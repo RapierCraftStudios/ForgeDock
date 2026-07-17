@@ -57,7 +57,7 @@ export function deriveState(events) {
   /** @type {import("./phases.mjs").RunState} */
   const s = { v: 0, run: null, issue: null, lane: "staging", committed: [],
               phase: null, branch: null, pr: null, terminal: false,
-              terminalReason: null, lease: null };
+              terminalReason: null, lease: null, complexity: null };
   for (const e of events) {
     switch (e.event) {
       case "RUN_START":
@@ -68,6 +68,13 @@ export function deriveState(events) {
         s.v = e.seq;
         if (e.outputs?.branch) s.branch = e.outputs.branch;
         if (e.outputs?.pr != null) s.pr = e.outputs.pr;
+        // forge#2387: deterministic scope classification, parsed by the
+        // investigate phase's own detectOutcome (bin/engine/phases.mjs) and
+        // carried forward here the same way branch/pr already are — read by
+        // context/architect's reconcile() to decide the zero-LLM-cost skip.
+        // Never defaults to a truthy value: absence of this output leaves
+        // s.complexity at its null starting value (fail-safe — no skip).
+        if (e.outputs?.complexity) s.complexity = e.outputs.complexity;
         break;
       case "RUN_TERMINAL":
         s.terminal = true; s.terminalReason = e.reason ?? "done"; s.v = e.seq;

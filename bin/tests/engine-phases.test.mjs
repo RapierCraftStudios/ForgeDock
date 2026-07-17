@@ -111,6 +111,130 @@ describe("pickPhase", () => {
       const outcome = await investigate.detectOutcome(base, ioWith("nothing relevant here"));
       assert.equal(outcome.status, "failed");
     });
+
+    // forge#2387: deterministic scope classification, parsed from the
+    // completion comment alongside the verdict.
+    it("INVESTIGATION:COMPLETE with **Complexity**: trivial -> outputs.complexity = 'trivial'", async () => {
+      const outcome = await investigate.detectOutcome(
+        base,
+        ioWith("<!-- FORGE:INVESTIGATOR -->\n**Complexity**: trivial\nINVESTIGATION:COMPLETE"),
+      );
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.outputs.complexity, "trivial");
+    });
+
+    it("INVESTIGATION:COMPLETE with **Complexity**: complex -> outputs.complexity = 'complex'", async () => {
+      const outcome = await investigate.detectOutcome(
+        base,
+        ioWith("<!-- FORGE:INVESTIGATOR -->\n**Complexity**: complex\nINVESTIGATION:COMPLETE"),
+      );
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.outputs.complexity, "complex");
+    });
+
+    it("INVESTIGATION:COMPLETE with no **Complexity** field -> outputs.complexity is null (never invented)", async () => {
+      const outcome = await investigate.detectOutcome(base, ioWith("INVESTIGATION:COMPLETE"));
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.outputs.complexity, null);
+    });
+
+    it("INVESTIGATION:COMPLETE with an unrecognized complexity value -> outputs.complexity is null", async () => {
+      const outcome = await investigate.detectOutcome(
+        base,
+        ioWith("<!-- FORGE:INVESTIGATOR -->\n**Complexity**: extreme\nINVESTIGATION:COMPLETE"),
+      );
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.outputs.complexity, null);
+    });
+  });
+
+  // forge#2387: deterministic scope classification — context/architect
+  // reconcile() trivial-skip, checked via reconcile() rather than
+  // detectOutcome() because a satisfied reconcile() bypasses runner()
+  // entirely (see bin/engine.mjs's runIssue()) — the actual zero-LLM-cost
+  // mechanism this issue requires.
+  describe("context.reconcile / architect.reconcile — trivial-complexity scope skip (forge#2387)", () => {
+    const context = PHASES.find(p => p.id === "context");
+    const architect = PHASES.find(p => p.id === "architect");
+    const ioNoMarkers = { gh: async () => "", git: async () => "0" };
+
+    it("context.reconcile: state.complexity === 'trivial' -> satisfied with a visible skip reason, no gh call needed", async () => {
+      const r = await context.reconcile({ ...base, complexity: "trivial" }, ioNoMarkers);
+      assert.equal(r.satisfied, true);
+      assert.equal(r.outputs.skipped, true);
+      assert.equal(r.outputs.which, "context");
+      assert.ok(typeof r.outputs.reason === "string" && r.outputs.reason.length > 0, "skip must carry a non-empty reason — never silent");
+    });
+
+    it("architect.reconcile: state.complexity === 'trivial' -> satisfied with a visible skip reason, no gh call needed", async () => {
+      const r = await architect.reconcile({ ...base, complexity: "trivial" }, ioNoMarkers);
+      assert.equal(r.satisfied, true);
+      assert.equal(r.outputs.skipped, true);
+      assert.equal(r.outputs.which, "architect");
+      assert.ok(typeof r.outputs.reason === "string" && r.outputs.reason.length > 0, "skip must carry a non-empty reason — never silent");
+    });
+
+    it("context.reconcile: state.complexity === 'standard' -> falls through to the normal marker-based check (not satisfied without the marker)", async () => {
+      const r = await context.reconcile({ ...base, complexity: "standard" }, ioNoMarkers);
+      assert.equal(r.satisfied, false);
+    });
+
+    it("context.reconcile: state.complexity === 'complex' -> falls through to the normal marker-based check", async () => {
+      const r = await context.reconcile({ ...base, complexity: "complex" }, ioNoMarkers);
+      assert.equal(r.satisfied, false);
+    });
+
+    it("context.reconcile: state.complexity === null (unclassified) -> falls through, fail-safe (no skip)", async () => {
+      const r = await context.reconcile({ ...base, complexity: null }, ioNoMarkers);
+      assert.equal(r.satisfied, false);
+    });
+
+    it("architect.reconcile: state.complexity undefined (base has no such property) -> falls through, fail-safe (no skip)", async () => {
+      assert.equal("complexity" in base, false, "sanity: the shared base fixture has no complexity property");
+      const r = await architect.reconcile(base, ioNoMarkers);
+      assert.equal(r.satisfied, false);
+    });
+
+    it("context.reconcile: trivial skip takes priority over an already-posted FORGE:CONTEXT:COMPLETE marker (no gh call is even made)", async () => {
+      let ghCalled = false;
+      const io = { gh: async () => { ghCalled = true; return "<!-- FORGE:CONTEXT:COMPLETE -->"; }, git: async () => "0" };
+      const r = await context.reconcile({ ...base, complexity: "trivial" }, io);
+      assert.equal(r.satisfied, true);
+      assert.equal(r.outputs.skipped, true);
+      assert.equal(ghCalled, false, "the trivial-complexity fast path must return before any gh call — genuinely zero cost");
+    });
+  });
+
+  // forge#2387 guardrails: "review is never skippable" and "complex ->
+  // decompose evaluation is unaffected by complexity classification".
+  describe("forge#2387 guardrails — review is never complexity-skippable; decompose is unaffected", () => {
+    const review = PHASES.find(p => p.id === "review");
+    const decompose = PHASES.find(p => p.id === "decompose");
+
+    it("review.reconcile ignores state.complexity entirely — a trivial classification with no PR still yields not-satisfied", async () => {
+      const io = {
+        gh: async (args) => (args.join(" ").startsWith("pr list") ? "[]" : ""),
+        git: async () => "0",
+      };
+      const r = await review.reconcile({ ...base, complexity: "trivial", branch: null }, io);
+      assert.equal(r.satisfied, false, "review must never be bypassed by complexity — only an actual PR can satisfy it");
+    });
+
+    it("decompose.entryCondition is unaffected by state.complexity (still gated solely on terminalReason)", () => {
+      assert.equal(
+        decompose.entryCondition({ ...base, complexity: "complex", terminalReason: "decomposed" }),
+        true,
+      );
+      assert.equal(
+        decompose.entryCondition({ ...base, complexity: "trivial", terminalReason: "decomposed" }),
+        true,
+        "even a (contradictory-in-practice) trivial+decomposed combination must still route to decompose — complexity never gates this phase",
+      );
+      assert.equal(
+        decompose.entryCondition({ ...base, complexity: "complex", terminalReason: null }),
+        false,
+      );
+    });
   });
 
   // forge#2379: decompose is now a real phase (previously investigate's

@@ -238,6 +238,38 @@ function resolveBranch(state, comments) {
   return parseBranchFromMarkers(comments) || state.branch || null;
 }
 
+/**
+ * forge#2387: parse the `**Complexity**: {trivial|standard|complex}` field out
+ * of the investigate phase's own completion comment — deterministic scope
+ * classification consumed by `context`/`architect`'s `reconcile()` below to
+ * skip both phases (zero LLM cost) when the issue is trivial.
+ *
+ * SCOPING mirrors `parseBranchFromMarkers()` above (forge#2184's lesson:
+ * extraction that isn't scoped to the producing comment is a real bug class
+ * in this file): only comments containing the investigate completion marker
+ * (`INVESTIGATION:COMPLETE` — never posted for an INVALID verdict, so an
+ * INVALID investigation correctly never yields a complexity value either,
+ * matching that its issue closes before any classification-consuming phase
+ * would ever run) are eligible. If more than one eligible comment exists
+ * (a resumed/retried investigation re-posting a fresh completion comment),
+ * the LAST one wins — same comment-level-last-match convention as
+ * `parseBranchFromMarkers()`. Returns null — never invents or defaults to a
+ * value — if no eligible comment contains the field, or its value isn't one
+ * of the three recognized classes. A null/absent complexity is read
+ * downstream as "unclassified" (full pipeline runs, no skip) — the
+ * fail-safe direction, never the reverse.
+ */
+function parseComplexityFromMarkers(comments) {
+  const re = /\*\*Complexity\*\*:\s*(trivial|standard|complex)\b/i;
+  for (let i = comments.length - 1; i >= 0; i--) {
+    const body = comments[i];
+    if (!body || !body.includes(PHASE_MARKERS.investigate.completionMarker)) continue;
+    const match = body.match(re);
+    if (match) return match[1].toLowerCase();
+  }
+  return null;
+}
+
 /** @type {Phase[]} */
 export const PHASES = [
   {
@@ -245,13 +277,20 @@ export const PHASES = [
     command: "work-on/investigate",
     entryCondition: () => true,
     async detectOutcome(state, io) {
-      const { blob } = await issueMarkers(state.issue, io);
+      const { blob, comments } = await issueMarkers(state.issue, io);
       if (has(blob, PHASE_MARKERS.investigate.invalidMarker))
         return { status: "committed", terminalReason: "invalid", outputs: { verdict: "INVALID" } };
       if (has(blob, PHASE_MARKERS.investigate.decomposedMarker))
         return { status: "committed", terminalReason: "decomposed", outputs: { decompose: true } };
-      if (has(blob, PHASE_MARKERS.investigate.completionMarker))
-        return { status: "committed", outputs: { verdict: "CONFIRMED" } };
+      if (has(blob, PHASE_MARKERS.investigate.completionMarker)) {
+        // forge#2387: deterministic scope classification, parsed from the
+        // same completion comment. `complexity` is `null` when the field is
+        // absent/unparseable — runlog.mjs's deriveState() only folds a
+        // truthy value into state.complexity, so this never regresses a
+        // classification-less investigation into a wrongly-skipped build.
+        const complexity = parseComplexityFromMarkers(comments);
+        return { status: "committed", outputs: { verdict: "CONFIRMED", complexity } };
+      }
       return { status: "failed", detail: `no ${PHASE_MARKERS.investigate.completionMarker} marker` };
     },
     // forge#2379: no longer terminal after "decomposed" — that reason now
@@ -288,6 +327,24 @@ export const PHASES = [
     command: "work-on/build/context",
     entryCondition: (s) => s.committed.includes("investigate"),
     async reconcile(state, io) {
+      // forge#2387: trivial-complexity scope skip — checked BEFORE the
+      // marker-based idempotent-resume check below, as a genuine zero-LLM-cost
+      // bypass (a truthy `satisfied` here means bin/engine.mjs's runIssue()
+      // never calls runner() at all — the phase's runner is never dispatched,
+      // not merely tolerated as absent post-hoc). Strict `=== "trivial"`
+      // equality — `"standard"`/`"complex"`/`null`/undefined all fall through
+      // to the existing marker check unchanged, so a classification-less run
+      // behaves exactly as it did before this change (fail-safe: no skip).
+      if (state.complexity === "trivial") {
+        return {
+          satisfied: true,
+          outputs: {
+            skipped: true,
+            which: "context",
+            reason: "trivial-complexity scope classification (forge#2387) — context phase skipped",
+          },
+        };
+      }
       // Idempotent resume: FORGE:CONTEXT:COMPLETE present → skip the LLM re-run.
       // Bare FORGE:CONTEXT matches a partial/interrupted annotation — require :COMPLETE.
       const { blob } = await issueMarkers(state.issue, io);
@@ -305,6 +362,23 @@ export const PHASES = [
     command: "work-on/build/architect",
     entryCondition: (s) => s.committed.includes("context"),
     async reconcile(state, io) {
+      // forge#2387: trivial-complexity scope skip — same zero-LLM-cost bypass
+      // as context's reconcile() above, and the same rationale (see that
+      // phase's comment for the full explanation). Independently checked here
+      // (not derived from context's own skip) so architect skips correctly
+      // whether context skipped via this same path or completed normally
+      // (e.g. a run whose complexity was reclassified — not expected in
+      // practice, but the check is self-contained either way).
+      if (state.complexity === "trivial") {
+        return {
+          satisfied: true,
+          outputs: {
+            skipped: true,
+            which: "architect",
+            reason: "trivial-complexity scope classification (forge#2387) — architect phase skipped",
+          },
+        };
+      }
       // Idempotent resume: FORGE:ARCHITECT:COMPLETE present → skip the LLM re-run.
       // Bare FORGE:ARCHITECT matches a partial/interrupted annotation — require :COMPLETE.
       const { blob } = await issueMarkers(state.issue, io);

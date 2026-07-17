@@ -360,6 +360,16 @@ The comment MUST include a terminal sentinel at the very end, AFTER all required
 - **Verdict is INVALID** → close with `<!-- INVESTIGATION:INVALID -->`. This is a distinct, already-wired-up terminal marker: `bin/engine/phases.mjs`'s `detectOutcome` for the `investigate` phase checks for it explicitly (ahead of `INVESTIGATION:COMPLETE`) and routes to `terminalReason: "invalid"`; `bin/hooks/interactive-engine.mjs`'s `PHASE_MARKERS` table also already treats it as terminal. Emitting `INVESTIGATION:COMPLETE` for an INVALID verdict is what previously caused every completed investigation to read as `{verdict: "CONFIRMED"}` regardless of actual outcome — do NOT regress this (forge#2350).
 - **Verdict is CONFIRMED or PARTIAL** → close with `<!-- INVESTIGATION:COMPLETE -->` as before (PARTIAL still routes to `ready-to-build` in Phase 1D — only INVALID gets the distinct terminal sentinel).
 
+**Complexity classification (forge#2387)**: Before posting, classify the issue's scope as one of `trivial` / `standard` / `complex`, using the same heuristic `commands/work-on.md`'s Phase 3B `COMPLEXITY_BAND` already applies (reused, not reinvented):
+
+| Condition | Complexity |
+|-----------|-----------|
+| Single file, doc/config/markdown only, no logic changes expected | `trivial` |
+| 1–5 files, existing patterns, no cross-service impact | `standard` |
+| 6+ files, new abstractions, cross-service, migration, schema changes | `complex` |
+
+Skip this classification entirely (omit the `**Complexity**:` field) for an INVALID verdict — the issue closes immediately and no downstream phase ever reads it. `bin/engine/phases.mjs`'s `context`/`architect` phases treat a `trivial` classification as a zero-LLM-cost skip (`reconcile()` bypasses their runner entirely) — get this right: classifying a genuinely multi-file change as `trivial` would starve the build of the context/architecture planning it needs. When in doubt, classify `standard` (the fail-safe default is to run the full pipeline, never to skip).
+
 Compute the sentinel once, before building the comment body:
 
 ```bash
@@ -381,9 +391,12 @@ ANNOTATION_BODY=$(node packages/protocol/src/cli.js emit INVESTIGATOR \
   --field "Confidence={CONFIDENCE}" \
   --field "Severity={SEVERITY}" \
   --field "Task Type={TASK_TYPE}" \
-  --field "Decomposition Assessment={YES|NO} — {reason}")
+  --field "Decomposition Assessment={YES|NO} — {reason}" \
+  --field "Complexity={trivial|standard|complex}")
 # ANNOTATION_BODY now has opening tag + required fields + INVESTIGATION:COMPLETE sentinel.
 # NOTE: the codec's sentinel is fixed — do not use this path when Verdict=INVALID (see caveat above).
+# Complexity (forge#2387) is optional/additive — not in INVESTIGATOR.requiredFields (packages/protocol/src/types.js),
+# so omitting this --field for an INVALID verdict (see "Complexity classification" note above) is still schema-valid.
 # Append the Markdown body sections to it before posting.
 ```
 
@@ -408,6 +421,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 **Confidence**: {HIGH|MEDIUM|LOW}
 **Severity**: {CRITICAL|HIGH|MEDIUM|LOW}
 **Task Type**: {Bug Fix|Feature|Refactor|Maintenance|Investigation}
+**Complexity**: {trivial|standard|complex} <!-- forge#2387 — omit this field entirely for an INVALID verdict; see "Complexity classification" above -->
 
 ### What Was Claimed
 {summary of what the issue describes}

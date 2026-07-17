@@ -897,6 +897,12 @@ function eventsFromIndex(idx) {
     const outputs = {};
     if (phase === "build" && idx.branch) outputs.branch = idx.branch;
     if (phase === "review" && idx.pr != null) outputs.pr = idx.pr;
+    // forge#2387: replay complexity the same way branch/pr are replayed —
+    // idx.complexity round-trips through the compact FORGE:STATE index
+    // automatically (state.mjs's serializeState/parseState are generic), but
+    // deriveState() only restores it from a PHASE_COMMIT's outputs, so a
+    // hydrate reconstruction must re-attach it to the phase that produced it.
+    if (phase === "investigate" && idx.complexity) outputs.complexity = idx.complexity;
     // forge#2442: `engineNative` (forge#2381) isn't carried by the compact
     // FORGE:STATE index (`idx.committed` is a flat phase-id string[] — see
     // bin/engine/state.mjs), so it can't be replayed from idx directly. It's
@@ -916,6 +922,10 @@ function eventsFromIndex(idx) {
 }
 
 function freshState(issue, lane) {
+  // forge#2387: complexity: null matches runlog.mjs's deriveState() base shape —
+  // both are hand-written RunState object literals with no shared factory, so
+  // both must declare every field. See that file's own comment on this field.
   return { v: 0, run: `r_${issue}_${lane}`, issue, lane, committed: [], phase: null,
-           branch: null, pr: null, terminal: false, terminalReason: null, lease: null };
+           branch: null, pr: null, terminal: false, terminalReason: null, lease: null,
+           complexity: null };
 }
