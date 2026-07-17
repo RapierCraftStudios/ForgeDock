@@ -2243,7 +2243,7 @@ if [ "$IS_FIRST_TIME_CONTRIBUTOR" = "true" ] && [ "$WELCOME_ENABLED" != "false" 
     else
         CONVENTIONS_TEXT="- **Conventional commits**: prefix your commit messages with \`fix(scope):\`, \`feat(scope):\`, \`refactor(scope):\`, etc.
 - **DCO sign-off**: all commits must be signed off with \`git commit -s\` (Developer Certificate of Origin — required for the dual-license model).
-  Fix unsigned commits: \`git commit --amend -s --no-edit && git push --force-with-lease\`
+  Fix unsigned commits: \`git commit --amend -s --no-edit && git push --force-with-lease\` <!-- allowlist:check-command-side-effects -->
 - **Issues, not inline fixes**: when you spot a bug or improvement opportunity, open a GitHub issue rather than fixing it inline — so it flows through the pipeline with full traceability."
     fi
 
