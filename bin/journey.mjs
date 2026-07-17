@@ -1543,7 +1543,7 @@ export async function forge(ctx) {
   let manifestChanged = false;
 
   const files = await findMarkdownFiles(commandsDir, { includeExtras: !!ctx.includeExtras });
-  let installed = 0, updated = 0, skipped = 0, copied = 0;
+  let installed = 0, updated = 0, skipped = 0, copied = 0, backedUp = 0;
   const barWidth = 24;
   let barShown = false;
 
@@ -1649,10 +1649,51 @@ export async function forge(ctx) {
             // mirrors the .tmp+rename swap already used for symlink installs
             // above (lines ~1573-1579, ~1601-1607).
             await copyFile(file, target + ".tmp");
+            // Preserve the pre-existing content before it's replaced, mirroring
+            // half of the confirm+backup convention used by the forge.yaml
+            // overwrite path (bin/forgedock.mjs ~990-1021 / journey.mjs
+            // review(), both via backupExisting()). A confirmation prompt is
+            // deliberately NOT added: this branch also runs non-interactively
+            // inside `doctor --fix`'s automated repair (bin/forgedock.mjs
+            // runInstallRepairOnce() -> forge(ctx())), so pausing per-file for
+            // input would break that flow. Placed here — after the .tmp write
+            // has already succeeded, before the final rename — rather than
+            // before copyFile (as the forge.yaml path does), so a copyFile
+            // failure never backs up (and thereby displaces) a target that's
+            // about to remain untouched (see the mid-write-failure test,
+            // forge#2498). backupExisting()'s rename is itself atomic, so this
+            // ordering carries none of the non-atomic-write risk that forge#1396
+            // flagged for the old backup-then-writeFileSync forge.yaml path.
+            const backup = backupExisting(target);
+            if (backup) backedUp++;
             try {
               await rename(target + ".tmp", target);
             } catch (renameErr) {
               await unlink(target + ".tmp").catch(() => {});
+              if (backup) {
+                // The final rename failed AFTER backupExisting() already moved
+                // the original file to target+".bak" — target no longer exists
+                // on disk at this point. Without this rollback the user's file
+                // would simply vanish (present only as .bak) while the WARNING
+                // below implies it merely "could not be repaired". Restore the
+                // prior content so a failed repair is a no-op, matching the
+                // pre-backup invariant that a rename failure never removes the
+                // existing file (see the mid-write-failure test, forge#2498).
+                // WIRE:PROVEN — manual: reasoned, not exercised by an automated
+                // test. This branch requires rename(tmp, target) to fail on the
+                // exact call immediately after backupExisting()'s own rename of
+                // the same target succeeded — an OS-level race with no portable
+                // way to force deterministically (the sibling renameErr catches
+                // for the symlink-relink paths above, lines ~1576/~1604, are the
+                // same kind of defensive OS-failure branch and are likewise
+                // untested for the same reason). Verified by code inspection:
+                // rename() is fs/promises' rename, .catch(() => {}) makes the
+                // rollback itself best-effort (never throws over renameErr),
+                // and backedUp-- keeps the counter consistent with the restored
+                // on-disk state before renameErr is rethrown to the outer catch.
+                await rename(target + ".bak", target).catch(() => {});
+                backedUp--;
+              }
               throw renameErr;
             }
             recordCopy(rel);
@@ -1739,9 +1780,10 @@ export async function forge(ctx) {
 
   const glyph = (ok) => (ctx.mode === "none" ? (ok ? "✔" : "!") : `\x1b[38;2;255;179;71m${ok ? "✔" : "!"}\x1b[0m`);
   const headlineVerb = copied > 0 ? "installed" : "linked";
+  const backupNote = backedUp > 0 ? `, ${backedUp} backed up` : "";
   const headlineDetail = copied > 0
-    ? `(new ${installed}, copied ${copied}, updated ${updated}, unchanged ${skipped})`
-    : `(new ${installed}, updated ${updated}, unchanged ${skipped})`;
+    ? `(new ${installed}, copied ${copied}, updated ${updated}${backupNote}, unchanged ${skipped})`
+    : `(new ${installed}, updated ${updated}${backupNote}, unchanged ${skipped})`;
   w.write(`  ${glyph(true)} ${files.length} slash commands ${headlineVerb} ${dimLine(ctx, headlineDetail)}\n`);
   if (pruned > 0) {
     w.write(`  ${glyph(true)} ${pruned} orphaned symlink${pruned === 1 ? "" : "s"} removed ${dimLine(ctx, "(commands deleted or renamed since last install)")}\n`);
@@ -1836,7 +1878,7 @@ export async function forge(ctx) {
     w.write(`  ${glyph(true)} SubagentStop enforcement hook removed ${dimLine(ctx, "(non-functional — see forge#1527)")}\n`);
   }
 
-  return { installed, updated, skipped, copied, pruned, total: files.length, hookStatus, preToolUseStatus, subagentStopEnforceStatus, scriptsResult };
+  return { installed, updated, skipped, copied, backedUp, pruned, total: files.length, hookStatus, preToolUseStatus, subagentStopEnforceStatus, scriptsResult };
 }
 
 // ---------------------------------------------------------------------------

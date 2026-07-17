@@ -1312,6 +1312,36 @@ describe("forge (Act II)", () => {
     assert.equal(res.updated, 0, "no update should be counted when the write failed");
   });
 
+  it("stale regular-file copy with no manifest entry: prior content is backed up before being overwritten (forge#2499)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home4c-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src4c-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // Pre-create the target as a stale regular-file copy (content mismatches
+    // the current source) with no manifest entry, same setup as the sibling
+    // "stale regular-file copy" test above.
+    const target = join(home, ".claude", "commands", "a.md");
+    mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
+    writeFileSync(target, "OLD STALE COPY", "utf-8");
+
+    const { ctx, w } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.equal(readFileSync(target, "utf-8"), "A", "stale copy should still be overwritten with current source content");
+    assert.equal(
+      readFileSync(target + ".bak", "utf-8"),
+      "OLD STALE COPY",
+      "prior stale content must be preserved in a .bak sibling before being overwritten",
+    );
+    assert.equal(res.backedUp, 1, "forge() should report exactly one backup");
+    assert.equal(res.updated, 1);
+    assert.doesNotMatch(w.text, /WARNING/, "should not warn — the stale copy was repaired");
+  });
+
   it("files outside the shipped command set are never touched by forge() (forge#2459 AC#3)", async () => {
     const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-unrelated-"));
     const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src-unrelated-"));
