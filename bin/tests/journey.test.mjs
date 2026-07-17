@@ -1274,6 +1274,44 @@ describe("forge (Act II)", () => {
     assert.equal(manifest.files["a.md"], true, "repaired file should be adopted into the manifest");
   });
 
+  it("stale regular-file copy with no manifest entry: target is untouched on a mid-write failure (forge#2498)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home4b-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src4b-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // Pre-create the target as a stale regular-file copy (content mismatches
+    // the current source) with no manifest entry, same setup as the sibling
+    // "stale regular-file copy" test above.
+    const target = join(home, ".claude", "commands", "a.md");
+    mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
+    writeFileSync(target, "OLD STALE COPY", "utf-8");
+
+    // Simulate a mid-write failure by pre-creating target + ".tmp" as a
+    // directory — copyFile(file, target + ".tmp") then throws EISDIR/EEXIST
+    // instead of writing, a cheap stand-in for ENOSPC/AV-lock without needing
+    // a real disk-full condition (same technique used for writeForgeYaml's
+    // atomic-write test above, ref: #1396).
+    mkdirSyncFs(target + ".tmp", { recursive: true });
+
+    const { ctx, w } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    // The write failure must land entirely on the .tmp path — target itself
+    // must never be opened for a direct overwrite, so its prior (stale)
+    // content survives completely intact rather than being truncated.
+    assert.equal(
+      readFileSync(target, "utf-8"),
+      "OLD STALE COPY",
+      "target content must be untouched when the .tmp write fails — never partially overwritten",
+    );
+    assert.match(w.text, /WARNING/, "a write failure should still surface the repair warning");
+    assert.equal(res.updated, 0, "no update should be counted when the write failed");
+  });
+
   it("files outside the shipped command set are never touched by forge() (forge#2459 AC#3)", async () => {
     const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-unrelated-"));
     const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src-unrelated-"));

@@ -1641,12 +1641,25 @@ export async function forge(ctx) {
             skipped++;
             handled = true;
           } else {
-            await copyFile(file, target);
+            // Write to a .tmp sibling and atomically rename onto target — never
+            // open target itself for a direct overwrite. copyFile() is not
+            // atomic: a mid-write failure (AV lock / ENOSPC / process kill)
+            // would otherwise leave target truncated/corrupted rather than
+            // simply stale, which the WARNING below cannot distinguish. This
+            // mirrors the .tmp+rename swap already used for symlink installs
+            // above (lines ~1573-1579, ~1601-1607).
+            await copyFile(file, target + ".tmp");
+            try {
+              await rename(target + ".tmp", target);
+            } catch (renameErr) {
+              await unlink(target + ".tmp").catch(() => {});
+              throw renameErr;
+            }
             recordCopy(rel);
             updated++;
             handled = true;
           }
-        } catch { /* readFile/copyFile failure — fall through to warning */ }
+        } catch { /* readFile/copyFile/rename failure — fall through to warning */ }
         if (!handled) {
           if (barShown) { w.write("\x1b[1A\x1b[2K"); barShown = false; }
           w.write(`  WARNING: ${rel} could not be repaired — remove it manually to let ForgeDock manage it\n`);
