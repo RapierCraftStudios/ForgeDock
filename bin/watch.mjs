@@ -611,6 +611,13 @@ async function runInteractiveLoop({
   }
 
   function repaint() {
+    // Guards against the detail-fetch `.finally()` (and any other async
+    // caller) writing an extra frame to stdout after `cleanup()` has
+    // already restored the cursor and printed the exit summary — the
+    // in-flight `getIssueDetail()` promise from an Enter-then-quit race
+    // is not cancelled, so this is the single choke point every caller
+    // goes through (forge#2492, review finding on PR #2482).
+    if (cleanedUp) return;
     if (!lastSnapshot) return;
     if (paused && pausedAt !== null) {
       const nowMs = typeof now === "function" ? now() : Date.now();
