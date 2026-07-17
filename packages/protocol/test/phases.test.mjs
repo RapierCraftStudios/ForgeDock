@@ -48,6 +48,21 @@ test('PHASE_RESULT_SCHEMAS: context/architect define no completion-strength fiel
   }
 });
 
+test('PHASE_RESULT_SCHEMAS: every registered entry declares additionalProperties: false (forge#2435 — model-facing schema must mirror the server-side closed key set validatePhaseResult() already enforces)', () => {
+  for (const [phaseId, schema] of Object.entries(PHASE_RESULT_SCHEMAS)) {
+    assert.equal(
+      schema.additionalProperties,
+      false,
+      `PHASE_RESULT_SCHEMAS.${phaseId} must declare additionalProperties: false`,
+    );
+  }
+});
+
+test('validatePhaseResult: context/architect still accept an empty object after additionalProperties: false is added (forge#2435 — required-field behavior is untouched)', () => {
+  assert.equal(validatePhaseResult('context', {}).valid, true);
+  assert.equal(validatePhaseResult('architect', {}).valid, true);
+});
+
 test('validatePhaseResult: unregistered phase id is a no-op (nothing to enforce)', () => {
   const { valid, errors } = validatePhaseResult('not-a-real-phase', { anything: 'goes' });
   assert.equal(valid, true);
