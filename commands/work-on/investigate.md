@@ -372,6 +372,8 @@ fi
 
 **CODEC PATH (forge#1727)**: Construct the annotation body via the protocol codec — do NOT hand-roll the `<!-- FORGE:INVESTIGATOR -->` header. Use `forge-annotation.sh write INVESTIGATOR --field ...` or `node packages/protocol/src/cli.js emit INVESTIGATOR --field ...` to produce the opening tag and completion sentinel. Fill in the Markdown body sections below. The full pattern:
 
+**Caveat (forge#2368)**: `packages/protocol/src/types.js`'s `INVESTIGATOR.completionSentinel` is a single fixed value (`'INVESTIGATION:COMPLETE'`) and `packages/protocol/src/emit.js` appends it unconditionally — the codec does NOT currently support the verdict-conditional sentinel selection described above, and cannot emit `INVESTIGATION:INVALID`. Using the CODEC PATH for an INVALID-verdict investigation would silently regress the forge#2350 fix (every investigation would again read as `{verdict: "CONFIRMED"}`). Until the codec is extended to support a verdict-conditional sentinel, the hand-rolled block above/below (using the `${INVESTIGATION_SENTINEL}` variable computed above) is the authoritative path for Phase 1C — do not use the CODEC PATH for this annotation.
+
 ```bash
 # Build the annotation body via codec (escaping and sentinel handled by codec)
 ANNOTATION_BODY=$(node packages/protocol/src/cli.js emit INVESTIGATOR \
@@ -381,6 +383,7 @@ ANNOTATION_BODY=$(node packages/protocol/src/cli.js emit INVESTIGATOR \
   --field "Task Type={TASK_TYPE}" \
   --field "Decomposition Assessment={YES|NO} — {reason}")
 # ANNOTATION_BODY now has opening tag + required fields + INVESTIGATION:COMPLETE sentinel.
+# NOTE: the codec's sentinel is fixed — do not use this path when Verdict=INVALID (see caveat above).
 # Append the Markdown body sections to it before posting.
 ```
 
