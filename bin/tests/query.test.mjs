@@ -175,6 +175,26 @@ describe("runQuery — usage/error contract", () => {
     assert.equal(stdout.json().error.code, "BAD_FLAG");
   });
 
+  it("an explicit empty-string --fields emits BAD_FLAG rather than treating it as absent (forge#2478)", async () => {
+    const stdout = fakeStdout();
+    const exitCode = await runQuery(["fleet", "--repo", "acme/widgets", "--fields", ""], {
+      stdout,
+      io: { gh: async () => { throw new Error("must not call gh"); } },
+    });
+    assert.equal(exitCode, 4);
+    assert.equal(stdout.json().error.code, "BAD_FLAG");
+  });
+
+  it("a whitespace-only --fields emits BAD_FLAG, consistent with the empty-string case (forge#2478)", async () => {
+    const stdout = fakeStdout();
+    const exitCode = await runQuery(["fleet", "--repo", "acme/widgets", "--fields", "   "], {
+      stdout,
+      io: { gh: async () => { throw new Error("must not call gh"); } },
+    });
+    assert.equal(exitCode, 4);
+    assert.equal(stdout.json().error.code, "BAD_FLAG");
+  });
+
   it("output is exactly one JSON document — parses cleanly with nothing else on stdout", async () => {
     const dir = tmpDir();
     const stdout = fakeStdout();
