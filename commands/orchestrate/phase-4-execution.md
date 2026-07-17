@@ -1577,8 +1577,8 @@ for FILE in "${!SURFACE_FILE_MEMBERS[@]}"; do
     done
 
     # Dedup-check with member exclusion (MANDATORY — forge#2432, identical mechanism to
-    # phase-1-resolve.md's mirror block; this site keeps its existing `gh issue create`
-    # architecture rather than migrating to /issue's Skill routing, since this loop runs
+    # phase-1-resolve.md's mirror block; this site keeps its existing direct-to-gh issue
+    # creation below rather than migrating to /issue's Skill routing, since this loop runs
     # per-completion-cycle and a direct scripts/issue-dedup.sh call is cheaper here). A
     # batch title necessarily restates its own members' subject matter by construction —
     # excluding the cluster's own member numbers means Phase-2D-style dedup only fires on
