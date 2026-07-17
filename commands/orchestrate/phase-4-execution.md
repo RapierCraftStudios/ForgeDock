@@ -1526,9 +1526,16 @@ for FINDING_NUM in "${QUEUED_FINDINGS[@]}"; do
 
   # Safety exclusions — never batch, at any priority. Same jq test() engine and
   # patterns as phase-1-resolve.md's batching rule (single shared mechanism).
+  # Word-boundary anchored (not bare substrings) and attribution-boilerplate
+  # (**Source**/**Agent**/**Confidence**/**Severity**/**Review comment**) stripped
+  # from the body before scanning, so a finding naming its own reviewing agent
+  # ("Security") or an identifier like `authority_source` no longer false-positives.
+  # `authentication|authorization|authn|authz` preserve real auth-domain coverage
+  # as separate whole-word alternatives now that bare `auth` is boundary-anchored.
+  # <!-- forge#2423 -->
   echo "$FINDING_DATA" | jq -e '
-    (.title | test("security|billing|anti-bot|auth"; "i"))
-    or (.body  | test("## Problem[\\s\\S]{0,500}(security|billing|anti-bot|auth)"; "i"))
+    (.title | test("\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i"))
+    or ((.body | gsub("(?m)^\\*\\*(Source|Agent|Confidence|Severity|Review comment)\\*\\*:.*$"; "")) | test("## Problem[\\s\\S]{0,500}\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i"))
     or ([.labels[]] | any(. == "security" or . == "billing" or . == "anti-bot" or . == "auth"))
   ' >/dev/null && continue
 
