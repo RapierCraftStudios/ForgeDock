@@ -14,6 +14,11 @@ on:
       - 'scripts/check-spec-markers.sh'
       - 'scripts/check-admission-parity.mjs'
       - 'bin/engine/admission.mjs'
+      - 'scripts/check-phase-registry-drift.mjs'
+      - 'bin/engine/phases.mjs'
+      - 'bin/hooks/interactive-engine.mjs'
+      - 'packages/protocol/src/phases.js'
+      - 'packages/protocol/src/types.js'
       - '.github/workflows/check-commands.yml'
   push:
     branches:
@@ -31,6 +36,11 @@ on:
       - 'scripts/check-spec-markers.sh'
       - 'scripts/check-admission-parity.mjs'
       - 'bin/engine/admission.mjs'
+      - 'scripts/check-phase-registry-drift.mjs'
+      - 'bin/engine/phases.mjs'
+      - 'bin/hooks/interactive-engine.mjs'
+      - 'packages/protocol/src/phases.js'
+      - 'packages/protocol/src/types.js'
       - '.github/workflows/check-commands.yml'
 
 concurrency:
@@ -292,3 +302,26 @@ jobs:
           # `case "$CASCADE_POLICY_NAME" in ... esac` block — kept in sync by hand, with no
           # prior check catching divergence between the two (forge#2340).
           node scripts/check-admission-parity.mjs
+
+  phase-registry-drift:
+    name: Phase marker registry drift check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+
+      - name: Check bin/engine/phases.mjs phase-id list matches packages/protocol/src/phases.js's registry
+        run: |
+          # packages/protocol/src/phases.js is the single-source phase-id/marker
+          # registry (forge#2378) both bin/engine/phases.mjs (the authoritative
+          # engine gate) and bin/hooks/interactive-engine.mjs (the interactive-
+          # session hook) import their marker strings from. This check catches
+          # phase-id-list drift between the engine's PHASES array and the
+          # registry's PHASE_IDS — the one thing that can still diverge now that
+          # marker *strings* are single-sourced (see forge#2375/PR#2395, the
+          # incident this issue's registry makes structurally impossible).
+          node scripts/check-phase-registry-drift.mjs

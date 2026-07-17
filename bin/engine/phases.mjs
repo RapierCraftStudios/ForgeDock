@@ -5,6 +5,14 @@
  * @typedef ... (see plan "Shared types")
  */
 
+// forge#2378: marker/label strings are single-sourced from packages/protocol's
+// phase registry (itself derived from RESERVED_TYPES' completionSentinel fields
+// where available) — do NOT reintroduce inline "FORGE:..."/"INVESTIGATION:..."/
+// "workflow:merged" literals in this file. bin/hooks/interactive-engine.mjs
+// imports the identical registry, so the two can no longer drift apart the way
+// they did in forge#2375/PR#2395.
+import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
+
 // forge#2261: "engine-error" is a distinct terminal reason for engine/tool-level
 // failures (e.g. an exhausted retry loop where the runner itself never once
 // succeeded, or a fail-fast CLI_BACKEND_FAILED/NO_API_KEY/NO_SDK throw) — kept
@@ -169,7 +177,7 @@ function parseBranchFromMarkers(comments) {
   const re = /\*\*Branch\*\*:\s*`([^`]+)`/;
   for (let i = comments.length - 1; i >= 0; i--) {
     const body = comments[i];
-    if (!body || !body.includes("FORGE:BUILDER:COMPLETE")) continue;
+    if (!body || !body.includes(PHASE_MARKERS.build.completionMarker)) continue;
     const match = body.match(re);
     if (match) return match[1];
   }
@@ -195,13 +203,13 @@ export const PHASES = [
     entryCondition: () => true,
     async detectOutcome(state, io) {
       const { blob } = await issueMarkers(state.issue, io);
-      if (has(blob, "INVESTIGATION:INVALID"))
+      if (has(blob, PHASE_MARKERS.investigate.invalidMarker))
         return { status: "committed", terminalReason: "invalid", outputs: { verdict: "INVALID" } };
-      if (has(blob, "DECOMPOSE:YES"))
+      if (has(blob, PHASE_MARKERS.investigate.decomposedMarker))
         return { status: "committed", terminalReason: "decomposed", outputs: { decompose: true } };
-      if (has(blob, "INVESTIGATION:COMPLETE"))
+      if (has(blob, PHASE_MARKERS.investigate.completionMarker))
         return { status: "committed", outputs: { verdict: "CONFIRMED" } };
-      return { status: "failed", detail: "no INVESTIGATION:COMPLETE marker" };
+      return { status: "failed", detail: `no ${PHASE_MARKERS.investigate.completionMarker} marker` };
     },
     isTerminalAfter: (s) => s.terminalReason === "invalid" || s.terminalReason === "decomposed",
   },
@@ -213,12 +221,12 @@ export const PHASES = [
       // Idempotent resume: FORGE:CONTEXT:COMPLETE present → skip the LLM re-run.
       // Bare FORGE:CONTEXT matches a partial/interrupted annotation — require :COMPLETE.
       const { blob } = await issueMarkers(state.issue, io);
-      return has(blob, "FORGE:CONTEXT:COMPLETE") ? { satisfied: true } : { satisfied: false };
+      return has(blob, PHASE_MARKERS.context.completionMarker) ? { satisfied: true } : { satisfied: false };
     },
     async detectOutcome(state, io) {
       const { blob } = await issueMarkers(state.issue, io);
       // Context is non-critical: a missing marker is a VISIBLE skip, not a hard fail (spec §7).
-      if (has(blob, "FORGE:CONTEXT")) return { status: "committed", outputs: {} };
+      if (has(blob, PHASE_MARKERS.context.presenceMarker)) return { status: "committed", outputs: {} };
       return { status: "committed", outputs: { skipped: true, which: "context" } };
     },
   },
@@ -230,13 +238,13 @@ export const PHASES = [
       // Idempotent resume: FORGE:ARCHITECT:COMPLETE present → skip the LLM re-run.
       // Bare FORGE:ARCHITECT matches a partial/interrupted annotation — require :COMPLETE.
       const { blob } = await issueMarkers(state.issue, io);
-      return has(blob, "FORGE:ARCHITECT:COMPLETE") ? { satisfied: true } : { satisfied: false };
+      return has(blob, PHASE_MARKERS.architect.completionMarker) ? { satisfied: true } : { satisfied: false };
     },
     async detectOutcome(state, io) {
       const { blob } = await issueMarkers(state.issue, io);
-      return has(blob, "FORGE:ARCHITECT:COMPLETE")
+      return has(blob, PHASE_MARKERS.architect.completionMarker)
         ? { status: "committed", outputs: {} }
-        : { status: "failed", detail: "no FORGE:ARCHITECT:COMPLETE" };
+        : { status: "failed", detail: `no ${PHASE_MARKERS.architect.completionMarker}` };
     },
   },
   {
@@ -249,14 +257,14 @@ export const PHASES = [
       // check it's already ahead of base → treat as done, skip the LLM (forge#2174).
       const { blob, comments } = await issueMarkers(state.issue, io);
       const branch = resolveBranch(state, comments);
-      if (branch && has(blob, "FORGE:BUILDER:COMPLETE") && (await commitsAhead(state.lane, branch, io)) > 0) {
+      if (branch && has(blob, PHASE_MARKERS.build.completionMarker) && (await commitsAhead(state.lane, branch, io)) > 0) {
         return { satisfied: true, outputs: { branch } };
       }
       return { satisfied: false };
     },
     async detectOutcome(state, io) {
       const { blob, comments } = await issueMarkers(state.issue, io);
-      const complete = has(blob, "FORGE:BUILDER:COMPLETE");        // #1305: require :COMPLETE …
+      const complete = has(blob, PHASE_MARKERS.build.completionMarker); // #1305: require :COMPLETE …
       // Resolve the branch the builder actually created from the FORGE:BUILDER:COMPLETE
       // comment (ground truth), scoped to that specific comment — see
       // resolveBranch()/parseBranchFromMarkers() above (forge#2174, forge#2184).
@@ -323,7 +331,7 @@ export const PHASES = [
       // Idempotent resume: issue already closed or workflow:merged label set → skip the LLM re-run.
       const snap = await issueSnapshot(state.issue, io);
       if (!snap.ok) return { satisfied: false };
-      return (snap.state === "CLOSED" || snap.labels.includes("workflow:merged"))
+      return (snap.state === "CLOSED" || snap.labels.includes(PHASE_MARKERS.close.completionLabel))
         ? { satisfied: true }
         : { satisfied: false };
     },
@@ -341,7 +349,7 @@ export const PHASES = [
       // that label is still a real terminal state (nothing left for this phase
       // to do), just not a "merged" one — reuse the existing "invalid" reason
       // (already in TERMINAL_REASONS) rather than inventing a new one.
-      if (snap.labels.includes("workflow:merged"))
+      if (snap.labels.includes(PHASE_MARKERS.close.completionLabel))
         return { status: "committed", terminalReason: "merged", outputs: {} };
       if (snap.state === "CLOSED")
         return { status: "committed", terminalReason: "invalid", outputs: {} };

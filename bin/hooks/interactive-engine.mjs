@@ -60,6 +60,7 @@ import { fileURLToPath, pathToFileURL } from "url";
 import { dirname, join, resolve } from "path";
 import { existsSync, readFileSync } from "fs";
 import { execFileSync } from "child_process";
+import { PHASE_MARKERS as PHASE_MARKER_REGISTRY } from "../../packages/protocol/src/phases.js";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -75,23 +76,31 @@ const FORGE_HOME = resolve(__dirname, "..", "..");
 // Maps FORGE annotation markers (found in transcript tool results) to phase IDs.
 // ---------------------------------------------------------------------------
 
+// forge#2378: marker strings are single-sourced from packages/protocol's phase
+// registry (bin/engine/phases.mjs imports the identical registry) — do NOT
+// reintroduce inline "FORGE:..."/"INVESTIGATION:..."/"workflow:merged" literals
+// here. This table previously hand-duplicated those strings and drifted out of
+// sync with the engine's stricter :COMPLETE gate (forge#2375/PR#2395) — sourcing
+// both consumers from one registry makes that class of drift structurally
+// impossible going forward.
+//
+// Require the :COMPLETE suffix — a bare "FORGE:CONTEXT"/"FORGE:ARCHITECT"
+// substring also matches a partial/interrupted annotation (e.g.
+// FORGE:CONTEXT:PARTIAL), which is not actually committed. bin/engine/phases.mjs's
+// architect detectOutcome() requires the identical :COMPLETE marker to consider
+// the phase committed.
 /** @type {Array<{marker: string, phase: string, terminal?: boolean, terminalReason?: string}>} */
 const PHASE_MARKERS = [
-  { marker: "INVESTIGATION:COMPLETE",   phase: "investigate" },
-  { marker: "INVESTIGATION:INVALID",    phase: "investigate", terminal: true, terminalReason: "invalid" },
-  { marker: "DECOMPOSE:YES",            phase: "investigate", terminal: true, terminalReason: "decomposed" },
-  // Require the :COMPLETE suffix — a bare "FORGE:CONTEXT"/"FORGE:ARCHITECT"
-  // substring also matches a partial/interrupted annotation (e.g.
-  // FORGE:CONTEXT:PARTIAL), which is not actually committed. bin/engine/phases.mjs's
-  // architect detectOutcome() requires the identical :COMPLETE marker to consider
-  // the phase committed (forge#2375 — was drifted from the engine's stricter gate).
-  { marker: "FORGE:CONTEXT:COMPLETE",   phase: "context" },
-  { marker: "FORGE:ARCHITECT:COMPLETE", phase: "architect" },
-  { marker: "FORGE:BUILDER:COMPLETE",   phase: "build" },
+  { marker: PHASE_MARKER_REGISTRY.investigate.completionMarker, phase: "investigate" },
+  { marker: PHASE_MARKER_REGISTRY.investigate.invalidMarker,    phase: "investigate", terminal: true, terminalReason: "invalid" },
+  { marker: PHASE_MARKER_REGISTRY.investigate.decomposedMarker, phase: "investigate", terminal: true, terminalReason: "decomposed" },
+  { marker: PHASE_MARKER_REGISTRY.context.completionMarker,     phase: "context" },
+  { marker: PHASE_MARKER_REGISTRY.architect.completionMarker,   phase: "architect" },
+  { marker: PHASE_MARKER_REGISTRY.build.completionMarker,       phase: "build" },
   // review phase: PR merged is detected from gh label/state
-  { marker: "FORGE:REVIEWER:MERGED",   phase: "review" },
+  { marker: PHASE_MARKER_REGISTRY.review.completionMarker,      phase: "review" },
   // close phase: issue closed with workflow:merged
-  { marker: "workflow:merged",         phase: "close", terminal: true, terminalReason: "merged" },
+  { marker: PHASE_MARKER_REGISTRY.close.completionLabel,        phase: "close", terminal: true, terminalReason: "merged" },
 ];
 
 /**
@@ -169,13 +178,15 @@ async function main() {
   // missing, block the subagent from completing silently and inject
   // corrective context so the agent knows what to do.
   if (skillInvoked && annotationMissing && phaseId) {
+    // forge#2378: sourced from the same registry as PHASE_MARKERS above — no
+    // second hand-written copy of these marker strings.
     const PHASE_ANNOTATION_MAP = {
-      investigate: "INVESTIGATION:COMPLETE (or INVESTIGATION:INVALID / DECOMPOSE:YES)",
-      context:     "FORGE:CONTEXT:COMPLETE",
-      architect:   "FORGE:ARCHITECT:COMPLETE",
-      build:       "FORGE:BUILDER:COMPLETE",
-      review:      "FORGE:REVIEWER:MERGED",
-      close:       "workflow:merged label",
+      investigate: `${PHASE_MARKER_REGISTRY.investigate.completionMarker} (or ${PHASE_MARKER_REGISTRY.investigate.invalidMarker} / ${PHASE_MARKER_REGISTRY.investigate.decomposedMarker})`,
+      context:     PHASE_MARKER_REGISTRY.context.completionMarker,
+      architect:   PHASE_MARKER_REGISTRY.architect.completionMarker,
+      build:       PHASE_MARKER_REGISTRY.build.completionMarker,
+      review:      PHASE_MARKER_REGISTRY.review.completionMarker,
+      close:       `${PHASE_MARKER_REGISTRY.close.completionLabel} label`,
     };
     const expected = PHASE_ANNOTATION_MAP[phaseId] || `the ${phaseId} phase annotation`;
     // Output additionalContext JSON (v2.1.163+ SubagentStop format).
