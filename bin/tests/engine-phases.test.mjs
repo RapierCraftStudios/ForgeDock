@@ -126,15 +126,36 @@ describe("pickPhase", () => {
     const close = PHASES.find(p => p.id === "close");
     const ioWith = (blob) => ({ gh: async () => blob, git: async () => "0" });
 
-    it("issue CLOSED -> committed, terminalReason merged", async () => {
+    // forge#2353: a bare CLOSED state (no workflow:merged label) is NOT proof
+    // a PR actually merged — the divergence guard (forge#2352, bin/engine.mjs)
+    // can route a closed-as-invalid or otherwise closed-not-merged issue into
+    // this phase, and reporting "merged" for that case would inflate
+    // run-log/telemetry merge-rate consumers with runs that never shipped a
+    // PR. Only workflow:merged (set by the review phase's own merge flow) is
+    // proof of an actual merge.
+    it("issue CLOSED without workflow:merged label -> committed, terminalReason invalid (#2353)", async () => {
       const io = ioWith(JSON.stringify({ state: "CLOSED", labels: [] }));
+      const outcome = await close.detectOutcome(base, io);
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "invalid");
+    });
+
+    it("issue CLOSED with workflow:invalid label (no workflow:merged) -> committed, terminalReason invalid (#2353)", async () => {
+      const io = ioWith(JSON.stringify({ state: "CLOSED", labels: [{ name: "workflow:invalid" }] }));
+      const outcome = await close.detectOutcome(base, io);
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "invalid");
+    });
+
+    it("workflow:merged label -> committed, terminalReason merged", async () => {
+      const io = ioWith(JSON.stringify({ state: "OPEN", labels: [{ name: "workflow:merged" }] }));
       const outcome = await close.detectOutcome(base, io);
       assert.equal(outcome.status, "committed");
       assert.equal(outcome.terminalReason, "merged");
     });
 
-    it("workflow:merged label -> committed, terminalReason merged", async () => {
-      const io = ioWith(JSON.stringify({ state: "OPEN", labels: [{ name: "workflow:merged" }] }));
+    it("issue CLOSED AND workflow:merged label -> committed, terminalReason merged", async () => {
+      const io = ioWith(JSON.stringify({ state: "CLOSED", labels: [{ name: "workflow:merged" }] }));
       const outcome = await close.detectOutcome(base, io);
       assert.equal(outcome.status, "committed");
       assert.equal(outcome.terminalReason, "merged");

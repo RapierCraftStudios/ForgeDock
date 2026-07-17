@@ -51,7 +51,7 @@ describe("runIssue", () => {
       // a guessed default (forge#2174).
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
 
@@ -74,7 +74,7 @@ describe("runIssue", () => {
       "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
     const events = [];
@@ -111,7 +111,7 @@ describe("runIssue", () => {
       "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
 
@@ -166,7 +166,7 @@ describe("runIssue", () => {
       "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
     const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
@@ -191,7 +191,7 @@ describe("runIssue", () => {
       "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
     const events = [];
@@ -250,7 +250,7 @@ describe("runIssue", () => {
       // a guessed default (forge#2174).
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
 
@@ -284,7 +284,7 @@ describe("runIssue", () => {
       "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += ` FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``; w.commitsAhead = 1; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
 
@@ -809,7 +809,7 @@ describe("runIssue", () => {
       // a guessed default (forge#2174).
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => {
       runCounts[commandName] = (runCounts[commandName] || 0) + 1;
@@ -848,7 +848,7 @@ describe("runIssue", () => {
       // a guessed default (forge#2174).
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => {
       runCounts[commandName] = (runCounts[commandName] || 0) + 1;
@@ -884,7 +884,7 @@ describe("runIssue", () => {
       // a guessed default (forge#2174).
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => {
       runCounts[commandName] = (runCounts[commandName] || 0) + 1;
@@ -910,6 +910,7 @@ describe("runIssue", () => {
     w.pr = 7;
     w.prMerged = true;
     w.issueState = "CLOSED";
+    w.labels.push("workflow:merged");
     const runCounts = {};
 
     const { appendEvent } = await import("../engine/runlog.mjs");
@@ -969,7 +970,7 @@ describe("runIssue", () => {
       // a guessed default (forge#2174).
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const calls = [];
     const runner = async (call) => {
@@ -1168,7 +1169,7 @@ describe("runIssue", () => {
         w.commitsAheadByBranch[REAL_BRANCH] = 2;
       },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
 
@@ -1206,7 +1207,7 @@ describe("runIssue", () => {
         w.comments.push(`FORGE:REMEDIATION note — see \`${DECOY_BRANCH}\` for context, **Branch**: \`${DECOY_BRANCH}\``);
       },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
 
@@ -1761,5 +1762,183 @@ describe("runIssue — forge#2239: in-flight lease", () => {
 
     assert.equal(res2.terminalReason, "deferred");
     assert.ok(res2.detail.includes("a1"));
+  });
+});
+
+// forge#2352: state-vs-GitHub divergence guard. Previously, none of the
+// PHASES entries' entryCondition/reconcile/detectOutcome (other than close,
+// which only runs at the very end) ever checked the issue's live GitHub
+// state/labels before advancing — so a phase could run to completion against
+// an issue that was independently closed or labeled workflow:invalid /
+// needs-human. These tests drive a run where the issue diverges mid-flight
+// and assert the engine halts/escalates at that boundary instead of
+// advancing to the next phase's runner.
+describe("runIssue — forge#2352: state-vs-GitHub divergence guard", () => {
+  it("halts before 'context' when the issue is closed workflow:invalid immediately after 'investigate' commits", async () => {
+    const { w, io } = fakeWorld();
+    const runCounts = {};
+    const script = {
+      "work-on/investigate": () => {
+        // investigate commits normally (CONFIRMED verdict marker) — but the
+        // issue is independently closed as workflow:invalid out-of-band
+        // (e.g. a human, or a sibling agent) between this phase committing
+        // and the engine picking the next phase. This is exactly the
+        // production scenario cited in the issue: the marker says CONFIRMED,
+        // but the issue's real GitHub state has already diverged.
+        w.markers += " INVESTIGATION:COMPLETE";
+        w.issueState = "CLOSED";
+        w.labels.push("workflow:invalid");
+      },
+      "work-on/build/context": () => { throw new Error("context must never run against a closed/invalid issue"); },
+    };
+    const runner = async ({ commandName }) => {
+      runCounts[commandName] = (runCounts[commandName] || 0) + 1;
+      script[commandName]();
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "invalid");
+    assert.equal(runCounts["work-on/investigate"], 1);
+    assert.equal(runCounts["work-on/build/context"] || 0, 0, "context must not have run");
+    const s = deriveState(readLog(dir, 42));
+    assert.deepEqual(s.committed, ["investigate"]);
+  });
+
+  it("halts before 'build' when the issue is closed (no workflow:merged) after 'architect' commits", async () => {
+    const { w, io } = fakeWorld();
+    const runCounts = {};
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => {
+        w.markers += " FORGE:ARCHITECT:COMPLETE";
+        // Issue closed out-of-band (not via workflow:invalid this time — a
+        // bare CLOSED state with no workflow:merged label must be treated
+        // the same way: dead, not a merge).
+        w.issueState = "CLOSED";
+      },
+      "work-on/build": () => { throw new Error("build must never run against a closed issue"); },
+    };
+    const runner = async ({ commandName }) => {
+      runCounts[commandName] = (runCounts[commandName] || 0) + 1;
+      script[commandName]();
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "invalid");
+    assert.equal(runCounts["work-on/build"] || 0, 0, "build must not have run");
+    const s = deriveState(readLog(dir, 42));
+    assert.deepEqual(s.committed, ["investigate", "context", "architect"]);
+  });
+
+  it("pauses (terminalReason needs-human) rather than advancing when the issue carries needs-human mid-run, and does not touch the needs-human label itself", async () => {
+    const { w, io } = fakeWorld();
+    const editCalls = [];
+    const origGh = io.gh;
+    io.gh = async (args) => {
+      if (args[0] === "issue" && args[1] === "edit") editCalls.push([...args]);
+      return origGh(args);
+    };
+    const runCounts = {};
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => {
+        w.markers += " FORGE:CONTEXT:COMPLETE";
+        // A human (or a sibling automation) escalates the issue mid-run.
+        w.labels.push("needs-human");
+      },
+      "work-on/build/architect": () => { throw new Error("architect must not run while needs-human is set"); },
+    };
+    const runner = async ({ commandName }) => {
+      runCounts[commandName] = (runCounts[commandName] || 0) + 1;
+      script[commandName]();
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "needs-human");
+    assert.equal(runCounts["work-on/build/architect"] || 0, 0, "architect must not have run");
+    const s = deriveState(readLog(dir, 42));
+    assert.deepEqual(s.committed, ["investigate", "context"]);
+  });
+
+  it("does not guard the close phase itself — close still runs and reads the same CLOSED state as its normal success signal", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    const s = deriveState(readLog(dir, 42));
+    assert.deepEqual(s.committed, ["investigate", "context", "architect", "build", "review", "close"]);
+  });
+
+  it("a healthy, non-diverged run is unaffected by the guard (baseline — no closed/invalid/needs-human state at any point)", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+  });
+
+  it("fail-open: a gh error on the divergence-guard snapshot does not block a healthy run", async () => {
+    const { w, io } = fakeWorld();
+    const origGh = io.gh;
+    let snapshotCalls = 0;
+    io.gh = async (args) => {
+      const a = args.join(" ");
+      // Only fail the guard's own snapshot calls (issued for every phase
+      // except close, while the issue is still OPEN) — once the close
+      // phase's script sets the issue CLOSED, its own reconcile/detectOutcome
+      // (which share this exact call shape) must be allowed to see the real,
+      // final state, since those are not covered by this fail-open guarantee.
+      if (a.startsWith("issue view") && a.includes("--json state,labels") && w.issueState === "OPEN") {
+        snapshotCalls++;
+        throw new Error("transient gh failure");
+      }
+      return origGh(args);
+    };
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    assert.ok(snapshotCalls > 0, "the guard's snapshot call must actually have been exercised (and failed) at least once");
   });
 });

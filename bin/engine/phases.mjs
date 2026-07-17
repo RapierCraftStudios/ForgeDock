@@ -100,6 +100,36 @@ async function commitsAhead(lane, branch, io) {
 function has(blob, marker) { return blob.includes(marker); }
 
 /**
+ * Fetch the issue's live `state` (OPEN/CLOSED) and `labels` in one call.
+ *
+ * This is the single data source for two consumers (forge#2352):
+ *  - the `close` phase's `reconcile`/`detectOutcome` below (which already made
+ *    this exact call inline before this helper existed — factored out here so
+ *    both call sites share one shape instead of drifting independently);
+ *  - the divergence guard in `bin/engine.mjs`'s `runIssue()` phase loop, which
+ *    calls this once per loop iteration (before running any phase other than
+ *    `close`) to detect an issue that was closed / labeled `workflow:invalid`
+ *    / labeled `needs-human` out from under an in-flight run.
+ *
+ * Returns `{ ok: false, state: null, labels: [] }` on any fetch/parse failure
+ * — callers must treat `ok: false` as "could not determine, do not act on
+ * this" rather than "issue has no labels/is not closed". This mirrors the
+ * existing fail-open behavior `close`'s `reconcile` already had (a `gh`
+ * failure there degrades to "not satisfied", never to a false positive).
+ */
+export async function issueSnapshot(issue, io) {
+  const out = await io.gh(["issue", "view", String(issue), "--json", "state,labels"]);
+  let j;
+  try {
+    j = JSON.parse(out || "{}");
+  } catch {
+    return { ok: false, state: null, labels: [] };
+  }
+  const labels = (j.labels || []).map((l) => l.name || l);
+  return { ok: true, state: j.state || null, labels };
+}
+
+/**
  * Parse the real branch name out of the `FORGE:BUILDER` comment's
  * `**Branch**: \`{BRANCH}\`` field (see `commands/work-on/build/implement.md`
  * Phase I6 — this is the exact format the builder posts). Ground truth for
@@ -291,21 +321,30 @@ export const PHASES = [
     entryCondition: (s) => s.committed.includes("review"),
     async reconcile(state, io) {
       // Idempotent resume: issue already closed or workflow:merged label set → skip the LLM re-run.
-      const out = await io.gh(["issue", "view", String(state.issue), "--json", "state,labels"]);
-      let j;
-      try { j = JSON.parse(out || "{}"); } catch { return { satisfied: false }; }
-      const labels = (j.labels || []).map((l) => l.name || l);
-      return (j.state === "CLOSED" || labels.includes("workflow:merged"))
+      const snap = await issueSnapshot(state.issue, io);
+      if (!snap.ok) return { satisfied: false };
+      return (snap.state === "CLOSED" || snap.labels.includes("workflow:merged"))
         ? { satisfied: true }
         : { satisfied: false };
     },
     async detectOutcome(state, io) {
-      const out = await io.gh(["issue", "view", String(state.issue), "--json", "state,labels"]);
-      let j;
-      try { j = JSON.parse(out || "{}"); } catch { return { status: "failed", detail: "malformed gh response" }; }
-      const labels = (j.labels || []).map((l) => l.name || l);
-      if (j.state === "CLOSED" || labels.includes("workflow:merged"))
+      const snap = await issueSnapshot(state.issue, io);
+      if (!snap.ok) return { status: "failed", detail: "malformed gh response" };
+      // forge#2353: a bare `state === "CLOSED"` is NOT sufficient evidence that
+      // a PR actually merged — the divergence guard in bin/engine.mjs (forge#2352)
+      // can now route a closed-as-invalid or otherwise closed-not-merged issue
+      // into this phase (see that guard's own comment for why `close` is exempt
+      // from it), and reporting `terminalReason: "merged"` for that case would
+      // inflate run-log/telemetry merge-rate consumers with runs that never
+      // shipped a PR. Only `workflow:merged` — the label the review phase's own
+      // merge flow sets — is proof of an actual merge. A CLOSED issue without
+      // that label is still a real terminal state (nothing left for this phase
+      // to do), just not a "merged" one — reuse the existing "invalid" reason
+      // (already in TERMINAL_REASONS) rather than inventing a new one.
+      if (snap.labels.includes("workflow:merged"))
         return { status: "committed", terminalReason: "merged", outputs: {} };
+      if (snap.state === "CLOSED")
+        return { status: "committed", terminalReason: "invalid", outputs: {} };
       return { status: "failed", detail: "issue not closed" };
     },
     isTerminalAfter: () => true,

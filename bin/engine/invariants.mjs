@@ -319,10 +319,23 @@ function evaluateOneCloseAssertion(assertion, events) {
     }
 
     case "issue_closed_at_terminal":
-      // This assertion is evaluated externally (requires a gh CLI call in the
-      // close phase). The evaluator returns ok=true here so callers that do
-      // not pass GitHub state still pass without error. The close.md phase
-      // block implements the actual gh issue view check.
+      // forge#2352: this assertion is enforced inside the engine itself now —
+      // not just "evaluated externally" as the previous version of this
+      // comment claimed. Two real, wired-up call sites cover it:
+      //   1. bin/engine.mjs's runIssue() phase loop: a per-iteration
+      //      divergence guard (`issueSnapshot()` from bin/engine/phases.mjs)
+      //      that terminates the run ("invalid" or "needs-human") the moment
+      //      the issue's live GitHub state/labels diverge from the local
+      //      run-log, for every phase except `close`.
+      //   2. The `close` phase's own reconcile/detectOutcome
+      //      (bin/engine/phases.mjs), which is exempt from (1) because
+      //      reading and acting on exactly this state IS its job.
+      // This function has no GitHub I/O access (it's a pure assertion
+      // evaluator — see the module header), so it cannot re-verify the live
+      // issue state itself; it stays a structural pass-through by design.
+      // The real enforcement lives in the two call sites above — this case
+      // exists so `assertCloseInvariants` callers get a defined, non-throwing
+      // result for this assertion id rather than an unhandled default.
       return { ok: true, id: assertion.id };
 
     default:
