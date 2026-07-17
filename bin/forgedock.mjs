@@ -1792,11 +1792,35 @@ async function update() {
         ).trim();
         if (porcelain) {
           console.log(
-            `  ${YELLOW}Working tree has uncommitted changes on branch ${branch} — skipping update.${RESET}`,
+            `  ${YELLOW}Working tree has uncommitted changes on branch ${branch} — skipping git-based update.${RESET}`,
           );
-          console.log(
-            `  ${YELLOW}Commit or stash your changes before updating, or run from a clean clone. HEAD was NOT moved.${RESET}`,
-          );
+
+          // forge#2460 — distinguish "developing on this checkout" from a
+          // dirty git-clone install elsewhere with unrelated changes. The
+          // former (npx-shadowing: FORGE_HOME resolves to the directory the
+          // user is physically running the CLI from) has a git-independent
+          // fallback available — relinkAndHint() only copies commands/hooks
+          // off disk, it never touches git state, so it's safe to run on a
+          // dirty tree. HEAD is still never moved in either case.
+          const cwdResolved = resolve(process.cwd());
+          const forgeHomeResolved = resolve(FORGE_HOME);
+          const isSourceRepoSelf =
+            cwdResolved === forgeHomeResolved ||
+            cwdResolved.startsWith(forgeHomeResolved + sep);
+
+          if (isSourceRepoSelf) {
+            console.log(
+              `  ${YELLOW}This looks like the ForgeDock source repo itself — syncing commands/hooks from the working tree instead (HEAD was NOT moved).${RESET}`,
+            );
+            await relinkAndHint();
+            console.log(
+              `  To pull the latest published release instead: ${CYAN}npm install -g forgedock@latest && npx forgedock doctor --fix${RESET}`,
+            );
+          } else {
+            console.log(
+              `  ${YELLOW}Commit or stash your changes before updating, or run from a clean clone. HEAD was NOT moved.${RESET}`,
+            );
+          }
           return;
         }
 
@@ -3844,6 +3868,31 @@ switch (command) {
     // update() (see the npm/npx branch above).
     const localVersion = getVersion();
     console.log(`forgedock ${localVersion ? `v${localVersion}` : `${YELLOW}version unknown${RESET}`}`);
+
+    // forge#2460 — getVersion() always reads FORGE_HOME/package.json. In a
+    // git-clone install (including the npx-shadowing case where FORGE_HOME
+    // resolves to whatever checkout the CLI is being run from), that's this
+    // checkout's own version — not necessarily what a separate global npm
+    // install elsewhere would report. Surface that ambiguity explicitly
+    // rather than letting this read as "the" installed version, mirroring
+    // the disambiguation messaging update() already prints (forge#2220).
+    // WIRE:PROVEN — manual: every existing "version command" test in
+    // bin/tests/router.test.mjs spawns this actual bin/forgedock.mjs file,
+    // whose FORGE_HOME resolves to this repo's own git-clone root (a real
+    // .git directory), so this guard evaluates true on every run of that
+    // suite (`node --test bin/tests/router.test.mjs`, confirmed passing).
+    // findSeparateGlobalInstall() itself fails closed to null on any error
+    // (see its JSDoc) and is exercised by the "update — global npm install
+    // self-update" suite below via the same resolveGlobalNpmForgedockDir()
+    // helper it shares with isGlobalNpmInstall().
+    if (existsSync(join(FORGE_HOME, ".git"))) {
+      const separateGlobalInstall = findSeparateGlobalInstall();
+      if (separateGlobalInstall) {
+        console.log(
+          `  ${YELLOW}Note: this is the git clone at ${FORGE_HOME}. Your global npm install at ${separateGlobalInstall} may report a different version.${RESET}`,
+        );
+      }
+    }
 
     const latestVersion = await fetchLatestVersion();
     if (latestVersion && localVersion && compareVersions(latestVersion, localVersion) > 0) {
