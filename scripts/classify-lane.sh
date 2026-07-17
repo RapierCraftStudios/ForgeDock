@@ -70,16 +70,22 @@ if ! [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-# Fetch milestone title from GitHub
-# gh issue view exits non-zero if the issue does not exist or auth fails
+# Fetch milestone title (and labels, for the review-finding staging-default
+# note below) from GitHub in a single call — gh issue view exits non-zero if
+# the issue does not exist or auth fails. Labels are fetched here rather
+# than via a second `gh issue view` call so this stays one round trip, same
+# failure surface as before this field was added. <!-- Added: forge#2443 -->
 GH_STDERR_TMP=$(mktemp)
-MILESTONE_TITLE=$(gh issue view "$ISSUE_NUMBER" "${GH_REPO_ARGS[@]}" --json milestone --jq '.milestone.title // empty' 2>"$GH_STDERR_TMP") || {
+ISSUE_JSON=$(gh issue view "$ISSUE_NUMBER" "${GH_REPO_ARGS[@]}" --json milestone,labels 2>"$GH_STDERR_TMP") || {
   echo "ERROR: failed to fetch issue #$ISSUE_NUMBER — check issue number and repo flag" >&2
   cat "$GH_STDERR_TMP" >&2
   rm -f "$GH_STDERR_TMP"
   exit 1
 }
 rm -f "$GH_STDERR_TMP"
+
+MILESTONE_TITLE=$(echo "$ISSUE_JSON" | jq -r '.milestone.title // empty')
+HAS_REVIEW_FINDING_LABEL=$(echo "$ISSUE_JSON" | jq -r '[.labels[]?.name] | any(. == "review-finding")')
 
 # Resolve staging branch name from forge.yaml (branches.staging), defaulting to "staging".
 # Uses yq if available; falls back gracefully when forge.yaml is absent or yq is not installed.
@@ -103,6 +109,24 @@ if [ -z "$MILESTONE_TITLE" ]; then
     echo "       Create the branch first, or update forge.yaml to point to an existing branch." >&2
     echo "       Run: git push origin HEAD:$STAGING_BRANCH  (from the default branch)" >&2
     exit 1
+  fi
+  # Defense-in-depth visibility (forge#2443): a review-finding issue with no
+  # milestone defaults to the staging fast lane here — which is correct ONLY
+  # when the finding's subject code actually lives on staging. For a finding
+  # spawned from a milestone-lane PR whose body is missing **Code branch**
+  # and whose milestone wasn't propagated, this default silently routes the
+  # fix to the one branch where the code is guaranteed absent, causing
+  # /work-on's investigation phase to close it as invalid. This script has
+  # no way to know whether that mismatch applies to THIS issue (it only
+  # knows the issue has no milestone) — the note below is diagnostic only,
+  # non-fatal, so callers relying on stdout are unaffected.
+  # WIRE:PROVEN — manual: ran classify-lane.sh against a fake `gh issue view`
+  # returning labels:[{"name":"review-finding"}] and milestone:null; confirmed
+  # the NOTE lines below print to stderr while stdout stays unaffected.
+  if [ "$HAS_REVIEW_FINDING_LABEL" = "true" ]; then
+    echo "NOTE: issue #$ISSUE_NUMBER is a review-finding with no milestone — defaulting to staging fast lane ('$STAGING_BRANCH')." >&2
+    echo "      If this finding's subject code only exists on a milestone branch, this default is WRONG." >&2
+    echo "      See commands/orchestrate/phase-4-execution.md Step 4C for the repair/loud-failure guard." >&2
   fi
   if [ "$JSON_OUTPUT" = "true" ]; then
     printf '{"lane":"%s","branch":"%s","source":"fast-lane","milestone":null}\n' \

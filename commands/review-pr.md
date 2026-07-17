@@ -1626,26 +1626,25 @@ gh label create "false-positive" --color "CCCCCC" --description "Review finding 
 
 **Milestone detection:**
 ```bash
-# Check BOTH head and base branches — feature PRs targeting milestone/* branches
-# should inherit the milestone for their review findings
+# BASE_BRANCH is what the finding template stamps as **Code branch** below
+# (see the rationale comment at that template block) — HEAD_BRANCH is no
+# longer needed here; derive-finding-milestone.sh resolves its own
+# base/head branch lookup internally for its Tier 3 slug match.
 BASE_BRANCH=$(gh pr view ${PR_NUMBER} --json baseRefName --jq '.baseRefName')
-HEAD_BRANCH=$(gh pr view ${PR_NUMBER} --json headRefName --jq '.headRefName')
 MILESTONE_FLAG=""
 
-# First check: PR's base branch is a milestone branch (most common for feature-lane PRs)
-MILESTONE_BRANCH=""
-if echo "$BASE_BRANCH" | grep -qE "^milestone/"; then
-    MILESTONE_BRANCH="$BASE_BRANCH"
-elif echo "$HEAD_BRANCH" | grep -qE "^milestone/"; then
-    MILESTONE_BRANCH="$HEAD_BRANCH"
-fi
-
-if [ -n "$MILESTONE_BRANCH" ]; then
-    BRANCH_SLUG=$(echo "$MILESTONE_BRANCH" | sed 's|^milestone/||')
-    MILESTONE_NUMBER=$(gh api repos/${REPO}/milestones 2>/dev/null | jq --arg slug "$BRANCH_SLUG" '.[] | select((.title | ascii_downcase | gsub("[^a-z0-9]+"; "-")) == $slug) | .number' 2>/dev/null | head -1)
-    [ -z "$MILESTONE_NUMBER" ] && MILESTONE_NUMBER=$(gh api repos/${REPO}/milestones 2>/dev/null | jq --arg slug "$BRANCH_SLUG" '.[] | select((.title | ascii_downcase | gsub("[^a-z0-9]+"; "-")) | test($slug)) | .number' 2>/dev/null | head -1)
-    [ -n "$MILESTONE_NUMBER" ] && MILESTONE_FLAG="--milestone $(gh api repos/${REPO}/milestones/${MILESTONE_NUMBER} --jq '.title')"
-fi
+# scripts/derive-finding-milestone.sh is the single source of truth for
+# milestone derivation — commands/review-pr.md and commands/review-pr-staging.md
+# both call it identically so the two specs cannot independently drift the
+# way they did before this fix (forge#2443 Instance B/C: findings from a
+# milestone-lane PR sometimes inherited the milestone and sometimes didn't,
+# depending on incidental inheritance rather than an explicit step). The
+# script's 3-tier resolution (PR's own milestone -> originating issue's
+# milestone via Closes/Fixes/Resolves #N -> branch-slug match against
+# milestone/* branches) supersedes the old base/head-branch-only slug match
+# that used to be hand-rolled here.
+MILESTONE_TITLE=$(bash scripts/derive-finding-milestone.sh "${PR_NUMBER}" -R "${REPO}")
+[ -n "$MILESTONE_TITLE" ] && MILESTONE_FLAG="--milestone $MILESTONE_TITLE"
 ```
 
 **Dedup against existing issues (MANDATORY before creating):**
@@ -1763,10 +1762,26 @@ Files that need changes:
 
 ## Source Branch Context
 
-**Code branch**: `[HEAD_BRANCH]`
-**Worktree base**: `origin/[HEAD_BRANCH]`
+<!--
+  BASE_BRANCH, not HEAD_BRANCH, is correct here (forge#2443). This looks like
+  a revert of forge#1391 ("review-finding template stamps BASE_BRANCH instead
+  of HEAD_BRANCH — fixes target wrong code state") but is NOT: forge#1391's
+  scenario was a staging->main review where HEAD (staging) is a long-lived
+  branch that already had the bug's code, while BASE (main) had not yet
+  received it. review-pr.md's scenario is different — HEAD here is a
+  short-lived feat/*|fix/* branch that Phase 6E deletes once --auto-merge
+  completes, which happens SYNCHRONOUSLY within this same /review-pr run,
+  before any downstream consumer (a human, or /work-on) ever reads this
+  finding. By the time the finding is read, HEAD no longer exists but BASE
+  does, and BASE now contains the merged code the finding is about.
+  commands/review-pr-staging.md keeps HEAD_BRANCH semantics (as a dynamic
+  ${CODE_BRANCH}, not a hardcoded literal) because ITS reviewed branches
+  (staging, milestone/*) are long-lived — consistent with forge#1391.
+-->
+**Code branch**: `[BASE_BRANCH]`
+**Worktree base**: `origin/[BASE_BRANCH]`
 
-> When fixing: `git worktree add ../fix-{slug} -b fix/{slug} origin/[HEAD_BRANCH]`
+> When fixing: `git worktree add ../fix-{slug} -b fix/{slug} origin/[BASE_BRANCH]`
 
 ## Code Context
 [10 lines around finding]

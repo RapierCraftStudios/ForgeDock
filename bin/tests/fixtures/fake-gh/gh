@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# fake-gh — test double for the `gh` CLI, used by
+# bin/tests/derive-finding-milestone.test.mjs to exercise
+# scripts/derive-finding-milestone.sh without touching the network.
+#
+# Prepend this file's directory onto PATH ahead of the real `gh` so shell
+# scripts under test resolve this shim instead. Behavior is driven entirely
+# by environment variables — no argument parsing beyond dispatching on the
+# subcommand, since the caller under test controls exactly which flags it
+# passes and this fixture only needs to answer the 3 call shapes
+# derive-finding-milestone.sh actually makes:
+#
+#   gh pr view <N> [-R owner/repo] --json ...            -> $GH_FAKE_PR_JSON
+#   gh issue view <N> [-R owner/repo] --json ... --jq E   -> jq -r E on $GH_FAKE_ISSUE_JSON
+#   gh api repos/.../milestones                            -> $GH_FAKE_MILESTONES_JSON
+#
+# GH_FAKE_PR_VIEW_EXIT / GH_FAKE_PR_VIEW_STDERR simulate a `gh pr view`
+# failure (nonexistent PR, auth failure, etc.) — see the "fails loud" test
+# case.
+#
+# <!-- Added: forge#2443 -->
+
+set -u
+
+SUBCMD="${1:-}"
+shift || true
+SUBSUBCMD="${1:-}"
+
+find_jq_expr() {
+  local prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--jq" ]; then
+      echo "$arg"
+      return 0
+    fi
+    prev="$arg"
+  done
+  return 1
+}
+
+case "$SUBCMD" in
+  pr)
+    if [ "$SUBSUBCMD" = "view" ]; then
+      if [ "${GH_FAKE_PR_VIEW_EXIT:-0}" != "0" ]; then
+        echo "${GH_FAKE_PR_VIEW_STDERR:-fake-gh: simulated pr view failure}" >&2
+        exit "${GH_FAKE_PR_VIEW_EXIT}"
+      fi
+      # NOTE: do not write the empty-object default inline as ${VAR:-{}} —
+      # bash's brace-matching for parameter expansion closes at the FIRST
+      # unescaped '}', so ${VAR:-{}} parses as default value '{' followed by
+      # a literal trailing '}' appended after the expansion, corrupting any
+      # real JSON value into a double-closed object. Use an explicit
+      # if/then default assignment instead.
+      JSON="${GH_FAKE_PR_JSON:-}"
+      [ -z "$JSON" ] && JSON='{}'
+      if JQ_EXPR=$(find_jq_expr "$@"); then
+        echo "$JSON" | jq -r "$JQ_EXPR"
+      else
+        echo "$JSON"
+      fi
+      exit 0
+    fi
+    ;;
+  issue)
+    if [ "$SUBSUBCMD" = "view" ]; then
+      JSON="${GH_FAKE_ISSUE_JSON:-}"
+      [ -z "$JSON" ] && JSON='{}'
+      if JQ_EXPR=$(find_jq_expr "$@"); then
+        echo "$JSON" | jq -r "$JQ_EXPR"
+      else
+        echo "$JSON"
+      fi
+      exit 0
+    fi
+    ;;
+  api)
+    # `gh api repos/.../milestones` — path is $SUBSUBCMD here (no further
+    # subcommand level for `api`). Always return the configured milestones
+    # list regardless of the exact path, since the test fixture only ever
+    # models the one endpoint the script calls.
+    echo "${GH_FAKE_MILESTONES_JSON:-[]}"
+    exit 0
+    ;;
+esac
+
+echo "fake-gh: unhandled invocation: $SUBCMD $SUBSUBCMD $*" >&2
+exit 1
