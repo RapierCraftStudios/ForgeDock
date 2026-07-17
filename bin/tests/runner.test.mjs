@@ -2340,6 +2340,88 @@ describe("runCliBackend usage parsing from --output-format json (issue #2398)", 
     );
   });
 
+  // forge#2484 (batch #2522): `parsedResult === ""` is a valid, non-null
+  // `.result` (per the `typeof parsed.result === "string"` check above), but
+  // the forge#2456 composition treated "non-null" as the sole gate for
+  // prefixing with `parsedResult`, producing `"" + "\n" + stderrTrimmed` — a
+  // leading-newline-only artifact — whenever the envelope's `.result` was an
+  // empty string and `stderr` was non-empty. Fixed: an empty `.result` now
+  // falls through to the (sanitized) stderr alone, with no separator.
+  it("logs stderr alone with no leading newline when .result is an empty string (forge#2484)", () => {
+    const envelope = JSON.stringify({
+      type: "result",
+      result: "",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    const stderrBanner = "some warning from the CLI";
+    const spawnFn = () => ({ status: 0, stdout: envelope, stderr: stderrBanner, error: undefined });
+
+    const loggedLines = [];
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2484",
+      args: ["2484"],
+      cwd: TMP,
+      logger: { log: (line) => loggedLines.push(line) },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.equal(result.status, "complete");
+    assert.ok(
+      loggedLines.some((line) => line === stderrBanner),
+      "with an empty .result, the logged line must be the stderr alone — no leading-newline-only artifact",
+    );
+    assert.ok(
+      !loggedLines.some((line) => line === `\n${stderrBanner}`),
+      "must never log a leading-newline-only string when .result is empty",
+    );
+  });
+
+  // forge#2483 (batch #2522): the appended `stderr` on this success path is
+  // untrusted subprocess output (the CLI echoes untrusted issue/PR body
+  // content — the same threat class already hardened for the timeout/
+  // non-zero-exit diagnostic paths via `sanitizeOutputExcerptForLog()`). It
+  // must be routed through that same helper before reaching `logger.log()`,
+  // rather than being concatenated raw.
+  it("sanitizes control characters in appended stderr on the success path (forge#2483)", () => {
+    const envelope = JSON.stringify({
+      type: "result",
+      result: "Hi! Done.",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    // A bell character (\x07) is a C0 control char that sanitizeOutputExcerptForLog
+    // must escape to a visible \x07 form, per the same hardening applied to
+    // the timeout/non-zero-exit diagnostic paths (forge#2277).
+    const stderrWithControlChar = "warning: \x07 unexpected byte";
+    const spawnFn = () => ({
+      status: 0,
+      stdout: envelope,
+      stderr: stderrWithControlChar,
+      error: undefined,
+    });
+
+    const loggedLines = [];
+    runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2483",
+      args: ["2483"],
+      cwd: TMP,
+      logger: { log: (line) => loggedLines.push(line) },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.ok(
+      loggedLines.some((line) => line === "Hi! Done.\nwarning: \\x07 unexpected byte"),
+      "the control char in appended stderr must be escaped to a visible \\xHH form before logging",
+    );
+    assert.ok(
+      !loggedLines.some((line) => line.includes("\x07")),
+      "the raw, unescaped control char must never reach logger.log()",
+    );
+  });
+
   // forge#2424: a non-numeric usage field (e.g. a string, as an alternate/
   // future CLI JSON shape might emit) must be coerced to a safe numeric
   // value (0), never passed through raw — otherwise bin/batch-runner.mjs's

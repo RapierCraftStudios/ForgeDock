@@ -884,12 +884,35 @@ export function runCliBackend({
     // one" fix already applied to the `run_bash` tool handler's success path
     // in #1229. `JSON.parse` itself still targets `stdout` alone (forge#2422)
     // — only the logged/displayed string composition changes here.
+    //
+    // forge#2483/forge#2484 (batch #2522): two follow-up fixes to the
+    // forge#2456 composition above, applied together since they share the
+    // exact same lines:
+    //   - forge#2483: `stderrTrimmed` is untrusted subprocess output (the CLI
+    //     echoes untrusted issue/PR body content — the same threat class
+    //     `sanitizeArgvForLog`/`sanitizeOutputExcerptForLog` already harden
+    //     for the timeout/non-zero-exit diagnostic paths above). It is now
+    //     routed through the same `sanitizeOutputExcerptForLog()` helper
+    //     before being concatenated into `humanOutput`, instead of reaching
+    //     `logger.log()` raw.
+    //   - forge#2484: `parsedResult !== null` is true even when
+    //     `parsedResult === ""` (the earlier `typeof parsed.result ===
+    //     "string"` check accepts `""`). Previously that produced
+    //     `"" + "\n" + stderrTrimmed` — a leading-newline-only artifact.
+    //     `parsedResult` (truthy check, not `!== null`) now gates the
+    //     "prefix with parsedResult" behavior, so an empty `.result` falls
+    //     through to the sanitized stderr alone, with no separator.
+    // The `parsedResult === null` fallback branch (raw `output`) is
+    // untouched by either fix — out of scope for both findings.
     const stderrTrimmed = stderr.trim();
+    const sanitizedStderr = stderrTrimmed ? sanitizeOutputExcerptForLog(stderrTrimmed) : "";
     const humanOutput =
       parsedResult !== null
-        ? stderrTrimmed
-          ? `${parsedResult}\n${stderrTrimmed}`
-          : parsedResult
+        ? parsedResult
+          ? sanitizedStderr
+            ? `${parsedResult}\n${sanitizedStderr}`
+            : parsedResult
+          : sanitizedStderr
         : output;
     if (humanOutput) logger.log(humanOutput);
 
