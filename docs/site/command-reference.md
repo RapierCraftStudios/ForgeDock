@@ -760,6 +760,36 @@ Counts sourced from `gh issue list` / `gh pr list` at the 500-item limit are lab
 
 ---
 
+### `npx forgedock query`
+
+**Scoped JSON fleet/engine data for pipeline agents.**
+
+The machine-readable counterpart to `forgedock watch`: instead of a human-facing dashboard, `query` prints exactly one JSON document to stdout and exits — no prose, no ANSI, nothing else on stdout. Built for agents (`/pipeline-status`, `/orchestrate`'s stall detector, `/diagnose`, `/autopilot`) that need one field of fleet state without pulling entire comment threads or re-deriving it from raw `gh` calls.
+
+```bash
+npx forgedock query fleet                                   # Full FleetSnapshot — every watched agent
+npx forgedock query issue 2340                               # IssueDetail: phase history, diagnostics, lease, last heartbeat
+npx forgedock query issue 2340 --events                      # Raw local run-log slice — zero network
+npx forgedock query issue 2340 --events --since-seq 12        # Only events after seq 12 (cursor-style polling)
+npx forgedock query stalls                                    # Only agents with status stalled/blocked, with stall math
+npx forgedock query orchestration                              # Fleet grouped by milestone, with per-milestone status counts
+npx forgedock query orchestration --milestone "Watch & Fleet Observability"
+npx forgedock query fleet --fields phase,status               # Project each agent to just the named fields (+ issue)
+npx forgedock query fleet --limit 10                           # Cap the number of agents/events returned
+npx forgedock query fleet --repo owner/repo                    # Override repo (default: forge.yaml in cwd)
+```
+
+**Contract**:
+
+- Output is a single JSON document on stdout, always — including errors: `{"schema":"forge-observe/1","error":{"code":"NO_REPO","message":"…"}}`.
+- Exit codes are signals a caller can branch on without parsing: `0` = healthy fleet, `2` = stalls present, `3` = blocked (`needs-human`) present (wins over 2), `4` = query/usage error.
+- `issue <n> --events` never makes a network call and never requires `--repo` — it reads only the local run-log.
+- Agent ordering is deterministic: severity (blocked → stalled → running → leased-elsewhere → terminal), then ascending issue number.
+
+Data is assembled entirely by `bin/observe.mjs` (one GraphQL request per `fleet`/`stalls`/`orchestration` call, regardless of fleet size) — `query` never talks to `gh` or parses JSONL itself.
+
+---
+
 ## Next Steps
 
 - [Command Learning Path](./command-learning-path.md) — which commands to learn first, tiered by when you need them
