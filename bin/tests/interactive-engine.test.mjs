@@ -246,7 +246,10 @@ describe("detectPhase — real nested Claude Code transcript schema (#1580)", ()
   it("does not derive a branch from a bare 'refs/heads/' fragment (was: branch=\"refs\")", () => {
     const path = writeTranscript(dir, [
       assistantToolUse("Skill", { skill: "work-on:build", args: "2204" }),
-      userToolResult('fatal: ambiguous argument refs/heads/: unknown revision\nFORGE:BUILDER:COMPLETE'),
+      // The old regex's "branch[:\s]+" alternative matches "branch refs" here and
+      // captures the bare word "refs" — reproduces the exact corrupt value seen
+      // in .forgedock/run-logs/2204.jsonl.
+      userToolResult('Updating branch refs for local tracking\nFORGE:BUILDER:COMPLETE'),
     ]);
     const transcript = parseTranscript(path);
     const { phaseId, outputs } = detectPhase(transcript);

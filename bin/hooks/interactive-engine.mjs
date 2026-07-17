@@ -171,8 +171,8 @@ async function main() {
   if (skillInvoked && annotationMissing && phaseId) {
     const PHASE_ANNOTATION_MAP = {
       investigate: "INVESTIGATION:COMPLETE (or INVESTIGATION:INVALID / DECOMPOSE:YES)",
-      context:     "FORGE:CONTEXT",
-      architect:   "FORGE:ARCHITECT",
+      context:     "FORGE:CONTEXT:COMPLETE",
+      architect:   "FORGE:ARCHITECT:COMPLETE",
       build:       "FORGE:BUILDER:COMPLETE",
       review:      "FORGE:REVIEWER:MERGED",
       close:       "workflow:merged label",
