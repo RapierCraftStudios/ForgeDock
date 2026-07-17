@@ -1648,6 +1648,87 @@ describe("runIssue — forge#2239: in-flight lease", () => {
       "so it can never land afterward and resurrect a phantom lease");
   });
 
+  it("forge#2348 (review finding): renewLease() must not dispatch an overlapping renewal write while a previous one is still in flight", async () => {
+    // Regression for a CONFIRMED MEDIUM review finding, related to but distinct
+    // from #2338: the join-tracking scheme fixed by #2239/#2338 only ever holds
+    // ONE promise in `pendingRenewal` — it protects against a single in-flight
+    // write landing late, but has no backpressure against a SECOND renewal tick
+    // firing (and dispatching its own write) while the first write is still in
+    // flight. Without a guard, `pendingRenewal` is simply overwritten by the
+    // newer write's promise, silently orphaning the earlier one from every join
+    // point. Since projector.writeState is a plain read-body/edit-body round
+    // trip with no CAS (see #2239), an orphaned earlier write landing after a
+    // later one (or after commit/terminate) can resurrect stale state.
+    //
+    // This test proves the fix at the dispatch level directly: while the phase
+    // runner is in flight, every "issue edit" renewal write dispatched during a
+    // bounded observation window is held artificially slow (60ms — longer than
+    // the whole window), and the renewal interval (10ms) is short enough for
+    // several ticks to become eligible to fire during that window. Pre-fix,
+    // `renewLease()` unconditionally dispatches a NEW overlapping write on every
+    // eligible tick regardless of whether the previous one has settled, so 2+
+    // writes would be dispatched during the window. Post-fix, the
+    // `if (pendingRenewal) return;` guard means every tick after the first is a
+    // no-op until the in-flight write settles, so exactly 1 write is dispatched.
+    // Delays are bounded (not indefinite) throughout, so this cannot hang even
+    // if a future refactor changes how many writes land — worst case is a
+    // failed assertion, not a stuck promise.
+    const { w, io } = fakeWorld();
+    const origGh = io.gh;
+    let delayEdits = false;
+    let dispatchCountDuringWindow = 0;
+    const delayedEditPromises = [];
+    io.gh = async (args) => {
+      if (args[0] === "issue" && args[1] === "edit" && args.includes("--body") && delayEdits) {
+        dispatchCountDuringWindow += 1;
+        const delayed = new Promise((resolve) => setTimeout(resolve, 60)).then(() => origGh(args));
+        delayedEditPromises.push(delayed);
+        return delayed;
+      }
+      return origGh(args);
+    };
+
+    const LEASE_TTL_MS = 1000;
+    const LEASE_RENEW_INTERVAL_MS = 10;
+
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/investigate") {
+        // Arm delay only once inside the runner — well after the two
+        // synchronous pre-loop lease-claim writes (the unconditional claim
+        // before the phase loop starts, and the per-phase renewal write
+        // immediately before renewTimer is created) have already resolved
+        // normally. This guarantees renewTimer is already running before any
+        // write is ever delayed, so the timer-driven ticks below are real.
+        delayEdits = true;
+        // Stay "in phase" long enough for several renewal ticks (10ms
+        // interval) to become eligible while every dispatched write during
+        // this window sits at a fixed 60ms delay — this is the overlap
+        // window where a second, unguarded write would be dispatched.
+        await new Promise((resolve) => setTimeout(resolve, LEASE_RENEW_INTERVAL_MS * 6));
+        delayEdits = false;
+      }
+      // Terminal (INVALID) on first phase — reaches terminate() shortly after
+      // the observation window, same shape as the sibling "slow in-flight
+      // heartbeat" test above.
+      w.markers += " INVESTIGATION:INVALID";
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => Date.now(), maxAttempts: 1,
+      leaseTtlMs: LEASE_TTL_MS, leaseRenewIntervalMs: LEASE_RENEW_INTERVAL_MS });
+
+    // Wait for every delayed write to actually land before asserting, so a
+    // write dispatched right at the edge of the window isn't missed.
+    await Promise.all(delayedEditPromises);
+
+    assert.equal(res.terminalReason, "invalid");
+    assert.equal(dispatchCountDuringWindow, 1,
+      "renewLease() must not dispatch a new renewal write while a previous one is still in flight — " +
+      "observed " + dispatchCountDuringWindow + " writes dispatched during a single 60ms-delayed window " +
+      "against a 10ms renewal interval (6 ticks eligible), meaning the backpressure guard did not engage");
+  });
+
   it("a second concurrent run-issue is deferred by the now-real (non-null) lease claimed by the first run", async () => {
     // End-to-end proof that the concurrency guard (bin/engine.mjs I3 check) is
     // actually reachable now: run agent "a1" far enough to claim a lease (but
