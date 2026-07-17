@@ -146,7 +146,9 @@ describe("buildContextPack — deterministic truncation", () => {
     const pack1 = buildContextPack({ issue: { number: 1, title: "T", body: hugeBody } }, { budgetBytes: 100 });
     const pack2 = buildContextPack({ issue: { number: 1, title: "T", body: hugeBody } }, { budgetBytes: 100 });
     assert.equal(pack1.text, pack2.text, "hard-truncation must be deterministic");
-    assert.ok(pack1.bytes <= 100 + Buffer.byteLength("\n\n[...truncated to fit context pack budget...]", "utf-8"));
+    // Review-finding #2517 fix: the result must never exceed the requested
+    // budget at all (previously tolerated exceeding it by up to markerBytes).
+    assert.ok(pack1.bytes <= 100, "truncated output must never exceed the requested budgetBytes");
     assert.ok(pack1.truncated.includes("hard-truncate"));
   });
 
@@ -159,6 +161,27 @@ describe("buildContextPack — deterministic truncation", () => {
     // toString('utf-8') on a valid buffer never produces the replacement
     // character (U+FFFD) for a boundary we chose correctly ourselves.
     assert.equal(pack.text.includes("�"), false, "must not contain a UTF-8 replacement character from a mid-char split");
+  });
+
+  // Review-finding #2517 (CONFIRMED, LOW): truncateToBytes previously
+  // returned the full, un-truncated marker (~46 bytes) whenever budgetBytes
+  // was smaller than the marker itself, violating its own "at most maxBytes"
+  // contract. Fixed by shrinking the marker itself to fit.
+  it("review-finding #2517: never exceeds budgetBytes even when the budget is smaller than the truncation marker", () => {
+    for (const tinyBudget of [0, 1, 5, 10, 20, 45, 46, 47]) {
+      const pack = buildContextPack({ issue: { number: 1, title: "T", body: "x".repeat(500) } }, { budgetBytes: tinyBudget });
+      assert.ok(
+        pack.bytes <= tinyBudget,
+        `budgetBytes=${tinyBudget}: expected pack.bytes (${pack.bytes}) <= ${tinyBudget}`,
+      );
+    }
+  });
+
+  it("review-finding #2517: is deterministic at tiny budgets too", () => {
+    const input = { issue: { number: 1, title: "T", body: "x".repeat(500) } };
+    const a = buildContextPack(input, { budgetBytes: 10 });
+    const b = buildContextPack(input, { budgetBytes: 10 });
+    assert.deepEqual(a, b);
   });
 });
 

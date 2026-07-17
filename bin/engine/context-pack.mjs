@@ -112,14 +112,43 @@ const DEFAULT_BUDGET_BYTES = 32000;
  * bounded by at most 3 iterations in practice (the widest UTF-8 sequence is
  * 4 bytes), so this stays cheap even though it is not the single fastest
  * possible implementation.
+ *
+ * Review-finding #2517 (CONFIRMED, LOW): the original implementation
+ * clamped `targetLen = Math.max(0, maxBytes - markerBytes)` and, when that
+ * clamped to 0 (i.e. `maxBytes` smaller than the ~46-byte marker itself),
+ * fell straight through to returning the FULL, un-truncated marker —
+ * silently exceeding the function's own "at most maxBytes" contract. Not
+ * reachable via the current production caller (a fixed 32000-byte budget in
+ * bin/engine.mjs), but `buildContextPack`/this helper are reachable with an
+ * arbitrary caller-supplied budget. Fixed by shrinking the marker itself
+ * (via the same strict-decode loop, so it stays UTF-8-boundary-safe even
+ * though the marker text itself is plain ASCII) whenever it alone would not
+ * fit — the function now genuinely never returns more than maxBytes bytes,
+ * including the degenerate maxBytes: 0 case (returns "").
  */
 function truncateToBytes(str, maxBytes) {
   const buf = Buffer.from(str, "utf-8");
   if (buf.length <= maxBytes) return str;
   const marker = "\n\n[...truncated to fit context pack budget...]";
   const markerBytes = Buffer.byteLength(marker, "utf-8");
-  let targetLen = Math.max(0, maxBytes - markerBytes);
   const decoder = new TextDecoder("utf-8", { fatal: true });
+
+  if (markerBytes > maxBytes) {
+    // The marker alone doesn't fit — shrink the marker itself rather than
+    // returning it un-truncated (the bug #2517 flagged).
+    const markerBuf = Buffer.from(marker, "utf-8");
+    let markerTargetLen = maxBytes;
+    while (markerTargetLen > 0) {
+      try {
+        return decoder.decode(markerBuf.subarray(0, markerTargetLen));
+      } catch {
+        markerTargetLen--;
+      }
+    }
+    return "";
+  }
+
+  let targetLen = maxBytes - markerBytes;
   while (targetLen > 0) {
     try {
       return decoder.decode(buf.subarray(0, targetLen)) + marker;
@@ -152,7 +181,16 @@ function truncateToBytes(str, maxBytes) {
  */
 export function buildContextPack(input, opts) {
   const safeInput = input || {};
-  const budgetBytes = (opts && opts.budgetBytes) || DEFAULT_BUDGET_BYTES;
+  // Discovered while fixing review-finding #2517: `opts.budgetBytes || DEFAULT`
+  // treats a caller-supplied `0` as absent (0 is falsy) and silently falls
+  // back to the 32000-byte default — defeating a caller's explicit "give me
+  // nothing" budget and making the tiny-budget behavior untestable/wrong.
+  // Use an explicit type check so only a genuinely absent/non-numeric budget
+  // falls back to the default; 0 (and any other finite number) is honored.
+  const budgetBytes =
+    opts && typeof opts.budgetBytes === "number" && Number.isFinite(opts.budgetBytes)
+      ? opts.budgetBytes
+      : DEFAULT_BUDGET_BYTES;
 
   const rendered = {};
   for (const key of RENDER_ORDER) rendered[key] = RENDERERS[key](safeInput[key]);
