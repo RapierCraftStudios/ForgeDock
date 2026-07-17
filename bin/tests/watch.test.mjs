@@ -942,6 +942,66 @@ describe("runWatch — keyboard interaction (forge#2392)", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  // forge#2492 — a detail-fetch promise still in flight when the operator
+  // quits must not repaint after cleanup() has already restored the cursor
+  // and printed the exit summary. Neither its resolution NOR its rejection
+  // may write anything further to stdout once the loop has torn down.
+  it("does not repaint after cleanup when an in-flight detail fetch settles post-quit", async () => {
+    const dir = tmpDir();
+    const stdout = fakeTtyStdout();
+    const stdin = fakeTtyStdin();
+    let resolveDetail;
+    const getIssueDetailFn = async () =>
+      new Promise((resolve) => {
+        resolveDetail = resolve;
+      });
+    let sleepCount = 0;
+    const sleep = async () => {
+      sleepCount += 1;
+      if (sleepCount === 1) stdin.emit("data", "\r"); // start a detail fetch that never settles on its own
+      if (sleepCount === 2) stdin.emit("data", "q"); // quit while it's still pending
+    };
+    await runWatch(["--repo", "acme/widgets"], {
+      stdout,
+      stdin,
+      io: ghOk([nodeFor(9)]),
+      getIssueDetailFn,
+      now: () => 1000,
+      runsDir: dir,
+      maxTicks: 1000,
+      sleep,
+    });
+    assert.ok(resolveDetail, "the detail fetch should have been started before quitting");
+    const textAtExit = stdout.text();
+    assert.ok(textAtExit.includes("\x1b[?25h"), "cleanup should already have restored the cursor by the time runWatch resolves");
+
+    // Settle the fetch *after* runWatch has already returned (cleanup already ran).
+    resolveDetail({
+      issue: 9,
+      title: "t",
+      branch: null,
+      pr: null,
+      status: "running",
+      stall: null,
+      phase: "build",
+      attempt: { n: 1, max: 3 },
+      phaseHistory: [],
+      heartbeat: null,
+      lastHeartbeatBody: null,
+      diagnostics: { valid: true, failedPhase: null },
+      lease: null,
+    });
+    // Flush the .then()/.finally() microtasks queued by the resolution above.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(
+      stdout.text(),
+      textAtExit,
+      "no additional frame should be written to stdout once a detail-fetch settles after cleanup has already run",
+    );
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("Enter is a no-op when the fleet is empty (no crash, no getIssueDetailFn call)", async () => {
     const dir = tmpDir();
     const stdout = fakeTtyStdout();
