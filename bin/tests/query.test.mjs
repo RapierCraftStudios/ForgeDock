@@ -68,6 +68,13 @@ describe("resolveQueryRepo", () => {
     assert.equal(resolveQueryRepo(["fleet"], dir), null);
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it("rejects a --repo value that isn't owner/repo shaped", () => {
+    const dir = tmpDir();
+    assert.equal(resolveQueryRepo(["fleet", "--repo", "not-a-repo-shape"], dir), null);
+    assert.equal(resolveQueryRepo(["fleet", "--repo", "too/many/slashes"], dir), null);
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 describe("projectFields", () => {
@@ -138,6 +145,36 @@ describe("runQuery — usage/error contract", () => {
     assert.equal(stdout.json().error.code, "BAD_FLAG");
   });
 
+  it("an explicit empty-string --limit emits BAD_FLAG rather than defaulting to 0 (forge#2428)", async () => {
+    const stdout = fakeStdout();
+    const exitCode = await runQuery(["fleet", "--repo", "acme/widgets", "--limit", ""], {
+      stdout,
+      io: { gh: async () => { throw new Error("must not call gh"); } },
+    });
+    assert.equal(exitCode, 4);
+    assert.equal(stdout.json().error.code, "BAD_FLAG");
+  });
+
+  it("--limit as the last argv token (no value) emits BAD_FLAG, distinct from --limit absent (forge#2429)", async () => {
+    const stdout = fakeStdout();
+    const exitCode = await runQuery(["fleet", "--repo", "acme/widgets", "--limit"], {
+      stdout,
+      io: { gh: async () => { throw new Error("must not call gh"); } },
+    });
+    assert.equal(exitCode, 4);
+    assert.equal(stdout.json().error.code, "BAD_FLAG");
+  });
+
+  it("--fields as the last argv token (no value) emits BAD_FLAG (forge#2429)", async () => {
+    const stdout = fakeStdout();
+    const exitCode = await runQuery(["fleet", "--repo", "acme/widgets", "--fields"], {
+      stdout,
+      io: { gh: async () => { throw new Error("must not call gh"); } },
+    });
+    assert.equal(exitCode, 4);
+    assert.equal(stdout.json().error.code, "BAD_FLAG");
+  });
+
   it("output is exactly one JSON document — parses cleanly with nothing else on stdout", async () => {
     const dir = tmpDir();
     const stdout = fakeStdout();
@@ -182,6 +219,16 @@ describe("runQuery — fleet scope", () => {
     await runQuery(["fleet", "--repo", "acme/widgets", "--limit", "2"], { stdout, io, now: () => 1000, runsDir: dir });
     assert.equal(stdout.json().agents.length, 2);
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("a negative --limit emits BAD_FLAG and exits 4 (forge#2430)", async () => {
+    const stdout = fakeStdout();
+    const exitCode = await runQuery(["fleet", "--repo", "acme/widgets", "--limit", "-1"], {
+      stdout,
+      io: { gh: async () => { throw new Error("must not call gh"); } },
+    });
+    assert.equal(exitCode, 4);
+    assert.equal(stdout.json().error.code, "BAD_FLAG");
   });
 
   it("exit code 2 when stalls present, no blocked", async () => {
@@ -284,6 +331,32 @@ describe("runQuery — orchestration scope", () => {
     assert.equal(doc.milestones[0].milestone, "Alpha");
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it("applies --fields projection within each milestone group's agents array (forge#2430)", async () => {
+    const dir = tmpDir();
+    const io = ghFleetIo([
+      fleetNode({ number: 1, milestone: "Alpha" }),
+      fleetNode({ number: 2, milestone: "Alpha", labels: ["workflow:building", "needs-human"] }),
+    ]);
+    const stdout = fakeStdout();
+    await runQuery(["orchestration", "--repo", "acme/widgets", "--fields", "status"], { stdout, io, now: () => 1000, runsDir: dir });
+    const doc = stdout.json();
+    const alpha = doc.milestones.find((m) => m.milestone === "Alpha");
+    for (const agent of alpha.agents) {
+      assert.deepEqual(Object.keys(agent).sort(), ["issue", "status"].sort());
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("--milestone as the last argv token (no value) emits BAD_FLAG (forge#2429)", async () => {
+    const stdout = fakeStdout();
+    const exitCode = await runQuery(["orchestration", "--repo", "acme/widgets", "--milestone"], {
+      stdout,
+      io: { gh: async () => { throw new Error("must not call gh"); } },
+    });
+    assert.equal(exitCode, 4);
+    assert.equal(stdout.json().error.code, "BAD_FLAG");
+  });
 });
 
 describe("runQuery — issue scope", () => {
@@ -349,6 +422,18 @@ describe("runQuery — issue scope", () => {
     const exitCode = await runQuery(["issue", "902", "--events", "--since-seq", "nope"], { stdout, runsDir: dir });
     assert.equal(exitCode, 4);
     assert.equal(stdout.json().error.code, "BAD_FLAG");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("--events with a --since-seq larger than every event's seq returns an empty events array, not an error (forge#2430)", async () => {
+    const dir = tmpDir();
+    appendEvent(dir, 904, { event: "RUN_START", run: "r1", issue: 904, lane: "staging" });
+    appendEvent(dir, 904, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+    const stdout = fakeStdout();
+    const exitCode = await runQuery(["issue", "904", "--events", "--since-seq", "999999"], { stdout, runsDir: dir });
+    assert.equal(exitCode, 0);
+    const doc = stdout.json();
+    assert.deepEqual(doc.events, []);
     rmSync(dir, { recursive: true, force: true });
   });
 

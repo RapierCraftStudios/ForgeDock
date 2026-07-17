@@ -47,6 +47,16 @@ const pexec = promisify(execFile);
 // private helper): explicit --repo flag first, then forge.yaml in cwd.
 // ---------------------------------------------------------------------------
 
+// Shape check applied to every resolved repo string before it flows into a
+// `gh --repo`/`-R` argv element. Defense-in-depth only (forge#2431): every
+// `gh` invocation in this file uses execFile with a plain argv array (see
+// defaultIo() below), so there is no shell-interpolation surface today —
+// this just rejects malformed forge.yaml/--repo values with a clearer error
+// than whatever `gh` itself would emit. Deliberately permissive (anything
+// non-slash/non-whitespace on each side of exactly one slash) so it never
+// rejects a legitimate "owner/repo" value.
+const REPO_SHAPE_RE = /^[^/\s]+\/[^/\s]+$/;
+
 /**
  * @param {string[]} argv - args after "query <scope>"
  * @param {string} [cwd]
@@ -54,20 +64,24 @@ const pexec = promisify(execFile);
  */
 export function resolveQueryRepo(argv, cwd = process.cwd()) {
   const idx = argv.indexOf("--repo");
-  if (idx !== -1 && argv[idx + 1]) return argv[idx + 1];
-
-  const forgeYamlPath = join(cwd, "forge.yaml");
-  if (existsSync(forgeYamlPath)) {
-    try {
-      const raw = readFileSync(forgeYamlPath, "utf-8");
-      const ownerMatch = raw.match(/^\s*owner:\s*["']?([^\s"'#]+)["']?/m);
-      const repoMatch = raw.match(/^\s*repo:\s*["']?([^\s"'#]+)["']?/m);
-      if (ownerMatch && repoMatch) return `${ownerMatch[1]}/${repoMatch[1]}`;
-    } catch {
-      // fall through to null
+  let resolved = null;
+  if (idx !== -1 && argv[idx + 1]) {
+    resolved = argv[idx + 1];
+  } else {
+    const forgeYamlPath = join(cwd, "forge.yaml");
+    if (existsSync(forgeYamlPath)) {
+      try {
+        const raw = readFileSync(forgeYamlPath, "utf-8");
+        const ownerMatch = raw.match(/^\s*owner:\s*["']?([^\s"'#]+)["']?/m);
+        const repoMatch = raw.match(/^\s*repo:\s*["']?([^\s"'#]+)["']?/m);
+        if (ownerMatch && repoMatch) resolved = `${ownerMatch[1]}/${repoMatch[1]}`;
+      } catch {
+        // fall through to null
+      }
     }
   }
-  return null;
+  if (resolved === null) return null;
+  return REPO_SHAPE_RE.test(resolved) ? resolved : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -89,31 +103,52 @@ function defaultIo() {
 // Flag parsing
 // ---------------------------------------------------------------------------
 
+// Sentinel distinguishing "flag present in argv but has no following value"
+// (e.g. `--limit` as the last token) from "flag absent entirely" (forge#2429).
+// `flagValue` returned `null` for both cases previously, making them
+// indistinguishable to every caller.
+const MISSING_VALUE = Symbol("forgedock-query:missing-flag-value");
+
+/**
+ * @returns {string|null|typeof MISSING_VALUE} the flag's value, `null` if
+ *   the flag is absent from argv, or `MISSING_VALUE` if the flag is present
+ *   but is the last argv token (no following value).
+ */
 function flagValue(argv, name) {
   const idx = argv.indexOf(name);
-  return idx !== -1 && argv[idx + 1] !== undefined ? argv[idx + 1] : null;
+  if (idx === -1) return null;
+  return argv[idx + 1] !== undefined ? argv[idx + 1] : MISSING_VALUE;
 }
 
 /**
  * Parse an integer-valued flag. Returns `{ ok: true, value }` when absent
  * (value: null) or a valid non-negative integer, `{ ok: false }` when the
- * flag is present but not a valid non-negative integer.
+ * flag is present but not a valid non-negative integer (including an empty
+ * string, forge#2428) or present with no value at all (forge#2429).
  */
 function parseIntFlag(argv, name) {
   const raw = flagValue(argv, name);
   if (raw === null) return { ok: true, value: null };
+  if (raw === MISSING_VALUE || raw.trim() === "") return { ok: false, value: null };
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 0) return { ok: false, value: null };
   return { ok: true, value: n };
 }
 
+/**
+ * Parse the `--fields` flag. Returns `{ ok: true, value }` when absent
+ * (value: null) or a valid comma-separated field list, `{ ok: false }` when
+ * the flag is present but has no value at all (forge#2429).
+ */
 function parseFields(argv) {
   const raw = flagValue(argv, "--fields");
-  if (!raw) return null;
-  return raw
+  if (raw === null) return { ok: true, value: null };
+  if (raw === MISSING_VALUE) return { ok: false, value: null };
+  const fields = raw
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+  return { ok: true, value: fields.length > 0 ? fields : null };
 }
 
 // ---------------------------------------------------------------------------
@@ -176,7 +211,12 @@ async function handleFleet({ argv, io, now, runsDir, cwd, stdout }) {
     write(stdout, errorDoc("BAD_FLAG", "--limit must be a non-negative integer"));
     return 4;
   }
-  const fields = parseFields(argv);
+  const fieldsParsed = parseFields(argv);
+  if (!fieldsParsed.ok) {
+    write(stdout, errorDoc("BAD_FLAG", "--fields requires a value"));
+    return 4;
+  }
+  const fields = fieldsParsed.value;
 
   const snapshot = await getFleetSnapshot({ repo, runsDir, io, now, cwd });
   let agents = applyLimit(snapshot.agents, limitParsed.value);
@@ -197,7 +237,12 @@ async function handleStalls({ argv, io, now, runsDir, cwd, stdout }) {
     write(stdout, errorDoc("BAD_FLAG", "--limit must be a non-negative integer"));
     return 4;
   }
-  const fields = parseFields(argv);
+  const fieldsParsed = parseFields(argv);
+  if (!fieldsParsed.ok) {
+    write(stdout, errorDoc("BAD_FLAG", "--fields requires a value"));
+    return 4;
+  }
+  const fields = fieldsParsed.value;
 
   const snapshot = await getFleetSnapshot({ repo, runsDir, io, now, cwd });
   let agents = snapshot.agents.filter((a) => a.status === "stalled" || a.status === "blocked");
@@ -225,8 +270,18 @@ async function handleOrchestration({ argv, io, now, runsDir, cwd, stdout }) {
     write(stdout, errorDoc("BAD_FLAG", "--limit must be a non-negative integer"));
     return 4;
   }
-  const fields = parseFields(argv);
-  const milestoneFilter = flagValue(argv, "--milestone");
+  const fieldsParsed = parseFields(argv);
+  if (!fieldsParsed.ok) {
+    write(stdout, errorDoc("BAD_FLAG", "--fields requires a value"));
+    return 4;
+  }
+  const fields = fieldsParsed.value;
+  const milestoneFilterRaw = flagValue(argv, "--milestone");
+  if (milestoneFilterRaw === MISSING_VALUE) {
+    write(stdout, errorDoc("BAD_FLAG", "--milestone requires a value"));
+    return 4;
+  }
+  const milestoneFilter = milestoneFilterRaw;
 
   const snapshot = await getFleetSnapshot({ repo, runsDir, io, now, cwd });
   let agents = snapshot.agents;
@@ -306,7 +361,12 @@ async function handleIssue({ argv, io, now, runsDir, cwd, stdout }) {
     write(stdout, errorDoc("NO_REPO", "No repository found. Pass --repo owner/repo or run from a directory with forge.yaml."));
     return 4;
   }
-  const fields = parseFields(argv);
+  const fieldsParsed = parseFields(argv);
+  if (!fieldsParsed.ok) {
+    write(stdout, errorDoc("BAD_FLAG", "--fields requires a value"));
+    return 4;
+  }
+  const fields = fieldsParsed.value;
 
   const detail = await getIssueDetail({ repo, issue, runsDir, io, now, cwd });
   const doc = fields ? { ...projectFields(detail, fields), schema: detail.schema } : detail;
