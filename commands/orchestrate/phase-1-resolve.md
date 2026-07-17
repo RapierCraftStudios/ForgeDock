@@ -308,14 +308,26 @@ These exclusions apply regardless of priority: P1/P2 findings are already never 
 # NOTE: `--label` is an exact-match GH filter and cannot OR "priority:P3" with bare "P3" in
 # one query, so the P3 test moves into the jq predicate below (schema-tolerant, forge#2232).
 # Only "review-finding" stays in the --label filter.
+# Safety-exclusion keyword alternation, shared verbatim across all three
+# mirrored sites (this file, phase-4-execution.md, cleanup.md) — see forge#2423.
+# Word-boundary anchored so it matches whole terms only, not substrings:
+# `authority_source`/`authoritative`/`author`/`authored` no longer trip `auth`.
+# `authentication|authorization|authn|authz` are listed explicitly so real
+# auth-domain findings that never use the bare word "auth" still exclude.
 BATCHABLE_P3=$(gh issue list {GH_FLAG} \
   --state open \
   --label "review-finding" \
   --limit 500 \
   --json number,title,body,labels \
   --jq '.[] | select([.labels[].name] | any(test("^(priority:)?P3$")))
-         | select((.title | test("security|billing|anti-bot|auth"; "i")) | not)
-         | select(.body | test("## Problem[\\s\\S]{0,500}(security|billing|anti-bot|auth)"; "i") | not)
+         | select((.title | test("\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i")) | not)
+         # Strip the review-finding template's attribution boilerplate
+         # (**Source**/**Agent**/**Confidence**/**Severity**/**Review comment**,
+         # see review-pr.md L1691-1719) before scanning the body — otherwise a
+         # finding is excluded because of who reviewed it (e.g. "**Agent**:
+         # Security (...)") rather than what it is actually about. <!-- forge#2423 -->
+         | (.body | gsub("(?m)^\\*\\*(Source|Agent|Confidence|Severity|Review comment)\\*\\*:.*$"; "")) as $stripped_body
+         | select($stripped_body | test("## Problem[\\s\\S]{0,500}\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i") | not)
          | select(([.labels[].name] | any(. == "security" or . == "billing" or . == "anti-bot" or . == "auth")) | not)')
 
 # Surface area = the exact affected file path listed first under "## Affected Files" (primary grouping key).
@@ -324,6 +336,13 @@ BATCHABLE_P3=$(gh issue list {GH_FLAG} \
 #        "web/src/app/billing/page.tsx"           → EXCLUDED (billing path)
 #        "commands/orchestrate/phase-1-resolve.md" → file "commands/orchestrate/phase-1-resolve.md", leaf-dir "commands/orchestrate"
 #        "commands/review-pr.md"                   → file "commands/review-pr.md", leaf-dir "commands"
+
+# Safety-exclusion worked examples (forge#2423 — both false-positive classes
+# fixed, true-positive case still excluded):
+#   Title "authority_source docstring fix"                    → NOT excluded (was: excluded — bare-substring "auth" match)
+#   Body: "...**Agent**: Security (General Security & Quality Scan)..." with a
+#     ## Problem about a stale docstring count                → NOT excluded (was: excluded — reviewer's own name matched "security")
+#   Title "fix auth bypass in login flow"                      → still excluded (genuine auth finding — true positive preserved)
 ```
 
 **Batch creation rule (two-tier threshold):** <!-- Changed: forge#1818 — added lower same-file tier -->

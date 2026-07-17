@@ -392,6 +392,13 @@ Eligibility is **default-batchable**: any open `review-finding` + a P3 priority 
 # NOTE: "priority:P3" is intentionally NOT in the --label filter — GH label filters are
 # exact-match and can't OR it with bare "P3", so the P3 test moves into the jq predicate
 # below (schema-tolerant, mirrors phase-1-resolve.md exactly). <!-- Added: forge#2232 -->
+# Safety-exclusion alternation is word-boundary anchored (not bare substrings)
+# and the body scan strips the review-finding template's attribution
+# boilerplate (**Source**/**Agent**/**Confidence**/**Severity**/**Review
+# comment**) before matching — identical fix mirrored across all three sweep
+# sites so `authority_source` and a Security-agent-attributed finding no
+# longer false-positive, while a genuine auth/billing/security/anti-bot
+# finding still excludes. <!-- forge#2423 -->
 UNBATCHED_P3=$(gh issue list {GH_FLAG} \
   --state open \
   --label "review-finding" \
@@ -399,8 +406,9 @@ UNBATCHED_P3=$(gh issue list {GH_FLAG} \
   --json number,title,body,labels,createdAt \
   --jq '.[] | select([.labels[].name] | any(test("^(priority:)?P3$")))
          | select(([.labels[].name] | any(. == "batch")) | not)
-         | select((.title | test("security|billing|anti-bot|auth"; "i")) | not)
-         | select(.body | test("## Problem[\\s\\S]{0,500}(security|billing|anti-bot|auth)"; "i") | not)
+         | select((.title | test("\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i")) | not)
+         | (.body | gsub("(?m)^\\*\\*(Source|Agent|Confidence|Severity|Review comment)\\*\\*:.*$"; "")) as $stripped_body
+         | select($stripped_body | test("## Problem[\\s\\S]{0,500}\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i") | not)
          | select(([.labels[].name] | any(. == "security" or . == "billing" or . == "anti-bot" or . == "auth")) | not)')
 
 echo "Unbatched batchable P3 findings: $(echo "$UNBATCHED_P3" | jq -s 'length')"
