@@ -54,9 +54,49 @@ DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE")
 # renders full tables once at the end regardless of this value.
 NARRATION_MODE=$(yq '.pipeline.narration // "terse"' "$CONFIG_FILE" 2>/dev/null || echo "terse")
 [ "$NARRATION_MODE" = "null" ] && NARRATION_MODE="terse"
+
+# Cascade admission policy (forge#2234) — CLI flags take precedence over forge.yaml, which
+# takes precedence over the "balanced" default. Mirrors the --model <name> precedence
+# pattern below. See docs/CONFIG.md → `orchestration` for the full field reference and
+# `phase-4-execution.md` / `phase-1-resolve.md` for where each resolved value is consumed.
+# Extraction regex is an explicit character allowlist (`[A-Za-z0-9_-]+`), NOT a bare
+# `\S+` — `\S+` would accept `"`, `` ` ``, `$`, `(`, `)`, which a downstream yq fallback
+# embedding (`.orchestration.cascade.policy // "${CLI_CASCADE_POLICY:-balanced}"`) could
+# not safely absorb: an embedded `"` breaks out of the yq string literal, letting the
+# remainder be parsed as yq expression syntax (yq-expression injection — not shell/command
+# injection, since `awk` here only extracts text, never executes it). The allowlist also
+# matches the format every valid value actually takes: policy names are
+# `all`/`balanced`/`conservative`; max-generation is a positive integer or `unlimited`;
+# token-budget is a positive integer or `unlimited` — none of these ever contain anything
+# outside `[A-Za-z0-9_-]`. (forge#2301)
+echo "{ARGUMENTS}" | grep -qE -- '--policy[[:space:]]+[A-Za-z0-9_-]+' && \
+  CLI_CASCADE_POLICY=$(echo "{ARGUMENTS}" | grep -oE -- '--policy[[:space:]]+[A-Za-z0-9_-]+' | awk '{print $2}')
+echo "{ARGUMENTS}" | grep -qE -- '--max-generation[[:space:]]+[A-Za-z0-9_-]+' && \
+  CLI_MAX_GENERATION=$(echo "{ARGUMENTS}" | grep -oE -- '--max-generation[[:space:]]+[A-Za-z0-9_-]+' | awk '{print $2}')
+echo "{ARGUMENTS}" | grep -qE -- '--token-budget[[:space:]]+[A-Za-z0-9_-]+' && \
+  CLI_TOKEN_BUDGET=$(echo "{ARGUMENTS}" | grep -oE -- '--token-budget[[:space:]]+[A-Za-z0-9_-]+' | awk '{print $2}')
+# CLI_CASCADE_POLICY / CLI_MAX_GENERATION / CLI_TOKEN_BUDGET, when set, override the
+# corresponding forge.yaml → orchestration.cascade.* key for this invocation only — pass
+# them through as the yq `//` fallback value at each Step 4A.pre / Phase 1 resolution site
+# (`... // "${CLI_CASCADE_POLICY:-balanced}"`, etc.) instead of the bare literal default.
+# Even with the allowlist above, the final resolved value is STILL validated against the
+# same regex (`^[1-9][0-9]*$|^unlimited$` for the two numeric levers,
+# `^(all|balanced|conservative)$` for policy) at its consuming site in
+# phase-4-execution.md / phase-1-resolve.md before use — this allowlist is defense in
+# depth, not a replacement for that validation.
 ```
 
-All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{PROJECT_NAME}`, `{STAGING_BRANCH}`, `{DEFAULT_BRANCH}`, and `{NARRATION_MODE}` references below are populated from `forge.yaml`.
+All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{PROJECT_NAME}`, `{STAGING_BRANCH}`, `{DEFAULT_BRANCH}`, `{NARRATION_MODE}`, and `{CLI_CASCADE_POLICY}`/`{CLI_MAX_GENERATION}`/`{CLI_TOKEN_BUDGET}` references below are populated from `forge.yaml` and CLI flags.
+
+### Cascade Policy CLI Flags
+
+| Flag | Overrides | Example |
+|------|-----------|---------|
+| `--policy <all\|balanced\|conservative>` | `orchestration.cascade.policy` | `/orchestrate cascade --policy all` |
+| `--max-generation <N\|unlimited>` | `orchestration.cascade.max_generation` | `/orchestrate cascade --max-generation 3` |
+| `--token-budget <N\|unlimited>` | `orchestration.cascade.token_budget` | `/orchestrate cascade --token-budget unlimited` |
+
+Precedence: CLI flag > `forge.yaml → orchestration.cascade.*` > preset default (`balanced`). These flags are additive with, not a replacement for, the pre-existing `--include-deferred`/`--allow-gen2` flags documented in `phase-1-resolve.md` — those remain the fastest way to say "everything, right now," while `--max-generation`/`--policy` express finer-grained policy (e.g. "admit gen-2, stop at gen-3").
 
 ---
 

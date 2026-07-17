@@ -51,7 +51,7 @@ describe("runIssue", () => {
       // a guessed default (forge#2174).
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
 
@@ -66,6 +66,149 @@ describe("runIssue", () => {
     assert.equal(s.branch, "fix/real-branch-42");
   });
 
+  it("forge#2240: onProgress fires phase_enter/phase_exit for every phase actually run, and never crashes the run if it throws", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+    const events = [];
+    // Intentionally throws on the first call — proves a misbehaving onProgress
+    // cannot crash an otherwise-healthy run (engine.mjs wraps every call).
+    let thrown = false;
+    const onProgress = (e) => {
+      events.push(e);
+      if (!thrown) { thrown = true; throw new Error("boom — a badly-behaved observer"); }
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3, onProgress });
+
+    assert.equal(res.terminalReason, "merged", "a throwing onProgress must not crash or alter the run's outcome");
+    const enters = events.filter((e) => e.event === "phase_enter").map((e) => e.phase);
+    const exits = events.filter((e) => e.event === "phase_exit").map((e) => e.phase);
+    assert.deepEqual(enters, ["investigate", "context", "architect", "build", "review", "close"]);
+    assert.deepEqual(exits, ["investigate", "context", "architect", "build", "review", "close"]);
+    assert.ok(events.filter((e) => e.event === "phase_exit").every((e) => e.status === "committed"));
+  });
+
+  it("forge#2240 (review finding): an async onProgress that rejects does not produce an unhandled rejection", async () => {
+    // Security review of PR #2319 found that emitProgress's try/catch only
+    // guards a *synchronous* throw — an async onProgress whose returned
+    // promise rejects would previously escape as an unhandled rejection,
+    // crashing the whole process well after runIssue() itself resolved.
+    // Reproduce with process's own 'unhandledRejection' listener: if the fix
+    // works, it must never fire.
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    let unhandledRejectionFired = false;
+    const onUnhandled = () => { unhandledRejectionFired = true; };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      // An async onProgress whose returned promise rejects on every call.
+      const onProgress = async () => { throw new Error("async observer rejection"); };
+      const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 3, onProgress });
+      assert.equal(res.terminalReason, "merged", "an async-rejecting onProgress must not alter the run's outcome");
+      // Give any not-yet-settled microtask/rejection a chance to surface before asserting.
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(unhandledRejectionFired, false, "onProgress's rejected promise must be caught, never surfaced as an unhandled rejection");
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("forge#2240 (review finding): phase_exit(blocked) fires on the engine-error fail-fast path, not just a dangling phase_enter", async () => {
+    // Security review of PR #2319 found that the NO_API_KEY/NO_SDK/CLI_BACKEND_FAILED
+    // fail-fast catch emitted phase_enter but returned via terminate() without a
+    // matching phase_exit — leaving the progress trail dangling exactly on the
+    // phase that actually failed, undermining this issue's own diagnosability goal.
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => {
+        throw Object.assign(new Error("claude CLI exited with status 1"), { code: "CLI_BACKEND_FAILED" });
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    const events = [];
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3, onProgress: (e) => events.push(e) });
+
+    assert.equal(res.terminalReason, "engine-error");
+    const architectEvents = events.filter((e) => e.phase === "architect");
+    assert.deepEqual(architectEvents.map((e) => e.event), ["phase_enter", "phase_exit"],
+      "the architect phase must report both entry AND exit on the engine-error fail-fast path");
+    const exitEvent = architectEvents.find((e) => e.event === "phase_exit");
+    assert.equal(exitEvent.status, "blocked");
+  });
+
+  it("forge#2240: onProgress defaults to a no-op — omitting it is safe", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+    assert.equal(res.terminalReason, "merged");
+  });
+
+  it("forge#2321: phase_exit is not emitted without a matching phase_enter for a reconcile-satisfied phase", async () => {
+    // Regression for the R1 resume scenario (context.reconcile short-circuits
+    // when FORGE:CONTEXT is already present): the phase's runner never
+    // executes on this path, so phase_enter is never emitted for it either —
+    // phase_exit must not be emitted for it, to avoid a dangling exit with no
+    // preceding enter (bin/engine-cli.mjs would otherwise print "✓ phase
+    // context committed" with no prior "→ phase context started" line).
+    const { w, io } = fakeWorld();
+    w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT:COMPLETE";
+    const { appendEvent } = await import("../engine/runlog.mjs");
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+
+    const script = {
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    const events = [];
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3, onProgress: (e) => events.push(e) });
+
+    assert.equal(res.terminalReason, "merged");
+    const contextEvents = events.filter((e) => e.phase === "context");
+    assert.deepEqual(contextEvents, [], "a reconcile-satisfied phase must emit neither phase_enter nor phase_exit");
+
+    // Sanity: a phase that DID actually run (architect, not pre-satisfied)
+    // still gets a paired enter+exit — proves the fix does not over-suppress.
+    const architectEvents = events.filter((e) => e.phase === "architect").map((e) => e.event);
+    assert.deepEqual(architectEvents, ["phase_enter", "phase_exit"]);
+  });
+
   it("stops at needs-human when a phase reports blocked (no silent merge)", async () => {
     const { w, io } = fakeWorld();
     const script = {
@@ -76,10 +219,16 @@ describe("runIssue", () => {
       "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; },
     };
     const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    const events = [];
     const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
-      io, runner, now: () => 1000, maxAttempts: 1 });
+      io, runner, now: () => 1000, maxAttempts: 1, onProgress: (e) => events.push(e) });
     assert.equal(res.terminalReason, "needs-human");
     assert.ok(w.labels.includes("needs-human"));
+    // forge#2240: the phase that ultimately blocks must report a phase_exit
+    // with status "blocked" — not silently omitted.
+    const lastExit = events.filter((e) => e.event === "phase_exit").at(-1);
+    assert.equal(lastExit.phase, "review");
+    assert.equal(lastExit.status, "blocked");
   });
 
   it("C1: commitsAhead swallows a git rejection on first build (no ref yet) and still drives build to merged", async () => {
@@ -101,7 +250,7 @@ describe("runIssue", () => {
       // a guessed default (forge#2174).
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
 
@@ -135,7 +284,7 @@ describe("runIssue", () => {
       "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += ` FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``; w.commitsAhead = 1; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
 
@@ -242,6 +391,46 @@ describe("runIssue", () => {
     assert.equal(buildFailures.length, 3, "all 3 attempts must be logged — transient git errors keep retrying");
   });
 
+  it("forge#2211: an unresolved branch (FORGE:BUILDER:COMPLETE present, no Branch marker) stays retryable, not a synthesized fixed point", async () => {
+    // Regression for a review finding on PR #2204: detectOutcome used to
+    // synthesize `ahead = 0` when resolveBranch() returned null (branch not
+    // yet resolvable — e.g. first build attempt, no **Branch**: `x` marker
+    // posted yet, and state.branch not carried forward from a prior commit).
+    // That synthesized 0 was indistinguishable from a genuine, git-confirmed
+    // zero and wrongly tripped the `ahead !== -1` non-retryable guard after a
+    // single attempt. An unresolved branch must map to the same "not computed"
+    // sentinel (-1) that a transient git error already uses, so this stays
+    // retryable and consumes the full attempt budget.
+    const { w, io } = fakeWorld();
+    let buildRunnerCalls = 0;
+    let gitCalls = 0;
+    io.git = async () => { gitCalls++; return String(w.commitsAhead); };
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      // Builder reports complete but never names a branch (no **Branch**: `x`
+      // marker) — resolveBranch() must return null since state.branch is also
+      // never set by a prior PHASE_COMMIT in this scenario.
+      "work-on/build": () => {
+        buildRunnerCalls++;
+        w.markers += " FORGE:BUILDER:COMPLETE";
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "needs-human", "still escalates once retries are exhausted");
+    assert.equal(buildRunnerCalls, 3,
+      "an unresolved branch must NOT set retryable:false — all 3 attempts must run, not just 1");
+    assert.equal(gitCalls, 0, "commitsAhead() must never be called when the branch could not be resolved");
+    const events = readLog(dir, 42);
+    const buildFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "build");
+    assert.equal(buildFailures.length, 3, "all 3 attempts must be logged — unresolved branch keeps retrying");
+  });
+
   it("forge#2176 (AC4): a phase that does not opt into retryable:false still retries to maxAttempts (transient failures unaffected)", async () => {
     // Guard against over-generalizing the retryable mechanism: the review
     // phase's "PR open, not merged" detail can legitimately repeat identically
@@ -270,6 +459,258 @@ describe("runIssue", () => {
     const events = readLog(dir, 42);
     const reviewFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "review");
     assert.equal(reviewFailures.length, 3, "all 3 attempts must be logged — transient retry behavior unchanged");
+  });
+
+  it("forge#2259/#2261: CLI_BACKEND_FAILED thrown by the runner fails fast on attempt 1, not retried to maxAttempts", async () => {
+    // Regression for #2244: a deterministic non-zero exit from the nested
+    // `claude` CLI (bin/runner.mjs's runCliBackend() throws with
+    // err.code = "CLI_BACKEND_FAILED" — see bin/tests/runner.test.mjs's own
+    // "propagates a non-zero exit status ... as CLI_BACKEND_FAILED" test for
+    // the exact shape) reproduces identically on every attempt. It must be
+    // rethrown immediately, exactly like NO_API_KEY/NO_SDK, instead of
+    // burning all `maxAttempts` retries on a guaranteed-repeat failure.
+    //
+    // forge#2261: unlike the original #2259 fix (which just let this throw
+    // propagate uncaught out of runIssue()), the engine now catches it at the
+    // phase-driving loop and reaches a clean "engine-error" terminal state —
+    // distinct from "needs-human", since this is the engine/tool breaking,
+    // not a genuine human-judgment block. This closes the gap where a
+    // completed run previously left the issue with NO terminal state or
+    // label at all (the uncaught throw only ever reached bin/forgedock.mjs's
+    // outermost catch, which just prints to stderr).
+    const { w, io } = fakeWorld();
+    let architectRunnerCalls = 0;
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => {
+        architectRunnerCalls++;
+        throw Object.assign(new Error("claude CLI exited with status 1"), { code: "CLI_BACKEND_FAILED" });
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "engine-error",
+      "CLI_BACKEND_FAILED must resolve to a distinct engine-error terminal reason, not needs-human, and not an uncaught rejection");
+    assert.ok(w.labels.includes("workflow:engine-error"),
+      "the workflow:engine-error label must be written — not needs-human");
+    assert.ok(!w.labels.includes("needs-human"),
+      "needs-human must NOT be written for an engine/tool-level failure");
+    assert.equal(architectRunnerCalls, 1,
+      "the architect runner must be invoked exactly once — CLI_BACKEND_FAILED must not be retried");
+    const events = readLog(dir, 42);
+    const architectFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "architect");
+    assert.equal(architectFailures.length, 0,
+      "no PHASE_FAILED event should be logged for a fail-fast rethrow — it never reaches the retry bookkeeping, matching NO_API_KEY/NO_SDK");
+  });
+
+  it("forge#2241: a session-limit CLI_BACKEND_FAILED carrying resetAt threads the reset time into the engine-error detail", async () => {
+    // bin/runner.mjs's runCliBackend() attaches err.resetAt (extracted via
+    // extractSessionLimitResetTime()) only when the CLI's captured output
+    // reports a genuine session-limit reset time. This closes the one
+    // remaining acceptance gap left by #2259/#2261: the terminal reason was
+    // already distinct ("engine-error", not "needs-human"), but the reset
+    // time itself never reached the terminal detail — this asserts it now
+    // does, additively, without altering the base detail shape.
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => {
+        throw Object.assign(
+          new Error("claude CLI exited with status 1"),
+          { code: "CLI_BACKEND_FAILED", resetAt: "12:50am (Asia/Calcutta)" },
+        );
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "engine-error");
+    assert.ok(res.detail.includes("resets: 12:50am (Asia/Calcutta)"),
+      `terminal detail must surface the CLI's reported reset time: ${res.detail}`);
+    assert.ok(res.detail.includes("CLI_BACKEND_FAILED"),
+      "the base detail (code/message) must still be present — reset time is additive, not a replacement");
+  });
+
+  it("forge#2241: a CLI_BACKEND_FAILED with no resetAt leaves the engine-error detail unchanged (no fabricated reset text)", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => {
+        throw Object.assign(new Error("claude CLI exited with status 1"), { code: "CLI_BACKEND_FAILED" });
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "engine-error");
+    assert.ok(!res.detail.includes("resets:"),
+      `no resetAt on the thrown error must not fabricate reset text in the detail: ${res.detail}`);
+  });
+
+  it("forge#2261: an uncoded runner exception on every attempt exhausts retries into engine-error, not needs-human", async () => {
+    // The runner (the tool itself — the nested `claude` CLI invocation, or
+    // whatever `runner()` wraps) crashed on all 3 attempts and detectOutcome()
+    // was never once reached — this is an engine/tool failure by definition,
+    // not a content-level judgment call, even though the thrown error carries
+    // no recognized .code. Prior to #2261 this collapsed into the same
+    // generic "needs-human" as a genuine content-level block (see the
+    // previous version of this test) — that conflation is exactly the defect
+    // #2261 fixes.
+    const { w, io } = fakeWorld();
+    let architectRunnerCalls = 0;
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => {
+        architectRunnerCalls++;
+        throw new Error("transient network blip");
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "engine-error",
+      "an uncoded error that crashes the runner on every attempt is an engine/tool failure, not needs-human");
+    assert.ok(w.labels.includes("workflow:engine-error"),
+      "the workflow:engine-error label must be written");
+    assert.ok(!w.labels.includes("needs-human"),
+      "needs-human must NOT be written when the runner never once succeeded");
+    assert.equal(architectRunnerCalls, 3,
+      "an uncoded error (no .code, or a code other than NO_API_KEY/NO_SDK/CLI_BACKEND_FAILED) must retry all 3 attempts unchanged");
+    const events = readLog(dir, 42);
+    const architectFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "architect");
+    assert.equal(architectFailures.length, 3, "all 3 attempts must be logged for a genuinely retryable error");
+  });
+
+  it("forge#2261: a genuine content-level block (detectOutcome reached, phase just isn't done) still escalates to needs-human, not engine-error", async () => {
+    // Guards the "mixed" case: the runner succeeds (the tool works) on every
+    // attempt, but the review phase's own detectOutcome() keeps reporting
+    // "PR open, not merged" — a real content-level state, not a tool crash.
+    // This must stay needs-human even though retries are exhausted, exactly
+    // like the pre-existing "forge#2176 (AC4)" test above — this test
+    // exists to explicitly pin the reason value now that engine-error exists
+    // as an alternative outcome.
+    const { w, io } = fakeWorld();
+    let reviewRunnerCalls = 0;
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { reviewRunnerCalls++; w.pr = 7; w.prMerged = false; },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "needs-human",
+      "a genuine content-level block (unmerged PR) must stay needs-human, not engine-error");
+    assert.ok(w.labels.includes("needs-human"));
+    assert.ok(!w.labels.includes("workflow:engine-error"));
+    assert.equal(reviewRunnerCalls, 3);
+  });
+
+  it("forge#2338 (review finding): a slow in-flight lease-renewal write must not resurrect the lease after terminate()'s lease:null write on the engine-error catch path", async () => {
+    // Regression for a CONFIRMED HIGH review finding: `return await
+    // terminate(state, "engine-error", detail)` sits INSIDE the catch block
+    // that guards runPhaseWithRetry(). Per try/catch/finally semantics, that
+    // return's expression (terminate(), including its own `lease: null`
+    // write) is fully evaluated to completion BEFORE the enclosing `finally`
+    // block runs `clearInterval` / `await pendingRenewal`. A renewal write
+    // already dispatched before the throw could therefore land on GitHub
+    // AFTER terminate()'s `lease: null` write, resurrecting a phantom lease
+    // on an already-terminated run — reopening the exact race #2239
+    // (07b3b8a) closed on the non-throwing path, on this one call site that
+    // fix didn't cover. Mirrors the sibling "a slow in-flight heartbeat
+    // renewal write must not resurrect the lease after terminate()'s
+    // lease:null write" test above (which exercises the non-throwing
+    // INVESTIGATION:INVALID terminal path) — same slow-write technique,
+    // applied to the CLI_BACKEND_FAILED catch/return path instead.
+    const { w, io } = fakeWorld();
+    const origGh = io.gh;
+    let delayEdits = false;
+    // Track EVERY delayed write's promise (not just the first) so the test
+    // can deterministically wait for all of them to actually land on
+    // `w.body`, regardless of whether runIssue() itself joins them (pre-fix:
+    // it doesn't on this path; post-fix: it does), and regardless of how
+    // many setInterval ticks happen to fire during the armed window under
+    // system/CI load. Without this, asserting on `w.body` immediately after
+    // `runIssue()` resolves would race ahead of the slow write(s) in BOTH
+    // the buggy and fixed code, making the assertion pass trivially either
+    // way; and delaying only the FIRST armed write would leave a second,
+    // fast-resolving tick free to silently replace `pendingRenewal` inside
+    // engine.mjs with an already-settled promise, defeating the technique
+    // regardless of whether the engine-error path is actually fixed.
+    const delayedEditPromises = [];
+    io.gh = async (args) => {
+      if (args[0] === "issue" && args[1] === "edit" && delayEdits) {
+        // Simulate a slow GitHub API round trip for every renewal write
+        // dispatched while armed — long enough that, without the fix, it
+        // would still be in flight when the engine-error catch branch calls
+        // terminate().
+        const delayed = new Promise((resolve) => setTimeout(resolve, 60)).then(() => origGh(args));
+        delayedEditPromises.push(delayed);
+        return delayed;
+      }
+      return origGh(args);
+    };
+
+    const LEASE_TTL_MS = 100;
+    const LEASE_RENEW_INTERVAL_MS = 25;
+
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/investigate") {
+        // Let at least one renewal heartbeat fire and become "slow", then
+        // disarm (synchronously, no further ticks can land as "slow" once
+        // armed=false) and throw CLI_BACKEND_FAILED immediately — this is
+        // the exact window where the pre-fix code would leave the slow
+        // write(s) unjoined before reaching the engine-error terminate()
+        // call.
+        await new Promise((resolve) => setTimeout(resolve, LEASE_RENEW_INTERVAL_MS + 2));
+        delayEdits = true;
+        await new Promise((resolve) => setTimeout(resolve, LEASE_RENEW_INTERVAL_MS + 2));
+        delayEdits = false;
+        throw Object.assign(new Error("claude CLI exited with status 1"), { code: "CLI_BACKEND_FAILED" });
+      }
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => Date.now(), maxAttempts: 1,
+      leaseTtlMs: LEASE_TTL_MS, leaseRenewIntervalMs: LEASE_RENEW_INTERVAL_MS });
+
+    assert.equal(res.terminalReason, "engine-error",
+      "sanity check: the run must reach the engine-error catch/return path this test targets");
+    assert.ok(delayedEditPromises.length >= 1,
+      "test setup sanity check: at least one renewal write must have been armed/delayed during the window");
+
+    // Critical: explicitly wait for every slow write to actually land before
+    // inspecting `w.body`. Pre-fix, `runIssue()` resolves WITHOUT joining
+    // the slow renewal write(s) on this path (that's the bug) — so checking
+    // `w.body` immediately after `await runIssue(...)` would race ahead of
+    // the slow write(s) in BOTH the buggy and fixed code, making this
+    // assertion pass trivially either way. Post-fix, `runIssue()` already
+    // joins the slow write internally (before calling terminate()), so this
+    // await is a no-op there.
+    await Promise.all(delayedEditPromises);
+    const { parseState } = await import("../engine/state.mjs");
+    const finalState = parseState(w.body);
+    assert.equal(finalState.lease, null,
+      "a slow in-flight renewal write must be joined before terminate()'s lease:null write on the " +
+      "engine-error catch path too, so it can never land afterward and resurrect a phantom lease");
   });
 
   it("I3: defers before writing GitHub state when another agent holds a valid lease (remirror path)", async () => {
@@ -368,7 +809,7 @@ describe("runIssue", () => {
       // a guessed default (forge#2174).
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => {
       runCounts[commandName] = (runCounts[commandName] || 0) + 1;
@@ -407,7 +848,7 @@ describe("runIssue", () => {
       // a guessed default (forge#2174).
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => {
       runCounts[commandName] = (runCounts[commandName] || 0) + 1;
@@ -443,7 +884,7 @@ describe("runIssue", () => {
       // a guessed default (forge#2174).
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => {
       runCounts[commandName] = (runCounts[commandName] || 0) + 1;
@@ -469,6 +910,7 @@ describe("runIssue", () => {
     w.pr = 7;
     w.prMerged = true;
     w.issueState = "CLOSED";
+    w.labels.push("workflow:merged");
     const runCounts = {};
 
     const { appendEvent } = await import("../engine/runlog.mjs");
@@ -528,7 +970,7 @@ describe("runIssue", () => {
       // a guessed default (forge#2174).
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const calls = [];
     const runner = async (call) => {
@@ -727,7 +1169,7 @@ describe("runIssue", () => {
         w.commitsAheadByBranch[REAL_BRANCH] = 2;
       },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
 
@@ -765,7 +1207,7 @@ describe("runIssue", () => {
         w.comments.push(`FORGE:REMEDIATION note — see \`${DECOY_BRANCH}\` for context, **Branch**: \`${DECOY_BRANCH}\``);
       },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
 
@@ -776,5 +1218,856 @@ describe("runIssue", () => {
     const s = deriveState(readLog(dir, 42));
     assert.equal(s.branch, REAL_BRANCH,
       "a **Branch** field in a comment lacking FORGE:BUILDER:COMPLETE must never be selected, even if posted later");
+  });
+});
+
+describe("runIssue — forge#2377: per-phase usage recording", () => {
+  it("attaches a successful runner()'s usage to the phase's PHASE_COMMIT event", async () => {
+    const { w, io } = fakeWorld();
+    const USAGE = { input_tokens: 1200, output_tokens: 340, cache_creation_input_tokens: 0, cache_read_input_tokens: 500 };
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    // Only the investigate phase's runner() reports usage in this fixture —
+    // the rest resolve with the pre-existing `{ status: "complete" }` shape
+    // (no usage field) used throughout the suite, to prove the two shapes
+    // coexist without crashing.
+    const runner = async ({ commandName }) => {
+      script[commandName](); // eslint-disable-line
+      if (commandName === "work-on/investigate") return { status: "complete", usage: USAGE };
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    const events = readLog(dir, 42);
+    const investigateCommit = events.find((e) => e.event === "PHASE_COMMIT" && e.phase === "investigate");
+    assert.deepEqual(investigateCommit.usage, USAGE,
+      "the investigate phase's PHASE_COMMIT event must carry the usage object its runner() resolved with");
+  });
+
+  it("degrades to usage: null on PHASE_COMMIT when the runner reports no usage (e.g. CLI backend)", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    // Matches the existing suite-wide fixture shape (`{ status: "complete" }`,
+    // no usage field at all) — the same shape every pre-#2377 test in this
+    // file already uses, proving no regression for callers that never
+    // supply usage.
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    const events = readLog(dir, 42);
+    const commits = events.filter((e) => e.event === "PHASE_COMMIT");
+    assert.ok(commits.length > 0);
+    for (const c of commits) {
+      assert.equal(c.usage, null, `PHASE_COMMIT for phase ${c.phase} must default usage to null when the runner reports none`);
+    }
+  });
+
+  it("omits usage on a PHASE_FAILED event produced by a thrown runner() error (no result was ever produced)", async () => {
+    const { w, io } = fakeWorld();
+    let investigateCalls = 0;
+    const script = {
+      "work-on/investigate": () => { investigateCalls++; if (investigateCalls > 1) w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/investigate" && investigateCalls === 0) {
+        script[commandName]();
+        throw new Error("transient network error");
+      }
+      script[commandName]();
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    const events = readLog(dir, 42);
+    const investigateFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "investigate");
+    assert.equal(investigateFailures.length, 1);
+    assert.ok(!("usage" in investigateFailures[0]),
+      "a PHASE_FAILED event for a thrown-runner attempt must not carry a fabricated usage field");
+  });
+
+  it("attaches the attempt's usage to a PHASE_FAILED event produced by detectOutcome (runner succeeded, phase not yet done)", async () => {
+    const { w, io } = fakeWorld();
+    const USAGE_ATTEMPT_1 = { input_tokens: 100, output_tokens: 20 };
+    let buildCalls = 0;
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => {
+        buildCalls++;
+        // First attempt: builder posts its marker but no commits landed yet
+        // (detectOutcome reports failure, retryable — commitsAhead === 0
+        // with no branch resolved is the existing "keep retrying" case).
+        if (buildCalls === 1) return;
+        w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`";
+        w.commitsAhead = 2;
+      },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => {
+      script[commandName]();
+      if (commandName === "work-on/build" && buildCalls === 1) return { status: "complete", usage: USAGE_ATTEMPT_1 };
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    const events = readLog(dir, 42);
+    const buildFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "build");
+    assert.equal(buildFailures.length, 1, "attempt 1 fails (no commits yet), attempt 2 succeeds");
+    assert.deepEqual(buildFailures[0].usage, USAGE_ATTEMPT_1,
+      "the PHASE_FAILED event for a detectOutcome-reported failure must carry that attempt's usage");
+  });
+});
+
+describe("runIssue — forge#2313: lease config validation", () => {
+  it("rejects leaseRenewIntervalMs >= leaseTtlMs (boundary-equal case) before any state I/O", async () => {
+    const { w, io } = fakeWorld();
+    const runner = async () => { throw new Error("runner must never be called"); };
+
+    await assert.rejects(
+      () => runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1,
+        leaseTtlMs: 100, leaseRenewIntervalMs: 100 }),
+      (err) => {
+        assert.equal(err.code, "INVALID_LEASE_CONFIG");
+        assert.match(err.message, /leaseRenewIntervalMs \(100\) must be less than leaseTtlMs \(100\)/);
+        return true;
+      },
+    );
+
+    // Must fail before any state is read/written — the fake GitHub issue body
+    // must remain at its pristine fixture value (no FORGE:STATE ever written),
+    // and no run-log event appended (same fail-fast placement as INVALID_BACKEND).
+    assert.equal(w.body, "Issue.", "no state should be written to GitHub for an invalid lease config");
+    const events = readLog(dir, 42);
+    assert.equal(events.length, 0, "no run-log event should be appended for an invalid lease config");
+  });
+
+  it("rejects leaseRenewIntervalMs > leaseTtlMs", async () => {
+    const { io } = fakeWorld();
+    const runner = async () => { throw new Error("runner must never be called"); };
+
+    await assert.rejects(
+      () => runIssue({ issue: 43, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1,
+        leaseTtlMs: 100, leaseRenewIntervalMs: 500 }),
+      (err) => { assert.equal(err.code, "INVALID_LEASE_CONFIG"); return true; },
+    );
+  });
+
+  it("defaults and explicitly-valid overrides are unaffected by the new check", async () => {
+    const { w, io } = fakeWorld();
+    const runner = async ({ commandName }) => {
+      w.markers += " INVESTIGATION:COMPLETE";
+      return { status: "complete" };
+    };
+
+    // No override at all — production default path (DEFAULT_LEASE_TTL_MS/DEFAULT_LEASE_RENEW_INTERVAL_MS).
+    const res1 = await runIssue({ issue: 44, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.notEqual(res1.terminalReason, undefined);
+
+    // Explicit valid override (interval < ttl).
+    const res2 = await runIssue({ issue: 45, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1,
+      leaseTtlMs: 1000, leaseRenewIntervalMs: 100 });
+    assert.notEqual(res2.terminalReason, undefined);
+  });
+
+  it("forge#2329: rejects NaN leaseTtlMs, which silently bypasses the relational check", async () => {
+    // NaN >= x and x >= NaN are both false in JS, so `leaseRenewIntervalMs >=
+    // leaseTtlMs` alone never catches a NaN leaseTtlMs — this must be caught
+    // by the finite-number guard instead.
+    const { w, io } = fakeWorld();
+    const runner = async () => { throw new Error("runner must never be called"); };
+
+    await assert.rejects(
+      () => runIssue({ issue: 46, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1,
+        leaseTtlMs: NaN, leaseRenewIntervalMs: 100 }),
+      (err) => {
+        assert.equal(err.code, "INVALID_LEASE_CONFIG");
+        assert.match(err.message, /leaseTtlMs must be a finite number/);
+        return true;
+      },
+    );
+    assert.equal(w.body, "Issue.", "no state should be written to GitHub for an invalid lease config");
+  });
+
+  it("forge#2329: rejects NaN leaseRenewIntervalMs, which silently bypasses the relational check", async () => {
+    const { io } = fakeWorld();
+    const runner = async () => { throw new Error("runner must never be called"); };
+
+    await assert.rejects(
+      () => runIssue({ issue: 47, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1,
+        leaseTtlMs: 1000, leaseRenewIntervalMs: NaN }),
+      (err) => {
+        assert.equal(err.code, "INVALID_LEASE_CONFIG");
+        assert.match(err.message, /leaseRenewIntervalMs must be a finite number/);
+        return true;
+      },
+    );
+  });
+
+  it("forge#2329: rejects Infinity and -Infinity lease values", async () => {
+    const { io } = fakeWorld();
+    const runner = async () => { throw new Error("runner must never be called"); };
+
+    await assert.rejects(
+      () => runIssue({ issue: 48, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1,
+        leaseTtlMs: Infinity, leaseRenewIntervalMs: 100 }),
+      (err) => { assert.equal(err.code, "INVALID_LEASE_CONFIG"); return true; },
+    );
+
+    await assert.rejects(
+      () => runIssue({ issue: 49, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1,
+        leaseTtlMs: 1000, leaseRenewIntervalMs: -Infinity }),
+      (err) => { assert.equal(err.code, "INVALID_LEASE_CONFIG"); return true; },
+    );
+  });
+
+  it("forge#2329: rejects non-numeric lease values (string, null)", async () => {
+    const { io } = fakeWorld();
+    const runner = async () => { throw new Error("runner must never be called"); };
+
+    await assert.rejects(
+      () => runIssue({ issue: 50, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1,
+        leaseTtlMs: "1000", leaseRenewIntervalMs: 100 }),
+      (err) => { assert.equal(err.code, "INVALID_LEASE_CONFIG"); return true; },
+    );
+
+    await assert.rejects(
+      () => runIssue({ issue: 51, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxAttempts: 1,
+        leaseTtlMs: 1000, leaseRenewIntervalMs: null }),
+      (err) => { assert.equal(err.code, "INVALID_LEASE_CONFIG"); return true; },
+    );
+  });
+});
+
+describe("runIssue — forge#2239: in-flight lease", () => {
+  it("claims a real (non-null) lease before the first phase runs, not after PHASE_COMMIT", async () => {
+    const { w, io } = fakeWorld();
+    const bodiesAtRunnerCall = [];
+    const origGh = io.gh;
+    io.gh = async (args) => {
+      const out = await origGh(args);
+      return out;
+    };
+    const runner = async ({ commandName }) => {
+      // Snapshot GitHub body the instant the FIRST phase's runner is invoked —
+      // before it does anything. If the lease is only claimed post-commit
+      // (the pre-fix bug), this snapshot would show lease: null.
+      if (commandName === "work-on/investigate") bodiesAtRunnerCall.push(w.body);
+      w.markers += " INVESTIGATION:COMPLETE";
+      return { status: "complete" };
+    };
+
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+
+    assert.equal(bodiesAtRunnerCall.length, 1);
+    const { parseState } = await import("../engine/state.mjs");
+    const snapshot = parseState(bodiesAtRunnerCall[0]);
+    assert.ok(snapshot, "a FORGE:STATE block must already be published before the first phase's runner is invoked");
+    assert.ok(snapshot.lease, "lease must be non-null before the first phase runs (forge#2239)");
+    assert.equal(snapshot.lease.by, "a1");
+    assert.ok(snapshot.lease.until > 1000, "lease must not already be expired at claim time");
+  });
+
+  it("claims a lease for the previously-unhandled 'local' reconcile action (local log ahead, no remote state)", async () => {
+    // Regression for the widest gap found during investigation: when reconcileState
+    // returns action:"local" (local run-log present, no remote FORGE:STATE at all),
+    // the pre-fix code wrote NOTHING to GitHub before running phases — not even a
+    // null lease. Confirm the post-fix code now claims a real lease in this path too.
+    const { w, io } = fakeWorld();
+    w.body = ""; // no remote FORGE:STATE block at all
+    const { appendEvent } = await import("../engine/runlog.mjs");
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+
+    let sawLeaseBeforeRunnerCall = null;
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/investigate") {
+        const { parseState } = await import("../engine/state.mjs");
+        sawLeaseBeforeRunnerCall = parseState(w.body)?.lease ?? null;
+      }
+      w.markers += " INVESTIGATION:COMPLETE";
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+
+    assert.notEqual(res.terminalReason, "deferred");
+    assert.ok(sawLeaseBeforeRunnerCall, "the 'local' resume path must also claim a lease before the first phase runs");
+    assert.equal(sawLeaseBeforeRunnerCall.by, "a1");
+  });
+
+  it("claims the lease before the phase loop and renews it once more before the phase runner starts (non-timer writes only — see the sibling 'setInterval heartbeat' test below for the timer-driven path)", async () => {
+    // forge#2333: this test's original name ("renews the lease while a single
+    // phase's runner is still in flight") implied it exercises the
+    // setInterval-driven heartbeat renewal (bin/engine.mjs's `renewTimer`).
+    // It does not. #2314's investigation proved (and this rename documents)
+    // that the `leaseStates.length >= 2` assertion below is satisfied
+    // entirely by two plain sequential `await`s that both complete before
+    // the runner's artificial delay even starts:
+    //   1. the unconditional pre-loop lease claim (`runIssue()`, before the
+    //      phase loop begins), and
+    //   2. the pre-phase "renew before phase" write (dispatched immediately
+    //      before the runner is invoked, still before `renewTimer` is even
+    //      constructed).
+    // Disabling `setInterval` entirely (i.e. the heartbeat never fires) does
+    // NOT fail this test — it only ever checks these two non-timer writes.
+    // This is a genuine regression guard for THAT pair: reconstructing
+    // pre-#2239 code (`git show 783a652`) yields only 1 non-null lease write,
+    // so a real revert of the pre-loop claim still correctly fails here. Do
+    // NOT delete it. The timer-driven heartbeat itself is covered by the new
+    // test immediately below, which is proven (see its comment) to fail when
+    // the `setInterval` mechanism is disabled — this one is not.
+    const { w, io } = fakeWorld();
+    const writeStateBodies = [];
+    const origGh = io.gh;
+    io.gh = async (args) => {
+      const out = await origGh(args);
+      const i = args.indexOf("--body");
+      if (i >= 0) writeStateBodies.push(args[i + 1]);
+      return out;
+    };
+
+    // Tiny TTL/renew-interval so a short real-time delay inside the runner
+    // reliably outlives at least one renewal cycle, without waiting on the
+    // real 10-minute production default.
+    const LEASE_TTL_MS = 30;
+    const LEASE_RENEW_INTERVAL_MS = 10;
+
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/investigate") {
+        // Outlive several renewal cycles.
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+      w.markers += " INVESTIGATION:COMPLETE";
+      return { status: "complete" };
+    };
+
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => Date.now(), maxAttempts: 1,
+      leaseTtlMs: LEASE_TTL_MS, leaseRenewIntervalMs: LEASE_RENEW_INTERVAL_MS });
+
+    const { parseState } = await import("../engine/state.mjs");
+    const leaseStates = writeStateBodies.map((b) => parseState(b)?.lease).filter(Boolean);
+    // At least: the pre-loop claim + the pre-phase renew-before-phase write.
+    // Both are plain sequential `await`s — no timer involved. See the block
+    // comment above: this assertion is intentionally satisfied without the
+    // setInterval heartbeat ever firing.
+    assert.ok(leaseStates.length >= 2,
+      `expected at least 2 lease-bearing writes (pre-loop claim + pre-phase renew), got ${leaseStates.length}`);
+  });
+
+  it("the setInterval heartbeat itself renews the lease one or more times while the phase runner is still in flight (timer-driven path, distinct from the pre-loop/pre-phase writes above)", async () => {
+    // forge#2333: isolates the ONE code path the test above does not
+    // exercise — bin/engine.mjs's `renewTimer = setInterval(renewLease,
+    // leaseRenewIntervalMs)`, constructed only after the pre-phase renewal
+    // write and only while a phase's runner is genuinely in flight.
+    //
+    // Non-timer lease-bearing writes for a single-phase, single-attempt run
+    // are exactly 3, regardless of whether the heartbeat ever fires:
+    //   1. the pre-loop unconditional claim,
+    //   2. the pre-phase renew-before-phase write, and
+    //   3. the post-commit write (after the runner resolves, once the phase
+    //      outcome is known — see the `state = deriveState(...); await
+    //      projector.writeState(...)` call right after the phase loop's
+    //      commit branch).
+    // None of these three depend on `setInterval` — they are step 2 and
+    // step 4 above (an earlier/renamed test) plus the always-present
+    // post-commit write. So asserting a COUNT STRICTLY GREATER than 3 (i.e.
+    // >= 4) can only be satisfied by at least one additional write that came
+    // from the timer-driven `renewLease()` firing during the runner's
+    // in-flight window — which is exactly the mechanism this issue found
+    // uncovered.
+    //
+    // Non-vacuousness proof (performed manually against a local copy of
+    // bin/engine.mjs, per this issue's mandate — not merely reasoned about):
+    // commenting out the `setInterval(renewLease, leaseRenewIntervalMs)`
+    // call (equivalently, never scheduling `renewLease`) drops the observed
+    // write count to exactly 3, and this assertion (`>= 4`) then fails. The
+    // renamed test above, by contrast, is unaffected by that same sabotage —
+    // it continues to pass at exactly 2, confirming it only ever covers the
+    // non-timer writes.
+    const { w, io } = fakeWorld();
+    const writeStateBodies = [];
+    const origGh = io.gh;
+    io.gh = async (args) => {
+      const out = await origGh(args);
+      const i = args.indexOf("--body");
+      if (i >= 0) writeStateBodies.push(args[i + 1]);
+      return out;
+    };
+
+    // Same tiny TTL/interval convention as the sibling test above — long
+    // enough (80ms runner delay vs. 10ms interval) that the heartbeat has
+    // several opportunities to fire before the runner resolves, without
+    // waiting on the real 10-minute production default.
+    const LEASE_TTL_MS = 30;
+    const LEASE_RENEW_INTERVAL_MS = 10;
+
+    // Terminate immediately after this ONE phase (INVESTIGATION:INVALID makes
+    // the investigate phase's isTerminalAfter fire — see phases.mjs), rather
+    // than INVESTIGATION:COMPLETE which lets the loop continue on to
+    // work-on/build/context, work-on/build/architect, etc. Letting the loop
+    // continue would add further phases' own pre-phase-renew/post-commit
+    // writes on top of investigate's, making the total count depend on how
+    // many downstream phases happen to run before this mocked world blocks —
+    // which has nothing to do with whether the timer fired during THIS
+    // phase's in-flight window, and would make the ">= 4" threshold below
+    // meaningless. Confirmed empirically: with INVESTIGATION:COMPLETE here,
+    // the run proceeds through context/architect before blocking, and even
+    // with the setInterval heartbeat fully disabled the total write count
+    // stays >= 4 purely from those extra phases — i.e. that variant of this
+    // test would be exactly the vacuous-count trap this issue is about.
+    // Ending the run after exactly one phase is what makes "3 without the
+    // timer, 4+ with it" a hard invariant instead of an environment-dependent
+    // guess.
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/investigate") {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+      w.markers += " INVESTIGATION:INVALID";
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => Date.now(), maxAttempts: 1,
+      leaseTtlMs: LEASE_TTL_MS, leaseRenewIntervalMs: LEASE_RENEW_INTERVAL_MS });
+
+    assert.equal(res.terminalReason, "invalid",
+      "sanity check: the run must terminate right after the single investigate phase, " +
+      "so the write count below reflects only that one phase's writes");
+
+    const { parseState } = await import("../engine/state.mjs");
+    const leaseStates = writeStateBodies.map((b) => parseState(b)?.lease).filter(Boolean);
+    // 3 non-timer writes (pre-loop claim + pre-phase renew + post-commit) can
+    // never satisfy this on their own — a 4th+ write requires the
+    // setInterval-driven renewLease() to have actually fired during the
+    // runner's in-flight window.
+    assert.ok(leaseStates.length >= 4,
+      `expected at least 4 lease-bearing writes (pre-loop claim + pre-phase renew + >=1 timer-driven ` +
+      `renewal + post-commit write), got ${leaseStates.length} — the setInterval heartbeat may not be firing`);
+  });
+
+  it("no regression: terminate() still clears the lease to null on a terminal state", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:INVALID"; },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+
+    assert.equal(res.terminalReason, "invalid");
+    const { parseState } = await import("../engine/state.mjs");
+    const finalState = parseState(w.body);
+    assert.equal(finalState.lease, null, "terminal states must still publish lease: null (no regression)");
+  });
+
+  it("review finding: a slow in-flight heartbeat renewal write must not resurrect the lease after terminate()'s lease:null write", async () => {
+    // Regression test for a CONFIRMED HIGH review finding on this PR:
+    // projector.writeState is a plain read-body/edit-body round trip with no
+    // CAS, so whichever `gh issue edit` call lands last on GitHub wins,
+    // regardless of dispatch order. The heartbeat renewal write is
+    // fire-and-forget (best-effort .catch()) — without joining it before the
+    // loop proceeds to a commit/terminate write, a slow renewal write that
+    // was already in flight when the phase finished could land AFTER
+    // terminate()'s lease:null write, resurrecting a phantom non-null lease
+    // on an already-terminated run. The fix: track the most recently
+    // dispatched renewal's promise and await it in `finally` before letting
+    // the loop continue.
+    const { w, io } = fakeWorld();
+    const origGh = io.gh;
+    let delayNextEdit = false;
+    // Track the slow write's own promise so the test can deterministically wait
+    // for it to actually land on `w.body`, regardless of whether runIssue()
+    // itself joins it (pre-fix: it doesn't; post-fix: it does). Without this,
+    // asserting on `w.body` immediately after `runIssue()` resolves would race
+    // ahead of the slow write in BOTH the buggy and fixed code paths, making
+    // the assertion pass trivially either way.
+    let slowEditPromise = null;
+    io.gh = async (args) => {
+      if (args[0] === "issue" && args[1] === "edit" && delayNextEdit) {
+        delayNextEdit = false;
+        // Simulate a slow GitHub API round trip for exactly one renewal write —
+        // long enough that, without the fix, it would still be in flight when
+        // the phase finishes and the run reaches terminate().
+        const delayed = new Promise((resolve) => setTimeout(resolve, 60)).then(() => origGh(args));
+        slowEditPromise = delayed;
+        return delayed;
+      }
+      return origGh(args);
+    };
+
+    const LEASE_TTL_MS = 20;
+    const LEASE_RENEW_INTERVAL_MS = 5;
+
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/investigate") {
+        // Let exactly one renewal heartbeat fire and become "slow", then
+        // immediately finish the phase — this is the exact window where the
+        // pre-fix code would leave the slow write unjoined.
+        await new Promise((resolve) => setTimeout(resolve, LEASE_RENEW_INTERVAL_MS + 1));
+        delayNextEdit = true;
+        await new Promise((resolve) => setTimeout(resolve, LEASE_RENEW_INTERVAL_MS + 1));
+      }
+      // Terminal (INVALID) on first phase — reaches terminate()'s lease:null
+      // write shortly after the slow renewal write was dispatched.
+      w.markers += " INVESTIGATION:INVALID";
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => Date.now(), maxAttempts: 1,
+      leaseTtlMs: LEASE_TTL_MS, leaseRenewIntervalMs: LEASE_RENEW_INTERVAL_MS });
+
+    assert.equal(res.terminalReason, "invalid");
+    // Critical: explicitly wait for the slow write to actually land before
+    // inspecting `w.body`. Pre-fix, `runIssue()` itself resolves WITHOUT
+    // joining the slow renewal write (that's the bug) — so checking `w.body`
+    // immediately after `await runIssue(...)` would race ahead of the slow
+    // write in BOTH the buggy and fixed code, making this assertion pass
+    // trivially either way. Post-fix, `runIssue()` already joins the slow
+    // write internally before returning, so this await is a no-op there.
+    if (slowEditPromise) await slowEditPromise;
+    const { parseState } = await import("../engine/state.mjs");
+    const finalState = parseState(w.body);
+    assert.equal(finalState.lease, null,
+      "a slow in-flight renewal write must be joined before terminate()'s lease:null write, " +
+      "so it can never land afterward and resurrect a phantom lease");
+  });
+
+  it("forge#2348 (review finding): renewLease() must not dispatch an overlapping renewal write while a previous one is still in flight", async () => {
+    // Regression for a CONFIRMED MEDIUM review finding, related to but distinct
+    // from #2338: the join-tracking scheme fixed by #2239/#2338 only ever holds
+    // ONE promise in `pendingRenewal` — it protects against a single in-flight
+    // write landing late, but has no backpressure against a SECOND renewal tick
+    // firing (and dispatching its own write) while the first write is still in
+    // flight. Without a guard, `pendingRenewal` is simply overwritten by the
+    // newer write's promise, silently orphaning the earlier one from every join
+    // point. Since projector.writeState is a plain read-body/edit-body round
+    // trip with no CAS (see #2239), an orphaned earlier write landing after a
+    // later one (or after commit/terminate) can resurrect stale state.
+    //
+    // This test proves the fix at the dispatch level directly: while the phase
+    // runner is in flight, every "issue edit" renewal write dispatched during a
+    // bounded observation window is held artificially slow (60ms — longer than
+    // the whole window), and the renewal interval (10ms) is short enough for
+    // several ticks to become eligible to fire during that window. Pre-fix,
+    // `renewLease()` unconditionally dispatches a NEW overlapping write on every
+    // eligible tick regardless of whether the previous one has settled, so 2+
+    // writes would be dispatched during the window. Post-fix, the
+    // `if (pendingRenewal) return;` guard means every tick after the first is a
+    // no-op until the in-flight write settles, so exactly 1 write is dispatched.
+    // Delays are bounded (not indefinite) throughout, so this cannot hang even
+    // if a future refactor changes how many writes land — worst case is a
+    // failed assertion, not a stuck promise.
+    const { w, io } = fakeWorld();
+    const origGh = io.gh;
+    let delayEdits = false;
+    let dispatchCountDuringWindow = 0;
+    const delayedEditPromises = [];
+    io.gh = async (args) => {
+      if (args[0] === "issue" && args[1] === "edit" && args.includes("--body") && delayEdits) {
+        dispatchCountDuringWindow += 1;
+        const delayed = new Promise((resolve) => setTimeout(resolve, 60)).then(() => origGh(args));
+        delayedEditPromises.push(delayed);
+        return delayed;
+      }
+      return origGh(args);
+    };
+
+    const LEASE_TTL_MS = 1000;
+    const LEASE_RENEW_INTERVAL_MS = 10;
+
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/investigate") {
+        // Arm delay only once inside the runner — well after the two
+        // synchronous pre-loop lease-claim writes (the unconditional claim
+        // before the phase loop starts, and the per-phase renewal write
+        // immediately before renewTimer is created) have already resolved
+        // normally. This guarantees renewTimer is already running before any
+        // write is ever delayed, so the timer-driven ticks below are real.
+        delayEdits = true;
+        // Stay "in phase" long enough for several renewal ticks (10ms
+        // interval) to become eligible while every dispatched write during
+        // this window sits at a fixed 60ms delay — this is the overlap
+        // window where a second, unguarded write would be dispatched.
+        await new Promise((resolve) => setTimeout(resolve, LEASE_RENEW_INTERVAL_MS * 6));
+        delayEdits = false;
+      }
+      // Terminal (INVALID) on first phase — reaches terminate() shortly after
+      // the observation window, same shape as the sibling "slow in-flight
+      // heartbeat" test above.
+      w.markers += " INVESTIGATION:INVALID";
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => Date.now(), maxAttempts: 1,
+      leaseTtlMs: LEASE_TTL_MS, leaseRenewIntervalMs: LEASE_RENEW_INTERVAL_MS });
+
+    // Wait for every delayed write to actually land before asserting, so a
+    // write dispatched right at the edge of the window isn't missed.
+    await Promise.all(delayedEditPromises);
+
+    assert.equal(res.terminalReason, "invalid");
+    assert.equal(dispatchCountDuringWindow, 1,
+      "renewLease() must not dispatch a new renewal write while a previous one is still in flight — " +
+      "observed " + dispatchCountDuringWindow + " writes dispatched during a single 60ms-delayed window " +
+      "against a 10ms renewal interval (6 ticks eligible), meaning the backpressure guard did not engage");
+  });
+
+  it("a second concurrent run-issue is deferred by the now-real (non-null) lease claimed by the first run", async () => {
+    // End-to-end proof that the concurrency guard (bin/engine.mjs I3 check) is
+    // actually reachable now: run agent "a1" far enough to claim a lease (but
+    // not finish), then have agent "a2" attempt to start against the same
+    // GitHub state and confirm it defers instead of racing in.
+    const { w, io } = fakeWorld();
+    let leaseSnapshotAfterA1Start = null;
+    const runnerA1 = async ({ commandName }) => {
+      if (commandName === "work-on/investigate") {
+        const { parseState } = await import("../engine/state.mjs");
+        leaseSnapshotAfterA1Start = parseState(w.body)?.lease ?? null;
+      }
+      // Never resolves the investigate phase — simulates a run that is still
+      // genuinely in flight when a2 attempts to start.
+      return new Promise(() => {});
+    };
+
+    // Fire a1 but don't await it to completion (it never resolves) — just
+    // enough ticks for it to have claimed the lease and be "running".
+    runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner: runnerA1, now: () => Date.now(), maxAttempts: 1 });
+    // Yield a couple of microtask/timer turns so a1's pre-loop lease claim lands.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.ok(leaseSnapshotAfterA1Start, "a1 must have claimed a lease before its phase runner was invoked");
+
+    const runnerA2 = async () => { throw new Error("a2's runner must never be called while a1 holds the lease"); };
+    const res2 = await runIssue({ issue: 42, dir: mkdtempSync(join(tmpdir(), "fd-engine-a2-")), agentId: "a2", lane: "staging",
+      io, runner: runnerA2, now: () => Date.now(), maxAttempts: 1 });
+
+    assert.equal(res2.terminalReason, "deferred");
+    assert.ok(res2.detail.includes("a1"));
+  });
+});
+
+// forge#2352: state-vs-GitHub divergence guard. Previously, none of the
+// PHASES entries' entryCondition/reconcile/detectOutcome (other than close,
+// which only runs at the very end) ever checked the issue's live GitHub
+// state/labels before advancing — so a phase could run to completion against
+// an issue that was independently closed or labeled workflow:invalid /
+// needs-human. These tests drive a run where the issue diverges mid-flight
+// and assert the engine halts/escalates at that boundary instead of
+// advancing to the next phase's runner.
+describe("runIssue — forge#2352: state-vs-GitHub divergence guard", () => {
+  it("halts before 'context' when the issue is closed workflow:invalid immediately after 'investigate' commits", async () => {
+    const { w, io } = fakeWorld();
+    const runCounts = {};
+    const script = {
+      "work-on/investigate": () => {
+        // investigate commits normally (CONFIRMED verdict marker) — but the
+        // issue is independently closed as workflow:invalid out-of-band
+        // (e.g. a human, or a sibling agent) between this phase committing
+        // and the engine picking the next phase. This is exactly the
+        // production scenario cited in the issue: the marker says CONFIRMED,
+        // but the issue's real GitHub state has already diverged.
+        w.markers += " INVESTIGATION:COMPLETE";
+        w.issueState = "CLOSED";
+        w.labels.push("workflow:invalid");
+      },
+      "work-on/build/context": () => { throw new Error("context must never run against a closed/invalid issue"); },
+    };
+    const runner = async ({ commandName }) => {
+      runCounts[commandName] = (runCounts[commandName] || 0) + 1;
+      script[commandName]();
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "invalid");
+    assert.equal(runCounts["work-on/investigate"], 1);
+    assert.equal(runCounts["work-on/build/context"] || 0, 0, "context must not have run");
+    const s = deriveState(readLog(dir, 42));
+    assert.deepEqual(s.committed, ["investigate"]);
+  });
+
+  it("halts before 'build' when the issue is closed (no workflow:merged) after 'architect' commits", async () => {
+    const { w, io } = fakeWorld();
+    const runCounts = {};
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => {
+        w.markers += " FORGE:ARCHITECT:COMPLETE";
+        // Issue closed out-of-band (not via workflow:invalid this time — a
+        // bare CLOSED state with no workflow:merged label must be treated
+        // the same way: dead, not a merge).
+        w.issueState = "CLOSED";
+      },
+      "work-on/build": () => { throw new Error("build must never run against a closed issue"); },
+    };
+    const runner = async ({ commandName }) => {
+      runCounts[commandName] = (runCounts[commandName] || 0) + 1;
+      script[commandName]();
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "invalid");
+    assert.equal(runCounts["work-on/build"] || 0, 0, "build must not have run");
+    const s = deriveState(readLog(dir, 42));
+    assert.deepEqual(s.committed, ["investigate", "context", "architect"]);
+  });
+
+  it("pauses (terminalReason needs-human) rather than advancing when the issue carries needs-human mid-run, and does not touch the needs-human label itself", async () => {
+    const { w, io } = fakeWorld();
+    const editCalls = [];
+    const origGh = io.gh;
+    io.gh = async (args) => {
+      if (args[0] === "issue" && args[1] === "edit") editCalls.push([...args]);
+      return origGh(args);
+    };
+    const runCounts = {};
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => {
+        w.markers += " FORGE:CONTEXT:COMPLETE";
+        // A human (or a sibling automation) escalates the issue mid-run.
+        w.labels.push("needs-human");
+      },
+      "work-on/build/architect": () => { throw new Error("architect must not run while needs-human is set"); },
+    };
+    const runner = async ({ commandName }) => {
+      runCounts[commandName] = (runCounts[commandName] || 0) + 1;
+      script[commandName]();
+      return { status: "complete" };
+    };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "needs-human");
+    assert.equal(runCounts["work-on/build/architect"] || 0, 0, "architect must not have run");
+    const s = deriveState(readLog(dir, 42));
+    assert.deepEqual(s.committed, ["investigate", "context"]);
+  });
+
+  it("does not guard the close phase itself — close still runs and reads the same CLOSED state as its normal success signal", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    const s = deriveState(readLog(dir, 42));
+    assert.deepEqual(s.committed, ["investigate", "context", "architect", "build", "review", "close"]);
+  });
+
+  it("a healthy, non-diverged run is unaffected by the guard (baseline — no closed/invalid/needs-human state at any point)", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+  });
+
+  it("fail-open: a gh error on the divergence-guard snapshot does not block a healthy run", async () => {
+    const { w, io } = fakeWorld();
+    const origGh = io.gh;
+    let snapshotCalls = 0;
+    io.gh = async (args) => {
+      const a = args.join(" ");
+      // Only fail the guard's own snapshot calls (issued for every phase
+      // except close, while the issue is still OPEN) — once the close
+      // phase's script sets the issue CLOSED, its own reconcile/detectOutcome
+      // (which share this exact call shape) must be allowed to see the real,
+      // final state, since those are not covered by this fail-open guarantee.
+      if (a.startsWith("issue view") && a.includes("--json state,labels") && w.issueState === "OPEN") {
+        snapshotCalls++;
+        throw new Error("transient gh failure");
+      }
+      return origGh(args);
+    };
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "merged");
+    assert.ok(snapshotCalls > 0, "the guard's snapshot call must actually have been exercised (and failed) at least once");
   });
 });

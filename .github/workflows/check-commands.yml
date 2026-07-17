@@ -12,6 +12,13 @@ on:
       - 'scripts/check-command-docs-drift.sh'
       - 'scripts/check-command-side-effects.sh'
       - 'scripts/check-spec-markers.sh'
+      - 'scripts/check-admission-parity.mjs'
+      - 'bin/engine/admission.mjs'
+      - 'scripts/check-phase-registry-drift.mjs'
+      - 'bin/engine/phases.mjs'
+      - 'bin/hooks/interactive-engine.mjs'
+      - 'packages/protocol/src/**'
+      - '.github/workflows/check-commands.yml'
   push:
     branches:
       - staging
@@ -26,6 +33,13 @@ on:
       - 'scripts/check-command-docs-drift.sh'
       - 'scripts/check-command-side-effects.sh'
       - 'scripts/check-spec-markers.sh'
+      - 'scripts/check-admission-parity.mjs'
+      - 'bin/engine/admission.mjs'
+      - 'scripts/check-phase-registry-drift.mjs'
+      - 'bin/engine/phases.mjs'
+      - 'bin/hooks/interactive-engine.mjs'
+      - 'packages/protocol/src/**'
+      - '.github/workflows/check-commands.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -68,6 +82,29 @@ jobs:
   banned-token-lint:
     name: Banned token lint
     runs-on: ubuntu-latest
+    env:
+      # Single source of truth for the banned-token pattern. Both the production
+      # step and the self-test step below reference this same job-level env var
+      # instead of each carrying their own literal copy. Previously the two steps
+      # each hardcoded an identical regex string; if one copy were ever edited
+      # (e.g. a token added/removed) without updating the other, the self-test
+      # would keep passing against its own stale pattern while the real gate
+      # silently drifted out of sync — the exact class of bug forge#2233 fixed
+      # one layer down (an unscoped allowlist exemption). See forge#2274.
+      #
+      # Notes on pattern precision:
+      # - 'alterlab'  — matched case-insensitively; no false positives expected
+      # - '\bememo\b' — word-boundary match excludes React's 'useMemo'/'React.memo'
+      # - 'EMEMO_EOF' — exact uppercase heredoc token; no false positives expected
+      # - 'is_byop'   — exact token; no false positives expected
+      # - 'byop_discount' — exact token; no false positives expected
+      #
+      # No allowlist/exemption mechanism: an unscoped `<!-- allowlist: -->` opt-out
+      # previously let ANY line suppress ANY banned token, which defeated the point
+      # of this gate (see forge#2233). If a legitimate need for an exemption ever
+      # arises, it must be a token-specific, line-specific marker that this grep
+      # explicitly and narrowly excludes — not a blanket prefix match.
+      BANNED_TOKEN_PATTERN: '\balterlab\b|\bememo\b|EMEMO_EOF|\bis_byop\b|\bbyop_discount\b'
 
     steps:
       - uses: actions/checkout@v4
@@ -78,15 +115,10 @@ jobs:
           # These tokens indicate AlterLab-specific residue that must not re-enter
           # the generic ForgeDock command corpus.
           #
-          # Notes on pattern precision:
-          # - 'alterlab'  — matched case-insensitively; no false positives expected
-          # - '\bememo\b' — word-boundary match excludes React's 'useMemo'/'React.memo'
-          # - 'EMEMO_EOF' — exact uppercase heredoc token; no false positives expected
-          # - 'is_byop'   — exact token; no false positives expected
-          # - 'byop_discount' — exact token; no false positives expected
-          MATCHES=$(grep -rniE '\balterlab\b|\bememo\b|EMEMO_EOF|\bis_byop\b|\bbyop_discount\b' commands/ \
+          # Pattern is defined once, at job level, in $BANNED_TOKEN_PATTERN — see
+          # that env var's comment above for precision notes and rationale.
+          MATCHES=$(grep -rniE "$BANNED_TOKEN_PATTERN" commands/ \
             --include='*.md' \
-            | grep -v '<!-- allowlist:' \
             || true)
           if [ -n "$MATCHES" ]; then
             echo "ERROR: Banned product-specific tokens found in commands/:"
@@ -96,6 +128,33 @@ jobs:
             exit 1
           fi
           echo "OK: No banned tokens found in commands/"
+
+      - name: Self-test — banned token lint must catch a marked token (regression guard for forge#2233)
+        run: |
+          # Prove the lint logic itself still fires on a banned token, even one
+          # decorated with what used to be a blanket allowlist marker. This runs
+          # against a throwaway scratch file outside commands/ so it never pollutes
+          # the real corpus, and it inverts the assertion: the self-test FAILS the
+          # job if the banned-token pattern does NOT match.
+          #
+          # Uses the same $BANNED_TOKEN_PATTERN job-level env var as the production
+          # step above, so this genuinely proves the production pattern still fires
+          # rather than exercising a separately-maintained copy that could drift
+          # (see forge#2274 — this step previously hardcoded its own literal copy).
+          SCRATCH_DIR=$(mktemp -d)
+          trap 'rm -rf "$SCRATCH_DIR"' EXIT
+          cat > "$SCRATCH_DIR/self-test.md" <<'EOF'
+          This line references alterlab and used to carry a blanket exemption. <!-- allowlist: AlterLab -->
+          EOF
+          SELF_TEST_MATCHES=$(grep -rniE "$BANNED_TOKEN_PATTERN" "$SCRATCH_DIR" \
+            --include='*.md' \
+            || true)
+          if [ -z "$SELF_TEST_MATCHES" ]; then
+            echo "ERROR: Self-test failed — a line containing 'alterlab' plus a marker was NOT flagged."
+            echo "The banned-token lint regressed to allowing a blanket exemption. See forge#2233."
+            exit 1
+          fi
+          echo "OK: Self-test confirms the banned-token lint catches 'alterlab' even with a marker present."
 
   portability-lint:
     name: Shell portability lint (no grep -P in specs)
@@ -221,3 +280,46 @@ jobs:
           #
           # <!-- Added: forge#1609 -->
           bash scripts/check-spec-markers.sh commands/ .
+
+  admission-parity:
+    name: admission.mjs / bash mirror parity check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+
+      - name: Check bin/engine/admission.mjs CASCADE_PRESETS matches the phase-4-execution.md bash mirror
+        run: |
+          # bin/engine/admission.mjs is the typed, unit-tested reference implementation
+          # of the cascade admission policy (forge#2234). The logic actually executed at
+          # runtime is a hand-written bash/yq mirror in phase-4-execution.md's Step 4A.pre
+          # `case "$CASCADE_POLICY_NAME" in ... esac` block — kept in sync by hand, with no
+          # prior check catching divergence between the two (forge#2340).
+          node scripts/check-admission-parity.mjs
+
+  phase-registry-drift:
+    name: Phase marker registry drift check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+
+      - name: Check bin/engine/phases.mjs phase-id list matches packages/protocol/src/phases.js's registry
+        run: |
+          # packages/protocol/src/phases.js is the single-source phase-id/marker
+          # registry (forge#2378) both bin/engine/phases.mjs (the authoritative
+          # engine gate) and bin/hooks/interactive-engine.mjs (the interactive-
+          # session hook) import their marker strings from. This check catches
+          # phase-id-list drift between the engine's PHASES array and the
+          # registry's PHASE_IDS — the one thing that can still diverge now that
+          # marker *strings* are single-sourced (see forge#2375/PR#2395, the
+          # incident this issue's registry makes structurally impossible).
+          node scripts/check-phase-registry-drift.mjs

@@ -17,6 +17,7 @@
  */
 
 import { RESERVED_TYPES, RESERVED_TYPE_NAMES, SentinelState } from './types.js';
+import { unescapeHtmlCommentDelimiters } from './html-comment-escape.js';
 
 // Matches: <!-- FORGE:TYPE --> or <!-- FORGE:TYPE: value -->
 // Anchored to require the tag to be the ENTIRE (trimmed) line — a FORGE-tag-shaped
@@ -119,17 +120,15 @@ function escapeRegExp(str) {
  * on decode is what makes the scheme injective: any pre-existing entity-like
  * text in the original value (e.g. `&lt;!--` or `<!--&gt;`) is doubly-escaped
  * at encode time and can never collide with the single-escaped form produced
- * by a real delimiter (forge#2137; forge#1662).
+ * by a real delimiter (forge#2137; forge#1662). Delegated to the shared
+ * `unescapeHtmlCommentDelimiters()` helper (forge#2225) so this scheme has a
+ * single implementation shared with `bin/engine/state.mjs`.
  *
  * @param {string} raw
  * @returns {string}
  */
 function unescapeFieldValue(raw) {
-  return raw
-    .replace(/--!&gt;/g, '--!>')
-    .replace(/--&gt;/g, '-->')
-    .replace(/&lt;!--/g, '<!--')
-    .replace(/&amp;/g, '&');
+  return unescapeHtmlCommentDelimiters(raw);
 }
 
 /**

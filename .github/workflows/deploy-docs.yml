@@ -9,6 +9,7 @@ on:
     paths:
       - 'docs/site/**'
       - 'package.json'
+      - '.github/workflows/deploy-docs.yml'
 
   # Allow manual trigger from GitHub Actions UI (use this for staging validation)
   workflow_dispatch:

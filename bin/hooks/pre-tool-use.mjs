@@ -151,16 +151,103 @@ async function getInvariants() {
 /**
  * Allowed label transitions: from → [to, ...]
  * A label not in this map can be added freely (not a workflow: label).
+ *
+ * `workflow:invalid` is reachable from `ready-to-build`, `building`, and
+ * `in-review` (issue #2326) — not just from `investigating` — because
+ * invalidity is not always discovered where the pipeline first labels the
+ * issue "ready to build". A cheap false positive is usually caught during
+ * investigation; a subtler one is only disproved once the architect/build
+ * phase reads the actual code and tests (see #2312: the premise wasn't
+ * disproved until Phase 3C.6 read `bin/tests/engine-crash.test.mjs`).
+ *
+ * These three post-investigation successors are NOT unconditional, though —
+ * see EVIDENCE_REQUIRED_TARGETS below and its enforcement in
+ * checkLabelTransition(). Reaching `workflow:invalid` from any of these
+ * three states requires a posted reversal comment (a second
+ * `FORGE:INVESTIGATOR` comment carrying `**Verdict**: INVALID`) already on
+ * the issue — the state machine still refuses a bare relabel with no
+ * evidence trail. This preserves the original protection (see history below)
+ * while making the terminal state reachable where it is actually discovered.
+ *
+ * History: this map was introduced by #1250/#1513 to stop arbitrary/skipped
+ * label jumps (e.g. investigating → merged in one hop) — it enforces that
+ * every workflow label transition follows the pipeline's real phase order,
+ * with corrective error messages naming the legal next states. Widening a
+ * terminal-reachability edge is safe as long as an equivalent guard (the
+ * evidence precondition) replaces the blanket "not reachable at all" rule
+ * for the specific case this hook was never asked to consider: legitimate,
+ * evidenced invalidation discovered after ready-to-build.
  */
 const LABEL_TRANSITIONS = {
   "workflow:investigating": ["workflow:ready-to-build", "workflow:invalid", "workflow:decomposed"],
-  "workflow:ready-to-build": ["workflow:building"],
-  "workflow:building": ["workflow:in-review", "workflow:ready-to-build"], // retry allowed
-  "workflow:in-review": ["workflow:merged", "workflow:building"],         // review → re-build allowed
+  "workflow:ready-to-build": ["workflow:building", "workflow:invalid"],
+  "workflow:building": ["workflow:in-review", "workflow:ready-to-build", "workflow:invalid"], // retry allowed; evidenced reversal allowed (#2326)
+  "workflow:in-review": ["workflow:merged", "workflow:building", "workflow:invalid"],         // review → re-build allowed; evidenced reversal allowed (#2326)
   "workflow:merged": [],     // terminal — no successors
   "workflow:invalid": [],    // terminal
   "workflow:decomposed": [], // terminal
 };
+
+/**
+ * States from which a transition to `workflow:invalid` requires posted
+ * evidence (a reversal comment), rather than being freely allowed.
+ * `workflow:investigating` is deliberately excluded — invalidation
+ * discovered during initial investigation is the pipeline's normal,
+ * unguarded path (Phase 1D) and needs no additional precondition.
+ */
+const EVIDENCE_REQUIRED_FOR_INVALID_FROM = new Set([
+  "workflow:ready-to-build",
+  "workflow:building",
+  "workflow:in-review",
+]);
+
+/**
+ * `authorAssociation` values (as returned by `gh issue view --json comments`,
+ * which GitHub computes server-side from the commenter's actual repo/org
+ * relationship) that are trusted to post reversal evidence. Deliberately
+ * NOT a hardcoded bot login: the pipeline's own `gh` identity legitimately
+ * rotates (issue #1722 — the primary automation account's token went invalid
+ * mid-batch and a session switched to a maintainer's personal account to keep
+ * working), and a literal-login allowlist would fail closed the next time
+ * identity rotates. Checking the GitHub-computed relationship instead of a
+ * specific account name survives that rotation: whichever account is
+ * authenticated, as long as it is an org member / repo owner / granted
+ * collaborator access, reports one of these three values regardless of which
+ * account it is. Everything else — `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`,
+ * `NONE`, or a missing/malformed field — is untrusted and must NOT satisfy
+ * the evidence check (issue #2332: this repo is public with no interaction
+ * restrictions, so any free GitHub account can otherwise post a comment
+ * matching the marker + verdict text below).
+ */
+const TRUSTED_REVERSAL_AUTHOR_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+/**
+ * A reversal comment is a `FORGE:INVESTIGATOR` annotation whose verdict is
+ * INVALID — i.e. a second investigation report that supersedes the
+ * original CONFIRMED/PARTIAL verdict with citable evidence (see #2312's
+ * "Investigation Report — CORRECTED" comment for the live example this
+ * pattern is modeled on). Matching on the marker + verdict line only (not
+ * on incident-specific text like issue numbers or the word "CORRECTED")
+ * keeps this a general-purpose evidence check, not a one-off special case.
+ *
+ * In addition to the marker + verdict text, the comment's author must carry
+ * a trusted `authorAssociation` (see TRUSTED_REVERSAL_AUTHOR_ASSOCIATIONS
+ * above, issue #2332) — otherwise any commenter, with no write access to the
+ * repository, could forge the marker text and unlock this transition.
+ *
+ * @param {Array<{body?: string, authorAssociation?: string}>} comments
+ * @returns {boolean}
+ */
+function hasInvalidReversalEvidence(comments) {
+  if (!Array.isArray(comments)) return false;
+  return comments.some((c) => {
+    const body = String((c && c.body) || "");
+    if (!body.includes("FORGE:INVESTIGATOR")) return false;
+    if (!/\*\*Verdict\*\*:\s*INVALID/i.test(body)) return false;
+    const association = String((c && c.authorAssociation) || "").toUpperCase();
+    return TRUSTED_REVERSAL_AUTHOR_ASSOCIATIONS.has(association);
+  });
+}
 
 /** Labels that are never allowed as a PR --base target. */
 const FORBIDDEN_PR_BASES = ["main", "master"];
@@ -189,14 +276,20 @@ const WORKFLOW_LABEL_PREFIX = "workflow:";
  * above, which Git Bash still normalizes to) the same whole-drive tree
  * (issue #2113 — PR #2112 review finding SEC-1: `find /c/` was silently
  * ALLOWED because the prior regex had no trailing-slash/dot alternative).
+ * This also includes the trailing-slash dot forms `/./` and `/../` — the
+ * dot alternative did not originally carry the same optional trailing
+ * slash the drive-letter alternative got in #2113, so those two bare
+ * tokens reached the identical whole-drive scan but were wrongly ALLOWED
+ * (issue #2213).
  *
- * Deliberately does NOT match `/c/Users/...`, `/./foo`, `/../foo`, or any
- * other scoped absolute path — only the bare root/drive-mount token itself,
- * optionally followed by exactly one trailing slash (drive-letter case) or
- * standing alone (dot/double-slash case). Case-insensitive on the drive
- * letter only (POSIX paths are otherwise case-sensitive).
+ * Deliberately does NOT match `/c/Users/...`, `/./foo`, `/../foo` (with
+ * anything beyond the trailing slash), or any other scoped absolute path —
+ * only the bare root/drive-mount token itself, optionally followed by
+ * exactly one trailing slash (drive-letter and dot/double-slash cases) or
+ * standing alone. Case-insensitive on the drive letter only (POSIX paths
+ * are otherwise case-sensitive).
  */
-const FIND_ROOT_TOKEN_RE = /^\/(?:[a-zA-Z]\/?|\.{1,2}|\/)?$/;
+const FIND_ROOT_TOKEN_RE = /^\/(?:[a-zA-Z]\/?|\.{1,2}\/?|\/)?$/;
 
 /**
  * Shell metacharacters that can glue a command name to an adjacent token
@@ -503,7 +596,13 @@ function checkPrTarget(command) {
  *
  * Reads the current workflow labels from GitHub via `gh issue view` and
  * validates that the new label is a legal successor in the state machine.
- * Falls back to allow (exit 0) on any gh CLI error so the hook is fail-open.
+ * Falls back to allow (exit 0) on a `gh` CLI error for ordinary transitions,
+ * so the hook stays resilient to transient `gh`/network failures. The one
+ * exception (#2347): when the attempted transition is to `workflow:invalid`
+ * (`mayNeedEvidence`), the same lookup also fetches the reversal-evidence
+ * comments required by the evidence gate below — a `gh` error there fails
+ * *closed* instead, so a transient CLI error can never silently bypass the
+ * evidence gate the way a blanket fail-open would.
  *
  * @param {string} command
  * @returns {string|null} Error message to show, or null if allowed.
@@ -532,11 +631,18 @@ function checkLabelTransition(command) {
   // Extract repo (-R flag) if present.
   const repoFlag = extractFlag(command, "-R") || extractFlag(command, "--repo");
 
-  // Read current labels from GitHub synchronously.
+  // Read current labels from GitHub synchronously. Also fetch comments when
+  // the requested transition is one that requires reversal evidence (see
+  // EVIDENCE_REQUIRED_FOR_INVALID_FROM) — deferred to a single conditional
+  // extra field so the common case (any other transition) stays a
+  // labels-only fetch, unchanged from before #2326.
   let currentWorkflowLabel = null;
+  let comments = null;
+  const mayNeedEvidence = newLabel === "workflow:invalid";
   try {
     const { execFileSync: exec } = _require("child_process");
-    const args = ["issue", "view", issueNum, "--json", "labels"];
+    const fields = mayNeedEvidence ? "labels,comments" : "labels";
+    const args = ["issue", "view", issueNum, "--json", fields];
     if (repoFlag) { args.push("-R", repoFlag); }
     const out = exec("gh", args, {
       encoding: "utf-8",
@@ -553,8 +659,29 @@ function checkLabelTransition(command) {
         currentWorkflowLabel = lbl;
       }
     }
+    if (mayNeedEvidence) {
+      comments = Array.isArray(parsed.comments) ? parsed.comments : [];
+    }
   } catch {
-    return null; // gh CLI error — fail-open
+    if (mayNeedEvidence) {
+      // #2347: the lookup that failed is the same one that would have
+      // fetched the reversal-evidence comments for the workflow:invalid
+      // evidence gate (#2326/#2332). Fail closed here instead of silently
+      // allowing an unverified workflow:invalid transition through.
+      return [
+        `[ForgeDock] BLOCKED: Unable to verify workflow:invalid evidence (gh CLI error).`,
+        ``,
+        `Attempted transition: → "workflow:invalid"`,
+        ``,
+        `This transition requires verifying a posted reversal comment, but the`,
+        `"gh issue view" lookup used to fetch that evidence failed. Failing`,
+        `closed rather than silently bypassing the evidence gate.`,
+        ``,
+        `This is transient, not permanent: retry once "gh issue view ${issueNum}"`,
+        `succeeds again (e.g. after a network blip or rate-limit reset).`,
+      ].join("\n");
+    }
+    return null; // gh CLI error on an ordinary transition — fail-open
   }
 
   if (!currentWorkflowLabel) {
@@ -589,6 +716,35 @@ function checkLabelTransition(command) {
       ``,
       `Fix: check the pipeline phase and apply the correct next workflow label.`,
     ].join("\n");
+  }
+
+  // Evidence precondition (#2326): reaching workflow:invalid from
+  // ready-to-build/building/in-review is structurally allowed above, but
+  // still gated against *casual* invalidation — a bare relabel with no
+  // paper trail is blocked. Require a posted reversal comment (a second
+  // FORGE:INVESTIGATOR annotation carrying "**Verdict**: INVALID") already
+  // on the issue before allowing the transition through, from a trusted
+  // author (issue #2332 — marker text alone is forgeable by anyone who can
+  // comment on a public issue; see TRUSTED_REVERSAL_AUTHOR_ASSOCIATIONS).
+  if (newLabel === "workflow:invalid" && EVIDENCE_REQUIRED_FOR_INVALID_FROM.has(currentWorkflowLabel)) {
+    if (!hasInvalidReversalEvidence(comments)) {
+      return [
+        `[ForgeDock] BLOCKED: workflow:invalid requires reversal evidence.`,
+        ``,
+        `Current workflow state: "${currentWorkflowLabel}"`,
+        `Attempted transition: → "workflow:invalid"`,
+        ``,
+        `This transition is allowed only when the issue carries a posted reversal:`,
+        `a FORGE:INVESTIGATOR comment with "**Verdict**: INVALID" documenting the`,
+        `evidence that disproved the original premise (see #2312 for the pattern),`,
+        `posted by an author with a trusted authorAssociation (OWNER, MEMBER, or`,
+        `COLLABORATOR — see #2332). A comment matching the marker text from any`,
+        `other commenter does not satisfy this gate.`,
+        ``,
+        `Fix: post the corrected investigation report first (verdict INVALID, with`,
+        `evidence, from a trusted account), then retry this label transition.`,
+      ].join("\n");
+    }
   }
 
   return null; // valid transition — allow

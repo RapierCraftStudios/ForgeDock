@@ -50,6 +50,9 @@ import {
   resolveBackend,
   resolveBackendLadder,
   runCliBackend,
+  sanitizeArgvForLog,
+  sanitizeOutputExcerptForLog,
+  extractSessionLimitResetTime,
   VALID_BACKENDS,
 } from "../runner.mjs";
 
@@ -1149,16 +1152,16 @@ describe("runCliBackend argv safety", () => {
     // within the same running process on Windows).
     //
     // node's own CLI parser rejects the fixed 3rd argv element
-    // ("--dangerously-skip-permissions") as an unrecognized flag and exits
-    // non-zero — which is itself strong affirmative evidence of correct argv
-    // separation: the parser named that exact 3rd token as the "bad option"
-    // *distinct* from the 2nd (message) token, proving all three array
-    // elements arrived as separate, unmangled OS-level argv entries rather
-    // than being concatenated/re-tokenized by an intermediate shell. The
-    // decisive assertion, though, is simpler and platform-independent: the
-    // injection payload's side effect (creating a marker file via $(...))
-    // must never occur, because runCliBackend never hands the message to a
-    // shell in the first place.
+    // ("--output-format", added by issue #2398's usage-parsing change) as an
+    // unrecognized flag and exits non-zero — which is itself strong
+    // affirmative evidence of correct argv separation: the parser named that
+    // exact 3rd token as the "bad option" *distinct* from the 2nd (message)
+    // token, proving all array elements arrived as separate, unmangled
+    // OS-level argv entries rather than being concatenated/re-tokenized by an
+    // intermediate shell. The decisive assertion, though, is simpler and
+    // platform-independent: the injection payload's side effect (creating a
+    // marker file via $(...)) must never occur, because runCliBackend never
+    // hands the message to a shell in the first place.
     const shimDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-injection-"));
     const injectionMarkerPath = join(shimDir, "INJECTED");
     const maliciousMessage =
@@ -1198,7 +1201,7 @@ describe("runCliBackend argv safety", () => {
     // element as a distinct, unmangled token — proving argv separation was
     // preserved end-to-end (no shell re-tokenized/concatenated the array).
     const output = logLines.join("\n");
-    assert.match(output, /--dangerously-skip-permissions/);
+    assert.match(output, /--output-format/);
   });
 });
 
@@ -1300,13 +1303,15 @@ describe("runCliBackend content passthrough (issue #2029, updated for #2019)", (
       // The exact content reaching the CLI invocation now includes the
       // system-prompt file flag — this is the fix for BUG-1 / #2019.
       assert.deepStrictEqual(capturedArgv.slice(0, 2), ["--print", message]);
-      assert.equal(capturedArgv[2], "--append-system-prompt-file");
-      capturedSystemPromptPath = capturedArgv[3];
+      assert.equal(capturedArgv[2], "--output-format");
+      assert.equal(capturedArgv[3], "json");
+      assert.equal(capturedArgv[4], "--append-system-prompt-file");
+      capturedSystemPromptPath = capturedArgv[5];
       assert.ok(
         typeof capturedSystemPromptPath === "string" && capturedSystemPromptPath.length > 0,
         "argv must include a system-prompt file path",
       );
-      assert.equal(capturedArgv[4], "--dangerously-skip-permissions");
+      assert.equal(capturedArgv[6], "--dangerously-skip-permissions");
 
       // The file existed AT THE TIME the CLI process ran (observed by the
       // recorder during the spawn, before runCliBackend's finally-block
@@ -1367,7 +1372,13 @@ describe("runCliBackend content passthrough (issue #2029, updated for #2019)", (
 
       assert.equal(result.status, "complete");
       const capturedArgv = JSON.parse(readFileSync(captureFile, "utf-8"));
-      assert.deepStrictEqual(capturedArgv, ["--print", message, "--dangerously-skip-permissions"]);
+      assert.deepStrictEqual(capturedArgv, [
+        "--print",
+        message,
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions",
+      ]);
     } finally {
       rmSync(shimDir, { recursive: true, force: true });
     }
@@ -1419,7 +1430,7 @@ describe("runCliBackend content passthrough (issue #2029, updated for #2019)", (
       }, /CLI_BACKEND_FAILED|exited with status/);
 
       const capturedArgv = JSON.parse(readFileSync(captureFile, "utf-8"));
-      capturedSystemPromptPath = capturedArgv[3];
+      capturedSystemPromptPath = capturedArgv[5];
       assert.ok(typeof capturedSystemPromptPath === "string" && capturedSystemPromptPath.length > 0);
     } finally {
       rmSync(shimDir, { recursive: true, force: true });
@@ -1576,6 +1587,442 @@ describe("runCliBackend spawnFn seam (issue #2033)", () => {
     );
   });
 
+  // Issue #2258 (parent: #2244) — a non-zero exit with fully empty
+  // stdout/stderr previously threw a self-referential "See output above for
+  // details" message even though nothing was ever logged, making the failure
+  // structurally undiagnosable. This asserts the fixed message is
+  // self-contained: it never claims output exists when it doesn't, and it
+  // inlines exit status, signal, and invocation (argv/cwd) context.
+  it("never claims 'output above' and inlines status/signal/argv/cwd when stdout AND stderr are both empty", () => {
+    const loggedLines = [];
+    const spawnFn = () => ({
+      status: 1,
+      signal: null,
+      stdout: "",
+      stderr: "",
+      error: undefined,
+    });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2258",
+        args: ["2258"],
+        cwd: TMP,
+        logger: { log: (line) => loggedLines.push(line) },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "runCliBackend must throw on non-zero exit");
+    assert.equal(thrown.code, "CLI_BACKEND_FAILED");
+    assert.match(thrown.message, /exited with status 1/);
+    assert.ok(
+      !thrown.message.includes("See output above for details"),
+      `message must not claim output exists when none was captured: ${thrown.message}`,
+    );
+    assert.match(
+      thrown.message,
+      /no output was captured/i,
+      "message must explicitly state that no output was captured",
+    );
+    assert.match(
+      thrown.message,
+      /claude --print/,
+      "message must inline the argv used for the failed invocation",
+    );
+    assert.ok(
+      thrown.message.includes(TMP),
+      "message must inline the cwd used for the failed invocation",
+    );
+    assert.ok(
+      loggedLines.some((line) => /no output was captured/i.test(line)),
+      "an explicit 'no output captured' diagnostic must be logged even when nothing was printed",
+    );
+  });
+
+  // Issue #2355: when the CLI produces non-empty stdout/stderr before a
+  // non-zero exit, the thrown message previously only said "See captured
+  // output above" — a pointer to a logger.log() call that is never persisted
+  // into the durable ~/.forge/runs/*.jsonl run-log (only `err.message`, via
+  // bin/engine.mjs's `reason: e.message`/fail-fast `detail` string, reaches
+  // that persisted record). This asserts the actual captured output text is
+  // now embedded directly in the thrown message.
+  it("embeds the actual captured output text in the thrown message when stdout/stderr is non-empty (#2355)", () => {
+    const spawnFn = () => ({
+      status: 1,
+      signal: null,
+      stdout: "TypeError: cannot read property 'foo' of undefined",
+      stderr: "    at main (/app/index.js:12:3)",
+      error: undefined,
+    });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2355",
+        args: ["2355"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "runCliBackend must throw on non-zero exit");
+    assert.equal(thrown.code, "CLI_BACKEND_FAILED");
+    assert.ok(
+      !thrown.message.includes("See captured output above"),
+      `message must not be a self-referential pointer to already-logged output: ${thrown.message}`,
+    );
+    assert.ok(
+      thrown.message.includes("TypeError: cannot read property 'foo' of undefined"),
+      `message must embed the actual captured stdout text: ${thrown.message}`,
+    );
+    assert.ok(
+      thrown.message.includes("at main (/app/index.js:12:3)"),
+      `message must embed the actual captured stderr text: ${thrown.message}`,
+    );
+  });
+
+  // Issue #2355 AC4: the embedded excerpt must be bounded so a very verbose
+  // CLI failure doesn't bloat the persisted JSONL run-log line indefinitely.
+  it("bounds and truncates a very large captured-output excerpt with a visible marker (#2355)", () => {
+    const hugeOutput = "E".repeat(10000);
+    const spawnFn = () => ({ status: 1, signal: null, stdout: hugeOutput, stderr: "", error: undefined });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2355",
+        args: ["2355"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "expected runCliBackend to throw");
+    assert.ok(
+      !thrown.message.includes("E".repeat(10000)),
+      "message must not contain the full unbounded captured output",
+    );
+    assert.match(
+      thrown.message,
+      /…\[truncated, \d+ chars\]/,
+      "message must contain a visible truncation marker for the bounded excerpt",
+    );
+  });
+
+  // Issue #2355: confirms the `!hadOutput` branch (already fixed by #2258/PR
+  // #2276) is unchanged by this fix — no regression to the empty-output
+  // diagnostic (exit code/signal/argv/cwd).
+  it("does not alter the empty-output diagnostic text (no regression to #2258/PR #2276, issue #2355 AC3)", () => {
+    const spawnFn = () => ({ status: 1, signal: null, stdout: "", stderr: "", error: undefined });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2355",
+        args: ["2355"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "expected runCliBackend to throw");
+    assert.match(
+      thrown.message,
+      /No output was captured \(stdout and stderr were both empty\)\./,
+      "empty-output message text must remain byte-identical to the pre-existing #2258/PR #2276 fix",
+    );
+  });
+
+  it("sanitizeOutputExcerptForLog neutralizes control characters, matching sanitizeArgvForLog's discipline (#2355)", () => {
+    const raw = "\x1b[31mFAKE\x1b[0m";
+    const excerpt = sanitizeOutputExcerptForLog(raw);
+    // eslint-disable-next-line no-control-regex -- asserting the ABSENCE of raw control chars is the point of this test
+    assert.ok(!/[\x00-\x1F\x7F]/.test(excerpt), "excerpt must not contain raw control characters");
+    assert.match(excerpt, /\\x1b/, "escaped ESC sequence should appear in place of the raw control char");
+  });
+
+  it("surfaces result.signal in the thrown message when the child was killed by a signal", () => {
+    const spawnFn = () => ({
+      status: null,
+      signal: "SIGKILL",
+      stdout: "",
+      stderr: "",
+      error: undefined,
+    });
+
+    assert.throws(
+      () =>
+        runCliBackend({
+          spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+          userMessage: "Execute: /work-on 2258",
+          args: ["2258"],
+          cwd: TMP,
+          logger: { log: () => {} },
+          bin: "claude",
+          spawnFn,
+        }),
+      (err) => err.code === "CLI_BACKEND_FAILED" && /signal SIGKILL/.test(err.message),
+    );
+  });
+
+  // Issue #2360: spawnSync's `timeout` option kills the child on expiry, but
+  // any stdout/stderr the CLI had already produced before the kill is still
+  // populated on `result` — the timeout branch previously discarded it
+  // entirely. This asserts the partial output is now embedded in the thrown
+  // message (mirroring the #2355 fix to the sibling non-zero-exit branch).
+  it("embeds captured partial output in the thrown message on ETIMEDOUT (#2360)", () => {
+    const spawnFn = () => ({
+      status: null,
+      signal: null,
+      error: { code: "ETIMEDOUT" },
+      stdout: "Architect plan: step 1 of 5 complete...",
+      stderr: "",
+    });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2360",
+        args: ["2360"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "expected runCliBackend to throw on ETIMEDOUT");
+    assert.match(thrown.message, /timed out after \d+s and was killed/);
+    assert.match(thrown.message, /FORGEDOCK_CLI_TIMEOUT_MS/);
+    assert.ok(
+      thrown.message.includes("Partial output:"),
+      `message must include a Partial output section: ${thrown.message}`,
+    );
+    assert.ok(
+      thrown.message.includes("Architect plan: step 1 of 5 complete..."),
+      `message must embed the actual captured partial stdout text: ${thrown.message}`,
+    );
+  });
+
+  // Issue #2360: no regression — when the killed CLI produced no output at
+  // all before timing out, the message must remain byte-identical to the
+  // pre-existing (pre-#2360) text, with no dangling "Partial output:" suffix.
+  it("does not append a Partial output section when stdout/stderr are both empty on ETIMEDOUT (#2360)", () => {
+    const spawnFn = () => ({
+      status: null,
+      signal: null,
+      error: { code: "ETIMEDOUT" },
+      stdout: "",
+      stderr: "",
+    });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2360",
+        args: ["2360"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "expected runCliBackend to throw on ETIMEDOUT");
+    assert.ok(
+      !thrown.message.includes("Partial output:"),
+      `message must not include a Partial output section when nothing was captured: ${thrown.message}`,
+    );
+    assert.match(
+      thrown.message,
+      /^claude CLI invocation timed out after \d+s and was killed\. Set FORGEDOCK_CLI_TIMEOUT_MS \(ms\) to adjust, or use --backend api\.$/,
+      "empty-output timeout message text must remain byte-identical to the pre-#2360 behavior",
+    );
+  });
+
+  // Issue #2360: the embedded partial-output excerpt on timeout must be
+  // bounded and sanitized the same way as the #2355 fix to the sibling
+  // non-zero-exit branch — reusing `sanitizeOutputExcerptForLog()`, not a new
+  // unsanitized/unbounded path (this file has 4 prior review findings for
+  // exactly that defect class: #2277, #2292, #2293, #2355).
+  it("bounds and truncates a very large partial-output excerpt on ETIMEDOUT (#2360)", () => {
+    const hugeOutput = "T".repeat(10000);
+    const spawnFn = () => ({
+      status: null,
+      signal: null,
+      error: { code: "ETIMEDOUT" },
+      stdout: hugeOutput,
+      stderr: "",
+    });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2360",
+        args: ["2360"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "expected runCliBackend to throw on ETIMEDOUT");
+    assert.ok(
+      !thrown.message.includes("T".repeat(10000)),
+      "message must not contain the full unbounded captured partial output",
+    );
+    assert.match(
+      thrown.message,
+      /…\[truncated, \d+ chars\]/,
+      "message must contain a visible truncation marker for the bounded excerpt",
+    );
+  });
+
+  // #2277: the CLI_BACKEND_FAILED diagnostic embeds `cliArgs.join(" ")`
+  // (which includes `userMessage` verbatim) into the thrown Error.message,
+  // and that message is later written verbatim to stderr by
+  // bin/forgedock.mjs's `run-issue` case. `userMessage` is built from
+  // untrusted issue/PR body content, so the diagnostic must bound length and
+  // neutralize control characters — without losing the argv/cwd context
+  // #2258 added (that context is what makes the diagnostic useful at all).
+  it("bounds and neutralizes untrusted userMessage content in the CLI_BACKEND_FAILED diagnostic", () => {
+    const hugeMessage = "\x1b[31mFAKE LOG LINE\x1b[0m\nInjected-Header: evil" + "A".repeat(5000);
+    const spawnFn = () => ({ status: 1, signal: null, stdout: "", stderr: "", error: undefined });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: hugeMessage,
+        args: ["2033"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "expected runCliBackend to throw");
+    assert.equal(thrown.code, "CLI_BACKEND_FAILED");
+    // Bounded: must not contain the full 5000-char run of "A"s.
+    assert.ok(
+      !thrown.message.includes("A".repeat(5000)),
+      "message must not contain the full unbounded userMessage",
+    );
+    // Neutralized: raw ESC (\x1b) and other C0 control chars must not survive.
+    // eslint-disable-next-line no-control-regex -- asserting the ABSENCE of raw control chars is the point of this test
+    assert.ok(!/[\x00-\x1F\x7F]/.test(thrown.message), "message must not contain raw control characters");
+    assert.match(thrown.message, /\\x1b/, "escaped ESC sequence should appear in place of the raw control char");
+    // Diagnosability preserved: flags and cwd must still be visible.
+    assert.match(thrown.message, /--print/);
+    assert.match(thrown.message, /--dangerously-skip-permissions/);
+    assert.ok(thrown.message.includes(TMP), "cwd must remain visible in the diagnostic");
+  });
+
+  it("sanitizeArgvForLog leaves short, plain argv elements unchanged", () => {
+    const summary = sanitizeArgvForLog(["--print", "hello world", "--dangerously-skip-permissions"]);
+    assert.equal(summary, "--print hello world --dangerously-skip-permissions");
+  });
+
+  it("sanitizeArgvForLog neutralizes Unicode bidi-override characters (#2292)", () => {
+    // U+202E RIGHT-TO-LEFT OVERRIDE — could visually reorder the diagnostic
+    // line in a terminal/log viewer that renders bidi controls.
+    const rlo = "‮evil";
+    const summary = sanitizeArgvForLog([rlo]);
+    assert.ok(!/[‪-‮⁦-⁩]/.test(summary), "message must not contain a raw bidi control char");
+    assert.match(summary, /\\u202e/i, "escaped RLO sequence should appear in place of the raw char");
+  });
+
+  it("sanitizeArgvForLog neutralizes Unicode bidi isolate characters (#2292)", () => {
+    // U+2066 LRI / U+2069 PDI — bidi isolate pair, distinct Unicode block from
+    // the override range above but same visual-spoofing threat model.
+    const isolated = "⁦embedded⁩";
+    const summary = sanitizeArgvForLog([isolated]);
+    assert.ok(!/[‪-‮⁦-⁩]/.test(summary), "message must not contain raw bidi isolate chars");
+    assert.match(summary, /\\u2066/i);
+    assert.match(summary, /\\u2069/i);
+  });
+
+  it("sanitizeArgvForLog neutralizes C1 control characters (#2292)", () => {
+    // U+009B CSI (C1 control range \x80-\x9F) — not covered by the original
+    // C0/DEL-only regex.
+    const csi = "evil";
+    const summary = sanitizeArgvForLog([csi]);
+    // eslint-disable-next-line no-control-regex -- asserting the ABSENCE of raw C1 control chars is the point of this test
+    assert.ok(!/[\x80-\x9F]/.test(summary), "message must not contain a raw C1 control char");
+    assert.match(summary, /\\x9b/i, "escaped CSI sequence should appear in place of the raw char");
+  });
+
+  it("sanitizeArgvForLog still escapes C0/DEL exactly as before (regression guard, #2292)", () => {
+    const summary = sanitizeArgvForLog(["a\tb\x1bc\x7f"]);
+    assert.equal(summary, "a\\x09b\\x1bc\\x7f");
+  });
+
+  it("sanitizeArgvForLog does not split a UTF-16 surrogate pair at the truncation boundary (#2293)", () => {
+    // U+1F600 GRINNING FACE is an astral-plane character represented as a
+    // high+low surrogate pair in UTF-16. Position it so the pair straddles
+    // the MAX_LOGGED_ARGV_ELEMENT_LEN (200) cut: 199 plain chars + the 2-unit
+    // emoji = 201 units, so a naive `.slice(0, 200)` would keep the 199 chars
+    // plus only the emoji's lone high surrogate.
+    const emoji = String.fromCodePoint(0x1f600);
+    const arg = "a".repeat(199) + emoji + "trailing content past the cut";
+    const summary = sanitizeArgvForLog([arg]);
+    const [truncated] = summary.split("…[truncated,");
+    for (let i = 0; i < truncated.length; i++) {
+      const code = truncated.charCodeAt(i);
+      const isHighSurrogate = code >= 0xd800 && code <= 0xdbff;
+      const isLowSurrogate = code >= 0xdc00 && code <= 0xdfff;
+      if (isHighSurrogate) {
+        assert.ok(
+          i + 1 < truncated.length && truncated.charCodeAt(i + 1) >= 0xdc00 && truncated.charCodeAt(i + 1) <= 0xdfff,
+          `lone high surrogate at index ${i} — surrogate pair was split`,
+        );
+      }
+      assert.ok(!isLowSurrogate || (i > 0 && truncated.charCodeAt(i - 1) >= 0xd800 && truncated.charCodeAt(i - 1) <= 0xdbff), `lone low surrogate at index ${i}`);
+    }
+    assert.match(summary, /…\[truncated, \d+ chars\]/);
+  });
+
+  it("sanitizeArgvForLog truncation marker still reports the true pre-trim length (#2293)", () => {
+    const emoji = String.fromCodePoint(0x1f600);
+    const arg = "a".repeat(199) + emoji + "trailing content past the cut";
+    const summary = sanitizeArgvForLog([arg]);
+    assert.match(summary, new RegExp(`…\\[truncated, ${arg.length} chars\\]`));
+  });
+
   it("defaults to the real spawnSync when spawnFn is omitted (backward compatibility)", () => {
     // No behavior assertion beyond "does not throw a TypeError from a missing
     // spawnFn" — this just confirms the default parameter wiring is correct.
@@ -1593,6 +2040,402 @@ describe("runCliBackend spawnFn seam (issue #2033)", () => {
         }),
       /Failed to invoke claude CLI/,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runCliBackend — token usage parsing from --output-format json (issue #2398)
+//
+// #2377/PR #2396 wired real per-phase usage recording for the API backend
+// into bin/engine.mjs's run-log events but explicitly scoped out the CLI
+// backend, which always returned `usage: null`. This closes that gap:
+// runCliBackend() now requests `--output-format json` and, on a successful
+// exit, parses the CLI's single-result JSON envelope for a top-level `usage`
+// object. These tests use the spawnFn injection seam (issue #2033) to
+// control the exact stdout the "CLI" returns, without needing a real
+// fake-binary shim.
+// ---------------------------------------------------------------------------
+
+describe("runCliBackend usage parsing from --output-format json (issue #2398)", () => {
+  it("requests --output-format json in cliArgs", () => {
+    let capturedArgv;
+    const spawnFn = (bin, argv) => {
+      capturedArgv = argv;
+      return { status: 0, stdout: "ok", stderr: "", error: undefined };
+    };
+
+    runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2398",
+      args: ["2398"],
+      cwd: TMP,
+      logger: { log: () => {} },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.ok(capturedArgv.includes("--output-format"));
+    assert.equal(capturedArgv[capturedArgv.indexOf("--output-format") + 1], "json");
+  });
+
+  it("populates usage from a valid JSON envelope with a usage object", () => {
+    const envelope = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      result: "Hi! Done.",
+      usage: {
+        input_tokens: 2,
+        output_tokens: 31,
+        cache_creation_input_tokens: 11630,
+        cache_read_input_tokens: 20334,
+      },
+    });
+    const spawnFn = () => ({ status: 0, stdout: envelope, stderr: "", error: undefined });
+
+    const loggedLines = [];
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2398",
+      args: ["2398"],
+      cwd: TMP,
+      logger: { log: (line) => loggedLines.push(line) },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.deepStrictEqual(result.usage, {
+      input_tokens: 2,
+      output_tokens: 31,
+      cache_creation_input_tokens: 11630,
+      cache_read_input_tokens: 20334,
+    });
+    // Human-readable `.result` string is logged, not the raw JSON blob.
+    assert.ok(
+      loggedLines.some((line) => line === "Hi! Done."),
+      "the parsed envelope's .result string must be logged, not the raw JSON",
+    );
+    assert.ok(
+      !loggedLines.some((line) => line.includes('"type":"result"')),
+      "the raw JSON envelope must never be logged verbatim",
+    );
+  });
+
+  it("normalizes a partial usage object with per-field coercion to 0 for missing fields", () => {
+    // Only input_tokens/output_tokens present — no cache fields, as when
+    // prompt caching is not active (mirrors the SDK's own omission behavior).
+    const envelope = JSON.stringify({
+      result: "done",
+      usage: { input_tokens: 5, output_tokens: 10 },
+    });
+    const spawnFn = () => ({ status: 0, stdout: envelope, stderr: "", error: undefined });
+
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2398",
+      args: ["2398"],
+      cwd: TMP,
+      logger: { log: () => {} },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.deepStrictEqual(result.usage, {
+      input_tokens: 5,
+      output_tokens: 10,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    });
+  });
+
+  it("degrades to usage: null when the JSON envelope has no usage field", () => {
+    const envelope = JSON.stringify({ type: "result", result: "done, no usage field" });
+    const spawnFn = () => ({ status: 0, stdout: envelope, stderr: "", error: undefined });
+
+    const loggedLines = [];
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2398",
+      args: ["2398"],
+      cwd: TMP,
+      logger: { log: (line) => loggedLines.push(line) },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.equal(result.status, "complete");
+    assert.equal(result.usage, null, "usage must degrade to null, not throw, when absent from the envelope");
+    assert.ok(loggedLines.some((line) => line === "done, no usage field"));
+  });
+
+  it("degrades to usage: null when stdout is non-JSON plain text (older CLI without --output-format support)", () => {
+    const plainText = "Hi! ForgeDock's loaded up and ready.";
+    const spawnFn = () => ({ status: 0, stdout: plainText, stderr: "", error: undefined });
+
+    const loggedLines = [];
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2398",
+      args: ["2398"],
+      cwd: TMP,
+      logger: { log: (line) => loggedLines.push(line) },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.equal(result.status, "complete");
+    assert.equal(result.usage, null, "usage must degrade to null on non-JSON output — no crash");
+    // Raw output is still logged for human readability when parsing fails.
+    assert.ok(loggedLines.some((line) => line === plainText));
+  });
+
+  it("degrades to usage: null on malformed/truncated JSON without throwing", () => {
+    const truncated = '{"type":"result","result":"partial","usage":{"input_tok';
+    const spawnFn = () => ({ status: 0, stdout: truncated, stderr: "", error: undefined });
+
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2398",
+      args: ["2398"],
+      cwd: TMP,
+      logger: { log: () => {} },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.equal(result.status, "complete");
+    assert.equal(result.usage, null);
+  });
+
+  it("non-zero exit diagnostics still operate on raw captured output, not JSON-parsed", () => {
+    // The error/diagnostic path (result.status !== 0) must never attempt to
+    // JSON-parse output or gate its behavior on parse success — it always
+    // used raw stdout+stderr and must continue to do so unchanged.
+    const rawErrorOutput = "some non-JSON crash text from an older CLI";
+    const spawnFn = () => ({ status: 1, stdout: rawErrorOutput, stderr: "", error: undefined });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2398",
+        args: ["2398"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown);
+    assert.equal(thrown.code, "CLI_BACKEND_FAILED");
+    assert.match(thrown.message, new RegExp(rawErrorOutput.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  });
+
+  // forge#2422: the success-path JSON envelope must be parsed from stdout
+  // ALONE, not the combined stdout+stderr string. A zero-exit run where the
+  // CLI writes non-JSON noise (deprecation banner, Node warning, etc.) to
+  // stderr while still emitting a clean, valid JSON envelope on stdout must
+  // still have its usage parsed — not silently degrade to null.
+  it("parses usage from stdout alone even when stderr contains non-JSON noise on a zero-exit run (forge#2422)", () => {
+    const envelope = JSON.stringify({
+      type: "result",
+      result: "Hi! Done.",
+      usage: { input_tokens: 7, output_tokens: 13 },
+    });
+    const stderrNoise = "(node:12345) DeprecationWarning: something is deprecated\n";
+    const spawnFn = () => ({ status: 0, stdout: envelope, stderr: stderrNoise, error: undefined });
+
+    const loggedLines = [];
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2422",
+      args: ["2422"],
+      cwd: TMP,
+      logger: { log: (line) => loggedLines.push(line) },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.equal(result.status, "complete");
+    assert.deepStrictEqual(
+      result.usage,
+      {
+        input_tokens: 7,
+        output_tokens: 13,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+      "usage must parse from stdout's clean JSON envelope, not degrade to null because of stderr noise",
+    );
+    assert.ok(loggedLines.some((line) => line === "Hi! Done."));
+  });
+
+  // forge#2424: a non-numeric usage field (e.g. a string, as an alternate/
+  // future CLI JSON shape might emit) must be coerced to a safe numeric
+  // value (0), never passed through raw — otherwise bin/batch-runner.mjs's
+  // tokenCost() (`input + output`) would string-concatenate instead of
+  // numerically add, silently corrupting the cost/run-log signal.
+  it("coerces a non-numeric usage field to 0 instead of passing it through raw (forge#2424)", () => {
+    const envelope = JSON.stringify({
+      type: "result",
+      result: "done",
+      usage: {
+        input_tokens: "1000", // non-numeric (string) — must not pass through raw
+        output_tokens: 250,
+        cache_creation_input_tokens: null,
+        cache_read_input_tokens: undefined,
+      },
+    });
+    const spawnFn = () => ({ status: 0, stdout: envelope, stderr: "", error: undefined });
+
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2424",
+      args: ["2424"],
+      cwd: TMP,
+      logger: { log: () => {} },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.equal(result.status, "complete");
+    assert.deepStrictEqual(result.usage, {
+      input_tokens: 0,
+      output_tokens: 250,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    });
+    assert.equal(typeof result.usage.input_tokens, "number");
+    // Downstream arithmetic (mirrors bin/batch-runner.mjs's tokenCost()) must
+    // numerically add, never string-concatenate.
+    assert.strictEqual(
+      result.usage.input_tokens + result.usage.output_tokens,
+      250,
+      "coerced usage fields must add numerically, not string-concatenate",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractSessionLimitResetTime / CLI_BACKEND_FAILED resetAt (issue #2241)
+//
+// #2259/#2261 already fail-fast + terminate cleanly as "engine-error" (not
+// "needs-human") for a session-limit CLI_BACKEND_FAILED — this closes the one
+// remaining acceptance gap: surfacing *when* the CLI's own reported quota
+// resets, instead of requiring a human to read raw logs. Deliberately narrow:
+// must never fabricate a reset time for ordinary, unrelated crash output.
+// ---------------------------------------------------------------------------
+
+describe("extractSessionLimitResetTime (issue #2241)", () => {
+  it("extracts the reset-time text from a genuine session-limit message", () => {
+    const output = "You've hit your session limit · resets 12:50am (Asia/Calcutta)";
+    assert.equal(extractSessionLimitResetTime(output), "12:50am (Asia/Calcutta)");
+  });
+
+  it("is case-insensitive and tolerates surrounding stdout/stderr noise", () => {
+    const output = "some preamble\nYOU'VE HIT YOUR SESSION LIMIT · RESETS 3:00pm (UTC)\ntrailing noise";
+    assert.equal(extractSessionLimitResetTime(output), "3:00pm (UTC)");
+  });
+
+  it("returns undefined for ordinary non-session-limit crash output (must not fabricate a reset time)", () => {
+    const output = "Captured output (stdout+stderr):\nTypeError: cannot read property 'foo' of undefined\n    at main (/app/index.js:12:3)";
+    assert.equal(extractSessionLimitResetTime(output), undefined);
+  });
+
+  it("returns undefined for empty or falsy output", () => {
+    assert.equal(extractSessionLimitResetTime(""), undefined);
+    assert.equal(extractSessionLimitResetTime(undefined), undefined);
+  });
+
+  it("returns undefined when the 'session limit' phrase appears without a resets clause", () => {
+    const output = "session limit configuration changed — no action needed";
+    assert.equal(extractSessionLimitResetTime(output), undefined);
+  });
+
+  // Security review finding (forge#2241, PR #2323): resetAt is extracted from
+  // untrusted CLI stdout/stderr — the same threat model #2277/#2292/#2293
+  // fixed for the neighboring argvSummary diagnostic. This asserts the fix
+  // (routing resetAt through sanitizeArgvForLog) actually neutralizes control
+  // chars and bidi-override sequences instead of passing them through raw.
+  it("neutralizes control characters and bidi-override sequences in the captured reset-time text (security review finding)", () => {
+    const output = "You've hit your session limit · resets 12:50am\x1b[31m‮evil‬";
+    const resetAt = extractSessionLimitResetTime(output);
+    assert.ok(resetAt, "a reset time should still be extracted");
+    // eslint-disable-next-line no-control-regex -- asserting the ABSENCE of raw control/bidi chars is the point of this test
+    assert.ok(!/[\x00-\x1F\x7F-\x9F‪-‮⁦-⁩]/.test(resetAt),
+      `resetAt must not contain raw control/bidi-override characters: ${JSON.stringify(resetAt)}`);
+    assert.match(resetAt, /\\x1b/, "escaped ESC sequence should appear in place of the raw control char");
+    assert.match(resetAt, /\\u202e/i, "escaped RLO sequence should appear in place of the raw bidi-override char");
+  });
+
+  it("caps an excessively long captured reset-time string (security review finding — no unbounded log growth)", () => {
+    const output = `You've hit your session limit · resets ${"A".repeat(5000)}`;
+    const resetAt = extractSessionLimitResetTime(output);
+    assert.ok(resetAt, "a reset time should still be extracted");
+    assert.ok(!resetAt.includes("A".repeat(5000)), "resetAt must not contain the full unbounded run of characters");
+    assert.match(resetAt, /…\[truncated, \d+ chars\]/, "resetAt must carry the truncation marker for an oversized value");
+  });
+});
+
+describe("runCliBackend attaches resetAt to CLI_BACKEND_FAILED on a session-limit exit (issue #2241)", () => {
+  it("sets err.resetAt when the captured output reports a session-limit reset time", () => {
+    const spawnFn = () => ({
+      status: 1,
+      signal: null,
+      stdout: "You've hit your session limit · resets 12:50am (Asia/Calcutta)",
+      stderr: "",
+      error: undefined,
+    });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2241",
+        args: ["2241"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "runCliBackend must throw on non-zero exit");
+    assert.equal(thrown.code, "CLI_BACKEND_FAILED");
+    assert.equal(thrown.resetAt, "12:50am (Asia/Calcutta)");
+  });
+
+  it("leaves resetAt unset (undefined) for an ordinary non-session-limit crash — never fabricated", () => {
+    const spawnFn = () => ({
+      status: 1,
+      signal: null,
+      stdout: "",
+      stderr: "boom",
+      error: undefined,
+    });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2241",
+        args: ["2241"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "runCliBackend must throw on non-zero exit");
+    assert.equal(thrown.code, "CLI_BACKEND_FAILED");
+    assert.equal(thrown.resetAt, undefined, "resetAt must not be set for unrelated crash output");
   });
 });
 

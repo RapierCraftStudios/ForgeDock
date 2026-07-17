@@ -48,6 +48,8 @@ If you have both a local `claude` CLI and `ANTHROPIC_API_KEY` set and want to pi
 | [`agents`](#agents-optional) | No | Default model for pipeline agents |
 | [`repos`](#repos-optional) | No | Multi-repository routing |
 | [`project_board`](#project_board-optional) | No | GitHub Projects v2 integration |
+| [`orchestration`](#orchestration-optional) | No | `/orchestrate` concurrency and cascade admission policy |
+| [`pipeline`](#pipeline-optional) | No | `/orchestrate` batch-engine tuning (stall detection, token budget, narration) |
 | [`services`](#services-optional) | No | External service URLs and IDs |
 | [`review`](#review-optional) | No | Context injected into review agents |
 | [`devdocs`](#devdocs-optional) | No | Devdocs knowledge tree path |
@@ -287,6 +289,124 @@ gh project field-list <project_number> --owner <owner> --format json \
 | `components` | array | No | Maps `owner/repo` values to Component field option IDs |
 
 **Commands that use this section**: `work-on` (Phase 0C, Phase 6B), `orchestrate`
+
+---
+
+## `orchestration` (OPTIONAL)
+
+Concurrency limits and cascade admission policy for `/orchestrate`'s batch engine. Previously read at runtime (`orchestration.max_concurrent`) but undocumented; this section is the first place it — and the newer `cascade` sub-section (forge#2234) — are formally specified.
+
+```yaml
+orchestration:
+  # Maximum number of /work-on sub-agents dispatched concurrently. Guards against
+  # saturating the Anthropic API rate limit in one burst on a large ready set.
+  # Default: 12.
+  max_concurrent: 12
+
+  cascade:
+    # Named preset expanding to the granular keys below. Any granular key set
+    # explicitly overrides just that field — the preset supplies defaults, not
+    # hard values. Default: "balanced".
+    #   all          — admit everything: no generation cap, no token cap, every
+    #                  heuristic-based defer disabled. For a maintainer draining
+    #                  a backlog who wants /orchestrate to "pick up everything."
+    #   balanced     — the pre-#2234 hardcoded behavior, unchanged: generation
+    #                  cap at 1 (i.e. cascade-spawned findings deferred),
+    #                  900000-token per-batch ceiling, idle/keyword/same-file
+    #                  heuristics all active.
+    #   conservative — same admission shape as balanced, with a lower
+    #                  (450000) token ceiling for cost-sensitive or noisy repos.
+    policy: "balanced"
+
+    # Maximum cascade generation depth admitted. Generation 1 = an original
+    # issue (not spawned from a review-finding). Generation 2 = spawned from a
+    # review-finding. Generation 3 = spawned from a finding that was itself
+    # spawned from a review-finding. Accepts a positive integer or the literal
+    # string "unlimited". Governs Phase 1 resolve-time admission only (the
+    # `cascade`/`review-findings`/`findings` resolution in phase-1-resolve.md)
+    # — it does NOT relax Step 4C's absolute autonomous-cascade defer, which
+    # stays hardcoded regardless of this value (see phase-4-execution.md Step
+    # 4C rule 1). This is what makes "admit gen-2, stop at gen-3" expressible,
+    # which the pre-#2234 --allow-gen2 flag (all-or-nothing) could not say.
+    # Default: 1 (from the "balanced" preset); "unlimited" under "all".
+    max_generation: 1
+
+    # Per-batch token ceiling for Step 4C's review-finding cascade dispatch.
+    # New home for the same lever previously read only as
+    # `pipeline.token_budget_per_batch` (kept working as a deprecated alias —
+    # see the `pipeline` section below). Accepts a positive integer or
+    # "unlimited". Default: 900000 (from "balanced"); 450000 under
+    # "conservative"; "unlimited" under "all".
+    token_budget: 900000
+
+    # Whether a fully human-gated original batch (forge#1814's
+    # BATCH_FULLY_GATED — every original-batch issue DONE/FAILED/GATED with at
+    # least one GATED) suppresses further cascade-finding dispatch. Default:
+    # true (from "balanced"); false under "all".
+    defer_on_batch_gated: true
+
+    # Whether the comment/typo title-keyword heuristic defers P3-and-below
+    # cascade findings. Default: true (from "balanced"); false under "all".
+    keyword_heuristic: true
+
+    # Whether a P3 finding sharing a file with the active batch is deferred
+    # (avoids serializing agents on same-file predecessor edges). Default:
+    # true (from "balanced"); false under "all".
+    p3_same_file_defer: true
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `max_concurrent` | integer | No | Max concurrent `/work-on` sub-agent dispatch. Default: 12 |
+| `cascade.policy` | string | No | `all` \| `balanced` \| `conservative`. Default: `balanced` |
+| `cascade.max_generation` | integer or `"unlimited"` | No | Max cascade generation admitted at Phase 1 resolve time. Default: 1 |
+| `cascade.token_budget` | integer or `"unlimited"` | No | Per-batch token ceiling for Step 4C cascade dispatch. Default: 900000 (deprecated alias: `pipeline.token_budget_per_batch`) |
+| `cascade.defer_on_batch_gated` | boolean | No | Suppress cascade dispatch when the original batch is fully human-gated. Default: `true` |
+| `cascade.keyword_heuristic` | boolean | No | Defer P3-and-below comment/typo-titled findings. Default: `true` |
+| `cascade.p3_same_file_defer` | boolean | No | Defer P3 findings sharing a file with the active batch. Default: `true` |
+
+**Hard invariant — not configurable**: safety exclusions (findings whose `## Problem` section indicates security/billing/anti-bot/auth concerns) are never batched and never auto-admitted by any `cascade.policy`, including `all`. That exclusion is enforced upstream of this section (the P3 batching eligibility check) and has no corresponding key here by design.
+
+**CLI overrides**: `--policy`, `--max-generation`, `--token-budget` on `/orchestrate` take precedence over these keys for a single invocation — see `commands/orchestrate/config.md` → "Cascade Policy CLI Flags".
+
+**Commands that use this section**: `orchestrate`
+
+---
+
+## `pipeline` (OPTIONAL)
+
+Tuning knobs for `/orchestrate`'s batch engine — stall detection, narration verbosity, and (deprecated alias only, see `orchestration.cascade` above) the review-finding cascade token budget. All keys optional; sane defaults apply when omitted.
+
+```yaml
+pipeline:
+  # Minutes an agent may sit idle (no FORGE:HEARTBEAT / label change) before
+  # /orchestrate's stall detector treats it as stuck and attempts an
+  # auto-resume. Default: 15.
+  stall_timeout_minutes: 15
+
+  # Deprecated alias for orchestration.cascade.token_budget (forge#2234) — kept
+  # working so existing configs are unaffected. When both are set,
+  # orchestration.cascade.token_budget wins. Default: 900000.
+  token_budget_per_batch: 900000
+
+  # Estimated token cost of a single P3-or-lower review-finding /work-on
+  # pipeline, used to decrement the token budget above. Default: 150000.
+  token_estimate_per_finding: 150000
+
+  # Narration verbosity for /orchestrate's per-completion status updates.
+  # "terse" (default): one line per completion. "verbose": adds a running
+  # per-completion recap table. Cosmetic only — never changes which phases run.
+  narration: "terse"
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `stall_timeout_minutes` | integer | No | Idle minutes before the stall detector attempts auto-resume. Default: 15 |
+| `token_budget_per_batch` | integer | No | **Deprecated** — use `orchestration.cascade.token_budget`. Default: 900000 |
+| `token_estimate_per_finding` | integer | No | Estimated tokens per P3-or-lower cascade finding. Default: 150000 |
+| `narration` | string | No | `terse` \| `verbose`. Default: `terse` |
+
+**Commands that use this section**: `orchestrate`
 
 ---
 

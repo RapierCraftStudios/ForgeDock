@@ -5,7 +5,29 @@
  * @typedef ... (see plan "Shared types")
  */
 
-export const TERMINAL_REASONS = ["merged", "invalid", "needs-human", "decomposed"];
+// forge#2378: marker/label strings are single-sourced from packages/protocol's
+// phase registry (itself derived from RESERVED_TYPES' completionSentinel fields
+// where available) — do NOT reintroduce inline "FORGE:..."/"INVESTIGATION:..."/
+// "workflow:merged" literals in this file. bin/hooks/interactive-engine.mjs
+// imports the identical registry, so the two can no longer drift apart the way
+// they did in forge#2375/PR#2395.
+import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
+
+// forge#2261: "engine-error" is a distinct terminal reason for engine/tool-level
+// failures (e.g. an exhausted retry loop where the runner itself never once
+// succeeded, or a fail-fast CLI_BACKEND_FAILED/NO_API_KEY/NO_SDK throw) — kept
+// separate from "needs-human" so it is never misclassified as a genuine
+// human-judgment block by /orchestrate's classify_predecessor_state().
+//
+// forge#2379: "awaiting-merge" mirrors the `workflow:awaiting-merge` label
+// commands/work-on/remediate.md's Phase M8 sets on a HELD-AWAITING-MERGE
+// re-gate outcome (a clean re-review that didn't clear the #1809 Q1 auto-land
+// bar) — already recognized as a terminal state by work-on.md's Universal
+// Phase Dispatcher; this just gives the `remediate` phase's detectOutcome a
+// matching engine-level terminal reason to report instead of overloading
+// "needs-human" (which would misrepresent a clean-but-unmet-bar re-review as
+// a fresh human-judgment escalation).
+export const TERMINAL_REASONS = ["merged", "invalid", "needs-human", "decomposed", "engine-error", "awaiting-merge"];
 
 /**
  * Fetch the issue's comments. Returns both:
@@ -50,14 +72,19 @@ async function issueMarkers(issue, io) {
  *
  * Returns -1 (rather than 0) when the underlying `git` call itself failed
  * (lock contention, transient I/O error, ref not yet fetched, etc.) — distinct
- * from a genuine, successfully-computed 0. This distinction matters to the
+ * from a genuine, successfully-computed 0. More generally, -1 means "this
+ * count was not computed" — that includes both a git failure here AND a
+ * caller that had no resolvable branch to check in the first place (forge#2211:
+ * `detectOutcome` mirrors this same -1 sentinel for its unresolved-branch case
+ * rather than synthesizing its own 0). This distinction matters to the
  * build phase's `detectOutcome` (forge#2176): a *genuine* 0 ahead (git ran
  * cleanly and reported no new commits) is a stable fixed point safe to mark
- * non-retryable, but a transient git error folded into the same 0 would not
- * be — the very next attempt could see a different, non-erroring result with
- * no external input having changed, so it must remain retryable. Callers that
- * only compare `> 0` (reconcile()'s satisfied check) are unaffected: -1 is
- * still not `> 0`, so existing behavior there is unchanged.
+ * non-retryable, but a transient git error — or a not-yet-resolved branch —
+ * folded into the same 0 would not be — the very next attempt could see a
+ * different, computed result with no external input having changed, so it
+ * must remain retryable. Callers that only compare `> 0` (reconcile()'s
+ * satisfied check) are unaffected: -1 is still not `> 0`, so existing
+ * behavior there is unchanged.
  */
 async function commitsAhead(lane, branch, io) {
   try {
@@ -88,6 +115,36 @@ async function commitsAhead(lane, branch, io) {
  * markers, not a bespoke parser for this one field.
  */
 function has(blob, marker) { return blob.includes(marker); }
+
+/**
+ * Fetch the issue's live `state` (OPEN/CLOSED) and `labels` in one call.
+ *
+ * This is the single data source for two consumers (forge#2352):
+ *  - the `close` phase's `reconcile`/`detectOutcome` below (which already made
+ *    this exact call inline before this helper existed — factored out here so
+ *    both call sites share one shape instead of drifting independently);
+ *  - the divergence guard in `bin/engine.mjs`'s `runIssue()` phase loop, which
+ *    calls this once per loop iteration (before running any phase other than
+ *    `close`) to detect an issue that was closed / labeled `workflow:invalid`
+ *    / labeled `needs-human` out from under an in-flight run.
+ *
+ * Returns `{ ok: false, state: null, labels: [] }` on any fetch/parse failure
+ * — callers must treat `ok: false` as "could not determine, do not act on
+ * this" rather than "issue has no labels/is not closed". This mirrors the
+ * existing fail-open behavior `close`'s `reconcile` already had (a `gh`
+ * failure there degrades to "not satisfied", never to a false positive).
+ */
+export async function issueSnapshot(issue, io) {
+  const out = await io.gh(["issue", "view", String(issue), "--json", "state,labels"]);
+  let j;
+  try {
+    j = JSON.parse(out || "{}");
+  } catch {
+    return { ok: false, state: null, labels: [] };
+  }
+  const labels = (j.labels || []).map((l) => l.name || l);
+  return { ok: true, state: j.state || null, labels };
+}
 
 /**
  * Parse the real branch name out of the `FORGE:BUILDER` comment's
@@ -129,7 +186,7 @@ function parseBranchFromMarkers(comments) {
   const re = /\*\*Branch\*\*:\s*`([^`]+)`/;
   for (let i = comments.length - 1; i >= 0; i--) {
     const body = comments[i];
-    if (!body || !body.includes("FORGE:BUILDER:COMPLETE")) continue;
+    if (!body || !body.includes(PHASE_MARKERS.build.completionMarker)) continue;
     const match = body.match(re);
     if (match) return match[1];
   }
@@ -155,15 +212,42 @@ export const PHASES = [
     entryCondition: () => true,
     async detectOutcome(state, io) {
       const { blob } = await issueMarkers(state.issue, io);
-      if (has(blob, "INVESTIGATION:INVALID"))
+      if (has(blob, PHASE_MARKERS.investigate.invalidMarker))
         return { status: "committed", terminalReason: "invalid", outputs: { verdict: "INVALID" } };
-      if (has(blob, "DECOMPOSE:YES"))
+      if (has(blob, PHASE_MARKERS.investigate.decomposedMarker))
         return { status: "committed", terminalReason: "decomposed", outputs: { decompose: true } };
-      if (has(blob, "INVESTIGATION:COMPLETE"))
+      if (has(blob, PHASE_MARKERS.investigate.completionMarker))
         return { status: "committed", outputs: { verdict: "CONFIRMED" } };
-      return { status: "failed", detail: "no INVESTIGATION:COMPLETE marker" };
+      return { status: "failed", detail: `no ${PHASE_MARKERS.investigate.completionMarker} marker` };
     },
-    isTerminalAfter: (s) => s.terminalReason === "invalid" || s.terminalReason === "decomposed",
+    // forge#2379: no longer terminal after "decomposed" — that reason now
+    // hands off to the "decompose" phase below (see bin/engine.mjs's
+    // runIssue(), which special-cases exactly this phase/reason combination
+    // to skip its own immediate-terminate check and let pickPhase run again).
+    // "invalid" is unaffected — investigate.md never posts anything further
+    // after INVESTIGATION:INVALID, so that path still terminates in place.
+    isTerminalAfter: (s) => s.terminalReason === "invalid",
+  },
+  {
+    // forge#2379: "decompose" was previously only a terminal reason on
+    // investigate (the run stopped the instant DECOMPOSE:YES was seen) —
+    // work-on/decompose (sub-issue fan-out, FORGE:DECOMPOSED posting) was
+    // never actually dispatched by the engine. This phase closes that gap:
+    // entryCondition fires exactly when investigate's own outcome signaled
+    // decompose, so pickPhase now genuinely dispatches work-on/decompose
+    // before the run terminates.
+    id: "decompose",
+    command: "work-on/decompose",
+    entryCondition: (s) => s.terminalReason === "decomposed",
+    async detectOutcome(state, io) {
+      const { blob } = await issueMarkers(state.issue, io);
+      if (has(blob, PHASE_MARKERS.decompose.completionMarker))
+        return { status: "committed", terminalReason: "decomposed", outputs: {} };
+      return { status: "failed", detail: `no ${PHASE_MARKERS.decompose.completionMarker} marker` };
+    },
+    // Always terminal: decomposition spawns independent sub-issues, each of
+    // which runs its own /work-on pipeline — nothing more for THIS run to do.
+    isTerminalAfter: () => true,
   },
   {
     id: "context",
@@ -173,12 +257,12 @@ export const PHASES = [
       // Idempotent resume: FORGE:CONTEXT:COMPLETE present → skip the LLM re-run.
       // Bare FORGE:CONTEXT matches a partial/interrupted annotation — require :COMPLETE.
       const { blob } = await issueMarkers(state.issue, io);
-      return has(blob, "FORGE:CONTEXT:COMPLETE") ? { satisfied: true } : { satisfied: false };
+      return has(blob, PHASE_MARKERS.context.completionMarker) ? { satisfied: true } : { satisfied: false };
     },
     async detectOutcome(state, io) {
       const { blob } = await issueMarkers(state.issue, io);
       // Context is non-critical: a missing marker is a VISIBLE skip, not a hard fail (spec §7).
-      if (has(blob, "FORGE:CONTEXT")) return { status: "committed", outputs: {} };
+      if (has(blob, PHASE_MARKERS.context.presenceMarker)) return { status: "committed", outputs: {} };
       return { status: "committed", outputs: { skipped: true, which: "context" } };
     },
   },
@@ -190,13 +274,13 @@ export const PHASES = [
       // Idempotent resume: FORGE:ARCHITECT:COMPLETE present → skip the LLM re-run.
       // Bare FORGE:ARCHITECT matches a partial/interrupted annotation — require :COMPLETE.
       const { blob } = await issueMarkers(state.issue, io);
-      return has(blob, "FORGE:ARCHITECT:COMPLETE") ? { satisfied: true } : { satisfied: false };
+      return has(blob, PHASE_MARKERS.architect.completionMarker) ? { satisfied: true } : { satisfied: false };
     },
     async detectOutcome(state, io) {
       const { blob } = await issueMarkers(state.issue, io);
-      return has(blob, "FORGE:ARCHITECT:COMPLETE")
+      return has(blob, PHASE_MARKERS.architect.completionMarker)
         ? { status: "committed", outputs: {} }
-        : { status: "failed", detail: "no FORGE:ARCHITECT:COMPLETE" };
+        : { status: "failed", detail: `no ${PHASE_MARKERS.architect.completionMarker}` };
     },
   },
   {
@@ -209,19 +293,24 @@ export const PHASES = [
       // check it's already ahead of base → treat as done, skip the LLM (forge#2174).
       const { blob, comments } = await issueMarkers(state.issue, io);
       const branch = resolveBranch(state, comments);
-      if (branch && has(blob, "FORGE:BUILDER:COMPLETE") && (await commitsAhead(state.lane, branch, io)) > 0) {
+      if (branch && has(blob, PHASE_MARKERS.build.completionMarker) && (await commitsAhead(state.lane, branch, io)) > 0) {
         return { satisfied: true, outputs: { branch } };
       }
       return { satisfied: false };
     },
     async detectOutcome(state, io) {
       const { blob, comments } = await issueMarkers(state.issue, io);
-      const complete = has(blob, "FORGE:BUILDER:COMPLETE");        // #1305: require :COMPLETE …
+      const complete = has(blob, PHASE_MARKERS.build.completionMarker); // #1305: require :COMPLETE …
       // Resolve the branch the builder actually created from the FORGE:BUILDER:COMPLETE
       // comment (ground truth), scoped to that specific comment — see
       // resolveBranch()/parseBranchFromMarkers() above (forge#2174, forge#2184).
       const branch = resolveBranch(state, comments);
-      const ahead = branch ? await commitsAhead(state.lane, branch, io) : 0; // … AND real commits
+      // forge#2211: an unresolved branch means the commit count was never
+      // computed at all — mirror commitsAhead()'s own "-1 = not computed"
+      // sentinel here instead of synthesizing a `0`, which is indistinguishable
+      // from a genuine git-confirmed zero and would wrongly trip the
+      // non-retryable guard below on the very first attempt.
+      const ahead = branch ? await commitsAhead(state.lane, branch, io) : -1; // … AND real commits
       if (complete && ahead > 0) return { status: "committed", outputs: { branch } };
       const detail = `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}`;
       // forge#2176: when the builder has already posted FORGE:BUILDER:COMPLETE
@@ -241,10 +330,14 @@ export const PHASES = [
       // retry, so this branch intentionally leaves `retryable` unset
       // (defaults to retryable in bin/engine.mjs's runPhaseWithRetry).
       //
-      // `ahead === -1` means commitsAhead() itself failed (transient git
-      // error), NOT a confirmed zero — that is exactly the kind of failure
-      // a retry might resolve, so it must stay retryable too. Only a
-      // successfully-computed ahead of 0 (a real "nothing new to commit"
+      // `ahead === -1` means the count was never computed — either
+      // commitsAhead() itself failed (transient git error) or the branch
+      // could not be resolved at all (forge#2211: `resolveBranch()` returned
+      // null, e.g. on the very first build attempt before any
+      // FORGE:BUILDER:COMPLETE comment names a branch). Neither is a
+      // confirmed zero — both are exactly the kind of failure a retry might
+      // resolve, so both must stay retryable. Only a successfully-computed
+      // ahead of 0 on a *resolved* branch (a real "nothing new to commit"
       // result) is the true fixed point this non-retryable signal targets.
       if (complete && ahead !== -1) return { status: "failed", detail, retryable: false };
       return { status: "failed", detail };
@@ -267,26 +360,99 @@ export const PHASES = [
     },
   },
   {
+    // forge#2379: `remediate` re-drives a needs-human PR via
+    // commands/work-on/remediate.md (checkout → classify FIXABLE/UNFIXABLE →
+    // fix → quality-gate → re-review → #1809 auto-land bar → merge-or-hold),
+    // finishing with a `FORGE:REMEDIATION`/`FORGE:REMEDIATION:COMPLETE`
+    // marker posted to BOTH the PR and this issue (Phase M8), carrying a
+    // `**Re-gate outcome**: AUTO-LANDED | HELD-AWAITING-MERGE | RE-ESCALATED
+    // | UNFIXABLE` field. This entry registers that outcome vocabulary in the
+    // phase table (closing the literal "remediate appears nowhere in the
+    // engine" gap) and is fully unit-tested via `pickPhase`/`detectOutcome`.
+    //
+    // KNOWN LIMITATION (documented, not fixed here — see forge#2379
+    // investigation "What We Found"): `review`'s `"blocked"` outcome (the
+    // needs-human escalation) causes `bin/engine.mjs`'s `runIssue()` to
+    // `terminate()` immediately, before `review` is ever added to
+    // `state.committed` — and the divergence guard just above that also
+    // pauses before any non-`close` phase once the issue carries
+    // `needs-human`. So a single continuous `runIssue()` walk cannot reach
+    // this phase's `entryCondition` today. In practice `remediate.md` is
+    // (correctly, per `work-on.md` Phase 0A.1) invoked as its own separate
+    // top-level entry point (`/work-on <pr> --remediate`), not as a
+    // continuation of the original run — this phase entry documents and
+    // tests the target state shape for a future run that reconstructs
+    // `committed`/`terminalReason` from live GitHub state (e.g. a dedicated
+    // remediation-run entry point) rather than from a fresh local run-log.
+    // Making that live wiring real is out of this issue's scope — it needs
+    // changes to `review`'s `"blocked"` contract and to `bin/tests/engine.test.mjs`,
+    // both outside this issue's declared file set.
+    id: "remediate",
+    command: "work-on/remediate",
+    entryCondition: (s) => s.committed.includes("review") && s.terminalReason === "needs-human",
+    async detectOutcome(state, io) {
+      const { blob } = await issueMarkers(state.issue, io);
+      if (!has(blob, PHASE_MARKERS.remediate.completionMarker))
+        return { status: "failed", detail: `no ${PHASE_MARKERS.remediate.completionMarker} marker` };
+      // Parse the **Re-gate outcome**: field remediate.md's Phase M8 posts
+      // (e.g. "**Re-gate outcome**: AUTO-LANDED to staging" — value is the
+      // first whitespace-delimited token after the colon).
+      const match = blob.match(/\*\*Re-gate outcome\*\*:\s*([A-Z-]+)/);
+      const reGateOutcome = match ? match[1] : null;
+      switch (reGateOutcome) {
+        case "AUTO-LANDED":
+          // remediate.md's own Phase M8 already drove close in this case
+          // (see that file's "If the outcome was AUTO-LANDED" branch) — the
+          // issue should already carry workflow:merged by the time this
+          // reads, but the terminal reason here is what THIS phase reports,
+          // independent of close's own idempotent detectOutcome re-check.
+          return { status: "committed", terminalReason: "merged", outputs: { reGateOutcome } };
+        case "HELD-AWAITING-MERGE":
+          return { status: "committed", terminalReason: "awaiting-merge", outputs: { reGateOutcome } };
+        case "RE-ESCALATED":
+        case "UNFIXABLE":
+          // Both leave the issue at needs-human (a fresh escalation, or a
+          // policy judgment call respectively) — reuse the existing
+          // "needs-human" terminal reason rather than inventing two more,
+          // matching the #2352/#2353 precedent of reusing an existing
+          // TERMINAL_REASONS value where semantically equivalent.
+          return { status: "committed", terminalReason: "needs-human", outputs: { reGateOutcome } };
+        default:
+          return { status: "failed", detail: `FORGE:REMEDIATION:COMPLETE present but Re-gate outcome unrecognized/missing: ${reGateOutcome || "none"}` };
+      }
+    },
+    isTerminalAfter: () => true,
+  },
+  {
     id: "close",
     command: "work-on/close",
     entryCondition: (s) => s.committed.includes("review"),
     async reconcile(state, io) {
       // Idempotent resume: issue already closed or workflow:merged label set → skip the LLM re-run.
-      const out = await io.gh(["issue", "view", String(state.issue), "--json", "state,labels"]);
-      let j;
-      try { j = JSON.parse(out || "{}"); } catch { return { satisfied: false }; }
-      const labels = (j.labels || []).map((l) => l.name || l);
-      return (j.state === "CLOSED" || labels.includes("workflow:merged"))
+      const snap = await issueSnapshot(state.issue, io);
+      if (!snap.ok) return { satisfied: false };
+      return (snap.state === "CLOSED" || snap.labels.includes(PHASE_MARKERS.close.completionLabel))
         ? { satisfied: true }
         : { satisfied: false };
     },
     async detectOutcome(state, io) {
-      const out = await io.gh(["issue", "view", String(state.issue), "--json", "state,labels"]);
-      let j;
-      try { j = JSON.parse(out || "{}"); } catch { return { status: "failed", detail: "malformed gh response" }; }
-      const labels = (j.labels || []).map((l) => l.name || l);
-      if (j.state === "CLOSED" || labels.includes("workflow:merged"))
+      const snap = await issueSnapshot(state.issue, io);
+      if (!snap.ok) return { status: "failed", detail: "malformed gh response" };
+      // forge#2353: a bare `state === "CLOSED"` is NOT sufficient evidence that
+      // a PR actually merged — the divergence guard in bin/engine.mjs (forge#2352)
+      // can now route a closed-as-invalid or otherwise closed-not-merged issue
+      // into this phase (see that guard's own comment for why `close` is exempt
+      // from it), and reporting `terminalReason: "merged"` for that case would
+      // inflate run-log/telemetry merge-rate consumers with runs that never
+      // shipped a PR. Only `workflow:merged` — the label the review phase's own
+      // merge flow sets — is proof of an actual merge. A CLOSED issue without
+      // that label is still a real terminal state (nothing left for this phase
+      // to do), just not a "merged" one — reuse the existing "invalid" reason
+      // (already in TERMINAL_REASONS) rather than inventing a new one.
+      if (snap.labels.includes(PHASE_MARKERS.close.completionLabel))
         return { status: "committed", terminalReason: "merged", outputs: {} };
+      if (snap.state === "CLOSED")
+        return { status: "committed", terminalReason: "invalid", outputs: {} };
       return { status: "failed", detail: "issue not closed" };
     },
     isTerminalAfter: () => true,

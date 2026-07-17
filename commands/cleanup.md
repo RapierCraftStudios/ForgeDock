@@ -381,7 +381,7 @@ Do NOT call `gh api ... -X PATCH -f state=closed` on any milestone. This phase i
 
 ### Step 4B.1: Fetch open batchable P3 findings
 
-Eligibility is **default-batchable**: any open `review-finding` + `priority:P3` issue qualifies unless excluded below. The `<!-- FORGE:BATCHABLE -->` marker (still appended by `review-pr.md` at finding-creation time) is honored when present but is no longer required — matching `phase-1-resolve.md`'s eligibility rule. <!-- Changed: forge#1828 — marker was previously mandatory -->
+Eligibility is **default-batchable**: any open `review-finding` + a P3 priority label (`priority:P3` or bare `P3` — see `phase-1-resolve.md`'s "Priority label schema" note; some consumer repos label externally/legacy findings with the bare form) issue qualifies unless excluded below. The `<!-- FORGE:BATCHABLE -->` marker (still appended by `review-pr.md` at finding-creation time) is honored when present but is no longer required — matching `phase-1-resolve.md`'s eligibility rule. <!-- Changed: forge#1828 — marker was previously mandatory; forge#2232 — priority-schema tolerance -->
 
 ```bash
 # Find all open, unbatched P3 review findings. Excludes findings already
@@ -389,12 +389,16 @@ Eligibility is **default-batchable**: any open `review-finding` + `priority:P3` 
 # exclusions (security, billing, anti-bot, auth) as the other two batching
 # sites, using the identical jq test() (Oniguruma) patterns so classification
 # cannot diverge between the three sweep locations. <!-- Changed: forge#1828 -->
+# NOTE: "priority:P3" is intentionally NOT in the --label filter — GH label filters are
+# exact-match and can't OR it with bare "P3", so the P3 test moves into the jq predicate
+# below (schema-tolerant, mirrors phase-1-resolve.md exactly). <!-- Added: forge#2232 -->
 UNBATCHED_P3=$(gh issue list {GH_FLAG} \
   --state open \
-  --label "review-finding,priority:P3" \
+  --label "review-finding" \
   --limit 500 \
   --json number,title,body,labels,createdAt \
-  --jq '.[] | select(([.labels[].name] | any(. == "batch")) | not)
+  --jq '.[] | select([.labels[].name] | any(test("^(priority:)?P3$")))
+         | select(([.labels[].name] | any(. == "batch")) | not)
          | select((.title | test("security|billing|anti-bot|auth"; "i")) | not)
          | select(.body | test("## Problem[\\s\\S]{0,500}(security|billing|anti-bot|auth)"; "i") | not)
          | select(([.labels[].name] | any(. == "security" or . == "billing" or . == "anti-bot" or . == "auth")) | not)')

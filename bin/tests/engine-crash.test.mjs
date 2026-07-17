@@ -108,7 +108,7 @@ function makeWorld() {
         w.reviewRuns++;
         if (!w.pr) { w.prCreateCount++; w.pr = 7; w.prMerged = true; }
         break;
-      case "work-on/close": w.issueState = "CLOSED"; break;
+      case "work-on/close": w.issueState = "CLOSED"; w.labels.push("workflow:merged"); break;
     }
     return { status: "complete" };
   };
@@ -294,7 +294,7 @@ describe("crash injection: forge#2184 comment-scoped last-match resume semantics
         w.commitsAheadByBranch[REAL_BRANCH] = 2;
       },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
     const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
 

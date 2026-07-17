@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics } from "../engine-cli.mjs";
+import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine } from "../engine-cli.mjs";
 import { serializeState } from "../engine/state.mjs";
 import { appendEvent } from "../engine/runlog.mjs";
 
@@ -384,6 +384,65 @@ describe("runFromCli --repo targeting guard", () => {
   });
 });
 
+describe("runFromCli phase progress output (forge#2240)", () => {
+  it("prints the run-log path at start, before runIssue is even invoked", async () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const io = { gh: async () => { throw new Error("should not be called"); } };
+    const logs = [];
+    let runLogPrintedBeforeRunIssue = false;
+    const runIssue = mock.fn(async () => {
+      // At the moment runIssue is invoked, the run-log line must already be there.
+      runLogPrintedBeforeRunIssue = logs.some((l) => l.includes("run-log:"));
+      return { terminalReason: "merged" };
+    });
+
+    const originalLog = console.log;
+    console.log = (...args) => logs.push(args.join(" "));
+    try {
+      await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
+    } finally {
+      console.log = originalLog;
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    assert.ok(runLogPrintedBeforeRunIssue, "run-log path must be printed before runIssue starts, not only in a completion summary");
+    assert.ok(logs.some((l) => l.includes(`run-log: ${join(dir, "42.jsonl")}`)));
+  });
+
+  it("emits a stdout line for each phase_enter/phase_exit onProgress event from runIssue", async () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const io = { gh: async () => { throw new Error("should not be called"); } };
+    const runIssue = mock.fn(async ({ onProgress }) => {
+      // Simulate a multi-phase run in flight — more than the startup banner.
+      onProgress({ event: "phase_enter", phase: "investigate" });
+      onProgress({ event: "phase_exit", phase: "investigate", status: "committed" });
+      onProgress({ event: "phase_enter", phase: "build" });
+      onProgress({ event: "phase_exit", phase: "build", status: "blocked", detail: "no commits yet" });
+      return { terminalReason: "needs-human" };
+    });
+
+    const logs = [];
+    const originalLog = console.log;
+    console.log = (...args) => logs.push(args.join(" "));
+    try {
+      await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
+    } finally {
+      console.log = originalLog;
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    const output = logs.join("\n");
+    assert.match(output, /phase investigate started/);
+    assert.match(output, /phase investigate committed/);
+    assert.match(output, /phase build started/);
+    assert.match(output, /phase build blocked: no commits yet/);
+    // A run in flight for longer than one phase produces more than just the
+    // run-log line and the final summary line — the explicit regression this
+    // issue targets.
+    assert.ok(logs.length > 2, "expected more than just the run-log line and the completion summary");
+  });
+});
+
 describe("runFromCli --backend/--model forwarding (forge#2028)", () => {
   it("forwards --backend and --model to runIssue when both are supplied", async () => {
     const io = { gh: async () => { throw new Error("should not be called"); } };
@@ -445,6 +504,41 @@ describe("formatTerminalDiagnostics (forge#2175)", () => {
     }
   });
 
+  it("uses the run's effective maxAttempts (forge#2226) rather than the DEFAULT_MAX_ATTEMPTS constant", () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    try {
+      appendEvent(dir, 30001, { event: "RUN_START", issue: 30001, run: "r_30001_staging", lane: "staging" });
+      appendEvent(dir, 30001, { event: "PHASE_START", phase: "build", attempt: 1 });
+      appendEvent(dir, 30001, { event: "PHASE_FAILED", phase: "build", attempt: 1, reason: "transient", maxAttempts: 5 });
+      appendEvent(dir, 30001, { event: "PHASE_START", phase: "build", attempt: 2 });
+      appendEvent(dir, 30001, { event: "PHASE_FAILED", phase: "build", attempt: 2, reason: "transient", maxAttempts: 5 });
+      appendEvent(dir, 30001, { event: "RUN_TERMINAL", reason: "needs-human" });
+
+      const out = formatTerminalDiagnostics(dir, 30001);
+
+      assert.match(out, /phase:\s+build \(failed 2\/5 attempts\)/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to DEFAULT_MAX_ATTEMPTS for legacy run-logs whose PHASE_FAILED events predate the maxAttempts field (forge#2226)", () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    try {
+      appendEvent(dir, 30002, { event: "RUN_START", issue: 30002, run: "r_30002_staging", lane: "staging" });
+      appendEvent(dir, 30002, { event: "PHASE_START", phase: "build", attempt: 1 });
+      // Legacy event shape — no maxAttempts field at all.
+      appendEvent(dir, 30002, { event: "PHASE_FAILED", phase: "build", attempt: 1, reason: "legacy failure" });
+      appendEvent(dir, 30002, { event: "RUN_TERMINAL", reason: "needs-human" });
+
+      const out = formatTerminalDiagnostics(dir, 30002);
+
+      assert.match(out, /phase:\s+build \(failed 1\/3 attempts\)/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("omits the phase/reason lines but still prints state and run-log path when there is no PHASE_FAILED event", () => {
     const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
     try {
@@ -488,6 +582,74 @@ describe("formatTerminalDiagnostics (forge#2175)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("appends an aggregate usage line when at least one PHASE_COMMIT/PHASE_FAILED event carries usage (forge#2399)", () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    try {
+      appendEvent(dir, 40001, { event: "RUN_START", issue: 40001, run: "r_40001_staging", lane: "staging" });
+      appendEvent(dir, 40001, { event: "PHASE_COMMIT", phase: "investigate", outputs: {}, usage: { input_tokens: 100, output_tokens: 20, cache_creation_input_tokens: 5, cache_read_input_tokens: 50 } });
+      appendEvent(dir, 40001, { event: "PHASE_COMMIT", phase: "context", outputs: {}, usage: { input_tokens: 30, output_tokens: 10, cache_creation_input_tokens: 0, cache_read_input_tokens: 15 } });
+      appendEvent(dir, 40001, { event: "RUN_TERMINAL", reason: "needs-human" });
+
+      const out = formatTerminalDiagnostics(dir, 40001);
+
+      assert.match(out, /usage:\s+130 in \/ 30 out \(65 cache-read \/ 5 cache-write\)/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("omits the usage line entirely (no misleading 0 tokens line) when no event carries usage data (forge#2399)", () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    try {
+      appendEvent(dir, 40002, { event: "RUN_START", issue: 40002, run: "r_40002_staging", lane: "staging" });
+      appendEvent(dir, 40002, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+      appendEvent(dir, 40002, { event: "RUN_TERMINAL", reason: "needs-human" });
+
+      const out = formatTerminalDiagnostics(dir, 40002);
+
+      assert.ok(!out.includes("usage:"), "must not print a usage: line when no event carries usage");
+      assert.ok(!/\b0\s*(tokens|in)\b/i.test(out), "must not print a misleading zero-token line");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("aggregateUsage / formatUsageLine (forge#2399)", () => {
+  it("sums usage across PHASE_COMMIT and PHASE_FAILED events, guarding each field with ?? 0", () => {
+    const events = [
+      { event: "RUN_START" },
+      { event: "PHASE_COMMIT", usage: { input_tokens: 10, output_tokens: 5 } },
+      { event: "PHASE_FAILED", usage: { input_tokens: 3, cache_read_input_tokens: 7 } },
+      { event: "PHASE_START" }, // no usage field — must not throw or be counted
+    ];
+    const total = aggregateUsage(events);
+    assert.deepEqual(total, { input_tokens: 13, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 7 });
+  });
+
+  it("returns null when no event carries a non-null usage object", () => {
+    const events = [
+      { event: "RUN_START" },
+      { event: "PHASE_COMMIT", outputs: {} },
+      { event: "PHASE_COMMIT", usage: null },
+      { event: "PHASE_FAILED", reason: "x" },
+    ];
+    assert.equal(aggregateUsage(events), null);
+  });
+
+  it("ignores usage on event types other than PHASE_COMMIT/PHASE_FAILED", () => {
+    const events = [{ event: "RUN_TERMINAL", usage: { input_tokens: 999 } }];
+    assert.equal(aggregateUsage(events), null);
+  });
+
+  it("formatUsageLine renders '' for null usage and a formatted line otherwise", () => {
+    assert.equal(formatUsageLine(null), "");
+    assert.match(
+      formatUsageLine({ input_tokens: 1, output_tokens: 2, cache_creation_input_tokens: 3, cache_read_input_tokens: 4 }),
+      /usage:\s+1 in \/ 2 out \(4 cache-read \/ 3 cache-write\)/
+    );
+  });
 });
 
 describe("runFromCli terminal diagnostics (forge#2175)", () => {
@@ -520,7 +682,7 @@ describe("runFromCli terminal diagnostics (forge#2175)", () => {
     assert.match(output, /run-log:/);
   });
 
-  it("does NOT print the diagnostic block after a merged termination", async () => {
+  it("does NOT print the post-completion diagnostic block after a merged termination", async () => {
     const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
     const io = { gh: async () => { throw new Error("should not be called"); } };
     const runIssue = mock.fn(async () => ({ terminalReason: "merged" }));
@@ -537,6 +699,65 @@ describe("runFromCli terminal diagnostics (forge#2175)", () => {
 
     const output = logs.join("\n");
     assert.match(output, /issue #42 → merged/);
-    assert.ok(!output.includes("run-log:"), "no diagnostic block should be printed on a merged termination");
+    // forge#2240: the run-log path is now always printed once at run START
+    // (so a caller knows where to look immediately, not only on failure) —
+    // that single startup line is expected here. What must NOT appear is the
+    // post-completion diagnostic BLOCK (phase:/reason: lines), which stays
+    // gated to non-merged terminations (forge#2175's original intent).
+    const runLogLines = logs.filter((l) => l.includes("run-log:"));
+    assert.equal(runLogLines.length, 1, "run-log path should be printed exactly once (at start), not again in a diagnostic block");
+    assert.ok(!output.includes("phase:"), "no diagnostic block should be printed on a merged termination");
+    assert.ok(!output.includes("reason:"), "no diagnostic block should be printed on a merged termination");
+  });
+
+  it("prints the aggregate usage line on a merged termination when the run-log carries usage data (forge#2399)", async () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const io = { gh: async () => { throw new Error("should not be called"); } };
+    const runIssue = mock.fn(async ({ dir: d, issue }) => {
+      appendEvent(d, issue, { event: "RUN_START", issue, run: `r_${issue}_staging`, lane: "staging" });
+      appendEvent(d, issue, { event: "PHASE_COMMIT", phase: "build", outputs: {}, usage: { input_tokens: 42, output_tokens: 8, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } });
+      appendEvent(d, issue, { event: "RUN_TERMINAL", reason: "merged" });
+      return { terminalReason: "merged" };
+    });
+
+    const logs = [];
+    const originalLog = console.log;
+    console.log = (...args) => logs.push(args.join(" "));
+    try {
+      await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
+    } finally {
+      console.log = originalLog;
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    const output = logs.join("\n");
+    assert.match(output, /issue #42 → merged/);
+    assert.match(output, /usage:\s+42 in \/ 8 out \(0 cache-read \/ 0 cache-write\)/);
+    assert.ok(!output.includes("phase:"), "the phase/reason diagnostic block must still stay gated to non-merged terminations");
+  });
+
+  it("prints no usage line on a merged termination when the run-log carries no usage data (forge#2399)", async () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const io = { gh: async () => { throw new Error("should not be called"); } };
+    const runIssue = mock.fn(async ({ dir: d, issue }) => {
+      appendEvent(d, issue, { event: "RUN_START", issue, run: `r_${issue}_staging`, lane: "staging" });
+      appendEvent(d, issue, { event: "PHASE_COMMIT", phase: "build", outputs: {} });
+      appendEvent(d, issue, { event: "RUN_TERMINAL", reason: "merged" });
+      return { terminalReason: "merged" };
+    });
+
+    const logs = [];
+    const originalLog = console.log;
+    console.log = (...args) => logs.push(args.join(" "));
+    try {
+      await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
+    } finally {
+      console.log = originalLog;
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    const output = logs.join("\n");
+    assert.match(output, /issue #42 → merged/);
+    assert.ok(!output.includes("usage:"), "must not print a usage line when no usage data exists");
   });
 });

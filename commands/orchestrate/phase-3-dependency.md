@@ -605,15 +605,15 @@ fi
 value(issue) = priority_weight × danger_zone_weight
 ```
 
-**Priority weight** (from issue labels):
+**Priority weight** (from issue labels — matches both the canonical `priority:P<n>` form and the bare `P<n>` form some consumer repos use for externally/legacy-labeled issues; see `phase-1-resolve.md`'s "Priority label schema" note. `priority:P<n>` wins if both are present on the same issue): <!-- Added: forge#2232 -->
 
 | Label | Weight |
 |-------|--------|
-| `priority:P0` | 4.0 |
-| `priority:P1` | 3.0 |
-| `priority:P2` | 2.0 |
-| `priority:P3` | 1.0 |
-| *(no priority label)* | 1.5 |
+| `priority:P0` or `P0` | 4.0 |
+| `priority:P1` or `P1` | 3.0 |
+| `priority:P2` or `P2` | 2.0 |
+| `priority:P3` or `P3` | 1.0 |
+| *(neither form present)* | 1.5 |
 
 **Danger-zone weight** (from affected files via FORGE:INVESTIGATOR comment): Read the `### Affected Files` section and check each file path against the danger-zone list from `forge.yaml → review.danger_zones[]`. Each affected file that appears in a danger zone adds 0.5 to the weight (additive, capped at 2.0). Default (no matches): 1.0.
 
@@ -670,13 +670,18 @@ for NUM in "${ISSUES[@]}"; do
   LABELS=$(echo "$ISSUE_DATA" | jq -r '.labels[]' 2>/dev/null || echo '')
 
   # --- Value: priority weight ---
-  if echo "$LABELS" | grep -q "priority:P0"; then
+  # Schema-tolerant (forge#2232): matches canonical "priority:P<n>" (whole-line, via -E
+  # anchors so "priority:P0" doesn't also satisfy a "priority:P0x"-style label) or bare
+  # "P<n>". $LABELS is already a flat newline-separated list of label names (not a JSON
+  # array), so this stays a grep -E check rather than jq test() — no engine-mismatch risk
+  # since there is no jq counterpart mirrored at this specific site.
+  if echo "$LABELS" | grep -qE "^priority:P0$|^P0$"; then
     PRIO_WEIGHT=4.0
-  elif echo "$LABELS" | grep -q "priority:P1"; then
+  elif echo "$LABELS" | grep -qE "^priority:P1$|^P1$"; then
     PRIO_WEIGHT=3.0
-  elif echo "$LABELS" | grep -q "priority:P2"; then
+  elif echo "$LABELS" | grep -qE "^priority:P2$|^P2$"; then
     PRIO_WEIGHT=2.0
-  elif echo "$LABELS" | grep -q "priority:P3"; then
+  elif echo "$LABELS" | grep -qE "^priority:P3$|^P3$"; then
     PRIO_WEIGHT=1.0
   else
     PRIO_WEIGHT=1.5
@@ -814,6 +819,8 @@ done
 
 **Populate every row below by dereferencing `PREDECESSORS[$NUM]`, `ISSUE_DOMAIN[$NUM]`, `ISSUE_SCORE[$NUM]`, and `ISSUE_COST_ESTIMATE[$NUM]` computed in Steps 3B–3E.5 — do not fabricate values from memory or by re-reading issue titles at this point.** The Step 3D.6 gate having passed only guarantees the data structures exist; it does not substitute for actually reading them here. <!-- Added: forge#1913 -->
 
+**Source-PR Hint column**: when `ISSUE_LIKELY_MOOT[$NUM]` (populated by `phase-1-resolve.md`'s "Source-PR Triage Hint" step — see that file) is present for an issue, dereference it into a `Source-PR Hint` column. This column is **informational only** — it never changes a row's `Status` (Ready/Blocked), never removes a row from the table, and never causes a row to be excluded from dispatch. It exists purely so the operator can see, before confirming the plan, which `staging-review`/`review-finding` issues cite a source PR that closed without merging — a reason to look closer during that issue's own investigation phase, not a reason to skip it (see `phase-1-resolve.md`'s counterexamples: #2339/#2342 vs. #2346/#2261 — the same signal was right in one case and would have been wrong as a verdict in the other). <!-- Added: forge#2351 -->
+
 ```
 ## Orchestration Plan
 
@@ -845,16 +852,18 @@ done
 
 ### Dependency Graph
 
-| Issue | Predecessors | Domain | Score | Est. Cost | Status |
-|-------|-------------|--------|-------|-----------|--------|
-| #{A} | — | FRONTEND | {score} | ${cost} | Ready (dispatches 1st by score) |
-| #{B} | — | BILLING | {score} | ${cost} | Ready (dispatches 2nd by score) |
-| #{C} | — | WORKER | {score} | ${cost} [ε] | Ready (dispatches 3rd — ε-reserve) |
-| #{D} | #{A} | FRONTEND | {score} | ${cost} | Blocked (waits for #{A} only) |
-| #{E} | — | DATABASE | {score} | ${cost} | Ready (dispatches 4th by score) |
-| #{F} | #{E} | DATABASE | {score} | ${cost} | Blocked (serialized — waits for #{E}) |
+| Issue | Predecessors | Domain | Score | Est. Cost | Source-PR Hint | Status |
+|-------|-------------|--------|-------|-----------|-----------------|--------|
+| #{A} | — | FRONTEND | {score} | ${cost} | — | Ready (dispatches 1st by score) |
+| #{B} | — | BILLING | {score} | ${cost} | — | Ready (dispatches 2nd by score) |
+| #{C} | — | WORKER | {score} | ${cost} [ε] | — | Ready (dispatches 3rd — ε-reserve) |
+| #{D} | #{A} | FRONTEND | {score} | ${cost} | — | Blocked (waits for #{A} only) |
+| #{E} | — | DATABASE | {score} | ${cost} | — | Ready (dispatches 4th by score) |
+| #{F} | #{E} | DATABASE | {score} | ${cost} | — | Blocked (serialized — waits for #{E}) |
+| #{G} | — | INFRA | {score} | ${cost} | likely-moot (PR #{N} closed unmerged — verify first) | Ready (dispatches 5th by score) |
 
 **[ε]** = no cost prior; eligible for exploration reserve (10% of budget guaranteed for these)
+**Source-PR Hint** = `${ISSUE_LIKELY_MOOT[$NUM]:-unknown}` rendered as `—` when `unknown`/absent, or `likely-moot (PR #{ISSUE_SOURCE_PR[$NUM]} closed unmerged — verify first)` when `yes`. Never affects `Status` or row inclusion — see `phase-1-resolve.md`'s "Source-PR Triage Hint" step for how this is computed and why it stays a hint.
 
 **Score** = value / estimated_cost (value = priority_weight × danger_zone_weight; higher = dispatches first within the ready-set)
 **Est. Cost** = cost-prior mean for (task_type × module), or label heuristic if no prior

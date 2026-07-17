@@ -431,9 +431,17 @@ export function resolveBackend({ requested = "auto", cwd = process.cwd() } = {})
  * Model selection is intentionally NOT forwarded to the CLI in this first
  * increment — the CLI backend uses whatever model the `claude` CLI itself is
  * configured for. `opts.model`/FORGEDOCK_MODEL only affects the API backend.
- * Likewise, structured token usage is not available the same way the
- * Anthropic SDK exposes it; `usage` is reported as `null` (an already
- * fully-supported value throughout renderSummaryCard/renderDryRun).
+ *
+ * Token usage: the invocation requests `--output-format json`, and on a
+ * successful exit the captured stdout is parsed as the CLI's single-result
+ * JSON envelope. When parsing succeeds and the envelope carries a `usage`
+ * object, it is normalized to the same shape the API backend returns
+ * (`{input_tokens, output_tokens, cache_creation_input_tokens,
+ * cache_read_input_tokens}`, each field `?? 0`). When the output isn't valid
+ * JSON (older CLI versions, or a CLI that ignores `--output-format`) or the
+ * envelope has no `usage` field, this degrades gracefully to `usage: null`
+ * (an already fully-supported value throughout renderSummaryCard/renderDryRun)
+ * — this parsing never throws on the success path.
  *
  * @param {object} opts
  * @param {{path: string, name: string, content: string}} opts.spec
@@ -464,8 +472,186 @@ export function resolveBackend({ requested = "auto", cwd = process.cwd() } = {})
  *   This is additive to the existing `bin` override seam above — tests may
  *   still use a real fake-binary-on-disk + real `spawnSync` (the original
  *   seam), or fully mock the call via `spawnFn` (no fake binary needed).
- * @returns {{status: string, command: string, iterations: number, stopReason: string, usage: null, model: string, backend: "cli"}}
+ * @returns {{status: string, command: string, iterations: number, stopReason: string, usage: ({input_tokens: number, output_tokens: number, cache_creation_input_tokens: number, cache_read_input_tokens: number}|null), model: string, backend: "cli"}}
  */
+
+// Diagnostic-only bound on each logged argv element (see sanitizeArgvForLog
+// below) — independent of DEFAULT_SPAWN_MAX_BUFFER_BYTES, which governs the
+// actual child process's stdout/stderr capture, not this summary string.
+const MAX_LOGGED_ARGV_ELEMENT_LEN = 200;
+
+// Diagnostic-only bound on the captured-output excerpt embedded directly in
+// a CLI_BACKEND_FAILED error message (forge#2355). Deliberately much larger
+// than MAX_LOGGED_ARGV_ELEMENT_LEN (200 chars) — that bound exists to keep a
+// single argv element's *summary* short, but a truncated-to-200-chars
+// captured-output excerpt would defeat the point of this fix (the whole goal
+// is to give an operator reading the persisted `~/.forge/runs/*.jsonl`
+// run-log enough of the CLI's actual failure text to diagnose it without
+// re-running). 4000 chars is generous enough to carry a real stack
+// trace/error while still bounding JSONL run-log line growth for very
+// verbose CLI failures (issue #2355 AC4).
+const MAX_LOGGED_OUTPUT_EXCERPT_LEN = 4000;
+
+/**
+ * Escape control/bidi-override characters and cap length, without joining
+ * multiple elements. Shared core of `sanitizeArgvForLog` (which maps this
+ * over an argv array with a small per-element bound) and
+ * `sanitizeOutputExcerptForLog` (which applies it once to a full captured
+ * stdout+stderr blob with a much larger bound) — both need the identical
+ * escaping and surrogate-pair-safe truncation behavior hardened across
+ * #2277/#2292/#2293; extracting it here keeps that behavior in one place
+ * instead of duplicating it per bound.
+ *
+ * @param {string} str
+ * @param {number} maxLen
+ * @returns {string}
+ */
+function sanitizeAndCap(str, maxLen) {
+  // eslint-disable-next-line no-control-regex -- intentional: neutralizing C0/DEL/C1 control chars and Unicode bidi-override/format chars is the point of this function
+  const escaped = str.replace(/[\x00-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069]/g, (ch) => {
+    const code = ch.charCodeAt(0);
+    return code <= 0xff ? `\\x${code.toString(16).padStart(2, "0")}` : `\\u${code.toString(16).padStart(4, "0")}`;
+  });
+  if (escaped.length <= maxLen) return escaped;
+  // `.slice()` counts UTF-16 code units, not Unicode code points. If the cut
+  // lands between a high surrogate (\uD800-\uDBFF) and its paired low
+  // surrogate (\uDC00-\uDFFF) — e.g. an astral-plane emoji straddling the
+  // boundary — a plain slice bisects the pair and leaves a lone/unpaired
+  // surrogate at the tail, which can render as U+FFFD or otherwise
+  // mis-encode downstream (#2293). Trim one additional unit in that case so
+  // the cut never lands mid-pair.
+  let cutLen = maxLen;
+  const lastCode = escaped.charCodeAt(cutLen - 1);
+  if (lastCode >= 0xd800 && lastCode <= 0xdbff) cutLen -= 1;
+  return `${escaped.slice(0, cutLen)}…[truncated, ${escaped.length} chars]`;
+}
+
+/**
+ * Build a safe-for-logs/error-messages summary of a CLI argv array.
+ *
+ * `cliArgs` (see `runCliBackend` below) includes `userMessage` verbatim, and
+ * `userMessage` is built from untrusted third-party content (issue/PR bodies
+ * fetched via `gh` — see the SECURITY note in `bin/engine.mjs`). The
+ * non-zero-exit diagnostic added in #2258 embeds `cliArgs.join(" ")` directly
+ * into a thrown `Error.message`, which `bin/forgedock.mjs`'s `run-issue` case
+ * later writes verbatim to stderr (`process.stderr.write(err.message)`) — so
+ * a crafted issue/PR body could otherwise inject raw ANSI escape sequences or
+ * newline-heavy content into operator-visible CI/terminal logs, or simply
+ * balloon log size with an arbitrarily large body (#2277).
+ *
+ * This function is used ONLY to build the human-readable diagnostic string —
+ * it must NEVER be applied to the actual `cliArgs` array passed to `spawnFn`,
+ * which must remain byte-exact for the real invocation. It intentionally
+ * keeps (rather than removes) the argv/cwd context: that context is exactly
+ * what #2258 added to fix a prior defect where a real CLI failure produced a
+ * diagnostic pointing at output that didn't exist. The goal here is to bound
+ * and neutralize each element, not to delete the context.
+ *
+ * - Control characters (`\x00`-`\x1F`, `\x7F`-`\x9F` — C0/DEL and C1) are
+ *   escaped to a visible `\xHH` form, neutralizing ANSI escape sequences and
+ *   log-line spoofing.
+ * - Unicode bidirectional-override/format characters (`‪`-`‮`
+ *   LRE/RLE/PDF/LRO/RLO and `⁦`-`⁩` LRI/RLI/FSI/PDI) are escaped to
+ *   a visible `\uHHHH` form, neutralizing visual reordering of the diagnostic
+ *   line in terminals/log viewers that render bidi controls (#2292).
+ * - Each element is independently truncated to `MAX_LOGGED_ARGV_ELEMENT_LEN`
+ *   characters, with an explicit `…[truncated, N chars]` marker appended
+ *   when truncation occurs, so log growth is bounded regardless of how large
+ *   the untrusted `userMessage` is.
+ *
+ * @param {string[]} cliArgs
+ * @returns {string} space-joined, sanitized argv summary
+ */
+export function sanitizeArgvForLog(cliArgs) {
+  return cliArgs.map((arg) => sanitizeAndCap(String(arg), MAX_LOGGED_ARGV_ELEMENT_LEN)).join(" ");
+}
+
+/**
+ * Build a safe-for-error-messages excerpt of the CLI's captured stdout+stderr
+ * output, for embedding directly in a CLI_BACKEND_FAILED error's message
+ * (forge#2355).
+ *
+ * Prior to this fix, the non-zero-exit diagnostic only *logged* the captured
+ * output (`logger.log(diagnostic)` in `runCliBackend` below) and threw a
+ * self-referential message pointing at that log line ("See captured output
+ * above."). `logger.log()` writes to the orchestrating process's own
+ * console/CI stream, which is never persisted into the durable
+ * `~/.forge/runs/*.jsonl` run-log — only the thrown `Error.message` (via
+ * `bin/engine.mjs`'s `reason: e.message` / fail-fast `detail` string) reaches
+ * that persisted record. As a result, the single dominant engine failure mode
+ * (50 of 69 `PHASE_FAILED` events in a 52-run-log audit) carried a reason that
+ * pointed at output the run-log never captured, leaving operators nothing to
+ * diagnose post-hoc. This function embeds a bounded excerpt of the real
+ * output directly in the message instead.
+ *
+ * `output` is raw, untrusted CLI stdout/stderr — the CLI itself echoes
+ * untrusted issue/PR body content it was fed (see the SECURITY note on
+ * `sanitizeArgvForLog` above) — so it carries the identical injection risk
+ * class already hardened for `argvSummary` across #2277/#2292/#2293. This
+ * function reuses the exact same `sanitizeAndCap` escaping/truncation core,
+ * just with a much larger bound (`MAX_LOGGED_OUTPUT_EXCERPT_LEN`) appropriate
+ * for a diagnostic excerpt rather than a short argv summary.
+ *
+ * @param {string} output - combined, already-captured stdout+stderr text
+ * @returns {string} bounded, sanitized excerpt safe to embed in Error.message
+ */
+export function sanitizeOutputExcerptForLog(output) {
+  return sanitizeAndCap(String(output), MAX_LOGGED_OUTPUT_EXCERPT_LEN);
+}
+
+/**
+ * Best-effort extraction of a Claude CLI session-limit reset time from
+ * captured stdout/stderr (forge#2241). The CLI's own session-limit message
+ * looks like `You've hit your session limit · resets 12:50am (Asia/Calcutta)`
+ * — when present, this lets a non-zero-exit CLI_BACKEND_FAILED surface *when*
+ * the quota resets instead of forcing a human to read raw logs (issue #2241
+ * AC3). Deliberately narrow and case-insensitive: anchored on the literal
+ * "session limit" phrase plus a trailing "resets ..." clause, so it can never
+ * misattribute an unrelated crash's output as a reset time (see #2258/#2277/
+ * #2292/#2293 — this same diagnostic branch has repeatedly needed defensive
+ * narrowing around untrusted CLI output).
+ *
+ * @param {string} output - combined, already-captured stdout+stderr text
+ * @returns {string|undefined} the reset-time text (trimmed), or undefined if
+ *   no session-limit pattern was found — callers must not fabricate a value
+ *   when this returns undefined.
+ */
+export function extractSessionLimitResetTime(output) {
+  if (!output) return undefined;
+  const match = /session limit[^\n]*?resets?\s+([^\n]+?)\s*$/im.exec(output);
+  if (!match) return undefined;
+  const resetAt = match[1].trim();
+  if (resetAt.length === 0) return undefined;
+  // Security review finding (forge#2241, PR #2323): `resetAt` is extracted
+  // from raw, untrusted CLI stdout/stderr — the same `output` that #2277/
+  // #2292/#2293 fixed control-char/bidi-override/surrogate-pair injection
+  // for in the neighboring CLI_BACKEND_FAILED diagnostic. Route it through
+  // the same sanitizeArgvForLog() escaping + length-capping used for
+  // argvSummary before it can reach err.resetAt -> the engine-error
+  // terminate detail -> operator-visible terminal/CI logs, so this new call
+  // site inherits the identical defensive posture instead of reopening that
+  // threat model via a fresh, unsanitized path.
+  return sanitizeArgvForLog([resetAt]);
+}
+
+/**
+ * Coerce a single CLI-reported `usage.*` field to a finite number, or `0`
+ * when it isn't one (forge#2424). `?? 0` only replaces `null`/`undefined` —
+ * it does not coerce or reject other non-numeric values (e.g. a string), so
+ * a malformed/unexpected field previously flowed through unchanged and later
+ * string-concatenated instead of numerically adding in
+ * bin/batch-runner.mjs's `tokenCost()` (`input + output`). Applied to all
+ * four `usage.*` fields parsed from the CLI's `--output-format json`
+ * envelope, which — unlike the API backend's SDK-typed `response.usage` — is
+ * arbitrary CLI stdout and must not be trusted to already be well-typed.
+ *
+ * @param {unknown} value - raw field value from the parsed CLI JSON envelope
+ * @returns {number} a finite number, or `0` when `value` is not one
+ */
+function toFiniteUsageNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
 export function runCliBackend({
   spec,
   userMessage,
@@ -495,7 +681,13 @@ export function runCliBackend({
   // `writeFileSync` still leaves `tmpDir` set and the already-created
   // directory gets cleaned up.
   let tmpDir = null;
-  let cliArgs = ["--print", userMessage, "--dangerously-skip-permissions"];
+  let cliArgs = [
+    "--print",
+    userMessage,
+    "--output-format",
+    "json",
+    "--dangerously-skip-permissions",
+  ];
 
   try {
     if (systemPrompt) {
@@ -506,6 +698,8 @@ export function runCliBackend({
       cliArgs = [
         "--print",
         userMessage,
+        "--output-format",
+        "json",
         "--append-system-prompt-file",
         systemPromptPath,
         "--dangerously-skip-permissions",
@@ -545,9 +739,25 @@ export function runCliBackend({
     const timedOut = result.status === null && result.error?.code === "ETIMEDOUT";
     if (timedOut) {
       const timeoutSecs = Math.round(timeoutMs / 1000);
+      // forge#2360: spawnSync's `timeout` option kills the child outright on
+      // expiry, but any stdout/stderr the CLI had already produced up to
+      // that point is still populated on `result` — surface it rather than
+      // silently discarding it, mirroring both the `run_bash` timeout path
+      // below (which appends its own captured `partial` output) and the
+      // sibling `result.status !== 0` branch just below this one (forge#2355
+      // / PR #2374), which embeds a bounded/sanitized excerpt of captured
+      // output via `sanitizeOutputExcerptForLog()` for the same reason: only
+      // `err.message` is persisted into the durable `~/.forge/runs/*.jsonl`
+      // run-log (via bin/engine.mjs's `reason: e.message`), never the
+      // `logger.log()` call. Reuses the exact same hardened helper — do NOT
+      // add a new unsanitized/unbounded path here (this file has 4 prior
+      // review findings — #2277, #2292, #2293, #2355 — for that defect
+      // class).
+      const partial = (stdout + stderr).trim();
       throw new Error(
         `claude CLI invocation timed out after ${timeoutSecs}s and was killed. ` +
-          `Set FORGEDOCK_CLI_TIMEOUT_MS (ms) to adjust, or use --backend api.`,
+          `Set FORGEDOCK_CLI_TIMEOUT_MS (ms) to adjust, or use --backend api.` +
+          (partial ? ` Partial output: ${sanitizeOutputExcerptForLog(partial)}` : ""),
       );
     }
     if (result.error) {
@@ -555,15 +765,116 @@ export function runCliBackend({
     }
 
     const output = (stdout + stderr).trim();
-    if (output) logger.log(output);
 
     if (result.status !== 0) {
+      // Non-zero exit: always emit a self-contained diagnostic, regardless of
+      // whether stdout/stderr captured anything. Previously this branch threw
+      // a self-referential message that unconditionally pointed to
+      // previously-logged output, even when `output` was empty (the
+      // success-path log call above was gated on `if (output)` and never
+      // ran) -- leaving the operator with nothing to consult. See issue
+      // #2258 / parent #2244.
+      const hadOutput = output.length > 0;
+      const signalPart = result.signal ? `, signal ${result.signal}` : "";
+      // Sanitized for the diagnostic string ONLY — the actual `cliArgs` array
+      // above (passed to spawnFn) is untouched. See sanitizeArgvForLog's doc
+      // comment for why (#2277 — untrusted userMessage content must not reach
+      // stderr/CI logs unbounded/unescaped).
+      const argvSummary = sanitizeArgvForLog(cliArgs);
+      const diagnostic = hadOutput
+        ? `Captured output (stdout+stderr):\n${output}`
+        : "No output was captured on stdout or stderr.";
+      logger.log(diagnostic);
+
+      // forge#2355: when `hadOutput` is true, embed a bounded/sanitized
+      // excerpt of the actual captured output directly in the thrown
+      // Error's message, rather than only pointing at the `logger.log()`
+      // call above. `logger.log()` writes to the orchestrating process's
+      // console/CI stream — it is NEVER persisted into the durable
+      // `~/.forge/runs/*.jsonl` run-log. Only `e.message` (via
+      // `bin/engine.mjs`'s `reason: e.message` / fail-fast `detail` string,
+      // both of which already interpolate `e.message` verbatim) reaches that
+      // persisted record. Without this, the run-log's `PHASE_FAILED.reason`
+      // carried a self-referential pointer to output that was already gone
+      // by the time anyone read the log — this was the single dominant
+      // engine failure mode (50 of 69 `PHASE_FAILED` events in a 52-run-log
+      // audit — see issue #2355). The `!hadOutput` branch below is
+      // intentionally left unchanged: it was already fixed by #2258/PR #2276
+      // to be self-contained.
+      const outputExcerpt = hadOutput ? sanitizeOutputExcerptForLog(output) : "";
       const err = new Error(
-        `claude CLI exited with status ${result.status ?? "?"}. See output above for details.`,
+        `claude CLI exited with status ${result.status ?? "?"}${signalPart}. ` +
+          (hadOutput
+            ? `Output: ${outputExcerpt}`
+            : "No output was captured (stdout and stderr were both empty).") +
+          ` Invocation: ${bin} ${argvSummary} (cwd: ${cwd})`,
       );
       err.code = "CLI_BACKEND_FAILED";
+      // forge#2241: attach the CLI's reported session-limit reset time (when
+      // present) so callers (bin/engine.mjs) can surface *when* a
+      // quota-exhaustion failure will clear without reading raw logs. Only
+      // ever set when the pattern actually matches — never fabricated.
+      const resetAt = extractSessionLimitResetTime(output);
+      if (resetAt) err.resetAt = resetAt;
       throw err;
     }
+
+    // Parse the `--output-format json` single-result envelope requested
+    // above. `claude --print --output-format json` emits a JSON object with
+    // (among other fields) a top-level `result` string — the same
+    // human-readable text the CLI would otherwise print in plain-text mode —
+    // and a top-level `usage` object shaped like the Anthropic SDK's
+    // `response.usage` (`input_tokens`/`output_tokens`/
+    // `cache_creation_input_tokens`/`cache_read_input_tokens`, plus extra
+    // fields we don't need). Older CLI versions that ignore
+    // `--output-format` (or any other non-JSON stdout) are handled
+    // defensively: any parse failure, or a parsed value missing `usage`,
+    // degrades to the pre-existing `usage: null` behavior — this must never
+    // throw on the success path.
+    //
+    // forge#2422: parse `stdout` ALONE here, not `output` (the combined
+    // `stdout + stderr` string used above for the timeout/non-zero-exit
+    // diagnostics). `--output-format json` writes exactly one JSON object to
+    // stdout; any warning/banner text a CLI version writes to stderr on an
+    // otherwise-clean, zero-exit run (deprecation notice, Node
+    // `--trace-warnings`, etc.) would corrupt the combined string and break
+    // `JSON.parse`, silently degrading `usage` to `null` even though valid
+    // JSON was on stdout. `output` itself is untouched — the diagnostic
+    // branches above still need the combined stream.
+    //
+    // forge#2424: each usage field is coerced with `toFiniteUsageNumber()`
+    // rather than `?? 0`. `?? 0` only replaces `null`/`undefined` — a
+    // non-numeric value (e.g. a string) would pass through unchanged and
+    // later string-concatenate instead of numerically add in
+    // bin/batch-runner.mjs's `tokenCost()` (`input + output`).
+    const stdoutTrimmed = stdout.trim();
+    let parsedResult = null;
+    let usage = null;
+    try {
+      const parsed = JSON.parse(stdoutTrimmed);
+      if (parsed && typeof parsed === "object") {
+        parsedResult = typeof parsed.result === "string" ? parsed.result : null;
+        if (parsed.usage && typeof parsed.usage === "object") {
+          usage = {
+            input_tokens: toFiniteUsageNumber(parsed.usage.input_tokens),
+            output_tokens: toFiniteUsageNumber(parsed.usage.output_tokens),
+            cache_creation_input_tokens: toFiniteUsageNumber(
+              parsed.usage.cache_creation_input_tokens,
+            ),
+            cache_read_input_tokens: toFiniteUsageNumber(parsed.usage.cache_read_input_tokens),
+          };
+        }
+      }
+    } catch {
+      // Non-JSON output (older CLI, or --output-format was ignored) —
+      // parsedResult/usage stay null; fall back to raw output below.
+    }
+
+    // Prefer the parsed envelope's human-readable `.result` string so
+    // console output stays prose, not a raw JSON blob; fall back to the raw
+    // captured output when parsing failed or `.result` was absent.
+    const humanOutput = parsedResult ?? output;
+    if (humanOutput) logger.log(humanOutput);
 
     logger.log(
       renderSummaryCard({
@@ -571,7 +882,7 @@ export function runCliBackend({
         args,
         iterations: 1,
         stopReason: "cli_exit_0",
-        usage: null,
+        usage,
       }),
     );
 
@@ -580,7 +891,7 @@ export function runCliBackend({
       command: spec.name,
       iterations: 1,
       stopReason: "cli_exit_0",
-      usage: null,
+      usage,
       model: "cli",
       backend: "cli",
     };

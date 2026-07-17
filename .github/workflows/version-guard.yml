@@ -1,0 +1,154 @@
+name: Deploy Version Guard
+
+# Guards against a class of process hazard identified in forge#2222: a
+# staging→main deploy PR merged with "Squash and merge" takes the PR head's
+# file content wholesale — including `package.json` — while a real 3-way
+# "Create a merge commit" resolves the field normally. `publish.yml`'s
+# version-bump step commits the bumped version to `main` only and never
+# back-merges it into `staging`, so `main` and `staging` structurally diverge
+# on `package.json.version` after every release. If an operator picks
+# squash-merge on the next staging→main PR, main's version silently regresses
+# to staging's stale value and `publish.yml` bumps/publishes from the wrong
+# base.
+#
+# This check evaluates the PR head's `package.json.version` directly against
+# main's current committed version — exactly the value squash-merge would
+# produce — regardless of which merge method is ultimately selected. It is
+# intentionally strict: a routine staging→main PR opened before staging's
+# `package.json.version` has been bumped to catch up with main's last release
+# WILL fail this check. That is the desired behavior — it forces the operator
+# to either bump staging's version to >= main's current version before
+# merging, or use "Create a merge commit" (which resolves correctly since
+# staging never touches the version field on its own). Silently allowing the
+# PR to merge and lose main's version is exactly the hazard this guard exists
+# to close.
+#
+# Trigger: pull_request targeting main only (staging→main or feature→main
+# deploy PRs). Non-deploy PRs are skipped immediately.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  version-guard:
+    name: Check package.json version is not regressing
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+
+      - name: Read base and head package.json content
+        id: read
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # Read package.json content directly from git objects at each ref's
+          # exact commit — no shell interpolation of the raw version string
+          # anywhere; the JSON blobs are handed to node via a temp file, which
+          # then does its own JSON.parse and only ever prints already-derived,
+          # safe values.
+          git show "${BASE_SHA}:package.json" > "${RUNNER_TEMP}/base-package.json" 2>/dev/null || echo "{}" > "${RUNNER_TEMP}/base-package.json"
+          git show "${HEAD_SHA}:package.json" > "${RUNNER_TEMP}/head-package.json" 2>/dev/null || echo "{}" > "${RUNNER_TEMP}/head-package.json"
+
+      - name: Compare head vs. base package.json version
+        env:
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const dir = process.env.RUNNER_TEMP;
+
+            function parseSemver(v) {
+              if (typeof v !== "string") return null;
+              const m = v.match(/^(\d+)\.(\d+)\.(\d+)/);
+              if (!m) return null;
+              return [Number(m[1]), Number(m[2]), Number(m[3])];
+            }
+
+            function cmp(a, b) {
+              for (let i = 0; i < 3; i++) {
+                if (a[i] !== b[i]) return a[i] - b[i];
+              }
+              return 0;
+            }
+
+            // This gate exists to block a specific hazard (a version regression
+            // on main). If it cannot evaluate its own precondition — either
+            // package.json fails to parse, or the version field is missing or
+            // not valid semver — it MUST fail closed rather than silently pass.
+            // A gate that waves a PR through when it cannot read the data it is
+            // supposed to check provides false assurance, which is strictly
+            // worse than no gate at all. (Mirrors this repository own fail-closed
+            // precedent for unreadable/unparseable gate input — see
+            // phases.mjs -> detectOutcome, which treats a missing or
+            // unparseable review verdict as a failure, never as an approval.)
+            let base, head;
+            try {
+              base = JSON.parse(fs.readFileSync(`${dir}/base-package.json`, "utf8"));
+            } catch (e) {
+              console.log(
+                `::error::Deploy Version Guard FAILED — could not parse main branch package.json as JSON (${e.message}). Cannot verify the head version is not a regression, so failing closed instead of silently passing.`
+              );
+              process.exit(1);
+            }
+            try {
+              head = JSON.parse(fs.readFileSync(`${dir}/head-package.json`, "utf8"));
+            } catch (e) {
+              console.log(
+                `::error::Deploy Version Guard FAILED — could not parse the PR head package.json as JSON (${e.message}). Cannot verify the head version is not a regression, so failing closed instead of silently passing.`
+              );
+              process.exit(1);
+            }
+
+            const baseVersion = base.version;
+            const headVersion = head.version;
+            const baseParsed = parseSemver(baseVersion);
+            const headParsed = parseSemver(headVersion);
+
+            if (!baseParsed || !headParsed) {
+              console.log(
+                `::error::Deploy Version Guard FAILED — could not parse a valid semver "version" field from main (saw: ${JSON.stringify(baseVersion)}) or from the PR head (saw: ${JSON.stringify(headVersion)}). Cannot verify the head version is not a regression, so failing closed instead of silently passing.`
+              );
+              process.exit(1);
+            }
+
+            console.log(`Base (main) package.json version: ${baseVersion}`);
+            console.log(`Head (PR)  package.json version: ${headVersion}`);
+
+            if (cmp(headParsed, baseParsed) < 0) {
+              console.log("");
+              console.log(
+                `::error::Deploy Version Guard FAILED — PR head package.json version (${headVersion}) is LOWER than main current version (${baseVersion}).`
+              );
+              console.log("");
+              console.log("If this PR is merged with \"Squash and merge\", GitHub takes the PR head");
+              console.log(`file content as-is — main would silently regress from ${baseVersion} to ${headVersion}, and the next publish would bump/release from`);
+              console.log("the wrong base.");
+              console.log("");
+              console.log("To fix, do ONE of the following before merging:");
+              console.log(`  1. Bump this branch'\''s package.json version to >= ${baseVersion}`);
+              console.log("     (e.g. merge main back into this branch, or manually set the version).");
+              console.log("  2. Merge this PR using \"Create a merge commit\" instead of \"Squash and");
+              console.log("     merge\" — a real 3-way merge resolves package.json correctly here since");
+              console.log("     this branch never touched the version field on its own.");
+              process.exit(1);
+            }
+
+            console.log("");
+            console.log("Deploy Version Guard passed — head version is not a regression from main.");
+          '

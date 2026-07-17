@@ -36,10 +36,10 @@
  * The hook looks for FORGE annotation markers in the transcript's tool
  * results (gh issue comment / gh api calls):
  *
- *   INVESTIGATION:COMPLETE  → phase "investigate" committed
- *   FORGE:CONTEXT           → phase "context" committed
- *   FORGE:ARCHITECT         → phase "architect" committed
- *   FORGE:BUILDER:COMPLETE  → phase "build" committed
+ *   INVESTIGATION:COMPLETE     → phase "investigate" committed
+ *   FORGE:CONTEXT:COMPLETE     → phase "context" committed
+ *   FORGE:ARCHITECT:COMPLETE   → phase "architect" committed
+ *   FORGE:BUILDER:COMPLETE     → phase "build" committed
  *   FORGE:REVIEWER          → phase "review" committed
  *   workflow:merged label   → phase "close" committed (terminal)
  *
@@ -60,6 +60,7 @@ import { fileURLToPath, pathToFileURL } from "url";
 import { dirname, join, resolve } from "path";
 import { existsSync, readFileSync } from "fs";
 import { execFileSync } from "child_process";
+import { PHASE_MARKERS as PHASE_MARKER_REGISTRY } from "../../packages/protocol/src/phases.js";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -75,18 +76,31 @@ const FORGE_HOME = resolve(__dirname, "..", "..");
 // Maps FORGE annotation markers (found in transcript tool results) to phase IDs.
 // ---------------------------------------------------------------------------
 
+// forge#2378: marker strings are single-sourced from packages/protocol's phase
+// registry (bin/engine/phases.mjs imports the identical registry) — do NOT
+// reintroduce inline "FORGE:..."/"INVESTIGATION:..."/"workflow:merged" literals
+// here. This table previously hand-duplicated those strings and drifted out of
+// sync with the engine's stricter :COMPLETE gate (forge#2375/PR#2395) — sourcing
+// both consumers from one registry makes that class of drift structurally
+// impossible going forward.
+//
+// Require the :COMPLETE suffix — a bare "FORGE:CONTEXT"/"FORGE:ARCHITECT"
+// substring also matches a partial/interrupted annotation (e.g.
+// FORGE:CONTEXT:PARTIAL), which is not actually committed. bin/engine/phases.mjs's
+// architect detectOutcome() requires the identical :COMPLETE marker to consider
+// the phase committed.
 /** @type {Array<{marker: string, phase: string, terminal?: boolean, terminalReason?: string}>} */
 const PHASE_MARKERS = [
-  { marker: "INVESTIGATION:COMPLETE",  phase: "investigate" },
-  { marker: "INVESTIGATION:INVALID",   phase: "investigate", terminal: true, terminalReason: "invalid" },
-  { marker: "DECOMPOSE:YES",           phase: "investigate", terminal: true, terminalReason: "decomposed" },
-  { marker: "FORGE:CONTEXT",           phase: "context" },
-  { marker: "FORGE:ARCHITECT",         phase: "architect" },
-  { marker: "FORGE:BUILDER:COMPLETE",  phase: "build" },
+  { marker: PHASE_MARKER_REGISTRY.investigate.completionMarker, phase: "investigate" },
+  { marker: PHASE_MARKER_REGISTRY.investigate.invalidMarker,    phase: "investigate", terminal: true, terminalReason: "invalid" },
+  { marker: PHASE_MARKER_REGISTRY.investigate.decomposedMarker, phase: "investigate", terminal: true, terminalReason: "decomposed" },
+  { marker: PHASE_MARKER_REGISTRY.context.completionMarker,     phase: "context" },
+  { marker: PHASE_MARKER_REGISTRY.architect.completionMarker,   phase: "architect" },
+  { marker: PHASE_MARKER_REGISTRY.build.completionMarker,       phase: "build" },
   // review phase: PR merged is detected from gh label/state
-  { marker: "FORGE:REVIEWER:MERGED",   phase: "review" },
+  { marker: PHASE_MARKER_REGISTRY.review.completionMarker,      phase: "review" },
   // close phase: issue closed with workflow:merged
-  { marker: "workflow:merged",         phase: "close", terminal: true, terminalReason: "merged" },
+  { marker: PHASE_MARKER_REGISTRY.close.completionLabel,        phase: "close", terminal: true, terminalReason: "merged" },
 ];
 
 /**
@@ -164,13 +178,15 @@ async function main() {
   // missing, block the subagent from completing silently and inject
   // corrective context so the agent knows what to do.
   if (skillInvoked && annotationMissing && phaseId) {
+    // forge#2378: sourced from the same registry as PHASE_MARKERS above — no
+    // second hand-written copy of these marker strings.
     const PHASE_ANNOTATION_MAP = {
-      investigate: "INVESTIGATION:COMPLETE (or INVESTIGATION:INVALID / DECOMPOSE:YES)",
-      context:     "FORGE:CONTEXT",
-      architect:   "FORGE:ARCHITECT",
-      build:       "FORGE:BUILDER:COMPLETE",
-      review:      "FORGE:REVIEWER:MERGED",
-      close:       "workflow:merged label",
+      investigate: `${PHASE_MARKER_REGISTRY.investigate.completionMarker} (or ${PHASE_MARKER_REGISTRY.investigate.invalidMarker} / ${PHASE_MARKER_REGISTRY.investigate.decomposedMarker})`,
+      context:     PHASE_MARKER_REGISTRY.context.completionMarker,
+      architect:   PHASE_MARKER_REGISTRY.architect.completionMarker,
+      build:       PHASE_MARKER_REGISTRY.build.completionMarker,
+      review:      PHASE_MARKER_REGISTRY.review.completionMarker,
+      close:       `${PHASE_MARKER_REGISTRY.close.completionLabel} label`,
     };
     const expected = PHASE_ANNOTATION_MAP[phaseId] || `the ${phaseId} phase annotation`;
     // Output additionalContext JSON (v2.1.163+ SubagentStop format).
@@ -308,6 +324,20 @@ export function parseTranscript(transcriptPath) {
  *   - Scan tool_result entries for gh CLI output containing FORGE annotation markers
  *   - Extract issue number from Skill args or from the skill name context
  *
+ * `outputs` is intentionally always `{}` from this function (forge#2375): earlier
+ * versions matched a bare `"number"` field and a bare `branch[:space]` token against
+ * the full text of every tool_result block, with no scoping to a FORGE-authoritative
+ * source. That regularly matched unrelated JSON (e.g. `gh issue view`'s own `"number"`
+ * field, matching the issue's own number as if it were a PR) or unrelated prose
+ * containing the word "branch", producing corrupt PHASE_COMMIT run-log entries
+ * (observed: `branch:"diff"`, `branch:"writer"`, `branch:"refs"`, `pr:<issue#>`).
+ * Those values were also consumed as a state fallback by
+ * bin/engine/runlog.mjs:deriveState() → bin/engine/phases.mjs:resolveBranch(), so a
+ * corrupt hook-derived value could leak into the engine's own resolution path. The
+ * engine already resolves branch/PR from GitHub ground truth
+ * (bin/engine/phases.mjs:parseBranchFromMarkers(), scoped to the FORGE:BUILDER:COMPLETE
+ * comment — forge#2184) on next pickup, so no replacement extraction is needed here.
+ *
  * @param {object[]} entries
  * @returns {{ issueNumber: number|null, phaseId: string|null, terminalReason: string|null, outputs: object, skillInvoked: boolean, annotationMissing: boolean }}
  */
@@ -352,12 +382,8 @@ export function detectPhase(entries) {
         for (const { marker } of PHASE_MARKERS) {
           if (content.includes(marker)) foundMarkers.add(marker);
         }
-        // Extract PR number if present.
-        const prM = content.match(/"number"\s*:\s*(\d+)/);
-        if (prM) outputs.pr = parseInt(prM[1], 10);
-        // Extract branch from git push output.
-        const branchM = content.match(/(?:refs\/heads\/|branch[:\s]+)([\w\-./]+)/i);
-        if (branchM) outputs.branch = branchM[1];
+        // No PR/branch extraction here (forge#2375) — see the JSDoc above
+        // detectPhase() for why. `outputs` stays empty from this scan.
       }
 
       // Also scan assistant message text blocks for FORGE markers.

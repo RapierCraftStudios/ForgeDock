@@ -36,6 +36,17 @@ import {
   PIPELINE_SCRIPTS,
 } from "./journey.mjs";
 import {
+  deriveWorkflowLabels,
+  FINDINGS_LANE_LABEL,
+  classifyFindingStatus,
+  hasWorkflowLabel,
+  normalizePriority,
+  parseSatelliteRepos,
+  buildHeartbeatBatchQuery,
+  parseHeartbeatBatchResponse,
+  chunkArray,
+} from "./watch-utils.mjs";
+import {
   removeSessionStartHook,
   removeSubagentStopHook,
   removePreToolUseHook,
@@ -1476,6 +1487,33 @@ async function printVersionAvailableChangelog(localVersion, latestVersion) {
 }
 
 /**
+ * Resolve the absolute path npm's global install tree would use for a
+ * `forgedock` package, i.e. `{npm root -g}/forgedock`. Shared by
+ * `isGlobalNpmInstall()` and `findSeparateGlobalInstall()` (forge#2273) so
+ * the `npm root -g` shell-out and path-join logic exists in exactly one
+ * place instead of being duplicated across both callers.
+ *
+ * Fails closed (returns null) on any error, timeout, or empty `npm root -g`
+ * output — callers treat null identically to their pre-existing "detection
+ * inconclusive" fallback (isGlobalNpmInstall: false; findSeparateGlobalInstall: null).
+ *
+ * @returns {string|null} absolute path to `{globalRoot}/forgedock`, or null
+ */
+function resolveGlobalNpmForgedockDir() {
+  try {
+    const globalRoot = execSync("npm root -g", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+      timeout: 5000,
+    }).trim();
+    if (!globalRoot) return null;
+    return resolve(join(globalRoot, "forgedock"));
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Detect whether FORGE_HOME resolves inside npm's global install tree, i.e.
  * this process is running as a globally-installed `forgedock` package (not
  * an ephemeral npx/dlx cache extraction). Used by update()'s npm-mode branch
@@ -1483,27 +1521,48 @@ async function printVersionAvailableChangelog(localVersion, latestVersion) {
  * in place with `npm install -g forgedock@latest`, versus the npx-cache case
  * where there is nothing durable to reinstall over.
  *
- * Resolution: `npm root -g` reports the global node_modules directory; if
- * FORGE_HOME sits under `{globalRoot}/forgedock`, this is a global install.
- * Fails closed (returns false) on any error — the pre-existing advisory-only
- * behavior is always a safe fallback when detection is inconclusive.
+ * Resolution: `resolveGlobalNpmForgedockDir()` (forge#2273) reports where npm's
+ * global install tree would place a `forgedock` package; if FORGE_HOME sits
+ * under that path, this is a global install. Fails closed (returns false) on
+ * any error — the pre-existing advisory-only behavior is always a safe
+ * fallback when detection is inconclusive.
  *
  * @returns {boolean}
  */
 function isGlobalNpmInstall() {
-  try {
-    const globalRoot = execSync("npm root -g", {
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-      timeout: 5000,
-    }).trim();
-    if (!globalRoot) return false;
-    const globalPkgDir = resolve(join(globalRoot, "forgedock"));
-    const home = resolve(FORGE_HOME);
-    return home === globalPkgDir || home.startsWith(globalPkgDir + sep);
-  } catch {
-    return false;
+  const globalPkgDir = resolveGlobalNpmForgedockDir();
+  if (!globalPkgDir) return false;
+  const home = resolve(FORGE_HOME);
+  return home === globalPkgDir || home.startsWith(globalPkgDir + sep);
+}
+
+/**
+ * Detect a separate global npm install of `forgedock` that is NOT the
+ * `FORGE_HOME` this process resolved to (forge#2220). This is the classic
+ * `npx`-shadowing scenario: running `npx forgedock update` from inside a
+ * ForgeDock git clone resolves `FORGE_HOME` to the clone (because the clone
+ * itself is the `forgedock` package on disk), so the git-clone update path
+ * runs and updates the checkout — while a genuinely separate global npm
+ * install elsewhere on disk is silently left untouched.
+ *
+ * Resolution mirrors `isGlobalNpmInstall()` via the shared
+ * `resolveGlobalNpmForgedockDir()` helper (forge#2273): if a `forgedock`
+ * package exists at the resolved global path AND it is a different path than
+ * the current `FORGE_HOME`, a separate global install exists. Fails closed
+ * (returns null) on any error or timeout — this is an advisory notice only
+ * and must never block or alter the update itself.
+ *
+ * @returns {string|null} absolute path to the separate global install, or null
+ */
+function findSeparateGlobalInstall() {
+  const globalPkgDir = resolveGlobalNpmForgedockDir();
+  if (!globalPkgDir) return null;
+  const home = resolve(FORGE_HOME);
+  if (home === globalPkgDir || home.startsWith(globalPkgDir + sep)) {
+    // Current FORGE_HOME already IS the global install — nothing separate.
+    return null;
   }
+  return existsSync(globalPkgDir) ? globalPkgDir : null;
 }
 
 /**
@@ -1690,12 +1749,26 @@ async function update() {
   console.log(`${BOLD}ForgeDock${RESET} — Checking for updates`);
   console.log("");
 
-  console.log(`  Mode: global (~/.claude)`);
   console.log(`  ${dim(getLogoTagline("update"))}`);
 
   // Check if installed via npm (no .git directory) or via git clone
   const gitDir = join(FORGE_HOME, ".git");
   if (existsSync(gitDir)) {
+    // forge#2220 — state the actual install being updated. Printing this
+    // only after the git-dir check (rather than an unconditional "global"
+    // line before it) is the fix: a clone resolved via npx-shadowing was
+    // previously reported as "Mode: global (~/.claude)", which reads as
+    // "your global install was updated" when in fact only this checkout was.
+    console.log(`  Mode: git clone at ${CYAN}${FORGE_HOME}${RESET}`);
+    const separateGlobalInstall = findSeparateGlobalInstall();
+    if (separateGlobalInstall) {
+      console.log(
+        `  ${YELLOW}Note: this updates the git clone above. Your global npm install at ${separateGlobalInstall} was NOT touched.${RESET}`,
+      );
+      console.log(
+        `  ${YELLOW}Run 'npm update -g forgedock', or 'npx forgedock update' from outside a clone, to update it.${RESET}`,
+      );
+    }
     try {
       const branch = execSync("git rev-parse --abbrev-ref HEAD", {
         cwd: FORGE_HOME,
@@ -1708,6 +1781,25 @@ async function update() {
       const isDetached = branch === "HEAD";
       const needsCheckout = branch !== "main";
       if (needsCheckout) {
+        // Dirty-tree guard: refuse to move HEAD in this clone if there are
+        // uncommitted TRACKED changes. Untracked files are intentionally
+        // excluded (--untracked-files=no) so a clean checkout with stray
+        // scratch/log files does not spuriously block the update.
+        const porcelain = execFileSync(
+          "git",
+          ["status", "--porcelain", "--untracked-files=no"],
+          { cwd: FORGE_HOME, encoding: "utf-8" },
+        ).trim();
+        if (porcelain) {
+          console.log(
+            `  ${YELLOW}Working tree has uncommitted changes on branch ${branch} — skipping update.${RESET}`,
+          );
+          console.log(
+            `  ${YELLOW}Commit or stash your changes before updating, or run from a clean clone. HEAD was NOT moved.${RESET}`,
+          );
+          return;
+        }
+
         if (isDetached) {
           console.log(
             `  ${YELLOW}Detached HEAD state — switching to main for update.${RESET}`,
@@ -1717,7 +1809,7 @@ async function update() {
             `  On branch ${CYAN}${branch}${RESET} — switching to ${CYAN}main${RESET} for update...`,
           );
         }
-        execSync("git checkout main --quiet", { cwd: FORGE_HOME });
+        execFileSync("git", ["checkout", "main", "--quiet"], { cwd: FORGE_HOME });
       }
 
       const before = execSync("git rev-parse HEAD", {
@@ -1744,7 +1836,7 @@ async function update() {
       // Restore original branch after a successful update.
       if (needsCheckout && !isDetached) {
         try {
-          execSync(`git checkout ${branch} --quiet`, { cwd: FORGE_HOME });
+          execFileSync("git", ["checkout", branch, "--quiet"], { cwd: FORGE_HOME });
           console.log(
             `  Restored branch ${CYAN}${branch}${RESET}.`,
           );
@@ -1764,6 +1856,18 @@ async function update() {
     // cache path (`npx forgedock`), which was never globally installed, so
     // "npm update -g forgedock" is a no-op. Check the actual published
     // version instead and give advice that reflects the real install model.
+    //
+    // forge#2220 — state the actual resolved install kind + path up front,
+    // computed once and reused below, so the mode line can never drift from
+    // the branch actually taken (isGlobalNpmInstall() is also consulted
+    // later to decide whether to self-update in place).
+    const globalInstall = isGlobalNpmInstall();
+    console.log(
+      globalInstall
+        ? `  Mode: global npm install at ${CYAN}${FORGE_HOME}${RESET}`
+        : `  Mode: npx (ad-hoc, not installed) — resolved from ${CYAN}${FORGE_HOME}${RESET}`,
+    );
+
     const localVersion = getVersion();
     const latestVersion = await fetchLatestVersion();
 
@@ -1788,7 +1892,7 @@ async function update() {
       // stale global binary). selfUpdateGlobalInstall() re-execs and exits
       // the process on success, so anything after this block only runs when
       // self-update wasn't attempted or failed.
-      if (isGlobalNpmInstall()) {
+      if (globalInstall) {
         selfUpdateGlobalInstall(latestVersion);
         // selfUpdateGlobalInstall() only returns (rather than exiting the
         // process) when the install or re-exec failed — it already printed
@@ -3164,13 +3268,25 @@ async function demo() {
 /**
  * `forgedock watch` — live per-agent orchestration view
  *
- * Polls GitHub every 5 seconds for in-flight issues (those with workflow:*
- * labels) and renders a per-agent table with issue#, title, phase, elapsed
- * time, and staleness status.  All data is sourced from FORGE:HEARTBEAT
- * comments written by the pipeline at each phase boundary.
+ * Polls GitHub every 5 seconds for in-flight issues (those carrying any
+ * label in the workflow-prefixed / needs-human family, derived from
+ * bin/labels.json — see deriveWorkflowLabels() in bin/watch-utils.mjs,
+ * forge#2235) and renders
+ * a per-agent table with issue#, title, phase, elapsed time, and staleness
+ * status. All data is sourced from FORGE:HEARTBEAT comments written by the
+ * pipeline at each phase boundary.
+ *
+ * A second, independent "Findings" lane renders review-finding issues
+ * regardless of workflow:* state (forge#2235) — a finding is born without
+ * any workflow:* label and may never acquire one (deferred findings), so it
+ * must not depend on the in-flight label set to be visible. Findings render
+ * with a distinct queued/deferred/validated status, never "running".
  *
  * Stalled agents (no HEARTBEAT update within pipeline.stall_timeout_minutes)
  * are highlighted in yellow.
+ *
+ * If `forge.yaml` defines `repos.satellites`, each satellite repo is watched
+ * in its own section in addition to the default/`--repo` repo.
  *
  * Run:  npx forgedock watch [--repo owner/repo]
  * Exit: Ctrl+C
@@ -3178,8 +3294,11 @@ async function demo() {
 async function watch() {
   const POLL_INTERVAL_MS = 5000;
   const USE_ANSI_WATCH = process.stdout.isTTY === true && !process.env.NO_COLOR && process.env.TERM !== "dumb";
+  const ISSUE_LIST_LIMIT = 500; // forge#2235 — was 30; matches phase-1-resolve.md's --limit 500 mandate
+  const HEARTBEAT_BATCH_CHUNK_SIZE = 25; // keep GraphQL query size/complexity bounded
 
-  // ── Resolve repo ──────────────────────────────────────────────────────────
+  // ── Resolve repo(s) ────────────────────────────────────────────────────────
+  const explicitRepoFlag = restArgs.includes("--repo");
   const watchRepo = resolveLabelsRepo(restArgs);
   if (!watchRepo) {
     process.stderr.write(
@@ -3189,6 +3308,22 @@ async function watch() {
     process.exitCode = 1;
     return;
   }
+
+  // Satellite repos (forge.yaml → repos.satellites) are watched in addition
+  // to the primary repo, unless the caller explicitly overrode --repo (an
+  // explicit --repo means "just this one repo"). Returns [] when no
+  // satellites section is present, so single-repo behavior is unchanged.
+  let satelliteRepos = [];
+  if (!explicitRepoFlag) {
+    const forgeYamlPathForSatellites = join(process.cwd(), "forge.yaml");
+    if (existsSync(forgeYamlPathForSatellites)) {
+      try {
+        const raw = readFileSync(forgeYamlPathForSatellites, "utf-8");
+        satelliteRepos = parseSatelliteRepos(raw).filter((r) => r !== watchRepo);
+      } catch { /* ignore — stay default-repo-only */ }
+    }
+  }
+  const watchedRepos = [watchRepo, ...satelliteRepos];
 
   // ── Validate gh CLI auth ───────────────────────────────────────────────────
   try {
@@ -3253,26 +3388,88 @@ async function watch() {
   }
 
   // ── Render loop ────────────────────────────────────────────────────────────
-  const WORKFLOW_LABELS = [
-    "workflow:investigating",
-    "workflow:ready-to-build",
-    "workflow:building",
-    "workflow:in-review",
-    "needs-human",
-  ];
+  // Derived from bin/labels.json (forge#2235) instead of a hardcoded literal,
+  // so a newly-added workflow:* label (e.g. workflow:engine-error) is watched
+  // automatically without a code change. Falls back to a conservative
+  // built-in list if the manifest is missing/unreadable.
+  const WORKFLOW_LABELS = deriveWorkflowLabels(join(__dirname, "labels.json"));
 
-  async function render() {
-    const rows = [["#", "Title", "Phase", "Elapsed", "Status"]];
+  // Batch-fetch the latest FORGE:HEARTBEAT comment for a set of issue numbers
+  // in ONE `gh api graphql` round-trip (chunked) instead of one REST call per
+  // issue (forge#2235 — de-N+1). Falls back to the old per-issue REST fetch
+  // for the whole set on any GraphQL error, so this optimization can never
+  // make watch() go blind.
+  async function fetchHeartbeatsBatch(repo, issueNumbers) {
+    const result = new Map();
+    if (issueNumbers.length === 0) return result;
+    const [owner, name] = repo.split("/");
+    if (!owner || !name) return fetchHeartbeatsPerIssueFallback(repo, issueNumbers);
+
+    try {
+      for (const chunk of chunkArray(issueNumbers, HEARTBEAT_BATCH_CHUNK_SIZE)) {
+        const query = buildHeartbeatBatchQuery(owner, name, chunk);
+        const raw = execFileSync(
+          "gh",
+          ["api", "graphql", "-f", `query=${query}`],
+          { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+        );
+        const parsed = parseHeartbeatBatchResponse(JSON.parse(raw));
+        for (const [num, body] of parsed) result.set(num, body);
+      }
+      return result;
+    } catch {
+      // GraphQL batch failed (auth scope gap, malformed query, rate limit) —
+      // fall back to the pre-forge#2235 per-issue REST behavior so watch()
+      // degrades gracefully instead of losing heartbeat data entirely.
+      return fetchHeartbeatsPerIssueFallback(repo, issueNumbers);
+    }
+  }
+
+  function fetchHeartbeatsPerIssueFallback(repo, issueNumbers) {
+    const result = new Map();
+    for (const num of issueNumbers) {
+      try {
+        const commentsJson = execFileSync(
+          "gh",
+          ["api", `repos/${repo}/issues/${num}/comments`,
+           "--jq", "[.[] | select(.body | contains(\"FORGE:HEARTBEAT\"))] | last | .body // \"\""],
+          { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+        ).trim();
+        if (commentsJson && commentsJson !== '""' && commentsJson !== "") {
+          result.set(num, commentsJson.replace(/^"|"$/g, "").replace(/\\n/g, "\n"));
+        } else {
+          result.set(num, null);
+        }
+      } catch {
+        result.set(num, null);
+      }
+    }
+    return result;
+  }
+
+  // Renders a normalized priority for the "Pri" column, accepting both the
+  // canonical `priority:P<n>` label form and the bare `P<n>` form used by
+  // some consumer repos (forge#2232 / forge#2235).
+  function priorityCell(issue) {
+    return normalizePriority(issue.labels || []) || "—";
+  }
+
+  async function renderRepo(repo) {
+    const rows = [["#", "Pri", "Title", "Phase", "Elapsed", "Status"]];
+    const findingsRows = [["#", "Pri", "Title", "Status"]];
     let anyIssues = false;
+    const inFlightNumbers = new Set();
+    const issuesByLabel = [];
 
+    // ── In-flight lane: one query per workflow:*/needs-human label ──────────
     for (const label of WORKFLOW_LABELS) {
       let issueJson;
       try {
-        // Use execFileSync with argument array to avoid shell injection via watchRepo
+        // Use execFileSync with argument array to avoid shell injection via repo
         issueJson = execFileSync(
           "gh",
-          ["issue", "list", "-R", watchRepo, "--state", "open",
-           "--label", label, "--limit", "30", "--json", "number,title"],
+          ["issue", "list", "-R", repo, "--state", "open",
+           "--label", label, "--limit", String(ISSUE_LIST_LIMIT), "--json", "number,title,labels"],
           { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
         );
       } catch {
@@ -3282,26 +3479,32 @@ async function watch() {
       let issues;
       try { issues = JSON.parse(issueJson); } catch { continue; }
 
+      if (issues.length === ISSUE_LIST_LIMIT) {
+        process.stderr.write(
+          `${YELLOW}WARNING: label '${label}' on ${repo} returned exactly ${ISSUE_LIST_LIMIT} issues — ` +
+          `results may be truncated.${RESET}\n`,
+        );
+      }
+
+      issuesByLabel.push({ label, issues });
+      for (const issue of issues) inFlightNumbers.add(issue.number);
+    }
+
+    // Batch-fetch heartbeats once for every in-flight issue across all labels
+    const heartbeats = await fetchHeartbeatsBatch(repo, [...inFlightNumbers]);
+
+    for (const { label, issues } of issuesByLabel) {
       for (const issue of issues) {
         anyIssues = true;
         let phase = label.replace("workflow:", "");
         let elapsed = null;
 
-        // Fetch latest FORGE:HEARTBEAT comment for phase + timestamp
-        try {
-          const commentsJson = execFileSync(
-            "gh",
-            ["api", `repos/${watchRepo}/issues/${issue.number}/comments`,
-             "--jq", "[.[] | select(.body | contains(\"FORGE:HEARTBEAT\"))] | last | .body // \"\""],
-            { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
-          ).trim();
-          if (commentsJson && commentsJson !== '""' && commentsJson !== "") {
-            const body = commentsJson.replace(/^"|"$/g, "").replace(/\\n/g, "\n");
-            phase = extractPhase(body) || phase;
-            const ts = extractTimestamp(body);
-            elapsed = elapsedMin(ts);
-          }
-        } catch { /* use label-derived phase */ }
+        const body = heartbeats.get(issue.number);
+        if (body) {
+          phase = extractPhase(body) || phase;
+          const ts = extractTimestamp(body);
+          elapsed = elapsedMin(ts);
+        }
 
         const isStalled = elapsed !== null && elapsed >= stallMinutes;
         const isBlocked = label === "needs-human";
@@ -3320,6 +3523,7 @@ async function watch() {
 
         rows.push([
           `#${issue.number}`,
+          priorityCell(issue),
           titleColored,
           phaseShort,
           elapsedStr(elapsed),
@@ -3328,7 +3532,60 @@ async function watch() {
       }
     }
 
+    // ── Findings lane: review-finding issues, regardless of workflow:* state ─
+    // A finding is born without any workflow:* label and may never acquire
+    // one (deferred/PERMANENT_DEFERRED findings) — this lane makes them
+    // visible from creation instead of only during the narrow in-flight
+    // window (forge#2235).
+    let anyFindings = false;
+    try {
+      const findingsJson = execFileSync(
+        "gh",
+        ["issue", "list", "-R", repo, "--state", "open",
+         "--label", FINDINGS_LANE_LABEL, "--limit", String(ISSUE_LIST_LIMIT), "--json", "number,title,labels"],
+        { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+      );
+      const findings = JSON.parse(findingsJson);
+      if (findings.length === ISSUE_LIST_LIMIT) {
+        process.stderr.write(
+          `${YELLOW}WARNING: label '${FINDINGS_LANE_LABEL}' on ${repo} returned exactly ${ISSUE_LIST_LIMIT} issues — ` +
+          `results may be truncated.${RESET}\n`,
+        );
+      }
+      for (const issue of findings) {
+        // Findings that already carry a workflow:* label are in-flight and
+        // already rendered above — do not double-render them here.
+        if (hasWorkflowLabel(issue.labels || [], WORKFLOW_LABELS)) continue;
+
+        anyFindings = true;
+        const findingStatus = classifyFindingStatus(issue.labels || []); // validated | false-positive | queued | deferred
+        const statusDisplay = findingStatus.toUpperCase();
+        const statusColored = USE_ANSI_WATCH
+          ? (findingStatus === "validated" ? `\x1b[32m${statusDisplay}\x1b[0m`
+             : findingStatus === "false-positive" ? `\x1b[90m${statusDisplay}\x1b[0m`
+             : `\x1b[36m${statusDisplay}\x1b[0m`) // queued / deferred
+          : statusDisplay;
+
+        const titleTrunc = issue.title.length > 38 ? issue.title.slice(0, 35) + "..." : issue.title;
+
+        findingsRows.push([
+          `#${issue.number}`,
+          priorityCell(issue),
+          titleTrunc,
+          statusColored,
+        ]);
+      }
+    } catch { /* findings lane best-effort — never blocks the in-flight table */ }
+
+    return { repo, rows, anyIssues, findingsRows, anyFindings };
+  }
+
+  async function render() {
     const now = new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC";
+    const results = [];
+    for (const repo of watchedRepos) {
+      results.push(await renderRepo(repo));
+    }
 
     if (USE_ANSI_WATCH) {
       process.stdout.write("\x1b[2J\x1b[H"); // clear screen + home
@@ -3336,12 +3593,26 @@ async function watch() {
       process.stdout.write(`\n${"─".repeat(60)}\n`);
     }
 
-    process.stdout.write(`${BOLD}ForgeDock Watch${RESET} — ${dim(watchRepo)}  ${dim(now)}\n\n`);
+    const repoLabel = watchedRepos.length > 1 ? `${watchedRepos.length} repos` : watchRepo;
+    process.stdout.write(`${BOLD}ForgeDock Watch${RESET} — ${dim(repoLabel)}  ${dim(now)}\n\n`);
 
-    if (!anyIssues || rows.length === 1) {
-      process.stdout.write(`  ${dim("No in-flight issues. All quiet.")}\n`);
-    } else {
-      process.stdout.write(table(rows, { header: true }));
+    for (const { repo, rows, anyIssues, findingsRows, anyFindings } of results) {
+      if (watchedRepos.length > 1) {
+        process.stdout.write(`${BOLD}${repo}${RESET}\n`);
+      }
+
+      if (!anyIssues || rows.length === 1) {
+        process.stdout.write(`  ${dim("No in-flight issues. All quiet.")}\n`);
+      } else {
+        process.stdout.write(table(rows, { header: true }));
+      }
+
+      if (anyFindings && findingsRows.length > 1) {
+        process.stdout.write(`\n${BOLD}Findings${RESET} ${dim("(review-finding — queued/deferred/validated)")}\n`);
+        process.stdout.write(table(findingsRows, { header: true }));
+      }
+
+      if (watchedRepos.length > 1) process.stdout.write("\n");
     }
 
     if (USE_ANSI_WATCH) {
@@ -3469,7 +3740,13 @@ switch (command) {
       // forge#2175: make a needs-human escalation distinguishable from a
       // successful run by exit code, mirroring the resume-stalled case's
       // existing convention below (result.failed.length > 0 -> exitCode 1).
-      if (result && result.terminalReason === "needs-human") exitCode = 1;
+      // forge#2261: "engine-error" (the engine/tool itself broke — a fail-fast
+      // CLI_BACKEND_FAILED/NO_API_KEY/NO_SDK, or an exhausted retry loop where
+      // the runner never once succeeded) previously reached this same case via
+      // an uncaught throw, which already set exitCode = 1 below. Now that
+      // runIssue() resolves cleanly with a terminalReason instead of throwing,
+      // preserve that same non-zero exit code for this reason too.
+      if (result && (result.terminalReason === "needs-human" || result.terminalReason === "engine-error")) exitCode = 1;
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;

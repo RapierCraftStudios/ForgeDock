@@ -304,8 +304,76 @@ BATCH_FULLY_GATED=false
 # Step 4C's cascade dispatch of review-finding issues. Declared once here (batch scope,
 # not per-agent) so BATCH_TOKEN_SPEND accumulates correctly across every Step 4C run
 # this session performs.
-TOKEN_BUDGET=$(yq '.pipeline.token_budget_per_batch // 900000' forge.yaml 2>/dev/null || echo 900000)
+
+# --- Cascade admission policy resolution (forge#2234) ---
+# `orchestration.cascade` gives the admission rules below (rules 0/3/4/5) an
+# independently-settable config surface, on top of a named preset. Absent
+# section => `balanced`, which reproduces today's hardcoded behavior exactly
+# (no-op for existing configs). See `bin/engine/admission.mjs` for the typed,
+# unit-tested reference implementation of this same preset table.
+CASCADE_POLICY_NAME=$(yq '.orchestration.cascade.policy // "balanced"' forge.yaml 2>/dev/null || echo "balanced")
+[ "$CASCADE_POLICY_NAME" = "null" ] && CASCADE_POLICY_NAME="balanced"
+
+case "$CASCADE_POLICY_NAME" in
+  all)
+    PRESET_MAX_GEN="unlimited"; PRESET_TOKEN_BUDGET="unlimited"; PRESET_DEFER_GATED="false"; PRESET_KEYWORD="false"; PRESET_P3_SAME_FILE="false" ;;
+  conservative)
+    PRESET_MAX_GEN=1; PRESET_TOKEN_BUDGET=450000; PRESET_DEFER_GATED="true"; PRESET_KEYWORD="true"; PRESET_P3_SAME_FILE="true" ;;
+  balanced)
+    PRESET_MAX_GEN=1; PRESET_TOKEN_BUDGET=900000; PRESET_DEFER_GATED="true"; PRESET_KEYWORD="true"; PRESET_P3_SAME_FILE="true" ;;
+  *)
+    echo "WARNING: forge.yaml → orchestration.cascade.policy \"${CASCADE_POLICY_NAME}\" is not one of: all, balanced, conservative — falling back to \"balanced\""
+    CASCADE_POLICY_NAME="balanced"
+    PRESET_MAX_GEN=1; PRESET_TOKEN_BUDGET=900000; PRESET_DEFER_GATED="true"; PRESET_KEYWORD="true"; PRESET_P3_SAME_FILE="true" ;;
+esac
+
+# max_generation is authoritatively resolved in phase-1-resolve.md (it only governs
+# Phase 1 resolve-time cascade admission, never Step 4C's autonomous defer — see rule 1
+# above). It is re-read here, read-only, ONLY to support the both-uncapped notice below —
+# Step 4C does not otherwise consume MAX_GENERATION_FOR_NOTICE.
+MAX_GENERATION_FOR_NOTICE=$(yq ".orchestration.cascade.max_generation // \"${PRESET_MAX_GEN}\"" forge.yaml 2>/dev/null || echo "$PRESET_MAX_GEN")
+[ "$MAX_GENERATION_FOR_NOTICE" = "null" ] && MAX_GENERATION_FOR_NOTICE="$PRESET_MAX_GEN"
+if [ "$MAX_GENERATION_FOR_NOTICE" != "unlimited" ] && ! echo "$MAX_GENERATION_FOR_NOTICE" | grep -qE '^[1-9][0-9]*$'; then
+  MAX_GENERATION_FOR_NOTICE="$PRESET_MAX_GEN"
+fi
+
+# token_budget precedence: orchestration.cascade.token_budget (new home) >
+# pipeline.token_budget_per_batch (deprecated alias, forge#1858, kept working
+# unchanged) > the resolved preset default. Accepts the "unlimited" sentinel —
+# unlike a bare `// 900000` yq default, an explicit "unlimited" string must
+# NOT be coerced back to the numeric default (see forge#2234 "Known Pitfalls":
+# threading the sentinel through before wiring the levers, not after).
+LEGACY_TOKEN_BUDGET=$(yq '.pipeline.token_budget_per_batch // ""' forge.yaml 2>/dev/null || echo "")
+[ "$LEGACY_TOKEN_BUDGET" = "null" ] && LEGACY_TOKEN_BUDGET=""
+TOKEN_BUDGET_FALLBACK="${LEGACY_TOKEN_BUDGET:-$PRESET_TOKEN_BUDGET}"
+TOKEN_BUDGET=$(yq ".orchestration.cascade.token_budget // \"${TOKEN_BUDGET_FALLBACK}\"" forge.yaml 2>/dev/null || echo "$TOKEN_BUDGET_FALLBACK")
+[ "$TOKEN_BUDGET" = "null" ] && TOKEN_BUDGET="$TOKEN_BUDGET_FALLBACK"
+if [ "$TOKEN_BUDGET" != "unlimited" ] && ! echo "$TOKEN_BUDGET" | grep -qE '^[1-9][0-9]*$'; then
+  echo "WARNING: forge.yaml → orchestration.cascade.token_budget is not a positive integer or \"unlimited\" (\"${TOKEN_BUDGET}\") — falling back to default ${PRESET_TOKEN_BUDGET}"
+  TOKEN_BUDGET="$PRESET_TOKEN_BUDGET"
+fi
+
 TOKEN_ESTIMATE_PER_FINDING=$(yq '.pipeline.token_estimate_per_finding // 150000' forge.yaml 2>/dev/null || echo 150000)
+
+# Independent boolean levers — each accepts an explicit granular override on
+# top of the resolved preset (preset supplies the default, not a hard value).
+CASCADE_DEFER_ON_BATCH_GATED=$(yq ".orchestration.cascade.defer_on_batch_gated // ${PRESET_DEFER_GATED}" forge.yaml 2>/dev/null || echo "$PRESET_DEFER_GATED")
+CASCADE_KEYWORD_HEURISTIC=$(yq ".orchestration.cascade.keyword_heuristic // ${PRESET_KEYWORD}" forge.yaml 2>/dev/null || echo "$PRESET_KEYWORD")
+CASCADE_P3_SAME_FILE_DEFER=$(yq ".orchestration.cascade.p3_same_file_defer // ${PRESET_P3_SAME_FILE}" forge.yaml 2>/dev/null || echo "$PRESET_P3_SAME_FILE")
+
+echo "Cascade admission policy resolved: policy=${CASCADE_POLICY_NAME} token_budget=${TOKEN_BUDGET} defer_on_batch_gated=${CASCADE_DEFER_ON_BATCH_GATED} keyword_heuristic=${CASCADE_KEYWORD_HEURISTIC} p3_same_file_defer=${CASCADE_P3_SAME_FILE_DEFER} (forge.yaml → orchestration.cascade; see docs/CONFIG.md)"
+
+# Both-uncapped notice (loud, one-time, printed once per orchestrate invocation since
+# this resolution block itself runs once at Step 4A.pre) — never a preset default except
+# "all", which sets it deliberately. Surfacing this explicitly means an operator running
+# an uncapped policy sees the tradeoff up front rather than discovering it from an
+# unexpectedly long cascade tail (the exact gen-2→3→4 drift this config surface exists to
+# make controllable — see forge#2234 issue body evidence).
+if [ "$MAX_GENERATION_FOR_NOTICE" = "unlimited" ] && [ "$TOKEN_BUDGET" = "unlimited" ]; then
+  echo "⚠ WARNING: orchestration.cascade — both max_generation and token_budget are unlimited. Cascade admission has NO upper bound on generation depth or token spend this run (policy=${CASCADE_POLICY_NAME})."
+fi
+# --- End cascade admission policy resolution ---
+
 BATCH_TOKEN_SPEND=0
 TOKEN_DEFERRED=()   # findings deferred by the token-budget rule this run (re-evaluable in Step 4F.2.6)
 
@@ -454,6 +522,7 @@ If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to
 **LANE**: {LANE} (PR target: {PR_BASE})
 **Issue title**: {ISSUE_TITLE}
 {GIST_CONTEXT}
+{SOURCE_PR_HINT_CONTEXT}
 "
 )
 ```
@@ -502,6 +571,20 @@ fi
 ```
 
 If `GIST_CONTEXT` is empty (no synthesis brief, no parent investigation, and no milestone index found), the variable resolves to a blank line in the template — no impact on the agent prompt. <!-- Updated: forge#341, forge#1192 -->
+
+**`{SOURCE_PR_HINT_CONTEXT}` generation** <!-- Added: forge#2351 -->: For each issue being dispatched, thread the source-PR `likely-moot` triage hint computed by `phase-1-resolve.md`'s "Source-PR Triage Hint" step (`ISSUE_LIKELY_MOOT[$NUM]`, `ISSUE_SOURCE_PR[$NUM]`, `ISSUE_SOURCE_PR_STATE[$NUM]` — Phase 1 output, not re-derived here) into the dispatched agent's initial context, framed explicitly as a starting point to verify, never as a conclusion:
+
+```bash
+# Build SOURCE_PR_HINT_CONTEXT for an issue — reads Phase 1's ISSUE_LIKELY_MOOT[]/ISSUE_SOURCE_PR[]/
+# ISSUE_SOURCE_PR_STATE[] arrays (populated once in phase-1-resolve.md's pre-flight step).
+SOURCE_PR_HINT_CONTEXT=""
+if [ "${ISSUE_LIKELY_MOOT[{NUMBER}]:-unknown}" = "yes" ]; then
+  SOURCE_PR_HINT_CONTEXT="
+**SOURCE-PR TRIAGE HINT (non-binding — verify, do not assume)**: This finding cites source PR #${ISSUE_SOURCE_PR[{NUMBER}]}, which closed WITHOUT merging (state: ${ISSUE_SOURCE_PR_STATE[{NUMBER}]}). This is a hint to check FIRST during investigation, not a verdict — do NOT conclude INVALID on this basis alone. Two outcomes are both possible and have both occurred in production: (a) the flagged change genuinely never landed by any route (verify with \`git log -S\`/\`git merge-base --is-ancestor\` against the target branch) — if so, this supports an INVALID verdict with evidence; (b) the flagged change reached the target branch anyway via a DIFFERENT, independently-merged PR — if so, this finding is still valid and must be investigated and resolved normally, exactly like #2346 (source PR #2337 closed unmerged, but the code landed via independently-merged PR #2261, commit 90376f5 — #2346 correctly ended at needs-human, not invalid). Reach your own evidence-based verdict; this hint only tells you where to look first."
+fi
+```
+
+If `ISSUE_LIKELY_MOOT[{NUMBER}]` is `unknown` or absent (no `**Source**: PR #{N}` citation found, source PR still open, source PR merged, or the lookup failed), `SOURCE_PR_HINT_CONTEXT` stays empty and resolves to a blank line in the template — no impact on the agent prompt, identical to the `GIST_CONTEXT` empty-case behavior above.
 
 **Claims board context injection** <!-- Added: forge#1736 -->: When a coordination issue exists for this batch (`FORGE_COORD_ISSUE` is set), append the claims board URL and the active-claims check instruction to the agent's context. This enables each `/work-on` agent to post its `FORGE:CLAIM` on build start.
 
@@ -635,6 +718,19 @@ classify_predecessor_state() {
     echo "DONE"
   elif echo "$PRED_LABELS" | grep -qxE "needs-human|workflow:awaiting-merge"; then
     echo "GATED"
+  elif echo "$PRED_LABELS" | grep -qx "workflow:engine-error"; then
+    # forge#2261: the engine/tool itself broke on this run (e.g. a fail-fast
+    # CLI_BACKEND_FAILED, or an exhausted retry loop where the runner never
+    # once succeeded) — this is NOT a human-judgment block, so it must NOT
+    # classify GATED (that would wrongly track dependents as
+    # blocked-on-human-merge, waiting on a merge decision nobody needs to
+    # make). It is also not FAILED — the predecessor's content was never
+    # actually judged bad, the tool just needs to be re-run. Classifying it
+    # IN_PROGRESS means dependents simply keep waiting, exactly as if the
+    # predecessor were still mid-pipeline — which is accurate, since the
+    # stall-detection step below (item 2) auto-resumes/retries a completed
+    # agent run that ends in workflow:engine-error, same as any other stall.
+    echo "IN_PROGRESS"
   elif [ "$PRED_STATE" = "CLOSED" ]; then
     # Closed with no workflow:invalid/merged label (e.g. closed-not-planned) — treat as DONE,
     # not a new deadlock state; there is no pending code for dependents to wait on.
@@ -648,7 +744,7 @@ classify_predecessor_state() {
 - **DONE** — predecessor's code is in the base branch (`workflow:merged`), or the predecessor is closed with no pending code. Safe for dependents to dispatch.
 - **GATED** — predecessor is paused pending a human decision (`needs-human`) or pending only a human merge click (`workflow:awaiting-merge`). Its code is NOT yet in the base branch. Dependents are neither dispatched nor skipped — they move to the `blocked-on-human-merge` tracked state (item 6.5 below).
 - **FAILED** — predecessor was closed as `workflow:invalid`, or the agent explicitly reported a build/test error. Dependents are marked "skipped — dependency failed" (item 6 below) — unchanged from prior behavior.
-- **IN_PROGRESS** — predecessor is still mid-pipeline (`investigating`/`ready-to-build`/`building`/`in-review`). Dependent simply continues waiting; no special tracking needed.
+- **IN_PROGRESS** — predecessor is still mid-pipeline (`investigating`/`ready-to-build`/`building`/`in-review`), or terminated `workflow:engine-error` (forge#2261 — an engine/tool failure, not a human-judgment block or a genuine content failure; treated as still-in-flight since stall-detection auto-resumes it). Dependent simply continues waiting; no special tracking needed.
 
 A GATED predecessor whose PR later merges reclassifies to DONE the next time `classify_predecessor_state` runs (its label flips to `workflow:merged`) — this is exactly what the merge-triggered wake check (item 6.6 below) relies on.
 
@@ -832,7 +928,7 @@ done
    echo "#{NUM}: $FINAL_STATE"
    ```
 
-2. **If the issue is NOT in a terminal-for-this-agent state** (`workflow:merged`, `workflow:invalid`, `needs-human`, or `workflow:awaiting-merge`), the agent stalled mid-pipeline. **Resume it immediately**:
+2. **If the issue is NOT in a terminal-for-this-agent state** (`workflow:merged`, `workflow:invalid`, `needs-human`, or `workflow:awaiting-merge`), the agent stalled mid-pipeline. **Resume it immediately**. `workflow:engine-error` (forge#2261 — `bin/engine.mjs`'s headless engine terminating on an engine/tool-level failure rather than a genuine human-judgment block) is deliberately excluded from the terminal-for-this-agent set: a completed agent run ending there is treated exactly like any other stall and auto-resumed/retried here, up to the resume-cap in item 3 below — no human decision is pending, so there is nothing to gate on:
    ```
    Agent(
      resume=AGENT_ISSUE_MAP[{NUMBER}],
@@ -895,9 +991,15 @@ done
 
    Report every dependent whose skip was avoided this way — e.g. "#{DEP} — predecessor #{PRED} failed but never touched the shared file(s); edge dropped, #{DEP} not skipped." For all remaining dependents (real `EDGE_KIND` overlap confirmed, or a non-`EDGE_KIND` edge type), mark them "skipped — dependency #{X} failed" and report them. Do NOT dispatch them.
 
-6.4. **Auto-dispatch remediation against a `needs-human`-gated predecessor's own PR** <!-- Added: forge#1813 --> — item 6.5 below tracks the *dependents* of a `GATED` predecessor; this item handles the predecessor's own PR, which item 6.5/6.6 never re-drive on their own. Run this check whenever a completed agent's issue classifies `GATED` **specifically via `needs-human`** — NOT `workflow:awaiting-merge`. That second state already means "remediated and re-reviewed to a clean verdict, just needs a human's merge click" (see forge#1810's guard) — dispatching remediation again would be redundant, not just wasteful, since there is nothing left to fix.
+6.4. **Auto-dispatch remediation against a `needs-human`-gated issue's own PR — runs unconditionally per completion, with or without dependents** <!-- Added: forge#1813, fixed: forge#2243 --> — item 6.5 below tracks the *dependents* of a `GATED` predecessor; this item handles the gated issue's own PR, which item 6.5/6.6 never re-drive on their own. **This check is bound directly to the issue that just completed — `PRED="$NUM"` (the same issue number carried from items 1-4 of this Step 4B sequence) — NOT to any `$PRED` produced by walking a dependent's predecessor list (item 5's readiness loop) or by item 6's FAILED-specific dependent-walk.** Run it for every completed agent, every cycle, regardless of whether that issue has any dependents in the DAG at all — a leaf issue (no dependents) is just as eligible as an issue that blocks others. Trigger condition: the completed issue classifies `GATED` **specifically via `needs-human`** — NOT `workflow:awaiting-merge`. That second state already means "remediated and re-reviewed to a clean verdict, just needs a human's merge click" (see forge#1810's guard) — dispatching remediation again would be redundant, not just wasteful, since there is nothing left to fix.
 
    ```bash
+   # Bind PRED to the issue that just completed — independent of item 5's dependent-walk loop
+   # and item 6's FAILED-specific dependent-walk. This is the fix for forge#2243: a leaf issue
+   # (no dependents) must still reach this check, since it never appears as a loop-bound $PRED
+   # in either of those other contexts.
+   PRED="$NUM"
+
    PRED_CURRENT_LABEL=$(gh issue view "$PRED" -R {GH_REPO} --json labels \
      --jq '[.labels[].name | select(. == "needs-human" or . == "workflow:awaiting-merge")] | .[0] // empty' 2>/dev/null)
 
@@ -938,7 +1040,7 @@ Do not ask the user questions — you are running autonomously in the background
    fi
    ```
 
-   This satisfies #1809 Q2 (the orchestrator auto-dispatches remediation against the gated predecessor itself — the exact gap forge#1812's item 6.5/6.6 left open, since those items only ever track and wake *dependents*, never the gated PR's own remediation). The remediation agent's outcome is picked up on the **next** completion-monitoring cycle of this same Step 4B loop: if it lands (`workflow:merged`), item 6.6 below fires normally and wakes any `blocked-on-human-merge` dependents; if it holds/re-escalates, the predecessor simply remains `GATED` and item 6.5 continues tracking its dependents unchanged.
+   This satisfies #1809 Q2 (the orchestrator auto-dispatches remediation against the gated issue itself — the exact gap forge#1812's item 6.5/6.6 left open, since those items only ever track and wake *dependents*, never the gated PR's own remediation) — and closes forge#2243 (the gap that #1812's fix left open for *leaf* issues with no dependents: because this item's `$PRED` binding was never made explicit and self-contained, it was only ever reached while walking a dependent's predecessor list, so a `needs-human` issue that has no dependents never got remediation dispatched and its CHANGES-REQUESTED PR re-reviewed the same unchanged commit forever). The remediation agent's outcome is picked up on the **next** completion-monitoring cycle of this same Step 4B loop: if it lands (`workflow:merged`), item 6.6 below fires normally and wakes any `blocked-on-human-merge` dependents (if any exist — a leaf issue simply has none to wake); if it holds/re-escalates, the issue simply remains `GATED` and item 6.5 continues tracking its dependents (if any) unchanged.
 
 6.5. **Handle predecessor gating** (`GATED` — `needs-human` or `workflow:awaiting-merge`) <!-- Added: forge#1812 --> — if a completed agent's issue classifies as `GATED`, its direct dependents are neither dispatched nor marked failed/skipped. For each direct dependent `DEP` of the gated predecessor `PRED`:
 
@@ -1113,6 +1215,57 @@ Gating predecessor #${NUM} reached \`workflow:merged\` — dispatching now. (Was
 - Polling the same status check repeatedly on a timer
 - Waiting for a "batch" of completions before checking for newly ready issues — check after EVERY completion
 
+### Step 4B.6: Predicate Re-Resolution (standing queries only)
+
+<!-- Added: forge#2236 -->
+
+**Purpose**: Phase 1 resolves `$ARGUMENTS` to an issue-number list exactly once (see `phase-1-resolve.md` "Predicate Persistence"). For a standing-query input (`ORIGINATING_QUERY_KIND == "query"` — everything except an explicit `#1 #2 #3` literal set), a new issue matching the same predicate can appear mid-run (a human files it, `/analytics` or `/signal-planner` create it, it gets added to the milestone) and is otherwise invisible to this batch until the operator re-invokes `/orchestrate` by hand. This step closes that gap for the *originating* issue set, distinct from Step 4C which folds in review-findings spawned *by* this batch's own agents.
+
+**Skip entirely if** `ORIGINATING_QUERY_KIND == "literal"` (see `phase-1-resolve.md`) — an explicit issue-number list is the complete intent; there is nothing to re-resolve, ever.
+
+**Trigger** (event-driven, same model as the rest of this file — no sleep/poll timer): run once per Step 4B completion cycle, immediately after the per-agent-completion handling above and before Step 4B.5's stall check.
+
+```bash
+# Gate on config + literal/query kind + round cap via bin/engine/resolve.mjs's
+# shouldReResolve (mirrors admission.mjs's role for Step 4C's admission rules).
+RERESOLVE_ENABLED=$(yq '.orchestration.reresolve.enabled // true' forge.yaml 2>/dev/null || echo "true")
+RERESOLVE_MAX_ROUNDS=$(yq '.orchestration.reresolve.max_rounds // "unbounded"' forge.yaml 2>/dev/null || echo "unbounded")
+
+node -e '
+import("{REPO_PATH}/bin/engine/resolve.mjs").then(({ shouldReResolve }) => {
+  const classified = { kind: process.argv[1], pattern: process.argv[2], args: [] };
+  const config = {
+    enabled: process.argv[3] === "false" ? false : process.argv[3],
+    maxRounds: process.argv[4] === "unbounded" ? undefined : Number(process.argv[4]),
+  };
+  const rounds = Number(process.argv[5]);
+  console.log(JSON.stringify(shouldReResolve(classified, config, rounds)));
+}, () => process.exit(0));
+' "$ORIGINATING_QUERY_KIND" "$ORIGINATING_QUERY_PATTERN" "$RERESOLVE_ENABLED" "$RERESOLVE_MAX_ROUNDS" "$RERESOLVE_ROUNDS_SO_FAR"
+```
+
+If the result's `reResolve` is `false` (off switch, or `RERESOLVE_ROUNDS_SO_FAR` has reached `max_rounds` — bounded termination per the issue's acceptance criteria), skip this step for the current cycle and log the reason. `RERESOLVE_ROUNDS_SO_FAR` starts at 0 for the batch and increments once per cycle this step actually runs (declare it alongside the other Step 4A.pre batch-scope accumulators — do not re-initialize per completion).
+
+**Re-run the original query** using the exact same resolution logic Phase 1 used for `$ORIGINATING_QUERY_PATTERN`/`$ORIGINATING_QUERY_ARGS` (e.g. re-run the `gh issue list --milestone`/`--label`/`priority:P*` fetch from `phase-1-resolve.md`'s "Fetch the issues" section), applying the exact same eligibility filter Phase 1 applied (`phase-4-execution.md` cross-reference: `phase-1-resolve.md` "Filter out ineligible issues" — closed/`needs-human`/`workflow:decomposed`/`workflow:awaiting-merge` excluded, same as T0).
+
+**Fold new matches through the existing admission path — never a bypass**:
+
+```bash
+node -e '
+import("{REPO_PATH}/bin/engine/resolve.mjs").then(({ foldNewMatches }) => {
+  const reResolved = JSON.parse(process.argv[1]);
+  const processed = JSON.parse(process.argv[2]);
+  console.log(JSON.stringify(foldNewMatches(reResolved, processed)));
+}, () => process.exit(0));
+' "$RERESOLVED_NUMBERS_JSON" "$ALL_BATCH_ISSUE_NUMBERS_JSON"
+```
+
+`newMatches` from `foldNewMatches` are candidate issues, not admitted ones. Each one MUST be dispatched through the exact same path a T0-resolved issue takes — DAG dependency analysis (`phase-3-dependency.md`), then Step 4A/4B's standard `dispatch_headroom`-gated dispatch — **not** through Step 4C's review-finding-specific `evaluateCascadeFinding` chain (that gate's rules, e.g. the comment/typo keyword heuristic, are shaped for cascade-spawned findings, not arbitrary re-resolved issues). This is the same non-bypass requirement Step 4C already satisfies for its own admission stream; this step must not become a second, ungated entry point into the DAG. Add every `newMatch` to `ALL_BATCH_ISSUE_NUMBERS` (so a later re-resolution round or Step 4C sees it as already processed) and to `SORTED_READY_SET`/the DAG exactly as Step 4A.pre.0 processes a T0-resolved issue.
+
+**Reporting (mandatory — do not let this become an alert-only dead-code path, per forge#1832)**: track which issues were T0-resolved vs. admitted via re-resolution, and which round each entered in. Surface this distinction in the final report (`phase-6-report.md`) rather than only in a log line — a run whose predicate still matches unadmitted work at exit (round cap or config disabled mid-run) must say so explicitly, not report a silent clean drain.
+
+**Multi-repo**: for `all-repos`/satellite-scoped queries (`next <N> all-repos`, `mcp:fast`, etc.), re-run the query against every repo the original resolution covered — not just the default repo.
+
 ### Step 4B.5: Time-Based Stall Detection
 
 **Purpose**: Catches agents that have stopped responding WITHOUT exiting (e.g., rate-limited, context-frozen, or silently hung). The reactive check in Step 4B only fires on agent completion — this check catches agents that never complete at all.
@@ -1225,12 +1378,12 @@ gh issue list -R {GH_REPO} --state open --label "review-finding" --limit 20 \
 For each spawned finding, determine whether it should be **executed** or **deferred**:
 
 **Evaluation order** (first matching rule wins):
-0. **Batch fully human-gated** (`BATCH_FULLY_GATED == true`, always defer, even for P1/P2) <!-- Added: forge#1814 -->: The original batch (see Step 4B item 6.7) has exhausted into DONE/FAILED/GATED with nothing left `IN_PROGRESS` — the real blockers are the GATED issues, not a lack of dispatchable findings. Dispatching a new review-finding here cannot produce net batch progress; it only inflates the open-issue count while the productive path waits on a human merge. Always defer, checked before generation and priority. Rationale: this is the idle/backpressure policy this issue adds — without it, rule 2 (below) unconditionally executes P1/P2 findings regardless of how gated the rest of the batch is, which is the root cause of the net-negative churn this policy exists to stop.
-1. **Generation ≥ 2** (always defer, even for P1/P2): Finding was spawned by an issue that was itself a review-finding. Check the source issue's labels for `review-finding` — if the source has that label, the new finding is generation 2. Always defer. Rationale: gen-2+ cascade is theoretically unbounded — cap it here.
+0. **Batch fully human-gated** (`BATCH_FULLY_GATED == true`, always defer, even for P1/P2) <!-- Added: forge#1814 -->: The original batch (see Step 4B item 6.7) has exhausted into DONE/FAILED/GATED with nothing left `IN_PROGRESS` — the real blockers are the GATED issues, not a lack of dispatchable findings. Dispatching a new review-finding here cannot produce net batch progress; it only inflates the open-issue count while the productive path waits on a human merge. Always defer, checked before generation and priority. Rationale: this is the idle/backpressure policy this issue adds — without it, rule 2 (below) unconditionally executes P1/P2 findings regardless of how gated the rest of the batch is, which is the root cause of the net-negative churn this policy exists to stop. **Configurable** via `orchestration.cascade.defer_on_batch_gated` (default `true`; `false` under `policy: all` — forge#2234).
+1. **Generation ≥ 2** (always defer, even for P1/P2, for autonomous mid-run cascade — see scope note below): Finding was spawned by an issue that was itself a review-finding. Check the source issue's labels for `review-finding` — if the source has that label, the new finding is generation 2. Always defer within this Step 4C triage pass. Rationale: gen-2+ cascade is theoretically unbounded — cap it here. **Scope**: this rule caps *autonomous* cascade — findings discovered and re-triaged automatically during an unattended run. It is not a cap on what a human can explicitly request. When an operator directly asks for cascade/review-finding work via `phase-1-resolve.md`'s dedicated `cascade`/`review-findings`/`findings` resolution (with `--include-deferred`/`--allow-gen2`, or the `orchestration.cascade.max_generation` config lever from #2234), those findings enter the DAG through Phase 1 resolution, not through this Step 4C mid-run triage — this rule still defers anything Step 4C itself discovers mid-run, including inside a human-requested gen≥2 batch (see recursion safety below). **Not configurable here** — `orchestration.cascade.max_generation` governs Phase 1 resolve-time admission only (see `phase-1-resolve.md` "Cascade / Review-Finding Resolution"); this Step 4C rule stays an absolute autonomous-cascade cap regardless of policy, including `policy: all`. <!-- Added: forge#2231 -->
 2. **Priority override** (P1 or P2 → always execute): If the finding is labeled P1 or P2, skip all remaining heuristics and execute. Rationale: high-priority findings must never be suppressed by keyword matching.
-3. **Comment/typo heuristic** (P3 and below only): Finding title contains the word "comment" or "typo" (case-insensitive). These are 1-line cosmetic fixes that do not block other work.
-4. **P3 + same-file overlap**: Finding is labeled `P3` AND the file it targets overlaps with ANY file already in the current batch (active or queued in the DAG). Rationale: same-file P3 findings add predecessor edges that serialize agents — one finding per original issue increases wall-clock time with no proportional value.
-5. **Per-batch token budget** (P3 and below only, applied AFTER surface-area batching below — see "Per-batch token budget gate") <!-- Added: forge#1858 -->: Once `BATCH_TOKEN_SPEND` would exceed `TOKEN_BUDGET`, additional P3-and-below units (an unclubbed finding, or an already-clubbed batch issue) defer rather than dispatch. This is NOT part of the per-finding rule 0-4 chain immediately below — it is a quantity gate applied to the POST-clubbing `QUEUED_FINDINGS` list, so a same-run surface-area batch issue (surface-area batching below) is charged once for the whole cluster, not once per member. P1/P2 are NEVER gated by it (they are excluded by rule 2 before reaching this gate, same as they are excluded from rules 3-4).
+3. **Comment/typo heuristic** (P3 and below only): Finding title contains the word "comment" or "typo" (case-insensitive). These are 1-line cosmetic fixes that do not block other work. **Configurable** via `orchestration.cascade.keyword_heuristic` (default `true`; `false` under `policy: all` — forge#2234).
+4. **P3 + same-file overlap**: Finding is labeled `P3` AND the file it targets overlaps with ANY file already in the current batch (active or queued in the DAG). Rationale: same-file P3 findings add predecessor edges that serialize agents — one finding per original issue increases wall-clock time with no proportional value. **Configurable** via `orchestration.cascade.p3_same_file_defer` (default `true`; `false` under `policy: all` — forge#2234).
+5. **Per-batch token budget** (P3 and below only, applied AFTER surface-area batching below — see "Per-batch token budget gate") <!-- Added: forge#1858 -->: Once `BATCH_TOKEN_SPEND` would exceed `TOKEN_BUDGET`, additional P3-and-below units (an unclubbed finding, or an already-clubbed batch issue) defer rather than dispatch. This is NOT part of the per-finding rule 0-4 chain immediately below — it is a quantity gate applied to the POST-clubbing `QUEUED_FINDINGS` list, so a same-run surface-area batch issue (surface-area batching below) is charged once for the whole cluster, not once per member. P1/P2 are NEVER gated by it (they are excluded by rule 2 before reaching this gate, same as they are excluded from rules 3-4). **Configurable** via `orchestration.cascade.token_budget` (default `900000`, deprecated alias `pipeline.token_budget_per_batch`; `unlimited` under `policy: all` — forge#2234). This is a distinct, independent lever from rule 1's generation cap — "admit gen-2, stop at gen-3" (`max_generation: 3`) and "admit cascade until N tokens" (`token_budget: N`) can each be set without the other.
 
 **Defer** (do NOT add to the DAG) if rules 0, 1, 3, 4, or 5 match.
 
@@ -1269,15 +1422,39 @@ for FINDING_NUM in {spawned_finding_numbers}; do
   FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body \
     --jq '{labels: [.labels[].name], title: .title, body: .body}')
 
-  PRIORITY=$(echo "$FINDING_DATA" | jq -r '.labels[] | select(startswith("priority:P")) | ltrimstr("priority:")' | head -1)
+  # Priority extraction accepts both label schemas: canonical `priority:P<n>` (the only
+  # form review-pr.md ever creates) and bare `P<n>` (carried by some consumer repos'
+  # externally/legacy-labeled issues). `priority:P<n>` wins if both are present on the
+  # same issue. Normalizes to bare P<n> form since all downstream comparisons in this file
+  # compare against bare "P1"/"P2"/"P3". Mirrored verbatim in the token-budget gate below,
+  # the Step 4F.2 sweep loop, and phase-1-resolve.md / cleanup.md's batching queries —
+  # keep all sites byte-identical (forge#1837: mirrored checks must not drift). <!-- Added: forge#2232 -->
+  # NOTE: $FINDING_DATA.labels is already a flat array of label-name strings (see the
+  # gh issue view --jq above: {labels: [.labels[].name], ...}) — so this reads `.labels[]`
+  # directly, NOT `.labels[].name` (that would error: "Cannot index string with name").
+  PRIORITY=$(echo "$FINDING_DATA" | jq -r '
+    ([.labels[] | select(test("^priority:P[0-9]+$"))] | .[0]) //
+    ([.labels[] | select(test("^P[0-9]+$"))] | .[0]) //
+    "" | ltrimstr("priority:")')
   TITLE=$(echo "$FINDING_DATA" | jq -r '.title')
+
+  if [ -z "$PRIORITY" ]; then
+    echo "WARNING: #${FINDING_NUM} has no parseable priority label (checked priority:P<n> and bare P<n>) — treating as untriaged, all priority-dependent rules below will not match"
+  fi
 
   # Rule 0: Batch fully human-gated — checked FIRST, overrides even the P1/P2 priority
   # override below. BATCH_FULLY_GATED is computed once per completion cycle in Step 4B
   # item 6.7; read it here, do not recompute. <!-- Added: forge#1814 -->
-  if [ "${BATCH_FULLY_GATED:-false}" = "true" ]; then
+  # Gated by CASCADE_DEFER_ON_BATCH_GATED (orchestration.cascade, forge#2234) — "policy:
+  # all" sets this to false so an operator draining a backlog is never idle-gated.
+  if [ "$CASCADE_DEFER_ON_BATCH_GATED" = "true" ] && [ "${BATCH_FULLY_GATED:-false}" = "true" ]; then
     DEFER=true; DEFER_REASON="batch fully human-gated — idle policy"
   # Heuristic 1: Generation check — source issue has review-finding label (always defer, even for P1/P2)
+  # NOT gated by orchestration.cascade.max_generation — this is Step 4C's autonomous
+  # mid-run cascade cap, which stays absolute regardless of config (see forge#2231's
+  # scope note above and phase-1-resolve.md's Cascade / Review-Finding Resolution
+  # section). `orchestration.cascade.max_generation` governs what an explicit human
+  # request admits at Phase 1 resolve time, not what this unattended triage pass defers.
   elif SOURCE_NUM=$(echo "$FINDING_DATA" | jq -r '.body' | grep -oP '(?i)spawned from issue #\K\d+|source issue[: #]+\K\d+' | head -1) && \
        [ -n "$SOURCE_NUM" ] && \
        gh issue view $SOURCE_NUM -R {GH_REPO} --json labels --jq '[.labels[].name]' 2>/dev/null | grep -q "review-finding"; then
@@ -1286,10 +1463,12 @@ for FINDING_NUM in {spawned_finding_numbers}; do
   elif [ "$PRIORITY" = "P1" ] || [ "$PRIORITY" = "P2" ]; then
     DEFER=false
   # Heuristic 2: Comment/typo keyword (only applies to P3 and below)
-  elif echo "$TITLE" | grep -qi "comment\|typo"; then
+  # Gated by CASCADE_KEYWORD_HEURISTIC (orchestration.cascade, forge#2234).
+  elif [ "$CASCADE_KEYWORD_HEURISTIC" = "true" ] && echo "$TITLE" | grep -qi "comment\|typo"; then
     DEFER=true; DEFER_REASON="comment/typo heuristic"
   # Heuristic 3: P3 + same-file overlap
-  elif [ "$PRIORITY" = "P3" ]; then
+  # Gated by CASCADE_P3_SAME_FILE_DEFER (orchestration.cascade, forge#2234).
+  elif [ "$CASCADE_P3_SAME_FILE_DEFER" = "true" ] && [ "$PRIORITY" = "P3" ]; then
     # Extract file target from finding body (look for code block or backtick path)
     FINDING_FILE=$(echo "$FINDING_DATA" | jq -r '.body' | grep -oP '`[^\`]+\.(py|ts|tsx|sh|md)`' | head -1 | tr -d '`')
     if [ -n "$FINDING_FILE" ] && echo "$ALL_BATCH_FILES" | grep -qF "$FINDING_FILE"; then
@@ -1353,8 +1532,9 @@ for FINDING_NUM in "${QUEUED_FINDINGS[@]}"; do
     or ([.labels[]] | any(. == "security" or . == "billing" or . == "anti-bot" or . == "auth"))
   ' >/dev/null && continue
 
-  # Only P3 findings are eligible (P1/P2 already dispatched individually above)
-  echo "$FINDING_DATA" | jq -e '[.labels[]] | any(. == "priority:P3")' >/dev/null || continue
+  # Only P3 findings are eligible (P1/P2 already dispatched individually above).
+  # Schema-tolerant: matches canonical priority:P3 or bare P3 (forge#2232).
+  echo "$FINDING_DATA" | jq -e '[.labels[]] | any(test("^(priority:)?P3$"))' >/dev/null || continue
 
   FINDING_FILE=$(echo "$FINDING_DATA" | jq -r '.body' | grep -oE '`[^`]+\.(py|tsx?|jsx?|sql|json|ya?ml|sh|md)`' | head -1 | tr -d '`')
   [ -z "$FINDING_FILE" ] && continue
@@ -1434,8 +1614,16 @@ Rule 5 from the evaluation order above. Charges ONE `TOKEN_ESTIMATE_PER_FINDING`
 TOKEN_BUDGET_DEFERRED_THIS_RUN=()
 
 for FINDING_NUM in "${QUEUED_FINDINGS[@]}"; do
+  # Schema-tolerant extraction (forge#2232) — same pattern as the Step 4C main loop above.
+  # Defaults to P3 only when NEITHER label form is present (an empty labels match, not
+  # merely a non-priority:P<n> label), so a bare-P3-labeled finding is read correctly
+  # instead of falling through to this default.
   FINDING_PRIORITY=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json labels \
-    --jq '([.labels[].name | select(startswith("priority:P"))] | .[0] // "priority:P3") | ltrimstr("priority:")' 2>/dev/null || echo "P3")
+    --jq '(
+      ([.labels[].name | select(test("^priority:P[0-9]+$"))] | .[0]) //
+      ([.labels[].name | select(test("^P[0-9]+$"))] | .[0]) //
+      "priority:P3"
+    ) | ltrimstr("priority:")' 2>/dev/null || echo "P3")
 
   # P1/P2 are NEVER gated by the token budget — they were queued by rule 2 above
   # regardless of budget headroom; skip them here and leave them in QUEUED_FINDINGS.
@@ -1444,7 +1632,9 @@ for FINDING_NUM in "${QUEUED_FINDINGS[@]}"; do
   fi
 
   PROJECTED_TOKEN_SPEND=$((BATCH_TOKEN_SPEND + TOKEN_ESTIMATE_PER_FINDING))
-  if [ "$PROJECTED_TOKEN_SPEND" -gt "$TOKEN_BUDGET" ]; then
+  # TOKEN_BUDGET may be the "unlimited" sentinel (orchestration.cascade.token_budget /
+  # policy: all) — never gate in that case, regardless of projected spend.
+  if [ "$TOKEN_BUDGET" != "unlimited" ] && [ "$PROJECTED_TOKEN_SPEND" -gt "$TOKEN_BUDGET" ]; then
     TOKEN_DEFERRED+=("$FINDING_NUM")
     TOKEN_BUDGET_DEFERRED_THIS_RUN+=("$FINDING_NUM")
     DEFERRED_REASONS[$FINDING_NUM]="token budget exceeded (est. ${TOKEN_ESTIMATE_PER_FINDING} tokens would push batch spend to ${PROJECTED_TOKEN_SPEND} > ceiling ${TOKEN_BUDGET})"
@@ -1688,7 +1878,16 @@ for FINDING_NUM in "${SWEEP_CANDIDATES[@]}"; do
   STATE=$(echo "$FINDING_DATA" | jq -r '.state')
   [ "$STATE" = "CLOSED" ] && continue
 
-  PRIORITY=$(echo "$FINDING_DATA" | jq -r '.labels[] | select(startswith("priority:P")) | ltrimstr("priority:")' | head -1)
+  # Schema-tolerant extraction (forge#2232), mirrors the Step 4C main loop above.
+  # PRIORITY is not currently read by the branches below (comment/typo is title-only),
+  # kept normalized for consistency and to avoid reintroducing the schema bug if a
+  # future rule here starts branching on it. NOTE: $FINDING_DATA.labels here is already
+  # a flat array of label-name strings (see the --jq above: {labels: [.labels[].name], ...}),
+  # so this reads `.labels[]` directly, not `.labels[].name`.
+  PRIORITY=$(echo "$FINDING_DATA" | jq -r '
+    ([.labels[] | select(test("^priority:P[0-9]+$"))] | .[0]) //
+    ([.labels[] | select(test("^P[0-9]+$"))] | .[0]) //
+    "" | ltrimstr("priority:")')
   TITLE=$(echo "$FINDING_DATA" | jq -r '.title')
 
   # Re-apply heuristics against the drained DAG (no active batch files)
@@ -1755,7 +1954,7 @@ if [ "${#TOKEN_GATED[@]}" -gt 0 ]; then
     [ "$STATE" = "CLOSED" ] && continue   # resolved by another process — drop silently
 
     PROJECTED_SWEEP_SPEND=$((SWEEP_TOKEN_SPEND + TOKEN_ESTIMATE_PER_FINDING))
-    if [ "$PROJECTED_SWEEP_SPEND" -gt "$TOKEN_BUDGET" ]; then
+    if [ "$TOKEN_BUDGET" != "unlimited" ] && [ "$PROJECTED_SWEEP_SPEND" -gt "$TOKEN_BUDGET" ]; then
       SWEEP_STILL_DEFERRED+=($FINDING_NUM)
       echo "Sweep: #${FINDING_NUM} still deferred (token budget — sweep allowance ${TOKEN_BUDGET} would be exceeded at ${PROJECTED_SWEEP_SPEND})"
     else
@@ -1915,7 +2114,7 @@ fi
 Completion Sweep Results:
   Dispatched: #{A}, #{B} (file overlap cleared after DAG drain)
   Still deferred (cosmetic): #{C} (comment/typo)
-  Permanently deferred (gen2): #{D} (generation >= 2 cascade cap)
+  Permanently deferred (gen2): #{D} (generation >= 2 cascade cap — requires manual /work-on, or an explicit `cascade`/`review-findings --allow-gen2` request via phase-1-resolve.md; see #2231/#2234)
   Idle-gated — still deferred: #{E} (batch still fully human-gated — waiting on a merge)
   Idle-gated — cleared: #{F} (a gating PR merged since deferral — no longer idle)
   Token-gated — cleared: #{G} (fits fresh sweep token allowance — batch spend ${SWEEP_TOKEN_SPEND}/${TOKEN_BUDGET})
@@ -1926,7 +2125,7 @@ Completion Sweep Results:
 
 **Anti-patterns — DO NOT DO THIS:**
 - Re-sweeping findings spawned during the sweep itself — this creates unbounded recursion. Sweep is a single pass.
-- Overriding generation >= 2 deferrals — the cascade cap is absolute.
+- Overriding generation >= 2 deferrals **inside this Step 4C mid-run triage** — the cascade cap is absolute for autonomous cascade: a sweep or triage pass must never promote a gen≥2 finding to executed just because it looks low-risk. This is distinct from an explicit human request made *before* the run starts: an operator may deliberately admit gen≥2 findings via `phase-1-resolve.md`'s `cascade`/`review-findings`/`findings` resolution with `--include-deferred`/`--allow-gen2` (or the `orchestration.cascade.max_generation` config lever from #2234) — that is the sanctioned override path, entered at Phase 1 resolution, not a violation of this rule. Do not use that human-request path as precedent to relax Step 4C itself. <!-- Added: forge#2231 -->
 - Skipping the sweep because "there are only a few" deferred findings — even one deferred finding represents unresolved work.
 - Clearing an idle-gated deferral (forge#1814) without recomputing `BATCH_FULLY_GATED` fresh at sweep time — a stale "not gated" read would re-introduce the exact net-negative churn this policy exists to stop.
 - Clearing a token-gated deferral (forge#1858) by reusing the drained `BATCH_TOKEN_SPEND` instead of the fresh `SWEEP_TOKEN_SPEND` allowance — the whole point of Step 4F.2.6 is that the *original* batch's spend is no longer relevant once it has drained.

@@ -866,6 +866,12 @@ describe("doctor --fix (forge#1944)", () => {
       "workflow:merged",
       "workflow:decomposed",
       "workflow:invalid",
+      // forge#2261: bin/labels.json gained a new "workflow:"-prefixed label
+      // (workflow:engine-error). Check 7 filters expectedLabels by
+      // `startsWith("workflow:")`, so this stub's "already present" set must
+      // stay in sync with every workflow:* label in bin/labels.json — this
+      // list existing exactly to mirror that filter, not the full manifest.
+      "workflow:engine-error",
     ].map((name) => ({ name }));
 
     const ghStubPath = join(stubBin, "gh-stub.js");
@@ -1084,11 +1090,12 @@ describe("status — re-entry mini-dashboard (#1945)", () => {
 // ---------------------------------------------------------------------------
 
 describe("update — global npm install self-update (forge#2133)", () => {
-  it("detects a global install, runs `npm install -g`, and re-execs to finish persist/relink from the new payload", () => {
+  it("detects a global install, runs `npm install -g`, and re-execs to finish persist/relink from the new payload", (t) => {
     // See the Windows note in the file-level comment above this describe
     // block (forge#2169) — a Windows shim is not viable for this exact
     // execFileSync("npm", ...) call, confirmed empirically.
     if (process.platform === "win32") {
+      t.skip("execFileSync(\"npm\", ...) cannot resolve a .cmd-based npm on Windows (forge#2169)");
       return;
     }
 
@@ -1231,8 +1238,9 @@ describe("update — global npm install self-update (forge#2133)", () => {
   // Windows, real or stubbed, so a Windows shim would not be reachable by
   // the code under test.
   // -------------------------------------------------------------------------
-  it("caps self-update re-exec attempts when the installed version never advances, instead of looping indefinitely", () => {
+  it("caps self-update re-exec attempts when the installed version never advances, instead of looping indefinitely", (t) => {
     if (process.platform === "win32") {
+      t.skip("execFileSync(\"npm\", ...) cannot resolve a .cmd-based npm on Windows (forge#2169)");
       return;
     }
 
@@ -1333,8 +1341,9 @@ describe("update — global npm install self-update (forge#2133)", () => {
   // Windows note (forge#2169): skipped for the same reason as the two tests
   // above — execFileSync("npm", ...) cannot resolve npm on Windows.
   // -------------------------------------------------------------------------
-  it("clamps a negative FORGEDOCK_SELF_UPDATE_ATTEMPT to 0 instead of allowing extra re-exec cycles", () => {
+  it("clamps a negative FORGEDOCK_SELF_UPDATE_ATTEMPT to 0 instead of allowing extra re-exec cycles", (t) => {
     if (process.platform === "win32") {
+      t.skip("execFileSync(\"npm\", ...) cannot resolve a .cmd-based npm on Windows (forge#2169)");
       return;
     }
 
@@ -1429,8 +1438,9 @@ describe("update — global npm install self-update (forge#2133)", () => {
   // `process.kill(process.pid, "SIGTERM")` and being observed by the parent
   // as `signal: "SIGTERM"`) do not hold on Windows.
   // -------------------------------------------------------------------------
-  it("exits non-zero (not 0) when the re-exec'd self-update child is killed by a signal", () => {
+  it("exits non-zero (not 0) when the re-exec'd self-update child is killed by a signal", (t) => {
     if (process.platform === "win32") {
+      t.skip("execFileSync(\"npm\", ...) cannot resolve a .cmd-based npm on Windows, and POSIX signal semantics do not hold on Windows (forge#2169)");
       return;
     }
 
@@ -1523,8 +1533,9 @@ describe("update — global npm install self-update (forge#2133)", () => {
   // for any Windows developer machine — including the one this fix was
   // authored and manually verified on.
   // -------------------------------------------------------------------------
-  it("[win32] resolves a .cmd-based npm via shell:true and completes the self-update", () => {
+  it("[win32] resolves a .cmd-based npm via shell:true and completes the self-update", (t) => {
     if (process.platform !== "win32") {
+      t.skip("this test exercises the win32-only .cmd-resolution shell:true path (forge#2169)");
       return;
     }
 

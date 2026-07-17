@@ -46,7 +46,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --test \"bin/tests/**/*.test.mjs\" \"packages/protocol/test/**/*.test.mjs\"",
+    "test": "node --test \"bin/tests/**/*.test.mjs\" \"bin/engine/**/*.test.mjs\" \"packages/protocol/test/**/*.test.mjs\"",
     "docs:dev": "vitepress dev docs/site",
     "docs:build": "vitepress build docs/site",
     "docs:preview": "vitepress preview docs/site"

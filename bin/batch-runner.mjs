@@ -113,6 +113,33 @@ export function classifyRunnerResult(result) {
 }
 
 /**
+ * forge#2377: derive a numeric "cost" (docs/spec/eval-run-result.md's
+ * `cost: null | number` field — a billed-token proxy, not a USD amount; see
+ * forge#2397) from a runCommand() result's `usage` object. `runCommand()`
+ * (bin/runner.mjs, since #1295/PR #1421) already accumulates
+ * `{input_tokens, output_tokens, cache_creation_input_tokens,
+ * cache_read_input_tokens}` for the API backend. The CLI backend
+ * (`runCliBackend()`) also returns a best-effort-parsed `usage` object on its
+ * success path since forge#2398/PR #2421 — `usage: null` from the CLI
+ * backend now only occurs when the CLI's `--output-format json` envelope
+ * could not be parsed (older CLI version, or a non-JSON stdout), not
+ * unconditionally. This reports total billed tokens (input + output; cache
+ * reads/writes are not separately billed at the standard rate and are
+ * omitted from this proxy) as the numeric cost signal — converting to a USD
+ * amount requires a per-model pricing table, which is out of this issue's
+ * scope (recording usage, not pricing it) and is left to a follow-up.
+ *
+ * @param {{input_tokens?: number, output_tokens?: number}|null|undefined} usage
+ * @returns {number|null}
+ */
+export function tokenCost(usage) {
+  if (!usage) return null;
+  const input = usage.input_tokens ?? 0;
+  const output = usage.output_tokens ?? 0;
+  return input + output;
+}
+
+/**
  * Construct a per-run result object conforming to docs/spec/eval-run-result.md.
  *
  * @param {number} issue - GitHub issue number.
@@ -120,7 +147,9 @@ export function classifyRunnerResult(result) {
  * @param {object} [opts]
  * @param {number} [opts.wallClockMs]        - Wall-clock duration (ms).
  * @param {number} [opts.interventionCount]  - Human intervention count.
- * @param {number|null} [opts.cost]          - Token cost (null until #1255).
+ * @param {number|null} [opts.cost]          - Total billed tokens (input + output), or null when
+ *                                              the run produced no usage data (CLI backend, or an
+ *                                              errored run). See tokenCost() (forge#2377).
  * @param {number} [opts.iterations]         - Tool-loop iteration count.
  * @param {string} [opts.stopReason]         - Anthropic stop_reason or "max_iterations".
  * @param {string|null} [opts.error]         - Error message when status === "error".
@@ -236,7 +265,7 @@ export async function runCorpus(opts = {}) {
         makeRunResult(issue, status, {
           wallClockMs,
           interventionCount: 0,
-          cost: null, // wired in once #1255 lands
+          cost: tokenCost(result.usage),
           iterations: result.iterations ?? null,
           stopReason: result.stopReason ?? null,
           model: model ?? result.model ?? null,
