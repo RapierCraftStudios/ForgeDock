@@ -757,6 +757,16 @@ ISSUE_EOF
 # source of truth for this mapping; commands/review-pr.md calls the identical
 # script so the two specs cannot independently drift. <!-- forge#2447 -->
 STAGING_FINDING_PRIORITY=$(bash scripts/severity-to-priority.sh "$STAGING_FINDING_SEVERITY")
+STAGING_FINDING_PRIORITY_EXIT=$?
+
+# Exit code MUST be checked before use — severity-to-priority.sh exits 1 (empty stdout)
+# on a missing/unrecognized severity. Proceeding with an empty $STAGING_FINDING_PRIORITY
+# would call Skill(issue, --label "") instead of aborting issue creation for this finding.
+# Mirrors the identical check in commands/review-pr.md. <!-- forge#2479 -->
+if [ "$STAGING_FINDING_PRIORITY_EXIT" -ne 0 ]; then
+  echo "PRIORITY: severity-to-priority.sh failed (exit $STAGING_FINDING_PRIORITY_EXIT) for severity '$STAGING_FINDING_SEVERITY' — skipping finding issue creation"
+  # Skip this finding — do NOT fall through to issue creation with an empty label
+else
 
 # --label is repeatable (not comma-joined) per the /issue programmatic contract.
 # ${MILESTONE_FLAG} carries the Phase 7D derivation through — empty string is
@@ -773,6 +783,7 @@ for _resolve_attempt in 1 2 3; do
   [ -n "$ISSUE_NUM" ] && break
   sleep 2
 done
+fi
 ```
 
 Labels: `review-finding` + `needs-validation` + `staging-review` + priority. `priority:*` is derived from the finding's `**Severity**` field via `scripts/severity-to-priority.sh` (identical script used by `commands/review-pr.md` — single documented mapping, see that script's header comment): `CRITICAL` → `priority:P0`, `HIGH` → `priority:P1`, `MEDIUM` → `priority:P2`, `LOW` → `priority:P3`, `INFO` → `priority:P3`. **Never derive `priority:*` from Confidence** (CONFIRMED/LIKELY/POSSIBLE) — conflating the two axes previously mislabeled LOW-severity CONFIRMED findings as `priority:P1`, defeating orchestrate's P3 batching rule. <!-- forge#2447 -->

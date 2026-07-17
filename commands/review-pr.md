@@ -1809,6 +1809,16 @@ ISSUE_EOF
 # source of truth for this mapping; commands/review-pr-staging.md calls the
 # identical script so the two specs cannot independently drift. <!-- forge#2447 -->
 FINDING_PRIORITY=$(bash scripts/severity-to-priority.sh "$FINDING_SEVERITY")
+FINDING_PRIORITY_EXIT=$?
+
+# Exit code MUST be checked before use — severity-to-priority.sh exits 1 (empty stdout)
+# on a missing/unrecognized severity, mirroring the DEDUP_EXIT idiom above. Proceeding
+# with an empty $FINDING_PRIORITY would call Skill(issue, --label "") instead of aborting
+# issue creation for this finding. <!-- forge#2479 -->
+if [ "$FINDING_PRIORITY_EXIT" -ne 0 ]; then
+  echo "PRIORITY: severity-to-priority.sh failed (exit $FINDING_PRIORITY_EXIT) for severity '$FINDING_SEVERITY' — skipping finding issue creation"
+  # Skip this finding — do NOT fall through to issue creation with an empty label
+else
 
 # --label is repeatable (not comma-joined) per the /issue programmatic contract.
 Skill(skill="issue", args="--title \"$FINDING_ISSUE_TITLE\" --body-file \"$FINDING_ISSUE_BODY_FILE\" --label review-finding --label needs-validation --label \"$FINDING_PRIORITY\" ${MILESTONE_FLAG}")
@@ -1824,6 +1834,7 @@ for _resolve_attempt in 1 2 3; do
   [ -n "$ISSUE_NUM" ] && break
   sleep 2
 done
+fi
 ```
 
 Labels: `review-finding` + `needs-validation` + priority. `priority:*` is derived from the finding's `**Severity**` field via `scripts/severity-to-priority.sh` (single documented mapping — see that script's header comment): `CRITICAL` → `priority:P0`, `HIGH` → `priority:P1`, `MEDIUM` → `priority:P2`, `LOW` → `priority:P3`, `INFO` → `priority:P3`. **Never derive `priority:*` from Confidence** (CONFIRMED/LIKELY/POSSIBLE) — Confidence and Severity are independent axes; conflating them previously mislabeled LOW-severity CONFIRMED findings as `priority:P1`, defeating the P3 batching rule below. <!-- forge#2447 -->
