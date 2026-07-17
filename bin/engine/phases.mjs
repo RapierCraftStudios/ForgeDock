@@ -18,7 +18,16 @@ import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
 // succeeded, or a fail-fast CLI_BACKEND_FAILED/NO_API_KEY/NO_SDK throw) — kept
 // separate from "needs-human" so it is never misclassified as a genuine
 // human-judgment block by /orchestrate's classify_predecessor_state().
-export const TERMINAL_REASONS = ["merged", "invalid", "needs-human", "decomposed", "engine-error"];
+//
+// forge#2379: "awaiting-merge" mirrors the `workflow:awaiting-merge` label
+// commands/work-on/remediate.md's Phase M8 sets on a HELD-AWAITING-MERGE
+// re-gate outcome (a clean re-review that didn't clear the #1809 Q1 auto-land
+// bar) — already recognized as a terminal state by work-on.md's Universal
+// Phase Dispatcher; this just gives the `remediate` phase's detectOutcome a
+// matching engine-level terminal reason to report instead of overloading
+// "needs-human" (which would misrepresent a clean-but-unmet-bar re-review as
+// a fresh human-judgment escalation).
+export const TERMINAL_REASONS = ["merged", "invalid", "needs-human", "decomposed", "engine-error", "awaiting-merge"];
 
 /**
  * Fetch the issue's comments. Returns both:
@@ -211,7 +220,34 @@ export const PHASES = [
         return { status: "committed", outputs: { verdict: "CONFIRMED" } };
       return { status: "failed", detail: `no ${PHASE_MARKERS.investigate.completionMarker} marker` };
     },
-    isTerminalAfter: (s) => s.terminalReason === "invalid" || s.terminalReason === "decomposed",
+    // forge#2379: no longer terminal after "decomposed" — that reason now
+    // hands off to the "decompose" phase below (see bin/engine.mjs's
+    // runIssue(), which special-cases exactly this phase/reason combination
+    // to skip its own immediate-terminate check and let pickPhase run again).
+    // "invalid" is unaffected — investigate.md never posts anything further
+    // after INVESTIGATION:INVALID, so that path still terminates in place.
+    isTerminalAfter: (s) => s.terminalReason === "invalid",
+  },
+  {
+    // forge#2379: "decompose" was previously only a terminal reason on
+    // investigate (the run stopped the instant DECOMPOSE:YES was seen) —
+    // work-on/decompose (sub-issue fan-out, FORGE:DECOMPOSED posting) was
+    // never actually dispatched by the engine. This phase closes that gap:
+    // entryCondition fires exactly when investigate's own outcome signaled
+    // decompose, so pickPhase now genuinely dispatches work-on/decompose
+    // before the run terminates.
+    id: "decompose",
+    command: "work-on/decompose",
+    entryCondition: (s) => s.terminalReason === "decomposed",
+    async detectOutcome(state, io) {
+      const { blob } = await issueMarkers(state.issue, io);
+      if (has(blob, PHASE_MARKERS.decompose.completionMarker))
+        return { status: "committed", terminalReason: "decomposed", outputs: {} };
+      return { status: "failed", detail: `no ${PHASE_MARKERS.decompose.completionMarker} marker` };
+    },
+    // Always terminal: decomposition spawns independent sub-issues, each of
+    // which runs its own /work-on pipeline — nothing more for THIS run to do.
+    isTerminalAfter: () => true,
   },
   {
     id: "context",
@@ -322,6 +358,70 @@ export const PHASES = [
       if (pr.needsHuman) return { status: "blocked", detail: "review escalated", outputs: { pr: pr.number } };
       return { status: "failed", detail: "PR open, not merged" };
     },
+  },
+  {
+    // forge#2379: `remediate` re-drives a needs-human PR via
+    // commands/work-on/remediate.md (checkout → classify FIXABLE/UNFIXABLE →
+    // fix → quality-gate → re-review → #1809 auto-land bar → merge-or-hold),
+    // finishing with a `FORGE:REMEDIATION`/`FORGE:REMEDIATION:COMPLETE`
+    // marker posted to BOTH the PR and this issue (Phase M8), carrying a
+    // `**Re-gate outcome**: AUTO-LANDED | HELD-AWAITING-MERGE | RE-ESCALATED
+    // | UNFIXABLE` field. This entry registers that outcome vocabulary in the
+    // phase table (closing the literal "remediate appears nowhere in the
+    // engine" gap) and is fully unit-tested via `pickPhase`/`detectOutcome`.
+    //
+    // KNOWN LIMITATION (documented, not fixed here — see forge#2379
+    // investigation "What We Found"): `review`'s `"blocked"` outcome (the
+    // needs-human escalation) causes `bin/engine.mjs`'s `runIssue()` to
+    // `terminate()` immediately, before `review` is ever added to
+    // `state.committed` — and the divergence guard just above that also
+    // pauses before any non-`close` phase once the issue carries
+    // `needs-human`. So a single continuous `runIssue()` walk cannot reach
+    // this phase's `entryCondition` today. In practice `remediate.md` is
+    // (correctly, per `work-on.md` Phase 0A.1) invoked as its own separate
+    // top-level entry point (`/work-on <pr> --remediate`), not as a
+    // continuation of the original run — this phase entry documents and
+    // tests the target state shape for a future run that reconstructs
+    // `committed`/`terminalReason` from live GitHub state (e.g. a dedicated
+    // remediation-run entry point) rather than from a fresh local run-log.
+    // Making that live wiring real is out of this issue's scope — it needs
+    // changes to `review`'s `"blocked"` contract and to `bin/tests/engine.test.mjs`,
+    // both outside this issue's declared file set.
+    id: "remediate",
+    command: "work-on/remediate",
+    entryCondition: (s) => s.committed.includes("review") && s.terminalReason === "needs-human",
+    async detectOutcome(state, io) {
+      const { blob } = await issueMarkers(state.issue, io);
+      if (!has(blob, PHASE_MARKERS.remediate.completionMarker))
+        return { status: "failed", detail: `no ${PHASE_MARKERS.remediate.completionMarker} marker` };
+      // Parse the **Re-gate outcome**: field remediate.md's Phase M8 posts
+      // (e.g. "**Re-gate outcome**: AUTO-LANDED to staging" — value is the
+      // first whitespace-delimited token after the colon).
+      const match = blob.match(/\*\*Re-gate outcome\*\*:\s*([A-Z-]+)/);
+      const reGateOutcome = match ? match[1] : null;
+      switch (reGateOutcome) {
+        case "AUTO-LANDED":
+          // remediate.md's own Phase M8 already drove close in this case
+          // (see that file's "If the outcome was AUTO-LANDED" branch) — the
+          // issue should already carry workflow:merged by the time this
+          // reads, but the terminal reason here is what THIS phase reports,
+          // independent of close's own idempotent detectOutcome re-check.
+          return { status: "committed", terminalReason: "merged", outputs: { reGateOutcome } };
+        case "HELD-AWAITING-MERGE":
+          return { status: "committed", terminalReason: "awaiting-merge", outputs: { reGateOutcome } };
+        case "RE-ESCALATED":
+        case "UNFIXABLE":
+          // Both leave the issue at needs-human (a fresh escalation, or a
+          // policy judgment call respectively) — reuse the existing
+          // "needs-human" terminal reason rather than inventing two more,
+          // matching the #2352/#2353 precedent of reusing an existing
+          // TERMINAL_REASONS value where semantically equivalent.
+          return { status: "committed", terminalReason: "needs-human", outputs: { reGateOutcome } };
+        default:
+          return { status: "failed", detail: `FORGE:REMEDIATION:COMPLETE present but Re-gate outcome unrecognized/missing: ${reGateOutcome || "none"}` };
+      }
+    },
+    isTerminalAfter: () => true,
   },
   {
     id: "close",

@@ -20,6 +20,35 @@ describe("pickPhase", () => {
     assert.equal(pickPhase({ ...base, terminal: true, terminalReason: "invalid" }), null);
   });
 
+  // forge#2379: decompose/remediate coverage.
+  it("returns 'decompose' when investigate committed with terminalReason 'decomposed'", () => {
+    const state = { ...base, committed: ["investigate"], terminalReason: "decomposed" };
+    assert.equal(pickPhase(state).id, "decompose");
+  });
+
+  it("does NOT return 'decompose' when investigate committed but terminalReason is unset (normal happy path)", () => {
+    const state = { ...base, committed: ["investigate"], terminalReason: null };
+    assert.equal(pickPhase(state).id, "context");
+  });
+
+  it("returns 'remediate' when review committed with terminalReason 'needs-human'", () => {
+    const state = {
+      ...base,
+      committed: ["investigate", "context", "architect", "build", "review"],
+      terminalReason: "needs-human",
+    };
+    assert.equal(pickPhase(state).id, "remediate");
+  });
+
+  it("does NOT return 'remediate' when review committed but terminalReason is unset (normal happy path)", () => {
+    const state = {
+      ...base,
+      committed: ["investigate", "context", "architect", "build", "review"],
+      terminalReason: null,
+    };
+    assert.equal(pickPhase(state).id, "close");
+  });
+
   it("build.detectOutcome fails when there are no commits ahead of base (encodes #1305)", async () => {
     const build = PHASES.find(p => p.id === "build");
     const io = {
@@ -76,6 +105,99 @@ describe("pickPhase", () => {
     it("no markers -> failed", async () => {
       const outcome = await investigate.detectOutcome(base, ioWith("nothing relevant here"));
       assert.equal(outcome.status, "failed");
+    });
+  });
+
+  // forge#2379: decompose is now a real phase (previously investigate's
+  // "decomposed" terminalReason short-circuited before this phase could ever
+  // run — see bin/engine.mjs's isDecomposeHandoff exemption).
+  describe("decompose.detectOutcome", () => {
+    const decompose = PHASES.find(p => p.id === "decompose");
+    const ioWith = (blob) => ({ gh: async () => blob, git: async () => "0" });
+
+    it("FORGE:DECOMPOSED:COMPLETE present -> committed, terminalReason decomposed", async () => {
+      const outcome = await decompose.detectOutcome(base, ioWith("<!-- FORGE:DECOMPOSED --> spawned sub-issues <!-- FORGE:DECOMPOSED:COMPLETE -->"));
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("bare FORGE:DECOMPOSED (no :COMPLETE) -> failed", async () => {
+      const outcome = await decompose.detectOutcome(base, ioWith("<!-- FORGE:DECOMPOSED --> in progress"));
+      assert.equal(outcome.status, "failed");
+    });
+
+    it("no marker at all -> failed", async () => {
+      const outcome = await decompose.detectOutcome(base, ioWith("nothing relevant here"));
+      assert.equal(outcome.status, "failed");
+    });
+
+    it("entryCondition fires only when terminalReason is 'decomposed'", () => {
+      assert.equal(decompose.entryCondition({ ...base, terminalReason: "decomposed" }), true);
+      assert.equal(decompose.entryCondition({ ...base, terminalReason: null }), false);
+      assert.equal(decompose.entryCondition({ ...base, terminalReason: "invalid" }), false);
+    });
+
+    it("is always terminal after committing", () => {
+      assert.equal(decompose.isTerminalAfter({ ...base, terminalReason: "decomposed" }), true);
+    });
+  });
+
+  // forge#2379: remediate is now a registered phase — see bin/engine/phases.mjs's
+  // "remediate" entry doc comment for the documented limitation that a single
+  // continuous runIssue() walk cannot reach it today (review's "blocked"
+  // outcome + the needs-human divergence-guard pause both terminate first).
+  // These tests exercise detectOutcome/entryCondition directly, which is the
+  // acceptance criterion ("pickPhase covers remediate") this issue targets.
+  describe("remediate.detectOutcome", () => {
+    const remediate = PHASES.find(p => p.id === "remediate");
+    const ioWith = (blob) => ({ gh: async () => blob, git: async () => "0" });
+    const remediateBody = (outcome) =>
+      `<!-- FORGE:REMEDIATION -->\n**Re-gate outcome**: ${outcome} to staging\n<!-- FORGE:REMEDIATION:COMPLETE -->`;
+
+    it("AUTO-LANDED -> committed, terminalReason merged", async () => {
+      const outcome = await remediate.detectOutcome(base, ioWith(remediateBody("AUTO-LANDED")));
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "merged");
+      assert.equal(outcome.outputs.reGateOutcome, "AUTO-LANDED");
+    });
+
+    it("HELD-AWAITING-MERGE -> committed, terminalReason awaiting-merge", async () => {
+      const outcome = await remediate.detectOutcome(base, ioWith(remediateBody("HELD-AWAITING-MERGE")));
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "awaiting-merge");
+    });
+
+    it("RE-ESCALATED -> committed, terminalReason needs-human", async () => {
+      const outcome = await remediate.detectOutcome(base, ioWith(remediateBody("RE-ESCALATED")));
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "needs-human");
+    });
+
+    it("UNFIXABLE -> committed, terminalReason needs-human", async () => {
+      const outcome = await remediate.detectOutcome(base, ioWith(remediateBody("UNFIXABLE")));
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "needs-human");
+    });
+
+    it("FORGE:REMEDIATION:COMPLETE present but Re-gate outcome unrecognized -> failed", async () => {
+      const outcome = await remediate.detectOutcome(base, ioWith(remediateBody("SOMETHING-ELSE")));
+      assert.equal(outcome.status, "failed");
+    });
+
+    it("no FORGE:REMEDIATION:COMPLETE marker -> failed", async () => {
+      const outcome = await remediate.detectOutcome(base, ioWith("nothing relevant here"));
+      assert.equal(outcome.status, "failed");
+    });
+
+    it("entryCondition requires review committed AND terminalReason needs-human", () => {
+      const reviewCommitted = { ...base, committed: ["build", "review"] };
+      assert.equal(remediate.entryCondition({ ...reviewCommitted, terminalReason: "needs-human" }), true);
+      assert.equal(remediate.entryCondition({ ...reviewCommitted, terminalReason: null }), false);
+      assert.equal(remediate.entryCondition({ ...base, terminalReason: "needs-human" }), false); // review not committed
+    });
+
+    it("is always terminal after committing", () => {
+      assert.equal(remediate.isTerminalAfter({ ...base, terminalReason: "needs-human" }), true);
     });
   });
 

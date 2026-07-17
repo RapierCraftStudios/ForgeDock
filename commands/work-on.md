@@ -247,6 +247,8 @@ Extract project prefix and issue number. If `next`/`pick`: list open issues sort
 
 ### 0A.1: Remediation Mode Detection (`--remediate`) <!-- Added: forge#1813 -->
 
+**Engine coverage** (forge#2379): `remediate` is now a registered phase in the headless engine's phase table (`packages/protocol/src/phases.js`, `bin/engine/phases.mjs`) — see `commands/work-on/remediate.md`'s own "Engine coverage" note for the current, documented limitation (a single continuous headless `runIssue()` walk cannot yet reach it; this prose-layer standalone-invocation path below remains the only way `remediate` actually runs today).
+
 **Check first, before any other Phase 0 routing** — if `$ARGUMENTS` contains `--remediate`, this is NOT a normal issue-pipeline invocation. The first positional argument is a **PR number**, not an issue number:
 
 ```bash
@@ -900,6 +902,8 @@ gh issue close {NUMBER} {GH_FLAG} --comment "Closing as invalid: {reason from in
 ---
 
 ## Phase 2: Decomposition (Conditional)
+
+**Engine coverage** (forge#2379): this phase's dispatch target (`work-on/decompose`) is now a real phase in the headless engine's phase table — `decompose` in `packages/protocol/src/phases.js`/`bin/engine/phases.mjs`, live-wired so `investigate`'s `DECOMPOSE:YES` outcome hands off to it instead of terminating the run in place. This prose Phase 2 remains the interactive/prose dispatch path; the engine path is the headless equivalent, both invoking the same `commands/work-on/decompose.md` subcommand.
 
 **Skip if**: Already decomposed, is a sub-issue, or investigation says decompose: NO.
 
