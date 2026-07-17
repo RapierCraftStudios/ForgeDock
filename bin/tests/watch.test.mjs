@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
+import { EventEmitter } from "node:events";
 
 import {
   diffFrame,
@@ -39,6 +40,36 @@ function fakeWritable() {
     },
     text: () => buf,
   };
+}
+
+/** A fake TTY stdout — EventEmitter so on("resize")/off("resize") work. */
+function fakeTtyStdout() {
+  let buf = "";
+  const emitter = new EventEmitter();
+  return Object.assign(emitter, {
+    isTTY: true,
+    columns: 100,
+    write: (s) => {
+      buf += s;
+      return true;
+    },
+    text: () => buf,
+  });
+}
+
+/** A fake TTY stdin — EventEmitter supporting the setRawMode/resume/pause/data contract runInteractiveLoop expects. */
+function fakeTtyStdin() {
+  const emitter = new EventEmitter();
+  return Object.assign(emitter, {
+    isTTY: true,
+    isRaw: false,
+    setRawMode(v) {
+      this.isRaw = v;
+    },
+    resume() {},
+    pause() {},
+    setEncoding() {},
+  });
 }
 
 function fleetAgent({ issue, status = "running", phase = "build", attempt = { n: 1, max: 3 }, phaseHistory = [] }) {
@@ -409,6 +440,142 @@ describe("runWatch — NDJSON mode", () => {
       sleep: async () => {},
     });
     assert.equal(graphqlCalls, 3);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runWatch — interactive TTY mode
+// ---------------------------------------------------------------------------
+
+describe("runWatch — interactive TTY mode", () => {
+  function ghOk(nodes = []) {
+    return {
+      gh: async (args) => {
+        if (args[0] === "auth") return "";
+        if (args[0] === "api" && args[1] === "graphql") {
+          return JSON.stringify({ data: { search: { nodes }, rateLimit: { remaining: 4999 } } });
+        }
+        throw new Error(`unexpected gh call: ${args.join(" ")}`);
+      },
+    };
+  }
+
+  it("paints a frame via writeFrame-style cursor addressing (no \\x1b[2J anywhere)", async () => {
+    const dir = tmpDir();
+    const stdout = fakeTtyStdout();
+    const stdin = fakeTtyStdin();
+    Object.defineProperty(stdin, "isTTY", { value: false }); // non-TTY stdin — keyboard-less fallback path
+    await runWatch(["--repo", "acme/widgets"], {
+      stdout,
+      stdin,
+      io: ghOk(),
+      now: () => 1000,
+      runsDir: dir,
+      maxTicks: 1,
+      sleep: async () => {},
+    });
+    const out = stdout.text();
+    assert.ok(out.includes("\x1b[1H"), "expected cursor-addressed first-line write");
+    assert.ok(!out.includes("\x1b[2J"), "must never full-screen clear");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("registers and fully deregisters SIGINT/SIGTERM handlers — no listener leak (forge#1428/#1593 cleanup-bug class)", async () => {
+    const before = process.listenerCount("SIGINT") + process.listenerCount("SIGTERM");
+    const dir = tmpDir();
+    const stdout = fakeTtyStdout();
+    const stdin = fakeTtyStdin();
+    Object.defineProperty(stdin, "isTTY", { value: false });
+    await runWatch(["--repo", "acme/widgets"], {
+      stdout,
+      stdin,
+      io: ghOk(),
+      now: () => 1000,
+      runsDir: dir,
+      maxTicks: 1,
+      sleep: async () => {},
+    });
+    const after = process.listenerCount("SIGINT") + process.listenerCount("SIGTERM");
+    assert.equal(after, before, "SIGINT/SIGTERM listeners must be removed when the loop exits normally");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("restores the cursor and writes a one-line summary on exit", async () => {
+    const dir = tmpDir();
+    const stdout = fakeTtyStdout();
+    const stdin = fakeTtyStdin();
+    Object.defineProperty(stdin, "isTTY", { value: false });
+    await runWatch(["--repo", "acme/widgets"], {
+      stdout,
+      stdin,
+      io: ghOk(),
+      now: () => 1000,
+      runsDir: dir,
+      maxTicks: 1,
+      sleep: async () => {},
+    });
+    assert.ok(stdout.text().includes("\x1b[?25h"), "cursor must be restored on exit");
+    assert.match(stdout.text(), /\d+ running · \d+ stalled · \d+ blocked · watched \d+m/);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("'q' keypress stops the loop before maxTicks is exhausted", async () => {
+    const dir = tmpDir();
+    const stdout = fakeTtyStdout();
+    const stdin = fakeTtyStdin();
+    let tickCount = 0;
+    const io = {
+      gh: async (args) => {
+        if (args[0] === "auth") return "";
+        tickCount += 1;
+        if (tickCount === 1) {
+          // After the first successful poll, simulate a "q" keypress arriving
+          // during the sleep window between polls.
+          queueMicrotask(() => stdin.emit("data", "q"));
+        }
+        return JSON.stringify({ data: { search: { nodes: [] }, rateLimit: { remaining: 4999 } } });
+      },
+    };
+    const exitCode = await runWatch(["--repo", "acme/widgets"], {
+      stdout,
+      stdin,
+      io,
+      now: () => 1000,
+      runsDir: dir,
+      maxTicks: 1000, // effectively unbounded — only "q" should stop it
+      sleep: async () => {}, // resolves immediately, giving the queued microtask a chance to fire first
+    });
+    assert.ok(tickCount <= 3, `expected the loop to stop quickly after 'q', got ${tickCount} ticks`);
+    assert.equal(exitCode, 0);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("returns exit code 3 when a blocked agent is present", async () => {
+    const dir = tmpDir();
+    const stdout = fakeTtyStdout();
+    const stdin = fakeTtyStdin();
+    Object.defineProperty(stdin, "isTTY", { value: false });
+    const nodes = [
+      {
+        number: 4,
+        title: "t",
+        body: "",
+        labels: { nodes: [{ name: "workflow:building" }, { name: "needs-human" }] },
+        milestone: null,
+        comments: { nodes: [] },
+      },
+    ];
+    const exitCode = await runWatch(["--repo", "acme/widgets"], {
+      stdout,
+      stdin,
+      io: ghOk(nodes),
+      now: () => 1000,
+      runsDir: dir,
+      maxTicks: 1,
+      sleep: async () => {},
+    });
+    assert.equal(exitCode, 3);
     rmSync(dir, { recursive: true, force: true });
   });
 });

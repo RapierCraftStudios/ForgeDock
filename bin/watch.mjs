@@ -123,12 +123,6 @@ async function checkGhAuth(io) {
 // Formatting helpers
 // ---------------------------------------------------------------------------
 
-function formatElapsedMinutes(minutes) {
-  if (minutes === null || minutes === undefined) return "—";
-  if (minutes < 60) return `${minutes}m`;
-  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-}
-
 function formatAttempt(attempt) {
   if (!attempt) return "—";
   return `${attempt.n}/${attempt.max}`;
@@ -415,6 +409,21 @@ async function runInteractiveLoop({ repo, io, now, runsDir, cwd, stdout, stdin, 
     }
   }
 
+  // The removed inline watch() explicitly registered SIGINT/SIGTERM to
+  // restore the hidden cursor on exit (see forge#1428/#1593 — cleanup-on-
+  // exit is a recurring bug class in this module). The raw-mode stdin
+  // keypress listener above only covers Ctrl+C when stdin IS a TTY; an
+  // external SIGTERM (process manager, `kill`), or Ctrl+C when stdin isn't
+  // a TTY (piped input, some terminal multiplexers), bypasses it entirely
+  // and would otherwise leave the cursor hidden with no cleanup. Handling
+  // both signals directly closes that gap regardless of stdin's TTY state.
+  const onSignal = () => {
+    cleanup();
+    process.exit(0);
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+
   const started = typeof now === "function" ? now() : Date.now();
   let lastCounts = { running: 0, stalled: 0, blocked: 0 };
 
@@ -429,6 +438,8 @@ async function runInteractiveLoop({ repo, io, now, runsDir, cwd, stdout, stdin, 
       await sleep(interval);
     }
   } finally {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
     if (onKey && stdin) {
       try {
         stdin.off("data", onKey);
