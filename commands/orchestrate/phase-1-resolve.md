@@ -354,8 +354,11 @@ BATCHABLE_P3=$(gh issue list {GH_FLAG} \
 
 **Route batch issue creation through `/issue`'s programmatic invocation contract** (`commands/issue.md`, added #2085) instead of calling `gh issue create` directly — this gets dedup (Phase 2D) and mandatory-section body validation (Phase 3F) for free. <!-- Changed: forge#2086 — route through /issue create-hook -->
 
+**Exclude the cluster's own member issues from the dedup candidate set (MANDATORY):** A batch title necessarily restates its member findings' subject matter by construction — it is a deliberate supersede, not an accidental duplicate — so without exclusion it always collides with its own members under Phase 2D's token-overlap algorithm, making the batching rule unfollowable. Pass the cluster's member issue numbers via `/issue`'s `--exclude` flag (`scripts/issue-dedup.sh --exclude`, forge#2432) so Phase 2D only fires on a **genuine non-member duplicate** — some other open issue this batch was never meant to cover. This is NOT a `--force` equivalent: it narrows the candidate set, it does not disable the gate. <!-- Added: forge#2432 -->
+
 ```bash
 SAFE_SURFACE_AREA=$(printf '%s' "{SURFACE_AREA}" | tr -cd 'A-Za-z0-9._/-')
+MEMBER_LIST="{N1},{N2},{N3},..."  # comma-joined member issue numbers for this cluster (e.g. "2422,2424")
 BATCH_BODY_FILE="$(mktemp)"
 cat > "$BATCH_BODY_FILE" <<'BATCH_EOF'
 ## Problem
@@ -384,7 +387,7 @@ BATCH_EOF
 ```
 
 ```
-ISSUE_SKILL_OUTPUT=$(Skill(skill="issue", args="--title \"fix(batch): P3 review findings — ${SAFE_SURFACE_AREA} (batch #{BATCH_N})\" --body-file \"${BATCH_BODY_FILE}\" --label \"review-finding\" --label \"priority:P3\" --label \"batch\""))
+ISSUE_SKILL_OUTPUT=$(Skill(skill="issue", args="--title \"fix(batch): P3 review findings — ${SAFE_SURFACE_AREA} (batch #{BATCH_N})\" --body-file \"${BATCH_BODY_FILE}\" --label \"review-finding\" --label \"priority:P3\" --label \"batch\" --exclude \"${MEMBER_LIST}\""))
 ```
 
 **Extract the created batch issue number from the Skill output** (see `commands/issue.md` Phase 4C/4E — it echoes `Created: {url}` and reports `**#{NUMBER}**: {title}`):
@@ -394,7 +397,13 @@ BATCH_ISSUE_NUM=$(echo "$ISSUE_SKILL_OUTPUT" | grep -oE 'issues/[0-9]+' | head -
 [ -z "$BATCH_ISSUE_NUM" ] && BATCH_ISSUE_NUM=$(echo "$ISSUE_SKILL_OUTPUT" | grep -oE '\*\*#[0-9]+\*\*' | head -1 | grep -oE '[0-9]+')
 
 if [ -z "$BATCH_ISSUE_NUM" ]; then
-  echo "WARNING: /issue did not report a created batch issue number — likely a Phase 2D dedup STOP (near-duplicate found) or a usage error. Do not replace member issues with a batch issue for this cluster; leave the members on the standard individual pipeline instead."
+  # With --exclude "${MEMBER_LIST}" passed above, Phase 2D no longer fires on the
+  # cluster's own declared members — a STOP reaching this point means a GENUINE
+  # non-member duplicate was found (some other open issue already covers this
+  # exact surface area), or a usage error. Do NOT replace member issues with a
+  # batch issue for this cluster; leave the members on the standard individual
+  # pipeline instead. <!-- Reworded: forge#2432 -->
+  echo "WARNING: /issue did not report a created batch issue number — likely a Phase 2D dedup STOP against a non-member issue (a real duplicate — member exclusion via --exclude \"${MEMBER_LIST}\" is already applied above, so this is not a false positive against the cluster's own members) or a usage error. Do not replace member issues with a batch issue for this cluster; leave the members on the standard individual pipeline instead."
 fi
 ```
 

@@ -1576,8 +1576,31 @@ for FILE in "${!SURFACE_FILE_MEMBERS[@]}"; do
       MEMBER_LINES="${MEMBER_LINES}- [ ] #${M}: ${MTITLE}"$'\n'
     done
 
+    # Dedup-check with member exclusion (MANDATORY — forge#2432, identical mechanism to
+    # phase-1-resolve.md's mirror block; this site keeps its existing `gh issue create`
+    # architecture rather than migrating to /issue's Skill routing, since this loop runs
+    # per-completion-cycle and a direct scripts/issue-dedup.sh call is cheaper here). A
+    # batch title necessarily restates its own members' subject matter by construction —
+    # excluding the cluster's own member numbers means Phase-2D-style dedup only fires on
+    # a GENUINE non-member duplicate. --exclude narrows the candidate set; it is NOT a
+    # --force equivalent.
+    CHUNK_LIST=$(IFS=,; echo "${CHUNK[*]}")
+    PROPOSED_BATCH_TITLE="fix(batch): P3 review findings — ${SAFE_SURFACE_AREA} (same-run batch)"
+    DEDUP_RESULT=$(scripts/issue-dedup.sh "$PROPOSED_BATCH_TITLE" {GH_FLAG} --exclude "$CHUNK_LIST" 2>&1)
+    DEDUP_EXIT=$?
+
+    if [ "$DEDUP_EXIT" -eq 1 ]; then
+      # Genuine non-member duplicate — some other open issue already covers this exact
+      # surface area. Do NOT create the batch; its members stay individually queued.
+      echo "Batch dedup STOP (non-member match): $DEDUP_RESULT — skipping batch creation for $SAFE_SURFACE_AREA, members stay individually queued"
+      continue
+    elif [ "$DEDUP_EXIT" -eq 2 ]; then
+      echo "Batch dedup usage error: $DEDUP_RESULT — skipping batch creation for $SAFE_SURFACE_AREA, members stay individually queued"
+      continue
+    fi
+
     BATCH_ISSUE_NUM=$(gh issue create {GH_FLAG} \
-      --title "fix(batch): P3 review findings — ${SAFE_SURFACE_AREA} (same-run batch)" \
+      --title "$PROPOSED_BATCH_TITLE" \
       --label "review-finding,priority:P3,batch" \
       --body "$(cat <<BATCH_EOF
 ## Problem
