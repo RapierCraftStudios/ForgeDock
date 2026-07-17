@@ -45,33 +45,42 @@ echo "Staging branch: $STAGING_BRANCH"
 echo "Stale threshold: ${STALE_DAYS} days"
 ```
 
+### Fleet Snapshot (single read for Phases 1, 3B, 5)
+
+**One parser, one truth** (forge#2393): every workflow-state read below (issues-by-state grouping, engine lease state, bottleneck counts) is derived from a single `npx forgedock query fleet` call instead of separate per-label `gh issue list` calls. `query fleet` is the agent-facing JSON face over `bin/observe.mjs`'s fleet-observability core — the same data `forgedock watch` renders interactively. Its exit code (`0` healthy, `2` stalls present, `3` blocked present) is captured but not branched on here — `/pipeline-status` is purely observational and always reports, it never gates on the result the way `/autopilot`/`/orchestrate` do.
+
+```bash
+FLEET_JSON=$(npx forgedock query fleet --repo "$GH_REPO" 2>/dev/null)
+FLEET_EXIT=$?
+if [ -z "$FLEET_JSON" ] || ! echo "$FLEET_JSON" | jq -e '.schema' >/dev/null 2>&1; then
+    echo "WARNING: forgedock query fleet failed or returned no data (exit ${FLEET_EXIT}) — Phases 1, 3B, and 5 below will show degraded/empty output." >&2
+    FLEET_JSON='{"schema":"forge-observe/1","agents":[],"counts":{"running":0,"stalled":0,"blocked":0,"leased":0,"quiet":true}}'
+fi
+```
+
 ---
 
 ## Phase 1: Issues by Workflow State
 
-Fetch all open issues with `workflow:*` labels. Group and count by state.
+Group and count the fleet snapshot's `agents[]` by `workflowLabel` (in pipeline order). `agents[]` already covers every open issue carrying an active `workflow:*` label or `needs-human` — no separate `gh issue list` call per label.
 
 ```bash
 echo ""
 echo "=== Pipeline Issues — $(date +%Y-%m-%d) ==="
 echo ""
 
-# Workflow states to display (in pipeline order)
+# Workflow states to display (in pipeline order) — must match ACTIVE_WORKFLOW_LABELS
+# (bin/engine-cli.mjs) + the blocked label, which is exactly what query fleet watches.
 STATES="workflow:investigating workflow:building workflow:in-review workflow:ready-to-build needs-human"
 
 for LABEL in $STATES; do
-    ISSUES=$(gh issue list $GH_FLAG \
-        --state open \
-        --label "$LABEL" \
-        --limit 50 \
-        --json number,title,updatedAt,assignees \
-        --jq '.[] | "#\(.number) \(.title[:60]) [updated: \(.updatedAt[:10])]"' \
-        2>/dev/null || echo "")
+    ISSUES=$(echo "$FLEET_JSON" | jq -r --arg label "$LABEL" \
+        '.agents[] | select(.workflowLabel == $label) |
+         "#\(.issue) \(.title[0:60]) [updated: \(.heartbeat.at // .at // "unknown" | .[0:10])]"')
 
-    COUNT=$(echo "$ISSUES" | grep -c '#' 2>/dev/null || echo 0)
-    [ "$COUNT" = "0" ] && [ -z "$ISSUES" ] && COUNT=0
+    COUNT=$(echo "$FLEET_JSON" | jq --arg label "$LABEL" '[.agents[] | select(.workflowLabel == $label)] | length')
 
-    if [ -n "$ISSUES" ] && [ "$COUNT" -gt 0 ]; then
+    if [ "$COUNT" -gt 0 ]; then
         echo "[$LABEL] ($COUNT open)"
         echo "$ISSUES" | while IFS= read -r line; do
             echo "  $line"
@@ -82,7 +91,9 @@ for LABEL in $STATES; do
     fi
 done
 
-# Issues with no workflow label (untracked / not yet entered pipeline)
+# Issues with no workflow label (untracked / not yet entered pipeline) — query fleet
+# only watches workflow:*/needs-human issues, so untracked issues are genuinely outside
+# its scope and still need their own gh issue list call.
 UNTRACKED=$(gh issue list $GH_FLAG \
     --state open \
     --limit 20 \
@@ -187,61 +198,28 @@ echo ""
 
 ## Phase 3B: Engine Lease State (FORGE:STATE)
 
-For issues managed by the durable engine, read the `FORGE:STATE` block from each issue body and display lease status. This gives ground-truth stall detection beyond `updatedAt` heuristics. Gracefully degrades — issues without a `FORGE:STATE` block are skipped (they use the Phase 3 timestamp-based detection above).
+For issues managed by the durable engine, display lease status derived from the fleet snapshot's `lease`/`phase`/`status` fields (`FLEET_JSON`, captured once above). This gives ground-truth stall detection beyond `updatedAt` heuristics. `bin/observe.mjs`'s `deriveAgent()` already parses each issue's `FORGE:STATE` block server-side (GitHub wins on any local/remote disagreement — the same trust rule the durable engine itself uses), so no separate per-label `gh issue list` + body-parsing loop is needed here.
 
 ```bash
 echo "=== Engine Lease State ==="
 echo ""
 
-# gh --label uses AND filtering, so query each label separately and merge
-ENGINE_CANDIDATES=$(
-    for LABEL in "workflow:investigating" "workflow:ready-to-build" "workflow:building" "workflow:in-review"; do
-        gh issue list $GH_FLAG \
-            --state open \
-            --label "$LABEL" \
-            --limit 100 \
-            --json number,title,body 2>/dev/null || echo "[]"
-    done | jq -s 'flatten | unique_by(.number)'
-)
-
 NOW_MS=$(date +%s)000
-ENGINE_OUTPUT=""
-
-while IFS= read -r ROW; do
-    NUM=$(echo "$ROW" | jq -r '.number')
-    TITLE=$(echo "$ROW" | jq -r '.title[:55]')
-    BODY=$(echo "$ROW" | jq -r '.body // ""')
-
-    # Extract FORGE:STATE JSON block from issue body
-    STATE_JSON=$(echo "$BODY" | sed -n '/<!-- FORGE:STATE -->/,/<!-- \/FORGE:STATE -->/p' \
-        | grep -v '<!-- ' | tr -d '\n' 2>/dev/null || echo "")
-
-    if [ -z "$STATE_JSON" ]; then
-        continue  # No engine state — skip, Phase 3 covers this issue via updatedAt
-    fi
-
-    TERMINAL=$(echo "$STATE_JSON" | jq -r '.terminal // false' 2>/dev/null || echo "false")
-    if [ "$TERMINAL" = "true" ]; then
-        continue  # Terminal — not interesting for stall detection
-    fi
-
-    LEASE_UNTIL=$(echo "$STATE_JSON" | jq -r '.lease.until // 0' 2>/dev/null || echo "0")
-    LEASE_BY=$(echo "$STATE_JSON" | jq -r '.lease.by // "unknown"' 2>/dev/null || echo "unknown")
-    PHASE=$(echo "$STATE_JSON" | jq -r '.phase // "unknown"' 2>/dev/null || echo "unknown")
-
-    if [ "$LEASE_UNTIL" -gt "$NOW_MS" ] 2>/dev/null; then
-        REMAINING=$(( (LEASE_UNTIL - NOW_MS) / 60000 ))
-        ENGINE_OUTPUT="${ENGINE_OUTPUT}  #${NUM} ${TITLE} [${PHASE}] LEASED (${LEASE_BY}, ${REMAINING}m left)\n"
+ENGINE_OUTPUT=$(echo "$FLEET_JSON" | jq -r --argjson now "$NOW_MS" '
+  .agents[]
+  | select(.lease != null and .status != "terminal")
+  | . as $a
+  | if ($a.lease.until > $now) then
+      "  #\($a.issue) \($a.title[0:55]) [\($a.phase // "unknown")] LEASED (\($a.lease.by // "unknown"), \((($a.lease.until - $now) / 60000) | floor)m left)"
     else
-        EXPIRED_AGO=$(( (NOW_MS - LEASE_UNTIL) / 60000 ))
-        ENGINE_OUTPUT="${ENGINE_OUTPUT}  #${NUM} ${TITLE} [${PHASE}] STALLED (lease expired ${EXPIRED_AGO}m ago)\n"
-    fi
-done <<< "$(echo "$ENGINE_CANDIDATES" | jq -c '.[]')"
+      "  #\($a.issue) \($a.title[0:55]) [\($a.phase // "unknown")] STALLED (lease expired \((($now - $a.lease.until) / 60000) | floor)m ago)"
+    end
+')
 
 if [ -z "$ENGINE_OUTPUT" ]; then
     echo "  No engine-managed issues in flight (or none with FORGE:STATE blocks)."
 else
-    echo -e "$ENGINE_OUTPUT"
+    echo "$ENGINE_OUTPUT"
 fi
 
 echo ""
@@ -292,11 +270,11 @@ Highlight states where issues are piling up or stuck.
 echo "=== Bottleneck Summary ==="
 echo ""
 
-INVESTIGATING=$(gh issue list $GH_FLAG --state open --label "workflow:investigating" --limit 100 --json number --jq '. | length' 2>/dev/null || echo 0)
-BUILDING=$(gh issue list $GH_FLAG --state open --label "workflow:building" --limit 100 --json number --jq '. | length' 2>/dev/null || echo 0)
-IN_REVIEW=$(gh issue list $GH_FLAG --state open --label "workflow:in-review" --limit 100 --json number --jq '. | length' 2>/dev/null || echo 0)
-BLOCKED=$(gh issue list $GH_FLAG --state open --label "needs-human" --limit 100 --json number --jq '. | length' 2>/dev/null || echo 0)
-READY=$(gh issue list $GH_FLAG --state open --label "workflow:ready-to-build" --limit 100 --json number --jq '. | length' 2>/dev/null || echo 0)
+INVESTIGATING=$(echo "$FLEET_JSON" | jq '[.agents[] | select(.workflowLabel == "workflow:investigating")] | length')
+BUILDING=$(echo "$FLEET_JSON" | jq '[.agents[] | select(.workflowLabel == "workflow:building")] | length')
+IN_REVIEW=$(echo "$FLEET_JSON" | jq '[.agents[] | select(.workflowLabel == "workflow:in-review")] | length')
+BLOCKED=$(echo "$FLEET_JSON" | jq '[.agents[] | select(.workflowLabel == "needs-human")] | length')
+READY=$(echo "$FLEET_JSON" | jq '[.agents[] | select(.workflowLabel == "workflow:ready-to-build")] | length')
 
 TOTAL_INFLIGHT=$((INVESTIGATING + BUILDING + IN_REVIEW + READY))
 
@@ -311,10 +289,7 @@ echo "  Total in-flight: $TOTAL_INFLIGHT"
 if [ "$BLOCKED" -gt 0 ]; then
     echo ""
     echo "  ⚠  $BLOCKED issue(s) need human attention:"
-    gh issue list $GH_FLAG --state open --label "needs-human" --limit 20 \
-        --json number,title \
-        --jq '.[] | "    #\(.number) \(.title[:70])"' \
-        2>/dev/null || true
+    echo "$FLEET_JSON" | jq -r '.agents[] | select(.workflowLabel == "needs-human") | "    #\(.issue) \(.title[0:70])"'
 fi
 
 if [ "$IN_REVIEW" -gt 3 ]; then

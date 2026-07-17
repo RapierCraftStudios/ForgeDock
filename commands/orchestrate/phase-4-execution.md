@@ -1128,43 +1128,41 @@ Gating predecessor #${NUM} reached \`workflow:merged\` — dispatching now. (Was
 STALL_TIMEOUT=$(yq '.pipeline.stall_timeout_minutes // 15' forge.yaml 2>/dev/null || echo 15)
 ```
 
-**For each non-terminal agent in the current batch**:
+**For each non-terminal agent in the current batch**: read the fleet's stall state in one call via `forgedock query stalls` (the agent-facing JSON face over `bin/observe.mjs` — forge#2393) instead of a per-issue `gh api .../comments` timestamp probe. `query stalls` already applies `pipeline.stall_timeout_minutes` (the same forge.yaml key `STALL_TIMEOUT` above reads) server-side, and only ever watches `ACTIVE_WORKFLOW_LABELS` + `needs-human` issues — `workflow:awaiting-merge` is structurally never in its `agents[]` at all, so the forge#1812 re-escalation hazard (never re-escalate an already-remediated-and-re-approved PR back to needs-human) can't recur here, rather than merely being guarded against by an extra label check.
+
 ```bash
-for NUM in {active_issue_numbers}; do
-  # Skip issues already in a terminal-for-this-agent state (merged/invalid/needs-human/awaiting-merge).
-  # workflow:awaiting-merge MUST be included here (forge#1812) — otherwise the stall detector
-  # re-escalates an already-remediated-and-re-approved PR back to needs-human after STALL_TIMEOUT,
-  # silently collapsing the Awaiting-Merge/Blocked distinction forge#1811 introduced.
-  TERMINAL=$(gh issue view $NUM -R {GH_REPO} --json labels \
-    --jq '[.labels[].name | select(. == "workflow:merged" or . == "workflow:invalid" or . == "needs-human" or . == "workflow:awaiting-merge")] | length')
-  [ "$TERMINAL" -gt 0 ] && continue
+STALL_JSON=$(npx forgedock query stalls --repo {GH_REPO} 2>/dev/null)
+STALL_EXIT=$?
+if [ -z "$STALL_JSON" ] || ! echo "$STALL_JSON" | jq -e '.schema' >/dev/null 2>&1; then
+  echo "WARNING: forgedock query stalls failed (exit ${STALL_EXIT}) — falling back to no stall detection this cycle." >&2
+  STALL_JSON='{"schema":"forge-observe/1","agents":[]}'
+fi
 
-  # Get last activity timestamp — prefer last comment (catches FORGE:HEARTBEAT updates)
-  LAST_ACTIVITY=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
-    --jq '.[-1].updated_at // empty' 2>/dev/null)
-  # Fall back to issue updated_at if no comments
-  if [ -z "$LAST_ACTIVITY" ]; then
-    LAST_ACTIVITY=$(gh issue view $NUM -R {GH_REPO} --json updatedAt --jq '.updatedAt')
-  fi
+# query stalls returns agents with status "stalled" (heartbeat aged past threshold)
+# or "blocked" (needs-human) — only "stalled" agents are candidates for auto-resume
+# here; "blocked" agents already carry needs-human and are handled elsewhere.
+STALLED_ISSUES=$(echo "$STALL_JSON" | jq -r '.agents[] | select(.status == "stalled") | .issue')
 
-  # Compute elapsed minutes (GNU date — adjust for macOS: date -j -f "%Y-%m-%dT%H:%M:%SZ")
-  LAST_EPOCH=$(date -d "$LAST_ACTIVITY" +%s 2>/dev/null \
-    || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST_ACTIVITY" +%s 2>/dev/null)
-  NOW_EPOCH=$(date +%s)
-  ELAPSED_MIN=$(( (NOW_EPOCH - LAST_EPOCH) / 60 ))
+for NUM in $STALLED_ISSUES; do
+  # Restrict to issues actually in this orchestrator run's batch — query stalls
+  # covers the whole fleet; {active_issue_numbers} scopes it to what this run dispatched.
+  case " {active_issue_numbers} " in
+    *" $NUM "*) ;;
+    *) continue ;;
+  esac
 
-  if [ "$ELAPSED_MIN" -gt "$STALL_TIMEOUT" ]; then
-    # Count prior stall events on this issue
-    STALL_COUNT=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
-      --jq '[.[] | select(.body | contains("FORGE:STALL_DETECTED"))] | length')
+  AGENT_JSON=$(echo "$STALL_JSON" | jq -c --argjson num "$NUM" '.agents[] | select(.issue == $num)')
+  ELAPSED_MIN=$(echo "$AGENT_JSON" | jq -r '.stall.ageMinutes // .heartbeat.ageMinutes // 0')
+  CURRENT_STATE=$(echo "$AGENT_JSON" | jq -r '.workflowLabel // "unknown"')
 
-    CURRENT_STATE=$(gh issue view $NUM -R {GH_REPO} --json labels \
-      --jq '[.labels[].name | select(startswith("workflow:"))] | .[0] // "unknown"')
+  # Count prior stall events on this issue
+  STALL_COUNT=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:STALL_DETECTED"))] | length')
 
-    if [ "$STALL_COUNT" -lt 2 ]; then
-      # Auto-resume: post stall annotation and re-invoke /work-on
-      RESUME_ATTEMPT=$(( STALL_COUNT + 1 ))
-      gh issue comment $NUM -R {GH_REPO} --body "<!-- FORGE:STALL_DETECTED -->
+  if [ "$STALL_COUNT" -lt 2 ]; then
+    # Auto-resume: post stall annotation and re-invoke /work-on
+    RESUME_ATTEMPT=$(( STALL_COUNT + 1 ))
+    gh issue comment $NUM -R {GH_REPO} --body "<!-- FORGE:STALL_DETECTED -->
 ## Stall Detected
 
 **Issue**: #${NUM}
@@ -1173,13 +1171,13 @@ for NUM in {active_issue_numbers}; do
 **Auto-resume attempt**: ${RESUME_ATTEMPT} of 2
 **Timestamp**: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-      # Resume the agent — collect all resumes and launch in a single message (see Step 4B rule)
-      # STALL_RESUME_LIST is accumulated and launched in parallel after the loop
-      STALL_RESUME_LIST="$STALL_RESUME_LIST $NUM"
-    else
-      # 2+ prior stalls — auto-resume exhausted, escalate to needs-human
-      gh issue edit $NUM -R {GH_REPO} --add-label "needs-human"
-      gh issue comment $NUM -R {GH_REPO} --body "<!-- FORGE:STALL_DETECTED -->
+    # Resume the agent — collect all resumes and launch in a single message (see Step 4B rule)
+    # STALL_RESUME_LIST is accumulated and launched in parallel after the loop
+    STALL_RESUME_LIST="$STALL_RESUME_LIST $NUM"
+  else
+    # 2+ prior stalls — auto-resume exhausted, escalate to needs-human
+    gh issue edit $NUM -R {GH_REPO} --add-label "needs-human"
+    gh issue comment $NUM -R {GH_REPO} --body "<!-- FORGE:STALL_DETECTED -->
 ## Stall Escalated — Needs Human Intervention
 
 Issue #${NUM} has been auto-resumed ${STALL_COUNT} times without reaching a terminal state. Auto-resume limit (2) exhausted. Manual intervention required.
@@ -1187,8 +1185,7 @@ Issue #${NUM} has been auto-resumed ${STALL_COUNT} times without reaching a term
 **Last workflow state**: ${CURRENT_STATE}
 **Total elapsed since last activity**: ${ELAPSED_MIN} min
 **Timestamp**: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      echo "STALL ESCALATED: #{NUM} → needs-human (${STALL_COUNT} prior resumes)"
-    fi
+    echo "STALL ESCALATED: #{NUM} → needs-human (${STALL_COUNT} prior resumes)"
   fi
 done
 

@@ -683,6 +683,23 @@ while true; do
     break
   fi
 
+  # Fast preliminary fleet-health check (forge#2393): `forgedock query fleet`'s exit
+  # code (0 healthy / 2 stalls present / 3 blocked present) is a single-call signal
+  # for whether any in-flight fast-lane agent needs recovery attention this iteration
+  # — read ahead of the detailed per-issue `gh issue list` enumeration below (which
+  # still runs regardless, since dispatch/recovery need full issue objects, not just
+  # counts). A non-zero exit is not itself a reason to break the loop — it flags that
+  # this iteration's terminal-state verification sweep (below) is likely to find
+  # stalled/blocked issues worth routing through recover-orphans.
+  FLEET_JSON=$(npx forgedock query fleet $GH_FLAG 2>/dev/null)
+  FLEET_EXIT=$?
+  case "$FLEET_EXIT" in
+    0) echo "Fleet health: healthy (query fleet exit 0)" ;;
+    2) echo "Fleet health: stalls present (query fleet exit 2) — expect recover-orphans activity this iteration" ;;
+    3) echo "Fleet health: blocked issues present (query fleet exit 3, needs-human) — expect recover-orphans activity this iteration" ;;
+    *) echo "Fleet health: query fleet unavailable or errored (exit $FLEET_EXIT) — proceeding on label counts alone" ;;
+  esac
+
   # Re-query open unmilestoned issues — always re-read, never trust a cached count
   OPEN_UNMILESTONED=$(gh issue list $GH_FLAG \
     --state open \
@@ -696,9 +713,11 @@ while true; do
 
   echo "Fast lane iteration $FAST_LANE_ITERATIONS: $OPEN_UNMILESTONED open unmilestoned issue(s)"
 
-  if [ "$OPEN_UNMILESTONED" -eq 0 ]; then
-    echo "Fast lane: zero open unmilestoned issues — loop complete"
+  if [ "$OPEN_UNMILESTONED" -eq 0 ] && [ "$FLEET_EXIT" -ne 2 ] && [ "$FLEET_EXIT" -ne 3 ]; then
+    echo "Fast lane: zero open unmilestoned issues and no stalled/blocked in-flight agents — loop complete"
     break
+  elif [ "$OPEN_UNMILESTONED" -eq 0 ]; then
+    echo "Fast lane: zero open unmilestoned issues, but query fleet reports stalled/blocked agents (exit $FLEET_EXIT) — running one more recovery-focused iteration before declaring complete"
   fi
 
   # Step 1: Drive all open fast-lane issues through the durable engine.

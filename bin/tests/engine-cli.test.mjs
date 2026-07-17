@@ -27,6 +27,45 @@ function makeFakeIo(states, { fanOutLabel = "workflow:building" } = {}) {
   };
 }
 
+/**
+ * `resumeStalledFromCli`'s candidate enumeration now sources from
+ * `getFleetSnapshot()` (bin/observe.mjs — forge#2393), which issues a
+ * `gh repo view` (repo resolution, when `--repo` is omitted) and a single
+ * `gh api graphql` fleet-search call instead of a per-label `gh issue list`
+ * loop. `scanStalls()`'s own lease-expiry check (`gh issue view ... --json body`)
+ * is unchanged. This fixture mirrors bin/tests/query.test.mjs's `ghFleetIo`/
+ * `fleetNode` shape so the mocked GraphQL response matches what
+ * `parseFleetSearchResponse` actually expects.
+ */
+function fleetNode(number, label) {
+  return {
+    number,
+    title: `issue ${number}`,
+    labels: { nodes: [{ name: label }] },
+    body: "",
+    milestone: null,
+    comments: { nodes: [] },
+  };
+}
+
+/** Builds a fake io.gh that serves `repo view`, `api graphql` (fleet search), and `issue view` (state) calls. */
+function makeFleetIo(states, { fanOutLabel = "workflow:building", repo = "acme/widgets" } = {}) {
+  return {
+    gh: async (args) => {
+      if (args[0] === "repo" && args[1] === "view") return `${repo}\n`;
+      if (args[0] === "api" && args[1] === "graphql") {
+        const nodes = Object.keys(states).map((n) => fleetNode(Number(n), fanOutLabel));
+        return JSON.stringify({ data: { search: { nodes }, rateLimit: { remaining: 4999 } } });
+      }
+      if (args[0] === "issue" && args[1] === "view") {
+        const issue = Number(args[2]);
+        return JSON.stringify({ body: serializeState(states[issue]) });
+      }
+      throw new Error(`unexpected gh call: ${args.join(" ")}`);
+    },
+  };
+}
+
 describe("scanStalls", () => {
   it("flags issues whose lease expired and state is non-terminal", () => {
     const now = 10_000;
@@ -124,7 +163,7 @@ describe("resumeStalledFromCli", () => {
       101: { terminal: false, lease: { by: "b", until: 1_000 } },
       102: { terminal: false, lease: { by: "c", until: 1_000 } },
     };
-    const io = makeFakeIo(states);
+    const io = makeFleetIo(states);
 
     const attempted = [];
     const dispatch = mock.fn(async (argv) => {
@@ -149,7 +188,7 @@ describe("resumeStalledFromCli", () => {
       200: { terminal: false, lease: { by: "a", until: 1_000 } },
       201: { terminal: false, lease: { by: "b", until: 1_000 } },
     };
-    const io = makeFakeIo(states);
+    const io = makeFleetIo(states);
     const dispatch = async () => ({ terminalReason: "workflow:merged" });
 
     const result = await resumeStalledFromCli(["--lane", "staging"], { io, dispatch });
@@ -162,7 +201,7 @@ describe("resumeStalledFromCli", () => {
     const states = {
       300: { terminal: false, lease: { by: "a", until: 1_000 } },
     };
-    const io = makeFakeIo(states);
+    const io = makeFleetIo(states);
     const dispatch = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
 
     const result = await resumeStalledFromCli(["--lane", "staging", "--dry-run"], { io, dispatch });
@@ -172,7 +211,7 @@ describe("resumeStalledFromCli", () => {
   });
 
   it("returns failed: [] when no in-flight issues are found", async () => {
-    const io = { gh: async () => JSON.stringify([]) };
+    const io = makeFleetIo({});
     const dispatch = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
 
     const result = await resumeStalledFromCli(["--lane", "staging"], { io, dispatch });
@@ -181,11 +220,40 @@ describe("resumeStalledFromCli", () => {
     assert.equal(dispatch.mock.callCount(), 0);
   });
 
+  it("excludes needs-human (blocked) candidates — only ACTIVE_WORKFLOW_LABELS agents are resume candidates", async () => {
+    const states = {
+      500: { terminal: false, lease: { by: "a", until: 1_000 } }, // workflow:building — candidate
+      501: { terminal: false, lease: { by: "b", until: 1_000 } }, // needs-human — excluded
+    };
+    const io = {
+      gh: async (args) => {
+        if (args[0] === "repo" && args[1] === "view") return "acme/widgets\n";
+        if (args[0] === "api" && args[1] === "graphql") {
+          const nodes = [fleetNode(500, "workflow:building"), fleetNode(501, "needs-human")];
+          return JSON.stringify({ data: { search: { nodes }, rateLimit: { remaining: 4999 } } });
+        }
+        if (args[0] === "issue" && args[1] === "view") {
+          const issue = Number(args[2]);
+          return JSON.stringify({ body: serializeState(states[issue]) });
+        }
+        throw new Error(`unexpected gh call: ${args.join(" ")}`);
+      },
+    };
+    const dispatch = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
+
+    const result = await resumeStalledFromCli(["--lane", "staging", "--dry-run"], { io, dispatch });
+
+    assert.deepEqual(result.stalled, [500]);
+  });
+
   // forge#1593: --repo must be validated against the cwd-resolved repo before
   // any state I/O — otherwise it silently reads/writes FORGE:STATE in the
-  // wrong repo (only the `issue list` enumeration ever honored --repo).
+  // wrong repo. forge#2393: candidate enumeration now goes through
+  // getFleetSnapshot's `gh api graphql` fleet-search call (and, when --repo
+  // is omitted, a `gh repo view` resolution call) instead of a per-label
+  // `gh issue list` loop.
   describe("--repo targeting guard", () => {
-    /** Fake gh that answers `repo view` with `currentRepo` and everything else with empty results. */
+    /** Fake gh that answers `repo view` with `currentRepo`, an empty fleet search, and everything else with empty results. */
     function makeRepoAwareIo(currentRepo) {
       const calls = [];
       return {
@@ -193,13 +261,15 @@ describe("resumeStalledFromCli", () => {
         gh: async (args) => {
           calls.push(args);
           if (args[0] === "repo" && args[1] === "view") return `${currentRepo}\n`;
-          if (args[0] === "issue" && args[1] === "list") return JSON.stringify([]);
+          if (args[0] === "api" && args[1] === "graphql") {
+            return JSON.stringify({ data: { search: { nodes: [] }, rateLimit: { remaining: 4999 } } });
+          }
           throw new Error(`unexpected gh call: ${args.join(" ")}`);
         },
       };
     }
 
-    it("throws before any issue enumeration when --repo mismatches the cwd-resolved repo", async () => {
+    it("throws before any fleet-snapshot resolution when --repo mismatches the cwd-resolved repo", async () => {
       const io = makeRepoAwareIo("acme/other-repo");
       const dispatch = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
 
@@ -208,7 +278,7 @@ describe("resumeStalledFromCli", () => {
         /does not match the current repo/,
       );
 
-      // Only the `repo view` verification call happened — no enumeration, no dispatch.
+      // Only the `repo view` verification call happened — no fleet snapshot, no dispatch.
       assert.deepEqual(io.calls.map((c) => c.slice(0, 2)), [["repo", "view"]]);
       assert.equal(dispatch.mock.callCount(), 0);
     });
@@ -225,13 +295,16 @@ describe("resumeStalledFromCli", () => {
       assert.deepEqual(result, { stalled: [], dispatched: [], failed: [] });
     });
 
-    it("does not call `gh repo view` at all when --repo is omitted", async () => {
+    it("resolves the default repo via `gh repo view` when --repo is omitted (needed for the fleet snapshot query)", async () => {
       const io = makeRepoAwareIo("acme/target-repo");
       const dispatch = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
 
       await resumeStalledFromCli(["--lane", "staging"], { io, dispatch });
 
-      assert.ok(!io.calls.some((c) => c[0] === "repo" && c[1] === "view"));
+      // Unlike the old per-label `gh issue list` enumeration (which never needed an
+      // explicit repo string), getFleetSnapshot requires one — so `repo view` is now
+      // called exactly once here to resolve it, even though --repo was not passed.
+      assert.equal(io.calls.filter((c) => c[0] === "repo" && c[1] === "view").length, 1);
     });
   });
 });

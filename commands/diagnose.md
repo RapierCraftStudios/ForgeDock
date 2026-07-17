@@ -83,6 +83,33 @@ echo "Created: $(echo "$ISSUE" | jq -r '.createdAt')"
   echo "Closed: $(echo "$ISSUE" | jq -r '.closedAt')"
 ```
 
+### 1A.5: Query Ground-Truth State (forgedock query)
+
+**State reconstruction now goes through `forgedock query`** (the agent-facing JSON face over `bin/observe.mjs`'s fleet-observability core — forge#2393) instead of re-deriving status/stall/lease by hand from raw comment/label text. `query issue <n>` merges GitHub (labels, `FORGE:STATE`, `FORGE:HEARTBEAT`) with the local run-log in the same trust order the durable engine itself uses (GitHub wins on disagreement), giving a single ground-truth object for Phase 4/5 below to reason from.
+
+```bash
+QUERY_STATE=$(npx forgedock query issue "$NUMBER" $GH_FLAG 2>/dev/null)
+QUERY_EXIT=$?
+if [ -z "$QUERY_STATE" ] || ! echo "$QUERY_STATE" | jq -e '.schema' >/dev/null 2>&1; then
+  echo "WARNING: forgedock query issue $NUMBER failed (exit ${QUERY_EXIT}) — falling back to comment-marker-only diagnosis below." >&2
+  QUERY_STATE='{"schema":"forge-observe/1","status":"unknown"}'
+fi
+
+echo "Query status: $(echo "$QUERY_STATE" | jq -r '.status // "unknown"')"
+echo "Query phase: $(echo "$QUERY_STATE" | jq -r '.phase // "unknown"')"
+[ "$(echo "$QUERY_STATE" | jq -r '.stall // empty')" != "" ] && \
+  echo "Stall: $(echo "$QUERY_STATE" | jq -r '"\(.stall.ageMinutes)m elapsed (threshold: \(.stall.threshold)m)"')"
+[ "$(echo "$QUERY_STATE" | jq -r '.lease // empty')" != "" ] && \
+  echo "Lease: $(echo "$QUERY_STATE" | jq -r '"by \(.lease.by // "unknown"), until \(.lease.until // "unknown")"')"
+
+# Zero-network local run-log slice — no --repo/GH_FLAG needed, filesystem-only.
+# Use this to see exact PHASE_COMMIT/PHASE_FAILED events when a build stalled
+# mid-phase and the GitHub-side annotations alone don't explain why.
+QUERY_EVENTS=$(npx forgedock query issue "$NUMBER" --events 2>/dev/null)
+```
+
+`QUERY_STATE.status` (`running`/`stalled`/`blocked`/`leased-elsewhere`/`terminal`) and `QUERY_STATE.diagnostics` (failed phase, attempt/max, reason — sourced from the local run-log when this machine ran the durable engine for this issue) feed directly into the failure classification in Phase 4 below; they are the ground-truth complement to the comment-marker walk in Phase 2.
+
 ### 1B: Fetch all comments
 
 ```bash
@@ -218,6 +245,8 @@ fi
 ## Phase 4: Diagnose Failure Point
 
 Walk the expected annotation sequence in order and identify the first gap or incomplete marker.
+
+**Ground-truth cross-check (run before the marker walk below)**: `$QUERY_STATE` (Phase 1A.5) gives a status independent of the marker-presence heuristics that follow. If `$QUERY_STATE.status` is `"stalled"`, the issue's heartbeat has aged past `pipeline.stall_timeout_minutes` regardless of which marker is present/absent — surface this as an additional finding alongside whichever F-code matches below, not instead of it (a build can be simultaneously "interrupted at contract phase" per the marker walk AND "stalled" per the heartbeat age). If `$QUERY_STATE.status` is `"leased-elsewhere"`, another machine/agent currently holds an active lease on this issue — the marker walk's "interrupted" diagnoses below may be wrong; note this explicitly in the report rather than recommending a `/work-on` re-run that would race the other holder.
 
 **Failure classification logic** (evaluate in this exact order — first match wins):
 
