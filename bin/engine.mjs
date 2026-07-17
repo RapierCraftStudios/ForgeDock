@@ -623,7 +623,7 @@ async function cleanupWorktreeAfterTerminal(state, io) {
     if (path) await io.git(["worktree", "remove", path, "--force"]);
   } catch { /* best-effort — tolerate an already-removed worktree */ }
   try {
-    await io.git(["branch", "-D", state.branch]);
+    await io.git(["branch", "-D", "--", state.branch]);
   } catch { /* best-effort — tolerate an already-deleted branch */ }
 }
 

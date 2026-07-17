@@ -2386,7 +2386,7 @@ describe("runIssue — forge#2382: engine-issued label transitions and worktree 
     assert.equal(res.terminalReason, "merged");
     assert.equal(w.worktrees.length, 0, "the worktree must be removed once the run terminates merged");
     assert.ok(w.gitCalls.some((c) => c.startsWith("worktree remove")));
-    assert.ok(w.gitCalls.some((c) => c === "branch -D fix/real-branch-42"));
+    assert.ok(w.gitCalls.some((c) => c === "branch -D -- fix/real-branch-42"));
   });
 
   it("does NOT clean up the worktree/branch when the run terminates needs-human", async () => {
