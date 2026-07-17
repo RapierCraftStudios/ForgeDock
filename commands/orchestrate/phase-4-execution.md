@@ -522,6 +522,7 @@ If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to
 **LANE**: {LANE} (PR target: {PR_BASE})
 **Issue title**: {ISSUE_TITLE}
 {GIST_CONTEXT}
+{SOURCE_PR_HINT_CONTEXT}
 "
 )
 ```
@@ -570,6 +571,20 @@ fi
 ```
 
 If `GIST_CONTEXT` is empty (no synthesis brief, no parent investigation, and no milestone index found), the variable resolves to a blank line in the template — no impact on the agent prompt. <!-- Updated: forge#341, forge#1192 -->
+
+**`{SOURCE_PR_HINT_CONTEXT}` generation** <!-- Added: forge#2351 -->: For each issue being dispatched, thread the source-PR `likely-moot` triage hint computed by `phase-1-resolve.md`'s "Source-PR Triage Hint" step (`ISSUE_LIKELY_MOOT[$NUM]`, `ISSUE_SOURCE_PR[$NUM]`, `ISSUE_SOURCE_PR_STATE[$NUM]` — Phase 1 output, not re-derived here) into the dispatched agent's initial context, framed explicitly as a starting point to verify, never as a conclusion:
+
+```bash
+# Build SOURCE_PR_HINT_CONTEXT for an issue — reads Phase 1's ISSUE_LIKELY_MOOT[]/ISSUE_SOURCE_PR[]/
+# ISSUE_SOURCE_PR_STATE[] arrays (populated once in phase-1-resolve.md's pre-flight step).
+SOURCE_PR_HINT_CONTEXT=""
+if [ "${ISSUE_LIKELY_MOOT[{NUMBER}]:-unknown}" = "yes" ]; then
+  SOURCE_PR_HINT_CONTEXT="
+**SOURCE-PR TRIAGE HINT (non-binding — verify, do not assume)**: This finding cites source PR #${ISSUE_SOURCE_PR[{NUMBER}]}, which closed WITHOUT merging (state: ${ISSUE_SOURCE_PR_STATE[{NUMBER}]}). This is a hint to check FIRST during investigation, not a verdict — do NOT conclude INVALID on this basis alone. Two outcomes are both possible and have both occurred in production: (a) the flagged change genuinely never landed by any route (verify with \`git log -S\`/\`git merge-base --is-ancestor\` against the target branch) — if so, this supports an INVALID verdict with evidence; (b) the flagged change reached the target branch anyway via a DIFFERENT, independently-merged PR — if so, this finding is still valid and must be investigated and resolved normally, exactly like #2346 (source PR #2337 closed unmerged, but the code landed via independently-merged PR #2261, commit 90376f5 — #2346 correctly ended at needs-human, not invalid). Reach your own evidence-based verdict; this hint only tells you where to look first."
+fi
+```
+
+If `ISSUE_LIKELY_MOOT[{NUMBER}]` is `unknown` or absent (no `**Source**: PR #{N}` citation found, source PR still open, source PR merged, or the lookup failed), `SOURCE_PR_HINT_CONTEXT` stays empty and resolves to a blank line in the template — no impact on the agent prompt, identical to the `GIST_CONTEXT` empty-case behavior above.
 
 **Claims board context injection** <!-- Added: forge#1736 -->: When a coordination issue exists for this batch (`FORGE_COORD_ISSUE` is set), append the claims board URL and the active-claims check instruction to the agent's context. This enables each `/work-on` agent to post its `FORGE:CLAIM` on build start.
 
