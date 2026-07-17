@@ -2,8 +2,8 @@
 # issue-dedup.sh — Deterministic near-duplicate check for GitHub issue creation
 #
 # Usage:
-#   issue-dedup.sh <title> [-R <owner/repo>] [--force]
-#   issue-dedup.sh <title> ["-R <owner/repo>"] [--force]   (single pre-joined token also accepted)
+#   issue-dedup.sh <title> [-R <owner/repo>] [--force] [--exclude <N,N,...>]
+#   issue-dedup.sh <title> ["-R <owner/repo>"] [--force] [--exclude <N,N,...>]   (single pre-joined -R token also accepted)
 #
 #   <title>           : Proposed issue title (required, must be quoted if it contains spaces)
 #   -R <owner/repo>   : GitHub repository, as two argv tokens (optional, defaults to
@@ -15,6 +15,19 @@
 #                       correctly detected by the parser and treated as a title, not a
 #                       repo flag. See the -R\ * case arm guard in the arg-parsing loop.
 #   --force           : Skip dedup check and always allow creation (explicit override)
+#   --exclude <N,N,...> : Comma-separated issue numbers to remove from the candidate
+#                       set BEFORE token matching runs. Accepts either "--exclude N,N"
+#                       (two argv tokens) or "--exclude=N,N" (one pre-joined token).
+#                       Intended for callers that are about to create an issue that is a
+#                       deliberate supersede of other, already-open issues (e.g. a P3
+#                       review-finding batch issue restating its own member findings) —
+#                       those members would otherwise always collide with the new title
+#                       by construction. This is NOT a --force equivalent: it narrows the
+#                       candidate set, it does not disable the check. Any OTHER open issue
+#                       (not in the exclusion list) is still matched normally, so a batch
+#                       title that happens to duplicate an unrelated existing issue is
+#                       still caught. See commands/issue.md Phase 2D for the integration
+#                       contract. <!-- Added: forge#2432 -->
 #
 # Exit codes:
 #   0 — No near-duplicate found. Creation is safe. Stdout is empty.
@@ -27,12 +40,13 @@
 #      of length ≥ 4 (short words are noise: "fix", "add", "the", etc.)
 #   2. Query open issues: search GitHub using the 2 most distinctive title tokens
 #      as the --search query (balances recall vs API cost)
-#   3. For each candidate open issue, count shared tokens (length ≥ 4) between
-#      the proposed title and the candidate title.
-#   4. MATCH threshold: ≥ 3 shared tokens OR shared token count ≥ 50% of
+#   3. Remove any --exclude'd issue numbers from the candidate set.
+#   4. For each remaining candidate open issue, count shared tokens (length ≥ 4)
+#      between the proposed title and the candidate title.
+#   5. MATCH threshold: ≥ 3 shared tokens OR shared token count ≥ 50% of
 #      the shorter title's token set — whichever fires first.
-#   5. On match: print "DUPLICATE: #<N> <title>" to stdout, exit 1.
-#   6. On no match: exit 0 (silent).
+#   6. On match: print "DUPLICATE: #<N> <title>" to stdout, exit 1.
+#   7. On no match: exit 0 (silent).
 #
 # Integration pattern (for command specs that call gh issue create):
 #
@@ -66,6 +80,10 @@
 #     "Regression of #N" reference; see issue.md Phase 2D).
 #   - The --force flag is the explicit override path. Human decision is required
 #     to use it — agents MUST NOT pass --force without user authorization.
+#   - The --exclude flag is NOT a --force equivalent and requires no human
+#     authorization: it narrows the candidate set to exclude specific already-
+#     known issue numbers (e.g. a batch's own declared members), it does not
+#     disable the check. Any other open issue is still matched normally.
 #   - Token matching is case-insensitive and punctuation-agnostic.
 #   - GitHub's --search flag performs a full-text search; the token query is a
 #     tiebreaker against the full candidate list, not the sole filter.
@@ -81,6 +99,7 @@ set -euo pipefail
 PROPOSED_TITLE=""
 GH_FLAG=""
 FORCE=0
+EXCLUDE_ARG=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -121,6 +140,19 @@ while [[ $# -gt 0 ]]; do
       FORCE=1
       shift
       ;;
+    --exclude)
+      shift
+      if [[ $# -eq 0 ]]; then
+        echo "Missing value for --exclude" >&2
+        exit 2
+      fi
+      EXCLUDE_ARG="$1"
+      shift
+      ;;
+    --exclude=*)
+      EXCLUDE_ARG="${1#--exclude=}"
+      shift
+      ;;
     -*)
       echo "Unknown flag: $1" >&2
       exit 2
@@ -133,7 +165,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$PROPOSED_TITLE" ]]; then
-  echo "Usage: issue-dedup.sh <title> [-R <owner/repo>] [--force]" >&2
+  echo "Usage: issue-dedup.sh <title> [-R <owner/repo>] [--force] [--exclude <N,N,...>]" >&2
   exit 2
 fi
 
@@ -141,6 +173,27 @@ fi
 if [[ "$FORCE" -eq 1 ]]; then
   exit 0
 fi
+
+# --------------------------------------------------------------------------- #
+# Exclusion set (--exclude N,N,N)
+# Narrows the candidate set BEFORE token matching — does NOT disable the gate.
+# Non-numeric/malformed tokens are silently dropped rather than treated as a
+# usage error, since callers typically build this list programmatically from
+# a bash array of issue numbers (e.g. a batch's own member issues) and should
+# not have to pre-validate it. Same "|| true" pattern as the grep -c hazard
+# documented below — a filter that legitimately matches nothing must not trip
+# `set -e`.
+# --------------------------------------------------------------------------- #
+EXCLUDE_SET=""
+if [[ -n "$EXCLUDE_ARG" ]]; then
+  EXCLUDE_SET=$(echo "$EXCLUDE_ARG" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -E '^[0-9]+$' || true)
+fi
+
+is_excluded() {
+  local num="$1"
+  [[ -z "$EXCLUDE_SET" ]] && return 1
+  grep -qxF "$num" <<< "$EXCLUDE_SET"
+}
 
 # --------------------------------------------------------------------------- #
 # Token normalization
@@ -197,6 +250,14 @@ MATCH_TITLE=""
 
 while IFS=$'\t' read -r CAND_NUMBER CAND_TITLE; do
   [[ -z "$CAND_NUMBER" ]] && continue
+
+  # Excluded candidates (e.g. a batch issue's own declared members) are removed
+  # from the candidate set entirely — they never reach token matching, so they
+  # can never produce a false "DUPLICATE" against the very issue meant to
+  # supersede them. Any other open issue is still matched normally below.
+  if is_excluded "$CAND_NUMBER"; then
+    continue
+  fi
 
   CAND_TOKENS=$(normalize_tokens "$CAND_TITLE")
   # Same double-fallback hazard as PROPOSED_TOKEN_COUNT above — see comment there.
