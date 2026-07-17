@@ -5,7 +5,7 @@
  */
 import { fileURLToPath } from "node:url";
 import { appendEvent, readLog, deriveState, rewriteLog } from "./engine/runlog.mjs";
-import { pickPhase, TERMINAL_REASONS } from "./engine/phases.mjs";
+import { pickPhase, TERMINAL_REASONS, issueSnapshot } from "./engine/phases.mjs";
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { VALID_BACKENDS } from "./runner.mjs";
@@ -201,6 +201,57 @@ export async function runIssue(opts) {
   // the real branch from the `FORGE:BUILDER` comment instead.
   let phase;
   while ((phase = pickPhase(state))) {
+    // forge#2352: state-vs-GitHub divergence guard. Every phase's own
+    // `entryCondition` only ever checked `state.committed` (local run-log
+    // progress) — never the issue's live GitHub state/labels — so a phase
+    // could run to completion against an issue that was independently closed
+    // (e.g. by a human, or by the investigate phase's own marker path) or
+    // labeled `workflow:invalid`/`needs-human` after this run's local state
+    // was last derived. `close` is deliberately exempt: it is the one phase
+    // whose entire job IS to read and act on this exact state (see its
+    // reconcile/detectOutcome in bin/engine/phases.mjs), so guarding it here
+    // would be redundant and could race with its own read of the same data.
+    //
+    // Cost: one extra `gh issue view` per loop iteration (skipped only for
+    // `close`, which already pays this cost itself) — bounded by the phase
+    // count (currently 6), not the retry budget inside a single phase.
+    //
+    // Fail-open on a snapshot error (`!snap.ok`): a transient `gh`/network
+    // failure here must not block a healthy run any more than the identical
+    // fail-open behavior in `close`'s own `reconcile` (bin/engine/phases.mjs)
+    // or the `reconcile` try/catch just below in this same loop.
+    if (phase.id !== "close") {
+      let snap;
+      try {
+        snap = await issueSnapshot(issue, io);
+      } catch {
+        snap = { ok: false, state: null, labels: [] };
+      }
+      if (snap.ok) {
+        // `workflow:invalid`, or CLOSED without `workflow:merged`, means the
+        // issue is dead — nothing a further phase does can be consequential.
+        // Reuses the existing "invalid" terminal reason (TERMINAL_REASONS)
+        // rather than inventing a new one; #2353 makes the same choice for
+        // `close`'s own CLOSED-not-merged case.
+        const isDead = snap.labels.includes("workflow:invalid") ||
+          (snap.state === "CLOSED" && !snap.labels.includes("workflow:merged"));
+        if (isDead) {
+          const detail = `issue ${issue} is ${snap.state === "CLOSED" ? "closed" : "open"} ` +
+            `with divergent state before phase ${phase.id} (labels: ${snap.labels.join(", ") || "none"})`;
+          return await terminate(state, "invalid", detail);
+        }
+        // `needs-human` is a PAUSE, not a death sentence — a human may still
+        // resolve it, and /orchestrate's classify_predecessor_state() already
+        // treats this label as GATED (not FAILED), so terminating here with
+        // the same reason composes with that existing contract instead of
+        // conflating "paused pending a human" with "dead". Deliberately does
+        // NOT check `workflow:invalid`/CLOSED here — those are handled above.
+        if (snap.labels.includes("needs-human")) {
+          const detail = `issue ${issue} carries needs-human — pausing before phase ${phase.id}`;
+          return await terminate(state, "needs-human", detail);
+        }
+      }
+    }
     // forge#2321: tracks whether `phase_enter` was actually emitted for this
     // loop iteration. Re-declared `false` on every iteration (never hoisted
     // above the loop) so a reconcile-satisfied phase can never inherit a
