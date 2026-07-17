@@ -357,7 +357,7 @@ function renderDetailView(detail) {
   }
   if (detail.lastHeartbeatBody) {
     const bodyLines = String(detail.lastHeartbeatBody).split("\n").slice(0, 6);
-    for (const l of bodyLines) lines.push(dim(`    ${l}`));
+    for (const l of bodyLines) lines.push(dim(`    ${stripAnsi(l)}`));
   }
   lines.push("");
 

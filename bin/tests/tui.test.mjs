@@ -69,6 +69,20 @@ describe("stripAnsi", () => {
     // Non-SGR CSI: cursor movement \x1b[2A (move up 2)
     assert.equal(stripAnsi("abc\x1b[2Adef"), "abcdef");
   });
+
+  it("removes OSC sequences terminated by BEL (forge#2490 — untrusted body sanitization)", () => {
+    // OSC 8 hyperlink: \x1b]8;;URL\x07 text \x1b]8;;\x07
+    assert.equal(stripAnsi("abc\x1b]8;;https://evil.example\x07def"), "abcdef");
+  });
+
+  it("removes OSC sequences terminated by ST (\\x1b\\\\)", () => {
+    assert.equal(stripAnsi("abc\x1b]0;window title\x1b\\def"), "abcdef");
+  });
+
+  it("removes an unterminated OSC sequence to end of string", () => {
+    // A truncated/malformed OSC (no BEL/ST before EOF) must not leak through.
+    assert.equal(stripAnsi("abc\x1b]52;c;evilpayload"), "abc");
+  });
 });
 
 // ---------------------------------------------------------------------------

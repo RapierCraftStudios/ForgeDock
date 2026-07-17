@@ -705,9 +705,21 @@ export function table(
 // ANSI string utilities (exported for testing)
 // ---------------------------------------------------------------------------
 
-/** Strip all ANSI CSI sequences from a string, returning only visible text. */
+/**
+ * Strip ANSI/terminal escape sequences from a string, returning only visible
+ * text. Covers CSI (`\x1b[...letter`, e.g. SGR color codes, cursor movement)
+ * and OSC (`\x1b]...BEL` or `\x1b]...\x1b\`, e.g. OSC 8 hyperlinks, OSC 52
+ * clipboard writes, OSC 0/2 window-title sets) — the two forms an untrusted
+ * source (a GitHub comment/issue body rendered into the operator's terminal
+ * via watch.mjs's `renderDetailView()`) is realistically able to inject. An
+ * unterminated OSC sequence (no BEL/ST before end-of-string) is also
+ * stripped to end-of-string rather than passed through, since a truncated
+ * terminator must not leave the escape live.
+ */
 export function stripAnsi(s) {
-  return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+  return s
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, "")
+    .replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
 }
 
 /**
