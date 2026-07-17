@@ -67,25 +67,23 @@ Domain estimation (above) catches broad category overlap but misses cases where 
 
 #### Layer 1: Explicit file-overlap extraction
 
-**For issues that already have an INVESTIGATOR comment** (from Wave 0 or a prior session), extract their Affected Files list. **For issues WITHOUT an investigation comment**, fall back to parsing the issue body for file paths. Both code paths accumulate into a single `LAYER1_FILES` array (declared once, before the loop) — this is the batch-wide file set that Layer 5's co-change query (below) reuses, per the "file list already extracted in Layer 1" reference in Layer 2 and Layer 5:
+**For issues that already have an INVESTIGATOR comment** (from Wave 0 or a prior session), extract their Affected Files list, scoped to that comment's own `### Affected Files` section. **For issues WITHOUT an investigation comment**, fall back to parsing the issue body, scoped to a deliverables-shaped heading (`## Affected Files`, `## Deliverables`, or `### Files to change`) — never the whole body. Both code paths accumulate into a single `LAYER1_FILES` array (declared once, before the loop) — this is the batch-wide file set that Layer 5's co-change query (below) reuses, per the "file list already extracted in Layer 1" reference in Layer 2 and Layer 5. Extraction runs through `scripts/extract-affected-files.sh` (not an inline `grep -oP` over the whole text) so that stray paths mentioned in `## Context` / `## Prior art` / `## Related` / `## Root Cause` — or anywhere outside a deliverables-shaped heading — are never collected as if they were files the issue changes. A populated-but-wrong file list is strictly worse than an empty one: it clears Layer 4's `<2 paths` conservative-serialization threshold with false confidence, defeating the safety net that threshold exists to provide (forge#2436).
+
+Each issue's extraction also carries a **provenance** tag — `affected-files-section` (from the INVESTIGATOR comment's own scoped section), `body-fallback` (from the raw issue body's scoped section, pre-investigation), or `none` (no scoped section found; correctly yields zero paths so Layer 4 fires). This is recorded per issue in `FILE_SOURCE[$NUM]` and consumed by Layer 5 (below) and Step 3E's plan presentation.
 
 ```bash
 LAYER1_FILES=()
-declare -A EDGE_KIND   # "{PRED}:{SUCCESSOR}" → same-file | directory | shared-module (forge#1860)
-declare -A EDGE_FILES  # "{PRED}:{SUCCESSOR}" → the specific file(s) that triggered the edge (forge#1860)
+declare -A EDGE_KIND    # "{PRED}:{SUCCESSOR}" → same-file | directory | shared-module (forge#1860)
+declare -A EDGE_FILES   # "{PRED}:{SUCCESSOR}" → the specific file(s) that triggered the edge (forge#1860)
+declare -A FILE_SOURCE  # {NUM} → affected-files-section | body-fallback | none (forge#2436)
 for NUM in {issue_numbers}; do
   echo "=== #$NUM ==="
-  FILES_FOR_NUM=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
-    --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' 2>/dev/null \
-    | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | tr -d '`' | sort -u)
-
-  # Fall back to parsing the issue body directly when no INVESTIGATOR comment exists yet.
-  if [ -z "$FILES_FOR_NUM" ]; then
-    FILES_FOR_NUM=$(gh issue view $NUM --json body --jq '.body' \
-      | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | tr -d '`' | sort -u)
-  fi
+  EXTRACT_OUT=$(bash scripts/extract-affected-files.sh "$NUM" -R {GH_REPO})
+  FILE_SOURCE[$NUM]=$(echo "$EXTRACT_OUT" | head -1 | sed 's/^PROVENANCE=//')
+  FILES_FOR_NUM=$(echo "$EXTRACT_OUT" | tail -n +2)
 
   echo "$FILES_FOR_NUM"
+  echo "  (source: ${FILE_SOURCE[$NUM]})"
 
   # Accumulate into the batch-wide array — read line-by-line so each extracted path
   # becomes one array element (paths here don't contain spaces, but this stays robust).
@@ -328,7 +326,7 @@ fi
 
 **Apply the signal:**
 - **High co-change pair spans two different issues in the batch** → add a serialization edge between them (same directed-edge convention as Layers 1-4: lower issue number is predecessor), OR, if the pair also carries competing investigation recommendations, flag it for Phase 2.5 arbitration instead of a blind serialization edge (see cross-reference in Step 2.5B below).
-- **Verified-independent pair** → MAY be used to downgrade an existing Layer 2 "broad directory + different domain" or Layer 4 "conservative fallback" serialization to parallel. This downgrade is **never** applied to Layer 1 (same-file hard conflict, which is ground truth from the current batch, not historical inference) or to Layer 3 high-fan-in-file edges (a file can be structurally high-risk even with a thin history window, e.g. a newly added `main.py`). Ubiquitous-file pairs (n/N > 0.2 for either file) are **ineligible** for verified-independent downgrade even with zero co-occurrences.
+- **Verified-independent pair** → MAY be used to downgrade an existing Layer 2 "broad directory + different domain" or Layer 4 "conservative fallback" serialization to parallel. This downgrade is **never** applied to Layer 1 (same-file hard conflict, which is ground truth from the current batch, not historical inference) or to Layer 3 high-fan-in-file edges (a file can be structurally high-risk even with a thin history window, e.g. a newly added `main.py`). Ubiquitous-file pairs (n/N > 0.2 for either file) are **ineligible** for verified-independent downgrade even with zero co-occurrences. **Also ineligible**: a pair where either issue's `FILE_SOURCE[$NUM]` (Layer 1, above) is `body-fallback` — that file list came from a pre-investigation scrape of the raw issue body, lower-confidence than a post-investigation `affected-files-section` extraction, so a "verified independent" co-change verdict computed against it is not trustworthy enough to remove an edge. Weak provenance may only ever be used to *add* a conflict edge (Layer 1's own same-file cross-reference, unaffected by this rule), never to *remove* one — mirrors the existing "never overrides Layer 1/Layer 3" carve-out on this same line (forge#2436).
 - If `ALL_AFFECTED_FILES` is empty, the guard above skips the query and Layer 5 contributes nothing for the entire batch. If the matrix or live query returns no data for a pair → Layer 5 contributes nothing; fall back silently to Layers 1-4's existing verdict for that pair.
 
 **Wire-through proof (mandatory check)**: When `LAYER5_SOURCE=matrix`, confirm the matrix lookup path executes on at least one pair in the batch and log the verdict. This proves the path is live, not dead code. If no pairs are in the matrix, log that the live fallback ran instead. <!-- Ref: forge#1731, forge#1230, forge#1244 — Layer 5 has had two dead-code defects; this check prevents recurrence. -->
@@ -821,6 +819,8 @@ done
 
 **Source-PR Hint column**: when `ISSUE_LIKELY_MOOT[$NUM]` (populated by `phase-1-resolve.md`'s "Source-PR Triage Hint" step — see that file) is present for an issue, dereference it into a `Source-PR Hint` column. This column is **informational only** — it never changes a row's `Status` (Ready/Blocked), never removes a row from the table, and never causes a row to be excluded from dispatch. It exists purely so the operator can see, before confirming the plan, which `staging-review`/`review-finding` issues cite a source PR that closed without merging — a reason to look closer during that issue's own investigation phase, not a reason to skip it (see `phase-1-resolve.md`'s counterexamples: #2339/#2342 vs. #2346/#2261 — the same signal was right in one case and would have been wrong as a verdict in the other). <!-- Added: forge#2351 -->
 
+**File Source column** <!-- Added: forge#2436 -->: dereference `FILE_SOURCE[$NUM]` (populated by Step 3C Layer 1, above) into a `File Source` column, rendered as `affected-files-section` / `body-fallback` / `none` / `—` (when the issue has no predecessors and no DAG edges depend on its file list at all). Same informational-only contract as `Source-PR Hint` — never changes `Status`, never removes a row. It exists so the operator can see, before confirming the plan, which edges rest on a pre-investigation `body-fallback` guess (lower confidence — see Layer 5's downgrade-eligibility carve-out) versus a post-investigation `affected-files-section` extraction.
+
 ```
 ## Orchestration Plan
 
@@ -852,17 +852,18 @@ done
 
 ### Dependency Graph
 
-| Issue | Predecessors | Domain | Score | Est. Cost | Source-PR Hint | Status |
-|-------|-------------|--------|-------|-----------|-----------------|--------|
-| #{A} | — | FRONTEND | {score} | ${cost} | — | Ready (dispatches 1st by score) |
-| #{B} | — | BILLING | {score} | ${cost} | — | Ready (dispatches 2nd by score) |
-| #{C} | — | WORKER | {score} | ${cost} [ε] | — | Ready (dispatches 3rd — ε-reserve) |
-| #{D} | #{A} | FRONTEND | {score} | ${cost} | — | Blocked (waits for #{A} only) |
-| #{E} | — | DATABASE | {score} | ${cost} | — | Ready (dispatches 4th by score) |
-| #{F} | #{E} | DATABASE | {score} | ${cost} | — | Blocked (serialized — waits for #{E}) |
-| #{G} | — | INFRA | {score} | ${cost} | likely-moot (PR #{N} closed unmerged — verify first) | Ready (dispatches 5th by score) |
+| Issue | Predecessors | Domain | Score | Est. Cost | File Source | Source-PR Hint | Status |
+|-------|-------------|--------|-------|-----------|-------------|-----------------|--------|
+| #{A} | — | FRONTEND | {score} | ${cost} | affected-files-section | — | Ready (dispatches 1st by score) |
+| #{B} | — | BILLING | {score} | ${cost} | affected-files-section | — | Ready (dispatches 2nd by score) |
+| #{C} | — | WORKER | {score} | ${cost} [ε] | body-fallback | — | Ready (dispatches 3rd — ε-reserve) |
+| #{D} | #{A} | FRONTEND | {score} | ${cost} | none | — | Blocked (waits for #{A} only) |
+| #{E} | — | DATABASE | {score} | ${cost} | affected-files-section | — | Ready (dispatches 4th by score) |
+| #{F} | #{E} | DATABASE | {score} | ${cost} | body-fallback | — | Blocked (serialized — waits for #{E}) |
+| #{G} | — | INFRA | {score} | ${cost} | affected-files-section | likely-moot (PR #{N} closed unmerged — verify first) | Ready (dispatches 5th by score) |
 
 **[ε]** = no cost prior; eligible for exploration reserve (10% of budget guaranteed for these)
+**File Source** = `${FILE_SOURCE[$NUM]:-none}` (Step 3C Layer 1). Never affects `Status` or row inclusion — see Layer 1's provenance tracking and Layer 5's downgrade-eligibility carve-out (forge#2436) for how a `body-fallback` value is actually consumed.
 **Source-PR Hint** = `${ISSUE_LIKELY_MOOT[$NUM]:-unknown}` rendered as `—` when `unknown`/absent, or `likely-moot (PR #{ISSUE_SOURCE_PR[$NUM]} closed unmerged — verify first)` when `yes`. Never affects `Status` or row inclusion — see `phase-1-resolve.md`'s "Source-PR Triage Hint" step for how this is computed and why it stays a hint.
 
 **Score** = value / estimated_cost (value = priority_weight × danger_zone_weight; higher = dispatches first within the ready-set)
