@@ -23,6 +23,18 @@
  * too. Keeping this module in `bin/engine/` gives the resolution logic a
  * place to be unit-tested in isolation from the prose pipeline.
  *
+ * Wiring status (intentional, by design — see forge#2455): none of this
+ * module's exports are imported by any prose spec via a `node -e`/dynamic
+ * `import()` call site — unlike `bin/engine/resolve.mjs` (forge#2236), whose
+ * `classifyInputPattern`/`shouldReResolve`/`foldNewMatches` ARE invoked that
+ * way from `phase-1-resolve.md` and `phase-4-execution.md`. This module stays
+ * reference-only; the only automated check tying it to the hand-written bash
+ * mirror is the CI parity check (`scripts/check-admission-parity.mjs`), which
+ * diffs `CASCADE_PRESETS` against the `phase-4-execution.md` Step 4A.pre bash
+ * case arms and fails the build on drift. That script's own header comment
+ * says it plainly: "The logic actually EXECUTED at runtime is a hand-written
+ * bash/yq mirror... the two are kept in sync by hand."
+ *
  * Evidence this config surface addresses (see forge#2234 issue body): a
  * cascade admitted via the pre-#2234 `--allow-gen2` all-or-nothing CLI flag
  * (forge#2231) ran generation 2 -> 3 -> 4, drifting from "the engine silently
@@ -248,15 +260,24 @@ export function admitsTokenSpend(projectedSpend, policy) {
 }
 
 /**
- * Evaluate the Step 4C rule chain for a single cascade-spawned finding.
- * Mirrors `commands/orchestrate/phase-4-execution.md` Step 4C's "Evaluation
- * order" (rules 0-5) exactly, with rules 0/3/4 gated by the policy's
- * corresponding toggle and rule 1 governed by `admitsGeneration`. Rule 1
- * (generation cap) is evaluated for the finding's *computed* generation —
- * NOT hardcoded to a single-hop "is my source a review-finding" boolean —
- * so a `max_generation: 3` policy actually distinguishes gen 2 from gen 3,
- * per the exact gap forge#2234 exists to close (a binary flag cannot say
- * "admit gen-2, stop at gen-3").
+ * Evaluate the general cascade admission rule chain for a single finding.
+ * Models the same rule *shape* as `commands/orchestrate/phase-4-execution.md`
+ * Step 4C's "Evaluation order" (rules 0-5) — defer-on-gated, generation cap,
+ * priority passthrough, keyword heuristic, same-file defer, token budget —
+ * with rules 0/3/4 gated by the policy's corresponding toggle and rule 1
+ * evaluated via `admitsGeneration`.
+ *
+ * Rule 1 here is NOT a live substitute for Step 4C's own generation-cap rule:
+ * per `docs/CONFIG.md` and `phase-1-resolve.md` ("Cascade / Review-Finding
+ * Resolution"), `orchestration.cascade.max_generation` governs Phase 1
+ * resolve-time admission only — Step 4C's own generation >= 2 defer during
+ * autonomous cascade dispatch (`phase-4-execution.md` Step 4C rule 1) stays
+ * hardcoded and absolute regardless of this policy, by design (an unattended
+ * run must not cascade forever). This function's generation check instead
+ * models the *configurable* Phase-1-resolve-time shape — "admit gen-2, stop
+ * at gen-3" (`max_generation: 3`), the exact gap forge#2234 closes for that
+ * entry point (a binary flag could not say that) — not Step 4C's
+ * non-configurable rule 1.
  *
  * @param {Object} finding
  * @param {number} finding.generation - 1-indexed, see `admitsGeneration`.
