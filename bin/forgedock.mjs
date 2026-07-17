@@ -1812,7 +1812,19 @@ async function update() {
             console.log(
               `  ${YELLOW}This looks like the ForgeDock source repo itself — syncing commands/hooks from the working tree instead (HEAD was NOT moved).${RESET}`,
             );
-            await relinkAndHint();
+            // forge#2493 — relinkAndHint() is wrapped in its own try/catch
+            // here so a failure inside it (forge()/writeInstallReceipt()
+            // disk-write errors) doesn't fall through to the outer catch
+            // below, which prints a fast-forward/merge message that would be
+            // actively wrong for this path — no fast-forward or merge is
+            // ever attempted when isSourceRepoSelf is true.
+            try {
+              await relinkAndHint();
+            } catch (relinkErr) {
+              console.log(
+                `  ${YELLOW}Could not sync commands/hooks from the working tree: ${relinkErr.message}${RESET}`,
+              );
+            }
             console.log(
               `  To pull the latest published release instead: ${CYAN}npm install -g forgedock@latest && npx forgedock doctor --fix${RESET}`,
             );
