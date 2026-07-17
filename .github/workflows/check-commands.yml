@@ -17,8 +17,7 @@ on:
       - 'scripts/check-phase-registry-drift.mjs'
       - 'bin/engine/phases.mjs'
       - 'bin/hooks/interactive-engine.mjs'
-      - 'packages/protocol/src/phases.js'
-      - 'packages/protocol/src/types.js'
+      - 'packages/protocol/src/**'
       - '.github/workflows/check-commands.yml'
   push:
     branches:
@@ -39,8 +38,7 @@ on:
       - 'scripts/check-phase-registry-drift.mjs'
       - 'bin/engine/phases.mjs'
       - 'bin/hooks/interactive-engine.mjs'
-      - 'packages/protocol/src/phases.js'
-      - 'packages/protocol/src/types.js'
+      - 'packages/protocol/src/**'
       - '.github/workflows/check-commands.yml'
 
 concurrency:
