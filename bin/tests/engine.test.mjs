@@ -999,7 +999,16 @@ describe("runIssue", () => {
     }
   });
 
-  it("forge#2028: omitting backend/model preserves the existing runner() call shape (no new keys)", async () => {
+  // forge#2383: this test's expected key set was widened from the original
+  // forge#2028 3-key assertion (["args", "commandName", "commandsDir"]) to
+  // include "contextPack" — the context-pack builder now runs unconditionally
+  // per phase dispatch (independent of backend/model), and fakeWorld()'s
+  // default `w.body = "Issue."` is non-empty, so every call in this scenario
+  // produces a non-empty pack. The forge#2028 invariant this test actually
+  // guards — that omitting backend/model omits those two specific keys
+  // entirely, rather than forwarding them as undefined — is unchanged and
+  // still asserted below via the two `!("... " in call)` checks.
+  it("forge#2028: omitting backend/model preserves the existing runner() call shape (only the forge#2383 contextPack key is added)", async () => {
     const { w, io } = fakeWorld();
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
@@ -1028,7 +1037,7 @@ describe("runIssue", () => {
     for (const call of calls) {
       assert.ok(!("backend" in call), "backend key must be absent from runner() call when not supplied to runIssue");
       assert.ok(!("model" in call), "model key must be absent from runner() call when not supplied to runIssue");
-      assert.deepEqual(Object.keys(call).sort(), ["args", "commandName", "commandsDir"].sort());
+      assert.deepEqual(Object.keys(call).sort(), ["args", "commandName", "commandsDir", "contextPack"].sort());
     }
   });
 
@@ -2367,5 +2376,73 @@ describe("runIssue — forge#2382: engine-issued label transitions and worktree 
     // the function's own doc comment).
     assert.ok(!w.gitCalls.some((c) => c.startsWith("worktree add")),
       "ensureWorktreeForBuild must not fire while state.branch is unresolved");
+  });
+});
+
+describe("runIssue — forge#2383: per-phase context pack", () => {
+  it("threads a non-empty contextPack into runner() and records packBytes/packSections on PHASE_START", async () => {
+    const { w, io } = fakeWorld();
+    w.body = "## Problem\n\nSomething is broken.";
+    const script = { "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; } };
+    const calls = [];
+    const runner = async (call) => { calls.push(call); script[call.commandName]?.(); return { status: "complete" }; };
+
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
+
+    assert.ok(calls.length > 0);
+    const investigateCall = calls.find((c) => c.commandName === "work-on/investigate");
+    assert.ok(investigateCall.contextPack, "contextPack must be forwarded to runner()");
+    assert.match(investigateCall.contextPack, /Something is broken\./);
+
+    const starts = readLog(dir, 42).filter((e) => e.event === "PHASE_START" && e.phase === "investigate");
+    assert.ok(starts.length > 0);
+    for (const s of starts) {
+      assert.ok(typeof s.packBytes === "number" && s.packBytes > 0, "packBytes must be recorded as a positive number");
+      assert.ok(Array.isArray(s.packSections) && s.packSections.includes("issue"), "packSections must list the included sections");
+    }
+  });
+
+  it("fail-open: a gh failure while building the pack degrades to no contextPack, phase still dispatches normally", async () => {
+    const { w, io } = fakeWorld();
+    const origGh = io.gh;
+    io.gh = async (args) => {
+      const a = args.join(" ");
+      if (a.startsWith("issue view") && a.includes("title,body")) throw new Error("simulated transient gh failure");
+      return origGh(args);
+    };
+    const script = { "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; } };
+    const calls = [];
+    const runner = async (call) => { calls.push(call); script[call.commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
+
+    // The phase must still dispatch and reach its normal outcome — a pack
+    // build failure must never block or crash the run (fail-open contract).
+    assert.notEqual(res.terminalReason, "engine-error");
+    assert.ok(calls.length > 0, "runner must still be called despite the pack-build gh failure");
+  });
+
+  it("reuses local run-log data for prior phase outputs without an extra gh call", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+    };
+    const calls = [];
+    const runner = async (call) => {
+      calls.push(call);
+      script[call.commandName]?.();
+      // Simulate #2380-style typed outputs from the investigate phase so the
+      // "context" phase's own pack should include a Prior Phase Outputs section.
+      return { status: "complete", outputs: call.commandName === "work-on/investigate" ? { verdict: "CONFIRMED" } : {} };
+    };
+
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
+
+    const contextCall = calls.find((c) => c.commandName === "work-on/build/context");
+    assert.ok(contextCall, "context phase must have dispatched");
+    assert.ok(contextCall.contextPack, "context phase must receive a contextPack");
+    assert.match(contextCall.contextPack, /Prior Phase Outputs/);
+    assert.match(contextCall.contextPack, /"verdict": "CONFIRMED"/);
   });
 });
