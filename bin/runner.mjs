@@ -25,8 +25,7 @@
  *   renderDryRun(ctx)                       → string
  *   renderSummaryCard(ctx)                  → string
  *   resolveConfiguredDefaultModel(cwd)      → string|null   (forge.yaml agents.default_model, resolved)
- *   derivePhaseId(commandName)              → string|null   (phase id, or null if not phase-shaped)
- *   runCommand(opts)                        → Promise<{status, ..., result}>
+ *   runCommand(opts)                        → Promise<{status, ...}>
  *
  * Design notes:
  *   - The Anthropic SDK is a LAZY/optional dependency: it is imported only when
@@ -53,11 +52,6 @@ import os from "os";
 import { execSync, spawnSync } from "child_process";
 import { parseForgeYaml, resolveModelAlias } from "./forge-utils.mjs";
 import { DEFAULT_SPAWN_MAX_BUFFER_BYTES } from "./cli-spawn-shared.mjs";
-// forge#2380: report_result's per-phase schemas are single-sourced from the
-// same registry bin/engine/phases.mjs and bin/hooks/interactive-engine.mjs
-// import their marker strings from (forge#2378/PR#2400) — do NOT declare a
-// second, independent schema/enum list in this file.
-import { PHASE_RESULT_SCHEMAS, validatePhaseResult } from "../packages/protocol/src/phases.js";
 
 const DEFAULT_MODEL = "claude-sonnet-5";
 const DEFAULT_MAX_ITERATIONS = 50;
@@ -1030,76 +1024,7 @@ export const TOOL_DEFINITIONS = [
       required: ["command"],
     },
   },
-  {
-    // forge#2380: schema-enforced structured phase result. The concrete
-    // input_schema is phase-specific (see PHASE_RESULT_SCHEMAS in
-    // packages/protocol/src/phases.js) and is substituted per-request by
-    // buildToolDefinitions() below for whichever phase the current command
-    // resolves to (see derivePhaseId()) — this generic object schema is only
-    // what's shown by renderDryRun()/buildCliSystemPrompt() and any command
-    // whose derived phase id has no registered schema.
-    //
-    // For an enforced phase, runCommand()'s live loop will not accept the
-    // phase as complete (a non-tool_use stop) until this tool has been
-    // called with schema-valid input — a validation failure returns an
-    // is_error tool_result so the model retries, and exhausting
-    // maxIterations without ever getting a valid call is a distinct
-    // "phase-failed" outcome (not silently treated as success).
-    name: "report_result",
-    description:
-      "Report this phase's structured, machine-validated result. Call this exactly once, when the phase's work is actually complete, with a JSON object matching the phase's expected shape (investigate: {verdict, decompose, rootCause}; build: {branch, commits}; review: {pr, disposition}; context/architect: {summary} — an empty object is also valid for those two). A schema-invalid call is rejected and must be retried with corrected input; the phase cannot be reported complete without a schema-valid call.",
-    input_schema: {
-      type: "object",
-      properties: {},
-      required: [],
-      additionalProperties: true,
-    },
-  },
 ];
-
-/**
- * Return TOOL_DEFINITIONS with `report_result`'s generic input_schema
- * swapped for the concrete, phase-specific schema registered in
- * PHASE_RESULT_SCHEMAS (packages/protocol/src/phases.js), when one exists
- * for `phaseId`. When `phaseId` is null/unregistered, TOOL_DEFINITIONS is
- * returned unchanged (report_result keeps its generic, unenforced schema —
- * matching "nothing to enforce" from validatePhaseResult()).
- *
- * @param {string|null} phaseId
- * @returns {object[]}
- */
-export function buildToolDefinitions(phaseId) {
-  const schema = phaseId ? PHASE_RESULT_SCHEMAS[phaseId] : null;
-  if (!schema) return TOOL_DEFINITIONS;
-  return TOOL_DEFINITIONS.map((tool) =>
-    tool.name === "report_result" ? { ...tool, input_schema: schema } : tool,
-  );
-}
-
-/**
- * Derive the phase id a command name corresponds to, for `report_result`
- * schema enforcement purposes. Mirrors the `command` → `id` convention
- * already established in bin/engine/phases.mjs's PHASES table (e.g.
- * `"work-on/build/architect"` is the `command` for the `"architect"` phase)
- * without duplicating that table here: every phase `command` value in that
- * table is `.../{id}` or exactly `{id}`, so taking the last `/`-segment
- * recovers the id directly.
- *
- * Returns the derived segment even when it is not a member of PHASE_IDS —
- * callers that only want to *enforce* a schema should additionally check
- * PHASE_IDS.includes(...) or simply rely on PHASE_RESULT_SCHEMAS[id] being
- * undefined for non-phase commands (validatePhaseResult() already treats an
- * unregistered id as "nothing to enforce").
- *
- * @param {string} commandName
- * @returns {string|null}
- */
-export function derivePhaseId(commandName) {
-  const name = String(commandName ?? "").trim();
-  if (!name) return null;
-  const segments = name.split("/").filter(Boolean);
-  return segments.length ? segments[segments.length - 1] : null;
-}
 
 /**
  * Resolve a tool-supplied path against cwd unless it is already absolute.
@@ -1768,17 +1693,6 @@ export async function runCommand(opts = {}) {
   const handlers = getToolHandlers(cwd);
   const messages = [{ role: "user", content: userMessage }];
 
-  // forge#2380: derive the phase this command corresponds to (if any) and
-  // resolve the report_result schema it must satisfy before this run is
-  // allowed to report success. Commands with no registered schema (most
-  // non-phase commands, e.g. ad-hoc /issue runs) get no enforcement —
-  // report_result stays available to call but nothing requires it, and
-  // `result` is simply reported as null throughout.
-  const resultPhaseId = derivePhaseId(commandName);
-  const resultSchema = resultPhaseId ? PHASE_RESULT_SCHEMAS[resultPhaseId] : null;
-  const toolsForRequest = buildToolDefinitions(resultPhaseId);
-  let structuredResult = null;
-
   // Accumulate token usage across all messages.create() calls in this run.
   // Field names match the Anthropic SDK's response.usage object exactly.
   const usage = {
@@ -1796,7 +1710,7 @@ export async function runCommand(opts = {}) {
       model,
       max_tokens: DEFAULT_MAX_TOKENS,
       system: systemPrompt,
-      tools: toolsForRequest,
+      tools: TOOL_DEFINITIONS,
       messages,
     });
 
@@ -1817,25 +1731,6 @@ export async function runCommand(opts = {}) {
     }
 
     if (response.stop_reason !== "tool_use") {
-      // forge#2380: for a phase with a registered report_result schema, a
-      // non-tool_use stop is NOT accepted as completion until a schema-valid
-      // report_result call has actually happened — otherwise the model could
-      // simply stop talking (run out of things to say, decide it's "probably
-      // done", etc.) and have that silently treated as phase success, which
-      // is exactly the "forgot to post the marker" failure mode this tool
-      // exists to close. Nudge with a corrective user turn and keep going,
-      // bounded by the same maxIterations as everything else in this loop.
-      if (resultSchema && !structuredResult) {
-        messages.push({
-          role: "user",
-          content:
-            "This phase is not yet complete: you must call the report_result tool with a " +
-            "schema-valid result before stopping. Expected input shape: " +
-            JSON.stringify(resultSchema),
-        });
-        continue;
-      }
-
       // `max_tokens` is a TRUNCATED assistant turn, not a clean finish — report
       // it distinctly so callers (and CI) don't treat a cut-off run as success.
       const status =
@@ -1857,47 +1752,12 @@ export async function runCommand(opts = {}) {
         usage,
         model,
         backend: "api",
-        result: structuredResult,
       };
     }
 
     const toolResults = [];
     for (const block of response.content) {
       if (block.type !== "tool_use") continue;
-
-      if (block.name === "report_result") {
-        // forge#2380: handled separately from the generic handler dispatch
-        // below — report_result has no filesystem/shell side effect, it only
-        // records (and schema-validates) the phase's typed result.
-        const { valid, errors } = resultSchema
-          ? validatePhaseResult(resultPhaseId, block.input)
-          : { valid: true, errors: [] };
-        if (valid) {
-          structuredResult = block.input ?? {};
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: block.id,
-            content: "Result accepted.",
-          });
-        } else {
-          // Validation errors can echo back a model-supplied value (e.g. an
-          // invalid enum value) — route through the same sanitize/cap helper
-          // used for every other piece of model-controlled content that
-          // reaches a tool_result/log/error in this file (#2277/#2292/#2293/
-          // #2355/#2360), rather than opening a new unsanitized path.
-          const sanitizedErrors = errors.map((e) => sanitizeOutputExcerptForLog(e));
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: block.id,
-            content: truncateToolResult(
-              `Result rejected — schema validation failed:\n- ${sanitizedErrors.join("\n- ")}`,
-            ),
-            is_error: true,
-          });
-        }
-        continue;
-      }
-
       const handler = handlers[block.name];
       let content;
       let isError = false;
@@ -1918,33 +1778,6 @@ export async function runCommand(opts = {}) {
     messages.push({ role: "user", content: toolResults });
   }
 
-  // forge#2380: iteration-cap exhaustion for a phase with a registered schema
-  // that never received a valid report_result call is a distinct failure —
-  // not a bare "max-iterations" — so callers can tell "ran out of turns
-  // having never reported a valid result" apart from an ordinary
-  // max-iterations cutoff on an unenforced command.
-  if (resultSchema && !structuredResult) {
-    logger.log(
-      renderSummaryCard({
-        command: spec.name,
-        args,
-        iterations,
-        stopReason: "phase_failed_no_result",
-        usage,
-      }),
-    );
-    return {
-      status: "phase-failed",
-      command: spec.name,
-      iterations,
-      usage,
-      model,
-      backend: "api",
-      result: null,
-      detail: `report_result was never called with schema-valid input for phase "${resultPhaseId}" after ${iterations} iterations`,
-    };
-  }
-
   logger.log(
     renderSummaryCard({
       command: spec.name,
@@ -1961,6 +1794,5 @@ export async function runCommand(opts = {}) {
     usage,
     model,
     backend: "api",
-    result: structuredResult,
   };
 }
