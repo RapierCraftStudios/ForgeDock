@@ -2120,7 +2120,7 @@ describe("runCliBackend usage parsing from --output-format json (issue #2398)", 
     );
   });
 
-  it("normalizes a partial usage object with per-field ?? 0 (mirrors the API-backend accumulator)", () => {
+  it("normalizes a partial usage object with per-field coercion to 0 for missing fields", () => {
     // Only input_tokens/output_tokens present — no cache fields, as when
     // prompt caching is not active (mirrors the SDK's own omission behavior).
     const envelope = JSON.stringify({
@@ -2231,6 +2231,90 @@ describe("runCliBackend usage parsing from --output-format json (issue #2398)", 
     assert.ok(thrown);
     assert.equal(thrown.code, "CLI_BACKEND_FAILED");
     assert.match(thrown.message, new RegExp(rawErrorOutput.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  });
+
+  // forge#2422: the success-path JSON envelope must be parsed from stdout
+  // ALONE, not the combined stdout+stderr string. A zero-exit run where the
+  // CLI writes non-JSON noise (deprecation banner, Node warning, etc.) to
+  // stderr while still emitting a clean, valid JSON envelope on stdout must
+  // still have its usage parsed — not silently degrade to null.
+  it("parses usage from stdout alone even when stderr contains non-JSON noise on a zero-exit run (forge#2422)", () => {
+    const envelope = JSON.stringify({
+      type: "result",
+      result: "Hi! Done.",
+      usage: { input_tokens: 7, output_tokens: 13 },
+    });
+    const stderrNoise = "(node:12345) DeprecationWarning: something is deprecated\n";
+    const spawnFn = () => ({ status: 0, stdout: envelope, stderr: stderrNoise, error: undefined });
+
+    const loggedLines = [];
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2422",
+      args: ["2422"],
+      cwd: TMP,
+      logger: { log: (line) => loggedLines.push(line) },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.equal(result.status, "complete");
+    assert.deepStrictEqual(
+      result.usage,
+      {
+        input_tokens: 7,
+        output_tokens: 13,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+      "usage must parse from stdout's clean JSON envelope, not degrade to null because of stderr noise",
+    );
+    assert.ok(loggedLines.some((line) => line === "Hi! Done."));
+  });
+
+  // forge#2424: a non-numeric usage field (e.g. a string, as an alternate/
+  // future CLI JSON shape might emit) must be coerced to a safe numeric
+  // value (0), never passed through raw — otherwise bin/batch-runner.mjs's
+  // tokenCost() (`input + output`) would string-concatenate instead of
+  // numerically add, silently corrupting the cost/run-log signal.
+  it("coerces a non-numeric usage field to 0 instead of passing it through raw (forge#2424)", () => {
+    const envelope = JSON.stringify({
+      type: "result",
+      result: "done",
+      usage: {
+        input_tokens: "1000", // non-numeric (string) — must not pass through raw
+        output_tokens: 250,
+        cache_creation_input_tokens: null,
+        cache_read_input_tokens: undefined,
+      },
+    });
+    const spawnFn = () => ({ status: 0, stdout: envelope, stderr: "", error: undefined });
+
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2424",
+      args: ["2424"],
+      cwd: TMP,
+      logger: { log: () => {} },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.equal(result.status, "complete");
+    assert.deepStrictEqual(result.usage, {
+      input_tokens: 0,
+      output_tokens: 250,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    });
+    assert.equal(typeof result.usage.input_tokens, "number");
+    // Downstream arithmetic (mirrors bin/batch-runner.mjs's tokenCost()) must
+    // numerically add, never string-concatenate.
+    assert.strictEqual(
+      result.usage.input_tokens + result.usage.output_tokens,
+      250,
+      "coerced usage fields must add numerically, not string-concatenate",
+    );
   });
 });
 
