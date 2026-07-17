@@ -327,9 +327,17 @@ function evaluateOneCloseAssertion(assertion, events) {
       //      that terminates the run ("invalid" or "needs-human") the moment
       //      the issue's live GitHub state/labels diverge from the local
       //      run-log, for every phase except `close`.
-      //   2. The `close` phase's own reconcile/detectOutcome
-      //      (bin/engine/phases.mjs), which is exempt from (1) because
-      //      reading and acting on exactly this state IS its job.
+      //   2. The `close` phase's own `reconcile` (bin/engine/phases.mjs),
+      //      which is exempt from (1) because reading and acting on exactly
+      //      this state IS its job. `close` also declares `detectOutcome`,
+      //      but forge#2441: since forge#2381 gave `close` an `execute`
+      //      method, bin/engine.mjs's runIssue() dispatches it via
+      //      runExecutePhase() — which calls only `execute()`, never
+      //      `detectOutcome()` — so `detectOutcome` is NOT a live enforcement
+      //      call site on the current production dispatch path (it is
+      //      retained for direct unit-test coverage and as dormant fallback
+      //      logic for the non-`execute` dispatch path — see its own doc
+      //      comment in bin/engine/phases.mjs). Only `reconcile` runs live.
       // This function has no GitHub I/O access (it's a pure assertion
       // evaluator — see the module header), so it cannot re-verify the live
       // issue state itself; it stays a structural pass-through by design.
