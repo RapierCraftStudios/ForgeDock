@@ -8,7 +8,7 @@
 # Usage:
 #   severity-to-priority.sh <SEVERITY>
 #
-#   SEVERITY  One of: CRITICAL, HIGH, MEDIUM, LOW, INFO (case-sensitive,
+#   SEVERITY  One of: CRITICAL, HIGH, MEDIUM, LOW (case-sensitive,
 #             matches the exact tokens written into a finding's
 #             `**Severity**:` body field by commands/review-pr-agents/*.md)
 #
@@ -21,7 +21,15 @@
 #   HIGH     -> priority:P1
 #   MEDIUM   -> priority:P2
 #   LOW      -> priority:P3
-#   INFO     -> priority:P3
+#
+# NOTE: an `INFO -> priority:P3` branch previously existed here (forge#2447)
+# but was removed (forge#2480) — no `commands/review-pr-agents/*.md` persona
+# ever documented or instructed emitting `INFO` as a `**Severity**` value, and
+# neither finding-body template (`review-pr.md`/`review-pr-staging.md`) ever
+# listed it as valid, making the branch permanently unreachable dead code. If
+# a real producer for `INFO` is added in the future, reintroduce the mapping
+# here AND update both finding-body template enums AND the relevant
+# review-pr-agents persona(s) in the same change — see forge#2480.
 #
 # IMPORTANT: this maps SEVERITY, never Confidence (CONFIRMED/LIKELY/POSSIBLE).
 # Confidence and Severity are independent axes of a finding — conflating them
@@ -46,7 +54,7 @@ set -euo pipefail
 
 if [ "$#" -lt 1 ]; then
   echo "ERROR: Usage: severity-to-priority.sh <SEVERITY>" >&2
-  echo "       SEVERITY: CRITICAL | HIGH | MEDIUM | LOW | INFO" >&2
+  echo "       SEVERITY: CRITICAL | HIGH | MEDIUM | LOW" >&2
   exit 1
 fi
 
@@ -65,12 +73,9 @@ case "$SEVERITY" in
   LOW)
     echo "priority:P3"
     ;;
-  INFO)
-    echo "priority:P3"
-    ;;
   *)
     echo "ERROR: Unrecognized severity: '$SEVERITY'" >&2
-    echo "       Valid severities: CRITICAL, HIGH, MEDIUM, LOW, INFO" >&2
+    echo "       Valid severities: CRITICAL, HIGH, MEDIUM, LOW" >&2
     exit 1
     ;;
 esac

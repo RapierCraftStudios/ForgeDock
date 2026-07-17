@@ -7,10 +7,17 @@
  * Regression coverage for forge#2447: commands/review-pr.md and
  * commands/review-pr-staging.md previously derived the `priority:*` label
  * from a finding's Confidence (CONFIRMED/LIKELY/POSSIBLE) instead of its
- * Severity (CRITICAL/HIGH/MEDIUM/LOW/INFO). A finding with
+ * Severity (CRITICAL/HIGH/MEDIUM/LOW). A finding with
  * `**Severity**: LOW` and `**Confidence**: CONFIRMED` was mislabeled
  * `priority:P1`, which defeats /orchestrate's P3 batching rule (P1/P2
  * findings are never batched).
+ *
+ * Also covers forge#2480: an `INFO -> priority:P3` branch was originally
+ * added alongside the mapping above, but no `commands/review-pr-agents/*.md`
+ * persona or finding-body template ever documented/emitted `INFO` as a valid
+ * Severity value, making it permanently unreachable dead code. The branch
+ * was removed from scripts/severity-to-priority.sh; `INFO` is now asserted to
+ * be rejected as an unrecognized severity, same as any other invalid input.
  *
  * This suite exercises scripts/severity-to-priority.sh directly via bash
  * (mirrors the script's own `#!/usr/bin/env bash` shebang — works under
@@ -49,7 +56,6 @@ describe("scripts/severity-to-priority.sh — Severity -> priority:* mapping (fo
     ["HIGH", "priority:P1"],
     ["MEDIUM", "priority:P2"],
     ["LOW", "priority:P3"],
-    ["INFO", "priority:P3"],
   ];
 
   for (const [severity, expectedLabel] of MAPPING_TABLE) {
@@ -74,6 +80,17 @@ describe("scripts/severity-to-priority.sh — Severity -> priority:* mapping (fo
 
   it("exits 1 with no stdout label for an unrecognized severity", () => {
     const result = run(["BOGUS"]);
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout.trim(), "");
+    assert.match(result.stderr, /Unrecognized severity/);
+  });
+
+  it("REGRESSION (forge#2480): INFO is rejected as unrecognized — it was removed as an unreachable dead branch", () => {
+    // INFO -> priority:P3 previously existed here but no producer (any
+    // review-pr-agents persona, or either finding-body template's Severity
+    // enum) ever emitted it. It must now behave exactly like any other
+    // invalid severity token, not silently map to a priority.
+    const result = run(["INFO"]);
     assert.equal(result.status, 1);
     assert.equal(result.stdout.trim(), "");
     assert.match(result.stderr, /Unrecognized severity/);
