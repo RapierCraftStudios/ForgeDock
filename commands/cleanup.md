@@ -399,6 +399,12 @@ Eligibility is **default-batchable**: any open `review-finding` + a P3 priority 
 # sites so `authority_source` and a Security-agent-attributed finding no
 # longer false-positive, while a genuine auth/billing/security/anti-bot
 # finding still excludes. <!-- forge#2423 -->
+# Each stripped alternative is anchored to the field's real generator-output
+# shape (enum for Confidence/Severity, URL for Review comment, length-bounded
+# free text for Source/Agent) rather than a bare label-prefix + `.*$` —
+# matching on label shape alone lets attacker-controlled body text on one of
+# these lines get stripped along with the label, smuggling banned keywords
+# past the scan below. <!-- forge#2477 -->
 UNBATCHED_P3=$(gh issue list {GH_FLAG} \
   --state open \
   --label "review-finding" \
@@ -407,7 +413,7 @@ UNBATCHED_P3=$(gh issue list {GH_FLAG} \
   --jq '.[] | select([.labels[].name] | any(test("^(priority:)?P3$")))
          | select(([.labels[].name] | any(. == "batch")) | not)
          | select((.title | test("\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i")) | not)
-         | (.body | gsub("(?m)^\\*\\*(Source|Agent|Confidence|Severity|Review comment)\\*\\*:.*$"; "")) as $stripped_body
+         | (.body | gsub("(?m)^\\*\\*(?:Source\\*\\*: PR #[0-9]+ [—-] .{1,150}|Agent\\*\\*: [A-Za-z][A-Za-z &/]{0,40} \\([^)\\n]{1,80}\\)|Confidence\\*\\*: (?:CONFIRMED|LIKELY|POSSIBLE)|Severity\\*\\*: (?:CRITICAL|HIGH|MEDIUM|LOW|INFO)|Review comment\\*\\*: https?://\\S+)$"; "")) as $stripped_body
          | select($stripped_body | test("## Problem[\\s\\S]{0,500}\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i") | not)
          | select(([.labels[].name] | any(. == "security" or . == "billing" or . == "anti-bot" or . == "auth")) | not)')
 

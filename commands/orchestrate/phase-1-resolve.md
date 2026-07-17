@@ -326,7 +326,13 @@ BATCHABLE_P3=$(gh issue list {GH_FLAG} \
          # see review-pr.md L1691-1719) before scanning the body — otherwise a
          # finding is excluded because of who reviewed it (e.g. "**Agent**:
          # Security (...)") rather than what it is actually about. <!-- forge#2423 -->
-         | (.body | gsub("(?m)^\\*\\*(Source|Agent|Confidence|Severity|Review comment)\\*\\*:.*$"; "")) as $stripped_body
+         # Each alternative is anchored to the field's real generator-output shape
+         # (enum for Confidence/Severity, URL for Review comment, length-bounded
+         # free text for Source/Agent) rather than a bare label-prefix + `.*$` —
+         # matching on label shape alone lets attacker-controlled body text on
+         # one of these lines get stripped along with the label, smuggling
+         # banned keywords past the scan below. <!-- forge#2477 -->
+         | (.body | gsub("(?m)^\\*\\*(?:Source\\*\\*: PR #[0-9]+ [—-] .{1,150}|Agent\\*\\*: [A-Za-z][A-Za-z &/]{0,40} \\([^)\\n]{1,80}\\)|Confidence\\*\\*: (?:CONFIRMED|LIKELY|POSSIBLE)|Severity\\*\\*: (?:CRITICAL|HIGH|MEDIUM|LOW|INFO)|Review comment\\*\\*: https?://\\S+)$"; "")) as $stripped_body
          | select($stripped_body | test("## Problem[\\s\\S]{0,500}\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i") | not)
          | select(([.labels[].name] | any(. == "security" or . == "billing" or . == "anti-bot" or . == "auth")) | not)')
 

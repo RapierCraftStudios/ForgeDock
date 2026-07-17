@@ -1637,9 +1637,15 @@ for FINDING_NUM in "${QUEUED_FINDINGS[@]}"; do
   # `authentication|authorization|authn|authz` preserve real auth-domain coverage
   # as separate whole-word alternatives now that bare `auth` is boundary-anchored.
   # <!-- forge#2423 -->
+  # Each stripped alternative is anchored to the field's real generator-output
+  # shape (enum for Confidence/Severity, URL for Review comment, length-bounded
+  # free text for Source/Agent) rather than a bare label-prefix + `.*$` —
+  # matching on label shape alone lets attacker-controlled body text on one of
+  # these lines get stripped along with the label, smuggling banned keywords
+  # past the scan below. <!-- forge#2477 -->
   echo "$FINDING_DATA" | jq -e '
     (.title | test("\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i"))
-    or ((.body | gsub("(?m)^\\*\\*(Source|Agent|Confidence|Severity|Review comment)\\*\\*:.*$"; "")) | test("## Problem[\\s\\S]{0,500}\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i"))
+    or ((.body | gsub("(?m)^\\*\\*(?:Source\\*\\*: PR #[0-9]+ [—-] .{1,150}|Agent\\*\\*: [A-Za-z][A-Za-z &/]{0,40} \\([^)\\n]{1,80}\\)|Confidence\\*\\*: (?:CONFIRMED|LIKELY|POSSIBLE)|Severity\\*\\*: (?:CRITICAL|HIGH|MEDIUM|LOW|INFO)|Review comment\\*\\*: https?://\\S+)$"; "")) | test("## Problem[\\s\\S]{0,500}\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i"))
     or ([.labels[]] | any(. == "security" or . == "billing" or . == "anti-bot" or . == "auth"))
   ' >/dev/null && continue
 
