@@ -78,7 +78,7 @@ declare -A EDGE_FILES   # "{PRED}:{SUCCESSOR}" → the specific file(s) that tri
 declare -A FILE_SOURCE  # {NUM} → affected-files-section | body-fallback | none (forge#2436)
 for NUM in {issue_numbers}; do
   echo "=== #$NUM ==="
-  EXTRACT_OUT=$(bash scripts/extract-affected-files.sh "$NUM" -R {GH_REPO})
+  EXTRACT_OUT=$(bash scripts/extract-affected-files.sh "$NUM" -R "{GH_REPO}")
   FILE_SOURCE[$NUM]=$(echo "$EXTRACT_OUT" | head -1 | sed 's/^PROVENANCE=//')
   FILES_FOR_NUM=$(echo "$EXTRACT_OUT" | tail -n +2)
 
