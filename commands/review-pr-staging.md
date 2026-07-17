@@ -688,7 +688,7 @@ Only assign milestone if reviewing a milestone/* branch. Plain staging reviews g
 Check for open review-finding issues at same file:line → skip. Closed issues at same location → potential regression (elevate priority).
 
 ### 7F: Create Issues
-Sequential creation. Title: `Staging Review: {summary} (staging → main)`. Labels: review-finding, needs-validation, staging-review, priority:P1/priority:P2/priority:P3. Body includes: source branch context (`staging`), code context, evidence, validation checklist.
+Sequential creation. Title: `Staging Review: {summary} (staging → main)`. Labels: review-finding, needs-validation, staging-review, priority:P0-P3 (derived from Severity — see below). Body includes: source branch context (`staging`), code context, evidence, validation checklist.
 
 **For each finding** (that passes dedup), create issue through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") instead of calling the raw issue-creation command directly:
 ```bash
@@ -733,8 +733,15 @@ Files that need changes:
 - [ ] If VALIDATED: fix implemented and tested on correct branch
 ISSUE_EOF
 
+# priority:* label is a deterministic function of the finding's **Severity**
+# (CRITICAL/HIGH/MEDIUM/LOW/INFO) — NEVER of its Confidence
+# (CONFIRMED/LIKELY/POSSIBLE). scripts/severity-to-priority.sh is the single
+# source of truth for this mapping; commands/review-pr.md calls the identical
+# script so the two specs cannot independently drift. <!-- forge#2447 -->
+STAGING_FINDING_PRIORITY=$(bash scripts/severity-to-priority.sh "$STAGING_FINDING_SEVERITY")
+
 # --label is repeatable (not comma-joined) per the /issue programmatic contract.
-Skill(skill="issue", args="--title \"$STAGING_FINDING_TITLE\" --body-file \"$STAGING_FINDING_BODY_FILE\" --label review-finding --label needs-validation --label staging-review --label \"{priority}\"")
+Skill(skill="issue", args="--title \"$STAGING_FINDING_TITLE\" --body-file \"$STAGING_FINDING_BODY_FILE\" --label review-finding --label needs-validation --label staging-review --label \"$STAGING_FINDING_PRIORITY\"")
 rm -f "$STAGING_FINDING_BODY_FILE"
 
 # /issue has no machine-readable return contract — resolve the created issue's number by
@@ -748,7 +755,7 @@ for _resolve_attempt in 1 2 3; do
 done
 ```
 
-Labels: `review-finding` + `needs-validation` + `staging-review` + priority (`priority:P1` CONFIRMED, `priority:P2` LIKELY, `priority:P3` POSSIBLE).
+Labels: `review-finding` + `needs-validation` + `staging-review` + priority. `priority:*` is derived from the finding's `**Severity**` field via `scripts/severity-to-priority.sh` (identical script used by `commands/review-pr.md` — single documented mapping, see that script's header comment): `CRITICAL` → `priority:P0`, `HIGH` → `priority:P1`, `MEDIUM` → `priority:P2`, `LOW` → `priority:P3`, `INFO` → `priority:P3`. **Never derive `priority:*` from Confidence** (CONFIRMED/LIKELY/POSSIBLE) — conflating the two axes previously mislabeled LOW-severity CONFIRMED findings as `priority:P1`, defeating orchestrate's P3 batching rule. <!-- forge#2447 -->
 
 **No pre-filtering**: Every finding becomes an issue. Validation agents sort out false positives downstream.
 
