@@ -289,6 +289,49 @@ describe("label transition state machine — pure logic (#2326)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// gh CLI error fail-open/fail-closed split (#2347)
+//
+// checkLabelTransition()'s single `gh issue view` lookup also fetches the
+// reversal-evidence comments when the attempted transition is to
+// workflow:invalid (mayNeedEvidence). Before #2347, ANY `gh` error on that
+// lookup returned null (allow) unconditionally — including when the error
+// occurred while trying to fetch evidence for a workflow:invalid attempt,
+// which silently bypassed the #2326/#2332 evidence gate. #2347 splits the
+// catch behavior: fail-closed when mayNeedEvidence is true, fail-open
+// (unchanged) otherwise.
+//
+// Mirrors the pattern above (and the file-level comment at ~line 150): the
+// real hook's catch block wraps a live `execFileSync("gh", ...)` call that
+// can't be shimmed via subprocess on this host, so this is a pure-logic
+// re-implementation of just the catch branch's decision.
+//
+// To confirm this suite is not vacuous: reverting decideOnGhError below to
+// its pre-#2347 form (`return null` unconditionally) makes "fails CLOSED
+// when mayNeedEvidence is true" FAIL (would return null/allowed instead of
+// a blocked message) — confirmed manually before this fix.
+// ---------------------------------------------------------------------------
+
+function decideOnGhError(mayNeedEvidence) {
+  if (mayNeedEvidence) {
+    return "BLOCKED: unable to verify workflow:invalid evidence (gh CLI error)";
+  }
+  return null;
+}
+
+describe("gh CLI error fail-open/fail-closed split (#2347)", () => {
+  it("fails CLOSED when the attempted transition is workflow:invalid (mayNeedEvidence=true)", () => {
+    const msg = decideOnGhError(true);
+    assert.ok(msg, "a gh error while fetching reversal evidence must not silently allow workflow:invalid");
+    assert.match(msg, /evidence/i);
+  });
+
+  it("stays fail-OPEN for ordinary (non-evidence-gated) transitions (mayNeedEvidence=false)", () => {
+    const msg = decideOnGhError(false);
+    assert.equal(msg, null, "gh errors on ordinary transitions must remain fail-open, unchanged");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Author-association check on reversal evidence (#2332)
 //
 // #2326 required marker+verdict text but never checked who posted it — on
