@@ -263,8 +263,8 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | {id: .id, body: .bod
 ```
 
 **Resume logic**:
-- If `<!-- FORGE:INVESTIGATOR -->` comment exists AND `<!-- INVESTIGATION:COMPLETE -->` is present in the SAME comment → investigation already complete, EXIT (return existing verdict to caller)
-- If `<!-- FORGE:INVESTIGATOR -->` comment exists BUT `<!-- INVESTIGATION:COMPLETE -->` is ABSENT → investigation was interrupted, delete the partial comment and restart:
+- If `<!-- FORGE:INVESTIGATOR -->` comment exists AND (`<!-- INVESTIGATION:COMPLETE -->` OR `<!-- INVESTIGATION:INVALID -->`) is present in the SAME comment → investigation already complete, EXIT (return existing verdict to caller). `INVESTIGATION:INVALID` is the terminal sentinel Phase 1C emits for an INVALID verdict (see Phase 1C below) — it is just as much a completion marker as `INVESTIGATION:COMPLETE`, not an "interrupted" state.
+- If `<!-- FORGE:INVESTIGATOR -->` comment exists BUT NEITHER `<!-- INVESTIGATION:COMPLETE -->` NOR `<!-- INVESTIGATION:INVALID -->` is present → investigation was interrupted, delete the partial comment and restart:
   ```bash
   gh api repos/{GH_REPO}/issues/comments/{COMMENT_ID} -X DELETE
   ```
@@ -355,7 +355,20 @@ bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN_LABEL} --repo-path
 
 ## Phase 1C: Post Investigation Comment
 
-The comment MUST include `<!-- INVESTIGATION:COMPLETE -->` at the very end, AFTER all required sections are present. This marker signals the investigation finished successfully.
+The comment MUST include a terminal sentinel at the very end, AFTER all required sections are present. **The sentinel is conditional on the resolved Verdict — it is NOT always `<!-- INVESTIGATION:COMPLETE -->`:**
+
+- **Verdict is INVALID** → close with `<!-- INVESTIGATION:INVALID -->`. This is a distinct, already-wired-up terminal marker: `bin/engine/phases.mjs`'s `detectOutcome` for the `investigate` phase checks for it explicitly (ahead of `INVESTIGATION:COMPLETE`) and routes to `terminalReason: "invalid"`; `bin/hooks/interactive-engine.mjs`'s `PHASE_MARKERS` table also already treats it as terminal. Emitting `INVESTIGATION:COMPLETE` for an INVALID verdict is what previously caused every completed investigation to read as `{verdict: "CONFIRMED"}` regardless of actual outcome — do NOT regress this (forge#2350).
+- **Verdict is CONFIRMED or PARTIAL** → close with `<!-- INVESTIGATION:COMPLETE -->` as before (PARTIAL still routes to `ready-to-build` in Phase 1D — only INVALID gets the distinct terminal sentinel).
+
+Compute the sentinel once, before building the comment body:
+
+```bash
+if [ "{VERDICT}" = "INVALID" ]; then
+  INVESTIGATION_SENTINEL="<!-- INVESTIGATION:INVALID -->"
+else
+  INVESTIGATION_SENTINEL="<!-- INVESTIGATION:COMPLETE -->"
+fi
+```
 
 **CODEC PATH (forge#1727)**: Construct the annotation body via the protocol codec — do NOT hand-roll the `<!-- FORGE:INVESTIGATOR -->` header. Use `forge-annotation.sh write INVESTIGATOR --field ...` or `node packages/protocol/src/cli.js emit INVESTIGATOR --field ...` to produce the opening tag and completion sentinel. Fill in the Markdown body sections below. The full pattern:
 
@@ -450,8 +463,10 @@ ACCEPTANCE_CHECK: id=ac-4 type=command target="grep -qE '(>= ?2|2\+)' commands/o
 
 **Skipping**: if the issue has no verifiable acceptance criteria and none can be derived from the recommendation, emit a single sentinel: `ACCEPTANCE_CHECK: id=ac-skip type=skipped target="none" matcher="none" description=No machine-checkable criteria available — human review required`
 ${ANNOTATION_LINK_FOOTER}
-<!-- INVESTIGATION:COMPLETE -->"
+${INVESTIGATION_SENTINEL}"
 ```
+
+**Do not hardcode `<!-- INVESTIGATION:COMPLETE -->` as the closing line.** The closing line MUST be the `${INVESTIGATION_SENTINEL}` variable computed above — it resolves to `<!-- INVESTIGATION:INVALID -->` for an INVALID verdict and `<!-- INVESTIGATION:COMPLETE -->` otherwise. `INVESTIGATION:COMPLETE` and `INVESTIGATION:INVALID` are mutually exclusive within a single posted comment — never emit both.
 
 ---
 
