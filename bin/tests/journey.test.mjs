@@ -846,7 +846,7 @@ describe("persistHome (forge#1943)", () => {
     );
   });
 
-  it("removeOrphans: source subdir replaced by a symlink-to-file (ENOTDIR) does not abort the whole persist (forge#2227)", async () => {
+  it("removeOrphans: source subdir replaced by a symlink-to-file (ENOTDIR) does not abort the whole persist (forge#2227)", async (t) => {
     const home = mkdtempSync(join(os.tmpdir(), "fd-persist-enotdir-home-"));
     const forgeHome = makeSourceForgeHome({ version: "1.0.0" });
     mkdirSyncFs(join(forgeHome, "commands", "subdir"), { recursive: true });
@@ -862,7 +862,15 @@ describe("persistHome (forge#1943)", () => {
     // dest-side directory) throws ENOTDIR, not ENOENT — the exact escape this
     // regression guards against. Bump version to clear the downgrade guard.
     rmSync(join(forgeHome, "commands", "subdir"), { recursive: true, force: true });
-    symlinkSync(join(forgeHome, "package.json"), join(forgeHome, "commands", "subdir"));
+    try {
+      symlinkSync(join(forgeHome, "package.json"), join(forgeHome, "commands", "subdir"));
+    } catch (err) {
+      if (err.code === "EPERM" || err.code === "EACCES") {
+        t.skip("symlink creation unavailable (Windows without Developer Mode)");
+        return;
+      }
+      throw err;
+    }
     writeFileSync(join(forgeHome, "package.json"), JSON.stringify({ name: "forgedock", version: "1.1.0" }), "utf-8");
 
     const second = await persistHome({ forgeHome, home });
