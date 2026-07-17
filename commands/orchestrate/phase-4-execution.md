@@ -283,6 +283,12 @@ DEFERRED_FINDINGS=()
 QUEUED_FINDINGS=()
 declare -A DEFERRED_REASONS
 declare -A AGENT_ISSUE_MAP
+# Engine-first dispatch equivalent of AGENT_ISSUE_MAP (fixed forge#2466): keyed by issue
+# number, holds the task id returned by each backgrounded `Bash(run_in_background=true,
+# command="forgedock run-issue ...")` call from Step 4A's engine-first path. Step 4B reads
+# this map to identify which issue a background-Bash completion notification belongs to,
+# the same role AGENT_ISSUE_MAP plays for Agent-tool `agent_completed` notifications.
+declare -A ENGINE_DISPATCH_MAP
 
 # Same-file current-state brief forwarding (forge#1860). Populated by the core streaming
 # dispatch loop below (Step 4B) whenever a Layer 1/2/3 structural predecessor edge (see
@@ -413,6 +419,8 @@ Use `${ISSUE_LANE[$NUM]}` and `${ISSUE_PR_BASE[$NUM]}` to populate `{LANE}` and 
 
 **Engine-first dispatch (default)**: When `forgedock` is in PATH, dispatch each ready issue via the durable engine rather than spawning prose Agent sub-agents. The engine's phase table enforces gate semantics in code — its fail-closed review gate and deterministic phase ordering are not subject to LLM interpretation.
 
+**CRITICAL — never background via shell `&`/`wait`** (fixed forge#2466): A single `forgedock run-issue` invocation drives an issue through investigate → build → review → close and routinely runs 30+ minutes. Backgrounding the process at the *shell* level (`cmd &` … `wait`) does not escape the Bash tool's own per-invocation ceiling — `wait` is itself the foreground command the tool watches, and it blocks for the combined duration of every process in the chunk. This made engine-first dispatch effectively dead code: any chunk running longer than the ceiling was always killed, so every run silently fell through to the Agent-spawn fallback below. The fix: dispatch each `forgedock run-issue` invocation as its **own `Bash` tool call with `run_in_background=true`** — the harness's native "start it, don't wait, notify me on completion" primitive — never with shell-level `&`/`wait`. This is exactly the same async model the Agent-spawn-fallback path already uses (and Step 4B's notification-driven completion loop already expects), so one monitoring loop now covers both dispatch styles.
+
 ```bash
 # Engine-first dispatch: check CLI availability, then dispatch ready issues in score order
 # Uses SORTED_READY_SET[] from Step 3E.5 (descending value/cost) and budget gate from Step 4A-pre.0
@@ -428,36 +436,56 @@ if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
     fi  # else: added to DEFERRED_BUDGET_ISSUES[] by should_dispatch()
   done
 
-  # Concurrency gate (forge#1912): dispatch in chunks of MAX_CONCURRENT, waiting for each
-  # chunk to finish before starting the next. This is the code-form equivalent of the
-  # Agent-spawn-fallback cap below — never more than MAX_CONCURRENT `forgedock run-issue`
-  # processes in flight at once, regardless of how many issues are ready.
-  IDX=0
-  while [ "$IDX" -lt "${#DISPATCH_QUEUE[@]}" ]; do
-    CHUNK=("${DISPATCH_QUEUE[@]:$IDX:$MAX_CONCURRENT}")
-    echo "Dispatching chunk of ${#CHUNK[@]} issue(s) — concurrency cap ${MAX_CONCURRENT}"
-
-    for NUM in "${CHUNK[@]}"; do
-      LANE="${ISSUE_LANE[$NUM]}"
-      PR_BASE="${ISSUE_PR_BASE[$NUM]}"
-      COST="${ISSUE_COST_ESTIMATE[$NUM]:-0.35}"
-
-      # Advance PROJECTED_SPEND before forking so subsequent iterations see the updated total
-      PROJECTED_SPEND=$(echo "scale=4; $PROJECTED_SPEND + $COST" | bc 2>/dev/null || echo "$PROJECTED_SPEND")
-
-      echo "Dispatching #$NUM via forgedock run-issue --lane $PR_BASE (score=${ISSUE_SCORE[$NUM]:-?} est_cost=\$${COST} projected_total=\$${PROJECTED_SPEND})"
-      forgedock run-issue "$NUM" --lane "$PR_BASE" &
-    done
-    wait   # cap enforced here — no more than MAX_CONCURRENT processes run concurrently
-    IDX=$((IDX + MAX_CONCURRENT))
+  # Concurrency gate (forge#1912, mechanism fixed forge#2466): compute this dispatch batch the
+  # SAME way the Agent-spawn-fallback path below does — via dispatch_headroom()/
+  # DEFERRED_CONCURRENCY_ISSUES (Step 4A-pre.0.2) — NOT a shell `&`/`wait` chunk loop. Issues
+  # beyond headroom are deferred and released, oldest first, as in-flight dispatches complete
+  # (Step 4B) — identical bookkeeping to the Agent-spawn path, just a different dispatch primitive.
+  HEADROOM=$(dispatch_headroom)
+  DISPATCH_NOW=()
+  for NUM in "${DISPATCH_QUEUE[@]}"; do
+    if [ "${#DISPATCH_NOW[@]}" -lt "$HEADROOM" ]; then
+      DISPATCH_NOW+=("$NUM")
+    else
+      DEFERRED_CONCURRENCY_ISSUES+=("$NUM")
+    fi
   done
-  echo "Engine dispatch complete — advancing to Step 4B (completion sweep)"
+
+  if [ "${#DEFERRED_CONCURRENCY_ISSUES[@]}" -gt 0 ]; then
+    echo "CONCURRENCY DEFER: ${#DEFERRED_CONCURRENCY_ISSUES[@]} ready issue(s) held back — ${ACTIVE_DISPATCH_COUNT}/${MAX_CONCURRENT} already in flight. Will dispatch as slots free up: ${DEFERRED_CONCURRENCY_ISSUES[*]}"
+  fi
+  echo "Dispatching ${#DISPATCH_NOW[@]} issue(s) this message via forgedock run-issue (headroom was ${HEADROOM})"
+
+  for NUM in "${DISPATCH_NOW[@]}"; do
+    LANE="${ISSUE_LANE[$NUM]}"
+    PR_BASE="${ISSUE_PR_BASE[$NUM]}"
+    COST="${ISSUE_COST_ESTIMATE[$NUM]:-0.35}"
+
+    # Advance PROJECTED_SPEND before dispatching so subsequent iterations see the updated total
+    PROJECTED_SPEND=$(echo "scale=4; $PROJECTED_SPEND + $COST" | bc 2>/dev/null || echo "$PROJECTED_SPEND")
+
+    echo "Dispatching #$NUM via forgedock run-issue --lane $PR_BASE (score=${ISSUE_SCORE[$NUM]:-?} est_cost=\$${COST} projected_total=\$${PROJECTED_SPEND})"
+  done
+
+  if [ "${#DISPATCH_NOW[@]}" -eq 0 ]; then
+    echo "Engine dispatch: no headroom this cycle — waiting for the next completion notification (Step 4B) before dispatching more."
+  fi
 else
   echo "INFO: Using agent dispatch mode (forgedock CLI not in PATH — run \`npm install -g forgedock\` for engine-mode dispatch)"
   # Fall through to Agent-spawn template below. The SubagentStop hook (bin/hooks/interactive-engine.mjs)
   # bridges these runs to the engine run-log for state persistence even on the fallback path.
 fi
 ```
+
+**Dispatch each issue in `DISPATCH_NOW` via its own backgrounded `Bash` call (MANDATORY when `FORGEDOCK_AVAILABLE=true`) — never shell `&`/`wait`.** Issue one `Bash(...)` call per issue in `DISPATCH_NOW`, all in the same message, so they run concurrently within the headroom already computed above:
+
+```
+Bash(command="forgedock run-issue {NUM} --lane {PR_BASE}", run_in_background=true, description="Engine-drive issue #{NUM}")
+```
+
+Capture the task id each call returns into `ENGINE_DISPATCH_MAP[{NUM}]` (declared alongside `AGENT_ISSUE_MAP` below — Step 4B's completion handler uses this map to identify which issue a backgrounded engine-mode `Bash` completion notification belongs to, the same role `AGENT_ISSUE_MAP` plays for `agent_completed` notifications). After the batch, increment `ACTIVE_DISPATCH_COUNT` by `${#DISPATCH_NOW[@]}` — identical accounting to the Agent-spawn path's own post-batch increment.
+
+If `DISPATCH_NOW` is empty (headroom is 0), do not dispatch any issues this cycle — wait for the next completion notification, exactly like the Agent-spawn path.
 
 **Agent-spawn path (fallback when forgedock CLI unavailable)**: When `FORGEDOCK_AVAILABLE=false`, spawn Agent sub-agents per issue using the template below. This preserves engine state via the SubagentStop hook even without the CLI.
 
@@ -689,9 +717,9 @@ If `DISPATCH_NOW` is empty (headroom is 0), do not spawn any agents this cycle �
 
 ### Step 4B: Monitor completions and dispatch newly ready issues
 
-You will be automatically notified when each background agent completes. **Do NOT use `sleep` loops to poll for completion.** Instead, wait for the automatic notification. When you receive a notification that an agent completed, immediately process it.
+You will be automatically notified when each background agent completes — or, for an engine-first dispatch (Step 4A, `FORGEDOCK_AVAILABLE=true`), when a backgrounded `Bash(run_in_background=true, command="forgedock run-issue ...")` call completes. Both are the same underlying "background task finished" notification the harness delivers; treat them identically for the purposes of this step. **Do NOT use `sleep` loops to poll for completion.** Instead, wait for the automatic notification. When one arrives, look up which issue it belongs to — `AGENT_ISSUE_MAP` for an `agent_completed` notification, `ENGINE_DISPATCH_MAP` (fixed forge#2466) for a background-Bash notification from the engine-first path — and immediately process it exactly the same way regardless of which map resolved it; every check below (`classify_predecessor_state()`, dependent dispatch, stall/staging checks) keys off GitHub labels/state, not which dispatch mechanism produced them. **Fallback**: if a runtime ever fails to deliver a background-Bash completion notification, poll `gh issue view --json labels` for the in-flight engine-dispatched issue's workflow label instead of blocking — the same degrade-gracefully behavior already used when `BACKGROUND_DISPATCH_ENABLED=false` for the Agent-spawn path (see `phase-3-dependency.md` → Background Dispatch Mode).
 
-**Concurrency slot release (MANDATORY — first action on every completion)** <!-- Added: forge#1912 -->: The instant an `agent_completed` notification arrives, decrement `ACTIVE_DISPATCH_COUNT` by 1 — a worker slot has just freed, regardless of what terminal state the issue ended up in. Do this before any stall-recovery/resume logic below. If that agent is then resumed (item 2 below, or Step 4B.5's stall recovery) because it stalled mid-pipeline rather than truly finishing, re-increment `ACTIVE_DISPATCH_COUNT` when the `Agent(resume=...)` call is issued — a resume re-occupies a worker slot exactly like a fresh dispatch does.
+**Concurrency slot release (MANDATORY — first action on every completion)** <!-- Added: forge#1912 -->: The instant a completion notification arrives — `agent_completed`, or a background-Bash completion for an engine-dispatched issue — decrement `ACTIVE_DISPATCH_COUNT` by 1 — a worker slot has just freed, regardless of what terminal state the issue ended up in. Do this before any stall-recovery/resume logic below. If that agent is then resumed (item 2 below, or Step 4B.5's stall recovery) because it stalled mid-pipeline rather than truly finishing, re-increment `ACTIVE_DISPATCH_COUNT` when the `Agent(resume=...)` call is issued — a resume re-occupies a worker slot exactly like a fresh dispatch does. (Step 4B.5's stall-resume mechanism is `Agent(resume=...)`-specific and is unchanged by this fix — an engine-dispatched issue that stalls is not currently auto-resumed by Step 4B.5; it surfaces the same way any other stalled issue does, via the standard stall-detection alert, and `forgedock resume-stalled` remains available as a separate manual/scripted recovery path outside this file's scope.)
 
 **Ordering requirement (MANDATORY — prevents transient over-cap)**: For every agent that completed in this notification batch, finish its terminal-state check and, if applicable, its resume re-increment (items 1-2 below) BEFORE computing `dispatch_headroom` for item 5's newly-ready-issue dispatch. Computing headroom before a to-be-resumed agent's re-increment would let a genuinely-still-running agent's freed slot be double-booked — once by a fresh dispatch, once by the resume itself — transiently exceeding `MAX_CONCURRENT`. Process every completed agent's items 1-2 to a decision (terminal vs. resumed) first; only then compute headroom once for the batch's item 5 dispatch.
 
