@@ -38,6 +38,8 @@ import {
   buildCliSystemPrompt,
   buildUserMessage,
   TOOL_DEFINITIONS,
+  buildToolDefinitions,
+  derivePhaseId,
   truncateToolResult,
   isWindowsBashShim,
   resolveBashShell,
@@ -219,13 +221,60 @@ describe("buildUserMessage", () => {
 // ---------------------------------------------------------------------------
 
 describe("TOOL_DEFINITIONS", () => {
-  it("defines read_file, write_file, run_bash with schemas", () => {
+  it("defines read_file, write_file, run_bash, report_result with schemas", () => {
     const names = TOOL_DEFINITIONS.map((t) => t.name);
-    assert.deepEqual(names.sort(), ["read_file", "run_bash", "write_file"]);
+    assert.deepEqual(names.sort(), ["read_file", "report_result", "run_bash", "write_file"]);
     for (const tool of TOOL_DEFINITIONS) {
       assert.equal(tool.input_schema.type, "object");
       assert.ok(Array.isArray(tool.input_schema.required));
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// report_result tool infrastructure (forge#2380)
+// ---------------------------------------------------------------------------
+
+describe("derivePhaseId", () => {
+  it("takes the last '/'-segment of the command name", () => {
+    assert.equal(derivePhaseId("work-on/investigate"), "investigate");
+    assert.equal(derivePhaseId("work-on/build/context"), "context");
+    assert.equal(derivePhaseId("work-on/build/architect"), "architect");
+    assert.equal(derivePhaseId("work-on/build"), "build");
+  });
+
+  it("returns the bare name unchanged when there is no '/'", () => {
+    assert.equal(derivePhaseId("issue"), "issue");
+  });
+
+  it("returns null for empty/nullish input", () => {
+    assert.equal(derivePhaseId(""), null);
+    assert.equal(derivePhaseId(undefined), null);
+  });
+});
+
+describe("buildToolDefinitions", () => {
+  it("returns TOOL_DEFINITIONS unchanged when phaseId has no registered schema", () => {
+    assert.equal(buildToolDefinitions(null), TOOL_DEFINITIONS);
+    assert.equal(buildToolDefinitions("not-a-real-phase"), TOOL_DEFINITIONS);
+  });
+
+  it("substitutes report_result's input_schema with the phase-specific schema", () => {
+    const tools = buildToolDefinitions("build");
+    const reportResult = tools.find((t) => t.name === "report_result");
+    assert.deepEqual(Object.keys(reportResult.input_schema.properties).sort(), ["branch", "commits"]);
+    assert.deepEqual(reportResult.input_schema.required, ["branch", "commits"]);
+    // Other tools are untouched.
+    const readFile = tools.find((t) => t.name === "read_file");
+    assert.equal(readFile, TOOL_DEFINITIONS.find((t) => t.name === "read_file"));
+  });
+
+  it("does not mutate the original TOOL_DEFINITIONS array or its report_result entry", () => {
+    const original = TOOL_DEFINITIONS.find((t) => t.name === "report_result").input_schema;
+    buildToolDefinitions("build");
+    const stillOriginal = TOOL_DEFINITIONS.find((t) => t.name === "report_result").input_schema;
+    assert.equal(stillOriginal, original);
+    assert.deepEqual(Object.keys(stillOriginal.properties), []);
   });
 });
 
