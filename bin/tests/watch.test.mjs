@@ -21,7 +21,10 @@ import {
   selectPollIntervalMs,
   resolveWatchRepo,
   runWatch,
+  applySortAndFilter,
   RATE_BUDGET_STRETCH_THRESHOLD,
+  SORT_ORDERS,
+  FILTER_MODES,
 } from "../watch.mjs";
 import { stripAnsi } from "../tui.mjs";
 
@@ -576,6 +579,513 @@ describe("runWatch — interactive TTY mode", () => {
       sleep: async () => {},
     });
     assert.equal(exitCode, 3);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// applySortAndFilter — pure sort/filter (forge#2392 AC4)
+// ---------------------------------------------------------------------------
+
+describe("applySortAndFilter", () => {
+  it("filterMode 'stalled+blocked' keeps only stalled and blocked agents", () => {
+    const agents = [
+      fleetAgent({ issue: 1, status: "running" }),
+      fleetAgent({ issue: 2, status: "stalled" }),
+      fleetAgent({ issue: 3, status: "blocked" }),
+    ];
+    const out = applySortAndFilter(agents, "severity", "stalled+blocked");
+    assert.deepEqual(out.map((a) => a.issue), [2, 3]);
+  });
+
+  it("filterMode 'running' keeps only running agents", () => {
+    const agents = [
+      fleetAgent({ issue: 1, status: "running" }),
+      fleetAgent({ issue: 2, status: "stalled" }),
+    ];
+    const out = applySortAndFilter(agents, "severity", "running");
+    assert.deepEqual(out.map((a) => a.issue), [1]);
+  });
+
+  it("filterMode 'all' keeps every agent", () => {
+    const agents = [fleetAgent({ issue: 1 }), fleetAgent({ issue: 2, status: "stalled" })];
+    const out = applySortAndFilter(agents, "severity", "all");
+    assert.equal(out.length, 2);
+  });
+
+  it("sortOrder 'severity' preserves the input (already pre-sorted) order", () => {
+    const agents = [fleetAgent({ issue: 3 }), fleetAgent({ issue: 1 }), fleetAgent({ issue: 2 })];
+    const out = applySortAndFilter(agents, "severity", "all");
+    assert.deepEqual(out.map((a) => a.issue), [3, 1, 2]);
+  });
+
+  it("sortOrder 'issueNumber' sorts ascending by issue", () => {
+    const agents = [fleetAgent({ issue: 3 }), fleetAgent({ issue: 1 }), fleetAgent({ issue: 2 })];
+    const out = applySortAndFilter(agents, "issueNumber", "all");
+    assert.deepEqual(out.map((a) => a.issue), [1, 2, 3]);
+  });
+
+  it("sortOrder 'heartbeatAge' sorts oldest heartbeat (largest ageMinutes) first", () => {
+    const agents = [
+      { ...fleetAgent({ issue: 1 }), heartbeat: { at: "x", ageMinutes: 2, phaseText: "build" } },
+      { ...fleetAgent({ issue: 2 }), heartbeat: { at: "x", ageMinutes: 40, phaseText: "build" } },
+      { ...fleetAgent({ issue: 3 }), heartbeat: { at: "x", ageMinutes: 10, phaseText: "build" } },
+    ];
+    const out = applySortAndFilter(agents, "heartbeatAge", "all");
+    assert.deepEqual(out.map((a) => a.issue), [2, 3, 1]);
+  });
+
+  it("never mutates the input array", () => {
+    const agents = [fleetAgent({ issue: 3 }), fleetAgent({ issue: 1 })];
+    const snapshot = [...agents];
+    applySortAndFilter(agents, "issueNumber", "all");
+    assert.deepEqual(agents, snapshot, "input array must not be mutated by sort/filter");
+  });
+
+  it("SORT_ORDERS and FILTER_MODES each expose exactly three cycle states", () => {
+    assert.equal(SORT_ORDERS.length, 3);
+    assert.equal(FILTER_MODES.length, 3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// renderFrame — selection pointer, detail view, pause banner, legend
+// (forge#2392) — pure, no I/O.
+// ---------------------------------------------------------------------------
+
+describe("renderFrame — keyboard interaction state (forge#2392)", () => {
+  it("marks the selected row with the ▸ pointer", () => {
+    const agents = [fleetAgent({ issue: 1 }), fleetAgent({ issue: 2 })];
+    const lines = renderFrame(snapshot({ agents }), { width: 100, mode: "none", selectedIndex: 1 });
+    const row2 = lines.find((l) => l.includes("#2"));
+    assert.ok(row2 && row2.includes("▸"), `expected #2's row to carry the pointer, got: ${row2}`);
+    const row1 = lines.find((l) => l.includes("#1"));
+    assert.ok(row1 && !row1.includes("▸"), `expected #1's row to NOT carry the pointer, got: ${row1}`);
+  });
+
+  it("clamps an out-of-range selectedIndex to the last row instead of crashing", () => {
+    const agents = [fleetAgent({ issue: 1 }), fleetAgent({ issue: 2 })];
+    assert.doesNotThrow(() => renderFrame(snapshot({ agents }), { width: 100, selectedIndex: 99 }));
+    const lines = renderFrame(snapshot({ agents }), { width: 100, selectedIndex: 99 });
+    const row2 = lines.find((l) => l.includes("#2"));
+    assert.ok(row2 && row2.includes("▸"), "out-of-range index should clamp to the last row");
+  });
+
+  it("renders safely with an empty agent list and a selection index (forge#125-style empty-list safety)", () => {
+    assert.doesNotThrow(() => renderFrame(snapshot({ agents: [] }), { width: 80, selectedIndex: 3 }));
+    const lines = renderFrame(snapshot({ agents: [] }), { width: 80, selectedIndex: 3 });
+    assert.ok(lines.join("\n").includes("All quiet"));
+  });
+
+  it("viewMode 'detail' renders the phase timeline instead of the fleet table", () => {
+    const detail = {
+      issue: 42,
+      title: "some issue",
+      branch: "feat/x",
+      pr: 7,
+      status: "running",
+      stall: null,
+      phase: "build",
+      attempt: { n: 1, max: 3 },
+      phaseHistory: [{ phase: "investigate", committedAtSeq: 1, attempts: 1 }],
+      heartbeat: { at: "2026-07-17T18:00:00Z", ageMinutes: 4, phaseText: "building" },
+      lastHeartbeatBody: "<!-- FORGE:HEARTBEAT -->\n**Phase**: build",
+      diagnostics: { valid: true, failedPhase: null },
+      lease: null,
+    };
+    const lines = renderFrame(snapshot({ agents: [] }), { width: 100, viewMode: "detail", detail });
+    const text = lines.join("\n");
+    assert.ok(text.includes("Phase timeline"));
+    assert.ok(text.includes("#42"));
+    assert.ok(text.includes("investigate"));
+    assert.ok(text.includes("seq 1"));
+    assert.ok(text.includes("Lease"));
+    assert.ok(!text.includes("All quiet"), "detail view must not also render the fleet table");
+  });
+
+  it("viewMode 'detail' surfaces terminal diagnostics when the agent failed", () => {
+    const detail = {
+      issue: 5,
+      title: "failed thing",
+      branch: null,
+      pr: null,
+      status: "terminal",
+      stall: null,
+      phase: null,
+      attempt: null,
+      phaseHistory: [],
+      heartbeat: null,
+      lastHeartbeatBody: null,
+      diagnostics: { valid: true, failedPhase: "build", attempt: 2, maxAttempts: 3, reason: "boom" },
+      lease: null,
+    };
+    const lines = renderFrame(snapshot({ agents: [] }), { width: 100, viewMode: "detail", detail });
+    const text = lines.join("\n");
+    assert.ok(text.includes("Terminal diagnostics"));
+    assert.ok(text.includes("failed phase: build"));
+    assert.ok(text.includes("boom"));
+  });
+
+  it("does not render a detail view when viewMode is 'detail' but no detail was supplied yet", () => {
+    const agents = [fleetAgent({ issue: 1 })];
+    const lines = renderFrame(snapshot({ agents }), { width: 100, viewMode: "detail", detail: null });
+    // Falls back to the fleet table rather than crashing on a null detail.
+    assert.ok(lines.join("\n").includes("#1"));
+  });
+
+  it("renders a frozen pause banner with the paused age when paused", () => {
+    const lines = renderFrame(snapshot({ agents: [] }), { width: 80, paused: true, pausedAgeSeconds: 12 });
+    const text = lines.join("\n");
+    assert.ok(text.includes("paused"));
+    assert.ok(text.includes("12s"));
+  });
+
+  it("shows the active sort/filter labels in the header", () => {
+    const lines = renderFrame(snapshot({ agents: [] }), { width: 80, sortOrder: "issueNumber", filterMode: "running" });
+    const text = lines.join("\n");
+    assert.ok(text.includes("issue #"));
+    assert.ok(text.includes("running"));
+  });
+
+  it("overlays the key legend instead of the key bar when showLegend is set", () => {
+    const withLegend = renderFrame(snapshot({ agents: [] }), { width: 80, showLegend: true }).join("\n");
+    const withoutLegend = renderFrame(snapshot({ agents: [] }), { width: 80, showLegend: false }).join("\n");
+    assert.ok(withLegend.includes("Keys"));
+    assert.ok(withLegend.includes("pause/resume"));
+    assert.ok(!withoutLegend.includes("pause/resume"), "legend body must not appear when showLegend is false");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runWatch — keyboard interaction wiring (forge#2392): selection, drill-down
+// detail view (via injected getIssueDetailFn), browser-open (via injected
+// openFn), sort/filter cycling, pause suppressing polling, legend, and the
+// raw-mode-unavailable fallback. Fully injected io/now/stdout/stdin/sleep —
+// no live terminal, no network.
+// ---------------------------------------------------------------------------
+
+describe("runWatch — keyboard interaction (forge#2392)", () => {
+  function ghOk(nodes = []) {
+    return {
+      gh: async (args) => {
+        if (args[0] === "auth") return "";
+        if (args[0] === "api" && args[1] === "graphql") {
+          return JSON.stringify({ data: { search: { nodes }, rateLimit: { remaining: 4999 } } });
+        }
+        throw new Error(`unexpected gh call: ${args.join(" ")}`);
+      },
+    };
+  }
+
+  function nodeFor(issue) {
+    return {
+      number: issue,
+      title: `issue ${issue}`,
+      body: "",
+      labels: { nodes: [{ name: "workflow:building" }] },
+      milestone: null,
+      comments: { nodes: [] },
+    };
+  }
+
+  it("Enter fetches the drill-down detail for the selected issue via the injected getIssueDetailFn and Esc returns to the fleet view", async () => {
+    const dir = tmpDir();
+    const stdout = fakeTtyStdout();
+    const stdin = fakeTtyStdin();
+    const detailCalls = [];
+    const getIssueDetailFn = async (opts) => {
+      detailCalls.push(opts.issue);
+      return {
+        issue: opts.issue,
+        title: "t",
+        branch: null,
+        pr: null,
+        status: "running",
+        stall: null,
+        phase: "build",
+        attempt: { n: 1, max: 3 },
+        phaseHistory: [],
+        heartbeat: null,
+        lastHeartbeatBody: null,
+        diagnostics: { valid: true, failedPhase: null },
+        lease: null,
+      };
+    };
+    // Keypresses are fired from the injected `sleep` mock rather than the
+    // `io.gh` mock: `sleep()` only runs *after* that tick's snapshot has
+    // been fetched and painted (lastSnapshot is populated), whereas firing
+    // from inside `io.gh` races the in-flight fetch and can find
+    // lastSnapshot still null (filteredAgents empty) depending on
+    // microtask-queue ordering.
+    let sleepCount = 0;
+    const sleep = async () => {
+      sleepCount += 1;
+      if (sleepCount === 1) stdin.emit("data", "\r"); // drill into the selected (only) issue
+      if (sleepCount === 3) stdin.emit("data", "\x1b"); // back to fleet
+      if (sleepCount === 5) stdin.emit("data", "q");
+    };
+    await runWatch(["--repo", "acme/widgets"], {
+      stdout,
+      stdin,
+      io: ghOk([nodeFor(9)]),
+      getIssueDetailFn,
+      now: () => 1000,
+      runsDir: dir,
+      maxTicks: 1000,
+      sleep,
+    });
+    assert.deepEqual(detailCalls, [9], "getIssueDetailFn should be called exactly once, with the selected issue number");
+    assert.ok(stdout.text().includes("Phase timeline"), "detail view should have been painted at some point");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("Enter is a no-op when the fleet is empty (no crash, no getIssueDetailFn call)", async () => {
+    const dir = tmpDir();
+    const stdout = fakeTtyStdout();
+    const stdin = fakeTtyStdin();
+    let detailCalled = false;
+    const getIssueDetailFn = async () => {
+      detailCalled = true;
+      return {};
+    };
+    let tickCount = 0;
+    const io = {
+      gh: async (args) => {
+        if (args[0] === "auth") return "";
+        tickCount += 1;
+        if (tickCount === 1) queueMicrotask(() => stdin.emit("data", "\r"));
+        if (tickCount === 2) queueMicrotask(() => stdin.emit("data", "q"));
+        return JSON.stringify({ data: { search: { nodes: [] }, rateLimit: { remaining: 4999 } } });
+      },
+    };
+    const exitCode = await runWatch(["--repo", "acme/widgets"], {
+      stdout,
+      stdin,
+      io,
+      getIssueDetailFn,
+      now: () => 1000,
+      runsDir: dir,
+      maxTicks: 1000,
+      sleep: async () => {},
+    });
+    assert.equal(detailCalled, false, "Enter on an empty fleet must not call getIssueDetailFn");
+    assert.equal(exitCode, 0);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("'o' opens the selected issue's GitHub URL via the injected openFn", async () => {
+    const dir = tmpDir();
+    const stdout = fakeTtyStdout();
+    const stdin = fakeTtyStdin();
+    const openCalls = [];
+    const openFn = (url) => openCalls.push(url);
+    let sleepCount = 0;
+    const sleep = async () => {
+      sleepCount += 1;
+      if (sleepCount === 1) stdin.emit("data", "o");
+      if (sleepCount === 2) stdin.emit("data", "q");
+    };
+    await runWatch(["--repo", "acme/widgets"], {
+      stdout,
+      stdin,
+      io: ghOk([nodeFor(11)]),
+      openFn,
+      now: () => 1000,
+      runsDir: dir,
+      maxTicks: 1000,
+      sleep,
+    });
+    assert.deepEqual(openCalls, ["https://github.com/acme/widgets/issues/11"]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("'o' opens the currently-displayed issue's GitHub URL from the detail view too (matches the detail key bar's advertised 'o open')", async () => {
+    const dir = tmpDir();
+    const stdout = fakeTtyStdout();
+    const stdin = fakeTtyStdin();
+    const openCalls = [];
+    const openFn = (url) => openCalls.push(url);
+    const getIssueDetailFn = async (opts) => ({
+      issue: opts.issue,
+      title: "t",
+      branch: null,
+      pr: null,
+      status: "running",
+      stall: null,
+      phase: "build",
+      attempt: { n: 1, max: 3 },
+      phaseHistory: [],
+      heartbeat: null,
+      lastHeartbeatBody: null,
+      diagnostics: { valid: true, failedPhase: null },
+      lease: null,
+    });
+    let sleepCount = 0;
+    const sleep = async () => {
+      sleepCount += 1;
+      if (sleepCount === 1) stdin.emit("data", "\r"); // drill into the selected (only) issue
+      if (sleepCount === 3) stdin.emit("data", "o"); // open from within the detail view
+      if (sleepCount === 4) stdin.emit("data", "q");
+    };
+    await runWatch(["--repo", "acme/widgets"], {
+      stdout,
+      stdin,
+      io: ghOk([nodeFor(13)]),
+      getIssueDetailFn,
+      openFn,
+      now: () => 1000,
+      runsDir: dir,
+      maxTicks: 1000,
+      sleep,
+    });
+    assert.deepEqual(openCalls, ["https://github.com/acme/widgets/issues/13"], "'o' must open the detail view's issue, not silently no-op");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("'s' cycles sort order through all three states and back to the first", async () => {
+    const dir = tmpDir();
+    const stdout = fakeTtyStdout();
+    const stdin = fakeTtyStdin();
+    let sleepCount = 0;
+    const sleep = async () => {
+      sleepCount += 1;
+      if (sleepCount === 1) {
+        stdin.emit("data", "s");
+        stdin.emit("data", "s");
+        stdin.emit("data", "s");
+      }
+      if (sleepCount === 2) stdin.emit("data", "q");
+    };
+    await runWatch(["--repo", "acme/widgets"], {
+      stdout,
+      stdin,
+      io: ghOk([nodeFor(1)]),
+      now: () => 1000,
+      runsDir: dir,
+      maxTicks: 1000,
+      sleep,
+    });
+    const text = stdout.text();
+    assert.ok(text.includes("sort: heartbeat age"), "one 's' press should cycle to heartbeat age");
+    assert.ok(text.includes("sort: issue #"), "two 's' presses should cycle to issue #");
+    assert.ok(text.includes("sort: severity"), "three 's' presses should cycle back to severity");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("'f' cycles filter mode through all three states", async () => {
+    const dir = tmpDir();
+    const stdout = fakeTtyStdout();
+    const stdin = fakeTtyStdin();
+    let sleepCount = 0;
+    const sleep = async () => {
+      sleepCount += 1;
+      if (sleepCount === 1) stdin.emit("data", "f");
+      if (sleepCount === 2) stdin.emit("data", "q");
+    };
+    await runWatch(["--repo", "acme/widgets"], {
+      stdout,
+      stdin,
+      io: ghOk([nodeFor(1)]),
+      now: () => 1000,
+      runsDir: dir,
+      maxTicks: 1000,
+      sleep,
+    });
+    assert.ok(stdout.text().includes("filter: stalled+blocked"));
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("'p' pauses polling (no further gh calls) and a second 'p' resumes it", async () => {
+    const dir = tmpDir();
+    const stdout = fakeTtyStdout();
+    const stdin = fakeTtyStdin();
+    let ghCallCount = 0;
+    const io = {
+      gh: async (args) => {
+        if (args[0] === "auth") return "";
+        ghCallCount += 1;
+        return JSON.stringify({ data: { search: { nodes: [] }, rateLimit: { remaining: 4999 } } });
+      },
+    };
+    // 'p' (pause) fires after tick 1's fetch+paint has completed; the paused
+    // branch then loops on its own short frozen-banner refresh sleep
+    // (PAUSED_REFRESH_MS) WITHOUT calling getFleetSnapshot — sleepCount
+    // advances through that inner loop before 'p' (resume) fires, then one
+    // more real tick happens before 'q' quits.
+    let sleepCount = 0;
+    const sleep = async () => {
+      sleepCount += 1;
+      if (sleepCount === 1) stdin.emit("data", "p"); // pause
+      if (sleepCount === 4) stdin.emit("data", "p"); // resume
+      if (sleepCount === 5) stdin.emit("data", "q"); // quit
+    };
+    await runWatch(["--repo", "acme/widgets"], {
+      stdout,
+      stdin,
+      io,
+      now: () => 1000,
+      runsDir: dir,
+      maxTicks: 1000,
+      sleep,
+    });
+    assert.equal(ghCallCount, 2, "exactly one fetch before pause and one after resume — none while paused");
+    assert.ok(stdout.text().includes("paused"), "a frozen pause banner should have been rendered");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("'?' overlays the key legend and any key dismisses it without also triggering that key's own action", async () => {
+    const dir = tmpDir();
+    const stdout = fakeTtyStdout();
+    const stdin = fakeTtyStdin();
+    const openCalls = [];
+    let sleepCount = 0;
+    const sleep = async () => {
+      sleepCount += 1;
+      if (sleepCount === 1) {
+        stdin.emit("data", "?"); // show legend
+        stdin.emit("data", "o"); // dismiss legend — must NOT also open the browser
+      }
+      if (sleepCount === 2) stdin.emit("data", "q");
+    };
+    await runWatch(["--repo", "acme/widgets"], {
+      stdout,
+      stdin,
+      io: ghOk([nodeFor(1)]),
+      openFn: (url) => openCalls.push(url),
+      now: () => 1000,
+      runsDir: dir,
+      maxTicks: 1000,
+      sleep,
+    });
+    assert.ok(stdout.text().includes("pause/resume"), "legend should have been rendered at some point");
+    assert.deepEqual(openCalls, [], "the keypress that dismissed the legend must not also trigger its own action");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("raw-mode-unavailable / non-TTY stdin: keyboard layer stays inert, watch runs exactly like the keyboard-less rebuild", async () => {
+    const dir = tmpDir();
+    const stdout = fakeTtyStdout();
+    const stdin = fakeTtyStdin();
+    Object.defineProperty(stdin, "isTTY", { value: false });
+    const openCalls = [];
+    const exitCode = await runWatch(["--repo", "acme/widgets"], {
+      stdout,
+      stdin,
+      io: ghOk([nodeFor(1)]),
+      openFn: (url) => openCalls.push(url),
+      now: () => 1000,
+      runsDir: dir,
+      maxTicks: 2,
+      sleep: async () => {},
+    });
+    // No "data" listener is ever attached when stdin isn't a TTY, so
+    // emitting keys is a no-op by construction — assert the loop still
+    // completes cleanly and the key bar (not the legend) is shown, matching
+    // pre-#2392 behavior exactly.
+    stdin.emit("data", "o");
+    stdin.emit("data", "?");
+    assert.deepEqual(openCalls, []);
+    assert.equal(exitCode, 0);
     rmSync(dir, { recursive: true, force: true });
   });
 });
