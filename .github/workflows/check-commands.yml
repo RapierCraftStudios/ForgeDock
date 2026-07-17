@@ -12,6 +12,8 @@ on:
       - 'scripts/check-command-docs-drift.sh'
       - 'scripts/check-command-side-effects.sh'
       - 'scripts/check-spec-markers.sh'
+      - 'scripts/check-admission-parity.mjs'
+      - 'bin/engine/admission.mjs'
       - '.github/workflows/check-commands.yml'
   push:
     branches:
@@ -27,6 +29,8 @@ on:
       - 'scripts/check-command-docs-drift.sh'
       - 'scripts/check-command-side-effects.sh'
       - 'scripts/check-spec-markers.sh'
+      - 'scripts/check-admission-parity.mjs'
+      - 'bin/engine/admission.mjs'
       - '.github/workflows/check-commands.yml'
 
 concurrency:
@@ -268,3 +272,23 @@ jobs:
           #
           # <!-- Added: forge#1609 -->
           bash scripts/check-spec-markers.sh commands/ .
+
+  admission-parity:
+    name: admission.mjs / bash mirror parity check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check bin/engine/admission.mjs CASCADE_PRESETS matches the phase-4-execution.md bash mirror
+        run: |
+          # bin/engine/admission.mjs is the typed, unit-tested reference implementation
+          # of the cascade admission policy (forge#2234). The logic actually executed at
+          # runtime is a hand-written bash/yq mirror in phase-4-execution.md's Step 4A.pre
+          # `case "$CASCADE_POLICY_NAME" in ... esac` block — kept in sync by hand, with no
+          # prior check catching divergence between the two (forge#2340).
+          node scripts/check-admission-parity.mjs
