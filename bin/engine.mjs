@@ -248,11 +248,30 @@ export async function runIssue(opts) {
       // promise and await it in `finally` (below) before letting the loop
       // proceed — this guarantees no renewal write is still in flight when
       // control moves on to the next write (commit or terminate).
+      // forge#2348 (review finding): the above join-tracking scheme only
+      // ever holds ONE promise in `pendingRenewal` — it protects against a
+      // single in-flight write landing late, but has no backpressure against
+      // a SECOND renewal tick firing while the first write is still in
+      // flight (write round trip > leaseRenewIntervalMs). Without a guard,
+      // `pendingRenewal` would simply be overwritten with the newer write's
+      // promise, silently orphaning the earlier one from every join point
+      // (both this closure's own `finally` below and the #2338 catch-path
+      // join) — the earlier write could then land on GitHub after a later
+      // write, or after the terminate()/commit write joins only the latest
+      // promise and proceeds. Guarding here so at most one renewal write is
+      // ever in flight keeps the existing single-variable join points
+      // correct and sufficient: skip this tick entirely if a previous
+      // renewal write hasn't settled yet, and clear `pendingRenewal` back to
+      // null once it does (success or failure) so the guard never
+      // permanently wedges future renewals.
       let pendingRenewal = null;
       const renewLease = () => {
+        if (pendingRenewal) return;
         pendingRenewal = projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } }).catch(() => {
           // Best-effort: a transient renewal failure must not crash the run.
           // The next scheduled renewal (or the post-commit write) will retry.
+        }).finally(() => {
+          pendingRenewal = null;
         });
       };
       const renewTimer = setInterval(renewLease, leaseRenewIntervalMs);
