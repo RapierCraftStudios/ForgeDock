@@ -723,15 +723,28 @@ async function openPrFor(state, io) {
  * linked worktree the build phase created, since branch refs are shared
  * across every worktree of the same repository.
  */
+// forge#2509: makeIo()'s default io.gh()/io.git() timeout (DEFAULT_IO_TIMEOUT_MS
+// in bin/engine-cli.mjs) is sized for fast, read-only metadata commands. The
+// `git push` below is the one state-changing operation routed through io —
+// pushing a large branch/diff over a slow connection can legitimately take
+// longer than that. Use a longer, push-specific timeout via io.git's optional
+// second argument rather than raising the shared default for every other
+// (genuinely fast) io.gh()/io.git() caller.
+const PUSH_TIMEOUT_MS = 30000;
+
 async function createPrFor(state, io) {
   if (!state.branch || !state.lane) return null;
   try {
-    await io.git(["push", "origin", `${state.branch}:${state.branch}`]);
+    await io.git(["push", "origin", `${state.branch}:${state.branch}`], { timeoutMs: PUSH_TIMEOUT_MS });
   } catch {
     return null; // nothing pushed — let the LLM-driven push+create path handle it
   }
   const { title, body } = await composePrContent(state, io);
   try {
+    // forge#2507: title/body are passed as array-form execFile args (see
+    // makeIo() in bin/engine-cli.mjs) — never shell-interpolated — so raw
+    // issue/comment content embedded in them (see composePrContent above)
+    // carries no shell/command-injection risk here.
     const out = await io.gh(["pr", "create", "--base", state.lane, "--head", state.branch, "--title", title, "--body", body]);
     const match = String(out || "").trim().match(/(\d+)\s*$/);
     return match ? parseInt(match[1], 10) : null;
@@ -756,7 +769,19 @@ async function composePrContent(state, io) {
     const out = await io.gh(["issue", "view", String(state.issue), "--json", "title,body"]);
     const j = JSON.parse(out || "{}");
     if (j.title) title = j.title;
-    if (j.body) summary = String(j.body).trim().split("\n").slice(0, 8).join("\n") || summary;
+    if (j.body) {
+      const truncated = String(j.body).trim().split("\n").slice(0, 8).join("\n");
+      if (truncated) {
+        // forge#2510: an issue body that opens a fenced code block (```)
+        // within its first 8 lines but doesn't close it before the cutoff
+        // would otherwise leak the fence into the rest of the generated PR
+        // body (## Changes, the Closes #N footer, etc.), breaking rendering.
+        // An odd number of ``` markers means a fence was left open — close
+        // it explicitly before using the slice as the summary.
+        const fenceCount = (truncated.match(/```/g) || []).length;
+        summary = fenceCount % 2 === 1 ? `${truncated}\n\`\`\`` : truncated;
+      }
+    }
   } catch { /* best-effort — fall back to the generic title/summary above */ }
 
   let changes = "See the FORGE:BUILDER comment on the linked issue for implementation details.";
