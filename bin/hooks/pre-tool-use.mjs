@@ -720,12 +720,34 @@ function checkLabelTransition(command) {
 
   // Evidence precondition (#2326): reaching workflow:invalid from
   // ready-to-build/building/in-review is structurally allowed above, but
-  // still gated against *casual* invalidation — a bare relabel with no
-  // paper trail is blocked. Require a posted reversal comment (a second
-  // FORGE:INVESTIGATOR annotation carrying "**Verdict**: INVALID") already
-  // on the issue before allowing the transition through, from a trusted
-  // author (issue #2332 — marker text alone is forgeable by anyone who can
-  // comment on a public issue; see TRUSTED_REVERSAL_AUTHOR_ASSOCIATIONS).
+  // still gated against *casual* invalidation — see checkInvalidReversalEvidence()
+  // below for the full rationale and evidence requirements.
+  const evidenceError = checkInvalidReversalEvidence(newLabel, currentWorkflowLabel, comments);
+  if (evidenceError) return evidenceError;
+
+  return null; // valid transition — allow
+}
+
+/**
+ * Evidence precondition (#2326): reaching workflow:invalid from
+ * ready-to-build/building/in-review is structurally allowed by the label
+ * transition state machine, but still gated against *casual* invalidation —
+ * a bare relabel with no paper trail is blocked. Require a posted reversal
+ * comment (a second FORGE:INVESTIGATOR annotation carrying "**Verdict**:
+ * INVALID") already on the issue before allowing the transition through,
+ * from a trusted author (issue #2332 — marker text alone is forgeable by
+ * anyone who can comment on a public issue; see
+ * TRUSTED_REVERSAL_AUTHOR_ASSOCIATIONS).
+ *
+ * Extracted from checkLabelTransition() (issue #2453) as a separable
+ * sub-concern — same inputs/outputs, no behavior change.
+ *
+ * @param {string} newLabel
+ * @param {string|null} currentWorkflowLabel
+ * @param {Array|null} comments
+ * @returns {string|null} Error message to show, or null if allowed.
+ */
+function checkInvalidReversalEvidence(newLabel, currentWorkflowLabel, comments) {
   if (newLabel === "workflow:invalid" && EVIDENCE_REQUIRED_FOR_INVALID_FROM.has(currentWorkflowLabel)) {
     if (!hasInvalidReversalEvidence(comments)) {
       return [
@@ -747,7 +769,7 @@ function checkLabelTransition(command) {
     }
   }
 
-  return null; // valid transition — allow
+  return null; // no evidence required, or evidence present — allow
 }
 
 // ---------------------------------------------------------------------------
