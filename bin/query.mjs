@@ -138,12 +138,15 @@ function parseIntFlag(argv, name) {
 /**
  * Parse the `--fields` flag. Returns `{ ok: true, value }` when absent
  * (value: null) or a valid comma-separated field list, `{ ok: false }` when
- * the flag is present but has no value at all (forge#2429).
+ * the flag is present but has no value at all (forge#2429), or is an
+ * explicit empty (or whitespace-only) string (forge#2478) — mirroring
+ * `parseIntFlag`'s empty-string rejection for consistency across this
+ * module's flag-parsing helpers.
  */
 function parseFields(argv) {
   const raw = flagValue(argv, "--fields");
   if (raw === null) return { ok: true, value: null };
-  if (raw === MISSING_VALUE) return { ok: false, value: null };
+  if (raw === MISSING_VALUE || raw.trim() === "") return { ok: false, value: null };
   const fields = raw
     .split(",")
     .map((s) => s.trim())
