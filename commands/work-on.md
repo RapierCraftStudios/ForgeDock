@@ -524,9 +524,9 @@ a hard dependency.
 
 ## Phase 1: Investigation
 
-**Skip if**: `<!-- FORGE:INVESTIGATOR -->` exists with `<!-- INVESTIGATION:COMPLETE -->` in the SAME comment.
+**Skip if**: `<!-- FORGE:INVESTIGATOR -->` exists with `<!-- INVESTIGATION:COMPLETE -->` OR `<!-- INVESTIGATION:INVALID -->` in the SAME comment. `INVESTIGATION:INVALID` is the terminal sentinel Phase 1C emits for an INVALID verdict (see 1C below) — it signals investigation completion just as much as `INVESTIGATION:COMPLETE` does, not an interrupted state.
 
-**Partial investigation**: If investigator comment exists BUT `<!-- INVESTIGATION:COMPLETE -->` is ABSENT → investigation was interrupted. Delete the partial comment and restart:
+**Partial investigation**: If investigator comment exists BUT NEITHER `<!-- INVESTIGATION:COMPLETE -->` NOR `<!-- INVESTIGATION:INVALID -->` is present → investigation was interrupted. Delete the partial comment and restart:
 ```bash
 COMMENT_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .id')
@@ -686,9 +686,18 @@ Use `forge.yaml → review.tech_stack` and the issue domain labels to identify e
 
 ### 1C: Post investigation comment
 
-The comment MUST include `<!-- INVESTIGATION:COMPLETE -->` at the very end.
+The comment MUST include a terminal sentinel at the very end. **The sentinel is conditional on the resolved Verdict — it is NOT always `<!-- INVESTIGATION:COMPLETE -->`:**
+
+- **Verdict is INVALID** → close with `<!-- INVESTIGATION:INVALID -->`. This is a distinct, already-wired-up terminal marker: `bin/engine/phases.mjs`'s `detectOutcome` for the `investigate` phase checks for it explicitly (ahead of `INVESTIGATION:COMPLETE`) and routes to `terminalReason: "invalid"`; `bin/hooks/interactive-engine.mjs`'s `PHASE_MARKERS` table also already treats it as terminal. Emitting `INVESTIGATION:COMPLETE` for an INVALID verdict is what previously caused every completed investigation to read as `{verdict: "CONFIRMED"}` regardless of actual outcome — do NOT regress this (forge#2350).
+- **Verdict is CONFIRMED or PARTIAL** → close with `<!-- INVESTIGATION:COMPLETE -->` as before (PARTIAL still routes to `ready-to-build` below — only INVALID gets the distinct terminal sentinel).
 
 ```bash
+if [ "{VERDICT}" = "INVALID" ]; then
+  INVESTIGATION_SENTINEL="<!-- INVESTIGATION:INVALID -->"
+else
+  INVESTIGATION_SENTINEL="<!-- INVESTIGATION:COMPLETE -->"
+fi
+
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 ## Investigation Report
 
@@ -728,8 +737,10 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 **{YES|NO}** — {reason}
 {if YES: proposed sub-issues with titles and dependencies}
 
-<!-- INVESTIGATION:COMPLETE -->"
+${INVESTIGATION_SENTINEL}"
 ```
+
+**Do not hardcode `<!-- INVESTIGATION:COMPLETE -->` as the closing line.** The closing line MUST be the `${INVESTIGATION_SENTINEL}` variable computed above — it resolves to `<!-- INVESTIGATION:INVALID -->` for an INVALID verdict and `<!-- INVESTIGATION:COMPLETE -->` otherwise. `INVESTIGATION:COMPLETE` and `INVESTIGATION:INVALID` are mutually exclusive within a single posted comment — never emit both.
 
 ### 1D: Correction capture (MANDATORY — run before label update)
 
