@@ -751,8 +751,13 @@ Files that need changes:
 - [ ] If VALIDATED: fix implemented and tested on correct branch
 ISSUE_EOF
 
+# STAGING_FINDING_SEVERITY is extracted from the finding's own **Severity**
+# body field (set above in the heredoc) — example assignment shown here for
+# clarity, same convention as STAGING_FINDING_TITLE etc.
+STAGING_FINDING_SEVERITY="LOW"
+
 # priority:* label is a deterministic function of the finding's **Severity**
-# (CRITICAL/HIGH/MEDIUM/LOW/INFO) — NEVER of its Confidence
+# (CRITICAL/HIGH/MEDIUM/LOW) — NEVER of its Confidence
 # (CONFIRMED/LIKELY/POSSIBLE). scripts/severity-to-priority.sh is the single
 # source of truth for this mapping; commands/review-pr.md calls the identical
 # script so the two specs cannot independently drift. <!-- forge#2447 -->
@@ -786,7 +791,7 @@ done
 fi
 ```
 
-Labels: `review-finding` + `needs-validation` + `staging-review` + priority. `priority:*` is derived from the finding's `**Severity**` field via `scripts/severity-to-priority.sh` (identical script used by `commands/review-pr.md` — single documented mapping, see that script's header comment): `CRITICAL` → `priority:P0`, `HIGH` → `priority:P1`, `MEDIUM` → `priority:P2`, `LOW` → `priority:P3`, `INFO` → `priority:P3`. **Never derive `priority:*` from Confidence** (CONFIRMED/LIKELY/POSSIBLE) — conflating the two axes previously mislabeled LOW-severity CONFIRMED findings as `priority:P1`, defeating orchestrate's P3 batching rule. <!-- forge#2447 -->
+Labels: `review-finding` + `needs-validation` + `staging-review` + priority. `priority:*` is derived from the finding's `**Severity**` field via `scripts/severity-to-priority.sh` (identical script used by `commands/review-pr.md` — single documented mapping, see that script's header comment): `CRITICAL` → `priority:P0`, `HIGH` → `priority:P1`, `MEDIUM` → `priority:P2`, `LOW` → `priority:P3`. **Never derive `priority:*` from Confidence** (CONFIRMED/LIKELY/POSSIBLE) — conflating the two axes previously mislabeled LOW-severity CONFIRMED findings as `priority:P1`, defeating orchestrate's P3 batching rule. <!-- forge#2447 -->
 
 **No pre-filtering**: Every finding becomes an issue. Validation agents sort out false positives downstream.
 
