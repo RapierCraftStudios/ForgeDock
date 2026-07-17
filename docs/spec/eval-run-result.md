@@ -27,7 +27,9 @@ Each headless run of a single corpus issue produces one JSON object:
   "interventionCount": 0,       // integer — number of human interventions (see below)
 
   // Optional fields (nullable — do NOT block on missing upstream data)
-  "cost": null,                 // null | number — token/USD cost; null until #1255 lands
+  "cost": null,                 // null | number — total billed tokens (input + output); null when
+                                 // the run reports no usage data (e.g. CLI backend, or an errored
+                                 // run). NOT a USD amount — no per-model pricing table exists yet.
   "iterations": 23,             // integer — tool-use loop iteration count
   "stopReason": "end_turn",     // string — Anthropic stop_reason or "max_iterations"
   "error": null,                // null | string — error message when status === "error"
@@ -109,7 +111,8 @@ a scorecard in the format consumed by `scripts/eval-gate-scorecard.mjs` (#1286):
   "mean_wall_clock_ms": 38200,    // number | null — arithmetic mean wall-clock
   "median_wall_clock_ms": 35000,  // number | null — median wall-clock
   "total_intervention_count": 1,  // integer — sum of interventionCount across all runs
-  "cost": null,                   // null | number — sum of per-run cost; null if any run has cost: null
+  "cost": null,                   // null | number — sum of per-run billed-token counts (not USD);
+                                   // null if any run has cost: null
   "run_mode": "full",             // "full" | "subset"
   "spec_sha": "abc123"            // string | null — git SHA of commands/ at run time
 }
@@ -128,8 +131,9 @@ hangs and crashes, not just logic failures.
    `wallClockMs`, `interventionCount`) or non-integer/non-string values cause
    exit code 1 (validation error).
 3. **Cost is nullable**: if any run has `cost: null`, the scorecard's
-   `cost` is `null`. The field becomes numeric only when every run reports a
-   real cost value (post-#1255).
+   `cost` is `null`. The field becomes numeric once every run reports a
+   billed-token count (see the per-run `cost` field above — this is a
+   token-count sum, not a USD amount).
 4. **Rate consistency**: `success_rate_pct` is always computed as
    `round(successful_runs / issues_run * 100, 2)`. The CI gate (#1286) validates
    this computed value matches the reported value.
