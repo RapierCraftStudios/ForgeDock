@@ -412,35 +412,42 @@ export async function resumeStalledFromCli(argv, deps = {}) {
   const projector = makeProjector(io);
   const now = Date.now();
 
-  // Collect candidate issue numbers from all non-terminal workflow labels
-  // (ACTIVE_WORKFLOW_LABELS — shared with countEngineActivity() so both
-  // surfaces agree on what "in-flight" means).
-  const repoFlag = repo ? ["--repo", repo] : [];
-  const issueSet = new Set();
+  // Candidate issue numbers are sourced from the shared observability core
+  // (bin/observe.mjs's getFleetSnapshot — one GraphQL search call covering
+  // every ACTIVE_WORKFLOW_LABELS-tagged issue, the same data `forgedock
+  // query`/`forgedock watch` consume) instead of resume-stalled's own
+  // per-label `gh issue list` loop (forge#2393 — "one parser, one truth").
+  // scanStalls()'s lease-expiry semantics below are unchanged: the fleet
+  // snapshot only supplies *candidates* — the actual stalled/not-stalled
+  // decision still reads each candidate's GitHub-authoritative FORGE:STATE
+  // via the projector.
+  //
+  // getFleetSnapshot is loaded via a deferred dynamic import rather than a
+  // static top-level import: bin/observe.mjs itself statically imports
+  // `ACTIVE_WORKFLOW_LABELS`/`terminalDiagnostics` from this module, and a
+  // static cycle here would race that binding against this module's own
+  // top-level evaluation (TDZ risk on whichever module the cycle enters
+  // second). Deferring to call-time — after both modules have finished
+  // their own top-level evaluation on any normal load order — avoids that
+  // hazard entirely.
+  const { getFleetSnapshot } = await import("./observe.mjs");
 
-  for (const label of ACTIVE_WORKFLOW_LABELS) {
-    try {
-      const out = await io.gh([
-        "issue", "list",
-        ...repoFlag,
-        "--state", "open",
-        "--label", label,
-        "--limit", "100",
-        "--json", "number",
-      ]);
-      const items = JSON.parse(out);
-      for (const { number } of items) issueSet.add(number);
-    } catch {
-      // gh may return non-zero when no issues match — treat as empty.
-    }
-  }
-
-  if (issueSet.size === 0) {
+  const resolvedRepo = repo ?? (await resolveDefaultRepo(io));
+  if (!resolvedRepo) {
     console.log("resume-stalled: no in-flight issues found.");
     return { stalled: [], dispatched: [], failed: [] };
   }
 
-  const candidates = [...issueSet];
+  const snapshot = await getFleetSnapshot({ repo: resolvedRepo, runsDir: runDir(), io, now: () => now });
+  const candidates = snapshot.agents
+    .filter((a) => ACTIVE_WORKFLOW_LABELS.includes(a.workflowLabel))
+    .map((a) => a.issue);
+
+  if (candidates.length === 0) {
+    console.log("resume-stalled: no in-flight issues found.");
+    return { stalled: [], dispatched: [], failed: [] };
+  }
+
   const stalled = await scanStalls(candidates, projector, now);
 
   if (stalled.length === 0) {
