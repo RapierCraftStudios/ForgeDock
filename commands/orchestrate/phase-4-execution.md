@@ -438,12 +438,21 @@ if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
 
   # Concurrency gate (forge#1912, mechanism fixed forge#2466): compute this dispatch batch the
   # SAME way the Agent-spawn-fallback path below does — via dispatch_headroom()/
-  # DEFERRED_CONCURRENCY_ISSUES (Step 4A-pre.0.2) — NOT a shell `&`/`wait` chunk loop. Issues
-  # beyond headroom are deferred and released, oldest first, as in-flight dispatches complete
-  # (Step 4B) — identical bookkeeping to the Agent-spawn path, just a different dispatch primitive.
+  # DEFERRED_CONCURRENCY_ISSUES (Step 4A-pre.0.2) — NOT a shell `&`/`wait` chunk loop.
+  #
+  # MUST merge previously-deferred issues back in before recomputing, exactly like the
+  # Agent-spawn path's own batch computation does (CANDIDATES=("${DEFERRED_CONCURRENCY_ISSUES[@]}"
+  # ...); DEFERRED_CONCURRENCY_ISSUES=()). Without this merge-and-reset, an issue that lands in
+  # DEFERRED_CONCURRENCY_ISSUES on THIS path has no way back into a future DISPATCH_QUEUE — Step
+  # 4B item 5 only re-runs Step 4A for issues that just became DAG-unblocked, not for issues that
+  # were already ready but held back purely by the concurrency cap. DEFERRED_CONCURRENCY_ISSUES
+  # would become a write-only sink on the engine-first path, silently starving deferred work —
+  # the same class of bug this PR exists to fix, just relocated.
   HEADROOM=$(dispatch_headroom)
+  CANDIDATES=("${DEFERRED_CONCURRENCY_ISSUES[@]}" "${DISPATCH_QUEUE[@]}")
+  DEFERRED_CONCURRENCY_ISSUES=()
   DISPATCH_NOW=()
-  for NUM in "${DISPATCH_QUEUE[@]}"; do
+  for NUM in "${CANDIDATES[@]}"; do
     if [ "${#DISPATCH_NOW[@]}" -lt "$HEADROOM" ]; then
       DISPATCH_NOW+=("$NUM")
     else
@@ -483,7 +492,14 @@ fi
 Bash(command="forgedock run-issue {NUM} --lane {PR_BASE}", run_in_background=true, description="Engine-drive issue #{NUM}")
 ```
 
-Capture the task id each call returns into `ENGINE_DISPATCH_MAP[{NUM}]` (declared alongside `AGENT_ISSUE_MAP` below — Step 4B's completion handler uses this map to identify which issue a backgrounded engine-mode `Bash` completion notification belongs to, the same role `AGENT_ISSUE_MAP` plays for `agent_completed` notifications). After the batch, increment `ACTIVE_DISPATCH_COUNT` by `${#DISPATCH_NOW[@]}` — identical accounting to the Agent-spawn path's own post-batch increment.
+Capture the task id each call returns into `ENGINE_DISPATCH_MAP[{NUM}]` (declared alongside `AGENT_ISSUE_MAP` below — Step 4B's completion handler uses this map to identify which issue a backgrounded engine-mode `Bash` completion notification belongs to, the same role `AGENT_ISSUE_MAP` plays for `agent_completed` notifications):
+
+```
+# After the batch of Bash(run_in_background=true, ...) calls, capture each returned task id:
+ENGINE_DISPATCH_MAP[{NUM}] = <task_id returned by Bash(run_in_background=true, ...)>
+```
+
+`ENGINE_DISPATCH_MAP` starts empty and accumulates one entry per dispatched issue, exactly like `AGENT_ISSUE_MAP` below. After the batch, increment `ACTIVE_DISPATCH_COUNT` by `${#DISPATCH_NOW[@]}` — identical accounting to the Agent-spawn path's own post-batch increment.
 
 If `DISPATCH_NOW` is empty (headroom is 0), do not dispatch any issues this cycle — wait for the next completion notification, exactly like the Agent-spawn path.
 
