@@ -77,6 +77,28 @@ describe("buildFleetSearchQuery / parseFleetSearchResponse", () => {
     assert.ok(!q.includes('ac"me')); // raw quote must not appear unescaped
   });
 
+  it("escapes the composed searchQuery exactly once, not twice (regression forge#2411)", () => {
+    // Values containing both a quote and a backslash so double-escaping
+    // (each backslash introduced by an inner escape pass gets re-escaped by
+    // the outer pass) leaves a decodable mismatch if it regresses.
+    const owner = 'ac"me';
+    const repo = "wid\\gets";
+    const labels = ['workflow:"weird"'];
+    const q = buildFleetSearchQuery(owner, repo, labels);
+
+    const match = q.match(/query:\s*"((?:[^"\\]|\\.)*)"\)/);
+    assert.ok(match, "query: \"...\" literal not found in generated GraphQL document");
+    const escapedLiteral = match[1];
+
+    // Reverse escapeGraphQLString's two passes in reverse order (unescape
+    // quotes, then unescape backslashes). If the source were escaped twice,
+    // one decode pass leaves stray backslashes behind and this equality
+    // fails — proving single-level escaping, not merely "no raw quote".
+    const decoded = escapedLiteral.replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+    const expected = `repo:${owner}/${repo} is:issue is:open (label:"${labels[0]}")`;
+    assert.equal(decoded, expected);
+  });
+
   it("parses nodes and rateLimit.remaining out of a graphql response", () => {
     const json = {
       data: {
@@ -226,6 +248,55 @@ describe("deriveAgent — phase resolution and GitHub-wins merge", () => {
     const n = { number: 400, title: "t", labels: { nodes: [{ name: "workflow:investigating" }] }, body: remoteBody, milestone: null, comments: { nodes: [] } };
     assert.doesNotThrow(() => deriveAgent(n, events, now, 15));
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("deriveAgent — attempt resolution (currentAttempt)", () => {
+  const now = 1000;
+
+  it("attempt is null when the local run-log has events but none for the current phase (regression forge#2412)", () => {
+    const dir = tmpDir();
+    appendEvent(dir, 600, { event: "RUN_START", run: "r1", issue: 600, lane: "staging" });
+    // Commit through "architect" so the first uncommitted phase — and
+    // therefore agent.phase — resolves to "build" (mirrors the "derives
+    // phase from local run-log as first uncommitted phase" fixture above).
+    appendEvent(dir, 600, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+    appendEvent(dir, 600, { event: "PHASE_COMMIT", phase: "context", outputs: {} });
+    appendEvent(dir, 600, { event: "PHASE_COMMIT", phase: "architect", outputs: {} });
+    // A PHASE_START exists locally, but only for an already-committed
+    // phase — zero events match the current phase ("build"). Before the
+    // fix this fell through to a synthesized { n: 1, max } instead of
+    // reporting "unknown".
+    appendEvent(dir, 600, { event: "PHASE_START", phase: "investigate", attempt: 1 });
+    const events = readLog(dir, 600);
+    const n = { number: 600, title: "t", labels: { nodes: [{ name: "workflow:building" }] }, body: "", milestone: null, comments: { nodes: [] } };
+    const agent = deriveAgent(n, events, now, 15);
+    assert.equal(agent.phase, "build");
+    assert.equal(agent.attempt, null);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("attempt reports {n, max} when the current phase has a matching PHASE_START/PHASE_FAILED event", () => {
+    const dir = tmpDir();
+    appendEvent(dir, 700, { event: "RUN_START", run: "r1", issue: 700, lane: "staging" });
+    appendEvent(dir, 700, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+    appendEvent(dir, 700, { event: "PHASE_COMMIT", phase: "context", outputs: {} });
+    appendEvent(dir, 700, { event: "PHASE_COMMIT", phase: "architect", outputs: {} });
+    appendEvent(dir, 700, { event: "PHASE_START", phase: "build", attempt: 1 });
+    appendEvent(dir, 700, { event: "PHASE_FAILED", phase: "build", attempt: 1, reason: "x", maxAttempts: 3 });
+    appendEvent(dir, 700, { event: "PHASE_START", phase: "build", attempt: 2 });
+    const events = readLog(dir, 700);
+    const n = { number: 700, title: "t", labels: { nodes: [{ name: "workflow:building" }] }, body: "", milestone: null, comments: { nodes: [] } };
+    const agent = deriveAgent(n, events, now, 15);
+    assert.equal(agent.phase, "build");
+    assert.deepEqual(agent.attempt, { n: 2, max: 3 });
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("attempt is null when there is no local run-log at all (pre-existing behavior, unchanged)", () => {
+    const n = { number: 800, title: "t", labels: { nodes: [{ name: "workflow:building" }] }, body: "", milestone: null, comments: { nodes: [] } };
+    const agent = deriveAgent(n, [], now, 15);
+    assert.equal(agent.attempt, null);
   });
 });
 

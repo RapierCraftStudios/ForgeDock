@@ -142,8 +142,13 @@ function escapeGraphQLString(value) {
  * @returns {string}
  */
 export function buildFleetSearchQuery(owner, repo, labels, first = 100) {
-  const labelClause = labels.map((l) => `label:"${escapeGraphQLString(l)}"`).join(" OR ");
-  const searchQuery = `repo:${escapeGraphQLString(owner)}/${escapeGraphQLString(repo)} is:issue is:open (${labelClause})`;
+  // Values here are intentionally raw (unescaped) — `searchQuery` below is
+  // escaped exactly once, at the point it is interpolated into the outer
+  // GraphQL string literal. Escaping per-value here as well as on the
+  // composed string would double-escape (each backslash introduced by the
+  // inner escape gets escaped again by the outer one). See forge#2411.
+  const labelClause = labels.map((l) => `label:"${l}"`).join(" OR ");
+  const searchQuery = `repo:${owner}/${repo} is:issue is:open (${labelClause})`;
   return `query {
   search(type: ISSUE, first: ${Number(first)}, query: "${escapeGraphQLString(searchQuery)}") {
     nodes {
@@ -220,7 +225,9 @@ function currentPhaseFromState(state) {
  * Attempt count/max for the current phase, from local run-log events only
  * (the remote FORGE:STATE index does not carry per-phase attempt counts —
  * only the compact committed[] list). Returns null when there is no local
- * run-log or no current phase to report against.
+ * run-log, no current phase to report against, or no run-log event for the
+ * current phase (absent attempt data must never be reported as "attempt 1"
+ * — see forge#2412).
  *
  * @param {object[]} events - readLog() output
  * @param {string|null} phase
@@ -238,7 +245,7 @@ function currentAttempt(events, phase) {
       if (e.maxAttempts) max = e.maxAttempts;
     }
   }
-  return n > 0 ? { n, max } : { n: 1, max };
+  return n > 0 ? { n, max } : null;
 }
 
 /**
