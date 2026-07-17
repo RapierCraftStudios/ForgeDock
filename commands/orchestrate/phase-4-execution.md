@@ -1422,6 +1422,66 @@ for FINDING_NUM in {spawned_finding_numbers}; do
   FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body \
     --jq '{labels: [.labels[].name], title: .title, body: .body}')
 
+  # Code-branch repair guard (MANDATORY — before priority/defer heuristics below).
+  # A review-finding with no **Code branch** annotation, whose parent PR's base is
+  # not the staging fast lane, would otherwise silently fall through to
+  # classify-lane.sh's implicit staging default — the one branch where the
+  # finding's subject code is guaranteed absent (forge#2443: 5 findings from
+  # milestone-lane PRs were misrouted this way in one batch; absent manual
+  # correction, /work-on's investigation phase would have closed all 5 as
+  # invalid). This is a synchronous per-finding check, distinct from the
+  # periodic Step 4C.5 lane-consistency sweep below (that one audits an
+  # entire milestone's PRs for base-branch drift after the fact; this one
+  # repairs a single finding's missing provenance at discovery time).
+  FINDING_BODY_RAW=$(echo "$FINDING_DATA" | jq -r '.body')
+  if ! echo "$FINDING_BODY_RAW" | grep -q '\*\*Code branch\*\*:'; then
+    # Portable (non-PCRE) extraction — PCRE grep lookbehinds are not supported by
+    # Git Bash's grep build on Windows (same convention as
+    # scripts/derive-finding-milestone.sh and scripts/code-index.sh), so use a
+    # bash regex + BASH_REMATCH instead of a lookbehind.
+    REPAIR_SOURCE_PR=""
+    FINDING_BODY_LOWER=$(echo "$FINDING_BODY_RAW" | tr '[:upper:]' '[:lower:]')
+    if [[ "$FINDING_BODY_LOWER" =~ \*\*source\*\*:[[:space:]]*pr[[:space:]]*#([0-9]+) ]]; then
+      REPAIR_SOURCE_PR="${BASH_REMATCH[1]}"
+    fi
+    if [ -n "$REPAIR_SOURCE_PR" ]; then
+      REPAIR_PARENT_BASE=$(gh pr view "$REPAIR_SOURCE_PR" -R {GH_REPO} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
+      if [ -n "$REPAIR_PARENT_BASE" ] && [ "$REPAIR_PARENT_BASE" != "$STAGING_BRANCH" ]; then
+        # GOVERNOR: cap the number of body-mutating repairs Step 4C will attempt
+        # in a single run — bounds the blast radius of this new autonomous
+        # `gh issue edit --body` mutation regardless of how many findings in the
+        # batch happen to be missing Code branch. Declared with `:=` so it is
+        # safe to reference whether or not a prior iteration already set it
+        # (bash arithmetic increment below persists it across loop iterations).
+        : "${REPAIR_GOVERNOR_COUNT:=0}"
+        REPAIR_GOVERNOR_MAX=25
+        if [ "$REPAIR_GOVERNOR_COUNT" -ge "$REPAIR_GOVERNOR_MAX" ]; then
+          echo "REPAIR: #${FINDING_NUM} skipped — GOVERNOR cap reached (${REPAIR_GOVERNOR_MAX} repairs already attempted this run); flagging instead of repairing"
+          gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label needs-human 2>/dev/null || true  # governor-cap path
+        else
+        REPAIR_GOVERNOR_COUNT=$((REPAIR_GOVERNOR_COUNT + 1))
+        echo "REPAIR: #${FINDING_NUM} has no **Code branch** and parent PR #${REPAIR_SOURCE_PR} bases on '${REPAIR_PARENT_BASE}' (non-staging) — attempting repair (${REPAIR_GOVERNOR_COUNT}/${REPAIR_GOVERNOR_MAX} this run)"
+        # Read-then-append: never blind-overwrite the existing body, only extend it.
+        REPAIRED_BODY=$(printf '%s\n\n## Source Branch Context (repaired by orchestrate Step 4C — forge#2443)\n\n**Code branch**: `%s`\n**Worktree base**: `origin/%s`\n' \
+          "$FINDING_BODY_RAW" "$REPAIR_PARENT_BASE" "$REPAIR_PARENT_BASE")
+        if gh issue edit "$FINDING_NUM" -R {GH_REPO} --body "$REPAIRED_BODY" 2>/dev/null; then
+          echo "REPAIR: #${FINDING_NUM} Code branch repaired to '${REPAIR_PARENT_BASE}'"
+          # Re-fetch so the rest of this loop iteration (priority/defer heuristics
+          # below) sees the repaired body, not the stale pre-repair one.
+          FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body \
+            --jq '{labels: [.labels[].name], title: .title, body: .body}')
+        else
+          gh issue comment "$FINDING_NUM" -R {GH_REPO} --body "<!-- FORGE:GATE_FAILURE -->
+## Code Branch Repair Failed
+
+Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${REPAIR_SOURCE_PR} bases on \`${REPAIR_PARENT_BASE}\` — not the staging fast lane. Automatic repair (\`gh issue edit --body\`) failed. Without this annotation, \`/work-on\`'s investigation phase may look for the code on the wrong branch (staging, where it is absent) and misclassify this confirmed finding as invalid. Human review required. <!-- forge#2443 -->" 2>/dev/null || true
+          gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label needs-human 2>/dev/null || true  # repair-failure path
+        fi
+        fi
+      fi
+    fi
+  fi
+
   # Priority extraction accepts both label schemas: canonical `priority:P<n>` (the only
   # form review-pr.md ever creates) and bare `P<n>` (carried by some consumer repos'
   # externally/legacy-labeled issues). `priority:P<n>` wins if both are present on the
