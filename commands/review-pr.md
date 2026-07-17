@@ -1772,8 +1772,8 @@ Files that need changes:
   scenario was a staging->main review where HEAD (staging) is a long-lived
   branch that already had the bug's code, while BASE (main) had not yet
   received it. review-pr.md's scenario is different — HEAD here is a
-  short-lived feat/*|fix/* branch that Phase 6E deletes once --auto-merge
-  completes, which happens SYNCHRONOUSLY within this same /review-pr run,
+  short-lived feat/*|fix/* branch that Phase 6E deletes once the auto-merge
+  step completes, which happens SYNCHRONOUSLY within this same /review-pr run,
   before any downstream consumer (a human, or /work-on) ever reads this
   finding. By the time the finding is read, HEAD no longer exists but BASE
   does, and BASE now contains the merged code the finding is about.
