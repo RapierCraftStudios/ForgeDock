@@ -420,7 +420,9 @@ function sortAgents(agents) {
  * @param {{gh: (args: string[]) => Promise<string>}} opts.io - injected `gh` accessor
  * @param {number} [opts.stallTimeoutMinutes] - overrides forge.yaml resolution (mainly for tests)
  * @param {string} [opts.cwd] - directory to resolve forge.yaml from (defaults to process.cwd())
- * @returns {Promise<object>} FleetSnapshot
+ * @returns {Promise<object>} FleetSnapshot — includes `rateLimitRemaining` (GitHub GraphQL
+ *   rate-limit budget remaining after this call, or `null` if the response didn't carry it),
+ *   surfaced for `forgedock watch`'s adaptive-polling header (forge#2391).
  */
 export async function getFleetSnapshot(opts) {
   const { repo, runsDir, io } = opts;
@@ -437,7 +439,7 @@ export async function getFleetSnapshot(opts) {
   } catch {
     parsed = {};
   }
-  const { nodes } = parseFleetSearchResponse(parsed);
+  const { nodes, rateLimitRemaining } = parseFleetSearchResponse(parsed);
 
   const agents = nodes.map((node) => {
     let events = [];
@@ -464,6 +466,7 @@ export async function getFleetSnapshot(opts) {
     repo,
     at: new Date(now).toISOString(),
     stallTimeoutMinutes,
+    rateLimitRemaining,
     counts,
     agents: sorted,
   };
