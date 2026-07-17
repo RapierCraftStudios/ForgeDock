@@ -365,6 +365,12 @@ export async function runFromCli(argv, deps = {}) {
     if (e.event === "phase_enter") console.log(`→ phase ${e.phase} started`);
     else if (e.event === "phase_exit" && e.status === "committed") console.log(`✓ phase ${e.phase} committed`);
     else if (e.event === "phase_exit" && e.status === "blocked") console.log(`✗ phase ${e.phase} blocked: ${e.detail ?? "no detail"}`);
+    // forge#2524: session-limit pause — the engine is waiting in-process
+    // until the reported reset time before retrying this same phase, rather
+    // than terminating. Distinct glyph from the exit/blocked lines above so
+    // an operator tailing this stdout can tell "still alive, just waiting"
+    // from "phase actually failed".
+    else if (e.event === "phase_paused") console.log(`⏸ phase ${e.phase} paused: ${e.detail ?? "session limit"}`);
   };
   const res = await runIssueFn({ issue, dir, agentId, lane, io,
     runner: (await import("./runner.mjs")).runCommand, now: () => Date.now(),
