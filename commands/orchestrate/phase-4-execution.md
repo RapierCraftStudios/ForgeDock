@@ -1447,7 +1447,20 @@ for FINDING_NUM in {spawned_finding_numbers}; do
     if [ -n "$REPAIR_SOURCE_PR" ]; then
       REPAIR_PARENT_BASE=$(gh pr view "$REPAIR_SOURCE_PR" -R {GH_REPO} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
       if [ -n "$REPAIR_PARENT_BASE" ] && [ "$REPAIR_PARENT_BASE" != "$STAGING_BRANCH" ]; then
-        echo "REPAIR: #${FINDING_NUM} has no **Code branch** and parent PR #${REPAIR_SOURCE_PR} bases on '${REPAIR_PARENT_BASE}' (non-staging) — attempting repair"
+        # GOVERNOR: cap the number of body-mutating repairs Step 4C will attempt
+        # in a single run — bounds the blast radius of this new autonomous
+        # `gh issue edit --body` mutation regardless of how many findings in the
+        # batch happen to be missing Code branch. Declared with `:=` so it is
+        # safe to reference whether or not a prior iteration already set it
+        # (bash arithmetic increment below persists it across loop iterations).
+        : "${REPAIR_GOVERNOR_COUNT:=0}"
+        REPAIR_GOVERNOR_MAX=25
+        if [ "$REPAIR_GOVERNOR_COUNT" -ge "$REPAIR_GOVERNOR_MAX" ]; then
+          echo "REPAIR: #${FINDING_NUM} skipped — GOVERNOR cap reached (${REPAIR_GOVERNOR_MAX} repairs already attempted this run); flagging instead of repairing"
+          gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
+        else
+        REPAIR_GOVERNOR_COUNT=$((REPAIR_GOVERNOR_COUNT + 1))
+        echo "REPAIR: #${FINDING_NUM} has no **Code branch** and parent PR #${REPAIR_SOURCE_PR} bases on '${REPAIR_PARENT_BASE}' (non-staging) — attempting repair (${REPAIR_GOVERNOR_COUNT}/${REPAIR_GOVERNOR_MAX} this run)"
         # Read-then-append: never blind-overwrite the existing body, only extend it.
         REPAIRED_BODY=$(printf '%s\n\n## Source Branch Context (repaired by orchestrate Step 4C — forge#2443)\n\n**Code branch**: `%s`\n**Worktree base**: `origin/%s`\n' \
           "$FINDING_BODY_RAW" "$REPAIR_PARENT_BASE" "$REPAIR_PARENT_BASE")
@@ -1463,6 +1476,7 @@ for FINDING_NUM in {spawned_finding_numbers}; do
 
 Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${REPAIR_SOURCE_PR} bases on \`${REPAIR_PARENT_BASE}\` — not the staging fast lane. Automatic repair (\`gh issue edit --body\`) failed. Without this annotation, \`/work-on\`'s investigation phase may look for the code on the wrong branch (staging, where it is absent) and misclassify this confirmed finding as invalid. Human review required. <!-- forge#2443 -->" 2>/dev/null || true
           gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
+        fi
         fi
       fi
     fi
