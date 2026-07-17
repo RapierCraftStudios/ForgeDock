@@ -36,3 +36,17 @@ PR #1733 introduced the module dossier system. `bin/runner.mjs` was NOT
 changed in this PR — this entry seeds the dossier from historical findings.
 Key gotcha: ENOBUFS check order and model return value are the two most
 common regression sites. Cite: #1433, #1668, #1248.
+
+## Entry 2026-07-17 — fix(runner): append non-empty stderr on CLI-backend success instead of dropping it (#2456)
+
+PR #2476 touched `runCliBackend`'s success path. When the `--output-format
+json` envelope parses with a non-null `.result`, `humanOutput` now appends
+trimmed `stderr` after `parsedResult` instead of dropping it silently —
+mirrors the same "combine streams" fix applied to `run_bash` in #1229. Key
+gotcha: `JSON.parse` must still target `stdout` alone (forge#2422 invariant)
+— do not regress this back to combined `output` when touching this block
+again. Follow-up findings filed (non-blocking, POSSIBLE/LOW): #2483
+(appended stderr reaches console unsanitized — no `sanitizeOutputExcerptForLog`
+applied on this success-path sink) and #2484 (empty-string `.result` +
+non-empty stderr produces a leading-newline-only logged string). Cite: #2456,
+PR #2476, #2422, #1229.
