@@ -137,6 +137,17 @@ export const PHASE_MARKERS = {
  * @property {'object'} type
  * @property {Object.<string, {type: string, enum?: string[], items?: {type: string}}>} properties
  * @property {string[]} required
+ * @property {boolean} [additionalProperties] - forge#2435: model-facing mirror of
+ *   `validatePhaseResult()`'s own hand-rolled allow-list check below (rebuilt
+ *   "was #2408"). `validatePhaseResult()` does NOT read this field — its
+ *   enforcement is independent and unconditional. Setting it to `false` on
+ *   every `PHASE_RESULT_SCHEMAS` entry is purely a model-facing annotation:
+ *   it tells the tool-use API (via `bin/runner.mjs`'s `buildToolDefinitions()`,
+ *   which substitutes these objects wholesale as `report_result`'s
+ *   `input_schema`) the same closed key set the server already enforces,
+ *   so a model attempting an extra field can be rejected earlier (or avoid
+ *   the attempt entirely) instead of only discovering the rejection after a
+ *   round-trip through `validatePhaseResult()`.
  */
 
 /**
@@ -174,6 +185,7 @@ export const PHASE_RESULT_SCHEMAS = {
       rootCause: { type: 'string' },
     },
     required: ['verdict', 'decompose'],
+    additionalProperties: false,
   },
   build: {
     type: 'object',
@@ -182,6 +194,7 @@ export const PHASE_RESULT_SCHEMAS = {
       commits: { type: 'array', items: { type: 'string' } },
     },
     required: ['branch', 'commits'],
+    additionalProperties: false,
   },
   review: {
     type: 'object',
@@ -190,6 +203,7 @@ export const PHASE_RESULT_SCHEMAS = {
       disposition: { type: 'string', enum: RESERVED_TYPES.REVIEWER.verdictValues }, // APPROVED | CHANGES_REQUESTED | COMMENTED
     },
     required: ['pr', 'disposition'],
+    additionalProperties: false,
   },
   close: {
     type: 'object',
@@ -197,17 +211,21 @@ export const PHASE_RESULT_SCHEMAS = {
       merged: { type: 'boolean' },
     },
     required: ['merged'],
+    additionalProperties: false,
   },
   // context/architect intentionally define no accepted fields beyond a free-form
   // `summary` — see the doc comment above for why no partial/degraded-success
   // value exists for either. A schema-valid call with an empty object `{}` is
   // sufficient completion signal; `summary` is optional metadata only.
+  // `additionalProperties: false` still applies here — it restricts extra
+  // keys, not required ones, so the empty-object-is-valid behavior is unchanged.
   context: {
     type: 'object',
     properties: {
       summary: { type: 'string' },
     },
     required: [],
+    additionalProperties: false,
   },
   architect: {
     type: 'object',
@@ -215,6 +233,7 @@ export const PHASE_RESULT_SCHEMAS = {
       summary: { type: 'string' },
     },
     required: [],
+    additionalProperties: false,
   },
 };
 
