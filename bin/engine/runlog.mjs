@@ -57,7 +57,7 @@ export function deriveState(events) {
   /** @type {import("./phases.mjs").RunState} */
   const s = { v: 0, run: null, issue: null, lane: "staging", committed: [],
               phase: null, branch: null, pr: null, terminal: false,
-              terminalReason: null, lease: null };
+              terminalReason: null, lease: null, lastRateLimit: null };
   for (const e of events) {
     switch (e.event) {
       case "RUN_START":
@@ -71,6 +71,16 @@ export function deriveState(events) {
         break;
       case "RUN_TERMINAL":
         s.terminal = true; s.terminalReason = e.reason ?? "done"; s.v = e.seq;
+        break;
+      // forge#2524: a session-limit pause is purely informational — it does
+      // NOT touch committed/terminal/terminalReason. The phase that hit the
+      // pause is, by construction, not yet committed (the engine is about to
+      // retry it from scratch once the wait elapses), so a resumed/hydrated
+      // run correctly re-enters pickPhase at the same phase with no special
+      // casing needed here beyond recording the diagnostic below.
+      case "PHASE_RATE_LIMITED":
+        s.lastRateLimit = { phase: e.phase, resetAt: e.resetAt ?? null, waitMs: e.waitMs ?? null };
+        s.v = e.seq;
         break;
       // PHASE_START / PHASE_FAILED do not change committed state
     }

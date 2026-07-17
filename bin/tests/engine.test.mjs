@@ -2071,3 +2071,198 @@ describe("runIssue — forge#2352: state-vs-GitHub divergence guard", () => {
     assert.ok(snapshotCalls > 0, "the guard's snapshot call must actually have been exercised (and failed) at least once");
   });
 });
+
+// ---------------------------------------------------------------------------
+// forge#2524: session-limit auto-resume — a CLI_BACKEND_FAILED carrying a
+// genuine, still-future, machine-parsed `resetAtEpochMs` (bin/runner.mjs's
+// runCliBackend()) should pause in-process and retry the same phase from
+// scratch once the reset time elapses, instead of terminating as
+// "engine-error" like every other CLI_BACKEND_FAILED. `sleep` is fully
+// injectable (mirrors `now`) so these tests never wait real wall-clock time.
+// ---------------------------------------------------------------------------
+
+describe("runIssue — forge#2524: session-limit auto-resume", () => {
+  it("pauses on a session-limit CLI_BACKEND_FAILED, then retries the same phase and reaches merged", async () => {
+    const { w, io } = fakeWorld();
+    let architectCalls = 0;
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => {
+        architectCalls++;
+        if (architectCalls === 1) {
+          throw Object.assign(new Error("claude CLI exited with status 1"), {
+            code: "CLI_BACKEND_FAILED", resetAt: "12:00am (UTC)", resetAtEpochMs: 5000,
+          });
+        }
+        w.markers += " FORGE:ARCHITECT:COMPLETE";
+      },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+
+    const events = [];
+    const sleepCalls = [];
+    const sleep = async (ms) => { sleepCalls.push(ms); };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3, sleep, onProgress: (e) => events.push(e) });
+
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(architectCalls, 2, "the architect phase's runner must be invoked again after the pause (fresh attempt budget)");
+    assert.deepEqual(sleepCalls, [4000], "sleep must be awaited for exactly resetAtEpochMs - now()");
+
+    const pauseEvents = events.filter((e) => e.event === "phase_paused");
+    assert.equal(pauseEvents.length, 1, "exactly one phase_paused progress event must be emitted (AC6)");
+    assert.equal(pauseEvents[0].phase, "architect");
+    assert.equal(pauseEvents[0].reason, "session-limit");
+    assert.equal(pauseEvents[0].resetAt, 5000);
+
+    const log = readLog(dir, 42);
+    const rateLimited = log.filter((e) => e.event === "PHASE_RATE_LIMITED");
+    assert.equal(rateLimited.length, 1, "exactly one PHASE_RATE_LIMITED run-log event must be appended (AC4)");
+    assert.equal(rateLimited[0].phase, "architect");
+    assert.equal(rateLimited[0].resetAt, 5000);
+    assert.equal(rateLimited[0].waitMs, 4000);
+
+    const s = deriveState(log);
+    assert.deepEqual(s.lastRateLimit, { phase: "architect", resetAt: 5000, waitMs: 4000 },
+      "deriveState() must fold PHASE_RATE_LIMITED into RunState.lastRateLimit without touching committed/terminal state");
+    assert.deepEqual(s.committed, ["investigate", "context", "architect", "build", "review", "close"],
+      "the pause must not have skipped or duplicated any phase's commit");
+  });
+
+  it("falls through to engine-error once the pause-count budget is exhausted (defensive backstop)", async () => {
+    const { w, io } = fakeWorld();
+    let architectCalls = 0;
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => {
+        architectCalls++;
+        throw Object.assign(new Error("claude CLI exited with status 1"), {
+          code: "CLI_BACKEND_FAILED", resetAt: "12:00am (UTC)", resetAtEpochMs: 5000,
+        });
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    const sleepCalls = [];
+    const sleep = async (ms) => { sleepCalls.push(ms); };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1, maxSessionLimitPauses: 2, sleep });
+
+    assert.equal(res.terminalReason, "engine-error");
+    assert.equal(architectCalls, 3, "expected 2 paused retries + 1 final over-budget failure");
+    assert.equal(sleepCalls.length, 2, "exactly maxSessionLimitPauses waits should have occurred, not unbounded");
+    assert.ok(w.labels.includes("workflow:engine-error"));
+  });
+
+  it("does not pause when resetAtEpochMs is absent (unparseable reset time) — no regression (AC8)", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => {
+        throw Object.assign(new Error("claude CLI exited with status 1"), {
+          code: "CLI_BACKEND_FAILED", resetAt: "garbled text — could not parse",
+        });
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    let sleepCalled = false;
+    const sleep = async () => { sleepCalled = true; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3, sleep });
+
+    assert.equal(res.terminalReason, "engine-error");
+    assert.equal(sleepCalled, false, "sleep must never be invoked when resetAtEpochMs is absent — must terminate immediately");
+    assert.ok(w.labels.includes("workflow:engine-error"));
+  });
+
+  it("does not pause when resetAtEpochMs is not in the future relative to now() — treated as a normal crash", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => {
+        throw Object.assign(new Error("claude CLI exited with status 1"), {
+          code: "CLI_BACKEND_FAILED", resetAt: "12:00am (UTC)", resetAtEpochMs: 500,
+        });
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    let sleepCalled = false;
+    const sleep = async () => { sleepCalled = true; };
+
+    // now() = 1000 > resetAtEpochMs = 500 — the reported reset time is already in the past.
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3, sleep });
+
+    assert.equal(res.terminalReason, "engine-error");
+    assert.equal(sleepCalled, false);
+  });
+
+  it("keeps renewing the lease via the existing renewal timer while paused (AC3)", async () => {
+    const { w, io } = fakeWorld();
+    let renewalWrites = 0;
+    const origGh = io.gh;
+    io.gh = async (args) => {
+      const a = args.join(" ");
+      if (a.startsWith("issue edit") && args.includes("--body")) renewalWrites++;
+      return origGh(args);
+    };
+    let architectCalls = 0;
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => {
+        architectCalls++;
+        if (architectCalls === 1) {
+          throw Object.assign(new Error("claude CLI exited with status 1"), {
+            code: "CLI_BACKEND_FAILED", resetAt: "12:00am (UTC)", resetAtEpochMs: 2000,
+          });
+        }
+        w.markers += " FORGE:ARCHITECT:COMPLETE";
+      },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+    // A real (short, bounded) wait so the pre-existing renewTimer (a real
+    // setInterval, unaffected by mocking `sleep`) gets a genuine chance to
+    // tick during the pause — only `sleep` is faked, never the global timers.
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(ms, 30)));
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3, sleep, leaseRenewIntervalMs: 5, leaseTtlMs: 50 });
+
+    assert.equal(res.terminalReason, "merged");
+    assert.ok(renewalWrites > 0, "at least one lease-renewal write must have occurred during the pause — the issue must not look abandoned to a concurrent agent");
+  });
+
+  it("rejects a non-finite maxSessionLimitPauses synchronously, before any state I/O (mirrors leaseTtlMs/leaseRenewIntervalMs precedent)", async () => {
+    const { io } = fakeWorld();
+    const runner = async () => ({ status: "complete" });
+    await assert.rejects(
+      () => runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxSessionLimitPauses: NaN }),
+      (err) => {
+        assert.equal(err.code, "INVALID_SESSION_LIMIT_CONFIG");
+        return true;
+      },
+    );
+    await assert.rejects(
+      () => runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+        io, runner, now: () => 1000, maxSessionLimitPauses: -1 }),
+      (err) => {
+        assert.equal(err.code, "INVALID_SESSION_LIMIT_CONFIG");
+        return true;
+      },
+    );
+  });
+});

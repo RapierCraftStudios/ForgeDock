@@ -20,6 +20,15 @@ export const DEFAULT_MAX_ATTEMPTS = 3;
 export const DEFAULT_LEASE_TTL_MS = 600000;
 export const DEFAULT_LEASE_RENEW_INTERVAL_MS = 240000;
 
+// forge#2524: bounds how many consecutive session-limit pauses a single
+// phase attempt will ride out before falling through to the existing
+// engine-error terminate path. Exists purely as a defensive backstop against
+// a persistently-misparsed/misreported reset time (clock skew, a CLI that
+// always claims "resets in 1 minute" for some unrelated reason) spinning the
+// engine forever — a genuine multi-hour session-limit reset is expected to
+// need at most one or two pauses in practice.
+export const DEFAULT_MAX_SESSION_LIMIT_PAUSES = 5;
+
 /**
  * Validates the subset of `runIssue()`'s options that must fail fast,
  * synchronously, before any state I/O or timer creation — `backend` and the
@@ -32,9 +41,10 @@ export const DEFAULT_LEASE_RENEW_INTERVAL_MS = 240000;
  * @param {string} [params.backend] - "cli" | "api" | "auto" (forge#2028).
  * @param {number} params.leaseTtlMs - forge#2239: how long a claimed lease is valid for.
  * @param {number} params.leaseRenewIntervalMs - forge#2239: how often the lease is re-written.
- * @throws {Error & {code: "INVALID_BACKEND"|"INVALID_LEASE_CONFIG"}}
+ * @param {number} params.maxSessionLimitPauses - forge#2524: bound on consecutive session-limit pauses.
+ * @throws {Error & {code: "INVALID_BACKEND"|"INVALID_LEASE_CONFIG"|"INVALID_SESSION_LIMIT_CONFIG"}}
  */
-function validateRunIssueOptions({ backend, leaseTtlMs, leaseRenewIntervalMs }) {
+function validateRunIssueOptions({ backend, leaseTtlMs, leaseRenewIntervalMs, maxSessionLimitPauses }) {
   // forge#2054: validate `backend` before anything else — before state is
   // read/written and before the phase/retry loop begins below. An invalid
   // value must fail fast and non-retryably. Without this check, an invalid
@@ -102,6 +112,22 @@ function validateRunIssueOptions({ backend, leaseTtlMs, leaseRenewIntervalMs }) 
       { code: "INVALID_LEASE_CONFIG" },
     );
   }
+
+  // forge#2524: same finite-number + non-negative guard precedent as the
+  // lease-timing pair above (forge#2329) — a NaN/negative pause bound would
+  // either silently disable the pause-count backstop (every relational
+  // comparison against NaN is false, so `pauseCount < maxSessionLimitPauses`
+  // would never trip) or reject every pause immediately (a negative bound).
+  // Validated eagerly here, synchronously, before any state I/O or timer
+  // creation — identical placement rationale to the checks above.
+  if (typeof maxSessionLimitPauses !== "number" || !Number.isFinite(maxSessionLimitPauses) || maxSessionLimitPauses < 0) {
+    throw Object.assign(
+      new Error(
+        `Invalid session-limit config: maxSessionLimitPauses must be a finite number >= 0, got ${typeof maxSessionLimitPauses === "number" ? maxSessionLimitPauses : `${typeof maxSessionLimitPauses} (${JSON.stringify(maxSessionLimitPauses)})`}.`,
+      ),
+      { code: "INVALID_SESSION_LIMIT_CONFIG" },
+    );
+  }
 }
 
 /**
@@ -150,17 +176,34 @@ function makeProgressEmitter(onProgress) {
  * @param {number} [opts.leaseRenewIntervalMs] - forge#2239: how often the lease
  *   is re-written while an unsatisfied phase's runner is executing. Defaults to
  *   DEFAULT_LEASE_RENEW_INTERVAL_MS. Overridable for tests.
- * @param {(event: {event: string, phase: string, status?: string, detail?: string}) => void} [opts.onProgress] -
+ * @param {(event: {event: string, phase: string, status?: string, detail?: string, resetAt?: number}) => void} [opts.onProgress] -
  *   forge#2240: optional phase-boundary observer. Called with
  *   `{event: "phase_enter", phase}` right before a phase's runner is about to
- *   execute (i.e. the phase was NOT already satisfied on reconcile), and with
+ *   execute (i.e. the phase was NOT already satisfied on reconcile), with
  *   `{event: "phase_exit", phase, status: "committed"|"blocked", detail?}`
- *   once that phase's outcome is known. Defaults to a no-op so every existing
- *   caller/test is unaffected. Deliberately engine.mjs's ONLY new surface for
- *   this issue — no `console.log`/stdout write is added here; printing is the
- *   CLI layer's job (bin/engine-cli.mjs), preserving the io-injection/testability
- *   convention this module already follows. Invocations are wrapped so a
- *   throwing callback can never crash a run.
+ *   once that phase's outcome is known, and (forge#2524) with
+ *   `{event: "phase_paused", phase, reason: "session-limit", resetAt, detail}`
+ *   when a session-limit hit pauses in-process (see the pause/retry loop
+ *   below). Defaults to a no-op so every existing caller/test is unaffected.
+ *   Deliberately engine.mjs's ONLY new surface for this issue — no
+ *   `console.log`/stdout write is added here; printing is the CLI layer's job
+ *   (bin/engine-cli.mjs), preserving the io-injection/testability convention
+ *   this module already follows. Invocations are wrapped so a throwing
+ *   callback can never crash a run.
+ * @param {() => number} [opts.now] - clock, overridable for tests.
+ * @param {(ms: number) => Promise<void>} [opts.sleep] - forge#2524: the wait
+ *   primitive used by the session-limit pause loop below. Defaults to a real
+ *   `setTimeout`-based sleep. Overridable for tests so the suite never
+ *   actually waits out a real (potentially multi-hour) session-limit reset —
+ *   a test injects a fast/no-op sleep and asserts the *requested* duration
+ *   instead of waiting for it. Mirrors the existing `now`/`onProgress`
+ *   injectability convention.
+ * @param {number} [opts.maxSessionLimitPauses] - forge#2524: caps how many
+ *   consecutive session-limit pauses a single phase attempt will ride out
+ *   before falling through to the existing engine-error terminate path.
+ *   Defaults to DEFAULT_MAX_SESSION_LIMIT_PAUSES. Purely a defensive backstop
+ *   against a persistently-misreported reset time; a genuine reset is
+ *   expected to need at most one or two pauses in practice.
  */
 export async function runIssue(opts) {
   const { issue, dir, agentId, lane = "staging", io, runner,
@@ -173,6 +216,10 @@ export async function runIssue(opts) {
           backend, model,
           leaseTtlMs = DEFAULT_LEASE_TTL_MS,
           leaseRenewIntervalMs = DEFAULT_LEASE_RENEW_INTERVAL_MS,
+          // forge#2524: real default is a genuine setTimeout-based wait —
+          // tests inject a fast/no-op replacement (see opts.sleep doc above).
+          sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+          maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES,
           onProgress = () => {} } = opts;
 
   // forge#2452: extracted into makeProgressEmitter() — see its docstring for
@@ -183,7 +230,7 @@ export async function runIssue(opts) {
   // for the forge#2054/#2313/#2329 rationale and required call-order (before
   // any state I/O or timer creation, unchanged from the inline block this
   // replaces).
-  validateRunIssueOptions({ backend, leaseTtlMs, leaseRenewIntervalMs });
+  validateRunIssueOptions({ backend, leaseTtlMs, leaseRenewIntervalMs, maxSessionLimitPauses });
 
   const projector = makeProjector(io);
 
@@ -366,7 +413,56 @@ export async function runIssue(opts) {
       const renewTimer = setInterval(renewLease, leaseRenewIntervalMs);
       if (typeof renewTimer.unref === "function") renewTimer.unref();
       try {
-        outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model });
+        // forge#2524: bounded pause/retry loop for a genuine, still-future
+        // session-limit hit. `runPhaseWithRetry()` itself remains fail-fast
+        // for CLI_BACKEND_FAILED (forge#2259 — a deterministic CLI crash
+        // reproduces identically on every attempt within one call) — this
+        // loop operates one layer up, deciding whether to call it again from
+        // scratch (fresh attempt budget) after waiting out a temporary usage
+        // cap, rather than treating every CLI_BACKEND_FAILED as equally
+        // fatal. `renewTimer` (started above) keeps renewing the lease for
+        // the entire duration of this loop, including any `sleep()` below —
+        // no separate heartbeat mechanism is needed for the wait itself.
+        let pauseCount = 0;
+        for (;;) {
+          try {
+            outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model });
+            break;
+          } catch (e) {
+            const resetAtMs = e.resetAtEpochMs;
+            const canPause =
+              e.code === "CLI_BACKEND_FAILED" &&
+              typeof resetAtMs === "number" && Number.isFinite(resetAtMs) &&
+              resetAtMs > now() &&
+              pauseCount < maxSessionLimitPauses;
+            if (!canPause) throw e; // falls through to the unchanged outer catch below
+            pauseCount += 1;
+            const waitMs = Math.max(0, resetAtMs - now());
+            // forge#2524 AC4: append a run-log event so a crash mid-wait
+            // leaves a durable record of the pause (deriveState() folds this
+            // into RunState.lastRateLimit — see bin/engine/runlog.mjs). This
+            // does NOT touch committed/terminal state: the phase genuinely
+            // hasn't committed yet, so a resumed run correctly re-enters
+            // pickPhase at this same phase regardless of whether this event
+            // was ever written.
+            appendEvent(dir, issue, {
+              event: "PHASE_RATE_LIMITED", phase: phase.id,
+              resetAt: resetAtMs, resetAtDisplay: e.resetAt || null, waitMs,
+            });
+            // forge#2524 AC6: progress observer sees the pause so a caller
+            // (bin/engine-cli.mjs) can render the wait state instead of the
+            // process going silent for the duration.
+            emitProgress({
+              event: "phase_paused", phase: phase.id, reason: "session-limit",
+              resetAt: resetAtMs,
+              detail: `session limit hit — pausing until ${e.resetAt || new Date(resetAtMs).toISOString()}`,
+            });
+            await sleep(waitMs);
+            // Loop back and retry the same phase with a fresh attempt budget
+            // (a brand-new runPhaseWithRetry() call, not a continuation of
+            // the exhausted one) — AC2.
+          }
+        }
       } catch (e) {
         // forge#2261: NO_API_KEY/NO_SDK/CLI_BACKEND_FAILED are fail-fast
         // rethrown by runPhaseWithRetry() (see its own catch below) instead
@@ -607,5 +703,6 @@ function eventsFromIndex(idx) {
 
 function freshState(issue, lane) {
   return { v: 0, run: `r_${issue}_${lane}`, issue, lane, committed: [], phase: null,
-           branch: null, pr: null, terminal: false, terminalReason: null, lease: null };
+           branch: null, pr: null, terminal: false, terminalReason: null, lease: null,
+           lastRateLimit: null };
 }
