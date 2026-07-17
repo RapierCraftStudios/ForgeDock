@@ -51,6 +51,7 @@ import {
   resolveBackendLadder,
   runCliBackend,
   sanitizeArgvForLog,
+  sanitizeOutputExcerptForLog,
   extractSessionLimitResetTime,
   VALID_BACKENDS,
 } from "../runner.mjs";
@@ -1634,6 +1635,123 @@ describe("runCliBackend spawnFn seam (issue #2033)", () => {
       loggedLines.some((line) => /no output was captured/i.test(line)),
       "an explicit 'no output captured' diagnostic must be logged even when nothing was printed",
     );
+  });
+
+  // Issue #2355: when the CLI produces non-empty stdout/stderr before a
+  // non-zero exit, the thrown message previously only said "See captured
+  // output above" — a pointer to a logger.log() call that is never persisted
+  // into the durable ~/.forge/runs/*.jsonl run-log (only `err.message`, via
+  // bin/engine.mjs's `reason: e.message`/fail-fast `detail` string, reaches
+  // that persisted record). This asserts the actual captured output text is
+  // now embedded directly in the thrown message.
+  it("embeds the actual captured output text in the thrown message when stdout/stderr is non-empty (#2355)", () => {
+    const spawnFn = () => ({
+      status: 1,
+      signal: null,
+      stdout: "TypeError: cannot read property 'foo' of undefined",
+      stderr: "    at main (/app/index.js:12:3)",
+      error: undefined,
+    });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2355",
+        args: ["2355"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "runCliBackend must throw on non-zero exit");
+    assert.equal(thrown.code, "CLI_BACKEND_FAILED");
+    assert.ok(
+      !thrown.message.includes("See captured output above"),
+      `message must not be a self-referential pointer to already-logged output: ${thrown.message}`,
+    );
+    assert.ok(
+      thrown.message.includes("TypeError: cannot read property 'foo' of undefined"),
+      `message must embed the actual captured stdout text: ${thrown.message}`,
+    );
+    assert.ok(
+      thrown.message.includes("at main (/app/index.js:12:3)"),
+      `message must embed the actual captured stderr text: ${thrown.message}`,
+    );
+  });
+
+  // Issue #2355 AC4: the embedded excerpt must be bounded so a very verbose
+  // CLI failure doesn't bloat the persisted JSONL run-log line indefinitely.
+  it("bounds and truncates a very large captured-output excerpt with a visible marker (#2355)", () => {
+    const hugeOutput = "E".repeat(10000);
+    const spawnFn = () => ({ status: 1, signal: null, stdout: hugeOutput, stderr: "", error: undefined });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2355",
+        args: ["2355"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "expected runCliBackend to throw");
+    assert.ok(
+      !thrown.message.includes("E".repeat(10000)),
+      "message must not contain the full unbounded captured output",
+    );
+    assert.match(
+      thrown.message,
+      /…\[truncated, \d+ chars\]/,
+      "message must contain a visible truncation marker for the bounded excerpt",
+    );
+  });
+
+  // Issue #2355: confirms the `!hadOutput` branch (already fixed by #2258/PR
+  // #2276) is unchanged by this fix — no regression to the empty-output
+  // diagnostic (exit code/signal/argv/cwd).
+  it("does not alter the empty-output diagnostic text (no regression to #2258/PR #2276, issue #2355 AC3)", () => {
+    const spawnFn = () => ({ status: 1, signal: null, stdout: "", stderr: "", error: undefined });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2355",
+        args: ["2355"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "expected runCliBackend to throw");
+    assert.match(
+      thrown.message,
+      /No output was captured \(stdout and stderr were both empty\)\./,
+      "empty-output message text must remain byte-identical to the pre-existing #2258/PR #2276 fix",
+    );
+  });
+
+  it("sanitizeOutputExcerptForLog neutralizes control characters, matching sanitizeArgvForLog's discipline (#2355)", () => {
+    const raw = "\x1b[31mFAKE\x1b[0m";
+    const excerpt = sanitizeOutputExcerptForLog(raw);
+    // eslint-disable-next-line no-control-regex -- asserting the ABSENCE of raw control chars is the point of this test
+    assert.ok(!/[\x00-\x1F\x7F]/.test(excerpt), "excerpt must not contain raw control characters");
+    assert.match(excerpt, /\\x1b/, "escaped ESC sequence should appear in place of the raw control char");
   });
 
   it("surfaces result.signal in the thrown message when the child was killed by a signal", () => {

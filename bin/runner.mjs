@@ -472,6 +472,52 @@ export function resolveBackend({ requested = "auto", cwd = process.cwd() } = {})
 // actual child process's stdout/stderr capture, not this summary string.
 const MAX_LOGGED_ARGV_ELEMENT_LEN = 200;
 
+// Diagnostic-only bound on the captured-output excerpt embedded directly in
+// a CLI_BACKEND_FAILED error message (forge#2355). Deliberately much larger
+// than MAX_LOGGED_ARGV_ELEMENT_LEN (200 chars) — that bound exists to keep a
+// single argv element's *summary* short, but a truncated-to-200-chars
+// captured-output excerpt would defeat the point of this fix (the whole goal
+// is to give an operator reading the persisted `~/.forge/runs/*.jsonl`
+// run-log enough of the CLI's actual failure text to diagnose it without
+// re-running). 4000 chars is generous enough to carry a real stack
+// trace/error while still bounding JSONL run-log line growth for very
+// verbose CLI failures (issue #2355 AC4).
+const MAX_LOGGED_OUTPUT_EXCERPT_LEN = 4000;
+
+/**
+ * Escape control/bidi-override characters and cap length, without joining
+ * multiple elements. Shared core of `sanitizeArgvForLog` (which maps this
+ * over an argv array with a small per-element bound) and
+ * `sanitizeOutputExcerptForLog` (which applies it once to a full captured
+ * stdout+stderr blob with a much larger bound) — both need the identical
+ * escaping and surrogate-pair-safe truncation behavior hardened across
+ * #2277/#2292/#2293; extracting it here keeps that behavior in one place
+ * instead of duplicating it per bound.
+ *
+ * @param {string} str
+ * @param {number} maxLen
+ * @returns {string}
+ */
+function sanitizeAndCap(str, maxLen) {
+  // eslint-disable-next-line no-control-regex -- intentional: neutralizing C0/DEL/C1 control chars and Unicode bidi-override/format chars is the point of this function
+  const escaped = str.replace(/[\x00-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069]/g, (ch) => {
+    const code = ch.charCodeAt(0);
+    return code <= 0xff ? `\\x${code.toString(16).padStart(2, "0")}` : `\\u${code.toString(16).padStart(4, "0")}`;
+  });
+  if (escaped.length <= maxLen) return escaped;
+  // `.slice()` counts UTF-16 code units, not Unicode code points. If the cut
+  // lands between a high surrogate (\uD800-\uDBFF) and its paired low
+  // surrogate (\uDC00-\uDFFF) — e.g. an astral-plane emoji straddling the
+  // boundary — a plain slice bisects the pair and leaves a lone/unpaired
+  // surrogate at the tail, which can render as U+FFFD or otherwise
+  // mis-encode downstream (#2293). Trim one additional unit in that case so
+  // the cut never lands mid-pair.
+  let cutLen = maxLen;
+  const lastCode = escaped.charCodeAt(cutLen - 1);
+  if (lastCode >= 0xd800 && lastCode <= 0xdbff) cutLen -= 1;
+  return `${escaped.slice(0, cutLen)}…[truncated, ${escaped.length} chars]`;
+}
+
 /**
  * Build a safe-for-logs/error-messages summary of a CLI argv array.
  *
@@ -509,31 +555,40 @@ const MAX_LOGGED_ARGV_ELEMENT_LEN = 200;
  * @returns {string} space-joined, sanitized argv summary
  */
 export function sanitizeArgvForLog(cliArgs) {
-  return cliArgs
-    .map((arg) => {
-      const str = String(arg);
-      // eslint-disable-next-line no-control-regex -- intentional: neutralizing C0/DEL/C1 control chars and Unicode bidi-override/format chars is the point of this function
-      const escaped = str.replace(/[\x00-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069]/g, (ch) => {
-        const code = ch.charCodeAt(0);
-        return code <= 0xff ? `\\x${code.toString(16).padStart(2, "0")}` : `\\u${code.toString(16).padStart(4, "0")}`;
-      });
-      if (escaped.length <= MAX_LOGGED_ARGV_ELEMENT_LEN) return escaped;
-      // `.slice()` counts UTF-16 code units, not Unicode code points. If the cut
-      // lands between a high surrogate (\uD800-\uDBFF) and its paired low
-      // surrogate (\uDC00-\uDFFF) — e.g. an astral-plane emoji straddling the
-      // boundary — a plain slice bisects the pair and leaves a lone/unpaired
-      // surrogate at the tail, which can render as U+FFFD or otherwise
-      // mis-encode downstream (#2293). Trim one additional unit in that case
-      // so the cut never lands mid-pair. This does not change
-      // MAX_LOGGED_ARGV_ELEMENT_LEN, the escaping logic above, or the reported
-      // `escaped.length` in the truncation marker — only the slice boundary
-      // itself may shift by at most 1 code unit.
-      let cutLen = MAX_LOGGED_ARGV_ELEMENT_LEN;
-      const lastCode = escaped.charCodeAt(cutLen - 1);
-      if (lastCode >= 0xd800 && lastCode <= 0xdbff) cutLen -= 1;
-      return `${escaped.slice(0, cutLen)}…[truncated, ${escaped.length} chars]`;
-    })
-    .join(" ");
+  return cliArgs.map((arg) => sanitizeAndCap(String(arg), MAX_LOGGED_ARGV_ELEMENT_LEN)).join(" ");
+}
+
+/**
+ * Build a safe-for-error-messages excerpt of the CLI's captured stdout+stderr
+ * output, for embedding directly in a CLI_BACKEND_FAILED error's message
+ * (forge#2355).
+ *
+ * Prior to this fix, the non-zero-exit diagnostic only *logged* the captured
+ * output (`logger.log(diagnostic)` in `runCliBackend` below) and threw a
+ * self-referential message pointing at that log line ("See captured output
+ * above."). `logger.log()` writes to the orchestrating process's own
+ * console/CI stream, which is never persisted into the durable
+ * `~/.forge/runs/*.jsonl` run-log — only the thrown `Error.message` (via
+ * `bin/engine.mjs`'s `reason: e.message` / fail-fast `detail` string) reaches
+ * that persisted record. As a result, the single dominant engine failure mode
+ * (50 of 69 `PHASE_FAILED` events in a 52-run-log audit) carried a reason that
+ * pointed at output the run-log never captured, leaving operators nothing to
+ * diagnose post-hoc. This function embeds a bounded excerpt of the real
+ * output directly in the message instead.
+ *
+ * `output` is raw, untrusted CLI stdout/stderr — the CLI itself echoes
+ * untrusted issue/PR body content it was fed (see the SECURITY note on
+ * `sanitizeArgvForLog` above) — so it carries the identical injection risk
+ * class already hardened for `argvSummary` across #2277/#2292/#2293. This
+ * function reuses the exact same `sanitizeAndCap` escaping/truncation core,
+ * just with a much larger bound (`MAX_LOGGED_OUTPUT_EXCERPT_LEN`) appropriate
+ * for a diagnostic excerpt rather than a short argv summary.
+ *
+ * @param {string} output - combined, already-captured stdout+stderr text
+ * @returns {string} bounded, sanitized excerpt safe to embed in Error.message
+ */
+export function sanitizeOutputExcerptForLog(output) {
+  return sanitizeAndCap(String(output), MAX_LOGGED_OUTPUT_EXCERPT_LEN);
 }
 
 /**
@@ -681,10 +736,26 @@ export function runCliBackend({
         : "No output was captured on stdout or stderr.";
       logger.log(diagnostic);
 
+      // forge#2355: when `hadOutput` is true, embed a bounded/sanitized
+      // excerpt of the actual captured output directly in the thrown
+      // Error's message, rather than only pointing at the `logger.log()`
+      // call above. `logger.log()` writes to the orchestrating process's
+      // console/CI stream — it is NEVER persisted into the durable
+      // `~/.forge/runs/*.jsonl` run-log. Only `e.message` (via
+      // `bin/engine.mjs`'s `reason: e.message` / fail-fast `detail` string,
+      // both of which already interpolate `e.message` verbatim) reaches that
+      // persisted record. Without this, the run-log's `PHASE_FAILED.reason`
+      // carried a self-referential pointer to output that was already gone
+      // by the time anyone read the log — this was the single dominant
+      // engine failure mode (50 of 69 `PHASE_FAILED` events in a 52-run-log
+      // audit — see issue #2355). The `!hadOutput` branch below is
+      // intentionally left unchanged: it was already fixed by #2258/PR #2276
+      // to be self-contained.
+      const outputExcerpt = hadOutput ? sanitizeOutputExcerptForLog(output) : "";
       const err = new Error(
         `claude CLI exited with status ${result.status ?? "?"}${signalPart}. ` +
           (hadOutput
-            ? "See captured output above."
+            ? `Output: ${outputExcerpt}`
             : "No output was captured (stdout and stderr were both empty).") +
           ` Invocation: ${bin} ${argvSummary} (cwd: ${cwd})`,
       );
