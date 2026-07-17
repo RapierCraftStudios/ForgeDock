@@ -255,6 +255,14 @@ async function main() {
       terminal: false,
       terminalReason: null,
       lease: null,
+      // forge#2387 (review finding, PR #2518): third hand-written RunState
+      // literal — matches the complexity: null default in
+      // bin/engine.mjs's freshState() and bin/engine/runlog.mjs's
+      // deriveState(). This value is immediately superseded by a fresh
+      // deriveState(readLog(...)) read at line ~278 before any
+      // reconcile()/entryCondition ever consults it, so the omission was
+      // functionally harmless — kept for shape consistency, not correctness.
+      complexity: null,
     };
     appendEvent(runLogDir, issueNumber, {
       event: "RUN_START",
