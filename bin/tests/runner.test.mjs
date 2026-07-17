@@ -40,6 +40,11 @@ import {
   TOOL_DEFINITIONS,
   buildToolDefinitions,
   derivePhaseId,
+  buildMessagesCreateParams,
+  groupRunsForCacheLocality,
+  createMessageBatch,
+  pollMessageBatchStatus,
+  retrieveMessageBatchResults,
   truncateToolResult,
   isWindowsBashShim,
   resolveBashShell,
@@ -345,6 +350,198 @@ describe("buildToolDefinitions", () => {
     const stillOriginal = TOOL_DEFINITIONS.find((t) => t.name === "report_result").input_schema;
     assert.equal(stillOriginal, original);
     assert.deepEqual(Object.keys(stillOriginal.properties), []);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Prompt-cache-aware scheduling / Batch API (forge#2385)
+// ---------------------------------------------------------------------------
+
+describe("buildMessagesCreateParams", () => {
+  it("converts system to a content-block array with an ephemeral cache_control breakpoint", () => {
+    const params = buildMessagesCreateParams({
+      model: "claude-sonnet-5",
+      systemPrompt: "You are executing the ForgeDock command...",
+      tools: TOOL_DEFINITIONS,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    assert.deepEqual(params.system, [
+      {
+        type: "text",
+        text: "You are executing the ForgeDock command...",
+        cache_control: { type: "ephemeral" },
+      },
+    ]);
+  });
+
+  it("adds an ephemeral cache_control breakpoint to only the LAST tool definition", () => {
+    const params = buildMessagesCreateParams({
+      model: "claude-sonnet-5",
+      systemPrompt: "sys",
+      tools: TOOL_DEFINITIONS,
+      messages: [],
+    });
+    for (let i = 0; i < params.tools.length - 1; i++) {
+      assert.equal(params.tools[i].cache_control, undefined, `tool[${i}] should not have cache_control`);
+    }
+    const last = params.tools[params.tools.length - 1];
+    assert.deepEqual(last.cache_control, { type: "ephemeral" });
+    // The rest of the last tool's fields are preserved unchanged.
+    assert.equal(last.name, TOOL_DEFINITIONS[TOOL_DEFINITIONS.length - 1].name);
+  });
+
+  it("does not mutate the original tools array or its entries", () => {
+    const originalLast = TOOL_DEFINITIONS[TOOL_DEFINITIONS.length - 1];
+    assert.equal(originalLast.cache_control, undefined);
+    buildMessagesCreateParams({
+      model: "claude-sonnet-5",
+      systemPrompt: "sys",
+      tools: TOOL_DEFINITIONS,
+      messages: [],
+    });
+    assert.equal(originalLast.cache_control, undefined, "original TOOL_DEFINITIONS entry must remain unmutated");
+  });
+
+  it("passes model, messages, and max_tokens through (defaulting max_tokens)", () => {
+    const messages = [{ role: "user", content: "hi" }];
+    const params = buildMessagesCreateParams({
+      model: "claude-sonnet-5",
+      systemPrompt: "sys",
+      tools: TOOL_DEFINITIONS,
+      messages,
+    });
+    assert.equal(params.model, "claude-sonnet-5");
+    assert.equal(params.messages, messages);
+    assert.equal(typeof params.max_tokens, "number");
+    assert.ok(params.max_tokens > 0);
+  });
+
+  it("honors an explicit maxTokens override", () => {
+    const params = buildMessagesCreateParams({
+      model: "claude-sonnet-5",
+      systemPrompt: "sys",
+      tools: TOOL_DEFINITIONS,
+      messages: [],
+      maxTokens: 1234,
+    });
+    assert.equal(params.max_tokens, 1234);
+  });
+
+  it("handles an empty tools array without throwing", () => {
+    const params = buildMessagesCreateParams({
+      model: "claude-sonnet-5",
+      systemPrompt: "sys",
+      tools: [],
+      messages: [],
+    });
+    assert.deepEqual(params.tools, []);
+  });
+});
+
+describe("groupRunsForCacheLocality", () => {
+  it("groups runs by phase, preserving within-group relative order", () => {
+    const runs = [
+      { issue: 1, phase: "build" },
+      { issue: 2, phase: "investigate" },
+      { issue: 3, phase: "build" },
+      { issue: 4, phase: "investigate" },
+    ];
+    const grouped = groupRunsForCacheLocality(runs);
+    assert.deepEqual(
+      grouped.map((r) => r.issue),
+      [1, 3, 2, 4],
+    );
+  });
+
+  it("orders groups by first-seen phase", () => {
+    const runs = [
+      { issue: 1, phase: "review" },
+      { issue: 2, phase: "build" },
+      { issue: 3, phase: "review" },
+    ];
+    const grouped = groupRunsForCacheLocality(runs);
+    assert.deepEqual(
+      grouped.map((r) => r.phase),
+      ["review", "review", "build"],
+    );
+  });
+
+  it("preserves arbitrary extra fields on each run descriptor", () => {
+    const runs = [{ issue: 1, phase: "build", extra: { nested: true } }];
+    const grouped = groupRunsForCacheLocality(runs);
+    assert.equal(grouped[0].extra, runs[0].extra);
+  });
+
+  it("returns an empty array for empty/non-array input", () => {
+    assert.deepEqual(groupRunsForCacheLocality([]), []);
+    assert.deepEqual(groupRunsForCacheLocality(null), []);
+    assert.deepEqual(groupRunsForCacheLocality(undefined), []);
+  });
+
+  it("does not mutate the input array", () => {
+    const runs = [
+      { issue: 1, phase: "build" },
+      { issue: 2, phase: "investigate" },
+    ];
+    const copy = [...runs];
+    groupRunsForCacheLocality(runs);
+    assert.deepEqual(runs, copy);
+  });
+});
+
+describe("createMessageBatch / pollMessageBatchStatus / retrieveMessageBatchResults (forge#2385)", () => {
+  // These tests use a hand-rolled fake client — no real @anthropic-ai/sdk
+  // import, no network call, no API key, no billing impact. This mirrors how
+  // the rest of this suite avoids live API calls entirely.
+
+  it("createMessageBatch calls client.messages.batches.create with the requests array", async () => {
+    const created = { id: "batch_123", processing_status: "in_progress" };
+    const createMock = mock.fn(async () => created);
+    const client = { messages: { batches: { create: createMock } } };
+    const requests = [{ custom_id: "req-1", params: { model: "claude-sonnet-5" } }];
+
+    const result = await createMessageBatch(requests, client);
+
+    assert.equal(createMock.mock.callCount(), 1);
+    assert.deepEqual(createMock.mock.calls[0].arguments[0], { requests });
+    assert.equal(result, created);
+  });
+
+  it("pollMessageBatchStatus calls client.messages.batches.retrieve with the batch id", async () => {
+    const batch = { id: "batch_123", processing_status: "ended" };
+    const retrieveMock = mock.fn(async () => batch);
+    const client = { messages: { batches: { retrieve: retrieveMock } } };
+
+    const result = await pollMessageBatchStatus("batch_123", client);
+
+    assert.equal(retrieveMock.mock.callCount(), 1);
+    assert.deepEqual(retrieveMock.mock.calls[0].arguments, ["batch_123"]);
+    assert.equal(result, batch);
+  });
+
+  it("retrieveMessageBatchResults calls client.messages.batches.results with the batch id and returns it verbatim", async () => {
+    const fakeResultsStream = { [Symbol.asyncIterator]: async function* () {} };
+    const resultsMock = mock.fn(async () => fakeResultsStream);
+    const client = { messages: { batches: { results: resultsMock } } };
+
+    const result = await retrieveMessageBatchResults("batch_123", client);
+
+    assert.equal(resultsMock.mock.callCount(), 1);
+    assert.deepEqual(resultsMock.mock.calls[0].arguments, ["batch_123"]);
+    assert.equal(result, fakeResultsStream);
+  });
+
+  it("propagates errors from the underlying client method without swallowing them", async () => {
+    const client = {
+      messages: {
+        batches: {
+          create: mock.fn(async () => {
+            throw new Error("simulated API error");
+          }),
+        },
+      },
+    };
+    await assert.rejects(() => createMessageBatch([], client), /simulated API error/);
   });
 });
 

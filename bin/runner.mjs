@@ -26,6 +26,11 @@
  *   renderSummaryCard(ctx)                  → string
  *   resolveConfiguredDefaultModel(cwd)      → string|null   (forge.yaml agents.default_model, resolved)
  *   derivePhaseId(commandName)              → string|null   (phase id, or null if not phase-shaped)
+ *   buildMessagesCreateParams(opts)         → object         (messages.create() params, cache_control-annotated — forge#2385)
+ *   groupRunsForCacheLocality(runs)         → object[]       (stable same-phase grouping for fleet cache locality — forge#2385)
+ *   createMessageBatch(requests, client)    → Promise<object> (Anthropic Message Batches API — opt-in, unwired — forge#2385)
+ *   pollMessageBatchStatus(batchId, client) → Promise<object> (opt-in, unwired — forge#2385)
+ *   retrieveMessageBatchResults(batchId, client) → Promise<object[]> (opt-in, unwired — forge#2385)
  *   runCommand(opts)                        → Promise<{status, ..., result}>
  *
  * Design notes:
@@ -1198,6 +1203,200 @@ export function derivePhaseId(commandName) {
   return segments.length ? segments[segments.length - 1] : null;
 }
 
+// ---------------------------------------------------------------------------
+// Prompt-cache-aware scheduling / Batch API (forge#2385)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the exact params object passed to `client.messages.create()`, with
+ * Anthropic prompt-caching breakpoints applied to the stable prefix (system
+ * prompt + tool definitions).
+ *
+ * Per-phase system prompts are the full command-spec markdown
+ * (`buildSystemPrompt()`/`buildCliSystemPrompt()`) — 100KB-class for specs
+ * like `work-on.md` — and are byte-identical across every iteration of a
+ * single run's tool-use loop, and across separate runs of the same
+ * command/phase within Anthropic's ~5-minute cache TTL. Likewise
+ * `toolsForRequest` (from `buildToolDefinitions()`) is a fixed small array
+ * that only varies by `report_result`'s substituted schema per phase id —
+ * still stable across all iterations of one run. Both are therefore ideal
+ * `cache_control: {type: "ephemeral"}` breakpoints: the cache write happens
+ * once (first call), and every subsequent call within the TTL reads from
+ * cache instead of re-processing the full prefix as fresh input tokens.
+ *
+ * `system` must be converted from a plain string to a content-block array to
+ * carry `cache_control` (the Anthropic API only accepts cache_control on a
+ * content block, not as a sibling of a bare string `system` field).
+ * `cache_control` on `tools` is placed on the LAST tool definition only —
+ * per Anthropic's caching model a breakpoint caches everything up to and
+ * including the block it's attached to, so one breakpoint at the end of the
+ * tools array covers the entire (stable) tools prefix; adding it to every
+ * tool would waste cache-breakpoint budget (Anthropic caps breakpoints per
+ * request) for no additional benefit.
+ *
+ * This function is a pure, dependency-free extraction so it is directly
+ * unit-testable without mocking the Anthropic SDK or making a network call —
+ * `runCommand()` has no client-injection seam today (unlike the CLI
+ * backend's `spawnFn` seam), so testing the exact request shape requires
+ * either adding such a seam or, as done here, extracting request-building
+ * into a pure function and testing that directly. Mirrors the existing
+ * `buildCliSystemPrompt`/`buildUserMessage`/`buildToolDefinitions` pattern
+ * in this file.
+ *
+ * Does NOT mutate its inputs — `tools` is copied (via map), never mutated in
+ * place, matching the "does not mutate the original TOOL_DEFINITIONS array"
+ * invariant already established and tested for `buildToolDefinitions()`
+ * (forge#2403).
+ *
+ * @param {{model: string, systemPrompt: string, tools: object[], messages: object[], maxTokens?: number}} opts
+ * @returns {{model: string, max_tokens: number, system: object[], tools: object[], messages: object[]}}
+ */
+export function buildMessagesCreateParams({ model, systemPrompt, tools, messages, maxTokens = DEFAULT_MAX_TOKENS }) {
+  const cachedTools =
+    Array.isArray(tools) && tools.length
+      ? tools.map((tool, i) =>
+          i === tools.length - 1 ? { ...tool, cache_control: { type: "ephemeral" } } : tool,
+        )
+      : tools;
+  return {
+    model,
+    max_tokens: maxTokens,
+    system: [{ type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } }],
+    tools: cachedTools,
+    messages,
+  };
+}
+
+/**
+ * Stably group an array of run descriptors by `phase`, preserving each
+ * group's original relative order and the original relative order of groups
+ * (first-seen phase first) — a stable partition, not a sort by any other
+ * key. This is the cache-aware fleet-ordering helper for issue #2385's
+ * ask #2: when a fleet run (e.g. `/orchestrate` or resume-stalled) has
+ * multiple issues queued, processing all same-phase work together — rather
+ * than interleaved by issue — keeps the phase's system-prompt/tools cache
+ * breakpoint warm across issues instead of evicting/rewriting it on every
+ * phase switch (Anthropic's cache TTL is ~5 minutes; interleaving phases
+ * across issues risks the cache going cold between same-phase calls).
+ *
+ * Deliberately generic over the run-descriptor shape: only `phase` is read;
+ * every other field on each element is passed through unchanged. No caller
+ * in this codebase invokes this yet — wiring it into `bin/engine.mjs`'s or
+ * `commands/orchestrate.md`'s scheduler is out of this issue's file scope
+ * (`bin/runner.mjs` only) and is left as a follow-up once #2376's corpus is
+ * available to validate the expected cache-read increase quantitatively.
+ *
+ * @param {{phase: string, [key: string]: *}[]} runs
+ * @returns {{phase: string, [key: string]: *}[]} a new array; `runs` is not mutated
+ */
+export function groupRunsForCacheLocality(runs) {
+  if (!Array.isArray(runs) || runs.length === 0) return [];
+  const groups = new Map();
+  for (const run of runs) {
+    const key = run?.phase;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(run);
+  }
+  return Array.from(groups.values()).flat();
+}
+
+/**
+ * Submit a batch of independent, single-turn Anthropic Message Batches API
+ * requests. Opt-in Batch API lane infrastructure for issue #2385's ask #3
+ * ("an opt-in --batch mode routing non-interactive phases through the
+ * Message Batches API at half price").
+ *
+ * IMPORTANT — architectural scope: `runCommand()`'s loop (see below) is a
+ * MULTI-TURN agentic tool-use loop, where each iteration's request depends
+ * on the previous iteration's LOCAL tool-execution results (`read_file`/
+ * `write_file`/`run_bash` handlers run in this process, not on Anthropic's
+ * infrastructure). The Message Batches API is built for independent,
+ * single-shot requests with no inter-request dependency and up to 24h
+ * completion latency — it cannot transparently replace the full multi-turn
+ * loop for a single phase run. This function (and its siblings below) is
+ * therefore infrastructure for the ask the issue itself actually describes —
+ * batching the SAME iteration of the SAME phase ACROSS MULTIPLE independent,
+ * concurrently-queued fleet runs (e.g. `/orchestrate`/resume-stalled
+ * processing many issues) — not an internal replacement for a single run's
+ * tool loop. Wiring this into `bin/engine.mjs`'s scheduler (which would need
+ * a poll-then-resume async completion pattern it does not yet have) is
+ * explicitly out of this issue's file scope and left as a follow-up.
+ *
+ * Deliberately NOT called from `runCommand()` or any CLI entrypoint in this
+ * PR — merging this function does not change the behavior or billing model
+ * of any existing pipeline run.
+ *
+ * `client` is passed explicitly (not constructed here, not read from a
+ * module-level singleton) so tests can inject a fake object exposing
+ * `client.messages.batches.create(...)` without importing the real
+ * `@anthropic-ai/sdk` or making any network call.
+ *
+ * NOTE for the future integrator: `requests` here mirrors the same
+ * `messages.create()`-shaped params `buildMessagesCreateParams()` produces
+ * (minus `messages` role framing specifics the Batches API requires per
+ * https://docs.anthropic.com/en/api/creating-message-batches) — apply the
+ * same `cache_control` breakpoints for consistency. Any text extracted from
+ * a batch result that could reach a log/error (e.g. a failed-request's error
+ * message) MUST be routed through `sanitizeOutputExcerptForLog()`/
+ * `sanitizeAndCap()` before being logged or embedded in a thrown Error — this
+ * file has 5 prior review findings (#2277/#2292/#2293/#2355/#2360) for
+ * exactly that unsanitized-content defect class; do not add a 6th unsanitized
+ * path when this is eventually wired in.
+ *
+ * @param {object[]} requests - array of `{custom_id: string, params: object}` batch request entries
+ * @param {{messages: {batches: {create: Function}}}} client - an Anthropic SDK client (or a test double exposing the same shape)
+ * @returns {Promise<object>} the created batch object (as returned by the SDK)
+ */
+export async function createMessageBatch(requests, client) {
+  return client.messages.batches.create({ requests });
+}
+
+/**
+ * Poll the current processing status of a previously-submitted Message
+ * Batch. See `createMessageBatch()`'s doc comment for the architectural
+ * scope of the Batch API lane this belongs to (forge#2385).
+ *
+ * `client` is passed explicitly for the same testability reason as
+ * `createMessageBatch()` — no module-level client, no real SDK import
+ * required in tests.
+ *
+ * @param {string} batchId
+ * @param {{messages: {batches: {retrieve: Function}}}} client
+ * @returns {Promise<object>} the batch object (as returned by the SDK), including `processing_status`
+ */
+export async function pollMessageBatchStatus(batchId, client) {
+  return client.messages.batches.retrieve(batchId);
+}
+
+/**
+ * Retrieve the per-request results of a Message Batch once processing has
+ * completed. See `createMessageBatch()`'s doc comment for the architectural
+ * scope of the Batch API lane this belongs to (forge#2385).
+ *
+ * Callers MUST check `pollMessageBatchStatus()`'s `processing_status` is
+ * `"ended"` before calling this — an in-progress batch's results are not yet
+ * available and the SDK will reject the request.
+ *
+ * `client` is passed explicitly for the same testability reason as
+ * `createMessageBatch()` — no module-level client, no real SDK import
+ * required in tests.
+ *
+ * NOTE: the real `@anthropic-ai/sdk`'s `client.messages.batches.results()`
+ * returns an async-iterable JSONL stream, not a plain array — this wrapper
+ * intentionally does not reshape that, it returns whatever `client`'s
+ * `results()` method returns verbatim (an async iterable for the real SDK, a
+ * plain array/value for a test double). The future integrator wiring this in
+ * must iterate it accordingly (`for await (const result of ...)`), not
+ * assume array methods are available.
+ *
+ * @param {string} batchId
+ * @param {{messages: {batches: {results: Function}}}} client
+ * @returns {Promise<*>} whatever `client.messages.batches.results()` returns (an async iterable for the real SDK)
+ */
+export async function retrieveMessageBatchResults(batchId, client) {
+  return client.messages.batches.results(batchId);
+}
+
 /**
  * Resolve a tool-supplied path against cwd unless it is already absolute.
  * @param {string} cwd
@@ -1919,13 +2118,14 @@ export async function runCommand(opts = {}) {
   while (iterations < maxIterations) {
     iterations++;
 
-    const response = await client.messages.create({
-      model,
-      max_tokens: DEFAULT_MAX_TOKENS,
-      system: systemPrompt,
-      tools: toolsForRequest,
-      messages,
-    });
+    // forge#2385: cache_control breakpoints on the stable system-prompt +
+    // tool-definitions prefix — see buildMessagesCreateParams()'s doc
+    // comment for why this is extracted as a pure function rather than
+    // inlined here (no client-injection seam exists to unit-test the inline
+    // shape directly).
+    const response = await client.messages.create(
+      buildMessagesCreateParams({ model, systemPrompt, tools: toolsForRequest, messages }),
+    );
 
     // Accumulate usage — guard each field for null/undefined (SDK omits
     // cache fields when prompt caching is not active).
