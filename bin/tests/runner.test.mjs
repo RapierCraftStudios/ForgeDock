@@ -1152,16 +1152,16 @@ describe("runCliBackend argv safety", () => {
     // within the same running process on Windows).
     //
     // node's own CLI parser rejects the fixed 3rd argv element
-    // ("--dangerously-skip-permissions") as an unrecognized flag and exits
-    // non-zero — which is itself strong affirmative evidence of correct argv
-    // separation: the parser named that exact 3rd token as the "bad option"
-    // *distinct* from the 2nd (message) token, proving all three array
-    // elements arrived as separate, unmangled OS-level argv entries rather
-    // than being concatenated/re-tokenized by an intermediate shell. The
-    // decisive assertion, though, is simpler and platform-independent: the
-    // injection payload's side effect (creating a marker file via $(...))
-    // must never occur, because runCliBackend never hands the message to a
-    // shell in the first place.
+    // ("--output-format", added by issue #2398's usage-parsing change) as an
+    // unrecognized flag and exits non-zero — which is itself strong
+    // affirmative evidence of correct argv separation: the parser named that
+    // exact 3rd token as the "bad option" *distinct* from the 2nd (message)
+    // token, proving all array elements arrived as separate, unmangled
+    // OS-level argv entries rather than being concatenated/re-tokenized by an
+    // intermediate shell. The decisive assertion, though, is simpler and
+    // platform-independent: the injection payload's side effect (creating a
+    // marker file via $(...)) must never occur, because runCliBackend never
+    // hands the message to a shell in the first place.
     const shimDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-injection-"));
     const injectionMarkerPath = join(shimDir, "INJECTED");
     const maliciousMessage =
@@ -1201,7 +1201,7 @@ describe("runCliBackend argv safety", () => {
     // element as a distinct, unmangled token — proving argv separation was
     // preserved end-to-end (no shell re-tokenized/concatenated the array).
     const output = logLines.join("\n");
-    assert.match(output, /--dangerously-skip-permissions/);
+    assert.match(output, /--output-format/);
   });
 });
 
@@ -1303,13 +1303,15 @@ describe("runCliBackend content passthrough (issue #2029, updated for #2019)", (
       // The exact content reaching the CLI invocation now includes the
       // system-prompt file flag — this is the fix for BUG-1 / #2019.
       assert.deepStrictEqual(capturedArgv.slice(0, 2), ["--print", message]);
-      assert.equal(capturedArgv[2], "--append-system-prompt-file");
-      capturedSystemPromptPath = capturedArgv[3];
+      assert.equal(capturedArgv[2], "--output-format");
+      assert.equal(capturedArgv[3], "json");
+      assert.equal(capturedArgv[4], "--append-system-prompt-file");
+      capturedSystemPromptPath = capturedArgv[5];
       assert.ok(
         typeof capturedSystemPromptPath === "string" && capturedSystemPromptPath.length > 0,
         "argv must include a system-prompt file path",
       );
-      assert.equal(capturedArgv[4], "--dangerously-skip-permissions");
+      assert.equal(capturedArgv[6], "--dangerously-skip-permissions");
 
       // The file existed AT THE TIME the CLI process ran (observed by the
       // recorder during the spawn, before runCliBackend's finally-block
@@ -1370,7 +1372,13 @@ describe("runCliBackend content passthrough (issue #2029, updated for #2019)", (
 
       assert.equal(result.status, "complete");
       const capturedArgv = JSON.parse(readFileSync(captureFile, "utf-8"));
-      assert.deepStrictEqual(capturedArgv, ["--print", message, "--dangerously-skip-permissions"]);
+      assert.deepStrictEqual(capturedArgv, [
+        "--print",
+        message,
+        "--output-format",
+        "json",
+        "--dangerously-skip-permissions",
+      ]);
     } finally {
       rmSync(shimDir, { recursive: true, force: true });
     }
@@ -1422,7 +1430,7 @@ describe("runCliBackend content passthrough (issue #2029, updated for #2019)", (
       }, /CLI_BACKEND_FAILED|exited with status/);
 
       const capturedArgv = JSON.parse(readFileSync(captureFile, "utf-8"));
-      capturedSystemPromptPath = capturedArgv[3];
+      capturedSystemPromptPath = capturedArgv[5];
       assert.ok(typeof capturedSystemPromptPath === "string" && capturedSystemPromptPath.length > 0);
     } finally {
       rmSync(shimDir, { recursive: true, force: true });
@@ -2032,6 +2040,197 @@ describe("runCliBackend spawnFn seam (issue #2033)", () => {
         }),
       /Failed to invoke claude CLI/,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runCliBackend — token usage parsing from --output-format json (issue #2398)
+//
+// #2377/PR #2396 wired real per-phase usage recording for the API backend
+// into bin/engine.mjs's run-log events but explicitly scoped out the CLI
+// backend, which always returned `usage: null`. This closes that gap:
+// runCliBackend() now requests `--output-format json` and, on a successful
+// exit, parses the CLI's single-result JSON envelope for a top-level `usage`
+// object. These tests use the spawnFn injection seam (issue #2033) to
+// control the exact stdout the "CLI" returns, without needing a real
+// fake-binary shim.
+// ---------------------------------------------------------------------------
+
+describe("runCliBackend usage parsing from --output-format json (issue #2398)", () => {
+  it("requests --output-format json in cliArgs", () => {
+    let capturedArgv;
+    const spawnFn = (bin, argv) => {
+      capturedArgv = argv;
+      return { status: 0, stdout: "ok", stderr: "", error: undefined };
+    };
+
+    runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2398",
+      args: ["2398"],
+      cwd: TMP,
+      logger: { log: () => {} },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.ok(capturedArgv.includes("--output-format"));
+    assert.equal(capturedArgv[capturedArgv.indexOf("--output-format") + 1], "json");
+  });
+
+  it("populates usage from a valid JSON envelope with a usage object", () => {
+    const envelope = JSON.stringify({
+      type: "result",
+      subtype: "success",
+      result: "Hi! Done.",
+      usage: {
+        input_tokens: 2,
+        output_tokens: 31,
+        cache_creation_input_tokens: 11630,
+        cache_read_input_tokens: 20334,
+      },
+    });
+    const spawnFn = () => ({ status: 0, stdout: envelope, stderr: "", error: undefined });
+
+    const loggedLines = [];
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2398",
+      args: ["2398"],
+      cwd: TMP,
+      logger: { log: (line) => loggedLines.push(line) },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.deepStrictEqual(result.usage, {
+      input_tokens: 2,
+      output_tokens: 31,
+      cache_creation_input_tokens: 11630,
+      cache_read_input_tokens: 20334,
+    });
+    // Human-readable `.result` string is logged, not the raw JSON blob.
+    assert.ok(
+      loggedLines.some((line) => line === "Hi! Done."),
+      "the parsed envelope's .result string must be logged, not the raw JSON",
+    );
+    assert.ok(
+      !loggedLines.some((line) => line.includes('"type":"result"')),
+      "the raw JSON envelope must never be logged verbatim",
+    );
+  });
+
+  it("normalizes a partial usage object with per-field ?? 0 (mirrors the API-backend accumulator)", () => {
+    // Only input_tokens/output_tokens present — no cache fields, as when
+    // prompt caching is not active (mirrors the SDK's own omission behavior).
+    const envelope = JSON.stringify({
+      result: "done",
+      usage: { input_tokens: 5, output_tokens: 10 },
+    });
+    const spawnFn = () => ({ status: 0, stdout: envelope, stderr: "", error: undefined });
+
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2398",
+      args: ["2398"],
+      cwd: TMP,
+      logger: { log: () => {} },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.deepStrictEqual(result.usage, {
+      input_tokens: 5,
+      output_tokens: 10,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    });
+  });
+
+  it("degrades to usage: null when the JSON envelope has no usage field", () => {
+    const envelope = JSON.stringify({ type: "result", result: "done, no usage field" });
+    const spawnFn = () => ({ status: 0, stdout: envelope, stderr: "", error: undefined });
+
+    const loggedLines = [];
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2398",
+      args: ["2398"],
+      cwd: TMP,
+      logger: { log: (line) => loggedLines.push(line) },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.equal(result.status, "complete");
+    assert.equal(result.usage, null, "usage must degrade to null, not throw, when absent from the envelope");
+    assert.ok(loggedLines.some((line) => line === "done, no usage field"));
+  });
+
+  it("degrades to usage: null when stdout is non-JSON plain text (older CLI without --output-format support)", () => {
+    const plainText = "Hi! ForgeDock's loaded up and ready.";
+    const spawnFn = () => ({ status: 0, stdout: plainText, stderr: "", error: undefined });
+
+    const loggedLines = [];
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2398",
+      args: ["2398"],
+      cwd: TMP,
+      logger: { log: (line) => loggedLines.push(line) },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.equal(result.status, "complete");
+    assert.equal(result.usage, null, "usage must degrade to null on non-JSON output — no crash");
+    // Raw output is still logged for human readability when parsing fails.
+    assert.ok(loggedLines.some((line) => line === plainText));
+  });
+
+  it("degrades to usage: null on malformed/truncated JSON without throwing", () => {
+    const truncated = '{"type":"result","result":"partial","usage":{"input_tok';
+    const spawnFn = () => ({ status: 0, stdout: truncated, stderr: "", error: undefined });
+
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2398",
+      args: ["2398"],
+      cwd: TMP,
+      logger: { log: () => {} },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.equal(result.status, "complete");
+    assert.equal(result.usage, null);
+  });
+
+  it("non-zero exit diagnostics still operate on raw captured output, not JSON-parsed", () => {
+    // The error/diagnostic path (result.status !== 0) must never attempt to
+    // JSON-parse output or gate its behavior on parse success — it always
+    // used raw stdout+stderr and must continue to do so unchanged.
+    const rawErrorOutput = "some non-JSON crash text from an older CLI";
+    const spawnFn = () => ({ status: 1, stdout: rawErrorOutput, stderr: "", error: undefined });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2398",
+        args: ["2398"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown);
+    assert.equal(thrown.code, "CLI_BACKEND_FAILED");
+    assert.match(thrown.message, new RegExp(rawErrorOutput.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   });
 });
 
