@@ -306,7 +306,7 @@ function renderFocusStrip(agent, spinnerChar) {
     return isCurrent ? `▸ ${bold(marker)}` : `  ${marker}`;
   });
 
-  const header = `#${agent.issue} · ${agent.branch ?? "—"} · PR ${agent.pr ?? "—"}`;
+  const header = `#${agent.issue} · ${stripAnsi(agent.branch ?? "—")} · PR ${agent.pr ?? "—"}`;
   const lastEvent =
     agent.runLog && agent.runLog.present
       ? `last event  seq ${agent.runLog.seq}`
