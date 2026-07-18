@@ -214,6 +214,32 @@ describe("stripAnsi", () => {
   });
 
   // -------------------------------------------------------------------------
+  // C1 single-byte CSI introducer (forge#2595 — the remaining C1 (0x80-0x9F)
+  // introducer not covered by the forge#2549 single-byte fix, which handled
+  // OSC/DCS/APC/PM/SOS but explicitly left CSI's C1 form (0x9b) out of scope)
+  // -------------------------------------------------------------------------
+
+  it("removes C1 CSI (0x9b) SGR sequences", () => {
+    assert.equal(stripAnsi("abc\x9b31mRED\x9b0m def"), "abcRED def");
+  });
+
+  it("removes C1 CSI (0x9b) non-SGR sequences (cursor movement)", () => {
+    assert.equal(stripAnsi("abc\x9b2Adef"), "abcdef");
+  });
+
+  it("removes C1 CSI (0x9b) sequences with no parameters", () => {
+    assert.equal(stripAnsi("a\x9bKb"), "ab");
+  });
+
+  it("removes mixed 7-bit CSI + C1 CSI sequences in one string", () => {
+    assert.equal(stripAnsi("\x1b[1ma\x9b31mb\x1b[0m"), "ab");
+  });
+
+  it("removes mixed C1 CSI + C1 OSC sequences in one string", () => {
+    assert.equal(stripAnsi("a\x9b1mb\x9d8;;url\x07c"), "abc");
+  });
+
+  // -------------------------------------------------------------------------
   // Fe-class single/two-byte forms (forge#2585 — ESC + one intermediate/final
   // byte, no payload, no terminator: RIS/DECSC/DECRC/IND/NEL/RI/SS2/SS3/
   // charset designators/keypad mode)

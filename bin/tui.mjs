@@ -707,11 +707,12 @@ export function table(
 
 /**
  * Strip ANSI/terminal escape sequences from a string, returning only visible
- * text. Covers CSI (`\x1b[...letter`, e.g. SGR color codes, cursor movement)
- * and all five ECMA-48 "string-type" introducers that can appear in
- * untrusted input rendered into the operator's terminal (a GitHub comment/
- * issue body, via watch.mjs's `renderDetailView()`), in both their 7-bit
- * two-byte (`ESC` + letter) and 8-bit single-byte C1 control-code forms:
+ * text. Covers CSI (`\x1b[...letter` 7-bit, or the single-byte C1 `\x9b`
+ * form — e.g. SGR color codes, cursor movement) and all five ECMA-48
+ * "string-type" introducers that can appear in untrusted input rendered
+ * into the operator's terminal (a GitHub comment/issue body, via
+ * watch.mjs's `renderDetailView()`), in both their 7-bit two-byte
+ * (`ESC` + letter) and 8-bit single-byte C1 control-code forms:
  *   - OSC (`\x1b]` / C1 `\x9d`) — OSC 8 hyperlinks, OSC 52 clipboard writes,
  *     OSC 0/2 window-title sets
  *   - DCS (`\x1bP` / C1 `\x90`) — device control strings
@@ -727,7 +728,11 @@ export function table(
  * to end-of-string rather than passed through, since a truncated terminator
  * must not leave the escape live. The C1 single-byte forms are honored by
  * some terminal emulators/locales even though most default configurations
- * treat raw C1 bytes as non-printing garbage — see forge#2549.
+ * treat raw C1 bytes as non-printing garbage — see forge#2549. CSI (`\x9b`)
+ * is part of the same C1 control range (0x80-0x9F) as the five string-type
+ * introducers above, but follows CSI's own parameter/final-byte grammar
+ * (`[0-9;]*` + final letter) rather than the BEL/ST-terminated string-type
+ * grammar — see forge#2595.
  *
  * Also strips the third structural shape distinct from CSI and the
  * string-type introducers above: `ESC` followed by a single intermediate/
@@ -752,6 +757,7 @@ export function stripAnsi(s) {
     .replace(/\x1b[\]P_^X][^\x07\x1b]*(?:\x07|\x1b\\)?/g, "")
     .replace(/[\x90\x9d\x9e\x9f\x98][^\x07\x9c]*(?:\x07|\x9c)?/g, "")
     .replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")
+    .replace(/\x9b[0-9;]*[A-Za-z]/g, "")
     .replace(/\x1b[()*+\-./][0-9A-Za-z@]/g, "")
     .replace(/\x1b[c78DEMNO=>]/g, "");
 }
