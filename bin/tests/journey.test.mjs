@@ -1511,11 +1511,17 @@ describe("forge (Act II)", () => {
     const foreignTmp = manifestPath + ".tmp";
     writeFileSync(foreignTmp, "FOREIGN PROCESS LEFTOVER", "utf-8");
 
-    const { ctx, w } = stubCtx({ home });
+    // linkStrategy "copy" forces the copy-fallback path deterministically
+    // (same technique used elsewhere in this file, e.g. line ~1158) — only
+    // the copy path calls recordCopy()/sets manifestChanged, so this is
+    // required for the manifest write under test to actually happen on
+    // platforms where symlinks succeed (e.g. Linux CI), not just on
+    // Windows-without-Developer-Mode where copy-fallback happens anyway.
+    const { ctx, w } = stubCtx({ home, linkStrategy: "copy" });
     ctx.forgeHome = forgeHome;
     const res = await forge(ctx);
 
-    assert.equal(res.installed + res.copied, 1, "the file should be freshly placed (symlinked or copy-fallback)");
+    assert.equal(res.copied, 1, "the file should be freshly copied");
     assert.ok(!w.text.includes("manifest not saved"), "manifest save should succeed");
     const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
     assert.equal(manifest.files["a.md"], true, "manifest should be written normally");
@@ -1543,11 +1549,15 @@ describe("forge (Act II)", () => {
     const tmpSibling = manifestPath + "." + process.pid + ".tmp";
     mkdirSyncFs(tmpSibling, { recursive: true });
 
-    const { ctx, w } = stubCtx({ home });
+    // linkStrategy "copy" forces the copy-fallback path deterministically —
+    // see the comment in the preceding test for why this is required for
+    // manifestChanged to actually be set (and saveCopiedManifest to run) on
+    // every platform, not just Windows-without-Developer-Mode.
+    const { ctx, w } = stubCtx({ home, linkStrategy: "copy" });
     ctx.forgeHome = forgeHome;
     const res = await forge(ctx);
 
-    assert.equal(res.installed + res.copied, 1, "the file copy itself should still succeed (symlinked or copy-fallback)");
+    assert.equal(res.copied, 1, "the file copy itself should still succeed");
     assert.ok(
       w.text.includes("manifest not saved"),
       "forge() should surface the manifest save failure instead of crashing",
