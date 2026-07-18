@@ -8,6 +8,27 @@ install: core
 
 ## Phase 1: Resolve the Issue Set
 
+### Batch-Start Timestamp (T0) — capture FIRST, before any resolution
+
+<!-- Added: forge#2628 -->
+
+Before parsing `$ARGUMENTS` or resolving anything, capture the batch's start timestamp once:
+
+```bash
+BATCH_T0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+echo "Batch start T0: ${BATCH_T0}"
+```
+
+`BATCH_T0` is the anchor for the run-spawned-vs-backlog cascade distinction used throughout this
+file's "Cascade / Review-Finding Resolution" section below and by `phase-4-execution.md` Step 4C.
+Persist it alongside `ORIGINATING_QUERY_KIND`/`ORIGINATING_QUERY_PATTERN`/`ORIGINATING_QUERY_ARGS`
+(see "Predicate Persistence" below) in the batch's in-memory/report state so Phase 4 reads the
+same value this step captured — it must never independently re-derive its own T0 from "now" at
+whatever later moment Step 4A.pre happens to run, which would silently widen the window past what
+this run actually spawned. If a session resumes mid-run without `BATCH_T0` in context (e.g. after
+compaction), Phase 4's Step 4A.pre falls back to capturing its own timestamp — see that section's
+note — but this is a degraded fallback, not the normal path.
+
 Parse `$ARGUMENTS` to determine which issues to work on:
 
 ### Input Patterns
@@ -21,19 +42,57 @@ Parse `$ARGUMENTS` to determine which issues to work on:
 | `fast-lane` or `fast` | All open fast-lane issues (no milestone, bugs/fixes) |
 | `priority:P0` or `priority:P1` | All open issues with that priority label (matches both `priority:P<n>` and bare `P<n>` on the target repo — see "Priority label schema" note below) |
 | `mcp:fast` or `n8n:next 3` | Repo-scoped queries |
-| `cascade`, `review-findings`, or `findings` (optionally `--include-deferred` / `--allow-gen2`) | All open `review-finding` issues (default repo, or repo-scoped e.g. `mcp:cascade`). See "Cascade / Review-Finding Resolution" below — by default this admits up to `orchestration.cascade.max_generation` (default 1, i.e. generation ≥ 2 `PERMANENT_DEFERRED` findings excluded); the CLI flags force `unlimited` for this one run, overriding config. <!-- Added: forge#2231, forge#2234 -->|
+| `cascade`, `review-findings`, or `findings` (optionally `--include-deferred` / `--allow-gen2` / `--include-backlog`) | `review-finding` issues created at/after this batch's T0 (default repo, or repo-scoped e.g. `mcp:cascade`) — i.e. empty unless combined with a run that has already spawned findings, or `--include-backlog` is passed. See "Cascade / Review-Finding Resolution" below for the run-spawned-vs-backlog distinction and the generation-depth admission on top of it (`orchestration.cascade.max_generation`, default 1). <!-- Added: forge#2231, forge#2234, forge#2628 -->|
 | `<slug>` (no keyword) | Try milestone first, then fall back to label search. If both resolve to zero issues, report near-miss label candidates instead of silently resolving to nothing — see "Near-Miss Suggestion" below. <!-- Added: forge#2231 -->|
 
 ### Cascade / Review-Finding Resolution
 
-<!-- Added: forge#2231 -->
+<!-- Added: forge#2231, T0-scoping added: forge#2628 -->
 
-When the input matches `cascade`, `review-findings`, or `findings` (case-insensitive, optionally repo-prefixed), resolve to open `review-finding`-labeled issues instead of a milestone or plain label search, then apply a generation depth check so the default set here matches what Step 4C would actually admit:
+When the input matches `cascade`, `review-findings`, or `findings` (case-insensitive, optionally repo-prefixed), resolve to open `review-finding`-labeled issues instead of a milestone or plain label search, then apply a generation depth check so the default set here matches what Step 4C would actually admit.
+
+**Two modes — run-spawned cascade (default) vs. whole-backlog sweep (explicit opt-in only):**
+
+There are two different things an operator can mean by "cascade," and this resolve step must not
+silently conflate them:
+
+- **(a) Run-spawned cascade (default)** — recursively work the `review-finding` issues *this batch*
+  produces. Bounded to findings created at/after `BATCH_T0` (captured at the very top of this file,
+  before any resolution runs). This is the safe default: combined with an ordinary scoped batch
+  (e.g. `<no:milestone set>` + `cascade`), it expresses "follow through on what this run's own
+  `/review-pr` agents find" — not "also adopt every other open finding already sitting in the repo."
+  Because `BATCH_T0` is captured at batch start, a bare `cascade` invocation with nothing yet spawned
+  legitimately resolves to an **empty set** at Phase 1 — new findings admitted by this mode are picked
+  up as they're created via `phase-4-execution.md` Step 4C's mid-run sweep (which uses the same
+  `BATCH_T0` anchor), not via this one-shot Phase 1 fetch.
+- **(b) Whole-backlog sweep (explicit opt-in only)** — work every open `review-finding` in the repo,
+  regardless of when it was created. This is what the pre-#2628 default silently did on every
+  `cascade`/`review-findings`/`findings` invocation. It is still available, but now requires the
+  explicit `--include-backlog` flag (e.g. `cascade --include-backlog`, `review-findings
+  --include-backlog`) — adding `cascade` to an already-scoped batch never implies it.
 
 ```bash
-# Fetch all open review-finding issues, including body (needed for the generation check below —
-# unlike a plain label search, we cannot skip straight to {number,title,labels,milestone} here).
-CASCADE_CANDIDATES=$(gh issue list {GH_FLAG} --label "review-finding" --state open --limit 500 \
+# BATCH_T0 was captured at the top of this file (Phase 1, "Batch-Start Timestamp (T0)"),
+# before any resolution ran — reuse it here, do not recapture.
+
+# --include-backlog opts into mode (b): the full open review-finding backlog, no created-date
+# filter. Without it (the default, mode (a)), only findings created at/after BATCH_T0 are fetched
+# — i.e. issues this batch itself could plausibly have spawned so far.
+if echo "{ARGUMENTS}" | grep -qE -- '--include-backlog'; then
+  CASCADE_MODE="backlog-sweep"
+  CASCADE_SEARCH="label:review-finding"
+else
+  CASCADE_MODE="run-spawned"
+  CASCADE_SEARCH="label:review-finding created:>=${BATCH_T0}"
+fi
+echo "Cascade mode: ${CASCADE_MODE} (search: \"${CASCADE_SEARCH}\")"
+
+# Fetch matching open review-finding issues, including body (needed for the generation check
+# below — unlike a plain label search, we cannot skip straight to {number,title,labels,milestone}
+# here). --search (not --label) is required to combine the label filter with the created-date
+# filter — verified working: `gh issue list --state open --search "label:review-finding
+# created:>=$T0"`.
+CASCADE_CANDIDATES=$(gh issue list {GH_FLAG} --state open --search "${CASCADE_SEARCH}" --limit 500 \
   --json number,title,labels,milestone,body)
 
 # --- Cascade admission policy resolution (forge#2234) ---
@@ -106,14 +165,17 @@ echo "$CASCADE_CANDIDATES" | jq -c '.[]' | while IFS= read -r FINDING; do
 done
 ```
 
+**Two independent filters apply, in sequence**: first the T0-vs-backlog *time* filter (`CASCADE_SEARCH` above — which issues are even fetched), then the generation *depth* filter below (which of the fetched issues are admitted). They answer different questions — "how far back in time" vs. "how many cascade hops deep" — and either can be widened independently of the other.
+
 **Generation > `max_generation` findings are excluded by default** by the loop above — a `review-finding` issue whose *source* chain is deeper than `orchestration.cascade.max_generation` (default: 1, i.e. generation ≥ 2 excluded — the pre-#2234 behavior, unchanged when the section is absent) is normally deferred permanently (`PERMANENT_DEFERRED`) by Step 4C's own absolute check. That cap is an **autonomy guard**, not a human-request guard: it exists to stop an unattended run from cascading forever, not to block an operator who explicitly asked for this exact bucket of work. See `phase-4-execution.md` Step 4C rule 1 and the reworded anti-pattern note for the full rationale.
 
-This resolve step is a human-requested entry point (the operator typed `cascade`/`review-findings`/`findings` directly), so it honors an explicit override:
+This resolve step is a human-requested entry point (the operator typed `cascade`/`review-findings`/`findings` directly), so it honors explicit overrides for both filters:
 
-- `--include-deferred` or `--allow-gen2` appended to the input (e.g. `cascade --allow-gen2`, `review-findings --include-deferred`): forces `MAX_GENERATION="unlimited"` above, admitting every generation into the resolved set for this run. Without either flag, `orchestration.cascade.max_generation` (default 1) governs how deep the resolved set reaches — the flags/config only change what this **explicit** request is allowed to touch; they do not relax Step 4C's autonomous behavior for anything spawned *during* this run (see "Recursion safety" below).
-- **`orchestration.cascade.max_generation`** (forge#2234) is the config-driven successor to the CLI flags above and supports a granularity the flags cannot: `max_generation: 3` admits generations 1-3 and stops at 4, expressing "admit gen-2, stop at gen-3" directly — something an all-or-nothing `--allow-gen2` flag could never say. The flags remain available and, when passed, override config with `unlimited` for that one invocation.
+- `--include-backlog` (forge#2628): widens the **time** filter — mode (b) above, whole open backlog regardless of `BATCH_T0`. Independent of the generation-depth flags below; combine both to get "everything, at every depth" (e.g. `cascade --include-backlog --allow-gen2`).
+- `--include-deferred` or `--allow-gen2` appended to the input (e.g. `cascade --allow-gen2`, `review-findings --include-deferred`): widens the **depth** filter — forces `MAX_GENERATION="unlimited"` above, admitting every generation into the resolved set for this run. Without either flag, `orchestration.cascade.max_generation` (default 1) governs how deep the resolved set reaches — the flags/config only change what this **explicit** request is allowed to touch; they do not relax Step 4C's autonomous behavior for anything spawned *during* this run (see "Recursion safety" below).
+- **`orchestration.cascade.max_generation`** (forge#2234) is the config-driven successor to the CLI depth flags above and supports a granularity the flags cannot: `max_generation: 3` admits generations 1-3 and stops at 4, expressing "admit gen-2, stop at gen-3" directly — something an all-or-nothing `--allow-gen2` flag could never say. The flags remain available and, when passed, override config with `unlimited` for that one invocation. There is no equivalent config-driven lever for the time filter — `--include-backlog` is the only way to widen it, deliberately, since a config default that silently re-adopts the whole backlog would reintroduce exactly the bug this section fixes.
 
-**Recursion safety (unchanged)**: findings spawned *during* this run by its own sweep agents are still never re-swept, regardless of whether `--include-deferred`/`--allow-gen2`/`orchestration.cascade.max_generation` was in effect at resolve time — see `phase-4-execution.md` Step 4C rules and the recursion-safety note near the anti-patterns list. The override above only widens what this one resolve step admits from the *pre-existing* open issue set; it has no effect on Step 4C's in-run admission logic.
+**Recursion safety (unchanged)**: findings spawned *during* this run by its own sweep agents are still never re-swept, regardless of whether `--include-backlog`/`--include-deferred`/`--allow-gen2`/`orchestration.cascade.max_generation` was in effect at resolve time — see `phase-4-execution.md` Step 4C rules and the recursion-safety note near the anti-patterns list. The overrides above only widen what this one resolve step admits from the *pre-existing* open issue set; they have no effect on Step 4C's in-run admission logic.
 
 ### Near-Miss Suggestion
 
@@ -148,6 +210,8 @@ import("{REPO_PATH}/bin/engine/resolve.mjs").then(({ classifyInputPattern }) => 
 This mirrors `bin/engine/resolve.mjs`'s `classifyInputPattern` — a typed, unit-tested reference implementation of the same literal-vs-query rule table shown here (see that file's docstring). As with `admission.mjs` for cascade policy, the two must stay in sync by hand: any change to which patterns count as `literal` vs `query` in this table must be mirrored in `resolve.mjs`, and vice versa.
 
 Persist the result (`kind`, `pattern`, `args`) next to the resolved issue-number list in the batch's in-memory/report state — e.g. `ORIGINATING_QUERY_KIND`, `ORIGINATING_QUERY_PATTERN`, `ORIGINATING_QUERY_ARGS`. Phase 4's re-resolution step (see `phase-4-execution.md` Step 4B) reads these three values; it never re-derives them from `$ARGUMENTS` a second time. If `kind` is `literal`, Phase 4 MUST NOT attempt to re-resolve — the list of numbers already resolved here IS the complete intent.
+
+**`BATCH_T0` is persisted the same way** (forge#2628) — alongside these three values, not as a separate mechanism. Phase 4's Step 4A.pre reads the persisted `BATCH_T0` for Step 4C's run-spawned-cascade time filter (see that section); it must not capture a fresh "now" of its own, which would silently widen the admitted window past what this run actually spawned between Phase 1 and Phase 4's start.
 
 ### Fetch the issues
 
