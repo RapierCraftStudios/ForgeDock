@@ -1719,6 +1719,67 @@ describe("forge (Act II)", () => {
     assert.ok(existsSync(legacyTmp), "the legacy plain .tmp (no pid segment) must not be swept");
   });
 
+  it("forge()'s final manifest save preserves a concurrent process's own manifest change instead of last-writer-wins overwriting it (forge#2614)", async () => {
+    // #2599/#2609 fixed the tmp-file *write-path* race (concurrent forge()
+    // invocations no longer collide on the same tmp filename), but left the
+    // manifest's logical *content* racy: forge() loads the manifest once at
+    // the start of the run and writes the whole in-memory object back at the
+    // end, so a second process's manifest.files change — saved between this
+    // run's load and its own final save — would previously be silently
+    // dropped. This test simulates that window directly (matching this
+    // suite's convention, e.g. the #2599/#2600/#2612 tests above, of
+    // reproducing a concurrent process's on-disk effect rather than
+    // orchestrating true OS-level concurrency): give this run many files to
+    // copy so its loop spans many await points, and inject the "other
+    // process's" manifest write via a macrotask timer so it lands on disk
+    // sometime during that loop — well before this run's final save.
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-merge-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-merge-src-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    const fileCount = 25;
+    for (let i = 0; i < fileCount; i++) {
+      writeFileSync(join(forgeHome, "commands", `f${i}.md`), `content ${i}`, "utf-8");
+    }
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const manifestPath = join(home, ".claude", "forgedock", "copied-commands.json");
+    mkdirSyncFs(join(home, ".claude", "forgedock"), { recursive: true });
+    // Seed the manifest with the state this run will load at startup.
+    writeFileSync(manifestPath, JSON.stringify({ version: 1, files: {} }, null, 2) + "\n", "utf-8");
+
+    // linkStrategy "copy" forces the copy-fallback path deterministically —
+    // same rationale as the sibling manifest tests above (recordCopy() only
+    // runs, and manifestChanged only gets set, on the copy path on platforms
+    // where symlinks succeed, e.g. Linux CI).
+    const { ctx, w } = stubCtx({ home, linkStrategy: "copy" });
+    ctx.forgeHome = forgeHome;
+
+    const forgePromise = forge(ctx);
+    // Simulate a concurrent forge() invocation that loaded the same
+    // manifest, added its own entry, and saved — after this run's own
+    // initial load but before this run's final save.
+    setTimeout(() => {
+      const concurrent = JSON.parse(readFileSync(manifestPath, "utf-8"));
+      concurrent.files["concurrent-process.md"] = true;
+      writeFileSync(manifestPath, JSON.stringify(concurrent, null, 2) + "\n", "utf-8");
+    }, 0);
+    const res = await forgePromise;
+
+    assert.equal(res.copied, fileCount, "this run should have copied all of its own files");
+    assert.ok(!w.text.includes("manifest not saved"), "manifest save should succeed");
+
+    const finalManifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    assert.equal(
+      finalManifest.files["concurrent-process.md"],
+      true,
+      "the concurrent process's own manifest entry must survive this run's final save — last-writer-wins must not silently drop it",
+    );
+    for (let i = 0; i < fileCount; i++) {
+      assert.equal(finalManifest.files[`f${i}.md`], true, `this run's own entry for f${i}.md must be present`);
+    }
+  });
+
   // forge#1527: the SubagentStop annotation-enforcement hook's trigger
   // (`FORGE:PHASE_START` in the transcript) is never emitted anywhere in the
   // pipeline, so it was dead code that always exited 0 with zero enforcement
