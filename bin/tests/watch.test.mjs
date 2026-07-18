@@ -271,6 +271,28 @@ describe("renderFrame", () => {
     }
   });
 
+  it("strips a raw OSC escape injected into a fleet-table title (forge#2577)", () => {
+    // Untrusted GitHub issue title carrying a raw OSC 0 (set-window-title) sequence.
+    // Prior to forge#2577 renderFleetTable() only ran stripAnsi() for width
+    // measurement, never on the text actually written to the terminal.
+    const evilTitle = "innocuous title \x1b]0;pwned\x07 trailing text";
+    const agents = [fleetAgent({ issue: 42 })];
+    agents[0].title = evilTitle;
+    const lines = renderFrame(snapshot({ agents }), { width: 100, mode: "none" });
+    const text = lines.join("\n");
+    assert.ok(!text.includes("\x1b"), `raw ESC byte leaked into fleet-table render: ${JSON.stringify(text)}`);
+    assert.ok(text.includes("#42"), "row for the affected agent must still render");
+  });
+
+  it("strips a raw SGR escape injected into a fleet-table title (forge#2577)", () => {
+    const evilTitle = "\x1b[31mred-colored injected title\x1b[0m";
+    const agents = [fleetAgent({ issue: 43 })];
+    agents[0].title = evilTitle;
+    const lines = renderFrame(snapshot({ agents }), { width: 100, mode: "none" });
+    const text = lines.join("\n");
+    assert.ok(!text.includes("\x1b"), `raw ESC byte leaked into fleet-table render: ${JSON.stringify(text)}`);
+  });
+
   it("renders the six-phase focus strip for the top (most severe) agent", () => {
     const agents = [
       fleetAgent({

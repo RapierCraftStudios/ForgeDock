@@ -263,7 +263,8 @@ function renderFleetTable(agents, width, selectedIdx = -1) {
   function renderRow(cells, isHeader) {
     return cells
       .map((cell, c) => {
-        const text = c === 2 ? truncateVisible(String(cell ?? ""), widths[c]) : String(cell ?? "");
+        const text =
+          c === 2 ? truncateVisible(stripAnsi(String(cell ?? "")), widths[c]) : String(cell ?? "");
         const visual = stripAnsi(text).length;
         const pad = " ".repeat(Math.max(0, widths[c] - visual)) + (c < cells.length - 1 ? "  " : "");
         const formatted = isHeader ? bold(dim(text)) : text;
