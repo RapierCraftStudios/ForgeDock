@@ -37,6 +37,13 @@ if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && [ -n "
 **TTL**: ${LEASE_TTL_SECONDS:-900}s (refreshed once per dispatch chunk in Step 4A)" 2>/dev/null || \
         echo "WARNING: failed to post FORGE:LEASE — continuing without a lease record (best-effort primitive)"
       ;;
+    *)
+      # Defensive default (MANDATORY — do not remove): see the matching comment at
+      # phase-3-dependency.md Step 3D.2's acquisition case block. An unexpected LEASE_STATE
+      # here must warn loudly, not silently fall through and let dispatch proceed as if the
+      # lease gate had passed.
+      echo "WARNING: check_orchestrator_lease() returned unexpected value '${LEASE_STATE}' — lease gate could not be evaluated. Proceeding without a confirmed lease; investigate rather than ignore." >&2
+      ;;
   esac
 else
   echo "INFO: no coordination issue / BATCH_ID available — lease enforcement disabled for this batch."

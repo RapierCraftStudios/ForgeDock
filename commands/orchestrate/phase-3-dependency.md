@@ -487,7 +487,17 @@ check_orchestrator_lease() {
   # Last FORGE:LEASE / FORGE:LEASE_RELEASED comment, in chronological order, to determine
   # current state. Both are HTML-comment-tagged issue comments (never a body edit) — an
   # append-only log the same way FORGE:CLAIM/FORGE:CLAIM_RELEASED already work in this file.
-  LAST_LEASE_EVENT=$(gh api "repos/{GH_REPO}/issues/${COORD_NUM}/comments" \
+  #
+  # --paginate is REQUIRED here (not optional/cosmetic): the coordination issue also
+  # accumulates one comment per FORGE:CLAIM/FORGE:CLAIM_RELEASED pair (Step 4B) plus one
+  # FORGE:LEASE heartbeat per dispatch chunk (Step 4A in phase-4-execution.md) and per
+  # wake/resume. GitHub's default comments listing returns only the first 30 (oldest)
+  # comments without --paginate — on any batch with more than a handful of issues or a
+  # couple of heartbeat cycles, `last` over an unpaginated page silently reads a STALE
+  # lease event instead of the true most recent one, which can either falsely trigger the
+  # "REFUSING TO DISPATCH" exit 1 below using stale holder data, or fail to see a genuinely
+  # live competing lease and defeat the entire point of this mechanism.
+  LAST_LEASE_EVENT=$(gh api --paginate "repos/{GH_REPO}/issues/${COORD_NUM}/comments" \
     --jq '[.[] | select(.body | contains("FORGE:LEASE"))] | last |
           {body: .body, created_at: .created_at}' 2>/dev/null || echo "")
 
@@ -511,7 +521,16 @@ check_orchestrator_lease() {
   fi
 
   # Staleness check — a lease older than LEASE_TTL_SECONDS with no refresh is treated as free.
-  LEASE_EPOCH=$(date -u -d "$LEASE_TIMESTAMP" +%s 2>/dev/null || echo 0)
+  # A `date -d` parse failure must NOT silently fall through to "free" (LEASE_EPOCH=0 would
+  # make AGE huge and every live lease report as free/expired, defeating the lease entirely
+  # with no warning). Distinguish "genuinely parsed as epoch 0" from "failed to parse" by
+  # checking the command's exit status explicitly, and fail SAFE (treat as held/unexpired)
+  # rather than fail-open on a parse error.
+  if ! LEASE_EPOCH=$(date -u -d "$LEASE_TIMESTAMP" +%s 2>/dev/null); then
+    echo "WARNING: check_orchestrator_lease(): failed to parse lease timestamp '${LEASE_TIMESTAMP}' — treating as held (fail-safe, not fail-open) to avoid masking a live lease." >&2
+    echo "held:${HOLDER_BATCH_ID}"
+    return
+  fi
   NOW_EPOCH=$(date -u +%s)
   AGE=$((NOW_EPOCH - LEASE_EPOCH))
 
@@ -546,6 +565,15 @@ if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ]; then
       echo "Another live /orchestrate instance (or a not-yet-stale prior run) appears to be dispatching this batch already."
       echo "If you are certain the other instance is dead (not just idle), wait ${LEASE_TTL_SECONDS}s for the lease to go stale, or manually post a FORGE:LEASE_RELEASED comment on #${COORD_ISSUE_NUMBER} to force a takeover."
       exit 1
+      ;;
+    *)
+      # Defensive default (MANDATORY — do not remove): if check_orchestrator_lease() is not
+      # re-declared correctly in a fresh context, or otherwise returns anything other than
+      # free/self/held:*, this branch must fail LOUD, not silently no-op. Silently falling
+      # through here would be worse than the documented "no coordination issue" fail-open
+      # path above — it would look like the lease gate ran and passed when it never
+      # evaluated a real state.
+      echo "WARNING: check_orchestrator_lease() returned unexpected value '${LEASE_STATE}' — lease gate could not be evaluated. Proceeding without a confirmed lease (best-effort primitive) but this indicates a bug in check_orchestrator_lease() or its re-declaration; investigate rather than ignore." >&2
       ;;
   esac
 else
@@ -1144,7 +1172,15 @@ if [ -z "${BATCH_ID:-}" ] && [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_IS
     export BATCH_ID
     echo "Reconstructed BATCH_ID=${BATCH_ID} from coordination issue #${COORD_ISSUE_NUMBER} body (in-context value was lost, per this section's own contract)."
   else
-    echo "WARNING: could not reconstruct BATCH_ID from coordination issue #${COORD_ISSUE_NUMBER} — lease check below is skipped this cycle (fail-open on a best-effort primitive, not a hard blocker)."
+    # KNOWN LIMITATION (not a silent oversight): this is exactly the stale-survivor-plus-restart
+    # scenario the lease exists to catch, and it is the one case where the lease cannot be
+    # evaluated at all — there is no safe synthetic BATCH_ID to substitute: guessing one risks
+    # a false self-lockout (refusing to resume the orchestrator's own batch) which is a worse
+    # failure mode than the gap being flagged. Fail-open is the deliberate choice for a
+    # best-effort primitive built on GitHub comments (see Step 3D.2's "Known limitation" note),
+    # but it must be loud, not a quiet log line — this WARNING is the operator's only signal
+    # that single-instance protection did not run this cycle.
+    echo "WARNING: could not reconstruct BATCH_ID from coordination issue #${COORD_ISSUE_NUMBER} (missing/malformed FORGE:BATCH_ID marker in the issue body) — lease check SKIPPED this cycle. This is the exact scenario the lease exists to protect against; single-instance protection is NOT active until the marker is present or a later cycle reconstructs it. This is a known, documented limitation of a best-effort primitive — not a silent bug." >&2
   fi
 fi
 
@@ -1166,6 +1202,13 @@ if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && [ -n "
 **Holder**: ${HOSTNAME_ID} (pid ${$})
 **Acquired/refreshed**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 **TTL**: ${LEASE_TTL_SECONDS:-900}s (refreshed on wake/compaction resume)" 2>/dev/null || true
+      ;;
+    *)
+      # Defensive default (MANDATORY — do not remove): see the matching comment at the
+      # Step 3D.2 acquisition case block above. An unexpected LEASE_STATE here must warn
+      # loudly, not silently fall through and let wake reconstruction proceed as if the
+      # lease check had passed.
+      echo "WARNING: check_orchestrator_lease() returned unexpected value '${LEASE_STATE}' during wake/compaction reconstruction — lease gate could not be evaluated. Proceeding without a confirmed lease; investigate rather than ignore." >&2
       ;;
   esac
 fi
