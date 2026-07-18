@@ -1986,10 +1986,36 @@ if [ "${#TOKEN_BUDGET_DEFERRED_THIS_RUN[@]}" -gt 0 ]; then
 fi
 ```
 
+**Classify lane for each queued finding (MANDATORY — before dispatch)** <!-- Added: forge#2629 -->
+
+Cascade-dispatched findings inherit NO lane assumption from the parent batch. Step 4A.pre's classify-lane loop (above) only covers `{ready_issue_numbers}` — the *original* dispatch group — and does not see findings discovered mid-run by this Step 4C pass. Without an explicit gate here, a finding reaches the Step 4A/4B dispatch loop with `${ISSUE_LANE[$NUM]}`/`${ISSUE_PR_BASE[$NUM]}` unset for its number, which is exactly the milestone-owned-finding-misrouted-to-staging risk this issue exists to close. Run this loop over `QUEUED_FINDINGS` (the post-clubbing, post-token-budget-gate list) before any of the numbered steps below, reusing the identical `classify-lane.sh` invocation and failure handling as Step 4A.pre — same script, same batch-scope `ISSUE_LANE`/`ISSUE_PR_BASE` arrays (declared once, line ~362-363), no new mechanism:
+
+```bash
+for FINDING_NUM in "${QUEUED_FINDINGS[@]}"; do
+  PR_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$FINDING_NUM" -R {GH_REPO}) || {
+    echo "ERROR: classify-lane.sh failed for #$FINDING_NUM — adding needs-human label and removing from QUEUED_FINDINGS" >&2
+    gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
+    QUEUED_FINDINGS=($(printf '%s\n' "${QUEUED_FINDINGS[@]}" | grep -vxF "$FINDING_NUM" || true))
+    continue
+  }
+  # Derive LANE label from PR_BASE — identical rule to Step 4A.pre.
+  if [ "$PR_BASE" = "staging" ]; then
+    LANE="fast-lane"
+  else
+    LANE="feature-lane"
+  fi
+  ISSUE_LANE[$FINDING_NUM]="$LANE"
+  ISSUE_PR_BASE[$FINDING_NUM]="$PR_BASE"
+  echo "#$FINDING_NUM → lane=$LANE, PR_BASE=$PR_BASE (cascade finding)"
+done
+```
+
+A finding that fails classify-lane is removed from `QUEUED_FINDINGS` (mirrors Step 4A.pre's `continue`, which never admits a failed classification into the ready set) and flagged `needs-human` instead of silently falling through to the dispatch loop with an unset lane.
+
 **For queued (non-deferred) findings:**
 
 1. **Add them to the dependency DAG.** They are implementation issues — same as issues spawned by investigations in Phase 2. Compute their predecessor sets using the same conflict detection (Step 3C Layers 1-4) against all remaining blocked/active issues.
-2. **Respect source branch context.** Review-finding issues have `**Code branch**: \`{branch}\`` in their body — the `/work-on` agent will read this and branch from the right origin. No special handling needed from the orchestrator.
+2. **Respect source branch context.** Review-finding issues have `**Code branch**: \`{branch}\`` in their body — the `/work-on` agent will read this and branch from the right origin (the body annotation is repaired earlier in this step if missing — see the Code-branch repair guard above). Separately, and mandatorily, `${ISSUE_LANE[$NUM]}`/`${ISSUE_PR_BASE[$NUM]}` are now populated by the classify-lane loop immediately above this list — every queued finding is lane-classified individually, inheriting no lane assumption from the parent batch, before it reaches the standard Step 4A/4B dispatch loop.
 3. **Report to user:**
    ```
    Agent #{COMPLETED} spawned {count} new finding issues: #{A}, #{B}
