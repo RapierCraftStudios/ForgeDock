@@ -1655,6 +1655,19 @@ describe("forge (Act II)", () => {
     const manifestPath = join(home, ".claude", "forgedock", "copied-commands.json");
     mkdirSyncFs(join(home, ".claude", "forgedock"), { recursive: true });
 
+    // Pre-seed a prior manifest with recognizable content BEFORE forcing the
+    // write failure below. The test's name claims the failed write leaves
+    // "the previous manifest" untouched — that claim is only meaningful if a
+    // previous manifest actually exists to potentially be clobbered
+    // (forge#2615: without this, `!existsSync(manifestPath)` was trivially
+    // true because there was never a prior manifest in play).
+    const priorManifestContent = JSON.stringify(
+      { files: { "prior.md": true }, marker: "PRE-EXISTING-MANIFEST-forge2615" },
+      null,
+      2,
+    ) + "\n";
+    writeFileSync(manifestPath, priorManifestContent, "utf-8");
+
     // Pre-create the pid-suffixed tmp sibling as a directory — writeFile()
     // then throws EISDIR at open-time (the write never starts), the same
     // technique used by #1396/#2542's atomic-write failure tests.
@@ -1674,7 +1687,15 @@ describe("forge (Act II)", () => {
       w.text.includes("manifest not saved"),
       "forge() should surface the manifest save failure instead of crashing",
     );
-    assert.ok(!existsSync(manifestPath), "no manifest should exist — the failed write never replaced it");
+    assert.ok(
+      existsSync(manifestPath),
+      "the pre-existing manifest should still exist — the failed write must not delete it",
+    );
+    assert.equal(
+      readFileSync(manifestPath, "utf-8"),
+      priorManifestContent,
+      "the pre-existing manifest's content must be byte-for-byte unchanged — the failed write never replaced it",
+    );
   });
 
   it("forge() sweeps a crash-orphaned pid-suffixed manifest tmp sibling but preserves an in-flight one and the legacy plain .tmp (forge#2612)", async () => {
