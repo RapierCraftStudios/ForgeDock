@@ -4,7 +4,7 @@
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync, chmodSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync, chmodSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome } from "../journey.mjs";
@@ -1563,6 +1563,48 @@ describe("forge (Act II)", () => {
       "forge() should surface the manifest save failure instead of crashing",
     );
     assert.ok(!existsSync(manifestPath), "no manifest should exist — the failed write never replaced it");
+  });
+
+  it("forge() sweeps a crash-orphaned pid-suffixed manifest tmp sibling but preserves an in-flight one and the legacy plain .tmp (forge#2612)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-sweep-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-sweep-src-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const manifestPath = join(home, ".claude", "forgedock", "copied-commands.json");
+    mkdirSyncFs(join(home, ".claude", "forgedock"), { recursive: true });
+
+    // A crash-orphaned pid-suffixed tmp from a prior hard-killed run (a pid
+    // this process will never reuse). Backdate it well past the sweep age
+    // threshold so it is eligible for reclamation.
+    const staleTmp = manifestPath + ".999999.tmp";
+    writeFileSync(staleTmp, "orphaned by SIGKILL between writeFile and rename", "utf-8");
+    const anHourAgo = Date.now() / 1000 - 3600;
+    utimesSync(staleTmp, anHourAgo, anHourAgo);
+
+    // A *recent* pid-suffixed tmp — as if a concurrent forge() (different pid)
+    // is mid-write right now. Younger than the age threshold → must survive.
+    const liveTmp = manifestPath + ".888888.tmp";
+    writeFileSync(liveTmp, "in-flight write by a concurrent forge()", "utf-8");
+
+    // The legacy plain `.tmp` (no digit segment) must never be swept here —
+    // the sweep only reclaims the pid-suffixed shape.
+    const legacyTmp = manifestPath + ".tmp";
+    writeFileSync(legacyTmp, "legacy foreign leftover", "utf-8");
+    utimesSync(legacyTmp, anHourAgo, anHourAgo);
+
+    // linkStrategy "copy" is not required for the sweep (it runs unconditionally
+    // at forge() startup), but keep the forge() invocation on the same
+    // deterministic footing as the sibling manifest tests.
+    const { ctx } = stubCtx({ home, linkStrategy: "copy" });
+    ctx.forgeHome = forgeHome;
+    await forge(ctx);
+
+    assert.ok(!existsSync(staleTmp), "a stale crash-orphaned pid-suffixed tmp sibling should be swept");
+    assert.ok(existsSync(liveTmp), "a recent (in-flight) pid-suffixed tmp sibling must be preserved");
+    assert.ok(existsSync(legacyTmp), "the legacy plain .tmp (no pid segment) must not be swept");
   });
 
   // forge#1527: the SubagentStop annotation-enforcement hook's trigger

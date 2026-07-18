@@ -873,6 +873,57 @@ async function saveCopiedManifest(manifestPath, manifest) {
   }
 }
 
+// Age (ms) below which a pid-suffixed manifest tmp sibling is assumed to be a
+// concurrent forge()'s in-flight write and left untouched. Anything older is a
+// crash-orphan (SIGKILL/OOM/power loss between writeFile and rename) that no
+// future pid-matched run and no other cleanup path will ever reclaim
+// (forge#2612). Generous relative to real write→rename latency.
+const STALE_MANIFEST_TMP_AGE_MS = 60_000;
+
+/**
+ * Best-effort sweep of crash-orphaned pid-suffixed manifest tmp siblings
+ * (forge#2612). saveCopiedManifest() writes to `manifestPath.<pid>.tmp` then
+ * renames it into place; if the process is hard-killed in that window the
+ * pid-suffixed tmp is orphaned permanently — no future run reuses that exact
+ * pid (unlike the old shared literal `.tmp` name any run would overwrite) and
+ * no other cleanup path scans this directory. Removes siblings matching
+ * `<manifest-basename>.<digits>.tmp` that are older than
+ * STALE_MANIFEST_TMP_AGE_MS (so a concurrent forge()'s in-flight tmp is never
+ * deleted) and are not this process's own live tmp. Never throws —
+ * housekeeping only, same never-abort contract as the manifest-save guard.
+ */
+async function sweepStaleManifestTmps(manifestPath) {
+  const dir = pathDirname(manifestPath);
+  const base = basename(manifestPath);
+  const liveTmp = base + "." + process.pid + ".tmp";
+  // Match only `<base>.<digits>.tmp` — the exact pid-suffixed shape. The legacy
+  // plain `<base>.tmp` (no digit segment) is intentionally excluded so a
+  // foreign/legacy sibling is never reclaimed here.
+  const stalePattern = new RegExp(
+    "^" + base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\.\\d+\\.tmp$",
+  );
+  let entries;
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return; // dir missing/unreadable — nothing to reclaim
+  }
+  const now = Date.now();
+  await Promise.all(
+    entries.map(async (name) => {
+      if (name === liveTmp || !stalePattern.test(name)) return;
+      const full = join(dir, name);
+      try {
+        const st = await lstat(full);
+        if (now - st.mtimeMs < STALE_MANIFEST_TMP_AGE_MS) return; // maybe in-flight
+        await unlink(full);
+      } catch {
+        // best-effort — ignore races / permission errors
+      }
+    }),
+  );
+}
+
 const isLinkPermissionError = (err) => err.code === "EPERM" || err.code === "EACCES";
 
 /**
@@ -1554,6 +1605,9 @@ export async function forge(ctx) {
   await mkdir(targetDir, { recursive: true });
 
   const manifest = await loadCopiedManifest(manifestPath);
+  // Reclaim crash-orphaned pid-suffixed tmp siblings left by prior hard-killed
+  // runs (forge#2612). Best-effort — must never abort the forge receipt/hook.
+  await sweepStaleManifestTmps(manifestPath).catch(() => {});
   let manifestChanged = false;
 
   const files = await findMarkdownFiles(commandsDir, { includeExtras: !!ctx.includeExtras });
