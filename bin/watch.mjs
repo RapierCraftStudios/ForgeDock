@@ -352,7 +352,7 @@ function renderDetailView(detail) {
   lines.push(`  ${bold("Last heartbeat")}`);
   if (detail.heartbeat && detail.heartbeat.at) {
     const age = typeof detail.heartbeat.ageMinutes === "number" ? `${detail.heartbeat.ageMinutes}m ago` : "—";
-    lines.push(`    ${detail.heartbeat.phaseText ?? "—"} · ${detail.heartbeat.at} (${age})`);
+    lines.push(`    ${stripAnsi(detail.heartbeat.phaseText ?? "—")} · ${detail.heartbeat.at} (${age})`);
   } else {
     lines.push(dim("    No heartbeat recorded."));
   }
