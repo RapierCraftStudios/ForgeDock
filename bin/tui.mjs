@@ -708,17 +708,25 @@ export function table(
 /**
  * Strip ANSI/terminal escape sequences from a string, returning only visible
  * text. Covers CSI (`\x1b[...letter`, e.g. SGR color codes, cursor movement)
- * and OSC (`\x1b]...BEL` or `\x1b]...\x1b\`, e.g. OSC 8 hyperlinks, OSC 52
- * clipboard writes, OSC 0/2 window-title sets) — the two forms an untrusted
- * source (a GitHub comment/issue body rendered into the operator's terminal
- * via watch.mjs's `renderDetailView()`) is realistically able to inject. An
- * unterminated OSC sequence (no BEL/ST before end-of-string) is also
- * stripped to end-of-string rather than passed through, since a truncated
- * terminator must not leave the escape live.
+ * and all four ECMA-48 "string-type" introducers that can appear in
+ * untrusted input rendered into the operator's terminal (a GitHub comment/
+ * issue body, via watch.mjs's `renderDetailView()`):
+ *   - OSC (`\x1b]`)  — OSC 8 hyperlinks, OSC 52 clipboard writes, OSC 0/2
+ *     window-title sets
+ *   - DCS (`\x1bP`)  — device control strings
+ *   - APC (`\x1b_`)  — application program command, incl. the Kitty terminal
+ *     graphics protocol (`\x1b_G...`) and iTerm2 proprietary sequences
+ *   - PM  (`\x1b^`)  — privacy message
+ *   - SOS (`\x1bX`)  — start of string
+ * Each of the four shares the same shape (ESC + introducer + payload,
+ * terminated by BEL or ST) and is stripped with one shared pattern. An
+ * unterminated sequence (no BEL/ST before end-of-string) is also stripped
+ * to end-of-string rather than passed through, since a truncated terminator
+ * must not leave the escape live.
  */
 export function stripAnsi(s) {
   return s
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, "")
+    .replace(/\x1b[\]P_^X][^\x07\x1b]*(?:\x07|\x1b\\)?/g, "")
     .replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
 }
 
