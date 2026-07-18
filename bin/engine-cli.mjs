@@ -34,16 +34,19 @@ const pexec = promisify(execFile);
  *
  * Matches the convention already used for the sibling `gh pr list` call in
  * the interactive dashboard (bin/forgedock.mjs's gatherDashboardData()).
- * Every io.gh()/io.git() call site issues a single, normally-fast metadata
- * command (gh issue view, gh api .../comments, gh pr list/view, git
- * rev-list --count) — none are legitimately long-running — so one shared
- * default timeout is appropriate across all callers (the interactive status
- * dashboard, run-issue, and resume-stalled). A hung/black-holed gh process
- * (flaky network, corporate proxy, stuck auth prompt) would otherwise hang
- * commands like `npx forgedock status` indefinitely (#1962). Callers already
- * wrap every io.gh()/io.git() call in try/catch and degrade to null/"unknown"
- * on any rejection, so a timeout fails closed gracefully with no additional
- * error handling required.
+ * Almost every io.gh()/io.git() call site issues a single, normally-fast
+ * metadata command (gh issue view, gh api .../comments, gh pr list/view, git
+ * rev-list --count), so one shared default timeout is appropriate across
+ * nearly all callers (the interactive status dashboard, run-issue, and
+ * resume-stalled). The one documented exception is `git push`, which is a
+ * state-changing operation that can legitimately take longer than a fast
+ * metadata read — see the `makeIo()` docblock immediately below for the
+ * per-call `timeoutMs` override it uses instead. A hung/black-holed gh
+ * process (flaky network, corporate proxy, stuck auth prompt) would
+ * otherwise hang commands like `npx forgedock status` indefinitely (#1962).
+ * Callers already wrap every io.gh()/io.git() call in try/catch and degrade
+ * to null/"unknown" on any rejection, so a timeout fails closed gracefully
+ * with no additional error handling required.
  */
 const DEFAULT_IO_TIMEOUT_MS = 10000;
 
