@@ -785,20 +785,40 @@ async function createPrFor(state, io) {
  * genuinely-still-open fence to be missed. The opening-line match stays
  * intentionally lenient (trailing content allowed); only the closing-line
  * branch requires whitespace-only trailing content.
+ *
+ * forge#2590: GFM also permits tilde (`~~~`) fence delimiters, and a fence
+ * pair must use the *same* character throughout — GFM explicitly disallows
+ * mixing a backtick-opened fence with a tilde closer (or vice versa). The
+ * delimiter regex therefore matches either character class, and open-fence
+ * state tracks the opening delimiter's *character* alongside its run
+ * length: a candidate line only closes the open fence when its character
+ * matches the opener's AND its run length is >= the opener's (plus the
+ * forge#2589 whitespace-only-trailing rule, unchanged). A run of the
+ * *other* character encountered while a fence is open is left alone as
+ * ordinary content — mirroring the existing shorter-nested-run handling —
+ * since GFM allows a tilde fence to contain literal backticks and vice
+ * versa. The appended closer reuses the opener's own character, not a
+ * hardcoded backtick, so a genuinely-unclosed tilde fence is closed with
+ * tildes.
  */
 export function closeUnbalancedFence(text) {
-  let openFenceLen = 0;
+  let openChar = null;
+  let openLen = 0;
   for (const line of text.split("\n")) {
-    const m = line.match(/^ {0,3}(`{3,})/);
+    const m = line.match(/^ {0,3}(`{3,}|~{3,})/);
     if (!m) continue;
-    const runLen = m[1].length;
-    if (openFenceLen === 0) {
-      openFenceLen = runLen;
-    } else if (runLen >= openFenceLen && /^[ \t]*$/.test(line.slice(m[0].length))) {
-      openFenceLen = 0;
+    const run = m[1];
+    const char = run[0];
+    const runLen = run.length;
+    if (openChar === null) {
+      openChar = char;
+      openLen = runLen;
+    } else if (char === openChar && runLen >= openLen && /^[ \t]*$/.test(line.slice(m[0].length))) {
+      openChar = null;
+      openLen = 0;
     }
   }
-  return openFenceLen > 0 ? `${text}\n${"`".repeat(openFenceLen)}` : text;
+  return openChar !== null ? `${text}\n${openChar.repeat(openLen)}` : text;
 }
 
 /**
