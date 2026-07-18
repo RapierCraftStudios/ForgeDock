@@ -703,6 +703,33 @@ describe("renderFrame — keyboard interaction state (forge#2392)", () => {
     assert.ok(!text.includes("All quiet"), "detail view must not also render the fleet table");
   });
 
+  it("viewMode 'detail' strips ANSI/OSC escape sequences from the title and branch header line (forge#2550)", () => {
+    // Untrusted GitHub-authored title/branch text could carry CSI (SGR/cursor) or OSC
+    // (hyperlink/clipboard/window-title) escapes; the header line must render them inert,
+    // matching the sanitization already applied to lastHeartbeatBody (forge#2490/PR #2543).
+    const detail = {
+      issue: 99,
+      title: "evil\x1b[31mtitle\x1b]8;;https://evil.example\x07link\x1b]8;;\x07",
+      branch: "feat/\x1b[1mbold\x1b[0mbranch",
+      pr: 3,
+      status: "running",
+      stall: null,
+      phase: "build",
+      attempt: { n: 1, max: 3 },
+      phaseHistory: [],
+      heartbeat: null,
+      lastHeartbeatBody: null,
+      diagnostics: { valid: true, failedPhase: null },
+      lease: null,
+    };
+    const lines = renderFrame(snapshot({ agents: [] }), { width: 100, viewMode: "detail", detail });
+    const text = lines.join("\n");
+    assert.ok(!text.includes("\x1b["), "raw CSI escape must not reach the rendered output");
+    assert.ok(!text.includes("\x1b]"), "raw OSC escape must not reach the rendered output");
+    assert.ok(text.includes("eviltitlelink"), "visible title text must survive stripping");
+    assert.ok(text.includes("feat/boldbranch"), "visible branch text must survive stripping");
+  });
+
   it("viewMode 'detail' surfaces terminal diagnostics when the agent failed", () => {
     const detail = {
       issue: 5,
