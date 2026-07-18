@@ -728,12 +728,32 @@ export function table(
  * must not leave the escape live. The C1 single-byte forms are honored by
  * some terminal emulators/locales even though most default configurations
  * treat raw C1 bytes as non-printing garbage — see forge#2549.
+ *
+ * Also strips the third structural shape distinct from CSI and the
+ * string-type introducers above: `ESC` followed by a single intermediate/
+ * final byte with NO payload and NO terminator ("Fe-class" and neighboring
+ * single/two-byte forms per ECMA-48 and DEC private extensions) — see
+ * forge#2585:
+ *   - RIS full-reset (`\x1bc`)
+ *   - DECSC/DECRC save/restore-cursor (`\x1b7` / `\x1b8`)
+ *   - IND/NEL/RI (`\x1bD` / `\x1bE` / `\x1bM`)
+ *   - SS2/SS3 single-shift (`\x1bN` / `\x1bO`)
+ *   - Keypad application/normal mode, DECKPAM/DECKPNM (`\x1b=` / `\x1b>`)
+ *   - G0-G3 charset designators — a two-byte form: `ESC` + one intermediate
+ *     byte (`(`, `)`, `*`, `+`, `-`, `.`, `/`) + one final byte identifying
+ *     the character set, e.g. `\x1b(B` (US-ASCII into G0), `\x1b)0`
+ *     (DEC special graphics into G1)
+ * None of these overlap the introducer bytes claimed by the CSI (`[`) or
+ * string-type (`]`, `P`, `_`, `^`, `X`) passes above, so pass ordering is
+ * not significant.
  */
 export function stripAnsi(s) {
   return s
     .replace(/\x1b[\]P_^X][^\x07\x1b]*(?:\x07|\x1b\\)?/g, "")
     .replace(/[\x90\x9d\x9e\x9f\x98][^\x07\x9c]*(?:\x07|\x9c)?/g, "")
-    .replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+    .replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")
+    .replace(/\x1b[()*+\-./][0-9A-Za-z@]/g, "")
+    .replace(/\x1b[c78DEMNO=>]/g, "");
 }
 
 /**

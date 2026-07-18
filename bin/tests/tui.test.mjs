@@ -212,6 +212,52 @@ describe("stripAnsi", () => {
   it("removes mixed CSI + C1 APC sequences in one string", () => {
     assert.equal(stripAnsi("\x1b[1ma\x9fapc\x07b\x1b[0m"), "ab");
   });
+
+  // -------------------------------------------------------------------------
+  // Fe-class single/two-byte forms (forge#2585 — ESC + one intermediate/final
+  // byte, no payload, no terminator: RIS/DECSC/DECRC/IND/NEL/RI/SS2/SS3/
+  // charset designators/keypad mode)
+  // -------------------------------------------------------------------------
+
+  it("removes RIS full-reset (\\x1bc)", () => {
+    assert.equal(stripAnsi("before\x1bcafter"), "beforeafter");
+  });
+
+  it("removes DECSC/DECRC save/restore-cursor (\\x1b7 / \\x1b8)", () => {
+    assert.equal(stripAnsi("a\x1b7b\x1b8c"), "abc");
+  });
+
+  it("removes IND/NEL/RI (\\x1bD / \\x1bE / \\x1bM)", () => {
+    assert.equal(stripAnsi("a\x1bDb\x1bEc\x1bMd"), "abcd");
+  });
+
+  it("removes SS2/SS3 single-shift (\\x1bN / \\x1bO)", () => {
+    assert.equal(stripAnsi("a\x1bNb\x1bOc"), "abc");
+  });
+
+  it("removes keypad application/normal mode (\\x1b= / \\x1b>)", () => {
+    assert.equal(stripAnsi("a\x1b=b\x1b>c"), "abc");
+  });
+
+  it("removes G0 charset designator (\\x1b(B — US-ASCII into G0)", () => {
+    assert.equal(stripAnsi("a\x1b(Bb"), "ab");
+  });
+
+  it("removes G1 charset designator (\\x1b)0 — DEC special graphics into G1)", () => {
+    assert.equal(stripAnsi("a\x1b)0b"), "ab");
+  });
+
+  it("removes mixed Fe-class + CSI sequences in one string (no interference)", () => {
+    assert.equal(stripAnsi("\x1b[1ma\x1bcb\x1b[0m"), "ab");
+  });
+
+  it("removes mixed Fe-class + OSC sequences in one string (no interference)", () => {
+    assert.equal(stripAnsi("a\x1b7b\x1b]8;;url\x07c"), "abc");
+  });
+
+  it("removes mixed charset designator + C1 DCS sequences in one string (no interference)", () => {
+    assert.equal(stripAnsi("a\x1b(Bb\x90dcs\x9cc"), "abc");
+  });
 });
 
 // ---------------------------------------------------------------------------
