@@ -774,6 +774,17 @@ async function createPrFor(state, io) {
  * it with a delimiter of the *same* backtick-run length as the opener
  * (not a hardcoded 3), so the appended closer is valid GFM even for a
  * 4+-backtick open fence.
+ *
+ * forge#2589: a candidate *closing* line must additionally satisfy GFM's
+ * "may be followed only by spaces (or tabs)" rule — an opening line may
+ * legitimately carry trailing content (an info string, e.g. ` ```js `),
+ * but a closing line may not. Without this check, a line like
+ * `` ``` this is misleading text `` would be wrongly accepted as a closer
+ * purely because its backtick-run length is >= the opener's, even though
+ * GFM does not consider it a valid closing delimiter — causing a
+ * genuinely-still-open fence to be missed. The opening-line match stays
+ * intentionally lenient (trailing content allowed); only the closing-line
+ * branch requires whitespace-only trailing content.
  */
 export function closeUnbalancedFence(text) {
   let openFenceLen = 0;
@@ -783,7 +794,7 @@ export function closeUnbalancedFence(text) {
     const runLen = m[1].length;
     if (openFenceLen === 0) {
       openFenceLen = runLen;
-    } else if (runLen >= openFenceLen) {
+    } else if (runLen >= openFenceLen && /^[ \t]*$/.test(line.slice(m[0].length))) {
       openFenceLen = 0;
     }
   }
