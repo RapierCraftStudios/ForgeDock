@@ -705,7 +705,14 @@ export function parseSessionLimitResetEpochMs(resetAtText, nowMs = Date.now()) {
   const match = /^(\d{1,2}):(\d{2})\s*([ap]m)\s*\(([^)]+)\)\s*$/i.exec(resetAtText.trim());
   if (!match) return undefined;
   const [, hourStr, minuteStr, ampm, timeZone] = match;
-  let hour = parseInt(hourStr, 10) % 12;
+  const rawHour = parseInt(hourStr, 10);
+  // Reject out-of-range hours BEFORE the `% 12` conversion below — otherwise
+  // malformed input like "13:30pm" or "99:30pm" silently aliases to a
+  // plausible-but-wrong hour (13 % 12 = 1, 99 % 12 = 3) instead of being
+  // rejected, violating this function's own "never fabricate a value"
+  // contract. Mirrors the `minute > 59` guard further down.
+  if (rawHour < 1 || rawHour > 12) return undefined;
+  let hour = rawHour % 12;
   if (/pm/i.test(ampm)) hour += 12;
   const minute = parseInt(minuteStr, 10);
   if (!Number.isFinite(hour) || !Number.isFinite(minute) || minute > 59) return undefined;

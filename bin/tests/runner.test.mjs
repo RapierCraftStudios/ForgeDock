@@ -2635,6 +2635,15 @@ describe("parseSessionLimitResetEpochMs (forge#2524)", () => {
     assert.equal(parseSessionLimitResetEpochMs("10:75am (Asia/Calcutta)", Date.now()), undefined);
   });
 
+  it("returns undefined for an out-of-range hour value instead of aliasing via modulo (forge#2560)", () => {
+    // Regression: `hour % 12` previously wrapped any out-of-range hour into a
+    // plausible-but-wrong in-range value (13 % 12 = 1, 99 % 12 = 3, 25 % 12 = 1)
+    // instead of being rejected. Must return `undefined` for all of these.
+    assert.equal(parseSessionLimitResetEpochMs("13:30pm (Asia/Calcutta)", Date.now()), undefined);
+    assert.equal(parseSessionLimitResetEpochMs("99:30pm (Asia/Calcutta)", Date.now()), undefined);
+    assert.equal(parseSessionLimitResetEpochMs("25:00am (Asia/Calcutta)", Date.now()), undefined);
+  });
+
   it("returns undefined for an unrecognized IANA timezone name rather than throwing", () => {
     assert.doesNotThrow(() => parseSessionLimitResetEpochMs("10:00am (Not/AZone)", Date.now()));
     assert.equal(parseSessionLimitResetEpochMs("10:00am (Not/AZone)", Date.now()), undefined);
