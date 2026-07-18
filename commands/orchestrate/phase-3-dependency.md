@@ -426,6 +426,14 @@ else
   echo "Coordination issue created: ${COORD_ISSUE_URL} (#${COORD_ISSUE_NUMBER})"
   export FORGE_COORD_ISSUE
   export COORD_ISSUE_NUMBER
+  # BATCH_ID must survive compaction the same way FORGE_COORD_ISSUE/COORD_ISSUE_NUMBER do —
+  # exporting it is necessary but not sufficient (export only survives within the *same*
+  # process tree). The `<!-- FORGE:BATCH_ID: ... -->` marker embedded in the issue body above
+  # is the actual durable source of truth: see "Orchestrator state reconstruction on wake /
+  # after compaction" below, which re-derives BATCH_ID from GitHub rather than trusting the
+  # in-context variable, consistent with that section's own "do not rely on in-context
+  # variables" contract. <!-- Updated: forge#2627 -->
+  export BATCH_ID
 fi
 ```
 
@@ -453,6 +461,99 @@ Initial dispatch: #2633, #2636, #2645, #2646 (all ready — launched simultaneou
 ```
 
 **Key advantage over waves**: When #2633 completes, #2634 dispatches immediately — it does not wait for #2636, #2645, or #2646 to finish. Similarly, when #2645 completes, #2647 dispatches immediately regardless of other issues' status.
+
+### Step 3D.2: Acquire orchestrator lease (MANDATORY) <!-- Added: forge#2627 -->
+
+**WHY THIS EXISTS**: The coordination issue created in Step 3D.1 exists purely for per-agent `FORGE:CLAIM` file-overlap serialization — nothing checks whether another live orchestrator instance is already dispatching against an overlapping issue set. Two concurrent loops (a stale survivor plus a restart, or two independent invocations) then both re-derive a ready set from GitHub and both dispatch, producing duplicate/backlog dispatch and truncating each other's view of local state. This step turns the same coordination issue into a single-instance lease, using the append-only comment stream (same idiom as `FORGE:CLAIM`/`FORGE:CLAIM_RELEASED`) rather than a body edit, so it does not reintroduce the read-then-write TOCTOU race documented in #2512.
+
+**Lease identity**: The lease holder is keyed on `BATCH_ID` (from Step 3D.1 — stable for the lifetime of this batch, including across compaction/wake within the *same* top-level session), not a fresh PID per invocation. This is deliberate: the same orchestrator resuming after its own compaction must always be able to refresh its own lease, never treated as a competing holder.
+
+**`check_orchestrator_lease()`** — shared helper, called from both the live Step 4A dispatch entry point (`phase-4-execution.md`) and the wake/compaction reconstruction block below. Declared once here; re-declare byte-identically wherever this file's context is not already sourced (same convention as `classify_predecessor_state()`/`verify_file_overlap_edge()` in `phase-4-execution.md` Step 4B).
+
+```bash
+# Default lease TTL: 15 minutes. Refreshed once per dispatch chunk in phase-4-execution.md
+# Step 4A — generous enough to tolerate a normal chunk's wall-clock time without a false
+# takeover, short enough that a genuinely dead orchestrator's lease goes stale promptly.
+LEASE_TTL_SECONDS="${LEASE_TTL_SECONDS:-900}"
+
+# check_orchestrator_lease <coord_issue_number> <this_batch_id>
+# Returns via stdout one of: "self" (lease already held by this BATCH_ID — safe to refresh),
+# "free" (no live lease — safe to acquire), "held:<holder_batch_id>" (a different, unexpired
+# lease is held — do NOT dispatch).
+check_orchestrator_lease() {
+  local COORD_NUM="$1"
+  local MY_BATCH_ID="$2"
+
+  # Last FORGE:LEASE / FORGE:LEASE_RELEASED comment, in chronological order, to determine
+  # current state. Both are HTML-comment-tagged issue comments (never a body edit) — an
+  # append-only log the same way FORGE:CLAIM/FORGE:CLAIM_RELEASED already work in this file.
+  LAST_LEASE_EVENT=$(gh api "repos/{GH_REPO}/issues/${COORD_NUM}/comments" \
+    --jq '[.[] | select(.body | contains("FORGE:LEASE"))] | last |
+          {body: .body, created_at: .created_at}' 2>/dev/null || echo "")
+
+  if [ -z "$LAST_LEASE_EVENT" ] || [ "$LAST_LEASE_EVENT" = "null" ]; then
+    echo "free"
+    return
+  fi
+
+  LEASE_IS_RELEASE=$(echo "$LAST_LEASE_EVENT" | jq -r '.body | contains("FORGE:LEASE_RELEASED")' 2>/dev/null || echo "false")
+  if [ "$LEASE_IS_RELEASE" = "true" ]; then
+    echo "free"
+    return
+  fi
+
+  HOLDER_BATCH_ID=$(echo "$LAST_LEASE_EVENT" | jq -r '.body' 2>/dev/null | grep -oP '(?<=\*\*Holder Batch ID\*\*: )\S+' | head -1)
+  LEASE_TIMESTAMP=$(echo "$LAST_LEASE_EVENT" | jq -r '.created_at' 2>/dev/null)
+
+  if [ "$HOLDER_BATCH_ID" = "$MY_BATCH_ID" ]; then
+    echo "self"
+    return
+  fi
+
+  # Staleness check — a lease older than LEASE_TTL_SECONDS with no refresh is treated as free.
+  LEASE_EPOCH=$(date -u -d "$LEASE_TIMESTAMP" +%s 2>/dev/null || echo 0)
+  NOW_EPOCH=$(date -u +%s)
+  AGE=$((NOW_EPOCH - LEASE_EPOCH))
+
+  if [ "$AGE" -gt "$LEASE_TTL_SECONDS" ]; then
+    echo "free"
+  else
+    echo "held:${HOLDER_BATCH_ID}"
+  fi
+}
+```
+
+**Acquire (or refresh) the lease** — run once per batch, immediately after Step 3D.1's coordination-issue creation/reuse, before Step 3D.5's cycle detection:
+
+```bash
+if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ]; then
+  LEASE_STATE=$(check_orchestrator_lease "$COORD_ISSUE_NUMBER" "$BATCH_ID")
+
+  case "$LEASE_STATE" in
+    free|self)
+      HOSTNAME_ID=$(hostname 2>/dev/null || echo "unknown-host")
+      gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE -->
+**Holder Batch ID**: ${BATCH_ID}
+**Holder**: ${HOSTNAME_ID} (pid ${$})
+**Acquired/refreshed**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**TTL**: ${LEASE_TTL_SECONDS}s (refreshed once per dispatch chunk — a lease with no refresh past this window is considered stale and may be taken over)" 2>/dev/null || \
+        echo "WARNING: failed to post FORGE:LEASE — continuing without a lease record (best-effort primitive, not a hard blocker on a gh API hiccup)"
+      echo "Orchestrator lease acquired/refreshed for batch ${BATCH_ID} on coordination issue #${COORD_ISSUE_NUMBER}"
+      ;;
+    held:*)
+      HELD_BY="${LEASE_STATE#held:}"
+      echo "REFUSING TO DISPATCH: an unexpired orchestrator lease for this batch is already held by batch ${HELD_BY} on coordination issue #${COORD_ISSUE_NUMBER}."
+      echo "Another live /orchestrate instance (or a not-yet-stale prior run) appears to be dispatching this batch already."
+      echo "If you are certain the other instance is dead (not just idle), wait ${LEASE_TTL_SECONDS}s for the lease to go stale, or manually post a FORGE:LEASE_RELEASED comment on #${COORD_ISSUE_NUMBER} to force a takeover."
+      exit 1
+      ;;
+  esac
+else
+  echo "INFO: no coordination issue available (Step 3D.1 failed or was skipped) — lease enforcement disabled for this batch. Proceeding without a single-instance guard."
+fi
+```
+
+**Known limitation (documented, not silently overclaimed)**: this is a best-effort lease built on GitHub issue comments, not a distributed-consensus lock. A genuinely simultaneous race — two orchestrators both calling `check_orchestrator_lease()` and both observing `free` before either posts `FORGE:LEASE` — has a narrow window it does not close. This is an accepted limitation of a prose/bash spec; it converts the common case (a stale survivor, a restart with the prior loop still technically alive, two deliberately-separate invocations) from silent parallel dispatch into a clear refusal, which is the actual failure mode reported in this issue.
 
 ### Step 3D.5: Cycle Detection (MANDATORY) <!-- Added: forge#1085 -->
 
@@ -1021,6 +1122,53 @@ For the same reason, this reconstruction also MUST call `verify_file_overlap_edg
 ```bash
 # Reconstruct dispatch state from GitHub after compaction / wake
 # Run this block at the top of every resumed Phase 4 loop iteration.
+
+# 0. Lease check (MANDATORY, forge#2627) — run BEFORE any of the reconstruction below.
+#    A wake/resume is either this same orchestrator continuing its own batch or, less
+#    commonly, a fresh invocation resuming someone else's interrupted batch. Either way,
+#    do not reconstruct or dispatch against a batch another *live* orchestrator still
+#    holds the lease for.
+#    check_orchestrator_lease() is declared in Step 3D.2 above — re-declare here if this
+#    block runs in a fresh context that hasn't sourced Step 3D.2 yet.
+#
+#    BATCH_ID reconstruction: this section's own contract is "do NOT rely on in-context
+#    variables" — BATCH_ID is a plain shell variable set once in Step 3D.1 and is NOT
+#    guaranteed to survive compaction/wake (export only propagates within the same process
+#    tree, not across a genuinely new session). Re-derive it from GitHub here rather than
+#    trusting an in-context value, the same way FORGE_COORD_ISSUE/COORD_ISSUE_NUMBER
+#    themselves are treated as re-derivable state, not assumed-present variables:
+if [ -z "${BATCH_ID:-}" ] && [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ]; then
+  BATCH_ID=$(gh issue view "$COORD_ISSUE_NUMBER" -R {GH_REPO} --json body \
+    --jq '.body' 2>/dev/null | grep -oP '(?<=<!-- FORGE:BATCH_ID: )[^ ]+(?= -->)' | head -1)
+  if [ -n "$BATCH_ID" ]; then
+    export BATCH_ID
+    echo "Reconstructed BATCH_ID=${BATCH_ID} from coordination issue #${COORD_ISSUE_NUMBER} body (in-context value was lost, per this section's own contract)."
+  else
+    echo "WARNING: could not reconstruct BATCH_ID from coordination issue #${COORD_ISSUE_NUMBER} — lease check below is skipped this cycle (fail-open on a best-effort primitive, not a hard blocker)."
+  fi
+fi
+
+if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && [ -n "${BATCH_ID:-}" ]; then
+  LEASE_STATE=$(check_orchestrator_lease "$COORD_ISSUE_NUMBER" "$BATCH_ID")
+  case "$LEASE_STATE" in
+    held:*)
+      HELD_BY="${LEASE_STATE#held:}"
+      echo "REFUSING TO RESUME: an unexpired orchestrator lease for this batch is held by batch ${HELD_BY} (coordination issue #${COORD_ISSUE_NUMBER}), not this session's batch ${BATCH_ID}."
+      echo "A different live orchestrator instance appears to already be dispatching this batch. Wait for its lease to expire or confirm it is dead before resuming."
+      exit 1
+      ;;
+    free|self)
+      # Free (no live holder) or self (this exact batch already holds it) — safe to
+      # refresh and continue reconstruction below.
+      HOSTNAME_ID=$(hostname 2>/dev/null || echo "unknown-host")
+      gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE -->
+**Holder Batch ID**: ${BATCH_ID}
+**Holder**: ${HOSTNAME_ID} (pid ${$})
+**Acquired/refreshed**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**TTL**: ${LEASE_TTL_SECONDS:-900}s (refreshed on wake/compaction resume)" 2>/dev/null || true
+      ;;
+  esac
+fi
 
 # 1. Re-fetch all issue labels and classify each into DONE / GATED / FAILED / IN_PROGRESS
 #    (same classify_predecessor_state() function defined in phase-4-execution.md Step 4B —

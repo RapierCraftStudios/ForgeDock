@@ -10,6 +10,85 @@ install: core
 
 **Entry requires `phase-3-dependency.md`'s Step 3D.6 completion gate to have passed.** <!-- Added: forge#1913 --> Every step below (budget init, dispatch, dependency resolution) reads `ISSUES[]`, `PREDECESSORS[]`, `ISSUE_DOMAIN[]`, `ISSUE_SCORE[]`, `ISSUE_COST_ESTIMATE[]`, and `ISSUE_HAS_PRIOR[]` as authoritative Phase 3 output — none of these are re-derived here. If Phase 4 is being entered without having actually run Phase 3's Steps 3A–3E.5 in this session (e.g. a fresh session resuming mid-batch), reconstruct from GitHub via the "Orchestrator state reconstruction on wake / after compaction" procedure in `phase-3-dependency.md` rather than assuming these variables are already populated.
 
+### Step 4A-pre.-1: Lease gate (MANDATORY, before any dispatch) <!-- Added: forge#2627 -->
+
+**WHY THIS EXISTS**: Nothing today checks whether another live `/orchestrate` instance already holds this batch before dispatching (see issue #2627). Two concurrent loops (a stale survivor plus a restart, or two independent invocations) then both re-derive a ready set from GitHub and both dispatch — duplicate/backlog dispatch, and a restarted instance's own bookkeeping can diverge from what the first loop already did. This step closes that gap at the single entry point every dispatch group (initial ready set + every subsequent newly-unblocked batch) passes through, by extending the Step 3D.1 coordination issue into a single-instance lease (see `phase-3-dependency.md` Step 3D.2 for `check_orchestrator_lease()` and the `FORGE:LEASE`/`FORGE:LEASE_RELEASED` comment format).
+
+**Run this once, before the first dispatch of any group in this session** — not per-chunk, per-issue, or per-newly-ready-batch.
+
+```bash
+# --- Lease gate (uses check_orchestrator_lease() from phase-3-dependency.md Step 3D.2;
+#     re-declare it here if this context hasn't sourced that file) ---
+if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && [ -n "${BATCH_ID:-}" ]; then
+  LEASE_STATE=$(check_orchestrator_lease "$COORD_ISSUE_NUMBER" "$BATCH_ID")
+  case "$LEASE_STATE" in
+    held:*)
+      HELD_BY="${LEASE_STATE#held:}"
+      echo "REFUSING TO DISPATCH: coordination issue #${COORD_ISSUE_NUMBER} shows an unexpired lease held by batch ${HELD_BY}, not this session's batch ${BATCH_ID}."
+      echo "Another live /orchestrate instance appears to be dispatching this batch already. Stop this invocation, or wait for the other lease to go stale."
+      exit 1
+      ;;
+    free|self)
+      HOSTNAME_ID=$(hostname 2>/dev/null || echo "unknown-host")
+      gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE -->
+**Holder Batch ID**: ${BATCH_ID}
+**Holder**: ${HOSTNAME_ID} (pid ${$})
+**Acquired/refreshed**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**TTL**: ${LEASE_TTL_SECONDS:-900}s (refreshed once per dispatch chunk in Step 4A)" 2>/dev/null || \
+        echo "WARNING: failed to post FORGE:LEASE — continuing without a lease record (best-effort primitive)"
+      ;;
+  esac
+else
+  echo "INFO: no coordination issue / BATCH_ID available — lease enforcement disabled for this batch."
+fi
+# --- End lease gate ---
+```
+
+**Lease release**: `LEASE_RELEASED_THIS_SESSION` (declared just below, alongside `release_orchestrator_lease()`) guards against double-posting `FORGE:LEASE_RELEASED`. The release call is invoked from both the **Step 4A-pre.-0.5 "Stopping the orchestrator"** procedure (interrupted path) and the **Termination condition** at the end of Step 4B (normal clean/paused drain) — both exit paths route through the same idempotent function so the lease is never left dangling either way.
+
+```bash
+LEASE_RELEASED_THIS_SESSION=false
+
+release_orchestrator_lease() {
+  # Idempotent — safe to call from both the interrupted-stop procedure and normal
+  # end-of-batch completion without double-posting FORGE:LEASE_RELEASED.
+  if [ "$LEASE_RELEASED_THIS_SESSION" = "true" ]; then
+    return
+  fi
+  if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ]; then
+    gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE_RELEASED -->
+**Holder Batch ID**: ${BATCH_ID:-unknown}
+**Released**: $(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>/dev/null || true
+  fi
+  LEASE_RELEASED_THIS_SESSION=true
+}
+```
+
+### Step 4A-pre.-0.5: Backgrounded engine-child tracking + interruption handling ("Stopping the orchestrator") (MANDATORY) <!-- Added: forge#2627 -->
+
+**WHY THIS EXISTS**: Step 4A's engine-first dispatch (fixed by forge#2466) already dispatches each `forgedock run-issue` invocation as its own `Bash(run_in_background=true, ...)` call and records the returned task id in `ENGINE_DISPATCH_MAP[{NUM}]` — this is a harness-managed background task, not a raw shell `&` job. **Because it is harness-managed, it cannot be reaped by a shell-level `trap`/`kill $PID`**: a bash `trap` only runs inside that one Bash tool invocation's own process and has no way to call back into the harness's own task-management surface (`TaskStop`). Reaping these tasks on interrupt is therefore something the orchestrating agent itself must do — as an explicit step in its own routing loop — not something a background shell script can do on its own behalf.
+
+**Contract — the orchestrating agent (not a shell trap) is responsible for reaping**: Whenever the interactive `/orchestrate` session is being stopped (the operator sends an interrupt, or the harness delivers a stop signal to the top-level orchestrator agent) **before** all dispatched issues have reached a terminal `workflow:*` label, the orchestrator MUST, as part of handling that stop — not silently exit —:
+
+1. Enumerate every task id still tracked in `ENGINE_DISPATCH_MAP` whose issue has not yet reached a terminal `workflow:*` label (per Step 4B's `classify_predecessor_state()`).
+2. Call `TaskStop(task_id)` (the harness tool) for each one, in the same turn, before ending the session.
+3. Call `release_orchestrator_lease()` (Step 4A-pre.-1) so a future resume or a different operator is not blocked by a stale lease from this now-stopped session.
+4. Report which issues had in-flight dispatch stopped mid-pipeline (their `workflow:*` label will reflect whatever phase they reached — a future `/work-on {NUMBER}` or orchestrator resume picks them back up from GitHub state, per the Universal Phase Dispatcher in `commands/work-on.md`).
+
+**This is a documentation/behavioral contract, not a bash block**: unlike the lease gate above, there is no shell construct that reliably intercepts "the orchestrator's own session is being stopped" — that is a harness-level event the orchestrating agent must handle in its own turn when it observes an interrupt, using its own tools (`TaskStop`), exactly the way `commands/orchestrate/phase-5-cleanup.md` already documents cleanup as an agent-driven procedure rather than a background script.
+
+**Known limitation — Windows Git Bash (documented, not silently overclaimed)**: Even a harness-issued `TaskStop` against the tracked background task is not guaranteed to terminate the underlying `forgedock run-issue` Win32 process tree on Windows Git Bash — MSYS-launched child processes are not always attached to the parent's job object in a way that a stop signal reliably cascades through. `TaskStop` is the correct in-spec, harness-native mitigation and closes the common case (an operator deliberately stopping a live, still-running orchestrator session). It does **not** guarantee full termination in every case — per the issue's own report, an operator may still need to fall back to a manual, command-line-matched kill as a belt-and-suspenders measure:
+
+```powershell
+# Windows fallback — only if a forgedock run-issue process is confirmed still running
+# after TaskStop (e.g. `docker ps` / dispatch-state still show activity post-stop):
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'forgedock run-issue' } | ForEach-Object {
+  Stop-Process -Id $_.ProcessId -Force
+}
+```
+
+Do not claim `TaskStop` eliminates every zombie-process scenario on Windows; it eliminates the scenario this issue's fix is scoped to (an operator or harness cleanly stopping a live orchestrator session that is still tracking its own dispatched tasks) — the PowerShell fallback above remains documented for the narrower case where the underlying process tree survives regardless.
+
 ### Step 4A-pre.0: Budget initialization (MANDATORY when --budget is set) <!-- Added: forge#1743 -->
 
 Initialize budget tracking state before the first dispatch. Read `--budget N` from the orchestrator's argument list (passed from the top-level `/orchestrate` invocation). When `--budget` is not set, `BUDGET_LIMIT` is `Infinity` (uncapped — current default behavior preserved).
@@ -475,6 +554,17 @@ if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
 
     echo "Dispatching #$NUM via forgedock run-issue --lane $PR_BASE (score=${ISSUE_SCORE[$NUM]:-?} est_cost=\$${COST} projected_total=\$${PROJECTED_SPEND})"
   done
+
+  # Lease heartbeat refresh (forge#2627) — once per dispatch chunk, so a long-running batch's
+  # lease never goes stale purely from elapsed wall-clock time while dispatch is still active.
+  if [ "${#DISPATCH_NOW[@]}" -gt 0 ] && [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && [ -n "${BATCH_ID:-}" ]; then
+    HOSTNAME_ID=$(hostname 2>/dev/null || echo "unknown-host")
+    gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE -->
+**Holder Batch ID**: ${BATCH_ID}
+**Holder**: ${HOSTNAME_ID} (pid ${$})
+**Acquired/refreshed**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**TTL**: ${LEASE_TTL_SECONDS:-900}s (refreshed once per dispatch chunk in Step 4A)" 2>/dev/null || true
+  fi
 
   if [ "${#DISPATCH_NOW[@]}" -eq 0 ]; then
     echo "Engine dispatch: no headroom this cycle — waiting for the next completion notification (Step 4B) before dispatching more."
@@ -1246,7 +1336,9 @@ Gating predecessor #${NUM} reached \`workflow:merged\` — dispatching now. (Was
 
 9. **Run staging integrity check** (from Step 4A-pre) if the completed agent merged a PR targeting staging.
 
-**Termination condition**: All issues in the DAG have reached `DONE` or `FAILED` (merged, invalid, or skipped due to dependency failure) — OR are `blocked-on-human-merge` (item 6.5) with no further dispatchable work remaining in the batch. These two outcomes are reported differently: a batch where every issue is `DONE`/`FAILED` is a **clean drain**; a batch where one or more issues remain `blocked-on-human-merge` is a **paused drain** — the active dispatch loop stops (there is nothing left to do until a human merges a gating PR) but this MUST be reported as paused, not as fully complete (see `phase-6-report.md`'s `🔗 Blocked-on-Merge` section). `needs-human` predecessors with no open PR are neither — they remain GATED indefinitely until either a PR appears (dependent moves to blocked-on-human-merge) or the predecessor itself resolves; do not treat isolated `needs-human` issues with no dependents as blocking termination. When either drain condition is met, check whether deferred review-spawned findings exist (accumulated in `DEFERRED_FINDINGS` during Step 4C). If deferred findings exist → proceed to Step 4F (Completion Sweep). If no deferred findings → proceed to Phase 5.
+**Termination condition**: All issues in the DAG have reached `DONE` or `FAILED` (merged, invalid, or skipped due to dependency failure) — OR are `blocked-on-human-merge` (item 6.5) with no further dispatchable work remaining in the batch. These two outcomes are reported differently: a batch where every issue is `DONE`/`FAILED` is a **clean drain**; a batch where one or more issues remain `blocked-on-human-merge` is a **paused drain** — the active dispatch loop stops (there is nothing left to do until a human merges a gating PR) but this MUST be reported as paused, not as fully complete (see `phase-6-report.md`'s `🔗 Blocked-on-Merge` section). `needs-human` predecessors with no open PR are neither — they remain GATED indefinitely until either a PR appears (dependent moves to blocked-on-human-merge) or the predecessor itself resolves; do not treat isolated `needs-human` issues with no dependents as blocking termination. When either drain condition is met, check whether deferred review-spawned findings exist (accumulated in `DEFERRED_FINDINGS` during Step 4C). If deferred findings exist → proceed to Step 4F (Completion Sweep). If no deferred findings → **call `release_orchestrator_lease()` (Step 4A-pre.-1)** — this is a clean/paused drain of this session's own dispatch loop, so the lease should not be left held for a now-idle session — then proceed to Phase 5. <!-- Added: forge#2627 -->
+
+**Reminder — this is the normal-exit lease release, distinct from the interrupted-stop procedure**: whether the drain is clean or paused, this session is no longer actively dispatching, so its lease must be released here (or, for a paused drain, at minimum have its heartbeat refresh stop — see Step 4A-pre.-1). This complements, but does not replace, the **Stopping the orchestrator** procedure (Step 4A-pre.-0.5) which handles the abnormal case of a mid-dispatch interrupt.
 
 **Relationship to `DEFERRED_CONCURRENCY_ISSUES` (forge#1912)**: A non-empty `DEFERRED_CONCURRENCY_ISSUES[]` never satisfies either termination condition above — it means dispatchable work exists but is temporarily held back by the concurrency cap, not that the DAG has stalled. Unlike `blocked-on-human-merge`, this is never reported as a "paused drain" requiring human action — it self-resolves automatically the moment any in-flight agent completes and frees a slot (Step 4A's `dispatch_headroom` recomputes every cycle). Only treat the DAG as drained once `DEFERRED_CONCURRENCY_ISSUES` is also empty.
 
@@ -2327,7 +2419,7 @@ Completion Sweep Results:
   Token-gated — still deferred: #{H} (sweep allowance also exhausted — re-evaluable next run)
 ```
 
-**After sweep agents complete** (or if no findings were dispatched): output the budget deferred-issues report (if applicable), then proceed to Phase 5.
+**After sweep agents complete** (or if no findings were dispatched): output the budget deferred-issues report (if applicable), **call `release_orchestrator_lease()` (Step 4A-pre.-1)** — the sweep is this session's last dispatch activity, so the lease must not be left held for a now-idle session (the Termination condition's own release call, above, only fires on the no-deferred-findings branch; this is the equivalent release for the deferred-findings/Completion Sweep branch) <!-- Added: forge#2627 -->, then proceed to Phase 5.
 
 **Anti-patterns — DO NOT DO THIS:**
 - Re-sweeping findings spawned during the sweep itself — this creates unbounded recursion. Sweep is a single pass.
