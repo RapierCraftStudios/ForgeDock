@@ -2130,19 +2130,34 @@ if [ "$PRE_MERGE_HEALTH" = "CONFLICTING" ] || [ "$PRE_MERGE_HEALTH_STATE" = "DIR
     # STOP — do not attempt gh pr merge on a CONFLICTING/DIRTY PR
 else
 
-# Previously-escalated re-review guard <!-- Added: forge#1810 -->
+# Previously-escalated re-review guard <!-- Added: forge#1810; base-scoped: forge#2570 -->
 # If the linked issue currently carries needs-human, this PR was escalated at some
 # earlier point (VERDICT/purpose-regression/calibration/trust/mergeability) and has
 # now been remediated + re-reviewed back to a clean, mergeable APPROVED state above.
-# The "auto-land bar" (≥2 independent adversarial approvals + domain gates — see
-# #1809 Q1) is not yet implemented (future #1809 sub-issues B/C/D), so the safe
-# default here is to land on workflow:awaiting-merge (clearing needs-human) rather
-# than silently auto-merging a PR that was once flagged human-risk.
+#
+# forge#2570: the hold is now scoped by the PR's target branch. This PR still transitions
+# to workflow:awaiting-merge (clearing needs-human) in BOTH cases below — the transition is
+# unchanged; only who acts next differs:
+#   - `main` / deploy gate (or an unresolved base — fail closed): held for a HUMAN merge
+#     decision, because `staging → main` is the genuine human gate no agent performs.
+#   - any other base (staging, milestone/* — reversible integration branches): NOT held for
+#     a human. It is parked for remediate.md Phase M7's base-scoped auto-land bar (bot APPROVED
+#     + quality-gate pass), which merges it on the SAME condition the normal /work-on fast lane
+#     uses for the same target branch — no manual click. This reconciles the asymmetry where a
+#     bot-only re-review (authorAssociation=NONE) could never satisfy the strict ≥2 verified-
+#     human bar and so stranded staging PRs the fast lane would auto-merge.
 PREVIOUSLY_ESCALATED=$(gh issue view {MERGE_ISSUE} {MERGE_GH_FLAG} --json labels \
   --jq '[.labels[].name] | any(. == "needs-human")' 2>/dev/null || echo "false")
+GUARD_BASE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
 
 if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
-    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "🟠 PR #{PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check. The automated auto-land bar for previously-escalated PRs is not yet implemented, so this PR is held at \`workflow:awaiting-merge\` for a human merge decision instead of auto-merging. Merge manually once reviewed: \`gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge\`."
+    if [ -n "$GUARD_BASE" ] && [ "$GUARD_BASE" != "main" ]; then
+      # forge#2570: non-`main` base — defer to remediate.md M7's auto-land, not a human.
+      gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "🟠 PR #{PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check on non-\`main\` base \`${GUARD_BASE}\`. It is parked at \`workflow:awaiting-merge\` for the remediation auto-land bar (\`remediate.md\` Phase M7, forge#2570) — which auto-merges it on the same fast-lane condition the normal \`/work-on\` path uses for this target branch — NOT for a human merge decision."
+    else
+      # forge#2570: `main` / deploy gate (or unresolved base — fail closed to the human gate).
+      gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "🟠 PR #{PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check. This PR targets the deploy gate (\`${GUARD_BASE:-unresolved base}\`), so it is held at \`workflow:awaiting-merge\` for a human merge decision — \`staging → main\` is the genuine human gate. Merge manually once reviewed: \`gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge\`."
+    fi
     RESOLUTION=$(resolve_script 'transition-label')
     TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
     case "$TIER" in
@@ -2152,7 +2167,9 @@ if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
           --remove-label "needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
         ;;
     esac
-    # STOP — do not attempt gh pr merge; a human decides the merge from here
+    # STOP — do not attempt gh pr merge here. The merge decision belongs to a human for a
+    # `main`/deploy-gate base, or to remediate.md Phase M7's base-scoped auto-land bar for a
+    # non-`main` base (forge#2570). Either way this guard only parks at workflow:awaiting-merge.
 else
     # Checkpoint comment on issue
     gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "Review complete for PR #{PR_NUMBER}. Verdict: ${VERDICT:-APPROVED}. Proceeding to merge."
