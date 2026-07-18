@@ -1530,17 +1530,31 @@ for FINDING_NUM in {spawned_finding_numbers}; do
           # as its own outcome and fail closed, mirroring the concurrent-edit branch below
           # rather than silently falling through to the unprotected write.
           echo "REPAIR: #${FINDING_NUM} skipped — freshness re-fetch failed (network error or API rate limit); cannot verify no concurrent edit occurred, failing closed instead of risking a silent clobber"
-          gh issue comment "$FINDING_NUM" -R {GH_REPO} --body "<!-- FORGE:GATE_FAILURE -->
+          # forge#2584: stage the body in a mktemp file and deliver it via --body-file
+          # instead of interpolating finding-derived variables (${FINDING_NUM},
+          # ${REPAIR_SOURCE_PR}, ${REPAIR_PARENT_BASE}, ${FINDING_UPDATED_AT_SNAPSHOT})
+          # directly into a double-quoted --body argument at the gh call site — mirrors
+          # REPAIRED_BODY's existing printf-into-variable approach and the repo-wide
+          # mktemp + --body-file convention (forge#2198). mktemp avoids /tmp path
+          # collisions with other concurrently-running orchestrated agents.
+          GATE_BODY_TMPFILE="$(mktemp)"
+          printf '%s\n' "<!-- FORGE:GATE_FAILURE -->
 ## Code Branch Repair Skipped — Freshness Re-fetch Failed
 
-Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${REPAIR_SOURCE_PR} bases on \`${REPAIR_PARENT_BASE}\` — not the staging fast lane. Automatic repair was skipped because the freshness re-fetch (\`gh issue view --json updatedAt\`) failed, so the concurrency guard could not confirm the issue body is still at the snapshot captured earlier in this iteration (\`${FINDING_UPDATED_AT_SNAPSHOT}\`). Proceeding with the write here would risk silently clobbering a concurrent edit with no way to verify. Human review required to confirm the current body state and, if still needed, re-apply the Code branch stamp manually. <!-- forge#2565 -->" 2>/dev/null || true
+Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${REPAIR_SOURCE_PR} bases on \`${REPAIR_PARENT_BASE}\` — not the staging fast lane. Automatic repair was skipped because the freshness re-fetch (\`gh issue view --json updatedAt\`) failed, so the concurrency guard could not confirm the issue body is still at the snapshot captured earlier in this iteration (\`${FINDING_UPDATED_AT_SNAPSHOT}\`). Proceeding with the write here would risk silently clobbering a concurrent edit with no way to verify. Human review required to confirm the current body state and, if still needed, re-apply the Code branch stamp manually. <!-- forge#2565 -->" > "$GATE_BODY_TMPFILE"
+          gh issue comment "$FINDING_NUM" -R {GH_REPO} --body-file "$GATE_BODY_TMPFILE" 2>/dev/null || true
+          rm -f "$GATE_BODY_TMPFILE"
           gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label needs-human 2>/dev/null || true  # freshness-recheck-failure path
         elif [ "$FINDING_UPDATED_AT_CURRENT" != "$FINDING_UPDATED_AT_SNAPSHOT" ]; then
           echo "REPAIR: #${FINDING_NUM} skipped — concurrent edit detected (updatedAt changed from ${FINDING_UPDATED_AT_SNAPSHOT} to ${FINDING_UPDATED_AT_CURRENT} since this iteration's initial read); flagging instead of repairing"
-          gh issue comment "$FINDING_NUM" -R {GH_REPO} --body "<!-- FORGE:GATE_FAILURE -->
+          # forge#2584: mktemp + --body-file, same rationale as the freshness-recheck-failure path above.
+          CONCURRENT_EDIT_BODY_TMPFILE="$(mktemp)"
+          printf '%s\n' "<!-- FORGE:GATE_FAILURE -->
 ## Code Branch Repair Skipped — Concurrent Edit Detected
 
-Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${REPAIR_SOURCE_PR} bases on \`${REPAIR_PARENT_BASE}\` — not the staging fast lane. Automatic repair was skipped because the issue body was edited concurrently (\`updatedAt\` changed from \`${FINDING_UPDATED_AT_SNAPSHOT}\` to \`${FINDING_UPDATED_AT_CURRENT}\` between this run's initial read and the repair write). Overwriting the body now would have silently discarded that concurrent edit. Human review required to reconcile and, if still needed, re-apply the Code branch stamp manually. <!-- forge#2512 -->" 2>/dev/null || true
+Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${REPAIR_SOURCE_PR} bases on \`${REPAIR_PARENT_BASE}\` — not the staging fast lane. Automatic repair was skipped because the issue body was edited concurrently (\`updatedAt\` changed from \`${FINDING_UPDATED_AT_SNAPSHOT}\` to \`${FINDING_UPDATED_AT_CURRENT}\` between this run's initial read and the repair write). Overwriting the body now would have silently discarded that concurrent edit. Human review required to reconcile and, if still needed, re-apply the Code branch stamp manually. <!-- forge#2512 -->" > "$CONCURRENT_EDIT_BODY_TMPFILE"
+          gh issue comment "$FINDING_NUM" -R {GH_REPO} --body-file "$CONCURRENT_EDIT_BODY_TMPFILE" 2>/dev/null || true
+          rm -f "$CONCURRENT_EDIT_BODY_TMPFILE"
           gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label needs-human 2>/dev/null || true  # concurrent-edit path
         else
         if gh issue edit "$FINDING_NUM" -R {GH_REPO} --body "$REPAIRED_BODY" 2>/dev/null; then
@@ -1550,10 +1564,14 @@ Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${R
           FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body,updatedAt \
             --jq '{labels: [.labels[].name], title: .title, body: .body, updatedAt: .updatedAt}')
         else
-          gh issue comment "$FINDING_NUM" -R {GH_REPO} --body "<!-- FORGE:GATE_FAILURE -->
+          # forge#2584: mktemp + --body-file, same rationale as the two failure paths above.
+          REPAIR_FAILED_BODY_TMPFILE="$(mktemp)"
+          printf '%s\n' "<!-- FORGE:GATE_FAILURE -->
 ## Code Branch Repair Failed
 
-Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${REPAIR_SOURCE_PR} bases on \`${REPAIR_PARENT_BASE}\` — not the staging fast lane. Automatic repair (\`gh issue edit --body\`) failed. Without this annotation, \`/work-on\`'s investigation phase may look for the code on the wrong branch (staging, where it is absent) and misclassify this confirmed finding as invalid. Human review required. <!-- forge#2443 -->" 2>/dev/null || true
+Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${REPAIR_SOURCE_PR} bases on \`${REPAIR_PARENT_BASE}\` — not the staging fast lane. Automatic repair (\`gh issue edit --body\`) failed. Without this annotation, \`/work-on\`'s investigation phase may look for the code on the wrong branch (staging, where it is absent) and misclassify this confirmed finding as invalid. Human review required. <!-- forge#2443 -->" > "$REPAIR_FAILED_BODY_TMPFILE"
+          gh issue comment "$FINDING_NUM" -R {GH_REPO} --body-file "$REPAIR_FAILED_BODY_TMPFILE" 2>/dev/null || true
+          rm -f "$REPAIR_FAILED_BODY_TMPFILE"
           gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label needs-human 2>/dev/null || true  # repair-failure path
         fi
         fi
