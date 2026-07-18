@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync, chmodSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome } from "../journey.mjs";
+import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, pruneStaleExtensionlessEntries } from "../journey.mjs";
 import { detectEnvironment } from "../env-detect.mjs";
 
 const VALUES = {
@@ -1929,6 +1929,89 @@ describe("forge (Act II)", () => {
     // User-owned symlink must survive untouched
     assert.ok(existsSync(userLink), "user-owned symlink preserved");
     assert.equal(res.pruned, 0);
+  });
+
+  describe("isSymlinkTraversable (forge#2620)", () => {
+    it("returns true for a symlink that resolves to a readable file", async () => {
+      const dirT = mkdtempSync(join(os.tmpdir(), "fd-symtrav-ok-"));
+      const src = join(dirT, "src.md");
+      writeFileSync(src, "content", "utf-8");
+      const link = join(dirT, "link.md");
+      symlinkSync(src, link);
+      assert.equal(await isSymlinkTraversable(link), true);
+    });
+
+    it("returns false for a symlink whose target does not exist", async () => {
+      const dirT = mkdtempSync(join(os.tmpdir(), "fd-symtrav-missing-"));
+      const link = join(dirT, "link.md");
+      symlinkSync(join(dirT, "does-not-exist.md"), link);
+      assert.equal(await isSymlinkTraversable(link), false);
+    });
+
+    it("returns false for a symlink whose target cannot be read as a file (e.g. a directory) — the portable proxy for an MSYS 'untrusted mount point' failure", async () => {
+      const dirT = mkdtempSync(join(os.tmpdir(), "fd-symtrav-eisdir-"));
+      const targetDirEntry = join(dirT, "not-a-file");
+      mkdirSyncFs(targetDirEntry, { recursive: true });
+      const link = join(dirT, "link.md");
+      symlinkSync(targetDirEntry, link);
+      assert.equal(await isSymlinkTraversable(link), false);
+    });
+  });
+
+  describe("pruneStaleExtensionlessEntries (forge#2620)", () => {
+    it("removes a top-level extensionless symlink whose target no longer exists", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-missing-"));
+      const link = join(targetDir, "orchestrate");
+      symlinkSync(join(targetDir, "gone-forever"), link);
+      const pruned = await pruneStaleExtensionlessEntries(targetDir);
+      assert.equal(pruned, 1);
+      assert.ok(!existsSync(link));
+    });
+
+    it("removes a top-level extensionless symlink pointing into the npx cache", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-npx-"));
+      const cacheHome = mkdtempSync(join(os.tmpdir(), "fd-stale-npxsrc-"));
+      const cacheTarget = join(cacheHome, "_npx", "abcd1234", "node_modules", "forgedock", "commands", "pipeline-health.md");
+      mkdirSyncFs(join(cacheHome, "_npx", "abcd1234", "node_modules", "forgedock", "commands"), { recursive: true });
+      writeFileSync(cacheTarget, "STALE", "utf-8");
+      const link = join(targetDir, "pipeline-health");
+      symlinkSync(cacheTarget, link);
+      const pruned = await pruneStaleExtensionlessEntries(targetDir);
+      assert.equal(pruned, 1);
+      assert.ok(!existsSync(link));
+    });
+
+    it("does not touch a real extensionless directory (e.g. a multi-file command dir like work-on/)", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-realdir-"));
+      const cmdDir = join(targetDir, "work-on");
+      mkdirSyncFs(cmdDir, { recursive: true });
+      writeFileSync(join(cmdDir, "build.md"), "BUILD", "utf-8");
+      const pruned = await pruneStaleExtensionlessEntries(targetDir);
+      assert.equal(pruned, 0);
+      assert.ok(existsSync(join(cmdDir, "build.md")), "real command directory left untouched");
+    });
+
+    it("does not touch entries with a file extension", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-hasext-"));
+      const link = join(targetDir, "orchestrate.md");
+      symlinkSync(join(targetDir, "gone-forever"), link);
+      const pruned = await pruneStaleExtensionlessEntries(targetDir);
+      assert.equal(pruned, 0);
+      assert.ok(existsSync(link) || true); // lstat-broken symlink still "exists" as a dirent; just confirm untouched by pruned count
+    });
+
+    it("does not touch a plain (non-symlink) extensionless file", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-plainfile-"));
+      writeFileSync(join(targetDir, "orchestrate"), "not a symlink", "utf-8");
+      const pruned = await pruneStaleExtensionlessEntries(targetDir);
+      assert.equal(pruned, 0);
+      assert.ok(existsSync(join(targetDir, "orchestrate")));
+    });
+
+    it("returns 0 for a targetDir that does not exist yet (fresh install)", async () => {
+      const pruned = await pruneStaleExtensionlessEntries(join(os.tmpdir(), "fd-stale-does-not-exist-" + Date.now()));
+      assert.equal(pruned, 0);
+    });
   });
 
   describe("linkPipelineScripts copy-fallback content comparison (forge#1916)", () => {

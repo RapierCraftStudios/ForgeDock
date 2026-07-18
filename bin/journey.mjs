@@ -927,6 +927,37 @@ async function sweepStaleManifestTmps(manifestPath) {
 const isLinkPermissionError = (err) => err.code === "EPERM" || err.code === "EACCES";
 
 /**
+ * Verify a freshly created symlink is actually readable by *this* process
+ * before trusting it. `fs.symlink()` can return successfully (no EPERM/
+ * EACCES — so `isLinkPermissionError()` never fires) while still producing a
+ * link the OS refuses to resolve for this security/runtime context. The
+ * concrete case this guards against (forge#2620): installing under Git Bash
+ * (MSYS2) on Windows creates an MSYS-style symlink; the reparse point itself
+ * is written successfully, but a native Windows process (the Node binary
+ * behind Claude Code) later hits `"The path cannot be traversed because it
+ * contains an untrusted mount point"` when it tries to read through it. That
+ * failure surfaces at *read* time, not at *creation* time, and with an error
+ * code (`UNKNOWN`/`EIO`, not `EPERM`/`EACCES`) that the existing permission
+ * gate doesn't recognize — so the copy-fallback path never engaged and a
+ * dead, unreadable link was left in place.
+ *
+ * Reading the link back immediately after creating it catches this (and any
+ * other silently-broken-symlink case) regardless of the specific error code
+ * involved, without needing to enumerate every possible OS/runtime error.
+ *
+ * @param {string} target - Path to the symlink just created.
+ * @returns {Promise<boolean>} true if the symlink resolves and is readable.
+ */
+export async function isSymlinkTraversable(target) {
+  try {
+    await readFile(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Allowlist of universal pipeline-agent scripts installed to
  * ~/.claude/scripts/ by forge() (linkPipelineScripts()) and cleaned up by
  * forgedock.mjs's uninstall(). This is the single source of truth for both
@@ -1003,6 +1034,72 @@ async function pruneOrphanedSymlinks(targetDir, commandsDir) {
   }
 
   await walk(targetDir);
+  return pruned;
+}
+
+/**
+ * Remove leftover extensionless entries at the top level of targetDir left
+ * behind by prior `npx forgedock <command>` runs (forge#2620). Those older
+ * ephemeral invocations created extensionless symlinks/directories (e.g.
+ * `orchestrate`, `pipeline-health`) pointing into the npx download cache
+ * (`%LocalAppData%\npm-cache\_npx\...` / `~/.npm/_npx/...`). Those cache
+ * targets are routinely evicted by npx/npm cache cleanup or OS temp
+ * cleanup, leaving dead entries that collide on the base command name with
+ * the real `{name}.md` file this installer is about to create —
+ * `mkdir(..., {recursive:true})` throws when a same-named non-directory
+ * file already occupies that path segment.
+ *
+ * Conservative by design — must run BEFORE the main install loop so stale
+ * entries are cleared before any mkdir/symlink attempt can collide with
+ * them this run (pruneOrphanedSymlinks above only catches entries that
+ * point *into commandsDir*, and runs after the loop; this catches the
+ * separate npx-cache-origin case pre-emptively). Only removes a top-level
+ * entry when its basename has no file extension (`.md` files and dotfiles
+ * are never touched) AND it is a symlink whose target either no longer
+ * exists or resolves into a known ephemeral cache path
+ * (`isEphemeralCachePath`). Real command directories (e.g. `work-on/`)
+ * created by this installer are plain directories containing `.md` files,
+ * never symlinks — untouched by either condition.
+ *
+ * @param {string} targetDir - ~/.claude/commands
+ * @returns {Promise<number>} Number of stale entries removed.
+ */
+export async function pruneStaleExtensionlessEntries(targetDir) {
+  let pruned = 0;
+  let entries;
+  try {
+    entries = await readdir(targetDir, { withFileTypes: true });
+  } catch (err) {
+    if (err.code === "ENOENT") return pruned;
+    throw err;
+  }
+  for (const entry of entries) {
+    const name = entry.name;
+    if (name.includes(".")) continue; // has an extension (or is a dotfile) — never touch
+    if (!entry.isSymbolicLink()) continue; // only manage symlinks here — real dirs/files are left alone
+    const full = join(targetDir, name);
+    let linkTarget;
+    try {
+      linkTarget = await readlink(full);
+    } catch {
+      continue; // unreadable link metadata — skip rather than guess
+    }
+    let targetMissing = false;
+    try {
+      await lstat(linkTarget);
+    } catch (err) {
+      if (err.code !== "ENOENT") continue; // unexpected error — skip to be safe
+      targetMissing = true;
+    }
+    if (targetMissing || isEphemeralCachePath(linkTarget)) {
+      try {
+        await unlink(full);
+        pruned++;
+      } catch (err) {
+        if (err.code !== "ENOENT") throw err;
+      }
+    }
+  }
   return pruned;
 }
 
@@ -1445,7 +1542,8 @@ async function linkPipelineScripts(ctx) {
     if (wantSymlink) {
       try {
         await symlink(file, target);
-        linked = true;
+        linked = await isSymlinkTraversable(target);
+        if (!linked) await unlink(target).catch(() => {});
       } catch (linkErr) {
         if (!isLinkPermissionError(linkErr)) throw linkErr;
       }
@@ -1604,6 +1702,10 @@ export async function forge(ctx) {
   w.write("\n  " + ember("Forging commands", ctx.mode) + " " + dimLine(ctx, `into ${targetDir}`) + "\n\n");
   await mkdir(targetDir, { recursive: true });
 
+  // Clear stale extensionless entries from prior `npx forgedock` runs before
+  // the install loop below can collide with them (forge#2620).
+  const staleExtensionlessPruned = await pruneStaleExtensionlessEntries(targetDir);
+
   const manifest = await loadCopiedManifest(manifestPath);
   // Reclaim crash-orphaned pid-suffixed tmp siblings left by prior hard-killed
   // runs (forge#2612). Best-effort — must never abort the forge receipt/hook.
@@ -1666,8 +1768,15 @@ export async function forge(ctx) {
                 await unlink(tmpTarget).catch(() => {});
                 throw renameErr;
               }
-              updated++;
-              relinked = true;
+              relinked = await isSymlinkTraversable(target);
+              if (relinked) {
+                updated++;
+              } else {
+                // Symlink was created but is not readable back (e.g. MSYS
+                // symlink hit by native Windows "untrusted mount point" —
+                // forge#2620). Remove it and fall through to the copy branch.
+                await unlink(target).catch(() => {});
+              }
             } catch (linkErr) {
               if (!isLinkPermissionError(linkErr)) throw linkErr;
             }
@@ -1675,7 +1784,11 @@ export async function forge(ctx) {
           if (!relinked) {
             // Can't (or shouldn't) re-link — replace the managed link with a copy.
             // unlink first: copyFile onto a symlink writes THROUGH the link.
-            await unlink(target);
+            // (target may already be gone here if isSymlinkTraversable() failed
+            // and its own cleanup already removed it — tolerate ENOENT.)
+            await unlink(target).catch((err) => {
+              if (err.code !== "ENOENT") throw err;
+            });
             await copyFile(file, target);
             updated++; // replaces an existing managed entry
             recordCopy(rel);
@@ -1685,6 +1798,7 @@ export async function forge(ctx) {
         // A regular file we copied on a previous run — ours to manage.
         // First try upgrading it to a symlink (Developer Mode enabled since).
         let upgraded = false;
+        let restoredAsCopy = false;
         if (wantSymlink) {
           // Same per-process-unique tmp suffix as the relink branch above —
           // sibling branch, identical shared-literal-path EEXIST risk
@@ -1698,16 +1812,29 @@ export async function forge(ctx) {
               await unlink(tmpTarget).catch(() => {});
               throw renameErr;
             }
-            updated++;
-            delete manifest.files[rel];
-            manifestChanged = true;
-            manifestOps.push({ rel, op: "delete" });
-            upgraded = true;
+            upgraded = await isSymlinkTraversable(target);
+            if (upgraded) {
+              updated++;
+              delete manifest.files[rel];
+              manifestChanged = true;
+              manifestOps.push({ rel, op: "delete" });
+            } else {
+              // Symlink was created but is not readable back (e.g. MSYS
+              // symlink hit by native Windows "untrusted mount point" —
+              // forge#2620). Restore a real copy so the command stays
+              // readable. Keep the manifest entry (still copy-managed, not
+              // symlink-managed) and do NOT fall through to the generic
+              // copy-comparison below — the copy is already done.
+              await unlink(target).catch(() => {});
+              await copyFile(file, target);
+              updated++;
+              restoredAsCopy = true;
+            }
           } catch (linkErr) {
             if (!isLinkPermissionError(linkErr)) throw linkErr;
           }
         }
-        if (!upgraded) {
+        if (!upgraded && !restoredAsCopy) {
           const [src, dst] = await Promise.all([readFile(file), readFile(target)]);
           if (src.equals(dst)) {
             skipped++;
@@ -1847,20 +1974,27 @@ export async function forge(ctx) {
       if (wantSymlink) {
         try {
           await symlink(file, target);
-          installed++;
-          linked = true;
-          if (manifest.files[rel]) {
-            // Symlinks work now and the old copy is gone — drop the stale record.
-            delete manifest.files[rel];
-            manifestChanged = true;
-            manifestOps.push({ rel, op: "delete" });
+          linked = await isSymlinkTraversable(target);
+          if (linked) {
+            installed++;
+            if (manifest.files[rel]) {
+              // Symlinks work now and the old copy is gone — drop the stale record.
+              delete manifest.files[rel];
+              manifestChanged = true;
+              manifestOps.push({ rel, op: "delete" });
+            }
+          } else {
+            // Symlink created but not readable back (e.g. MSYS symlink hit by
+            // native Windows "untrusted mount point" — forge#2620). Remove it
+            // and fall through to the copy path below.
+            await unlink(target).catch(() => {});
           }
         } catch (linkErr) {
           if (!isLinkPermissionError(linkErr)) throw linkErr;
         }
       }
       if (!linked) {
-        // Windows without Developer Mode/admin — fall back to a copy.
+        // Windows without Developer Mode/admin, or symlink unreadable — copy.
         await copyFile(file, target);
         copied++;
         recordCopy(rel);
@@ -1939,6 +2073,9 @@ export async function forge(ctx) {
   w.write(`  ${glyph(true)} ${files.length} slash commands ${headlineVerb} ${dimLine(ctx, headlineDetail)}\n`);
   if (pruned > 0) {
     w.write(`  ${glyph(true)} ${pruned} orphaned symlink${pruned === 1 ? "" : "s"} removed ${dimLine(ctx, "(commands deleted or renamed since last install)")}\n`);
+  }
+  if (staleExtensionlessPruned > 0) {
+    w.write(`  ${glyph(true)} ${staleExtensionlessPruned} stale extensionless entr${staleExtensionlessPruned === 1 ? "y" : "ies"} removed ${dimLine(ctx, "(leftover from prior npx forgedock runs)")}\n`);
   }
   if (copied > 0) {
     w.write(`  ${glyph(false)} ${copied} copied (not linked) ${dimLine(ctx, "— enable Windows Developer Mode for live-updating links")}\n`);
