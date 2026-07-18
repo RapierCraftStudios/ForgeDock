@@ -1540,8 +1540,22 @@ async function linkPipelineScripts(ctx) {
 
     let linked = false;
     if (wantSymlink) {
+      // Suffix the tmp sibling with this process's PID so a losing
+      // concurrent forge() invocation linking the same brand-new pipeline
+      // script never collides on the same literal target path (which
+      // raises an uncaught EEXIST — isLinkPermissionError() only treats
+      // EPERM/EACCES as recoverable). Mirrors the fresh-install symlink
+      // branch in forge() (forge#2631) and the relink/upgrade branches
+      // (forge#2542, forge#2600, forge#2599).
+      const tmpTarget = target + "." + process.pid + ".tmp";
       try {
-        await symlink(file, target);
+        await symlink(file, tmpTarget);
+        try {
+          await rename(tmpTarget, target);
+        } catch (renameErr) {
+          await unlink(tmpTarget).catch(() => {});
+          throw renameErr;
+        }
         linked = await isSymlinkTraversable(target);
         if (!linked) await unlink(target).catch(() => {});
       } catch (linkErr) {
