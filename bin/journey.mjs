@@ -1609,6 +1609,18 @@ export async function forge(ctx) {
   // runs (forge#2612). Best-effort — must never abort the forge receipt/hook.
   await sweepStaleManifestTmps(manifestPath).catch(() => {});
   let manifestChanged = false;
+  // This run's own manifest mutations, tracked as a replayable diff
+  // (forge#2614). #2599/#2609 fixed the tmp-file *write-path* race (two
+  // concurrent forge() runs no longer collide on the same tmp filename) but
+  // left the manifest's logical *content* racy: each run loads the manifest
+  // into memory once, mutates its own copy across the whole run, then writes
+  // the entire in-memory object back at the end — a classic last-writer-wins
+  // race on manifest.files. Recording this run's own adds/deletes here (instead
+  // of relying on the run-start in-memory snapshot) lets the final save re-read
+  // the on-disk manifest and replay only these ops onto it, so a concurrent
+  // run's own adds/deletes made after this run's initial load are preserved
+  // rather than silently overwritten.
+  const manifestOps = [];
 
   const files = await findMarkdownFiles(commandsDir, { includeExtras: !!ctx.includeExtras });
   let installed = 0, updated = 0, skipped = 0, copied = 0, backedUp = 0;
@@ -1620,6 +1632,7 @@ export async function forge(ctx) {
       manifest.files[rel] = true;
       manifestChanged = true;
     }
+    manifestOps.push({ rel, op: "add" });
   };
 
   for (let i = 0; i < files.length; i++) {
@@ -1688,6 +1701,7 @@ export async function forge(ctx) {
             updated++;
             delete manifest.files[rel];
             manifestChanged = true;
+            manifestOps.push({ rel, op: "delete" });
             upgraded = true;
           } catch (linkErr) {
             if (!isLinkPermissionError(linkErr)) throw linkErr;
@@ -1839,6 +1853,7 @@ export async function forge(ctx) {
             // Symlinks work now and the old copy is gone — drop the stale record.
             delete manifest.files[rel];
             manifestChanged = true;
+            manifestOps.push({ rel, op: "delete" });
           }
         } catch (linkErr) {
           if (!isLinkPermissionError(linkErr)) throw linkErr;
@@ -1892,7 +1907,24 @@ export async function forge(ctx) {
   let manifestSaveFailed = false;
   if (manifestChanged) {
     try {
-      await saveCopiedManifest(manifestPath, manifest);
+      // Re-read-and-merge (forge#2614): another concurrent forge() invocation
+      // may have saved its own manifest.files adds/deletes since this run's
+      // initial load above. Re-reading the on-disk manifest right before this
+      // run's own save and replaying only this run's own ops (manifestOps)
+      // onto that fresh copy — rather than blindly overwriting with the
+      // run-start in-memory snapshot — means this run's save can no longer
+      // silently drop the other run's changes. loadCopiedManifest() never
+      // throws (missing/corrupt on-disk manifest resolves to an empty one),
+      // so this stays within the surrounding never-abort contract.
+      const mergedManifest = await loadCopiedManifest(manifestPath);
+      for (const { rel, op } of manifestOps) {
+        if (op === "add") {
+          mergedManifest.files[rel] = true;
+        } else {
+          delete mergedManifest.files[rel];
+        }
+      }
+      await saveCopiedManifest(manifestPath, mergedManifest);
     } catch {
       manifestSaveFailed = true;
     }
