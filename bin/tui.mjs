@@ -708,25 +708,31 @@ export function table(
 /**
  * Strip ANSI/terminal escape sequences from a string, returning only visible
  * text. Covers CSI (`\x1b[...letter`, e.g. SGR color codes, cursor movement)
- * and all four ECMA-48 "string-type" introducers that can appear in
+ * and all five ECMA-48 "string-type" introducers that can appear in
  * untrusted input rendered into the operator's terminal (a GitHub comment/
- * issue body, via watch.mjs's `renderDetailView()`):
- *   - OSC (`\x1b]`)  — OSC 8 hyperlinks, OSC 52 clipboard writes, OSC 0/2
- *     window-title sets
- *   - DCS (`\x1bP`)  — device control strings
- *   - APC (`\x1b_`)  — application program command, incl. the Kitty terminal
- *     graphics protocol (`\x1b_G...`) and iTerm2 proprietary sequences
- *   - PM  (`\x1b^`)  — privacy message
- *   - SOS (`\x1bX`)  — start of string
- * Each of the four shares the same shape (ESC + introducer + payload,
- * terminated by BEL or ST) and is stripped with one shared pattern. An
+ * issue body, via watch.mjs's `renderDetailView()`), in both their 7-bit
+ * two-byte (`ESC` + letter) and 8-bit single-byte C1 control-code forms:
+ *   - OSC (`\x1b]` / C1 `\x9d`) — OSC 8 hyperlinks, OSC 52 clipboard writes,
+ *     OSC 0/2 window-title sets
+ *   - DCS (`\x1bP` / C1 `\x90`) — device control strings
+ *   - APC (`\x1b_` / C1 `\x9f`) — application program command, incl. the
+ *     Kitty terminal graphics protocol (`\x1b_G...`) and iTerm2 proprietary
+ *     sequences
+ *   - PM  (`\x1b^` / C1 `\x9e`) — privacy message
+ *   - SOS (`\x1bX` / C1 `\x98`) — start of string
+ * Each shares the same shape (introducer + payload, terminated by BEL or
+ * ST — `\x1b\\` for the 7-bit form, the single-byte `\x9c` C1 ST for the
+ * 8-bit form) and is stripped with one shared pattern per byte-width. An
  * unterminated sequence (no BEL/ST before end-of-string) is also stripped
  * to end-of-string rather than passed through, since a truncated terminator
- * must not leave the escape live.
+ * must not leave the escape live. The C1 single-byte forms are honored by
+ * some terminal emulators/locales even though most default configurations
+ * treat raw C1 bytes as non-printing garbage — see forge#2549.
  */
 export function stripAnsi(s) {
   return s
     .replace(/\x1b[\]P_^X][^\x07\x1b]*(?:\x07|\x1b\\)?/g, "")
+    .replace(/[\x90\x9d\x9e\x9f\x98][^\x07\x9c]*(?:\x07|\x9c)?/g, "")
     .replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
 }
 

@@ -139,6 +139,79 @@ describe("stripAnsi", () => {
   it("removes mixed CSI + APC sequences in one string", () => {
     assert.equal(stripAnsi("\x1b[1ma\x1b_Gapc\x07b\x1b[0m"), "ab");
   });
+
+  // -------------------------------------------------------------------------
+  // C1 single-byte introducer forms (forge#2549 — 8-bit equivalents of the
+  // 7-bit two-byte OSC/DCS/APC/PM/SOS introducers extended in forge#2548)
+  // -------------------------------------------------------------------------
+
+  it("removes C1 OSC (0x9d) sequences terminated by BEL", () => {
+    assert.equal(stripAnsi("abc\x9d52;c;payload\x07def"), "abcdef");
+  });
+
+  it("removes C1 OSC (0x9d) sequences terminated by C1 ST (0x9c)", () => {
+    assert.equal(stripAnsi("abc\x9d0;window title\x9cdef"), "abcdef");
+  });
+
+  it("removes an unterminated C1 OSC (0x9d) sequence to end of string", () => {
+    assert.equal(stripAnsi("abc\x9d52;c;evilpayload"), "abc");
+  });
+
+  it("removes C1 DCS (0x90) sequences terminated by BEL", () => {
+    assert.equal(stripAnsi("abc\x90some-dcs-payload\x07def"), "abcdef");
+  });
+
+  it("removes C1 DCS (0x90) sequences terminated by C1 ST (0x9c)", () => {
+    assert.equal(stripAnsi("abc\x90some-dcs-payload\x9cdef"), "abcdef");
+  });
+
+  it("removes an unterminated C1 DCS (0x90) sequence to end of string", () => {
+    assert.equal(stripAnsi("abc\x90some-dcs-payload"), "abc");
+  });
+
+  it("removes C1 APC (0x9f) sequences terminated by BEL, incl. Kitty graphics protocol", () => {
+    assert.equal(stripAnsi("abc\x9fsome-apc-payload\x07def"), "abcdef");
+  });
+
+  it("removes C1 APC (0x9f) sequences terminated by C1 ST (0x9c)", () => {
+    assert.equal(stripAnsi("abc\x9fsome-apc-payload\x9cdef"), "abcdef");
+  });
+
+  it("removes an unterminated C1 APC (0x9f) sequence to end of string", () => {
+    assert.equal(stripAnsi("abc\x9fsome-apc-payload"), "abc");
+  });
+
+  it("removes C1 PM (0x9e) sequences terminated by BEL", () => {
+    assert.equal(stripAnsi("abc\x9esome-pm-payload\x07def"), "abcdef");
+  });
+
+  it("removes C1 PM (0x9e) sequences terminated by C1 ST (0x9c)", () => {
+    assert.equal(stripAnsi("abc\x9esome-pm-payload\x9cdef"), "abcdef");
+  });
+
+  it("removes an unterminated C1 PM (0x9e) sequence to end of string", () => {
+    assert.equal(stripAnsi("abc\x9esome-pm-payload"), "abc");
+  });
+
+  it("removes C1 SOS (0x98) sequences terminated by BEL", () => {
+    assert.equal(stripAnsi("abc\x98some-sos-payload\x07def"), "abcdef");
+  });
+
+  it("removes C1 SOS (0x98) sequences terminated by C1 ST (0x9c)", () => {
+    assert.equal(stripAnsi("abc\x98some-sos-payload\x9cdef"), "abcdef");
+  });
+
+  it("removes an unterminated C1 SOS (0x98) sequence to end of string", () => {
+    assert.equal(stripAnsi("abc\x98some-sos-payload"), "abc");
+  });
+
+  it("removes mixed C1 OSC + 7-bit DCS sequences in one string", () => {
+    assert.equal(stripAnsi("a\x9d8;;url\x07b\x1bPdcs\x1b\\c"), "abc");
+  });
+
+  it("removes mixed CSI + C1 APC sequences in one string", () => {
+    assert.equal(stripAnsi("\x1b[1ma\x9fapc\x07b\x1b[0m"), "ab");
+  });
 });
 
 // ---------------------------------------------------------------------------
