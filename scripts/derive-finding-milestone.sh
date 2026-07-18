@@ -97,7 +97,16 @@ done
 # 0-exit gh call's stdout is never polluted with incidental stderr text
 # (e.g. a gh CLI update notice) ahead of the jq -r parse below. Mirrors the
 # GH_STDERR_TMP pattern already used in scripts/classify-lane.sh.
+# Restricted to owner-only permissions (chmod 600) since the file transiently
+# holds gh CLI stderr text; and trap-cleaned on EXIT (mirrors the idiom
+# already in production at scripts/doctor-pipeline-state.sh) so a
+# signal-interrupted run (SIGINT/SIGTERM while `gh pr view` is in flight)
+# doesn't leak the temp file — the two explicit rm -f calls below still run
+# on their normal/error paths; the trap is a no-op in those cases and only
+# matters for exit paths those calls don't cover. <!-- Fixes: forge#2532, forge#2533 -->
 GH_STDERR_TMP=$(mktemp)
+chmod 600 "$GH_STDERR_TMP"
+trap 'rm -f "$GH_STDERR_TMP"' EXIT
 PR_JSON=$(gh pr view "$PR_NUMBER" "${GH_REPO_ARGS[@]+"${GH_REPO_ARGS[@]}"}" \
   --json milestone,body,baseRefName,headRefName 2>"$GH_STDERR_TMP") || {
   echo "ERROR: failed to fetch PR #$PR_NUMBER — check PR number and repo flag" >&2
