@@ -76,6 +76,8 @@ fi
 # than via a second `gh issue view` call so this stays one round trip, same
 # failure surface as before this field was added. <!-- Added: forge#2443 -->
 GH_STDERR_TMP=$(mktemp)
+chmod 600 "$GH_STDERR_TMP"
+trap 'rm -f "$GH_STDERR_TMP"' EXIT
 ISSUE_JSON=$(gh issue view "$ISSUE_NUMBER" "${GH_REPO_ARGS[@]}" --json milestone,labels 2>"$GH_STDERR_TMP") || {
   echo "ERROR: failed to fetch issue #$ISSUE_NUMBER — check issue number and repo flag" >&2
   cat "$GH_STDERR_TMP" >&2
