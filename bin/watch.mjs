@@ -328,8 +328,8 @@ function renderDetailView(detail) {
   if (!detail) return [dim("  No detail available.")];
 
   const lines = [];
-  lines.push(`  ${bold(`#${detail.issue} · ${detail.title ?? ""}`)}`);
-  lines.push(dim(`  ${detail.branch ?? "—"} · PR ${detail.pr ?? "—"} · ${formatStatus(detail)}`));
+  lines.push(`  ${bold(`#${detail.issue} · ${stripAnsi(detail.title ?? "")}`)}`);
+  lines.push(dim(`  ${stripAnsi(detail.branch ?? "—")} · PR ${detail.pr ?? "—"} · ${formatStatus(detail)}`));
   lines.push("");
 
   lines.push(`  ${bold("Phase timeline")}`);
