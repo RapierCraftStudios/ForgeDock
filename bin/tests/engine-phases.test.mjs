@@ -945,4 +945,19 @@ describe("closeUnbalancedFence", () => {
     const text = "```js\nfoo\n```";
     assert.equal(closeUnbalancedFence(text), text);
   });
+
+  // forge#2589: a candidate closing line with trailing non-whitespace content
+  // is not a valid GFM closer — the fence must stay open and a genuine
+  // closer must be appended.
+  it("does not treat a backtick run followed by trailing content as a closer (forge#2589)", () => {
+    const text = "```js\nfoo\n``` this is misleading text\nbar";
+    assert.equal(closeUnbalancedFence(text), `${text}\n\`\`\``);
+  });
+
+  // A closer followed only by trailing spaces/tabs remains valid per GFM
+  // ("may be followed only by spaces or tabs, which are ignored").
+  it("still treats a backtick run followed only by trailing whitespace as a valid closer (forge#2589)", () => {
+    const text = "```js\nfoo\n```   \nbar";
+    assert.equal(closeUnbalancedFence(text), text);
+  });
 });
