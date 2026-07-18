@@ -1660,7 +1660,7 @@ export async function forge(ctx) {
             // has already succeeded, before the final rename — rather than
             // before copyFile (as the forge.yaml path does), so a copyFile
             // failure never backs up (and thereby displaces) a target that's
-            // about to remain untouched (see the mid-write-failure test,
+            // about to remain untouched (see the .tmp-write-failure test,
             // forge#2498). backupExisting()'s rename is itself atomic, so this
             // ordering carries none of the non-atomic-write risk that forge#1396
             // flagged for the old backup-then-writeFileSync forge.yaml path.
@@ -1678,7 +1678,7 @@ export async function forge(ctx) {
                 // below implies it merely "could not be repaired". Restore the
                 // prior content so a failed repair is a no-op, matching the
                 // pre-backup invariant that a rename failure never removes the
-                // existing file (see the mid-write-failure test, forge#2498).
+                // existing file (see the .tmp-write-failure test, forge#2498).
                 // WIRE:PROVEN — manual: reasoned, not exercised by an automated
                 // test. This branch requires rename(tmp, target) to fail on the
                 // exact call immediately after backupExisting()'s own rename of

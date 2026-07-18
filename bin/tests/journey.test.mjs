@@ -1274,7 +1274,7 @@ describe("forge (Act II)", () => {
     assert.equal(manifest.files["a.md"], true, "repaired file should be adopted into the manifest");
   });
 
-  it("stale regular-file copy with no manifest entry: target is untouched on a mid-write failure (forge#2498)", async () => {
+  it("stale regular-file copy with no manifest entry: target is untouched on a .tmp write failure (forge#2498)", async () => {
     const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home4b-"));
     const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src4b-"));
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
@@ -1289,11 +1289,12 @@ describe("forge (Act II)", () => {
     mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
     writeFileSync(target, "OLD STALE COPY", "utf-8");
 
-    // Simulate a mid-write failure by pre-creating target + ".tmp" as a
+    // Simulate a write failure by pre-creating target + ".tmp" as a
     // directory — copyFile(file, target + ".tmp") then throws EISDIR/EEXIST
-    // instead of writing, a cheap stand-in for ENOSPC/AV-lock without needing
-    // a real disk-full condition (same technique used for writeForgeYaml's
-    // atomic-write test above, ref: #1396).
+    // at open-time (the write never starts, not a partial in-flight write),
+    // a cheap stand-in for ENOSPC/AV-lock without needing a real disk-full
+    // condition (same technique used for writeForgeYaml's atomic-write test
+    // above, ref: #1396).
     mkdirSyncFs(target + ".tmp", { recursive: true });
 
     const { ctx, w } = stubCtx({ home });
