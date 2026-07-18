@@ -390,6 +390,18 @@ function renderKeyLegend() {
   ];
 }
 
+// detailError is meant to be a closed set of fixed-literal status strings,
+// never free text — see the `opts.detailError` JSDoc below and the sole
+// writer in runInteractiveLoop(). KNOWN_DETAIL_ERRORS is the render-boundary
+// enforcement of that contract: renderFrame() only renders a detailError
+// value that is a member of this set, so a future call site that
+// accidentally threads external/caught-error text (e.g. `err.message`)
+// through this parameter is silently not rendered rather than leaking
+// unsanitized content into the fleet view (forge#2562, hardening the
+// convention documented but not enforced since forge#2491).
+const DETAIL_FETCH_FAILED_MESSAGE = "detail fetch failed — press Enter to retry";
+const KNOWN_DETAIL_ERRORS = new Set([DETAIL_FETCH_FAILED_MESSAGE]);
+
 /**
  * Build the full frame (header, rule, fleet table or detail view, focus
  * strip, key bar / legend) as a flat array of lines — pure, no I/O, so it's
@@ -411,7 +423,10 @@ function renderKeyLegend() {
  * @param {boolean} [opts.showLegend=false]
  * @param {string|null} [opts.detailError] - fixed-literal message shown as a
  *   one-line banner in the fleet view when a drill-down detail fetch fails
- *   (forge#2491); never echoes external/caught-error content verbatim
+ *   (forge#2491); never echoes external/caught-error content verbatim.
+ *   Enforced at render time — only rendered when it is a member of
+ *   KNOWN_DETAIL_ERRORS (forge#2562), so a value outside that closed set is
+ *   silently not rendered rather than leaking unsanitized content.
  * @returns {string[]}
  */
 export function renderFrame(snapshot, opts = {}) {
@@ -465,7 +480,7 @@ export function renderFrame(snapshot, opts = {}) {
     lines.push(rule, dim(`  ⏸ paused ${ageLabel} — press p to resume`));
   }
 
-  if (viewMode === "fleet" && opts.detailError) {
+  if (viewMode === "fleet" && opts.detailError && KNOWN_DETAIL_ERRORS.has(opts.detailError)) {
     lines.push(rule, yellow(`  ⚠ ${opts.detailError}`));
   }
 
@@ -735,9 +750,11 @@ async function runInteractiveLoop({
                 // rather than crashing the loop, but it must not be
                 // silent (forge#2491) — record a fixed-literal status
                 // message (never the caught error's own text, to keep
-                // rendered state free of unsanitized external content)
-                // so the operator sees something happened and can retry.
-                detailError = "detail fetch failed — press Enter to retry";
+                // rendered state free of unsanitized external content).
+                // Sourced from the shared DETAIL_FETCH_FAILED_MESSAGE
+                // constant (forge#2562) so this writer and renderFrame()'s
+                // KNOWN_DETAIL_ERRORS allowlist can never drift apart.
+                detailError = DETAIL_FETCH_FAILED_MESSAGE;
               })
               .finally(() => {
                 detailLoading = false;

@@ -781,6 +781,21 @@ describe("renderFrame — keyboard interaction state (forge#2392)", () => {
     assert.ok(!text.includes("detail fetch failed"));
   });
 
+  // forge#2562 — renderFrame() must enforce the "fixed-literal only"
+  // contract on detailError at the render boundary itself, not merely by
+  // convention at the sole call site. A value outside the known allowlist
+  // (e.g. an accidentally-threaded err.message) must be silently dropped,
+  // never rendered.
+  it("does not render a detailError value outside the known-literal allowlist (e.g. an accidental err.message echo)", () => {
+    const lines = renderFrame(snapshot({ agents: [] }), {
+      width: 80,
+      detailError: "ECONNRESET: socket hang up at TLSSocket.onConnectEnd",
+    });
+    const text = lines.join("\n");
+    assert.ok(!text.includes("ECONNRESET"));
+    assert.ok(!text.includes("socket hang up"));
+  });
+
   it("does not render the detail-fetch error banner while viewMode is 'detail' (error only ever occurs in fleet view)", () => {
     const detail = {
       issue: 42,
