@@ -1522,7 +1522,20 @@ for FINDING_NUM in {spawned_finding_numbers}; do
         # REPAIR_GOVERNOR_MAX cap as the write itself — at most one extra `gh issue view`
         # call per repair attempt.
         FINDING_UPDATED_AT_CURRENT=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json updatedAt --jq '.updatedAt' 2>/dev/null || echo "")
-        if [ -n "$FINDING_UPDATED_AT_CURRENT" ] && [ "$FINDING_UPDATED_AT_CURRENT" != "$FINDING_UPDATED_AT_SNAPSHOT" ]; then
+        if [ -z "$FINDING_UPDATED_AT_CURRENT" ]; then
+          # forge#2565: the re-fetch itself failed (network error, API rate limit, or any
+          # other non-zero `gh issue view` exit) — the `|| echo ""` fallback above produces
+          # an empty string that is indistinguishable, to a plain `[ -n ... ] && [ ... != ... ]`
+          # check, from "confirmed no concurrent edit." Treat an unverifiable freshness check
+          # as its own outcome and fail closed, mirroring the concurrent-edit branch below
+          # rather than silently falling through to the unprotected write.
+          echo "REPAIR: #${FINDING_NUM} skipped — freshness re-fetch failed (network error or API rate limit); cannot verify no concurrent edit occurred, failing closed instead of risking a silent clobber"
+          gh issue comment "$FINDING_NUM" -R {GH_REPO} --body "<!-- FORGE:GATE_FAILURE -->
+## Code Branch Repair Skipped — Freshness Re-fetch Failed
+
+Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${REPAIR_SOURCE_PR} bases on \`${REPAIR_PARENT_BASE}\` — not the staging fast lane. Automatic repair was skipped because the freshness re-fetch (\`gh issue view --json updatedAt\`) failed, so the concurrency guard could not confirm the issue body is still at the snapshot captured earlier in this iteration (\`${FINDING_UPDATED_AT_SNAPSHOT}\`). Proceeding with the write here would risk silently clobbering a concurrent edit with no way to verify. Human review required to confirm the current body state and, if still needed, re-apply the Code branch stamp manually. <!-- forge#2565 -->" 2>/dev/null || true
+          gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label needs-human 2>/dev/null || true  # freshness-recheck-failure path
+        elif [ "$FINDING_UPDATED_AT_CURRENT" != "$FINDING_UPDATED_AT_SNAPSHOT" ]; then
           echo "REPAIR: #${FINDING_NUM} skipped — concurrent edit detected (updatedAt changed from ${FINDING_UPDATED_AT_SNAPSHOT} to ${FINDING_UPDATED_AT_CURRENT} since this iteration's initial read); flagging instead of repairing"
           gh issue comment "$FINDING_NUM" -R {GH_REPO} --body "<!-- FORGE:GATE_FAILURE -->
 ## Code Branch Repair Skipped — Concurrent Edit Detected
