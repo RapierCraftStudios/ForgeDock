@@ -1289,13 +1289,15 @@ describe("forge (Act II)", () => {
     mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
     writeFileSync(target, "OLD STALE COPY", "utf-8");
 
-    // Simulate a write failure by pre-creating target + ".tmp" as a
-    // directory — copyFile(file, target + ".tmp") then throws EISDIR/EEXIST
-    // at open-time (the write never starts, not a partial in-flight write),
-    // a cheap stand-in for ENOSPC/AV-lock without needing a real disk-full
-    // condition (same technique used for writeForgeYaml's atomic-write test
-    // above, ref: #1396).
-    mkdirSyncFs(target + ".tmp", { recursive: true });
+    // Simulate a write failure by pre-creating the per-process tmp sibling
+    // (target + "." + process.pid + ".tmp", forge#2542) as a directory —
+    // copyFile(file, tmpTarget) then throws EISDIR/EEXIST at open-time (the
+    // write never starts, not a partial in-flight write), a cheap stand-in
+    // for ENOSPC/AV-lock without needing a real disk-full condition (same
+    // technique used for writeForgeYaml's atomic-write test above, ref:
+    // #1396). Must use the pid-suffixed path — the plain `target + ".tmp"`
+    // is no longer the path forge() actually writes to.
+    mkdirSyncFs(target + "." + process.pid + ".tmp", { recursive: true });
 
     const { ctx, w } = stubCtx({ home });
     ctx.forgeHome = forgeHome;
@@ -1329,14 +1331,16 @@ describe("forge (Act II)", () => {
     writeFileSync(target, "OLD STALE COPY", "utf-8");
 
     // Unlike the sibling mid-write-failure test above (which pre-creates
-    // target + ".tmp" as a directory — a technique that forces copyFile to
-    // fail but leaves nothing unlink() can remove), pre-create target + ".tmp"
-    // as a *regular file* and mark it read-only. copyFile(file, target+".tmp")
-    // then fails with EPERM while attempting to open the destination for
-    // writing — the same failure shape as a real AV lock or permission error
-    // — but leaves a genuine file-type .tmp residue on disk, so this test can
-    // actually assert that the new cleanup path (forge#2540) removes it.
-    const tmpSibling = target + ".tmp";
+    // the per-process tmp sibling as a directory — a technique that forces
+    // copyFile to fail but leaves nothing unlink() can remove), pre-create
+    // it as a *regular file* and mark it read-only. copyFile(file,
+    // tmpTarget) then fails with EPERM while attempting to open the
+    // destination for writing — the same failure shape as a real AV lock or
+    // permission error — but leaves a genuine file-type .tmp residue on
+    // disk, so this test can actually assert that the cleanup path
+    // (forge#2540) removes it. Must use the pid-suffixed path (forge#2542)
+    // — the plain `target + ".tmp"` is no longer the path forge() writes to.
+    const tmpSibling = target + "." + process.pid + ".tmp";
     writeFileSync(tmpSibling, "STALE .tmp LEFTOVER", "utf-8");
     chmodSync(tmpSibling, 0o444);
 
@@ -1392,6 +1396,47 @@ describe("forge (Act II)", () => {
     assert.equal(res.backedUp, 1, "forge() should report exactly one backup");
     assert.equal(res.updated, 1);
     assert.doesNotMatch(w.text, /WARNING/, "should not warn — the stale copy was repaired");
+  });
+
+  it("stale regular-file copy with no manifest entry: uses a per-process tmp path, unaffected by a stray plain target+\".tmp\" file (forge#2542)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home4e-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src4e-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // Pre-create the target as a stale regular-file copy (content mismatches
+    // the current source) with no manifest entry, same setup as the sibling
+    // tests above.
+    const target = join(home, ".claude", "commands", "a.md");
+    mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
+    writeFileSync(target, "OLD STALE COPY", "utf-8");
+
+    // Simulate a leftover plain `target + ".tmp"` file from a *different*
+    // process (e.g. a concurrent forge() invocation with a different PID,
+    // or a stale leftover from before this fix). Before forge#2542, this
+    // repair branch wrote to and cleaned up exactly this literal path, so a
+    // second concurrent invocation sharing it could race. After the fix,
+    // this invocation writes to its own `target + "." + process.pid +
+    // ".tmp"` path and must never read, write, or clean up this foreign
+    // sibling — it should be left completely untouched.
+    const foreignTmp = target + ".tmp";
+    writeFileSync(foreignTmp, "FOREIGN PROCESS LEFTOVER", "utf-8");
+
+    const { ctx, w } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.equal(readFileSync(target, "utf-8"), "A", "stale copy should still be overwritten with current source content");
+    assert.equal(res.backedUp, 1, "forge() should report exactly one backup");
+    assert.equal(res.updated, 1);
+    assert.doesNotMatch(w.text, /WARNING/, "should not warn — the stale copy was repaired despite the foreign .tmp sibling");
+    assert.equal(
+      readFileSync(foreignTmp, "utf-8"),
+      "FOREIGN PROCESS LEFTOVER",
+      "a foreign (non-pid-suffixed) .tmp sibling must be untouched — this invocation writes to its own per-process tmp path",
+    );
   });
 
   it("files outside the shipped command set are never touched by forge() (forge#2459 AC#3)", async () => {

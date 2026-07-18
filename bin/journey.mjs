@@ -1648,18 +1648,29 @@ export async function forge(ctx) {
             // simply stale, which the WARNING below cannot distinguish. This
             // mirrors the .tmp+rename swap already used for symlink installs
             // above (lines ~1573-1579, ~1601-1607).
+            //
+            // Unlike those symlink-based branches — where symlink() is itself
+            // exclusive-create and therefore naturally races out a concurrent
+            // writer — copyFile() has no such semantics: two concurrent
+            // forge() invocations (e.g. an overlapping `doctor --fix` run, or
+            // a file watcher) targeting the same file would both write
+            // through the same shared `target + ".tmp"` path and could
+            // interleave or clobber each other before either rename() runs.
+            // Suffix the tmp sibling with this process's PID so concurrent
+            // invocations never share a path (forge#2542).
+            const tmpTarget = target + "." + process.pid + ".tmp";
             try {
-              await copyFile(file, target + ".tmp");
+              await copyFile(file, tmpTarget);
             } catch (copyErr) {
               // A copyFile failure (disk full mid-copy, AV lock, permission
               // error) can still leave a partially-written .tmp sibling on
               // disk even though the write itself threw. The sibling
-              // rename() failure just below already cleans up target+".tmp"
+              // rename() failure just below already cleans up tmpTarget
               // on its own failure path (renameErr) — mirror that here so a
               // copyFile failure doesn't orphan the .tmp file instead
               // (forge#2540). Best-effort: never let the cleanup itself mask
               // or replace the original copyErr being rethrown.
-              await unlink(target + ".tmp").catch(() => {});
+              await unlink(tmpTarget).catch(() => {});
               throw copyErr;
             }
             // Preserve the pre-existing content before it's replaced, mirroring
@@ -1677,12 +1688,22 @@ export async function forge(ctx) {
             // forge#2498). backupExisting()'s rename is itself atomic, so this
             // ordering carries none of the non-atomic-write risk that forge#1396
             // flagged for the old backup-then-writeFileSync forge.yaml path.
+            //
+            // Note: backupExisting() below is a *synchronous* rename
+            // (target -> target+".bak"); the tmpTarget -> target rename just
+            // after it is a separate, async filesystem operation. Between
+            // the two, target genuinely does not exist on disk for a
+            // sub-millisecond window. Only a hard process kill (not any
+            // catchable JS error) can land exactly there — any catchable
+            // failure of the second rename is already handled by the
+            // rollback block below — and recovery in that rare case is via
+            // the surviving target+".bak" on the next forge() run (forge#2558).
             const backup = backupExisting(target);
             if (backup) backedUp++;
             try {
-              await rename(target + ".tmp", target);
+              await rename(tmpTarget, target);
             } catch (renameErr) {
-              await unlink(target + ".tmp").catch(() => {});
+              await unlink(tmpTarget).catch(() => {});
               if (backup) {
                 // The final rename failed AFTER backupExisting() already moved
                 // the original file to target+".bak" — target no longer exists
@@ -1700,12 +1721,18 @@ export async function forge(ctx) {
                 // for the symlink-relink paths above, lines ~1576/~1604, are the
                 // same kind of defensive OS-failure branch and are likewise
                 // untested for the same reason). Verified by code inspection:
-                // rename() is fs/promises' rename, .catch(() => {}) makes the
-                // rollback itself best-effort (never throws over renameErr),
-                // and backedUp-- keeps the counter consistent with the restored
+                // rename() is fs/promises' rename. The rollback rename's own
+                // outcome is captured explicitly rather than assumed — if it
+                // also fails (e.g. .bak itself is locked), target+".bak" is
+                // left in place as the only remaining copy of the prior
+                // content, so backedUp must NOT be decremented in that case;
+                // it correctly reflects "a backup file still exists on disk"
+                // (forge#2559). Only on confirmed rollback success does
+                // backedUp-- keep the counter consistent with the restored
                 // on-disk state before renameErr is rethrown to the outer catch.
-                await rename(target + ".bak", target).catch(() => {});
-                backedUp--;
+                let rollbackOk = true;
+                await rename(target + ".bak", target).catch(() => { rollbackOk = false; });
+                if (rollbackOk) backedUp--;
               }
               throw renameErr;
             }
