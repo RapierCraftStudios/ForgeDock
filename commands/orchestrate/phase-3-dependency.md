@@ -509,6 +509,7 @@ check_orchestrator_lease() {
   # lease event instead of the true most recent one, which can either falsely trigger the
   # "REFUSING TO DISPATCH" exit 1 below using stale holder data, or fail to see a genuinely
   # live competing lease and defeat the entire point of this mechanism.
+  local LAST_LEASE_EVENT
   LAST_LEASE_EVENT=$(gh api --paginate "repos/{GH_REPO}/issues/${COORD_NUM}/comments" \
     --jq '[.[] | select(.body | contains("FORGE:LEASE"))] | last |
           {body: .body, created_at: .created_at}' 2>/dev/null || echo "")
@@ -518,12 +519,14 @@ check_orchestrator_lease() {
     return
   fi
 
+  local LEASE_IS_RELEASE
   LEASE_IS_RELEASE=$(echo "$LAST_LEASE_EVENT" | jq -r '.body | contains("FORGE:LEASE_RELEASED")' 2>/dev/null || echo "false")
   if [ "$LEASE_IS_RELEASE" = "true" ]; then
     echo "free"
     return
   fi
 
+  local HOLDER_BATCH_ID LEASE_TIMESTAMP
   HOLDER_BATCH_ID=$(echo "$LAST_LEASE_EVENT" | jq -r '.body' 2>/dev/null | grep -oP '(?<=\*\*Holder Batch ID\*\*: )\S+' | head -1)
   LEASE_TIMESTAMP=$(echo "$LAST_LEASE_EVENT" | jq -r '.created_at' 2>/dev/null)
 
@@ -538,11 +541,13 @@ check_orchestrator_lease() {
   # with no warning). Distinguish "genuinely parsed as epoch 0" from "failed to parse" by
   # checking the command's exit status explicitly, and fail SAFE (treat as held/unexpired)
   # rather than fail-open on a parse error.
+  local LEASE_EPOCH
   if ! LEASE_EPOCH=$(date -u -d "$LEASE_TIMESTAMP" +%s 2>/dev/null); then
     echo "WARNING: check_orchestrator_lease(): failed to parse lease timestamp '${LEASE_TIMESTAMP}' — treating as held (fail-safe, not fail-open) to avoid masking a live lease." >&2
     echo "held:${HOLDER_BATCH_ID}"
     return
   fi
+  local NOW_EPOCH AGE
   NOW_EPOCH=$(date -u +%s)
   AGE=$((NOW_EPOCH - LEASE_EPOCH))
 
