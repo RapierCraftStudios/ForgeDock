@@ -497,6 +497,71 @@ describe("truncateVisible — boundary values", () => {
 });
 
 // ---------------------------------------------------------------------------
+// truncateVisible — dangerous non-CSI escape neutralization (forge#2606)
+//
+// truncateVisible() previously used its own narrower, CSI-only regex and
+// passed through any other escape class (OSC/DCS/APC/PM/SOS, 8-bit C1 CSI,
+// charset designators, single-byte Fe/Fp forms) untouched — reopening the
+// exact threat model stripAnsi() was hardened against, for any caller that
+// invokes truncateVisible() directly without a prior stripAnsi() pass (e.g.
+// bin/tui.mjs's own config-review screen). These tests call truncateVisible()
+// directly on unsanitized input — no upstream stripAnsi() — mirroring how a
+// caller could reach it in production.
+// ---------------------------------------------------------------------------
+
+describe("truncateVisible — dangerous non-CSI escape neutralization (forge#2606)", () => {
+  it("does not pass through an OSC sequence (window-title injection) when called without a prior stripAnsi()", () => {
+    const input = "abc\x1b]0;evil-title\x07def";
+    const result = truncateVisible(input, 20);
+    assert.ok(!result.includes("\x1b]"), "raw OSC introducer must not appear in output");
+    assert.equal(result, "abcdef");
+  });
+
+  it("does not pass through a RIS full-reset (Fe-class, \\x1bc) when called without a prior stripAnsi()", () => {
+    const input = "abc\x1bcdef";
+    const result = truncateVisible(input, 20);
+    assert.ok(!result.includes("\x1bc"), "raw RIS escape must not appear in output");
+    assert.equal(result, "abcdef");
+  });
+
+  it("does not pass through a charset designator (\\x1b(B) when called without a prior stripAnsi()", () => {
+    const input = "abc\x1b(Bdef";
+    const result = truncateVisible(input, 20);
+    assert.ok(!result.includes("\x1b("), "raw charset designator must not appear in output");
+    assert.equal(result, "abcdef");
+  });
+
+  it("does not pass through an 8-bit C1 CSI sequence (\\x9b) when called without a prior stripAnsi()", () => {
+    const input = "abc\x9b31mdef\x9b0m";
+    const result = truncateVisible(input, 20);
+    assert.ok(!result.includes("\x9b"), "raw C1 CSI byte must not appear in output");
+    assert.equal(result, "abcdef");
+  });
+
+  it("does not pass through a DCS sequence (\\x1bP) when called without a prior stripAnsi()", () => {
+    const input = "abc\x1bPpayload\x1b\\def";
+    const result = truncateVisible(input, 20);
+    assert.ok(!result.includes("\x1bP"), "raw DCS introducer must not appear in output");
+    assert.equal(result, "abcdef");
+  });
+
+  it("still preserves legitimate 7-bit CSI SGR sequences after the dangerous-escape pass", () => {
+    // Regression guard: the new sanitization pass must not touch the CSI
+    // pattern truncateVisible() needs for width-safe color truncation.
+    const input = `${BOLD_OPEN}hello${RESET}`;
+    const result = truncateVisible(input, 10);
+    assert.equal(result, input, "CSI/SGR sequences must be unaffected by the dangerous-escape strip");
+  });
+
+  it("neutralizes an injected OSC sequence mid-truncation without corrupting the visible-width budget", () => {
+    const input = "hello\x1b]8;;https://evil.example\x07world";
+    const result = truncateVisible(input, 8);
+    assert.ok(!result.includes("\x1b]"), "raw OSC introducer must not survive truncation");
+    assert.equal(stripAnsi(result).length <= 8, true, "visible width budget must still be respected");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // runSteps — non-TTY / no-ANSI mode (uses _forceNoAnsi: true)
 //
 // All tests use a mock writable stream to capture output without requiring a

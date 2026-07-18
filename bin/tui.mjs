@@ -763,8 +763,40 @@ export function stripAnsi(s) {
 }
 
 /**
+ * Strip every escape-sequence class `stripAnsi()` recognizes EXCEPT 7-bit
+ * CSI (`\x1b[...letter`) — OSC/DCS/APC/PM/SOS (7-bit + 8-bit C1 forms),
+ * 8-bit C1 CSI (`\x9b`), charset designators, and single-byte Fe/Fp forms
+ * (RIS/DECSC/DECRC/IND/NEL/RI/SS2/SS3/DECKPAM/DECKPNM). 7-bit CSI is
+ * deliberately left alone — it is the only sequence class the app itself
+ * intentionally emits (SGR color codes via bold()/dim()/etc.) and callers
+ * of `truncateVisible()`/`padVisible()` below need it preserved for
+ * width-safe color truncation.
+ *
+ * This is used as a defense-in-depth pass inside `truncateVisible()` and
+ * `padVisible()` so that untrusted text (e.g. a GitHub issue title, or
+ * auto-detected repo metadata) is neutralized even when a caller forgets
+ * to route it through `stripAnsi()` first — see forge#2606: `truncateVisible()`
+ * previously used its own narrower CSI-only regex and `padVisible()` used
+ * `stripAnsi()` only to *measure* width while still appending the raw,
+ * unsanitized string.
+ */
+function stripDangerousAnsi(s) {
+  return s
+    .replace(/\x1b[\]P_^X][^\x07\x1b]*(?:\x07|\x1b\\)?/g, "")
+    .replace(/[\x90\x9d\x9e\x9f\x98][^\x07\x9c]*(?:\x07|\x9c)?/g, "")
+    .replace(/\x9b[0-9;]*[A-Za-z]/g, "")
+    .replace(/\x1b[()*+\-./][0-9A-Za-z@]/g, "")
+    .replace(/\x1b[c78DEMNO=>]/g, "");
+}
+
+/**
  * Truncate an ANSI-decorated string to at most `maxWidth` visible characters,
  * never bisecting an escape sequence.
+ *
+ * Non-CSI dangerous escape classes (OSC/DCS/APC/PM/SOS, 8-bit C1 CSI,
+ * charset designators, single-byte Fe/Fp forms) are stripped up front via
+ * `stripDangerousAnsi()` so they can never reach the output even if the
+ * caller passed in unsanitized text — see forge#2606.
  *
  * Tokens from the cut region are suppressed — only ANSI tokens encountered
  * while the visible budget is still live are forwarded to the output.
@@ -773,6 +805,7 @@ export function stripAnsi(s) {
  * adjacent columns.
  */
 export function truncateVisible(str, maxWidth) {
+  str = stripDangerousAnsi(str);
   const ansiRe = /\x1b\[[0-9;]*[A-Za-z]/g;
   let visible = 0;
   let result = "";
@@ -937,9 +970,16 @@ export async function annotatedReviewScreen(
   }
 
   // Pad an ANSI-decorated string to `width` visible characters.
+  //
+  // Sanitizes non-CSI dangerous escape classes (OSC/DCS/APC/PM/SOS, 8-bit
+  // C1 CSI, charset designators, single-byte Fe/Fp forms) before appending
+  // `str` to the output — previously this measured width via `stripAnsi()`
+  // but appended the raw, unsanitized string, letting those escape classes
+  // reach the terminal via the config-review value column (see forge#2606).
   function padVisible(str, width) {
-    const visual = stripAnsi(str).length;
-    return str + " ".repeat(Math.max(0, width - visual));
+    const sanitized = stripDangerousAnsi(str);
+    const visual = stripAnsi(sanitized).length;
+    return sanitized + " ".repeat(Math.max(0, width - visual));
   }
 
   // ── Render the annotated table ────────────────────────────────────────────
