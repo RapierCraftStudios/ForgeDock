@@ -470,6 +470,109 @@ describe("pickPhase", () => {
     });
   });
 
+  // forge#2547: composePrContent's fence-balance guard (forge#2510) had zero
+  // direct coverage. composePrContent is module-private — the only reachable
+  // caller is review.reconcile's createPrFor call (the same public-PHASES
+  // seam the forge#2382 describe block above already uses), so this drives
+  // the guard end-to-end via a mocked `gh pr create` and inspects the
+  // composed PR body's `## Summary` section.
+  describe("composePrContent — fence-balance guard (forge#2510)", () => {
+    const review = PHASES.find(p => p.id === "review");
+    const reviewState = { ...base, branch: "fix/x-42", lane: "staging" };
+
+    /** Drives review.reconcile with the given issue body and returns the composed `## Summary` text. */
+    async function summaryFor(issueBody) {
+      let capturedBody = null;
+      const gh = async (args) => {
+        const a = args.join(" ");
+        if (a.startsWith("pr list")) return "[]";
+        if (a.startsWith("pr create")) {
+          const bi = args.indexOf("--body");
+          capturedBody = args[bi + 1];
+          return "https://github.com/o/r/pull/9";
+        }
+        if (a.startsWith("api ")) return JSON.stringify([]);
+        if (a.startsWith("issue view") && a.includes("title,body")) return JSON.stringify({ title: "Fix: thing", body: issueBody });
+        if (a.startsWith("issue view") && a.includes("labels")) return JSON.stringify({ labels: [] });
+        if (a.startsWith("issue edit")) return "";
+        throw new Error(`unexpected gh call: ${a}`);
+      };
+      const git = async () => "";
+      const result = await review.reconcile(reviewState, { gh, git });
+      assert.equal(result.outputs.pr, 9, "sanity: PR creation must succeed for the summary to be captured");
+      const m = capturedBody && capturedBody.match(/## Summary\n\n([\s\S]*?)\n\n## Changes/);
+      return m ? m[1] : null;
+    }
+
+    it("closes an odd/unbalanced fence left open within the truncated summary", async () => {
+      const body = "Line1\n```code\nLine2\nLine3";
+      const summary = await summaryFor(body);
+      assert.equal(summary, "Line1\n```code\nLine2\nLine3\n```");
+      assert.equal((summary.match(/```/g) || []).length % 2, 0, "fence count must be balanced in the composed summary");
+    });
+
+    it("leaves an already-balanced (even) fence count untouched", async () => {
+      const body = "Line1\n```code\nLine2\n```\nLine3";
+      const summary = await summaryFor(body);
+      assert.equal(summary, body);
+    });
+
+    it("leaves a fence-free body untouched", async () => {
+      const body = "Just a plain problem description.";
+      const summary = await summaryFor(body);
+      assert.equal(summary, body);
+    });
+
+    it("falls back to the default summary for an empty issue body", async () => {
+      const summary = await summaryFor("");
+      assert.equal(summary, "See linked issue for details.");
+    });
+
+    it("does not read past the 8-line truncation window even when a real closing fence exists further down", async () => {
+      // Opening fence on line 8 (the last line kept by the 8-line slice); a
+      // genuine closing fence exists on line 9, but must NOT be counted —
+      // only the first 8 lines feed the fence-balance check.
+      const lines = ["l1", "l2", "l3", "l4", "l5", "l6", "l7", "```open", "```", "l10"];
+      const body = lines.join("\n");
+      const summary = await summaryFor(body);
+      const truncated = lines.slice(0, 8).join("\n");
+      assert.equal(summary, truncated + "\n```", "closing fence on line 9 must not count toward the balance check");
+    });
+  });
+
+  // forge#2547: createPrFor's push-specific PUSH_TIMEOUT_MS (forge#2509) had
+  // zero direct coverage — the existing forge#2382 describe block above
+  // captures git call *args* but never the options object, so the timeout
+  // override itself was never asserted.
+  describe("createPrFor — PUSH_TIMEOUT_MS override (forge#2509)", () => {
+    const review = PHASES.find(p => p.id === "review");
+    const reviewState = { ...base, branch: "fix/x-42", lane: "staging" };
+
+    it("pushes the branch with the push-specific 30000ms timeoutMs override, not makeIo()'s default", async () => {
+      const gitCalls = [];
+      const gh = async (args) => {
+        const a = args.join(" ");
+        if (a.startsWith("pr list")) return "[]";
+        if (a.startsWith("pr create")) return "https://github.com/o/r/pull/11";
+        if (a.startsWith("api ")) return JSON.stringify([]);
+        if (a.startsWith("issue view") && a.includes("title,body")) return JSON.stringify({ title: "Fix: thing", body: "Problem." });
+        if (a.startsWith("issue view") && a.includes("labels")) return JSON.stringify({ labels: [] });
+        if (a.startsWith("issue edit")) return "";
+        throw new Error(`unexpected gh call: ${a}`);
+      };
+      const git = async (args, opts) => { gitCalls.push({ args, opts }); return ""; };
+      const result = await review.reconcile(reviewState, { gh, git });
+      assert.equal(result.outputs.pr, 11);
+      assert.equal(gitCalls.length, 1, "createPrFor must push exactly once");
+      assert.deepEqual(gitCalls[0].args, ["push", "origin", "fix/x-42:fix/x-42"]);
+      assert.deepEqual(
+        gitCalls[0].opts,
+        { timeoutMs: 30000 },
+        "must use the push-specific PUSH_TIMEOUT_MS override (30000ms), not makeIo()'s DEFAULT_IO_TIMEOUT_MS (10000ms)"
+      );
+    });
+  });
+
   describe("close.detectOutcome", () => {
     const close = PHASES.find(p => p.id === "close");
     const ioWith = (blob) => ({ gh: async () => blob, git: async () => "0" });
