@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createRequire } from "module";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { dirname, join, resolve as resolvePath } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 const _require = createRequire(import.meta.url);
@@ -547,11 +547,40 @@ async function isForgeDockManagedCwd() {
 // ---------------------------------------------------------------------------
 
 /**
+ * Read the configured project repo slug ("owner/repo") from the cwd's
+ * `forge.yaml` → `project.owner` / `project.repo`.
+ *
+ * Deliberately a line-anchored regex rather than a YAML parse: this hook runs
+ * on every tool call and must stay synchronous and dependency-free. The
+ * `^\s*owner:` anchor cannot match a commented-out `#   owner:` line, so the
+ * commented `repos:` template block that `forgedock init` emits is ignored.
+ *
+ * @returns {string|null} lowercased "owner/repo", or null if undeterminable.
+ */
+function projectRepoSlug() {
+  try {
+    const configPath = join(process.cwd(), "forge.yaml");
+    if (!existsSync(configPath)) return null;
+    const text = readFileSync(configPath, "utf-8");
+    const owner = text.match(/^\s*owner:\s*["']?([A-Za-z0-9._-]+)/m)?.[1];
+    const repo = text.match(/^\s*repo:\s*["']?([A-Za-z0-9._-]+)/m)?.[1];
+    if (!owner || !repo) return null;
+    return `${owner}/${repo}`.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Check whether a gh pr create command targets a forbidden base branch.
  *
  * Allows staging → main PRs (the deploy path) by detecting --head staging
  * or falling back to the current git branch. Feature branches targeting
  * main are still hard-blocked.
+ *
+ * Only governs the configured project repo. A `gh pr create -R other/repo`
+ * targets a third-party repository whose branch conventions are not ours to
+ * enforce — see the project-scope guard below.
  *
  * @param {string} command
  * @returns {string|null} Error message to show, or null if allowed.
@@ -562,6 +591,26 @@ function checkPrTarget(command) {
 
   const base = extractFlag(command, "--base") || extractFlag(command, "-B");
   if (!base) return null; // no --base flag — gh will use the default
+
+  // Project-scope guard (forge#1920). This rule exists to protect THIS
+  // project's deploy pipeline, where `main` is the deploy trigger. It must not
+  // govern PRs to unrelated repositories: an upstream awesome-list, a docs
+  // typo fix, or any third-party contribution typically has `main` as its ONLY
+  // valid base and no `staging` branch at all, so blocking it is a guaranteed
+  // false positive that makes legitimate external contribution impossible.
+  //
+  // Explicitly conservative: an UNDETERMINABLE project slug (no forge.yaml, or
+  // no project.owner/repo in it) falls through to enforcement rather than
+  // skipping it, so a malformed config can never silently disarm the guard on
+  // the repo it is meant to protect. Only a *positive* mismatch — an explicit
+  // --repo/-R naming a repo that is demonstrably not ours — is exempted.
+  const targetRepo = extractFlag(command, "--repo") || extractFlag(command, "-R");
+  if (targetRepo) {
+    const ownSlug = projectRepoSlug();
+    if (ownSlug && targetRepo.toLowerCase() !== ownSlug) {
+      return null; // external repo — not ours to govern
+    }
+  }
 
   if (FORBIDDEN_PR_BASES.includes(base.toLowerCase())) {
     // Allow staging → main (the deploy path, not a pipeline violation).
