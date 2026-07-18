@@ -960,4 +960,44 @@ describe("closeUnbalancedFence", () => {
     const text = "```js\nfoo\n```   \nbar";
     assert.equal(closeUnbalancedFence(text), text);
   });
+
+  // forge#2590: GFM also permits tilde fences; a genuinely-unclosed tilde
+  // fence must be detected and closed with a matching tilde run — not
+  // silently ignored (the pre-fix regex was backtick-only).
+  it("closes a genuinely-unclosed 3-tilde fence (forge#2590)", () => {
+    const text = "~~~js\nfoo";
+    assert.equal(closeUnbalancedFence(text), "~~~js\nfoo\n~~~");
+  });
+
+  it("leaves a balanced tilde fence unchanged (forge#2590)", () => {
+    const text = "~~~js\nfoo\n~~~";
+    assert.equal(closeUnbalancedFence(text), text);
+  });
+
+  it("closes a genuinely-unclosed 4-tilde fence with a matching 4-tilde closer (forge#2590)", () => {
+    const text = "~~~~js\nfoo\nbar";
+    assert.equal(closeUnbalancedFence(text), "~~~~js\nfoo\nbar\n~~~~");
+  });
+
+  // GFM disallows mixing fence characters within one pair — a backtick run
+  // encountered while a tilde fence is open (or vice versa) must not close
+  // it; the tilde fence must remain open and get a genuine tilde closer.
+  it("does not treat a backtick run as a closer for an open tilde fence (forge#2590)", () => {
+    const text = "~~~js\nfoo\n```\nbar";
+    assert.equal(closeUnbalancedFence(text), `${text}\n~~~`);
+  });
+
+  it("does not treat a tilde run as a closer for an open backtick fence (forge#2590)", () => {
+    const text = "```js\nfoo\n~~~\nbar";
+    assert.equal(closeUnbalancedFence(text), `${text}\n\`\`\``);
+  });
+
+  // A balanced backtick fence containing a literal tilde-fence-looking line
+  // as ordinary content (and vice versa) must remain unchanged — mirrors
+  // the existing nested-shorter-run behavior from forge#2545, extended
+  // across delimiter families.
+  it("leaves a balanced backtick fence wrapping a literal tilde-run line unchanged (forge#2590)", () => {
+    const text = "```js\nfoo\n~~~\nbar\n```";
+    assert.equal(closeUnbalancedFence(text), text);
+  });
 });
