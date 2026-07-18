@@ -2151,7 +2151,10 @@ PREVIOUSLY_ESCALATED=$(gh issue view {MERGE_ISSUE} {MERGE_GH_FLAG} --json labels
 GUARD_BASE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
 
 if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
-    if [ -n "$GUARD_BASE" ] && [ "$GUARD_BASE" != "main" ]; then
+    # forge#2625: `jq -r '.baseRefName'` stringifies a JSON null to the literal text "null" (not
+    # an empty string), so the `-n` check alone does not catch it — add an explicit `!= "null"`
+    # check so a literal-string "null" is treated the same as an empty/unresolved base (strict).
+    if [ -n "$GUARD_BASE" ] && [ "$GUARD_BASE" != "null" ] && [ "$GUARD_BASE" != "main" ]; then
       # forge#2570: non-`main` base — defer to remediate.md M7's auto-land, not a human.
       gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "🟠 PR #{PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check on non-\`main\` base \`${GUARD_BASE}\`. It is parked at \`workflow:awaiting-merge\` for the remediation auto-land bar (\`remediate.md\` Phase M7, forge#2570) — which auto-merges it on the same fast-lane condition the normal \`/work-on\` path uses for this target branch — NOT for a human merge decision."
     else

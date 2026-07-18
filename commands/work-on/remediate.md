@@ -273,7 +273,10 @@ LIVE_BASE_REF=$(gh pr view {PR_NUMBER} {GH_FLAG} --json baseRefName --jq '.baseR
 # to the fast lane; an empty/unresolved fetch is treated as the deploy gate (strict) so a base-
 # resolution failure (or a caller passing a stale/incorrect --base) can never accidentally
 # relax the bar.
-if [ -n "$LIVE_BASE_REF" ] && [ "$LIVE_BASE_REF" != "main" ]; then IS_DEPLOY_GATE=false; else IS_DEPLOY_GATE=true; fi
+# forge#2625: `jq -r '.baseRefName'` stringifies a JSON null to the literal text "null" (not an
+# empty string), so the `-n` check alone does not catch it — add an explicit `!= "null"` check
+# so a literal-string "null" is treated the same as an empty/unresolved base (strict).
+if [ -n "$LIVE_BASE_REF" ] && [ "$LIVE_BASE_REF" != "null" ] && [ "$LIVE_BASE_REF" != "main" ]; then IS_DEPLOY_GATE=false; else IS_DEPLOY_GATE=true; fi
 ```
 
 **Non-`main` base (`IS_DEPLOY_GATE=false` — staging / milestone)** — reconcile to the fast-lane bar. `review-pr.md`'s Phase 8 guard only parks a PR at `workflow:awaiting-merge` after a clean, mergeable `APPROVED` re-review (the same bot-`APPROVED` signal the normal fast lane auto-merges on), so the only additional condition is this remediation's own quality gate:
