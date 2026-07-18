@@ -656,8 +656,15 @@ describe("makeIo — timeoutMs override (forge#2509)", () => {
   });
 
   it("an explicit timeoutMs override too short for the command to complete rejects", async () => {
+    // `git hash-object --stdin` blocks waiting for stdin EOF that never
+    // arrives here — a deterministic hang, not a timing race. Unlike racing
+    // a fast command (e.g. `git --version`) against a 1ms timeout — which is
+    // flaky on fast CI runners where process spawn can complete in under
+    // 1ms, causing "Missing expected rejection" — this command can NEVER
+    // resolve on its own, so any positive timeoutMs deterministically
+    // triggers the kill regardless of machine speed.
     const io = makeIo();
-    await assert.rejects(() => io.git(["--version"], { timeoutMs: 1 }));
+    await assert.rejects(() => io.git(["hash-object", "--stdin"], { timeoutMs: 50 }));
   });
 
   it("an explicit timeoutMs override large enough for the command still succeeds", async () => {
