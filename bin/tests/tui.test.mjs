@@ -83,6 +83,62 @@ describe("stripAnsi", () => {
     // A truncated/malformed OSC (no BEL/ST before EOF) must not leak through.
     assert.equal(stripAnsi("abc\x1b]52;c;evilpayload"), "abc");
   });
+
+  it("removes DCS sequences terminated by ST (forge#2548 — DCS/APC/PM/SOS gap)", () => {
+    assert.equal(stripAnsi("abc\x1bPsome-dcs-payload\x1b\\def"), "abcdef");
+  });
+
+  it("removes DCS sequences terminated by BEL", () => {
+    assert.equal(stripAnsi("abc\x1bPsome-dcs-payload\x07def"), "abcdef");
+  });
+
+  it("removes an unterminated DCS sequence to end of string", () => {
+    assert.equal(stripAnsi("abc\x1bPsome-dcs-payload"), "abc");
+  });
+
+  it("removes APC sequences terminated by ST, incl. Kitty graphics protocol (\\x1b_G...)", () => {
+    assert.equal(stripAnsi("abc\x1b_Gsome-apc-payload\x1b\\def"), "abcdef");
+  });
+
+  it("removes APC sequences terminated by BEL", () => {
+    assert.equal(stripAnsi("abc\x1b_Gsome-apc-payload\x07def"), "abcdef");
+  });
+
+  it("removes an unterminated APC sequence to end of string", () => {
+    assert.equal(stripAnsi("abc\x1b_Gsome-apc-payload"), "abc");
+  });
+
+  it("removes PM sequences terminated by ST", () => {
+    assert.equal(stripAnsi("abc\x1b^some-pm-payload\x1b\\def"), "abcdef");
+  });
+
+  it("removes PM sequences terminated by BEL", () => {
+    assert.equal(stripAnsi("abc\x1b^some-pm-payload\x07def"), "abcdef");
+  });
+
+  it("removes an unterminated PM sequence to end of string", () => {
+    assert.equal(stripAnsi("abc\x1b^some-pm-payload"), "abc");
+  });
+
+  it("removes SOS sequences terminated by ST", () => {
+    assert.equal(stripAnsi("abc\x1bXsome-sos-payload\x1b\\def"), "abcdef");
+  });
+
+  it("removes SOS sequences terminated by BEL", () => {
+    assert.equal(stripAnsi("abc\x1bXsome-sos-payload\x07def"), "abcdef");
+  });
+
+  it("removes an unterminated SOS sequence to end of string", () => {
+    assert.equal(stripAnsi("abc\x1bXsome-sos-payload"), "abc");
+  });
+
+  it("removes mixed OSC + DCS sequences in one string", () => {
+    assert.equal(stripAnsi("a\x1b]8;;url\x07b\x1bPdcs\x1b\\c"), "abc");
+  });
+
+  it("removes mixed CSI + APC sequences in one string", () => {
+    assert.equal(stripAnsi("\x1b[1ma\x1b_Gapc\x07b\x1b[0m"), "ab");
+  });
 });
 
 // ---------------------------------------------------------------------------
