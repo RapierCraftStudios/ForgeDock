@@ -1489,6 +1489,72 @@ describe("forge (Act II)", () => {
     assert.equal(manifest.files["a.md"], true, "file should be adopted into manifest");
   });
 
+  it("saveCopiedManifest uses a per-process tmp path, unaffected by a stray plain manifestPath+\".tmp\" file (forge#2599)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-pid-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-pid-src-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const manifestPath = join(home, ".claude", "forgedock", "copied-commands.json");
+    mkdirSyncFs(join(home, ".claude", "forgedock"), { recursive: true });
+
+    // Simulate a leftover plain `manifestPath + ".tmp"` file from a
+    // *different* process (e.g. a concurrent forge() invocation with a
+    // different PID, or a stale leftover from before this fix). Before
+    // forge#2599, saveCopiedManifest() wrote to and renamed exactly this
+    // literal path, so a second concurrent invocation sharing it could
+    // race. After the fix, this invocation writes to its own
+    // `manifestPath + "." + process.pid + ".tmp"` path and must never
+    // read, write, or clean up this foreign sibling.
+    const foreignTmp = manifestPath + ".tmp";
+    writeFileSync(foreignTmp, "FOREIGN PROCESS LEFTOVER", "utf-8");
+
+    const { ctx, w } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.equal(res.installed + res.copied, 1, "the file should be freshly placed (symlinked or copy-fallback)");
+    assert.ok(!w.text.includes("manifest not saved"), "manifest save should succeed");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    assert.equal(manifest.files["a.md"], true, "manifest should be written normally");
+    assert.equal(
+      readFileSync(foreignTmp, "utf-8"),
+      "FOREIGN PROCESS LEFTOVER",
+      "a foreign (non-pid-suffixed) .tmp sibling must be untouched — this invocation writes to its own per-process tmp path",
+    );
+  });
+
+  it("saveCopiedManifest cleans up its per-process tmp sibling on write failure, without touching the previous manifest (forge#2599)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-fail-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-fail-src-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const manifestPath = join(home, ".claude", "forgedock", "copied-commands.json");
+    mkdirSyncFs(join(home, ".claude", "forgedock"), { recursive: true });
+
+    // Pre-create the pid-suffixed tmp sibling as a directory — writeFile()
+    // then throws EISDIR at open-time (the write never starts), the same
+    // technique used by #1396/#2542's atomic-write failure tests.
+    const tmpSibling = manifestPath + "." + process.pid + ".tmp";
+    mkdirSyncFs(tmpSibling, { recursive: true });
+
+    const { ctx, w } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.equal(res.installed + res.copied, 1, "the file copy itself should still succeed (symlinked or copy-fallback)");
+    assert.ok(
+      w.text.includes("manifest not saved"),
+      "forge() should surface the manifest save failure instead of crashing",
+    );
+    assert.ok(!existsSync(manifestPath), "no manifest should exist — the failed write never replaced it");
+  });
+
   // forge#1527: the SubagentStop annotation-enforcement hook's trigger
   // (`FORGE:PHASE_START` in the transcript) is never emitted anywhere in the
   // pipeline, so it was dead code that always exited 0 with zero enforcement

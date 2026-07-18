@@ -855,8 +855,22 @@ async function loadCopiedManifest(manifestPath) {
 /** Save the manifest atomically (mkdir recursive + .tmp+rename). */
 async function saveCopiedManifest(manifestPath, manifest) {
   await mkdir(pathDirname(manifestPath), { recursive: true });
-  await writeFile(manifestPath + ".tmp", JSON.stringify(manifest, null, 2) + "\n", "utf-8");
-  await rename(manifestPath + ".tmp", manifestPath);
+  // Suffix the tmp sibling with this process's PID so concurrent forge()
+  // invocations never share the same tmp path — mirrors the fix already
+  // applied to the copy-file branch in this same function (forge#2542).
+  const tmpPath = manifestPath + "." + process.pid + ".tmp";
+  try {
+    await writeFile(tmpPath, JSON.stringify(manifest, null, 2) + "\n", "utf-8");
+  } catch (writeErr) {
+    await unlink(tmpPath).catch(() => {});
+    throw writeErr;
+  }
+  try {
+    await rename(tmpPath, manifestPath);
+  } catch (renameErr) {
+    await unlink(tmpPath).catch(() => {});
+    throw renameErr;
+  }
 }
 
 const isLinkPermissionError = (err) => err.code === "EPERM" || err.code === "EACCES";
