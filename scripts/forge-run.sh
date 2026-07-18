@@ -182,6 +182,8 @@ fi
 
 # Fetch issue: state, labels
 GH_STDERR_TMP=$(mktemp)
+chmod 600 "$GH_STDERR_TMP"
+trap 'rm -f "$GH_STDERR_TMP"' EXIT
 ISSUE_JSON=$(gh issue view "$ISSUE_NUMBER" "${GH_REPO_ARGS[@]}" \
   --json number,state,labels,title \
   2>"$GH_STDERR_TMP") || {
@@ -229,6 +231,8 @@ fi
 # via GH_REPO_ARGS and handles both default-repo and explicit-repo cases.
 # gh api repos/{owner}/{repo}/... would need GH_REPO env var for -R override — avoided here.
 GH_STDERR_TMP=$(mktemp)
+chmod 600 "$GH_STDERR_TMP"
+trap 'rm -f "$GH_STDERR_TMP"' EXIT
 COMMENTS_JSON=$(gh issue view "$ISSUE_NUMBER" "${GH_REPO_ARGS[@]}" \
   --json comments --jq '[.comments[] | {id: .id, body: .body}]' \
   2>"$GH_STDERR_TMP") || {
