@@ -396,11 +396,20 @@ done
 **Purpose**: Create a dedicated GitHub issue that serves as the shared claims board for the batch. Agents post `FORGE:CLAIM` annotations here when they begin implementation; they post `FORGE:CLAIM_RELEASED` when they reach a terminal state. The orchestrator reads active claims during the Layer-2/4 relaxation sweep (Step 4B) to determine whether serialized pairs can now run in parallel.
 
 ```bash
-# Create coordination issue for this orchestration batch
-BATCH_ISSUE_COUNT="${#ISSUES[@]}"
-BATCH_ID="$(date -u +%Y%m%dT%H%M%S)-$$"
+# Create coordination issue for this orchestration batch.
+# Guarded on FORGE_COORD_ISSUE being unset: this is the actual enforcement of the
+# "Skip if FORGE_COORD_ISSUE is already set" contract stated above. Without this guard,
+# a re-entry into this block within the same logical session (resumed session, retry,
+# or any other re-run of Step 3D.1) would silently regenerate BATCH_ID — and because
+# check_orchestrator_lease() (Step 3D.2, forge#2627) keys "self" vs. "held" purely on
+# BATCH_ID string equality, a regenerated BATCH_ID causes the orchestrator's own
+# subsequent lease-refresh calls to see HOLDER_BATCH_ID != MY_BATCH_ID and self-lock-out
+# against its own still-live lease. <!-- Fixed: forge#2642 -->
+if [ -z "${FORGE_COORD_ISSUE:-}" ]; then
+  BATCH_ISSUE_COUNT="${#ISSUES[@]}"
+  BATCH_ID="$(date -u +%Y%m%dT%H%M%S)-$$"
 
-COORD_ISSUE_BODY="## Orchestration Batch Claims Board
+  COORD_ISSUE_BODY="## Orchestration Batch Claims Board
 
 This issue is the claims board for an orchestration batch of ${BATCH_ISSUE_COUNT} issues.
 Agents post \`FORGE:CLAIM\` here on build start and \`FORGE:CLAIM_RELEASED\` on terminal state.
@@ -412,32 +421,35 @@ Agents post \`FORGE:CLAIM\` here on build start and \`FORGE:CLAIM_RELEASED\` on 
 <!-- FORGE:COORD_ISSUE -->
 <!-- FORGE:BATCH_ID: ${BATCH_ID} -->"
 
-COORD_ISSUE_URL=$(gh issue create -R {GH_REPO} \
-  --title "orchestrate: claims board for batch ${BATCH_ID}" \
-  --body "$COORD_ISSUE_BODY" \
-  --label "automation" 2>/dev/null || echo "")
+  COORD_ISSUE_URL=$(gh issue create -R {GH_REPO} \
+    --title "orchestrate: claims board for batch ${BATCH_ID}" \
+    --body "$COORD_ISSUE_BODY" \
+    --label "automation" 2>/dev/null || echo "")
 
-if [ -z "$COORD_ISSUE_URL" ]; then
-  echo "WARNING: failed to create coordination issue — claims board disabled for this batch. Layer-2/4 relaxation will not run."
-  FORGE_COORD_ISSUE=""
+  if [ -z "$COORD_ISSUE_URL" ]; then
+    echo "WARNING: failed to create coordination issue — claims board disabled for this batch. Layer-2/4 relaxation will not run."
+    FORGE_COORD_ISSUE=""
+  else
+    COORD_ISSUE_NUMBER=$(echo "$COORD_ISSUE_URL" | grep -oE '[0-9]+$')
+    FORGE_COORD_ISSUE="$COORD_ISSUE_URL"
+    echo "Coordination issue created: ${COORD_ISSUE_URL} (#${COORD_ISSUE_NUMBER})"
+    export FORGE_COORD_ISSUE
+    export COORD_ISSUE_NUMBER
+    # BATCH_ID must survive compaction the same way FORGE_COORD_ISSUE/COORD_ISSUE_NUMBER do —
+    # exporting it is necessary but not sufficient (export only survives within the *same*
+    # process tree). The `<!-- FORGE:BATCH_ID: ... -->` marker embedded in the issue body above
+    # is the actual durable source of truth: see "Orchestrator state reconstruction on wake /
+    # after compaction" below, which re-derives BATCH_ID from GitHub rather than trusting the
+    # in-context variable, consistent with that section's own "do not rely on in-context
+    # variables" contract. <!-- Updated: forge#2627 -->
+    export BATCH_ID
+  fi
 else
-  COORD_ISSUE_NUMBER=$(echo "$COORD_ISSUE_URL" | grep -oE '[0-9]+$')
-  FORGE_COORD_ISSUE="$COORD_ISSUE_URL"
-  echo "Coordination issue created: ${COORD_ISSUE_URL} (#${COORD_ISSUE_NUMBER})"
-  export FORGE_COORD_ISSUE
-  export COORD_ISSUE_NUMBER
-  # BATCH_ID must survive compaction the same way FORGE_COORD_ISSUE/COORD_ISSUE_NUMBER do —
-  # exporting it is necessary but not sufficient (export only survives within the *same*
-  # process tree). The `<!-- FORGE:BATCH_ID: ... -->` marker embedded in the issue body above
-  # is the actual durable source of truth: see "Orchestrator state reconstruction on wake /
-  # after compaction" below, which re-derives BATCH_ID from GitHub rather than trusting the
-  # in-context variable, consistent with that section's own "do not rely on in-context
-  # variables" contract. <!-- Updated: forge#2627 -->
-  export BATCH_ID
+  echo "FORGE_COORD_ISSUE already set (${FORGE_COORD_ISSUE}) — skipping coordination-issue creation and BATCH_ID regeneration. Reusing existing batch identity."
 fi
 ```
 
-**Idempotency**: If `FORGE_COORD_ISSUE` is already set in the environment (e.g., after a compaction / orchestrator restart), skip creation and use the existing URL. The coordination issue persists for the lifetime of the batch.
+**Idempotency**: If `FORGE_COORD_ISSUE` is already set in the environment (e.g., after a compaction / orchestrator restart, or any other re-entry into this block within the same batch), the bash block above skips creation entirely and reuses the existing `FORGE_COORD_ISSUE`/`BATCH_ID` — this is enforced by the `if [ -z "${FORGE_COORD_ISSUE:-}" ]` guard, not just documented in prose. The coordination issue persists for the lifetime of the batch. <!-- Fixed: forge#2642 -->
 
 **Terminology:**
 - **Ready issues**: Issues whose predecessor set is empty (all predecessors have reached terminal state or were never added)
