@@ -2420,8 +2420,19 @@ describe("runIssue — forge#2382: engine-issued label transitions and worktree 
     // the same FORGE:BUILDER `**Branch**:` marker parseBranchFromMarkers()
     // reads in production, so the defense-in-depth path is proven reachable
     // rather than merely asserted in a comment.
+    //
+    // forge#2553: the case/whitespace-variant entries ("MAIN", " staging",
+    // "Milestone/Foo") prove isProtectedBranch()'s normalization (trim +
+    // lowercase) — without it, these would fall through to the destructive
+    // worktree-remove/branch-D path and this test would fail. Leading-only
+    // whitespace (" staging", not " staging ") is used deliberately: a
+    // trailing-space variant additionally trips an unrelated, pre-existing
+    // trim asymmetry in worktreePathForBranch's own porcelain-line parsing
+    // (line.slice(...).trim() strips a trailing space that the freshly-built
+    // `ref` comparand never had), which is a separate, out-of-scope, equally
+    // no-known-live-trigger concern — not something this fix touches.
     let issue = 100;
-    for (const protectedBranch of ["main", "staging", "milestone/foo"]) {
+    for (const protectedBranch of ["main", "staging", "milestone/foo", "MAIN", " staging", "Milestone/Foo"]) {
       const { w, io } = fakeWorld();
       const script = {
         ...happyScript(w),

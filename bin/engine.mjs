@@ -601,6 +601,25 @@ async function ensureWorktreeForBuild(state, io) {
   // above sees no registered path) but that `git worktree add` can still
   // collide with. Best-effort/fail-open, matching every other git probe in
   // this file: a prune failure must never block the add attempt below.
+  //
+  // forge#2554: `git worktree prune` has no per-branch/per-path scoping
+  // flag — `git help worktree` documents `prune` as taking only `[-n] [-v]
+  // [--expire <time>]`, never a worktree/path argument — so this call is
+  // unavoidably repo-wide rather than scoped to `state.branch`. No
+  // additional serialization/locking is added around it: (1) `prune` only
+  // removes administrative metadata for worktree directories already
+  // absent from disk — it never touches a worktree that still exists, so a
+  // concurrent `git worktree add` for a *different*, still-present branch
+  // cannot be corrupted by it; (2) a lock scoped to just this call site
+  // would not actually close the race for a shared clone anyway, since the
+  // build phase's own worktree creation (commands/work-on/build.md's Phase
+  // B1C) runs as a separate out-of-process shell command, outside `io.git`
+  // entirely, and would not honor an in-process lock; and (3) no live
+  // multi-agent-on-one-shared-clone deployment pattern is documented for
+  // this engine today — each `/work-on` run owns its own worktree
+  // directory. If that changes, revisit with a cross-process lock that
+  // covers the build phase's shell-level worktree creation too, not just
+  // this call site.
   try {
     await io.git(["worktree", "prune"]);
   } catch { /* best-effort — proceed to the add attempt regardless */ }
@@ -646,10 +665,18 @@ async function cleanupWorktreeAfterTerminal(state, io) {
  * forge#2506: `true` if `branch` is a protected branch name that
  * `cleanupWorktreeAfterTerminal` must never delete — the two known deploy
  * lanes (`main`, `staging`) and any `milestone/*` feature-lane branch.
+ *
+ * forge#2553: `branch` is normalized (trimmed + lowercased) before
+ * comparison. `state.branch` is currently only ever engine/LLM-set once,
+ * from an exact-matched `**Branch**:` marker (see the caller's own comment
+ * above), so this has no known live trigger today — it exists so this
+ * destructive-cleanup guard never silently regresses to a case-/whitespace-
+ * sensitive bypass if that assumption ever changes.
  * @returns {boolean}
  */
 function isProtectedBranch(branch) {
-  return branch === "main" || branch === "staging" || branch.startsWith("milestone/");
+  const normalized = String(branch || "").trim().toLowerCase();
+  return normalized === "main" || normalized === "staging" || normalized.startsWith("milestone/");
 }
 
 /** @returns {Promise<boolean>} whether a local branch ref exists for `branch`. */
