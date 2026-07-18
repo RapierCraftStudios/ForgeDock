@@ -362,6 +362,20 @@ Before building agent prompts, run `classify-lane.sh` for every issue in the cur
 declare -A ISSUE_LANE
 declare -A ISSUE_PR_BASE
 
+# Batch-start T0 (forge#2628) — reuse the value phase-1-resolve.md captured at the very
+# start of Phase 1 and persisted per "Predicate Persistence." Step 4C's run-spawned cascade
+# time filter (Method 2 below) anchors to this, NOT to a rolling "N hours ago" window — a
+# rolling window can still admit pre-existing backlog issues that happen to have been
+# created recently for unrelated reasons. Degraded fallback only: if BATCH_T0 is not in
+# context (e.g. a session resumed mid-run after compaction and Phase 1's capture was lost),
+# capture one here — this is later than true batch start and will admit a narrower window
+# than the real run, never wider, so it fails safe.
+if [ -z "${BATCH_T0:-}" ]; then
+  echo "WARNING: BATCH_T0 not found in context — Phase 1 should have captured it. Falling back to capturing it now (narrower window than the true batch start, but never wider)."
+  BATCH_T0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+fi
+echo "Step 4A.pre: using BATCH_T0=${BATCH_T0} for Step 4C's run-spawned cascade time filter"
+
 # Batch-level accumulators for review-finding cascade control (Step 4C) and
 # Completion Sweep (Step 4F). Declared here so they persist across ALL agent
 # completions — Step 4C runs per-agent and must NOT re-initialize these.
@@ -1500,6 +1514,15 @@ done
 
 After each agent reaches a terminal state, check if its `/work-on` run spawned review-finding issues during the review phase. These are new work items that should be added to the dependency DAG and dispatched when ready.
 
+**This step is the mid-run half of the run-spawned cascade mode** (`phase-1-resolve.md`
+"Cascade / Review-Finding Resolution" — mode (a)). It scopes to `BATCH_T0` for the same reason
+that resolve step does: this loop must only ever fold in `review-finding` issues *this batch's own
+agents* produced, never the pre-existing open backlog. There is no whole-backlog-sweep mode here —
+that mode only exists as the explicit, one-shot `--include-backlog` opt-in at Phase 1 resolve time
+(a human directly asking for it); Step 4C runs autonomously on every completion cycle and must
+never silently widen to the full backlog regardless of any flag, since nothing here is a
+human-in-the-loop request. <!-- Added: forge#2628 -->
+
 ```bash
 # Method 1: Read TRAJECTORY comments from completed issues for "Finding issues" row
 for NUM in {completed_issue_number}; do
@@ -1508,10 +1531,14 @@ for NUM in {completed_issue_number}; do
     | grep -oP 'Finding issues\s*\|\s*#?\K\d+[^|]*' | grep -oP '\d+' | sort -u
 done
 
-# Method 2 (fallback): Check for recently created review-finding issues that reference PRs from this batch
-gh issue list -R {GH_REPO} --state open --label "review-finding" --limit 20 \
-  --json number,title,body,createdAt \
-  --jq "[.[] | select(.createdAt > \"$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ)\")]"
+# Method 2 (fallback): Check for review-finding issues created since this batch started
+# (BATCH_T0 — see Step 4A.pre above; reused from phase-1-resolve.md's Phase 1 capture, never
+# a rolling "N hours ago" window). A rolling window can still admit pre-existing backlog
+# issues that happen to have been created recently for reasons unrelated to this batch;
+# anchoring to BATCH_T0 cannot, by construction — anything created before this batch began
+# is excluded regardless of how recent it looks.
+gh issue list -R {GH_REPO} --state open --search "label:review-finding created:>=${BATCH_T0}" --limit 20 \
+  --json number,title,body,createdAt
 ```
 
 **If review-finding issues were spawned:**

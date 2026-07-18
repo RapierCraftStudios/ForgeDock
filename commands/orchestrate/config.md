@@ -96,7 +96,9 @@ All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{PROJECT_NAME}`, `{STAGING_BRANCH}
 | `--max-generation <N\|unlimited>` | `orchestration.cascade.max_generation` | `/orchestrate cascade --max-generation 3` |
 | `--token-budget <N\|unlimited>` | `orchestration.cascade.token_budget` | `/orchestrate cascade --token-budget unlimited` |
 
-Precedence: CLI flag > `forge.yaml → orchestration.cascade.*` > preset default (`balanced`). These flags are additive with, not a replacement for, the pre-existing `--include-deferred`/`--allow-gen2` flags documented in `phase-1-resolve.md` — those remain the fastest way to say "everything, right now," while `--max-generation`/`--policy` express finer-grained policy (e.g. "admit gen-2, stop at gen-3").
+Precedence: CLI flag > `forge.yaml → orchestration.cascade.*` > preset default (`balanced`). These flags are additive with, not a replacement for, the pre-existing `--include-deferred`/`--allow-gen2` flags documented in `phase-1-resolve.md` — those remain the fastest way to say "everything, right now" for generation *depth*, while `--max-generation`/`--policy` express finer-grained depth policy (e.g. "admit gen-2, stop at gen-3").
+
+**Time scope is a separate axis from depth** (forge#2628): by default, `cascade`/`review-findings`/`findings` only resolves `review-finding` issues created at/after this batch's start (T0) — see `phase-1-resolve.md` "Cascade / Review-Finding Resolution" for the run-spawned-vs-backlog distinction. None of the depth flags/config above widen that time window. `--include-backlog` is the only flag that does — it opts into the whole open-backlog sweep regardless of when issues were created, and must be requested explicitly; it is never implied by adding `cascade` to an already-scoped batch.
 
 ---
 
