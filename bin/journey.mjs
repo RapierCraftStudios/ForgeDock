@@ -1637,12 +1637,20 @@ export async function forge(ctx) {
         } else {
           let relinked = false;
           if (wantSymlink) {
+            // Suffix the tmp sibling with this process's PID so a losing
+            // concurrent forge() invocation's symlink() call never collides
+            // on the same literal path (which raises an uncaught EEXIST —
+            // isLinkPermissionError() only treats EPERM/EACCES as
+            // recoverable). Mirrors the copyFile branch and
+            // saveCopiedManifest fixes already applied in this file
+            // (forge#2542, forge#2599).
+            const tmpTarget = target + "." + process.pid + ".tmp";
             try {
-              await symlink(file, target + ".tmp");
+              await symlink(file, tmpTarget);
               try {
-                await rename(target + ".tmp", target);
+                await rename(tmpTarget, target);
               } catch (renameErr) {
-                await unlink(target + ".tmp").catch(() => {});
+                await unlink(tmpTarget).catch(() => {});
                 throw renameErr;
               }
               updated++;
@@ -1665,12 +1673,16 @@ export async function forge(ctx) {
         // First try upgrading it to a symlink (Developer Mode enabled since).
         let upgraded = false;
         if (wantSymlink) {
+          // Same per-process-unique tmp suffix as the relink branch above —
+          // sibling branch, identical shared-literal-path EEXIST risk
+          // (forge#2542, forge#2599).
+          const tmpTarget = target + "." + process.pid + ".tmp";
           try {
-            await symlink(file, target + ".tmp");
+            await symlink(file, tmpTarget);
             try {
-              await rename(target + ".tmp", target); // rename replaces existing files on Windows
+              await rename(tmpTarget, target); // rename replaces existing files on Windows
             } catch (renameErr) {
-              await unlink(target + ".tmp").catch(() => {});
+              await unlink(tmpTarget).catch(() => {});
               throw renameErr;
             }
             updated++;

@@ -1243,6 +1243,118 @@ describe("forge (Act II)", () => {
     assert.equal(manifest.files["a.md"], true);
   });
 
+  it("relinking a stale symlink uses a per-process tmp path, unaffected by a stray plain target+\".tmp\" file (forge#2600)", async (t) => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home6b-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src6b-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // Stale symlink at the target pointing at a different file — same setup
+    // as "linkStrategy copy replaces a stale symlink with a copy" above, but
+    // this time with the default (symlink) linkStrategy so forge() takes the
+    // relink branch (bin/journey.mjs, wantSymlink=true) instead of falling
+    // straight to the copy fallback.
+    const other = join(forgeHome, "other.md");
+    writeFileSync(other, "OTHER", "utf-8");
+    const target = join(home, ".claude", "commands", "a.md");
+    mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
+    try {
+      symlinkSync(other, target);
+    } catch (err) {
+      if (err.code === "EPERM" || err.code === "EACCES") {
+        t.skip("symlink creation unavailable (Windows without Developer Mode)");
+        return;
+      }
+      throw err;
+    }
+
+    // Simulate a leftover plain `target + ".tmp"` file from a *different*
+    // process (e.g. a concurrent forge() invocation with a different PID, or
+    // a stale leftover from before forge#2600). Before forge#2600, the
+    // relink branch wrote to and renamed exactly this literal path, so a
+    // second concurrent invocation sharing it could race and surface an
+    // uncaught EEXIST. After the fix, this invocation writes to its own
+    // `target + "." + process.pid + ".tmp"` path and must never read,
+    // write, or clean up this foreign sibling.
+    const foreignTmp = target + ".tmp";
+    writeFileSync(foreignTmp, "FOREIGN PROCESS LEFTOVER", "utf-8");
+
+    const { ctx } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.equal(res.updated, 1, "the stale symlink should be relinked");
+    assert.ok(lstatSync(target).isSymbolicLink(), "target should remain a symlink after relinking");
+    assert.equal(
+      readFileSync(foreignTmp, "utf-8"),
+      "FOREIGN PROCESS LEFTOVER",
+      "a foreign (non-pid-suffixed) .tmp sibling must be untouched — this invocation writes to its own per-process tmp path",
+    );
+  });
+
+  it("upgrading a manifest-tracked copy to a symlink uses a per-process tmp path, unaffected by a stray plain target+\".tmp\" file (forge#2600)", async (t) => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home6c-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src6c-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // Probe symlink permission before setting up the (regular-file) target
+    // state below — the upgrade branch's initial target must be a plain
+    // file, so unlike the sibling relink test above we can't gate on the
+    // fixture's own symlinkSync call. Probe with a throwaway path instead.
+    const probeLink = join(forgeHome, "probe-link.md");
+    try {
+      symlinkSync(join(forgeHome, "commands", "a.md"), probeLink);
+      unlinkSync(probeLink);
+    } catch (err) {
+      if (err.code === "EPERM" || err.code === "EACCES") {
+        t.skip("symlink creation unavailable (Windows without Developer Mode)");
+        return;
+      }
+      throw err;
+    }
+
+    // Pre-seed the manifest (it's our copy) and a stale-content copy at the
+    // target — the "manifest-tracked file" branch, same setup as
+    // "manifest-tracked file with changed content is updated" above, but
+    // with the default (symlink) linkStrategy so forge() attempts the
+    // upgrade-to-symlink branch (wantSymlink=true) instead of the
+    // copy-fallback content-compare path.
+    mkdirSyncFs(join(home, ".claude", "forgedock"), { recursive: true });
+    writeFileSync(
+      join(home, ".claude", "forgedock", "copied-commands.json"),
+      JSON.stringify({ version: 1, files: { "a.md": true } }),
+      "utf-8",
+    );
+    const target = join(home, ".claude", "commands", "a.md");
+    mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
+    writeFileSync(target, "OLD", "utf-8");
+
+    // Same foreign-tmp-sibling simulation as the relink test above.
+    const foreignTmp = target + ".tmp";
+    writeFileSync(foreignTmp, "FOREIGN PROCESS LEFTOVER", "utf-8");
+
+    const { ctx } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.equal(res.updated, 1, "the manifest-tracked copy should be upgraded to a symlink");
+    assert.ok(lstatSync(target).isSymbolicLink(), "target should be a symlink after upgrading");
+    const manifest = JSON.parse(
+      readFileSync(join(home, ".claude", "forgedock", "copied-commands.json"), "utf-8"),
+    );
+    assert.equal(manifest.files["a.md"], undefined, "upgraded file should be dropped from the manifest");
+    assert.equal(
+      readFileSync(foreignTmp, "utf-8"),
+      "FOREIGN PROCESS LEFTOVER",
+      "a foreign (non-pid-suffixed) .tmp sibling must be untouched — this invocation writes to its own per-process tmp path",
+    );
+  });
+
   it("stale regular-file copy with no manifest entry is overwritten and adopted (forge#2459)", async () => {
     const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home4-"));
     const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src4-"));
