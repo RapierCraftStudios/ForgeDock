@@ -1538,7 +1538,7 @@ for FINDING_NUM in {spawned_finding_numbers}; do
           # mktemp + --body-file convention (forge#2198). mktemp avoids /tmp path
           # collisions with other concurrently-running orchestrated agents.
           GATE_BODY_TMPFILE="$(mktemp)"
-          printf '%s\n' "<!-- FORGE:GATE_FAILURE -->
+          printf '%s' "<!-- FORGE:GATE_FAILURE -->
 ## Code Branch Repair Skipped — Freshness Re-fetch Failed
 
 Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${REPAIR_SOURCE_PR} bases on \`${REPAIR_PARENT_BASE}\` — not the staging fast lane. Automatic repair was skipped because the freshness re-fetch (\`gh issue view --json updatedAt\`) failed, so the concurrency guard could not confirm the issue body is still at the snapshot captured earlier in this iteration (\`${FINDING_UPDATED_AT_SNAPSHOT}\`). Proceeding with the write here would risk silently clobbering a concurrent edit with no way to verify. Human review required to confirm the current body state and, if still needed, re-apply the Code branch stamp manually. <!-- forge#2565 -->" > "$GATE_BODY_TMPFILE"
@@ -1549,7 +1549,7 @@ Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${R
           echo "REPAIR: #${FINDING_NUM} skipped — concurrent edit detected (updatedAt changed from ${FINDING_UPDATED_AT_SNAPSHOT} to ${FINDING_UPDATED_AT_CURRENT} since this iteration's initial read); flagging instead of repairing"
           # forge#2584: mktemp + --body-file, same rationale as the freshness-recheck-failure path above.
           CONCURRENT_EDIT_BODY_TMPFILE="$(mktemp)"
-          printf '%s\n' "<!-- FORGE:GATE_FAILURE -->
+          printf '%s' "<!-- FORGE:GATE_FAILURE -->
 ## Code Branch Repair Skipped — Concurrent Edit Detected
 
 Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${REPAIR_SOURCE_PR} bases on \`${REPAIR_PARENT_BASE}\` — not the staging fast lane. Automatic repair was skipped because the issue body was edited concurrently (\`updatedAt\` changed from \`${FINDING_UPDATED_AT_SNAPSHOT}\` to \`${FINDING_UPDATED_AT_CURRENT}\` between this run's initial read and the repair write). Overwriting the body now would have silently discarded that concurrent edit. Human review required to reconcile and, if still needed, re-apply the Code branch stamp manually. <!-- forge#2512 -->" > "$CONCURRENT_EDIT_BODY_TMPFILE"
@@ -1566,7 +1566,7 @@ Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${R
         else
           # forge#2584: mktemp + --body-file, same rationale as the two failure paths above.
           REPAIR_FAILED_BODY_TMPFILE="$(mktemp)"
-          printf '%s\n' "<!-- FORGE:GATE_FAILURE -->
+          printf '%s' "<!-- FORGE:GATE_FAILURE -->
 ## Code Branch Repair Failed
 
 Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${REPAIR_SOURCE_PR} bases on \`${REPAIR_PARENT_BASE}\` — not the staging fast lane. Automatic repair (\`gh issue edit --body\`) failed. Without this annotation, \`/work-on\`'s investigation phase may look for the code on the wrong branch (staging, where it is absent) and misclassify this confirmed finding as invalid. Human review required. <!-- forge#2443 -->" > "$REPAIR_FAILED_BODY_TMPFILE"
