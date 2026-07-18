@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics } from "../engine-cli.mjs";
+import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, makeIo } from "../engine-cli.mjs";
 import { serializeState } from "../engine/state.mjs";
 import { appendEvent } from "../engine/runlog.mjs";
 
@@ -640,5 +640,29 @@ describe("runFromCli terminal diagnostics (forge#2175)", () => {
     assert.equal(runLogLines.length, 1, "run-log path should be printed exactly once (at start), not again in a diagnostic block");
     assert.ok(!output.includes("phase:"), "no diagnostic block should be printed on a merged termination");
     assert.ok(!output.includes("reason:"), "no diagnostic block should be printed on a merged termination");
+  });
+});
+
+// forge#2547: makeIo()'s optional per-call timeoutMs override (forge#2509)
+// had zero direct coverage. makeIo() hardcodes execFile("git"/"gh", ...) with
+// no injection seam, so these run against the real `git` binary — already a
+// hard dependency of this entire pipeline (git worktrees, commits, etc.),
+// and fast enough (a version query) not to make these tests slow.
+describe("makeIo — timeoutMs override (forge#2509)", () => {
+  it("omitting timeoutMs uses the default (10s) — a fast command still succeeds", async () => {
+    const io = makeIo();
+    const out = await io.git(["--version"]);
+    assert.match(out, /git version/);
+  });
+
+  it("an explicit timeoutMs override too short for the command to complete rejects", async () => {
+    const io = makeIo();
+    await assert.rejects(() => io.git(["--version"], { timeoutMs: 1 }));
+  });
+
+  it("an explicit timeoutMs override large enough for the command still succeeds", async () => {
+    const io = makeIo();
+    const out = await io.git(["--version"], { timeoutMs: 10000 });
+    assert.match(out, /git version/);
   });
 });
