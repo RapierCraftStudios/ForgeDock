@@ -4,7 +4,7 @@
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome } from "../journey.mjs";
@@ -1303,6 +1303,57 @@ describe("forge (Act II)", () => {
     // The write failure must land entirely on the .tmp path — target itself
     // must never be opened for a direct overwrite, so its prior (stale)
     // content survives completely intact rather than being truncated.
+    assert.equal(
+      readFileSync(target, "utf-8"),
+      "OLD STALE COPY",
+      "target content must be untouched when the .tmp write fails — never partially overwritten",
+    );
+    assert.match(w.text, /WARNING/, "a write failure should still surface the repair warning");
+    assert.equal(res.updated, 0, "no update should be counted when the write failed");
+  });
+
+  it("stale regular-file copy with no manifest entry: orphaned .tmp file is cleaned up on a copyFile failure (forge#2540)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home4d-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src4d-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // Pre-create the target as a stale regular-file copy (content mismatches
+    // the current source) with no manifest entry, same setup as the sibling
+    // mid-write-failure test above.
+    const target = join(home, ".claude", "commands", "a.md");
+    mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
+    writeFileSync(target, "OLD STALE COPY", "utf-8");
+
+    // Unlike the sibling mid-write-failure test above (which pre-creates
+    // target + ".tmp" as a directory — a technique that forces copyFile to
+    // fail but leaves nothing unlink() can remove), pre-create target + ".tmp"
+    // as a *regular file* and mark it read-only. copyFile(file, target+".tmp")
+    // then fails with EPERM while attempting to open the destination for
+    // writing — the same failure shape as a real AV lock or permission error
+    // — but leaves a genuine file-type .tmp residue on disk, so this test can
+    // actually assert that the new cleanup path (forge#2540) removes it.
+    const tmpSibling = target + ".tmp";
+    writeFileSync(tmpSibling, "STALE .tmp LEFTOVER", "utf-8");
+    chmodSync(tmpSibling, 0o444);
+
+    const { ctx, w } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    let res;
+    try {
+      res = await forge(ctx);
+    } finally {
+      // Defensive: if the cleanup assertion below fails, don't leave a
+      // read-only file behind for the OS temp-dir GC to choke on.
+      try { chmodSync(tmpSibling, 0o666); } catch { /* already removed */ }
+    }
+
+    assert.ok(
+      !existsSync(tmpSibling),
+      "the orphaned .tmp file must be cleaned up after a copyFile failure, not left behind",
+    );
     assert.equal(
       readFileSync(target, "utf-8"),
       "OLD STALE COPY",

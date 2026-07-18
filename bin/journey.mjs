@@ -1648,7 +1648,20 @@ export async function forge(ctx) {
             // simply stale, which the WARNING below cannot distinguish. This
             // mirrors the .tmp+rename swap already used for symlink installs
             // above (lines ~1573-1579, ~1601-1607).
-            await copyFile(file, target + ".tmp");
+            try {
+              await copyFile(file, target + ".tmp");
+            } catch (copyErr) {
+              // A copyFile failure (disk full mid-copy, AV lock, permission
+              // error) can still leave a partially-written .tmp sibling on
+              // disk even though the write itself threw. The sibling
+              // rename() failure just below already cleans up target+".tmp"
+              // on its own failure path (renameErr) — mirror that here so a
+              // copyFile failure doesn't orphan the .tmp file instead
+              // (forge#2540). Best-effort: never let the cleanup itself mask
+              // or replace the original copyErr being rethrown.
+              await unlink(target + ".tmp").catch(() => {});
+              throw copyErr;
+            }
             // Preserve the pre-existing content before it's replaced, mirroring
             // half of the confirm+backup convention used by the forge.yaml
             // overwrite path (bin/forgedock.mjs ~990-1021 / journey.mjs
