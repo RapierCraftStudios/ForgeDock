@@ -755,6 +755,42 @@ async function createPrFor(state, io) {
 }
 
 /**
+ * forge#2545: appends a closing fence delimiter to `text` if the last GFM
+ * fenced code block opened within it is still open at end-of-text.
+ *
+ * Tracks fence delimiters as whole line-anchored tokens (0-3 leading spaces
+ * of indent, then a run of 3+ backticks at line start) with GFM's actual
+ * open/close semantics — a candidate closing line only closes the
+ * currently-open fence if its own backtick-run length is >= the opening
+ * run's length — rather than counting raw ``` substring occurrences.
+ * Substring counting cannot distinguish a 4+-backtick delimiter line from a
+ * 3-backtick one: a `` ```` `` (4-backtick) delimiter line still contains a
+ * ``` substring, so a balanced 4+-backtick fence that legitimately wraps a
+ * literal ``` inside it (a valid GFM pattern for documenting code containing
+ * a triple-backtick) can be miscounted as unbalanced by a naive count. This
+ * line-anchored approach also correctly leaves a nested *shorter* backtick
+ * run (e.g. that literal ``` inside a 4-backtick fence) alone as ordinary
+ * content, not a delimiter — and, if a fence genuinely is left open, closes
+ * it with a delimiter of the *same* backtick-run length as the opener
+ * (not a hardcoded 3), so the appended closer is valid GFM even for a
+ * 4+-backtick open fence.
+ */
+export function closeUnbalancedFence(text) {
+  let openFenceLen = 0;
+  for (const line of text.split("\n")) {
+    const m = line.match(/^ {0,3}(`{3,})/);
+    if (!m) continue;
+    const runLen = m[1].length;
+    if (openFenceLen === 0) {
+      openFenceLen = runLen;
+    } else if (runLen >= openFenceLen) {
+      openFenceLen = 0;
+    }
+  }
+  return openFenceLen > 0 ? `${text}\n${"`".repeat(openFenceLen)}` : text;
+}
+
+/**
  * Compose a PR title/body from already-known typed/GitHub state — no LLM
  * call. Title falls back to a generic "Fix: issue #N" if the issue view
  * fails; body always includes the mandatory `Closes #{issue}` footer
@@ -776,10 +812,10 @@ async function composePrContent(state, io) {
         // within its first 8 lines but doesn't close it before the cutoff
         // would otherwise leak the fence into the rest of the generated PR
         // body (## Changes, the Closes #N footer, etc.), breaking rendering.
-        // An odd number of ``` markers means a fence was left open — close
-        // it explicitly before using the slice as the summary.
-        const fenceCount = (truncated.match(/```/g) || []).length;
-        summary = fenceCount % 2 === 1 ? `${truncated}\n\`\`\`` : truncated;
+        // forge#2545: closeUnbalancedFence (above) tracks fence delimiters
+        // as whole line-anchored tokens instead of counting raw ```
+        // substrings, so a balanced 4+-backtick fence isn't miscounted.
+        summary = closeUnbalancedFence(truncated);
       }
     }
   } catch { /* best-effort — fall back to the generic title/summary above */ }

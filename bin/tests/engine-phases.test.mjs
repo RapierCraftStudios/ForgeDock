@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PHASES, pickPhase } from "../engine/phases.mjs";
+import { PHASES, pickPhase, closeUnbalancedFence } from "../engine/phases.mjs";
 import { appendEvent } from "../engine/runlog.mjs";
 import { loadInvariants, assertCloseInvariants } from "../engine/invariants.mjs";
 
@@ -811,5 +811,35 @@ describe("pickPhase", () => {
       const outcome = await build.detectOutcome({ ...base, branch: null }, io);
       assert.equal(outcome.status, "failed");
     });
+  });
+});
+
+// forge#2545: closeUnbalancedFence tracks GFM fence delimiters as whole
+// line-anchored tokens instead of counting raw ``` substring occurrences,
+// so it isn't fooled by 4+-backtick fences wrapping a literal ``` inside.
+describe("closeUnbalancedFence", () => {
+  it("closes a genuinely-unclosed 3-backtick fence (forge#2510 regression guard)", () => {
+    const text = "```js\nfoo";
+    assert.equal(closeUnbalancedFence(text), "```js\nfoo\n```");
+  });
+
+  it("leaves a balanced 4-backtick fence wrapping a literal ``` unchanged (forge#2545)", () => {
+    const text = "````js\nfoo\n```\nbar\n````";
+    assert.equal(closeUnbalancedFence(text), text);
+  });
+
+  it("closes a genuinely-unclosed 4-backtick fence with a matching 4-backtick closer", () => {
+    const text = "````js\nfoo\n```\nbar";
+    assert.equal(closeUnbalancedFence(text), "````js\nfoo\n```\nbar\n````");
+  });
+
+  it("is a no-op when no fence is present", () => {
+    const text = "just a plain issue body\nwith no code fences at all";
+    assert.equal(closeUnbalancedFence(text), text);
+  });
+
+  it("closes a balanced 3-backtick fence unchanged (even-count happy path)", () => {
+    const text = "```js\nfoo\n```";
+    assert.equal(closeUnbalancedFence(text), text);
   });
 });
