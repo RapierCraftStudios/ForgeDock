@@ -255,17 +255,25 @@ REVIEW_BODIES=$(gh pr view {PR_NUMBER} {GH_FLAG} --json reviews,comments \
 APPROVED_COUNT=$(echo "$REVIEW_BODIES" | grep -cE 'APPROVED:' 2>/dev/null || true); APPROVED_COUNT=${APPROVED_COUNT:-0}
 ```
 
-**Auto-land bar — base-branch scoped** (forge#2570): the condition the PR must clear to auto-land depends on its target branch `PR_BASE` (resolved in Phase M0, line 46). This reconciles the remediation bar with the normal `/work-on` fast-lane merge bar for the *same target branch*, while keeping the strict human-verified bar only where a human is genuinely in the loop (the `staging → main` deploy gate).
+**Auto-land bar — base-branch scoped** (forge#2570): the condition the PR must clear to auto-land depends on its target branch. This reconciles the remediation bar with the normal `/work-on` fast-lane merge bar for the *same target branch*, while keeping the strict human-verified bar only where a human is genuinely in the loop (the `staging → main` deploy gate).
 
-Compute the base predicate once:
+**Re-derive the base fresh — do NOT reuse `$PR_BASE` for this decision** (forge#2624): `$PR_BASE` was resolved in Phase M0 as `PR_BASE="${PR_BASE:-$(... .baseRefName)}"` — a caller-supplied `--base` wins over the PR's actual live base whenever non-empty. That is fine for M0's own purposes (worktree base, display text), but this is a security-relevant decision point: a wrong/stale `--base staging` on a PR that actually targets `main` must never be allowed to relax the strict deploy-gate bar. Mirror `review-pr.md`'s sibling guard (`GUARD_BASE`, which always re-fetches `baseRefName` fresh at its own decision point) by re-querying the PR's live base here, independent of whatever `$PR_BASE` currently holds:
+
 ```bash
+# forge#2624: re-fetch baseRefName fresh from the PR itself — never trust the
+# M0-resolved $PR_BASE for this decision, since M0 prefers a caller-supplied
+# --base over the live value. This is the one line in this phase that makes
+# a trust/security decision, so it must be immune to a caller-overridable input.
+LIVE_BASE_REF=$(gh pr view {PR_NUMBER} {GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
+
 # forge#2570: `main` (and any deploy-gate base) keeps the strict #1809 Q1 verified-human bar;
 # every other base (staging, milestone/* — the reversible integration branches) reconciles to
 # the fast-lane bar. Key on "is the deploy gate", NOT the literal string "staging", so milestone
-# branches reconcile too. Fail closed: only a KNOWN, non-empty, non-`main` base reconciles to
-# the fast lane; an empty/unresolved base is treated as the deploy gate (strict) so a base-
-# resolution failure can never accidentally relax the bar.
-if [ -n "$PR_BASE" ] && [ "$PR_BASE" != "main" ]; then IS_DEPLOY_GATE=false; else IS_DEPLOY_GATE=true; fi
+# branches reconcile too. Fail closed: only a KNOWN, non-empty, non-`main` LIVE base reconciles
+# to the fast lane; an empty/unresolved fetch is treated as the deploy gate (strict) so a base-
+# resolution failure (or a caller passing a stale/incorrect --base) can never accidentally
+# relax the bar.
+if [ -n "$LIVE_BASE_REF" ] && [ "$LIVE_BASE_REF" != "main" ]; then IS_DEPLOY_GATE=false; else IS_DEPLOY_GATE=true; fi
 ```
 
 **Non-`main` base (`IS_DEPLOY_GATE=false` — staging / milestone)** — reconcile to the fast-lane bar. `review-pr.md`'s Phase 8 guard only parks a PR at `workflow:awaiting-merge` after a clean, mergeable `APPROVED` re-review (the same bot-`APPROVED` signal the normal fast lane auto-merges on), so the only additional condition is this remediation's own quality gate:
