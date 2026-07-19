@@ -1075,11 +1075,15 @@ export async function isSymlinkTraversable(target) {
  *   target, including on Windows.
  * - The tmp sibling is unlinked on every failure path so a rename failure
  *   (or any rethrow) never orphans it (forge#2612).
- * - After a successful rename, the link is read back via
- *   isSymlinkTraversable(): fs.symlink() can succeed while producing a link
+ * - The link is read back via isSymlinkTraversable() on the PID-scoped tmp
+ *   path *before* the rename: fs.symlink() can succeed while producing a link
  *   this runtime cannot resolve (MSYS symlink + native Windows "untrusted
- *   mount point" — forge#2620). Such a dead link is unlinked before
- *   returning so the caller can fall back to a copy.
+ *   mount point" — forge#2620). Verifying the tmp sibling — which no other
+ *   process ever touches — instead of the shared target *after* the rename
+ *   closes a TOCTOU window: a post-rename readback could describe (and the
+ *   old cleanup unlink could remove) a concurrent installer's freshly-renamed
+ *   link, not ours (forge#2679). An unreadable link is discarded as tmp and
+ *   never renamed onto target, so target is left untouched.
  *
  * Callers keep their own `wantSymlink` guard and site-specific bookkeeping
  * (counters, manifest mutation, copy fall-through) around the result.
@@ -1089,27 +1093,34 @@ export async function isSymlinkTraversable(target) {
  * @returns {Promise<"linked"|"unreadable"|"denied">}
  *   "linked"     — symlink atomically installed at target and traversable.
  *   "unreadable" — symlink was created but not readable back (forge#2620);
- *                  the dead link has already been unlinked, so target may be
- *                  absent on return. Caller should restore/fall back to a copy.
+ *                  the dead link was discarded as tmp and the rename never
+ *                  happened, so any existing target is left intact (forge#2679).
+ *                  Caller should fall back to a copy.
  *   "denied"     — EPERM/EACCES from symlink/rename (no symlink installed;
  *                  e.g. Windows without Developer Mode). Caller should fall
  *                  back to a copy.
  *   Any other error (EEXIST on the tmp path, ENOSPC, rename failures, …) is
  *   rethrown after tmp cleanup.
  */
-async function atomicSymlinkInstall(file, target) {
+export async function atomicSymlinkInstall(file, target) {
   const tmpTarget = target + "." + process.pid + ".tmp";
   try {
     await symlink(file, tmpTarget);
+    // Read back the PID-scoped tmp sibling *before* renaming onto target. No
+    // other process touches tmpTarget, so the verdict cannot describe a
+    // concurrent installer's link, and an unreadable link is discarded here
+    // without ever unlinking target (forge#2679, forge#2620).
+    if (!(await isSymlinkTraversable(tmpTarget))) {
+      await unlink(tmpTarget).catch(() => {});
+      return "unreadable";
+    }
     try {
       await rename(tmpTarget, target);
     } catch (renameErr) {
       await unlink(tmpTarget).catch(() => {});
       throw renameErr;
     }
-    if (await isSymlinkTraversable(target)) return "linked";
-    await unlink(target).catch(() => {});
-    return "unreadable";
+    return "linked";
   } catch (linkErr) {
     if (!isLinkPermissionError(linkErr)) throw linkErr;
     return "denied";
@@ -1935,11 +1946,12 @@ async function upgradeManagedCopy(file, target, rel, { wantSymlink, recordDelete
       upgraded = true;
       recordDelete(rel);
     } else if (result === "unreadable") {
-      // Symlink was created but is not readable back (forge#2620) —
-      // the helper already removed the dead link. Restore a real copy
-      // so the command stays readable. Keep the manifest entry (still
-      // copy-managed, not symlink-managed) and do NOT fall through to
-      // the generic copy-comparison below — the copy is already done.
+      // Symlink was created but is not readable back (forge#2620) — the helper
+      // discarded it as tmp and left the existing copy at target untouched
+      // (forge#2679). Overwrite it with a fresh copy so the command stays
+      // readable. Keep the manifest entry (still copy-managed, not
+      // symlink-managed) and do NOT fall through to the generic
+      // copy-comparison below — the copy is already done.
       await copyFile(file, target);
       restoredAsCopy = true;
     }
@@ -2312,9 +2324,9 @@ export async function forge(ctx) {
           if (!relinked) {
             // Can't (or shouldn't) re-link — replace the managed link with a copy.
             // unlink first: copyFile onto a symlink writes THROUGH the link.
-            // (target may already be gone here if atomicSymlinkInstall()
-            // returned "unreadable" and its own cleanup already removed it —
-            // tolerate ENOENT.)
+            // (On "unreadable" the rename never happened so the old link is
+            // still here; on "denied" likewise. ENOENT tolerated defensively
+            // in case the entry vanished out from under us — forge#2679.)
             await unlink(target).catch((err) => {
               if (err.code !== "ENOENT") throw err;
             });
