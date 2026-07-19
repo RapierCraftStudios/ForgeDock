@@ -240,9 +240,9 @@ findings and what will actually be built.
 {brief description of the implementation approach}
 
 ### Deliverables
-| File | Change | Why |
-|------|--------|-----|
-| {filepath} | {what changes} | {why this change is needed} |
+| File | Change |
+|------|--------|
+| {filepath} | {what changes} |
 
 ### Acceptance Criteria
 - [ ] {specific, testable criterion}
