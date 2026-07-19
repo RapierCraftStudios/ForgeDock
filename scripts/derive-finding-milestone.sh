@@ -126,11 +126,15 @@ fi
 # Portable (non-PCRE) extraction — grep -oP is not supported by Git Bash's
 # grep build on Windows, so use a bash regex + BASH_REMATCH instead of a
 # lookbehind (same convention as scripts/code-index.sh).
+# The leading (^|[^a-z]) group anchors the alternation to a word start so a
+# close-verb embedded in a larger word (e.g. "encloses #1234") cannot match;
+# the body is already lowercased, so [^a-z] is the correct complement class.
+# The extra group shifts the issue-number capture to BASH_REMATCH[3].
 PR_BODY=$(echo "$PR_JSON" | jq -r '.body // empty')
 SOURCE_ISSUE=""
 PR_BODY_LOWER=$(echo "$PR_BODY" | tr '[:upper:]' '[:lower:]')
-if [[ "$PR_BODY_LOWER" =~ (closes|fixes|resolves)[[:space:]]*#([0-9]+) ]]; then
-  SOURCE_ISSUE="${BASH_REMATCH[2]}"
+if [[ "$PR_BODY_LOWER" =~ (^|[^a-z])(closes|fixes|resolves)[[:space:]]*#([0-9]+) ]]; then
+  SOURCE_ISSUE="${BASH_REMATCH[3]}"
 fi
 
 if [ -n "$SOURCE_ISSUE" ]; then

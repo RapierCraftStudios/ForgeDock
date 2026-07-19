@@ -145,6 +145,44 @@ describe("scripts/derive-finding-milestone.sh — PR -> milestone derivation (fo
     }
   });
 
+  it("REGRESSION (forge#2666): 'encloses #N' must NOT match as a Tier-2 close reference", () => {
+    const result = run(["129"], {
+      GH_FAKE_PR_JSON: JSON.stringify({
+        milestone: null,
+        body: "this pr encloses #1234 as part of refactor",
+        baseRefName: "staging",
+        headRefName: "fix/example",
+      }),
+      // Deliberately can a milestone for the falsely-extracted issue: if the
+      // unanchored regex regresses and Tier 2 fires on "encloses #1234", this
+      // leaks into stdout and the empty-output assertion below fails loudly.
+      GH_FAKE_ISSUE_JSON: JSON.stringify({ milestone: { title: "WRONG Milestone (substring match)" } }),
+    });
+    assert.equal(result.status, 0, `stderr: ${result.stderr}`);
+    assert.equal(
+      result.stdout.trim(),
+      "",
+      "'encloses #1234' must not resolve a Tier-2 source issue (substring false positive)"
+    );
+  });
+
+  it("REGRESSION (forge#2666): a legitimate 'closes #N' at the very start of the body still matches", () => {
+    const result = run(["130"], {
+      GH_FAKE_PR_JSON: JSON.stringify({
+        milestone: null,
+        body: "closes #4321",
+        baseRefName: "staging",
+        headRefName: "fix/example",
+      }),
+      GH_FAKE_ISSUE_JSON: JSON.stringify({ milestone: { title: "Tier 2 Milestone" } }),
+      // Pin the exact issue number the script must request — proves the
+      // capture index extracts "4321", not the close verb or a shifted group.
+      GH_FAKE_EXPECT_ISSUE: "4321",
+    });
+    assert.equal(result.status, 0, `stderr: ${result.stderr}`);
+    assert.equal(result.stdout.trim(), "Tier 2 Milestone");
+  });
+
   it("Tier 3: falls through to branch-slug match when PR and issue have no milestone", () => {
     const result = run(["126"], {
       GH_FAKE_PR_JSON: JSON.stringify({
