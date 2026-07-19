@@ -600,8 +600,26 @@ if [ -n "$INDEX_GIST_URLS" ]; then
   GIST_URLS=$(echo -e "${GIST_URLS}\n${INDEX_GIST_URLS}" | sort -u | head -5)
 fi
 
+# Self-exclusion (forge#2685): drop this issue's own Knowledge Gist before fetching/summarizing.
+# investigate.md Phase 1C.5 posts this issue's own investigation as a Gist and links it via
+# FORGE:KNOWLEDGE_GIST on this same issue; Phase 1C.6 (same run) then folds that identical URL
+# into the milestone index. By the time this phase runs, the milestone index can already contain
+# this issue's own Gist — with no filter, Step 2 below would re-fetch and re-summarize the
+# current issue's own FORGE:INVESTIGATOR content into "Prior Investigation Findings", producing
+# a third same-thread copy of content already in FORGE:INVESTIGATOR and already linked via
+# FORGE:KNOWLEDGE_GIST. Match on the literal, unmodified Gist URL string (both sides derive from
+# the same $GIST_URL value with no transformation) rather than a derived/prefixed form — see
+# forge#1841 for the failure mode a heuristic match here would otherwise repeat.
+SELF_GIST_URL=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:KNOWLEDGE_GIST:"))] | last | .body // ""' 2>/dev/null \
+  | sed -n 's/.*<!-- FORGE:KNOWLEDGE_GIST: \(https:\/\/[^ ]*\) -->.*/\1/p' | head -1)
+
+if [ -n "$SELF_GIST_URL" ] && [ -n "$GIST_URLS" ]; then
+  GIST_URLS=$(echo "$GIST_URLS" | grep -vF "$SELF_GIST_URL" || true)
+fi
+
 if [ -z "$GIST_URLS" ]; then
-  echo "No FORGE:PRIOR_GIST or FORGE:MILESTONE_INDEX annotations found — skipping Phase C0"
+  echo "No FORGE:PRIOR_GIST or FORGE:MILESTONE_INDEX annotations found (or only this issue's own Gist was present) — skipping Phase C0"
   # → Continue to Phase C1
 fi
 ```

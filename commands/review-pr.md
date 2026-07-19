@@ -2087,7 +2087,21 @@ fi
 
 # Log threshold decision in TRAJECTORY (append to existing issue comment or note for Phase 6)
 # This satisfies the acceptance criterion: "Threshold adjustments appear in TRAJECTORY with the cell that justified them"
-if [ -n "$ISSUE_NUMBER" ]; then
+#
+# Signal gate (forge#2685): only post FORGE:CALIBRATION_CHECK when there is something to report.
+# The "table not found / SHADOW / false" combination is the no-signal default state — every
+# eligible issue hit it and got an identical, information-free comment. Post only when a
+# calibration cell was actually resolved, a needs-human flag fired, or the trust tier moved
+# off its SHADOW default. The no-signal case still logs to stdout (visible in the run
+# transcript / TRAJECTORY) — this changes visibility on the issue thread only, never the
+# CALIBRATION_NEEDS_HUMAN/TRUST_NEEDS_HUMAN values Phase 8 reads directly.
+POST_CALIBRATION_CHECK=false
+if [ -n "$CALIBRATION_CELL" ] || [ "$CALIBRATION_NEEDS_HUMAN" = "true" ] \
+   || [ "${INTENSITY_TIER:-SHADOW}" != "SHADOW" ] || [ "${TRUST_NEEDS_HUMAN:-false}" = "true" ]; then
+  POST_CALIBRATION_CHECK=true
+fi
+
+if [ -n "$ISSUE_NUMBER" ] && [ "$POST_CALIBRATION_CHECK" = "true" ]; then
   gh issue comment "${ISSUE_NUMBER}" {MERGE_GH_FLAG} --body "<!-- FORGE:CALIBRATION_CHECK -->
 **Phase 7B.5 — Calibration Threshold Check**
 **Cell**: ${CALIBRATION_CELL:-not found}
@@ -2100,6 +2114,8 @@ if [ -n "$ISSUE_NUMBER" ]; then
 **Shadow mode**: ${TRUST_SHADOW_MODE:-true}
 **TRUST_NEEDS_HUMAN**: ${TRUST_NEEDS_HUMAN:-false}
 **Timestamp**: $(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>/dev/null || true
+elif [ -n "$ISSUE_NUMBER" ]; then
+  echo "Phase 7B.5: no calibration/trust signal to report (${CALIBRATION_NOTE:-no calibration data}; tier=${INTENSITY_TIER:-SHADOW}) — skipping FORGE:CALIBRATION_CHECK post (forge#2685)"
 fi
 ```
 
