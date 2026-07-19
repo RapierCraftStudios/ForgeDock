@@ -1801,6 +1801,140 @@ describe("forge (Act II)", () => {
     }
   });
 
+  // forge#2637: #2614 (above) closed the "whole run duration" last-writer-wins
+  // race by re-reading and merging right before the final save, but left that
+  // final read→merge→write sequence itself unprotected — a third concurrent
+  // forge() could still land its own save inside that narrower window. These
+  // tests exercise the file-lock mitigation added around that sequence,
+  // simulating a concurrent holder via the real `<manifest>.lock` artifact on
+  // disk (rather than mocking internals — acquireManifestLock/
+  // releaseManifestLock are not exported, matching this suite's existing
+  // convention of testing forge()'s on-disk effects rather than its private
+  // helpers).
+  it("final manifest save waits for a concurrently held lock and merges both sides once it's released (forge#2637)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-wait-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-wait-src-"));
+    mkdirSync(join(forgeHome, "commands"), { recursive: true });
+    mkdirSync(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "content a", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const manifestPath = join(home, ".claude", "forgedock", "copied-commands.json");
+    const lockPath = manifestPath + ".lock";
+    mkdirSync(join(home, ".claude", "forgedock"), { recursive: true });
+    writeFileSync(manifestPath, JSON.stringify({ version: 1, files: {} }, null, 2) + "\n", "utf-8");
+
+    // Simulate a concurrent process already holding the lock, mid-critical-
+    // section, when this run reaches its own final save.
+    writeFileSync(lockPath, "", "utf-8");
+
+    const { ctx, w } = stubCtx({ home, linkStrategy: "copy" });
+    ctx.forgeHome = forgeHome;
+
+    const forgePromise = forge(ctx);
+    // Release the held lock — and land the "other process's" own manifest
+    // write, as it would have on releasing — shortly after this run starts
+    // retrying, well within the retry/backoff budget.
+    setTimeout(() => {
+      const concurrent = JSON.parse(readFileSync(manifestPath, "utf-8"));
+      concurrent.files["concurrent-process.md"] = true;
+      writeFileSync(manifestPath, JSON.stringify(concurrent, null, 2) + "\n", "utf-8");
+      unlinkSync(lockPath);
+    }, 15);
+    const res = await forgePromise;
+
+    assert.equal(res.copied, 1, "this run should have copied its own file");
+    assert.ok(!w.text.includes("manifest not saved"), "manifest save should succeed once the lock is released");
+    assert.ok(!existsSync(lockPath), "the lock file must be cleaned up after this run's save completes");
+
+    const finalManifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    assert.equal(finalManifest.files["a.md"], true, "this run's own entry must be present");
+    assert.equal(
+      finalManifest.files["concurrent-process.md"],
+      true,
+      "the concurrent holder's entry (written before releasing the lock) must survive this run's save",
+    );
+  });
+
+  it("stale (crash-orphaned) manifest lock is reclaimed so forge() is not permanently blocked (forge#2637)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-stale-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-stale-src-"));
+    mkdirSync(join(forgeHome, "commands"), { recursive: true });
+    mkdirSync(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "content a", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const manifestPath = join(home, ".claude", "forgedock", "copied-commands.json");
+    const lockPath = manifestPath + ".lock";
+    mkdirSync(join(home, ".claude", "forgedock"), { recursive: true });
+    writeFileSync(manifestPath, JSON.stringify({ version: 1, files: {} }, null, 2) + "\n", "utf-8");
+
+    // A lock left behind by a process that was hard-killed before releasing
+    // it — backdate its mtime well past the staleness threshold so this run's
+    // first contended attempt reclaims it instead of waiting out the full
+    // retry budget.
+    writeFileSync(lockPath, "", "utf-8");
+    const staleTime = new Date(Date.now() - 60_000);
+    utimesSync(lockPath, staleTime, staleTime);
+
+    const { ctx, w } = stubCtx({ home, linkStrategy: "copy" });
+    ctx.forgeHome = forgeHome;
+
+    const res = await forge(ctx);
+
+    assert.equal(res.copied, 1, "this run should have copied its own file");
+    assert.ok(!w.text.includes("manifest not saved"), "manifest save should succeed after reclaiming the stale lock");
+    assert.ok(!existsSync(lockPath), "the reclaimed lock must not be left behind after this run's own save");
+
+    const finalManifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    assert.equal(finalManifest.files["a.md"], true, "this run's own entry must be present");
+  });
+
+  it("falls back to an unlocked save (never-abort contract preserved) when the lock cannot be acquired within the retry budget (forge#2637)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-heldfull-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-heldfull-src-"));
+    mkdirSync(join(forgeHome, "commands"), { recursive: true });
+    mkdirSync(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "content a", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const manifestPath = join(home, ".claude", "forgedock", "copied-commands.json");
+    const lockPath = manifestPath + ".lock";
+    mkdirSync(join(home, ".claude", "forgedock"), { recursive: true });
+    writeFileSync(manifestPath, JSON.stringify({ version: 1, files: {} }, null, 2) + "\n", "utf-8");
+
+    // Held for the entire run — freshly touched throughout so it is never
+    // treated as stale — simulating a live (non-crashed) concurrent holder
+    // whose own critical section outlasts this run's retry budget.
+    writeFileSync(lockPath, "", "utf-8");
+    const keepAlive = setInterval(() => {
+      const now = new Date();
+      try {
+        utimesSync(lockPath, now, now);
+      } catch {
+        // lock already gone (test cleanup raced) — stop trying
+        clearInterval(keepAlive);
+      }
+    }, 20);
+
+    const { ctx, w } = stubCtx({ home, linkStrategy: "copy" });
+    ctx.forgeHome = forgeHome;
+
+    try {
+      const res = await forge(ctx);
+      assert.equal(res.copied, 1, "this run should have copied its own file");
+      assert.ok(
+        !w.text.includes("manifest not saved"),
+        "manifest save must still succeed unlocked — the lock is best-effort, not a hard requirement",
+      );
+      const finalManifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+      assert.equal(finalManifest.files["a.md"], true, "this run's own entry must be present even without the lock");
+    } finally {
+      clearInterval(keepAlive);
+      unlinkSync(lockPath);
+    }
+  });
+
   // forge#1527: the SubagentStop annotation-enforcement hook's trigger
   // (`FORGE:PHASE_START` in the transcript) is never emitted anywhere in the
   // pipeline, so it was dead code that always exited 0 with zero enforcement
