@@ -384,6 +384,27 @@ describe("pickPhase", () => {
       const outcome = await architect.detectOutcome(base, ioWith("<!-- FORGE:ARCHITECT:COMPLETE -->"));
       assert.equal(outcome.status, "committed");
     });
+
+    // Regression #2689: the architect SKIP path (chore:/docs:/trivial titles) must
+    // post a minimal FORGE:ARCHITECT comment ending in the :COMPLETE sentinel so the
+    // marker-only headless gate advances the issue to build instead of stranding it
+    // at needs-human. A skip that emits the sentinel is indistinguishable, to this
+    // gate, from a full plan — both -> committed. Crash detection is preserved: a
+    // skip that posts NO marker still -> failed (see the case below).
+    it("architect skip-path comment (chore/docs skip note) with :COMPLETE -> committed (advances, not needs-human)", async () => {
+      const skipBlob = "<!-- FORGE:ARCHITECT -->\n" +
+        "## Architecture Plan — Skipped\n\n" +
+        "**Skipped**: chore:/docs: title. No cross-path consistency risk.\n\n" +
+        "<!-- FORGE:ARCHITECT:COMPLETE -->";
+      const outcome = await architect.detectOutcome(base, ioWith(skipBlob));
+      assert.equal(outcome.status, "committed");
+    });
+
+    it("architect skip note WITHOUT the :COMPLETE sentinel (genuine crash) -> failed (still escalates)", async () => {
+      const crashBlob = "<!-- FORGE:ARCHITECT -->\n## Architecture Plan — Skipped\n**Skipped**: chore: title.";
+      const outcome = await architect.detectOutcome(base, ioWith(crashBlob));
+      assert.equal(outcome.status, "failed");
+    });
   });
 
   // Regression tests for #2193: within-comment `**Branch**:` field match order is
