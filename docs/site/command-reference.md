@@ -621,14 +621,17 @@ These are invoked automatically by `/work-on` but can also be run standalone.
 
 | Command | Phase | Purpose |
 |---------|-------|---------|
+| `/work-on/phase-0-resolve` | Phase 0 | Resolve issue, pre-flight checks, load context, sync project board |
 | `/work-on/investigate` | Phase 1 | Investigation only |
 | `/work-on/build` | Phase 3 | Build only (requires investigation) |
 | `/work-on/build/context` | Phase 3C.5 | Context gathering only |
 | `/work-on/build/architect` | Phase 3C.6 | Architecture planning only |
 | `/work-on/build/implement` | Phase 3F | Implementation only |
 | `/work-on/build/validate` | Phase 3G | Quality gate only |
+| `/work-on/phase-4-pr` | Phase 4 | Push branch, validate PR target, create PR |
 | `/work-on/review` | Phase 5 | Review only |
 | `/work-on/close` | Phase 6 | Close & cleanup only |
+| `/work-on/phase-7-trajectory` | Phase 7 | Summary card, trajectory log, Graph Decision Record |
 | `/work-on/decompose` | Phase 2 | Decompose into sub-issues |
 | `/work-on/remediate` | Phase 0A.1 | Remediate a `needs-human` PR: fix findings, re-review, re-gate (`/work-on <pr> --remediate`) |
 | `/review-pr-agents` | PR review | Agent catalog router read by `/review-pr` during dispatch (not user-invokable directly) |
