@@ -578,7 +578,7 @@ if [ -n "$MILESTONE_INDEX_URL" ]; then
     if [ -n "$INDEX_CONTENT" ]; then
       # Extract Gist URLs from table rows (format: | ... | https://gist.github.com/... | ... |)
       INDEX_GIST_URLS=$(echo "$INDEX_CONTENT" \
-        | grep -oE 'https://gist\.github\.com/[a-f0-9/]+' \
+        | grep -oE 'https://gist\.github\.com/[A-Za-z0-9_-]+/[a-f0-9]+' \
         | head -10)
       echo "Milestone index fetched: found $(echo "$INDEX_GIST_URLS" | wc -l) investigation Gist(s)"
     else
