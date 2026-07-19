@@ -64,7 +64,7 @@ jobs:
 
           # --- Policy (kept in sync with prior TOML config) ---------------------
           # Project maintainer emails -- exempt from DCO sign-off (author-only).
-          EXEMPT_AUTHORS=("yash.dubey803at@gmail.com" "rapiercraftstudios@gmail.com")
+          EXEMPT_AUTHORS=("yash.dubey803at@gmail.com" "rapiercraftstudios@gmail.com" "admin@ultranews.com")
 
           # Bots allowed to skip the DCO requirement.
           BOT_LOGINS=("github-actions[bot]" "dependabot[bot]" "dependabot-preview[bot]" "rapiercraft-forgedock[bot]" "rapiercraft-forge[bot]")

@@ -527,7 +527,7 @@ check_orchestrator_lease() {
   fi
 
   local HOLDER_BATCH_ID LEASE_TIMESTAMP
-  HOLDER_BATCH_ID=$(echo "$LAST_LEASE_EVENT" | jq -r '.body' 2>/dev/null | grep -oP '(?<=\*\*Holder Batch ID\*\*: )\S+' | head -1)
+  HOLDER_BATCH_ID=$(echo "$LAST_LEASE_EVENT" | jq -r '.body' 2>/dev/null | grep -oE '\*\*Holder Batch ID\*\*: [^[:space:]]+' | head -1 | sed -E 's/^\*\*Holder Batch ID\*\*: //')
   LEASE_TIMESTAMP=$(echo "$LAST_LEASE_EVENT" | jq -r '.created_at' 2>/dev/null)
 
   if [ "$HOLDER_BATCH_ID" = "$MY_BATCH_ID" ]; then
@@ -1186,7 +1186,7 @@ For the same reason, this reconstruction also MUST call `verify_file_overlap_edg
 #    themselves are treated as re-derivable state, not assumed-present variables:
 if [ -z "${BATCH_ID:-}" ] && [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ]; then
   BATCH_ID=$(gh issue view "$COORD_ISSUE_NUMBER" -R {GH_REPO} --json body \
-    --jq '.body' 2>/dev/null | grep -oP '(?<=<!-- FORGE:BATCH_ID: )[^ ]+(?= -->)' | head -1)
+    --jq '.body' 2>/dev/null | grep -oE '<!-- FORGE:BATCH_ID: [^ ]+ -->' | head -1 | sed -E 's/^<!-- FORGE:BATCH_ID: //; s/ -->$//')
   if [ -n "$BATCH_ID" ]; then
     export BATCH_ID
     echo "Reconstructed BATCH_ID=${BATCH_ID} from coordination issue #${COORD_ISSUE_NUMBER} body (in-context value was lost, per this section's own contract)."

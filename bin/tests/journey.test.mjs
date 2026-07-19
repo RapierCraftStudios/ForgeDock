@@ -2210,29 +2210,36 @@ describe("forge (Act II)", () => {
       assert.ok(!existsSync(link));
     });
 
-    it("leaves a Windows drive-relative symlink target (e.g. \"C:foo\") untouched rather than mis-joining it (forge#2659)", async () => {
+    it("leaves a Windows drive-relative symlink target (e.g. \"C:foo\") untouched on win32; treats it as an ordinary relative target on POSIX (forge#2659, win32-gated per forge#2663)", async () => {
       const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-driverel-"));
       const link = join(targetDir, "orchestrate");
       // "C:foo" — drive letter + colon with NO separator after it — is
       // classified as "relative" by both path.win32.isAbsolute() and
-      // path.posix.isAbsolute() (neither recognizes this shape as absolute),
-      // so it would previously fall into the join(targetDir, linkTarget)
-      // branch and produce a nonsensical resolved path. It cannot be
-      // resolved correctly without knowing the drive's own cwd, which Node
-      // has no API for — the correct behavior is to leave the entry alone.
+      // path.posix.isAbsolute() (neither recognizes this shape as absolute).
+      // The drive-relative special case is deliberately platform-gated to
+      // win32 (forge#2663): only on Windows does "C:foo" mean "relative to
+      // drive C's own cwd" — a path Node has no API to resolve — so the entry
+      // is left untouched there. On POSIX, `:` is an ordinary filename
+      // character, so "C:foo" is just a normal relative target resolved
+      // against the link's own directory and pruned like any broken link.
       symlinkSync("C:foo", link);
-      // Native Windows symlink creation resolves a drive-relative target
-      // against the process's cwd at creation time (CreateSymbolicLink
-      // semantics), so readlink() here would return an already-absolute
-      // path rather than the literal "C:foo" string this test targets — the
-      // literal-string scenario only arises from a symlink created by an
-      // external tool that preserves the raw string (e.g. on POSIX, where
-      // symlink() never interprets its target). Skip on platforms where the
-      // literal string can't actually be constructed via symlinkSync rather
-      // than assert something this environment can't reproduce.
-      if (readlinkSync(link) !== "C:foo") return;
-      const pruned = await pruneStaleExtensionlessEntries(targetDir);
-      assert.equal(pruned, 0, "drive-relative target must not be pruned — cannot be resolved safely");
+      if (process.platform === "win32") {
+        // Native Windows symlink creation resolves a drive-relative target
+        // against the process's cwd at creation time (CreateSymbolicLink
+        // semantics), so readlink() may return an already-absolute path
+        // rather than the literal "C:foo" string this branch targets. Only
+        // assert the untouched contract when the literal string survived.
+        if (readlinkSync(link) !== "C:foo") return;
+        const pruned = await pruneStaleExtensionlessEntries(targetDir);
+        assert.equal(pruned, 0, "drive-relative target must not be pruned on win32 — cannot be resolved safely");
+      } else {
+        // POSIX: symlink() stores the literal "C:foo", which resolves to a
+        // missing path under targetDir and is pruned like any broken link.
+        assert.equal(readlinkSync(link), "C:foo");
+        const pruned = await pruneStaleExtensionlessEntries(targetDir);
+        assert.equal(pruned, 1, "on POSIX, \"C:foo\" is an ordinary relative target and is pruned when its resolved path is missing");
+        assert.ok(!existsSync(link));
+      }
     });
 
     it("does NOT mistake a genuinely drive-absolute target (\"C:\\\\foo\") for drive-relative", async () => {
