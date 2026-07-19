@@ -1872,351 +1872,257 @@ export function detectCrossEnvInstall(ctx, envInfo, deps = {}) {
 }
 
 /**
- * Act II: link commands into ~/.claude/commands with a molten progress line,
- * then register the SessionStart hook.
- * Symlink semantics preserved verbatim from the original install():
- * regular files are skipped with a warning; changed links updated atomically.
- * On Windows without Developer Mode (symlink → EPERM/EACCES) each command is
- * copied instead, and recorded in a manifest so re-runs can tell ForgeDock's
- * own copies apart from user-owned files. ctx.linkStrategy ("symlink" default)
- * can be set to "copy" to skip all symlink attempts (deterministic tests).
+ * Final manifest save for forge(): locked re-read → replay this run's
+ * `manifestOps` → write. Returns true on success, false on any failure —
+ * never throws, because manifest housekeeping must never abort the caller's
+ * receipt or the hook installation.
  */
-export async function forge(ctx) {
-  const { stdout: w } = ctx;
-  const commandsDir = join(ctx.forgeHome, "commands");
-  const targetDir = join(ctx.home, ".claude", "commands");
-  const manifestPath = join(ctx.home, ".claude", "forgedock", "copied-commands.json");
-  const wantSymlink = ctx.linkStrategy !== "copy";
-
-  w.write("\n  " + ember("Forging commands", ctx.mode) + " " + dimLine(ctx, `into ${targetDir}`) + "\n\n");
-  await mkdir(targetDir, { recursive: true });
-
-  // Clear stale extensionless entries from prior `npx forgedock` runs before
-  // the install loop below can collide with them (forge#2620).
-  const staleExtensionlessPruned = await pruneStaleExtensionlessEntries(targetDir);
-
-  const manifest = await loadCopiedManifest(manifestPath);
-  // Reclaim crash-orphaned pid-suffixed tmp siblings left by prior hard-killed
-  // runs (forge#2612). Best-effort — must never abort the forge receipt/hook.
-  await sweepStaleManifestTmps(manifestPath).catch(() => {});
-  let manifestChanged = false;
-  // This run's own manifest mutations, tracked as a replayable diff
-  // (forge#2614). #2599/#2609 fixed the tmp-file *write-path* race (two
-  // concurrent forge() runs no longer collide on the same tmp filename) but
-  // left the manifest's logical *content* racy: each run loads the manifest
-  // into memory once, mutates its own copy across the whole run, then writes
-  // the entire in-memory object back at the end — a classic last-writer-wins
-  // race on manifest.files. Recording this run's own adds/deletes here (instead
-  // of relying on the run-start in-memory snapshot) lets the final save re-read
-  // the on-disk manifest and replay only these ops onto it, so a concurrent
-  // run's own adds/deletes made after this run's initial load are preserved
-  // rather than silently overwritten.
-  const manifestOps = [];
-
-  const files = await findMarkdownFiles(commandsDir, { includeExtras: !!ctx.includeExtras });
-  let installed = 0, updated = 0, skipped = 0, copied = 0, backedUp = 0;
-  const barWidth = 24;
-  let barShown = false;
-
-  const recordCopy = (rel) => {
-    if (!manifest.files[rel]) {
-      manifest.files[rel] = true;
-      manifestChanged = true;
-    }
-    manifestOps.push({ rel, op: "add" });
-  };
-
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i];
-    const rel = relative(commandsDir, file);
-    const target = join(targetDir, rel);
-    await mkdir(pathDirname(target), { recursive: true });
-
+async function saveManifestWithMerge(manifestPath, manifestOps) {
+  try {
+    // Re-read-and-merge (forge#2614): another concurrent forge() invocation
+    // may have saved its own manifest.files adds/deletes since this run's
+    // initial load above. Re-reading the on-disk manifest right before this
+    // run's own save and replaying only this run's own ops (manifestOps)
+    // onto that fresh copy — rather than blindly overwriting with the
+    // run-start in-memory snapshot — means this run's save can no longer
+    // silently drop the other run's changes. loadCopiedManifest() never
+    // throws (missing/corrupt on-disk manifest resolves to an empty one),
+    // so this stays within the surrounding never-abort contract.
+    //
+    // Lock the re-read→merge→write sequence itself (forge#2637): #2614
+    // narrowed the race from "whole run duration" to this critical section,
+    // but left it unprotected — a third concurrent forge() could still land
+    // its own save inside the gap between this run's re-read and its own
+    // write-rename completing. acquireManifestLock() is best-effort: on
+    // failure to acquire (contention exhausted retries, or an unexpected
+    // error) it returns null and this run proceeds unlocked, same as
+    // before — the lock narrows the window further, it does not change the
+    // never-abort contract.
+    const lockHandle = await acquireManifestLock(manifestPath);
     try {
-      const stats = await lstat(target);
-      if (stats.isSymbolicLink()) {
-        const current = await readlink(target);
-        if (current === file) {
-          skipped++;
+      const mergedManifest = await loadCopiedManifest(manifestPath);
+      for (const { rel, op } of manifestOps) {
+        if (op === "add") {
+          mergedManifest.files[rel] = true;
         } else {
-          let relinked = false;
-          if (wantSymlink) {
-            relinked = (await atomicSymlinkInstall(file, target)) === "linked";
-            if (relinked) updated++;
-          }
-          if (!relinked) {
-            // Can't (or shouldn't) re-link — replace the managed link with a copy.
-            // unlink first: copyFile onto a symlink writes THROUGH the link.
-            // (target may already be gone here if atomicSymlinkInstall()
-            // returned "unreadable" and its own cleanup already removed it —
-            // tolerate ENOENT.)
-            await unlink(target).catch((err) => {
-              if (err.code !== "ENOENT") throw err;
-            });
-            await copyFile(file, target);
-            updated++; // replaces an existing managed entry
-            recordCopy(rel);
-          }
-        }
-      } else if (manifest.files[rel]) {
-        // A regular file we copied on a previous run — ours to manage.
-        // First try upgrading it to a symlink (Developer Mode enabled since).
-        let upgraded = false;
-        let restoredAsCopy = false;
-        if (wantSymlink) {
-          const result = await atomicSymlinkInstall(file, target);
-          if (result === "linked") {
-            upgraded = true;
-            updated++;
-            delete manifest.files[rel];
-            manifestChanged = true;
-            manifestOps.push({ rel, op: "delete" });
-          } else if (result === "unreadable") {
-            // Symlink was created but is not readable back (forge#2620) —
-            // the helper already removed the dead link. Restore a real copy
-            // so the command stays readable. Keep the manifest entry (still
-            // copy-managed, not symlink-managed) and do NOT fall through to
-            // the generic copy-comparison below — the copy is already done.
-            await copyFile(file, target);
-            updated++;
-            restoredAsCopy = true;
-          }
-          // "denied" — no symlink installed; fall through to content-compare.
-        }
-        if (!upgraded && !restoredAsCopy) {
-          const [src, dst] = await Promise.all([readFile(file), readFile(target)]);
-          if (src.equals(dst)) {
-            skipped++;
-          } else {
-            await copyFile(file, target);
-            updated++;
-          }
-        }
-      } else {
-        // Regular file not in manifest — a copy from a pre-manifest ForgeDock
-        // version, or a stale copy that was never adopted. `rel` here is
-        // always enumerated from `files` (ForgeDock's own commandsDir
-        // listing, see above) — every path this loop touches is a
-        // ForgeDock-managed command file, never an arbitrary user file, so
-        // there is no "user-customized" case to protect. Content-compare: if
-        // it matches source, adopt it into the manifest silently (it was
-        // ours all along). If it differs, it's stale — overwrite it and
-        // adopt it into the manifest too, mirroring the manifest-tracked
-        // branch above, so future runs take the manifest-aware fast path.
-        let handled = false;
-        try {
-          const [src, dst] = await Promise.all([readFile(file), readFile(target)]);
-          if (src.equals(dst)) {
-            recordCopy(rel);
-            skipped++;
-            handled = true;
-          } else {
-            // Write to a .tmp sibling and atomically rename onto target — never
-            // open target itself for a direct overwrite. copyFile() is not
-            // atomic: a mid-write failure (AV lock / ENOSPC / process kill)
-            // would otherwise leave target truncated/corrupted rather than
-            // simply stale, which the WARNING below cannot distinguish. This
-            // mirrors the .tmp+rename swap already used for symlink installs
-            // above (lines ~1573-1579, ~1601-1607).
-            //
-            // Unlike those symlink-based branches — where symlink() is itself
-            // exclusive-create and therefore naturally races out a concurrent
-            // writer — copyFile() has no such semantics: two concurrent
-            // forge() invocations (e.g. an overlapping `doctor --fix` run, or
-            // a file watcher) targeting the same file would both write
-            // through the same shared `target + ".tmp"` path and could
-            // interleave or clobber each other before either rename() runs.
-            // Suffix the tmp sibling with this process's PID so concurrent
-            // invocations never share a path (forge#2542).
-            const tmpTarget = target + "." + process.pid + ".tmp";
-            try {
-              await copyFile(file, tmpTarget);
-            } catch (copyErr) {
-              // A copyFile failure (disk full mid-copy, AV lock, permission
-              // error) can still leave a partially-written .tmp sibling on
-              // disk even though the write itself threw. The sibling
-              // rename() failure just below already cleans up tmpTarget
-              // on its own failure path (renameErr) — mirror that here so a
-              // copyFile failure doesn't orphan the .tmp file instead
-              // (forge#2540). Best-effort: never let the cleanup itself mask
-              // or replace the original copyErr being rethrown.
-              await unlink(tmpTarget).catch(() => {});
-              throw copyErr;
-            }
-            // Preserve the pre-existing content before it's replaced, mirroring
-            // half of the confirm+backup convention used by the forge.yaml
-            // overwrite path (bin/forgedock.mjs ~990-1021 / journey.mjs
-            // review(), both via backupExisting()). A confirmation prompt is
-            // deliberately NOT added: this branch also runs non-interactively
-            // inside `doctor --fix`'s automated repair (bin/forgedock.mjs
-            // runInstallRepairOnce() -> forge(ctx())), so pausing per-file for
-            // input would break that flow. Placed here — after the .tmp write
-            // has already succeeded, before the final rename — rather than
-            // before copyFile (as the forge.yaml path does), so a copyFile
-            // failure never backs up (and thereby displaces) a target that's
-            // about to remain untouched (see the .tmp-write-failure test,
-            // forge#2498). backupExisting()'s rename is itself atomic, so this
-            // ordering carries none of the non-atomic-write risk that forge#1396
-            // flagged for the old backup-then-writeFileSync forge.yaml path.
-            //
-            // Note: backupExisting() below is a *synchronous* rename
-            // (target -> target+".bak"); the tmpTarget -> target rename just
-            // after it is a separate, async filesystem operation. Between
-            // the two, target genuinely does not exist on disk for a
-            // sub-millisecond window. Only a hard process kill (not any
-            // catchable JS error) can land exactly there — any catchable
-            // failure of the second rename is already handled by the
-            // rollback block below — and recovery in that rare case is via
-            // the surviving target+".bak" on the next forge() run (forge#2558).
-            const backup = backupExisting(target);
-            if (backup) backedUp++;
-            try {
-              await rename(tmpTarget, target);
-            } catch (renameErr) {
-              await unlink(tmpTarget).catch(() => {});
-              if (backup) {
-                // The final rename failed AFTER backupExisting() already moved
-                // the original file to target+".bak" — target no longer exists
-                // on disk at this point. Without this rollback the user's file
-                // would simply vanish (present only as .bak) while the WARNING
-                // below implies it merely "could not be repaired". Restore the
-                // prior content so a failed repair is a no-op, matching the
-                // pre-backup invariant that a rename failure never removes the
-                // existing file (see the .tmp-write-failure test, forge#2498).
-                // WIRE:PROVEN — manual: reasoned, not exercised by an automated
-                // test. This branch requires rename(tmp, target) to fail on the
-                // exact call immediately after backupExisting()'s own rename of
-                // the same target succeeded — an OS-level race with no portable
-                // way to force deterministically (the sibling renameErr catches
-                // for the symlink-relink paths above, lines ~1576/~1604, are the
-                // same kind of defensive OS-failure branch and are likewise
-                // untested for the same reason). Verified by code inspection:
-                // rename() is fs/promises' rename. The rollback rename's own
-                // outcome is captured explicitly rather than assumed — if it
-                // also fails (e.g. .bak itself is locked), target+".bak" is
-                // left in place as the only remaining copy of the prior
-                // content, so backedUp must NOT be decremented in that case;
-                // it correctly reflects "a backup file still exists on disk"
-                // (forge#2559). Only on confirmed rollback success does
-                // backedUp-- keep the counter consistent with the restored
-                // on-disk state before renameErr is rethrown to the outer catch.
-                let rollbackOk = true;
-                await rename(target + ".bak", target).catch(() => { rollbackOk = false; });
-                if (rollbackOk) backedUp--;
-              }
-              throw renameErr;
-            }
-            recordCopy(rel);
-            updated++;
-            handled = true;
-          }
-        } catch { /* readFile/copyFile/rename failure — fall through to warning */ }
-        if (!handled) {
-          if (barShown) { w.write("\x1b[1A\x1b[2K"); barShown = false; }
-          w.write(`  WARNING: ${rel} could not be repaired — remove it manually to let ForgeDock manage it\n`);
-          skipped++;
+          delete mergedManifest.files[rel];
         }
       }
-    } catch (err) {
-      if (err.code !== "ENOENT") throw err;
-      let linked = false;
-      if (wantSymlink) {
-        linked = (await atomicSymlinkInstall(file, target)) === "linked";
-        if (linked) {
-          installed++;
-          if (manifest.files[rel]) {
-            // Symlinks work now and the old copy is gone — drop the stale record.
-            delete manifest.files[rel];
-            manifestChanged = true;
-            manifestOps.push({ rel, op: "delete" });
-          }
-        }
-      }
-      if (!linked) {
-        // Windows without Developer Mode/admin, or symlink unreadable — copy.
-        await copyFile(file, target);
-        copied++;
-        recordCopy(rel);
-      }
+      await saveCopiedManifest(manifestPath, mergedManifest);
+    } finally {
+      await releaseManifestLock(manifestPath, lockHandle);
     }
-
-    if (ctx.motion) {
-      if (barShown) w.write("\x1b[1A\x1b[2K");
-      w.write(`  ${moltenBar(i + 1, files.length, { width: barWidth, mode: ctx.mode })}  ${i + 1}/${files.length}  ${dimLine(ctx, "/" + rel.replace(/\.md$/, ""))}\n`);
-      barShown = true;
-    }
+    return true;
+  } catch {
+    return false;
   }
-  if (barShown) w.write("\x1b[1A\x1b[2K");
+}
 
-  // Prune orphaned symlinks: links that point into commandsDir but whose
-  // target file no longer exists (e.g. after a command is renamed or deleted).
-  const pruned = await pruneOrphanedSymlinks(targetDir, commandsDir);
+/**
+ * Per-file branch for forge(): a manifest-tracked regular file — a copy we
+ * made on a previous run, ours to manage. First try upgrading it to a
+ * symlink (Developer Mode enabled since), preserving atomicSymlinkInstall()'s
+ * tri-state "linked"/"unreadable"/"denied" contract (forge#2620 / ADR #2667)
+ * exactly; on "denied", fall through to content-compare + copy.
+ * Returns counter deltas for forge() to fold in.
+ */
+async function upgradeManagedCopy(file, target, rel, { wantSymlink, recordDelete }) {
+  let upgraded = false;
+  let restoredAsCopy = false;
+  if (wantSymlink) {
+    const result = await atomicSymlinkInstall(file, target);
+    if (result === "linked") {
+      upgraded = true;
+      recordDelete(rel);
+    } else if (result === "unreadable") {
+      // Symlink was created but is not readable back (forge#2620) —
+      // the helper already removed the dead link. Restore a real copy
+      // so the command stays readable. Keep the manifest entry (still
+      // copy-managed, not symlink-managed) and do NOT fall through to
+      // the generic copy-comparison below — the copy is already done.
+      await copyFile(file, target);
+      restoredAsCopy = true;
+    }
+    // "denied" — no symlink installed; fall through to content-compare.
+  }
+  if (upgraded || restoredAsCopy) {
+    return { updatedDelta: 1, skippedDelta: 0 };
+  }
+  const [src, dst] = await Promise.all([readFile(file), readFile(target)]);
+  if (src.equals(dst)) {
+    return { updatedDelta: 0, skippedDelta: 1 };
+  }
+  await copyFile(file, target);
+  return { updatedDelta: 1, skippedDelta: 0 };
+}
 
-  // Link the small set of universal pipeline-agent scripts (forge#1885).
-  const scriptsResult = await linkPipelineScripts(ctx);
-
-  const hookScript = join(ctx.forgeHome, "bin", "hooks", "session-start.mjs");
-  const settingsPath = join(ctx.home, ".claude", "settings.json");
-  const { status: hookStatus } = installSessionStartHook(settingsPath, hookScript);
-
-  // Install enforcement hooks (#1250): PreToolUse (branch/label validation)
-  // and SubagentStop interactive engine adapter. Both are idempotent and
-  // always installed (fail-open if settings.json is malformed, same
-  // contract as SessionStart hook).
-  const preToolUseScript = join(ctx.forgeHome, "bin", "hooks", "pre-tool-use.mjs");
-  const subagentStopScript = join(ctx.forgeHome, "bin", "hooks", "interactive-engine.mjs");
-  const { status: preToolUseStatus } = installPreToolUseHook(settingsPath, preToolUseScript);
-  installSubagentStopHook(settingsPath, subagentStopScript);
-
-  // SubagentStop annotation-verifier hook (#1250) is NOT installed: its
-  // trigger condition (a `FORGE:PHASE_START` marker in the transcript) is
-  // never emitted anywhere in the pipeline, so it always exits 0 with zero
-  // enforcement effect while still spawning a process + reading the
-  // transcript on every SubagentStop (forge#1527). Actively clean up any
-  // prior installation instead of installing it.
-  const { status: subagentStopEnforceStatus } = removeSubagentStopEnforceHook(settingsPath);
-
-  // Housekeeping — must never abort the receipt or the hook.
-  let manifestSaveFailed = false;
-  if (manifestChanged) {
-    try {
-      // Re-read-and-merge (forge#2614): another concurrent forge() invocation
-      // may have saved its own manifest.files adds/deletes since this run's
-      // initial load above. Re-reading the on-disk manifest right before this
-      // run's own save and replaying only this run's own ops (manifestOps)
-      // onto that fresh copy — rather than blindly overwriting with the
-      // run-start in-memory snapshot — means this run's save can no longer
-      // silently drop the other run's changes. loadCopiedManifest() never
-      // throws (missing/corrupt on-disk manifest resolves to an empty one),
-      // so this stays within the surrounding never-abort contract.
+/**
+ * Per-file branch for forge(): a regular file not in the manifest — a copy
+ * from a pre-manifest ForgeDock version, or a stale copy that was never
+ * adopted. `rel` here is always enumerated from `files` (ForgeDock's own
+ * commandsDir listing) — every path this branch touches is a
+ * ForgeDock-managed command file, never an arbitrary user file, so there is
+ * no "user-customized" case to protect. Content-compare: if it matches
+ * source, adopt it into the manifest silently (it was ours all along). If it
+ * differs, it's stale — overwrite it and adopt it into the manifest too,
+ * mirroring the manifest-tracked branch, so future runs take the
+ * manifest-aware fast path.
+ *
+ * Never throws. Returns an effects object forge() folds into its counters:
+ * `handled: false` means every repair attempt failed and forge() should
+ * print the per-file WARNING (terminal/progress-bar state stays in forge()).
+ * `backedUpDelta` is mutated in place as backup/rollback progresses so a
+ * mid-sequence failure still reports any backup that remains on disk
+ * (forge#2559).
+ */
+async function adoptOrRepairUnmanagedCopy(file, target, rel, { recordCopy }) {
+  const effects = { handled: false, updatedDelta: 0, skippedDelta: 0, backedUpDelta: 0 };
+  try {
+    const [src, dst] = await Promise.all([readFile(file), readFile(target)]);
+    if (src.equals(dst)) {
+      recordCopy(rel);
+      effects.skippedDelta++;
+      effects.handled = true;
+    } else {
+      // Write to a .tmp sibling and atomically rename onto target — never
+      // open target itself for a direct overwrite. copyFile() is not
+      // atomic: a mid-write failure (AV lock / ENOSPC / process kill)
+      // would otherwise leave target truncated/corrupted rather than
+      // simply stale, which the WARNING in forge() cannot distinguish. This
+      // mirrors the .tmp+rename swap already used for symlink installs
+      // (lines ~1573-1579, ~1601-1607).
       //
-      // Lock the re-read→merge→write sequence itself (forge#2637): #2614
-      // narrowed the race from "whole run duration" to this critical section,
-      // but left it unprotected — a third concurrent forge() could still land
-      // its own save inside the gap between this run's re-read and its own
-      // write-rename completing. acquireManifestLock() is best-effort: on
-      // failure to acquire (contention exhausted retries, or an unexpected
-      // error) it returns null and this run proceeds unlocked, same as
-      // before — the lock narrows the window further, it does not change the
-      // never-abort contract.
-      const lockHandle = await acquireManifestLock(manifestPath);
+      // Unlike those symlink-based branches — where symlink() is itself
+      // exclusive-create and therefore naturally races out a concurrent
+      // writer — copyFile() has no such semantics: two concurrent
+      // forge() invocations (e.g. an overlapping `doctor --fix` run, or
+      // a file watcher) targeting the same file would both write
+      // through the same shared `target + ".tmp"` path and could
+      // interleave or clobber each other before either rename() runs.
+      // Suffix the tmp sibling with this process's PID so concurrent
+      // invocations never share a path (forge#2542).
+      const tmpTarget = target + "." + process.pid + ".tmp";
       try {
-        const mergedManifest = await loadCopiedManifest(manifestPath);
-        for (const { rel, op } of manifestOps) {
-          if (op === "add") {
-            mergedManifest.files[rel] = true;
-          } else {
-            delete mergedManifest.files[rel];
-          }
-        }
-        await saveCopiedManifest(manifestPath, mergedManifest);
-      } finally {
-        await releaseManifestLock(manifestPath, lockHandle);
+        await copyFile(file, tmpTarget);
+      } catch (copyErr) {
+        // A copyFile failure (disk full mid-copy, AV lock, permission
+        // error) can still leave a partially-written .tmp sibling on
+        // disk even though the write itself threw. The sibling
+        // rename() failure just below already cleans up tmpTarget
+        // on its own failure path (renameErr) — mirror that here so a
+        // copyFile failure doesn't orphan the .tmp file instead
+        // (forge#2540). Best-effort: never let the cleanup itself mask
+        // or replace the original copyErr being rethrown.
+        await unlink(tmpTarget).catch(() => {});
+        throw copyErr;
       }
-    } catch {
-      manifestSaveFailed = true;
+      // Preserve the pre-existing content before it's replaced, mirroring
+      // half of the confirm+backup convention used by the forge.yaml
+      // overwrite path (bin/forgedock.mjs ~990-1021 / journey.mjs
+      // review(), both via backupExisting()). A confirmation prompt is
+      // deliberately NOT added: this branch also runs non-interactively
+      // inside `doctor --fix`'s automated repair (bin/forgedock.mjs
+      // runInstallRepairOnce() -> forge(ctx())), so pausing per-file for
+      // input would break that flow. Placed here — after the .tmp write
+      // has already succeeded, before the final rename — rather than
+      // before copyFile (as the forge.yaml path does), so a copyFile
+      // failure never backs up (and thereby displaces) a target that's
+      // about to remain untouched (see the .tmp-write-failure test,
+      // forge#2498). backupExisting()'s rename is itself atomic, so this
+      // ordering carries none of the non-atomic-write risk that forge#1396
+      // flagged for the old backup-then-writeFileSync forge.yaml path.
+      //
+      // Note: backupExisting() below is a *synchronous* rename
+      // (target -> target+".bak"); the tmpTarget -> target rename just
+      // after it is a separate, async filesystem operation. Between
+      // the two, target genuinely does not exist on disk for a
+      // sub-millisecond window. Only a hard process kill (not any
+      // catchable JS error) can land exactly there — any catchable
+      // failure of the second rename is already handled by the
+      // rollback block below — and recovery in that rare case is via
+      // the surviving target+".bak" on the next forge() run (forge#2558).
+      const backup = backupExisting(target);
+      if (backup) effects.backedUpDelta++;
+      try {
+        await rename(tmpTarget, target);
+      } catch (renameErr) {
+        await unlink(tmpTarget).catch(() => {});
+        if (backup) {
+          // The final rename failed AFTER backupExisting() already moved
+          // the original file to target+".bak" — target no longer exists
+          // on disk at this point. Without this rollback the user's file
+          // would simply vanish (present only as .bak) while the WARNING
+          // in forge() implies it merely "could not be repaired". Restore
+          // the prior content so a failed repair is a no-op, matching the
+          // pre-backup invariant that a rename failure never removes the
+          // existing file (see the .tmp-write-failure test, forge#2498).
+          // WIRE:PROVEN — manual: reasoned, not exercised by an automated
+          // test. This branch requires rename(tmp, target) to fail on the
+          // exact call immediately after backupExisting()'s own rename of
+          // the same target succeeded — an OS-level race with no portable
+          // way to force deterministically (the sibling renameErr catches
+          // for the symlink-relink paths above, lines ~1576/~1604, are the
+          // same kind of defensive OS-failure branch and are likewise
+          // untested for the same reason). Verified by code inspection:
+          // rename() is fs/promises' rename. The rollback rename's own
+          // outcome is captured explicitly rather than assumed — if it
+          // also fails (e.g. .bak itself is locked), target+".bak" is
+          // left in place as the only remaining copy of the prior
+          // content, so backedUpDelta must NOT be decremented in that
+          // case; it correctly reflects "a backup file still exists on
+          // disk" (forge#2559). Only on confirmed rollback success does
+          // the decrement keep the counter consistent with the restored
+          // on-disk state before renameErr is rethrown to the outer catch.
+          let rollbackOk = true;
+          await rename(target + ".bak", target).catch(() => { rollbackOk = false; });
+          if (rollbackOk) effects.backedUpDelta--;
+        }
+        throw renameErr;
+      }
+      recordCopy(rel);
+      effects.updatedDelta++;
+      effects.handled = true;
+    }
+  } catch { /* readFile/copyFile/rename failure — fall through to warning */ }
+  return effects;
+}
+
+/**
+ * Per-file branch for forge(): target does not exist yet (ENOENT from
+ * lstat) — fresh install. Symlink-first, copy-fallback; a successful link
+ * also drops any stale manifest record for the path.
+ * Returns counter deltas for forge() to fold in.
+ */
+async function installFreshCommandFile(file, target, rel, { wantSymlink, manifest, recordCopy, recordDelete }) {
+  let linked = false;
+  if (wantSymlink) {
+    linked = (await atomicSymlinkInstall(file, target)) === "linked";
+    if (linked && manifest.files[rel]) {
+      // Symlinks work now and the old copy is gone — drop the stale record.
+      recordDelete(rel);
     }
   }
+  if (!linked) {
+    // Windows without Developer Mode/admin, or symlink unreadable — copy.
+    await copyFile(file, target);
+    recordCopy(rel);
+    return { installedDelta: 0, copiedDelta: 1 };
+  }
+  return { installedDelta: 1, copiedDelta: 0 };
+}
+
+/**
+ * Act II receipt: render forge()'s summary lines, advisories, and hook
+ * statuses. Pure reporting — mechanical move of the forge() tail; reads
+ * `results` and writes to ctx.stdout, mutates nothing.
+ */
+function renderForgeReceipt(ctx, results) {
+  const { stdout: w } = ctx;
+  const {
+    installed, updated, skipped, copied, backedUp, pruned, total,
+    staleExtensionlessPruned, scriptsResult, manifestSaveFailed,
+    hookStatus, settingsPath, preToolUseStatus, subagentStopEnforceStatus,
+  } = results;
 
   const glyph = (ok) => (ctx.mode === "none" ? (ok ? "✔" : "!") : `\x1b[38;2;255;179;71m${ok ? "✔" : "!"}\x1b[0m`);
   const headlineVerb = copied > 0 ? "installed" : "linked";
@@ -2224,7 +2130,7 @@ export async function forge(ctx) {
   const headlineDetail = copied > 0
     ? `(new ${installed}, copied ${copied}, updated ${updated}${backupNote}, unchanged ${skipped})`
     : `(new ${installed}, updated ${updated}${backupNote}, unchanged ${skipped})`;
-  w.write(`  ${glyph(true)} ${files.length} slash commands ${headlineVerb} ${dimLine(ctx, headlineDetail)}\n`);
+  w.write(`  ${glyph(true)} ${total} slash commands ${headlineVerb} ${dimLine(ctx, headlineDetail)}\n`);
   if (pruned > 0) {
     w.write(`  ${glyph(true)} ${pruned} orphaned symlink${pruned === 1 ? "" : "s"} removed ${dimLine(ctx, "(commands deleted or renamed since last install)")}\n`);
   }
@@ -2320,6 +2226,176 @@ export async function forge(ctx) {
   if (subagentStopEnforceStatus === "removed") {
     w.write(`  ${glyph(true)} SubagentStop enforcement hook removed ${dimLine(ctx, "(non-functional — see forge#1527)")}\n`);
   }
+}
+
+/**
+ * Act II: link commands into ~/.claude/commands with a molten progress line,
+ * then register the SessionStart hook.
+ * Symlink semantics preserved verbatim from the original install():
+ * regular files are skipped with a warning; changed links updated atomically.
+ * On Windows without Developer Mode (symlink → EPERM/EACCES) each command is
+ * copied instead, and recorded in a manifest so re-runs can tell ForgeDock's
+ * own copies apart from user-owned files. ctx.linkStrategy ("symlink" default)
+ * can be set to "copy" to skip all symlink attempts (deterministic tests).
+ */
+export async function forge(ctx) {
+  const { stdout: w } = ctx;
+  const commandsDir = join(ctx.forgeHome, "commands");
+  const targetDir = join(ctx.home, ".claude", "commands");
+  const manifestPath = join(ctx.home, ".claude", "forgedock", "copied-commands.json");
+  const wantSymlink = ctx.linkStrategy !== "copy";
+
+  w.write("\n  " + ember("Forging commands", ctx.mode) + " " + dimLine(ctx, `into ${targetDir}`) + "\n\n");
+  await mkdir(targetDir, { recursive: true });
+
+  // Clear stale extensionless entries from prior `npx forgedock` runs before
+  // the install loop below can collide with them (forge#2620).
+  const staleExtensionlessPruned = await pruneStaleExtensionlessEntries(targetDir);
+
+  const manifest = await loadCopiedManifest(manifestPath);
+  // Reclaim crash-orphaned pid-suffixed tmp siblings left by prior hard-killed
+  // runs (forge#2612). Best-effort — must never abort the forge receipt/hook.
+  await sweepStaleManifestTmps(manifestPath).catch(() => {});
+  let manifestChanged = false;
+  // This run's own manifest mutations, tracked as a replayable diff
+  // (forge#2614). #2599/#2609 fixed the tmp-file *write-path* race (two
+  // concurrent forge() runs no longer collide on the same tmp filename) but
+  // left the manifest's logical *content* racy: each run loads the manifest
+  // into memory once, mutates its own copy across the whole run, then writes
+  // the entire in-memory object back at the end — a classic last-writer-wins
+  // race on manifest.files. Recording this run's own adds/deletes here (instead
+  // of relying on the run-start in-memory snapshot) lets the final save re-read
+  // the on-disk manifest and replay only these ops onto it, so a concurrent
+  // run's own adds/deletes made after this run's initial load are preserved
+  // rather than silently overwritten.
+  const manifestOps = [];
+
+  const files = await findMarkdownFiles(commandsDir, { includeExtras: !!ctx.includeExtras });
+  let installed = 0, updated = 0, skipped = 0, copied = 0, backedUp = 0;
+  const barWidth = 24;
+  let barShown = false;
+
+  const recordCopy = (rel) => {
+    if (!manifest.files[rel]) {
+      manifest.files[rel] = true;
+      manifestChanged = true;
+    }
+    manifestOps.push({ rel, op: "add" });
+  };
+  // Mirror of recordCopy for removals — keeps manifest.files, manifestChanged,
+  // and the replayable manifestOps diff (forge#2614) mutating as one unit so
+  // the in-memory manifest and the final merge-save replay never diverge.
+  const recordDelete = (rel) => {
+    delete manifest.files[rel];
+    manifestChanged = true;
+    manifestOps.push({ rel, op: "delete" });
+  };
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const rel = relative(commandsDir, file);
+    const target = join(targetDir, rel);
+    await mkdir(pathDirname(target), { recursive: true });
+
+    try {
+      const stats = await lstat(target);
+      if (stats.isSymbolicLink()) {
+        const current = await readlink(target);
+        if (current === file) {
+          skipped++;
+        } else {
+          let relinked = false;
+          if (wantSymlink) {
+            relinked = (await atomicSymlinkInstall(file, target)) === "linked";
+            if (relinked) updated++;
+          }
+          if (!relinked) {
+            // Can't (or shouldn't) re-link — replace the managed link with a copy.
+            // unlink first: copyFile onto a symlink writes THROUGH the link.
+            // (target may already be gone here if atomicSymlinkInstall()
+            // returned "unreadable" and its own cleanup already removed it —
+            // tolerate ENOENT.)
+            await unlink(target).catch((err) => {
+              if (err.code !== "ENOENT") throw err;
+            });
+            await copyFile(file, target);
+            updated++; // replaces an existing managed entry
+            recordCopy(rel);
+          }
+        }
+      } else if (manifest.files[rel]) {
+        const eff = await upgradeManagedCopy(file, target, rel, { wantSymlink, recordDelete });
+        updated += eff.updatedDelta;
+        skipped += eff.skippedDelta;
+      } else {
+        const eff = await adoptOrRepairUnmanagedCopy(file, target, rel, { recordCopy });
+        updated += eff.updatedDelta;
+        skipped += eff.skippedDelta;
+        backedUp += eff.backedUpDelta;
+        if (!eff.handled) {
+          // Terminal/progress-bar state stays here — helpers never touch
+          // barShown or write to the stream.
+          if (barShown) { w.write("\x1b[1A\x1b[2K"); barShown = false; }
+          w.write(`  WARNING: ${rel} could not be repaired — remove it manually to let ForgeDock manage it\n`);
+          skipped++;
+        }
+      }
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+      const eff = await installFreshCommandFile(file, target, rel, { wantSymlink, manifest, recordCopy, recordDelete });
+      installed += eff.installedDelta;
+      copied += eff.copiedDelta;
+    }
+
+    if (ctx.motion) {
+      if (barShown) w.write("\x1b[1A\x1b[2K");
+      w.write(`  ${moltenBar(i + 1, files.length, { width: barWidth, mode: ctx.mode })}  ${i + 1}/${files.length}  ${dimLine(ctx, "/" + rel.replace(/\.md$/, ""))}\n`);
+      barShown = true;
+    }
+  }
+  if (barShown) w.write("\x1b[1A\x1b[2K");
+
+  // Prune orphaned symlinks: links that point into commandsDir but whose
+  // target file no longer exists (e.g. after a command is renamed or deleted).
+  const pruned = await pruneOrphanedSymlinks(targetDir, commandsDir);
+
+  // Link the small set of universal pipeline-agent scripts (forge#1885).
+  const scriptsResult = await linkPipelineScripts(ctx);
+
+  const hookScript = join(ctx.forgeHome, "bin", "hooks", "session-start.mjs");
+  const settingsPath = join(ctx.home, ".claude", "settings.json");
+  const { status: hookStatus } = installSessionStartHook(settingsPath, hookScript);
+
+  // Install enforcement hooks (#1250): PreToolUse (branch/label validation)
+  // and SubagentStop interactive engine adapter. Both are idempotent and
+  // always installed (fail-open if settings.json is malformed, same
+  // contract as SessionStart hook).
+  const preToolUseScript = join(ctx.forgeHome, "bin", "hooks", "pre-tool-use.mjs");
+  const subagentStopScript = join(ctx.forgeHome, "bin", "hooks", "interactive-engine.mjs");
+  const { status: preToolUseStatus } = installPreToolUseHook(settingsPath, preToolUseScript);
+  installSubagentStopHook(settingsPath, subagentStopScript);
+
+  // SubagentStop annotation-verifier hook (#1250) is NOT installed: its
+  // trigger condition (a `FORGE:PHASE_START` marker in the transcript) is
+  // never emitted anywhere in the pipeline, so it always exits 0 with zero
+  // enforcement effect while still spawning a process + reading the
+  // transcript on every SubagentStop (forge#1527). Actively clean up any
+  // prior installation instead of installing it.
+  const { status: subagentStopEnforceStatus } = removeSubagentStopEnforceHook(settingsPath);
+
+  // Housekeeping — must never abort the receipt or the hook.
+  // saveManifestWithMerge() owns the locked re-read → replay-manifestOps →
+  // save sequence (forge#2614/forge#2637) and never throws.
+  let manifestSaveFailed = false;
+  if (manifestChanged) {
+    manifestSaveFailed = !(await saveManifestWithMerge(manifestPath, manifestOps));
+  }
+
+  renderForgeReceipt(ctx, {
+    installed, updated, skipped, copied, backedUp, pruned, total: files.length,
+    staleExtensionlessPruned, scriptsResult, manifestSaveFailed,
+    hookStatus, settingsPath, preToolUseStatus, subagentStopEnforceStatus,
+  });
 
   return { installed, updated, skipped, copied, backedUp, pruned, total: files.length, hookStatus, preToolUseStatus, subagentStopEnforceStatus, scriptsResult };
 }
