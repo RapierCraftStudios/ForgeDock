@@ -389,6 +389,17 @@ const ATTRIBUTION_SCOPED_COMMANDS = [
 const CONTENT_STAGING_FLAGS = new Set(["--body-file", "--notes-file"]);
 
 /**
+ * Short-flag alias for `--body-file`/`--notes-file` on every `gh` subcommand
+ * this rule covers (`gh pr comment`, `gh pr create`, `gh issue comment/create`,
+ * `gh release create`, …) — confirmed against `gh <cmd> --help` output. Without
+ * this, `gh pr comment N -F /tmp/x.md` reproduces the exact #2672 collision
+ * shape while being invisible to Form 1 (`-F` isn't in `CONTENT_STAGING_FLAGS`)
+ * and to Form 2 (no `>`/`>>` token present) — a one-character bypass of the
+ * whole rule.
+ */
+const CONTENT_STAGING_SHORT_FLAG = "-F";
+
+/**
  * Uniqueness components that make a temp path collision-safe by construction.
  * If the path token carries ANY of these it is not a fixed literal and the
  * rule must NOT fire: `mktemp`/`$(mktemp …)` (the mandated idiom), `$$` (PID),
@@ -409,8 +420,17 @@ const COLLISION_SAFE_MARKERS = [
  * construction (each agent gets its own), so they are exempt even without a
  * mktemp component. `.forgedock/tmp` is per-worktree; `scratchpad` is Claude
  * Code's per-session scratch dir.
+ *
+ * Both alternatives are path-segment-anchored (not a bare substring test) and
+ * the `scratchpad` alternative additionally requires an immediately-preceding
+ * session-UUID segment — matching the real per-session scratchpad convention
+ * (`.../claude/<project-hash>/<session-uuid>/scratchpad`). An unanchored
+ * substring match previously let a bare `/tmp/scratchpad/x.md` — which is
+ * NOT session-isolated, just a fixed literal that happens to contain the word
+ * "scratchpad" — slip through as if it were the real per-session directory.
  */
-const SAFE_TEMP_ROOT_RE = /\.forgedock[/\\]tmp|scratchpad/i;
+const SAFE_TEMP_ROOT_RE =
+  /(^|[/\\])\.forgedock[/\\]tmp(?:[/\\]|$)|[/\\][0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}[/\\]scratchpad(?:[/\\]|$)/i;
 
 /**
  * A shared system-temp-directory prefix immediately followed by a path
@@ -1139,8 +1159,8 @@ function checkTempPathStaging(command) {
     const { value: tok } = tokens[i];
     let val = null;
     let where = tok;
-    if (CONTENT_STAGING_FLAGS.has(tok)) {
-      // `--flag value` — value is the next token (quote-insensitive exact match).
+    if (CONTENT_STAGING_FLAGS.has(tok) || tok === CONTENT_STAGING_SHORT_FLAG) {
+      // `--flag value` / `-F value` — value is the next token (quote-insensitive exact match).
       val = i + 1 < tokens.length ? tokens[i + 1].value : null;
     } else if (!/\s/.test(tok)) {
       // `--flag=value` — skipped on embedded-whitespace tokens (the #1519 decoy
@@ -1148,6 +1168,11 @@ function checkTempPathStaging(command) {
       for (const flag of CONTENT_STAGING_FLAGS) {
         const eq = `${flag}=`;
         if (tok.startsWith(eq)) { val = tok.slice(eq.length); where = flag; break; }
+      }
+      // `-Fvalue` — glued short-flag form (getopt-style), e.g. `-F/tmp/x.md`.
+      if (val === null && tok.startsWith(CONTENT_STAGING_SHORT_FLAG) && tok.length > CONTENT_STAGING_SHORT_FLAG.length) {
+        val = tok.slice(CONTENT_STAGING_SHORT_FLAG.length);
+        where = CONTENT_STAGING_SHORT_FLAG;
       }
     }
     if (val && isFixedSystemTempPath(val)) {

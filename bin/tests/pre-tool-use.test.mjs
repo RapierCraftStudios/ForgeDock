@@ -1236,6 +1236,44 @@ describe("pre-tool-use hook — content-staging temp-path guard (#2686)", () => 
     assert.match(stderr, /\/tmp\/review-body\.md/);
   });
 
+  // -- Security-review regression (issue #2686 PR review): `-F` is `gh`'s
+  //    documented short alias for --body-file/--notes-file on every covered
+  //    subcommand (gh pr comment, gh pr create, gh issue comment/create, gh
+  //    release create). The pre-fix flag set only recognized the long form,
+  //    so `gh pr comment N -F /tmp/x.md` reproduced the exact #2672 collision
+  //    shape while being invisible to both Form 1 (flag not in the set) and
+  //    Form 2 (no redirect operator present) — a one-character bypass of the
+  //    rule's entire purpose. --
+  it("exits 2 for the -F short-flag space form (gh pr comment N -F /tmp/x.md)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr comment 2672 -F /tmp/review-body.md" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+    assert.match(stderr, /\/tmp\/review-body\.md/);
+  });
+
+  it("exits 2 for the -F short-flag glued form (gh pr comment N -F/tmp/x.md)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr comment 2672 -F/tmp/review-body.md" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 0 for the -F short-flag form with a mktemp-derived path (no false positive)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'BODY=$(mktemp); gh pr comment 2672 -F "$BODY"' },
+    });
+    assert.equal(exitCode, 0);
+  });
+
   it("exits 2 for a fixed /tmp --body-file on a gh issue comment", () => {
     const { exitCode, stderr } = runHook({
       hook_event_name: "PreToolUse",
@@ -1410,6 +1448,34 @@ describe("pre-tool-use hook — content-staging temp-path guard (#2686)", () => 
       tool_input: { command: "gh issue comment 5 --body-file .forgedock/tmp/review.md" },
     });
     assert.equal(exitCode, 0);
+  });
+
+  it("exits 0 for a real session-scoped scratchpad path (UUID segment immediately before scratchpad)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: {
+        command:
+          "gh issue comment 5 --body-file /tmp/claude/proj-hash/a5a83ea0-5308-4d6b-890a-d1f4374dc529/scratchpad/review.md",
+      },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  // -- Security-review regression (issue #2686 PR review): the pre-fix
+  //    SAFE_TEMP_ROOT_RE was an unanchored substring test, so a bare fixed
+  //    literal that merely contained the word "scratchpad" — NOT a real
+  //    per-session scratch directory — was wrongly exempted. Two agents both
+  //    hardcoding this exact path would still collide exactly like #2672
+  //    while being whitelisted. Must now be BLOCKED. --
+  it("exits 2 for a bare /tmp/scratchpad/<fixed>.md path with no session-UUID segment (closes the loose-substring exemption bypass)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr comment 2672 --body-file /tmp/scratchpad/review.md" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
   });
 
   it("exits 0 when a fixed /tmp path is only MENTIONED inside a quoted --body value (no real staging)", () => {
