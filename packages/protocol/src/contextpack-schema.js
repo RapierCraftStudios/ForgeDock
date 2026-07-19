@@ -54,6 +54,15 @@ export const MAX_PACK_BYTES = 32 * 1024;
  * cannot silently starve the other slices of their share of the pack. */
 export const MAX_SLICE_BYTES = 12 * 1024;
 
+/** Maximum number of entries a pack's `slices` array may declare. Enforced as
+ * a cheap, O(1) upfront bound — checked before the per-slice validation loop
+ * and before the whole-pack `JSON.stringify` size check below — so a pack
+ * crafted with many individually size-valid slices cannot force the cost of
+ * full iteration plus full serialization before being rejected. Set well
+ * above the 3 currently-defined PACK_SLICE_NAMES to avoid constraining any
+ * near-term legitimate use. */
+export const MAX_SLICES = 64;
+
 /** Field name a pack sets to `true` when the miner/assembler dropped content
  * in-band to stay under a size cap. Distinguishes an intentionally-shortened
  * pack (still valid) from a malformed one. Exported as a named constant
@@ -127,6 +136,12 @@ export function validateContextPack(pack) {
     errors.push('Missing required field "slices"');
   } else if (!Array.isArray(pack.slices)) {
     errors.push(`Field "slices" must be an array, got ${typeof pack.slices}`);
+  } else if (pack.slices.length > MAX_SLICES) {
+    // Cheap O(1) rejection on slice count, before any per-slice iteration or
+    // the whole-pack JSON.stringify below — see MAX_SLICES doc comment.
+    errors.push(
+      `Field "slices" has ${pack.slices.length} entries, exceeding MAX_SLICES (${MAX_SLICES})`,
+    );
   } else {
     pack.slices.forEach((slice, i) => {
       if (slice === null || typeof slice !== 'object' || Array.isArray(slice)) {

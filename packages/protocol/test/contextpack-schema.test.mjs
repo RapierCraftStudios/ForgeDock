@@ -15,6 +15,7 @@ import {
   PACK_SLICE_NAMES,
   MAX_PACK_BYTES,
   MAX_SLICE_BYTES,
+  MAX_SLICES,
   TRUNCATED_FIELD,
   validateContextPack,
 } from '../src/contextpack-schema.js';
@@ -148,6 +149,31 @@ test('contextpack-schema: validateContextPack accepts a whole pack over MAX_PACK
   const result = validateContextPack(pack);
   assert.equal(result.valid, true);
   assert.equal(result.truncated, true);
+});
+
+test('contextpack-schema: validateContextPack rejects a pack whose slices array exceeds MAX_SLICES, without requiring oversized content', () => {
+  // Every slice here is trivially small and individually well within
+  // MAX_SLICE_BYTES — only the *count* of slices is invalid. This proves the
+  // MAX_SLICES cap fires on its own, independent of MAX_PACK_BYTES/MAX_SLICE_BYTES.
+  const slices = Array.from({ length: MAX_SLICES + 1 }, (_, i) => ({
+    phase: 'investigate',
+    content: `slice-${i}`,
+  }));
+  const pack = validPack({ slices });
+  const result = validateContextPack(pack);
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some((e) => e.includes('MAX_SLICES')));
+});
+
+test('contextpack-schema: validateContextPack accepts a pack with exactly MAX_SLICES slices', () => {
+  const slices = Array.from({ length: MAX_SLICES }, (_, i) => ({
+    phase: 'investigate',
+    content: `slice-${i}`,
+  }));
+  const pack = validPack({ slices });
+  const result = validateContextPack(pack);
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.errors, []);
 });
 
 test('contextpack-schema: validateContextPack throws TypeError for non-object input', () => {
