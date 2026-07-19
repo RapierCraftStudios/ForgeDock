@@ -52,7 +52,7 @@ This quality gate uses **domain detection** to adapt to your project's actual te
 | FORGE_GRAPH | `commands/*.md` specs or `scripts/*` files change (ForgeDock self-consistency) |
 | CONFIG_SCHEMA | Config files for external tools (`traefik/`, `infra/nginx/`, `k8s/`, `terraform/`, `*.conf`, `*.toml` in infra paths, or `docker-compose*.yml` with service definition changes) |
 | BILLING | Files under `billing/`, `credits/`, `subscription`, `ledger`, or `payment` paths |
-| WIRE_THROUGH | Any code file where the diff adds new conditional lines (`if`/`elif`/`else`/`guard`/`feature flag`) — triggers wire-through proof check <!-- Added: forge#1731 --> |
+| WIRE_THROUGH | Any code file where the diff adds new conditional lines (`if`/`elif`/`else`/`guard`/`feature flag`) — triggers wire-through proof check |
 
 **Stack-agnostic coverage**: The example domains above reflect common patterns caught in production; they are not requirements. A Go or Ruby project benefits from SECURITY checks. A Node.js project benefits from FRONTEND, PROXY, and DEPLOY checks. Any project benefits from DATABASE and WORKFLOW checks when those file types are present. The stack-specific examples (Python routers, SOPS secrets chain, FastAPI layouts, appleboy SSH deploys) are illustrative — the domain detection system applies the applicable subset to any codebase.
 
@@ -107,7 +107,7 @@ Before running checks, classify the changed files into domains. This avoids runn
 | `*.py` in `routers/` where the diff removes a line containing an or-gate condition (lines starting with `-` containing `if.*or`) | ROUTER_BUG |
 | `commands/*.md` or `scripts/*` files (ForgeDock repo only — dogfoods its own spec graph) | FORGE_GRAPH |
 | Files under `traefik/`, `infra/nginx/`, `k8s/`, `terraform/`, or files matching `*.conf`, `*.toml` in infra paths, or `docker-compose*.yml` with service definition changes | CONFIG_SCHEMA |
-| Executable code files (`.py`, `.ts`, `.tsx`, `.js`, `.sh`) where the diff adds new `if`/`elif`/`else`/guard/feature-flag conditional lines — NOT `.md` prose spec files | WIRE_THROUGH *(universal — see 2G.8)* <!-- Added: forge#1731 --> |
+| Executable code files (`.py`, `.ts`, `.tsx`, `.js`, `.sh`) where the diff adds new `if`/`elif`/`else`/guard/feature-flag conditional lines — NOT `.md` prose spec files | WIRE_THROUGH *(universal — see 2G.8)* |
 
 **Apply the classification:**
 
@@ -141,7 +141,6 @@ for f in "${CHANGED_FILES_ARR[@]}"; do
     case "$f" in
         *anti_detection/*|*consumers/*|*browser/*|*shared/detection/*)
             # STRING_SETS is a scraping-pack domain — opt-in via forge.yaml → quality_gate.optional_domains
-            # <!-- Updated: forge#1349 — not enabled by default; scraping-product-specific -->
             if echo "$f" | grep -qE '\.py$'; then
                 _OPT_DOMAINS=$(grep -A5 'optional_domains:' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null | grep -oE 'STRING_SETS' | head -1 || true)
                 [ -n "$_OPT_DOMAINS" ] && DOMAINS="$DOMAINS STRING_SETS"
@@ -164,7 +163,6 @@ grep -lE "^\w+ = (\{\}|\[\]|set\(\)|Lock\(\)|defaultdict|Counter)" {CHANGED_FILE
 
 # Check for capacity constants in worker/infra/browser Python files
 # CAPACITY is a scraping-pack domain — opt-in via forge.yaml → quality_gate.optional_domains
-# <!-- Updated: forge#1349 — not enabled by default; scraping-product-specific -->
 _OPT_CAPACITY=$(grep -A5 'optional_domains:' "{WORKTREE_PATH}/forge.yaml" 2>/dev/null | grep -oE 'CAPACITY' | head -1 || true)
 if [ -n "$_OPT_CAPACITY" ]; then
     while IFS= read -r f; do
@@ -213,7 +211,7 @@ for f in "${CHANGED_FILES_ARR[@]}"; do
     esac
 done
 
-# Check for newly added conditional paths in code files — wire-through proof trigger <!-- Added: forge#1731 -->
+# Check for newly added conditional paths in code files — wire-through proof trigger
 # Scoped to NEWLY ADDED lines only (lines starting with '+' in the diff, excluding the '+++' header).
 # Pre-existing conditionals are never flagged — only additions.
 # Applies to executable code files ONLY (.py, .ts, .tsx, .js, .sh) — NOT .md prose spec files,
@@ -262,12 +260,12 @@ Run ONLY the checks whose domain was identified in Step 1.5. Skip checks for dom
 - **2O (Residual pattern check)**: Run if `ROUTER_BUG` in DOMAINS
 - **2P (External tool config schema)**: Run if `CONFIG_SCHEMA` in DOMAINS
 - **2Q (Billing)**: Run if `BILLING` in DOMAINS
-- **2R (Registry checks)**: ALWAYS run — executes all promoted checks from `scripts/check-registry/manifest.json` <!-- Added: forge#1331 -->
-- **2R.5 (Adaptive gate.d checks)**: ALWAYS run when `adaptive_scripts.enabled` — executes `.forgedock/scripts/gate.d/*.sh`; each script is repo-specific and was promoted from a recurring finding pattern <!-- Added: forge#1739 -->
-- **2G.8 (Wire-through proof)**: Run if `WIRE_THROUGH` in DOMAINS — demands each newly added conditional path be demonstrably reachable <!-- Added: forge#1731 -->
-- **2G.9 (Danger-zone recurrence)**: Run if `FORGE_GRAPH` in DOMAINS — cross-references injected danger-zone rule cards from FORGE:CONTEXT against the diff; violations tagged `known-pattern-recurrence` (HIGH) <!-- Added: forge#1744 -->
-- **2S (Test failure classification)**: Run if any Step 2 check invoked a test suite and it failed — classifies the failure as PRE_BROKEN, FLAKY, or REAL using `scripts/flaky-quarantine.sh` <!-- Added: forge#1336 -->
-- **2T (Subscribed pattern card rules)**: ALWAYS run when `pattern_feeds.enabled` is true — injects Tier-B (warning-only) learned rules from subscribed exchange cards that have a `gate.d` check template matching any changed file's stack <!-- Added: forge#1746 -->
+- **2R (Registry checks)**: ALWAYS run — executes all promoted checks from `scripts/check-registry/manifest.json`
+- **2R.5 (Adaptive gate.d checks)**: ALWAYS run when `adaptive_scripts.enabled` — executes `.forgedock/scripts/gate.d/*.sh`; each script is repo-specific and was promoted from a recurring finding pattern
+- **2G.8 (Wire-through proof)**: Run if `WIRE_THROUGH` in DOMAINS — demands each newly added conditional path be demonstrably reachable
+- **2G.9 (Danger-zone recurrence)**: Run if `FORGE_GRAPH` in DOMAINS — cross-references injected danger-zone rule cards from FORGE:CONTEXT against the diff; violations tagged `known-pattern-recurrence` (HIGH)
+- **2S (Test failure classification)**: Run if any Step 2 check invoked a test suite and it failed — classifies the failure as PRE_BROKEN, FLAKY, or REAL using `scripts/flaky-quarantine.sh`
+- **2T (Subscribed pattern card rules)**: ALWAYS run when `pattern_feeds.enabled` is true — injects Tier-B (warning-only) learned rules from subscribed exchange cards that have a `gate.d` check template matching any changed file's stack
 
 ### 2A: Security (ALL files)
 
@@ -311,7 +309,7 @@ For new/modified endpoints:
 1. Which auth dependency is used? Read `forge.yaml → review.domains.auth` for the configured dependency name(s). If absent, skip the naming check and fall back to generic resource-ownership verification only.
 2. Does the endpoint check resource ownership (`user_id` or equivalent) before returning data?
 
-Route-path-to-dependency convention (e.g. "dashboard routes must use X, public routes must use Y") is project-specific. Configure it in `forge.yaml → review.domains.auth` if your project uses one. Do not enforce a hard-coded convention universally. <!-- Updated: forge#1349 — removed hardcoded SessionUser/CurrentUser rule -->
+Route-path-to-dependency convention (e.g. "dashboard routes must use X, public routes must use Y") is project-specific. Configure it in `forge.yaml → review.domains.auth` if your project uses one. Do not enforce a hard-coded convention universally.
 
 ```bash
 # Read configured auth dependency names from forge.yaml (if present)
@@ -343,7 +341,6 @@ if [ -n "$NEW_ENVS" ]; then
         # Check decrypt-secrets.sh ENV_MAPPING only when the SOPS mapping script exists.
         # Emitting a finding for a file that doesn't exist in the repo produces false BLOCKINGs
         # on non-SOPS repos. Use verify-sops-chain.sh for the full SOPS chain check instead.
-        # <!-- Updated: forge#1349 — gate on file presence -->
         if [ -f "{WORKTREE_PATH}/scripts/decrypt-secrets.sh" ]; then
             grep -q "$var" "{WORKTREE_PATH}/scripts/decrypt-secrets.sh" 2>/dev/null || echo "DEPLOY: $var not in decrypt-secrets.sh ENV_MAPPING"
         fi
@@ -384,8 +381,6 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E 'migrations/.*\.py$')
 # Runs whenever any SQL or Alembic Python migration file changed. Scans the configured
 # migrations directory for duplicate numeric prefixes (both .sql and .py files).
 # Duplicate prefixes can cause ordering conflicts during deploy.
-# <!-- Updated: forge#1349 — removed stale validate-migration-order.sh reference (script does not exist) -->
-# <!-- Updated: forge#1329 — extended collision scan to cover .py Alembic migration files -->
 MIGRATIONS_DIR="{WORKTREE_PATH}/infra/migrations"
 # Support configured migration directory from forge.yaml (if set)
 if [ -f "{WORKTREE_PATH}/forge.yaml" ]; then
@@ -464,7 +459,7 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.tsx?$' | grep -v 'route
 
 The direct-backend path prefix to flag is read from `forge.yaml → review.layout.direct_api_prefix`.
 If absent, defaults to `/api/v1/` (backward compatible). This prevents false findings on projects
-that use a different API path scheme. <!-- Updated: forge#1349 — gate on forge.yaml, not hardcoded prefix -->
+that use a different API path scheme.
 
 ```bash
 # Read configured direct API prefix from forge.yaml, fall back to /api/v1/
@@ -489,8 +484,6 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.(tsx?|jsx?)$' | grep -v
 ```
 
 ### 2G: Cross-service integration (shell scripts with curl/wget)
-
-<!-- Added: forge#1739 — Tier-B learned-rules injection -->
 
 **Tier-B learned-rules injection (SHELL domain)**: Before running host-header and localhost checks, load any repo-specific prose rules from `devdocs/learned-rules/SHELL.md`. These are Tier-B patterns — non-mechanizable defect descriptions that have recurred ≥3 times and been promoted by `/optimize` for inclusion in this domain scan. Inject the content as additional context for the LLM scan, bounded to ~200 tokens (approximately 30 lines). Skip gracefully if the file is absent.
 
@@ -541,7 +534,7 @@ The script `verify-host-headers.sh` checks for the `FORGE_INTERNAL_PATTERNS` env
 
 **Triggered when**: changed `*.sh` files contain DB connection patterns (`PGPASSWORD`, `createdb`, `psql`, `pg_dump`, `pg_restore`).
 
-**Why this matters**: Every DB connection function in a deploy script must use `${POSTGRES_HOST:-localhost}` (or equivalent env var interpolation), not a bare `"localhost"` string literal. A hardcoded `"localhost"` works in local development but fails in any environment where PostgreSQL runs on a separate host. The pattern is reliably grep-detectable. <!-- Added: forge#303 -->
+**Why this matters**: Every DB connection function in a deploy script must use `${POSTGRES_HOST:-localhost}` (or equivalent env var interpolation), not a bare `"localhost"` string literal. A hardcoded `"localhost"` works in local development but fails in any environment where PostgreSQL runs on a separate host. The pattern is reliably grep-detectable.
 
 ```bash
 while IFS= read -r f; do
@@ -588,13 +581,13 @@ if [ -f "$VALIDATOR" ]; then
 fi
 ```
 
-Report each `[HARD]` line as **HIGH** — a dangling `Skill()` target or a label set by no command is a real pipeline break (an agent will invoke a phase that does not exist, or a state will never be entered/exited). Orphan-annotation `[SOFT]` lines are advisory: surface them in the report for periodic triage but do NOT block the commit. Scaffolding `[INFO]` lines are expected and need no action. To gate on HARD findings (fail the build), drop `--soft`; the default keeps existing baseline orphans from blocking until they are triaged. <!-- Added: forge#869 -->
+Report each `[HARD]` line as **HIGH** — a dangling `Skill()` target or a label set by no command is a real pipeline break (an agent will invoke a phase that does not exist, or a state will never be entered/exited). Orphan-annotation `[SOFT]` lines are advisory: surface them in the report for periodic triage but do NOT block the commit. Scaffolding `[INFO]` lines are expected and need no action. To gate on HARD findings (fail the build), drop `--soft`; the default keeps existing baseline orphans from blocking until they are triaged.
 
 ### 2G.7: Native command conflict check (FORGE_GRAPH domain)
 
 **Triggered when**: changed files include `commands/*.md` files (top-level, not sub-phase subdirectories). Skips silently in any project without `scripts/check-native-conflicts.sh`.
 
-**Why this matters**: ForgeDock commands are installed into `~/.claude/commands/`, the same namespace as native Claude Code built-in slash commands. A top-level command file whose basename matches a native command name (e.g. `resume.md` → `/resume`, `status.md` → `/status`) completely shadows the native command — users lose access to core Claude Code functionality with no error message. This check prevents the bug class from ever reaching `staging` or `npm publish`. <!-- Added: forge#1074 -->
+**Why this matters**: ForgeDock commands are installed into `~/.claude/commands/`, the same namespace as native Claude Code built-in slash commands. A top-level command file whose basename matches a native command name (e.g. `resume.md` → `/resume`, `status.md` → `/status`) completely shadows the native command — users lose access to core Claude Code functionality with no error message. This check prevents the bug class from ever reaching `staging` or `npm publish`.
 
 ```bash
 # Run only when top-level commands/*.md files changed and the script ships in this repo.
@@ -618,8 +611,6 @@ fi
 Report each conflict as **HIGH** — a shadowed native command is a silent user-facing regression (the native command becomes unreachable without warning). The builder must rename the conflicting file before the commit. Blocklist updates are in `scripts/check-native-conflicts.sh` (NATIVE_COMMANDS array).
 
 ### 2G.8: Wire-through proof for newly added conditional paths
-
-<!-- Added: forge#1731 -->
 
 **Triggered when**: `WIRE_THROUGH` in DOMAINS — the diff adds new conditional lines (`if`/`elif`/`else`/guard/feature-flag) in executable code files (`.py`, `.ts`, `.tsx`, `.js`, `.sh`). Markdown spec files are explicitly excluded — prose docs use `if`/`else` as natural language, not executable conditionals.
 
@@ -703,9 +694,9 @@ fi
 - Add `# WIRE:PROVEN — <method>` immediately before or after the new conditional
 - Ensure the conditional qualifies as a trivial re-guard (see criterion 3 above)
 
-Do NOT suppress the finding by making the check less strict or adding fake no-op tests. The intent is a real proof that the path is reachable. <!-- Added: forge#1731 -->
+Do NOT suppress the finding by making the check less strict or adding fake no-op tests. The intent is a real proof that the path is reachable.
 
-### 2G.9: Danger-zone recurrence check (FORGE_GRAPH domain) <!-- Added: forge#1744 -->
+### 2G.9: Danger-zone recurrence check (FORGE_GRAPH domain)
 
 **Triggered when**: `FORGE_GRAPH` in DOMAINS (changed files include `commands/*.md` specs or `scripts/*` files). Skips silently when the FORGE:CONTEXT comment on the issue contains no `### Danger-Zone Rule Cards` section (i.e., Phase C0.5 injected zero cards — nothing to cross-reference).
 
@@ -764,7 +755,7 @@ fi
 
 **Severity**: **HIGH** — `known-pattern-recurrence` is the highest embarrassment class. The pipeline had the risk knowledge in context and the implementation violated it regardless. This represents a failure of the context injection mechanism's effectiveness, and every recurrence degrades the A/B signal that measures whether memory injection changes agent behavior. The builder must fix the violation before the gate can pass.
 
-**Note**: This check fires only for FORGE_GRAPH domain changes (ForgeDock spec files). For application code changes, violations of injected rule cards are surfaced by the review agents in Phase 5 — the quality gate cross-reference here is specific to pipeline spec changes where the FORGE:CONTEXT from the issue is the definitive context source. <!-- Added: forge#1744 -->
+**Note**: This check fires only for FORGE_GRAPH domain changes (ForgeDock spec files). For application code changes, violations of injected rule cards are surfaced by the review agents in Phase 5 — the quality gate cross-reference here is specific to pipeline spec changes where the FORGE:CONTEXT from the issue is the definitive context source.
 
 ### 2H: Asyncio cancellation safety (Python async code)
 
@@ -793,7 +784,6 @@ while IFS= read -r f; do
     done
 done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 ```
-
 
 ### 2I: State completeness (module-level counters/dicts/sets/locks)
 
@@ -841,7 +831,7 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 
 ### 2J: String literal consistency (anti-detection/scraping code) *(Scraping Pack — opt-in)*
 
-> **This domain is opt-in and disabled by default.** It is specific to scraping/anti-detection products and produces false findings on general repos. Enable it by adding `STRING_SETS` to `forge.yaml → quality_gate.optional_domains`. <!-- Added: forge#1349 -->
+> **This domain is opt-in and disabled by default.** It is specific to scraping/anti-detection products and produces false findings on general repos. Enable it by adding `STRING_SETS` to `forge.yaml → quality_gate.optional_domains`.
 
 **Triggered when**: changed files include Python files in `anti_detection/`, `consumers/`, `browser/`, or `shared/detection/` directories AND `STRING_SETS` is in `forge.yaml → quality_gate.optional_domains`.
 
@@ -935,7 +925,7 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'anti_de
 
 ### 2K: Capacity constant validation (worker/infra code) *(Scraping Pack — opt-in)*
 
-> **This domain is opt-in and disabled by default.** It is specific to scraping/browser-pool products and produces false findings on general repos. Enable it by adding `CAPACITY` to `forge.yaml → quality_gate.optional_domains`. <!-- Added: forge#1349 -->
+> **This domain is opt-in and disabled by default.** It is specific to scraping/browser-pool products and produces false findings on general repos. Enable it by adding `CAPACITY` to `forge.yaml → quality_gate.optional_domains`.
 
 **Triggered when**: changed Python files in `services/worker/`, `infra/`, or `browser/` introduce new assignments to variables whose names contain `MB`, `SIZE`, `MAX`, `LIMIT`, `THRESHOLD`, or `TIMEOUT` AND `CAPACITY` is in `forge.yaml → quality_gate.optional_domains`.
 
@@ -1004,7 +994,7 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.github/workflows/.*\.ym
 
 Report any hit as **CONFIRMED HIGH** — the step will exit 1 before reaching the remote shell.
 
-Go template directives in `appleboy/ssh-action` `script:` blocks are preprocessed client-side before the script reaches SSH — they fail on an empty data context, crashing the action before any shell error handler can catch it. Both function call forms (`{{index .X Y}}`) and field accessors (`{{.Names}}`) fail. A partial fix that only replaces one form while leaving the other is insufficient. <!-- Added: forge#226 -->
+Go template directives in `appleboy/ssh-action` `script:` blocks are preprocessed client-side before the script reaches SSH — they fail on an empty data context, crashing the action before any shell error handler can catch it. Both function call forms (`{{index.X Y}}`) and field accessors (`{{.Names}}`) fail. A partial fix that only replaces one form while leaving the other is insufficient.
 
 ### 2M: Import resolution (Python files with new app.* imports)
 
@@ -1061,7 +1051,7 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 - Does NOT flag non-`app.*` imports (third-party libraries, `shared/`, stdlib)
 - Does NOT block imports from modules that genuinely exist on the base branch
 
-A builder agent working in a milestone-branch worktree has access to milestone-only modules. A fast-lane PR importing `app.*` modules that only exist on the milestone branch will pass `py_compile` (the module is present in the worktree) but crash at runtime on the base branch with `ModuleNotFoundError` on every request. <!-- Added: forge#277 -->
+A builder agent working in a milestone-branch worktree has access to milestone-only modules. A fast-lane PR importing `app.*` modules that only exist on the milestone branch will pass `py_compile` (the module is present in the worktree) but crash at runtime on the base branch with `ModuleNotFoundError` on every request.
 
 ### 2N: Runtime UID × filesystem write check (Dockerfile or entrypoint with USER/su-exec/gosu changes)
 
@@ -1109,7 +1099,7 @@ fi
 ```
 
 **Flag as findings**:
-- Filesystem write operations found in service directory AND named volume mounts exist AND no `chown` before privilege drop in entrypoint: **HIGH** — `PermissionError` on first write after UID drop. Named volumes are root-owned by default; a privilege drop without `chown` silently breaks all write paths under the mount point. <!-- Added: forge#323 -->
+- Filesystem write operations found in service directory AND named volume mounts exist AND no `chown` before privilege drop in entrypoint: **HIGH** — `PermissionError` on first write after UID drop. Named volumes are root-owned by default; a privilege drop without `chown` silently breaks all write paths under the mount point.
 
 ### 2O: Residual Pattern Check (router Python files with gate condition narrowing)
 
@@ -1148,7 +1138,7 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'router'
 ```
 
 **Flag as findings**:
-- Original condition pattern found in sibling router files after the fix was applied: **HIGH** — the fix is incomplete; the same bug class exists in unlisted sibling files and will continue to produce the original error for users of those endpoints. <!-- Added: forge#383 -->
+- Original condition pattern found in sibling router files after the fix was applied: **HIGH** — the fix is incomplete; the same bug class exists in unlisted sibling files and will continue to produce the original error for users of those endpoints.
 
 **False-positive prevention**:
 - Only runs on files in a `routers/` path
@@ -1159,7 +1149,7 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$' | grep -E 'router'
 
 **Triggered when**: CONFIG_SCHEMA domain is set (config files for external tools are in the diff).
 
-**Why this matters**: External tools with strict config schemas (Traefik, nginx, Kubernetes, Terraform, Docker Compose) silently ignore or reject structurally incorrect config — no startup crash, no error log, the feature simply does not activate. The quality gate cannot run `traefik validate` / `nginx -t` / `terraform validate` (those belong in CI), but it can verify that CI validation steps exist for the tool and remind the builder that structural validation is CI's responsibility. <!-- Added: forge#1104 -->
+**Why this matters**: External tools with strict config schemas (Traefik, nginx, Kubernetes, Terraform, Docker Compose) silently ignore or reject structurally incorrect config — no startup crash, no error log, the feature simply does not activate. The quality gate cannot run `traefik validate` / `nginx -t` / `terraform validate` (those belong in CI), but it can verify that CI validation steps exist for the tool and remind the builder that structural validation is CI's responsibility.
 
 ```bash
 # Identify which external tools have config files in the diff
@@ -1225,7 +1215,7 @@ fi
 
 **Triggered when**: BILLING domain is set (changed files are under `billing/`, `credits/`, `subscription`, `ledger`, or `payment` paths).
 
-**Why this matters**: Billing code has three reliably grep-detectable defect classes that recur often enough in production billing code to justify a deterministic check: (1) `org_id` not propagated to debit/refund ledger write paths (silent data ownership loss — charges appear with wrong tenant); (2) `asyncio.sleep` / blocking sleep called inside an advisory-lock or open-transaction scope (holds DB connection/lock for the full sleep duration, causing connection exhaustion and deadlocks under load); (3) stdlib `logging.*()` calls passed structlog-style keyword arguments (`event=`, named context keys) that are not valid stdlib kwargs — crashes at runtime with `TypeError: unexpected keyword argument`. <!-- Added: forge#1329 -->
+**Why this matters**: Billing code has three reliably grep-detectable defect classes that recur often enough in production billing code to justify a deterministic check: (1) `org_id` not propagated to debit/refund ledger write paths (silent data ownership loss — charges appear with wrong tenant); (2) `asyncio.sleep` / blocking sleep called inside an advisory-lock or open-transaction scope (holds DB connection/lock for the full sleep duration, causing connection exhaustion and deadlocks under load); (3) stdlib `logging.*()` calls passed structlog-style keyword arguments (`event=`, named context keys) that are not valid stdlib kwargs — crashes at runtime with `TypeError: unexpected keyword argument`.
 
 **2Q-1: org_id propagation in ledger write functions**
 
@@ -1291,8 +1281,6 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 **Note**: 2Q-3 (stdlib logging check) fires on ALL changed Python files regardless of path — stdlib logger misuse is not specific to billing paths and is a universal crash class. 2Q-1 and 2Q-2 fire only on billing-domain files.
 
 ### 2R: Registry checks (ALWAYS — promoted patterns from recurring review findings)
-
-<!-- Added: forge#1331 -->
 
 **Purpose**: Run all checks that have been promoted from recurring review findings into the registry. These are deterministic scripts that catch in milliseconds what previously required a full review cycle to detect. Each check was generated once by an LLM after the same defect class appeared 3+ times — thereafter it runs forever at zero LLM cost.
 
@@ -1360,8 +1348,6 @@ If any registry check produces findings, include them in the Step 3 findings lis
 ---
 
 ## Step 2R.5: Adaptive gate.d checks (when adaptive_scripts.enabled)
-
-<!-- Added: forge#1739 -->
 
 **Purpose**: Run all repo-specific learned checks that have been promoted from recurring review findings into `.forgedock/scripts/gate.d/`. Unlike the static `scripts/check-registry/` (Step 2R), gate.d scripts live in the per-repo adaptive layer and are generated by `/optimize` from validated Ledger patterns. Each script represents a defect class that appeared ≥3 times in this specific codebase — it catches in milliseconds what previously required a full review cycle to detect.
 
@@ -1458,8 +1444,6 @@ If any gate.d check produces findings, include them in the Step 3 findings list 
 ---
 
 ## Step 2T: Subscribed pattern card rules (when pattern_feeds enabled)
-
-<!-- Added: forge#1746 -->
 
 **Triggered when**: `pattern_feeds.enabled` is `true` in `forge.yaml` AND the local ledger contains at least one card with `origin: <feed-slug>` AND a `gate.d` check template.
 
@@ -1582,8 +1566,6 @@ If any Step 2T template produces findings, include them in the Step 3 findings l
 ---
 
 ## Step 2S: Test failure classification (run when tests fail in Step 2)
-
-<!-- Added: forge#1336 -->
 
 **Triggered when**: any domain check in Step 2 invokes a test suite command and that command exits non-zero.
 

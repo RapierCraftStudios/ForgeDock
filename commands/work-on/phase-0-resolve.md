@@ -54,7 +54,7 @@ Satellite repos (those without a `staging` branch) receive fast-lane PRs directl
 
 ### 0.0: Pre-Flight Checks (MANDATORY — run before any other Phase 0 step)
 
-Validate the environment before the pipeline spends tokens. Each check fails fast with an actionable error and a pointer to the troubleshooting guide (`docs/site/troubleshooting.md`). Run all checks; report every failure, then STOP if any HARD check fails. <!-- Added: forge#1149 -->
+Validate the environment before the pipeline spends tokens. Each check fails fast with an actionable error and a pointer to the troubleshooting guide (`docs/site/troubleshooting.md`). Run all checks; report every failure, then STOP if any HARD check fails.
 
 ```bash
 PREFLIGHT_FAILED=0
@@ -127,9 +127,9 @@ Extract project prefix and issue number. If `next`/`pick`: list open issues sort
 
 **Optional pre-flight**: Before committing to the full pipeline, run `/scope {NUMBER}` to get a complexity estimate (affected files, blast radius, risk flags, and decomposition recommendation). Especially useful for large or ambiguous issues.
 
-### 0A.1: Remediation Mode Detection (`--remediate`) <!-- Added: forge#1813 -->
+### 0A.1: Remediation Mode Detection (`--remediate`)
 
-**Engine coverage** (forge#2379): `remediate` is now a registered phase in the headless engine's phase table (`packages/protocol/src/phases.js`, `bin/engine/phases.mjs`) — see `commands/work-on/remediate.md`'s own "Engine coverage" note for the current, documented limitation (a single continuous headless `runIssue()` walk cannot yet reach it; this prose-layer standalone-invocation path below remains the only way `remediate` actually runs today).
+**Engine coverage**: `remediate` is now a registered phase in the headless engine's phase table (`packages/protocol/src/phases.js`, `bin/engine/phases.mjs`) — see `commands/work-on/remediate.md`'s own "Engine coverage" note for the current, documented limitation (a single continuous headless `runIssue()` walk cannot yet reach it; this prose-layer standalone-invocation path below remains the only way `remediate` actually runs today).
 
 **Check first, before any other Phase 0 routing** — if `$ARGUMENTS` contains `--remediate`, this is NOT a normal issue-pipeline invocation. The first positional argument is a **PR number**, not an issue number:
 
@@ -179,7 +179,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
 **Issue**: #{NUMBER}"
 ```
 
-**Also post at major phase entry points** (Phases 1, 3, and 5) — replace `Phase 0` with the correct phase name in each case, and same `UNDER_ORCHESTRATION` gate. These mid-pipeline heartbeats ensure the stall detector sees recent activity during long phases (e.g., a build phase running for 20 minutes is not falsely classified as stalled). Inline snippets are embedded at Phase 1A, Phase 3A, and Phase 5A — agents resuming mid-pipeline encounter them without reading this section. <!-- Added: forge#740 -->
+**Also post at major phase entry points** (Phases 1, 3, and 5) — replace `Phase 0` with the correct phase name in each case, and same `UNDER_ORCHESTRATION` gate. These mid-pipeline heartbeats ensure the stall detector sees recent activity during long phases (e.g., a build phase running for 20 minutes is not falsely classified as stalled). Inline snippets are embedded at Phase 1A, Phase 3A, and Phase 5A — agents resuming mid-pipeline encounter them without reading this section.
 
 **Skip if**: Issue already has a terminal label (`workflow:merged`, `workflow:invalid`, `needs-human`, `workflow:awaiting-merge`) — no heartbeat needed on a completed issue. (This is in addition to, not instead of, the `UNDER_ORCHESTRATION` gate above.)
 
@@ -227,7 +227,7 @@ Note: Phase 1D no longer writes `next_phase: BUILD`/`DECOMPOSE` CHECKPOINT comme
 
 **Classify lane**: Milestone → feature lane (`milestone/{slug}`). No milestone → fast lane (`staging`).
 
-**Batch issue detection**: <!-- Added: forge#1333 --> If the issue body contains `<!-- FORGE:BATCH_MEMBERS -->`, this is a P3 batch issue. Set `IS_BATCH=true` and extract the member issue list:
+**Batch issue detection**: If the issue body contains `<!-- FORGE:BATCH_MEMBERS -->`, this is a P3 batch issue. Set `IS_BATCH=true` and extract the member issue list:
 
 ```bash
 IS_BATCH=0
@@ -281,7 +281,7 @@ UNIVERSAL_DIR="${FORGEDOCK_HOME:-$REPO_PATH}/scripts"
 # locate pipeline scripts under any circumstances: if UNIVERSAL_DIR/${operation}.sh
 # does not exist, resolve_script() falls through to Tier 4 (prose) below,
 # which is always safe and available. A missing script is never a reason
-# to search the filesystem. <!-- Added: forge#1984 -->
+# to search the filesystem.
 
 resolve_script() {
   local operation="$1"
@@ -318,10 +318,10 @@ resolve_script() {
 # because each operation has a different prose fallback — transition-label falls
 # back to inline gh issue edit; classify-lane has no valid prose fallback and  <!-- allowlist:check-command-side-effects -->
 # must exit 1; validate-pr-target emits a WARNING and continues (the PR review
-# step catches any mismatch before merge). <!-- Added: forge#822 -->
+# step catches any mismatch before merge).
 ```
 
-When invoking a resolved script, log the tier in the FORGE annotation: `Script tier: {adaptive|universal|prose} ({path})`. This provides full pipeline observability. <!-- Added: forge#670 -->
+When invoking a resolved script, log the tier in the FORGE annotation: `Script tier: {adaptive|universal|prose} ({path})`. This provides full pipeline observability.
 
 ### 0B.1: Apply learned overrides (MANDATORY — run after 0B, before any routing)
 
@@ -365,8 +365,6 @@ LEARNED_COMMIT_STYLE=$(yq '.learned.commit_style // ""' forge.yaml 2>/dev/null |
    [ -n "$LEARNED_COMMIT_STYLE" ] && COMMIT_STYLE="$LEARNED_COMMIT_STYLE" && \
      echo "Learned override: COMMIT_STYLE → $COMMIT_STYLE"
    ```
-
-<!-- Added: forge#667 — learned section reader -->
 
 ### 0C: Sync to Project board
 Add issue to project, set Status=In Progress, Lane, Component, Priority, Workflow=Investigating.

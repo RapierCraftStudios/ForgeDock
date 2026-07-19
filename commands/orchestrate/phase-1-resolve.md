@@ -21,12 +21,10 @@ Parse `$ARGUMENTS` to determine which issues to work on:
 | `fast-lane` or `fast` | All open fast-lane issues (no milestone, bugs/fixes) |
 | `priority:P0` or `priority:P1` | All open issues with that priority label (matches both `priority:P<n>` and bare `P<n>` on the target repo — see "Priority label schema" note below) |
 | `mcp:fast` or `n8n:next 3` | Repo-scoped queries |
-| `cascade`, `review-findings`, or `findings` (optionally `--include-deferred` / `--allow-gen2`) | All open `review-finding` issues (default repo, or repo-scoped e.g. `mcp:cascade`). See "Cascade / Review-Finding Resolution" below — by default this admits up to `orchestration.cascade.max_generation` (default 1, i.e. generation ≥ 2 `PERMANENT_DEFERRED` findings excluded); the CLI flags force `unlimited` for this one run, overriding config. <!-- Added: forge#2231, forge#2234 -->|
-| `<slug>` (no keyword) | Try milestone first, then fall back to label search. If both resolve to zero issues, report near-miss label candidates instead of silently resolving to nothing — see "Near-Miss Suggestion" below. <!-- Added: forge#2231 -->|
+| `cascade`, `review-findings`, or `findings` (optionally `--include-deferred` / `--allow-gen2`) | All open `review-finding` issues (default repo, or repo-scoped e.g. `mcp:cascade`). See "Cascade / Review-Finding Resolution" below — by default this admits up to `orchestration.cascade.max_generation` (default 1, i.e. generation ≥ 2 `PERMANENT_DEFERRED` findings excluded); the CLI flags force `unlimited` for this one run, overriding config. |
+| `<slug>` (no keyword) | Try milestone first, then fall back to label search. If both resolve to zero issues, report near-miss label candidates instead of silently resolving to nothing — see "Near-Miss Suggestion" below. |
 
 ### Cascade / Review-Finding Resolution
-
-<!-- Added: forge#2231 -->
 
 When the input matches `cascade`, `review-findings`, or `findings` (case-insensitive, optionally repo-prefixed), resolve to open `review-finding`-labeled issues instead of a milestone or plain label search, then apply a generation depth check so the default set here matches what Step 4C would actually admit:
 
@@ -36,7 +34,7 @@ When the input matches `cascade`, `review-findings`, or `findings` (case-insensi
 CASCADE_CANDIDATES=$(gh issue list {GH_FLAG} --label "review-finding" --state open --limit 500 \
   --json number,title,labels,milestone,body)
 
-# --- Cascade admission policy resolution (forge#2234) ---
+# --- Cascade admission policy resolution ---
 # orchestration.cascade.max_generation is the config-driven, granular successor to the
 # pre-#2234 --include-deferred/--allow-gen2 flags: instead of an all-or-nothing "admit
 # every deferred generation," an operator can say "admit up to generation 3" and no
@@ -111,13 +109,11 @@ done
 This resolve step is a human-requested entry point (the operator typed `cascade`/`review-findings`/`findings` directly), so it honors an explicit override:
 
 - `--include-deferred` or `--allow-gen2` appended to the input (e.g. `cascade --allow-gen2`, `review-findings --include-deferred`): forces `MAX_GENERATION="unlimited"` above, admitting every generation into the resolved set for this run. Without either flag, `orchestration.cascade.max_generation` (default 1) governs how deep the resolved set reaches — the flags/config only change what this **explicit** request is allowed to touch; they do not relax Step 4C's autonomous behavior for anything spawned *during* this run (see "Recursion safety" below).
-- **`orchestration.cascade.max_generation`** (forge#2234) is the config-driven successor to the CLI flags above and supports a granularity the flags cannot: `max_generation: 3` admits generations 1-3 and stops at 4, expressing "admit gen-2, stop at gen-3" directly — something an all-or-nothing `--allow-gen2` flag could never say. The flags remain available and, when passed, override config with `unlimited` for that one invocation.
+- **`orchestration.cascade.max_generation`** is the config-driven successor to the CLI flags above and supports a granularity the flags cannot: `max_generation: 3` admits generations 1-3 and stops at 4, expressing "admit gen-2, stop at gen-3" directly — something an all-or-nothing `--allow-gen2` flag could never say. The flags remain available and, when passed, override config with `unlimited` for that one invocation.
 
 **Recursion safety (unchanged)**: findings spawned *during* this run by its own sweep agents are still never re-swept, regardless of whether `--include-deferred`/`--allow-gen2`/`orchestration.cascade.max_generation` was in effect at resolve time — see `phase-4-execution.md` Step 4C rules and the recursion-safety note near the anti-patterns list. The override above only widens what this one resolve step admits from the *pre-existing* open issue set; it has no effect on Step 4C's in-run admission logic.
 
 ### Near-Miss Suggestion
-
-<!-- Added: forge#2231 -->
 
 When a bare `<slug>` (no keyword) resolves to **zero** issues via both the milestone lookup and the label-search fallback, do not silently return an empty set. Fetch the repo's label list and suggest the closest matching label(s) instead:
 
@@ -130,8 +126,6 @@ NEAR_MISS=$(echo "$ALL_LABELS" | grep -iE "${SLUG:0:4}" || true)
 Report back to the caller: `No milestone or label matched "{SLUG}". Did you mean: {NEAR_MISS list, or "review-finding"/"batch" if SLUG resembles "cascade"}?` This directly fixes the case reported in #2231 — `cascade` is not itself a label in most repos (the only cascade-adjacent labels are `review-finding` and `batch`), so a bare `cascade` slug previously resolved to nothing with no feedback. Note that `cascade`/`review-findings`/`findings` are now handled by the dedicated resolution rule above and never reach this bare-slug fallback path at all — this near-miss path remains for any other unmatched slug.
 
 ### Predicate Persistence (literal set vs. standing query)
-
-<!-- Added: forge#2236 -->
 
 Phase 1 resolves `$ARGUMENTS` to a concrete issue-number list exactly once, at T0, and that list is currently frozen for the rest of the run (`phase-4-execution.md`: "Phase 1 only runs once, at the start."). Of the input patterns above, only `#1 #2 #3` / `1 2 3` (optionally repo-prefixed) is genuinely a one-time literal set — every other row (`milestone <slug>`, `next <N>`, `next <N> all-repos`, `fast-lane`, `priority:P0`/`priority:P1`, `mcp:fast`/`n8n:next 3`, a bare `<slug>`) is a **standing query**: the predicate ("all open P0s", "this milestone") is the caller's actual intent, not the specific numbers it happened to resolve to at T0.
 
@@ -172,7 +166,7 @@ gh issue list -R {SATELLITE_REPO} --state open --limit 500 --json number,title,l
 # Priority rank when sorting: read each issue's labels and normalize to bare P<n> form —
 # `priority:P<n>` and bare `P<n>` both resolve to the same rank (see "Priority label schema"
 # note under P3 batching below); an issue with neither label form sorts last, not first, and
-# should be logged as untriaged rather than silently treated as top priority. <!-- Added: forge#2232 -->
+# should be logged as untriaged rather than silently treated as top priority.
 ```
 
 **Count validation**: After fetching issues, log the count returned. If a milestone query returns exactly 30 issues, warn the user: "WARNING: Exactly 30 issues returned — gh CLI default may have truncated results. Re-running with --limit 500 is recommended." (The --limit 500 above prevents this for standard runs, but verify if the count seems suspiciously low relative to milestone expectations.)
@@ -192,8 +186,6 @@ Remove issues that should NOT be worked on:
 If a `workflow:decomposed` issue is found, automatically expand it to its open sub-issues instead.
 
 ### Source-PR Triage Hint (pre-flight, non-binding)
-
-<!-- Added: forge#2351 -->
 
 **This is a triage hint for the operator and the dispatched investigation agent — it is NEVER an automated verdict.** It must never cause an issue to be closed, skipped, or excluded from dispatch. See "CRITICAL: No duplicate detection at orchestrator level" below — that rule's spirit ("only a `/work-on` investigation agent, after reading the actual code, can determine validity") applies identically here: a closed-unmerged source PR is a reason to look closer, not a reason to skip looking at all.
 
@@ -282,27 +274,23 @@ done
 
 ### P3 Review-Finding Batching (deterministic grouping rule)
 
-<!-- Added: forge#1333 -->
-<!-- Extended: forge#1818 — default-batchable eligibility, surface-area grouping, lowered same-file threshold -->
-<!-- Extended: forge#2232 — priority-label schema tolerance (bare P<n> vs priority:P<n>) -->
-
 Before finalizing the issue set, apply the P3 batching rule to reduce full-pipeline overhead on low-severity review findings.
 
-**Priority label schema**: ForgeDock's own issue creator (`review-pr.md`) writes only the canonical `priority:P<n>` label form. Some repos this pipeline operates against (issues opened externally, imported, or predating ForgeDock adoption) instead carry a bare `P<n>` label with no `priority:` prefix. Every priority-read check in this section — and its mirrors in `phase-4-execution.md` and `cleanup.md` — MUST accept both forms. `priority:P<n>` wins when (unusually) both are present on the same issue. Issue-*creation* call sites (the batch-issue creation below) are unaffected and keep writing canonical `priority:P<n>` only — there is no case where this pipeline needs to *write* the bare form. <!-- Added: forge#2232 -->
+**Priority label schema**: ForgeDock's own issue creator (`review-pr.md`) writes only the canonical `priority:P<n>` label form. Some repos this pipeline operates against (issues opened externally, imported, or predating ForgeDock adoption) instead carry a bare `P<n>` label with no `priority:` prefix. Every priority-read check in this section — and its mirrors in `phase-4-execution.md` and `cleanup.md` — MUST accept both forms. `priority:P<n>` wins when (unusually) both are present on the same issue. Issue-*creation* call sites (the batch-issue creation below) are unaffected and keep writing canonical `priority:P<n>` only — there is no case where this pipeline needs to *write* the bare form.
 
 **Trigger conditions** (default-batchable — no opt-in marker required):
 1. The issue has label `review-finding` + a P3 priority label (`priority:P3` or bare `P3`)
 2. The issue does NOT match any Safety exclusion below
 
-The `<!-- FORGE:BATCHABLE -->` marker (still appended by `review-pr.md` at finding-creation time) is honored when present but is no longer REQUIRED for eligibility — a `review-finding`+`priority:P3` issue is batchable by default unless explicitly excluded. This closes the gap where cascade-spawned findings that never carried the marker sat un-batched indefinitely. <!-- Added: forge#1818 -->
+The `<!-- FORGE:BATCHABLE -->` marker (still appended by `review-pr.md` at finding-creation time) is honored when present but is no longer REQUIRED for eligibility — a `review-finding`+`priority:P3` issue is batchable by default unless explicitly excluded. This closes the gap where cascade-spawned findings that never carried the marker sat un-batched indefinitely.
 
 **Safety exclusions — NEVER batch, at any priority** (override all trigger conditions):
 - Issue body contains the word "security", "billing", "anti-bot", or "auth" anywhere in the title or `## Problem` section
 - Issue has a `security`, `billing`, `anti-bot`, or `auth` label
 
-These exclusions apply regardless of priority: P1/P2 findings are already never batched (see Important limits), and P3 findings in these domains are excluded even though they would otherwise qualify for default-batchable treatment. <!-- Added: forge#1818 -->
+These exclusions apply regardless of priority: P1/P2 findings are already never batched (see Important limits), and P3 findings in these domains are excluded even though they would otherwise qualify for default-batchable treatment.
 
-**Grouping algorithm (surface area — same file first, leaf directory as broader fallback):** <!-- Changed: forge#1818 — was domain-only -->
+**Grouping algorithm (surface area — same file first, leaf directory as broader fallback):**
 ```bash
 # Fetch all open batchable P3 issues (default-batchable; marker no longer required).
 # NOTE: `--label` is an exact-match GH filter and cannot OR "priority:P3" with bare "P3" in
@@ -326,14 +314,14 @@ BATCHABLE_P3=$(gh issue list {GH_FLAG} \
 #        "commands/review-pr.md"                   → file "commands/review-pr.md", leaf-dir "commands"
 ```
 
-**Batch creation rule (two-tier threshold):** <!-- Changed: forge#1818 — added lower same-file tier -->
+**Batch creation rule (two-tier threshold):**
 - **Same-file cluster** (primary, low threshold): When **2+** batchable P3 issues share the exact same affected file, create a batch issue for that file cluster. Same-file P3 findings are the dominant low-value token sink (dead imports, stale comments, style nits) and already conflict with each other if built individually — the low threshold reflects that they'd otherwise serialize into slow one-at-a-time chains regardless of count.
 - **Leaf-directory cluster** (broader grouping, existing threshold preserved): When **5+** batchable P3 issues share the same leaf directory but are not already covered by a same-file cluster above, OR the oldest batchable P3 in that leaf directory exceeds 72 hours, create a batch issue for that leaf-directory cluster.
 - Form same-file clusters first; evaluate any remaining ungrouped findings for leaf-directory clustering. A finding is claimed by at most one batch.
 
-**Sanitize the surface-area path before interpolation (MANDATORY):** `{SURFACE_AREA}` is an affected-file path derived from an issue body, and git filenames can legally carry shell metacharacters (`` ` ``, `$()`, quotes). Restrict it to a validated `[A-Za-z0-9._/-]` charset before templating it into `--title` / `--body`, so an untrusted issue body cannot break the `gh` argument boundary. The same guard is applied at the mirror site in `phase-4-execution.md`. <!-- forge#1833, forge#1835 -->
+**Sanitize the surface-area path before interpolation (MANDATORY):** `{SURFACE_AREA}` is an affected-file path derived from an issue body, and git filenames can legally carry shell metacharacters (`` ` ``, `$()`, quotes). Restrict it to a validated `[A-Za-z0-9._/-]` charset before templating it into `--title` / `--body`, so an untrusted issue body cannot break the `gh` argument boundary. The same guard is applied at the mirror site in `phase-4-execution.md`.
 
-**Route batch issue creation through `/issue`'s programmatic invocation contract** (`commands/issue.md`, added #2085) instead of calling `gh issue create` directly — this gets dedup (Phase 2D) and mandatory-section body validation (Phase 3F) for free. <!-- Changed: forge#2086 — route through /issue create-hook -->
+**Route batch issue creation through `/issue`'s programmatic invocation contract** (`commands/issue.md`, added #2085) instead of calling `gh issue create` directly — this gets dedup (Phase 2D) and mandatory-section body validation (Phase 3F) for free.
 
 ```bash
 SAFE_SURFACE_AREA=$(printf '%s' "{SURFACE_AREA}" | tr -cd 'A-Za-z0-9._/-')
@@ -382,9 +370,9 @@ fi
 **Replace member issues with the batch issue** in the resolved issue set. Member issues are NOT individually dispatched to `/work-on` — the batch issue is the single pipeline unit.
 
 **Important limits**:
-- Max **8** members per batch issue — if more than 8 batchable P3s exist in a surface-area cluster, create multiple batch issues of ≤ 8 each <!-- Changed: forge#1818 — was 10 -->
+- Max **8** members per batch issue — if more than 8 batchable P3s exist in a surface-area cluster, create multiple batch issues of ≤ 8 each
 - P1 and P2 issues are NEVER batched — they keep the standard one-issue-one-PR path
-- Security/billing/anti-bot/auth findings are NEVER batched at any priority (see Safety exclusions above) <!-- Added: forge#1818 -->
+- Security/billing/anti-bot/auth findings are NEVER batched at any priority (see Safety exclusions above)
 - Batch issues themselves are never nested inside other batch issues
 
 If fewer than 2 batchable P3 findings share a file, AND fewer than 5 share a leaf directory, AND none exceed 72h, skip batch creation entirely — individual P3s run through the standard pipeline.

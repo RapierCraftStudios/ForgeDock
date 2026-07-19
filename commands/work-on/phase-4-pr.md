@@ -66,7 +66,7 @@ case "$TIER" in
     ;;
 esac
 ```
-Output is authoritative — no prose fallback. Script exits 1 on error (invalid issue, `gh` auth failure, or milestone branch absent on remote); treat non-zero exit as `needs-human` and STOP. <!-- Added: forge#669, forge#639 -->
+Output is authoritative — no prose fallback. Script exits 1 on error (invalid issue, `gh` auth failure, or milestone branch absent on remote); treat non-zero exit as `needs-human` and STOP.
 
 ### 4C.5: Validate PR target against classified lane
 ```bash
@@ -90,7 +90,7 @@ esac
 gh issue comment {NUMBER} {GH_FLAG} --body "BLOCKING: validate-pr-target.sh — PR base \`{PR_BASE}\` does not match classified lane \`{CLASSIFIED_LANE}\`. Manual intervention required."
 gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
 ```
-→ STOP. Do NOT proceed to Phase 4D. <!-- Added: forge#671 -->
+→ STOP. Do NOT proceed to Phase 4D.
 
 ### 4D: Create PR
 ```bash
@@ -132,6 +132,5 @@ esac
 ```
 
 ---
-
 
 → Return to `work-on.md` Universal Phase Dispatcher: Phase 4 complete, PR created and `workflow:in-review` set. Proceed to Phase 5 (Auto-Review) via `work-on/review.md`.

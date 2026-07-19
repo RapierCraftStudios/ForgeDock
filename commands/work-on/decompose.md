@@ -12,9 +12,9 @@ argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG]"
 **Invoked by**: `work-on.md` routing loop, when `INVESTIGATE_RESULT.decompose = YES`.
 **Output**: Create sub-issues, update parent tracker, post `<!-- FORGE:DECOMPOSED -->` comment, set labels. STOP — each sub-issue runs its own /work-on.
 
-**Engine coverage** (forge#2379): this subcommand's `command` name (`work-on/decompose`) and completion marker (`FORGE:DECOMPOSED:COMPLETE`) are now registered as a real phase in the headless engine's phase table — `decompose` in `packages/protocol/src/phases.js`'s `PHASE_IDS`/`PHASE_MARKERS`, and the matching `decompose` entry in `bin/engine/phases.mjs`'s `PHASES` array. The engine's `investigate` phase hands off to it on `DECOMPOSE:YES` instead of terminating in place, so a headless `runIssue()` walk now actually dispatches this subcommand rather than stopping short.
+**Engine coverage**: this subcommand's `command` name (`work-on/decompose`) and completion marker (`FORGE:DECOMPOSED:COMPLETE`) are now registered as a real phase in the headless engine's phase table — `decompose` in `packages/protocol/src/phases.js`'s `PHASE_IDS`/`PHASE_MARKERS`, and the matching `decompose` entry in `bin/engine/phases.mjs`'s `PHASES` array. The engine's `investigate` phase hands off to it on `DECOMPOSE:YES` instead of terminating in place, so a headless `runIssue()` walk now actually dispatches this subcommand rather than stopping short.
 
-**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (label transitions, sub-issue creation) stay at this tier because they're interleaved with the reasoning-heavy sub-issue design steps in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies". <!-- Added: forge#1827 -->
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (label transitions, sub-issue creation) stay at this tier because they're interleaved with the reasoning-heavy sub-issue design steps in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies".
 Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not already in context.
 
 ---
@@ -44,7 +44,7 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 - If FORGE:INVESTIGATOR comment is absent → EXIT with `DECOMPOSE_RESULT: status: BLOCKED`, blocker: "No investigation report found — run investigate first"
 - If investigation report has no Decomposition Assessment section, OR the assessment does not list any sub-issues → EXIT with `DECOMPOSE_RESULT: status: BLOCKED`, blocker: "Investigation report has no decomposition plan — re-run investigate with explicit decomposition scope"
 
-> **Shared Scoping Convention**: This investigation gate (blocks without a `FORGE:INVESTIGATOR` comment) is the **reference pattern** for investigation-gated issue creation across the pipeline. `milestone.md` Step 4 and `orchestrate.md` MUST apply the same principle: read code and identify all affected call sites BEFORE writing any issue body. Sub-issue bodies created in Phase D3 MUST use the Pipeline Issue Template defined in `issue.md` Phase 3D — that template is the single canonical standard for all automated issue creation. <!-- Added: forge#293 -->
+> **Shared Scoping Convention**: This investigation gate (blocks without a `FORGE:INVESTIGATOR` comment) is the **reference pattern** for investigation-gated issue creation across the pipeline. `milestone.md` Step 4 and `orchestrate.md` MUST apply the same principle: read code and identify all affected call sites BEFORE writing any issue body. Sub-issue bodies created in Phase D3 MUST use the Pipeline Issue Template defined in `issue.md` Phase 3D — that template is the single canonical standard for all automated issue creation.
 
 Extract from investigation report:
 - Decomposition Assessment section: list of proposed sub-issues with titles and dependencies
@@ -108,7 +108,7 @@ For each sub-issue, prepare:
 
 ## Phase D3: Create Sub-Issues
 
-For each sub-issue (in dependency order), route creation through the `/issue` create-hook's programmatic invocation contract (`commands/issue.md` Programmatic Invocation Contract, added in #2085) instead of calling `gh issue create` directly. `/issue`'s Phase 2D runs the same `scripts/issue-dedup.sh` check this file used to run manually — the standalone pre-check below is removed; dedup is now enforced inside the create-hook on every call, with no bypass path. <!-- Changed: forge#2086 — route through /issue create-hook -->
+For each sub-issue (in dependency order), route creation through the `/issue` create-hook's programmatic invocation contract (`commands/issue.md` Programmatic Invocation Contract, added in #2085) instead of calling `gh issue create` directly. `/issue`'s Phase 2D runs the same `scripts/issue-dedup.sh` check this file used to run manually — the standalone pre-check below is removed; dedup is now enforced inside the create-hook on every call, with no bypass path.
 
 **Compose the sub-issue body to a temp file** (avoids quoting issues when passed as `--body-file`):
 

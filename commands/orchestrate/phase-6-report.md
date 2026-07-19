@@ -25,7 +25,7 @@ Aggregate into the batch-level analytics for Step 6B.
 comment by `/work-on` close phase as a `<!-- FORGE:CARD: v1 sha:... b64:... -->` line). These
 power the per-issue and batch cards in Step 6C.
 
-**CODEC PATH (forge#1727)**: Cards are now Base64url-encoded. Use the protocol CLI's `parse`
+**CODEC PATH **: Cards are now Base64url-encoded. Use the protocol CLI's `parse`
 subcommand to decode them — do NOT use the old `sed -n 's/.*<!-- FORGE:CARD \(.*\) -->.*/\1/p'`
 regex extraction, which only worked for the deprecated inline-JSON form:
 
@@ -36,7 +36,7 @@ for NUM in {all_completed_issue_numbers}; do
   TRAJ_BODY=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
     --jq '[.[] | select(.body | contains("FORGE:CARD:"))] | last | .body // ""' 2>/dev/null || true)
   if [ -n "$TRAJ_BODY" ]; then
-    # Decode via protocol CLI — handles both Base64url form (forge#1727) and gracefully
+    # Decode via protocol CLI — handles both Base64url form and gracefully
     # exits 1 (skips) for pre-migration inline-JSON entries.
     CARD=$(echo "$TRAJ_BODY" | node packages/protocol/src/cli.js parse --type CARD 2>/dev/null || true)
     [ -n "$CARD" ] && CARDS="${CARDS}${CARD}"$'\n'
@@ -46,7 +46,7 @@ done
 # Skip any issue whose card is absent — pre-card runs or non-merged terminal states degrade gracefully.
 ```
 
-### Step 6A.5: Collect merge-ready PRs (`workflow:awaiting-merge`) <!-- Added: forge#1811 -->
+### Step 6A.5: Collect merge-ready PRs (`workflow:awaiting-merge`)
 
 **Why a separate collection pass**: `workflow:awaiting-merge` issues are open (their PR hasn't
 merged yet), so they are excluded from `{all_completed_issue_numbers}` above — that set only
@@ -77,7 +77,7 @@ for NUM in {all_batch_issue_numbers}; do
     # each candidate's body against an anchored (Closes|Fixes|Resolves) #N word-boundary
     # regex before accepting it — never accept a bare mention (changelog / cross-reference),
     # which could resolve the wrong PR into the one-shot batch-merge command. This mirrors
-    # the recover-orphans.md re-validation precedent. <!-- forge#1822 -->
+    # the recover-orphans.md re-validation precedent.
     PR_NUM=$(gh pr list -R {GH_REPO} --state open --search "${NUM} in:body" \
       --json number,updatedAt,body \
       --jq --arg n "${NUM}" '[ .[] | select(.body | test("(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\s+#" + $n + "\\b")) ] | sort_by(.updatedAt) | last | .number // empty' 2>/dev/null || echo "")
@@ -92,7 +92,7 @@ done
 # computed here, not inside the report template, so Step 6B stays plain template text with no
 # nested code fences of its own). `gh pr merge` accepts only ONE PR selector per invocation,
 # so chain one `gh pr merge` per PR with && rather than passing a space-separated list (which
-# `gh` rejects). <!-- forge#1838 review: BUG-3 -->
+# `gh` rejects).
 MERGE_READY_CMD=""
 if [ "${#MERGE_READY_PRS[@]}" -gt 0 ]; then
   for _entry in "${MERGE_READY_PRS[@]}"; do
@@ -104,7 +104,7 @@ if [ "${#MERGE_READY_PRS[@]}" -gt 0 ]; then
 fi
 ```
 
-### Step 6A.6: Collect blocked-on-human-merge dependents (`blocked-on-human-merge`) <!-- Added: forge#1812 -->
+### Step 6A.6: Collect blocked-on-human-merge dependents (`blocked-on-human-merge`)
 
 **Why a separate collection pass**: A `blocked-on-human-merge` issue is a *dependent* of a `GATED`
 predecessor (`needs-human` or `workflow:awaiting-merge` — see `phase-4-execution.md` Step 4B's
@@ -139,7 +139,7 @@ done
 # Results table row (Step 6B).
 ```
 
-### Step 6A.7: Determine idle-policy end state <!-- Added: forge#1814 -->
+### Step 6A.7: Determine idle-policy end state
 
 **Why**: `phase-4-execution.md` Step 4B item 6.7 can end the live monitoring loop in two visibly
 different ways: a **clean/paused drain** (every original-batch issue reached `DONE`/`FAILED`, or
@@ -271,7 +271,7 @@ current session's live wake pick them up automatically if it is still running).
 
 {ELSE: "No review findings created during this batch."}
 
-### Completion Sweep <!-- Added: forge#1105 -->
+### Completion Sweep
 - **Re-evaluated**: {N} deferred findings re-checked after DAG drain
 - **Dispatched**: {N} findings cleared and executed (file overlap resolved)
 - **Still deferred (cosmetic)**: {N} comment/typo findings (low-value, safe to leave)
@@ -300,7 +300,7 @@ current session's live wake pick them up automatically if it is still running).
 - Worktrees removed: {N}
 - Branches pruned: {N}
 - Milestones closed: {N}
-- Coordination board: {IF `COORD_ISSUE_NUMBER` was set this run: "closed — #{COORD_ISSUE_NUMBER}" ELSE: "n/a (no claims board this batch)"} <!-- Added: forge#2072 -->
+- Coordination board: {IF `COORD_ISSUE_NUMBER` was set this run: "closed — #{COORD_ISSUE_NUMBER}" ELSE: "n/a (no claims board this batch)"}
 
 ### Agent Efficiency (from /audit-agents)
 
@@ -322,9 +322,9 @@ current session's live wake pick them up automatically if it is still running).
 | Contract→code divergences | {N} (agents that updated contract mid-build) |
 | Review findings created | {N_total} |
 | Findings queued after cascade control | {N_queued}/{N_total} ({N_deferred} deferred — see Step 4C) |
-| Findings deferred — idle policy (forge#1814) | {IDLE_POLICY_DEFERRED_COUNT} (batch fully human-gated at defer time — see Step 4B item 6.7) |
+| Findings deferred — idle policy | {IDLE_POLICY_DEFERRED_COUNT} (batch fully human-gated at defer time — see Step 4B item 6.7) |
 | P3 findings clubbed (surface-area batching, forge#1818) | {SURFACE_BATCH_COUNT:-0} batch(es) covering {#SURFACE_BATCHED_FINDINGS[@]:-0} finding(s) — see Step 4C |
-| Findings deferred — token budget (forge#1858) | {#TOKEN_DEFERRED[@]:-0} (batch spend {BATCH_TOKEN_SPEND:-0}/{TOKEN_BUDGET:-uncapped} tokens — see Step 4C) |
+| Findings deferred — token budget | {#TOKEN_DEFERRED[@]:-0} (batch spend {BATCH_TOKEN_SPEND:-0}/{TOKEN_BUDGET:-uncapped} tokens — see Step 4C) |
 | Competing recommendations reconciled (Phase 2.5) | {RECONCILED_COUNT} (investigation plans arbitrated in place + serialized) |
 | Findings validated | {N} |
 | False positives | {N} ({%}) |
@@ -336,9 +336,9 @@ current session's live wake pick them up automatically if it is still running).
 | ε-reserve issued (no-prior dispatch) | {EPSILON_DISPATCHED:-no} |
 | **Value-weighted throughput** | **{VALUE_THROUGHPUT:-—} value-pts/USD** |
 
-`value-weighted throughput` = Σ(priority_weight × danger_zone_weight) for **merged** issues ÷ actual spend (USD). A higher value means more high-priority issues were resolved per dollar. Trend this across runs via `/pipeline-health` to measure the economic scheduling ROI. <!-- Added: forge#1743 -->
+`value-weighted throughput` = Σ(priority_weight × danger_zone_weight) for **merged** issues ÷ actual spend (USD). A higher value means more high-priority issues were resolved per dollar. Trend this across runs via `/pipeline-health` to measure the economic scheduling ROI.
 
-`P3 findings clubbed` and `Findings deferred — token budget` are a DIFFERENT mechanism from the `$`-denominated `Budget limit`/`Projected spend`/`Actual spend`/`Issues deferred (budget ceiling)` rows above (forge#1743, opt-in `--budget N` flag, gates the *original* issue dispatch order). The token-budget row reads the always-on, token-denominated ceiling that scopes ONLY to Step 4C's review-finding cascade dispatch (forge#1858); `SURFACE_BATCH_COUNT` and `SURFACE_BATCHED_FINDINGS` are populated by the same Step 4C surface-area-batching block (forge#1818) that clubs P3 findings sharing a file/leaf-directory into one dispatched pipeline. Both degrade gracefully to `0`/`uncapped` when the batch had no review findings or ran with defaults. <!-- Added: forge#1858 -->
+`P3 findings clubbed` and `Findings deferred — token budget` are a DIFFERENT mechanism from the `$`-denominated `Budget limit`/`Projected spend`/`Actual spend`/`Issues deferred (budget ceiling)` rows above (forge#1743, opt-in `--budget N` flag, gates the *original* issue dispatch order). The token-budget row reads the always-on, token-denominated ceiling that scopes ONLY to Step 4C's review-finding cascade dispatch; `SURFACE_BATCH_COUNT` and `SURFACE_BATCHED_FINDINGS` are populated by the same Step 4C surface-area-batching block that clubs P3 findings sharing a file/leaf-directory into one dispatched pipeline. Both degrade gracefully to `0`/`uncapped` when the batch had no review findings or ran with defaults.
 
 **Compute value-weighted throughput** (populate before rendering the table):
 
@@ -364,7 +364,7 @@ fi
 **Domain breakdown**: {N} scraping, {N} frontend, {N} billing, ...
 **Routing**: {N} fast-lane, {N} feature-lane
 
-> `Findings queued after cascade control` reports Step 4C's defer/execute triage split (`QUEUED_FINDINGS` vs `DEFERRED_FINDINGS`) — it is NOT a dedup/arbitration computation; no such step exists for review findings. `Competing recommendations reconciled` is populated by Phase 2.5 (`RECONCILED_COUNT`), which reconciles investigation plans, not review findings. It is `0` when the batch had 0–1 investigations (synthesis is a no-op). <!-- Added: forge#1192, forge#1193 -->
+> `Findings queued after cascade control` reports Step 4C's defer/execute triage split (`QUEUED_FINDINGS` vs `DEFERRED_FINDINGS`) — it is NOT a dedup/arbitration computation; no such step exists for review findings. `Competing recommendations reconciled` is populated by Phase 2.5 (`RECONCILED_COUNT`), which reconciles investigation plans, not review findings. It is `0` when the batch had 0–1 investigations (synthesis is a no-op).
 
 **Systematic issues** (flag if detected):
 - False positive rate > 30% → review agents may need tuning
@@ -376,7 +376,7 @@ fi
 - **Value-weighted throughput trending down** → high-value issues deferred or blocked; check Step 3E.5 score distribution
 
 ### Next Steps
-{If ORCHESTRATION_ENDED_IDLE == "true": "This run paused on the human-gated idle policy (forge#1814) — merge the PR(s) listed in the Merge-Ready section above, then re-run `/orchestrate` (or let a still-running session's live wake pick it up automatically) to resume dispatch of blocked-on-merge dependents and re-evaluate the {IDLE_POLICY_DEFERRED_COUNT} deferred finding(s)."}
+{If ORCHESTRATION_ENDED_IDLE == "true": "This run paused on the human-gated idle policy — merge the PR(s) listed in the Merge-Ready section above, then re-run `/orchestrate` (or let a still-running session's live wake pick it up automatically) to resume dispatch of blocked-on-merge dependents and re-evaluate the {IDLE_POLICY_DEFERRED_COUNT} deferred finding(s)."}
 {If milestone and all issues done: "Milestone ready to ship. Run `/milestone ship {slug}` when ready. The ship command includes a pre-merge hunk-loss audit (Step 2.5) that detects staging-only hunks in milestone-modified files and rebases the milestone branch to absorb them before creating the PR — protecting against squash-merge regressions."}
 {If some failed: "Issues #{X}, #{Y} need manual attention. Re-run with `/work-on #{X}` after resolving blockers."}
 {If fast-lane: "All fixes merged to staging. Merge staging → main via GitHub web UI when ready to deploy."}

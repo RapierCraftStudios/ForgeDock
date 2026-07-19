@@ -49,7 +49,7 @@ gh issue list -R $REPO --state closed --label "review-finding" --json number,cre
 
 **Note**: This proxy uses `workflow:invalid` as a stand-in for false-positive. Phase 2C.5 reports the actual false-positive rate from the `false-positive` label. Both metrics should be reported; they should converge as validation coverage increases.
 
-### 2C.5: Validation coverage (finding lifecycle health) <!-- Added: forge#1730 -->
+### 2C.5: Validation coverage (finding lifecycle health)
 
 Measures whether the `needs-validation → validated/false-positive` lifecycle is operating. This is the primary health signal for the review system's calibration corpus.
 
@@ -557,7 +557,7 @@ gh issue list -R $FORGE_REPO --state all --label "audit-finding" \
 - **Failure category distribution**: breakdown by failure point (INVESTIGATION, IMPLEMENTATION, REVIEW, REVIEW_FALSE_NEG, DEPLOY_GATE, etc.). No target — use for diagnosis. High IMPLEMENTATION counts indicate builder gaps; high REVIEW_FALSE_NEG counts indicate review agent gaps.
 - **Mean time to detect (MTD)**: average days from PR merge to audit-finding creation. Target: < 7 days. Long MTD means defects linger undetected in production.
 
-### 2M.5: Review intensity distribution and escaped-defect rate by tier <!-- Added: forge#1745 -->
+### 2M.5: Review intensity distribution and escaped-defect rate by tier
 
 This metric is only meaningful once `scripts/calibration.mjs --provenance` has been publishing to the `forge-knowledge` branch for at least one 30-day shadow-mode window. Before that point, all PRs have `INTENSITY_TIER=SHADOW` in their FORGE:REVIEW annotations and both tier buckets will be empty — this is expected and correct.
 
@@ -1737,7 +1737,7 @@ Aggregates per-session metrics from Phase 2O's `PER_SESSION_METRICS_RAW` into a 
 **Fields explicitly excluded** (even though present in Phase 2O output):
 - `session_id` — opaque UUID; not useful for pipeline improvement; excluded from all output
 - `skill_invocations[].skill_args` — may contain issue numbers (safe) but also file paths or branch names (contextual); excluded to keep the whitelist strict
-- `agent_spawns[].model` — excluded from model_freq to prevent double-counting with `model_distribution`; spawn intent ≠ response actuality; Phase 2P uses this field separately for spawn pattern analysis <!-- Added: forge#369 -->
+- `agent_spawns[].model` — excluded from model_freq to prevent double-counting with `model_distribution`; spawn intent ≠ response actuality; Phase 2P uses this field separately for spawn pattern analysis
 - `agent_spawns[].agent_desc` — may contain file paths or code context; excluded per #347 privacy classification
 
 **Step 1 — Prerequisite guard**:
@@ -1922,7 +1922,7 @@ fi
 
 ### 2R: Confidence Calibration Table (from run outcomes)
 
-**Purpose**: Surfaces whether the pipeline's stated confidence levels predict actual outcomes. A HIGH-confidence issue that frequently triggers review-findings or reverts within 14 days indicates systematic overconfidence — the investigator's confidence is not tracking reality. Conversely, needs-human routing on issues that almost always survive indicates overcaution. This section reads the calibration table produced by `scripts/calibration.mjs` and published to the `forge-knowledge` branch. <!-- Added: forge#1741 -->
+**Purpose**: Surfaces whether the pipeline's stated confidence levels predict actual outcomes. A HIGH-confidence issue that frequently triggers review-findings or reverts within 14 days indicates systematic overconfidence — the investigator's confidence is not tracking reality. Conversely, needs-human routing on issues that almost always survive indicates overcaution. This section reads the calibration table produced by `scripts/calibration.mjs` and published to the `forge-knowledge` branch.
 
 **Skip if**: forge-knowledge branch is absent or `calibration/table.json` does not exist on it — emit the unavailability note below and continue.
 
@@ -2027,7 +2027,7 @@ fi
 - **Overcaution candidates**: count of cells where survival > 95% (informational — loosening requires eval-gate)
 - **Table freshness**: `computedAt` timestamp — flag as stale if > 7 days old
 
-**Why this matters**: Static confidence thresholds in review-pr.md (Phase 7B blocking criteria) are prose rules with no feedback from outcomes. The calibration table is the mechanism by which the pipeline learns whether its stated confidence is tracking reality. A task-type with persistent overconfidence should have its review intensity increased regardless of the agent's stated confidence. <!-- Added: forge#1741 -->
+**Why this matters**: Static confidence thresholds in review-pr.md (Phase 7B blocking criteria) are prose rules with no feedback from outcomes. The calibration table is the mechanism by which the pipeline learns whether its stated confidence is tracking reality. A task-type with persistent overconfidence should have its review intensity increased regardless of the agent's stated confidence.
 
 ---
 

@@ -10,7 +10,6 @@ This file contains the shared protocols that ALL review agents must follow.
 It is read alongside individual persona files during Phase 3C agent dispatch.
 Canonical source: `docs/spec/review-protocol.md` — sync changes there first.
 
-
 ## Per-Agent Input Scoping
 
 **Each domain agent receives only the diff slice relevant to its domain**, not the full PR changeset. The orchestrator (Phase 3C of `review-pr.md`) pre-computes these slices and substitutes `[DOMAIN_DIFF_SLICE]` in each agent's prompt before dispatch.
@@ -31,7 +30,7 @@ Rationale: agents receiving oversized context perform worse, not better — atte
 
 ## File Resolution Discipline
 
-Pipeline agents MUST NOT use `find` (unbounded or filesystem-wide) to locate protocol files, persona templates, or verification scripts under any circumstances. If a `Read` or `bash` invocation of an expected pipeline file fails (e.g. because `$FORGE_HOME` is unset and the path degraded to a root-anchored form), that is never a reason to search the filesystem — it means the deterministic fallback chain the orchestrator already computed (`$FORGE_HOME` → `$REPO_PATH` → documented last-resort) was exhausted. Stop and report the failure (or fall through to the orchestrator's documented FATAL/hard-stop behavior — see `commands/review-pr.md` Phase 3C `TEMPLATE_BASE` guard) instead of improvising a `find /`-style search. A filesystem-wide `find` on an unset variable is the exact failure mode that produced runaway orphaned processes in production (see forge#1984, forge#2035). <!-- Added: forge#2035 -->
+Pipeline agents MUST NOT use `find` (unbounded or filesystem-wide) to locate protocol files, persona templates, or verification scripts under any circumstances. If a `Read` or `bash` invocation of an expected pipeline file fails (e.g. because `$FORGE_HOME` is unset and the path degraded to a root-anchored form), that is never a reason to search the filesystem — it means the deterministic fallback chain the orchestrator already computed (`$FORGE_HOME` → `$REPO_PATH` → documented last-resort) was exhausted. Stop and report the failure (or fall through to the orchestrator's documented FATAL/hard-stop behavior — see `commands/review-pr.md` Phase 3C `TEMPLATE_BASE` guard) instead of improvising a `find /`-style search. A filesystem-wide `find` on an unset variable is the exact failure mode that produced runaway orphaned processes in production (see forge#1984, forge#2035).
 
 ---
 
@@ -93,7 +92,7 @@ If a file you are reviewing is listed above as a hot-spot, apply deeper scrutiny
 - A theoretical exploit path not grounded in specific lines from the diff
 - A heuristic ("this type of code often has X bug") without verification
 
-**POSSIBLE findings are informational advisories** — they are logged and tracked but do NOT block merge and do NOT trigger mandatory fix PRs. When in doubt, POSSIBLE is the correct classification. <!-- Added: forge#371 -->
+**POSSIBLE findings are informational advisories** — they are logged and tracked but do NOT block merge and do NOT trigger mandatory fix PRs. When in doubt, POSSIBLE is the correct classification.
 
 ### 4. SEVERITY CLASSIFICATION — TRACE THE IMPACT
 
@@ -167,7 +166,7 @@ Append this block at the very end of your comment (after the `---` footer line, 
 8. **Empty block**: If no findings at all, include just the START/END markers
 9. **HTML comments**: The block is invisible in rendered markdown but parseable by the review system
 
-### Admission Gate — NOTED Disposition <!-- Added: forge#2683 -->
+### Admission Gate — NOTED Disposition
 
 Not every LOW-severity or POSSIBLE-confidence finding should become a GitHub issue. A finding is **self-refuting** when the agent's own Evidence text concedes the flagged condition cannot actually be reached — e.g. "not exploitable", "cannot occur", "no changes required unless a fault-injection seam is added". Filing these forces the pipeline to pay full investigate-and-close cost on a ticket the agent already proved is a no-op — this was independently identified as the pipeline's largest systemic waste source (2026-07-19 audit of #2657, #2660).
 

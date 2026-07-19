@@ -260,7 +260,7 @@ For each eligible package (or batch), create a GitHub issue:
 ### 3A: Per-package issue (patch or minor, non-batched)
 
 ```bash
-# DRY_RUN guard — must stay above the create it guards (forge#1609). In dry-run
+# DRY_RUN guard — must stay above the create it guards. In dry-run
 # mode print the would-be issue and move on; never create it.
 if [ "$DRY_RUN" = "true" ]; then
   echo "[DRY RUN] Would create issue: feat(deps): upgrade {PACKAGE} from {CURRENT} to {LATEST} ({SEMVER_LEVEL})"
@@ -318,7 +318,7 @@ Group multiple patch-level packages into one issue:
 ```bash
 BATCH_PACKAGE_LIST=$(printf '- `%s`: %s → %s\n' {PACKAGE} {CURRENT} {LATEST})
 
-# DRY_RUN guard — must stay above the create it guards (forge#1609).
+# DRY_RUN guard — must stay above the create it guards.
 if [ "$DRY_RUN" = "true" ]; then
   echo "[DRY RUN] Would create batch issue: feat(deps): batch patch upgrades — {COUNT} packages ({DATE})"
   echo "[DRY RUN] Packages: $BATCH_PACKAGE_LIST"
@@ -363,7 +363,7 @@ BATCH_ISSUE_EOF
 fi
 ```
 
-**DRY_RUN check**: enforced inline in 3A and 3B above — the guard wraps each `gh issue create` rather than being stated after it, so a dry run cannot create issues even if only one section is read in isolation (forge#1609).
+**DRY_RUN check**: enforced inline in 3A and 3B above — the guard wraps each `gh issue create` rather than being stated after it, so a dry run cannot create issues even if only one section is read in isolation.
 
 Store created issue numbers as `CREATED_ISSUES` (empty when `DRY_RUN=true`).
 
@@ -376,7 +376,7 @@ Store created issue numbers as `CREATED_ISSUES` (empty when `DRY_RUN=true`).
 For each issue in `CREATED_ISSUES`, invoke `/work-on` via the Skill tool:
 
 ```
-# DRY_RUN guard — must stay above the Skill() call it guards (forge#1609).
+# DRY_RUN guard — must stay above the Skill() call it guards.
 if [ "$DRY_RUN" = "true" ]; then
   echo "[DRY RUN] Would invoke: Skill(skill: \"work-on\", args: \"{ISSUE_NUMBER}\")"
 else
@@ -394,7 +394,7 @@ FIX_RESULTS = [
 ]
 ```
 
-**DRY_RUN check**: enforced inline above — the guard wraps the `Skill()` call rather than being stated after it, so a dry run cannot invoke `/work-on` even if only this section is read in isolation (forge#1609).
+**DRY_RUN check**: enforced inline above — the guard wraps the `Skill()` call rather than being stated after it, so a dry run cannot invoke `/work-on` even if only this section is read in isolation.
 
 ---
 

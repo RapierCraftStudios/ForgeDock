@@ -8,8 +8,6 @@ install: core
 
 ## Phase 2.5: Investigation Synthesis
 
-<!-- Added: forge#1192 -->
-
 **Purpose**: Reconcile *competing recommendations* across investigation outputs BEFORE they fan out to implementation agents. Phase 3's conflict detection (Step 3C) deconflicts issues at the **file** layer only — it prevents git merge conflicts. It performs **zero semantic deconfliction**: two issues can touch entirely different files while proposing **contradictory approaches to the same problem**, and the file-overlap detector passes both straight to parallel dispatch. This phase closes that gap by clustering investigations semantically (by target subsystem, not by file) and arbitrating incompatible plans into a single decision — or serializing them so the second agent inherits the first's decision.
 
 **This phase operates ONLY on FORGE annotations and issue bodies. It NEVER reads code, and it NEVER closes, skips, or merges issues.** Reconciling plans/annotations is distinct from adjudicating *duplicate validity* (Safety Rule 9, the #3842/#4039 scar): the anti-dedup rule forbids the orchestrator from deciding two issues are the same bug and closing one — that call belongs to `/work-on` investigation agents examining actual code. Plan reconciliation touches neither code nor issue state; it only writes a synthesis brief annotation and adds `Depends on #X` serialization edges. It therefore does not violate Hard Rule 2 (dispatcher, not builder) or Safety Rule 9.
@@ -60,7 +58,7 @@ done
 
 **Cluster rule**: Two investigations are in the same cluster when they share a target subsystem (overlapping affected-file directories OR the same domain tag from Step 3B applied to their recommendations). Clustering is by **conceptual surface**, deliberately coarser than Step 3C's file-level analysis — the goal is to surface plan-level contradictions the file layer cannot see.
 
-**Forward reference — related future signal** <!-- Added: forge#1196 -->: This clustering step (Step 2.5B) runs before Phase 3, so no Layer 5 data exists yet at this point — do not treat it as an input here. For readers extending this clustering rule in the future: Step 3C Layer 5 (historical co-change coupling, computed later in Phase 3) is a related signal worth reusing — two investigations whose affected files have historically co-changed would be good candidates for the same subsystem cluster. This is purely a forward reference, not a functional dependency or phase-reordering.
+**Forward reference — related future signal**: This clustering step (Step 2.5B) runs before Phase 3, so no Layer 5 data exists yet at this point — do not treat it as an input here. For readers extending this clustering rule in the future: Step 3C Layer 5 (historical co-change coupling, computed later in Phase 3) is a related signal worth reusing — two investigations whose affected files have historically co-changed would be good candidates for the same subsystem cluster. This is purely a forward reference, not a functional dependency or phase-reordering.
 
 ### Step 2.5C: Detect and resolve competing recommendations
 

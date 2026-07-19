@@ -8,8 +8,6 @@ install: core
 
 > Read `review-pr-agents/protocols.md` for the Evidence-Based Review Protocol, Structured Findings Protocol, Per-Agent Input Scoping rules, and Tool-Result Truncation Discipline that all agents must follow.
 
-
-
 **Trigger**: BILLING domain detected
 **Type**: `codebase-explorer` | **Model**: `{SUBAGENT_MODEL}`
 
@@ -32,7 +30,7 @@ If no billing context is configured above, derive the billing flow from the chan
 4. **Failure handling**: What happens to charges when an operation fails?
 5. **Idempotency**: Can a retry cause double-debit?
 6. **Bypass paths**: Is there any code path that bypasses billing entirely?
-7. **Gate regression check**: If the PR contains or preserves a feature gate that restricts endpoint access (e.g., `if "feature_name" not in features`, tier checks, balance thresholds blocking a route), verify the gate existed in the base branch BEFORE the commits being reviewed. Run `git show origin/{base}:{file} | grep -n "gate_pattern"` to check. If the gate was introduced by the same commit chain being fixed — not an independent historical addition — flag it as a potential rogue gate with HIGH severity: the correct fix is to fully revert the gate block, not to patch around it. A rogue gate silently restricts access for all users below a tier or balance threshold without any intentional review of that restriction. This finding is **informational — not a merge blocker**, but must appear in the Findings table so it can be tracked as a follow-up. <!-- Added: forge#278 -->
+7. **Gate regression check**: If the PR contains or preserves a feature gate that restricts endpoint access (e.g., `if "feature_name" not in features`, tier checks, balance thresholds blocking a route), verify the gate existed in the base branch BEFORE the commits being reviewed. Run `git show origin/{base}:{file} | grep -n "gate_pattern"` to check. If the gate was introduced by the same commit chain being fixed — not an independent historical addition — flag it as a potential rogue gate with HIGH severity: the correct fix is to fully revert the gate block, not to patch around it. A rogue gate silently restricts access for all users below a tier or balance threshold without any intentional review of that restriction. This finding is **informational — not a merge blocker**, but must appear in the Findings table so it can be tracked as a follow-up.
 
 ## MANDATORY Before Reporting
 - Search for reconciliation logic before claiming "no reconciliation": `grep -rn "reconcil" $(git ls-files | grep -E "\.(py|js|ts)$")`

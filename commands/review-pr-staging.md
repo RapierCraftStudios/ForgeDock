@@ -86,7 +86,7 @@ The **Evidence-Based Review Protocol** and **Structured Findings Protocol** are 
 
 **This phase is MANDATORY and must execute before Phase 0A. No phase may be skipped.**
 
-**Idempotent re-review (merge-train aware)**: <!-- Added: forge#1328, extended: forge#1332 --> This spec is safe to invoke multiple times on the same PR. Each invocation posts a new `FORGE:REVIEW_ROUTE` marker with the current SHA — re-review passes are distinguished by SHA, not by PR number. When a staging→main deploy PR receives blocking findings and the fixes are pushed to the head branch, re-invoke this spec on the same PR number. Do NOT close the PR and create a new one.
+**Idempotent re-review (merge-train aware)**: This spec is safe to invoke multiple times on the same PR. Each invocation posts a new `FORGE:REVIEW_ROUTE` marker with the current SHA — re-review passes are distinguished by SHA, not by PR number. When a staging→main deploy PR receives blocking findings and the fixes are pushed to the head branch, re-invoke this spec on the same PR number. Do NOT close the PR and create a new one.
 
 **Prior-finding awareness on re-entry**: On each re-invocation, load findings from prior review passes on the same PR before running any new checks. Previously-resolved findings (issues that are now closed or marked `false-positive`) are excluded from the current verdict to avoid re-surfacing already-fixed issues. Previously-unresolved findings (open issues from a prior pass) are carried forward as context so agents know what was previously flagged:
 
@@ -159,7 +159,7 @@ fi
 
 **Purpose**: Prevent deploying commits that have known, unfixed review findings. The review system catches bugs before merging; this gate ensures the merge path acts on that information.
 
-**Why this matters**: Review findings are filed before the originating PR merges to staging. Without this gate, a staging→main bundle can include commits with known unfixed bugs — the review system caught the issue, but the deploy path ignored it. This gate closes the gap between issue discovery and deploy execution. <!-- Added: forge#303 -->
+**Why this matters**: Review findings are filed before the originating PR merges to staging. Without this gate, a staging→main bundle can include commits with known unfixed bugs — the review system caught the issue, but the deploy path ignored it. This gate closes the gap between issue discovery and deploy execution.
 
 ```bash
 git fetch origin $DEFAULT_BRANCH $STAGING_BRANCH
@@ -396,7 +396,7 @@ gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:materia
 <!-- FINDING:... -->
 <!-- REVIEW-FINDINGS-END -->"
 ```
-Include the structured `<!-- REVIEW-FINDINGS-START -->` block even if there are no findings (empty block). This ensures auditability even if the orchestrator crashes mid-review. <!-- Added: forge#1400 -->
+Include the structured `<!-- REVIEW-FINDINGS-START -->` block even if there are no findings (empty block). This ensures auditability even if the orchestrator crashes mid-review.
 
 ---
 
@@ -423,7 +423,7 @@ gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:bug-hun
 <!-- FINDING:BUG-N|CONFIDENCE|SEVERITY|file:line|summary -->
 <!-- REVIEW-FINDINGS-END -->"
 ```
-Where `{service}` is `api`, `worker`, or `web`. Post one comment per service agent. <!-- Added: forge#1400 -->
+Where `{service}` is `api`, `worker`, or `web`. Post one comment per service agent.
 
 ---
 
@@ -442,7 +442,6 @@ gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:code-qu
 <!-- FINDING:QA-N|CONFIDENCE|SEVERITY|file:line|summary -->
 <!-- REVIEW-FINDINGS-END -->"
 ```
-<!-- Added: forge#1400 -->
 
 ---
 
@@ -499,7 +498,7 @@ gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:{domain
 <!-- FINDING:{PREFIX}-N|CONFIDENCE|SEVERITY|file:line|summary -->
 <!-- REVIEW-FINDINGS-END -->"
 ```
-Where `{domain}` is `security`, `auth`, `billing`, `concurrency`, `scraper`, `api-design`, `database`, or `infrastructure`. Post one comment per domain agent. This ensures findings are posted even if the orchestrator crashes mid-review. <!-- Added: forge#1400 -->
+Where `{domain}` is `security`, `auth`, `billing`, `concurrency`, `scraper`, `api-design`, `database`, or `infrastructure`. Post one comment per domain agent. This ensures findings are posted even if the orchestrator crashes mid-review.
 
 ---
 
@@ -518,11 +517,10 @@ gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:regress
 <!-- FINDING:REG-N|CONFIDENCE|SEVERITY|file:line|summary -->
 <!-- REVIEW-FINDINGS-END -->"
 ```
-<!-- Added: forge#1400 -->
 
 **Workflow sibling drift (MANDATORY)**: Deep-diff ci.yml and deploy-production.yml shared jobs. Compare PYTHONPATH, dependency install steps, step names. Pre-existing drift is invisible until deploy fails.
 
-**Database container restart risk (MANDATORY when `docker-compose*.yml` changes touch `postgres` or `redis` service)**: Any change to a stateful container's `command:`, `image:`, `volumes:`, or `environment:` forces container recreation on deploy. Auto-escalate to HIGH risk. Verify: `stop_grace_period` is sufficient (≥30s for PG), `full_page_writes = on`, `fsync = on`, no active long-running transactions will be interrupted. Recommend maintenance window — stateful container restarts must NOT happen as a side effect of routine deploys. A Postgres restart under active write load can corrupt btree indexes and bypass UNIQUE constraints. <!-- Added: forge#146 -->
+**Database container restart risk (MANDATORY when `docker-compose*.yml` changes touch `postgres` or `redis` service)**: Any change to a stateful container's `command:`, `image:`, `volumes:`, or `environment:` forces container recreation on deploy. Auto-escalate to HIGH risk. Verify: `stop_grace_period` is sufficient (≥30s for PG), `full_page_writes = on`, `fsync = on`, no active long-running transactions will be interrupted. Recommend maintenance window — stateful container restarts must NOT happen as a side effect of routine deploys. A Postgres restart under active write load can corrupt btree indexes and bypass UNIQUE constraints.
 
 ---
 
@@ -532,7 +530,7 @@ gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:regress
 
 **Why here**: Phase 6 completes all static analysis (regression risk, security, quality). Phase 6.5 adds the runtime dimension before Phase 7 triages findings — so any test-gate failures can be filed as `test-failure` issues by `/test-gate` itself, then surface in Phase 7's triage pass.
 
-**Posture**: Controlled by `verification.test_gate.posture` in `forge.yaml` (resolved in Config Resolution as `$GATE_POSTURE`). Default: `blocking`. Set to `advisory` to surface failures without preventing deploy. <!-- Added: forge#906 -->
+**Posture**: Controlled by `verification.test_gate.posture` in `forge.yaml` (resolved in Config Resolution as `$GATE_POSTURE`). Default: `blocking`. Set to `advisory` to surface failures without preventing deploy.
 
 ```bash
 echo "=== Phase 6.5: Runtime Test Gate ==="
@@ -684,9 +682,9 @@ fi
 
 Each line of `$FINDINGS` is `PREFIX-N|CONFIDENCE|SEVERITY|file:line|summary`, optionally followed by a 6th `|DISPOSITION` field (`FILE` default, or `NOTED`) — see `commands/review-pr-agents/protocols.md` § Structured Findings Protocol (the sole source of the admission rule; not restated here). If `$FINDINGS` is empty: scan for unstructured findings. If still 0 → skip to Phase 8.
 
-**This extraction was previously prose-only in this file** ("From PR comments, extract structured findings") with no corresponding `$FINDINGS` bash assignment — the identical `gh api ... scan(...)` block from `commands/review-pr.md` Phase 6A is now mirrored here so Phase 7A.5 below has a real value to partition, rather than reading an unset variable. <!-- Fixed during forge#2683 review: 7A.5 previously did `done <<< "$FINDINGS"` against a variable this file never assigned, which would have silently filed zero findings on every staging review. -->
+**This extraction was previously prose-only in this file** ("From PR comments, extract structured findings") with no corresponding `$FINDINGS` bash assignment — the identical `gh api... scan(...)` block from `commands/review-pr.md` Phase 6A is now mirrored here so Phase 7A.5 below has a real value to partition, rather than reading an unset variable.
 
-### 7A.5: Admission Gate — Split FILE vs NOTED <!-- Added: forge#2683 -->
+### 7A.5: Admission Gate — Split FILE vs NOTED
 
 Partition extracted findings by the 6th (`DISPOSITION`) field, defaulting missing/empty to `FILE`:
 

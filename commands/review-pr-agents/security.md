@@ -8,8 +8,6 @@ install: core
 
 > Read `review-pr-agents/protocols.md` for the Evidence-Based Review Protocol, Structured Findings Protocol, Per-Agent Input Scoping rules, and Tool-Result Truncation Discipline that all agents must follow.
 
-
-
 **Type**: `security-exploit-auditor` | **Model**: `{SUBAGENT_MODEL}`
 
 **Prompt template:**
@@ -235,7 +233,7 @@ For each named volume found: determine its container mount point. Named volumes 
 
 **Confidence**: `CONFIRMED` — Docker named volume ownership is an objective, verifiable fact (volumes are root-owned at creation).
 **Severity**: HIGH — filesystem writes fail silently at runtime with `PermissionError`; no startup crash, so the failure only surfaces when the code path executes.
-**Evidence**: When a container's runtime user changes from root to a non-root UID, Docker named volumes retain their existing ownership (root:root). Any code path that writes to a path under a named volume mount point will fail with `[Errno 13] Permission denied`. The fix is to add `chown -R <user>:<group> <mount_point>` to the entrypoint script before the privilege-drop `exec` call. <!-- Added: forge#323 -->
+**Evidence**: When a container's runtime user changes from root to a non-root UID, Docker named volumes retain their existing ownership (root:root). Any code path that writes to a path under a named volume mount point will fail with `[Errno 13] Permission denied`. The fix is to add `chown -R <user>:<group> <mount_point>` to the entrypoint script before the privilege-drop `exec` call.
 
 ## Step 3: Code Quality Scan
 1. **Error handling**: Exceptions swallowed silently, generic except clauses
@@ -256,7 +254,7 @@ For each named volume found: determine its container mount point. Named volumes 
    # Then read the fix itself — what format(s) does it handle?
    gh pr diff [PR_NUMBER] | grep -E "^\+" | grep -iE "json\.loads|split\(','\)|split\(' '\)|csv|,\.join"
    ```
-   Compare documented formats against handled formats. Any documented format not handled by the fix is a gap. A fix that addresses one documented failure mode (e.g., blank string) while leaving another documented format (e.g., CSV) unhandled is an incomplete fix. <!-- Added: forge#190 -->
+   Compare documented formats against handled formats. Any documented format not handled by the fix is a gap. A fix that addresses one documented failure mode (e.g., blank string) while leaving another documented format (e.g., CSV) unhandled is an incomplete fix.
 9. **Scope creep detection**: Compare the PR title/description scope against the actual diff size. When a fix PR's diff contains significantly more logic than its stated scope implies, there is a high risk that the extra code introduces bugs the reviewer is not primed to look for — and that the builder agent added context from a different branch or a different issue.
    ```bash
    # Count lines added in the diff (excluding whitespace-only lines and file headers)
@@ -278,7 +276,7 @@ For each named volume found: determine its container mount point. Named volumes 
 
    **Confidence**: `POSSIBLE` (reviewer cannot always know the full intent — flag for human review, do not hard-block). If the extra code is importing a module from a non-existent path, upgrade to `CONFIRMED HIGH`.
 
-   When a builder agent working in a milestone-branch worktree adds code to a fast-lane fix PR, it can introduce imports of milestone-only modules or feature gate logic unrelated to the stated fix. These additions pass local compilation (the module exists in the worktree) but crash at runtime (the module doesn't exist on the base branch). <!-- Added: forge#277 -->
+   When a builder agent working in a milestone-branch worktree adds code to a fast-lane fix PR, it can introduce imports of milestone-only modules or feature gate logic unrelated to the stated fix. These additions pass local compilation (the module exists in the worktree) but crash at runtime (the module doesn't exist on the base branch).
 
 10. **Architectural fit check**: For any PR that introduces new files in service directories (`services/`, `worker/`, `scripts/`, `tools/`, or project-specific tooling directories like `reddit-bot/`, `bots/`, `cli/`), check whether a scheduled or automated system already handles the same functional capability.
     ```bash
@@ -299,7 +297,7 @@ For each named volume found: determine its container mount point. Named volumes 
 
     **Confidence**: `POSSIBLE` — reviewer may not have full knowledge of all service capabilities. Flag for human verification. Escalate to `CONFIRMED HIGH` only if the existing code path is unambiguously doing the same thing (e.g., both files call the same third-party API endpoint to perform the same action).
 
-    A new standalone script that duplicates a capability owned by an existing service creates split ownership: two code paths performing the same action, each with separate authentication surfaces and no coordination. The review passing on syntax and call signatures does not catch this — the question is whether the new file should exist at all. <!-- Added: forge#279 -->
+    A new standalone script that duplicates a capability owned by an existing service creates split ownership: two code paths performing the same action, each with separate authentication surfaces and no coordination. The review passing on syntax and call signatures does not catch this — the question is whether the new file should exist at all.
 
 11. **Pattern-completion check** *(conditional — when PR title contains "fix" AND the diff removes or narrows a condition or field gate in a router file)*: When a fix PR changes a condition that guards a function call or restricts a set of fields, grep for the same original (unfixed) condition in sibling files within the same router directory. A fix that corrects one router but leaves identical gates in sibling routers is incomplete — users of those endpoints still receive the original error.
     ```bash
@@ -331,7 +329,7 @@ For each named volume found: determine its container mount point. Named volumes 
 
     **Flag as POSSIBLE (MEDIUM) if**: The pattern match is found but the surrounding context is ambiguous (e.g., the field appears in a different kind of condition or with different semantics).
 
-    A condition fix that is limited to the most visible endpoint (the one generating observed errors) leaves users of sibling endpoints experiencing the original bug. The fix is structurally complete only when all callers of the gated operation have been verified. <!-- Added: forge#383 -->
+    A condition fix that is limited to the most visible endpoint (the one generating observed errors) leaves users of sibling endpoints experiencing the original bug. The fix is structurally complete only when all callers of the gated operation have been verified.
 
 ## Step 4: Post Findings
 ```bash

@@ -63,7 +63,6 @@ If no domain context is configured above, derive the architecture from the chang
    git log --all --oneline -10 -- $ROUTER_FILES | head -10
    grep -rn "FIELD_NAME" $(git ls-files | grep -E "\.(py|ts|js)$") | grep -v "^\s*#" | head -20
    ```
-   <!-- Added: forge#382 -->
 10. **Cross-component gate tracing** (conditional — trigger: PR touches both a router file that injects a field into a job payload AND a worker file that reads that field at execution time):
     When a worker-layer review identifies that a resource field (API key, credential, config value) is resolved at use-time from a job payload, the review MUST also trace to the API-layer gate condition that controls injection of that field. A gate can fail at the API layer for logic that executes at the worker layer — both components must be reviewed together.
     - Find the API router that creates the job payload and injects the field. Read the condition that controls whether the field is populated.
@@ -80,7 +79,6 @@ If no domain context is configured above, derive the architecture from the chang
     grep -rn "api_key\|credential\|resource_key\|config_key" \
       $(git ls-files | grep -E "(worker|job|task|handler)" | grep -E "\.(py|ts|js)$") | grep -v "^\s*#" | head -20
     ```
-    <!-- Added: forge#382 -->
 
 ```bash
 # Find all detection-related string constants

@@ -20,7 +20,7 @@ This command enforces ForgeDock's separation-of-concerns principle:
 | **ForgeDock (autonomous)** | Reasoning about architecture, logic, security | Yes | "Is this timeout chain coherent?", "Does this wiring match the deploy script?" |
 | **ForgeDock CI hygiene** | Audit that CI has the right checks for the stack | Once | "Project uses Traefik v3 but CI has no `traefik validate` step → file issue" |
 
-Config validation runs in CI (zero tokens). ForgeDock's role is to ensure the right CI checks exist — not to run them itself. <!-- Added: forge#1104 -->
+Config validation runs in CI (zero tokens). ForgeDock's role is to ensure the right CI checks exist — not to run them itself.
 
 This command is designed to be run:
 - **Once after project setup** to establish CI hygiene baseline
@@ -310,7 +310,7 @@ for tool in "${!TOOL_VALIDATOR_FOUND[@]}"; do
 
 The project uses \`$tool\` (config files present in repo) but the CI pipeline has no structural validation step for \`$tool\` config files. Structural config errors (wrong nesting, missing required keys, version-incompatible syntax) are therefore not caught before merge or deploy.
 
-**Upstream incident**: This CI gap was identified via \`/ci-audit\` following incident analysis showing that review agents verify logical correctness (coherent values, naming consistency, cross-file wiring) but cannot substitute for deterministic structural validators. <!-- Added: forge#1104 -->
+**Upstream incident**: This CI gap was identified via \`/ci-audit\` following incident analysis showing that review agents verify logical correctness (coherent values, naming consistency, cross-file wiring) but cannot substitute for deterministic structural validators.
 
 ## Root Cause
 

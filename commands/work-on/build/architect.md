@@ -29,7 +29,7 @@ COMPLEXITY_BAND=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 COMPLEXITY_BAND="${COMPLEXITY_BAND:-STANDARD}"
 ```
 
-**If COMPLEXITY_BAND: TRIVIAL** → skip all phases (A0 through A5), post NO comment, return empty plan to caller immediately. Do not read any files. This is not an error — trivial single-file changes have no cross-path consistency risk. <!-- Added: forge#679 -->
+**If COMPLEXITY_BAND: TRIVIAL** → skip all phases (A0 through A5), post NO comment, return empty plan to caller immediately. Do not read any files. This is not an error — trivial single-file changes have no cross-path consistency risk.
 
 **If COMPLEXITY_BAND: STANDARD or COMPLEX** → proceed to Phase A0 below.
 
@@ -55,7 +55,7 @@ Parse from $ARGUMENTS:
 Also read from the calling context (in-memory, passed by parent agent):
 - `{INVESTIGATION_REPORT}` — full text of FORGE:INVESTIGATOR comment
 - `{CONTEXT_BRIEFING}` — full text of FORGE:CONTEXT comment (empty string if context step was skipped)
-- `{MEMORY_PRIORS}` — structured prior run blocks emitted by investigate Phase 0.5 (empty string if no priors found or investigate predates memory). When non-empty, treat each `[MEMORY PRIOR]` block as a high-confidence prior: if any prior's affected files overlap with the current plan's affected files, explicitly note the prior's root cause and key lesson in the FORGE:ARCHITECT comment's **Prior Run Priors** section (add this section after **Context Briefing** when priors exist). <!-- Added: forge#1316 -->
+- `{MEMORY_PRIORS}` — structured prior run blocks emitted by investigate Phase 0.5 (empty string if no priors found or investigate predates memory). When non-empty, treat each `[MEMORY PRIOR]` block as a high-confidence prior: if any prior's affected files overlap with the current plan's affected files, explicitly note the prior's root cause and key lesson in the FORGE:ARCHITECT comment's **Prior Run Priors** section (add this section after **Context Briefing** when priors exist).
 
 If any of these are not passed directly, read them from GitHub (fallback/recovery path):
 
@@ -318,7 +318,7 @@ agent defaults                  ← Built-in behaviors
 
 ---
 
-## Phase A1.5: Prior Decision Injection (MANDATORY for STANDARD/COMPLEX — skip for TRIVIAL) <!-- Added: forge#1737 -->
+## Phase A1.5: Prior Decision Injection (MANDATORY for STANDARD/COMPLEX — skip for TRIVIAL)
 
 **Purpose**: Surface ADRs from prior pipeline runs whose anchor paths overlap the contract files before any code is written. Architect plans open with binding prior decisions ("prior decision NNN: chose process substitution over pipes because pipe-RHS subshell loss — #1689") so tradeoffs are not silently re-litigated.
 
@@ -669,7 +669,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ARCHITECT -->
 ## Skip Conditions
 
 Skip this entire step (post nothing, return empty plan to caller) if:
-- **COMPLEXITY_BAND: TRIVIAL** — checked via FORGE:FAST_PATH comment at entry (see guard above) <!-- Primary skip path: forge#679 -->
+- **COMPLEXITY_BAND: TRIVIAL** — checked via FORGE:FAST_PATH comment at entry (see guard above)
 - Issue creates only **new files** with no callers to find (e.g. a new command file with no existing integration point yet)
 - Issue is a 1-file config or docs edit with no code logic
 - Issue title starts with "docs:" or "chore:"
@@ -699,4 +699,4 @@ This module runs at **Step 3C.6** — after Context Gathering, before Implement:
 
 The builder agent reads the `<!-- FORGE:ARCHITECT -->` comment as its **primary input** before writing any code. The raw issue body is secondary context. If the architect step was skipped, the builder falls back to investigation report + contract.
 
-**Devdocs precedence** (Phase A0): `project/custom-instructions.md` has ABSOLUTE priority over all other context. The architect's plan must reflect any directives in that file — if custom instructions mandate a specific pattern, the implementation order and approach MUST follow it, even if the architect's general reasoning suggests an alternative. <!-- Added: forge#259 -->
+**Devdocs precedence** (Phase A0): `project/custom-instructions.md` has ABSOLUTE priority over all other context. The architect's plan must reflect any directives in that file — if custom instructions mandate a specific pattern, the implementation order and approach MUST follow it, even if the architect's general reasoning suggests an alternative.

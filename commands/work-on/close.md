@@ -12,7 +12,7 @@ argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--pr PR_NUM
 **Invoked by**: `work-on.md` Phase 6–7, after `review.md` returns `REVIEW_RESULT: status: COMPLETE`.
 **Output**: Update project board, close issue, update parent tracker, post trajectory log. Return final summary.
 
-**Agent model policy**: `effort: low` (mechanical tier — label transitions, annotation posting, board updates; this file is mechanical end-to-end, so a low effort level is safe here). Fallback: `model: "sonnet"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154. **Note**: this file is dispatched via `Skill("work-on:close", ...)`, which does not support a `model` override — see `work-on.md` section "Model and Effort Tiering — What Actually Applies" for why a `model: "haiku"` claim here would not take effect. <!-- Corrected: forge#1827 -->
+**Agent model policy**: `effort: low` (mechanical tier — label transitions, annotation posting, board updates; this file is mechanical end-to-end, so a low effort level is safe here). Fallback: `model: "sonnet"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154. **Note**: this file is dispatched via `Skill("work-on:close",...)`, which does not support a `model` override — see `work-on.md` section "Model and Effort Tiering — What Actually Applies" for why a `model: "haiku"` claim here would not take effect.
 Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not already in context.
 
 <!-- FORGE:SPEC_LOADED — work-on/close.md loaded and active. Agent is bound by this spec. -->
@@ -129,7 +129,6 @@ The `INVARIANT_ANOMALIES` variable is read in Phase C4.5 (trajectory post) and w
 
 ---
 
-
 ## Phase C1: Final Issue Body Update
 
 **Multi-phase guard**: Before checking off items, detect whether the issue has multiple phases. Only check off items belonging to the current completed phase — not all remaining items across future phases.
@@ -177,7 +176,7 @@ The `REMAINING_AFTER` variable is passed to Phase C2 to decide whether to close.
 
 ---
 
-## Phase C1.7: Module Dossier Append (MANDATORY when PR exists) <!-- Added: forge#1733 -->
+## Phase C1.7: Module Dossier Append (MANDATORY when PR exists)
 
 **Goal**: After each merge that touches a module covered by `devdocs/modules/`, append a dated entry so future agents working on that module receive current institutional knowledge through the binding devdocs channel.
 
@@ -664,7 +663,7 @@ CARD_JSON=$(jq -nc \
 
 ## Phase C5: Trajectory Log (MANDATORY)
 
-**CODEC PATH (forge#1727)**: Post the `<!-- FORGE:TRAJECTORY -->` comment via the protocol codec — do NOT hand-roll the opening tag. Use `forge-annotation.sh write TRAJECTORY --field ...` or `node packages/protocol/src/cli.js emit TRAJECTORY` to produce the opening tag. The codec handles any field escaping automatically.
+**CODEC PATH **: Post the `<!-- FORGE:TRAJECTORY -->` comment via the protocol codec — do NOT hand-roll the opening tag. Use `forge-annotation.sh write TRAJECTORY --field...` or `node packages/protocol/src/cli.js emit TRAJECTORY` to produce the opening tag. The codec handles any field escaping automatically.
 
 ```bash
 # Codec produces the opening <!-- FORGE:TRAJECTORY --> tag
@@ -675,7 +674,7 @@ TRAJECTORY_HEADER=$(node packages/protocol/src/cli.js emit TRAJECTORY)
 
 Post the `<!-- FORGE:TRAJECTORY -->` comment as the final pipeline record.
 
-**Prior delta computation** — read cost-prior for this issue's task_type × module before posting (forge#1743):
+**Prior delta computation** — read cost-prior for this issue's task_type × module before posting:
 
 ```bash
 # Compute actual vs prior cost delta for self-correction of cost priors
@@ -765,7 +764,7 @@ parse --type CARD --field status`. This block is **additive**: all existing `FOR
 consumers select via `contains("FORGE:TRAJECTORY")` and parse the markdown table, so the
 embedded CARD line does not affect them.
 
-**CODEC PATH (forge#1727)**: The `$(node packages/protocol/src/cli.js emit CARD --b64 ...)` call
+**CODEC PATH **: The `$(node packages/protocol/src/cli.js emit CARD --b64...)` call
 above replaces the previous `<!-- FORGE:CARD ${CARD_JSON} -->` inline-JSON form. The Base64url
 form is safe against all HTML comment injection vectors and includes a sha8 integrity prefix for
 truncation detection. Consumers that parsed the old inline-JSON form must migrate to the codec
@@ -779,7 +778,7 @@ Where:
 
 ---
 
-## Phase C5.1: Knowledge Index + Cost Prior Update (forge#1743) <!-- Added: forge#1743 -->
+## Phase C5.1: Knowledge Index + Cost Prior Update
 
 **Goal**: Re-index this issue's knowledge cards and regenerate cost-priors.json so that economic scheduling (orchestrate Step 3E.5) has up-to-date data for future runs. The actual-vs-prior delta recorded in the TRAJECTORY above is the write side of the self-correction loop — this step performs the read/recompute.
 
@@ -802,7 +801,7 @@ fi
 
 ---
 
-## Phase C5.2: Memory Index Update <!-- Added: forge#1316 -->
+## Phase C5.2: Memory Index Update
 
 **Goal**: Append this run's learnings to the per-repo memory index so future `investigate` runs can retrieve relevant priors. This is the write side of the compounding intelligence loop.
 
@@ -847,7 +846,7 @@ Generated by ForgeDock close phase. Each line is a prior pipeline run.
 
 ${MEMORY_ENTRY}
 GIST_EOF
-  # Memory gists MUST be secret — never pass --public here (forge#1587).
+  # Memory gists MUST be secret — never pass --public here.
   # The entry content below embeds real issue titles, root causes, and file
   # paths; for a private consumer repo, --public would publish that content
   # to a world-readable Gist. `gh gist create` is secret by default, so
@@ -925,7 +924,7 @@ fi
 
 ---
 
-## Phase C5.3: Knowledge Ledger Index <!-- Added: forge#1732 -->
+## Phase C5.3: Knowledge Ledger Index
 
 **Goal**: Index the just-closed issue into the Forge Ledger so future context phases can retrieve
 its knowledge cards by file path or symbol without making live GitHub API calls.
@@ -1125,8 +1124,6 @@ if [ "$GDR_EXISTS" != "true" ] && [ -n "{PR_NUMBER}" ]; then
 \`\`\`"
 fi
 ```
-
-<!-- Added: forge#776 -->
 
 ---
 

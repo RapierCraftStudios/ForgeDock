@@ -40,8 +40,6 @@ In all other cases, the gate MUST run.
 
 ## Phase V1: Builder Self-Check — Wire-Through Proof (MANDATORY, run BEFORE quality gate loop)
 
-<!-- Added: forge#1731 -->
-
 Before invoking the quality gate, the builder MUST perform a self-check on newly added conditional paths. This mirrors the quality gate's 2G.8 check and allows the builder to resolve gaps before the gate invocation rather than after.
 
 **Self-check protocol**:
@@ -62,7 +60,7 @@ Before invoking the quality gate, the builder MUST perform a self-check on newly
    - Add a `# WIRE:PROVEN — <method>` annotation explaining how you verified reachability
    - Confirm it qualifies as a trivial re-guard
 
-**Why this matters**: Guards, flags, and validators that are never exercised are functionally dead code. This class has cost multiple sprint cycles in this pipeline (#1230, #1244, #1522, #1580). The self-check catches gaps before the quality gate fires, reducing iteration count. <!-- Added: forge#1731 -->
+**Why this matters**: Guards, flags, and validators that are never exercised are functionally dead code. This class has cost multiple sprint cycles in this pipeline (#1230, #1244, #1522, #1580). The self-check catches gaps before the quality gate fires, reducing iteration count.
 
 ---
 
@@ -400,7 +398,7 @@ git ls-remote --exit-code origin {PR_BASE} >/dev/null 2>&1 || echo "PR_BASE not 
 
 ### V5 Post-Commit: Mark Build Complete (MANDATORY)
 
-After the ancestry audit passes (or is skipped), append `<!-- FORGE:BUILDER:COMPLETE -->` to the existing FORGE:BUILDER comment. This is the **only** place this marker is written — it signals that a real commit exists on the branch and the build is safe to resume-skip. <!-- Added: forge#1305 -->
+After the ancestry audit passes (or is skipped), append `<!-- FORGE:BUILDER:COMPLETE -->` to the existing FORGE:BUILDER comment. This is the **only** place this marker is written — it signals that a real commit exists on the branch and the build is safe to resume-skip.
 
 ```bash
 # Find the FORGE:BUILDER comment posted by implement.md Phase I6
@@ -430,7 +428,7 @@ fi
 
 ---
 
-## Phase V5.1: Auto-ADR Extraction (transactional with PR) <!-- Added: forge#2687 -->
+## Phase V5.1: Auto-ADR Extraction (transactional with PR)
 
 **Goal**: Promote tradeoff-shaped decisions from the just-posted `FORGE:BUILDER` comment's `### Approach`
 section into human-readable, git-tracked ADR markdown files at `devdocs/decisions/NNN-{slug}.md` —
@@ -438,7 +436,7 @@ committed into the **same worktree, before push** so the files ride the issue's 
 reviewed and merged exactly like any other change. Architect plans on future runs load matching ADRs
 as constraints before writing any code.
 
-**Historical note (forge#2687)**: this step previously ran in `close.md` Phase C5.4, *after* the PR
+**Historical note **: this step previously ran in `close.md` Phase C5.4, *after* the PR
 had already merged (`close.md` is invoked with `--pr {PR_NUMBER}` = the merged PR number). Writing
 ADR files that late meant the "commit" (if it even succeeded) landed on a worktree that Phase C6
 deletes moments later — an unreachable local commit, never pushed, never part of any diff. That is

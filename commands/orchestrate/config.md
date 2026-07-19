@@ -55,7 +55,7 @@ DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE")
 NARRATION_MODE=$(yq '.pipeline.narration // "terse"' "$CONFIG_FILE" 2>/dev/null || echo "terse")
 [ "$NARRATION_MODE" = "null" ] && NARRATION_MODE="terse"
 
-# Cascade admission policy (forge#2234) — CLI flags take precedence over forge.yaml, which
+# Cascade admission policy — CLI flags take precedence over forge.yaml, which
 # takes precedence over the "balanced" default. Mirrors the --model <name> precedence
 # pattern below. See docs/CONFIG.md → `orchestration` for the full field reference and
 # `phase-4-execution.md` / `phase-1-resolve.md` for where each resolved value is consumed.
@@ -68,7 +68,7 @@ NARRATION_MODE=$(yq '.pipeline.narration // "terse"' "$CONFIG_FILE" 2>/dev/null 
 # matches the format every valid value actually takes: policy names are
 # `all`/`balanced`/`conservative`; max-generation is a positive integer or `unlimited`;
 # token-budget is a positive integer or `unlimited` — none of these ever contain anything
-# outside `[A-Za-z0-9_-]`. (forge#2301)
+# outside `[A-Za-z0-9_-]`.
 echo "{ARGUMENTS}" | grep -qE -- '--policy[[:space:]]+[A-Za-z0-9_-]+' && \
   CLI_CASCADE_POLICY=$(echo "{ARGUMENTS}" | grep -oE -- '--policy[[:space:]]+[A-Za-z0-9_-]+' | awk '{print $2}')
 echo "{ARGUMENTS}" | grep -qE -- '--max-generation[[:space:]]+[A-Za-z0-9_-]+' && \

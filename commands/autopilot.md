@@ -24,7 +24,7 @@ Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not alrea
 
 You are a fully autonomous deploy loop for this project. Your job is to **detect the current pipeline state, work through all open issues, and deploy everything — without stopping for user confirmation**. Invoking `/autopilot` is the authorization to run to completion.
 
-**Issue selection and priority**: Phase 2 (Fast Lane Loop) dispatches all eligible open issues **concurrently** via the durable engine — ordering is irrelevant at dispatch time because all issues start simultaneously. For scenarios requiring sequential, priority-ordered dispatch (P0 before P1 before P2, unlabeled excluded), use `scripts/select-fix-targets.sh` as the entry point. This script will be the substitution point when #1743 (economic scheduling) implements value/cost-based ordering. <!-- Added: forge#1752 -->
+**Issue selection and priority**: Phase 2 (Fast Lane Loop) dispatches all eligible open issues **concurrently** via the durable engine — ordering is irrelevant at dispatch time because all issues start simultaneously. For scenarios requiring sequential, priority-ordered dispatch (P0 before P1 before P2, unlabeled excluded), use `scripts/select-fix-targets.sh` as the entry point. This script will be the substitution point when #1743 (economic scheduling) implements value/cost-based ordering.
 
 **This command overrides the standard "never merge to main" rule.** `/autopilot` IS the authorized deploy system. It ships staging→main and milestone→staging→main as part of normal operation.
 
@@ -716,7 +716,7 @@ while true; do
       # through the durable engine concurrently (background workers + wait).
       # Dispatch order is irrelevant here — all issues start simultaneously and the
       # engine's per-issue leases prevent conflicts. For sequential priority-ordered
-      # dispatch, use scripts/select-fix-targets.sh instead. <!-- forge#1752 -->
+      # dispatch, use scripts/select-fix-targets.sh instead.
       FAST_LANE_ISSUE_NUMS=$(gh issue list $GH_FLAG \
         --state open \
         --limit 200 \
@@ -1512,8 +1512,6 @@ echo "╚═══════════════════════�
 
 ## Spec-Edit Impact Analysis (MANDATORY before any spec-touching recon fix)
 
-<!-- Added: forge#870 -->
-
 Before autopilot dispatches a recon-created fix (via /orchestrate → /work-on) that edits ForgeDock's own command specs (`commands/*.md`), surface the blast radius via `graph-query.sh`. This prevents spec edits from silently breaking downstream consumers.
 
 **When it runs**: for each issue in `RECON_ISSUES` whose affected files include any path matching `commands/*.md`.
@@ -1591,7 +1589,7 @@ Rules are listed in **precedence order** — when two rules appear to conflict, 
 
 **Rule 8: deploy-pr result is authoritative** — if status is not "merged", do not assume the deploy succeeded. Log and continue the loop.
 
-**Rule 9: Terminal-state verification is mandatory after every dispatch batch.** After every `forgedock run-issue … wait` block or `Skill(orchestrate)` call, autopilot MUST query the actual GitHub label state for each dispatched issue. An issue whose process exits 0 but whose GitHub label is still `workflow:in-review` or `workflow:building` is NOT done — the close phase may have been interrupted. Stalls at `workflow:in-review` with a merged PR are the known recoverable class; autopilot resumes them via `Skill("recover-orphans", args="--issue N")` once before recording them as stalled. The Phase 4 report MUST emit a per-issue disposition table sourced from these GitHub-verified states — self-reported sub-process success is not sufficient. <!-- Added: forge#1751 -->
+**Rule 9: Terminal-state verification is mandatory after every dispatch batch.** After every `forgedock run-issue … wait` block or `Skill(orchestrate)` call, autopilot MUST query the actual GitHub label state for each dispatched issue. An issue whose process exits 0 but whose GitHub label is still `workflow:in-review` or `workflow:building` is NOT done — the close phase may have been interrupted. Stalls at `workflow:in-review` with a merged PR are the known recoverable class; autopilot resumes them via `Skill("recover-orphans", args="--issue N")` once before recording them as stalled. The Phase 4 report MUST emit a per-issue disposition table sourced from these GitHub-verified states — self-reported sub-process success is not sufficient.
 
 **Headless / unattended operation**: `/autopilot` has no human checkpoint and never waits for user input. When invoked via `/loop 4h /autopilot` or any other unattended runner, it runs to completion and exits. Human escalation is exclusively via the `needs-human` label (Rule 2 above) — autopilot surfaces `needs-human` issues in the recon report but never stalls waiting for a response. There is no "Phase 4B confirm before fixing" gate in the current design; that checkpoint was intentionally removed in the #1673 rewrite. If a future design adds a confirmation gate, it must be guarded by both Rule 0 (dry-run) and Rule 2 (needs-human) to remain safe.
 

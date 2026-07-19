@@ -8,7 +8,7 @@ install: extras
 
 ## Phase 4: Generate Improvement Proposals
 
-### 4A: Pattern recurrence analysis — check-promotion threshold <!-- Added: forge#1331 -->
+### 4A: Pattern recurrence analysis — check-promotion threshold
 
 Before the general improvement proposals, scan for `FORGE:PATTERN` tags in review-finding issues closed in the analysis window. When the same pattern slug appears on 3+ distinct issues, emit a check-promotion issue:
 
@@ -118,7 +118,7 @@ done <<< "$PATTERN_LIST"
 
 ---
 
-### 4A.5: Spec-file concentration analysis — spec-doctor trigger <!-- Added: forge#1742 -->
+### 4A.5: Spec-file concentration analysis — spec-doctor trigger
 
 After the check-promotion pass (§4A), scan for spec files whose 30-day review-finding
 concentration exceeds the trigger threshold (≥5 findings referencing the same spec file).

@@ -11,7 +11,7 @@ argument-hint: "[issue number] [--repo {owner}/{repo}] [--gh-flag \"-R {owner}/{
 
 Standalone investigation phase for the work-on pipeline. Validates whether an issue is real, determines root cause, posts a structured FORGE:INVESTIGATOR comment to GitHub, and updates workflow labels.
 
-**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (1A label set, `FORGE:CHECKPOINT` writes) stay at this tier because they're interleaved with the reasoning-heavy investigation steps in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies". <!-- Added: forge#1827 -->
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (1A label set, `FORGE:CHECKPOINT` writes) stay at this tier because they're interleaved with the reasoning-heavy investigation steps in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies".
 Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not already in context.
 
 <!-- FORGE:SPEC_LOADED — work-on/investigate.md loaded and active. Agent is bound by this spec. -->
@@ -29,13 +29,13 @@ If called from `work-on`, these are passed through. If invoked standalone, `--re
 
 ---
 
-## Phase 0.5: Memory Retrieval — Prior Run Priors <!-- Added: forge#1316 -->
+## Phase 0.5: Memory Retrieval — Prior Run Priors
 
 **Goal**: Before investigating, retrieve the top-k relevant prior pipeline runs from the per-repo memory index. Inject confirmed priors into the investigation context so the pipeline compounds intelligence across runs.
 
 **This phase is non-blocking** — if the memory index is absent or retrieval fails, log the reason and proceed to Phase 1A. Never stall the pipeline for memory.
 
-**Note on Gist visibility (forge#1587)**: The memory-index Gist is created **secret** (see `close.md` Phase C5.2 — no `--public` flag). `gh gist list` and `gh gist view` operate against the authenticated user's own Gists by description/id regardless of public/secret status, so the retrieval steps below work unchanged against a secret Gist. No code change is needed here — this note exists only so a future edit doesn't reintroduce a "must be public to be readable" assumption.
+**Note on Gist visibility **: The memory-index Gist is created **secret** (see `close.md` Phase C5.2 — no `--public` flag). `gh gist list` and `gh gist view` operate against the authenticated user's own Gists by description/id regardless of public/secret status, so the retrieval steps below work unchanged against a secret Gist. No code change is needed here — this note exists only so a future edit doesn't reintroduce a "must be public to be readable" assumption.
 
 ### Step 1: Locate memory index Gist
 
@@ -90,7 +90,7 @@ Print these blocks to stdout before Phase 1A begins. During Phase 1B (step 3 —
 
 ---
 
-## Phase 0.6: Forge Ledger Pre-Recall <!-- Added: forge#1740 -->
+## Phase 0.6: Forge Ledger Pre-Recall
 
 **Goal**: Query the Forge Ledger knowledge index for prior cards matching this issue's title terms, affected files, and symbols — **before reading any code**. Inject above-threshold results with explicit delta-verification framing so the investigator builds on prior knowledge rather than re-deriving it.
 
@@ -357,10 +357,10 @@ bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN_LABEL} --repo-path
 
 The comment MUST include a terminal sentinel at the very end, AFTER all required sections are present. **The sentinel is conditional on the resolved Verdict — it is NOT always `<!-- INVESTIGATION:COMPLETE -->`:**
 
-- **Verdict is INVALID** → close with `<!-- INVESTIGATION:INVALID -->`. This is a distinct, already-wired-up terminal marker: `bin/engine/phases.mjs`'s `detectOutcome` for the `investigate` phase checks for it explicitly (ahead of `INVESTIGATION:COMPLETE`) and routes to `terminalReason: "invalid"`; `bin/hooks/interactive-engine.mjs`'s `PHASE_MARKERS` table also already treats it as terminal. Emitting `INVESTIGATION:COMPLETE` for an INVALID verdict is what previously caused every completed investigation to read as `{verdict: "CONFIRMED"}` regardless of actual outcome — do NOT regress this (forge#2350).
+- **Verdict is INVALID** → close with `<!-- INVESTIGATION:INVALID -->`. This is a distinct, already-wired-up terminal marker: `bin/engine/phases.mjs`'s `detectOutcome` for the `investigate` phase checks for it explicitly (ahead of `INVESTIGATION:COMPLETE`) and routes to `terminalReason: "invalid"`; `bin/hooks/interactive-engine.mjs`'s `PHASE_MARKERS` table also already treats it as terminal. Emitting `INVESTIGATION:COMPLETE` for an INVALID verdict is what previously caused every completed investigation to read as `{verdict: "CONFIRMED"}` regardless of actual outcome — do NOT regress this.
 - **Verdict is CONFIRMED or PARTIAL** → close with `<!-- INVESTIGATION:COMPLETE -->` as before (PARTIAL still routes to `ready-to-build` in Phase 1D — only INVALID gets the distinct terminal sentinel).
 
-**Complexity classification (forge#2387)**: Before posting, classify the issue's scope as one of `trivial` / `standard` / `complex`, using the same heuristic `commands/work-on.md`'s Phase 3B `COMPLEXITY_BAND` already applies (reused, not reinvented):
+**Complexity classification **: Before posting, classify the issue's scope as one of `trivial` / `standard` / `complex`, using the same heuristic `commands/work-on.md`'s Phase 3B `COMPLEXITY_BAND` already applies (reused, not reinvented):
 
 | Condition | Complexity |
 |-----------|-----------|
@@ -380,9 +380,9 @@ else
 fi
 ```
 
-**CODEC PATH (forge#1727)**: Construct the annotation body via the protocol codec — do NOT hand-roll the `<!-- FORGE:INVESTIGATOR -->` header. Use `forge-annotation.sh write INVESTIGATOR --field ...` or `node packages/protocol/src/cli.js emit INVESTIGATOR --field ...` to produce the opening tag and completion sentinel. Fill in the Markdown body sections below. The full pattern:
+**CODEC PATH **: Construct the annotation body via the protocol codec — do NOT hand-roll the `<!-- FORGE:INVESTIGATOR -->` header. Use `forge-annotation.sh write INVESTIGATOR --field...` or `node packages/protocol/src/cli.js emit INVESTIGATOR --field...` to produce the opening tag and completion sentinel. Fill in the Markdown body sections below. The full pattern:
 
-**Caveat (forge#2368)**: `packages/protocol/src/types.js`'s `INVESTIGATOR.completionSentinel` is a single fixed value (`'INVESTIGATION:COMPLETE'`) and `packages/protocol/src/emit.js` appends it unconditionally — the codec does NOT currently support the verdict-conditional sentinel selection described above, and cannot emit `INVESTIGATION:INVALID`. Using the CODEC PATH for an INVALID-verdict investigation would silently regress the forge#2350 fix (every investigation would again read as `{verdict: "CONFIRMED"}`). Until the codec is extended to support a verdict-conditional sentinel, the hand-rolled block above/below (using the `${INVESTIGATION_SENTINEL}` variable computed above) is the authoritative path for Phase 1C — do not use the CODEC PATH for this annotation.
+**Caveat **: `packages/protocol/src/types.js`'s `INVESTIGATOR.completionSentinel` is a single fixed value (`'INVESTIGATION:COMPLETE'`) and `packages/protocol/src/emit.js` appends it unconditionally — the codec does NOT currently support the verdict-conditional sentinel selection described above, and cannot emit `INVESTIGATION:INVALID`. Using the CODEC PATH for an INVALID-verdict investigation would silently regress the forge#2350 fix (every investigation would again read as `{verdict: "CONFIRMED"}`). Until the codec is extended to support a verdict-conditional sentinel, the hand-rolled block above/below (using the `${INVESTIGATION_SENTINEL}` variable computed above) is the authoritative path for Phase 1C — do not use the CODEC PATH for this annotation.
 
 ```bash
 # Build the annotation body via codec (escaping and sentinel handled by codec)
@@ -395,7 +395,7 @@ ANNOTATION_BODY=$(node packages/protocol/src/cli.js emit INVESTIGATOR \
   --field "Complexity={trivial|standard|complex}")
 # ANNOTATION_BODY now has opening tag + required fields + INVESTIGATION:COMPLETE sentinel.
 # NOTE: the codec's sentinel is fixed — do not use this path when Verdict=INVALID (see caveat above).
-# Complexity (forge#2387) is optional/additive — not in INVESTIGATOR.requiredFields (packages/protocol/src/types.js),
+# Complexity is optional/additive — not in INVESTIGATOR.requiredFields (packages/protocol/src/types.js),
 # so omitting this --field for an INVALID verdict (see "Complexity classification" note above) is still schema-valid.
 # Append the Markdown body sections to it before posting.
 ```
@@ -421,7 +421,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 **Confidence**: {HIGH|MEDIUM|LOW}
 **Severity**: {CRITICAL|HIGH|MEDIUM|LOW}
 **Task Type**: {Bug Fix|Feature|Refactor|Maintenance|Investigation}
-**Complexity**: {trivial|standard|complex} <!-- forge#2387 — omit this field entirely for an INVALID verdict; see "Complexity classification" above -->
+**Complexity**: {trivial|standard|complex}
 
 ### What Was Claimed
 {summary of what the issue describes}
@@ -455,7 +455,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 **{YES|NO}** — {reason}
 {if YES: proposed sub-issues with titles and dependencies}
 
-### Acceptance Spec <!-- Added: forge#1829 -->
+### Acceptance Spec
 {For each item in the issue's ## Acceptance Criteria section, emit one machine-checkable check line using the format below. If the issue has no Acceptance Criteria section, derive checks from the Recommendation above. Each check MUST be specific, observable, and testable — not vague prose. Checks are consumed by build/validate Phase B6.5 as the merge gate.}
 
 **Quoting (MANDATORY)**: `target=` and `matcher=` MUST always be wrapped in double quotes — `target="..."` / `matcher="..."` — even when the value is a single token (e.g. a plain file path). The downstream Phase B6.5 parser only extracts quoted values; an unquoted `target=`/`matcher=` will silently truncate at the first space and cause a false-negative gate failure for any multi-word value (shell commands with flags/arguments/pipes are almost always multi-word). Neither `target` nor `matcher` may contain a literal `"` character — use single quotes for any embedded string/regex literal inside the value, as shown below. `id=` and `type=` are always single tokens and are never quoted. `description=` is always the last field on the line and is captured to end-of-line — it does not need quoting.
@@ -764,7 +764,7 @@ fi
 
 ### 1D.0: Finding Lifecycle Label Transition (MANDATORY — run before workflow label update)
 
-**Purpose**: Wire the investigation verdict into the finding-validation lifecycle. If the issue under investigation is a review-finding (carries `needs-validation`), translate the verdict into `validated` or `false-positive` using `transition-label.sh --validate`. This is the primary mechanism that resolves the `needs-validation → validated/false-positive` lifecycle gap. <!-- Added: forge#1730 -->
+**Purpose**: Wire the investigation verdict into the finding-validation lifecycle. If the issue under investigation is a review-finding (carries `needs-validation`), translate the verdict into `validated` or `false-positive` using `transition-label.sh --validate`. This is the primary mechanism that resolves the `needs-validation → validated/false-positive` lifecycle gap.
 
 **Run this block regardless of verdict (CONFIRMED, PARTIAL, INVALID) — the verdict-to-label mapping handles all cases:**
 

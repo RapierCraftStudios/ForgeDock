@@ -8,8 +8,6 @@ install: core
 
 > Read `review-pr-agents/protocols.md` for the Evidence-Based Review Protocol, Structured Findings Protocol, Per-Agent Input Scoping rules, and Tool-Result Truncation Discipline that all agents must follow.
 
-
-
 **Trigger**: INFRA service touched
 **Type**: `general-purpose` | **Model**: `{SUBAGENT_MODEL}`
 
@@ -37,14 +35,14 @@ If no infra context is configured above, derive the deployment model from the ch
    - Schedule the restart during a **maintenance window** (low-traffic hours)
    - OR split the change: deploy the stateful config change as a **separate manual operation** with monitoring
    - Verify backups are current before any PG restart
-   A Postgres container restart under active write load can corrupt btree indexes and bypass UNIQUE constraints — the database may return to a consistent state but with structural damage that only surfaces on subsequent writes or queries. <!-- Added: forge#146 -->
+   A Postgres container restart under active write load can corrupt btree indexes and bypass UNIQUE constraints — the database may return to a consistent state but with structural damage that only surfaces on subsequent writes or queries.
 1c. **Functional equivalence on config mechanism change** (when a stateful service's `command:` or `entrypoint:` changes structurally — e.g., inline args → script, or vice versa):
    The old and new configurations MUST produce the same runtime behavior. Verify:
    - Extract the effective config from the OLD approach (parse `command:` args or previous entrypoint)
    - Extract the effective config from the NEW approach (parse new entrypoint/script + env vars)
    - Diff them — flag any settings that changed, disappeared, or gained new defaults
    - **Env var delivery mechanism**: When `command:` uses `${VAR}` (Compose interpolation, host-side parse time) and the new approach uses an entrypoint script that reads `${VAR}` (shell, container runtime), the var MUST be explicitly passed via `environment:` or `env_file:`. Compose interpolation does NOT inject the var into the container — it resolves it before the container starts. If the entrypoint reads `$VAR` but no `environment:` block passes it, the var will be empty inside the container. **This is a CONFIRMED BLOCKING finding.**
-   Compose interpolation (`${VAR}` in `command:`) resolves the variable at parse time on the host before the container starts — it does NOT inject the variable into the container's environment. If the new entrypoint script reads `$VAR` but no `environment:` block passes it, the variable will be empty inside the container. This is a silent misconfiguration that only surfaces at deploy time. <!-- Added: forge#185 -->
+   Compose interpolation (`${VAR}` in `command:`) resolves the variable at parse time on the host before the container starts — it does NOT inject the variable into the container's environment. If the new entrypoint script reads `$VAR` but no `environment:` block passes it, the variable will be empty inside the container. This is a silent misconfiguration that only surfaces at deploy time.
 2. **Blue-green compatibility**: Do old and new versions work simultaneously?
    - API responses compatible?
    - Database schema works with both versions?
@@ -86,7 +84,7 @@ If no infra context is configured above, derive the deployment model from the ch
 
    **Recommended fix**: Update ALL behavioral consumers in the same PR as the endpoint change. If a consumer is in a deploy script or CI workflow, updating it after the endpoint change has already shipped creates a window where every deploy will roll back.
 
-   A response contract change that updates only the endpoint while leaving downstream consumers on the old format is equivalent to a breaking API change deployed without a migration path — the breakage surfaces at the worst possible time: during a production deploy. <!-- Added: forge#321 -->
+   A response contract change that updates only the endpoint while leaving downstream consumers on the old format is equivalent to a breaking API change deployed without a migration path — the breakage surfaces at the worst possible time: during a production deploy.
 
 7. **Secret delivery chain** (when secrets scripts, encrypted secret files, or deploy workflows change):
    Trace the FULL path a secret takes from its source (SOPS, Vault, CI secrets, etc.) to the running container. Read the relevant files from `[DOMAIN_CONTEXT]` (or discover them via `git ls-files | grep -iE "secret|decrypt|\.env"`) and verify consistency:
@@ -123,7 +121,7 @@ If no infra context is configured above, derive the deployment model from the ch
    f.write(f'{key}="{value}"\n')
    ```
 
-   An allowlist-based quoting approach in a secret-decryption script will silently fail for any metacharacter not in the list. Secret values (passwords, API keys, OAuth tokens) can contain any character — allowlists are guaranteed to be incomplete. The only safe approach is always-quote. <!-- Added: forge#286 -->
+   An allowlist-based quoting approach in a secret-decryption script will silently fail for any metacharacter not in the list. Secret values (passwords, API keys, OAuth tokens) can contain any character — allowlists are guaranteed to be incomplete. The only safe approach is always-quote.
 8. **Cross-domain service interactions** (when shell scripts curl/wget internal services):
    For every `curl` or `wget` command in changed shell scripts that targets an internal service (API, worker, Redis, Postgres), trace the HTTP request through the target application's middleware stack:
    - Find the application entrypoint: `grep -rn "TrustedHostMiddleware\|allowed_hosts\|trusted_host" $(git ls-files | grep -E "\.(py|ts|js)$") | head -10` — check the `allowed_hosts` list. Does the curl's `Host` header value match an allowed entry? (Default `Host` is the URL hostname — a bare container IP like `172.18.0.x` is NOT `localhost`.)
@@ -166,7 +164,7 @@ If no infra context is configured above, derive the deployment model from the ch
    done
    ```
    If the `.env.example` comment says "comma-separated", "CSV", or shows a bare `a,b,c` example value for a `list[str]` field: **CONFIRMED HIGH** — the documented format crashes pydantic-settings v2 on startup. The fix is to update `.env.example` to show JSON format (`["a","b","c"]`) as primary, OR add a custom settings source that handles CSV as a fallback.
-   pydantic-settings v2 parses `list[str]` fields via `json.loads()` — it requires JSON array format. A `.env.example` comment saying "comma-separated" on a `list[str]` field is a guaranteed startup crash for any operator who follows the documented format. The type annotation and the documented format must agree. <!-- Added: forge#190 -->
+   pydantic-settings v2 parses `list[str]` fields via `json.loads()` — it requires JSON array format. A `.env.example` comment saying "comma-separated" on a `list[str]` field is a guaranteed startup crash for any operator who follows the documented format. The type annotation and the documented format must agree.
 12. **appleboy/ssh-action Go template safety** (when `.github/workflows/*.yml` changes include `appleboy/ssh-action` steps):
    The `appleboy/ssh-action` action processes every `script:` field through Go's `text/template` engine **client-side, before SSH transmission**. Any `{{` in the script — including in comments, `docker ps --format` strings, and `docker inspect --format` strings — is interpreted as a Go template directive. If the expression does not resolve against the action's data context (which is an empty map for `appleboy/ssh-action`), the step exits with status 1 **before the script reaches the remote shell**. Shell error handlers (`|| fallback`, `2>/dev/null`, `set -e`) are completely bypassed. If `continue-on-error: true` is set, GitHub Actions will report overall success — masking the failure silently.
 
@@ -192,7 +190,7 @@ If no infra context is configured above, derive the deployment model from the ch
    - `docker ps --format '{{.Names}}'` → `docker ps --format json | jq -r '.Names'`
    - `docker ps --format '{{.Status}}'` → `docker ps --format json | jq -r '.Status'`
 
-   Both function call forms (`{{index .X Y}}`) and field accessor forms (`{{.FieldName}}`) fail on `appleboy/ssh-action`'s empty data context. A partial fix that replaces only one form while leaving the other is insufficient — search for ALL `{{` occurrences, not just the specific form that triggered the initial investigation. <!-- Added: forge#226 -->
+   Both function call forms (`{{index.X Y}}`) and field accessor forms (`{{.FieldName}}`) fail on `appleboy/ssh-action`'s empty data context. A partial fix that replaces only one form while leaving the other is insufficient — search for ALL `{{` occurrences, not just the specific form that triggered the initial investigation.
 
 13. **Insecure config file defaults** (when any `traefik/`, `infra/nginx/`, `infra/`, or CI config file is in the diff):
    Config files that use shell-style variable substitution with fallback values (`${VAR:-default}`) are safe only when the fallback itself is safe. The INFRA agent checks whether the env var is delivered to the container (items 7 and 7b) — but does NOT check whether the fallback value is a credential placeholder that becomes active if the env var is absent in production.
@@ -226,7 +224,7 @@ If no infra context is configured above, derive the deployment model from the ch
 
    **Recommended fix**: Remove the fallback entirely (`${VAR}` not `${VAR:-placeholder}`) and make the env var required in `env_validation.py`. If the service cannot start without the credential, a startup crash is safer than running with a default credential.
 
-   The INFRA agent's secret delivery chain verification (env var present in ENV_MAPPING) does NOT verify whether the fallback value is safe. A config file can pass all delivery chain checks while still containing an active placeholder credential for any environment where the env var is absent. This check targets that gap. <!-- Added: forge#301 -->
+   The INFRA agent's secret delivery chain verification (env var present in ENV_MAPPING) does NOT verify whether the fallback value is safe. A config file can pass all delivery chain checks while still containing an active placeholder credential for any environment where the env var is absent. This check targets that gap.
 
 14. **Host-side database tool invocations in deploy scripts** (when `.github/workflows/*.yml`, `scripts/deploy*.sh`, or any deploy entrypoint script in the diff invokes `psql`, `createdb`, or `pg_dump` directly on the host):
    Host-side `psql`, `createdb`, and `pg_dump` connect to PostgreSQL via the host's port binding (`localhost:5432` or `127.0.0.1:5432`). In SSH-based deploy contexts, the host-side port mapping to PostgreSQL's Docker container is unreliable — the listening address may differ from what the SSH session can reach, and the mapping is not guaranteed to be present at all in hardened host configurations. The safe pattern is to use `docker exec <postgres-container>` for all database operations in deploy scripts.
@@ -257,7 +255,7 @@ If no infra context is configured above, derive the deployment model from the ch
    - `createdb -h localhost -U $USER $DB_NAME` → `docker exec [DB_CONTAINER] createdb -U $USER $DB_NAME`
    - `pg_dump -h localhost -U $USER $DB` → `docker exec [DB_CONTAINER] pg_dump -U $USER $DB`
 
-   Host-side port bindings to Docker containers are unreliable in SSH deploy contexts. Deploy scripts that invoke database tools directly cannot depend on `localhost:5432` being reachable; the same operation via `docker exec` bypasses the host network entirely and always succeeds when the container is running. <!-- Added: forge#322 -->
+   Host-side port bindings to Docker containers are unreliable in SSH deploy contexts. Deploy scripts that invoke database tools directly cannot depend on `localhost:5432` being reachable; the same operation via `docker exec` bypasses the host network entirely and always succeeds when the container is running.
 
 15. **External tool config schema validation** (when any config file consumed by an external tool is in the diff — trigger: files under `traefik/`, `infra/nginx/`, `k8s/`, `terraform/`, `*.conf`, `*.toml`, or any `docker-compose*.yml` with non-trivial changes to service definitions):
 
@@ -305,7 +303,7 @@ If no infra context is configured above, derive the deployment model from the ch
    - Version mismatch (config uses v2 syntax on v3 tool): **CONFIRMED HIGH** — v3 silently ignores v2 keys in most tools
    - Structural ambiguity (key could plausibly be correct but version cannot be determined): **LIKELY MEDIUM** — flag for human verification with schema reference
 
-   **Do NOT rely solely on logical correctness checks when structural correctness has not been verified.** A config that names services correctly, uses coherent values, and matches the deploy script's expectations can still be silently rejected if the nesting does not match the tool's schema. Both dimensions must be verified independently. <!-- Added: forge#1104 -->
+   **Do NOT rely solely on logical correctness checks when structural correctness has not been verified.** A config that names services correctly, uses coherent values, and matches the deploy script's expectations can still be silently rejected if the nesting does not match the tool's schema. Both dimensions must be verified independently.
 
 ## Post Findings
 ```bash
