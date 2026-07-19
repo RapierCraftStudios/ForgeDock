@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync, chmodSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, pruneStaleExtensionlessEntries } from "../journey.mjs";
+import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, atomicSymlinkInstall, pruneStaleExtensionlessEntries } from "../journey.mjs";
 import { detectEnvironment } from "../env-detect.mjs";
 
 const VALUES = {
@@ -2130,6 +2130,45 @@ describe("forge (Act II)", () => {
       const link = join(dirT, "link.md");
       symlinkSync(targetDirEntry, link);
       assert.equal(await isSymlinkTraversable(link), false);
+    });
+  });
+
+  describe("atomicSymlinkInstall (forge#2679)", () => {
+    it("an unreadable verdict does not unlink or remove an existing target", async () => {
+      // Regression for the rename-readback TOCTOU: when the freshly-created
+      // link is not traversable, the helper must discard it as tmp and leave
+      // any pre-existing target untouched — it must NOT rename the dead link
+      // over target and then unlink target (which the pre-fix code did, and
+      // which could remove a *concurrent* installer's fresh link).
+      const dirT = mkdtempSync(join(os.tmpdir(), "fd-atomic-unreadable-"));
+      const target = join(dirT, "cmd.md");
+      writeFileSync(target, "PRE-EXISTING CONTENT", "utf-8");
+      // Point the symlink at a non-existent source → the tmp readback fails
+      // (readFile through a dangling link throws) → "unreadable".
+      const missingSrc = join(dirT, "does-not-exist-src.md");
+
+      const result = await atomicSymlinkInstall(missingSrc, target);
+
+      assert.equal(result, "unreadable");
+      assert.ok(existsSync(target), "existing target must survive an unreadable verdict");
+      assert.equal(
+        readFileSync(target, "utf-8"),
+        "PRE-EXISTING CONTENT",
+        "target content must be untouched — helper must not unlink target (forge#2679)",
+      );
+    });
+
+    it("returns 'linked' and installs a traversable symlink for a readable source", async () => {
+      const dirT = mkdtempSync(join(os.tmpdir(), "fd-atomic-linked-"));
+      const src = join(dirT, "src.md");
+      writeFileSync(src, "SOURCE", "utf-8");
+      const target = join(dirT, "cmd.md");
+
+      const result = await atomicSymlinkInstall(src, target);
+
+      assert.equal(result, "linked");
+      assert.ok(existsSync(target), "target symlink installed");
+      assert.equal(readFileSync(target, "utf-8"), "SOURCE", "symlink resolves to source content");
     });
   });
 
