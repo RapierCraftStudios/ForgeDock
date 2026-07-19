@@ -925,7 +925,25 @@ async function acquireManifestLock(manifestPath) {
       try {
         const st = await lstat(lockPath);
         if (Date.now() - st.mtimeMs >= STALE_MANIFEST_LOCK_AGE_MS) {
-          await unlink(lockPath).catch(() => {});
+          // Re-stat immediately before deleting and only unlink if it's
+          // provably the SAME file we just judged stale (matching inode +
+          // mtime) — a plain lstat-then-unlink-by-path has a window where
+          // the original holder releases and a brand-new live holder
+          // acquires a fresh lock at this same path in between; unlinking
+          // by path alone would then delete that new holder's live lock,
+          // reproducing the exact race this lock exists to prevent, one
+          // layer down (review finding on PR #2654). If the file changed
+          // (or vanished) between the two stats, leave it alone — some
+          // other process has since claimed or released the path — and let
+          // the next retry iteration re-evaluate from scratch.
+          try {
+            const st2 = await lstat(lockPath);
+            if (st2.ino === st.ino && st2.mtimeMs === st.mtimeMs) {
+              await unlink(lockPath).catch(() => {});
+            }
+          } catch {
+            // vanished between the two stats — already released, nothing to reclaim
+          }
         }
       } catch {
         // lock file vanished between the failed open and this stat (the
