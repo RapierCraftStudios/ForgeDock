@@ -566,7 +566,7 @@ describe("preflight", () => {
 // Task 6: forge & findMarkdownFiles tests
 // ---------------------------------------------------------------------------
 
-import { lstatSync, mkdirSync as mkdirSyncFs, symlinkSync, statSync } from "node:fs";
+import { lstatSync, mkdirSync as mkdirSyncFs, symlinkSync, statSync, readlinkSync } from "node:fs";
 
 /**
  * A command is installed if the target is a symlink (Developer Mode / admin /
@@ -1890,6 +1890,47 @@ describe("forge (Act II)", () => {
     assert.equal(finalManifest.files["a.md"], true, "this run's own entry must be present");
   });
 
+  it("a lock younger than the new 30s threshold (but older than the old 10s one) is NOT reclaimed (forge#2655)", async () => {
+    // Regression guard for the STALE_MANIFEST_LOCK_AGE_MS bump (10s -> 30s,
+    // forge#2655): backdate the held lock's mtime to 20s ago — past the old
+    // threshold, but still well within the new one. A correct implementation
+    // must leave this lock completely untouched (never reclaim it) and fall
+    // back to an unlocked save instead, exactly like the "held for the full
+    // retry budget" case below. If the threshold ever regresses back toward
+    // 10s, this lock would incorrectly get reclaimed and unlinked/replaced —
+    // this test catches that by asserting the original lock file survives
+    // byte-for-byte (same mtime) after forge() completes.
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-boundary-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-boundary-src-"));
+    mkdirSync(join(forgeHome, "commands"), { recursive: true });
+    mkdirSync(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "content a", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const manifestPath = join(home, ".claude", "forgedock", "copied-commands.json");
+    const lockPath = manifestPath + ".lock";
+    mkdirSync(join(home, ".claude", "forgedock"), { recursive: true });
+    writeFileSync(manifestPath, JSON.stringify({ version: 1, files: {} }, null, 2) + "\n", "utf-8");
+
+    writeFileSync(lockPath, "", "utf-8");
+    const boundaryTime = new Date(Date.now() - 20_000); // 20s old: > old 10s threshold, < new 30s threshold
+    utimesSync(lockPath, boundaryTime, boundaryTime);
+    const originalMtimeMs = statSync(lockPath).mtimeMs;
+
+    const { ctx, w } = stubCtx({ home, linkStrategy: "copy" });
+    ctx.forgeHome = forgeHome;
+
+    const res = await forge(ctx);
+
+    assert.equal(res.copied, 1, "this run should have copied its own file even without the lock");
+    assert.ok(existsSync(lockPath), "a lock younger than the new threshold must survive untouched, not be reclaimed");
+    assert.equal(
+      statSync(lockPath).mtimeMs,
+      originalMtimeMs,
+      "the held lock's mtime must be unchanged — proves it was never re-stat'd-and-unlinked by the reclaim path",
+    );
+  });
+
   it("falls back to an unlocked save (never-abort contract preserved) when the lock cannot be acquired within the retry budget (forge#2637)", async () => {
     const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-heldfull-"));
     const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-heldfull-src-"));
@@ -2167,6 +2208,83 @@ describe("forge (Act II)", () => {
       const pruned = await pruneStaleExtensionlessEntries(targetDir);
       assert.equal(pruned, 1);
       assert.ok(!existsSync(link));
+    });
+
+    it("leaves a Windows drive-relative symlink target (e.g. \"C:foo\") untouched rather than mis-joining it (forge#2659)", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-driverel-"));
+      const link = join(targetDir, "orchestrate");
+      // "C:foo" — drive letter + colon with NO separator after it — is
+      // classified as "relative" by both path.win32.isAbsolute() and
+      // path.posix.isAbsolute() (neither recognizes this shape as absolute),
+      // so it would previously fall into the join(targetDir, linkTarget)
+      // branch and produce a nonsensical resolved path. It cannot be
+      // resolved correctly without knowing the drive's own cwd, which Node
+      // has no API for — the correct behavior is to leave the entry alone.
+      symlinkSync("C:foo", link);
+      // Native Windows symlink creation resolves a drive-relative target
+      // against the process's cwd at creation time (CreateSymbolicLink
+      // semantics), so readlink() here would return an already-absolute
+      // path rather than the literal "C:foo" string this test targets — the
+      // literal-string scenario only arises from a symlink created by an
+      // external tool that preserves the raw string (e.g. on POSIX, where
+      // symlink() never interprets its target). Skip on platforms where the
+      // literal string can't actually be constructed via symlinkSync rather
+      // than assert something this environment can't reproduce.
+      if (readlinkSync(link) !== "C:foo") return;
+      const pruned = await pruneStaleExtensionlessEntries(targetDir);
+      assert.equal(pruned, 0, "drive-relative target must not be pruned — cannot be resolved safely");
+    });
+
+    it("does NOT mistake a genuinely drive-absolute target (\"C:\\\\foo\") for drive-relative", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-driveabs-"));
+      const realTarget = join(targetDir, "real-target.md");
+      writeFileSync(realTarget, "REAL", "utf-8");
+      const link = join(targetDir, "orchestrate");
+      symlinkSync(realTarget, link); // absolute target (e.g. "C:\...\real-target.md" on Windows)
+      const pruned = await pruneStaleExtensionlessEntries(targetDir);
+      assert.equal(pruned, 0, "a genuinely absolute target must resolve normally and not be pruned");
+      assert.ok(existsSync(link));
+    });
+
+    it("expands a leading ~ against the home directory before resolving the target (forge#2660)", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-tilde-"));
+      const homeDir = mkdtempSync(join(os.tmpdir(), "fd-stale-tildehome-"));
+      const realTargetHomeRelative = join(homeDir, "real-target.md");
+      writeFileSync(realTargetHomeRelative, "REAL", "utf-8");
+      const originalHomedir = os.homedir;
+      os.homedir = () => homeDir;
+      try {
+        const link = join(targetDir, "orchestrate");
+        symlinkSync("~/real-target.md", link); // literal tilde-prefixed target, as readlink() would return it
+        const pruned = await pruneStaleExtensionlessEntries(targetDir);
+        // NOTE: cannot assert existsSync(link) here — existsSync follows the
+        // symlink using the OS's own (non-tilde-aware) resolution, which
+        // would report the link as broken regardless of our custom
+        // expansion. pruned === 0 is the correct, complete assertion: it
+        // proves pruneStaleExtensionlessEntries itself resolved the tilde
+        // target to the real, existing file and therefore left the entry
+        // alone (matches this describe block's existing convention — see
+        // "does not touch entries with a file extension" above).
+        assert.equal(pruned, 0, "tilde target must expand against home dir and resolve to the existing file");
+      } finally {
+        os.homedir = originalHomedir;
+      }
+    });
+
+    it("still prunes a tilde-prefixed target that is genuinely missing under the home directory", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-tilde-missing-"));
+      const homeDir = mkdtempSync(join(os.tmpdir(), "fd-stale-tildehome-missing-"));
+      const originalHomedir = os.homedir;
+      os.homedir = () => homeDir;
+      try {
+        const link = join(targetDir, "orchestrate");
+        symlinkSync("~/does-not-exist.md", link);
+        const pruned = await pruneStaleExtensionlessEntries(targetDir);
+        assert.equal(pruned, 1);
+        assert.ok(!existsSync(link));
+      } finally {
+        os.homedir = originalHomedir;
+      }
     });
   });
 
