@@ -469,6 +469,191 @@ async function fetchReviewFindingsForPr(prNumber, io, repo) {
 }
 
 /**
+ * Maximum number of file-basename search terms `fetchFailureMemory()` will
+ * issue `gh issue list --search` calls for. Bounds the fan-out (2 calls per
+ * term — review-finding + workflow:invalid) the same way
+ * `fetchReviewFindingsForPr()`'s per-PR loop is bounded by the number of
+ * linked PRs, not by an explicit cap of its own — here there is no natural
+ * cap on `affectedFiles.length`, so one is set explicitly.
+ */
+const MAX_FAILURE_MEMORY_SEARCH_TERMS = 5;
+
+/** Maximum number of ranked failure-memory items `rankFailureMemory()`
+ * returns. Keeps the rendered excerpt bounded before it even reaches
+ * `truncateToBytes()` — mirrors `renderLinkedPrsExcerpt()`'s `.slice(0, 10)`
+ * per-PR finding cap. */
+const MAX_FAILURE_MEMORY_ITEMS = 10;
+
+/**
+ * Derive `gh issue list --search` terms from affected-file paths: the
+ * basename only (e.g. `bin/engine/contextpack.mjs` -> `contextpack.mjs`),
+ * deduplicated, capped to `MAX_FAILURE_MEMORY_SEARCH_TERMS`. Using the
+ * basename (not the full path, not a bare extension) keeps search terms
+ * specific enough to avoid noisy false-positive matches — a bare `mjs`
+ * term would match nearly every issue in a JS-heavy repo.
+ */
+function deriveFailureMemorySearchTerms(affectedFiles) {
+  if (!Array.isArray(affectedFiles)) return [];
+  const seen = new Set();
+  const terms = [];
+  for (const file of affectedFiles) {
+    if (typeof file !== 'string' || !file) continue;
+    const basename = file.split('/').pop();
+    if (!basename || seen.has(basename)) continue;
+    seen.add(basename);
+    terms.push(basename);
+    if (terms.length >= MAX_FAILURE_MEMORY_SEARCH_TERMS) break;
+  }
+  return terms;
+}
+
+/**
+ * Run one `gh issue list --state closed --label {label} --search {term}`
+ * query and normalize its result. Fail-open per call: a `gh` failure
+ * returns `{items: [], fetchError}` rather than throwing or silently
+ * reporting zero results — the same contract `fetchReviewFindingsForPr()`
+ * establishes (see forge#2715/#2716/#2717, review findings on PR #2713,
+ * for the bug class this guards against: a discarded error indistinguishable
+ * from a genuine empty result).
+ */
+async function fetchFailureMemoryForTerm(term, label, io, repo) {
+  let out;
+  try {
+    out = await io.gh([
+      'issue',
+      'list',
+      '--state',
+      'closed',
+      '--label',
+      label,
+      '--search',
+      term,
+      '--json',
+      'number,title,body,closedAt',
+      ...repoArgs(repo),
+    ]);
+  } catch (err) {
+    return { items: [], fetchError: String(err && err.message ? err.message : err) };
+  }
+  try {
+    const parsed = JSON.parse(out || '[]');
+    return {
+      items: Array.isArray(parsed)
+        ? parsed.map((i) => ({
+            number: i.number,
+            title: i.title || '',
+            body: i.body || '',
+            closedAt: i.closedAt || null,
+            label,
+          }))
+        : [],
+    };
+  } catch (err) {
+    return { items: [], fetchError: `unparseable gh issue list output: ${String(err && err.message ? err.message : err)}` };
+  }
+}
+
+/**
+ * Mine prior-failure/finding history for the modules an issue touches:
+ * closed `review-finding` issues and closed `workflow:invalid` issues whose
+ * title/body/search-index mentions one of `affectedFiles`'s basenames.
+ * Deterministic, no-LLM (forge#2681) — every item returned is a raw `gh`
+ * result, not a synthesized summary.
+ *
+ * Fail-open: any single `gh` call failing degrades that call's contribution
+ * to an empty list plus a recorded error (surfaced by the caller via
+ * `meta.failureMemoryFetchErrors`); it never throws and never blanks items
+ * already successfully fetched from other terms/labels.
+ *
+ * @param {string[]} affectedFiles
+ * @param {{gh: Function}} io
+ * @param {string} [repo]
+ * @returns {Promise<{items: Object[], fetchErrors: string[]}>}
+ */
+async function fetchFailureMemory(affectedFiles, io, repo) {
+  const terms = deriveFailureMemorySearchTerms(affectedFiles);
+  if (terms.length === 0) return { items: [], fetchErrors: [] };
+
+  const seen = new Set();
+  const items = [];
+  const fetchErrors = [];
+
+  for (const term of terms) {
+    for (const label of ['review-finding', 'workflow:invalid']) {
+      const { items: found, fetchError } = await fetchFailureMemoryForTerm(term, label, io, repo);
+      if (fetchError) fetchErrors.push(`${label}/"${term}": ${fetchError}`);
+      for (const item of found) {
+        if (item.number == null || seen.has(item.number)) continue;
+        seen.add(item.number);
+        items.push(item);
+      }
+    }
+  }
+
+  return { items, fetchErrors };
+}
+
+/**
+ * Rank failure-memory items deterministically — same-module hit count
+ * (desc) first, tie-broken by recency (closedAt desc). No embedding/LLM
+ * similarity scoring anywhere, per forge#2681's explicit "Deterministic
+ * ranking (recency × same-module hits) — no embedding/LLM similarity in
+ * v1" requirement. Items whose same-module hit count is 0 (matched only by
+ * the GitHub search API's own relevance ranking, not an actual basename
+ * mention in title/body) are dropped — this is the primary noise filter
+ * against overly broad search-API matches.
+ *
+ * Pure function — no I/O.
+ *
+ * @param {Object[]} items - raw items from `fetchFailureMemory()`
+ * @param {string[]} affectedFiles
+ * @returns {Object[]} ranked, filtered, capped to `MAX_FAILURE_MEMORY_ITEMS`
+ */
+function rankFailureMemory(items, affectedFiles) {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  const basenames = Array.isArray(affectedFiles)
+    ? [...new Set(affectedFiles.map((f) => (typeof f === 'string' ? f.split('/').pop() : '')).filter(Boolean))]
+    : [];
+
+  const scored = items.map((item) => {
+    const haystack = `${item.title || ''}\n${item.body || ''}`.toLowerCase();
+    const hitCount = basenames.reduce((n, b) => (b && haystack.includes(b.toLowerCase()) ? n + 1 : n), 0);
+    return { item, hitCount };
+  });
+
+  return scored
+    .filter((s) => s.hitCount > 0)
+    .sort((a, b) => {
+      if (b.hitCount !== a.hitCount) return b.hitCount - a.hitCount;
+      const aTime = a.item.closedAt ? Date.parse(a.item.closedAt) : 0;
+      const bTime = b.item.closedAt ? Date.parse(b.item.closedAt) : 0;
+      return bTime - aTime;
+    })
+    .slice(0, MAX_FAILURE_MEMORY_ITEMS)
+    .map((s) => s.item);
+}
+
+/**
+ * Render ranked failure-memory items as a bounded excerpt: heading + one
+ * bullet per item, quoted title + issue number + label only — never
+ * synthesized prose, per forge#2681's "Injected content is quoted history
+ * with issue/PR links — never synthesized prose — so an agent can verify
+ * any claim at the source" safety guard. Returns "" for an empty list.
+ *
+ * Pure function — no I/O.
+ */
+function renderFailureMemoryExcerpt(items) {
+  if (!Array.isArray(items) || items.length === 0) return '';
+  const lines = ['## Prior Failures / Findings on These Modules'];
+  for (const item of items) {
+    if (!item || item.number == null) continue;
+    const kind = item.label === 'workflow:invalid' ? 'closed as invalid' : 'review finding';
+    lines.push(`- #${item.number} (${kind}): ${item.title || ''}`);
+  }
+  return lines.length > 1 ? lines.join('\n') : '';
+}
+
+/**
  * Mine deterministic, structured GitHub context for `issueNumber`. Zero LLM
  * calls — every field below is either raw `gh` output or a regex/registry
  * parse of that output.
@@ -516,6 +701,22 @@ export async function mineContext(issueNumber, opts = {}) {
     linkedPrs.push({ number: prNumber, reviewFindings });
   }
 
+  // forge#2681: prior-remediation/failure-history mining. Wrapped in its own
+  // try/catch even though `fetchFailureMemory()` is internally fail-open —
+  // defense in depth, matching the existing per-field pattern above: a bug
+  // in the new mining path must never propagate out of `mineContext()` and
+  // blank fields (issue, comments, annotations, ...) that were already
+  // successfully mined.
+  let failureMemory = [];
+  let failureMemoryFetchErrors = [];
+  try {
+    const result = await fetchFailureMemory(affectedFiles, io, repo);
+    failureMemory = result.items;
+    failureMemoryFetchErrors = result.fetchErrors;
+  } catch (err) {
+    failureMemoryFetchErrors = [String(err && err.message ? err.message : err)];
+  }
+
   return {
     issue,
     comments,
@@ -523,6 +724,7 @@ export async function mineContext(issueNumber, opts = {}) {
     affectedFiles,
     linkedPrs,
     gists,
+    failureMemory,
     meta: {
       issueNumber: typeof issueNumber === 'number' ? issueNumber : Number(issueNumber),
       repo: repo || null,
@@ -536,6 +738,7 @@ export async function mineContext(issueNumber, opts = {}) {
       ...(partialParseFailure ? { partialParseFailure: true } : {}),
       ...(linkedPrsFetchError ? { linkedPrsFetchError } : {}),
       ...(Object.keys(reviewFindingsFetchErrors).length > 0 ? { reviewFindingsFetchErrors } : {}),
+      ...(failureMemoryFetchErrors.length > 0 ? { failureMemoryFetchErrors } : {}),
     },
   };
 }
@@ -662,10 +865,21 @@ function renderSliceContent(sliceName, minedData) {
     ? minedData.annotations.filter((a) => a && annotationTypes.has(a.type))
     : [];
 
+  // forge#2681: failure-memory (prior review-findings / closed-as-invalid
+  // history on overlapping modules) is injected into the investigate and
+  // build slices only — never review. A review-phase agent is looking at
+  // its OWN just-built PR, not re-deriving prior-attempt history; that
+  // context already served its purpose upstream at investigate/build time.
+  const includeFailureMemory = sliceName === 'investigate' || sliceName === 'build';
+  const failureMemoryExcerpt = includeFailureMemory
+    ? renderFailureMemoryExcerpt(rankFailureMemory(minedData.failureMemory, minedData.affectedFiles))
+    : '';
+
   const sections = [
     sliceName === 'investigate' ? renderIssueExcerpt(minedData.issue) : '',
     renderAffectedFilesExcerpt(minedData.affectedFiles),
     ...relevantAnnotations.map(renderAnnotationExcerpt),
+    failureMemoryExcerpt,
     sliceName !== 'investigate' ? renderLinkedPrsExcerpt(minedData.linkedPrs) : '',
   ].filter((s) => typeof s === 'string' && s.length > 0);
 

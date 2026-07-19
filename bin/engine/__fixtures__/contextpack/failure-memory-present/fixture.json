@@ -1,0 +1,29 @@
+{
+  "description": "forge#2681: two prior review-finding issues and one prior workflow:invalid issue reference the affected module (contextpack.mjs) by basename — the build slice gains a 'Prior Failures / Findings on These Modules' section, ranked by same-module hit count then recency, capped and deduplicated. A third candidate item (#9999) never mentions the basename and must be dropped as search-API noise.",
+  "issueNumber": 3102,
+  "repo": null,
+  "phaseId": "build",
+  "assembleOpts": {},
+  "issueView": {
+    "number": 3102,
+    "title": "feat(engine): extend contextpack.mjs with a new mining source",
+    "body": "n/a",
+    "labels": [],
+    "state": "OPEN",
+    "milestone": null
+  },
+  "commentsRaw": "[{\"id\":1,\"author\":\"agent-bot\",\"body\":\"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/engine/contextpack.mjs` (edit) — extend mining\\n\",\"createdAt\":\"2026-07-19T00:00:00Z\"}]",
+  "timelineRaw": "[]",
+  "prListById": {},
+  "gistById": {},
+  "failureMemoryByKey": {
+    "review-finding:contextpack.mjs": [
+      { "number": 2716, "title": "linked-PR fetch failures silently reported as empty in contextpack.mjs", "body": "root cause: catch block discarded the gh error instead of propagating it", "closedAt": "2026-07-10T00:00:00Z" },
+      { "number": 2717, "title": "contextpack.mjs test fixtures use wrong comment shape", "body": "fixtures mocked the pre-jq REST shape instead of the post-jq shape", "closedAt": "2026-07-12T00:00:00Z" },
+      { "number": 9999, "title": "unrelated finding surfaced only by GitHub search-API relevance ranking", "body": "never mentions the target module by basename — must be dropped as noise", "closedAt": "2026-07-15T00:00:00Z" }
+    ],
+    "workflow:invalid:contextpack.mjs": [
+      { "number": 2650, "title": "contextpack.mjs should cache gh calls across phases", "body": "closed as invalid — caching was out of scope, no actual defect in contextpack.mjs", "closedAt": "2026-07-05T00:00:00Z" }
+    ]
+  }
+}

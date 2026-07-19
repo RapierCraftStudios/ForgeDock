@@ -12,8 +12,22 @@ const ISSUE_JSON = JSON.stringify({
 });
 
 /** Build a mocked `io` that routes `gh` calls by command prefix, mirroring
- * the `ioFor({...})` convention in `bin/tests/engine-phases.test.mjs`. */
-function ioFor({ issueView = ISSUE_JSON, comments = '[]', timeline = '[]', prListById = {}, gistById = {} } = {}) {
+ * the `ioFor({...})` convention in `bin/tests/engine-phases.test.mjs`.
+ *
+ * `failureMemoryByKey` (forge#2681) keys forge#2681's
+ * `fetchFailureMemory()` basename-search calls — distinct from
+ * `prListById`'s `#N in:body` PR-review-finding lookups — by
+ * `"{label}:{term}"` (e.g. `"review-finding:contextpack.mjs"`), value is
+ * either an array (returned as-is) or `{error}` (thrown, simulating a `gh`
+ * failure). */
+function ioFor({
+  issueView = ISSUE_JSON,
+  comments = '[]',
+  timeline = '[]',
+  prListById = {},
+  gistById = {},
+  failureMemoryByKey = {},
+} = {}) {
   return {
     gh: async (args) => {
       const cmd = args.join(' ');
@@ -21,12 +35,22 @@ function ioFor({ issueView = ISSUE_JSON, comments = '[]', timeline = '[]', prLis
       if (cmd.includes('/comments')) return comments;
       if (cmd.includes('/timeline')) return timeline;
       if (cmd.startsWith('issue list')) {
-        // args: issue list --label review-finding --search "#N in:body" ...
+        // args: issue list --state closed --label {label} --search {term} --json ...
         const searchIdx = args.indexOf('--search');
         const search = searchIdx >= 0 ? args[searchIdx + 1] : '';
         const prMatch = /^#(\d+)/.exec(search || '');
-        const pr = prMatch ? prMatch[1] : null;
-        return prListById[pr] !== undefined ? prListById[pr] : '[]';
+        if (prMatch) {
+          // PR review-finding lookup (fetchReviewFindingsForPr's shape).
+          const pr = prMatch[1];
+          return prListById[pr] !== undefined ? prListById[pr] : '[]';
+        }
+        // Basename-search lookup (fetchFailureMemoryForTerm's shape).
+        const labelIdx = args.indexOf('--label');
+        const label = labelIdx >= 0 ? args[labelIdx + 1] : '';
+        const key = `${label}:${search}`;
+        const entry = failureMemoryByKey[key];
+        if (entry && entry.error) throw new Error(entry.error);
+        return entry !== undefined ? JSON.stringify(entry) : '[]';
       }
       if (cmd.startsWith('gist view')) {
         const gistId = args[2];
@@ -456,6 +480,77 @@ describe('mineContext — fetch-failure surfacing (review-finding SPEC-1/SPEC-2/
     assert.ok(result.meta.reviewFindingsFetchErrors);
     assert.ok(result.meta.reviewFindingsFetchErrors[42]);
     assert.match(result.meta.reviewFindingsFetchErrors[42], /issue list failed/);
+  });
+});
+
+describe('mineContext — failure-memory mining (forge#2681)', () => {
+  const contractBody = [
+    '<!-- FORGE:CONTRACT -->',
+    '## Builder Contract',
+    '### Affected Files',
+    '1. `bin/engine/contextpack.mjs` (new) — exports mineContext()',
+  ].join('\n');
+  const comments = JSON.stringify([{ id: 1, author: 'agent-bot', body: contractBody, createdAt: '2026-01-01T00:00:00Z' }]);
+
+  it('returns an empty failureMemory array (no meta error) when the issue has no history', async () => {
+    const io = ioFor({ comments });
+    const result = await mineContext(2701, { io });
+    assert.deepEqual(result.failureMemory, []);
+    assert.equal(result.meta.failureMemoryFetchErrors, undefined);
+  });
+
+  it('merges review-finding and workflow:invalid results for the derived basename term, deduplicated by issue number', async () => {
+    const io = ioFor({
+      comments,
+      failureMemoryByKey: {
+        'review-finding:contextpack.mjs': [
+          { number: 2716, title: 'linked-PR fetch failures silently reported as empty', body: 'contextpack.mjs', closedAt: '2026-07-10T00:00:00Z' },
+        ],
+        'workflow:invalid:contextpack.mjs': [
+          { number: 2500, title: 'closed as invalid — misdiagnosed', body: 'contextpack.mjs', closedAt: '2026-06-01T00:00:00Z' },
+        ],
+      },
+    });
+    const result = await mineContext(2701, { io });
+    const numbers = result.failureMemory.map((i) => i.number).sort();
+    assert.deepEqual(numbers, [2500, 2716]);
+    const labelsByNumber = Object.fromEntries(result.failureMemory.map((i) => [i.number, i.label]));
+    assert.equal(labelsByNumber[2716], 'review-finding');
+    assert.equal(labelsByNumber[2500], 'workflow:invalid');
+  });
+
+  it('surfaces a gh fetch failure via meta.failureMemoryFetchErrors instead of silently reporting zero history', async () => {
+    const io = ioFor({
+      comments,
+      failureMemoryByKey: {
+        'review-finding:contextpack.mjs': { error: 'gh: rate limit exceeded' },
+      },
+    });
+    const result = await mineContext(2701, { io });
+    assert.deepEqual(result.failureMemory, []);
+    assert.ok(result.meta.failureMemoryFetchErrors);
+    assert.match(result.meta.failureMemoryFetchErrors[0], /rate limit exceeded/);
+  });
+
+  it('does not let a failure-memory mining exception blank other already-mined fields', async () => {
+    const io = {
+      gh: async (args) => {
+        const cmd = args.join(' ');
+        if (cmd.startsWith('issue view')) return ISSUE_JSON;
+        if (cmd.includes('/comments')) return comments;
+        if (cmd.includes('/timeline')) return '[]';
+        if (cmd.startsWith('issue list')) throw new Error('unexpected total gh outage');
+        throw new Error(`unexpected gh call: ${cmd}`);
+      },
+    };
+    const result = await mineContext(2701, { io });
+    // Issue/comments/annotations/affectedFiles must all still be populated —
+    // only failureMemory degrades.
+    assert.equal(result.issue.ok, true);
+    assert.equal(result.comments.length, 1);
+    assert.deepEqual(result.affectedFiles, ['bin/engine/contextpack.mjs']);
+    assert.deepEqual(result.failureMemory, []);
+    assert.ok(result.meta.failureMemoryFetchErrors.length > 0);
   });
 });
 

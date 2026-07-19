@@ -109,3 +109,108 @@ describe('assemblePack() whole-pack truncation budget (forge#2724)', () => {
     assert.ok(serializedBytes <= 100000);
   });
 });
+
+/**
+ * forge#2681: failure-memory (prior review-findings / closed-as-invalid
+ * history on overlapping modules) slice-integration tests. Exercises
+ * `assemblePack()`'s `renderSliceContent()` wiring directly with hand-built
+ * `minedData.failureMemory` — the mining/ranking (`fetchFailureMemory()`,
+ * `rankFailureMemory()`) is exercised separately in
+ * `contextpack.mine.test.mjs` via the public `mineContext()` API.
+ */
+describe('assemblePack() — failure memory injection (forge#2681)', () => {
+  const failureMemory = [
+    { number: 2716, title: 'linked-PR fetch failures silently reported as empty', body: 'contextpack.mjs bug', closedAt: '2026-07-10T00:00:00Z', label: 'review-finding' },
+    { number: 2706, title: 'size cap checked only after full JSON.stringify', body: 'contextpack-schema.js bug', closedAt: '2026-07-01T00:00:00Z', label: 'workflow:invalid' },
+  ];
+
+  it('injects a "Prior Failures / Findings" section into the investigate slice when failureMemory items match affectedFiles', () => {
+    const minedData = {
+      issue: { number: 2681, title: 'failure memory', body: 'some problem' },
+      affectedFiles: ['bin/engine/contextpack.mjs'],
+      failureMemory,
+    };
+    const pack = assemblePack('investigate', minedData);
+    assert.ok(pack, 'assemblePack() should return a pack');
+    const content = pack.slices[0].content;
+    assert.match(content, /Prior Failures \/ Findings on These Modules/);
+    assert.match(content, /#2716/);
+    assert.match(content, /review finding/);
+  });
+
+  it('injects the same section into the build slice', () => {
+    const minedData = {
+      issue: { number: 2681, title: 'failure memory', body: 'some problem' },
+      affectedFiles: ['bin/engine/contextpack.mjs'],
+      failureMemory,
+    };
+    const pack = assemblePack('build', minedData);
+    assert.ok(pack, 'assemblePack() should return a pack');
+    assert.match(pack.slices[0].content, /Prior Failures \/ Findings on These Modules/);
+  });
+
+  it('never injects a failure-memory section into the review slice', () => {
+    const minedData = {
+      issue: { number: 2681, title: 'failure memory', body: 'some problem' },
+      affectedFiles: ['bin/engine/contextpack.mjs'],
+      failureMemory,
+      annotations: [{ type: 'BUILDER', body: 'Implementation Complete', commentIndex: 0 }],
+    };
+    const pack = assemblePack('review', minedData);
+    assert.ok(pack, 'assemblePack() should return a pack');
+    assert.doesNotMatch(pack.slices[0].content, /Prior Failures \/ Findings on These Modules/);
+  });
+
+  it('renders nothing (no section, no crash) when failureMemory is empty or absent', () => {
+    const minedData = {
+      issue: { number: 2681, title: 'failure memory', body: 'some problem' },
+      affectedFiles: ['bin/engine/contextpack.mjs'],
+      failureMemory: [],
+    };
+    const pack = assemblePack('investigate', minedData);
+    assert.ok(pack, 'assemblePack() should still return a pack from the issue excerpt alone');
+    assert.doesNotMatch(pack.slices[0].content, /Prior Failures/);
+
+    const minedDataNoField = {
+      issue: { number: 2681, title: 'failure memory', body: 'some problem' },
+      affectedFiles: ['bin/engine/contextpack.mjs'],
+    };
+    assert.doesNotThrow(() => assemblePack('investigate', minedDataNoField));
+  });
+
+  it('drops items whose same-module hit count is 0 (title/body never mentions an affected-file basename) — the search-API-noise filter', () => {
+    const minedData = {
+      issue: { number: 2681, title: 'failure memory', body: 'some problem' },
+      affectedFiles: ['bin/engine/contextpack.mjs'],
+      failureMemory: [
+        { number: 9999, title: 'unrelated finding about a totally different module', body: 'no mention of the target file', closedAt: '2026-07-15T00:00:00Z', label: 'review-finding' },
+      ],
+    };
+    const pack = assemblePack('investigate', minedData);
+    assert.ok(pack);
+    assert.doesNotMatch(pack.slices[0].content, /#9999/);
+  });
+
+  it('respects the existing MAX_SLICE_BYTES truncation path when failure-memory content alone is large', () => {
+    const manyItems = Array.from({ length: 60 }, (_, i) => ({
+      number: 3000 + i,
+      title: `contextpack.mjs regression #${i} — long descriptive title padded to add bulk to this excerpt`,
+      body: 'contextpack.mjs',
+      closedAt: `2026-0${(i % 9) + 1}-01T00:00:00Z`,
+      label: 'review-finding',
+    }));
+    const minedData = {
+      issue: { number: 2681, title: 'failure memory', body: '' },
+      affectedFiles: ['bin/engine/contextpack.mjs'],
+      failureMemory: manyItems,
+    };
+    // Small maxSliceBytes forces truncation via the exact same
+    // truncateToBytes() path proven correct by forge#2724 — no new
+    // truncation mechanism is introduced by this feature.
+    const pack = assemblePack('investigate', minedData, { maxSliceBytes: 200 });
+    assert.ok(pack);
+    const serializedBytes = Buffer.byteLength(JSON.stringify(pack), 'utf-8');
+    assert.ok(serializedBytes <= 32 * 1024, 'stays within MAX_PACK_BYTES default');
+    assert.equal(pack.slices[0].truncated, true);
+  });
+});

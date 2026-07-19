@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "issue": 3102,
+  "slices": [
+    {
+      "phase": "build",
+      "content": "## Known Affected Files\n- `bin/engine/contextpack.mjs`\n\n### CONTRACT annotation (comment #0)\n\n## Builder Contract\n### Affected Files\n1. `bin/engine/contextpack.mjs` (edit) — extend mining\n\n## Prior Failures / Findings on These Modules\n- #2717 (review finding): contextpack.mjs test fixtures use wrong comment shape\n- #2716 (review finding): linked-PR fetch failures silently reported as empty in contextpack.mjs\n- #2650 (closed as invalid): contextpack.mjs should cache gh calls across phases"
+    }
+  ]
+}
