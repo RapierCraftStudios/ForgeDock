@@ -1789,8 +1789,20 @@ ISSUE_EOF
 # Priority is derived from Severity ONLY, via the single canonical mapper — never from
 # Confidence. Confidence and Severity are independent axes; conflating them is the exact
 # bug forge#2447 fixed once already. See commands/shared/priority-rubric.md.
+# scripts/severity-to-priority.sh is committed non-executable (100644, matching the rest
+# of scripts/) — invoke via `bash`, never as a bare path, or this fails with "Permission
+# denied" (exit 126) on a real checkout.
 FINDING_SEVERITY="LOW"  # illustrative — actual value comes from the finding's **Severity** field
-FINDING_PRIORITY=$(scripts/severity-to-priority.sh "$FINDING_SEVERITY")
+FINDING_PRIORITY=$(bash scripts/severity-to-priority.sh "$FINDING_SEVERITY")
+FINDING_PRIORITY_EXIT=$?
+
+# Exit code MUST be checked before use — severity-to-priority.sh exits 1 (empty stdout)
+# on an unrecognized severity. Silently continuing with an empty $FINDING_PRIORITY would
+# call Skill(issue, --label "") instead of aborting, reintroducing a failure-swallowing
+# bug of exactly the kind forge#2447/#2523 exist to prevent.
+if [ "$FINDING_PRIORITY_EXIT" -ne 0 ]; then
+  echo "PRIORITY: severity-to-priority.sh failed (exit $FINDING_PRIORITY_EXIT) for severity '$FINDING_SEVERITY' — skipping finding issue creation"
+else
 
 # --label is repeatable (not comma-joined) per the /issue programmatic contract.
 Skill(skill="issue", args="--title \"$FINDING_ISSUE_TITLE\" --body-file \"$FINDING_ISSUE_BODY_FILE\" --label review-finding --label needs-validation --label \"$FINDING_PRIORITY\" ${MILESTONE_FLAG}")
@@ -1806,6 +1818,7 @@ for _resolve_attempt in 1 2 3; do
   [ -n "$ISSUE_NUM" ] && break
   sleep 2
 done
+fi
 ```
 
 Labels: `review-finding` + `needs-validation` + priority. Priority is resolved from **Severity**
