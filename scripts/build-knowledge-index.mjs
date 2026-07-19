@@ -48,7 +48,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, rea
 import { execSync, spawnSync } from 'child_process';
 import { homedir } from 'os';
 import { dirname, join, resolve } from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -309,7 +309,11 @@ async function getParser() {
   const parsePath = join(repoRoot, 'packages', 'protocol', 'src', 'parse.js');
 
   try {
-    const mod = await import(parsePath);
+    // On win32 a bare absolute path (C:\...) makes Node parse the drive letter as a
+    // URL scheme (ERR_UNSUPPORTED_ESM_URL_SCHEME). Convert to a file:// URL first —
+    // valid on POSIX too, and matches the import(pathToFileURL(...).href) idiom used
+    // at check-admission-parity.mjs / validate-annotation-node.mjs / check-phase-registry-drift.mjs.
+    const mod = await import(pathToFileURL(parsePath).href);
     _parseAnnotation = mod.parse;
     return _parseAnnotation;
   } catch (e) {
