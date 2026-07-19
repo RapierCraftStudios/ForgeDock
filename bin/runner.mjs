@@ -56,7 +56,7 @@ import {
 import { join, dirname, basename, relative, isAbsolute } from "path";
 import os from "os";
 import { execSync, spawnSync } from "child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { parseForgeYaml, resolveModelAlias } from "./forge-utils.mjs";
 import { DEFAULT_SPAWN_MAX_BUFFER_BYTES } from "./cli-spawn-shared.mjs";
 // forge#2380: report_result's per-phase schemas are single-sourced from the
@@ -94,6 +94,25 @@ try {
   // above in place. report_result enforcement simply never engages, which is
   // exactly the same as "phaseId has no registered schema" everywhere else
   // in this file.
+}
+
+// forge#2702: lazy-loaded the same way as PHASE_RESULT_SCHEMAS above —
+// `bin/engine/contextpack.mjs` transitively imports
+// `packages/protocol/src/contextpack-schema.js`, which (like `phases.js`
+// above) is absent from a global npm install / the router self-update test
+// fixture. A bare static import would crash module load for every caller of
+// this file, not just the ones that opt into `context_packs.enabled`. When
+// absent, `buildValidatedPackForPhaseFn` stays `null` and the
+// `context_packs.enabled` flag simply never engages — identical fail-open
+// contract to report_result enforcement above.
+let buildValidatedPackForPhaseFn = null;
+try {
+  const contextPackModule = await import("./engine/contextpack.mjs");
+  buildValidatedPackForPhaseFn = contextPackModule.buildValidatedPackForPhase ?? null;
+} catch (err) {
+  if (err?.code !== "ERR_MODULE_NOT_FOUND") throw err;
+  // packages/protocol not present in this install — context-pack assembly
+  // never engages, same as the PHASE_RESULT_SCHEMAS fallback above.
 }
 
 const DEFAULT_MODEL = "claude-sonnet-5";
@@ -240,6 +259,84 @@ export function resolveConfiguredDefaultModel(cwd) {
   } catch {
     return null;
   }
+}
+
+/**
+ * forge#2702: resolve `forge.yaml → context_packs.enabled` — the opt-in flag
+ * for the schema-validated, miner-fed context-pack path (distinct from the
+ * pre-existing, always-on forge#2383 pack `bin/engine.mjs` already builds
+ * and forwards via `opts.contextPack` — see the module-level import comment
+ * above for why the two must never collide).
+ *
+ * Fail-soft, absent-safe (mirrors `resolveConfiguredDefaultModel` above):
+ * missing file, unreadable file, missing section, or any value other than
+ * the literal string `"true"` all resolve to `false` — every existing
+ * repo's `forge.yaml` that doesn't set this key gets zero behavior change,
+ * per the parent issue's own acceptance criteria.
+ *
+ * `parseForgeYaml()` returns every scalar as a string (no YAML boolean
+ * coercion — see forge-utils.mjs), so this compares against the literal
+ * string `"true"` rather than a JS boolean.
+ *
+ * @param {string} cwd
+ * @returns {boolean}
+ */
+export function resolveContextPacksEnabled(cwd) {
+  try {
+    const forgeYamlPath = join(cwd, "forge.yaml");
+    if (!existsSync(forgeYamlPath)) return false;
+    const raw = readFileSync(forgeYamlPath, "utf-8");
+    const parsed = parseForgeYaml(raw);
+    const enabled = parsed?.context_packs?.enabled;
+    return String(enabled).trim().toLowerCase() === "true";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * forge#2702: derive an engine phase id (`packages/protocol/src/phases.js`'s
+ * `PHASE_IDS`) from a `commandName` of the shape `bin/engine/phases.mjs`'s
+ * phase table uses (e.g. `"work-on/investigate"`, `"work-on/build/architect"`).
+ * Returns `null` for a bare command name with no `/` (e.g. top-level
+ * `"work-on"`, or any command invoked outside the engine's phase dispatch)
+ * — `assemblePack()` has no slice mapping for those anyway, so returning
+ * `null` here just avoids a wasted mine/assemble/validate round trip.
+ *
+ * @param {string} commandName
+ * @returns {string|null}
+ */
+export function derivePhaseIdFromCommandName(commandName) {
+  const name = String(commandName || "").trim().replace(/^\/+/, "");
+  const parts = name.split("/").filter(Boolean);
+  return parts.length > 1 ? parts[parts.length - 1] : null;
+}
+
+/**
+ * forge#2702: default `io.gh` implementation for `mineContext()` when
+ * `runCommand()` builds its own context pack (i.e. no `opts.contextPack`
+ * was supplied by the caller and `context_packs.enabled` is true). Mirrors
+ * the injected-`io` convention `bin/engine/contextpack.mjs`'s own docblock
+ * describes ("every `gh` call goes through an injected `io.gh(args)`") —
+ * this file has no pre-existing `gh` wrapper of its own (it only shells out
+ * to the `claude` CLI), so a minimal one is defined here rather than adding
+ * a new cross-file dependency for a single call site.
+ *
+ * @returns {{gh: (args: string[]) => Promise<string>}}
+ */
+function defaultGhIo() {
+  return {
+    async gh(args) {
+      const result = spawnSync("gh", args, { encoding: "utf-8" });
+      if (result.error) throw result.error;
+      if (result.status !== 0) {
+        throw new Error(
+          `gh ${args.join(" ")} exited ${result.status}: ${(result.stderr || "").trim()}`,
+        );
+      }
+      return result.stdout;
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1943,13 +2040,88 @@ export async function runCommand(opts = {}) {
     contextPack,
   } = opts;
 
+  // forge#2702: opt-in, schema-validated context-pack assembly. Only
+  // engages when (a) the caller did NOT already supply `opts.contextPack`
+  // (the pre-existing forge#2383 pack from `bin/engine.mjs` — this path
+  // must never overwrite it), (b) `context_packs.enabled` is `true` in
+  // `forge.yaml`, (c) `commandName` maps to a known engine phase id, (d)
+  // the module actually loaded (see `buildValidatedPackForPhaseFn`'s
+  // top-of-file lazy-import comment), and (e) the first CLI arg parses as
+  // an issue number (mirrors `bin/engine.mjs`'s own `args: [String(issue)]`
+  // convention for phase dispatch). Every failure mode below falls back to
+  // `resolvedContextPack = contextPack` (i.e. exactly today's behavior) —
+  // fail-open per the parent issue's own acceptance criteria; a mining/
+  // assembly/validation exception must never abort the run.
+  let resolvedContextPack = contextPack;
+  let contextPackMeta = null;
+  if (!resolvedContextPack && buildValidatedPackForPhaseFn && resolveContextPacksEnabled(cwd)) {
+    const phaseId = derivePhaseIdFromCommandName(commandName);
+    const issueArg = Array.isArray(args) && args.length > 0 ? args[0] : undefined;
+    const issueNumber = issueArg !== undefined ? Number(issueArg) : NaN;
+    if (phaseId && Number.isInteger(issueNumber)) {
+      try {
+        const packResult = await buildValidatedPackForPhaseFn(phaseId, issueNumber, {
+          io: defaultGhIo(),
+        });
+        if (packResult && packResult.text) {
+          resolvedContextPack = packResult.text;
+          contextPackMeta = {
+            valid: true,
+            hash: createHash("sha256").update(packResult.text, "utf-8").digest("hex").slice(0, 16),
+            bytes: Buffer.byteLength(packResult.text, "utf-8"),
+          };
+        } else if (packResult && packResult.errors?.length > 0) {
+          // forge#2680 acceptance criteria: "log the failure too" — a pack
+          // that was attempted (mining/assembly ran) but never became
+          // injectable (empty content, schema-validation failure, or a
+          // caught mine/assemble exception surfaced as an `errors` entry by
+          // `buildValidatedPackForPhase()`) still gets a `contextPackMeta`
+          // record, just with `valid: false` and no hash/bytes (there is no
+          // successfully-produced pack to hash). The runlog consumer
+          // (`bin/engine.mjs`) records this distinctly from a silent no-op.
+          contextPackMeta = { valid: false, errors: packResult.errors.slice(0, 3) };
+          logger.log(
+            `[context-packs] no pack injected for phase "${phaseId}": ${packResult.errors.join("; ")}`,
+          );
+        }
+      } catch (err) {
+        // Fail-open (forge#2680 acceptance criteria): assembly must never
+        // abort the run — only means no pack is injected this time.
+        logger.log(
+          `[context-packs] assembly threw for phase "${phaseId}": ${String(err && err.message ? err.message : err)}`,
+        );
+      }
+    }
+  }
+
   const spec = loadCommandSpec(commandsDir, commandName);
-  const systemPrompt = buildSystemPrompt(spec, { repoRoot: cwd, contextPack });
+  const systemPrompt = buildSystemPrompt(spec, { repoRoot: cwd, contextPack: resolvedContextPack });
   // CLI-backend-specific prompt (issue #2019) — see buildCliSystemPrompt's
   // doc comment for why this must NOT be the same string as `systemPrompt`
   // above (that one is written for the API backend's custom 3-tool loop).
-  const cliSystemPrompt = buildCliSystemPrompt(spec, { contextPack });
+  const cliSystemPrompt = buildCliSystemPrompt(spec, { contextPack: resolvedContextPack });
   const userMessage = buildUserMessage(commandName, args);
+
+  // forge#2702: attach contextPackHash/contextPackBytes to a runCommand()
+  // result object when (and only when) THIS call actually built/injected a
+  // pack via the flagged path above — omitted entirely otherwise, so a
+  // caller that doesn't know about this feature (or ran with the flag off)
+  // sees exactly today's return shape. Deliberately distinct field names
+  // from forge#2383's `packBytes`/`packSections` (computed by the CALLER,
+  // `bin/engine.mjs`, from its own unrelated pack) so the two systems'
+  // telemetry can never collide once both are recorded into a runlog event.
+  const withContextPackMeta = (result) => {
+    if (!contextPackMeta) return result;
+    if (contextPackMeta.valid) {
+      return {
+        ...result,
+        contextPackValid: true,
+        contextPackHash: contextPackMeta.hash,
+        contextPackBytes: contextPackMeta.bytes,
+      };
+    }
+    return { ...result, contextPackValid: false, contextPackErrors: contextPackMeta.errors };
+  };
 
   // Resolve the backend before dry-run so the preview reports what would
   // actually run. isClaudeCliAvailable() is bounded by CLI_PROBE_TIMEOUT_MS
@@ -2029,7 +2201,9 @@ export async function runCommand(opts = {}) {
           }.`,
       );
     }
-    return runCliBackend({ spec, userMessage, systemPrompt: cliSystemPrompt, args, cwd, logger });
+    return withContextPackMeta(
+      runCliBackend({ spec, userMessage, systemPrompt: cliSystemPrompt, args, cwd, logger }),
+    );
   }
 
   if (!apiKey) {
@@ -2162,7 +2336,7 @@ export async function runCommand(opts = {}) {
             usage,
           }),
         );
-        return {
+        return withContextPackMeta({
           status: "incomplete",
           command: spec.name,
           iterations,
@@ -2172,7 +2346,7 @@ export async function runCommand(opts = {}) {
           backend: "api",
           result: null,
           detail: `Response truncated (max_tokens) before phase "${resultPhaseId}" reported a schema-valid result via report_result`,
-        };
+        });
       }
 
       // forge#2380: for a phase with a registered report_result schema
@@ -2210,7 +2384,7 @@ export async function runCommand(opts = {}) {
           usage,
         }),
       );
-      return {
+      return withContextPackMeta({
         status,
         command: spec.name,
         iterations,
@@ -2219,7 +2393,7 @@ export async function runCommand(opts = {}) {
         model,
         backend: "api",
         result: structuredResult,
-      };
+      });
     }
 
     const toolResults = [];
@@ -2307,7 +2481,7 @@ export async function runCommand(opts = {}) {
         usage,
       }),
     );
-    return {
+    return withContextPackMeta({
       status: "phase-failed",
       command: spec.name,
       iterations,
@@ -2316,7 +2490,7 @@ export async function runCommand(opts = {}) {
       backend: "api",
       result: null,
       detail: `report_result was never called with schema-valid input for phase "${resultPhaseId}" after ${iterations} iterations`,
-    };
+    });
   }
 
   logger.log(
@@ -2328,7 +2502,7 @@ export async function runCommand(opts = {}) {
       usage,
     }),
   );
-  return {
+  return withContextPackMeta({
     status: "max-iterations",
     command: spec.name,
     iterations,
@@ -2336,5 +2510,5 @@ export async function runCommand(opts = {}) {
     model,
     backend: "api",
     result: structuredResult,
-  };
+  });
 }

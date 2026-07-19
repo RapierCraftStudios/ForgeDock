@@ -7,7 +7,19 @@ import { join } from "node:path";
 
 function logPath(dir, issue) { return join(dir, `${issue}.jsonl`); }
 
-/** Append an event; assigns the next seq based on the current line count. */
+/**
+ * Append an event; assigns the next seq based on the current line count.
+ *
+ * Deliberately schema-free (`{ seq, ...event }`) — this is what lets
+ * additive-only fields (e.g. forge#2381's `engineNative`, forge#2702's
+ * `contextPackValid`/`contextPackHash`/`contextPackBytes`/`contextPackErrors`
+ * on `PHASE_START`/`PHASE_COMMIT`/`PHASE_FAILED` events, recorded by
+ * `bin/engine.mjs`'s `runPhaseWithRetry()`) get logged with zero change to
+ * this file: any event shape passes straight through, and every existing
+ * consumer of a given event type (`deriveState()` below,
+ * `bin/engine-cli.mjs`'s renderers) simply ignores field names it doesn't
+ * recognize rather than erroring on them.
+ */
 export function appendEvent(dir, issue, event) {
   mkdirSync(dir, { recursive: true });
   const path = logPath(dir, issue);

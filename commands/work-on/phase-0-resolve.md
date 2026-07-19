@@ -193,6 +193,8 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | {id: .id, author: .u
 
 **Determine resume point**: No comments → Phase 1. Investigation exists + ready-to-build → Phase 3. Builder:COMPLETE + no PR → Phase 4. Builder without :COMPLETE (partial/interrupted build) + no PR → Phase 3 (partial-build cleanup). Builder + PR open → Phase 5. PR merged + issue open → Phase 6.
 
+**Context-pack bypass note (forge#2680/#2702, opt-in)**: When the headless engine (`bin/engine.mjs`) is driving this run with `forge.yaml → context_packs.enabled: true`, `bin/runner.mjs` may have already mined and injected a schema-validated context pack for this phase directly into the system prompt (see `bin/engine/contextpack.mjs`'s `assemblePack()`) — in that case, the `gh` calls above may already be answered by the injected pack, and re-running them is redundant but never wrong (the pack is an optimization, not a hard dependency, per its own render-time framing). This note does **not** change the prose above: run the `gh` commands as written whenever a pack was not injected (flag off, validation failed, or this run isn't engine-driven) — the fallback path stays fully intact for every non-flagged run, including every existing repo whose `forge.yaml` omits `context_packs`.
+
 ### 0B.5: Read Phase Checkpoint (MANDATORY — executes before any phase-skip decision)
 
 Query for the latest `<!-- FORGE:CHECKPOINT -->` comment. This is the machine-readable source of truth for the pipeline's current phase position — it takes priority over all prose-based resume heuristics above.
