@@ -749,7 +749,7 @@ export async function preflight(ctx) {
 
 import { mkdir, symlink, readlink, lstat, readdir, rename, copyFile, readFile, writeFile, unlink, rm, open } from "fs/promises";
 import { compareVersions } from "./registry.mjs";
-import { relative, dirname as pathDirname } from "path";
+import { relative, dirname as pathDirname, isAbsolute } from "path";
 import {
   installSessionStartHook,
   installSubagentStopHook,
@@ -1173,9 +1173,14 @@ export async function pruneStaleExtensionlessEntries(targetDir) {
     } catch {
       continue; // unreadable link metadata — skip rather than guess
     }
+    // readlink() returns whatever string was stored at symlink-creation time.
+    // A relative target is defined (POSIX) relative to the symlink's own
+    // containing directory (targetDir, since full = join(targetDir, name)) —
+    // not the process cwd, which is what a raw lstat(linkTarget) would use.
+    const resolvedTarget = isAbsolute(linkTarget) ? linkTarget : join(targetDir, linkTarget);
     let targetMissing = false;
     try {
-      await lstat(linkTarget);
+      await lstat(resolvedTarget);
     } catch (err) {
       if (err.code !== "ENOENT") continue; // unexpected error — skip to be safe
       targetMissing = true;

@@ -2146,6 +2146,28 @@ describe("forge (Act II)", () => {
       const pruned = await pruneStaleExtensionlessEntries(join(os.tmpdir(), "fd-stale-does-not-exist-" + Date.now()));
       assert.equal(pruned, 0);
     });
+
+    it("resolves a relative symlink target against the symlink's own directory, not process.cwd() (forge#2646)", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-relative-"));
+      // Relative target that DOES exist when resolved against targetDir
+      // (its own containing directory), but would NOT exist if resolved
+      // against process.cwd() instead.
+      writeFileSync(join(targetDir, "real-target.md"), "REAL", "utf-8");
+      const link = join(targetDir, "orchestrate");
+      symlinkSync("real-target.md", link); // relative target, not absolute
+      const pruned = await pruneStaleExtensionlessEntries(targetDir);
+      assert.equal(pruned, 0, "relative target resolves to an existing file relative to its own dir — must not be pruned");
+      assert.ok(existsSync(link));
+    });
+
+    it("still prunes a relative symlink target that is genuinely missing", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-relative-missing-"));
+      const link = join(targetDir, "orchestrate");
+      symlinkSync("does-not-exist.md", link); // relative target, missing either way
+      const pruned = await pruneStaleExtensionlessEntries(targetDir);
+      assert.equal(pruned, 1);
+      assert.ok(!existsSync(link));
+    });
   });
 
   describe("linkPipelineScripts copy-fallback content comparison (forge#1916)", () => {
