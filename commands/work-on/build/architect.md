@@ -684,12 +684,20 @@ When skipped, the builder proceeds with investigation report + context briefing 
 On **every** skip branch above, post exactly this minimal comment (substitute the concrete `{SKIP_REASON}`, e.g. `chore:/docs: title`, `TRIVIAL complexity band`, `new files only — no callers`, or `AFFECTED_FILES empty`) **before** returning the empty plan:
 
 ```bash
-gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ARCHITECT -->
+# The skip marker is mandatory and un-gated by design — posting it IS the point
+# (a missing marker strands the issue at needs-human; see above). Same report-only
+# risk class as the unguarded plan post in "Output Format" above, so it carries the
+# same allowlist rather than a DRY_RUN guard.
+SKIP_BODY=$(cat <<SKIP_EOF
+<!-- FORGE:ARCHITECT -->
 ## Architecture Plan — Skipped
 
 **Skipped**: {SKIP_REASON}. No cross-path consistency risk — the builder proceeds with the investigation report + context briefing.
 
-<!-- FORGE:ARCHITECT:COMPLETE -->"
+<!-- FORGE:ARCHITECT:COMPLETE -->
+SKIP_EOF
+)
+gh issue comment {NUMBER} {GH_FLAG} --body "$SKIP_BODY" # <!-- allowlist:check-command-side-effects -->
 ```
 
 The empty-plan-with-marker changes no downstream behavior — the builder already falls back to the investigation report + contract when the plan is empty (see Integration Point below). The marker only makes the legitimate skip **observable** to the marker-only engine gate. This intentionally does **not** weaken crash detection: a genuinely interrupted architect run still posts no marker at all, so `detectOutcome` still fails-and-escalates it correctly.
