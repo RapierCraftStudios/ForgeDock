@@ -421,6 +421,7 @@ Agents post \`FORGE:CLAIM\` here on build start and \`FORGE:CLAIM_RELEASED\` on 
 <!-- FORGE:COORD_ISSUE -->
 <!-- FORGE:BATCH_ID: ${BATCH_ID} -->"
 
+  # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
   COORD_ISSUE_URL=$(gh issue create -R {GH_REPO} \
     --title "orchestrate: claims board for batch ${BATCH_ID}" \
     --body "$COORD_ISSUE_BODY" \
@@ -568,6 +569,7 @@ if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ]; then
   case "$LEASE_STATE" in
     free|self)
       HOSTNAME_ID=$(hostname 2>/dev/null || echo "unknown-host")
+      # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
       gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE -->
 **Holder Batch ID**: ${BATCH_ID}
 **Holder**: ${HOSTNAME_ID} (pid ${$})
@@ -1216,6 +1218,7 @@ if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && [ -n "
       # Free (no live holder) or self (this exact batch already holds it) — safe to
       # refresh and continue reconstruction below.
       HOSTNAME_ID=$(hostname 2>/dev/null || echo "unknown-host")
+      # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
       gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE -->
 **Holder Batch ID**: ${BATCH_ID}
 **Holder**: ${HOSTNAME_ID} (pid ${$})

@@ -30,6 +30,7 @@ if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && [ -n "
       ;;
     free|self)
       HOSTNAME_ID=$(hostname 2>/dev/null || echo "unknown-host")
+      # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
       gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE -->
 **Holder Batch ID**: ${BATCH_ID}
 **Holder**: ${HOSTNAME_ID} (pid ${$})
@@ -63,6 +64,7 @@ release_orchestrator_lease() {
     return
   fi
   if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ]; then
+    # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
     gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE_RELEASED -->
 **Holder Batch ID**: ${BATCH_ID:-unknown}
 **Released**: $(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>/dev/null || true
@@ -580,6 +582,7 @@ if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
   # lease never goes stale purely from elapsed wall-clock time while dispatch is still active.
   if [ "${#DISPATCH_NOW[@]}" -gt 0 ] && [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && [ -n "${BATCH_ID:-}" ]; then
     HOSTNAME_ID=$(hostname 2>/dev/null || echo "unknown-host")
+    # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
     gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE -->
 **Holder Batch ID**: ${BATCH_ID}
 **Holder**: ${HOSTNAME_ID} (pid ${$})
@@ -1994,6 +1997,7 @@ Cascade-dispatched findings inherit NO lane assumption from the parent batch. St
 for FINDING_NUM in "${QUEUED_FINDINGS[@]}"; do
   PR_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$FINDING_NUM" -R {GH_REPO}) || {
     echo "ERROR: classify-lane.sh failed for #$FINDING_NUM — adding needs-human label and removing from QUEUED_FINDINGS" >&2
+    # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
     gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
     QUEUED_FINDINGS=($(printf '%s\n' "${QUEUED_FINDINGS[@]}" | grep -vxF "$FINDING_NUM" || true))
     continue
@@ -2343,6 +2347,7 @@ declare -A SWEEP_PR_BASE
 for FINDING_NUM in "${SWEEP_EXECUTE[@]}"; do
   SWEEP_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$FINDING_NUM" -R {GH_REPO}) || {
     echo "ERROR: classify-lane.sh failed for #$FINDING_NUM — adding needs-human and skipping" >&2
+    # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
     gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
     continue
   }

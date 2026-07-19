@@ -2159,6 +2159,7 @@ if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
       # forge#2626: standalone `/review-pr` (no remediate.md M6→M7 chain) would otherwise
       # strand this PR at `workflow:awaiting-merge` with no actionable guidance — add a
       # manual-merge fallback so the comment is correct in both the chained and standalone cases.
+      # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
       gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "🟠 PR #{PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check on non-\`main\` base \`${GUARD_BASE}\`. It is parked at \`workflow:awaiting-merge\` for the remediation auto-land bar (\`remediate.md\` Phase M7, forge#2570) — which auto-merges it on the same fast-lane condition the normal \`/work-on\` path uses for this target branch — NOT for a human merge decision. If no remediation \`M7\` follows (e.g. this review was invoked standalone), merge manually once reviewed: \`gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge\`."
     else
       # forge#2570: `main` / deploy gate (or unresolved base — fail closed to the human gate).
