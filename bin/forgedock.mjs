@@ -1514,6 +1514,28 @@ function resolveGlobalNpmForgedockDir() {
 }
 
 /**
+ * Compare two already-`resolve()`d absolute paths for equality or containment
+ * (child equals parent, or sits strictly under it). On case-insensitive
+ * filesystems (win32/darwin) the same physical directory can resolve with
+ * differing letter casing (drive letter, path segments), so both operands are
+ * lowercased before comparing there; on Linux the comparison stays
+ * case-sensitive byte-for-byte (forge#2668). The `+ sep` boundary keeps
+ * `/foo-bar` from matching parent `/foo`. Callers pass paths that are already
+ * resolved — this helper deliberately does not re-resolve.
+ *
+ * @param {string} child - resolved absolute path being tested
+ * @param {string} parent - resolved absolute path of the candidate ancestor
+ * @returns {boolean}
+ */
+function samePathOrUnder(child, parent) {
+  const caseInsensitive =
+    process.platform === "win32" || process.platform === "darwin";
+  const a = caseInsensitive ? child.toLowerCase() : child;
+  const b = caseInsensitive ? parent.toLowerCase() : parent;
+  return a === b || a.startsWith(b + sep);
+}
+
+/**
  * Detect whether FORGE_HOME resolves inside npm's global install tree, i.e.
  * this process is running as a globally-installed `forgedock` package (not
  * an ephemeral npx/dlx cache extraction). Used by update()'s npm-mode branch
@@ -1533,7 +1555,7 @@ function isGlobalNpmInstall() {
   const globalPkgDir = resolveGlobalNpmForgedockDir();
   if (!globalPkgDir) return false;
   const home = resolve(FORGE_HOME);
-  return home === globalPkgDir || home.startsWith(globalPkgDir + sep);
+  return samePathOrUnder(home, globalPkgDir);
 }
 
 /**
@@ -1558,7 +1580,7 @@ function findSeparateGlobalInstall() {
   const globalPkgDir = resolveGlobalNpmForgedockDir();
   if (!globalPkgDir) return null;
   const home = resolve(FORGE_HOME);
-  if (home === globalPkgDir || home.startsWith(globalPkgDir + sep)) {
+  if (samePathOrUnder(home, globalPkgDir)) {
     // Current FORGE_HOME already IS the global install — nothing separate.
     return null;
   }
@@ -1804,9 +1826,10 @@ async function update() {
           // dirty tree. HEAD is still never moved in either case.
           const cwdResolved = resolve(process.cwd());
           const forgeHomeResolved = resolve(FORGE_HOME);
-          const isSourceRepoSelf =
-            cwdResolved === forgeHomeResolved ||
-            cwdResolved.startsWith(forgeHomeResolved + sep);
+          const isSourceRepoSelf = samePathOrUnder(
+            cwdResolved,
+            forgeHomeResolved,
+          );
 
           if (isSourceRepoSelf) {
             console.log(
