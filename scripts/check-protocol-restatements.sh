@@ -170,6 +170,65 @@ for i in "${!PATTERN_NAMES[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
+# Structured Findings Protocol drift check (diff-based, not heading-regex).
+#
+# commands/review-pr-agents/protocols.md is a deliberate, permanent
+# reproduction of docs/spec/review-protocol.md's "## Structured Findings
+# Protocol" section (see commands/review-pr-agents.md: "Protocols live in
+# docs/spec/review-protocol.md (canonical source) and are reproduced in
+# commands/review-pr-agents/protocols.md"). Because the reproduction is
+# intentional, a heading-regex pattern (like REVIEW_PROTOCOL above) would
+# permanently flag protocols.md as a violator — the two copies must instead
+# stay byte-identical, which a heading ban cannot express. This check extracts
+# the "## Structured Findings Protocol" section (heading through the next
+# "^## " heading, or EOF) from both files and diffs them directly.
+#
+# <!-- Added: forge#2721 -->
+STRUCTURED_FINDINGS_NORMATIVE="${DOCS_DIR}/spec/review-protocol.md"
+STRUCTURED_FINDINGS_COPY="${REPO_ROOT}/commands/review-pr-agents/protocols.md"
+
+# extract_structured_findings_section <file> — prints the "## Structured
+# Findings Protocol" section from <file> (heading through the line before the
+# next "^## " heading, or EOF). Trailing blank lines, and a trailing lone
+# "---" horizontal-rule separator (plus any blank lines after it), are
+# stripped — that separator is document structure belonging to the
+# surrounding file (it precedes the *next* section), not section content.
+extract_structured_findings_section() {
+  local file="$1"
+  awk '
+    /^## Structured Findings Protocol/ { found=1 }
+    found && /^## / && !/^## Structured Findings Protocol/ { exit }
+    found { cnt++; lines[cnt]=$0; last=cnt }
+    END {
+      # Trim trailing blank lines.
+      while (last > 0 && lines[last] == "") last--
+      # Trim a trailing lone "---" horizontal-rule separator, then any
+      # blank lines that preceded it (it belongs to the surrounding file,
+      # not this section).
+      if (last > 0 && lines[last] == "---") {
+        last--
+        while (last > 0 && lines[last] == "") last--
+      }
+      for (i = 1; i <= last; i++) print lines[i]
+    }
+  ' "$file"
+}
+
+if [ -f "$STRUCTURED_FINDINGS_NORMATIVE" ] && [ -f "$STRUCTURED_FINDINGS_COPY" ]; then
+  SF_NORMATIVE_SECTION="$(extract_structured_findings_section "$STRUCTURED_FINDINGS_NORMATIVE")"
+  SF_COPY_SECTION="$(extract_structured_findings_section "$STRUCTURED_FINDINGS_COPY")"
+
+  if [ -z "$SF_NORMATIVE_SECTION" ]; then
+    VIOLATIONS+=("${STRUCTURED_FINDINGS_NORMATIVE#"${REPO_ROOT}/"}: '## Structured Findings Protocol' heading not found — cannot verify drift against ${STRUCTURED_FINDINGS_COPY#"${REPO_ROOT}/"}")
+  elif [ -z "$SF_COPY_SECTION" ]; then
+    VIOLATIONS+=("${STRUCTURED_FINDINGS_COPY#"${REPO_ROOT}/"}: '## Structured Findings Protocol' heading not found — cannot verify drift against ${STRUCTURED_FINDINGS_NORMATIVE#"${REPO_ROOT}/"}")
+  elif [ "$SF_NORMATIVE_SECTION" != "$SF_COPY_SECTION" ]; then
+    VIOLATIONS+=("STRUCTURED_FINDINGS_DRIFT: ${STRUCTURED_FINDINGS_COPY#"${REPO_ROOT}/"} has drifted from its normative source ${STRUCTURED_FINDINGS_NORMATIVE#"${REPO_ROOT}/"}")
+    VIOLATIONS+=("  fix: resync the '## Structured Findings Protocol' section in ${STRUCTURED_FINDINGS_COPY#"${REPO_ROOT}/"} to match ${STRUCTURED_FINDINGS_NORMATIVE#"${REPO_ROOT}/"} verbatim")
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Report and exit.
 # ---------------------------------------------------------------------------
 if [ ${#VIOLATIONS[@]} -gt 0 ]; then
