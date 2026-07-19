@@ -119,6 +119,7 @@ GH_FLAG="-R $GH_REPO"
 # the diagnostic stderr text for the WARNING message on actual failure.
 # ---------------------------------------------------------------------------
 GH_STDERR_TMP=$(mktemp)
+chmod 600 "$GH_STDERR_TMP"
 trap 'rm -f "$GH_STDERR_TMP"' EXIT
 
 # ---------------------------------------------------------------------------

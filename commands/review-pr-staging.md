@@ -681,14 +681,32 @@ gh label create "needs-validation" --color "FBCA04" --description "Review findin
 gh label create "staging-review" --color "1D76DB" --description "Finding from a staging branch review before deploy to main. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
 ```
 
-### 7D: Milestone Detection
-Only assign milestone if reviewing a milestone/* branch. Plain staging reviews get no milestone.
+### 7D: Milestone & Code Branch Detection
+
+Derive both `CODE_BRANCH` and `MILESTONE_FLAG` from the reviewed PR before creating any findings. Unlike `commands/review-pr.md` (feature-lane PRs with short-lived HEAD branches that get deleted post-merge — see the rationale comment on that spec's finding template), `review-pr-staging.md` reviews long-lived branches (`staging`, `milestone/*`) that persist after merge, so `CODE_BRANCH` uses `headRefName` (the PR's HEAD — the branch actually being reviewed), consistent with forge#1391's original fix. This replaces the previous hardcoded `staging` literal, which was silently wrong whenever this spec reviewed a `milestone/X → staging` PR instead of a `staging → main` PR — `CODE_BRANCH` used to always say `staging` even when the reviewed branch was `milestone/X`.
+
+```bash
+CODE_BRANCH=$(gh pr view ${PR_NUMBER} --json headRefName --jq '.headRefName')
+MILESTONE_FLAG=""
+
+# scripts/derive-finding-milestone.sh is the single source of truth for
+# milestone derivation — commands/review-pr.md and commands/review-pr-staging.md
+# both call it identically so the two specs cannot independently drift.
+# <!-- forge#2443 -->
+MILESTONE_TITLE=$(bash scripts/derive-finding-milestone.sh "${PR_NUMBER}" -R {GH_REPO})
+# Quoted so multi-word milestone titles survive as a single value wherever
+# MILESTONE_FLAG is later interpolated — matches the quoting convention already
+# used for --title/--body-file/--label below.
+[ -n "$MILESTONE_TITLE" ] && MILESTONE_FLAG="--milestone \"$MILESTONE_TITLE\""
+```
+
+Plain staging→main reviews resolve `CODE_BRANCH` to `staging` dynamically (same value as before, now derived rather than hardcoded) and typically resolve no milestone. A milestone→staging review resolves `CODE_BRANCH` to `milestone/X` and (via the shared script) the matching milestone.
 
 ### 7E: Deduplicate Against Existing Issues
 Check for open review-finding issues at same file:line → skip. Closed issues at same location → potential regression (elevate priority).
 
 ### 7F: Create Issues
-Sequential creation. Title: `Staging Review: {summary} (staging → main)`. Labels: review-finding, needs-validation, staging-review, priority:P1/priority:P2/priority:P3. Body includes: source branch context (`staging`), code context, evidence, validation checklist.
+Sequential creation. Title: `Staging Review: {summary} (staging → main)`. Labels: review-finding, needs-validation, staging-review, priority:P0-P3 (derived from Severity — see below). Body includes: source branch context (`${CODE_BRANCH}`, derived in Phase 7D — not a hardcoded `staging` literal), code context, evidence, validation checklist.
 
 **For each finding** (that passes dedup), create issue through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") instead of calling the raw issue-creation command directly:
 ```bash
@@ -716,10 +734,10 @@ Files that need changes:
 
 ## Source Branch Context
 
-**Code branch**: `staging`
-**Worktree base**: `origin/staging`
+**Code branch**: `[CODE_BRANCH]`
+**Worktree base**: `origin/[CODE_BRANCH]`
 
-> When fixing: `git worktree add ../fix-{slug} -b fix/{slug} origin/staging`
+> When fixing: `git worktree add ../fix-{slug} -b fix/{slug} origin/[CODE_BRANCH]`
 
 ## Code Context
 [10 lines around finding]
@@ -733,8 +751,32 @@ Files that need changes:
 - [ ] If VALIDATED: fix implemented and tested on correct branch
 ISSUE_EOF
 
+# STAGING_FINDING_SEVERITY is extracted from the finding's own **Severity**
+# body field (set above in the heredoc) — example assignment shown here for
+# clarity, same convention as STAGING_FINDING_TITLE etc.
+STAGING_FINDING_SEVERITY="LOW"
+
+# priority:* label is a deterministic function of the finding's **Severity**
+# (CRITICAL/HIGH/MEDIUM/LOW) — NEVER of its Confidence
+# (CONFIRMED/LIKELY/POSSIBLE). scripts/severity-to-priority.sh is the single
+# source of truth for this mapping; commands/review-pr.md calls the identical
+# script so the two specs cannot independently drift. <!-- forge#2447 -->
+STAGING_FINDING_PRIORITY=$(bash scripts/severity-to-priority.sh "$STAGING_FINDING_SEVERITY")
+STAGING_FINDING_PRIORITY_EXIT=$?
+
+# Exit code MUST be checked before use — severity-to-priority.sh exits 1 (empty stdout)
+# on a missing/unrecognized severity. Proceeding with an empty $STAGING_FINDING_PRIORITY
+# would call Skill(issue, --label "") instead of aborting issue creation for this finding.
+# Mirrors the identical check in commands/review-pr.md. <!-- forge#2479 -->
+if [ "$STAGING_FINDING_PRIORITY_EXIT" -ne 0 ]; then
+  echo "PRIORITY: severity-to-priority.sh failed (exit $STAGING_FINDING_PRIORITY_EXIT) for severity '$STAGING_FINDING_SEVERITY' — skipping finding issue creation"
+  # Skip this finding — do NOT fall through to issue creation with an empty label
+else
+
 # --label is repeatable (not comma-joined) per the /issue programmatic contract.
-Skill(skill="issue", args="--title \"$STAGING_FINDING_TITLE\" --body-file \"$STAGING_FINDING_BODY_FILE\" --label review-finding --label needs-validation --label staging-review --label \"{priority}\"")
+# ${MILESTONE_FLAG} carries the Phase 7D derivation through — empty string is
+# a no-op arg when the reviewed branch has no milestone (plain staging→main).
+Skill(skill="issue", args="--title \"$STAGING_FINDING_TITLE\" --body-file \"$STAGING_FINDING_BODY_FILE\" --label review-finding --label needs-validation --label staging-review --label \"$STAGING_FINDING_PRIORITY\" ${MILESTONE_FLAG}")
 rm -f "$STAGING_FINDING_BODY_FILE"
 
 # /issue has no machine-readable return contract — resolve the created issue's number by
@@ -746,9 +788,10 @@ for _resolve_attempt in 1 2 3; do
   [ -n "$ISSUE_NUM" ] && break
   sleep 2
 done
+fi
 ```
 
-Labels: `review-finding` + `needs-validation` + `staging-review` + priority (`priority:P1` CONFIRMED, `priority:P2` LIKELY, `priority:P3` POSSIBLE).
+Labels: `review-finding` + `needs-validation` + `staging-review` + priority. `priority:*` is derived from the finding's `**Severity**` field via `scripts/severity-to-priority.sh` (identical script used by `commands/review-pr.md` — single documented mapping, see that script's header comment): `CRITICAL` → `priority:P0`, `HIGH` → `priority:P1`, `MEDIUM` → `priority:P2`, `LOW` → `priority:P3`. **Never derive `priority:*` from Confidence** (CONFIRMED/LIKELY/POSSIBLE) — conflating the two axes previously mislabeled LOW-severity CONFIRMED findings as `priority:P1`, defeating orchestrate's P3 batching rule. <!-- forge#2447 -->
 
 **No pre-filtering**: Every finding becomes an issue. Validation agents sort out false positives downstream.
 

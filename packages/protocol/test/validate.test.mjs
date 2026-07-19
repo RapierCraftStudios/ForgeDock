@@ -156,6 +156,41 @@ test('validate: REVIEWER with valid CHANGES_REQUESTED verdict → valid', () => 
   assert.equal(valid, true);
 });
 
+// --- REMEDIATION Re-gate outcome tests (forge#2450) ---
+
+for (const outcome of ['AUTO-LANDED', 'HELD-AWAITING-MERGE', 'RE-ESCALATED', 'UNFIXABLE']) {
+  test(`validate: REMEDIATION with valid Re-gate outcome "${outcome}" → valid`, () => {
+    // Mirrors the real field shape Phase M8 posts (commands/work-on/remediate.md):
+    // "**Re-gate outcome**: ${RE_GATE_OUTCOME} ${OUTCOME_DETAIL}" — trailing free text
+    // after the outcome token must not cause a false rejection.
+    const ann = parseOne(
+      `<!-- FORGE:REMEDIATION -->\n**Re-gate outcome**: ${outcome} to staging\n<!-- FORGE:REMEDIATION:COMPLETE -->`,
+      'REMEDIATION',
+    );
+    const { valid, errors } = validate(ann);
+    assert.equal(valid, true, `Expected valid but got errors: ${errors.join(', ')}`);
+  });
+}
+
+test('validate: REMEDIATION with invalid Re-gate outcome → invalid', () => {
+  const ann = parseOne(
+    `<!-- FORGE:REMEDIATION -->\n**Re-gate outcome**: SOMETHING-ELSE to staging\n<!-- FORGE:REMEDIATION:COMPLETE -->`,
+    'REMEDIATION',
+  );
+  const { valid, errors } = validate(ann);
+  assert.equal(valid, false);
+  assert.ok(errors.some(e => e.includes('Re-gate outcome')));
+});
+
+test('validate: REMEDIATION with no Re-gate outcome field → valid (field is optional pre-Phase-M8)', () => {
+  const ann = parseOne(
+    `<!-- FORGE:REMEDIATION -->\n<!-- FORGE:REMEDIATION:COMPLETE -->`,
+    'REMEDIATION',
+  );
+  const { valid, errors } = validate(ann);
+  assert.equal(valid, true, `Expected valid but got errors: ${errors.join(', ')}`);
+});
+
 test('validate: CONTRACT missing Task type → invalid', () => {
   const ann = parseOne(
     `<!-- FORGE:CONTRACT -->\n### Proposed Approach\nSome approach.`,

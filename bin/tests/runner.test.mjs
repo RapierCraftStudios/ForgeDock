@@ -53,6 +53,7 @@ import {
   sanitizeArgvForLog,
   sanitizeOutputExcerptForLog,
   extractSessionLimitResetTime,
+  parseSessionLimitResetEpochMs,
   VALID_BACKENDS,
 } from "../runner.mjs";
 
@@ -2269,7 +2270,157 @@ describe("runCliBackend usage parsing from --output-format json (issue #2398)", 
       },
       "usage must parse from stdout's clean JSON envelope, not degrade to null because of stderr noise",
     );
-    assert.ok(loggedLines.some((line) => line === "Hi! Done."));
+    // forge#2456: the stderr noise itself is no longer silently dropped from
+    // the logged output — it's appended after the parsed .result text, on
+    // its own line, once JSON.parse has already succeeded from stdout alone.
+    assert.ok(
+      loggedLines.some((line) => line === `Hi! Done.\n${stderrNoise.trim()}`),
+      "the parsed .result text and the stderr noise must both be logged, in that order",
+    );
+  });
+
+  // forge#2456: `runCliBackend`'s success path previously discarded any
+  // non-empty stderr whenever the JSON envelope parsed with a string
+  // `.result` — silently dropping warnings/banners a user would have seen in
+  // the pre-#2398 raw-output behavior. Mirrors the same "combine streams
+  // instead of dropping one" fix already applied to the `run_bash` tool
+  // handler's success path (#1229).
+  it("appends non-empty stderr after the parsed .result on a successful JSON-parse exit (forge#2456)", () => {
+    const envelope = JSON.stringify({
+      type: "result",
+      result: "Hi! Done.",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    const stderrBanner = "(node:99999) [DEP0040] DeprecationWarning: punycode is deprecated";
+    const spawnFn = () => ({ status: 0, stdout: envelope, stderr: stderrBanner, error: undefined });
+
+    const loggedLines = [];
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2456",
+      args: ["2456"],
+      cwd: TMP,
+      logger: { log: (line) => loggedLines.push(line) },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.equal(result.status, "complete");
+    assert.ok(
+      loggedLines.some((line) => line === `Hi! Done.\n${stderrBanner}`),
+      "non-empty stderr must be appended after the parsed .result text, not dropped",
+    );
+    assert.ok(
+      !loggedLines.some((line) => line === "Hi! Done."),
+      "the parsed .result text must not ALSO be logged bare when stderr was appended to it",
+    );
+  });
+
+  it("logs the parsed .result unchanged (no trailing newline/whitespace) when stderr is empty on a successful JSON-parse exit (forge#2456)", () => {
+    const envelope = JSON.stringify({
+      type: "result",
+      result: "Hi! Done.",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    const spawnFn = () => ({ status: 0, stdout: envelope, stderr: "", error: undefined });
+
+    const loggedLines = [];
+    runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2456",
+      args: ["2456"],
+      cwd: TMP,
+      logger: { log: (line) => loggedLines.push(line) },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.ok(
+      loggedLines.some((line) => line === "Hi! Done."),
+      "with empty stderr, the logged line must be byte-identical to the parsed .result — no formatting change",
+    );
+  });
+
+  // forge#2484 (batch #2522): `parsedResult === ""` is a valid, non-null
+  // `.result` (per the `typeof parsed.result === "string"` check above), but
+  // the forge#2456 composition treated "non-null" as the sole gate for
+  // prefixing with `parsedResult`, producing `"" + "\n" + stderrTrimmed` — a
+  // leading-newline-only artifact — whenever the envelope's `.result` was an
+  // empty string and `stderr` was non-empty. Fixed: an empty `.result` now
+  // falls through to the (sanitized) stderr alone, with no separator.
+  it("logs stderr alone with no leading newline when .result is an empty string (forge#2484)", () => {
+    const envelope = JSON.stringify({
+      type: "result",
+      result: "",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    const stderrBanner = "some warning from the CLI";
+    const spawnFn = () => ({ status: 0, stdout: envelope, stderr: stderrBanner, error: undefined });
+
+    const loggedLines = [];
+    const result = runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2484",
+      args: ["2484"],
+      cwd: TMP,
+      logger: { log: (line) => loggedLines.push(line) },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.equal(result.status, "complete");
+    assert.ok(
+      loggedLines.some((line) => line === stderrBanner),
+      "with an empty .result, the logged line must be the stderr alone — no leading-newline-only artifact",
+    );
+    assert.ok(
+      !loggedLines.some((line) => line === `\n${stderrBanner}`),
+      "must never log a leading-newline-only string when .result is empty",
+    );
+  });
+
+  // forge#2483 (batch #2522): the appended `stderr` on this success path is
+  // untrusted subprocess output (the CLI echoes untrusted issue/PR body
+  // content — the same threat class already hardened for the timeout/
+  // non-zero-exit diagnostic paths via `sanitizeOutputExcerptForLog()`). It
+  // must be routed through that same helper before reaching `logger.log()`,
+  // rather than being concatenated raw.
+  it("sanitizes control characters in appended stderr on the success path (forge#2483)", () => {
+    const envelope = JSON.stringify({
+      type: "result",
+      result: "Hi! Done.",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    // A bell character (\x07) is a C0 control char that sanitizeOutputExcerptForLog
+    // must escape to a visible \x07 form, per the same hardening applied to
+    // the timeout/non-zero-exit diagnostic paths (forge#2277).
+    const stderrWithControlChar = "warning: \x07 unexpected byte";
+    const spawnFn = () => ({
+      status: 0,
+      stdout: envelope,
+      stderr: stderrWithControlChar,
+      error: undefined,
+    });
+
+    const loggedLines = [];
+    runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2483",
+      args: ["2483"],
+      cwd: TMP,
+      logger: { log: (line) => loggedLines.push(line) },
+      bin: "claude",
+      spawnFn,
+    });
+
+    assert.ok(
+      loggedLines.some((line) => line === "Hi! Done.\nwarning: \\x07 unexpected byte"),
+      "the control char in appended stderr must be escaped to a visible \\xHH form before logging",
+    );
+    assert.ok(
+      !loggedLines.some((line) => line.includes("\x07")),
+      "the raw, unescaped control char must never reach logger.log()",
+    );
   });
 
   // forge#2424: a non-numeric usage field (e.g. a string, as an alternate/
@@ -2436,6 +2587,131 @@ describe("runCliBackend attaches resetAt to CLI_BACKEND_FAILED on a session-limi
     assert.ok(thrown, "runCliBackend must throw on non-zero exit");
     assert.equal(thrown.code, "CLI_BACKEND_FAILED");
     assert.equal(thrown.resetAt, undefined, "resetAt must not be set for unrelated crash output");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseSessionLimitResetEpochMs (forge#2524) — turns extractSessionLimitResetTime()'s
+// display string ("12:50am (Asia/Calcutta)") into a machine-usable epoch-ms
+// timestamp so the engine can compute an actual wait duration. Asia/Calcutta
+// is used throughout as a deterministic test fixture: it's a real IANA link
+// name with a fixed +5:30 offset and no DST, so expected epoch values can be
+// computed by hand without any DST-transition ambiguity.
+// ---------------------------------------------------------------------------
+
+describe("parseSessionLimitResetEpochMs (forge#2524)", () => {
+  it("resolves today's occurrence when the parsed time is still in the future relative to now", () => {
+    // now = 2026-01-01T04:00:00Z = 2026-01-01 09:30 IST (Asia/Calcutta, UTC+5:30)
+    const nowMs = Date.UTC(2026, 0, 1, 4, 0, 0);
+    const epoch = parseSessionLimitResetEpochMs("10:00am (Asia/Calcutta)", nowMs);
+    // 10:00 IST on 2026-01-01 = 04:30 UTC same day — still after `nowMs`.
+    assert.equal(epoch, Date.UTC(2026, 0, 1, 4, 30, 0));
+  });
+
+  it("rolls forward to tomorrow when today's occurrence of the parsed time has already passed", () => {
+    // now = 2026-01-01T04:00:00Z = 2026-01-01 09:30 IST
+    const nowMs = Date.UTC(2026, 0, 1, 4, 0, 0);
+    const epoch = parseSessionLimitResetEpochMs("8:00am (Asia/Calcutta)", nowMs);
+    // 8:00 IST today = 02:30 UTC, already before `nowMs` (04:00 UTC) — must roll to tomorrow.
+    assert.equal(epoch, Date.UTC(2026, 0, 2, 2, 30, 0));
+  });
+
+  it("handles 12:00am (midnight) and 12:xxpm (noon) boundary conversions correctly", () => {
+    const nowMs = Date.UTC(2026, 0, 1, 0, 0, 0); // 2026-01-01 05:30 IST
+    const midnight = parseSessionLimitResetEpochMs("12:00am (Asia/Calcutta)", nowMs);
+    // 12:00am IST today already passed relative to 05:30 IST `now` — rolls to tomorrow midnight.
+    assert.equal(midnight, Date.UTC(2026, 0, 1, 18, 30, 0)); // 2026-01-02 00:00 IST = 2026-01-01 18:30 UTC
+    const noon = parseSessionLimitResetEpochMs("12:30pm (Asia/Calcutta)", nowMs);
+    assert.equal(noon, Date.UTC(2026, 0, 1, 7, 0, 0)); // 12:30pm IST = 07:00 UTC, still future
+  });
+
+  it("returns undefined for unparseable reset-time text — never fabricates a value", () => {
+    assert.equal(parseSessionLimitResetEpochMs("sometime soon", Date.now()), undefined);
+    assert.equal(parseSessionLimitResetEpochMs("", Date.now()), undefined);
+    assert.equal(parseSessionLimitResetEpochMs(undefined, Date.now()), undefined);
+  });
+
+  it("returns undefined for an out-of-range minute value", () => {
+    assert.equal(parseSessionLimitResetEpochMs("10:75am (Asia/Calcutta)", Date.now()), undefined);
+  });
+
+  it("returns undefined for an out-of-range hour value instead of aliasing via modulo (forge#2560)", () => {
+    // Regression: `hour % 12` previously wrapped any out-of-range hour into a
+    // plausible-but-wrong in-range value (13 % 12 = 1, 99 % 12 = 3, 25 % 12 = 1)
+    // instead of being rejected. Must return `undefined` for all of these.
+    assert.equal(parseSessionLimitResetEpochMs("13:30pm (Asia/Calcutta)", Date.now()), undefined);
+    assert.equal(parseSessionLimitResetEpochMs("99:30pm (Asia/Calcutta)", Date.now()), undefined);
+    assert.equal(parseSessionLimitResetEpochMs("25:00am (Asia/Calcutta)", Date.now()), undefined);
+  });
+
+  it("returns undefined for an unrecognized IANA timezone name rather than throwing", () => {
+    assert.doesNotThrow(() => parseSessionLimitResetEpochMs("10:00am (Not/AZone)", Date.now()));
+    assert.equal(parseSessionLimitResetEpochMs("10:00am (Not/AZone)", Date.now()), undefined);
+  });
+});
+
+describe("runCliBackend attaches resetAtEpochMs to CLI_BACKEND_FAILED on a session-limit exit (forge#2524)", () => {
+  it("sets err.resetAtEpochMs to a finite future timestamp alongside err.resetAt", () => {
+    const spawnFn = () => ({
+      status: 1,
+      signal: null,
+      stdout: "You've hit your session limit · resets 11:59pm (Asia/Calcutta)",
+      stderr: "",
+      error: undefined,
+    });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2524",
+        args: ["2524"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "runCliBackend must throw on non-zero exit");
+    assert.equal(thrown.code, "CLI_BACKEND_FAILED");
+    assert.equal(thrown.resetAt, "11:59pm (Asia/Calcutta)");
+    assert.equal(typeof thrown.resetAtEpochMs, "number");
+    assert.ok(Number.isFinite(thrown.resetAtEpochMs));
+    // Always the next occurrence of that wall-clock time — within 24h of now.
+    assert.ok(thrown.resetAtEpochMs > Date.now() - 1000, "resetAtEpochMs should not be in the past");
+    assert.ok(thrown.resetAtEpochMs <= Date.now() + 24 * 60 * 60 * 1000, "resetAtEpochMs should be within 24h");
+  });
+
+  it("leaves resetAtEpochMs unset for an ordinary non-session-limit crash — never fabricated", () => {
+    const spawnFn = () => ({
+      status: 1,
+      signal: null,
+      stdout: "",
+      stderr: "boom",
+      error: undefined,
+    });
+
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+        userMessage: "Execute: /work-on 2524",
+        args: ["2524"],
+        cwd: TMP,
+        logger: { log: () => {} },
+        bin: "claude",
+        spawnFn,
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    assert.ok(thrown, "runCliBackend must throw on non-zero exit");
+    assert.equal(thrown.resetAt, undefined);
+    assert.equal(thrown.resetAtEpochMs, undefined, "resetAtEpochMs must not be set for unrelated crash output");
   });
 });
 

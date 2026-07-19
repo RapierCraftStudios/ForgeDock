@@ -10,6 +10,94 @@ install: core
 
 **Entry requires `phase-3-dependency.md`'s Step 3D.6 completion gate to have passed.** <!-- Added: forge#1913 --> Every step below (budget init, dispatch, dependency resolution) reads `ISSUES[]`, `PREDECESSORS[]`, `ISSUE_DOMAIN[]`, `ISSUE_SCORE[]`, `ISSUE_COST_ESTIMATE[]`, and `ISSUE_HAS_PRIOR[]` as authoritative Phase 3 output — none of these are re-derived here. If Phase 4 is being entered without having actually run Phase 3's Steps 3A–3E.5 in this session (e.g. a fresh session resuming mid-batch), reconstruct from GitHub via the "Orchestrator state reconstruction on wake / after compaction" procedure in `phase-3-dependency.md` rather than assuming these variables are already populated.
 
+### Step 4A-pre.-1: Lease gate (MANDATORY, before any dispatch) <!-- Added: forge#2627 -->
+
+**WHY THIS EXISTS**: Nothing today checks whether another live `/orchestrate` instance already holds this batch before dispatching (see issue #2627). Two concurrent loops (a stale survivor plus a restart, or two independent invocations) then both re-derive a ready set from GitHub and both dispatch — duplicate/backlog dispatch, and a restarted instance's own bookkeeping can diverge from what the first loop already did. This step closes that gap at the single entry point every dispatch group (initial ready set + every subsequent newly-unblocked batch) passes through, by extending the Step 3D.1 coordination issue into a single-instance lease (see `phase-3-dependency.md` Step 3D.2 for `check_orchestrator_lease()` and the `FORGE:LEASE`/`FORGE:LEASE_RELEASED` comment format).
+
+**Run this once, before the first dispatch of any group in this session** — not per-chunk, per-issue, or per-newly-ready-batch.
+
+```bash
+# --- Lease gate (uses check_orchestrator_lease() from phase-3-dependency.md Step 3D.2;
+#     re-declare it here if this context hasn't sourced that file) ---
+if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && [ -n "${BATCH_ID:-}" ]; then
+  LEASE_STATE=$(check_orchestrator_lease "$COORD_ISSUE_NUMBER" "$BATCH_ID")
+  case "$LEASE_STATE" in
+    held:*)
+      HELD_BY="${LEASE_STATE#held:}"
+      echo "REFUSING TO DISPATCH: coordination issue #${COORD_ISSUE_NUMBER} shows an unexpired lease held by batch ${HELD_BY}, not this session's batch ${BATCH_ID}."
+      echo "Another live /orchestrate instance appears to be dispatching this batch already. Stop this invocation, or wait for the other lease to go stale."
+      exit 1
+      ;;
+    free|self)
+      HOSTNAME_ID=$(hostname 2>/dev/null || echo "unknown-host")
+      # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
+      gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE -->
+**Holder Batch ID**: ${BATCH_ID}
+**Holder**: ${HOSTNAME_ID} (pid ${$})
+**Acquired/refreshed**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**TTL**: ${LEASE_TTL_SECONDS:-900}s (refreshed once per dispatch chunk in Step 4A)" 2>/dev/null || \
+        echo "WARNING: failed to post FORGE:LEASE — continuing without a lease record (best-effort primitive)"
+      ;;
+    *)
+      # Defensive default (MANDATORY — do not remove): see the matching comment at
+      # phase-3-dependency.md Step 3D.2's acquisition case block. An unexpected LEASE_STATE
+      # here must warn loudly, not silently fall through and let dispatch proceed as if the
+      # lease gate had passed.
+      echo "WARNING: check_orchestrator_lease() returned unexpected value '${LEASE_STATE}' — lease gate could not be evaluated. Proceeding without a confirmed lease; investigate rather than ignore." >&2
+      ;;
+  esac
+else
+  echo "INFO: no coordination issue / BATCH_ID available — lease enforcement disabled for this batch."
+fi
+# --- End lease gate ---
+```
+
+**Lease release**: `LEASE_RELEASED_THIS_SESSION` (declared just below, alongside `release_orchestrator_lease()`) guards against double-posting `FORGE:LEASE_RELEASED`. The release call is invoked from both the **Step 4A-pre.-0.5 "Stopping the orchestrator"** procedure (interrupted path) and the **Termination condition** at the end of Step 4B (normal clean/paused drain) — both exit paths route through the same idempotent function so the lease is never left dangling either way.
+
+```bash
+LEASE_RELEASED_THIS_SESSION=false
+
+release_orchestrator_lease() {
+  # Idempotent — safe to call from both the interrupted-stop procedure and normal
+  # end-of-batch completion without double-posting FORGE:LEASE_RELEASED.
+  if [ "$LEASE_RELEASED_THIS_SESSION" = "true" ]; then
+    return
+  fi
+  if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ]; then
+    # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
+    gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE_RELEASED -->
+**Holder Batch ID**: ${BATCH_ID:-unknown}
+**Released**: $(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>/dev/null || true
+  fi
+  LEASE_RELEASED_THIS_SESSION=true
+}
+```
+
+### Step 4A-pre.-0.5: Backgrounded engine-child tracking + interruption handling ("Stopping the orchestrator") (MANDATORY) <!-- Added: forge#2627 -->
+
+**WHY THIS EXISTS**: Step 4A's engine-first dispatch (fixed by forge#2466) already dispatches each `forgedock run-issue` invocation as its own `Bash(run_in_background=true, ...)` call and records the returned task id in `ENGINE_DISPATCH_MAP[{NUM}]` — this is a harness-managed background task, not a raw shell `&` job. **Because it is harness-managed, it cannot be reaped by a shell-level `trap`/`kill $PID`**: a bash `trap` only runs inside that one Bash tool invocation's own process and has no way to call back into the harness's own task-management surface (`TaskStop`). Reaping these tasks on interrupt is therefore something the orchestrating agent itself must do — as an explicit step in its own routing loop — not something a background shell script can do on its own behalf.
+
+**Contract — the orchestrating agent (not a shell trap) is responsible for reaping**: Whenever the interactive `/orchestrate` session is being stopped (the operator sends an interrupt, or the harness delivers a stop signal to the top-level orchestrator agent) **before** all dispatched issues have reached a terminal `workflow:*` label, the orchestrator MUST, as part of handling that stop — not silently exit —:
+
+1. Enumerate every task id still tracked in `ENGINE_DISPATCH_MAP` whose issue has not yet reached a terminal `workflow:*` label (per Step 4B's `classify_predecessor_state()`).
+2. Call `TaskStop(task_id)` (the harness tool) for each one, in the same turn, before ending the session.
+3. Call `release_orchestrator_lease()` (Step 4A-pre.-1) so a future resume or a different operator is not blocked by a stale lease from this now-stopped session.
+4. Report which issues had in-flight dispatch stopped mid-pipeline (their `workflow:*` label will reflect whatever phase they reached — a future `/work-on {NUMBER}` or orchestrator resume picks them back up from GitHub state, per the Universal Phase Dispatcher in `commands/work-on.md`).
+
+**This is a documentation/behavioral contract, not a bash block**: unlike the lease gate above, there is no shell construct that reliably intercepts "the orchestrator's own session is being stopped" — that is a harness-level event the orchestrating agent must handle in its own turn when it observes an interrupt, using its own tools (`TaskStop`), exactly the way `commands/orchestrate/phase-5-cleanup.md` already documents cleanup as an agent-driven procedure rather than a background script.
+
+**Known limitation — Windows Git Bash (documented, not silently overclaimed)**: Even a harness-issued `TaskStop` against the tracked background task is not guaranteed to terminate the underlying `forgedock run-issue` Win32 process tree on Windows Git Bash — MSYS-launched child processes are not always attached to the parent's job object in a way that a stop signal reliably cascades through. `TaskStop` is the correct in-spec, harness-native mitigation and closes the common case (an operator deliberately stopping a live, still-running orchestrator session). It does **not** guarantee full termination in every case — per the issue's own report, an operator may still need to fall back to a manual, command-line-matched kill as a belt-and-suspenders measure:
+
+```powershell
+# Windows fallback — only if a forgedock run-issue process is confirmed still running
+# after TaskStop (e.g. `docker ps` / dispatch-state still show activity post-stop):
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'forgedock run-issue' } | ForEach-Object {
+  Stop-Process -Id $_.ProcessId -Force
+}
+```
+
+Do not claim `TaskStop` eliminates every zombie-process scenario on Windows; it eliminates the scenario this issue's fix is scoped to (an operator or harness cleanly stopping a live orchestrator session that is still tracking its own dispatched tasks) — the PowerShell fallback above remains documented for the narrower case where the underlying process tree survives regardless.
+
 ### Step 4A-pre.0: Budget initialization (MANDATORY when --budget is set) <!-- Added: forge#1743 -->
 
 Initialize budget tracking state before the first dispatch. Read `--budget N` from the orchestrator's argument list (passed from the top-level `/orchestrate` invocation). When `--budget` is not set, `BUDGET_LIMIT` is `Infinity` (uncapped — current default behavior preserved).
@@ -276,6 +364,20 @@ Before building agent prompts, run `classify-lane.sh` for every issue in the cur
 declare -A ISSUE_LANE
 declare -A ISSUE_PR_BASE
 
+# Batch-start T0 (forge#2628) — reuse the value phase-1-resolve.md captured at the very
+# start of Phase 1 and persisted per "Predicate Persistence." Step 4C's run-spawned cascade
+# time filter (Method 2 below) anchors to this, NOT to a rolling "N hours ago" window — a
+# rolling window can still admit pre-existing backlog issues that happen to have been
+# created recently for unrelated reasons. Degraded fallback only: if BATCH_T0 is not in
+# context (e.g. a session resumed mid-run after compaction and Phase 1's capture was lost),
+# capture one here — this is later than true batch start and will admit a narrower window
+# than the real run, never wider, so it fails safe.
+if [ -z "${BATCH_T0:-}" ]; then
+  echo "WARNING: BATCH_T0 not found in context — Phase 1 should have captured it. Falling back to capturing it now (narrower window than the true batch start, but never wider)."
+  BATCH_T0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+fi
+echo "Step 4A.pre: using BATCH_T0=${BATCH_T0} for Step 4C's run-spawned cascade time filter"
+
 # Batch-level accumulators for review-finding cascade control (Step 4C) and
 # Completion Sweep (Step 4F). Declared here so they persist across ALL agent
 # completions — Step 4C runs per-agent and must NOT re-initialize these.
@@ -283,6 +385,12 @@ DEFERRED_FINDINGS=()
 QUEUED_FINDINGS=()
 declare -A DEFERRED_REASONS
 declare -A AGENT_ISSUE_MAP
+# Engine-first dispatch equivalent of AGENT_ISSUE_MAP (fixed forge#2466): keyed by issue
+# number, holds the task id returned by each backgrounded `Bash(run_in_background=true,
+# command="forgedock run-issue ...")` call from Step 4A's engine-first path. Step 4B reads
+# this map to identify which issue a background-Bash completion notification belongs to,
+# the same role AGENT_ISSUE_MAP plays for Agent-tool `agent_completed` notifications.
+declare -A ENGINE_DISPATCH_MAP
 
 # Same-file current-state brief forwarding (forge#1860). Populated by the core streaming
 # dispatch loop below (Step 4B) whenever a Layer 1/2/3 structural predecessor edge (see
@@ -413,6 +521,8 @@ Use `${ISSUE_LANE[$NUM]}` and `${ISSUE_PR_BASE[$NUM]}` to populate `{LANE}` and 
 
 **Engine-first dispatch (default)**: When `forgedock` is in PATH, dispatch each ready issue via the durable engine rather than spawning prose Agent sub-agents. The engine's phase table enforces gate semantics in code — its fail-closed review gate and deterministic phase ordering are not subject to LLM interpretation.
 
+**CRITICAL — never background via shell `&`/`wait`** (fixed forge#2466): A single `forgedock run-issue` invocation drives an issue through investigate → build → review → close and routinely runs 30+ minutes. Backgrounding the process at the *shell* level (`cmd &` … `wait`) does not escape the Bash tool's own per-invocation ceiling — `wait` is itself the foreground command the tool watches, and it blocks for the combined duration of every process in the chunk. This made engine-first dispatch effectively dead code: any chunk running longer than the ceiling was always killed, so every run silently fell through to the Agent-spawn fallback below. The fix: dispatch each `forgedock run-issue` invocation as its **own `Bash` tool call with `run_in_background=true`** — the harness's native "start it, don't wait, notify me on completion" primitive — never with shell-level `&`/`wait`. This is exactly the same async model the Agent-spawn-fallback path already uses (and Step 4B's notification-driven completion loop already expects), so one monitoring loop now covers both dispatch styles.
+
 ```bash
 # Engine-first dispatch: check CLI availability, then dispatch ready issues in score order
 # Uses SORTED_READY_SET[] from Step 3E.5 (descending value/cost) and budget gate from Step 4A-pre.0
@@ -428,36 +538,84 @@ if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
     fi  # else: added to DEFERRED_BUDGET_ISSUES[] by should_dispatch()
   done
 
-  # Concurrency gate (forge#1912): dispatch in chunks of MAX_CONCURRENT, waiting for each
-  # chunk to finish before starting the next. This is the code-form equivalent of the
-  # Agent-spawn-fallback cap below — never more than MAX_CONCURRENT `forgedock run-issue`
-  # processes in flight at once, regardless of how many issues are ready.
-  IDX=0
-  while [ "$IDX" -lt "${#DISPATCH_QUEUE[@]}" ]; do
-    CHUNK=("${DISPATCH_QUEUE[@]:$IDX:$MAX_CONCURRENT}")
-    echo "Dispatching chunk of ${#CHUNK[@]} issue(s) — concurrency cap ${MAX_CONCURRENT}"
-
-    for NUM in "${CHUNK[@]}"; do
-      LANE="${ISSUE_LANE[$NUM]}"
-      PR_BASE="${ISSUE_PR_BASE[$NUM]}"
-      COST="${ISSUE_COST_ESTIMATE[$NUM]:-0.35}"
-
-      # Advance PROJECTED_SPEND before forking so subsequent iterations see the updated total
-      PROJECTED_SPEND=$(echo "scale=4; $PROJECTED_SPEND + $COST" | bc 2>/dev/null || echo "$PROJECTED_SPEND")
-
-      echo "Dispatching #$NUM via forgedock run-issue --lane $PR_BASE (score=${ISSUE_SCORE[$NUM]:-?} est_cost=\$${COST} projected_total=\$${PROJECTED_SPEND})"
-      forgedock run-issue "$NUM" --lane "$PR_BASE" &
-    done
-    wait   # cap enforced here — no more than MAX_CONCURRENT processes run concurrently
-    IDX=$((IDX + MAX_CONCURRENT))
+  # Concurrency gate (forge#1912, mechanism fixed forge#2466): compute this dispatch batch the
+  # SAME way the Agent-spawn-fallback path below does — via dispatch_headroom()/
+  # DEFERRED_CONCURRENCY_ISSUES (Step 4A-pre.0.2) — NOT a shell `&`/`wait` chunk loop.
+  #
+  # MUST merge previously-deferred issues back in before recomputing, exactly like the
+  # Agent-spawn path's own batch computation does (CANDIDATES=("${DEFERRED_CONCURRENCY_ISSUES[@]}"
+  # ...); DEFERRED_CONCURRENCY_ISSUES=()). Without this merge-and-reset, an issue that lands in
+  # DEFERRED_CONCURRENCY_ISSUES on THIS path has no way back into a future DISPATCH_QUEUE — Step
+  # 4B item 5 only re-runs Step 4A for issues that just became DAG-unblocked, not for issues that
+  # were already ready but held back purely by the concurrency cap. DEFERRED_CONCURRENCY_ISSUES
+  # would become a write-only sink on the engine-first path, silently starving deferred work —
+  # the same class of bug this PR exists to fix, just relocated.
+  HEADROOM=$(dispatch_headroom)
+  CANDIDATES=("${DEFERRED_CONCURRENCY_ISSUES[@]}" "${DISPATCH_QUEUE[@]}")
+  DEFERRED_CONCURRENCY_ISSUES=()
+  DISPATCH_NOW=()
+  for NUM in "${CANDIDATES[@]}"; do
+    if [ "${#DISPATCH_NOW[@]}" -lt "$HEADROOM" ]; then
+      DISPATCH_NOW+=("$NUM")
+    else
+      DEFERRED_CONCURRENCY_ISSUES+=("$NUM")
+    fi
   done
-  echo "Engine dispatch complete — advancing to Step 4B (completion sweep)"
+
+  if [ "${#DEFERRED_CONCURRENCY_ISSUES[@]}" -gt 0 ]; then
+    echo "CONCURRENCY DEFER: ${#DEFERRED_CONCURRENCY_ISSUES[@]} ready issue(s) held back — ${ACTIVE_DISPATCH_COUNT}/${MAX_CONCURRENT} already in flight. Will dispatch as slots free up: ${DEFERRED_CONCURRENCY_ISSUES[*]}"
+  fi
+  echo "Dispatching ${#DISPATCH_NOW[@]} issue(s) this message via forgedock run-issue (headroom was ${HEADROOM})"
+
+  for NUM in "${DISPATCH_NOW[@]}"; do
+    LANE="${ISSUE_LANE[$NUM]}"
+    PR_BASE="${ISSUE_PR_BASE[$NUM]}"
+    COST="${ISSUE_COST_ESTIMATE[$NUM]:-0.35}"
+
+    # Advance PROJECTED_SPEND before dispatching so subsequent iterations see the updated total
+    PROJECTED_SPEND=$(echo "scale=4; $PROJECTED_SPEND + $COST" | bc 2>/dev/null || echo "$PROJECTED_SPEND")
+
+    echo "Dispatching #$NUM via forgedock run-issue --lane $PR_BASE (score=${ISSUE_SCORE[$NUM]:-?} est_cost=\$${COST} projected_total=\$${PROJECTED_SPEND})"
+  done
+
+  # Lease heartbeat refresh (forge#2627) — once per dispatch chunk, so a long-running batch's
+  # lease never goes stale purely from elapsed wall-clock time while dispatch is still active.
+  if [ "${#DISPATCH_NOW[@]}" -gt 0 ] && [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && [ -n "${BATCH_ID:-}" ]; then
+    HOSTNAME_ID=$(hostname 2>/dev/null || echo "unknown-host")
+    # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
+    gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE -->
+**Holder Batch ID**: ${BATCH_ID}
+**Holder**: ${HOSTNAME_ID} (pid ${$})
+**Acquired/refreshed**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**TTL**: ${LEASE_TTL_SECONDS:-900}s (refreshed once per dispatch chunk in Step 4A)" 2>/dev/null || true
+  fi
+
+  if [ "${#DISPATCH_NOW[@]}" -eq 0 ]; then
+    echo "Engine dispatch: no headroom this cycle — waiting for the next completion notification (Step 4B) before dispatching more."
+  fi
 else
   echo "INFO: Using agent dispatch mode (forgedock CLI not in PATH — run \`npm install -g forgedock\` for engine-mode dispatch)"
   # Fall through to Agent-spawn template below. The SubagentStop hook (bin/hooks/interactive-engine.mjs)
   # bridges these runs to the engine run-log for state persistence even on the fallback path.
 fi
 ```
+
+**Dispatch each issue in `DISPATCH_NOW` via its own backgrounded `Bash` call (MANDATORY when `FORGEDOCK_AVAILABLE=true`) — never shell `&`/`wait`.** Issue one `Bash(...)` call per issue in `DISPATCH_NOW`, all in the same message, so they run concurrently within the headroom already computed above:
+
+```
+Bash(command="forgedock run-issue {NUM} --lane {PR_BASE}", run_in_background=true, description="Engine-drive issue #{NUM}")
+```
+
+Capture the task id each call returns into `ENGINE_DISPATCH_MAP[{NUM}]` (declared alongside `AGENT_ISSUE_MAP` below — Step 4B's completion handler uses this map to identify which issue a backgrounded engine-mode `Bash` completion notification belongs to, the same role `AGENT_ISSUE_MAP` plays for `agent_completed` notifications):
+
+```
+# After the batch of Bash(run_in_background=true, ...) calls, capture each returned task id:
+ENGINE_DISPATCH_MAP[{NUM}] = <task_id returned by Bash(run_in_background=true, ...)>
+```
+
+`ENGINE_DISPATCH_MAP` starts empty and accumulates one entry per dispatched issue, exactly like `AGENT_ISSUE_MAP` below. After the batch, increment `ACTIVE_DISPATCH_COUNT` by `${#DISPATCH_NOW[@]}` — identical accounting to the Agent-spawn path's own post-batch increment.
+
+If `DISPATCH_NOW` is empty (headroom is 0), do not dispatch any issues this cycle — wait for the next completion notification, exactly like the Agent-spawn path.
 
 **Agent-spawn path (fallback when forgedock CLI unavailable)**: When `FORGEDOCK_AVAILABLE=false`, spawn Agent sub-agents per issue using the template below. This preserves engine state via the SubagentStop hook even without the CLI.
 
@@ -689,9 +847,9 @@ If `DISPATCH_NOW` is empty (headroom is 0), do not spawn any agents this cycle �
 
 ### Step 4B: Monitor completions and dispatch newly ready issues
 
-You will be automatically notified when each background agent completes. **Do NOT use `sleep` loops to poll for completion.** Instead, wait for the automatic notification. When you receive a notification that an agent completed, immediately process it.
+You will be automatically notified when each background agent completes — or, for an engine-first dispatch (Step 4A, `FORGEDOCK_AVAILABLE=true`), when a backgrounded `Bash(run_in_background=true, command="forgedock run-issue ...")` call completes. Both are the same underlying "background task finished" notification the harness delivers; treat them identically for the purposes of this step. **Do NOT use `sleep` loops to poll for completion.** Instead, wait for the automatic notification. When one arrives, look up which issue it belongs to — `AGENT_ISSUE_MAP` for an `agent_completed` notification, `ENGINE_DISPATCH_MAP` (fixed forge#2466) for a background-Bash notification from the engine-first path — and immediately process it exactly the same way regardless of which map resolved it; every check below (`classify_predecessor_state()`, dependent dispatch, stall/staging checks) keys off GitHub labels/state, not which dispatch mechanism produced them. **Fallback**: if a runtime ever fails to deliver a background-Bash completion notification, poll `gh issue view --json labels` for the in-flight engine-dispatched issue's workflow label instead of blocking — the same degrade-gracefully behavior already used when `BACKGROUND_DISPATCH_ENABLED=false` for the Agent-spawn path (see `phase-3-dependency.md` → Background Dispatch Mode).
 
-**Concurrency slot release (MANDATORY — first action on every completion)** <!-- Added: forge#1912 -->: The instant an `agent_completed` notification arrives, decrement `ACTIVE_DISPATCH_COUNT` by 1 — a worker slot has just freed, regardless of what terminal state the issue ended up in. Do this before any stall-recovery/resume logic below. If that agent is then resumed (item 2 below, or Step 4B.5's stall recovery) because it stalled mid-pipeline rather than truly finishing, re-increment `ACTIVE_DISPATCH_COUNT` when the `Agent(resume=...)` call is issued — a resume re-occupies a worker slot exactly like a fresh dispatch does.
+**Concurrency slot release (MANDATORY — first action on every completion)** <!-- Added: forge#1912 -->: The instant a completion notification arrives — `agent_completed`, or a background-Bash completion for an engine-dispatched issue — decrement `ACTIVE_DISPATCH_COUNT` by 1 — a worker slot has just freed, regardless of what terminal state the issue ended up in. Do this before any stall-recovery/resume logic below. If that agent is then resumed (item 2 below, or Step 4B.5's stall recovery) because it stalled mid-pipeline rather than truly finishing, re-increment `ACTIVE_DISPATCH_COUNT` when the `Agent(resume=...)` call is issued — a resume re-occupies a worker slot exactly like a fresh dispatch does. (Step 4B.5's stall-resume mechanism is `Agent(resume=...)`-specific and is unchanged by this fix — an engine-dispatched issue that stalls is not currently auto-resumed by Step 4B.5; it surfaces the same way any other stalled issue does, via the standard stall-detection alert, and `forgedock resume-stalled` remains available as a separate manual/scripted recovery path outside this file's scope.)
 
 **Ordering requirement (MANDATORY — prevents transient over-cap)**: For every agent that completed in this notification batch, finish its terminal-state check and, if applicable, its resume re-increment (items 1-2 below) BEFORE computing `dispatch_headroom` for item 5's newly-ready-issue dispatch. Computing headroom before a to-be-resumed agent's re-increment would let a genuinely-still-running agent's freed slot be double-booked — once by a fresh dispatch, once by the resume itself — transiently exceeding `MAX_CONCURRENT`. Process every completed agent's items 1-2 to a decision (terminal vs. resumed) first; only then compute headroom once for the batch's item 5 dispatch.
 
@@ -991,7 +1149,7 @@ done
 
    Report every dependent whose skip was avoided this way — e.g. "#{DEP} — predecessor #{PRED} failed but never touched the shared file(s); edge dropped, #{DEP} not skipped." For all remaining dependents (real `EDGE_KIND` overlap confirmed, or a non-`EDGE_KIND` edge type), mark them "skipped — dependency #{X} failed" and report them. Do NOT dispatch them.
 
-6.4. **Auto-dispatch remediation against a `needs-human`-gated issue's own PR — runs unconditionally per completion, with or without dependents** <!-- Added: forge#1813, fixed: forge#2243 --> — item 6.5 below tracks the *dependents* of a `GATED` predecessor; this item handles the gated issue's own PR, which item 6.5/6.6 never re-drive on their own. **This check is bound directly to the issue that just completed — `PRED="$NUM"` (the same issue number carried from items 1-4 of this Step 4B sequence) — NOT to any `$PRED` produced by walking a dependent's predecessor list (item 5's readiness loop) or by item 6's FAILED-specific dependent-walk.** Run it for every completed agent, every cycle, regardless of whether that issue has any dependents in the DAG at all — a leaf issue (no dependents) is just as eligible as an issue that blocks others. Trigger condition: the completed issue classifies `GATED` **specifically via `needs-human`** — NOT `workflow:awaiting-merge`. That second state already means "remediated and re-reviewed to a clean verdict, just needs a human's merge click" (see forge#1810's guard) — dispatching remediation again would be redundant, not just wasteful, since there is nothing left to fix.
+6.4. **Auto-dispatch remediation against a `needs-human`-gated issue's own PR — runs unconditionally per completion, with or without dependents** <!-- Added: forge#1813, fixed: forge#2243 --> — item 6.5 below tracks the *dependents* of a `GATED` predecessor; this item handles the gated issue's own PR, which item 6.5/6.6 never re-drive on their own. **This check is bound directly to the issue that just completed — `PRED="$NUM"` (the same issue number carried from items 1-4 of this Step 4B sequence) — NOT to any `$PRED` produced by walking a dependent's predecessor list (item 5's readiness loop) or by item 6's FAILED-specific dependent-walk.** Run it for every completed agent, every cycle, regardless of whether that issue has any dependents in the DAG at all — a leaf issue (no dependents) is just as eligible as an issue that blocks others. Trigger condition: the completed issue classifies `GATED` **specifically via `needs-human`** — NOT `workflow:awaiting-merge`. That second state already means "remediated and re-reviewed to a clean verdict" (see forge#1810's guard) — dispatching remediation again would be redundant, not just wasteful, since there is nothing left to fix. A PR that reaches `workflow:awaiting-merge` now does so only when it targets `main` / the deploy gate (where `staging → main` is the genuine human gate and a human's merge click is required); a remediated-clean PR targeting a non-`main` base (`staging`, `milestone/*`) auto-lands to `workflow:merged` via remediate.md Phase M7's base-scoped auto-land bar (forge#2570) and never parks here. Either way this item's skip of `workflow:awaiting-merge` is unchanged.
 
    ```bash
    # Bind PRED to the issue that just completed — independent of item 5's dependent-walk loop
@@ -1176,7 +1334,7 @@ Gating predecessor #${NUM} reached \`workflow:merged\` — dispatching now. (Was
    ✓ #{NUMBER} — {title} → PR #{PR} merged to {target}
    ✗ #{NUMBER} — {title} → {reason for failure}
    ⚠ #{NUMBER} — {title} → PIPELINE BYPASS (no /work-on — PR invalid)
-   ⏸ #{NUMBER} — {title} → PR #{PR} awaiting-merge (remediated + re-approved — human merge only, no diagnosis needed)
+   ⏸ #{NUMBER} — {title} → PR #{PR} awaiting-merge (remediated + re-approved, `main`/deploy-gate base — human merge only, no diagnosis needed; non-`main` bases now auto-land to `workflow:merged` via remediate.md M7, forge#2570)
    🔗 #{NUMBER} — {title} → blocked-on-human-merge (gated by #{PRED}, will auto-dispatch on #{PRED} merge)
    ⏳ Progress: {completed}/{total} complete, {active} active, {blocked} blocked
    → Dispatched #{NEWLY_READY} (predecessor #{PRED} completed)
@@ -1202,7 +1360,9 @@ Gating predecessor #${NUM} reached \`workflow:merged\` — dispatching now. (Was
 
 9. **Run staging integrity check** (from Step 4A-pre) if the completed agent merged a PR targeting staging.
 
-**Termination condition**: All issues in the DAG have reached `DONE` or `FAILED` (merged, invalid, or skipped due to dependency failure) — OR are `blocked-on-human-merge` (item 6.5) with no further dispatchable work remaining in the batch. These two outcomes are reported differently: a batch where every issue is `DONE`/`FAILED` is a **clean drain**; a batch where one or more issues remain `blocked-on-human-merge` is a **paused drain** — the active dispatch loop stops (there is nothing left to do until a human merges a gating PR) but this MUST be reported as paused, not as fully complete (see `phase-6-report.md`'s `🔗 Blocked-on-Merge` section). `needs-human` predecessors with no open PR are neither — they remain GATED indefinitely until either a PR appears (dependent moves to blocked-on-human-merge) or the predecessor itself resolves; do not treat isolated `needs-human` issues with no dependents as blocking termination. When either drain condition is met, check whether deferred review-spawned findings exist (accumulated in `DEFERRED_FINDINGS` during Step 4C). If deferred findings exist → proceed to Step 4F (Completion Sweep). If no deferred findings → proceed to Phase 5.
+**Termination condition**: All issues in the DAG have reached `DONE` or `FAILED` (merged, invalid, or skipped due to dependency failure) — OR are `blocked-on-human-merge` (item 6.5) with no further dispatchable work remaining in the batch. These two outcomes are reported differently: a batch where every issue is `DONE`/`FAILED` is a **clean drain**; a batch where one or more issues remain `blocked-on-human-merge` is a **paused drain** — the active dispatch loop stops (there is nothing left to do until a human merges a gating PR) but this MUST be reported as paused, not as fully complete (see `phase-6-report.md`'s `🔗 Blocked-on-Merge` section). `needs-human` predecessors with no open PR are neither — they remain GATED indefinitely until either a PR appears (dependent moves to blocked-on-human-merge) or the predecessor itself resolves; do not treat isolated `needs-human` issues with no dependents as blocking termination. When either drain condition is met, check whether deferred review-spawned findings exist (accumulated in `DEFERRED_FINDINGS` during Step 4C). If deferred findings exist → proceed to Step 4F (Completion Sweep). If no deferred findings → **call `release_orchestrator_lease()` (Step 4A-pre.-1)** — this is a clean/paused drain of this session's own dispatch loop, so the lease should not be left held for a now-idle session — then proceed to Phase 5. <!-- Added: forge#2627 -->
+
+**Reminder — this is the normal-exit lease release, distinct from the interrupted-stop procedure**: whether the drain is clean or paused, this session is no longer actively dispatching, so its lease must be released here (or, for a paused drain, at minimum have its heartbeat refresh stop — see Step 4A-pre.-1). This complements, but does not replace, the **Stopping the orchestrator** procedure (Step 4A-pre.-0.5) which handles the abnormal case of a mid-dispatch interrupt.
 
 **Relationship to `DEFERRED_CONCURRENCY_ISSUES` (forge#1912)**: A non-empty `DEFERRED_CONCURRENCY_ISSUES[]` never satisfies either termination condition above — it means dispatchable work exists but is temporarily held back by the concurrency cap, not that the DAG has stalled. Unlike `blocked-on-human-merge`, this is never reported as a "paused drain" requiring human action — it self-resolves automatically the moment any in-flight agent completes and frees a slot (Step 4A's `dispatch_headroom` recomputes every cycle). Only treat the DAG as drained once `DEFERRED_CONCURRENCY_ISSUES` is also empty.
 
@@ -1357,6 +1517,15 @@ done
 
 After each agent reaches a terminal state, check if its `/work-on` run spawned review-finding issues during the review phase. These are new work items that should be added to the dependency DAG and dispatched when ready.
 
+**This step is the mid-run half of the run-spawned cascade mode** (`phase-1-resolve.md`
+"Cascade / Review-Finding Resolution" — mode (a)). It scopes to `BATCH_T0` for the same reason
+that resolve step does: this loop must only ever fold in `review-finding` issues *this batch's own
+agents* produced, never the pre-existing open backlog. There is no whole-backlog-sweep mode here —
+that mode only exists as the explicit, one-shot `--include-backlog` opt-in at Phase 1 resolve time
+(a human directly asking for it); Step 4C runs autonomously on every completion cycle and must
+never silently widen to the full backlog regardless of any flag, since nothing here is a
+human-in-the-loop request. <!-- Added: forge#2628 -->
+
 ```bash
 # Method 1: Read TRAJECTORY comments from completed issues for "Finding issues" row
 for NUM in {completed_issue_number}; do
@@ -1365,10 +1534,14 @@ for NUM in {completed_issue_number}; do
     | grep -oP 'Finding issues\s*\|\s*#?\K\d+[^|]*' | grep -oP '\d+' | sort -u
 done
 
-# Method 2 (fallback): Check for recently created review-finding issues that reference PRs from this batch
-gh issue list -R {GH_REPO} --state open --label "review-finding" --limit 20 \
-  --json number,title,body,createdAt \
-  --jq "[.[] | select(.createdAt > \"$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ)\")]"
+# Method 2 (fallback): Check for review-finding issues created since this batch started
+# (BATCH_T0 — see Step 4A.pre above; reused from phase-1-resolve.md's Phase 1 capture, never
+# a rolling "N hours ago" window). A rolling window can still admit pre-existing backlog
+# issues that happen to have been created recently for reasons unrelated to this batch;
+# anchoring to BATCH_T0 cannot, by construction — anything created before this batch began
+# is excluded regardless of how recent it looks.
+gh issue list -R {GH_REPO} --state open --search "label:review-finding created:>=${BATCH_T0}" --limit 20 \
+  --json number,title,body,createdAt
 ```
 
 **If review-finding issues were spawned:**
@@ -1419,8 +1592,122 @@ ALL_BATCH_FILES=$(echo "$ALL_BATCH_FILES" | sort -u | grep -v '^$')
 # NOTE: DEFERRED_FINDINGS, QUEUED_FINDINGS, and DEFERRED_REASONS are declared at
 # batch scope in Step 4A.pre — do NOT re-initialize them here (Step 4C runs per-agent).
 for FINDING_NUM in {spawned_finding_numbers}; do
-  FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body \
-    --jq '{labels: [.labels[].name], title: .title, body: .body}')
+  FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body,updatedAt \
+    --jq '{labels: [.labels[].name], title: .title, body: .body, updatedAt: .updatedAt}')
+
+  # Code-branch repair guard (MANDATORY — before priority/defer heuristics below).
+  # A review-finding with no **Code branch** annotation, whose parent PR's base is
+  # not the staging fast lane, would otherwise silently fall through to
+  # classify-lane.sh's implicit staging default — the one branch where the
+  # finding's subject code is guaranteed absent (forge#2443: 5 findings from
+  # milestone-lane PRs were misrouted this way in one batch; absent manual
+  # correction, /work-on's investigation phase would have closed all 5 as
+  # invalid). This is a synchronous per-finding check, distinct from the
+  # periodic Step 4C.5 lane-consistency sweep below (that one audits an
+  # entire milestone's PRs for base-branch drift after the fact; this one
+  # repairs a single finding's missing provenance at discovery time).
+  FINDING_BODY_RAW=$(echo "$FINDING_DATA" | jq -r '.body')
+  # Snapshot freshness marker alongside the body read above — compared immediately
+  # before the body-mutating write below to detect a concurrent edit (forge#2512).
+  FINDING_UPDATED_AT_SNAPSHOT=$(echo "$FINDING_DATA" | jq -r '.updatedAt')
+  if ! echo "$FINDING_BODY_RAW" | grep -q '\*\*Code branch\*\*:'; then
+    # Portable (non-PCRE) extraction — PCRE grep lookbehinds are not supported by
+    # Git Bash's grep build on Windows (same convention as
+    # scripts/derive-finding-milestone.sh and scripts/code-index.sh), so use a
+    # bash regex + BASH_REMATCH instead of a lookbehind.
+    REPAIR_SOURCE_PR=""
+    FINDING_BODY_LOWER=$(echo "$FINDING_BODY_RAW" | tr '[:upper:]' '[:lower:]')
+    if [[ "$FINDING_BODY_LOWER" =~ \*\*source\*\*:[[:space:]]*pr[[:space:]]*#([0-9]+) ]]; then
+      REPAIR_SOURCE_PR="${BASH_REMATCH[1]}"
+    fi
+    if [ -n "$REPAIR_SOURCE_PR" ]; then
+      REPAIR_PARENT_BASE=$(gh pr view "$REPAIR_SOURCE_PR" -R {GH_REPO} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
+      if [ -n "$REPAIR_PARENT_BASE" ] && [ "$REPAIR_PARENT_BASE" != "$STAGING_BRANCH" ]; then
+        # GOVERNOR: cap the number of body-mutating repairs Step 4C will attempt
+        # in a single run — bounds the blast radius of this new autonomous
+        # `gh issue edit --body` mutation regardless of how many findings in the
+        # batch happen to be missing Code branch. Declared with `:=` so it is
+        # safe to reference whether or not a prior iteration already set it
+        # (bash arithmetic increment below persists it across loop iterations).
+        : "${REPAIR_GOVERNOR_COUNT:=0}"
+        REPAIR_GOVERNOR_MAX=25
+        if [ "$REPAIR_GOVERNOR_COUNT" -ge "$REPAIR_GOVERNOR_MAX" ]; then
+          echo "REPAIR: #${FINDING_NUM} skipped — GOVERNOR cap reached (${REPAIR_GOVERNOR_MAX} repairs already attempted this run); flagging instead of repairing"
+          gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label needs-human 2>/dev/null || true  # governor-cap path
+        else
+        REPAIR_GOVERNOR_COUNT=$((REPAIR_GOVERNOR_COUNT + 1))
+        echo "REPAIR: #${FINDING_NUM} has no **Code branch** and parent PR #${REPAIR_SOURCE_PR} bases on '${REPAIR_PARENT_BASE}' (non-staging) — attempting repair (${REPAIR_GOVERNOR_COUNT}/${REPAIR_GOVERNOR_MAX} this run)"
+        # Read-then-append: never blind-overwrite the existing body, only extend it.
+        REPAIRED_BODY=$(printf '%s\n\n## Source Branch Context (repaired by orchestrate Step 4C — forge#2443)\n\n**Code branch**: `%s`\n**Worktree base**: `origin/%s`\n' \
+          "$FINDING_BODY_RAW" "$REPAIR_PARENT_BASE" "$REPAIR_PARENT_BASE")
+        # Concurrency guard (forge#2512 — TOCTOU fix): REPAIRED_BODY above was built purely
+        # by string-appending to the FINDING_BODY_RAW snapshot captured at the top of this
+        # loop iteration. The write below is a full-body overwrite — if the issue's body
+        # changed since that read (a human edit, a second orchestrator run, or the finding's
+        # own creation process still settling), a blind write here would silently clobber
+        # that concurrent edit with no conflict signal. Re-fetch just `updatedAt` (cheap —
+        # no body/labels payload) immediately before the write and compare against the
+        # snapshot captured alongside FINDING_BODY_RAW. Bounded by the same
+        # REPAIR_GOVERNOR_MAX cap as the write itself — at most one extra `gh issue view`
+        # call per repair attempt.
+        FINDING_UPDATED_AT_CURRENT=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json updatedAt --jq '.updatedAt' 2>/dev/null || echo "")
+        if [ -z "$FINDING_UPDATED_AT_CURRENT" ]; then
+          # forge#2565: the re-fetch itself failed (network error, API rate limit, or any
+          # other non-zero `gh issue view` exit) — the `|| echo ""` fallback above produces
+          # an empty string that is indistinguishable, to a plain `[ -n ... ] && [ ... != ... ]`
+          # check, from "confirmed no concurrent edit." Treat an unverifiable freshness check
+          # as its own outcome and fail closed, mirroring the concurrent-edit branch below
+          # rather than silently falling through to the unprotected write.
+          echo "REPAIR: #${FINDING_NUM} skipped — freshness re-fetch failed (network error or API rate limit); cannot verify no concurrent edit occurred, failing closed instead of risking a silent clobber"
+          # forge#2584: stage the body in a mktemp file and deliver it via --body-file
+          # instead of interpolating finding-derived variables (${FINDING_NUM},
+          # ${REPAIR_SOURCE_PR}, ${REPAIR_PARENT_BASE}, ${FINDING_UPDATED_AT_SNAPSHOT})
+          # directly into a double-quoted --body argument at the gh call site — mirrors
+          # REPAIRED_BODY's existing printf-into-variable approach and the repo-wide
+          # mktemp + --body-file convention (forge#2198). mktemp avoids /tmp path
+          # collisions with other concurrently-running orchestrated agents.
+          GATE_BODY_TMPFILE="$(mktemp)"
+          printf '%s' "<!-- FORGE:GATE_FAILURE -->
+## Code Branch Repair Skipped — Freshness Re-fetch Failed
+
+Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${REPAIR_SOURCE_PR} bases on \`${REPAIR_PARENT_BASE}\` — not the staging fast lane. Automatic repair was skipped because the freshness re-fetch (\`gh issue view --json updatedAt\`) failed, so the concurrency guard could not confirm the issue body is still at the snapshot captured earlier in this iteration (\`${FINDING_UPDATED_AT_SNAPSHOT}\`). Proceeding with the write here would risk silently clobbering a concurrent edit with no way to verify. Human review required to confirm the current body state and, if still needed, re-apply the Code branch stamp manually. <!-- forge#2565 -->" > "$GATE_BODY_TMPFILE"
+          gh issue comment "$FINDING_NUM" -R {GH_REPO} --body-file "$GATE_BODY_TMPFILE" 2>/dev/null || true
+          rm -f "$GATE_BODY_TMPFILE"
+          gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label needs-human 2>/dev/null || true  # freshness-recheck-failure path
+        elif [ "$FINDING_UPDATED_AT_CURRENT" != "$FINDING_UPDATED_AT_SNAPSHOT" ]; then
+          echo "REPAIR: #${FINDING_NUM} skipped — concurrent edit detected (updatedAt changed from ${FINDING_UPDATED_AT_SNAPSHOT} to ${FINDING_UPDATED_AT_CURRENT} since this iteration's initial read); flagging instead of repairing"
+          # forge#2584: mktemp + --body-file, same rationale as the freshness-recheck-failure path above.
+          CONCURRENT_EDIT_BODY_TMPFILE="$(mktemp)"
+          printf '%s' "<!-- FORGE:GATE_FAILURE -->
+## Code Branch Repair Skipped — Concurrent Edit Detected
+
+Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${REPAIR_SOURCE_PR} bases on \`${REPAIR_PARENT_BASE}\` — not the staging fast lane. Automatic repair was skipped because the issue body was edited concurrently (\`updatedAt\` changed from \`${FINDING_UPDATED_AT_SNAPSHOT}\` to \`${FINDING_UPDATED_AT_CURRENT}\` between this run's initial read and the repair write). Overwriting the body now would have silently discarded that concurrent edit. Human review required to reconcile and, if still needed, re-apply the Code branch stamp manually. <!-- forge#2512 -->" > "$CONCURRENT_EDIT_BODY_TMPFILE"
+          gh issue comment "$FINDING_NUM" -R {GH_REPO} --body-file "$CONCURRENT_EDIT_BODY_TMPFILE" 2>/dev/null || true
+          rm -f "$CONCURRENT_EDIT_BODY_TMPFILE"
+          gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label needs-human 2>/dev/null || true  # concurrent-edit path
+        else
+        if gh issue edit "$FINDING_NUM" -R {GH_REPO} --body "$REPAIRED_BODY" 2>/dev/null; then
+          echo "REPAIR: #${FINDING_NUM} Code branch repaired to '${REPAIR_PARENT_BASE}'"
+          # Re-fetch so the rest of this loop iteration (priority/defer heuristics
+          # below) sees the repaired body, not the stale pre-repair one.
+          FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body,updatedAt \
+            --jq '{labels: [.labels[].name], title: .title, body: .body, updatedAt: .updatedAt}')
+        else
+          # forge#2584: mktemp + --body-file, same rationale as the two failure paths above.
+          REPAIR_FAILED_BODY_TMPFILE="$(mktemp)"
+          printf '%s' "<!-- FORGE:GATE_FAILURE -->
+## Code Branch Repair Failed
+
+Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${REPAIR_SOURCE_PR} bases on \`${REPAIR_PARENT_BASE}\` — not the staging fast lane. Automatic repair (\`gh issue edit --body\`) failed. Without this annotation, \`/work-on\`'s investigation phase may look for the code on the wrong branch (staging, where it is absent) and misclassify this confirmed finding as invalid. Human review required. <!-- forge#2443 -->" > "$REPAIR_FAILED_BODY_TMPFILE"
+          gh issue comment "$FINDING_NUM" -R {GH_REPO} --body-file "$REPAIR_FAILED_BODY_TMPFILE" 2>/dev/null || true
+          rm -f "$REPAIR_FAILED_BODY_TMPFILE"
+          gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label needs-human 2>/dev/null || true  # repair-failure path
+        fi
+        fi
+        fi
+      fi
+    fi
+  fi
 
   # Priority extraction accepts both label schemas: canonical `priority:P<n>` (the only
   # form review-pr.md ever creates) and bare `P<n>` (carried by some consumer repos'
@@ -1526,9 +1813,34 @@ for FINDING_NUM in "${QUEUED_FINDINGS[@]}"; do
 
   # Safety exclusions — never batch, at any priority. Same jq test() engine and
   # patterns as phase-1-resolve.md's batching rule (single shared mechanism).
+  # Word-boundary anchored (not bare substrings) and attribution-boilerplate
+  # (**Confidence**/**Severity**/**Review comment** — see forge#2477 note below
+  # for why **Source**/**Agent** are deliberately excluded from this list)
+  # stripped from the body before scanning, so a finding naming its own
+  # reviewing agent ("Security") or an identifier like `authority_source` no
+  # longer false-positives.
+  # `authentication|authorization|authn|authz` preserve real auth-domain coverage
+  # as separate whole-word alternatives now that bare `auth` is boundary-anchored.
+  # <!-- forge#2423 -->
+  # Each stripped alternative is anchored to the field's real generator-output
+  # shape (enum for Confidence/Severity, URL for Review comment) rather than a
+  # bare label-prefix + `.*$` — matching on label shape alone lets
+  # attacker-controlled body text on one of these lines get stripped along
+  # with the label, smuggling banned keywords past the scan below. Source/Agent
+  # are deliberately NOT stripped: both hold genuinely free-text generator
+  # output (a PR title; an agent's self-description) with no fixed vocabulary,
+  # so no shape bound can distinguish legitimate attribution from
+  # attacker-authored payload placed in the same position — a length-bounded
+  # free-text alternative for either field re-opens the exact smuggling gap
+  # this fix closes (an attacker need only prefix their payload with a fake
+  # "PR #N — " or agent name to satisfy the bound). Leaving them unstripped
+  # trades a narrow, already-known false-positive (forge#2423's Agent-line
+  # case; a P3 finding whose Source/Agent text happens to mention a domain
+  # keyword is not auto-batched) for closing a real bypass — the safe
+  # direction for a security-relevant exclusion. <!-- forge#2477 -->
   echo "$FINDING_DATA" | jq -e '
-    (.title | test("security|billing|anti-bot|auth"; "i"))
-    or (.body  | test("## Problem[\\s\\S]{0,500}(security|billing|anti-bot|auth)"; "i"))
+    (.title | test("\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i"))
+    or ((.body | gsub("(?m)^\\*\\*(?:Confidence\\*\\*: (?:CONFIRMED|LIKELY|POSSIBLE)|Severity\\*\\*: (?:CRITICAL|HIGH|MEDIUM|LOW|INFO)|Review comment\\*\\*: https?://\\S+)$"; "")) | test("## Problem[\\s\\S]{0,500}\\b(security|billing|anti-bot|auth|authentication|authorization|authn|authz)\\b"; "i"))
     or ([.labels[]] | any(. == "security" or . == "billing" or . == "anti-bot" or . == "auth"))
   ' >/dev/null && continue
 
@@ -1569,8 +1881,31 @@ for FILE in "${!SURFACE_FILE_MEMBERS[@]}"; do
       MEMBER_LINES="${MEMBER_LINES}- [ ] #${M}: ${MTITLE}"$'\n'
     done
 
+    # Dedup-check with member exclusion (MANDATORY — forge#2432, identical mechanism to
+    # phase-1-resolve.md's mirror block; this site keeps its existing direct-to-gh issue
+    # creation below rather than migrating to /issue's Skill routing, since this loop runs
+    # per-completion-cycle and a direct scripts/issue-dedup.sh call is cheaper here). A
+    # batch title necessarily restates its own members' subject matter by construction —
+    # excluding the cluster's own member numbers means Phase-2D-style dedup only fires on
+    # a GENUINE non-member duplicate. --exclude narrows the candidate set; it is NOT a
+    # --force equivalent.
+    CHUNK_LIST=$(IFS=,; echo "${CHUNK[*]}")
+    PROPOSED_BATCH_TITLE="fix(batch): P3 review findings — ${SAFE_SURFACE_AREA} (same-run batch)"
+    DEDUP_RESULT=$(scripts/issue-dedup.sh "$PROPOSED_BATCH_TITLE" {GH_FLAG} --exclude "$CHUNK_LIST" 2>&1)
+    DEDUP_EXIT=$?
+
+    if [ "$DEDUP_EXIT" -eq 1 ]; then
+      # Genuine non-member duplicate — some other open issue already covers this exact
+      # surface area. Do NOT create the batch; its members stay individually queued.
+      echo "Batch dedup STOP (non-member match): $DEDUP_RESULT — skipping batch creation for $SAFE_SURFACE_AREA, members stay individually queued"
+      continue
+    elif [ "$DEDUP_EXIT" -eq 2 ]; then
+      echo "Batch dedup usage error: $DEDUP_RESULT — skipping batch creation for $SAFE_SURFACE_AREA, members stay individually queued"
+      continue
+    fi
+
     BATCH_ISSUE_NUM=$(gh issue create {GH_FLAG} \
-      --title "fix(batch): P3 review findings — ${SAFE_SURFACE_AREA} (same-run batch)" \
+      --title "$PROPOSED_BATCH_TITLE" \
       --label "review-finding,priority:P3,batch" \
       --body "$(cat <<BATCH_EOF
 ## Problem
@@ -1654,10 +1989,37 @@ if [ "${#TOKEN_BUDGET_DEFERRED_THIS_RUN[@]}" -gt 0 ]; then
 fi
 ```
 
+**Classify lane for each queued finding (MANDATORY — before dispatch)** <!-- Added: forge#2629 -->
+
+Cascade-dispatched findings inherit NO lane assumption from the parent batch. Step 4A.pre's classify-lane loop (above) only covers `{ready_issue_numbers}` — the *original* dispatch group — and does not see findings discovered mid-run by this Step 4C pass. Without an explicit gate here, a finding reaches the Step 4A/4B dispatch loop with `${ISSUE_LANE[$NUM]}`/`${ISSUE_PR_BASE[$NUM]}` unset for its number, which is exactly the milestone-owned-finding-misrouted-to-staging risk this issue exists to close. Run this loop over `QUEUED_FINDINGS` (the post-clubbing, post-token-budget-gate list) before any of the numbered steps below, reusing the identical `classify-lane.sh` invocation and failure handling as Step 4A.pre — same script, same batch-scope `ISSUE_LANE`/`ISSUE_PR_BASE` arrays (declared once, line ~362-363), no new mechanism:
+
+```bash
+for FINDING_NUM in "${QUEUED_FINDINGS[@]}"; do
+  PR_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$FINDING_NUM" -R {GH_REPO}) || {
+    echo "ERROR: classify-lane.sh failed for #$FINDING_NUM — adding needs-human label and removing from QUEUED_FINDINGS" >&2
+    # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
+    gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
+    QUEUED_FINDINGS=($(printf '%s\n' "${QUEUED_FINDINGS[@]}" | grep -vxF "$FINDING_NUM" || true))
+    continue
+  }
+  # Derive LANE label from PR_BASE — identical rule to Step 4A.pre.
+  if [ "$PR_BASE" = "staging" ]; then
+    LANE="fast-lane"
+  else
+    LANE="feature-lane"
+  fi
+  ISSUE_LANE[$FINDING_NUM]="$LANE"
+  ISSUE_PR_BASE[$FINDING_NUM]="$PR_BASE"
+  echo "#$FINDING_NUM → lane=$LANE, PR_BASE=$PR_BASE (cascade finding)"
+done
+```
+
+A finding that fails classify-lane is removed from `QUEUED_FINDINGS` (mirrors Step 4A.pre's `continue`, which never admits a failed classification into the ready set) and flagged `needs-human` instead of silently falling through to the dispatch loop with an unset lane.
+
 **For queued (non-deferred) findings:**
 
 1. **Add them to the dependency DAG.** They are implementation issues — same as issues spawned by investigations in Phase 2. Compute their predecessor sets using the same conflict detection (Step 3C Layers 1-4) against all remaining blocked/active issues.
-2. **Respect source branch context.** Review-finding issues have `**Code branch**: \`{branch}\`` in their body — the `/work-on` agent will read this and branch from the right origin. No special handling needed from the orchestrator.
+2. **Respect source branch context.** Review-finding issues have `**Code branch**: \`{branch}\`` in their body — the `/work-on` agent will read this and branch from the right origin (the body annotation is repaired earlier in this step if missing — see the Code-branch repair guard above). Separately, and mandatorily, `${ISSUE_LANE[$NUM]}`/`${ISSUE_PR_BASE[$NUM]}` are now populated by the classify-lane loop immediately above this list — every queued finding is lane-classified individually, inheriting no lane assumption from the parent batch, before it reaches the standard Step 4A/4B dispatch loop.
 3. **Report to user:**
    ```
    Agent #{COMPLETED} spawned {count} new finding issues: #{A}, #{B}
@@ -1985,6 +2347,7 @@ declare -A SWEEP_PR_BASE
 for FINDING_NUM in "${SWEEP_EXECUTE[@]}"; do
   SWEEP_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$FINDING_NUM" -R {GH_REPO}) || {
     echo "ERROR: classify-lane.sh failed for #$FINDING_NUM — adding needs-human and skipping" >&2
+    # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
     gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
     continue
   }
@@ -2121,7 +2484,7 @@ Completion Sweep Results:
   Token-gated — still deferred: #{H} (sweep allowance also exhausted — re-evaluable next run)
 ```
 
-**After sweep agents complete** (or if no findings were dispatched): output the budget deferred-issues report (if applicable), then proceed to Phase 5.
+**After sweep agents complete** (or if no findings were dispatched): output the budget deferred-issues report (if applicable), **call `release_orchestrator_lease()` (Step 4A-pre.-1)** — the sweep is this session's last dispatch activity, so the lease must not be left held for a now-idle session (the Termination condition's own release call, above, only fires on the no-deferred-findings branch; this is the equivalent release for the deferred-findings/Completion Sweep branch) <!-- Added: forge#2627 -->, then proceed to Phase 5.
 
 **Anti-patterns — DO NOT DO THIS:**
 - Re-sweeping findings spawned during the sweep itself — this creates unbounded recursion. Sweep is a single pass.

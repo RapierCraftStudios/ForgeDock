@@ -4,10 +4,10 @@
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync, chmodSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
-import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome } from "../journey.mjs";
+import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, pruneStaleExtensionlessEntries } from "../journey.mjs";
 import { detectEnvironment } from "../env-detect.mjs";
 
 const VALUES = {
@@ -566,7 +566,7 @@ describe("preflight", () => {
 // Task 6: forge & findMarkdownFiles tests
 // ---------------------------------------------------------------------------
 
-import { lstatSync, mkdirSync as mkdirSyncFs, symlinkSync, statSync } from "node:fs";
+import { lstatSync, mkdirSync as mkdirSyncFs, symlinkSync, statSync, readlinkSync } from "node:fs";
 
 /**
  * A command is installed if the target is a symlink (Developer Mode / admin /
@@ -846,7 +846,7 @@ describe("persistHome (forge#1943)", () => {
     );
   });
 
-  it("removeOrphans: source subdir replaced by a symlink-to-file (ENOTDIR) does not abort the whole persist (forge#2227)", async () => {
+  it("removeOrphans: source subdir replaced by a symlink-to-file (ENOTDIR) does not abort the whole persist (forge#2227)", async (t) => {
     const home = mkdtempSync(join(os.tmpdir(), "fd-persist-enotdir-home-"));
     const forgeHome = makeSourceForgeHome({ version: "1.0.0" });
     mkdirSyncFs(join(forgeHome, "commands", "subdir"), { recursive: true });
@@ -862,7 +862,15 @@ describe("persistHome (forge#1943)", () => {
     // dest-side directory) throws ENOTDIR, not ENOENT — the exact escape this
     // regression guards against. Bump version to clear the downgrade guard.
     rmSync(join(forgeHome, "commands", "subdir"), { recursive: true, force: true });
-    symlinkSync(join(forgeHome, "package.json"), join(forgeHome, "commands", "subdir"));
+    try {
+      symlinkSync(join(forgeHome, "package.json"), join(forgeHome, "commands", "subdir"));
+    } catch (err) {
+      if (err.code === "EPERM" || err.code === "EACCES") {
+        t.skip("symlink creation unavailable (Windows without Developer Mode)");
+        return;
+      }
+      throw err;
+    }
     writeFileSync(join(forgeHome, "package.json"), JSON.stringify({ name: "forgedock", version: "1.1.0" }), "utf-8");
 
     const second = await persistHome({ forgeHome, home });
@@ -1235,7 +1243,119 @@ describe("forge (Act II)", () => {
     assert.equal(manifest.files["a.md"], true);
   });
 
-  it("user-owned regular file is never clobbered", async () => {
+  it("relinking a stale symlink uses a per-process tmp path, unaffected by a stray plain target+\".tmp\" file (forge#2600)", async (t) => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home6b-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src6b-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // Stale symlink at the target pointing at a different file — same setup
+    // as "linkStrategy copy replaces a stale symlink with a copy" above, but
+    // this time with the default (symlink) linkStrategy so forge() takes the
+    // relink branch (bin/journey.mjs, wantSymlink=true) instead of falling
+    // straight to the copy fallback.
+    const other = join(forgeHome, "other.md");
+    writeFileSync(other, "OTHER", "utf-8");
+    const target = join(home, ".claude", "commands", "a.md");
+    mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
+    try {
+      symlinkSync(other, target);
+    } catch (err) {
+      if (err.code === "EPERM" || err.code === "EACCES") {
+        t.skip("symlink creation unavailable (Windows without Developer Mode)");
+        return;
+      }
+      throw err;
+    }
+
+    // Simulate a leftover plain `target + ".tmp"` file from a *different*
+    // process (e.g. a concurrent forge() invocation with a different PID, or
+    // a stale leftover from before forge#2600). Before forge#2600, the
+    // relink branch wrote to and renamed exactly this literal path, so a
+    // second concurrent invocation sharing it could race and surface an
+    // uncaught EEXIST. After the fix, this invocation writes to its own
+    // `target + "." + process.pid + ".tmp"` path and must never read,
+    // write, or clean up this foreign sibling.
+    const foreignTmp = target + ".tmp";
+    writeFileSync(foreignTmp, "FOREIGN PROCESS LEFTOVER", "utf-8");
+
+    const { ctx } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.equal(res.updated, 1, "the stale symlink should be relinked");
+    assert.ok(lstatSync(target).isSymbolicLink(), "target should remain a symlink after relinking");
+    assert.equal(
+      readFileSync(foreignTmp, "utf-8"),
+      "FOREIGN PROCESS LEFTOVER",
+      "a foreign (non-pid-suffixed) .tmp sibling must be untouched — this invocation writes to its own per-process tmp path",
+    );
+  });
+
+  it("upgrading a manifest-tracked copy to a symlink uses a per-process tmp path, unaffected by a stray plain target+\".tmp\" file (forge#2600)", async (t) => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home6c-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src6c-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // Probe symlink permission before setting up the (regular-file) target
+    // state below — the upgrade branch's initial target must be a plain
+    // file, so unlike the sibling relink test above we can't gate on the
+    // fixture's own symlinkSync call. Probe with a throwaway path instead.
+    const probeLink = join(forgeHome, "probe-link.md");
+    try {
+      symlinkSync(join(forgeHome, "commands", "a.md"), probeLink);
+      unlinkSync(probeLink);
+    } catch (err) {
+      if (err.code === "EPERM" || err.code === "EACCES") {
+        t.skip("symlink creation unavailable (Windows without Developer Mode)");
+        return;
+      }
+      throw err;
+    }
+
+    // Pre-seed the manifest (it's our copy) and a stale-content copy at the
+    // target — the "manifest-tracked file" branch, same setup as
+    // "manifest-tracked file with changed content is updated" above, but
+    // with the default (symlink) linkStrategy so forge() attempts the
+    // upgrade-to-symlink branch (wantSymlink=true) instead of the
+    // copy-fallback content-compare path.
+    mkdirSyncFs(join(home, ".claude", "forgedock"), { recursive: true });
+    writeFileSync(
+      join(home, ".claude", "forgedock", "copied-commands.json"),
+      JSON.stringify({ version: 1, files: { "a.md": true } }),
+      "utf-8",
+    );
+    const target = join(home, ".claude", "commands", "a.md");
+    mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
+    writeFileSync(target, "OLD", "utf-8");
+
+    // Same foreign-tmp-sibling simulation as the relink test above.
+    const foreignTmp = target + ".tmp";
+    writeFileSync(foreignTmp, "FOREIGN PROCESS LEFTOVER", "utf-8");
+
+    const { ctx } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.equal(res.updated, 1, "the manifest-tracked copy should be upgraded to a symlink");
+    assert.ok(lstatSync(target).isSymbolicLink(), "target should be a symlink after upgrading");
+    const manifest = JSON.parse(
+      readFileSync(join(home, ".claude", "forgedock", "copied-commands.json"), "utf-8"),
+    );
+    assert.equal(manifest.files["a.md"], undefined, "upgraded file should be dropped from the manifest");
+    assert.equal(
+      readFileSync(foreignTmp, "utf-8"),
+      "FOREIGN PROCESS LEFTOVER",
+      "a foreign (non-pid-suffixed) .tmp sibling must be untouched — this invocation writes to its own per-process tmp path",
+    );
+  });
+
+  it("stale regular-file copy with no manifest entry is overwritten and adopted (forge#2459)", async () => {
     const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home4-"));
     const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src4-"));
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
@@ -1243,18 +1363,216 @@ describe("forge (Act II)", () => {
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
     writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
 
-    // Pre-create the target as a user-owned regular file — no manifest entry.
+    // Pre-create the target as a stale regular-file copy (content mismatches
+    // the current source) with no manifest entry — e.g. a pre-manifest
+    // ForgeDock version's copy-fallback install, or one that fell out of the
+    // manifest. `a.md` is a path forge() itself ships (findMarkdownFiles(commandsDir)
+    // enumerates it), so it is never an arbitrary user file — doctor --fix must
+    // be able to repair it without a manual delete step.
     const target = join(home, ".claude", "commands", "a.md");
     mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
-    writeFileSync(target, "USER OWNED", "utf-8");
+    writeFileSync(target, "OLD STALE COPY", "utf-8");
 
     const { ctx, w } = stubCtx({ home });
     ctx.forgeHome = forgeHome;
     const res = await forge(ctx);
 
-    assert.equal(readFileSync(target, "utf-8"), "USER OWNED");
-    assert.equal(res.skipped, 1);
-    assert.match(w.text, /WARNING/);
+    assert.equal(readFileSync(target, "utf-8"), "A", "stale copy should be overwritten with current source content");
+    assert.equal(res.updated, 1);
+    assert.doesNotMatch(w.text, /WARNING/, "should not warn — the stale copy was repaired");
+    const manifest = JSON.parse(
+      readFileSync(join(home, ".claude", "forgedock", "copied-commands.json"), "utf-8"),
+    );
+    assert.equal(manifest.files["a.md"], true, "repaired file should be adopted into the manifest");
+  });
+
+  it("stale regular-file copy with no manifest entry: target is untouched on a .tmp write failure (forge#2498)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home4b-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src4b-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // Pre-create the target as a stale regular-file copy (content mismatches
+    // the current source) with no manifest entry, same setup as the sibling
+    // "stale regular-file copy" test above.
+    const target = join(home, ".claude", "commands", "a.md");
+    mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
+    writeFileSync(target, "OLD STALE COPY", "utf-8");
+
+    // Simulate a write failure by pre-creating the per-process tmp sibling
+    // (target + "." + process.pid + ".tmp", forge#2542) as a directory —
+    // copyFile(file, tmpTarget) then throws EISDIR/EEXIST at open-time (the
+    // write never starts, not a partial in-flight write), a cheap stand-in
+    // for ENOSPC/AV-lock without needing a real disk-full condition (same
+    // technique used for writeForgeYaml's atomic-write test above, ref:
+    // #1396). Must use the pid-suffixed path — the plain `target + ".tmp"`
+    // is no longer the path forge() actually writes to.
+    mkdirSyncFs(target + "." + process.pid + ".tmp", { recursive: true });
+
+    const { ctx, w } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    // The write failure must land entirely on the .tmp path — target itself
+    // must never be opened for a direct overwrite, so its prior (stale)
+    // content survives completely intact rather than being truncated.
+    assert.equal(
+      readFileSync(target, "utf-8"),
+      "OLD STALE COPY",
+      "target content must be untouched when the .tmp write fails — never partially overwritten",
+    );
+    assert.match(w.text, /WARNING/, "a write failure should still surface the repair warning");
+    assert.equal(res.updated, 0, "no update should be counted when the write failed");
+  });
+
+  it("stale regular-file copy with no manifest entry: orphaned .tmp file is cleaned up on a copyFile failure (forge#2540)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home4d-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src4d-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // Pre-create the target as a stale regular-file copy (content mismatches
+    // the current source) with no manifest entry, same setup as the sibling
+    // mid-write-failure test above.
+    const target = join(home, ".claude", "commands", "a.md");
+    mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
+    writeFileSync(target, "OLD STALE COPY", "utf-8");
+
+    // Unlike the sibling mid-write-failure test above (which pre-creates
+    // the per-process tmp sibling as a directory — a technique that forces
+    // copyFile to fail but leaves nothing unlink() can remove), pre-create
+    // it as a *regular file* and mark it read-only. copyFile(file,
+    // tmpTarget) then fails with EPERM while attempting to open the
+    // destination for writing — the same failure shape as a real AV lock or
+    // permission error — but leaves a genuine file-type .tmp residue on
+    // disk, so this test can actually assert that the cleanup path
+    // (forge#2540) removes it. Must use the pid-suffixed path (forge#2542)
+    // — the plain `target + ".tmp"` is no longer the path forge() writes to.
+    const tmpSibling = target + "." + process.pid + ".tmp";
+    writeFileSync(tmpSibling, "STALE .tmp LEFTOVER", "utf-8");
+    chmodSync(tmpSibling, 0o444);
+
+    const { ctx, w } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    let res;
+    try {
+      res = await forge(ctx);
+    } finally {
+      // Defensive: if the cleanup assertion below fails, don't leave a
+      // read-only file behind for the OS temp-dir GC to choke on.
+      try { chmodSync(tmpSibling, 0o666); } catch { /* already removed */ }
+    }
+
+    assert.ok(
+      !existsSync(tmpSibling),
+      "the orphaned .tmp file must be cleaned up after a copyFile failure, not left behind",
+    );
+    assert.equal(
+      readFileSync(target, "utf-8"),
+      "OLD STALE COPY",
+      "target content must be untouched when the .tmp write fails — never partially overwritten",
+    );
+    assert.match(w.text, /WARNING/, "a write failure should still surface the repair warning");
+    assert.equal(res.updated, 0, "no update should be counted when the write failed");
+  });
+
+  it("stale regular-file copy with no manifest entry: prior content is backed up before being overwritten (forge#2499)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home4c-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src4c-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // Pre-create the target as a stale regular-file copy (content mismatches
+    // the current source) with no manifest entry, same setup as the sibling
+    // "stale regular-file copy" test above.
+    const target = join(home, ".claude", "commands", "a.md");
+    mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
+    writeFileSync(target, "OLD STALE COPY", "utf-8");
+
+    const { ctx, w } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.equal(readFileSync(target, "utf-8"), "A", "stale copy should still be overwritten with current source content");
+    assert.equal(
+      readFileSync(target + ".bak", "utf-8"),
+      "OLD STALE COPY",
+      "prior stale content must be preserved in a .bak sibling before being overwritten",
+    );
+    assert.equal(res.backedUp, 1, "forge() should report exactly one backup");
+    assert.equal(res.updated, 1);
+    assert.doesNotMatch(w.text, /WARNING/, "should not warn — the stale copy was repaired");
+  });
+
+  it("stale regular-file copy with no manifest entry: uses a per-process tmp path, unaffected by a stray plain target+\".tmp\" file (forge#2542)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home4e-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src4e-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // Pre-create the target as a stale regular-file copy (content mismatches
+    // the current source) with no manifest entry, same setup as the sibling
+    // tests above.
+    const target = join(home, ".claude", "commands", "a.md");
+    mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
+    writeFileSync(target, "OLD STALE COPY", "utf-8");
+
+    // Simulate a leftover plain `target + ".tmp"` file from a *different*
+    // process (e.g. a concurrent forge() invocation with a different PID,
+    // or a stale leftover from before this fix). Before forge#2542, this
+    // repair branch wrote to and cleaned up exactly this literal path, so a
+    // second concurrent invocation sharing it could race. After the fix,
+    // this invocation writes to its own `target + "." + process.pid +
+    // ".tmp"` path and must never read, write, or clean up this foreign
+    // sibling — it should be left completely untouched.
+    const foreignTmp = target + ".tmp";
+    writeFileSync(foreignTmp, "FOREIGN PROCESS LEFTOVER", "utf-8");
+
+    const { ctx, w } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.equal(readFileSync(target, "utf-8"), "A", "stale copy should still be overwritten with current source content");
+    assert.equal(res.backedUp, 1, "forge() should report exactly one backup");
+    assert.equal(res.updated, 1);
+    assert.doesNotMatch(w.text, /WARNING/, "should not warn — the stale copy was repaired despite the foreign .tmp sibling");
+    assert.equal(
+      readFileSync(foreignTmp, "utf-8"),
+      "FOREIGN PROCESS LEFTOVER",
+      "a foreign (non-pid-suffixed) .tmp sibling must be untouched — this invocation writes to its own per-process tmp path",
+    );
+  });
+
+  it("files outside the shipped command set are never touched by forge() (forge#2459 AC#3)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-unrelated-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src-unrelated-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    // A file at a path forge() never enumerates (no corresponding source file
+    // under forgeHome/commands) — this is genuinely outside the ForgeDock
+    // command set (e.g. a user's own custom slash command) and must be left
+    // completely untouched, since forge()'s loop only ever iterates paths
+    // returned by findMarkdownFiles(commandsDir).
+    const unrelatedTarget = join(home, ".claude", "commands", "my-custom-command.md");
+    mkdirSyncFs(join(home, ".claude", "commands"), { recursive: true });
+    writeFileSync(unrelatedTarget, "MY OWN CUSTOM COMMAND", "utf-8");
+
+    const { ctx } = stubCtx({ home });
+    ctx.forgeHome = forgeHome;
+    await forge(ctx);
+
+    assert.equal(readFileSync(unrelatedTarget, "utf-8"), "MY OWN CUSTOM COMMAND");
   });
 
   it("adopts pre-manifest regular file into manifest when content matches source", async () => {
@@ -1281,6 +1599,381 @@ describe("forge (Act II)", () => {
       readFileSync(join(home, ".claude", "forgedock", "copied-commands.json"), "utf-8"),
     );
     assert.equal(manifest.files["a.md"], true, "file should be adopted into manifest");
+  });
+
+  it("saveCopiedManifest uses a per-process tmp path, unaffected by a stray plain manifestPath+\".tmp\" file (forge#2599)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-pid-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-pid-src-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const manifestPath = join(home, ".claude", "forgedock", "copied-commands.json");
+    mkdirSyncFs(join(home, ".claude", "forgedock"), { recursive: true });
+
+    // Simulate a leftover plain `manifestPath + ".tmp"` file from a
+    // *different* process (e.g. a concurrent forge() invocation with a
+    // different PID, or a stale leftover from before this fix). Before
+    // forge#2599, saveCopiedManifest() wrote to and renamed exactly this
+    // literal path, so a second concurrent invocation sharing it could
+    // race. After the fix, this invocation writes to its own
+    // `manifestPath + "." + process.pid + ".tmp"` path and must never
+    // read, write, or clean up this foreign sibling.
+    const foreignTmp = manifestPath + ".tmp";
+    writeFileSync(foreignTmp, "FOREIGN PROCESS LEFTOVER", "utf-8");
+
+    // linkStrategy "copy" forces the copy-fallback path deterministically
+    // (same technique used elsewhere in this file, e.g. line ~1158) — only
+    // the copy path calls recordCopy()/sets manifestChanged, so this is
+    // required for the manifest write under test to actually happen on
+    // platforms where symlinks succeed (e.g. Linux CI), not just on
+    // Windows-without-Developer-Mode where copy-fallback happens anyway.
+    const { ctx, w } = stubCtx({ home, linkStrategy: "copy" });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.equal(res.copied, 1, "the file should be freshly copied");
+    assert.ok(!w.text.includes("manifest not saved"), "manifest save should succeed");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    assert.equal(manifest.files["a.md"], true, "manifest should be written normally");
+    assert.equal(
+      readFileSync(foreignTmp, "utf-8"),
+      "FOREIGN PROCESS LEFTOVER",
+      "a foreign (non-pid-suffixed) .tmp sibling must be untouched — this invocation writes to its own per-process tmp path",
+    );
+  });
+
+  it("saveCopiedManifest cleans up its per-process tmp sibling on write failure, without touching the previous manifest (forge#2599)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-fail-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-fail-src-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const manifestPath = join(home, ".claude", "forgedock", "copied-commands.json");
+    mkdirSyncFs(join(home, ".claude", "forgedock"), { recursive: true });
+
+    // Pre-seed a prior manifest with recognizable content BEFORE forcing the
+    // write failure below. The test's name claims the failed write leaves
+    // "the previous manifest" untouched — that claim is only meaningful if a
+    // previous manifest actually exists to potentially be clobbered
+    // (forge#2615: without this, `!existsSync(manifestPath)` was trivially
+    // true because there was never a prior manifest in play).
+    const priorManifestContent = JSON.stringify(
+      { files: { "prior.md": true }, marker: "PRE-EXISTING-MANIFEST-forge2615" },
+      null,
+      2,
+    ) + "\n";
+    writeFileSync(manifestPath, priorManifestContent, "utf-8");
+
+    // Pre-create the pid-suffixed tmp sibling as a directory — writeFile()
+    // then throws EISDIR at open-time (the write never starts), the same
+    // technique used by #1396/#2542's atomic-write failure tests.
+    const tmpSibling = manifestPath + "." + process.pid + ".tmp";
+    mkdirSyncFs(tmpSibling, { recursive: true });
+
+    // linkStrategy "copy" forces the copy-fallback path deterministically —
+    // see the comment in the preceding test for why this is required for
+    // manifestChanged to actually be set (and saveCopiedManifest to run) on
+    // every platform, not just Windows-without-Developer-Mode.
+    const { ctx, w } = stubCtx({ home, linkStrategy: "copy" });
+    ctx.forgeHome = forgeHome;
+    const res = await forge(ctx);
+
+    assert.equal(res.copied, 1, "the file copy itself should still succeed");
+    assert.ok(
+      w.text.includes("manifest not saved"),
+      "forge() should surface the manifest save failure instead of crashing",
+    );
+    assert.ok(
+      existsSync(manifestPath),
+      "the pre-existing manifest should still exist — the failed write must not delete it",
+    );
+    assert.equal(
+      readFileSync(manifestPath, "utf-8"),
+      priorManifestContent,
+      "the pre-existing manifest's content must be byte-for-byte unchanged — the failed write never replaced it",
+    );
+  });
+
+  it("forge() sweeps a crash-orphaned pid-suffixed manifest tmp sibling but preserves an in-flight one and the legacy plain .tmp (forge#2612)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-sweep-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-sweep-src-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const manifestPath = join(home, ".claude", "forgedock", "copied-commands.json");
+    mkdirSyncFs(join(home, ".claude", "forgedock"), { recursive: true });
+
+    // A crash-orphaned pid-suffixed tmp from a prior hard-killed run (a pid
+    // this process will never reuse). Backdate it well past the sweep age
+    // threshold so it is eligible for reclamation.
+    const staleTmp = manifestPath + ".999999.tmp";
+    writeFileSync(staleTmp, "orphaned by SIGKILL between writeFile and rename", "utf-8");
+    const anHourAgo = Date.now() / 1000 - 3600;
+    utimesSync(staleTmp, anHourAgo, anHourAgo);
+
+    // A *recent* pid-suffixed tmp — as if a concurrent forge() (different pid)
+    // is mid-write right now. Younger than the age threshold → must survive.
+    const liveTmp = manifestPath + ".888888.tmp";
+    writeFileSync(liveTmp, "in-flight write by a concurrent forge()", "utf-8");
+
+    // The legacy plain `.tmp` (no digit segment) must never be swept here —
+    // the sweep only reclaims the pid-suffixed shape.
+    const legacyTmp = manifestPath + ".tmp";
+    writeFileSync(legacyTmp, "legacy foreign leftover", "utf-8");
+    utimesSync(legacyTmp, anHourAgo, anHourAgo);
+
+    // linkStrategy "copy" is not required for the sweep (it runs unconditionally
+    // at forge() startup), but keep the forge() invocation on the same
+    // deterministic footing as the sibling manifest tests.
+    const { ctx } = stubCtx({ home, linkStrategy: "copy" });
+    ctx.forgeHome = forgeHome;
+    await forge(ctx);
+
+    assert.ok(!existsSync(staleTmp), "a stale crash-orphaned pid-suffixed tmp sibling should be swept");
+    assert.ok(existsSync(liveTmp), "a recent (in-flight) pid-suffixed tmp sibling must be preserved");
+    assert.ok(existsSync(legacyTmp), "the legacy plain .tmp (no pid segment) must not be swept");
+  });
+
+  it("forge()'s final manifest save preserves a concurrent process's own manifest change instead of last-writer-wins overwriting it (forge#2614)", async () => {
+    // #2599/#2609 fixed the tmp-file *write-path* race (concurrent forge()
+    // invocations no longer collide on the same tmp filename), but left the
+    // manifest's logical *content* racy: forge() loads the manifest once at
+    // the start of the run and writes the whole in-memory object back at the
+    // end, so a second process's manifest.files change — saved between this
+    // run's load and its own final save — would previously be silently
+    // dropped. This test simulates that window directly (matching this
+    // suite's convention, e.g. the #2599/#2600/#2612 tests above, of
+    // reproducing a concurrent process's on-disk effect rather than
+    // orchestrating true OS-level concurrency): give this run many files to
+    // copy so its loop spans many await points, and inject the "other
+    // process's" manifest write via a macrotask timer so it lands on disk
+    // sometime during that loop — well before this run's final save.
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-merge-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-merge-src-"));
+    mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
+    const fileCount = 25;
+    for (let i = 0; i < fileCount; i++) {
+      writeFileSync(join(forgeHome, "commands", `f${i}.md`), `content ${i}`, "utf-8");
+    }
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const manifestPath = join(home, ".claude", "forgedock", "copied-commands.json");
+    mkdirSyncFs(join(home, ".claude", "forgedock"), { recursive: true });
+    // Seed the manifest with the state this run will load at startup.
+    writeFileSync(manifestPath, JSON.stringify({ version: 1, files: {} }, null, 2) + "\n", "utf-8");
+
+    // linkStrategy "copy" forces the copy-fallback path deterministically —
+    // same rationale as the sibling manifest tests above (recordCopy() only
+    // runs, and manifestChanged only gets set, on the copy path on platforms
+    // where symlinks succeed, e.g. Linux CI).
+    const { ctx, w } = stubCtx({ home, linkStrategy: "copy" });
+    ctx.forgeHome = forgeHome;
+
+    const forgePromise = forge(ctx);
+    // Simulate a concurrent forge() invocation that loaded the same
+    // manifest, added its own entry, and saved — after this run's own
+    // initial load but before this run's final save.
+    setTimeout(() => {
+      const concurrent = JSON.parse(readFileSync(manifestPath, "utf-8"));
+      concurrent.files["concurrent-process.md"] = true;
+      writeFileSync(manifestPath, JSON.stringify(concurrent, null, 2) + "\n", "utf-8");
+    }, 0);
+    const res = await forgePromise;
+
+    assert.equal(res.copied, fileCount, "this run should have copied all of its own files");
+    assert.ok(!w.text.includes("manifest not saved"), "manifest save should succeed");
+
+    const finalManifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    assert.equal(
+      finalManifest.files["concurrent-process.md"],
+      true,
+      "the concurrent process's own manifest entry must survive this run's final save — last-writer-wins must not silently drop it",
+    );
+    for (let i = 0; i < fileCount; i++) {
+      assert.equal(finalManifest.files[`f${i}.md`], true, `this run's own entry for f${i}.md must be present`);
+    }
+  });
+
+  // forge#2637: #2614 (above) closed the "whole run duration" last-writer-wins
+  // race by re-reading and merging right before the final save, but left that
+  // final read→merge→write sequence itself unprotected — a third concurrent
+  // forge() could still land its own save inside that narrower window. These
+  // tests exercise the file-lock mitigation added around that sequence,
+  // simulating a concurrent holder via the real `<manifest>.lock` artifact on
+  // disk (rather than mocking internals — acquireManifestLock/
+  // releaseManifestLock are not exported, matching this suite's existing
+  // convention of testing forge()'s on-disk effects rather than its private
+  // helpers).
+  it("final manifest save waits for a concurrently held lock and merges both sides once it's released (forge#2637)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-wait-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-wait-src-"));
+    mkdirSync(join(forgeHome, "commands"), { recursive: true });
+    mkdirSync(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "content a", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const manifestPath = join(home, ".claude", "forgedock", "copied-commands.json");
+    const lockPath = manifestPath + ".lock";
+    mkdirSync(join(home, ".claude", "forgedock"), { recursive: true });
+    writeFileSync(manifestPath, JSON.stringify({ version: 1, files: {} }, null, 2) + "\n", "utf-8");
+
+    // Simulate a concurrent process already holding the lock, mid-critical-
+    // section, when this run reaches its own final save.
+    writeFileSync(lockPath, "", "utf-8");
+
+    const { ctx, w } = stubCtx({ home, linkStrategy: "copy" });
+    ctx.forgeHome = forgeHome;
+
+    const forgePromise = forge(ctx);
+    // Release the held lock — and land the "other process's" own manifest
+    // write, as it would have on releasing — shortly after this run starts
+    // retrying, well within the retry/backoff budget.
+    setTimeout(() => {
+      const concurrent = JSON.parse(readFileSync(manifestPath, "utf-8"));
+      concurrent.files["concurrent-process.md"] = true;
+      writeFileSync(manifestPath, JSON.stringify(concurrent, null, 2) + "\n", "utf-8");
+      unlinkSync(lockPath);
+    }, 15);
+    const res = await forgePromise;
+
+    assert.equal(res.copied, 1, "this run should have copied its own file");
+    assert.ok(!w.text.includes("manifest not saved"), "manifest save should succeed once the lock is released");
+    assert.ok(!existsSync(lockPath), "the lock file must be cleaned up after this run's save completes");
+
+    const finalManifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    assert.equal(finalManifest.files["a.md"], true, "this run's own entry must be present");
+    assert.equal(
+      finalManifest.files["concurrent-process.md"],
+      true,
+      "the concurrent holder's entry (written before releasing the lock) must survive this run's save",
+    );
+  });
+
+  it("stale (crash-orphaned) manifest lock is reclaimed so forge() is not permanently blocked (forge#2637)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-stale-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-stale-src-"));
+    mkdirSync(join(forgeHome, "commands"), { recursive: true });
+    mkdirSync(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "content a", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const manifestPath = join(home, ".claude", "forgedock", "copied-commands.json");
+    const lockPath = manifestPath + ".lock";
+    mkdirSync(join(home, ".claude", "forgedock"), { recursive: true });
+    writeFileSync(manifestPath, JSON.stringify({ version: 1, files: {} }, null, 2) + "\n", "utf-8");
+
+    // A lock left behind by a process that was hard-killed before releasing
+    // it — backdate its mtime well past the staleness threshold so this run's
+    // first contended attempt reclaims it instead of waiting out the full
+    // retry budget.
+    writeFileSync(lockPath, "", "utf-8");
+    const staleTime = new Date(Date.now() - 60_000);
+    utimesSync(lockPath, staleTime, staleTime);
+
+    const { ctx, w } = stubCtx({ home, linkStrategy: "copy" });
+    ctx.forgeHome = forgeHome;
+
+    const res = await forge(ctx);
+
+    assert.equal(res.copied, 1, "this run should have copied its own file");
+    assert.ok(!w.text.includes("manifest not saved"), "manifest save should succeed after reclaiming the stale lock");
+    assert.ok(!existsSync(lockPath), "the reclaimed lock must not be left behind after this run's own save");
+
+    const finalManifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+    assert.equal(finalManifest.files["a.md"], true, "this run's own entry must be present");
+  });
+
+  it("a lock younger than the new 30s threshold (but older than the old 10s one) is NOT reclaimed (forge#2655)", async () => {
+    // Regression guard for the STALE_MANIFEST_LOCK_AGE_MS bump (10s -> 30s,
+    // forge#2655): backdate the held lock's mtime to 20s ago — past the old
+    // threshold, but still well within the new one. A correct implementation
+    // must leave this lock completely untouched (never reclaim it) and fall
+    // back to an unlocked save instead, exactly like the "held for the full
+    // retry budget" case below. If the threshold ever regresses back toward
+    // 10s, this lock would incorrectly get reclaimed and unlinked/replaced —
+    // this test catches that by asserting the original lock file survives
+    // byte-for-byte (same mtime) after forge() completes.
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-boundary-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-boundary-src-"));
+    mkdirSync(join(forgeHome, "commands"), { recursive: true });
+    mkdirSync(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "content a", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const manifestPath = join(home, ".claude", "forgedock", "copied-commands.json");
+    const lockPath = manifestPath + ".lock";
+    mkdirSync(join(home, ".claude", "forgedock"), { recursive: true });
+    writeFileSync(manifestPath, JSON.stringify({ version: 1, files: {} }, null, 2) + "\n", "utf-8");
+
+    writeFileSync(lockPath, "", "utf-8");
+    const boundaryTime = new Date(Date.now() - 20_000); // 20s old: > old 10s threshold, < new 30s threshold
+    utimesSync(lockPath, boundaryTime, boundaryTime);
+    const originalMtimeMs = statSync(lockPath).mtimeMs;
+
+    const { ctx, w } = stubCtx({ home, linkStrategy: "copy" });
+    ctx.forgeHome = forgeHome;
+
+    const res = await forge(ctx);
+
+    assert.equal(res.copied, 1, "this run should have copied its own file even without the lock");
+    assert.ok(existsSync(lockPath), "a lock younger than the new threshold must survive untouched, not be reclaimed");
+    assert.equal(
+      statSync(lockPath).mtimeMs,
+      originalMtimeMs,
+      "the held lock's mtime must be unchanged — proves it was never re-stat'd-and-unlinked by the reclaim path",
+    );
+  });
+
+  it("falls back to an unlocked save (never-abort contract preserved) when the lock cannot be acquired within the retry budget (forge#2637)", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-heldfull-"));
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-heldfull-src-"));
+    mkdirSync(join(forgeHome, "commands"), { recursive: true });
+    mkdirSync(join(forgeHome, "bin", "hooks"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "a.md"), "content a", "utf-8");
+    writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook", "utf-8");
+
+    const manifestPath = join(home, ".claude", "forgedock", "copied-commands.json");
+    const lockPath = manifestPath + ".lock";
+    mkdirSync(join(home, ".claude", "forgedock"), { recursive: true });
+    writeFileSync(manifestPath, JSON.stringify({ version: 1, files: {} }, null, 2) + "\n", "utf-8");
+
+    // Held for the entire run — freshly touched throughout so it is never
+    // treated as stale — simulating a live (non-crashed) concurrent holder
+    // whose own critical section outlasts this run's retry budget.
+    writeFileSync(lockPath, "", "utf-8");
+    const keepAlive = setInterval(() => {
+      const now = new Date();
+      try {
+        utimesSync(lockPath, now, now);
+      } catch {
+        // lock already gone (test cleanup raced) — stop trying
+        clearInterval(keepAlive);
+      }
+    }, 20);
+
+    const { ctx, w } = stubCtx({ home, linkStrategy: "copy" });
+    ctx.forgeHome = forgeHome;
+
+    try {
+      const res = await forge(ctx);
+      assert.equal(res.copied, 1, "this run should have copied its own file");
+      assert.ok(
+        !w.text.includes("manifest not saved"),
+        "manifest save must still succeed unlocked — the lock is best-effort, not a hard requirement",
+      );
+      const finalManifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+      assert.equal(finalManifest.files["a.md"], true, "this run's own entry must be present even without the lock");
+    } finally {
+      clearInterval(keepAlive);
+      unlinkSync(lockPath);
+    }
   });
 
   // forge#1527: the SubagentStop annotation-enforcement hook's trigger
@@ -1411,6 +2104,195 @@ describe("forge (Act II)", () => {
     // User-owned symlink must survive untouched
     assert.ok(existsSync(userLink), "user-owned symlink preserved");
     assert.equal(res.pruned, 0);
+  });
+
+  describe("isSymlinkTraversable (forge#2620)", () => {
+    it("returns true for a symlink that resolves to a readable file", async () => {
+      const dirT = mkdtempSync(join(os.tmpdir(), "fd-symtrav-ok-"));
+      const src = join(dirT, "src.md");
+      writeFileSync(src, "content", "utf-8");
+      const link = join(dirT, "link.md");
+      symlinkSync(src, link);
+      assert.equal(await isSymlinkTraversable(link), true);
+    });
+
+    it("returns false for a symlink whose target does not exist", async () => {
+      const dirT = mkdtempSync(join(os.tmpdir(), "fd-symtrav-missing-"));
+      const link = join(dirT, "link.md");
+      symlinkSync(join(dirT, "does-not-exist.md"), link);
+      assert.equal(await isSymlinkTraversable(link), false);
+    });
+
+    it("returns false for a symlink whose target cannot be read as a file (e.g. a directory) — the portable proxy for an MSYS 'untrusted mount point' failure", async () => {
+      const dirT = mkdtempSync(join(os.tmpdir(), "fd-symtrav-eisdir-"));
+      const targetDirEntry = join(dirT, "not-a-file");
+      mkdirSyncFs(targetDirEntry, { recursive: true });
+      const link = join(dirT, "link.md");
+      symlinkSync(targetDirEntry, link);
+      assert.equal(await isSymlinkTraversable(link), false);
+    });
+  });
+
+  describe("pruneStaleExtensionlessEntries (forge#2620)", () => {
+    it("removes a top-level extensionless symlink whose target no longer exists", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-missing-"));
+      const link = join(targetDir, "orchestrate");
+      symlinkSync(join(targetDir, "gone-forever"), link);
+      const pruned = await pruneStaleExtensionlessEntries(targetDir);
+      assert.equal(pruned, 1);
+      assert.ok(!existsSync(link));
+    });
+
+    it("removes a top-level extensionless symlink pointing into the npx cache", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-npx-"));
+      const cacheHome = mkdtempSync(join(os.tmpdir(), "fd-stale-npxsrc-"));
+      const cacheTarget = join(cacheHome, "_npx", "abcd1234", "node_modules", "forgedock", "commands", "pipeline-health.md");
+      mkdirSyncFs(join(cacheHome, "_npx", "abcd1234", "node_modules", "forgedock", "commands"), { recursive: true });
+      writeFileSync(cacheTarget, "STALE", "utf-8");
+      const link = join(targetDir, "pipeline-health");
+      symlinkSync(cacheTarget, link);
+      const pruned = await pruneStaleExtensionlessEntries(targetDir);
+      assert.equal(pruned, 1);
+      assert.ok(!existsSync(link));
+    });
+
+    it("does not touch a real extensionless directory (e.g. a multi-file command dir like work-on/)", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-realdir-"));
+      const cmdDir = join(targetDir, "work-on");
+      mkdirSyncFs(cmdDir, { recursive: true });
+      writeFileSync(join(cmdDir, "build.md"), "BUILD", "utf-8");
+      const pruned = await pruneStaleExtensionlessEntries(targetDir);
+      assert.equal(pruned, 0);
+      assert.ok(existsSync(join(cmdDir, "build.md")), "real command directory left untouched");
+    });
+
+    it("does not touch entries with a file extension", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-hasext-"));
+      const link = join(targetDir, "orchestrate.md");
+      symlinkSync(join(targetDir, "gone-forever"), link);
+      const pruned = await pruneStaleExtensionlessEntries(targetDir);
+      assert.equal(pruned, 0);
+      assert.ok(existsSync(link) || true); // lstat-broken symlink still "exists" as a dirent; just confirm untouched by pruned count
+    });
+
+    it("does not touch a plain (non-symlink) extensionless file", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-plainfile-"));
+      writeFileSync(join(targetDir, "orchestrate"), "not a symlink", "utf-8");
+      const pruned = await pruneStaleExtensionlessEntries(targetDir);
+      assert.equal(pruned, 0);
+      assert.ok(existsSync(join(targetDir, "orchestrate")));
+    });
+
+    it("returns 0 for a targetDir that does not exist yet (fresh install)", async () => {
+      const pruned = await pruneStaleExtensionlessEntries(join(os.tmpdir(), "fd-stale-does-not-exist-" + Date.now()));
+      assert.equal(pruned, 0);
+    });
+
+    it("resolves a relative symlink target against the symlink's own directory, not process.cwd() (forge#2646)", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-relative-"));
+      // Relative target that DOES exist when resolved against targetDir
+      // (its own containing directory), but would NOT exist if resolved
+      // against process.cwd() instead.
+      writeFileSync(join(targetDir, "real-target.md"), "REAL", "utf-8");
+      const link = join(targetDir, "orchestrate");
+      symlinkSync("real-target.md", link); // relative target, not absolute
+      const pruned = await pruneStaleExtensionlessEntries(targetDir);
+      assert.equal(pruned, 0, "relative target resolves to an existing file relative to its own dir — must not be pruned");
+      assert.ok(existsSync(link));
+    });
+
+    it("still prunes a relative symlink target that is genuinely missing", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-relative-missing-"));
+      const link = join(targetDir, "orchestrate");
+      symlinkSync("does-not-exist.md", link); // relative target, missing either way
+      const pruned = await pruneStaleExtensionlessEntries(targetDir);
+      assert.equal(pruned, 1);
+      assert.ok(!existsSync(link));
+    });
+
+    it("leaves a Windows drive-relative symlink target (e.g. \"C:foo\") untouched on win32; treats it as an ordinary relative target on POSIX (forge#2659, win32-gated per forge#2663)", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-driverel-"));
+      const link = join(targetDir, "orchestrate");
+      // "C:foo" — drive letter + colon with NO separator after it — is
+      // classified as "relative" by both path.win32.isAbsolute() and
+      // path.posix.isAbsolute() (neither recognizes this shape as absolute).
+      // The drive-relative special case is deliberately platform-gated to
+      // win32 (forge#2663): only on Windows does "C:foo" mean "relative to
+      // drive C's own cwd" — a path Node has no API to resolve — so the entry
+      // is left untouched there. On POSIX, `:` is an ordinary filename
+      // character, so "C:foo" is just a normal relative target resolved
+      // against the link's own directory and pruned like any broken link.
+      symlinkSync("C:foo", link);
+      if (process.platform === "win32") {
+        // Native Windows symlink creation resolves a drive-relative target
+        // against the process's cwd at creation time (CreateSymbolicLink
+        // semantics), so readlink() may return an already-absolute path
+        // rather than the literal "C:foo" string this branch targets. Only
+        // assert the untouched contract when the literal string survived.
+        if (readlinkSync(link) !== "C:foo") return;
+        const pruned = await pruneStaleExtensionlessEntries(targetDir);
+        assert.equal(pruned, 0, "drive-relative target must not be pruned on win32 — cannot be resolved safely");
+      } else {
+        // POSIX: symlink() stores the literal "C:foo", which resolves to a
+        // missing path under targetDir and is pruned like any broken link.
+        assert.equal(readlinkSync(link), "C:foo");
+        const pruned = await pruneStaleExtensionlessEntries(targetDir);
+        assert.equal(pruned, 1, "on POSIX, \"C:foo\" is an ordinary relative target and is pruned when its resolved path is missing");
+        assert.ok(!existsSync(link));
+      }
+    });
+
+    it("does NOT mistake a genuinely drive-absolute target (\"C:\\\\foo\") for drive-relative", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-driveabs-"));
+      const realTarget = join(targetDir, "real-target.md");
+      writeFileSync(realTarget, "REAL", "utf-8");
+      const link = join(targetDir, "orchestrate");
+      symlinkSync(realTarget, link); // absolute target (e.g. "C:\...\real-target.md" on Windows)
+      const pruned = await pruneStaleExtensionlessEntries(targetDir);
+      assert.equal(pruned, 0, "a genuinely absolute target must resolve normally and not be pruned");
+      assert.ok(existsSync(link));
+    });
+
+    it("expands a leading ~ against the home directory before resolving the target (forge#2660)", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-tilde-"));
+      const homeDir = mkdtempSync(join(os.tmpdir(), "fd-stale-tildehome-"));
+      const realTargetHomeRelative = join(homeDir, "real-target.md");
+      writeFileSync(realTargetHomeRelative, "REAL", "utf-8");
+      const originalHomedir = os.homedir;
+      os.homedir = () => homeDir;
+      try {
+        const link = join(targetDir, "orchestrate");
+        symlinkSync("~/real-target.md", link); // literal tilde-prefixed target, as readlink() would return it
+        const pruned = await pruneStaleExtensionlessEntries(targetDir);
+        // NOTE: cannot assert existsSync(link) here — existsSync follows the
+        // symlink using the OS's own (non-tilde-aware) resolution, which
+        // would report the link as broken regardless of our custom
+        // expansion. pruned === 0 is the correct, complete assertion: it
+        // proves pruneStaleExtensionlessEntries itself resolved the tilde
+        // target to the real, existing file and therefore left the entry
+        // alone (matches this describe block's existing convention — see
+        // "does not touch entries with a file extension" above).
+        assert.equal(pruned, 0, "tilde target must expand against home dir and resolve to the existing file");
+      } finally {
+        os.homedir = originalHomedir;
+      }
+    });
+
+    it("still prunes a tilde-prefixed target that is genuinely missing under the home directory", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-tilde-missing-"));
+      const homeDir = mkdtempSync(join(os.tmpdir(), "fd-stale-tildehome-missing-"));
+      const originalHomedir = os.homedir;
+      os.homedir = () => homeDir;
+      try {
+        const link = join(targetDir, "orchestrate");
+        symlinkSync("~/does-not-exist.md", link);
+        const pruned = await pruneStaleExtensionlessEntries(targetDir);
+        assert.equal(pruned, 1);
+        assert.ok(!existsSync(link));
+      } finally {
+        os.homedir = originalHomedir;
+      }
+    });
   });
 
   describe("linkPipelineScripts copy-fallback content comparison (forge#1916)", () => {

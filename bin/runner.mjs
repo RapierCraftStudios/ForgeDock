@@ -635,6 +635,112 @@ export function extractSessionLimitResetTime(output) {
 }
 
 /**
+ * Computes the UTC offset (in ms) `timeZone` observes at `instantMs`, defined
+ * such that `wallClockAsUTC = instantMs + offset` — i.e. a positive offset
+ * means the zone is ahead of UTC at that instant. Used by
+ * `wallTimeInZoneToEpochMs()` below to convert a local wall-clock time back
+ * into a real UTC epoch, correctly handling DST for zones that observe it
+ * (though the only zone shape actually seen in production CLI output today —
+ * `Asia/Calcutta`, a fixed +5:30 IANA link name with no DST — never needs the
+ * iteration this enables; the general form is kept so any zone name the CLI
+ * reports is handled correctly, not just the one observed so far).
+ *
+ * @param {number} instantMs - a real UTC epoch instant
+ * @param {string} timeZone - IANA zone name (e.g. "Asia/Calcutta")
+ * @returns {number} offset in ms
+ */
+function tzOffsetMsAtInstant(instantMs, timeZone) {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  });
+  const parts = Object.fromEntries(dtf.formatToParts(new Date(instantMs)).map((p) => [p.type, p.value]));
+  const localAsUTC = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute, +parts.second);
+  return localAsUTC - instantMs;
+}
+
+/**
+ * Converts a local wall-clock time `(y, mo, d, h, mi, s)` *in* `timeZone*
+ * into the real UTC epoch ms instant it represents. Two-iteration
+ * fixed-point refinement using `tzOffsetMsAtInstant()` above — sufficient
+ * for every real-world zone (including DST transitions, which shift the
+ * offset by at most a couple of hours, well within one refinement step).
+ *
+ * @returns {number} UTC epoch ms
+ */
+function wallTimeInZoneToEpochMs(y, mo, d, h, mi, s, timeZone) {
+  const naiveUtc = Date.UTC(y, mo - 1, d, h, mi, s);
+  let guess = naiveUtc;
+  for (let i = 0; i < 2; i++) {
+    guess = naiveUtc - tzOffsetMsAtInstant(guess, timeZone);
+  }
+  return guess;
+}
+
+/**
+ * Parses the CLI's session-limit reset-time text (forge#2241's
+ * `extractSessionLimitResetTime()` output — e.g. `"12:50am (Asia/Calcutta)"`)
+ * into a machine-usable UTC epoch ms timestamp (forge#2524 AC5). The CLI only
+ * ever reports a bare time-of-day plus an IANA zone name, never a date — the
+ * reset is always the *next* occurrence of that wall-clock time from `nowMs`,
+ * so this resolves "today" in the target zone and rolls forward one day if
+ * that candidate has already passed.
+ *
+ * Deliberately narrow, mirroring `extractSessionLimitResetTime()`'s own
+ * "never fabricate a value" contract: returns `undefined` on any input that
+ * doesn't match the exact expected shape, or names a timezone
+ * `Intl.DateTimeFormat` doesn't recognize — callers must treat `undefined` as
+ * "could not compute a wait duration", never substitute a guessed default.
+ *
+ * @param {string|undefined} resetAtText - the (already-sanitized) display
+ *   string from `extractSessionLimitResetTime()`
+ * @param {number} [nowMs] - current time; defaults to `Date.now()`, overridable for tests
+ * @returns {number|undefined} UTC epoch ms of the next occurrence of that
+ *   wall-clock time in that zone, or `undefined` if unparseable
+ */
+export function parseSessionLimitResetEpochMs(resetAtText, nowMs = Date.now()) {
+  if (!resetAtText) return undefined;
+  const match = /^(\d{1,2}):(\d{2})\s*([ap]m)\s*\(([^)]+)\)\s*$/i.exec(resetAtText.trim());
+  if (!match) return undefined;
+  const [, hourStr, minuteStr, ampm, timeZone] = match;
+  const rawHour = parseInt(hourStr, 10);
+  // Reject out-of-range hours BEFORE the `% 12` conversion below — otherwise
+  // malformed input like "13:30pm" or "99:30pm" silently aliases to a
+  // plausible-but-wrong hour (13 % 12 = 1, 99 % 12 = 3) instead of being
+  // rejected, violating this function's own "never fabricate a value"
+  // contract. Mirrors the `minute > 59` guard further down.
+  if (rawHour < 1 || rawHour > 12) return undefined;
+  let hour = rawHour % 12;
+  if (/pm/i.test(ampm)) hour += 12;
+  const minute = parseInt(minuteStr, 10);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute) || minute > 59) return undefined;
+
+  let todayParts;
+  try {
+    const dtf = new Intl.DateTimeFormat("en-US", {
+      timeZone, year: "numeric", month: "2-digit", day: "2-digit",
+    });
+    todayParts = Object.fromEntries(dtf.formatToParts(new Date(nowMs)).map((p) => [p.type, p.value]));
+  } catch {
+    // Unrecognized IANA zone name — Intl throws a RangeError. Do not fabricate
+    // a value; the caller must treat this identically to any other parse failure.
+    return undefined;
+  }
+
+  const y = +todayParts.year, mo = +todayParts.month, d = +todayParts.day;
+  let epoch = wallTimeInZoneToEpochMs(y, mo, d, hour, minute, 0, timeZone);
+  // The CLI reports a reset time that is, by definition, in the future
+  // relative to when it printed the message — if today's candidate has
+  // already passed `nowMs`, the real reset is tomorrow at the same wall-clock time.
+  if (epoch <= nowMs) {
+    epoch = wallTimeInZoneToEpochMs(y, mo, d + 1, hour, minute, 0, timeZone);
+  }
+  return epoch;
+}
+
+/**
  * Coerce a single CLI-reported `usage.*` field to a finite number, or `0`
  * when it isn't one (forge#2424). `?? 0` only replaces `null`/`undefined` —
  * it does not coerce or reject other non-numeric values (e.g. a string), so
@@ -815,7 +921,18 @@ export function runCliBackend({
       // quota-exhaustion failure will clear without reading raw logs. Only
       // ever set when the pattern actually matches — never fabricated.
       const resetAt = extractSessionLimitResetTime(output);
-      if (resetAt) err.resetAt = resetAt;
+      if (resetAt) {
+        err.resetAt = resetAt;
+        // forge#2524: also attach a machine-usable epoch-ms timestamp so
+        // bin/engine.mjs can compute an actual wait duration and pause
+        // in-process instead of merely displaying the reset time. Only ever
+        // set when parsing succeeds — never fabricated (mirrors resetAt's
+        // own contract). A future/unparseable reset time simply leaves this
+        // field absent, and the caller's fail-fast/terminate behavior is
+        // unaffected (see bin/engine.mjs's runIssue() pause-loop guard).
+        const resetAtEpochMs = parseSessionLimitResetEpochMs(resetAt, Date.now());
+        if (resetAtEpochMs !== undefined) err.resetAtEpochMs = resetAtEpochMs;
+      }
       throw err;
     }
 
@@ -873,7 +990,47 @@ export function runCliBackend({
     // Prefer the parsed envelope's human-readable `.result` string so
     // console output stays prose, not a raw JSON blob; fall back to the raw
     // captured output when parsing failed or `.result` was absent.
-    const humanOutput = parsedResult ?? output;
+    //
+    // forge#2456: `.result` alone would otherwise silently drop any non-empty
+    // `stderr` on an exit-0 run (deprecation notice, Node runtime banner,
+    // etc.) — a real behavior change from the pre-#2398 baseline, where the
+    // combined stdout+stderr stream was always logged. Append trimmed
+    // `stderr` after the parsed result when present, so operators still see
+    // it; when `stderr` is empty (the common case) the logged string is
+    // unchanged. This mirrors the same "combine streams instead of dropping
+    // one" fix already applied to the `run_bash` tool handler's success path
+    // in #1229. `JSON.parse` itself still targets `stdout` alone (forge#2422)
+    // — only the logged/displayed string composition changes here.
+    //
+    // forge#2483/forge#2484 (batch #2522): two follow-up fixes to the
+    // forge#2456 composition above, applied together since they share the
+    // exact same lines:
+    //   - forge#2483: `stderrTrimmed` is untrusted subprocess output (the CLI
+    //     echoes untrusted issue/PR body content — the same threat class
+    //     `sanitizeArgvForLog`/`sanitizeOutputExcerptForLog` already harden
+    //     for the timeout/non-zero-exit diagnostic paths above). It is now
+    //     routed through the same `sanitizeOutputExcerptForLog()` helper
+    //     before being concatenated into `humanOutput`, instead of reaching
+    //     `logger.log()` raw.
+    //   - forge#2484: `parsedResult !== null` is true even when
+    //     `parsedResult === ""` (the earlier `typeof parsed.result ===
+    //     "string"` check accepts `""`). Previously that produced
+    //     `"" + "\n" + stderrTrimmed` — a leading-newline-only artifact.
+    //     `parsedResult` (truthy check, not `!== null`) now gates the
+    //     "prefix with parsedResult" behavior, so an empty `.result` falls
+    //     through to the sanitized stderr alone, with no separator.
+    // The `parsedResult === null` fallback branch (raw `output`) is
+    // untouched by either fix — out of scope for both findings.
+    const stderrTrimmed = stderr.trim();
+    const sanitizedStderr = stderrTrimmed ? sanitizeOutputExcerptForLog(stderrTrimmed) : "";
+    const humanOutput =
+      parsedResult !== null
+        ? parsedResult
+          ? sanitizedStderr
+            ? `${parsedResult}\n${sanitizedStderr}`
+            : parsedResult
+          : sanitizedStderr
+        : output;
     if (humanOutput) logger.log(humanOutput);
 
     logger.log(

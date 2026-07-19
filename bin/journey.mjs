@@ -747,9 +747,9 @@ export async function preflight(ctx) {
 // Act II — Forging: command symlinks + SessionStart hook (Task 6)
 // ---------------------------------------------------------------------------
 
-import { mkdir, symlink, readlink, lstat, readdir, rename, copyFile, readFile, writeFile, unlink, rm } from "fs/promises";
+import { mkdir, symlink, readlink, lstat, readdir, rename, copyFile, readFile, writeFile, unlink, rm, open } from "fs/promises";
 import { compareVersions } from "./registry.mjs";
-import { relative, dirname as pathDirname } from "path";
+import { relative, dirname as pathDirname, isAbsolute } from "path";
 import {
   installSessionStartHook,
   installSubagentStopHook,
@@ -855,11 +855,210 @@ async function loadCopiedManifest(manifestPath) {
 /** Save the manifest atomically (mkdir recursive + .tmp+rename). */
 async function saveCopiedManifest(manifestPath, manifest) {
   await mkdir(pathDirname(manifestPath), { recursive: true });
-  await writeFile(manifestPath + ".tmp", JSON.stringify(manifest, null, 2) + "\n", "utf-8");
-  await rename(manifestPath + ".tmp", manifestPath);
+  // Suffix the tmp sibling with this process's PID so concurrent forge()
+  // invocations never share the same tmp path — mirrors the fix already
+  // applied to the copy-file branch in this same function (forge#2542).
+  const tmpPath = manifestPath + "." + process.pid + ".tmp";
+  try {
+    await writeFile(tmpPath, JSON.stringify(manifest, null, 2) + "\n", "utf-8");
+  } catch (writeErr) {
+    await unlink(tmpPath).catch(() => {});
+    throw writeErr;
+  }
+  try {
+    await rename(tmpPath, manifestPath);
+  } catch (renameErr) {
+    await unlink(tmpPath).catch(() => {});
+    throw renameErr;
+  }
+}
+
+// Age (ms) below which a pid-suffixed manifest tmp sibling is assumed to be a
+// concurrent forge()'s in-flight write and left untouched. Anything older is a
+// crash-orphan (SIGKILL/OOM/power loss between writeFile and rename) that no
+// future pid-matched run and no other cleanup path will ever reclaim
+// (forge#2612). Generous relative to real write→rename latency.
+const STALE_MANIFEST_TMP_AGE_MS = 60_000;
+
+// Age (ms) above which a held manifest lock file is assumed to be a
+// crash-orphan (the holder died between acquiring the lock and releasing it)
+// rather than a live concurrent holder, and is safe to reclaim. Deliberately
+// shorter than STALE_MANIFEST_TMP_AGE_MS (60s, forge#2612) rather than
+// matching it: the lock's critical section (one readFile+JSON.parse, an
+// in-memory loop, one writeFile+rename) is far lighter than the write this
+// process guards against staleness in the tmp-sweep case, so a live holder
+// should never legitimately hold this lock anywhere near that long. Not set
+// as low as the original 10s either — that left too little headroom under
+// slow I/O (AV scanning, network home dirs, loaded CI), which could plausibly
+// exceed 10s and trigger premature reclaim of a still-live lock (review
+// finding on PR #2654, forge#2655). 30s is a documented middle ground: 3x the
+// original headroom, still 2x shorter than the tmp precedent.
+const STALE_MANIFEST_LOCK_AGE_MS = 30_000;
+
+// Bounded retry/backoff for acquireManifestLock (forge#2637). Total worst-case
+// wait is small (a few hundred ms) — long enough to let a concurrent holder's
+// short critical section finish, short enough that a stuck/foreign lock never
+// meaningfully delays a forge() run before falling back to unlocked behavior.
+const MANIFEST_LOCK_RETRY_DELAYS_MS = [10, 20, 40, 80, 150];
+
+/**
+ * Acquire an exclusive lock guarding the manifest's final read→merge→write
+ * critical section (forge#2637). Uses `fs.open(lockPath, 'wx')` — O_EXCL
+ * create — as a zero-dependency mutual-exclusion primitive: the call fails
+ * with EEXIST if another process already holds the lock, and succeeds
+ * atomically otherwise (no separate exists-check + create races).
+ *
+ * On contention, retries with the bounded backoff schedule above. Each retry
+ * also opportunistically busts a stale lock (older than
+ * STALE_MANIFEST_LOCK_AGE_MS — a crash-orphan from a holder that died before
+ * releasing) so a hard-killed process can never permanently deadlock future
+ * runs.
+ *
+ * Never throws. Returns the open file handle on success, or `null` if the
+ * lock could not be acquired after all retries — callers MUST treat `null`
+ * as "proceed without the lock" (this file's manifest-save path is
+ * best-effort/never-abort by design; the lock narrows the race window, it is
+ * not a hard correctness requirement).
+ */
+async function acquireManifestLock(manifestPath) {
+  const lockPath = manifestPath + ".lock";
+  for (let attempt = 0; attempt <= MANIFEST_LOCK_RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      return await open(lockPath, "wx");
+    } catch (err) {
+      if (err?.code !== "EEXIST") return null; // unexpected error (e.g. EACCES) — proceed unlocked
+      // Contended — opportunistically reclaim a stale (crash-orphaned) lock.
+      let reclaimed = false;
+      try {
+        const st = await lstat(lockPath);
+        if (Date.now() - st.mtimeMs >= STALE_MANIFEST_LOCK_AGE_MS) {
+          // Re-stat immediately before deleting and only unlink if it's
+          // provably the SAME file we just judged stale (matching inode +
+          // mtime) — a plain lstat-then-unlink-by-path has a window where
+          // the original holder releases and a brand-new live holder
+          // acquires a fresh lock at this same path in between; unlinking
+          // by path alone would then delete that new holder's live lock,
+          // reproducing the exact race this lock exists to prevent, one
+          // layer down (review finding on PR #2654). If the file changed
+          // (or vanished) between the two stats, leave it alone — some
+          // other process has since claimed or released the path — and let
+          // the next retry iteration re-evaluate from scratch.
+          try {
+            const st2 = await lstat(lockPath);
+            if (st2.ino === st.ino && st2.mtimeMs === st.mtimeMs) {
+              await unlink(lockPath).catch(() => {});
+              reclaimed = true;
+            }
+          } catch {
+            // vanished between the two stats — already released, nothing to reclaim
+          }
+        }
+      } catch {
+        // lock file vanished between the failed open and this stat (the
+        // holder released it) — fall through to the next attempt/retry.
+      }
+      // A successful reclaim just proved the path is free — retry open()
+      // immediately instead of waiting out the full backoff delay for this
+      // iteration (review finding on PR #2654, forge#2656). Still counts as
+      // a used attempt (loop counter still advances), it just skips the
+      // sleep.
+      if (reclaimed) continue;
+      if (attempt === MANIFEST_LOCK_RETRY_DELAYS_MS.length) return null; // retries exhausted
+      await new Promise((resolve) => setTimeout(resolve, MANIFEST_LOCK_RETRY_DELAYS_MS[attempt]));
+    }
+  }
+  return null;
+}
+
+/**
+ * Release a lock acquired by acquireManifestLock() (forge#2637). Closes the
+ * handle and removes the lock file. Never throws — same best-effort contract
+ * as the rest of the manifest-save path; a failure to release cleanly is
+ * recovered by the next contender's stale-lock reclaim in
+ * acquireManifestLock() rather than by this function succeeding.
+ */
+async function releaseManifestLock(manifestPath, handle) {
+  if (!handle) return;
+  await handle.close().catch(() => {});
+  await unlink(manifestPath + ".lock").catch(() => {});
+}
+
+/**
+ * Best-effort sweep of crash-orphaned pid-suffixed manifest tmp siblings
+ * (forge#2612). saveCopiedManifest() writes to `manifestPath.<pid>.tmp` then
+ * renames it into place; if the process is hard-killed in that window the
+ * pid-suffixed tmp is orphaned permanently — no future run reuses that exact
+ * pid (unlike the old shared literal `.tmp` name any run would overwrite) and
+ * no other cleanup path scans this directory. Removes siblings matching
+ * `<manifest-basename>.<digits>.tmp` that are older than
+ * STALE_MANIFEST_TMP_AGE_MS (so a concurrent forge()'s in-flight tmp is never
+ * deleted) and are not this process's own live tmp. Never throws —
+ * housekeeping only, same never-abort contract as the manifest-save guard.
+ */
+async function sweepStaleManifestTmps(manifestPath) {
+  const dir = pathDirname(manifestPath);
+  const base = basename(manifestPath);
+  const liveTmp = base + "." + process.pid + ".tmp";
+  // Match only `<base>.<digits>.tmp` — the exact pid-suffixed shape. The legacy
+  // plain `<base>.tmp` (no digit segment) is intentionally excluded so a
+  // foreign/legacy sibling is never reclaimed here.
+  const stalePattern = new RegExp(
+    "^" + base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\.\\d+\\.tmp$",
+  );
+  let entries;
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return; // dir missing/unreadable — nothing to reclaim
+  }
+  const now = Date.now();
+  await Promise.all(
+    entries.map(async (name) => {
+      if (name === liveTmp || !stalePattern.test(name)) return;
+      const full = join(dir, name);
+      try {
+        const st = await lstat(full);
+        if (now - st.mtimeMs < STALE_MANIFEST_TMP_AGE_MS) return; // maybe in-flight
+        await unlink(full);
+      } catch {
+        // best-effort — ignore races / permission errors
+      }
+    }),
+  );
 }
 
 const isLinkPermissionError = (err) => err.code === "EPERM" || err.code === "EACCES";
+
+/**
+ * Verify a freshly created symlink is actually readable by *this* process
+ * before trusting it. `fs.symlink()` can return successfully (no EPERM/
+ * EACCES — so `isLinkPermissionError()` never fires) while still producing a
+ * link the OS refuses to resolve for this security/runtime context. The
+ * concrete case this guards against (forge#2620): installing under Git Bash
+ * (MSYS2) on Windows creates an MSYS-style symlink; the reparse point itself
+ * is written successfully, but a native Windows process (the Node binary
+ * behind Claude Code) later hits `"The path cannot be traversed because it
+ * contains an untrusted mount point"` when it tries to read through it. That
+ * failure surfaces at *read* time, not at *creation* time, and with an error
+ * code (`UNKNOWN`/`EIO`, not `EPERM`/`EACCES`) that the existing permission
+ * gate doesn't recognize — so the copy-fallback path never engaged and a
+ * dead, unreadable link was left in place.
+ *
+ * Reading the link back immediately after creating it catches this (and any
+ * other silently-broken-symlink case) regardless of the specific error code
+ * involved, without needing to enumerate every possible OS/runtime error.
+ *
+ * @param {string} target - Path to the symlink just created.
+ * @returns {Promise<boolean>} true if the symlink resolves and is readable.
+ */
+export async function isSymlinkTraversable(target) {
+  try {
+    await readFile(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Allowlist of universal pipeline-agent scripts installed to
@@ -938,6 +1137,108 @@ async function pruneOrphanedSymlinks(targetDir, commandsDir) {
   }
 
   await walk(targetDir);
+  return pruned;
+}
+
+/**
+ * Remove leftover extensionless entries at the top level of targetDir left
+ * behind by prior `npx forgedock <command>` runs (forge#2620). Those older
+ * ephemeral invocations created extensionless symlinks/directories (e.g.
+ * `orchestrate`, `pipeline-health`) pointing into the npx download cache
+ * (`%LocalAppData%\npm-cache\_npx\...` / `~/.npm/_npx/...`). Those cache
+ * targets are routinely evicted by npx/npm cache cleanup or OS temp
+ * cleanup, leaving dead entries that collide on the base command name with
+ * the real `{name}.md` file this installer is about to create —
+ * `mkdir(..., {recursive:true})` throws when a same-named non-directory
+ * file already occupies that path segment.
+ *
+ * Conservative by design — must run BEFORE the main install loop so stale
+ * entries are cleared before any mkdir/symlink attempt can collide with
+ * them this run (pruneOrphanedSymlinks above only catches entries that
+ * point *into commandsDir*, and runs after the loop; this catches the
+ * separate npx-cache-origin case pre-emptively). Only removes a top-level
+ * entry when its basename has no file extension (`.md` files and dotfiles
+ * are never touched) AND it is a symlink whose target either no longer
+ * exists or resolves into a known ephemeral cache path
+ * (`isEphemeralCachePath`). Real command directories (e.g. `work-on/`)
+ * created by this installer are plain directories containing `.md` files,
+ * never symlinks — untouched by either condition.
+ *
+ * @param {string} targetDir - ~/.claude/commands
+ * @returns {Promise<number>} Number of stale entries removed.
+ */
+// Matches a Windows drive-relative path like "C:foo" (drive letter + colon,
+// NOT followed by a path separator) — as opposed to a drive-absolute path
+// like "C:\foo" or "C:/foo", which path.isAbsolute() already recognizes
+// correctly. A drive-relative target resolves relative to that drive's own
+// current working directory, which Node has no API to query — there is no
+// way to compute the correct absolute path here (review finding on PR #2658,
+// forge#2659). Deliberately narrow: only fires when isAbsolute() has already
+// said "no" and the string still starts with `<letter>:` immediately
+// followed by a non-separator character. Platform-gated (review finding
+// forge#2663): on POSIX, `:` has no special meaning in filenames, so a
+// literal relative target like `C:foo` is a perfectly valid path component
+// and must NOT be misclassified as an unresolvable Windows drive-relative
+// path — only apply this heuristic on win32.
+const WINDOWS_DRIVE_RELATIVE_RE = /^[A-Za-z]:(?![\\/])/;
+
+export async function pruneStaleExtensionlessEntries(targetDir) {
+  let pruned = 0;
+  let entries;
+  try {
+    entries = await readdir(targetDir, { withFileTypes: true });
+  } catch (err) {
+    if (err.code === "ENOENT") return pruned;
+    throw err;
+  }
+  for (const entry of entries) {
+    const name = entry.name;
+    if (name.includes(".")) continue; // has an extension (or is a dotfile) — never touch
+    if (!entry.isSymbolicLink()) continue; // only manage symlinks here — real dirs/files are left alone
+    const full = join(targetDir, name);
+    let linkTarget;
+    try {
+      linkTarget = await readlink(full);
+    } catch {
+      continue; // unreadable link metadata — skip rather than guess
+    }
+    // readlink() returns whatever string was stored at symlink-creation time.
+    // A relative target is defined (POSIX) relative to the symlink's own
+    // containing directory (targetDir, since full = join(targetDir, name)) —
+    // not the process cwd, which is what a raw lstat(linkTarget) would use.
+    //
+    // Two shapes isAbsolute() alone misclassifies as "relative" and would
+    // otherwise be wrongly joined onto targetDir:
+    //   - Windows drive-relative ("C:foo") — see WINDOWS_DRIVE_RELATIVE_RE
+    //     above; unresolvable here, so the entry is left untouched. Only
+    //     meaningful on win32 (review finding forge#2663) — on POSIX, `:` is
+    //     just an ordinary filename character, so this check is skipped
+    //     there and the target falls through to normal relative resolution.
+    //   - Shell-style tilde ("~/foo", "~\foo", or bare "~") — expand against
+    //     os.homedir() first, matching shell semantics (review finding on
+    //     PR #2658, forge#2660).
+    if (process.platform === "win32" && WINDOWS_DRIVE_RELATIVE_RE.test(linkTarget)) continue; // can't resolve without the drive's own cwd — leave alone
+    let effectiveTarget = linkTarget;
+    if (effectiveTarget === "~" || effectiveTarget.startsWith("~/") || effectiveTarget.startsWith("~\\")) {
+      effectiveTarget = join(os.homedir(), effectiveTarget.slice(1));
+    }
+    const resolvedTarget = isAbsolute(effectiveTarget) ? effectiveTarget : join(targetDir, effectiveTarget);
+    let targetMissing = false;
+    try {
+      await lstat(resolvedTarget);
+    } catch (err) {
+      if (err.code !== "ENOENT") continue; // unexpected error — skip to be safe
+      targetMissing = true;
+    }
+    if (targetMissing || isEphemeralCachePath(linkTarget)) {
+      try {
+        await unlink(full);
+        pruned++;
+      } catch (err) {
+        if (err.code !== "ENOENT") throw err;
+      }
+    }
+  }
   return pruned;
 }
 
@@ -1378,9 +1679,24 @@ async function linkPipelineScripts(ctx) {
 
     let linked = false;
     if (wantSymlink) {
+      // Suffix the tmp sibling with this process's PID so a losing
+      // concurrent forge() invocation linking the same brand-new pipeline
+      // script never collides on the same literal target path (which
+      // raises an uncaught EEXIST — isLinkPermissionError() only treats
+      // EPERM/EACCES as recoverable). Mirrors the fresh-install symlink
+      // branch in forge() (forge#2631) and the relink/upgrade branches
+      // (forge#2542, forge#2600, forge#2599).
+      const tmpTarget = target + "." + process.pid + ".tmp";
       try {
-        await symlink(file, target);
-        linked = true;
+        await symlink(file, tmpTarget);
+        try {
+          await rename(tmpTarget, target);
+        } catch (renameErr) {
+          await unlink(tmpTarget).catch(() => {});
+          throw renameErr;
+        }
+        linked = await isSymlinkTraversable(target);
+        if (!linked) await unlink(target).catch(() => {});
       } catch (linkErr) {
         if (!isLinkPermissionError(linkErr)) throw linkErr;
       }
@@ -1539,11 +1855,30 @@ export async function forge(ctx) {
   w.write("\n  " + ember("Forging commands", ctx.mode) + " " + dimLine(ctx, `into ${targetDir}`) + "\n\n");
   await mkdir(targetDir, { recursive: true });
 
+  // Clear stale extensionless entries from prior `npx forgedock` runs before
+  // the install loop below can collide with them (forge#2620).
+  const staleExtensionlessPruned = await pruneStaleExtensionlessEntries(targetDir);
+
   const manifest = await loadCopiedManifest(manifestPath);
+  // Reclaim crash-orphaned pid-suffixed tmp siblings left by prior hard-killed
+  // runs (forge#2612). Best-effort — must never abort the forge receipt/hook.
+  await sweepStaleManifestTmps(manifestPath).catch(() => {});
   let manifestChanged = false;
+  // This run's own manifest mutations, tracked as a replayable diff
+  // (forge#2614). #2599/#2609 fixed the tmp-file *write-path* race (two
+  // concurrent forge() runs no longer collide on the same tmp filename) but
+  // left the manifest's logical *content* racy: each run loads the manifest
+  // into memory once, mutates its own copy across the whole run, then writes
+  // the entire in-memory object back at the end — a classic last-writer-wins
+  // race on manifest.files. Recording this run's own adds/deletes here (instead
+  // of relying on the run-start in-memory snapshot) lets the final save re-read
+  // the on-disk manifest and replay only these ops onto it, so a concurrent
+  // run's own adds/deletes made after this run's initial load are preserved
+  // rather than silently overwritten.
+  const manifestOps = [];
 
   const files = await findMarkdownFiles(commandsDir, { includeExtras: !!ctx.includeExtras });
-  let installed = 0, updated = 0, skipped = 0, copied = 0;
+  let installed = 0, updated = 0, skipped = 0, copied = 0, backedUp = 0;
   const barWidth = 24;
   let barShown = false;
 
@@ -1552,6 +1887,7 @@ export async function forge(ctx) {
       manifest.files[rel] = true;
       manifestChanged = true;
     }
+    manifestOps.push({ rel, op: "add" });
   };
 
   for (let i = 0; i < files.length; i++) {
@@ -1569,16 +1905,31 @@ export async function forge(ctx) {
         } else {
           let relinked = false;
           if (wantSymlink) {
+            // Suffix the tmp sibling with this process's PID so a losing
+            // concurrent forge() invocation's symlink() call never collides
+            // on the same literal path (which raises an uncaught EEXIST —
+            // isLinkPermissionError() only treats EPERM/EACCES as
+            // recoverable). Mirrors the copyFile branch and
+            // saveCopiedManifest fixes already applied in this file
+            // (forge#2542, forge#2599).
+            const tmpTarget = target + "." + process.pid + ".tmp";
             try {
-              await symlink(file, target + ".tmp");
+              await symlink(file, tmpTarget);
               try {
-                await rename(target + ".tmp", target);
+                await rename(tmpTarget, target);
               } catch (renameErr) {
-                await unlink(target + ".tmp").catch(() => {});
+                await unlink(tmpTarget).catch(() => {});
                 throw renameErr;
               }
-              updated++;
-              relinked = true;
+              relinked = await isSymlinkTraversable(target);
+              if (relinked) {
+                updated++;
+              } else {
+                // Symlink was created but is not readable back (e.g. MSYS
+                // symlink hit by native Windows "untrusted mount point" —
+                // forge#2620). Remove it and fall through to the copy branch.
+                await unlink(target).catch(() => {});
+              }
             } catch (linkErr) {
               if (!isLinkPermissionError(linkErr)) throw linkErr;
             }
@@ -1586,7 +1937,11 @@ export async function forge(ctx) {
           if (!relinked) {
             // Can't (or shouldn't) re-link — replace the managed link with a copy.
             // unlink first: copyFile onto a symlink writes THROUGH the link.
-            await unlink(target);
+            // (target may already be gone here if isSymlinkTraversable() failed
+            // and its own cleanup already removed it — tolerate ENOENT.)
+            await unlink(target).catch((err) => {
+              if (err.code !== "ENOENT") throw err;
+            });
             await copyFile(file, target);
             updated++; // replaces an existing managed entry
             recordCopy(rel);
@@ -1596,24 +1951,43 @@ export async function forge(ctx) {
         // A regular file we copied on a previous run — ours to manage.
         // First try upgrading it to a symlink (Developer Mode enabled since).
         let upgraded = false;
+        let restoredAsCopy = false;
         if (wantSymlink) {
+          // Same per-process-unique tmp suffix as the relink branch above —
+          // sibling branch, identical shared-literal-path EEXIST risk
+          // (forge#2542, forge#2599).
+          const tmpTarget = target + "." + process.pid + ".tmp";
           try {
-            await symlink(file, target + ".tmp");
+            await symlink(file, tmpTarget);
             try {
-              await rename(target + ".tmp", target); // rename replaces existing files on Windows
+              await rename(tmpTarget, target); // rename replaces existing files on Windows
             } catch (renameErr) {
-              await unlink(target + ".tmp").catch(() => {});
+              await unlink(tmpTarget).catch(() => {});
               throw renameErr;
             }
-            updated++;
-            delete manifest.files[rel];
-            manifestChanged = true;
-            upgraded = true;
+            upgraded = await isSymlinkTraversable(target);
+            if (upgraded) {
+              updated++;
+              delete manifest.files[rel];
+              manifestChanged = true;
+              manifestOps.push({ rel, op: "delete" });
+            } else {
+              // Symlink was created but is not readable back (e.g. MSYS
+              // symlink hit by native Windows "untrusted mount point" —
+              // forge#2620). Restore a real copy so the command stays
+              // readable. Keep the manifest entry (still copy-managed, not
+              // symlink-managed) and do NOT fall through to the generic
+              // copy-comparison below — the copy is already done.
+              await unlink(target).catch(() => {});
+              await copyFile(file, target);
+              updated++;
+              restoredAsCopy = true;
+            }
           } catch (linkErr) {
             if (!isLinkPermissionError(linkErr)) throw linkErr;
           }
         }
-        if (!upgraded) {
+        if (!upgraded && !restoredAsCopy) {
           const [src, dst] = await Promise.all([readFile(file), readFile(target)]);
           if (src.equals(dst)) {
             skipped++;
@@ -1623,22 +1997,127 @@ export async function forge(ctx) {
           }
         }
       } else {
-        // Regular file not in manifest — could be a copy from a pre-manifest
-        // ForgeDock version, or a user-owned file. Content-compare: if it
-        // matches source exactly, adopt it into the manifest silently (it was
-        // ours). If it differs, leave it untouched — it may be user-customized.
-        let adopted = false;
+        // Regular file not in manifest — a copy from a pre-manifest ForgeDock
+        // version, or a stale copy that was never adopted. `rel` here is
+        // always enumerated from `files` (ForgeDock's own commandsDir
+        // listing, see above) — every path this loop touches is a
+        // ForgeDock-managed command file, never an arbitrary user file, so
+        // there is no "user-customized" case to protect. Content-compare: if
+        // it matches source, adopt it into the manifest silently (it was
+        // ours all along). If it differs, it's stale — overwrite it and
+        // adopt it into the manifest too, mirroring the manifest-tracked
+        // branch above, so future runs take the manifest-aware fast path.
+        let handled = false;
         try {
           const [src, dst] = await Promise.all([readFile(file), readFile(target)]);
           if (src.equals(dst)) {
             recordCopy(rel);
             skipped++;
-            adopted = true;
+            handled = true;
+          } else {
+            // Write to a .tmp sibling and atomically rename onto target — never
+            // open target itself for a direct overwrite. copyFile() is not
+            // atomic: a mid-write failure (AV lock / ENOSPC / process kill)
+            // would otherwise leave target truncated/corrupted rather than
+            // simply stale, which the WARNING below cannot distinguish. This
+            // mirrors the .tmp+rename swap already used for symlink installs
+            // above (lines ~1573-1579, ~1601-1607).
+            //
+            // Unlike those symlink-based branches — where symlink() is itself
+            // exclusive-create and therefore naturally races out a concurrent
+            // writer — copyFile() has no such semantics: two concurrent
+            // forge() invocations (e.g. an overlapping `doctor --fix` run, or
+            // a file watcher) targeting the same file would both write
+            // through the same shared `target + ".tmp"` path and could
+            // interleave or clobber each other before either rename() runs.
+            // Suffix the tmp sibling with this process's PID so concurrent
+            // invocations never share a path (forge#2542).
+            const tmpTarget = target + "." + process.pid + ".tmp";
+            try {
+              await copyFile(file, tmpTarget);
+            } catch (copyErr) {
+              // A copyFile failure (disk full mid-copy, AV lock, permission
+              // error) can still leave a partially-written .tmp sibling on
+              // disk even though the write itself threw. The sibling
+              // rename() failure just below already cleans up tmpTarget
+              // on its own failure path (renameErr) — mirror that here so a
+              // copyFile failure doesn't orphan the .tmp file instead
+              // (forge#2540). Best-effort: never let the cleanup itself mask
+              // or replace the original copyErr being rethrown.
+              await unlink(tmpTarget).catch(() => {});
+              throw copyErr;
+            }
+            // Preserve the pre-existing content before it's replaced, mirroring
+            // half of the confirm+backup convention used by the forge.yaml
+            // overwrite path (bin/forgedock.mjs ~990-1021 / journey.mjs
+            // review(), both via backupExisting()). A confirmation prompt is
+            // deliberately NOT added: this branch also runs non-interactively
+            // inside `doctor --fix`'s automated repair (bin/forgedock.mjs
+            // runInstallRepairOnce() -> forge(ctx())), so pausing per-file for
+            // input would break that flow. Placed here — after the .tmp write
+            // has already succeeded, before the final rename — rather than
+            // before copyFile (as the forge.yaml path does), so a copyFile
+            // failure never backs up (and thereby displaces) a target that's
+            // about to remain untouched (see the .tmp-write-failure test,
+            // forge#2498). backupExisting()'s rename is itself atomic, so this
+            // ordering carries none of the non-atomic-write risk that forge#1396
+            // flagged for the old backup-then-writeFileSync forge.yaml path.
+            //
+            // Note: backupExisting() below is a *synchronous* rename
+            // (target -> target+".bak"); the tmpTarget -> target rename just
+            // after it is a separate, async filesystem operation. Between
+            // the two, target genuinely does not exist on disk for a
+            // sub-millisecond window. Only a hard process kill (not any
+            // catchable JS error) can land exactly there — any catchable
+            // failure of the second rename is already handled by the
+            // rollback block below — and recovery in that rare case is via
+            // the surviving target+".bak" on the next forge() run (forge#2558).
+            const backup = backupExisting(target);
+            if (backup) backedUp++;
+            try {
+              await rename(tmpTarget, target);
+            } catch (renameErr) {
+              await unlink(tmpTarget).catch(() => {});
+              if (backup) {
+                // The final rename failed AFTER backupExisting() already moved
+                // the original file to target+".bak" — target no longer exists
+                // on disk at this point. Without this rollback the user's file
+                // would simply vanish (present only as .bak) while the WARNING
+                // below implies it merely "could not be repaired". Restore the
+                // prior content so a failed repair is a no-op, matching the
+                // pre-backup invariant that a rename failure never removes the
+                // existing file (see the .tmp-write-failure test, forge#2498).
+                // WIRE:PROVEN — manual: reasoned, not exercised by an automated
+                // test. This branch requires rename(tmp, target) to fail on the
+                // exact call immediately after backupExisting()'s own rename of
+                // the same target succeeded — an OS-level race with no portable
+                // way to force deterministically (the sibling renameErr catches
+                // for the symlink-relink paths above, lines ~1576/~1604, are the
+                // same kind of defensive OS-failure branch and are likewise
+                // untested for the same reason). Verified by code inspection:
+                // rename() is fs/promises' rename. The rollback rename's own
+                // outcome is captured explicitly rather than assumed — if it
+                // also fails (e.g. .bak itself is locked), target+".bak" is
+                // left in place as the only remaining copy of the prior
+                // content, so backedUp must NOT be decremented in that case;
+                // it correctly reflects "a backup file still exists on disk"
+                // (forge#2559). Only on confirmed rollback success does
+                // backedUp-- keep the counter consistent with the restored
+                // on-disk state before renameErr is rethrown to the outer catch.
+                let rollbackOk = true;
+                await rename(target + ".bak", target).catch(() => { rollbackOk = false; });
+                if (rollbackOk) backedUp--;
+              }
+              throw renameErr;
+            }
+            recordCopy(rel);
+            updated++;
+            handled = true;
           }
-        } catch { /* readFile failure — fall through to warning */ }
-        if (!adopted) {
+        } catch { /* readFile/copyFile/rename failure — fall through to warning */ }
+        if (!handled) {
           if (barShown) { w.write("\x1b[1A\x1b[2K"); barShown = false; }
-          w.write(`  WARNING: ${rel} is a regular file — skipping (remove it manually to let ForgeDock manage it)\n`);
+          w.write(`  WARNING: ${rel} could not be repaired — remove it manually to let ForgeDock manage it\n`);
           skipped++;
         }
       }
@@ -1646,21 +2125,42 @@ export async function forge(ctx) {
       if (err.code !== "ENOENT") throw err;
       let linked = false;
       if (wantSymlink) {
+        // Suffix the tmp sibling with this process's PID so a losing
+        // concurrent forge() invocation installing the same brand-new
+        // command never collides on the same literal target path (which
+        // raises an uncaught EEXIST — isLinkPermissionError() only treats
+        // EPERM/EACCES as recoverable). Mirrors the relink and copy-upgrade
+        // branches above (forge#2542, forge#2600, forge#2599).
+        const tmpTarget = target + "." + process.pid + ".tmp";
         try {
-          await symlink(file, target);
-          installed++;
-          linked = true;
-          if (manifest.files[rel]) {
-            // Symlinks work now and the old copy is gone — drop the stale record.
-            delete manifest.files[rel];
-            manifestChanged = true;
+          await symlink(file, tmpTarget);
+          try {
+            await rename(tmpTarget, target);
+          } catch (renameErr) {
+            await unlink(tmpTarget).catch(() => {});
+            throw renameErr;
+          }
+          linked = await isSymlinkTraversable(target);
+          if (linked) {
+            installed++;
+            if (manifest.files[rel]) {
+              // Symlinks work now and the old copy is gone — drop the stale record.
+              delete manifest.files[rel];
+              manifestChanged = true;
+              manifestOps.push({ rel, op: "delete" });
+            }
+          } else {
+            // Symlink created but not readable back (e.g. MSYS symlink hit by
+            // native Windows "untrusted mount point" — forge#2620). Remove it
+            // and fall through to the copy path below.
+            await unlink(target).catch(() => {});
           }
         } catch (linkErr) {
           if (!isLinkPermissionError(linkErr)) throw linkErr;
         }
       }
       if (!linked) {
-        // Windows without Developer Mode/admin — fall back to a copy.
+        // Windows without Developer Mode/admin, or symlink unreadable — copy.
         await copyFile(file, target);
         copied++;
         recordCopy(rel);
@@ -1707,7 +2207,39 @@ export async function forge(ctx) {
   let manifestSaveFailed = false;
   if (manifestChanged) {
     try {
-      await saveCopiedManifest(manifestPath, manifest);
+      // Re-read-and-merge (forge#2614): another concurrent forge() invocation
+      // may have saved its own manifest.files adds/deletes since this run's
+      // initial load above. Re-reading the on-disk manifest right before this
+      // run's own save and replaying only this run's own ops (manifestOps)
+      // onto that fresh copy — rather than blindly overwriting with the
+      // run-start in-memory snapshot — means this run's save can no longer
+      // silently drop the other run's changes. loadCopiedManifest() never
+      // throws (missing/corrupt on-disk manifest resolves to an empty one),
+      // so this stays within the surrounding never-abort contract.
+      //
+      // Lock the re-read→merge→write sequence itself (forge#2637): #2614
+      // narrowed the race from "whole run duration" to this critical section,
+      // but left it unprotected — a third concurrent forge() could still land
+      // its own save inside the gap between this run's re-read and its own
+      // write-rename completing. acquireManifestLock() is best-effort: on
+      // failure to acquire (contention exhausted retries, or an unexpected
+      // error) it returns null and this run proceeds unlocked, same as
+      // before — the lock narrows the window further, it does not change the
+      // never-abort contract.
+      const lockHandle = await acquireManifestLock(manifestPath);
+      try {
+        const mergedManifest = await loadCopiedManifest(manifestPath);
+        for (const { rel, op } of manifestOps) {
+          if (op === "add") {
+            mergedManifest.files[rel] = true;
+          } else {
+            delete mergedManifest.files[rel];
+          }
+        }
+        await saveCopiedManifest(manifestPath, mergedManifest);
+      } finally {
+        await releaseManifestLock(manifestPath, lockHandle);
+      }
     } catch {
       manifestSaveFailed = true;
     }
@@ -1715,12 +2247,16 @@ export async function forge(ctx) {
 
   const glyph = (ok) => (ctx.mode === "none" ? (ok ? "✔" : "!") : `\x1b[38;2;255;179;71m${ok ? "✔" : "!"}\x1b[0m`);
   const headlineVerb = copied > 0 ? "installed" : "linked";
+  const backupNote = backedUp > 0 ? `, ${backedUp} backed up` : "";
   const headlineDetail = copied > 0
-    ? `(new ${installed}, copied ${copied}, updated ${updated}, unchanged ${skipped})`
-    : `(new ${installed}, updated ${updated}, unchanged ${skipped})`;
+    ? `(new ${installed}, copied ${copied}, updated ${updated}${backupNote}, unchanged ${skipped})`
+    : `(new ${installed}, updated ${updated}${backupNote}, unchanged ${skipped})`;
   w.write(`  ${glyph(true)} ${files.length} slash commands ${headlineVerb} ${dimLine(ctx, headlineDetail)}\n`);
   if (pruned > 0) {
     w.write(`  ${glyph(true)} ${pruned} orphaned symlink${pruned === 1 ? "" : "s"} removed ${dimLine(ctx, "(commands deleted or renamed since last install)")}\n`);
+  }
+  if (staleExtensionlessPruned > 0) {
+    w.write(`  ${glyph(true)} ${staleExtensionlessPruned} stale extensionless entr${staleExtensionlessPruned === 1 ? "y" : "ies"} removed ${dimLine(ctx, "(leftover from prior npx forgedock runs)")}\n`);
   }
   if (copied > 0) {
     w.write(`  ${glyph(false)} ${copied} copied (not linked) ${dimLine(ctx, "— enable Windows Developer Mode for live-updating links")}\n`);
@@ -1812,7 +2348,7 @@ export async function forge(ctx) {
     w.write(`  ${glyph(true)} SubagentStop enforcement hook removed ${dimLine(ctx, "(non-functional — see forge#1527)")}\n`);
   }
 
-  return { installed, updated, skipped, copied, pruned, total: files.length, hookStatus, preToolUseStatus, subagentStopEnforceStatus, scriptsResult };
+  return { installed, updated, skipped, copied, backedUp, pruned, total: files.length, hookStatus, preToolUseStatus, subagentStopEnforceStatus, scriptsResult };
 }
 
 // ---------------------------------------------------------------------------

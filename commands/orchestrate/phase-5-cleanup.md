@@ -45,6 +45,8 @@ Include the audit summary in the final report (Phase 6). Key metrics to surface:
 
 **Run after Step 5B, before Step 5D.** No-ops cleanly if the claims board was never created this run (`COORD_ISSUE_NUMBER` unset/empty — e.g. Step 3D.1's `gh issue create` failed, or this batch never reached DAG construction). Tolerates GitHub API failures without aborting the rest of Phase 5 — the same tolerant-failure convention (`2>/dev/null || echo ...`, `|| true`) used throughout `phase-3-dependency.md`/`phase-4-execution.md`.
 
+**Orchestrator lease should already be released by this point** (forge#2627): `phase-4-execution.md`'s Termination condition (end of Step 4B) calls `release_orchestrator_lease()` before handing off to Phase 5 on a normal drain, and the "Stopping the orchestrator" procedure (Step 4A-pre.-0.5) does the same on an interrupted exit. Closing the coordination issue here does not depend on lease state either way — an unreleased lease on an issue about to be closed is harmless (a future batch creates its own new coordination issue per Step 3D.1), but if `ACTIVE_CLAIMS_NOTE` logic is ever extended to also surface lease state, prefer checking for a still-unreleased `FORGE:LEASE` the same way `ACTIVE_CLAIMS` is computed above.
+
 ```bash
 if [ -n "${COORD_ISSUE_NUMBER:-}" ]; then
   # Detect any still-active (unreleased) claims — a claim posted with no matching

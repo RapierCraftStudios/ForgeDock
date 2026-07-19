@@ -31,6 +31,7 @@ You create GitHub issues with the exact structure the `/work-on` pipeline expect
 | `--body-file <path>` | Supplies the final issue body by reading it from a file (programmatic mode only). Mutually exclusive with `--body`. |
 | `--label "..."` | Adds one label. Repeatable (`--label bug --label P2`) — labels accumulate. Programmatic mode only. |
 | `--milestone "..."` | Supplies the milestone title directly, skipping the Phase 2E milestone lookup. Programmatic mode only, optional. |
+| `--exclude "N,N,..."` | Comma-separated issue numbers to exclude from the Phase 2D dedup candidate set. Programmatic mode only, optional. Forwarded verbatim to `scripts/issue-dedup.sh --exclude`. NOT a `--force` equivalent — narrows the candidate set, does not disable the gate. See Phase 2D. <!-- Added: forge#2432 --> |
 
 ```bash
 DRY_RUN=false
@@ -39,6 +40,7 @@ PROGRAMMATIC_BODY=""
 PROGRAMMATIC_BODY_FILE=""
 PROGRAMMATIC_LABELS=()
 PROGRAMMATIC_MILESTONE=""
+PROGRAMMATIC_EXCLUDE=""
 
 # Positional/flag parsing. $ARGUMENTS is a single opaque string (the invoking
 # agent's raw args, e.g. from `Skill(skill="issue", args="--title \"fix: ...\" ...")`)
@@ -107,7 +109,7 @@ rm -f "$ARGS_TMP"
 LOOKS_LIKE_FLAG_MODE=false
 for arg in "${ARGS[@]}"; do
   case "$arg" in
-    --dry-run|--title|--body|--body-file|--label|--milestone)
+    --dry-run|--title|--body|--body-file|--label|--milestone|--exclude)
       LOOKS_LIKE_FLAG_MODE=true
       break
       ;;
@@ -119,7 +121,7 @@ while [ "$LOOKS_LIKE_FLAG_MODE" = "true" ] && [ $i -lt ${#ARGS[@]} ]; do
   arg="${ARGS[$i]}"
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
-    --title|--body|--body-file|--label|--milestone)
+    --title|--body|--body-file|--label|--milestone|--exclude)
       # Each of these flags requires a value token immediately after it. A flag
       # with no following token (e.g. --title as the last argument) is a usage
       # error, not an empty value — fail loudly instead of silently proceeding
@@ -136,6 +138,7 @@ while [ "$LOOKS_LIKE_FLAG_MODE" = "true" ] && [ $i -lt ${#ARGS[@]} ]; do
         --body-file) PROGRAMMATIC_BODY_FILE="${ARGS[$i]}" ;;
         --label) PROGRAMMATIC_LABELS+=("${ARGS[$i]}") ;;
         --milestone) PROGRAMMATIC_MILESTONE="${ARGS[$i]}" ;;
+        --exclude) PROGRAMMATIC_EXCLUDE="${ARGS[$i]}" ;;
       esac
       ;;
     --*)
@@ -177,7 +180,7 @@ fi
 For callers that have already composed a title, body, labels, and (optionally) a milestone — audit tools, `/work-on` decomposition, pipeline-health proposals, review-finding creation, and similar automation — pass `--title` to activate programmatic mode. This bypasses Phase 1 (free-text parsing) and Phase 3 (LLM drafting) entirely; Phase 2D (dedup) and body validation still run.
 
 **Required**: `--title "TEXT"` and exactly one of `--body "TEXT"` / `--body-file <path>`.
-**Optional**: `--label "NAME"` (repeatable, zero or more), `--milestone "TITLE"`, `--dry-run`.
+**Optional**: `--label "NAME"` (repeatable, zero or more), `--milestone "TITLE"`, `--dry-run`, `--exclude "N,N,..."` (see Phase 2D — narrows the dedup candidate set, not a `--force` equivalent).
 
 If `--title` is present but neither `--body` nor `--body-file` is supplied, or both are supplied, this is a usage error: print `ERROR: programmatic mode requires exactly one of --body or --body-file` and STOP — do not fall through to Phase 2D or Phase 4B.
 
@@ -340,7 +343,12 @@ Run the deterministic dedup script first (authoritative check), then fall back t
 
 ```bash
 # Authoritative deterministic check — uses token overlap algorithm (see scripts/issue-dedup.sh)
-DEDUP_RESULT=$(scripts/issue-dedup.sh "{PROPOSED_TITLE}" {GH_FLAG} 2>&1)
+# In programmatic mode, forward $PROGRAMMATIC_EXCLUDE (if set) as --exclude — see the
+# "Exclusion mechanism" note below. In interactive mode $PROGRAMMATIC_EXCLUDE is always
+# empty, so this is a no-op for that path.
+DEDUP_EXCLUDE_ARGS=()
+[ -n "$PROGRAMMATIC_EXCLUDE" ] && DEDUP_EXCLUDE_ARGS=(--exclude "$PROGRAMMATIC_EXCLUDE")
+DEDUP_RESULT=$(scripts/issue-dedup.sh "{PROPOSED_TITLE}" {GH_FLAG} "${DEDUP_EXCLUDE_ARGS[@]}" 2>&1)
 DEDUP_EXIT=$?
 
 if [ "$DEDUP_EXIT" -eq 1 ]; then
@@ -368,6 +376,8 @@ If a duplicate exists:
 - **Open duplicate found**: Tell the user. Do NOT create the issue. Show the existing issue number.
 - **Closed duplicate found (regression)**: Create the issue but reference the prior issue in the body: "Regression of #{N}."
 - **User wants to override**: Pass `--force` to the dedup script — this is an explicit human override path. Agents MUST NOT pass `--force` without user authorization. <!-- Added: forge#1335 -->
+
+**Exclusion mechanism (`--exclude`, programmatic mode only)**: A caller that already knows a set of open issue numbers this new issue is a deliberate supersede of — not an accidental duplicate — can pass `--exclude "N,N,..."` to `/issue` (forwarded to `scripts/issue-dedup.sh --exclude`). The canonical example is `phase-1-resolve.md`'s P3 review-finding batching: a batch issue restates its own member findings' subject matter by construction, so without exclusion it always collides with them under the token-overlap algorithm. `--exclude` removes those specific issue numbers from Phase 2D's candidate set BEFORE matching runs — it is **NOT a `--force` equivalent**: it narrows the candidate set, it does not disable the check, and it requires no human authorization (unlike `--force`, which agents MUST NOT pass without one). Any OTHER open issue — one not in the exclusion list — is still matched normally, so a title that happens to duplicate an unrelated existing issue still trips the STOP. <!-- Added: forge#2432 -->
 
 ### 2E: Check for milestone context
 

@@ -1626,26 +1626,28 @@ gh label create "false-positive" --color "CCCCCC" --description "Review finding 
 
 **Milestone detection:**
 ```bash
-# Check BOTH head and base branches — feature PRs targeting milestone/* branches
-# should inherit the milestone for their review findings
+# BASE_BRANCH is what the finding template stamps as **Code branch** below
+# (see the rationale comment at that template block) — HEAD_BRANCH is no
+# longer needed here; derive-finding-milestone.sh resolves its own
+# base/head branch lookup internally for its Tier 3 slug match.
 BASE_BRANCH=$(gh pr view ${PR_NUMBER} --json baseRefName --jq '.baseRefName')
-HEAD_BRANCH=$(gh pr view ${PR_NUMBER} --json headRefName --jq '.headRefName')
 MILESTONE_FLAG=""
 
-# First check: PR's base branch is a milestone branch (most common for feature-lane PRs)
-MILESTONE_BRANCH=""
-if echo "$BASE_BRANCH" | grep -qE "^milestone/"; then
-    MILESTONE_BRANCH="$BASE_BRANCH"
-elif echo "$HEAD_BRANCH" | grep -qE "^milestone/"; then
-    MILESTONE_BRANCH="$HEAD_BRANCH"
-fi
-
-if [ -n "$MILESTONE_BRANCH" ]; then
-    BRANCH_SLUG=$(echo "$MILESTONE_BRANCH" | sed 's|^milestone/||')
-    MILESTONE_NUMBER=$(gh api repos/${REPO}/milestones 2>/dev/null | jq --arg slug "$BRANCH_SLUG" '.[] | select((.title | ascii_downcase | gsub("[^a-z0-9]+"; "-")) == $slug) | .number' 2>/dev/null | head -1)
-    [ -z "$MILESTONE_NUMBER" ] && MILESTONE_NUMBER=$(gh api repos/${REPO}/milestones 2>/dev/null | jq --arg slug "$BRANCH_SLUG" '.[] | select((.title | ascii_downcase | gsub("[^a-z0-9]+"; "-")) | test($slug)) | .number' 2>/dev/null | head -1)
-    [ -n "$MILESTONE_NUMBER" ] && MILESTONE_FLAG="--milestone $(gh api repos/${REPO}/milestones/${MILESTONE_NUMBER} --jq '.title')"
-fi
+# scripts/derive-finding-milestone.sh is the single source of truth for
+# milestone derivation — commands/review-pr.md and commands/review-pr-staging.md
+# both call it identically so the two specs cannot independently drift the
+# way they did before this fix (forge#2443 Instance B/C: findings from a
+# milestone-lane PR sometimes inherited the milestone and sometimes didn't,
+# depending on incidental inheritance rather than an explicit step). The
+# script's 3-tier resolution (PR's own milestone -> originating issue's
+# milestone via Closes/Fixes/Resolves #N -> branch-slug match against
+# milestone/* branches) supersedes the old base/head-branch-only slug match
+# that used to be hand-rolled here.
+MILESTONE_TITLE=$(bash scripts/derive-finding-milestone.sh "${PR_NUMBER}" -R "${REPO}")
+# Quoted so multi-word milestone titles (e.g. "Watch & Fleet Observability") survive
+# as a single value wherever MILESTONE_FLAG is later interpolated — matches the
+# quoting convention already used for --title/--body-file/--label below.
+[ -n "$MILESTONE_TITLE" ] && MILESTONE_FLAG="--milestone \"$MILESTONE_TITLE\""
 ```
 
 **Dedup against existing issues (MANDATORY before creating):**
@@ -1763,10 +1765,26 @@ Files that need changes:
 
 ## Source Branch Context
 
-**Code branch**: `[HEAD_BRANCH]`
-**Worktree base**: `origin/[HEAD_BRANCH]`
+<!--
+  BASE_BRANCH, not HEAD_BRANCH, is correct here (forge#2443). This looks like
+  a revert of forge#1391 ("review-finding template stamps BASE_BRANCH instead
+  of HEAD_BRANCH — fixes target wrong code state") but is NOT: forge#1391's
+  scenario was a staging->main review where HEAD (staging) is a long-lived
+  branch that already had the bug's code, while BASE (main) had not yet
+  received it. review-pr.md's scenario is different — HEAD here is a
+  short-lived feat/*|fix/* branch that Phase 6E deletes once the auto-merge
+  step completes, which happens SYNCHRONOUSLY within this same /review-pr run,
+  before any downstream consumer (a human, or /work-on) ever reads this
+  finding. By the time the finding is read, HEAD no longer exists but BASE
+  does, and BASE now contains the merged code the finding is about.
+  commands/review-pr-staging.md keeps HEAD_BRANCH semantics (as a dynamic
+  ${CODE_BRANCH}, not a hardcoded literal) because ITS reviewed branches
+  (staging, milestone/*) are long-lived — consistent with forge#1391.
+-->
+**Code branch**: `[BASE_BRANCH]`
+**Worktree base**: `origin/[BASE_BRANCH]`
 
-> When fixing: `git worktree add ../fix-{slug} -b fix/{slug} origin/[HEAD_BRANCH]`
+> When fixing: `git worktree add ../fix-{slug} -b fix/{slug} origin/[BASE_BRANCH]`
 
 ## Code Context
 [10 lines around finding]
@@ -1785,8 +1803,30 @@ Files that need changes:
 [BATCHABLE_ANNOTATION]
 ISSUE_EOF
 
+# FINDING_SEVERITY is extracted from the finding's own **Severity** body field
+# (set above in the heredoc) — example assignment shown here for clarity, same
+# convention as FINDING_ISSUE_TITLE etc.
+FINDING_SEVERITY="LOW"
+
+# priority:* label is a deterministic function of the finding's **Severity**
+# (CRITICAL/HIGH/MEDIUM/LOW) — NEVER of its Confidence
+# (CONFIRMED/LIKELY/POSSIBLE). scripts/severity-to-priority.sh is the single
+# source of truth for this mapping; commands/review-pr-staging.md calls the
+# identical script so the two specs cannot independently drift. <!-- forge#2447 -->
+FINDING_PRIORITY=$(bash scripts/severity-to-priority.sh "$FINDING_SEVERITY")
+FINDING_PRIORITY_EXIT=$?
+
+# Exit code MUST be checked before use — severity-to-priority.sh exits 1 (empty stdout)
+# on a missing/unrecognized severity, mirroring the DEDUP_EXIT idiom above. Proceeding
+# with an empty $FINDING_PRIORITY would call Skill(issue, --label "") instead of aborting
+# issue creation for this finding. <!-- forge#2479 -->
+if [ "$FINDING_PRIORITY_EXIT" -ne 0 ]; then
+  echo "PRIORITY: severity-to-priority.sh failed (exit $FINDING_PRIORITY_EXIT) for severity '$FINDING_SEVERITY' — skipping finding issue creation"
+  # Skip this finding — do NOT fall through to issue creation with an empty label
+else
+
 # --label is repeatable (not comma-joined) per the /issue programmatic contract.
-Skill(skill="issue", args="--title \"$FINDING_ISSUE_TITLE\" --body-file \"$FINDING_ISSUE_BODY_FILE\" --label review-finding --label needs-validation --label \"{priority}\" ${MILESTONE_FLAG}")
+Skill(skill="issue", args="--title \"$FINDING_ISSUE_TITLE\" --body-file \"$FINDING_ISSUE_BODY_FILE\" --label review-finding --label needs-validation --label \"$FINDING_PRIORITY\" ${MILESTONE_FLAG}")
 rm -f "$FINDING_ISSUE_BODY_FILE"
 
 # /issue has no machine-readable return contract (it's a user-facing command, not a work-on
@@ -1799,15 +1839,16 @@ for _resolve_attempt in 1 2 3; do
   [ -n "$ISSUE_NUM" ] && break
   sleep 2
 done
+fi
 ```
 
-Labels: `review-finding` + `needs-validation` + priority (`priority:P1` CONFIRMED, `priority:P2` LIKELY, `priority:P3` POSSIBLE).
+Labels: `review-finding` + `needs-validation` + priority. `priority:*` is derived from the finding's `**Severity**` field via `scripts/severity-to-priority.sh` (single documented mapping — see that script's header comment): `CRITICAL` → `priority:P0`, `HIGH` → `priority:P1`, `MEDIUM` → `priority:P2`, `LOW` → `priority:P3`. **Never derive `priority:*` from Confidence** (CONFIRMED/LIKELY/POSSIBLE) — Confidence and Severity are independent axes; conflating them previously mislabeled LOW-severity CONFIRMED findings as `priority:P1`, defeating the P3 batching rule below. <!-- forge#2447 -->
 
-**P3 batchable annotation** — <!-- Added: forge#1333 --> When priority resolves to `priority:P3` (POSSIBLE confidence), check whether the finding qualifies for batching. If the affected file does NOT touch a security or billing path, substitute `[BATCHABLE_ANNOTATION]` with the `<!-- FORGE:BATCHABLE -->` marker. This signals the orchestrator's Phase 1 batching rule that this finding can be grouped with other P3s in the same domain:
+**P3 batchable annotation** — <!-- Added: forge#1333 --> When priority resolves to `priority:P3` (i.e. `**Severity**: LOW`), check whether the finding qualifies for batching. If the affected file does NOT touch a security or billing path, substitute `[BATCHABLE_ANNOTATION]` with the `<!-- FORGE:BATCHABLE -->` marker. This signals the orchestrator's Phase 1 batching rule that this finding can be grouped with other P3s in the same domain:
 
 ```bash
 # Determine batchable eligibility for this finding
-FINDING_PRIORITY="{priority}"  # priority:P1 / priority:P2 / priority:P3
+# $FINDING_PRIORITY was already computed above (severity-to-priority.sh) — reuse it, do not re-derive.
 BATCHABLE_ANNOTATION=""
 
 if [ "$FINDING_PRIORITY" = "priority:P3" ]; then
@@ -2089,19 +2130,41 @@ if [ "$PRE_MERGE_HEALTH" = "CONFLICTING" ] || [ "$PRE_MERGE_HEALTH_STATE" = "DIR
     # STOP — do not attempt gh pr merge on a CONFLICTING/DIRTY PR
 else
 
-# Previously-escalated re-review guard <!-- Added: forge#1810 -->
+# Previously-escalated re-review guard <!-- Added: forge#1810; base-scoped: forge#2570 -->
 # If the linked issue currently carries needs-human, this PR was escalated at some
 # earlier point (VERDICT/purpose-regression/calibration/trust/mergeability) and has
 # now been remediated + re-reviewed back to a clean, mergeable APPROVED state above.
-# The "auto-land bar" (≥2 independent adversarial approvals + domain gates — see
-# #1809 Q1) is not yet implemented (future #1809 sub-issues B/C/D), so the safe
-# default here is to land on workflow:awaiting-merge (clearing needs-human) rather
-# than silently auto-merging a PR that was once flagged human-risk.
+#
+# forge#2570: the hold is now scoped by the PR's target branch. This PR still transitions
+# to workflow:awaiting-merge (clearing needs-human) in BOTH cases below — the transition is
+# unchanged; only who acts next differs:
+#   - `main` / deploy gate (or an unresolved base — fail closed): held for a HUMAN merge
+#     decision, because `staging → main` is the genuine human gate no agent performs.
+#   - any other base (staging, milestone/* — reversible integration branches): NOT held for
+#     a human. It is parked for remediate.md Phase M7's base-scoped auto-land bar (bot APPROVED
+#     + quality-gate pass), which merges it on the SAME condition the normal /work-on fast lane
+#     uses for the same target branch — no manual click. This reconciles the asymmetry where a
+#     bot-only re-review (authorAssociation=NONE) could never satisfy the strict ≥2 verified-
+#     human bar and so stranded staging PRs the fast lane would auto-merge.
 PREVIOUSLY_ESCALATED=$(gh issue view {MERGE_ISSUE} {MERGE_GH_FLAG} --json labels \
   --jq '[.labels[].name] | any(. == "needs-human")' 2>/dev/null || echo "false")
+GUARD_BASE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
 
 if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
-    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "🟠 PR #{PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check. The automated auto-land bar for previously-escalated PRs is not yet implemented, so this PR is held at \`workflow:awaiting-merge\` for a human merge decision instead of auto-merging. Merge manually once reviewed: \`gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge\`."
+    # forge#2625: `jq -r '.baseRefName'` stringifies a JSON null to the literal text "null" (not
+    # an empty string), so the `-n` check alone does not catch it — add an explicit `!= "null"`
+    # check so a literal-string "null" is treated the same as an empty/unresolved base (strict).
+    if [ -n "$GUARD_BASE" ] && [ "$GUARD_BASE" != "null" ] && [ "$GUARD_BASE" != "main" ]; then
+      # forge#2570: non-`main` base — defer to remediate.md M7's auto-land, not a human.
+      # forge#2626: standalone `/review-pr` (no remediate.md M6→M7 chain) would otherwise
+      # strand this PR at `workflow:awaiting-merge` with no actionable guidance — add a
+      # manual-merge fallback so the comment is correct in both the chained and standalone cases.
+      # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
+      gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "🟠 PR #{PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check on non-\`main\` base \`${GUARD_BASE}\`. It is parked at \`workflow:awaiting-merge\` for the remediation auto-land bar (\`remediate.md\` Phase M7, forge#2570) — which auto-merges it on the same fast-lane condition the normal \`/work-on\` path uses for this target branch — NOT for a human merge decision. If no remediation \`M7\` follows (e.g. this review was invoked standalone), merge manually once reviewed: \`gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge\`."
+    else
+      # forge#2570: `main` / deploy gate (or unresolved base — fail closed to the human gate).
+      gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "🟠 PR #{PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check. This PR targets the deploy gate (\`${GUARD_BASE:-unresolved base}\`), so it is held at \`workflow:awaiting-merge\` for a human merge decision — \`staging → main\` is the genuine human gate. Merge manually once reviewed: \`gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge\`."
+    fi
     RESOLUTION=$(resolve_script 'transition-label')
     TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
     case "$TIER" in
@@ -2111,7 +2174,9 @@ if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
           --remove-label "needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
         ;;
     esac
-    # STOP — do not attempt gh pr merge; a human decides the merge from here
+    # STOP — do not attempt gh pr merge here. The merge decision belongs to a human for a
+    # `main`/deploy-gate base, or to remediate.md Phase M7's base-scoped auto-land bar for a
+    # non-`main` base (forge#2570). Either way this guard only parks at workflow:awaiting-merge.
 else
     # Checkpoint comment on issue
     gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "Review complete for PR #{PR_NUMBER}. Verdict: ${VERDICT:-APPROVED}. Proceeding to merge."

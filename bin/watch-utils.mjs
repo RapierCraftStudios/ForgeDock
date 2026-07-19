@@ -152,7 +152,10 @@ export function parseSatelliteRepos(forgeYamlText) {
   const stopMatch = tail.match(/\n[^\s#][^\n]*/);
   const section = stopMatch ? tail.slice(0, stopMatch.index) : tail;
   const repos = [];
-  const re = /repo:\s*["']?([^\s"'#]+)["']?/g;
+  // Anchor to a YAML key boundary (line start, optional indentation, optional
+  // `-` list-item marker) so a future suffixed key like `staging_repo:` can
+  // never be matched as a trailing substring of an unrelated key (forge#2457).
+  const re = /^[ \t]*(?:-[ \t]*)?repo:\s*["']?([^\s"'#]+)["']?/gm;
   let m;
   while ((m = re.exec(section)) !== null) {
     repos.push(m[1]);

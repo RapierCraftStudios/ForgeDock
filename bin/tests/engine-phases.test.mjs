@@ -1,6 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
+import fs from "node:fs";
+import path from "node:path";
 import { PHASES, pickPhase } from "../engine/phases.mjs";
+import { RESERVED_TYPES } from "../../packages/protocol/src/types.js";
 
 const base = { v: 0, run: "r1", issue: 42, lane: "staging", committed: [], phase: null,
   branch: null, pr: null, terminal: false, terminalReason: null, lease: null };
@@ -187,6 +191,42 @@ describe("pickPhase", () => {
     it("no FORGE:REMEDIATION:COMPLETE marker -> failed", async () => {
       const outcome = await remediate.detectOutcome(base, ioWith("nothing relevant here"));
       assert.equal(outcome.status, "failed");
+    });
+
+    // forge#2450: drift guard. RESERVED_TYPES.REMEDIATION.reGateOutcomeValues
+    // (packages/protocol/src/types.js) and this switch statement are two
+    // independent declarations of the same outcome vocabulary — nothing
+    // structurally ties them together. This test fails loudly if a future
+    // edit adds/removes/renames an outcome on one side without the other.
+    it("drift guard: switch case values match RESERVED_TYPES.REMEDIATION.reGateOutcomeValues exactly", async () => {
+      // Direction 1: every registry value must be recognized by the switch
+      // (not fall through to the `default:` "failed" branch).
+      for (const registryOutcome of RESERVED_TYPES.REMEDIATION.reGateOutcomeValues) {
+        const outcome = await remediate.detectOutcome(base, ioWith(remediateBody(registryOutcome)));
+        assert.notEqual(
+          outcome.status,
+          "failed",
+          `Registry outcome "${registryOutcome}" is not recognized by phases.mjs's remediate switch — the two declarations have drifted`,
+        );
+      }
+
+      // Direction 2: the switch must not handle any outcome absent from the
+      // registry (parsed directly from source text, since the switch's case
+      // labels aren't otherwise exposed as data).
+      const phasesSrc = fs.readFileSync(
+        path.join(path.dirname(fileURLToPath(import.meta.url)), "../engine/phases.mjs"),
+        "utf8",
+      );
+      const remediateStart = phasesSrc.indexOf('id: "remediate"');
+      const remediateEnd = phasesSrc.indexOf("isTerminalAfter", remediateStart);
+      const switchSection = phasesSrc.slice(remediateStart, remediateEnd);
+      const caseValues = [...new Set([...switchSection.matchAll(/case\s+"([A-Z-]+)":/g)].map((m) => m[1]))];
+
+      assert.deepEqual(
+        caseValues.sort(),
+        [...RESERVED_TYPES.REMEDIATION.reGateOutcomeValues].sort(),
+        "phases.mjs's remediate switch case values must exactly match RESERVED_TYPES.REMEDIATION.reGateOutcomeValues",
+      );
     });
 
     it("entryCondition requires review committed AND terminalReason needs-human", () => {

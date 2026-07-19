@@ -157,6 +157,24 @@ review:
 });
 
 // ---------------------------------------------------------------------------
+// forge#2457: a suffixed key like `staging_repo:` must NOT be matched as a
+// trailing substring of the unanchored `repo:` pattern. The satellites
+// schema does not define such a key today, but the regex must not rely on
+// that — it must be anchored to a real YAML key boundary regardless of what
+// keys the schema happens to define.
+// ---------------------------------------------------------------------------
+test("parseSatelliteRepos does not match repo: as a substring of a suffixed key (e.g. staging_repo:)", () => {
+  const yaml = `
+repos:
+  satellites:
+    - prefix: "platform"
+      staging_repo: "should-not-be-picked-up"
+      repo: "RapierCraftStudios/forgedock-platform"
+`;
+  assert.deepEqual(parseSatelliteRepos(yaml), ["RapierCraftStudios/forgedock-platform"]);
+});
+
+// ---------------------------------------------------------------------------
 // Heartbeat batching (GraphQL query build + response parse)
 // ---------------------------------------------------------------------------
 test("buildHeartbeatBatchQuery produces one aliased issue lookup per issue number", () => {

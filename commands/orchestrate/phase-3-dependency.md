@@ -67,25 +67,23 @@ Domain estimation (above) catches broad category overlap but misses cases where 
 
 #### Layer 1: Explicit file-overlap extraction
 
-**For issues that already have an INVESTIGATOR comment** (from Wave 0 or a prior session), extract their Affected Files list. **For issues WITHOUT an investigation comment**, fall back to parsing the issue body for file paths. Both code paths accumulate into a single `LAYER1_FILES` array (declared once, before the loop) — this is the batch-wide file set that Layer 5's co-change query (below) reuses, per the "file list already extracted in Layer 1" reference in Layer 2 and Layer 5:
+**For issues that already have an INVESTIGATOR comment** (from Wave 0 or a prior session), extract their Affected Files list, scoped to that comment's own `### Affected Files` section. **For issues WITHOUT an investigation comment**, fall back to parsing the issue body, scoped to a deliverables-shaped heading (`## Affected Files`, `## Deliverables`, or `### Files to change`) — never the whole body. Both code paths accumulate into a single `LAYER1_FILES` array (declared once, before the loop) — this is the batch-wide file set that Layer 5's co-change query (below) reuses, per the "file list already extracted in Layer 1" reference in Layer 2 and Layer 5. Extraction runs through `scripts/extract-affected-files.sh` (not an inline `grep -oP` over the whole text) so that stray paths mentioned in `## Context` / `## Prior art` / `## Related` / `## Root Cause` — or anywhere outside a deliverables-shaped heading — are never collected as if they were files the issue changes. A populated-but-wrong file list is strictly worse than an empty one: it clears Layer 4's `<2 paths` conservative-serialization threshold with false confidence, defeating the safety net that threshold exists to provide (forge#2436).
+
+Each issue's extraction also carries a **provenance** tag — `affected-files-section` (from the INVESTIGATOR comment's own scoped section), `body-fallback` (from the raw issue body's scoped section, pre-investigation), or `none` (no scoped section found; correctly yields zero paths so Layer 4 fires). This is recorded per issue in `FILE_SOURCE[$NUM]` and consumed by Layer 5 (below) and Step 3E's plan presentation.
 
 ```bash
 LAYER1_FILES=()
-declare -A EDGE_KIND   # "{PRED}:{SUCCESSOR}" → same-file | directory | shared-module (forge#1860)
-declare -A EDGE_FILES  # "{PRED}:{SUCCESSOR}" → the specific file(s) that triggered the edge (forge#1860)
+declare -A EDGE_KIND    # "{PRED}:{SUCCESSOR}" → same-file | directory | shared-module (forge#1860)
+declare -A EDGE_FILES   # "{PRED}:{SUCCESSOR}" → the specific file(s) that triggered the edge (forge#1860)
+declare -A FILE_SOURCE  # {NUM} → affected-files-section | body-fallback | none (forge#2436)
 for NUM in {issue_numbers}; do
   echo "=== #$NUM ==="
-  FILES_FOR_NUM=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
-    --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' 2>/dev/null \
-    | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | tr -d '`' | sort -u)
-
-  # Fall back to parsing the issue body directly when no INVESTIGATOR comment exists yet.
-  if [ -z "$FILES_FOR_NUM" ]; then
-    FILES_FOR_NUM=$(gh issue view $NUM --json body --jq '.body' \
-      | grep -oP '`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml)`' | tr -d '`' | sort -u)
-  fi
+  EXTRACT_OUT=$(bash scripts/extract-affected-files.sh "$NUM" -R "{GH_REPO}")
+  FILE_SOURCE[$NUM]=$(echo "$EXTRACT_OUT" | head -1 | sed 's/^PROVENANCE=//')
+  FILES_FOR_NUM=$(echo "$EXTRACT_OUT" | tail -n +2)
 
   echo "$FILES_FOR_NUM"
+  echo "  (source: ${FILE_SOURCE[$NUM]})"
 
   # Accumulate into the batch-wide array — read line-by-line so each extracted path
   # becomes one array element (paths here don't contain spaces, but this stays robust).
@@ -328,7 +326,7 @@ fi
 
 **Apply the signal:**
 - **High co-change pair spans two different issues in the batch** → add a serialization edge between them (same directed-edge convention as Layers 1-4: lower issue number is predecessor), OR, if the pair also carries competing investigation recommendations, flag it for Phase 2.5 arbitration instead of a blind serialization edge (see cross-reference in Step 2.5B below).
-- **Verified-independent pair** → MAY be used to downgrade an existing Layer 2 "broad directory + different domain" or Layer 4 "conservative fallback" serialization to parallel. This downgrade is **never** applied to Layer 1 (same-file hard conflict, which is ground truth from the current batch, not historical inference) or to Layer 3 high-fan-in-file edges (a file can be structurally high-risk even with a thin history window, e.g. a newly added `main.py`). Ubiquitous-file pairs (n/N > 0.2 for either file) are **ineligible** for verified-independent downgrade even with zero co-occurrences.
+- **Verified-independent pair** → MAY be used to downgrade an existing Layer 2 "broad directory + different domain" or Layer 4 "conservative fallback" serialization to parallel. This downgrade is **never** applied to Layer 1 (same-file hard conflict, which is ground truth from the current batch, not historical inference) or to Layer 3 high-fan-in-file edges (a file can be structurally high-risk even with a thin history window, e.g. a newly added `main.py`). Ubiquitous-file pairs (n/N > 0.2 for either file) are **ineligible** for verified-independent downgrade even with zero co-occurrences. **Also ineligible**: a pair where either issue's `FILE_SOURCE[$NUM]` (Layer 1, above) is `body-fallback` — that file list came from a pre-investigation scrape of the raw issue body, lower-confidence than a post-investigation `affected-files-section` extraction, so a "verified independent" co-change verdict computed against it is not trustworthy enough to remove an edge. Weak provenance may only ever be used to *add* a conflict edge (Layer 1's own same-file cross-reference, unaffected by this rule), never to *remove* one — mirrors the existing "never overrides Layer 1/Layer 3" carve-out on this same line (forge#2436).
 - If `ALL_AFFECTED_FILES` is empty, the guard above skips the query and Layer 5 contributes nothing for the entire batch. If the matrix or live query returns no data for a pair → Layer 5 contributes nothing; fall back silently to Layers 1-4's existing verdict for that pair.
 
 **Wire-through proof (mandatory check)**: When `LAYER5_SOURCE=matrix`, confirm the matrix lookup path executes on at least one pair in the batch and log the verdict. This proves the path is live, not dead code. If no pairs are in the matrix, log that the live fallback ran instead. <!-- Ref: forge#1731, forge#1230, forge#1244 — Layer 5 has had two dead-code defects; this check prevents recurrence. -->
@@ -398,11 +396,20 @@ done
 **Purpose**: Create a dedicated GitHub issue that serves as the shared claims board for the batch. Agents post `FORGE:CLAIM` annotations here when they begin implementation; they post `FORGE:CLAIM_RELEASED` when they reach a terminal state. The orchestrator reads active claims during the Layer-2/4 relaxation sweep (Step 4B) to determine whether serialized pairs can now run in parallel.
 
 ```bash
-# Create coordination issue for this orchestration batch
-BATCH_ISSUE_COUNT="${#ISSUES[@]}"
-BATCH_ID="$(date -u +%Y%m%dT%H%M%S)-$$"
+# Create coordination issue for this orchestration batch.
+# Guarded on FORGE_COORD_ISSUE being unset: this is the actual enforcement of the
+# "Skip if FORGE_COORD_ISSUE is already set" contract stated above. Without this guard,
+# a re-entry into this block within the same logical session (resumed session, retry,
+# or any other re-run of Step 3D.1) would silently regenerate BATCH_ID — and because
+# check_orchestrator_lease() (Step 3D.2, forge#2627) keys "self" vs. "held" purely on
+# BATCH_ID string equality, a regenerated BATCH_ID causes the orchestrator's own
+# subsequent lease-refresh calls to see HOLDER_BATCH_ID != MY_BATCH_ID and self-lock-out
+# against its own still-live lease. <!-- Fixed: forge#2642 -->
+if [ -z "${FORGE_COORD_ISSUE:-}" ]; then
+  BATCH_ISSUE_COUNT="${#ISSUES[@]}"
+  BATCH_ID="$(date -u +%Y%m%dT%H%M%S)-$$"
 
-COORD_ISSUE_BODY="## Orchestration Batch Claims Board
+  COORD_ISSUE_BODY="## Orchestration Batch Claims Board
 
 This issue is the claims board for an orchestration batch of ${BATCH_ISSUE_COUNT} issues.
 Agents post \`FORGE:CLAIM\` here on build start and \`FORGE:CLAIM_RELEASED\` on terminal state.
@@ -414,24 +421,36 @@ Agents post \`FORGE:CLAIM\` here on build start and \`FORGE:CLAIM_RELEASED\` on 
 <!-- FORGE:COORD_ISSUE -->
 <!-- FORGE:BATCH_ID: ${BATCH_ID} -->"
 
-COORD_ISSUE_URL=$(gh issue create -R {GH_REPO} \
-  --title "orchestrate: claims board for batch ${BATCH_ID}" \
-  --body "$COORD_ISSUE_BODY" \
-  --label "automation" 2>/dev/null || echo "")
+  # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
+  COORD_ISSUE_URL=$(gh issue create -R {GH_REPO} \
+    --title "orchestrate: claims board for batch ${BATCH_ID}" \
+    --body "$COORD_ISSUE_BODY" \
+    --label "automation" 2>/dev/null || echo "")
 
-if [ -z "$COORD_ISSUE_URL" ]; then
-  echo "WARNING: failed to create coordination issue — claims board disabled for this batch. Layer-2/4 relaxation will not run."
-  FORGE_COORD_ISSUE=""
+  if [ -z "$COORD_ISSUE_URL" ]; then
+    echo "WARNING: failed to create coordination issue — claims board disabled for this batch. Layer-2/4 relaxation will not run."
+    FORGE_COORD_ISSUE=""
+  else
+    COORD_ISSUE_NUMBER=$(echo "$COORD_ISSUE_URL" | grep -oE '[0-9]+$')
+    FORGE_COORD_ISSUE="$COORD_ISSUE_URL"
+    echo "Coordination issue created: ${COORD_ISSUE_URL} (#${COORD_ISSUE_NUMBER})"
+    export FORGE_COORD_ISSUE
+    export COORD_ISSUE_NUMBER
+    # BATCH_ID must survive compaction the same way FORGE_COORD_ISSUE/COORD_ISSUE_NUMBER do —
+    # exporting it is necessary but not sufficient (export only survives within the *same*
+    # process tree). The `<!-- FORGE:BATCH_ID: ... -->` marker embedded in the issue body above
+    # is the actual durable source of truth: see "Orchestrator state reconstruction on wake /
+    # after compaction" below, which re-derives BATCH_ID from GitHub rather than trusting the
+    # in-context variable, consistent with that section's own "do not rely on in-context
+    # variables" contract. <!-- Updated: forge#2627 -->
+    export BATCH_ID
+  fi
 else
-  COORD_ISSUE_NUMBER=$(echo "$COORD_ISSUE_URL" | grep -oE '[0-9]+$')
-  FORGE_COORD_ISSUE="$COORD_ISSUE_URL"
-  echo "Coordination issue created: ${COORD_ISSUE_URL} (#${COORD_ISSUE_NUMBER})"
-  export FORGE_COORD_ISSUE
-  export COORD_ISSUE_NUMBER
+  echo "FORGE_COORD_ISSUE already set (${FORGE_COORD_ISSUE}) — skipping coordination-issue creation and BATCH_ID regeneration. Reusing existing batch identity."
 fi
 ```
 
-**Idempotency**: If `FORGE_COORD_ISSUE` is already set in the environment (e.g., after a compaction / orchestrator restart), skip creation and use the existing URL. The coordination issue persists for the lifetime of the batch.
+**Idempotency**: If `FORGE_COORD_ISSUE` is already set in the environment (e.g., after a compaction / orchestrator restart, or any other re-entry into this block within the same batch), the bash block above skips creation entirely and reuses the existing `FORGE_COORD_ISSUE`/`BATCH_ID` — this is enforced by the `if [ -z "${FORGE_COORD_ISSUE:-}" ]` guard, not just documented in prose. The coordination issue persists for the lifetime of the batch. <!-- Fixed: forge#2642 -->
 
 **Terminology:**
 - **Ready issues**: Issues whose predecessor set is empty (all predecessors have reached terminal state or were never added)
@@ -455,6 +474,135 @@ Initial dispatch: #2633, #2636, #2645, #2646 (all ready — launched simultaneou
 ```
 
 **Key advantage over waves**: When #2633 completes, #2634 dispatches immediately — it does not wait for #2636, #2645, or #2646 to finish. Similarly, when #2645 completes, #2647 dispatches immediately regardless of other issues' status.
+
+### Step 3D.2: Acquire orchestrator lease (MANDATORY) <!-- Added: forge#2627 -->
+
+**WHY THIS EXISTS**: The coordination issue created in Step 3D.1 exists purely for per-agent `FORGE:CLAIM` file-overlap serialization — nothing checks whether another live orchestrator instance is already dispatching against an overlapping issue set. Two concurrent loops (a stale survivor plus a restart, or two independent invocations) then both re-derive a ready set from GitHub and both dispatch, producing duplicate/backlog dispatch and truncating each other's view of local state. This step turns the same coordination issue into a single-instance lease, using the append-only comment stream (same idiom as `FORGE:CLAIM`/`FORGE:CLAIM_RELEASED`) rather than a body edit, so it does not reintroduce the read-then-write TOCTOU race documented in #2512.
+
+**Lease identity**: The lease holder is keyed on `BATCH_ID` (from Step 3D.1 — stable for the lifetime of this batch, including across compaction/wake within the *same* top-level session), not a fresh PID per invocation. This is deliberate: the same orchestrator resuming after its own compaction must always be able to refresh its own lease, never treated as a competing holder.
+
+**`check_orchestrator_lease()`** — shared helper, called from both the live Step 4A dispatch entry point (`phase-4-execution.md`) and the wake/compaction reconstruction block below. Declared once here; re-declare byte-identically wherever this file's context is not already sourced (same convention as `classify_predecessor_state()`/`verify_file_overlap_edge()` in `phase-4-execution.md` Step 4B).
+
+```bash
+# Default lease TTL: 15 minutes. Refreshed once per dispatch chunk in phase-4-execution.md
+# Step 4A — generous enough to tolerate a normal chunk's wall-clock time without a false
+# takeover, short enough that a genuinely dead orchestrator's lease goes stale promptly.
+LEASE_TTL_SECONDS="${LEASE_TTL_SECONDS:-900}"
+
+# check_orchestrator_lease <coord_issue_number> <this_batch_id>
+# Returns via stdout one of: "self" (lease already held by this BATCH_ID — safe to refresh),
+# "free" (no live lease — safe to acquire), "held:<holder_batch_id>" (a different, unexpired
+# lease is held — do NOT dispatch).
+check_orchestrator_lease() {
+  local COORD_NUM="$1"
+  local MY_BATCH_ID="$2"
+
+  # Last FORGE:LEASE / FORGE:LEASE_RELEASED comment, in chronological order, to determine
+  # current state. Both are HTML-comment-tagged issue comments (never a body edit) — an
+  # append-only log the same way FORGE:CLAIM/FORGE:CLAIM_RELEASED already work in this file.
+  #
+  # --paginate is REQUIRED here (not optional/cosmetic): the coordination issue also
+  # accumulates one comment per FORGE:CLAIM/FORGE:CLAIM_RELEASED pair (Step 4B) plus one
+  # FORGE:LEASE heartbeat per dispatch chunk (Step 4A in phase-4-execution.md) and per
+  # wake/resume. GitHub's default comments listing returns only the first 30 (oldest)
+  # comments without --paginate — on any batch with more than a handful of issues or a
+  # couple of heartbeat cycles, `last` over an unpaginated page silently reads a STALE
+  # lease event instead of the true most recent one, which can either falsely trigger the
+  # "REFUSING TO DISPATCH" exit 1 below using stale holder data, or fail to see a genuinely
+  # live competing lease and defeat the entire point of this mechanism.
+  local LAST_LEASE_EVENT
+  LAST_LEASE_EVENT=$(gh api --paginate "repos/{GH_REPO}/issues/${COORD_NUM}/comments" \
+    --jq '[.[] | select(.body | contains("FORGE:LEASE"))] | last |
+          {body: .body, created_at: .created_at}' 2>/dev/null || echo "")
+
+  if [ -z "$LAST_LEASE_EVENT" ] || [ "$LAST_LEASE_EVENT" = "null" ]; then
+    echo "free"
+    return
+  fi
+
+  local LEASE_IS_RELEASE
+  LEASE_IS_RELEASE=$(echo "$LAST_LEASE_EVENT" | jq -r '.body | contains("FORGE:LEASE_RELEASED")' 2>/dev/null || echo "false")
+  if [ "$LEASE_IS_RELEASE" = "true" ]; then
+    echo "free"
+    return
+  fi
+
+  local HOLDER_BATCH_ID LEASE_TIMESTAMP
+  HOLDER_BATCH_ID=$(echo "$LAST_LEASE_EVENT" | jq -r '.body' 2>/dev/null | grep -oE '\*\*Holder Batch ID\*\*: [^[:space:]]+' | head -1 | sed -E 's/^\*\*Holder Batch ID\*\*: //')
+  LEASE_TIMESTAMP=$(echo "$LAST_LEASE_EVENT" | jq -r '.created_at' 2>/dev/null)
+
+  if [ "$HOLDER_BATCH_ID" = "$MY_BATCH_ID" ]; then
+    echo "self"
+    return
+  fi
+
+  # Staleness check — a lease older than LEASE_TTL_SECONDS with no refresh is treated as free.
+  # A `date -d` parse failure must NOT silently fall through to "free" (LEASE_EPOCH=0 would
+  # make AGE huge and every live lease report as free/expired, defeating the lease entirely
+  # with no warning). Distinguish "genuinely parsed as epoch 0" from "failed to parse" by
+  # checking the command's exit status explicitly, and fail SAFE (treat as held/unexpired)
+  # rather than fail-open on a parse error.
+  local LEASE_EPOCH
+  if ! LEASE_EPOCH=$(date -u -d "$LEASE_TIMESTAMP" +%s 2>/dev/null); then
+    echo "WARNING: check_orchestrator_lease(): failed to parse lease timestamp '${LEASE_TIMESTAMP}' — treating as held (fail-safe, not fail-open) to avoid masking a live lease." >&2
+    echo "held:${HOLDER_BATCH_ID}"
+    return
+  fi
+  local NOW_EPOCH AGE
+  NOW_EPOCH=$(date -u +%s)
+  AGE=$((NOW_EPOCH - LEASE_EPOCH))
+
+  if [ "$AGE" -gt "$LEASE_TTL_SECONDS" ]; then
+    echo "free"
+  else
+    echo "held:${HOLDER_BATCH_ID}"
+  fi
+}
+```
+
+**Acquire (or refresh) the lease** — run once per batch, immediately after Step 3D.1's coordination-issue creation/reuse, before Step 3D.5's cycle detection:
+
+```bash
+if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ]; then
+  LEASE_STATE=$(check_orchestrator_lease "$COORD_ISSUE_NUMBER" "$BATCH_ID")
+
+  case "$LEASE_STATE" in
+    free|self)
+      HOSTNAME_ID=$(hostname 2>/dev/null || echo "unknown-host")
+      # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
+      gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE -->
+**Holder Batch ID**: ${BATCH_ID}
+**Holder**: ${HOSTNAME_ID} (pid ${$})
+**Acquired/refreshed**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**TTL**: ${LEASE_TTL_SECONDS}s (refreshed once per dispatch chunk — a lease with no refresh past this window is considered stale and may be taken over)" 2>/dev/null || \
+        echo "WARNING: failed to post FORGE:LEASE — continuing without a lease record (best-effort primitive, not a hard blocker on a gh API hiccup)"
+      echo "Orchestrator lease acquired/refreshed for batch ${BATCH_ID} on coordination issue #${COORD_ISSUE_NUMBER}"
+      ;;
+    held:*)
+      HELD_BY="${LEASE_STATE#held:}"
+      echo "REFUSING TO DISPATCH: an unexpired orchestrator lease for this batch is already held by batch ${HELD_BY} on coordination issue #${COORD_ISSUE_NUMBER}."
+      echo "Another live /orchestrate instance (or a not-yet-stale prior run) appears to be dispatching this batch already."
+      echo "If you are certain the other instance is dead (not just idle), wait ${LEASE_TTL_SECONDS}s for the lease to go stale, or manually post a FORGE:LEASE_RELEASED comment on #${COORD_ISSUE_NUMBER} to force a takeover."
+      exit 1
+      ;;
+    *)
+      # Defensive default (MANDATORY — do not remove): if check_orchestrator_lease() is not
+      # re-declared correctly in a fresh context, or otherwise returns anything other than
+      # free/self/held:*, this branch must fail LOUD, not silently no-op. Silently falling
+      # through here would be worse than the documented "no coordination issue" fail-open
+      # path above — it would look like the lease gate ran and passed when it never
+      # evaluated a real state.
+      echo "WARNING: check_orchestrator_lease() returned unexpected value '${LEASE_STATE}' — lease gate could not be evaluated. Proceeding without a confirmed lease (best-effort primitive) but this indicates a bug in check_orchestrator_lease() or its re-declaration; investigate rather than ignore." >&2
+      ;;
+  esac
+else
+  echo "INFO: no coordination issue available (Step 3D.1 failed or was skipped) — lease enforcement disabled for this batch. Proceeding without a single-instance guard."
+fi
+```
+
+**Known limitation (documented, not silently overclaimed)**: this is a best-effort lease built on GitHub issue comments, not a distributed-consensus lock. A genuinely simultaneous race — two orchestrators both calling `check_orchestrator_lease()` and both observing `free` before either posts `FORGE:LEASE` — has a narrow window it does not close. This is an accepted limitation of a prose/bash spec; it converts the common case (a stale survivor, a restart with the prior loop still technically alive, two deliberately-separate invocations) from silent parallel dispatch into a clear refusal, which is the actual failure mode reported in this issue.
+
+**Known limitation — spoofed lease comment (accepted risk, no authorship check)** <!-- forge#2644 -->: `check_orchestrator_lease()` trusts `**Holder Batch ID**` out of the *body* of the last `FORGE:LEASE`/`FORGE:LEASE_RELEASED` comment with no `comment.user.login` verification — any account with comment-write access to the coordination issue can post a spoofed `FORGE:LEASE` comment and force every legitimate orchestrator instance into the `held:*` refusal branch (`exit 1`) for up to `LEASE_TTL_SECONDS` (default 900s), repeatably. This is a deliberate, accepted tradeoff, not an oversight: (1) exploiting it already requires an existing repo collaborator, who has far higher-impact avenues than a bounded, self-expiring dispatch refusal; (2) the obvious fix — checking the comment author against an "expected" identity — would break legitimate leases posted by a second authorized teammate running `/orchestrate` under their own `gh auth` session, trading a bounded/self-healing DoS for a silent, unbounded correctness bug; (3) `FORGE:CLAIM`/`FORGE:CLAIM_RELEASED` (`phase-4-execution.md`) already uses the identical no-authorship-check, body-only trust model for the same reason and predates this lease mechanism. No authorship check is planned for either mechanism.
 
 ### Step 3D.5: Cycle Detection (MANDATORY) <!-- Added: forge#1085 -->
 
@@ -821,6 +969,8 @@ done
 
 **Source-PR Hint column**: when `ISSUE_LIKELY_MOOT[$NUM]` (populated by `phase-1-resolve.md`'s "Source-PR Triage Hint" step — see that file) is present for an issue, dereference it into a `Source-PR Hint` column. This column is **informational only** — it never changes a row's `Status` (Ready/Blocked), never removes a row from the table, and never causes a row to be excluded from dispatch. It exists purely so the operator can see, before confirming the plan, which `staging-review`/`review-finding` issues cite a source PR that closed without merging — a reason to look closer during that issue's own investigation phase, not a reason to skip it (see `phase-1-resolve.md`'s counterexamples: #2339/#2342 vs. #2346/#2261 — the same signal was right in one case and would have been wrong as a verdict in the other). <!-- Added: forge#2351 -->
 
+**File Source column** <!-- Added: forge#2436 -->: dereference `FILE_SOURCE[$NUM]` (populated by Step 3C Layer 1, above) into a `File Source` column, rendered as `affected-files-section` / `body-fallback` / `none` / `—` (when the issue has no predecessors and no DAG edges depend on its file list at all). Same informational-only contract as `Source-PR Hint` — never changes `Status`, never removes a row. It exists so the operator can see, before confirming the plan, which edges rest on a pre-investigation `body-fallback` guess (lower confidence — see Layer 5's downgrade-eligibility carve-out) versus a post-investigation `affected-files-section` extraction.
+
 ```
 ## Orchestration Plan
 
@@ -852,17 +1002,18 @@ done
 
 ### Dependency Graph
 
-| Issue | Predecessors | Domain | Score | Est. Cost | Source-PR Hint | Status |
-|-------|-------------|--------|-------|-----------|-----------------|--------|
-| #{A} | — | FRONTEND | {score} | ${cost} | — | Ready (dispatches 1st by score) |
-| #{B} | — | BILLING | {score} | ${cost} | — | Ready (dispatches 2nd by score) |
-| #{C} | — | WORKER | {score} | ${cost} [ε] | — | Ready (dispatches 3rd — ε-reserve) |
-| #{D} | #{A} | FRONTEND | {score} | ${cost} | — | Blocked (waits for #{A} only) |
-| #{E} | — | DATABASE | {score} | ${cost} | — | Ready (dispatches 4th by score) |
-| #{F} | #{E} | DATABASE | {score} | ${cost} | — | Blocked (serialized — waits for #{E}) |
-| #{G} | — | INFRA | {score} | ${cost} | likely-moot (PR #{N} closed unmerged — verify first) | Ready (dispatches 5th by score) |
+| Issue | Predecessors | Domain | Score | Est. Cost | File Source | Source-PR Hint | Status |
+|-------|-------------|--------|-------|-----------|-------------|-----------------|--------|
+| #{A} | — | FRONTEND | {score} | ${cost} | affected-files-section | — | Ready (dispatches 1st by score) |
+| #{B} | — | BILLING | {score} | ${cost} | affected-files-section | — | Ready (dispatches 2nd by score) |
+| #{C} | — | WORKER | {score} | ${cost} [ε] | body-fallback | — | Ready (dispatches 3rd — ε-reserve) |
+| #{D} | #{A} | FRONTEND | {score} | ${cost} | none | — | Blocked (waits for #{A} only) |
+| #{E} | — | DATABASE | {score} | ${cost} | affected-files-section | — | Ready (dispatches 4th by score) |
+| #{F} | #{E} | DATABASE | {score} | ${cost} | body-fallback | — | Blocked (serialized — waits for #{E}) |
+| #{G} | — | INFRA | {score} | ${cost} | affected-files-section | likely-moot (PR #{N} closed unmerged — verify first) | Ready (dispatches 5th by score) |
 
 **[ε]** = no cost prior; eligible for exploration reserve (10% of budget guaranteed for these)
+**File Source** = `${FILE_SOURCE[$NUM]:-none}` (Step 3C Layer 1). Never affects `Status` or row inclusion — see Layer 1's provenance tracking and Layer 5's downgrade-eligibility carve-out (forge#2436) for how a `body-fallback` value is actually consumed.
 **Source-PR Hint** = `${ISSUE_LIKELY_MOOT[$NUM]:-unknown}` rendered as `—` when `unknown`/absent, or `likely-moot (PR #{ISSUE_SOURCE_PR[$NUM]} closed unmerged — verify first)` when `yes`. Never affects `Status` or row inclusion — see `phase-1-resolve.md`'s "Source-PR Triage Hint" step for how this is computed and why it stays a hint.
 
 **Score** = value / estimated_cost (value = priority_weight × danger_zone_weight; higher = dispatches first within the ready-set)
@@ -1020,6 +1171,69 @@ For the same reason, this reconstruction also MUST call `verify_file_overlap_edg
 ```bash
 # Reconstruct dispatch state from GitHub after compaction / wake
 # Run this block at the top of every resumed Phase 4 loop iteration.
+
+# 0. Lease check (MANDATORY, forge#2627) — run BEFORE any of the reconstruction below.
+#    A wake/resume is either this same orchestrator continuing its own batch or, less
+#    commonly, a fresh invocation resuming someone else's interrupted batch. Either way,
+#    do not reconstruct or dispatch against a batch another *live* orchestrator still
+#    holds the lease for.
+#    check_orchestrator_lease() is declared in Step 3D.2 above — re-declare here if this
+#    block runs in a fresh context that hasn't sourced Step 3D.2 yet.
+#
+#    BATCH_ID reconstruction: this section's own contract is "do NOT rely on in-context
+#    variables" — BATCH_ID is a plain shell variable set once in Step 3D.1 and is NOT
+#    guaranteed to survive compaction/wake (export only propagates within the same process
+#    tree, not across a genuinely new session). Re-derive it from GitHub here rather than
+#    trusting an in-context value, the same way FORGE_COORD_ISSUE/COORD_ISSUE_NUMBER
+#    themselves are treated as re-derivable state, not assumed-present variables:
+if [ -z "${BATCH_ID:-}" ] && [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ]; then
+  BATCH_ID=$(gh issue view "$COORD_ISSUE_NUMBER" -R {GH_REPO} --json body \
+    --jq '.body' 2>/dev/null | grep -oE '<!-- FORGE:BATCH_ID: [^ ]+ -->' | head -1 | sed -E 's/^<!-- FORGE:BATCH_ID: //; s/ -->$//')
+  if [ -n "$BATCH_ID" ]; then
+    export BATCH_ID
+    echo "Reconstructed BATCH_ID=${BATCH_ID} from coordination issue #${COORD_ISSUE_NUMBER} body (in-context value was lost, per this section's own contract)."
+  else
+    # KNOWN LIMITATION (not a silent oversight): this is exactly the stale-survivor-plus-restart
+    # scenario the lease exists to catch, and it is the one case where the lease cannot be
+    # evaluated at all — there is no safe synthetic BATCH_ID to substitute: guessing one risks
+    # a false self-lockout (refusing to resume the orchestrator's own batch) which is a worse
+    # failure mode than the gap being flagged. Fail-open is the deliberate choice for a
+    # best-effort primitive built on GitHub comments (see Step 3D.2's "Known limitation" note),
+    # but it must be loud, not a quiet log line — this WARNING is the operator's only signal
+    # that single-instance protection did not run this cycle.
+    echo "WARNING: could not reconstruct BATCH_ID from coordination issue #${COORD_ISSUE_NUMBER} (missing/malformed FORGE:BATCH_ID marker in the issue body) — lease check SKIPPED this cycle. This is the exact scenario the lease exists to protect against; single-instance protection is NOT active until the marker is present or a later cycle reconstructs it. This is a known, documented limitation of a best-effort primitive — not a silent bug." >&2
+  fi
+fi
+
+if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && [ -n "${BATCH_ID:-}" ]; then
+  LEASE_STATE=$(check_orchestrator_lease "$COORD_ISSUE_NUMBER" "$BATCH_ID")
+  case "$LEASE_STATE" in
+    held:*)
+      HELD_BY="${LEASE_STATE#held:}"
+      echo "REFUSING TO RESUME: an unexpired orchestrator lease for this batch is held by batch ${HELD_BY} (coordination issue #${COORD_ISSUE_NUMBER}), not this session's batch ${BATCH_ID}."
+      echo "A different live orchestrator instance appears to already be dispatching this batch. Wait for its lease to expire or confirm it is dead before resuming."
+      exit 1
+      ;;
+    free|self)
+      # Free (no live holder) or self (this exact batch already holds it) — safe to
+      # refresh and continue reconstruction below.
+      HOSTNAME_ID=$(hostname 2>/dev/null || echo "unknown-host")
+      # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
+      gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE -->
+**Holder Batch ID**: ${BATCH_ID}
+**Holder**: ${HOSTNAME_ID} (pid ${$})
+**Acquired/refreshed**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**TTL**: ${LEASE_TTL_SECONDS:-900}s (refreshed on wake/compaction resume)" 2>/dev/null || true
+      ;;
+    *)
+      # Defensive default (MANDATORY — do not remove): see the matching comment at the
+      # Step 3D.2 acquisition case block above. An unexpected LEASE_STATE here must warn
+      # loudly, not silently fall through and let wake reconstruction proceed as if the
+      # lease check had passed.
+      echo "WARNING: check_orchestrator_lease() returned unexpected value '${LEASE_STATE}' during wake/compaction reconstruction — lease gate could not be evaluated. Proceeding without a confirmed lease; investigate rather than ignore." >&2
+      ;;
+  esac
+fi
 
 # 1. Re-fetch all issue labels and classify each into DONE / GATED / FAILED / IN_PROGRESS
 #    (same classify_predecessor_state() function defined in phase-4-execution.md Step 4B —

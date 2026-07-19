@@ -277,6 +277,159 @@ describe("router", () => {
     );
   });
 
+  // -------------------------------------------------------------------------
+  // Dirty-tree-guard npm fallback (forge#2460)
+  //
+  // Before this fix, `update()` unconditionally skipped (no relink, no
+  // guidance beyond "commit or stash") whenever the FORGE_HOME git clone had
+  // uncommitted tracked changes on a non-main branch — even when that clone
+  // IS the ForgeDock source repo the user is actively developing in (cwd
+  // nested under FORGE_HOME). The fix distinguishes that case from a
+  // genuinely separate, unrelated dirty git-clone install: when cwd is
+  // inside FORGE_HOME, it now runs the git-independent relinkAndHint() sync
+  // (commands/hooks only — never touches git state) and prints an
+  // `npm install -g forgedock@latest` fallback hint, instead of just
+  // skipping. HEAD must never move in either case.
+  // -------------------------------------------------------------------------
+  function makeDirtyNonMainClone(prefix) {
+    const forgeHome = mkdtempSync(join(os.tmpdir(), prefix));
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "ForgeDock Test",
+      GIT_AUTHOR_EMAIL: "test@forgedock.test",
+      GIT_COMMITTER_NAME: "ForgeDock Test",
+      GIT_COMMITTER_EMAIL: "test@forgedock.test",
+    };
+    cpSync(dirname(CLI), join(forgeHome, "bin"), {
+      recursive: true,
+      filter: (src) => !src.includes("tests"),
+    });
+    mkdirSync(join(forgeHome, "commands"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest command\n", "utf-8");
+
+    spawnSync("git", ["init", "-b", "main", forgeHome], { stdio: "pipe" });
+    spawnSync("git", ["-C", forgeHome, "add", "-A"], { stdio: "pipe", env: gitEnv });
+    spawnSync("git", ["-C", forgeHome, "commit", "-m", "init"], { stdio: "pipe", env: gitEnv });
+    spawnSync("git", ["-C", forgeHome, "checkout", "-b", "feature/dirty-test"], { stdio: "pipe", env: gitEnv });
+    // Dirty a TRACKED file (untracked files are deliberately excluded by the
+    // guard's `--untracked-files=no` scan, so this must modify a tracked one).
+    writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nEdited, uncommitted.\n", "utf-8");
+
+    const branch = spawnSync("git", ["-C", forgeHome, "rev-parse", "--abbrev-ref", "HEAD"], {
+      encoding: "utf-8",
+    }).stdout.trim();
+    const headBefore = spawnSync("git", ["-C", forgeHome, "rev-parse", "HEAD"], {
+      encoding: "utf-8",
+    }).stdout.trim();
+
+    return { forgeHome, branch, headBefore };
+  }
+
+  it("update on a dirty, non-main branch run from INSIDE the source repo itself relinks commands/hooks and prints the npm fallback hint, HEAD unmoved (forge#2460)", () => {
+    const { forgeHome, branch, headBefore } = makeDirtyNonMainClone("fd-selfrepo-");
+    const home = mkdtempSync(join(os.tmpdir(), "fd-selfrepo-home-"));
+
+    const res = spawnSync(process.execPath, [join(forgeHome, "bin", "forgedock.mjs"), "update"], {
+      cwd: forgeHome, // cwd IS FORGE_HOME — the npx-shadowing self-checkout case
+      env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" },
+      encoding: "utf-8",
+      timeout: 30000,
+    });
+
+    assert.equal(res.status, 0, `update exited non-zero:\n${res.stdout}\n${res.stderr}`);
+    assert.match(res.stdout, /source repo itself/i);
+    assert.match(res.stdout, /npm install -g forgedock@latest/);
+    assert.doesNotMatch(res.stdout, /Commit or stash your changes before updating/);
+
+    // relinkAndHint() ran → commands/one.md must have been synced onto disk.
+    assert.ok(
+      existsSync(join(home, ".claude", "commands", "one.md")),
+      "relinkAndHint() should have synced commands/hooks from the dirty working tree",
+    );
+
+    // HEAD must never move: still on the same non-main branch, same commit.
+    const branchAfter = spawnSync("git", ["-C", forgeHome, "rev-parse", "--abbrev-ref", "HEAD"], {
+      encoding: "utf-8",
+    }).stdout.trim();
+    const headAfter = spawnSync("git", ["-C", forgeHome, "rev-parse", "HEAD"], {
+      encoding: "utf-8",
+    }).stdout.trim();
+    assert.equal(branchAfter, branch, "must not switch off the dirty non-main branch");
+    assert.equal(headAfter, headBefore, "HEAD must not move");
+  });
+
+  it("update on a dirty, non-main branch run from INSIDE the source repo, when relinkAndHint() throws, prints an accurate error instead of the misleading fast-forward message (forge#2493)", () => {
+    const { forgeHome, branch, headBefore } = makeDirtyNonMainClone("fd-selfrepo-relinkfail-");
+    const home = mkdtempSync(join(os.tmpdir(), "fd-selfrepo-relinkfail-home-"));
+    // Force relinkAndHint() to throw: forge() does
+    // `await mkdir(join(ctx.home, ".claude", "commands"), { recursive: true })`
+    // — pre-creating a REGULAR FILE at `home/.claude` makes that mkdir throw
+    // (a path segment exists as a non-directory), which is a real, reachable
+    // failure mode (any disk-write error inside forge()/writeInstallReceipt()
+    // reaches this same call), not a contrived one.
+    writeFileSync(join(home, ".claude"), "not a directory", "utf-8");
+
+    const res = spawnSync(process.execPath, [join(forgeHome, "bin", "forgedock.mjs"), "update"], {
+      cwd: forgeHome, // cwd IS FORGE_HOME — the npx-shadowing self-checkout case
+      env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" },
+      encoding: "utf-8",
+      timeout: 30000,
+    });
+
+    assert.equal(res.status, 0, `update exited non-zero:\n${res.stdout}\n${res.stderr}`);
+    assert.match(res.stdout, /source repo itself/i);
+    // The misleading fast-forward message must NEVER appear here — no
+    // fast-forward/merge was ever attempted in this path (forge#2493).
+    assert.doesNotMatch(res.stdout, /Cannot fast-forward/);
+    // An accurate, relink-specific error must be printed instead.
+    assert.match(res.stdout, /Could not sync commands\/hooks from the working tree/i);
+    // The npm-fallback hint must still print even though relink failed.
+    assert.match(res.stdout, /npm install -g forgedock@latest/);
+
+    // HEAD must never move, even on the failure path.
+    const branchAfter = spawnSync("git", ["-C", forgeHome, "rev-parse", "--abbrev-ref", "HEAD"], {
+      encoding: "utf-8",
+    }).stdout.trim();
+    const headAfter = spawnSync("git", ["-C", forgeHome, "rev-parse", "HEAD"], {
+      encoding: "utf-8",
+    }).stdout.trim();
+    assert.equal(branchAfter, branch, "must not switch off the dirty non-main branch");
+    assert.equal(headAfter, headBefore, "HEAD must not move");
+  });
+
+  it("update on a dirty, non-main branch run from OUTSIDE the source repo (separate cwd) keeps the original commit/stash guidance — no npm fallback, no relink (forge#2460)", () => {
+    const { forgeHome, branch, headBefore } = makeDirtyNonMainClone("fd-elsewhere-");
+    const home = mkdtempSync(join(os.tmpdir(), "fd-elsewhere-home-"));
+    const outsideCwd = mkdtempSync(join(os.tmpdir(), "fd-elsewhere-cwd-"));
+
+    const res = spawnSync(process.execPath, [join(forgeHome, "bin", "forgedock.mjs"), "update"], {
+      cwd: outsideCwd, // cwd is NOT inside FORGE_HOME
+      env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" },
+      encoding: "utf-8",
+      timeout: 30000,
+    });
+
+    assert.equal(res.status, 0, `update exited non-zero:\n${res.stdout}\n${res.stderr}`);
+    assert.match(res.stdout, /Commit or stash your changes before updating/);
+    assert.doesNotMatch(res.stdout, /source repo itself/i);
+    assert.doesNotMatch(res.stdout, /npm install -g forgedock@latest/);
+
+    // relinkAndHint() must NOT have run — nothing installed into home.
+    assert.ok(
+      !existsSync(join(home, ".claude", "commands", "one.md")),
+      "relinkAndHint() must not run for a dirty clone unrelated to the invoking cwd",
+    );
+
+    const branchAfter = spawnSync("git", ["-C", forgeHome, "rev-parse", "--abbrev-ref", "HEAD"], {
+      encoding: "utf-8",
+    }).stdout.trim();
+    const headAfter = spawnSync("git", ["-C", forgeHome, "rev-parse", "HEAD"], {
+      encoding: "utf-8",
+    }).stdout.trim();
+    assert.equal(branchAfter, branch, "must not switch off the dirty non-main branch");
+    assert.equal(headAfter, headBefore, "HEAD must not move");
+  });
+
   it("init --manual non-TTY with existing forge.yaml aborts (exit 1, file untouched)", () => {
     const home = mkdtempSync(join(os.tmpdir(), "fd-manual-abort-home-"));
     const cwd = mkdtempSync(join(os.tmpdir(), "fd-manual-abort-cwd-"));

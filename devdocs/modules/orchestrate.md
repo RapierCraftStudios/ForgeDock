@@ -41,3 +41,18 @@ PR #1733 introduced the module dossier system. `commands/orchestrate.md` was
 NOT changed in this PR — this entry seeds the dossier from historical findings.
 Key gotcha: Step 4B.7 wrong-PR resolution and Agent-tool bypass are the two
 most common regression sites. Cite: #1634, #1383, #1202.
+
+## Entry 2026-07-17 — Fix: quote GH_REPO placeholder in phase-3-dependency.md Layer 1 call site (#2502)
+
+PR #2526 fixed a quoting inconsistency in `commands/orchestrate/phase-3-dependency.md:81`:
+`-R {GH_REPO}` was unquoted while the adjacent `"$NUM"` was quoted. Fixed to
+`-R "{GH_REPO}"`. Sibling-pattern sweep confirmed unquoted `-R {GH_REPO}` is
+still the prevailing convention across the rest of `commands/` — this fix was
+intentionally scoped to just this one call site, not a repo-wide requoting
+pass. Cite: #2502, PR #2526, PR #2500 (source finding).
+
+## Entry 2026-07-18 — Fix: printf trailing newline in repair guard comment bodies (#2598)
+
+PR #2605 touched `commands/orchestrate/phase-4-execution.md`. See FORGE:BUILDER comment on issue #2598 for full change list.
+Key gotcha recorded: `printf '%s\n' "..."` always appends a trailing newline the original inline `--body "..."` string did not have; when staging a body-file for byte-for-byte content parity with a prior inline `--body` argument, use `printf '%s'` (no `\n`) instead. Introduced by #2584/PR #2594's mktemp+--body-file refactor of the Step 4C repair guard.
+Cite: #2598, PR #2605.

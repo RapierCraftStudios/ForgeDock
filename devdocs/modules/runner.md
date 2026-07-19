@@ -36,3 +36,43 @@ PR #1733 introduced the module dossier system. `bin/runner.mjs` was NOT
 changed in this PR — this entry seeds the dossier from historical findings.
 Key gotcha: ENOBUFS check order and model return value are the two most
 common regression sites. Cite: #1433, #1668, #1248.
+
+## Entry 2026-07-17 — fix(runner): append non-empty stderr on CLI-backend success instead of dropping it (#2456)
+
+PR #2476 touched `runCliBackend`'s success path. When the `--output-format
+json` envelope parses with a non-null `.result`, `humanOutput` now appends
+trimmed `stderr` after `parsedResult` instead of dropping it silently —
+mirrors the same "combine streams" fix applied to `run_bash` in #1229. Key
+gotcha: `JSON.parse` must still target `stdout` alone (forge#2422 invariant)
+— do not regress this back to combined `output` when touching this block
+again. Follow-up findings filed (non-blocking, POSSIBLE/LOW): #2483
+(appended stderr reaches console unsanitized — no `sanitizeOutputExcerptForLog`
+applied on this success-path sink) and #2484 (empty-string `.result` +
+non-empty stderr produces a leading-newline-only logged string). Cite: #2456,
+PR #2476, #2422, #1229.
+
+## Entry 2026-07-17 — fix(batch): P3 review findings — bin/runner.mjs (#2522)
+
+PR #2531 fixed the #2483/#2484 follow-ups from the entry above. Key gotcha:
+`parsedResult !== null` is true even when `parsedResult === ""` — any future
+edit to this ternary must gate on `parsedResult` truthiness (not `!== null`)
+when deciding whether to prefix stderr, or an empty `.result` produces a
+leading-newline-only artifact. Also: any untrusted stderr/stdout appended
+into a NEW log sink in this file must be routed through
+`sanitizeOutputExcerptForLog()` — this file now has 6 prior
+output-sanitization findings (#2277, #2292, #2293, #2355, #2483, #2484).
+Cite: #2522, PR #2531.
+
+## Entry 2026-07-17 — feat(engine): auto-resume on session-limit hit (#2524)
+
+PR #2555 added `parseSessionLimitResetEpochMs()` to `bin/runner.mjs` — turns
+`extractSessionLimitResetTime()`'s sanitized display string ("12:50am (Asia/
+Calcutta)") into a machine-usable epoch-ms timestamp via `Intl.DateTimeFormat`
+(next-occurrence semantics), and `runCliBackend()` now attaches
+`err.resetAtEpochMs` alongside the existing `err.resetAt`. Key gotcha (review
+finding #2560, non-blocking/LOW): the hour-parsing regex allows any 1-2 digit
+value (00-99), and `parseInt(hourStr, 10) % 12` silently wraps out-of-range
+hours (13, 25, 99) into a plausible-but-wrong value instead of returning
+`undefined` — any future edit to this parser must bounds-check the raw hour
+(1-12) BEFORE the `% 12` conversion, mirroring the existing `minute > 59`
+guard. Cite: #2524, PR #2555, #2560.
