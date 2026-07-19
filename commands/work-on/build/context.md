@@ -610,9 +610,20 @@ fi
 # FORGE:KNOWLEDGE_GIST. Match on the literal, unmodified Gist URL string (both sides derive from
 # the same $GIST_URL value with no transformation) rather than a derived/prefixed form — see
 # forge#1841 for the failure mode a heuristic match here would otherwise repeat.
-SELF_GIST_URL=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '[.[] | select(.body | contains("FORGE:KNOWLEDGE_GIST:"))] | last | .body // ""' 2>/dev/null \
-  | sed -n 's/.*<!-- FORGE:KNOWLEDGE_GIST: \(https:\/\/[^ ]*\) -->.*/\1/p' | head -1)
+# Capture stderr separately from the empty-result case: an empty $SELF_GIST_URL can mean
+# either "no FORGE:KNOWLEDGE_GIST comment exists yet" (exit 0, legitimate) or "the gh api
+# call itself failed" (non-zero exit, transient) — these must not be indistinguishable, or a
+# transient failure silently no-ops the self-exclusion filter below with no visible signal.
+SELF_GIST_RAW=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:KNOWLEDGE_GIST:"))] | last | .body // ""' 2>&1)
+SELF_GIST_STATUS=$?
+if [ $SELF_GIST_STATUS -ne 0 ]; then
+  echo "WARNING: gh api call for SELF_GIST_URL self-exclusion failed (exit $SELF_GIST_STATUS) — self-exclusion filter will no-op this run: $SELF_GIST_RAW" >&2
+  SELF_GIST_URL=""
+else
+  SELF_GIST_URL=$(echo "$SELF_GIST_RAW" \
+    | sed -n 's/.*<!-- FORGE:KNOWLEDGE_GIST: \(https:\/\/[^ ]*\) -->.*/\1/p' | head -1)
+fi
 
 if [ -n "$SELF_GIST_URL" ] && [ -n "$GIST_URLS" ]; then
   GIST_URLS=$(echo "$GIST_URLS" | grep -vF "$SELF_GIST_URL" || true)
