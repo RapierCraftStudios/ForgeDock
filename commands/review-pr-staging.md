@@ -667,10 +667,49 @@ If the gate exits with `RESULT: BLOCK DEPLOY` → **STOP**. A `<!-- FORGE:GATE_F
 ## Phase 7: Finding Triage & Issue Creation
 
 ### 7A: Extract Findings
-From PR comments, extract structured findings (`<!-- FINDING:... -->`). If none found, scan for unstructured findings. If still 0 → skip to Phase 8.
+
+```bash
+HAS_SYNTHESIS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[].body' | grep -c 'REVIEW-FINDINGS-SYNTHESIZED-START' || echo 0)
+
+if [ "$HAS_SYNTHESIS" -gt 0 ]; then
+    # Extract finding IDs from synthesized block using jq scan() — no grep -oP needed
+    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+        --jq '[.[] | select(.body | test("REVIEW-FINDINGS-SYNTHESIZED-START")) | .body | scan("<!-- FINDING:([^>]+) -->") | .[0]] | join("\n")')
+else
+    # Extract finding IDs from all agent comments using jq scan() — portable, no grep -oP
+    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+        --jq '[.[].body | scan("<!-- FINDING:([^>]+) -->") | .[0]] | join("\n")')
+fi
+```
+
+Each line of `$FINDINGS` is `PREFIX-N|CONFIDENCE|SEVERITY|file:line|summary`, optionally followed by a 6th `|DISPOSITION` field (`FILE` default, or `NOTED`) — see `commands/review-pr-agents/protocols.md` § Structured Findings Protocol (the sole source of the admission rule; not restated here). If `$FINDINGS` is empty: scan for unstructured findings. If still 0 → skip to Phase 8.
+
+**This extraction was previously prose-only in this file** ("From PR comments, extract structured findings") with no corresponding `$FINDINGS` bash assignment — the identical `gh api ... scan(...)` block from `commands/review-pr.md` Phase 6A is now mirrored here so Phase 7A.5 below has a real value to partition, rather than reading an unset variable. <!-- Fixed during forge#2683 review: 7A.5 previously did `done <<< "$FINDINGS"` against a variable this file never assigned, which would have silently filed zero findings on every staging review. -->
+
+### 7A.5: Admission Gate — Split FILE vs NOTED <!-- Added: forge#2683 -->
+
+Partition extracted findings by the 6th (`DISPOSITION`) field, defaulting missing/empty to `FILE`:
+
+```bash
+FINDINGS_TO_FILE=""
+FINDINGS_NOTED=""
+
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  DISPOSITION=$(echo "$line" | awk -F'|' '{print $6}')
+  DISPOSITION=${DISPOSITION:-FILE}
+  if [ "$DISPOSITION" = "NOTED" ]; then
+    FINDINGS_NOTED="${FINDINGS_NOTED}${line}"$'\n'
+  else
+    FINDINGS_TO_FILE="${FINDINGS_TO_FILE}${line}"$'\n'
+  fi
+done <<< "$FINDINGS"
+```
+
+This is a mechanical split on a field the emitting agent already set (per the Admission Gate rule in `commands/review-pr-agents/protocols.md`) — it does not re-evaluate reachability text itself. `$FINDINGS_NOTED` is carried through to Phase 8 (Final Summary) as a visible "Noted (not filed)" list — never silently dropped. Phases 7B–7F below operate on `$FINDINGS_TO_FILE` only.
 
 ### 7B: Filter & Deduplicate
-Keep ALL findings (CONFIRMED/LIKELY/POSSIBLE). Deduplicate by file:line (keep higher confidence). Sort: CONFIRMED first, then by severity.
+Keep ALL confidence levels (CONFIRMED/LIKELY/POSSIBLE) among `$FINDINGS_TO_FILE` (post admission-gate — `NOTED` findings were already routed out in 7A.5). Deduplicate by file:line (keep higher confidence). Sort: CONFIRMED first, then by severity.
 
 ### 7C: Ensure Labels
 ```bash
@@ -774,10 +813,12 @@ from **Severity** (never Confidence) via `scripts/severity-to-priority.sh`:
 `CRITICAL`→`priority:P0`, `HIGH`→`priority:P1`, `MEDIUM`→`priority:P2`, `LOW`→`priority:P3`. See
 `commands/shared/priority-rubric.md`.
 
-**No pre-filtering**: Every finding becomes an issue. Validation agents sort out false positives downstream.
+**Admission-gated, not unfiltered**: every finding in `$FINDINGS_TO_FILE` (i.e. every finding whose agent-set `DISPOSITION` was `FILE` or unset) becomes an issue — validation agents sort out false positives among those downstream, same as before forge#2683. Findings the emitting agent marked `NOTED` (self-refuting LOW/POSSIBLE findings per the Admission Gate in `commands/review-pr-agents/protocols.md`) were already routed out in Phase 7A.5 and are never filed; they surface in Phase 8's summary instead.
 
 ### 7G: Add to Project Board
 ### 7H: Update PR Description with Findings Table
+
+Also append a `## Noted (Not Filed)` section whenever `$FINDINGS_NOTED` (Phase 7A.5) is non-empty — same format as `commands/review-pr.md` Phase 6D. Omit when empty.
 
 ---
 
@@ -791,7 +832,7 @@ Post summary with verdict:
 4. CONFIRMED HIGH blocking (crashes, data loss) → NEEDS FIXES FIRST
 5. All else → APPROVE FOR DEPLOY
 
-Include: Material Changes Summary, Risk Matrix (CI, Build, Bugs, Security, Billing, Quality, Regression, **Test Gate**), Finding Triage Results, Blocking Issues, Deployment Checklist (pre-deploy, deploy, post-deploy verification, rollback triggers), Stats.
+Include: Material Changes Summary, Risk Matrix (CI, Build, Bugs, Security, Billing, Quality, Regression, **Test Gate**), Finding Triage Results, Noted-not-filed count (from `$FINDINGS_NOTED`, Phase 7A.5), Blocking Issues, Deployment Checklist (pre-deploy, deploy, post-deploy verification, rollback triggers), Stats.
 
 **Risk Matrix must include a Test Gate row** (use `$TEST_GATE_VERDICT` and `$TEST_GATE_REASON` set in Phase 6.5):
 
