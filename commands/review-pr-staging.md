@@ -707,6 +707,7 @@ cat <<'ISSUE_EOF' > "$STAGING_FINDING_BODY_FILE"
 **Source**: PR #[PR_NUMBER] — [TITLE]
 **Confidence**: [CONFIRMED/LIKELY/POSSIBLE]
 **Severity**: [CRITICAL/HIGH/MEDIUM/LOW]
+**P-justification**: [priority:P* resolved from Severity via `scripts/severity-to-priority.sh` — never from Confidence; see `commands/shared/priority-rubric.md`]
 **Review comment**: [permalink to agent comment]
 
 ## Affected Files
@@ -733,8 +734,14 @@ Files that need changes:
 - [ ] If VALIDATED: fix implemented and tested on correct branch
 ISSUE_EOF
 
+# Priority is derived from Severity ONLY, via the single canonical mapper — never from
+# Confidence. Confidence and Severity are independent axes; conflating them is the exact
+# bug forge#2447 fixed once already. See commands/shared/priority-rubric.md.
+STAGING_FINDING_SEVERITY="LOW"  # illustrative — actual value comes from the finding's **Severity** field
+STAGING_FINDING_PRIORITY=$(scripts/severity-to-priority.sh "$STAGING_FINDING_SEVERITY")
+
 # --label is repeatable (not comma-joined) per the /issue programmatic contract.
-Skill(skill="issue", args="--title \"$STAGING_FINDING_TITLE\" --body-file \"$STAGING_FINDING_BODY_FILE\" --label review-finding --label needs-validation --label staging-review --label \"{priority}\"")
+Skill(skill="issue", args="--title \"$STAGING_FINDING_TITLE\" --body-file \"$STAGING_FINDING_BODY_FILE\" --label review-finding --label needs-validation --label staging-review --label \"$STAGING_FINDING_PRIORITY\"")
 rm -f "$STAGING_FINDING_BODY_FILE"
 
 # /issue has no machine-readable return contract — resolve the created issue's number by
@@ -748,7 +755,10 @@ for _resolve_attempt in 1 2 3; do
 done
 ```
 
-Labels: `review-finding` + `needs-validation` + `staging-review` + priority (`priority:P1` CONFIRMED, `priority:P2` LIKELY, `priority:P3` POSSIBLE).
+Labels: `review-finding` + `needs-validation` + `staging-review` + priority. Priority is resolved
+from **Severity** (never Confidence) via `scripts/severity-to-priority.sh`:
+`CRITICAL`→`priority:P0`, `HIGH`→`priority:P1`, `MEDIUM`→`priority:P2`, `LOW`→`priority:P3`. See
+`commands/shared/priority-rubric.md`.
 
 **No pre-filtering**: Every finding becomes an issue. Validation agents sort out false positives downstream.
 

@@ -198,6 +198,11 @@ Default to `enhancement` when no signal is clear.
 
 ### 2B: Priority classification
 
+Priority levels (`priority:P0`-`priority:P3`) are defined canonically in
+`commands/shared/priority-rubric.md` — this section only maps triage *text signals* found in
+existing issue trackers/backlogs onto those levels; it is not a second definition of what each
+level means.
+
 | Priority | Label | Signals |
 |----------|-------|---------|
 | P0 | `priority:P0` | "production down", "data loss", "security breach", "P0", "critical", "outage", "blocked deploy" |
@@ -205,7 +210,7 @@ Default to `enhancement` when no signal is clear.
 | P2 | `priority:P2` | "minor", "improve", "enhancement", "feature", P2 |
 | P3 | `priority:P3` | "cosmetic", "typo", "nice to have", "polish", "low priority", no severity signals |
 
-Default to `priority:P2` for features and enhancements, `priority:P3` for documentation and cosmetic issues, `priority:P1` for bugs with unclear severity.
+Default to `priority:P2` for features and enhancements, `priority:P3` for documentation and cosmetic issues, `priority:P1` for bugs with unclear severity. Every adopted issue MUST carry a `**P-justification**:` line per `commands/shared/priority-rubric.md` — for signal-based classification, the justification names the matched signal (e.g. "P1 because backlog text says 'blocks release' — matches the 'blocks' signal").
 
 ### 2C: Build classification table
 
