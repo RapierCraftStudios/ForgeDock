@@ -1,0 +1,23 @@
+{
+  "description": "A KNOWLEDGE_GIST annotation references a gist that 404s. mineContext() must mark it unavailable, not throw, and the pack (built from the sibling CONTRACT annotation) must remain schema-valid.",
+  "issueNumber": 3004,
+  "repo": null,
+  "phaseId": "build",
+  "assembleOpts": {},
+  "issueView": {
+    "number": 3004,
+    "title": "fix: stale gist reference",
+    "body": "n/a",
+    "labels": [],
+    "state": "OPEN",
+    "milestone": null
+  },
+  "commentsRaw": "[{\"id\":1,\"author\":\"agent-bot\",\"body\":\"<!-- FORGE:KNOWLEDGE_GIST: https://gist.github.com/exampleuser/deadbeef1234deadbeef1234 -->\",\"createdAt\":\"2026-01-01T00:00:00Z\"},{\"id\":2,\"author\":\"agent-bot\",\"body\":\"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n**Task type**: Bug Fix\\n### Affected Files\\n1. `bin/engine/contextpack.mjs` — no-op\",\"createdAt\":\"2026-01-01T00:05:00Z\"}]",
+  "timelineRaw": "[]",
+  "prListById": {},
+  "gistById": {
+    "deadbeef1234deadbeef1234": {
+      "error": "gist not found (HTTP 404)"
+    }
+  }
+}

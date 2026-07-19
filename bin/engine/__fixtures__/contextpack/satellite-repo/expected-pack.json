@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "issue": 42,
+  "slices": [
+    {
+      "phase": "investigate",
+      "content": "## Issue #42: fix: satellite handler bug\n\nReported against the platform satellite.\n\n## Known Affected Files\n- `src/platform/handler.ts`\n\n### INVESTIGATOR annotation (comment #0)\n\n## Investigation Report\n**Verdict**: CONFIRMED\n**Confidence**: HIGH\n**Severity**: LOW\n**Task Type**: Bug Fix\n## Affected Files\n- `src/platform/handler.ts` — satellite-repo file\n<!-- INVESTIGATION:COMPLETE -->"
+    }
+  ]
+}

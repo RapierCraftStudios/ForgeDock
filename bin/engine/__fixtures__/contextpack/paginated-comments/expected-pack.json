@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "issue": 3006,
+  "slices": [
+    {
+      "phase": "build",
+      "content": "## Known Affected Files\n- `bin/engine/contextpack.mjs`\n\n### CONTRACT annotation (comment #104)\n\n## Builder Contract\n**Task type**: Feature\n### Affected Files\n1. `bin/engine/contextpack.mjs` — no-op"
+    }
+  ]
+}

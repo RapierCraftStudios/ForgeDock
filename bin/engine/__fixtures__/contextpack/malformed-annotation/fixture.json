@@ -1,0 +1,19 @@
+{
+  "description": "Comment 1 has a CONTEXT annotation missing its :COMPLETE sentinel (parses, sentinelState=INTERRUPTED). Comment 2 has an unterminated opening tag (does not match annotation syntax at all — parse() finds nothing there). Comment 3 has a well-formed CONTRACT annotation that must still parse correctly despite its malformed siblings.",
+  "issueNumber": 3003,
+  "repo": null,
+  "phaseId": "build",
+  "assembleOpts": {},
+  "issueView": {
+    "number": 3003,
+    "title": "fix: annotation robustness",
+    "body": "n/a",
+    "labels": [],
+    "state": "OPEN",
+    "milestone": null
+  },
+  "commentsRaw": "[{\"id\":1,\"author\":\"agent-bot\",\"body\":\"<!-- FORGE:CONTEXT -->\\n## Implementation Context\\nSome context with no completion sentinel at all.\",\"createdAt\":\"2026-01-01T00:00:00Z\"},{\"id\":2,\"author\":\"agent-bot\",\"body\":\"<!-- FORGE:ARCHITECT\\n## Implementation Plan\\nThis opening tag is missing its closing --> so it is not a structural annotation at all.\",\"createdAt\":\"2026-01-01T00:05:00Z\"},{\"id\":3,\"author\":\"agent-bot\",\"body\":\"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n**Task type**: Bug Fix\\n### Affected Files\\n1. `bin/engine/contextpack.mjs` — no-op\",\"createdAt\":\"2026-01-01T00:10:00Z\"}]",
+  "timelineRaw": "[]",
+  "prListById": {},
+  "gistById": {}
+}
