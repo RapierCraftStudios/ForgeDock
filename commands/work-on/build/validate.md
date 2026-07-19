@@ -436,7 +436,7 @@ committed into the **same worktree, before push** so the files ride the issue's 
 reviewed and merged exactly like any other change. Architect plans on future runs load matching ADRs
 as constraints before writing any code.
 
-**Historical note **: this step previously ran in `close.md` Phase C5.4, *after* the PR
+**Historical note**: this step previously ran in `close.md` Phase C5.4, *after* the PR
 had already merged (`close.md` is invoked with `--pr {PR_NUMBER}` = the merged PR number). Writing
 ADR files that late meant the "commit" (if it even succeeded) landed on a worktree that Phase C6
 deletes moments later — an unreachable local commit, never pushed, never part of any diff. That is

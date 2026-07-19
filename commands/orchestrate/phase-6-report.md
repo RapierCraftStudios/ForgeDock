@@ -25,7 +25,7 @@ Aggregate into the batch-level analytics for Step 6B.
 comment by `/work-on` close phase as a `<!-- FORGE:CARD: v1 sha:... b64:... -->` line). These
 power the per-issue and batch cards in Step 6C.
 
-**CODEC PATH **: Cards are now Base64url-encoded. Use the protocol CLI's `parse`
+**CODEC PATH**: Cards are now Base64url-encoded. Use the protocol CLI's `parse`
 subcommand to decode them — do NOT use the old `sed -n 's/.*<!-- FORGE:CARD \(.*\) -->.*/\1/p'`
 regex extraction, which only worked for the deprecated inline-JSON form:
 

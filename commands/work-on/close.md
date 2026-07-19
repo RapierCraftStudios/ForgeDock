@@ -663,7 +663,7 @@ CARD_JSON=$(jq -nc \
 
 ## Phase C5: Trajectory Log (MANDATORY)
 
-**CODEC PATH **: Post the `<!-- FORGE:TRAJECTORY -->` comment via the protocol codec — do NOT hand-roll the opening tag. Use `forge-annotation.sh write TRAJECTORY --field...` or `node packages/protocol/src/cli.js emit TRAJECTORY` to produce the opening tag. The codec handles any field escaping automatically.
+**CODEC PATH**: Post the `<!-- FORGE:TRAJECTORY -->` comment via the protocol codec — do NOT hand-roll the opening tag. Use `forge-annotation.sh write TRAJECTORY --field ...` or `node packages/protocol/src/cli.js emit TRAJECTORY` to produce the opening tag. The codec handles any field escaping automatically.
 
 ```bash
 # Codec produces the opening <!-- FORGE:TRAJECTORY --> tag
@@ -764,7 +764,7 @@ parse --type CARD --field status`. This block is **additive**: all existing `FOR
 consumers select via `contains("FORGE:TRAJECTORY")` and parse the markdown table, so the
 embedded CARD line does not affect them.
 
-**CODEC PATH **: The `$(node packages/protocol/src/cli.js emit CARD --b64...)` call
+**CODEC PATH**: The `$(node packages/protocol/src/cli.js emit CARD --b64 ...)` call
 above replaces the previous `<!-- FORGE:CARD ${CARD_JSON} -->` inline-JSON form. The Base64url
 form is safe against all HTML comment injection vectors and includes a sha8 integrity prefix for
 truncation detection. Consumers that parsed the old inline-JSON form must migrate to the codec

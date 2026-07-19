@@ -35,7 +35,7 @@ If called from `work-on`, these are passed through. If invoked standalone, `--re
 
 **This phase is non-blocking** — if the memory index is absent or retrieval fails, log the reason and proceed to Phase 1A. Never stall the pipeline for memory.
 
-**Note on Gist visibility **: The memory-index Gist is created **secret** (see `close.md` Phase C5.2 — no `--public` flag). `gh gist list` and `gh gist view` operate against the authenticated user's own Gists by description/id regardless of public/secret status, so the retrieval steps below work unchanged against a secret Gist. No code change is needed here — this note exists only so a future edit doesn't reintroduce a "must be public to be readable" assumption.
+**Note on Gist visibility**: The memory-index Gist is created **secret** (see `close.md` Phase C5.2 — no `--public` flag). `gh gist list` and `gh gist view` operate against the authenticated user's own Gists by description/id regardless of public/secret status, so the retrieval steps below work unchanged against a secret Gist. No code change is needed here — this note exists only so a future edit doesn't reintroduce a "must be public to be readable" assumption.
 
 ### Step 1: Locate memory index Gist
 
@@ -360,7 +360,7 @@ The comment MUST include a terminal sentinel at the very end, AFTER all required
 - **Verdict is INVALID** → close with `<!-- INVESTIGATION:INVALID -->`. This is a distinct, already-wired-up terminal marker: `bin/engine/phases.mjs`'s `detectOutcome` for the `investigate` phase checks for it explicitly (ahead of `INVESTIGATION:COMPLETE`) and routes to `terminalReason: "invalid"`; `bin/hooks/interactive-engine.mjs`'s `PHASE_MARKERS` table also already treats it as terminal. Emitting `INVESTIGATION:COMPLETE` for an INVALID verdict is what previously caused every completed investigation to read as `{verdict: "CONFIRMED"}` regardless of actual outcome — do NOT regress this.
 - **Verdict is CONFIRMED or PARTIAL** → close with `<!-- INVESTIGATION:COMPLETE -->` as before (PARTIAL still routes to `ready-to-build` in Phase 1D — only INVALID gets the distinct terminal sentinel).
 
-**Complexity classification **: Before posting, classify the issue's scope as one of `trivial` / `standard` / `complex`, using the same heuristic `commands/work-on.md`'s Phase 3B `COMPLEXITY_BAND` already applies (reused, not reinvented):
+**Complexity classification**: Before posting, classify the issue's scope as one of `trivial` / `standard` / `complex`, using the same heuristic `commands/work-on.md`'s Phase 3B `COMPLEXITY_BAND` already applies (reused, not reinvented):
 
 | Condition | Complexity |
 |-----------|-----------|
@@ -380,9 +380,9 @@ else
 fi
 ```
 
-**CODEC PATH **: Construct the annotation body via the protocol codec — do NOT hand-roll the `<!-- FORGE:INVESTIGATOR -->` header. Use `forge-annotation.sh write INVESTIGATOR --field...` or `node packages/protocol/src/cli.js emit INVESTIGATOR --field...` to produce the opening tag and completion sentinel. Fill in the Markdown body sections below. The full pattern:
+**CODEC PATH**: Construct the annotation body via the protocol codec — do NOT hand-roll the `<!-- FORGE:INVESTIGATOR -->` header. Use `forge-annotation.sh write INVESTIGATOR --field ...` or `node packages/protocol/src/cli.js emit INVESTIGATOR --field ...` to produce the opening tag and completion sentinel. Fill in the Markdown body sections below. The full pattern:
 
-**Caveat **: `packages/protocol/src/types.js`'s `INVESTIGATOR.completionSentinel` is a single fixed value (`'INVESTIGATION:COMPLETE'`) and `packages/protocol/src/emit.js` appends it unconditionally — the codec does NOT currently support the verdict-conditional sentinel selection described above, and cannot emit `INVESTIGATION:INVALID`. Using the CODEC PATH for an INVALID-verdict investigation would silently regress the forge#2350 fix (every investigation would again read as `{verdict: "CONFIRMED"}`). Until the codec is extended to support a verdict-conditional sentinel, the hand-rolled block above/below (using the `${INVESTIGATION_SENTINEL}` variable computed above) is the authoritative path for Phase 1C — do not use the CODEC PATH for this annotation.
+**Caveat**: `packages/protocol/src/types.js`'s `INVESTIGATOR.completionSentinel` is a single fixed value (`'INVESTIGATION:COMPLETE'`) and `packages/protocol/src/emit.js` appends it unconditionally — the codec does NOT currently support the verdict-conditional sentinel selection described above, and cannot emit `INVESTIGATION:INVALID`. Using the CODEC PATH for an INVALID-verdict investigation would silently regress the forge#2350 fix (every investigation would again read as `{verdict: "CONFIRMED"}`). Until the codec is extended to support a verdict-conditional sentinel, the hand-rolled block above/below (using the `${INVESTIGATION_SENTINEL}` variable computed above) is the authoritative path for Phase 1C — do not use the CODEC PATH for this annotation.
 
 ```bash
 # Build the annotation body via codec (escaping and sentinel handled by codec)
