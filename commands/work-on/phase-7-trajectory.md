@@ -151,6 +151,8 @@ This check is **audit-only** — it annotates the trajectory for visibility. It 
 Post `<!-- FORGE:TRAJECTORY -->` comment with phase-by-phase results table:
 
 ```bash
+# Not DRY_RUN-gated — the trajectory log is the unconditional final artifact
+# of every /work-on run, matching sibling phase files.
 # Compute verification row from VERIFICATION_SKIPPED_CHECKS (set in Phase 3H)
 if [ -z "$VERIFICATION_SKIPPED_CHECKS" ]; then
   VERIFICATION_ROW="✅ Ran"

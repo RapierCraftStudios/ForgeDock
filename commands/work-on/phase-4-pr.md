@@ -39,13 +39,15 @@ fi
 
 ### 4B: Push branch
 ```bash
-cd {WORKTREE_PATH} && git push -u origin {BRANCH}
+cd {WORKTREE_PATH} && git push -u origin {BRANCH}  # not DRY_RUN-gated — unconditional pipeline step, matches sibling phase files <!-- allowlist:check-command-side-effects -->
 ```
 If fails: try `--force-with-lease`. If still fails: post comment, add `needs-human`, STOP.
 
 ### 4C: Determine PR target
 `PR_BASE` was computed in Phase 3E. If somehow unset (e.g., resumed session after compaction), recompute:
 ```bash
+# Not DRY_RUN-gated — a classify-lane/PR-target failure is an unconditional
+# needs-human escalation in every /work-on run, matching sibling phase files.
 RESOLUTION=$(resolve_script 'classify-lane')
 TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
 case "$TIER" in
@@ -84,6 +86,7 @@ esac
 ```
 `{CLASSIFIED_LANE}` is the value returned by `classify-lane.sh` in Phase 4C. `{PR_BASE}` is the branch the PR will target. If exit code is 1 (mismatch):
 ```bash
+# Not DRY_RUN-gated — a lane mismatch is an unconditional needs-human escalation.
 gh issue comment {NUMBER} {GH_FLAG} --body "BLOCKING: validate-pr-target.sh — PR base \`{PR_BASE}\` does not match classified lane \`{CLASSIFIED_LANE}\`. Manual intervention required."
 gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
 ```
@@ -91,6 +94,7 @@ gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
 
 ### 4D: Create PR
 ```bash
+# Not DRY_RUN-gated — PR creation is the unconditional purpose of this phase.
 PR_URL=$(gh pr create {GH_FLAG} --base {PR_BASE} --head {BRANCH} \
   --title "{Fix|Feat|Refactor}: {description}" \
   --body "## Summary
@@ -115,6 +119,7 @@ If PR already exists for this branch, use the existing PR number.
 
 ### 4E: Update labels
 ```bash
+# Not DRY_RUN-gated — the workflow:in-review transition is unconditional once a PR exists.
 RESOLUTION=$(resolve_script 'transition-label')
 TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
 case "$TIER" in

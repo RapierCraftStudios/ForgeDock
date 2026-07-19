@@ -168,6 +168,10 @@ This mode is reachable both standalone (a human or script running `/work-on <pr>
 When `UNDER_ORCHESTRATION` is `true`: post a lightweight activity signal immediately after resolving the issue number. This gives the stall detector (orchestrate Step 4B.5) a fresh timestamp to compare against `STALL_TIMEOUT`. Without this, the stall detector can only see the last structured comment (INVESTIGATOR, BUILDER, etc.) which may be hours old during a valid long-running phase.
 
 ```bash
+# Not DRY_RUN-gated — this heartbeat write is an unconditional part of every
+# /work-on run once UNDER_ORCHESTRATION is true (see the skip check above),
+# matching sibling phase files (investigate.md, build.md, close.md) which
+# perform the same class of side effect without a governor.
 PHASE_START_TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
 **Phase**: Phase 0 — starting pipeline
@@ -245,7 +249,7 @@ fi
   for MEMBER in "${BATCH_MEMBERS[@]}"; do
     gh issue close "$MEMBER" {GH_FLAG} \
       --comment "Resolved as part of batch PR #{PR_NUMBER} (#{ISSUE_NUMBER}). See batch issue for details."
-    gh issue edit "$MEMBER" {GH_FLAG} --add-label "workflow:merged" 2>/dev/null || true
+    gh issue edit "$MEMBER" {GH_FLAG} --add-label "workflow:merged" 2>/dev/null || true  # <!-- allowlist:check-command-side-effects -->
   done
   ```
 - Member issues are closed in Phase 6 (after PR merge) — NOT before
@@ -310,7 +314,7 @@ resolve_script() {
 #
 # The case pattern is inlined at every call site (rather than centralised here)
 # because each operation has a different prose fallback — transition-label falls
-# back to inline gh issue edit; classify-lane has no valid prose fallback and
+# back to inline gh issue edit; classify-lane has no valid prose fallback and  <!-- allowlist:check-command-side-effects -->
 # must exit 1; validate-pr-target emits a WARNING and continues (the PR review
 # step catches any mismatch before merge). <!-- Added: forge#822 -->
 ```
