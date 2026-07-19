@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "issue": 3003,
+  "slices": [
+    {
+      "phase": "build",
+      "content": "## Known Affected Files\n- `bin/engine/contextpack.mjs`\n\n### CONTEXT annotation (comment #0)\n\n## Implementation Context\nSome context with no completion sentinel at all.\n\n### CONTRACT annotation (comment #2)\n\n## Builder Contract\n**Task type**: Bug Fix\n### Affected Files\n1. `bin/engine/contextpack.mjs` — no-op"
+    }
+  ]
+}

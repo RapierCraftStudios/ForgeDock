@@ -1,0 +1,19 @@
+{
+  "description": "Cross-repo satellite issue — mineContext() called with repo:'RapierCraftStudios/forgedock-platform' must thread that repo into every gh call (-R args on issue view/issue list, repos/{repo}/... path on the api comments/timeline calls) and the assembled pack must be structurally identical in shape to a same-repo pack.",
+  "issueNumber": 42,
+  "repo": "RapierCraftStudios/forgedock-platform",
+  "phaseId": "investigate",
+  "assembleOpts": {},
+  "issueView": {
+    "number": 42,
+    "title": "fix: satellite handler bug",
+    "body": "Reported against the platform satellite.",
+    "labels": [],
+    "state": "OPEN",
+    "milestone": null
+  },
+  "commentsRaw": "[{\"id\":1,\"author\":\"agent-bot\",\"body\":\"<!-- FORGE:INVESTIGATOR -->\\n## Investigation Report\\n**Verdict**: CONFIRMED\\n**Confidence**: HIGH\\n**Severity**: LOW\\n**Task Type**: Bug Fix\\n## Affected Files\\n- `src/platform/handler.ts` — satellite-repo file\\n<!-- INVESTIGATION:COMPLETE -->\",\"createdAt\":\"2026-01-01T00:00:00Z\"}]",
+  "timelineRaw": "[]",
+  "prListById": {},
+  "gistById": {}
+}

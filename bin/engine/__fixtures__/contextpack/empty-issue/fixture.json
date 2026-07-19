@@ -1,0 +1,19 @@
+{
+  "description": "Empty issue: no comments, no labels, no annotations — pack must still be minimal but schema-valid.",
+  "issueNumber": 3001,
+  "repo": null,
+  "phaseId": "investigate",
+  "assembleOpts": {},
+  "issueView": {
+    "number": 3001,
+    "title": "chore: placeholder issue with no activity",
+    "body": "",
+    "labels": [],
+    "state": "OPEN",
+    "milestone": null
+  },
+  "commentsRaw": "[]",
+  "timelineRaw": "[]",
+  "prListById": {},
+  "gistById": {}
+}
