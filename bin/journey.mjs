@@ -747,7 +747,7 @@ export async function preflight(ctx) {
 // Act II — Forging: command symlinks + SessionStart hook (Task 6)
 // ---------------------------------------------------------------------------
 
-import { mkdir, symlink, readlink, lstat, readdir, rename, copyFile, readFile, writeFile, unlink, rm } from "fs/promises";
+import { mkdir, symlink, readlink, lstat, readdir, rename, copyFile, readFile, writeFile, unlink, rm, open } from "fs/promises";
 import { compareVersions } from "./registry.mjs";
 import { relative, dirname as pathDirname } from "path";
 import {
@@ -879,6 +879,77 @@ async function saveCopiedManifest(manifestPath, manifest) {
 // future pid-matched run and no other cleanup path will ever reclaim
 // (forge#2612). Generous relative to real write→rename latency.
 const STALE_MANIFEST_TMP_AGE_MS = 60_000;
+
+// Age (ms) above which a held manifest lock file is assumed to be a
+// crash-orphan (the holder died between acquiring the lock and releasing it)
+// rather than a live concurrent holder, and is safe to reclaim. Generous
+// relative to the real read→merge→write critical section this lock guards
+// (one readFile+JSON.parse, an in-memory loop, one writeFile+rename) —
+// mirrors STALE_MANIFEST_TMP_AGE_MS's reasoning (forge#2612) applied to the
+// lock file instead of the tmp write sibling (forge#2637).
+const STALE_MANIFEST_LOCK_AGE_MS = 10_000;
+
+// Bounded retry/backoff for acquireManifestLock (forge#2637). Total worst-case
+// wait is small (a few hundred ms) — long enough to let a concurrent holder's
+// short critical section finish, short enough that a stuck/foreign lock never
+// meaningfully delays a forge() run before falling back to unlocked behavior.
+const MANIFEST_LOCK_RETRY_DELAYS_MS = [10, 20, 40, 80, 150];
+
+/**
+ * Acquire an exclusive lock guarding the manifest's final read→merge→write
+ * critical section (forge#2637). Uses `fs.open(lockPath, 'wx')` — O_EXCL
+ * create — as a zero-dependency mutual-exclusion primitive: the call fails
+ * with EEXIST if another process already holds the lock, and succeeds
+ * atomically otherwise (no separate exists-check + create races).
+ *
+ * On contention, retries with the bounded backoff schedule above. Each retry
+ * also opportunistically busts a stale lock (older than
+ * STALE_MANIFEST_LOCK_AGE_MS — a crash-orphan from a holder that died before
+ * releasing) so a hard-killed process can never permanently deadlock future
+ * runs.
+ *
+ * Never throws. Returns the open file handle on success, or `null` if the
+ * lock could not be acquired after all retries — callers MUST treat `null`
+ * as "proceed without the lock" (this file's manifest-save path is
+ * best-effort/never-abort by design; the lock narrows the race window, it is
+ * not a hard correctness requirement).
+ */
+async function acquireManifestLock(manifestPath) {
+  const lockPath = manifestPath + ".lock";
+  for (let attempt = 0; attempt <= MANIFEST_LOCK_RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      return await open(lockPath, "wx");
+    } catch (err) {
+      if (err?.code !== "EEXIST") return null; // unexpected error (e.g. EACCES) — proceed unlocked
+      // Contended — opportunistically reclaim a stale (crash-orphaned) lock.
+      try {
+        const st = await lstat(lockPath);
+        if (Date.now() - st.mtimeMs >= STALE_MANIFEST_LOCK_AGE_MS) {
+          await unlink(lockPath).catch(() => {});
+        }
+      } catch {
+        // lock file vanished between the failed open and this stat (the
+        // holder released it) — fall through to the next attempt/retry.
+      }
+      if (attempt === MANIFEST_LOCK_RETRY_DELAYS_MS.length) return null; // retries exhausted
+      await new Promise((resolve) => setTimeout(resolve, MANIFEST_LOCK_RETRY_DELAYS_MS[attempt]));
+    }
+  }
+  return null;
+}
+
+/**
+ * Release a lock acquired by acquireManifestLock() (forge#2637). Closes the
+ * handle and removes the lock file. Never throws — same best-effort contract
+ * as the rest of the manifest-save path; a failure to release cleanly is
+ * recovered by the next contender's stale-lock reclaim in
+ * acquireManifestLock() rather than by this function succeeding.
+ */
+async function releaseManifestLock(manifestPath, handle) {
+  if (!handle) return;
+  await handle.close().catch(() => {});
+  await unlink(manifestPath + ".lock").catch(() => {});
+}
 
 /**
  * Best-effort sweep of crash-orphaned pid-suffixed manifest tmp siblings
@@ -2077,15 +2148,30 @@ export async function forge(ctx) {
       // silently drop the other run's changes. loadCopiedManifest() never
       // throws (missing/corrupt on-disk manifest resolves to an empty one),
       // so this stays within the surrounding never-abort contract.
-      const mergedManifest = await loadCopiedManifest(manifestPath);
-      for (const { rel, op } of manifestOps) {
-        if (op === "add") {
-          mergedManifest.files[rel] = true;
-        } else {
-          delete mergedManifest.files[rel];
+      //
+      // Lock the re-read→merge→write sequence itself (forge#2637): #2614
+      // narrowed the race from "whole run duration" to this critical section,
+      // but left it unprotected — a third concurrent forge() could still land
+      // its own save inside the gap between this run's re-read and its own
+      // write-rename completing. acquireManifestLock() is best-effort: on
+      // failure to acquire (contention exhausted retries, or an unexpected
+      // error) it returns null and this run proceeds unlocked, same as
+      // before — the lock narrows the window further, it does not change the
+      // never-abort contract.
+      const lockHandle = await acquireManifestLock(manifestPath);
+      try {
+        const mergedManifest = await loadCopiedManifest(manifestPath);
+        for (const { rel, op } of manifestOps) {
+          if (op === "add") {
+            mergedManifest.files[rel] = true;
+          } else {
+            delete mergedManifest.files[rel];
+          }
         }
+        await saveCopiedManifest(manifestPath, mergedManifest);
+      } finally {
+        await releaseManifestLock(manifestPath, lockHandle);
       }
-      await saveCopiedManifest(manifestPath, mergedManifest);
     } catch {
       manifestSaveFailed = true;
     }
