@@ -430,6 +430,179 @@ fi
 
 ---
 
+## Phase V5.1: Auto-ADR Extraction (transactional with PR) <!-- Added: forge#2687 -->
+
+**Goal**: Promote tradeoff-shaped decisions from the just-posted `FORGE:BUILDER` comment's `### Approach`
+section into human-readable, git-tracked ADR markdown files at `devdocs/decisions/NNN-{slug}.md` —
+committed into the **same worktree, before push** so the files ride the issue's own PR diff and are
+reviewed and merged exactly like any other change. Architect plans on future runs load matching ADRs
+as constraints before writing any code.
+
+**Historical note (forge#2687)**: this step previously ran in `close.md` Phase C5.4, *after* the PR
+had already merged (`close.md` is invoked with `--pr {PR_NUMBER}` = the merged PR number). Writing
+ADR files that late meant the "commit" (if it even succeeded) landed on a worktree that Phase C6
+deletes moments later — an unreachable local commit, never pushed, never part of any diff. That is
+the exact "written but uncommitted" failure this phase closes. Extraction now happens here, before
+`{BRANCH}` is ever pushed to `origin`, so there is no post-merge path left that can orphan a file.
+
+**This phase is non-blocking** — if ADR extraction, file write, or commit fails at any step, log the
+reason and continue to Phase V5's ancestry audit / Phase 4 push. Never block the build on ADR
+generation.
+
+**Skip if**: `devdocs/decisions/` directory does not exist in the repository root (feature not
+installed) OR a `<!-- FORGE:ADR_EXTRACTED -->` comment already exists on the issue (idempotency
+guard — covers resumed/re-run builds).
+
+### Step 1: Idempotency check
+
+```bash
+ADR_EXTRACTED=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:ADR_EXTRACTED"))] | length > 0' 2>/dev/null || echo "false")
+DECISIONS_DIR="{WORKTREE_PATH}/devdocs/decisions"
+
+if [ "$ADR_EXTRACTED" = "true" ] || [ ! -d "$DECISIONS_DIR" ]; then
+  echo "[ADR] Skipping — already extracted for this issue, or devdocs/decisions/ not installed"
+else
+  : # continue to Step 2
+fi
+```
+
+### Step 2: Extract tradeoff-shaped text from FORGE:BUILDER's Approach section
+
+Source is the `FORGE:BUILDER` comment posted by `implement.md` Phase I6 (already on the issue by
+this point) — not `FORGE:TRAJECTORY`, which does not exist yet this early in the pipeline.
+
+```bash
+APPROACH_TEXT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:BUILDER") and (contains("FORGE:BUILDER:COMPLETE") | not))] | last | .body // ""' \
+  2>/dev/null | sed -n '/^### Approach$/,/^### /p' | sed '1d;$d')
+
+if [ -z "$APPROACH_TEXT" ]; then
+  echo "[ADR] No Approach text found on FORGE:BUILDER comment — skipping ADR extraction"
+  ADR_FILES_WRITTEN=0
+fi
+```
+
+### Step 3: Filter for tradeoff shape and write ADR file(s)
+
+Same tradeoff heuristic as before (a choice keyword AND a rationale keyword must both be present) —
+only ported to a single Approach paragraph instead of a bulleted Decisions list, so it is evaluated
+once per build rather than once per bullet.
+
+```bash
+ADR_FILES_WRITTEN=0
+
+if [ -n "$APPROACH_TEXT" ] && [ -d "$DECISIONS_DIR" ]; then
+  CHOICE_MATCH=$(echo "$APPROACH_TEXT" | grep -iE 'chose|chosen|opted|decided|instead of|rather than|over ' || true)
+  RATIONALE_MATCH=$(echo "$APPROACH_TEXT" | grep -iE 'because|since[[:space:]]|so[[:space:]]|to avoid|prevents|due to' || true)
+
+  if [ -z "$CHOICE_MATCH" ] || [ -z "$RATIONALE_MATCH" ]; then
+    echo "[ADR] Skipped (not a tradeoff): $APPROACH_TEXT"
+  else
+    COMMIT_SHA=$(git -C {WORKTREE_PATH} rev-parse HEAD 2>/dev/null || echo "unknown")
+    # Anchor: first backtick-quoted path-like string in the Approach text — same extraction
+    # as the original close.md logic. architect.md Phase A1.5 reads this field directly
+    # (`grep "^anchor:"`) and `continue`s past any ADR where it's empty, so a missing anchor
+    # here means the file is silently never matched/injected by future architect runs.
+    ANCHOR_PATH=$(echo "$APPROACH_TEXT" | grep -oE '`[a-zA-Z][^`]*/[^`]+`' | head -1 | tr -d '`' || true)
+    SLUG=$(echo "$APPROACH_TEXT" | tr '[:upper:]' '[:lower:]' | \
+      sed 's/[^a-z0-9 ]/ /g' | tr -s ' ' '-' | cut -c1-40 | sed 's/-$//')
+    ADR_FILENAME="{NUMBER}-${SLUG}.md"
+    ADR_PATH="$DECISIONS_DIR/$ADR_FILENAME"
+
+    if [ -f "$ADR_PATH" ]; then
+      echo "[ADR] Already exists — skipping: $ADR_FILENAME"
+      ADR_FILES_WRITTEN=$((ADR_FILES_WRITTEN + 1))
+    else
+      cat > "$ADR_PATH" <<ADR_EOF
+---
+issue: {NUMBER}
+pr: pending
+commit: ${COMMIT_SHA}
+status: fresh
+anchor: ${ANCHOR_PATH:-unknown}
+created: $(date -u +%Y-%m-%d)
+---
+
+# ADR — ${APPROACH_TEXT}
+
+## Decision
+
+${APPROACH_TEXT}
+
+## Context
+
+Auto-extracted from the FORGE:BUILDER comment's Approach section on issue #{NUMBER}.
+
+**Citations**:
+- Issue: https://github.com/{GH_REPO}/issues/{NUMBER}
+- Commit: ${COMMIT_SHA}
+- Anchor: \`${ANCHOR_PATH:-no file anchor found}\`
+
+## Status
+
+\`fresh\` — anchor is active. Architect plans on future runs will inject this ADR as a constraint
+when the anchor path overlaps the contract files (see `architect.md` Phase A1.5 — it reads the
+`anchor:` frontmatter field directly, and skips any ADR where it is empty).
+
+Set \`status: needs-review\` manually (or the staleness pass in \`build-knowledge-index.mjs\` will
+flip it automatically) when the anchored code region no longer exists.
+ADR_EOF
+      echo "[ADR] Written: $ADR_FILENAME"
+      ADR_FILES_WRITTEN=$((ADR_FILES_WRITTEN + 1))
+    fi
+  fi
+fi
+```
+
+The `pr: pending` frontmatter field is intentional — the PR does not exist yet at this point in the
+pipeline (PR creation is Phase 4, still ahead). `close.md` Phase C3/C6.5 back-fills the real PR
+number into any ADR frontmatter matching this issue once the PR is known (see below).
+
+### Step 4: Commit ADR files into the same worktree, before push (MANDATORY — this is the transactional step)
+
+```bash
+if [ "$ADR_FILES_WRITTEN" -gt 0 ]; then
+  cd {WORKTREE_PATH}
+  git add devdocs/decisions/*.md 2>/dev/null || true
+  if ! git diff --cached --quiet 2>/dev/null; then
+    git commit -s -m "docs(decisions): auto-ADR from build decisions (#{NUMBER})" \
+      && echo "[ADR] Committed ${ADR_FILES_WRITTEN} ADR file(s) — will ride PR #{NUMBER}'s diff on push" \
+      || echo "[ADR] WARNING: commit failed — ADR file(s) written but not committed (non-blocking; will surface as an uncommitted diff for V5's ancestry audit to catch)"
+  else
+    echo "[ADR] No staged changes — ADR file(s) already committed"
+  fi
+fi
+```
+
+Because this runs **before** Phase 4B's `git push`, a successful commit here is pushed with every
+other commit on `{BRANCH}` and appears in the PR diff exactly like the implementation change itself
+— it is reviewed, and it merges (or doesn't) atomically with the rest of the PR. There is no
+worktree-deletion window between "committed" and "pushed": Phase 6E's worktree cleanup does not run
+until long after this branch is on `origin` and merged.
+
+### Step 5: Post audit annotation
+
+```bash
+if [ "${ADR_FILES_WRITTEN:-0}" -gt 0 ]; then
+  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ADR_EXTRACTED -->
+${ADR_FILES_WRITTEN} ADR file(s) auto-extracted from the build's Approach decision and committed to
+\`devdocs/decisions/\` on branch \`{BRANCH}\` — they ride this issue's own PR diff (transactional:
+forge#2687) rather than being written after merge.
+
+Future architect runs will load matching ADRs as constraints when anchor paths overlap contract files.
+
+ADRs are human-editable — update or remove them as the codebase evolves. The staleness pass in
+\`build-knowledge-index.mjs\` automatically flips \`status: needs-review\` when an anchor is dead.
+
+<!-- FORGE:ADR_EXTRACTED:COMPLETE -->" 2>/dev/null || true
+else
+  echo "[ADR] No tradeoff-shaped decision found in Approach text — no ADR files written"
+fi
+```
+
+---
+
 ## Output
 
 Return structured output to the caller:
@@ -441,7 +614,8 @@ VALIDATE_RESULT:
   format_issues_fixed: {COUNT}
   proxy_violations_fixed: {COUNT}
   deploy_completeness_fixes: [{VAR_NAME: location_added}, ...]
-  commits_added: [{SHA}, ...]  # from V5 if any
+  commits_added: [{SHA}, ...]  # from V5 (and V5.1's ADR commit, if any)
+  adr_files_written: {COUNT}  # from V5.1, 0 if none
   blocker: {description if gate_passed=false}
   verification_skipped: []  # empty when all configured checks ran; list of skipped check names otherwise
                             # e.g. ["python.format", "typescript.typecheck/build"]
