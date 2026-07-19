@@ -667,7 +667,24 @@ If the gate exits with `RESULT: BLOCK DEPLOY` → **STOP**. A `<!-- FORGE:GATE_F
 ## Phase 7: Finding Triage & Issue Creation
 
 ### 7A: Extract Findings
-From PR comments, extract structured findings (`<!-- FINDING:... -->`). Each line is `PREFIX-N|CONFIDENCE|SEVERITY|file:line|summary`, optionally followed by a 6th `|DISPOSITION` field (`FILE` default, or `NOTED`) — see `commands/review-pr-agents/protocols.md` § Structured Findings Protocol (the sole source of the admission rule; not restated here). If none found, scan for unstructured findings. If still 0 → skip to Phase 8.
+
+```bash
+HAS_SYNTHESIS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[].body' | grep -c 'REVIEW-FINDINGS-SYNTHESIZED-START' || echo 0)
+
+if [ "$HAS_SYNTHESIS" -gt 0 ]; then
+    # Extract finding IDs from synthesized block using jq scan() — no grep -oP needed
+    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+        --jq '[.[] | select(.body | test("REVIEW-FINDINGS-SYNTHESIZED-START")) | .body | scan("<!-- FINDING:([^>]+) -->") | .[0]] | join("\n")')
+else
+    # Extract finding IDs from all agent comments using jq scan() — portable, no grep -oP
+    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+        --jq '[.[].body | scan("<!-- FINDING:([^>]+) -->") | .[0]] | join("\n")')
+fi
+```
+
+Each line of `$FINDINGS` is `PREFIX-N|CONFIDENCE|SEVERITY|file:line|summary`, optionally followed by a 6th `|DISPOSITION` field (`FILE` default, or `NOTED`) — see `commands/review-pr-agents/protocols.md` § Structured Findings Protocol (the sole source of the admission rule; not restated here). If `$FINDINGS` is empty: scan for unstructured findings. If still 0 → skip to Phase 8.
+
+**This extraction was previously prose-only in this file** ("From PR comments, extract structured findings") with no corresponding `$FINDINGS` bash assignment — the identical `gh api ... scan(...)` block from `commands/review-pr.md` Phase 6A is now mirrored here so Phase 7A.5 below has a real value to partition, rather than reading an unset variable. <!-- Fixed during forge#2683 review: 7A.5 previously did `done <<< "$FINDINGS"` against a variable this file never assigned, which would have silently filed zero findings on every staging review. -->
 
 ### 7A.5: Admission Gate — Split FILE vs NOTED <!-- Added: forge#2683 -->
 
