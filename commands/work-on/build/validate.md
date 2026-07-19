@@ -501,6 +501,11 @@ if [ -n "$APPROACH_TEXT" ] && [ -d "$DECISIONS_DIR" ]; then
     echo "[ADR] Skipped (not a tradeoff): $APPROACH_TEXT"
   else
     COMMIT_SHA=$(git -C {WORKTREE_PATH} rev-parse HEAD 2>/dev/null || echo "unknown")
+    # Anchor: first backtick-quoted path-like string in the Approach text — same extraction
+    # as the original close.md logic. architect.md Phase A1.5 reads this field directly
+    # (`grep "^anchor:"`) and `continue`s past any ADR where it's empty, so a missing anchor
+    # here means the file is silently never matched/injected by future architect runs.
+    ANCHOR_PATH=$(echo "$APPROACH_TEXT" | grep -oE '`[a-zA-Z][^`]*/[^`]+`' | head -1 | tr -d '`' || true)
     SLUG=$(echo "$APPROACH_TEXT" | tr '[:upper:]' '[:lower:]' | \
       sed 's/[^a-z0-9 ]/ /g' | tr -s ' ' '-' | cut -c1-40 | sed 's/-$//')
     ADR_FILENAME="{NUMBER}-${SLUG}.md"
@@ -515,6 +520,8 @@ if [ -n "$APPROACH_TEXT" ] && [ -d "$DECISIONS_DIR" ]; then
 issue: {NUMBER}
 pr: pending
 commit: ${COMMIT_SHA}
+status: fresh
+anchor: ${ANCHOR_PATH:-unknown}
 created: $(date -u +%Y-%m-%d)
 ---
 
@@ -524,10 +531,20 @@ created: $(date -u +%Y-%m-%d)
 
 ${APPROACH_TEXT}
 
+## Context
+
+Auto-extracted from the FORGE:BUILDER comment's Approach section on issue #{NUMBER}.
+
+**Citations**:
+- Issue: https://github.com/{GH_REPO}/issues/{NUMBER}
+- Commit: ${COMMIT_SHA}
+- Anchor: \`${ANCHOR_PATH:-no file anchor found}\`
+
 ## Status
 
 \`fresh\` — anchor is active. Architect plans on future runs will inject this ADR as a constraint
-when the anchor path overlaps the contract files.
+when the anchor path overlaps the contract files (see `architect.md` Phase A1.5 — it reads the
+`anchor:` frontmatter field directly, and skips any ADR where it is empty).
 
 Set \`status: needs-review\` manually (or the staleness pass in \`build-knowledge-index.mjs\` will
 flip it automatically) when the anchored code region no longer exists.
