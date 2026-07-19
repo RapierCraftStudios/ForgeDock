@@ -192,6 +192,13 @@ export function validateContextPack(pack) {
     try {
       packBytes = Buffer.byteLength(JSON.stringify(pack), 'utf8');
     } catch {
+      // JSON.stringify() throws for circular references and other
+      // non-serializable values (BigInt, etc.) — that is a malformed pack,
+      // not a "size check doesn't apply" case, and must not be silently
+      // reported as valid.
+      errors.push(
+        'Pack contains a non-serializable value (circular reference or similar) and cannot be validated for size',
+      );
       packBytes = null;
     }
     if (packBytes !== null && packBytes > MAX_PACK_BYTES && !packTruncated) {

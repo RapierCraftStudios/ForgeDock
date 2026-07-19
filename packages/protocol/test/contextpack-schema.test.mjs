@@ -151,6 +151,18 @@ test('contextpack-schema: validateContextPack accepts a whole pack over MAX_PACK
   assert.equal(result.truncated, true);
 });
 
+test('contextpack-schema: validateContextPack rejects a pack containing a circular reference instead of silently reporting valid', () => {
+  // A circular reference makes JSON.stringify() throw inside the whole-pack
+  // size-cap check. That must surface as an explicit error, not be silently
+  // treated as "size check doesn't apply" (forge#2707).
+  const pack = validPack();
+  pack.slices[0].self = pack.slices[0];
+  assert.throws(() => JSON.stringify(pack));
+  const result = validateContextPack(pack);
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some((e) => e.includes('non-serializable')));
+});
+
 test('contextpack-schema: validateContextPack rejects a pack whose slices array exceeds MAX_SLICES, without requiring oversized content', () => {
   // Every slice here is trivially small and individually well within
   // MAX_SLICE_BYTES — only the *count* of slices is invalid. This proves the
