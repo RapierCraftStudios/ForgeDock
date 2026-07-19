@@ -1175,7 +1175,11 @@ async function pruneOrphanedSymlinks(targetDir, commandsDir) {
 // way to compute the correct absolute path here (review finding on PR #2658,
 // forge#2659). Deliberately narrow: only fires when isAbsolute() has already
 // said "no" and the string still starts with `<letter>:` immediately
-// followed by a non-separator character.
+// followed by a non-separator character. Platform-gated (review finding
+// forge#2663): on POSIX, `:` has no special meaning in filenames, so a
+// literal relative target like `C:foo` is a perfectly valid path component
+// and must NOT be misclassified as an unresolvable Windows drive-relative
+// path — only apply this heuristic on win32.
 const WINDOWS_DRIVE_RELATIVE_RE = /^[A-Za-z]:(?![\\/])/;
 
 export async function pruneStaleExtensionlessEntries(targetDir) {
@@ -1206,11 +1210,14 @@ export async function pruneStaleExtensionlessEntries(targetDir) {
     // Two shapes isAbsolute() alone misclassifies as "relative" and would
     // otherwise be wrongly joined onto targetDir:
     //   - Windows drive-relative ("C:foo") — see WINDOWS_DRIVE_RELATIVE_RE
-    //     above; unresolvable here, so the entry is left untouched.
+    //     above; unresolvable here, so the entry is left untouched. Only
+    //     meaningful on win32 (review finding forge#2663) — on POSIX, `:` is
+    //     just an ordinary filename character, so this check is skipped
+    //     there and the target falls through to normal relative resolution.
     //   - Shell-style tilde ("~/foo", "~\foo", or bare "~") — expand against
     //     os.homedir() first, matching shell semantics (review finding on
     //     PR #2658, forge#2660).
-    if (WINDOWS_DRIVE_RELATIVE_RE.test(linkTarget)) continue; // can't resolve without the drive's own cwd — leave alone
+    if (process.platform === "win32" && WINDOWS_DRIVE_RELATIVE_RE.test(linkTarget)) continue; // can't resolve without the drive's own cwd — leave alone
     let effectiveTarget = linkTarget;
     if (effectiveTarget === "~" || effectiveTarget.startsWith("~/") || effectiveTarget.startsWith("~\\")) {
       effectiveTarget = join(os.homedir(), effectiveTarget.slice(1));
