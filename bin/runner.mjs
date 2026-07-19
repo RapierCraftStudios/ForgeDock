@@ -132,6 +132,17 @@ const DEFAULT_CLI_TIMEOUT_MS = 15 * 60 * 1000;
 // it is far shorter than DEFAULT_CLI_TIMEOUT_MS. Mirrors the timeout already
 // used by the `claude --version` doctor check in bin/forgedock.mjs.
 const CLI_PROBE_TIMEOUT_MS = 5000;
+// forge#2702: wall-clock bound for a single `gh` call made by defaultGhIo()
+// (the context-pack assembler's mining path). This is an optimization layer
+// (fail-open per the context_packs.enabled docblock) sitting in front of
+// every phase run, not a user-facing operation someone is deliberately
+// waiting on — it must fail fast rather than silently extend the phase's
+// own wall-clock budget. Shorter than CLI_PROBE_TIMEOUT_MS's sibling
+// concerns would suggest not because gh is expected to be slower, but
+// because mineContext() makes several sequential gh calls per pack build
+// (issue view, comments, timeline, review-findings per linked PR) and each
+// one needs its own bounded budget within the overall phase timeout.
+const CONTEXT_PACK_GH_TIMEOUT_MS = 30 * 1000;
 /**
  * Wraps a Set in a Proxy that blocks add()/delete()/clear(), so the
  * returned collection is genuinely read-only — not just Object.frozen.
@@ -322,12 +333,26 @@ export function derivePhaseIdFromCommandName(commandName) {
  * to the `claude` CLI), so a minimal one is defined here rather than adding
  * a new cross-file dependency for a single call site.
  *
+ * Bounded like every other `spawnSync` call in this file (review finding on
+ * PR #2722, SEC-1/QUAL-1): a `timeout` so a hung/slow `gh` call cannot stall
+ * `runCommand()` indefinitely — this path is explicitly an optimization
+ * (fail-open per the module docblock above), so it must fail fast rather
+ * than block the phase it's trying to speed up — and `maxBuffer` reusing
+ * the file's own `DEFAULT_SPAWN_MAX_BUFFER_BYTES` instead of Node's 1MB
+ * default, since `mineContext()`'s `gh api --paginate` calls on a
+ * comment-heavy issue can plausibly exceed 1MB and would otherwise throw
+ * `ENOBUFS` for exactly the issues this feature helps most.
+ *
  * @returns {{gh: (args: string[]) => Promise<string>}}
  */
 function defaultGhIo() {
   return {
     async gh(args) {
-      const result = spawnSync("gh", args, { encoding: "utf-8" });
+      const result = spawnSync("gh", args, {
+        encoding: "utf-8",
+        timeout: CONTEXT_PACK_GH_TIMEOUT_MS,
+        maxBuffer: DEFAULT_SPAWN_MAX_BUFFER_BYTES,
+      });
       if (result.error) throw result.error;
       if (result.status !== 0) {
         throw new Error(
