@@ -144,9 +144,9 @@ describe('mineContext — issue with FORGE annotation types present', () => {
   ].join('\n');
 
   const comments = JSON.stringify([
-    { id: 1, user: { login: 'agent-bot' }, body: contractBody, created_at: '2026-01-01T00:00:00Z' },
-    { id: 2, user: { login: 'agent-bot' }, body: investigatorBody, created_at: '2026-01-01T00:05:00Z' },
-    { id: 3, user: { login: 'agent-bot' }, body: otherAnnotationsBody, created_at: '2026-01-01T00:10:00Z' },
+    { id: 1, author: 'agent-bot', body: contractBody, createdAt: '2026-01-01T00:00:00Z' },
+    { id: 2, author: 'agent-bot', body: investigatorBody, createdAt: '2026-01-01T00:05:00Z' },
+    { id: 3, author: 'agent-bot', body: otherAnnotationsBody, createdAt: '2026-01-01T00:10:00Z' },
   ]);
 
   it('parses every FORGE annotation type via packages/protocol parse(), not inline regex', async () => {
@@ -175,6 +175,25 @@ describe('mineContext — issue with FORGE annotation types present', () => {
     const investigator = result.annotations.find((a) => a.type === 'INVESTIGATOR');
     assert.equal(contract.commentId, 1);
     assert.equal(investigator.commentId, 2);
+  });
+
+  it('populates comment.author/comment.createdAt from the post-jq gh output shape', async () => {
+    // fetchAllComments()'s --jq filter already transforms the raw GitHub API
+    // shape ({user:{login}, created_at}) into {author, createdAt} before this
+    // module ever sees it — the mock IS standing in for gh + --jq together, so
+    // the fixture above uses the POST-jq field names. This test exists so a
+    // fixture regression back to the raw shape (author: "", createdAt: null)
+    // fails loudly instead of silently — see forge review-finding SPEC-5.
+    const io = ioFor({ comments });
+    const result = await mineContext(2701, { io });
+
+    assert.equal(result.comments.length, 3);
+    assert.equal(result.comments[0].author, 'agent-bot');
+    assert.equal(result.comments[0].createdAt, '2026-01-01T00:00:00Z');
+    for (const c of result.comments) {
+      assert.notEqual(c.author, '');
+      assert.notEqual(c.createdAt, null);
+    }
   });
 
   it('merges affected files from CONTRACT and INVESTIGATOR annotations, deduplicated', async () => {
@@ -210,7 +229,7 @@ describe('mineContext — deleted/missing gist handling', () => {
   it('marks an unfetchable gist unavailable instead of throwing', async () => {
     const gistBody = '<!-- FORGE:KNOWLEDGE_GIST: https://gist.github.com/exampleuser/deadbeef -->';
     const comments = JSON.stringify([
-      { id: 1, user: { login: 'agent-bot' }, body: gistBody, created_at: '2026-01-01T00:00:00Z' },
+      { id: 1, author: 'agent-bot', body: gistBody, createdAt: '2026-01-01T00:00:00Z' },
     ]);
     const io = ioFor({
       comments,
@@ -227,7 +246,7 @@ describe('mineContext — deleted/missing gist handling', () => {
   it('marks a malformed gist URL unavailable without ever calling gh gist view', async () => {
     const gistBody = '<!-- FORGE:PRIOR_GIST: not-a-real-url -->';
     const comments = JSON.stringify([
-      { id: 1, user: { login: 'agent-bot' }, body: gistBody, created_at: '2026-01-01T00:00:00Z' },
+      { id: 1, author: 'agent-bot', body: gistBody, createdAt: '2026-01-01T00:00:00Z' },
     ]);
     let gistViewCalled = false;
     const io = {
@@ -258,17 +277,17 @@ describe('mineContext — pagination for >100 comments', () => {
     const page1 = JSON.stringify(
       Array.from({ length: 100 }, (_, i) => ({
         id: i + 1,
-        user: { login: 'agent-bot' },
+        author: 'agent-bot',
         body: `comment ${i + 1}`,
-        created_at: '2026-01-01T00:00:00Z',
+        createdAt: '2026-01-01T00:00:00Z',
       })),
     );
     const page2 = JSON.stringify(
       Array.from({ length: 37 }, (_, i) => ({
         id: 101 + i,
-        user: { login: 'agent-bot' },
+        author: 'agent-bot',
         body: `comment ${101 + i}`,
-        created_at: '2026-01-01T00:00:00Z',
+        createdAt: '2026-01-01T00:00:00Z',
       })),
     );
     const paginatedOutput = `${page1}\n${page2}`;
@@ -283,9 +302,9 @@ describe('mineContext — pagination for >100 comments', () => {
   });
 
   it('skips an unparseable page without dropping the other pages', async () => {
-    const page1 = JSON.stringify([{ id: 1, user: { login: 'a' }, body: 'ok', created_at: 't' }]);
+    const page1 = JSON.stringify([{ id: 1, author: 'a', body: 'ok', createdAt: 't' }]);
     const badPage = 'not json';
-    const page3 = JSON.stringify([{ id: 3, user: { login: 'a' }, body: 'also ok', created_at: 't' }]);
+    const page3 = JSON.stringify([{ id: 3, author: 'a', body: 'also ok', createdAt: 't' }]);
     const io = ioFor({ comments: `${page1}\n${badPage}\n${page3}` });
 
     const result = await mineContext(2701, { io });
@@ -357,6 +376,86 @@ describe('mineContext — explicit repo threading (satellite/cross-repo support)
     const commentsCall = calls.find((c) => c.includes('/comments'));
     assert.ok(commentsCall.includes('repos/RapierCraftStudios/some-satellite/issues/2701/comments'));
     assert.ok(!commentsCall.includes('{owner}/{repo}'));
+  });
+});
+
+describe('mineContext — fetch-failure surfacing (review-finding SPEC-1/SPEC-2/SPEC-3)', () => {
+  // A genuine gh fetch failure (auth/rate-limit/network) must never be
+  // indistinguishable from a legitimate empty result — comments are the sole
+  // annotation source, so a swallowed comments-fetch failure would silently
+  // report "no pipeline history" for an issue that actually has extensive
+  // history. Each *FetchError field in meta exists to make that distinction
+  // observable to a caller instead of collapsing into `[]`/empty.
+
+  it('surfaces a comments-fetch failure via meta.commentsFetchError instead of reporting zero comments silently', async () => {
+    const io = {
+      gh: async (args) => {
+        const cmd = args.join(' ');
+        if (cmd.startsWith('issue view')) return ISSUE_JSON;
+        if (cmd.includes('/comments')) throw new Error('gh: rate limit exceeded');
+        if (cmd.includes('/timeline')) return '[]';
+        return '[]';
+      },
+    };
+    const result = await mineContext(2701, { io });
+
+    assert.deepEqual(result.comments, []);
+    assert.ok(result.meta.commentsFetchError);
+    assert.match(result.meta.commentsFetchError, /rate limit/);
+  });
+
+  it('does not set meta.commentsFetchError for a genuinely empty (zero-comment) issue', async () => {
+    const io = ioFor({ comments: '[]' });
+    const result = await mineContext(2701, { io });
+
+    assert.deepEqual(result.comments, []);
+    assert.equal('commentsFetchError' in result.meta, false);
+  });
+
+  it('surfaces a timeline-fetch failure via meta.linkedPrsFetchError instead of reporting zero linked PRs silently', async () => {
+    const io = {
+      gh: async (args) => {
+        const cmd = args.join(' ');
+        if (cmd.startsWith('issue view')) return ISSUE_JSON;
+        if (cmd.includes('/comments')) return '[]';
+        if (cmd.includes('/timeline')) throw new Error('gh: network error');
+        return '[]';
+      },
+    };
+    const result = await mineContext(2701, { io });
+
+    assert.deepEqual(result.linkedPrs, []);
+    assert.ok(result.meta.linkedPrsFetchError);
+    assert.match(result.meta.linkedPrsFetchError, /network error/);
+  });
+
+  it('does not set meta.linkedPrsFetchError when the issue genuinely has no linked PRs', async () => {
+    const io = ioFor({ timeline: '[]' });
+    const result = await mineContext(2701, { io });
+
+    assert.deepEqual(result.linkedPrs, []);
+    assert.equal('linkedPrsFetchError' in result.meta, false);
+  });
+
+  it('surfaces a review-findings-fetch failure per PR via meta.reviewFindingsFetchErrors instead of reporting zero findings silently', async () => {
+    const io = {
+      gh: async (args) => {
+        const cmd = args.join(' ');
+        if (cmd.startsWith('issue view')) return ISSUE_JSON;
+        if (cmd.includes('/comments')) return '[]';
+        if (cmd.includes('/timeline')) return JSON.stringify([42]);
+        if (cmd.startsWith('issue list')) throw new Error('gh: issue list failed');
+        return '[]';
+      },
+    };
+    const result = await mineContext(2701, { io });
+
+    assert.equal(result.linkedPrs.length, 1);
+    assert.equal(result.linkedPrs[0].number, 42);
+    assert.deepEqual(result.linkedPrs[0].reviewFindings, []);
+    assert.ok(result.meta.reviewFindingsFetchErrors);
+    assert.ok(result.meta.reviewFindingsFetchErrors[42]);
+    assert.match(result.meta.reviewFindingsFetchErrors[42], /issue list failed/);
   });
 });
 
