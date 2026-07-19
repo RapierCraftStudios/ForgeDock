@@ -37,6 +37,14 @@ export {
   SOFT_SKIP_RESULT_PHASES,
   validatePhaseResult,
 } from './phases.js';
+export {
+  SCHEMA_VERSION,
+  PACK_SLICE_NAMES,
+  MAX_PACK_BYTES,
+  MAX_SLICE_BYTES,
+  TRUNCATED_FIELD,
+  validateContextPack,
+} from './contextpack-schema.js';
 
 /**
  * @typedef {Object} ParsedAnnotation
