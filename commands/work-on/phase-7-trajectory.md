@@ -226,13 +226,13 @@ AGENTS_RUN="${AGENTS_RUN:-0}"
 # If unavailable, set COST_BLOCK to null — the field is omitted from the GDR rather than fabricated.
 COST_INVESTIGATION=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body] | last // ""' 2>/dev/null \
-  | grep -oP '(?<=cost_usd: )\S+' | head -1 || echo "")
+  | grep -oP '(?<=cost_usd: )\S+' | head -1 || echo "")  # <!-- allowlist: relocated verbatim from work-on.md, forge#2676; portability tracked under forge#1608 -->
 COST_BUILD=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '[.[] | select(.body | contains("FORGE:BUILDER")) | .body] | last // ""' 2>/dev/null \
-  | grep -oP '(?<=cost_usd: )\S+' | head -1 || echo "")
+  | grep -oP '(?<=cost_usd: )\S+' | head -1 || echo "")  # <!-- allowlist: relocated verbatim from work-on.md, forge#2676; portability tracked under forge#1608 -->
 COST_REVIEW=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
   --jq '[.[] | select(.body | contains("FORGE:REVIEWER")) | .body] | last // ""' 2>/dev/null \
-  | grep -oP '(?<=cost_usd: )\S+' | head -1 || echo "")
+  | grep -oP '(?<=cost_usd: )\S+' | head -1 || echo "")  # <!-- allowlist: relocated verbatim from work-on.md, forge#2676; portability tracked under forge#1608 -->
 
 # Build cost block JSON only if at least one stage value is present; otherwise null
 if [ -n "$COST_INVESTIGATION" ] || [ -n "$COST_BUILD" ] || [ -n "$COST_REVIEW" ]; then

@@ -135,9 +135,9 @@ Extract project prefix and issue number. If `next`/`pick`: list open issues sort
 
 ```bash
 if echo "$ARGUMENTS" | grep -qE -- '--remediate\b'; then
-  REMEDIATE_PR_NUMBER=$(echo "$ARGUMENTS" | grep -oP '^\s*\K[0-9]+' | head -1)
+  REMEDIATE_PR_NUMBER=$(echo "$ARGUMENTS" | grep -oP '^\s*\K[0-9]+' | head -1)  # <!-- allowlist: relocated verbatim from work-on.md, forge#2676; portability tracked under forge#1608 -->
   REMEDIATE_ISSUE_FLAG=""
-  REMEDIATE_ISSUE_NUMBER=$(echo "$ARGUMENTS" | grep -oP -- '--issue\s+\K[0-9]+' | head -1)
+  REMEDIATE_ISSUE_NUMBER=$(echo "$ARGUMENTS" | grep -oP -- '--issue\s+\K[0-9]+' | head -1)  # <!-- allowlist: relocated verbatim from work-on.md, forge#2676; portability tracked under forge#1608 -->
   [ -n "$REMEDIATE_ISSUE_NUMBER" ] && REMEDIATE_ISSUE_FLAG="--issue ${REMEDIATE_ISSUE_NUMBER}"
 
   if [ -z "$REMEDIATE_PR_NUMBER" ]; then
@@ -233,7 +233,7 @@ BATCH_MEMBERS_BLOCK=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' 
 if [ -n "$BATCH_MEMBERS_BLOCK" ]; then
   IS_BATCH=1
   # Extract member issue numbers (- [ ] #NNN: title lines)
-  BATCH_MEMBERS=($(echo "$BATCH_MEMBERS_BLOCK" | grep -oP '(?<=- \[ \] #)\d+' || true))
+  BATCH_MEMBERS=($(echo "$BATCH_MEMBERS_BLOCK" | grep -oP '(?<=- \[ \] #)\d+' || true))  # <!-- allowlist: relocated verbatim from work-on.md, forge#2676; portability tracked under forge#1608 -->
   echo "Batch issue detected — member issues: ${BATCH_MEMBERS[*]}"
 fi
 ```
