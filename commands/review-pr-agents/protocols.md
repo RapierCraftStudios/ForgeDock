@@ -152,11 +152,11 @@ Append this block at the very end of your comment (after the `---` footer line, 
 `<!-- FINDING:PREFIX-N|CONFIDENCE|SEVERITY|file.py:line|One-line summary|DISPOSITION -->`
 `<!-- REVIEW-FINDINGS-END -->`
 
-`DISPOSITION` is optional and defaults to `FILE` when omitted (fully backward-compatible with the pre-forge#2683 5-field format). See "Admission Gate — NOTED Disposition" below for when to set it to `NOTED`.
+`DISPOSITION` is optional and defaults to `FILE` when omitted (backward-compatible with the pre-forge#2683 5-field format). See "Admission Gate — NOTED Disposition" below for when to set it to `NOTED`.
 
 ### Rules
 
-1. **Include ALL findings at CONFIRMED, LIKELY, and POSSIBLE confidence** — every finding is recorded in the structured block. Nothing stays as an unread, unstructured PR comment. Most findings become a GitHub issue; findings that fail the Admission Gate below are recorded as `NOTED` instead — visible and searchable in the structured block, but not filed. **POSSIBLE findings are informational advisories (P3/non-blocking)** — they are tracked but do not require a fix PR and do not block merge. CONFIRMED and LIKELY findings are blocking at P1/P2 respectively.
+1. **Include ALL findings at CONFIRMED, LIKELY, and POSSIBLE confidence** — every finding is recorded in the structured block. Nothing stays as an unread, unstructured PR comment. Most findings become a GitHub issue; findings that fail the Admission Gate below are recorded as `NOTED` instead — visible and searchable, but not filed. **POSSIBLE findings are informational advisories (P3/non-blocking)** — they are tracked but do not require a fix PR and do not block merge. CONFIRMED and LIKELY findings are blocking at P1/P2 respectively.
 2. **One line per finding** — sequential numbering (PREFIX-1, PREFIX-2, ...)
 3. **Confidence**: `CONFIRMED`, `LIKELY`, or `POSSIBLE`
 4. **Severity**: `CRITICAL`, `HIGH`, `MEDIUM`, or `LOW`
@@ -166,20 +166,20 @@ Append this block at the very end of your comment (after the `---` footer line, 
 8. **Empty block**: If no findings at all, include just the START/END markers
 9. **HTML comments**: The block is invisible in rendered markdown but parseable by the review system
 
-### Admission Gate — NOTED Disposition
+### Admission Gate — NOTED Disposition <!-- Added: forge#2683 -->
 
-Not every LOW-severity or POSSIBLE-confidence finding should become a GitHub issue. A finding is **self-refuting** when the agent's own Evidence text concedes the flagged condition cannot actually be reached — e.g. "not exploitable", "cannot occur", "no changes required unless a fault-injection seam is added". Filing these forces the pipeline to pay full investigate-and-close cost on a ticket the agent already proved is a no-op — this was independently identified as the pipeline's largest systemic waste source (2026-07-19 audit of #2657, #2660).
+Not every LOW-severity or POSSIBLE-confidence finding should become a GitHub issue. A finding is **self-refuting** when the agent's own Evidence text concedes the flagged condition cannot actually be reached — e.g. "not exploitable", "cannot occur", "no changes required unless a fault-injection seam is added". Filing these forces the pipeline to pay full investigate-and-close cost on a ticket the agent already proved is a no-op.
 
 **Evaluate this gate per finding, BEFORE emitting its structured marker line:**
 
 1. If the finding's Evidence contains a reachability-concession phrase (regex below) AND does NOT also include a concrete "**How to reach it**:" line naming a specific input/state/call site that reaches the flagged code → disposition is `NOTED`.
 2. If Confidence is `POSSIBLE` OR Severity is `LOW`, filing requires an explicit "**How to reach it**:" line in the Evidence describing the concrete trigger. Without it → disposition is `NOTED`.
-3. CONFIRMED and LIKELY findings at MEDIUM+ severity are unaffected — they always `FILE`. The gate targets exactly the identified waste (self-refuting LOW/POSSIBLE tickets), not the pipeline's core signal.
+3. CONFIRMED and LIKELY findings at MEDIUM+ severity are unaffected — they always `FILE`.
 4. `NOTED` is not deletion. NOTED findings remain fully visible in the structured findings block and in the agent's PR comment — they are simply not turned into a GitHub issue. A later review pass that finds a real trigger can promote a NOTED finding to `FILE` (re-emit it with a concrete "How to reach it:" line).
 
 **Reachability-concession phrase regex** (case-insensitive, applied to the finding's Evidence text): `not exploitable|not reachable|cannot occur|can.t occur|no changes required unless|not exploitable through|never happens|not currently reachable|no known trigger`
 
-**Single source of truth**: This admission rule is defined ONLY in this file. `commands/review-pr.md` Phase 6 and `commands/review-pr-staging.md` Phase 7 read the `DISPOSITION` field emitted here and skip issue creation for `NOTED` findings — they do NOT restate the admission criteria. Persona files in the Agent Catalog below inherit this rule by reading this shared protocols file (see "Per-Agent Input Scoping" at the top of this document); they must not copy-paste the rule text.
+**Wiring**: `commands/review-pr.md` Phase 6 and `commands/review-pr-staging.md` Phase 7 read the `DISPOSITION` field and skip issue creation for `NOTED` findings — see `commands/review-pr-agents/protocols.md` § Structured Findings Protocol for the operational copy of this rule (kept in sync with this normative source; do not restate the admission criteria a third time anywhere else).
 
 ### Domain Prefixes
 
@@ -194,14 +194,15 @@ Not every LOW-severity or POSSIBLE-confidence finding should become a GitHub iss
 | API Design | `API` |
 | Database & Migration | `DB` |
 | Infrastructure | `INFRA` |
+| Config Schema | `CFG` |
+
 ### Example
 
 `<!-- REVIEW-FINDINGS-START -->`
-`<!-- FINDING:SEC-1|CONFIRMED|HIGH|src/api/routers/upload.py:45|SQL injection via unsanitized user input in query parameter -->`
-`<!-- FINDING:SEC-2|LIKELY|MEDIUM|src/worker/jobs/process.py:312|Potential SSRF through user-controlled proxy URL -->`
+`<!-- FINDING:SEC-1|CONFIRMED|HIGH|services/api/app/routers/scrape.py:45|SQL injection via unsanitized user input in query parameter -->`
+`<!-- FINDING:SEC-2|LIKELY|MEDIUM|services/worker/worker/queues.py:312|Potential SSRF through user-controlled proxy URL -->`
 `<!-- FINDING:SEC-3|POSSIBLE|LOW|shared/symlink.py:88|Symlink target could theoretically escape sandbox — NOTED, not exploitable through ForgeDock's own install path (its symlinks always use absolute targets)|NOTED -->`
 `<!-- REVIEW-FINDINGS-END -->`
-
 ---
 
 ## Agent Catalog
