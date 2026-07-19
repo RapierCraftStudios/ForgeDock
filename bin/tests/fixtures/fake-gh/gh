@@ -66,6 +66,15 @@ case "$SUBCMD" in
     ;;
   issue)
     if [ "$SUBSUBCMD" = "view" ]; then
+      # GH_FAKE_EXPECT_ISSUE pins the exact issue number the caller must
+      # request ($2 = the arg after "view"). Guards the BASH_REMATCH capture
+      # index in derive-finding-milestone.sh — without this, a wrong index
+      # (capturing the close verb instead of the number) would still be
+      # answered with GH_FAKE_ISSUE_JSON and pass. <!-- Added: forge#2666 -->
+      if [ -n "${GH_FAKE_EXPECT_ISSUE:-}" ] && [ "${2:-}" != "$GH_FAKE_EXPECT_ISSUE" ]; then
+        echo "fake-gh: issue view called with '${2:-}', expected '$GH_FAKE_EXPECT_ISSUE'" >&2
+        exit 1
+      fi
       JSON="${GH_FAKE_ISSUE_JSON:-}"
       [ -z "$JSON" ] && JSON='{}'
       if JQ_EXPR=$(find_jq_expr "$@"); then
