@@ -173,8 +173,8 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CONTRACT -->
 
 ### Deliverables
 
-| File | Change | Why |
-|------|--------|-----|
+| File | Change |
+|------|--------|
 {DELIVERABLES_ROWS}
 
 ### Acceptance Criteria
@@ -192,6 +192,8 @@ ${ATTRIBUTION_LINE}"
 ```
 
 Contract must be grounded in the investigation report. Every deliverable file must appear in the affected files list from the investigator. Adversarially validate the proposed fix against adjacent system layers before posting.
+
+**Deliverables table is intentionally terse** (forge#2685): list only `File | Change` — one line per file, no per-file rationale column. Per-file "why" belongs in the `FORGE:ARCHITECT` `### Affected Paths` table (Phase B4 below), which is posted later in the same build and is strictly more detailed (adds Function/Class, Implementation Order, Consistency Checks, Risk Assessment). A Contract that restates Architect's rationale ahead of time duplicates it row-for-row once Architect posts; do not add a "Why" column back.
 
 ### B2.1: Post FORGE:CLAIM on coordination issue (conditional — when running under orchestration batch) <!-- Added: forge#1736 -->
 
