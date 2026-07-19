@@ -732,11 +732,35 @@ export function assemblePack(phaseId, minedData, opts = {}) {
   // skipped.
   let packBytes = Buffer.byteLength(JSON.stringify(pack), 'utf-8');
   if (packBytes > maxPackBytes) {
-    const envelopeOverhead = packBytes - Buffer.byteLength(sliceContent, 'utf-8');
-    const shrunkBudget = Math.max(0, maxPackBytes - envelopeOverhead);
-    slice.content = truncateToBytes(sliceContent, shrunkBudget);
     slice.truncated = true;
     pack.truncated = true;
+
+    // A one-shot raw-byte budget calc is not sufficient: truncateToBytes()
+    // only guarantees the *raw* UTF-8 byte length of slice.content stays
+    // under budget, but JSON.stringify() escapes characters (quotes,
+    // backslashes, control chars) — notably the truncation marker's own
+    // literal "\n\n" prefix, which JSON always expands to the 4-byte
+    // sequence "\n\n" (forge#2724). That escaping can push the serialized
+    // pack back over maxPackBytes even after truncating slice.content to
+    // fit the raw budget. Re-measure after each attempt and keep shrinking
+    // until the *serialized* pack actually fits, bounded by a small
+    // iteration cap with a guaranteed-safe fallback.
+    let envelopeOverhead = packBytes - Buffer.byteLength(sliceContent, 'utf-8');
+    let budget = Math.max(0, maxPackBytes - envelopeOverhead);
+    const MAX_SHRINK_ATTEMPTS = 8;
+    for (let attempt = 0; attempt < MAX_SHRINK_ATTEMPTS; attempt++) {
+      slice.content = truncateToBytes(sliceContent, budget);
+      packBytes = Buffer.byteLength(JSON.stringify(pack), 'utf-8');
+      if (packBytes <= maxPackBytes) break;
+      if (budget === 0) {
+        // Envelope alone (with empty slice content) still doesn't fit —
+        // nothing further to shrink. Leave slice.content empty; the pack
+        // is as small as this function can make it.
+        break;
+      }
+      const overshoot = packBytes - maxPackBytes;
+      budget = Math.max(0, budget - overshoot);
+    }
   }
 
   return pack;
