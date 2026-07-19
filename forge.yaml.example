@@ -1044,3 +1044,31 @@ branches:
 #   # Local ledger path where imported cards are merged.
 #   # Default: ".forge/ledger" — must match index.cache_dir if configured.
 #   # ledger_path: ".forge/ledger"
+
+# =============================================================================
+# CONTEXT_PACKS (OPTIONAL, forge#2680/#2702)
+# Opt-in, schema-validated, miner-fed per-phase context packs. When enabled,
+# bin/runner.mjs mines deterministic GitHub state for the phase about to run
+# (bin/engine/contextpack.mjs's mineContext(), forge#2701), assembles it into
+# a versioned pack (assemblePack(), forge#2702) matching the schema/validator
+# in packages/protocol/src/contextpack-schema.js (forge#2700), and — only if
+# it validates — injects it into the phase's system prompt via the same
+# renderContextPackSection() path bin/runner.mjs already uses.
+#
+# This is a SEPARATE, independently-toggled mechanism from the always-on
+# per-phase pack bin/engine.mjs already builds via bin/engine/context-pack.mjs
+# (forge#2383, un-schema'd, no flag) — that system is unaffected by this flag
+# and keeps running unconditionally either way. This flag only controls the
+# newer, schema-validated pack, and only takes effect when a caller has not
+# already supplied its own contextPack string.
+#
+# Fail-open: a pack that fails schema validation, a mining error, or the flag
+# being unset/false all fall back to exactly today's behavior — no crash, no
+# empty prompt. Every existing repo's forge.yaml that omits this section gets
+# zero behavior change.
+# =============================================================================
+
+# context_packs:
+#   # Master switch. Default: false — must be explicitly opted into.
+#   enabled: false
+

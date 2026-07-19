@@ -479,7 +479,25 @@ export async function runIssue(opts) {
     // additive-only field; bin/engine/runlog.mjs's deriveState()/eventsFromIndex()
     // pass unrecognized event fields through untouched, so every existing
     // consumer of PHASE_COMMIT events is unaffected by its presence/absence.
-    appendEvent(dir, issue, { event: "PHASE_COMMIT", phase: phase.id, outputs: outcome.outputs || {}, usage: outcome.usage ?? null, engineNative: !!phase.execute });
+    // forge#2702: contextPackValid/Hash/Bytes(/Errors) are additive-only,
+    // present only when bin/runner.mjs's context_packs.enabled path actually
+    // ran for this phase (see runPhaseWithRetry's lastContextPackMeta above)
+    // — absent otherwise, matching the engineNative field's precedent above.
+    appendEvent(dir, issue, {
+      event: "PHASE_COMMIT",
+      phase: phase.id,
+      outputs: outcome.outputs || {},
+      usage: outcome.usage ?? null,
+      engineNative: !!phase.execute,
+      ...(outcome.contextPackValid !== undefined
+        ? {
+            contextPackValid: outcome.contextPackValid,
+            contextPackHash: outcome.contextPackHash ?? null,
+            contextPackBytes: outcome.contextPackBytes ?? null,
+            ...(outcome.contextPackErrors ? { contextPackErrors: outcome.contextPackErrors } : {}),
+          }
+        : {}),
+    });
     state = deriveState(readLog(dir, issue));
     if (outcome.terminalReason) state.terminalReason = outcome.terminalReason;
     await projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } });
@@ -901,9 +919,27 @@ async function runPhaseWithRetry(phase, state, ctx) {
     }
     allAttemptsThrew = false;
     lastUsage = result?.usage ?? null;
+    // forge#2702: bin/runner.mjs's own context_packs.enabled path (separate
+    // from this file's forge#2383 contextPack above) reports whether IT
+    // built/injected a schema-validated pack via these additive fields on
+    // its return value — undefined/absent whenever the flag is off, the
+    // module didn't load, or the caller already supplied a contextPack (see
+    // runner.mjs's runCommand() docblock). Captured here so the PHASE_COMMIT/
+    // PHASE_FAILED events below can record it, mirroring how `lastUsage` is
+    // captured from the same `result`.
+    const lastContextPackMeta =
+      result && "contextPackValid" in result
+        ? {
+            contextPackValid: result.contextPackValid,
+            contextPackHash: result.contextPackHash ?? null,
+            contextPackBytes: result.contextPackBytes ?? null,
+            ...(result.contextPackErrors ? { contextPackErrors: result.contextPackErrors } : {}),
+          }
+        : null;
     const outcome = await phase.detectOutcome(state, io);
-    if (outcome.status === "committed" || outcome.status === "blocked") return { ...outcome, usage: lastUsage };
-    appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail, maxAttempts, usage: lastUsage });
+    if (outcome.status === "committed" || outcome.status === "blocked")
+      return { ...outcome, usage: lastUsage, ...(lastContextPackMeta || {}) };
+    appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail, maxAttempts, usage: lastUsage, ...(lastContextPackMeta || {}) });
     // forge#2176: a phase's detectOutcome can mark a failure as a known,
     // state-derived fixed point — re-running the phase's runner is
     // guaranteed to reproduce the identical failure (e.g. the build phase's

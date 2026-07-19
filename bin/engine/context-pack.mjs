@@ -125,8 +125,15 @@ const DEFAULT_BUDGET_BYTES = 32000;
  * though the marker text itself is plain ASCII) whenever it alone would not
  * fit — the function now genuinely never returns more than maxBytes bytes,
  * including the degenerate maxBytes: 0 case (returns "").
+ *
+ * Exported (forge#2702) so bin/engine/contextpack.mjs's schema-conformant
+ * pack assembler can reuse this exact, already-hardened truncation routine
+ * for its own MAX_SLICE_BYTES/MAX_PACK_BYTES enforcement instead of
+ * re-implementing byte-budget truncation a second time and risking a
+ * reintroduction of the #2517 bug class (a budget smaller than the marker
+ * silently returning more bytes than requested).
  */
-function truncateToBytes(str, maxBytes) {
+export function truncateToBytes(str, maxBytes) {
   const buf = Buffer.from(str, "utf-8");
   if (buf.length <= maxBytes) return str;
   const marker = "\n\n[...truncated to fit context pack budget...]";

@@ -47,6 +47,14 @@
  */
 
 import { parse } from '../../packages/protocol/src/parse.js';
+import { truncateToBytes } from './context-pack.mjs';
+import {
+  SCHEMA_VERSION,
+  PACK_SLICE_NAMES,
+  MAX_PACK_BYTES,
+  MAX_SLICE_BYTES,
+  validateContextPack,
+} from '../../packages/protocol/src/contextpack-schema.js';
 
 /** Annotation types whose inline value is a gist/knowledge-index reference
  * (URL). See `packages/protocol/src/types.js` — all three declare
@@ -530,4 +538,274 @@ export async function mineContext(issueNumber, opts = {}) {
       ...(Object.keys(reviewFindingsFetchErrors).length > 0 ? { reviewFindingsFetchErrors } : {}),
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// forge#2702: schema-conformant per-phase pack assembler
+// ---------------------------------------------------------------------------
+//
+// The functions below turn `mineContext()`'s raw pre-assembly output into a
+// `packages/protocol/src/contextpack-schema.js`-conformant `ContextPack`
+// (`assemblePack()`) and flatten that pack into the plain string
+// `bin/runner.mjs`'s pre-existing `opts.contextPack` injection point expects
+// (`renderPackAsText()`). Neither function performs any I/O — both are pure
+// given `minedData` (already fetched by `mineContext()`), mirroring the
+// "assembly is pure, fetching happens in the caller" split established by
+// `bin/engine/context-pack.mjs`'s `buildContextPack()` (forge#2383).
+//
+// This is a SEPARATE pack from forge#2383's `context-pack.mjs`/
+// `buildContextPack()`, which remains live, unconditional, and un-schema'd.
+// The two must never collide — see `bin/runner.mjs`'s `context_packs.enabled`
+// wiring (forge#2702), which only builds this pack when the caller has not
+// already supplied a `contextPack` string (i.e. when forge#2383's engine
+// dispatch path hasn't already populated one).
+
+/**
+ * Maps an engine phase id (`packages/protocol/src/phases.js`'s `PHASE_IDS`)
+ * to the narrower `PACK_SLICE_NAMES` set this schema defines
+ * (`investigate`/`build`/`review`). Not every phase id has a natural slice:
+ * `decompose` and `close` produce no pack (there is no meaningful
+ * "prior context" a decomposition or close phase needs beyond what its own
+ * spec already tells it to fetch), so `assemblePack()` returns `null` for
+ * those — the caller's fail-open contract treats `null` identically to "no
+ * pack was requested", which is exactly today's behavior for those phases.
+ * `context`/`architect` map onto the `investigate`/`build` slices they most
+ * resemble (context-gathering augments an investigation; architecture
+ * planning precedes and feeds a build) rather than getting their own
+ * PACK_SLICE_NAMES entries — the schema deliberately does not grow a slice
+ * name per engine phase id (see contextpack-schema.js's PACK_SLICE_NAMES
+ * doc comment: "expected to grow independently of the phase table").
+ * `remediate` maps onto `review` — a remediation is itself a follow-up
+ * review round.
+ */
+const PHASE_TO_SLICE = {
+  investigate: 'investigate',
+  context: 'investigate',
+  architect: 'build',
+  build: 'build',
+  review: 'review',
+  remediate: 'review',
+};
+
+/** Annotation types (see `packages/protocol/src/types.js`'s `RESERVED_TYPES`)
+ * whose body is relevant to each pack slice. Kept as an explicit allowlist
+ * (rather than "every annotation on the issue") so a slice stays focused on
+ * the annotations a phase at that point in the pipeline would actually have
+ * produced/consumed — mirrors `AFFECTED_FILES_SOURCE_TYPES`'s narrow-scope
+ * precedent above. */
+const SLICE_ANNOTATION_TYPES = {
+  investigate: new Set(['INVESTIGATOR', 'CONTRACT']),
+  build: new Set(['CONTRACT', 'CONTEXT', 'ARCHITECT']),
+  review: new Set(['BUILDER', 'REVIEWER']),
+};
+
+/** Render one annotation's body as a bounded excerpt: type header + body,
+ * trimmed. Callers cap the overall slice size via `truncateToBytes()`, so
+ * this only trims leading/trailing whitespace — it does not itself enforce
+ * a byte budget per annotation. */
+function renderAnnotationExcerpt(annotation) {
+  if (!annotation || typeof annotation.body !== 'string') return '';
+  const body = annotation.body.trim();
+  if (!body) return '';
+  // Deliberately does NOT reconstruct the literal "FORGE:" marker prefix —
+  // this module declares no inline FORGE marker literals in executable code
+  // (see the module docblock and this file's own structural test,
+  // `contextpack.mine.test.mjs`'s "no inline FORGE marker literals" check).
+  // "annotation type" alone (e.g. "CONTRACT annotation") is unambiguous
+  // pack content without reproducing marker syntax at runtime.
+  return `### ${annotation.type} annotation (comment #${annotation.commentIndex})\n\n${body}`;
+}
+
+/** Render the affected-files list as a markdown bullet list, or "" if empty. */
+function renderAffectedFilesExcerpt(affectedFiles) {
+  if (!Array.isArray(affectedFiles) || affectedFiles.length === 0) return '';
+  return ['## Known Affected Files', ...affectedFiles.map((f) => `- \`${f}\``)].join('\n');
+}
+
+/** Render linked PRs and their review findings as a compact summary, or ""
+ * if there are no linked PRs. */
+function renderLinkedPrsExcerpt(linkedPrs) {
+  if (!Array.isArray(linkedPrs) || linkedPrs.length === 0) return '';
+  const lines = ['## Linked PRs'];
+  for (const pr of linkedPrs) {
+    if (!pr) continue;
+    const findingCount = Array.isArray(pr.reviewFindings) ? pr.reviewFindings.length : 0;
+    lines.push(`- PR #${pr.number} — ${findingCount} review finding(s)`);
+    if (Array.isArray(pr.reviewFindings)) {
+      for (const finding of pr.reviewFindings.slice(0, 10)) {
+        if (finding && finding.number != null) {
+          lines.push(`  - #${finding.number}: ${finding.title || ''}`);
+        }
+      }
+    }
+  }
+  return lines.length > 1 ? lines.join('\n') : '';
+}
+
+/** Render the issue's title/body as a markdown section, or "" if both are
+ * empty (e.g. `fetchIssueCore()` failed — see its `{ok: false}` contract). */
+function renderIssueExcerpt(issue) {
+  if (!issue || (!issue.title && !issue.body)) return '';
+  return `## Issue #${issue.number}: ${issue.title || ''}\n\n${issue.body || ''}`.trim();
+}
+
+/**
+ * Build one slice's raw (pre-truncation) content by concatenating the
+ * sections relevant to `sliceName`, in a fixed, deterministic order: issue
+ * summary, affected files, relevant annotations (in mined comment order,
+ * i.e. oldest first), linked PRs. A slice with nothing to say (every section
+ * empty — e.g. a brand-new issue with no annotations yet) returns "".
+ */
+function renderSliceContent(sliceName, minedData) {
+  const annotationTypes = SLICE_ANNOTATION_TYPES[sliceName] || new Set();
+  const relevantAnnotations = Array.isArray(minedData.annotations)
+    ? minedData.annotations.filter((a) => a && annotationTypes.has(a.type))
+    : [];
+
+  const sections = [
+    sliceName === 'investigate' ? renderIssueExcerpt(minedData.issue) : '',
+    renderAffectedFilesExcerpt(minedData.affectedFiles),
+    ...relevantAnnotations.map(renderAnnotationExcerpt),
+    sliceName !== 'investigate' ? renderLinkedPrsExcerpt(minedData.linkedPrs) : '',
+  ].filter((s) => typeof s === 'string' && s.length > 0);
+
+  return sections.join('\n\n');
+}
+
+/**
+ * Assemble a schema-conformant `ContextPack` (per
+ * `packages/protocol/src/contextpack-schema.js`) for one engine phase, from
+ * `mineContext()`'s raw mined-data object.
+ *
+ * Pure and deterministic given the same `minedData` — no I/O, no `Date.now()`
+ * beyond what `minedData` itself already carries. Every failure mode
+ * degrades to `null` rather than throwing, so a caller's fail-open contract
+ * (per forge#2680's own acceptance criteria) can treat "no pack" uniformly
+ * whether the cause was "phase has no slice mapping", "nothing to report",
+ * or "issue number unavailable" — never `assemblePack()` crashing the phase
+ * dispatch that called it.
+ *
+ * @param {string} phaseId - an engine phase id from
+ *   `packages/protocol/src/phases.js`'s `PHASE_IDS` (e.g. "investigate",
+ *   "build", "review"). Ids with no `PHASE_TO_SLICE` entry (e.g. "decompose",
+ *   "close") return `null`.
+ * @param {Object} minedData - the raw object returned by `mineContext()`.
+ * @param {{schemaVersion?: number, maxSliceBytes?: number, maxPackBytes?: number}} [opts] -
+ *   override hooks for the schema constants (defaults to the real
+ *   `contextpack-schema.js` constants) — exists purely so tests can exercise
+ *   the truncation/validation paths with small budgets without waiting to
+ *   construct multi-kilobyte fixtures.
+ * @returns {{schema_version: number, issue: number, slices: Array, truncated?: boolean}|null}
+ */
+export function assemblePack(phaseId, minedData, opts = {}) {
+  const sliceName = PHASE_TO_SLICE[phaseId];
+  if (!sliceName || !PACK_SLICE_NAMES.includes(sliceName)) return null;
+  if (!minedData || typeof minedData !== 'object') return null;
+
+  const issueNumber = minedData.issue && typeof minedData.issue.number === 'number'
+    ? minedData.issue.number
+    : (typeof minedData.meta?.issueNumber === 'number' ? minedData.meta.issueNumber : null);
+  if (issueNumber === null) return null;
+
+  const maxSliceBytes = opts.maxSliceBytes ?? MAX_SLICE_BYTES;
+  const maxPackBytes = opts.maxPackBytes ?? MAX_PACK_BYTES;
+  const schemaVersion = opts.schemaVersion ?? SCHEMA_VERSION;
+
+  const rawContent = renderSliceContent(sliceName, minedData);
+  if (!rawContent) return null; // nothing to report — identical to "no pack requested"
+
+  const rawBytes = Buffer.byteLength(rawContent, 'utf-8');
+  const sliceContent = truncateToBytes(rawContent, maxSliceBytes);
+  const sliceTruncated = Buffer.byteLength(sliceContent, 'utf-8') < rawBytes;
+
+  const slice = { phase: sliceName, content: sliceContent };
+  if (sliceTruncated) slice.truncated = true;
+
+  const pack = { schema_version: schemaVersion, issue: issueNumber, slices: [slice] };
+
+  // Whole-pack budget: re-check after per-slice truncation because the
+  // schema/pack envelope (JSON structure, field names) adds bytes beyond the
+  // slice content alone. A single-slice pack rarely needs this second pass —
+  // maxSliceBytes is well under maxPackBytes by construction in the real
+  // constants — but a caller-supplied opts override (tests) can legitimately
+  // set maxSliceBytes close to or above maxPackBytes, so this must not be
+  // skipped.
+  let packBytes = Buffer.byteLength(JSON.stringify(pack), 'utf-8');
+  if (packBytes > maxPackBytes) {
+    const envelopeOverhead = packBytes - Buffer.byteLength(sliceContent, 'utf-8');
+    const shrunkBudget = Math.max(0, maxPackBytes - envelopeOverhead);
+    slice.content = truncateToBytes(sliceContent, shrunkBudget);
+    slice.truncated = true;
+    pack.truncated = true;
+  }
+
+  return pack;
+}
+
+/**
+ * Flatten an assembled `ContextPack` into the plain string
+ * `bin/runner.mjs`'s pre-existing `opts.contextPack` parameter expects (it
+ * is rendered, unmodified, via `renderContextPackSection()` — forge#2515's
+ * prompt-injection hardening already applies at that layer, so this
+ * function does no escaping of its own).
+ *
+ * @param {{slices: Array<{phase: string, content: string}>}|null} pack
+ * @returns {string} "" for a null/malformed pack — matches every other
+ *   render* helper's "absent input renders as empty string" convention.
+ */
+export function renderPackAsText(pack) {
+  if (!pack || !Array.isArray(pack.slices)) return '';
+  return pack.slices
+    .map((s) => (s && typeof s.content === 'string' ? s.content : ''))
+    .filter((s) => s.length > 0)
+    .join('\n\n---\n\n');
+}
+
+/**
+ * Mine and assemble a validated, schema-conformant context pack for one
+ * phase in a single call — the convenience entry point `bin/runner.mjs`'s
+ * `context_packs.enabled` wiring (forge#2702) uses. Combines `mineContext()`
+ * (I/O, `#2701`) + `assemblePack()` (pure, `#2702`) +
+ * `validateContextPack()` (`#2700`) and returns the render-ready string plus
+ * validation metadata, so the caller never has to import three modules or
+ * duplicate the mine → assemble → validate → render sequence.
+ *
+ * Fail-open at every stage: a mining exception, an unmapped `phaseId`, an
+ * empty pack, or a schema-validation failure all resolve to
+ * `{text: null, pack: null, valid: false, errors}` rather than throwing —
+ * the caller's contract (inject only when `text` is non-null) is identical
+ * regardless of which stage produced the empty result.
+ *
+ * @param {string} phaseId
+ * @param {number|string} issueNumber
+ * @param {{io: {gh: Function}, repo?: string}} mineOpts - forwarded to
+ *   `mineContext()` verbatim (see its own docblock for the `io.gh`
+ *   injection contract).
+ * @returns {Promise<{text: string|null, pack: Object|null, valid: boolean, errors: string[]}>}
+ */
+export async function buildValidatedPackForPhase(phaseId, issueNumber, mineOpts) {
+  let minedData;
+  try {
+    minedData = await mineContext(issueNumber, mineOpts);
+  } catch (err) {
+    return { text: null, pack: null, valid: false, errors: [`mineContext() threw: ${String(err && err.message ? err.message : err)}`] };
+  }
+
+  let pack;
+  try {
+    pack = assemblePack(phaseId, minedData);
+  } catch (err) {
+    return { text: null, pack: null, valid: false, errors: [`assemblePack() threw: ${String(err && err.message ? err.message : err)}`] };
+  }
+  if (!pack) return { text: null, pack: null, valid: false, errors: ['no pack produced (unmapped phase or nothing to report)'] };
+
+  let result;
+  try {
+    result = validateContextPack(pack);
+  } catch (err) {
+    return { text: null, pack: null, valid: false, errors: [`validateContextPack() threw: ${String(err && err.message ? err.message : err)}`] };
+  }
+  if (!result.valid) return { text: null, pack: null, valid: false, errors: result.errors };
+
+  return { text: renderPackAsText(pack), pack, valid: true, errors: [] };
 }
