@@ -10,7 +10,7 @@ install: extras
 
 Replay a completed pipeline run. Fetches all FORGE annotations posted during the pipeline and displays them chronologically — phase headings, timestamps, and key structured fields. Read-only: nothing is written, no labels changed.
 
-**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+Model policy: see `commands/shared/agent-policies.md` § Agent model policy (default tier) if not already in context.
 
 ---
 

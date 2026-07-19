@@ -12,7 +12,7 @@ argument-hint: "[issue number or \"next\" to pick highest priority]"
 Orchestrator for the full issue lifecycle: investigate → decompose (if needed) → build → review → merge → close. GitHub issues are the persistent context layer — read comments before starting, write structured reports back, use `workflow:*` labels to track state.
 
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — from forge.yaml `agents.default_model`, else "sonnet". Fallback `model: "opus"` if rate-limited. Pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
-**NEVER use plan mode (EnterPlanMode).**
+Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not already in context.
 **NEVER use the Agent tool** for sub-phase dispatch — it spawns opaque subprocesses that skip FORGE annotations and phase protocols. Always use `Skill(skill="...", args="...")`.
 
 <!-- FORGE:SPEC_LOADED — work-on.md loaded and active. Agent is bound by this spec. -->

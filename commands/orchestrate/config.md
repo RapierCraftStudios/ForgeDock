@@ -25,7 +25,7 @@ You are the top-level orchestrator. Your job is to take a batch of issues, plan 
 **Agent model policy**: `model: "haiku"`, `effort: low` (mechanical — dispatch bookkeeping, lane routing, classification). Fallback: `model: "sonnet"` if rate-limited. User can override with `--model <name>`. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. **Distinct from the spawned `/work-on` sub-agents** (Phase 4, per-issue and review-finding sweep): those resolve via `model: "{SUBAGENT_MODEL}"` — forge.yaml `agents.subagent_model`, else `agents.default_model`, else `"sonnet"` — not this dispatcher's own `haiku` policy.
 
 **Hard exclusion — already enforced by this design, not left to convention**: this `haiku`/`effort: low` tier applies ONLY to the orchestrator's own mechanical bookkeeping (dispatch, lane routing, classification) — never to the spawned `/work-on` sub-agents, which always run at `{SUBAGENT_MODEL}` (standard tier, sonnet by default). Every reasoning-heavy `/work-on` sub-phase file (`investigate.md`, `build/architect.md`, `build/implement.md`, `review.md`) carries its own "Agent model policy" line pinned to `{DEFAULT_MODEL}`/standard tier — see `work-on.md`'s `FORGE:MODEL_TIER_NOTE` for the canonical explanation of why these are never downtiered, and forge#1827 for the explicit correction against adding a `model: "haiku"` claim to any file where mechanical bits are interleaved with reasoning-heavy content. Do not introduce a second, competing deterministic-step-to-cheap-model config — this per-file tiering plus the dispatcher/sub-agent split above is the single source of truth for which steps may use a cheaper model.
-**NEVER use plan mode (EnterPlanMode).**
+Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not already in context.
 
 <!-- FORGE:SPEC_LOADED — orchestrate.md loaded and active. Agent is bound by HARD RULES above. -->
 
@@ -33,7 +33,7 @@ You are the top-level orchestrator. Your job is to take a batch of issues, plan 
 
 ## Config Resolution
 
-Read `forge.yaml` at the project root to resolve all project-specific variables before running any commands:
+Config resolution: see `commands/shared/config-resolution.md` (resolves `GH_REPO`, `GH_FLAG`, `REPO_PATH`) if not already in context.
 
 ```bash
 # Parse forge.yaml for project context

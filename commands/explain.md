@@ -10,8 +10,7 @@ install: extras
 
 You translate the FORGE pipeline's machine-readable annotations on a GitHub issue or PR into a clear, plain-English narrative that anyone can understand — no pipeline knowledge required. This is a read-only command: it never writes to GitHub, never changes labels, and never modifies any state.
 
-**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
-**NEVER use plan mode (EnterPlanMode).**
+Agent policy: see `commands/shared/agent-policies.md` (default-tier model resolution + plan-mode ban) if not already in context.
 
 ---
 

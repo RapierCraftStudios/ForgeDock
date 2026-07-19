@@ -12,8 +12,7 @@ You onboard an existing repo into the ForgeDock pipeline. Unlike `/forgedock-ini
 
 Run `/adopt` once after `npx forgedock init` + `/forgedock-init` to make a legacy backlog pipeline-ready without touching the issues themselves.
 
-**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
-**NEVER use plan mode (EnterPlanMode).**
+Agent policy: see `commands/shared/agent-policies.md` (default-tier model resolution + plan-mode ban) if not already in context.
 
 <!-- FORGE:SPEC_LOADED — adopt.md loaded and active. Agent is bound by this spec. -->
 
@@ -58,7 +57,7 @@ If `DRY_RUN=true`, prefix all actions with `[DRY RUN]` and skip all `gh label` w
 
 ## Config Resolution
 
-Read `forge.yaml` at the project root to resolve all project-specific variables before running any commands:
+Config resolution: see `commands/shared/config-resolution.md` (resolves `GH_REPO`, `GH_FLAG`, `REPO_PATH`) if not already in context.
 
 ```bash
 CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"

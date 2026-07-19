@@ -12,8 +12,7 @@ argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree 
 **Invoked by**: `work-on.md` Step 3F.5, after `implement.md` has written and staged code (not committed).
 **Output**: Return `GATE_PASSED: true/false` to caller. On failure after max iterations, post comment and set `needs-human`.
 
-**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
-**NEVER use plan mode (EnterPlanMode).**
+Agent policy: see `commands/shared/agent-policies.md` (default-tier model resolution + plan-mode ban) if not already in context.
 
 <!-- FORGE:SPEC_LOADED — work-on/build/validate.md loaded and active. Agent is bound by this spec. -->
 

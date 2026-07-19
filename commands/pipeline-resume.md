@@ -11,7 +11,7 @@ install: extras
 You are the context-recovery agent. When a session ends or context is compressed, all working state is lost. Your job is to restore it instantly — find the most recently active issue, read all FORGE annotations, reconstruct the current pipeline phase, and re-enter the pipeline exactly where it left off.
 
 **Agent model policy**: `model: "haiku"`, `effort: low` (mechanical tier — context recovery, annotation reading, state reconstruction). Fallback: `model: "sonnet"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
-**NEVER use plan mode (EnterPlanMode).**
+Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not already in context.
 **NEVER use the Agent tool** — pipeline-resume re-enters the pipeline via `Skill(skill="work-on", ...)` only. Using the Agent tool would restart the pipeline in an untracked subprocess rather than resuming the existing tracked session.
 
 <!-- FORGE:SPEC_LOADED — pipeline-resume.md loaded and active. Agent is bound by this spec. -->
@@ -20,7 +20,7 @@ You are the context-recovery agent. When a session ends or context is compressed
 
 ## Phase 0: Config Resolution
 
-Read `forge.yaml` to configure all project-specific variables before running any commands:
+Config resolution: see `commands/shared/config-resolution.md` (resolves `GH_REPO`, `GH_FLAG`, `REPO_PATH`) if not already in context.
 
 ```bash
 CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"

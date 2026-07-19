@@ -15,7 +15,7 @@ argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG]"
 **Engine coverage** (forge#2379): this subcommand's `command` name (`work-on/decompose`) and completion marker (`FORGE:DECOMPOSED:COMPLETE`) are now registered as a real phase in the headless engine's phase table — `decompose` in `packages/protocol/src/phases.js`'s `PHASE_IDS`/`PHASE_MARKERS`, and the matching `decompose` entry in `bin/engine/phases.mjs`'s `PHASES` array. The engine's `investigate` phase hands off to it on `DECOMPOSE:YES` instead of terminating in place, so a headless `runIssue()` walk now actually dispatches this subcommand rather than stopping short.
 
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (label transitions, sub-issue creation) stay at this tier because they're interleaved with the reasoning-heavy sub-issue design steps in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies". <!-- Added: forge#1827 -->
-**NEVER use plan mode (EnterPlanMode).**
+Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not already in context.
 
 ---
 

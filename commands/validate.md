@@ -12,7 +12,7 @@ install: extras
 
 Verify whether a reported issue is real before anyone writes code. This command exists for reports that come from outside the pipeline — user complaints, DevOps alerts, monitoring triggers, gut feelings. It is the checkpoint before creating a GitHub issue.
 
-**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
+Model policy: see `commands/shared/agent-policies.md` § Agent model policy (default tier) if not already in context.
 
 **Output**: A verdict (CONFIRMED / NOT A PROBLEM / NEEDS MORE DATA) with evidence.
 
