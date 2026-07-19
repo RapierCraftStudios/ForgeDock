@@ -115,6 +115,21 @@ async function getInvariants() {
  *    starting Claude Code (operator-set only — same process.env semantics as
  *    the gist guard above).
  *
+ * 7. Content-staging temp-path guard (issue #2686)
+ *    Intercepts commands that stage a comment/PR/issue/release body to a FIXED
+ *    literal system-temp path (`/tmp/…`, `$TMPDIR/…`, `%TEMP%\…`) via a
+ *    content-staging flag (`--body-file`, `--notes-file`) or a `>`/`>>`
+ *    redirect handed to `gh`, and hard-blocks it when the path carries no
+ *    collision-safe component (`mktemp`/`$$`/`$RANDOM`/`XXXXXX`/date). Two
+ *    concurrent review agents writing to the same fixed `/tmp` path clobber
+ *    each other and post the wrong body (the #2672 collision). This makes the
+ *    prose mktemp mandate from forge#2198 — which degraded and let #2672
+ *    happen — deterministic. Like Rule 5, it is NOT gated by
+ *    isForgeDockManagedCwd() (it runs before that check) because the colliding
+ *    agents run in git worktrees with no forge.yaml/.forgedock marker.
+ *    Override: set FORGE_ALLOW_FIXED_TMP=1 in the shell environment before
+ *    starting Claude Code (operator-set only — same process.env semantics).
+ *
  * Rules 1-4 and 6 only apply inside a ForgeDock-managed directory (a directory
  * with a `forge.yaml` or `.forgedock` marker) — see `isForgeDockManagedCwd()`
  * (issue #1591). The hook installs into the user's global
@@ -122,12 +137,14 @@ async function getInvariants() {
  * repo on the machine would be subject to these ForgeDock-specific rules,
  * including unrelated repos where `main` is a legitimate PR target.
  *
- * Rule 5 is deliberately NOT gated by `isForgeDockManagedCwd()` — it runs
- * before that check. A filesystem-root `find` is a universal footgun with no
- * legitimate use anywhere (unlike Rules 1-4/6, which are ForgeDock-pipeline-
- * specific), and gating it the same way would leave it silently disabled
- * inside git worktrees, which typically carry no `forge.yaml`/`.forgedock`
- * marker of their own — exactly where build/review sub-agents run.
+ * Rules 5 and 7 are deliberately NOT gated by `isForgeDockManagedCwd()` — they
+ * run before that check. A filesystem-root `find` is a universal footgun with
+ * no legitimate use anywhere, and a fixed shared-temp content-staging path is a
+ * cross-agent collision footgun (unlike Rules 1-4/6, which are
+ * ForgeDock-pipeline-specific); gating either the same way would leave it
+ * silently disabled inside git worktrees, which typically carry no
+ * `forge.yaml`/`.forgedock` marker of their own — exactly where build/review
+ * sub-agents run (and exactly where the #2672 collision occurred).
  *
  * === Fail-open contract ===
  *
@@ -350,6 +367,66 @@ const ATTRIBUTION_SCOPED_COMMANDS = [
 ];
 
 // ---------------------------------------------------------------------------
+// Rule 7 constants (issue #2686) — content-staging temp-path (mktemp) guard.
+// Declared here — above the top-level `await main()` call — for the same
+// temporal-dead-zone reason documented for the Rule 5/6 constants above: a
+// top-level `await` suspends module evaluation, so a `const` declared after it
+// is still in its TDZ when `checkTempPathStaging()` first reads it, and the
+// resulting ReferenceError would be swallowed by main()'s fail-open catch,
+// silently defeating the rule.
+// ---------------------------------------------------------------------------
+
+/**
+ * Content-staging flags whose value is a path the caller writes a comment / PR
+ * / issue / release *body* to before handing it to `gh`. A fixed literal temp
+ * path here is the exact #2672 collision surface: two concurrent review agents
+ * each write their body to the same `/tmp/<fixed>.md` and the second clobbers
+ * the first, so the wrong body is posted (self-documented in #2672's own
+ * FORGE:TRAJECTORY anomalies). This rule makes the prose mktemp mandate from
+ * forge#2198 — which degraded under concurrency and let #2672 happen —
+ * deterministic.
+ */
+const CONTENT_STAGING_FLAGS = new Set(["--body-file", "--notes-file"]);
+
+/**
+ * Uniqueness components that make a temp path collision-safe by construction.
+ * If the path token carries ANY of these it is not a fixed literal and the
+ * rule must NOT fire: `mktemp`/`$(mktemp …)` (the mandated idiom), `$$` (PID),
+ * `$RANDOM`, an mktemp `XXXXXX` template, or a `$(date …)` / `%date%` stamp —
+ * each guarantees a per-invocation-unique name.
+ */
+const COLLISION_SAFE_MARKERS = [
+  /mktemp/i,
+  /\$\$/,
+  /\$\{?RANDOM\b/,
+  /X{3,}/,
+  /\$\(\s*date\b/i,
+  /%date%/i,
+];
+
+/**
+ * Worktree-local / session-scratchpad temp roots that are collision-safe by
+ * construction (each agent gets its own), so they are exempt even without a
+ * mktemp component. `.forgedock/tmp` is per-worktree; `scratchpad` is Claude
+ * Code's per-session scratch dir.
+ */
+const SAFE_TEMP_ROOT_RE = /\.forgedock[/\\]tmp|scratchpad/i;
+
+/**
+ * A shared system-temp-directory prefix immediately followed by a path
+ * segment (a bare `/tmp` with no leaf is not a staging target — you can't
+ * write a file without naming it, so a trailing separator is required). POSIX
+ * `/tmp/` is matched case-sensitively (POSIX paths are case-sensitive); the
+ * `$TMPDIR`/`${TMPDIR…}` and Windows `%TEMP%`/`%TMP%` forms are matched
+ * case-insensitively on the variable name only. Trailing-slash and dot
+ * variants (`/tmp//x`, `/tmp/./x`) still start with `/tmp/` and so are still
+ * caught — the same class of bypass that Rule 5 (#2113/#2213) had to close.
+ */
+const SYSTEM_TMP_POSIX_RE = /^\/tmp\//;                    // /tmp/...
+const SYSTEM_TMP_ENV_RE = /^\$\{?TMPDIR\b[^/\\]*[/\\]/i;   // $TMPDIR/..., ${TMPDIR:-/tmp}/...
+const SYSTEM_TMP_WIN_RE = /^%(?:TEMP|TMP)%[/\\]/i;         // %TEMP%\..., %TMP%\...
+
+// ---------------------------------------------------------------------------
 // Main — fail-open wrapper
 // ---------------------------------------------------------------------------
 
@@ -389,6 +466,20 @@ async function main() {
   const findRootViolation = checkFindRoot(command);
   if (findRootViolation) {
     process.stderr.write(findRootViolation);
+    process.exit(2);
+    return;
+  }
+
+  // --- Rule 7: content-staging temp-path (mktemp) guard ---
+  // Deliberately checked BEFORE the isForgeDockManagedCwd() gate below — like
+  // Rule 5 — because the concurrent review agents that collide on a fixed temp
+  // path (#2672) run inside git worktrees, which typically carry no
+  // forge.yaml/.forgedock marker of their own. Gating this after the
+  // managed-cwd check would make it a silent no-op for exactly that case
+  // (issue #2686). Operator override: FORGE_ALLOW_FIXED_TMP=1.
+  const tempStagingViolation = checkTempPathStaging(command);
+  if (tempStagingViolation) {
+    process.stderr.write(tempStagingViolation);
     process.exit(2);
     return;
   }
@@ -928,6 +1019,162 @@ function checkFindRoot(command) {
         `No override exists for this rule — a root-anchored \`find\` has no`,
         `legitimate use in any ForgeDock pipeline.`,
       ].join("\n");
+    }
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Rule 7: Content-staging temp-path (mktemp) guard (issue #2686)
+// ---------------------------------------------------------------------------
+
+/**
+ * Decide whether a path token is a FIXED literal under a shared system temp
+ * directory — i.e. a collision hazard across concurrent agents that share this
+ * host's `/tmp`. Returns false (safe) if the token carries any collision-safe
+ * uniqueness component (mktemp/PID/RANDOM/XXXXXX/date) or lives under a
+ * per-worktree / per-session scratch root; returns true only for a bare fixed
+ * literal under `/tmp`, `$TMPDIR`, or `%TEMP%`/`%TMP%`.
+ *
+ * @param {string} value  a path token (quotes already stripped by the tokenizer)
+ * @returns {boolean}
+ */
+function isFixedSystemTempPath(value) {
+  if (!value) return false;
+  const v = String(value);
+  // Collision-safe by construction — a per-invocation-unique component present.
+  if (COLLISION_SAFE_MARKERS.some((re) => re.test(v))) return false;
+  // Per-worktree / per-session scratch roots are safe even without mktemp.
+  if (SAFE_TEMP_ROOT_RE.test(v)) return false;
+  // A fixed literal under a shared system temp directory.
+  return SYSTEM_TMP_POSIX_RE.test(v) || SYSTEM_TMP_ENV_RE.test(v) || SYSTEM_TMP_WIN_RE.test(v);
+}
+
+/**
+ * Build the exit-2 remediation message (returned to the caller, which writes
+ * it to stderr — Claude Code reads the hook's stderr for the block reason).
+ *
+ * @param {string} path   the offending fixed temp path
+ * @param {string} where  human label for where it was found (flag name or "redirect")
+ * @returns {string}
+ */
+function tempStagingMessage(path, where) {
+  return [
+    `[ForgeDock] BLOCKED: fixed temp path "${path}" staged for a gh body (${where}).`,
+    ``,
+    `Concurrent orchestrated agents share this host's system temp dir. A fixed`,
+    `literal path like this is clobbered mid-flight when a second agent writes`,
+    `the same path — the wrong body is then posted to the PR/issue (the #2672`,
+    `cross-agent content collision; the prose mktemp mandate from forge#2198`,
+    `degraded, so this rule makes it deterministic).`,
+    ``,
+    `Fix: stage the body to a mktemp-created path instead, e.g.:`,
+    `  BODY=$(mktemp); printf '%s' "$content" > "$BODY"; gh ... --body-file "$BODY"`,
+    ``,
+    `Exception: set FORGE_ALLOW_FIXED_TMP=1 in your shell environment BEFORE`,
+    `starting Claude Code if you intentionally need a fixed temp path.`,
+  ].join("\n");
+}
+
+/**
+ * Check whether a Bash command stages a comment/PR/issue/release body to a
+ * FIXED literal system-temp path — the #2672 cross-agent collision surface.
+ *
+ * Two forms are matched:
+ *   1. Content-staging flag: `--body-file <path>` / `--notes-file <path>`
+ *      (space, equals, and quoted forms). The flag is recognized only as an
+ *      exact argv token (quote-insensitive), and the equals form is skipped on
+ *      any token carrying EMBEDDED WHITESPACE — mirroring `extractFlag()`'s
+ *      discriminator exactly (issues #1519/#1591), so flag-shaped text inside
+ *      an unrelated quoted `--title`/`--body` value is never misread AND a
+ *      single-word quoted flag is never let through. ALL occurrences are
+ *      scanned (not just the first) so a safe decoy cannot mask a later fixed
+ *      path.
+ *   2. Redirect: a stdout `>`/`>>` redirect target, only when the command also
+ *      invokes `gh` (the "later handed to gh" signal). Redirect operators are
+ *      matched only as real (unquoted) argv tokens, so a `> /tmp/x` mentioned
+ *      inside a quoted annotation string is one whitespace-bearing token, not a
+ *      standalone `>`, and cannot trip this. Only pure stdout redirects are
+ *      considered — the mktemp-created stderr-capture idiom the script corpus
+ *      uses (`2>"$GH_STDERR_TMP"`, `GH_STDERR_TMP=$(mktemp)`) is a variable,
+ *      never a fixed literal, and is a `2>` fd redirect that is skipped here.
+ *
+ * A path only fires when `isFixedSystemTempPath()` is true — a `mktemp`/`$$`/
+ * `$RANDOM`/`XXXXXX`/date component, or a worktree-local `.forgedock/tmp` /
+ * scratchpad root, all make it safe.
+ *
+ * Reuses `tokenizeCommand()` (quote- and backslash-aware) — no hand-rolled
+ * tokenizer — so the whole Rule-5 bypass class (metacharacter adjacency,
+ * backslash-escape, empty-quote injection, case, trailing-slash/dot) is
+ * inherited rather than re-opened.
+ *
+ * Override: FORGE_ALLOW_FIXED_TMP=1 in the operator's shell environment (read
+ * at hook startup, not from the tool payload — agents cannot set it via a Bash
+ * tool call in the same session).
+ *
+ * Scope caveat: the hook only intercepts the Bash tool (main() short-circuits
+ * at `toolName !== "Bash"`), so PowerShell-tool `%TEMP%\…` calls never reach
+ * this rule — the `%TEMP%`/`%TMP%` matcher is defensive only.
+ *
+ * @param {string} command
+ * @returns {string|null} Error message to show, or null if allowed.
+ */
+function checkTempPathStaging(command) {
+  if (!command) return null;
+
+  // Operator override — same process.env semantics as Rules 4/6.
+  if (process.env.FORGE_ALLOW_FIXED_TMP === "1") return null;
+
+  // Cheap pre-filter: skip tokenization unless a system-temp sigil is present
+  // at all. Quotes/backslashes are stripped first so a degenerate/escaped form
+  // can't hide the sigil from the substring check (same idiom as checkFindRoot).
+  const bare = command.replace(/["'\\]/g, "");
+  if (!/\/tmp\/|\$\{?TMPDIR|%TE?MP%/i.test(bare)) return null;
+
+  const tokens = tokenizeCommand(command);
+
+  // --- Form 1: content-staging flag value ---
+  for (let i = 0; i < tokens.length; i++) {
+    const { value: tok } = tokens[i];
+    let val = null;
+    let where = tok;
+    if (CONTENT_STAGING_FLAGS.has(tok)) {
+      // `--flag value` — value is the next token (quote-insensitive exact match).
+      val = i + 1 < tokens.length ? tokens[i + 1].value : null;
+    } else if (!/\s/.test(tok)) {
+      // `--flag=value` — skipped on embedded-whitespace tokens (the #1519 decoy
+      // signature) by the guard above; matched only as a real single-word arg.
+      for (const flag of CONTENT_STAGING_FLAGS) {
+        const eq = `${flag}=`;
+        if (tok.startsWith(eq)) { val = tok.slice(eq.length); where = flag; break; }
+      }
+    }
+    if (val && isFixedSystemTempPath(val)) {
+      return tempStagingMessage(val, where);
+    }
+  }
+
+  // --- Form 2: stdout redirect target handed to gh ---
+  const invokesGh = tokens.some(({ value }) => value === "gh");
+  if (invokesGh) {
+    for (let i = 0; i < tokens.length; i++) {
+      const { value: tok, quoted } = tokens[i];
+      // Inert multi-word quoted argument (e.g. a prose annotation that merely
+      // mentions `> /tmp/x`) — never a real redirect operator.
+      if (quoted && /\s/.test(tok)) continue;
+      let target = null;
+      if (tok === ">" || tok === ">>") {
+        target = i + 1 < tokens.length ? tokens[i + 1].value : null;
+      } else if (/^>>?[^>&]/.test(tok)) {
+        // Glued form `>/tmp/x` / `>>/tmp/x`. A leading fd digit (`2>`, `1>`)
+        // means the token does not start with `>`, so stderr/fd redirects are
+        // not matched here — only pure stdout content writes.
+        target = tok.replace(/^>>?/, "");
+      }
+      if (target && isFixedSystemTempPath(target)) {
+        return tempStagingMessage(target, "redirect");
+      }
     }
   }
 
