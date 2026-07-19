@@ -1519,9 +1519,16 @@ function resolveGlobalNpmForgedockDir() {
  * filesystems (win32/darwin) the same physical directory can resolve with
  * differing letter casing (drive letter, path segments), so both operands are
  * lowercased before comparing there; on Linux the comparison stays
- * case-sensitive byte-for-byte (forge#2668). The `+ sep` boundary keeps
- * `/foo-bar` from matching parent `/foo`. Callers pass paths that are already
- * resolved — this helper deliberately does not re-resolve.
+ * case-sensitive byte-for-byte (forge#2668). On the case-insensitive branch
+ * both operands are also Unicode-normalized to NFC: macOS APFS/HFS+ enumerate
+ * filenames NFD-normalized while CLI args/env vars typically arrive NFC, and
+ * `resolve()` preserves the input form — so without normalization two paths
+ * for the same physical directory containing accented characters can compare
+ * unequal (forge#2674). NFC is idempotent for pure-ASCII and pre-composed
+ * paths, so ASCII behavior is unchanged; win32 normalizes harmlessly. The
+ * `+ sep` boundary keeps `/foo-bar` from matching parent `/foo`. Callers pass
+ * paths that are already resolved — this helper deliberately does not
+ * re-resolve.
  *
  * @param {string} child - resolved absolute path being tested
  * @param {string} parent - resolved absolute path of the candidate ancestor
@@ -1530,8 +1537,9 @@ function resolveGlobalNpmForgedockDir() {
 function samePathOrUnder(child, parent) {
   const caseInsensitive =
     process.platform === "win32" || process.platform === "darwin";
-  const a = caseInsensitive ? child.toLowerCase() : child;
-  const b = caseInsensitive ? parent.toLowerCase() : parent;
+  const fold = (p) => (caseInsensitive ? p.normalize("NFC").toLowerCase() : p);
+  const a = fold(child);
+  const b = fold(parent);
   return a === b || a.startsWith(b + sep);
 }
 
