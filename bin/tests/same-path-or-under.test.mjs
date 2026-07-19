@@ -46,6 +46,14 @@ function withPlatform(platform, fn) {
   }
 }
 
+// "café" with the accented "e" pre-composed (NFC, U+00E9) versus decomposed
+// (NFD, "e" + combining acute U+0301). These are distinct JS strings that
+// denote the same physical directory on macOS; constructed with explicit
+// escapes so the pair is guaranteed to differ regardless of how this source
+// file happens to be saved on disk (forge#2674).
+const CAFE_NFC = "caf\u00e9"; // c a f + precomposed é (U+00E9), NFC
+const CAFE_NFD = "cafe\u0301"; // c a f e + combining acute (U+0301), NFD
+
 describe("samePathOrUnder() — case-insensitive platforms (forge#2668)", () => {
   it("matches equal paths that differ only in casing on win32", () => {
     const samePathOrUnder = makeFn("\\");
@@ -86,6 +94,35 @@ describe("samePathOrUnder() — case-insensitive platforms (forge#2668)", () => 
       );
     });
   });
+
+  it("matches NFC vs NFD representations of the same accented path on darwin (forge#2674)", () => {
+    const samePathOrUnder = makeFn("/");
+    const nfc = `/Users/dev/${CAFE_NFC}/forgedock`;
+    const nfd = `/Users/dev/${CAFE_NFD}/forgedock`;
+    assert.notEqual(nfc, nfd, "test setup: NFC and NFD strings must differ");
+    withPlatform("darwin", () => {
+      assert.equal(samePathOrUnder(nfc, nfd), true);
+      assert.equal(samePathOrUnder(nfd, nfc), true);
+    });
+  });
+
+  it("matches child under parent across an NFC/NFD accented segment on darwin (forge#2674)", () => {
+    const samePathOrUnder = makeFn("/");
+    const childNfd = `/Users/dev/${CAFE_NFD}/forgedock/bin`;
+    const parentNfc = `/Users/dev/${CAFE_NFC}/forgedock`;
+    withPlatform("darwin", () => {
+      assert.equal(samePathOrUnder(childNfd, parentNfc), true);
+    });
+  });
+
+  it("normalizes NFC/NFD alongside casing on win32 (harmless — forge#2674)", () => {
+    const samePathOrUnder = makeFn("\\");
+    const nfc = `C:\\Users\\Dev\\${CAFE_NFC}`;
+    const nfd = `c:\\users\\dev\\${CAFE_NFD}`;
+    withPlatform("win32", () => {
+      assert.equal(samePathOrUnder(nfc, nfd), true);
+    });
+  });
 });
 
 describe("samePathOrUnder() — case-sensitive platforms unchanged", () => {
@@ -108,6 +145,18 @@ describe("samePathOrUnder() — case-sensitive platforms unchanged", () => {
         samePathOrUnder("/home/dev/forge/bin", "/home/dev/forge"),
         true,
       );
+    });
+  });
+
+  it("leaves NFC/NFD unreconciled on linux (case-sensitive, byte-exact — forge#2674)", () => {
+    const samePathOrUnder = makeFn("/");
+    const nfc = `/home/dev/${CAFE_NFC}`;
+    const nfd = `/home/dev/${CAFE_NFD}`;
+    withPlatform("linux", () => {
+      // Linux stays byte-for-byte: distinct NFC/NFD byte sequences must NOT
+      // be reconciled — normalization is deliberately gated to the
+      // case-insensitive branch only.
+      assert.equal(samePathOrUnder(nfc, nfd), false);
     });
   });
 
