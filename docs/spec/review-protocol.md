@@ -127,19 +127,37 @@ Every finding must include:
 Append this block at the very end of your comment (after the `---` footer line, still inside the EOF heredoc). It uses HTML comments so it's invisible in rendered markdown:
 
 `<!-- REVIEW-FINDINGS-START -->`
-`<!-- FINDING:PREFIX-N|CONFIDENCE|SEVERITY|file.py:line|One-line summary -->`
+`<!-- FINDING:PREFIX-N|CONFIDENCE|SEVERITY|file.py:line|One-line summary|DISPOSITION -->`
 `<!-- REVIEW-FINDINGS-END -->`
+
+`DISPOSITION` is optional and defaults to `FILE` when omitted (backward-compatible with the pre-forge#2683 5-field format). See "Admission Gate — NOTED Disposition" below for when to set it to `NOTED`.
 
 ### Rules
 
-1. **Include ALL findings at CONFIRMED, LIKELY, and POSSIBLE confidence** — every finding becomes a GitHub issue. Nothing stays as just a PR comment. **POSSIBLE findings are informational advisories (P3/non-blocking)** — they are tracked but do not require a fix PR and do not block merge. CONFIRMED and LIKELY findings are blocking at P1/P2 respectively.
+1. **Include ALL findings at CONFIRMED, LIKELY, and POSSIBLE confidence** — every finding is recorded in the structured block. Nothing stays as an unread, unstructured PR comment. Most findings become a GitHub issue; findings that fail the Admission Gate below are recorded as `NOTED` instead — visible and searchable, but not filed. **POSSIBLE findings are informational advisories (P3/non-blocking)** — they are tracked but do not require a fix PR and do not block merge. CONFIRMED and LIKELY findings are blocking at P1/P2 respectively.
 2. **One line per finding** — sequential numbering (PREFIX-1, PREFIX-2, ...)
 3. **Confidence**: `CONFIRMED`, `LIKELY`, or `POSSIBLE`
 4. **Severity**: `CRITICAL`, `HIGH`, `MEDIUM`, or `LOW`
 5. **Location**: Exact `file:line` reference
 6. **Summary**: Concise one-line description (no pipe `|` characters in summary)
-7. **Empty block**: If no findings at all, include just the START/END markers
-8. **HTML comments**: The block is invisible in rendered markdown but parseable by the review system
+7. **Disposition**: `FILE` (default, may be omitted) or `NOTED` — see Admission Gate below
+8. **Empty block**: If no findings at all, include just the START/END markers
+9. **HTML comments**: The block is invisible in rendered markdown but parseable by the review system
+
+### Admission Gate — NOTED Disposition <!-- Added: forge#2683 -->
+
+Not every LOW-severity or POSSIBLE-confidence finding should become a GitHub issue. A finding is **self-refuting** when the agent's own Evidence text concedes the flagged condition cannot actually be reached — e.g. "not exploitable", "cannot occur", "no changes required unless a fault-injection seam is added". Filing these forces the pipeline to pay full investigate-and-close cost on a ticket the agent already proved is a no-op.
+
+**Evaluate this gate per finding, BEFORE emitting its structured marker line:**
+
+1. If the finding's Evidence contains a reachability-concession phrase (regex below) AND does NOT also include a concrete "**How to reach it**:" line naming a specific input/state/call site that reaches the flagged code → disposition is `NOTED`.
+2. If Confidence is `POSSIBLE` OR Severity is `LOW`, filing requires an explicit "**How to reach it**:" line in the Evidence describing the concrete trigger. Without it → disposition is `NOTED`.
+3. CONFIRMED and LIKELY findings at MEDIUM+ severity are unaffected — they always `FILE`.
+4. `NOTED` is not deletion. NOTED findings remain fully visible in the structured findings block and in the agent's PR comment — they are simply not turned into a GitHub issue. A later review pass that finds a real trigger can promote a NOTED finding to `FILE` (re-emit it with a concrete "How to reach it:" line).
+
+**Reachability-concession phrase regex** (case-insensitive, applied to the finding's Evidence text): `not exploitable|not reachable|cannot occur|can.t occur|no changes required unless|not exploitable through|never happens|not currently reachable|no known trigger`
+
+**Wiring**: `commands/review-pr.md` Phase 6 and `commands/review-pr-staging.md` Phase 7 read the `DISPOSITION` field and skip issue creation for `NOTED` findings — see `commands/review-pr-agents/protocols.md` § Structured Findings Protocol for the operational copy of this rule (kept in sync with this normative source; do not restate the admission criteria a third time anywhere else).
 
 ### Domain Prefixes
 
@@ -161,4 +179,5 @@ Append this block at the very end of your comment (after the `---` footer line, 
 `<!-- REVIEW-FINDINGS-START -->`
 `<!-- FINDING:SEC-1|CONFIRMED|HIGH|services/api/app/routers/scrape.py:45|SQL injection via unsanitized user input in query parameter -->`
 `<!-- FINDING:SEC-2|LIKELY|MEDIUM|services/worker/worker/queues.py:312|Potential SSRF through user-controlled proxy URL -->`
+`<!-- FINDING:SEC-3|POSSIBLE|LOW|shared/symlink.py:88|Symlink target could theoretically escape sandbox — NOTED, not exploitable through ForgeDock's own install path (its symlinks always use absolute targets)|NOTED -->`
 `<!-- REVIEW-FINDINGS-END -->`

@@ -1583,7 +1583,7 @@ If synthesis needed, launch a `general-purpose` Task (model: `"{SUBAGENT_MODEL}"
 
 ## Phase 6: Finding Triage & Issue Creation (MANDATORY)
 
-**STOP. DO NOT skip this phase. DO NOT post summary first.** Every finding MUST become a GitHub issue BEFORE the summary.
+**STOP. DO NOT skip this phase. DO NOT post summary first.** Every finding MUST be triaged BEFORE the summary — either filed as a GitHub issue or recorded as `NOTED` per the Admission Gate below (Phase 6A.5).
 
 ### 6A: Extract Findings
 
@@ -1601,14 +1601,41 @@ else
 fi
 ```
 
+Each line of `$FINDINGS` is `PREFIX-N|CONFIDENCE|SEVERITY|file:line|summary` or, when the agent set a disposition, `PREFIX-N|CONFIDENCE|SEVERITY|file:line|summary|DISPOSITION` (see `commands/review-pr-agents/protocols.md` § Structured Findings Protocol — the 6-field format is the sole source of the `DISPOSITION` field's meaning; nothing here re-derives it).
+
 Also include any `INTEG-N` findings from Phase 2.5 that weren't already covered by agents.
 
 If 0 structured findings: scan agent comments for unstructured findings (lines starting with "Finding", "Issue", "Bug", "Warning"; sections titled "Findings", "Issues Found"). Extract manually.
 
 If still 0: review is clean — skip to Phase 7.
 
+### 6A.5: Admission Gate — Split FILE vs NOTED <!-- Added: forge#2683 -->
+
+Before dedup, partition `$FINDINGS` by the 6th field (`DISPOSITION`), defaulting missing/empty to `FILE` for backward compatibility with agents that haven't adopted the field:
+
+```bash
+FINDINGS_TO_FILE=""
+FINDINGS_NOTED=""
+
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  DISPOSITION=$(echo "$line" | awk -F'|' '{print $6}')
+  DISPOSITION=${DISPOSITION:-FILE}
+  if [ "$DISPOSITION" = "NOTED" ]; then
+    FINDINGS_NOTED="${FINDINGS_NOTED}${line}"$'\n'
+  else
+    FINDINGS_TO_FILE="${FINDINGS_TO_FILE}${line}"$'\n'
+  fi
+done <<< "$FINDINGS"
+```
+
+**The admission criteria themselves (reachability-concession phrases, the LOW/POSSIBLE "How to reach it" requirement) are NOT re-evaluated here** — that judgment call is made once, by the agent, at emission time (`commands/review-pr-agents/protocols.md` § Admission Gate). This step is a pure mechanical split on the `DISPOSITION` field an agent already set; it does not re-read Evidence text or apply the regex itself. If an agent never adopted the field, every finding defaults to `FILE` — the gate degrades to today's "file everything" behavior rather than silently dropping findings.
+
+`$FINDINGS_NOTED` entries are carried through to Phase 6D (PR description) and Phase 9 (summary) as a visible "Noted, not filed" list — they are never silently discarded. From here on, Phase 6B/6C operate on `$FINDINGS_TO_FILE` only.
+
 ### 6B: Deduplicate
-- Keep ALL confidence levels (CONFIRMED, LIKELY, POSSIBLE)
+- Operates on `$FINDINGS_TO_FILE` (post admission-gate) — `NOTED` findings are not deduplicated or filed, they were already routed to the NOTED list in 6A.5
+- Keep ALL confidence levels (CONFIRMED, LIKELY, POSSIBLE) among `$FINDINGS_TO_FILE`
 - Dedup by file + line range ±5 — keep higher confidence (covers off-by-one from upstream insertions)
 - Also dedup by title similarity: if two findings share the same file and 3+ title keywords, keep the higher confidence one
 - Sort: CONFIRMED first, then LIKELY, then POSSIBLE; within group by severity
@@ -1872,6 +1899,8 @@ done
 ### 6D: Update PR Description
 
 Append `## Review Findings` table to PR body with finding summaries and issue links.
+
+**Also append a `## Noted (Not Filed)` section** whenever `$FINDINGS_NOTED` (from Phase 6A.5) is non-empty — one row per NOTED finding (prefix-N, confidence/severity, file:line, summary). This keeps the admission gate's output visible on the PR itself, not just buried in agent comments, satisfying the "NOTED keeps everything on the record" requirement. Omit the section entirely when `$FINDINGS_NOTED` is empty.
 
 ---
 
@@ -2339,6 +2368,12 @@ gh pr comment $ARGUMENTS --body "$(cat <<'EOF'
 | Finding | Severity | Confidence | Issue |
 |---------|----------|------------|-------|
 
+## Noted (Not Filed)
+| Finding | Severity | Confidence | Location | Why NOTED |
+|---------|----------|------------|----------|-----------|
+
+**Omit this section entirely when `$FINDINGS_NOTED` (Phase 6A.5) is empty.** When non-empty, one row per NOTED finding — this is the audit trail the Admission Gate's acceptance criteria requires ("no CONFIRMED-severity finding was ever suppressed — NOTED list reviewed"): everything the gate diverted stays reviewable here, it is never silently dropped.
+
 ## Automated Checks
 | Check | Result |
 |-------|--------|
@@ -2347,7 +2382,7 @@ gh pr comment $ARGUMENTS --body "$(cat <<'EOF'
 [Final recommendation]
 
 ---
-*Context-aware review complete. [N] agents + integration checks. [M] findings triaged.*
+*Context-aware review complete. [N] agents + integration checks. [M] findings filed, [K] noted (not filed).*
 EOF
 )"
 ```
@@ -2359,6 +2394,7 @@ Review complete for PR #X. Verdict: [VERDICT].
 - Agents: [N] ([names]) — [dispatch mode: risk-scaled / thorough / full-union]
 - Integration checks: [pass/N broken paths found]
 - Issues created: [M]
+- Noted (not filed): [K]
 {IF AUTO_MERGE: "PR merged and issue closed." / "Merge FAILED — see issue."}
 {IF IS_MILESTONE_TO_STAGING: "Review findings demilestoned: [N] issues moved to fast lane." / ""}
 {Tip if risk-scaled: "Run with --thorough to enable full union dispatch for release-critical reviews."}
