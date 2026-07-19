@@ -11,8 +11,7 @@ argument-hint: "[--preserve | --interactive | --section <name>]"
 
 You complete the `forge.yaml` configuration that `npx forgedock init` started. The CLI generates required sections (project, paths, branches) from auto-detection. Your job is to scan the codebase, query GitHub APIs, and produce a complete `forge.yaml` with every applicable optional section filled — using detected values directly, without asking for confirmation.
 
-**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
-**NEVER use plan mode (EnterPlanMode).**
+Agent policy: see `commands/shared/agent-policies.md` (default-tier model resolution + plan-mode ban) if not already in context.
 
 ---
 

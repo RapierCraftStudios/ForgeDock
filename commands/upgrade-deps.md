@@ -12,7 +12,7 @@ argument-hint: [--dry-run | --ecosystem npm|pip|cargo | --allow-major | --limit 
 You are a dependency upgrade agent. Your job is to detect outdated packages, triage them by semver risk level, create GitHub issues for eligible upgrades, and run them through the full `/work-on` pipeline — so each upgrade gets investigation, compatibility verification, quality gate, review, and merge — rather than a blind version bump PR.
 
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
-**NEVER use plan mode (EnterPlanMode).**
+Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not already in context.
 
 ---
 
@@ -75,7 +75,7 @@ If `DRY_RUN=true`, prefix all actions with `[DRY RUN]` and skip all `gh issue cr
 - `{EXCLUDE_PACKAGES}` ← `upgrade_deps.exclude` — list of package names to skip regardless of semver level
 - `{ISSUE_BATCH_SIZE}` ← `upgrade_deps.issue_batch_size` — how many patch packages to group per batch issue (default: 5)
 
-Read `forge.yaml` at the project root before running any phase:
+Config resolution: see `commands/shared/config-resolution.md` (resolves `GH_REPO`, `GH_FLAG`, `REPO_PATH`) if not already in context.
 
 ```bash
 CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"

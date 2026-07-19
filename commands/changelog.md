@@ -18,7 +18,7 @@ Generate a structured markdown changelog from merged PRs and their FORGE:TRAJECT
 
 ## Config Resolution
 
-Read `forge.yaml` before running any phase. If missing, stop and tell the user to run `npx forgedock init`.
+Config resolution: see `commands/shared/config-resolution.md` (resolves `GH_REPO`, `GH_FLAG`, `REPO_PATH`) if not already in context.
 
 ```bash
 CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"

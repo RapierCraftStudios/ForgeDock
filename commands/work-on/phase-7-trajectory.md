@@ -19,7 +19,7 @@ used throughout the pipeline.
 Applies" (`FORGE:MODEL_TIER_NOTE`) — this file's steps are mechanical (stats gathering,
 comment posting) end-to-end, a legitimate `effort: low` candidate; `model` overrides are
 non-functional for `Skill()`-dispatched sub-phases per that note.
-**NEVER use plan mode (EnterPlanMode).**
+Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not already in context.
 
 <!-- FORGE:SPEC_LOADED — work-on/phase-7-trajectory.md loaded and active. -->
 

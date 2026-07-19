@@ -16,7 +16,7 @@ install: extras
 - `{GOVERNOR_MAX_ISSUES}` ← `governor.max_issues_per_run` (optional, default `10`) — hard cap on issues spawned per run
 - `{GOVERNOR_MAX_COST_USD}` ← `governor.max_cost_usd` (optional, default `5.00`) — hard cap on estimated LLM spend per run
 
-**NEVER use plan mode (EnterPlanMode).**
+Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not already in context.
 **NEVER use the Agent tool** for implementation work — dispatch issues via `Skill(skill="work-on", ...)` or via `/orchestrate`.
 
 <!-- FORGE:SPEC_LOADED — signal-planner.md loaded and active. Agent is bound by this spec. -->

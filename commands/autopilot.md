@@ -17,7 +17,7 @@ install: extras
 - `{BILLING_ENABLED}` ← `billing.enabled` (optional, default `false`) — set to `true` to enable Stripe data in Analytics Snapshot
 - `{RECON_SOURCES}` ← `autopilot.recon_sources` (optional, default `["ci","backlog"]`) — list of collectors to run in Phase 1. Built-in tags: `ci` (Phase 1B), `backlog` (Phase 1C), `analytics` (Phase 1D). Omit the key to run `ci` and `backlog` only.
 
-**NEVER use plan mode (EnterPlanMode).**
+Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not already in context.
 **NEVER use the Agent tool** — autopilot dispatches all work via `Skill(...)` calls only. The Agent tool bypasses the Skill pipeline's label state machine, investigation comments, and structured review — leaving no audit trail.
 
 <!-- FORGE:SPEC_LOADED — autopilot.md loaded and active. Agent is bound by this spec. -->

@@ -18,7 +18,7 @@ Scan the entire development environment for rot and fix it. This is a maintenanc
 
 ## Config Resolution
 
-Read `forge.yaml` at the project root to resolve all project-specific variables before running any commands:
+Config resolution: see `commands/shared/config-resolution.md` (resolves `GH_REPO`, `GH_FLAG`, `REPO_PATH`) if not already in context.
 
 ```bash
 # Parse forge.yaml for project context

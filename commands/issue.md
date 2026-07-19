@@ -15,8 +15,7 @@ You create GitHub issues with the exact structure the `/work-on` pipeline expect
 
 `/issue` also accepts a **programmatic invocation form** for callers that have already composed a title, body, labels, and (optionally) a milestone — e.g. `Skill(skill="issue", args="--title \"fix: ...\" --body-file \"$(mktemp)\" --label bug --label P2")` (the caller writes the body to that path before invoking). This form skips the free-text parsing (Phase 1) and LLM drafting (Phase 3) entirely, but still runs the same dedup and body-validation correctness gates as the interactive path. See **Programmatic Invocation Contract** below — in particular, `--body-file` callers MUST use a `mktemp`-created path, never a fixed literal like `/tmp/body.md`; concurrent orchestrated agents share this host's `/tmp`, and a fixed path can be clobbered mid-flight by another agent (forge#2198).
 
-**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
-**NEVER use plan mode (EnterPlanMode).**
+Agent policy: see `commands/shared/agent-policies.md` (default-tier model resolution + plan-mode ban) if not already in context.
 
 ---
 
@@ -238,7 +237,7 @@ The user's input (`$ARGUMENTS`) can be:
 
 ### 1A: Resolve target repository
 
-Read `forge.yaml` to build the routing table dynamically:
+Config resolution: see `commands/shared/config-resolution.md` (resolves `GH_REPO`, `GH_FLAG`, `REPO_PATH`) if not already in context.
 
 ```bash
 CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"

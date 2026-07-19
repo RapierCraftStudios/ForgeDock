@@ -18,7 +18,7 @@ run before any phase-specific logic (investigate, build, review, close) executes
 Applies" (`FORGE:MODEL_TIER_NOTE`) — this file's steps are mechanical (label edits, config
 reads, board sync) end-to-end, a legitimate `effort: low` candidate; `model` overrides are
 non-functional for `Skill()`-dispatched sub-phases per that note.
-**NEVER use plan mode (EnterPlanMode).**
+Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not already in context.
 
 <!-- FORGE:SPEC_LOADED — work-on/phase-0-resolve.md loaded and active. -->
 

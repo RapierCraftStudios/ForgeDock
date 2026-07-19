@@ -18,7 +18,7 @@ resolution and validation against the classified lane, PR creation, and the
 Applies" (`FORGE:MODEL_TIER_NOTE`) — this file's steps are mechanical (branch push, label
 edit, `gh pr create`) end-to-end, a legitimate `effort: low` candidate; `model` overrides
 are non-functional for `Skill()`-dispatched sub-phases per that note.
-**NEVER use plan mode (EnterPlanMode).**
+Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not already in context.
 **PRs NEVER target `main`.** Target `staging` (fast lane) or `milestone/{slug}` (feature lane).
 
 <!-- FORGE:SPEC_LOADED — work-on/phase-4-pr.md loaded and active. -->

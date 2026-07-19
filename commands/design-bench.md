@@ -22,7 +22,7 @@ live there — this command is the executable workflow over that methodology.
 **No application runtime.** ForgeDock is a set of command specs. This command is a step-by-step procedure an
 agent executes; the only executable helper is the deterministic aggregator `scripts/bench-scorecard.mjs`.
 
-**NEVER use plan mode (EnterPlanMode).**
+Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not already in context.
 
 <!-- FORGE:SPEC_LOADED — design-bench.md loaded and active. Agent is bound by this spec. -->
 

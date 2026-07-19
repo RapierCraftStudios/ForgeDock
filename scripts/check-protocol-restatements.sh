@@ -5,33 +5,43 @@
 # check-protocol-restatements.sh — Guard against future restatements of normative
 #                                   FORGE protocol content in commands/**/*.md.
 #
-# ForgeDock keeps three protocol definitions in designated normative source files:
+# ForgeDock keeps four protocol/policy definitions in designated normative
+# source files:
 #
-#   docs/FORGE-PROTOCOL.md       — FORGE annotation format (annotation types,
-#                                   schemas, completion sentinels)
-#   docs/WORKFLOW.md             — Label state machine (workflow:* transitions)
-#   commands/review-pr-agents.md — Evidence-Based Review Protocol (review agent
-#                                   behaviour, structured findings format)
+#   docs/FORGE-PROTOCOL.md            — FORGE annotation format (annotation
+#                                        types, schemas, completion sentinels)
+#   docs/WORKFLOW.md                  — Label state machine (workflow:* transitions)
+#   commands/review-pr-agents.md      — Evidence-Based Review Protocol (review
+#                                        agent behaviour, structured findings format)
+#   commands/shared/agent-policies.md — Agent model policy (default tier) +
+#                                        plan-mode ban (forge#2677)
 #
 # Once these are single-sourced, command specs should reference them via a
 # one-line pointer, NOT restate the full content. This script detects
-# heading-level signatures that indicate a full restatement has crept back in.
+# heading-level (or, for the two AGENT_* patterns, full-line) signatures that
+# indicate a full restatement has crept back in.
 #
-# Detected patterns (heading-level restatement signatures):
+# Detected patterns (heading-level restatement signatures, unless noted):
 #
-#   FORGE_ANNOTATION_PROTOCOL — "# FORGE Annotation Protocol"
-#                                "## FORGE Annotation Protocol"
-#   ANNOTATION_TYPES          — "## Annotation Types"
-#                                "### Annotation Types"
-#   WORKFLOW_STATE_MACHINE    — "# Workflow State Machine"
-#                                "## Workflow State Machine"
-#   LABEL_STATE_MACHINE       — "# Label State Machine"
-#                                "## Label State Machine"
-#   REVIEW_PROTOCOL           — "## Evidence-Based Review Protocol"
-#                                (outside its normative source)
+#   FORGE_ANNOTATION_PROTOCOL  — "# FORGE Annotation Protocol"
+#                                 "## FORGE Annotation Protocol"
+#   ANNOTATION_TYPES           — "## Annotation Types"
+#                                 "### Annotation Types"
+#   WORKFLOW_STATE_MACHINE     — "# Workflow State Machine"
+#                                 "## Workflow State Machine"
+#   LABEL_STATE_MACHINE        — "# Label State Machine"
+#                                 "## Label State Machine"
+#   REVIEW_PROTOCOL            — "## Evidence-Based Review Protocol"
+#                                 (outside its normative source)
+#   AGENT_MODEL_POLICY_DEFAULT — full-line: the exact default-tier
+#                                 "**Agent model policy**: ..." sentence
+#                                 (a command with a genuinely different model/
+#                                 effort tier or extra caveats is not a match —
+#                                 see commands/shared/agent-policies.md)
+#   PLAN_MODE_BAN               — full-line: "**NEVER use plan mode (EnterPlanMode).**"
 #
 # Each pattern is keyed to a NORMATIVE_SOURCE — the one file allowed to contain
-# that heading. All other files in commands/ that match are flagged as
+# that heading/line. All other files in commands/ that match are flagged as
 # restatements.
 #
 # Allowlist: to permit a heading in an additional file (e.g. a migration guide),
@@ -87,12 +97,19 @@ PATTERN_NAMES=(
   "WORKFLOW_STATE_MACHINE"
   "LABEL_STATE_MACHINE"
   "REVIEW_PROTOCOL"
+  "AGENT_MODEL_POLICY_DEFAULT"
+  "PLAN_MODE_BAN"
 )
 
-# Each regex matches one or more heading levels for the given protocol section.
-# Anchored (^) so prose references mid-sentence are not false positives.
-# Trailing content after the key phrase is permitted (e.g. parentheticals like
-# "(ALL Agents Follow)") — the anchored key phrase is the restatement signal.
+# Each regex matches one or more heading levels for the given protocol section,
+# OR (for the two AGENT_* entries added at forge#2677) a full-line content
+# signature rather than a heading — these two are exact-duplicate prose lines,
+# not section headings, so the anchor is the whole line instead of a "^#{1,2}"
+# heading prefix. Anchored (^...$) so prose references mid-sentence are not
+# false positives, and so a file with a genuinely different policy (different
+# model, different effort tier, extra dispatcher-specific caveats — see
+# commands/shared/agent-policies.md's "Usage" section) is NOT flagged: those
+# lines carry additional trailing content and no longer match the anchor.
 # The allowlist comment token exclusion is handled in a separate grep -v pass.
 PATTERN_REGEXES=(
   "^#{1,2} FORGE Annotation Protocol"
@@ -100,6 +117,8 @@ PATTERN_REGEXES=(
   "^#{1,2} Workflow State Machine"
   "^#{1,2} Label State Machine"
   "^#{1,2} Evidence-Based Review Protocol"
+  '^\*\*Agent model policy\*\*: `model: "\{DEFAULT_MODEL\}"` — resolved from forge\.yaml `agents\.default_model`, else "sonnet" \(standard tier\)\. Fallback: `model: "opus"` if rate-limited\. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2\.1\.154\.$'
+  '^\*\*NEVER use plan mode \(EnterPlanMode\)\.\*\*$'
 )
 
 NORMATIVE_SOURCES=(
@@ -108,6 +127,8 @@ NORMATIVE_SOURCES=(
   "docs/WORKFLOW.md"
   "docs/WORKFLOW.md"
   "commands/review-pr-agents.md"
+  "commands/shared/agent-policies.md"
+  "commands/shared/agent-policies.md"
 )
 
 # ---------------------------------------------------------------------------
@@ -165,10 +186,11 @@ if [ ${#VIOLATIONS[@]} -gt 0 ]; then
   echo "To permit a heading in this file intentionally, add the allowlist token:" >&2
   echo "  ## <Heading> <!-- allowlist:check-protocol-restatements -->" >&2
   echo "" >&2
-  echo "Normative sources (these files may contain the headings):" >&2
-  echo "  docs/FORGE-PROTOCOL.md       — FORGE annotation format" >&2
-  echo "  docs/WORKFLOW.md             — Label state machine" >&2
-  echo "  commands/review-pr-agents.md — Evidence-Based Review Protocol" >&2
+  echo "Normative sources (these files may contain the headings/lines):" >&2
+  echo "  docs/FORGE-PROTOCOL.md            — FORGE annotation format" >&2
+  echo "  docs/WORKFLOW.md                  — Label state machine" >&2
+  echo "  commands/review-pr-agents.md      — Evidence-Based Review Protocol" >&2
+  echo "  commands/shared/agent-policies.md — Agent model policy / plan-mode ban" >&2
   exit 1
 fi
 

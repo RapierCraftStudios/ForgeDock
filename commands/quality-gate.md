@@ -13,8 +13,7 @@ You are a quality gate that runs AFTER implementation but BEFORE commit. Your jo
 
 You do NOT post to GitHub. You do NOT create issues. You return findings directly to the builder agent that spawned you.
 
-**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
-**NEVER use plan mode (EnterPlanMode).**
+Agent policy: see `commands/shared/agent-policies.md` (default-tier model resolution + plan-mode ban) if not already in context.
 
 <!-- FORGE:SPEC_LOADED — quality-gate.md loaded and active. Agent is bound by this spec. -->
 

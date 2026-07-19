@@ -13,8 +13,7 @@ install: extras
 
 Verifies a staging→main bundle's acceptance criteria against running code before deploy. Called by `/review-pr-staging` (Phase 6.5) with the bundle PRs, or run standalone when `--prs` is absent (computes the bundle itself). Returns a machine-readable BLOCK / PASS / SKIP verdict for the caller to consume.
 
-**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
-**NEVER use plan mode (EnterPlanMode).**
+Agent policy: see `commands/shared/agent-policies.md` (default-tier model resolution + plan-mode ban) if not already in context.
 **NEVER use the Agent tool** — test-gate dispatches test clusters via `Task` only. The Agent tool bypasses the allowed-tools constraint and produces output that cannot be structured into the machine-readable BLOCK / PASS / SKIP verdict.
 
 <!-- FORGE:SPEC_LOADED — test-gate.md loaded and active. Agent is bound by this spec. -->
@@ -36,7 +35,7 @@ If you find yourself about to call `Agent(...)`, stop and use `Task(...)` instea
 
 ## Config Resolution
 
-Read `forge.yaml` **before** running any commands. All variable references below are populated from this block.
+Config resolution: see `commands/shared/config-resolution.md` (resolves `GH_REPO`, `GH_FLAG`, `REPO_PATH`) if not already in context.
 
 ```bash
 CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
