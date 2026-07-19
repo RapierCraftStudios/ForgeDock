@@ -1206,6 +1206,342 @@ describe("pre-tool-use hook — filesystem-root find guard (#2034)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Rule 7: Content-staging temp-path (mktemp) guard (issue #2686)
+//
+// Blocks a comment/PR/issue/release body staged to a FIXED literal system-temp
+// path — the #2672 cross-agent collision surface, where two concurrent review
+// agents each wrote their body to the same /tmp path and the second clobbered
+// the first, so the wrong body was posted to the PR. Converts the prose mktemp
+// mandate (forge#2198), which degraded under concurrency, into a deterministic
+// hook rule. Runs before the isForgeDockManagedCwd() gate (like Rule 5) because
+// the colliding agents run inside git worktrees with no forge.yaml marker.
+//
+// To confirm this suite is not vacuous: removing the checkTempPathStaging()
+// wire-in from main() makes every "exits 2" case below FAIL (the fixed-temp
+// --body-file command would be allowed through, exit 0).
+// ---------------------------------------------------------------------------
+
+describe("pre-tool-use hook — content-staging temp-path guard (#2686)", () => {
+  // -- The recorded #2672 collision shape: a fixed /tmp path passed to
+  //    --body-file on a gh comment. This is the exact class the rule exists
+  //    to block. --
+  it("exits 2 and prints BLOCKED for the #2672 collision shape (gh pr comment --body-file /tmp/<fixed>)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr comment 2672 --body-file /tmp/review-body.md" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+    assert.match(stderr, /\/tmp\/review-body\.md/);
+  });
+
+  // -- Security-review regression (issue #2686 PR review): `-F` is `gh`'s
+  //    documented short alias for --body-file/--notes-file on every covered
+  //    subcommand (gh pr comment, gh pr create, gh issue comment/create, gh
+  //    release create). The pre-fix flag set only recognized the long form,
+  //    so `gh pr comment N -F /tmp/x.md` reproduced the exact #2672 collision
+  //    shape while being invisible to both Form 1 (flag not in the set) and
+  //    Form 2 (no redirect operator present) — a one-character bypass of the
+  //    rule's entire purpose. --
+  it("exits 2 for the -F short-flag space form (gh pr comment N -F /tmp/x.md)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr comment 2672 -F /tmp/review-body.md" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+    assert.match(stderr, /\/tmp\/review-body\.md/);
+  });
+
+  it("exits 2 for the -F short-flag glued form (gh pr comment N -F/tmp/x.md)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr comment 2672 -F/tmp/review-body.md" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 0 for the -F short-flag form with a mktemp-derived path (no false positive)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'BODY=$(mktemp); gh pr comment 2672 -F "$BODY"' },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("exits 2 for a fixed /tmp --body-file on a gh issue comment", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh issue comment 5 --body-file /tmp/sec-review.md" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for the equals form --body-file=/tmp/x.md", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh issue comment 5 --body-file=/tmp/x.md" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for --notes-file /tmp/notes.md (gh release notes staging)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh release create v1 --notes-file /tmp/notes.md" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for a $TMPDIR-rooted fixed path", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'gh issue comment 5 --body-file "$TMPDIR/review.md"' },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for a ${TMPDIR:-/tmp} default-expansion fixed leaf", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'gh issue comment 5 --body-file "${TMPDIR:-/tmp}/review.md"' },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  // -- Bypass vectors inherited from the Rule 5 track record: these MUST also
+  //    be blocked (the matcher reuses tokenizeCommand, which carries the
+  //    empty-quote / backslash-escape / trailing-slash-dot fixes). --
+  it("exits 2 for a trailing-double-slash root /tmp//review.md", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh issue comment 5 --body-file /tmp//review.md" },
+    });
+    assert.equal(exitCode, 2);
+  });
+
+  it("exits 2 for a dot-segment root /tmp/./review.md", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh issue comment 5 --body-file /tmp/./review.md" },
+    });
+    assert.equal(exitCode, 2);
+  });
+
+  it("exits 2 for an empty-quote-injection path (/tmp/\"\"review.md)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'gh issue comment 5 --body-file /tmp/""review.md' },
+    });
+    assert.equal(exitCode, 2);
+  });
+
+  it("exits 2 for a backslash-escaped path (/tmp/re\\view.md collapses to /tmp/review.md)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh issue comment 5 --body-file /tmp/re\\view.md" },
+    });
+    assert.equal(exitCode, 2);
+  });
+
+  // -- Redirect (write-side) form: fixed /tmp redirect target in a gh command. --
+  it("exits 2 for a stdout redirect to a fixed /tmp path in a gh command", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'echo "$body" > /tmp/staged-body.md && gh issue comment 5 --body-file -' },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 2 for a glued stdout redirect >/tmp/x in a gh command", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'printf "%s" "$b" >/tmp/body.md && gh pr comment 7 --body-file -' },
+    });
+    assert.equal(exitCode, 2);
+  });
+
+  // -- Cwd independence: like Rule 5, fires inside a git worktree with no
+  //    forge.yaml/.forgedock marker (exactly where the #2672 agents ran). --
+  it("blocks a fixed /tmp --body-file even in an unmanaged directory (#2686, runs before the managed-cwd gate)", () => {
+    const unmanagedDir = mkdtempSync(join(osTop.tmpdir(), "fd-ptu-unmanaged-tmp-"));
+    try {
+      const { exitCode, stderr } = runHook(
+        {
+          hook_event_name: "PreToolUse",
+          tool_name: "Bash",
+          tool_input: { command: "gh pr comment 2672 --body-file /tmp/review-body.md" },
+        },
+        { cwd: unmanagedDir },
+      );
+      assert.equal(exitCode, 2, "Rule 7 must fire regardless of forge.yaml presence");
+      assert.match(stderr, /BLOCKED/);
+    } finally {
+      rmSync(unmanagedDir, { recursive: true, force: true });
+    }
+  });
+
+  // -- False-positive guard (AC2/AC4): the mktemp-using corpus must NOT be
+  //    flagged. These mirror real command shapes from scripts/ and commands/. --
+  it('exits 0 for the mandated --body-file "$(mktemp)" idiom', () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'gh issue comment 5 --body-file "$(mktemp)"' },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("exits 0 for a --body-file variable form ($BODY_TMPFILE, VAR=$(mktemp))", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'gh issue comment 5 --body-file "$BODY_TMPFILE"' },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("exits 0 for a mktemp XXXXXX template path (corpus graph-query.sh shape)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'gh issue comment 5 --body-file "${TMPDIR:-/tmp}/spec-graph.XXXXXX.json"' },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("exits 0 for a $$-PID-suffixed fixed temp path (collision-safe by construction)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh issue comment 5 --body-file /tmp/body.$$.md" },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("exits 0 for a worktree-local .forgedock/tmp path (collision-safe scratch root)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh issue comment 5 --body-file .forgedock/tmp/review.md" },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("exits 0 for a real session-scoped scratchpad path (UUID segment immediately before scratchpad)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: {
+        command:
+          "gh issue comment 5 --body-file /tmp/claude/proj-hash/a5a83ea0-5308-4d6b-890a-d1f4374dc529/scratchpad/review.md",
+      },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  // -- Security-review regression (issue #2686 PR review): the pre-fix
+  //    SAFE_TEMP_ROOT_RE was an unanchored substring test, so a bare fixed
+  //    literal that merely contained the word "scratchpad" — NOT a real
+  //    per-session scratch directory — was wrongly exempted. Two agents both
+  //    hardcoding this exact path would still collide exactly like #2672
+  //    while being whitelisted. Must now be BLOCKED. --
+  it("exits 2 for a bare /tmp/scratchpad/<fixed>.md path with no session-UUID segment (closes the loose-substring exemption bypass)", () => {
+    const { exitCode, stderr } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "gh pr comment 2672 --body-file /tmp/scratchpad/review.md" },
+    });
+    assert.equal(exitCode, 2);
+    assert.match(stderr, /BLOCKED/);
+  });
+
+  it("exits 0 when a fixed /tmp path is only MENTIONED inside a quoted --body value (no real staging)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'gh issue comment 1 --body "write the report to /tmp/foo.md first"' },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("exits 0 when a `> /tmp/x` redirect is only inside a quoted annotation string (corpus doctor-pipeline-state.sh shape)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'gh issue comment 1 --body "Migration: gh gist view X > /tmp/migrate.md && gh gist delete X"' },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("exits 0 for a plain non-gh redirect to /tmp (redirect form is gated on a gh invocation)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "echo hi > /tmp/scratch.txt" },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  it("exits 0 for a --body-file - stdin form alongside a mktemp stderr capture (no fixed literal)", () => {
+    const { exitCode } = runHook({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: 'gh pr comment 5 --body-file "$BODY" 2>"$GH_STDERR_TMP"' },
+    });
+    assert.equal(exitCode, 0);
+  });
+
+  // -- Operator override + fail-open (AC3). --
+  it("exits 0 when FORGE_ALLOW_FIXED_TMP=1 operator override is set", () => {
+    const result = spawnSync(process.execPath, [HOOK_PATH], {
+      input: JSON.stringify({
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "gh pr comment 2672 --body-file /tmp/review-body.md" },
+      }),
+      encoding: "utf-8",
+      timeout: 5000,
+      env: { ...process.env, NODE_OPTIONS: "", FORGE_ALLOW_FIXED_TMP: "1" },
+      cwd: DEFAULT_MANAGED_DIR,
+    });
+    assert.equal(result.status ?? -1, 0, "FORGE_ALLOW_FIXED_TMP=1 should allow a fixed temp path");
+  });
+
+  it("exits 0 (fail-open) for malformed JSON even with the new rule wired in", () => {
+    const result = spawnSync(process.execPath, [HOOK_PATH], {
+      input: "{ not json }",
+      encoding: "utf-8",
+      timeout: 3000,
+      env: { ...process.env, NODE_OPTIONS: "" },
+    });
+    assert.equal(result.status, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // settings-hook.mjs — SubagentStop and PreToolUse wiring tests
 // ---------------------------------------------------------------------------
 
