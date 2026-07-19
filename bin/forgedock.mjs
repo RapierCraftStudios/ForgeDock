@@ -1530,6 +1530,21 @@ function resolveGlobalNpmForgedockDir() {
  * paths that are already resolved — this helper deliberately does not
  * re-resolve.
  *
+ * Known limitation: `caseInsensitive` is gated on `process.platform`, an
+ * OS-level constant, not on the actual case-sensitivity of the volume
+ * FORGE_HOME/the npm global root live on. This is the correct assumption for
+ * the default filesystem format on each OS (NTFS on win32, APFS/HFS+ on
+ * darwin), but a volume explicitly formatted case-sensitive (e.g. opt-in
+ * case-sensitive APFS) would still be case-folded here, and two distinct
+ * directories differing only by case could be treated as equal. This is an
+ * accepted approximation, not a probe of real volume semantics — both call
+ * sites (`isGlobalNpmInstall`, `findSeparateGlobalInstall`) already fail
+ * closed / stay advisory-only, so a false match here degrades to their
+ * pre-existing "detection inconclusive" behavior rather than causing any
+ * destructive or incorrect action (forge#2675). Probing the actual volume
+ * (e.g. an `existsSync` case-twist check) is deliberately not done — the
+ * added complexity and syscall aren't warranted for a purely advisory path.
+ *
  * @param {string} child - resolved absolute path being tested
  * @param {string} parent - resolved absolute path of the candidate ancestor
  * @returns {boolean}
