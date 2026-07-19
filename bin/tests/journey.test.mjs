@@ -566,7 +566,7 @@ describe("preflight", () => {
 // Task 6: forge & findMarkdownFiles tests
 // ---------------------------------------------------------------------------
 
-import { lstatSync, mkdirSync as mkdirSyncFs, symlinkSync, statSync } from "node:fs";
+import { lstatSync, mkdirSync as mkdirSyncFs, symlinkSync, statSync, readlinkSync } from "node:fs";
 
 /**
  * A command is installed if the target is a symlink (Developer Mode / admin /
@@ -2167,6 +2167,83 @@ describe("forge (Act II)", () => {
       const pruned = await pruneStaleExtensionlessEntries(targetDir);
       assert.equal(pruned, 1);
       assert.ok(!existsSync(link));
+    });
+
+    it("leaves a Windows drive-relative symlink target (e.g. \"C:foo\") untouched rather than mis-joining it (forge#2659)", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-driverel-"));
+      const link = join(targetDir, "orchestrate");
+      // "C:foo" — drive letter + colon with NO separator after it — is
+      // classified as "relative" by both path.win32.isAbsolute() and
+      // path.posix.isAbsolute() (neither recognizes this shape as absolute),
+      // so it would previously fall into the join(targetDir, linkTarget)
+      // branch and produce a nonsensical resolved path. It cannot be
+      // resolved correctly without knowing the drive's own cwd, which Node
+      // has no API for — the correct behavior is to leave the entry alone.
+      symlinkSync("C:foo", link);
+      // Native Windows symlink creation resolves a drive-relative target
+      // against the process's cwd at creation time (CreateSymbolicLink
+      // semantics), so readlink() here would return an already-absolute
+      // path rather than the literal "C:foo" string this test targets — the
+      // literal-string scenario only arises from a symlink created by an
+      // external tool that preserves the raw string (e.g. on POSIX, where
+      // symlink() never interprets its target). Skip on platforms where the
+      // literal string can't actually be constructed via symlinkSync rather
+      // than assert something this environment can't reproduce.
+      if (readlinkSync(link) !== "C:foo") return;
+      const pruned = await pruneStaleExtensionlessEntries(targetDir);
+      assert.equal(pruned, 0, "drive-relative target must not be pruned — cannot be resolved safely");
+    });
+
+    it("does NOT mistake a genuinely drive-absolute target (\"C:\\\\foo\") for drive-relative", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-driveabs-"));
+      const realTarget = join(targetDir, "real-target.md");
+      writeFileSync(realTarget, "REAL", "utf-8");
+      const link = join(targetDir, "orchestrate");
+      symlinkSync(realTarget, link); // absolute target (e.g. "C:\...\real-target.md" on Windows)
+      const pruned = await pruneStaleExtensionlessEntries(targetDir);
+      assert.equal(pruned, 0, "a genuinely absolute target must resolve normally and not be pruned");
+      assert.ok(existsSync(link));
+    });
+
+    it("expands a leading ~ against the home directory before resolving the target (forge#2660)", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-tilde-"));
+      const homeDir = mkdtempSync(join(os.tmpdir(), "fd-stale-tildehome-"));
+      const realTargetHomeRelative = join(homeDir, "real-target.md");
+      writeFileSync(realTargetHomeRelative, "REAL", "utf-8");
+      const originalHomedir = os.homedir;
+      os.homedir = () => homeDir;
+      try {
+        const link = join(targetDir, "orchestrate");
+        symlinkSync("~/real-target.md", link); // literal tilde-prefixed target, as readlink() would return it
+        const pruned = await pruneStaleExtensionlessEntries(targetDir);
+        // NOTE: cannot assert existsSync(link) here — existsSync follows the
+        // symlink using the OS's own (non-tilde-aware) resolution, which
+        // would report the link as broken regardless of our custom
+        // expansion. pruned === 0 is the correct, complete assertion: it
+        // proves pruneStaleExtensionlessEntries itself resolved the tilde
+        // target to the real, existing file and therefore left the entry
+        // alone (matches this describe block's existing convention — see
+        // "does not touch entries with a file extension" above).
+        assert.equal(pruned, 0, "tilde target must expand against home dir and resolve to the existing file");
+      } finally {
+        os.homedir = originalHomedir;
+      }
+    });
+
+    it("still prunes a tilde-prefixed target that is genuinely missing under the home directory", async () => {
+      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-tilde-missing-"));
+      const homeDir = mkdtempSync(join(os.tmpdir(), "fd-stale-tildehome-missing-"));
+      const originalHomedir = os.homedir;
+      os.homedir = () => homeDir;
+      try {
+        const link = join(targetDir, "orchestrate");
+        symlinkSync("~/does-not-exist.md", link);
+        const pruned = await pruneStaleExtensionlessEntries(targetDir);
+        assert.equal(pruned, 1);
+        assert.ok(!existsSync(link));
+      } finally {
+        os.homedir = originalHomedir;
+      }
     });
   });
 

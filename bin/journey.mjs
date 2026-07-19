@@ -882,12 +882,18 @@ const STALE_MANIFEST_TMP_AGE_MS = 60_000;
 
 // Age (ms) above which a held manifest lock file is assumed to be a
 // crash-orphan (the holder died between acquiring the lock and releasing it)
-// rather than a live concurrent holder, and is safe to reclaim. Generous
-// relative to the real read→merge→write critical section this lock guards
-// (one readFile+JSON.parse, an in-memory loop, one writeFile+rename) —
-// mirrors STALE_MANIFEST_TMP_AGE_MS's reasoning (forge#2612) applied to the
-// lock file instead of the tmp write sibling (forge#2637).
-const STALE_MANIFEST_LOCK_AGE_MS = 10_000;
+// rather than a live concurrent holder, and is safe to reclaim. Deliberately
+// shorter than STALE_MANIFEST_TMP_AGE_MS (60s, forge#2612) rather than
+// matching it: the lock's critical section (one readFile+JSON.parse, an
+// in-memory loop, one writeFile+rename) is far lighter than the write this
+// process guards against staleness in the tmp-sweep case, so a live holder
+// should never legitimately hold this lock anywhere near that long. Not set
+// as low as the original 10s either — that left too little headroom under
+// slow I/O (AV scanning, network home dirs, loaded CI), which could plausibly
+// exceed 10s and trigger premature reclaim of a still-live lock (review
+// finding on PR #2654, forge#2655). 30s is a documented middle ground: 3x the
+// original headroom, still 2x shorter than the tmp precedent.
+const STALE_MANIFEST_LOCK_AGE_MS = 30_000;
 
 // Bounded retry/backoff for acquireManifestLock (forge#2637). Total worst-case
 // wait is small (a few hundred ms) — long enough to let a concurrent holder's
@@ -922,6 +928,7 @@ async function acquireManifestLock(manifestPath) {
     } catch (err) {
       if (err?.code !== "EEXIST") return null; // unexpected error (e.g. EACCES) — proceed unlocked
       // Contended — opportunistically reclaim a stale (crash-orphaned) lock.
+      let reclaimed = false;
       try {
         const st = await lstat(lockPath);
         if (Date.now() - st.mtimeMs >= STALE_MANIFEST_LOCK_AGE_MS) {
@@ -940,6 +947,7 @@ async function acquireManifestLock(manifestPath) {
             const st2 = await lstat(lockPath);
             if (st2.ino === st.ino && st2.mtimeMs === st.mtimeMs) {
               await unlink(lockPath).catch(() => {});
+              reclaimed = true;
             }
           } catch {
             // vanished between the two stats — already released, nothing to reclaim
@@ -949,6 +957,12 @@ async function acquireManifestLock(manifestPath) {
         // lock file vanished between the failed open and this stat (the
         // holder released it) — fall through to the next attempt/retry.
       }
+      // A successful reclaim just proved the path is free — retry open()
+      // immediately instead of waiting out the full backoff delay for this
+      // iteration (review finding on PR #2654, forge#2656). Still counts as
+      // a used attempt (loop counter still advances), it just skips the
+      // sleep.
+      if (reclaimed) continue;
       if (attempt === MANIFEST_LOCK_RETRY_DELAYS_MS.length) return null; // retries exhausted
       await new Promise((resolve) => setTimeout(resolve, MANIFEST_LOCK_RETRY_DELAYS_MS[attempt]));
     }
@@ -1153,6 +1167,17 @@ async function pruneOrphanedSymlinks(targetDir, commandsDir) {
  * @param {string} targetDir - ~/.claude/commands
  * @returns {Promise<number>} Number of stale entries removed.
  */
+// Matches a Windows drive-relative path like "C:foo" (drive letter + colon,
+// NOT followed by a path separator) — as opposed to a drive-absolute path
+// like "C:\foo" or "C:/foo", which path.isAbsolute() already recognizes
+// correctly. A drive-relative target resolves relative to that drive's own
+// current working directory, which Node has no API to query — there is no
+// way to compute the correct absolute path here (review finding on PR #2658,
+// forge#2659). Deliberately narrow: only fires when isAbsolute() has already
+// said "no" and the string still starts with `<letter>:` immediately
+// followed by a non-separator character.
+const WINDOWS_DRIVE_RELATIVE_RE = /^[A-Za-z]:(?![\\/])/;
+
 export async function pruneStaleExtensionlessEntries(targetDir) {
   let pruned = 0;
   let entries;
@@ -1177,7 +1202,20 @@ export async function pruneStaleExtensionlessEntries(targetDir) {
     // A relative target is defined (POSIX) relative to the symlink's own
     // containing directory (targetDir, since full = join(targetDir, name)) —
     // not the process cwd, which is what a raw lstat(linkTarget) would use.
-    const resolvedTarget = isAbsolute(linkTarget) ? linkTarget : join(targetDir, linkTarget);
+    //
+    // Two shapes isAbsolute() alone misclassifies as "relative" and would
+    // otherwise be wrongly joined onto targetDir:
+    //   - Windows drive-relative ("C:foo") — see WINDOWS_DRIVE_RELATIVE_RE
+    //     above; unresolvable here, so the entry is left untouched.
+    //   - Shell-style tilde ("~/foo", "~\foo", or bare "~") — expand against
+    //     os.homedir() first, matching shell semantics (review finding on
+    //     PR #2658, forge#2660).
+    if (WINDOWS_DRIVE_RELATIVE_RE.test(linkTarget)) continue; // can't resolve without the drive's own cwd — leave alone
+    let effectiveTarget = linkTarget;
+    if (effectiveTarget === "~" || effectiveTarget.startsWith("~/") || effectiveTarget.startsWith("~\\")) {
+      effectiveTarget = join(os.homedir(), effectiveTarget.slice(1));
+    }
+    const resolvedTarget = isAbsolute(effectiveTarget) ? effectiveTarget : join(targetDir, effectiveTarget);
     let targetMissing = false;
     try {
       await lstat(resolvedTarget);
