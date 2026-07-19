@@ -1742,6 +1742,7 @@ cat <<'ISSUE_EOF' > "$FINDING_ISSUE_BODY_FILE"
 **Agent**: [name] ([domain])
 **Confidence**: [CONFIRMED/LIKELY/POSSIBLE]
 **Severity**: [CRITICAL/HIGH/MEDIUM/LOW]
+**P-justification**: [priority:P* resolved from Severity via `scripts/severity-to-priority.sh` — never from Confidence; see `commands/shared/priority-rubric.md`]
 **Review comment**: [permalink to agent comment]
 
 ## Pattern Metadata
@@ -1785,8 +1786,26 @@ Files that need changes:
 [BATCHABLE_ANNOTATION]
 ISSUE_EOF
 
+# Priority is derived from Severity ONLY, via the single canonical mapper — never from
+# Confidence. Confidence and Severity are independent axes; conflating them is the exact
+# bug forge#2447 fixed once already. See commands/shared/priority-rubric.md.
+# scripts/severity-to-priority.sh is committed non-executable (100644, matching the rest
+# of scripts/) — invoke via `bash`, never as a bare path, or this fails with "Permission
+# denied" (exit 126) on a real checkout.
+FINDING_SEVERITY="LOW"  # illustrative — actual value comes from the finding's **Severity** field
+FINDING_PRIORITY=$(bash scripts/severity-to-priority.sh "$FINDING_SEVERITY")
+FINDING_PRIORITY_EXIT=$?
+
+# Exit code MUST be checked before use — severity-to-priority.sh exits 1 (empty stdout)
+# on an unrecognized severity. Silently continuing with an empty $FINDING_PRIORITY would
+# call Skill(issue, --label "") instead of aborting, reintroducing a failure-swallowing
+# bug of exactly the kind forge#2447/#2523 exist to prevent.
+if [ "$FINDING_PRIORITY_EXIT" -ne 0 ]; then
+  echo "PRIORITY: severity-to-priority.sh failed (exit $FINDING_PRIORITY_EXIT) for severity '$FINDING_SEVERITY' — skipping finding issue creation"
+else
+
 # --label is repeatable (not comma-joined) per the /issue programmatic contract.
-Skill(skill="issue", args="--title \"$FINDING_ISSUE_TITLE\" --body-file \"$FINDING_ISSUE_BODY_FILE\" --label review-finding --label needs-validation --label \"{priority}\" ${MILESTONE_FLAG}")
+Skill(skill="issue", args="--title \"$FINDING_ISSUE_TITLE\" --body-file \"$FINDING_ISSUE_BODY_FILE\" --label review-finding --label needs-validation --label \"$FINDING_PRIORITY\" ${MILESTONE_FLAG}")
 rm -f "$FINDING_ISSUE_BODY_FILE"
 
 # /issue has no machine-readable return contract (it's a user-facing command, not a work-on
@@ -1799,15 +1818,18 @@ for _resolve_attempt in 1 2 3; do
   [ -n "$ISSUE_NUM" ] && break
   sleep 2
 done
+fi
 ```
 
-Labels: `review-finding` + `needs-validation` + priority (`priority:P1` CONFIRMED, `priority:P2` LIKELY, `priority:P3` POSSIBLE).
+Labels: `review-finding` + `needs-validation` + priority. Priority is resolved from **Severity**
+(never Confidence) via `scripts/severity-to-priority.sh`: `CRITICAL`→`priority:P0`,
+`HIGH`→`priority:P1`, `MEDIUM`→`priority:P2`, `LOW`→`priority:P3`. See
+`commands/shared/priority-rubric.md`.
 
-**P3 batchable annotation** — <!-- Added: forge#1333 --> When priority resolves to `priority:P3` (POSSIBLE confidence), check whether the finding qualifies for batching. If the affected file does NOT touch a security or billing path, substitute `[BATCHABLE_ANNOTATION]` with the `<!-- FORGE:BATCHABLE -->` marker. This signals the orchestrator's Phase 1 batching rule that this finding can be grouped with other P3s in the same domain:
+**P3 batchable annotation** — <!-- Added: forge#1333 --> When priority resolves to `priority:P3` (LOW severity), check whether the finding qualifies for batching. If the affected file does NOT touch a security or billing path, substitute `[BATCHABLE_ANNOTATION]` with the `<!-- FORGE:BATCHABLE -->` marker. This signals the orchestrator's Phase 1 batching rule that this finding can be grouped with other P3s in the same domain:
 
 ```bash
-# Determine batchable eligibility for this finding
-FINDING_PRIORITY="{priority}"  # priority:P1 / priority:P2 / priority:P3
+# FINDING_PRIORITY was already resolved above via scripts/severity-to-priority.sh
 BATCHABLE_ANNOTATION=""
 
 if [ "$FINDING_PRIORITY" = "priority:P3" ]; then

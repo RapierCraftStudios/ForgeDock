@@ -503,7 +503,7 @@ If `--dry-run` was passed, print the table and STOP. Do not create issues.
 
 ### 5B: Ensure labels exist in target repo
 
-Before creating any issues, ensure all required labels exist. Colors match the canonical ForgeDock label manifest (`bin/labels.json`). Run `npx forgedock labels setup` to bootstrap all managed labels at once.
+Before creating any issues, ensure all required labels exist. Colors match the canonical ForgeDock label manifest (`bin/labels.json`). Run `npx forgedock labels setup` to bootstrap all managed labels at once. The `priority:P*` descriptions below are kept in sync with `bin/labels.json`; for the P0-P3 rubric itself (definitions, examples, required justification line) see `commands/shared/priority-rubric.md`.
 
 ```bash
 gh label create "security" --color "B60205" --description "Security vulnerability or hardening. Managed by ForgeDock." --force -R "{GH_REPO}" 2>/dev/null || true
@@ -542,6 +542,8 @@ cat > "$SECURITY_BODY_FILE" <<'ISSUE_EOF'
 
 - [ ] {Specific remediation step}
 - [ ] Verified by re-running `/security-audit` after fix
+
+**P-justification**: {one sentence — why this priority, referencing what breaks and for whom. See `commands/shared/priority-rubric.md`.}
 
 ## Context
 

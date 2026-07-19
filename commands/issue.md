@@ -436,6 +436,8 @@ Files that need changes (ordered by dependency — change these in this order):
 
 > **Test-type annotation** (optional): Append `[type:api]`, `[type:unit]`, `[type:e2e]`, or `[type:manual]` to each criterion. The test gate reads this annotation directly and skips regex inference. Omit it to rely on regex classification fallback.
 
+**P-justification**: {one sentence — why this priority, referencing what breaks and for whom. See `commands/shared/priority-rubric.md`.}
+
 ## Dependencies
 
 {If this issue depends on other issues:}
@@ -513,6 +515,8 @@ Files that need changes (ordered by dependency):
 
 > **Test-type annotation** (optional): Append `[type:api]`, `[type:unit]`, `[type:e2e]`, or `[type:manual]` to each criterion. The test gate reads this annotation directly and skips regex inference. Omit it to rely on regex classification fallback.
 
+**P-justification**: {one sentence — why this priority, referencing what breaks and for whom. See `commands/shared/priority-rubric.md`.}
+
 ## Context
 
 {Domain-specific context — logs, metrics, source report, linked issue, etc.}
@@ -537,6 +541,7 @@ Files that need changes (ordered by dependency):
 - `## Problem` is MANDATORY — every issue must state what's wrong or what's needed
 - `## Affected Files` is MANDATORY — list actual file paths the investigator should read first
 - `## Acceptance Criteria` is MANDATORY — at least one testable `- [ ]` criterion; each item MAY carry an optional `[type:api|unit|e2e|manual]` annotation for deterministic test-gate classification (omit to fall back to regex inference)
+- **`P-justification` is MANDATORY** — one line, immediately after Acceptance Criteria, stating why the assigned priority (`priority:P0`-`priority:P3`) fits. See `commands/shared/priority-rubric.md` for the canonical rubric, examples, and the soft title-vs-priority lint. A justification that only restates the priority name (e.g. "P1 because it's high priority") does not satisfy this requirement.
 - Domain-specific sections (Evidence Trail, Pattern Metadata, Validation Checklist, etc.) SHOULD be preserved — they add pipeline value. Add mandatory sections around them, not instead of them.
 - `## Prior Investigation` is OPTIONAL — include only when parent/sibling investigation Gist URLs are available. Each Gist URL must be wrapped in a `<!-- FORGE:PRIOR_GIST: {url} -->` annotation for machine-readable parsing by downstream agents. <!-- Added: forge#339 -->
 
@@ -551,7 +556,7 @@ Before creating, verify:
 3. **No vague sections**: Every section has concrete content, not placeholders
 4. **Acceptance criteria are testable**: Each criterion can be verified with a specific action
 5. **Override files included**: If `docker-compose.yml` is listed, `docker-compose.prod.yml` is too (if it exists). If a model is listed, its migration is too.
-6. **Priority matches severity**: P0 = prod down, P1 = significant user impact, P2 = minor, P3 = cosmetic
+6. **Priority matches severity, and is justified**: see `commands/shared/priority-rubric.md` for the canonical P0-P3 definitions. A `**P-justification**:` line MUST be present. **Soft lint**: if the title starts with `refactor:`/`chore:` and priority is `priority:P0` or `priority:P1`, warn (do not block) — this combination is legitimate only when the P-justification explicitly explains why a refactor/chore carries that priority (e.g. it blocks a P0 fix); an unexplained combination should be downgraded to `priority:P2`/`priority:P3` before creation.
 
 **Skip this step entirely in programmatic mode** — the caller already composed and is responsible for the draft. Programmatic mode has its own validation gate instead: Phase 3F below.
 
@@ -808,6 +813,7 @@ Re-run without --dry-run to create these {N} issues.
 | "Handle edge case" | Which edge case? In what function? | "fix: task_processor.process_job() silently drops jobs when queue.length > MAX_BATCH" |
 | Missing override files | Fix is incomplete, deploy fails | Include docker-compose.prod.yml, .env.example, etc. |
 | P0 for a typo fix | Wastes priority signaling | Use P3 for cosmetic issues |
+| `priority:P1` on a pure refactor with no `P-justification` | Priority label no longer reflects real impact — downstream scheduling (fast-lane selection, `/orchestrate` ordering) trusts it | See `commands/shared/priority-rubric.md` for the canonical rubric; assign `priority:P2`/`priority:P3` unless the refactor genuinely blocks a higher-priority fix, and say so in the justification line |
 
 ---
 
