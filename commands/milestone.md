@@ -125,7 +125,7 @@ git push origin milestone/{slug}
 
 ### Step 4: Scope decomposition
 
-**Investigation-gated decomposition** — do NOT skip code reads. The single-pass shallow-planning approach (one agent, whole milestone, no per-issue code reads) produces under-specified issues that ship incomplete. This step mandates per-proposed-issue investigation before any issue body is written. See `work-on/decompose.md` Phase D0 for the reference pattern that enforces this gate. <!-- Added: forge#293 -->
+**Investigation-gated decomposition** — do NOT skip code reads. The single-pass shallow-planning approach (one agent, whole milestone, no per-issue code reads) produces under-specified issues that ship incomplete. This step mandates per-proposed-issue investigation before any issue body is written. See `work-on/decompose.md` Phase D0 for the reference pattern that enforces this gate.
 
 **4A: First pass — enumerate proposed issues (no code reads yet)**
 
@@ -166,9 +166,9 @@ Present the proposed issues to the user. Ask:
 
 ### Step 6: Create issues and assign to milestone
 
-**Issue body standard**: Use the **Pipeline Issue Template** from `issue.md` Phase 3D as the body structure for every issue created here. Do NOT use a bespoke inline template — the Pipeline Issue Template is the single canonical standard for all automated issue creation across the pipeline. The body content (Problem, Root Cause, Affected Files, Acceptance Criteria, Context, Dependencies) comes from the per-issue investigation in Step 4B. <!-- Added: forge#293 -->
+**Issue body standard**: Use the **Pipeline Issue Template** from `issue.md` Phase 3D as the body structure for every issue created here. Do NOT use a bespoke inline template — the Pipeline Issue Template is the single canonical standard for all automated issue creation across the pipeline. The body content (Problem, Root Cause, Affected Files, Acceptance Criteria, Context, Dependencies) comes from the per-issue investigation in Step 4B.
 
-**Route creation through `/issue`'s programmatic invocation contract** (`commands/issue.md`, added #2085) instead of calling `gh issue create` directly — this gets dedup (Phase 2D) and mandatory-section body validation (Phase 3F) for free. <!-- Changed: forge#2086 — route through /issue create-hook -->
+**Route creation through `/issue`'s programmatic invocation contract** (`commands/issue.md`, added #2085) instead of calling `gh issue create` directly — this gets dedup (Phase 2D) and mandatory-section body validation (Phase 3F) for free.
 
 For each approved issue, create it in the **correct repo** based on the scope analysis:
 
@@ -290,7 +290,7 @@ else
       # Resolve priority option ID from the issue's priority label
       ISSUE_PRIORITY=$(gh issue view "$ISSUE_NUM" "$GH_FLAG" --json labels \
         --jq '[.labels[].name | select(startswith("priority:"))] | .[0] | ltrimstr("priority:") | ascii_downcase' 2>/dev/null || echo "")
-      # Validate ISSUE_PRIORITY matches expected pattern before use as yq key path <!-- Added: forge#300 -->
+      # Validate ISSUE_PRIORITY matches expected pattern before use as yq key path
       PRIORITY_OPTION_ID=""
       if [[ "$ISSUE_PRIORITY" =~ ^p[0-3]$ ]]; then
         PRIORITY_OPTION_ID=$(yq '.project_board.option_ids.priority.'"$ISSUE_PRIORITY"' // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
@@ -533,8 +533,6 @@ fi
 
 ### Step 3: Create or update shipping PR (merge-train mechanics)
 
-<!-- Added: forge#1327 (update-in-place), extended: forge#1332 (merge-train) -->
-
 **Merge-train policy**: One staging→main PR stays open per deploy cycle. When a milestone ships to staging, it joins the deploy train as a candidate. The train PR is updated in place when fixes are pushed — it is NEVER closed and recreated. Dead-PR chains are eliminated: fix → push → re-request review on the same PR.
 
 **Update-in-place policy**: Before creating a new PR, check whether an open shipping PR already exists for this milestone. If one does, push the updated milestone branch and re-request review on the existing PR — do NOT close and recreate. Closing-and-recreating is pure churn: it burns a new PR number, loses review history, and contributes to a low staging→main pass rate. The correct flow is: fix → push → re-request review on the same PR.
@@ -628,7 +626,7 @@ Skill(skill="review-pr", args="{PR_NUMBER}")
   Skill(skill="review-pr", args="{PR_NUMBER}")
   ```
 - Step 3 will detect the open PR on the next `/milestone ship {slug}` call and update it in place — the same PR number is preserved, review history is retained, and the reviewer is re-notified.
-- This eliminates the close-and-recreate churn that inflates the failed-PR count and lowers the staging→main pass rate. <!-- Added: forge#1328 -->
+- This eliminates the close-and-recreate churn that inflates the failed-PR count and lowers the staging→main pass rate.
 
 ### Step 5: Report — PR is ready for user to merge
 
@@ -662,7 +660,7 @@ Milestone stays open. Issues remain assigned. Branch milestone/{slug} preserved.
 Run /milestone ship {slug} again when the milestone is ready for another shipping attempt.
 ```
 
-**When the staging review returns blockers (FINDINGS, not PASSED)**: do NOT close the PR. Fix the blockers on `milestone/{slug}`, push the fixes, then re-run `/milestone ship {slug}`. Step 3 will detect the open PR and update it in place — the same PR number is preserved, review history is retained, and the reviewer is re-notified. This eliminates the close-and-recreate churn that inflates the failed-PR count and lowers the staging→main pass rate. <!-- Added: forge#1327 -->
+**When the staging review returns blockers (FINDINGS, not PASSED)**: do NOT close the PR. Fix the blockers on `milestone/{slug}`, push the fixes, then re-run `/milestone ship {slug}`. Step 3 will detect the open PR and update it in place — the same PR number is preserved, review history is retained, and the reviewer is re-notified. This eliminates the close-and-recreate churn that inflates the failed-PR count and lowers the staging→main pass rate.
 
 **If the PR merged successfully**, run the following:
 

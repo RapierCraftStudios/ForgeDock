@@ -8,8 +8,6 @@ install: core
 
 > Read `review-pr-agents/protocols.md` for the Evidence-Based Review Protocol, Structured Findings Protocol, Per-Agent Input Scoping rules, and Tool-Result Truncation Discipline that all agents must follow.
 
-
-
 **Trigger**: DATABASE domain detected
 **Type**: `general-purpose` | **Model**: `{SUBAGENT_MODEL}`
 
@@ -41,7 +39,7 @@ You are auditing PR #[PR_NUMBER] for database changes in [PROJECT_NAME].
    a. List ALL `*.sql` files in `infra/migrations/` on the PR's target branch (use `git ls-tree` or `ls`)
    b. Extract the 4-digit numeric prefix from each filename (the leading digits before the first `_`)
    c. Identify any prefix that appears more than once
-   d. Identify if the project maintains a grandfathered-duplicates allowlist (e.g., a config file or comment block listing known-safe legacy duplicate prefixes). If one exists, cross-reference against it. <!-- Updated: forge#1349 — removed stale validate-migration-order.sh reference (script does not exist in ForgeDock) -->
+   d. Identify if the project maintains a grandfathered-duplicates allowlist (e.g., a config file or comment block listing known-safe legacy duplicate prefixes). If one exists, cross-reference against it.
    e. **DEPLOY GATE — CRITICAL**: If ANY non-allowlisted duplicate prefix exists → flag as **CRITICAL BLOCKER** and reject the PR. **Do NOT apply migration runner reasoning here.** Deploy gates that enforce migration ordering hard-fail on any non-allowed duplicate regardless of whether the migration runner executes files correctly. The runner may handle duplicate filenames fine; the deploy script does not. A PR that passes this reasoning trap ("unique filenames, so the runner is safe") will still halt production deploy. The only safe classification is CRITICAL BLOCKER.
    f. Additionally: if the PR adds new migration files, verify their prefixes don't collide with existing files in the directory
 9. **FK and CHECK constraints**: New tables should have appropriate foreign keys and CHECK constraints. Missing FK allows orphaned rows; missing CHECK allows invalid enum values.

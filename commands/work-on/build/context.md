@@ -26,7 +26,7 @@ COMPLEXITY_BAND=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 COMPLEXITY_BAND="${COMPLEXITY_BAND:-STANDARD}"
 ```
 
-**If COMPLEXITY_BAND: TRIVIAL** → skip all phases (C-1 through C4), post NO comment, return empty briefing to caller immediately. Do not query GitHub, do not read files. This is not an error — trivial single-file changes have no institutional memory to surface. <!-- Added: forge#679 -->
+**If COMPLEXITY_BAND: TRIVIAL** → skip all phases (C-1 through C4), post NO comment, return empty briefing to caller immediately. Do not query GitHub, do not read files. This is not an error — trivial single-file changes have no institutional memory to surface.
 
 **If COMPLEXITY_BAND: STANDARD or COMPLEX** → proceed to Phase C-1 below.
 
@@ -34,7 +34,7 @@ COMPLEXITY_BAND="${COMPLEXITY_BAND:-STANDARD}"
 
 ## Mission
 
-Surface what went wrong in this area before the builder writes a single line of code. The builder starts with the investigator report and contract — this step adds institutional memory: what did review agents catch last time someone touched these files, what bugs recurred, what other paths must stay consistent. When prior investigation Gists are linked in the issue body, fetch and summarize them so the builder has cross-issue context without manual lookups. When a milestone-level index Gist exists, use it to discover all investigation Gists for the milestone — providing full cross-issue context from a single URL. <!-- Updated: forge#341 -->
+Surface what went wrong in this area before the builder writes a single line of code. The builder starts with the investigator report and contract — this step adds institutional memory: what did review agents catch last time someone touched these files, what bugs recurred, what other paths must stay consistent. When prior investigation Gists are linked in the issue body, fetch and summarize them so the builder has cross-issue context without manual lookups. When a milestone-level index Gist exists, use it to discover all investigation Gists for the milestone — providing full cross-issue context from a single URL.
 
 **Principle**: A builder with context produces fewer review findings. Fewer findings = fewer fix cycles = lower token cost.
 
@@ -310,11 +310,11 @@ done <<< "$DEVDOCS_APPLICABLE"
 
 `DEVDOCS_CONTENT` is used in the `### Authoritative Devdocs` section of the FORGE:CONTEXT comment output. If empty (path absent or no applicable files), the section is replaced with a skip note.
 
-**Module dossier injection**: When the glob pass (Step 1, index-first path) matched one or more dossiers, they appear first in `DEVDOCS_APPLICABLE` (sort key `0`) and are rendered as `#### Module Dossier: {name}` sub-sections within `### Authoritative Devdocs`. The 200-line/file cap applies to each dossier individually — the same cap used for all other devdocs files. This ensures dossier injection is bounded by the existing token budget even as dossiers grow. <!-- Added: forge#1733 -->
+**Module dossier injection**: When the glob pass (Step 1, index-first path) matched one or more dossiers, they appear first in `DEVDOCS_APPLICABLE` (sort key `0`) and are rendered as `#### Module Dossier: {name}` sub-sections within `### Authoritative Devdocs`. The 200-line/file cap applies to each dossier individually — the same cap used for all other devdocs files. This ensures dossier injection is bounded by the existing token budget even as dossiers grow.
 
 ---
 
-## Phase C-0.5: Active Peer Claims Reader (conditional — when running under orchestration batch) <!-- Added: forge#1736 -->
+## Phase C-0.5: Active Peer Claims Reader (conditional — when running under orchestration batch)
 
 **Skip if**: `FORGE_COORD_ISSUE` is not set. This phase is a no-op when the agent is not running under an `/orchestrate` batch — no error, no output.
 
@@ -404,7 +404,7 @@ fi
 
 ---
 
-## Phase C0.5: Danger-Zone Rule Cards (fixed 400-token slot) <!-- Added: forge#1744 -->
+## Phase C0.5: Danger-Zone Rule Cards (fixed 400-token slot)
 
 Surface the highest-value risk knowledge for exactly the files this build will touch. Reads the persisted danger-zones index produced by `scripts/danger-zones.mjs`, filters to files that overlap the Builder Contract's deliverables table, ranks by risk score, and emits one-line rule cards cut at a hard 400-token ceiling. The slot is constant by construction — never more, never less — so risk injection adds zero variance to the builder's token budget.
 
@@ -600,7 +600,7 @@ if [ -n "$INDEX_GIST_URLS" ]; then
   GIST_URLS=$(echo -e "${GIST_URLS}\n${INDEX_GIST_URLS}" | sort -u | head -5)
 fi
 
-# Self-exclusion (forge#2685): drop this issue's own Knowledge Gist before fetching/summarizing.
+# Self-exclusion: drop this issue's own Knowledge Gist before fetching/summarizing.
 # investigate.md Phase 1C.5 posts this issue's own investigation as a Gist and links it via
 # FORGE:KNOWLEDGE_GIST on this same issue; Phase 1C.6 (same run) then folds that identical URL
 # into the milestone index. By the time this phase runs, the milestone index can already contain
@@ -694,7 +694,7 @@ If `GIST_SUMMARIES` is non-empty, it will be included in the `### Prior Investig
 
 ## Phase C1: Past Review Findings on These Files
 
-**Primary path — Forge Ledger** (O(1) local index lookup, zero API calls): <!-- Added: forge#1732 -->
+**Primary path — Forge Ledger** (O(1) local index lookup, zero API calls):
 
 Check for a local knowledge index before making any GitHub API calls. If the index exists, use
 `forge recall` for exact file-path lookups. Fall back to live `gh issue list --search` only when
@@ -857,7 +857,7 @@ Use 2-3 keywords from the issue title. If no results, skip this phase — do not
 
 ## Output Format
 
-**CODEC PATH (forge#1727)**: Post the `<!-- FORGE:CONTEXT -->` comment via the protocol codec — do NOT hand-roll the opening tag or completion sentinel. Use `forge-annotation.sh write CONTEXT` or `node packages/protocol/src/cli.js emit CONTEXT` to produce the tag and sentinel (`<!-- FORGE:CONTEXT:COMPLETE -->`). The codec handles completion sentinel emission automatically.
+**CODEC PATH**: Post the `<!-- FORGE:CONTEXT -->` comment via the protocol codec — do NOT hand-roll the opening tag or completion sentinel. Use `forge-annotation.sh write CONTEXT` or `node packages/protocol/src/cli.js emit CONTEXT` to produce the tag and sentinel (`<!-- FORGE:CONTEXT:COMPLETE -->`). The codec handles completion sentinel emission automatically.
 
 ```bash
 # Codec produces the opening tag and completion sentinel
@@ -947,7 +947,7 @@ gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
 ## Skip Conditions
 
 Skip this entire step (post nothing, return empty briefing) if:
-- **COMPLEXITY_BAND: TRIVIAL** — checked via FORGE:FAST_PATH comment at entry (see guard above) <!-- Primary skip path: forge#679 -->
+- **COMPLEXITY_BAND: TRIVIAL** — checked via FORGE:FAST_PATH comment at entry (see guard above)
 - Issue is a 1-file config or docs edit with no code logic
 - The affected files have zero git history (new files being created)
 - `{AFFECTED_FILES}` is empty (investigation produced no file list)
@@ -974,6 +974,6 @@ This module runs at **Step 3C.5** — after Builder Contract is posted, before I
 
 The builder agent reads the `<!-- FORGE:CONTEXT -->` comment before writing any code. If the context step was skipped, the builder proceeds with investigation report + contract only.
 
-**Devdocs precedence** (Phase C-1): Content from `project/custom-instructions.md` has the HIGHEST precedence of all context sources. Directives there override agent defaults, training knowledge, and all other devdocs. Other `project/*.md` and `agent/*.md` files with `applies_to: work-on` provide authoritative project conventions and ForgeDock usage guidance. <!-- Added: forge#259 -->
+**Devdocs precedence** (Phase C-1): Content from `project/custom-instructions.md` has the HIGHEST precedence of all context sources. Directives there override agent defaults, training knowledge, and all other devdocs. Other `project/*.md` and `agent/*.md` files with `applies_to: work-on` provide authoritative project conventions and ForgeDock usage guidance.
 
-When prior investigation Gists are available (Phase C0), the `### Prior Investigation Findings` section gives the builder cross-issue context — root causes, recommendations, and affected files from upstream investigations — without requiring manual Gist lookups. When a milestone-level index Gist exists (GIST-04), Phase C0 can resolve the index to discover all investigation Gists for the milestone from a single URL — providing full milestone-wide context automatically. <!-- Updated: forge#341 -->
+When prior investigation Gists are available (Phase C0), the `### Prior Investigation Findings` section gives the builder cross-issue context — root causes, recommendations, and affected files from upstream investigations — without requiring manual Gist lookups. When a milestone-level index Gist exists (GIST-04), Phase C0 can resolve the index to discover all investigation Gists for the milestone from a single URL — providing full milestone-wide context automatically.

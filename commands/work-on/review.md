@@ -12,7 +12,7 @@ argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree 
 **Invoked by**: `work-on.md` Phase 4–5, after `build/validate.md` returns `GATE_PASSED: true`.
 **Output**: Push branch, create PR, invoke /review-pr --auto-merge, return result to caller.
 
-**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (label transitions, `FORGE:CHECKPOINT` writes) stay at this tier because they're interleaved with the review/merge-decision steps in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies". <!-- Added: forge#1827 -->
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (label transitions, `FORGE:CHECKPOINT` writes) stay at this tier because they're interleaved with the review/merge-decision steps in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies".
 Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not already in context.
 
 <!-- FORGE:SPEC_LOADED — work-on/review.md loaded and active. Agent is bound by this spec. -->
@@ -51,7 +51,7 @@ gh pr list {GH_FLAG} --head {BRANCH} --json number,state,url 2>/dev/null
 - If PR already exists AND is MERGED → return `REVIEW_RESULT: status: ALREADY_MERGED`
 - If no `<!-- FORGE:BUILDER -->` comment exists → EXIT with `REVIEW_RESULT: status: BLOCKED`, blocker: "FORGE:BUILDER comment not found — implement phase may not have completed"
 
-**HEAD-unchanged re-review guard** (MANDATORY when a PR already exists and is OPEN) <!-- Added: forge#2243 --> — a PR whose most recent review verdict was CHANGES REQUESTED must not be resubmitted for a full domain-agent review fan-out if nothing has changed since that verdict. `/review-pr` records the exact commit it reviewed in its verdict comment (`CHANGES REQUESTED: commit {sha} — ...`, see `commands/review-pr.md` Phase 8/9); compare that recorded sha against the PR's current `headRefOid`:
+**HEAD-unchanged re-review guard** (MANDATORY when a PR already exists and is OPEN) — a PR whose most recent review verdict was CHANGES REQUESTED must not be resubmitted for a full domain-agent review fan-out if nothing has changed since that verdict. `/review-pr` records the exact commit it reviewed in its verdict comment (`CHANGES REQUESTED: commit {sha} —...`, see `commands/review-pr.md` Phase 8/9); compare that recorded sha against the PR's current `headRefOid`:
 
 ```bash
 # NOTE: the CHANGES REQUESTED verdict is posted via `gh pr review --comment` (see
@@ -122,7 +122,7 @@ Do NOT push this branch. Human review required to identify the source of the mer
 fi
 ```
 
-## Phase R1: Non-Empty Commit Guard (MANDATORY — run before push) <!-- Added: forge#1305 -->
+## Phase R1: Non-Empty Commit Guard (MANDATORY — run before push)
 
 Before pushing, verify the branch has at least one commit ahead of the PR base. This is the last-line defense against the phantom-commit hazard: a session that resumed from a partial FORGE:BUILDER comment (without `:COMPLETE`) would have skipped the commit step and could otherwise push an empty branch.
 

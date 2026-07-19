@@ -67,7 +67,7 @@ committed into `FORGE:DESIGN_SPEC` ([schema](../docs/design/design-spec-schema.m
 Generate the page from the committed `FORGE:DESIGN_SPEC`. The spec is the contract — no taste decisions are re-rolled
 here; generation realizes the committed intent.
 
-### Foundation CSS injection <!-- Added: forge#1048 -->
+### Foundation CSS injection
 
 Before generating the page, inject the archetype's pre-built CSS foundation as the starting stylesheet. Foundation files live in `docs/design/foundations/` and are keyed by `meta.archetype` from `FORGE:DESIGN_SPEC`:
 
@@ -92,7 +92,7 @@ Run [`/design-render-critique-loop`](design-render-critique-loop.md) (#882): det
 render (desktop + mobile, #875/#878) → vision critique of the perceptual negatives → iterate. Each pass posts a
 `FORGE:CRITIQUE`. The loop continues until PASS or budget.
 
-## Stage 4.5 — user-feedback loop (`design:awaiting-feedback`) <!-- Added: forge#1044 -->
+## Stage 4.5 — user-feedback loop (`design:awaiting-feedback`)
 
 **Entry condition**: Stage 4 (design-critique) has completed — `FORGE:CRITIQUE` posted with verdict `PASS` or
 `BUDGET-EXHAUSTED`. **Automated/benchmark bypass**: if no user is present (e.g., running as part of the ABC benchmark

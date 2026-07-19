@@ -110,7 +110,7 @@ esac
 ```
 
 **Build the machine-readable twin** (C4.5c — MUST run this block to assign `CARD_JSON` before
-Phase 7B embeds it; the cross-reference to `close.md` above is insufficient on the inline path): <!-- forge#1178 -->
+Phase 7B embeds it; the cross-reference to `close.md` above is insufficient on the inline path):
 
 ```bash
 CARD_JSON=$(jq -nc \
@@ -135,7 +135,7 @@ CARD_JSON=$(jq -nc \
 
 ### 7B: Trajectory Log (MANDATORY)
 
-**Review-presence check** (run before filling in Phase 4-5 row): <!-- Added: forge#381 -->
+**Review-presence check** (run before filling in Phase 4-5 row):
 ```bash
 # Check whether /review-pr was actually invoked — look for review agent comments on the PR
 REVIEW_PRESENT=$(gh pr view {PR_NUMBER} {GH_FLAG} --json reviews,comments \
@@ -317,8 +317,6 @@ gh pr list -R {GH_REPO} --state merged --limit 100 --json number \
       --jq '.[] | select(.body | contains("FORGE:DECISION_RECORD")) | .body' 2>/dev/null
   done
 ```
-
-<!-- Added: forge#776 -->
 
 ---
 

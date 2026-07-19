@@ -94,7 +94,7 @@ done
 - If it has `workflow:invalid` already → just remove `workflow:investigating`
 - If closed normally → add `workflow:merged`, remove `workflow:investigating`
 
-**Stale `needs-validation`** — backfill from FORGE:INVESTIGATOR verdict where available; strip-only for issues with no verdict comment: <!-- Added: forge#1730 -->
+**Stale `needs-validation`** — backfill from FORGE:INVESTIGATOR verdict where available; strip-only for issues with no verdict comment:
 
 This is the H1 backfill sweep from the Design Decision (#1730). For each closed finding-issue with `needs-validation`:
 1. Fetch any `FORGE:INVESTIGATOR` comment on the issue
@@ -347,7 +347,7 @@ Both options only apply to branches deleted by this phase (or by GitHub's own me
 
 ## Phase 4: Milestone Hygiene (Advisory Only)
 
-**NEVER close milestones in this phase.** Milestones are only closed by `/milestone ship` (human-gated) or `/milestone close` (explicit abandonment). Incorrect closure destroys milestone state that cannot be trivially recovered. <!-- fix: forge#1160 -->
+**NEVER close milestones in this phase.** Milestones are only closed by `/milestone ship` (human-gated) or `/milestone close` (explicit abandonment). Incorrect closure destroys milestone state that cannot be trivially recovered.
 
 ### 4A: Find milestones with 0 open issues
 
@@ -372,26 +372,23 @@ Do NOT call `gh api ... -X PATCH -f state=closed` on any milestone. This phase i
 
 ## Phase 4B: P3 Batch Sweep (if `batch-p3` or `all`)
 
-<!-- Added: forge#1333 -->
-<!-- Extended: forge#1828 — brought into lockstep with the P3 batching rule extension in orchestrate/phase-1-resolve.md and orchestrate/phase-4-execution.md (forge#1818): default-batchable eligibility, surface-area grouping, two-tier threshold, extended safety exclusions -->
-
 **Purpose**: Fold stale unbatched P3 review findings into surface-area-grouped batch issues (same file first, leaf directory as broader fallback). Reduces pipeline overhead from individual per-finding full-pipeline runs. This sweep applies the same batching rule as `orchestrate/phase-1-resolve.md`'s "P3 Review-Finding Batching" section (the canonical definition) — this file is a periodic, cross-run pass over the same policy that Phase 1 (at `/orchestrate` start) and Phase 4C (mid-run cascade findings, `phase-4-execution.md`) already apply.
 
 **Skip if**: Input is not `batch-p3` and not `all`.
 
 ### Step 4B.1: Fetch open batchable P3 findings
 
-Eligibility is **default-batchable**: any open `review-finding` + a P3 priority label (`priority:P3` or bare `P3` — see `phase-1-resolve.md`'s "Priority label schema" note; some consumer repos label externally/legacy findings with the bare form) issue qualifies unless excluded below. The `<!-- FORGE:BATCHABLE -->` marker (still appended by `review-pr.md` at finding-creation time) is honored when present but is no longer required — matching `phase-1-resolve.md`'s eligibility rule. <!-- Changed: forge#1828 — marker was previously mandatory; forge#2232 — priority-schema tolerance -->
+Eligibility is **default-batchable**: any open `review-finding` + a P3 priority label (`priority:P3` or bare `P3` — see `phase-1-resolve.md`'s "Priority label schema" note; some consumer repos label externally/legacy findings with the bare form) issue qualifies unless excluded below. The `<!-- FORGE:BATCHABLE -->` marker (still appended by `review-pr.md` at finding-creation time) is honored when present but is no longer required — matching `phase-1-resolve.md`'s eligibility rule.
 
 ```bash
 # Find all open, unbatched P3 review findings. Excludes findings already
 # claimed by a batch ("batch" label), and applies the same extended safety
 # exclusions (security, billing, anti-bot, auth) as the other two batching
 # sites, using the identical jq test() (Oniguruma) patterns so classification
-# cannot diverge between the three sweep locations. <!-- Changed: forge#1828 -->
+# cannot diverge between the three sweep locations.
 # NOTE: "priority:P3" is intentionally NOT in the --label filter — GH label filters are
 # exact-match and can't OR it with bare "P3", so the P3 test moves into the jq predicate
-# below (schema-tolerant, mirrors phase-1-resolve.md exactly). <!-- Added: forge#2232 -->
+# below (schema-tolerant, mirrors phase-1-resolve.md exactly).
 UNBATCHED_P3=$(gh issue list {GH_FLAG} \
   --state open \
   --label "review-finding" \
@@ -407,8 +404,6 @@ echo "Unbatched batchable P3 findings: $(echo "$UNBATCHED_P3" | jq -s 'length')"
 ```
 
 ### Step 4B.2: Group by surface area (same file, then leaf directory)
-
-<!-- Changed: forge#1828 — was coarse domain grouping (`cut -d/ -f1,2,3`); now surface area, matching phase-1-resolve.md -->
 
 For each finding, extract the exact affected-file path under `## Affected Files` (primary grouping key) and its leaf directory — `dirname` of that path — as a broader fallback key:
 
@@ -433,9 +428,9 @@ echo "$UNBATCHED_P3" | jq -c '.[]' | while read -r issue; do
 
   # Extract first affected file path from body. Uses POSIX ERE (`grep -oE`),
   # NOT PCRE lookbehind (`grep -oP '(?<=...)'`) — the prior fallback line here
-  # used `-P`, which BSD grep on macOS does not support (forge#1767). This
+  # used `-P`, which BSD grep on macOS does not support. This
   # pattern matches the portable one already used in phase-4-execution.md's
-  # same-run surface-area batching. <!-- Changed: forge#1828 -->
+  # same-run surface-area batching.
   FIRST_FILE=$(echo "$BODY" | sed -n '/^## Affected Files/,/^## /p' | grep -oE '`[^`]+`' | head -1 | tr -d '`')
   if [ -z "$FIRST_FILE" ]; then
     FIRST_FILE=$(echo "$BODY" | grep -oE '`[^`]+\.(py|tsx?|jsx?|sql|json|ya?ml|sh|md)`' | head -1 | tr -d '`')
@@ -449,8 +444,6 @@ done
 
 ### Step 4B.3: Apply two-tier batching threshold
 
-<!-- Changed: forge#1828 — added lower same-file tier, matching phase-1-resolve.md's two-tier threshold -->
-
 - **Same-file cluster** (primary, low threshold): **2+** unbatched batchable P3 findings share the exact same affected file → create a batch issue for that file cluster.
 - **Leaf-directory cluster** (broader fallback, existing threshold preserved): among findings NOT already claimed by a same-file cluster above, **5+** share the same leaf directory, **OR** the oldest finding in that leaf directory is > 72 hours old → create a batch issue for that leaf-directory cluster.
 - Form same-file clusters first; only findings left ungrouped after that pass are evaluated for leaf-directory clustering. A finding is claimed by at most one batch.
@@ -458,7 +451,7 @@ done
 ```bash
 NOW_EPOCH=$(date +%s)
 HOURS_72=$((72 * 3600))
-MAX_MEMBERS=8   # Changed: forge#1828 — was 10, matching phase-1-resolve.md's cap
+MAX_MEMBERS=8
 
 # Pass 1 — same-file clusters (2+ members). Claim member issue numbers into
 # CLAIMED_BY_FILE so Pass 2 (leaf-directory) skips them.

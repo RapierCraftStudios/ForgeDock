@@ -8,8 +8,6 @@ install: core
 
 > Read `review-pr-agents/protocols.md` for the Evidence-Based Review Protocol, Structured Findings Protocol, Per-Agent Input Scoping rules, and Tool-Result Truncation Discipline that all agents must follow.
 
-
-
 **Trigger**: WEB service touched
 **Type**: `codebase-explorer` | **Model**: `{SUBAGENT_MODEL}`
 
@@ -33,7 +31,7 @@ If no frontend context is configured above, derive conventions from the changed 
 7. **XSS**: User input rendered with `dangerouslySetInnerHTML` without sanitization
 8. **Accessibility**: Interactive elements have proper labels, keyboard navigation works
 9. **Performance**: Large bundles, unnecessary client-side rendering, missing dynamic imports
-10. **Hook provider scope**: For any new `useX()` hook call added to a component, verify the hook is safe to call outside its provider. If `useX` internally calls `useContext(XContext)` and throws when context is undefined (i.e., the hook contains `if (!ctx) throw new Error(...)`), check ALL mount sites of the component across the codebase. If the component is used in both authenticated routes (e.g., `app/dashboard/`) AND public routes (e.g., `app/(public)/`, `app/playground/`) that do not wrap children in the provider, the hook call will crash the public route with a React error boundary cascade. Flag as CONFIRMED HIGH if a public mount site exists without the provider. <!-- Added: forge#381 -->
+10. **Hook provider scope**: For any new `useX()` hook call added to a component, verify the hook is safe to call outside its provider. If `useX` internally calls `useContext(XContext)` and throws when context is undefined (i.e., the hook contains `if (!ctx) throw new Error(...)`), check ALL mount sites of the component across the codebase. If the component is used in both authenticated routes (e.g., `app/dashboard/`) AND public routes (e.g., `app/(public)/`, `app/playground/`) that do not wrap children in the provider, the hook call will crash the public route with a React error boundary cascade. Flag as CONFIRMED HIGH if a public mount site exists without the provider.
 
 ## Post Findings
 ```bash

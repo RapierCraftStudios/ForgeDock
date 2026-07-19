@@ -313,4 +313,3 @@ PYEOF
 
 **Scope constraint**: This mode reports raw numbers sourced from `FORGE:DECISION_RECORD` annotations only. No new data source is invented. Trend visualization, regression-flagging, and alerting logic are Platform features — do not add them here. If a cost block is absent (older annotations predating #1296), report "no data" rather than erroring.
 
-<!-- Added: forge#1297 -->

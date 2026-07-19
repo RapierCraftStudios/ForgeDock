@@ -23,11 +23,11 @@ allowed-tools: Task, Agent, Bash, Read, Grep, Glob, WebFetch, Skill
 
 2. **Post the FORGE:REVIEW verdict regardless of finding severity.** A review that completes but posts no `<!-- FORGE:REVIEW -->` comment is invisible to the pipeline. Even a PASS verdict must be posted.
 
-3. **Review findings do NOT block merge UNLESS they meet the Blocking Criteria in §7B** (a CONFIRMED HIGH/CRITICAL finding, a purpose regression, a merge conflict, or a build/type/test failure) **or the calibration threshold check in §7B.5 sets `CALIBRATION_NEEDS_HUMAN=true`** (HIGH-confidence task type with historical survival < 80%). File every finding as a GitHub issue with the `review-finding` label regardless of severity. Minor/style findings never block; §7B's and §7B.5's blocking conditions always do — including under `--auto-merge`. <!-- forge#1741 -->
+3. **Review findings do NOT block merge UNLESS they meet the Blocking Criteria in §7B** (a CONFIRMED HIGH/CRITICAL finding, a purpose regression, a merge conflict, or a build/type/test failure) **or the calibration threshold check in §7B.5 sets `CALIBRATION_NEEDS_HUMAN=true`** (HIGH-confidence task type with historical survival < 80%). File every finding as a GitHub issue with the `review-finding` label regardless of severity. Minor/style findings never block; §7B's and §7B.5's blocking conditions always do — including under `--auto-merge`.
 
 4. **Route correctly at Phase 0.** If the input is "staging" or the PR targets `main`, invoke `Skill("review-pr-staging", ...)` — do NOT run the standard PR review pipeline against a staging→main PR.
 
-5. **`spec-evolution` PRs are NEVER auto-merged.** When a PR carries the `spec-evolution` label (created by `/spec-doctor`), Phase -1 MUST set `AUTO_MERGE=false` and add `needs-human` before any other processing. This cannot be overridden by the caller — the eval gate plus human review are the only permitted merge path. See Phase -1 `spec-evolution guard` block. <!-- Added: forge#1742 -->
+5. **`spec-evolution` PRs are NEVER auto-merged.** When a PR carries the `spec-evolution` label (created by `/spec-doctor`), Phase -1 MUST set `AUTO_MERGE=false` and add `needs-human` before any other processing. This cannot be overridden by the caller — the eval gate plus human review are the only permitted merge path. See Phase -1 `spec-evolution guard` block.
 
 ## Sub-Agent Dispatch Tool Resolution (MANDATORY — run once, before Phase 3C)
 
@@ -130,7 +130,7 @@ fi
 
 REVIEW_SHA_ROUTE=$(gh pr view ${ROUTE_PR_NUMBER:-$ARGUMENTS} --json headRefOid --jq '.headRefOid' 2>/dev/null | cut -c1-7 || echo "n/a")
 
-# spec-evolution guard — MUST run before posting FORGE:REVIEW_ROUTE <!-- Added: forge#1742 -->
+# spec-evolution guard — MUST run before posting FORGE:REVIEW_ROUTE
 # spec-evolution PRs are produced by /spec-doctor and require eval-gate + human review.
 # Auto-merge is structurally excluded regardless of how review-pr was invoked.
 # This guard activates for single-PR mode only (staging/multi-pr modes don't auto-merge anyway).
@@ -154,7 +154,7 @@ if [ "$REVIEW_MODE" = "single-pr" ] && [ -n "$ROUTE_PR_NUMBER" ] && [ "$ROUTE_PR
 fi
 
 # Post the routing assertion marker to the PR (skip for list/keyword modes where no PR# is known yet)
-# CODEC PATH (forge#1727): REVIEW_ROUTE is a custom (non-RESERVED) annotation type; emit() tolerates
+# CODEC PATH: REVIEW_ROUTE is a custom (non-RESERVED) annotation type; emit() tolerates
 # unknown types. Use the codec CLI to produce the opening tag for any FORGE: annotation.
 # For single-line control markers like REVIEW_ROUTE, the inline heredoc is acceptable as long
 # as field values contain no untrusted content (here: REVIEW_MODE and REVIEW_SHA_ROUTE are
@@ -235,7 +235,6 @@ gh pr diff $ARGUMENTS --name-only
 gh pr diff $ARGUMENTS
 
 # Mergeability check — GitHub computes this asynchronously; retry up to 3× on UNKNOWN
-# <!-- Added: forge#194 -->
 MERGE_HEALTH_RESULT=$(gh pr view $ARGUMENTS --json mergeable,mergeStateStatus --jq '"\\(.mergeable)|\\(.mergeStateStatus)"')
 MERGE_HEALTH=${MERGE_HEALTH_RESULT%%|*}
 MERGE_HEALTH_STATE=${MERGE_HEALTH_RESULT##*|}
@@ -250,10 +249,10 @@ done
 # MERGE_HEALTH: MERGEABLE | CONFLICTING | UNKNOWN (still async after retries)
 # MERGE_HEALTH_STATE: CLEAN | DIRTY | BLOCKED | UNSTABLE | UNKNOWN
 
-# Resolve repo name early — used in Phases 5, 6, 8B, 9A (clean-review skip path bypasses Phase 6A) <!-- Added: forge#820 -->
+# Resolve repo name early — used in Phases 5, 6, 8B, 9A (clean-review skip path bypasses Phase 6A)
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 
-# First-time contributor detection <!-- Added: forge#960 -->
+# First-time contributor detection
 # Requires REPO to be set (line above). Checks whether the PR author has any prior merged PRs in this repo.
 # IS_FIRST_TIME_CONTRIBUTOR is consumed in Phase 9 to conditionally post an onboarding welcome comment.
 PR_AUTHOR=$(gh pr view "$ARGUMENTS" -R "$REPO" --json author --jq '.author.login')
@@ -596,7 +595,7 @@ Map each changed file to its activation requirements.
 | `web/src/app/**/*-client.tsx`, `web/src/components/**/*.tsx`, `web/src/lib/*.ts` (Client-side code with `fetch()`/`useSWR()`) | Client requests go through Next.js proxy (`/api/...`), never directly to FastAPI (`/api/v1/...`) | Grep changed `.tsx`/`.ts` files (excluding `route.ts` proxy handlers) for `fetch("/api/v1/` or `` `/api/v1/ `` in template literals or `useSWR.*"/api/v1/`. Any match is a **CONFIRMED BLOCKING** integration bug — direct calls bypass session auth (admin proxy JWT, session-to-bearer conversion) and fail locally (no nginx). |
 | `.github/workflows/*.yml` (Workflow with test/build jobs) | Sibling workflows with same-named jobs stay in sync | For each job name in the changed workflow, check if the same job name exists in sibling workflows (`ci.yml` ↔ `deploy-production.yml` ↔ `hotfix-deploy.yml`). Compare env vars, PYTHONPATH, working-directory, and run commands for meaningful drift. |
 | `docker-compose*.yml` changes to `postgres` or `redis` service (`command:`, `image:`, `volumes:`, `environment:`) | Stateful container will NOT be recreated during deploy, OR restart is safe | **Auto-escalate to HIGH risk.** Changing `command:` args, `image:` tag, or `volumes:` forces container recreation on `docker-compose up`. For stateful services (postgres, redis), verify: (1) `stop_grace_period` is set and sufficient (≥30s for PG); (2) `full_page_writes = on` in PG config (protects against partial page writes on crash); (3) `fsync = on` (ensures write durability); (4) No long-running transactions will be interrupted. If container recreation is unavoidable, recommend scheduling during a maintenance window — NOT as a side effect of a routine deploy. **This check prevents the class of incident documented in issue #146**: a PG `command:` arg change triggered container restart under active load, corrupting btree indexes. |
-| `docker-compose*.yml` changes `entrypoint:` or `command:` to reference a script (`.sh` file) | Env vars used inside the entrypoint script are available inside the container at runtime | **Run `verify-env-vars.sh`** which detects shell `${VAR}` references in entrypoint scripts and cross-checks against the service's `environment:` section. Docker Compose `${VAR}` in YAML `command:` is parsed at Compose load time (host-side) — the var doesn't need to be in the container. But `${VAR}` inside an entrypoint `.sh` script runs at container runtime — it MUST be injected via `environment:` or `env_file:`. **This check prevents the class of incident where a service migrates from `command:` args (Compose interpolation) to an entrypoint script (container runtime) without adding the env var to `environment:`, causing a restart loop on deploy.** <!-- Added: forge#185 --> |
+| `docker-compose*.yml` changes `entrypoint:` or `command:` to reference a script (`.sh` file) | Env vars used inside the entrypoint script are available inside the container at runtime | **Run `verify-env-vars.sh`** which detects shell `${VAR}` references in entrypoint scripts and cross-checks against the service's `environment:` section. Docker Compose `${VAR}` in YAML `command:` is parsed at Compose load time (host-side) — the var doesn't need to be in the container. But `${VAR}` inside an entrypoint `.sh` script runs at container runtime — it MUST be injected via `environment:` or `env_file:`. **This check prevents the class of incident where a service migrates from `command:` args (Compose interpolation) to an entrypoint script (container runtime) without adding the env var to `environment:`, causing a restart loop on deploy.** |
 | **ANY staging→main PR** (regardless of files changed) | `ci.yml` and `deploy-production.yml` test jobs are in sync | **ALWAYS runs for staging→main PRs.** Pre-existing drift is invisible until deploy. Deep-diff shared jobs (test-api, test-web): compare PYTHONPATH values, dependency install steps, and step names. A missing PYTHONPATH or install step in deploy is CONFIRMED BLOCKING — CI passes but deploy fails (PR #11356 incident). |
 
 ### Step 2.5B: Run Verification
@@ -615,7 +614,6 @@ REPO_ROOT="."  # Assumes cwd is the repo root
 # git top-level). A bare/unset $FORGE_HOME must never be used directly in a path —
 # that degrades to a root-anchored path (/scripts/verify-*.sh) and silently skips
 # every check below. Never fall back to a filesystem-wide `find`.
-# <!-- Added: forge#2035 -->
 if [ -n "$FORGE_HOME" ] && [ -f "$FORGE_HOME/scripts/verify-route-registration.sh" ]; then
     SCRIPTS_HOME="$FORGE_HOME"
 else
@@ -646,7 +644,7 @@ if [ "$BASH_AVAILABLE" = "true" ]; then
     # 1. Route/router/middleware/shared-module/component registration
     # Export forge.yaml layout overrides so verify-route-registration.sh uses project-configured
     # paths instead of project defaults. The script supports these env vars (lines 36-44 of
-    # verify-route-registration.sh) but requires the caller to set them. <!-- Added: forge#1349 -->
+    # verify-route-registration.sh) but requires the caller to set them.
     if [ -f "$REPO_ROOT/forge.yaml" ]; then
         _PAGES_ROOT=$(grep -A10 'layout:' "$REPO_ROOT/forge.yaml" 2>/dev/null \
             | grep -E '^\s*pages:' | head -1 | sed 's/.*pages:[[:space:]]*//' | tr -d '"' | tr -d "'" | xargs)
@@ -757,7 +755,7 @@ if [ -n "$WORKFLOW_FILES" ] || [ "$IS_STAGING_PR" = "true" ]; then
             # to a single line when the header (e.g. "  test-api:") matches both
             # patterns simultaneously. The flag form sets p=1 on the header line,
             # prints body lines while p=1, and clears p when the next sibling job
-            # header (same indentation, lowercase start) is seen. <!-- Added: forge#310 -->
+            # header (same indentation, lowercase start) is seen.
             CI_ENVS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$CI_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
             DEPLOY_ENVS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$DEPLOY_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
 
@@ -824,7 +822,7 @@ echo "$DIFF" | grep -cE "subprocess|os\.system|eval\(|exec\(|pickle|yaml\.load[^
 echo "$FILES" | grep -cE "^sdk/|openapi.*\.json$|openapi-versions/" && echo "  SDK_OPENAPI" || true
 ```
 
-**Churn (hot-spot) signal**: The signals above are all derived from the current diff content — none of them measure historical change frequency or defect density. Compute both commit-churn tier and finding-density tier for the PR's changed files and carry them forward as `CHURN_CONTEXT` for Phase 3C: <!-- Finding-density signal: forge#1738 -->
+**Churn (hot-spot) signal**: The signals above are all derived from the current diff content — none of them measure historical change frequency or defect density. Compute both commit-churn tier and finding-density tier for the PR's changed files and carry them forward as `CHURN_CONTEXT` for Phase 3C:
 
 ```bash
 CHURN_WINDOW="90 days ago"   # named constant — must match the same window used in architect.md Phase A5
@@ -888,7 +886,7 @@ fi
 echo "$CHURN_CONTEXT"
 ```
 
-Tiers (fixed thresholds, identical to `architect.md` Phase A5): **HOT** = 15+ commits / 90 days, **MEDIUM** = 5–14, **LOW** = 0–4. **HOT-FINDINGS** = 3+ confirmed findings in 90 days (from Forge Ledger danger-zones index). Only files where at least one signal fires are listed in `CHURN_CONTEXT` — this keeps the agent prompt signal short and high-value. A file can appear with both tags (e.g., `commands/orchestrate.md — HOT (20 commits/90d) — HOT-FINDINGS (18 findings/90d)`). This does not change agent selection (3B) — it is a scrutiny prior surfaced to whichever agents are already selected, substituted as `[CHURN_CONTEXT]` in Phase 3C. When the danger-zones index is absent (cold start or pre-1738 install), `CHURN_CONTEXT` falls back to commit-count-only behavior (no HOT-FINDINGS tags). <!-- Added: forge#1738 -->
+Tiers (fixed thresholds, identical to `architect.md` Phase A5): **HOT** = 15+ commits / 90 days, **MEDIUM** = 5–14, **LOW** = 0–4. **HOT-FINDINGS** = 3+ confirmed findings in 90 days (from Forge Ledger danger-zones index). Only files where at least one signal fires are listed in `CHURN_CONTEXT` — this keeps the agent prompt signal short and high-value. A file can appear with both tags (e.g., `commands/orchestrate.md — HOT (20 commits/90d) — HOT-FINDINGS (18 findings/90d)`). This does not change agent selection (3B) — it is a scrutiny prior surfaced to whichever agents are already selected, substituted as `[CHURN_CONTEXT]` in Phase 3C. When the danger-zones index is absent (cold start or pre-1738 install), `CHURN_CONTEXT` falls back to commit-count-only behavior (no HOT-FINDINGS tags).
 
 ### 3B: Select Agents — Risk-Scaled Dispatch
 
@@ -1061,8 +1059,7 @@ echo "=== AGENT COUNT: $AGENT_COUNT ==="
 
 ### 3B.5: Provenance-Based Trust Escalation (Conditional)
 
-**Skip if**: `THOROUGH=true` OR `IS_MILESTONE_TO_STAGING=true` — these modes already run full union dispatch; provenance de-escalation must not narrow an already-thorough review. This skip is enforced in code at the Step 4 application block (not merely relied upon via a downstream overwrite). <!-- forge#1804 -->
-
+**Skip if**: `THOROUGH=true` OR `IS_MILESTONE_TO_STAGING=true` — these modes already run full union dispatch; provenance de-escalation must not narrow an already-thorough review. This skip is enforced in code at the Step 4 application block (not merely relied upon via a downstream overwrite).
 
 **Purpose**: Adjust the agent roster based on the PR's verifiable track record. Proven `(task-type × module-set)` combinations may drop optional judgment agents; novel combinations escalate to full panel plus `needs-human` on merge. The hard floor (Security agent + all Phase 2 automated checks) runs at every intensity tier, unconditionally.
 
@@ -1182,7 +1179,7 @@ echo "=== INTENSITY_TIER (pre-application): ${INTENSITY_TIER} ==="
 # Explicit skip guard (enforces the "Skip if" prose above in code): in THOROUGH or
 # milestone mode the full union dispatch is authoritative — provenance MUST NOT narrow
 # the roster here. Enforcing it at the application point means correctness no longer
-# depends on a downstream overwrite re-widening SELECTED_AGENTS. <!-- forge#1804 -->
+# depends on a downstream overwrite re-widening SELECTED_AGENTS.
 if [ "$THOROUGH" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]; then
   echo "=== TRUST ESCALATION: skipped (THOROUGH/milestone mode — full union dispatch is authoritative) ==="
 # Shadow mode: log the decision but do NOT modify SELECTED_AGENTS.
@@ -1241,8 +1238,6 @@ TRUST_NEEDS_HUMAN="${TRUST_NEEDS_HUMAN:-false}"
 echo "=== FINAL ROSTER (after trust escalation): $SELECTED_AGENTS ==="
 echo "=== INTENSITY_TIER: ${INTENSITY_TIER} | TABLE_CELL_KEY: ${TABLE_CELL_KEY} | SHADOW: ${TRUST_SHADOW_MODE} | NEEDS_HUMAN: ${TRUST_NEEDS_HUMAN} ==="
 ```
-
-<!-- Added: forge#1745 -->
 
 **Full union dispatch (THOROUGH=true or IS_MILESTONE_TO_STAGING=true):**
 
@@ -1317,7 +1312,7 @@ else
     # post-split repo still ships a small router stub at this same path that only points
     # BACK to the (missing) commands/review-pr-agents/ directory — reading it would not
     # provide any actual protocol/persona content, silently reproducing the original bug
-    # one tier deeper. <!-- Added: forge#1849 -->
+    # one tier deeper.
     TEMPLATE_BASE=""
     MONOLITHIC_CATALOG="$REPO_PATH/commands/review-pr-agents.md"
     TEMPLATE_SOURCE="monolithic_catalog"
@@ -1609,7 +1604,7 @@ If 0 structured findings: scan agent comments for unstructured findings (lines s
 
 If still 0: review is clean — skip to Phase 7.
 
-### 6A.5: Admission Gate — Split FILE vs NOTED <!-- Added: forge#2683 -->
+### 6A.5: Admission Gate — Split FILE vs NOTED
 
 Before dedup, partition `$FINDINGS` by the 6th field (`DISPOSITION`), defaulting missing/empty to `FILE` for backward compatibility with agents that haven't adopted the field:
 
@@ -1681,7 +1676,7 @@ Run the deterministic dedup script first, then fall through to the line-range ch
 
 ```bash
 # Step 0: Deterministic title dedup — catches near-duplicates before line-range check
-# See scripts/issue-dedup.sh for the token-overlap algorithm. <!-- Added: forge#1335 -->
+# See scripts/issue-dedup.sh for the token-overlap algorithm.
 FINDING_TITLE_DEDUP="fix: brief description of finding (review finding — PR #${PR_NUMBER})"
 DEDUP_RESULT=$(scripts/issue-dedup.sh "$FINDING_TITLE_DEDUP" "$GH_FLAG" 2>&1)
 DEDUP_EXIT=$?
@@ -1782,7 +1777,7 @@ cat <<'ISSUE_EOF' > "$FINDING_ISSUE_BODY_FILE"
 <!-- FORGE:PATTERN: [pattern-slug] -->
 <!-- This machine-readable tag is used by pipeline-health Phase 4A to count pattern recurrences.
      When this slug appears on 3+ findings, a check-promotion issue is automatically filed.
-     Keep the slug consistent across all findings for the same defect class. --> <!-- Added: forge#1331 -->
+     Keep the slug consistent across all findings for the same defect class. -->
 
 ## Affected Files
 
@@ -1853,7 +1848,7 @@ Labels: `review-finding` + `needs-validation` + priority. Priority is resolved f
 `HIGH`→`priority:P1`, `MEDIUM`→`priority:P2`, `LOW`→`priority:P3`. See
 `commands/shared/priority-rubric.md`.
 
-**P3 batchable annotation** — <!-- Added: forge#1333 --> When priority resolves to `priority:P3` (LOW severity), check whether the finding qualifies for batching. If the affected file does NOT touch a security or billing path, substitute `[BATCHABLE_ANNOTATION]` with the `<!-- FORGE:BATCHABLE -->` marker. This signals the orchestrator's Phase 1 batching rule that this finding can be grouped with other P3s in the same domain:
+**P3 batchable annotation** — When priority resolves to `priority:P3` (LOW severity), check whether the finding qualifies for batching. If the affected file does NOT touch a security or billing path, substitute `[BATCHABLE_ANNOTATION]` with the `<!-- FORGE:BATCHABLE -->` marker. This signals the orchestrator's Phase 1 batching rule that this finding can be grouped with other P3s in the same domain:
 
 ```bash
 # FINDING_PRIORITY was already resolved above via scripts/severity-to-priority.sh
@@ -1973,7 +1968,7 @@ Verdict determined by standard blocking criteria.
 1. Phase 2 automated checks failed (build error, type error, test failure)
 2. Agent finding is CONFIRMED at HIGH or CRITICAL severity
 3. **[Milestone PRs only]** Phase 7A Purpose Regression Gate flagged `HAS_PURPOSE_REGRESSION=true` for this finding — regardless of whether it causes a runtime error
-4. `MERGE_HEALTH == "CONFLICTING"` OR `MERGE_HEALTH_STATE` in {`DIRTY`, `BLOCKED`} — PR cannot be merged cleanly into its base branch <!-- Added: forge#194 -->
+4. `MERGE_HEALTH == "CONFLICTING"` OR `MERGE_HEALTH_STATE` in {`DIRTY`, `BLOCKED`} — PR cannot be merged cleanly into its base branch
    - Verdict: CHANGES REQUESTED. Message: "Merge conflict with `{base}`. Rebase `{head}` onto `origin/{base}`, resolve the conflicting files, then re-run /review-pr."
    - If `MERGE_HEALTH == "UNKNOWN"` after retries: emit a WARNING in the verdict body (do NOT treat as a block — GitHub may still be computing it).
 
@@ -2019,7 +2014,7 @@ $([ "$HAS_PURPOSE_REGRESSION" = "true" ] && echo "
 
 ---
 
-## Phase 7B.5: Calibration Threshold Consultation (Conditional) <!-- Added: forge#1741 -->
+## Phase 7B.5: Calibration Threshold Consultation (Conditional)
 
 **Skip if**: `AUTO_MERGE=false` AND no calibration-based routing is needed (this phase is informational even when not auto-merging — run it to populate `CALIBRATION_NEEDS_HUMAN` for Phase 8).
 
@@ -2088,7 +2083,7 @@ fi
 # Log threshold decision in TRAJECTORY (append to existing issue comment or note for Phase 6)
 # This satisfies the acceptance criterion: "Threshold adjustments appear in TRAJECTORY with the cell that justified them"
 #
-# Signal gate (forge#2685): only post FORGE:CALIBRATION_CHECK when there is something to report.
+# Signal gate: only post FORGE:CALIBRATION_CHECK when there is something to report.
 # The "table not found / SHADOW / false" combination is the no-signal default state — every
 # eligible issue hit it and got an identical, information-free comment. Post only when a
 # calibration cell was actually resolved, a needs-human flag fired, or the trust tier moved
@@ -2115,7 +2110,7 @@ if [ -n "$ISSUE_NUMBER" ] && [ "$POST_CALIBRATION_CHECK" = "true" ]; then
 **TRUST_NEEDS_HUMAN**: ${TRUST_NEEDS_HUMAN:-false}
 **Timestamp**: $(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>/dev/null || true
 elif [ -n "$ISSUE_NUMBER" ]; then
-  echo "Phase 7B.5: no calibration/trust signal to report (${CALIBRATION_NOTE:-no calibration data}; tier=${INTENSITY_TIER:-SHADOW}) — skipping FORGE:CALIBRATION_CHECK post (forge#2685)"
+  echo "Phase 7B.5: no calibration/trust signal to report (${CALIBRATION_NOTE:-no calibration data}; tier=${INTENSITY_TIER:-SHADOW}) — skipping FORGE:CALIBRATION_CHECK post "
 fi
 ```
 
@@ -2126,7 +2121,7 @@ fi
 **Skip if** `AUTO_MERGE=false`.
 
 ```bash
-# §7B verdict + purpose-regression + calibration + trust-escalation guard — check before any merge attempt <!-- Added: forge#1601, forge#1741, forge#1745 -->
+# §7B verdict + purpose-regression + calibration + trust-escalation guard — check before any merge attempt
 # HARD RULE 3 requires that VERDICT=CHANGES REQUESTED, HAS_PURPOSE_REGRESSION=true,
 # CALIBRATION_NEEDS_HUMAN=true, AND TRUST_NEEDS_HUMAN=true all block merge, including under --auto-merge.
 # These vars are set in Phase 7A/7B/7B.5/3B.5 earlier in the same agent session.
@@ -2137,13 +2132,13 @@ if [ "$VERDICT" = "CHANGES REQUESTED" ] || [ "$HAS_PURPOSE_REGRESSION" = "true" 
     [ "$VERDICT" = "CHANGES REQUESTED" ] && BLOCK_REASON="review verdict is CHANGES REQUESTED (blocking finding confirmed by Phase 7B)"
     [ "$HAS_PURPOSE_REGRESSION" = "true" ] && BLOCK_REASON="${BLOCK_REASON:+${BLOCK_REASON}; }purpose regression detected by Phase 7A (\`HAS_PURPOSE_REGRESSION=true\`)"
     [ "$CALIBRATION_NEEDS_HUMAN" = "true" ] && BLOCK_REASON="${BLOCK_REASON:+${BLOCK_REASON}; }calibration threshold: ${CALIBRATION_NOTE}"
-    [ "${TRUST_NEEDS_HUMAN:-false}" = "true" ] && BLOCK_REASON="${BLOCK_REASON:+${BLOCK_REASON}; }provenance trust: NOVEL_NEEDS_HUMAN tier for cell \`${TABLE_CELL_KEY}\` — no sufficient prior data (forge#1745)"
+    [ "${TRUST_NEEDS_HUMAN:-false}" = "true" ] && BLOCK_REASON="${BLOCK_REASON:+${BLOCK_REASON}; }provenance trust: NOVEL_NEEDS_HUMAN tier for cell \`${TABLE_CELL_KEY}\` — no sufficient prior data "
     gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: ${BLOCK_REASON}. Manual review required before merging."
     gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true
     # STOP — do not attempt gh pr merge when §7B/7B.5 blocking conditions are active
 else
 
-# Pre-merge mergeability guard — re-fetch fresh state before attempting merge <!-- Added: forge#194 -->
+# Pre-merge mergeability guard — re-fetch fresh state before attempting merge
 # A PR that was MERGEABLE at Phase 1A may have become CONFLICTING if the base branch
 # received commits while the review was running. Re-check before every auto-merge.
 PRE_MERGE_RESULT=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json mergeable,mergeStateStatus --jq '"\\(.mergeable)|\\(.mergeStateStatus)"')
@@ -2156,7 +2151,7 @@ if [ "$PRE_MERGE_HEALTH" = "CONFLICTING" ] || [ "$PRE_MERGE_HEALTH_STATE" = "DIR
     # STOP — do not attempt gh pr merge on a CONFLICTING/DIRTY PR
 else
 
-# Previously-escalated re-review guard <!-- Added: forge#1810 -->
+# Previously-escalated re-review guard
 # If the linked issue currently carries needs-human, this PR was escalated at some
 # earlier point (VERDICT/purpose-regression/calibration/trust/mergeability) and has
 # now been remediated + re-reviewed back to a clean, mergeable APPROVED state above.
@@ -2233,8 +2228,6 @@ if [ "${IS_MILESTONE_TO_STAGING:-false}" = "true" ] && [ "${MERGE_STATE:-}" = "M
 fi
 ```
 
-<!-- Added: forge#815 -->
-
 ---
 
 ## Phase 9: Integrity Check & Summary (LAST)
@@ -2277,15 +2270,13 @@ if [ "${IS_MILESTONE_TO_STAGING:-false}" = "true" ]; then
 fi
 ```
 
-<!-- Added: forge#815 -->
-
 ```bash
 CURRENT_SHA=$(gh pr view $ARGUMENTS --json headRefOid --jq '.headRefOid')
 REVIEW_IS_STALE="false"
 if [ "$CURRENT_SHA" != "$REVIEW_SHA" ]; then REVIEW_IS_STALE="true"; fi
 ```
 
-### Phase 9 — New Contributor Welcome (Conditional) <!-- Added: forge#960 -->
+### Phase 9 — New Contributor Welcome (Conditional)
 
 Post a welcome comment when all three conditions are true:
 1. `IS_FIRST_TIME_CONTRIBUTOR="true"` (set in Phase 1A — no prior merged PRs from this author in this repo)
@@ -2342,7 +2333,7 @@ EOF
 fi
 ```
 
-**Verifiable agent count (MANDATORY — do not report a self-asserted `Agents: [N]` figure)** <!-- Added: forge#1849 -->
+**Verifiable agent count (MANDATORY — do not report a self-asserted `Agents: [N]` figure)**
 
 A degraded run that skipped Task-based agent dispatch must be visible from this summary alone, without interrogating the agent afterward. Compute the actual launched-agent count from the `<!-- FORGE:REVIEW-AGENT:{domain} -->` comments each agent is required to post (Phase 3C), rather than trusting a free-text tally:
 
@@ -2353,7 +2344,7 @@ ACTUAL_AGENT_DOMAINS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
 # no match) even though it exits 1 in that case. Appending `|| echo 0` after a `grep -c`
 # pipeline double-counts: the pipeline already printed "0", then the fallback prints a
 # second "0" line, corrupting the value to "0\n0" in exactly the zero-agent case this
-# check exists to detect. <!-- Added: forge#1849 -->
+# check exists to detect.
 ACTUAL_AGENT_COUNT=$(echo "$ACTUAL_AGENT_DOMAINS" | tr ',' '\n' | grep -c '.' 2>/dev/null)
 ```
 

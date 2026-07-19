@@ -224,7 +224,7 @@ For each defect class from 2B, draft the specific spec text change:
 **Rules for spec text changes**:
 - Describe the **bug class**, not a specific incident: write "When X condition, verify Y" not
   "In PR #1234, the builder failed to..."
-- One brief HTML comment `<!-- Added: forge#1742 -->` per new check (traceability)
+- One brief HTML comment `` per new check (traceability)
 - Evidence block (if used) describes the vulnerability **pattern** — not a historical narrative
 - New checks go into the most specific relevant section (e.g., a builder check → Phase 3F
   of work-on.md, not the header)

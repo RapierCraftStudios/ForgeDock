@@ -12,12 +12,12 @@ argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--base PR_B
 **Invoked by**: `work-on.md` Phase 3 — entered when the issue carries label `workflow:ready-to-build` or `workflow:building` (see Universal Phase Dispatcher in work-on.md).
 **Output**: Create worktree, post contract, run build phases, return result to work-on.md.
 
-**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (3B classification, 3D label transitions) stay at this tier because they're interleaved with the reasoning-heavy build steps (3C.5/3C.6/3F) in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies". <!-- Added: forge#1827 -->
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (3B classification, 3D label transitions) stay at this tier because they're interleaved with the reasoning-heavy build steps (3C.5/3C.6/3F) in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies".
 Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not already in context.
 
 **CRITICAL: You MUST execute ALL phases B0–B6 in order. Phases B3 (context) and B4 (architect) are skipped ONLY when COMPLEXITY_BAND: TRIVIAL (read from FORGE:FAST_PATH comment in Phase B0). For STANDARD and COMPLEX tasks they are NOT optional — skipping them degrades build quality.**
 
-### Canonical Build Path (STANDARD/fast-lane) <!-- Added: forge#1276 -->
+### Canonical Build Path (STANDARD/fast-lane)
 
 **Default execution model: inline.** For STANDARD and fast-lane issues, phases B3 (context gathering) and B4 (architecture planning) run **inline in the current context window** — not as separate `Skill()` sub-agent spawns. B5 (implement) and B6 (validate) also run inline.
 
@@ -31,7 +31,7 @@ Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not alrea
 | **Spawn exception (Row c)** | ≥20 Skill invocations OR ≥10 files changed before build | Spawn B3/B4 as fresh sub-agents via `Skill()` |
 | **TRIVIAL fast-path** | COMPLEXITY_BAND: TRIVIAL | Skip B3 and B4 entirely |
 
-This resolves the three-topology conflict: `work-on.md` Phase 3 (inline 3A–3M), `work-on/build.md` (this file), and `work-on-monolithic.md` ([BENCHMARK]) all describe the **same canonical inline path**. `work-on/build.md` adds worktree lifecycle management (B1) and the FORGE:CONTRACT handoff (B2) that the monolithic variant omits for brevity. The `Skill()` forms in B3/B4 below document the sub-phase contract and serve as the exception path only. <!-- Added: forge#1276 -->
+This resolves the three-topology conflict: `work-on.md` Phase 3 (inline 3A–3M), `work-on/build.md` (this file), and `work-on-monolithic.md` ([BENCHMARK]) all describe the **same canonical inline path**. `work-on/build.md` adds worktree lifecycle management (B1) and the FORGE:CONTRACT handoff (B2) that the monolithic variant omits for brevity. The `Skill()` forms in B3/B4 below document the sub-phase contract and serve as the exception path only.
 
 <!-- FORGE:SPEC_LOADED — work-on/build.md loaded and active. Agent is bound by this spec. -->
 
@@ -45,7 +45,7 @@ Parse from $ARGUMENTS:
 - `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`)
 - `--base {PR_BASE}` — PR target branch (e.g. `milestone/modular-pipeline-architecture` or `staging`)
 
-**Phase notation**: This file uses **B0–B6** for its own phases. The calling orchestrator (`work-on.md`) uses **3A–3M** for its sub-phases. Mapping: work-on.md Phase 3A = B0 (load state), Phase 3B = complexity classification (posts `FORGE:FAST_PATH` before invoking build), Phase 3C onward maps to B1+ in this file. When cross-references mention "Phase 3B", they refer to work-on.md's Phase 3B, not a phase in this file. <!-- Added: forge#1380 -->
+**Phase notation**: This file uses **B0–B6** for its own phases. The calling orchestrator (`work-on.md`) uses **3A–3M** for its sub-phases. Mapping: work-on.md Phase 3A = B0 (load state), Phase 3B = complexity classification (posts `FORGE:FAST_PATH` before invoking build), Phase 3C onward maps to B1+ in this file. When cross-references mention "Phase 3B", they refer to work-on.md's Phase 3B, not a phase in this file.
 
 ---
 
@@ -67,7 +67,7 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 
 **Resume check**:
 - If `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment → build already complete. Return `BUILD_RESULT: status: ALREADY_DONE` to router.
-- If `<!-- FORGE:BUILDER -->` exists BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → build was interrupted after the comment was posted but before the commit (validate.md V5). Delete the partial comment and restart from Phase B2 (contract): <!-- Added: forge#1305 -->
+- If `<!-- FORGE:BUILDER -->` exists BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → build was interrupted after the comment was posted but before the commit (validate.md V5). Delete the partial comment and restart from Phase B2 (contract):
   ```bash
   PARTIAL_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
     --jq '[.[] | select(.body | contains("FORGE:BUILDER") and (contains("FORGE:BUILDER:COMPLETE") | not))] | last | .id // ""')
@@ -84,7 +84,7 @@ Extract from investigation report:
 - Recommendation
 - Task type (Bug Fix / Feature / Refactor / Maintenance / UI/UX / Full-Stack)
 
-**Read COMPLEXITY_BAND** (from `FORGE:FAST_PATH` comment posted by Phase 3B of `work-on.md` — the complexity classification step that runs before invoking this file): <!-- Fixed: forge#1380 -->
+**Read COMPLEXITY_BAND** (from `FORGE:FAST_PATH` comment posted by Phase 3B of `work-on.md` — the complexity classification step that runs before invoking this file):
 ```bash
 COMPLEXITY_BAND=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:FAST_PATH")) | .body' 2>/dev/null \
@@ -193,9 +193,9 @@ ${ATTRIBUTION_LINE}"
 
 Contract must be grounded in the investigation report. Every deliverable file must appear in the affected files list from the investigator. Adversarially validate the proposed fix against adjacent system layers before posting.
 
-**Deliverables table is intentionally terse** (forge#2685): list only `File | Change` — one line per file, no per-file rationale column. Per-file "why" belongs in the `FORGE:ARCHITECT` `### Affected Paths` table (Phase B4 below), which is posted later in the same build and is strictly more detailed (adds Function/Class, Implementation Order, Consistency Checks, Risk Assessment). A Contract that restates Architect's rationale ahead of time duplicates it row-for-row once Architect posts; do not add a "Why" column back.
+**Deliverables table is intentionally terse**: list only `File | Change` — one line per file, no per-file rationale column. Per-file "why" belongs in the `FORGE:ARCHITECT` `### Affected Paths` table (Phase B4 below), which is posted later in the same build and is strictly more detailed (adds Function/Class, Implementation Order, Consistency Checks, Risk Assessment). A Contract that restates Architect's rationale ahead of time duplicates it row-for-row once Architect posts; do not add a "Why" column back.
 
-### B2.1: Post FORGE:CLAIM on coordination issue (conditional — when running under orchestration batch) <!-- Added: forge#1736 -->
+### B2.1: Post FORGE:CLAIM on coordination issue (conditional — when running under orchestration batch)
 
 **Skip if**: `FORGE_COORD_ISSUE` is not set (agent is not running under an orchestration batch). This step is a no-op outside of `/orchestrate` dispatch — no error, no output.
 
@@ -270,7 +270,7 @@ If `FUNCTION_NAMES` is non-empty, it will be passed via `--functions` to the con
 
 **For STANDARD and COMPLEX tasks**: Always run. Do NOT skip without a TRIVIAL COMPLEXITY_BAND.
 
-**Execution model**: Run **inline** (see Canonical Build Path above). Read the `commands/work-on/build/context.md` spec and execute its steps directly in this context window. Only spawn a Skill() sub-agent when the Spawn-Decision Table Row (c) applies (≥20 prior Skill invocations or ≥10 files already changed). <!-- Added: forge#1276 -->
+**Execution model**: Run **inline** (see Canonical Build Path above). Read the `commands/work-on/build/context.md` spec and execute its steps directly in this context window. Only spawn a Skill() sub-agent when the Spawn-Decision Table Row (c) applies (≥20 prior Skill invocations or ≥10 files already changed).
 
 Surface historical review findings and bug patterns for the affected files. The full step-by-step logic is defined in `commands/work-on/build/context.md`. Key steps: search closed issues with `review-finding` label on the affected files; check git log for past bug patterns; synthesize a `FORGE:CONTEXT` annotation and post it as a GitHub comment.
 
@@ -278,7 +278,7 @@ Surface historical review findings and bug patterns for the affected files. The 
 ```
 Skill("work-on:build:context", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --repo-path {WORKTREE_PATH} {AFFECTED_FILES} --functions {FUNCTION_NAMES}")
 ```
-If `FUNCTION_NAMES` is empty, omit `--functions`. The Skill() form above is the exception path — not the default. <!-- Added: forge#1276 -->
+If `FUNCTION_NAMES` is empty, omit `--functions`. The Skill() form above is the exception path — not the default.
 
 **After context gathering**:
 - Structured context briefing produced (or no relevant history found) → continue to B4
@@ -293,7 +293,7 @@ If `FUNCTION_NAMES` is empty, omit `--functions`. The Skill() form above is the 
 
 **For STANDARD and COMPLEX tasks**: Always run. Even a 1-file STANDARD fix benefits from cross-path consistency checks. Do NOT skip without a TRIVIAL COMPLEXITY_BAND.
 
-**Execution model**: Run **inline** (see Canonical Build Path above). Read the `commands/work-on/build/architect.md` spec and execute its steps directly in this context window. Only spawn a Skill() sub-agent when the Spawn-Decision Table Row (c) applies. <!-- Added: forge#1276 -->
+**Execution model**: Run **inline** (see Canonical Build Path above). Read the `commands/work-on/build/architect.md` spec and execute its steps directly in this context window. Only spawn a Skill() sub-agent when the Spawn-Decision Table Row (c) applies.
 
 Trace all affected code paths and produce an ordered implementation plan. The full step-by-step logic is defined in `commands/work-on/build/architect.md`. Key steps: map all callers and importers of changed functions; check consistency rules across paths; post a `FORGE:ARCHITECT` annotation with the ordered plan and a risk table.
 
@@ -301,7 +301,7 @@ Trace all affected code paths and produce an ordered implementation plan. The fu
 ```
 Skill("work-on:build:architect", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --repo-path {WORKTREE_PATH} --files {AFFECTED_FILES}")
 ```
-The Skill() form above is the exception path — not the default. <!-- Added: forge#1276 -->
+The Skill() form above is the exception path — not the default.
 
 **After architecture planning**:
 - Returns ordered implementation plan → continue to B5
@@ -343,7 +343,7 @@ Where `{CHANGED_FILES}` is the space-separated list of files changed by the impl
 
 ---
 
-## Phase B6.5: Acceptance Gate (MANDATORY — cannot be silently skipped) <!-- Added: forge#1315 -->
+## Phase B6.5: Acceptance Gate (MANDATORY — cannot be silently skipped)
 
 **Goal**: Execute the machine-checkable acceptance spec emitted by investigate Phase 1C and block merge if any check fails. This is a hard gate — not advisory.
 
@@ -383,7 +383,7 @@ The acceptance spec contains only a skip sentinel (\`type=skipped\`). No automat
 <!-- FORGE:ACCEPTANCE_GATE:PASSED -->"
 ```
 
-**Otherwise — execute each check**: <!-- Added: forge#1829 -->
+**Otherwise — execute each check**:
 
 ```bash
 GATE_PASS=true

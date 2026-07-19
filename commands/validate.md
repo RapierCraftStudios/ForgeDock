@@ -150,7 +150,7 @@ If NEEDS MORE DATA — what's missing:
 
 **Skip if**: Input was not an issue number (e.g., `/validate` was invoked with a plain description, not `#NNN`).
 
-**Purpose**: If the validated issue is a review-finding with `needs-validation`, wire the verdict back into the finding lifecycle. This prevents `needs-validation` from becoming a permanent no-op label. <!-- Added: forge#1730 -->
+**Purpose**: If the validated issue is a review-finding with `needs-validation`, wire the verdict back into the finding lifecycle. This prevents `needs-validation` from becoming a permanent no-op label.
 
 ```bash
 # Parse issue number from input — skip if not an issue reference
@@ -164,7 +164,7 @@ if [ -n "$INPUT_ISSUE" ] && [ -n "$GH_FLAG" ]; then
   # no label transition needed" branch below, silently misreporting a
   # transient API failure as a legitimate no-op. Use the same
   # `if VAR=$(cmd); then ... else ... fi` idiom already applied to
-  # scripts/transition-label.sh (forge#1991) to keep the two outcomes
+  # scripts/transition-label.sh to keep the two outcomes
   # distinguishable.
   if ! ISSUE_LABELS=$(gh issue view "$INPUT_ISSUE" "$GH_FLAG" --json labels \
     --jq '[.labels[].name] | join(",")' 2>/dev/null); then

@@ -26,7 +26,7 @@ You are the pipeline's deploy awareness layer. Before the user merges staging �
 
 ## Phase 0: Review-Finding Readiness Check
 
-**Purpose**: Surface open review-finding issues before the deploy workflow begins. Staging→main PRs that ship with open findings have a 50%+ failure rate — this check identifies the readiness gap at the earliest possible point. <!-- Added: forge#372 -->
+**Purpose**: Surface open review-finding issues before the deploy workflow begins. Staging→main PRs that ship with open findings have a 50%+ failure rate — this check identifies the readiness gap at the earliest possible point.
 
 **Non-blocking**: This phase emits a warning but does NOT block. Deploy-info is an informational tool. The authoritative gate is Phase 0A of `/review-pr-staging`.
 
@@ -281,7 +281,7 @@ gh workflow run {deploy.workflow} --ref main -f {deploy.workflow_inputs.services
 
 ---
 
-## Phase 4B: Deploy Train State <!-- Added: forge#1332 -->
+## Phase 4B: Deploy Train State
 
 **Purpose**: Report the current state of the rolling staging→main deploy candidate (the "merge train"). One deploy PR should stay open per deploy cycle — this phase shows whether a candidate exists, what is holding it, and what is queued behind it.
 

@@ -13,7 +13,7 @@ You create GitHub issues with the exact structure the `/work-on` pipeline expect
 
 `/issue` is the structured create-hook for issue creation across the pipeline — it enforces the canonical template, reads code before drafting, runs dedup, and validates mandatory sections. Because those checks are deterministic, `/issue` **creates the issue by default once they pass** — it does not wait for a human to approve the draft. Pass `--dry-run` to review the draft without creating anything (see Argument Parsing below).
 
-`/issue` also accepts a **programmatic invocation form** for callers that have already composed a title, body, labels, and (optionally) a milestone — e.g. `Skill(skill="issue", args="--title \"fix: ...\" --body-file \"$(mktemp)\" --label bug --label P2")` (the caller writes the body to that path before invoking). This form skips the free-text parsing (Phase 1) and LLM drafting (Phase 3) entirely, but still runs the same dedup and body-validation correctness gates as the interactive path. See **Programmatic Invocation Contract** below — in particular, `--body-file` callers MUST use a `mktemp`-created path, never a fixed literal like `/tmp/body.md`; concurrent orchestrated agents share this host's `/tmp`, and a fixed path can be clobbered mid-flight by another agent (forge#2198).
+`/issue` also accepts a **programmatic invocation form** for callers that have already composed a title, body, labels, and (optionally) a milestone — e.g. `Skill(skill="issue", args="--title \"fix:...\" --body-file \"$(mktemp)\" --label bug --label P2")` (the caller writes the body to that path before invoking). This form skips the free-text parsing (Phase 1) and LLM drafting (Phase 3) entirely, but still runs the same dedup and body-validation correctness gates as the interactive path. See **Programmatic Invocation Contract** below — in particular, `--body-file` callers MUST use a `mktemp`-created path, never a fixed literal like `/tmp/body.md`; concurrent orchestrated agents share this host's `/tmp`, and a fixed path can be clobbered mid-flight by another agent.
 
 Agent policy: see `commands/shared/agent-policies.md` (default-tier model resolution + plan-mode ban) if not already in context.
 
@@ -44,7 +44,7 @@ PROGRAMMATIC_MILESTONE=""
 # — it is NOT pre-tokenized by any harness, and a naive `ARGS=($ARGUMENTS)` would
 # word-split on whitespace without honoring embedded quote characters (a literal
 # `"` inside the string is not shell syntax at this point), fragmenting any
-# multi-word `--title`/`--body` value (forge#2094).
+# multi-word `--title`/`--body` value.
 #
 # Do NOT tokenize via `eval "set -- $ARGUMENTS"`. An earlier fix for #2094 used
 # exactly that — it is quote-aware, but `eval` re-parses and EXECUTES the full
@@ -180,7 +180,7 @@ For callers that have already composed a title, body, labels, and (optionally) a
 
 If `--title` is present but neither `--body` nor `--body-file` is supplied, or both are supplied, this is a usage error: print `ERROR: programmatic mode requires exactly one of --body or --body-file` and STOP — do not fall through to Phase 2D or Phase 4B.
 
-**`--body-file` path requirement (MANDATORY for the caller)**: The path passed to `--body-file` MUST come from `mktemp` (e.g. `BODY_FILE="$(mktemp)"`), never a fixed literal such as `/tmp/body.md` or `/tmp/issue.json`. Concurrent orchestrated agents (`/orchestrate` dispatches up to `orchestration.max_concurrent` agents, default 12) share this host's `/tmp` — a fixed filename collides across agents, and a second agent's write to the same path can silently corrupt the first agent's staged content before it is read. `mktemp` gives every caller a collision-free path at effectively zero cost. This applies to every `--body-file` caller across the pipeline (`commands/work-on.md`, `commands/work-on/decompose.md`, `commands/review-pr*.md`, `commands/orchestrate/phase-1-resolve.md`, and all others) — all current callers already comply; this is the stated contract that keeps it that way (forge#2198).
+**`--body-file` path requirement (MANDATORY for the caller)**: The path passed to `--body-file` MUST come from `mktemp` (e.g. `BODY_FILE="$(mktemp)"`), never a fixed literal such as `/tmp/body.md` or `/tmp/issue.json`. Concurrent orchestrated agents (`/orchestrate` dispatches up to `orchestration.max_concurrent` agents, default 12) share this host's `/tmp` — a fixed filename collides across agents, and a second agent's write to the same path can silently corrupt the first agent's staged content before it is read. `mktemp` gives every caller a collision-free path at effectively zero cost. This applies to every `--body-file` caller across the pipeline (`commands/work-on.md`, `commands/work-on/decompose.md`, `commands/review-pr*.md`, `commands/orchestrate/phase-1-resolve.md`, and all others) — all current callers already comply; this is the stated contract that keeps it that way.
 
 **Fail-loud read ordering (the defensive mechanism against a clobbered body-file)**: `/issue` reads `$PROGRAMMATIC_BODY_FILE` exactly once, into memory, immediately below — it never re-reads the file later in the pipeline. This is deliberate: combined with a `mktemp`-unique path, it minimizes the window in which another process could overwrite the file between the caller's write and this read to effectively nil (no other agent has any reason to target a `mktemp`-generated path). If the file is missing or unreadable at read time, the check below fails loudly (`exit 1`) rather than silently proceeding with an empty or partial body — a clobbered/missing body-file is surfaced as an error, not pushed to GitHub.
 
@@ -366,7 +366,7 @@ gh issue list {GH_FLAG} --state closed --limit 10 --search "{key_terms}" --json 
 If a duplicate exists:
 - **Open duplicate found**: Tell the user. Do NOT create the issue. Show the existing issue number.
 - **Closed duplicate found (regression)**: Create the issue but reference the prior issue in the body: "Regression of #{N}."
-- **User wants to override**: Pass `--force` to the dedup script — this is an explicit human override path. Agents MUST NOT pass `--force` without user authorization. <!-- Added: forge#1335 -->
+- **User wants to override**: Pass `--force` to the dedup script — this is an explicit human override path. Agents MUST NOT pass `--force` without user authorization.
 
 ### 2E: Check for milestone context
 
@@ -489,7 +489,7 @@ Files/areas to examine:
 
 ### 3D: Pipeline Issue Template (machine-callable reference)
 
-> **Canonical Standard**: This template is the single source of truth for all automated issue creation in the ForgeDock pipeline. `milestone.md`, `orchestrate.md`, and `work-on/decompose.md` MUST use this template structure when creating issues programmatically. A shared convention is only useful if all create-paths enforce it — divergent inline templates in each command file cause acceptance-criteria drift and coverage gaps. See `work-on/decompose.md` Phase D0 for the investigation-gate pattern that enforces this standard at decomposition time. <!-- Added: forge#293 -->
+> **Canonical Standard**: This template is the single source of truth for all automated issue creation in the ForgeDock pipeline. `milestone.md`, `orchestrate.md`, and `work-on/decompose.md` MUST use this template structure when creating issues programmatically. A shared convention is only useful if all create-paths enforce it — divergent inline templates in each command file cause acceptance-criteria drift and coverage gaps. See `work-on/decompose.md` Phase D0 for the investigation-gate pattern that enforces this standard at decomposition time.
 
 When pipeline agents create issues programmatically (not via user input), use this canonical template. All automated `gh issue create` calls across Forge commands MUST include these mandatory sections. Domain-specific sections are additive — preserve them, but wrap them with this structure.
 
@@ -543,7 +543,7 @@ Files that need changes (ordered by dependency):
 - `## Acceptance Criteria` is MANDATORY — at least one testable `- [ ]` criterion; each item MAY carry an optional `[type:api|unit|e2e|manual]` annotation for deterministic test-gate classification (omit to fall back to regex inference)
 - **`P-justification` is MANDATORY** — one line, immediately after Acceptance Criteria, stating why the assigned priority (`priority:P0`-`priority:P3`) fits. See `commands/shared/priority-rubric.md` for the canonical rubric, examples, and the soft title-vs-priority lint. A justification that only restates the priority name (e.g. "P1 because it's high priority") does not satisfy this requirement.
 - Domain-specific sections (Evidence Trail, Pattern Metadata, Validation Checklist, etc.) SHOULD be preserved — they add pipeline value. Add mandatory sections around them, not instead of them.
-- `## Prior Investigation` is OPTIONAL — include only when parent/sibling investigation Gist URLs are available. Each Gist URL must be wrapped in a `<!-- FORGE:PRIOR_GIST: {url} -->` annotation for machine-readable parsing by downstream agents. <!-- Added: forge#339 -->
+- `## Prior Investigation` is OPTIONAL — include only when parent/sibling investigation Gist URLs are available. Each Gist URL must be wrapped in a `<!-- FORGE:PRIOR_GIST: {url} -->` annotation for machine-readable parsing by downstream agents.
 
 ---
 

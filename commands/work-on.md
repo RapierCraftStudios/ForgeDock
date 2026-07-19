@@ -68,7 +68,7 @@ Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not alrea
 - `workflow:merged` label is set
 - `workflow:invalid` label is set
 - `needs-human` label is set
-- `workflow:awaiting-merge` label is set (remediated + re-reviewed, awaiting a human merge decision — see #1810) <!-- Added: forge#1810 -->
+- `workflow:awaiting-merge` label is set (remediated + re-reviewed, awaiting a human merge decision — see #1810)
 - `workflow:decomposed` label is set (sub-issues spawned)
 - Issue state is CLOSED with terminal label
 
@@ -91,7 +91,7 @@ Plan mode: see `commands/shared/agent-policies.md` § Plan mode ban if not alrea
 | a | **Parallel fan-out** — independent work units can run concurrently and the time saved justifies the fork | YES — one sub-agent per unit | `/orchestrate` dispatching `/work-on` agents; `review-pr` spawning domain reviewers |
 | b | **Fresh-context isolation** — a review/audit whose value depends on seeing the artefact without the builder's context bias, AND is load-bearing for the merge decision | YES — dedicated sub-agent | Phase 5C review-fork when build context is large (see Row c) |
 | c | **Parent context near overflow** — ≥20 Skill invocations OR ≥10 files changed | YES — fresh sub-agent for review | Phase 5C: `Skill(skill="work-on/review", …)` instead of direct `review-pr` |
-| d | **Prompt-cache TTL** — sub-op runs longer than the ~5min TTL, forcing **uncached** re-hydration next turn, independent of build size | YES — fresh sub-agent, **unconditionally** | Phase 5C review (always forks, Row d supersedes Row c); Phase 3G quality-gate loop <!-- forge#1825 --> |
+| d | **Prompt-cache TTL** — sub-op runs longer than the ~5min TTL, forcing **uncached** re-hydration next turn, independent of build size | YES — fresh sub-agent, **unconditionally** | Phase 5C review (always forks, Row d supersedes Row c); Phase 3G quality-gate loop |
 
 **If none of the four rows match: run inline.** Do not fork for convenience — the spawn/reconstruct/aggregate cost is paid every time, even when it adds no value.
 

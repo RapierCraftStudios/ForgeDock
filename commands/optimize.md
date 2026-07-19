@@ -402,8 +402,6 @@ Run /work-on on a few issues to let the pipeline capture corrections, then re-ru
 
 ## Phase 5: Promotion Loop (Tier-A and Tier-B)
 
-<!-- Added: forge#1739 -->
-
 **Purpose**: Scan the Forge Ledger for validated finding patterns that have recurred ≥3 times and promote them — either as a Tier-A mechanizable check script in `gate.d/` or as a Tier-B prose entry in `devdocs/learned-rules/{domain}.md`. Both promotion paths open as a PR for human review. Checks are never silently auto-enforced.
 
 **Skip if**: `--dry-run` flag is set (print what would be promoted without creating PRs).
@@ -752,8 +750,6 @@ fi
 ---
 
 ## Phase 6: Contribution Path (Outbound Exchange)
-
-<!-- Added: forge#1746 -->
 
 **Purpose**: When a promoted learned rule (from Phase 5) generalizes beyond this repo — no repo paths, no project-specific identifiers in the card body — offer to contribute it to a subscribed exchange repo so other ForgeDock installations can benefit. This is the outbound half of the pattern exchange loop.
 

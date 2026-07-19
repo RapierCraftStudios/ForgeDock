@@ -39,7 +39,7 @@ Include the audit summary in the final report (Phase 6). Key metrics to surface:
 - **Resume cycles** — how many times agents had to be resumed
 - **Stall boundaries** — which phase transitions cause the most stalls
 
-### Step 5C: Close the coordination issue (claims board) <!-- Added: forge#2072 -->
+### Step 5C: Close the coordination issue (claims board)
 
 **Why this step exists**: Step 3D.1 (`phase-3-dependency.md`) creates a per-batch coordination issue (the claims board) and exports `FORGE_COORD_ISSUE`/`COORD_ISSUE_NUMBER`. Step 5A's `/cleanup` sweep only closes orphaned issues whose PR merged — the claims board has no PR of its own, so that heuristic never matches it. Without this step, one `automation`-labelled issue leaks per orchestration batch.
 

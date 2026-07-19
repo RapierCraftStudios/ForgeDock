@@ -102,7 +102,7 @@ Add the newly created issues to the issue set. Re-check each one:
 - Tag them as `IMPLEMENTATION` (investigations don't spawn more investigations)
 - They inherit the milestone from their parent investigation if applicable
 
-**Issue body standard**: Any new issues created by investigation agents MUST use the **Pipeline Issue Template** from `issue.md` Phase 3D as their body structure. Investigation agents that produce issues as output should be prompted to use that template — not ad-hoc body formats — so every spawned issue enters the pipeline with the correct structure (Problem, Root Cause, Affected Files, Acceptance Criteria). Verify spawned issues have all mandatory sections before adding them to the batch; if sections are missing, the `/issue` body-validation step (Phase 4C.5) will repair them. <!-- Added: forge#293 -->
+**Issue body standard**: Any new issues created by investigation agents MUST use the **Pipeline Issue Template** from `issue.md` Phase 3D as their body structure. Investigation agents that produce issues as output should be prompted to use that template — not ad-hoc body formats — so every spawned issue enters the pipeline with the correct structure (Problem, Root Cause, Affected Files, Acceptance Criteria). Verify spawned issues have all mandatory sections before adding them to the batch; if sections are missing, the `/issue` body-validation step (Phase 4C.5) will repair them.
 
 **Updated issue set** = original `IMPLEMENTATION` issues + newly spawned issues from investigations.
 
