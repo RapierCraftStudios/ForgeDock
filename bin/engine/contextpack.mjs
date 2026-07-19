@@ -227,7 +227,12 @@ async function fetchAllComments(issueNumber, io, repo) {
       '[.[] | {id: .id, author: .user.login, body: .body, createdAt: .created_at}]',
     ]);
   } catch (err) {
-    return { comments: [], truncated: false, error: String(err && err.message ? err.message : err) };
+    // A genuine fetch failure (auth/rate-limit/network) MUST be distinguishable
+    // from a real zero-comment issue — folding both into `comments: []` would
+    // silently misreport "no pipeline history" for an issue that actually has
+    // extensive history but happened to hit a transient gh failure. The caller
+    // (mineContext()) surfaces this via `meta.commentsFetchError`.
+    return { comments: [], fetchError: String(err && err.message ? err.message : err) };
   }
 
   const comments = [];
@@ -255,7 +260,7 @@ async function fetchAllComments(issueNumber, io, repo) {
     }
   }
 
-  return { comments, truncated: false, ...(sawParseFailure ? { partialParseFailure: true } : {}) };
+  return { comments, ...(sawParseFailure ? { partialParseFailure: true } : {}) };
 }
 
 /**
@@ -393,8 +398,12 @@ async function fetchLinkedPrNumbers(issueNumber, io, repo) {
       '--jq',
       '[.[] | select(.event == "cross-referenced") | select(.source.issue.pull_request != null) | .source.issue.number]',
     ]);
-  } catch {
-    return [];
+  } catch (err) {
+    // A genuine timeline-fetch failure must be distinguishable from the
+    // legitimate "no linked PRs yet" case — see fetchAllComments()'s identical
+    // fail-open contract above. The caller (mineContext()) surfaces this via
+    // `meta.linkedPrsFetchError`.
+    return { numbers: [], fetchError: String(err && err.message ? err.message : err) };
   }
 
   const { pages: pageTexts } = extractJsonArrayPages(out);
@@ -412,7 +421,7 @@ async function fetchLinkedPrNumbers(issueNumber, io, repo) {
       // Skip an unparseable page — best-effort, mirrors fetchAllComments().
     }
   }
-  return [...numbers];
+  return { numbers: [...numbers] };
 }
 
 /**
@@ -437,14 +446,17 @@ async function fetchReviewFindingsForPr(prNumber, io, repo) {
       'number,title',
       ...repoArgs(repo),
     ]);
-  } catch {
-    return [];
+  } catch (err) {
+    // Same fail-open contract as fetchAllComments()/fetchLinkedPrNumbers(): a
+    // genuine fetch failure must not collapse into "this PR has zero review
+    // findings" — surfaced via meta.reviewFindingsFetchErrors[prNumber].
+    return { items: [], fetchError: String(err && err.message ? err.message : err) };
   }
   try {
     const parsed = JSON.parse(out || '[]');
-    return Array.isArray(parsed) ? parsed.map((i) => ({ number: i.number, title: i.title })) : [];
-  } catch {
-    return [];
+    return { items: Array.isArray(parsed) ? parsed.map((i) => ({ number: i.number, title: i.title })) : [] };
+  } catch (err) {
+    return { items: [], fetchError: `unparseable gh issue list output: ${String(err && err.message ? err.message : err)}` };
   }
 }
 
@@ -470,15 +482,29 @@ export async function mineContext(issueNumber, opts = {}) {
   assertIo(io);
 
   const issue = await fetchIssueCore(issueNumber, io, repo);
-  const { comments, truncated, partialParseFailure } = await fetchAllComments(issueNumber, io, repo);
+  const { comments, fetchError: commentsFetchError, partialParseFailure } = await fetchAllComments(
+    issueNumber,
+    io,
+    repo,
+  );
   const annotations = parseAnnotations(comments);
   const affectedFiles = extractAffectedFiles(annotations);
   const gists = await fetchGists(annotations, io);
 
-  const prNumbers = await fetchLinkedPrNumbers(issueNumber, io, repo);
+  const { numbers: prNumbers, fetchError: linkedPrsFetchError } = await fetchLinkedPrNumbers(
+    issueNumber,
+    io,
+    repo,
+  );
   const linkedPrs = [];
+  const reviewFindingsFetchErrors = {};
   for (const prNumber of prNumbers) {
-    const reviewFindings = await fetchReviewFindingsForPr(prNumber, io, repo);
+    const { items: reviewFindings, fetchError: reviewFindingsFetchError } = await fetchReviewFindingsForPr(
+      prNumber,
+      io,
+      repo,
+    );
+    if (reviewFindingsFetchError) reviewFindingsFetchErrors[prNumber] = reviewFindingsFetchError;
     linkedPrs.push({ number: prNumber, reviewFindings });
   }
 
@@ -493,8 +519,15 @@ export async function mineContext(issueNumber, opts = {}) {
       issueNumber: typeof issueNumber === 'number' ? issueNumber : Number(issueNumber),
       repo: repo || null,
       commentCount: comments.length,
-      ...(truncated ? { truncated: true } : {}),
+      // Every *Error field below distinguishes "we tried and gh failed" from a
+      // genuinely empty/legitimate result — see fetchAllComments()'s docblock
+      // for the fail-open contract this mirrors throughout the module. Fields
+      // are only present when the corresponding failure actually occurred, so
+      // a clean mine (the overwhelmingly common case) has a lean meta object.
+      ...(commentsFetchError ? { commentsFetchError } : {}),
       ...(partialParseFailure ? { partialParseFailure: true } : {}),
+      ...(linkedPrsFetchError ? { linkedPrsFetchError } : {}),
+      ...(Object.keys(reviewFindingsFetchErrors).length > 0 ? { reviewFindingsFetchErrors } : {}),
     },
   };
 }
