@@ -1061,6 +1061,62 @@ export async function isSymlinkTraversable(target) {
 }
 
 /**
+ * Atomically install `target` as a symlink to `file`, verifying the result is
+ * readable by *this* process. Single source of truth for the correctness
+ * invariants that previously lived as near-verbatim copies at every symlink
+ * call site (forge#2667):
+ *
+ * - The symlink is first created at a tmp sibling suffixed with this
+ *   process's PID, then rename()d onto target. symlink() is exclusive-create,
+ *   so two concurrent forge() invocations installing the same path would
+ *   collide with an uncaught EEXIST on a shared literal path — the PID
+ *   suffix guarantees they never share one (forge#2542, forge#2599,
+ *   forge#2600, forge#2631). rename() atomically replaces any existing
+ *   target, including on Windows.
+ * - The tmp sibling is unlinked on every failure path so a rename failure
+ *   (or any rethrow) never orphans it (forge#2612).
+ * - After a successful rename, the link is read back via
+ *   isSymlinkTraversable(): fs.symlink() can succeed while producing a link
+ *   this runtime cannot resolve (MSYS symlink + native Windows "untrusted
+ *   mount point" — forge#2620). Such a dead link is unlinked before
+ *   returning so the caller can fall back to a copy.
+ *
+ * Callers keep their own `wantSymlink` guard and site-specific bookkeeping
+ * (counters, manifest mutation, copy fall-through) around the result.
+ *
+ * @param {string} file   - Symlink target (the source file to link to).
+ * @param {string} target - Path where the symlink is installed.
+ * @returns {Promise<"linked"|"unreadable"|"denied">}
+ *   "linked"     — symlink atomically installed at target and traversable.
+ *   "unreadable" — symlink was created but not readable back (forge#2620);
+ *                  the dead link has already been unlinked, so target may be
+ *                  absent on return. Caller should restore/fall back to a copy.
+ *   "denied"     — EPERM/EACCES from symlink/rename (no symlink installed;
+ *                  e.g. Windows without Developer Mode). Caller should fall
+ *                  back to a copy.
+ *   Any other error (EEXIST on the tmp path, ENOSPC, rename failures, …) is
+ *   rethrown after tmp cleanup.
+ */
+async function atomicSymlinkInstall(file, target) {
+  const tmpTarget = target + "." + process.pid + ".tmp";
+  try {
+    await symlink(file, tmpTarget);
+    try {
+      await rename(tmpTarget, target);
+    } catch (renameErr) {
+      await unlink(tmpTarget).catch(() => {});
+      throw renameErr;
+    }
+    if (await isSymlinkTraversable(target)) return "linked";
+    await unlink(target).catch(() => {});
+    return "unreadable";
+  } catch (linkErr) {
+    if (!isLinkPermissionError(linkErr)) throw linkErr;
+    return "denied";
+  }
+}
+
+/**
  * Allowlist of universal pipeline-agent scripts installed to
  * ~/.claude/scripts/ by forge() (linkPipelineScripts()) and cleaned up by
  * forgedock.mjs's uninstall(). This is the single source of truth for both
@@ -1679,27 +1735,7 @@ async function linkPipelineScripts(ctx) {
 
     let linked = false;
     if (wantSymlink) {
-      // Suffix the tmp sibling with this process's PID so a losing
-      // concurrent forge() invocation linking the same brand-new pipeline
-      // script never collides on the same literal target path (which
-      // raises an uncaught EEXIST — isLinkPermissionError() only treats
-      // EPERM/EACCES as recoverable). Mirrors the fresh-install symlink
-      // branch in forge() (forge#2631) and the relink/upgrade branches
-      // (forge#2542, forge#2600, forge#2599).
-      const tmpTarget = target + "." + process.pid + ".tmp";
-      try {
-        await symlink(file, tmpTarget);
-        try {
-          await rename(tmpTarget, target);
-        } catch (renameErr) {
-          await unlink(tmpTarget).catch(() => {});
-          throw renameErr;
-        }
-        linked = await isSymlinkTraversable(target);
-        if (!linked) await unlink(target).catch(() => {});
-      } catch (linkErr) {
-        if (!isLinkPermissionError(linkErr)) throw linkErr;
-      }
+      linked = (await atomicSymlinkInstall(file, target)) === "linked";
     }
     if (!linked) {
       await copyFile(file, target);
@@ -1905,40 +1941,15 @@ export async function forge(ctx) {
         } else {
           let relinked = false;
           if (wantSymlink) {
-            // Suffix the tmp sibling with this process's PID so a losing
-            // concurrent forge() invocation's symlink() call never collides
-            // on the same literal path (which raises an uncaught EEXIST —
-            // isLinkPermissionError() only treats EPERM/EACCES as
-            // recoverable). Mirrors the copyFile branch and
-            // saveCopiedManifest fixes already applied in this file
-            // (forge#2542, forge#2599).
-            const tmpTarget = target + "." + process.pid + ".tmp";
-            try {
-              await symlink(file, tmpTarget);
-              try {
-                await rename(tmpTarget, target);
-              } catch (renameErr) {
-                await unlink(tmpTarget).catch(() => {});
-                throw renameErr;
-              }
-              relinked = await isSymlinkTraversable(target);
-              if (relinked) {
-                updated++;
-              } else {
-                // Symlink was created but is not readable back (e.g. MSYS
-                // symlink hit by native Windows "untrusted mount point" —
-                // forge#2620). Remove it and fall through to the copy branch.
-                await unlink(target).catch(() => {});
-              }
-            } catch (linkErr) {
-              if (!isLinkPermissionError(linkErr)) throw linkErr;
-            }
+            relinked = (await atomicSymlinkInstall(file, target)) === "linked";
+            if (relinked) updated++;
           }
           if (!relinked) {
             // Can't (or shouldn't) re-link — replace the managed link with a copy.
             // unlink first: copyFile onto a symlink writes THROUGH the link.
-            // (target may already be gone here if isSymlinkTraversable() failed
-            // and its own cleanup already removed it — tolerate ENOENT.)
+            // (target may already be gone here if atomicSymlinkInstall()
+            // returned "unreadable" and its own cleanup already removed it —
+            // tolerate ENOENT.)
             await unlink(target).catch((err) => {
               if (err.code !== "ENOENT") throw err;
             });
@@ -1953,39 +1964,24 @@ export async function forge(ctx) {
         let upgraded = false;
         let restoredAsCopy = false;
         if (wantSymlink) {
-          // Same per-process-unique tmp suffix as the relink branch above —
-          // sibling branch, identical shared-literal-path EEXIST risk
-          // (forge#2542, forge#2599).
-          const tmpTarget = target + "." + process.pid + ".tmp";
-          try {
-            await symlink(file, tmpTarget);
-            try {
-              await rename(tmpTarget, target); // rename replaces existing files on Windows
-            } catch (renameErr) {
-              await unlink(tmpTarget).catch(() => {});
-              throw renameErr;
-            }
-            upgraded = await isSymlinkTraversable(target);
-            if (upgraded) {
-              updated++;
-              delete manifest.files[rel];
-              manifestChanged = true;
-              manifestOps.push({ rel, op: "delete" });
-            } else {
-              // Symlink was created but is not readable back (e.g. MSYS
-              // symlink hit by native Windows "untrusted mount point" —
-              // forge#2620). Restore a real copy so the command stays
-              // readable. Keep the manifest entry (still copy-managed, not
-              // symlink-managed) and do NOT fall through to the generic
-              // copy-comparison below — the copy is already done.
-              await unlink(target).catch(() => {});
-              await copyFile(file, target);
-              updated++;
-              restoredAsCopy = true;
-            }
-          } catch (linkErr) {
-            if (!isLinkPermissionError(linkErr)) throw linkErr;
+          const result = await atomicSymlinkInstall(file, target);
+          if (result === "linked") {
+            upgraded = true;
+            updated++;
+            delete manifest.files[rel];
+            manifestChanged = true;
+            manifestOps.push({ rel, op: "delete" });
+          } else if (result === "unreadable") {
+            // Symlink was created but is not readable back (forge#2620) —
+            // the helper already removed the dead link. Restore a real copy
+            // so the command stays readable. Keep the manifest entry (still
+            // copy-managed, not symlink-managed) and do NOT fall through to
+            // the generic copy-comparison below — the copy is already done.
+            await copyFile(file, target);
+            updated++;
+            restoredAsCopy = true;
           }
+          // "denied" — no symlink installed; fall through to content-compare.
         }
         if (!upgraded && !restoredAsCopy) {
           const [src, dst] = await Promise.all([readFile(file), readFile(target)]);
@@ -2125,38 +2121,15 @@ export async function forge(ctx) {
       if (err.code !== "ENOENT") throw err;
       let linked = false;
       if (wantSymlink) {
-        // Suffix the tmp sibling with this process's PID so a losing
-        // concurrent forge() invocation installing the same brand-new
-        // command never collides on the same literal target path (which
-        // raises an uncaught EEXIST — isLinkPermissionError() only treats
-        // EPERM/EACCES as recoverable). Mirrors the relink and copy-upgrade
-        // branches above (forge#2542, forge#2600, forge#2599).
-        const tmpTarget = target + "." + process.pid + ".tmp";
-        try {
-          await symlink(file, tmpTarget);
-          try {
-            await rename(tmpTarget, target);
-          } catch (renameErr) {
-            await unlink(tmpTarget).catch(() => {});
-            throw renameErr;
+        linked = (await atomicSymlinkInstall(file, target)) === "linked";
+        if (linked) {
+          installed++;
+          if (manifest.files[rel]) {
+            // Symlinks work now and the old copy is gone — drop the stale record.
+            delete manifest.files[rel];
+            manifestChanged = true;
+            manifestOps.push({ rel, op: "delete" });
           }
-          linked = await isSymlinkTraversable(target);
-          if (linked) {
-            installed++;
-            if (manifest.files[rel]) {
-              // Symlinks work now and the old copy is gone — drop the stale record.
-              delete manifest.files[rel];
-              manifestChanged = true;
-              manifestOps.push({ rel, op: "delete" });
-            }
-          } else {
-            // Symlink created but not readable back (e.g. MSYS symlink hit by
-            // native Windows "untrusted mount point" — forge#2620). Remove it
-            // and fall through to the copy path below.
-            await unlink(target).catch(() => {});
-          }
-        } catch (linkErr) {
-          if (!isLinkPermissionError(linkErr)) throw linkErr;
         }
       }
       if (!linked) {
