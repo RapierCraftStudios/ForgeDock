@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "issue": 3101,
+  "slices": [
+    {
+      "phase": "build",
+      "content": "## Known Affected Files\n- `bin/engine/brand-new-module.mjs`\n\n### CONTRACT annotation (comment #0)\n\n## Builder Contract\n### Affected Files\n1. `bin/engine/brand-new-module.mjs` (new) — no prior history"
+    }
+  ]
+}

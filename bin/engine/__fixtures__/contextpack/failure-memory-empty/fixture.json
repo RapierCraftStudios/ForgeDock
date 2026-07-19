@@ -1,0 +1,20 @@
+{
+  "description": "forge#2681: no prior review-finding or workflow:invalid history for this issue's affected module — pack is built exactly as before the failure-memory feature, no 'Prior Failures / Findings' section appears.",
+  "issueNumber": 3101,
+  "repo": null,
+  "phaseId": "build",
+  "assembleOpts": {},
+  "issueView": {
+    "number": 3101,
+    "title": "feat: unrelated new module with no history",
+    "body": "n/a",
+    "labels": [],
+    "state": "OPEN",
+    "milestone": null
+  },
+  "commentsRaw": "[{\"id\":1,\"author\":\"agent-bot\",\"body\":\"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/engine/brand-new-module.mjs` (new) — no prior history\\n\",\"createdAt\":\"2026-07-19T00:00:00Z\"}]",
+  "timelineRaw": "[]",
+  "prListById": {},
+  "gistById": {},
+  "failureMemoryByKey": {}
+}

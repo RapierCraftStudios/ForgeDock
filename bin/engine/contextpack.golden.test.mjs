@@ -40,6 +40,16 @@
  *                             `--paginate` pages; miner pages through ALL
  *                             comments, pack still respects the size cap.
  *
+ * Additional scenarios (forge#2681 — failure-memory mining):
+ *   7. failure-memory-empty   — no prior review-finding/workflow:invalid
+ *                               history for the affected module; pack is
+ *                               unaffected, no "Prior Failures" section.
+ *   8. failure-memory-present — prior review-finding + workflow:invalid
+ *                               history on the affected module; ranked by
+ *                               same-module hit count then recency, a
+ *                               search-API-noise candidate (zero hits) is
+ *                               dropped.
+ *
  * @license MIT
  */
 
@@ -64,7 +74,7 @@ const FIXTURES_DIR = path.join(__dirname, '__fixtures__', 'contextpack');
  * assertions. */
 function ioForFixture(fixture) {
   const calls = [];
-  const { issueView, commentsRaw = '[]', timelineRaw = '[]', prListById = {}, gistById = {} } = fixture;
+  const { issueView, commentsRaw = '[]', timelineRaw = '[]', prListById = {}, gistById = {}, failureMemoryByKey = {} } = fixture;
   return {
     calls,
     gh: async (args) => {
@@ -77,8 +87,19 @@ function ioForFixture(fixture) {
         const searchIdx = args.indexOf('--search');
         const search = searchIdx >= 0 ? args[searchIdx + 1] : '';
         const prMatch = /^#(\d+)/.exec(search || '');
-        const pr = prMatch ? prMatch[1] : null;
-        return JSON.stringify(prListById[pr] !== undefined ? prListById[pr] : []);
+        if (prMatch) {
+          const pr = prMatch[1];
+          return JSON.stringify(prListById[pr] !== undefined ? prListById[pr] : []);
+        }
+        // forge#2681: basename-search failure-memory lookup (not a "#N in:body"
+        // PR-review-finding lookup) — keyed "{label}:{term}", see
+        // fetchFailureMemoryForTerm() in contextpack.mjs.
+        const labelIdx = args.indexOf('--label');
+        const label = labelIdx >= 0 ? args[labelIdx + 1] : '';
+        const key = `${label}:${search}`;
+        const entry = failureMemoryByKey[key];
+        if (entry && !Array.isArray(entry) && entry.error) throw new Error(entry.error);
+        return JSON.stringify(entry !== undefined ? entry : []);
       }
       if (cmd.startsWith('gist view')) {
         const gistId = args[2];
@@ -221,13 +242,44 @@ describe('contextpack golden fixtures — full mine->assemble->validate pipeline
     const sliceBytes = Buffer.byteLength(pack.slices[0].content, 'utf-8');
     assert.ok(sliceBytes <= MAX_SLICE_BYTES, `assembled slice is ${sliceBytes} bytes, expected <= MAX_SLICE_BYTES (${MAX_SLICE_BYTES})`);
   });
+
+  it('scenario 7 (forge#2681): no prior failure-memory history — pack unaffected, no "Prior Failures" section', async () => {
+    const { pack } = await runAndAssertGolden('failure-memory-empty');
+
+    assert.notEqual(pack, null);
+    assert.doesNotMatch(pack.slices[0].content, /Prior Failures/, 'a module with no history must not gain a failure-memory section');
+  });
+
+  it('scenario 8 (forge#2681): prior review-finding + workflow:invalid history ranked by same-module hits then recency, search-API noise dropped', async () => {
+    const { pack } = await runAndAssertGolden('failure-memory-present');
+
+    assert.notEqual(pack, null);
+    const content = pack.slices[0].content;
+    assert.match(content, /Prior Failures \/ Findings on These Modules/);
+
+    // #9999 never mentions the affected-file basename in title/body — must
+    // be dropped as GitHub search-API relevance noise, not injected as if
+    // it were a confirmed same-module hit.
+    assert.doesNotMatch(content, /#9999/, 'a candidate with zero same-module hits must be filtered out');
+
+    // Ranking: same-module hit count ties (all 1 here) broken by recency
+    // desc — #2717 (2026-07-12) before #2716 (2026-07-10) before the
+    // workflow:invalid #2650 (2026-07-05).
+    const idx2717 = content.indexOf('#2717');
+    const idx2716 = content.indexOf('#2716');
+    const idx2650 = content.indexOf('#2650');
+    assert.ok(idx2717 >= 0 && idx2716 >= 0 && idx2650 >= 0, 'all three genuine hits must be present');
+    assert.ok(idx2717 < idx2716, '#2717 (more recent) must be ranked before #2716');
+    assert.ok(idx2716 < idx2650, '#2716 (review-finding, more recent) must be ranked before #2650 (workflow:invalid, older)');
+    assert.match(content, /#2650 \(closed as invalid\)/, 'workflow:invalid items are labeled distinctly from review findings');
+  });
 });
 
 describe('contextpack golden fixtures — fixture/expected-pack pairing sanity', () => {
   const scenarioNames = fs.readdirSync(FIXTURES_DIR).filter((name) => fs.statSync(path.join(FIXTURES_DIR, name)).isDirectory());
 
   it('every fixture subdirectory has both fixture.json and expected-pack.json', () => {
-    assert.ok(scenarioNames.length >= 6, `expected at least 6 fixture scenarios, found ${scenarioNames.length}: ${scenarioNames.join(', ')}`);
+    assert.ok(scenarioNames.length >= 8, `expected at least 8 fixture scenarios, found ${scenarioNames.length}: ${scenarioNames.join(', ')}`);
     for (const name of scenarioNames) {
       const dir = path.join(FIXTURES_DIR, name);
       assert.ok(fs.existsSync(path.join(dir, 'fixture.json')), `${name}/fixture.json is missing`);
@@ -236,7 +288,16 @@ describe('contextpack golden fixtures — fixture/expected-pack pairing sanity',
   });
 
   it('every required scenario name is present', () => {
-    const required = ['empty-issue', 'truncated-comments', 'malformed-annotation', 'deleted-gist', 'satellite-repo', 'paginated-comments'];
+    const required = [
+      'empty-issue',
+      'truncated-comments',
+      'malformed-annotation',
+      'deleted-gist',
+      'satellite-repo',
+      'paginated-comments',
+      'failure-memory-empty',
+      'failure-memory-present',
+    ];
     for (const name of required) {
       assert.ok(scenarioNames.includes(name), `required scenario "${name}" is missing from ${FIXTURES_DIR}`);
     }

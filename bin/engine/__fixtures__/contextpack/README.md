@@ -108,3 +108,10 @@ or regenerate a fixture:
 | `deleted-gist/` | A `KNOWLEDGE_GIST` annotation references a gist that 404s; `mineContext()` marks it `available: false` with a non-empty `error`, pack stays schema-valid |
 | `satellite-repo/` | Cross-repo (satellite) issue — every mocked `gh` call carries the satellite repo (`-R` args / `repos/{repo}/...` path), pack shape is unaffected |
 | `paginated-comments/` | >100-comment thread split across 2 `--paginate` pages (60 + 45 = 105); miner pages through ALL comments (no silent truncation at page 1), pack still respects the size cap |
+
+## Additional scenarios (forge#2681 — failure-memory mining)
+
+| Directory | What it proves |
+|---|---|
+| `failure-memory-empty/` | No prior `review-finding`/`workflow:invalid` history for the issue's affected module — pack is built exactly as before the feature, no "Prior Failures / Findings" section appears |
+| `failure-memory-present/` | Two prior `review-finding` issues and one `workflow:invalid` issue reference the affected module by basename — pack gains a ranked "Prior Failures / Findings on These Modules" section (same-module hit count desc, then recency desc), a third candidate whose title/body never mentions the module basename (search-API relevance noise) is filtered out |
