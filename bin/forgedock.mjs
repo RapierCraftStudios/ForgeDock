@@ -1514,6 +1514,51 @@ function resolveGlobalNpmForgedockDir() {
 }
 
 /**
+ * Compare two already-`resolve()`d absolute paths for equality or containment
+ * (child equals parent, or sits strictly under it). On case-insensitive
+ * filesystems (win32/darwin) the same physical directory can resolve with
+ * differing letter casing (drive letter, path segments), so both operands are
+ * lowercased before comparing there; on Linux the comparison stays
+ * case-sensitive byte-for-byte (forge#2668). On the case-insensitive branch
+ * both operands are also Unicode-normalized to NFC: macOS APFS/HFS+ enumerate
+ * filenames NFD-normalized while CLI args/env vars typically arrive NFC, and
+ * `resolve()` preserves the input form — so without normalization two paths
+ * for the same physical directory containing accented characters can compare
+ * unequal (forge#2674). NFC is idempotent for pure-ASCII and pre-composed
+ * paths, so ASCII behavior is unchanged; win32 normalizes harmlessly. The
+ * `+ sep` boundary keeps `/foo-bar` from matching parent `/foo`. Callers pass
+ * paths that are already resolved — this helper deliberately does not
+ * re-resolve.
+ *
+ * Known limitation: `caseInsensitive` is gated on `process.platform`, an
+ * OS-level constant, not on the actual case-sensitivity of the volume
+ * FORGE_HOME/the npm global root live on. This is the correct assumption for
+ * the default filesystem format on each OS (NTFS on win32, APFS/HFS+ on
+ * darwin), but a volume explicitly formatted case-sensitive (e.g. opt-in
+ * case-sensitive APFS) would still be case-folded here, and two distinct
+ * directories differing only by case could be treated as equal. This is an
+ * accepted approximation, not a probe of real volume semantics — both call
+ * sites (`isGlobalNpmInstall`, `findSeparateGlobalInstall`) already fail
+ * closed / stay advisory-only, so a false match here degrades to their
+ * pre-existing "detection inconclusive" behavior rather than causing any
+ * destructive or incorrect action (forge#2675). Probing the actual volume
+ * (e.g. an `existsSync` case-twist check) is deliberately not done — the
+ * added complexity and syscall aren't warranted for a purely advisory path.
+ *
+ * @param {string} child - resolved absolute path being tested
+ * @param {string} parent - resolved absolute path of the candidate ancestor
+ * @returns {boolean}
+ */
+function samePathOrUnder(child, parent) {
+  const caseInsensitive =
+    process.platform === "win32" || process.platform === "darwin";
+  const fold = (p) => (caseInsensitive ? p.normalize("NFC").toLowerCase() : p);
+  const a = fold(child);
+  const b = fold(parent);
+  return a === b || a.startsWith(b + sep);
+}
+
+/**
  * Detect whether FORGE_HOME resolves inside npm's global install tree, i.e.
  * this process is running as a globally-installed `forgedock` package (not
  * an ephemeral npx/dlx cache extraction). Used by update()'s npm-mode branch
@@ -1533,7 +1578,7 @@ function isGlobalNpmInstall() {
   const globalPkgDir = resolveGlobalNpmForgedockDir();
   if (!globalPkgDir) return false;
   const home = resolve(FORGE_HOME);
-  return home === globalPkgDir || home.startsWith(globalPkgDir + sep);
+  return samePathOrUnder(home, globalPkgDir);
 }
 
 /**
@@ -1558,7 +1603,7 @@ function findSeparateGlobalInstall() {
   const globalPkgDir = resolveGlobalNpmForgedockDir();
   if (!globalPkgDir) return null;
   const home = resolve(FORGE_HOME);
-  if (home === globalPkgDir || home.startsWith(globalPkgDir + sep)) {
+  if (samePathOrUnder(home, globalPkgDir)) {
     // Current FORGE_HOME already IS the global install — nothing separate.
     return null;
   }
@@ -1804,9 +1849,10 @@ async function update() {
           // dirty tree. HEAD is still never moved in either case.
           const cwdResolved = resolve(process.cwd());
           const forgeHomeResolved = resolve(FORGE_HOME);
-          const isSourceRepoSelf =
-            cwdResolved === forgeHomeResolved ||
-            cwdResolved.startsWith(forgeHomeResolved + sep);
+          const isSourceRepoSelf = samePathOrUnder(
+            cwdResolved,
+            forgeHomeResolved,
+          );
 
           if (isSourceRepoSelf) {
             console.log(

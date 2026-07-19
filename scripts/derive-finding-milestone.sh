@@ -126,11 +126,15 @@ fi
 # Portable (non-PCRE) extraction — grep -oP is not supported by Git Bash's
 # grep build on Windows, so use a bash regex + BASH_REMATCH instead of a
 # lookbehind (same convention as scripts/code-index.sh).
+# The leading (^|[^a-z]) group anchors the alternation to a word start so a
+# close-verb embedded in a larger word (e.g. "encloses #1234") cannot match;
+# the body is already lowercased, so [^a-z] is the correct complement class.
+# The extra group shifts the issue-number capture to BASH_REMATCH[3].
 PR_BODY=$(echo "$PR_JSON" | jq -r '.body // empty')
 SOURCE_ISSUE=""
 PR_BODY_LOWER=$(echo "$PR_BODY" | tr '[:upper:]' '[:lower:]')
-if [[ "$PR_BODY_LOWER" =~ (closes|fixes|resolves)[[:space:]]*#([0-9]+) ]]; then
-  SOURCE_ISSUE="${BASH_REMATCH[2]}"
+if [[ "$PR_BODY_LOWER" =~ (^|[^a-z])(closes|fixes|resolves)[[:space:]]*#([0-9]+) ]]; then
+  SOURCE_ISSUE="${BASH_REMATCH[3]}"
 fi
 
 if [ -n "$SOURCE_ISSUE" ]; then
@@ -167,12 +171,18 @@ if [ -n "$MILESTONE_BRANCH" ]; then
   ALL_MILESTONES=$(gh api "repos/${MILESTONES_REPO}/milestones" 2>/dev/null || echo "")
 
   if [ -n "$ALL_MILESTONES" ] && [ "$ALL_MILESTONES" != "[]" ]; then
-    MATCH=$(echo "$ALL_MILESTONES" | jq -r --arg slug "$BRANCH_SLUG" \
-      '.[] | select((.title | ascii_downcase | gsub("[^a-z0-9]+"; "-")) == $slug) | .title' | head -1)
-    if [ -z "$MATCH" ]; then
-      MATCH=$(echo "$ALL_MILESTONES" | jq -r --arg slug "$BRANCH_SLUG" \
-        '.[] | select((.title | ascii_downcase | gsub("[^a-z0-9]+"; "-")) | test($slug)) | .title' | head -1)
-    fi
+    # Single jq invocation: shared `def slugify` replaces the duplicated
+    # downcase/gsub slug transform that previously appeared once per tier
+    # (exact-match, then substring-fallback). Exact match is tried first
+    # (array 1), substring match second (array 2); `first` picks the winner
+    # from the concatenation, preserving the exact-match-wins-over-substring
+    # ordering and the regex semantics of `test($slug)` exactly as before.
+    # <!-- Fixes: forge#2670 -->
+    MATCH=$(echo "$ALL_MILESTONES" | jq -r --arg slug "$BRANCH_SLUG" '
+      def slugify: ascii_downcase | gsub("[^a-z0-9]+"; "-");
+      ([.[] | select((.title | slugify) == $slug)]
+       + [.[] | select((.title | slugify) | test($slug))])
+      | (first.title // empty)')
     if [ -n "$MATCH" ]; then
       echo "$MATCH"
       exit 0

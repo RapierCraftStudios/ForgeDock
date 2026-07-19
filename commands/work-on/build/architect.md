@@ -29,7 +29,7 @@ COMPLEXITY_BAND=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 COMPLEXITY_BAND="${COMPLEXITY_BAND:-STANDARD}"
 ```
 
-**If COMPLEXITY_BAND: TRIVIAL** → skip all phases (A0 through A5), post NO comment, return empty plan to caller immediately. Do not read any files. This is not an error — trivial single-file changes have no cross-path consistency risk. <!-- Added: forge#679 -->
+**If COMPLEXITY_BAND: TRIVIAL** → skip all phases (A0 through A5), **post the minimal skip marker comment described in "Skip Marker" under Skip Conditions below** (reason: `TRIVIAL complexity band`), then return an empty plan to caller immediately. Do not read any files. This is not an error — trivial single-file changes have no cross-path consistency risk. The skip marker (ending in `<!-- FORGE:ARCHITECT:COMPLETE -->`) is what makes a legitimate skip observable to the headless engine's marker-only gate, so the issue advances to build instead of being stranded at `needs-human`. <!-- Added: forge#679; skip-marker on skip: forge#2689 -->
 
 **If COMPLEXITY_BAND: STANDARD or COMPLEX** → proceed to Phase A0 below.
 
@@ -668,14 +668,39 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ARCHITECT -->
 
 ## Skip Conditions
 
-Skip this entire step (post nothing, return empty plan to caller) if:
+Skip the planning work (Phases A0–A5) and return an empty plan to caller — **but always post the Skip Marker below first** — if:
 - **COMPLEXITY_BAND: TRIVIAL** — checked via FORGE:FAST_PATH comment at entry (see guard above) <!-- Primary skip path: forge#679 -->
 - Issue creates only **new files** with no callers to find (e.g. a new command file with no existing integration point yet)
 - Issue is a 1-file config or docs edit with no code logic
 - Issue title starts with "docs:" or "chore:"
 - `{AFFECTED_FILES}` is empty
 
-When skipped, the builder proceeds with investigation report + context briefing only.
+When skipped, the builder proceeds with investigation report + context briefing only (see Integration Point below — the builder falls back gracefully on an empty plan).
+
+### Skip Marker (MANDATORY on every skip — do NOT post nothing) <!-- forge#2689 -->
+
+**Do not post nothing.** The headless engine gate (`bin/engine/phases.mjs` → `architect.detectOutcome`) treats a **missing** `FORGE:ARCHITECT:COMPLETE` sentinel as a phase **failure**, retries to `maxAttempts` (3), then strands the issue at `needs-human`. It reads GitHub comment markers only — it cannot see this subcommand's in-process "empty plan" return value. So a skip that posts no marker is indistinguishable from a crashed architect run and deterministically strands **every** `chore:`/`docs:`/trivial issue.
+
+On **every** skip branch above, post exactly this minimal comment (substitute the concrete `{SKIP_REASON}`, e.g. `chore:/docs: title`, `TRIVIAL complexity band`, `new files only — no callers`, or `AFFECTED_FILES empty`) **before** returning the empty plan:
+
+```bash
+# The skip marker is mandatory and un-gated by design — posting it IS the point
+# (a missing marker strands the issue at needs-human; see above). Same report-only
+# risk class as the unguarded plan post in "Output Format" above, so it carries the
+# same allowlist rather than a DRY_RUN guard.
+SKIP_BODY=$(cat <<SKIP_EOF
+<!-- FORGE:ARCHITECT -->
+## Architecture Plan — Skipped
+
+**Skipped**: {SKIP_REASON}. No cross-path consistency risk — the builder proceeds with the investigation report + context briefing.
+
+<!-- FORGE:ARCHITECT:COMPLETE -->
+SKIP_EOF
+)
+gh issue comment {NUMBER} {GH_FLAG} --body "$SKIP_BODY" # <!-- allowlist:check-command-side-effects -->
+```
+
+The empty-plan-with-marker changes no downstream behavior — the builder already falls back to the investigation report + contract when the plan is empty (see Integration Point below). The marker only makes the legitimate skip **observable** to the marker-only engine gate. This intentionally does **not** weaken crash detection: a genuinely interrupted architect run still posts no marker at all, so `detectOutcome` still fails-and-escalates it correctly.
 
 ---
 
