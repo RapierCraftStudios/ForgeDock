@@ -390,13 +390,37 @@ describe('contextpack golden fixtures — full mine->assemble->validate pipeline
     const content = pack.slices[0].content;
     assert.match(content, /5 additional in-flight sibling\(s\) omitted — fleet brief capped at 10/, 'the omitted-count truncation marker must name both the omitted count and the cap value');
   });
+
+  it('scenario 13 (forge#2745): sibling CONTRACT Deliverables row with a GFM-escaped pipe in the Change column is not truncated', async () => {
+    const { minedData, pack } = await runAndAssertGolden('fleet-brief-escaped-pipe');
+
+    assert.equal(minedData.fleetBrief.items.length, 1);
+    const sibling = minedData.fleetBrief.items.find((i) => i.number === 4201);
+    assert.ok(sibling, 'sibling #4201 must be present');
+    assert.equal(sibling.contractUnknown, false);
+
+    const deliverable = sibling.deliverables.find((d) => d.file === 'bin/engine/contextpack.mjs');
+    assert.ok(deliverable, 'the deliverables row must have been parsed');
+    // Regression guard for forge#2745: before the fix, `TABLE_ROW_RE` treated
+    // the escaped pipe as a column delimiter and truncated `change` to
+    // "Add support for a" — dropping "b delimiter in parsed output" entirely.
+    assert.equal(
+      deliverable.change,
+      'Add support for a|b delimiter in parsed output',
+      'the escaped pipe (\\|) must be unescaped to a literal | and the full cell text preserved, not truncated at the escape sequence',
+    );
+
+    assert.notEqual(pack, null);
+    const content = pack.slices[0].content;
+    assert.match(content, /Add support for a\|b delimiter in parsed output/, 'the rendered fleet-brief excerpt must also carry the full, untruncated change text');
+  });
 });
 
 describe('contextpack golden fixtures — fixture/expected-pack pairing sanity', () => {
   const scenarioNames = fs.readdirSync(FIXTURES_DIR).filter((name) => fs.statSync(path.join(FIXTURES_DIR, name)).isDirectory());
 
   it('every fixture subdirectory has both fixture.json and expected-pack.json', () => {
-    assert.ok(scenarioNames.length >= 12, `expected at least 12 fixture scenarios, found ${scenarioNames.length}: ${scenarioNames.join(', ')}`);
+    assert.ok(scenarioNames.length >= 13, `expected at least 13 fixture scenarios, found ${scenarioNames.length}: ${scenarioNames.join(', ')}`);
     for (const name of scenarioNames) {
       const dir = path.join(FIXTURES_DIR, name);
       assert.ok(fs.existsSync(path.join(dir, 'fixture.json')), `${name}/fixture.json is missing`);
@@ -418,6 +442,7 @@ describe('contextpack golden fixtures — fixture/expected-pack pairing sanity',
       'fleet-brief-present',
       'fleet-brief-satellite-repo',
       'fleet-brief-capped',
+      'fleet-brief-escaped-pipe',
     ];
     for (const name of required) {
       assert.ok(scenarioNames.includes(name), `required scenario "${name}" is missing from ${FIXTURES_DIR}`);

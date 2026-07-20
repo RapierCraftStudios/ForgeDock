@@ -330,6 +330,14 @@ const TABLE_ROW_RE = /^\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|/;
 // character is one of `|`, `-`, `:`, or whitespace.
 const TABLE_DIVIDER_RE = /^[\s|:-]+$/;
 
+// Placeholder used to shield GFM-escaped pipes (`\|`) from `TABLE_ROW_RE`
+// while it splits a row on literal `|` column delimiters. A Private Use Area
+// code point cannot occur in ordinary markdown table content, so a raw
+// collision with real cell text is not a practical concern. See
+// `extractDeliverablesFromBody()` below for the substitute-match-restore
+// sequence this is used in.
+const ESCAPED_PIPE_PLACEHOLDER = '';
+
 /**
  * Slice the "## Deliverables" section out of a CONTRACT annotation body (the
  * heading through the next heading or end-of-body) and extract each table
@@ -363,10 +371,16 @@ function extractDeliverablesFromBody(body) {
     if (!trimmed.startsWith('|')) continue;
     const withoutPipes = trimmed.replace(/\|/g, '');
     if (TABLE_DIVIDER_RE.test(withoutPipes) && withoutPipes.includes('-')) continue; // divider row
-    const m = TABLE_ROW_RE.exec(trimmed);
+    // Shield GFM-escaped pipes (`\|`) from TABLE_ROW_RE's column split by
+    // substituting them with a placeholder before matching, then restoring
+    // them (unescaped to a literal `|`) in the captured groups afterward.
+    // Without this, a `\|` inside a cell is misread as a real column
+    // boundary and the cell's remaining text is silently truncated.
+    const withPlaceholders = trimmed.replace(/\\\|/g, ESCAPED_PIPE_PLACEHOLDER);
+    const m = TABLE_ROW_RE.exec(withPlaceholders);
     if (!m) continue;
-    const file = m[1].replace(/`/g, '').trim();
-    const change = m[2].trim();
+    const file = m[1].replace(/`/g, '').trim().split(ESCAPED_PIPE_PLACEHOLDER).join('|');
+    const change = m[2].trim().split(ESCAPED_PIPE_PLACEHOLDER).join('|');
     if (!file || /^file$/i.test(file)) continue; // header row
     rows.push({ file, change });
   }
