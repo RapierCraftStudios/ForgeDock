@@ -59,8 +59,8 @@ import {
   detectClaudeVersion,
   loadBreakpoints,
   hasFeature,
-  getPersistedHomeState,
   setPersistedHomeState,
+  getInstalledCommandsDriftStatus,
 } from "./registry.mjs";
 import { renderMark, ember } from "./cinema.mjs";
 import {
@@ -2740,27 +2740,16 @@ async function doctor(fix = false) {
             `incomplete (missing: ${missingDirs.join(", ")}). Run: npx forgedock install`,
           );
         } else {
-          // Prefer the version registry.mjs last recorded for this exact
-          // write (getPersistedHomeState()) — the single source of truth
-          // update()/install also write through — falling back to reading
-          // ~/.forge/version directly on disk when the registry has no entry
-          // (e.g. an older ForgeDock version wrote ~/.forge/ before #1943
-          // added registry tracking). Reading both keeps doctor() honest
-          // even if the registry ever drifts from what's actually on disk.
-          const recorded = getPersistedHomeState();
-          let persistedVersion = recorded?.version || "";
-          if (!persistedVersion) {
-            try {
-              persistedVersion = readFileSync(versionPath, "utf-8").trim();
-            } catch {
-              // version file missing/unreadable — reported below as "unknown"
-            }
-          }
-          const sourceVersion = getVersion();
-          if (persistedVersion && sourceVersion && compareVersions(persistedVersion, sourceVersion) < 0) {
+          // Package-vs-installed-commands drift comparison is factored into
+          // a single shared helper (bin/registry.mjs's
+          // getInstalledCommandsDriftStatus, forge#2719) so doctor, the
+          // `version` command, and the SessionStart hook all agree on one
+          // source of truth instead of re-deriving this logic independently.
+          const { persistedVersion, isStale, unknown } = getInstalledCommandsDriftStatus(FORGE_HOME);
+          if (!unknown && isStale) {
             warn(
               "Persisted toolset home (~/.forge)",
-              `v${persistedVersion} — source is v${sourceVersion}. Run: npx forgedock update`,
+              `v${persistedVersion} — source is v${getVersion()}. Run: npx forgedock update`,
             );
           } else {
             pass("Persisted toolset home (~/.forge)", `v${persistedVersion || "unknown"} at ${persistedHome}`);
@@ -3957,6 +3946,18 @@ switch (command) {
       console.log(
         `  ${GREEN}New version available: v${latestVersion}${RESET} (you have v${localVersion}). ` +
           `Run ${CYAN}npx forgedock update${RESET} to fetch it.`,
+      );
+    }
+
+    // forge#2719 — surface package-vs-installed-commands drift (previously
+    // only visible via `doctor` Check 5d). Uses the same shared helper doctor
+    // calls, so both surfaces agree. Silent when versions match or when
+    // either version is unknown (e.g. a git-clone dev install, which never
+    // persists to ~/.forge — see registry.mjs's getInstalledCommandsDriftStatus).
+    const driftStatus = getInstalledCommandsDriftStatus(FORGE_HOME);
+    if (!driftStatus.unknown && driftStatus.isStale) {
+      console.log(
+        `  ${YELLOW}Installed commands are stale (v${driftStatus.persistedVersion}) vs package v${driftStatus.sourceVersion}${RESET} — run: ${CYAN}npx forgedock update${RESET}`,
       );
     }
     break;

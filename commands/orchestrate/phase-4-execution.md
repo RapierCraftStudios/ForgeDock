@@ -528,6 +528,32 @@ Use `${ISSUE_LANE[$NUM]}` and `${ISSUE_PR_BASE[$NUM]}` to populate `{LANE}` and 
 # Uses SORTED_READY_SET[] from Step 3E.5 (descending value/cost) and budget gate from Step 4A-pre.0
 FORGEDOCK_AVAILABLE=$(command -v forgedock >/dev/null 2>&1 && echo "true" || echo "false")
 
+# Backend preflight canary (forge#2743): `command -v forgedock` only proves the orchestrator CLI
+# binary is on PATH — it says nothing about whether the engine's execution backend (the `claude`
+# CLI spawn, or a working `ANTHROPIC_API_KEY`) can actually run a phase. Without this probe, an
+# environmental failure (e.g. forge#2741 — `spawnSync claude` ENOENT despite a shell `command -v`
+# probe reporting the binary present) commits the ENTIRE ready set to engine-first dispatch, every
+# `forgedock run-issue` call fails within seconds, and nothing re-routes the batch — a human has
+# to notice and manually re-dispatch via the Agent-spawn path below.
+#
+# CRITICAL — do NOT use a shell-resolved probe here (`command -v claude`, `claude --version` run
+# directly by bash, `which claude`, etc.). forge#2741's entire root cause is that a shell-resolved
+# probe and the engine's actual invocation resolve the `claude` binary differently: bash's builtin
+# PATH lookup (and `execSync("claude --version", ...)`, used deliberately by
+# `bin/runner.mjs`'s `isClaudeCliAvailable()` for this exact reason) can find and run an
+# npx-transient/extensionless shim that `bin/runner.mjs`'s actual backend call —
+# `runCliBackend()`'s `spawnFn(bin, cliArgs, { shell: false, ... })` with bare `bin = "claude"`
+# (no shell resolution) — cannot. A canary that shell-resolves `claude` reproduces the exact
+# blind spot it exists to catch and reports the backend healthy in precisely forge#2741's failure
+# scenario. The canary MUST reproduce `runCliBackend()`'s exact invocation shape — bare binary
+# name, `shell: false` — via a one-off Node `spawnSync` call, not a bash-native probe:
+if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
+  if ! node -e "const r = require('node:child_process').spawnSync('claude', ['--version'], { shell: false }); process.exit(r.error ? 1 : 0);" 2>/dev/null; then
+    echo "WARNING: forgedock CLI is on PATH, but its execution backend is not invocable via the engine's own spawn shape (bare 'claude', shell:false) in this environment. Downgrading to the Agent-spawn fallback path for this entire run — see forge#2743. (If forge#2741's ENOENT root cause is fixed, this canary will pass again on the next /orchestrate invocation.)"
+    FORGEDOCK_AVAILABLE="false"
+  fi
+fi
+
 if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
   # Build the budget-gated dispatch queue first (forge#1743's should_dispatch() still applies
   # per-issue, independent of the concurrency cap below).
@@ -849,7 +875,7 @@ If `DISPATCH_NOW` is empty (headroom is 0), do not spawn any agents this cycle �
 
 You will be automatically notified when each background agent completes — or, for an engine-first dispatch (Step 4A, `FORGEDOCK_AVAILABLE=true`), when a backgrounded `Bash(run_in_background=true, command="forgedock run-issue ...")` call completes. Both are the same underlying "background task finished" notification the harness delivers; treat them identically for the purposes of this step. **Do NOT use `sleep` loops to poll for completion.** Instead, wait for the automatic notification. When one arrives, look up which issue it belongs to — `AGENT_ISSUE_MAP` for an `agent_completed` notification, `ENGINE_DISPATCH_MAP` (fixed forge#2466) for a background-Bash notification from the engine-first path — and immediately process it exactly the same way regardless of which map resolved it; every check below (`classify_predecessor_state()`, dependent dispatch, stall/staging checks) keys off GitHub labels/state, not which dispatch mechanism produced them. **Fallback**: if a runtime ever fails to deliver a background-Bash completion notification, poll `gh issue view --json labels` for the in-flight engine-dispatched issue's workflow label instead of blocking — the same degrade-gracefully behavior already used when `BACKGROUND_DISPATCH_ENABLED=false` for the Agent-spawn path (see `phase-3-dependency.md` → Background Dispatch Mode).
 
-**Concurrency slot release (MANDATORY — first action on every completion)** <!-- Added: forge#1912 -->: The instant a completion notification arrives — `agent_completed`, or a background-Bash completion for an engine-dispatched issue — decrement `ACTIVE_DISPATCH_COUNT` by 1 — a worker slot has just freed, regardless of what terminal state the issue ended up in. Do this before any stall-recovery/resume logic below. If that agent is then resumed (item 2 below, or Step 4B.5's stall recovery) because it stalled mid-pipeline rather than truly finishing, re-increment `ACTIVE_DISPATCH_COUNT` when the `Agent(resume=...)` call is issued — a resume re-occupies a worker slot exactly like a fresh dispatch does. (Step 4B.5's stall-resume mechanism is `Agent(resume=...)`-specific and is unchanged by this fix — an engine-dispatched issue that stalls is not currently auto-resumed by Step 4B.5; it surfaces the same way any other stalled issue does, via the standard stall-detection alert, and `forgedock resume-stalled` remains available as a separate manual/scripted recovery path outside this file's scope.)
+**Concurrency slot release (MANDATORY — first action on every completion)** <!-- Added: forge#1912 -->: The instant a completion notification arrives — `agent_completed`, or a background-Bash completion for an engine-dispatched issue — decrement `ACTIVE_DISPATCH_COUNT` by 1 — a worker slot has just freed, regardless of what terminal state the issue ended up in. Do this before any stall-recovery/resume logic below. If that agent is then resumed or fallback-dispatched (item 2 below, or Step 4B.5's stall recovery) because it stalled mid-pipeline rather than truly finishing, re-increment `ACTIVE_DISPATCH_COUNT` when the `Agent(resume=...)` (or, per item 2b below, the fresh `Agent(...)` fallback dispatch) call is issued — either re-occupies a worker slot exactly like a fresh dispatch does. (Step 4B.5's TIME-BASED hang detector — an agent that never completes at all, as opposed to one that completes at `workflow:engine-error` — remains `Agent(resume=...)`-specific and out of scope for this fix: an engine-dispatched issue that silently hangs still surfaces only via the standard stall-detection alert, and `forgedock resume-stalled` remains available as a separate manual/scripted recovery path for that case. The completion-triggered case — an engine-dispatched issue that DOES complete, at `workflow:engine-error` with empty committed state — is now auto-fallen-back to Agent-spawn by item 2b below, fixed forge#2743.)
 
 **Ordering requirement (MANDATORY — prevents transient over-cap)**: For every agent that completed in this notification batch, finish its terminal-state check and, if applicable, its resume re-increment (items 1-2 below) BEFORE computing `dispatch_headroom` for item 5's newly-ready-issue dispatch. Computing headroom before a to-be-resumed agent's re-increment would let a genuinely-still-running agent's freed slot be double-booked — once by a fresh dispatch, once by the resume itself — transiently exceeding `MAX_CONCURRENT`. Process every completed agent's items 1-2 to a decision (terminal vs. resumed) first; only then compute headroom once for the batch's item 5 dispatch.
 
@@ -888,6 +914,10 @@ classify_predecessor_state() {
     # predecessor were still mid-pipeline — which is accurate, since the
     # stall-detection step below (item 2) auto-resumes/retries a completed
     # agent run that ends in workflow:engine-error, same as any other stall.
+    # Fixed forge#2743: item 2's sub-case 2b is what actually fulfills this for
+    # ENGINE_DISPATCH_MAP-tracked issues (fresh Agent-spawn fallback on empty
+    # committed state) — 2a's Agent(resume=...) alone cannot reach them, since
+    # they were never in AGENT_ISSUE_MAP.
     echo "IN_PROGRESS"
   elif [ "$PRED_STATE" = "CLOSED" ]; then
     # Closed with no workflow:invalid/merged label (e.g. closed-not-planned) — treat as DONE,
@@ -1086,7 +1116,11 @@ done
    echo "#{NUM}: $FINAL_STATE"
    ```
 
-2. **If the issue is NOT in a terminal-for-this-agent state** (`workflow:merged`, `workflow:invalid`, `needs-human`, or `workflow:awaiting-merge`), the agent stalled mid-pipeline. **Resume it immediately**. `workflow:engine-error` (forge#2261 — `bin/engine.mjs`'s headless engine terminating on an engine/tool-level failure rather than a genuine human-judgment block) is deliberately excluded from the terminal-for-this-agent set: a completed agent run ending there is treated exactly like any other stall and auto-resumed/retried here, up to the resume-cap in item 3 below — no human decision is pending, so there is nothing to gate on:
+2. **If the issue is NOT in a terminal-for-this-agent state** (`workflow:merged`, `workflow:invalid`, `needs-human`, or `workflow:awaiting-merge`), the agent stalled mid-pipeline. **Resume it immediately**. `workflow:engine-error` (forge#2261 — `bin/engine.mjs`'s headless engine terminating on an engine/tool-level failure rather than a genuine human-judgment block) is deliberately excluded from the terminal-for-this-agent set: a completed agent run ending there is treated exactly like any other stall and auto-resumed/retried here, up to the resume-cap in item 3 below — no human decision is pending, so there is nothing to gate on.
+
+   **Two distinct resume mechanisms, dispatched by which map resolved the completion (fixed forge#2743)** — `AGENT_ISSUE_MAP`-resolved completions (Agent-spawn path) and `ENGINE_DISPATCH_MAP`-resolved completions (engine-first path) hit `workflow:engine-error` for structurally different reasons and need different recovery:
+
+   **2a. Agent-spawn-dispatched issue (`AGENT_ISSUE_MAP[{NUMBER}]` set)** — unchanged from prior behavior. Resume the same agent in place:
    ```
    Agent(
      resume=AGENT_ISSUE_MAP[{NUMBER}],
@@ -1095,7 +1129,83 @@ done
      prompt="The previous /work-on invocation stopped before completing the full pipeline. The issue is currently at {CURRENT_WORKFLOW_STATE}. Continue — invoke Skill(skill='work-on', args='{NUMBER} --under-orchestration') to resume the routing loop from the current state. /work-on will re-read GitHub state and pick up where it left off."
    )
    ```
-   **Resume ALL stalled agents in a single message** (parallel resume). Do not wait between resumes. Each resume re-occupies a worker slot — increment `ACTIVE_DISPATCH_COUNT` by 1 per agent resumed here (it was already decremented by the "Concurrency slot release" rule above when the stall was first observed as a completion). <!-- Added: forge#1912 -->
+
+   **2b. Engine-first-dispatched issue (`ENGINE_DISPATCH_MAP[{NUMBER}]` set, no `AGENT_ISSUE_MAP` entry)** — `Agent(resume=...)` has nothing to resume here; the completed task was a backgrounded `Bash(command="forgedock run-issue ...")` call, not an `Agent()`. Re-issuing the identical `forgedock run-issue` command would just reproduce the same environmental failure. Instead, fall back to the Agent-spawn path for this ONE issue — but only when it is safe to do so:
+   ```bash
+   # Idempotency guard: only fall back once per issue per engine-error occurrence.
+   ALREADY_FALLEN_BACK=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+     --jq '[.[] | select(.body | contains("FORGE:ENGINE_FALLBACK"))] | length' 2>/dev/null || echo "0")
+
+   # Safety gate: only fall back when the engine run committed NOTHING — no branch, no PR, no
+   # committed phases. Primary source: the `FORGE:STATE` HTML-comment block the engine already
+   # mirrors onto the issue BODY on every phase transition (`bin/engine/state.mjs`/`projector.mjs`
+   # — see phase-3-dependency.md "Engine mode (default)"), which carries `committed`/`branch`/`pr`
+   # as real JSON — read it directly rather than screen-scraping terminal text:
+   # NOTE (forge#2750 review fix): `bin/engine/state.mjs`'s `serializeState()` writes the block
+   # as THREE separate lines — `<!-- FORGE:STATE`, the JSON payload, and `-->` — never all on one
+   # line. A single-line `grep -oP '(?<=<!-- FORGE:STATE)[\s\S]*?(?=-->)'` NEVER matches this <!-- allowlist:portability — cited non-portable anti-pattern being replaced, not a command this spec runs -->
+   # (GNU `grep -P` without `-z` operates per-line, not across newlines, regardless of `[\s\S]`)
+   # — it always returns empty. Extract the block with a `sed` line-range instead, which handles
+   # the real multi-line shape correctly:
+   STATE_BLOCK=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' \
+     | sed -n '/<!-- FORGE:STATE/,/-->/p')
+   STATE_JSON=$(echo "$STATE_BLOCK" | sed '1d;$d')
+   if [ -n "$STATE_JSON" ]; then
+     COMMITTED_COUNT=$(echo "$STATE_JSON" | jq -r '.committed | length' 2>/dev/null)
+     STATE_BRANCH=$(echo "$STATE_JSON" | jq -r '.branch' 2>/dev/null)
+     STATE_PR=$(echo "$STATE_JSON" | jq -r '.pr' 2>/dev/null)
+     [ "$COMMITTED_COUNT" = "0" ] && [ "$STATE_BRANCH" = "null" ] && [ "$STATE_PR" = "null" ] \
+       && EMPTY_COMMITTED_STATE="true" || EMPTY_COMMITTED_STATE="false"
+   else
+     # No FORGE:STATE block was ever written to the issue body (e.g. the run failed before
+     # phase 1 committed anything). There is no reliable structured signal available in this
+     # case — fail SAFE: do NOT auto-fallback on an unverifiable state. This surfaces via the
+     # existing stall-detection alert / needs-human path instead, exactly as before this fix.
+     # (An earlier draft of this fix attempted a second fallback source — a
+     # `committed=[] branch=null pr=null` diagnostic line assumed to be present in the
+     # completed background Bash call's captured stdout — but no code in this file or
+     # phase-3-dependency.md actually captures/populates that stdout into a named variable,
+     # so that fallback was dead code reading an unset variable. Removed rather than wired up:
+     # the FORGE:STATE block above is the engine's own durable, already-documented mirror of
+     # this exact data and should always be present by the time a phase transition occurs;
+     # treating its absence as "cannot verify, don't risk it" is the correct fail-safe.)
+     EMPTY_COMMITTED_STATE="false"
+   fi
+   # A non-empty committed/branch/pr means real per-issue work exists that a fresh Agent-spawn
+   # dispatch could collide with or duplicate — that case is NOT auto-fallen-back; it surfaces
+   # via the existing stall-detection alert / needs-human path instead, exactly as before this fix.
+
+   if [ "$ALREADY_FALLEN_BACK" -eq 0 ] && [ "$EMPTY_COMMITTED_STATE" = "true" ]; then
+     ENGINE_FALLBACK_BODY="<!-- FORGE:ENGINE_FALLBACK -->
+   ## Engine-First Dispatch Failed — Falling Back to Agent-Spawn
+
+   \`forgedock run-issue\` ended at \`workflow:engine-error\` with no committed phases, branch, or PR
+   (\`committed=[] branch=null pr=null\`) — this is an environmental/tool failure (forge#2261), not a
+   per-issue content failure, and nothing was committed that a fresh dispatch could collide with.
+   Auto-falling back to the Agent-spawn \`/work-on\` path for this issue. See forge#2743."
+     gh issue comment {NUMBER} {GH_FLAG} --body "$ENGINE_FALLBACK_BODY" # <!-- allowlist:check-command-side-effects — intentional pipeline status annotation, mirrors work-on/build/architect.md:700 -->
+
+     # Reuse the SAME Agent-spawn template as Step 4A's "Agent-spawn path (fallback when forgedock
+     # CLI unavailable)" section above (the `Agent(subagent_type="general-purpose", ...)` block
+     # under "Copy this template. Fill in variables. Do not modify the structure:") verbatim —
+     # HARD RULE 1 preserved. This is a fresh dispatch, not a resume: capture its returned agent
+     # ID into AGENT_ISSUE_MAP so subsequent completions for this issue route through 2a above.
+     Agent(
+       subagent_type="general-purpose",
+       model="{SUBAGENT_MODEL}",
+       description="Work on {PROJECT_PREFIX}#{NUMBER} (engine-error fallback)",
+       run_in_background=true,
+       prompt="<same template body as Step 4A's Agent-spawn path — see the 'Agent-spawn path (fallback when forgedock CLI unavailable)' section above; fill {NUMBER}/{GH_REPO}/{REPO_PATH}/{LANE}/{PR_BASE}/{ISSUE_TITLE} exactly as that template does>"
+     )
+     AGENT_ISSUE_MAP[{NUMBER}] = <agent_id returned by the Agent() call above>
+     # Re-occupies the worker slot this completion just freed (see "Concurrency slot release" above).
+     ACTIVE_DISPATCH_COUNT=$((ACTIVE_DISPATCH_COUNT + 1))
+   elif [ "$ALREADY_FALLEN_BACK" -eq 0 ]; then
+     echo "#{NUMBER}: engine-error with non-empty committed state (partial work exists) — NOT auto-falling back. Surfaces via standard stall-detection alert; forgedock resume-stalled remains available for manual/scripted recovery."
+   fi
+   ```
+
+   **Resume ALL stalled agents in a single message** (parallel resume/fallback across 2a and 2b together). Do not wait between resumes. Each resume or fallback dispatch re-occupies a worker slot — increment `ACTIVE_DISPATCH_COUNT` by 1 per agent resumed/dispatched here (it was already decremented by the "Concurrency slot release" rule above when the stall was first observed as a completion). <!-- Added: forge#1912 -->
 
 3. **Track resume cycles per agent.** If an agent has been resumed 2+ times and still hasn't reached a terminal state, report it as a failure — do not resume again.
 

@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, cpSync, unlinkSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import os from "node:os";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "forgedock.mjs");
 
@@ -621,6 +621,124 @@ describe("version command / --version, -v flags (#1981)", () => {
     // check never blocks the primary output.
     const res = runCli(["version"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-net-"))});
     assert.equal(res.status, 0, res.stdout + res.stderr);
+  });
+
+  // forge#2719 — package-vs-installed-commands drift advisory.
+  it("warns when installed commands (~/.forge/version) are older than the package", () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-ver-drift-stale-"));
+    mkdirSync(join(home, ".forge"), { recursive: true });
+    writeFileSync(join(home, ".forge", "version"), "0.0.1");
+    const res = runCli(["version"], { home });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(res.stdout, /Installed commands are stale \(v0\.0\.1\) vs package v\d+\.\d+\.\d+/);
+    assert.match(res.stdout, /npx forgedock update/);
+  });
+
+  it("stays silent about drift when installed commands match the package version", () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-ver-drift-equal-"));
+    // Read this checkout's own package.json version so the persisted version
+    // exactly matches the source version under test.
+    const pkgVersion = JSON.parse(
+      readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json"), "utf-8"),
+    ).version;
+    mkdirSync(join(home, ".forge"), { recursive: true });
+    writeFileSync(join(home, ".forge", "version"), pkgVersion);
+    const res = runCli(["version"], { home });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.doesNotMatch(res.stdout, /Installed commands are stale/);
+  });
+
+  it("stays silent about drift when ~/.forge/version is missing (degrades to unknown, no throw)", () => {
+    // No ~/.forge directory created at all — persisted state is absent.
+    const home = mkdtempSync(join(os.tmpdir(), "fd-ver-drift-missing-"));
+    const res = runCli(["version"], { home });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.doesNotMatch(res.stdout, /Installed commands are stale/);
+  });
+});
+
+describe("getInstalledCommandsDriftStatus() — package-vs-installed-commands helper (forge#2719)", () => {
+  // pathToFileURL(...).href is required, not a raw path — dynamic import()
+  // rejects Windows backslash paths with ERR_UNSUPPORTED_ESM_URL_SCHEME
+  // (same pattern bin/hooks/session-start.mjs already uses for its own
+  // dynamic imports of this file).
+  const REGISTRY_MJS = pathToFileURL(join(dirname(fileURLToPath(import.meta.url)), "..", "registry.mjs")).href;
+
+  // registry.mjs computes its module-scope HOME constant once, at import
+  // time — so process.env.HOME must be set *before* the dynamic import, and
+  // each test needs its own fresh module instance (registry.mjs's internal
+  // HOME would otherwise stay pinned to whichever HOME was in effect on the
+  // very first import, since Node caches ESM modules by specifier). A
+  // cache-busting query string forces a fresh module instance per test.
+  let importSeq = 0;
+  async function withHome(home, fn) {
+    const prevHome = process.env.HOME;
+    const prevProfile = process.env.USERPROFILE;
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    try {
+      const { getInstalledCommandsDriftStatus } = await import(`${REGISTRY_MJS}?t=${Date.now()}-${importSeq++}`);
+      return fn(getInstalledCommandsDriftStatus);
+    } finally {
+      process.env.HOME = prevHome;
+      process.env.USERPROFILE = prevProfile;
+    }
+  }
+
+  it("reports isStale=true when the persisted version is older than the source version", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-drift-older-"));
+    const pkgDir = mkdtempSync(join(os.tmpdir(), "fd-drift-older-pkg-"));
+    mkdirSync(join(home, ".forge"), { recursive: true });
+    writeFileSync(join(home, ".forge", "version"), "1.0.0");
+    writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ version: "2.0.0" }));
+    const result = await withHome(home, (fn) => fn(pkgDir));
+    assert.deepEqual(result, {
+      persistedVersion: "1.0.0",
+      sourceVersion: "2.0.0",
+      isStale: true,
+      unknown: false,
+    });
+  });
+
+  it("reports isStale=false when the persisted version equals the source version", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-drift-equal-"));
+    const pkgDir = mkdtempSync(join(os.tmpdir(), "fd-drift-equal-pkg-"));
+    mkdirSync(join(home, ".forge"), { recursive: true });
+    writeFileSync(join(home, ".forge", "version"), "3.1.4");
+    writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ version: "3.1.4" }));
+    const result = await withHome(home, (fn) => fn(pkgDir));
+    assert.equal(result.isStale, false);
+    assert.equal(result.unknown, false);
+  });
+
+  it("reports isStale=false when the persisted version is newer than the source version", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-drift-newer-"));
+    const pkgDir = mkdtempSync(join(os.tmpdir(), "fd-drift-newer-pkg-"));
+    mkdirSync(join(home, ".forge"), { recursive: true });
+    writeFileSync(join(home, ".forge", "version"), "9.9.9");
+    writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ version: "1.0.0" }));
+    const result = await withHome(home, (fn) => fn(pkgDir));
+    assert.equal(result.isStale, false);
+    assert.equal(result.unknown, false);
+  });
+
+  it("degrades to unknown=true, never throws, when ~/.forge/version is missing", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-drift-unknown-home-"));
+    const pkgDir = mkdtempSync(join(os.tmpdir(), "fd-drift-unknown-pkg-"));
+    writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ version: "1.0.0" }));
+    const result = await withHome(home, (fn) => fn(pkgDir));
+    assert.equal(result.unknown, true);
+    assert.equal(result.isStale, false);
+  });
+
+  it("degrades to unknown=true, never throws, when package.json is missing/unreadable", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-drift-unknown-pkg-home-"));
+    const pkgDir = mkdtempSync(join(os.tmpdir(), "fd-drift-unknown-pkg-missing-"));
+    mkdirSync(join(home, ".forge"), { recursive: true });
+    writeFileSync(join(home, ".forge", "version"), "1.0.0");
+    // No package.json written in pkgDir at all.
+    const result = await withHome(home, (fn) => fn(pkgDir));
+    assert.equal(result.unknown, true);
   });
 });
 
