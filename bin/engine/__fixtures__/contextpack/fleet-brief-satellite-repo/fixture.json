@@ -1,0 +1,34 @@
+{
+  "description": "forge#2682: fleet-brief mining for a satellite (cross-repo) issue must thread the same explicit repo into every sibling gh call (-R args on issue view, repos/{repo}/... path on the comments api call) — mirrors the pre-existing satellite-repo scenario's repo-threading assertion, extended to cover the new per-sibling fetch calls fetchFleetBriefForSibling() makes.",
+  "issueNumber": 3105,
+  "repo": "RapierCraftStudios/forgedock-platform",
+  "phaseId": "build",
+  "assembleOpts": {},
+  "inFlightSiblings": [2683],
+  "issueView": {
+    "number": 3105,
+    "title": "feat: satellite change dispatched alongside a satellite sibling",
+    "body": "n/a",
+    "labels": [],
+    "state": "OPEN",
+    "milestone": null
+  },
+  "commentsRaw": "[{\"id\":1,\"author\":\"agent-bot\",\"body\":\"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `src/platform/handler.ts` (edit) — satellite-repo file\\n\",\"createdAt\":\"2026-07-19T00:00:00Z\"}]",
+  "timelineRaw": "[]",
+  "prListById": {},
+  "gistById": {},
+  "failureMemoryByKey": {},
+  "siblingsByNumber": {
+    "2683": {
+      "issueView": {
+        "number": 2683,
+        "title": "feat(platform): satellite sibling with a declared contract",
+        "body": "n/a",
+        "labels": [],
+        "state": "OPEN",
+        "milestone": null
+      },
+      "commentsRaw": "[{\"id\":1,\"author\":\"agent-bot\",\"body\":\"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n\\n### Deliverables\\n| File | Change | Why |\\n|------|--------|-----|\\n| `src/platform/shared.ts` | Add new shared export | Sibling scope overlaps this module |\\n\",\"createdAt\":\"2026-07-19T00:00:00Z\"}]"
+    }
+  }
+}

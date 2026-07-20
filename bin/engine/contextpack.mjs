@@ -716,10 +716,13 @@ function renderFailureMemoryExcerpt(items) {
  * issue view + comments) the same way `MAX_FAILURE_MEMORY_SEARCH_TERMS`
  * bounds `fetchFailureMemory()`'s: the caller-supplied `inFlightSiblings`
  * list has no natural cap of its own (an orchestrator dispatching a large
- * milestone could plausibly hand this 10+ sibling numbers), so one is set
- * explicitly here.
+ * milestone could plausibly hand this many more sibling numbers than are
+ * worth rendering into one context-pack slice), so one is set explicitly
+ * here. Value is the issue's own explicit acceptance criterion ("Size-capped:
+ * one line per sibling beyond N=10 siblings; in-band truncation marker" —
+ * forge#2682 Safety/scope guards).
  */
-const MAX_FLEET_BRIEF_SIBLINGS = 5;
+const MAX_FLEET_BRIEF_SIBLINGS = 10;
 
 /** Fixed, never-varied trailer appended to every non-empty fleet-brief
  * excerpt — a behavioral-contract disclaimer, not synthesized prose (see

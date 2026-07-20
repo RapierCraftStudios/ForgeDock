@@ -1,0 +1,204 @@
+{
+  "description": "forge#2682: 15 in-flight siblings supplied, exceeding MAX_FLEET_BRIEF_SIBLINGS=10 \u2014 fetchFleetBrief() must dedup/cap to exactly 10 fetched siblings and report omittedCount=5; the rendered excerpt must include the truncation-marker note naming the omitted count and the cap value.",
+  "issueNumber": 3106,
+  "repo": null,
+  "phaseId": "build",
+  "assembleOpts": {},
+  "inFlightSiblings": [
+    2700,
+    2701,
+    2702,
+    2703,
+    2704,
+    2705,
+    2706,
+    2707,
+    2708,
+    2709,
+    2710,
+    2711,
+    2712,
+    2713,
+    2714
+  ],
+  "issueView": {
+    "number": 3106,
+    "title": "feat: change dispatched alongside 15 in-flight siblings",
+    "body": "n/a",
+    "labels": [],
+    "state": "OPEN",
+    "milestone": null
+  },
+  "commentsRaw": "[{\"id\": 1, \"author\": \"agent-bot\", \"body\": \"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/engine/contextpack.mjs` (edit) \\u2014 add fleet-brief mining\\n\", \"createdAt\": \"2026-07-19T00:00:00Z\"}]",
+  "timelineRaw": "[]",
+  "prListById": {},
+  "gistById": {},
+  "failureMemoryByKey": {},
+  "siblingsByNumber": {
+    "2700": {
+      "issueView": {
+        "number": 2700,
+        "title": "feat: batch sibling #2700",
+        "body": "n/a",
+        "labels": [],
+        "state": "OPEN",
+        "milestone": null
+      },
+      "commentsRaw": "[{\"id\": 1, \"author\": \"agent-bot\", \"body\": \"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/batch/sibling-2700.mjs` (new) \\u2014 batch sibling file\\n\", \"createdAt\": \"2026-07-19T00:00:00Z\"}]"
+    },
+    "2701": {
+      "issueView": {
+        "number": 2701,
+        "title": "feat: batch sibling #2701",
+        "body": "n/a",
+        "labels": [],
+        "state": "OPEN",
+        "milestone": null
+      },
+      "commentsRaw": "[{\"id\": 1, \"author\": \"agent-bot\", \"body\": \"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/batch/sibling-2701.mjs` (new) \\u2014 batch sibling file\\n\", \"createdAt\": \"2026-07-19T00:00:00Z\"}]"
+    },
+    "2702": {
+      "issueView": {
+        "number": 2702,
+        "title": "feat: batch sibling #2702",
+        "body": "n/a",
+        "labels": [],
+        "state": "OPEN",
+        "milestone": null
+      },
+      "commentsRaw": "[{\"id\": 1, \"author\": \"agent-bot\", \"body\": \"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/batch/sibling-2702.mjs` (new) \\u2014 batch sibling file\\n\", \"createdAt\": \"2026-07-19T00:00:00Z\"}]"
+    },
+    "2703": {
+      "issueView": {
+        "number": 2703,
+        "title": "feat: batch sibling #2703",
+        "body": "n/a",
+        "labels": [],
+        "state": "OPEN",
+        "milestone": null
+      },
+      "commentsRaw": "[{\"id\": 1, \"author\": \"agent-bot\", \"body\": \"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/batch/sibling-2703.mjs` (new) \\u2014 batch sibling file\\n\", \"createdAt\": \"2026-07-19T00:00:00Z\"}]"
+    },
+    "2704": {
+      "issueView": {
+        "number": 2704,
+        "title": "feat: batch sibling #2704",
+        "body": "n/a",
+        "labels": [],
+        "state": "OPEN",
+        "milestone": null
+      },
+      "commentsRaw": "[{\"id\": 1, \"author\": \"agent-bot\", \"body\": \"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/batch/sibling-2704.mjs` (new) \\u2014 batch sibling file\\n\", \"createdAt\": \"2026-07-19T00:00:00Z\"}]"
+    },
+    "2705": {
+      "issueView": {
+        "number": 2705,
+        "title": "feat: batch sibling #2705",
+        "body": "n/a",
+        "labels": [],
+        "state": "OPEN",
+        "milestone": null
+      },
+      "commentsRaw": "[{\"id\": 1, \"author\": \"agent-bot\", \"body\": \"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/batch/sibling-2705.mjs` (new) \\u2014 batch sibling file\\n\", \"createdAt\": \"2026-07-19T00:00:00Z\"}]"
+    },
+    "2706": {
+      "issueView": {
+        "number": 2706,
+        "title": "feat: batch sibling #2706",
+        "body": "n/a",
+        "labels": [],
+        "state": "OPEN",
+        "milestone": null
+      },
+      "commentsRaw": "[{\"id\": 1, \"author\": \"agent-bot\", \"body\": \"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/batch/sibling-2706.mjs` (new) \\u2014 batch sibling file\\n\", \"createdAt\": \"2026-07-19T00:00:00Z\"}]"
+    },
+    "2707": {
+      "issueView": {
+        "number": 2707,
+        "title": "feat: batch sibling #2707",
+        "body": "n/a",
+        "labels": [],
+        "state": "OPEN",
+        "milestone": null
+      },
+      "commentsRaw": "[{\"id\": 1, \"author\": \"agent-bot\", \"body\": \"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/batch/sibling-2707.mjs` (new) \\u2014 batch sibling file\\n\", \"createdAt\": \"2026-07-19T00:00:00Z\"}]"
+    },
+    "2708": {
+      "issueView": {
+        "number": 2708,
+        "title": "feat: batch sibling #2708",
+        "body": "n/a",
+        "labels": [],
+        "state": "OPEN",
+        "milestone": null
+      },
+      "commentsRaw": "[{\"id\": 1, \"author\": \"agent-bot\", \"body\": \"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/batch/sibling-2708.mjs` (new) \\u2014 batch sibling file\\n\", \"createdAt\": \"2026-07-19T00:00:00Z\"}]"
+    },
+    "2709": {
+      "issueView": {
+        "number": 2709,
+        "title": "feat: batch sibling #2709",
+        "body": "n/a",
+        "labels": [],
+        "state": "OPEN",
+        "milestone": null
+      },
+      "commentsRaw": "[{\"id\": 1, \"author\": \"agent-bot\", \"body\": \"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/batch/sibling-2709.mjs` (new) \\u2014 batch sibling file\\n\", \"createdAt\": \"2026-07-19T00:00:00Z\"}]"
+    },
+    "2710": {
+      "issueView": {
+        "number": 2710,
+        "title": "feat: batch sibling #2710",
+        "body": "n/a",
+        "labels": [],
+        "state": "OPEN",
+        "milestone": null
+      },
+      "commentsRaw": "[{\"id\": 1, \"author\": \"agent-bot\", \"body\": \"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/batch/sibling-2710.mjs` (new) \\u2014 batch sibling file\\n\", \"createdAt\": \"2026-07-19T00:00:00Z\"}]"
+    },
+    "2711": {
+      "issueView": {
+        "number": 2711,
+        "title": "feat: batch sibling #2711",
+        "body": "n/a",
+        "labels": [],
+        "state": "OPEN",
+        "milestone": null
+      },
+      "commentsRaw": "[{\"id\": 1, \"author\": \"agent-bot\", \"body\": \"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/batch/sibling-2711.mjs` (new) \\u2014 batch sibling file\\n\", \"createdAt\": \"2026-07-19T00:00:00Z\"}]"
+    },
+    "2712": {
+      "issueView": {
+        "number": 2712,
+        "title": "feat: batch sibling #2712",
+        "body": "n/a",
+        "labels": [],
+        "state": "OPEN",
+        "milestone": null
+      },
+      "commentsRaw": "[{\"id\": 1, \"author\": \"agent-bot\", \"body\": \"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/batch/sibling-2712.mjs` (new) \\u2014 batch sibling file\\n\", \"createdAt\": \"2026-07-19T00:00:00Z\"}]"
+    },
+    "2713": {
+      "issueView": {
+        "number": 2713,
+        "title": "feat: batch sibling #2713",
+        "body": "n/a",
+        "labels": [],
+        "state": "OPEN",
+        "milestone": null
+      },
+      "commentsRaw": "[{\"id\": 1, \"author\": \"agent-bot\", \"body\": \"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/batch/sibling-2713.mjs` (new) \\u2014 batch sibling file\\n\", \"createdAt\": \"2026-07-19T00:00:00Z\"}]"
+    },
+    "2714": {
+      "issueView": {
+        "number": 2714,
+        "title": "feat: batch sibling #2714",
+        "body": "n/a",
+        "labels": [],
+        "state": "OPEN",
+        "milestone": null
+      },
+      "commentsRaw": "[{\"id\": 1, \"author\": \"agent-bot\", \"body\": \"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/batch/sibling-2714.mjs` (new) \\u2014 batch sibling file\\n\", \"createdAt\": \"2026-07-19T00:00:00Z\"}]"
+    }
+  }
+}
