@@ -1,0 +1,45 @@
+{
+  "description": "forge#2682: two in-flight siblings supplied via inFlightSiblings — #2683 has a well-formed CONTRACT annotation (declared deliverables surfaced), #2684 has no CONTRACT yet (contract-unknown). A self-reference (3104, this issue's own number) and a duplicate (2683 twice) are included in inFlightSiblings to exercise the self-drop and dedup guards — the pack must still show exactly 2 siblings, in ascending issue-number order.",
+  "issueNumber": 3104,
+  "repo": null,
+  "phaseId": "build",
+  "assembleOpts": {},
+  "inFlightSiblings": [2683, 2684, 3104, 2683],
+  "issueView": {
+    "number": 3104,
+    "title": "feat: change dispatched alongside two in-flight siblings",
+    "body": "n/a",
+    "labels": [],
+    "state": "OPEN",
+    "milestone": null
+  },
+  "commentsRaw": "[{\"id\":1,\"author\":\"agent-bot\",\"body\":\"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/engine/contextpack.mjs` (edit) — add fleet-brief mining\\n\",\"createdAt\":\"2026-07-19T00:00:00Z\"}]",
+  "timelineRaw": "[]",
+  "prListById": {},
+  "gistById": {},
+  "failureMemoryByKey": {},
+  "siblingsByNumber": {
+    "2683": {
+      "issueView": {
+        "number": 2683,
+        "title": "feat(engine): sibling with a declared contract",
+        "body": "n/a",
+        "labels": ["priority:P2"],
+        "state": "OPEN",
+        "milestone": null
+      },
+      "commentsRaw": "[{\"id\":1,\"author\":\"agent-bot\",\"body\":\"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n\\n### Deliverables\\n| File | Change | Why |\\n|------|--------|-----|\\n| `bin/engine/contextpack.mjs` | Add new mining source | Sibling scope overlaps this module |\\n| `bin/runner.mjs` | Thread new opt through runCommand() | Wiring |\\n\",\"createdAt\":\"2026-07-19T00:00:00Z\"}]"
+    },
+    "2684": {
+      "issueView": {
+        "number": 2684,
+        "title": "feat(engine): sibling still under investigation, no contract yet",
+        "body": "n/a",
+        "labels": ["priority:P3"],
+        "state": "OPEN",
+        "milestone": null
+      },
+      "commentsRaw": "[{\"id\":1,\"author\":\"agent-bot\",\"body\":\"<!-- FORGE:INVESTIGATOR -->\\n## Investigation Report\\n\\n**Verdict**: CONFIRMED\\n\\n<!-- INVESTIGATION:COMPLETE -->\",\"createdAt\":\"2026-07-19T00:00:00Z\"}]"
+    }
+  }
+}

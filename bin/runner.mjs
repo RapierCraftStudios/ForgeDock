@@ -324,6 +324,60 @@ export function derivePhaseIdFromCommandName(commandName) {
 }
 
 /**
+ * forge#2682: resolve the in-flight sibling issue numbers to thread into
+ * `mineContext()`'s `opts.inFlightSiblings` (fleet-brief mining). Two
+ * sources, explicit-caller-wins:
+ *
+ *   1. `explicitInFlightSiblings` — an array passed directly by a JS caller
+ *      (e.g. a future `bin/engine.mjs` orchestrator that already has its own
+ *      in-memory dispatch batch and can hand the array straight through
+ *      without an env-var round trip).
+ *   2. `FORGEDOCK_IN_FLIGHT_SIBLINGS` env var — comma-separated issue
+ *      numbers, e.g. `"2683,2684,2701"`. This is the seam that lets today's
+ *      shell-based `/orchestrate` dispatch (which spawns each `/work-on`
+ *      sub-agent as a separate process, not a JS function call) thread its
+ *      sibling batch through without any process-boundary-crossing API.
+ *
+ * Fail-soft: a missing/empty/malformed value at either source resolves to
+ * `[]` — mirrors `resolveContextPacksEnabled()`'s absent-safe contract.
+ * Non-numeric tokens in the env var are silently skipped rather than
+ * aborting the whole parse (one malformed entry must not blank out every
+ * other, legitimately-numeric sibling).
+ *
+ * @param {Array<number|string>} [explicitInFlightSiblings]
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {Array<number>}
+ */
+export function resolveInFlightSiblings(explicitInFlightSiblings, env = process.env) {
+  // A valid issue number is a positive integer. `Number('')` and
+  // `Number('   ')` both coerce to `0`, which passes a bare
+  // `Number.isFinite()` check — an empty/whitespace-only token (a trailing
+  // comma, a double comma, or a stray space in `FORGEDOCK_IN_FLIGHT_SIBLINGS`)
+  // would otherwise silently resolve to a phantom sibling `#0` and trigger a
+  // wasted (and misleading — "issue #0 not found") `gh` fetch. Negative and
+  // non-integer values are equally never legitimate GitHub issue numbers, so
+  // the same guard rejects them too, whether they came from the explicit
+  // array or the env-var string form (review finding on PR #2744).
+  const isValidIssueNumber = (n) => Number.isInteger(n) && n > 0;
+
+  if (Array.isArray(explicitInFlightSiblings) && explicitInFlightSiblings.length > 0) {
+    return explicitInFlightSiblings
+      .map((n) => (typeof n === "number" ? n : Number(n)))
+      .filter(isValidIssueNumber);
+  }
+
+  const raw = env && env.FORGEDOCK_IN_FLIGHT_SIBLINGS;
+  if (!raw || typeof raw !== "string") return [];
+
+  return raw
+    .split(",")
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0)
+    .map((token) => Number(token))
+    .filter(isValidIssueNumber);
+}
+
+/**
  * forge#2702: default `io.gh` implementation for `mineContext()` when
  * `runCommand()` builds its own context pack (i.e. no `opts.contextPack`
  * was supplied by the caller and `context_packs.enabled` is true). Mirrors
@@ -2046,6 +2100,13 @@ export function renderSummaryCard(ctx) {
  *   when present; omitted entirely has zero effect on either prompt (fail-open
  *   — no caller is required to supply this, and every existing caller that
  *   doesn't gets exactly today's behavior).
+ * @param {Array<number|string>} [opts.inFlightSiblings] - forge#2682:
+ *   optional list of other issue numbers currently in-flight in the same
+ *   dispatch batch, threaded into the forge#2702 context-pack path's
+ *   `mineContext({..., inFlightSiblings})` call (fleet-brief mining). See
+ *   `resolveInFlightSiblings()` for the explicit-arg-vs-env-var precedence.
+ *   Has no effect when `context_packs.enabled` is off or `opts.contextPack`
+ *   was already supplied by the caller.
  * @returns {Promise<{status: string, command: string, [k: string]: any}>}
  */
 export async function runCommand(opts = {}) {
@@ -2063,6 +2124,7 @@ export async function runCommand(opts = {}) {
     backend = process.env.FORGEDOCK_BACKEND || "auto",
     logger = console,
     contextPack,
+    inFlightSiblings,
   } = opts;
 
   // forge#2702: opt-in, schema-validated context-pack assembly. Only
@@ -2087,6 +2149,7 @@ export async function runCommand(opts = {}) {
       try {
         const packResult = await buildValidatedPackForPhaseFn(phaseId, issueNumber, {
           io: defaultGhIo(),
+          inFlightSiblings: resolveInFlightSiblings(inFlightSiblings),
         });
         if (packResult && packResult.text) {
           resolvedContextPack = packResult.text;

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "issue": 3104,
+  "slices": [
+    {
+      "phase": "build",
+      "content": "## Known Affected Files\n- `bin/engine/contextpack.mjs`\n\n### CONTRACT annotation (comment #0)\n\n## Builder Contract\n### Affected Files\n1. `bin/engine/contextpack.mjs` (edit) — add fleet-brief mining\n\n## In-Flight Sibling Contracts (Fleet Brief)\n- #2683: feat(engine): sibling with a declared contract\n  - `bin/engine/contextpack.mjs` — Add new mining source\n  - `bin/runner.mjs` — Thread new opt through runCommand()\n- #2684: feat(engine): sibling still under investigation, no contract yet — contract unknown\n\n> Snapshot of declared scope from in-flight sibling issues at pack-build time — not a live guarantee. A sibling's actual deliverables may change before it merges; do not treat this as a merged/locked contract."
+    }
+  ]
+}

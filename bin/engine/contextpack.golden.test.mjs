@@ -50,6 +50,15 @@
  *                               search-API-noise candidate (zero hits) is
  *                               dropped.
  *
+ * Additional scenarios (forge#2682 — in-flight sibling fleet-brief mining):
+ *   9. fleet-brief-empty      — no `inFlightSiblings` supplied; pack is
+ *                               unaffected, no "Fleet Brief" section.
+ *   10. fleet-brief-present   — two in-flight siblings: one with a
+ *                               well-formed CONTRACT (declared deliverables
+ *                               surfaced), one with no CONTRACT yet
+ *                               (contract-unknown); rendered in ascending
+ *                               issue-number order.
+ *
  * @license MIT
  */
 
@@ -69,19 +78,42 @@ const FIXTURES_DIR = path.join(__dirname, '__fixtures__', 'contextpack');
  * accept a raw (possibly multi-page) `commentsRaw` string instead of a
  * pre-parsed array — required for the pagination scenario, since real
  * `gh api --paginate --jq` output is one JSON array literal PER PAGE
- * concatenated back-to-back, not one combined array — and (b) capture every
+ * concatenated back-to-back, not one combined array — (b) capture every
  * call's argv for the satellite-repo scenario's `-R`/`repos/{repo}/...`
- * assertions. */
+ * assertions, and (c) route `issue view`/`.../comments` calls for a NON-self
+ * issue number through a `siblingsByNumber` fixture key (forge#2682's
+ * fleet-brief mining fetches other issues' core+comments, not just the
+ * primary issue's) before falling back to the existing single-issue
+ * `issueView`/`commentsRaw` behavior — additive, never replacing, the
+ * pre-existing dispatch for every other scenario. */
 function ioForFixture(fixture) {
   const calls = [];
-  const { issueView, commentsRaw = '[]', timelineRaw = '[]', prListById = {}, gistById = {}, failureMemoryByKey = {} } = fixture;
+  const {
+    issueNumber: primaryIssueNumber,
+    issueView,
+    commentsRaw = '[]',
+    timelineRaw = '[]',
+    prListById = {},
+    gistById = {},
+    failureMemoryByKey = {},
+    siblingsByNumber = {},
+  } = fixture;
   return {
     calls,
     gh: async (args) => {
       calls.push(args.slice());
       const cmd = args.join(' ');
-      if (cmd.startsWith('issue view')) return JSON.stringify(issueView);
-      if (cmd.includes('/comments')) return commentsRaw;
+      if (cmd.startsWith('issue view')) {
+        const n = args[2];
+        if (siblingsByNumber[n] !== undefined) return JSON.stringify(siblingsByNumber[n].issueView);
+        return JSON.stringify(issueView);
+      }
+      if (cmd.includes('/comments')) {
+        const m = /\/issues\/(\d+)\/comments/.exec(cmd);
+        const n = m ? m[1] : String(primaryIssueNumber);
+        if (siblingsByNumber[n] !== undefined) return siblingsByNumber[n].commentsRaw ?? '[]';
+        return commentsRaw;
+      }
       if (cmd.includes('/timeline')) return timelineRaw;
       if (cmd.startsWith('issue list')) {
         const searchIdx = args.indexOf('--search');
@@ -127,7 +159,11 @@ function loadFixture(name) {
 async function runAndAssertGolden(name) {
   const { fixture, expectedPack } = loadFixture(name);
   const io = ioForFixture(fixture);
-  const minedData = await mineContext(fixture.issueNumber, { io, repo: fixture.repo || undefined });
+  const minedData = await mineContext(fixture.issueNumber, {
+    io,
+    repo: fixture.repo || undefined,
+    inFlightSiblings: fixture.inFlightSiblings || [],
+  });
   const pack = assemblePack(fixture.phaseId, minedData, fixture.assembleOpts || {});
 
   assert.deepEqual(pack, expectedPack, `assembled pack for fixture "${name}" drifted from the committed golden file`);
@@ -273,13 +309,46 @@ describe('contextpack golden fixtures — full mine->assemble->validate pipeline
     assert.ok(idx2716 < idx2650, '#2716 (review-finding, more recent) must be ranked before #2650 (workflow:invalid, older)');
     assert.match(content, /#2650 \(closed as invalid\)/, 'workflow:invalid items are labeled distinctly from review findings');
   });
+
+  it('scenario 9 (forge#2682): no inFlightSiblings supplied — pack unaffected, no "Fleet Brief" section', async () => {
+    const { pack } = await runAndAssertGolden('fleet-brief-empty');
+
+    assert.notEqual(pack, null);
+    assert.doesNotMatch(pack.slices[0].content, /Fleet Brief/, 'omitting inFlightSiblings must not add a fleet-brief section');
+  });
+
+  it('scenario 10 (forge#2682): two in-flight siblings — one well-formed CONTRACT, one contract-unknown, ascending issue-number order', async () => {
+    const { minedData, pack } = await runAndAssertGolden('fleet-brief-present');
+
+    assert.equal(minedData.fleetBrief.items.length, 2);
+    assert.equal(minedData.fleetBrief.omittedCount, 0);
+
+    const known = minedData.fleetBrief.items.find((i) => i.number === 2683);
+    assert.ok(known, 'sibling #2683 (well-formed CONTRACT) must be present');
+    assert.equal(known.contractUnknown, false);
+    assert.ok(known.deliverables.some((d) => d.file === 'bin/engine/contextpack.mjs'));
+
+    const unknown = minedData.fleetBrief.items.find((i) => i.number === 2684);
+    assert.ok(unknown, 'sibling #2684 (no CONTRACT yet) must be present');
+    assert.equal(unknown.contractUnknown, true);
+
+    assert.notEqual(pack, null);
+    const content = pack.slices[0].content;
+    assert.match(content, /In-Flight Sibling Contracts \(Fleet Brief\)/);
+    const idx2683 = content.indexOf('#2683');
+    const idx2684 = content.indexOf('#2684');
+    assert.ok(idx2683 >= 0 && idx2684 >= 0, 'both siblings must be rendered');
+    assert.ok(idx2683 < idx2684, 'siblings must render in ascending issue-number order');
+    assert.match(content, /contract unknown/, 'the contract-unknown sibling must be labeled as such, not silently omitted');
+    assert.match(content, /not a live guarantee/, 'the fixed behavioral-contract trailer must always be present');
+  });
 });
 
 describe('contextpack golden fixtures — fixture/expected-pack pairing sanity', () => {
   const scenarioNames = fs.readdirSync(FIXTURES_DIR).filter((name) => fs.statSync(path.join(FIXTURES_DIR, name)).isDirectory());
 
   it('every fixture subdirectory has both fixture.json and expected-pack.json', () => {
-    assert.ok(scenarioNames.length >= 8, `expected at least 8 fixture scenarios, found ${scenarioNames.length}: ${scenarioNames.join(', ')}`);
+    assert.ok(scenarioNames.length >= 10, `expected at least 10 fixture scenarios, found ${scenarioNames.length}: ${scenarioNames.join(', ')}`);
     for (const name of scenarioNames) {
       const dir = path.join(FIXTURES_DIR, name);
       assert.ok(fs.existsSync(path.join(dir, 'fixture.json')), `${name}/fixture.json is missing`);
@@ -297,6 +366,8 @@ describe('contextpack golden fixtures — fixture/expected-pack pairing sanity',
       'paginated-comments',
       'failure-memory-empty',
       'failure-memory-present',
+      'fleet-brief-empty',
+      'fleet-brief-present',
     ];
     for (const name of required) {
       assert.ok(scenarioNames.includes(name), `required scenario "${name}" is missing from ${FIXTURES_DIR}`);
