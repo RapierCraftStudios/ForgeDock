@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "issue": 4200,
+  "slices": [
+    {
+      "phase": "build",
+      "content": "## In-Flight Sibling Contracts (Fleet Brief)\n- #4201: feat(engine): sibling whose contract Change column contains an escaped pipe\n  - `bin/engine/contextpack.mjs` — Add support for a|b delimiter in parsed output\n\n> Snapshot of declared scope from in-flight sibling issues at pack-build time — not a live guarantee. A sibling's actual deliverables may change before it merges; do not treat this as a merged/locked contract."
+    }
+  ]
+}

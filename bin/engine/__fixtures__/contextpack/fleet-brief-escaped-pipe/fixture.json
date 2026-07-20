@@ -1,0 +1,34 @@
+{
+  "description": "forge#2745: one in-flight sibling (#4201) whose CONTRACT Deliverables table has a Change column containing a GFM-escaped pipe (`\\|`). Proves extractDeliverablesFromBody() preserves the full cell text across the escaped pipe instead of truncating at it.",
+  "issueNumber": 4200,
+  "repo": null,
+  "phaseId": "build",
+  "assembleOpts": {},
+  "inFlightSiblings": [4201],
+  "issueView": {
+    "number": 4200,
+    "title": "feat: change dispatched alongside one in-flight sibling with an escaped pipe in its contract",
+    "body": "n/a",
+    "labels": [],
+    "state": "OPEN",
+    "milestone": null
+  },
+  "commentsRaw": "[]",
+  "timelineRaw": "[]",
+  "prListById": {},
+  "gistById": {},
+  "failureMemoryByKey": {},
+  "siblingsByNumber": {
+    "4201": {
+      "issueView": {
+        "number": 4201,
+        "title": "feat(engine): sibling whose contract Change column contains an escaped pipe",
+        "body": "n/a",
+        "labels": ["priority:P2"],
+        "state": "OPEN",
+        "milestone": null
+      },
+      "commentsRaw": "[{\"id\":1,\"author\":\"agent-bot\",\"body\":\"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n\\n### Deliverables\\n| File | Change | Why |\\n|------|--------|-----|\\n| `bin/engine/contextpack.mjs` | Add support for a\\\\|b delimiter in parsed output | Sibling scope overlaps this module |\\n\",\"createdAt\":\"2026-07-19T00:00:00Z\"}]"
+    }
+  }
+}
