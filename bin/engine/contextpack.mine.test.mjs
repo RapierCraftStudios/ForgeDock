@@ -481,6 +481,84 @@ describe('mineContext — fetch-failure surfacing (review-finding SPEC-1/SPEC-2/
     assert.ok(result.meta.reviewFindingsFetchErrors[42]);
     assert.match(result.meta.reviewFindingsFetchErrors[42], /issue list failed/);
   });
+
+  // forge#2746 (review finding on PR #2744): fetchFleetBriefForSibling() has
+  // two distinct fetch-failure branches — a sibling's `issue view` call
+  // failing vs. its `issue view` succeeding but the `.../comments` call
+  // failing. Neither was independently exercised before this test — the
+  // golden fixtures under `fleet-brief-*` only cover the well-formed-CONTRACT
+  // and no-CONTRACT-posted happy paths. Both branches already behave
+  // correctly (contractUnknown:true, fail-open per sibling); these tests
+  // lock that contract in and would catch a regression toward the same
+  // "silently reported as empty" bug class fixed for comments/timeline/PR
+  // fetches above.
+
+  it('surfaces a sibling issue-view fetch failure as contractUnknown:true with no title/labels, without dropping other siblings', async () => {
+    const io = {
+      gh: async (args) => {
+        const cmd = args.join(' ');
+        if (cmd.startsWith('issue view')) {
+          const n = args[2];
+          if (n === '2684') throw new Error('gh: issue #2684 not found');
+          return ISSUE_JSON; // sibling 2683 resolves fine
+        }
+        if (cmd.includes('/comments')) return '[]';
+        if (cmd.includes('/timeline')) return '[]';
+        return '[]';
+      },
+    };
+    const result = await mineContext(2701, { io, inFlightSiblings: [2683, 2684] });
+
+    assert.equal(result.fleetBrief.items.length, 2, 'a failing sibling must still produce one item, not be dropped from the batch');
+
+    const failed = result.fleetBrief.items.find((item) => item.number === 2684);
+    assert.ok(failed, 'sibling #2684 must be present in fleetBrief.items despite the fetch failure');
+    assert.equal(failed.contractUnknown, true);
+    assert.equal(failed.title, undefined, 'issue-view failure means no issue metadata was ever fetched');
+    assert.equal(failed.labels, undefined);
+    assert.ok(failed.error);
+    assert.match(failed.error, /not found/);
+
+    const ok = result.fleetBrief.items.find((item) => item.number === 2683);
+    assert.ok(ok, 'a sibling fetch failure must not prevent other siblings in the same batch from resolving');
+
+    assert.ok(result.meta.fleetBriefFetchErrors);
+    assert.ok(result.meta.fleetBriefFetchErrors.some((e) => e.includes('#2684')));
+  });
+
+  it('surfaces a sibling comments-fetch failure as contractUnknown:true while still keeping the fetched title/labels', async () => {
+    const io = {
+      gh: async (args) => {
+        const cmd = args.join(' ');
+        if (cmd.startsWith('issue view')) return ISSUE_JSON; // issue-view succeeds for every sibling
+        if (cmd.includes('/comments')) {
+          const m = /\/issues\/(\d+)\/comments/.exec(cmd);
+          const n = m ? m[1] : null;
+          if (n === '2684') throw new Error('gh: rate limit exceeded');
+          return '[]';
+        }
+        if (cmd.includes('/timeline')) return '[]';
+        return '[]';
+      },
+    };
+    const result = await mineContext(2701, { io, inFlightSiblings: [2684] });
+
+    assert.equal(result.fleetBrief.items.length, 1);
+    const failed = result.fleetBrief.items[0];
+    assert.equal(failed.number, 2684);
+    assert.equal(failed.contractUnknown, true);
+    // The key behavioral distinction from the issue-view-failure branch
+    // above: issue metadata was already fetched successfully before the
+    // comments call failed, so title/labels must survive even though the
+    // contract itself could not be determined.
+    assert.equal(failed.title, JSON.parse(ISSUE_JSON).title);
+    assert.deepEqual(failed.labels, JSON.parse(ISSUE_JSON).labels.map((l) => l.name));
+    assert.ok(failed.error);
+    assert.match(failed.error, /rate limit/);
+
+    assert.ok(result.meta.fleetBriefFetchErrors);
+    assert.ok(result.meta.fleetBriefFetchErrors.some((e) => e.includes('#2684')));
+  });
 });
 
 describe('mineContext — failure-memory mining (forge#2681)', () => {
