@@ -1066,6 +1066,15 @@ branches:
 # being unset/false all fall back to exactly today's behavior — no crash, no
 # empty prompt. Every existing repo's forge.yaml that omits this section gets
 # zero behavior change.
+#
+# forge#2682: when enabled, the investigate/build slices additionally carry
+# an "In-Flight Sibling Contracts (Fleet Brief)" section summarizing the
+# declared CONTRACT deliverables of other issues currently in-flight in the
+# same dispatch batch (e.g. an /orchestrate run's sibling issues). Populated
+# from bin/runner.mjs's opts.inFlightSiblings — an explicit array, or the
+# FORGEDOCK_IN_FLIGHT_SIBLINGS env var (comma-separated issue numbers) for
+# today's shell-based /orchestrate dispatch. Omitted/empty by default —
+# zero behavior change unless a caller actually supplies sibling numbers.
 # =============================================================================
 
 # context_packs:

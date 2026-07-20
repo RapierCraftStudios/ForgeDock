@@ -1,0 +1,22 @@
+{
+  "description": "forge#2682: no inFlightSiblings supplied — pack is built exactly as before the fleet-brief feature, no 'In-Flight Sibling Contracts (Fleet Brief)' section appears.",
+  "issueNumber": 3103,
+  "repo": null,
+  "phaseId": "build",
+  "assembleOpts": {},
+  "inFlightSiblings": [],
+  "issueView": {
+    "number": 3103,
+    "title": "feat: standalone change with no in-flight siblings",
+    "body": "n/a",
+    "labels": [],
+    "state": "OPEN",
+    "milestone": null
+  },
+  "commentsRaw": "[{\"id\":1,\"author\":\"agent-bot\",\"body\":\"<!-- FORGE:CONTRACT -->\\n## Builder Contract\\n### Affected Files\\n1. `bin/engine/standalone-module.mjs` (new) — no siblings dispatched alongside this issue\\n\",\"createdAt\":\"2026-07-19T00:00:00Z\"}]",
+  "timelineRaw": "[]",
+  "prListById": {},
+  "gistById": {},
+  "failureMemoryByKey": {},
+  "siblingsByNumber": {}
+}

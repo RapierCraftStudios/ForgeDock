@@ -15,9 +15,9 @@
  * output is the sibling assembler's job (forge#2702). This module exposes
  * enough structure (parsed affected-file lists, typed FORGE annotations)
  * that the assembler, plus forge#2681 (prior-remediation/failure-history
- * mining) and forge#2682 (sibling in-flight fleet-brief mining) — both
- * explicitly out of scope here — can build on top without re-deriving raw
- * GitHub state themselves.
+ * mining, now implemented below) and forge#2682 (sibling in-flight
+ * fleet-brief mining, now implemented below) can build on top without
+ * re-deriving raw GitHub state themselves.
  *
  * I/O-injection convention (mirrors `bin/engine/phases.mjs`'s
  * `issueMarkers()`/`issueSnapshot()`): every `gh` call goes through an
@@ -314,6 +314,63 @@ function extractAffectedFilesFromBody(body) {
     if (m) files.push(m[1]);
   }
   return files;
+}
+
+// Matches a "## Deliverables" or "### Deliverables" markdown heading — the
+// table every FORGE:CONTRACT producer (commands/work-on.md Phase 3C /
+// commands/work-on/build.md Phase B2) emits: `| File | Change | Why |`.
+const DELIVERABLES_HEADING_RE = /^#{2,3}\s*Deliverables\s*$/m;
+
+// One markdown table row: `| col1 | col2 | ... |`. Captures the first two
+// columns (file, change) — the "why" column is not needed for the fleet
+// brief's "declared contract surface" summary.
+const TABLE_ROW_RE = /^\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|/;
+
+// A markdown table divider row, e.g. `|------|--------|-----|` — every
+// character is one of `|`, `-`, `:`, or whitespace.
+const TABLE_DIVIDER_RE = /^[\s|:-]+$/;
+
+/**
+ * Slice the "## Deliverables" section out of a CONTRACT annotation body (the
+ * heading through the next heading or end-of-body) and extract each table
+ * row's file + change columns. Prose-section (markdown table) parsing, NOT
+ * FORGE marker parsing — same out-of-`packages/protocol`-scope precedent as
+ * `extractAffectedFilesFromBody()` above (see that function's docblock).
+ *
+ * Deliberately conservative: any row that doesn't match the strict
+ * `| col | col |` shape, the header row (`File` in the first column), or the
+ * divider row is skipped rather than guessed at — a partial/malformed table
+ * degrades to a shorter (possibly empty) deliverables list, never a crash or
+ * a garbled entry (forge#2682's fail-open guard extends to parsing, not just
+ * network fetches).
+ *
+ * @param {string} body
+ * @returns {Array<{file: string, change: string}>}
+ */
+function extractDeliverablesFromBody(body) {
+  if (typeof body !== 'string' || !body) return [];
+  const headingMatch = DELIVERABLES_HEADING_RE.exec(body);
+  if (!headingMatch) return [];
+  const sectionStart = headingMatch.index + headingMatch[0].length;
+  const rest = body.slice(sectionStart);
+  ANY_HEADING_RE.lastIndex = 0;
+  const nextHeadingMatch = ANY_HEADING_RE.exec(rest);
+  const sectionText = nextHeadingMatch ? rest.slice(0, nextHeadingMatch.index) : rest;
+
+  const rows = [];
+  for (const line of sectionText.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('|')) continue;
+    const withoutPipes = trimmed.replace(/\|/g, '');
+    if (TABLE_DIVIDER_RE.test(withoutPipes) && withoutPipes.includes('-')) continue; // divider row
+    const m = TABLE_ROW_RE.exec(trimmed);
+    if (!m) continue;
+    const file = m[1].replace(/`/g, '').trim();
+    const change = m[2].trim();
+    if (!file || /^file$/i.test(file)) continue; // header row
+    rows.push({ file, change });
+  }
+  return rows;
 }
 
 /**
@@ -654,24 +711,215 @@ function renderFailureMemoryExcerpt(items) {
 }
 
 /**
+ * forge#2682: maximum number of in-flight sibling issues `fetchFleetBrief()`
+ * will fetch a contract for. Bounds the fan-out (2 `gh` calls per sibling —
+ * issue view + comments) the same way `MAX_FAILURE_MEMORY_SEARCH_TERMS`
+ * bounds `fetchFailureMemory()`'s: the caller-supplied `inFlightSiblings`
+ * list has no natural cap of its own (an orchestrator dispatching a large
+ * milestone could plausibly hand this 10+ sibling numbers), so one is set
+ * explicitly here.
+ */
+const MAX_FLEET_BRIEF_SIBLINGS = 5;
+
+/** Fixed, never-varied trailer appended to every non-empty fleet-brief
+ * excerpt — a behavioral-contract disclaimer, not synthesized prose (see
+ * `renderFleetBriefExcerpt()`'s docblock for why this must stay a literal
+ * constant rather than being composed per-render). */
+const FLEET_BRIEF_TRAILER =
+  'Snapshot of declared scope from in-flight sibling issues at pack-build time — not a live guarantee. A sibling\'s actual deliverables may change before it merges; do not treat this as a merged/locked contract.';
+
+/**
+ * Fetch one in-flight sibling's declared contract surface: issue core
+ * (title/labels) + comments -> latest CONTRACT annotation's affected-files
+ * and deliverables. Fail-open per sibling (mirrors
+ * `fetchFailureMemoryForTerm()`'s per-call contract): a sibling that cannot
+ * be fetched, or that has no CONTRACT annotation yet (still investigating,
+ * or a TRIVIAL task that skipped the Builder Contract phase entirely — see
+ * `commands/work-on.md` Phase 3B), degrades to `{number, contractUnknown:
+ * true, ...}` rather than throwing or being silently omitted — the caller
+ * (`fetchFleetBrief()`) always gets exactly one result per requested
+ * sibling number.
+ *
+ * @param {number} siblingNumber
+ * @param {{gh: Function}} io
+ * @param {string} [repo]
+ * @returns {Promise<Object>}
+ */
+async function fetchFleetBriefForSibling(siblingNumber, io, repo) {
+  const issue = await fetchIssueCore(siblingNumber, io, repo);
+  if (!issue.ok) {
+    return { number: siblingNumber, contractUnknown: true, error: issue.error || 'issue fetch failed' };
+  }
+
+  const { comments, fetchError: commentsFetchError } = await fetchAllComments(siblingNumber, io, repo);
+  if (commentsFetchError) {
+    return {
+      number: siblingNumber,
+      title: issue.title,
+      labels: issue.labels,
+      contractUnknown: true,
+      error: commentsFetchError,
+    };
+  }
+
+  const annotations = parseAnnotations(comments);
+  const contractAnnotations = annotations.filter((a) => a.type === 'CONTRACT');
+  // Last-in-comment-order CONTRACT annotation is the current one — mirrors
+  // `extractAffectedFiles()`'s "later annotations add to, do not replace"
+  // stance being inapplicable here: a fleet brief wants THE current declared
+  // scope, not a merged history of every re-contracted revision.
+  const latestContract = contractAnnotations.length > 0 ? contractAnnotations[contractAnnotations.length - 1] : null;
+
+  if (!latestContract) {
+    return { number: siblingNumber, title: issue.title, labels: issue.labels, contractUnknown: true };
+  }
+
+  return {
+    number: siblingNumber,
+    title: issue.title,
+    labels: issue.labels,
+    contractUnknown: false,
+    affectedFiles: extractAffectedFilesFromBody(latestContract.body || ''),
+    deliverables: extractDeliverablesFromBody(latestContract.body || ''),
+  };
+}
+
+/**
+ * Batch-fetch declared contract surfaces for every caller-supplied in-flight
+ * sibling issue number. Dedupes, drops a self-reference (a caller
+ * accidentally including its own issue number must not turn into a
+ * "sibling" of itself), and caps to `MAX_FLEET_BRIEF_SIBLINGS` — tracking
+ * how many were dropped by the cap so the render layer can surface an
+ * honest "N more omitted" note rather than silently truncating.
+ *
+ * @param {Array<number|string>} inFlightSiblings - caller-supplied list,
+ *   e.g. resolved from `bin/runner.mjs`'s `resolveInFlightSiblings()`.
+ * @param {number|string} selfIssueNumber - the issue `mineContext()` is
+ *   building a pack for; excluded from the sibling list if present.
+ * @param {{gh: Function}} io
+ * @param {string} [repo]
+ * @returns {Promise<{items: Object[], omittedCount: number}>}
+ */
+async function fetchFleetBrief(inFlightSiblings, selfIssueNumber, io, repo) {
+  if (!Array.isArray(inFlightSiblings) || inFlightSiblings.length === 0) {
+    return { items: [], omittedCount: 0 };
+  }
+
+  const selfNum = typeof selfIssueNumber === 'number' ? selfIssueNumber : Number(selfIssueNumber);
+  const seen = new Set();
+  const deduped = [];
+  for (const raw of inFlightSiblings) {
+    const n = typeof raw === 'number' ? raw : Number(raw);
+    if (!Number.isFinite(n) || n === selfNum || seen.has(n)) continue;
+    seen.add(n);
+    deduped.push(n);
+  }
+
+  const omittedCount = Math.max(0, deduped.length - MAX_FLEET_BRIEF_SIBLINGS);
+  const capped = deduped.slice(0, MAX_FLEET_BRIEF_SIBLINGS);
+
+  const items = [];
+  for (const siblingNumber of capped) {
+    try {
+      items.push(await fetchFleetBriefForSibling(siblingNumber, io, repo));
+    } catch (err) {
+      // Defense in depth — fetchFleetBriefForSibling() is itself fail-open,
+      // but a bug in it must never abort the batch for every other sibling
+      // (mirrors mineContext()'s own per-field try/catch pattern below).
+      items.push({ number: siblingNumber, contractUnknown: true, error: String(err && err.message ? err.message : err) });
+    }
+  }
+
+  return { items, omittedCount };
+}
+
+/**
+ * Deterministic, ascending-issue-number ordering. No relevance ranking is
+ * needed here (unlike `rankFailureMemory()`'s hit-count/recency scoring) —
+ * the sibling list is already caller-curated (an orchestrator's own
+ * dependency/dispatch set), so the only ordering question is "what's a
+ * stable, predictable order to render them in", and issue number satisfies
+ * that trivially. Pure function — no I/O.
+ *
+ * @param {Object[]} items
+ * @returns {Object[]}
+ */
+function rankFleetBrief(items) {
+  if (!Array.isArray(items)) return [];
+  return [...items].sort((a, b) => (a && a.number != null ? a.number : 0) - (b && b.number != null ? b.number : 0));
+}
+
+/**
+ * Render ranked fleet-brief items as a bounded excerpt: heading + one entry
+ * per sibling (declared deliverables as a nested list when known, an
+ * explicit "contract unknown" note otherwise) + an omitted-count note when
+ * the cap dropped any + a fixed behavioral-contract trailer. Never
+ * synthesizes prose about a sibling's intent — only quoted title, quoted
+ * file paths, and quoted change descriptions already present in that
+ * sibling's own CONTRACT annotation, mirroring
+ * `renderFailureMemoryExcerpt()`'s "quoted history, never synthesized
+ * prose" safety guard. Returns "" for an empty item list.
+ *
+ * Pure function — no I/O.
+ *
+ * @param {Object[]} items
+ * @param {number} [omittedCount]
+ * @returns {string}
+ */
+function renderFleetBriefExcerpt(items, omittedCount = 0) {
+  if (!Array.isArray(items) || items.length === 0) return '';
+  const ranked = rankFleetBrief(items);
+  const lines = ['## In-Flight Sibling Contracts (Fleet Brief)'];
+  for (const item of ranked) {
+    if (!item || item.number == null) continue;
+    const titleSuffix = item.title ? `: ${item.title}` : '';
+    if (item.contractUnknown) {
+      lines.push(`- #${item.number}${titleSuffix} — contract unknown${item.error ? ` (${item.error})` : ''}`);
+      continue;
+    }
+    lines.push(`- #${item.number}${titleSuffix}`);
+    if (Array.isArray(item.deliverables) && item.deliverables.length > 0) {
+      for (const d of item.deliverables.slice(0, 10)) {
+        if (d && d.file) lines.push(`  - \`${d.file}\` — ${d.change || ''}`);
+      }
+    } else if (Array.isArray(item.affectedFiles) && item.affectedFiles.length > 0) {
+      for (const f of item.affectedFiles.slice(0, 10)) {
+        lines.push(`  - \`${f}\``);
+      }
+    }
+  }
+  if (omittedCount > 0) {
+    lines.push(`- _(${omittedCount} additional in-flight sibling(s) omitted — fleet brief capped at ${MAX_FLEET_BRIEF_SIBLINGS})_`);
+  }
+  lines.push('');
+  lines.push(`> ${FLEET_BRIEF_TRAILER}`);
+  return lines.join('\n');
+}
+
+/**
  * Mine deterministic, structured GitHub context for `issueNumber`. Zero LLM
  * calls — every field below is either raw `gh` output or a regex/registry
  * parse of that output.
  *
  * @param {number|string} issueNumber
- * @param {{io: {gh: Function}, repo?: string}} opts - `io.gh(args)` is
- *   REQUIRED (no default wiring — see module docblock). `repo` is an
- *   optional explicit `owner/repo` string threaded to every `gh` call via
- *   `-R`, which is what makes this module work correctly for satellite
- *   (`forge.yaml → repos.satellites`) issues regardless of the caller's
- *   cwd — the caller is responsible for resolving a `<prefix>:N` reference
- *   to its satellite's `repo` before calling `mineContext()`. When omitted,
- *   `gh`'s own cwd-implicit repo resolution is used.
+ * @param {{io: {gh: Function}, repo?: string, inFlightSiblings?: Array<number|string>}} opts -
+ *   `io.gh(args)` is REQUIRED (no default wiring — see module docblock).
+ *   `repo` is an optional explicit `owner/repo` string threaded to every
+ *   `gh` call via `-R`, which is what makes this module work correctly for
+ *   satellite (`forge.yaml → repos.satellites`) issues regardless of the
+ *   caller's cwd — the caller is responsible for resolving a `<prefix>:N`
+ *   reference to its satellite's `repo` before calling `mineContext()`. When
+ *   omitted, `gh`'s own cwd-implicit repo resolution is used.
+ *   `inFlightSiblings` (forge#2682) is an optional list of other issue
+ *   numbers currently in-flight in the same dispatch batch (e.g. an
+ *   `/orchestrate` run's sibling issues); when omitted or empty, `fleetBrief`
+ *   resolves to `{items: [], omittedCount: 0}` and today's exact output is
+ *   unchanged.
  * @returns {Promise<Object>} raw pre-assembly mined-data object — NOT a
  *   `packages/protocol/src/contextpack-schema.js`-conformant `ContextPack`.
  */
 export async function mineContext(issueNumber, opts = {}) {
-  const { io, repo } = opts;
+  const { io, repo, inFlightSiblings = [] } = opts;
   assertIo(io);
 
   const issue = await fetchIssueCore(issueNumber, io, repo);
@@ -717,6 +965,21 @@ export async function mineContext(issueNumber, opts = {}) {
     failureMemoryFetchErrors = [String(err && err.message ? err.message : err)];
   }
 
+  // forge#2682: in-flight sibling fleet-brief mining. Wrapped in its own
+  // try/catch — same defense-in-depth rationale as failureMemory above: a
+  // bug in the new mining path must never propagate out of mineContext() and
+  // blank fields that were already successfully mined.
+  let fleetBrief = { items: [], omittedCount: 0 };
+  let fleetBriefFetchErrors = [];
+  try {
+    fleetBrief = await fetchFleetBrief(inFlightSiblings, issueNumber, io, repo);
+    fleetBriefFetchErrors = fleetBrief.items
+      .filter((item) => item && item.error)
+      .map((item) => `#${item.number}: ${item.error}`);
+  } catch (err) {
+    fleetBriefFetchErrors = [String(err && err.message ? err.message : err)];
+  }
+
   return {
     issue,
     comments,
@@ -725,6 +988,7 @@ export async function mineContext(issueNumber, opts = {}) {
     linkedPrs,
     gists,
     failureMemory,
+    fleetBrief,
     meta: {
       issueNumber: typeof issueNumber === 'number' ? issueNumber : Number(issueNumber),
       repo: repo || null,
@@ -739,6 +1003,7 @@ export async function mineContext(issueNumber, opts = {}) {
       ...(linkedPrsFetchError ? { linkedPrsFetchError } : {}),
       ...(Object.keys(reviewFindingsFetchErrors).length > 0 ? { reviewFindingsFetchErrors } : {}),
       ...(failureMemoryFetchErrors.length > 0 ? { failureMemoryFetchErrors } : {}),
+      ...(fleetBriefFetchErrors.length > 0 ? { fleetBriefFetchErrors } : {}),
     },
   };
 }
@@ -875,11 +1140,22 @@ function renderSliceContent(sliceName, minedData) {
     ? renderFailureMemoryExcerpt(rankFailureMemory(minedData.failureMemory, minedData.affectedFiles))
     : '';
 
+  // forge#2682: fleet-brief (in-flight sibling declared-contract awareness)
+  // is injected into the investigate and build slices only — same rationale
+  // as failure-memory above: a review-phase agent is looking at its OWN
+  // just-built PR, not the state of other in-flight siblings at dispatch
+  // time; that awareness already served its purpose upstream.
+  const includeFleetBrief = sliceName === 'investigate' || sliceName === 'build';
+  const fleetBriefExcerpt = includeFleetBrief
+    ? renderFleetBriefExcerpt(minedData.fleetBrief?.items, minedData.fleetBrief?.omittedCount || 0)
+    : '';
+
   const sections = [
     sliceName === 'investigate' ? renderIssueExcerpt(minedData.issue) : '',
     renderAffectedFilesExcerpt(minedData.affectedFiles),
     ...relevantAnnotations.map(renderAnnotationExcerpt),
     failureMemoryExcerpt,
+    fleetBriefExcerpt,
     sliceName !== 'investigate' ? renderLinkedPrsExcerpt(minedData.linkedPrs) : '',
   ].filter((s) => typeof s === 'string' && s.length > 0);
 

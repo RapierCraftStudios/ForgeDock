@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "issue": 3103,
+  "slices": [
+    {
+      "phase": "build",
+      "content": "## Known Affected Files\n- `bin/engine/standalone-module.mjs`\n\n### CONTRACT annotation (comment #0)\n\n## Builder Contract\n### Affected Files\n1. `bin/engine/standalone-module.mjs` (new) — no siblings dispatched alongside this issue"
+    }
+  ]
+}
