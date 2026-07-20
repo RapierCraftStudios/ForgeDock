@@ -51,6 +51,8 @@ const FORGE_HOME = resolve(__dirname, "..", "..");
 let resolveState;
 let nudgeSeen;
 let markNudgeSeen;
+// Assigned alongside the other registry.mjs helpers below — see forge#2719.
+let getInstalledCommandsDriftStatus;
 
 // ---------------------------------------------------------------------------
 // forge-utils helpers — populated inside the try block to honour fail-open
@@ -88,7 +90,7 @@ try {
   // that import() rejects with ERR_UNSUPPORTED_ESM_URL_SCHEME.
   /** @type {import('../registry.mjs')} */
   (
-    { resolveState, nudgeSeen, markNudgeSeen } = await import(
+    { resolveState, nudgeSeen, markNudgeSeen, getInstalledCommandsDriftStatus } = await import(
       pathToFileURL(join(FORGE_HOME, "bin", "registry.mjs")).href
     )
   );
@@ -125,6 +127,25 @@ try {
 
   const cwd = process.cwd();
   const state = resolveState(cwd);
+
+  // Surface package-vs-installed-commands drift as a single non-fatal
+  // advisory line (forge#2719). Uses the same shared helper doctor's
+  // Check 5d and the `version` command call, so all three surfaces agree.
+  // Best-effort: any failure here must never block the session, and
+  // managed-optedout directories stay completely silent per this hook's
+  // existing contract for that state (see the switch below).
+  if (state !== "managed-optedout") {
+    try {
+      const driftStatus = getInstalledCommandsDriftStatus(FORGE_HOME);
+      if (!driftStatus.unknown && driftStatus.isStale) {
+        console.log(
+          `ForgeDock: installed commands are stale (v${driftStatus.persistedVersion}) vs package v${driftStatus.sourceVersion} — run: npx forgedock update`,
+        );
+      }
+    } catch {
+      // Fail open — never let a drift-check error affect session start.
+    }
+  }
 
   switch (state) {
     case "managed-active":

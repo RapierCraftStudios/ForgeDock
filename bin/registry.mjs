@@ -466,6 +466,92 @@ export async function setPersistedHomeState({ path, version, updatedAt } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Package-vs-installed-commands drift detection (issue #2719)
+// ---------------------------------------------------------------------------
+//
+// Single shared source of truth for "is the persisted ~/.forge/ toolset
+// (commands/skills the SessionStart hook and ~/.claude/commands actually
+// load) older than the forgedock package currently running?" — previously
+// this comparison existed only inline inside doctor's Check 5d
+// (bin/forgedock.mjs), so a user who bumped the npm package but never ran
+// `forgedock update` had no way to learn about the drift outside of
+// proactively running `doctor`. This helper is now the one place the
+// comparison lives; doctor, the `version` command, and the SessionStart hook
+// all call it instead of re-deriving the logic (forge#1589 split-brain
+// precedent — see the persistHome() comment above for why that matters).
+
+/**
+ * Compare the running forgedock package's version against the version last
+ * persisted to `~/.forge/` (the copy the SessionStart hook and
+ * `~/.claude/commands` actually load from — see persistHome() in
+ * bin/journey.mjs).
+ *
+ * Fail-open: never throws. Any failure to read either version (missing/
+ * corrupt package.json, missing/corrupt registry, missing/unreadable
+ * `~/.forge/version` file) resolves to `unknown: true` with empty version
+ * strings, rather than propagating an error to the caller. This mirrors the
+ * fail-open contract required of both doctor (best-effort diagnostics) and
+ * the SessionStart hook (must never block a Claude Code session — see
+ * forge#383/forge#489).
+ *
+ * Version comparison delegates to the already-fixed compareVersions() above
+ * (forge#1932 — do not reimplement comparison logic here).
+ *
+ * @param {string} forgeHome - Absolute path to the ForgeDock installation
+ *   root whose package.json holds the "source" version (the package
+ *   currently running). Callers pass their own FORGE_HOME.
+ * @returns {{
+ *   persistedVersion: string,
+ *   sourceVersion: string,
+ *   isStale: boolean,
+ *   unknown: boolean
+ * }}
+ */
+export function getInstalledCommandsDriftStatus(forgeHome) {
+  const notFound = { persistedVersion: "", sourceVersion: "", isStale: false, unknown: true };
+
+  let sourceVersion = "";
+  try {
+    const pkg = JSON.parse(readFileSync(join(forgeHome, "package.json"), "utf-8"));
+    sourceVersion = pkg.version || "";
+  } catch {
+    // Missing/unreadable/corrupt package.json — cannot determine the source
+    // version at all; degrade to unknown rather than guessing.
+    return notFound;
+  }
+
+  // Prefer the version registry.mjs last recorded for persistHome()'s write
+  // (the single source of truth update()/install also write through),
+  // falling back to reading ~/.forge/version directly on disk when the
+  // registry has no entry (e.g. an older ForgeDock version wrote ~/.forge/
+  // before forge#1943 added registry tracking). Mirrors doctor's Check 5d.
+  let persistedVersion = "";
+  try {
+    const recorded = getPersistedHomeState();
+    persistedVersion = recorded?.version || "";
+  } catch {
+    // getPersistedHomeState() already fails open to null — this catch is
+    // defensive only.
+  }
+  if (!persistedVersion) {
+    try {
+      const versionPath = join(HOME, ".forge", "version");
+      persistedVersion = readFileSync(versionPath, "utf-8").trim();
+    } catch {
+      // version file missing/unreadable — no persisted-home version is
+      // knowable; degrade to unknown.
+    }
+  }
+
+  if (!persistedVersion) {
+    return notFound;
+  }
+
+  const isStale = compareVersions(persistedVersion, sourceVersion) < 0;
+  return { persistedVersion, sourceVersion, isStale, unknown: false };
+}
+
+// ---------------------------------------------------------------------------
 // Claude Code version detection and breakpoints resolution (issue #1252)
 // ---------------------------------------------------------------------------
 
