@@ -1143,7 +1143,7 @@ done
    # as real JSON — read it directly rather than screen-scraping terminal text:
    # NOTE (forge#2750 review fix): `bin/engine/state.mjs`'s `serializeState()` writes the block
    # as THREE separate lines — `<!-- FORGE:STATE`, the JSON payload, and `-->` — never all on one
-   # line. A single-line `grep -oP '(?<=<!-- FORGE:STATE)[\s\S]*?(?=-->)'` NEVER matches this
+   # line. A single-line `grep -oP '(?<=<!-- FORGE:STATE)[\s\S]*?(?=-->)'` NEVER matches this <!-- allowlist:portability — cited non-portable anti-pattern being replaced, not a command this spec runs -->
    # (GNU `grep -P` without `-z` operates per-line, not across newlines, regardless of `[\s\S]`)
    # — it always returns empty. Extract the block with a `sed` line-range instead, which handles
    # the real multi-line shape correctly:
@@ -1176,13 +1176,14 @@ done
    # via the existing stall-detection alert / needs-human path instead, exactly as before this fix.
 
    if [ "$ALREADY_FALLEN_BACK" -eq 0 ] && [ "$EMPTY_COMMITTED_STATE" = "true" ]; then
-     gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ENGINE_FALLBACK -->
+     ENGINE_FALLBACK_BODY="<!-- FORGE:ENGINE_FALLBACK -->
    ## Engine-First Dispatch Failed — Falling Back to Agent-Spawn
 
    \`forgedock run-issue\` ended at \`workflow:engine-error\` with no committed phases, branch, or PR
    (\`committed=[] branch=null pr=null\`) — this is an environmental/tool failure (forge#2261), not a
    per-issue content failure, and nothing was committed that a fresh dispatch could collide with.
    Auto-falling back to the Agent-spawn \`/work-on\` path for this issue. See forge#2743."
+     gh issue comment {NUMBER} {GH_FLAG} --body "$ENGINE_FALLBACK_BODY" # <!-- allowlist:check-command-side-effects — intentional pipeline status annotation, mirrors work-on/build/architect.md:700 -->
 
      # Reuse the SAME Agent-spawn template as Step 4A's "Agent-spawn path (fallback when forgedock
      # CLI unavailable)" section above (the `Agent(subagent_type="general-purpose", ...)` block
