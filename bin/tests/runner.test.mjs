@@ -47,6 +47,7 @@ import {
   resolveConfiguredDefaultModel,
   runCommand,
   isClaudeCliAvailable,
+  resolveClaudeCliBinary,
   resolveBackend,
   resolveBackendLadder,
   runCliBackend,
@@ -2829,6 +2830,124 @@ describe("isClaudeCliAvailable", () => {
     } finally {
       rmSync(cwdA, { recursive: true, force: true });
       rmSync(cwdB, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveClaudeCliBinary / probe-invocation asymmetry regression (issue #2741)
+// ---------------------------------------------------------------------------
+//
+// Reproduces the exact bug: an environment where the CLI is only reachable
+// as an npx-transient shim. The shell-based probe (`where`/`command -v`, via
+// the injected execImpl) resolves and reports it available; a bare-name
+// spawnSync (shell:false) would ENOENT on that same environment. Asserts
+// that (a) resolveClaudeCliBinary() surfaces the resolved path rather than
+// the bare name, and (b) runCliBackend(), given that resolved path as `bin`,
+// succeeds even when the injected spawnFn is wired to fail on the bare
+// "claude" name specifically.
+describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issue #2741)", () => {
+  it("resolves and caches the shell-validated absolute path, not the bare command name", () => {
+    const shimPath = "/home/user/.npm/_npx/abc123/node_modules/.bin/claude";
+    const execImpl = mock.fn(() => `${shimPath}\n1.2.3 (Claude Code)`);
+    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-resolve-"));
+    try {
+      const resolved = resolveClaudeCliBinary(cwd, { execImpl });
+      assert.equal(resolved, shimPath);
+      assert.equal(
+        execImpl.mock.callCount(),
+        1,
+        "resolveClaudeCliBinary must reuse isClaudeCliAvailable's single-probe cache, not re-probe",
+      );
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null when the probe succeeds but no path-like line is present (e.g. a bare version string)", () => {
+    const execImpl = mock.fn(() => "1.2.3");
+    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-resolve-nopath-"));
+    try {
+      assert.equal(resolveClaudeCliBinary(cwd, { execImpl }), null);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null when the CLI is unavailable", () => {
+    const execImpl = mock.fn(() => {
+      throw new Error("ENOENT: claude not found");
+    });
+    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-resolve-unavailable-"));
+    try {
+      assert.equal(resolveClaudeCliBinary(cwd, { execImpl }), null);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("on win32, prefers a .cmd sibling over a bare extensionless `where` match", () => {
+    if (process.platform !== "win32") return; // platform-specific selection logic
+    const bareShim = "C:\\Users\\dev\\AppData\\Local\\npm-cache\\_npx\\abc\\node_modules\\.bin\\claude";
+    const cmdShim = `${bareShim}.cmd`;
+    const execImpl = mock.fn(() => `${bareShim}\n${cmdShim}\n1.2.3 (Claude Code)`);
+    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-resolve-win-"));
+    try {
+      assert.equal(resolveClaudeCliBinary(cwd, { execImpl }), cmdShim);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("runCliBackend spawns the resolved path successfully when the bare name would ENOENT (the reported bug)", () => {
+    const shimPath = "/home/user/.npm/_npx/abc123/node_modules/.bin/claude";
+    const execImpl = mock.fn(() => `${shimPath}\n1.2.3 (Claude Code)`);
+    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-resolve-e2e-"));
+    try {
+      const resolvedBin = resolveClaudeCliBinary(cwd, { execImpl });
+      assert.equal(resolvedBin, shimPath, "precondition: probe must resolve the shim path");
+
+      // Mirrors the real-world failure: spawnFn ENOENTs on the bare "claude"
+      // name (no shell/PATHEXT resolution available to a no-shell spawnSync)
+      // but succeeds when given the exact resolved path.
+      const spawnFn = (bin) => {
+        if (bin === "claude") {
+          return {
+            status: null,
+            signal: null,
+            stdout: "",
+            stderr: "",
+            error: Object.assign(new Error("spawnSync claude ENOENT"), { code: "ENOENT" }),
+          };
+        }
+        if (bin === shimPath) {
+          return { status: 0, signal: null, stdout: JSON.stringify({ result: "ok" }), stderr: "" };
+        }
+        throw new Error(`unexpected bin: ${bin}`);
+      };
+
+      const result = runCliBackend({
+        spec: { path: "x", name: "x", content: "x" },
+        userMessage: "hello",
+        cwd,
+        bin: resolvedBin,
+        spawnFn,
+      });
+      assert.equal(result.status, "complete");
+
+      // Sanity: confirm the bare name really would have failed, proving this
+      // test reproduces the reported ENOENT rather than trivially passing.
+      assert.throws(() => {
+        runCliBackend({
+          spec: { path: "x", name: "x", content: "x" },
+          userMessage: "hello",
+          cwd,
+          bin: "claude",
+          spawnFn,
+        });
+      }, /Failed to invoke claude CLI/);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
     }
   });
 });
