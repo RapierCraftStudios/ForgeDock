@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "issue": 3106,
+  "slices": [
+    {
+      "phase": "build",
+      "content": "## Known Affected Files\n- `bin/engine/contextpack.mjs`\n\n### CONTRACT annotation (comment #0)\n\n## Builder Contract\n### Affected Files\n1. `bin/engine/contextpack.mjs` (edit) — add fleet-brief mining\n\n## In-Flight Sibling Contracts (Fleet Brief)\n- #2700: feat: batch sibling #2700\n  - `bin/batch/sibling-2700.mjs`\n- #2701: feat: batch sibling #2701\n  - `bin/batch/sibling-2701.mjs`\n- #2702: feat: batch sibling #2702\n  - `bin/batch/sibling-2702.mjs`\n- #2703: feat: batch sibling #2703\n  - `bin/batch/sibling-2703.mjs`\n- #2704: feat: batch sibling #2704\n  - `bin/batch/sibling-2704.mjs`\n- #2705: feat: batch sibling #2705\n  - `bin/batch/sibling-2705.mjs`\n- #2706: feat: batch sibling #2706\n  - `bin/batch/sibling-2706.mjs`\n- #2707: feat: batch sibling #2707\n  - `bin/batch/sibling-2707.mjs`\n- #2708: feat: batch sibling #2708\n  - `bin/batch/sibling-2708.mjs`\n- #2709: feat: batch sibling #2709\n  - `bin/batch/sibling-2709.mjs`\n- _(5 additional in-flight sibling(s) omitted — fleet brief capped at 10)_\n\n> Snapshot of declared scope from in-flight sibling issues at pack-build time — not a live guarantee. A sibling's actual deliverables may change before it merges; do not treat this as a merged/locked contract."
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "issue": 3105,
+  "slices": [
+    {
+      "phase": "build",
+      "content": "## Known Affected Files\n- `src/platform/handler.ts`\n\n### CONTRACT annotation (comment #0)\n\n## Builder Contract\n### Affected Files\n1. `src/platform/handler.ts` (edit) — satellite-repo file\n\n## In-Flight Sibling Contracts (Fleet Brief)\n- #2683: feat(platform): satellite sibling with a declared contract\n  - `src/platform/shared.ts` — Add new shared export\n\n> Snapshot of declared scope from in-flight sibling issues at pack-build time — not a live guarantee. A sibling's actual deliverables may change before it merges; do not treat this as a merged/locked contract."
+    }
+  ]
+}

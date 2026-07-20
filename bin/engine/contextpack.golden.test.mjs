@@ -58,6 +58,15 @@
  *                               surfaced), one with no CONTRACT yet
  *                               (contract-unknown); rendered in ascending
  *                               issue-number order.
+ *   11. fleet-brief-satellite-repo — cross-repo (satellite) issue; sibling
+ *                               issue-view/comments fetches carry the same
+ *                               explicit repo as the primary issue's own
+ *                               fetches.
+ *   12. fleet-brief-capped    — 15 in-flight siblings supplied, exceeding
+ *                               MAX_FLEET_BRIEF_SIBLINGS=10; miner caps to
+ *                               exactly 10 fetched siblings, reports
+ *                               omittedCount=5, and the rendered excerpt
+ *                               carries the truncation-marker note.
  *
  * @license MIT
  */
@@ -342,13 +351,52 @@ describe('contextpack golden fixtures — full mine->assemble->validate pipeline
     assert.match(content, /contract unknown/, 'the contract-unknown sibling must be labeled as such, not silently omitted');
     assert.match(content, /not a live guarantee/, 'the fixed behavioral-contract trailer must always be present');
   });
+
+  it('scenario 11 (forge#2682): satellite (cross-repo) issue — sibling fetches carry the same explicit repo', async () => {
+    const { fixture, io } = await runAndAssertGolden('fleet-brief-satellite-repo');
+
+    assert.equal(fixture.repo, 'RapierCraftStudios/forgedock-platform');
+
+    const siblingIssueViewCall = io.calls.find((c) => c[0] === 'issue' && c[1] === 'view' && c[2] === '2683');
+    assert.ok(siblingIssueViewCall, 'sibling issue view call must have been made');
+    assert.ok(
+      siblingIssueViewCall.includes('-R') && siblingIssueViewCall.includes('RapierCraftStudios/forgedock-platform'),
+      'sibling issue view must carry -R <satellite repo>, not the default repo',
+    );
+
+    const siblingCommentsCall = io.calls.find((c) => c.join(' ').includes('/issues/2683/comments'));
+    assert.ok(siblingCommentsCall, 'sibling comments call must have been made');
+    assert.ok(
+      siblingCommentsCall[1].includes('repos/RapierCraftStudios/forgedock-platform/issues/2683/comments'),
+      'the sibling comments api call must embed the satellite repo in its path, not the default repo',
+    );
+  });
+
+  it('scenario 12 (forge#2682): 15 in-flight siblings exceed MAX_FLEET_BRIEF_SIBLINGS=10 — capped, deterministic omittedCount, truncation marker rendered', async () => {
+    const { minedData, pack } = await runAndAssertGolden('fleet-brief-capped');
+
+    assert.equal(minedData.fleetBrief.items.length, 10, 'exactly 10 siblings must be fetched — the cap, not the caller-supplied count of 15');
+    assert.equal(minedData.fleetBrief.omittedCount, 5, '15 supplied - 10 cap = 5 omitted');
+
+    // Cap applies to the caller-supplied array order (2700..2709), not the full 2700..2714 range.
+    for (let n = 2700; n <= 2709; n++) {
+      assert.ok(minedData.fleetBrief.items.some((i) => i.number === n), `sibling #${n} must be within the first 10 and fetched`);
+    }
+    for (let n = 2710; n <= 2714; n++) {
+      assert.ok(!minedData.fleetBrief.items.some((i) => i.number === n), `sibling #${n} is beyond the cap and must not have been fetched`);
+    }
+
+    assert.notEqual(pack, null);
+    const content = pack.slices[0].content;
+    assert.match(content, /5 additional in-flight sibling\(s\) omitted — fleet brief capped at 10/, 'the omitted-count truncation marker must name both the omitted count and the cap value');
+  });
 });
 
 describe('contextpack golden fixtures — fixture/expected-pack pairing sanity', () => {
   const scenarioNames = fs.readdirSync(FIXTURES_DIR).filter((name) => fs.statSync(path.join(FIXTURES_DIR, name)).isDirectory());
 
   it('every fixture subdirectory has both fixture.json and expected-pack.json', () => {
-    assert.ok(scenarioNames.length >= 10, `expected at least 10 fixture scenarios, found ${scenarioNames.length}: ${scenarioNames.join(', ')}`);
+    assert.ok(scenarioNames.length >= 12, `expected at least 12 fixture scenarios, found ${scenarioNames.length}: ${scenarioNames.join(', ')}`);
     for (const name of scenarioNames) {
       const dir = path.join(FIXTURES_DIR, name);
       assert.ok(fs.existsSync(path.join(dir, 'fixture.json')), `${name}/fixture.json is missing`);
@@ -368,6 +416,8 @@ describe('contextpack golden fixtures — fixture/expected-pack pairing sanity',
       'failure-memory-present',
       'fleet-brief-empty',
       'fleet-brief-present',
+      'fleet-brief-satellite-repo',
+      'fleet-brief-capped',
     ];
     for (const name of required) {
       assert.ok(scenarioNames.includes(name), `required scenario "${name}" is missing from ${FIXTURES_DIR}`);
