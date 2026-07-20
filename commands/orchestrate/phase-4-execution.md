@@ -534,15 +534,22 @@ FORGEDOCK_AVAILABLE=$(command -v forgedock >/dev/null 2>&1 && echo "true" || ech
 # environmental failure (e.g. forge#2741 — `spawnSync claude` ENOENT despite a shell `command -v`
 # probe reporting the binary present) commits the ENTIRE ready set to engine-first dispatch, every
 # `forgedock run-issue` call fails within seconds, and nothing re-routes the batch — a human has
-# to notice and manually re-dispatch via the Agent-spawn path below. Run one lightweight, direct
-# invocation attempt of the backend BEFORE committing the batch — the same call shape the engine's
-# own spawn would make, not another `command -v` PATH check (which would just repeat #2741's blind
-# spot). On failure, downgrade FORGEDOCK_AVAILABLE for the rest of this run so the whole batch
-# takes the proven-safe Agent-spawn path from the start, instead of losing the batch to N
-# individual engine-error failures.
+# to notice and manually re-dispatch via the Agent-spawn path below.
+#
+# CRITICAL — do NOT use a shell-resolved probe here (`command -v claude`, `claude --version` run
+# directly by bash, `which claude`, etc.). forge#2741's entire root cause is that a shell-resolved
+# probe and the engine's actual invocation resolve the `claude` binary differently: bash's builtin
+# PATH lookup (and `execSync("claude --version", ...)`, used deliberately by
+# `bin/runner.mjs`'s `isClaudeCliAvailable()` for this exact reason) can find and run an
+# npx-transient/extensionless shim that `bin/runner.mjs`'s actual backend call —
+# `runCliBackend()`'s `spawnFn(bin, cliArgs, { shell: false, ... })` with bare `bin = "claude"`
+# (no shell resolution) — cannot. A canary that shell-resolves `claude` reproduces the exact
+# blind spot it exists to catch and reports the backend healthy in precisely forge#2741's failure
+# scenario. The canary MUST reproduce `runCliBackend()`'s exact invocation shape — bare binary
+# name, `shell: false` — via a one-off Node `spawnSync` call, not a bash-native probe:
 if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
-  if ! claude --version >/dev/null 2>&1; then
-    echo "WARNING: forgedock CLI is on PATH, but its execution backend ('claude --version') is not invocable in this environment. Downgrading to the Agent-spawn fallback path for this entire run — see forge#2743. (If forge#2741's ENOENT root cause is fixed, this canary will pass again on the next /orchestrate invocation.)"
+  if ! node -e "const r = require('node:child_process').spawnSync('claude', ['--version'], { shell: false }); process.exit(r.error ? 1 : 0);" 2>/dev/null; then
+    echo "WARNING: forgedock CLI is on PATH, but its execution backend is not invocable via the engine's own spawn shape (bare 'claude', shell:false) in this environment. Downgrading to the Agent-spawn fallback path for this entire run — see forge#2743. (If forge#2741's ENOENT root cause is fixed, this canary will pass again on the next /orchestrate invocation.)"
     FORGEDOCK_AVAILABLE="false"
   fi
 fi
@@ -1134,26 +1141,39 @@ done
    # mirrors onto the issue BODY on every phase transition (`bin/engine/state.mjs`/`projector.mjs`
    # — see phase-3-dependency.md "Engine mode (default)"), which carries `committed`/`branch`/`pr`
    # as real JSON — read it directly rather than screen-scraping terminal text:
-   STATE_JSON=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' \
-     | grep -oP '(?<=<!-- FORGE:STATE)[\s\S]*?(?=-->)' | head -1 || echo "")
+   # NOTE (forge#2750 review fix): `bin/engine/state.mjs`'s `serializeState()` writes the block
+   # as THREE separate lines — `<!-- FORGE:STATE`, the JSON payload, and `-->` — never all on one
+   # line. A single-line `grep -oP '(?<=<!-- FORGE:STATE)[\s\S]*?(?=-->)'` NEVER matches this
+   # (GNU `grep -P` without `-z` operates per-line, not across newlines, regardless of `[\s\S]`)
+   # — it always returns empty. Extract the block with a `sed` line-range instead, which handles
+   # the real multi-line shape correctly:
+   STATE_BLOCK=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' \
+     | sed -n '/<!-- FORGE:STATE/,/-->/p')
+   STATE_JSON=$(echo "$STATE_BLOCK" | sed '1d;$d')
    if [ -n "$STATE_JSON" ]; then
-     COMMITTED_COUNT=$(echo "$STATE_JSON" | jq -r '.committed | length' 2>/dev/null || echo "-1")
-     STATE_BRANCH=$(echo "$STATE_JSON" | jq -r '.branch' 2>/dev/null || echo "")
-     STATE_PR=$(echo "$STATE_JSON" | jq -r '.pr' 2>/dev/null || echo "")
+     COMMITTED_COUNT=$(echo "$STATE_JSON" | jq -r '.committed | length' 2>/dev/null)
+     STATE_BRANCH=$(echo "$STATE_JSON" | jq -r '.branch' 2>/dev/null)
+     STATE_PR=$(echo "$STATE_JSON" | jq -r '.pr' 2>/dev/null)
      [ "$COMMITTED_COUNT" = "0" ] && [ "$STATE_BRANCH" = "null" ] && [ "$STATE_PR" = "null" ] \
        && EMPTY_COMMITTED_STATE="true" || EMPTY_COMMITTED_STATE="false"
    else
-     # Fallback source: the exact `committed=[] branch=null pr=null` diagnostic line
-     # `bin/engine-cli.mjs`'s `formatTerminalDiagnostics()` prints after a non-merged terminal
-     # line, present in the completed background Bash call's captured stdout — used only when
-     # no FORGE:STATE block was ever written (e.g. the run failed before phase 1 committed
-     # anything to the issue body at all).
-     EMPTY_COMMITTED_STATE=$(echo "$ENGINE_COMPLETION_STDOUT" | grep -qE 'committed=\[\] branch=null pr=null' && echo "true" || echo "false")
+     # No FORGE:STATE block was ever written to the issue body (e.g. the run failed before
+     # phase 1 committed anything). There is no reliable structured signal available in this
+     # case — fail SAFE: do NOT auto-fallback on an unverifiable state. This surfaces via the
+     # existing stall-detection alert / needs-human path instead, exactly as before this fix.
+     # (An earlier draft of this fix attempted a second fallback source — a
+     # `committed=[] branch=null pr=null` diagnostic line assumed to be present in the
+     # completed background Bash call's captured stdout — but no code in this file or
+     # phase-3-dependency.md actually captures/populates that stdout into a named variable,
+     # so that fallback was dead code reading an unset variable. Removed rather than wired up:
+     # the FORGE:STATE block above is the engine's own durable, already-documented mirror of
+     # this exact data and should always be present by the time a phase transition occurs;
+     # treating its absence as "cannot verify, don't risk it" is the correct fail-safe.)
+     EMPTY_COMMITTED_STATE="false"
    fi
-   # A non-empty committed/branch/pr (from either source) means real per-issue work exists
-   # that a fresh Agent-spawn dispatch could collide with or duplicate — that case is NOT
-   # auto-fallen-back; it surfaces via the existing stall-detection alert / needs-human path
-   # instead, exactly as before this fix.
+   # A non-empty committed/branch/pr means real per-issue work exists that a fresh Agent-spawn
+   # dispatch could collide with or duplicate — that case is NOT auto-fallen-back; it surfaces
+   # via the existing stall-detection alert / needs-human path instead, exactly as before this fix.
 
    if [ "$ALREADY_FALLEN_BACK" -eq 0 ] && [ "$EMPTY_COMMITTED_STATE" = "true" ]; then
      gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ENGINE_FALLBACK -->
