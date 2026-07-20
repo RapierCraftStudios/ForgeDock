@@ -2170,6 +2170,48 @@ describe("forge (Act II)", () => {
       assert.ok(existsSync(target), "target symlink installed");
       assert.equal(readFileSync(target, "utf-8"), "SOURCE", "symlink resolves to source content");
     });
+
+    it("returns 'denied' and leaves target untouched when the destination directory denies write access (EPERM/EACCES)", async (t) => {
+      const dirT = mkdtempSync(join(os.tmpdir(), "fd-atomic-denied-"));
+      const src = join(dirT, "src.md");
+      writeFileSync(src, "SOURCE", "utf-8");
+      const target = join(dirT, "cmd.md");
+      writeFileSync(target, "PRE-EXISTING CONTENT", "utf-8");
+
+      // Remove write permission on the containing directory so the OS cannot
+      // create the new tmp-sibling symlink entry there. This exercises the
+      // same failure shape journey.mjs's isLinkPermissionError() catches
+      // (EPERM/EACCES) — e.g. Windows without Developer Mode, or a
+      // permission-restricted directory on POSIX.
+      chmodSync(dirT, 0o555);
+      let result;
+      try {
+        result = await atomicSymlinkInstall(src, target);
+      } finally {
+        chmodSync(dirT, 0o755); // restore so cleanup / later assertions can read the dir
+      }
+
+      if (result === "linked") {
+        // Some environments (e.g. running as root, or platforms/filesystems
+        // that don't honor directory write-permission bits the same way)
+        // don't actually deny the write — the chmod trick can't force the
+        // denied branch there. Skip rather than false-fail, mirroring the
+        // existing skip-on-unavailable pattern used elsewhere in this file
+        // for permission-dependent behavior.
+        t.skip("directory write-denial did not block symlink creation in this environment (e.g. running as root)");
+        return;
+      }
+
+      assert.equal(result, "denied");
+      assert.ok(existsSync(target), "existing target must survive a denied verdict");
+      assert.equal(
+        readFileSync(target, "utf-8"),
+        "PRE-EXISTING CONTENT",
+        "target content must be untouched — a denied verdict must not touch target (mirrors the 'unreadable' invariant, forge#2679)",
+      );
+      const leftoverTmp = readdirSync(dirT).filter((f) => f.includes(".tmp"));
+      assert.equal(leftoverTmp.length, 0, "no .pid.tmp sibling should be left behind after a denied verdict");
+    });
   });
 
   describe("pruneStaleExtensionlessEntries (forge#2620)", () => {
