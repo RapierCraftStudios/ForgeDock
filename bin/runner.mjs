@@ -349,10 +349,21 @@ export function derivePhaseIdFromCommandName(commandName) {
  * @returns {Array<number>}
  */
 export function resolveInFlightSiblings(explicitInFlightSiblings, env = process.env) {
+  // A valid issue number is a positive integer. `Number('')` and
+  // `Number('   ')` both coerce to `0`, which passes a bare
+  // `Number.isFinite()` check — an empty/whitespace-only token (a trailing
+  // comma, a double comma, or a stray space in `FORGEDOCK_IN_FLIGHT_SIBLINGS`)
+  // would otherwise silently resolve to a phantom sibling `#0` and trigger a
+  // wasted (and misleading — "issue #0 not found") `gh` fetch. Negative and
+  // non-integer values are equally never legitimate GitHub issue numbers, so
+  // the same guard rejects them too, whether they came from the explicit
+  // array or the env-var string form (review finding on PR #2744).
+  const isValidIssueNumber = (n) => Number.isInteger(n) && n > 0;
+
   if (Array.isArray(explicitInFlightSiblings) && explicitInFlightSiblings.length > 0) {
     return explicitInFlightSiblings
       .map((n) => (typeof n === "number" ? n : Number(n)))
-      .filter((n) => Number.isFinite(n));
+      .filter(isValidIssueNumber);
   }
 
   const raw = env && env.FORGEDOCK_IN_FLIGHT_SIBLINGS;
@@ -360,8 +371,10 @@ export function resolveInFlightSiblings(explicitInFlightSiblings, env = process.
 
   return raw
     .split(",")
-    .map((token) => Number(token.trim()))
-    .filter((n) => Number.isFinite(n));
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0)
+    .map((token) => Number(token))
+    .filter(isValidIssueNumber);
 }
 
 /**

@@ -810,7 +810,14 @@ async function fetchFleetBrief(inFlightSiblings, selfIssueNumber, io, repo) {
   const deduped = [];
   for (const raw of inFlightSiblings) {
     const n = typeof raw === 'number' ? raw : Number(raw);
-    if (!Number.isFinite(n) || n === selfNum || seen.has(n)) continue;
+    // A valid GitHub issue number is a positive integer — `Number('')`/
+    // `Number('  ')` both coerce to `0`, which `Number.isFinite()` alone
+    // would accept, turning an empty/whitespace token from a caller (e.g.
+    // `bin/runner.mjs`'s env-var-parsed list) into a phantom "sibling #0"
+    // fetch. Guarding here too (not just at the runner.mjs env-parsing
+    // layer) keeps this module correct for any direct caller, not only the
+    // one that happens to sanitize first (review finding on PR #2744).
+    if (!Number.isInteger(n) || n <= 0 || n === selfNum || seen.has(n)) continue;
     seen.add(n);
     deduped.push(n);
   }
