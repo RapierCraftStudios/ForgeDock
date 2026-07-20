@@ -61,6 +61,7 @@ import {
   sanitizeOutputExcerptForLog,
   extractSessionLimitResetTime,
   VALID_BACKENDS,
+  resolveInFlightSiblings,
 } from "../runner.mjs";
 
 // ---------------------------------------------------------------------------
@@ -3465,5 +3466,89 @@ describe("runCommand backend resolution", () => {
       const notice = lines.find((l) => /Using the claude CLI backend/.test(l));
       assert.equal(notice, undefined, "no live-run notice expected during --dry-run");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveInFlightSiblings (forge#2682, review finding forge#2746 — this had
+// zero dedicated coverage; the phantom-#0 regression fixed on PR #2744
+// (commit 652cce8) is the case every malformed-token test below locks in)
+// ---------------------------------------------------------------------------
+
+describe("resolveInFlightSiblings", () => {
+  it("prefers an explicit array over the env var when both are present", () => {
+    const env = { FORGEDOCK_IN_FLIGHT_SIBLINGS: "9001,9002" };
+    assert.deepEqual(resolveInFlightSiblings([2683, 2684], env), [2683, 2684]);
+  });
+
+  it("coerces string entries in an explicit array to numbers", () => {
+    assert.deepEqual(resolveInFlightSiblings(["2683", "2684"], {}), [2683, 2684]);
+  });
+
+  it("filters invalid entries (zero, negative, non-integer, NaN) out of an explicit array", () => {
+    assert.deepEqual(
+      resolveInFlightSiblings([2683, 0, -5, 2.5, "not-a-number", 2684], {}),
+      [2683, 2684],
+    );
+  });
+
+  it("parses a comma-separated FORGEDOCK_IN_FLIGHT_SIBLINGS env var when no explicit array is given", () => {
+    const env = { FORGEDOCK_IN_FLIGHT_SIBLINGS: "2683,2684,2701" };
+    assert.deepEqual(resolveInFlightSiblings(undefined, env), [2683, 2684, 2701]);
+  });
+
+  it("falls back to the env var when the explicit array is present but empty", () => {
+    const env = { FORGEDOCK_IN_FLIGHT_SIBLINGS: "2683,2684" };
+    assert.deepEqual(resolveInFlightSiblings([], env), [2683, 2684]);
+  });
+
+  it("regression (forge#2744/PR#2744, fixed in 652cce8): an empty token in the env var CSV does not resolve to a phantom sibling #0", () => {
+    // Number('') === 0 and Number.isFinite(0) is true — a bare finite check
+    // would let a trailing comma or blank token through as issue #0. This is
+    // the exact bug the isValidIssueNumber() guard in resolveInFlightSiblings
+    // was added to fix; assert the fix, not just "no crash".
+    const env = { FORGEDOCK_IN_FLIGHT_SIBLINGS: "2683,,2684," };
+    const result = resolveInFlightSiblings(undefined, env);
+    assert.ok(!result.includes(0), "result must never include phantom sibling #0");
+    assert.deepEqual(result, [2683, 2684]);
+  });
+
+  it("regression: a whitespace-only token in the env var CSV is dropped, not resolved to #0", () => {
+    const env = { FORGEDOCK_IN_FLIGHT_SIBLINGS: "2683,   ,2684" };
+    const result = resolveInFlightSiblings(undefined, env);
+    assert.ok(!result.includes(0), "result must never include phantom sibling #0");
+    assert.deepEqual(result, [2683, 2684]);
+  });
+
+  it("drops non-numeric, negative, and zero tokens from the env var CSV while keeping valid siblings", () => {
+    const env = { FORGEDOCK_IN_FLIGHT_SIBLINGS: "2683,abc,-1,0,2684" };
+    assert.deepEqual(resolveInFlightSiblings(undefined, env), [2683, 2684]);
+  });
+
+  it("returns [] when the explicit array is absent/empty and the env var is unset", () => {
+    assert.deepEqual(resolveInFlightSiblings(undefined, {}), []);
+    assert.deepEqual(resolveInFlightSiblings([], {}), []);
+  });
+
+  it("returns [] when the env var is present but not a string (fail-soft, mirrors resolveContextPacksEnabled's absent-safe contract)", () => {
+    assert.deepEqual(resolveInFlightSiblings(undefined, { FORGEDOCK_IN_FLIGHT_SIBLINGS: 12345 }), []);
+  });
+
+  it("returns [] when the env var is an empty string", () => {
+    assert.deepEqual(resolveInFlightSiblings(undefined, { FORGEDOCK_IN_FLIGHT_SIBLINGS: "" }), []);
+  });
+
+  it("defaults env to process.env when no env argument is supplied and no explicit array is given", () => {
+    const original = process.env.FORGEDOCK_IN_FLIGHT_SIBLINGS;
+    process.env.FORGEDOCK_IN_FLIGHT_SIBLINGS = "2683,2684";
+    try {
+      assert.deepEqual(resolveInFlightSiblings(undefined), [2683, 2684]);
+    } finally {
+      if (original === undefined) {
+        delete process.env.FORGEDOCK_IN_FLIGHT_SIBLINGS;
+      } else {
+        process.env.FORGEDOCK_IN_FLIGHT_SIBLINGS = original;
+      }
+    }
   });
 });
