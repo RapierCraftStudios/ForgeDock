@@ -1,0 +1,1 @@
+Run a ForgeDock-native workflow in an isolated child session. Use this instead of the generic skill tool for ForgeDock workflow and phase invocations. The workflow name must come from the built-in ForgeDock catalog; project commands, MCP prompts, and third-party skills are not accepted.

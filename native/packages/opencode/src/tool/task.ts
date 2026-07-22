@@ -14,11 +14,20 @@ import { Effect, Exit, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
+import { WorkflowSession } from "@/forgedock/session"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
   resolvePromptParts(template: string): Effect.Effect<SessionPrompt.PromptInput["parts"]>
   prompt(input: SessionPrompt.PromptInput): Effect.Effect<SessionV1.WithParts>
+}
+
+type InternalTaskContext = {
+  allowOrchestration?: boolean
+  bypassAgentCheck?: boolean
+  childSessionMetadata?: Session.Info["metadata"]
+  promptOps?: TaskPromptOps
+  workflowSession?: boolean
 }
 
 const id = "task"
@@ -105,7 +114,7 @@ export const TaskTool = Tool.define(
       let current = parent
       let depth = 0
       while (current.parentID) {
-        depth++
+        if (!WorkflowSession.has(current.id)) depth++
         current = yield* sessions.get(current.parentID)
       }
       if (depth >= (cfg.subagent_depth ?? 1)) {
@@ -116,7 +125,8 @@ export const TaskTool = Tool.define(
         )
       }
 
-      if (!ctx.extra?.bypassAgentCheck) {
+      const extra = ctx.extra as InternalTaskContext | undefined
+      if (!extra?.bypassAgentCheck) {
         yield* ctx.ask({
           permission: id,
           patterns: [params.subagent_type],
@@ -139,12 +149,14 @@ export const TaskTool = Tool.define(
       const childPermission = deriveSubagentSessionPermission({
         parentSessionPermission: parent.permission ?? [],
         subagent: next,
+        allowTask: extra?.allowOrchestration,
+        allowTodo: extra?.allowOrchestration,
       })
       const childToolDenies = [
-        ...(next.permission.some((rule) => rule.permission === "todowrite")
+        ...(extra?.allowOrchestration || next.permission.some((rule) => rule.permission === "todowrite")
           ? []
           : [{ permission: "todowrite" as const, pattern: "*" as const, action: "deny" as const }]),
-        ...(next.permission.some((rule) => rule.permission === id)
+        ...(extra?.allowOrchestration || next.permission.some((rule) => rule.permission === id)
           ? []
           : [{ permission: id, pattern: "*" as const, action: "deny" as const }]),
         ...(cfg.experimental?.primary_tools?.map((permission) => ({
@@ -159,6 +171,7 @@ export const TaskTool = Tool.define(
           parentID: ctx.sessionID,
           title: params.description + ` (@${next.name} subagent)`,
           agent: next.name,
+          metadata: extra?.childSessionMetadata,
           permission: [
             ...childPermission,
             ...childToolDenies.filter(
@@ -170,6 +183,7 @@ export const TaskTool = Tool.define(
             ),
           ],
         }))
+      if (extra?.workflowSession) WorkflowSession.mark(nextSession.id)
 
       const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
         Effect.provideService(Database.Service, database),
@@ -194,7 +208,7 @@ export const TaskTool = Tool.define(
         metadata,
       })
 
-      const ops = ctx.extra?.promptOps as TaskPromptOps
+      const ops = extra?.promptOps
       if (!ops) return yield* Effect.fail(new Error("TaskTool requires promptOps in ctx.extra"))
 
       const runTask = Effect.fn("TaskTool.runTask")(function* () {

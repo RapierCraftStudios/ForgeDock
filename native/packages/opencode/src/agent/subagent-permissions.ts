@@ -14,9 +14,11 @@ import type { Agent } from "./agent"
 export function deriveSubagentSessionPermission(input: {
   parentSessionPermission: PermissionV1.Ruleset
   subagent: Agent.Info
+  allowTask?: boolean
+  allowTodo?: boolean
 }): PermissionV1.Ruleset {
-  const canTask = input.subagent.permission.some((rule) => rule.permission === "task")
-  const canTodo = input.subagent.permission.some((rule) => rule.permission === "todowrite")
+  const canTask = input.allowTask || input.subagent.permission.some((rule) => rule.permission === "task")
+  const canTodo = input.allowTodo || input.subagent.permission.some((rule) => rule.permission === "todowrite")
   return [
     ...input.parentSessionPermission.filter(
       (rule) => rule.permission === "external_directory" || rule.action === "deny",

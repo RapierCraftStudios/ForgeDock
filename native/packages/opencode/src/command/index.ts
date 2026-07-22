@@ -10,7 +10,7 @@ import { Skill } from "../skill"
 import PROMPT_INITIALIZE from "./template/initialize.txt"
 import PROMPT_REVIEW from "./template/review.txt"
 import { LegacyEvent } from "@opencode-ai/schema/legacy-event"
-import { workflows as forgeDockWorkflows } from "@/forgedock/workflows.generated"
+import { Workflow } from "@/forgedock/workflow"
 
 type State = {
   commands: Record<string, Info>
@@ -62,6 +62,7 @@ const layer = Layer.effect(
     const config = yield* Config.Service
     const mcp = yield* MCP.Service
     const skill = yield* Skill.Service
+    const workflow = yield* Workflow.Service
 
     const init = Effect.fn("Command.state")(function* (ctx: InstanceContext) {
       const cfg = yield* config.get()
@@ -88,13 +89,15 @@ const layer = Layer.effect(
         hints: hints(PROMPT_REVIEW),
       }
 
-      for (const workflow of forgeDockWorkflows) {
-        commands[workflow.name] = {
-          name: workflow.name,
-          description: workflow.description,
+      for (const item of yield* workflow.list()) {
+        if (item.install === "internal") continue
+        const template = Workflow.commandTemplate(item)
+        commands[item.name] = {
+          name: item.name,
+          description: item.description,
           source: "command",
-          template: workflow.template,
-          hints: hints(workflow.template),
+          template,
+          hints: hints(template),
         }
       }
 
@@ -183,6 +186,10 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = LayerNode.make({ service: Service, layer: layer, deps: [Config.node, MCP.node, Skill.node] })
+export const node = LayerNode.make({
+  service: Service,
+  layer: layer,
+  deps: [Config.node, MCP.node, Skill.node, Workflow.node],
+})
 
 export * as Command from "."

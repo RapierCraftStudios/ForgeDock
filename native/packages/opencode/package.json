@@ -11,8 +11,8 @@
     "test:httpapi": "bun run script/httpapi-exercise.ts --mode coverage --fail-on-missing --fail-on-skip && bun run script/httpapi-exercise.ts --mode auth --fail-on-missing --fail-on-skip && bun run script/httpapi-exercise.ts --mode effect --fail-on-missing --fail-on-skip",
     "bench:test": "bun run script/bench-test-suite.ts",
     "profile:test": "bun run script/profile-test-files.ts",
-    "build": "node ../../../scripts/generate-native-workflows.mjs && bun run script/build.ts",
-    "dev": "node ../../../scripts/generate-native-workflows.mjs && bun run --conditions=browser ./src/index.ts",
+    "build": "node ../../../scripts/generate-native-workflows.mjs --extras && bun run script/build.ts",
+    "dev": "node ../../../scripts/generate-native-workflows.mjs --extras && bun run --conditions=browser ./src/index.ts",
     "dev:temporary": "bun run --conditions=browser ./src/temporary.ts"
   },
   "bin": {
