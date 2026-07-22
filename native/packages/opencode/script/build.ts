@@ -141,6 +141,10 @@ if (!skipInstall) {
   await $`bun install --os="*" --cpu="*" @opentui/core@${pkg.dependencies["@opentui/core"]}`
   await $`bun install --os="*" --cpu="*" @parcel/watcher@${pkg.dependencies["@parcel/watcher"]}`
   await $`bun install --os="*" --cpu="*" @ff-labs/fff-bun@${pkg.dependencies["@ff-labs/fff-bun"]}`
+  // Bun's current process does not refresh package resolution after the
+  // cross-platform installs above. Re-exec once so every target sees them.
+  await $`bun ./script/build.ts ${process.argv.slice(2)} --skip-install`
+  process.exit(0)
 }
 for (const item of targets) {
   const name = [
