@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
   CodexAuthPlugin,
+  buildAuthorizeUrl,
   parseJwtClaims,
   extractAccountIdFromClaims,
   extractAccountId,
@@ -15,6 +16,19 @@ function createTestJwt(payload: object): string {
 }
 
 describe("plugin.codex", () => {
+  test("identifies ForgeDock in the OpenAI authorization request", () => {
+    const url = new URL(
+      buildAuthorizeUrl(
+        "http://localhost:1455/auth/callback",
+        { verifier: "verifier", challenge: "challenge" },
+        "state",
+      ),
+    )
+
+    expect(url.searchParams.get("originator")).toBe("forgedock")
+    expect(url.toString()).not.toContain("originator=opencode")
+  })
+
   test("escapes provider errors in callback HTML", () => {
     const error = `</div><script>alert("xss" & 'more')</script>`
     const html = renderOAuthError(error)

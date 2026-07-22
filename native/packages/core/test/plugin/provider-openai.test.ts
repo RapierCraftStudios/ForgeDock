@@ -7,7 +7,7 @@ import { Integration } from "@opencode-ai/core/integration"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { PluginV2 } from "@opencode-ai/core/plugin"
 import { PluginHost } from "@opencode-ai/core/plugin/host"
-import { OpenAIPlugin } from "@opencode-ai/core/plugin/provider/openai"
+import { OpenAIPlugin, authorizeURL } from "@opencode-ai/core/plugin/provider/openai"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { testEffect } from "../lib/effect"
 import { PluginTestLayer } from "./fixture"
@@ -41,6 +41,20 @@ function fakeSelectorSdk(calls: string[]) {
 }
 
 describe("OpenAIPlugin", () => {
+  it.effect("identifies ForgeDock in browser authorization URLs", () =>
+    Effect.sync(() => {
+      const url = new URL(
+        authorizeURL(
+          "http://localhost:1455/auth/callback",
+          { verifier: "verifier", challenge: "challenge" },
+          "state",
+        ),
+      )
+      expect(url.searchParams.get("originator")).toBe("forgedock")
+      expect(url.toString()).not.toContain("originator=opencode")
+    }),
+  )
+
   it.effect("registers browser and headless ChatGPT OAuth methods", () =>
     Effect.gen(function* () {
       yield* addPlugin()
