@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo-64.png" alt="ForgeDock" width="80" />
+<img src="https://avatars.githubusercontent.com/in/4051319?s=200&v=4" alt="ForgeDock" width="80" />
 
 <h1>ForgeDock</h1>
 
@@ -224,28 +224,21 @@ More ship today (web-property analytics, browser QA sweeps, self-benchmarking) �
 
 ## Install
 
-**Requirements:** [GitHub CLI](https://cli.github.com/) (authenticated) · Node.js ≥ 18.
+**Requirements:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code) · [GitHub CLI](https://cli.github.com/) (authenticated) · Node.js ≥ 18.
 
 ```bash
-npm install -g forgedock
-forgedock-cli
+npx forgedock # checks your environment, installs commands into ~/.claude/commands/ (available in every Claude Code session on this machine), detects your repo, and hands you a reviewed forge.yaml
 ```
 
-`forgedock-cli` opens the ForgeDock CLI and guided setup. It detects the repository,
-checks the native runtime, configures integrations, and generates a reviewed
-`forge.yaml`. The existing `forgedock` command remains as a compatibility alias.
+**Install is always global**, to `~/.claude/commands/`. `--global` is still accepted on the command line for backward compatibility but has no effect — there's no other install location to opt out of.
 
-```bash
-forgedock-cli run work-on 42
-forgedock-cli run-issue 42 --lane staging
-forgedock-cli watch
-```
+> **Want engine-mode dispatch?** `npx forgedock` is transient — the `forgedock` binary isn't persisted in PATH after install. `/orchestrate` and `/autopilot` use agent dispatch mode by default, which is fully functional. To enable engine-mode dispatch (`forgedock run-issue`) with its durable phase table and fail-closed review gate, run `npm install -g forgedock` instead.
 
-Run `forgedock-cli init` afterward to regenerate project configuration.
+One command does everything: it checks your environment, installs the slash commands into Claude Code, detects your repo (owner, branches, paths), and hands you a single annotated `forge.yaml` to review — press Enter to accept. Run `npx forgedock init` any time afterward to re-generate the config only.
 
 Installing also registers a SessionStart hook, so every Claude Code session
 in a forge-managed directory starts already knowing ForgeDock runs it.
-Per-directory control: `forgedock-cli enable` / `disable` / `status`.
+Per-directory control: `npx forgedock enable` / `disable` / `status`.
 
 Then just open Claude Code and run `/work-on <issue>`.
 

@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: runtime, agents, repos, project_board, orchestration, pipeline, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
+# Optional sections: agents, repos, project_board, orchestration, pipeline, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -57,15 +57,6 @@ project:
   # forge_repo: "acme-org/acme-forge"
 
 # =============================================================================
-# RUNTIME (OPTIONAL)
-# ForgeDock's execution backend. "native" is the recommended local runtime;
-# "auto" falls back through compatibility backends when native is unavailable.
-# =============================================================================
-
-runtime:
-  default: "native"
-
-# =============================================================================
 # PATHS (REQUIRED)
 # Local filesystem paths. Used by commands that create worktrees and read files.
 # Commands: work-on (Phase 3E worktree creation), quality-gate, deploy-info
@@ -78,8 +69,8 @@ paths:
 
   # Directory where git worktrees are created for each branch
   # Relative to root, or absolute path
-  # Default: "{root}/.forgedock/worktrees"
-  worktree_base: "/home/youruser/projects/acme-platform/.forgedock/worktrees"
+  # Default: "{root}/.claude/worktrees"
+  worktree_base: "/home/youruser/projects/acme-platform/.claude/worktrees"
 
   # Path to a credentials YAML file for external service authentication
   # Optional — only needed for commands that access analytics, monitoring, etc.

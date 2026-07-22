@@ -393,9 +393,9 @@ export async function detectConfig(cwd = process.cwd()) {
     ? medium(gitRoot, "resolved git repository root", rootWhy)
     : high(cwd, "process.cwd()", "Absolute path passed to detectConfig — the project root");
   const worktreeBase = high(
-    join(gitRoot, ".forgedock", "worktrees"),
+    join(gitRoot, ".claude", "worktrees"),
     "derived from root",
-    `Convention: {root}/.forgedock/worktrees (root = ${gitRoot})`,
+    `Convention: {root}/.claude/worktrees (root = ${gitRoot})`,
   );
 
   // Branch detection

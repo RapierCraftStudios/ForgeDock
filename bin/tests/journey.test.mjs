@@ -74,12 +74,11 @@ describe("writeForgeYaml", () => {
     assert.ok(existsSync(out), "forge.yaml must exist after write");
     assert.ok(!existsSync(out + ".tmp"), ".tmp must be gone after successful write");
   });
-  it("emits all optional sections from forge.yaml.example (#1983)", () => {
+  it("emits all 16 optional sections from forge.yaml.example (#1983)", () => {
     const out = join(dir, "forge.yaml");
     writeForgeYaml(VALUES, [], out);
     const yaml = readFileSync(out, "utf-8");
     const optionalSections = [
-      "RUNTIME",
       "AGENTS",
       "REPOS",
       "PROJECT BOARD",
@@ -122,8 +121,8 @@ describe("writeForgeYaml", () => {
 });
 
 describe("backfillForgeYaml (#1982)", () => {
-  const ALL_OPTIONAL_KEYS = [
-    "runtime", "agents", "repos", "project_board", "pipeline", "services", "review",
+  const ALL_16_KEYS = [
+    "agents", "repos", "project_board", "pipeline", "services", "review",
     "verification", "deploy", "autopilot", "billing", "devdocs",
     "adaptive_scripts", "learned", "index", "attribution", "pattern_feeds",
   ];
@@ -134,7 +133,7 @@ describe("backfillForgeYaml (#1982)", () => {
     assert.ok(!existsSync(join(dir, "forge.yaml")));
   });
 
-  it("adds all optional sections to a minimal (required-only) forge.yaml", () => {
+  it("adds all 16 optional sections to a minimal (required-only) forge.yaml", () => {
     const out = join(dir, "forge.yaml");
     writeFileSync(
       out,
@@ -143,37 +142,37 @@ describe("backfillForgeYaml (#1982)", () => {
     );
     const res = backfillForgeYaml(dir);
     assert.equal(res.present, true);
-    assert.deepEqual([...res.added].sort(), [...ALL_OPTIONAL_KEYS].sort());
+    assert.deepEqual([...res.added].sort(), [...ALL_16_KEYS].sort());
     assert.deepEqual(res.alreadyPresent, []);
 
     const yaml = readFileSync(out, "utf-8");
-    for (const key of ALL_OPTIONAL_KEYS) {
+    for (const key of ALL_16_KEYS) {
       assert.match(yaml, new RegExp(`^#\\s?${key}:`, "m"), `missing backfilled stub for ${key}`);
     }
     // Backfilled sections stay commented out — never parsed as active YAML.
-    for (const key of ALL_OPTIONAL_KEYS) {
+    for (const key of ALL_16_KEYS) {
       assert.doesNotMatch(yaml, new RegExp(`^${key}:`, "m"), `${key} must remain commented out`);
     }
   });
 
-  it("is a no-op when writeForgeYaml() already emitted all optional sections", () => {
+  it("is a no-op when writeForgeYaml() already emitted all 16 sections", () => {
     const out = join(dir, "forge.yaml");
     writeForgeYaml(VALUES, [], out);
     const before = readFileSync(out, "utf-8");
     const res = backfillForgeYaml(dir);
     assert.equal(res.added.length, 0);
-    assert.equal(res.alreadyPresent.length, 17);
+    assert.equal(res.alreadyPresent.length, 16);
     assert.equal(readFileSync(out, "utf-8"), before, "file must be untouched when nothing is missing");
   });
 
   it("adds only the sections missing from a partially-migrated forge.yaml, leaving the rest untouched", () => {
     const out = join(dir, "forge.yaml");
-    // Simulate a pre-#1983 file: required sections + only 2 optional stubs.
+    // Simulate a pre-#1983 file: required sections + only 2 of the 16 optional stubs.
     const original = `project:\n  name: "X"\n  owner: "o"\n  repo: "r"\n  description: "d"\n\npaths:\n  root: "/tmp"\n  worktree_base: "/tmp/wt"\n\nbranches:\n  default: "main"\n  staging: "staging"\n  feature_pattern: "milestone/{slug}"\n\n# repos:\n#   default:\n#     repo: "o/r"\n\n# billing:\n#   enabled: false\n`;
     writeFileSync(out, original, "utf-8");
     const res = backfillForgeYaml(dir);
     assert.deepEqual([...res.alreadyPresent].sort(), ["billing", "repos"]);
-    assert.equal(res.added.length, 15);
+    assert.equal(res.added.length, 14);
     assert.ok(!res.added.includes("repos"));
     assert.ok(!res.added.includes("billing"));
 
@@ -196,7 +195,7 @@ describe("backfillForgeYaml (#1982)", () => {
     const afterFirst = readFileSync(out, "utf-8");
     const res2 = backfillForgeYaml(dir);
     assert.equal(res2.added.length, 0);
-    assert.equal(res2.alreadyPresent.length, 17);
+    assert.equal(res2.alreadyPresent.length, 16);
     assert.equal(readFileSync(out, "utf-8"), afterFirst, "second run must not modify the file");
   });
 

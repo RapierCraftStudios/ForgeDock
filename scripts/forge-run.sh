@@ -14,7 +14,7 @@
 #   This script does NOT invoke LLM agents — it reports what phase the pipeline is
 #   in and what the next action should be. It is designed to be called by any
 #   agent runtime that can execute bash (Aider /run, Cursor terminal, CI runners,
-#   local agent shell) to get deterministic routing information without re-implementing
+#   OpenCode shell) to get deterministic routing information without re-implementing
 #   the phase detection logic.
 #
 # JSON Event Schema:

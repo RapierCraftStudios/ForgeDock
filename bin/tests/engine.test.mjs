@@ -1081,9 +1081,9 @@ describe("runIssue", () => {
       "unprotected local copy in a consumer would silently accept this instead");
     assert.throws(() => VALID_BACKENDS.delete("cli"), TypeError,
       "deleting from VALID_BACKENDS must throw (issue #2075)");
-    assert.equal(VALID_BACKENDS.size, 4,
+    assert.equal(VALID_BACKENDS.size, 3,
       "VALID_BACKENDS contents must be unchanged after the rejected mutation attempts");
-    assert.deepEqual([...VALID_BACKENDS].sort(), ["api", "auto", "cli", "native"],
+    assert.deepEqual([...VALID_BACKENDS].sort(), ["api", "auto", "cli"],
       "VALID_BACKENDS values must be unchanged after the rejected mutation attempts");
     assert.equal(VALID_BACKENDS.constructor, Set,
       "VALID_BACKENDS.constructor must still be Set — the readOnlySet() Proxy " +

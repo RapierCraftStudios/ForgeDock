@@ -91,7 +91,7 @@ Local filesystem paths. Commands use these to locate the project, create git wor
 ```yaml
 paths:
   root: "/home/youruser/projects/acme-platform"
-  worktree_base: "/home/youruser/projects/acme-platform/.forgedock/worktrees"
+  worktree_base: "/home/youruser/projects/acme-platform/.claude/worktrees"
   # credentials:
   #   file: "/home/youruser/credentials.yaml"
 ```
@@ -99,7 +99,7 @@ paths:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `root` | string (absolute path) | **Yes** | Absolute path to the project root. Used as the base for `git worktree add` |
-| `worktree_base` | string (absolute path) | **Yes** | Directory where per-branch git worktrees are created. Default: `{root}/.forgedock/worktrees` |
+| `worktree_base` | string (absolute path) | **Yes** | Directory where per-branch git worktrees are created. Default: `{root}/.claude/worktrees` |
 | `credentials.file` | string (absolute path) | No | Path to a YAML credentials file for analytics/monitoring tools. **Do not commit.** |
 
 **Commands that use this section**: `work-on` (Phase 3E), `quality-gate`, `deploy-info`
@@ -874,7 +874,7 @@ Every leaf value in a `ConfigDraft` is a **ConfigField** object:
   },
   paths: {
     root:         { value: "/home/user/acme",                      confidence: "high", source: "process.cwd()", why: "Absolute path passed to detectConfig — the project root" },
-    worktreeBase: { value: "/home/user/acme/.forgedock/worktrees", confidence: "high", source: "derived from root", why: "Convention: {root}/.forgedock/worktrees" },
+    worktreeBase: { value: "/home/user/acme/.claude/worktrees",    confidence: "high", source: "derived from root", why: "Convention: {root}/.claude/worktrees" },
   },
   branches: {
     default: { value: "main",    confidence: "high",   source: "git symbolic-ref refs/remotes/origin/HEAD", why: "Remote HEAD points to main" },

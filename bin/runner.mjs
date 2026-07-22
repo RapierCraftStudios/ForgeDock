@@ -49,7 +49,7 @@ import {
 } from "fs";
 import { join, dirname, basename, relative, isAbsolute, extname } from "path";
 import os from "os";
-import { execSync, spawn, spawnSync } from "child_process";
+import { execSync, spawnSync } from "child_process";
 import { parseForgeYaml, resolveModelAlias } from "./forge-utils.mjs";
 import { DEFAULT_SPAWN_MAX_BUFFER_BYTES } from "./cli-spawn-shared.mjs";
 
@@ -124,7 +124,7 @@ function readOnlySet(values) {
  * be one of: ..." error-message wording — for every other consumer
  * simultaneously. Treat it as immutable; mutation attempts throw.
  */
-export const VALID_BACKENDS = readOnlySet(["native", "cli", "api", "auto"]);
+export const VALID_BACKENDS = readOnlySet(["cli", "api", "auto"]);
 // Per-process memoization for isClaudeCliAvailable(), keyed by `cwd` (issue
 // #2011). `runCommand()` calls resolveBackend() — and therefore, for the
 // default "auto" backend, isClaudeCliAvailable() — unconditionally on every
@@ -153,7 +153,6 @@ export const VALID_BACKENDS = readOnlySet(["native", "cli", "api", "auto"]);
 const CLI_AVAILABILITY_CACHE_TTL_MS = 60_000;
 const CLI_AVAILABILITY_CACHE_MAX_SIZE = 100;
 const cliAvailabilityCache = new Map();
-const nativeAvailabilityCache = new Map();
 // Windows file extensions `spawnSync(shell:false)` can actually launch:
 // native executables (`.exe`, `.com`) directly, and `.cmd`/`.bat` via Node's
 // own built-in special-cased re-exec through cmd.exe (see the comment on
@@ -401,75 +400,6 @@ export function resolveClaudeCliBinary(cwd = process.cwd(), opts = {}) {
   return cliAvailabilityCache.get(cwd)?.cliPath ?? null;
 }
 
-/** Resolve runtime.default from forge.yaml without making configuration mandatory. */
-export function resolveConfiguredBackend(cwd) {
-  try {
-    const forgeYamlPath = join(cwd, "forge.yaml");
-    if (!existsSync(forgeYamlPath)) return null;
-    const configured = parseForgeYaml(readFileSync(forgeYamlPath, "utf-8"))?.runtime?.default;
-    return typeof configured === "string" && VALID_BACKENDS.has(configured)
-      ? configured
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Resolve the private runtime used by ForgeDock's native backend. Product
- * surfaces deliberately call this backend "native"; the executable is an
- * implementation detail and can be replaced with FORGEDOCK_RUNTIME_BIN.
- */
-export function isNativeRuntimeAvailable(
-  cwd = process.cwd(),
-  { execImpl = execSync } = {},
-) {
-  const configuredBin = process.env.FORGEDOCK_RUNTIME_BIN;
-  if (configuredBin) return existsSync(configuredBin);
-
-  const cached = nativeAvailabilityCache.get(cwd);
-  if (cached && Date.now() - cached.cachedAt < CLI_AVAILABILITY_CACHE_TTL_MS) {
-    return cached.available;
-  }
-
-  const resolveCmd = process.platform === "win32" ? "where opencode" : "command -v opencode";
-  let available = false;
-  let cliPath = null;
-  try {
-    const raw = execImpl(`${resolveCmd} && opencode --version`, {
-      cwd,
-      stdio: ["ignore", "pipe", "ignore"],
-      encoding: "utf-8",
-      timeout: CLI_PROBE_TIMEOUT_MS,
-    });
-    available = true;
-    cliPath = selectResolvedCliPath(parseProbeOutput(raw));
-
-    // npm's Windows shim is a .cmd file, which async spawn(shell:false)
-    // cannot launch. Resolve the package's native executable instead so
-    // untrusted workflow arguments never pass through cmd.exe.
-    if (process.platform === "win32" && cliPath?.toLowerCase().endsWith(".cmd")) {
-      const nativeExe = join(dirname(cliPath), "node_modules", "opencode-ai", "bin", "opencode.exe");
-      if (existsSync(nativeExe)) cliPath = nativeExe;
-    }
-  } catch {
-    available = false;
-  }
-
-  nativeAvailabilityCache.delete(cwd);
-  nativeAvailabilityCache.set(cwd, { available, cliPath, cachedAt: Date.now() });
-  if (nativeAvailabilityCache.size > CLI_AVAILABILITY_CACHE_MAX_SIZE) {
-    nativeAvailabilityCache.delete(nativeAvailabilityCache.keys().next().value);
-  }
-  return available;
-}
-
-export function resolveNativeRuntimeBinary(cwd = process.cwd(), opts = {}) {
-  if (process.env.FORGEDOCK_RUNTIME_BIN) return process.env.FORGEDOCK_RUNTIME_BIN;
-  isNativeRuntimeAvailable(cwd, opts);
-  return nativeAvailabilityCache.get(cwd)?.cliPath ?? null;
-}
-
 /**
  * Shared backend-resolution primitive (issue #2026) used by both
  * `resolveBackend()` (below, `forgedock run`'s engine ladder — issue #2003)
@@ -550,9 +480,8 @@ export function resolveBackend({ requested = "auto", cwd = process.cwd() } = {})
       `Invalid backend "${requested}". Must be one of: ${[...VALID_BACKENDS].join(", ")}.`,
     );
   }
-  if (requested !== "auto") return requested;
-  if (isNativeRuntimeAvailable(cwd)) return "native";
   return resolveBackendLadder({
+    override: requested === "auto" ? undefined : requested,
     validOverrides: new Set(["cli", "api"]),
     cwd,
     cliFallback: () => "api",
@@ -1278,333 +1207,6 @@ export function runCliBackend({
   }
 }
 
-/**
- * Execute one ForgeDock workflow with the native runtime. Unlike the legacy
- * CLI adapter this is asynchronous, so engine lease heartbeats and
- * cancellation timers continue to run while the agent is working.
- */
-const NATIVE_ENV_ALLOWLIST = [
-  "PATH",
-  "HOME",
-  "USERPROFILE",
-  "APPDATA",
-  "LOCALAPPDATA",
-  "XDG_CONFIG_HOME",
-  "XDG_CACHE_HOME",
-  "XDG_DATA_HOME",
-  "TEMP",
-  "TMP",
-  "TMPDIR",
-  "SYSTEMROOT",
-  "COMSPEC",
-  "PATHEXT",
-  "LANG",
-  "LC_ALL",
-  "TERM",
-  "COLORTERM",
-  "NO_COLOR",
-  "CI",
-  "GH_TOKEN",
-  "GITHUB_TOKEN",
-  "SSH_AUTH_SOCK",
-];
-
-/** Build the least-privilege environment inherited by native agent workers. */
-export function buildNativeChildEnv(env = process.env) {
-  const childEnv = {};
-  for (const key of NATIVE_ENV_ALLOWLIST) {
-    if (env[key] !== undefined) childEnv[key] = env[key];
-  }
-  const extra = String(env.FORGEDOCK_PASSTHROUGH_ENV || "")
-    .split(",")
-    .map((key) => key.trim())
-    .filter((key) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key));
-  for (const key of extra) {
-    if (env[key] !== undefined) childEnv[key] = env[key];
-  }
-  return childEnv;
-}
-
-function waitForChildExit(child, timeoutMs) {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      child.removeListener?.("close", finish);
-      resolve();
-    };
-    const timer = setTimeout(finish, timeoutMs);
-    timer.unref?.();
-    child.once?.("close", finish);
-  });
-}
-
-/** Terminate the complete native worker tree before the engine releases it. */
-export async function terminateNativeProcessTree(child) {
-  if (process.platform === "win32" && Number.isInteger(child?.pid)) {
-    const killed = await new Promise((resolve) => {
-      let killer;
-      try {
-        killer = spawn("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], {
-          shell: false,
-          windowsHide: true,
-          stdio: "ignore",
-        });
-      } catch {
-        child.kill?.("SIGTERM");
-        resolve(false);
-        return;
-      }
-      const timer = setTimeout(() => resolve(false), 2_000);
-      timer.unref?.();
-      killer.once("close", (status) => {
-        clearTimeout(timer);
-        resolve(status === 0);
-      });
-      killer.once("error", () => {
-        child.kill?.("SIGTERM");
-        clearTimeout(timer);
-        resolve(false);
-      });
-    });
-    await waitForChildExit(child, killed ? 500 : 750);
-    if (child?.exitCode == null && child?.signalCode == null) {
-      throw new Error("native worker process tree is still running after taskkill");
-    }
-    return;
-  }
-
-  if (process.platform !== "win32" && Number.isInteger(child?.pid)) {
-    const groupAlive = () => {
-      try {
-        process.kill(-child.pid, 0);
-        return true;
-      } catch (err) {
-        return err?.code !== "ESRCH";
-      }
-    };
-    try {
-      process.kill(-child.pid, "SIGTERM");
-    } catch (err) {
-      if (err?.code !== "ESRCH") child.kill?.("SIGTERM");
-    }
-    await waitForChildExit(child, 750);
-    if (groupAlive()) {
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch (err) {
-        if (err?.code !== "ESRCH") child.kill?.("SIGKILL");
-      }
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-    if (groupAlive()) {
-      throw new Error("native worker process group is still running after SIGKILL");
-    }
-    return;
-  }
-
-  try {
-    child.kill?.("SIGTERM");
-  } catch {
-    child.kill?.("SIGTERM");
-  }
-  await waitForChildExit(child, 750);
-  if (child?.exitCode == null && child?.signalCode == null) {
-    try {
-      child.kill?.("SIGKILL");
-    } catch {
-      child.kill?.("SIGKILL");
-    }
-    await waitForChildExit(child, 250);
-  }
-  if (child?.exitCode == null && child?.signalCode == null) {
-    throw new Error("native worker process group is still running after SIGKILL");
-  }
-}
-
-export function runNativeBackend({
-  spec,
-  userMessage,
-  args = [],
-  cwd,
-  model,
-  logger = console,
-  bin,
-  spawnFn = spawn,
-  terminateFn = terminateNativeProcessTree,
-}) {
-  const brandOutput = (value) => String(value ?? "").replace(/opencode/giu, "ForgeDock");
-  const rawTimeout = parseInt(process.env.FORGEDOCK_CLI_TIMEOUT_MS, 10);
-  const timeoutMs =
-    Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : DEFAULT_CLI_TIMEOUT_MS;
-  const runtimeBin = bin || process.env.FORGEDOCK_RUNTIME_BIN || "opencode";
-  const commandSegments = String(spec.name).split(/[\\/]/).filter(Boolean);
-  let commandsDir = dirname(spec.path);
-  for (let i = 1; i < commandSegments.length; i++) commandsDir = dirname(commandsDir);
-  const runtimeArgs = [
-    "run",
-    `Execute the attached ForgeDock workflow specification for ${userMessage}. ` +
-      `Treat it as authoritative, complete every required phase, and present all output as ForgeDock. ` +
-      `Resolve Skill(\"name\") by loading ${commandsDir}/name.md. Resolve nested skills from the same ` +
-      `registry. Use isolated child agents for Agent/Task review boundaries; if isolation is required but ` +
-      `unavailable, fail closed instead of reviewing inline.`,
-    "--file",
-    spec.path,
-    "--format",
-    "default",
-    "--title",
-    `ForgeDock /${spec.name}`,
-    "--auto",
-  ];
-  if (model) runtimeArgs.push("--model", model);
-
-  const childEnv = buildNativeChildEnv();
-
-  return new Promise((resolve, reject) => {
-    let child;
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    let timer;
-    const signalHandlers = new Map();
-
-    const removeSignalHandlers = () => {
-      for (const [signal, handler] of signalHandlers) {
-        process.removeListener(signal, handler);
-      }
-      signalHandlers.clear();
-    };
-
-    const finishError = (message, code = "CLI_BACKEND_FAILED") => {
-      if (settled) return;
-      settled = true;
-      if (timer) clearTimeout(timer);
-      removeSignalHandlers();
-      const err = new Error(message);
-      err.code = code;
-      reject(err);
-    };
-
-    try {
-      child = spawnFn(runtimeBin, runtimeArgs, {
-        cwd,
-        env: childEnv,
-        shell: false,
-        detached: process.platform !== "win32",
-        windowsHide: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    } catch (err) {
-      const wrapped = new Error(
-        `Failed to start the ForgeDock native runtime: ${brandOutput(err.message)}`,
-      );
-      wrapped.code = "CLI_BACKEND_FAILED";
-      reject(wrapped);
-      return;
-    }
-
-    for (const signal of ["SIGINT", "SIGTERM"]) {
-      const handler = async () => {
-        try {
-          await terminateFn(child);
-        } catch (err) {
-          process.stderr.write(
-            `ForgeDock could not confirm native worker termination: ${brandOutput(err.message)}\n`,
-          );
-        } finally {
-          removeSignalHandlers();
-          process.kill(process.pid, signal);
-        }
-      };
-      signalHandlers.set(signal, handler);
-      process.once(signal, handler);
-    }
-
-    let timedOut = false;
-    timer = setTimeout(async () => {
-      timedOut = true;
-      let terminationConfirmed = true;
-      try {
-        await terminateFn(child);
-      } catch {
-        terminationConfirmed = false;
-        try {
-          child.kill?.("SIGKILL");
-        } catch {
-          // The timeout remains authoritative even when termination reports an error.
-        }
-      }
-      const partial = sanitizeOutputExcerptForLog(brandOutput((stdout + stderr).trim()));
-      finishError(
-        `ForgeDock native runtime timed out after ${Math.round(timeoutMs / 1000)}s. ` +
-          (terminationConfirmed
-            ? "The worker process tree was stopped."
-            : "Worker termination could not be confirmed; manual process cleanup is required.") +
-          (partial ? ` Partial output: ${partial}` : ""),
-      );
-    }, timeoutMs);
-
-    const append = (current, chunk) => {
-      const next = current + String(chunk ?? "");
-      return next.length > DEFAULT_SPAWN_MAX_BUFFER_BYTES
-        ? next.slice(next.length - DEFAULT_SPAWN_MAX_BUFFER_BYTES)
-        : next;
-    };
-    child.stdout?.on("data", (chunk) => {
-      stdout = append(stdout, chunk);
-    });
-    child.stderr?.on("data", (chunk) => {
-      stderr = append(stderr, chunk);
-    });
-    child.once("error", (err) => {
-      if (timedOut) return;
-      finishError(`Failed to start the ForgeDock native runtime: ${brandOutput(err.message)}`);
-    });
-    child.once("close", (status, signal) => {
-      if (settled || timedOut) return;
-      settled = true;
-      clearTimeout(timer);
-      removeSignalHandlers();
-      const output = stdout.trim();
-      const diagnostics = stderr.trim();
-      if (status !== 0) {
-        const excerpt = sanitizeOutputExcerptForLog(brandOutput((output + diagnostics).trim()));
-        const err = new Error(
-          `ForgeDock native runtime exited with status ${status ?? "?"}` +
-            (signal ? `, signal ${signal}` : "") +
-            (excerpt ? `. Output: ${excerpt}` : ". No output was captured."),
-        );
-        err.code = "CLI_BACKEND_FAILED";
-        reject(err);
-        return;
-      }
-
-      if (output) logger.log(brandOutput(output));
-      if (diagnostics) logger.log(sanitizeOutputExcerptForLog(brandOutput(diagnostics)));
-      logger.log(
-        renderSummaryCard({
-          command: spec.name,
-          args,
-          iterations: 1,
-          stopReason: "native_exit_0",
-          usage: null,
-        }),
-      );
-      resolve({
-        status: "complete",
-        command: spec.name,
-        iterations: 1,
-        stopReason: "native_exit_0",
-        usage: null,
-        model: model || "runtime-default",
-        backend: "native",
-      });
-    });
-  });
-}
-
 // ---------------------------------------------------------------------------
 // Command spec resolution
 // ---------------------------------------------------------------------------
@@ -2238,29 +1840,23 @@ export function getToolHandlers(cwd) {
  * CLI's own native tool set and receives the prompt via
  * `--append-system-prompt-file`, not inline (issue #2019).
  *
- * @param {{spec: object, systemPrompt: string, userMessage: string, model: string, maxIterations: number, backend?: "native"|"cli"|"api"}} ctx
+ * @param {{spec: object, systemPrompt: string, userMessage: string, model: string, maxIterations: number, backend?: "cli"|"api"}} ctx
  * @returns {string}
  */
 export function renderDryRun(ctx) {
   const { spec, systemPrompt, userMessage, model, maxIterations, backend } = ctx;
   const backendLine =
-    backend === "native"
-      ? `│ backend:        native (ForgeDock managed runtime)`
-      : backend === "cli"
+    backend === "cli"
       ? `│ backend:        cli (claude CLI detected — no ANTHROPIC_API_KEY needed)`
       : backend === "api"
         ? `│ backend:        api (ANTHROPIC_API_KEY required)`
         : null;
   const toolsLine =
-    backend === "native"
-      ? `│ tools:          ForgeDock native workspace tools`
-      : backend === "cli"
+    backend === "cli"
       ? `│ tools:          claude CLI's native tools (Read/Write/Edit/Bash/etc. — not TOOL_DEFINITIONS below)`
       : `│ tools:          ${TOOL_DEFINITIONS.map((t) => t.name).join(", ")}`;
   const systemPromptLine =
-    backend === "native"
-      ? `│ workflow:       ${systemPrompt.length} chars (attached from the ForgeDock command registry)`
-      : backend === "cli"
+    backend === "cli"
       ? `│ system prompt:  ${systemPrompt.length} chars (appended to CLI's default via --append-system-prompt-file)`
       : `│ system prompt:  ${systemPrompt.length} chars`;
   return [
@@ -2275,7 +1871,8 @@ export function renderDryRun(ctx) {
     `│ user message:   ${userMessage}`,
     `└─────────────────────────────────────────────────────────`,
     ``,
-    `(dry-run) No agent process or API call was started.`,
+    `(dry-run) No API call made. Set ANTHROPIC_API_KEY and install`,
+    `@anthropic-ai/sdk, then drop --dry-run to execute the pipeline.`,
   ]
     .filter((line) => line !== null && line !== undefined)
     .join("\n");
@@ -2333,10 +1930,10 @@ export function renderSummaryCard(ctx) {
  *   `cwd`) > hardcoded DEFAULT_MODEL.
  * @param {number} [opts.maxIterations]      - Tool-loop bound.
  * @param {boolean} [opts.dryRun]            - Preview without an API call.
- * @param {string} [opts.backend]            - "native" | "cli" | "api" | "auto" (default
+ * @param {string} [opts.backend]            - "cli" | "api" | "auto" (default
  *   "auto"). Resolution order when omitted: $FORGEDOCK_BACKEND env > "auto".
- *   "auto" prefers ForgeDock's native runtime, then the local Claude Code
- *   CLI, and finally the API backend. This
+ *   "auto" prefers the local Claude Code CLI when detected (no
+ *   ANTHROPIC_API_KEY needed), else falls back to the API backend. This
  *   precedence is intentional/shipped (issue #2003's accepted acceptance
  *   criteria) and is NOT changed by issue #2020 — that issue only adds a
  *   discoverability notice (below) for the case where the ladder silently
@@ -2357,7 +1954,7 @@ export async function runCommand(opts = {}) {
       DEFAULT_MODEL,
     maxIterations = DEFAULT_MAX_ITERATIONS,
     dryRun = false,
-    backend = process.env.FORGEDOCK_BACKEND || resolveConfiguredBackend(cwd) || "auto",
+    backend = process.env.FORGEDOCK_BACKEND || "auto",
     logger = console,
   } = opts;
 
@@ -2379,23 +1976,12 @@ export async function runCommand(opts = {}) {
   const resolvedBackend = resolveBackend({ requested: backend, cwd });
 
   if (dryRun) {
-    const previewModel =
-      resolvedBackend === "native"
-        ? Object.prototype.hasOwnProperty.call(opts, "model")
-          ? model
-          : process.env.FORGEDOCK_MODEL || "runtime-default"
-        : model;
     logger.log(
       renderDryRun({
         spec,
-        systemPrompt:
-          resolvedBackend === "cli"
-            ? cliSystemPrompt
-            : resolvedBackend === "native"
-              ? spec.content
-              : systemPrompt,
+        systemPrompt: resolvedBackend === "cli" ? cliSystemPrompt : systemPrompt,
         userMessage,
-        model: previewModel,
+        model,
         maxIterations,
         backend: resolvedBackend,
       }),
@@ -2405,33 +1991,9 @@ export async function runCommand(opts = {}) {
       command: spec.name,
       args,
       specPath: spec.path,
-      model: previewModel,
+      model,
       backend: resolvedBackend,
     };
-  }
-
-  if (resolvedBackend === "native") {
-    const resolvedBin = resolveNativeRuntimeBinary(cwd);
-    if (!resolvedBin) {
-      const err = new Error(
-        "ForgeDock native runtime is unavailable. Run `forgedock doctor`, " +
-          "set FORGEDOCK_RUNTIME_BIN, or select --backend cli|api.",
-      );
-      err.code = "CLI_BACKEND_FAILED";
-      throw err;
-    }
-    const requestedModel = Object.prototype.hasOwnProperty.call(opts, "model")
-      ? model
-      : process.env.FORGEDOCK_MODEL || undefined;
-    return runNativeBackend({
-      spec,
-      userMessage,
-      args,
-      cwd,
-      model: requestedModel,
-      logger,
-      bin: resolvedBin,
-    });
   }
 
   if (resolvedBackend === "cli") {
@@ -2502,8 +2064,9 @@ export async function runCommand(opts = {}) {
 
   if (!apiKey) {
     const err = new Error(
-        "No executable backend is configured. Run `forgedock doctor`, pass --dry-run to preview, " +
-        "or select --backend native|cli after authenticating that runtime.",
+      "ANTHROPIC_API_KEY is not set. Export your Anthropic API key to run the live pipeline, " +
+        "pass --dry-run to preview, or use --backend cli (requires the `claude` CLI on PATH, " +
+        "already authenticated) to run without an API key.",
     );
     err.code = "NO_API_KEY";
     throw err;

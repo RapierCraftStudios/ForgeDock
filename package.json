@@ -1,13 +1,12 @@
 {
   "name": "forgedock",
   "version": "1.6.0",
-  "description": "Autonomous software development control plane with durable state, independent review, and GitHub-backed institutional memory.",
+  "description": "Autonomous dev pipeline for Claude Code. GitHub as institutional memory — every issue, PR, and annotation survives context resets and makes the next agent smarter.",
   "bin": {
-    "forgedock-cli": "bin/forgedock.mjs",
     "forgedock": "bin/forgedock.mjs"
   },
   "keywords": [
-    "development-orchestration",
+    "claude-code",
     "ai-agents",
     "autonomous-coding",
     "github-automation",
@@ -16,8 +15,8 @@
     "code-review",
     "llm",
     "knowledge-graph",
-    "multi-provider",
-    "agent-runtime",
+    "claude",
+    "anthropic",
     "agentic-ai",
     "devtools",
     "automation"
@@ -43,7 +42,6 @@
     "scripts/",
     "!scripts/refresh-bot-token.sh",
     "templates/",
-    "assets/logo-64.png",
     "LICENSE",
     "README.md"
   ],

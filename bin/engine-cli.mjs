@@ -325,7 +325,7 @@ export function lastLocalRun(dir) {
  * Flags:
  *   --lane <lane>          Required — e.g. `main` or `staging`.
  *   --repo <owner/repo>    Optional — must match the cwd-resolved repo (forge#1593).
- *   --backend <native|cli|api|auto> Optional. Forwarded to every phase's
+ *   --backend <cli|api|auto>  Optional (forge#2028). Forwarded to every phase's
  *                          `runCommand()` call. Omit to keep runner.mjs's own
  *                          default ("auto" ladder — probes the `claude` CLI, falls
  *                          back to the API). Mirrors `bin/forgedock.mjs`'s `run()`
@@ -405,7 +405,7 @@ export async function runFromCli(argv, deps = {}) {
 }
 
 /**
- * `forgedock resume-stalled [--dry-run] [--lane <lane>] [--repo <owner/repo>] [--backend <backend>] [--model <model>]`
+ * `forgedock resume-stalled [--dry-run] [--lane <lane>] [--repo <owner/repo>]`
  *
  * Enumerates all open issues carrying non-terminal workflow labels, reads each
  * issue's FORGE:STATE block via the projector, identifies those with an expired
@@ -418,8 +418,6 @@ export async function runFromCli(argv, deps = {}) {
  *               (the cwd git remote) — cross-repo dispatch is refused (forge#1593),
  *               since state reads/writes are cwd-scoped and would otherwise silently
  *               target the wrong repo. Omit --repo to operate on the cwd-resolved repo.
- *   --backend   Preserve an explicit execution backend for every resumed issue.
- *   --model     Preserve an explicit runtime model for every resumed issue.
  *
  * Per-issue dispatch failures are caught and isolated — one issue's engine error
  * (e.g. NO_API_KEY/NO_SDK or any other uncaught phase error from runIssue) does
@@ -436,8 +434,6 @@ export async function resumeStalledFromCli(argv, deps = {}) {
   const lane   = flag(argv, "--lane");
   if (!lane) throw new Error("--lane is required for resume-stalled: e.g. --lane main or --lane staging.");
   const repo   = flag(argv, "--repo");
-  const backend = flag(argv, "--backend");
-  const model = flag(argv, "--model");
 
   const io = deps.io ?? makeIo();
   await assertRepoMatchesCwd(io, repo);
@@ -493,14 +489,7 @@ export async function resumeStalledFromCli(argv, deps = {}) {
   for (const issue of stalled) {
     console.log(`resume-stalled: dispatching #${issue} …`);
     try {
-      await dispatch([
-        String(issue),
-        "--lane",
-        lane,
-        ...(repo ? ["--repo", repo] : []),
-        ...(backend ? ["--backend", backend] : []),
-        ...(model ? ["--model", model] : []),
-      ]);
+      await dispatch([String(issue), "--lane", lane, ...(repo ? ["--repo", repo] : [])]);
       dispatched.push(issue);
     } catch (err) {
       const message = err?.message ?? String(err);

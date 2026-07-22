@@ -14,9 +14,6 @@
  */
 
 import readline from "readline";
-import { readFileSync } from "fs";
-import { fileURLToPath } from "url";
-import { dirname, join } from "path";
 
 // ---------------------------------------------------------------------------
 // ANSI detection — computed once at module load
@@ -1505,60 +1502,23 @@ const LOGO_PIXELS = [
 ];
 
 /**
- * Chrome palette shared with the cinematic ForgeDock identity.
+ * Gradient palette for the F-monogram — interpolates from bright ice-blue
+ * at the top to deep ocean-blue at the bottom, creating a metallic sheen.
  *
  * Each entry is [R, G, B] for the corresponding pixel row pair.
  */
 const LOGO_GRADIENT = [
-  [247, 243, 234],
-  [232, 225, 212],
-  [217, 207, 186],
-  [198, 187, 165],
-  [181, 168, 144],
-  [169, 154, 130],
-  [143, 129, 108],
-  [120, 107, 89],
-  [103, 91, 75],
-  [82, 72, 59],
+  [150, 215, 255],  // rows  0-1: ice blue (highlight)
+  [140, 208, 255],  // rows  2-3
+  [128, 198, 255],  // rows  4-5
+  [115, 185, 255],  // rows  6-7
+  [100, 172, 250],  // rows  8-9: brand blue
+  [85, 158, 240],   // rows 10-11
+  [68, 140, 228],   // rows 12-13
+  [52, 122, 215],   // rows 14-15
+  [40, 108, 200],   // rows 16-17
+  [35, 95, 190],    // rows 18-19: deep blue
 ];
-
-const LOGO_ASSET = join(dirname(fileURLToPath(import.meta.url)), "..", "assets", "logo-64.png");
-let logoAssetBase64;
-
-/** Detect a terminal protocol that can display the official ForgeDock PNG. */
-export function terminalImageProtocol(env = process.env, stdout = process.stdout) {
-  if (stdout.isTTY !== true || env.NO_COLOR || env.FORGEDOCK_NO_IMAGES) return null;
-  if (env.KITTY_WINDOW_ID || env.TERM === "xterm-kitty") return "kitty";
-  if (env.TERM_PROGRAM === "iTerm.app" || env.WEZTERM_PANE) return "iterm";
-  return null;
-}
-
-/** Render the official PNG through Kitty/iTerm2 protocols when available. */
-export function renderTerminalLogoImage(
-  protocol = terminalImageProtocol(),
-  { readFile = readFileSync } = {},
-) {
-  if (!protocol) return "";
-  try {
-    logoAssetBase64 ||= readFile(LOGO_ASSET).toString("base64");
-  } catch {
-    return "";
-  }
-  if (protocol === "iterm") {
-    return `\x1b]1337;File=inline=1;width=12;height=6;preserveAspectRatio=1:${logoAssetBase64}\x07\n`;
-  }
-  if (protocol === "kitty") {
-    const chunks = logoAssetBase64.match(/.{1,4096}/g) || [];
-    return chunks
-      .map((chunk, index) => {
-        const more = index < chunks.length - 1 ? 1 : 0;
-        const params = index === 0 ? `a=T,f=100,t=d,c=12,r=6,q=2,m=${more}` : `m=${more}`;
-        return `\x1b_G${params};${chunk}\x1b\\`;
-      })
-      .join("") + "\n\n\n\n\n\n";
-  }
-  return "";
-}
 
 /**
  * Render the F-monogram as half-block art with per-row gradient colors.
@@ -1690,13 +1650,6 @@ export function renderLogo({ version = "", context = "" } = {}) {
     : DEFAULT_TAGLINE;
   const versionStr = version ? `ForgeDock · v${version}` : "ForgeDock";
 
-  const nativeImage = renderTerminalLogoImage();
-  if (nativeImage) {
-    const brand = gradientText("FORGEDOCK", [255, 77, 0], [255, 209, 102]);
-    const versionLine = version ? `\x1b[2mv${version}\x1b[0m\n` : "";
-    return `${nativeImage}${brand}\n${versionLine}\x1b[2m${tagline}\x1b[0m`;
-  }
-
   if (!USE_TRUECOLOR) {
     // Plain text fallback — NO_COLOR, non-TTY, or 256-color terminal
     return `${versionStr}\n${tagline}`;
@@ -1709,11 +1662,11 @@ export function renderLogo({ version = "", context = "" } = {}) {
   // Text lines to appear to the right of the logo (vertically centered)
   const brandLine = gradientText(
     "FORGEDOCK",
-    [255, 77, 0],
-    [255, 209, 102],
+    [150, 215, 255], // ice blue
+    [35, 95, 190],   // deep blue
   );
   const versionLine = version
-    ? `\x1b[2m\x1b[38;2;255;140;26mv${version}\x1b[0m`
+    ? `\x1b[2m\x1b[38;2;88;166;255mv${version}\x1b[0m`
     : "";
   const taglineLine = `\x1b[2m${tagline}\x1b[0m`;
 

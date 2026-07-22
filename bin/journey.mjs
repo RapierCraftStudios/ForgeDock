@@ -24,7 +24,7 @@ function todo(key, low) {
 }
 
 /**
- * Ordered list of optional forge.yaml sections. Each entry is a
+ * Ordered list of the 16 optional forge.yaml sections. Each entry is a
  * self-contained, fully-commented stub block (banner + example content).
  * This is the single source of truth for optional-section text, shared by
  * writeForgeYaml() (full-file generation for `npx forgedock init`) and
@@ -40,15 +40,6 @@ function todo(key, low) {
  * @type {Array<{ key: string, block: (v: object) => string }>}
  */
 const OPTIONAL_SECTIONS = [
-  {
-    key: "runtime",
-    block: () => `# =============================================================================
-# RUNTIME (OPTIONAL) — ForgeDock execution backend.
-# =============================================================================
-
-# runtime:
-#   default: "native"`,
-  },
   {
     key: "agents",
     block: () => `# =============================================================================
@@ -285,7 +276,7 @@ export function writeForgeYaml(v, lowConfidenceKeys, outputPath) {
 # Fields marked with TODO comments below were guessed — verify them.
 #
 # Required sections: project, paths, branches
-# Optional sections: runtime, agents, repos, project_board, pipeline, services, review,
+# Optional sections: agents, repos, project_board, pipeline, services, review,
 #   verification, deploy, autopilot, billing, devdocs, adaptive_scripts,
 #   learned, index, attribution, pattern_feeds
 #

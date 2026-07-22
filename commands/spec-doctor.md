@@ -269,11 +269,10 @@ DOCTOR_BRANCH="spec-doctor/${SPEC_SLUG}-$(date +%Y%m%d)"
 
 # Branch from staging (fast lane — spec-evolution PRs never auto-merge,
 # so they are reviewed by a human before reaching main via staging→main)
-mkdir -p ".forgedock/worktrees/$(dirname "$DOCTOR_BRANCH")"
-git worktree add ".forgedock/worktrees/${DOCTOR_BRANCH}" -b "$DOCTOR_BRANCH" "origin/$STAGING_BRANCH" 2>/dev/null \
-  || git worktree add ".forgedock/worktrees/${DOCTOR_BRANCH}" "$DOCTOR_BRANCH"
+git worktree add ".claude/worktrees/${DOCTOR_BRANCH}" -b "$DOCTOR_BRANCH" "origin/$STAGING_BRANCH" 2>/dev/null \
+  || git worktree add ".claude/worktrees/${DOCTOR_BRANCH}" "$DOCTOR_BRANCH"
 
-DOCTOR_WORKTREE="$REPO_PATH/.forgedock/worktrees/${DOCTOR_BRANCH}"
+DOCTOR_WORKTREE="$REPO_PATH/.claude/worktrees/${DOCTOR_BRANCH}"
 echo "Created worktree: $DOCTOR_WORKTREE on branch $DOCTOR_BRANCH"
 ```
 
@@ -397,7 +396,7 @@ After merge, clean up with:
 
 ```bash
 cd "$REPO_PATH"
-git worktree remove ".forgedock/worktrees/${DOCTOR_BRANCH}" --force
+git worktree remove ".claude/worktrees/${DOCTOR_BRANCH}" --force
 git branch -D "$DOCTOR_BRANCH" 2>/dev/null || true
 ```
 

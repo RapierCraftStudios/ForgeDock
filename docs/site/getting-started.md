@@ -107,7 +107,7 @@ project:
 
 paths:
   root: "/path/to/my-app"
-  worktree_base: "/path/to/my-app/.forgedock/worktrees"
+  worktree_base: "/path/to/my-app/.claude/worktrees"
 
 branches:
   default: "main"

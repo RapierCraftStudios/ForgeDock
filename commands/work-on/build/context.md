@@ -46,7 +46,7 @@ Parse from `$ARGUMENTS`:
 - `{NUMBER}` — issue number (positional, required)
 - `--repo {GH_REPO}` — GitHub repo (e.g. `{owner}/{repo}` — resolved from `forge.yaml → project`)
 - `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`)
-- `--repo-path {REPO_PATH}` — local filesystem path to the worktree (e.g. `/path/to/.forgedock/worktrees/fix/issue-121`); used by Phase C3 grep commands
+- `--repo-path {REPO_PATH}` — local filesystem path to the worktree (e.g. `/path/to/.claude/worktrees/fix/issue-121`); used by Phase C3 grep commands
 - `{AFFECTED_FILES}` — space-separated file paths (positional, after `{NUMBER}`, before any `--functions` flag)
 - `--functions {FUNCTION_NAMES}` — space-separated function/class names extracted from the Builder Contract deliverables table (optional)
 

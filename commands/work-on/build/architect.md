@@ -49,7 +49,7 @@ Parse from $ARGUMENTS:
 - `{NUMBER}` — issue number (required, positional first arg)
 - `--repo {GH_REPO}` — GitHub repo (e.g. `{owner}/{repo}` — resolved from `forge.yaml → project`)
 - `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`)
-- `--repo-path {REPO_PATH}` — local filesystem path to the worktree (e.g. `/path/to/.forgedock/worktrees/fix/issue-121`); used by Phase A1 grep commands
+- `--repo-path {REPO_PATH}` — local filesystem path to the worktree (e.g. `/path/to/.claude/worktrees/fix/issue-121`); used by Phase A1 grep commands
 - `--files {AFFECTED_FILES}` — space-separated list of files from investigation report (passed by `build.md` Phase B4)
 
 Also read from the calling context (in-memory, passed by parent agent):

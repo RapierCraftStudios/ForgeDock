@@ -185,7 +185,7 @@ export function demoForgeYaml(repoSlug) {
     '  description: "A tiny Notes API for trying ForgeDock risk-free."',
     "paths:",
     '  root: "."',
-    '  worktree_base: ".forgedock/worktrees"',
+    '  worktree_base: ".claude/worktrees"',
     "branches:",
     '  default: "main"',
     '  staging: "main"',
