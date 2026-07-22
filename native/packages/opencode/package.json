@@ -3,7 +3,7 @@
   "version": "1.18.4",
   "name": "forgedock-cli",
   "type": "module",
-  "license": "MIT",
+  "license": "AGPL-3.0",
   "private": true,
   "scripts": {
     "typecheck": "tsgo --noEmit",

@@ -219,7 +219,13 @@ for (const item of targets) {
     JSON.stringify(
       {
         name,
+        description: "Platform binary for ForgeDock's native autonomous software development CLI.",
         version: Script.version,
+        license: pkg.license,
+        repository: {
+          type: "git",
+          url: "git+https://github.com/RapierCraftStudios/ForgeDock-CLI.git",
+        },
         preferUnplugged: true,
         os: [item.os],
         cpu: [item.arch],
