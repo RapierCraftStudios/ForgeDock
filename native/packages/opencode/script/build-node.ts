@@ -24,7 +24,7 @@ await Bun.build({
     OPENCODE_CHANNEL: `'${Script.channel}'`,
   },
   files: {
-    "opencode-web-ui.gen.ts": "",
+    "forgedock-web-ui.gen.ts": "",
   },
 })
 

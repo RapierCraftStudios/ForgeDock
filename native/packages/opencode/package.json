@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "version": "1.18.4",
-  "name": "opencode",
+  "name": "forgedock-cli",
   "type": "module",
   "license": "MIT",
   "private": true,
@@ -11,12 +11,12 @@
     "test:httpapi": "bun run script/httpapi-exercise.ts --mode coverage --fail-on-missing --fail-on-skip && bun run script/httpapi-exercise.ts --mode auth --fail-on-missing --fail-on-skip && bun run script/httpapi-exercise.ts --mode effect --fail-on-missing --fail-on-skip",
     "bench:test": "bun run script/bench-test-suite.ts",
     "profile:test": "bun run script/profile-test-files.ts",
-    "build": "bun run script/build.ts",
-    "dev": "bun run --conditions=browser ./src/index.ts",
+    "build": "node ../../../scripts/generate-native-workflows.mjs && bun run script/build.ts",
+    "dev": "node ../../../scripts/generate-native-workflows.mjs && bun run --conditions=browser ./src/index.ts",
     "dev:temporary": "bun run --conditions=browser ./src/temporary.ts"
   },
   "bin": {
-    "opencode": "./bin/opencode"
+    "forgedock-cli": "./bin/forgedock-cli"
   },
   "exports": {
     "./*": "./src/*.ts"

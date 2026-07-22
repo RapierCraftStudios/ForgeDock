@@ -175,19 +175,19 @@ for (const item of targets) {
       autoloadTsconfig: true,
       autoloadPackageJson: true,
       target: name.replace(pkg.name, "bun") as any,
-      outfile: `dist/${name}/bin/opencode`,
-      execArgv: [`--user-agent=opencode/${Script.version}`, "--use-system-ca", "--"],
+      outfile: `dist/${name}/bin/forgedock-cli`,
+      execArgv: [`--user-agent=forgedock-cli/${Script.version}`, "--use-system-ca", "--"],
       windows: {},
     },
     files: {
       [treeSitterWorkerPath]: treeSitterWorker,
-      ...(embeddedFileMap ? { "opencode-web-ui.gen.ts": embeddedFileMap } : {}),
+      ...(embeddedFileMap ? { "forgedock-web-ui.gen.ts": embeddedFileMap } : {}),
     },
     entrypoints: [
       "./src/index.ts",
       workerPath,
       treeSitterWorkerPath,
-      ...(embeddedFileMap ? ["opencode-web-ui.gen.ts"] : []),
+      ...(embeddedFileMap ? ["forgedock-web-ui.gen.ts"] : []),
     ],
     define: {
       FFF_LIBC: JSON.stringify(item.abi === "musl" ? "musl" : "gnu"),
@@ -203,7 +203,7 @@ for (const item of targets) {
 
   // Smoke test: only run if binary is for current platform
   if (item.os === process.platform && item.arch === process.arch && !item.abi) {
-    const binaryPath = `dist/${name}/bin/opencode`
+    const binaryPath = `dist/${name}/bin/forgedock-cli`
     console.log(`Running smoke test: ${binaryPath} --version`)
     try {
       const versionOutput = await $`${binaryPath} --version`.text()

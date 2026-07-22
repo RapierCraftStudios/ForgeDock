@@ -10,6 +10,7 @@ import { Skill } from "../skill"
 import PROMPT_INITIALIZE from "./template/initialize.txt"
 import PROMPT_REVIEW from "./template/review.txt"
 import { LegacyEvent } from "@opencode-ai/schema/legacy-event"
+import { workflows as forgeDockWorkflows } from "@/forgedock/workflows.generated"
 
 type State = {
   commands: Record<string, Info>
@@ -85,6 +86,16 @@ const layer = Layer.effect(
         },
         subtask: true,
         hints: hints(PROMPT_REVIEW),
+      }
+
+      for (const workflow of forgeDockWorkflows) {
+        commands[workflow.name] = {
+          name: workflow.name,
+          description: workflow.description,
+          source: "command",
+          template: workflow.template,
+          hints: hints(workflow.template),
+        }
       }
 
       for (const [name, command] of Object.entries(cfg.command ?? {})) {

@@ -176,29 +176,6 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
           },
         },
       }),
-    opencode: Effect.fnUntraced(function* (input: Info) {
-      const env = yield* dep.env()
-      const hasKey = iife(() => {
-        if (input.env.some((item) => env[item])) return true
-        return false
-      })
-      const ok =
-        hasKey ||
-        Boolean(yield* dep.auth(input.id)) ||
-        Boolean((yield* dep.config()).provider?.["opencode"]?.options?.apiKey)
-
-      if (!ok) {
-        for (const [key, value] of Object.entries(input.models)) {
-          if (value.cost.input === 0) continue
-          delete input.models[key]
-        }
-      }
-
-      return {
-        autoload: Object.keys(input.models).length > 0,
-        options: ok ? {} : { apiKey: "public" },
-      }
-    }),
     openai: () =>
       Effect.succeed({
         autoload: false,
@@ -458,9 +435,9 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         autoload: false,
         options: {
           headers: {
-            "HTTP-Referer": "https://opencode.ai/",
-            "X-Title": "opencode",
-            "X-Source": "opencode",
+            "HTTP-Referer": "https://github.com/RapierCraftStudios/ForgeDock-CLI",
+            "X-Title": "ForgeDock",
+            "X-Source": "forgedock",
           },
         },
       }),
@@ -469,8 +446,8 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         autoload: false,
         options: {
           headers: {
-            "HTTP-Referer": "https://opencode.ai/",
-            "X-Title": "opencode",
+            "HTTP-Referer": "https://github.com/RapierCraftStudios/ForgeDock-CLI",
+            "X-Title": "ForgeDock",
           },
         },
       }),
@@ -479,9 +456,9 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         autoload: provider.source === "config",
         options: {
           headers: {
-            "HTTP-Referer": "https://opencode.ai/",
-            "X-Title": "opencode",
-            "X-BILLING-INVOKE-ORIGIN": "OpenCode",
+            "HTTP-Referer": "https://github.com/RapierCraftStudios/ForgeDock-CLI",
+            "X-Title": "ForgeDock",
+            "X-BILLING-INVOKE-ORIGIN": "ForgeDock",
           },
         },
       }),
@@ -490,8 +467,8 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         autoload: false,
         options: {
           headers: {
-            "http-referer": "https://opencode.ai/",
-            "x-title": "opencode",
+            "http-referer": "https://github.com/RapierCraftStudios/ForgeDock-CLI",
+            "x-title": "ForgeDock",
           },
         },
       }),
@@ -1380,7 +1357,7 @@ const layer = Layer.effect(
 
         // now read config providers - includes any modifications from plugin config() hook
         const configProviders = Object.entries(cfg.provider ?? {})
-        const disabled = new Set(cfg.disabled_providers ?? [])
+        const disabled = new Set(["opencode", "opencode-go", ...(cfg.disabled_providers ?? [])])
         const enabled = cfg.enabled_providers ? new Set(cfg.enabled_providers) : null
 
         function isProviderAllowed(providerID: ProviderV2.ID): boolean {
