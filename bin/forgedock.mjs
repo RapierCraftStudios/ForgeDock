@@ -3015,6 +3015,19 @@ async function doctor(fix = false) {
     }
   }
 
+  // ── Check 10b: ForgeDock native runtime ───────────────────────────────────
+  {
+    const { isNativeRuntimeAvailable } = await import("./runner.mjs");
+    if (isNativeRuntimeAvailable(process.cwd())) {
+      pass("ForgeDock native runtime", "available (preferred execution backend)");
+    } else {
+      warn(
+        "ForgeDock native runtime",
+        "not available; compatibility backends remain usable. Set FORGEDOCK_RUNTIME_BIN to a supported executable.",
+      );
+    }
+  }
+
   // ── Check 11: Claude Code installed + version compatible ───────────────────
   // The compatibility floor is the @anthropic-ai/claude-code peerDependency in
   // package.json (read dynamically so it never drifts from the declared floor).
@@ -3131,27 +3144,27 @@ function help() {
   // goes to stdout (help output is the requested artifact).
   const commands = [
     ["Command", "Description"],
-    ["npx forgedock", "Guided setup: install commands + configure repo (default)"],
-    ["npx forgedock install", "Install commands to ~/.claude/"],
-    ["npx forgedock init", "Generate forge.yaml config for your project"],
-    ["npx forgedock init --minimal", "Generate a minimal forge.yaml (required sections only)"],
-    ["npx forgedock enable [dir]", "Activate ForgeDock in a directory"],
-    ["npx forgedock disable [dir]", "Opt a directory out of ForgeDock"],
-    ["npx forgedock status [dir]", "Show ForgeDock state for a directory"],
-    ["npx forgedock run <cmd> [args]", "Run a command headlessly (local claude CLI or Anthropic API)"],
-    ["npx forgedock run-issue <issue>", "Drive one issue through the durable engine"],
-    ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],
-    ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
-    ["npx forgedock labels [setup] [--repo owner/repo]", "Bootstrap ForgeDock-managed labels on a GitHub repo (idempotent)"],
-    ["npx forgedock config migrate [dir]", "Backfill missing optional sections into an existing forge.yaml (idempotent)"],
-    ["npx forgedock watch [--repo owner/repo]", "Live per-agent orchestration view (Ctrl+C to exit)"],
-    ["npx forgedock report [--days 30] [--md] [--json]", "30-day pipeline impact receipts for your repo"],
-    ["npx forgedock doctor", "Check installation health"],
-    ["npx forgedock doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block)"],
-    ["npx forgedock update", "Pull latest & reinstall"],
-    ["npx forgedock uninstall", "Remove commands"],
-    ["npx forgedock version", "Print the installed version and check for updates"],
-    ["npx forgedock help", "Show this help"],
+    ["forgedock-cli", "Open ForgeDock guided setup (default)"],
+    ["forgedock-cli install", "Install ForgeDock runtime integrations"],
+    ["forgedock-cli init", "Generate forge.yaml config for your project"],
+    ["forgedock-cli init --minimal", "Generate a minimal forge.yaml (required sections only)"],
+    ["forgedock-cli enable [dir]", "Activate ForgeDock in a directory"],
+    ["forgedock-cli disable [dir]", "Opt a directory out of ForgeDock"],
+    ["forgedock-cli status [dir]", "Show ForgeDock state for a directory"],
+    ["forgedock-cli run <cmd> [args]", "Run a command through the ForgeDock execution engine"],
+    ["forgedock-cli run-issue <issue>", "Drive one issue through the durable engine"],
+    ["forgedock-cli resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],
+    ["forgedock-cli demo", "Set up a risk-free demo repo and print next steps"],
+    ["forgedock-cli labels [setup] [--repo owner/repo]", "Bootstrap ForgeDock-managed labels on a GitHub repo (idempotent)"],
+    ["forgedock-cli config migrate [dir]", "Backfill missing optional sections into an existing forge.yaml (idempotent)"],
+    ["forgedock-cli watch [--repo owner/repo]", "Live per-agent orchestration view (Ctrl+C to exit)"],
+    ["forgedock-cli report [--days 30] [--md] [--json]", "30-day pipeline impact receipts for your repo"],
+    ["forgedock-cli doctor", "Check installation health"],
+    ["forgedock-cli doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block)"],
+    ["forgedock-cli update", "Pull latest & reinstall"],
+    ["forgedock-cli uninstall", "Remove commands"],
+    ["forgedock-cli version", "Print the installed version and check for updates"],
+    ["forgedock-cli help", "Show this help"],
   ];
   const flagRows = [
     ["Flag", "Description"],
@@ -3178,19 +3191,18 @@ function help() {
  *   --dry-run                    Preview the assembled prompt + tool plan; no call made.
  *   --model <id>                 Override the model (see resolution order below; api backend only).
  *   --max-iterations <n>         Bound the tool-use loop (default: 50; api backend only).
- *   --backend <cli|api|auto>     Execution backend (see below; default: auto).
+ *   --backend <native|cli|api|auto> Execution backend (see below; default: auto).
  *
- * Two execution backends (issue #2003):
+ * Execution backends:
+ *   - "native": ForgeDock's managed local agent runtime. This is the preferred
+ *     asynchronous backend and keeps engine heartbeats active during long runs.
  *   - "cli": shells out to the local Claude Code CLI (`claude --print ...`),
  *     reusing whatever credentials it already has (Pro/Max OAuth or a
  *     CLI-managed key). No ANTHROPIC_API_KEY needed. Requires `claude` on PATH.
  *   - "api": drives the Anthropic SDK directly. Requires ANTHROPIC_API_KEY and
  *     the optional @anthropic-ai/sdk dependency. Needed for CI/headless
  *     environments without an interactively-authenticated `claude` CLI.
- *   - "auto" (default): prefers "cli" when a working `claude` install is
- *     detected, otherwise falls back to "api" unchanged — existing callers
- *     that never pass --backend see no behavior change when `claude` isn't
- *     installed.
+ *   - "auto" (default): prefers "native", then the compatibility CLI, then API.
  *
  * The runtime itself lives in bin/runner.mjs.
  *
@@ -3202,7 +3214,8 @@ function help() {
  *   4. Hardcoded default                   "claude-sonnet-5" (bin/runner.mjs DEFAULT_MODEL).
  *
  * Env:
- *   FORGEDOCK_BACKEND      Default backend ("cli"|"api"|"auto") when --backend is omitted.
+ *   FORGEDOCK_BACKEND      Default backend ("native"|"cli"|"api"|"auto").
+ *   FORGEDOCK_RUNTIME_BIN  Override the executable used by the native backend.
  *   FORGEDOCK_MODEL        Default model id when --model is omitted.
  *   FORGEDOCK_CLI_TIMEOUT_MS  Wall-clock timeout (ms) for the cli backend invocation.
  *   FORGEDOCK_SHELL        Override the shell used by run_bash / the cli backend.
@@ -3264,7 +3277,7 @@ async function run() {
 
   if (!commandName) {
     process.stderr.write(
-      `${RED}Usage: forgedock run <command> [args...] [--dry-run] [--model <id>] [--max-iterations <n>] [--backend <cli|api|auto>]${RESET}\n`,
+      `${RED}Usage: forgedock-cli run <command> [args...] [--dry-run] [--model <id>] [--max-iterations <n>] [--backend <native|cli|api|auto>]${RESET}\n`,
     );
     process.exit(1);
   }

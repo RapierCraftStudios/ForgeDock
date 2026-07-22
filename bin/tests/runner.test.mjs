@@ -29,6 +29,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
+import { EventEmitter } from "node:events";
 
 import {
   resolveSpecPath,
@@ -45,12 +46,17 @@ import {
   renderDryRun,
   renderSummaryCard,
   resolveConfiguredDefaultModel,
+  resolveConfiguredBackend,
   runCommand,
   isClaudeCliAvailable,
   resolveClaudeCliBinary,
   resolveBackend,
   resolveBackendLadder,
   runCliBackend,
+  runNativeBackend,
+  buildNativeChildEnv,
+  isNativeRuntimeAvailable,
+  resolveNativeRuntimeBinary,
   sanitizeArgvForLog,
   sanitizeOutputExcerptForLog,
   extractSessionLimitResetTime,
@@ -1027,6 +1033,28 @@ describe("resolveConfiguredDefaultModel", () => {
 // runCommand — model resolution precedence (issue #1851)
 // ---------------------------------------------------------------------------
 
+describe("resolveConfiguredBackend", () => {
+  it("reads a valid runtime.default from forge.yaml", () => {
+    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-runtime-config-"));
+    try {
+      writeFileSync(join(cwd, "forge.yaml"), "runtime:\n  default: native\n");
+      assert.equal(resolveConfiguredBackend(cwd), "native");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores unknown configured backends", () => {
+    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-runtime-config-"));
+    try {
+      writeFileSync(join(cwd, "forge.yaml"), "runtime:\n  default: mystery\n");
+      assert.equal(resolveConfiguredBackend(cwd), null);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("runCommand model resolution precedence", () => {
   let precTmp;
   let originalForgedockModel;
@@ -1057,6 +1085,7 @@ describe("runCommand model resolution precedence", () => {
       args: ["1851"],
       cwd: dir,
       dryRun: true,
+      backend: "api",
       logger: { log() {} },
     });
     assert.equal(result.model, "claude-opus-4-6");
@@ -1075,6 +1104,7 @@ describe("runCommand model resolution precedence", () => {
         args: ["1851"],
         cwd: dir,
         dryRun: true,
+        backend: "api",
         logger: { log() {} },
       });
       assert.equal(result.model, "claude-env-override");
@@ -1094,6 +1124,7 @@ describe("runCommand model resolution precedence", () => {
       args: ["1851"],
       cwd: dir,
       dryRun: true,
+      backend: "api",
       model: "claude-explicit-flag",
       logger: { log() {} },
     });
@@ -1111,6 +1142,7 @@ describe("runCommand model resolution precedence", () => {
       args: ["1851"],
       cwd: dir,
       dryRun: true,
+      backend: "api",
       logger: { log() {} },
     });
     assert.equal(result.model, "claude-sonnet-5");
@@ -1126,6 +1158,7 @@ describe("runCommand model resolution precedence", () => {
       args: ["1851"],
       cwd: dir,
       dryRun: true,
+      backend: "api",
       logger: { log() {} },
     });
     assert.equal(result.model, "claude-sonnet-5");
@@ -2952,7 +2985,173 @@ describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issu
   });
 });
 
+function nativeChild({ status = 0, stdout = "", stderr = "" } = {}) {
+  const child = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.kill = mock.fn();
+  queueMicrotask(() => {
+    if (stdout) child.stdout.emit("data", stdout);
+    if (stderr) child.stderr.emit("data", stderr);
+    child.emit("close", status, null);
+  });
+  return child;
+}
+
+describe("runNativeBackend", () => {
+  it("runs asynchronously with an argv array and no shell", async () => {
+    let invocation;
+    const lines = [];
+    const result = await runNativeBackend({
+      spec: { path: join(COMMANDS_DIR, "work-on.md"), name: "work-on" },
+      userMessage: "Run /work-on with arguments: 42",
+      args: ["42"],
+      cwd: TMP,
+      model: "provider/model",
+      bin: "forge-runtime",
+      logger: { log: (line) => lines.push(line) },
+      spawnFn: (bin, argv, options) => {
+        invocation = { bin, argv, options };
+        return nativeChild({ stdout: "OpenCode pipeline complete" });
+      },
+    });
+
+    assert.equal(invocation.bin, "forge-runtime");
+    assert.equal(invocation.options.shell, false);
+    assert.equal(invocation.options.stdio[0], "ignore");
+    assert.deepEqual(invocation.argv.slice(0, 2), ["run", invocation.argv[1]]);
+    assert.ok(invocation.argv.includes("--file"));
+    assert.ok(invocation.argv.includes(join(COMMANDS_DIR, "work-on.md")));
+    assert.ok(invocation.argv.includes("--auto"));
+    assert.match(invocation.argv[1], /Resolve Skill\("name"\)/);
+    assert.match(invocation.argv[1], /fail closed instead of reviewing inline/);
+    assert.deepEqual(invocation.argv.slice(-2), ["--model", "provider/model"]);
+    assert.equal(result.backend, "native");
+    assert.equal(result.stopReason, "native_exit_0");
+    assert.ok(lines.some((line) => line.includes("ForgeDock pipeline complete")));
+    assert.ok(lines.every((line) => !/opencode/i.test(line)));
+  });
+
+  it("scrubs unrelated provider and publishing secrets from the child", async () => {
+    const prior = process.env.NPM_TOKEN;
+    process.env.NPM_TOKEN = "do-not-forward";
+    let childEnv;
+    try {
+      await runNativeBackend({
+        spec: { path: "spec.md", name: "test" },
+        userMessage: "test",
+        cwd: TMP,
+        bin: "forge-runtime",
+        logger: { log() {} },
+        spawnFn: (_bin, _argv, options) => {
+          childEnv = options.env;
+          return nativeChild();
+        },
+      });
+      assert.equal(childEnv.NPM_TOKEN, undefined);
+      assert.equal(childEnv.ANTHROPIC_API_KEY, undefined);
+      assert.equal(childEnv.PATH, process.env.PATH);
+    } finally {
+      if (prior === undefined) delete process.env.NPM_TOKEN;
+      else process.env.NPM_TOKEN = prior;
+    }
+  });
+
+  it("only passes extra project credentials through explicit opt-in", () => {
+    const env = {
+      PATH: "/bin",
+      GH_TOKEN: "github",
+      DATABASE_URL: "database",
+      PRIVATE_KEY: "private",
+      FORGEDOCK_PASSTHROUGH_ENV: "DATABASE_URL, invalid-name!, MISSING",
+    };
+    assert.deepEqual(buildNativeChildEnv(env), {
+      PATH: "/bin",
+      GH_TOKEN: "github",
+      DATABASE_URL: "database",
+    });
+  });
+
+  it("normalizes a non-zero exit into CLI_BACKEND_FAILED", async () => {
+    await assert.rejects(
+      runNativeBackend({
+        spec: { path: "spec.md", name: "test" },
+        userMessage: "test",
+        cwd: TMP,
+        bin: "forge-runtime",
+        logger: { log() {} },
+        spawnFn: () => nativeChild({ status: 9, stderr: "runtime failed" }),
+      }),
+      (err) => err.code === "CLI_BACKEND_FAILED" && /runtime failed/.test(err.message),
+    );
+  });
+
+  it("waits for process-tree termination before reporting a timeout", async () => {
+    const prior = process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+    process.env.FORGEDOCK_CLI_TIMEOUT_MS = "1";
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    let terminated = false;
+    try {
+      await assert.rejects(
+        runNativeBackend({
+          spec: { path: "spec.md", name: "test" },
+          userMessage: "test",
+          cwd: TMP,
+          bin: "forge-runtime",
+          logger: { log() {} },
+          spawnFn: () => child,
+          terminateFn: async () => {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            terminated = true;
+            child.emit("close", null, "SIGTERM");
+          },
+        }),
+        /timed out/,
+      );
+      assert.equal(terminated, true);
+    } finally {
+      if (prior === undefined) delete process.env.FORGEDOCK_CLI_TIMEOUT_MS;
+      else process.env.FORGEDOCK_CLI_TIMEOUT_MS = prior;
+    }
+  });
+
+  it("does not expose the private runtime brand in startup errors", async () => {
+    await assert.rejects(
+      runNativeBackend({
+        spec: { path: "spec.md", name: "test" },
+        userMessage: "test",
+        cwd: TMP,
+        bin: "forge-runtime",
+        spawnFn: () => {
+          throw new Error("spawn C:/tools/opencode.exe ENOENT");
+        },
+      }),
+      (err) => /ForgeDock\.exe/.test(err.message) && !/opencode/i.test(err.message),
+    );
+  });
+});
+
+describe("native runtime detection", () => {
+  it("honors an explicit ForgeDock runtime executable", () => {
+    const prior = process.env.FORGEDOCK_RUNTIME_BIN;
+    process.env.FORGEDOCK_RUNTIME_BIN = process.execPath;
+    try {
+      assert.equal(isNativeRuntimeAvailable(TMP), true);
+      assert.equal(resolveNativeRuntimeBinary(TMP), process.execPath);
+    } finally {
+      if (prior === undefined) delete process.env.FORGEDOCK_RUNTIME_BIN;
+      else process.env.FORGEDOCK_RUNTIME_BIN = prior;
+    }
+  });
+});
+
 describe("resolveBackend", () => {
+  it("returns 'native' immediately when explicitly requested", () => {
+    assert.equal(resolveBackend({ requested: "native", cwd: TMP }), "native");
+  });
+
   it("returns 'cli' immediately when explicitly requested, without probing", () => {
     assert.equal(resolveBackend({ requested: "cli", cwd: TMP }), "cli");
   });
@@ -2961,12 +3160,12 @@ describe("resolveBackend", () => {
     assert.equal(resolveBackend({ requested: "api", cwd: TMP }), "api");
   });
 
-  it("'auto' resolves to either 'cli' or 'api' based on CLI detection (never throws)", () => {
+  it("'auto' resolves to an available execution backend (never throws)", () => {
     let result;
     assert.doesNotThrow(() => {
       result = resolveBackend({ requested: "auto", cwd: TMP });
     });
-    assert.ok(result === "cli" || result === "api");
+    assert.ok(["native", "cli", "api"].includes(result));
   });
 
   it("defaults to 'auto' behavior when requested is omitted", () => {
@@ -2974,7 +3173,7 @@ describe("resolveBackend", () => {
     assert.doesNotThrow(() => {
       result = resolveBackend({ cwd: TMP });
     });
-    assert.ok(result === "cli" || result === "api");
+    assert.ok(["native", "cli", "api"].includes(result));
   });
 
   it("throws a descriptive error for an unrecognized backend value", () => {
@@ -3050,7 +3249,7 @@ describe("resolveBackendLadder", () => {
 // ---------------------------------------------------------------------------
 
 describe("runCommand backend resolution", () => {
-  it("dry-run result includes a resolved backend field ('cli' or 'api')", async () => {
+  it("dry-run result includes a resolved backend field", async () => {
     const result = await runCommand({
       commandsDir: COMMANDS_DIR,
       commandName: "work-on",
@@ -3060,7 +3259,7 @@ describe("runCommand backend resolution", () => {
       logger: { log() {} },
     });
     assert.equal(result.status, "dry-run");
-    assert.ok(result.backend === "cli" || result.backend === "api");
+    assert.ok(["native", "cli", "api"].includes(result.backend));
   });
 
   it("dry-run output documents which backend would run", async () => {
@@ -3240,7 +3439,7 @@ describe("runCommand backend resolution", () => {
       // resolvedBackend is "api" and the entire cli-branch (including the
       // notice) is unreachable — assert its absence in that case instead,
       // so the test is deterministic either way rather than flaky.
-      const cliAvailable = isClaudeCliAvailable(TMP);
+      const resolved = resolveBackend({ requested: "auto", cwd: TMP });
       const originalTimeout = process.env.FORGEDOCK_CLI_TIMEOUT_MS;
       process.env.FORGEDOCK_CLI_TIMEOUT_MS = "1";
       const lines = [];
@@ -3266,7 +3465,7 @@ describe("runCommand backend resolution", () => {
         }
       }
       const notice = lines.find((l) => /Using the claude CLI backend/.test(l));
-      if (cliAvailable) {
+      if (resolved === "cli") {
         assert.ok(notice, "expected the discoverability notice when auto resolves to cli with an apiKey present");
         assert.match(notice, /--backend api/);
         assert.match(notice, /FORGEDOCK_BACKEND=api/);
@@ -3274,7 +3473,7 @@ describe("runCommand backend resolution", () => {
         assert.equal(
           notice,
           undefined,
-          "no notice expected when the host has no claude CLI (ladder resolves to api, cli-branch unreachable)",
+          "no compatibility-CLI notice expected when auto selects another backend",
         );
       }
     });

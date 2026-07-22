@@ -31,7 +31,15 @@ const __dirname = dirname(__filename);
 //
 // Use pathToFileURL to produce a valid file:// URL on Windows (raw C:\ paths are
 // not valid ESM specifiers on Windows — see ERR_UNSUPPORTED_ESM_URL_SCHEME).
-const { stripAnsi, truncateVisible, runSteps, renderLogo, annotatedReviewScreen } = await import(
+const {
+  stripAnsi,
+  truncateVisible,
+  runSteps,
+  renderLogo,
+  terminalImageProtocol,
+  renderTerminalLogoImage,
+  annotatedReviewScreen,
+} = await import(
   pathToFileURL(join(__dirname, "..", "tui.mjs")).href
 );
 
@@ -556,6 +564,29 @@ describe("renderLogo — plain-text fallback in non-TTY/NO_COLOR environment", (
     const result = renderLogo();
     assert.ok(result.includes("ForgeDock"),
       "renderLogo() with no args must still include 'ForgeDock'");
+  });
+});
+
+describe("official terminal logo image", () => {
+  it("detects only explicitly supported interactive terminal protocols", () => {
+    assert.equal(terminalImageProtocol({ TERM: "xterm-kitty" }, { isTTY: true }), "kitty");
+    assert.equal(terminalImageProtocol({ TERM_PROGRAM: "iTerm.app" }, { isTTY: true }), "iterm");
+    assert.equal(terminalImageProtocol({ TERM_PROGRAM: "iTerm.app", NO_COLOR: "1" }, { isTTY: true }), null);
+    assert.equal(terminalImageProtocol({ TERM: "xterm-kitty" }, { isTTY: false }), null);
+  });
+
+  it("renders the packaged PNG with the iTerm2 protocol", () => {
+    const image = renderTerminalLogoImage("iterm", {
+      readFile: () => Buffer.from("forge-logo"),
+    });
+    assert.match(image, /^\x1b\]1337;File=inline=1;/);
+    assert.match(image, /Zm9yZ2UtbG9nbw==/);
+  });
+
+  it("renders the packaged PNG with the Kitty graphics protocol", () => {
+    const image = renderTerminalLogoImage("kitty");
+    assert.match(image, /^\x1b_Ga=T,f=100/);
+    assert.match(image, /\x1b\\/);
   });
 });
 

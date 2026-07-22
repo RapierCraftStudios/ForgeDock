@@ -1411,7 +1411,8 @@ esac
 cd {REPO_PATH}
 git fetch origin
 BRANCH="fix/{slug}-{NUMBER}"
-WORKTREE_PATH="{REPO_PATH}/.claude/worktrees/{BRANCH_SLUG}"
+WORKTREE_PATH="{REPO_PATH}/.forgedock/worktrees/{BRANCH_SLUG}"
+mkdir -p "$(dirname "$WORKTREE_PATH")"
 git worktree add {WORKTREE_PATH} -b {BRANCH} origin/{PR_BASE}
 ```
 

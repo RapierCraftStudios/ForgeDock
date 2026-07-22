@@ -13,7 +13,7 @@
  *   - Default branch detection via symbolic-ref / current branch
  *   - Staging branch detection when origin/staging exists vs. absent
  *   - paths.root always equals the injected cwd
- *   - paths.worktreeBase is {root}/.claude/worktrees
+ *   - paths.worktreeBase is {root}/.forgedock/worktrees
  *   - project.name is derived from repo slug
  *   - meta.remoteDetected reflects whether a remote was found
  *
@@ -143,9 +143,9 @@ describe("detectConfig — SSH remote URL", async () => {
     assert.equal(draft.paths.root.confidence, "high");
   });
 
-  it("paths.worktreeBase is {root}/.claude/worktrees", async () => {
+  it("paths.worktreeBase is {root}/.forgedock/worktrees", async () => {
     const draft = await detectConfig(repoPath);
-    assert.equal(draft.paths.worktreeBase.value, join(repoPath, ".claude", "worktrees"));
+    assert.equal(draft.paths.worktreeBase.value, join(repoPath, ".forgedock", "worktrees"));
   });
 });
 

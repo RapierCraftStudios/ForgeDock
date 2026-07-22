@@ -26,12 +26,12 @@ project:
 # =============================================================================
 # PATHS (REQUIRED)
 # Local paths used for git worktrees. worktree_base defaults to
-# {root}/.claude/worktrees.
+# {root}/.forgedock/worktrees.
 # =============================================================================
 
 paths:
   root: "/path/to/my-repo"
-  worktree_base: "/path/to/my-repo/.claude/worktrees"
+  worktree_base: "/path/to/my-repo/.forgedock/worktrees"
 
 # =============================================================================
 # BRANCHES (REQUIRED)

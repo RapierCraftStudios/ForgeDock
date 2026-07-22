@@ -78,7 +78,7 @@ Local filesystem paths for git worktree operations.
 ```yaml
 paths:
   root: "/home/youruser/projects/acme-platform"
-  worktree_base: "/home/youruser/projects/acme-platform/.claude/worktrees"
+  worktree_base: "/home/youruser/projects/acme-platform/.forgedock/worktrees"
 ```
 
 | Field | Type | Required | Description |
@@ -232,7 +232,7 @@ project:
 
 paths:
   root: "/home/me/projects/my-project"
-  worktree_base: "/home/me/projects/my-project/.claude/worktrees"
+  worktree_base: "/home/me/projects/my-project/.forgedock/worktrees"
 
 branches:
   default: "main"

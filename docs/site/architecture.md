@@ -124,7 +124,7 @@ Posts `FORGE:TRAJECTORY` with phase-by-phase results table for pipeline health m
 Every build phase creates an isolated git worktree:
 
 ```bash
-git worktree add .claude/worktrees/feat-my-feature-42 \
+git worktree add .forgedock/worktrees/feat-my-feature-42 \
   -b feat/my-feature-42 origin/staging
 ```
 

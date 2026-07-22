@@ -125,7 +125,8 @@ Append `-{NUMBER}` to ensure uniqueness: e.g. `fix/work-on-build-landing-file-85
 ### B1C: Create worktree
 
 ```bash
-WORKTREE_PATH="/path/to/repo/.claude/worktrees/{BRANCH_SLUG}"
+WORKTREE_PATH="/path/to/repo/.forgedock/worktrees/{BRANCH_SLUG}"
+mkdir -p "$(dirname "$WORKTREE_PATH")"
 git worktree add {WORKTREE_PATH} -b {BRANCH} origin/{SOURCE_BRANCH}
 ```
 
@@ -137,6 +138,7 @@ git -C {WORKTREE_PATH} branch --show-current
 If wrong branch, remove and recreate:
 ```bash
 git worktree remove {WORKTREE_PATH} --force
+mkdir -p "$(dirname "$WORKTREE_PATH")"
 git worktree add {WORKTREE_PATH} -b {BRANCH} origin/{SOURCE_BRANCH}
 ```
 

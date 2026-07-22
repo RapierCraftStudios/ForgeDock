@@ -158,6 +158,33 @@ describe("resumeStalledFromCli", () => {
     assert.deepEqual(result.failed, []);
   });
 
+  it("preserves backend and model selections when re-dispatching stalled issues", async () => {
+    const states = {
+      250: { terminal: false, lease: { by: "a", until: 1_000 } },
+    };
+    const io = makeFakeIo(states);
+    const calls = [];
+    const dispatch = async (argv) => {
+      calls.push(argv);
+      return { terminalReason: "workflow:merged" };
+    };
+
+    await resumeStalledFromCli(
+      ["--lane", "staging", "--backend", "native", "--model", "provider/model"],
+      { io, dispatch },
+    );
+
+    assert.deepEqual(calls, [[
+      "250",
+      "--lane",
+      "staging",
+      "--backend",
+      "native",
+      "--model",
+      "provider/model",
+    ]]);
+  });
+
   it("returns failed: [] and skips dispatch entirely on --dry-run", async () => {
     const states = {
       300: { terminal: false, lease: { by: "a", until: 1_000 } },

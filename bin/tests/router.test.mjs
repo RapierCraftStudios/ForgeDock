@@ -608,7 +608,7 @@ describe("version command / --version, -v flags (#1981)", () => {
   it("help lists the version command and flag", () => {
     const res = runCli(["help"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-help-")) });
     assert.equal(res.status, 0);
-    assert.match(res.stdout, /npx forgedock version/);
+    assert.match(res.stdout, /forgedock-cli\s+version/);
     assert.match(res.stdout, /--version/);
   });
 
