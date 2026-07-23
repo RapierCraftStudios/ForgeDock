@@ -309,6 +309,11 @@ describe("stripAnsi", () => {
   it("treats a letter after CSI parameters as its valid final byte", () => {
     assert.equal(stripAnsi("a\x9b31;hello world b"), "aello world b");
   });
+
+  it("preserves text after CAN or SUB cancels a control string", () => {
+    assert.equal(stripAnsi("a\x1b]0;title\x18b"), "ab");
+    assert.equal(stripAnsi("a\x1bPpayload\x1ab"), "ab");
+  });
 });
 
 describe("padVisible", () => {
@@ -322,6 +327,7 @@ describe("padVisible", () => {
     assert.equal(padVisible("a\x9b31mb\x9b0m", 4), "ab  ");
     assert.equal(padVisible("a\x1b%Gb", 4), "ab  ");
     assert.equal(padVisible("a\x1b[2Ab", 4), "ab  ");
+    assert.equal(padVisible("a\x1b[>4;2mb", 4), "ab  ");
   });
 
   it("does not truncate content wider than the requested width", () => {

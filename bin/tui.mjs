@@ -754,8 +754,8 @@ export function table(
  */
 // Ordered from multi-byte string controls through CSI and general ESC forms;
 // earlier alternatives prevent their introducers from being consumed alone.
-const ANSI_TOKEN_RE = /(?:\x1b[\]PX^_]|[\x90\x98\x9d-\x9f])(?:[^\x07\x1b\x9c]|\x1b(?!\\))*(?:\x07|\x9c|\x1b\\|$)|(?:\x1b\[|\x9b)(?:[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|[\x30-\x3f]*[\x20-\x2f]*$)|\x1b[\x20-\x2f]*[\x30-\x7e]|[\x80-\x9f]/g;
-const SGR_TOKEN_RE = /^\x1b\[[\x30-\x3f]*[\x20-\x2f]*m$/;
+const ANSI_TOKEN_RE = /(?:\x1b[\]PX^_]|[\x90\x98\x9d-\x9f])(?:[^\x07\x18\x1a\x1b\x9c]|\x1b(?!\\))*(?:\x07|\x18|\x1a|\x9c|\x1b\\|$)|(?:\x1b\[|\x9b)(?:[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|[\x30-\x3f]*[\x20-\x2f]*$)|\x1b[\x20-\x2f]*[\x30-\x7e]|[\x80-\x9f]/g;
+const SGR_TOKEN_RE = /^\x1b\[[0-9:;]*m$/;
 
 export function stripAnsi(s) {
   return String(s).replace(ANSI_TOKEN_RE, "");
