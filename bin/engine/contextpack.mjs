@@ -321,22 +321,42 @@ function extractAffectedFilesFromBody(body) {
 // commands/work-on/build.md Phase B2) emits: `| File | Change | Why |`.
 const DELIVERABLES_HEADING_RE = /^#{2,3}\s*Deliverables\s*$/m;
 
-// One markdown table row: `| col1 | col2 | ... |`. Captures the first two
-// columns (file, change) — the "why" column is not needed for the fleet
-// brief's "declared contract surface" summary.
-const TABLE_ROW_RE = /^\s*\|\s*(.+?)\s*\|\s*(.+?)\s*\|/;
-
 // A markdown table divider row, e.g. `|------|--------|-----|` — every
 // character is one of `|`, `-`, `:`, or whitespace.
 const TABLE_DIVIDER_RE = /^[\s|:-]+$/;
 
-// Placeholder used to shield GFM-escaped pipes (`\|`) from `TABLE_ROW_RE`
-// while it splits a row on literal `|` column delimiters. A Private Use Area
-// code point cannot occur in ordinary markdown table content, so a raw
-// collision with real cell text is not a practical concern. See
-// `extractDeliverablesFromBody()` below for the substitute-match-restore
-// sequence this is used in.
-const ESCAPED_PIPE_PLACEHOLDER = '';
+/**
+ * Split a Markdown table row on structural pipes. A pipe is escaped only when
+ * preceded by an odd-length backslash run; paired backslashes remain content.
+ * The escaping backslash is removed without using a collision-prone sentinel.
+ */
+export function splitMarkdownTableRow(line) {
+  const cells = [];
+  let cell = '';
+  let backslashRun = 0;
+
+  for (const ch of line) {
+    if (ch === '\\') {
+      cell += ch;
+      backslashRun++;
+      continue;
+    }
+
+    if (ch === '|') {
+      if (backslashRun % 2 === 1) {
+        cell = `${cell.slice(0, -1)}|`;
+      } else {
+        cells.push(cell);
+        cell = '';
+      }
+    } else {
+      cell += ch;
+    }
+    backslashRun = 0;
+  }
+
+  return cells;
+}
 
 /**
  * Slice the "## Deliverables" section out of a CONTRACT annotation body (the
@@ -371,16 +391,10 @@ function extractDeliverablesFromBody(body) {
     if (!trimmed.startsWith('|')) continue;
     const withoutPipes = trimmed.replace(/\|/g, '');
     if (TABLE_DIVIDER_RE.test(withoutPipes) && withoutPipes.includes('-')) continue; // divider row
-    // Shield GFM-escaped pipes (`\|`) from TABLE_ROW_RE's column split by
-    // substituting them with a placeholder before matching, then restoring
-    // them (unescaped to a literal `|`) in the captured groups afterward.
-    // Without this, a `\|` inside a cell is misread as a real column
-    // boundary and the cell's remaining text is silently truncated.
-    const withPlaceholders = trimmed.replace(/\\\|/g, ESCAPED_PIPE_PLACEHOLDER);
-    const m = TABLE_ROW_RE.exec(withPlaceholders);
-    if (!m) continue;
-    const file = m[1].replace(/`/g, '').trim().split(ESCAPED_PIPE_PLACEHOLDER).join('|');
-    const change = m[2].trim().split(ESCAPED_PIPE_PLACEHOLDER).join('|');
+    const cells = splitMarkdownTableRow(trimmed);
+    if (cells.length < 3) continue;
+    const file = cells[1].replace(/`/g, '').trim();
+    const change = cells[2].trim();
     if (!file || /^file$/i.test(file)) continue; // header row
     rows.push({ file, change });
   }
