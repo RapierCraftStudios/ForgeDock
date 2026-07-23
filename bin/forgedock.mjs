@@ -3711,7 +3711,7 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "run-issue", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "run-issue", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "help", "--help", "-h",
+  "run", "backend-check", "run-issue", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -3804,6 +3804,15 @@ switch (command) {
   case "run":
     await run();
     break;
+  case "backend-check": {
+    const { checkExecutionBackend } = await import("./runner.mjs");
+    const result = checkExecutionBackend();
+    if (!restArgs.includes("--quiet")) {
+      process.stdout.write(`${result.ready ? "ready" : "unavailable"}: ${result.backend} (${result.reason})\n`);
+    }
+    if (!result.ready) exitCode = 1;
+    break;
+  }
   case "run-issue": {
     const { runFromCli } = await import("./engine-cli.mjs");
     try {

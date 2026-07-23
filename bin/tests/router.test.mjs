@@ -22,6 +22,21 @@ function runCli(args, { cwd, home, extraEnv } = {}) {
 }
 
 describe("router", () => {
+  it("backend-check accepts configured API mode and fails when its key is absent", () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-backend-check-"));
+    const ready = runCli(["backend-check", "--quiet"], {
+      home,
+      extraEnv: { FORGEDOCK_BACKEND: "api", ANTHROPIC_API_KEY: "test-key" },
+    });
+    assert.equal(ready.status, 0, ready.stdout + ready.stderr);
+
+    const unavailable = runCli(["backend-check", "--quiet"], {
+      home,
+      extraEnv: { FORGEDOCK_BACKEND: "api", ANTHROPIC_API_KEY: "" },
+    });
+    assert.equal(unavailable.status, 1, unavailable.stdout + unavailable.stderr);
+  });
+
   it("help lists the union of journey + engine commands — no phantom commands", () => {
     const res = runCli(["help"], { home: mkdtempSync(join(os.tmpdir(), "fd-h-")) });
     assert.equal(res.status, 0);
@@ -576,6 +591,33 @@ describe("router", () => {
   });
 });
 
+describe("orchestrate engine fallback guards", () => {
+  const specPath = join(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "..",
+    "commands",
+    "orchestrate",
+    "phase-4-execution.md",
+  );
+
+  it("uses the tested backend-check command instead of an inline spawn canary", () => {
+    const spec = readFileSync(specPath, "utf-8");
+    assert.match(spec, /forgedock backend-check --quiet/);
+    assert.doesNotMatch(spec, /spawnSync\('claude', \['--version'\]/);
+  });
+
+  it("posts a fallback claim before paginated lowest-comment-id election", () => {
+    const spec = readFileSync(specPath, "utf-8");
+    const claimPost = spec.indexOf("CLAIM_ID=$(gh api");
+    const claimList = spec.indexOf("CLAIM_IDS=$(gh api");
+    assert.ok(claimPost >= 0 && claimList > claimPost, "claim must be posted before election");
+    assert.match(spec.slice(claimList, claimList + 500), /--paginate/);
+    assert.match(spec, /sort -n \| head -1/);
+    assert.doesNotMatch(spec, /ALREADY_FALLEN_BACK=/);
+  });
+});
+
 describe("version command / --version, -v flags (#1981)", () => {
   it("`version` prints the local version and exits 0", () => {
     const res = runCli(["version"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-")) });
@@ -740,6 +782,29 @@ describe("getInstalledCommandsDriftStatus() — package-vs-installed-commands he
     const result = await withHome(home, (fn) => fn(pkgDir));
     assert.equal(result.unknown, true);
   });
+
+  for (const [label, version] of [
+    ["missing", undefined],
+    ["empty", ""],
+    ["whitespace-only", "   "],
+    ["non-string", 123],
+  ]) {
+    it(`degrades to unknown=true when package.json version is ${label}`, async () => {
+      const home = mkdtempSync(join(os.tmpdir(), `fd-drift-${label}-home-`));
+      const pkgDir = mkdtempSync(join(os.tmpdir(), `fd-drift-${label}-pkg-`));
+      mkdirSync(join(home, ".forge"), { recursive: true });
+      writeFileSync(join(home, ".forge", "version"), "1.0.0");
+      const pkg = version === undefined ? {} : { version };
+      writeFileSync(join(pkgDir, "package.json"), JSON.stringify(pkg));
+      const result = await withHome(home, (fn) => fn(pkgDir));
+      assert.deepEqual(result, {
+        persistedVersion: "",
+        sourceVersion: "",
+        isStale: false,
+        unknown: true,
+      });
+    });
+  }
 });
 
 describe("doctor — forge.yaml placeholder / staleness checks (forge#1850)", () => {
