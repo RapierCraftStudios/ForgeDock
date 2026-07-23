@@ -3181,7 +3181,7 @@ describe("resolveBackendLadder", () => {
 // ---------------------------------------------------------------------------
 
 describe("runCommand backend resolution", () => {
-  it("dry-run result includes a resolved backend field ('cli' or 'api')", async () => {
+  it("dry-run reports the same execution-ready auto backend as a live run", async () => {
     const result = await runCommand({
       commandsDir: COMMANDS_DIR,
       commandName: "work-on",
@@ -3191,7 +3191,8 @@ describe("runCommand backend resolution", () => {
       logger: { log() {} },
     });
     assert.equal(result.status, "dry-run");
-    assert.ok(result.backend === "cli" || result.backend === "api");
+    const expected = checkExecutionBackend({ requested: "auto", cwd: TMP }).backend;
+    assert.equal(result.backend, expected);
   });
 
   it("dry-run output documents which backend would run", async () => {

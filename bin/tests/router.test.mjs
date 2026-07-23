@@ -607,6 +607,10 @@ describe("orchestrate engine fallback guards", () => {
     const claimList = spec.indexOf("CLAIM_IDS=$(gh api");
     assert.ok(claimPost >= 0 && claimList > claimPost, "claim must be posted before election");
     assert.match(spec.slice(claimList, claimList + 500), /--paginate/);
+    assert.match(
+      spec.slice(claimList, claimList + 500),
+      /any\(\. == \\"<!-- FORGE:ENGINE_FALLBACK -->\\"\)/,
+    );
     assert.match(spec.slice(claimList, claimList + 500), /split\(.*any\(\. ==/);
     assert.match(spec, /sort -n \| head -1/);
     assert.doesNotMatch(spec, /ALREADY_FALLEN_BACK=/);
