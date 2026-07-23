@@ -1168,11 +1168,12 @@ done
      # Atomic-enough cross-session claim: post first, then elect the lowest server-assigned
      # comment ID for this batch. Concurrent claimants may both post, but exactly one can win.
      # Pagination is mandatory; any POST/list/parse failure fails closed and dispatches nothing.
-     CLAIM_TOKEN="${BATCH_ID}-{NUMBER}-$$-${RANDOM}"
+     CLAIM_SCOPE="${BATCH_ID:-${BATCH_T0:-standalone-{NUMBER}}}"
+     CLAIM_TOKEN="${CLAIM_SCOPE}-{NUMBER}-$$-${RANDOM}"
      ENGINE_FALLBACK_BODY="<!-- FORGE:ENGINE_FALLBACK -->
    ## Engine-First Dispatch Failed — Falling Back to Agent-Spawn
 
-   **Batch**: ${BATCH_ID}
+   **Batch**: ${CLAIM_SCOPE}
    **Claim**: ${CLAIM_TOKEN}
 
    \`forgedock run-issue\` ended at \`workflow:engine-error\` with no committed phases, branch, or PR
@@ -1183,7 +1184,7 @@ done
        --raw-field body="$ENGINE_FALLBACK_BODY" --jq '.id' 2>/dev/null) || CLAIM_ID=""
      CLAIM_LIST_OK="true"
      CLAIM_IDS=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
-       --jq ".[] | select(.body | contains(\"FORGE:ENGINE_FALLBACK\") and contains(\"**Batch**: ${BATCH_ID}\")) | .id" \
+       --jq ".[] | select(.body | contains(\"FORGE:ENGINE_FALLBACK\") and contains(\"**Batch**: ${CLAIM_SCOPE}\")) | .id" \
        2>/dev/null) || CLAIM_LIST_OK="false"
      WINNER_CLAIM_ID=$(printf '%s\n' "$CLAIM_IDS" | grep -E '^[0-9]+$' | sort -n | head -1)
      CLAIM_WON="false"

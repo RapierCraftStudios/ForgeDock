@@ -50,6 +50,7 @@ import {
 import { join, dirname, basename, relative, isAbsolute, extname } from "path";
 import os from "os";
 import { execSync, spawnSync } from "child_process";
+import { createRequire } from "module";
 import { parseForgeYaml, resolveModelAlias } from "./forge-utils.mjs";
 import { DEFAULT_SPAWN_MAX_BUFFER_BYTES } from "./cli-spawn-shared.mjs";
 
@@ -431,6 +432,15 @@ export function checkExecutionBackend({
   cwd = process.cwd(),
   apiKey = process.env.ANTHROPIC_API_KEY,
   resolveCliFn = resolveClaudeCliBinary,
+  spawnImpl = spawnSync,
+  sdkAvailableFn = () => {
+    try {
+      createRequire(import.meta.url).resolve("@anthropic-ai/sdk");
+      return true;
+    } catch {
+      return false;
+    }
+  },
 } = {}) {
   if (!VALID_BACKENDS.has(requested)) {
     return { ready: false, backend: requested, reason: "invalid-backend" };
@@ -438,13 +448,26 @@ export function checkExecutionBackend({
 
   if (requested !== "api") {
     const cliPath = resolveCliFn(cwd);
-    if (cliPath) return { ready: true, backend: "cli", reason: "resolved-cli" };
+    if (cliPath) {
+      const result = spawnImpl(cliPath, ["--version"], {
+        cwd,
+        shell: false,
+        encoding: "utf-8",
+        timeout: CLI_PROBE_TIMEOUT_MS,
+      });
+      if (!result?.error && result?.status === 0) {
+        return { ready: true, backend: "cli", reason: "resolved-cli" };
+      }
+    }
     if (requested === "cli") {
       return { ready: false, backend: "cli", reason: "cli-unavailable" };
     }
   }
 
-  if (apiKey) return { ready: true, backend: "api", reason: "api-key-configured" };
+  if (apiKey && sdkAvailableFn()) {
+    return { ready: true, backend: "api", reason: "api-key-and-sdk-configured" };
+  }
+  if (apiKey) return { ready: false, backend: "api", reason: "api-sdk-missing" };
   return { ready: false, backend: "api", reason: "api-key-missing" };
 }
 
@@ -2021,7 +2044,7 @@ export async function runCommand(opts = {}) {
   // misbehaving. An explicitly invalid `backend` value DOES throw here —
   // surfacing a bad --backend/FORGEDOCK_BACKEND value immediately, before any
   // work is attempted, rather than silently ignoring it.
-  const resolvedBackend = resolveBackend({ requested: backend, cwd });
+  let resolvedBackend = resolveBackend({ requested: backend, cwd });
 
   if (dryRun) {
     logger.log(
@@ -2098,16 +2121,24 @@ export async function runCommand(opts = {}) {
     // the bare "claude" name only if resolution genuinely found nothing
     // (e.g. an injected-execImpl test scenario with no path-like output),
     // preserving prior behavior in that edge case.
-    const resolvedBin = resolveClaudeCliBinary(cwd) ?? "claude";
-    return runCliBackend({
-      spec,
-      userMessage,
-      systemPrompt: cliSystemPrompt,
-      args,
-      cwd,
-      logger,
-      bin: resolvedBin,
-    });
+    const resolvedBin = resolveClaudeCliBinary(cwd);
+    if (!resolvedBin && backend === "auto") {
+      resolvedBackend = "api";
+    } else if (!resolvedBin) {
+      const err = new Error("The configured claude CLI path disappeared before invocation.");
+      err.code = "CLI_BACKEND_UNAVAILABLE";
+      throw err;
+    } else {
+      return runCliBackend({
+        spec,
+        userMessage,
+        systemPrompt: cliSystemPrompt,
+        args,
+        cwd,
+        logger,
+        bin: resolvedBin,
+      });
+    }
   }
 
   if (!apiKey) {
