@@ -155,12 +155,9 @@ export const VALID_BACKENDS = readOnlySet(["cli", "api", "auto"]);
 const CLI_AVAILABILITY_CACHE_TTL_MS = 60_000;
 const CLI_AVAILABILITY_CACHE_MAX_SIZE = 100;
 const cliAvailabilityCache = new Map();
-// Windows file extensions `spawnSync(shell:false)` can actually launch:
-// native executables (`.exe`, `.com`) directly, and `.cmd`/`.bat` via Node's
-// own built-in special-cased re-exec through cmd.exe (see the comment on
-// `runCliBackend()` below). An extensionless file — e.g. the POSIX shell
-// shim `npm`/`npx` also drop alongside these on Windows — cannot be
-// launched by `CreateProcess` at all, with or without a full absolute path.
+// Windows path types emitted by npm's shim generator. Native executables are
+// directly spawnable; .cmd/.bat files must be resolved to their trusted native
+// target before spawning because Node cannot exec them with shell:false.
 const WINDOWS_SPAWNABLE_EXTENSIONS = new Set([".exe", ".cmd", ".bat", ".com"]);
 // Cap tool-result payloads so a large file read or verbose command does not
 // blow the context window in a single turn.
@@ -281,6 +278,35 @@ export function selectResolvedCliPath(
     if (existsImpl(candidate)) return candidate;
   }
   return bare;
+}
+
+/**
+ * Resolve an npm-generated Windows command shim to the native executable it
+ * delegates to. This keeps shell:false and argv-array isolation intact instead
+ * of interpolating untrusted command arguments into cmd.exe.
+ */
+export function resolveDirectCliExecutable(
+  cliPath,
+  {
+    platform = process.platform,
+    existsImpl = existsSync,
+    readImpl = readFileSync,
+  } = {},
+) {
+  if (!cliPath || platform !== "win32") return cliPath || null;
+  const extension = extname(cliPath).toLowerCase();
+  if (extension === ".exe" || extension === ".com") return cliPath;
+  if (extension !== ".cmd" && extension !== ".bat") return null;
+
+  try {
+    const shim = readImpl(cliPath, "utf-8");
+    const match = shim.match(/^\s*"%dp0%[\\/]([^"\r\n]+\.(?:exe|com))"\s+%\*\s*$/im);
+    if (!match) return null;
+    const target = join(dirname(cliPath), ...match[1].split(/[\\/]+/));
+    return existsImpl(target) ? target : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -406,7 +432,9 @@ export function resolveClaudeCliBinary(cwd = process.cwd(), opts = {}) {
 
   const existsImpl = opts.existsImpl ?? existsSync;
   try {
-    if (existsImpl(cliPath)) return cliPath;
+    if (existsImpl(cliPath)) {
+      return resolveDirectCliExecutable(cliPath, { ...opts, existsImpl });
+    }
   } catch {
     // Treat an unverifiable cached path as stale and make one bounded refresh.
   }
@@ -416,7 +444,9 @@ export function resolveClaudeCliBinary(cwd = process.cwd(), opts = {}) {
   cliPath = cliAvailabilityCache.get(cwd)?.cliPath ?? null;
   if (!cliPath) return null;
   try {
-    return existsImpl(cliPath) ? cliPath : null;
+    return existsImpl(cliPath)
+      ? resolveDirectCliExecutable(cliPath, { ...opts, existsImpl })
+      : null;
   } catch {
     return null;
   }
@@ -583,15 +613,11 @@ export function resolveBackend({ requested = "auto", cwd = process.cwd() } = {})
  * arbitrary shell commands with this process's privileges). Do not
  * reintroduce `shell: true` or string-command interpolation here.
  *
- * Windows `.cmd`/`.bat` shim resolution works WITHOUT `shell: true` — BUT
- * only when `bin` is already a resolvable target: Node's spawn/spawnSync
- * safely re-invoke through cmd.exe internally when the *given* target is a
- * `.cmd`/`.bat` file, using a properly escaped mechanism, and argv elements
- * are never parsed as shell syntax (verified empirically on Windows: a
- * malicious-looking argv element is delivered to the child process
- * byte-for-byte, not executed). This is the correct fix for the
- * `execFileSync("claude", [...])` ENOENT-on-Windows regression from issue
- * #382 for a `claude.cmd` sitting directly on a real PATH entry.
+ * Windows npm `.cmd`/`.bat` shims cannot be launched by Node with
+ * `shell:false`. `resolveDirectCliExecutable()` therefore parses only the
+ * strict npm-shim form that delegates directly to a native `.exe`/`.com` and
+ * returns that trusted target. Unknown batch scripts fail closed instead of
+ * requiring cmd.exe interpolation of the untrusted user message.
  *
  * CORRECTED (issue #2741): the claim that a bare `"claude"` name resolves
  * via "spawnSync's own PATH/PATHEXT resolution" was overconfident and
@@ -605,8 +631,8 @@ export function resolveBackend({ requested = "auto", cwd = process.cwd() } = {})
  * above); it is resolving the *exact* absolute path the probe validated
  * once, via `resolveClaudeCliBinary()`, and passing that resolved path as
  * `bin` — `spawnSync(shell:false)` launches an already-fully-resolved
- * absolute path (native `.exe`, or `.cmd`/`.bat` via the special-cased
- * re-exec described above) without needing any further PATH/PATHEXT
+ * native executable path (including the target extracted from a recognized
+ * npm shim) without needing any further PATH/PATHEXT
  * resolution of its own. See `isClaudeCliAvailable()`/
  * `resolveClaudeCliBinary()` above for how that resolution happens.
  *
@@ -1042,10 +1068,9 @@ export function runCliBackend({
     // No `shell` option (defaults to false): argv is passed as discrete,
     // unparsed elements — see the SECURITY note above. `bin` is expected to
     // already be a fully-resolved absolute path (see `resolveClaudeCliBinary()`
-    // and the `opts.bin` doc comment above, issue #2741) — spawnSync launches
-    // an already-resolved `.exe`/`.cmd`/`.bat` path directly (with Node's
-    // built-in special-cased `.cmd`/`.bat` re-exec) without needing any
-    // further shell/PATHEXT resolution of its own.
+    // and the `opts.bin` doc comment above, issue #2741) — Windows npm shims
+    // have already been reduced to their native target, so spawnSync never
+    // needs shell/PATHEXT resolution.
     const result = spawnFn(bin, cliArgs, {
       cwd,
       encoding: "utf-8",

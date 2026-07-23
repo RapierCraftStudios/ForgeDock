@@ -601,6 +601,12 @@ describe("orchestrate engine fallback guards", () => {
     assert.doesNotMatch(spec, /spawnSync\('claude', \['--version'\]/);
   });
 
+  it("requires committed state to be an empty array before fallback", () => {
+    const spec = readFileSync(specPath, "utf-8");
+    assert.match(spec, /\.committed \| type == "array"/);
+    assert.match(spec, /\.committed \| length == 0/);
+  });
+
   it("posts a fallback claim before paginated lowest-comment-id election", () => {
     const spec = readFileSync(specPath, "utf-8");
     const claimPost = spec.indexOf("CLAIM_ID=$(gh api");

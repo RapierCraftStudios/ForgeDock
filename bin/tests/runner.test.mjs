@@ -50,6 +50,7 @@ import {
   CLI_PROBE_OUTPUT_SENTINEL,
   parseProbeOutput,
   selectResolvedCliPath,
+  resolveDirectCliExecutable,
   resolveClaudeCliBinary,
   checkExecutionBackend,
   resolveBackend,
@@ -2941,17 +2942,30 @@ describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issu
     }
   });
 
-  it("on win32, prefers a .cmd sibling over a bare extensionless `where` match", () => {
+  it("on win32, resolves an npm .cmd shim to its directly spawnable native target", () => {
     if (process.platform !== "win32") return; // platform-specific selection logic
     const bareShim = "C:\\Users\\dev\\AppData\\Local\\npm-cache\\_npx\\abc\\node_modules\\.bin\\claude";
     const cmdShim = `${bareShim}.cmd`;
+    const exeTarget = "C:\\Users\\dev\\AppData\\Local\\npm-cache\\_npx\\abc\\node_modules\\.bin\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe";
     const execImpl = mock.fn(() => `${bareShim}\n${cmdShim}\n${CLI_PROBE_OUTPUT_SENTINEL}\n1.2.3 (Claude Code)`);
     const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-resolve-win-"));
     try {
-      assert.equal(resolveClaudeCliBinary(cwd, { execImpl, existsImpl: () => true }), cmdShim);
+      assert.equal(resolveClaudeCliBinary(cwd, {
+        execImpl,
+        existsImpl: () => true,
+        readImpl: () => '"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*',
+      }), exeTarget);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
+  });
+
+  it("rejects a Windows command shim without a direct native target", () => {
+    assert.equal(resolveDirectCliExecutable("C:\\npm\\claude.cmd", {
+      platform: "win32",
+      existsImpl: () => true,
+      readImpl: () => '@echo off\r\nnode cli.js %*',
+    }), null);
   });
 
   it("runCliBackend spawns the resolved path successfully when the bare name would ENOENT (the reported bug)", () => {
@@ -3022,9 +3036,9 @@ describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issu
     const existsImpl = (candidate) => candidate === newShim || (candidate === oldShim && oldExists);
     const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-resolve-stale-"));
     try {
-      assert.equal(resolveClaudeCliBinary(cwd, { execImpl, existsImpl }), oldShim);
+      assert.equal(resolveClaudeCliBinary(cwd, { execImpl, existsImpl, platform: "linux" }), oldShim);
       oldExists = false;
-      assert.equal(resolveClaudeCliBinary(cwd, { execImpl, existsImpl }), newShim);
+      assert.equal(resolveClaudeCliBinary(cwd, { execImpl, existsImpl, platform: "linux" }), newShim);
       assert.equal(execImpl.mock.callCount(), 2);
     } finally {
       rmSync(cwd, { recursive: true, force: true });

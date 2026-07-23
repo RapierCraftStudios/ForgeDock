@@ -1138,13 +1138,17 @@ done
    # the real multi-line shape correctly:
    STATE_BLOCK=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' \
      | sed -n '/<!-- FORGE:STATE/,/-->/p')
-   STATE_JSON=$(echo "$STATE_BLOCK" | sed '1d;$d')
-   if [ -n "$STATE_JSON" ]; then
-     COMMITTED_COUNT=$(echo "$STATE_JSON" | jq -r '.committed | length' 2>/dev/null)
-     STATE_BRANCH=$(echo "$STATE_JSON" | jq -r '.branch' 2>/dev/null)
-     STATE_PR=$(echo "$STATE_JSON" | jq -r '.pr' 2>/dev/null)
-     [ "$COMMITTED_COUNT" = "0" ] && [ "$STATE_BRANCH" = "null" ] && [ "$STATE_PR" = "null" ] \
-       && EMPTY_COMMITTED_STATE="true" || EMPTY_COMMITTED_STATE="false"
+    STATE_JSON=$(echo "$STATE_BLOCK" | sed '1d;$d')
+    if [ -n "$STATE_JSON" ]; then
+      # Missing or schema-invalid fields are unverifiable, not empty. In particular, jq's
+      # `length` is also zero for null, {}, and "", so require the committed array type first.
+      if echo "$STATE_JSON" | jq -e \
+        '(.committed | type == "array") and (.committed | length == 0) and (.branch == null) and (.pr == null)' \
+        >/dev/null 2>&1; then
+        EMPTY_COMMITTED_STATE="true"
+      else
+        EMPTY_COMMITTED_STATE="false"
+      fi
    else
      # No FORGE:STATE block was ever written to the issue body (e.g. the run failed before
      # phase 1 committed anything). There is no reliable structured signal available in this
