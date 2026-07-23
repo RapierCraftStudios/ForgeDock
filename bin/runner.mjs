@@ -70,6 +70,7 @@ const DEFAULT_CLI_TIMEOUT_MS = 15 * 60 * 1000;
 // it is far shorter than DEFAULT_CLI_TIMEOUT_MS. Mirrors the timeout already
 // used by the `claude --version` doctor check in bin/forgedock.mjs.
 const CLI_PROBE_TIMEOUT_MS = 5000;
+export const CLI_PROBE_OUTPUT_SENTINEL = "__FORGEDOCK_CLI_PATHS_END__";
 /**
  * Wraps a Set in a Proxy that blocks add()/delete()/clear(), so the
  * returned collection is genuinely read-only — not just Object.frozen.
@@ -216,13 +217,10 @@ export function resolveConfiguredDefaultModel(cwd) {
 // ---------------------------------------------------------------------------
 
 /**
- * Split the combined probe command's stdout (issue #2741 — see
- * `isClaudeCliAvailable()`) into the leading "path-like" lines (from the
- * `where`/`command -v` half of the command) versus everything after them
- * (the `claude --version` output). A path-like line is one containing a
- * path separator (`/` or `\`); `claude --version` output (e.g.
- * `"1.2.3 (Claude Code)"`) never does, so the first non-path-like line
- * marks the boundary.
+ * Read path candidates from the explicitly delimited resolver section of the
+ * combined CLI probe. Version output is untrusted for parsing purposes: update
+ * notices can contain path-like URLs or filenames, so shape-based inference
+ * must never allow lines after the sentinel to become executable candidates.
  *
  * Pure/side-effect-free so it can be unit tested directly against
  * synthetic multi-line `where` output without spawning anything.
@@ -230,20 +228,16 @@ export function resolveConfiguredDefaultModel(cwd) {
  * @param {string} raw
  * @returns {string[]} Leading path-like lines, in original order.
  */
-function parseProbeOutput(raw) {
+export function parseProbeOutput(raw) {
   const lines = String(raw ?? "")
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
-  const pathLines = [];
-  for (const line of lines) {
-    if (line.includes("/") || line.includes("\\")) {
-      pathLines.push(line);
-    } else {
-      break;
-    }
-  }
-  return pathLines;
+  const boundary = lines.indexOf(CLI_PROBE_OUTPUT_SENTINEL);
+  if (boundary < 0) return [];
+  return lines
+    .slice(0, boundary)
+    .filter((line) => line.includes("/") || line.includes("\\"));
 }
 
 /**
@@ -266,9 +260,12 @@ function parseProbeOutput(raw) {
  * @param {string[]} pathLines
  * @returns {string|null}
  */
-function selectResolvedCliPath(pathLines) {
+export function selectResolvedCliPath(
+  pathLines,
+  { platform = process.platform, existsImpl = existsSync } = {},
+) {
   if (pathLines.length === 0) return null;
-  if (process.platform !== "win32") return pathLines[0];
+  if (platform !== "win32") return pathLines[0];
 
   const withExt = pathLines.find((line) =>
     WINDOWS_SPAWNABLE_EXTENSIONS.has(extname(line).toLowerCase()),
@@ -280,7 +277,7 @@ function selectResolvedCliPath(pathLines) {
   const base = basename(bare);
   for (const ext of [".cmd", ".exe", ".bat", ".com"]) {
     const candidate = join(dir, `${base}${ext}`);
-    if (existsSync(candidate)) return candidate;
+    if (existsImpl(candidate)) return candidate;
   }
   return bare;
 }
@@ -345,7 +342,10 @@ function selectResolvedCliPath(pathLines) {
  *   `runCliBackend()`.
  * @returns {boolean}
  */
-export function isClaudeCliAvailable(cwd = process.cwd(), { execImpl = execSync } = {}) {
+export function isClaudeCliAvailable(
+  cwd = process.cwd(),
+  { execImpl = execSync, platform = process.platform, existsImpl = existsSync } = {},
+) {
   const cached = cliAvailabilityCache.get(cwd);
   if (cached && Date.now() - cached.cachedAt < CLI_AVAILABILITY_CACHE_TTL_MS) {
     return cached.available;
@@ -354,14 +354,17 @@ export function isClaudeCliAvailable(cwd = process.cwd(), { execImpl = execSync 
   let available;
   let cliPath = null;
   try {
-    const raw = execImpl(`${resolveCmd} && claude --version`, {
+    const raw = execImpl(
+      `${resolveCmd} && echo ${CLI_PROBE_OUTPUT_SENTINEL} && claude --version`,
+      {
       cwd,
       stdio: ["ignore", "pipe", "ignore"],
       encoding: "utf-8",
       timeout: CLI_PROBE_TIMEOUT_MS,
-    });
+      },
+    );
     available = true;
-    cliPath = selectResolvedCliPath(parseProbeOutput(raw));
+    cliPath = selectResolvedCliPath(parseProbeOutput(raw), { platform, existsImpl });
   } catch {
     available = false;
   }
@@ -397,7 +400,52 @@ export function isClaudeCliAvailable(cwd = process.cwd(), { execImpl = execSync 
  */
 export function resolveClaudeCliBinary(cwd = process.cwd(), opts = {}) {
   isClaudeCliAvailable(cwd, opts);
-  return cliAvailabilityCache.get(cwd)?.cliPath ?? null;
+  let cliPath = cliAvailabilityCache.get(cwd)?.cliPath ?? null;
+  if (!cliPath) return null;
+
+  const existsImpl = opts.existsImpl ?? existsSync;
+  try {
+    if (existsImpl(cliPath)) return cliPath;
+  } catch {
+    // Treat an unverifiable cached path as stale and make one bounded refresh.
+  }
+
+  cliAvailabilityCache.delete(cwd);
+  isClaudeCliAvailable(cwd, opts);
+  cliPath = cliAvailabilityCache.get(cwd)?.cliPath ?? null;
+  if (!cliPath) return null;
+  try {
+    return existsImpl(cliPath) ? cliPath : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Check whether the configured execution backend is locally usable without
+ * making a paid model request. CLI checks reuse the production resolver;
+ * API checks verify that a key is configured, not that the key is accepted.
+ */
+export function checkExecutionBackend({
+  requested = process.env.FORGEDOCK_BACKEND || "auto",
+  cwd = process.cwd(),
+  apiKey = process.env.ANTHROPIC_API_KEY,
+  resolveCliFn = resolveClaudeCliBinary,
+} = {}) {
+  if (!VALID_BACKENDS.has(requested)) {
+    return { ready: false, backend: requested, reason: "invalid-backend" };
+  }
+
+  if (requested !== "api") {
+    const cliPath = resolveCliFn(cwd);
+    if (cliPath) return { ready: true, backend: "cli", reason: "resolved-cli" };
+    if (requested === "cli") {
+      return { ready: false, backend: "cli", reason: "cli-unavailable" };
+    }
+  }
+
+  if (apiKey) return { ready: true, backend: "api", reason: "api-key-configured" };
+  return { ready: false, backend: "api", reason: "api-key-missing" };
 }
 
 /**

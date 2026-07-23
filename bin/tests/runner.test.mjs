@@ -47,7 +47,11 @@ import {
   resolveConfiguredDefaultModel,
   runCommand,
   isClaudeCliAvailable,
+  CLI_PROBE_OUTPUT_SENTINEL,
+  parseProbeOutput,
+  selectResolvedCliPath,
   resolveClaudeCliBinary,
+  checkExecutionBackend,
   resolveBackend,
   resolveBackendLadder,
   runCliBackend,
@@ -2753,6 +2757,53 @@ describe("buildCliSystemPrompt", () => {
 // Backend selection — isClaudeCliAvailable / resolveBackend (issue #2003)
 // ---------------------------------------------------------------------------
 
+describe("CLI probe output parsing", () => {
+  it("keeps ordered path lines before the explicit sentinel", () => {
+    const raw = `noise\r\nC:\\bin\\claude\r\n\r\nC:\\bin\\claude.cmd\r\n${CLI_PROBE_OUTPUT_SENTINEL}\r\n1.2.3`;
+    assert.deepEqual(parseProbeOutput(raw), ["C:\\bin\\claude", "C:\\bin\\claude.cmd"]);
+  });
+
+  it("never treats path-like version output as a CLI candidate", () => {
+    const raw = `/real/claude\n${CLI_PROBE_OUTPUT_SENTINEL}\nUpdate: https://example.test/claude.cmd`;
+    assert.deepEqual(parseProbeOutput(raw), ["/real/claude"]);
+  });
+
+  it("fails closed when the sentinel is absent", () => {
+    assert.deepEqual(parseProbeOutput("/real/claude\nhttps://example.test/claude.cmd"), []);
+  });
+});
+
+describe("selectResolvedCliPath", () => {
+  it("returns the first candidate on POSIX", () => {
+    assert.equal(
+      selectResolvedCliPath(["/first/claude", "/second/claude"], { platform: "linux" }),
+      "/first/claude",
+    );
+  });
+
+  it("prefers a spawnable Windows extension", () => {
+    assert.equal(
+      selectResolvedCliPath(["C:\\bin\\claude", "C:\\bin\\claude.CMD"], {
+        platform: "win32",
+      }),
+      "C:\\bin\\claude.CMD",
+    );
+  });
+
+  it("finds a spawnable sibling when all Windows candidates are extensionless", () => {
+    const checked = [];
+    const resolved = selectResolvedCliPath(["C:\\bin\\claude"], {
+      platform: "win32",
+      existsImpl(candidate) {
+        checked.push(candidate);
+        return candidate.toLowerCase().endsWith(".exe");
+      },
+    });
+    assert.equal(resolved, "C:\\bin\\claude.exe");
+    assert.deepEqual(checked.map((value) => value.slice(-4).toLowerCase()), [".cmd", ".exe"]);
+  });
+});
+
 describe("isClaudeCliAvailable", () => {
   it("returns a boolean and never throws, regardless of whether `claude` is installed", () => {
     // Deliberately does not assert true/false — whether `claude` happens to be
@@ -2849,10 +2900,14 @@ describe("isClaudeCliAvailable", () => {
 describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issue #2741)", () => {
   it("resolves and caches the shell-validated absolute path, not the bare command name", () => {
     const shimPath = "/home/user/.npm/_npx/abc123/node_modules/.bin/claude";
-    const execImpl = mock.fn(() => `${shimPath}\n1.2.3 (Claude Code)`);
+    const execImpl = mock.fn(() => `${shimPath}\n${CLI_PROBE_OUTPUT_SENTINEL}\n1.2.3 (Claude Code)`);
     const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-resolve-"));
     try {
-      const resolved = resolveClaudeCliBinary(cwd, { execImpl });
+      const resolved = resolveClaudeCliBinary(cwd, {
+        execImpl,
+        platform: "linux",
+        existsImpl: () => true,
+      });
       assert.equal(resolved, shimPath);
       assert.equal(
         execImpl.mock.callCount(),
@@ -2890,10 +2945,10 @@ describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issu
     if (process.platform !== "win32") return; // platform-specific selection logic
     const bareShim = "C:\\Users\\dev\\AppData\\Local\\npm-cache\\_npx\\abc\\node_modules\\.bin\\claude";
     const cmdShim = `${bareShim}.cmd`;
-    const execImpl = mock.fn(() => `${bareShim}\n${cmdShim}\n1.2.3 (Claude Code)`);
+    const execImpl = mock.fn(() => `${bareShim}\n${cmdShim}\n${CLI_PROBE_OUTPUT_SENTINEL}\n1.2.3 (Claude Code)`);
     const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-resolve-win-"));
     try {
-      assert.equal(resolveClaudeCliBinary(cwd, { execImpl }), cmdShim);
+      assert.equal(resolveClaudeCliBinary(cwd, { execImpl, existsImpl: () => true }), cmdShim);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
@@ -2901,10 +2956,14 @@ describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issu
 
   it("runCliBackend spawns the resolved path successfully when the bare name would ENOENT (the reported bug)", () => {
     const shimPath = "/home/user/.npm/_npx/abc123/node_modules/.bin/claude";
-    const execImpl = mock.fn(() => `${shimPath}\n1.2.3 (Claude Code)`);
+    const execImpl = mock.fn(() => `${shimPath}\n${CLI_PROBE_OUTPUT_SENTINEL}\n1.2.3 (Claude Code)`);
     const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-resolve-e2e-"));
     try {
-      const resolvedBin = resolveClaudeCliBinary(cwd, { execImpl });
+      const resolvedBin = resolveClaudeCliBinary(cwd, {
+        execImpl,
+        platform: "linux",
+        existsImpl: () => true,
+      });
       assert.equal(resolvedBin, shimPath, "precondition: probe must resolve the shim path");
 
       // Mirrors the real-world failure: spawnFn ENOENTs on the bare "claude"
@@ -2949,6 +3008,58 @@ describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issu
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
+  });
+
+  it("refreshes a cached path once when a transient shim disappears", () => {
+    const oldShim = "/tmp/npx-old/claude";
+    const newShim = "/tmp/npx-new/claude";
+    let probe = 0;
+    let oldExists = true;
+    const execImpl = mock.fn(() => {
+      const path = probe++ === 0 ? oldShim : newShim;
+      return `${path}\n${CLI_PROBE_OUTPUT_SENTINEL}\n1.2.3`;
+    });
+    const existsImpl = (candidate) => candidate === newShim || (candidate === oldShim && oldExists);
+    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-resolve-stale-"));
+    try {
+      assert.equal(resolveClaudeCliBinary(cwd, { execImpl, existsImpl }), oldShim);
+      oldExists = false;
+      assert.equal(resolveClaudeCliBinary(cwd, { execImpl, existsImpl }), newShim);
+      assert.equal(execImpl.mock.callCount(), 2);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("checkExecutionBackend", () => {
+  it("uses the production-resolved CLI path in auto mode", () => {
+    assert.deepEqual(checkExecutionBackend({ resolveCliFn: () => "/bin/claude" }), {
+      ready: true,
+      backend: "cli",
+      reason: "resolved-cli",
+    });
+  });
+
+  it("falls back to a configured API backend in auto mode", () => {
+    assert.deepEqual(checkExecutionBackend({ resolveCliFn: () => null, apiKey: "key" }), {
+      ready: true,
+      backend: "api",
+      reason: "api-key-configured",
+    });
+  });
+
+  it("fails explicit CLI and API checks instead of crossing backends", () => {
+    assert.equal(checkExecutionBackend({ requested: "cli", resolveCliFn: () => null, apiKey: "key" }).ready, false);
+    assert.equal(checkExecutionBackend({ requested: "api", resolveCliFn: () => "/bin/claude", apiKey: "" }).ready, false);
+  });
+
+  it("reports no usable backend when auto has neither CLI nor API key", () => {
+    assert.deepEqual(checkExecutionBackend({ resolveCliFn: () => null, apiKey: "" }), {
+      ready: false,
+      backend: "api",
+      reason: "api-key-missing",
+    });
   });
 });
 
