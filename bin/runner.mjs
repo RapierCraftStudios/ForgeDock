@@ -2046,6 +2046,11 @@ export async function runCommand(opts = {}) {
   // work is attempted, rather than silently ignoring it.
   let resolvedBackend = resolveBackend({ requested: backend, cwd });
 
+  if (resolvedBackend === "cli" && backend === "auto") {
+    const readiness = checkExecutionBackend({ requested: "auto", cwd, apiKey });
+    if (readiness.backend === "api") resolvedBackend = "api";
+  }
+
   if (dryRun) {
     logger.log(
       renderDryRun({
@@ -2065,11 +2070,6 @@ export async function runCommand(opts = {}) {
       model,
       backend: resolvedBackend,
     };
-  }
-
-  if (resolvedBackend === "cli" && backend === "auto") {
-    const readiness = checkExecutionBackend({ requested: "auto", cwd, apiKey });
-    if (readiness.backend === "api") resolvedBackend = "api";
   }
 
   if (resolvedBackend === "cli") {
