@@ -22,14 +22,8 @@ function runCli(args, { cwd, home, extraEnv } = {}) {
 }
 
 describe("router", () => {
-  it("backend-check accepts configured API mode and fails when its key is absent", () => {
+  it("backend-check fails configured API mode when its key is absent", () => {
     const home = mkdtempSync(join(os.tmpdir(), "fd-backend-check-"));
-    const ready = runCli(["backend-check", "--quiet"], {
-      home,
-      extraEnv: { FORGEDOCK_BACKEND: "api", ANTHROPIC_API_KEY: "test-key" },
-    });
-    assert.equal(ready.status, 0, ready.stdout + ready.stderr);
-
     const unavailable = runCli(["backend-check", "--quiet"], {
       home,
       extraEnv: { FORGEDOCK_BACKEND: "api", ANTHROPIC_API_KEY: "" },

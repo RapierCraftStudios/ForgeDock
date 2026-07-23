@@ -3034,7 +3034,10 @@ describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issu
 
 describe("checkExecutionBackend", () => {
   it("uses the production-resolved CLI path in auto mode", () => {
-    assert.deepEqual(checkExecutionBackend({ resolveCliFn: () => "/bin/claude" }), {
+    assert.deepEqual(checkExecutionBackend({
+      resolveCliFn: () => "/bin/claude",
+      spawnImpl: () => ({ status: 0 }),
+    }), {
       ready: true,
       backend: "cli",
       reason: "resolved-cli",
@@ -3042,10 +3045,14 @@ describe("checkExecutionBackend", () => {
   });
 
   it("falls back to a configured API backend in auto mode", () => {
-    assert.deepEqual(checkExecutionBackend({ resolveCliFn: () => null, apiKey: "key" }), {
+    assert.deepEqual(checkExecutionBackend({
+      resolveCliFn: () => null,
+      apiKey: "key",
+      sdkAvailableFn: () => true,
+    }), {
       ready: true,
       backend: "api",
-      reason: "api-key-configured",
+      reason: "api-key-and-sdk-configured",
     });
   });
 
@@ -3060,6 +3067,19 @@ describe("checkExecutionBackend", () => {
       backend: "api",
       reason: "api-key-missing",
     });
+  });
+
+  it("rejects an unspawnable resolved CLI and an API backend without its SDK", () => {
+    assert.equal(checkExecutionBackend({
+      requested: "cli",
+      resolveCliFn: () => "claude.cmd",
+      spawnImpl: () => ({ status: null, error: new Error("EINVAL") }),
+    }).ready, false);
+    assert.deepEqual(checkExecutionBackend({
+      requested: "api",
+      apiKey: "key",
+      sdkAvailableFn: () => false,
+    }), { ready: false, backend: "api", reason: "api-sdk-missing" });
   });
 });
 
