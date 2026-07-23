@@ -752,14 +752,13 @@ export function table(
  * string-type (`]`, `P`, `_`, `^`, `X`) passes above, so pass ordering is
  * not significant.
  */
+// Ordered from multi-byte string controls through CSI and general ESC forms;
+// earlier alternatives prevent their introducers from being consumed alone.
+const ANSI_TOKEN_RE = /(?:\x1b[\]PX^_]|[\x90\x98\x9d-\x9f])(?:[^\x07\x1b\x9c]|\x1b(?!\\))*(?:\x07|\x9c|\x1b\\|$)|(?:\x1b\[|\x9b)(?:[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|[\x30-\x3f]*[\x20-\x2f]*$)|\x1b[\x20-\x2f]*[\x30-\x7e]|[\x80-\x9f]/g;
+const SGR_TOKEN_RE = /^\x1b\[[\x30-\x3f]*[\x20-\x2f]*m$/;
+
 export function stripAnsi(s) {
-  return s
-    .replace(/\x1b[\]P_^X][^\x07\x1b]*(?:\x07|\x1b\\)?/g, "")
-    .replace(/[\x90\x9d\x9e\x9f\x98][^\x07\x9c]*(?:\x07|\x9c)?/g, "")
-    .replace(/\x1b\[[0-9;]*[A-Za-z]/g, "")
-    .replace(/\x9b[0-9;]*[A-Za-z]/g, "")
-    .replace(/\x1b[()*+\-./][0-9A-Za-z@]/g, "")
-    .replace(/\x1b[c78DEMNO=>]/g, "");
+  return String(s).replace(ANSI_TOKEN_RE, "");
 }
 
 /**
@@ -781,12 +780,9 @@ export function stripAnsi(s) {
  * unsanitized string.
  */
 function stripDangerousAnsi(s) {
-  return s
-    .replace(/\x1b[\]P_^X][^\x07\x1b]*(?:\x07|\x1b\\)?/g, "")
-    .replace(/[\x90\x9d\x9e\x9f\x98][^\x07\x9c]*(?:\x07|\x9c)?/g, "")
-    .replace(/\x9b[0-9;]*[A-Za-z]/g, "")
-    .replace(/\x1b[()*+\-./][0-9A-Za-z@]/g, "")
-    .replace(/\x1b[c78DEMNO=>]/g, "");
+  return String(s).replace(ANSI_TOKEN_RE, (token) =>
+    SGR_TOKEN_RE.test(token) ? token : "",
+  );
 }
 
 /**
@@ -806,7 +802,7 @@ function stripDangerousAnsi(s) {
  */
 export function truncateVisible(str, maxWidth) {
   str = stripDangerousAnsi(str);
-  const ansiRe = /\x1b\[[0-9;]*[A-Za-z]/g;
+  const ansiRe = ANSI_TOKEN_RE;
   let visible = 0;
   let result = "";
   let lastIndex = 0;
@@ -840,10 +836,17 @@ export function truncateVisible(str, maxWidth) {
   // suppresses the original trailing RESET token, so the post-loop guard must fire
   // to close any open sequences.  Inputs shorter than maxWidth are unaffected because
   // stripAnsi(str).length < maxWidth makes the condition false.
-  if (stripAnsi(str).length >= maxWidth && result.includes("\x1b[")) {
+  if (stripAnsi(str).length >= maxWidth && /\x1b\[[\x30-\x3f]*[\x20-\x2f]*m/.test(result)) {
     result += "\x1b[0m";
   }
   return result;
+}
+
+/** Pad an ANSI-decorated string to `width` visible characters. */
+export function padVisible(str, width) {
+  const sanitized = stripDangerousAnsi(str);
+  const visual = stripAnsi(sanitized).length;
+  return sanitized + " ".repeat(Math.max(0, width - visual));
 }
 
 // ---------------------------------------------------------------------------
@@ -967,19 +970,6 @@ export async function annotatedReviewScreen(
         (fd) => confidences[fd.key] === "low",
       ).map((fd) => fd.key),
     };
-  }
-
-  // Pad an ANSI-decorated string to `width` visible characters.
-  //
-  // Sanitizes non-CSI dangerous escape classes (OSC/DCS/APC/PM/SOS, 8-bit
-  // C1 CSI, charset designators, single-byte Fe/Fp forms) before appending
-  // `str` to the output — previously this measured width via `stripAnsi()`
-  // but appended the raw, unsanitized string, letting those escape classes
-  // reach the terminal via the config-review value column (see forge#2606).
-  function padVisible(str, width) {
-    const sanitized = stripDangerousAnsi(str);
-    const visual = stripAnsi(sanitized).length;
-    return sanitized + " ".repeat(Math.max(0, width - visual));
   }
 
   // ── Render the annotated table ────────────────────────────────────────────
