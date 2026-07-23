@@ -604,6 +604,7 @@ describe("orchestrate engine fallback guards", () => {
   it("requires committed state to be an empty array before fallback", () => {
     const spec = readFileSync(specPath, "utf-8");
     assert.match(spec, /\.run \| type == "string" and test\(/);
+    assert.match(spec, /A-Za-z0-9\._:\/-/);
     assert.match(spec, /\.v \| type == "number"/);
     assert.match(spec, /\.committed \| type == "array"/);
     assert.match(spec, /\.committed \| length == 0/);

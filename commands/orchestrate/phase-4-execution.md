@@ -1146,7 +1146,7 @@ done
       # orchestrator handling this same failure one stable scope while allowing a later failure
       # for the same issue/run name to elect a new claimant.
       if echo "$STATE_JSON" | jq -e \
-        '(.run | type == "string" and test("^[A-Za-z0-9._:-]+$")) and (.v | type == "number" and . >= 0 and floor == .) and (.committed | type == "array") and (.committed | length == 0) and (.branch == null) and (.pr == null)' \
+        '(.run | type == "string" and test("^[A-Za-z0-9._:/-]+$")) and (.v | type == "number" and . >= 0 and floor == .) and (.committed | type == "array") and (.committed | length == 0) and (.branch == null) and (.pr == null)' \
         >/dev/null 2>&1; then
         STATE_RUN=$(echo "$STATE_JSON" | jq -r '.run')
         STATE_VERSION=$(echo "$STATE_JSON" | jq -r '.v')
