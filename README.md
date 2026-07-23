@@ -56,7 +56,7 @@ $ /work-on #1230        "orchestrate: Layer 5 co-change signal is dead code"
 
 ### Try it in 30 seconds — on a throwaway repo, nothing to lose
 
-**Requires:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (subscription or `ANTHROPIC_API_KEY`) · [GitHub CLI](https://cli.github.com/) (authenticated) · Node.js ≥ 18.
+**Requires for this demo:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (subscription or `ANTHROPIC_API_KEY`) · [GitHub CLI](https://cli.github.com/) (authenticated) · Node.js ≥ 18.
 
 ```bash
 npx forgedock demo     # spins up a risk-free demo repo and shows you the pipeline end to end
@@ -224,11 +224,22 @@ More ship today (web-property analytics, browser QA sweeps, self-benchmarking) �
 
 ## Install
 
-**Requirements:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code) · [GitHub CLI](https://cli.github.com/) (authenticated) · Node.js ≥ 18.
+**Requirements:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [OpenCode](https://opencode.ai/) · [GitHub CLI](https://cli.github.com/) (authenticated) · Node.js ≥ 18.
 
 ```bash
 npx forgedock # checks your environment, installs commands into ~/.claude/commands/ (available in every Claude Code session on this machine), detects your repo, and hands you a reviewed forge.yaml
 ```
+
+For OpenCode, install namespaced native commands without changing your provider
+or `opencode.json`:
+
+```bash
+npx forgedock opencode install
+# restart OpenCode, then: /forge/work-on <issue>
+```
+
+See [OpenCode support](docs/OPENCODE.md) for architecture, token-loading rules,
+current parity boundaries, and lifecycle commands.
 
 **Install is always global**, to `~/.claude/commands/`. `--global` is still accepted on the command line for backward compatibility but has no effect — there's no other install location to opt out of.
 

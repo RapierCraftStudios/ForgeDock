@@ -3150,6 +3150,9 @@ function help() {
     ["npx forgedock doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block)"],
     ["npx forgedock update", "Pull latest & reinstall"],
     ["npx forgedock uninstall", "Remove commands"],
+    ["npx forgedock opencode install", "Install token-efficient native OpenCode commands"],
+    ["npx forgedock opencode status", "Check the OpenCode adapter"],
+    ["npx forgedock opencode uninstall", "Remove ForgeDock-owned OpenCode files"],
     ["npx forgedock version", "Print the installed version and check for updates"],
     ["npx forgedock help", "Show this help"],
   ];
@@ -3801,6 +3804,63 @@ switch (command) {
   case "update":
     await update();
     break;
+  case "opencode": {
+    const action = restArgs[0] || "install";
+    const {
+      getOpenCodeAdapterStatus,
+      installOpenCodeAdapter,
+      uninstallOpenCodeAdapter,
+    } = await import("./opencode-adapter.mjs");
+    if (action === "install") {
+      const persist = await persistHome({ forgeHome: FORGE_HOME, home: HOME });
+      if (persist.forgeHome === FORGE_HOME && isEphemeralCachePath(FORGE_HOME)) {
+        throw new Error(
+          `Cannot install OpenCode commands from ephemeral package path ${FORGE_HOME}: ` +
+            `${persist.reason || "failed to persist ForgeDock under ~/.forge"}.`,
+        );
+      }
+      const result = await installOpenCodeAdapter({
+        forgeHome: persist.forgeHome || FORGE_HOME,
+        home: HOME,
+        includeExtras: restArgs.includes("--extras"),
+      });
+      process.stdout.write(
+        `Installed ${result.commandCount} OpenCode commands under ${result.configDir}.\n` +
+          "Restart OpenCode, then run /forge/work-on <issue>.\n",
+      );
+      if (result.migration.removedInstructionsFile || result.migration.removedConfigEntries > 0) {
+        process.stdout.write(
+          `Removed legacy OpenCode adapter artifacts (${result.migration.removedConfigEntries} config entries).\n`,
+        );
+      }
+      for (const warning of result.migration.warnings) process.stderr.write(`Warning: ${warning}\n`);
+    } else if (action === "status") {
+      const result = await getOpenCodeAdapterStatus({ home: HOME });
+      if (!result.installed) {
+        process.stdout.write(`OpenCode adapter is not installed under ${result.configDir}.\n`);
+        exitCode = 1;
+      } else if (!result.healthy) {
+        process.stdout.write(
+          `OpenCode adapter is incomplete (${result.missing.length} missing file(s)). ` +
+            "Re-run: npx forgedock opencode install\n",
+        );
+        exitCode = 1;
+      } else {
+        process.stdout.write(
+          `OpenCode adapter is healthy (${result.manifest.commandCount} commands) under ${result.configDir}.\n`,
+        );
+      }
+    } else if (action === "uninstall") {
+      const result = await uninstallOpenCodeAdapter({ home: HOME });
+      process.stdout.write(`Removed ${result.removed} ForgeDock-owned OpenCode file(s).\n`);
+    } else {
+      process.stderr.write(
+        `Unknown OpenCode action: ${action}. Use install, status, or uninstall.\n`,
+      );
+      exitCode = 1;
+    }
+    break;
+  }
   case "run":
     await run();
     break;

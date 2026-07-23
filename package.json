@@ -1,7 +1,7 @@
 {
   "name": "forgedock",
   "version": "1.5.1",
-  "description": "Autonomous dev pipeline for Claude Code. GitHub as institutional memory — every issue, PR, and annotation survives context resets and makes the next agent smarter.",
+  "description": "Autonomous development pipeline for coding agents. GitHub as institutional memory, with native Claude Code and OpenCode entrypoints.",
   "bin": {
     "forgedock": "bin/forgedock.mjs"
   },
@@ -16,6 +16,7 @@
     "llm",
     "knowledge-graph",
     "claude",
+    "opencode",
     "anthropic",
     "agentic-ai",
     "devtools",
