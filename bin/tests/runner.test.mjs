@@ -3371,7 +3371,11 @@ describe("runCommand backend resolution", () => {
       // resolvedBackend is "api" and the entire cli-branch (including the
       // notice) is unreachable — assert its absence in that case instead,
       // so the test is deterministic either way rather than flaky.
-      const cliAvailable = isClaudeCliAvailable(TMP);
+      const cliReady = checkExecutionBackend({
+        requested: "auto",
+        cwd: TMP,
+        apiKey: "sk-test-key-present",
+      }).backend === "cli";
       const originalTimeout = process.env.FORGEDOCK_CLI_TIMEOUT_MS;
       process.env.FORGEDOCK_CLI_TIMEOUT_MS = "1";
       const lines = [];
@@ -3397,7 +3401,7 @@ describe("runCommand backend resolution", () => {
         }
       }
       const notice = lines.find((l) => /Using the claude CLI backend/.test(l));
-      if (cliAvailable) {
+      if (cliReady) {
         assert.ok(notice, "expected the discoverability notice when auto resolves to cli with an apiKey present");
         assert.match(notice, /--backend api/);
         assert.match(notice, /FORGEDOCK_BACKEND=api/);

@@ -2067,6 +2067,11 @@ export async function runCommand(opts = {}) {
     };
   }
 
+  if (resolvedBackend === "cli" && backend === "auto") {
+    const readiness = checkExecutionBackend({ requested: "auto", cwd, apiKey });
+    if (readiness.backend === "api") resolvedBackend = "api";
+  }
+
   if (resolvedBackend === "cli") {
     // Discoverability notice (issue #2020): the "auto" ladder's CLI-first
     // precedence is intentional, shipped behavior (issue #2003's accepted

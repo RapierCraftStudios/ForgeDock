@@ -1184,7 +1184,7 @@ done
        --raw-field body="$ENGINE_FALLBACK_BODY" --jq '.id' 2>/dev/null) || CLAIM_ID=""
      CLAIM_LIST_OK="true"
      CLAIM_IDS=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
-       --jq ".[] | select(.body | contains(\"FORGE:ENGINE_FALLBACK\") and contains(\"**Batch**: ${CLAIM_SCOPE}\")) | .id" \
+       --jq ".[] | select(.body | contains(\"FORGE:ENGINE_FALLBACK\") and (.body | split(\"\\n\") | any(. == \"   **Batch**: ${CLAIM_SCOPE}\"))) | .id" \
        2>/dev/null) || CLAIM_LIST_OK="false"
      WINNER_CLAIM_ID=$(printf '%s\n' "$CLAIM_IDS" | grep -E '^[0-9]+$' | sort -n | head -1)
      CLAIM_WON="false"
