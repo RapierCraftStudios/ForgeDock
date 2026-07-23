@@ -57,6 +57,29 @@ describe("router", () => {
     assert.match(res.stdout + res.stderr, /Unknown command/);
   });
 
+  it("routes the OpenCode install, status, and uninstall lifecycle", () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-opencode-cli-home-"));
+    const configDir = mkdtempSync(join(os.tmpdir(), "fd-opencode-cli-config-"));
+    const extraEnv = { OPENCODE_CONFIG_DIR: configDir };
+
+    const install = runCli(["opencode", "install"], { home, extraEnv });
+    assert.equal(install.status, 0, install.stderr || install.stdout);
+    assert.match(install.stdout, /Installed \d+ OpenCode commands/);
+    assert.ok(existsSync(join(configDir, "commands", "forge", "work-on.md")));
+    assert.ok(!existsSync(join(configDir, "opencode.json")));
+
+    const status = runCli(["opencode", "status"], { home, extraEnv });
+    assert.equal(status.status, 0, status.stderr || status.stdout);
+    assert.match(status.stdout, /adapter is healthy/i);
+
+    const uninstall = runCli(["opencode", "uninstall"], { home, extraEnv });
+    assert.equal(uninstall.status, 0, uninstall.stderr || uninstall.stdout);
+    assert.ok(!existsSync(join(configDir, "commands", "forge", "work-on.md")));
+
+    rmSync(home, { recursive: true, force: true });
+    rmSync(configDir, { recursive: true, force: true });
+  });
+
   it("status reports unmanaged in a fresh directory", () => {
     const res = runCli(["status"], { home: mkdtempSync(join(os.tmpdir(), "fd-s-")) });
     assert.equal(res.status, 0);
