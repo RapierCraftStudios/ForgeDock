@@ -1142,9 +1142,14 @@ done
     if [ -n "$STATE_JSON" ]; then
       # Missing or schema-invalid fields are unverifiable, not empty. In particular, jq's
       # `length` is also zero for null, {}, and "", so require the committed array type first.
+      # The persisted engine run ID and state version are also required: together they give every
+      # orchestrator handling this same failure one stable scope while allowing a later failure
+      # for the same issue/run name to elect a new claimant.
       if echo "$STATE_JSON" | jq -e \
-        '(.committed | type == "array") and (.committed | length == 0) and (.branch == null) and (.pr == null)' \
+        '(.run | type == "string" and test("^[A-Za-z0-9._:-]+$")) and (.v | type == "number" and . >= 0 and floor == .) and (.committed | type == "array") and (.committed | length == 0) and (.branch == null) and (.pr == null)' \
         >/dev/null 2>&1; then
+        STATE_RUN=$(echo "$STATE_JSON" | jq -r '.run')
+        STATE_VERSION=$(echo "$STATE_JSON" | jq -r '.v')
         EMPTY_COMMITTED_STATE="true"
       else
         EMPTY_COMMITTED_STATE="false"
@@ -1172,7 +1177,7 @@ done
      # Atomic-enough cross-session claim: post first, then elect the lowest server-assigned
      # comment ID for this batch. Concurrent claimants may both post, but exactly one can win.
      # Pagination is mandatory; any POST/list/parse failure fails closed and dispatches nothing.
-     CLAIM_SCOPE="${BATCH_ID:-${BATCH_T0:-standalone-{NUMBER}}}"
+      CLAIM_SCOPE="${STATE_RUN}:${STATE_VERSION}"
      CLAIM_TOKEN="${CLAIM_SCOPE}-{NUMBER}-$$-${RANDOM}"
      ENGINE_FALLBACK_BODY="<!-- FORGE:ENGINE_FALLBACK -->
    ## Engine-First Dispatch Failed — Falling Back to Agent-Spawn

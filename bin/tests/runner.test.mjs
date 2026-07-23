@@ -3044,6 +3044,38 @@ describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issu
       rmSync(cwd, { recursive: true, force: true });
     }
   });
+
+  it("refreshes a Windows shim when its cached native target disappears", () => {
+    const oldShim = "C:/npm-old/claude.cmd";
+    const newShim = "C:/npm-new/claude.cmd";
+    let probe = 0;
+    let oldTargetExists = true;
+    const execImpl = mock.fn(() => {
+      const path = probe++ === 0 ? oldShim : newShim;
+      return `${path}\n${CLI_PROBE_OUTPUT_SENTINEL}\n1.2.3`;
+    });
+    const existsImpl = (candidate) => {
+      const path = candidate.replaceAll("\\", "/");
+      if (path === oldShim || path === newShim) return true;
+      if (path === "C:/npm-old/claude.exe") return oldTargetExists;
+      return path === "C:/npm-new/claude.exe";
+    };
+    const opts = {
+      platform: "win32",
+      execImpl,
+      existsImpl,
+      readImpl: () => '"%dp0%\\claude.exe" %*',
+    };
+    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-resolve-win-stale-"));
+    try {
+      assert.match(resolveClaudeCliBinary(cwd, opts), /npm-old[\\/]claude\.exe$/);
+      oldTargetExists = false;
+      assert.match(resolveClaudeCliBinary(cwd, opts), /npm-new[\\/]claude\.exe$/);
+      assert.equal(execImpl.mock.callCount(), 2);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("checkExecutionBackend", () => {

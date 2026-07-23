@@ -433,7 +433,8 @@ export function resolveClaudeCliBinary(cwd = process.cwd(), opts = {}) {
   const existsImpl = opts.existsImpl ?? existsSync;
   try {
     if (existsImpl(cliPath)) {
-      return resolveDirectCliExecutable(cliPath, { ...opts, existsImpl });
+      const executable = resolveDirectCliExecutable(cliPath, { ...opts, existsImpl });
+      if (executable) return executable;
     }
   } catch {
     // Treat an unverifiable cached path as stale and make one bounded refresh.

@@ -603,8 +603,12 @@ describe("orchestrate engine fallback guards", () => {
 
   it("requires committed state to be an empty array before fallback", () => {
     const spec = readFileSync(specPath, "utf-8");
+    assert.match(spec, /\.run \| type == "string" and test\(/);
+    assert.match(spec, /\.v \| type == "number"/);
     assert.match(spec, /\.committed \| type == "array"/);
     assert.match(spec, /\.committed \| length == 0/);
+    assert.match(spec, /CLAIM_SCOPE="\$\{STATE_RUN\}:\$\{STATE_VERSION\}"/);
+    assert.doesNotMatch(spec, /CLAIM_SCOPE="\$\{BATCH_ID/);
   });
 
   it("posts a fallback claim before paginated lowest-comment-id election", () => {
