@@ -50,6 +50,7 @@ import {
 import { join, dirname, basename, relative, isAbsolute, extname } from "path";
 import os from "os";
 import { execSync, spawnSync } from "child_process";
+import { createRequire } from "module";
 import { parseForgeYaml, resolveModelAlias } from "./forge-utils.mjs";
 import { DEFAULT_SPAWN_MAX_BUFFER_BYTES } from "./cli-spawn-shared.mjs";
 
@@ -70,6 +71,7 @@ const DEFAULT_CLI_TIMEOUT_MS = 15 * 60 * 1000;
 // it is far shorter than DEFAULT_CLI_TIMEOUT_MS. Mirrors the timeout already
 // used by the `claude --version` doctor check in bin/forgedock.mjs.
 const CLI_PROBE_TIMEOUT_MS = 5000;
+export const CLI_PROBE_OUTPUT_SENTINEL = "__FORGEDOCK_CLI_PATHS_END__";
 /**
  * Wraps a Set in a Proxy that blocks add()/delete()/clear(), so the
  * returned collection is genuinely read-only — not just Object.frozen.
@@ -153,12 +155,9 @@ export const VALID_BACKENDS = readOnlySet(["cli", "api", "auto"]);
 const CLI_AVAILABILITY_CACHE_TTL_MS = 60_000;
 const CLI_AVAILABILITY_CACHE_MAX_SIZE = 100;
 const cliAvailabilityCache = new Map();
-// Windows file extensions `spawnSync(shell:false)` can actually launch:
-// native executables (`.exe`, `.com`) directly, and `.cmd`/`.bat` via Node's
-// own built-in special-cased re-exec through cmd.exe (see the comment on
-// `runCliBackend()` below). An extensionless file — e.g. the POSIX shell
-// shim `npm`/`npx` also drop alongside these on Windows — cannot be
-// launched by `CreateProcess` at all, with or without a full absolute path.
+// Windows path types emitted by npm's shim generator. Native executables are
+// directly spawnable; .cmd/.bat files must be resolved to their trusted native
+// target before spawning because Node cannot exec them with shell:false.
 const WINDOWS_SPAWNABLE_EXTENSIONS = new Set([".exe", ".cmd", ".bat", ".com"]);
 // Cap tool-result payloads so a large file read or verbose command does not
 // blow the context window in a single turn.
@@ -216,13 +215,10 @@ export function resolveConfiguredDefaultModel(cwd) {
 // ---------------------------------------------------------------------------
 
 /**
- * Split the combined probe command's stdout (issue #2741 — see
- * `isClaudeCliAvailable()`) into the leading "path-like" lines (from the
- * `where`/`command -v` half of the command) versus everything after them
- * (the `claude --version` output). A path-like line is one containing a
- * path separator (`/` or `\`); `claude --version` output (e.g.
- * `"1.2.3 (Claude Code)"`) never does, so the first non-path-like line
- * marks the boundary.
+ * Read path candidates from the explicitly delimited resolver section of the
+ * combined CLI probe. Version output is untrusted for parsing purposes: update
+ * notices can contain path-like URLs or filenames, so shape-based inference
+ * must never allow lines after the sentinel to become executable candidates.
  *
  * Pure/side-effect-free so it can be unit tested directly against
  * synthetic multi-line `where` output without spawning anything.
@@ -230,20 +226,16 @@ export function resolveConfiguredDefaultModel(cwd) {
  * @param {string} raw
  * @returns {string[]} Leading path-like lines, in original order.
  */
-function parseProbeOutput(raw) {
+export function parseProbeOutput(raw) {
   const lines = String(raw ?? "")
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
-  const pathLines = [];
-  for (const line of lines) {
-    if (line.includes("/") || line.includes("\\")) {
-      pathLines.push(line);
-    } else {
-      break;
-    }
-  }
-  return pathLines;
+  const boundary = lines.indexOf(CLI_PROBE_OUTPUT_SENTINEL);
+  if (boundary < 0) return [];
+  return lines
+    .slice(0, boundary)
+    .filter((line) => line.includes("/") || line.includes("\\"));
 }
 
 /**
@@ -266,9 +258,12 @@ function parseProbeOutput(raw) {
  * @param {string[]} pathLines
  * @returns {string|null}
  */
-function selectResolvedCliPath(pathLines) {
+export function selectResolvedCliPath(
+  pathLines,
+  { platform = process.platform, existsImpl = existsSync } = {},
+) {
   if (pathLines.length === 0) return null;
-  if (process.platform !== "win32") return pathLines[0];
+  if (platform !== "win32") return pathLines[0];
 
   const withExt = pathLines.find((line) =>
     WINDOWS_SPAWNABLE_EXTENSIONS.has(extname(line).toLowerCase()),
@@ -280,9 +275,38 @@ function selectResolvedCliPath(pathLines) {
   const base = basename(bare);
   for (const ext of [".cmd", ".exe", ".bat", ".com"]) {
     const candidate = join(dir, `${base}${ext}`);
-    if (existsSync(candidate)) return candidate;
+    if (existsImpl(candidate)) return candidate;
   }
   return bare;
+}
+
+/**
+ * Resolve an npm-generated Windows command shim to the native executable it
+ * delegates to. This keeps shell:false and argv-array isolation intact instead
+ * of interpolating untrusted command arguments into cmd.exe.
+ */
+export function resolveDirectCliExecutable(
+  cliPath,
+  {
+    platform = process.platform,
+    existsImpl = existsSync,
+    readImpl = readFileSync,
+  } = {},
+) {
+  if (!cliPath || platform !== "win32") return cliPath || null;
+  const extension = extname(cliPath).toLowerCase();
+  if (extension === ".exe" || extension === ".com") return cliPath;
+  if (extension !== ".cmd" && extension !== ".bat") return null;
+
+  try {
+    const shim = readImpl(cliPath, "utf-8");
+    const match = shim.match(/^\s*"%dp0%[\\/]([^"\r\n]+\.(?:exe|com))"\s+%\*\s*$/im);
+    if (!match) return null;
+    const target = join(dirname(cliPath), ...match[1].split(/[\\/]+/));
+    return existsImpl(target) ? target : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -345,7 +369,10 @@ function selectResolvedCliPath(pathLines) {
  *   `runCliBackend()`.
  * @returns {boolean}
  */
-export function isClaudeCliAvailable(cwd = process.cwd(), { execImpl = execSync } = {}) {
+export function isClaudeCliAvailable(
+  cwd = process.cwd(),
+  { execImpl = execSync, platform = process.platform, existsImpl = existsSync } = {},
+) {
   const cached = cliAvailabilityCache.get(cwd);
   if (cached && Date.now() - cached.cachedAt < CLI_AVAILABILITY_CACHE_TTL_MS) {
     return cached.available;
@@ -354,14 +381,17 @@ export function isClaudeCliAvailable(cwd = process.cwd(), { execImpl = execSync 
   let available;
   let cliPath = null;
   try {
-    const raw = execImpl(`${resolveCmd} && claude --version`, {
+    const raw = execImpl(
+      `${resolveCmd} && echo ${CLI_PROBE_OUTPUT_SENTINEL} && claude --version`,
+      {
       cwd,
       stdio: ["ignore", "pipe", "ignore"],
       encoding: "utf-8",
       timeout: CLI_PROBE_TIMEOUT_MS,
-    });
+      },
+    );
     available = true;
-    cliPath = selectResolvedCliPath(parseProbeOutput(raw));
+    cliPath = selectResolvedCliPath(parseProbeOutput(raw), { platform, existsImpl });
   } catch {
     available = false;
   }
@@ -397,7 +427,79 @@ export function isClaudeCliAvailable(cwd = process.cwd(), { execImpl = execSync 
  */
 export function resolveClaudeCliBinary(cwd = process.cwd(), opts = {}) {
   isClaudeCliAvailable(cwd, opts);
-  return cliAvailabilityCache.get(cwd)?.cliPath ?? null;
+  let cliPath = cliAvailabilityCache.get(cwd)?.cliPath ?? null;
+  if (!cliPath) return null;
+
+  const existsImpl = opts.existsImpl ?? existsSync;
+  try {
+    if (existsImpl(cliPath)) {
+      const executable = resolveDirectCliExecutable(cliPath, { ...opts, existsImpl });
+      if (executable) return executable;
+    }
+  } catch {
+    // Treat an unverifiable cached path as stale and make one bounded refresh.
+  }
+
+  cliAvailabilityCache.delete(cwd);
+  isClaudeCliAvailable(cwd, opts);
+  cliPath = cliAvailabilityCache.get(cwd)?.cliPath ?? null;
+  if (!cliPath) return null;
+  try {
+    return existsImpl(cliPath)
+      ? resolveDirectCliExecutable(cliPath, { ...opts, existsImpl })
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Check whether the configured execution backend is locally usable without
+ * making a paid model request. CLI checks reuse the production resolver;
+ * API checks verify that a key is configured, not that the key is accepted.
+ */
+export function checkExecutionBackend({
+  requested = process.env.FORGEDOCK_BACKEND || "auto",
+  cwd = process.cwd(),
+  apiKey = process.env.ANTHROPIC_API_KEY,
+  resolveCliFn = resolveClaudeCliBinary,
+  spawnImpl = spawnSync,
+  sdkAvailableFn = () => {
+    try {
+      createRequire(import.meta.url).resolve("@anthropic-ai/sdk");
+      return true;
+    } catch {
+      return false;
+    }
+  },
+} = {}) {
+  if (!VALID_BACKENDS.has(requested)) {
+    return { ready: false, backend: requested, reason: "invalid-backend" };
+  }
+
+  if (requested !== "api") {
+    const cliPath = resolveCliFn(cwd);
+    if (cliPath) {
+      const result = spawnImpl(cliPath, ["--version"], {
+        cwd,
+        shell: false,
+        encoding: "utf-8",
+        timeout: CLI_PROBE_TIMEOUT_MS,
+      });
+      if (!result?.error && result?.status === 0) {
+        return { ready: true, backend: "cli", reason: "resolved-cli" };
+      }
+    }
+    if (requested === "cli") {
+      return { ready: false, backend: "cli", reason: "cli-unavailable" };
+    }
+  }
+
+  if (apiKey && sdkAvailableFn()) {
+    return { ready: true, backend: "api", reason: "api-key-and-sdk-configured" };
+  }
+  if (apiKey) return { ready: false, backend: "api", reason: "api-sdk-missing" };
+  return { ready: false, backend: "api", reason: "api-key-missing" };
 }
 
 /**
@@ -512,15 +614,11 @@ export function resolveBackend({ requested = "auto", cwd = process.cwd() } = {})
  * arbitrary shell commands with this process's privileges). Do not
  * reintroduce `shell: true` or string-command interpolation here.
  *
- * Windows `.cmd`/`.bat` shim resolution works WITHOUT `shell: true` — BUT
- * only when `bin` is already a resolvable target: Node's spawn/spawnSync
- * safely re-invoke through cmd.exe internally when the *given* target is a
- * `.cmd`/`.bat` file, using a properly escaped mechanism, and argv elements
- * are never parsed as shell syntax (verified empirically on Windows: a
- * malicious-looking argv element is delivered to the child process
- * byte-for-byte, not executed). This is the correct fix for the
- * `execFileSync("claude", [...])` ENOENT-on-Windows regression from issue
- * #382 for a `claude.cmd` sitting directly on a real PATH entry.
+ * Windows npm `.cmd`/`.bat` shims cannot be launched by Node with
+ * `shell:false`. `resolveDirectCliExecutable()` therefore parses only the
+ * strict npm-shim form that delegates directly to a native `.exe`/`.com` and
+ * returns that trusted target. Unknown batch scripts fail closed instead of
+ * requiring cmd.exe interpolation of the untrusted user message.
  *
  * CORRECTED (issue #2741): the claim that a bare `"claude"` name resolves
  * via "spawnSync's own PATH/PATHEXT resolution" was overconfident and
@@ -534,8 +632,8 @@ export function resolveBackend({ requested = "auto", cwd = process.cwd() } = {})
  * above); it is resolving the *exact* absolute path the probe validated
  * once, via `resolveClaudeCliBinary()`, and passing that resolved path as
  * `bin` — `spawnSync(shell:false)` launches an already-fully-resolved
- * absolute path (native `.exe`, or `.cmd`/`.bat` via the special-cased
- * re-exec described above) without needing any further PATH/PATHEXT
+ * native executable path (including the target extracted from a recognized
+ * npm shim) without needing any further PATH/PATHEXT
  * resolution of its own. See `isClaudeCliAvailable()`/
  * `resolveClaudeCliBinary()` above for how that resolution happens.
  *
@@ -971,10 +1069,9 @@ export function runCliBackend({
     // No `shell` option (defaults to false): argv is passed as discrete,
     // unparsed elements — see the SECURITY note above. `bin` is expected to
     // already be a fully-resolved absolute path (see `resolveClaudeCliBinary()`
-    // and the `opts.bin` doc comment above, issue #2741) — spawnSync launches
-    // an already-resolved `.exe`/`.cmd`/`.bat` path directly (with Node's
-    // built-in special-cased `.cmd`/`.bat` re-exec) without needing any
-    // further shell/PATHEXT resolution of its own.
+    // and the `opts.bin` doc comment above, issue #2741) — Windows npm shims
+    // have already been reduced to their native target, so spawnSync never
+    // needs shell/PATHEXT resolution.
     const result = spawnFn(bin, cliArgs, {
       cwd,
       encoding: "utf-8",
@@ -1973,7 +2070,12 @@ export async function runCommand(opts = {}) {
   // misbehaving. An explicitly invalid `backend` value DOES throw here —
   // surfacing a bad --backend/FORGEDOCK_BACKEND value immediately, before any
   // work is attempted, rather than silently ignoring it.
-  const resolvedBackend = resolveBackend({ requested: backend, cwd });
+  let resolvedBackend = resolveBackend({ requested: backend, cwd });
+
+  if (resolvedBackend === "cli" && backend === "auto") {
+    const readiness = checkExecutionBackend({ requested: "auto", cwd, apiKey });
+    if (readiness.backend === "api") resolvedBackend = "api";
+  }
 
   if (dryRun) {
     logger.log(
@@ -2050,16 +2152,24 @@ export async function runCommand(opts = {}) {
     // the bare "claude" name only if resolution genuinely found nothing
     // (e.g. an injected-execImpl test scenario with no path-like output),
     // preserving prior behavior in that edge case.
-    const resolvedBin = resolveClaudeCliBinary(cwd) ?? "claude";
-    return runCliBackend({
-      spec,
-      userMessage,
-      systemPrompt: cliSystemPrompt,
-      args,
-      cwd,
-      logger,
-      bin: resolvedBin,
-    });
+    const resolvedBin = resolveClaudeCliBinary(cwd);
+    if (!resolvedBin && backend === "auto") {
+      resolvedBackend = "api";
+    } else if (!resolvedBin) {
+      const err = new Error("The configured claude CLI path disappeared before invocation.");
+      err.code = "CLI_BACKEND_UNAVAILABLE";
+      throw err;
+    } else {
+      return runCliBackend({
+        spec,
+        userMessage,
+        systemPrompt: cliSystemPrompt,
+        args,
+        cwd,
+        logger,
+        bin: resolvedBin,
+      });
+    }
   }
 
   if (!apiKey) {

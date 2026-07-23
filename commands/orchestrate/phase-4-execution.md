@@ -536,20 +536,13 @@ FORGEDOCK_AVAILABLE=$(command -v forgedock >/dev/null 2>&1 && echo "true" || ech
 # `forgedock run-issue` call fails within seconds, and nothing re-routes the batch — a human has
 # to notice and manually re-dispatch via the Agent-spawn path below.
 #
-# CRITICAL — do NOT use a shell-resolved probe here (`command -v claude`, `claude --version` run
-# directly by bash, `which claude`, etc.). forge#2741's entire root cause is that a shell-resolved
-# probe and the engine's actual invocation resolve the `claude` binary differently: bash's builtin
-# PATH lookup (and `execSync("claude --version", ...)`, used deliberately by
-# `bin/runner.mjs`'s `isClaudeCliAvailable()` for this exact reason) can find and run an
-# npx-transient/extensionless shim that `bin/runner.mjs`'s actual backend call —
-# `runCliBackend()`'s `spawnFn(bin, cliArgs, { shell: false, ... })` with bare `bin = "claude"`
-# (no shell resolution) — cannot. A canary that shell-resolves `claude` reproduces the exact
-# blind spot it exists to catch and reports the backend healthy in precisely forge#2741's failure
-# scenario. The canary MUST reproduce `runCliBackend()`'s exact invocation shape — bare binary
-# name, `shell: false` — via a one-off Node `spawnSync` call, not a bash-native probe:
+# Use the runner's tested backend policy rather than duplicating it as shell/Node prose. This
+# reuses the production resolved-CLI path check (including transient-shim refresh), honors an
+# explicit FORGEDOCK_BACKEND, and accepts API fallback only when ANTHROPIC_API_KEY is configured.
+# It performs no paid model request.
 if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
-  if ! node -e "const r = require('node:child_process').spawnSync('claude', ['--version'], { shell: false }); process.exit(r.error ? 1 : 0);" 2>/dev/null; then
-    echo "WARNING: forgedock CLI is on PATH, but its execution backend is not invocable via the engine's own spawn shape (bare 'claude', shell:false) in this environment. Downgrading to the Agent-spawn fallback path for this entire run — see forge#2743. (If forge#2741's ENOENT root cause is fixed, this canary will pass again on the next /orchestrate invocation.)"
+  if ! forgedock backend-check --quiet; then
+    echo "WARNING: forgedock CLI is on PATH, but no configured execution backend is locally usable. Downgrading to the Agent-spawn fallback path for this entire run — see forge#2743."
     FORGEDOCK_AVAILABLE="false"
   fi
 fi
@@ -1132,10 +1125,6 @@ done
 
    **2b. Engine-first-dispatched issue (`ENGINE_DISPATCH_MAP[{NUMBER}]` set, no `AGENT_ISSUE_MAP` entry)** — `Agent(resume=...)` has nothing to resume here; the completed task was a backgrounded `Bash(command="forgedock run-issue ...")` call, not an `Agent()`. Re-issuing the identical `forgedock run-issue` command would just reproduce the same environmental failure. Instead, fall back to the Agent-spawn path for this ONE issue — but only when it is safe to do so:
    ```bash
-   # Idempotency guard: only fall back once per issue per engine-error occurrence.
-   ALREADY_FALLEN_BACK=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-     --jq '[.[] | select(.body | contains("FORGE:ENGINE_FALLBACK"))] | length' 2>/dev/null || echo "0")
-
    # Safety gate: only fall back when the engine run committed NOTHING — no branch, no PR, no
    # committed phases. Primary source: the `FORGE:STATE` HTML-comment block the engine already
    # mirrors onto the issue BODY on every phase transition (`bin/engine/state.mjs`/`projector.mjs`
@@ -1149,13 +1138,22 @@ done
    # the real multi-line shape correctly:
    STATE_BLOCK=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' \
      | sed -n '/<!-- FORGE:STATE/,/-->/p')
-   STATE_JSON=$(echo "$STATE_BLOCK" | sed '1d;$d')
-   if [ -n "$STATE_JSON" ]; then
-     COMMITTED_COUNT=$(echo "$STATE_JSON" | jq -r '.committed | length' 2>/dev/null)
-     STATE_BRANCH=$(echo "$STATE_JSON" | jq -r '.branch' 2>/dev/null)
-     STATE_PR=$(echo "$STATE_JSON" | jq -r '.pr' 2>/dev/null)
-     [ "$COMMITTED_COUNT" = "0" ] && [ "$STATE_BRANCH" = "null" ] && [ "$STATE_PR" = "null" ] \
-       && EMPTY_COMMITTED_STATE="true" || EMPTY_COMMITTED_STATE="false"
+    STATE_JSON=$(echo "$STATE_BLOCK" | sed '1d;$d')
+    if [ -n "$STATE_JSON" ]; then
+      # Missing or schema-invalid fields are unverifiable, not empty. In particular, jq's
+      # `length` is also zero for null, {}, and "", so require the committed array type first.
+      # The persisted engine run ID and state version are also required: together they give every
+      # orchestrator handling this same failure one stable scope while allowing a later failure
+      # for the same issue/run name to elect a new claimant.
+      if echo "$STATE_JSON" | jq -e \
+        '(.run | type == "string" and test("^[A-Za-z0-9._:/-]+$")) and (.v | type == "number" and . >= 0 and floor == .) and (.committed | type == "array") and (.committed | length == 0) and (.branch == null) and (.pr == null)' \
+        >/dev/null 2>&1; then
+        STATE_RUN=$(echo "$STATE_JSON" | jq -r '.run')
+        STATE_VERSION=$(echo "$STATE_JSON" | jq -r '.v')
+        EMPTY_COMMITTED_STATE="true"
+      else
+        EMPTY_COMMITTED_STATE="false"
+      fi
    else
      # No FORGE:STATE block was ever written to the issue body (e.g. the run failed before
      # phase 1 committed anything). There is no reliable structured signal available in this
@@ -1175,32 +1173,53 @@ done
    # dispatch could collide with or duplicate — that case is NOT auto-fallen-back; it surfaces
    # via the existing stall-detection alert / needs-human path instead, exactly as before this fix.
 
-   if [ "$ALREADY_FALLEN_BACK" -eq 0 ] && [ "$EMPTY_COMMITTED_STATE" = "true" ]; then
+   if [ "$EMPTY_COMMITTED_STATE" = "true" ]; then
+     # Atomic-enough cross-session claim: post first, then elect the lowest server-assigned
+     # comment ID for this batch. Concurrent claimants may both post, but exactly one can win.
+     # Pagination is mandatory; any POST/list/parse failure fails closed and dispatches nothing.
+      CLAIM_SCOPE="${STATE_RUN}:${STATE_VERSION}"
+     CLAIM_TOKEN="${CLAIM_SCOPE}-{NUMBER}-$$-${RANDOM}"
      ENGINE_FALLBACK_BODY="<!-- FORGE:ENGINE_FALLBACK -->
    ## Engine-First Dispatch Failed — Falling Back to Agent-Spawn
+
+   **Batch**: ${CLAIM_SCOPE}
+   **Claim**: ${CLAIM_TOKEN}
 
    \`forgedock run-issue\` ended at \`workflow:engine-error\` with no committed phases, branch, or PR
    (\`committed=[] branch=null pr=null\`) — this is an environmental/tool failure (forge#2261), not a
    per-issue content failure, and nothing was committed that a fresh dispatch could collide with.
    Auto-falling back to the Agent-spawn \`/work-on\` path for this issue. See forge#2743."
-     gh issue comment {NUMBER} {GH_FLAG} --body "$ENGINE_FALLBACK_BODY" # <!-- allowlist:check-command-side-effects — intentional pipeline status annotation, mirrors work-on/build/architect.md:700 -->
+     CLAIM_ID=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --method POST \
+       --raw-field body="$ENGINE_FALLBACK_BODY" --jq '.id' 2>/dev/null) || CLAIM_ID=""
+      CLAIM_LIST_OK="true"
+      CLAIM_IDS=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
+        --jq ".[] | select(.body | split(\"\\n\") | (any(. == \"<!-- FORGE:ENGINE_FALLBACK -->\") and any(. == \"   **Batch**: ${CLAIM_SCOPE}\"))) | .id" \
+        2>/dev/null) || CLAIM_LIST_OK="false"
+     WINNER_CLAIM_ID=$(printf '%s\n' "$CLAIM_IDS" | grep -E '^[0-9]+$' | sort -n | head -1)
+     CLAIM_WON="false"
+     [ "$CLAIM_LIST_OK" = "true" ] && [ -n "$CLAIM_ID" ] && \
+       [ "$CLAIM_ID" = "$WINNER_CLAIM_ID" ] && CLAIM_WON="true"
 
      # Reuse the SAME Agent-spawn template as Step 4A's "Agent-spawn path (fallback when forgedock
      # CLI unavailable)" section above (the `Agent(subagent_type="general-purpose", ...)` block
      # under "Copy this template. Fill in variables. Do not modify the structure:") verbatim —
      # HARD RULE 1 preserved. This is a fresh dispatch, not a resume: capture its returned agent
      # ID into AGENT_ISSUE_MAP so subsequent completions for this issue route through 2a above.
-     Agent(
+     if [ "$CLAIM_WON" = "true" ]; then
+       Agent(
        subagent_type="general-purpose",
        model="{SUBAGENT_MODEL}",
        description="Work on {PROJECT_PREFIX}#{NUMBER} (engine-error fallback)",
        run_in_background=true,
        prompt="<same template body as Step 4A's Agent-spawn path — see the 'Agent-spawn path (fallback when forgedock CLI unavailable)' section above; fill {NUMBER}/{GH_REPO}/{REPO_PATH}/{LANE}/{PR_BASE}/{ISSUE_TITLE} exactly as that template does>"
-     )
-     AGENT_ISSUE_MAP[{NUMBER}] = <agent_id returned by the Agent() call above>
-     # Re-occupies the worker slot this completion just freed (see "Concurrency slot release" above).
-     ACTIVE_DISPATCH_COUNT=$((ACTIVE_DISPATCH_COUNT + 1))
-   elif [ "$ALREADY_FALLEN_BACK" -eq 0 ]; then
+       )
+       AGENT_ISSUE_MAP[{NUMBER}] = <agent_id returned by the Agent() call above>
+       # Re-occupies the worker slot this completion just freed (see "Concurrency slot release" above).
+       ACTIVE_DISPATCH_COUNT=$((ACTIVE_DISPATCH_COUNT + 1))
+     else
+       echo "#{NUMBER}: engine fallback claim lost or could not be verified — no duplicate Agent dispatch."
+     fi
+   else
      echo "#{NUMBER}: engine-error with non-empty committed state (partial work exists) — NOT auto-falling back. Surfaces via standard stall-detection alert; forgedock resume-stalled remains available for manual/scripted recovery."
    fi
    ```
@@ -2636,4 +2655,3 @@ fi
 ```
 
 ---
-
