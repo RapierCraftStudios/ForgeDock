@@ -31,7 +31,7 @@ const __dirname = dirname(__filename);
 //
 // Use pathToFileURL to produce a valid file:// URL on Windows (raw C:\ paths are
 // not valid ESM specifiers on Windows — see ERR_UNSUPPORTED_ESM_URL_SCHEME).
-const { stripAnsi, truncateVisible, runSteps, renderLogo, annotatedReviewScreen } = await import(
+const { stripAnsi, truncateVisible, padVisible, runSteps, renderLogo, annotatedReviewScreen } = await import(
   pathToFileURL(join(__dirname, "..", "tui.mjs")).href
 );
 
@@ -283,6 +283,55 @@ describe("stripAnsi", () => {
 
   it("removes mixed charset designator + C1 DCS sequences in one string (no interference)", () => {
     assert.equal(stripAnsi("a\x1b(Bb\x90dcs\x9cc"), "abc");
+  });
+
+  it("supports the full CSI parameter, intermediate, and final-byte grammar", () => {
+    assert.equal(stripAnsi("a\x1b[5@b"), "ab");
+    assert.equal(stripAnsi("a\x9b5`b"), "ab");
+    assert.equal(stripAnsi("a\x1b[?25lb"), "ab");
+    assert.equal(stripAnsi("a\x1b[1 @b"), "ab");
+    assert.equal(stripAnsi("a\x1b[38:2::1:2:3mb"), "ab");
+  });
+
+  it("removes general ECMA-35 escape forms, including percent intermediates", () => {
+    assert.equal(stripAnsi("a\x1b%Gb"), "ab");
+    assert.equal(stripAnsi("a\x1b%@b"), "ab");
+    assert.equal(stripAnsi("a\x1b)%2b"), "ab");
+    assert.equal(stripAnsi("a\x1b(&4b"), "ab");
+  });
+
+  it("strips genuinely incomplete CSI suffixes at end of input", () => {
+    assert.equal(stripAnsi("a\x9b31;"), "a");
+    assert.equal(stripAnsi("a\x1b[?25"), "a");
+    assert.equal(stripAnsi("a\x1b[12 "), "a");
+  });
+
+  it("treats a letter after CSI parameters as its valid final byte", () => {
+    assert.equal(stripAnsi("a\x9b31;hello world b"), "aello world b");
+  });
+
+  it("preserves text after CAN or SUB cancels a control string", () => {
+    assert.equal(stripAnsi("a\x1b]0;title\x18b"), "ab");
+    assert.equal(stripAnsi("a\x1bPpayload\x1ab"), "ab");
+  });
+});
+
+describe("padVisible", () => {
+  it("pads plain and styled text by visible width", () => {
+    assert.equal(padVisible("abc", 5), "abc  ");
+    assert.equal(padVisible(`${RED_OPEN}red${RESET}`, 5), `${RED_OPEN}red${RESET}  `);
+  });
+
+  it("strips dangerous controls before padding", () => {
+    assert.equal(padVisible("a\x1b]0;evil\x07b", 5), "ab   ");
+    assert.equal(padVisible("a\x9b31mb\x9b0m", 4), "ab  ");
+    assert.equal(padVisible("a\x1b%Gb", 4), "ab  ");
+    assert.equal(padVisible("a\x1b[2Ab", 4), "ab  ");
+    assert.equal(padVisible("a\x1b[>4;2mb", 4), "ab  ");
+  });
+
+  it("does not truncate content wider than the requested width", () => {
+    assert.equal(padVisible("abcdef", 3), "abcdef");
   });
 });
 
