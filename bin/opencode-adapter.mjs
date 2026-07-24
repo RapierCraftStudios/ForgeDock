@@ -421,8 +421,15 @@ export async function getOpenCodeAdapterStatus({ home, env = process.env } = {})
 export async function uninstallOpenCodeAdapter({ home, env = process.env } = {}) {
   const configDir = resolveOpenCodeConfigDir({ home, env });
   const manifestPath = join(configDir, "forgedock", "manifest.json");
-  const manifest = (await readManifest(manifestPath)) || { files: [] };
-  const removed = await removeOwnedFiles(configDir, manifest.files);
+  const manifest = await readManifest(manifestPath);
+  if (existsSync(manifestPath) && !manifest) {
+    throw new Error(
+      `Cannot uninstall OpenCode adapter: ownership manifest is invalid at ${manifestPath}. ` +
+        "Re-run install to repair the manifest before uninstalling.",
+    );
+  }
+  const ownedFiles = manifest?.files || [];
+  const removed = await removeOwnedFiles(configDir, ownedFiles);
   await unlink(manifestPath).catch((error) => {
     if (error.code !== "ENOENT") throw error;
   });
