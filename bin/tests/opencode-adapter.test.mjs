@@ -256,10 +256,11 @@ describe("OpenCode adapter", () => {
     assert.equal(status.integrity, "digest-mismatch");
   });
 
-  it("reports malformed manifest file entries without crashing", async () => {
-    const home = temp("fd-opencode-bad-manifest-");
-    const manifestPath = join(home, ".config", "opencode", "forgedock", "manifest.json");
-    mkdirSync(join(manifestPath, ".."), { recursive: true });
+  it("fails closed when uninstall encounters a malformed manifest", async () => {
+    const { forgeHome, home } = fixture();
+    const config = join(home, ".config", "opencode");
+    await installOpenCodeAdapter({ forgeHome, home, env: {} });
+    const manifestPath = join(config, "forgedock", "manifest.json");
     writeFileSync(
       manifestPath,
       `${JSON.stringify({ version: 1, files: [null], digest: "bad" })}\n`,
@@ -269,8 +270,13 @@ describe("OpenCode adapter", () => {
     assert.equal(status.installed, true);
     assert.equal(status.healthy, false);
     assert.equal(status.integrity, "invalid-manifest");
-    const uninstall = await uninstallOpenCodeAdapter({ home, env: {} });
-    assert.equal(uninstall.removed, 0);
+    await assert.rejects(
+      () => uninstallOpenCodeAdapter({ home, env: {} }),
+      /ownership manifest is invalid.*Re-run install/,
+    );
+    assert.ok(existsSync(manifestPath));
+    assert.ok(existsSync(join(config, "commands", "forge", "work-on.md")));
+    assert.ok(existsSync(join(config, "plugins", "forgedock.js")));
   });
 
   it("reports health and uninstalls only managed files", async () => {
