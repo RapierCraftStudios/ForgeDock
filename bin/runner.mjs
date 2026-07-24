@@ -454,6 +454,29 @@ export function resolveClaudeCliBinary(cwd = process.cwd(), opts = {}) {
 }
 
 /**
+ * Invoke the CLI with one recovery attempt for a path that disappeared after
+ * resolution. The availability cache is intentionally retained, so only an
+ * observed ENOENT triggers a fresh resolution.
+ */
+export function runCliWithStalePathRecovery({
+  backend,
+  cwd,
+  bin,
+  cliOptions,
+  runCliFn = runCliBackend,
+  resolveCliFn = resolveClaudeCliBinary,
+}) {
+  try {
+    return runCliFn({ ...cliOptions, bin });
+  } catch (error) {
+    if (backend !== "auto" || error?.code !== "ENOENT") throw error;
+    const freshBin = resolveCliFn(cwd);
+    if (!freshBin) throw error;
+    return runCliFn({ ...cliOptions, bin: freshBin });
+  }
+}
+
+/**
  * Check whether the configured execution backend is locally usable without
  * making a paid model request. CLI checks reuse the production resolver;
  * API checks verify that a key is configured, not that the key is accepted.
@@ -1112,7 +1135,9 @@ export function runCliBackend({
       );
     }
     if (result.error) {
-      throw new Error(`Failed to invoke claude CLI: ${result.error.message}`);
+      const error = new Error(`Failed to invoke claude CLI: ${result.error.message}`);
+      error.code = result.error.code;
+      throw error;
     }
 
     const output = (stdout + stderr).trim();
@@ -2160,14 +2185,18 @@ export async function runCommand(opts = {}) {
       err.code = "CLI_BACKEND_UNAVAILABLE";
       throw err;
     } else {
-      return runCliBackend({
-        spec,
-        userMessage,
-        systemPrompt: cliSystemPrompt,
-        args,
+      return runCliWithStalePathRecovery({
+        backend,
         cwd,
-        logger,
         bin: resolvedBin,
+        cliOptions: {
+          spec,
+          userMessage,
+          systemPrompt: cliSystemPrompt,
+          args,
+          cwd,
+          logger,
+        },
       });
     }
   }

@@ -52,6 +52,7 @@ import {
   selectResolvedCliPath,
   resolveDirectCliExecutable,
   resolveClaudeCliBinary,
+  runCliWithStalePathRecovery,
   checkExecutionBackend,
   resolveBackend,
   resolveBackendLadder,
@@ -3074,6 +3075,62 @@ describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issu
       assert.equal(execImpl.mock.callCount(), 2);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("runCliWithStalePathRecovery", () => {
+  it("re-resolves and retries once for an auto-backend ENOENT", () => {
+    const calls = [];
+    const result = runCliWithStalePathRecovery({
+      backend: "auto",
+      cwd: "/repo",
+      bin: "/stale/claude",
+      cliOptions: { userMessage: "run" },
+      resolveCliFn: (cwd) => {
+        assert.equal(cwd, "/repo");
+        return "/fresh/claude";
+      },
+      runCliFn: ({ bin }) => {
+        calls.push(bin);
+        if (calls.length === 1) {
+          const error = new Error("missing");
+          error.code = "ENOENT";
+          throw error;
+        }
+        return { status: "ok", bin };
+      },
+    });
+
+    assert.deepEqual(result, { status: "ok", bin: "/fresh/claude" });
+    assert.deepEqual(calls, ["/stale/claude", "/fresh/claude"]);
+  });
+
+  it("does not retry explicit CLI requests or non-ENOENT failures", () => {
+    for (const { backend, code } of [
+      { backend: "cli", code: "ENOENT" },
+      { backend: "auto", code: "EACCES" },
+    ]) {
+      let attempts = 0;
+      assert.throws(
+        () => runCliWithStalePathRecovery({
+          backend,
+          cwd: "/repo",
+          bin: "/stale/claude",
+          cliOptions: {},
+          resolveCliFn: () => {
+            throw new Error("must not re-resolve");
+          },
+          runCliFn: () => {
+            attempts += 1;
+            const error = new Error("spawn failed");
+            error.code = code;
+            throw error;
+          },
+        }),
+        { code },
+      );
+      assert.equal(attempts, 1);
     }
   });
 });
