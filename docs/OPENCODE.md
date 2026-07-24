@@ -170,6 +170,21 @@ This runtime branch is additive. Claude keeps its existing engine and
 background-agent paths, and Codex keeps its installed namespaced skills and
 repo-local adapters.
 
+## Runtime Paths
+
+The shared orchestration spec resolves `classify-lane.sh` by runtime:
+
+| Runtime | Helper precedence | Worktree root |
+|---------|-------------------|---------------|
+| Claude | `${FORGE_HOME}/scripts`, then `~/.claude/scripts`, then the repository `scripts/` | `.claude/worktrees/` |
+| OpenCode | `${FORGE_HOME}/scripts`, then the repository `scripts/`, then `~/.opencode/scripts` | `.opencode/worktrees/` |
+| Codex | `${FORGE_HOME}/scripts`, then the repository `scripts/` | `.codex/worktrees/` |
+
+Set `FORGE_RUNTIME=opencode` for headless OpenCode sessions when no native
+OpenCode marker is available. The resolver is used by initial dispatch and all
+review-finding classification loops, so an OpenCode installation never needs
+`~/.claude` while the Claude precedence and fallback remain unchanged.
+
 ## Source References
 
 - Shared workflows: [`commands/`](../commands/)

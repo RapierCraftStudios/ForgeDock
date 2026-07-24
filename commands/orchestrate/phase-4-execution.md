@@ -352,14 +352,39 @@ This step is the deterministic counterpart to fix #2 (atomic create-if-absent in
 Before building agent prompts, run `classify-lane.sh` for every issue in the current dispatch group to compute `{LANE}` and `{PR_BASE}` deterministically. The script output is authoritative — the LLM MUST NOT override or reason around it.
 
 ```bash
-# Requires classify-lane.sh to be available at ~/.claude/scripts/classify-lane.sh
-# (installed by `npx forgedock` — see bin/journey.mjs: forge()'s linkPipelineScripts() step)
-# NOTE: the actual invocations below (and in the review-finding sweep) hardcode this
-# ~/.claude path directly — there is no $FORGE_HOME-based fallback implemented, so this
-# call site is not exposed to the bare-unset-$FORGE_HOME → root-anchored-path footgun
-# that affected commands/review-pr.md (see forge#1984, forge#2035 audit). If
-# ~/.claude/scripts/ is genuinely unavailable, classify-lane.sh hard-fails per the
-# phantom-slug gate above — it does NOT fall through to a filesystem search.
+# Resolve the helper once and reuse it for the initial dispatch and all finding
+# classification loops. Claude keeps its installed path as the default, while
+# OpenCode and Codex can use ForgeDock's repository-local scripts.
+resolve_classify_lane() {
+  local candidates=()
+  if [ "${FORGE_RUNTIME:-}" = "opencode" ] ||
+     [ -n "${OPENCODE_SESSION_ID:-}" ] ||
+     [ -n "${OPENCODE_PID:-}" ] ||
+     [ -n "${OPENCODE:-}" ]; then
+    [ -n "${FORGE_HOME:-}" ] && candidates+=("$FORGE_HOME/scripts/classify-lane.sh")
+    [ -n "${REPO_PATH:-}" ] && candidates+=("$REPO_PATH/scripts/classify-lane.sh")
+    candidates+=("$HOME/.opencode/scripts/classify-lane.sh")
+  else
+    [ -n "${FORGE_HOME:-}" ] && candidates+=("$FORGE_HOME/scripts/classify-lane.sh")
+    candidates+=("$HOME/.claude/scripts/classify-lane.sh")
+    [ -n "${REPO_PATH:-}" ] && candidates+=("$REPO_PATH/scripts/classify-lane.sh")
+  fi
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [ -f "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  echo "ERROR: classify-lane.sh is not installed in any configured runtime path." >&2
+  return 1
+}
+
+CLASSIFY_LANE_SCRIPT=$(resolve_classify_lane) || {
+  echo "ERROR: cannot classify lanes without classify-lane.sh" >&2
+  exit 1
+}
 
 declare -A ISSUE_LANE
 declare -A ISSUE_PR_BASE
@@ -498,7 +523,7 @@ SURFACE_BATCHED_FINDINGS=()   # all member issue numbers absorbed into a batch a
 SURFACE_BATCH_COUNT=0         # count of batch issues created across the run
 
 for NUM in {ready_issue_numbers}; do
-  PR_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$NUM" -R {GH_REPO}) || {
+  PR_BASE=$(bash "$CLASSIFY_LANE_SCRIPT" "$NUM" -R {GH_REPO}) || {
     echo "ERROR: classify-lane.sh failed for #$NUM — adding needs-human label and skipping" >&2
     gh issue edit "$NUM" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
     continue
@@ -2137,7 +2162,7 @@ Cascade-dispatched findings inherit NO lane assumption from the parent batch. St
 
 ```bash
 for FINDING_NUM in "${QUEUED_FINDINGS[@]}"; do
-  PR_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$FINDING_NUM" -R {GH_REPO}) || {
+  PR_BASE=$(bash "$CLASSIFY_LANE_SCRIPT" "$FINDING_NUM" -R {GH_REPO}) || {
     echo "ERROR: classify-lane.sh failed for #$FINDING_NUM — adding needs-human label and removing from QUEUED_FINDINGS" >&2
     # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
     gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
@@ -2487,7 +2512,7 @@ declare -A SWEEP_LANE
 declare -A SWEEP_PR_BASE
 
 for FINDING_NUM in "${SWEEP_EXECUTE[@]}"; do
-  SWEEP_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$FINDING_NUM" -R {GH_REPO}) || {
+  SWEEP_BASE=$(bash "$CLASSIFY_LANE_SCRIPT" "$FINDING_NUM" -R {GH_REPO}) || {
     echo "ERROR: classify-lane.sh failed for #$FINDING_NUM — adding needs-human and skipping" >&2
     # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
     gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
