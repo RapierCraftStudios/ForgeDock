@@ -85,6 +85,19 @@ function parseDescription(content) {
   return "";
 }
 
+function isLegacyCommandDefinition(name, definition) {
+  if (!definition || typeof definition !== "object" || Array.isArray(definition)) return false;
+  const keys = Object.keys(definition).sort();
+  return (
+    keys.length === 2 &&
+    keys[0] === "description" &&
+    keys[1] === "template" &&
+    typeof definition.template === "string" &&
+    definition.template.includes(`/commands/${name}.md`) &&
+    String(definition.description || "").includes("ForgeDock")
+  );
+}
+
 export function resolveOpenCodeConfigDir({ home, env = process.env } = {}) {
   const resolvedHome = home || env.HOME || env.USERPROFILE || homedir();
   if (env.OPENCODE_CONFIG_DIR) return resolve(env.OPENCODE_CONFIG_DIR);
@@ -282,12 +295,7 @@ async function migrateLegacyAdapter({ configDir, home }) {
     if (config.command && typeof config.command === "object" && !Array.isArray(config.command)) {
       for (const name of legacyCommands) {
         const definition = config.command[name];
-        if (
-          definition &&
-          typeof definition.template === "string" &&
-          definition.template.includes(`/commands/${name}.md`) &&
-          String(definition.description || "").includes("ForgeDock")
-        ) {
+        if (isLegacyCommandDefinition(name, definition)) {
           delete config.command[name];
           result.removedConfigEntries++;
           changed = true;
