@@ -104,7 +104,9 @@ npx forgedock opencode uninstall
 
 Updates are deterministic and prune stale ForgeDock-owned command files.
 Uninstall removes only files listed in the ownership manifest and still marked
-with a ForgeDock sentinel. User-owned commands and plugins are never removed.
+with a ForgeDock sentinel. User-owned commands, plugins, and files placed in
+the `forgedock/` namespace are never removed; that namespace is pruned only
+when it is empty.
 Install also removes the previous ForgeDock-managed `~/.opencode-forge.md`
 instructions file and its exact legacy config entries when they are present.
 

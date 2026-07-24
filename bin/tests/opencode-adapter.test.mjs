@@ -309,4 +309,17 @@ describe("OpenCode adapter", () => {
     assert.ok(!existsSync(join(config, "commands", "forge", "work-on.md")));
     assert.ok(!existsSync(join(config, "plugins", "forgedock.js")));
   });
+
+  it("preserves unmanifested files in the ForgeDock namespace", async () => {
+    const { forgeHome, home } = fixture();
+    const config = join(home, ".config", "opencode");
+    await installOpenCodeAdapter({ forgeHome, home, env: {} });
+    const userFile = join(config, "forgedock", "user-notes.txt");
+    writeFileSync(userFile, "keep this file\n");
+
+    await uninstallOpenCodeAdapter({ home, env: {} });
+
+    assert.ok(existsSync(userFile));
+    assert.ok(existsSync(join(config, "forgedock")));
+  });
 });
