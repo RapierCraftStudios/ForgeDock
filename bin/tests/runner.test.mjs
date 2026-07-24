@@ -2969,6 +2969,22 @@ describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issu
     }), null);
   });
 
+  it("resolves a wrapped variable-based native target", () => {
+    assert.equal(resolveDirectCliExecutable("C:\\npm\\claude.cmd", {
+      platform: "win32",
+      existsImpl: () => true,
+      readImpl: () => '@echo off\r\nset "_prog=%~dp0\\node.exe"\r\n"%_prog%" %*',
+    }), "C:\\npm\\node.exe");
+  });
+
+  it("rejects node-based JavaScript wrappers because they need extra argv", () => {
+    assert.equal(resolveDirectCliExecutable("C:\\npm\\claude.cmd", {
+      platform: "win32",
+      existsImpl: () => true,
+      readImpl: () => '@echo off\r\nnode "%~dp0\\cli.js" %*',
+    }), null);
+  });
+
   it("runCliBackend spawns the resolved path successfully when the bare name would ENOENT (the reported bug)", () => {
     const shimPath = "/home/user/.npm/_npx/abc123/node_modules/.bin/claude";
     const execImpl = mock.fn(() => `${shimPath}\n${CLI_PROBE_OUTPUT_SENTINEL}\n1.2.3 (Claude Code)`);

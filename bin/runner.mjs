@@ -47,7 +47,7 @@ import {
   rmSync,
   realpathSync,
 } from "fs";
-import { join, dirname, basename, relative, isAbsolute, extname } from "path";
+import { join, dirname, basename, relative, isAbsolute, extname, win32 as win32Path } from "path";
 import os from "os";
 import { execSync, spawnSync } from "child_process";
 import { createRequire } from "module";
@@ -300,9 +300,18 @@ export function resolveDirectCliExecutable(
 
   try {
     const shim = readImpl(cliPath, "utf-8");
-    const match = shim.match(/^\s*"%dp0%[\\/]([^"\r\n]+\.(?:exe|com))"\s+%\*\s*$/im);
+    // npm emits several equivalent native-target wrappers. Only accept a
+    // bounded %dp0%-relative .exe/.com target; never evaluate batch syntax.
+    const directMatch = shim.match(
+      /(?:^|\r?\n)\s*"%(?:~)?dp0%?[\\/]([^"\r\n]+\.(?:exe|com))"\s+%\*\s*(?:\r?\n|$)/im,
+    );
+    const variableMatch = shim.match(
+      /(?:^|\r?\n)\s*set\s+"[^"=]+=%(?:~)?dp0%?[\\/]([^"\r\n]+\.(?:exe|com))"[\s\S]*?\r?\n\s*"%[^"\r\n]+%"\s+%\*\s*(?:\r?\n|$)/im,
+    );
+    const match = directMatch || variableMatch;
     if (!match) return null;
-    const target = join(dirname(cliPath), ...match[1].split(/[\\/]+/));
+    const pathApi = platform === "win32" ? win32Path : { join, dirname };
+    const target = pathApi.join(pathApi.dirname(cliPath), ...match[1].split(/[\\/]+/));
     return existsImpl(target) ? target : null;
   } catch {
     return null;
