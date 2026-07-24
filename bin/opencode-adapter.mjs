@@ -3,7 +3,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { parseInstallTier } from "./journey.mjs";
@@ -418,7 +418,9 @@ export async function uninstallOpenCodeAdapter({ home, env = process.env } = {})
   await unlink(manifestPath).catch((error) => {
     if (error.code !== "ENOENT") throw error;
   });
-  await rm(join(configDir, "forgedock"), { recursive: true, force: true }).catch(() => {});
+  await rmdir(join(configDir, "forgedock")).catch((error) => {
+    if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error.code)) throw error;
+  });
   const migration = await migrateLegacyAdapter({ configDir, home });
   return { configDir, removed, migration };
 }
