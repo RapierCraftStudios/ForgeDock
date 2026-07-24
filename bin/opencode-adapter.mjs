@@ -157,6 +157,7 @@ export const ForgeDockPlugin = async () => ({
   },
   "shell.env": async (_input, output) => {
     output.env.FORGE_HOME = shellForgeHome
+    output.env.FORGE_RUNTIME = "opencode"
   },
 })
 `;
