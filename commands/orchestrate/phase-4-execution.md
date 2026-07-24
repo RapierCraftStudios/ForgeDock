@@ -521,6 +521,27 @@ Use `${ISSUE_LANE[$NUM]}` and `${ISSUE_PR_BASE[$NUM]}` to populate `{LANE}` and 
 
 **Engine-first dispatch (default)**: When `forgedock` is in PATH, dispatch each ready issue via the durable engine rather than spawning prose Agent sub-agents. The engine's phase table enforces gate semantics in code — its fail-closed review gate and deterministic phase ordering are not subject to LLM interpretation.
 
+**OpenCode dispatch (runtime-neutral adapter)**: When `FORGE_RUNTIME=opencode` or
+an OpenCode runtime marker is present, do not invoke the engine's Claude-backed
+runner and do not use the Claude `Agent(...)` fallback. Dispatch each ready
+issue through OpenCode's native `task` tool, loading the nested
+`commands/work-on.md` pipeline. Use GitHub labels and `FORGE:*` comments as the
+resume state. After each task continuation, re-read the issue workflow label
+and continue until it reaches
+`workflow:merged`, `workflow:invalid`, `needs-human`, or
+`workflow:awaiting-merge`.
+
+```bash
+if [ "${FORGE_RUNTIME:-}" = "opencode" ]; then
+  echo "OpenCode native task dispatch selected — load commands/work-on.md for each ready issue."
+  echo "Do not call forgedock run-issue or the Claude Agent(...) fallback in this branch."
+  echo "If native task dispatch cannot run, post FORGE:OPENCODE_BLOCKED with the missing capability and add needs-human."
+fi
+```
+
+This branch is additive. When OpenCode is not selected, continue through the
+existing engine-first and Claude Agent-spawn paths below without modification.
+
 **CRITICAL — never background via shell `&`/`wait`** (fixed forge#2466): A single `forgedock run-issue` invocation drives an issue through investigate → build → review → close and routinely runs 30+ minutes. Backgrounding the process at the *shell* level (`cmd &` … `wait`) does not escape the Bash tool's own per-invocation ceiling — `wait` is itself the foreground command the tool watches, and it blocks for the combined duration of every process in the chunk. This made engine-first dispatch effectively dead code: any chunk running longer than the ceiling was always killed, so every run silently fell through to the Agent-spawn fallback below. The fix: dispatch each `forgedock run-issue` invocation as its **own `Bash` tool call with `run_in_background=true`** — the harness's native "start it, don't wait, notify me on completion" primitive — never with shell-level `&`/`wait`. This is exactly the same async model the Agent-spawn-fallback path already uses (and Step 4B's notification-driven completion loop already expects), so one monitoring loop now covers both dispatch styles.
 
 ```bash

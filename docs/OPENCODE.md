@@ -148,6 +148,28 @@ Commands that inspect Claude-specific transcripts or Claude installation state
 remain runtime-specific and should not be represented as portable until they
 receive dedicated implementations.
 
+## Orchestration Runtime
+
+OpenCode orchestration uses the native OpenCode `task` tool for isolated issue
+work and follows the shared `commands/work-on.md` state machine. It must not
+route through `forgedock run-issue` when that would select the Claude CLI or
+Anthropic API backend. If the host does not expose an OpenCode runtime marker,
+set the runtime explicitly before launching a headless command:
+
+```bash
+FORGE_RUNTIME=opencode opencode run --command forge/orchestrate "fast-lane"
+```
+
+Each task re-reads GitHub labels and `FORGE:*` comments after every phase and
+continues until `workflow:merged`, `workflow:invalid`, `needs-human`, or
+`workflow:awaiting-merge`. If native task dispatch is unavailable, post a
+`FORGE:OPENCODE_BLOCKED` diagnostic naming the missing capability and add
+`needs-human`; do not leave an issue stranded at `workflow:engine-error`.
+
+This runtime branch is additive. Claude keeps its existing engine and
+background-agent paths, and Codex keeps its installed namespaced skills and
+repo-local adapters.
+
 ## Source References
 
 - Shared workflows: [`commands/`](../commands/)
