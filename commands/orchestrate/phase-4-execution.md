@@ -1520,17 +1520,9 @@ Gating predecessor #${NUM} reached \`workflow:merged\` — dispatching now. (Was
 RERESOLVE_ENABLED=$(yq '.orchestration.reresolve.enabled // true' forge.yaml 2>/dev/null || echo "true")
 RERESOLVE_MAX_ROUNDS=$(yq '.orchestration.reresolve.max_rounds // "unbounded"' forge.yaml 2>/dev/null || echo "unbounded")
 
-node -e '
-import("{REPO_PATH}/bin/engine/resolve.mjs").then(({ shouldReResolve }) => {
-  const classified = { kind: process.argv[1], pattern: process.argv[2], args: [] };
-  const config = {
-    enabled: process.argv[3] === "false" ? false : process.argv[3],
-    maxRounds: process.argv[4] === "unbounded" ? undefined : Number(process.argv[4]),
-  };
-  const rounds = Number(process.argv[5]);
-  console.log(JSON.stringify(shouldReResolve(classified, config, rounds)));
-}, () => process.exit(0));
-' "$ORIGINATING_QUERY_KIND" "$ORIGINATING_QUERY_PATTERN" "$RERESOLVE_ENABLED" "$RERESOLVE_MAX_ROUNDS" "$RERESOLVE_ROUNDS_SO_FAR"
+node "{REPO_PATH}/bin/engine/orchestrate-canary.mjs" \
+  "$ORIGINATING_QUERY_KIND" "$ORIGINATING_QUERY_PATTERN" \
+  "$RERESOLVE_ENABLED" "$RERESOLVE_MAX_ROUNDS" "$RERESOLVE_ROUNDS_SO_FAR"
 ```
 
 If the result's `reResolve` is `false` (off switch, or `RERESOLVE_ROUNDS_SO_FAR` has reached `max_rounds` — bounded termination per the issue's acceptance criteria), skip this step for the current cycle and log the reason. `RERESOLVE_ROUNDS_SO_FAR` starts at 0 for the batch and increments once per cycle this step actually runs (declare it alongside the other Step 4A.pre batch-scope accumulators — do not re-initialize per completion).
