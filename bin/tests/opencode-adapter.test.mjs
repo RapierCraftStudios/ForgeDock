@@ -182,6 +182,25 @@ describe("OpenCode adapter", () => {
     assert.equal(migrated.model, "test/model");
   });
 
+  it("preserves customized legacy-named commands with ForgeDock-like content", async () => {
+    const { forgeHome, home } = fixture();
+    const config = join(home, ".config", "opencode");
+    mkdirSync(config, { recursive: true });
+    const customCommand = {
+      description: "Run the ForgeDock full issue pipeline with my confirmation step",
+      template: `Read ${forgeHome.replaceAll("\\", "/")}/commands/work-on.md and ask for confirmation first`,
+      customField: "keep this setting",
+    };
+    writeFileSync(
+      join(config, "opencode.json"),
+      `${JSON.stringify({ command: { "work-on": customCommand } }, null, 2)}\n`,
+    );
+
+    await installOpenCodeAdapter({ forgeHome, home, env: {} });
+    const migrated = JSON.parse(readFileSync(join(config, "opencode.json"), "utf8"));
+    assert.deepEqual(migrated.command["work-on"], customCommand);
+  });
+
   it("migrates JSONC configs before removing the managed instructions file", async () => {
     const { forgeHome, home } = fixture();
     const config = join(home, ".config", "opencode");
