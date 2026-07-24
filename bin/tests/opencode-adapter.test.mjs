@@ -77,6 +77,27 @@ describe("OpenCode adapter", () => {
     assert.equal(shellPath("C:\\Forge Dock\\commands", "win32"), "/c/Forge Dock/commands");
   });
 
+  it("normalizes colon-qualified nested skill paths without changing other names", () => {
+    const output = renderOpenCodeCommand({
+      description: "Run one issue",
+      forgeHome: "/forge",
+      command: "work-on",
+    });
+
+    assert.match(output, /commands\/\$\{x\.replaceAll\(\":\", \"\/\"\)\}\.md/);
+    assert.match(output, /Skill\(skill="x", args="y"\)/);
+    assert.match(output, /slash separators remain unchanged/i);
+
+    for (const [skill, expected] of [
+      ["work-on:close", "work-on/close"],
+      ["work-on:build:context", "work-on/build/context"],
+      ["review-pr", "review-pr"],
+      ["work-on/build", "work-on/build"],
+    ]) {
+      assert.equal(skill.replaceAll(":", "/"), expected);
+    }
+  });
+
   it("installs only top-level core entrypoints by default", async () => {
     const { forgeHome, home } = fixture();
     const result = await installOpenCodeAdapter({ forgeHome, home, env: {} });

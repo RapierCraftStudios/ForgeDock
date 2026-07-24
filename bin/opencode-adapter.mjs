@@ -122,7 +122,7 @@ Use \`read\` to load that spec, then execute it. Keep loading token-efficient: d
 
 OpenCode runtime mapping:
 
-- \`Skill(skill="x", args="y")\` means lazily read \`${commandsPath}/x.md\` and execute that workflow in the current context with the exact arguments. This matches Claude Code Skill's in-conversation loading; it is not a reason to spawn a subagent.
+- \`Skill(skill="x", args="y")\` means lazily read \`${commandsPath}/\${x.replaceAll(":", "/")}.md\` and execute that workflow in the current context with the exact arguments. Colon separators become slash separators; existing slash separators remain unchanged. This matches Claude Code Skill's in-conversation loading; it is not a reason to spawn a subagent.
 - \`Task(...)\` or a permitted \`Agent(...)\` means use OpenCode's \`task\` tool. Preserve requested isolation and parallelism, use \`general\` for implementation/review and \`explore\` for read-only discovery, and resume by task ID when requested. If background tasks are unavailable, launch independent foreground tasks concurrently where possible and use the workflow's GitHub-label polling fallback; never inline a required isolated review.
 - Map Claude tool names to the corresponding OpenCode tools. Do not skip a step merely because its source uses Claude-style invocation syntax.
 - OpenCode injects \`FORGE_HOME\` into shell commands through the ForgeDock plugin. GitHub labels, FORGE annotations, worktree isolation, and terminal-state rules remain unchanged.
