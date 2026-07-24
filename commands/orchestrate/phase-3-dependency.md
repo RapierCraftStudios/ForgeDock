@@ -1136,8 +1136,23 @@ Background dispatch (via `run_in_background=true` on each `Agent()` call) is the
 Check both at the start of Phase 4, before the first dispatch:
 
 ```bash
+# Runtime selection is explicit for non-Claude adapters. OpenCode runs nested
+# work-on phases through its native task path, so it must not be treated as a
+# failed Claude probe.
+FORGE_RUNTIME="${FORGE_RUNTIME:-}"
+if [ -n "${OPENCODE_SESSION_ID:-}" ] || [ -n "${OPENCODE_PID:-}" ] || [ -n "${OPENCODE:-}" ]; then
+  FORGE_RUNTIME="opencode"
+fi
+
+if [ "$FORGE_RUNTIME" = "opencode" ]; then
+  echo "OpenCode runtime detected: native task dispatch selected; Claude background dispatch is not required."
+  BACKGROUND_DISPATCH_ENABLED=false
+fi
+
 # Feature gate check — run once before Phase 4 dispatch begins
-BACKGROUND_DISPATCH_ENABLED=true
+if [ "${BACKGROUND_DISPATCH_ENABLED:-}" != "false" ]; then
+  BACKGROUND_DISPATCH_ENABLED=true
+fi
 
 if [ -n "${CLAUDE_CODE_DISABLE_BACKGROUND_TASKS:-}" ]; then
   echo "Background dispatch disabled: CLAUDE_CODE_DISABLE_BACKGROUND_TASKS is set."
@@ -1147,7 +1162,7 @@ fi
 # Version check: if the Claude Code version can be read, compare it.
 # If the version cannot be determined, default to ENABLED (optimistic).
 CC_VERSION=$(claude --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "")
-if [ -n "$CC_VERSION" ]; then
+if [ "$FORGE_RUNTIME" != "opencode" ] && [ -n "$CC_VERSION" ]; then
   # Compare major.minor.patch numerically
   IFS='.' read -r CC_MAJOR CC_MINOR CC_PATCH <<< "$CC_VERSION"
   if [ "$CC_MAJOR" -lt 2 ] || \
@@ -1158,6 +1173,12 @@ if [ -n "$CC_VERSION" ]; then
   fi
 fi
 ```
+
+When `FORGE_RUNTIME=opencode` (or an OpenCode runtime marker is present), do not
+interpret a missing `claude` executable as an environment failure. The Phase 4
+dispatcher must use OpenCode's inline continuation contract instead of the
+Claude `Agent(...)` fallback. Claude remains the default when no runtime marker
+is present, preserving the existing Claude behavior.
 
 **When `BACKGROUND_DISPATCH_ENABLED=false`**: fall back to the current streaming dispatch behavior — `run_in_background=true` is still set on each `Agent()` call (existing behavior, already correct), but treat completions as synchronous and do not rely on `agent_completed` notifications. Poll issue labels for terminal state instead.
 
@@ -1359,4 +1380,3 @@ done
 **Why this keeps context small**: Each `Agent()` call returns an agent ID stored only in `AGENT_ISSUE_MAP`, which is rebuilt per Step 4A.pre dispatch batch. After compaction, the map is gone — but the DAG state, including `blocked-on-human-merge` tracking (a durable `FORGE:BLOCKED_ON_HUMAN_MERGE` comment plus label, not an in-context variable), is fully on GitHub. The reconstruction above re-derives the ready set, the gated set, and the blocked-on-human-merge set from labels and comments alone, so the orchestrator context never needs to hold cumulative dispatch history.
 
 ---
-

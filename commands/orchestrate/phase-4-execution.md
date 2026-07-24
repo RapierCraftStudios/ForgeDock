@@ -352,14 +352,39 @@ This step is the deterministic counterpart to fix #2 (atomic create-if-absent in
 Before building agent prompts, run `classify-lane.sh` for every issue in the current dispatch group to compute `{LANE}` and `{PR_BASE}` deterministically. The script output is authoritative — the LLM MUST NOT override or reason around it.
 
 ```bash
-# Requires classify-lane.sh to be available at ~/.claude/scripts/classify-lane.sh
-# (installed by `npx forgedock` — see bin/journey.mjs: forge()'s linkPipelineScripts() step)
-# NOTE: the actual invocations below (and in the review-finding sweep) hardcode this
-# ~/.claude path directly — there is no $FORGE_HOME-based fallback implemented, so this
-# call site is not exposed to the bare-unset-$FORGE_HOME → root-anchored-path footgun
-# that affected commands/review-pr.md (see forge#1984, forge#2035 audit). If
-# ~/.claude/scripts/ is genuinely unavailable, classify-lane.sh hard-fails per the
-# phantom-slug gate above — it does NOT fall through to a filesystem search.
+# Resolve the helper once and reuse it for the initial dispatch and all finding
+# classification loops. Claude keeps its installed path as the default, while
+# OpenCode and Codex can use ForgeDock's repository-local scripts.
+resolve_classify_lane() {
+  local candidates=()
+  if [ "${FORGE_RUNTIME:-}" = "opencode" ] ||
+     [ -n "${OPENCODE_SESSION_ID:-}" ] ||
+     [ -n "${OPENCODE_PID:-}" ] ||
+     [ -n "${OPENCODE:-}" ]; then
+    [ -n "${FORGE_HOME:-}" ] && candidates+=("$FORGE_HOME/scripts/classify-lane.sh")
+    [ -n "${REPO_PATH:-}" ] && candidates+=("$REPO_PATH/scripts/classify-lane.sh")
+    candidates+=("$HOME/.opencode/scripts/classify-lane.sh")
+  else
+    [ -n "${FORGE_HOME:-}" ] && candidates+=("$FORGE_HOME/scripts/classify-lane.sh")
+    candidates+=("$HOME/.claude/scripts/classify-lane.sh")
+    [ -n "${REPO_PATH:-}" ] && candidates+=("$REPO_PATH/scripts/classify-lane.sh")
+  fi
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [ -f "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  echo "ERROR: classify-lane.sh is not installed in any configured runtime path." >&2
+  return 1
+}
+
+CLASSIFY_LANE_SCRIPT=$(resolve_classify_lane) || {
+  echo "ERROR: cannot classify lanes without classify-lane.sh" >&2
+  exit 1
+}
 
 declare -A ISSUE_LANE
 declare -A ISSUE_PR_BASE
@@ -498,7 +523,7 @@ SURFACE_BATCHED_FINDINGS=()   # all member issue numbers absorbed into a batch a
 SURFACE_BATCH_COUNT=0         # count of batch issues created across the run
 
 for NUM in {ready_issue_numbers}; do
-  PR_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$NUM" -R {GH_REPO}) || {
+  PR_BASE=$(bash "$CLASSIFY_LANE_SCRIPT" "$NUM" -R {GH_REPO}) || {
     echo "ERROR: classify-lane.sh failed for #$NUM — adding needs-human label and skipping" >&2
     gh issue edit "$NUM" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
     continue
@@ -521,9 +546,34 @@ Use `${ISSUE_LANE[$NUM]}` and `${ISSUE_PR_BASE[$NUM]}` to populate `{LANE}` and 
 
 **Engine-first dispatch (default)**: When `forgedock` is in PATH, dispatch each ready issue via the durable engine rather than spawning prose Agent sub-agents. The engine's phase table enforces gate semantics in code — its fail-closed review gate and deterministic phase ordering are not subject to LLM interpretation.
 
+**OpenCode dispatch (runtime-neutral adapter)**: When `FORGE_RUNTIME=opencode` or
+an OpenCode runtime marker is present, do not invoke the engine's Claude-backed
+runner and do not use the Claude `Agent(...)` fallback. Dispatch each ready
+issue through OpenCode's native `task` tool, loading the nested
+`commands/work-on.md` pipeline. Use GitHub labels and `FORGE:*` comments as the
+resume state. After each task continuation, re-read the issue workflow label
+and continue until it reaches
+`workflow:merged`, `workflow:invalid`, `needs-human`, or
+`workflow:awaiting-merge`.
+
+```bash
+if [ "${FORGE_RUNTIME:-}" = "opencode" ]; then
+  echo "OpenCode native task dispatch selected — load commands/work-on.md for each ready issue."
+  echo "Do not call forgedock run-issue or the Claude Agent(...) fallback in this branch."
+  echo "If native task dispatch cannot run, post FORGE:OPENCODE_BLOCKED with the missing capability and add needs-human."
+fi
+```
+
+This branch is additive. When OpenCode is not selected, continue through the
+existing engine-first and Claude Agent-spawn paths below without modification.
+
 **CRITICAL — never background via shell `&`/`wait`** (fixed forge#2466): A single `forgedock run-issue` invocation drives an issue through investigate → build → review → close and routinely runs 30+ minutes. Backgrounding the process at the *shell* level (`cmd &` … `wait`) does not escape the Bash tool's own per-invocation ceiling — `wait` is itself the foreground command the tool watches, and it blocks for the combined duration of every process in the chunk. This made engine-first dispatch effectively dead code: any chunk running longer than the ceiling was always killed, so every run silently fell through to the Agent-spawn fallback below. The fix: dispatch each `forgedock run-issue` invocation as its **own `Bash` tool call with `run_in_background=true`** — the harness's native "start it, don't wait, notify me on completion" primitive — never with shell-level `&`/`wait`. This is exactly the same async model the Agent-spawn-fallback path already uses (and Step 4B's notification-driven completion loop already expects), so one monitoring loop now covers both dispatch styles.
 
 ```bash
+if [ "${FORGE_RUNTIME:-}" != "opencode" ] &&
+   [ -z "${OPENCODE_SESSION_ID:-}" ] &&
+   [ -z "${OPENCODE_PID:-}" ] &&
+   [ -z "${OPENCODE:-}" ]; then
 # Engine-first dispatch: check CLI availability, then dispatch ready issues in score order
 # Uses SORTED_READY_SET[] from Step 3E.5 (descending value/cost) and budget gate from Step 4A-pre.0
 FORGEDOCK_AVAILABLE=$(command -v forgedock >/dev/null 2>&1 && echo "true" || echo "false")
@@ -536,20 +586,13 @@ FORGEDOCK_AVAILABLE=$(command -v forgedock >/dev/null 2>&1 && echo "true" || ech
 # `forgedock run-issue` call fails within seconds, and nothing re-routes the batch — a human has
 # to notice and manually re-dispatch via the Agent-spawn path below.
 #
-# CRITICAL — do NOT use a shell-resolved probe here (`command -v claude`, `claude --version` run
-# directly by bash, `which claude`, etc.). forge#2741's entire root cause is that a shell-resolved
-# probe and the engine's actual invocation resolve the `claude` binary differently: bash's builtin
-# PATH lookup (and `execSync("claude --version", ...)`, used deliberately by
-# `bin/runner.mjs`'s `isClaudeCliAvailable()` for this exact reason) can find and run an
-# npx-transient/extensionless shim that `bin/runner.mjs`'s actual backend call —
-# `runCliBackend()`'s `spawnFn(bin, cliArgs, { shell: false, ... })` with bare `bin = "claude"`
-# (no shell resolution) — cannot. A canary that shell-resolves `claude` reproduces the exact
-# blind spot it exists to catch and reports the backend healthy in precisely forge#2741's failure
-# scenario. The canary MUST reproduce `runCliBackend()`'s exact invocation shape — bare binary
-# name, `shell: false` — via a one-off Node `spawnSync` call, not a bash-native probe:
+# Use the runner's tested backend policy rather than duplicating it as shell/Node prose. This
+# reuses the production resolved-CLI path check (including transient-shim refresh), honors an
+# explicit FORGEDOCK_BACKEND, and accepts API fallback only when ANTHROPIC_API_KEY is configured.
+# It performs no paid model request.
 if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
-  if ! node -e "const r = require('node:child_process').spawnSync('claude', ['--version'], { shell: false }); process.exit(r.error ? 1 : 0);" 2>/dev/null; then
-    echo "WARNING: forgedock CLI is on PATH, but its execution backend is not invocable via the engine's own spawn shape (bare 'claude', shell:false) in this environment. Downgrading to the Agent-spawn fallback path for this entire run — see forge#2743. (If forge#2741's ENOENT root cause is fixed, this canary will pass again on the next /orchestrate invocation.)"
+  if ! forgedock backend-check --quiet; then
+    echo "WARNING: forgedock CLI is on PATH, but no configured execution backend is locally usable. Downgrading to the Agent-spawn fallback path for this entire run — see forge#2743."
     FORGEDOCK_AVAILABLE="false"
   fi
 fi
@@ -623,6 +666,7 @@ else
   echo "INFO: Using agent dispatch mode (forgedock CLI not in PATH — run \`npm install -g forgedock\` for engine-mode dispatch)"
   # Fall through to Agent-spawn template below. The SubagentStop hook (bin/hooks/interactive-engine.mjs)
   # bridges these runs to the engine run-log for state persistence even on the fallback path.
+fi
 fi
 ```
 
@@ -1132,10 +1176,6 @@ done
 
    **2b. Engine-first-dispatched issue (`ENGINE_DISPATCH_MAP[{NUMBER}]` set, no `AGENT_ISSUE_MAP` entry)** — `Agent(resume=...)` has nothing to resume here; the completed task was a backgrounded `Bash(command="forgedock run-issue ...")` call, not an `Agent()`. Re-issuing the identical `forgedock run-issue` command would just reproduce the same environmental failure. Instead, fall back to the Agent-spawn path for this ONE issue — but only when it is safe to do so:
    ```bash
-   # Idempotency guard: only fall back once per issue per engine-error occurrence.
-   ALREADY_FALLEN_BACK=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-     --jq '[.[] | select(.body | contains("FORGE:ENGINE_FALLBACK"))] | length' 2>/dev/null || echo "0")
-
    # Safety gate: only fall back when the engine run committed NOTHING — no branch, no PR, no
    # committed phases. Primary source: the `FORGE:STATE` HTML-comment block the engine already
    # mirrors onto the issue BODY on every phase transition (`bin/engine/state.mjs`/`projector.mjs`
@@ -1149,13 +1189,22 @@ done
    # the real multi-line shape correctly:
    STATE_BLOCK=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' \
      | sed -n '/<!-- FORGE:STATE/,/-->/p')
-   STATE_JSON=$(echo "$STATE_BLOCK" | sed '1d;$d')
-   if [ -n "$STATE_JSON" ]; then
-     COMMITTED_COUNT=$(echo "$STATE_JSON" | jq -r '.committed | length' 2>/dev/null)
-     STATE_BRANCH=$(echo "$STATE_JSON" | jq -r '.branch' 2>/dev/null)
-     STATE_PR=$(echo "$STATE_JSON" | jq -r '.pr' 2>/dev/null)
-     [ "$COMMITTED_COUNT" = "0" ] && [ "$STATE_BRANCH" = "null" ] && [ "$STATE_PR" = "null" ] \
-       && EMPTY_COMMITTED_STATE="true" || EMPTY_COMMITTED_STATE="false"
+    STATE_JSON=$(echo "$STATE_BLOCK" | sed '1d;$d')
+    if [ -n "$STATE_JSON" ]; then
+      # Missing or schema-invalid fields are unverifiable, not empty. In particular, jq's
+      # `length` is also zero for null, {}, and "", so require the committed array type first.
+      # The persisted engine run ID and state version are also required: together they give every
+      # orchestrator handling this same failure one stable scope while allowing a later failure
+      # for the same issue/run name to elect a new claimant.
+      if echo "$STATE_JSON" | jq -e \
+        '(.run | type == "string" and test("^[A-Za-z0-9._:/-]+$")) and (.v | type == "number" and . >= 0 and floor == .) and (.committed | type == "array") and (.committed | length == 0) and (.branch == null) and (.pr == null)' \
+        >/dev/null 2>&1; then
+        STATE_RUN=$(echo "$STATE_JSON" | jq -r '.run')
+        STATE_VERSION=$(echo "$STATE_JSON" | jq -r '.v')
+        EMPTY_COMMITTED_STATE="true"
+      else
+        EMPTY_COMMITTED_STATE="false"
+      fi
    else
      # No FORGE:STATE block was ever written to the issue body (e.g. the run failed before
      # phase 1 committed anything). There is no reliable structured signal available in this
@@ -1175,32 +1224,53 @@ done
    # dispatch could collide with or duplicate — that case is NOT auto-fallen-back; it surfaces
    # via the existing stall-detection alert / needs-human path instead, exactly as before this fix.
 
-   if [ "$ALREADY_FALLEN_BACK" -eq 0 ] && [ "$EMPTY_COMMITTED_STATE" = "true" ]; then
+   if [ "$EMPTY_COMMITTED_STATE" = "true" ]; then
+     # Atomic-enough cross-session claim: post first, then elect the lowest server-assigned
+     # comment ID for this batch. Concurrent claimants may both post, but exactly one can win.
+     # Pagination is mandatory; any POST/list/parse failure fails closed and dispatches nothing.
+      CLAIM_SCOPE="${STATE_RUN}:${STATE_VERSION}"
+     CLAIM_TOKEN="${CLAIM_SCOPE}-{NUMBER}-$$-${RANDOM}"
      ENGINE_FALLBACK_BODY="<!-- FORGE:ENGINE_FALLBACK -->
    ## Engine-First Dispatch Failed — Falling Back to Agent-Spawn
+
+   **Batch**: ${CLAIM_SCOPE}
+   **Claim**: ${CLAIM_TOKEN}
 
    \`forgedock run-issue\` ended at \`workflow:engine-error\` with no committed phases, branch, or PR
    (\`committed=[] branch=null pr=null\`) — this is an environmental/tool failure (forge#2261), not a
    per-issue content failure, and nothing was committed that a fresh dispatch could collide with.
    Auto-falling back to the Agent-spawn \`/work-on\` path for this issue. See forge#2743."
-     gh issue comment {NUMBER} {GH_FLAG} --body "$ENGINE_FALLBACK_BODY" # <!-- allowlist:check-command-side-effects — intentional pipeline status annotation, mirrors work-on/build/architect.md:700 -->
+     CLAIM_ID=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --method POST \
+       --raw-field body="$ENGINE_FALLBACK_BODY" --jq '.id' 2>/dev/null) || CLAIM_ID=""
+      CLAIM_LIST_OK="true"
+      CLAIM_IDS=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
+        --jq ".[] | select(.body | split(\"\\n\") | (any(. == \"<!-- FORGE:ENGINE_FALLBACK -->\") and any(. == \"   **Batch**: ${CLAIM_SCOPE}\"))) | .id" \
+        2>/dev/null) || CLAIM_LIST_OK="false"
+     WINNER_CLAIM_ID=$(printf '%s\n' "$CLAIM_IDS" | grep -E '^[0-9]+$' | sort -n | head -1)
+     CLAIM_WON="false"
+     [ "$CLAIM_LIST_OK" = "true" ] && [ -n "$CLAIM_ID" ] && \
+       [ "$CLAIM_ID" = "$WINNER_CLAIM_ID" ] && CLAIM_WON="true"
 
      # Reuse the SAME Agent-spawn template as Step 4A's "Agent-spawn path (fallback when forgedock
      # CLI unavailable)" section above (the `Agent(subagent_type="general-purpose", ...)` block
      # under "Copy this template. Fill in variables. Do not modify the structure:") verbatim —
      # HARD RULE 1 preserved. This is a fresh dispatch, not a resume: capture its returned agent
      # ID into AGENT_ISSUE_MAP so subsequent completions for this issue route through 2a above.
-     Agent(
+     if [ "$CLAIM_WON" = "true" ]; then
+       Agent(
        subagent_type="general-purpose",
        model="{SUBAGENT_MODEL}",
        description="Work on {PROJECT_PREFIX}#{NUMBER} (engine-error fallback)",
        run_in_background=true,
        prompt="<same template body as Step 4A's Agent-spawn path — see the 'Agent-spawn path (fallback when forgedock CLI unavailable)' section above; fill {NUMBER}/{GH_REPO}/{REPO_PATH}/{LANE}/{PR_BASE}/{ISSUE_TITLE} exactly as that template does>"
-     )
-     AGENT_ISSUE_MAP[{NUMBER}] = <agent_id returned by the Agent() call above>
-     # Re-occupies the worker slot this completion just freed (see "Concurrency slot release" above).
-     ACTIVE_DISPATCH_COUNT=$((ACTIVE_DISPATCH_COUNT + 1))
-   elif [ "$ALREADY_FALLEN_BACK" -eq 0 ]; then
+       )
+       AGENT_ISSUE_MAP[{NUMBER}] = <agent_id returned by the Agent() call above>
+       # Re-occupies the worker slot this completion just freed (see "Concurrency slot release" above).
+       ACTIVE_DISPATCH_COUNT=$((ACTIVE_DISPATCH_COUNT + 1))
+     else
+       echo "#{NUMBER}: engine fallback claim lost or could not be verified — no duplicate Agent dispatch."
+     fi
+   else
      echo "#{NUMBER}: engine-error with non-empty committed state (partial work exists) — NOT auto-falling back. Surfaces via standard stall-detection alert; forgedock resume-stalled remains available for manual/scripted recovery."
    fi
    ```
@@ -1501,17 +1571,9 @@ Gating predecessor #${NUM} reached \`workflow:merged\` — dispatching now. (Was
 RERESOLVE_ENABLED=$(yq '.orchestration.reresolve.enabled // true' forge.yaml 2>/dev/null || echo "true")
 RERESOLVE_MAX_ROUNDS=$(yq '.orchestration.reresolve.max_rounds // "unbounded"' forge.yaml 2>/dev/null || echo "unbounded")
 
-node -e '
-import("{REPO_PATH}/bin/engine/resolve.mjs").then(({ shouldReResolve }) => {
-  const classified = { kind: process.argv[1], pattern: process.argv[2], args: [] };
-  const config = {
-    enabled: process.argv[3] === "false" ? false : process.argv[3],
-    maxRounds: process.argv[4] === "unbounded" ? undefined : Number(process.argv[4]),
-  };
-  const rounds = Number(process.argv[5]);
-  console.log(JSON.stringify(shouldReResolve(classified, config, rounds)));
-}, () => process.exit(0));
-' "$ORIGINATING_QUERY_KIND" "$ORIGINATING_QUERY_PATTERN" "$RERESOLVE_ENABLED" "$RERESOLVE_MAX_ROUNDS" "$RERESOLVE_ROUNDS_SO_FAR"
+node "{REPO_PATH}/bin/engine/orchestrate-canary.mjs" \
+  "$ORIGINATING_QUERY_KIND" "$ORIGINATING_QUERY_PATTERN" \
+  "$RERESOLVE_ENABLED" "$RERESOLVE_MAX_ROUNDS" "$RERESOLVE_ROUNDS_SO_FAR"
 ```
 
 If the result's `reResolve` is `false` (off switch, or `RERESOLVE_ROUNDS_SO_FAR` has reached `max_rounds` — bounded termination per the issue's acceptance criteria), skip this step for the current cycle and log the reason. `RERESOLVE_ROUNDS_SO_FAR` starts at 0 for the batch and increments once per cycle this step actually runs (declare it alongside the other Step 4A.pre batch-scope accumulators — do not re-initialize per completion).
@@ -2105,7 +2167,7 @@ Cascade-dispatched findings inherit NO lane assumption from the parent batch. St
 
 ```bash
 for FINDING_NUM in "${QUEUED_FINDINGS[@]}"; do
-  PR_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$FINDING_NUM" -R {GH_REPO}) || {
+  PR_BASE=$(bash "$CLASSIFY_LANE_SCRIPT" "$FINDING_NUM" -R {GH_REPO}) || {
     echo "ERROR: classify-lane.sh failed for #$FINDING_NUM — adding needs-human label and removing from QUEUED_FINDINGS" >&2
     # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
     gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
@@ -2455,7 +2517,7 @@ declare -A SWEEP_LANE
 declare -A SWEEP_PR_BASE
 
 for FINDING_NUM in "${SWEEP_EXECUTE[@]}"; do
-  SWEEP_BASE=$(bash ~/.claude/scripts/classify-lane.sh "$FINDING_NUM" -R {GH_REPO}) || {
+  SWEEP_BASE=$(bash "$CLASSIFY_LANE_SCRIPT" "$FINDING_NUM" -R {GH_REPO}) || {
     echo "ERROR: classify-lane.sh failed for #$FINDING_NUM — adding needs-human and skipping" >&2
     # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
     gh issue edit "$FINDING_NUM" -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
@@ -2636,4 +2698,3 @@ fi
 ```
 
 ---
-

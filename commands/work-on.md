@@ -1411,7 +1411,16 @@ esac
 cd {REPO_PATH}
 git fetch origin
 BRANCH="fix/{slug}-{NUMBER}"
-WORKTREE_PATH="{REPO_PATH}/.claude/worktrees/{BRANCH_SLUG}"
+WORKTREE_ROOT="{REPO_PATH}/.claude/worktrees"
+if [ "${FORGE_RUNTIME:-}" = "opencode" ] ||
+   [ -n "${OPENCODE_SESSION_ID:-}" ] ||
+   [ -n "${OPENCODE_PID:-}" ] ||
+   [ -n "${OPENCODE:-}" ]; then
+  WORKTREE_ROOT="{REPO_PATH}/.opencode/worktrees"
+elif [ "${FORGE_RUNTIME:-}" = "codex" ]; then
+  WORKTREE_ROOT="{REPO_PATH}/.codex/worktrees"
+fi
+WORKTREE_PATH="${WORKTREE_ROOT}/{BRANCH_SLUG}"
 git worktree add {WORKTREE_PATH} -b {BRANCH} origin/{PR_BASE}
 ```
 

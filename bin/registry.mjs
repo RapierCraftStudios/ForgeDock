@@ -513,12 +513,13 @@ export function getInstalledCommandsDriftStatus(forgeHome) {
   let sourceVersion = "";
   try {
     const pkg = JSON.parse(readFileSync(join(forgeHome, "package.json"), "utf-8"));
-    sourceVersion = pkg.version || "";
+    sourceVersion = typeof pkg.version === "string" ? pkg.version.trim() : "";
   } catch {
     // Missing/unreadable/corrupt package.json — cannot determine the source
     // version at all; degrade to unknown rather than guessing.
     return notFound;
   }
+  if (!sourceVersion) return notFound;
 
   // Prefer the version registry.mjs last recorded for persistHome()'s write
   // (the single source of truth update()/install also write through),
