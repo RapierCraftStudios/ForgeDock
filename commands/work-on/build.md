@@ -125,7 +125,16 @@ Append `-{NUMBER}` to ensure uniqueness: e.g. `fix/work-on-build-landing-file-85
 ### B1C: Create worktree
 
 ```bash
-WORKTREE_PATH="/path/to/repo/.claude/worktrees/{BRANCH_SLUG}"
+WORKTREE_ROOT="/path/to/repo/.claude/worktrees"
+if [ "${FORGE_RUNTIME:-}" = "opencode" ] ||
+   [ -n "${OPENCODE_SESSION_ID:-}" ] ||
+   [ -n "${OPENCODE_PID:-}" ] ||
+   [ -n "${OPENCODE:-}" ]; then
+  WORKTREE_ROOT="/path/to/repo/.opencode/worktrees"
+elif [ "${FORGE_RUNTIME:-}" = "codex" ]; then
+  WORKTREE_ROOT="/path/to/repo/.codex/worktrees"
+fi
+WORKTREE_PATH="${WORKTREE_ROOT}/{BRANCH_SLUG}"
 git worktree add {WORKTREE_PATH} -b {BRANCH} origin/{SOURCE_BRANCH}
 ```
 
