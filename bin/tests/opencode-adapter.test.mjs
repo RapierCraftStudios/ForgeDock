@@ -123,6 +123,7 @@ describe("OpenCode adapter", () => {
     assert.match(plugin, /NATIVE_FORGE_HOME/);
     assert.match(plugin, /GIT_BASH_FORGE_HOME/);
     assert.match(plugin, /output\.env\.FORGE_HOME = shellForgeHome/);
+    assert.match(plugin, /output\.env\.FORGE_RUNTIME = "opencode"/);
     assert.match(plugin, /subagent_depth === undefined/);
     assert.doesNotMatch(plugin, /current < 2/);
     assert.match(plugin, /\/.*fd-opencode-source-/);
