@@ -76,11 +76,29 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mineContext, assemblePack } from './contextpack.mjs';
+import { mineContext, assemblePack, splitMarkdownTableRow } from './contextpack.mjs';
 import { validateContextPack, MAX_SLICE_BYTES } from '../../packages/protocol/src/contextpack-schema.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = path.join(__dirname, '__fixtures__', 'contextpack');
+
+describe('splitMarkdownTableRow', () => {
+  it('uses backslash parity and preserves private-use Unicode without collisions', () => {
+    const pua = '\uE000';
+    assert.deepEqual(splitMarkdownTableRow(String.raw`| file | before\|after | why |`), [
+      '', ' file ', ' before|after ', ' why ',
+    ]);
+    assert.deepEqual(splitMarkdownTableRow(String.raw`| file | before\\| next |`), [
+      '', ' file ', String.raw` before\\`, ' next ',
+    ]);
+    assert.deepEqual(splitMarkdownTableRow(String.raw`| file | before\\\|after | why |`), [
+      '', ' file ', String.raw` before\\|after `, ' why ',
+    ]);
+    assert.deepEqual(splitMarkdownTableRow(`| pua-${pua} | keep-${pua} | why |`), [
+      '', ` pua-${pua} `, ` keep-${pua} `, ' why ',
+    ]);
+  });
+});
 
 /** Build a mocked `io` from a fixture's raw `gh` response data. Mirrors the
  * `ioFor({...})` convention in `contextpack.mine.test.mjs`, extended to (a)
