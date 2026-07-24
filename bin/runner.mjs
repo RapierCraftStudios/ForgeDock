@@ -47,7 +47,7 @@ import {
   rmSync,
   realpathSync,
 } from "fs";
-import { join, dirname, basename, relative, isAbsolute, extname } from "path";
+import { join, dirname, basename, relative, isAbsolute, extname, win32 as win32Path } from "path";
 import os from "os";
 import { execSync, spawnSync } from "child_process";
 import { createRequire } from "module";
@@ -310,7 +310,8 @@ export function resolveDirectCliExecutable(
     );
     const match = directMatch || variableMatch;
     if (!match) return null;
-    const target = join(dirname(cliPath), ...match[1].split(/[\\/]+/));
+    const pathApi = platform === "win32" ? win32Path : { join, dirname };
+    const target = pathApi.join(pathApi.dirname(cliPath), ...match[1].split(/[\\/]+/));
     return existsImpl(target) ? target : null;
   } catch {
     return null;
