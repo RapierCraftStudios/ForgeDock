@@ -17,6 +17,52 @@ function portablePath(path) {
   return path.replaceAll("\\", "/");
 }
 
+function stripJsonc(raw) {
+  let result = "";
+  let i = 0;
+  while (i < raw.length) {
+    const ch = raw[i];
+    if (ch === '"') {
+      result += ch;
+      i++;
+      while (i < raw.length) {
+        const stringChar = raw[i];
+        result += stringChar;
+        if (stringChar === "\\" && i + 1 < raw.length) {
+          i++;
+          result += raw[i];
+        } else if (stringChar === '"') {
+          break;
+        }
+        i++;
+      }
+      i++;
+      continue;
+    }
+    if (ch === "/" && raw[i + 1] === "/") {
+      while (i < raw.length && raw[i] !== "\n") i++;
+      continue;
+    }
+    if (ch === "/" && raw[i + 1] === "*") {
+      i += 2;
+      while (i + 1 < raw.length && !(raw[i] === "*" && raw[i + 1] === "/")) i++;
+      if (i + 1 < raw.length) i += 2;
+      continue;
+    }
+    if (ch === ",") {
+      let next = i + 1;
+      while (/[\s]/.test(raw[next] || "")) next++;
+      if (raw[next] === "}" || raw[next] === "]") {
+        i++;
+        continue;
+      }
+    }
+    result += ch;
+    i++;
+  }
+  return result;
+}
+
 export function shellPath(path, platform = process.platform) {
   const portable = portablePath(path);
   if (platform !== "win32") return portable;
@@ -198,8 +244,6 @@ async function migrateLegacyAdapter({ configDir, home }) {
     const content = await readFile(legacyInstructions, "utf8");
     if (content.includes(LEGACY_SENTINEL)) {
       legacyInstructionsOwned = true;
-      await unlink(legacyInstructions);
-      result.removedInstructionsFile = true;
     }
   } catch (error) {
     if (error.code !== "ENOENT") result.warnings.push(`Could not inspect ${legacyInstructions}: ${error.message}`);
@@ -210,13 +254,16 @@ async function migrateLegacyAdapter({ configDir, home }) {
     join(configDir, "opencode.json"),
   ]);
   const legacyCommands = new Set(["work-on", "review-pr", "quality-gate", "orchestrate"]);
+  const staged = [];
+  let parseFailed = false;
   for (const configPath of configPaths) {
     if (!existsSync(configPath)) continue;
     let config;
     try {
-      config = JSON.parse(await readFile(configPath, "utf8"));
+      config = JSON.parse(stripJsonc(await readFile(configPath, "utf8")));
     } catch (error) {
       result.warnings.push(`Could not migrate legacy entries in ${configPath}: ${error.message}`);
+      parseFailed = true;
       continue;
     }
 
@@ -249,12 +296,28 @@ async function migrateLegacyAdapter({ configDir, home }) {
       if (Object.keys(config.command).length === 0) delete config.command;
     }
     if (changed) {
-      try {
-        await atomicWrite(configPath, `${JSON.stringify(config, null, 2)}\n`);
-      } catch (error) {
-        result.warnings.push(`Could not write legacy migration for ${configPath}: ${error.message}`);
-      }
+      staged.push({
+        path: configPath,
+        original: await readFile(configPath, "utf8"),
+        content: `${JSON.stringify(config, null, 2)}\n`,
+      });
     }
+  }
+  if (parseFailed) return result;
+  const written = [];
+  try {
+    for (const item of staged) {
+      await atomicWrite(item.path, item.content);
+      written.push(item);
+    }
+  } catch (error) {
+    for (const item of written) await atomicWrite(item.path, item.original).catch(() => {});
+    result.warnings.push(`Could not write legacy migration: ${error.message}`);
+    return result;
+  }
+  if (legacyInstructionsOwned) {
+    await unlink(legacyInstructions);
+    result.removedInstructionsFile = true;
   }
   return result;
 }

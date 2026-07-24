@@ -182,6 +182,51 @@ describe("OpenCode adapter", () => {
     assert.equal(migrated.model, "test/model");
   });
 
+  it("migrates JSONC configs before removing the managed instructions file", async () => {
+    const { forgeHome, home } = fixture();
+    const config = join(home, ".config", "opencode");
+    const legacyInstructions = join(home, ".opencode-forge.md");
+    mkdirSync(config, { recursive: true });
+    writeFileSync(legacyInstructions, "<!-- ForgeDock managed -->\nlegacy\n");
+    writeFileSync(
+      join(config, "opencode.json"),
+      `{
+        // Retained user setting
+        "instructions": ["${legacyInstructions.replaceAll("\\", "\\\\")}"],
+        "command": {
+          "work-on": {
+            "description": "Run the ForgeDock pipeline",
+            "template": "Read ${forgeHome.replaceAll("\\", "/")}/commands/work-on.md",
+          },
+        },
+      }\n`,
+    );
+
+    const result = await installOpenCodeAdapter({ forgeHome, home, env: {} });
+    assert.equal(result.migration.removedInstructionsFile, true);
+    assert.equal(result.migration.removedConfigEntries, 2);
+    assert.ok(!existsSync(legacyInstructions));
+    const migrated = JSON.parse(readFileSync(join(config, "opencode.json"), "utf8"));
+    assert.equal(migrated.instructions, undefined);
+    assert.equal(migrated.command, undefined);
+  });
+
+  it("preserves legacy artifacts when JSONC migration cannot parse a config", async () => {
+    const { forgeHome, home } = fixture();
+    const config = join(home, ".config", "opencode");
+    const legacyInstructions = join(home, ".opencode-forge.md");
+    const configPath = join(config, "opencode.json");
+    mkdirSync(config, { recursive: true });
+    writeFileSync(legacyInstructions, "<!-- ForgeDock managed -->\nlegacy\n");
+    const original = "{\n  // unterminated config\n  \"instructions\": [\n";
+    writeFileSync(configPath, original);
+
+    const result = await installOpenCodeAdapter({ forgeHome, home, env: {} });
+    assert.equal(result.migration.removedInstructionsFile, false);
+    assert.ok(existsSync(legacyInstructions));
+    assert.equal(readFileSync(configPath, "utf8"), original);
+  });
+
   it("preserves a user-owned legacy-named instructions file and reference", async () => {
     const { forgeHome, home } = fixture();
     const config = join(home, ".config", "opencode");
