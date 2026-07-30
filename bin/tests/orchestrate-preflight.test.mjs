@@ -122,6 +122,89 @@ describe("OpenCode orchestration preflight", () => {
     assert.deepEqual(plan.dispatchNow, []);
   });
 
+  it("resolves an encoded GitHub milestone issues URL", () => {
+    const input = "https://github.com/RapierCraftStudios/ForgeDock/issues?q=is%3Aissue%20state%3Aopen%20milestone%3Aengine-v2-harness";
+    const issues = [
+      issue(1, { milestone: { title: "Engine v2 Harness" } }),
+      issue(2, { milestone: { title: "Other milestone" } }),
+      issue(3, { milestone: { title: "engine-v2-harness" } }),
+    ];
+
+    const plan = buildPreflightPlan({ input, repo: "RapierCraftStudios/ForgeDock", issues });
+
+    assert.equal(plan.supported, true);
+    assert.equal(plan.pattern, "milestone");
+    assert.deepEqual(plan.issues.map((item) => item.number), [3]);
+
+    const quoted = buildPreflightPlan({
+      input: "https://github.com/RapierCraftStudios/ForgeDock/issues?q=is%3Aissue%20state%3Aopen%20milestone%3A%22Engine%20v2%20Harness%22",
+      repo: "RapierCraftStudios/ForgeDock",
+      issues,
+    });
+    assert.equal(quoted.supported, true);
+    assert.deepEqual(quoted.issues.map((item) => item.number), [1]);
+
+    const punctuation = buildPreflightPlan({
+      input: "https://github.com/owner/repo/issues?q=is%3Aissue%20state%3Aopen%20milestone%3Arelease%2Fcandidate",
+      repo: "owner/repo",
+      issues: [
+        issue(4, { milestone: { title: "release/candidate" } }),
+        issue(5, { milestone: { title: "release candidate" } }),
+      ],
+    });
+    assert.deepEqual(punctuation.issues.map((item) => item.number), [4]);
+
+    const controlToken = buildPreflightPlan({
+      input: "https://github.com/owner/repo/issues?q=is%3Aissue%20state%3Aopen%20milestone%3A--auto --auto",
+      repo: "owner/repo",
+      issues: [
+        issue(6, { milestone: { title: "--auto" } }),
+        issue(7, { milestone: { title: "milestone-auto" } }),
+      ],
+    });
+    assert.equal(controlToken.confirmed, true);
+    assert.deepEqual(controlToken.issues.map((item) => item.number), [6]);
+    assert.deepEqual(controlToken.dispatchNow, [6]);
+  });
+
+  it("fails closed for unsupported or cross-repository GitHub issue URLs", () => {
+    const unsupported = buildPreflightPlan({
+      input: "https://github.com/owner/repo/issues?q=is%3Aissue%20state%3Aopen%20label%3Abug",
+      repo: "owner/repo",
+      issues: [issue(1)],
+    });
+    assert.equal(unsupported.supported, false);
+    assert.equal(unsupported.pattern, "github-issues-url");
+    assert.match(unsupported.reason, /qualifier "label"/);
+
+    const wrongRepo = buildPreflightPlan({
+      input: "https://github.com/other/repo/issues?q=is%3Aissue%20state%3Aopen%20milestone%3Arelease",
+      repo: "owner/repo",
+      issues: [issue(1)],
+    });
+    assert.equal(wrongRepo.supported, false);
+    assert.match(wrongRepo.reason, /targets other\/repo/);
+
+    const malformedInputs = [
+      "https:/github.com/owner/repo/issues?q=is%3Aissue%20state%3Aopen%20milestone%3Arelease",
+      "https://github.com/owner/repo/issues?q=is%3Aissue%20state%3Aopen%20milestone%3Arelease%ZZ",
+      "https://github.com/owner/repo/issues?q=is%3Aissue%20state%3Aopen%20milestone%3Arelease%C0",
+      "https://github.com/owner/repo/issues?q=is%3Aissue%20state%3Aopen%20%22milestone%3Arelease%22",
+      "https://github.com/owner/repo/issues?q=is%3Aissue%20state%3Aopen%20milestone%3A*",
+      "https:///github.com/owner/repo/issues?q=is%3Aissue%20state%3Aopen%20milestone%3Arelease",
+      "https://github.com\\owner\\repo\\issues?q=is%3Aissue%20state%3Aopen%20milestone%3Arelease",
+      "https://github.com/owner//repo/issues?q=is%3Aissue%20state%3Aopen%20milestone%3Arelease",
+      "https://github.com/owner%2Frepo/issues?q=is%3Aissue%20state%3Aopen%20milestone%3Arelease",
+      "//evil.io/owner/repo/issues?q=is%3Aissue%20state%3Aopen%20milestone%3Arelease",
+      "www.github.com\\owner\\repo\\issues?q=is%3Aissue%20state%3Aopen%20milestone%3Arelease",
+    ];
+    for (const input of malformedInputs) {
+      const malformed = buildPreflightPlan({ input, repo: "owner/repo", issues: [issue(1)] });
+      assert.equal(malformed.supported, false, input);
+      assert.equal(malformed.pattern, "github-issues-url", input);
+    }
+  });
+
   it("uses one issue-list snapshot and only views missing literal issues", () => {
     const calls = [];
     const result = runPreflight({

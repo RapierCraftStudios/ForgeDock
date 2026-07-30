@@ -125,25 +125,171 @@ function controlFlags(input) {
   };
 }
 
-function resolveQuery(input, issues, { includeInFlight }) {
+function githubSearchTokens(input) {
+  const tokens = [];
+  let token = "";
+  let quoted = false;
+  let quoteStart = -1;
+  let quoteEnd = -1;
+  let escaped = false;
+  const pushToken = () => {
+    if (token || quoteStart >= 0) tokens.push({ value: token, quoteStart, quoteEnd });
+    token = "";
+    quoteStart = -1;
+    quoteEnd = -1;
+  };
+  for (const char of String(input || "")) {
+    if (escaped) {
+      token += char;
+      escaped = false;
+    } else if (char === "\\" && quoted) {
+      escaped = true;
+    } else if (char === '"') {
+      if (quoted) {
+        quoted = false;
+        quoteEnd = token.length;
+      } else {
+        if (quoteStart >= 0) return null;
+        quoted = true;
+        quoteStart = token.length;
+      }
+    } else if (/\s/.test(char) && !quoted) {
+      pushToken();
+    } else {
+      token += char;
+    }
+  }
+  if (escaped) token += "\\";
+  if (quoted) return null;
+  pushToken();
+  return tokens;
+}
+
+function normalizeGitHubIssuesUrl(input, repo) {
+  const unsupported = (reason) => ({ supported: false, input: "", pattern: "github-issues-url", reason });
+  const absoluteUrl = /^[a-z][a-z\d+.-]*:\/\//i.test(input);
+  const malformedWebUrl = /^https?(?::|[\\/]{1,2})/i.test(input) ||
+    /^[\\/]{2}/.test(input) || /^www\./i.test(input) || /^github\.com(?::|[\\/]|$)/i.test(input);
+  if (!absoluteUrl && !malformedWebUrl) return { supported: true, input };
+  if (!absoluteUrl) return unsupported("issue query URL must be an absolute URL with // after its scheme");
+
+  let url;
+  try {
+    url = new URL(input);
+  } catch {
+    return unsupported("issue query URL is invalid");
+  }
+  if (!["http:", "https:"].includes(url.protocol) || !["github.com", "www.github.com"].includes(url.hostname.toLowerCase())) {
+    return unsupported("compact preflight only supports github.com issue query URLs");
+  }
+
+  const pathMatch = input.match(/^https?:\/\/(?:www\.)?github\.com\/([^/?#\\]+)\/([^/?#\\]+)\/issues\/?(?:\?[^#]*)?(?:#.*)?$/i);
+  if (!pathMatch) {
+    return unsupported("GitHub issue query URL must use a canonical owner/repository/issues path");
+  }
+  if (/%(?:2f|5c)/i.test(`${pathMatch[1]}${pathMatch[2]}`)) {
+    return unsupported("GitHub issue query path cannot contain encoded separators");
+  }
+  let owner;
+  let name;
+  try {
+    owner = decodeURIComponent(pathMatch[1]);
+    name = decodeURIComponent(pathMatch[2]);
+  } catch {
+    return unsupported("GitHub issue query path contains invalid percent encoding");
+  }
+  const urlRepo = `${owner}/${name}`;
+  if (repo && urlRepo.toLowerCase() !== repo.toLowerCase()) {
+    return unsupported(`GitHub issue query targets ${urlRepo}, not configured repository ${repo}`);
+  }
+  try {
+    for (const parameter of url.search.slice(1).split("&")) {
+      const separator = parameter.indexOf("=");
+      const name = separator < 0 ? parameter : parameter.slice(0, separator);
+      const value = separator < 0 ? "" : parameter.slice(separator + 1);
+      decodeURIComponent(name.replace(/\+/g, " "));
+      decodeURIComponent(value.replace(/\+/g, " "));
+    }
+  } catch {
+    return unsupported("GitHub issue search contains invalid percent encoding");
+  }
+
+  const searches = url.searchParams.getAll("q");
+  if (searches.length !== 1 || !searches[0].trim()) {
+    return unsupported("GitHub issues URL must contain one non-empty q search parameter");
+  }
+  const tokens = githubSearchTokens(searches[0]);
+  if (!tokens) return unsupported("GitHub issue search contains an unterminated quote");
+
+  let issueOnly = false;
+  let openOnly = false;
+  let milestone = "";
+  for (const tokenInfo of tokens) {
+    const { value: token, quoteStart, quoteEnd } = tokenInfo;
+    const separator = token.indexOf(":");
+    if (separator < 1 || separator === token.length - 1) {
+      return unsupported(`GitHub issue search term "${token}" needs the full query resolver`);
+    }
+    const qualifier = token.slice(0, separator).toLowerCase();
+    const value = token.slice(separator + 1);
+    const lowerValue = value.toLowerCase();
+    if (quoteStart < 0 && ((qualifier === "is" && lowerValue === "issue") ||
+        (qualifier === "type" && lowerValue === "issue"))) {
+      issueOnly = true;
+      continue;
+    }
+    if (quoteStart < 0 && ((qualifier === "is" && lowerValue === "open") ||
+        (qualifier === "state" && lowerValue === "open"))) {
+      openOnly = true;
+      continue;
+    }
+    if (quoteStart < 0 && qualifier === "repo" && lowerValue === urlRepo.toLowerCase()) continue;
+    if (qualifier === "milestone" && !milestone) {
+      if (quoteStart >= 0 && (quoteStart !== separator + 1 || quoteEnd !== token.length)) {
+        return unsupported("GitHub milestone qualifier uses unsupported quote placement");
+      }
+      if (!normalizeSlug(value) || /[*,{}]/.test(value)) {
+        return unsupported(`GitHub milestone value "${value}" needs the full query resolver`);
+      }
+      milestone = value;
+      continue;
+    }
+    return unsupported(`GitHub issue search qualifier "${qualifier}" needs the full query resolver`);
+  }
+  if (!milestone) {
+    return unsupported("compact GitHub issue queries require exactly one milestone qualifier");
+  }
+  if (!issueOnly || !openOnly) {
+    return unsupported("compact GitHub issue queries require explicit issue and open-state qualifiers");
+  }
+  return { supported: true, input: `milestone ${milestone}`, exactMilestone: milestone };
+}
+
+function resolveQuery(input, issues, { includeInFlight, repo }) {
   const trimmed = String(input || "").trim();
-  const classified = classifyInputPattern(trimmed);
-  const lower = trimmed.toLowerCase();
-  let pattern = classified.pattern;
+  const normalized = normalizeGitHubIssuesUrl(trimmed, repo);
+  const predicate = normalized.input;
+  const classified = normalized.exactMilestone === undefined
+    ? classifyInputPattern(predicate)
+    : { kind: "query", pattern: "milestone", args: [normalized.exactMilestone] };
+  const lower = predicate.toLowerCase();
+  let pattern = normalized.pattern || classified.pattern;
   let selected = [...issues];
   const deferred = [];
-  let supported = true;
-  let reason = "";
+  let supported = normalized.supported;
+  let reason = normalized.reason || "";
 
-  if (!trimmed) {
+  if (!supported) {
+    selected = [];
+  } else if (!predicate) {
     supported = false;
     reason = "empty input has no safe issue-set predicate";
-  } else if (/^no:milestone$|^no-milestone$/i.test(trimmed)) {
+  } else if (/^no:milestone$|^no-milestone$/i.test(predicate)) {
     pattern = "no-milestone";
     selected = selected.filter((issue) => !issue.milestone);
   } else if (classified.kind === "literal") {
     const requested = new Set();
-    for (const token of trimmed.split(/\s+/)) {
+    for (const token of predicate.split(/\s+/)) {
       const match = token.match(/^(?:[a-zA-Z0-9_-]+:)?#?(\d+)$/);
       if (!match || token.includes(":")) {
         supported = false;
@@ -158,8 +304,13 @@ function resolveQuery(input, issues, { includeInFlight }) {
       if (!found.has(number)) selected.push({ number, title: `Issue #${number}`, body: "", labels: [], milestone: null });
     }
   } else if (classified.pattern === "milestone") {
-    const requested = normalizeSlug(classified.args.join("-"));
-    selected = selected.filter((issue) => normalizeSlug(issue.milestone?.title) === requested);
+    if (normalized.exactMilestone) {
+      const requested = normalized.exactMilestone.toLowerCase();
+      selected = selected.filter((issue) => String(issue.milestone?.title || "").toLowerCase() === requested);
+    } else {
+      const requested = normalizeSlug(classified.args.join("-"));
+      selected = selected.filter((issue) => normalizeSlug(issue.milestone?.title) === requested);
+    }
   } else if (classified.pattern === "next-n") {
     const count = Number(classified.args[0]);
     selected = selected
@@ -174,7 +325,7 @@ function resolveQuery(input, issues, { includeInFlight }) {
     const requested = lower.split(":").at(-1);
     selected = selected.filter((issue) => labelsOf(issue).some((label) => label.toLowerCase() === `priority:${requested}` || label.toLowerCase() === requested));
   } else if (classified.pattern === "bare-slug") {
-    const requested = normalizeSlug(trimmed);
+    const requested = normalizeSlug(predicate);
     selected = selected.filter((issue) =>
       normalizeSlug(issue.milestone?.title) === requested || labelsOf(issue).some((label) => normalizeSlug(label) === requested),
     );
@@ -203,7 +354,7 @@ function addEdge(predecessors, predecessor, successor, kind, edges) {
 
 export function buildPreflightPlan({ input, repo = "", issues = [], maxConcurrent = 12 } = {}) {
   const flags = controlFlags(input);
-  const query = resolveQuery(flags.input, issues, flags);
+  const query = resolveQuery(flags.input, issues, { ...flags, repo });
   if (!query.supported) {
     return {
       version: VERSION,
