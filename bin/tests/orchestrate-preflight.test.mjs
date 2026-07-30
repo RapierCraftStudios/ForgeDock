@@ -83,13 +83,17 @@ describe("OpenCode orchestration preflight", () => {
     assert.equal(unsupported.supported, false);
     assert.equal(unsupported.mode, "full-spec-required");
 
+    const backlog = buildPreflightPlan({ input: "mcp:next 3 --include-backlog", issues });
+    assert.equal(backlog.supported, false);
+    assert.equal(backlog.requiresDeepPlan, true);
+
     const deep = buildPreflightPlan({ input: "1 --deep-plan --auto", issues });
     assert.equal(deep.supported, true);
     assert.equal(deep.requiresDeepPlan, true);
     assert.deepEqual(deep.dispatchNow, []);
   });
 
-  it("does not dispatch implementation issues while an investigation requires the full phase path", () => {
+  it("requires a Wave-0 replan before admitting investigation-class issues", () => {
     const issues = [
       issue(1, { title: "Investigate the deployment failure" }),
       issue(2),
@@ -100,7 +104,14 @@ describe("OpenCode orchestration preflight", () => {
     assert.equal(plan.requiresDeepPlan, true);
     assert.deepEqual(plan.ready, [1, 2]);
     assert.deepEqual(plan.dispatchNow, []);
-    assert.deepEqual(plan.queued, [1, 2]);
+    assert.deepEqual(plan.investigations, [1]);
+  });
+
+  it("fails closed for include-backlog compact scopes", () => {
+    const plan = buildPreflightPlan({ input: "1 --include-backlog --auto", issues: [issue(1)] });
+    assert.equal(plan.supported, true);
+    assert.equal(plan.requiresDeepPlan, true);
+    assert.deepEqual(plan.dispatchNow, []);
   });
 
   it("keeps the interactive confirmation gate explicit", () => {

@@ -1,11 +1,21 @@
 # OpenCode Support
 
-ForgeDock's OpenCode integration uses native OpenCode commands, subagents, and
-plugins while keeping `commands/**/*.md` as the only workflow source of truth.
-The older global-instructions and `opencode.json` patching adapter has been
-retired because it loaded ForgeDock prose into unrelated sessions, registered
-only four commands, used the wrong argument placeholder, and assumed OpenCode
-had neither skills nor subagents.
+ForgeDock has a native OpenCode control plane for the two load-bearing pipeline
+entrypoints:
+
+```text
+/forge/work-on <issue>
+/forge/orchestrate <query>
+```
+
+The controller is deterministic code. It does not load the Claude-oriented
+`commands/work-on.md`, `commands/orchestrate.md`, or orchestration phase prose.
+Each issue phase runs in a fresh root OpenCode session using a compact native
+phase card under `runtimes/opencode/work-on/`.
+
+Other ForgeDock commands continue to use thin OpenCode command/skill adapters
+around shared semantic workflow specs. Claude keeps its existing engine, and
+Claude Code and Codex installation paths are unchanged.
 
 ## Install
 
@@ -13,283 +23,211 @@ had neither skills nor subagents.
 npx forgedock opencode install
 ```
 
-For the optional command tier:
+Install the optional command tier with:
 
 ```bash
 npx forgedock opencode install --extras
 ```
 
-Restart OpenCode after install or update. OpenCode loads commands, skills, and
-plugins at startup.
+To test an unmerged linked worktree without resolving back to its main checkout,
+use `--forge-home <candidate-worktree>`. This flag affects only the adapter
+source for that install.
 
-The native adapter does not add or modify user-owned OpenCode settings. It
-writes only ForgeDock-owned files under OpenCode's config directory and records
-them in `forgedock/manifest.json` for safe updates and removal.
+Restart OpenCode after install or update. The installer writes only managed
+files under OpenCode's config directory and records them in
+`forgedock/manifest.json`.
+
+Installation does not add or modify user-owned OpenCode settings. During a
+proven legacy migration, install and uninstall may rewrite `opencode.json` only
+to remove exact ForgeDock-owned entries; migration does not
+rewrite `opencode.jsonc`, and customized commands are preserved.
 
 ## Usage
 
-Commands are namespaced to avoid collisions:
-
 ```text
 /forge/work-on 967
-/forge/review-pr 123
-/forge/quality-gate
+/forge/work-on 967 --lane staging --model provider/model
+/forge/work-on 967 --dry-run
+
+/forge/orchestrate 967 968 --dry-run
 /forge/orchestrate milestone checkout-v2
+/forge/orchestrate milestone checkout-v2 --confirm
+/forge/orchestrate --resume <batch-id> --confirm
 ```
 
-Headless OpenCode invocation uses the same command names:
+`work-on --dry-run` resolves the repository, issue, lane, branch, worktree, and
+phase-card byte budget without creating sessions or mutating GitHub/git.
 
-```bash
-opencode run --command forge/work-on "967"
-```
+`orchestrate` always compiles and persists a plan before dispatch. Without
+`--confirm` or `--auto`, it returns `confirmation-required` and performs no
+pipeline mutation. Authorization can be supplied on the same query or by
+resuming the reported batch ID.
+
+Useful native flags:
+
+| Flag | Applies to | Purpose |
+|---|---|---|
+| `--lane <branch>` | both | Explicit non-production PR base |
+| `--repo <owner/repo>` | both | Must match the current checkout |
+| `--model <provider/model>` | both | Explicit OpenCode provider/model |
+| `--variant <name>` | both | Provider model variant |
+| `--max-attempts <1-10>` | both | Per-phase attempt budget |
+| `--dry-run` | both | Resolve/plan only; no mutation |
+| `--keep-worktree` | work-on | Retain a merged issue worktree |
+| `--max-concurrent <1-64>` | orchestrate | Batch worker cap |
+| `--keep-worktrees` | orchestrate | Retain merged worktrees |
+| `--resume <batch-id>` | orchestrate | Resume a persisted batch |
 
 ## Architecture
 
-The installed command files are thin entry adapters. A command loads exactly
-one authoritative spec from ForgeDock's stable installation and translates
-runtime mechanics without copying workflow behavior.
-
 ```text
 OpenCode /forge/work-on
-  -> small generated command adapter
-  -> commands/work-on.md
-  -> only the nested phase spec reached by the dispatcher
-  -> GitHub labels and FORGE annotations remain durable state
+  -> compact generated command
+  -> ForgeDock plugin custom tool
+  -> bin/opencode/control.mjs
+  -> durable bin/engine.mjs phase state machine
+  -> fresh OpenCode root session per phase
+  -> runtimes/opencode/work-on/<phase>.md
+  -> GitHub/git outcome reconciliation
+
+OpenCode /forge/orchestrate
+  -> compact generated command
+  -> ForgeDock plugin custom tool
+  -> deterministic snapshot/preflight plan
+  -> persisted batch event log
+  -> serialized Promise scheduler
+  -> concurrent runNativeWorkOn() workers
 ```
 
-The generated plugin has no prompt text. It:
+The host plugin client executes phase sessions directly. It does not create a
+model-owned parent scheduler, use `task(background=true)`, inject synthetic
+child-completion prompts, invoke `opencode run`, or fall back to Claude CLI or
+the Anthropic API.
 
-- injects `FORGE_HOME` into OpenCode shell environments;
-- defaults `subagent_depth` to 2 when the user has not configured it, while
-  preserving explicit lower limits;
-- grants the built-in `general` subagent permission to invoke native `task`
-  unless the user explicitly configured a task permission;
-- opts into OpenCode background subagents for the orchestrator's explicit
-  ready-issue dispatches so each completed issue can wake the parent independently; set
-  `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=false` to opt out;
-- selects Git Bash on Windows only when the user has not explicitly configured
-  an OpenCode shell, because the shared workflows and helper scripts use Bash.
+Every phase attempt:
 
-The adapter also registers every eligible ForgeDock workflow as a native
-OpenCode skill. Top-level and nested source paths are normalized to valid
-hyphenated skill names while the wrapper continues to point at the authoritative
-source file:
+1. Creates a fresh root OpenCode session with no `parentID`.
+2. Disables `task`, `skill`, and recursive ForgeDock controller tools.
+3. Runs exactly one native phase card.
+4. Records session identity and normalized usage in the local run log.
+5. Re-reads GitHub/git through the existing phase detector.
+6. Commits the phase only when durable external state proves completion.
+
+Assistant text and provider finish reasons are advisory. If a provider response
+fails after a GitHub marker landed, reconciliation accepts the durable marker.
+If every attempt fails at the runtime layer without a marker, the issue ends at
+`workflow:engine-error`, not `needs-human`.
+
+## Isolation
+
+The generated plugin exposes two small tools, `forge_work_on` and
+`forge_orchestrate`. It does not globally change:
+
+- `subagent_depth`;
+- built-in agent task permissions;
+- the user's shell selection;
+- the background-subagent process flag; or
+- `FORGE_RUNTIME` for unrelated sessions.
+
+Native phase session IDs are tracked in memory. Shell environment shaping and
+recursive-controller guards apply only to those sessions. Main-workflow skill
+wrappers (`work-on/**` and `orchestrate/**`) are no longer installed, removing
+their metadata and preventing the old prompt controller from being selected.
+The scoped worker environment includes `FORGE_RUNTIME=opencode`; the native
+controller does not depend on legacy helper copies under `~/.opencode/scripts`.
+
+Manifest v2 upgrades trust a valid managed v1 manifest long enough to remove
+its obsolete ForgeDock-owned wrappers. User-owned files, including a custom
+skill at the old `skills/work-on/SKILL.md` path, are preserved.
+
+## Worktrees
+
+Build work is isolated under:
 
 ```text
-commands/work-on.md             -> skills/work-on/SKILL.md
-commands/work-on/investigate.md -> skills/work-on-investigate/SKILL.md
-commands/review-pr.md           -> skills/review-pr/SKILL.md
+<repo>/.opencode/worktrees/<branch-with-slashes-normalized>
 ```
 
-The wrapper is intentionally thin. It carries the workflow's `name` and
-`description` frontmatter, preserves the current-context arguments, and loads
-only the referenced `commands/**/*.md` spec.
+The controller reuses an existing worktree already attached to the issue branch
+and refuses to overwrite a conflicting path. It removes only an OpenCode-owned
+worktree whose branch is verified merged into the selected lane. Failed,
+cancelled, gated, and `--keep-worktree` runs retain work for inspection/resume.
 
-OpenCode's provider configuration remains entirely user-owned. ForgeDock does
-not require Anthropic when invoked through OpenCode; any provider and model
-supported by the user's OpenCode configuration can execute the commands.
+## Orchestration
 
-## Token Efficiency
+The scheduler currently admits deterministic, single-repository queries handled
+by `bin/orchestrate-preflight.mjs`, including literal issue sets, milestones,
+`fast-lane`, `next N`, priorities, and no-milestone selection.
 
-The adapter follows these rules:
+It enforces:
 
-- No global ForgeDock `instructions` entry.
-- Top-level user entry commands are registered under `/forge/*`.
-- Every eligible workflow is registered as a native skill so nested
-  `Skill(...)` dispatch resolves through OpenCode's `skill` tool instead of
-  filesystem guessing.
-- Nested phase specs are loaded only when their dispatcher reaches them.
-- Task/Agent work uses OpenCode subagents only for the parallelism, isolation,
-  or context-pressure cases required by the shared workflow.
-- Orchestration dispatches independent issues with `task(background=true)` and
-  processes each injected task-result event immediately; it does not wait for a
-  wave or the slowest sibling.
-- The `/orchestrate` entrypoint reads only runtime config, then runs
-  `bin/orchestrate-preflight.mjs` before loading the phase specs. The helper batches the initial GitHub
-  snapshot and emits only the compact ready queue needed for the first native task.
-  Interactive runs keep the confirmation gate; `--auto` or `--confirm` is the
-  explicit headless authorization.
-- The full Phase 3/4 prose is reserved for investigations, unsupported or multi-repo
-  queries, explicit deep planning, and recovery after a task-result event. It remains
-  authoritative for cascade handling, leases, cleanup, and reporting.
-- GitHub state and the durable engine remain the recovery source instead of
-  replaying prior prompt context.
+- explicit confirmation before first dispatch;
+- one concurrency semaphore for the batch;
+- explicit, same-file, and database dependency edges;
+- external-dependency verification;
+- immediate successor dispatch after each completed predecessor;
+- no dispatch after a failed/gated predecessor;
+- append-only batch events with truncated-tail repair;
+- cancellation propagation to active phase sessions; and
+- resume from persisted per-issue terminal results.
 
-The generated adapter preamble is intentionally small. It maps Claude Code's
-in-conversation `Skill(...)` loading to the normalized native skill name and
-authoritative shared spec. It maps isolated `Task(...)` and permitted
-`Agent(...)` calls to OpenCode's native `task` tool. Before the shared review
-specs evaluate Claude's literal `Task`/`Agent` names, an OpenCode runtime marker
-selects `DISPATCH_TOOL=task`; the absence of those Claude names must not produce
-a false `FORGE:REVIEW_BLOCKED` result.
+Unsupported multi-repository and explicit deep-semantic planning queries fail
+closed with an actionable error. They do not fall back to the large shared
+orchestration prompt.
 
-Every isolated review dispatch uses a foreground native task. Every
-native task call must include the schema-required `subagent_type` at the top
-level alongside its `description` and `prompt`:
+Batch artifacts live under:
 
-```js
-{ description: "...", prompt: "...", subagent_type: "general", background: false }
+```text
+~/.forge/batches/<owner_repo>/<batch-id>/plan.json
+~/.forge/batches/<owner_repo>/<batch-id>/events.jsonl
 ```
 
-Implementation and review work uses `general`; read-only discovery uses
-`explore`. Claude `general-purpose` maps to `general` and
-`codebase-explorer` maps to `explore`. When a source task omits its type, the
-generated adapter safely defaults it to `general`; unsupported types stop with
-`FORGE_OPENCODE_CAPABILITY_ERROR` instead of reaching schema validation.
-If the native `task` capability itself is unavailable, the workflow posts
-`FORGE:REVIEW_BLOCKED` and stops rather than falling back to inline review or
-another pipeline controller.
-The generated plugin defaults omitted `background` to `false`. Only the
-orchestrator's ready-issue dispatcher sets `background: true`; setting
-`OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=false` forces foreground execution.
+Per-issue logs are repository-scoped under:
 
-`commands/work-on.md` is still a large entry dispatcher and is loaded in full,
-matching the Claude Code path. The adapter prevents additional eager loading,
-but reducing that entry cost requires decomposing the shared authoritative spec
-rather than maintaining an OpenCode-only copy.
+```text
+~/.forge/runs/<owner_repo>/<issue>.jsonl
+```
+
+## Cancellation And Resume
+
+A normal OpenCode tool cancellation aborts active phase sessions, appends
+`RUN_INTERRUPTED`, clears the issue lease, and leaves the engine state
+non-terminal. Re-running `work-on` resumes from the last GitHub-committed phase.
+
+After a hard process or machine crash, GitHub state remains authoritative. A
+new invocation resumes after the prior best-effort lease expires; it does not
+continue an opaque model conversation.
 
 ## Lifecycle
 
 ```bash
 npx forgedock opencode status
-npx forgedock opencode install          # update/repair
+npx forgedock opencode install
 npx forgedock opencode install --extras
 npx forgedock opencode uninstall
 ```
 
-`npx forgedock update` also refreshes an existing managed OpenCode adapter,
-including its plugin and generated skills. It preserves the installed core vs.
-`--extras` tier, migrates the sentinel-marked legacy adapter, and does not
-install OpenCode files when no ForgeDock adapter is already registered.
+`npx forgedock update` refreshes an already-installed adapter while preserving
+its core/extras tier. Install and uninstall do not rewrite `opencode.jsonc` and
+may remove legacy `opencode.json` entries only when their exact managed
+ownership contract is proven.
 
-Updates are deterministic and prune stale ForgeDock-owned command files.
-Uninstall removes only files listed in the ownership manifest and still marked
-with a ForgeDock sentinel. User-owned commands, plugins, and files placed in
-the `forgedock/` namespace are never removed; that namespace is pruned only
-when it is empty.
-For backward compatibility, install and uninstall may rewrite `opencode.json`
-only to remove legacy entries whose two-key `description` and `template` still
-exactly match one of the definitions emitted by the retired adapter and point to
-the active ForgeDock home (or the home recorded in the ownership manifest during
-uninstall), and the sentinel-marked legacy instructions file is present. It also
-removes references to that managed `~/.opencode-forge.md` instructions file. The
-migration does not rewrite `opencode.jsonc`. User-owned settings and customized commands are preserved;
-definitions with extra keys, edited fields, different
-paths, a missing ownership marker, or ambiguous ownership are left in place. If
-a legacy config cannot be parsed or written, the migration leaves the legacy
-artifacts in place.
-
-## Locations
-
-Default global location:
+Default managed locations:
 
 ```text
 ~/.config/opencode/
   commands/forge/*.md
-  skills/<workflow-name>/SKILL.md
+  skills/<non-native-workflow>/SKILL.md
   plugins/forgedock.js
   forgedock/manifest.json
 ```
 
-`XDG_CONFIG_HOME` and `OPENCODE_CONFIG_DIR` are honored when set. An npm/npx
-installation first persists the required ForgeDock payload under `~/.forge` so
-generated commands never point into an evictable package cache. A stable Git
-clone is referenced directly.
+`XDG_CONFIG_HOME` and `OPENCODE_CONFIG_DIR` are honored. npm/npx installs copy
+the required `bin/`, `commands/`, `runtimes/`, `scripts/`, and `templates/`
+payload into stable `~/.forge` storage before generating the adapter.
 
-## Current Boundary
+## Verification
 
-This integration provides native interactive command and subagent execution.
-The separate `forgedock run` and `forgedock run-issue` backend still supports
-only Claude CLI and the Anthropic API. An OpenCode engine backend must be added
-and validated before ForgeDock can claim provider-neutral headless parity.
-
-The ForgeDock plugin provides the OpenCode-specific runtime boundary for shell
-and task execution. Its `tool.execute.before` hook rejects Claude-backed and
-recursive ForgeDock controller commands, and normalizes native task arguments
-before execution; the shared workflow rules and deterministic scripts remain
-the source of truth for all other behavior.
-
-OpenCode 1.18.4 keeps background subagents experimental. ForgeDock opts into
-that feature by default because the streaming DAG depends on the parent session
-receiving one completion event per child. A native background task returns a
-`<task id="..." state="running">` marker immediately and later injects a
-`state="completed"` or `state="error"` result into the parent session. The
-orchestrator maps that id to the issue, re-reads GitHub state, and dispatches
-newly unlocked successors in the same response.
-
-If `OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=false` is explicitly set,
-ForgeDock uses independent foreground tasks where OpenCode can execute them
-concurrently and labels the run as degraded. Foreground tasks cannot provide
-the same per-completion wake behavior, so this opt-out intentionally restores a
-wave-like fallback rather than silently claiming Claude-equivalent throughput.
-
-Commands that inspect Claude-specific transcripts or Claude installation state
-remain runtime-specific and should not be represented as portable until they
-receive dedicated implementations.
-
-The preflight is intentionally bounded. It handles explicit issue sets and the
-common single-repository `fast-lane`, `milestone`, `next`, `priority`, and
-`no:milestone` queries, plus explicit dependencies and scoped issue-body file
-overlap. Unsupported or complex inputs fall back to the shared phase specs rather
-than silently weakening their safety rules.
-
-## Orchestration Runtime
-
-OpenCode orchestration uses the native OpenCode `task` tool for isolated issue
-work and follows the shared `commands/work-on.md` state machine. Each ready
-issue is launched as `task(subagent_type="general", background=true)` and its
-task-result event is treated as the completion notification for that issue. It
-must not
-route through `forgedock run-issue` when that would select the Claude CLI or
-Anthropic API backend. If the host does not expose an OpenCode runtime marker,
-set the runtime explicitly before launching a headless command:
-
-```bash
-FORGE_RUNTIME=opencode opencode run --command forge/orchestrate "fast-lane"
-```
-
-Each task re-reads GitHub labels and `FORGE:*` comments after every phase and
-continues until `workflow:merged`, `workflow:invalid`, `needs-human`, or
-`workflow:awaiting-merge`. The parent orchestrator processes every child
-completion independently, so a completed predecessor can unlock and dispatch
-its successors while unrelated issues continue running. If native task
-dispatch is unavailable, post a
-`FORGE:OPENCODE_BLOCKED` diagnostic naming the missing capability and add
-`needs-human`; do not leave an issue stranded at `workflow:engine-error`.
-
-If a generated command or skill cannot load its authoritative workflow, it must
-stop with an actionable `FORGE_OPENCODE_CAPABILITY_ERROR`. It must not recover
-by invoking `forgedock run-issue`, `npx forgedock run-issue`, or a recursive
-`opencode run`; those paths select a competing controller or Claude-backed
-backend.
-
-The same boundary is enforced below the plugin for direct CLI callers. With
-`FORGE_RUNTIME=opencode`, `forgedock run`, `forgedock run-issue`, and Claude
-backend preflight fail before selecting a provider. The stable error is
-`FORGE_OPENCODE_CAPABILITY_ERROR`; continue by using the registered native
-Skill and Task workflow instead.
-
-This runtime branch is additive. Claude keeps its existing engine and
-background-agent paths, and Codex keeps its installed namespaced skills and
-repo-local adapters.
-
-## Runtime Paths
-
-The shared orchestration spec resolves `classify-lane.sh` by runtime:
-
-| Runtime | Helper precedence | Worktree root |
-|---------|-------------------|---------------|
-| Claude | `${FORGE_HOME}/scripts`, then `~/.claude/scripts`, then the repository `scripts/` | `.claude/worktrees/` |
-| OpenCode | `${FORGE_HOME}/scripts`, then the repository `scripts/`, then `~/.opencode/scripts` | `.opencode/worktrees/` |
-| Codex | `${FORGE_HOME}/scripts`, then the repository `scripts/` | `.codex/worktrees/` |
-
-Set `FORGE_RUNTIME=opencode` for headless OpenCode sessions when no native
-OpenCode marker is available. The resolver is used by initial dispatch and all
-review-finding classification loops, so an OpenCode installation never needs
-`~/.claude` while the Claude precedence and fallback remain unchanged.
-
-## Source References
-
-- Shared workflows: [`commands/`](../commands/)
-- Installer implementation: [`bin/opencode-adapter.mjs`](../bin/opencode-adapter.mjs)
-- FORGE protocol: [`docs/spec/forge-protocol-v1.md`](spec/forge-protocol-v1.md)
+Use [`OPENCODE-NATIVE-ACCEPTANCE.md`](OPENCODE-NATIVE-ACCEPTANCE.md) for the
+pre-staging automated, disposable-repository, cancellation/resume, token, and
+Claude non-regression gates.

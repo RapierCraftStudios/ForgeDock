@@ -5,12 +5,48 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, cpSync, unlinkSync, rmSync, chmodSync, symlinkSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, cpSync, unlinkSync, rmSync, chmodSync, symlinkSync, readdirSync } from "node:fs";
+import { delimiter, join, dirname } from "node:path";
 import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "forgedock.mjs");
+const FORGE_HOME = dirname(dirname(CLI));
+
+function prependPath(dir) {
+  return `${dir}${delimiter}${process.env.PATH ?? ""}`;
+}
+
+function commandDir(name) {
+  const suffixes = process.platform === "win32" ? [".exe", ".cmd", ".bat", ""] : [""];
+  return (process.env.PATH ?? "").split(delimiter).find(
+    (dir) => dir && suffixes.some((suffix) => existsSync(join(dir, `${name}${suffix}`))),
+  );
+}
+
+function isolatedToolPath(stubBin) {
+  return [...new Set([stubBin, dirname(process.execPath), commandDir("git")].filter(Boolean))].join(delimiter);
+}
+
+function writeToolStub(dir, name, posixBody, windowsBody) {
+  const windows = process.platform === "win32";
+  const path = join(dir, windows ? `${name}.cmd` : name);
+  writeFileSync(
+    path,
+    windows ? `@echo off\r\n${windowsBody}\r\n` : `#!/bin/sh\n${posixBody}\n`,
+    "utf-8",
+  );
+  if (!windows) chmodSync(path, 0o755);
+}
+
+function stubDoctorTools(prefix) {
+  const stubBin = mkdtempSync(join(os.tmpdir(), prefix));
+  const ghConfig = join(stubBin, "gh-config");
+  mkdirSync(ghConfig);
+  writeToolStub(stubBin, "gh", "echo 'gh version 2.60.0'", "echo gh version 2.60.0");
+  writeToolStub(stubBin, "yq", "echo 'yq version v4.44.0'", "echo yq version v4.44.0");
+  return { PATH: isolatedToolPath(stubBin), GH_CONFIG_DIR: ghConfig };
+}
 
 function runCli(args, { cli = CLI, cwd, home, extraEnv } = {}) {
   return spawnSync(process.execPath, [cli, ...args], {
@@ -19,6 +55,27 @@ function runCli(args, { cli = CLI, cwd, home, extraEnv } = {}) {
     encoding: "utf-8",
     timeout: 30000,
   });
+}
+
+function copyOpenCodePayload(destination) {
+  cpSync(join(FORGE_HOME, "bin"), join(destination, "bin"), {
+    recursive: true,
+    filter: (src) => !src.includes("tests"),
+  });
+  for (const name of ["commands", "runtimes", "scripts", "templates"]) {
+    cpSync(join(FORGE_HOME, name), join(destination, name), { recursive: true });
+  }
+  mkdirSync(join(destination, "packages", "protocol"), { recursive: true });
+  cpSync(
+    join(FORGE_HOME, "packages", "protocol", "package.json"),
+    join(destination, "packages", "protocol", "package.json"),
+  );
+  cpSync(
+    join(FORGE_HOME, "packages", "protocol", "src"),
+    join(destination, "packages", "protocol", "src"),
+    { recursive: true },
+  );
+  cpSync(join(FORGE_HOME, "package.json"), join(destination, "package.json"));
 }
 
 describe("router", () => {
@@ -58,16 +115,22 @@ describe("router", () => {
   });
 
   it("routes the OpenCode install, status, and uninstall lifecycle", () => {
+    const source = mkdtempSync(join(os.tmpdir(), "fd-opencode-cli-source-"));
     const home = mkdtempSync(join(os.tmpdir(), "fd-opencode-cli-home-"));
     const configDir = mkdtempSync(join(os.tmpdir(), "fd-opencode-cli-config-"));
     const extraEnv = { OPENCODE_CONFIG_DIR: configDir };
+    copyOpenCodePayload(source);
 
-    const install = runCli(["opencode", "install"], { home, extraEnv });
+    const install = runCli(["opencode", "--extras", `--forge-home=${source}`], { home, extraEnv });
     assert.equal(install.status, 0, install.stderr || install.stdout);
     assert.match(install.stdout, /Installed \d+ OpenCode commands and \d+ skills/);
     assert.ok(existsSync(join(configDir, "commands", "forge", "work-on.md")));
-    assert.ok(existsSync(join(configDir, "skills", "work-on", "SKILL.md")));
+    assert.ok(!existsSync(join(configDir, "skills", "work-on", "SKILL.md")));
     assert.ok(!existsSync(join(configDir, "opencode.json")));
+    assert.ok(existsSync(join(home, ".forge", "packages", "protocol", "package.json")));
+    const manifest = JSON.parse(readFileSync(join(configDir, "forgedock", "manifest.json"), "utf-8"));
+    assert.equal(manifest.forgeHome, join(home, ".forge"));
+    assert.equal(manifest.includeExtras, true);
 
     const status = runCli(["opencode", "status"], { home, extraEnv });
     assert.equal(status.status, 0, status.stderr || status.stdout);
@@ -78,8 +141,247 @@ describe("router", () => {
     assert.equal(uninstall.status, 0, uninstall.stderr || uninstall.stdout);
     assert.ok(!existsSync(join(configDir, "commands", "forge", "work-on.md")));
 
+    rmSync(source, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
     rmSync(configDir, { recursive: true, force: true });
+  });
+
+  it("rejects incomplete --forge-home payloads before pruning the existing persisted home", () => {
+    const source = mkdtempSync(join(os.tmpdir(), "fd-opencode-invalid-source-"));
+    const home = mkdtempSync(join(os.tmpdir(), "fd-opencode-invalid-home-"));
+    const configDir = mkdtempSync(join(os.tmpdir(), "fd-opencode-invalid-config-"));
+    const sentinel = join(home, ".forge", "keep.txt");
+    copyOpenCodePayload(source);
+    mkdirSync(join(home, ".forge"), { recursive: true });
+    writeFileSync(sentinel, "keep\n", "utf-8");
+
+    const cases = [
+      {
+        name: "package identity",
+        path: join(source, "package.json"),
+        invalid: JSON.stringify({ name: "not-forgedock", version: "1.0.0" }),
+      },
+      {
+        name: "missing package version",
+        path: join(source, "package.json"),
+        invalid: JSON.stringify({ name: "forgedock" }),
+      },
+      {
+        name: "invalid package version",
+        path: join(source, "package.json"),
+        invalid: JSON.stringify({ name: "forgedock", version: "01.2.3" }),
+      },
+      { name: "commands", path: join(source, "commands", "work-on.md") },
+      { name: "native runtime", path: join(source, "runtimes", "opencode", "work-on", "common.md") },
+      { name: "protocol package", path: join(source, "packages", "protocol", "package.json") },
+    ];
+
+    for (const testCase of cases) {
+      const original = readFileSync(testCase.path, "utf-8");
+      if (testCase.invalid === undefined) unlinkSync(testCase.path);
+      else writeFileSync(testCase.path, testCase.invalid, "utf-8");
+
+      const result = runCli(["opencode", "install", "--forge-home", source], {
+        home,
+        extraEnv: { OPENCODE_CONFIG_DIR: configDir },
+      });
+      assert.equal(result.status, 1, `${testCase.name}: ${result.stdout}${result.stderr}`);
+      assert.match(result.stdout + result.stderr, /Invalid ForgeDock payload/);
+      assert.equal(readFileSync(sentinel, "utf-8"), "keep\n", `${testCase.name} must not prune ~/.forge`);
+      assert.ok(!existsSync(join(configDir, "forgedock", "manifest.json")));
+
+      writeFileSync(testCase.path, original, "utf-8");
+    }
+
+    rmSync(source, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+    rmSync(configDir, { recursive: true, force: true });
+  });
+
+  it("rejects unknown, duplicate, and malformed OpenCode install arguments", () => {
+    const source = mkdtempSync(join(os.tmpdir(), "fd-opencode-args-source-"));
+    const home = mkdtempSync(join(os.tmpdir(), "fd-opencode-args-home-"));
+    const configDir = mkdtempSync(join(os.tmpdir(), "fd-opencode-args-config-"));
+    const sentinel = join(home, ".forge", "keep.txt");
+    copyOpenCodePayload(source);
+    mkdirSync(join(home, ".forge"), { recursive: true });
+    writeFileSync(sentinel, "keep\n", "utf-8");
+
+    const invalidArgs = [
+      ["garbage"],
+      ["--unknown"],
+      ["--extras", "--extras"],
+      ["--forge-home"],
+      ["--forge-home="],
+      ["--forge-home", source, `--forge-home=${source}`],
+    ];
+    for (const args of invalidArgs) {
+      const result = runCli(["opencode", "install", ...args], {
+        home,
+        extraEnv: { OPENCODE_CONFIG_DIR: configDir },
+      });
+      assert.equal(result.status, 1, `${args.join(" ")}: ${result.stdout}${result.stderr}`);
+      assert.match(result.stdout + result.stderr, /OpenCode install argument|OpenCode install option|--forge-home requires/);
+      assert.equal(readFileSync(sentinel, "utf-8"), "keep\n");
+      assert.ok(!existsSync(join(configDir, "forgedock", "manifest.json")));
+    }
+    const impliedUnknown = runCli(["opencode", "--unknown"], {
+      home,
+      extraEnv: { OPENCODE_CONFIG_DIR: configDir },
+    });
+    assert.equal(impliedUnknown.status, 1, impliedUnknown.stdout + impliedUnknown.stderr);
+    assert.match(impliedUnknown.stdout + impliedUnknown.stderr, /Unknown OpenCode install argument/);
+    assert.equal(readFileSync(sentinel, "utf-8"), "keep\n");
+
+    rmSync(source, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+    rmSync(configDir, { recursive: true, force: true });
+  });
+
+  it("imports source controllers before persistence can mutate an existing home", () => {
+    const source = mkdtempSync(join(os.tmpdir(), "fd-opencode-transitive-source-"));
+    const home = mkdtempSync(join(os.tmpdir(), "fd-opencode-transitive-home-"));
+    const configDir = mkdtempSync(join(os.tmpdir(), "fd-opencode-transitive-config-"));
+    copyOpenCodePayload(source);
+    unlinkSync(join(source, "bin", "engine", "reconcile.mjs"));
+    const persistedRoot = join(home, ".forge");
+    const persistedController = join(persistedRoot, "bin", "opencode", "control.mjs");
+    mkdirSync(join(persistedRoot, "bin", "opencode"), { recursive: true });
+    writeFileSync(join(persistedRoot, "sentinel.txt"), "existing sentinel\n", "utf-8");
+    writeFileSync(join(persistedRoot, "version"), "1.0.0\n", "utf-8");
+    writeFileSync(persistedController, "// existing controller\n", "utf-8");
+    const entriesBefore = readdirSync(persistedRoot).sort();
+
+    const result = runCli(["opencode", "install", "--forge-home", source], {
+      home,
+      extraEnv: { OPENCODE_CONFIG_DIR: configDir },
+    });
+
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stdout + result.stderr, /native controller is not loadable/i);
+    assert.deepEqual(readdirSync(persistedRoot).sort(), entriesBefore);
+    assert.equal(readFileSync(join(persistedRoot, "sentinel.txt"), "utf-8"), "existing sentinel\n");
+    assert.equal(readFileSync(join(persistedRoot, "version"), "utf-8"), "1.0.0\n");
+    assert.equal(readFileSync(persistedController, "utf-8"), "// existing controller\n");
+    assert.ok(!existsSync(join(persistedRoot, "packages")));
+    assert.ok(!existsSync(join(configDir, "plugins", "forgedock.js")));
+    assert.ok(!existsSync(join(configDir, "forgedock", "manifest.json")));
+
+    rmSync(source, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+    rmSync(configDir, { recursive: true, force: true });
+  });
+
+  it("aborts OpenCode installation when persistence returns a filesystem error", () => {
+    const source = mkdtempSync(join(os.tmpdir(), "fd-opencode-persist-error-source-"));
+    const home = mkdtempSync(join(os.tmpdir(), "fd-opencode-persist-error-home-"));
+    const configDir = mkdtempSync(join(os.tmpdir(), "fd-opencode-persist-error-config-"));
+    copyOpenCodePayload(source);
+    writeFileSync(join(home, ".forge"), "not a directory\n", "utf-8");
+
+    const result = runCli(["opencode", "install", "--forge-home", source], {
+      home,
+      extraEnv: { OPENCODE_CONFIG_DIR: configDir },
+    });
+
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stdout + result.stderr, /Could not persist ForgeDock for OpenCode/);
+    assert.equal(readFileSync(join(home, ".forge"), "utf-8"), "not a directory\n");
+    assert.ok(!existsSync(join(configDir, "plugins", "forgedock.js")));
+
+    rmSync(source, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+    rmSync(configDir, { recursive: true, force: true });
+  });
+
+  it("accepts git-checkout and downgrade-to-existing-persisted-home skips", () => {
+    const gitSource = mkdtempSync(join(os.tmpdir(), "fd-opencode-git-source-"));
+    const gitHome = mkdtempSync(join(os.tmpdir(), "fd-opencode-git-home-"));
+    const gitConfig = mkdtempSync(join(os.tmpdir(), "fd-opencode-git-config-"));
+    copyOpenCodePayload(gitSource);
+    mkdirSync(join(gitSource, ".git"));
+
+    const gitInstall = runCli(["opencode", "install", "--forge-home", gitSource], {
+      home: gitHome,
+      extraEnv: { OPENCODE_CONFIG_DIR: gitConfig },
+    });
+    assert.equal(gitInstall.status, 0, gitInstall.stdout + gitInstall.stderr);
+    assert.equal(
+      JSON.parse(readFileSync(join(gitConfig, "forgedock", "manifest.json"), "utf-8")).forgeHome,
+      gitSource,
+    );
+    assert.equal(existsSync(join(gitHome, ".forge")), false);
+
+    const olderSource = mkdtempSync(join(os.tmpdir(), "fd-opencode-older-source-"));
+    const downgradeHome = mkdtempSync(join(os.tmpdir(), "fd-opencode-downgrade-home-"));
+    const downgradeConfig = mkdtempSync(join(os.tmpdir(), "fd-opencode-downgrade-config-"));
+    copyOpenCodePayload(olderSource);
+    copyOpenCodePayload(join(downgradeHome, ".forge"));
+    const persistedPackagePath = join(downgradeHome, ".forge", "package.json");
+    const persistedPackage = JSON.parse(readFileSync(persistedPackagePath, "utf-8"));
+    writeFileSync(
+      persistedPackagePath,
+      `${JSON.stringify({ ...persistedPackage, version: "9.0.0" }, null, 2)}\n`,
+      "utf-8",
+    );
+    writeFileSync(join(downgradeHome, ".forge", "version"), "9.0.0\n", "utf-8");
+
+    const downgradeInstall = runCli(["opencode", "install", "--forge-home", olderSource], {
+      home: downgradeHome,
+      extraEnv: { OPENCODE_CONFIG_DIR: downgradeConfig },
+    });
+    assert.equal(downgradeInstall.status, 0, downgradeInstall.stdout + downgradeInstall.stderr);
+    assert.equal(
+      JSON.parse(readFileSync(join(downgradeConfig, "forgedock", "manifest.json"), "utf-8")).forgeHome,
+      join(downgradeHome, ".forge"),
+    );
+    assert.equal(readFileSync(join(downgradeHome, ".forge", "version"), "utf-8"), "9.0.0\n");
+
+    for (const path of [gitSource, gitHome, gitConfig, olderSource, downgradeHome, downgradeConfig]) {
+      rmSync(path, { recursive: true, force: true });
+    }
+  });
+
+  it("root npm packlist includes the native controller, runtime, and protocol boundary", () => {
+    const npmHome = mkdtempSync(join(os.tmpdir(), "fd-packlist-npm-home-"));
+    const npmCache = join(npmHome, "cache");
+    const npmConfig = join(npmHome, "npmrc");
+    const npmGlobalConfig = join(npmHome, "global-npmrc");
+    mkdirSync(npmCache);
+    writeFileSync(npmConfig, "", "utf-8");
+    writeFileSync(npmGlobalConfig, "", "utf-8");
+    const packed = spawnSync("npm", [
+      "pack",
+      "--dry-run",
+      "--json",
+      "--ignore-scripts",
+      "--cache",
+      npmCache,
+      "--userconfig",
+      npmConfig,
+      "--globalconfig",
+      npmGlobalConfig,
+    ], {
+      cwd: FORGE_HOME,
+      env: { ...process.env, HOME: npmHome, USERPROFILE: npmHome },
+      encoding: "utf-8",
+      timeout: 120000,
+      maxBuffer: 5 * 1024 * 1024,
+      shell: process.platform === "win32",
+    });
+    assert.equal(packed.status, 0, packed.stdout + packed.stderr);
+    const result = JSON.parse(packed.stdout);
+    const files = new Set(result[0].files.map((entry) => entry.path.replaceAll("\\", "/")));
+    for (const required of [
+      "packages/protocol/package.json",
+      "bin/opencode/control.mjs",
+      "bin/opencode/orchestrator.mjs",
+      "runtimes/opencode/work-on/common.md",
+      "runtimes/opencode/work-on/close.md",
+    ]) {
+      assert.ok(files.has(required), `npm packlist is missing ${required}`);
+    }
+    rmSync(npmHome, { recursive: true, force: true });
   });
 
   it("refreshes an existing managed OpenCode adapter during generic update", () => {
@@ -89,11 +391,7 @@ describe("router", () => {
     const configDir = mkdtempSync(join(os.tmpdir(), "fd-opencode-update-config-"));
 
     try {
-      cpSync(dirname(CLI), join(forgeHome, "bin"), {
-        recursive: true,
-        filter: (src) => !src.includes("tests"),
-      });
-      mkdirSync(join(forgeHome, "commands"), { recursive: true });
+      copyOpenCodePayload(forgeHome);
       writeFileSync(
         join(forgeHome, "commands", "one.md"),
         "---\ndescription: One\n---\n\n# One\n",
@@ -131,7 +429,9 @@ describe("router", () => {
       assert.match(update.stdout, /Refreshed managed OpenCode adapter/);
 
       const refreshed = readFileSync(pluginPath, "utf-8");
-      assert.match(refreshed, /subagent_depth === undefined/);
+      assert.match(refreshed, /NATIVE_FORGE_HOME/);
+      assert.match(refreshed, /nativeSessions\.has\(input\.sessionID\)/);
+      assert.doesNotMatch(refreshed, /subagent_depth/);
       assert.doesNotMatch(refreshed, /stale adapter/);
     } finally {
       rmSync(forgeHome, { recursive: true, force: true });
@@ -236,6 +536,9 @@ describe("router", () => {
     mkdirSync(join(forgeHome, "commands"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest command\n", "utf-8");
     const home = mkdtempSync(join(os.tmpdir(), "fd-npm-home-"));
+    const sentinel = join(home, ".forge", "sentinel.txt");
+    mkdirSync(dirname(sentinel), { recursive: true });
+    writeFileSync(sentinel, "existing persisted state\n", "utf-8");
     const res = spawnSync(process.execPath, [join(forgeHome, "bin", "forgedock.mjs"), "update"], {
       cwd: mkdtempSync(join(os.tmpdir(), "fd-npm-cwd-")),
       env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" },
@@ -256,9 +559,34 @@ describe("router", () => {
     // forge() now runs as a repair path — commands get (re)linked/copied.
     assert.match(res.stdout, /slash command/i);
     assert.ok(existsSync(join(home, ".claude", "commands", "one.md")));
+    assert.equal(readFileSync(sentinel, "utf-8"), "existing persisted state\n");
+    assert.equal(existsSync(join(home, ".forge", "commands")), false);
     // Guard: update must never enter the config journey.
     assert.doesNotMatch(res.stdout, /Reading your repository/);
     assert.doesNotMatch(res.stdout, /forge\.yaml configuration/);
+  });
+
+  it("generic npm update imports source controllers before touching persisted payload files", () => {
+    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-npm-invalid-controller-"));
+    const home = mkdtempSync(join(os.tmpdir(), "fd-npm-invalid-controller-home-"));
+    const cwd = mkdtempSync(join(os.tmpdir(), "fd-npm-invalid-controller-cwd-"));
+    copyOpenCodePayload(forgeHome);
+    unlinkSync(join(forgeHome, "bin", "engine", "reconcile.mjs"));
+    const sentinel = join(home, ".forge", "commands", "keep.md");
+    mkdirSync(dirname(sentinel), { recursive: true });
+    writeFileSync(sentinel, "keep persisted controller state\n", "utf-8");
+
+    const result = spawnSync(process.execPath, [join(forgeHome, "bin", "forgedock.mjs"), "update"], {
+      cwd,
+      env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" },
+      encoding: "utf-8",
+      timeout: 30000,
+    });
+
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.equal(readFileSync(sentinel, "utf-8"), "keep persisted controller state\n");
+    assert.equal(existsSync(join(home, ".forge", "packages")), false);
+    assert.doesNotMatch(result.stdout, /Refreshed ~\/\.forge/);
   });
 
   it("update from a git worktree resolves symlinks to the main repo, not the worktree (#1700)", () => {
@@ -666,15 +994,8 @@ describe("router", () => {
       "utf-8",
     );
 
-    // Stub external tools (gh, yq) so doctor passes in isolated environments
-    // (CI, sandboxed test HOMEs) where these aren't installed/authenticated.
-    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-stub-bin-"));
-    // gh: must handle "gh --version" and "gh auth status" with exit 0
-    writeFileSync(join(stubBin, "gh"), "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
-    // yq: must handle "yq --version" with exit 0
-    writeFileSync(join(stubBin, "yq"), "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n", { mode: 0o755 });
-
-    const stubEnv = { PATH: `${stubBin}:${process.env.PATH}` };
+    // Stub external tools (gh, yq) so doctor passes without host auth/tools.
+    const stubEnv = stubDoctorTools("fd-stub-bin-");
 
     const installRes = runCli(["install", "--fast"], { cwd, home, extraEnv: stubEnv });
     assert.equal(installRes.status, 0, installRes.stdout + installRes.stderr);
@@ -716,10 +1037,7 @@ describe("router", () => {
     const unrelatedFile = "not-a-forgedock-command.md";
     writeFileSync(join(cwdClaudeCommands, unrelatedFile), "# user's own command\n", "utf-8");
 
-    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-split-stub-bin-"));
-    writeFileSync(join(stubBin, "gh"), "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
-    writeFileSync(join(stubBin, "yq"), "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n", { mode: 0o755 });
-    const stubEnv = { PATH: `${stubBin}:${process.env.PATH}` };
+    const stubEnv = stubDoctorTools("fd-split-stub-bin-");
 
     const installRes = runCli(["install", "--fast"], { cwd, home, extraEnv: stubEnv });
     assert.equal(installRes.status, 0, installRes.stdout + installRes.stderr);
@@ -1007,10 +1325,7 @@ describe("getInstalledCommandsDriftStatus() — package-vs-installed-commands he
 
 describe("doctor — forge.yaml placeholder / staleness checks (forge#1850)", () => {
   function stubTools() {
-    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-doctor-stub-bin-"));
-    writeFileSync(join(stubBin, "gh"), "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
-    writeFileSync(join(stubBin, "yq"), "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n", { mode: 0o755 });
-    return { PATH: `${stubBin}:${process.env.PATH}` };
+    return stubDoctorTools("fd-doctor-stub-bin-");
   }
 
   /**
@@ -1103,10 +1418,7 @@ describe("doctor — forge.yaml placeholder / staleness checks (forge#1850)", ()
 
 describe("doctor: SessionStart hook script path integrity (Check 5c, forge#1895)", () => {
   function stubTools() {
-    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-hookcheck-stub-bin-"));
-    writeFileSync(join(stubBin, "gh"), "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
-    writeFileSync(join(stubBin, "yq"), "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n", { mode: 0o755 });
-    return { PATH: `${stubBin}:${process.env.PATH}` };
+    return stubDoctorTools("fd-hookcheck-stub-bin-");
   }
 
   /**
@@ -1193,10 +1505,7 @@ describe("doctor: SessionStart hook script path integrity (Check 5c, forge#1895)
 
 describe("doctor --fix (forge#1944)", () => {
   function stubTools() {
-    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-stub-bin-"));
-    writeFileSync(join(stubBin, "gh"), "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
-    writeFileSync(join(stubBin, "yq"), "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n", { mode: 0o755 });
-    return { PATH: `${stubBin}:${process.env.PATH}` };
+    return stubDoctorTools("fd-doctor-fix-stub-bin-");
   }
 
   function setupInstall() {
@@ -1431,19 +1740,9 @@ describe("doctor --fix (forge#1944)", () => {
   // create --force semantics closely enough for Check 7's detect/fix/recheck
   // logic, without any network access or a real GitHub repo.
   //
-  // POSIX-only: forgedock.mjs calls execFileSync("gh", [...]) (no shell) for
-  // label list/create. execFileSync without `shell: true` can only launch a
-  // real executable — on POSIX that includes an extensionless script with a
-  // `#!/bin/sh` shebang (the kernel itself handles it), so a plain shell
-  // stub placed first on PATH is sufficient and deterministic. On Windows,
-  // execFileSync without a shell cannot invoke a .cmd/.bat launcher at all
-  // (Windows' CreateProcess only recognizes real PE binaries for a bare,
-  // non-shell spawn — confirmed empirically: spawnSync("gh.cmd", ...) with
-  // shell:false fails with EINVAL even given the file's exact name), so
-  // there is no reliable way to fake `gh` for execFileSync callers on
-  // Windows without shipping a compiled binary. This test therefore only
-  // runs on POSIX platforms, which matches the project's CI (ubuntu-latest
-  // — see .github/workflows/ci.yml) and is where the real coverage lives.
+  // labelsSetup() uses execFileSync without a shell, so its mutation assertions
+  // remain POSIX-only. The launcher is still platform-aware so every other
+  // doctor probe resolves the isolated stub rather than a host gh/yq install.
   function stubToolsWithLabels() {
     const stubBin = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-label-stub-bin-"));
     const present = [
@@ -1485,18 +1784,17 @@ describe("doctor --fix (forge#1944)", () => {
       ].join("\n") + "\n",
       "utf-8",
     );
-    writeFileSync(
-      join(stubBin, "gh"),
-      `#!/bin/sh\nexec node "${ghStubPath}" "$@"\n`,
-      { mode: 0o755 },
+    writeToolStub(
+      stubBin,
+      "gh",
+      `exec "${process.execPath}" "${ghStubPath}" "$@"`,
+      `"${process.execPath}" "${ghStubPath}" %*`,
     );
-    writeFileSync(
-      join(stubBin, "yq"),
-      "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n",
-      { mode: 0o755 },
-    );
+    writeToolStub(stubBin, "yq", "echo 'yq version v4.44.0'", "echo yq version v4.44.0");
 
-    return { PATH: `${stubBin}:${process.env.PATH}` };
+    const ghConfig = join(stubBin, "gh-config");
+    mkdirSync(ghConfig);
+    return { PATH: isolatedToolPath(stubBin), GH_CONFIG_DIR: ghConfig };
   }
 
   // See the POSIX-only note above stubToolsWithLabels() — execFileSync
@@ -1581,7 +1879,7 @@ describe("doctor --fix (forge#1944)", () => {
 
 describe("status — re-entry mini-dashboard (#1945)", () => {
   /** Same install + forge.yaml overwrite pattern as the doctor placeholder suite above. */
-  function setupConfigured(forgeYamlContent, { gh } = {}) {
+  function setupConfigured(forgeYamlContent) {
     const home = mkdtempSync(join(os.tmpdir(), "fd-dash-home-"));
     const cwd = mkdtempSync(join(os.tmpdir(), "fd-dash-cwd-"));
     writeFileSync(
@@ -1589,10 +1887,7 @@ describe("status — re-entry mini-dashboard (#1945)", () => {
       "[user]\n\tname = Test User\n\temail = test@example.com\n",
       "utf-8",
     );
-    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-dash-stub-bin-"));
-    writeFileSync(join(stubBin, "gh"), gh ?? "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
-    writeFileSync(join(stubBin, "yq"), "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n", { mode: 0o755 });
-    const extraEnv = { PATH: `${stubBin}:${process.env.PATH}` };
+    const extraEnv = stubDoctorTools("fd-dash-stub-bin-");
     const installRes = runCli(["install", "--fast"], { cwd, home, extraEnv });
     assert.equal(installRes.status, 0, installRes.stdout + installRes.stderr);
     writeFileSync(join(cwd, "forge.yaml"), forgeYamlContent, "utf-8");
@@ -1748,7 +2043,7 @@ describe("update — global npm install self-update (forge#2133)", () => {
             HOME: home,
             USERPROFILE: home,
             NO_COLOR: "1",
-            PATH: `${shimDir}:${process.env.PATH}`,
+            PATH: prependPath(shimDir),
           },
           encoding: "utf-8",
           timeout: 30000,
@@ -1886,7 +2181,7 @@ describe("update — global npm install self-update (forge#2133)", () => {
             HOME: home,
             USERPROFILE: home,
             NO_COLOR: "1",
-            PATH: `${shimDir}:${process.env.PATH}`,
+            PATH: prependPath(shimDir),
           },
           encoding: "utf-8",
           timeout: 30000,
@@ -1985,7 +2280,7 @@ describe("update — global npm install self-update (forge#2133)", () => {
             HOME: home,
             USERPROFILE: home,
             NO_COLOR: "1",
-            PATH: `${shimDir}:${process.env.PATH}`,
+            PATH: prependPath(shimDir),
             // The regression input: a negative starting attempt count.
             FORGEDOCK_SELF_UPDATE_ATTEMPT: "-3",
           },
@@ -2084,7 +2379,7 @@ describe("update — global npm install self-update (forge#2133)", () => {
             HOME: home,
             USERPROFILE: home,
             NO_COLOR: "1",
-            PATH: `${shimDir}:${process.env.PATH}`,
+            PATH: prependPath(shimDir),
           },
           encoding: "utf-8",
           timeout: 30000,
@@ -2181,7 +2476,7 @@ describe("update — global npm install self-update (forge#2133)", () => {
             HOME: home,
             USERPROFILE: home,
             NO_COLOR: "1",
-            PATH: `${shimDir};${process.env.PATH}`,
+            PATH: prependPath(shimDir),
           },
           encoding: "utf-8",
           timeout: 30000,

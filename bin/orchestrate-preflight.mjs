@@ -214,6 +214,7 @@ export function buildPreflightPlan({ input, repo = "", issues = [], maxConcurren
       reason: query.reason,
       pattern: query.pattern,
       confirmed: flags.confirmed,
+      requiresDeepPlan: flags.deepPlan || flags.includeBacklog,
       dispatchNow: [],
       deferred: query.deferred,
       warnings: [query.reason],
@@ -294,8 +295,8 @@ export function buildPreflightPlan({ input, repo = "", issues = [], maxConcurren
     .sort((a, b) => b.priority - a.priority || a.number - b.number)
     .map((issue) => issue.number);
   const effectiveMax = Number.isInteger(maxConcurrent) && maxConcurrent > 0 ? maxConcurrent : 12;
-  const deepPlan = flags.deepPlan || query.pattern === "cascade" || query.pattern === "repo-scoped";
-  const requiresDeepPlan = deepPlan || investigations.length > 0;
+  const requiresDeepPlan = flags.deepPlan || flags.includeBacklog || investigations.length > 0 ||
+    query.pattern === "cascade" || query.pattern === "repo-scoped";
   const warnings = [
     "Compact preflight uses explicit dependencies, scoped issue-body files, and the database serialization rule.",
     "The full Phase 3 conflict/history analysis remains available with --deep-plan or when this preflight is unsupported.",
@@ -303,6 +304,7 @@ export function buildPreflightPlan({ input, repo = "", issues = [], maxConcurren
   if (flags.includeInFlight) warnings.push("In-flight issues were explicitly admitted for recovery.");
   if (deferred.length) warnings.push(`${deferred.length} in-flight issue(s) were deferred; use --include-in-flight for explicit recovery.`);
   if (flags.includeBacklog) warnings.push("Review-finding backlog scope requires the full cascade resolver.");
+  if (investigations.length) warnings.push("Investigation-class issues require a durable Wave-0 replan before implementation dispatch.");
 
   return {
     version: VERSION,

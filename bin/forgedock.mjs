@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { dirname, join, relative, resolve, sep } from "path";
 import { mkdir, lstat, readlink, readdir, unlink, readFile, writeFile } from "fs/promises";
 import {
@@ -154,6 +154,129 @@ function resolveRealForgeHome(dir) {
 
 const FORGE_HOME = resolveRealForgeHome(dirname(__dirname));
 const COMMANDS_DIR = join(FORGE_HOME, "commands");
+
+const REQUIRED_OPENCODE_PAYLOAD_FILES = [
+  "bin/forgedock.mjs",
+  "bin/engine.mjs",
+  "commands/work-on.md",
+  "commands/orchestrate.md",
+  "bin/opencode/batch-store.mjs",
+  "bin/opencode/config.mjs",
+  "bin/opencode/control.mjs",
+  "bin/opencode/orchestrator.mjs",
+  "bin/opencode/runner.mjs",
+  "bin/opencode/worktree.mjs",
+  "runtimes/opencode/work-on/common.md",
+  "runtimes/opencode/work-on/investigate.md",
+  "runtimes/opencode/work-on/decompose.md",
+  "runtimes/opencode/work-on/context.md",
+  "runtimes/opencode/work-on/architect.md",
+  "runtimes/opencode/work-on/build.md",
+  "runtimes/opencode/work-on/review.md",
+  "runtimes/opencode/work-on/remediate.md",
+  "runtimes/opencode/work-on/close.md",
+  "packages/protocol/package.json",
+  "packages/protocol/src/index.js",
+  "packages/protocol/src/types.js",
+  "packages/protocol/src/phases.js",
+  "packages/protocol/src/html-comment-escape.js",
+  "scripts/classify-lane.sh",
+  "templates/forge.yaml.minimal",
+];
+
+/**
+ * Validate a user-selected OpenCode install source before persistHome() can
+ * reconcile (and prune) the existing ~/.forge payload.
+ *
+ * @param {string} forgeHome
+ * @returns {string} resolved payload root
+ */
+export function validateOpenCodePayload(forgeHome) {
+  const root = resolve(forgeHome);
+  let pkg;
+  try {
+    pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf-8"));
+  } catch (error) {
+    throw new Error(`Invalid ForgeDock payload at ${root}: package.json is missing or invalid (${error.message}).`);
+  }
+  if (pkg.name !== "forgedock") {
+    throw new Error(`Invalid ForgeDock payload at ${root}: package.json name must be "forgedock".`);
+  }
+  if (!isValidSemverShape(pkg.version)) {
+    throw new Error(`Invalid ForgeDock payload at ${root}: package.json version must be a valid non-empty semver.`);
+  }
+
+  const missing = REQUIRED_OPENCODE_PAYLOAD_FILES.filter((rel) => {
+    try {
+      return !lstatSync(join(root, rel)).isFile();
+    } catch {
+      return true;
+    }
+  });
+  if (missing.length > 0) {
+    throw new Error(`Invalid ForgeDock payload at ${root}: missing required file(s): ${missing.join(", ")}.`);
+  }
+
+  const protocolPackagePath = join(root, "packages", "protocol", "package.json");
+  let protocolPackage;
+  try {
+    protocolPackage = JSON.parse(readFileSync(protocolPackagePath, "utf-8"));
+  } catch (error) {
+    throw new Error(`Invalid ForgeDock payload at ${root}: packages/protocol/package.json is invalid (${error.message}).`);
+  }
+  if (protocolPackage.name !== "@forgedock/protocol" || protocolPackage.type !== "module") {
+    throw new Error(
+      `Invalid ForgeDock payload at ${root}: packages/protocol/package.json must identify @forgedock/protocol with type "module".`,
+    );
+  }
+  return root;
+}
+
+/** Parse only the supported `forgedock opencode install` options. */
+export function parseOpenCodeInstallArgs(args = []) {
+  let forgeHome = "";
+  let includeExtras = false;
+  let sawForgeHome = false;
+
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (arg === "--extras") {
+      if (includeExtras) throw new Error("Duplicate OpenCode install option: --extras");
+      includeExtras = true;
+      continue;
+    }
+
+    if (arg === "--forge-home" || arg.startsWith("--forge-home=")) {
+      if (sawForgeHome) throw new Error("Duplicate OpenCode install option: --forge-home");
+      sawForgeHome = true;
+      const value = arg === "--forge-home" ? args[++index] : arg.slice("--forge-home=".length);
+      if (!value || value.startsWith("-")) {
+        throw new Error("--forge-home requires an absolute or relative ForgeDock source path");
+      }
+      forgeHome = value;
+      continue;
+    }
+
+    throw new Error(`Unknown OpenCode install argument: ${arg}`);
+  }
+
+  return { forgeHome, includeExtras };
+}
+
+/** Import both generated-plugin entry modules from the final install root. */
+export async function validateOpenCodeNativeController(forgeHome) {
+  const root = resolve(forgeHome);
+  try {
+    const control = await import(pathToFileURL(join(root, "bin", "opencode", "control.mjs")).href);
+    const orchestrator = await import(pathToFileURL(join(root, "bin", "opencode", "orchestrator.mjs")).href);
+    if (typeof control.runNativeWorkOn !== "function" || typeof orchestrator.runNativeOrchestrate !== "function") {
+      throw new Error("native controller exports are incomplete");
+    }
+  } catch (error) {
+    throw new Error(`ForgeDock OpenCode native controller is not loadable from ${root}: ${error.message}.`);
+  }
+  return root;
+}
 
 // Resolve home cross-platform: HOME on Unix, USERPROFILE on Windows, with
 // os.homedir() as the always-available fallback (no hard exit — see #744).
@@ -1376,20 +1499,30 @@ async function refreshManagedOpenCodeAdapter() {
     const status = await getOpenCodeAdapterStatus({ home: HOME, env: process.env });
     if (!status.installed) return;
 
-    // npm/npx payloads must be persisted before the generated adapter points at
-    // them; git-clone installs are already stable and persistHome returns them
-    // unchanged.
-    const persisted = await persistHome(ctx());
-    const adapterForgeHome = persisted.forgeHome || FORGE_HOME;
-    if (adapterForgeHome === FORGE_HOME && isEphemeralCachePath(FORGE_HOME)) {
+    // Validate the complete source module graph before persistence can mutate
+    // ~/.forge, then repeat against the final root before adapter generation.
+    const sourceForgeHome = validateOpenCodePayload(FORGE_HOME);
+    await validateOpenCodeNativeController(sourceForgeHome);
+    const persisted = await persistHome({ forgeHome: sourceForgeHome, home: HOME });
+    if (persisted.reasonCode === "filesystem-error") {
+      throw new Error(`Could not persist ForgeDock for OpenCode: ${persisted.reason || "filesystem error"}`);
+    }
+    const adapterForgeHome = persisted.forgeHome || sourceForgeHome;
+    if (
+      persisted.reasonCode !== "git-working-tree" &&
+      adapterForgeHome === sourceForgeHome &&
+      isEphemeralCachePath(sourceForgeHome)
+    ) {
       console.log(
         `  ${YELLOW}OpenCode adapter refresh skipped: the current ForgeDock payload is ephemeral.${RESET}`,
       );
       return;
     }
+    const validatedForgeHome = validateOpenCodePayload(adapterForgeHome);
+    await validateOpenCodeNativeController(validatedForgeHome);
 
     const result = await installOpenCodeAdapter({
-      forgeHome: adapterForgeHome,
+      forgeHome: validatedForgeHome,
       home: HOME,
       env: process.env,
       includeExtras: status.manifest?.includeExtras === true,
@@ -1696,17 +1829,15 @@ function findSeparateGlobalInstall() {
 const MAX_SELF_UPDATE_ATTEMPTS = 1;
 
 /**
- * Strict semver-shape check for a version string before it is interpolated
- * into a shell-invoked command (see forge#2180). Intentionally narrow —
- * digits-dot-digits-dot-digits with an optional `-prerelease`/`+build`
- * suffix restricted to `[0-9A-Za-z.-]` — so it accepts every real value
- * `fetchLatestVersion()` can return from the npm registry's `version` field,
- * while rejecting anything containing shell metacharacters
+ * Strict SemVer 2.0.0 check for a version string before it is trusted as a
+ * payload downgrade-guard input or interpolated into a shell-invoked command
+ * (see forge#2180). It rejects leading-zero numeric components, malformed
+ * prerelease/build identifiers, and anything containing shell metacharacters
  * (`; | & $ \` ( ) < > " ' \n` etc.) that `shell: true` would otherwise
  * hand straight to cmd.exe/`/bin/sh`.
  *
- * The regex above is fully anchored (`^...$`) but its quantifiers (`\d+`,
- * `[0-9A-Za-z.-]+`) are unbounded, so shape validity alone does not bound
+ * The regex below is fully anchored but its quantifiers are unbounded, so
+ * shape validity alone does not bound
  * string *length* — a pathologically long value could still match. This
  * is defense-in-depth only (see forge#2195): the character-class
  * restriction already rules out shell metacharacters at any length, and
@@ -1723,7 +1854,7 @@ function isValidSemverShape(version) {
   return (
     typeof version === "string" &&
     version.length <= MAX_VERSION_LENGTH &&
-    /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)
+    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.test(version)
   );
 }
 
@@ -2050,9 +2181,13 @@ async function update() {
     // install/init runs. Skipped as a no-op for git-clone installs (handled
     // by the `if (existsSync(gitDir))` branch above — this code path only
     // runs for npm/npx installs). Fail-open: any error here must never block
-    // relinkAndHint() below.
+    // relinkAndHint() below. Validate and import the source first so a partial
+    // or corrupt package can never use orphan reconciliation to prune a valid
+    // existing ~/.forge payload.
     try {
-      const persisted = await persistHome(ctx());
+      const sourceForgeHome = validateOpenCodePayload(FORGE_HOME);
+      await validateOpenCodeNativeController(sourceForgeHome);
+      const persisted = await persistHome({ forgeHome: sourceForgeHome, home: HOME });
       if (!persisted.skipped) {
         await setPersistedHomeState({
           path: persisted.forgeHome,
@@ -2769,8 +2904,8 @@ async function doctor(fix = false) {
   }
 
   // ── Check 5d: Persisted toolset home (~/.forge) ────────────────────────────
-  // persistHome() (bin/journey.mjs, forge#1943) copies bin/commands/scripts/
-  // templates from wherever FORGE_HOME resolved into a stable ~/.forge/ copy
+  // persistHome() (bin/journey.mjs, forge#1943) copies bin/commands/packages/
+  // runtimes/scripts/templates from wherever FORGE_HOME resolved into a stable ~/.forge/ copy
   // on every `npx forgedock` install/init/update run, so ~/.claude/commands
   // symlinks and the SessionStart hook keep working after the npm/npx cache
   // that originally served them is evicted. This check reports that copy's
@@ -2790,7 +2925,7 @@ async function doctor(fix = false) {
         pass("Persisted toolset home (~/.forge)", "skipped — git-clone install links directly from the clone");
       } else {
         const persistedHome = join(HOME, ".forge");
-        const payloadDirs = ["bin", "commands", "scripts", "templates"];
+        const payloadDirs = ["bin", "commands", "packages", "runtimes", "scripts", "templates"];
         const missingDirs = payloadDirs.filter((d) => !existsSync(join(persistedHome, d)));
         const versionPath = join(persistedHome, "version");
 
@@ -3876,24 +4011,39 @@ switch (command) {
     await update();
     break;
   case "opencode": {
-    const action = restArgs[0] || "install";
+    const impliedInstall = !restArgs[0] || restArgs[0].startsWith("--");
+    const action = impliedInstall ? "install" : restArgs[0];
     const {
       getOpenCodeAdapterStatus,
       installOpenCodeAdapter,
       uninstallOpenCodeAdapter,
     } = await import("./opencode-adapter.mjs");
     if (action === "install") {
-      const persist = await persistHome({ forgeHome: FORGE_HOME, home: HOME });
-      if (persist.forgeHome === FORGE_HOME && isEphemeralCachePath(FORGE_HOME)) {
+      const inheritedExtras = rawArgs.slice(0, cmdIdx).filter((arg) => arg === "--extras");
+      const actionArgs = impliedInstall ? restArgs : restArgs.slice(1);
+      const installArgs = parseOpenCodeInstallArgs([...inheritedExtras, ...actionArgs]);
+      const sourceForgeHome = validateOpenCodePayload(installArgs.forgeHome || FORGE_HOME);
+      await validateOpenCodeNativeController(sourceForgeHome);
+      const persist = await persistHome({ forgeHome: sourceForgeHome, home: HOME });
+      if (persist.reasonCode === "filesystem-error") {
+        throw new Error(`Could not persist ForgeDock for OpenCode: ${persist.reason || "filesystem error"}`);
+      }
+      if (
+        persist.reasonCode !== "git-working-tree" &&
+        persist.forgeHome === sourceForgeHome &&
+        isEphemeralCachePath(sourceForgeHome)
+      ) {
         throw new Error(
-          `Cannot install OpenCode commands from ephemeral package path ${FORGE_HOME}: ` +
+          `Cannot install OpenCode commands from ephemeral package path ${sourceForgeHome}: ` +
             `${persist.reason || "failed to persist ForgeDock under ~/.forge"}.`,
         );
       }
+      const adapterForgeHome = validateOpenCodePayload(persist.forgeHome || sourceForgeHome);
+      await validateOpenCodeNativeController(adapterForgeHome);
       const result = await installOpenCodeAdapter({
-        forgeHome: persist.forgeHome || FORGE_HOME,
+        forgeHome: adapterForgeHome,
         home: HOME,
-        includeExtras: restArgs.includes("--extras"),
+        includeExtras: installArgs.includeExtras,
       });
       process.stdout.write(
         `Installed ${result.commandCount} OpenCode commands and ${result.skillCount} skills under ${result.configDir}.\n` +

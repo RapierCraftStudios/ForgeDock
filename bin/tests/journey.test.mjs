@@ -4,10 +4,10 @@
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync, chmodSync, utimesSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync, chmodSync, utimesSync, linkSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
 import os from "node:os";
-import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, atomicSymlinkInstall, pruneStaleExtensionlessEntries } from "../journey.mjs";
+import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, atomicSymlinkInstall, pruneOrphanedSymlinks, pruneStaleExtensionlessEntries, resolveOrphanedSymlinkTarget, assertPersistedDestinationDevice, acquirePersistHomeLock, releasePersistHomeLock } from "../journey.mjs";
 import { detectEnvironment } from "../env-detect.mjs";
 
 const VALUES = {
@@ -635,17 +635,35 @@ describe("persistHome (forge#1943)", () => {
     const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-persist-src-"));
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "packages", "protocol", "src"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "runtimes", "opencode", "work-on"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "scripts"), { recursive: true });
     // templates/ deliberately omitted from some tests below to exercise the
     // "missing source subdirectory" tolerance.
     writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook\n", "utf-8");
     writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n", "utf-8");
+    writeFileSync(join(forgeHome, "packages", "protocol", "package.json"), JSON.stringify({ name: "@forgedock/protocol", type: "module" }), "utf-8");
+    writeFileSync(join(forgeHome, "packages", "protocol", "src", "index.js"), "export const protocol = true;\n", "utf-8");
+    writeFileSync(join(forgeHome, "runtimes", "opencode", "work-on", "common.md"), "# Common runtime\n", "utf-8");
     writeFileSync(join(forgeHome, "scripts", "classify-lane.sh"), "#!/bin/sh\n", "utf-8");
     writeFileSync(join(forgeHome, "package.json"), JSON.stringify({ name: "forgedock", version }), "utf-8");
     return forgeHome;
   }
 
-  it("fresh copy: copies bin/commands/scripts into ~/.forge/ and writes version", async () => {
+  function linkDirectoryOrSkip(t, target, link, type = "dir") {
+    try {
+      symlinkSync(target, link, type);
+      return true;
+    } catch (error) {
+      if (error.code === "EPERM" || error.code === "EACCES") {
+        t.skip("directory symlink creation unavailable");
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  it("fresh copy: copies bin/commands/packages/runtimes/scripts into ~/.forge/ and writes version", async () => {
     const forgeHome = makeSourceForgeHome({ version: "1.2.3" });
     const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-"));
 
@@ -658,8 +676,393 @@ describe("persistHome (forge#1943)", () => {
 
     assert.equal(readFileSync(join(home, ".forge", "commands", "one.md"), "utf-8"), "# /one\n");
     assert.equal(readFileSync(join(home, ".forge", "bin", "hooks", "session-start.mjs"), "utf-8"), "// hook\n");
+    assert.equal(JSON.parse(readFileSync(join(home, ".forge", "packages", "protocol", "package.json"), "utf-8")).type, "module");
+    assert.equal(readFileSync(join(home, ".forge", "packages", "protocol", "src", "index.js"), "utf-8"), "export const protocol = true;\n");
+    assert.equal(readFileSync(join(home, ".forge", "runtimes", "opencode", "work-on", "common.md"), "utf-8"), "# Common runtime\n");
     assert.equal(readFileSync(join(home, ".forge", "scripts", "classify-lane.sh"), "utf-8"), "#!/bin/sh\n");
     assert.equal(readFileSync(join(home, ".forge", "version"), "utf-8").trim(), "1.2.3");
+  });
+
+  it("creates a missing ctx.home recursively before inspecting ~/.forge", async () => {
+    const forgeHome = makeSourceForgeHome();
+    const parent = mkdtempSync(join(os.tmpdir(), "fd-persist-missing-home-parent-"));
+    const home = join(parent, "nested", "home");
+
+    const result = await persistHome({ forgeHome, home });
+
+    assert.equal(result.skipped, false);
+    assert.equal(readFileSync(join(home, ".forge", "commands", "one.md"), "utf-8"), "# /one\n");
+  });
+
+  it("refuses a ~/.forge destination symlink without touching its outside target", async (t) => {
+    const forgeHome = makeSourceForgeHome();
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-root-link-home-"));
+    const outside = mkdtempSync(join(os.tmpdir(), "fd-persist-root-link-outside-"));
+    const sentinel = join(outside, "sentinel.txt");
+    writeFileSync(sentinel, "outside\n", "utf-8");
+    if (!linkDirectoryOrSkip(t, outside, join(home, ".forge"))) return;
+
+    const result = await persistHome({ forgeHome, home });
+
+    assert.equal(result.skipped, true);
+    assert.equal(result.reasonCode, "filesystem-error");
+    assert.match(result.reason, /symbolic links and junctions are not allowed/);
+    assert.equal(readFileSync(sentinel, "utf-8"), "outside\n");
+    assert.equal(readdirSync(outside).length, 1, "nothing may be created through the ~/.forge link");
+  });
+
+  it("refuses a destination file symlink before reading or overwriting its target", async (t) => {
+    const forgeHome = makeSourceForgeHome();
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-file-link-home-"));
+    const outside = mkdtempSync(join(os.tmpdir(), "fd-persist-file-link-outside-"));
+    const sentinel = join(outside, "version.txt");
+    mkdirSyncFs(join(home, ".forge"), { recursive: true });
+    writeFileSync(sentinel, "outside version\n", "utf-8");
+    try {
+      symlinkSync(sentinel, join(home, ".forge", "version"));
+    } catch (error) {
+      if (error.code === "EPERM" || error.code === "EACCES") {
+        t.skip("file symlink creation unavailable");
+        return;
+      }
+      throw error;
+    }
+
+    const result = await persistHome({ forgeHome, home });
+
+    assert.equal(result.skipped, true);
+    assert.equal(result.reasonCode, "filesystem-error");
+    assert.equal(readFileSync(sentinel, "utf-8"), "outside version\n");
+    assert.equal(existsSync(join(home, ".forge", "bin")), false);
+  });
+
+  it("refuses a destination hard link without overwriting its outside inode", async (t) => {
+    const forgeHome = makeSourceForgeHome();
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-hardlink-home-"));
+    const outside = mkdtempSync(join(os.tmpdir(), "fd-persist-hardlink-outside-"));
+    const sentinel = join(outside, "one.md");
+    mkdirSyncFs(join(home, ".forge", "commands"), { recursive: true });
+    writeFileSync(sentinel, "outside command\n", "utf-8");
+    try {
+      linkSync(sentinel, join(home, ".forge", "commands", "one.md"));
+    } catch (error) {
+      if (error.code === "EPERM" || error.code === "EACCES" || error.code === "EXDEV") {
+        t.skip("hard-link creation unavailable");
+        return;
+      }
+      throw error;
+    }
+
+    const result = await persistHome({ forgeHome, home });
+
+    assert.equal(result.skipped, true);
+    assert.equal(result.reasonCode, "filesystem-error");
+    assert.match(result.reason, /hard-linked destination files are not allowed/);
+    assert.equal(readFileSync(sentinel, "utf-8"), "outside command\n");
+  });
+
+  it("refuses a top-level payload symlink without overwriting or pruning outside files", async (t) => {
+    const forgeHome = makeSourceForgeHome();
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-top-link-home-"));
+    const outside = mkdtempSync(join(os.tmpdir(), "fd-persist-top-link-outside-"));
+    mkdirSyncFs(join(home, ".forge"), { recursive: true });
+    writeFileSync(join(outside, "one.md"), "outside command\n", "utf-8");
+    writeFileSync(join(outside, "sentinel.md"), "outside sentinel\n", "utf-8");
+    if (!linkDirectoryOrSkip(t, outside, join(home, ".forge", "commands"))) return;
+
+    const result = await persistHome({ forgeHome, home });
+
+    assert.equal(result.skipped, true);
+    assert.equal(result.reasonCode, "filesystem-error");
+    assert.equal(readFileSync(join(outside, "one.md"), "utf-8"), "outside command\n");
+    assert.equal(readFileSync(join(outside, "sentinel.md"), "utf-8"), "outside sentinel\n");
+  });
+
+  it("refuses a nested payload symlink before copying through it", async (t) => {
+    const forgeHome = makeSourceForgeHome();
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-nested-link-home-"));
+    const outside = mkdtempSync(join(os.tmpdir(), "fd-persist-nested-link-outside-"));
+    mkdirSyncFs(join(forgeHome, "commands", "nested"), { recursive: true });
+    writeFileSync(join(forgeHome, "commands", "nested", "one.md"), "source command\n", "utf-8");
+    mkdirSyncFs(join(home, ".forge", "commands"), { recursive: true });
+    writeFileSync(join(outside, "one.md"), "outside command\n", "utf-8");
+    writeFileSync(join(outside, "sentinel.md"), "outside sentinel\n", "utf-8");
+    if (!linkDirectoryOrSkip(t, outside, join(home, ".forge", "commands", "nested"))) return;
+
+    const result = await persistHome({ forgeHome, home });
+
+    assert.equal(result.skipped, true);
+    assert.equal(result.reasonCode, "filesystem-error");
+    assert.equal(readFileSync(join(outside, "one.md"), "utf-8"), "outside command\n");
+    assert.equal(readFileSync(join(outside, "sentinel.md"), "utf-8"), "outside sentinel\n");
+  });
+
+  it("refuses an orphan destination symlink instead of pruning it", async (t) => {
+    const forgeHome = makeSourceForgeHome();
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-orphan-link-home-"));
+    const outside = mkdtempSync(join(os.tmpdir(), "fd-persist-orphan-link-outside-"));
+    mkdirSyncFs(join(home, ".forge", "commands"), { recursive: true });
+    writeFileSync(join(outside, "sentinel.md"), "outside sentinel\n", "utf-8");
+    const orphanLink = join(home, ".forge", "commands", "orphan");
+    if (!linkDirectoryOrSkip(t, outside, orphanLink)) return;
+
+    const result = await persistHome({ forgeHome, home });
+
+    assert.equal(result.skipped, true);
+    assert.equal(result.reasonCode, "filesystem-error");
+    assert.equal(lstatSync(orphanLink).isSymbolicLink(), true);
+    assert.equal(readFileSync(join(outside, "sentinel.md"), "utf-8"), "outside sentinel\n");
+  });
+
+  it("refuses a Windows junction at a top-level payload directory", async (t) => {
+    if (process.platform !== "win32") {
+      t.skip("Windows junction regression");
+      return;
+    }
+    const forgeHome = makeSourceForgeHome();
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-junction-home-"));
+    const outside = mkdtempSync(join(os.tmpdir(), "fd-persist-junction-outside-"));
+    mkdirSyncFs(join(home, ".forge"), { recursive: true });
+    writeFileSync(join(outside, "one.md"), "outside command\n", "utf-8");
+    writeFileSync(join(outside, "sentinel.md"), "outside sentinel\n", "utf-8");
+    symlinkSync(outside, join(home, ".forge", "commands"), "junction");
+
+    const result = await persistHome({ forgeHome, home });
+
+    assert.equal(result.skipped, true);
+    assert.equal(result.reasonCode, "filesystem-error");
+    assert.equal(readFileSync(join(outside, "one.md"), "utf-8"), "outside command\n");
+    assert.equal(readFileSync(join(outside, "sentinel.md"), "utf-8"), "outside sentinel\n");
+  });
+
+  it("ignores an unrelated batches symlink or junction without touching its target", async (t) => {
+    const forgeHome = makeSourceForgeHome();
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-unrelated-link-home-"));
+    const outside = mkdtempSync(join(os.tmpdir(), "fd-persist-unrelated-link-outside-"));
+    const persistedHome = join(home, ".forge");
+    const unrelatedLink = join(persistedHome, "batches");
+    mkdirSyncFs(persistedHome, { recursive: true });
+    writeFileSync(join(outside, "sentinel.txt"), "outside state\n", "utf-8");
+    const type = process.platform === "win32" ? "junction" : "dir";
+    if (!linkDirectoryOrSkip(t, outside, unrelatedLink, type)) return;
+
+    const result = await persistHome({ forgeHome, home });
+
+    assert.equal(result.skipped, false);
+    assert.equal(readFileSync(join(persistedHome, "commands", "one.md"), "utf-8"), "# /one\n");
+    assert.equal(lstatSync(unrelatedLink).isSymbolicLink(), true);
+    assert.equal(readFileSync(join(outside, "sentinel.txt"), "utf-8"), "outside state\n");
+    assert.deepEqual(readdirSync(outside), ["sentinel.txt"]);
+  });
+
+  it("rejects root or managed directory device-boundary crossings when stat.dev is comparable", () => {
+    assert.doesNotThrow(() => assertPersistedDestinationDevice({ dev: 7 }, { dev: 7 }, "same-device"));
+    assert.throws(
+      () => assertPersistedDestinationDevice({ dev: 7 }, { dev: 8 }, "mounted-payload"),
+      /filesystem device/,
+    );
+    assert.doesNotThrow(() => assertPersistedDestinationDevice({}, { dev: 8 }, "unknown-device"));
+  });
+
+  it("does not reclaim an explicitly active persistence lock", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-active-lock-home-"));
+    const persistedHome = join(home, ".forge");
+    const lockPath = join(persistedHome, "persist.lock");
+    mkdirSyncFs(persistedHome, { recursive: true });
+    const holder = await acquirePersistHomeLock(lockPath);
+
+    await assert.rejects(
+      acquirePersistHomeLock(lockPath, { timeoutMs: 20, retryMs: 5 }),
+      (error) => error.code === "PERSIST_HOME_LOCK_BUSY",
+    );
+    assert.equal(JSON.parse(readFileSync(lockPath, "utf-8")).state, "active");
+    await releasePersistHomeLock(lockPath, holder);
+  });
+
+  it("retries transient persistence-lock unlink failures", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-release-retry-home-"));
+    const persistedHome = join(home, ".forge");
+    const lockPath = join(persistedHome, "persist.lock");
+    mkdirSyncFs(persistedHome, { recursive: true });
+    const holder = await acquirePersistHomeLock(lockPath);
+    let attempts = 0;
+
+    await releasePersistHomeLock(lockPath, holder, {
+      retries: 2,
+      retryMs: 1,
+      unlinkFn: async (path) => {
+        attempts++;
+        if (attempts < 3) {
+          const error = new Error("transient lock contention");
+          error.code = "EPERM";
+          throw error;
+        }
+        unlinkSync(path);
+      },
+    });
+
+    assert.equal(attempts, 3);
+    assert.equal(existsSync(lockPath), false);
+  });
+
+  it("does not let a release retry unlink a successor's active lock", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-release-handoff-home-"));
+    const persistedHome = join(home, ".forge");
+    const lockPath = join(persistedHome, "persist.lock");
+    mkdirSyncFs(persistedHome, { recursive: true });
+    const holder = await acquirePersistHomeLock(lockPath);
+    let firstAttempt;
+    const attempted = new Promise((resolveAttempted) => { firstAttempt = resolveAttempted; });
+    let attempts = 0;
+
+    const releasing = releasePersistHomeLock(lockPath, holder, {
+      retries: 1,
+      retryMs: 10,
+      unlinkFn: async (path) => {
+        attempts++;
+        if (attempts === 1) {
+          firstAttempt();
+          const error = new Error("transient lock contention");
+          error.code = "EPERM";
+          throw error;
+        }
+        unlinkSync(path);
+      },
+    });
+    await attempted;
+    const replacementPromise = acquirePersistHomeLock(lockPath, { timeoutMs: 500, retryMs: 5 });
+    await releasing;
+    const replacement = await replacementPromise;
+
+    assert.equal(attempts, 2);
+    assert.equal(JSON.parse(readFileSync(lockPath, "utf-8")).state, "active");
+    await releasePersistHomeLock(lockPath, replacement);
+  });
+
+  it("surfaces an unrecoverable release error and reclaims only its released marker", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-released-lock-home-"));
+    const persistedHome = join(home, ".forge");
+    const lockPath = join(persistedHome, "persist.lock");
+    mkdirSyncFs(persistedHome, { recursive: true });
+    const holder = await acquirePersistHomeLock(lockPath);
+    let publishAttempts = 0;
+
+    await assert.rejects(
+      releasePersistHomeLock(lockPath, holder, {
+        retries: 2,
+        retryMs: 1,
+        unlinkFn: async () => {
+          const error = new Error("unrecoverable unlink failure");
+          error.code = "EIO";
+          throw error;
+        },
+        publishCleanupFn: async (path, token) => {
+          publishAttempts++;
+          if (publishAttempts < 3) {
+            const error = new Error("transient completion open failure");
+            error.code = "EPERM";
+            error.persistHomeRetrySafe = true;
+            throw error;
+          }
+          const current = JSON.parse(readFileSync(path, "utf-8"));
+          assert.equal(current.token, token);
+          writeFileSync(path, `${JSON.stringify({ ...current, cleanupComplete: true })}\n`, "utf-8");
+        },
+      }),
+      (error) => error.code === "PERSIST_HOME_LOCK_RELEASE_FAILED",
+    );
+    assert.equal(publishAttempts, 3);
+    const released = JSON.parse(readFileSync(lockPath, "utf-8"));
+    assert.equal(released.state, "released");
+    assert.equal(released.cleanupComplete, true);
+
+    const replacement = await acquirePersistHomeLock(lockPath, { timeoutMs: 250, retryMs: 5 });
+    assert.equal(JSON.parse(readFileSync(lockPath, "utf-8")).state, "active");
+    await releasePersistHomeLock(lockPath, replacement);
+  });
+
+  it("does not retry cleanup publication after a successor can observe it", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-partial-publish-home-"));
+    const persistedHome = join(home, ".forge");
+    const lockPath = join(persistedHome, "persist.lock");
+    mkdirSyncFs(persistedHome, { recursive: true });
+    const holder = await acquirePersistHomeLock(lockPath);
+    let publishAttempts = 0;
+    let replacement;
+
+    await assert.rejects(
+      releasePersistHomeLock(lockPath, holder, {
+        retries: 2,
+        retryMs: 1,
+        unlinkFn: async () => {
+          const error = new Error("unrecoverable unlink failure");
+          error.code = "EIO";
+          throw error;
+        },
+        publishCleanupFn: async (path, token) => {
+          publishAttempts++;
+          const current = JSON.parse(readFileSync(path, "utf-8"));
+          writeFileSync(path, `${JSON.stringify({ ...current, token, cleanupComplete: true })}\n`, "utf-8");
+          replacement = await acquirePersistHomeLock(path, { timeoutMs: 250, retryMs: 5 });
+          const error = new Error("sync failed after publication became visible");
+          error.code = "EPERM";
+          error.persistHomeRetrySafe = false;
+          throw error;
+        },
+      }),
+      (error) => error.code === "PERSIST_HOME_LOCK_RELEASE_FAILED",
+    );
+
+    assert.equal(publishAttempts, 1);
+    assert.equal(JSON.parse(readFileSync(lockPath, "utf-8")).state, "active");
+    await releasePersistHomeLock(lockPath, replacement);
+  });
+
+  it("serializes concurrent reclaimers before either can replace a released lock", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-concurrent-reclaim-home-"));
+    const persistedHome = join(home, ".forge");
+    const lockPath = join(persistedHome, "persist.lock");
+    mkdirSyncFs(persistedHome, { recursive: true });
+    const holder = await acquirePersistHomeLock(lockPath);
+    await assert.rejects(
+      releasePersistHomeLock(lockPath, holder, {
+        retries: 0,
+        unlinkFn: async () => {
+          const error = new Error("leave an explicitly released marker");
+          error.code = "EIO";
+          throw error;
+        },
+      }),
+      (error) => error.code === "PERSIST_HOME_LOCK_RELEASE_FAILED",
+    );
+
+    const firstPromise = acquirePersistHomeLock(lockPath, { timeoutMs: 1_000, retryMs: 5 });
+    const secondPromise = acquirePersistHomeLock(lockPath, { timeoutMs: 1_000, retryMs: 5 });
+    const winner = await Promise.race([
+      firstPromise.then((handle) => ({ handle, next: secondPromise })),
+      secondPromise.then((handle) => ({ handle, next: firstPromise })),
+    ]);
+    assert.equal(JSON.parse(readFileSync(lockPath, "utf-8")).state, "active");
+
+    await releasePersistHomeLock(lockPath, winner.handle);
+    const next = await winner.next;
+    assert.equal(JSON.parse(readFileSync(lockPath, "utf-8")).state, "active");
+    await releasePersistHomeLock(lockPath, next);
+  });
+
+  it("serializes concurrent persistence calls through the cooperative lock", async () => {
+    const forgeHome = makeSourceForgeHome({ version: "4.0.0" });
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-concurrent-home-"));
+
+    const results = await Promise.all([
+      persistHome({ forgeHome, home }),
+      persistHome({ forgeHome, home }),
+    ]);
+
+    assert.equal(results.every((result) => result.skipped === false), true);
+    assert.deepEqual(results.map((result) => result.migrated).sort(), [false, true]);
+    assert.equal(readFileSync(join(home, ".forge", "version"), "utf-8").trim(), "4.0.0");
+    assert.equal(existsSync(join(home, ".forge", "persist.lock")), false);
   });
 
   it("git-clone skip: does not touch ~/.forge/ at all when ctx.forgeHome is a real git clone", async () => {
@@ -781,6 +1184,55 @@ describe("persistHome (forge#1943)", () => {
     assert.equal(readFileSync(join(home, ".forge", "version"), "utf-8").trim(), "2.0.0");
   });
 
+  it("downgrade guard applies SemVer prerelease precedence", async () => {
+    const stableHome = mkdtempSync(join(os.tmpdir(), "fd-persist-semver-stable-home-"));
+    const stableSource = makeSourceForgeHome({ version: "1.2.3" });
+    await persistHome({ forgeHome: stableSource, home: stableHome });
+    writeFileSync(join(stableHome, ".forge", "commands", "one.md"), "stable\n", "utf-8");
+
+    const prereleaseSource = makeSourceForgeHome({ version: "1.2.3-beta.1" });
+    const blocked = await persistHome({ forgeHome: prereleaseSource, home: stableHome });
+    assert.equal(blocked.reasonCode, "downgrade");
+    assert.equal(readFileSync(join(stableHome, ".forge", "commands", "one.md"), "utf-8"), "stable\n");
+
+    const prereleaseHome = mkdtempSync(join(os.tmpdir(), "fd-persist-semver-prerelease-home-"));
+    await persistHome({ forgeHome: prereleaseSource, home: prereleaseHome });
+    const promoted = await persistHome({ forgeHome: stableSource, home: prereleaseHome });
+    assert.equal(promoted.skipped, false, "stable release must supersede its prerelease");
+    assert.equal(readFileSync(join(prereleaseHome, ".forge", "version"), "utf-8").trim(), "1.2.3");
+  });
+
+  it("uses a newer package.json candidate when a late version write left metadata mismatched", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-version-mismatch-home-"));
+    const newerSource = makeSourceForgeHome({ version: "9.0.0" });
+    await persistHome({ forgeHome: newerSource, home });
+    writeFileSync(join(home, ".forge", "version"), "1.0.0\n", "utf-8");
+    writeFileSync(join(home, ".forge", "commands", "one.md"), "newer payload\n", "utf-8");
+
+    const staleSource = makeSourceForgeHome({ version: "2.0.0" });
+    const result = await persistHome({ forgeHome: staleSource, home });
+
+    assert.equal(result.reasonCode, "downgrade");
+    assert.equal(result.version, "9.0.0");
+    assert.equal(readFileSync(join(home, ".forge", "version"), "utf-8").trim(), "1.0.0");
+    assert.equal(JSON.parse(readFileSync(join(home, ".forge", "package.json"), "utf-8")).version, "9.0.0");
+    assert.equal(readFileSync(join(home, ".forge", "commands", "one.md"), "utf-8"), "newer payload\n");
+  });
+
+  it("uses a newer version-file candidate when persisted package.json is stale", async () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-package-mismatch-home-"));
+    const oldSource = makeSourceForgeHome({ version: "1.0.0" });
+    await persistHome({ forgeHome: oldSource, home });
+    writeFileSync(join(home, ".forge", "version"), "9.0.0\n", "utf-8");
+
+    const staleSource = makeSourceForgeHome({ version: "2.0.0" });
+    const result = await persistHome({ forgeHome: staleSource, home });
+
+    assert.equal(result.reasonCode, "downgrade");
+    assert.equal(result.version, "9.0.0");
+    assert.equal(JSON.parse(readFileSync(join(home, ".forge", "package.json"), "utf-8")).version, "1.0.0");
+  });
+
   it("same-version re-persist is not blocked by the downgrade guard (compareVersions == 0 proceeds normally)", async () => {
     const home = mkdtempSync(join(os.tmpdir(), "fd-persist-sameversion-home-"));
     const source = makeSourceForgeHome({ version: "3.1.0" });
@@ -796,28 +1248,42 @@ describe("persistHome (forge#1943)", () => {
     );
   });
 
-  it("orphan cleanup: a file removed from the source payload is deleted from the persisted ~/.forge/ copy", async () => {
+  it("orphan cleanup: files removed from commands/packages/runtimes are deleted from the persisted ~/.forge/ copy", async () => {
     const home = mkdtempSync(join(os.tmpdir(), "fd-persist-orphan-home-"));
     const forgeHome = makeSourceForgeHome({ version: "1.0.0" });
     writeFileSync(join(forgeHome, "commands", "two.md"), "# /two\n", "utf-8");
+    writeFileSync(join(forgeHome, "packages", "protocol", "src", "legacy.js"), "export {};\n", "utf-8");
+    writeFileSync(join(forgeHome, "runtimes", "opencode", "work-on", "legacy.md"), "# Legacy runtime\n", "utf-8");
 
     const first = await persistHome({ forgeHome, home });
     assert.equal(first.skipped, false);
     assert.ok(existsSync(join(home, ".forge", "commands", "one.md")));
     assert.ok(existsSync(join(home, ".forge", "commands", "two.md")));
+    assert.ok(existsSync(join(home, ".forge", "packages", "protocol", "src", "legacy.js")));
+    assert.ok(existsSync(join(home, ".forge", "runtimes", "opencode", "work-on", "legacy.md")));
 
     // Simulate an upstream release that drops commands/two.md, bumping the
     // version so the downgrade guard doesn't interfere with this persist.
     unlinkSync(join(forgeHome, "commands", "two.md"));
+    unlinkSync(join(forgeHome, "packages", "protocol", "src", "legacy.js"));
+    unlinkSync(join(forgeHome, "runtimes", "opencode", "work-on", "legacy.md"));
     writeFileSync(join(forgeHome, "package.json"), JSON.stringify({ name: "forgedock", version: "1.1.0" }), "utf-8");
 
     const second = await persistHome({ forgeHome, home });
     assert.equal(second.skipped, false);
-    assert.equal(second.filesRemoved, 1);
+    assert.equal(second.filesRemoved, 3);
     assert.equal(second.migrated, true);
     assert.ok(
       !existsSync(join(home, ".forge", "commands", "two.md")),
       "orphaned file must be removed from ~/.forge/ once dropped from the source payload",
+    );
+    assert.ok(
+      !existsSync(join(home, ".forge", "packages", "protocol", "src", "legacy.js")),
+      "orphaned protocol payload files must be removed from ~/.forge/",
+    );
+    assert.ok(
+      !existsSync(join(home, ".forge", "runtimes", "opencode", "work-on", "legacy.md")),
+      "orphaned runtime cards must be removed from ~/.forge/",
     );
     assert.ok(
       existsSync(join(home, ".forge", "commands", "one.md")),
@@ -2104,6 +2570,61 @@ describe("forge (Act II)", () => {
     // User-owned symlink must survive untouched
     assert.ok(existsSync(userLink), "user-owned symlink preserved");
     assert.equal(res.pruned, 0);
+  });
+
+  describe("pruneOrphanedSymlinks containment", () => {
+    it("prunes a missing relative target resolved from the symlink's directory", async (t) => {
+      const commandsDir = join(dir, "forge", "commands");
+      const targetDir = join(dir, "home", ".claude", "commands", "nested");
+      mkdirSyncFs(commandsDir, { recursive: true });
+      mkdirSyncFs(targetDir, { recursive: true });
+      const link = join(targetDir, "removed.md");
+      const target = join(commandsDir, "removed.md");
+      try {
+        symlinkSync(relative(targetDir, target), link);
+      } catch (err) {
+        if (err.code === "EPERM" || err.code === "EACCES") {
+          t.skip("symlink creation unavailable (Windows without Developer Mode)");
+          return;
+        }
+        throw err;
+      }
+
+      assert.equal(await pruneOrphanedSymlinks(join(dir, "home", ".claude", "commands"), commandsDir), 1);
+      assert.throws(() => lstatSync(link), /ENOENT/);
+      assert.equal(existsSync(target), false);
+    });
+
+    it("does not claim a dangling link into a sibling-prefix commands-evil directory", async (t) => {
+      const commandsDir = join(dir, "forge", "commands");
+      const targetDir = join(dir, "home", ".claude", "commands");
+      mkdirSyncFs(commandsDir, { recursive: true });
+      mkdirSyncFs(targetDir, { recursive: true });
+      const link = join(targetDir, "user-owned.md");
+      try {
+        symlinkSync(join(dir, "forge", "commands-evil", "missing.md"), link);
+      } catch (err) {
+        if (err.code === "EPERM" || err.code === "EACCES") {
+          t.skip("symlink creation unavailable (Windows without Developer Mode)");
+          return;
+        }
+        throw err;
+      }
+
+      assert.equal(await pruneOrphanedSymlinks(targetDir, commandsDir), 0);
+      assert.equal(lstatSync(link).isSymbolicLink(), true, "sibling-prefix link must be preserved");
+    });
+
+    it("leaves an unresolvable Windows drive-relative target untouched", async (t) => {
+      if (process.platform !== "win32") {
+        t.skip("Windows drive-relative regression");
+        return;
+      }
+      assert.equal(
+        resolveOrphanedSymlinkTarget(join(dir, "commands", "user-owned.md"), "C:relative.md"),
+        null,
+      );
+    });
   });
 
   describe("isSymlinkTraversable (forge#2620)", () => {

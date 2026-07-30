@@ -52,6 +52,12 @@ export function readLog(dir, issue) {
   return out;
 }
 
+function advanceVersion(state, event) {
+  const seq = Number.isSafeInteger(event.seq) && event.seq >= 0 ? event.seq : 0;
+  const next = state.v < Number.MAX_SAFE_INTEGER ? state.v + 1 : state.v;
+  state.v = Math.max(seq, next);
+}
+
 /** Fold events into a RunState. The commit rule lives here. */
 export function deriveState(events) {
   /** @type {import("./phases.mjs").RunState} */
@@ -65,12 +71,15 @@ export function deriveState(events) {
         break;
       case "PHASE_COMMIT":
         if (!s.committed.includes(e.phase)) s.committed.push(e.phase);
-        s.v = e.seq;
+        advanceVersion(s, e);
         if (e.outputs?.branch) s.branch = e.outputs.branch;
         if (e.outputs?.pr != null) s.pr = e.outputs.pr;
         break;
       case "RUN_TERMINAL":
-        s.terminal = true; s.terminalReason = e.reason ?? "done"; s.v = e.seq;
+        s.terminal = true; s.terminalReason = e.reason ?? "done"; advanceVersion(s, e);
+        break;
+      case "STATE_VERSION":
+        if (Number.isSafeInteger(e.v) && e.v >= 0) s.v = Math.max(s.v, e.v);
         break;
       // forge#2524: a session-limit pause is purely informational — it does
       // NOT touch committed/terminal/terminalReason. The phase that hit the
@@ -80,7 +89,7 @@ export function deriveState(events) {
       // casing needed here beyond recording the diagnostic below.
       case "PHASE_RATE_LIMITED":
         s.lastRateLimit = { phase: e.phase, resetAt: e.resetAt ?? null, waitMs: e.waitMs ?? null };
-        s.v = e.seq;
+        advanceVersion(s, e);
         break;
       // PHASE_START / PHASE_FAILED do not change committed state
     }

@@ -230,7 +230,8 @@ More ship today (web-property analytics, browser QA sweeps, self-benchmarking) â
 npx forgedock # checks your environment, installs commands into ~/.claude/commands/ (available in every Claude Code session on this machine), detects your repo, and hands you a reviewed forge.yaml
 ```
 
-For OpenCode, install namespaced native commands without changing your provider
+For OpenCode, install namespaced commands and the deterministic native
+`work-on`/`orchestrate` controllers without changing your provider
 or user-owned settings. When migrating an older ForgeDock adapter, it removes
 only exact ForgeDock-managed legacy entries from `opencode.json`:
 
@@ -239,8 +240,12 @@ npx forgedock opencode install
 # restart OpenCode, then: /forge/work-on <issue>
 ```
 
-See [OpenCode support](docs/OPENCODE.md) for architecture, token-loading rules,
-current parity boundaries, and lifecycle commands.
+The native control plane uses fresh foreground phase sessions and durable
+GitHub/git reconciliation instead of loading the Claude dispatcher prose or
+waiting for background-task completion prompts. See [OpenCode support](docs/OPENCODE.md)
+for architecture and lifecycle commands, and the
+[pre-staging acceptance runbook](docs/OPENCODE-NATIVE-ACCEPTANCE.md) for a
+disposable end-to-end test procedure.
 
 **Install is always global**, to `~/.claude/commands/`. `--global` is still accepted on the command line for backward compatibility but has no effect â€” there's no other install location to opt out of.
 

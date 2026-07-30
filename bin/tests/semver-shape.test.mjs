@@ -58,6 +58,10 @@ describe("isValidSemverShape() — length cap (forge#2195)", () => {
   it("rejects shape-invalid strings", () => {
     assert.equal(isValidSemverShape("1.2"), false);
     assert.equal(isValidSemverShape("v1.2.3"), false);
+    assert.equal(isValidSemverShape("01.2.3"), false);
+    assert.equal(isValidSemverShape("1.02.3"), false);
+    assert.equal(isValidSemverShape("1.2.3-01"), false);
+    assert.equal(isValidSemverShape("1.2.3-beta..1"), false);
     assert.equal(isValidSemverShape("1.2.3; rm -rf /"), false);
   });
 

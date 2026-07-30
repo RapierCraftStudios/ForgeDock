@@ -6,8 +6,8 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runIssue } from "../engine.mjs";
-import { readLog, deriveState } from "../engine/runlog.mjs";
-import { serializeState } from "../engine/state.mjs";
+import { appendEvent, readLog, deriveState } from "../engine/runlog.mjs";
+import { parseState, serializeState } from "../engine/state.mjs";
 import { VALID_BACKENDS } from "../runner.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -64,6 +64,122 @@ describe("runIssue", () => {
     // forge#2174: branch must be the real, ground-truth branch parsed from the
     // FORGE:BUILDER comment — never a guessed default the engine invented.
     assert.equal(s.branch, "fix/real-branch-42");
+  });
+
+  it("accepts a durable phase marker even when an OpenCode session reports a runtime failure", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
+      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => {
+      script[commandName]();
+      return commandName === "work-on/investigate"
+        ? { runtimeFailure: { code: "OPENCODE_ASSISTANT_ERROR", message: "connection closed after write", retryable: true } }
+        : {};
+    };
+
+    const result = await runIssue({ issue: 42, dir, agentId: "native", lane: "staging", io, runner, now: () => 1000 });
+
+    assert.equal(result.terminalReason, "merged");
+    assert.equal(readLog(dir, 42).filter((event) => event.phase === "investigate" && event.event === "PHASE_START").length, 1);
+  });
+
+  it("classifies exhausted OpenCode runtime failures as engine-error, not needs-human", async () => {
+    const { io } = fakeWorld();
+    const runner = async () => ({
+      runtimeFailure: { code: "OPENCODE_ASSISTANT_ERROR", message: "provider unavailable", retryable: true },
+    });
+
+    const result = await runIssue({ issue: 42, dir, agentId: "native", lane: "staging", io, runner, now: () => 1000, maxAttempts: 2 });
+
+    assert.equal(result.terminalReason, "engine-error");
+    const failures = readLog(dir, 42).filter((event) => event.event === "PHASE_FAILED");
+    assert.equal(failures.length, 2);
+    assert.ok(failures.every((event) => event.reason.includes("OPENCODE_ASSISTANT_ERROR")));
+  });
+
+  it("classifies mixed throws and runtime failures as engine-error when no healthy result occurred", async () => {
+    const { io } = fakeWorld();
+    let attempt = 0;
+    const runner = async () => {
+      attempt++;
+      if (attempt === 1) throw new Error("transport reset");
+      return { runtimeFailure: { code: "OPENCODE_ASSISTANT_ERROR", message: "provider unavailable", retryable: true } };
+    };
+
+    const result = await runIssue({ issue: 42, dir, agentId: "native", lane: "staging", io, runner, now: () => 1000, maxAttempts: 2 });
+
+    assert.equal(result.terminalReason, "engine-error");
+    assert.match(result.detail, /never returned a healthy result/);
+  });
+
+  it("keeps exhausted content failures as needs-human after any healthy runner result", async () => {
+    const { io } = fakeWorld();
+    let attempt = 0;
+    const runner = async () => {
+      attempt++;
+      if (attempt === 2) throw new Error("transport reset");
+      return {};
+    };
+
+    const result = await runIssue({ issue: 42, dir, agentId: "native", lane: "staging", io, runner, now: () => 1000, maxAttempts: 2 });
+
+    assert.equal(result.terminalReason, "needs-human");
+  });
+
+  it("terminates a cancelled OpenCode phase without consuming retry attempts", async () => {
+    const { io } = fakeWorld();
+    let calls = 0;
+    const runner = async () => {
+      calls++;
+      throw Object.assign(new Error("cancelled"), { code: "OPENCODE_CANCELLED" });
+    };
+
+    const result = await runIssue({ issue: 42, dir, agentId: "native", lane: "staging", io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(result.terminalReason, "cancelled");
+    assert.equal(calls, 1);
+    assert.equal(deriveState(readLog(dir, 42)).terminal, false);
+    assert.ok(readLog(dir, 42).some((event) => event.event === "RUN_INTERRUPTED"));
+  });
+
+  it("returns an existing terminal run without appending a second RUN_TERMINAL", async () => {
+    const { io } = fakeWorld();
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+    appendEvent(dir, 42, { event: "RUN_TERMINAL", reason: "merged" });
+    let runnerCalls = 0;
+
+    const result = await runIssue({
+      issue: 42,
+      dir,
+      agentId: "native",
+      lane: "staging",
+      io,
+      runner: async () => { runnerCalls++; return {}; },
+      now: () => 1000,
+    });
+
+    assert.equal(result.terminalReason, "merged");
+    assert.equal(runnerCalls, 0);
+    assert.equal(readLog(dir, 42).filter((event) => event.event === "RUN_TERMINAL").length, 1);
+  });
+
+  it("does not duplicate RUN_TERMINAL if the log becomes terminal before terminate()", async () => {
+    const { io } = fakeWorld();
+    const runner = async () => {
+      appendEvent(dir, 42, { event: "RUN_TERMINAL", reason: "invalid" });
+      return {};
+    };
+
+    const result = await runIssue({ issue: 42, dir, agentId: "native", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
+
+    assert.equal(result.terminalReason, "invalid");
+    assert.equal(readLog(dir, 42).filter((event) => event.event === "RUN_TERMINAL").length, 1);
   });
 
   it("forge#2240: onProgress fires phase_enter/phase_exit for every phase actually run, and never crashes the run if it throws", async () => {
@@ -817,6 +933,50 @@ describe("runIssue", () => {
     const s = deriveState(readLog(dir, 42));
     assert.deepEqual(s.committed, ["investigate", "context", "architect", "build", "review", "close"]);
     assert.equal(s.issue, 42);
+  });
+
+  it("C2: hydrate preserves remote.v across compact reconstruction and telemetry-sized local logs", async () => {
+    const { w, io } = fakeWorld();
+    w.body = serializeState({
+      v: 40,
+      run: "r_42_staging",
+      issue: 42,
+      lane: "staging",
+      committed: ["investigate"],
+      phase: "context",
+      branch: null,
+      pr: null,
+      terminal: false,
+      terminalReason: null,
+      lease: null,
+    });
+    w.markers = "INVESTIGATION:COMPLETE";
+    const projectedVersions = [];
+    const originalGh = io.gh;
+    io.gh = async (args) => {
+      const result = await originalGh(args);
+      if (args[0] === "issue" && args[1] === "edit" && args.includes("--body")) {
+        projectedVersions.push(parseState(args[args.indexOf("--body") + 1])?.v);
+      }
+      return result;
+    };
+
+    const result = await runIssue({
+      issue: 42,
+      dir,
+      agentId: "native",
+      lane: "staging",
+      io,
+      runner: async () => { throw Object.assign(new Error("cancelled"), { code: "OPENCODE_CANCELLED" }); },
+      now: () => 1000,
+      maxAttempts: 1,
+    });
+
+    assert.equal(result.terminalReason, "cancelled");
+    assert.ok(projectedVersions.length >= 2);
+    assert.ok(projectedVersions.every((version) => version >= 40),
+      `projected versions must never regress below hydrated remote.v: ${projectedVersions.join(", ")}`);
+    assert.equal(deriveState(readLog(dir, 42)).v, 40);
   });
 
   it("R1: context.reconcile short-circuits when FORGE:CONTEXT already present (no LLM re-run)", async () => {

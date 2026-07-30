@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -25,7 +25,7 @@ const {
   checkAllPreconditions,
   assertCloseInvariants,
   formatViolation,
-} = await import(INVARIANTS_PATH);
+} = await import(pathToFileURL(INVARIANTS_PATH).href);
 
 // ---------------------------------------------------------------------------
 // Minimal YAML for tests — avoids depending on yq availability in test env.

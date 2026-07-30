@@ -260,6 +260,17 @@ export async function runIssue(opts) {
     rewriteLog(dir, issue, eventsFromIndex(state));
     state = deriveState(readLog(dir, issue));
   }
+  // A resumed terminal run is already complete. Do not claim a fresh lease or
+  // append another RUN_TERMINAL; only remirror a local-only/ahead terminal
+  // index when GitHub does not already carry that terminal state.
+  if (state.terminal) {
+    if (!remote || action === "remirror") {
+      await projector.writeState(issue, { ...state, lease: null });
+      if (state.terminalReason === "needs-human") await projector.setLabel(issue, "needs-human");
+      else if (state.terminalReason === "engine-error") await projector.setLabel(issue, "workflow:engine-error");
+    }
+    return { terminalReason: state.terminalReason || "merged", detail: null };
+  }
   // forge#2239: claim the lease unconditionally here — before the phase loop
   // starts, for EVERY reconcile action ("fresh", "remirror", "hydrate", and
   // "local"). Previously only "fresh"/"remirror"/"hydrate" wrote any state at
@@ -479,7 +490,14 @@ export async function runIssue(opts) {
         // "needs-human" — this is the engine/tool breaking, not a genuine
         // human-judgment block (see #2244/#2261). Any other thrown error is
         // a true unexpected crash and keeps propagating unchanged.
-        if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED") {
+        if (e.code === "OPENCODE_CANCELLED") {
+          const detail = `phase ${phase.id}: OpenCode run cancelled`;
+          emitProgress({ event: "phase_exit", phase: phase.id, status: "blocked", detail });
+          clearInterval(renewTimer);
+          if (pendingRenewal) await pendingRenewal;
+          return await interrupt(state, detail);
+        }
+        if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED" || e.code === "OPENCODE_BACKEND_FAILED") {
           // forge#2241: when the runner attached a session-limit reset time
           // (bin/runner.mjs's extractSessionLimitResetTime(), only ever set
           // for a genuine session-limit CLI_BACKEND_FAILED — never
@@ -582,6 +600,20 @@ export async function runIssue(opts) {
   return await terminate(state, state.terminalReason || "merged");
 
   async function terminate(s, reason, detail) {
+    const current = deriveState(readLog(dir, issue));
+    if (s?.terminal || current.terminal) {
+      const terminalReason = current.terminalReason || s?.terminalReason || reason;
+      const final = {
+        ...(current.terminal ? current : s),
+        terminal: true,
+        terminalReason,
+        lease: null,
+      };
+      await projector.writeState(issue, final);
+      if (terminalReason === "needs-human") await projector.setLabel(issue, "needs-human");
+      else if (terminalReason === "engine-error") await projector.setLabel(issue, "workflow:engine-error");
+      return { terminalReason, detail };
+    }
     appendEvent(dir, issue, { event: "RUN_TERMINAL", reason });
     const final = { ...deriveState(readLog(dir, issue)), terminal: true, terminalReason: reason, lease: null };
     await projector.writeState(issue, final);
@@ -594,19 +626,28 @@ export async function runIssue(opts) {
     else if (reason === "engine-error") await projector.setLabel(issue, "workflow:engine-error");
     return { terminalReason: reason, detail };
   }
+
+  async function interrupt(s, detail) {
+    appendEvent(dir, issue, { event: "RUN_INTERRUPTED", reason: "cancelled" });
+    const resumable = {
+      ...deriveState(readLog(dir, issue)),
+      terminal: false,
+      terminalReason: null,
+      lease: null,
+    };
+    await projector.writeState(issue, resumable);
+    return { terminalReason: "cancelled", detail };
+  }
 }
 
 async function runPhaseWithRetry(phase, state, ctx) {
   const { io, runner, dir, issue, commandsDir, maxAttempts, backend, model } = ctx;
-  // forge#2261: true only if EVERY attempt failed by the runner itself
-  // throwing (never once reached phase.detectOutcome()). This is the signal
-  // that distinguishes an engine/tool crash (the tool never even produced a
-  // result to evaluate) from a genuine content-level block (the tool ran
-  // fine, but the phase's own completion criteria weren't met — e.g. an
-  // unmerged PR, an unresolved branch, or a fixed-point zero-commits case).
-  // Flips to false the instant any attempt's runner() call succeeds, even if
-  // that attempt's detectOutcome() itself reports failure.
-  let allAttemptsThrew = true;
+  // A returned OpenCode runtimeFailure is not a healthy runner result, even
+  // though it is returned (rather than thrown) so GitHub reconciliation can
+  // still observe durable effects. Any mixture of throws/runtime failures is
+  // therefore an engine error unless at least one normal runner result made it
+  // through to content-level outcome detection.
+  let healthyRunnerResult = false;
   // forge#2377: the last successful attempt's `usage` (from runner()'s ==
   // runCommand()'s resolved value — {input_tokens, output_tokens,
   // cache_creation_input_tokens, cache_read_input_tokens} on the API
@@ -645,7 +686,8 @@ async function runPhaseWithRetry(phase, state, ctx) {
       // *why* the CLI exited 1 (the quota/session-limit theory in #2244 is
       // unproven) — a deterministic tool crash should not be retried as if
       // transient regardless of its root cause.
-      if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED") throw e;
+      if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED" ||
+          e.code === "OPENCODE_CANCELLED" || e.code === "OPENCODE_BACKEND_FAILED") throw e;
       // forge#2377: no `usage` field here — the runner threw, so no result
       // (and therefore no usage data) was ever produced for this attempt.
       // Do not fabricate a value; omitting the field (rather than a stale
@@ -654,10 +696,27 @@ async function runPhaseWithRetry(phase, state, ctx) {
       appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, maxAttempts });
       continue;
     }
-    allAttemptsThrew = false;
     lastUsage = result?.usage ?? null;
     const outcome = await phase.detectOutcome(state, io);
     if (outcome.status === "committed" || outcome.status === "blocked") return { ...outcome, usage: lastUsage };
+    if (result?.runtimeFailure) {
+      const failure = result.runtimeFailure;
+      appendEvent(dir, issue, {
+        event: "PHASE_FAILED",
+        phase: phase.id,
+        attempt,
+        reason: `${failure.code || "OPENCODE_SESSION_FAILED"}: ${failure.message || outcome.detail}`,
+        maxAttempts,
+        usage: lastUsage,
+      });
+      if (failure.retryable === false) {
+        throw Object.assign(new Error(failure.message || `OpenCode phase ${phase.id} failed`), {
+          code: "OPENCODE_BACKEND_FAILED",
+        });
+      }
+      continue;
+    }
+    healthyRunnerResult = true;
     appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail, maxAttempts, usage: lastUsage });
     // forge#2176: a phase's detectOutcome can mark a failure as a known,
     // state-derived fixed point — re-running the phase's runner is
@@ -674,19 +733,14 @@ async function runPhaseWithRetry(phase, state, ctx) {
     }
   }
   // Exhausted transient retries → escalate (spec §7).
-  // forge#2261: if the runner itself threw on every single attempt (it never
-  // once produced a result for detectOutcome() to evaluate), this is an
-  // engine/tool failure, not a content-level judgment call — tag the outcome
-  // so runIssue()'s terminate() writes a distinct label instead of
-  // needs-human. If at least one attempt reached detectOutcome() (the tool
-  // ran, the phase just isn't done), this stays the existing untagged shape,
-  // which runIssue() defaults to "needs-human" — unchanged behavior for every
-  // genuine content-level block (unmerged PR, unresolved branch, a transient
-  // git error inside commitsAhead(), etc.).
-  if (allAttemptsThrew) {
+  // forge#2261: no healthy runner result means the tool never produced content
+  // that can justify a human gate. This includes mixed thrown/runtimeFailure
+  // attempts. Once any healthy result exists, exhausted content checks retain
+  // the established needs-human classification.
+  if (!healthyRunnerResult) {
     return {
       status: "blocked",
-      detail: `phase ${phase.id} failed after ${maxAttempts} attempts (runner threw every attempt)`,
+      detail: `phase ${phase.id} failed after ${maxAttempts} attempts (runner never returned a healthy result)`,
       reason: "engine-error",
       usage: null,
     };
@@ -707,6 +761,7 @@ function eventsFromIndex(idx) {
     events.push({ event: "PHASE_COMMIT", phase, outputs });
   }
   if (idx.terminal) events.push({ event: "RUN_TERMINAL", reason: idx.terminalReason });
+  events.push({ event: "STATE_VERSION", v: idx.v });
   return events;
 }
 

@@ -56,6 +56,20 @@ describe("runlog", () => {
     assert.equal(s.phase, null);
   });
 
+  it("preserves a hydrated remote version floor without treating runtime telemetry as progress", () => {
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r1", lane: "staging" });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+    appendEvent(dir, 42, { event: "STATE_VERSION", v: 40 });
+    appendEvent(dir, 42, { event: "OPENCODE_SESSION_BOUND", phase: "context", sessionID: "s1" });
+    appendEvent(dir, 42, { event: "OPENCODE_SESSION_TERMINAL", phase: "context", sessionID: "s1" });
+
+    assert.equal(deriveState(readLog(dir, 42)).v, 40);
+
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "context", outputs: {} });
+    assert.equal(deriveState(readLog(dir, 42)).v, 41,
+      "the next authoritative event must advance from remote.v rather than regress to its local seq");
+  });
+
   it("readLog throws on corrupted non-final line (mid-file data loss)", () => {
     appendEvent(dir, 42, { event: "RUN_START", issue: 42 });
     appendFileSync(join(dir, "42.jsonl"), "not json\n"); // corrupted line in the middle

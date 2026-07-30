@@ -9,7 +9,7 @@
  *   init-detect.mjs, init-enrich-api.mjs, tui.annotatedReviewScreen, registry.mjs
  */
 
-import { existsSync, lstatSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
+import { existsSync, lstatSync, readFileSync, writeFileSync, renameSync, unlinkSync, constants as fsConstants } from "fs";
 import { join, basename } from "path";
 
 // ---------------------------------------------------------------------------
@@ -747,9 +747,9 @@ export async function preflight(ctx) {
 // Act II — Forging: command symlinks + SessionStart hook (Task 6)
 // ---------------------------------------------------------------------------
 
-import { mkdir, symlink, readlink, lstat, readdir, rename, copyFile, readFile, writeFile, unlink, rm, open } from "fs/promises";
+import { mkdir, rmdir, symlink, readlink, lstat, stat, readdir, rename, copyFile, readFile, writeFile, unlink, rm, open } from "fs/promises";
 import { compareVersions } from "./registry.mjs";
-import { relative, dirname as pathDirname, isAbsolute } from "path";
+import { relative, dirname as pathDirname, isAbsolute, resolve as resolvePath, sep } from "path";
 import {
   installSessionStartHook,
   installSubagentStopHook,
@@ -1145,22 +1145,28 @@ export const PIPELINE_SCRIPTS = new Set([
   "validate-pr-target.sh",
 ]);
 
+export function resolveOrphanedSymlinkTarget(linkPath, target, platform = process.platform) {
+  if (platform === "win32" && WINDOWS_DRIVE_RELATIVE_RE.test(target)) return null;
+  return resolvePath(pathDirname(linkPath), target);
+}
+
 /**
- * Recursively walk targetDir and remove any symlink whose target begins with
- * commandsDir (i.e. a ForgeDock-managed link) but whose target file no longer
- * exists on disk. These are "orphaned" symlinks left behind when a command is
- * renamed or deleted.
+ * Recursively walk targetDir and remove any symlink whose resolved target is
+ * contained by commandsDir (i.e. a ForgeDock-managed link) but whose target
+ * file no longer exists on disk. These are "orphaned" symlinks left behind
+ * when a command is renamed or deleted.
  *
- * Safety invariant: only symlinks whose readlink() result starts with
- * commandsDir + "/" are touched. User-owned symlinks and third-party links are
- * never removed.
+ * Safety invariant: resolve relative link targets from the link's own
+ * directory, then use path.relative() containment. String-prefix checks are
+ * forbidden here because sibling paths such as commands-evil are not owned.
+ * User-owned symlinks and third-party links are never removed.
  *
  * @param {string} targetDir   - ~/.claude/commands (installed commands root)
  * @param {string} commandsDir - FORGE_HOME/commands (source commands root)
  * @returns {Promise<number>} Number of orphaned symlinks removed.
  */
-async function pruneOrphanedSymlinks(targetDir, commandsDir) {
-  const prefix = commandsDir + "/";
+export async function pruneOrphanedSymlinks(targetDir, commandsDir) {
+  const commandsRoot = resolvePath(commandsDir);
   let pruned = 0;
 
   async function walk(dir) {
@@ -1182,11 +1188,22 @@ async function pruneOrphanedSymlinks(targetDir, commandsDir) {
         } catch {
           continue; // can't read link — skip
         }
-        // Only manage links that point into our commandsDir
-        if (!target.startsWith(prefix)) continue;
+        // Windows drive-relative targets ("C:foo") depend on drive C's own
+        // process cwd, which Node cannot resolve safely. Do not reinterpret
+        // them relative to the link directory and accidentally claim them.
+        const resolvedTarget = resolveOrphanedSymlinkTarget(full, target);
+        if (!resolvedTarget) continue;
+        const relTarget = relative(commandsRoot, resolvedTarget);
+        const isOwned = relTarget === "" || (
+          relTarget !== ".." &&
+          !relTarget.startsWith(`..${sep}`) &&
+          !isAbsolute(relTarget)
+        );
+        // Only manage links whose resolved target is contained by commandsDir.
+        if (!isOwned) continue;
         // Check whether the target file still exists
         try {
-          await lstat(target);
+          await lstat(resolvedTarget);
           // target exists — not orphaned
         } catch (err) {
           if (err.code !== "ENOENT") continue; // unexpected error — skip to be safe
@@ -1352,11 +1369,11 @@ export function isEphemeralCachePath(p) {
 // ---------------------------------------------------------------------------
 
 /**
- * The four top-level directories that make up ForgeDock's installable
+ * The top-level directories that make up ForgeDock's installable
  * payload. Kept as a single list so persistHome() and its tests agree on
  * exactly what gets copied.
  */
-const PERSIST_HOME_DIRS = ["bin", "commands", "scripts", "templates"];
+const PERSIST_HOME_DIRS = ["bin", "commands", "packages", "runtimes", "scripts", "templates"];
 
 /**
  * Detect whether `dir` is a git working tree — has a `.git` entry at all,
@@ -1384,6 +1401,373 @@ function isGitWorkingTree(dir) {
   }
 }
 
+function unsafePersistDestination(path, detail) {
+  const error = new Error(`Unsafe persisted-home destination ${path}: ${detail}`);
+  error.code = "UNSAFE_PERSIST_DESTINATION";
+  return error;
+}
+
+export function assertPersistedDestinationDevice(rootStats, destinationStats, path) {
+  const rootDevice = rootStats?.dev;
+  const destinationDevice = destinationStats?.dev;
+  const rootComparable = typeof rootDevice === "number" || typeof rootDevice === "bigint";
+  const destinationComparable = typeof destinationDevice === "number" || typeof destinationDevice === "bigint";
+  if (rootComparable && destinationComparable && rootDevice !== destinationDevice) {
+    throw unsafePersistDestination(path, "managed directories must remain on the ~/.forge filesystem device");
+  }
+}
+
+/** lstat a destination entry without ever following a symlink/junction. */
+async function safeDestinationStats(path) {
+  try {
+    const stats = await lstat(path);
+    // Node reports Windows directory junctions as symbolic links from lstat().
+    if (stats.isSymbolicLink()) {
+      throw unsafePersistDestination(path, "symbolic links and junctions are not allowed");
+    }
+    if (stats.isFile() && stats.nlink > 1) {
+      throw unsafePersistDestination(path, "hard-linked destination files are not allowed");
+    }
+    return stats;
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function assertSafeDestinationDirectory(path, { allowMissing = false, rootStats = null } = {}) {
+  const stats = await safeDestinationStats(path);
+  if (!stats) {
+    if (allowMissing) return null;
+    throw unsafePersistDestination(path, "directory is missing");
+  }
+  if (!stats.isDirectory()) {
+    throw unsafePersistDestination(path, "expected a directory");
+  }
+  if (rootStats) assertPersistedDestinationDevice(rootStats, stats, path);
+  return stats;
+}
+
+async function ensureSafeDestinationDirectory(path, rootStats = null) {
+  const existing = await assertSafeDestinationDirectory(path, { allowMissing: true, rootStats });
+  if (existing) return;
+  // Deliberately non-recursive: callers establish and validate the parent
+  // first, so mkdir cannot walk through an unchecked destination component.
+  try {
+    await mkdir(path);
+  } catch (error) {
+    if (error.code !== "EEXIST") throw error;
+  }
+  await assertSafeDestinationDirectory(path, { rootStats });
+}
+
+/** Reject links anywhere below path before a recursive orphan deletion. */
+async function assertSafeDestinationTree(path, persistedRoot, rootStats) {
+  await assertSafeDestinationDirectory(persistedRoot);
+  const stats = await safeDestinationStats(path);
+  if (!stats || !stats.isDirectory()) return;
+  assertPersistedDestinationDevice(rootStats, stats, path);
+  const entries = await readdir(path);
+  for (const name of entries) {
+    await assertSafeDestinationTree(join(path, name), persistedRoot, rootStats);
+  }
+}
+
+async function atomicCopyIntoDestination(srcPath, destPath, persistedRoot, rootStats) {
+  const parent = pathDirname(destPath);
+  await assertSafeDestinationDirectory(persistedRoot);
+  await assertSafeDestinationDirectory(parent, { rootStats });
+  await safeDestinationStats(destPath);
+  const tmpPath = `${destPath}.${process.pid}.${Date.now()}.persist.tmp`;
+  try {
+    await copyFile(srcPath, tmpPath, fsConstants.COPYFILE_EXCL);
+    await assertSafeDestinationDirectory(persistedRoot);
+    await assertSafeDestinationDirectory(parent, { rootStats });
+    await safeDestinationStats(destPath);
+    await rename(tmpPath, destPath);
+  } catch (error) {
+    await unlink(tmpPath).catch(() => {});
+    throw error;
+  }
+}
+
+const PERSIST_HOME_LOCK_NAME = "persist.lock";
+const PERSIST_HOME_LOCK_WAIT_MS = 10_000;
+const PERSIST_HOME_LOCK_RETRY_MS = 25;
+const PERSIST_HOME_LOCK_RELEASE_RETRIES = 4;
+const PERSIST_HOME_LOCK_TRANSIENT_RELEASE_CODES = new Set(["EACCES", "EBUSY", "EMFILE", "ENFILE", "EPERM"]);
+const PERSIST_HOME_LOCK_TRANSIENT_ACQUIRE_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
+const PERSIST_HOME_LOCK_HANDLES = new WeakMap();
+
+async function writePersistHomeLockState(handle, state, metadata = {}) {
+  const data = Buffer.from(`${JSON.stringify({ version: 1, state, pid: process.pid, at: new Date().toISOString(), ...metadata })}\n`);
+  await handle.write(data, 0, data.length, 0);
+  await handle.truncate(data.length);
+  await handle.sync();
+}
+
+async function releasePersistHomeReclaimClaim(claimPath) {
+  for (let attempt = 0; attempt <= PERSIST_HOME_LOCK_RELEASE_RETRIES; attempt++) {
+    try {
+      await rmdir(claimPath);
+      return;
+    } catch (error) {
+      if (error.code === "ENOENT") return;
+      if (!PERSIST_HOME_LOCK_TRANSIENT_RELEASE_CODES.has(error.code) || attempt === PERSIST_HOME_LOCK_RELEASE_RETRIES) {
+        throw error;
+      }
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, PERSIST_HOME_LOCK_RETRY_MS));
+    }
+  }
+}
+
+async function reclaimReleasedPersistHomeLock(lockPath) {
+  const claimPath = `${lockPath}.reclaim`;
+  try {
+    await mkdir(claimPath);
+  } catch (error) {
+    if (error.code === "EEXIST") return false;
+    throw error;
+  }
+  try {
+    let stats;
+    try {
+      stats = await lstat(lockPath);
+    } catch (error) {
+      if (error.code === "ENOENT") return true;
+      if (PERSIST_HOME_LOCK_TRANSIENT_RELEASE_CODES.has(error.code)) return false;
+      throw error;
+    }
+    if (!stats.isFile() || stats.isSymbolicLink()) return false;
+
+    let metadata;
+    try {
+      metadata = JSON.parse(await readFile(lockPath, "utf-8"));
+    } catch (error) {
+      if (error.code === "ENOENT") return true;
+      if (error instanceof SyntaxError) return false;
+      if (PERSIST_HOME_LOCK_TRANSIENT_RELEASE_CODES.has(error.code)) return false;
+      throw error;
+    }
+    if (
+      metadata?.version !== 1
+      || metadata?.state !== "released"
+      || metadata?.cleanupComplete !== true
+      || typeof metadata?.token !== "string"
+      || metadata.token.length === 0
+    ) return false;
+
+    try {
+      await unlink(lockPath);
+    } catch (error) {
+      if (error.code === "ENOENT") return true;
+      if (PERSIST_HOME_LOCK_TRANSIENT_RELEASE_CODES.has(error.code)) return false;
+      throw error;
+    }
+    return true;
+  } finally {
+    await releasePersistHomeReclaimClaim(claimPath);
+  }
+}
+
+async function publishPersistHomeLockCleanupComplete(lockPath, token) {
+  let current;
+  try {
+    current = JSON.parse(await readFile(lockPath, "utf-8"));
+  } catch (error) {
+    error.persistHomeRetrySafe = true;
+    throw error;
+  }
+  if (current?.state !== "released" || current?.token !== token) {
+    throw new Error("persistence lock changed before release cleanup completed");
+  }
+  let completionHandle;
+  try {
+    completionHandle = await open(lockPath, "r+");
+  } catch (error) {
+    error.persistHomeRetrySafe = true;
+    throw error;
+  }
+  let operationError = null;
+  try {
+    await writePersistHomeLockState(completionHandle, "released", { token, cleanupComplete: true });
+  } catch (error) {
+    operationError = error;
+  }
+  try {
+    await completionHandle.close();
+  } catch (error) {
+    operationError ||= error;
+  }
+  if (operationError) {
+    operationError.persistHomeRetrySafe = false;
+    throw operationError;
+  }
+}
+
+export async function acquirePersistHomeLock(
+  lockPath,
+  { timeoutMs = PERSIST_HOME_LOCK_WAIT_MS, retryMs = PERSIST_HOME_LOCK_RETRY_MS } = {},
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    let handle;
+    try {
+      handle = await open(lockPath, "wx");
+    } catch (error) {
+      if (error.code !== "EEXIST" && !PERSIST_HOME_LOCK_TRANSIENT_ACQUIRE_CODES.has(error.code)) throw error;
+      if (await reclaimReleasedPersistHomeLock(lockPath)) continue;
+      if (Date.now() >= deadline) {
+        if (error.code !== "EEXIST") throw error;
+        const busy = new Error(`Persisted-home lock is active: ${lockPath}`);
+        busy.code = "PERSIST_HOME_LOCK_BUSY";
+        throw busy;
+      }
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, retryMs));
+      continue;
+    }
+
+    try {
+      const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      await writePersistHomeLockState(handle, "active", { token });
+      PERSIST_HOME_LOCK_HANDLES.set(handle, { token });
+      return handle;
+    } catch (error) {
+      await releasePersistHomeLock(lockPath, handle).catch(() => {});
+      throw error;
+    }
+  }
+}
+
+export async function releasePersistHomeLock(
+  lockPath,
+  handle,
+  {
+    retries = PERSIST_HOME_LOCK_RELEASE_RETRIES,
+    retryMs = PERSIST_HOME_LOCK_RETRY_MS,
+    unlinkFn = unlink,
+    publishCleanupFn = publishPersistHomeLockCleanupComplete,
+  } = {},
+) {
+  if (!handle) return;
+  const failures = [];
+  const token = PERSIST_HOME_LOCK_HANDLES.get(handle)?.token || "";
+  let markedReleased = false;
+  let closed = false;
+  try {
+    // This first marker is intentionally not reclaimable. Only after every
+    // pathname unlink attempt has ended do we publish cleanupComplete below.
+    await writePersistHomeLockState(handle, "released", { token, cleanupComplete: false });
+    markedReleased = true;
+  } catch (error) {
+    failures.push(error);
+  }
+  try {
+    await handle.close();
+    closed = true;
+  } catch (error) {
+    failures.push(error);
+  }
+  PERSIST_HOME_LOCK_HANDLES.delete(handle);
+
+  let unlinkError = null;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      await unlinkFn(lockPath);
+      unlinkError = null;
+      break;
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        unlinkError = null;
+        break;
+      }
+      unlinkError = error;
+      if (!PERSIST_HOME_LOCK_TRANSIENT_RELEASE_CODES.has(error.code) || attempt === retries) break;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, retryMs));
+    }
+  }
+  if (unlinkError && markedReleased && closed) {
+    let completionError = null;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        await publishCleanupFn(lockPath, token);
+        completionError = null;
+        break;
+      } catch (error) {
+        completionError = error;
+        if (
+          error.persistHomeRetrySafe !== true
+          || !PERSIST_HOME_LOCK_TRANSIENT_RELEASE_CODES.has(error.code)
+          || attempt === retries
+        ) break;
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, retryMs));
+      }
+    }
+    if (completionError) failures.push(completionError);
+  }
+  if (unlinkError) failures.push(unlinkError);
+  if (failures.length > 0) {
+    const releaseError = new Error(
+      `Failed to release persisted-home lock ${lockPath}: ${failures.map((error) => error.message || String(error)).join("; ")}`,
+    );
+    releaseError.code = "PERSIST_HOME_LOCK_RELEASE_FAILED";
+    releaseError.cause = failures[0];
+    throw releaseError;
+  }
+}
+
+async function preflightManagedPersistDestinations(persistedHome, rootStats, lockPath) {
+  for (const name of PERSIST_HOME_DIRS) {
+    const path = join(persistedHome, name);
+    const stats = await safeDestinationStats(path);
+    if (!stats) continue;
+    if (!stats.isDirectory()) {
+      throw unsafePersistDestination(path, "managed payload root must be a directory");
+    }
+    assertPersistedDestinationDevice(rootStats, stats, path);
+    await assertSafeDestinationTree(path, persistedHome, rootStats);
+  }
+
+  for (const path of [join(persistedHome, "package.json"), join(persistedHome, "version"), lockPath]) {
+    const stats = await safeDestinationStats(path);
+    if (stats && !stats.isFile()) {
+      throw unsafePersistDestination(path, "managed metadata and lock entries must be regular files");
+    }
+  }
+}
+
+const STRICT_SEMVER_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+function compareNumericIdentifiers(a, b) {
+  if (a.length !== b.length) return a.length - b.length;
+  return a === b ? 0 : (a < b ? -1 : 1);
+}
+
+/** SemVer precedence with a fallback for legacy/non-semver version files. */
+function comparePersistedVersions(a, b) {
+  const left = STRICT_SEMVER_RE.exec(a);
+  const right = STRICT_SEMVER_RE.exec(b);
+  if (!left || !right) return compareVersions(a, b);
+  for (let index = 1; index <= 3; index++) {
+    const compared = compareNumericIdentifiers(left[index], right[index]);
+    if (compared !== 0) return compared;
+  }
+  const leftPre = left[4]?.split(".") ?? null;
+  const rightPre = right[4]?.split(".") ?? null;
+  if (!leftPre || !rightPre) return leftPre ? -1 : (rightPre ? 1 : 0);
+  for (let index = 0; index < Math.max(leftPre.length, rightPre.length); index++) {
+    if (leftPre[index] === undefined) return -1;
+    if (rightPre[index] === undefined) return 1;
+    if (leftPre[index] === rightPre[index]) continue;
+    const leftNumeric = /^\d+$/.test(leftPre[index]);
+    const rightNumeric = /^\d+$/.test(rightPre[index]);
+    if (leftNumeric && rightNumeric) return compareNumericIdentifiers(leftPre[index], rightPre[index]);
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return leftPre[index] < rightPre[index] ? -1 : 1;
+  }
+  return 0;
+}
+
 /**
  * Recursively copy `srcDir` into `destDir`, content-comparing existing files
  * before overwriting so unchanged bytes are never rewritten (same idempotency
@@ -1394,9 +1778,11 @@ function isGitWorkingTree(dir) {
  *
  * @param {string} srcDir
  * @param {string} destDir
+ * @param {string} persistedRoot
+ * @param {import("node:fs").Stats} rootStats
  * @returns {Promise<{ copied: number, unchanged: number }>}
  */
-async function copyDirIfChanged(srcDir, destDir) {
+async function copyDirIfChanged(srcDir, destDir, persistedRoot, rootStats) {
   let entries;
   try {
     entries = await readdir(srcDir, { withFileTypes: true });
@@ -1405,7 +1791,8 @@ async function copyDirIfChanged(srcDir, destDir) {
     throw err;
   }
 
-  await mkdir(destDir, { recursive: true });
+  await assertSafeDestinationDirectory(persistedRoot);
+  await ensureSafeDestinationDirectory(destDir, rootStats);
 
   let copied = 0;
   let unchanged = 0;
@@ -1413,26 +1800,35 @@ async function copyDirIfChanged(srcDir, destDir) {
   for (const entry of entries) {
     const srcPath = join(srcDir, entry.name);
     const destPath = join(destDir, entry.name);
+    const destStats = await safeDestinationStats(destPath);
 
     if (entry.isDirectory()) {
-      const sub = await copyDirIfChanged(srcPath, destPath);
+      if (destStats && !destStats.isDirectory()) {
+        throw unsafePersistDestination(destPath, "source directory collides with a non-directory destination");
+      }
+      const sub = await copyDirIfChanged(srcPath, destPath, persistedRoot, rootStats);
       copied += sub.copied;
       unchanged += sub.unchanged;
       continue;
     }
     if (!entry.isFile()) continue; // symlinks/sockets/etc. — not expected in this payload
+    if (destStats && !destStats.isFile()) {
+      throw unsafePersistDestination(destPath, "source file collides with a non-file destination");
+    }
 
     let needsCopy = true;
-    try {
+    if (destStats) {
       const [src, dst] = await Promise.all([readFile(srcPath), readFile(destPath)]);
       if (src.equals(dst)) needsCopy = false;
-    } catch (err) {
-      if (err.code !== "ENOENT") throw err;
-      // destPath missing — needs copy, needsCopy stays true.
     }
 
     if (needsCopy) {
-      await copyFile(srcPath, destPath);
+      await assertSafeDestinationDirectory(persistedRoot);
+      const currentDestStats = await safeDestinationStats(destPath);
+      if (currentDestStats && !currentDestStats.isFile()) {
+        throw unsafePersistDestination(destPath, "source file collides with a non-file destination");
+      }
+      await atomicCopyIntoDestination(srcPath, destPath, persistedRoot, rootStats);
       copied++;
     } else {
       unchanged++;
@@ -1453,16 +1849,19 @@ async function copyDirIfChanged(srcDir, destDir) {
  *
  * @param {string} srcDir
  * @param {string} destDir
+ * @param {string} persistedRoot
+ * @param {import("node:fs").Stats} rootStats
  * @returns {Promise<{ removed: number }>}
  */
-async function removeOrphans(srcDir, destDir) {
-  let destEntries;
-  try {
-    destEntries = await readdir(destDir, { withFileTypes: true });
-  } catch (err) {
-    if (err.code === "ENOENT") return { removed: 0 };
-    throw err;
+async function removeOrphans(srcDir, destDir, persistedRoot, rootStats) {
+  await assertSafeDestinationDirectory(persistedRoot);
+  const destStats = await safeDestinationStats(destDir);
+  if (!destStats) return { removed: 0 };
+  if (!destStats.isDirectory()) {
+    throw unsafePersistDestination(destDir, "expected a directory while pruning orphans");
   }
+  assertPersistedDestinationDevice(rootStats, destStats, destDir);
+  const destEntries = await readdir(destDir, { withFileTypes: true });
 
   let srcNames = null;
   try {
@@ -1483,13 +1882,16 @@ async function removeOrphans(srcDir, destDir) {
   let removed = 0;
   for (const entry of destEntries) {
     const destPath = join(destDir, entry.name);
+    const entryStats = await safeDestinationStats(destPath);
+    if (!entryStats) continue; // raced with another cleanup
     if (!srcNames.has(entry.name)) {
+      await assertSafeDestinationTree(destPath, persistedRoot, rootStats);
       await rm(destPath, { recursive: true, force: true });
       removed++;
       continue;
     }
-    if (entry.isDirectory()) {
-      const sub = await removeOrphans(join(srcDir, entry.name), destPath);
+    if (entryStats.isDirectory()) {
+      const sub = await removeOrphans(join(srcDir, entry.name), destPath, persistedRoot, rootStats);
       removed += sub.removed;
     }
   }
@@ -1497,14 +1899,15 @@ async function removeOrphans(srcDir, destDir) {
 }
 
 /**
- * Copy ForgeDock's own installable payload (bin/, commands/, scripts/,
- * templates/) from wherever the package currently resolved — npm global
- * install, npx/dlx cache, or any other non-git extraction — into a stable
- * `{ctx.home}/.forge/` home, and point `ctx.forgeHome` at it for the rest of
- * the journey. This is what makes `~/.claude/commands/` symlinks and the
- * SessionStart hook's baked-in script path survive npm/npx cache eviction
- * (issue #1943) — before this, both were built directly from the ephemeral
- * source location and broke silently once that cache was pruned.
+ * Copy ForgeDock's own installable payload (bin/, commands/, packages/,
+ * runtimes/, scripts/, templates/) from wherever the package currently
+ * resolved — npm global install, npx/dlx cache, or any other non-git
+ * extraction — into a stable `{ctx.home}/.forge/` home, and point
+ * `ctx.forgeHome` at it for the rest of the journey. This is what makes
+ * `~/.claude/commands/` symlinks, native runtime modules, and the SessionStart
+ * hook's baked-in script path survive npm/npx cache eviction (issue #1943) —
+ * before this, they were built directly from the ephemeral source location
+ * and broke silently once that cache was pruned.
  *
  * Skipped entirely when `ctx.forgeHome` is a git working tree (see
  * isGitWorkingTree() above): a git clone (or worktree) is already a stable,
@@ -1526,8 +1929,15 @@ async function removeOrphans(srcDir, destDir) {
  *
  * Fail-open: any filesystem error (permission denied, disk full, etc.) is
  * caught and reported via the returned `skipped`/`reason` fields rather than
- * thrown. Callers must treat a `skipped: true` result as "fall back to the
- * original ctx.forgeHome" — the pre-existing ephemeral-FORGE_HOME behavior.
+ * thrown. General journey callers retain the pre-existing fallback to the
+ * original ctx.forgeHome; security-sensitive callers can reject the explicit
+ * `reasonCode: "filesystem-error"` result before generating durable files.
+ * A cooperative lock serializes managed reconciliation and metadata writes,
+ * but process termination does not roll back files already replaced and may
+ * leave persist.lock for an operator to remove after confirming no holder is
+ * active. Repeated lstat/device checks narrow path races; hostile concurrent
+ * path replacement remains an unavoidable TOCTOU residual without portable
+ * directory-handle-relative no-follow filesystem operations in Node.
  *
  * @param {{ forgeHome: string, home: string }} ctx
  * @returns {Promise<{
@@ -1539,6 +1949,7 @@ async function removeOrphans(srcDir, destDir) {
  *   filesCopied?: number,
  *   filesUnchanged?: number,
  *   filesRemoved?: number,
+ *   reasonCode?: "git-working-tree" | "downgrade" | "filesystem-error",
  * }>}
  */
 export async function persistHome(ctx) {
@@ -1551,6 +1962,7 @@ export async function persistHome(ctx) {
       migrated: false,
       skipped: true,
       reason: "git working tree — linked directly from the clone, not persisted",
+      reasonCode: "git-working-tree",
       version: "",
     };
   }
@@ -1566,54 +1978,110 @@ export async function persistHome(ctx) {
     // proceed with version === ""
   }
 
-  // Downgrade guard (forge#2133): if a newer version is already persisted at
-  // ~/.forge/version than the source package we're about to copy from, skip
-  // the copy entirely rather than silently overwriting newer files with
-  // older ones. This happens when a stale resolved package (e.g. a plain
-  // `npx forgedock update` that resolved an old global install) runs after
-  // ~/.forge/ was already refreshed to a newer version by some other path
-  // (e.g. `npx forgedock@latest`). Both `version` and the persisted value
-  // must be non-empty for the guard to apply — an unreadable/missing
-  // ~/.forge/version is treated as "no guard needed" so first-run persist
-  // is never blocked.
   const persistedVersionPath = join(persistedHome, "version");
-  let existingPersistedVersion = "";
-  let persistedVersionFileExists = true;
-  try {
-    existingPersistedVersion = readFileSync(persistedVersionPath, "utf-8").trim();
-  } catch {
-    // missing/unreadable — proceed, nothing to guard against. Tracked
-    // separately from existingPersistedVersion's "" default so the
-    // versionChanged check below (a fresh persist with no prior version
-    // file) is still correctly treated as "changed" even when the source
-    // package's own version also resolves to "" (e.g. missing package.json).
-    persistedVersionFileExists = false;
-  }
-  if (
-    version &&
-    existingPersistedVersion &&
-    compareVersions(version, existingPersistedVersion) < 0
-  ) {
-    return {
-      forgeHome: persistedHome,
-      migrated: false,
-      skipped: true,
-      reason: `refusing to downgrade ~/.forge/ from v${existingPersistedVersion} to v${version} — source package is older than what's already persisted`,
-      version: existingPersistedVersion,
-    };
-  }
+  const persistLockPath = join(persistedHome, PERSIST_HOME_LOCK_NAME);
+  let persistLockHandle = null;
+  let outcome = null;
 
   try {
-    await mkdir(persistedHome, { recursive: true });
+    // Validate ~/.forge itself before even reading its version file. lstat is
+    // essential here: readFile/mkdir would otherwise traverse a symlink or a
+    // Windows junction and let persistence mutate an arbitrary outside tree.
+    await mkdir(ctx.home, { recursive: true });
+    const homeStats = await stat(ctx.home);
+    if (!homeStats.isDirectory()) {
+      throw unsafePersistDestination(ctx.home, "home path must be a directory");
+    }
+    let persistedHomeStats = await assertSafeDestinationDirectory(persistedHome, { allowMissing: true });
+    if (!persistedHomeStats) {
+      await ensureSafeDestinationDirectory(persistedHome);
+      persistedHomeStats = await assertSafeDestinationDirectory(persistedHome);
+    }
+    assertPersistedDestinationDevice(homeStats, persistedHomeStats, persistedHome);
+    const existingLockStats = await safeDestinationStats(persistLockPath);
+    if (existingLockStats && !existingLockStats.isFile()) {
+      throw unsafePersistDestination(persistLockPath, "persistence lock must be a regular file");
+    }
+
+    // The lock covers the complete read/decision/reconcile/metadata sequence.
+    // Contenders wait; an existing lock is never age-reclaimed because its
+    // holder may still be active on a slow filesystem.
+    persistLockHandle = await acquirePersistHomeLock(persistLockPath);
+    persistedHomeStats = await assertSafeDestinationDirectory(persistedHome);
+    assertPersistedDestinationDevice(homeStats, persistedHomeStats, persistedHome);
+    await preflightManagedPersistDestinations(persistedHome, persistedHomeStats, persistLockPath);
+
+    const persistedVersionStats = await safeDestinationStats(persistedVersionPath);
+    if (persistedVersionStats && !persistedVersionStats.isFile()) {
+      throw unsafePersistDestination(persistedVersionPath, "expected a regular version file");
+    }
+    const persistedVersionFileExists = !!persistedVersionStats;
+    const existingPersistedVersion = persistedVersionStats
+      ? (await readFile(persistedVersionPath, "utf-8")).trim()
+      : "";
+    const persistedVersionCandidates = STRICT_SEMVER_RE.test(existingPersistedVersion)
+      ? [existingPersistedVersion]
+      : [];
+    const persistedPackagePath = join(persistedHome, "package.json");
+    const persistedPackageStats = await safeDestinationStats(persistedPackagePath);
+    if (persistedPackageStats && !persistedPackageStats.isFile()) {
+      throw unsafePersistDestination(persistedPackagePath, "expected a regular package.json file");
+    }
+    if (persistedPackageStats) {
+      try {
+        const persistedPackage = JSON.parse(await readFile(persistedPackagePath, "utf-8"));
+        if (typeof persistedPackage.version === "string" && STRICT_SEMVER_RE.test(persistedPackage.version)) {
+          persistedVersionCandidates.push(persistedPackage.version);
+        }
+      } catch {
+        // Invalid persisted metadata cannot authorize a downgrade skip. The
+        // source payload will refresh it below instead.
+      }
+    }
+    const highestPersistedVersion = persistedVersionCandidates.reduce(
+      (highest, candidate) => !highest || comparePersistedVersions(candidate, highest) > 0 ? candidate : highest,
+      "",
+    );
+
+    // Downgrade guard (forge#2133): a stale source must not overwrite a newer
+    // existing persisted payload. Treat every valid persisted SemVer as
+    // evidence and keep the highest: package.json is written before the version
+    // sentinel, so an ordinary late write failure can legitimately leave the
+    // two files mismatched without making downgrade protection disappear.
+    if (
+      STRICT_SEMVER_RE.test(version) &&
+      highestPersistedVersion &&
+      comparePersistedVersions(version, highestPersistedVersion) < 0
+    ) {
+      outcome = {
+        forgeHome: persistedHome,
+        migrated: false,
+        skipped: true,
+        reason: `refusing to downgrade ~/.forge/ from v${highestPersistedVersion} to v${version} — source package is older than what's already persisted`,
+        reasonCode: "downgrade",
+        version: highestPersistedVersion,
+      };
+      return outcome;
+    }
 
     let filesCopied = 0;
     let filesUnchanged = 0;
     let filesRemoved = 0;
     for (const name of PERSIST_HOME_DIRS) {
-      const res = await copyDirIfChanged(join(source, name), join(persistedHome, name));
+      const res = await copyDirIfChanged(
+        join(source, name),
+        join(persistedHome, name),
+        persistedHome,
+        persistedHomeStats,
+      );
       filesCopied += res.copied;
       filesUnchanged += res.unchanged;
-      const pruned = await removeOrphans(join(source, name), join(persistedHome, name));
+      const pruned = await removeOrphans(
+        join(source, name),
+        join(persistedHome, name),
+        persistedHome,
+        persistedHomeStats,
+      );
       filesRemoved += pruned.removed;
     }
 
@@ -1628,12 +2096,21 @@ export async function persistHome(ctx) {
     // mirror. Missing source package.json (unusual layout) is a no-op, same
     // as any other PERSIST_HOME_DIRS entry.
     try {
-      const [src, dst] = await Promise.all([
-        readFile(join(source, "package.json")),
-        readFile(join(persistedHome, "package.json")).catch(() => null),
-      ]);
+      await assertSafeDestinationDirectory(persistedHome);
+      const destinationPackagePath = join(persistedHome, "package.json");
+      const destinationPackageStats = await safeDestinationStats(destinationPackagePath);
+      if (destinationPackageStats && !destinationPackageStats.isFile()) {
+        throw unsafePersistDestination(destinationPackagePath, "expected a regular package.json file");
+      }
+      const src = await readFile(join(source, "package.json"));
+      const dst = destinationPackageStats ? await readFile(destinationPackagePath) : null;
       if (!dst || !src.equals(dst)) {
-        await copyFile(join(source, "package.json"), join(persistedHome, "package.json"));
+        await atomicCopyIntoDestination(
+          join(source, "package.json"),
+          destinationPackagePath,
+          persistedHome,
+          persistedHomeStats,
+        );
         filesCopied++;
       } else {
         filesUnchanged++;
@@ -1654,17 +2131,28 @@ export async function persistHome(ctx) {
     // ~/.forge/.
     let versionChanged = !persistedVersionFileExists || existingPersistedVersion !== version;
     if (versionChanged) {
-      const tmpVersionPath = persistedVersionPath + ".tmp";
+      const tmpVersionPath = `${persistedVersionPath}.${process.pid}.${Date.now()}.tmp`;
       try {
-        writeFileSync(tmpVersionPath, version + "\n", "utf-8");
-        renameSync(tmpVersionPath, persistedVersionPath);
+        await assertSafeDestinationDirectory(persistedHome);
+        const [currentVersionStats, tmpVersionStats] = await Promise.all([
+          safeDestinationStats(persistedVersionPath),
+          safeDestinationStats(tmpVersionPath),
+        ]);
+        if (currentVersionStats && !currentVersionStats.isFile()) {
+          throw unsafePersistDestination(persistedVersionPath, "expected a regular version file");
+        }
+        if (tmpVersionStats && !tmpVersionStats.isFile()) {
+          throw unsafePersistDestination(tmpVersionPath, "expected a regular temporary version file");
+        }
+        await writeFile(tmpVersionPath, version + "\n", { encoding: "utf-8", flag: "wx" });
+        await rename(tmpVersionPath, persistedVersionPath);
       } catch (err) {
-        try { unlinkSync(tmpVersionPath); } catch { /* best-effort cleanup */ }
+        await unlink(tmpVersionPath).catch(() => {});
         throw err;
       }
     }
 
-    return {
+    outcome = {
       forgeHome: persistedHome,
       migrated: filesCopied > 0 || filesRemoved > 0 || versionChanged,
       skipped: false,
@@ -1673,16 +2161,34 @@ export async function persistHome(ctx) {
       filesUnchanged,
       filesRemoved,
     };
+    return outcome;
   } catch (err) {
     // Fail-open (forge#383): a permission error, disk-full, etc. must never
     // abort install/update — fall back to the original, un-persisted forgeHome.
-    return {
+    outcome = {
       forgeHome: source,
       migrated: false,
       skipped: true,
       reason: `error: ${err && err.message ? err.message : String(err)}`,
+      reasonCode: "filesystem-error",
       version,
     };
+    return outcome;
+  } finally {
+    try {
+      await releasePersistHomeLock(persistLockPath, persistLockHandle);
+    } catch (releaseError) {
+      if (outcome) {
+        const detail = releaseError?.message || String(releaseError);
+        Object.assign(outcome, {
+          forgeHome: source,
+          migrated: false,
+          skipped: true,
+          reason: `${outcome.reason ? `${outcome.reason}; ` : "error: "}${detail}`,
+          reasonCode: "filesystem-error",
+        });
+      }
+    }
   }
 }
 
