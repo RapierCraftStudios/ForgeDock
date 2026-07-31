@@ -626,9 +626,11 @@ const NATIVE_ARGUMENT_MARKERS = {
 }
 const CONTROL_MODULE_URL = pathToFileURL(join(NATIVE_FORGE_HOME, "bin", "opencode", "control.mjs")).href
 const ORCHESTRATOR_MODULE_URL = pathToFileURL(join(NATIVE_FORGE_HOME, "bin", "opencode", "orchestrator.mjs")).href
+const GITHUB_AUTH_MODULE_URL = pathToFileURL(join(NATIVE_FORGE_HOME, "bin", "opencode", "github-auth.mjs")).href
 const nativeSessions = new Set()
 let controlModule
 let orchestratorModule
+let githubAuthModule
 ${runtimeGuard}
 
 function compactMetadata(result) {
@@ -732,6 +734,9 @@ export const ForgeDockPlugin = async ({
     output.env.FORGE_HOME = SHELL_FORGE_HOME
     output.env.FORGE_RUNTIME = "opencode"
     if (nativeSessions.has(input.sessionID)) {
+      githubAuthModule ||= import(GITHUB_AUTH_MODULE_URL)
+      const { githubAuthRecovery } = await githubAuthModule
+      Object.assign(output.env, githubAuthRecovery.shellOverrides())
       output.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS = "false"
     }
   },
@@ -1214,6 +1219,8 @@ export async function installOpenCodeAdapter({
     throw new Error(`ForgeDock commands directory not found: ${join(forgeHome, "commands")}`);
   }
   if (!existsSync(join(forgeHome, "bin", "opencode", "control.mjs")) ||
+      !existsSync(join(forgeHome, "bin", "opencode", "github-auth.mjs")) ||
+      !existsSync(join(forgeHome, "bin", "opencode", "orchestrator.mjs")) ||
       !existsSync(join(forgeHome, "runtimes", "opencode", "work-on", "common.md"))) {
     throw new Error(`ForgeDock OpenCode native runtime is incomplete under: ${forgeHome}`);
   }

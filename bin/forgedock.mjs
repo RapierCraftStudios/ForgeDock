@@ -163,6 +163,7 @@ const REQUIRED_OPENCODE_PAYLOAD_FILES = [
   "bin/opencode/batch-store.mjs",
   "bin/opencode/config.mjs",
   "bin/opencode/control.mjs",
+  "bin/opencode/github-auth.mjs",
   "bin/opencode/orchestrator.mjs",
   "bin/opencode/runner.mjs",
   "bin/opencode/worktree.mjs",
@@ -268,8 +269,11 @@ export async function validateOpenCodeNativeController(forgeHome) {
   const root = resolve(forgeHome);
   try {
     const control = await import(pathToFileURL(join(root, "bin", "opencode", "control.mjs")).href);
+    const githubAuth = await import(pathToFileURL(join(root, "bin", "opencode", "github-auth.mjs")).href);
     const orchestrator = await import(pathToFileURL(join(root, "bin", "opencode", "orchestrator.mjs")).href);
-    if (typeof control.runNativeWorkOn !== "function" || typeof orchestrator.runNativeOrchestrate !== "function") {
+    if (typeof control.runNativeWorkOn !== "function" ||
+        typeof githubAuth.githubAuthRecovery?.shellOverrides !== "function" ||
+        typeof orchestrator.runNativeOrchestrate !== "function") {
       throw new Error("native controller exports are incomplete");
     }
   } catch (error) {

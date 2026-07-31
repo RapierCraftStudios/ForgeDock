@@ -107,6 +107,13 @@ function addNativeRuntime(forgeHome) {
     export function formatNativeOrchestrateResult(result) { return "orchestrate " + result.status; }
     `,
   );
+  writeFileSync(
+    join(forgeHome, "bin", "opencode", "github-auth.mjs"),
+    `export const githubAuthRecovery = {
+      shellOverrides() { return { GH_TOKEN: "", GITHUB_TOKEN: "" }; }
+    };
+    `,
+  );
   writeFileSync(join(forgeHome, "runtimes", "opencode", "work-on", "common.md"), "native runtime\n");
 }
 
@@ -139,6 +146,16 @@ afterEach(() => {
 });
 
 describe("OpenCode adapter", () => {
+  it("rejects a native source missing the GitHub authentication runtime", async () => {
+    const { forgeHome, home } = fixture();
+    rmSync(join(forgeHome, "bin", "opencode", "github-auth.mjs"));
+
+    await assert.rejects(
+      installOpenCodeAdapter({ forgeHome, home, env: {} }),
+      /OpenCode native runtime is incomplete/,
+    );
+  });
+
   it("resolves OpenCode config paths without touching opencode.json", () => {
     assert.equal(
       resolveOpenCodeConfigDir({ home: "/home/test", env: {} }),
@@ -446,11 +463,13 @@ describe("OpenCode adapter", () => {
     const plugin = readFileSync(join(config, "plugins", "forgedock.js"), "utf8");
     assert.match(plugin, /NATIVE_FORGE_HOME/);
     assert.match(plugin, /SHELL_FORGE_HOME/);
+    assert.match(plugin, /GITHUB_AUTH_MODULE_URL/);
     assert.match(plugin, /forge_work_on: tool/);
     assert.match(plugin, /forge_orchestrate: tool/);
     assert.match(plugin, /nativeSessions\.has\(input\.sessionID\)/);
     assert.match(plugin, /output\.env\.FORGE_HOME = SHELL_FORGE_HOME/);
     assert.match(plugin, /output\.env\.FORGE_RUNTIME = "opencode"/);
+    assert.match(plugin, /githubAuthRecovery\.shellOverrides/);
     assert.match(plugin, /OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS/);
     assert.doesNotMatch(plugin, /subagent_depth|config\.agent\.general|background subagents.*true/i);
     assert.ok(plugin.includes(JSON.stringify(forgeHome)));
@@ -499,6 +518,8 @@ describe("OpenCode adapter", () => {
     await hooks["shell.env"]({ sessionID: "native-test-session" }, shellOutput);
     assert.equal(shellOutput.env.FORGE_HOME, shellPath(forgeHome));
     assert.equal(shellOutput.env.FORGE_RUNTIME, "opencode");
+    assert.equal(shellOutput.env.GH_TOKEN, "");
+    assert.equal(shellOutput.env.GITHUB_TOKEN, "");
     assert.equal(shellOutput.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS, "false");
     const ordinaryShell = { env: {} };
     await hooks["shell.env"]({ sessionID: "ordinary-session" }, ordinaryShell);

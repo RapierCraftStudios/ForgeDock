@@ -9,11 +9,11 @@
  * dependency edges, and the initial ready queue.
  */
 
-import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { classifyInputPattern } from "./engine/resolve.mjs";
+import { runGitHubSyncWithAuthRecovery } from "./opencode/github-auth.mjs";
 
 const VERSION = "opencode-preflight-v1";
 const IN_FLIGHT_LABELS = new Set(["workflow:building", "workflow:in-review"]);
@@ -482,12 +482,12 @@ export function buildPreflightPlan({ input, repo = "", issues = [], maxConcurren
 }
 
 function ghJson(cwd, args) {
-  const result = spawnSync("gh", args, {
-    cwd,
+  const result = runGitHubSyncWithAuthRecovery(args, cwd, { options: {
     encoding: "utf8",
+    timeout: 30_000,
     maxBuffer: 32 * 1024 * 1024,
     windowsHide: true,
-  });
+  } });
   if (result.error || result.status !== 0) {
     const detail = result.error?.message || String(result.stderr || "gh command failed").trim();
     throw new Error(`GitHub preflight failed: ${detail}`);

@@ -5,6 +5,7 @@ import { runPreflight } from "../orchestrate-preflight.mjs";
 import { batchPlanDigest, createBatchStore, newBatchId } from "./batch-store.mjs";
 import { codedError, parseOrchestrateArguments, readForgeConfig } from "./config.mjs";
 import { runNativeWorkOn } from "./control.mjs";
+import { runGitHubWithAuthRecovery } from "./github-auth.mjs";
 import { phasePromptBytes } from "./runner.mjs";
 
 const exec = promisify(execFile);
@@ -14,12 +15,15 @@ const TERMINAL_STATES = new Set([...DURABLE_STATES, ...RETRYABLE_STATES].filter(
 
 async function command(bin, args, cwd) {
   try {
-    const { stdout } = await exec(bin, args, {
+    const options = {
       cwd,
       windowsHide: true,
       timeout: 30_000,
       maxBuffer: 64 * 1024 * 1024,
-    });
+    };
+    const { stdout } = bin === "gh"
+      ? await runGitHubWithAuthRecovery(args, cwd, { options })
+      : await exec(bin, args, options);
     return String(stdout || "");
   } catch (error) {
     const detail = String(error.stderr || error.message || `${bin} failed`).trim();

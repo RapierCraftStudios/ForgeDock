@@ -12,6 +12,7 @@ import {
   resolveRepository,
   slugify,
 } from "./config.mjs";
+import { runGitHubWithAuthRecovery } from "./github-auth.mjs";
 import { createOpenCodePhaseRunner, phasePromptBytes } from "./runner.mjs";
 import {
   branchForIssue,
@@ -29,12 +30,15 @@ function repoRunDir(repo) {
 
 async function command(bin, args, cwd, timeout = 30_000) {
   try {
-    const { stdout } = await exec(bin, args, {
+    const options = {
       cwd,
       windowsHide: true,
       timeout,
       maxBuffer: 64 * 1024 * 1024,
-    });
+    };
+    const { stdout } = bin === "gh"
+      ? await runGitHubWithAuthRecovery(args, cwd, { options })
+      : await exec(bin, args, options);
     return String(stdout || "");
   } catch (error) {
     const detail = String(error.stderr || error.message || `${bin} failed`).trim();

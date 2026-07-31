@@ -172,6 +172,7 @@ describe("router", () => {
         invalid: JSON.stringify({ name: "forgedock", version: "01.2.3" }),
       },
       { name: "commands", path: join(source, "commands", "work-on.md") },
+      { name: "GitHub auth runtime", path: join(source, "bin", "opencode", "github-auth.mjs") },
       { name: "native runtime", path: join(source, "runtimes", "opencode", "work-on", "common.md") },
       { name: "protocol package", path: join(source, "packages", "protocol", "package.json") },
     ];
@@ -375,6 +376,7 @@ describe("router", () => {
     for (const required of [
       "packages/protocol/package.json",
       "bin/opencode/control.mjs",
+      "bin/opencode/github-auth.mjs",
       "bin/opencode/orchestrator.mjs",
       "runtimes/opencode/work-on/common.md",
       "runtimes/opencode/work-on/close.md",
