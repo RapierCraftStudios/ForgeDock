@@ -47,7 +47,7 @@ Nested command specs map by replacing path separators and punctuation with hyphe
 1. Resolve the issue and current GitHub state.
 2. Run investigation, context, architecture, build, review, and close phases in order.
 3. Create the implementation worktree under `.pi/worktrees/` for Pi workers.
-4. Run each selected phase with `pi --no-session` in the project root or issue worktree.
+4. Run each selected phase with `pi --no-session` in the project root or issue worktree. On Windows, the fallback resolves npm's `pi.cmd` or `pi.bat` shim to its JavaScript Node entrypoint and invokes Node directly with shell-free argument passing (`shell: false`); it never reparses the worker prompt through a shell. If the shim is malformed, unavailable, or has no safe JavaScript entrypoint, worker startup uses fail-closed behavior rather than interpolating prompt text through shell parsing.
 5. Verify FORGE markers, labels, commits, PR state, and terminal outcomes.
 6. Release DAG dependents only after the predecessor completes successfully.
 7. Preserve the local run-log and GitHub `FORGE:STATE` for resume/recovery.
