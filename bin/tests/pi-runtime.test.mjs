@@ -3,6 +3,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+const forgeExtensionSource = readFileSync(new URL("../../pi/extensions/forgedock.ts", import.meta.url), "utf8");
+
 import {
   buildPiModelArgs,
   buildPiPhaseArgs,
@@ -11,6 +14,37 @@ import {
   parseWorktrees,
   worktreeForBranch,
 } from "../../pi/runtime/engine.mjs";
+
+test("Pi review preserves work-on arguments and keeps direct review non-merging", () => {
+  const requiredParserContracts = [
+    /type ReviewInvocation = \{/,
+    /token === "--auto-merge"/,
+    /token === "--issue"/,
+    /token === "--base"/,
+    /token === "--gh-flag"/,
+    /split\(\/\\s\+\/\)/,
+  ];
+  for (const contract of requiredParserContracts) assert.match(forgeExtensionSource, contract);
+  assert.match(forgeExtensionSource, /if \(invocation\.autoMerge\)/);
+  assert.match(forgeExtensionSource, /String\(params\.pr\)/);
+  assert.match(forgeExtensionSource, /Direct review mode does not merge PRs/);
+  assert.doesNotMatch(forgeExtensionSource, /function resolveReviewPr\(/);
+});
+
+test("Pi review auto-merge uses guarded shell-free argv and durable verification", () => {
+  assert.match(forgeExtensionSource, /reviewGuardBlockers\(prSnapshot, issueSnapshot, invocation\)/);
+  assert.match(forgeExtensionSource, /mergeable !== "MERGEABLE"/);
+  assert.match(forgeExtensionSource, /mergeStateStatus !== "CLEAN"/);
+  assert.match(forgeExtensionSource, /\["pr", "merge", String\(invocation\.pr\), "-R", repo, "--merge"\]/);
+  assert.match(forgeExtensionSource, /--add-label", "needs-human/);
+  assert.match(forgeExtensionSource, /--json", "state,mergedAt"/);
+  assert.match(forgeExtensionSource, /verified\.state !== "MERGED" \|\| !verified\.mergedAt/);
+});
+
+test("Pi review scopes findings to the current durable reviewer run", () => {
+  assert.match(forgeExtensionSource, /comment\.body\.includes\(`<!-- FORGE:REVIEW-RUN:\$\{runId\} -->`\)/);
+  assert.match(forgeExtensionSource, /FINDING:\[\^>\]\+ -->/);
+});
 
 test("Pi runtime resolves provider/model objects into an explicit model pattern", () => {
   assert.equal(modelPattern({ provider: "openai", id: "gpt-5.5" }), "openai/gpt-5.5");

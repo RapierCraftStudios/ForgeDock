@@ -264,17 +264,180 @@ function formatIssueResult(result: IssueResult & { status?: string }): string {
 	return `- #${result.number}: ${state}${detail}`;
 }
 
-function resolveReviewPr(projectRoot: string, args: string): number {
-	const match = args.match(/(?:^|\s)#?(\d+)(?:\s|$)/);
-	if (match) return Number(match[1]);
-	const prs = ghJson(projectRoot, ["pr", "list", "--base", "main", "--head", "staging", "--state", "open", "--json", "number"]) as Array<{ number: number }>;
-	if (prs.length !== 1) throw new Error("Review requires a PR number, or exactly one open staging-to-main PR");
-	return prs[0].number;
+type ReviewInvocation = {
+	pr: number;
+	autoMerge: boolean;
+	issue?: number;
+	base?: string;
+	ghFlag?: string;
+};
+
+type ReviewPrSnapshot = {
+	baseRefName?: string;
+	mergeable?: string;
+	mergeStateStatus?: string;
+	state?: string;
+	mergedAt?: string | null;
+	labels?: Array<{ name?: string } | string>;
+	comments?: Array<{ body?: string }>;
+	reviews?: Array<{ body?: string }>;
+};
+
+type ReviewIssueSnapshot = {
+	state?: string;
+	labels?: Array<{ name?: string } | string>;
+	comments?: Array<{ body?: string }>;
+};
+
+function positiveReviewNumber(value: string, field: string): number {
+	if (!/^[0-9]+$/.test(value) || Number(value) < 1) throw new Error(`Review ${field} must be a positive integer`);
+	return Number(value);
+}
+
+function reviewBase(value: string): string {
+	if (!value || value.startsWith("-") || value.includes("..") || !/^[A-Za-z0-9._/-]+$/.test(value)) {
+		throw new Error("Review base must be a safe branch name");
+	}
+	return value;
+}
+
+function resolveReviewInvocation(projectRoot: string, args: string): ReviewInvocation {
+	const tokens = args.trim().split(/\s+/).filter(Boolean);
+	let pr: number | undefined;
+	let autoMerge = false;
+	let issue: number | undefined;
+	let base: string | undefined;
+	let ghFlag: string | undefined;
+
+	for (let index = 0; index < tokens.length; index += 1) {
+		const token = tokens[index];
+		if (token === "--auto-merge") {
+			autoMerge = true;
+			continue;
+		}
+		if (token === "--issue" || token === "--base" || token === "--gh-flag" || token === "--worktree") {
+			const value = tokens[++index];
+			if (!value) throw new Error(`${token} requires a value`);
+			if (token === "--issue") issue = positiveReviewNumber(value, "issue");
+			else if (token === "--base") base = reviewBase(value);
+			else if (token === "--worktree") continue;
+			else {
+				// work-on passes --gh-flag as two argv-like tokens: -R owner/repo.
+				if (value === "-R" || value === "--repo") {
+					const repo = tokens[++index];
+					if (!repo) throw new Error("--gh-flag requires a repository value");
+					ghFlag = `${value} ${repo}`;
+				} else ghFlag = value;
+			}
+			continue;
+		}
+		if (token.startsWith("--")) {
+			// Unknown options are not PR identifiers; consume a separate value so a
+			// numeric option value cannot be mistaken for the PR to review.
+			if (tokens[index + 1] && !tokens[index + 1].startsWith("-")) index += 1;
+			continue;
+		}
+		if (/^#?[0-9]+$/.test(token)) {
+			if (pr !== undefined) throw new Error("Review accepts only one PR number");
+			pr = positiveReviewNumber(token.replace(/^#/, ""), "PR number");
+			continue;
+		}
+		throw new Error(`Unrecognized review argument: ${token}`);
+	}
+
+	if (autoMerge && pr === undefined) throw new Error("Auto-merge requires an explicit PR number");
+	if (pr === undefined) {
+		const prs = ghJson(projectRoot, ["pr", "list", "-R", repoFromConfig(projectRoot), "--base", "main", "--head", "staging", "--state", "open", "--json", "number"]) as Array<{ number: number }>;
+		if (prs.length !== 1) throw new Error("Review requires a PR number, or exactly one open staging-to-main PR");
+		pr = prs[0].number;
+	}
+	return { pr, autoMerge, issue, base, ghFlag };
 }
 
 function postPrComment(projectRoot: string, repo: string, pr: number, body: string): void {
 	const result = spawnSync("gh", ["pr", "comment", String(pr), "-R", repo, "--body", body], { cwd: projectRoot, encoding: "utf8", windowsHide: true });
 	if (result.status !== 0) throw new Error(String(result.stderr || "failed to post PR review comment").trim());
+}
+
+function postIssueComment(projectRoot: string, repo: string, issue: number, body: string): void {
+	const result = spawnSync("gh", ["issue", "comment", String(issue), "-R", repo, "--body", body], { cwd: projectRoot, encoding: "utf8", windowsHide: true });
+	if (result.status !== 0) throw new Error(String(result.stderr || "failed to post issue review comment").trim());
+}
+
+function reviewLabels(labels: Array<{ name?: string } | string> | undefined): string[] {
+	return (labels || []).map((label) => typeof label === "string" ? label : label.name || "");
+}
+
+function reviewBodies(snapshot: ReviewPrSnapshot, issueSnapshot?: ReviewIssueSnapshot): string[] {
+	return [...(snapshot.comments || []), ...(snapshot.reviews || []), ...(issueSnapshot?.comments || [])]
+		.map((comment) => comment.body || "")
+		.filter(Boolean);
+}
+
+function reviewRepoFlagMatches(repo: string, ghFlag: string | undefined): boolean {
+	return !ghFlag || ghFlag === repo || ghFlag === `-R ${repo}`;
+}
+
+function postAutoMergeBlocked(projectRoot: string, repo: string, invocation: ReviewInvocation, reason: string): void {
+	const body = `<!-- FORGE:REVIEW_BLOCKED -->\n## Auto-Merge Blocked\n\nPR #${invocation.pr} was reviewed, but the guarded merge handoff did not complete.\n\n**Reason**: ${reason}\n\nNo successful auto-merge verdict was posted; safety labels remain in place.\n`;
+	try { postPrComment(projectRoot, repo, invocation.pr, body); } catch { /* preserve the original blocker */ }
+	if (invocation.issue !== undefined) {
+		try { postIssueComment(projectRoot, repo, invocation.issue, `${body}\n<!-- FORGE:REVIEW_BLOCKED:ISSUE -->`); } catch { /* preserve the original blocker */ }
+	}
+	spawnSync("gh", ["pr", "edit", String(invocation.pr), "-R", repo, "--add-label", "needs-human", "--add-label", "review-degraded"], { cwd: projectRoot, windowsHide: true });
+	if (invocation.issue !== undefined) {
+		spawnSync("gh", ["issue", "edit", String(invocation.issue), "-R", repo, "--add-label", "needs-human"], { cwd: projectRoot, windowsHide: true });
+	}
+}
+
+function reviewGuardBlockers(prSnapshot: ReviewPrSnapshot, issueSnapshot: ReviewIssueSnapshot | undefined, invocation: ReviewInvocation): string[] {
+	const blockers: string[] = [];
+	const prLabels = reviewLabels(prSnapshot.labels);
+	const issueLabels = reviewLabels(issueSnapshot?.labels);
+	if (!invocation.base) blockers.push("auto-merge context is missing --base");
+	else if (prSnapshot.baseRefName !== invocation.base) blockers.push(`PR base is ${prSnapshot.baseRefName || "unresolved"}, expected ${invocation.base}`);
+	if (!issueSnapshot || issueSnapshot.state !== "OPEN") blockers.push(`linked issue state is ${issueSnapshot?.state || "unresolved"}`);
+	const alreadyMerged = prSnapshot.state === "MERGED" && Boolean(prSnapshot.mergedAt);
+	if (!alreadyMerged) {
+		if (prSnapshot.state !== "OPEN") blockers.push(`PR state is ${prSnapshot.state || "unresolved"}`);
+		if (prSnapshot.mergeable !== "MERGEABLE" || prSnapshot.mergeStateStatus !== "CLEAN") {
+			blockers.push(`PR is not freshly mergeable (mergeable=${prSnapshot.mergeable || "unresolved"}, mergeStateStatus=${prSnapshot.mergeStateStatus || "unresolved"})`);
+		}
+	}
+	if (prLabels.includes("needs-human") || prLabels.includes("review-degraded")) blockers.push("PR carries a safety label");
+	if (issueLabels.includes("needs-human") || issueLabels.includes("review-degraded")) blockers.push("linked issue carries a safety label");
+	const bodies = reviewBodies(prSnapshot, issueSnapshot);
+	if (bodies.some((body) => /CHANGES REQUESTED:|HAS_PURPOSE_REGRESSION\s*=\s*true|Purpose Regression/i.test(body))) blockers.push("review verdict or purpose-regression guard is blocking");
+	if (bodies.some((body) => /CALIBRATION_NEEDS_HUMAN\s*=\s*true|TRUST_NEEDS_HUMAN\s*=\s*true|NOVEL_NEEDS_HUMAN/i.test(body))) blockers.push("calibration or provenance trust guard is blocking");
+	return blockers;
+}
+
+function mergeReviewPr(projectRoot: string, repo: string, invocation: ReviewInvocation): void {
+	if (invocation.issue === undefined || invocation.base === undefined || !reviewRepoFlagMatches(repo, invocation.ghFlag)) {
+		const reason = invocation.issue === undefined || invocation.base === undefined
+			? "auto-merge requires --issue and --base context from work-on/review"
+			: "auto-merge repository context does not match the configured repository";
+		postAutoMergeBlocked(projectRoot, repo, invocation, reason);
+		throw new Error(reason);
+	}
+
+	try {
+		const prSnapshot = ghJson(projectRoot, ["pr", "view", String(invocation.pr), "-R", repo, "--json", "baseRefName,mergeable,mergeStateStatus,state,mergedAt,labels,comments,reviews"]) as ReviewPrSnapshot;
+		const issueSnapshot = ghJson(projectRoot, ["issue", "view", String(invocation.issue), "-R", repo, "--json", "state,labels,comments"]) as ReviewIssueSnapshot;
+		const blockers = reviewGuardBlockers(prSnapshot, issueSnapshot, invocation);
+		if (blockers.length) throw new Error(blockers.join("; "));
+		if (prSnapshot.state !== "MERGED") {
+			// This is the shared Phase 8 handoff: equivalent to `gh pr merge`.
+			const merge = spawnSync("gh", ["pr", "merge", String(invocation.pr), "-R", repo, "--merge"], { cwd: projectRoot, encoding: "utf8", windowsHide: true });
+			if (merge.status !== 0) throw new Error(String(merge.stderr || "gh pr merge failed").trim());
+		}
+		const verified = ghJson(projectRoot, ["pr", "view", String(invocation.pr), "-R", repo, "--json", "state,mergedAt"]) as ReviewPrSnapshot;
+		if (verified.state !== "MERGED" || !verified.mergedAt) throw new Error(`post-merge verification failed (state=${verified.state || "unresolved"}, mergedAt=${verified.mergedAt || "null"})`);
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		postAutoMergeBlocked(projectRoot, repo, invocation, reason);
+		throw new Error(`auto-merge blocked: ${reason}`);
+	}
 }
 
 function reviewAgentPrompt(forgeHome: string, projectRoot: string, repo: string, pr: number, domain: string, runId: string): string {
@@ -291,29 +454,42 @@ function reviewAgentPrompt(forgeHome: string, projectRoot: string, repo: string,
 
 async function executeReview(forgeHome: string, projectRoot: string, args: string, ctx: ExtensionContext): Promise<string> {
 	const repo = repoFromConfig(projectRoot);
-	const pr = resolveReviewPr(projectRoot, args);
+	const invocation = resolveReviewInvocation(projectRoot, args);
+	if (invocation.autoMerge && (invocation.issue === undefined || invocation.base === undefined || !reviewRepoFlagMatches(repo, invocation.ghFlag))) {
+		const reason = invocation.issue === undefined || invocation.base === undefined
+			? "auto-merge requires --issue and --base context from work-on/review"
+			: "auto-merge repository context does not match the configured repository";
+		postAutoMergeBlocked(projectRoot, repo, invocation, reason);
+		throw new Error(reason);
+	}
 	const domains = ["security", "workflow", "runtime", "protocols"];
 	const runId = `pi-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 	const modelArgs = ctx.model?.provider && ctx.model?.id ? ["--model", `${ctx.model.provider}/${ctx.model.id}`] : [];
 	const reviewResults = await Promise.all(domains.map(async (domain) => {
-		const result = await runProcess(piExecutable(), ["--no-session", "--approve", "--no-extensions", ...modelArgs, "--name", `forge-review-${pr}-${domain}`, "-p", reviewAgentPrompt(forgeHome, projectRoot, repo, pr, domain, runId)], projectRoot, ctx.signal, 600_000);
+		const result = await runProcess(piExecutable(), ["--no-session", "--approve", "--no-extensions", ...modelArgs, "--name", `forge-review-${invocation.pr}-${domain}`, "-p", reviewAgentPrompt(forgeHome, projectRoot, repo, invocation.pr, domain, runId)], projectRoot, ctx.signal, 600_000);
 		return { domain, result };
 	}));
-	const comments = ghJson(projectRoot, ["api", `repos/${repo}/issues/${pr}/comments`]) as Array<{ body: string }>;
+	const comments = ghJson(projectRoot, ["api", `repos/${repo}/issues/${invocation.pr}/comments`]) as Array<{ body: string }>;
 	const missing = domains.filter((domain) => !comments.some((comment) => comment.body.includes(`<!-- FORGE:REVIEW-AGENT:${domain} -->`) && comment.body.includes(`<!-- FORGE:REVIEW-RUN:${runId} -->`)));
 	if (missing.length || reviewResults.some(({ result }) => result.timedOut || result.code !== 0)) {
-		postPrComment(projectRoot, repo, pr, `<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity -->\n<!-- FORGE:REVIEW_BLOCKED -->\n## Review Blocked: Incomplete Isolated Review Panel\n\nSelected reviewers: ${domains.length}\nMissing receipts: ${missing.join(", ") || "none"}\nTimed out/failed workers: ${reviewResults.filter(({ result }) => result.timedOut || result.code !== 0).map(({ domain }) => domain).join(", ") || "none"}\n\nNo verdict is valid until every selected reviewer has posted its receipt.`);
-		spawnSync("gh", ["pr", "edit", String(pr), "-R", repo, "--add-label", "needs-human", "--add-label", "review-degraded"], { cwd: projectRoot, windowsHide: true });
+		postPrComment(projectRoot, repo, invocation.pr, `<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity -->\n<!-- FORGE:REVIEW_BLOCKED -->\n## Review Blocked: Incomplete Isolated Review Panel\n\nSelected reviewers: ${domains.length}\nMissing receipts: ${missing.join(", ") || "none"}\nTimed out/failed workers: ${reviewResults.filter(({ result }) => result.timedOut || result.code !== 0).map(({ domain }) => domain).join(", ") || "none"}\n\nNo verdict is valid until every selected reviewer has posted its receipt.`);
+		spawnSync("gh", ["pr", "edit", String(invocation.pr), "-R", repo, "--add-label", "needs-human", "--add-label", "review-degraded"], { cwd: projectRoot, windowsHide: true });
 		throw new Error(`review panel incomplete: ${missing.join(", ") || "worker failure"}`);
 	}
-	const findings = comments.filter((comment) => /<!-- FINDING:[^>]+ -->/.test(comment.body));
+	const findings = comments.filter((comment) => comment.body.includes(`<!-- FORGE:REVIEW-RUN:${runId} -->`) && /<!-- FINDING:[^>]+ -->/.test(comment.body));
 	if (findings.length) {
-		postPrComment(projectRoot, repo, pr, `<!-- FORGE:GATE_FAILURE:TYPE=review-findings -->\n<!-- FORGE:REVIEW_BLOCKED -->\n## Review findings require triage\n\n${findings.length} structured finding comment(s) were produced. The review remains blocked until finding triage and issue creation complete.`);
+		postPrComment(projectRoot, repo, invocation.pr, `<!-- FORGE:GATE_FAILURE:TYPE=review-findings -->\n<!-- FORGE:REVIEW_BLOCKED -->\n## Review findings require triage\n\n${findings.length} structured finding comment(s) were produced. The review remains blocked until finding triage and issue creation complete.`);
 		throw new Error("review produced findings; triage is required before a verdict");
 	}
-	spawnSync("gh", ["pr", "edit", String(pr), "-R", repo, "--remove-label", "needs-human", "--remove-label", "review-degraded"], { cwd: projectRoot, windowsHide: true });
-	postPrComment(projectRoot, repo, pr, `<!-- FORGE:GATE_PASS -->\n<!-- FORGE:REVIEW -->\n## ForgeDock Review\n\n**Verdict**: PASS\n**Selected isolated reviewers**: ${domains.length}\n**Verified reviewer receipts**: ${domains.length}\n\nAll selected Pi reviewers completed and posted durable GitHub receipts.`);
-	return `PR #${pr}: PASS — ${domains.length} isolated reviewer receipts verified.`;
+	if (invocation.autoMerge) {
+		mergeReviewPr(projectRoot, repo, invocation);
+		spawnSync("gh", ["pr", "edit", String(invocation.pr), "-R", repo, "--remove-label", "needs-human", "--remove-label", "review-degraded"], { cwd: projectRoot, windowsHide: true });
+		postPrComment(projectRoot, repo, invocation.pr, `<!-- FORGE:GATE_PASS -->\n<!-- FORGE:REVIEW -->\n## ForgeDock Review\n\n**Verdict**: PASS\n**Merge**: MERGED\n**Selected isolated reviewers**: ${domains.length}\n**Verified reviewer receipts**: ${domains.length}\n\nAll selected Pi reviewers completed and the guarded merge reached durable MERGED state.`);
+		return `PR #${invocation.pr}: PASS — ${domains.length} isolated reviewer receipts verified and merged.`;
+	}
+	spawnSync("gh", ["pr", "edit", String(invocation.pr), "-R", repo, "--remove-label", "needs-human", "--remove-label", "review-degraded"], { cwd: projectRoot, windowsHide: true });
+	postPrComment(projectRoot, repo, invocation.pr, `<!-- FORGE:GATE_PASS -->\n<!-- FORGE:REVIEW -->\n## ForgeDock Review\n\n**Verdict**: PASS\n**Selected isolated reviewers**: ${domains.length}\n**Verified reviewer receipts**: ${domains.length}\n\nAll selected Pi reviewers completed and posted durable GitHub receipts. Direct review mode does not merge PRs.`);
+	return `PR #${invocation.pr}: PASS — ${domains.length} isolated reviewer receipts verified.`;
 }
 
 function sendPrompt(pi: ExtensionAPI, ctx: ExtensionCommandContext, prompt: string): void {
