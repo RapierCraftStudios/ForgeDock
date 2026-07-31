@@ -11,9 +11,9 @@
 
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, win32 } from "node:path";
 import { runIssue } from "../../bin/engine.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -27,8 +27,102 @@ const PRE_BUILD_PHASES = new Set([
   "work-on/build",
 ]);
 
-function piExecutable() {
-  return process.platform === "win32" ? "pi.cmd" : "pi";
+const WINDOWS_SHIM_PATTERN = /\.(?:cmd|bat)$/i;
+
+function findWindowsPiExecutable() {
+  try {
+    const result = spawnSync("where.exe", ["pi"], { encoding: "utf8", windowsHide: true });
+    if (result.status === 0) {
+      const candidates = String(result.stdout || "")
+        .split(/\r?\n/)
+        .map((candidate) => candidate.trim())
+        .filter(Boolean);
+      const native = candidates.find((candidate) => /\.exe$/i.test(candidate));
+      if (native) return native;
+      const shim = candidates.find((candidate) => WINDOWS_SHIM_PATTERN.test(candidate));
+      if (shim) return shim;
+    }
+  } catch {
+    // Fall through to the PATH scan so a missing where.exe does not hide Pi.
+  }
+
+  for (const directory of String(process.env.PATH || "").split(";")) {
+    if (!directory) continue;
+    for (const name of ["pi.exe", "pi.cmd", "pi.bat"]) {
+      const candidate = win32.join(directory, name);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return undefined;
+}
+
+function expandWindowsShimPath(expression, shimPath) {
+  const shimDirectory = win32.dirname(shimPath);
+  const expanded = String(expression || "")
+    .replace(/%~dp0/gi, `${shimDirectory}\\`)
+    .replace(/%dp0%/gi, `${shimDirectory}\\`)
+    .trim();
+  if (!expanded || expanded.includes("%")) return undefined;
+  return win32.normalize(expanded);
+}
+
+function readWindowsShimTarget(shimPath, readFile, exists, nodeExecutable) {
+  let source;
+  try {
+    source = String(readFile(shimPath, "utf8"));
+  } catch (error) {
+    throw new Error(`Cannot safely launch Pi: unable to read Windows shim ${shimPath}: ${error.message}`);
+  }
+
+  const scriptExpressions = [...source.matchAll(/"([^"\r\n]+\.js)"/gi)].map((match) => match[1]);
+  const scriptExpression = scriptExpressions.find((candidate) => /node_modules/i.test(candidate)) || scriptExpressions[0];
+  const scriptPath = expandWindowsShimPath(scriptExpression, shimPath);
+  if (!scriptPath || !win32.isAbsolute(scriptPath) || !exists(scriptPath)) {
+    throw new Error(`Cannot safely launch Pi: Windows shim ${shimPath} has no existing JavaScript entrypoint`);
+  }
+
+  const localNode = expandWindowsShimPath("%dp0%\\node.exe", shimPath);
+  return {
+    command: localNode && exists(localNode) ? localNode : nodeExecutable,
+    args: [scriptPath],
+  };
+}
+
+/**
+ * Resolve Pi to a directly executable command. Windows npm installs expose a
+ * .cmd/.bat wrapper; passing that wrapper to shell-free spawn() raises EINVAL
+ * and using a shell would reparse issue-controlled prompts. Parse the wrapper
+ * instead and keep the resulting launch shell-free.
+ */
+export function resolvePiLaunch({
+  platform = process.platform,
+  executablePath,
+  nodeExecutable = process.execPath,
+  readFile = readFileSync,
+  exists = existsSync,
+} = {}) {
+  if (platform !== "win32") {
+    return { command: executablePath || "pi", args: [], options: { shell: false } };
+  }
+
+  const candidate = executablePath || findWindowsPiExecutable();
+  if (!candidate) {
+    throw new Error("Cannot safely launch Pi: no pi.exe or pi.cmd was found on PATH");
+  }
+  if (!WINDOWS_SHIM_PATTERN.test(candidate)) {
+    if (/\.exe$/i.test(candidate)) return { command: candidate, args: [], options: { shell: false } };
+    throw new Error(`Cannot safely launch Pi: unsupported Windows executable ${candidate}`);
+  }
+  if (/\.(?:cmd|bat)$/i.test(nodeExecutable)) {
+    throw new Error("Cannot safely launch Pi: Node executable must not be a Windows command shim");
+  }
+
+  const target = readWindowsShimTarget(candidate, readFile, exists, nodeExecutable);
+  return {
+    command: target.command || nodeExecutable,
+    args: target.args,
+    options: { shell: false },
+  };
 }
 
 function phaseLabel(commandName) {
@@ -226,13 +320,15 @@ function killProcessTree(child) {
 async function runPiPhase({ extensionPath, forgeHome, projectRoot, repo, issue, commandName, args, model, thinkingLevel, worktree, signal, onOutput }) {
   const phaseCwd = await resolvePhaseCwd({ projectRoot, repo, issue, commandName, worktree });
   const prompt = buildPiPhasePrompt({ forgeHome, projectRoot, phaseCwd: phaseCwd.cwd, issue, commandName, args });
-  const child = spawn(piExecutable(), buildPiPhaseArgs({
+  const piLaunch = resolvePiLaunch();
+  const child = spawn(piLaunch.command, [...piLaunch.args, ...buildPiPhaseArgs({
     extensionPath,
     model,
     thinkingLevel,
     name: `forge-pi-${issue}-${phaseLabel(commandName)}`,
     prompt,
-  }), {
+  })], {
+    ...piLaunch.options,
     cwd: phaseCwd.cwd,
     env: {
       ...process.env,
@@ -241,6 +337,7 @@ async function runPiPhase({ extensionPath, forgeHome, projectRoot, repo, issue, 
       FORGE_PI_WORKER: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
+    shell: false,
     windowsHide: true,
   });
 

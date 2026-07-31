@@ -9,8 +9,67 @@ import {
   buildPiPhasePrompt,
   modelPattern,
   parseWorktrees,
+  resolvePiLaunch,
   worktreeForBranch,
 } from "../../pi/runtime/engine.mjs";
+
+test("Pi runtime resolves a Windows npm shim to a shell-free Node launch", () => {
+  const shimPath = "C:\\Pi\\pi.cmd";
+  const scriptPath = "C:\\Pi\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.js";
+  const files = new Map([
+    [shimPath, String.raw`@ECHO off
+SET dp0=%~dp0
+"%_prog%" "%dp0%\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.js" %*`],
+    [scriptPath, ""],
+  ]);
+  const launch = resolvePiLaunch({
+    platform: "win32",
+    executablePath: shimPath,
+    nodeExecutable: "C:\\Node\\node.exe",
+    readFile: (path) => {
+      if (!files.has(path)) throw new Error(`missing fixture: ${path}`);
+      return files.get(path);
+    },
+    exists: (path) => files.has(path),
+  });
+
+  assert.deepEqual(launch, {
+    command: "C:\\Node\\node.exe",
+    args: [scriptPath],
+    options: { shell: false },
+  });
+  assert.notEqual(launch.command.toLowerCase().endsWith(".cmd"), true);
+});
+
+test("Pi runtime accepts a native Windows executable without adding shell parsing", () => {
+  assert.deepEqual(
+    resolvePiLaunch({ platform: "win32", executablePath: "C:\\Pi\\pi.exe" }),
+    { command: "C:\\Pi\\pi.exe", args: [], options: { shell: false } },
+  );
+});
+
+test("Pi runtime fails closed for missing or malformed Windows shims", () => {
+  assert.throws(
+    () => resolvePiLaunch({ platform: "win32", executablePath: "C:\\Pi\\missing.cmd" }),
+    /unable to read Windows shim/,
+  );
+  assert.throws(
+    () => resolvePiLaunch({
+      platform: "win32",
+      executablePath: "C:\\Pi\\malformed.cmd",
+      readFile: () => "@echo off",
+      exists: () => false,
+    }),
+    /no existing JavaScript entrypoint/,
+  );
+});
+
+test("Pi runtime keeps the normal non-Windows executable shell-free", () => {
+  assert.deepEqual(
+    resolvePiLaunch({ platform: "linux", executablePath: "pi" }),
+    { command: "pi", args: [], options: { shell: false } },
+  );
+});
 
 test("Pi runtime resolves provider/model objects into an explicit model pattern", () => {
   assert.equal(modelPattern({ provider: "openai", id: "gpt-5.5" }), "openai/gpt-5.5");
