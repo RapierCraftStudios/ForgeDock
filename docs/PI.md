@@ -86,6 +86,8 @@ When a workflow spec references Claude-specific mechanics, Pi translates them as
 - `Bash`, `Read`, `Grep`, `Glob` -> Pi shell/file tools with `gh`, `git`, `rg`, and `find`
 - `WebFetch` -> `gh`, `curl`, or available web tooling
 
+Direct Pi subprocesses launched from a project working directory, including `forge_subagent`, pass `--no-extensions` so repository-controlled extensions cannot execute before the requested prompt. Phase workers additionally pass `--no-extensions` and explicitly load only the selected ForgeDock extension.
+
 The Claude adapter and headless Claude runner remain available, but they are separate runtime implementations. Pi must not silently fall back to Claude when its selected provider fails; the phase is recorded as a runtime error and remains recoverable from GitHub state.
 
 Preserve ForgeDock invariants across runtimes: GitHub issues/PRs are state, structured `FORGE:*` comments remain machine-readable, workflow labels track state, builders do not approve their own work, and unsafe or unavailable phases fail closed to a blocked/`needs-human` state.

@@ -79,6 +79,24 @@ export function buildPiPhaseArgs({ extensionPath, model, thinkingLevel, name, pr
 }
 
 /**
+ * Build the argv for a direct subagent launched from a project working
+ * directory. Project-local extensions are untrusted, so extension discovery
+ * must remain disabled while preserving the literal prompt as the final arg.
+ */
+export function buildPiSubagentArgs({ name, prompt, readOnly } = {}) {
+  return [
+    "--no-session",
+    "--approve",
+    "--no-extensions",
+    "--name",
+    name || "forge-subagent",
+    ...(readOnly ? ["--tools", "read,grep,find,ls,bash"] : []),
+    "-p",
+    prompt,
+  ];
+}
+
+/**
  * Parse `git worktree list --porcelain` output without relying on platform
  * path separators. The branch ref is the durable identity; paths may contain
  * spaces on Windows.

@@ -7,7 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runPiIssue } from "../runtime/engine.mjs";
+import { buildPiSubagentArgs, runPiIssue } from "../runtime/engine.mjs";
 
 type ForgeCommand = { id: string; name: string; relativePath: string; absolutePath: string; description: string };
 type PlanIssue = { number: number; title: string; predecessors: number[]; domain: string[]; files: string[]; priority: number; inFlight?: boolean };
@@ -413,7 +413,7 @@ export default function forgedockPiExtension(pi: ExtensionAPI) {
 		name: "forge_subagent", label: "Forge Subagent", description: "Run an isolated Pi subprocess for ForgeDock review or subtask work.",
 		parameters: Type.Object({ prompt: Type.String(), label: Type.Optional(Type.String()), readOnly: Type.Optional(Type.Boolean()) }),
 		async execute(_id, params, signal, _update, ctx) {
-			const result = await runProcess(piExecutable(), ["--no-session", "--approve", "--name", params.label || "forge-subagent", ...(params.readOnly ? ["--tools", "read,grep,find,ls,bash"] : []), "-p", params.prompt], ctx.cwd, signal);
+			const result = await runProcess(piExecutable(), buildPiSubagentArgs({ name: params.label, prompt: params.prompt, readOnly: params.readOnly }), ctx.cwd, signal);
 			return { content: [{ type: "text", text: `exit_code=${result.code}\n${result.stdout}\n${result.stderr}` }], details: result, isError: result.code !== 0 };
 		},
 	});

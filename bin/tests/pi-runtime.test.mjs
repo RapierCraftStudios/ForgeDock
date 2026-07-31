@@ -7,6 +7,7 @@ import {
   buildPiModelArgs,
   buildPiPhaseArgs,
   buildPiPhasePrompt,
+  buildPiSubagentArgs,
   modelPattern,
   parseWorktrees,
   worktreeForBranch,
@@ -49,6 +50,28 @@ test("Pi worker argv is isolated and loads the selected ForgeDock extension", ()
       "forge-pi-42-build",
       "-p",
       "run phase",
+    ],
+  );
+});
+
+test("Pi subagent argv disables project extensions and preserves literal prompts", () => {
+  const prompt = "review with spaces; do not split this";
+  assert.deepEqual(
+    buildPiSubagentArgs({ name: "security-review", prompt }),
+    ["--no-session", "--approve", "--no-extensions", "--name", "security-review", "-p", prompt],
+  );
+  assert.deepEqual(
+    buildPiSubagentArgs({ name: "read-only-review", prompt, readOnly: true }),
+    [
+      "--no-session",
+      "--approve",
+      "--no-extensions",
+      "--name",
+      "read-only-review",
+      "--tools",
+      "read,grep,find,ls,bash",
+      "-p",
+      prompt,
     ],
   );
 });
