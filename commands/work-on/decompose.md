@@ -69,23 +69,34 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 
 ---
 
-## Phase D1.5: Collect Parent Knowledge Gist URLs
+## Phase D1.5: Resolve Parent Investigator Comment
 
-Query the parent issue's comments for `FORGE:KNOWLEDGE_GIST` annotations created by Phase 1C.5 of the investigation. These URLs will be embedded in each sub-issue body so downstream agents can fetch prior investigation context.
+Resolve one completed `FORGE:INVESTIGATOR` comment on the parent issue and propagate its exact repository-scoped identity. The numeric comment resource is authoritative; the rendered GitHub URL is informational. The request is intentionally bounded to the first 100 comments so a missing older comment fails closed rather than triggering an unbounded scan.
 
 ```bash
-GIST_URLS=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '[.[] | select(.body | test("<!-- FORGE:KNOWLEDGE_GIST: https://")) | .body | capture("<!-- FORGE:KNOWLEDGE_GIST: (?<url>https://[^ ]+) -->").url] | unique | .[]')
+PARENT_CONTEXT_COMMENT_ID=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments?per_page=100&page=1" \
+  --jq '[.[] | select((.body | contains("<!-- FORGE:INVESTIGATOR -->")) and (.body | contains("<!-- INVESTIGATION:COMPLETE -->"))) | .id] | last // empty')
 
-if [ -n "$GIST_URLS" ]; then
-  echo "Found Knowledge Gist URL(s) on parent issue #${NUMBER}:"
-  echo "$GIST_URLS"
-else
-  echo "No Knowledge Gist annotations found on parent issue #${NUMBER} — sub-issues will not include Prior Investigation section"
+# WIRE:PROVEN — a missing or malformed parent comment fails closed before any child is created.
+if ! [[ "$PARENT_CONTEXT_COMMENT_ID" =~ ^[0-9]+$ ]]; then
+  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:DECOMPOSE:BLOCKED -->
+## Decomposition Blocked
+
+The parent issue has no bounded, completed `FORGE:INVESTIGATOR` comment resource to propagate. Decomposition will not guess from other comments or external artifacts; re-run investigation and retry.
+
+<!-- FORGE:DECOMPOSE:BLOCKED:COMPLETE -->"
+  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+  echo "BLOCKED: completed parent investigator comment not found in the bounded comment page"
+  exit 1
 fi
+
+PARENT_CONTEXT_REFERENCE="<!-- FORGE:PARENT_CONTEXT: repo={GH_REPO} issue={NUMBER} comment=${PARENT_CONTEXT_COMMENT_ID} marker=FORGE:INVESTIGATOR -->"
+PARENT_CONTEXT_URL="https://github.com/{GH_REPO}/issues/{NUMBER}#issuecomment-${PARENT_CONTEXT_COMMENT_ID}"
+echo "Parent context reference: ${PARENT_CONTEXT_REFERENCE}"
+echo "Parent context URL: ${PARENT_CONTEXT_URL}"
 ```
 
-If `GIST_URLS` is non-empty, a `## Prior Investigation` section will be appended to each sub-issue body in Phase D3.
+`PARENT_CONTEXT_REFERENCE` and `PARENT_CONTEXT_URL` are appended once to each child body in Phase D3. No Gist URL or retired prior-investigation annotation is emitted.
 
 ---
 
@@ -197,28 +208,20 @@ fi
 
 If `SUB_NUMBER` is empty, treat this sub-issue as not created — do not add it to the parent tracker checklist (Phase D4) and do not reference it as a dependency in later sub-issues.
 
-**Append Prior Investigation section** (conditional — only if `GIST_URLS` from Phase D1.5 is non-empty):
+**Append Parent Context reference**:
 
-After creating each sub-issue, append the `## Prior Investigation` section containing all parent Gist URLs. This keeps the Gist references machine-readable for downstream agents.
+After creating each sub-issue, append the exact bounded parent-comment reference. This is the single machine-readable context handoff consumed by build context; the URL is informational and the numeric comment resource remains authoritative.
 
 ```bash
-if [ -n "$GIST_URLS" ]; then
-  SUB_BODY=$(gh issue view {SUB_NUMBER} {GH_FLAG} --json body --jq '.body')
+SUB_BODY=$(gh issue view {SUB_NUMBER} {GH_FLAG} --json body --jq '.body')
+PARENT_CONTEXT_SECTION="
 
-  PRIOR_SECTION="
+## Parent Context
 
-## Prior Investigation
-
-Investigation findings from the parent issue are available as Knowledge Gists:
+${PARENT_CONTEXT_REFERENCE}
+Parent investigator comment: ${PARENT_CONTEXT_URL}
 "
-  while IFS= read -r url; do
-    PRIOR_SECTION="${PRIOR_SECTION}
-<!-- FORGE:PRIOR_GIST: ${url} -->
-- ${url}"
-  done <<< "$GIST_URLS"
-
-  gh issue edit {SUB_NUMBER} {GH_FLAG} --body "${SUB_BODY}${PRIOR_SECTION}"
-fi
+gh issue edit {SUB_NUMBER} {GH_FLAG} --body "${SUB_BODY}${PARENT_CONTEXT_SECTION}"
 ```
 
 Capture the created issue number from the output URL for the tracker checklist.

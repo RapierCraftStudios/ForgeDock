@@ -538,139 +538,61 @@ fi
 
 ---
 
-## Phase C0: Prior Investigation Findings (from Gists)
+## Phase C0: Bounded Parent Repository Context
 
-Scan the issue body for `<!-- FORGE:PRIOR_GIST: {url} -->` annotations embedded by the decompose or orchestrate phases (GIST-02). Also check for `<!-- FORGE:MILESTONE_INDEX: {url} -->` annotations — these reference a milestone-level index Gist (GIST-04) that aggregates all investigation Gist URLs for a milestone into a single reference. Both annotation types reference Knowledge Gists created during upstream investigation (GIST-01) and contain structured findings — verdict, root cause, recommendation, affected files — that the builder needs before writing code.
+The issue body may contain one exact `FORGE:PARENT_CONTEXT` annotation emitted by decomposition. The annotation identifies the repository, parent issue, numeric investigator-comment ID, and required marker. The comment ID is the authority; any rendered URL is informational. This phase reads one exact comment resource and never scans an unbounded comment history or external memory store.
 
-**Time budget**: 30 seconds total for all Gist fetches. Each individual fetch times out after 15 seconds.
-
-**Skip if**: Issue body contains no `FORGE:PRIOR_GIST` or `FORGE:MILESTONE_INDEX` annotations, AND the issue's milestone description contains no `FORGE:MILESTONE_INDEX` annotation. Zero iterations, no output — this is expected for issues without prior investigation context.
-
-### Step 0: Check for milestone index Gist
-
-Before scanning individual Gist annotations, check if the issue's milestone has an index Gist. If so, fetch the index and extract individual Gist URLs from the table rows.
+### Step 0: Parse and validate the parent reference
 
 ```bash
 ISSUE_BODY=$(gh issue view {NUMBER} -R {GH_REPO} --json body --jq '.body')
-MILESTONE_NUM=$(gh issue view {NUMBER} -R {GH_REPO} --json milestone --jq '.milestone.number // empty')
+PARENT_CONTEXT_LINE=$(printf '%s\n' "$ISSUE_BODY" \
+  | grep -E '^<!-- FORGE:PARENT_CONTEXT: repo=[^ ]+ issue=[0-9]+ comment=[0-9]+ marker=FORGE:INVESTIGATOR -->$' \
+  | head -1 || true)
+PARENT_CONTEXT_SUMMARY=""
 
-MILESTONE_INDEX_URL=""
-INDEX_GIST_URLS=""
+# WIRE:PROVEN — absent references emit an explicit no-context result; present references enter exact-resource validation.
+if [ -z "$PARENT_CONTEXT_LINE" ]; then
+  PARENT_CONTEXT_SUMMARY="No FORGE:PARENT_CONTEXT reference found; no parent context was hydrated."
+else
+  PARENT_REPO=$(printf '%s\n' "$PARENT_CONTEXT_LINE" | sed -n 's/.*repo=\([^ ]*\) issue=.*/\1/p')
+  PARENT_ISSUE=$(printf '%s\n' "$PARENT_CONTEXT_LINE" | sed -n 's/.*issue=\([0-9]*\) comment=.*/\1/p')
+  PARENT_COMMENT_ID=$(printf '%s\n' "$PARENT_CONTEXT_LINE" | sed -n 's/.*comment=\([0-9]*\) marker=.*/\1/p')
 
-# Check issue body for milestone index annotation
-MILESTONE_INDEX_URL=$(echo "$ISSUE_BODY" \
-  | sed -n 's/.*<!-- FORGE:MILESTONE_INDEX: \(https:\/\/[^ ]*\) -->.*/\1/p' \
-  | head -1)
+  # WIRE:PROVEN — repository, issue, and numeric-comment rejection is covered by the bounded reference contract.
+  if [ "$PARENT_REPO" != "{GH_REPO}" ] || [ -z "$PARENT_ISSUE" ] || ! [[ "$PARENT_COMMENT_ID" =~ ^[0-9]+$ ]]; then
+    PARENT_CONTEXT_SUMMARY="Invalid FORGE:PARENT_CONTEXT reference; repository, issue, and numeric comment identity did not validate. No parent context was used."
+  else
+    PARENT_COMMENT_JSON=$(gh api "repos/{GH_REPO}/issues/comments/${PARENT_COMMENT_ID}" 2>/dev/null || true)
+    PARENT_COMMENT_BODY=$(printf '%s' "$PARENT_COMMENT_JSON" | jq -r '.body // empty' 2>/dev/null || true)
+    PARENT_COMMENT_ISSUE_URL=$(printf '%s' "$PARENT_COMMENT_JSON" | jq -r '.issue_url // empty' 2>/dev/null || true)
+    EXPECTED_PARENT_ISSUE_URL="https://api.github.com/repos/{GH_REPO}/issues/${PARENT_ISSUE}"
 
-# If not in issue body, check milestone description
-if [ -z "$MILESTONE_INDEX_URL" ] && [ -n "$MILESTONE_NUM" ]; then
-  MILESTONE_DESC=$(gh api repos/{GH_REPO}/milestones/${MILESTONE_NUM} --jq '.description // ""' 2>/dev/null)
-  MILESTONE_INDEX_URL=$(echo "$MILESTONE_DESC" \
-    | sed -n 's/.*<!-- FORGE:MILESTONE_INDEX: \(https:\/\/[^ ]*\) -->.*/\1/p' \
-    | head -1)
-fi
-
-# If found, fetch the index and extract individual Gist URLs from table rows
-if [ -n "$MILESTONE_INDEX_URL" ]; then
-  INDEX_GIST_ID=$(echo "$MILESTONE_INDEX_URL" | grep -oE '[a-f0-9]{20,}' | tail -1)
-  if [ -n "$INDEX_GIST_ID" ]; then
-    INDEX_CONTENT=$(timeout 15 gh gist view "$INDEX_GIST_ID" --raw 2>/dev/null)
-    if [ -n "$INDEX_CONTENT" ]; then
-      # Extract Gist URLs from table rows (format: | ... | https://gist.github.com/... | ... |)
-      INDEX_GIST_URLS=$(echo "$INDEX_CONTENT" \
-        | grep -oE 'https://gist\.github\.com/[a-f0-9/]+' \
-        | head -10)
-      echo "Milestone index fetched: found $(echo "$INDEX_GIST_URLS" | wc -l) investigation Gist(s)"
+    # WIRE:PROVEN — inaccessible, wrong-issue, and incomplete comments warn; a validated comment is bounded before output.
+    if [ -z "$PARENT_COMMENT_BODY" ] || [ "$PARENT_COMMENT_ISSUE_URL" != "$EXPECTED_PARENT_ISSUE_URL" ] || \
+       ! printf '%s' "$PARENT_COMMENT_BODY" | grep -q '<!-- FORGE:INVESTIGATOR -->' || \
+       ! printf '%s' "$PARENT_COMMENT_BODY" | grep -q '<!-- INVESTIGATION:COMPLETE -->'; then
+      PARENT_CONTEXT_SUMMARY="Parent context comment ${PARENT_COMMENT_ID} was inaccessible or failed repository, issue, marker, or completion validation. No parent context was used."
     else
-      echo "WARNING: Failed to fetch milestone index Gist — falling back to individual annotations"
+      PARENT_CONTEXT_SUMMARY=$(printf 'Parent context comment %s from %s#%s was validated from the exact comment resource:\n\n%s' \
+        "$PARENT_COMMENT_ID" "$PARENT_REPO" "$PARENT_ISSUE" \
+        "$(printf '%s' "$PARENT_COMMENT_BODY" | sed -n '1,80p' | cut -c1-12000)")
     fi
   fi
 fi
 ```
 
-### Step 1: Detect Gist URLs in issue body
+### Step 1: Hydrate bounded current-issue annotations
+
+Read only the first 100 issue comments and retain the latest investigator/synthesis annotations. This keeps current-issue context bounded while preserving the repository's structured completion markers.
 
 ```bash
-GIST_URLS=$(echo "$ISSUE_BODY" \
-  | sed -n 's/.*<!-- FORGE:PRIOR_GIST: \(https:\/\/[^ ]*\) -->.*/\1/p' \
-  | head -5)
-
-# Merge with any URLs discovered from milestone index (deduplicate)
-if [ -n "$INDEX_GIST_URLS" ]; then
-  GIST_URLS=$(echo -e "${GIST_URLS}\n${INDEX_GIST_URLS}" | sort -u | head -5)
-fi
-
-if [ -z "$GIST_URLS" ]; then
-  echo "No FORGE:PRIOR_GIST or FORGE:MILESTONE_INDEX annotations found — skipping Phase C0"
-  # → Continue to Phase C1
-fi
+CURRENT_ANNOTATIONS=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments?per_page=100&page=1" \
+  --jq '[.[] | select((.body | contains("FORGE:INVESTIGATOR")) or (.body | contains("FORGE:SYNTHESIS_BRIEF"))) | {id, body}] | sort_by(.id) | reverse | .[:4] | .[] | "#### Comment #\(.id)\n\(.body | .[0:12000])"' \
+  2>/dev/null || true)
 ```
 
-**Max Gists**: 5 per issue. If more than 5 are present (from combined individual + index sources), process only the first 5 to stay within time budget.
-
-### Step 2: Fetch and summarize each Gist
-
-For each Gist URL, extract the Gist ID (last path segment) and fetch the raw content:
-
-```bash
-GIST_SUMMARIES=""
-
-for url in $GIST_URLS; do
-  # Extract Gist ID from URL (last path segment, strip any trailing slash)
-  GIST_ID=$(echo "$url" | grep -oE '[a-f0-9]{20,}' | tail -1)
-
-  if [ -z "$GIST_ID" ]; then
-    echo "WARNING: Could not extract Gist ID from URL: $url — skipping"
-    continue
-  fi
-
-  # Fetch Gist content with timeout
-  GIST_CONTENT=$(timeout 15 gh gist view "$GIST_ID" --raw 2>/dev/null)
-
-  if [ -z "$GIST_CONTENT" ]; then
-    echo "WARNING: Failed to fetch Gist $GIST_ID — skipping (deleted, private, or network error)"
-    GIST_SUMMARIES="${GIST_SUMMARIES}
-- **Gist ${GIST_ID}** (${url}): _Fetch failed — Gist may be deleted or inaccessible_"
-    continue
-  fi
-
-  # Extract key sections for summary (~2K chars target per Gist)
-  VERDICT=$(echo "$GIST_CONTENT" | sed -n 's/.*verdict: \([A-Za-z_]*\).*/\1/p' | head -1)
-  TASK_TYPE=$(echo "$GIST_CONTENT" | sed -n 's/.*task_type: \(.*\)/\1/p' | head -1)
-  SEVERITY=$(echo "$GIST_CONTENT" | sed -n 's/.*severity: \([A-Za-z_]*\).*/\1/p' | head -1)
-  SOURCE_ISSUE=$(echo "$GIST_CONTENT" | sed -n 's/.*issue: \([0-9]*\).*/\1/p' | head -1)
-
-  # Extract structured sections: Root Cause, Recommendation, Affected Files
-  ROOT_CAUSE=$(echo "$GIST_CONTENT" \
-    | sed -n '/^### Root Cause/,/^### /p' \
-    | head -10 | tail -n +2 | head -8)
-  RECOMMENDATION=$(echo "$GIST_CONTENT" \
-    | sed -n '/^### Recommendation/,/^### /p' \
-    | head -10 | tail -n +2 | head -8)
-  AFFECTED_FILES=$(echo "$GIST_CONTENT" \
-    | sed -n '/^### Affected Files/,/^### /p' \
-    | head -10 | tail -n +2 | head -8)
-
-  GIST_SUMMARIES="${GIST_SUMMARIES}
-
-#### Investigation #${SOURCE_ISSUE:-unknown} (${VERDICT:-unknown} / ${SEVERITY:-unknown})
-**Source**: ${url}
-**Task type**: ${TASK_TYPE:-unknown}
-
-**Root Cause**:
-${ROOT_CAUSE:-_Not extracted — read Gist directly_}
-
-**Recommendation**:
-${RECOMMENDATION:-_Not extracted — read Gist directly_}
-
-**Affected Files**:
-${AFFECTED_FILES:-_Not extracted — read Gist directly_}"
-done
-```
-
-### Step 3: Store for output
-
-If `GIST_SUMMARIES` is non-empty, it will be included in the `### Prior Investigation Findings` section of the FORGE:CONTEXT comment (see Output Format below). If empty (all fetches failed or no annotations found), the section is omitted from the output.
+`PARENT_CONTEXT_SUMMARY` and `CURRENT_ANNOTATIONS` are included in the FORGE:CONTEXT output. Invalid or inaccessible parent references produce a bounded warning rather than fabricated context; Ledger recall in Phase C1 remains the non-blocking repository-scoped fallback.
 
 ---
 
@@ -870,11 +792,15 @@ gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
      If danger-zones.json was absent or no contract files had findings — omit this section entirely (no empty scaffolding). -->
 {DANGER_ZONE_CARDS}
 
-### Prior Investigation Findings
-<!-- Summarized Knowledge Gist content from upstream investigations (Phase C0).
-     If no FORGE:PRIOR_GIST annotations were found in the issue body: omit this section entirely.
-     If Gist fetches failed: include the failure note so the builder knows context was attempted. -->
-{GIST_SUMMARIES}
+### Parent Repository Context
+<!-- Bounded exact-comment hydration from FORGE:PARENT_CONTEXT (Phase C0).
+     The numeric comment resource is authoritative; invalid or inaccessible references are warnings.
+     No parent reference is represented by the explicit no-context note. -->
+{PARENT_CONTEXT_SUMMARY}
+
+### Current Issue Annotations
+<!-- Latest bounded FORGE:INVESTIGATOR/FORGE:SYNTHESIS_BRIEF comments from this issue. -->
+{CURRENT_ANNOTATIONS}
 
 ### Claims Board Constraints
 <!-- Active peer claims from the orchestration coordination issue (Phase C-0.5).
@@ -918,7 +844,7 @@ gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
 ## Timing Rules
 
 - Phase C-1 devdocs read: 30s total budget (file enumeration + content reads combined); skip if exceeded
-- Phase C0 `gh gist view` calls: timeout after 15s each, 30s total budget for all Gist fetches
+- Phase C0 exact parent-comment read: one bounded GitHub API resource lookup; invalid or inaccessible references are recorded as warnings
 - Each `gh issue list` call: timeout after 20s, skip if exceeded
 - Each `gh pr list` call: timeout after 20s, skip if exceeded
 - Each `grep -r` call: timeout after 10s, skip if exceeded
@@ -946,7 +872,7 @@ This module runs at **Step 3C.5** — after Builder Contract is posted, before I
          Phase C-1:  Authoritative Devdocs (project-resident knowledge — highest precedence)
          Phase C-0.5: Active Peer Claims Reader (conditional — orchestration only)
          Phase C0.5: Danger-Zone Rule Cards (fixed 400-token slot — forge#1744)
-         Phase C0:  Prior Investigation Findings (from Gists)
+         Phase C0:  Bounded Parent Repository Context
          Phase C1:  Past Review Findings on These Files
          Phase C2:  Past Bugs in the Same Module
          Phase C3:  Related Code Paths
@@ -958,4 +884,4 @@ The builder agent reads the `<!-- FORGE:CONTEXT -->` comment before writing any 
 
 **Devdocs precedence** (Phase C-1): Content from `project/custom-instructions.md` has the HIGHEST precedence of all context sources. Directives there override agent defaults, training knowledge, and all other devdocs. Other `project/*.md` and `agent/*.md` files with `applies_to: work-on` provide authoritative project conventions and ForgeDock usage guidance. <!-- Added: forge#259 -->
 
-When prior investigation Gists are available (Phase C0), the `### Prior Investigation Findings` section gives the builder cross-issue context — root causes, recommendations, and affected files from upstream investigations — without requiring manual Gist lookups. When a milestone-level index Gist exists (GIST-04), Phase C0 can resolve the index to discover all investigation Gists for the milestone from a single URL — providing full milestone-wide context automatically. <!-- Updated: forge#341 -->
+When a parent reference is available (Phase C0), the `### Parent Repository Context` section gives the builder the exact validated investigator comment without requiring an unbounded comment scan. Current issue investigator/synthesis annotations and Forge Ledger recall remain bounded repository-scoped context surfaces.
