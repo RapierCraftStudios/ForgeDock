@@ -1353,6 +1353,8 @@ export function runCliBackend({
     //     routed through the same `sanitizeOutputExcerptForLog()` helper
     //     before being concatenated into `humanOutput`, instead of reaching
     //     `logger.log()` raw.
+    //   - forge#2922: the parsed `.result` is also untrusted CLI/model output;
+    //     it is sanitized before entering the same human-readable log sink.
     //   - forge#2484: `parsedResult !== null` is true even when
     //     `parsedResult === ""` (the earlier `typeof parsed.result ===
     //     "string"` check accepts `""`). Previously that produced
@@ -1364,12 +1366,14 @@ export function runCliBackend({
     // untouched by either fix — out of scope for both findings.
     const stderrTrimmed = stderr.trim();
     const sanitizedStderr = stderrTrimmed ? sanitizeOutputExcerptForLog(stderrTrimmed) : "";
+    const sanitizedParsedResult =
+      parsedResult !== null ? sanitizeOutputExcerptForLog(parsedResult) : null;
     const humanOutput =
-      parsedResult !== null
-        ? parsedResult
+      sanitizedParsedResult !== null
+        ? sanitizedParsedResult
           ? sanitizedStderr
-            ? `${parsedResult}\n${sanitizedStderr}`
-            : parsedResult
+            ? `${sanitizedParsedResult}\n${sanitizedStderr}`
+            : sanitizedParsedResult
           : sanitizedStderr
         : output;
     if (humanOutput) logger.log(humanOutput);

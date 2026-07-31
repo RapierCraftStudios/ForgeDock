@@ -2252,6 +2252,33 @@ describe("runCliBackend usage parsing from --output-format json (issue #2398)", 
     );
   });
 
+  it("sanitizes terminal controls in the parsed result while preserving readable text", () => {
+    const resultText =
+      "Readable \x1b[31mresult\x1b[0m with OSC \x1b]52;c;INJECT\x07 done";
+    const envelope = JSON.stringify({ result: resultText, usage: {} });
+    const spawnFn = () => ({ status: 0, stdout: envelope, stderr: "", error: undefined });
+    const loggedLines = [];
+
+    runCliBackend({
+      spec: loadCommandSpec(COMMANDS_DIR, "work-on"),
+      userMessage: "Execute: /work-on 2922",
+      args: ["2922"],
+      cwd: TMP,
+      logger: { log: (line) => loggedLines.push(line) },
+      bin: "claude",
+      spawnFn,
+    });
+
+    const humanOutput = loggedLines.find((line) => line.includes("Readable"));
+    assert.ok(humanOutput, "the parsed result should remain visible in the human-readable log");
+    assert.ok(!humanOutput.includes("\x1b"), "raw ESC must not reach the logger");
+    assert.ok(!humanOutput.includes("\x07"), "raw BEL must not reach the logger");
+    assert.equal(
+      humanOutput,
+      "Readable \\x1b[31mresult\\x1b[0m with OSC \\x1b]52;c;INJECT\\x07 done",
+    );
+  });
+
   it("normalizes a partial usage object with per-field coercion to 0 for missing fields", () => {
     // Only input_tokens/output_tokens present — no cache fields, as when
     // prompt caching is not active (mirrors the SDK's own omission behavior).
