@@ -58,11 +58,20 @@ function discoverCommands(root: string): ForgeCommand[] {
 	}));
 }
 
+function stopProcessTree(child: ChildProcess): void {
+	if (!child.pid) return;
+	if (process.platform === "win32") {
+		spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+	} else if (!child.killed) {
+		child.kill();
+	}
+}
+
 function runProcess(command: string, args: string[], cwd: string, signal?: AbortSignal): Promise<{ code: number | null; stdout: string; stderr: string }> {
 	return new Promise((resolvePromise, reject) => {
 		const child = spawn(command, args, { cwd, env: { ...process.env, FORGE_RUNTIME: "pi" }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
 		let stdout = ""; let stderr = "";
-		const abort = () => { if (!child.killed) child.kill(); };
+		const abort = () => stopProcessTree(child);
 		signal?.addEventListener("abort", abort, { once: true });
 		child.stdout?.on("data", (chunk) => { stdout += String(chunk); });
 		child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
@@ -143,13 +152,13 @@ async function runWorker(root: string, repo: string, number: number, signal?: Ab
 		while (polling) {
 			if (terminalIssue(root, repo, number)) {
 				stoppedAtTerminal = true;
-				if (!child.killed) child.kill();
+				stopProcessTree(child);
 				return;
 			}
 			await new Promise((resolvePromise) => setTimeout(resolvePromise, 5000));
 		}
 	};
-	const abort = () => { polling = false; if (!child.killed) child.kill(); };
+	const abort = () => { polling = false; stopProcessTree(child); };
 	signal?.addEventListener("abort", abort, { once: true });
 	const result = await Promise.race([
 		new Promise<{ code: number | null }>((resolvePromise, reject) => { child.once("error", reject); child.once("close", (code) => resolvePromise({ code })); }),
