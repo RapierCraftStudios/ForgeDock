@@ -20,10 +20,9 @@ install: core
 
 ```bash
 # Count investigations that completed in Wave 0 (Phase 2), regardless of whether each
-# emitted a Knowledge Gist. Use the full completed-investigation set (the same
-# {investigation_numbers} that Steps 2C.5, 2.5B and 2.5C iterate) — NOT the
-# INVESTIGATION_GISTS map, which only holds gist-producing investigations and would
-# undercount when a genuine investigation reached a recommendation without a gist.
+# has an available repository comment reference. Use the full completed-investigation
+# set (the same {investigation_numbers} that Steps 2C.5, 2.5B and 2.5C iterate) so an
+# investigation is not silently dropped when its repository context is unavailable.
 # If < 2, skip synthesis entirely.
 INVESTIGATION_NUMS=( {investigation_numbers} )
 INVESTIGATION_COUNT=${#INVESTIGATION_NUMS[@]}
@@ -37,7 +36,7 @@ else
 fi
 ```
 
-If `SYNTHESIS_RAN` is false, do NOT execute Steps 2.5B–2.5D — proceed directly to Phase 3. Step 4A's `{GIST_CONTEXT}` generation will fall back to the existing raw-gist behavior (no synthesis brief exists).
+If `SYNTHESIS_RAN` is false, do NOT execute Steps 2.5B–2.5D — proceed directly to Phase 3. Step 4A's `{GIST_CONTEXT}` generation will use the repository-scoped investigator-comment behavior (no synthesis brief exists).
 
 ### Step 2.5B: Cluster investigations by target subsystem
 
@@ -47,9 +46,22 @@ For each investigation that completed in Wave 0, read its `FORGE:INVESTIGATOR` c
 # For each investigation, pull its recommendation + affected-files block (annotations only — no code reads)
 declare -A INV_RECOMMENDATION
 declare -A INV_SUBSYSTEM
+if ! declare -p INVESTIGATION_CONTEXT >/dev/null 2>&1; then
+  declare -A INVESTIGATION_CONTEXT
+fi
 for INV_NUM in {investigation_numbers}; do
-  INV_BODY=$(gh api repos/{GH_REPO}/issues/${INV_NUM}/comments \
-    --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' 2>/dev/null | head -1)
+  EXPECTED_ISSUE_URL="https://api.github.com/repos/{GH_REPO}/issues/${INV_NUM}"
+  INVESTIGATOR_JSON=$(gh api --paginate --slurp \
+    "repos/{GH_REPO}/issues/${INV_NUM}/comments?per_page=100" 2>/dev/null \
+    | jq -c --arg expected_issue_url "$EXPECTED_ISSUE_URL" \
+      'add | map(select(.issue_url == $expected_issue_url and (.body | contains("<!-- FORGE:INVESTIGATOR -->")) and (.body | contains("<!-- INVESTIGATION:COMPLETE -->")))) | sort_by(.id) | last // empty' \
+    || true)
+  INV_BODY=$(printf '%s' "$INVESTIGATOR_JSON" | jq -r '.body // empty' 2>/dev/null || true)
+  if [ -n "$INVESTIGATOR_JSON" ] && [ -z "${INVESTIGATION_CONTEXT[$INV_NUM]:-}" ]; then
+    COMMENT_ID=$(printf '%s' "$INVESTIGATOR_JSON" | jq -r '.id // empty')
+    COMMENT_URL=$(printf '%s' "$INVESTIGATOR_JSON" | jq -r '.html_url // empty')
+    INVESTIGATION_CONTEXT[$INV_NUM]="Investigation #${INV_NUM} — exact completed FORGE:INVESTIGATOR comment #${COMMENT_ID}: ${COMMENT_URL}"
+  fi
   # Extract the Recommendation section (annotation prose only)
   INV_RECOMMENDATION[$INV_NUM]=$(echo "$INV_BODY" | awk '/^### Recommendation/{p=1;next}/^### /{p=0}p')
   # Derive a coarse subsystem tag from Affected Files directories + title keywords
@@ -119,13 +131,26 @@ echo "Phase 2.5 reconciled ${RECONCILED_COUNT} competing recommendation(s) (${N_
 
 ### Step 2.5D: Emit one deconflicted brief per issue
 
-For each implementation issue about to be dispatched, write a single `FORGE:SYNTHESIS_BRIEF` annotation containing ONLY the reconciled context relevant to *that* issue — the arbitration decisions affecting it and pointers to the specific sibling investigation Gists it actually needs. This replaces injecting the entire aggregated milestone-index gist (which forces each agent to independently re-arbitrate the same contradictions, wasting tokens and producing nondeterministic cross-PR incoherence).
+For each implementation issue about to be dispatched, write a single `FORGE:SYNTHESIS_BRIEF` annotation containing ONLY the reconciled context relevant to *that* issue — the arbitration decisions affecting it and exact repository comment references to the investigator reports it actually needs. This keeps every handoff repository-scoped and prevents agents from independently re-arbitrating the same contradictions.
 
 ```bash
 for ISSUE_NUM in {implementation_issue_numbers}; do
   # Assemble the per-issue brief: arbitration decisions touching this issue's subsystem +
-  # only the relevant sibling gist URLs (not the full milestone-index dump)
+  # exact repository-scoped investigator references. Never copy a raw investigator body;
+  # its reserved markers must remain in the authoritative source comment.
+  REPOSITORY_INVESTIGATION_REFS=""
+  for INV_NUM in "${INVESTIGATION_NUMS[@]}"; do
+    if [ -n "${INVESTIGATION_CONTEXT[$INV_NUM]:-}" ]; then
+      REPOSITORY_INVESTIGATION_REFS="${REPOSITORY_INVESTIGATION_REFS}
+- ${INVESTIGATION_CONTEXT[$INV_NUM]}"
+    fi
+  done
   BRIEF_BODY="Reconciled context for this issue (see orchestrate Phase 2.5):
+
+### Repository Investigator References
+${REPOSITORY_INVESTIGATION_REFS:-No completed investigator comment references were available; treat that as an explicit unavailable-context result.}
+
+### Reconciled Decisions
 ${PER_ISSUE_DECISIONS[$ISSUE_NUM]}"
   gh issue comment $ISSUE_NUM -R {GH_REPO} --body "<!-- FORGE:SYNTHESIS_BRIEF -->
 ## Synthesis Brief
@@ -136,7 +161,7 @@ ${BRIEF_BODY}
 done
 ```
 
-The `FORGE:SYNTHESIS_BRIEF` annotation is consumed by Step 4A's `{GIST_CONTEXT}` generation (which prefers it over the raw milestone-index gist when present) and its reconciled count (`RECONCILED_COUNT`) feeds the Step 6B `Competing recommendations reconciled (Phase 2.5)` metric.
+The `FORGE:SYNTHESIS_BRIEF` annotation is consumed by Step 4A's `{GIST_CONTEXT}` generation (which prefers the reconciled repository brief when present) and its reconciled count (`RECONCILED_COUNT`) feeds the Step 6B `Competing recommendations reconciled (Phase 2.5)` metric.
 
 **Report**: Post a brief Phase 2.5 summary to the user before proceeding to Phase 3:
 
