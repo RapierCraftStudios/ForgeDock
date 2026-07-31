@@ -59,12 +59,46 @@ function priorityWeight(labels) {
   return 1.5;
 }
 
+function createsIssuesDeliverable(body) {
+  const lines = String(body || "").split(/\r?\n/);
+  for (const line of lines) {
+    const normalized = line
+      .trim()
+      .replace(/^(?:>\s*)+/, "")
+      .replace(/^#{1,6}\s+/, "")
+      .replace(/^(?:(?:[-*+]|\d+[.)])\s+)?(?:\[[ xX]\]\s*)?/, "")
+      .replace(/[*_`~]/g, "")
+      .trim();
+    const directive = /^(?:(?:deliverable|output|expected output)\s*:\s*)?create issues\b(.*)$/i.exec(normalized);
+    if (!directive) continue;
+    const tail = directive[1];
+    const negated = /^\s*(?:(?::|[-\u2013\u2014])\s*)?(?:(?:is|are|was|were|must|should|will|can|may|might|could|would)\s+not\b|(?:is|are|was|were)\s+(?:unsupported|prohibited|forbidden|disabled|unavailable)\b|(?:is|are|was|were)\s+(?:the|a)\s+(?:legacy\s+|deprecated\s+)?(?:command|label|name|term)\b|not\s+(?:supported|allowed|permitted|available|required)\b|never\b|unsupported\b|prohibited\b|forbidden\b|disabled\b|unavailable\b|cannot\b|can't\b)/i.test(tail);
+    if (!negated) return true;
+  }
+
+  const prose = /\b(?:the\s+)?deliverable\s+(?:is|will be)\s+(?:to\s+)?create issues\b/gi;
+  for (const match of String(body || "").matchAll(prose)) {
+    const before = body.slice(0, match.index);
+    const sentenceStart = Math.max(
+      before.lastIndexOf("\n"),
+      before.lastIndexOf("."),
+      before.lastIndexOf("!"),
+      before.lastIndexOf("?"),
+      before.lastIndexOf(";"),
+    );
+    const prefix = before.slice(sentenceStart + 1);
+    const negated = /(?:\bno\s+(?:the\s+)?|\b(?:not|never)\s+(?:an?\s+)?(?:task|issue|ticket|work item)\s+whose\s+)$/i.test(prefix);
+    if (!negated) return true;
+  }
+  return false;
+}
+
 function isInvestigation(issue) {
   const title = String(issue?.title || "");
   const body = String(issue?.body || "");
   return /investigate|audit|research|evaluate|assess|deep dive/i.test(title) ||
     (/(- \[ \]|\* \[ \])/.test(body) && !/affected files|acceptance criteria/i.test(body)) ||
-    /deliverable:\s*execution plan|create issues/i.test(body);
+    /deliverable:\s*execution plan/i.test(body) || createsIssuesDeliverable(body);
 }
 
 function scopedSection(body) {

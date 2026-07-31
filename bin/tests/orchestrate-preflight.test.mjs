@@ -107,6 +107,51 @@ describe("OpenCode orchestration preflight", () => {
     assert.deepEqual(plan.investigations, [1]);
   });
 
+  it("does not treat a negated create-issues constraint as an investigation deliverable", () => {
+    const implementationBodies = [
+      [
+        "## Expected Behavior",
+        "The compiler cannot create issues, edit labels, or dispatch agents.",
+        "## Affected Files",
+        "- `bin/orchestrate-preflight.mjs`",
+        "## Acceptance Criteria",
+        "- [ ] Emit an immutable compiled plan.",
+      ].join("\n"),
+      "## Constraint\n- Create issues: not supported by the compiler.\n## Affected Files\n- `bin/compiler.mjs`",
+      "This is not a task whose deliverable is to create issues; implement code instead.\n## Affected Files\n- `bin/compiler.mjs`",
+      "## Deliverable\nDo not create issues.\n## Affected Files\n- `bin/compiler.mjs`",
+      "No component should create issues.\n## Affected Files\n- `bin/compiler.mjs`",
+      "Create issues are unsupported.\n## Affected Files\n- `bin/compiler.mjs`",
+      "Create issues may not be performed.\n## Affected Files\n- `bin/compiler.mjs`",
+      "`Create issues` is the legacy command label being renamed.\n## Affected Files\n- `bin/compiler.mjs`",
+      "No deliverable is to create issues.\n## Affected Files\n- `bin/compiler.mjs`",
+      "This is not an issue whose deliverable is to create issues.\n## Affected Files\n- `bin/compiler.mjs`",
+    ];
+    for (const body of implementationBodies) {
+      const implementation = issue(1, { title: "feat(engine): compile immutable plans", body });
+      const plan = buildPreflightPlan({ input: "1 --auto", issues: [implementation] });
+      assert.equal(plan.issues[0].classification, "IMPLEMENTATION", body);
+      assert.equal(plan.requiresDeepPlan, false, body);
+      assert.deepEqual(plan.dispatchNow, [1], body);
+    }
+
+    const investigationBodies = [
+      "## Deliverable\nCreate issues for each confirmed finding.",
+      "## Deliverable\n+ Create issues for each confirmed finding.",
+      "## Acceptance Criteria\n- [ ] Create issues for each confirmed finding.",
+      "Deliverable: **Create issues for each confirmed finding.**",
+      "The deliverable is to create issues for each confirmed finding.",
+      "No deliverable is to create issues for unconfirmed findings. The deliverable is to create issues for confirmed findings.",
+    ];
+    for (const body of investigationBodies) {
+      const investigation = issue(2, { title: "Plan follow-up reliability work", body });
+      const plan = buildPreflightPlan({ input: "2 --auto", issues: [investigation] });
+      assert.equal(plan.issues[0].classification, "INVESTIGATION", body);
+      assert.equal(plan.requiresDeepPlan, true, body);
+      assert.deepEqual(plan.dispatchNow, [], body);
+    }
+  });
+
   it("fails closed for include-backlog compact scopes", () => {
     const plan = buildPreflightPlan({ input: "1 --include-backlog --auto", issues: [issue(1)] });
     assert.equal(plan.supported, true);
