@@ -309,6 +309,7 @@ export function buildPreflightPlan({ input, repo = "", issues = [], maxConcurren
     version: VERSION,
     supported: true,
     mode: requiresDeepPlan ? "compact-with-full-spec-followup" : "compact",
+    maxConcurrent: effectiveMax,
     input: flags.input,
     repo,
     pattern: query.pattern,

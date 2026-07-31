@@ -1,32 +1,62 @@
+// SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runPiIssue } from "../runtime/engine.mjs";
 
 type ForgeCommand = { id: string; name: string; relativePath: string; absolutePath: string; description: string };
 type PlanIssue = { number: number; title: string; predecessors: number[]; domain: string[]; files: string[]; priority: number; inFlight?: boolean };
 type PreflightPlan = {
-	supported: boolean; reason?: string; mode?: string; pattern?: string; total?: number; issues?: PlanIssue[];
+	supported: boolean; reason?: string; mode?: string; pattern?: string; total?: number; maxConcurrent?: number; issues?: PlanIssue[];
 	edges?: Array<{ predecessor: number; successor: number; kind: string }>; ready?: number[]; dispatchNow?: number[];
 	deferred?: Array<{ number: number; reason: string }>; excluded?: Array<{ number: number; reason: string }>;
 	investigations?: number[]; warnings?: string[]; requiresDeepPlan?: boolean;
 };
+type IssueResult = { number: number; terminalReason?: string | null; detail?: string; code?: number | null; status?: string };
 
 const INTERNAL_COMMANDS = new Set(["review-pr-agents.md"]);
-const TERMINAL_LABELS = new Set(["workflow:merged", "workflow:invalid", "workflow:awaiting-merge", "needs-human"]);
+const SUCCESSFUL_TERMINALS = new Set(["merged", "decomposed"]);
+
+function extensionPath(): string {
+	return fileURLToPath(import.meta.url);
+}
 
 function extensionDir(): string {
-	try { return dirname(fileURLToPath(import.meta.url)); } catch { return process.cwd(); }
+	return dirname(extensionPath());
+}
+
+function isForgeRoot(current: string): boolean {
+	if (!existsSync(join(current, "commands"))) return false;
+	if (existsSync(join(current, "AGENTS.md"))) return true;
+	try {
+		const packageJson = JSON.parse(readFileSync(join(current, "package.json"), "utf8"));
+		return packageJson?.name === "forgedock";
+	} catch {
+		return false;
+	}
 }
 
 function findForgeRoot(start: string): string | undefined {
 	let current = resolve(start);
 	while (true) {
-		if (existsSync(join(current, "commands")) && existsSync(join(current, "AGENTS.md"))) return current;
+		if (isForgeRoot(current)) return current;
 		const parent = dirname(current);
 		if (parent === current) return undefined;
+		current = parent;
+	}
+}
+
+function findProjectRoot(start: string): string {
+	let current = resolve(start);
+	while (true) {
+		if (existsSync(join(current, "forge.yaml")) || existsSync(join(current, ".git"))) return current;
+		const parent = dirname(current);
+		if (parent === current) return resolve(start);
 		current = parent;
 	}
 }
@@ -58,20 +88,14 @@ function discoverCommands(root: string): ForgeCommand[] {
 	}));
 }
 
-function stopProcessTree(child: ChildProcess): void {
-	if (!child.pid) return;
-	if (process.platform === "win32") {
-		spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
-	} else if (!child.killed) {
-		child.kill();
-	}
-}
-
 function runProcess(command: string, args: string[], cwd: string, signal?: AbortSignal): Promise<{ code: number | null; stdout: string; stderr: string }> {
 	return new Promise((resolvePromise, reject) => {
 		const child = spawn(command, args, { cwd, env: { ...process.env, FORGE_RUNTIME: "pi" }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
 		let stdout = ""; let stderr = "";
-		const abort = () => stopProcessTree(child);
+		const abort = () => {
+			if (process.platform === "win32" && child.pid) spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true });
+			else if (!child.killed) child.kill("SIGTERM");
+		};
 		signal?.addEventListener("abort", abort, { once: true });
 		child.stdout?.on("data", (chunk) => { stdout += String(chunk); });
 		child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
@@ -86,14 +110,16 @@ function ghJson(root: string, args: string[]): unknown {
 	if (result.status !== 0) throw new Error(String(result.stderr || "gh command failed").trim());
 	return JSON.parse(result.stdout || "null");
 }
-function repoFromConfig(root: string): string {
-	const source = readFileSync(join(root, "forge.yaml"), "utf8");
+function repoFromConfig(projectRoot: string): string {
+	const source = readFileSync(join(projectRoot, "forge.yaml"), "utf8");
 	const owner = source.match(/^\s*owner:\s*["']?([^\s"'#]+)["']?\s*$/m)?.[1];
 	const repo = source.match(/^\s*repo:\s*["']?([^\s"'#]+)["']?\s*$/m)?.[1];
 	if (!owner || !repo) throw new Error("forge.yaml does not define project.owner/project.repo");
 	return `${owner}/${repo}`;
 }
-
+function normalizeSlug(value: string): string {
+	return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
 function normalizeInput(input: string): string {
 	const url = input.match(/^https?:\/\/github\.com\/[^/]+\/[^/]+\/issues\/?(?:\?(.*))?$/i);
 	if (!url?.[1]) return input;
@@ -101,21 +127,12 @@ function normalizeInput(input: string): string {
 	return query.replace(/^q:/i, "").replace(/\bstate:open\b/i, "").replace(/\bis:issue\b/i, "").replace(/\s+/g, " ").trim();
 }
 
-function preflight(root: string, input: string): PreflightPlan {
-	const result = spawnSync(process.execPath, [join(root, "bin", "orchestrate-preflight.mjs"), "--cwd", root, "--repo", repoFromConfig(root), "--args", normalizeInput(input)], {
-		cwd: root, encoding: "utf8", windowsHide: true, maxBuffer: 32 * 1024 * 1024,
+function preflight(forgeHome: string, projectRoot: string, input: string): PreflightPlan {
+	const result = spawnSync(process.execPath, [join(forgeHome, "bin", "orchestrate-preflight.mjs"), "--cwd", projectRoot, "--repo", repoFromConfig(projectRoot), "--args", normalizeInput(input)], {
+		cwd: projectRoot, encoding: "utf8", windowsHide: true, maxBuffer: 32 * 1024 * 1024,
 	});
 	if (result.status !== 0) throw new Error(String(result.stderr || "preflight failed").trim());
 	return JSON.parse(result.stdout) as PreflightPlan;
-}
-
-function terminalIssue(root: string, repo: string, number: number): boolean {
-	try {
-		const data = ghJson(root, ["issue", "view", String(number), "-R", repo, "--json", "state,labels,comments"]) as { state: string; labels: Array<{ name: string }>; comments: Array<{ body: string }> };
-		const labels = new Set((data.labels || []).map((label) => label.name));
-		if (data.state === "CLOSED") return true;
-		return [...TERMINAL_LABELS].some((label) => labels.has(label));
-	} catch { return false; }
 }
 
 function renderPlan(plan: PreflightPlan): string {
@@ -138,40 +155,44 @@ function renderPlan(plan: PreflightPlan): string {
 	].join("\n");
 }
 
-async function runWorker(root: string, repo: string, number: number, signal?: AbortSignal): Promise<{ number: number; code: number | null; output: string; stoppedAtTerminal: boolean }> {
-	const prompt = `You are ForgeDock Pi worker for issue #${number}. Read ${join(root, "AGENTS.md")}, ${join(root, "docs", "PI.md")}, ${join(root, "commands", "work-on.md")} and all referenced phase files. Execute the complete /work-on pipeline for issue #${number}; resume from GitHub state rather than restarting completed phases. Preserve annotations, labels, branches, review, merge, and cleanup. You are a worker inside an orchestrator: do not work on any other issue, do not summarize early, and stop immediately once the issue is closed or has a terminal workflow label.`;
-	const child = spawn(piExecutable(), ["--no-session", "--approve", "--name", `forge-work-on-${number}`, "-p", prompt], {
-		cwd: root, env: { ...process.env, FORGE_RUNTIME: "pi", FORGE_PI_WORKER: "1" }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
-	});
-	let output = "";
-	child.stdout?.on("data", (chunk) => { output += String(chunk); });
-	child.stderr?.on("data", (chunk) => { output += String(chunk); });
-	let stoppedAtTerminal = false;
-	let polling = true;
-	const poll = async () => {
-		while (polling) {
-			if (terminalIssue(root, repo, number)) {
-				stoppedAtTerminal = true;
-				stopProcessTree(child);
-				return;
-			}
-			await new Promise((resolvePromise) => setTimeout(resolvePromise, 5000));
-		}
-	};
-	const abort = () => { polling = false; stopProcessTree(child); };
-	signal?.addEventListener("abort", abort, { once: true });
-	const result = await Promise.race([
-		new Promise<{ code: number | null }>((resolvePromise, reject) => { child.once("error", reject); child.once("close", (code) => resolvePromise({ code })); }),
-		poll().then(() => ({ code: 0 })),
-	]);
-	polling = false;
-	signal?.removeEventListener("abort", abort);
-	if (!stoppedAtTerminal) stoppedAtTerminal = terminalIssue(root, repo, number);
-	return { number, code: result.code, output, stoppedAtTerminal };
+function parseIssueNumber(args: string): number | undefined {
+	const first = args.trim().split(/\s+/)[0] || "";
+	const match = first.match(/^#?(\d+)$/);
+	return match ? Number(match[1]) : undefined;
 }
 
-async function orchestrate(root: string, input: string, ctx: ExtensionContext, auto = false): Promise<string> {
-	let plan = preflight(root, input);
+function issueLane(projectRoot: string, repo: string, issue: number): string {
+	const data = ghJson(projectRoot, ["issue", "view", String(issue), "-R", repo, "--json", "milestone"]) as { milestone?: { title?: string } | null };
+	const title = data.milestone?.title;
+	return title ? `milestone/${normalizeSlug(title)}` : "staging";
+}
+
+async function executeIssue(forgeHome: string, projectRoot: string, args: string, ctx: ExtensionContext): Promise<IssueResult> {
+	const issue = parseIssueNumber(args);
+	if (!issue) throw new Error("Pi's native ForgeDock engine requires an issue number, for example: /forge-work-on #123");
+	const repo = repoFromConfig(projectRoot);
+	const lane = issueLane(projectRoot, repo, issue);
+	ctx.ui.setStatus("forgedock", `ForgeDock: issue #${issue} (${lane})`);
+	try {
+		return await runPiIssue({
+			issue,
+			projectRoot,
+			forgeHome,
+			extensionPath: extensionPath(),
+			repo,
+			lane,
+			model: ctx.model,
+			thinkingLevel: ctx.thinkingLevel,
+			signal: ctx.signal,
+			onProgress: (event) => ctx.ui.setStatus("forgedock", `ForgeDock #${issue}: ${event.event} ${event.phase}`),
+		});
+	} finally {
+		ctx.ui.setStatus("forgedock", undefined);
+	}
+}
+
+async function orchestrate(forgeHome: string, projectRoot: string, input: string, ctx: ExtensionContext, auto = false): Promise<string> {
+	let plan = preflight(forgeHome, projectRoot, input);
 	let planText = renderPlan(plan);
 	if (!plan.supported) return `${planText}\n\nFull ForgeDock phase execution is required: ${plan.reason || "unsupported input"}. No agents were dispatched.`;
 	if (plan.requiresDeepPlan && (plan.investigations?.length || 0) > 0) {
@@ -179,9 +200,8 @@ async function orchestrate(root: string, input: string, ctx: ExtensionContext, a
 			const confirmed = await ctx.ui.confirm("ForgeDock investigation wave", `${planText}\n\nInvestigation issues must run first. Dispatch Wave 0 now?`);
 			if (!confirmed) return `${planText}\n\nDispatch cancelled.`;
 		}
-		const repo = repoFromConfig(root);
-		await Promise.all(plan.investigations!.map((number) => runWorker(root, repo, number, ctx.signal)));
-		plan = preflight(root, input);
+		await Promise.all(plan.investigations!.map((number) => executeIssue(forgeHome, projectRoot, String(number), ctx)));
+		plan = preflight(forgeHome, projectRoot, input);
 		planText = renderPlan(plan);
 	}
 	if (plan.requiresDeepPlan) return `${renderPlan(plan)}\n\nThis batch requires the full ForgeDock phase planner (deep conflict/history analysis). No implementation agents were dispatched by the compact Pi controller; use the shared /orchestrate workflow for this batch.`;
@@ -190,28 +210,57 @@ async function orchestrate(root: string, input: string, ctx: ExtensionContext, a
 		const confirmed = await ctx.ui.confirm("ForgeDock execution plan", `${planText}\n\nDispatch ready issues and resume admitted inflight issues?`);
 		if (!confirmed) return `${planText}\n\nDispatch cancelled.`;
 	}
-	const repo = repoFromConfig(root);
+
 	const issueMap = new Map((plan.issues || []).map((issue) => [issue.number, issue]));
 	const completed = new Set<number>();
+	const blocked = new Set<number>();
 	const pending = new Set((plan.issues || []).map((issue) => issue.number));
-	const results: Array<{ number: number; code: number | null; stoppedAtTerminal: boolean }> = [];
-	const maxConcurrent = Math.max(1, Math.min(35, Number(input.match(/--max-concurrent(?:=|\s+)(\d+)/)?.[1] || 12)));
+	const results: Array<IssueResult & { status: string }> = [];
+	const maxConcurrent = Math.max(1, Math.min(35, plan.maxConcurrent || 12));
 
 	while (pending.size) {
+		for (const number of [...pending]) {
+			const predecessors = issueMap.get(number)?.predecessors || [];
+			const failedDependency = predecessors.find((dependency) => blocked.has(dependency));
+			if (failedDependency !== undefined) {
+				pending.delete(number);
+				blocked.add(number);
+				results.push({ number, status: "blocked", terminalReason: "blocked", detail: `predecessor #${failedDependency} did not complete successfully` });
+			}
+		}
 		const ready = [...pending].filter((number) => (issueMap.get(number)?.predecessors || []).every((dependency) => completed.has(dependency)));
-		if (!ready.length) return `${planText}\n\nBlocked: no ready issues remain. Check dependency edges or GitHub state.`;
+		if (!ready.length) {
+			return `${planText}\n\n## Results\n${results.map(formatIssueResult).join("\n")}\n\nBlocked: no ready issues remain. Check dependency edges or GitHub state.`;
+		}
 		const batch = ready.slice(0, maxConcurrent);
 		ctx.ui.setStatus("forgedock", `ForgeDock: running ${batch.map((n) => `#${n}`).join(", ")}`);
-		const batchResults = await Promise.all(batch.map((number) => runWorker(root, repo, number, ctx.signal)));
-		for (const result of batchResults) {
-			if (!result.stoppedAtTerminal) {
-				return `${planText}\n\nWorker #${result.number} exited before reaching a terminal GitHub state (exit ${result.code ?? "unknown"}). Dependents were not dispatched.`;
+		const batchResults = await Promise.all(batch.map(async (number) => {
+			try {
+				const result = await executeIssue(forgeHome, projectRoot, String(number), ctx);
+				return { number, status: SUCCESSFUL_TERMINALS.has(String(result.terminalReason)) ? "complete" : "blocked", ...result };
+			} catch (error) {
+				return { number, status: "error", terminalReason: "engine-error", detail: error instanceof Error ? error.message : String(error) };
 			}
-			pending.delete(result.number); completed.add(result.number); results.push(result);
+		}));
+		for (const result of batchResults) {
+			pending.delete(result.number);
+			results.push(result);
+			if (result.status === "complete") completed.add(result.number);
+			else blocked.add(result.number);
 		}
 	}
 	ctx.ui.setStatus("forgedock", "ForgeDock: batch complete");
-	return `${planText}\n\n## Results\n${results.map((result) => `- #${result.number}: ${result.stoppedAtTerminal ? "terminal state detected; worker stopped" : `worker exited (${result.code})`}`).join("\n")}`;
+	return `${planText}\n\n## Results\n${results.map(formatIssueResult).join("\n")}`;
+}
+
+function issueResultStatus(result: IssueResult): string {
+	return SUCCESSFUL_TERMINALS.has(String(result.terminalReason)) ? "complete" : "blocked";
+}
+
+function formatIssueResult(result: IssueResult & { status?: string }): string {
+	const state = result.status || issueResultStatus(result);
+	const detail = result.terminalReason ? ` (${result.terminalReason})` : result.detail ? ` — ${result.detail}` : "";
+	return `- #${result.number}: ${state}${detail}`;
 }
 
 function sendPrompt(pi: ExtensionAPI, ctx: ExtensionCommandContext, prompt: string): void {
@@ -219,24 +268,56 @@ function sendPrompt(pi: ExtensionAPI, ctx: ExtensionCommandContext, prompt: stri
 }
 
 export default function forgedockPiExtension(pi: ExtensionAPI) {
-	const root = process.env.FORGE_HOME || findForgeRoot(extensionDir()) || findForgeRoot(process.cwd()) || process.cwd();
-	const commands = discoverCommands(root);
+	const forgeHome = process.env.FORGE_HOME || findForgeRoot(extensionDir()) || findForgeRoot(process.cwd()) || process.cwd();
+	const commands = discoverCommands(forgeHome);
 	const byName = new Map(commands.map((command) => [command.name, command]));
 
 	const orchestrateHandler = async (args: string, ctx: ExtensionCommandContext) => {
-		try { ctx.ui.notify("Running deterministic ForgeDock preflight…", "info"); ctx.ui.setWidget("forgedock-plan", ["ForgeDock is resolving issues and building the DAG…"]); const result = await orchestrate(root, args, ctx, /(?:^|\s)--(?:auto|confirm)(?:\s|$)/.test(args)); ctx.ui.setWidget("forgedock-plan", undefined); ctx.ui.notify("ForgeDock orchestration finished", "info"); pi.sendMessage({ customType: "forgedock-orchestration", content: result, display: true, details: { terminalAware: true } }); }
-		catch (error) { ctx.ui.setWidget("forgedock-plan", undefined); ctx.ui.notify(`ForgeDock orchestration failed: ${error instanceof Error ? error.message : String(error)}`, "error"); }
+		const projectRoot = findProjectRoot(ctx.cwd);
+		try {
+			ctx.ui.notify("Running deterministic ForgeDock preflight…", "info");
+			ctx.ui.setWidget("forgedock-plan", ["ForgeDock is resolving issues and building the DAG…"]);
+			const result = await orchestrate(forgeHome, projectRoot, args, ctx, /(?:^|\s)--(?:auto|confirm)(?:\s|$)/.test(args));
+			ctx.ui.setWidget("forgedock-plan", undefined);
+			ctx.ui.notify("ForgeDock orchestration finished", "info");
+			pi.sendMessage({ customType: "forgedock-orchestration", content: result, display: true, details: { durablePiEngine: true } });
+		} catch (error) {
+			ctx.ui.setWidget("forgedock-plan", undefined);
+			ctx.ui.notify(`ForgeDock orchestration failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+		}
 	};
 
-	pi.registerCommand("forge-orchestrate", { description: "Build and execute a deterministic ForgeDock DAG", handler: orchestrateHandler });
+	const workOnHandler = async (args: string, ctx: ExtensionCommandContext) => {
+		const projectRoot = findProjectRoot(ctx.cwd);
+		try {
+			const result = await executeIssue(forgeHome, projectRoot, args, ctx);
+			pi.sendMessage({ customType: "forgedock-issue", content: formatIssueResult({ number: parseIssueNumber(args) || 0, status: issueResultStatus(result), ...result }), display: true, details: { durablePiEngine: true } });
+		} catch (error) {
+			ctx.ui.notify(`ForgeDock issue failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+		}
+	};
+
+	pi.registerCommand("forge-orchestrate", { description: "Build and execute a durable Pi-backed ForgeDock DAG", handler: orchestrateHandler });
+	pi.registerCommand("forge-work-on", { description: "Run one issue through the durable Pi-backed ForgeDock engine", handler: workOnHandler });
+
 	pi.registerTool({
 		name: "forge_orchestrate", label: "Forge Orchestrate",
-		description: "Resolve ForgeDock issues, present the dependency DAG, ask for confirmation, then run isolated Pi workers in parallel. Resumes in-flight issues only when requested.",
+		description: "Resolve ForgeDock issues, present the dependency DAG, then run durable Pi-backed issue engines in parallel.",
 		parameters: Type.Object({ input: Type.String({ description: "Issue query, milestone, issue numbers, or GitHub issue-search URL." }), includeInFlight: Type.Optional(Type.Boolean({ description: "Resume workflow:building and workflow:in-review issues." })), auto: Type.Optional(Type.Boolean({ description: "Skip the interactive confirmation checkpoint." })) }),
 		async execute(_id, params, signal, _update, ctx) {
 			const input = `${params.input}${params.includeInFlight ? " --include-in-flight" : ""}`;
-			const result = await orchestrate(root, input, ctx, Boolean(params.auto));
-			return { content: [{ type: "text", text: result }], details: { input, terminalAware: true } };
+			const result = await orchestrate(forgeHome, findProjectRoot(ctx.cwd), input, { ...ctx, signal } as ExtensionContext, Boolean(params.auto));
+			return { content: [{ type: "text", text: result }], details: { input, durablePiEngine: true } };
+		},
+	});
+
+	pi.registerTool({
+		name: "forge_work_on", label: "Forge Work On",
+		description: "Run one GitHub issue through the durable Pi-backed ForgeDock engine in an isolated worktree.",
+		parameters: Type.Object({ issue: Type.Integer({ description: "GitHub issue number" }) }),
+		async execute(_id, params, signal, _update, ctx) {
+			const result = await executeIssue(forgeHome, findProjectRoot(ctx.cwd), String(params.issue), { ...ctx, signal } as ExtensionContext);
+			return { content: [{ type: "text", text: formatIssueResult({ number: params.issue, status: issueResultStatus(result), ...result }) }], details: { durablePiEngine: true } };
 		},
 	});
 
@@ -244,14 +325,22 @@ export default function forgedockPiExtension(pi: ExtensionAPI) {
 	pi.registerCommand("forge", { description: "Route work into a ForgeDock workflow", handler: async (args, ctx) => {
 		const [first, ...rest] = args.trim().split(/\s+/); const key = first?.replace(/^\//, "").replace(/^forge[-:]?/, "").replace(/-/g, ":");
 		if (key === "orchestrate") { await orchestrateHandler(rest.join(" "), ctx); return; }
+		if (key === "work:on") { await workOnHandler(rest.join(" "), ctx); return; }
 		const command = commands.find((item) => item.id === key || item.name === first);
-		if (command) { sendPrompt(pi, ctx, `Read and execute ${command.absolutePath} for arguments: ${rest.join(" ") || "(none)"}. Follow the shared ForgeDock spec and use forge_subagent for required isolated work.`); return; }
-		ctx.ui.notify("Use /forge-orchestrate <query> or /forge-work-on <issue>.", "info");
+		if (command) { sendPrompt(pi, ctx, `Read and execute ${command.absolutePath} for arguments: ${rest.join(" ") || "(none)"}. Follow the shared ForgeDock spec and use Pi-native runtime behavior.`); return; }
+		ctx.ui.notify("Use /forge-work-on <issue> or /forge-orchestrate <query>.", "info");
 	}});
-	for (const command of commands) if (byName.get(command.name) === command && command.name !== "forge-orchestrate") pi.registerCommand(command.name, { description: command.description, handler: async (args, ctx) => sendPrompt(pi, ctx, `Read and execute ${command.absolutePath} for arguments: ${args || "(none)"}. Follow the shared ForgeDock spec.`) });
+	for (const command of commands) {
+		if (byName.get(command.name) !== command || command.name === "forge-orchestrate" || command.name === "forge-work-on") continue;
+		pi.registerCommand(command.name, { description: command.description, handler: async (args, ctx) => sendPrompt(pi, ctx, `Read and execute ${command.absolutePath} for arguments: ${args || "(none)"}. Follow the shared ForgeDock spec.`) });
+	}
 
-	pi.registerTool({ name: "forge_subagent", label: "Forge Subagent", description: "Run an isolated Pi subprocess for ForgeDock review or subtask work.", parameters: Type.Object({ prompt: Type.String(), label: Type.Optional(Type.String()), readOnly: Type.Optional(Type.Boolean()) }), async execute(_id, params, signal, _update, ctx) {
-		const result = await runProcess(piExecutable(), ["--no-session", "--approve", "--name", params.label || "forge-subagent", ...(params.readOnly ? ["--tools", "read,grep,find,ls,bash"] : []), "-p", params.prompt], ctx.cwd, signal);
-		return { content: [{ type: "text", text: `exit_code=${result.code}\n${result.stdout}\n${result.stderr}` }], details: result, isError: result.code !== 0 };
-	}});
+	pi.registerTool({
+		name: "forge_subagent", label: "Forge Subagent", description: "Run an isolated Pi subprocess for ForgeDock review or subtask work.",
+		parameters: Type.Object({ prompt: Type.String(), label: Type.Optional(Type.String()), readOnly: Type.Optional(Type.Boolean()) }),
+		async execute(_id, params, signal, _update, ctx) {
+			const result = await runProcess(piExecutable(), ["--no-session", "--approve", "--name", params.label || "forge-subagent", ...(params.readOnly ? ["--tools", "read,grep,find,ls,bash"] : []), "-p", params.prompt], ctx.cwd, signal);
+			return { content: [{ type: "text", text: `exit_code=${result.code}\n${result.stdout}\n${result.stderr}` }], details: result, isError: result.code !== 0 };
+		},
+	});
 }

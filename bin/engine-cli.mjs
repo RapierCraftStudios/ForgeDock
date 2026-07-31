@@ -374,13 +374,27 @@ export async function runFromCli(argv, deps = {}) {
     // from "phase actually failed".
     else if (e.event === "phase_paused") console.log(`⏸ phase ${e.phase} paused: ${e.detail ?? "session limit"}`);
   };
-  const res = await runIssueFn({ issue, dir, agentId, lane, io,
-    runner: (await import("./runner.mjs")).runCommand, now: () => Date.now(),
-    onProgress,
+  const isPiRuntime = String(process.env.FORGE_RUNTIME || "").toLowerCase() === "pi";
+  let res;
+  if (isPiRuntime && !deps.runIssue) {
+    const { runPiIssue } = await import("../pi/runtime/engine.mjs");
+    const forgeHome = process.env.FORGE_HOME || process.cwd();
+    const extensionPath = join(forgeHome, "pi", "extensions", "forgedock.ts");
+    const defaultRepo = repo || await resolveDefaultRepo(io);
+    if (!defaultRepo) throw new Error("Pi runtime could not resolve the current GitHub repository");
+    res = await runPiIssue({
+      issue, projectRoot: process.cwd(), forgeHome, extensionPath, repo: defaultRepo,
+      lane, model, signal: undefined, onProgress,
+    });
+  } else {
+    res = await runIssueFn({ issue, dir, agentId, lane, io,
+      runner: (await import("./runner.mjs")).runCommand, now: () => Date.now(),
+      onProgress,
     // Only forwarded when explicitly provided — omitting them preserves
     // runIssue's/runner.mjs's existing defaults (forge#2028).
     ...(backend ? { backend } : {}),
-    ...(model ? { model } : {}) });
+      ...(model ? { model } : {}) });
+  }
   console.log(`issue #${issue} → ${res.terminalReason}`);
   // forge#2175: a non-success termination previously printed nothing beyond
   // the bare reason above — the actual failing phase/attempt/reason was only

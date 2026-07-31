@@ -23,6 +23,9 @@ secrets/
 .claude/
 CLAUDE.md
 
+# Pi project state (keep .pi/settings.json and other project resources trackable)
+.pi/worktrees/
+
 # Spec Knowledge Graph (generated; gitignored by default — opt-in to commit,
 # mirroring per-repo adaptive scripts)
 .forgedock/graph/

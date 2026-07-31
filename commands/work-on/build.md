@@ -133,6 +133,8 @@ if [ "${FORGE_RUNTIME:-}" = "opencode" ] ||
   WORKTREE_ROOT="/path/to/repo/.opencode/worktrees"
 elif [ "${FORGE_RUNTIME:-}" = "codex" ]; then
   WORKTREE_ROOT="/path/to/repo/.codex/worktrees"
+elif [ "${FORGE_RUNTIME:-}" = "pi" ]; then
+  WORKTREE_ROOT="/path/to/repo/.pi/worktrees"
 fi
 WORKTREE_PATH="${WORKTREE_ROOT}/{BRANCH_SLUG}"
 git worktree add {WORKTREE_PATH} -b {BRANCH} origin/{SOURCE_BRANCH}

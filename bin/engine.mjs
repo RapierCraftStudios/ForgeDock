@@ -466,8 +466,9 @@ export async function runIssue(opts) {
           }
         }
       } catch (e) {
-        // forge#2261: NO_API_KEY/NO_SDK/CLI_BACKEND_FAILED are fail-fast
-        // rethrown by runPhaseWithRetry() (see its own catch below) instead
+        // forge#2261: NO_API_KEY/NO_SDK/CLI_BACKEND_FAILED and Pi runtime
+        // backend/worktree failures are fail-fast rethrown by
+        // runPhaseWithRetry() (see its own catch below) instead
         // of being retried — but until now that throw was never caught here,
         // so it propagated all the way out of runIssue() uncaught (through
         // bin/engine-cli.mjs's runFromCli(), which also has no try/catch)
@@ -479,7 +480,8 @@ export async function runIssue(opts) {
         // "needs-human" — this is the engine/tool breaking, not a genuine
         // human-judgment block (see #2244/#2261). Any other thrown error is
         // a true unexpected crash and keeps propagating unchanged.
-        if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED") {
+        if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED" ||
+            e.code === "PI_BACKEND_FAILED" || e.code === "PI_RUNNER_ABORTED" || e.code === "PI_WORKTREE_NOT_FOUND") {
           // forge#2241: when the runner attached a session-limit reset time
           // (bin/runner.mjs's extractSessionLimitResetTime(), only ever set
           // for a genuine session-limit CLI_BACKEND_FAILED — never
@@ -645,7 +647,8 @@ async function runPhaseWithRetry(phase, state, ctx) {
       // *why* the CLI exited 1 (the quota/session-limit theory in #2244 is
       // unproven) — a deterministic tool crash should not be retried as if
       // transient regardless of its root cause.
-      if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED") throw e;
+      if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED" ||
+        e.code === "PI_BACKEND_FAILED" || e.code === "PI_RUNNER_ABORTED" || e.code === "PI_WORKTREE_NOT_FOUND") throw e;
       // forge#2377: no `usage` field here — the runner threw, so no result
       // (and therefore no usage data) was ever produced for this attempt.
       // Do not fabricate a value; omitting the field (rather than a stale
