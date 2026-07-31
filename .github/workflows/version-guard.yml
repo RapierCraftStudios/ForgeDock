@@ -1,154 +1,279 @@
 name: Deploy Version Guard
 
-# Guards against a class of process hazard identified in forge#2222: a
-# staging→main deploy PR merged with "Squash and merge" takes the PR head's
-# file content wholesale — including `package.json` — while a real 3-way
-# "Create a merge commit" resolves the field normally. `publish.yml`'s
-# version-bump step commits the bumped version to `main` only and never
-# back-merges it into `staging`, so `main` and `staging` structurally diverge
-# on `package.json.version` after every release. If an operator picks
-# squash-merge on the next staging→main PR, main's version silently regresses
-# to staging's stale value and `publish.yml` bumps/publishes from the wrong
-# base.
-#
-# This check evaluates the PR head's `package.json.version` directly against
-# main's current committed version — exactly the value squash-merge would
-# produce — regardless of which merge method is ultimately selected. It is
-# intentionally strict: a routine staging→main PR opened before staging's
-# `package.json.version` has been bumped to catch up with main's last release
-# WILL fail this check. That is the desired behavior — it forces the operator
-# to either bump staging's version to >= main's current version before
-# merging, or use "Create a merge commit" (which resolves correctly since
-# staging never touches the version field on its own). Silently allowing the
-# PR to merge and lose main's version is exactly the hazard this guard exists
-# to close.
-#
-# Trigger: pull_request targeting main only (staging→main or feature→main
-# deploy PRs). Non-deploy PRs are skipped immediately.
+# The guard protects squash merges into main from replacing a newer published
+# package.json version with stale PR-head content. A pull_request run checks the
+# current refs directly. publish.yml dispatches the same workflow after main
+# advances so an older green result cannot remain merge-valid.
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Open PR targeting main to revalidate
+        required: true
+        type: string
+      expected_head_sha:
+        description: PR head SHA observed before dispatch
+        required: true
+        type: string
+      expected_base_sha:
+        description: main SHA that caused this revalidation
+        required: true
+        type: string
+
+concurrency:
+  # A PR-keyed group prevents publisher fan-out and pull_request runs from
+  # racing. The exact-head and current-ref checks below are still required:
+  # cancellation is cooperative and cannot itself prevent a stale write.
+  group: version-guard-pr-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
+  pull-requests: read
+  statuses: write
+
+env:
+  STATUS_CONTEXT: forgedock/version-guard
 
 jobs:
   version-guard:
     name: Check package.json version is not regressing
     runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.base.ref == 'main'
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          fetch-depth: 0
-
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
 
-      - name: Read base and head package.json content
-        id: read
+      - name: Resolve current PR and refs
+        id: resolve
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha || '' }}
+          EXPECTED_BASE_SHA: ${{ inputs.expected_base_sha || '' }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
-          # Read package.json content directly from git objects at each ref's
-          # exact commit — no shell interpolation of the raw version string
-          # anywhere; the JSON blobs are handed to node via a temp file, which
-          # then does its own JSON.parse and only ever prints already-derived,
-          # safe values.
-          git show "${BASE_SHA}:package.json" > "${RUNNER_TEMP}/base-package.json" 2>/dev/null || echo "{}" > "${RUNNER_TEMP}/base-package.json"
-          git show "${HEAD_SHA}:package.json" > "${RUNNER_TEMP}/head-package.json" 2>/dev/null || echo "{}" > "${RUNNER_TEMP}/head-package.json"
+          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "Invalid PR number; refusing to publish a status for an unknown target."
+            {
+              echo "stale=true"
+              echo "reason=invalid PR number"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-      - name: Compare head vs. base package.json version
+          PR_JSON=$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}")
+          PR_STATE=$(jq -r '.state // ""' <<<"$PR_JSON")
+          BASE_REF=$(jq -r '.base.ref // ""' <<<"$PR_JSON")
+          HEAD_SHA=$(jq -r '.head.sha // ""' <<<"$PR_JSON")
+          PR_BASE_SHA=$(jq -r '.base.sha // ""' <<<"$PR_JSON")
+          MAIN_SHA=$(gh api "repos/${REPOSITORY}/branches/main" --jq '.commit.sha // empty')
+
+          STALE=false
+          REASON=""
+          if [ "$PR_STATE" != "open" ] || [ "$BASE_REF" != "main" ]; then
+            STALE=true
+            REASON="PR is not an open PR targeting main"
+          elif ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || ! [[ "$MAIN_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            STALE=true
+            REASON="GitHub returned an invalid PR head or main SHA"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && {
+            [ "$EXPECTED_HEAD_SHA" != "$HEAD_SHA" ] ||
+            [ "$EXPECTED_BASE_SHA" != "$MAIN_SHA" ];
+          }; then
+            # A newer head or main push owns the status now. Do not even write
+            # pending for this stale dispatch: otherwise an old queued run could
+            # overwrite a newer success with a misleading pending result.
+            STALE=true
+            REASON="dispatch inputs no longer match the current PR head and main"
+          fi
+
+          {
+            echo "pr_number=$PR_NUMBER"
+            echo "head_sha=$HEAD_SHA"
+            echo "base_sha=$MAIN_SHA"
+            echo "pr_base_sha=$PR_BASE_SHA"
+            echo "stale=$STALE"
+            echo "reason=$REASON"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mark current PR head pending
+        if: steps.resolve.outputs.stale != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
+            -f state=pending \
+            -f context="${STATUS_CONTEXT}" \
+            -f description="Waiting for current main version guard result for PR #${PR_NUMBER}" \
+            -f target_url="${RUN_URL}"
+
+      - name: Read package metadata at exact refs
+        id: read
+        if: steps.resolve.outputs.stale != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BASE_SHA: ${{ steps.resolve.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
+          RUNNER_TEMP: ${{ runner.temp }}
+        run: |
+          set -u
+
+          read_package() {
+            local ref="$1"
+            local destination="$2"
+            local encoded
+
+            if ! encoded=$(gh api "repos/${REPOSITORY}/contents/package.json?ref=${ref}" --jq '.content // empty' 2>/dev/null); then
+              printf '{}\n' > "$destination"
+              return 1
+            fi
+            if ! printf '%s' "$encoded" | tr -d '\r\n' | base64 --decode > "$destination" 2>/dev/null; then
+              printf '{}\n' > "$destination"
+              return 1
+            fi
+            return 0
+          }
+
+          FETCH_FAILED=0
+          read_package "$BASE_SHA" "${RUNNER_TEMP}/base-package.json" || FETCH_FAILED=1
+          read_package "$HEAD_SHA" "${RUNNER_TEMP}/head-package.json" || FETCH_FAILED=1
+          echo "fetch_failed=${FETCH_FAILED}" >> "$GITHUB_OUTPUT"
+
+      - name: Compare head against current main
+        id: compare
+        if: steps.resolve.outputs.stale != 'true'
         env:
           RUNNER_TEMP: ${{ runner.temp }}
         run: |
-          node -e '
-            const fs = require("fs");
-            const dir = process.env.RUNNER_TEMP;
+          set -u
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const output = process.env.GITHUB_OUTPUT;
+          const dir = process.env.RUNNER_TEMP;
 
-            function parseSemver(v) {
-              if (typeof v !== "string") return null;
-              const m = v.match(/^(\d+)\.(\d+)\.(\d+)/);
-              if (!m) return null;
-              return [Number(m[1]), Number(m[2]), Number(m[3])];
+          function parseSemver(value) {
+            if (typeof value !== 'string') return null;
+            const match = value.match(/^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/);
+            return match ? match.slice(1, 4).map(Number) : null;
+          }
+
+          function compare(left, right) {
+            for (let index = 0; index < 3; index += 1) {
+              if (left[index] !== right[index]) return left[index] - right[index];
             }
+            return 0;
+          }
 
-            function cmp(a, b) {
-              for (let i = 0; i < 3; i++) {
-                if (a[i] !== b[i]) return a[i] - b[i];
-              }
-              return 0;
-            }
+          function result(state, reason) {
+            fs.appendFileSync(output, `state=${state}\nreason=${reason.replace(/[\r\n]/g, ' ')}\n`);
+          }
 
-            // This gate exists to block a specific hazard (a version regression
-            // on main). If it cannot evaluate its own precondition — either
-            // package.json fails to parse, or the version field is missing or
-            // not valid semver — it MUST fail closed rather than silently pass.
-            // A gate that waves a PR through when it cannot read the data it is
-            // supposed to check provides false assurance, which is strictly
-            // worse than no gate at all. (Mirrors this repository own fail-closed
-            // precedent for unreadable/unparseable gate input — see
-            // phases.mjs -> detectOutcome, which treats a missing or
-            // unparseable review verdict as a failure, never as an approval.)
-            let base, head;
-            try {
-              base = JSON.parse(fs.readFileSync(`${dir}/base-package.json`, "utf8"));
-            } catch (e) {
-              console.log(
-                `::error::Deploy Version Guard FAILED — could not parse main branch package.json as JSON (${e.message}). Cannot verify the head version is not a regression, so failing closed instead of silently passing.`
-              );
-              process.exit(1);
-            }
-            try {
-              head = JSON.parse(fs.readFileSync(`${dir}/head-package.json`, "utf8"));
-            } catch (e) {
-              console.log(
-                `::error::Deploy Version Guard FAILED — could not parse the PR head package.json as JSON (${e.message}). Cannot verify the head version is not a regression, so failing closed instead of silently passing.`
-              );
-              process.exit(1);
-            }
+          let base;
+          let head;
+          try {
+            base = JSON.parse(fs.readFileSync(path.join(dir, 'base-package.json'), 'utf8'));
+          } catch (error) {
+            console.error(`Deploy Version Guard FAILED — could not parse main package.json as JSON: ${error.message}`);
+            result('failure', 'main package.json is not valid JSON');
+            process.exit(0);
+          }
+          try {
+            head = JSON.parse(fs.readFileSync(path.join(dir, 'head-package.json'), 'utf8'));
+          } catch (error) {
+            console.error(`Deploy Version Guard FAILED — could not parse PR package.json as JSON: ${error.message}`);
+            result('failure', 'PR head package.json is not valid JSON');
+            process.exit(0);
+          }
 
-            const baseVersion = base.version;
-            const headVersion = head.version;
-            const baseParsed = parseSemver(baseVersion);
-            const headParsed = parseSemver(headVersion);
+          const baseVersion = base.version;
+          const headVersion = head.version;
+          const baseParsed = parseSemver(baseVersion);
+          const headParsed = parseSemver(headVersion);
+          if (!baseParsed || !headParsed) {
+            console.error('Deploy Version Guard FAILED — both package.json version fields must be valid semver.');
+            result('failure', 'package.json version is missing or invalid semver');
+            process.exit(0);
+          }
 
-            if (!baseParsed || !headParsed) {
-              console.log(
-                `::error::Deploy Version Guard FAILED — could not parse a valid semver "version" field from main (saw: ${JSON.stringify(baseVersion)}) or from the PR head (saw: ${JSON.stringify(headVersion)}). Cannot verify the head version is not a regression, so failing closed instead of silently passing.`
-              );
-              process.exit(1);
-            }
+          console.log(`Base (main) package.json version: ${baseVersion}`);
+          console.log(`Head (PR)  package.json version: ${headVersion}`);
+          if (compare(headParsed, baseParsed) < 0) {
+            console.error(`Deploy Version Guard FAILED — PR head version ${headVersion} is lower than main ${baseVersion}.`);
+            result('failure', `head version ${headVersion} is lower than main ${baseVersion}`);
+          } else {
+            console.log('Deploy Version Guard passed — head version is not a regression from main.');
+            result('success', `head version ${headVersion} is current against main ${baseVersion}`);
+          }
+          NODE
 
-            console.log(`Base (main) package.json version: ${baseVersion}`);
-            console.log(`Head (PR)  package.json version: ${headVersion}`);
+      - name: Revalidate refs before final status
+        id: verify
+        if: always() && steps.resolve.outputs.stale != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+          EXPECTED_HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
+          EXPECTED_BASE_SHA: ${{ steps.resolve.outputs.base_sha }}
+        run: |
+          set -u
+          CURRENT_HEAD_SHA=$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha // empty' 2>/dev/null || true)
+          CURRENT_BASE_SHA=$(gh api "repos/${REPOSITORY}/branches/main" --jq '.commit.sha // empty' 2>/dev/null || true)
+          if [ "$CURRENT_HEAD_SHA" != "$EXPECTED_HEAD_SHA" ] || [ "$CURRENT_BASE_SHA" != "$EXPECTED_BASE_SHA" ]; then
+            echo "Current refs changed while the guard was evaluating; leaving the pending status for the newer run."
+            {
+              echo "stale=true"
+              echo "reason=PR head or main changed during evaluation"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+          fi
 
-            if (cmp(headParsed, baseParsed) < 0) {
-              console.log("");
-              console.log(
-                `::error::Deploy Version Guard FAILED — PR head package.json version (${headVersion}) is LOWER than main current version (${baseVersion}).`
-              );
-              console.log("");
-              console.log("If this PR is merged with \"Squash and merge\", GitHub takes the PR head");
-              console.log(`file content as-is — main would silently regress from ${baseVersion} to ${headVersion}, and the next publish would bump/release from`);
-              console.log("the wrong base.");
-              console.log("");
-              console.log("To fix, do ONE of the following before merging:");
-              console.log(`  1. Bump this branch'\''s package.json version to >= ${baseVersion}`);
-              console.log("     (e.g. merge main back into this branch, or manually set the version).");
-              console.log("  2. Merge this PR using \"Create a merge commit\" instead of \"Squash and");
-              console.log("     merge\" — a real 3-way merge resolves package.json correctly here since");
-              console.log("     this branch never touched the version field on its own.");
-              process.exit(1);
-            }
+      - name: Publish final freshness status
+        if: always() && steps.resolve.outputs.stale != 'true' && steps.verify.outputs.stale != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
+          PR_NUMBER: ${{ steps.resolve.outputs.pr_number }}
+          GUARD_STATE: ${{ steps.compare.outputs.state }}
+          GUARD_REASON: ${{ steps.compare.outputs.reason }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -u
+          FINAL_STATE="${GUARD_STATE:-failure}"
+          if [ "$FINAL_STATE" != "success" ] && [ "$FINAL_STATE" != "failure" ]; then
+            FINAL_STATE=failure
+          fi
+          DESCRIPTION="${GUARD_REASON:-guard could not evaluate its inputs}"
+          gh api "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
+            -f state="$FINAL_STATE" \
+            -f context="${STATUS_CONTEXT}" \
+            -f description="$DESCRIPTION" \
+            -f target_url="${RUN_URL}"
+          if [ "$FINAL_STATE" != "success" ]; then
+            exit 1
+          fi
 
-            console.log("");
-            console.log("Deploy Version Guard passed — head version is not a regression from main.");
-          '
+      - name: Report stale run without overwriting newer status
+        if: always() && (steps.resolve.outputs.stale == 'true' || steps.verify.outputs.stale == 'true')
+        run: |
+          echo "Guard run became stale; a newer PR-head or main commit owns the required status."

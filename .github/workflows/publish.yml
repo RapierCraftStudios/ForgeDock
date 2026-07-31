@@ -37,6 +37,8 @@ on:
       - 'templates/**'
       - 'package.json'
       - '.github/workflows/publish.yml'
+      - '.github/workflows/version-guard.yml'
+      - '.github/workflows/check-commands.yml'
   workflow_dispatch:  # Manual retrigger for bot-token merges
 
 jobs:
@@ -44,9 +46,12 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     permissions:
+      actions: write
       contents: write
       id-token: write
       packages: write
+      pull-requests: read
+      statuses: write
 
     steps:
       - uses: actions/checkout@v4
@@ -190,6 +195,53 @@ jobs:
           git add package.json .claude-plugin/plugin.json
           git commit -m "chore: bump version to ${{ env.VERSION }} [skip ci]"
           git push
+
+      - name: Revalidate open deploy PRs after main advances
+        if: always() && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STATUS_CONTEXT: forgedock/version-guard
+        run: |
+          set -euo pipefail
+
+          REPOSITORY="${GITHUB_REPOSITORY}"
+          BASE_SHA=$(gh api "repos/${REPOSITORY}/branches/main" --jq '.commit.sha')
+          if ! [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid main SHA; refusing to dispatch an unverifiable guard."
+            exit 1
+          fi
+          PRS=$(gh api --paginate "repos/${REPOSITORY}/pulls?state=open&base=main&per_page=100" \
+            --jq '.[] | [.number, .head.sha] | @tsv')
+
+          if [ -z "$PRS" ]; then
+            echo "No open PRs targeting main require version revalidation."
+            exit 0
+          fi
+
+          while IFS=$'\t' read -r PR_NUMBER HEAD_SHA; do
+            [ -n "$PR_NUMBER" ] || continue
+            if ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "Invalid head SHA for PR #${PR_NUMBER}; refusing to dispatch an unverifiable guard."
+              exit 1
+            fi
+
+            # Invalidate the old green result before dispatching. The guard's
+            # required context is therefore pending even if dispatch/API work
+            # fails, and a stale success cannot satisfy branch protection.
+            gh api "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
+              -f state=pending \
+              -f context="${STATUS_CONTEXT}" \
+              -f description="Waiting for main version revalidation for PR #${PR_NUMBER}" \
+              -f target_url="${GITHUB_SERVER_URL}/${REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+            gh workflow run version-guard.yml \
+              --repo "$REPOSITORY" \
+              --ref main \
+              -f "pr_number=${PR_NUMBER}" \
+              -f "expected_head_sha=${HEAD_SHA}" \
+              -f "expected_base_sha=${BASE_SHA}"
+            echo "Dispatched version guard for PR #${PR_NUMBER} at head ${HEAD_SHA}."
+          done <<< "$PRS"
 
       - name: Create GitHub Release
         if: env.SKIP_PUBLISH != 'true'

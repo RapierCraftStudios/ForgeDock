@@ -19,6 +19,9 @@ on:
       - 'bin/hooks/interactive-engine.mjs'
       - 'packages/protocol/src/**'
       - '.github/workflows/check-commands.yml'
+      - '.github/workflows/version-guard.yml'
+      - '.github/workflows/publish.yml'
+      - 'bin/tests/version-guard-freshness.test.mjs'
   push:
     branches:
       - staging
@@ -40,6 +43,9 @@ on:
       - 'bin/hooks/interactive-engine.mjs'
       - 'packages/protocol/src/**'
       - '.github/workflows/check-commands.yml'
+      - '.github/workflows/version-guard.yml'
+      - '.github/workflows/publish.yml'
+      - 'bin/tests/version-guard-freshness.test.mjs'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -49,6 +55,20 @@ permissions:
   contents: read
 
 jobs:
+  version-guard-freshness:
+    name: Version guard freshness regression
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+
+      - name: Run version guard freshness tests
+        run: node --test bin/tests/version-guard-freshness.test.mjs
+
   check-native-conflicts:
     name: Native command conflict check
     runs-on: ubuntu-latest
