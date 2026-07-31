@@ -113,7 +113,8 @@ function renderPlan(plan: PreflightPlan): string {
 	const rows = (plan.issues || []).map((issue) => {
 		const deps = issue.predecessors.length ? issue.predecessors.map((n) => `#${n}`).join(", ") : "—";
 		const files = issue.files.length ? issue.files.join(", ") : "—";
-		return `| #${issue.number} | ${issue.title.replace(/\|/g, "\\|")} | ${deps} | ${issue.domain.join(", ")} | ${files} | ${issue.inFlight ? "resume" : "ready/queued"} |`;
+		const safeTitle = issue.title.replace(/\\/g, "\\\\").replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ");
+		return `| #${issue.number} | ${safeTitle} | ${deps} | ${issue.domain.join(", ")} | ${files} | ${issue.inFlight ? "resume" : "ready/queued"} |`;
 	}).join("\n");
 	return [
 		`## ForgeDock DAG (${plan.total ?? 0} issues)`,
