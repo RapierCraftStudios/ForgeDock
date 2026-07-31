@@ -3,6 +3,11 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import {
   buildPiModelArgs,
   buildPiPhaseArgs,
@@ -11,6 +16,56 @@ import {
   parseWorktrees,
   worktreeForBranch,
 } from "../../pi/runtime/engine.mjs";
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const PI_EXTENSION = join(REPO_ROOT, "pi", "extensions", "forgedock.ts");
+const CLASSIFIER = join(REPO_ROOT, "scripts", "classify-lane.sh");
+
+function writeExecutable(path, content) {
+  writeFileSync(path, content, "utf8");
+  chmodSync(path, 0o755);
+}
+
+test("Pi lane resolution uses the shared classifier and forwards its configured branch", () => {
+  const source = readFileSync(PI_EXTENSION, "utf8");
+  assert.match(source, /const classifier = join\(projectRoot, "scripts", "classify-lane\.sh"\)/);
+  assert.match(source, /spawnSync\("bash", \[classifier, String\(issue\), "-R", repo\]/);
+  assert.match(source, /if \(result\.error \|\| result\.status !== 0\)/);
+  assert.match(source, /const lane = issueLane\(projectRoot, repo, issue\);[\s\S]*?runPiIssue\(\{[\s\S]*?lane,/);
+  assert.doesNotMatch(source, /return[^;\n]*staging/);
+
+  const fixture = mkdtempSync(join(tmpdir(), "forgedock-lane-"));
+  const bin = join(fixture, "bin");
+  const scripts = join(fixture, "scripts");
+  const path = [bin, process.env.PATH || ""].join(process.platform === "win32" ? ";" : ":");
+  try {
+    writeFileSync(join(fixture, "forge.yaml"), "branches:\n  staging: integration\n", "utf8");
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(scripts, { recursive: true });
+    writeFileSync(join(scripts, "classify-lane.sh"), readFileSync(CLASSIFIER), "utf8");
+    writeExecutable(join(bin, "gh"), "#!/bin/sh\nprintf '%s\\n' '{\"milestone\":null,\"labels\":[]}'\n");
+    writeExecutable(join(bin, "yq"), "#!/bin/sh\nprintf '%s\\n' integration\n");
+    writeExecutable(join(bin, "git"), "#!/bin/sh\n[ \"$1\" = \"ls-remote\" ] && exit 0\nexit 1\n");
+
+    const success = spawnSync("bash", [join(scripts, "classify-lane.sh"), "2950", "-R", "acme/repo"], {
+      cwd: fixture,
+      encoding: "utf8",
+      env: { ...process.env, PATH: path },
+    });
+    assert.equal(success.status, 0, success.stderr);
+    assert.equal(success.stdout.trim(), "integration");
+
+    writeExecutable(join(bin, "gh"), "#!/bin/sh\nexit 7\n");
+    const failure = spawnSync("bash", [join(scripts, "classify-lane.sh"), "2950", "-R", "acme/repo"], {
+      cwd: fixture,
+      encoding: "utf8",
+      env: { ...process.env, PATH: path },
+    });
+    assert.notEqual(failure.status, 0);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
 
 test("Pi runtime resolves provider/model objects into an explicit model pattern", () => {
   assert.equal(modelPattern({ provider: "openai", id: "gpt-5.5" }), "openai/gpt-5.5");

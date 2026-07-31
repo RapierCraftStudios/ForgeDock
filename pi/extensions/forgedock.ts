@@ -118,9 +118,6 @@ function repoFromConfig(projectRoot: string): string {
 	if (!owner || !repo) throw new Error("forge.yaml does not define project.owner/project.repo");
 	return `${owner}/${repo}`;
 }
-function normalizeSlug(value: string): string {
-	return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-}
 function normalizeInput(input: string): string {
 	const url = input.match(/^https?:\/\/github\.com\/[^/]+\/[^/]+\/issues\/?(?:\?(.*))?$/i);
 	if (!url?.[1]) return input;
@@ -163,9 +160,20 @@ function parseIssueNumber(args: string): number | undefined {
 }
 
 function issueLane(projectRoot: string, repo: string, issue: number): string {
-	const data = ghJson(projectRoot, ["issue", "view", String(issue), "-R", repo, "--json", "milestone"]) as { milestone?: { title?: string } | null };
-	const title = data.milestone?.title;
-	return title ? `milestone/${normalizeSlug(title)}` : "staging";
+	const classifier = join(projectRoot, "scripts", "classify-lane.sh");
+	const result = spawnSync("bash", [classifier, String(issue), "-R", repo], {
+		cwd: projectRoot,
+		encoding: "utf8",
+		windowsHide: true,
+		maxBuffer: 32 * 1024 * 1024,
+	});
+	if (result.error || result.status !== 0) {
+		const detail = String(result.stderr || result.error?.message || "classifier failed").trim();
+		throw new Error(`Unable to classify lane for issue #${issue}: ${detail}`);
+	}
+	const lane = String(result.stdout || "").trim();
+	if (!lane) throw new Error(`Unable to classify lane for issue #${issue}: classifier returned no lane`);
+	return lane;
 }
 
 async function executeIssue(forgeHome: string, projectRoot: string, args: string, ctx: ExtensionContext): Promise<IssueResult> {
