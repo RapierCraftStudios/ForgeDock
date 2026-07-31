@@ -166,6 +166,7 @@ async function runWorker(root: string, repo: string, number: number, signal?: Ab
 	]);
 	polling = false;
 	signal?.removeEventListener("abort", abort);
+	if (!stoppedAtTerminal) stoppedAtTerminal = terminalIssue(root, repo, number);
 	return { number, code: result.code, output, stoppedAtTerminal };
 }
 
@@ -203,6 +204,9 @@ async function orchestrate(root: string, input: string, ctx: ExtensionContext, a
 		ctx.ui.setStatus("forgedock", `ForgeDock: running ${batch.map((n) => `#${n}`).join(", ")}`);
 		const batchResults = await Promise.all(batch.map((number) => runWorker(root, repo, number, ctx.signal)));
 		for (const result of batchResults) {
+			if (!result.stoppedAtTerminal) {
+				return `${planText}\n\nWorker #${result.number} exited before reaching a terminal GitHub state (exit ${result.code ?? "unknown"}). Dependents were not dispatched.`;
+			}
 			pending.delete(result.number); completed.add(result.number); results.push(result);
 		}
 	}
