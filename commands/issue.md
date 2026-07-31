@@ -552,15 +552,14 @@ Files that need changes (ordered by dependency):
 
 {If this depends on other issues: "Depends on #{N} — {reason}". If none, omit this section.}
 
-## Prior Investigation
+## Parent Context
 
-{Optional — include when this issue was spawned from or relates to a prior investigation that produced Knowledge Gists.}
+{Optional — include when this issue was spawned from a completed parent investigation. The comment ID is the authority; the URL is informational.}
 
-{For each Gist URL from the parent/sibling investigation:}
-<!-- FORGE:PRIOR_GIST: {gist_url} -->
-- {gist_url}
+<!-- FORGE:PARENT_CONTEXT: repo={GH_REPO} issue={PARENT_ISSUE} comment={COMMENT_ID} marker=FORGE:INVESTIGATOR -->
+Parent investigator comment: https://github.com/{GH_REPO}/issues/{PARENT_ISSUE}#issuecomment-{COMMENT_ID}
 
-{If no prior investigation Gists exist, omit this section entirely.}
+{If no completed parent investigation exists, omit this section entirely.}
 ```
 
 **Rules for automated issue creation**:
@@ -569,7 +568,7 @@ Files that need changes (ordered by dependency):
 - `## Affected Files` is MANDATORY — list actual file paths the investigator should read first
 - `## Acceptance Criteria` is MANDATORY — at least one testable `- [ ]` criterion; each item MAY carry an optional `[type:api|unit|e2e|manual]` annotation for deterministic test-gate classification (omit to fall back to regex inference)
 - Domain-specific sections (Evidence Trail, Pattern Metadata, Validation Checklist, etc.) SHOULD be preserved — they add pipeline value. Add mandatory sections around them, not instead of them.
-- `## Prior Investigation` is OPTIONAL — include only when parent/sibling investigation Gist URLs are available. Each Gist URL must be wrapped in a `<!-- FORGE:PRIOR_GIST: {url} -->` annotation for machine-readable parsing by downstream agents. <!-- Added: forge#339 -->
+- `## Parent Context` is OPTIONAL — include only when a completed parent investigator comment exists. Use exactly one `FORGE:PARENT_CONTEXT` annotation with the repository, parent issue number, numeric comment ID, and `marker=FORGE:INVESTIGATOR`; include the informational GitHub comment URL. The comment resource is the authority and future templates MUST NOT emit retired external-memory annotations. <!-- Updated: forge#2967 -->
 
 ---
 
