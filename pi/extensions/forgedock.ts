@@ -8,6 +8,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runPiIssue } from "../runtime/engine.mjs";
+import { reconcileReviewFindings } from "../runtime/review-findings.mjs";
 
 type ForgeCommand = { id: string; name: string; relativePath: string; absolutePath: string; description: string };
 type PlanIssue = { number: number; title: string; predecessors: number[]; domain: string[]; files: string[]; priority: number; inFlight?: boolean };
@@ -110,6 +111,14 @@ function ghJson(root: string, args: string[]): unknown {
 	const result = spawnSync("gh", args, { cwd: root, encoding: "utf8", windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
 	if (result.status !== 0) throw new Error(String(result.stderr || "gh command failed").trim());
 	return JSON.parse(result.stdout || "null");
+}
+function ghPaginatedArray(root: string, endpoint: string): unknown[] {
+	const response = ghJson(root, ["api", "--paginate", "--slurp", endpoint]);
+	if (!Array.isArray(response)) throw new TypeError("paginated GitHub response must be an array");
+	if (response.length === 0) return [];
+	if (response.every((page) => Array.isArray(page))) return response.flat();
+	if (response.every((item) => item && typeof item === "object")) return response;
+	throw new TypeError("paginated GitHub response contains an invalid page");
 }
 function repoFromConfig(projectRoot: string): string {
 	const source = readFileSync(join(projectRoot, "forge.yaml"), "utf8");
@@ -299,17 +308,25 @@ async function executeReview(forgeHome: string, projectRoot: string, args: strin
 		const result = await runProcess(piExecutable(), ["--no-session", "--approve", "--no-extensions", ...modelArgs, "--name", `forge-review-${pr}-${domain}`, "-p", reviewAgentPrompt(forgeHome, projectRoot, repo, pr, domain, runId)], projectRoot, ctx.signal, 600_000);
 		return { domain, result };
 	}));
-	const comments = ghJson(projectRoot, ["api", `repos/${repo}/issues/${pr}/comments`]) as Array<{ body: string }>;
+	const comments = ghPaginatedArray(projectRoot, `repos/${repo}/issues/${pr}/comments`) as Array<{ body: string }>;
 	const missing = domains.filter((domain) => !comments.some((comment) => comment.body.includes(`<!-- FORGE:REVIEW-AGENT:${domain} -->`) && comment.body.includes(`<!-- FORGE:REVIEW-RUN:${runId} -->`)));
 	if (missing.length || reviewResults.some(({ result }) => result.timedOut || result.code !== 0)) {
 		postPrComment(projectRoot, repo, pr, `<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity -->\n<!-- FORGE:REVIEW_BLOCKED -->\n## Review Blocked: Incomplete Isolated Review Panel\n\nSelected reviewers: ${domains.length}\nMissing receipts: ${missing.join(", ") || "none"}\nTimed out/failed workers: ${reviewResults.filter(({ result }) => result.timedOut || result.code !== 0).map(({ domain }) => domain).join(", ") || "none"}\n\nNo verdict is valid until every selected reviewer has posted its receipt.`);
 		spawnSync("gh", ["pr", "edit", String(pr), "-R", repo, "--add-label", "needs-human", "--add-label", "review-degraded"], { cwd: projectRoot, windowsHide: true });
 		throw new Error(`review panel incomplete: ${missing.join(", ") || "worker failure"}`);
 	}
-	const findings = comments.filter((comment) => /<!-- FINDING:[^>]+ -->/.test(comment.body));
-	if (findings.length) {
-		postPrComment(projectRoot, repo, pr, `<!-- FORGE:GATE_FAILURE:TYPE=review-findings -->\n<!-- FORGE:REVIEW_BLOCKED -->\n## Review findings require triage\n\n${findings.length} structured finding comment(s) were produced. The review remains blocked until finding triage and issue creation complete.`);
-		throw new Error("review produced findings; triage is required before a verdict");
+	const findingIssues = ghJson(projectRoot, ["issue", "list", "-R", repo, "--state", "all", "--label", "review-finding", "--search", `PR #${pr}`, "--limit", "100", "--json", "number,title,body,labels,state"]);
+	const reconciliation = reconcileReviewFindings({
+		comments,
+		runId,
+		domains,
+		findingIssues: findingIssues as Array<{ state: string; labels: Array<string | { name: string }> }>,
+	});
+	if (reconciliation.hasBlockingFindings) {
+		const currentCount = reconciliation.currentRunFindings.length;
+		const priorCount = reconciliation.openPriorFindings.length;
+		postPrComment(projectRoot, repo, pr, `<!-- FORGE:GATE_FAILURE:TYPE=review-findings -->\n<!-- FORGE:REVIEW_BLOCKED -->\n## Review findings require triage\n\nCurrent-run findings: ${currentCount}\nPrior open findings carried forward: ${priorCount}\n\nClosed and explicitly dismissed historical findings are excluded from this verdict. The review remains blocked until all active findings are triaged.`);
+		throw new Error(`review produced findings; triage is required (${currentCount} current-run, ${priorCount} prior open)`);
 	}
 	spawnSync("gh", ["pr", "edit", String(pr), "-R", repo, "--remove-label", "needs-human", "--remove-label", "review-degraded"], { cwd: projectRoot, windowsHide: true });
 	postPrComment(projectRoot, repo, pr, `<!-- FORGE:GATE_PASS -->\n<!-- FORGE:REVIEW -->\n## ForgeDock Review\n\n**Verdict**: PASS\n**Selected isolated reviewers**: ${domains.length}\n**Verified reviewer receipts**: ${domains.length}\n\nAll selected Pi reviewers completed and posted durable GitHub receipts.`);
