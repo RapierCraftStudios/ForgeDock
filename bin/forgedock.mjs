@@ -3219,6 +3219,8 @@ function help() {
     ["npx forgedock update", "Pull latest & reinstall"],
     ["npx forgedock uninstall", "Remove commands"],
     ["npx forgedock opencode install", "Install token-efficient native OpenCode commands"],
+    ["npx forgedock pi install", "Install the native Pi ForgeDock package globally"],
+    ["npx forgedock pi status", "Check the native Pi ForgeDock package"],
     ["npx forgedock opencode status", "Check the OpenCode adapter"],
     ["npx forgedock opencode uninstall", "Remove ForgeDock-owned OpenCode files"],
     ["npx forgedock version", "Print the installed version and check for updates"],
@@ -3783,7 +3785,7 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "run-issue", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "backend-check", "run-issue", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "help", "--help", "-h",
+  "run", "backend-check", "run-issue", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "pi", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -3875,6 +3877,24 @@ switch (command) {
   case "update":
     await update();
     break;
+  case "pi": {
+    const action = restArgs[0] || "install";
+    const piExecutable = process.platform === "win32" ? "pi.cmd" : "pi";
+    if (action === "status") {
+      const probe = spawnSync(piExecutable, ["list"], { encoding: "utf8", shell: process.platform === "win32", windowsHide: true });
+      process.stdout.write(probe.status === 0 ? probe.stdout : "Pi is not installed or ForgeDock is not registered as a Pi package.\n");
+      if (probe.status !== 0) exitCode = 1;
+    } else if (action === "install") {
+      const persisted = await persistHome({ forgeHome: FORGE_HOME, home: HOME });
+      const forgeHome = persisted.forgeHome || FORGE_HOME;
+      const result = spawnSync(piExecutable, ["install", forgeHome], { stdio: "inherit", shell: process.platform === "win32", windowsHide: true });
+      if (result.status !== 0) throw new Error("Pi package installation failed. Ensure `pi` is installed and on PATH.");
+      process.stdout.write("Installed ForgeDock's native Pi adapter. Restart Pi or run /reload.\n");
+    } else {
+      throw new Error(`Unknown Pi action: ${action}. Use: npx forgedock pi install|status`);
+    }
+    break;
+  }
   case "opencode": {
     const action = restArgs[0] || "install";
     const {

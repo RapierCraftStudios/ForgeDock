@@ -59,6 +59,18 @@ describe("OpenCode orchestration preflight", () => {
     assert.ok(plan.edges.some((edge) => edge.kind === "same-file" && edge.predecessor === 1 && edge.successor === 2));
   });
 
+  it("filters orchestration coordination issues from work batches", () => {
+    const plan = buildPreflightPlan({
+      input: "1 2 --auto",
+      issues: [
+        issue(1),
+        issue(2, { title: "orchestrate: claims board for batch test", body: "<!-- FORGE:COORD_ISSUE -->" }),
+      ],
+    });
+    assert.deepEqual(plan.issues.map((item) => item.number), [1]);
+    assert.deepEqual(plan.excluded, [{ number: 2, reason: "orchestration coordination issue" }]);
+  });
+
   it("filters workflow exclusions and supports explicit in-flight recovery", () => {
     const issues = [
       issue(1),

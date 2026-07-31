@@ -226,8 +226,9 @@ export function buildPreflightPlan({ input, repo = "", issues = [], maxConcurren
   for (const issue of query.selected) {
     const labels = labelsOf(issue);
     const excludedLabel = labels.find((label) => EXCLUDED_LABELS.has(label));
-    if (excludedLabel || String(issue.state || "").toUpperCase() === "CLOSED") {
-      excluded.push({ number: Number(issue.number), reason: excludedLabel || "closed" });
+    const isCoordinationIssue = /FORGE:COORD_ISSUE|orchestrate:\s*claims board/i.test(String(issue.body || ""));
+    if (excludedLabel || isCoordinationIssue || String(issue.state || "").toUpperCase() === "CLOSED") {
+      excluded.push({ number: Number(issue.number), reason: excludedLabel || (isCoordinationIssue ? "orchestration coordination issue" : "closed") });
       continue;
     }
     admitted.push(issue);

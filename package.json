@@ -1,7 +1,7 @@
 {
   "name": "forgedock",
   "version": "1.7.1",
-  "description": "Autonomous development pipeline for coding agents. GitHub as institutional memory, with native Claude Code and OpenCode entrypoints.",
+  "description": "Autonomous development pipeline for coding agents. GitHub as institutional memory, with native Claude Code, OpenCode, Codex, and Pi entrypoints.",
   "bin": {
     "forgedock": "bin/forgedock.mjs"
   },
@@ -17,6 +17,9 @@
     "knowledge-graph",
     "claude",
     "opencode",
+    "pi-package",
+    "pi-coding-agent",
+    "pi",
     "anthropic",
     "agentic-ai",
     "devtools",
@@ -43,9 +46,14 @@
     "scripts/",
     "!scripts/refresh-bot-token.sh",
     "templates/",
+    "pi/",
+    "install-pi.sh",
     "LICENSE",
     "README.md"
   ],
+  "pi": {
+    "extensions": ["./pi/extensions"]
+  },
   "scripts": {
     "test": "node --test \"bin/tests/**/*.test.mjs\" \"bin/engine/**/*.test.mjs\" \"packages/protocol/test/**/*.test.mjs\"",
     "docs:dev": "vitepress dev docs/site",
