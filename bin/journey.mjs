@@ -1356,7 +1356,7 @@ export function isEphemeralCachePath(p) {
  * payload. Kept as a single list so persistHome() and its tests agree on
  * exactly what gets copied.
  */
-const PERSIST_HOME_DIRS = ["bin", "commands", "scripts", "templates"];
+const PERSIST_HOME_DIRS = ["bin", "commands", "scripts", "templates", "pi"];
 
 /**
  * Detect whether `dir` is a git working tree — has a `.git` entry at all,
