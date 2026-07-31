@@ -4,14 +4,100 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildPiChildEnv,
   buildPiModelArgs,
   buildPiPhaseArgs,
   buildPiPhasePrompt,
   buildPiSubagentArgs,
   modelPattern,
   parseWorktrees,
+  resolvePiLaunch,
   worktreeForBranch,
 } from "../../pi/runtime/engine.mjs";
+
+test("Pi runtime resolves a Windows npm shim to a shell-free Node launch", () => {
+  const shimPath = "C:\\Pi\\pi.cmd";
+  const scriptPath = "C:\\Pi\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.js";
+  const files = new Map([
+    [shimPath, String.raw`@ECHO off
+SET dp0=%~dp0
+"%_prog%" "%dp0%\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\cli.js" %*`],
+    [scriptPath, ""],
+  ]);
+  const launch = resolvePiLaunch({
+    platform: "win32",
+    executablePath: shimPath,
+    nodeExecutable: "C:\\Node\\node.exe",
+    readFile: (path) => {
+      if (!files.has(path)) throw new Error(`missing fixture: ${path}`);
+      return files.get(path);
+    },
+    exists: (path) => files.has(path),
+  });
+
+  assert.deepEqual(launch, {
+    command: "C:\\Node\\node.exe",
+    args: [scriptPath],
+    options: { shell: false },
+  });
+  assert.equal(launch.command.toLowerCase().endsWith(".cmd"), false);
+});
+
+test("Pi runtime accepts native Windows executables without shell parsing", () => {
+  assert.deepEqual(
+    resolvePiLaunch({ platform: "win32", executablePath: "C:\\Pi\\pi.exe" }),
+    { command: "C:\\Pi\\pi.exe", args: [], options: { shell: false } },
+  );
+});
+
+test("Pi runtime fails closed for missing or malformed Windows shims", () => {
+  assert.throws(
+    () => resolvePiLaunch({ platform: "win32", executablePath: "C:\\Pi\\missing.cmd" }),
+    /unable to read Windows shim/,
+  );
+  assert.throws(
+    () => resolvePiLaunch({
+      platform: "win32",
+      executablePath: "C:\\Pi\\malformed.cmd",
+      readFile: () => "@echo off",
+      exists: () => false,
+    }),
+    /no existing JavaScript entrypoint/,
+  );
+});
+
+test("Pi runtime keeps non-Windows launches shell-free", () => {
+  assert.deepEqual(
+    resolvePiLaunch({ platform: "linux", executablePath: "pi" }),
+    { command: "pi", args: [], options: { shell: false } },
+  );
+});
+
+test("Pi child environments retain runtime basics but omit credentials and arbitrary variables", () => {
+  assert.deepEqual(
+    buildPiChildEnv({
+      env: {
+        PATH: "C:/bin",
+        HOME: "C:/Users/test",
+        GH_TOKEN: "secret",
+        GITHUB_TOKEN: "secret",
+        ANTHROPIC_API_KEY: "secret",
+        FORGEDOCK_APP_PEM: "secret",
+        SOPS_AGE_KEY_FILE: "C:/secret.txt",
+        UNTRUSTED_MARKER: "discard",
+      },
+      forgeHome: "C:/forge",
+      phaseWorker: true,
+    }),
+    {
+      PATH: "C:/bin",
+      HOME: "C:/Users/test",
+      FORGE_HOME: "C:/forge",
+      FORGE_RUNTIME: "pi",
+      FORGE_PI_WORKER: "1",
+    },
+  );
+});
 
 test("Pi runtime resolves provider/model objects into an explicit model pattern", () => {
   assert.equal(modelPattern({ provider: "openai", id: "gpt-5.5" }), "openai/gpt-5.5");
@@ -69,7 +155,7 @@ test("Pi subagent argv disables project extensions and preserves literal prompts
       "--name",
       "read-only-review",
       "--tools",
-      "read,grep,find,ls,bash",
+      "read,grep,find,ls",
       "-p",
       prompt,
     ],

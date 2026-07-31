@@ -7,7 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildPiSubagentArgs, runPiIssue } from "../runtime/engine.mjs";
+import { buildPiChildEnv, buildPiSubagentArgs, resolvePiLaunch, runPiIssue } from "../runtime/engine.mjs";
 
 type ForgeCommand = { id: string; name: string; relativePath: string; absolutePath: string; description: string };
 type PlanIssue = { number: number; title: string; predecessors: number[]; domain: string[]; files: string[]; priority: number; inFlight?: boolean };
@@ -88,9 +88,18 @@ function discoverCommands(root: string): ForgeCommand[] {
 	}));
 }
 
-function runProcess(command: string, args: string[], cwd: string, signal?: AbortSignal, timeoutMs = 600_000): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
+type PiLaunch = { command: string; args: string[]; options?: { shell?: boolean } };
+
+function runProcess(launch: PiLaunch, args: string[], cwd: string, signal?: AbortSignal, timeoutMs = 600_000): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
 	return new Promise((resolvePromise, reject) => {
-		const child = spawn(command, args, { cwd, env: { ...process.env, FORGE_RUNTIME: "pi" }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+		const child = spawn(launch.command, [...launch.args, ...args], {
+			...launch.options,
+			cwd,
+			env: buildPiChildEnv(),
+			stdio: ["ignore", "pipe", "pipe"],
+			shell: false,
+			windowsHide: true,
+		});
 		let stdout = ""; let stderr = ""; let timedOut = false;
 		const timer = setTimeout(() => { timedOut = true; abort(); }, timeoutMs);
 		const abort = () => {
@@ -105,7 +114,6 @@ function runProcess(command: string, args: string[], cwd: string, signal?: Abort
 	});
 }
 
-function piExecutable(): string { return process.platform === "win32" ? "pi.cmd" : "pi"; }
 function ghJson(root: string, args: string[]): unknown {
 	const result = spawnSync("gh", args, { cwd: root, encoding: "utf8", windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
 	if (result.status !== 0) throw new Error(String(result.stderr || "gh command failed").trim());
@@ -296,7 +304,7 @@ async function executeReview(forgeHome: string, projectRoot: string, args: strin
 	const runId = `pi-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 	const modelArgs = ctx.model?.provider && ctx.model?.id ? ["--model", `${ctx.model.provider}/${ctx.model.id}`] : [];
 	const reviewResults = await Promise.all(domains.map(async (domain) => {
-		const result = await runProcess(piExecutable(), ["--no-session", "--approve", "--no-extensions", ...modelArgs, "--name", `forge-review-${pr}-${domain}`, "-p", reviewAgentPrompt(forgeHome, projectRoot, repo, pr, domain, runId)], projectRoot, ctx.signal, 600_000);
+		const result = await runProcess(resolvePiLaunch(), ["--no-session", "--approve", "--no-extensions", ...modelArgs, "--name", `forge-review-${pr}-${domain}`, "-p", reviewAgentPrompt(forgeHome, projectRoot, repo, pr, domain, runId)], projectRoot, ctx.signal, 600_000);
 		return { domain, result };
 	}));
 	const comments = ghJson(projectRoot, ["api", `repos/${repo}/issues/${pr}/comments`]) as Array<{ body: string }>;
@@ -413,7 +421,7 @@ export default function forgedockPiExtension(pi: ExtensionAPI) {
 		name: "forge_subagent", label: "Forge Subagent", description: "Run an isolated Pi subprocess for ForgeDock review or subtask work.",
 		parameters: Type.Object({ prompt: Type.String(), label: Type.Optional(Type.String()), readOnly: Type.Optional(Type.Boolean()) }),
 		async execute(_id, params, signal, _update, ctx) {
-			const result = await runProcess(piExecutable(), buildPiSubagentArgs({ name: params.label, prompt: params.prompt, readOnly: params.readOnly }), ctx.cwd, signal);
+			const result = await runProcess(resolvePiLaunch(), buildPiSubagentArgs({ name: params.label, prompt: params.prompt, readOnly: params.readOnly }), ctx.cwd, signal);
 			return { content: [{ type: "text", text: `exit_code=${result.code}\n${result.stdout}\n${result.stderr}` }], details: result, isError: result.code !== 0 };
 		},
 	});

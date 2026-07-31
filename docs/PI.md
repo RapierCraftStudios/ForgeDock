@@ -86,7 +86,7 @@ When a workflow spec references Claude-specific mechanics, Pi translates them as
 - `Bash`, `Read`, `Grep`, `Glob` -> Pi shell/file tools with `gh`, `git`, `rg`, and `find`
 - `WebFetch` -> `gh`, `curl`, or available web tooling
 
-Direct Pi subprocesses launched from a project working directory, including `forge_subagent`, pass `--no-extensions` so repository-controlled extensions cannot execute before the requested prompt. Phase workers additionally pass `--no-extensions` and explicitly load only the selected ForgeDock extension.
+Direct Pi subprocesses launched from a project working directory, including `forge_subagent`, pass `--no-extensions` so repository-controlled extensions cannot execute before the requested prompt. Their environments are explicitly allowlisted and omit host credentials, signing material, and arbitrary caller variables. `forge_subagent` read-only mode enables only `read`, `grep`, `find`, and `ls`; it never enables shell access. Phase workers additionally pass `--no-extensions` and explicitly load only the selected ForgeDock extension. On Windows, all Pi children resolve npm command shims to a directly executable Node entrypoint and keep prompts as discrete, shell-free argv values.
 
 The Claude adapter and headless Claude runner remain available, but they are separate runtime implementations. Pi must not silently fall back to Claude when its selected provider fails; the phase is recorded as a runtime error and remains recoverable from GitHub state.
 
