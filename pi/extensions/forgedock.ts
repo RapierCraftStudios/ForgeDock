@@ -302,16 +302,17 @@ async function executeReview(forgeHome: string, projectRoot: string, args: strin
 	const comments = ghJson(projectRoot, ["api", `repos/${repo}/issues/${pr}/comments"]) as Array<{ body: string }>;
 	const missing = domains.filter((domain) => !comments.some((comment) => comment.body.includes(`<!-- FORGE:REVIEW-AGENT:${domain} -->`) && comment.body.includes(`<!-- FORGE:REVIEW-RUN:${runId} -->`)));
 	if (missing.length || reviewResults.some(({ result }) => result.timedOut || result.code !== 0)) {
-		postPrComment(projectRoot, repo, pr, `<!-- FORGE:REVIEW_BLOCKED -->\n## Review Blocked: Incomplete Isolated Review Panel\n\nSelected reviewers: ${domains.length}\nMissing receipts: ${missing.join(", ") || "none"}\nTimed out/failed workers: ${reviewResults.filter(({ result }) => result.timedOut || result.code !== 0).map(({ domain }) => domain).join(", ") || "none"}\n\nNo verdict is valid until every selected reviewer has posted its receipt.`);
+		postPrComment(projectRoot, repo, pr, `<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity -->\n<!-- FORGE:REVIEW_BLOCKED -->\n## Review Blocked: Incomplete Isolated Review Panel\n\nSelected reviewers: ${domains.length}\nMissing receipts: ${missing.join(", ") || "none"}\nTimed out/failed workers: ${reviewResults.filter(({ result }) => result.timedOut || result.code !== 0).map(({ domain }) => domain).join(", ") || "none"}\n\nNo verdict is valid until every selected reviewer has posted its receipt.`);
 		spawnSync("gh", ["pr", "edit", String(pr), "-R", repo, "--add-label", "needs-human", "--add-label", "review-degraded"], { cwd: projectRoot, windowsHide: true });
 		throw new Error(`review panel incomplete: ${missing.join(", ") || "worker failure"}`);
 	}
 	const findings = comments.filter((comment) => /<!-- FINDING:[^>]+ -->/.test(comment.body));
 	if (findings.length) {
-		postPrComment(projectRoot, repo, pr, `<!-- FORGE:REVIEW_BLOCKED -->\n## Review findings require triage\n\n${findings.length} structured finding comment(s) were produced. The review remains blocked until finding triage and issue creation complete.`);
+		postPrComment(projectRoot, repo, pr, `<!-- FORGE:GATE_FAILURE:TYPE=review-findings -->\n<!-- FORGE:REVIEW_BLOCKED -->\n## Review findings require triage\n\n${findings.length} structured finding comment(s) were produced. The review remains blocked until finding triage and issue creation complete.`);
 		throw new Error("review produced findings; triage is required before a verdict");
 	}
-	postPrComment(projectRoot, repo, pr, `<!-- FORGE:REVIEW -->\n## ForgeDock Review\n\n**Verdict**: PASS\n**Selected isolated reviewers**: ${domains.length}\n**Verified reviewer receipts**: ${domains.length}\n\nAll selected Pi reviewers completed and posted durable GitHub receipts.`);
+	spawnSync("gh", ["pr", "edit", String(pr), "-R", repo, "--remove-label", "needs-human", "--remove-label", "review-degraded"], { cwd: projectRoot, windowsHide: true });
+	postPrComment(projectRoot, repo, pr, `<!-- FORGE:GATE_PASS -->\n<!-- FORGE:REVIEW -->\n## ForgeDock Review\n\n**Verdict**: PASS\n**Selected isolated reviewers**: ${domains.length}\n**Verified reviewer receipts**: ${domains.length}\n\nAll selected Pi reviewers completed and posted durable GitHub receipts.`);
 	return `PR #${pr}: PASS — ${domains.length} isolated reviewer receipts verified.`;
 }
 
