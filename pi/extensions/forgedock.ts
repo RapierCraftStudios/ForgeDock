@@ -299,7 +299,7 @@ async function executeReview(forgeHome: string, projectRoot: string, args: strin
 		const result = await runProcess(piExecutable(), ["--no-session", "--approve", "--no-extensions", ...modelArgs, "--name", `forge-review-${pr}-${domain}`, "-p", reviewAgentPrompt(forgeHome, projectRoot, repo, pr, domain, runId)], projectRoot, ctx.signal, 600_000);
 		return { domain, result };
 	}));
-	const comments = ghJson(projectRoot, ["api", `repos/${repo}/issues/${pr}/comments"]) as Array<{ body: string }>;
+	const comments = ghJson(projectRoot, ["api", `repos/${repo}/issues/${pr}/comments`]) as Array<{ body: string }>;
 	const missing = domains.filter((domain) => !comments.some((comment) => comment.body.includes(`<!-- FORGE:REVIEW-AGENT:${domain} -->`) && comment.body.includes(`<!-- FORGE:REVIEW-RUN:${runId} -->`)));
 	if (missing.length || reviewResults.some(({ result }) => result.timedOut || result.code !== 0)) {
 		postPrComment(projectRoot, repo, pr, `<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity -->\n<!-- FORGE:REVIEW_BLOCKED -->\n## Review Blocked: Incomplete Isolated Review Panel\n\nSelected reviewers: ${domains.length}\nMissing receipts: ${missing.join(", ") || "none"}\nTimed out/failed workers: ${reviewResults.filter(({ result }) => result.timedOut || result.code !== 0).map(({ domain }) => domain).join(", ") || "none"}\n\nNo verdict is valid until every selected reviewer has posted its receipt.`);
