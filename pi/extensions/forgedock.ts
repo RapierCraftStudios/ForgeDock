@@ -277,14 +277,14 @@ function postPrComment(projectRoot: string, repo: string, pr: number, body: stri
 	if (result.status !== 0) throw new Error(String(result.stderr || "failed to post PR review comment").trim());
 }
 
-function reviewAgentPrompt(forgeHome: string, projectRoot: string, repo: string, pr: number, domain: string): string {
+function reviewAgentPrompt(forgeHome: string, projectRoot: string, repo: string, pr: number, domain: string, runId: string): string {
 	const persona = domain === "security" ? "security" : domain === "runtime" ? "infra" : domain === "workflow" ? "spec-cli" : "protocols";
 	return [
 		`You are the isolated ForgeDock ${domain} reviewer for PR #${pr} in ${repo}.`,
 		`Read ${join(forgeHome, "AGENTS.md")}, ${join(forgeHome, "commands", "review-pr.md")}, ${join(forgeHome, "commands", "review-pr-agents", "protocols.md")}, and ${join(forgeHome, "commands", "review-pr-agents", `${persona}.md`)} before reviewing.`,
 		`Inspect PR #${pr} with gh and review only the ${domain} domain.`,
 		"Do not edit files, merge, approve, or run another workflow. Use evidence-based findings only.",
-		`Before exiting, persist your complete review to the PR with gh pr comment and include exactly: <!-- FORGE:REVIEW-AGENT:${domain} -->`,
+		`Before exiting, persist your complete review to the PR with gh pr comment and include exactly: <!-- FORGE:REVIEW-AGENT:${domain} --> and <!-- FORGE:REVIEW-RUN:${runId} -->`,
 		"If there are findings, include structured <!-- FINDING:... --> markers. If clean, explicitly state PASS. Do not claim completion until the GitHub comment succeeds.",
 	].join("\n");
 }
@@ -293,13 +293,14 @@ async function executeReview(forgeHome: string, projectRoot: string, args: strin
 	const repo = repoFromConfig(projectRoot);
 	const pr = resolveReviewPr(projectRoot, args);
 	const domains = ["security", "workflow", "runtime", "protocols"];
+	const runId = `pi-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 	const modelArgs = ctx.model?.provider && ctx.model?.id ? ["--model", `${ctx.model.provider}/${ctx.model.id}`] : [];
 	const reviewResults = await Promise.all(domains.map(async (domain) => {
-		const result = await runProcess(piExecutable(), ["--no-session", "--approve", "--no-extensions", ...modelArgs, "--name", `forge-review-${pr}-${domain}`, "-p", reviewAgentPrompt(forgeHome, projectRoot, repo, pr, domain)], projectRoot, ctx.signal, 600_000);
+		const result = await runProcess(piExecutable(), ["--no-session", "--approve", "--no-extensions", ...modelArgs, "--name", `forge-review-${pr}-${domain}`, "-p", reviewAgentPrompt(forgeHome, projectRoot, repo, pr, domain, runId)], projectRoot, ctx.signal, 600_000);
 		return { domain, result };
 	}));
 	const comments = ghJson(projectRoot, ["api", `repos/${repo}/issues/${pr}/comments"]) as Array<{ body: string }>;
-	const missing = domains.filter((domain) => !comments.some((comment) => comment.body.includes(`<!-- FORGE:REVIEW-AGENT:${domain} -->`)));
+	const missing = domains.filter((domain) => !comments.some((comment) => comment.body.includes(`<!-- FORGE:REVIEW-AGENT:${domain} -->`) && comment.body.includes(`<!-- FORGE:REVIEW-RUN:${runId} -->`)));
 	if (missing.length || reviewResults.some(({ result }) => result.timedOut || result.code !== 0)) {
 		postPrComment(projectRoot, repo, pr, `<!-- FORGE:REVIEW_BLOCKED -->\n## Review Blocked: Incomplete Isolated Review Panel\n\nSelected reviewers: ${domains.length}\nMissing receipts: ${missing.join(", ") || "none"}\nTimed out/failed workers: ${reviewResults.filter(({ result }) => result.timedOut || result.code !== 0).map(({ domain }) => domain).join(", ") || "none"}\n\nNo verdict is valid until every selected reviewer has posted its receipt.`);
 		spawnSync("gh", ["pr", "edit", String(pr), "-R", repo, "--add-label", "needs-human", "--add-label", "review-degraded"], { cwd: projectRoot, windowsHide: true });
