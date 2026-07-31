@@ -1,7 +1,7 @@
 {
   "name": "forgedock",
-  "version": "1.7.1",
-  "description": "Autonomous development pipeline for coding agents. GitHub as institutional memory, with native Claude Code, OpenCode, Codex, and Pi entrypoints.",
+  "version": "1.8.0",
+  "description": "Autonomous development pipeline for coding agents. GitHub as institutional memory, with native Claude Code, OpenCode, Codex, and Pi entrypoints."
   "bin": {
     "forgedock": "bin/forgedock.mjs"
   },
