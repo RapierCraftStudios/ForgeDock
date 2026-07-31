@@ -88,10 +88,11 @@ function discoverCommands(root: string): ForgeCommand[] {
 	}));
 }
 
-function runProcess(command: string, args: string[], cwd: string, signal?: AbortSignal): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function runProcess(command: string, args: string[], cwd: string, signal?: AbortSignal, timeoutMs = 600_000): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
 	return new Promise((resolvePromise, reject) => {
 		const child = spawn(command, args, { cwd, env: { ...process.env, FORGE_RUNTIME: "pi" }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-		let stdout = ""; let stderr = "";
+		let stdout = ""; let stderr = ""; let timedOut = false;
+		const timer = setTimeout(() => { timedOut = true; abort(); }, timeoutMs);
 		const abort = () => {
 			if (process.platform === "win32" && child.pid) spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true });
 			else if (!child.killed) child.kill("SIGTERM");
@@ -100,7 +101,7 @@ function runProcess(command: string, args: string[], cwd: string, signal?: Abort
 		child.stdout?.on("data", (chunk) => { stdout += String(chunk); });
 		child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
 		child.once("error", reject);
-		child.once("close", (code) => { signal?.removeEventListener("abort", abort); resolvePromise({ code, stdout, stderr }); });
+		child.once("close", (code) => { clearTimeout(timer); signal?.removeEventListener("abort", abort); resolvePromise({ code, stdout, stderr, timedOut }); });
 	});
 }
 
@@ -263,6 +264,56 @@ function formatIssueResult(result: IssueResult & { status?: string }): string {
 	return `- #${result.number}: ${state}${detail}`;
 }
 
+function resolveReviewPr(projectRoot: string, args: string): number {
+	const match = args.match(/(?:^|\s)#?(\d+)(?:\s|$)/);
+	if (match) return Number(match[1]);
+	const prs = ghJson(projectRoot, ["pr", "list", "--base", "main", "--head", "staging", "--state", "open", "--json", "number"]) as Array<{ number: number }>;
+	if (prs.length !== 1) throw new Error("Review requires a PR number, or exactly one open staging-to-main PR");
+	return prs[0].number;
+}
+
+function postPrComment(projectRoot: string, repo: string, pr: number, body: string): void {
+	const result = spawnSync("gh", ["pr", "comment", String(pr), "-R", repo, "--body", body], { cwd: projectRoot, encoding: "utf8", windowsHide: true });
+	if (result.status !== 0) throw new Error(String(result.stderr || "failed to post PR review comment").trim());
+}
+
+function reviewAgentPrompt(forgeHome: string, projectRoot: string, repo: string, pr: number, domain: string): string {
+	const persona = domain === "security" ? "security" : domain === "runtime" ? "infra" : domain === "workflow" ? "spec-cli" : "protocols";
+	return [
+		`You are the isolated ForgeDock ${domain} reviewer for PR #${pr} in ${repo}.`,
+		`Read ${join(forgeHome, "AGENTS.md")}, ${join(forgeHome, "commands", "review-pr.md")}, ${join(forgeHome, "commands", "review-pr-agents", "protocols.md")}, and ${join(forgeHome, "commands", "review-pr-agents", `${persona}.md`)} before reviewing.`,
+		`Inspect PR #${pr} with gh and review only the ${domain} domain.`,
+		"Do not edit files, merge, approve, or run another workflow. Use evidence-based findings only.",
+		`Before exiting, persist your complete review to the PR with gh pr comment and include exactly: <!-- FORGE:REVIEW-AGENT:${domain} -->`,
+		"If there are findings, include structured <!-- FINDING:... --> markers. If clean, explicitly state PASS. Do not claim completion until the GitHub comment succeeds.",
+	].join("\n");
+}
+
+async function executeReview(forgeHome: string, projectRoot: string, args: string, ctx: ExtensionContext): Promise<string> {
+	const repo = repoFromConfig(projectRoot);
+	const pr = resolveReviewPr(projectRoot, args);
+	const domains = ["security", "workflow", "runtime", "protocols"];
+	const modelArgs = ctx.model?.provider && ctx.model?.id ? ["--model", `${ctx.model.provider}/${ctx.model.id}`] : [];
+	const reviewResults = await Promise.all(domains.map(async (domain) => {
+		const result = await runProcess(piExecutable(), ["--no-session", "--approve", "--no-extensions", ...modelArgs, "--name", `forge-review-${pr}-${domain}`, "-p", reviewAgentPrompt(forgeHome, projectRoot, repo, pr, domain)], projectRoot, ctx.signal, 600_000);
+		return { domain, result };
+	}));
+	const comments = ghJson(projectRoot, ["api", `repos/${repo}/issues/${pr}/comments"]) as Array<{ body: string }>;
+	const missing = domains.filter((domain) => !comments.some((comment) => comment.body.includes(`<!-- FORGE:REVIEW-AGENT:${domain} -->`)));
+	if (missing.length || reviewResults.some(({ result }) => result.timedOut || result.code !== 0)) {
+		postPrComment(projectRoot, repo, pr, `<!-- FORGE:REVIEW_BLOCKED -->\n## Review Blocked: Incomplete Isolated Review Panel\n\nSelected reviewers: ${domains.length}\nMissing receipts: ${missing.join(", ") || "none"}\nTimed out/failed workers: ${reviewResults.filter(({ result }) => result.timedOut || result.code !== 0).map(({ domain }) => domain).join(", ") || "none"}\n\nNo verdict is valid until every selected reviewer has posted its receipt.`);
+		spawnSync("gh", ["pr", "edit", String(pr), "-R", repo, "--add-label", "needs-human", "--add-label", "review-degraded"], { cwd: projectRoot, windowsHide: true });
+		throw new Error(`review panel incomplete: ${missing.join(", ") || "worker failure"}`);
+	}
+	const findings = comments.filter((comment) => /<!-- FINDING:[^>]+ -->/.test(comment.body));
+	if (findings.length) {
+		postPrComment(projectRoot, repo, pr, `<!-- FORGE:REVIEW_BLOCKED -->\n## Review findings require triage\n\n${findings.length} structured finding comment(s) were produced. The review remains blocked until finding triage and issue creation complete.`);
+		throw new Error("review produced findings; triage is required before a verdict");
+	}
+	postPrComment(projectRoot, repo, pr, `<!-- FORGE:REVIEW -->\n## ForgeDock Review\n\n**Verdict**: PASS\n**Selected isolated reviewers**: ${domains.length}\n**Verified reviewer receipts**: ${domains.length}\n\nAll selected Pi reviewers completed and posted durable GitHub receipts.`);
+	return `PR #${pr}: PASS — ${domains.length} isolated reviewer receipts verified.`;
+}
+
 function sendPrompt(pi: ExtensionAPI, ctx: ExtensionCommandContext, prompt: string): void {
 	pi.sendUserMessage(prompt, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
 }
@@ -287,6 +338,15 @@ export default function forgedockPiExtension(pi: ExtensionAPI) {
 		}
 	};
 
+	const reviewHandler = async (args: string, ctx: ExtensionCommandContext) => {
+		try {
+			const result = await executeReview(forgeHome, findProjectRoot(ctx.cwd), args, ctx);
+			pi.sendMessage({ customType: "forgedock-review", content: result, display: true, details: { durableReview: true } });
+		} catch (error) {
+			ctx.ui.notify(`ForgeDock review blocked: ${error instanceof Error ? error.message : String(error)}`, "error");
+		}
+	};
+
 	const workOnHandler = async (args: string, ctx: ExtensionCommandContext) => {
 		const projectRoot = findProjectRoot(ctx.cwd);
 		try {
@@ -299,6 +359,7 @@ export default function forgedockPiExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("forge-orchestrate", { description: "Build and execute a durable Pi-backed ForgeDock DAG", handler: orchestrateHandler });
 	pi.registerCommand("forge-work-on", { description: "Run one issue through the durable Pi-backed ForgeDock engine", handler: workOnHandler });
+	pi.registerCommand("forge-review-pr", { description: "Run the verified multi-agent ForgeDock PR review panel", handler: reviewHandler });
 
 	pi.registerTool({
 		name: "forge_orchestrate", label: "Forge Orchestrate",
@@ -308,6 +369,16 @@ export default function forgedockPiExtension(pi: ExtensionAPI) {
 			const input = `${params.input}${params.includeInFlight ? " --include-in-flight" : ""}`;
 			const result = await orchestrate(forgeHome, findProjectRoot(ctx.cwd), input, { ...ctx, signal } as ExtensionContext, Boolean(params.auto));
 			return { content: [{ type: "text", text: result }], details: { input, durablePiEngine: true } };
+		},
+	});
+
+	pi.registerTool({
+		name: "forge_review_pr", label: "Forge Review PR",
+		description: "Run the required isolated ForgeDock reviewer panel and fail closed unless every reviewer posts a durable receipt.",
+		parameters: Type.Object({ pr: Type.Integer({ description: "GitHub pull request number" }) }),
+		async execute(_id, params, signal, _update, ctx) {
+			const result = await executeReview(forgeHome, findProjectRoot(ctx.cwd), String(params.pr), { ...ctx, signal } as ExtensionContext);
+			return { content: [{ type: "text", text: result }], details: { durableReview: true } };
 		},
 	});
 
@@ -326,12 +397,13 @@ export default function forgedockPiExtension(pi: ExtensionAPI) {
 		const [first, ...rest] = args.trim().split(/\s+/); const key = first?.replace(/^\//, "").replace(/^forge[-:]?/, "").replace(/-/g, ":");
 		if (key === "orchestrate") { await orchestrateHandler(rest.join(" "), ctx); return; }
 		if (key === "work:on") { await workOnHandler(rest.join(" "), ctx); return; }
+		if (key === "review:pr") { await reviewHandler(rest.join(" "), ctx); return; }
 		const command = commands.find((item) => item.id === key || item.name === first);
 		if (command) { sendPrompt(pi, ctx, `Read and execute ${command.absolutePath} for arguments: ${rest.join(" ") || "(none)"}. Follow the shared ForgeDock spec and use Pi-native runtime behavior.`); return; }
 		ctx.ui.notify("Use /forge-work-on <issue> or /forge-orchestrate <query>.", "info");
 	}});
 	for (const command of commands) {
-		if (byName.get(command.name) !== command || command.name === "forge-orchestrate" || command.name === "forge-work-on") continue;
+		if (byName.get(command.name) !== command || command.name === "forge-orchestrate" || command.name === "forge-work-on" || command.name === "forge-review-pr") continue;
 		pi.registerCommand(command.name, { description: command.description, handler: async (args, ctx) => sendPrompt(pi, ctx, `Read and execute ${command.absolutePath} for arguments: ${args || "(none)"}. Follow the shared ForgeDock spec.`) });
 	}
 
