@@ -3,6 +3,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   buildPiModelArgs,
   buildPiPhaseArgs,
@@ -11,6 +12,8 @@ import {
   parseWorktrees,
   worktreeForBranch,
 } from "../../pi/runtime/engine.mjs";
+
+const forgedockExtension = readFileSync(new URL("../../pi/extensions/forgedock.ts", import.meta.url), "utf8");
 
 test("Pi runtime resolves provider/model objects into an explicit model pattern", () => {
   assert.equal(modelPattern({ provider: "openai", id: "gpt-5.5" }), "openai/gpt-5.5");
@@ -24,6 +27,29 @@ test("Pi runtime passes the active model and thinking level to workers", () => {
     ["--model", "openai/gpt-5.5", "--thinking", "high"],
   );
   assert.deepEqual(buildPiModelArgs({ thinkingLevel: "unsupported" }), []);
+});
+
+test("Pi review launch failures are normalized before the durable blocked-panel gate", () => {
+  assert.match(forgedockExtension, /function failedProcessResult\(error: unknown\)/);
+  assert.match(
+    forgedockExtension,
+    /catch \(error\) \{\s*return \{ domain, result: failedProcessResult\(error\) \};\s*\}/,
+  );
+
+  const reviewResultsStart = forgedockExtension.indexOf("const reviewResults = await Promise.all");
+  const incompletePanelStart = forgedockExtension.indexOf("if (missing.length || reviewResults.some", reviewResultsStart);
+  const findingsStart = forgedockExtension.indexOf("const findings = comments.filter", incompletePanelStart);
+  assert.ok(reviewResultsStart >= 0);
+  assert.ok(incompletePanelStart > reviewResultsStart);
+  assert.ok(findingsStart > incompletePanelStart);
+
+  const incompletePanel = forgedockExtension.slice(incompletePanelStart, findingsStart);
+  assert.match(incompletePanel, /FORGE:GATE_FAILURE:TYPE=review-panel-integrity/);
+  assert.match(incompletePanel, /FORGE:REVIEW_BLOCKED/);
+  assert.match(incompletePanel, /needs-human/);
+  assert.match(incompletePanel, /review-degraded/);
+  assert.doesNotMatch(incompletePanel, /<!-- FORGE:GATE_PASS -->/);
+  assert.doesNotMatch(incompletePanel, /<!-- FORGE:REVIEW -->/);
 });
 
 test("Pi worker argv is isolated and loads the selected ForgeDock extension", () => {

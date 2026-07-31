@@ -105,6 +105,11 @@ function runProcess(command: string, args: string[], cwd: string, signal?: Abort
 	});
 }
 
+function failedProcessResult(error: unknown): { code: number; stdout: string; stderr: string; timedOut: boolean } {
+	const detail = error instanceof Error ? error.message : String(error);
+	return { code: 1, stdout: "", stderr: `reviewer launch failed: ${detail}`, timedOut: false };
+}
+
 function piExecutable(): string { return process.platform === "win32" ? "pi.cmd" : "pi"; }
 function ghJson(root: string, args: string[]): unknown {
 	const result = spawnSync("gh", args, { cwd: root, encoding: "utf8", windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
@@ -296,8 +301,12 @@ async function executeReview(forgeHome: string, projectRoot: string, args: strin
 	const runId = `pi-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 	const modelArgs = ctx.model?.provider && ctx.model?.id ? ["--model", `${ctx.model.provider}/${ctx.model.id}`] : [];
 	const reviewResults = await Promise.all(domains.map(async (domain) => {
-		const result = await runProcess(piExecutable(), ["--no-session", "--approve", "--no-extensions", ...modelArgs, "--name", `forge-review-${pr}-${domain}`, "-p", reviewAgentPrompt(forgeHome, projectRoot, repo, pr, domain, runId)], projectRoot, ctx.signal, 600_000);
-		return { domain, result };
+		try {
+			const result = await runProcess(piExecutable(), ["--no-session", "--approve", "--no-extensions", ...modelArgs, "--name", `forge-review-${pr}-${domain}`, "-p", reviewAgentPrompt(forgeHome, projectRoot, repo, pr, domain, runId)], projectRoot, ctx.signal, 600_000);
+			return { domain, result };
+		} catch (error) {
+			return { domain, result: failedProcessResult(error) };
+		}
 	}));
 	const comments = ghJson(projectRoot, ["api", `repos/${repo}/issues/${pr}/comments`]) as Array<{ body: string }>;
 	const missing = domains.filter((domain) => !comments.some((comment) => comment.body.includes(`<!-- FORGE:REVIEW-AGENT:${domain} -->`) && comment.body.includes(`<!-- FORGE:REVIEW-RUN:${runId} -->`)));
