@@ -30,6 +30,8 @@ import {
 import { join } from "node:path";
 import os from "node:os";
 
+import { createTestEnvironment, runTests, TEST_GLOBS } from "../../scripts/test.mjs";
+
 import {
   resolveSpecPath,
   listCommands,
@@ -1002,6 +1004,60 @@ describe("OpenCode runtime guard", () => {
       }),
       (error) => error.code === "FORGE_OPENCODE_CAPABILITY_ERROR",
     );
+  });
+});
+
+describe("test launcher environment", () => {
+  it("removes only the inherited Forge runtime marker", () => {
+    const environment = createTestEnvironment({
+      FORGE_RUNTIME: "opencode",
+      FORGE_TEST_SENTINEL: "preserved",
+    });
+
+    assert.equal(environment.FORGE_RUNTIME, undefined);
+    assert.equal(environment.FORGE_TEST_SENTINEL, "preserved");
+  });
+
+  it("keeps the complete Node test suite in its argv contract", () => {
+    assert.deepEqual(TEST_GLOBS, [
+      "bin/tests/**/*.test.mjs",
+      "bin/engine/**/*.test.mjs",
+      "packages/protocol/test/**/*.test.mjs",
+    ]);
+  });
+
+  it("uses a shell-free child and propagates its exit status", () => {
+    let invocation;
+    const status = runTests({
+      env: { FORGE_RUNTIME: "opencode", FORGE_TEST_SENTINEL: "preserved" },
+      spawnImpl: (command, args, options) => {
+        invocation = { command, args, options };
+        return { status: 7 };
+      },
+    });
+
+    assert.equal(status, 7);
+    assert.equal(invocation.command, process.execPath);
+    assert.deepEqual(invocation.args, ["--test", ...TEST_GLOBS]);
+    assert.equal(invocation.options.shell, false);
+    assert.equal(invocation.options.stdio, "inherit");
+    assert.equal(invocation.options.env.FORGE_RUNTIME, undefined);
+    assert.equal(invocation.options.env.FORGE_TEST_SENTINEL, "preserved");
+  });
+
+  it("returns a failure status when the child cannot be launched", () => {
+    const messages = [];
+    const originalError = console.error;
+    console.error = (message) => messages.push(message);
+    try {
+      assert.equal(
+        runTests({ spawnImpl: () => ({ error: new Error("spawn failed") }) }),
+        1,
+      );
+    } finally {
+      console.error = originalError;
+    }
+    assert.deepEqual(messages, ["Unable to launch test suite: spawn failed"]);
   });
 });
 
