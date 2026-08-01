@@ -484,7 +484,7 @@ FULL_REPO_SWEEP_COUNT=0
 # Same-file current-state brief forwarding (forge#1860). Populated by the core streaming
 # dispatch loop below (Step 4B) whenever a Layer 1/2/3 structural predecessor edge (see
 # EDGE_KIND/EDGE_FILES from phase-3-dependency.md Step 3C) resolves; consumed by Step 4A's
-# {GIST_CONTEXT} generation. EDGE_BRIEFED guards against re-appending the same predecessor's
+# {DISPATCH_CONTEXT} generation. EDGE_BRIEFED guards against re-appending the same predecessor's
 # brief on every completion cycle this loop re-runs before BLOCKED_NUM actually dispatches.
 declare -A SAME_FILE_BRIEF
 declare -A EDGE_BRIEFED
@@ -671,33 +671,10 @@ Use `${ISSUE_LANE[$NUM]}` and `${ISSUE_PR_BASE[$NUM]}` to populate `{LANE}` and 
 
 ### Step 4A: Dispatch ready issues
 
-### Step 4A.0: Probe Knowledge Gist capability once
+### Step 4A.0: Build repository-scoped dispatch context
 
-Probe the authenticated identity once for this orchestration run before any engine, Agent, or
-OpenCode worker is dispatched. A GitHub App installation token identifies as `Bot` and cannot use
-the Gists API; cache that fact rather than letting every worker rediscover it by attempting a
-write. An unavailable identity probe preserves existing behavior for PAT-authenticated runs.
-
-```bash
-if [ -z "${FORGE_GIST_CAPABLE+x}" ]; then
-  GIST_AUTH_TYPE=$(gh api user --jq '.type' 2>/dev/null || true)
-  if [ "$GIST_AUTH_TYPE" = "Bot" ]; then
-    FORGE_GIST_CAPABLE=false
-  else
-    FORGE_GIST_CAPABLE=true
-  fi
-  export FORGE_GIST_CAPABLE
-fi
-
-if [ "$FORGE_GIST_CAPABLE" = "true" ]; then
-  echo "Knowledge Gist capability available"
-else
-  echo "INFO: Knowledge Gist subsystem unavailable for this authentication; workers will skip it"
-fi
-```
-
-Carry `FORGE_GIST_CAPABLE` unchanged through every dispatch path. Do not probe it in individual
-workers dispatched by this run. Phase 6 reports a false value once at batch level.
+Workers receive bounded issue/comment annotations and exact `FORGE:PARENT_CONTEXT` references.
+The orchestrator does not probe, export, or forward external-artifact capability state.
 
 **Claims-board dispatch gate (MANDATORY, before every individual dispatch)** <!-- Added: forge#2844 -->: The coordination issue is the durable authority for file ownership. Do not use `EDGE_FILES`, `ISSUE_FILES`, or a remembered prior read as evidence that a claim is free. Immediately before dispatching each issue, re-read the full claims board and refuse that dispatch when the issue's declared file set intersects a live claim held by another issue. This applies equally to engine, Claude Agent, and OpenCode task dispatches, including newly-ready issues and wake reconstruction.
 
@@ -782,7 +759,7 @@ task(
   description="Work on {PROJECT_PREFIX}#{NUMBER}",
   subagent_type="general",
   background=true,
-  prompt="Use the same Phase 4A work-on template below. Before invoking it, run `export FORGE_GIST_CAPABLE={FORGE_GIST_CAPABLE}` so the cached orchestration capability is preserved. Invoke Skill(skill='work-on', args='{PROJECT_PREFIX}{NUMBER} --under-orchestration') and continue until a terminal workflow state."
+  prompt="Use the same Phase 4A work-on template below. Invoke Skill(skill='work-on', args='{PROJECT_PREFIX}{NUMBER} --under-orchestration') and continue until a terminal workflow state."
 )
 ```
 
@@ -945,7 +922,7 @@ fi
 **Dispatch each issue in `DISPATCH_NOW` via its own backgrounded `Bash` call (MANDATORY when `FORGEDOCK_AVAILABLE=true`) — never shell `&`/`wait`.** Immediately before each call, run `claim_conflicts_with_live_holder "{NUM}"`; if it returns success, defer that issue rather than dispatching it. Issue one `Bash(...)` call per remaining issue in `DISPATCH_NOW`, all in the same message, so they run concurrently within the headroom already computed above:
 
 ```
-Bash(command="FORGE_GIST_CAPABLE=${FORGE_GIST_CAPABLE} forgedock run-issue {NUM} --lane {PR_BASE}", run_in_background=true, description="Engine-drive issue #{NUM}")
+Bash(command="forgedock run-issue {NUM} --lane {PR_BASE}", run_in_background=true, description="Engine-drive issue #{NUM}")
 ```
 
 Capture the task id each call returns into `ENGINE_DISPATCH_MAP[{NUM}]` (declared alongside `AGENT_ISSUE_MAP` below — Step 4B's completion handler uses this map to identify which issue a backgrounded engine-mode `Bash` completion notification belongs to, the same role `AGENT_ISSUE_MAP` plays for `agent_completed` notifications):
@@ -990,8 +967,6 @@ Agent(
 **Repository**: {GH_REPO}
 **Repo path**: {REPO_PATH}
 
-**KNOWLEDGE GIST CAPABILITY**: This orchestration already probed it: `{FORGE_GIST_CAPABLE}`. Before invoking `/work-on`, run `export FORGE_GIST_CAPABLE={FORGE_GIST_CAPABLE}`. Do not re-probe or attempt Gist creation when it is `false`.
-
 **YOUR MISSION**: Invoke `/work-on` via the Skill tool and let it run to completion. `/work-on` is a self-contained routing loop that handles the ENTIRE pipeline: investigate → build (context → architect → implement → validate) → review (push → PR → /review-pr --auto-merge) → close (project board → trajectory log → worktree cleanup). Do NOT intervene, compensate, or manually close issues — `/work-on` handles everything including issue closure and label updates in its close phase.
 
 **CRITICAL — DO NOT STOP EARLY**: /work-on runs as a multi-phase routing loop. Each phase (investigate, build, review, close) returns an intermediate result — these are NOT completion signals. You are NOT done until the issue reaches a terminal state: `workflow:merged`, `workflow:invalid`, `needs-human`, or `workflow:awaiting-merge`. If /work-on returns after only one phase (e.g., investigation), you MUST invoke it again immediately — it will re-read GitHub state and continue to the next phase. Keep invoking /work-on until it reaches a terminal state. Never output 'done' or stop after an intermediate result.
@@ -1034,56 +1009,61 @@ If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to
 
 **LANE**: {LANE} (PR target: {PR_BASE})
 **Issue title**: {ISSUE_TITLE}
-{GIST_CONTEXT}
+{DISPATCH_CONTEXT}
 {SOURCE_PR_HINT_CONTEXT}
 "
 )
 ```
 
-**`{GIST_CONTEXT}` generation**: For each issue being dispatched, build the context block. **Prefer the deconflicted `FORGE:SYNTHESIS_BRIEF` (from Phase 2.5) when one exists** — it is a per-issue, already-reconciled brief that carries only the arbitration decisions and sibling investigation Gists relevant to *this* issue. Injecting it instead of the full aggregated milestone-index gist means the agent does not re-arbitrate the same contradictions (less token spend, less nondeterminism). Only when Phase 2.5 did not run (0/1 investigations — no brief exists) does this fall back to the raw parent-investigation + milestone-index gist behavior. <!-- Added: forge#1192 -->
+**`{DISPATCH_CONTEXT}` generation**: For each issue being dispatched, build a bounded repository-scoped context block. **Prefer the deconflicted `FORGE:SYNTHESIS_BRIEF` (from Phase 2.5) when one exists** — it is a per-issue, already-reconciled brief containing exact investigator comment references and decisions relevant to *this* issue. Only when Phase 2.5 did not run (0/1 investigations — no brief exists) does this fall back to the exact parent investigator comment reference.
 
 ```bash
-# Build GIST_CONTEXT for an issue
-GIST_CONTEXT=""
+# Build DISPATCH_CONTEXT for an issue from repository-scoped annotations only.
+DISPATCH_CONTEXT=""
 
 # Preferred path: a deconflicted per-issue synthesis brief from Phase 2.5.
-SYNTHESIS_BRIEF=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '[.[] | select(.body | contains("<!-- FORGE:SYNTHESIS_BRIEF -->"))] | last | .body // ""' 2>/dev/null)
+SYNTHESIS_BRIEF=$(gh api --paginate --slurp \
+  "repos/{GH_REPO}/issues/{NUMBER}/comments?per_page=100" 2>/dev/null \
+  | jq -r 'add | map(select((.body | contains("<!-- FORGE:SYNTHESIS_BRIEF -->")) and (.body | contains("<!-- FORGE:SYNTHESIS_BRIEF:COMPLETE -->")))) | sort_by(.id) | last | .body // ""' \
+  || true)
 
 if [ -n "$SYNTHESIS_BRIEF" ]; then
   # Phase 2.5 ran and reconciled competing recommendations for this issue.
-  # Inject the deconflicted brief INSTEAD of the raw milestone-index gist dump.
-  GIST_CONTEXT="
-**RECONCILED CONTEXT (orchestrate Phase 2.5 synthesis brief)**: Competing investigation recommendations affecting this issue have already been reconciled. Use this deconflicted brief as your primary cross-investigation context — do NOT independently re-arbitrate the underlying investigations.
+  DISPATCH_CONTEXT="
+**RECONCILED CONTEXT (orchestrate Phase 2.5 synthesis brief)**: Competing investigation recommendations affecting this issue have already been reconciled. Use this repository-scoped brief as the primary cross-investigation context — do NOT independently re-arbitrate the underlying investigations.
 ${SYNTHESIS_BRIEF}"
 else
-  # Fallback: Phase 2.5 did not run (0/1 investigations). Use the raw gist behavior.
-  # Markdown emphasis markers (**bold**, __bold__, *italic*) are stripped before matching,
-  # since sub-issue bodies commonly render the label as "**Parent**: #NNN" and the bare
-  # label alternation below would otherwise fail to match past the emphasis characters.
-  PARENT_INV=$(gh issue view {NUMBER} -R {GH_REPO} --json body --jq '.body' \
+  # Fallback: Phase 2.5 did not run (0/1 investigations). Resolve the parent issue and
+  # exact FORGE:PARENT_CONTEXT reference, then use the validated investigator map entry.
+  ISSUE_BODY=$(gh issue view {NUMBER} -R {GH_REPO} --json body --jq '.body' 2>/dev/null || echo "")
+  PARENT_CONTEXT_REF=$(printf '%s\n' "$ISSUE_BODY" \
+    | grep -E '^<!-- FORGE:PARENT_CONTEXT: repo=[^ ]+ issue=[0-9]+ comment=[0-9]+ marker=FORGE:INVESTIGATOR -->$' \
+    | head -1 || true)
+  PARENT_INV=$(printf '%s\n' "$ISSUE_BODY" \
     | sed -E 's/[*_]+//g' \
-    | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1)
-
-  if [ -n "$PARENT_INV" ] && [ -n "${INVESTIGATION_GISTS[$PARENT_INV]:-}" ]; then
-    GIST_CONTEXT="
-**CONTEXT FROM PRIOR INVESTIGATION**: Investigation #${PARENT_INV} produced Knowledge Gist(s) with findings relevant to this issue:
-$(echo "${INVESTIGATION_GISTS[$PARENT_INV]}" | while IFS= read -r url; do echo "- ${url}"; done)
-Fetch the Gist content during the context-gathering phase for implementation guidance."
+    | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1 || true)
+  if [ -z "$PARENT_INV" ] && [ -n "$PARENT_CONTEXT_REF" ]; then
+    PARENT_INV=$(printf '%s\n' "$PARENT_CONTEXT_REF" | sed -n 's/.* issue=\([0-9][0-9]*\) comment=.*/\1/p')
   fi
 
-  # Include milestone index URL if available (from Step 2C.5)
-  if [ -n "$MILESTONE_INDEX_URL" ]; then
-    GIST_CONTEXT="${GIST_CONTEXT}
-
-**MILESTONE KNOWLEDGE INDEX**: All investigation findings for this milestone are aggregated in a single index Gist:
-- ${MILESTONE_INDEX_URL}
-The context-gathering phase can fetch this index to discover all investigation Gists for the milestone."
+  if [ -n "$PARENT_INV" ]; then
+    if [ -n "${INVESTIGATION_CONTEXT[$PARENT_INV]:-}" ]; then
+      DISPATCH_CONTEXT="
+**CONTEXT FROM REPOSITORY INVESTIGATION**: Use the exact completed `FORGE:INVESTIGATOR` resource below. The numeric comment identity is authoritative; fetch that single comment during context gathering for full details. Do not search external memory.
+${INVESTIGATION_CONTEXT[$PARENT_INV]}"
+    elif [ -n "$PARENT_CONTEXT_REF" ]; then
+      DISPATCH_CONTEXT="
+**CONTEXT FROM REPOSITORY INVESTIGATION**: The parent handoff is an exact `FORGE:PARENT_CONTEXT` reference. The numeric comment identity is authoritative; validate and fetch it during context gathering. Do not search external memory.
+${PARENT_CONTEXT_REF}"
+    else
+      DISPATCH_CONTEXT="
+**CONTEXT FROM REPOSITORY INVESTIGATION**: Investigation #${PARENT_INV} has no validated completed `FORGE:INVESTIGATOR` resource available in this run. This is an explicit unavailable-context result; do not substitute external memory."
+    fi
   fi
 fi
 ```
 
-If `GIST_CONTEXT` is empty (no synthesis brief, no parent investigation, and no milestone index found), the variable resolves to a blank line in the template — no impact on the agent prompt. <!-- Updated: forge#341, forge#1192 -->
+If `DISPATCH_CONTEXT` is empty (no synthesis brief and no parent repository investigation reference), the variable resolves to a blank line in the template — no impact on the agent prompt.
 
 **`{SOURCE_PR_HINT_CONTEXT}` generation** <!-- Added: forge#2351 -->: For each issue being dispatched, thread the source-PR `likely-moot` triage hint computed by `phase-1-resolve.md`'s "Source-PR Triage Hint" step (`ISSUE_LIKELY_MOOT[$NUM]`, `ISSUE_SOURCE_PR[$NUM]`, `ISSUE_SOURCE_PR_STATE[$NUM]` — Phase 1 output, not re-derived here) into the dispatched agent's initial context, framed explicitly as a starting point to verify, never as a conclusion:
 
@@ -1097,14 +1077,14 @@ if [ "${ISSUE_LIKELY_MOOT[{NUMBER}]:-unknown}" = "yes" ]; then
 fi
 ```
 
-If `ISSUE_LIKELY_MOOT[{NUMBER}]` is `unknown` or absent (no `**Source**: PR #{N}` citation found, source PR still open, source PR merged, or the lookup failed), `SOURCE_PR_HINT_CONTEXT` stays empty and resolves to a blank line in the template — no impact on the agent prompt, identical to the `GIST_CONTEXT` empty-case behavior above.
+If `ISSUE_LIKELY_MOOT[{NUMBER}]` is `unknown` or absent (no `**Source**: PR #{N}` citation found, source PR still open, source PR merged, or the lookup failed), `SOURCE_PR_HINT_CONTEXT` stays empty and resolves to a blank line in the template — no impact on the agent prompt, identical to the `DISPATCH_CONTEXT` empty-case behavior above.
 
 **Claims board context injection** <!-- Added: forge#1736 -->: When a coordination issue exists for this batch (`FORGE_COORD_ISSUE` is set), append the claims board URL and the active-claims check instruction to the agent's context. This enables each `/work-on` agent to post its `FORGE:CLAIM` on build start.
 
 ```bash
 # Inject coordination issue URL if claims board was created in Step 3D.1
 if [ -n "${FORGE_COORD_ISSUE:-}" ]; then
-  GIST_CONTEXT="${GIST_CONTEXT}
+  DISPATCH_CONTEXT="${DISPATCH_CONTEXT}
 
 **ORCHESTRATION CLAIMS BOARD**: This agent is running under an orchestration batch.
 Claims board issue URL: ${FORGE_COORD_ISSUE}
@@ -1123,12 +1103,12 @@ Set FORGE_COORD_ISSUE=${FORGE_COORD_ISSUE} in your environment so /work-on phase
 fi
 ```
 
-**Hot-copy CONTRACT context** (extends `{GIST_CONTEXT}` for milestone-lane issues where the parent issue already carries a `FORGE:CONTRACT` annotation): <!-- Added: forge#1277 -->
+**Hot-copy CONTRACT context** (extends `{DISPATCH_CONTEXT}` for milestone-lane issues where the parent issue already carries a `FORGE:CONTRACT` annotation): <!-- Added: forge#1277 -->
 
 When a DAG node issue was spawned from a decomposition (parent issue has `workflow:decomposed` label and the child issue body references `**Parent**: #NNN`), the parent issue may already have a `FORGE:CONTRACT` annotation that was posted before decomposition. Inject a scoped excerpt into the child's prompt so the child does not re-fetch it.
 
 ```bash
-# Hot-copy: inject parent CONTRACT annotation excerpt into GIST_CONTEXT (milestone lane only)
+# Hot-copy: inject parent CONTRACT annotation excerpt into DISPATCH_CONTEXT (milestone lane only)
 PARENT_NUM=$(gh issue view {NUMBER} -R {GH_REPO} --json body --jq '.body' \
   | grep -oP '(?i)\*\*Parent\*\*[: ]*#\K\d+' | head -1)
 
@@ -1138,7 +1118,7 @@ if [ -n "$PARENT_NUM" ]; then
     | head -40)  # Scope: first 40 lines — Proposed Approach + Deliverables table only
 
   if [ -n "$PARENT_CONTRACT" ]; then
-    GIST_CONTEXT="${GIST_CONTEXT}
+    DISPATCH_CONTEXT="${DISPATCH_CONTEXT}
 
 **HOT COPY — PARENT FORGE:CONTRACT** (from parent issue #${PARENT_NUM}; do not re-fetch — durable record is on that issue):
 ${PARENT_CONTRACT}"
@@ -1146,21 +1126,21 @@ ${PARENT_CONTRACT}"
 fi
 ```
 
-If the issue has no parent reference, or the parent has no `FORGE:CONTRACT` annotation, this block produces no output and `GIST_CONTEXT` is unchanged. The hot-copy is an optimization — the durable annotation on the parent issue remains the authoritative record for compaction recovery.
+If the issue has no parent reference, or the parent has no `FORGE:CONTRACT` annotation, this block produces no output and `DISPATCH_CONTEXT` is unchanged. The hot-copy is an optimization — the durable annotation on the parent issue remains the authoritative record for compaction recovery.
 
 **Same-file current-state brief injection** <!-- Added: forge#1860 --> — a separate, parallel mechanism to the `FORGE:SYNTHESIS_BRIEF` handling above: it does not replace or interact with Phase 2.5 investigation→implementation forwarding. When this issue was dispatched because a Layer 1/2/3 structural predecessor edge just resolved, Step 4B's core streaming dispatch loop has already populated `SAME_FILE_BRIEF[{NUMBER}]` with a short excerpt of what each such predecessor changed in the shared file/directory/module. Append it here:
 
 ```bash
 # Append same-file/directory/shared-module briefs from resolved structural-edge predecessors.
 if [ -n "${SAME_FILE_BRIEF[{NUMBER}]:-}" ]; then
-  GIST_CONTEXT="${GIST_CONTEXT}
+  DISPATCH_CONTEXT="${DISPATCH_CONTEXT}
 
 **SAME-FILE STATE BRIEF (structural DAG predecessor)**: One or more predecessors in this batch were serialized against you because they touch the same file/directory/module (Step 3C Layer 1/2/3 — not an explicit \`Depends on\`). Here is what they just changed — use this as your starting understanding of the file's current state; do not re-investigate it cold:
 ${SAME_FILE_BRIEF[{NUMBER}]}"
 fi
 ```
 
-This block is a no-op — `GIST_CONTEXT` resolves exactly as before — whenever `SAME_FILE_BRIEF[{NUMBER}]` is unset: the issue had no predecessors, its only predecessors were explicit-dependency/DATABASE-chain/Layer 4/Layer 5 edges (none of which populate `SAME_FILE_BRIEF`), or the orchestrator session was compacted and restarted between Phase 3 and this dispatch (in which case `EDGE_KIND`/`EDGE_FILES`/`SAME_FILE_BRIEF` are in-memory-only and are not reconstructed by the wake/compaction recovery in `phase-3-dependency.md` — the dispatched agent simply proceeds without the brief, exactly as it would have before this mechanism existed).
+This block is a no-op — `DISPATCH_CONTEXT` resolves exactly as before — whenever `SAME_FILE_BRIEF[{NUMBER}]` is unset: the issue had no predecessors, its only predecessors were explicit-dependency/DATABASE-chain/Layer 4/Layer 5 edges (none of which populate `SAME_FILE_BRIEF`), or the orchestrator session was compacted and restarted between Phase 3 and this dispatch (in which case `EDGE_KIND`/`EDGE_FILES`/`SAME_FILE_BRIEF` are in-memory-only and are not reconstructed by the wake/compaction recovery in `phase-3-dependency.md` — the dispatched agent simply proceeds without the brief, exactly as it would have before this mechanism existed).
 
 **Capture agent IDs after the batch spawn (MANDATORY)**: Each `Agent(...)` call returns an agent ID. Store each returned ID in `AGENT_ISSUE_MAP` keyed by issue number. This map is the only way to resume a stalled agent by ID in Steps 4B and 4B.5:
 
@@ -3183,31 +3163,34 @@ if [ ${#SWEEP_EXECUTE[@]} -gt 0 ]; then
 
     FINDING_TITLE=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json title --jq '.title' 2>/dev/null || echo "")
 
-    # Build GIST_CONTEXT for sweep finding — same as Step 4A's *fallback* (raw-gist) path.
-    # The Phase 2.5 FORGE:SYNTHESIS_BRIEF preference is intentionally NOT applied here:
-    # sweep findings are freshly-created review-finding issues that never received a
-    # synthesis brief (Phase 2.5 runs only over the original batch's investigations), so
-    # there is nothing to prefer. Keep this block in sync with 4A's fallback branch only.
-    GIST_CONTEXT=""
-    # Markdown emphasis markers (**bold**, __bold__, *italic*) are stripped before matching —
-    # kept in sync with 4A's fallback branch above.
-    PARENT_INV=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json body --jq '.body' \
+    # Build DISPATCH_CONTEXT for a sweep finding from the same repository-scoped fallback as Step 4A.
+    # Sweep findings intentionally have no synthesis brief, so use only the exact parent
+    # investigator comment reference and keep this block behaviorally aligned with 4A.
+    DISPATCH_CONTEXT=""
+    FINDING_BODY=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json body --jq '.body' 2>/dev/null || echo "")
+    PARENT_CONTEXT_REF=$(printf '%s\n' "$FINDING_BODY" \
+      | grep -E '^<!-- FORGE:PARENT_CONTEXT: repo=[^ ]+ issue=[0-9]+ comment=[0-9]+ marker=FORGE:INVESTIGATOR -->$' \
+      | head -1 || true)
+    PARENT_INV=$(printf '%s\n' "$FINDING_BODY" \
       | sed -E 's/[*_]+//g' \
-      | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1)
-
-    if [ -n "$PARENT_INV" ] && [ -n "${INVESTIGATION_GISTS[$PARENT_INV]:-}" ]; then
-      GIST_CONTEXT="
-**CONTEXT FROM PRIOR INVESTIGATION**: Investigation #${PARENT_INV} produced Knowledge Gist(s) with findings relevant to this issue:
-$(echo "${INVESTIGATION_GISTS[$PARENT_INV]}" | while IFS= read -r url; do echo "- ${url}"; done)
-Fetch the Gist content during the context-gathering phase for implementation guidance."
+      | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1 || true)
+    if [ -z "$PARENT_INV" ] && [ -n "$PARENT_CONTEXT_REF" ]; then
+      PARENT_INV=$(printf '%s\n' "$PARENT_CONTEXT_REF" | sed -n 's/.* issue=\([0-9][0-9]*\) comment=.*/\1/p')
     fi
 
-    if [ -n "$MILESTONE_INDEX_URL" ]; then
-      GIST_CONTEXT="${GIST_CONTEXT}
-
-**MILESTONE KNOWLEDGE INDEX**: All investigation findings for this milestone are aggregated in a single index Gist:
-- ${MILESTONE_INDEX_URL}
-The context-gathering phase can fetch this index to discover all investigation Gists for the milestone."
+    if [ -n "$PARENT_INV" ]; then
+      if [ -n "${INVESTIGATION_CONTEXT[$PARENT_INV]:-}" ]; then
+        DISPATCH_CONTEXT="
+**CONTEXT FROM REPOSITORY INVESTIGATION**: Use the exact completed `FORGE:INVESTIGATOR` resource below. The numeric comment identity is authoritative; fetch that single comment during context gathering for full details. Do not search external memory.
+${INVESTIGATION_CONTEXT[$PARENT_INV]}"
+      elif [ -n "$PARENT_CONTEXT_REF" ]; then
+        DISPATCH_CONTEXT="
+**CONTEXT FROM REPOSITORY INVESTIGATION**: The parent handoff is an exact `FORGE:PARENT_CONTEXT` reference. The numeric comment identity is authoritative; validate and fetch it during context gathering. Do not search external memory.
+${PARENT_CONTEXT_REF}"
+      else
+        DISPATCH_CONTEXT="
+**CONTEXT FROM REPOSITORY INVESTIGATION**: Investigation #${PARENT_INV} has no validated completed `FORGE:INVESTIGATOR` resource available in this run. This is an explicit unavailable-context result; do not substitute external memory."
+      fi
     fi
 
     # Use the full Step 4A template verbatim — copied here so sweep agents receive
@@ -3222,8 +3205,6 @@ The context-gathering phase can fetch this index to discover all investigation G
 **Project**: {PROJECT_NAME}
 **Repository**: {GH_REPO}
 **Repo path**: {REPO_PATH}
-
-**KNOWLEDGE GIST CAPABILITY**: This orchestration already probed it: `${FORGE_GIST_CAPABLE}`. Before invoking `/work-on`, run `export FORGE_GIST_CAPABLE=${FORGE_GIST_CAPABLE}`. Do not re-probe or attempt Gist creation when it is `false`.
 
 **YOUR MISSION**: Invoke \`/work-on\` via the Skill tool and let it run to completion. \`/work-on\` is a self-contained routing loop that handles the ENTIRE pipeline: investigate → build (context → architect → implement → validate) → review (push → PR → /review-pr --auto-merge) → close (project board → trajectory log → worktree cleanup). Do NOT intervene, compensate, or manually close issues — \`/work-on\` handles everything including issue closure and label updates in its close phase.
 
@@ -3261,7 +3242,7 @@ If the label is NOT terminal (e.g., \`workflow:investigating\`, \`workflow:ready
 
 **LANE**: ${SWEEP_LANE[$FINDING_NUM]} (PR target: ${SWEEP_PR_BASE[$FINDING_NUM]})
 **Issue title**: ${FINDING_TITLE}
-${GIST_CONTEXT}
+${DISPATCH_CONTEXT}
 "
     )
   done
