@@ -69,23 +69,82 @@ For every completed Wave 0 investigation, resolve the exact completed `FORGE:INV
 ```bash
 # Build a map: investigation_number → exact completed investigator comment + bounded summary.
 # The map is keyed by the complete investigation set, not by whether an external artifact exists.
+# Every consumer uses the same finite newest-first retrieval contract. The page, byte, and
+# timeout limits bound both the API work and the response retained before validation.
 declare -A INVESTIGATION_CONTEXT
+MAX_COMMENT_PAGES=5
+MAX_COMMENT_PAGE_BYTES=1048576
+MAX_COMMENT_TOTAL_BYTES=5242880
+COMMENT_FETCH_TIMEOUT_SECONDS=15
+COMMENT_PAGE_SIZE=100
 for INV_NUM in {investigation_numbers}; do
   EXPECTED_ISSUE_URL="https://api.github.com/repos/{GH_REPO}/issues/${INV_NUM}"
-  INVESTIGATOR_JSON=$(gh api --paginate --slurp \
-    "repos/{GH_REPO}/issues/${INV_NUM}/comments?per_page=100" 2>/dev/null \
-    | jq -c --arg expected_issue_url "$EXPECTED_ISSUE_URL" \
-      'add | map(select(.issue_url == $expected_issue_url and (.body | contains("<!-- FORGE:INVESTIGATOR -->")) and (.body | contains("<!-- INVESTIGATION:COMPLETE -->")))) | sort_by(.id) | last // empty' \
-    || true)
+  INVESTIGATOR_JSON=""
+  COMMENT_BYTES_USED=0
+  COMMENT_PAGE=1
+
+  while [ "$COMMENT_PAGE" -le "$MAX_COMMENT_PAGES" ]; do
+    if ! PAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/forgedock-comments.XXXXXX"); then
+      echo "Investigation #${INV_NUM}: unavailable — could not create bounded response file"
+      break
+    fi
+
+    # Capture at most one byte beyond the page budget. An oversized response is rejected
+    # before jq sees it, while a timeout/API error is surfaced instead of swallowed.
+    if timeout "$COMMENT_FETCH_TIMEOUT_SECONDS" gh api \
+      "repos/{GH_REPO}/issues/${INV_NUM}/comments?sort=created&direction=desc&per_page=${COMMENT_PAGE_SIZE}&page=${COMMENT_PAGE}" 2>/dev/null \
+      | head -c "$((MAX_COMMENT_PAGE_BYTES + 1))" > "$PAGE_FILE"; then
+      PAGE_FETCH_STATUS=("${PIPESTATUS[@]}")
+    else
+      PAGE_FETCH_STATUS=("${PIPESTATUS[@]}")
+    fi
+    PAGE_BYTES=$(wc -c < "$PAGE_FILE" | tr -d '[:space:]')
+
+    if [ "$PAGE_BYTES" -gt "$MAX_COMMENT_PAGE_BYTES" ] || \
+       [ $((COMMENT_BYTES_USED + PAGE_BYTES)) -gt "$MAX_COMMENT_TOTAL_BYTES" ]; then
+      echo "Investigation #${INV_NUM}: unavailable — comment response byte budget exceeded"
+      rm -f "$PAGE_FILE"
+      break
+    fi
+    if [ "${PAGE_FETCH_STATUS[0]:-1}" -ne 0 ] || [ "${PAGE_FETCH_STATUS[1]:-1}" -ne 0 ]; then
+      echo "Investigation #${INV_NUM}: unavailable — bounded comment request failed or timed out"
+      rm -f "$PAGE_FILE"
+      break
+    fi
+    COMMENT_BYTES_USED=$((COMMENT_BYTES_USED + PAGE_BYTES))
+
+    if ! PAGE_COUNT=$(jq -r 'if type == "array" then length else error("comment response is not an array") end' "$PAGE_FILE" 2>/dev/null); then
+      echo "Investigation #${INV_NUM}: unavailable — bounded comment response was malformed"
+      rm -f "$PAGE_FILE"
+      break
+    fi
+    if ! INVESTIGATOR_JSON=$(jq -c --arg expected_issue_url "$EXPECTED_ISSUE_URL" \
+      'map(select(.issue_url == $expected_issue_url and ((.body // "") | contains("<!-- FORGE:INVESTIGATOR -->")) and ((.body // "") | contains("<!-- INVESTIGATION:COMPLETE -->")))) | sort_by(.id) | last // empty' \
+      "$PAGE_FILE" 2>/dev/null); then
+      echo "Investigation #${INV_NUM}: unavailable — could not validate bounded comment response"
+      rm -f "$PAGE_FILE"
+      break
+    fi
+    rm -f "$PAGE_FILE"
+
+    [ -n "$INVESTIGATOR_JSON" ] && break
+    [ "$PAGE_COUNT" -lt "$COMMENT_PAGE_SIZE" ] && break
+    COMMENT_PAGE=$((COMMENT_PAGE + 1))
+  done
 
   if [ -z "$INVESTIGATOR_JSON" ] || [ "$INVESTIGATOR_JSON" = "null" ]; then
-    INVESTIGATION_CONTEXT[$INV_NUM]="Investigation #${INV_NUM}: unavailable — no validated completed FORGE:INVESTIGATOR comment resource was found. Do not substitute external memory; report this missing context explicitly."
-    echo "Investigation #${INV_NUM}: completed investigator context unavailable"
+    INVESTIGATION_CONTEXT[$INV_NUM]="Investigation #${INV_NUM}: unavailable — the finite newest-first comment window did not establish a validated completed FORGE:INVESTIGATOR resource. Do not substitute external memory; report this missing context explicitly."
+    echo "Investigation #${INV_NUM}: completed investigator context unavailable (finite retrieval window)"
     continue
   fi
 
   COMMENT_ID=$(printf '%s' "$INVESTIGATOR_JSON" | jq -r '.id // empty')
   COMMENT_URL=$(printf '%s' "$INVESTIGATOR_JSON" | jq -r '.html_url // empty')
+  if [ -z "$COMMENT_ID" ] || [ -z "$COMMENT_URL" ]; then
+    INVESTIGATION_CONTEXT[$INV_NUM]="Investigation #${INV_NUM}: unavailable — the bounded comment did not contain a valid repository comment identity. Do not substitute external memory; report this missing context explicitly."
+    echo "Investigation #${INV_NUM}: unavailable — invalid comment identity"
+    continue
+  fi
   RECOMMENDATION=$(printf '%s' "$INVESTIGATOR_JSON" | jq -r '.body' \
     | awk '/^### Recommendation/{p=1; next} /^### /{p=0} p' \
     | sed -E 's/<!--[^>]*-->//g' \

@@ -1048,10 +1048,67 @@ If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to
 GIST_CONTEXT=""
 
 # Preferred path: a deconflicted per-issue synthesis brief from Phase 2.5.
-SYNTHESIS_BRIEF=$(gh api --paginate --slurp \
-  "repos/{GH_REPO}/issues/{NUMBER}/comments?per_page=100" 2>/dev/null \
-  | jq -r 'add | map(select((.body | contains("<!-- FORGE:SYNTHESIS_BRIEF -->")) and (.body | contains("<!-- FORGE:SYNTHESIS_BRIEF:COMPLETE -->")))) | sort_by(.id) | last | .body // ""' \
-  || true)
+# Use the same finite newest-first retrieval contract as triage and synthesis; never slurp
+# the complete comment history into one jq array.
+SYNTHESIS_BRIEF=""
+SYNTHESIS_RETRIEVAL_NOTE=""
+MAX_COMMENT_PAGES=5
+MAX_COMMENT_PAGE_BYTES=1048576
+MAX_COMMENT_TOTAL_BYTES=5242880
+COMMENT_FETCH_TIMEOUT_SECONDS=15
+COMMENT_PAGE_SIZE=100
+COMMENT_BYTES_USED=0
+COMMENT_PAGE=1
+while [ "$COMMENT_PAGE" -le "$MAX_COMMENT_PAGES" ]; do
+  if ! PAGE_FILE=$(mktemp "${TMPDIR:-/tmp}/forgedock-comments.XXXXXX"); then
+    SYNTHESIS_RETRIEVAL_NOTE="Synthesis brief unavailable — could not create bounded response file; fail closed and do not substitute external memory."
+    break
+  fi
+  if timeout "$COMMENT_FETCH_TIMEOUT_SECONDS" gh api \
+    "repos/{GH_REPO}/issues/{NUMBER}/comments?sort=created&direction=desc&per_page=${COMMENT_PAGE_SIZE}&page=${COMMENT_PAGE}" 2>/dev/null \
+    | head -c "$((MAX_COMMENT_PAGE_BYTES + 1))" > "$PAGE_FILE"; then
+    PAGE_FETCH_STATUS=("${PIPESTATUS[@]}")
+  else
+    PAGE_FETCH_STATUS=("${PIPESTATUS[@]}")
+  fi
+  PAGE_BYTES=$(wc -c < "$PAGE_FILE" | tr -d '[:space:]')
+  if [ "$PAGE_BYTES" -gt "$MAX_COMMENT_PAGE_BYTES" ] || \
+     [ $((COMMENT_BYTES_USED + PAGE_BYTES)) -gt "$MAX_COMMENT_TOTAL_BYTES" ]; then
+    SYNTHESIS_RETRIEVAL_NOTE="Synthesis brief unavailable — the finite comment response byte budget was exceeded; fail closed and do not substitute external memory."
+    rm -f "$PAGE_FILE"
+    break
+  fi
+  if [ "${PAGE_FETCH_STATUS[0]:-1}" -ne 0 ] || [ "${PAGE_FETCH_STATUS[1]:-1}" -ne 0 ]; then
+    SYNTHESIS_RETRIEVAL_NOTE="Synthesis brief unavailable — the bounded comment request failed or timed out; fail closed and do not substitute external memory."
+    rm -f "$PAGE_FILE"
+    break
+  fi
+  COMMENT_BYTES_USED=$((COMMENT_BYTES_USED + PAGE_BYTES))
+  if ! PAGE_COUNT=$(jq -r 'if type == "array" then length else error("comment response is not an array") end' "$PAGE_FILE" 2>/dev/null); then
+    SYNTHESIS_RETRIEVAL_NOTE="Synthesis brief unavailable — the bounded comment response was malformed; fail closed and do not substitute external memory."
+    rm -f "$PAGE_FILE"
+    break
+  fi
+  if ! SYNTHESIS_COMMENT_JSON=$(jq -c \
+    'map(select(((.body // "") | contains("<!-- FORGE:SYNTHESIS_BRIEF -->")) and ((.body // "") | contains("<!-- FORGE:SYNTHESIS_BRIEF:COMPLETE -->")))) | sort_by(.id) | last // empty' \
+    "$PAGE_FILE" 2>/dev/null); then
+    SYNTHESIS_RETRIEVAL_NOTE="Synthesis brief unavailable — the bounded comment response could not be validated; fail closed and do not substitute external memory."
+    rm -f "$PAGE_FILE"
+    break
+  fi
+  if [ -n "$SYNTHESIS_COMMENT_JSON" ]; then
+    if ! SYNTHESIS_BRIEF=$(printf '%s' "$SYNTHESIS_COMMENT_JSON" | jq -r '.body // empty' 2>/dev/null); then
+      SYNTHESIS_RETRIEVAL_NOTE="Synthesis brief unavailable — the completed brief body could not be parsed; fail closed and do not substitute external memory."
+      SYNTHESIS_BRIEF=""
+    fi
+  fi
+  rm -f "$PAGE_FILE"
+  [ -n "$SYNTHESIS_BRIEF" ] && break
+  [ "$PAGE_COUNT" -lt "$COMMENT_PAGE_SIZE" ] && break
+  COMMENT_PAGE=$((COMMENT_PAGE + 1))
+done
+[ -n "$SYNTHESIS_BRIEF" ] || [ -n "$SYNTHESIS_RETRIEVAL_NOTE" ] || \
+  SYNTHESIS_RETRIEVAL_NOTE="Synthesis brief unavailable — no validated completed brief was found within the finite newest-first comment window; fail closed and do not substitute external memory."
 
 if [ -n "$SYNTHESIS_BRIEF" ]; then
   # Phase 2.5 ran and reconciled competing recommendations for this issue.
@@ -1086,6 +1143,13 @@ ${PARENT_CONTEXT_REF}"
 **CONTEXT FROM REPOSITORY INVESTIGATION**: Investigation #${PARENT_INV} has no validated completed `FORGE:INVESTIGATOR` resource available in this run. This is an explicit unavailable-context result; do not substitute external memory."
     fi
   fi
+fi
+
+# A failed or exhausted bounded lookup remains visible even when the parent-investigator
+# fallback is available; workers must not mistake unavailable synthesis for a complete brief.
+if [ -n "$SYNTHESIS_RETRIEVAL_NOTE" ]; then
+  GIST_CONTEXT="${GIST_CONTEXT}
+**RECONCILED CONTEXT UNAVAILABLE**: ${SYNTHESIS_RETRIEVAL_NOTE}"
 fi
 ```
 
