@@ -641,6 +641,7 @@ describe("persistHome (forge#1943)", () => {
     writeFileSync(join(forgeHome, "bin", "hooks", "session-start.mjs"), "// hook\n", "utf-8");
     writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n", "utf-8");
     writeFileSync(join(forgeHome, "scripts", "classify-lane.sh"), "#!/bin/sh\n", "utf-8");
+    writeFileSync(join(forgeHome, "AGENTS.md"), "# ForgeDock agent guidance\n", "utf-8");
     writeFileSync(join(forgeHome, "package.json"), JSON.stringify({ name: "forgedock", version }), "utf-8");
     return forgeHome;
   }
@@ -659,6 +660,7 @@ describe("persistHome (forge#1943)", () => {
     assert.equal(readFileSync(join(home, ".forge", "commands", "one.md"), "utf-8"), "# /one\n");
     assert.equal(readFileSync(join(home, ".forge", "bin", "hooks", "session-start.mjs"), "utf-8"), "// hook\n");
     assert.equal(readFileSync(join(home, ".forge", "scripts", "classify-lane.sh"), "utf-8"), "#!/bin/sh\n");
+    assert.equal(readFileSync(join(home, ".forge", "AGENTS.md"), "utf-8"), readFileSync(join(forgeHome, "AGENTS.md"), "utf-8"));
     assert.equal(readFileSync(join(home, ".forge", "version"), "utf-8").trim(), "1.2.3");
   });
 
@@ -684,7 +686,9 @@ describe("persistHome (forge#1943)", () => {
     assert.equal(first.migrated, true);
 
     const commandFile = join(home, ".forge", "commands", "one.md");
+    const guidanceFile = join(home, ".forge", "AGENTS.md");
     const mtimeBefore = statSync(commandFile).mtimeMs;
+    const guidanceMtimeBefore = statSync(guidanceFile).mtimeMs;
 
     // Re-run with byte-identical source content.
     const second = await persistHome({ forgeHome, home });
@@ -692,7 +696,9 @@ describe("persistHome (forge#1943)", () => {
     assert.equal(second.migrated, false, "no file content changed, so nothing should have been rewritten");
 
     const mtimeAfter = statSync(commandFile).mtimeMs;
+    const guidanceMtimeAfter = statSync(guidanceFile).mtimeMs;
     assert.equal(mtimeAfter, mtimeBefore, "unchanged file must not be rewritten (content-compare before overwrite)");
+    assert.equal(guidanceMtimeAfter, guidanceMtimeBefore, "unchanged AGENTS.md must not be rewritten");
   });
 
   it("re-run after a real content change re-copies only the changed file and reports migrated: true", async () => {
@@ -701,10 +707,12 @@ describe("persistHome (forge#1943)", () => {
 
     await persistHome({ forgeHome, home });
     writeFileSync(join(forgeHome, "commands", "one.md"), "# /one (edited)\n", "utf-8");
+    writeFileSync(join(forgeHome, "AGENTS.md"), "# ForgeDock agent guidance (edited)\n", "utf-8");
 
     const second = await persistHome({ forgeHome, home });
     assert.equal(second.migrated, true);
     assert.equal(readFileSync(join(home, ".forge", "commands", "one.md"), "utf-8"), "# /one (edited)\n");
+    assert.equal(readFileSync(join(home, ".forge", "AGENTS.md"), "utf-8"), "# ForgeDock agent guidance (edited)\n");
   });
 
   it("degrades gracefully when a source subdirectory (templates/) does not exist", async () => {
