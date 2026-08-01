@@ -1061,15 +1061,41 @@ ${SYNTHESIS_BRIEF}"
 else
   # Fallback: Phase 2.5 did not run (0/1 investigations). Resolve the parent issue and
   # exact FORGE:PARENT_CONTEXT reference, then use the validated investigator map entry.
-  ISSUE_BODY=$(gh issue view {NUMBER} -R {GH_REPO} --json body --jq '.body' 2>/dev/null || echo "")
-  PARENT_CONTEXT_REF=$(printf '%s\n' "$ISSUE_BODY" \
-    | grep -E '^<!-- FORGE:PARENT_CONTEXT: repo=[^ ]+ issue=[0-9]+ comment=[0-9]+ marker=FORGE:INVESTIGATOR -->$' \
-    | head -1 || true)
-  PARENT_INV=$(printf '%s\n' "$ISSUE_BODY" \
-    | sed -E 's/[*_]+//g' \
-    | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1 || true)
+  ISSUE_BODY=""
+  PARENT_CONTEXT_REF=""
+  unset PARENT_INV
+  # WIRE:PROVEN — the focused runtime-path test asserts the explicit GitHub read-status split.
+  if ISSUE_BODY=$(gh issue view {NUMBER} -R {GH_REPO} --json body --jq '.body' 2>/dev/null); then
+    ISSUE_BODY_READ_STATUS=0
+  else
+    ISSUE_BODY_READ_STATUS=$?
+    echo "WARNING: unable to read issue #{NUMBER}; parent investigation context is unavailable" >&2
+  fi
+  # WIRE:PROVEN — only a successful body read reaches parent parsing; failures emit an explicit warning.
+  if [ "$ISSUE_BODY_READ_STATUS" -eq 0 ]; then
+    PARENT_CONTEXT_REF=$(printf '%s\n' "$ISSUE_BODY" \
+      | grep -E '^<!-- FORGE:PARENT_CONTEXT: repo=[^ ]+ issue=[0-9]+ comment=[0-9]+ marker=FORGE:INVESTIGATOR -->$' \
+      | head -1 || true)
+    # WIRE:PROVEN — the portable pattern and parser-status branches are asserted by the focused test.
+    if PARENT_MATCHES=$(printf '%s\n' "$ISSUE_BODY" \
+      | sed -E 's/[*_]+//g' \
+      | grep -ioE 'parent[[:space:]:]*#[[:space:]]*[0-9]+|spawned[[:space:]]+from[[:space:]]*#[[:space:]]*[0-9]+'); then
+      PARENT_PARSE_STATUS=0
+    else
+      PARENT_PARSE_STATUS=$?
+    fi
+    if [ "$PARENT_PARSE_STATUS" -eq 0 ]; then
+      PARENT_INV=$(printf '%s\n' "$PARENT_MATCHES" \
+        | sed -E 's/.*#[[:space:]]*([0-9]+).*/\1/' \
+        | head -1)
+    elif [ "$PARENT_PARSE_STATUS" -gt 1 ]; then
+      # WIRE:PROVEN — unsupported parser failures warn explicitly instead of becoming empty context.
+      echo "WARNING: parent reference parser failed for issue #{NUMBER}; legacy parent context is unavailable" >&2
+    fi
+  fi
   if [ -z "$PARENT_INV" ] && [ -n "$PARENT_CONTEXT_REF" ]; then
-    PARENT_INV=$(printf '%s\n' "$PARENT_CONTEXT_REF" | sed -n 's/.* issue=\([0-9][0-9]*\) comment=.*/\1/p')
+    PARENT_CONTEXT_INV=$(printf '%s\n' "$PARENT_CONTEXT_REF" | sed -n 's/.* issue=\([0-9][0-9]*\) comment=.*/\1/p')
+    [ -z "$PARENT_CONTEXT_INV" ] || printf -v PARENT_INV '%s' "$PARENT_CONTEXT_INV"
   fi
 
   if [ -n "$PARENT_INV" ]; then
@@ -2475,7 +2501,7 @@ Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${R
   # scope note above and phase-1-resolve.md's Cascade / Review-Finding Resolution
   # section). `orchestration.cascade.max_generation` governs what an explicit human
   # request admits at Phase 1 resolve time, not what this unattended triage pass defers.
-  elif SOURCE_NUM=$(echo "$FINDING_DATA" | jq -r '.body' | grep -oP '(?i)spawned from issue #\K\d+|source issue[: #]+\K\d+' | head -1) && \
+  elif SOURCE_NUM=$(echo "$FINDING_DATA" | jq -r '.body' | grep -ioE 'spawned[[:space:]]+from[[:space:]]+issue[[:space:]]*#[[:space:]]*[0-9]+|source[[:space:]]+issue[[:space:]:#]+[0-9]+' | sed -E 's/.*#[[:space:]]*([0-9]+).*/\1/; s/.*[^0-9]([0-9]+)$/\1/' | head -1) && \
        [ -n "$SOURCE_NUM" ] && \
        gh issue view $SOURCE_NUM -R {GH_REPO} --json labels --jq '[.labels[].name]' 2>/dev/null | grep -q "review-finding"; then
     FINDING_GENERATION=$(compute_finding_generation "$(echo "$FINDING_DATA" | jq -r '.body')")
@@ -3193,15 +3219,41 @@ if [ ${#SWEEP_EXECUTE[@]} -gt 0 ]; then
     # Sweep findings intentionally have no synthesis brief, so use only the exact parent
     # investigator comment reference and keep this block behaviorally aligned with 4A.
     GIST_CONTEXT=""
-    FINDING_BODY=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json body --jq '.body' 2>/dev/null || echo "")
-    PARENT_CONTEXT_REF=$(printf '%s\n' "$FINDING_BODY" \
-      | grep -E '^<!-- FORGE:PARENT_CONTEXT: repo=[^ ]+ issue=[0-9]+ comment=[0-9]+ marker=FORGE:INVESTIGATOR -->$' \
-      | head -1 || true)
-    PARENT_INV=$(printf '%s\n' "$FINDING_BODY" \
-      | sed -E 's/[*_]+//g' \
-      | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1 || true)
+    FINDING_BODY=""
+    PARENT_CONTEXT_REF=""
+    unset PARENT_INV
+    # WIRE:PROVEN — the focused runtime-path test asserts the sweep read-status split mirrors Step 4A.
+    if FINDING_BODY=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json body --jq '.body' 2>/dev/null); then
+      FINDING_BODY_READ_STATUS=0
+    else
+      FINDING_BODY_READ_STATUS=$?
+      echo "WARNING: unable to read issue #$FINDING_NUM; parent investigation context is unavailable" >&2
+    fi
+    # WIRE:PROVEN — only a successful sweep body read reaches parent parsing; failures warn and stop context use.
+    if [ "$FINDING_BODY_READ_STATUS" -eq 0 ]; then
+      PARENT_CONTEXT_REF=$(printf '%s\n' "$FINDING_BODY" \
+        | grep -E '^<!-- FORGE:PARENT_CONTEXT: repo=[^ ]+ issue=[0-9]+ comment=[0-9]+ marker=FORGE:INVESTIGATOR -->$' \
+        | head -1 || true)
+      # WIRE:PROVEN — both mirrored parser-status branches retain the tested portable pattern.
+      if PARENT_MATCHES=$(printf '%s\n' "$FINDING_BODY" \
+        | sed -E 's/[*_]+//g' \
+        | grep -ioE 'parent[[:space:]:]*#[[:space:]]*[0-9]+|spawned[[:space:]]+from[[:space:]]*#[[:space:]]*[0-9]+'); then
+        PARENT_PARSE_STATUS=0
+      else
+        PARENT_PARSE_STATUS=$?
+      fi
+      if [ "$PARENT_PARSE_STATUS" -eq 0 ]; then
+        PARENT_INV=$(printf '%s\n' "$PARENT_MATCHES" \
+          | sed -E 's/.*#[[:space:]]*([0-9]+).*/\1/' \
+          | head -1)
+      elif [ "$PARENT_PARSE_STATUS" -gt 1 ]; then
+        # WIRE:PROVEN — the sweep reports parser failures rather than silently dropping the handoff.
+        echo "WARNING: parent reference parser failed for issue #$FINDING_NUM; legacy parent context is unavailable" >&2
+      fi
+    fi
     if [ -z "$PARENT_INV" ] && [ -n "$PARENT_CONTEXT_REF" ]; then
-      PARENT_INV=$(printf '%s\n' "$PARENT_CONTEXT_REF" | sed -n 's/.* issue=\([0-9][0-9]*\) comment=.*/\1/p')
+      PARENT_CONTEXT_INV=$(printf '%s\n' "$PARENT_CONTEXT_REF" | sed -n 's/.* issue=\([0-9][0-9]*\) comment=.*/\1/p')
+      [ -z "$PARENT_CONTEXT_INV" ] || printf -v PARENT_INV '%s' "$PARENT_CONTEXT_INV"
     fi
 
     if [ -n "$PARENT_INV" ]; then

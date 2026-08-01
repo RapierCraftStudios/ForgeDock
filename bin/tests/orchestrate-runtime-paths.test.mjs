@@ -37,6 +37,17 @@ describe("orchestrate runtime helper paths", () => {
     assert.ok(directCalls.length >= resolverCalls.length);
   });
 
+  it("uses portable parent parsing in both mirrored dispatch paths", () => {
+    const parentParser =
+      "grep -ioE 'parent[[:space:]:]*#[[:space:]]*[0-9]+|spawned[[:space:]]+from[[:space:]]*#[[:space:]]*[0-9]+'";
+    assert.equal(phase4.split(parentParser).length - 1, 2);
+    assert.equal((phase4.match(/PARENT_PARSE_STATUS=\$\?/g) ?? []).length, 2);
+    assert.equal((phase4.match(/ISSUE_BODY_READ_STATUS=\$\?/g) ?? []).length, 1);
+    assert.equal((phase4.match(/FINDING_BODY_READ_STATUS=\$\?/g) ?? []).length, 1);
+    assert.match(phase4, /PARENT_CONTEXT_REF/);
+    assert.doesNotMatch(phase4, /grep -oP '\(\?i\)parent/);
+  });
+
   it("requires mktemp paths and rejects root-level temp files", () => {
     for (const spec of [phase4, issue]) {
       assert.match(spec, /mktemp/);
