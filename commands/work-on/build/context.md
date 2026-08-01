@@ -574,9 +574,18 @@ else
        ! printf '%s' "$PARENT_COMMENT_BODY" | grep -q '<!-- INVESTIGATION:COMPLETE -->'; then
       PARENT_CONTEXT_SUMMARY="Parent context comment ${PARENT_COMMENT_ID} was inaccessible or failed repository, issue, marker, or completion validation. No parent context was used."
     else
-      PARENT_CONTEXT_SUMMARY=$(printf 'Parent context comment %s from %s#%s was validated from the exact comment resource:\n\n%s' \
-        "$PARENT_COMMENT_ID" "$PARENT_REPO" "$PARENT_ISSUE" \
-        "$(printf '%s' "$PARENT_COMMENT_BODY" | sed -n '1,80p' | cut -c1-12000)")
+      # Keep the exact comment identity useful without copying the annotation body into
+      # the later FORGE:CONTEXT record. Only bounded metadata fields are retained, and
+      # reserved markers/acceptance records are removed before output.
+      PARENT_CONTEXT_SUMMARY="Parent context comment ${PARENT_COMMENT_ID} from ${PARENT_REPO}#${PARENT_ISSUE} was validated from the exact comment resource; raw annotation body omitted."
+      PARENT_CONTEXT_FIELDS=$(printf '%s\n' "$PARENT_COMMENT_BODY" \
+        | grep -E '^\*\*(Task Type|Verdict|Confidence|Severity)\*\*:' \
+        | sed -E 's/<!--[^>]*-->//g; s/FORGE:[A-Z_:-]+//g; s/[A-Z_]+:COMPLETE//g; s/ACCEPTANCE_CHECK:.*$//' \
+        | cut -c1-2000 || true)
+      if [ -n "$PARENT_CONTEXT_FIELDS" ]; then
+        PARENT_CONTEXT_SUMMARY="${PARENT_CONTEXT_SUMMARY}
+${PARENT_CONTEXT_FIELDS}"
+      fi
     fi
   fi
 fi
@@ -584,11 +593,16 @@ fi
 
 ### Step 1: Hydrate bounded current-issue annotations
 
-Read only the first 100 issue comments and retain the latest investigator/synthesis annotations. This keeps current-issue context bounded while preserving the repository's structured completion markers.
+Read only the first 100 issue comments and retain references to the latest completed top-level investigator/synthesis annotations. This keeps current-issue context bounded without copying reserved annotation bodies into the later context record.
 
 ```bash
-CURRENT_ANNOTATIONS=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments?per_page=100&page=1" \
-  --jq '[.[] | select((.body | contains("FORGE:INVESTIGATOR")) or (.body | contains("FORGE:SYNTHESIS_BRIEF"))) | {id, body}] | sort_by(.id) | reverse | .[:4] | .[] | "#### Comment #\(.id)\n\(.body | .[0:12000])"' \
+CURRENT_COMMENT_DATA=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments?per_page=100&page=1" \
+  --jq '[.[] | select(.body | startswith("<!-- FORGE:INVESTIGATOR -->")) | select(.body | contains("<!-- INVESTIGATION:COMPLETE -->")) | {id, marker: "investigator"}] +
+          [.[] | select(.body | startswith("<!-- FORGE:SYNTHESIS_BRIEF -->")) | select(.body | contains("<!-- FORGE:SYNTHESIS_BRIEF:COMPLETE -->")) | {id, marker: "synthesis"}] |
+          sort_by(.id) | reverse | .[:4]' \
+  2>/dev/null || echo '[]')
+CURRENT_ANNOTATIONS=$(printf '%s' "$CURRENT_COMMENT_DATA" \
+  | jq -r --arg repo "{GH_REPO}" --arg issue "{NUMBER}" '.[] | "#### Workflow annotation comment #\(.id)\nType: \(.marker)\nReference: https://github.com/\($repo)/issues/\($issue)#issuecomment-\(.id)\nRaw annotation body intentionally omitted to preserve marker ownership."' \
   2>/dev/null || true)
 ```
 
@@ -793,13 +807,13 @@ gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
 {DANGER_ZONE_CARDS}
 
 ### Parent Repository Context
-<!-- Bounded exact-comment hydration from FORGE:PARENT_CONTEXT (Phase C0).
+<!-- Bounded exact-comment hydration from a parent issue reference (Phase C0).
      The numeric comment resource is authoritative; invalid or inaccessible references are warnings.
-     No parent reference is represented by the explicit no-context note. -->
+     Raw annotation bodies are omitted so reserved markers remain owned by their source comments. -->
 {PARENT_CONTEXT_SUMMARY}
 
 ### Current Issue Annotations
-<!-- Latest bounded FORGE:INVESTIGATOR/FORGE:SYNTHESIS_BRIEF comments from this issue. -->
+<!-- Latest bounded top-level workflow annotation references from this issue; raw bodies are intentionally omitted. -->
 {CURRENT_ANNOTATIONS}
 
 ### Claims Board Constraints

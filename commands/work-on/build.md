@@ -58,7 +58,7 @@ gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,milestone
 
 # Check investigation report
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body'
+  --jq '.[] | select(.body | startswith("<!-- FORGE:INVESTIGATOR -->")) | select(.body | contains("<!-- INVESTIGATION:COMPLETE -->")) | .body'
 
 # Check if build already completed
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
@@ -359,9 +359,9 @@ Where `{CHANGED_FILES}` is the space-separated list of files changed by the impl
 **Read acceptance spec from FORGE:INVESTIGATOR comment**:
 
 ```bash
-ACCEPTANCE_CHECKS=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' \
-  | grep "^ACCEPTANCE_CHECK:" )
+INVESTIGATOR_BODY=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  --jq '[.[] | select(.body | startswith("<!-- FORGE:INVESTIGATOR -->")) | select(.body | contains("<!-- INVESTIGATION:COMPLETE -->")) | .body] | last // ""')
+ACCEPTANCE_CHECKS=$(printf '%s\n' "$INVESTIGATOR_BODY" | grep "^ACCEPTANCE_CHECK:" || true)
 ```
 
 **If `ACCEPTANCE_CHECKS` is empty** (investigation predates this feature or comment was deleted): post a warning comment and **block** — do not silently pass:

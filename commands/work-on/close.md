@@ -233,7 +233,7 @@ CHANGED_FILES_RAW=$(echo "$BUILDER_COMMENT" \
 # Fallback: try the FORGE:INVESTIGATOR affected files list
 if [ -z "$CHANGED_FILES_RAW" ]; then
   CHANGED_FILES_RAW=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-    --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR"))] | last | .body // ""' 2>/dev/null \
+    --jq '[.[] | select(.body | startswith("<!-- FORGE:INVESTIGATOR -->")) | select(.body | contains("<!-- INVESTIGATION:COMPLETE -->"))] | last | .body // ""' 2>/dev/null \
     | sed -n '/### Affected Files/,/###/p' \
     | grep -oE '`[^`]+`' \
     | tr -d '`' \
@@ -548,11 +548,11 @@ Reconstruct the pipeline summary from GitHub state:
 ```bash
 # Get investigation verdict from FORGE:INVESTIGATOR comment
 VERDICT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' \
+  --jq '.[] | select(.body | startswith("<!-- FORGE:INVESTIGATOR -->")) | select(.body | contains("<!-- INVESTIGATION:COMPLETE -->")) | .body' \
   | grep -oP '(?<=\*\*Verdict\*\*: )\w+' | head -1)
 
 CONFIDENCE=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' \
+  --jq '.[] | select(.body | startswith("<!-- FORGE:INVESTIGATOR -->")) | select(.body | contains("<!-- INVESTIGATION:COMPLETE -->")) | .body' \
   | grep -oP '(?<=\*\*Confidence\*\*: )\w+' | head -1)
 
 # Get files changed from FORGE:BUILDER comment
@@ -723,10 +723,10 @@ ACTUAL_TOTAL_USD=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 if [ -n "$ACTUAL_TOTAL_USD" ] && [ -f "$COST_PRIORS_PATH" ]; then
   # Derive task_type:module key (same logic as Step 3E.5)
   TASK_TYPE=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-    --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body] | last // ""' 2>/dev/null \
+    --jq '[.[] | select(.body | startswith("<!-- FORGE:INVESTIGATOR -->")) | select(.body | contains("<!-- INVESTIGATION:COMPLETE -->")) | .body] | last // ""' 2>/dev/null \
     | grep -oP '(?<=\*\*Task Type\*\*: )\S+' | head -1 | tr '[:upper:]' '[:lower:]' | tr ' ' '-' || echo 'unknown')
   PRIMARY_FILE=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-    --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body] | last // ""' 2>/dev/null \
+    --jq '[.[] | select(.body | startswith("<!-- FORGE:INVESTIGATOR -->")) | select(.body | contains("<!-- INVESTIGATION:COMPLETE -->")) | .body] | last // ""' 2>/dev/null \
     | grep -oP '`[^`]+\.(py|mjs|ts|md|sh|yaml|yml)`' | tr -d '`' | head -1 || echo '')
   MODULE=$(basename "${PRIMARY_FILE:-_unknown}" | sed 's/\.[^.]*$//' | tr '[:upper:]' '[:lower:]')
   [ -z "$MODULE" ] && MODULE="_unknown"
