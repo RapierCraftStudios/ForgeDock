@@ -46,6 +46,7 @@
     "scripts/",
     "!scripts/refresh-bot-token.sh",
     "templates/",
+    "AGENTS.md",
     "pi/",
     "install-pi.sh",
     "LICENSE",

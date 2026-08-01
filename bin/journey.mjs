@@ -1443,6 +1443,36 @@ async function copyDirIfChanged(srcDir, destDir) {
 }
 
 /**
+ * Copy a single payload file only when its bytes differ. A missing source is
+ * treated as an optional payload entry, matching copyDirIfChanged()'s
+ * fail-open behavior for releases that predate the file.
+ *
+ * @param {string} srcPath
+ * @param {string} destPath
+ * @returns {Promise<{ copied: number, unchanged: number }>}
+ */
+async function copyFileIfChanged(srcPath, destPath) {
+  let src;
+  try {
+    src = await readFile(srcPath);
+  } catch (err) {
+    if (err.code === "ENOENT") return { copied: 0, unchanged: 0 };
+    throw err;
+  }
+
+  let dst;
+  try {
+    dst = await readFile(destPath);
+  } catch (err) {
+    if (err.code !== "ENOENT") throw err;
+  }
+
+  if (dst && src.equals(dst)) return { copied: 0, unchanged: 1 };
+  await copyFile(srcPath, destPath);
+  return { copied: 1, unchanged: 0 };
+}
+
+/**
  * Recursively delete entries in `destDir` that no longer exist in `srcDir`.
  * The mirror-image of copyDirIfChanged(): that function is additive-only (it
  * copies new/changed files but never removes anything), so a file dropped or
@@ -1617,30 +1647,15 @@ export async function persistHome(ctx) {
       filesRemoved += pruned.removed;
     }
 
-    // Also persist package.json itself (not just PERSIST_HOME_DIRS) — several
-    // callers read `{forgeHome}/package.json` directly (readForgedockVersion()
-    // in this file, used by writeInstallReceipt() — forge#1946) and expect it
-    // to resolve relative to whatever ctx.forgeHome currently points at. Once
-    // this function reassigns ctx.forgeHome to the persisted copy, those
-    // callers would otherwise find no package.json there and silently degrade
-    // to an empty version string. Copying it keeps ~/.forge a complete
-    // drop-in stand-in for the original forgeHome, not just a commands/hooks
-    // mirror. Missing source package.json (unusual layout) is a no-op, same
-    // as any other PERSIST_HOME_DIRS entry.
-    try {
-      const [src, dst] = await Promise.all([
-        readFile(join(source, "package.json")),
-        readFile(join(persistedHome, "package.json")).catch(() => null),
-      ]);
-      if (!dst || !src.equals(dst)) {
-        await copyFile(join(source, "package.json"), join(persistedHome, "package.json"));
-        filesCopied++;
-      } else {
-        filesUnchanged++;
-      }
-    } catch (err) {
-      if (err.code !== "ENOENT") throw err;
-      // source package.json missing — nothing to persist, not an error.
+    // Persist root files that callers consume directly. package.json supplies
+    // the persisted version metadata, while AGENTS.md supplies the mandatory
+    // reviewer guidance. Both use the same content-comparing helper so
+    // unchanged files are not rewritten and missing files remain optional for
+    // older source layouts.
+    for (const name of ["package.json", "AGENTS.md"]) {
+      const res = await copyFileIfChanged(join(source, name), join(persistedHome, name));
+      filesCopied += res.copied;
+      filesUnchanged += res.unchanged;
     }
 
     // Write ~/.forge/version — content-compared like everything else here so
