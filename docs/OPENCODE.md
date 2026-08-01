@@ -230,8 +230,19 @@ receive dedicated implementations.
 The preflight is intentionally bounded. It handles explicit issue sets and the
 common single-repository `fast-lane`, `milestone`, `next`, `priority`, and
 `no:milestone` queries, plus explicit dependencies and scoped issue-body file
-overlap. Unsupported or complex inputs fall back to the shared phase specs rather
-than silently weakening their safety rules.
+overlap. It also accepts a same-repository GitHub issue-search URL such as:
+
+```text
+https://github.com/RapierCraftStudios/ForgeDock/issues?q=is%3Aissue+state%3Aopen+no%3Amilestone+sort%3Aupdated-desc
+```
+
+The URL `q` value is decoded with `URLSearchParams`. The compact path permits
+`is:issue`, `state:open`, supported `sort`/`order` modifiers, and
+`no:milestone`, `milestone:<slug>`, or `label:<name>` predicates. Raw forms such
+as `no:milestone` remain supported. URLs must target the configured repository;
+malformed, cross-repository, closed-state, `is:pr`, missing-query, and unknown
+predicates fail closed with an actionable diagnostic and fall back to the shared
+phase specs rather than silently weakening their safety rules.
 
 ## Orchestration Runtime
 

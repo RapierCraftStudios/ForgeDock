@@ -131,15 +131,8 @@ function repoFromConfig(projectRoot: string): string {
 function normalizeSlug(value: string): string {
 	return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
-function normalizeInput(input: string): string {
-	const url = input.match(/^https?:\/\/github\.com\/[^/]+\/[^/]+\/issues\/?(?:\?(.*))?$/i);
-	if (!url?.[1]) return input;
-	const query = decodeURIComponent(url[1]).replace(/&/g, " ").replace(/=/g, ":");
-	return query.replace(/^q:/i, "").replace(/\bstate:open\b/i, "").replace(/\bis:issue\b/i, "").replace(/\s+/g, " ").trim();
-}
-
 function preflight(forgeHome: string, projectRoot: string, input: string): PreflightPlan {
-	const result = spawnSync(process.execPath, [join(forgeHome, "bin", "orchestrate-preflight.mjs"), "--cwd", projectRoot, "--repo", repoFromConfig(projectRoot), "--args", normalizeInput(input)], {
+	const result = spawnSync(process.execPath, [join(forgeHome, "bin", "orchestrate-preflight.mjs"), "--cwd", projectRoot, "--repo", repoFromConfig(projectRoot), "--args", input], {
 		cwd: projectRoot, encoding: "utf8", windowsHide: true, maxBuffer: 32 * 1024 * 1024,
 	});
 	if (result.status !== 0) throw new Error(String(result.stderr || "preflight failed").trim());

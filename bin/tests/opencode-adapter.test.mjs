@@ -120,6 +120,8 @@ describe("OpenCode adapter", () => {
     assert.match(orchestrate, /orchestrate-preflight\.mjs/);
     assert.match(orchestrate, /dispatchNow/);
     assert.match(orchestrate, /requiresDeepPlan is false/);
+    assert.match(orchestrate, /Pass raw GitHub issue-search URLs through unchanged/);
+    assert.match(orchestrate, /configured-repository validation.*fail-closed diagnostics/s);
     assert.match(orchestrate, /do not load the full phase-3 or phase-4 files just to ask that question/i);
 
     const skill = renderOpenCodeSkill({

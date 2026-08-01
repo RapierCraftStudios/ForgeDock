@@ -42,6 +42,7 @@ Parse `$ARGUMENTS` to determine which issues to work on:
 | `next <N> all-repos` | Top N across ALL ecosystem repos |
 | `fast-lane` or `fast` | All open fast-lane issues (no milestone, bugs/fixes) |
 | `priority:P0` or `priority:P1` | All open issues with that priority label (matches both `priority:P<n>` and bare `P<n>` on the target repo — see "Priority label schema" note below) |
+| `https://github.com/{owner}/{repo}/issues?q=...` | Same-repository issue-search URL. Decode `q` and allow only `is:issue`, `state:open`, supported `sort`/`order`, and `no:milestone`, `milestone:<slug>`, or `label:<name>` predicates; cross-repository, malformed, missing-query, `is:pr`, closed-state, and unknown predicates fail closed to the full resolver. |
 | `mcp:fast` or `n8n:next 3` | Repo-scoped queries |
 | `cascade`, `review-findings`, or `findings` (optionally `--include-deferred` / `--allow-gen2` / `--include-backlog`) | `review-finding` issues created at/after this batch's T0 (default repo, or repo-scoped e.g. `mcp:cascade`) — i.e. empty unless combined with a run that has already spawned findings, or `--include-backlog` is passed. See "Cascade / Review-Finding Resolution" below for the run-spawned-vs-backlog distinction and the generation-depth admission on top of it (`orchestration.cascade.max_generation`, default 1). <!-- Added: forge#2231, forge#2234, forge#2628 -->|
 | `<slug>` (no keyword) | Try milestone first, then fall back to label search. If both resolve to zero issues, report near-miss label candidates instead of silently resolving to nothing — see "Near-Miss Suggestion" below. <!-- Added: forge#2231 -->|
@@ -198,7 +199,7 @@ Report back to the caller: `No milestone or label matched "{SLUG}". Did you mean
 
 Phase 1 resolves `$ARGUMENTS` to a concrete issue-number list exactly once, at T0, and that list is currently frozen for the rest of the run (`phase-4-execution.md`: "Phase 1 only runs once, at the start."). Of the input patterns above, only `#1 #2 #3` / `1 2 3` (optionally repo-prefixed) is genuinely a one-time literal set — every other row (`milestone <slug>`, `next <N>`, `next <N> all-repos`, `fast-lane`, `priority:P0`/`priority:P1`, `mcp:fast`/`n8n:next 3`, a bare `<slug>`) is a **standing query**: the predicate ("all open P0s", "this milestone") is the caller's actual intent, not the specific numbers it happened to resolve to at T0.
 
-Classify `$ARGUMENTS` and persist that classification alongside the resolved issue-number list, so Phase 4 (`phase-4-execution.md` Step 4B) can decide whether to re-run the query later in the batch:
+Classify `$ARGUMENTS` and persist that classification alongside the resolved issue-number list, so Phase 4 (`phase-4-execution.md` Step 4B) can decide whether to re-run the query later in the batch. A same-repository GitHub issue-search URL is always persisted as `kind=query` with `pattern=github-issue-search-url` (and its validated predicate), never as a bare slug; invalid URL input is not eligible for compact dispatch.
 
 ```bash
 node -e '

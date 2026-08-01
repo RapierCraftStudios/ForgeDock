@@ -116,3 +116,9 @@ test("Pi phase prompt binds the worker to one phase and one working directory", 
   assert.match(prompt, /Current working directory: C:\/project\/\.pi\/worktrees\/fix-42/);
   assert.match(prompt, /Do not run or summarize a later phase/);
 });
+
+test("Pi orchestration passes raw GitHub URLs to the shared preflight", () => {
+  const source = readFileSync(new URL("../../pi/extensions/forgedock.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /function normalizeInput\(/);
+  assert.match(source, /"--args", input\]/);
+});

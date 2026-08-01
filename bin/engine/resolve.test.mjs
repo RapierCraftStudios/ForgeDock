@@ -83,6 +83,18 @@ describe("classifyInputPattern — query patterns", () => {
     assert.equal(r.pattern, "bare-slug");
   });
 
+  it("classifies GitHub issue-search URLs as queries instead of bare slugs", () => {
+    const r = classifyInputPattern("https://github.com/owner/repo/issues?q=is%3Aissue+state%3Aopen+no%3Amilestone --auto");
+    assert.equal(r.kind, "query");
+    assert.equal(r.pattern, "github-issue-search-url");
+    assert.match(r.args[0], /^https:\/\/github\.com\//);
+  });
+
+  it("keeps malformed and foreign URLs out of the bare-slug fallback", () => {
+    assert.equal(classifyInputPattern("https://github.com/owner/repo/not-issues?q=no%3Amilestone").pattern, "github-issue-search-url");
+    assert.equal(classifyInputPattern("https://gitlab.com/owner/repo/issues?q=no%3Amilestone").pattern, "github-issue-search-url");
+  });
+
   it("classifies empty/unrecognized input as an unknown query, never literal", () => {
     assert.equal(classifyInputPattern("").kind, "query");
     assert.equal(classifyInputPattern("").pattern, "unknown");

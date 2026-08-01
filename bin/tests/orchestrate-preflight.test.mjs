@@ -123,6 +123,78 @@ describe("OpenCode orchestration preflight", () => {
     assert.deepEqual(plan.dispatchNow, []);
   });
 
+  it("resolves a same-repository encoded GitHub issue-search URL", () => {
+    const issues = [
+      issue(1),
+      issue(2, { milestone: { title: "planned" } }),
+      issue(3, { labels: [{ name: "workflow:building" }] }),
+    ];
+    const input = "https://github.com/owner/repo/issues?q=is%3Aissue+state%3Aopen+no%3Amilestone+sort%3Aupdated-desc --auto";
+    const plan = buildPreflightPlan({ input, repo: "owner/repo", issues });
+
+    assert.equal(plan.supported, true);
+    assert.equal(plan.pattern, "no:milestone");
+    assert.equal(plan.confirmed, true);
+    assert.deepEqual(plan.issues.map((item) => item.number), [1]);
+    assert.deepEqual(plan.dispatchNow, [1]);
+  });
+
+  it("supports URL label and milestone predicates without changing raw slug behavior", () => {
+    const issues = [
+      issue(1, { labels: [{ name: "bug" }], milestone: { title: "planned" } }),
+      issue(2, { labels: [{ name: "feature" }], milestone: { title: "planned" } }),
+    ];
+    const label = buildPreflightPlan({
+      input: "https://github.com/owner/repo/issues?q=is%3Aissue+state%3Aopen+label%3Abug --confirm",
+      repo: "owner/repo",
+      issues,
+    });
+    const milestone = buildPreflightPlan({
+      input: "https://github.com/owner/repo/issues?q=milestone%3Aplanned",
+      repo: "owner/repo",
+      issues,
+    });
+
+    assert.deepEqual(label.issues.map((item) => item.number), [1]);
+    assert.deepEqual(milestone.issues.map((item) => item.number), [1, 2]);
+    assert.deepEqual(buildPreflightPlan({ input: "no:milestone", repo: "owner/repo", issues }).issues, []);
+  });
+
+  it("fails closed for cross-repository, malformed, missing, and unsupported URLs", () => {
+    const cases = [
+      ["https://github.com/other/repo/issues?q=no%3Amilestone", /does not match configured repository/],
+      ["https://github.com/owner/repo/not-issues?q=no%3Amilestone", /must target/],
+      ["https://github.com/owner/repo/issues", /exactly one q parameter/],
+      ["https://github.com/owner/repo/issues?q=is%3Apr+state%3Aopen", /is:pr/],
+      ["https://github.com/owner/repo/issues?q=is%3Aissue+state%3Aopen+assignee%3Aoctocat", /unsupported.*assignee/],
+    ];
+
+    for (const [input, reason] of cases) {
+      const plan = buildPreflightPlan({ input, repo: "owner/repo", issues: [issue(1)] });
+      assert.equal(plan.supported, false, input);
+      assert.equal(plan.mode, "full-spec-required");
+      assert.match(plan.reason, reason, input);
+      assert.deepEqual(plan.dispatchNow, []);
+    }
+  });
+
+  it("does not view literal issues for an invalid GitHub URL", () => {
+    const calls = [];
+    const result = runPreflight({
+      cwd: ".",
+      repo: "owner/repo",
+      input: "https://github.com/other/repo/issues?q=no%3Amilestone --auto",
+      gh: (_cwd, args) => {
+        calls.push(args);
+        return [issue(1)];
+      },
+    });
+
+    assert.equal(result.supported, false);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][1], "list");
+  });
+
   it("uses one issue-list snapshot and only views missing literal issues", () => {
     const calls = [];
     const result = runPreflight({
