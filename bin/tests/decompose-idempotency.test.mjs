@@ -17,4 +17,16 @@ describe("decomposition idempotency", () => {
     assert.match(spec, /Do \*\*not\*\* create issues, edit the parent body, or post another decomposition comment/);
     assert.match(spec, /status: ALREADY_DONE/);
   });
+
+  it("guards parent-context enrichment when no numeric child was created", () => {
+    const guardStart = spec.indexOf('if [[ "$SUB_NUMBER" =~ ^[0-9]+$ ]]; then');
+    const guardEnd = spec.indexOf("\nelse\n", guardStart);
+
+    assert.notEqual(guardStart, -1);
+    assert.ok(guardEnd > guardStart);
+
+    const guardedChildPath = spec.slice(guardStart, guardEnd);
+    assert.match(guardedChildPath, /gh issue view \{SUB_NUMBER\}/);
+    assert.match(guardedChildPath, /gh issue edit \{SUB_NUMBER\}/);
+  });
 });

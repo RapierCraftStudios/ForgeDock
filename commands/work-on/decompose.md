@@ -213,15 +213,19 @@ If `SUB_NUMBER` is empty, treat this sub-issue as not created — do not add it 
 After creating each sub-issue, append the exact bounded parent-comment reference. This is the single machine-readable context handoff consumed by build context; the URL is informational and the numeric comment resource remains authoritative.
 
 ```bash
-SUB_BODY=$(gh issue view {SUB_NUMBER} {GH_FLAG} --json body --jq '.body')
-PARENT_CONTEXT_SECTION="
+if [[ "$SUB_NUMBER" =~ ^[0-9]+$ ]]; then
+  SUB_BODY=$(gh issue view {SUB_NUMBER} {GH_FLAG} --json body --jq '.body')
+  PARENT_CONTEXT_SECTION="
 
 ## Parent Context
 
 ${PARENT_CONTEXT_REFERENCE}
 Parent investigator comment: ${PARENT_CONTEXT_URL}
 "
-gh issue edit {SUB_NUMBER} {GH_FLAG} --body "${SUB_BODY}${PARENT_CONTEXT_SECTION}"
+  gh issue edit {SUB_NUMBER} {GH_FLAG} --body "${SUB_BODY}${PARENT_CONTEXT_SECTION}"
+else
+  echo "WARNING: skipping parent-context enrichment because SUB_NUMBER is not a valid numeric issue number."
+fi
 ```
 
 Capture the created issue number from the output URL for the tracker checklist.
