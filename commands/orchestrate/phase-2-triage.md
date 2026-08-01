@@ -62,38 +62,44 @@ for NEW_NUM in {newly_created_numbers}; do
 done
 ```
 
-### Step 2C.5: Collect Knowledge Gist URLs from investigations
+### Step 2C.5: Collect repository-scoped investigator annotations
 
-For each completed investigation issue, query its comments for `FORGE:KNOWLEDGE_GIST` annotations. Store the mapping of investigation issue number → Gist URL(s) so the agent template in Step 4A can include prior investigation context.
+For every completed Wave 0 investigation, resolve the exact completed `FORGE:INVESTIGATOR` comment resource. The comment ID and issue URL are the durable handoff; a bounded recommendation excerpt is included for prompt context without copying a reserved annotation body into another annotation. Paginate explicitly so an issue with more than 100 comments cannot hide its latest investigator result.
 
 ```bash
-# Build a map: investigation_number → gist_url(s)
-declare -A INVESTIGATION_GISTS
+# Build a map: investigation_number → exact completed investigator comment + bounded summary.
+# The map is keyed by the complete investigation set, not by whether an external artifact exists.
+declare -A INVESTIGATION_CONTEXT
 for INV_NUM in {investigation_numbers}; do
-  GIST_URLS=$(gh api repos/{GH_REPO}/issues/${INV_NUM}/comments \
-    --jq '[.[] | select(.body | test("<!-- FORGE:KNOWLEDGE_GIST: https://")) | .body | capture("<!-- FORGE:KNOWLEDGE_GIST: (?<url>https://[^ ]+) -->").url] | unique | .[]')
-  if [ -n "$GIST_URLS" ]; then
-    INVESTIGATION_GISTS[$INV_NUM]="$GIST_URLS"
-    echo "Investigation #${INV_NUM}: found Gist URL(s)"
+  EXPECTED_ISSUE_URL="https://api.github.com/repos/{GH_REPO}/issues/${INV_NUM}"
+  INVESTIGATOR_JSON=$(gh api --paginate --slurp \
+    "repos/{GH_REPO}/issues/${INV_NUM}/comments?per_page=100" 2>/dev/null \
+    | jq -c --arg expected_issue_url "$EXPECTED_ISSUE_URL" \
+      'add | map(select(.issue_url == $expected_issue_url and (.body | contains("<!-- FORGE:INVESTIGATOR -->")) and (.body | contains("<!-- INVESTIGATION:COMPLETE -->")))) | sort_by(.id) | last // empty' \
+    || true)
+
+  if [ -z "$INVESTIGATOR_JSON" ] || [ "$INVESTIGATOR_JSON" = "null" ]; then
+    INVESTIGATION_CONTEXT[$INV_NUM]="Investigation #${INV_NUM}: unavailable — no validated completed FORGE:INVESTIGATOR comment resource was found. Do not substitute external memory; report this missing context explicitly."
+    echo "Investigation #${INV_NUM}: completed investigator context unavailable"
+    continue
   fi
+
+  COMMENT_ID=$(printf '%s' "$INVESTIGATOR_JSON" | jq -r '.id // empty')
+  COMMENT_URL=$(printf '%s' "$INVESTIGATOR_JSON" | jq -r '.html_url // empty')
+  RECOMMENDATION=$(printf '%s' "$INVESTIGATOR_JSON" | jq -r '.body' \
+    | awk '/^### Recommendation/{p=1; next} /^### /{p=0} p' \
+    | sed -E 's/<!--[^>]*-->//g' \
+    | tr '\n' ' ' \
+    | cut -c1-1200)
+  [ -n "$RECOMMENDATION" ] || RECOMMENDATION="See the exact completed investigator comment for the bounded finding details."
+
+  INVESTIGATION_CONTEXT[$INV_NUM]="Investigation #${INV_NUM} — exact completed FORGE:INVESTIGATOR comment #${COMMENT_ID}: ${COMMENT_URL}
+Recommendation excerpt: ${RECOMMENDATION}"
+  echo "Investigation #${INV_NUM}: using completed investigator comment #${COMMENT_ID}"
 done
 ```
 
-When spawning agents for implementation issues in Step 4A, include any Gist URLs from parent/sibling investigations in the agent prompt's context block. See the `{GIST_CONTEXT}` variable in the agent template.
-
-**Milestone index Gist**: If the milestone has a `<!-- FORGE:MILESTONE_INDEX: {url} -->` annotation in its description, read the index URL and store it for inclusion in agent context. The milestone index aggregates all investigation Gist URLs for the milestone into a single reference.
-
-```bash
-# Read milestone index URL from milestone description (if milestone exists)
-MILESTONE_INDEX_URL=""
-if [ -n "$MILESTONE_NUM" ]; then
-  MILESTONE_DESC=$(gh api repos/{GH_REPO}/milestones/${MILESTONE_NUM} --jq '.description // ""' 2>/dev/null)
-  MILESTONE_INDEX_URL=$(echo "$MILESTONE_DESC" | grep -oP '(?<=<!-- FORGE:MILESTONE_INDEX: )https://[^ ]+(?= -->)' | head -1)
-  if [ -n "$MILESTONE_INDEX_URL" ]; then
-    echo "Milestone index Gist found: ${MILESTONE_INDEX_URL}"
-  fi
-fi
-```
+When spawning agents for implementation issues in Step 4A, include the exact repository comment reference and bounded recommendation from the parent or relevant investigation in the `{GIST_CONTEXT}` context block. The numeric comment identity remains authoritative; workers may fetch that single comment for full details during context gathering. No external-memory lookup is part of this handoff.
 
 ### Step 2D: Merge new issues into the batch
 

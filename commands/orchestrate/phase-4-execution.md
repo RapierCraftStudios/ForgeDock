@@ -1040,50 +1040,56 @@ If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to
 )
 ```
 
-**`{GIST_CONTEXT}` generation**: For each issue being dispatched, build the context block. **Prefer the deconflicted `FORGE:SYNTHESIS_BRIEF` (from Phase 2.5) when one exists** — it is a per-issue, already-reconciled brief that carries only the arbitration decisions and sibling investigation Gists relevant to *this* issue. Injecting it instead of the full aggregated milestone-index gist means the agent does not re-arbitrate the same contradictions (less token spend, less nondeterminism). Only when Phase 2.5 did not run (0/1 investigations — no brief exists) does this fall back to the raw parent-investigation + milestone-index gist behavior. <!-- Added: forge#1192 -->
+**`{GIST_CONTEXT}` generation**: For each issue being dispatched, build the repository-scoped context block. **Prefer the deconflicted `FORGE:SYNTHESIS_BRIEF` (from Phase 2.5) when one exists** — it is a per-issue, already-reconciled brief containing exact investigator comment references and decisions relevant to *this* issue. Only when Phase 2.5 did not run (0/1 investigations — no brief exists) does this fall back to the exact parent investigator comment reference. <!-- Updated: forge#2980 -->
 
 ```bash
-# Build GIST_CONTEXT for an issue
+# Build GIST_CONTEXT for an issue. The variable name is retained for prompt-template
+# compatibility; its sources are repository comments, never external memory.
 GIST_CONTEXT=""
 
 # Preferred path: a deconflicted per-issue synthesis brief from Phase 2.5.
-SYNTHESIS_BRIEF=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '[.[] | select(.body | contains("<!-- FORGE:SYNTHESIS_BRIEF -->"))] | last | .body // ""' 2>/dev/null)
+SYNTHESIS_BRIEF=$(gh api --paginate --slurp \
+  "repos/{GH_REPO}/issues/{NUMBER}/comments?per_page=100" 2>/dev/null \
+  | jq -r 'add | map(select((.body | contains("<!-- FORGE:SYNTHESIS_BRIEF -->")) and (.body | contains("<!-- FORGE:SYNTHESIS_BRIEF:COMPLETE -->")))) | sort_by(.id) | last | .body // ""' \
+  || true)
 
 if [ -n "$SYNTHESIS_BRIEF" ]; then
   # Phase 2.5 ran and reconciled competing recommendations for this issue.
-  # Inject the deconflicted brief INSTEAD of the raw milestone-index gist dump.
   GIST_CONTEXT="
-**RECONCILED CONTEXT (orchestrate Phase 2.5 synthesis brief)**: Competing investigation recommendations affecting this issue have already been reconciled. Use this deconflicted brief as your primary cross-investigation context — do NOT independently re-arbitrate the underlying investigations.
+**RECONCILED CONTEXT (orchestrate Phase 2.5 synthesis brief)**: Competing investigation recommendations affecting this issue have already been reconciled. Use this repository-scoped brief as the primary cross-investigation context — do NOT independently re-arbitrate the underlying investigations.
 ${SYNTHESIS_BRIEF}"
 else
-  # Fallback: Phase 2.5 did not run (0/1 investigations). Use the raw gist behavior.
-  # Markdown emphasis markers (**bold**, __bold__, *italic*) are stripped before matching,
-  # since sub-issue bodies commonly render the label as "**Parent**: #NNN" and the bare
-  # label alternation below would otherwise fail to match past the emphasis characters.
-  PARENT_INV=$(gh issue view {NUMBER} -R {GH_REPO} --json body --jq '.body' \
+  # Fallback: Phase 2.5 did not run (0/1 investigations). Resolve the parent issue and
+  # exact FORGE:PARENT_CONTEXT reference, then use the validated investigator map entry.
+  ISSUE_BODY=$(gh issue view {NUMBER} -R {GH_REPO} --json body --jq '.body' 2>/dev/null || echo "")
+  PARENT_CONTEXT_REF=$(printf '%s\n' "$ISSUE_BODY" \
+    | grep -E '^<!-- FORGE:PARENT_CONTEXT: repo=[^ ]+ issue=[0-9]+ comment=[0-9]+ marker=FORGE:INVESTIGATOR -->$' \
+    | head -1 || true)
+  PARENT_INV=$(printf '%s\n' "$ISSUE_BODY" \
     | sed -E 's/[*_]+//g' \
-    | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1)
-
-  if [ -n "$PARENT_INV" ] && [ -n "${INVESTIGATION_GISTS[$PARENT_INV]:-}" ]; then
-    GIST_CONTEXT="
-**CONTEXT FROM PRIOR INVESTIGATION**: Investigation #${PARENT_INV} produced Knowledge Gist(s) with findings relevant to this issue:
-$(echo "${INVESTIGATION_GISTS[$PARENT_INV]}" | while IFS= read -r url; do echo "- ${url}"; done)
-Fetch the Gist content during the context-gathering phase for implementation guidance."
+    | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1 || true)
+  if [ -z "$PARENT_INV" ] && [ -n "$PARENT_CONTEXT_REF" ]; then
+    PARENT_INV=$(printf '%s\n' "$PARENT_CONTEXT_REF" | sed -n 's/.* issue=\([0-9][0-9]*\) comment=.*/\1/p')
   fi
 
-  # Include milestone index URL if available (from Step 2C.5)
-  if [ -n "$MILESTONE_INDEX_URL" ]; then
-    GIST_CONTEXT="${GIST_CONTEXT}
-
-**MILESTONE KNOWLEDGE INDEX**: All investigation findings for this milestone are aggregated in a single index Gist:
-- ${MILESTONE_INDEX_URL}
-The context-gathering phase can fetch this index to discover all investigation Gists for the milestone."
+  if [ -n "$PARENT_INV" ]; then
+    if [ -n "${INVESTIGATION_CONTEXT[$PARENT_INV]:-}" ]; then
+      GIST_CONTEXT="
+**CONTEXT FROM REPOSITORY INVESTIGATION**: Use the exact completed `FORGE:INVESTIGATOR` resource below. The numeric comment identity is authoritative; fetch that single comment during context gathering for full details. Do not search external memory.
+${INVESTIGATION_CONTEXT[$PARENT_INV]}"
+    elif [ -n "$PARENT_CONTEXT_REF" ]; then
+      GIST_CONTEXT="
+**CONTEXT FROM REPOSITORY INVESTIGATION**: The parent handoff is an exact `FORGE:PARENT_CONTEXT` reference. The numeric comment identity is authoritative; validate and fetch it during context gathering. Do not search external memory.
+${PARENT_CONTEXT_REF}"
+    else
+      GIST_CONTEXT="
+**CONTEXT FROM REPOSITORY INVESTIGATION**: Investigation #${PARENT_INV} has no validated completed `FORGE:INVESTIGATOR` resource available in this run. This is an explicit unavailable-context result; do not substitute external memory."
+    fi
   fi
 fi
 ```
 
-If `GIST_CONTEXT` is empty (no synthesis brief, no parent investigation, and no milestone index found), the variable resolves to a blank line in the template — no impact on the agent prompt. <!-- Updated: forge#341, forge#1192 -->
+If `GIST_CONTEXT` is empty (no synthesis brief and no parent repository investigation reference), the variable resolves to a blank line in the template — no impact on the agent prompt. <!-- Updated: forge#2980 -->
 
 **`{SOURCE_PR_HINT_CONTEXT}` generation** <!-- Added: forge#2351 -->: For each issue being dispatched, thread the source-PR `likely-moot` triage hint computed by `phase-1-resolve.md`'s "Source-PR Triage Hint" step (`ISSUE_LIKELY_MOOT[$NUM]`, `ISSUE_SOURCE_PR[$NUM]`, `ISSUE_SOURCE_PR_STATE[$NUM]` — Phase 1 output, not re-derived here) into the dispatched agent's initial context, framed explicitly as a starting point to verify, never as a conclusion:
 
@@ -3183,31 +3189,34 @@ if [ ${#SWEEP_EXECUTE[@]} -gt 0 ]; then
 
     FINDING_TITLE=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json title --jq '.title' 2>/dev/null || echo "")
 
-    # Build GIST_CONTEXT for sweep finding — same as Step 4A's *fallback* (raw-gist) path.
-    # The Phase 2.5 FORGE:SYNTHESIS_BRIEF preference is intentionally NOT applied here:
-    # sweep findings are freshly-created review-finding issues that never received a
-    # synthesis brief (Phase 2.5 runs only over the original batch's investigations), so
-    # there is nothing to prefer. Keep this block in sync with 4A's fallback branch only.
+    # Build GIST_CONTEXT for a sweep finding from the same repository-scoped fallback as Step 4A.
+    # Sweep findings intentionally have no synthesis brief, so use only the exact parent
+    # investigator comment reference and keep this block behaviorally aligned with 4A.
     GIST_CONTEXT=""
-    # Markdown emphasis markers (**bold**, __bold__, *italic*) are stripped before matching —
-    # kept in sync with 4A's fallback branch above.
-    PARENT_INV=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json body --jq '.body' \
+    FINDING_BODY=$(gh issue view "$FINDING_NUM" -R {GH_REPO} --json body --jq '.body' 2>/dev/null || echo "")
+    PARENT_CONTEXT_REF=$(printf '%s\n' "$FINDING_BODY" \
+      | grep -E '^<!-- FORGE:PARENT_CONTEXT: repo=[^ ]+ issue=[0-9]+ comment=[0-9]+ marker=FORGE:INVESTIGATOR -->$' \
+      | head -1 || true)
+    PARENT_INV=$(printf '%s\n' "$FINDING_BODY" \
       | sed -E 's/[*_]+//g' \
-      | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1)
-
-    if [ -n "$PARENT_INV" ] && [ -n "${INVESTIGATION_GISTS[$PARENT_INV]:-}" ]; then
-      GIST_CONTEXT="
-**CONTEXT FROM PRIOR INVESTIGATION**: Investigation #${PARENT_INV} produced Knowledge Gist(s) with findings relevant to this issue:
-$(echo "${INVESTIGATION_GISTS[$PARENT_INV]}" | while IFS= read -r url; do echo "- ${url}"; done)
-Fetch the Gist content during the context-gathering phase for implementation guidance."
+      | grep -oP '(?i)parent[: ]*#\K\d+|spawned from[: ]*#\K\d+' | head -1 || true)
+    if [ -z "$PARENT_INV" ] && [ -n "$PARENT_CONTEXT_REF" ]; then
+      PARENT_INV=$(printf '%s\n' "$PARENT_CONTEXT_REF" | sed -n 's/.* issue=\([0-9][0-9]*\) comment=.*/\1/p')
     fi
 
-    if [ -n "$MILESTONE_INDEX_URL" ]; then
-      GIST_CONTEXT="${GIST_CONTEXT}
-
-**MILESTONE KNOWLEDGE INDEX**: All investigation findings for this milestone are aggregated in a single index Gist:
-- ${MILESTONE_INDEX_URL}
-The context-gathering phase can fetch this index to discover all investigation Gists for the milestone."
+    if [ -n "$PARENT_INV" ]; then
+      if [ -n "${INVESTIGATION_CONTEXT[$PARENT_INV]:-}" ]; then
+        GIST_CONTEXT="
+**CONTEXT FROM REPOSITORY INVESTIGATION**: Use the exact completed `FORGE:INVESTIGATOR` resource below. The numeric comment identity is authoritative; fetch that single comment during context gathering for full details. Do not search external memory.
+${INVESTIGATION_CONTEXT[$PARENT_INV]}"
+      elif [ -n "$PARENT_CONTEXT_REF" ]; then
+        GIST_CONTEXT="
+**CONTEXT FROM REPOSITORY INVESTIGATION**: The parent handoff is an exact `FORGE:PARENT_CONTEXT` reference. The numeric comment identity is authoritative; validate and fetch it during context gathering. Do not search external memory.
+${PARENT_CONTEXT_REF}"
+      else
+        GIST_CONTEXT="
+**CONTEXT FROM REPOSITORY INVESTIGATION**: Investigation #${PARENT_INV} has no validated completed `FORGE:INVESTIGATOR` resource available in this run. This is an explicit unavailable-context result; do not substitute external memory."
+      fi
     fi
 
     # Use the full Step 4A template verbatim — copied here so sweep agents receive
