@@ -46,9 +46,28 @@ For each investigation that completed in Wave 0, read its `FORGE:INVESTIGATOR` c
 # For each investigation, pull its recommendation + affected-files block (annotations only — no code reads)
 declare -A INV_RECOMMENDATION
 declare -A INV_SUBSYSTEM
+declare -A INV_RELEVANCE
 if ! declare -p INVESTIGATION_CONTEXT >/dev/null 2>&1; then
   declare -A INVESTIGATION_CONTEXT
 fi
+
+# Normalize the directories named in an annotation's affected-files section. The same
+# helper is used for investigations and implementation issues so subsystem matching is
+# deterministic and does not depend on the batch's size or ordering.
+forge_annotation_subsystems() {
+  AFFECTED_FILES_SECTION=$(printf '%s\n' "$1" \
+    | awk '
+      (/^##[[:space:]]+Affected Files([[:space:]]|$)/ || /^###[[:space:]]+Affected Files([[:space:]]|$)/) { in_section=1; next }
+      in_section && (/^#[[:space:]]/ || /^##[[:space:]]/ || /^###[[:space:]]/) { in_section=0 }
+      in_section { print }
+    ')
+  printf '%s\n' "$AFFECTED_FILES_SECTION" \
+    | grep -oP '`[^`]+/[^`]+`' 2>/dev/null \
+    | tr -d '`' \
+    | while IFS= read -r path; do dirname "$path"; done \
+    | sort -u
+}
+
 for INV_NUM in {investigation_numbers}; do
   EXPECTED_ISSUE_URL="https://api.github.com/repos/{GH_REPO}/issues/${INV_NUM}"
   INVESTIGATOR_JSON=$(gh api --paginate --slurp \
@@ -63,10 +82,12 @@ for INV_NUM in {investigation_numbers}; do
     INVESTIGATION_CONTEXT[$INV_NUM]="Investigation #${INV_NUM} — exact completed FORGE:INVESTIGATOR comment #${COMMENT_ID}: ${COMMENT_URL}"
   fi
   # Extract the Recommendation section (annotation prose only)
-  INV_RECOMMENDATION[$INV_NUM]=$(echo "$INV_BODY" | awk '/^### Recommendation/{p=1;next}/^### /{p=0}p')
-  # Derive a coarse subsystem tag from Affected Files directories + title keywords
-  INV_SUBSYSTEM[$INV_NUM]=$(echo "$INV_BODY" \
-    | grep -oP '`[^`]+/[^`]+`' | xargs -r -n1 dirname 2>/dev/null | sort | uniq -c | sort -rn | head -1)
+  INV_RECOMMENDATION[$INV_NUM]=$(printf '%s' "$INV_BODY" | awk '/^### Recommendation/{p=1;next}/^### /{p=0}p')
+  # Derive the same coarse subsystem boundary later used for implementation issues.
+  INV_SUBSYSTEM[$INV_NUM]=$(forge_annotation_subsystems "$INV_BODY")
+  # Direct parent/sibling edges are added during Step 2.5D, once implementation
+  # issue bodies are available; initialize the reverse relation here.
+  INV_RELEVANCE[$INV_NUM]=""
 done
 ```
 
@@ -134,15 +155,52 @@ echo "Phase 2.5 reconciled ${RECONCILED_COUNT} competing recommendation(s) (${N_
 For each implementation issue about to be dispatched, write a single `FORGE:SYNTHESIS_BRIEF` annotation containing ONLY the reconciled context relevant to *that* issue — the arbitration decisions affecting it and exact repository comment references to the investigator reports it actually needs. This keeps every handoff repository-scoped and prevents agents from independently re-arbitrating the same contradictions.
 
 ```bash
+# Build the implementation issue -> investigation relation before appending any
+# references. A reference is relevant when the issue shares the normalized subsystem
+# with the investigation, or when the issue body explicitly names that investigation
+# as its parent/spawned-from issue. There is deliberately no batch-wide fallback.
+declare -A ISSUE_BODY_CACHE
+declare -A ISSUE_SUBSYSTEM
+for ISSUE_NUM in {implementation_issue_numbers}; do
+  ISSUE_BODY_CACHE[$ISSUE_NUM]=$(gh issue view "$ISSUE_NUM" -R {GH_REPO} --json title,body --jq '.title + "\n" + .body' 2>/dev/null || true)
+  ISSUE_SUBSYSTEM[$ISSUE_NUM]=$(forge_annotation_subsystems "${ISSUE_BODY_CACHE[$ISSUE_NUM]:-}")
+done
+
 for ISSUE_NUM in {implementation_issue_numbers}; do
   # Assemble the per-issue brief: arbitration decisions touching this issue's subsystem +
   # exact repository-scoped investigator references. Never copy a raw investigator body;
   # its reserved markers must remain in the authoritative source comment.
   REPOSITORY_INVESTIGATION_REFS=""
   for INV_NUM in "${INVESTIGATION_NUMS[@]}"; do
-    if [ -n "${INVESTIGATION_CONTEXT[$INV_NUM]:-}" ]; then
-      REPOSITORY_INVESTIGATION_REFS="${REPOSITORY_INVESTIGATION_REFS}
+    RELEVANT_INVESTIGATION=false
+    SHARED_SUBSYSTEM=$(comm -12 \
+      <(printf '%s\\n' "${INV_SUBSYSTEM[$INV_NUM]:-}" | sed '/^$/d' | sort -u) \
+      <(printf '%s\\n' "${ISSUE_SUBSYSTEM[$ISSUE_NUM]:-}" | sed '/^$/d' | sort -u) \
+      || true)
+    if [ -n "$SHARED_SUBSYSTEM" ]; then
+      RELEVANT_INVESTIGATION=true
+    fi
+
+    # Parent/spawned-from and FORGE:PARENT_CONTEXT references are explicit relevance
+    # edges even when affected-file subsystem tags are absent or coarse.
+    if printf '%s\\n' "${ISSUE_BODY_CACHE[$ISSUE_NUM]:-}" \
+      | grep -qiE "(parent|spawned[ -]from|sibling)[^#[:cntrl:]]*#${INV_NUM}([^0-9]|$)"; then
+      RELEVANT_INVESTIGATION=true
+    elif printf '%s\\n' "${ISSUE_BODY_CACHE[$ISSUE_NUM]:-}" \
+      | grep -qiE "FORGE:PARENT_CONTEXT:[^[:cntrl:]]*issue=${INV_NUM}([^0-9]|$)"; then
+      RELEVANT_INVESTIGATION=true
+    fi
+
+    if [ "$RELEVANT_INVESTIGATION" = true ]; then
+      INV_RELEVANCE[$INV_NUM]="${INV_RELEVANCE[$INV_NUM]:-} ${ISSUE_NUM}"
+      # Only validated completed comment references may be forwarded. If a relevant
+      # investigation is unavailable, the final no-reference sentinel below remains
+      # explicit instead of silently broadening to every investigation in the batch.
+      if [ -n "${INVESTIGATION_CONTEXT[$INV_NUM]:-}" ] && \
+        printf '%s' "${INVESTIGATION_CONTEXT[$INV_NUM]}" | grep -qF 'exact completed FORGE:INVESTIGATOR comment'; then
+        REPOSITORY_INVESTIGATION_REFS="${REPOSITORY_INVESTIGATION_REFS}
 - ${INVESTIGATION_CONTEXT[$INV_NUM]}"
+      fi
     fi
   done
   BRIEF_BODY="Reconciled context for this issue (see orchestrate Phase 2.5):
