@@ -118,7 +118,8 @@ export function classifyInputPattern(input) {
   // Keep URL-shaped input out of the generic one-token bare-slug fallback.
   // The preflight owns canonical host, repository, and predicate validation,
   // so even malformed or non-GitHub URLs must remain visibly query-shaped.
-  if (/^https?:\/\//i.test(trimmed)) {
+  const urlIntended = /^(?:https?:|https?\/\/|\/\/|[a-z][a-z0-9+.-]*:\/\/|(?:www\.)?[a-z0-9.-]+\.[a-z]{2,}\/)/i;
+  if (urlIntended.test(trimmed)) {
     return { kind: "query", pattern: "github-issue-search-url", args: [trimmed] };
   }
 

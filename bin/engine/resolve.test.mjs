@@ -91,8 +91,18 @@ describe("classifyInputPattern — query patterns", () => {
   });
 
   it("keeps malformed and foreign URLs out of the bare-slug fallback", () => {
-    assert.equal(classifyInputPattern("https://github.com/owner/repo/not-issues?q=no%3Amilestone").pattern, "github-issue-search-url");
-    assert.equal(classifyInputPattern("https://gitlab.com/owner/repo/issues?q=no%3Amilestone").pattern, "github-issue-search-url");
+    for (const input of [
+      "https://github.com/owner/repo/not-issues?q=no%3Amilestone",
+      "https://gitlab.com/owner/repo/issues?q=no%3Amilestone",
+      "https:/github.com/owner/repo/issues?q=no%3Amilestone",
+      "https//github.com/owner/repo/issues?q=no%3Amilestone",
+      "//github.com/owner/repo/issues?q=no%3Amilestone",
+      "ftp://github.com/owner/repo/issues?q=no%3Amilestone",
+      "github.com/owner/repo/issues?q=no%3Amilestone",
+      "gitlab.com/owner/repo/issues?q=no%3Amilestone",
+    ]) {
+      assert.equal(classifyInputPattern(input).pattern, "github-issue-search-url", input);
+    }
   });
 
   it("classifies empty/unrecognized input as an unknown query, never literal", () => {

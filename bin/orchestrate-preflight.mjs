@@ -51,6 +51,10 @@ function normalizeSlug(value) {
     .replace(/^-+|-+$/g, "");
 }
 
+function sameGitHubName(actual, requested) {
+  return String(actual || "").toLowerCase() === String(requested || "").toLowerCase();
+}
+
 function priorityWeight(labels) {
   if (labels.some((label) => label === "priority:P0" || label === "P0")) return 4;
   if (labels.some((label) => label === "priority:P1" || label === "P1")) return 3;
@@ -175,6 +179,9 @@ function isSupportedSort(value) {
  */
 export function parseIssueSearchUrl(input, repo) {
   const source = String(input || "").trim();
+  if (!/^https:\/\/github\.com\//i.test(source)) {
+    return { supported: false, reason: "malformed GitHub issue-search URL; expected canonical https://github.com/owner/repository/issues" };
+  }
   let url;
   try {
     url = new URL(source);
@@ -202,6 +209,15 @@ export function parseIssueSearchUrl(input, repo) {
       supported: false,
       reason: `GitHub issue-search URL repository ${pathParts[0]}/${pathParts[1]} does not match configured repository ${repo || "(missing)"}`,
     };
+  }
+
+  try {
+    // URLSearchParams replaces malformed UTF-8 escapes with U+FFFD. Validate the
+    // raw query first so both incomplete escapes (%2) and invalid bytes (%FF)
+    // fail closed instead of becoming a different, apparently valid predicate.
+    decodeURIComponent(url.search.slice(1));
+  } catch {
+    return { supported: false, reason: "GitHub issue-search URL contains malformed query encoding" };
   }
 
   const queryKeys = [...url.searchParams.keys()];
@@ -285,10 +301,10 @@ function resolveQuery(input, issues, { includeInFlight, repo }) {
     } else {
       pattern = parsed.pattern;
       if (parsed.noMilestone) selected = selected.filter((issue) => !issue.milestone);
-      if (parsed.milestone) selected = selected.filter((issue) => normalizeSlug(issue.milestone?.title) === normalizeSlug(parsed.milestone));
+      if (parsed.milestone) selected = selected.filter((issue) => sameGitHubName(issue.milestone?.title, parsed.milestone));
       if (parsed.labels?.length) {
         selected = selected.filter((issue) => parsed.labels.every((wanted) =>
-          labelsOf(issue).some((label) => normalizeSlug(label) === normalizeSlug(wanted)),
+          labelsOf(issue).some((label) => sameGitHubName(label, wanted)),
         ));
       }
     }

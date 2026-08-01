@@ -238,11 +238,18 @@ https://github.com/RapierCraftStudios/ForgeDock/issues?q=is%3Aissue+state%3Aopen
 
 The URL `q` value is decoded with `URLSearchParams`. The compact path permits
 `is:issue`, `state:open`, supported `sort`/`order` modifiers, and
-`no:milestone`, `milestone:<slug>`, or `label:<name>` predicates. Raw forms such
-as `no:milestone` remain supported. URLs must target the configured repository;
-malformed, cross-repository, closed-state, `is:pr`, missing-query, and unknown
-predicates fail closed with an actionable diagnostic and fall back to the shared
-phase specs rather than silently weakening their safety rules.
+`no:milestone`, `milestone:<name>`, or `label:<name>` predicates. URL label and
+milestone values use GitHub's case-insensitive name identity without punctuation
+or whitespace folding; raw ForgeDock slugs such as `no:milestone` retain their
+existing slug behavior. URLs must target the configured repository; malformed,
+cross-repository, closed-state, `is:pr`, missing-query, and unknown predicates
+fail closed with an actionable diagnostic and fall back to the shared phase specs
+rather than silently weakening their safety rules.
+
+A GitHub issue-search URL is a standing query rather than a frozen T0 list.
+After each ordinary task completion, the compact runtime re-runs the same raw
+preflight input and admits newly matched issues through the refreshed eligibility
+and dependency plan before it can report the batch complete.
 
 ## Orchestration Runtime
 

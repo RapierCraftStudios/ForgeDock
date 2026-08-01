@@ -122,3 +122,12 @@ test("Pi orchestration passes raw GitHub URLs to the shared preflight", () => {
   assert.doesNotMatch(source, /function normalizeInput\(/);
   assert.match(source, /"--args", input\]/);
 });
+
+test("Pi re-resolves standing issue-search URLs after each ordinary completion event", () => {
+  const source = readFileSync(new URL("../../pi/extensions/forgedock.ts", import.meta.url), "utf8");
+  assert.match(source, /standingIssueSearchUrl = \/\^https:\\\/\\\/\/i\.test\(String\(plan\.input \|\| ""\)\.trim\(\)\)/);
+  assert.match(source, /await Promise\.race\(running\.values\(\)\)[\s\S]*if \(standingIssueSearchUrl\)[\s\S]*preflight\(forgeHome, projectRoot, input\)/);
+  assert.doesNotMatch(source, /await Promise\.all\(batch\.map/);
+  assert.match(source, /if \(completed\.has\(issue\.number\) \|\| blocked\.has\(issue\.number\) \|\| running\.has\(issue\.number\)\) continue;[\s\S]*pending\.add\(issue\.number\)/);
+  assert.match(source, /externalDependencies/);
+});

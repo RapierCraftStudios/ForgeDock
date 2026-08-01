@@ -20,9 +20,9 @@ import {
 } from "../../bin/engine/review-run.mjs";
 
 type ForgeCommand = { id: string; name: string; relativePath: string; absolutePath: string; description: string };
-type PlanIssue = { number: number; title: string; predecessors: number[]; domain: string[]; files: string[]; priority: number; inFlight?: boolean };
+type PlanIssue = { number: number; title: string; predecessors: number[]; externalDependencies?: number[]; domain: string[]; files: string[]; priority: number; inFlight?: boolean };
 type PreflightPlan = {
-	supported: boolean; reason?: string; mode?: string; pattern?: string; total?: number; maxConcurrent?: number; issues?: PlanIssue[];
+	supported: boolean; reason?: string; mode?: string; pattern?: string; input?: string; total?: number; maxConcurrent?: number; issues?: PlanIssue[];
 	edges?: Array<{ predecessor: number; successor: number; kind: string }>; ready?: number[]; dispatchNow?: number[];
 	deferred?: Array<{ number: number; reason: string }>; excluded?: Array<{ number: number; reason: string }>;
 	investigations?: number[]; warnings?: string[]; requiresDeepPlan?: boolean;
@@ -219,38 +219,71 @@ async function orchestrate(forgeHome: string, projectRoot: string, input: string
 	const completed = new Set<number>();
 	const blocked = new Set<number>();
 	const pending = new Set((plan.issues || []).map((issue) => issue.number));
+	const running = new Map<number, Promise<IssueResult & { number: number; status: string }>>();
 	const results: Array<IssueResult & { status: string }> = [];
 	const maxConcurrent = Math.max(1, Math.min(35, plan.maxConcurrent || 12));
+	const standingIssueSearchUrl = /^https:\/\//i.test(String(plan.input || "").trim());
+	let handoffPlan: PreflightPlan | undefined;
 
-	while (pending.size) {
+	while (pending.size || running.size) {
 		for (const number of [...pending]) {
-			const predecessors = issueMap.get(number)?.predecessors || [];
-			const failedDependency = predecessors.find((dependency) => blocked.has(dependency));
+			if (running.has(number)) continue;
+			const record = issueMap.get(number);
+			const dependencies = [...(record?.predecessors || []), ...(record?.externalDependencies || [])];
+			const failedDependency = dependencies.find((dependency) => blocked.has(dependency));
 			if (failedDependency !== undefined) {
 				pending.delete(number);
 				blocked.add(number);
 				results.push({ number, status: "blocked", terminalReason: "blocked", detail: `predecessor #${failedDependency} did not complete successfully` });
 			}
 		}
-		const ready = [...pending].filter((number) => (issueMap.get(number)?.predecessors || []).every((dependency) => completed.has(dependency)));
-		if (!ready.length) {
+		const ready = handoffPlan ? [] : [...pending].filter((number) => {
+			if (running.has(number)) return false;
+			const record = issueMap.get(number);
+			const dependencies = [...(record?.predecessors || []), ...(record?.externalDependencies || [])];
+			return dependencies.every((dependency) => completed.has(dependency));
+		});
+		for (const number of ready.slice(0, Math.max(0, maxConcurrent - running.size))) {
+			const task = (async () => {
+				try {
+					const result = await executeIssue(forgeHome, projectRoot, String(number), ctx);
+					return { ...result, number, status: SUCCESSFUL_TERMINALS.has(String(result.terminalReason)) ? "complete" : "blocked" };
+				} catch (error) {
+					return { number, status: "error", terminalReason: "engine-error", detail: error instanceof Error ? error.message : String(error) };
+				}
+			})();
+			running.set(number, task);
+		}
+		ctx.ui.setStatus("forgedock", `ForgeDock: running ${[...running.keys()].map((n) => `#${n}`).join(", ")}`);
+		if (!running.size) {
+			if (handoffPlan) {
+				return `${renderPlan(handoffPlan)}\n\nThe standing issue-search query now requires the full shared workflow. No newly resolved issues were dispatched: ${handoffPlan.reason || "deep planning required"}.`;
+			}
 			return `${planText}\n\n## Results\n${results.map(formatIssueResult).join("\n")}\n\nBlocked: no ready issues remain. Check dependency edges or GitHub state.`;
 		}
-		const batch = ready.slice(0, maxConcurrent);
-		ctx.ui.setStatus("forgedock", `ForgeDock: running ${batch.map((n) => `#${n}`).join(", ")}`);
-		const batchResults = await Promise.all(batch.map(async (number) => {
-			try {
-				const result = await executeIssue(forgeHome, projectRoot, String(number), ctx);
-				return { number, status: SUCCESSFUL_TERMINALS.has(String(result.terminalReason)) ? "complete" : "blocked", ...result };
-			} catch (error) {
-				return { number, status: "error", terminalReason: "engine-error", detail: error instanceof Error ? error.message : String(error) };
+
+		// Handle one completion at a time so a fast sibling can refresh a standing
+		// query and fill newly available capacity without waiting for the wave.
+		const result = await Promise.race(running.values());
+		running.delete(result.number);
+		pending.delete(result.number);
+		results.push(result);
+		if (result.status === "complete") completed.add(result.number);
+		else blocked.add(result.number);
+
+		if (standingIssueSearchUrl) {
+			const refreshed = preflight(forgeHome, projectRoot, input);
+			if (!refreshed.supported || refreshed.requiresDeepPlan) {
+				handoffPlan = refreshed;
+				continue;
 			}
-		}));
-		for (const result of batchResults) {
-			pending.delete(result.number);
-			results.push(result);
-			if (result.status === "complete") completed.add(result.number);
-			else blocked.add(result.number);
+			for (const issue of refreshed.issues || []) {
+				if (completed.has(issue.number) || blocked.has(issue.number) || running.has(issue.number)) continue;
+				issueMap.set(issue.number, issue);
+				pending.add(issue.number);
+			}
+			plan = refreshed;
+			planText = renderPlan(refreshed);
 		}
 	}
 	ctx.ui.setStatus("forgedock", "ForgeDock: batch complete");

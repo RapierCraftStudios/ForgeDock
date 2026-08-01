@@ -131,6 +131,7 @@ describe("OpenCode adapter", () => {
     });
     assert.match(skill, /node "\$FORGE_HOME\/bin\/orchestrate-preflight\.mjs"/);
     assert.match(skill, /task-result events/);
+    assert.match(skill, /issue-search URL is a standing query.*after every ordinary task completion.*re-run the same raw preflight input/s);
   });
 
   it("normalizes colon-qualified nested skill paths without changing other names", () => {

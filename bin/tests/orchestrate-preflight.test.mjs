@@ -139,10 +139,12 @@ describe("OpenCode orchestration preflight", () => {
     assert.deepEqual(plan.dispatchNow, [1]);
   });
 
-  it("supports URL label and milestone predicates without changing raw slug behavior", () => {
+  it("supports exact URL label and milestone predicates without changing raw slug behavior", () => {
     const issues = [
       issue(1, { labels: [{ name: "bug" }], milestone: { title: "planned" } }),
       issue(2, { labels: [{ name: "feature" }], milestone: { title: "planned" } }),
+      issue(3, { labels: [{ name: "bug/fix" }], milestone: { title: "release/one" } }),
+      issue(4, { labels: [{ name: "bug-fix" }], milestone: { title: "release-one" } }),
     ];
     const label = buildPreflightPlan({
       input: "https://github.com/owner/repo/issues?q=is%3Aissue+state%3Aopen+label%3Abug --confirm",
@@ -155,8 +157,21 @@ describe("OpenCode orchestration preflight", () => {
       issues,
     });
 
+    const exactLabel = buildPreflightPlan({
+      input: "https://github.com/owner/repo/issues?q=label%3A%22bug%2Ffix%22",
+      repo: "owner/repo",
+      issues,
+    });
+    const exactMilestone = buildPreflightPlan({
+      input: "https://github.com/owner/repo/issues?q=milestone%3A%22release%2Fone%22",
+      repo: "owner/repo",
+      issues,
+    });
+
     assert.deepEqual(label.issues.map((item) => item.number), [1]);
     assert.deepEqual(milestone.issues.map((item) => item.number), [1, 2]);
+    assert.deepEqual(exactLabel.issues.map((item) => item.number), [3]);
+    assert.deepEqual(exactMilestone.issues.map((item) => item.number), [3]);
     assert.deepEqual(buildPreflightPlan({ input: "no:milestone", repo: "owner/repo", issues }).issues, []);
   });
 
@@ -167,6 +182,10 @@ describe("OpenCode orchestration preflight", () => {
       ["https://github.com/owner/repo/issues", /exactly one q parameter/],
       ["https://github.com/owner/repo/issues?q=is%3Apr+state%3Aopen", /is:pr/],
       ["https://github.com/owner/repo/issues?q=is%3Aissue+state%3Aopen+assignee%3Aoctocat", /unsupported.*assignee/],
+      ["https:/github.com/owner/repo/issues?q=no%3Amilestone", /malformed/],
+      ["https//github.com/owner/repo/issues?q=no%3Amilestone", /malformed/],
+      ["https://github.com/owner/repo/issues?q=label%3Abug%2", /malformed query encoding/],
+      ["https://github.com/owner/repo/issues?q=label%3A%FF", /malformed query encoding/],
     ];
 
     for (const [input, reason] of cases) {
