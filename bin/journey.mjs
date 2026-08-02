@@ -10,7 +10,8 @@
  */
 
 import { existsSync, lstatSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "fs";
-import { join, basename } from "path";
+import { createRequire } from "module";
+import { dirname, join, basename } from "path";
 
 // ---------------------------------------------------------------------------
 // forge.yaml generation (Task 4)
@@ -1357,6 +1358,7 @@ export function isEphemeralCachePath(p) {
  * exactly what gets copied.
  */
 const PERSIST_HOME_DIRS = ["bin", "commands", "scripts", "templates", "pi"];
+const PERSIST_HOME_RUNTIME_PACKAGES = ["yaml"];
 
 /**
  * Detect whether `dir` is a git working tree — has a `.git` entry at all,
@@ -1589,11 +1591,12 @@ export async function persistHome(ctx) {
   // A missing/unreadable package.json degrades to an empty version string
   // rather than aborting the whole persist step.
   let version = "";
+  let sourcePackage = {};
   try {
-    const pkg = JSON.parse(readFileSync(join(source, "package.json"), "utf-8"));
-    version = pkg.version || "";
+    sourcePackage = JSON.parse(readFileSync(join(source, "package.json"), "utf-8"));
+    version = sourcePackage.version || "";
   } catch {
-    // proceed with version === ""
+    // proceed with version === "" and no runtime dependencies
   }
 
   // Downgrade guard (forge#2133): if a newer version is already persisted at
@@ -1644,6 +1647,21 @@ export async function persistHome(ctx) {
       filesCopied += res.copied;
       filesUnchanged += res.unchanged;
       const pruned = await removeOrphans(join(source, name), join(persistedHome, name));
+      filesRemoved += pruned.removed;
+    }
+
+    // Persist the small, audited runtime packages imported by the native adapter.
+    // The source package manager may hoist them above `source`, so resolve from the
+    // source package boundary instead of assuming `source/node_modules` exists.
+    const sourceRequire = createRequire(join(source, "package.json"));
+    for (const packageName of PERSIST_HOME_RUNTIME_PACKAGES) {
+      if (!sourcePackage.dependencies?.[packageName]) continue;
+      const packageRoot = dirname(sourceRequire.resolve(`${packageName}/package.json`));
+      const destination = join(persistedHome, "node_modules", packageName);
+      const res = await copyDirIfChanged(packageRoot, destination);
+      filesCopied += res.copied;
+      filesUnchanged += res.unchanged;
+      const pruned = await removeOrphans(packageRoot, destination);
       filesRemoved += pruned.removed;
     }
 

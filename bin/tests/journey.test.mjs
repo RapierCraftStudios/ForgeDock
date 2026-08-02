@@ -4,8 +4,10 @@
  */
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync, chmodSync, utimesSync } from "node:fs";
-import { join } from "node:path";
+import { cpSync, mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync, chmodSync, utimesSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import os from "node:os";
 import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, atomicSymlinkInstall, pruneStaleExtensionlessEntries } from "../journey.mjs";
 import { detectEnvironment } from "../env-detect.mjs";
@@ -662,6 +664,41 @@ describe("persistHome (forge#1943)", () => {
     assert.equal(readFileSync(join(home, ".forge", "scripts", "classify-lane.sh"), "utf-8"), "#!/bin/sh\n");
     assert.equal(readFileSync(join(home, ".forge", "AGENTS.md"), "utf-8"), readFileSync(join(forgeHome, "AGENTS.md"), "utf-8"));
     assert.equal(readFileSync(join(home, ".forge", "version"), "utf-8").trim(), "1.2.3");
+  });
+
+  it("persists native Pi runtime dependencies with the package artifact", async () => {
+    const forgeHome = makeSourceForgeHome();
+    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-runtime-"));
+    mkdirSyncFs(join(forgeHome, "pi", "runtime"), { recursive: true });
+    mkdirSyncFs(join(forgeHome, "bin", "engine"), { recursive: true });
+    writeFileSync(
+      join(forgeHome, "pi", "runtime", "reresolve.mjs"),
+      readFileSync(new URL("../../pi/runtime/reresolve.mjs", import.meta.url), "utf8"),
+      "utf8",
+    );
+    writeFileSync(
+      join(forgeHome, "bin", "engine", "resolve.mjs"),
+      readFileSync(new URL("../engine/resolve.mjs", import.meta.url), "utf8"),
+      "utf8",
+    );
+    const require = createRequire(import.meta.url);
+    const yamlRoot = dirname(require.resolve("yaml/package.json"));
+    cpSync(yamlRoot, join(forgeHome, "node_modules", "yaml"), { recursive: true });
+    writeFileSync(
+      join(forgeHome, "package.json"),
+      JSON.stringify({ name: "forgedock", version: "1.2.3", dependencies: { yaml: "^2.9.0" } }),
+      "utf8",
+    );
+
+    const res = await persistHome({ forgeHome, home });
+    const persistedRuntime = join(res.forgeHome, "pi", "runtime", "reresolve.mjs");
+    const runtime = await import(`${pathToFileURL(persistedRuntime).href}?persisted=${Date.now()}`);
+
+    assert.deepEqual(
+      runtime.parsePiReResolveConfig('orchestration: { reresolve: { enabled: "false" } }'),
+      { enabled: false },
+    );
+    assert.ok(existsSync(join(res.forgeHome, "node_modules", "yaml", "package.json")));
   });
 
   it("git-clone skip: does not touch ~/.forge/ at all when ctx.forgeHome is a real git clone", async () => {

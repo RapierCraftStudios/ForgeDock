@@ -175,7 +175,28 @@ test("Pi standing-query controls preserve valid YAML representations", () => {
   assert.equal(piReResolveDecision(quotedKeys, 1).reResolve, true);
   assert.equal(piReResolveDecision(quotedKeys, 2).reResolve, false);
 
-  const malformed = parsePiReResolveConfig("orchestration: [unterminated");
-  assert.deepEqual(malformed, { enabled: false });
-  assert.equal(piReResolveDecision(malformed, 0).reResolve, false);
+  const quotedFalse = parsePiReResolveConfig(`
+orchestration: { reresolve: { enabled: "false", max_rounds: 3 } }
+`);
+  assert.deepEqual(quotedFalse, { enabled: false, maxRounds: 3 });
+  assert.equal(piReResolveDecision(quotedFalse, 0).reResolve, false);
+  assert.deepEqual(
+    parsePiReResolveConfig('orchestration: { reresolve: { enabled: "on" } }'),
+    { enabled: true },
+  );
+
+  for (const invalid of [
+    "[]",
+    "orchestration: null",
+    "orchestration: [reresolve]",
+    "orchestration: { reresolve: [false] }",
+    "orchestration: { reresolve: { enabled: [false] } }",
+    "orchestration: { reresolve: { max_rounds: unlimited } }",
+    "orchestration: { reresolve: { max_rounds: -1 } }",
+    "orchestration: [unterminated",
+  ]) {
+    const failClosed = parsePiReResolveConfig(invalid);
+    assert.deepEqual(failClosed, { enabled: false });
+    assert.equal(piReResolveDecision(failClosed, 0).reResolve, false);
+  }
 });

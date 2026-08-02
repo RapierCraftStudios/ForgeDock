@@ -10,13 +10,28 @@ import { shouldReResolve } from "../../bin/engine/resolve.mjs";
 export function parsePiReResolveConfig(source) {
   try {
     const document = parse(String(source || ""));
-    const controls = document?.orchestration?.reresolve;
-    if (!controls || Array.isArray(controls) || typeof controls !== "object") return {};
+    if (!document || typeof document !== "object" || Array.isArray(document)) return { enabled: false };
+    if (!Object.hasOwn(document, "orchestration")) return {};
+    const orchestration = document.orchestration;
+    if (!orchestration || typeof orchestration !== "object" || Array.isArray(orchestration)) {
+      return { enabled: false };
+    }
+    if (!Object.hasOwn(orchestration, "reresolve")) return {};
+    const controls = orchestration.reresolve;
+    if (!controls || Array.isArray(controls) || typeof controls !== "object") return { enabled: false };
+
     const config = {};
-    if (Object.hasOwn(controls, "enabled")) config.enabled = controls.enabled;
+    if (Object.hasOwn(controls, "enabled")) {
+      const enabled = controls.enabled;
+      if (typeof enabled === "boolean") config.enabled = enabled;
+      else if (typeof enabled === "string" && /^(true|false|on|off)$/i.test(enabled.trim())) {
+        config.enabled = /^(true|on)$/i.test(enabled.trim());
+      } else return { enabled: false };
+    }
     if (Object.hasOwn(controls, "max_rounds")) {
-      const rounds = Number(controls.max_rounds);
-      if (Number.isFinite(rounds)) config.maxRounds = rounds;
+      const rounds = controls.max_rounds;
+      if (!Number.isInteger(rounds) || rounds < 0) return { enabled: false };
+      config.maxRounds = rounds;
     }
     return config;
   } catch {
