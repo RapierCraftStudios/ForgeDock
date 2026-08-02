@@ -8,6 +8,13 @@ set -euo pipefail
 
 FORGE_HOME="$(cd "$(dirname "$0")" && pwd)"
 
+# Encode the filesystem path before writing it as executable shell profile text.
+# The resulting single-quoted literal is valid in both Bash and zsh.
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+FORGE_HOME_SHELL_LITERAL=$(shell_quote "$FORGE_HOME")
+
 if ! command -v pi >/dev/null 2>&1; then
   echo "error: pi is not on PATH. Install Pi first: npm install -g --ignore-scripts @earendil-works/pi-coding-agent" >&2
   exit 1
@@ -25,7 +32,7 @@ for profile in "$HOME/.bashrc" "$HOME/.zshrc"; do
     {
       echo ""
       echo "# RapierCraft ForgeDock — autonomous development pipeline"
-      echo "export FORGE_HOME=\"$FORGE_HOME\""
+      printf 'export FORGE_HOME=%s\n' "$FORGE_HOME_SHELL_LITERAL"
     } >> "$profile"
     echo "Added FORGE_HOME to $profile"
     PROFILE_UPDATED=$((PROFILE_UPDATED + 1))
@@ -40,5 +47,5 @@ echo "Reference: $FORGE_HOME/docs/PI.md"
 if [ "$PROFILE_UPDATED" -gt 0 ]; then
   echo ""
   echo "Restart your shell or run:"
-  echo "  export FORGE_HOME=\"$FORGE_HOME\""
+  printf '  export FORGE_HOME=%s\n' "$FORGE_HOME_SHELL_LITERAL"
 fi
