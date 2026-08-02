@@ -91,6 +91,18 @@ test("Pi reviewer validates ForgeDock guidance before dispatch and reuses its pa
   );
 });
 
+test("Pi reviewer reads the complete durable comment ledger", () => {
+  assert.match(
+    extensionSource,
+    /ghJson\(projectRoot, \["api", "--paginate", "--slurp", `repos\/\$\{repo\}\/issues\/\$\{pr\}\/comments`\]\)/,
+  );
+  assert.match(extensionSource, /const pages = ghJson[\s\S]*return pages\.flat\(\);/);
+  assert.ok(
+    extensionSource.indexOf("const readComments = () =>") < extensionSource.indexOf("decideReviewRunAdmission({ comments, headSha"),
+    "the complete ledger must be loaded before review admission",
+  );
+});
+
 test("Pi phase prompt binds the worker to one phase and one working directory", () => {
   const prompt = buildPiPhasePrompt({
     forgeHome: "C:/forge",

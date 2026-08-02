@@ -320,7 +320,10 @@ async function executeReview(forgeHome: string, projectRoot: string, args: strin
 	if (!/^[0-9a-f]{40}$/.test(headSha)) throw new Error(`PR #${pr} did not expose a valid full headRefOid`);
 	if (prState.state === "MERGED") return `PR #${pr}: already merged at ${headSha.slice(0, 7)}.`;
 
-	const readComments = () => ghJson(projectRoot, ["api", `repos/${repo}/issues/${pr}/comments`]) as Array<any>;
+	const readComments = () => {
+		const pages = ghJson(projectRoot, ["api", "--paginate", "--slurp", `repos/${repo}/issues/${pr}/comments`]) as Array<Array<any>>;
+		return pages.flat();
+	};
 	let comments = readComments();
 	let admission = decideReviewRunAdmission({ comments, headSha, inline: false });
 	if (admission.reason === "stale-active-claim" && admission.receipt) {
