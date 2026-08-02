@@ -93,21 +93,28 @@ describe("OpenCode orchestration preflight", () => {
   it("retains current-run active issues as non-dispatchable conflict vertices", () => {
     const sharedFile = "## Affected Files\n- `pi/extensions/forgedock.ts`";
     const plan = buildPreflightPlan({
-      input: "https://github.com/owner/repo/issues?q=is%3Aissue+state%3Aopen+no%3Amilestone --auto",
+      input: "https://github.com/owner/repo/issues?q=is%3Aissue+state%3Aopen+label%3Aworkflow%3Aready-to-build --auto",
       repo: "owner/repo",
       issues: [
-        issue(1, { body: sharedFile }),
+        issue(1, { title: "Add migration", body: sharedFile, labels: [{ name: "workflow:ready-to-build" }] }),
         issue(2, { labels: [{ name: "workflow:building" }] }),
-        issue(3, { body: sharedFile, labels: [{ name: "workflow:building" }] }),
+        issue(3, {
+          title: "Investigate migration",
+          body: `${sharedFile}\n\nBlocked by #99`,
+          labels: [{ name: "workflow:building" }],
+        }),
       ],
       conflictIssueNumbers: [...Array(40).fill("invalid"), ...Array(40).fill(3), -1],
     });
 
     assert.deepEqual(plan.issues.map((item) => item.number), [1, 3]);
-    assert.deepEqual(plan.deferred, [{ number: 2, reason: "in-flight" }]);
+    assert.deepEqual(plan.deferred, []);
     assert.equal(plan.issues.find((item) => item.number === 3).conflictOnly, true);
     assert.deepEqual(plan.issues.find((item) => item.number === 1).predecessors, [3]);
     assert.ok(plan.edges.some((edge) => edge.kind === "same-file" && edge.predecessor === 3 && edge.successor === 1));
+    assert.ok(plan.edges.some((edge) => edge.kind === "database" && edge.predecessor === 3 && edge.successor === 1));
+    assert.deepEqual(plan.investigations, []);
+    assert.equal(plan.requiresDeepPlan, false);
     assert.deepEqual(plan.ready, []);
     assert.deepEqual(plan.dispatchNow, []);
     assert.deepEqual(plan.queued, []);

@@ -351,6 +351,12 @@ function resolveQuery(input, issues, { includeInFlight, repo, conflictIssueNumbe
     reason = `input pattern "${classified.pattern}" needs the full multi-phase resolver`;
   }
 
+  for (const issue of issues) {
+    if (conflictOnly.has(Number(issue.number)) && !selected.some((selectedIssue) => Number(selectedIssue.number) === Number(issue.number))) {
+      selected.push(issue);
+    }
+  }
+
   if (!includeInFlight) {
     for (const issue of selected) {
       if (labelsOf(issue).some((label) => IN_FLIGHT_LABELS.has(label)) && !conflictOnly.has(Number(issue.number))) {
@@ -401,7 +407,7 @@ export function buildPreflightPlan({ input, repo = "", issues = [], maxConcurren
     const labels = labelsOf(issue);
     const excludedLabel = labels.find((label) => EXCLUDED_LABELS.has(label));
     const isCoordinationIssue = /FORGE:COORD_ISSUE|orchestrate:\s*claims board/i.test(String(issue.body || ""));
-    if (excludedLabel || isCoordinationIssue || String(issue.state || "").toUpperCase() === "CLOSED") {
+    if (!conflictOnly.has(Number(issue.number)) && (excludedLabel || isCoordinationIssue || String(issue.state || "").toUpperCase() === "CLOSED")) {
       excluded.push({ number: Number(issue.number), reason: excludedLabel || (isCoordinationIssue ? "orchestration coordination issue" : "closed") });
       continue;
     }
@@ -442,10 +448,16 @@ export function buildPreflightPlan({ input, repo = "", issues = [], maxConcurren
 
   const databaseIssues = admitted
     .filter((issue) => domainsFor(issue).includes("DATABASE"))
-    .map((issue) => Number(issue.number))
-    .sort((a, b) => a - b);
-  for (let index = 1; index < databaseIssues.length; index++) {
-    addEdge(predecessors, databaseIssues[index - 1], databaseIssues[index], "database", edges);
+    .map((issue) => Number(issue.number));
+  const activeDatabaseIssues = databaseIssues.filter((number) => conflictOnly.has(number));
+  const selectableDatabaseIssues = databaseIssues.filter((number) => !conflictOnly.has(number)).sort((a, b) => a - b);
+  for (const active of activeDatabaseIssues) {
+    for (const selectable of selectableDatabaseIssues) {
+      addEdge(predecessors, active, selectable, "database", edges);
+    }
+  }
+  for (let index = 1; index < selectableDatabaseIssues.length; index++) {
+    addEdge(predecessors, selectableDatabaseIssues[index - 1], selectableDatabaseIssues[index], "database", edges);
   }
 
   const records = admitted
@@ -468,14 +480,14 @@ export function buildPreflightPlan({ input, repo = "", issues = [], maxConcurren
     })
     .sort((a, b) => b.priority - a.priority || a.number - b.number);
 
-  const investigations = records.filter((issue) => issue.classification === "INVESTIGATION");
+  const investigations = records.filter((issue) => !issue.conflictOnly && issue.classification === "INVESTIGATION");
   const ready = records
     .filter((issue) => !issue.conflictOnly && issue.predecessors.length === 0 && issue.externalDependencies.length === 0)
     .sort((a, b) => b.priority - a.priority || a.number - b.number)
     .map((issue) => issue.number);
   const effectiveMax = Number.isInteger(maxConcurrent) && maxConcurrent > 0 ? maxConcurrent : 12;
   const deepPlan = flags.deepPlan || query.pattern === "cascade" || query.pattern === "repo-scoped";
-  const hasExternalDependencies = externalDependencies.size > 0;
+  const hasExternalDependencies = records.some((issue) => !issue.conflictOnly && issue.externalDependencies.length > 0);
   const requiresDeepPlanWithoutExternalDependencies = deepPlan || investigations.length > 0;
   const requiresDeepPlan = requiresDeepPlanWithoutExternalDependencies || hasExternalDependencies;
   const warnings = [
@@ -523,7 +535,7 @@ export function reconcileCompletedDependencies(plan, completedDependencies = [])
     ...issue,
     externalDependencies: (issue.externalDependencies || []).filter((dependency) => !completed.has(dependency)),
   }));
-  const hasExternalDependencies = issues.some((issue) => issue.externalDependencies.length > 0);
+  const hasExternalDependencies = issues.some((issue) => !issue.conflictOnly && issue.externalDependencies.length > 0);
   const requiresDeepPlan = Boolean(plan.requiresDeepPlanWithoutExternalDependencies || hasExternalDependencies);
   const ready = issues
     .filter((issue) => !issue.conflictOnly && issue.predecessors.length === 0 && issue.externalDependencies.length === 0)
