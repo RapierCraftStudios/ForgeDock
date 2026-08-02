@@ -1764,21 +1764,86 @@ done
    PRED_CURRENT_LABEL=$(gh issue view "$PRED" -R {GH_REPO} --json labels \
      --jq '[.labels[].name | select(. == "needs-human" or . == "workflow:awaiting-merge")] | .[0] // empty' 2>/dev/null)
 
-   if [ "$PRED_CURRENT_LABEL" = "needs-human" ]; then
+   if [ "$PRED_CURRENT_LABEL" = "needs-human" ] && [ "${DRY_RUN:-false}" = "true" ]; then
+     echo "DRY_RUN: would evaluate and, if eligible, dispatch remediation for issue #${PRED}; no remediation Agent or GitHub/git writer will run"
+   elif [ "$PRED_CURRENT_LABEL" = "needs-human" ]; then
      # Resolve PRED's open PR using the anchored search (forge#1634/#1646 precedent —
      # never a bare-number search, which would misattribute an unrelated PR).
      GATING_PR=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${PRED}\" in:body" \
        --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
 
      if [ -n "$GATING_PR" ]; then
-       # Idempotency guard: only one remediation attempt per PR, ever (single-attempt
-       # semantics — remediate.md's own Phase M0 enforces this too, but checking here
-       # avoids spawning a redundant agent that would immediately no-op on entry).
-       ALREADY_REMEDIATED=$(gh api repos/{GH_REPO}/issues/${GATING_PR}/comments \
-         --jq '[.[] | select(.body | contains("FORGE:REMEDIATION"))] | length' 2>/dev/null || echo "0")
+       # Cycle-scoped idempotency guard. Derive the cycle key with the canonical identity
+       # recipe below and keep it synchronized
+       # with work-on/remediate.md Phase M0: lowercased full reviewed HEAD SHA plus the
+       # sorted unique confirmed HIGH/CRITICAL blocker-finding numbers. A read failure is
+       # not an empty set and fails closed without dispatch.
+       MAX_REMEDIATION_CYCLES=3
+       set +e
+       GATING_HEAD_RAW=$(gh pr view "$GATING_PR" -R {GH_REPO} --json headRefOid --jq '.headRefOid // empty' 2>/dev/null)
+       HEAD_EXIT=$?
+       GATING_HEAD=$(printf '%s' "$GATING_HEAD_RAW" | tr '[:upper:]' '[:lower:]')
+       GATING_BLOCKERS=$(gh issue list -R {GH_REPO} --state open --label review-finding --limit 100 \
+         --json number,title,body \
+         --jq "[.[] | select(.body | test(\"(?m)^\\\\*\\\\*Source\\\\*\\\\*:[[:space:]]*PR #${GATING_PR}([[:space:]]+—.*)?[[:space:]]*$\")) | select(.body | test(\"(?m)^\\\\*\\\\*Confidence\\\\*\\\\*:[[:space:]]*CONFIRMED[[:space:]]*$\")) | select(.body | test(\"(?m)^\\\\*\\\\*Severity\\\\*\\\\*:[[:space:]]*(HIGH|CRITICAL)[[:space:]]*$\"))]" 2>/dev/null)
+       BLOCKER_EXIT=$?
+       REMEDIATION_COMMENT_PAGES=$(gh api repos/{GH_REPO}/issues/${GATING_PR}/comments --paginate --slurp 2>/dev/null)
+       COMMENTS_EXIT=$?
+       set -e
+       REMEDIATION_COMMENTS=$(echo "$REMEDIATION_COMMENT_PAGES" | jq '
+         def trusted: (.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR"));
+         (add // []) | map(select(trusted))' 2>/dev/null || echo 'null')
 
-       if [ "$ALREADY_REMEDIATED" -eq 0 ]; then
-         echo "Dispatching remediation for #{PRED}'s gating PR #{GATING_PR} (needs-human)"
+       if [ "$HEAD_EXIT" -ne 0 ] || [ -z "$GATING_HEAD" ] || [ "$BLOCKER_EXIT" -ne 0 ] || \
+          ! echo "$GATING_BLOCKERS" | jq -e 'type == "array"' >/dev/null 2>&1 || \
+          [ "$COMMENTS_EXIT" -ne 0 ] || ! echo "$REMEDIATION_COMMENTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
+         echo "Remediation eligibility for PR #${GATING_PR} is ambiguous — fail closed; retry on the next completion cycle"
+         REMEDIATION_ELIGIBLE=false
+       else
+         GATING_FINDING_SET=$(echo "$GATING_BLOCKERS" | jq -r 'map(.number) | unique | sort | map(tostring) | join(",")')
+         GATING_CYCLE_KEY="${GATING_HEAD}:${GATING_FINDING_SET:-none}"
+         SAME_CYCLE_RECEIPTS=$(echo "$REMEDIATION_COMMENTS" | jq --arg key "$GATING_CYCLE_KEY" '
+           def hasline($line): .body | split("\n") | any(. == $line);
+           [.[] | select((.body | contains("FORGE:REMEDIATION")) and hasline("**Cycle key**: `" + $key + "`"))]')
+         DISTINCT_COMPLETED_CYCLES=$(echo "$REMEDIATION_COMMENTS" | jq '
+           def hasline($line): .body | split("\n") | any(. == $line);
+           [.[]
+             | select(hasline("**Cycle attempted**: false") | not)
+             | select((.body | contains("FORGE:REMEDIATION:COMPLETE")) or hasline("**Cycle state**: COMPLETE-CONTINUE"))
+             | .body | capture("(?m)^\\*\\*Cycle key\\*\\*: `(?<key>[^`]+)`[[:space:]]*$")?.key]
+           | map(select(. != null)) | unique | length')
+         # Claims are immutable and never expire from elapsed wall time. This prevents a
+         # blocking child of any duration from overlapping a replacement. Recovery requires
+         # a trusted explicit RELEASED receipt for the exact owner after verifying it stopped.
+         # A stale progress receipt is not authority by itself: after its claim is explicitly
+         # released, recovery must be able to elect a replacement for the same cycle.
+         SAME_CYCLE_ACTIVE=$(echo "$SAME_CYCLE_RECEIPTS" | jq '
+           def hasline($line): .body | split("\n") | any(. == $line);
+           def owner: .body | capture("(?m)^\\*\\*Owner token\\*\\*: `(?<v>[^`]+)`[[:space:]]*$")?.v // "";
+           . as $all
+           | [.[] | select((.body | contains("FORGE:REMEDIATION:COMPLETE")) or hasline("**Cycle state**: COMPLETE-CONTINUE"))]
+             + [.[]
+               | select(hasline("**State**: CLAIMED") or hasline("**State**: CAP_CLAIM"))
+               | owner as $owner
+               | select($owner != "")
+               | select([$all[] | select(hasline("**State**: RELEASED") and (owner == $owner))] | length == 0)]
+           | length')
+         if [ "$SAME_CYCLE_ACTIVE" -gt 0 ]; then
+           REMEDIATION_ELIGIBLE=false
+           echo "Remediation cycle ${GATING_CYCLE_KEY} is already claimed or complete — duplicate dispatch suppressed"
+         elif [ "$DISTINCT_COMPLETED_CYCLES" -ge "$MAX_REMEDIATION_CYCLES" ]; then
+           # Dispatch the bounded remediator once more so M0 can write the cap-only terminal
+           # receipt. Competing finalizers serialize through M8's immutable CAP_CLAIM election;
+           # no fourth remediation cycle is attempted.
+           REMEDIATION_ELIGIBLE=true
+           echo "Remediation cap reached for PR #${GATING_PR} (${DISTINCT_COMPLETED_CYCLES}/${MAX_REMEDIATION_CYCLES}); dispatching cap-only finalization for ${GATING_CYCLE_KEY}"
+         else
+           REMEDIATION_ELIGIBLE=true
+         fi
+       fi
+
+       if [ "$REMEDIATION_ELIGIBLE" = "true" ]; then
+         echo "Dispatching remediation cycle ${GATING_CYCLE_KEY} for #{PRED}'s gating PR #{GATING_PR} (needs-human)"
          # Same Agent-spawn-fallback style as Step 4A's template — one background agent,
          # whose sole job is to invoke /work-on in remediation mode and let it run to
          # completion (AUTO-LANDED, HELD-AWAITING-MERGE, RE-ESCALATED, or UNFIXABLE — all
