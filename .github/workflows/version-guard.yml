@@ -6,7 +6,10 @@ name: Deploy Version Guard
 # advances so an older green result cannot remain merge-valid.
 
 on:
-  pull_request:
+  # This privileged event is safe here because the workflow never checks out or
+  # executes PR code; it reads immutable package blobs through the GitHub API.
+  # Unlike pull_request, its token can publish the required status for fork PRs.
+  pull_request_target:
     types: [opened, synchronize, reopened]
     branches:
       - main
@@ -171,13 +174,42 @@ jobs:
 
           function parseSemver(value) {
             if (typeof value !== 'string') return null;
-            const match = value.match(/^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/);
-            return match ? match.slice(1, 4).map(Number) : null;
+            const identifier = '(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)';
+            const buildIdentifier = '[0-9A-Za-z-]+';
+            const pattern = new RegExp(
+              `^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)` +
+              `(?:-(${identifier}(?:\\.${identifier})*))?` +
+              `(?:\\+${buildIdentifier}(?:\\.${buildIdentifier})*)?$`,
+            );
+            const match = value.match(pattern);
+            if (!match) return null;
+            return {
+              core: match.slice(1, 4).map(Number),
+              prerelease: match[4] ? match[4].split('.') : [],
+            };
           }
 
           function compare(left, right) {
             for (let index = 0; index < 3; index += 1) {
-              if (left[index] !== right[index]) return left[index] - right[index];
+              if (left.core[index] !== right.core[index]) {
+                return left.core[index] - right.core[index];
+              }
+            }
+            if (left.prerelease.length === 0 || right.prerelease.length === 0) {
+              return right.prerelease.length - left.prerelease.length;
+            }
+            const count = Math.max(left.prerelease.length, right.prerelease.length);
+            for (let index = 0; index < count; index += 1) {
+              const leftId = left.prerelease[index];
+              const rightId = right.prerelease[index];
+              if (leftId === undefined) return -1;
+              if (rightId === undefined) return 1;
+              if (leftId === rightId) continue;
+              const leftNumeric = /^\\d+$/.test(leftId);
+              const rightNumeric = /^\\d+$/.test(rightId);
+              if (leftNumeric && rightNumeric) return Number(leftId) - Number(rightId);
+              if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+              return leftId < rightId ? -1 : 1;
             }
             return 0;
           }
@@ -258,7 +290,7 @@ jobs:
           GUARD_REASON: ${{ steps.compare.outputs.reason }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          set -u
+          set -euo pipefail
           FINAL_STATE="${GUARD_STATE:-failure}"
           if [ "$FINAL_STATE" != "success" ] && [ "$FINAL_STATE" != "failure" ]; then
             FINAL_STATE=failure
@@ -269,6 +301,25 @@ jobs:
             -f context="${STATUS_CONTEXT}" \
             -f description="$DESCRIPTION" \
             -f target_url="${RUN_URL}"
+
+          # Close the final-write TOCTOU window. If either ref changed before
+          # this post-write read, restore pending so this obsolete run cannot
+          # overwrite the publisher's invalidation with stale success. If the
+          # ref changes after these reads, the publisher's later pending write
+          # wins instead.
+          if [ "$FINAL_STATE" = "success" ]; then
+            CURRENT_HEAD_SHA=$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha // empty' 2>/dev/null || true)
+            CURRENT_BASE_SHA=$(gh api "repos/${REPOSITORY}/branches/main" --jq '.commit.sha // empty' 2>/dev/null || true)
+            if [ "$CURRENT_HEAD_SHA" != "$HEAD_SHA" ] || [ "$CURRENT_BASE_SHA" != "${{ steps.resolve.outputs.base_sha }}" ]; then
+              gh api "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
+                -f state=pending \
+                -f context="${STATUS_CONTEXT}" \
+                -f description="Refs changed after evaluation; waiting for current revalidation" \
+                -f target_url="${RUN_URL}"
+              echo "Refs changed during final publication; stale success was restored to pending."
+              exit 1
+            fi
+          fi
           if [ "$FINAL_STATE" != "success" ]; then
             exit 1
           fi

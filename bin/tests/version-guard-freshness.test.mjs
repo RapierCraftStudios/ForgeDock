@@ -14,19 +14,46 @@ const checkCommands = fs.readFileSync(path.join(root, '.github/workflows/check-c
 
 function parseSemver(value) {
   if (typeof value !== 'string') return null;
-  const match = value.match(/^(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/);
-  return match ? match.slice(1, 4).map(Number) : null;
+  const identifier = '(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)';
+  const buildIdentifier = '[0-9A-Za-z-]+';
+  const pattern = new RegExp(
+    `^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)` +
+      `(?:-(${identifier}(?:\\.${identifier})*))?` +
+      `(?:\\+${buildIdentifier}(?:\\.${buildIdentifier})*)?$`,
+  );
+  const match = value.match(pattern);
+  if (!match) return null;
+  return { core: match.slice(1, 4).map(Number), prerelease: match[4]?.split('.') ?? [] };
+}
+
+function compareParsed(left, right) {
+  for (let index = 0; index < 3; index += 1) {
+    if (left.core[index] !== right.core[index]) return left.core[index] - right.core[index];
+  }
+  if (left.prerelease.length === 0 || right.prerelease.length === 0) {
+    return right.prerelease.length - left.prerelease.length;
+  }
+  const count = Math.max(left.prerelease.length, right.prerelease.length);
+  for (let index = 0; index < count; index += 1) {
+    const leftId = left.prerelease[index];
+    const rightId = right.prerelease[index];
+    if (leftId === undefined) return -1;
+    if (rightId === undefined) return 1;
+    if (leftId === rightId) continue;
+    const leftNumeric = /^\d+$/.test(leftId);
+    const rightNumeric = /^\d+$/.test(rightId);
+    if (leftNumeric && rightNumeric) return Number(leftId) - Number(rightId);
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return leftId < rightId ? -1 : 1;
+  }
+  return 0;
 }
 
 function compareVersions(left, right) {
   const parsedLeft = parseSemver(left);
   const parsedRight = parseSemver(right);
   if (!parsedLeft || !parsedRight) return 'failure';
-  for (let index = 0; index < 3; index += 1) {
-    if (parsedLeft[index] < parsedRight[index]) return 'failure';
-    if (parsedLeft[index] > parsedRight[index]) return 'success';
-  }
-  return 'success';
+  return compareParsed(parsedLeft, parsedRight) < 0 ? 'failure' : 'success';
 }
 
 function revalidate(baseVersion, headVersion, priorStatus = 'success') {
@@ -54,6 +81,10 @@ test('fresh comparison passes equal and newer versions and blocks lower versions
   assert.equal(compareVersions('1.7.1', '1.8.0'), 'failure');
   assert.equal(compareVersions('1.8.0', '1.8.0'), 'success');
   assert.equal(compareVersions('1.8.1', '1.8.0'), 'success');
+  assert.equal(compareVersions('1.8.0-alpha', '1.8.0'), 'failure');
+  assert.equal(compareVersions('1.8.0-alpha.2', '1.8.0-alpha.10'), 'failure');
+  assert.equal(compareVersions('1.8.0-beta', '1.8.0-alpha'), 'success');
+  assert.equal(compareVersions('1.8.0+build.2', '1.8.0+build.1'), 'success');
 });
 
 test('missing, malformed, and non-semver metadata fails closed', () => {
@@ -65,6 +96,7 @@ test('missing, malformed, and non-semver metadata fails closed', () => {
 
 test('version guard has one exact-head, status-backed freshness contract', () => {
   for (const required of [
+    'pull_request_target:',
     'workflow_dispatch:',
     'expected_head_sha:',
     'expected_base_sha:',
@@ -77,14 +109,20 @@ test('version guard has one exact-head, status-backed freshness contract', () =>
     'contents/package.json?ref=${ref}',
     'Mark current PR head pending',
     'Revalidate refs before final status',
+    'Refs changed after evaluation; waiting for current revalidation',
   ]) {
     assert.match(versionGuard, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
 
   assert.ok(versionGuard.indexOf('Mark current PR head pending') < versionGuard.indexOf('Compare head against current main'));
   assert.ok(versionGuard.indexOf('Compare head against current main') < versionGuard.indexOf('Publish final freshness status'));
+  const finalStatusStep = versionGuard.slice(
+    versionGuard.indexOf('- name: Publish final freshness status'),
+    versionGuard.indexOf('- name: Report stale run without overwriting newer status'),
+  );
+  assert.match(finalStatusStep, /run: \|\n\s+set -euo pipefail/);
   assert.doesNotMatch(versionGuard, /actions\/checkout/);
-  assert.doesNotMatch(versionGuard, /pull_request_target/);
+  assert.doesNotMatch(versionGuard, /github\.event\.pull_request\.head\.repo.*checkout/);
   assert.doesNotMatch(versionGuard, /npm (ci|install|publish)/);
 });
 
@@ -107,9 +145,18 @@ test('publisher invalidates and dispatches every open main-targeting PR after pu
     "if: always() && github.ref == 'refs/heads/main'",
     ".github/workflows/version-guard.yml",
     ".github/workflows/check-commands.yml",
+    'VALID_PRS=$(mktemp)',
+    'while IFS=$\'\\t\' read -r PR_NUMBER HEAD_SHA',
+    'One or more version-guard invalidations or dispatches failed.',
   ]) {
     assert.match(publish, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
+
+  const invalidation = publish.indexOf('-f state=pending');
+  const dispatch = publish.indexOf('gh workflow run version-guard.yml');
+  assert.ok(invalidation >= 0 && dispatch > invalidation);
+  assert.match(publish, /if ! gh api[\s\S]*FAILED=1/);
+  assert.match(publish, /if ! gh workflow run[\s\S]*FAILED=1/);
 });
 
 test('command checks run freshness coverage when either workflow or the test wiring changes', () => {

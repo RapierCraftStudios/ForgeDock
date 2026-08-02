@@ -218,30 +218,51 @@ jobs:
             exit 0
           fi
 
+          VALID_PRS=$(mktemp)
+          trap 'rm -f "$VALID_PRS"' EXIT
+          FAILED=0
+
+          # Invalidate every eligible head before dispatching any workflow. A
+          # failure for one PR must not leave later PRs with stale successes.
           while IFS=$'\t' read -r PR_NUMBER HEAD_SHA; do
             [ -n "$PR_NUMBER" ] || continue
             if ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-              echo "Invalid head SHA for PR #${PR_NUMBER}; refusing to dispatch an unverifiable guard."
-              exit 1
+              echo "Invalid head SHA for PR #${PR_NUMBER}; cannot invalidate it."
+              FAILED=1
+              continue
             fi
-
-            # Invalidate the old green result before dispatching. The guard's
-            # required context is therefore pending even if dispatch/API work
-            # fails, and a stale success cannot satisfy branch protection.
-            gh api "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
+            printf '%s\t%s\n' "$PR_NUMBER" "$HEAD_SHA" >> "$VALID_PRS"
+            if ! gh api "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
               -f state=pending \
               -f context="${STATUS_CONTEXT}" \
               -f description="Waiting for main version revalidation for PR #${PR_NUMBER}" \
-              -f target_url="${GITHUB_SERVER_URL}/${REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+              -f target_url="${GITHUB_SERVER_URL}/${REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"; then
+              echo "Failed to invalidate version status for PR #${PR_NUMBER}."
+              FAILED=1
+            fi
+          done <<< "$PRS"
 
-            gh workflow run version-guard.yml \
+          # Attempt every dispatch and aggregate failures only after the full
+          # fanout, preserving pending statuses for all successfully invalidated
+          # heads even when an earlier dispatch fails.
+          while IFS=$'\t' read -r PR_NUMBER HEAD_SHA; do
+            if ! gh workflow run version-guard.yml \
               --repo "$REPOSITORY" \
               --ref main \
               -f "pr_number=${PR_NUMBER}" \
               -f "expected_head_sha=${HEAD_SHA}" \
-              -f "expected_base_sha=${BASE_SHA}"
+              -f "expected_base_sha=${BASE_SHA}"; then
+              echo "Failed to dispatch version guard for PR #${PR_NUMBER}."
+              FAILED=1
+              continue
+            fi
             echo "Dispatched version guard for PR #${PR_NUMBER} at head ${HEAD_SHA}."
-          done <<< "$PRS"
+          done < "$VALID_PRS"
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "One or more version-guard invalidations or dispatches failed."
+            exit 1
+          fi
 
       - name: Create GitHub Release
         if: env.SKIP_PUBLISH != 'true'
