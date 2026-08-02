@@ -666,38 +666,46 @@ describe("persistHome (forge#1943)", () => {
     assert.equal(readFileSync(join(home, ".forge", "version"), "utf-8").trim(), "1.2.3");
   });
 
-  it("persists native Pi runtime dependencies with the package artifact", async () => {
+  it("loads the Pi extension from the exact persisted package artifact", async () => {
     const forgeHome = makeSourceForgeHome();
     const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-runtime-"));
-    mkdirSyncFs(join(forgeHome, "pi", "runtime"), { recursive: true });
-    mkdirSyncFs(join(forgeHome, "bin", "engine"), { recursive: true });
-    writeFileSync(
-      join(forgeHome, "pi", "runtime", "reresolve.mjs"),
-      readFileSync(new URL("../../pi/runtime/reresolve.mjs", import.meta.url), "utf8"),
-      "utf8",
-    );
-    writeFileSync(
-      join(forgeHome, "bin", "engine", "resolve.mjs"),
-      readFileSync(new URL("../engine/resolve.mjs", import.meta.url), "utf8"),
-      "utf8",
-    );
+    const copyArtifactPath = (sourceUrl, ...destinationSegments) => {
+      const destination = join(forgeHome, ...destinationSegments);
+      mkdirSyncFs(dirname(destination), { recursive: true });
+      cpSync(sourceUrl, destination, { recursive: true });
+    };
+
+    copyArtifactPath(new URL("../../pi/extensions/forgedock.ts", import.meta.url), "pi", "extensions", "forgedock.ts");
+    copyArtifactPath(new URL("../../pi/runtime", import.meta.url), "pi", "runtime");
+    copyArtifactPath(new URL("../engine.mjs", import.meta.url), "bin", "engine.mjs");
+    copyArtifactPath(new URL("../engine", import.meta.url), "bin", "engine");
+    copyArtifactPath(new URL("../runner.mjs", import.meta.url), "bin", "runner.mjs");
+    copyArtifactPath(new URL("../forge-utils.mjs", import.meta.url), "bin", "forge-utils.mjs");
+    copyArtifactPath(new URL("../cli-spawn-shared.mjs", import.meta.url), "bin", "cli-spawn-shared.mjs");
+    copyArtifactPath(new URL("../../packages/protocol/src", import.meta.url), "packages", "protocol", "src");
+
     const require = createRequire(import.meta.url);
     const yamlRoot = dirname(require.resolve("yaml/package.json"));
     cpSync(yamlRoot, join(forgeHome, "node_modules", "yaml"), { recursive: true });
     writeFileSync(
       join(forgeHome, "package.json"),
-      JSON.stringify({ name: "forgedock", version: "1.2.3", dependencies: { yaml: "^2.9.0" } }),
+      JSON.stringify({ name: "forgedock", version: "1.2.3", type: "module", dependencies: { yaml: "^2.9.0" } }),
       "utf8",
     );
 
     const res = await persistHome({ forgeHome, home });
-    const persistedRuntime = join(res.forgeHome, "pi", "runtime", "reresolve.mjs");
-    const runtime = await import(`${pathToFileURL(persistedRuntime).href}?persisted=${Date.now()}`);
+    const persistedExtension = join(res.forgeHome, "pi", "extensions", "forgedock.ts");
+    const persistedProtocol = join(res.forgeHome, "packages", "protocol", "src", "phases.js");
+    const extensionSource = readFileSync(persistedExtension, "utf8");
+    const localImports = [...extensionSource.matchAll(/\bfrom\s+["'](\.\.?\/[^"']+)["']/g)]
+      .map((match) => match[1]);
 
-    assert.deepEqual(
-      runtime.parsePiReResolveConfig('orchestration: { reresolve: { enabled: "false" } }'),
-      { enabled: false },
-    );
+    assert.ok(localImports.length > 0, "the exact persisted extension entrypoint must expose local runtime imports");
+    for (const specifier of localImports) {
+      const runtimeUrl = new URL(specifier, pathToFileURL(persistedExtension));
+      await import(`${runtimeUrl.href}?persisted=${Date.now()}`);
+    }
+    assert.ok(existsSync(persistedProtocol));
     assert.ok(existsSync(join(res.forgeHome, "node_modules", "yaml", "package.json")));
   });
 

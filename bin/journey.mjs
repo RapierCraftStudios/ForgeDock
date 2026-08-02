@@ -1358,6 +1358,7 @@ export function isEphemeralCachePath(p) {
  * exactly what gets copied.
  */
 const PERSIST_HOME_DIRS = ["bin", "commands", "scripts", "templates", "pi"];
+const PERSIST_HOME_SUBTREES = ["packages/protocol/src"];
 const PERSIST_HOME_RUNTIME_PACKAGES = ["yaml"];
 
 /**
@@ -1647,6 +1648,19 @@ export async function persistHome(ctx) {
       filesCopied += res.copied;
       filesUnchanged += res.unchanged;
       const pruned = await removeOrphans(join(source, name), join(persistedHome, name));
+      filesRemoved += pruned.removed;
+    }
+
+    // Persist only the internal package subtrees imported by the native runtime.
+    // Keeping these paths explicit avoids copying unrelated future packages while
+    // preserving the package-relative imports used by the engine.
+    for (const relativePath of PERSIST_HOME_SUBTREES) {
+      const sourceDir = join(source, relativePath);
+      const destination = join(persistedHome, relativePath);
+      const res = await copyDirIfChanged(sourceDir, destination);
+      filesCopied += res.copied;
+      filesUnchanged += res.unchanged;
+      const pruned = await removeOrphans(sourceDir, destination);
       filesRemoved += pruned.removed;
     }
 
