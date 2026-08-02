@@ -157,3 +157,21 @@ orchestration:
   assert.equal(piReResolveDecision(bounded, 1).reResolve, true);
   assert.equal(piReResolveDecision(bounded, 2).reResolve, false);
 });
+
+test("Pi standing-query controls preserve valid YAML representations", () => {
+  const inline = parsePiReResolveConfig(`
+"orchestration": { "reresolve": { "enabled": false, "max_rounds": 1 } }
+`);
+  assert.deepEqual(inline, { enabled: false, maxRounds: 1 });
+  assert.equal(piReResolveDecision(inline, 0).reResolve, false);
+
+  const quotedKeys = parsePiReResolveConfig(`
+'orchestration':
+  'reresolve':
+    'enabled': true
+    'max_rounds': 2
+`);
+  assert.deepEqual(quotedKeys, { enabled: true, maxRounds: 2 });
+  assert.equal(piReResolveDecision(quotedKeys, 1).reResolve, true);
+  assert.equal(piReResolveDecision(quotedKeys, 2).reResolve, false);
+});
