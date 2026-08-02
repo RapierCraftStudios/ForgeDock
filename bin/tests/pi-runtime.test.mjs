@@ -134,6 +134,13 @@ test("Pi re-resolves standing issue-search URLs after each ordinary completion e
   assert.match(source, /externalDependencies/);
 });
 
+test("Pi clears a stale deep-plan handoff when a later refresh returns to compact mode", () => {
+  assert.match(
+    extensionSource,
+    /if \(!refreshed\.supported \|\| refreshed\.requiresDeepPlan\) \{[\s\S]*handoffPlan = refreshed;[\s\S]*continue;[\s\S]*\}[\s\S]*handoffPlan = undefined;[\s\S]*for \(const issue of refreshed\.issues \|\| \[\]\)/,
+  );
+});
+
 test("Pi standing-query refresh honors the configured disable switch and round cap", () => {
   const disabled = parsePiReResolveConfig(`
 project:

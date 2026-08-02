@@ -283,6 +283,7 @@ async function orchestrate(forgeHome: string, projectRoot: string, input: string
 				handoffPlan = refreshed;
 				continue;
 			}
+			handoffPlan = undefined;
 			for (const issue of refreshed.issues || []) {
 				if (completed.has(issue.number) || blocked.has(issue.number) || running.has(issue.number)) continue;
 				issueMap.set(issue.number, issue);
