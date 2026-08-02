@@ -19,6 +19,7 @@ import {
 	scopedReviewerDomains,
 } from "../../bin/engine/review-run.mjs";
 import { loadPiReResolveConfig, piReResolveDecision } from "../runtime/reresolve.mjs";
+import { reconcileCompletedDependencies } from "../../bin/orchestrate-preflight.mjs";
 
 type ForgeCommand = { id: string; name: string; relativePath: string; absolutePath: string; description: string };
 type PlanIssue = { number: number; title: string; predecessors: number[]; externalDependencies?: number[]; domain: string[]; files: string[]; priority: number; inFlight?: boolean };
@@ -26,7 +27,8 @@ type PreflightPlan = {
 	supported: boolean; reason?: string; mode?: string; pattern?: string; input?: string; total?: number; maxConcurrent?: number; issues?: PlanIssue[];
 	edges?: Array<{ predecessor: number; successor: number; kind: string }>; ready?: number[]; dispatchNow?: number[];
 	deferred?: Array<{ number: number; reason: string }>; excluded?: Array<{ number: number; reason: string }>;
-	investigations?: number[]; warnings?: string[]; requiresDeepPlan?: boolean;
+	investigations?: number[]; warnings?: string[]; requiresDeepPlanWithoutExternalDependencies?: boolean; requiresDeepPlan?: boolean;
+	confirmed?: boolean; queued?: number[];
 };
 type IssueResult = { number: number; terminalReason?: string | null; detail?: string; code?: number | null; status?: string };
 
@@ -276,11 +278,12 @@ async function orchestrate(forgeHome: string, projectRoot: string, input: string
 
 		if (standingIssueSearchUrl && piReResolveDecision(reResolveConfig, reResolveRounds).reResolve) {
 			reResolveRounds += 1;
-			const refreshed = preflight(forgeHome, projectRoot, input);
+			const refreshed = reconcileCompletedDependencies(preflight(forgeHome, projectRoot, input), completed) as PreflightPlan;
 			if (!refreshed.supported || refreshed.requiresDeepPlan) {
 				handoffPlan = refreshed;
 				continue;
 			}
+			handoffPlan = undefined;
 			for (const issue of refreshed.issues || []) {
 				if (completed.has(issue.number) || blocked.has(issue.number) || running.has(issue.number)) continue;
 				issueMap.set(issue.number, issue);

@@ -678,6 +678,7 @@ describe("persistHome (forge#1943)", () => {
     copyArtifactPath(new URL("../../pi/extensions/forgedock.ts", import.meta.url), "pi", "extensions", "forgedock.ts");
     copyArtifactPath(new URL("../../pi/runtime", import.meta.url), "pi", "runtime");
     copyArtifactPath(new URL("../engine.mjs", import.meta.url), "bin", "engine.mjs");
+    copyArtifactPath(new URL("../orchestrate-preflight.mjs", import.meta.url), "bin", "orchestrate-preflight.mjs");
     copyArtifactPath(new URL("../engine", import.meta.url), "bin", "engine");
     copyArtifactPath(new URL("../runner.mjs", import.meta.url), "bin", "runner.mjs");
     copyArtifactPath(new URL("../forge-utils.mjs", import.meta.url), "bin", "forge-utils.mjs");
