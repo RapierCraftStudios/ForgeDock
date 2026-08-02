@@ -110,13 +110,19 @@ if [ "$PR_COMMENTS_EXIT" -ne 0 ] || ! echo "$PR_REMEDIATION_COMMENTS" | jq -e 't
   # EXIT REMEDIATE_RESULT: status: BLOCKED
 fi
 
-COMPLETED_CYCLE_KEYS=$(echo "$PR_REMEDIATION_COMMENTS" | jq -r \
-  '[.[] | select(.body | (contains("**Cycle attempted**: false") | not)) | select(.body | (contains("FORGE:REMEDIATION:COMPLETE") or contains("**Cycle state**: COMPLETE-CONTINUE"))) | .body | capture("\\*\\*Cycle key\\*\\*: `(?<key>[^`]+)`")?.key] | map(select(. != null)) | unique | .[]')
+COMPLETED_CYCLE_KEYS=$(echo "$PR_REMEDIATION_COMMENTS" | jq -r '
+  def hasline($line): .body | split("\n") | any(. == $line);
+  [.[]
+    | select(hasline("**Cycle attempted**: false") | not)
+    | select((.body | contains("FORGE:REMEDIATION:COMPLETE")) or hasline("**Cycle state**: COMPLETE-CONTINUE"))
+    | .body | capture("(?m)^\\*\\*Cycle key\\*\\*: `(?<key>[^`]+)`[[:space:]]*$")?.key]
+  | map(select(. != null)) | unique | .[]')
 CYCLES_COMPLETED=$(printf '%s\n' "$COMPLETED_CYCLE_KEYS" | grep -c . || true)
 REMEDIATION_CYCLE=$((CYCLES_COMPLETED + 1))
 ATTEMPTED_CYCLE_KEYS=$(printf '%s\n' "$COMPLETED_CYCLE_KEYS" | grep -v '^$' | awk '!seen[$0]++')
-SAME_CYCLE_COMPLETE=$(echo "$PR_REMEDIATION_COMMENTS" | jq --arg key "$CYCLE_KEY" \
-  '[.[] | select((.body | (contains("FORGE:REMEDIATION:COMPLETE") or contains("**Cycle state**: COMPLETE-CONTINUE"))) and (.body | contains("**Cycle key**: `" + $key + "`")))] | length')
+SAME_CYCLE_COMPLETE=$(echo "$PR_REMEDIATION_COMMENTS" | jq --arg key "$CYCLE_KEY" '
+  def hasline($line): .body | split("\n") | any(. == $line);
+  [.[] | select(((.body | contains("FORGE:REMEDIATION:COMPLETE")) or hasline("**Cycle state**: COMPLETE-CONTINUE")) and hasline("**Cycle key**: `" + $key + "`"))] | length')
 LEGACY_TERMINAL_COMPLETE=$(echo "$PR_REMEDIATION_COMMENTS" | jq \
   '[.[] | select(.body | contains("FORGE:REMEDIATION:COMPLETE")) | select(.body | (contains("**Cycle key**:") | not)) | select(.body | test("Re-gate outcome\\*\\*:[[:space:]]*(AUTO-LANDED|HELD-AWAITING-MERGE|UNFIXABLE)"; "i"))] | length')
 ```
@@ -125,9 +131,9 @@ LEGACY_TERMINAL_COMPLETE=$(echo "$PR_REMEDIATION_COMMENTS" | jq \
 - `LEGACY_TERMINAL_COMPLETE > 0` → EXIT `REMEDIATE_RESULT: status: ALREADY_DONE`. This compatibility guard applies only to a legacy clean/unfixable terminal outcome; a legacy `RE-ESCALATED` receipt does not suppress a distinct current HEAD/finding set.
 - `CYCLES_COMPLETED >= MAX_REMEDIATION_CYCLES` with a distinct current key → when `DRY_RUN=true`, report the prospective cap outcome and return immediately without Phase M8 writes. Otherwise set `CAP_EXHAUSTED=true`, `CYCLE_ATTEMPTED=false`, `REMEDIATION_CYCLE=MAX_REMEDIATION_CYCLES`, `BLOCKED_NEXT_CYCLE_KEY="$CYCLE_KEY"`, and `REMAINING_BLOCKER_FINDING_SET="$BLOCKER_FINDING_SET"`; preserve the three-key `ATTEMPTED_CYCLE_KEYS`, skip directly to Phase M8, retain `needs-human`, and return `RE-ESCALATED`. The cap receipt remains keyed to `BLOCKED_NEXT_CYCLE_KEY` so a duplicate same-input invocation is suppressed, while completed-cycle counting excludes receipts carrying `**Cycle attempted**: false`; never post a claim or begin a fourth cycle.
 
-**Atomic-enough renewable per-cycle claim**: Before checkout or label mutation, post a file-backed `FORGE:REMEDIATION` claim to the PR and mirror it to the issue with `Cycle key`, `Cycle ordinal: CYCLES_COMPLETED + 1`, `State: CLAIMED`, an opaque `Owner token`, and `Lease renewed at`. Read only trusted PR comments (Bot or OWNER/MEMBER/COLLABORATOR), then elect the lowest server-assigned comment ID for this exact cycle key. The winner continues; every later claimant exits `BLOCKED` retryably without touching files or labels.
+**Atomic-enough immutable per-cycle claim**: Before checkout or label mutation, post a file-backed `FORGE:REMEDIATION` claim to the PR and mirror it to the issue with `Cycle key`, `Cycle ordinal: CYCLES_COMPLETED + 1`, `State: CLAIMED`, an opaque `Owner token`, and `Claimed at`. Read only trusted PR comments (Bot or OWNER/MEMBER/COLLABORATOR), then elect the lowest server-assigned comment ID for this exact cycle key. The winner continues; every later claimant exits `BLOCKED` retryably without touching files or labels.
 
-The winner MUST renew its claim at least every 10 minutes throughout M2–M4, after every quality-gate iteration, and immediately before commit, push, finding closure, or re-review. A claim is takeover-eligible only when its trusted elected receipt's `updated_at` is older than 30 minutes and no later trusted progress/completion exists. A contender must re-fetch that exact comment immediately before deletion and verify its ID, cycle key, owner token, and stale `updated_at` are unchanged. Every destructive side effect calls `assert_cycle_claim_owner` immediately first. This renewable lease and compare-before-delete protocol prevents a live long-running worker from coexisting with a replacement while preserving bounded crash recovery.
+Claims do not expire from elapsed wall time and are never deleted or overwritten. Therefore a long-running M2–M4 child cannot admit a replacement, even if it runs for hours. Recovery requires a trusted explicit `State: RELEASED` receipt with the exact owner token after a controller/operator verifies the owner is no longer running. Every destructive side effect calls `assert_cycle_claim_owner` immediately first.
 
 The claim body and every later progress/completion body MUST carry:
 
@@ -136,92 +142,21 @@ The claim body and every later progress/completion body MUST carry:
 **Cycle ordinal**: {N}/{MAX_REMEDIATION_CYCLES}
 ```
 
-Post and verify the claim before Phase M1 mutates state. First remove only expired bare claims for this exact key. A claim is stale only when it is older than 30 minutes and no later progress/completion receipt for the key exists. Read failures during stale detection or mirror lookup fail closed; they are never treated as permission to dispatch:
+Post and verify the immutable claim before Phase M1 mutates state. Existing unreleased claims remain authoritative regardless of age. Read failures fail closed; they are never treated as permission to dispatch:
 
 ```bash
 # The cap guard above has already passed, so this key is now an actual attempted cycle.
 ATTEMPTED_CYCLE_KEYS=$(printf '%s\n%s\n' "$ATTEMPTED_CYCLE_KEYS" "$CYCLE_KEY" | grep -v '^$' | awk '!seen[$0]++')
-NOW_EPOCH=$(date -u +%s)
-STALE_PR_CLAIMS=$(echo "$PR_REMEDIATION_COMMENTS" | jq -r --arg key "$CYCLE_KEY" --argjson now "$NOW_EPOCH" '
-  . as $all | [.[] | select(.body | contains("**Cycle key**: `" + $key + "`") and contains("**State**: CLAIMED"))
-  | select(($now - (.updated_at | fromdateiso8601)) >= 1800)
-  | . as $claim
-  | select([$all[] | select(.updated_at > $claim.updated_at) | select(.body | contains("**Cycle key**: `" + $key + "`"))
-      | select(.body | (contains("Remediation In Progress") or contains("FORGE:REMEDIATION:COMPLETE") or contains("**Cycle state**: COMPLETE-CONTINUE")))] | length == 0)
-  | {id, updated_at, owner: (.body | capture("\\*\\*Owner token\\*\\*: `(?<v>[^`]+)`")?.v // "")}]
-  | .[] | [.id, .updated_at, .owner] | @tsv') || {
-  echo "BLOCKED: cannot evaluate stale remediation claims"
-  # EXIT REMEDIATE_RESULT: status: BLOCKED
-}
+# Claims never expire from elapsed wall time. A blocking child may run arbitrarily long
+# without admitting a replacement worker. Recovery requires a trusted, explicit
+# FORGE:REMEDIATION receipt for this key with **State**: RELEASED and the exact owner token,
+# posted only after an operator/controller has verified that the owner is no longer running.
+# No automated path deletes or overwrites claim receipts.
 
 if [ "${DRY_RUN:-false}" = "true" ]; then
-  echo "DRY_RUN: would clean stale claims, claim cycle ${CYCLE_KEY}, and run remediation; no GitHub or git writes performed"
-  # RETURN NOW — do not fall through to stale cleanup, claim creation, or any later phase.
+  echo "DRY_RUN: would claim cycle ${CYCLE_KEY} and run remediation; no GitHub or git writes performed"
+  # RETURN NOW — do not fall through to claim creation or any later phase.
   # REMEDIATE_RESULT: status: BLOCKED, re_gate_outcome: N/A, blocker: dry-run report only
-fi
-
-if [ -n "$STALE_PR_CLAIMS" ]; then
-  set +e
-  ISSUE_COMMENT_PAGES=$(gh api repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments --paginate --slurp 2>/dev/null)
-  ISSUE_COMMENTS_EXIT=$?
-  set -e
-  ISSUE_REMEDIATION_COMMENTS=$(echo "$ISSUE_COMMENT_PAGES" | jq '
-    def trusted: (.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR"));
-    (add // []) | map(select(trusted))' 2>/dev/null || echo 'null')
-  if [ "$ISSUE_COMMENTS_EXIT" -ne 0 ] || ! echo "$ISSUE_REMEDIATION_COMMENTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
-    echo "BLOCKED: cannot read stale-claim mirrors; refusing partial cleanup"
-    # EXIT REMEDIATE_RESULT: status: BLOCKED
-  fi
-  STALE_PR_OWNERS=$(printf '%s\n' "$STALE_PR_CLAIMS" | cut -f3 | jq -Rsc 'split("\n") | map(select(. != ""))')
-  STALE_ISSUE_CLAIMS=$(echo "$ISSUE_REMEDIATION_COMMENTS" | jq -r --arg key "$CYCLE_KEY" --argjson now "$NOW_EPOCH" --argjson stale_owners "$STALE_PR_OWNERS" '
-    . as $all | [.[] | select(.body | contains("**Cycle key**: `" + $key + "`") and contains("**State**: CLAIMED"))
-    | (.body | capture("\\*\\*Owner token\\*\\*: `(?<v>[^`]+)`")?.v // "") as $owner
-    | select($stale_owners | index($owner) != null)
-    | select(($now - (.updated_at | fromdateiso8601)) >= 1800)
-    | . as $claim
-    | select([$all[] | select(.updated_at > $claim.updated_at) | select(.body | contains("**Cycle key**: `" + $key + "`"))
-        | select(.body | (contains("Remediation In Progress") or contains("FORGE:REMEDIATION:COMPLETE") or contains("**Cycle state**: COMPLETE-CONTINUE")))] | length == 0)
-    | {id, updated_at, owner: (.body | capture("\\*\\*Owner token\\*\\*: `(?<v>[^`]+)`")?.v // "")}]
-    | .[] | [.id, .updated_at, .owner] | @tsv')
-  while IFS=$'\t' read -r COMMENT_ID SNAPSHOT_UPDATED_AT SNAPSHOT_OWNER; do
-    [ -n "$COMMENT_ID" ] || continue
-    # Compare immediately before delete. Renewal updates updated_at, so a live owner wins.
-    FRESH_CLAIM=$(gh api repos/{GH_REPO}/issues/comments/$COMMENT_ID 2>/dev/null) || {
-      echo "BLOCKED: stale-claim revalidation failed for $COMMENT_ID"
-      # EXIT REMEDIATE_RESULT: status: BLOCKED
-    }
-    FRESH_MATCH=$(echo "$FRESH_CLAIM" | jq -r --arg key "$CYCLE_KEY" --arg updated "$SNAPSHOT_UPDATED_AT" --arg owner "$SNAPSHOT_OWNER" --argjson now "$(date -u +%s)" '
-      ($owner != "") and ((.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR")))
-      and (.updated_at == $updated) and (($now - (.updated_at | fromdateiso8601)) >= 1800)
-      and (.body | contains("**Cycle key**: `" + $key + "`") and contains("**State**: CLAIMED") and contains("**Owner token**: `" + $owner + "`"))')
-    [ "$FRESH_MATCH" = "true" ] || {
-      echo "BLOCKED: claim $COMMENT_ID renewed or changed during takeover; live owner retains lease"
-      # EXIT REMEDIATE_RESULT: status: BLOCKED
-    }
-    gh api repos/{GH_REPO}/issues/comments/$COMMENT_ID -X DELETE || {
-      echo "BLOCKED: failed to delete stale PR claim $COMMENT_ID"
-      # EXIT REMEDIATE_RESULT: status: BLOCKED
-    }
-  done <<< "$STALE_PR_CLAIMS"
-  while IFS=$'\t' read -r COMMENT_ID SNAPSHOT_UPDATED_AT SNAPSHOT_OWNER; do
-    [ -n "$COMMENT_ID" ] || continue
-    FRESH_MIRROR=$(gh api repos/{GH_REPO}/issues/comments/$COMMENT_ID 2>/dev/null) || {
-      echo "BLOCKED: stale mirror revalidation failed for $COMMENT_ID"
-      # EXIT REMEDIATE_RESULT: status: BLOCKED
-    }
-    FRESH_MIRROR_MATCH=$(echo "$FRESH_MIRROR" | jq -r --arg key "$CYCLE_KEY" --arg updated "$SNAPSHOT_UPDATED_AT" --arg owner "$SNAPSHOT_OWNER" --argjson now "$(date -u +%s)" '
-      ($owner != "") and ((.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR")))
-      and (.updated_at == $updated) and (($now - (.updated_at | fromdateiso8601)) >= 1800)
-      and (.body | contains("**Cycle key**: `" + $key + "`") and contains("**State**: CLAIMED") and contains("**Owner token**: `" + $owner + "`"))')
-    [ "$FRESH_MIRROR_MATCH" = "true" ] || {
-      echo "BLOCKED: claim mirror $COMMENT_ID renewed, changed, or became untrusted during takeover"
-      # EXIT REMEDIATE_RESULT: status: BLOCKED
-    }
-    gh api repos/{GH_REPO}/issues/comments/$COMMENT_ID -X DELETE || {
-      echo "BLOCKED: failed to delete stale issue claim mirror $COMMENT_ID"
-      # EXIT REMEDIATE_RESULT: status: BLOCKED
-    }
-  done <<< "$STALE_ISSUE_CLAIMS"
 fi
 
 OWNER_TOKEN="remediate-{PR_NUMBER}-$(date -u +%s)-$$-$RANDOM"
@@ -235,7 +170,6 @@ cat > "$CLAIM_BODY_FILE" <<EOF
 **State**: CLAIMED
 **Owner token**: \`${OWNER_TOKEN}\`
 **Claimed at**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-**Lease renewed at**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 CLAIM_URL=$(gh pr comment {PR_NUMBER} {GH_FLAG} --body-file "$CLAIM_BODY_FILE") || {
   rm -f "$CLAIM_BODY_FILE"; echo "BLOCKED: failed to post PR remediation claim"
@@ -246,10 +180,11 @@ ISSUE_CLAIM_URL=$(gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body-file "$CLAIM_
   if [ -n "$CLAIM_ID_TO_CLEAN" ]; then
     ROLLBACK_CLAIM=$(gh api repos/{GH_REPO}/issues/comments/$CLAIM_ID_TO_CLEAN 2>/dev/null) || ROLLBACK_CLAIM=""
     echo "$ROLLBACK_CLAIM" | jq -e --arg key "$CYCLE_KEY" --arg owner "$OWNER_TOKEN" '
-      (.body | contains("**Cycle key**: `" + $key + "`") and contains("**State**: CLAIMED") and contains("**Owner token**: `" + $owner + "`"))' >/dev/null &&
-      gh api repos/{GH_REPO}/issues/comments/$CLAIM_ID_TO_CLEAN -X DELETE 2>/dev/null || true
+      def hasline($line): .body | split("\n") | any(. == $line);
+      hasline("**Cycle key**: `" + $key + "`") and hasline("**State**: CLAIMED") and hasline("**Owner token**: `" + $owner + "`")' >/dev/null &&
+      echo "Primary claim ${CLAIM_ID_TO_CLEAN} remains immutable; post a trusted RELEASED receipt after mirror failure"
   fi
-  rm -f "$CLAIM_BODY_FILE"; echo "BLOCKED: failed to post issue remediation claim mirror; primary claim rolled back"
+  rm -f "$CLAIM_BODY_FILE"; echo "BLOCKED: failed to post issue remediation claim mirror; primary claim remains immutable"
   # EXIT REMEDIATE_RESULT: status: BLOCKED
 }
 rm -f "$CLAIM_BODY_FILE"
@@ -265,9 +200,9 @@ for COMMENT_REF in "{PR_NUMBER}:$CLAIM_ID" "{ISSUE_NUMBER}:$ISSUE_CLAIM_ID"; do
     echo "BLOCKED: claim read-back failed for comment $COMMENT_ID"
     # EXIT REMEDIATE_RESULT: status: BLOCKED
   }
-  printf '%s' "$CLAIM_READBACK" | grep -Fq "**Cycle key**: \`${CYCLE_KEY}\`" &&
-    printf '%s' "$CLAIM_READBACK" | grep -Fq '**State**: CLAIMED' &&
-    printf '%s' "$CLAIM_READBACK" | grep -Fq "**Owner token**: \`${OWNER_TOKEN}\`" || {
+  printf '%s\n' "$CLAIM_READBACK" | grep -Fxq "**Cycle key**: \`${CYCLE_KEY}\`" &&
+    printf '%s\n' "$CLAIM_READBACK" | grep -Fxq '**State**: CLAIMED' &&
+    printf '%s\n' "$CLAIM_READBACK" | grep -Fxq "**Owner token**: \`${OWNER_TOKEN}\`" || {
       echo "BLOCKED: claim read-back did not preserve the exact cycle key/state/owner"
       # EXIT REMEDIATE_RESULT: status: BLOCKED
     }
@@ -284,46 +219,61 @@ if [ "$CLAIM_ELECTION_EXIT" -ne 0 ] || ! echo "$CLAIM_ELECTION_COMMENTS" | jq -e
   echo "BLOCKED: claim election read failed; do not mutate the PR"
   # EXIT REMEDIATE_RESULT: status: BLOCKED
 fi
-CLAIM_WINNER_ID=$(echo "$CLAIM_ELECTION_COMMENTS" | jq -r --arg key "$CYCLE_KEY" \
-  '[.[] | select(.body | contains("**Cycle key**: `" + $key + "`") and contains("**State**: CLAIMED"))] | sort_by(.id) | first | .id // empty')
+CLAIM_WINNER_ID=$(echo "$CLAIM_ELECTION_COMMENTS" | jq -r --arg key "$CYCLE_KEY" '
+  def hasline($line): .body | split("\n") | any(. == $line);
+  def owner: .body | capture("(?m)^\\*\\*Owner token\\*\\*: `(?<v>[^`]+)`[[:space:]]*$")?.v // "";
+  . as $all
+  | [$all[]
+    | select(hasline("**Cycle key**: `" + $key + "`") and hasline("**State**: CLAIMED"))
+    | owner as $owner
+    | select($owner != "")
+    | select([$all[]
+      | select(hasline("**Cycle key**: `" + $key + "`") and hasline("**State**: RELEASED") and (owner == $owner))
+    ] | length == 0)]
+  | sort_by(.id) | first | .id // empty')
 [ "$CLAIM_ID" = "$CLAIM_WINNER_ID" ] || {
   echo "BLOCKED: remediation cycle already claimed by comment ${CLAIM_WINNER_ID}"
   # EXIT REMEDIATE_RESULT: status: BLOCKED (retryable duplicate suppression)
 }
 ```
 
-Define lease helpers after election. Both helpers fail closed. `renew_cycle_claim` PATCHes both elected mirrors, reads them back, and therefore updates GitHub's authoritative `updated_at`; `assert_cycle_claim_owner` filters to trusted comments, verifies that this comment remains the elected lowest-ID live claim for the key, and matches `OWNER_TOKEN`.
+Define ownership helpers after election. Both fail closed. Claims are immutable and non-expiring, so a blocking child cannot outlive its authority and no heartbeat race exists. `assert_cycle_claim_owner` filters to trusted comments, excludes owners with a trusted `RELEASED` receipt, verifies that this comment remains the elected lowest-ID live claim for the key, and matches `OWNER_TOKEN`. `renew_cycle_claim` is an ownership reassertion (not an expiry extension or PATCH).
 
 ```bash
 assert_cycle_claim_owner() {
   local comments winner id claim
   comments=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments --paginate --slurp 2>/dev/null \
     | jq 'def trusted: (.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR")); (add // []) | map(select(trusted))') || return 1
-  winner=$(echo "$comments" | jq -r --arg key "$CYCLE_KEY" \
-    '[.[] | select(.body | contains("**Cycle key**: `" + $key + "`") and contains("**State**: CLAIMED"))] | sort_by(.id) | first | .id // empty')
+  winner=$(echo "$comments" | jq -r --arg key "$CYCLE_KEY" '
+    def hasline($line): .body | split("\n") | any(. == $line);
+    def owner: .body | capture("(?m)^\\*\\*Owner token\\*\\*: `(?<v>[^`]+)`[[:space:]]*$")?.v // "";
+    . as $all
+    | [$all[]
+      | select(hasline("**Cycle key**: `" + $key + "`") and hasline("**State**: CLAIMED"))
+      | owner as $owner
+      | select($owner != "")
+      | select([$all[]
+        | select(hasline("**Cycle key**: `" + $key + "`") and hasline("**State**: RELEASED") and (owner == $owner))
+      ] | length == 0)]
+    | sort_by(.id) | first | .id // empty')
   [ "$winner" = "$CLAIM_ID" ] || return 1
   for id in "$CLAIM_ID" "$ISSUE_CLAIM_ID"; do
     claim=$(gh api repos/{GH_REPO}/issues/comments/$id 2>/dev/null) || return 1
-    echo "$claim" | jq -e --arg key "$CYCLE_KEY" --arg owner "$OWNER_TOKEN" --argjson now "$(date -u +%s)" '
+    echo "$claim" | jq -e --arg key "$CYCLE_KEY" --arg owner "$OWNER_TOKEN" '
+      def hasline($line): .body | split("\n") | any(. == $line);
       ((.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR")))
-      and (($now - (.updated_at | fromdateiso8601)) < 1800)
-      and (.body | contains("**Cycle key**: `" + $key + "`") and contains("**State**: CLAIMED") and contains("**Owner token**: `" + $owner + "`"))' >/dev/null || return 1
+      and hasline("**Cycle key**: `" + $key + "`")
+      and hasline("**State**: CLAIMED")
+      and hasline("**Owner token**: `" + $owner + "`")' >/dev/null || return 1
   done
 }
 renew_cycle_claim() {
-  assert_cycle_claim_owner || return 1
-  local id current renewed
-  for id in "$CLAIM_ID" "$ISSUE_CLAIM_ID"; do
-    current=$(gh api repos/{GH_REPO}/issues/comments/$id --jq '.body' 2>/dev/null) || return 1
-    printf '%s' "$current" | grep -Fq "**Owner token**: \`${OWNER_TOKEN}\`" || return 1
-    renewed=$(printf '%s\n' "$current" | sed "s/^\\*\\*Lease renewed at\\*\\*: .*/**Lease renewed at**: $(date -u +%Y-%m-%dT%H:%M:%SZ)/")
-    gh api repos/{GH_REPO}/issues/comments/$id -X PATCH --field body="$renewed" >/dev/null || return 1
-    gh api repos/{GH_REPO}/issues/comments/$id --jq '.body' 2>/dev/null | grep -Fq "**Owner token**: \`${OWNER_TOKEN}\`" || return 1
-  done
+  # Compatibility name: authority is immutable/non-expiring, so renewal means reassertion.
+  assert_cycle_claim_owner
 }
 ```
 
-Call `renew_cycle_claim` on a timer no slower than 10 minutes and after each long subcommand. Call `assert_cycle_claim_owner` immediately before every commit, push, finding close, label mutation, review dispatch, or other destructive side effect; failure adds no mutation and returns retryable `BLOCKED`. The cycle key is also the durable handoff consumed by orchestrator item 6.4.
+Call `assert_cycle_claim_owner` after each long subcommand and immediately before every commit, push, finding close, label mutation, review dispatch, cap receipt, or other destructive side effect; failure adds no mutation and returns retryable `BLOCKED`. Because active claims do not expire, no replacement can overlap a long child. The cycle key is also the durable handoff consumed by orchestrator item 6.4.
 
 ---
 
@@ -384,6 +334,8 @@ cd {REPO_PATH}
 git fetch origin
 WORKTREE_PATH="{WORKTREE_BASE}/remediate-{HEAD_BRANCH_SLUG}-{PR_NUMBER}"
 if [ -d "{WORKTREE_PATH}" ]; then
+  assert_cycle_claim_owner || { echo "BLOCKED: ownership lost before worktree fetch"; # EXIT REMEDIATE_RESULT: status: BLOCKED
+  }
   git -C "{WORKTREE_PATH}" fetch origin
   assert_cycle_claim_owner || { echo "BLOCKED: ownership lost before checkout"; # EXIT REMEDIATE_RESULT: status: BLOCKED
   }
@@ -400,7 +352,7 @@ fi
 
 If the worktree/branch checkout fails for any reason (branch deleted, force-pushed out from under us, etc.): post a comment, add `needs-human`, EXIT `REMEDIATE_RESULT: status: BLOCKED`.
 
-Immediately after checkout, call `renew_cycle_claim`; while applying edits, renew again whenever 10 minutes have elapsed. A renewal failure stops before further file or GitHub mutation.
+Immediately after checkout, call `assert_cycle_claim_owner`; repeat after long operations. Because authority does not expire, a blocking child needs no concurrent heartbeat, and a replacement cannot overlap it.
 
 ---
 
@@ -496,6 +448,10 @@ EOF
 )
 REMEDIATION_PROGRESS_FILE=$(mktemp)
 printf '%s' "$REMEDIATION_PROGRESS_BODY" > "$REMEDIATION_PROGRESS_FILE"
+assert_cycle_claim_owner || {
+  rm -f "$REMEDIATION_PROGRESS_FILE"; echo "BLOCKED: cycle ownership lost before PR progress receipt"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
 gh pr comment {PR_NUMBER} {GH_FLAG} --body-file "$REMEDIATION_PROGRESS_FILE"
 assert_cycle_claim_owner || {
   echo "BLOCKED: cycle ownership lost before progress mirror"
@@ -506,7 +462,7 @@ rm -f "$REMEDIATION_PROGRESS_FILE"
 fi
 ```
 
-Note the marker is `<!-- FORGE:REMEDIATION -->` with **no** `:COMPLETE` suffix yet. The cycle key distinguishes this progress receipt from earlier cycles. M0's stale-claim rule, rather than a PR-wide partial-comment delete, controls interrupted recovery.
+Note the marker is `<!-- FORGE:REMEDIATION -->` with **no** `:COMPLETE` suffix yet. The cycle key distinguishes this progress receipt from earlier cycles. Immutable unreleased ownership, rather than deletion or elapsed-time takeover, controls interrupted recovery.
 
 ---
 
@@ -709,32 +665,122 @@ REMEDIATION_BODY="<!-- FORGE:REMEDIATION -->
 
 <!-- FORGE:REMEDIATION:COMPLETE -->"
 
-# An attempted cycle must still own its renewable claim immediately before terminal writes.
-# A cap-only receipt (`Cycle attempted: false`) has no claim by design; re-read trusted PR
-# receipts and fail closed if another receipt for the blocked key appeared since M0.
+# An attempted cycle must still own its immutable unreleased claim immediately before terminal writes.
+# A cap-only receipt (`Cycle attempted: false`) has no attempted-cycle claim; it elects
+# a separate immutable CAP_CLAIM below and fails closed on any ownership ambiguity.
 if [ "${CYCLE_ATTEMPTED:-true}" = "true" ]; then
   renew_cycle_claim && assert_cycle_claim_owner || {
     echo "BLOCKED: cycle ownership lost before completion receipts"
     # EXIT REMEDIATE_RESULT: status: BLOCKED
   }
 else
-  CAP_RECEIPTS=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments --paginate --slurp 2>/dev/null \
-    | jq --arg key "$CYCLE_KEY" 'def trusted: (.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR")); (add // []) | map(select(trusted)) | [.[] | select(.body | contains("**Cycle key**: `" + $key + "`"))] | length') || {
-      echo "BLOCKED: cannot compare cap receipts before terminal write"
+  # Cap-only terminal writers serialize through an immutable CAP_CLAIM before either
+  # terminal receipt. Lowest server-assigned trusted comment ID wins; later writers
+  # cannot pre-empt it and no claim is ever deleted.
+  CAP_OWNER_TOKEN="cap-{PR_NUMBER}-$(date -u +%s)-$$-$RANDOM"
+  CAP_CLAIM_FILE=$(mktemp)
+  cat > "$CAP_CLAIM_FILE" <<EOF
+<!-- FORGE:REMEDIATION -->
+**Cycle key**: \`${CYCLE_KEY}\`
+**Cycle ordinal**: ${REMEDIATION_CYCLE:-3}/${MAX_REMEDIATION_CYCLES:-3}
+**State**: CAP_CLAIM
+**Owner token**: \`${CAP_OWNER_TOKEN}\`
+EOF
+  CAP_CLAIM_URL=$(gh pr comment {PR_NUMBER} {GH_FLAG} --body-file "$CAP_CLAIM_FILE") || {
+    rm -f "$CAP_CLAIM_FILE"; echo "BLOCKED: cannot claim cap receipt"
+    # EXIT REMEDIATE_RESULT: status: BLOCKED
+  }
+  rm -f "$CAP_CLAIM_FILE"
+  CAP_CLAIM_ID=$(echo "$CAP_CLAIM_URL" | grep -oE '[0-9]+$')
+  [ -n "$CAP_CLAIM_ID" ] || {
+    echo "BLOCKED: cap claim write returned no verifiable comment ID"
+    # EXIT REMEDIATE_RESULT: status: BLOCKED
+  }
+  CAP_CLAIM_READBACK=$(gh api repos/{GH_REPO}/issues/comments/$CAP_CLAIM_ID 2>/dev/null) || {
+    echo "BLOCKED: cap claim read-back failed"
+    # EXIT REMEDIATE_RESULT: status: BLOCKED
+  }
+  echo "$CAP_CLAIM_READBACK" | jq -e --arg key "$CYCLE_KEY" --arg owner "$CAP_OWNER_TOKEN" '
+    def hasline($line): .body | split("\n") | any(. == $line);
+    ((.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR")))
+    and hasline("**Cycle key**: `" + $key + "`")
+    and hasline("**State**: CAP_CLAIM")
+    and hasline("**Owner token**: `" + $owner + "`")' >/dev/null || {
+      echo "BLOCKED: cap claim read-back did not preserve exact trusted metadata"
       # EXIT REMEDIATE_RESULT: status: BLOCKED
     }
-  [ "$CAP_RECEIPTS" -eq 0 ] || {
-    echo "BLOCKED: a receipt for the cap-exhausted cycle appeared concurrently"
+  CAP_WINNER_ID=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments --paginate --slurp 2>/dev/null \
+    | jq -r --arg key "$CYCLE_KEY" '
+      def trusted: (.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR"));
+      def hasline($line): .body | split("\n") | any(. == $line);
+      def owner: .body | capture("(?m)^\\*\\*Owner token\\*\\*: `(?<v>[^`]+)`[[:space:]]*$")?.v // "";
+      (add // []) | map(select(trusted)) | . as $all
+      | [$all[]
+        | select(hasline("**Cycle key**: `" + $key + "`") and hasline("**State**: CAP_CLAIM"))
+        | owner as $owner | select($owner != "")
+        | select([$all[] | select(hasline("**Cycle key**: `" + $key + "`") and hasline("**State**: RELEASED") and (owner == $owner))] | length == 0)]
+      | sort_by(.id) | first | .id // empty') || {
+      echo "BLOCKED: cannot elect cap receipt owner"
+      # EXIT REMEDIATE_RESULT: status: BLOCKED
+    }
+  [ -n "$CAP_CLAIM_ID" ] && [ "$CAP_CLAIM_ID" = "$CAP_WINNER_ID" ] || {
+    echo "BLOCKED: another writer owns the cap receipt"
     # EXIT REMEDIATE_RESULT: status: BLOCKED
   }
 fi
-gh pr comment {PR_NUMBER} {GH_FLAG} --body "$REMEDIATION_BODY"
-# Re-assert between the two durable writes for attempted cycles.
-[ "${CYCLE_ATTEMPTED:-true}" != "true" ] || assert_cycle_claim_owner || {
-  echo "BLOCKED: cycle ownership lost before issue completion mirror"
-  # EXIT REMEDIATE_RESULT: status: BLOCKED
-}
-gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "$REMEDIATION_BODY"
+REMEDIATION_BODY_FILE=$(mktemp)
+printf '%s' "$REMEDIATION_BODY" > "$REMEDIATION_BODY_FILE"
+# Re-assert immediately before the first terminal write; preparing the body does not carry
+# authority across a concurrent trusted RELEASED receipt.
+if [ "${CYCLE_ATTEMPTED:-true}" = "true" ]; then
+  assert_cycle_claim_owner || {
+    rm -f "$REMEDIATION_BODY_FILE"; echo "BLOCKED: cycle ownership lost before PR completion receipt"
+    # EXIT REMEDIATE_RESULT: status: BLOCKED
+  }
+else
+  CAP_WINNER_NOW=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments --paginate --slurp 2>/dev/null \
+    | jq -r --arg key "$CYCLE_KEY" '
+      def trusted: (.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR"));
+      def hasline($line): .body | split("\n") | any(. == $line);
+      def owner: .body | capture("(?m)^\\*\\*Owner token\\*\\*: `(?<v>[^`]+)`[[:space:]]*$")?.v // "";
+      (add // []) | map(select(trusted)) | . as $all
+      | [$all[]
+        | select(hasline("**Cycle key**: `" + $key + "`") and hasline("**State**: CAP_CLAIM"))
+        | owner as $owner | select($owner != "")
+        | select([$all[] | select(hasline("**Cycle key**: `" + $key + "`") and hasline("**State**: RELEASED") and (owner == $owner))] | length == 0)]
+      | sort_by(.id) | first | .id // empty') || true
+  [ "$CAP_WINNER_NOW" = "$CAP_CLAIM_ID" ] || {
+    rm -f "$REMEDIATION_BODY_FILE"; echo "BLOCKED: cap receipt ownership lost before PR completion receipt"
+    # EXIT REMEDIATE_RESULT: status: BLOCKED
+  }
+fi
+gh pr comment {PR_NUMBER} {GH_FLAG} --body-file "$REMEDIATION_BODY_FILE"
+# Re-assert between the two durable writes. Attempted cycles use their claim; cap-only
+# cycles re-read the immutable CAP_CLAIM winner.
+if [ "${CYCLE_ATTEMPTED:-true}" = "true" ]; then
+  assert_cycle_claim_owner || {
+    rm -f "$REMEDIATION_BODY_FILE"; echo "BLOCKED: cycle ownership lost before issue completion mirror"
+    # EXIT REMEDIATE_RESULT: status: BLOCKED
+  }
+else
+  CAP_WINNER_RECHECK=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments --paginate --slurp 2>/dev/null \
+    | jq -r --arg key "$CYCLE_KEY" '
+      def trusted: (.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR"));
+      def hasline($line): .body | split("\n") | any(. == $line);
+      def owner: .body | capture("(?m)^\\*\\*Owner token\\*\\*: `(?<v>[^`]+)`[[:space:]]*$")?.v // "";
+      (add // []) | map(select(trusted)) | . as $all
+      | [$all[]
+        | select(hasline("**Cycle key**: `" + $key + "`") and hasline("**State**: CAP_CLAIM"))
+        | owner as $owner | select($owner != "")
+        | select([$all[] | select(hasline("**Cycle key**: `" + $key + "`") and hasline("**State**: RELEASED") and (owner == $owner))] | length == 0)]
+      | sort_by(.id) | first | .id // empty') || true
+  [ "$CAP_WINNER_RECHECK" = "$CAP_CLAIM_ID" ] || {
+    rm -f "$REMEDIATION_BODY_FILE"; echo "BLOCKED: cap receipt ownership changed before mirror"
+    # EXIT REMEDIATE_RESULT: status: BLOCKED
+  }
+fi
+gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body-file "$REMEDIATION_BODY_FILE"
+rm -f "$REMEDIATION_BODY_FILE"
 ```
 
 **If the outcome was `AUTO-LANDED`**: this Skill invocation is itself the caller's terminal delegate (Phase 0A.1 of `work-on.md` already told its own routing loop to STOP after dispatching here) — so `remediate.md` must drive the close phase itself rather than assume some other inline logic will. Invoke the close subcommand directly, the same way `work-on/review.md` does when it hands off from a spawned sub-agent context:

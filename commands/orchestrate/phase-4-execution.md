@@ -1802,22 +1802,41 @@ done
        else
          GATING_FINDING_SET=$(echo "$GATING_BLOCKERS" | jq -r 'map(.number) | unique | sort | map(tostring) | join(",")')
          GATING_CYCLE_KEY="${GATING_HEAD}:${GATING_FINDING_SET:-none}"
-         SAME_CYCLE_RECEIPTS=$(echo "$REMEDIATION_COMMENTS" | jq --arg key "$GATING_CYCLE_KEY" \
-           '[.[] | select(.body | contains("FORGE:REMEDIATION") and contains("**Cycle key**: `" + $key + "`"))]')
-         DISTINCT_COMPLETED_CYCLES=$(echo "$REMEDIATION_COMMENTS" | jq \
-           '[.[] | select(.body | (contains("**Cycle attempted**: false") | not)) | select(.body | (contains("FORGE:REMEDIATION:COMPLETE") or contains("**Cycle state**: COMPLETE-CONTINUE"))) | .body | capture("\\*\\*Cycle key\\*\\*: `(?<key>[^`]+)`")?.key] | map(select(. != null)) | unique | length')
-         # The elected worker renews its claim comment at least every 10 minutes. A bare
-         # claim is takeover-eligible only after 30 minutes without an updated_at renewal
-         # and without later progress/completion. The remediation worker re-fetches and
-         # compares the exact claim immediately before any takeover deletion or mutation.
-         SAME_CYCLE_ACTIVE=$(echo "$SAME_CYCLE_RECEIPTS" | jq \
-           '[.[] | select((.body | (contains("Remediation In Progress") or contains("FORGE:REMEDIATION:COMPLETE") or contains("**Cycle state**: COMPLETE-CONTINUE"))) or ((.body | contains("**State**: CLAIMED")) and ((now - (.updated_at | fromdateiso8601)) < 1800)))] | length')
-         if [ "$DISTINCT_COMPLETED_CYCLES" -ge "$MAX_REMEDIATION_CYCLES" ]; then
-           REMEDIATION_ELIGIBLE=false
-           echo "Remediation cap reached for PR #${GATING_PR} (${DISTINCT_COMPLETED_CYCLES}/${MAX_REMEDIATION_CYCLES}); leaving needs-human with existing receipts"
-         elif [ "$SAME_CYCLE_ACTIVE" -gt 0 ]; then
+         SAME_CYCLE_RECEIPTS=$(echo "$REMEDIATION_COMMENTS" | jq --arg key "$GATING_CYCLE_KEY" '
+           def hasline($line): .body | split("\n") | any(. == $line);
+           [.[] | select((.body | contains("FORGE:REMEDIATION")) and hasline("**Cycle key**: `" + $key + "`"))]')
+         DISTINCT_COMPLETED_CYCLES=$(echo "$REMEDIATION_COMMENTS" | jq '
+           def hasline($line): .body | split("\n") | any(. == $line);
+           [.[]
+             | select(hasline("**Cycle attempted**: false") | not)
+             | select((.body | contains("FORGE:REMEDIATION:COMPLETE")) or hasline("**Cycle state**: COMPLETE-CONTINUE"))
+             | .body | capture("(?m)^\\*\\*Cycle key\\*\\*: `(?<key>[^`]+)`[[:space:]]*$")?.key]
+           | map(select(. != null)) | unique | length')
+         # Claims are immutable and never expire from elapsed wall time. This prevents a
+         # blocking child of any duration from overlapping a replacement. Recovery requires
+         # a trusted explicit RELEASED receipt for the exact owner after verifying it stopped.
+         # A stale progress receipt is not authority by itself: after its claim is explicitly
+         # released, recovery must be able to elect a replacement for the same cycle.
+         SAME_CYCLE_ACTIVE=$(echo "$SAME_CYCLE_RECEIPTS" | jq '
+           def hasline($line): .body | split("\n") | any(. == $line);
+           def owner: .body | capture("(?m)^\\*\\*Owner token\\*\\*: `(?<v>[^`]+)`[[:space:]]*$")?.v // "";
+           . as $all
+           | [.[] | select((.body | contains("FORGE:REMEDIATION:COMPLETE")) or hasline("**Cycle state**: COMPLETE-CONTINUE"))]
+             + [.[]
+               | select(hasline("**State**: CLAIMED") or hasline("**State**: CAP_CLAIM"))
+               | owner as $owner
+               | select($owner != "")
+               | select([$all[] | select(hasline("**State**: RELEASED") and (owner == $owner))] | length == 0)]
+           | length')
+         if [ "$SAME_CYCLE_ACTIVE" -gt 0 ]; then
            REMEDIATION_ELIGIBLE=false
            echo "Remediation cycle ${GATING_CYCLE_KEY} is already claimed or complete — duplicate dispatch suppressed"
+         elif [ "$DISTINCT_COMPLETED_CYCLES" -ge "$MAX_REMEDIATION_CYCLES" ]; then
+           # Dispatch the bounded remediator once more so M0 can write the cap-only terminal
+           # receipt. Competing finalizers serialize through M8's immutable CAP_CLAIM election;
+           # no fourth remediation cycle is attempted.
+           REMEDIATION_ELIGIBLE=true
+           echo "Remediation cap reached for PR #${GATING_PR} (${DISTINCT_COMPLETED_CYCLES}/${MAX_REMEDIATION_CYCLES}); dispatching cap-only finalization for ${GATING_CYCLE_KEY}"
          else
            REMEDIATION_ELIGIBLE=true
          fi
