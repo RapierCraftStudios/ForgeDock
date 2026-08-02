@@ -40,9 +40,10 @@ Parse from $ARGUMENTS:
 Re-read current state before doing anything:
 
 ```bash
-PR_STATE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json state,headRefName,baseRefName,body,mergeable,mergeStateStatus,url)
+PR_STATE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json state,headRefName,headRefOid,baseRefName,body,mergeable,mergeStateStatus,url)
 PR_OPEN_STATE=$(echo "$PR_STATE" | jq -r '.state')
 HEAD_BRANCH=$(echo "$PR_STATE" | jq -r '.headRefName')
+REVIEWED_HEAD_SHA=$(echo "$PR_STATE" | jq -r '.headRefOid // empty' | tr '[:upper:]' '[:lower:]')
 PR_BASE="${PR_BASE:-$(echo "$PR_STATE" | jq -r '.baseRefName')}"
 PR_BODY=$(echo "$PR_STATE" | jq -r '.body')
 ```
@@ -70,20 +71,166 @@ ISSUE_LABELS=$(echo "$ISSUE_STATE" | jq -r '[.labels[].name] | join(",")')
 
 - If `needs-human` is NOT among `ISSUE_LABELS` → EXIT `REMEDIATE_RESULT: status: BLOCKED`, blocker: "issue #{ISSUE_NUMBER} is not `needs-human` — remediation mode only targets `needs-human`-gated PRs; use the normal `/work-on {ISSUE_NUMBER}` resume path instead." This keeps blast radius scoped to exactly the gap this mode fills — it is not a general-purpose re-review trigger.
 
-**Idempotency / resume check** — the paper trail lives on **both** the PR (primary — checked by the orchestrator's item 6.4 dispatch guard) and the linked issue (mirror — keeps `/work-on`'s standard FORGE-annotation trajectory and resume logic consistent with every other phase):
+**Bounded cycle identity and resume check** — Phases M0–M7 are the body of a convergence loop with a finite cycle cap, `MAX_REMEDIATION_CYCLES=3`. A cycle is scoped to the distinct reviewed HEAD and confirmed blocker finding set, not to the PR for all time. The paper trail lives on **both** the PR (primary) and linked issue (mirror).
+
+Derive the current cycle key from the lowercased full reviewed HEAD SHA plus the sorted, unique set of open confirmed HIGH/CRITICAL review-finding issue numbers. Do not use titles, short SHAs, comment order, or prose summaries as identity. A GitHub read failure is distinct from an empty finding set and fails closed:
 
 ```bash
-PR_REMEDIATION_COMMENT=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
-  --jq '[.[] | select(.body | contains("FORGE:REMEDIATION"))] | last')
+MAX_REMEDIATION_CYCLES=3
+[ -n "$REVIEWED_HEAD_SHA" ] || {
+  echo "BLOCKED: cannot resolve the PR's full reviewed HEAD SHA"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
+
+set +e
+PR_BLOCKER_JSON=$(gh issue list {GH_FLAG} --state open --label "review-finding" --limit 100 \
+  --json number,title,body \
+  --jq "[.[] | select(.title | test(\"PR #{PR_NUMBER}\\\\b\")) | select(.body | test(\"CONFIRMED|LIKELY\"; \"i\")) | select(.body | test(\"CRITICAL|HIGH\"; \"i\"))]" 2>/dev/null)
+PR_BLOCKER_EXIT=$?
+set -e
+if [ "$PR_BLOCKER_EXIT" -ne 0 ] || ! echo "$PR_BLOCKER_JSON" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  echo "BLOCKED: cannot read the current confirmed blocker finding set; refusing to claim a remediation cycle"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+fi
+BLOCKER_FINDING_SET=$(echo "$PR_BLOCKER_JSON" | jq -r 'map(.number) | unique | sort | map(tostring) | join(",")')
+CYCLE_KEY="${REVIEWED_HEAD_SHA}:${BLOCKER_FINDING_SET:-none}"
+
+set +e
+PR_REMEDIATION_COMMENT_PAGES=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments --paginate --slurp 2>/dev/null)
+PR_COMMENTS_EXIT=$?
+set -e
+PR_REMEDIATION_COMMENTS=$(echo "$PR_REMEDIATION_COMMENT_PAGES" | jq 'add // []' 2>/dev/null || echo 'null')
+if [ "$PR_COMMENTS_EXIT" -ne 0 ] || ! echo "$PR_REMEDIATION_COMMENTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  echo "BLOCKED: cannot read remediation receipts; refusing to infer cycle eligibility"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+fi
+
+COMPLETED_CYCLE_KEYS=$(echo "$PR_REMEDIATION_COMMENTS" | jq -r \
+  '[.[] | select(.body | (contains("**Cycle attempted**: false") | not)) | select(.body | (contains("FORGE:REMEDIATION:COMPLETE") or contains("**Cycle state**: COMPLETE-CONTINUE"))) | .body | capture("\\*\\*Cycle key\\*\\*: `(?<key>[^`]+)`")?.key] | map(select(. != null)) | unique | .[]')
+CYCLES_COMPLETED=$(printf '%s\n' "$COMPLETED_CYCLE_KEYS" | grep -c . || true)
+REMEDIATION_CYCLE=$((CYCLES_COMPLETED + 1))
+ATTEMPTED_CYCLE_KEYS=$(printf '%s\n' "$COMPLETED_CYCLE_KEYS" | grep -v '^$' | awk '!seen[$0]++')
+SAME_CYCLE_COMPLETE=$(echo "$PR_REMEDIATION_COMMENTS" | jq --arg key "$CYCLE_KEY" \
+  '[.[] | select((.body | (contains("FORGE:REMEDIATION:COMPLETE") or contains("**Cycle state**: COMPLETE-CONTINUE"))) and (.body | contains("**Cycle key**: `" + $key + "`")))] | length')
+LEGACY_TERMINAL_COMPLETE=$(echo "$PR_REMEDIATION_COMMENTS" | jq \
+  '[.[] | select(.body | contains("FORGE:REMEDIATION:COMPLETE")) | select(.body | (contains("**Cycle key**:") | not)) | select(.body | test("Re-gate outcome\\*\\*:[[:space:]]*(AUTO-LANDED|HELD-AWAITING-MERGE|UNFIXABLE)"; "i"))] | length')
 ```
 
-- If a comment is found AND its body contains `FORGE:REMEDIATION:COMPLETE` → EXIT `REMEDIATE_RESULT: status: ALREADY_DONE`. **Single-attempt semantics (AC5)**: once a `FORGE:REMEDIATION:COMPLETE` marker exists for this PR, do NOT re-attempt fixes on a subsequent invocation, regardless of the prior verdict — this is what prevents an infinite remediation retry loop on a genuinely-blocked PR.
-- If a comment is found WITHOUT `:COMPLETE` → a prior attempt was interrupted mid-flight (same failure mode as the investigation phase's partial-comment case). Delete the partial comment(s) on both the PR and the issue, then continue below as a fresh attempt:
-  ```bash
-  gh api repos/{GH_REPO}/issues/comments/{PARTIAL_PR_COMMENT_ID} -X DELETE 2>/dev/null || true
-  gh api repos/{GH_REPO}/issues/comments/{PARTIAL_ISSUE_COMMENT_ID} -X DELETE 2>/dev/null || true
-  ```
-- If no comment is found → fresh attempt, continue below.
+- `SAME_CYCLE_COMPLETE > 0` → EXIT `REMEDIATE_RESULT: status: ALREADY_DONE`. Only the same cycle key is suppressed.
+- `LEGACY_TERMINAL_COMPLETE > 0` → EXIT `REMEDIATE_RESULT: status: ALREADY_DONE`. This compatibility guard applies only to a legacy clean/unfixable terminal outcome; a legacy `RE-ESCALATED` receipt does not suppress a distinct current HEAD/finding set.
+- `CYCLES_COMPLETED >= MAX_REMEDIATION_CYCLES` with a distinct current key → set `CAP_EXHAUSTED=true`, `CYCLE_ATTEMPTED=false`, `REMEDIATION_CYCLE=MAX_REMEDIATION_CYCLES`, `BLOCKED_NEXT_CYCLE_KEY="$CYCLE_KEY"`, and `REMAINING_BLOCKER_FINDING_SET="$BLOCKER_FINDING_SET"`; preserve the three-key `ATTEMPTED_CYCLE_KEYS`, skip directly to Phase M8, retain `needs-human`, and return `RE-ESCALATED`. The cap receipt remains keyed to `BLOCKED_NEXT_CYCLE_KEY` so a duplicate same-input invocation is suppressed, while completed-cycle counting excludes receipts carrying `**Cycle attempted**: false`; never post a claim or begin a fourth cycle.
+
+**Atomic-enough per-cycle claim**: Before checkout or label mutation, post a file-backed `FORGE:REMEDIATION` claim to the PR and mirror it to the issue with `Cycle key`, `Cycle ordinal: CYCLES_COMPLETED + 1`, `State: CLAIMED`, and timestamp. Read the PR comments back with exit-status checking and elect the lowest server-assigned comment ID for this exact cycle key. The winner continues; every later claimant exits `BLOCKED` retryably without touching files or labels. A `CLAIMED` receipt older than 30 minutes with no later progress/completion receipt for the same key is stale: delete the stale PR+issue mirrors, then post/elect a fresh claim. This bounded stale-claim recovery preserves crash resumability without permitting concurrent same-cycle attempts.
+
+The claim body and every later progress/completion body MUST carry:
+
+```text
+**Cycle key**: `{REVIEWED_HEAD_SHA}:{SORTED_BLOCKER_FINDING_SET_OR_none}`
+**Cycle ordinal**: {N}/{MAX_REMEDIATION_CYCLES}
+```
+
+Post and verify the claim before Phase M1 mutates state. First remove only expired bare claims for this exact key. A claim is stale only when it is older than 30 minutes and no later progress/completion receipt for the key exists. Read failures during stale detection or mirror lookup fail closed; they are never treated as permission to dispatch:
+
+```bash
+# The cap guard above has already passed, so this key is now an actual attempted cycle.
+ATTEMPTED_CYCLE_KEYS=$(printf '%s\n%s\n' "$ATTEMPTED_CYCLE_KEYS" "$CYCLE_KEY" | grep -v '^$' | awk '!seen[$0]++')
+NOW_EPOCH=$(date -u +%s)
+STALE_PR_CLAIM_IDS=$(echo "$PR_REMEDIATION_COMMENTS" | jq -r --arg key "$CYCLE_KEY" --argjson now "$NOW_EPOCH" '
+  . as $all | [.[] | select(.body | contains("**Cycle key**: `" + $key + "`") and contains("**State**: CLAIMED"))
+  | select(($now - (.created_at | fromdateiso8601)) >= 1800)
+  | . as $claim
+  | select([$all[] | select(.created_at > $claim.created_at) | select(.body | contains("**Cycle key**: `" + $key + "`"))
+      | select(.body | (contains("Remediation In Progress") or contains("FORGE:REMEDIATION:COMPLETE") or contains("**Cycle state**: COMPLETE-CONTINUE")))] | length == 0)
+  | .id] | .[]') || {
+  echo "BLOCKED: cannot evaluate stale remediation claims"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
+
+if [ -n "$STALE_PR_CLAIM_IDS" ]; then
+  set +e
+  ISSUE_COMMENT_PAGES=$(gh api repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments --paginate --slurp 2>/dev/null)
+  ISSUE_COMMENTS_EXIT=$?
+  set -e
+  ISSUE_REMEDIATION_COMMENTS=$(echo "$ISSUE_COMMENT_PAGES" | jq 'add // []' 2>/dev/null || echo 'null')
+  if [ "$ISSUE_COMMENTS_EXIT" -ne 0 ] || ! echo "$ISSUE_REMEDIATION_COMMENTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    echo "BLOCKED: cannot read stale-claim mirrors; refusing partial cleanup"
+    # EXIT REMEDIATE_RESULT: status: BLOCKED
+  fi
+  STALE_ISSUE_CLAIM_IDS=$(echo "$ISSUE_REMEDIATION_COMMENTS" | jq -r --arg key "$CYCLE_KEY" --argjson now "$NOW_EPOCH" '
+    [.[] | select(.body | contains("**Cycle key**: `" + $key + "`") and contains("**State**: CLAIMED"))
+    | select(($now - (.created_at | fromdateiso8601)) >= 1800) | .id] | .[]')
+  for COMMENT_ID in $STALE_PR_CLAIM_IDS; do
+    gh api repos/{GH_REPO}/issues/comments/$COMMENT_ID -X DELETE || {
+      echo "BLOCKED: failed to delete stale PR claim $COMMENT_ID"
+      # EXIT REMEDIATE_RESULT: status: BLOCKED
+    }
+  done
+  for COMMENT_ID in $STALE_ISSUE_CLAIM_IDS; do
+    gh api repos/{GH_REPO}/issues/comments/$COMMENT_ID -X DELETE || {
+      echo "BLOCKED: failed to delete stale issue claim mirror $COMMENT_ID"
+      # EXIT REMEDIATE_RESULT: status: BLOCKED
+    }
+  done
+fi
+
+CLAIM_BODY_FILE=$(mktemp)
+cat > "$CLAIM_BODY_FILE" <<EOF
+<!-- FORGE:REMEDIATION -->
+## Remediation Cycle Claim for PR #{PR_NUMBER}
+
+**Cycle key**: \`${CYCLE_KEY}\`
+**Cycle ordinal**: ${REMEDIATION_CYCLE}/${MAX_REMEDIATION_CYCLES}
+**State**: CLAIMED
+**Claimed at**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+CLAIM_URL=$(gh pr comment {PR_NUMBER} {GH_FLAG} --body-file "$CLAIM_BODY_FILE") || {
+  rm -f "$CLAIM_BODY_FILE"; echo "BLOCKED: failed to post PR remediation claim"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
+ISSUE_CLAIM_URL=$(gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body-file "$CLAIM_BODY_FILE") || {
+  CLAIM_ID_TO_CLEAN=$(echo "$CLAIM_URL" | grep -oE '[0-9]+$')
+  [ -z "$CLAIM_ID_TO_CLEAN" ] || gh api repos/{GH_REPO}/issues/comments/$CLAIM_ID_TO_CLEAN -X DELETE 2>/dev/null || true
+  rm -f "$CLAIM_BODY_FILE"; echo "BLOCKED: failed to post issue remediation claim mirror; primary claim rolled back"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
+rm -f "$CLAIM_BODY_FILE"
+CLAIM_ID=$(echo "$CLAIM_URL" | grep -oE '[0-9]+$')
+ISSUE_CLAIM_ID=$(echo "$ISSUE_CLAIM_URL" | grep -oE '[0-9]+$')
+[ -n "$CLAIM_ID" ] && [ -n "$ISSUE_CLAIM_ID" ] || {
+  echo "BLOCKED: claim write returned no verifiable comment ID"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
+for COMMENT_REF in "{PR_NUMBER}:$CLAIM_ID" "{ISSUE_NUMBER}:$ISSUE_CLAIM_ID"; do
+  COMMENT_ID=${COMMENT_REF#*:}
+  CLAIM_READBACK=$(gh api repos/{GH_REPO}/issues/comments/$COMMENT_ID --jq '.body' 2>/dev/null) || {
+    echo "BLOCKED: claim read-back failed for comment $COMMENT_ID"
+    # EXIT REMEDIATE_RESULT: status: BLOCKED
+  }
+  printf '%s' "$CLAIM_READBACK" | grep -Fq "**Cycle key**: \`${CYCLE_KEY}\`" &&
+    printf '%s' "$CLAIM_READBACK" | grep -Fq '**State**: CLAIMED' || {
+      echo "BLOCKED: claim read-back did not preserve the exact cycle key/state"
+      # EXIT REMEDIATE_RESULT: status: BLOCKED
+    }
+done
+
+set +e
+CLAIM_ELECTION_PAGES=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments --paginate --slurp 2>/dev/null)
+CLAIM_ELECTION_EXIT=$?
+set -e
+CLAIM_ELECTION_COMMENTS=$(echo "$CLAIM_ELECTION_PAGES" | jq 'add // []' 2>/dev/null || echo 'null')
+if [ "$CLAIM_ELECTION_EXIT" -ne 0 ] || ! echo "$CLAIM_ELECTION_COMMENTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  echo "BLOCKED: claim election read failed; do not mutate the PR"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+fi
+CLAIM_WINNER_ID=$(echo "$CLAIM_ELECTION_COMMENTS" | jq -r --arg key "$CYCLE_KEY" \
+  '[.[] | select(.body | contains("**Cycle key**: `" + $key + "`") and contains("**State**: CLAIMED"))] | sort_by(.id) | first | .id // empty')
+[ "$CLAIM_ID" = "$CLAIM_WINNER_ID" ] || {
+  echo "BLOCKED: remediation cycle already claimed by comment ${CLAIM_WINNER_ID}"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED (retryable duplicate suppression)
+}
+```
+
+The cycle key is also the durable handoff consumed by orchestrator item 6.4.
 
 ---
 
@@ -197,29 +344,29 @@ Only close findings actually addressed in this commit — leave any FIXABLE-but-
 Post the same body to **both** `{PR_NUMBER}` and `{ISSUE_NUMBER}` (PR copy is the idempotency source of truth; issue copy keeps the standard trajectory/resume logic consistent):
 
 ```bash
-gh pr comment {PR_NUMBER} {GH_FLAG} --body "<!-- FORGE:REMEDIATION -->
+REMEDIATION_PROGRESS_BODY=$(cat <<EOF
+<!-- FORGE:REMEDIATION -->
 ## Remediation In Progress for PR #{PR_NUMBER}
 
+**Cycle key**: \`${CYCLE_KEY}\`
+**Cycle ordinal**: ${REMEDIATION_CYCLE}/${MAX_REMEDIATION_CYCLES}
 **Findings addressed**:
 {bulleted list: finding # — title — one-line fix summary}
 
 **Commit**: {COMMIT_SHA}
 **Quality gate**: {iterations} iteration(s), PASS
 
-Re-invoking \`/review-pr --auto-merge\` now."
-gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "<!-- FORGE:REMEDIATION -->
-## Remediation In Progress for PR #{PR_NUMBER}
-
-**Findings addressed**:
-{bulleted list: finding # — title — one-line fix summary}
-
-**Commit**: {COMMIT_SHA}
-**Quality gate**: {iterations} iteration(s), PASS
-
-Re-invoking \`/review-pr --auto-merge\` now."
+Re-invoking \`/review-pr --auto-merge\` now.
+EOF
+)
+REMEDIATION_PROGRESS_FILE=$(mktemp)
+printf '%s' "$REMEDIATION_PROGRESS_BODY" > "$REMEDIATION_PROGRESS_FILE"
+gh pr comment {PR_NUMBER} {GH_FLAG} --body-file "$REMEDIATION_PROGRESS_FILE"
+gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body-file "$REMEDIATION_PROGRESS_FILE"
+rm -f "$REMEDIATION_PROGRESS_FILE"
 ```
 
-Note the marker is `<!-- FORGE:REMEDIATION -->` with **no** `:COMPLETE` suffix yet — per the marker-presence convention (forge#1360/#1357), the absence of `:COMPLETE` correctly signals "in progress" to any concurrent reader, and the M0 resume check above treats this exact state as an interrupted attempt if a session dies before M8.
+Note the marker is `<!-- FORGE:REMEDIATION -->` with **no** `:COMPLETE` suffix yet. The cycle key distinguishes this progress receipt from earlier cycles. M0's stale-claim rule, rather than a PR-wide partial-comment delete, controls interrupted recovery.
 
 ---
 
@@ -272,7 +419,15 @@ Re-read the issue's current labels after M6:
 POST_REVIEW_LABELS=$(gh issue view {ISSUE_NUMBER} {GH_FLAG} --json labels --jq '[.labels[].name] | join(",")')
 ```
 
-**If `needs-human` is present** (re-escalated case): the bar does not apply — nothing to compute. `RE_GATE_OUTCOME="RE-ESCALATED"`. Skip to Phase M8.
+**If `needs-human` is present** (re-escalated case): re-run Phase M1's FIXABLE/UNFIXABLE classification against the fresh full HEAD and open blocker set before deciding to stop.
+
+- If the new block is policy-level/unfixable, set `RE_GATE_OUTCOME="UNFIXABLE"` and skip to Phase M8.
+- Derive `NEXT_CYCLE_KEY` using the exact M0 recipe. If it equals `CYCLE_KEY`, no distinct remediation input exists; set `RE_GATE_OUTCOME="RE-ESCALATED"` and skip to Phase M8 rather than re-reviewing the same state.
+- If the blocker is FIXABLE, re-fetch `headRefOid` and the blocker list with the same exit-status/type checks as M0, then derive `NEXT_CYCLE_KEY` from that fresh full SHA and confirmed blocker set. Any failed/invalid read sets `RE_GATE_OUTCOME="RE-ESCALATED"` and stops fail-closed; it never yields an empty set or a new cycle.
+- If `NEXT_CYCLE_KEY != CYCLE_KEY` and the current ordinal is below `MAX_REMEDIATION_CYCLES`, post a file-backed cycle receipt to the PR and issue containing the current key/ordinal, `**Cycle state**: COMPLETE-CONTINUE`, the fresh key, and the newly confirmed blocker numbers. Verify both writes by exact marker/key read-back as in M0. Then set `CYCLE_KEY="$NEXT_CYCLE_KEY"`, increment the ordinal, and continue the M0–M7 loop immediately. M0 appends the key to `ATTEMPTED_CYCLE_KEYS` only after its cap guard passes and immediately before claiming it. Do not return to the caller and do not launch a second same-HEAD panel.
+- If the new blocker is FIXABLE and distinct but the current ordinal equals the cap, do **not** append the unattempted `NEXT_CYCLE_KEY` to `ATTEMPTED_CYCLE_KEYS`; set `CAP_EXHAUSTED=true`, `CYCLE_ATTEMPTED=true`, `BLOCKED_NEXT_CYCLE_KEY="$NEXT_CYCLE_KEY"`, and `REMAINING_BLOCKER_FINDING_SET` to the freshly confirmed blocker numbers, retain `needs-human`, and set `RE_GATE_OUTCOME="RE-ESCALATED"`. Phase M8 includes exactly the three attempted keys, the `3/3` count, the blocked next key, and the remaining blocker numbers as durable evidence. This cap receipt counts the just-finished third cycle as completed because `**Cycle attempted**` is true.
+
+This models bounded convergence: one cycle can resolve an initial blocker set, a fresh re-review can discover a second set on the new HEAD, and a later clean review still flows through the unchanged base-scoped auto-land bar below.
 
 **If `workflow:awaiting-merge` is present** (clean re-review case — the only branch where `review-pr.md`'s guard has already safely parked this PR): compute the bar.
 
@@ -385,7 +540,14 @@ esac
 REMEDIATION_BODY="<!-- FORGE:REMEDIATION -->
 ## Remediation Complete for PR #{PR_NUMBER}
 
+**Cycle key**: \`${CYCLE_KEY}\`
+**Cycle ordinal**: ${REMEDIATION_CYCLE:-1}/${MAX_REMEDIATION_CYCLES:-3}
+**Cycle cap exhausted**: ${CAP_EXHAUSTED:-false}
+**Cycle attempted**: ${CYCLE_ATTEMPTED:-true}
+**Attempted cycle keys**: $(printf '%s' "${ATTEMPTED_CYCLE_KEYS:-$CYCLE_KEY}" | tr '\n' ' ')
+**Blocked next cycle key**: ${BLOCKED_NEXT_CYCLE_KEY:-none}
 **Findings addressed**: ${#ADDRESSED_FINDING_NUMBERS[@]} (${ADDRESSED_FINDING_NUMBERS[*]:-none})
+**Remaining blockers**: ${REMAINING_BLOCKER_FINDING_SET:-none}
 **Re-review verdict**: ${RE_REVIEW_VERDICT:-unknown}
 **Auto-land bar**: ${AUTO_LAND_BAR_TEXT}
 **Re-gate outcome**: ${RE_GATE_OUTCOME} ${OUTCOME_DETAIL}
