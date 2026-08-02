@@ -193,6 +193,9 @@ orchestration: { reresolve: { enabled: "false", max_rounds: 3 } }
     "orchestration: { reresolve: { enabled: [false] } }",
     "orchestration: { reresolve: { max_rounds: unlimited } }",
     "orchestration: { reresolve: { max_rounds: -1 } }",
+    "orchestration: { reresolve: { enable: false } }",
+    "orchestration: { reresolve: { max_round: 2 } }",
+    "orchestration: { reresolve: { enabled: false, max_rounds: 2, unexpected: true } }",
     "orchestration: [unterminated",
   ]) {
     const failClosed = parsePiReResolveConfig(invalid);

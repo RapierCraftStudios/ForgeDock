@@ -19,6 +19,8 @@ export function parsePiReResolveConfig(source) {
     if (!Object.hasOwn(orchestration, "reresolve")) return {};
     const controls = orchestration.reresolve;
     if (!controls || Array.isArray(controls) || typeof controls !== "object") return { enabled: false };
+    const allowedKeys = new Set(["enabled", "max_rounds"]);
+    if (Object.keys(controls).some((key) => !allowedKeys.has(key))) return { enabled: false };
 
     const config = {};
     if (Object.hasOwn(controls, "enabled")) {
