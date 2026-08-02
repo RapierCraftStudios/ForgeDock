@@ -29,6 +29,8 @@ allowed-tools: Task, Agent, Bash, Read, Grep, Glob, WebFetch, Skill
 
 5. **`spec-evolution` PRs are NEVER auto-merged.** When a PR carries the `spec-evolution` label (created by `/spec-doctor`), Phase -1 MUST set `AUTO_MERGE=false` and add `needs-human` before any other processing. This cannot be overridden by the caller — the eval gate plus human review are the only permitted merge path. See Phase -1 `spec-evolution guard` block. <!-- Added: forge#1742 -->
 
+6. **One active panel per PR HEAD.** Every panel owns a durable `FORGE:REVIEW_RUN` STARTED receipt pinned to the full HEAD SHA. Live claims block duplicate panels. Expired claims require the recovery-claim election below; expiry alone never authorizes an uncoordinated retry. Exactly one elected recovery owner closes the stale run and enters the ordinary fresh-claim election. <!-- Added: forge#3021 -->
+
 ## Sub-Agent Dispatch Tool Resolution (MANDATORY — run once, before Phase 3C)
 
 This spec dispatches domain review agents via a sub-agent-spawning tool. Different runtimes expose different tools for this — resolve deterministically, once per invocation, and use the same tool for every dispatch call in this run:
@@ -53,10 +55,11 @@ When `IS_OPENCODE_RUNTIME=true`, lowercase native `task` is the preferred isolat
 
 1. **If `Task` is available in the current environment**: set `{DISPATCH_TOOL} = Task`. This is the preferred tool — tightest `allowed-tools` scoping.
 2. **Else if `Agent` is available**: set `{DISPATCH_TOOL} = Agent`. This is the documented fallback, not a degraded path — use it exactly as you would `Task`: one call per selected domain agent, same prompt template, `subagent_type: "general-purpose"` (or the closest equivalent the environment offers), same requirement that each agent posts its own findings directly to the PR via `gh pr comment`. Isolation and fresh-context review are preserved either way.
-3. **Neither tool is available**: this is a genuine setup defect, not a routing decision — HARD STOP, post a PR/issue comment explaining that no sub-agent dispatch tool is available, add `needs-human`, and exit without posting a verdict. Do NOT fall back to reviewing inline in the orchestrator's own context — inline self-review is strictly weaker than an isolated fresh-context reviewer and is never a substitute for a missing dispatch tool.
-4. **Dispatch pool exhausted or dispatch call fails**: this is distinct from tool absence. If any selected reviewer cannot be launched because the runtime reports a sub-agent/session/pool limit (or any dispatch call fails), HARD STOP immediately. Do not review that domain inline, do not silently reduce the panel, and do not merge. Mark the PR `review-degraded`, add `needs-human` to the linked issue, post `<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity -->` with the selected and completed reviewer counts, then exit without a `FORGE:REVIEW` verdict. A later fresh session must re-run the full selected panel.
+3. **Else if `forge_nested_agent` is available in a Pi-dispatched `/work-on` child**: resolve `{DISPATCH_TOOL} = forge_nested_agent`. Map each selected fresh-context reviewer to `forge_nested_agent(prompt=<complete reviewer prompt>, description=<short description>, readOnly=false)` and issue independent reviewers concurrently. This bridge is only for the explicit isolated review panel; it never replaces ordinary Skill routing.
+4. **No isolated dispatch tool is available**: this is a genuine setup defect, not a routing decision — HARD STOP, post a PR/issue comment explaining that no sub-agent dispatch tool is available, add `needs-human`, and exit without posting a verdict. Do NOT fall back to reviewing inline in the orchestrator's own context — inline self-review is strictly weaker than an isolated fresh-context reviewer and is never a substitute for a missing dispatch tool.
+5. **Dispatch pool exhausted or dispatch call fails**: this is distinct from tool absence. If any selected reviewer cannot be launched because the runtime reports a sub-agent/session/pool limit (or any dispatch call fails), HARD STOP immediately. Do not review that domain inline, do not silently reduce the panel, and do not merge. Mark the PR `review-degraded`, add `needs-human` to the linked issue, post `<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity -->` with the selected and completed reviewer counts, then exit without a `FORGE:REVIEW` verdict. A later fresh session must re-run the full selected panel.
 
-**Do not halt to ask the operator which tool to use.** Steps 1–2 are deterministic and fully resolve the common case; only step 3 (both absent) requires a stop, and even then the action is HARD STOP + `needs-human`, not a question back to the operator.
+**Do not halt to ask the operator which tool to use.** Steps 1–3 deterministically resolve supported runtimes; only step 4 (all isolated dispatch tools absent) requires a stop, and even then the action is HARD STOP + `needs-human`, not a question back to the operator.
 
 Everywhere this file (and `review-pr-agents.md` / the `review-pr-agents/*.md` persona files) says `Task(...)`, read it as `{DISPATCH_TOOL}(...)` using the value resolved here.
 
@@ -70,7 +73,7 @@ Everywhere this file (and `review-pr-agents.md` / the `review-pr-agents/*.md` pe
 | Inline self-review (no sub-agent spawn at all) | **FORBIDDEN** | Bypasses isolated fresh-context review entirely — always spawn via the resolved `{DISPATCH_TOOL}`, never review directly in the orchestrator's own context |
 | `EnterPlanMode` | **FORBIDDEN** | Breaks execution context; must run phases, not plan them |
 
-If you find yourself about to call `Agent(...)` while `Task` is available, stop and use `Task(...)` instead. If neither `Task` nor `Agent` is available, do not fall through to inline review — follow step 3 of Sub-Agent Dispatch Tool Resolution above. If you find yourself about to use `EnterPlanMode`, stop and execute the next phase directly.
+If you find yourself about to call `Agent(...)` while `Task` is available, stop and use `Task(...)` instead. If neither `Task` nor `Agent` is available, resolve `forge_nested_agent` for a Pi-dispatched `/work-on` child before following the all-tools-absent hard stop. Never fall through to inline review. If you find yourself about to use `EnterPlanMode`, stop and execute the next phase directly.
 
 ## Architecture — How This Command Works
 
@@ -107,6 +110,28 @@ Example: "3126 --auto-merge --issue 3124 --base staging --gh-flag -R $GH_REPO --
 Extract: `PR_NUMBER`, `AUTO_MERGE=true`, `MERGE_ISSUE`, `MERGE_BASE`, `MERGE_GH_FLAG`, `MERGE_WORKTREE` (optional — the absolute path to the git worktree to clean up after merge)
 
 If `--auto-merge` is NOT present, `AUTO_MERGE=false` — Phase 8 (Auto-Merge) will be skipped.
+
+### Review-Run Identity and Expired-Claim Recovery
+
+Before checks or reviewer fan-out for a concrete PR, read trusted `FORGE:REVIEW_RUN` receipts (Bot or repository OWNER/MEMBER/COLLABORATOR), group lifecycle state by exact Run ID plus full 40-character HEAD SHA, and apply this protocol:
+
+1. A same-HEAD STARTED receipt with a missing, malformed, or future `Expires` value remains live and blocks re-entry.
+2. For an expired STARTED receipt, post a short-lived `FORGE:REVIEW_RECOVERY_CLAIM` containing a collision-resistant Recovery ID, the exact Stale Run ID, the full Head SHA, and a future expiry. Re-read comments after a bounded stabilization window and elect the lowest durable trusted comment ID among unexpired claims for that stale run/SHA.
+3. A losing recovery claimant stops before changing the stale run. The winner re-checks that the exact stale STARTED receipt is still current, posts its terminal BLOCKED receipt with the elected Recovery ID in the detail, and then enters the ordinary fresh STARTED claim election. An expired recovery claim is ignored so a crashed recovery contender cannot create a second permanent lock.
+4. Ordinary fresh claimants post STARTED, re-read, and elect the lowest durable comment ID. Losers post SUPERSEDED and stop. The sole winner launches the complete fresh-context panel. All reviewer/verdict evidence is scoped to its new run ID and full SHA, so late output from the recovered run cannot satisfy the replacement panel.
+5. Runtime-local active-worker guards still win: never recover a claim owned by a controller known to be active in the same process, and never terminalize a worker whose cancellation was not acknowledged.
+
+Recovery claim shape:
+
+```text
+<!-- FORGE:REVIEW_RECOVERY_CLAIM -->
+**Recovery ID**: `{RECOVERY_ID}`
+**Stale Run ID**: `{STALE_RUN_ID}`
+**Head SHA**: `{FULL_HEAD_SHA}`
+**Expires**: {short future ISO timestamp}
+```
+
+This recovery is automatic only for a parseable expired claim. Ambiguous durable state remains fail-closed. <!-- Added: forge#3021 -->
 
 ### Thoroughness Flag
 

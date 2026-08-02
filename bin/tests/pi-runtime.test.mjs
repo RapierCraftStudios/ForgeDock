@@ -83,7 +83,7 @@ test("Pi reviewer validates ForgeDock guidance before dispatch and reuses its pa
   assert.match(extensionSource, /statSync\(guidancePath\)\.isFile\(\)/);
   assert.match(extensionSource, /readFileSync\(guidancePath, "utf8"\)/);
   assert.match(extensionSource, /const guidancePath = requireReviewerGuidance\(forgeHome\);/);
-  assert.match(extensionSource, /reviewAgentPrompt\(guidancePath, repo, pr, domain, runId\)/);
+  assert.match(extensionSource, /reviewAgentPrompt\(guidancePath, repo, pr, domain, runId, headSha\)/);
   assert.ok(
     extensionSource.indexOf("const guidancePath = requireReviewerGuidance(forgeHome);") <
       extensionSource.indexOf("Promise.all(domains.map"),

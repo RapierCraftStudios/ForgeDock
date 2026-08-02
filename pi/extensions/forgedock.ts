@@ -7,7 +7,17 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 import { runPiIssue } from "../runtime/engine.mjs";
+import {
+	decideReviewRunAdmission,
+	electReviewRunClaim,
+	electReviewRunRecovery,
+	formatReviewRecoveryClaim,
+	formatReviewRunReceipt,
+	isTrustedReviewReceiptAuthor,
+	scopedReviewerDomains,
+} from "../../bin/engine/review-run.mjs";
 
 type ForgeCommand = { id: string; name: string; relativePath: string; absolutePath: string; description: string };
 type PlanIssue = { number: number; title: string; predecessors: number[]; domain: string[]; files: string[]; priority: number; inFlight?: boolean };
@@ -289,14 +299,14 @@ function requireReviewerGuidance(forgeHome: string): string {
 	return guidancePath;
 }
 
-function reviewAgentPrompt(guidancePath: string, repo: string, pr: number, domain: string, runId: string): string {
+function reviewAgentPrompt(guidancePath: string, repo: string, pr: number, domain: string, runId: string, headSha: string): string {
 	const persona = domain === "security" ? "security" : domain === "runtime" ? "infra" : domain === "workflow" ? "spec-cli" : "protocols";
 	return [
 		`You are the isolated ForgeDock ${domain} reviewer for PR #${pr} in ${repo}.`,
 		`Read ${guidancePath}, ${join(dirname(guidancePath), "commands", "review-pr.md")}, ${join(dirname(guidancePath), "commands", "review-pr-agents", "protocols.md")}, and ${join(dirname(guidancePath), "commands", "review-pr-agents", `${persona}.md`)} before reviewing.`,
 		`Inspect PR #${pr} with gh and review only the ${domain} domain.`,
 		"Do not edit files, merge, approve, or run another workflow. Use evidence-based findings only.",
-		`Before exiting, persist your complete review to the PR with gh pr comment and include exactly: <!-- FORGE:REVIEW-AGENT:${domain} --> and <!-- FORGE:REVIEW-RUN:${runId} -->`,
+		`Before exiting, persist your complete review to the PR with gh pr comment and include exactly: <!-- FORGE:REVIEW-AGENT:${domain} -->, <!-- FORGE:REVIEW-RUN:${runId} -->, and <!-- FORGE:REVIEW-SHA:${headSha} -->`,
 		"If there are findings, include structured <!-- FINDING:... --> markers. If clean, explicitly state PASS. Do not claim completion until the GitHub comment succeeds.",
 	].join("\n");
 }
@@ -305,27 +315,81 @@ async function executeReview(forgeHome: string, projectRoot: string, args: strin
 	const guidancePath = requireReviewerGuidance(forgeHome);
 	const repo = repoFromConfig(projectRoot);
 	const pr = resolveReviewPr(projectRoot, args);
+	const prState = ghJson(projectRoot, ["pr", "view", String(pr), "-R", repo, "--json", "state,headRefOid"]) as { state?: string; headRefOid?: string };
+	const headSha = String(prState.headRefOid || "").toLowerCase();
+	if (!/^[0-9a-f]{40}$/.test(headSha)) throw new Error(`PR #${pr} did not expose a valid full headRefOid`);
+	if (prState.state === "MERGED") return `PR #${pr}: already merged at ${headSha.slice(0, 7)}.`;
+
+	const readComments = () => ghJson(projectRoot, ["api", `repos/${repo}/issues/${pr}/comments`]) as Array<any>;
+	let comments = readComments();
+	let admission = decideReviewRunAdmission({ comments, headSha, inline: false });
+	if (admission.reason === "stale-active-claim" && admission.receipt) {
+		const staleRun = admission.receipt;
+		const recoveryId = `recover-${pr}-${Date.now()}-${randomUUID().slice(0, 8)}`;
+		postPrComment(projectRoot, repo, pr, formatReviewRecoveryClaim({
+			recoveryId, staleRunId: staleRun.runId, headSha, expiresAt: Date.now() + 120_000,
+		}));
+		await new Promise((resolvePromise) => setTimeout(resolvePromise, 750));
+		comments = readComments();
+		const recovery = electReviewRunRecovery({ comments, headSha, staleRunId: staleRun.runId, recoveryId });
+		if (!recovery.won) throw new Error(`expired review recovery claim ${recoveryId} lost election to ${recovery.winner?.recoveryId || "another claimant"}`);
+		admission = decideReviewRunAdmission({ comments, headSha, inline: false });
+		if (admission.reason !== "stale-active-claim" || admission.receipt?.runId !== staleRun.runId) {
+			throw new Error(`expired review run ${staleRun.runId} changed during recovery election`);
+		}
+		postPrComment(projectRoot, repo, pr, formatReviewRunReceipt({
+			runId: staleRun.runId, headSha, state: "BLOCKED", mode: staleRun.mode,
+			detail: `expired claim recovered by elected claimant ${recoveryId}`,
+		}));
+		comments = readComments();
+		admission = decideReviewRunAdmission({ comments, headSha, inline: false });
+	}
+	if (admission.action === "reuse") return `PR #${pr}: adopted durable ${admission.receipt.state} review run.`;
+	if (admission.action !== "start") throw new Error(`PR #${pr} already has ${admission.reason}; no duplicate panel launched`);
+
 	const domains = ["security", "workflow", "runtime", "protocols"];
-	const runId = `pi-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	const runId = `pi-${pr}-${Date.now()}-${randomUUID().slice(0, 8)}`;
+	postPrComment(projectRoot, repo, pr, formatReviewRunReceipt({ runId, headSha, state: "STARTED", mode: "standalone", expiresAt: Date.now() + 35 * 60_000 }));
+	await new Promise((resolvePromise) => setTimeout(resolvePromise, 750));
+	comments = readComments();
+	const election = electReviewRunClaim({ comments, headSha, runId });
+	if (!election.won) {
+		postPrComment(projectRoot, repo, pr, formatReviewRunReceipt({ runId, headSha, state: "SUPERSEDED", mode: "standalone", detail: `claim lost to ${election.winner?.runId || "another claimant"}` }));
+		throw new Error(`review claim ${runId} lost election`);
+	}
+
 	const modelArgs = ctx.model?.provider && ctx.model?.id ? ["--model", `${ctx.model.provider}/${ctx.model.id}`] : [];
 	const reviewResults = await Promise.all(domains.map(async (domain) => {
-		const result = await runProcess(piExecutable(), ["--no-session", "--approve", "--no-extensions", ...modelArgs, "--name", `forge-review-${pr}-${domain}`, "-p", reviewAgentPrompt(guidancePath, repo, pr, domain, runId)], projectRoot, ctx.signal, 600_000);
+		const result = await runProcess(piExecutable(), ["--no-session", "--approve", "--no-extensions", ...modelArgs, "--name", `forge-review-${pr}-${domain}`, "-p", reviewAgentPrompt(guidancePath, repo, pr, domain, runId, headSha)], projectRoot, ctx.signal, 600_000);
 		return { domain, result };
 	}));
-	const comments = ghJson(projectRoot, ["api", `repos/${repo}/issues/${pr}/comments`]) as Array<{ body: string }>;
-	const missing = domains.filter((domain) => !comments.some((comment) => comment.body.includes(`<!-- FORGE:REVIEW-AGENT:${domain} -->`) && comment.body.includes(`<!-- FORGE:REVIEW-RUN:${runId} -->`)));
+	comments = readComments();
+	const completedDomains = scopedReviewerDomains(comments, { runId, headSha }).filter((domain) => domains.includes(domain));
+	const scoped = comments.filter((comment) => {
+		const body = String(comment.body || "");
+		const markers = [...body.matchAll(/<!--\s*FORGE:REVIEW-AGENT:([a-z0-9-]+)\s*-->/gi)];
+		return isTrustedReviewReceiptAuthor(comment)
+			&& body.includes(`<!-- FORGE:REVIEW-RUN:${runId} -->`)
+			&& body.toLowerCase().includes(`<!-- forge:review-sha:${headSha} -->`)
+			&& markers.length === 1
+			&& domains.includes(markers[0][1].toLowerCase());
+	});
+	const missing = domains.filter((domain) => !completedDomains.includes(domain));
 	if (missing.length || reviewResults.some(({ result }) => result.timedOut || result.code !== 0)) {
-		postPrComment(projectRoot, repo, pr, `<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity -->\n<!-- FORGE:REVIEW_BLOCKED -->\n## Review Blocked: Incomplete Isolated Review Panel\n\nSelected reviewers: ${domains.length}\nMissing receipts: ${missing.join(", ") || "none"}\nTimed out/failed workers: ${reviewResults.filter(({ result }) => result.timedOut || result.code !== 0).map(({ domain }) => domain).join(", ") || "none"}\n\nNo verdict is valid until every selected reviewer has posted its receipt.`);
-		spawnSync("gh", ["pr", "edit", String(pr), "-R", repo, "--add-label", "needs-human", "--add-label", "review-degraded"], { cwd: projectRoot, windowsHide: true });
+		postPrComment(projectRoot, repo, pr, formatReviewRunReceipt({ runId, headSha, state: "BLOCKED", mode: "standalone", detail: `incomplete panel; missing ${missing.join(", ") || "worker failure"}` }));
+		postPrComment(projectRoot, repo, pr, `<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity -->\n<!-- FORGE:REVIEW-RUN:${runId} -->\n<!-- FORGE:REVIEW-SHA:${headSha} -->\n<!-- FORGE:REVIEW_BLOCKED -->\n## Review Blocked: Incomplete Isolated Review Panel\n\nSelected reviewers: ${domains.length}\nMissing receipts: ${missing.join(", ") || "none"}`);
+		spawnSync("gh", ["pr", "edit", String(pr), "-R", repo, "--add-label", "review-degraded"], { cwd: projectRoot, windowsHide: true });
 		throw new Error(`review panel incomplete: ${missing.join(", ") || "worker failure"}`);
 	}
-	const findings = comments.filter((comment) => /<!-- FINDING:[^>]+ -->/.test(comment.body));
+	const findings = scoped.filter((comment) => /<!-- FINDING:[^>]+ -->/.test(String(comment.body || "")));
 	if (findings.length) {
-		postPrComment(projectRoot, repo, pr, `<!-- FORGE:GATE_FAILURE:TYPE=review-findings -->\n<!-- FORGE:REVIEW_BLOCKED -->\n## Review findings require triage\n\n${findings.length} structured finding comment(s) were produced. The review remains blocked until finding triage and issue creation complete.`);
+		postPrComment(projectRoot, repo, pr, formatReviewRunReceipt({ runId, headSha, state: "CHANGES_REQUESTED", mode: "standalone", selected: domains.length, completed: domains.length }));
+		postPrComment(projectRoot, repo, pr, `<!-- FORGE:GATE_FAILURE:TYPE=review-findings -->\n<!-- FORGE:REVIEW-RUN:${runId} -->\n<!-- FORGE:REVIEW-SHA:${headSha} -->\n## Review findings require triage\n\n${findings.length} structured finding comment(s) were produced.`);
 		throw new Error("review produced findings; triage is required before a verdict");
 	}
-	spawnSync("gh", ["pr", "edit", String(pr), "-R", repo, "--remove-label", "needs-human", "--remove-label", "review-degraded"], { cwd: projectRoot, windowsHide: true });
-	postPrComment(projectRoot, repo, pr, `<!-- FORGE:GATE_PASS -->\n<!-- FORGE:REVIEW -->\n## ForgeDock Review\n\n**Verdict**: PASS\n**Selected isolated reviewers**: ${domains.length}\n**Verified reviewer receipts**: ${domains.length}\n\nAll selected Pi reviewers completed and posted durable GitHub receipts.`);
+	spawnSync("gh", ["pr", "edit", String(pr), "-R", repo, "--remove-label", "review-degraded"], { cwd: projectRoot, windowsHide: true });
+	postPrComment(projectRoot, repo, pr, `<!-- FORGE:GATE_PASS -->\n<!-- FORGE:REVIEW -->\n<!-- FORGE:REVIEW-RUN:${runId} -->\n<!-- FORGE:REVIEW-SHA:${headSha} -->\n## ForgeDock Review\n\n**Verdict**: PASS\n**Selected isolated reviewers**: ${domains.length}\n**Verified reviewer receipts**: ${domains.length}\n\nAll selected Pi reviewers completed and posted durable GitHub receipts.`);
+	postPrComment(projectRoot, repo, pr, formatReviewRunReceipt({ runId, headSha, state: "COMPLETE", mode: "standalone", selected: domains.length, completed: domains.length }));
 	return `PR #${pr}: PASS — ${domains.length} isolated reviewer receipts verified.`;
 }
 
