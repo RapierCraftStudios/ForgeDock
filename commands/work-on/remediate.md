@@ -665,6 +665,13 @@ REMEDIATION_BODY="<!-- FORGE:REMEDIATION -->
 
 <!-- FORGE:REMEDIATION:COMPLETE -->"
 
+# Keep the entire terminal-write path, including cap-only writer election, behind a
+# local command-wide dry-run guard. Phase M0 should already have returned, but this
+# boundary prevents any terminal-path GitHub write if control reaches M8 unexpectedly.
+if [ "${DRY_RUN:-false}" = "true" ]; then
+  echo "DRY_RUN: would post and verify remediation terminal receipts; no write performed"
+  # RETURN REMEDIATE_RESULT: status: BLOCKED, re_gate_outcome: N/A
+else
 # An attempted cycle must still own its immutable unreleased claim immediately before terminal writes.
 # A cap-only receipt (`Cycle attempted: false`) has no attempted-cycle claim; it elects
 # a separate immutable CAP_CLAIM below and fails closed on any ownership ambiguity.
@@ -754,7 +761,24 @@ else
     # EXIT REMEDIATE_RESULT: status: BLOCKED
   }
 fi
-gh pr comment {PR_NUMBER} {GH_FLAG} --body-file "$REMEDIATION_BODY_FILE"
+PR_TERMINAL_URL=$(gh pr comment {PR_NUMBER} {GH_FLAG} --body-file "$REMEDIATION_BODY_FILE") || {
+  rm -f "$REMEDIATION_BODY_FILE"; echo "BLOCKED: primary remediation terminal receipt write failed; mirror not attempted"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
+PR_TERMINAL_ID=$(echo "$PR_TERMINAL_URL" | grep -oE '[0-9]+$')
+[ -n "$PR_TERMINAL_ID" ] || {
+  rm -f "$REMEDIATION_BODY_FILE"; echo "BLOCKED: primary terminal receipt write returned no verifiable comment ID; mirror not attempted"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
+PR_TERMINAL_BODY=$(gh api repos/{GH_REPO}/issues/comments/$PR_TERMINAL_ID --jq '.body' 2>/dev/null) || {
+  rm -f "$REMEDIATION_BODY_FILE"; echo "BLOCKED: primary terminal receipt read-back failed; mirror not attempted"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
+printf '%s\n' "$PR_TERMINAL_BODY" | grep -Fxq "**Cycle key**: \`${CYCLE_KEY}\`" &&
+printf '%s\n' "$PR_TERMINAL_BODY" | grep -Fxq '<!-- FORGE:REMEDIATION:COMPLETE -->' || {
+  rm -f "$REMEDIATION_BODY_FILE"; echo "BLOCKED: primary terminal receipt failed exact metadata read-back; mirror not attempted"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
 # Re-assert between the two durable writes. Attempted cycles use their claim; cap-only
 # cycles re-read the immutable CAP_CLAIM winner.
 if [ "${CYCLE_ATTEMPTED:-true}" = "true" ]; then
@@ -779,8 +803,26 @@ else
     # EXIT REMEDIATE_RESULT: status: BLOCKED
   }
 fi
-gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body-file "$REMEDIATION_BODY_FILE"
+ISSUE_TERMINAL_URL=$(gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body-file "$REMEDIATION_BODY_FILE") || {
+  rm -f "$REMEDIATION_BODY_FILE"; echo "BLOCKED: issue remediation terminal mirror write failed"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
+ISSUE_TERMINAL_ID=$(echo "$ISSUE_TERMINAL_URL" | grep -oE '[0-9]+$')
+[ -n "$ISSUE_TERMINAL_ID" ] || {
+  rm -f "$REMEDIATION_BODY_FILE"; echo "BLOCKED: issue terminal mirror write returned no verifiable comment ID"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
+ISSUE_TERMINAL_BODY=$(gh api repos/{GH_REPO}/issues/comments/$ISSUE_TERMINAL_ID --jq '.body' 2>/dev/null) || {
+  rm -f "$REMEDIATION_BODY_FILE"; echo "BLOCKED: issue terminal mirror read-back failed"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
+printf '%s\n' "$ISSUE_TERMINAL_BODY" | grep -Fxq "**Cycle key**: \`${CYCLE_KEY}\`" &&
+printf '%s\n' "$ISSUE_TERMINAL_BODY" | grep -Fxq '<!-- FORGE:REMEDIATION:COMPLETE -->' || {
+  rm -f "$REMEDIATION_BODY_FILE"; echo "BLOCKED: issue terminal mirror failed exact metadata read-back"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
 rm -f "$REMEDIATION_BODY_FILE"
+fi
 ```
 
 **If the outcome was `AUTO-LANDED`**: this Skill invocation is itself the caller's terminal delegate (Phase 0A.1 of `work-on.md` already told its own routing loop to STOP after dispatching here) — so `remediate.md` must drive the close phase itself rather than assume some other inline logic will. Invoke the close subcommand directly, the same way `work-on/review.md` does when it hands off from a spawned sub-agent context:
