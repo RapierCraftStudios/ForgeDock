@@ -83,11 +83,23 @@ test("Pi reviewer validates ForgeDock guidance before dispatch and reuses its pa
   assert.match(extensionSource, /statSync\(guidancePath\)\.isFile\(\)/);
   assert.match(extensionSource, /readFileSync\(guidancePath, "utf8"\)/);
   assert.match(extensionSource, /const guidancePath = requireReviewerGuidance\(forgeHome\);/);
-  assert.match(extensionSource, /reviewAgentPrompt\(guidancePath, repo, pr, domain, runId\)/);
+  assert.match(extensionSource, /reviewAgentPrompt\(guidancePath, repo, pr, domain, runId, headSha\)/);
   assert.ok(
     extensionSource.indexOf("const guidancePath = requireReviewerGuidance(forgeHome);") <
       extensionSource.indexOf("Promise.all(domains.map"),
     "guidance must be validated before reviewer workers are spawned",
+  );
+});
+
+test("Pi reviewer reads the complete durable comment ledger", () => {
+  assert.match(
+    extensionSource,
+    /ghJson\(projectRoot, \["api", "--paginate", "--slurp", `repos\/\$\{repo\}\/issues\/\$\{pr\}\/comments`\]\)/,
+  );
+  assert.match(extensionSource, /const pages = ghJson[\s\S]*return pages\.flat\(\);/);
+  assert.ok(
+    extensionSource.indexOf("const readComments = () =>") < extensionSource.indexOf("decideReviewRunAdmission({ comments, headSha"),
+    "the complete ledger must be loaded before review admission",
   );
 });
 
