@@ -18,6 +18,7 @@ import {
 	isTrustedReviewReceiptAuthor,
 	scopedReviewerDomains,
 } from "../../bin/engine/review-run.mjs";
+import { loadPiReResolveConfig, piReResolveDecision } from "../runtime/reresolve.mjs";
 
 type ForgeCommand = { id: string; name: string; relativePath: string; absolutePath: string; description: string };
 type PlanIssue = { number: number; title: string; predecessors: number[]; externalDependencies?: number[]; domain: string[]; files: string[]; priority: number; inFlight?: boolean };
@@ -223,6 +224,8 @@ async function orchestrate(forgeHome: string, projectRoot: string, input: string
 	const results: Array<IssueResult & { status: string }> = [];
 	const maxConcurrent = Math.max(1, Math.min(35, plan.maxConcurrent || 12));
 	const standingIssueSearchUrl = /^https:\/\//i.test(String(plan.input || "").trim());
+	const reResolveConfig = loadPiReResolveConfig(projectRoot);
+	let reResolveRounds = 0;
 	let handoffPlan: PreflightPlan | undefined;
 
 	while (pending.size || running.size) {
@@ -271,7 +274,8 @@ async function orchestrate(forgeHome: string, projectRoot: string, input: string
 		if (result.status === "complete") completed.add(result.number);
 		else blocked.add(result.number);
 
-		if (standingIssueSearchUrl) {
+		if (standingIssueSearchUrl && piReResolveDecision(reResolveConfig, reResolveRounds).reResolve) {
+			reResolveRounds += 1;
 			const refreshed = preflight(forgeHome, projectRoot, input);
 			if (!refreshed.supported || refreshed.requiresDeepPlan) {
 				handoffPlan = refreshed;

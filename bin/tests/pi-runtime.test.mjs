@@ -12,6 +12,7 @@ import {
   parseWorktrees,
   worktreeForBranch,
 } from "../../pi/runtime/engine.mjs";
+import { parsePiReResolveConfig, piReResolveDecision } from "../../pi/runtime/reresolve.mjs";
 
 const packageJson = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
 const extensionSource = readFileSync(new URL("../../pi/extensions/forgedock.ts", import.meta.url), "utf8");
@@ -126,8 +127,33 @@ test("Pi orchestration passes raw GitHub URLs to the shared preflight", () => {
 test("Pi re-resolves standing issue-search URLs after each ordinary completion event", () => {
   const source = readFileSync(new URL("../../pi/extensions/forgedock.ts", import.meta.url), "utf8");
   assert.match(source, /standingIssueSearchUrl = \/\^https:\\\/\\\/\/i\.test\(String\(plan\.input \|\| ""\)\.trim\(\)\)/);
-  assert.match(source, /await Promise\.race\(running\.values\(\)\)[\s\S]*if \(standingIssueSearchUrl\)[\s\S]*preflight\(forgeHome, projectRoot, input\)/);
+  assert.match(source, /await Promise\.race\(running\.values\(\)\)[\s\S]*if \(standingIssueSearchUrl && piReResolveDecision\(reResolveConfig, reResolveRounds\)\.reResolve\)[\s\S]*reResolveRounds \+= 1;[\s\S]*preflight\(forgeHome, projectRoot, input\)/);
   assert.doesNotMatch(source, /await Promise\.all\(batch\.map/);
   assert.match(source, /if \(completed\.has\(issue\.number\) \|\| blocked\.has\(issue\.number\) \|\| running\.has\(issue\.number\)\) continue;[\s\S]*pending\.add\(issue\.number\)/);
   assert.match(source, /externalDependencies/);
+});
+
+test("Pi standing-query refresh honors the configured disable switch and round cap", () => {
+  const disabled = parsePiReResolveConfig(`
+project:
+  owner: example
+orchestration:
+  reresolve:
+    enabled: false
+    max_rounds: 5
+  cascade:
+    enabled: true
+    max_rounds: 99
+`);
+  assert.deepEqual(disabled, { enabled: false, maxRounds: 5 });
+  assert.equal(piReResolveDecision(disabled, 0).reResolve, false);
+
+  const bounded = parsePiReResolveConfig(`
+orchestration:
+  reresolve:
+    enabled: true
+    max_rounds: 2
+`);
+  assert.equal(piReResolveDecision(bounded, 1).reResolve, true);
+  assert.equal(piReResolveDecision(bounded, 2).reResolve, false);
 });
