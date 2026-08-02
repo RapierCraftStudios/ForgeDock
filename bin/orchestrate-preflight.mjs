@@ -464,7 +464,8 @@ export function buildPreflightPlan({ input, repo = "", issues = [], maxConcurren
   const effectiveMax = Number.isInteger(maxConcurrent) && maxConcurrent > 0 ? maxConcurrent : 12;
   const deepPlan = flags.deepPlan || query.pattern === "cascade" || query.pattern === "repo-scoped";
   const hasExternalDependencies = externalDependencies.size > 0;
-  const requiresDeepPlan = deepPlan || investigations.length > 0 || hasExternalDependencies;
+  const requiresDeepPlanWithoutExternalDependencies = deepPlan || investigations.length > 0;
+  const requiresDeepPlan = requiresDeepPlanWithoutExternalDependencies || hasExternalDependencies;
   const warnings = [
     "Compact preflight uses explicit dependencies, scoped issue-body files, and the database serialization rule.",
     "The full Phase 3 conflict/history analysis remains available with --deep-plan or when this preflight is unsupported.",
@@ -496,6 +497,38 @@ export function buildPreflightPlan({ input, repo = "", issues = [], maxConcurren
     queued: requiresDeepPlan ? ready : ready.slice(effectiveMax),
     confirmed: flags.confirmed,
     requiresConfirmation: !flags.confirmed,
+    requiresDeepPlanWithoutExternalDependencies,
+    requiresDeepPlan,
+    warnings,
+  };
+}
+
+export function reconcileCompletedDependencies(plan, completedDependencies = []) {
+  if (!plan?.supported || !Array.isArray(plan.issues)) return plan;
+
+  const completed = new Set([...completedDependencies].map(Number));
+  const issues = plan.issues.map((issue) => ({
+    ...issue,
+    externalDependencies: (issue.externalDependencies || []).filter((dependency) => !completed.has(dependency)),
+  }));
+  const hasExternalDependencies = issues.some((issue) => issue.externalDependencies.length > 0);
+  const requiresDeepPlan = Boolean(plan.requiresDeepPlanWithoutExternalDependencies || hasExternalDependencies);
+  const ready = issues
+    .filter((issue) => issue.predecessors.length === 0 && issue.externalDependencies.length === 0)
+    .sort((a, b) => b.priority - a.priority || a.number - b.number)
+    .map((issue) => issue.number);
+  const maxConcurrent = Number.isInteger(plan.maxConcurrent) && plan.maxConcurrent > 0 ? plan.maxConcurrent : 12;
+  const warnings = (plan.warnings || []).filter((warning) =>
+    hasExternalDependencies || !warning.includes("External dependencies require the full workflow"),
+  );
+
+  return {
+    ...plan,
+    mode: requiresDeepPlan ? "compact-with-full-spec-followup" : "compact",
+    issues,
+    ready,
+    dispatchNow: requiresDeepPlan || !plan.confirmed ? [] : ready.slice(0, maxConcurrent),
+    queued: requiresDeepPlan ? ready : ready.slice(maxConcurrent),
     requiresDeepPlan,
     warnings,
   };

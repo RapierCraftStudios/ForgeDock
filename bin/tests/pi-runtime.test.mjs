@@ -127,7 +127,8 @@ test("Pi orchestration passes raw GitHub URLs to the shared preflight", () => {
 test("Pi re-resolves standing issue-search URLs after each ordinary completion event", () => {
   const source = readFileSync(new URL("../../pi/extensions/forgedock.ts", import.meta.url), "utf8");
   assert.match(source, /standingIssueSearchUrl = \/\^https:\\\/\\\/\/i\.test\(String\(plan\.input \|\| ""\)\.trim\(\)\)/);
-  assert.match(source, /await Promise\.race\(running\.values\(\)\)[\s\S]*if \(standingIssueSearchUrl && piReResolveDecision\(reResolveConfig, reResolveRounds\)\.reResolve\)[\s\S]*reResolveRounds \+= 1;[\s\S]*preflight\(forgeHome, projectRoot, input\)/);
+  assert.match(source, /await Promise\.race\(running\.values\(\)\)[\s\S]*if \(standingIssueSearchUrl && piReResolveDecision\(reResolveConfig, reResolveRounds\)\.reResolve\)[\s\S]*reResolveRounds \+= 1;[\s\S]*reconcileCompletedDependencies\(preflight\(forgeHome, projectRoot, input\), completed\)[\s\S]*if \(!refreshed\.supported \|\| refreshed\.requiresDeepPlan\)/);
+  assert.match(source, /import \{ reconcileCompletedDependencies \} from "\.\.\/\.\.\/bin\/orchestrate-preflight\.mjs"/);
   assert.doesNotMatch(source, /await Promise\.all\(batch\.map/);
   assert.match(source, /if \(completed\.has\(issue\.number\) \|\| blocked\.has\(issue\.number\) \|\| running\.has\(issue\.number\)\) continue;[\s\S]*pending\.add\(issue\.number\)/);
   assert.match(source, /externalDependencies/);

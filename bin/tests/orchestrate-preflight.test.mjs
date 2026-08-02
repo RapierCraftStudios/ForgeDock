@@ -8,6 +8,7 @@ import {
   buildPreflightPlan,
   domainsFor,
   explicitDependencies,
+  reconcileCompletedDependencies,
   runPreflight,
 } from "../orchestrate-preflight.mjs";
 
@@ -112,6 +113,39 @@ describe("OpenCode orchestration preflight", () => {
     assert.deepEqual(plan.issues[0].externalDependencies, [99]);
     assert.deepEqual(plan.dispatchNow, []);
     assert.match(plan.warnings.join("\n"), /verify their live terminal state/);
+  });
+
+  it("reconciles completed external dependencies without weakening unresolved gates", () => {
+    const original = buildPreflightPlan({
+      input: "2 --auto",
+      issues: [issue(2, { body: "## Problem\nBlocked by #1\nDepends on #99" })],
+    });
+
+    const reconciled = reconcileCompletedDependencies(original, new Set([1]));
+
+    assert.deepEqual(reconciled.issues[0].externalDependencies, [99]);
+    assert.equal(reconciled.requiresDeepPlan, true);
+    assert.deepEqual(reconciled.dispatchNow, []);
+    assert.deepEqual(original.issues[0].externalDependencies, [1, 99]);
+
+    const ready = reconcileCompletedDependencies(original, new Set([1, 99]));
+    assert.deepEqual(ready.issues[0].externalDependencies, []);
+    assert.equal(ready.requiresDeepPlan, false);
+    assert.deepEqual(ready.ready, [2]);
+    assert.deepEqual(ready.dispatchNow, [2]);
+  });
+
+  it("preserves non-external deep-plan causes after completed dependency reconciliation", () => {
+    const deep = buildPreflightPlan({
+      input: "2 --deep-plan --auto",
+      issues: [issue(2, { body: "## Problem\nBlocked by #1" })],
+    });
+
+    const reconciled = reconcileCompletedDependencies(deep, [1]);
+
+    assert.deepEqual(reconciled.issues[0].externalDependencies, []);
+    assert.equal(reconciled.requiresDeepPlan, true);
+    assert.deepEqual(reconciled.dispatchNow, []);
   });
 
   it("does not dispatch implementation issues while an investigation requires the full phase path", () => {
