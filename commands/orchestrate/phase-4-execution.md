@@ -1764,7 +1764,9 @@ done
    PRED_CURRENT_LABEL=$(gh issue view "$PRED" -R {GH_REPO} --json labels \
      --jq '[.labels[].name | select(. == "needs-human" or . == "workflow:awaiting-merge")] | .[0] // empty' 2>/dev/null)
 
-   if [ "$PRED_CURRENT_LABEL" = "needs-human" ]; then
+   if [ "$PRED_CURRENT_LABEL" = "needs-human" ] && [ "${DRY_RUN:-false}" = "true" ]; then
+     echo "DRY_RUN: would evaluate and, if eligible, dispatch remediation for issue #${PRED}; no remediation Agent or GitHub/git writer will run"
+   elif [ "$PRED_CURRENT_LABEL" = "needs-human" ]; then
      # Resolve PRED's open PR using the anchored search (forge#1634/#1646 precedent —
      # never a bare-number search, which would misattribute an unrelated PR).
      GATING_PR=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${PRED}\" in:body" \
@@ -1783,12 +1785,14 @@ done
        GATING_HEAD=$(printf '%s' "$GATING_HEAD_RAW" | tr '[:upper:]' '[:lower:]')
        GATING_BLOCKERS=$(gh issue list -R {GH_REPO} --state open --label review-finding --limit 100 \
          --json number,title,body \
-         --jq "[.[] | select(.title | test(\"PR #${GATING_PR}\\\\b\")) | select(.body | test(\"CONFIRMED|LIKELY\"; \"i\")) | select(.body | test(\"CRITICAL|HIGH\"; \"i\"))]" 2>/dev/null)
+         --jq "[.[] | select(.body | test(\"(?m)^\\\\*\\\\*Source\\\\*\\\\*:[[:space:]]*PR #${GATING_PR}([[:space:]]+—.*)?[[:space:]]*$\")) | select(.body | test(\"(?m)^\\\\*\\\\*Confidence\\\\*\\\\*:[[:space:]]*CONFIRMED[[:space:]]*$\")) | select(.body | test(\"(?m)^\\\\*\\\\*Severity\\\\*\\\\*:[[:space:]]*(HIGH|CRITICAL)[[:space:]]*$\"))]" 2>/dev/null)
        BLOCKER_EXIT=$?
        REMEDIATION_COMMENT_PAGES=$(gh api repos/{GH_REPO}/issues/${GATING_PR}/comments --paginate --slurp 2>/dev/null)
        COMMENTS_EXIT=$?
        set -e
-       REMEDIATION_COMMENTS=$(echo "$REMEDIATION_COMMENT_PAGES" | jq 'add // []' 2>/dev/null || echo 'null')
+       REMEDIATION_COMMENTS=$(echo "$REMEDIATION_COMMENT_PAGES" | jq '
+         def trusted: (.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR"));
+         (add // []) | map(select(trusted))' 2>/dev/null || echo 'null')
 
        if [ "$HEAD_EXIT" -ne 0 ] || [ -z "$GATING_HEAD" ] || [ "$BLOCKER_EXIT" -ne 0 ] || \
           ! echo "$GATING_BLOCKERS" | jq -e 'type == "array"' >/dev/null 2>&1 || \
@@ -1802,10 +1806,12 @@ done
            '[.[] | select(.body | contains("FORGE:REMEDIATION") and contains("**Cycle key**: `" + $key + "`"))]')
          DISTINCT_COMPLETED_CYCLES=$(echo "$REMEDIATION_COMMENTS" | jq \
            '[.[] | select(.body | (contains("**Cycle attempted**: false") | not)) | select(.body | (contains("FORGE:REMEDIATION:COMPLETE") or contains("**Cycle state**: COMPLETE-CONTINUE"))) | .body | capture("\\*\\*Cycle key\\*\\*: `(?<key>[^`]+)`")?.key] | map(select(. != null)) | unique | length')
-         # A bare claim expires after 30 minutes only when no later progress/completion
-         # exists for the key. Progress and completion receipts never expire.
+         # The elected worker renews its claim comment at least every 10 minutes. A bare
+         # claim is takeover-eligible only after 30 minutes without an updated_at renewal
+         # and without later progress/completion. The remediation worker re-fetches and
+         # compares the exact claim immediately before any takeover deletion or mutation.
          SAME_CYCLE_ACTIVE=$(echo "$SAME_CYCLE_RECEIPTS" | jq \
-           '[.[] | select((.body | (contains("Remediation In Progress") or contains("FORGE:REMEDIATION:COMPLETE") or contains("**Cycle state**: COMPLETE-CONTINUE"))) or ((.body | contains("**State**: CLAIMED")) and ((now - (.created_at | fromdateiso8601)) < 1800)))] | length')
+           '[.[] | select((.body | (contains("Remediation In Progress") or contains("FORGE:REMEDIATION:COMPLETE") or contains("**Cycle state**: COMPLETE-CONTINUE"))) or ((.body | contains("**State**: CLAIMED")) and ((now - (.updated_at | fromdateiso8601)) < 1800)))] | length')
          if [ "$DISTINCT_COMPLETED_CYCLES" -ge "$MAX_REMEDIATION_CYCLES" ]; then
            REMEDIATION_ELIGIBLE=false
            echo "Remediation cap reached for PR #${GATING_PR} (${DISTINCT_COMPLETED_CYCLES}/${MAX_REMEDIATION_CYCLES}); leaving needs-human with existing receipts"

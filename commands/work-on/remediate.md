@@ -32,6 +32,9 @@ Parse from $ARGUMENTS:
 - `--repo {GH_REPO}` — GitHub repo (resolved from `forge.yaml → project` if omitted)
 - `--gh-flag {GH_FLAG}` — gh CLI repo flag
 - `--base {PR_BASE}` — PR target branch (optional; resolved from the PR's `baseRefName` if omitted)
+- `DRY_RUN=true` — read-only eligibility report. It permits GitHub and Git reads only: no comments, labels, claim cleanup/creation/renewal, checkout/reset/rebase, edits, staging, commit, push, finding closure, review dispatch, merge, or close dispatch.
+
+`DRY_RUN` is a command-wide governance boundary, not a per-snippet hint. Phase M0 performs the required reads, prints the prospective cycle, then returns `REMEDIATE_RESULT: status: BLOCKED`, `re_gate_outcome: N/A`, blocker `dry-run report only`. No later phase may execute in that invocation.
 
 ---
 
@@ -85,7 +88,7 @@ MAX_REMEDIATION_CYCLES=3
 set +e
 PR_BLOCKER_JSON=$(gh issue list {GH_FLAG} --state open --label "review-finding" --limit 100 \
   --json number,title,body \
-  --jq "[.[] | select(.title | test(\"PR #{PR_NUMBER}\\\\b\")) | select(.body | test(\"CONFIRMED|LIKELY\"; \"i\")) | select(.body | test(\"CRITICAL|HIGH\"; \"i\"))]" 2>/dev/null)
+  --jq "[.[] | select(.body | test(\"(?m)^\\\\*\\\\*Source\\\\*\\\\*:[[:space:]]*PR #{PR_NUMBER}([[:space:]]+—.*)?[[:space:]]*$\")) | select(.body | test(\"(?m)^\\\\*\\\\*Confidence\\\\*\\\\*:[[:space:]]*CONFIRMED[[:space:]]*$\")) | select(.body | test(\"(?m)^\\\\*\\\\*Severity\\\\*\\\\*:[[:space:]]*(HIGH|CRITICAL)[[:space:]]*$\"))]" 2>/dev/null)
 PR_BLOCKER_EXIT=$?
 set -e
 if [ "$PR_BLOCKER_EXIT" -ne 0 ] || ! echo "$PR_BLOCKER_JSON" | jq -e 'type == "array"' >/dev/null 2>&1; then
@@ -99,7 +102,9 @@ set +e
 PR_REMEDIATION_COMMENT_PAGES=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments --paginate --slurp 2>/dev/null)
 PR_COMMENTS_EXIT=$?
 set -e
-PR_REMEDIATION_COMMENTS=$(echo "$PR_REMEDIATION_COMMENT_PAGES" | jq 'add // []' 2>/dev/null || echo 'null')
+PR_REMEDIATION_COMMENTS=$(echo "$PR_REMEDIATION_COMMENT_PAGES" | jq '
+  def trusted: (.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR"));
+  (add // []) | map(select(trusted))' 2>/dev/null || echo 'null')
 if [ "$PR_COMMENTS_EXIT" -ne 0 ] || ! echo "$PR_REMEDIATION_COMMENTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
   echo "BLOCKED: cannot read remediation receipts; refusing to infer cycle eligibility"
   # EXIT REMEDIATE_RESULT: status: BLOCKED
@@ -118,9 +123,11 @@ LEGACY_TERMINAL_COMPLETE=$(echo "$PR_REMEDIATION_COMMENTS" | jq \
 
 - `SAME_CYCLE_COMPLETE > 0` → EXIT `REMEDIATE_RESULT: status: ALREADY_DONE`. Only the same cycle key is suppressed.
 - `LEGACY_TERMINAL_COMPLETE > 0` → EXIT `REMEDIATE_RESULT: status: ALREADY_DONE`. This compatibility guard applies only to a legacy clean/unfixable terminal outcome; a legacy `RE-ESCALATED` receipt does not suppress a distinct current HEAD/finding set.
-- `CYCLES_COMPLETED >= MAX_REMEDIATION_CYCLES` with a distinct current key → set `CAP_EXHAUSTED=true`, `CYCLE_ATTEMPTED=false`, `REMEDIATION_CYCLE=MAX_REMEDIATION_CYCLES`, `BLOCKED_NEXT_CYCLE_KEY="$CYCLE_KEY"`, and `REMAINING_BLOCKER_FINDING_SET="$BLOCKER_FINDING_SET"`; preserve the three-key `ATTEMPTED_CYCLE_KEYS`, skip directly to Phase M8, retain `needs-human`, and return `RE-ESCALATED`. The cap receipt remains keyed to `BLOCKED_NEXT_CYCLE_KEY` so a duplicate same-input invocation is suppressed, while completed-cycle counting excludes receipts carrying `**Cycle attempted**: false`; never post a claim or begin a fourth cycle.
+- `CYCLES_COMPLETED >= MAX_REMEDIATION_CYCLES` with a distinct current key → when `DRY_RUN=true`, report the prospective cap outcome and return immediately without Phase M8 writes. Otherwise set `CAP_EXHAUSTED=true`, `CYCLE_ATTEMPTED=false`, `REMEDIATION_CYCLE=MAX_REMEDIATION_CYCLES`, `BLOCKED_NEXT_CYCLE_KEY="$CYCLE_KEY"`, and `REMAINING_BLOCKER_FINDING_SET="$BLOCKER_FINDING_SET"`; preserve the three-key `ATTEMPTED_CYCLE_KEYS`, skip directly to Phase M8, retain `needs-human`, and return `RE-ESCALATED`. The cap receipt remains keyed to `BLOCKED_NEXT_CYCLE_KEY` so a duplicate same-input invocation is suppressed, while completed-cycle counting excludes receipts carrying `**Cycle attempted**: false`; never post a claim or begin a fourth cycle.
 
-**Atomic-enough per-cycle claim**: Before checkout or label mutation, post a file-backed `FORGE:REMEDIATION` claim to the PR and mirror it to the issue with `Cycle key`, `Cycle ordinal: CYCLES_COMPLETED + 1`, `State: CLAIMED`, and timestamp. Read the PR comments back with exit-status checking and elect the lowest server-assigned comment ID for this exact cycle key. The winner continues; every later claimant exits `BLOCKED` retryably without touching files or labels. A `CLAIMED` receipt older than 30 minutes with no later progress/completion receipt for the same key is stale: delete the stale PR+issue mirrors, then post/elect a fresh claim. This bounded stale-claim recovery preserves crash resumability without permitting concurrent same-cycle attempts.
+**Atomic-enough renewable per-cycle claim**: Before checkout or label mutation, post a file-backed `FORGE:REMEDIATION` claim to the PR and mirror it to the issue with `Cycle key`, `Cycle ordinal: CYCLES_COMPLETED + 1`, `State: CLAIMED`, an opaque `Owner token`, and `Lease renewed at`. Read only trusted PR comments (Bot or OWNER/MEMBER/COLLABORATOR), then elect the lowest server-assigned comment ID for this exact cycle key. The winner continues; every later claimant exits `BLOCKED` retryably without touching files or labels.
+
+The winner MUST renew its claim at least every 10 minutes throughout M2–M4, after every quality-gate iteration, and immediately before commit, push, finding closure, or re-review. A claim is takeover-eligible only when its trusted elected receipt's `updated_at` is older than 30 minutes and no later trusted progress/completion exists. A contender must re-fetch that exact comment immediately before deletion and verify its ID, cycle key, owner token, and stale `updated_at` are unchanged. Every destructive side effect calls `assert_cycle_claim_owner` immediately first. This renewable lease and compare-before-delete protocol prevents a live long-running worker from coexisting with a replacement while preserving bounded crash recovery.
 
 The claim body and every later progress/completion body MUST carry:
 
@@ -135,44 +142,89 @@ Post and verify the claim before Phase M1 mutates state. First remove only expir
 # The cap guard above has already passed, so this key is now an actual attempted cycle.
 ATTEMPTED_CYCLE_KEYS=$(printf '%s\n%s\n' "$ATTEMPTED_CYCLE_KEYS" "$CYCLE_KEY" | grep -v '^$' | awk '!seen[$0]++')
 NOW_EPOCH=$(date -u +%s)
-STALE_PR_CLAIM_IDS=$(echo "$PR_REMEDIATION_COMMENTS" | jq -r --arg key "$CYCLE_KEY" --argjson now "$NOW_EPOCH" '
+STALE_PR_CLAIMS=$(echo "$PR_REMEDIATION_COMMENTS" | jq -r --arg key "$CYCLE_KEY" --argjson now "$NOW_EPOCH" '
   . as $all | [.[] | select(.body | contains("**Cycle key**: `" + $key + "`") and contains("**State**: CLAIMED"))
-  | select(($now - (.created_at | fromdateiso8601)) >= 1800)
+  | select(($now - (.updated_at | fromdateiso8601)) >= 1800)
   | . as $claim
-  | select([$all[] | select(.created_at > $claim.created_at) | select(.body | contains("**Cycle key**: `" + $key + "`"))
+  | select([$all[] | select(.updated_at > $claim.updated_at) | select(.body | contains("**Cycle key**: `" + $key + "`"))
       | select(.body | (contains("Remediation In Progress") or contains("FORGE:REMEDIATION:COMPLETE") or contains("**Cycle state**: COMPLETE-CONTINUE")))] | length == 0)
-  | .id] | .[]') || {
+  | {id, updated_at, owner: (.body | capture("\\*\\*Owner token\\*\\*: `(?<v>[^`]+)`")?.v // "")}]
+  | .[] | [.id, .updated_at, .owner] | @tsv') || {
   echo "BLOCKED: cannot evaluate stale remediation claims"
   # EXIT REMEDIATE_RESULT: status: BLOCKED
 }
 
-if [ -n "$STALE_PR_CLAIM_IDS" ]; then
+if [ "${DRY_RUN:-false}" = "true" ]; then
+  echo "DRY_RUN: would clean stale claims, claim cycle ${CYCLE_KEY}, and run remediation; no GitHub or git writes performed"
+  # RETURN NOW — do not fall through to stale cleanup, claim creation, or any later phase.
+  # REMEDIATE_RESULT: status: BLOCKED, re_gate_outcome: N/A, blocker: dry-run report only
+fi
+
+if [ -n "$STALE_PR_CLAIMS" ]; then
   set +e
   ISSUE_COMMENT_PAGES=$(gh api repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments --paginate --slurp 2>/dev/null)
   ISSUE_COMMENTS_EXIT=$?
   set -e
-  ISSUE_REMEDIATION_COMMENTS=$(echo "$ISSUE_COMMENT_PAGES" | jq 'add // []' 2>/dev/null || echo 'null')
+  ISSUE_REMEDIATION_COMMENTS=$(echo "$ISSUE_COMMENT_PAGES" | jq '
+    def trusted: (.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR"));
+    (add // []) | map(select(trusted))' 2>/dev/null || echo 'null')
   if [ "$ISSUE_COMMENTS_EXIT" -ne 0 ] || ! echo "$ISSUE_REMEDIATION_COMMENTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
     echo "BLOCKED: cannot read stale-claim mirrors; refusing partial cleanup"
     # EXIT REMEDIATE_RESULT: status: BLOCKED
   fi
-  STALE_ISSUE_CLAIM_IDS=$(echo "$ISSUE_REMEDIATION_COMMENTS" | jq -r --arg key "$CYCLE_KEY" --argjson now "$NOW_EPOCH" '
-    [.[] | select(.body | contains("**Cycle key**: `" + $key + "`") and contains("**State**: CLAIMED"))
-    | select(($now - (.created_at | fromdateiso8601)) >= 1800) | .id] | .[]')
-  for COMMENT_ID in $STALE_PR_CLAIM_IDS; do
+  STALE_PR_OWNERS=$(printf '%s\n' "$STALE_PR_CLAIMS" | cut -f3 | jq -Rsc 'split("\n") | map(select(. != ""))')
+  STALE_ISSUE_CLAIMS=$(echo "$ISSUE_REMEDIATION_COMMENTS" | jq -r --arg key "$CYCLE_KEY" --argjson now "$NOW_EPOCH" --argjson stale_owners "$STALE_PR_OWNERS" '
+    . as $all | [.[] | select(.body | contains("**Cycle key**: `" + $key + "`") and contains("**State**: CLAIMED"))
+    | (.body | capture("\\*\\*Owner token\\*\\*: `(?<v>[^`]+)`")?.v // "") as $owner
+    | select($stale_owners | index($owner) != null)
+    | select(($now - (.updated_at | fromdateiso8601)) >= 1800)
+    | . as $claim
+    | select([$all[] | select(.updated_at > $claim.updated_at) | select(.body | contains("**Cycle key**: `" + $key + "`"))
+        | select(.body | (contains("Remediation In Progress") or contains("FORGE:REMEDIATION:COMPLETE") or contains("**Cycle state**: COMPLETE-CONTINUE")))] | length == 0)
+    | {id, updated_at, owner: (.body | capture("\\*\\*Owner token\\*\\*: `(?<v>[^`]+)`")?.v // "")}]
+    | .[] | [.id, .updated_at, .owner] | @tsv')
+  while IFS=$'\t' read -r COMMENT_ID SNAPSHOT_UPDATED_AT SNAPSHOT_OWNER; do
+    [ -n "$COMMENT_ID" ] || continue
+    # Compare immediately before delete. Renewal updates updated_at, so a live owner wins.
+    FRESH_CLAIM=$(gh api repos/{GH_REPO}/issues/comments/$COMMENT_ID 2>/dev/null) || {
+      echo "BLOCKED: stale-claim revalidation failed for $COMMENT_ID"
+      # EXIT REMEDIATE_RESULT: status: BLOCKED
+    }
+    FRESH_MATCH=$(echo "$FRESH_CLAIM" | jq -r --arg key "$CYCLE_KEY" --arg updated "$SNAPSHOT_UPDATED_AT" --arg owner "$SNAPSHOT_OWNER" --argjson now "$(date -u +%s)" '
+      ($owner != "") and ((.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR")))
+      and (.updated_at == $updated) and (($now - (.updated_at | fromdateiso8601)) >= 1800)
+      and (.body | contains("**Cycle key**: `" + $key + "`") and contains("**State**: CLAIMED") and contains("**Owner token**: `" + $owner + "`"))')
+    [ "$FRESH_MATCH" = "true" ] || {
+      echo "BLOCKED: claim $COMMENT_ID renewed or changed during takeover; live owner retains lease"
+      # EXIT REMEDIATE_RESULT: status: BLOCKED
+    }
     gh api repos/{GH_REPO}/issues/comments/$COMMENT_ID -X DELETE || {
       echo "BLOCKED: failed to delete stale PR claim $COMMENT_ID"
       # EXIT REMEDIATE_RESULT: status: BLOCKED
     }
-  done
-  for COMMENT_ID in $STALE_ISSUE_CLAIM_IDS; do
+  done <<< "$STALE_PR_CLAIMS"
+  while IFS=$'\t' read -r COMMENT_ID SNAPSHOT_UPDATED_AT SNAPSHOT_OWNER; do
+    [ -n "$COMMENT_ID" ] || continue
+    FRESH_MIRROR=$(gh api repos/{GH_REPO}/issues/comments/$COMMENT_ID 2>/dev/null) || {
+      echo "BLOCKED: stale mirror revalidation failed for $COMMENT_ID"
+      # EXIT REMEDIATE_RESULT: status: BLOCKED
+    }
+    FRESH_MIRROR_MATCH=$(echo "$FRESH_MIRROR" | jq -r --arg key "$CYCLE_KEY" --arg updated "$SNAPSHOT_UPDATED_AT" --arg owner "$SNAPSHOT_OWNER" --argjson now "$(date -u +%s)" '
+      ($owner != "") and ((.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR")))
+      and (.updated_at == $updated) and (($now - (.updated_at | fromdateiso8601)) >= 1800)
+      and (.body | contains("**Cycle key**: `" + $key + "`") and contains("**State**: CLAIMED") and contains("**Owner token**: `" + $owner + "`"))')
+    [ "$FRESH_MIRROR_MATCH" = "true" ] || {
+      echo "BLOCKED: claim mirror $COMMENT_ID renewed, changed, or became untrusted during takeover"
+      # EXIT REMEDIATE_RESULT: status: BLOCKED
+    }
     gh api repos/{GH_REPO}/issues/comments/$COMMENT_ID -X DELETE || {
       echo "BLOCKED: failed to delete stale issue claim mirror $COMMENT_ID"
       # EXIT REMEDIATE_RESULT: status: BLOCKED
     }
-  done
+  done <<< "$STALE_ISSUE_CLAIMS"
 fi
 
+OWNER_TOKEN="remediate-{PR_NUMBER}-$(date -u +%s)-$$-$RANDOM"
 CLAIM_BODY_FILE=$(mktemp)
 cat > "$CLAIM_BODY_FILE" <<EOF
 <!-- FORGE:REMEDIATION -->
@@ -181,7 +233,9 @@ cat > "$CLAIM_BODY_FILE" <<EOF
 **Cycle key**: \`${CYCLE_KEY}\`
 **Cycle ordinal**: ${REMEDIATION_CYCLE}/${MAX_REMEDIATION_CYCLES}
 **State**: CLAIMED
+**Owner token**: \`${OWNER_TOKEN}\`
 **Claimed at**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+**Lease renewed at**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 CLAIM_URL=$(gh pr comment {PR_NUMBER} {GH_FLAG} --body-file "$CLAIM_BODY_FILE") || {
   rm -f "$CLAIM_BODY_FILE"; echo "BLOCKED: failed to post PR remediation claim"
@@ -189,7 +243,12 @@ CLAIM_URL=$(gh pr comment {PR_NUMBER} {GH_FLAG} --body-file "$CLAIM_BODY_FILE") 
 }
 ISSUE_CLAIM_URL=$(gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body-file "$CLAIM_BODY_FILE") || {
   CLAIM_ID_TO_CLEAN=$(echo "$CLAIM_URL" | grep -oE '[0-9]+$')
-  [ -z "$CLAIM_ID_TO_CLEAN" ] || gh api repos/{GH_REPO}/issues/comments/$CLAIM_ID_TO_CLEAN -X DELETE 2>/dev/null || true
+  if [ -n "$CLAIM_ID_TO_CLEAN" ]; then
+    ROLLBACK_CLAIM=$(gh api repos/{GH_REPO}/issues/comments/$CLAIM_ID_TO_CLEAN 2>/dev/null) || ROLLBACK_CLAIM=""
+    echo "$ROLLBACK_CLAIM" | jq -e --arg key "$CYCLE_KEY" --arg owner "$OWNER_TOKEN" '
+      (.body | contains("**Cycle key**: `" + $key + "`") and contains("**State**: CLAIMED") and contains("**Owner token**: `" + $owner + "`"))' >/dev/null &&
+      gh api repos/{GH_REPO}/issues/comments/$CLAIM_ID_TO_CLEAN -X DELETE 2>/dev/null || true
+  fi
   rm -f "$CLAIM_BODY_FILE"; echo "BLOCKED: failed to post issue remediation claim mirror; primary claim rolled back"
   # EXIT REMEDIATE_RESULT: status: BLOCKED
 }
@@ -207,8 +266,9 @@ for COMMENT_REF in "{PR_NUMBER}:$CLAIM_ID" "{ISSUE_NUMBER}:$ISSUE_CLAIM_ID"; do
     # EXIT REMEDIATE_RESULT: status: BLOCKED
   }
   printf '%s' "$CLAIM_READBACK" | grep -Fq "**Cycle key**: \`${CYCLE_KEY}\`" &&
-    printf '%s' "$CLAIM_READBACK" | grep -Fq '**State**: CLAIMED' || {
-      echo "BLOCKED: claim read-back did not preserve the exact cycle key/state"
+    printf '%s' "$CLAIM_READBACK" | grep -Fq '**State**: CLAIMED' &&
+    printf '%s' "$CLAIM_READBACK" | grep -Fq "**Owner token**: \`${OWNER_TOKEN}\`" || {
+      echo "BLOCKED: claim read-back did not preserve the exact cycle key/state/owner"
       # EXIT REMEDIATE_RESULT: status: BLOCKED
     }
 done
@@ -217,7 +277,9 @@ set +e
 CLAIM_ELECTION_PAGES=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments --paginate --slurp 2>/dev/null)
 CLAIM_ELECTION_EXIT=$?
 set -e
-CLAIM_ELECTION_COMMENTS=$(echo "$CLAIM_ELECTION_PAGES" | jq 'add // []' 2>/dev/null || echo 'null')
+CLAIM_ELECTION_COMMENTS=$(echo "$CLAIM_ELECTION_PAGES" | jq '
+  def trusted: (.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR"));
+  (add // []) | map(select(trusted))' 2>/dev/null || echo 'null')
 if [ "$CLAIM_ELECTION_EXIT" -ne 0 ] || ! echo "$CLAIM_ELECTION_COMMENTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
   echo "BLOCKED: claim election read failed; do not mutate the PR"
   # EXIT REMEDIATE_RESULT: status: BLOCKED
@@ -230,7 +292,38 @@ CLAIM_WINNER_ID=$(echo "$CLAIM_ELECTION_COMMENTS" | jq -r --arg key "$CYCLE_KEY"
 }
 ```
 
-The cycle key is also the durable handoff consumed by orchestrator item 6.4.
+Define lease helpers after election. Both helpers fail closed. `renew_cycle_claim` PATCHes both elected mirrors, reads them back, and therefore updates GitHub's authoritative `updated_at`; `assert_cycle_claim_owner` filters to trusted comments, verifies that this comment remains the elected lowest-ID live claim for the key, and matches `OWNER_TOKEN`.
+
+```bash
+assert_cycle_claim_owner() {
+  local comments winner id claim
+  comments=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments --paginate --slurp 2>/dev/null \
+    | jq 'def trusted: (.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR")); (add // []) | map(select(trusted))') || return 1
+  winner=$(echo "$comments" | jq -r --arg key "$CYCLE_KEY" \
+    '[.[] | select(.body | contains("**Cycle key**: `" + $key + "`") and contains("**State**: CLAIMED"))] | sort_by(.id) | first | .id // empty')
+  [ "$winner" = "$CLAIM_ID" ] || return 1
+  for id in "$CLAIM_ID" "$ISSUE_CLAIM_ID"; do
+    claim=$(gh api repos/{GH_REPO}/issues/comments/$id 2>/dev/null) || return 1
+    echo "$claim" | jq -e --arg key "$CYCLE_KEY" --arg owner "$OWNER_TOKEN" --argjson now "$(date -u +%s)" '
+      ((.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR")))
+      and (($now - (.updated_at | fromdateiso8601)) < 1800)
+      and (.body | contains("**Cycle key**: `" + $key + "`") and contains("**State**: CLAIMED") and contains("**Owner token**: `" + $owner + "`"))' >/dev/null || return 1
+  done
+}
+renew_cycle_claim() {
+  assert_cycle_claim_owner || return 1
+  local id current renewed
+  for id in "$CLAIM_ID" "$ISSUE_CLAIM_ID"; do
+    current=$(gh api repos/{GH_REPO}/issues/comments/$id --jq '.body' 2>/dev/null) || return 1
+    printf '%s' "$current" | grep -Fq "**Owner token**: \`${OWNER_TOKEN}\`" || return 1
+    renewed=$(printf '%s\n' "$current" | sed "s/^\\*\\*Lease renewed at\\*\\*: .*/**Lease renewed at**: $(date -u +%Y-%m-%dT%H:%M:%SZ)/")
+    gh api repos/{GH_REPO}/issues/comments/$id -X PATCH --field body="$renewed" >/dev/null || return 1
+    gh api repos/{GH_REPO}/issues/comments/$id --jq '.body' 2>/dev/null | grep -Fq "**Owner token**: \`${OWNER_TOKEN}\`" || return 1
+  done
+}
+```
+
+Call `renew_cycle_claim` on a timer no slower than 10 minutes and after each long subcommand. Call `assert_cycle_claim_owner` immediately before every commit, push, finding close, label mutation, review dispatch, or other destructive side effect; failure adds no mutation and returns retryable `BLOCKED`. The cycle key is also the durable handoff consumed by orchestrator item 6.4.
 
 ---
 
@@ -238,17 +331,17 @@ The cycle key is also the durable handoff consumed by orchestrator item 6.4.
 
 Gather everything that caused (or is still causing) `needs-human`:
 
-**M1a — Open review-finding issues spawned from this PR** (same title-match precedent as `review-pr.md` Phase 8B/9A):
+**M1a — Open review-finding issues spawned from this PR**. Trust the anchored machine-readable `Source`, `Confidence`, and `Severity` fields, never a title substring (which can misattribute PR `#30` to `#3022` or accept spoofed prose):
 ```bash
 FINDINGS=$(gh issue list {GH_FLAG} --state open --label "review-finding" --limit 100 \
   --json number,title,body \
-  --jq "[.[] | select(.title | test(\"PR #{PR_NUMBER}\"))]")
+  --jq "[.[] | select(.body | test(\"(?m)^\\\\*\\\\*Source\\\\*\\\\*:[[:space:]]*PR #{PR_NUMBER}([[:space:]]+—.*)?[[:space:]]*$\")) | select(.body | test(\"(?m)^\\\\*\\\\*Confidence\\\\*\\\\*:[[:space:]]*(CONFIRMED|LIKELY)[[:space:]]*$\")) | select(.body | test(\"(?m)^\\\\*\\\\*Severity\\\\*\\\\*:[[:space:]]*(CRITICAL|HIGH|MEDIUM|LOW)[[:space:]]*$\"))]")
 ```
 
-**M1b — PR review verdicts and merge-block reasons** (Phase 8 of `review-pr.md` records the exact block reason on the linked issue when it aborts auto-merge — read that trail rather than re-deriving it):
+**M1b — PR review verdicts and merge-block reasons** (Phase 8 of `review-pr.md` records the exact block reason on the linked issue when it aborts auto-merge — read that trail rather than re-deriving it). Only trusted authors may supply this control-plane receipt:
 ```bash
 BLOCK_COMMENTS=$(gh api repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments \
-  --jq '[.[] | select(.body | test("Auto-merge aborted|not mergeable|Pre-Push Ancestry Guard Failed|Push Failed|Quality Gate Failed"; "i"))] | last')
+  --jq '[.[] | select((.user.type == "Bot") or (.author_association == "OWNER") or (.author_association == "MEMBER") or (.author_association == "COLLABORATOR")) | select(.body | test("Auto-merge aborted|not mergeable|Pre-Push Ancestry Guard Failed|Push Failed|Quality Gate Failed"; "i"))] | last')
 ```
 
 **Classify into FIXABLE vs. UNFIXABLE**:
@@ -261,8 +354,13 @@ BLOCK_COMMENTS=$(gh api repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments \
 
 ```bash
 if [ "${DRY_RUN:-false}" = "true" ]; then
-  echo "DRY_RUN: would replace needs-human with workflow:in-review on issue #{ISSUE_NUMBER}"
+  echo "BLOCKED: DRY_RUN must already have returned from Phase M0"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
 else
+  assert_cycle_claim_owner || {
+    echo "BLOCKED: cycle ownership lost before label transition"
+    # EXIT REMEDIATE_RESULT: status: BLOCKED
+  }
   gh issue edit {ISSUE_NUMBER} {GH_FLAG} \
     --add-label "workflow:in-review" \
     --remove-label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
@@ -278,19 +376,31 @@ Do not perform this transition for an UNFIXABLE policy escalation. Any later qua
 Remediation always fixes forward on top of the PR's existing head commit — never rebase onto a different base and never force-push over the PR's history unless a fix genuinely requires it (e.g. resolving a merge conflict per the mergeability guard case, in which case use `git rebase`/`git merge` onto `origin/{PR_BASE}` exactly as the branch's own commit history would, then `--force-with-lease`).
 
 ```bash
+assert_cycle_claim_owner || {
+  echo "BLOCKED: cycle ownership lost before checkout/worktree mutation"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
 cd {REPO_PATH}
 git fetch origin
 WORKTREE_PATH="{WORKTREE_BASE}/remediate-{HEAD_BRANCH_SLUG}-{PR_NUMBER}"
 if [ -d "{WORKTREE_PATH}" ]; then
   git -C "{WORKTREE_PATH}" fetch origin
+  assert_cycle_claim_owner || { echo "BLOCKED: ownership lost before checkout"; # EXIT REMEDIATE_RESULT: status: BLOCKED
+  }
   git -C "{WORKTREE_PATH}" checkout {HEAD_BRANCH}
+  assert_cycle_claim_owner || { echo "BLOCKED: ownership lost before reset"; # EXIT REMEDIATE_RESULT: status: BLOCKED
+  }
   git -C "{WORKTREE_PATH}" reset --hard "origin/{HEAD_BRANCH}"
 else
+  assert_cycle_claim_owner || { echo "BLOCKED: ownership lost before worktree creation"; # EXIT REMEDIATE_RESULT: status: BLOCKED
+  }
   git worktree add "{WORKTREE_PATH}" {HEAD_BRANCH} "origin/{HEAD_BRANCH}"
 fi
 ```
 
 If the worktree/branch checkout fails for any reason (branch deleted, force-pushed out from under us, etc.): post a comment, add `needs-human`, EXIT `REMEDIATE_RESULT: status: BLOCKED`.
+
+Immediately after checkout, call `renew_cycle_claim`; while applying edits, renew again whenever 10 minutes have elapsed. A renewal failure stops before further file or GitHub mutation.
 
 ---
 
@@ -298,16 +408,18 @@ If the worktree/branch checkout fails for any reason (branch deleted, force-push
 
 For each FIXABLE item from Phase M1: read the affected file(s) in `{WORKTREE_PATH}` before editing (never assume current state), apply the fix. Follow the same implementation discipline as `work-on.md` Phase 3F (cross-lane import guard, library-callback verification, deliverable-type consistency, no unrequested scope) — this file does not restate those rules, it inherits them.
 
-**If the block reason was a mergeability conflict** (`CONFLICTING`/`DIRTY`/`BLOCKED`): resolve it by rebasing `{HEAD_BRANCH}` onto `origin/{PR_BASE}` (or merging `{PR_BASE}` in, whichever preserves a clean, reviewable history) — resolve conflicts manually, do not blindly take "ours"/"theirs".
+**If the block reason was a mergeability conflict** (`CONFLICTING`/`DIRTY`/`BLOCKED`): resolve it by rebasing `{HEAD_BRANCH}` onto `origin/{PR_BASE}` (or merging `{PR_BASE}` in, whichever preserves a clean, reviewable history) — resolve conflicts manually, do not blindly take "ours"/"theirs". Call `assert_cycle_claim_owner` immediately before every edit, rebase/merge continuation, conflict-resolution stage, and quality-gate re-stage; ownership failure stops the cycle before that mutation.
 
 **Quality Gate** (same loop as Phase 3G, max 3 iterations):
 ```
 iteration = 0
 while iteration < 3:
     iteration += 1
+    renew_cycle_claim or return BLOCKED before invoking the gate
     Skill("quality-gate", args="{CHANGED_FILES} --worktree {WORKTREE_PATH}")
+    renew_cycle_claim or return BLOCKED after the gate returns
     if result == "QUALITY GATE: PASS": GATE_PASSED=true; break
-    else: fix each HIGH/MEDIUM finding, re-stage
+    else: fix each HIGH/MEDIUM finding, re-stage; renew_cycle_claim again
 ```
 If still failing after 3 iterations: post a comment, re-affirm `needs-human`, EXIT `REMEDIATE_RESULT: status: BLOCKED`. Do not proceed to re-review with an unresolved gate failure — that would just re-escalate one phase later with a worse paper trail.
 
@@ -319,8 +431,20 @@ If still failing after 3 iterations: post a comment, re-affirm `needs-human`, EX
 
 ```bash
 cd {WORKTREE_PATH}
+renew_cycle_claim && assert_cycle_claim_owner || {
+  echo "BLOCKED: cycle ownership lost before staging"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
 git add -u
+assert_cycle_claim_owner || {
+  echo "BLOCKED: cycle ownership lost before commit"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
 git commit -s -m "fix(remediate): {description} (#{ISSUE_NUMBER})"
+renew_cycle_claim && assert_cycle_claim_owner || {
+  echo "BLOCKED: cycle ownership lost before push"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
 git push origin {HEAD_BRANCH}
 ```
 
@@ -330,6 +454,10 @@ If push fails, retry with `--force-with-lease` (expected when M3 rebased to reso
 ```bash
 ADDRESSED_FINDING_NUMBERS=()
 for FINDING_NUM in {FIXABLE_FINDING_NUMBERS_FROM_M1}; do
+  renew_cycle_claim && assert_cycle_claim_owner || {
+    echo "BLOCKED: cycle ownership lost before closing finding $FINDING_NUM"
+    # EXIT REMEDIATE_RESULT: status: BLOCKED
+  }
   gh issue close "$FINDING_NUM" {GH_FLAG} \
     --comment "Fixed by remediation of PR #{PR_NUMBER} (commit {COMMIT_SHA}). See #{ISSUE_NUMBER}."
   ADDRESSED_FINDING_NUMBERS+=("$FINDING_NUM")
@@ -344,6 +472,13 @@ Only close findings actually addressed in this commit — leave any FIXABLE-but-
 Post the same body to **both** `{PR_NUMBER}` and `{ISSUE_NUMBER}` (PR copy is the idempotency source of truth; issue copy keeps the standard trajectory/resume logic consistent):
 
 ```bash
+if [ "${DRY_RUN:-false}" = "true" ]; then
+  echo "DRY_RUN: would post remediation progress and invoke re-review for cycle ${CYCLE_KEY}"
+else
+  renew_cycle_claim && assert_cycle_claim_owner || {
+    echo "BLOCKED: cycle ownership lost before progress/re-review"
+    # EXIT REMEDIATE_RESULT: status: BLOCKED
+  }
 REMEDIATION_PROGRESS_BODY=$(cat <<EOF
 <!-- FORGE:REMEDIATION -->
 ## Remediation In Progress for PR #{PR_NUMBER}
@@ -362,8 +497,13 @@ EOF
 REMEDIATION_PROGRESS_FILE=$(mktemp)
 printf '%s' "$REMEDIATION_PROGRESS_BODY" > "$REMEDIATION_PROGRESS_FILE"
 gh pr comment {PR_NUMBER} {GH_FLAG} --body-file "$REMEDIATION_PROGRESS_FILE"
+assert_cycle_claim_owner || {
+  echo "BLOCKED: cycle ownership lost before progress mirror"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
 gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body-file "$REMEDIATION_PROGRESS_FILE"
 rm -f "$REMEDIATION_PROGRESS_FILE"
+fi
 ```
 
 Note the marker is `<!-- FORGE:REMEDIATION -->` with **no** `:COMPLETE` suffix yet. The cycle key distinguishes this progress receipt from earlier cycles. M0's stale-claim rule, rather than a PR-wide partial-comment delete, controls interrupted recovery.
@@ -372,7 +512,10 @@ Note the marker is `<!-- FORGE:REMEDIATION -->` with **no** `:COMPLETE` suffix y
 
 ## Phase M6: Re-Invoke /review-pr
 
+Immediately before either runtime dispatch, renew and verify ownership. A review can mutate verdict comments, labels, and merge state, so it is a destructive side effect for lease purposes:
+
 ```
+renew_cycle_claim && assert_cycle_claim_owner or return BLOCKED
 Skill(skill="review-pr", args="{PR_NUMBER} --auto-merge --issue {ISSUE_NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
 ```
 
@@ -400,6 +543,10 @@ This re-runs the full review (domain agents → verdict → Phase 8 auto-merge g
 ```bash
 POST_REVIEW_LABELS=$(gh issue view {ISSUE_NUMBER} {GH_FLAG} --json labels --jq '[.labels[].name] | join(",")')
 if echo "$POST_REVIEW_LABELS" | grep -qE '(^|,)needs-human(,|$)'; then
+  assert_cycle_claim_owner || {
+    echo "BLOCKED: cycle ownership lost before post-review label cleanup"
+    # EXIT REMEDIATE_RESULT: status: BLOCKED
+  }
   gh issue edit {ISSUE_NUMBER} {GH_FLAG} --remove-label "workflow:in-review" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
 fi
 ```
@@ -407,7 +554,7 @@ fi
 Extract the re-review verdict for the paper trail (Phase M8 reports this verbatim):
 ```bash
 RE_REVIEW_VERDICT=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
-  --jq '[.[] | select(.body | test("APPROVED:|CHANGES REQUESTED:"; "i"))] | last | .body // "unknown"' 2>/dev/null | head -c 200)
+  --jq '[.[] | select((.user.type == "Bot") or (.author_association == "OWNER") or (.author_association == "MEMBER") or (.author_association == "COLLABORATOR")) | select(.body | test("APPROVED:|CHANGES REQUESTED:"; "i"))] | last | .body // "unknown"' 2>/dev/null | head -c 200)
 ```
 
 ---
@@ -424,7 +571,7 @@ POST_REVIEW_LABELS=$(gh issue view {ISSUE_NUMBER} {GH_FLAG} --json labels --jq '
 - If the new block is policy-level/unfixable, set `RE_GATE_OUTCOME="UNFIXABLE"` and skip to Phase M8.
 - Derive `NEXT_CYCLE_KEY` using the exact M0 recipe. If it equals `CYCLE_KEY`, no distinct remediation input exists; set `RE_GATE_OUTCOME="RE-ESCALATED"` and skip to Phase M8 rather than re-reviewing the same state.
 - If the blocker is FIXABLE, re-fetch `headRefOid` and the blocker list with the same exit-status/type checks as M0, then derive `NEXT_CYCLE_KEY` from that fresh full SHA and confirmed blocker set. Any failed/invalid read sets `RE_GATE_OUTCOME="RE-ESCALATED"` and stops fail-closed; it never yields an empty set or a new cycle.
-- If `NEXT_CYCLE_KEY != CYCLE_KEY` and the current ordinal is below `MAX_REMEDIATION_CYCLES`, post a file-backed cycle receipt to the PR and issue containing the current key/ordinal, `**Cycle state**: COMPLETE-CONTINUE`, the fresh key, and the newly confirmed blocker numbers. Verify both writes by exact marker/key read-back as in M0. Then set `CYCLE_KEY="$NEXT_CYCLE_KEY"`, increment the ordinal, and continue the M0–M7 loop immediately. M0 appends the key to `ATTEMPTED_CYCLE_KEYS` only after its cap guard passes and immediately before claiming it. Do not return to the caller and do not launch a second same-HEAD panel.
+- If `NEXT_CYCLE_KEY != CYCLE_KEY` and the current ordinal is below `MAX_REMEDIATION_CYCLES`, call `renew_cycle_claim && assert_cycle_claim_owner` immediately before the PR receipt write, re-assert before the issue mirror, then post a file-backed cycle receipt containing the current key/ordinal, `**Cycle state**: COMPLETE-CONTINUE`, the fresh key, and the newly confirmed blocker numbers. Verify both writes by exact marker/key read-back as in M0. Then set `CYCLE_KEY="$NEXT_CYCLE_KEY"`, increment the ordinal, and continue the M0–M7 loop immediately. M0 appends the key to `ATTEMPTED_CYCLE_KEYS` only after its cap guard passes and immediately before claiming it. Do not return to the caller and do not launch a second same-HEAD panel.
 - If the new blocker is FIXABLE and distinct but the current ordinal equals the cap, do **not** append the unattempted `NEXT_CYCLE_KEY` to `ATTEMPTED_CYCLE_KEYS`; set `CAP_EXHAUSTED=true`, `CYCLE_ATTEMPTED=true`, `BLOCKED_NEXT_CYCLE_KEY="$NEXT_CYCLE_KEY"`, and `REMAINING_BLOCKER_FINDING_SET` to the freshly confirmed blocker numbers, retain `needs-human`, and set `RE_GATE_OUTCOME="RE-ESCALATED"`. Phase M8 includes exactly the three attempted keys, the `3/3` count, the blocked next key, and the remaining blocker numbers as durable evidence. This cap receipt counts the just-finished third cycle as completed because `**Cycle attempted**` is true.
 
 This models bounded convergence: one cycle can resolve an initial blocker set, a fresh re-review can discover a second set on the new HEAD, and a later clean review still flows through the unchanged base-scoped auto-land bar below.
@@ -491,9 +638,17 @@ fi
 
 **If the bar is met** (`BAR_MET=true`):
 ```bash
+renew_cycle_claim && assert_cycle_claim_owner || {
+  echo "BLOCKED: cycle ownership lost before merge"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
 gh pr merge {PR_NUMBER} {GH_FLAG} --merge
 MERGE_STATE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json state --jq '.state')
 if [ "$MERGE_STATE" = "MERGED" ]; then
+  assert_cycle_claim_owner || {
+    echo "BLOCKED: cycle ownership lost before merged-label transition"
+    # EXIT REMEDIATE_RESULT: status: BLOCKED
+  }
   RESOLUTION=$(resolve_script 'transition-label')
   TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
   case "$TIER" in
@@ -554,13 +709,38 @@ REMEDIATION_BODY="<!-- FORGE:REMEDIATION -->
 
 <!-- FORGE:REMEDIATION:COMPLETE -->"
 
+# An attempted cycle must still own its renewable claim immediately before terminal writes.
+# A cap-only receipt (`Cycle attempted: false`) has no claim by design; re-read trusted PR
+# receipts and fail closed if another receipt for the blocked key appeared since M0.
+if [ "${CYCLE_ATTEMPTED:-true}" = "true" ]; then
+  renew_cycle_claim && assert_cycle_claim_owner || {
+    echo "BLOCKED: cycle ownership lost before completion receipts"
+    # EXIT REMEDIATE_RESULT: status: BLOCKED
+  }
+else
+  CAP_RECEIPTS=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments --paginate --slurp 2>/dev/null \
+    | jq --arg key "$CYCLE_KEY" 'def trusted: (.user.type == "Bot") or (.author_association | IN("OWNER","MEMBER","COLLABORATOR")); (add // []) | map(select(trusted)) | [.[] | select(.body | contains("**Cycle key**: `" + $key + "`"))] | length') || {
+      echo "BLOCKED: cannot compare cap receipts before terminal write"
+      # EXIT REMEDIATE_RESULT: status: BLOCKED
+    }
+  [ "$CAP_RECEIPTS" -eq 0 ] || {
+    echo "BLOCKED: a receipt for the cap-exhausted cycle appeared concurrently"
+    # EXIT REMEDIATE_RESULT: status: BLOCKED
+  }
+fi
 gh pr comment {PR_NUMBER} {GH_FLAG} --body "$REMEDIATION_BODY"
+# Re-assert between the two durable writes for attempted cycles.
+[ "${CYCLE_ATTEMPTED:-true}" != "true" ] || assert_cycle_claim_owner || {
+  echo "BLOCKED: cycle ownership lost before issue completion mirror"
+  # EXIT REMEDIATE_RESULT: status: BLOCKED
+}
 gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "$REMEDIATION_BODY"
 ```
 
 **If the outcome was `AUTO-LANDED`**: this Skill invocation is itself the caller's terminal delegate (Phase 0A.1 of `work-on.md` already told its own routing loop to STOP after dispatching here) — so `remediate.md` must drive the close phase itself rather than assume some other inline logic will. Invoke the close subcommand directly, the same way `work-on/review.md` does when it hands off from a spawned sub-agent context:
 
 ```
+assert_cycle_claim_owner or return BLOCKED
 Skill("work-on:close", args="{ISSUE_NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --pr {PR_NUMBER} --base {PR_BASE}")
 ```
 
