@@ -101,6 +101,19 @@ describe("OpenCode orchestration preflight", () => {
     assert.deepEqual(deep.dispatchNow, []);
   });
 
+  it("routes external dependencies to the full workflow for live-state verification", () => {
+    const plan = buildPreflightPlan({
+      input: "1 --auto",
+      issues: [issue(1, { body: "## Problem\nBlocked by #99" })],
+    });
+
+    assert.equal(plan.supported, true);
+    assert.equal(plan.requiresDeepPlan, true);
+    assert.deepEqual(plan.issues[0].externalDependencies, [99]);
+    assert.deepEqual(plan.dispatchNow, []);
+    assert.match(plan.warnings.join("\n"), /verify their live terminal state/);
+  });
+
   it("does not dispatch implementation issues while an investigation requires the full phase path", () => {
     const issues = [
       issue(1, { title: "Investigate the deployment failure" }),

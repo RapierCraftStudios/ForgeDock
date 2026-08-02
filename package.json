@@ -53,7 +53,9 @@
     "README.md"
   ],
   "pi": {
-    "extensions": ["./pi/extensions"]
+    "extensions": [
+      "./pi/extensions"
+    ]
   },
   "scripts": {
     "test": "node scripts/test.mjs",
@@ -77,5 +79,8 @@
     "@anthropic-ai/claude-code": {
       "optional": true
     }
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
   }
 }

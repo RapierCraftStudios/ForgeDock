@@ -463,11 +463,15 @@ export function buildPreflightPlan({ input, repo = "", issues = [], maxConcurren
     .map((issue) => issue.number);
   const effectiveMax = Number.isInteger(maxConcurrent) && maxConcurrent > 0 ? maxConcurrent : 12;
   const deepPlan = flags.deepPlan || query.pattern === "cascade" || query.pattern === "repo-scoped";
-  const requiresDeepPlan = deepPlan || investigations.length > 0;
+  const hasExternalDependencies = externalDependencies.size > 0;
+  const requiresDeepPlan = deepPlan || investigations.length > 0 || hasExternalDependencies;
   const warnings = [
     "Compact preflight uses explicit dependencies, scoped issue-body files, and the database serialization rule.",
     "The full Phase 3 conflict/history analysis remains available with --deep-plan or when this preflight is unsupported.",
   ];
+  if (hasExternalDependencies) {
+    warnings.push("External dependencies require the full workflow to verify their live terminal state before dispatch.");
+  }
   if (flags.includeInFlight) warnings.push("In-flight issues were explicitly admitted for recovery.");
   if (deferred.length) warnings.push(`${deferred.length} in-flight issue(s) were deferred; use --include-in-flight for explicit recovery.`);
   if (flags.includeBacklog) warnings.push("Review-finding backlog scope requires the full cascade resolver.");

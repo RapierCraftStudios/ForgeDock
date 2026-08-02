@@ -1,22 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { parse } from "yaml";
 import { shouldReResolve } from "../../bin/engine/resolve.mjs";
 
-/** Parse the Pi re-resolution controls with the workflow's required YAML parser. */
+/** Parse the Pi re-resolution controls with the packaged YAML parser. */
 export function parsePiReResolveConfig(source) {
-  const parsed = spawnSync(
-    "yq",
-    ["-o=json", "-I=0", ".orchestration.reresolve // {}", "-"],
-    { encoding: "utf8", input: String(source || ""), windowsHide: true },
-  );
-  if (parsed.status !== 0 || parsed.error) return {};
-
   try {
-    const controls = JSON.parse(parsed.stdout || "{}");
+    const document = parse(String(source || ""));
+    const controls = document?.orchestration?.reresolve;
     if (!controls || Array.isArray(controls) || typeof controls !== "object") return {};
     const config = {};
     if (Object.hasOwn(controls, "enabled")) config.enabled = controls.enabled;
@@ -26,7 +20,8 @@ export function parsePiReResolveConfig(source) {
     }
     return config;
   } catch {
-    return {};
+    // A malformed policy must never silently fall back to default-on autonomy.
+    return { enabled: false };
   }
 }
 
