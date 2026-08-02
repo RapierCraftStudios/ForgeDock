@@ -228,7 +228,6 @@ async function orchestrate(forgeHome: string, projectRoot: string, input: string
 	const results: Array<IssueResult & { status: string }> = [];
 	const maxConcurrent = Math.max(1, Math.min(35, plan.maxConcurrent || 12));
 	const standingIssueSearchUrl = /^https:\/\//i.test(String(plan.input || "").trim());
-	const reResolveConfig = loadPiReResolveConfig(projectRoot);
 	let reResolveRounds = 0;
 	let handoffPlan: PreflightPlan | undefined;
 
@@ -278,7 +277,7 @@ async function orchestrate(forgeHome: string, projectRoot: string, input: string
 		if (result.status === "complete") completed.add(result.number);
 		else blocked.add(result.number);
 
-		if (standingIssueSearchUrl && piReResolveDecision(reResolveConfig, reResolveRounds).reResolve) {
+		if (standingIssueSearchUrl && piReResolveDecision(loadPiReResolveConfig(projectRoot), reResolveRounds).reResolve) {
 			reResolveRounds += 1;
 			const refreshed = reconcileCompletedDependencies(preflight(forgeHome, projectRoot, input, [...running.keys()]), completed) as PreflightPlan;
 			if (!refreshed.supported || refreshed.requiresDeepPlan) {

@@ -3,7 +3,9 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   buildPiModelArgs,
   buildPiPhaseArgs,
@@ -12,7 +14,7 @@ import {
   parseWorktrees,
   worktreeForBranch,
 } from "../../pi/runtime/engine.mjs";
-import { parsePiReResolveConfig, piReResolveDecision } from "../../pi/runtime/reresolve.mjs";
+import { loadPiReResolveConfig, parsePiReResolveConfig, piReResolveDecision } from "../../pi/runtime/reresolve.mjs";
 
 const packageJson = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
 const extensionSource = readFileSync(new URL("../../pi/extensions/forgedock.ts", import.meta.url), "utf8");
@@ -127,7 +129,8 @@ test("Pi orchestration passes raw GitHub URLs to the shared preflight", () => {
 test("Pi re-resolves standing issue-search URLs after each ordinary completion event", () => {
   const source = readFileSync(new URL("../../pi/extensions/forgedock.ts", import.meta.url), "utf8");
   assert.match(source, /standingIssueSearchUrl = \/\^https:\\\/\\\/\/i\.test\(String\(plan\.input \|\| ""\)\.trim\(\)\)/);
-  assert.match(source, /await Promise\.race\(running\.values\(\)\)[\s\S]*if \(standingIssueSearchUrl && piReResolveDecision\(reResolveConfig, reResolveRounds\)\.reResolve\)[\s\S]*reResolveRounds \+= 1;[\s\S]*reconcileCompletedDependencies\(preflight\(forgeHome, projectRoot, input, \[\.\.\.running\.keys\(\)\]\), completed\)[\s\S]*if \(!refreshed\.supported \|\| refreshed\.requiresDeepPlan\)/);
+  assert.match(source, /await Promise\.race\(running\.values\(\)\)[\s\S]*if \(standingIssueSearchUrl && piReResolveDecision\(loadPiReResolveConfig\(projectRoot\), reResolveRounds\)\.reResolve\)[\s\S]*reResolveRounds \+= 1;[\s\S]*reconcileCompletedDependencies\(preflight\(forgeHome, projectRoot, input, \[\.\.\.running\.keys\(\)\]\), completed\)[\s\S]*if \(!refreshed\.supported \|\| refreshed\.requiresDeepPlan\)/);
+  assert.doesNotMatch(source, /const reResolveConfig = loadPiReResolveConfig\(projectRoot\)/);
   assert.match(source, /import \{ reconcileCompletedDependencies \} from "\.\.\/\.\.\/bin\/orchestrate-preflight\.mjs"/);
   assert.doesNotMatch(source, /await Promise\.all\(batch\.map/);
   assert.match(source, /if \(completed\.has\(issue\.number\) \|\| blocked\.has\(issue\.number\) \|\| running\.has\(issue\.number\) \|\| issue\.conflictOnly\) continue;[\s\S]*pending\.add\(issue\.number\)/);
@@ -146,6 +149,19 @@ test("Pi clears a stale deep-plan handoff when a later refresh returns to compac
     extensionSource,
     /if \(!refreshed\.supported \|\| refreshed\.requiresDeepPlan\) \{[\s\S]*handoffPlan = refreshed;[\s\S]*continue;[\s\S]*\}[\s\S]*handoffPlan = undefined;[\s\S]*for \(const issue of refreshed\.issues \|\| \[\]\)/,
   );
+});
+
+test("Pi reloads standing-query policy between completion decisions", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "forgedock-pi-reresolve-"));
+  try {
+    writeFileSync(join(projectRoot, "forge.yaml"), "orchestration: { reresolve: { enabled: true, max_rounds: 3 } }\n");
+    assert.equal(piReResolveDecision(loadPiReResolveConfig(projectRoot), 1).reResolve, true);
+
+    writeFileSync(join(projectRoot, "forge.yaml"), "orchestration: { reresolve: { enabled: false, max_rounds: 3 } }\n");
+    assert.equal(piReResolveDecision(loadPiReResolveConfig(projectRoot), 1).reResolve, false);
+  } finally {
+    rmSync(projectRoot, { recursive: true, force: true });
+  }
 });
 
 test("Pi standing-query refresh honors the configured disable switch and round cap", () => {
