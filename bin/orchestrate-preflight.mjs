@@ -277,8 +277,9 @@ export function parseIssueSearchUrl(input, repo) {
   };
 }
 
-function resolveQuery(input, issues, { includeInFlight, repo }) {
+function resolveQuery(input, issues, { includeInFlight, repo, conflictIssueNumbers = [] }) {
   const trimmed = String(input || "").trim();
+  const conflictOnly = new Set(conflictIssueNumbers);
   const classified = classifyInputPattern(trimmed);
   const lower = trimmed.toLowerCase();
   let pattern = classified.pattern;
@@ -350,13 +351,21 @@ function resolveQuery(input, issues, { includeInFlight, repo }) {
     reason = `input pattern "${classified.pattern}" needs the full multi-phase resolver`;
   }
 
+  for (const issue of issues) {
+    if (conflictOnly.has(Number(issue.number)) && !selected.some((selectedIssue) => Number(selectedIssue.number) === Number(issue.number))) {
+      selected.push(issue);
+    }
+  }
+
   if (!includeInFlight) {
     for (const issue of selected) {
-      if (labelsOf(issue).some((label) => IN_FLIGHT_LABELS.has(label))) {
+      if (labelsOf(issue).some((label) => IN_FLIGHT_LABELS.has(label)) && !conflictOnly.has(Number(issue.number))) {
         deferred.push({ number: Number(issue.number), reason: "in-flight" });
       }
     }
-    selected = selected.filter((issue) => !labelsOf(issue).some((label) => IN_FLIGHT_LABELS.has(label)));
+    selected = selected.filter((issue) =>
+      !labelsOf(issue).some((label) => IN_FLIGHT_LABELS.has(label)) || conflictOnly.has(Number(issue.number)),
+    );
   }
 
   return { supported, reason, pattern, classified, selected, deferred };
@@ -368,9 +377,13 @@ function addEdge(predecessors, predecessor, successor, kind, edges) {
   edges.push({ predecessor, successor, kind });
 }
 
-export function buildPreflightPlan({ input, repo = "", issues = [], maxConcurrent = 12 } = {}) {
+export function buildPreflightPlan({ input, repo = "", issues = [], maxConcurrent = 12, conflictIssueNumbers = [] } = {}) {
   const flags = controlFlags(input);
-  const query = resolveQuery(flags.input, issues, { ...flags, repo });
+  const validConflictIssueNumbers = [...conflictIssueNumbers]
+    .map(Number)
+    .filter((number) => Number.isSafeInteger(number) && number > 0);
+  const conflictOnly = new Set([...new Set(validConflictIssueNumbers)].slice(0, 35));
+  const query = resolveQuery(flags.input, issues, { ...flags, repo, conflictIssueNumbers: conflictOnly });
   if (!query.supported) {
     return {
       version: VERSION,
@@ -394,7 +407,7 @@ export function buildPreflightPlan({ input, repo = "", issues = [], maxConcurren
     const labels = labelsOf(issue);
     const excludedLabel = labels.find((label) => EXCLUDED_LABELS.has(label));
     const isCoordinationIssue = /FORGE:COORD_ISSUE|orchestrate:\s*claims board/i.test(String(issue.body || ""));
-    if (excludedLabel || isCoordinationIssue || String(issue.state || "").toUpperCase() === "CLOSED") {
+    if (!conflictOnly.has(Number(issue.number)) && (excludedLabel || isCoordinationIssue || String(issue.state || "").toUpperCase() === "CLOSED")) {
       excluded.push({ number: Number(issue.number), reason: excludedLabel || (isCoordinationIssue ? "orchestration coordination issue" : "closed") });
       continue;
     }
@@ -420,8 +433,12 @@ export function buildPreflightPlan({ input, repo = "", issues = [], maxConcurren
     for (const file of files) {
       const existing = owners.get(file) || [];
       for (const other of existing) {
-        const predecessor = Math.min(number, other);
-        const successor = Math.max(number, other);
+        const numberIsConflict = conflictOnly.has(number);
+        const otherIsConflict = conflictOnly.has(other);
+        const predecessor = numberIsConflict !== otherIsConflict
+          ? (numberIsConflict ? number : other)
+          : Math.min(number, other);
+        const successor = predecessor === number ? other : number;
         addEdge(predecessors, predecessor, successor, "same-file", edges);
       }
       existing.push(number);
@@ -431,10 +448,16 @@ export function buildPreflightPlan({ input, repo = "", issues = [], maxConcurren
 
   const databaseIssues = admitted
     .filter((issue) => domainsFor(issue).includes("DATABASE"))
-    .map((issue) => Number(issue.number))
-    .sort((a, b) => a - b);
-  for (let index = 1; index < databaseIssues.length; index++) {
-    addEdge(predecessors, databaseIssues[index - 1], databaseIssues[index], "database", edges);
+    .map((issue) => Number(issue.number));
+  const activeDatabaseIssues = databaseIssues.filter((number) => conflictOnly.has(number));
+  const selectableDatabaseIssues = databaseIssues.filter((number) => !conflictOnly.has(number)).sort((a, b) => a - b);
+  for (const active of activeDatabaseIssues) {
+    for (const selectable of selectableDatabaseIssues) {
+      addEdge(predecessors, active, selectable, "database", edges);
+    }
+  }
+  for (let index = 1; index < selectableDatabaseIssues.length; index++) {
+    addEdge(predecessors, selectableDatabaseIssues[index - 1], selectableDatabaseIssues[index], "database", edges);
   }
 
   const records = admitted
@@ -452,18 +475,19 @@ export function buildPreflightPlan({ input, repo = "", issues = [], maxConcurren
         externalDependencies: externalDependencies.get(number) || [],
         priority: priorityWeight(labels),
         inFlight: labels.some((label) => IN_FLIGHT_LABELS.has(label)),
+        conflictOnly: conflictOnly.has(number),
       };
     })
     .sort((a, b) => b.priority - a.priority || a.number - b.number);
 
-  const investigations = records.filter((issue) => issue.classification === "INVESTIGATION");
+  const investigations = records.filter((issue) => !issue.conflictOnly && issue.classification === "INVESTIGATION");
   const ready = records
-    .filter((issue) => issue.predecessors.length === 0 && issue.externalDependencies.length === 0)
+    .filter((issue) => !issue.conflictOnly && issue.predecessors.length === 0 && issue.externalDependencies.length === 0)
     .sort((a, b) => b.priority - a.priority || a.number - b.number)
     .map((issue) => issue.number);
   const effectiveMax = Number.isInteger(maxConcurrent) && maxConcurrent > 0 ? maxConcurrent : 12;
   const deepPlan = flags.deepPlan || query.pattern === "cascade" || query.pattern === "repo-scoped";
-  const hasExternalDependencies = externalDependencies.size > 0;
+  const hasExternalDependencies = records.some((issue) => !issue.conflictOnly && issue.externalDependencies.length > 0);
   const requiresDeepPlanWithoutExternalDependencies = deepPlan || investigations.length > 0;
   const requiresDeepPlan = requiresDeepPlanWithoutExternalDependencies || hasExternalDependencies;
   const warnings = [
@@ -511,10 +535,10 @@ export function reconcileCompletedDependencies(plan, completedDependencies = [])
     ...issue,
     externalDependencies: (issue.externalDependencies || []).filter((dependency) => !completed.has(dependency)),
   }));
-  const hasExternalDependencies = issues.some((issue) => issue.externalDependencies.length > 0);
+  const hasExternalDependencies = issues.some((issue) => !issue.conflictOnly && issue.externalDependencies.length > 0);
   const requiresDeepPlan = Boolean(plan.requiresDeepPlanWithoutExternalDependencies || hasExternalDependencies);
   const ready = issues
-    .filter((issue) => issue.predecessors.length === 0 && issue.externalDependencies.length === 0)
+    .filter((issue) => !issue.conflictOnly && issue.predecessors.length === 0 && issue.externalDependencies.length === 0)
     .sort((a, b) => b.priority - a.priority || a.number - b.number)
     .map((issue) => issue.number);
   const maxConcurrent = Number.isInteger(plan.maxConcurrent) && plan.maxConcurrent > 0 ? plan.maxConcurrent : 12;
@@ -581,11 +605,13 @@ function configuredRepo(cwd) {
 }
 
 function parseCli(argv) {
-  const options = { cwd: process.cwd(), repo: "", input: "" };
+  const options = { cwd: process.cwd(), repo: "", input: "", conflictIssueNumbers: [] };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
     if (arg === "--cwd" || arg === "--repo" || arg === "--args") {
       options[arg.slice(2) === "args" ? "input" : arg.slice(2)] = argv[++index] || "";
+    } else if (arg === "--conflict-issues") {
+      options.conflictIssueNumbers = String(argv[++index] || "").split(",");
     } else if (!options.input) {
       options.input = arg;
     }
@@ -593,7 +619,7 @@ function parseCli(argv) {
   return options;
 }
 
-export function runPreflight({ cwd = process.cwd(), repo, input, gh = ghJson } = {}) {
+export function runPreflight({ cwd = process.cwd(), repo, input, conflictIssueNumbers = [], gh = ghJson } = {}) {
   repo ||= configuredRepo(cwd);
   if (!repo) throw new Error("--repo is required or must be present in forge.yaml");
   const flags = controlFlags(input);
@@ -625,6 +651,7 @@ export function runPreflight({ cwd = process.cwd(), repo, input, gh = ghJson } =
     repo,
     issues,
     maxConcurrent: flags.maxConcurrent || configuredConcurrency(cwd),
+    conflictIssueNumbers,
   });
 }
 

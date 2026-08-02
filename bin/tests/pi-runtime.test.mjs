@@ -127,11 +127,18 @@ test("Pi orchestration passes raw GitHub URLs to the shared preflight", () => {
 test("Pi re-resolves standing issue-search URLs after each ordinary completion event", () => {
   const source = readFileSync(new URL("../../pi/extensions/forgedock.ts", import.meta.url), "utf8");
   assert.match(source, /standingIssueSearchUrl = \/\^https:\\\/\\\/\/i\.test\(String\(plan\.input \|\| ""\)\.trim\(\)\)/);
-  assert.match(source, /await Promise\.race\(running\.values\(\)\)[\s\S]*if \(standingIssueSearchUrl && piReResolveDecision\(reResolveConfig, reResolveRounds\)\.reResolve\)[\s\S]*reResolveRounds \+= 1;[\s\S]*reconcileCompletedDependencies\(preflight\(forgeHome, projectRoot, input\), completed\)[\s\S]*if \(!refreshed\.supported \|\| refreshed\.requiresDeepPlan\)/);
+  assert.match(source, /await Promise\.race\(running\.values\(\)\)[\s\S]*if \(standingIssueSearchUrl && piReResolveDecision\(reResolveConfig, reResolveRounds\)\.reResolve\)[\s\S]*reResolveRounds \+= 1;[\s\S]*reconcileCompletedDependencies\(preflight\(forgeHome, projectRoot, input, \[\.\.\.running\.keys\(\)\]\), completed\)[\s\S]*if \(!refreshed\.supported \|\| refreshed\.requiresDeepPlan\)/);
   assert.match(source, /import \{ reconcileCompletedDependencies \} from "\.\.\/\.\.\/bin\/orchestrate-preflight\.mjs"/);
   assert.doesNotMatch(source, /await Promise\.all\(batch\.map/);
-  assert.match(source, /if \(completed\.has\(issue\.number\) \|\| blocked\.has\(issue\.number\) \|\| running\.has\(issue\.number\)\) continue;[\s\S]*pending\.add\(issue\.number\)/);
+  assert.match(source, /if \(completed\.has\(issue\.number\) \|\| blocked\.has\(issue\.number\) \|\| running\.has\(issue\.number\) \|\| issue\.conflictOnly\) continue;[\s\S]*pending\.add\(issue\.number\)/);
   assert.match(source, /externalDependencies/);
+});
+
+test("Pi standing-query refresh keeps active conflicts but they are not redispatched", () => {
+  assert.match(extensionSource, /function preflight\([^)]*conflictIssueNumbers: number\[\] = \[\]/);
+  assert.match(extensionSource, /if \(conflictIssueNumbers\.length\) args\.push\("--conflict-issues", conflictIssueNumbers\.join\(","\)\)/);
+  assert.match(extensionSource, /preflight\(forgeHome, projectRoot, input, \[\.\.\.running\.keys\(\)\]\)/);
+  assert.match(extensionSource, /running\.has\(issue\.number\) \|\| issue\.conflictOnly/);
 });
 
 test("Pi clears a stale deep-plan handoff when a later refresh returns to compact mode", () => {

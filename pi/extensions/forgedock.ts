@@ -22,7 +22,7 @@ import { loadPiReResolveConfig, piReResolveDecision } from "../runtime/reresolve
 import { reconcileCompletedDependencies } from "../../bin/orchestrate-preflight.mjs";
 
 type ForgeCommand = { id: string; name: string; relativePath: string; absolutePath: string; description: string };
-type PlanIssue = { number: number; title: string; predecessors: number[]; externalDependencies?: number[]; domain: string[]; files: string[]; priority: number; inFlight?: boolean };
+type PlanIssue = { number: number; title: string; predecessors: number[]; externalDependencies?: number[]; domain: string[]; files: string[]; priority: number; inFlight?: boolean; conflictOnly?: boolean };
 type PreflightPlan = {
 	supported: boolean; reason?: string; mode?: string; pattern?: string; input?: string; total?: number; maxConcurrent?: number; issues?: PlanIssue[];
 	edges?: Array<{ predecessor: number; successor: number; kind: string }>; ready?: number[]; dispatchNow?: number[];
@@ -134,8 +134,10 @@ function repoFromConfig(projectRoot: string): string {
 function normalizeSlug(value: string): string {
 	return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
-function preflight(forgeHome: string, projectRoot: string, input: string): PreflightPlan {
-	const result = spawnSync(process.execPath, [join(forgeHome, "bin", "orchestrate-preflight.mjs"), "--cwd", projectRoot, "--repo", repoFromConfig(projectRoot), "--args", input], {
+function preflight(forgeHome: string, projectRoot: string, input: string, conflictIssueNumbers: number[] = []): PreflightPlan {
+	const args = [join(forgeHome, "bin", "orchestrate-preflight.mjs"), "--cwd", projectRoot, "--repo", repoFromConfig(projectRoot), "--args", input];
+	if (conflictIssueNumbers.length) args.push("--conflict-issues", conflictIssueNumbers.join(","));
+	const result = spawnSync(process.execPath, args, {
 		cwd: projectRoot, encoding: "utf8", windowsHide: true, maxBuffer: 32 * 1024 * 1024,
 	});
 	if (result.status !== 0) throw new Error(String(result.stderr || "preflight failed").trim());
@@ -278,14 +280,14 @@ async function orchestrate(forgeHome: string, projectRoot: string, input: string
 
 		if (standingIssueSearchUrl && piReResolveDecision(reResolveConfig, reResolveRounds).reResolve) {
 			reResolveRounds += 1;
-			const refreshed = reconcileCompletedDependencies(preflight(forgeHome, projectRoot, input), completed) as PreflightPlan;
+			const refreshed = reconcileCompletedDependencies(preflight(forgeHome, projectRoot, input, [...running.keys()]), completed) as PreflightPlan;
 			if (!refreshed.supported || refreshed.requiresDeepPlan) {
 				handoffPlan = refreshed;
 				continue;
 			}
 			handoffPlan = undefined;
 			for (const issue of refreshed.issues || []) {
-				if (completed.has(issue.number) || blocked.has(issue.number) || running.has(issue.number)) continue;
+				if (completed.has(issue.number) || blocked.has(issue.number) || running.has(issue.number) || issue.conflictOnly) continue;
 				issueMap.set(issue.number, issue);
 				pending.add(issue.number);
 			}
