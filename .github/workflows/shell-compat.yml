@@ -14,7 +14,7 @@ on:
   pull_request:
     paths:
       - 'scripts/**'
-      - 'commands/orchestrate/phase-4-execution.md'
+      - 'commands/**'
       - '.github/workflows/**'
       - '.github/workflows/shell-compat.yml'
   push:
@@ -23,7 +23,7 @@ on:
       - main
     paths:
       - 'scripts/**'
-      - 'commands/orchestrate/phase-4-execution.md'
+      - 'commands/**'
       - '.github/workflows/**'
       - '.github/workflows/shell-compat.yml'
 
@@ -75,6 +75,8 @@ jobs:
         run: bash scripts/verify-phase-trail.test.sh
       - name: Run is-docs-only.test.sh
         run: bash scripts/is-docs-only.test.sh
+      - name: Run extract-affected-files.test.sh
+        run: bash scripts/extract-affected-files.test.sh
 
   # ---------------------------------------------------------------------------
   # Windows Git Bash fixture smoke for the phase-trail / dispatch-lint scripts
