@@ -149,13 +149,53 @@ OUT=$(FORGE_TRAIL_QG_SINCE=2026-10-05T00:00:00Z MOCK_GH_JSON="$mp" bash "$VERIFY
 [ $RC -eq 1 ] && echo "$OUT" | grep -q 'MISSING: QUALITY_GATE' && ok "multi-page: latest build on page 2 is not waived" || bad "multi-page (rc=$RC out=$OUT)"
 
 # Cutoff validation (#3121): malformed or future cutoff fails closed
-for bad_since in "garbage" "2999-01-01T00:00:00Z"; do
+for bad_since in "garbage" "2999-01-01T00:00:00Z" "2020-13-45T99:99:99Z" "2026-02-30T00:00:00Z" "2026-10-01T24:00:00Z"; do
   OUT=$(FORGE_TRAIL_QG_SINCE="$bad_since" MOCK_GH_JSON="$(lg lgv 2026-10-01T00:00:00Z)" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
   [ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "invalid cutoff '$bad_since' rejected" || bad "cutoff '$bad_since' (rc=$RC out=$OUT)"
 done
 
+# Runner clock behind the default cutoff: cutoff looks future-dated -> exit 2 (fails closed)
+CLK="$TMP_FX/clock"; mkdir -p "$CLK"
+REAL_DATE=$(command -v date)
+cat > "$CLK/date" <<MOCKDATE
+#!/usr/bin/env bash
+if [ "\$1" = "-u" ] && [ "\$2" = "+%Y-%m-%dT%H:%M:%SZ" ]; then echo 2020-01-01T00:00:00Z; else exec "$REAL_DATE" "\$@"; fi
+MOCKDATE
+chmod +x "$CLK/date"
+OUT=$(PATH="$CLK:$PATH" MOCK_GH_JSON="$(lg lgc 2026-10-01T00:00:00Z)" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+[ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "clock behind default cutoff fails closed (exit 2)" || bad "clock behind cutoff (rc=$RC out=$OUT)"
+
+# Boundary: cutoff exactly equal to BUILDER:COMPLETE time is NOT waived (strictly-before only)
+OUT=$(FORGE_TRAIL_QG_SINCE=2026-10-01T00:00:00Z MOCK_GH_JSON="$(lg lgb 2026-10-01T00:00:00Z)" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+[ $RC -eq 1 ] && echo "$OUT" | grep -q 'MISSING: QUALITY_GATE' && ok "boundary: build at exactly the cutoff is not waived" || bad "boundary equal (rc=$RC out=$OUT)"
+OUT=$(FORGE_TRAIL_QG_SINCE=2026-10-01T00:00:01Z MOCK_GH_JSON="$(lg lgb2 2026-10-01T00:00:00Z)" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+[ $RC -eq 0 ] && ok "boundary: build one second before the cutoff is waived" || bad "boundary minus 1s (rc=$RC out=$OUT)"
+
+# Page-shape edge cases (#3130)
+BLD='{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","created_at":"2026-10-06T00:00:00Z"}'
+pg() { jq -nc --argjson c "$1" '$c | map(. + {author_association:"OWNER", user:{login:"owner",type:"User"}})'; }
+BASE='[{"body":"<!-- FORGE:INVESTIGATOR -->\n<!-- INVESTIGATION:COMPLETE -->"},{"body":"<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: TRIVIAL"},{"body":"<!-- FORGE:CONTRACT -->\nc"}]'
+# empty pages around a populated one
+{ echo '[]'; pg "$BASE"; echo '[]'; pg "[$BLD]"; echo '[]'; } > "$TMP_FX/empty.json"
+OUT=$(FORGE_TRAIL_QG_SINCE=2026-10-05T00:00:00Z MOCK_GH_JSON="$TMP_FX/empty.json" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+[ $RC -eq 1 ] && echo "$OUT" | grep -q 'MISSING: QUALITY_GATE' && ok "empty pages interleaved are tolerated" || bad "empty pages (rc=$RC out=$OUT)"
+OUT=$(MOCK_GH_JSON=<(echo '[]') bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+[ $RC -eq 1 ] && echo "$OUT" | grep -q 'MISSING: INVESTIGATOR' && ok "all-empty thread fails (not error)" || bad "all-empty (rc=$RC out=$OUT)"
+# 3+ pages: latest build on the LAST page wins
+{ pg "$BASE"; pg '[{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","created_at":"2026-01-01T00:00:00Z"}]'; pg "[$BLD]"; } > "$TMP_FX/p3.json"
+OUT=$(FORGE_TRAIL_QG_SINCE=2026-10-05T00:00:00Z MOCK_GH_JSON="$TMP_FX/p3.json" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+[ $RC -eq 1 ] && echo "$OUT" | grep -q 'MISSING: QUALITY_GATE' && ok "3 pages: latest build on page 3 is not waived" || bad "3 pages (rc=$RC out=$OUT)"
+# Malformed / mixed pages fail closed with exit 2
+{ pg "$BASE"; echo '{"message":"Server Error"}'; } > "$TMP_FX/mixed.json"
+OUT=$(MOCK_GH_JSON="$TMP_FX/mixed.json" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+[ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "mixed array/object pages fail closed (exit 2)" || bad "mixed pages (rc=$RC out=$OUT)"
+{ pg "$BASE"; echo '[{"body":'; } > "$TMP_FX/malformed.json"
+OUT=$(MOCK_GH_JSON="$TMP_FX/malformed.json" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+[ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "malformed page fails closed (exit 2)" || bad "malformed page (rc=$RC out=$OUT)"
+
 # -h prints the full header
-bash "$VERIFY" -h | grep -q 'COLLABORATOR includes read-level' && ok "-h prints the full header" || bad "-h truncated"
+HOUT=$(bash "$VERIFY" -h)
+[ "$(printf '%s\n' "$HOUT" | wc -l)" -ge 45 ] && echo "$HOUT" | grep -q 'COLLABORATOR includes read-level' && echo "$HOUT" | grep -q '^# Usage:' && ok "-h prints the full multi-line header" || bad "-h truncated"
 
 # Untrusted-author FORGE markers are ignored AND diagnosed with a NOTE (#3123)
 UT="$TMP_FX/untrusted.json"
