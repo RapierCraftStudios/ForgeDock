@@ -1428,6 +1428,7 @@ release_merged_trail() {
   gh issue comment "$N" -R {GH_REPO} --body "<!-- FORGE:PHASE_TRAIL_RELEASED -->
 The merged-trail hold on #${N} was released by a human (needs-human cleared or trail re-verified). Dependents held as \`blocked-on-human-merge\` are released. A later, unrelated \`needs-human\` on this merged issue no longer gates them." >/dev/null 2>&1 || true # <!-- allowlist:check-command-side-effects -->
   [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -f "$TRAIL_CACHE_DIR/trail-$N"
+  return 0
 }
 
 # classify_predecessor_state <issue> (forge#3168): the helpers hold_merged_trail, resolve_orch_login,
