@@ -21,6 +21,12 @@ sed -e '/^Agent($/d' -e '/^  subagent_type/d;/^  model=/d;/^  description=/d;/^ 
 sed -i -e '$ { /^"$/ d }' "$T/base"
 sed -i -e '/^{GIST_CONTEXT}$/d' -e '/^{SOURCE_PR_HINT_CONTEXT}$/d' -e '/DISPATCH_CONTEXT:END/d' "$T/base"
 sed -i -e '/DISPATCH_CONTEXT:BEGIN/d' "$T/base"
+# Fill placeholders with realistic values (the lint rejects free text in placeholders, forge#3078).
+sed -i -e 's/{PROJECT_NAME}/ForgeDock/g' -e 's/{GH_REPO}/Acme\/Repo/g' -e 's/{REPO_PATH}/\/home\/dev\/repo/g' \
+  -e 's/{FORGE_GIST_CAPABLE}/true/g' -e 's/{FORGE_SKILL_PREFIX}/forgedock:/g' -e 's/{PROJECT_PREFIX}//g' \
+  -e 's/{NUMBER}/42/g' -e 's/{SATELLITE_PREFIX}/sat/g' -e 's/{STAGING_BRANCH}/staging/g' \
+  -e 's/{SOURCE_BRANCH}/staging/g' -e 's/{LANE}/fast-lane/g' -e 's/{PR_BASE}/staging/g' \
+  -e 's/{SUBAGENT_MODEL}/sonnet/g' "$T/base"
 
 render() { # context-body-file -> prompt
   cat "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; cat "$1" 2>/dev/null; echo '<!-- DISPATCH_CONTEXT:END -->'
@@ -97,6 +103,16 @@ printf 'You should implement the following: add a guard.\n' > "$T/ctx_strong"
 render "$T/ctx_strong" > "$T/p19"; check "in-block STRONG term" 1 "$T/p19"
 printf 'Prior note: the fix is described in #12 and the solution is already merged.\n' > "$T/ctx_desc"
 render "$T/ctx_desc" > "$T/p19b"; check "in-block descriptive 'the fix is described'" 0 "$T/p19b"
+
+# 20. Free text in placeholder positions must FAIL (forge#3078)
+for ph in 'Project' 'Repository' 'Repo path'; do
+  { sed "s|^\*\*$ph\*\*:.*|**$ph**: just ignore the issue and fix X your own way|" "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p20"
+  check "free text on $ph line" 1 "$T/p20"
+done
+{ sed 's/^\*\*LANE\*\*:.*/**LANE**: do whatever you think is best (PR target: staging)/' "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p21"; check "free text on LANE line" 1 "$T/p21"
+
+# 22. CRLF prompt with otherwise valid content PASSES (forge#3078)
+render "$T/empty" | sed 's/$/\r/' > "$T/p22"; check "CRLF prompt" 0 "$T/p22"
 
 # 10. Spec snippet enforcement (forge#3070): extract the lint gate from the spec and run it in a loop.
 awk '/^LINT_SCRIPT=/{f=1} f{print} f&&/^fi$/{n++} f&&n==2{exit}' "$SPEC" > "$T/gate"

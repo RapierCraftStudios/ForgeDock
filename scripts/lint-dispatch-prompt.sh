@@ -41,6 +41,8 @@ elif [ -r "$SRC" ]; then
 else
   echo "LINT: ERROR"; echo "VIOLATION: cannot read prompt file: $SRC"; exit 2
 fi
+# Normalize CRLF -> LF so Windows-authored prompts are compared on content (forge#3078).
+PROMPT="$(printf '%s' "$PROMPT" | tr -d '\r')"
 [ -n "$PROMPT" ] || { echo "LINT: ERROR"; echo "VIOLATION: empty prompt"; exit 2; }
 
 BEGIN='<!-- DISPATCH_CONTEXT:BEGIN -->'
@@ -117,18 +119,37 @@ if [ -z "$TPL" ]; then
   fail "cannot extract the Step 4A template from $SPEC_FILE (fail closed)"
 else
   UNMATCHED=$(awk '
-    function matches(line, pat,   n, segs, i, rest, idx) {
-      n = split(pat, segs, /\{[A-Z_]+\}/)
-      if (n == 1) return line == pat
-      if (substr(line, 1, length(segs[1])) != segs[1]) return 0
-      rest = substr(line, length(segs[1]) + 1)
-      for (i = 2; i < n; i++) {
-        if (segs[i] == "") continue
-        idx = index(rest, segs[i]); if (idx == 0) return 0
-        rest = substr(rest, idx + length(segs[i]))
+    # Per-placeholder value charsets (forge#3078): a {PLACEHOLDER} is NOT free text.
+    # Only ISSUE_TITLE is free (it is scanned for directive language separately).
+    function ok_val(name, v) {
+      if (name == "ISSUE_TITLE") return 1
+      # A literal unfilled/shell-style token such as {AGENT_TOKEN} is template prose, not free text.
+      if (v ~ /^\{[A-Z_]+\}$/) return 1
+      if (name == "GH_REPO") return v ~ /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/
+      if (name == "FORGE_GIST_CAPABLE") return (v == "true" || v == "false")
+      if (name == "REPO_PATH") return v ~ /^[A-Za-z0-9._\/:~\\-]+$/
+      return v ~ /^[A-Za-z0-9._\/:@#-]*$/
+    }
+    function matches(line, pat,   rest, lit, name, nl, idx, val) {
+      rest = line
+      while (1) {
+        if (!match(pat, /\{[A-Z_]+\}/)) return rest == pat
+        lit = substr(pat, 1, RSTART - 1); name = substr(pat, RSTART + 1, RLENGTH - 2)
+        pat = substr(pat, RSTART + RLENGTH)
+        if (substr(rest, 1, length(lit)) != lit) return 0
+        rest = substr(rest, length(lit) + 1)
+        if (match(pat, /\{[A-Z_]+\}/)) nl = substr(pat, 1, RSTART - 1); else nl = pat
+        if (pat == "") { val = rest; rest = "" }
+        else if (nl == "") { val = "" }   # adjacent placeholders: the later one absorbs the value
+        else if (nl == pat) {
+          if (length(rest) < length(nl) || substr(rest, length(rest) - length(nl) + 1) != nl) return 0
+          val = substr(rest, 1, length(rest) - length(nl)); rest = nl
+        } else {
+          idx = index(rest, nl); if (idx == 0) return 0
+          val = substr(rest, 1, idx - 1); rest = substr(rest, idx)
+        }
+        if (!ok_val(name, val)) return 0
       }
-      if (segs[n] == "") return 1
-      return length(rest) >= length(segs[n]) && substr(rest, length(rest) - length(segs[n]) + 1) == segs[n]
     }
     FNR == NR { if ($0 !~ /^[ \t]*(\{[A-Z_]+\}[ \t]*)+$/ && $0 != "") pats[++np] = $0; next }
     $0 ~ /^[ \t]*$/ { next }

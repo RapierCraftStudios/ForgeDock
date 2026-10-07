@@ -39,8 +39,12 @@ jobs:
   # Dispatch prompt lint fixtures (forge#3072) — keep the Hard Rule 1 lint tested
   # ---------------------------------------------------------------------------
   dispatch-lint-tests:
-    name: lint-dispatch-prompt fixtures
-    runs-on: ubuntu-latest
+    name: lint-dispatch-prompt fixtures (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - name: Run lint-dispatch-prompt.test.sh
