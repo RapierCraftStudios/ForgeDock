@@ -183,7 +183,8 @@ Return `REVIEW_RESULT: status: BLOCKED`, blocker: "git push failed".
 A PR must not be opened for work whose earlier phases were skipped. Run the deterministic verifier; it requires INVESTIGATOR, FAST_PATH and CONTRACT always, CONTEXT and ARCHITECT unless the band is TRIVIAL/INVESTIGATION, and a passing FORGE:QUALITY_GATE unless the diff is docs-only.
 
 ```bash
-CHANGED=$(git -C {WORKTREE_PATH} diff --name-only origin/{PR_BASE}...HEAD)
+# --no-renames: list BOTH sides of a rename so a file moved into docs/ cannot hide its source path (forge#3145).
+CHANGED=$(git -C {WORKTREE_PATH} diff --name-only --no-renames origin/{PR_BASE}...HEAD)
 # The verifier ships with ForgeDock (not the consumer repo): same resolution as every universal script.
 # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
 FORGE_ROOT=""

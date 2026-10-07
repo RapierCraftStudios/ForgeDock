@@ -41,5 +41,24 @@ t "leading ./ docs" 0 ./docs/a.md
 t "leading ./ excluded" 1 ./commands/x.md
 t "docs traversal" 1 docs/../commands/x.md
 t "valid + blank lines" 0 docs/a.md "" README.md
+t "rename pair (source in commands/)" 1 commands/x.md docs/x.md
+t "rename collapsed dest only (caller bug, predicate alone cannot see)" 0 docs/x.md
+t "devdocs md" 1 devdocs/agent/custom-instructions.md
+t "templates devdocs agent md" 1 templates/devdocs/agent/x.md
+t ".opencode md" 1 .opencode/x.md
+t ".gemini md" 1 .gemini/x.md
+t ".kiro md" 1 .kiro/steering/x.md
+t "skills dir md" 1 skills/a/readme.md
+t "templates md" 1 templates/x.md
+t "unknown dir md fails closed" 1 notes/x.md
+t "nested unknown README fails closed" 1 pkg/README.md
+t "docs/skillset.md accepted" 0 docs/skillset.md
+t "docs/Agents-guide.md accepted" 0 docs/Agents-guide.md
+t "docs/AGENTS.md rejected" 1 docs/AGENTS.md
+t "AGENTS.override.md rejected" 1 AGENTS.override.md
+t "docs/skill.md rejected" 1 docs/skill.md
+t "root CHANGELOG" 0 CHANGELOG.md
+t "root CONTRIBUTING" 0 CONTRIBUTING.md
+t "docs under devdocs-named dir" 1 docs/devdocs/x.md
 echo "is-docs-only: $PASS passed, $FAILN failed"
 [ "$FAILN" -eq 0 ]
