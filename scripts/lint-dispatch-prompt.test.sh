@@ -100,6 +100,13 @@ render "$T/ctx_fixis" > "$T/p17"; check "in-block 'the fix is to'" 1 "$T/p17"
 printf 'The solution is: return early in handle_fraud.\n' > "$T/ctx_soln"
 render "$T/ctx_soln" > "$T/p17b"; check "in-block 'the solution is:'" 1 "$T/p17b"
 
+# 17c. Phrase variants inside the block are rejected (forge#3083)
+n=0
+for v in 'The fix is  to add a guard.' 'The fix is simply to add a guard.' 'The fix was to add a guard.' 'The fix is, to add a guard.' 'The solution is just to return early.' 'The fix is simply: return early.'; do
+  n=$((n+1)); printf '%s\n' "$v" > "$T/ctx_v$n"
+  render "$T/ctx_v$n" > "$T/p17v$n"; check "in-block variant: $v" 1 "$T/p17v$n"
+done
+
 # 18. Same phrase OUTSIDE the context block (WIDE) still FAILS (forge#3076)
 { lane_before 'The fix is fairly small.' "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p18"; check "outside-block 'the fix is'" 1 "$T/p18"
 
