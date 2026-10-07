@@ -379,14 +379,6 @@ orchestration:
     # Number of consecutive merged-unit observations at ratio >= 1.0 before
     # printing a convergence warning. Default: 3.
     convergence_window: 3
-
-    # On-by-default finding-amplification circuit breaker (forge#3060). Counts
-    # ALL cascade findings; when the rolling ratio stays >= 1.0 for
-    # convergence_window merged units, P3-and-below admission pauses (P3s route
-    # to bounded batches or defer) and the operator gets a report. P1/P2 are
-    # never paused. Not disabled by max_generation/token_budget "unlimited".
-    # Default: true. Set false to opt out.
-    p3_breaker: true
 ```
 
 | Field | Type | Required | Description |
@@ -401,7 +393,6 @@ orchestration:
 | `cascade.keyword_heuristic` | boolean | No | Defer P3-and-below comment/typo-titled findings. Default: `true` |
 | `cascade.p3_same_file_defer` | boolean | No | Defer P3 findings sharing a file with the active batch. Default: `true` |
 | `cascade.max_amplification` | positive number or `"off"` | No | Opt-in ceiling for same-lineage refinement dispatch. Default: `"off"` |
-| `cascade.p3_breaker` | boolean | No | On-by-default P3 amplification breaker over all cascade findings. Default: `true`; `false` opts out |
 | `cascade.convergence_window` | positive integer | No | Consecutive ratio observations at or above 1.0 before warning. Default: 3 |
 
 **Hard invariant — not configurable**: safety exclusions (findings whose `## Problem` section indicates security/billing/anti-bot/auth concerns) are never batched and never auto-admitted by any `cascade.policy`, including `all`. That exclusion is enforced upstream of this section (the P3 batching eligibility check) and has no corresponding key here by design.
@@ -507,11 +498,6 @@ Context injected into review agent prompts. Helps the 9-agent review system give
 ```yaml
 review:
   tech_stack: "Next.js 15 App Router, FastAPI, PostgreSQL 16, Docker, Traefik"
-
-  # forge#3060: LOW-severity LIKELY/POSSIBLE notes are fixed in-PR, listed as
-  # non-blocking notes in the PR body, or dropped — not filed as issues.
-  # Set true to restore legacy file-everything behavior. Default: false.
-  file_low_findings: false
 
   context: |
     Multi-service monorepo: services/api (Python/FastAPI), web/ (Next.js).
