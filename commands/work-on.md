@@ -2076,7 +2076,10 @@ The `{HOT_COPY_BLOCK}` is an optimization that avoids the child re-discovering c
 
 **Fallback invocation** (only when `work-on/review` is unavailable):
 ```
-Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
+if DRY_RUN=true:
+  record "Would invoke review-pr --auto-merge for PR #{PR_NUMBER}; skipped (dry-run)."
+else:
+  Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
 ```
 
 Review-pr handles: full domain-agent review → post findings as separate issues → merge PR. It does NOT close the issue or clean up the worktree — those run in Phase 6.

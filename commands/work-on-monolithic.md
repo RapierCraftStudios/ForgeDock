@@ -280,7 +280,10 @@ gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:in-review" --remove-label
 ### 5A: Re-read state from GitHub (MANDATORY)
 ### 5B: Invoke /review-pr with --auto-merge
 ```
-Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
+if DRY_RUN=true:
+  record "Would invoke review-pr --auto-merge for PR #{PR_NUMBER}; skipped (dry-run)."
+else:
+  Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
 ```
 
 ### 5C: Verify merge and close (recovery)

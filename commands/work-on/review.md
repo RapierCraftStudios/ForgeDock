@@ -318,7 +318,10 @@ Review will: analyze changes → spawn domain agents → post findings → merge
 Invoke the review command:
 
 ```
-Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
+if DRY_RUN=true:
+  record "Would invoke review-pr --auto-merge for PR #{PR_NUMBER}; skipped (dry-run)."
+else:
+  Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
 ```
 
 **OpenCode joined-child contract**: When `FORGE_RUNTIME=opencode` (or an OpenCode runtime marker is present), invoke this load-bearing review through one native foreground `task` instead of treating the `Skill(...)` line as an asynchronous handoff:
