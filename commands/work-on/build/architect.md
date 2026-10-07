@@ -7,6 +7,8 @@ argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--files AFF
 
 # work-on/build/architect — Multi-Path Implementation Planning
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Invoked by**: `work-on.md` Step 3C.6, between Context Gathering and Implement.
 **Time budget**: Max 3 minutes. Skip any file read that times out.
 **Output**: Post `<!-- FORGE:ARCHITECT -->` comment on the issue, then return structured plan to caller.
@@ -471,7 +473,7 @@ For each affected `commands/*.md` file, identify what it produces that other pha
 
 1. **Comment markers** — HTML comment markers the phase writes to GitHub (e.g., `<!-- FORGE:ARCHITECT -->`, `<!-- FORGE:ARCHITECT:COMPLETE -->`). Search for `<!-- FORGE:` patterns in the affected file.
 2. **Structured output blocks** — named result blocks returned to the caller (e.g., `BUILD_RESULT:`, `VALIDATE_RESULT:`, `IMPLEMENT_RESULT:`). Search for lines ending in `:` that start a return block.
-3. **Skill() invocation signatures** — parameters the file passes when invoking subcommands (e.g., `Skill("work-on:build:architect", args="... --files ...")`). Search for `Skill(` calls.
+3. **Skill() invocation signatures** — parameters the file passes when invoking subcommands (e.g., `Skill("{FORGE_SKILL_PREFIX}work-on:build:architect", args="... --files ...")`). Search for `Skill(` calls.
 4. **Label state machine transitions** — `gh issue edit ... --add-label ... --remove-label ...` calls that define which label is set at the end of this phase.
 
 **P2: Find downstream phases that consume these artefacts**

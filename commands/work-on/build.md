@@ -7,6 +7,8 @@ argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--base PR_B
 
 # work-on/build — Build Phase Orchestrator
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 **Invoked by**: `work-on.md` Phase 3 — entered when the issue carries label `workflow:ready-to-build` or `workflow:building` (see Universal Phase Dispatcher in work-on.md).
@@ -289,7 +291,7 @@ Surface historical review findings and bug patterns for the affected files. The 
 
 **Spawn exception** (only when Row (c) applies):
 ```
-Skill("work-on:build:context", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --repo-path {WORKTREE_PATH} {AFFECTED_FILES} --functions {FUNCTION_NAMES}")
+Skill("{FORGE_SKILL_PREFIX}work-on:build:context", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --repo-path {WORKTREE_PATH} {AFFECTED_FILES} --functions {FUNCTION_NAMES}")
 ```
 If `FUNCTION_NAMES` is empty, omit `--functions`. The Skill() form above is the exception path — not the default. <!-- Added: forge#1276 -->
 
@@ -312,7 +314,7 @@ Trace all affected code paths and produce an ordered implementation plan. The fu
 
 **Spawn exception** (only when Row (c) applies):
 ```
-Skill("work-on:build:architect", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --repo-path {WORKTREE_PATH} --files {AFFECTED_FILES}")
+Skill("{FORGE_SKILL_PREFIX}work-on:build:architect", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --repo-path {WORKTREE_PATH} --files {AFFECTED_FILES}")
 ```
 The Skill() form above is the exception path — not the default. <!-- Added: forge#1276 -->
 
@@ -328,7 +330,7 @@ The Skill() form above is the exception path — not the default. <!-- Added: fo
 Invoke the implement subcommand to write code, stage, and post the builder comment:
 
 ```
-Skill("work-on:build:implement", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --worktree {WORKTREE_PATH} --branch {BRANCH}")
+Skill("{FORGE_SKILL_PREFIX}work-on:build:implement", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --worktree {WORKTREE_PATH} --branch {BRANCH}")
 ```
 
 **After subcommand returns**:
@@ -345,7 +347,7 @@ Skill("work-on:build:implement", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_F
 Invoke the validate subcommand to run the quality gate loop, formatting, and deploy checks:
 
 ```
-Skill("work-on:build:validate", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --worktree {WORKTREE_PATH} --files {CHANGED_FILES}")
+Skill("{FORGE_SKILL_PREFIX}work-on:build:validate", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --worktree {WORKTREE_PATH} --files {CHANGED_FILES}")
 ```
 
 Where `{CHANGED_FILES}` is the space-separated list of files changed by the implement subcommand (read from `IMPLEMENT_RESULT` or from the `<!-- FORGE:BUILDER -->` comment).

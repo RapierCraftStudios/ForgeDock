@@ -797,7 +797,7 @@ task(
   description="Work on {PROJECT_PREFIX}#{NUMBER}",
   subagent_type="general",
   background=true,
-  prompt="Use the same Phase 4A work-on template below. Before invoking it, run `export FORGE_GIST_CAPABLE={FORGE_GIST_CAPABLE}` so the cached orchestration capability is preserved. Invoke Skill(skill='work-on', args='{PROJECT_PREFIX}{NUMBER} --under-orchestration') and continue until a terminal workflow state."
+  prompt="Use the same Phase 4A work-on template below. Before invoking it, run `export FORGE_GIST_CAPABLE={FORGE_GIST_CAPABLE}` so the cached orchestration capability is preserved. Invoke Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{PROJECT_PREFIX}{NUMBER} --under-orchestration') and continue until a terminal workflow state."
 )
 ```
 
@@ -991,6 +991,8 @@ For each **ready** issue (all predecessors resolved or no predecessors), spawn a
 
 **One agent per issue.** Do NOT group multiple issues into a single agent. `/work-on` handles branching, labels, and PRs per-issue.
 
+**Resolve `{FORGE_SKILL_PREFIX}` once before dispatching** (`forgedock:` for the plugin install, empty for `install.sh`; rule in `commands/work-on.md` § Skill Name Resolution) and substitute it literally into every copy of the template below (4A, 4B, 4F, remediation and finding dispatches). Subagents cannot see this resolution, so never leave the placeholder unfilled.
+
 **Copy this template. Fill in variables. Do not modify the structure:**
 
 ```
@@ -1014,9 +1016,10 @@ Agent(
 **HOW REVIEW FINDINGS WORK**: /review-pr may create GitHub issues (with `review-finding` label) for findings it discovers. These are NOT blockers — they are separate work items that will go through their own /work-on pipeline later. The original PR should ALWAYS merge after review. The only exception is build errors (code doesn't compile) — those must be fixed before merging.
 
 **IMPORTANT RULES**:
-- **MANDATORY**: You MUST use the Skill tool to invoke 'work-on' with args '{PROJECT_PREFIX}{NUMBER}'. Do NOT implement manually — /work-on handles the full pipeline including label state machine (workflow:investigating → workflow:building → workflow:in-review → workflow:merged), investigation reports, PR creation, and cleanup.
-  - For default repo issues: `Skill(skill='work-on', args='{NUMBER} --under-orchestration')`
-  - For satellite repo issues: `Skill(skill='work-on', args='{SATELLITE_PREFIX}:{NUMBER} --under-orchestration')` (prefix from forge.yaml → repos.satellites)
+- **MANDATORY**: You MUST use the Skill tool to invoke '{FORGE_SKILL_PREFIX}work-on' with args '{PROJECT_PREFIX}{NUMBER}'. Do NOT implement manually — /work-on handles the full pipeline including label state machine (workflow:investigating → workflow:building → workflow:in-review → workflow:merged), investigation reports, PR creation, and cleanup.
+  - For default repo issues: `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{NUMBER} --under-orchestration')`
+  - For satellite repo issues: `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{SATELLITE_PREFIX}:{NUMBER} --under-orchestration')` (prefix from forge.yaml → repos.satellites)
+  - **If `{FORGE_SKILL_PREFIX}work-on` is reported unknown or not found, this is a HARD ERROR: STOP and report 'skill not found: {FORGE_SKILL_PREFIX}work-on' as your final result. Do NOT run the pipeline phases inline or with the Agent tool — an inline run bypasses the phase trail.**
   - The `--under-orchestration` flag tells `/work-on` to post its phase-entry `FORGE:HEARTBEAT` comments (Phases 0/1/3/5) — this orchestrator's Step 4B.5 stall detector depends on those timestamps. A solo `/work-on` run omits the flag and skips those writes entirely (see `commands/work-on.md` → Orchestration Flag).
 - NEVER bypass /work-on with manual git/gh commands — the label updates and structured comments are critical for tracking
 - **File-backed GitHub bodies — entity scope plus read-back is mandatory**: Never stage a `gh --body-file` body at a generic shared `/tmp` path, including one made by bare `mktemp`, and never hand-roll a root-level path such as `/tmp_invbody_31076.txt`, which can hang unattended cleanup. Prefer the session scratchpad or a repo-relative scratch directory on Windows: a native Windows `gh` may not resolve Git Bash `/tmp` reliably. Create a filename that contains the target issue/PR number and an agent-unique token, then use `mktemp` for its random suffix. Put one caller-chosen marker such as `<!-- FORGE:BODY-INTEGRITY:${NUMBER}_investigator_${AGENT_TOKEN} -->` in the body. After every `gh issue create|edit` or `gh pr create|comment` using `--body-file`, re-read the target object and assert the exact marker is present; a mismatch is a hard error. Unique names reduce collisions, but only read-back detects a collision that substitutes plausible-looking content from another agent. Do not rely on eyeballing. (forge#2843, forge#2855) <!-- allowlist:check-command-side-effects -->
@@ -1031,14 +1034,14 @@ Agent(
 - **NEVER ask the user questions** — you are a background agent. If review finds issues, auto-fix simple ones and proceed, then let `/review-pr`'s own verdict decide: APPROVED (no unresolved CONFIRMED HIGH/CRITICAL finding) → merge to `staging` and create follow-up issues for the rest, **regardless of domain**. Domain alone (AUTH, BILLING, DATABASE, or any domain tagged as security-critical in Step 3B) is NOT a reason to add `needs-human` and stop — `staging` is reversible; the real human deploy gate is `staging → main`, not this merge. <!-- Added: forge#1815 --> `needs-human` is reserved for what the pipeline genuinely cannot do itself: spend/procurement decisions, real-environment validation it has no access to, product/architecture judgment calls a human must make, or `/review-pr`'s existing evidence-based escalations (spec-evolution guard, novel task-type/module-combo trust escalation, calibration-based overconfidence routing). An unresolved CONFIRMED HIGH/CRITICAL finding is `/review-pr`'s own withheld-APPROVED case, not a domain-driven `needs-human` halt — `/review-pr` already refuses to return APPROVED when that's true, so there is no separate domain check to perform here.
 
 **LABEL-STATE LOOP CONTRACT — enforce after EVERY Skill return**:
-After EVERY `Skill(skill='work-on', ...)` call returns, immediately check the issue's current workflow label:
+After EVERY `Skill(skill='{FORGE_SKILL_PREFIX}work-on', ...)` call returns, immediately check the issue's current workflow label:
 ```bash
 gh issue view {NUMBER} -R {GH_REPO} --json labels --jq '[.labels[].name | select(startswith("workflow:"))]'
 ```
 **Terminal labels** (only these allow you to stop): `workflow:merged`, `workflow:invalid`
 **Terminal condition also**: `needs-human` label present, `workflow:awaiting-merge` label present, OR issue state is `closed`
 `needs-human` and `workflow:awaiting-merge` are terminal-FOR-THIS-AGENT (this individual `/work-on` run stops here — a human decision or merge is now the blocking step) but are NOT "done" from the DAG's point of view; see Predecessor Classification in Step 4B for how the orchestrator's dependency logic treats them (`GATED`, not `DONE`).
-If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to-build`, `workflow:building`, `workflow:in-review`), invoke `Skill(skill='work-on', args='{NUMBER} --under-orchestration')` again immediately. The `/work-on` skill will re-read GitHub state and advance to the next phase. Do NOT output a summary, do NOT pause, do NOT ask for confirmation — just invoke it again.
+If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to-build`, `workflow:building`, `workflow:in-review`), invoke `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{NUMBER} --under-orchestration')` again immediately. The `/work-on` skill will re-read GitHub state and advance to the next phase. Do NOT output a summary, do NOT pause, do NOT ask for confirmation — just invoke it again.
 
 **CRITICAL — SOURCE BRANCH DETECTION**:
 - If the issue has the `review-finding` label, read the issue body for `**Code branch**: \`{branch}\``
@@ -1606,7 +1609,7 @@ done
      resume=AGENT_ISSUE_MAP[{NUMBER}],
      description="Resume #{NUMBER} pipeline",
      run_in_background=true,
-     prompt="The previous /work-on invocation stopped before completing the full pipeline. The issue is currently at {CURRENT_WORKFLOW_STATE}. Continue — invoke Skill(skill='work-on', args='{NUMBER} --under-orchestration') to resume the routing loop from the current state. /work-on will re-read GitHub state and pick up where it left off."
+     prompt="The previous /work-on invocation stopped before completing the full pipeline. The issue is currently at {CURRENT_WORKFLOW_STATE}. Continue — invoke Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{NUMBER} --under-orchestration') to resume the routing loop from the current state. /work-on will re-read GitHub state and pick up where it left off."
    )
    ```
 
@@ -1799,7 +1802,7 @@ done
            run_in_background=true,
            prompt="You are remediating GitHub PR #{GATING_PR} for the {PROJECT_NAME} project (repo: {GH_REPO}), which is currently held at `needs-human` on its linked issue #{PRED}.
 
-**YOUR MISSION**: Invoke `Skill(skill='work-on', args='{GATING_PR} --remediate --issue {PRED} --repo {GH_REPO} --gh-flag {GH_FLAG}')` and let it run to completion. This is a self-contained flow: it classifies the gate first, replaces `needs-human` with `workflow:in-review` only for fixable remediation, checks out the PR branch, fixes any fixable review findings, re-reviews, and either auto-lands the PR, holds it at `workflow:awaiting-merge` for a human, re-escalates back to `needs-human`, or reports the block as policy-level and unfixable. Do NOT intervene manually — do not run raw git/gh commands yourself.
+**YOUR MISSION**: Invoke `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{GATING_PR} --remediate --issue {PRED} --repo {GH_REPO} --gh-flag {GH_FLAG}')` and let it run to completion. This is a self-contained flow: it classifies the gate first, replaces `needs-human` with `workflow:in-review` only for fixable remediation, checks out the PR branch, fixes any fixable review findings, re-reviews, and either auto-lands the PR, holds it at `workflow:awaiting-merge` for a human, re-escalates back to `needs-human`, or reports the block as policy-level and unfixable. Do NOT intervene manually — do not run raw git/gh commands yourself.
 
 **DO NOT STOP EARLY**: if the Skill call returns without a terminal `REMEDIATE_RESULT.status`, invoke it again — it re-reads GitHub state and resumes. Terminal statuses are: `COMPLETE`, `ALREADY_DONE`, `UNFIXABLE`, `BLOCKED`.
 
@@ -3335,9 +3338,10 @@ The context-gathering phase can fetch this index to discover all investigation G
 **HOW REVIEW FINDINGS WORK**: /review-pr may create GitHub issues (with \`review-finding\` label) for findings it discovers. These are NOT blockers — they are separate work items that will go through their own /work-on pipeline later. The original PR should ALWAYS merge after review. The only exception is build errors (code doesn't compile) — those must be fixed before merging.
 
 **IMPORTANT RULES**:
-- **MANDATORY**: You MUST use the Skill tool to invoke 'work-on' with args '${FINDING_NUM}'. Do NOT implement manually — /work-on handles the full pipeline including label state machine (workflow:investigating → workflow:building → workflow:in-review → workflow:merged), investigation reports, PR creation, and cleanup.
-  - For default repo issues: \`Skill(skill='work-on', args='${FINDING_NUM} --under-orchestration')\`
-  - For satellite repo issues: \`Skill(skill='work-on', args='{SATELLITE_PREFIX}:${FINDING_NUM} --under-orchestration')\` (prefix from forge.yaml → repos.satellites)
+- **MANDATORY**: You MUST use the Skill tool to invoke '{FORGE_SKILL_PREFIX}work-on' with args '${FINDING_NUM}'. Do NOT implement manually — /work-on handles the full pipeline including label state machine (workflow:investigating → workflow:building → workflow:in-review → workflow:merged), investigation reports, PR creation, and cleanup.
+  - For default repo issues: \`Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='${FINDING_NUM} --under-orchestration')\`
+  - For satellite repo issues: \`Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{SATELLITE_PREFIX}:${FINDING_NUM} --under-orchestration')\` (prefix from forge.yaml → repos.satellites)
+  - **If \`{FORGE_SKILL_PREFIX}work-on\` is reported unknown or not found, this is a HARD ERROR: STOP and report 'skill not found: {FORGE_SKILL_PREFIX}work-on' as your final result. Do NOT run the pipeline phases inline or with the Agent tool — an inline run bypasses the phase trail.**
 - NEVER bypass /work-on with manual git/gh commands — the label updates and structured comments are critical for tracking
 - NEVER target \`main\` for PRs targeting the default repo. Use \`{STAGING_BRANCH}\` for fast-lane issues, or \`milestone/{slug}\` for milestone issues.
 - Satellite repos (MCP, n8n) have no staging branch — fast-lane PRs go to \`main\` for those.
@@ -3347,13 +3351,13 @@ The context-gathering phase can fetch this index to discover all investigation G
 - **NEVER ask the user questions** — you are a background agent. If review finds issues, auto-fix simple ones and proceed, then let `/review-pr`'s own verdict decide: APPROVED (no unresolved CONFIRMED HIGH/CRITICAL finding) → merge to `staging` and create follow-up issues for the rest, **regardless of domain**. Domain alone (AUTH, BILLING, DATABASE, or any domain tagged as security-critical in Step 3B) is NOT a reason to add `needs-human` and stop — `staging` is reversible; the real human deploy gate is `staging → main`, not this merge. <!-- Added: forge#1815 --> `needs-human` is reserved for what the pipeline genuinely cannot do itself: spend/procurement decisions, real-environment validation it has no access to, product/architecture judgment calls a human must make, or `/review-pr`'s existing evidence-based escalations (spec-evolution guard, novel task-type/module-combo trust escalation, calibration-based overconfidence routing). An unresolved CONFIRMED HIGH/CRITICAL finding is `/review-pr`'s own withheld-APPROVED case, not a domain-driven `needs-human` halt — `/review-pr` already refuses to return APPROVED when that's true, so there is no separate domain check to perform here.
 
 **LABEL-STATE LOOP CONTRACT — enforce after EVERY Skill return**:
-After EVERY \`Skill(skill='work-on', ...)\` call returns, immediately check the issue's current workflow label:
+After EVERY \`Skill(skill='{FORGE_SKILL_PREFIX}work-on', ...)\` call returns, immediately check the issue's current workflow label:
 \`\`\`bash
 gh issue view ${FINDING_NUM} -R {GH_REPO} --json labels --jq '[.labels[].name | select(startswith(\"workflow:\"))]'
 \`\`\`
 **Terminal labels** (only these allow you to stop): \`workflow:merged\`, \`workflow:invalid\`
 **Terminal condition also**: \`needs-human\` label present, \`workflow:awaiting-merge\` label present, OR issue state is \`closed\`
-If the label is NOT terminal (e.g., \`workflow:investigating\`, \`workflow:ready-to-build\`, \`workflow:building\`, \`workflow:in-review\`), invoke \`Skill(skill='work-on', args='${FINDING_NUM} --under-orchestration')\` again immediately. The \`/work-on\` skill will re-read GitHub state and advance to the next phase. Do NOT output a summary, do NOT pause, do NOT ask for confirmation — just invoke it again.
+If the label is NOT terminal (e.g., \`workflow:investigating\`, \`workflow:ready-to-build\`, \`workflow:building\`, \`workflow:in-review\`), invoke \`Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='${FINDING_NUM} --under-orchestration')\` again immediately. The \`/work-on\` skill will re-read GitHub state and advance to the next phase. Do NOT output a summary, do NOT pause, do NOT ask for confirmation — just invoke it again.
 
 **CRITICAL — SOURCE BRANCH DETECTION**:
 - If the issue has the \`review-finding\` label, read the issue body for \`**Code branch**: \\\`{branch}\\\`\`

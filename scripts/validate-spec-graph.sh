@@ -287,7 +287,7 @@ check_dangling() {
   # Extract every Skill(skill="X") / Skill(skill='X') target with file+line.
   # grep -rn over the whole tree (no fixed -A/-m window that could truncate).
   local hits
-  hits="$(grep -rnoE "Skill\(\s*(skill\s*[:=]\s*)?[\"'][A-Za-z0-9][A-Za-z0-9:_/-]*[\"']" "$commands_dir" 2>/dev/null || true)"
+  hits="$(grep -rnoE "Skill\(\s*(skill\s*[:=]\s*)?[\"'](\{FORGE_SKILL_PREFIX\})?[A-Za-z0-9][A-Za-z0-9:_/-]*[\"']" "$commands_dir" 2>/dev/null || true)"
 
   [ -n "$hits" ] || return 0
 
@@ -301,7 +301,8 @@ check_dangling() {
     relpath="${line%%:*}"
     relpath="${relpath#"$REPO_ROOT"/}"
     # Pull the quoted target.
-    target="$(printf '%s' "$line" | grep -oE "[\"'][A-Za-z0-9][A-Za-z0-9:_/-]*[\"']" | head -1 | tr -d "\"'")"
+    target="$(printf '%s' "$line" | grep -oE "[\"'](\{FORGE_SKILL_PREFIX\})?[A-Za-z0-9][A-Za-z0-9:_/-]*[\"']" | head -1 | tr -d "\"'")"
+    target="${target#\{FORGE_SKILL_PREFIX\}}"
     [ -n "$target" ] || continue
     # Normalize the `/`-delimited sub-phase form (work-on/review) to the graph's
     # `:` form (work-on:review) before resolution — kept in sync with the builder.

@@ -8,6 +8,8 @@ allowed-tools: Bash, Read, Grep, Glob, Skill
 
 # /deploy-pr — PR Ship Orchestrator
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
@@ -146,7 +148,7 @@ fi
 echo "Source: $SOURCE → Target: $PR_TARGET (prefix: $TITLE_PREFIX)"
 ```
 
-**Routing guard — staging→main**: When `SOURCE=staging` and `PR_TARGET=main`, the review gate (Phase 4) MUST route to `Skill("review-pr-staging", ...)` rather than the standard `review-pr`. This ensures the staging deploy review (comprehensive, multi-agent) runs instead of the single-PR review.
+**Routing guard — staging→main**: When `SOURCE=staging` and `PR_TARGET=main`, the review gate (Phase 4) MUST route to `Skill("{FORGE_SKILL_PREFIX}review-pr-staging", ...)` rather than the standard `review-pr`. This ensures the staging deploy review (comprehensive, multi-agent) runs instead of the single-PR review.
 
 **Routing guard — milestone→staging**: When `SOURCE` matches `milestone/*`, this is a feature lane ship. `/review-pr` handles these normally (they target staging, not main).
 
@@ -356,9 +358,9 @@ while [ "$REVIEW_ITER" -lt "$MAX_REVIEW_ITER" ] && [ "$REVIEW_GATE_PASSED" = "fa
   if [ "$DRY_RUN" = "false" ]; then
     # Route: staging→main uses review-pr-staging; all other uses standard review-pr
     if [ "$SOURCE" = "$STAGING_BRANCH" ] && [ "$PR_TARGET" = "$DEFAULT_BRANCH" ]; then
-      REVIEW_RESULT=$(Skill("review-pr-staging", args="$PR_NUMBER $GH_FLAG"))
+      REVIEW_RESULT=$(Skill("{FORGE_SKILL_PREFIX}review-pr-staging", args="$PR_NUMBER $GH_FLAG"))
     else
-      REVIEW_RESULT=$(Skill("review-pr", args="$PR_NUMBER $GH_FLAG"))
+      REVIEW_RESULT=$(Skill("{FORGE_SKILL_PREFIX}review-pr", args="$PR_NUMBER $GH_FLAG"))
     fi
   else
     echo "[DRY-RUN] Would invoke review-pr for PR #$PR_NUMBER"

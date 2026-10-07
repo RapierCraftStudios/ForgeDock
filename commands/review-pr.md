@@ -8,6 +8,8 @@ allowed-tools: Task, Agent, Bash, Read, Grep, Glob, WebFetch, Skill
 
 # PR Review — Orchestrator
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 **NEVER use plan mode (EnterPlanMode)** during review — it breaks execution context.
@@ -25,7 +27,7 @@ allowed-tools: Task, Agent, Bash, Read, Grep, Glob, WebFetch, Skill
 
 3. **Review findings do NOT block merge UNLESS they meet the Blocking Criteria in §7B** (a CONFIRMED HIGH/CRITICAL finding, a purpose regression, a merge conflict, or a build/type/test failure) **or the calibration threshold check in §7B.5 sets `CALIBRATION_NEEDS_HUMAN=true`** (HIGH-confidence task type with historical survival < 80%). File every finding that survives the §6B.5 note disposition (MEDIUM+ severity, or CONFIRMED/LIKELY above LOW; security/billing always) as a GitHub issue with the `review-finding` label. LOW/POSSIBLE notes are fixed in-PR, listed in the PR body, or dropped — never filed as standalone issues. Minor/style findings never block; §7B's and §7B.5's blocking conditions always do — including under `--auto-merge`. <!-- forge#1741 -->
 
-4. **Route correctly at Phase 0.** If the input is "staging" or the PR targets `main`, invoke `Skill("review-pr-staging", ...)` — do NOT run the standard PR review pipeline against a staging→main PR.
+4. **Route correctly at Phase 0.** If the input is "staging" or the PR targets `main`, invoke `Skill("{FORGE_SKILL_PREFIX}review-pr-staging", ...)` — do NOT run the standard PR review pipeline against a staging→main PR.
 
 5. **`spec-evolution` PRs are NEVER auto-merged.** When a PR carries the `spec-evolution` label (created by `/spec-doctor`), Phase -1 MUST set `AUTO_MERGE=false` and add `needs-human` before any other processing. This cannot be overridden by the caller — the eval gate plus human review are the only permitted merge path. See Phase -1 `spec-evolution guard` block. <!-- Added: forge#1742 -->
 
@@ -82,15 +84,15 @@ This is the **orchestrator**. It routes to the right review mode, runs automated
 |------|------|---------------|
 | `${FORGE_HOME:-$REPO_PATH}/commands/review-pr-agents/protocols.md` | Shared review protocols (Evidence-Based + Structured Findings + Input Scoping) | `Read` tool during Phase 3C (always) |
 | `${FORGE_HOME:-$REPO_PATH}/commands/review-pr-agents/<persona>.md` | Per-persona agent prompt templates (9 files) | `Read` tool during Phase 3C (selected agents only) |
-| `${FORGE_HOME:-$REPO_PATH}/commands/review-pr-staging.md` | Full staging→main review pipeline | `Skill("review-pr-staging", ...)` during Phase 0 |
+| `${FORGE_HOME:-$REPO_PATH}/commands/review-pr-staging.md` | Full staging→main review pipeline | `Skill("{FORGE_SKILL_PREFIX}review-pr-staging", ...)` during Phase 0 |
 
 `$FORGE_HOME` defaults to `~/.claude` (the directory where `npx forgedock` symlinks commands). When unset, every resolution in this file falls back to `$REPO_PATH` (the repo root, from `forge.yaml → paths.root`) rather than degrading to a bare root-anchored path — see the `TEMPLATE_BASE` tiered guard in Phase 3C and the verification-script resolution in Step 2.5B for the actual fallback chains. Never resolve a missing file via a filesystem-wide `find` — see the guardrail in `commands/review-pr-agents/protocols.md`.
 
 **Invocation flow:**
 ```
 /review-pr 5428          → Phase 0 detects single PR → runs Phases 1-9 inline
-/review-pr staging       → Phase 0 detects staging mode → Skill("review-pr-staging", "staging")
-/review-pr 5500          → Phase 0 auto-detects staging→main PR → Skill("review-pr-staging", "5500")
+/review-pr staging       → Phase 0 detects staging mode → Skill("{FORGE_SKILL_PREFIX}review-pr-staging", "staging")
+/review-pr 5500          → Phase 0 auto-detects staging→main PR → Skill("{FORGE_SKILL_PREFIX}review-pr-staging", "5500")
 /review-pr 3126 --auto-merge --issue 3124 --base staging  → single PR + auto-merge after approval
 ```
 
@@ -189,7 +191,7 @@ if [ "$REVIEW_MODE" != "staging-keyword" ] && [ "$REVIEW_MODE" != "multi-pr" ]; 
 fi
 ```
 
-**Invariant**: After this phase, `REVIEW_MODE` and (where applicable) `ROUTE_PR_NUMBER` are set. Any sub-invocation of `Skill("review-pr-staging", ...)` should immediately post its own `FORGE:REVIEW_ROUTE` marker scoped to the PR it resolves.
+**Invariant**: After this phase, `REVIEW_MODE` and (where applicable) `ROUTE_PR_NUMBER` are set. Any sub-invocation of `Skill("{FORGE_SKILL_PREFIX}review-pr-staging", ...)` should immediately post its own `FORGE:REVIEW_ROUTE` marker scoped to the PR it resolves.
 
 ---
 
@@ -204,7 +206,7 @@ Check input to determine which mode:
 If `$ARGUMENTS` is "staging", "feature", or "staging:feature":
 
 ```
->>> INVOKE: Skill("review-pr-staging", "$ARGUMENTS")
+>>> INVOKE: Skill("{FORGE_SKILL_PREFIX}review-pr-staging", "$ARGUMENTS")
 >>> THEN STOP — the staging command handles the full flow.
 ```
 
@@ -227,7 +229,7 @@ BASE=$(echo $PR_INFO | jq -r '.baseRefName')
 
 If `HEAD = "staging" AND BASE = "main"` OR `HEAD = "feature" AND BASE = "main"`:
 ```
->>> INVOKE: Skill("review-pr-staging", "$ARGUMENTS")
+>>> INVOKE: Skill("{FORGE_SKILL_PREFIX}review-pr-staging", "$ARGUMENTS")
 >>> THEN STOP.
 ```
 

@@ -6,6 +6,8 @@ install: core
 
 # /orchestrate — Phase 3: Dependency Analysis & Execution Plan
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 ## Phase 3: Dependency Analysis & Execution Plan
 
 ### Step 3A: Analyze explicit dependencies
@@ -1140,7 +1142,7 @@ The engine drives every phase transition deterministically, mirrors state to the
 
 **Fallback — best-effort, not all-or-nothing (fixed forge#2743)**: Engine-first is guaranteed to have an Agent-spawn fallback under two distinct trigger conditions, not just CLI absence:
 
-1. **CLI absent at dispatch time**: If `forgedock` is not in PATH, `phase-4-execution.md` Step 4A falls back to spawning Agent sub-agents that run `Skill("work-on", ...)` per issue for the whole batch, before any dispatch happens.
+1. **CLI absent at dispatch time**: If `forgedock` is not in PATH, `phase-4-execution.md` Step 4A falls back to spawning Agent sub-agents that run `Skill("{FORGE_SKILL_PREFIX}work-on", ...)` per issue for the whole batch, before any dispatch happens.
 2. **Backend unavailable despite CLI presence, or a runtime engine-error with empty committed state**: `command -v forgedock` only proves the orchestrator CLI is installed — it says nothing about whether the engine's execution backend (the `claude` CLI spawn) can actually run a phase (forge#2741 is a concrete case: `spawnSync claude` ENOENTs even though a shell `command -v` probe reports the binary present). Step 4A now runs a cheap backend preflight canary before committing the whole ready set to engine-first, downgrading the entire run to Agent-spawn on failure. And per-issue, Step 4B's completion handler auto-falls-back any individual engine-dispatched issue that completes at `workflow:engine-error` with an empty committed state (`committed=[] branch=null pr=null` — see `bin/engine-cli.mjs`'s `formatTerminalDiagnostics()`) to the same Agent-spawn template, rather than leaving it stuck waiting on a resume mechanism that only exists for Agent-spawn-dispatched issues. An engine-error with partial committed state (branch/PR non-null) is NOT auto-fallen-back, to avoid double-work — it surfaces via the existing stall-detection alert instead.
 
 In both cases the SubagentStop hook still bridges the fallback Agent-spawn runs to the engine run-log for state persistence. Engine-first is therefore best-effort: it is always backed by a working Agent-spawn path, whether the gap is discovered before dispatch (canary) or after (per-issue fallback) — a whole ready set is never permanently lost to an environmental engine failure.

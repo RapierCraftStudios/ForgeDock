@@ -224,13 +224,14 @@ function commandNodeFromPath(rel) {
   };
 }
 
-/** Map a Skill(skill="X") target to a command node id. The skill name uses the
+/** Map a Skill(skill="X") target to a command node id (an optional leading
+ *  `{FORGE_SKILL_PREFIX}` namespace placeholder is stripped). The skill name uses the
  *  same `:`-delimited convention as our sub-phase names (e.g. "work-on:build").
  *  Specs also write the `/`-delimited form (e.g. "work-on/review"); normalize it
  *  to the colon form so both resolve to the same node (kept in sync with the
  *  dangling-ref check in validate-spec-graph.sh). */
 function skillTargetToId(skill) {
-  return `cmd:${skill.replace(/\//g, ":")}`;
+  return `cmd:${skill.replace(/^\{FORGE_SKILL_PREFIX\}/, "").replace(/\//g, ":")}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -351,7 +352,7 @@ function build() {
       // Skill(skill="X"), and colon Skill(skill: "X") — with `/`-delimited
       // sub-phase targets and uppercase/leading-digit names. Kept in sync with
       // the dangling-ref check in validate-spec-graph.sh.
-      for (const m of line.matchAll(/Skill\(\s*(?:skill\s*[:=]\s*)?["']([A-Za-z0-9][A-Za-z0-9:_/-]*)["']/g)) {
+      for (const m of line.matchAll(/Skill\(\s*(?:skill\s*[:=]\s*)?["']((?:\{FORGE_SKILL_PREFIX\})?[A-Za-z0-9][A-Za-z0-9:_/-]*)["']/g)) {
         const targetId = skillTargetToId(m[1]);
         // Only link if the target resolves to a known command/sub-phase node.
         if (nodes.has(targetId)) {

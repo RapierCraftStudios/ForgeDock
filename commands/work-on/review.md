@@ -7,6 +7,8 @@ argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree 
 
 # work-on/review — Review & PR Creation Subcommand
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 **Invoked by**: `work-on.md` Phase 4–5, after `build/validate.md` returns `GATE_PASSED: true`.
@@ -316,7 +318,7 @@ Review will: analyze changes → spawn domain agents → post findings → merge
 Invoke the review command:
 
 ```
-Skill(skill="review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
+Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
 ```
 
 **OpenCode joined-child contract**: When `FORGE_RUNTIME=opencode` (or an OpenCode runtime marker is present), invoke this load-bearing review through one native foreground `task` instead of treating the `Skill(...)` line as an asynchronous handoff:
@@ -373,7 +375,7 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 
 ## Output
 
-**After posting this result, immediately proceed to the close subcommand — do NOT stop here. `REVIEW_RESULT: status: COMPLETE` is an intermediate result, NOT a terminal state. The pipeline is not done. You MUST invoke `Skill("work-on:close", ...)` now to close the issue, update labels to `workflow:merged`, post the trajectory log, and clean up the worktree.**
+**After posting this result, immediately proceed to the close subcommand — do NOT stop here. `REVIEW_RESULT: status: COMPLETE` is an intermediate result, NOT a terminal state. The pipeline is not done. You MUST invoke `Skill("{FORGE_SKILL_PREFIX}work-on:close", ...)` now to close the issue, update labels to `workflow:merged`, post the trajectory log, and clean up the worktree.**
 
 Output this structured block:
 
