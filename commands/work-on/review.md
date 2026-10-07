@@ -203,12 +203,18 @@ TRAIL_SCRIPT="$FORGE_ROOT/scripts/verify-phase-trail.sh"
 # Docs-only predicate: ONE shared copy (scripts/is-docs-only.sh, forge#3134). Fail closed: unresolved script or empty diff -> no flag.
 DOCS_ONLY_FLAG=""
 if [ -n "$CHANGED" ] && [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/is-docs-only.sh" ] && echo "$CHANGED" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"; then DOCS_ONLY_FLAG="--docs-only"; fi
+# Band cross-check (forge#3149): a non-docs diff means an agent-chosen INVESTIGATION band must not waive requirements.
+# Fail closed: anything not positively docs-only (including an empty/unreadable diff) is treated as a code diff.
+CODE_DIFF_FLAG="--code-diff"
+if [ -n "$DOCS_ONLY_FLAG" ]; then CODE_DIFF_FLAG=""; fi
+# Bind the QUALITY_GATE PASS to the built tree (forge#3149). An unresolved tree is passed as empty -> the verifier exits 2 (fail closed).
+HEAD_TREE=$(git -C {WORKTREE_PATH} rev-parse 'HEAD^{tree}' 2>/dev/null)
 if [ -z "$FORGE_ROOT" ] || [ ! -f "$TRAIL_SCRIPT" ]; then
   # Fail closed: never skip the gate when the verifier cannot be resolved (plugin installs set no FORGE_HOME).
   echo "PHASE TRAIL: verify-phase-trail.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install)" >&2
   TRAIL_RC=127
 else
-  TRAIL=$(bash "$TRAIL_SCRIPT" {NUMBER} -R {GH_REPO} $DOCS_ONLY_FLAG); TRAIL_RC=$?
+  TRAIL=$(bash "$TRAIL_SCRIPT" {NUMBER} -R {GH_REPO} $DOCS_ONLY_FLAG $CODE_DIFF_FLAG --head-tree "$HEAD_TREE"); TRAIL_RC=$?
   echo "$TRAIL"
 fi
 # Hard guard (same as review-pr.md Phase 8): an unreadable/unresolvable trail never falls through to PR creation.

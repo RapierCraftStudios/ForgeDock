@@ -1074,6 +1074,26 @@ If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to
 **Prompt lint (MANDATORY before every dispatch — a best-effort, self-run guard for Hard Rule 1; no hook gates `Agent(...)`, so it is orchestrator-policed, not tamper-proof)** <!-- Added: forge#3062 -->: the only variable text allowed in the rendered prompt is the `{GIST_CONTEXT}`/`{SOURCE_PR_HINT_CONTEXT}` blocks between the `DISPATCH_CONTEXT` markers (which already carry the claims-board URL and the same-file "what changed" brief). Before every `Agent(...)`/`task(...)` launch built from the Step 4A template — initial dispatch, Step 4B resume/relaunch, Step 4F sweep — write the fully rendered prompt to a `mktemp` file and run the lint. A non-zero exit means the dispatch is REFUSED (the snippet below sets the refusal by appending to `LINT_REFUSED_ISSUES[]` and skipping that issue with `continue`): do not launch, do not "fix" the prompt by adding text — re-render from the unmodified template, drop the offending context block, and report every `LINT_REFUSED_ISSUES[]` entry in the operator status update (`DISPATCH REFUSED: #{NUMBER} — {reason}`). A missing/unreadable `scripts/lint-dispatch-prompt.sh` is a distinct `lint-script-not-found` refusal (fail closed, never a silent pass); do not conflate it with a lint verdict. **Exempt (not Step 4A-template prompts, no free-text variable slot, so the template-anchor lint does not apply)**: the Codex/OpenCode `task()` wrapper prompt in the engine-fallback section and the remediation `Agent()` prompt in Step 4B item 6.4 — both are fixed one-purpose wrappers that only invoke `Skill(...work-on...)` with substituted identifiers; never add free text to them.
 
 ```bash
+# Bind the lint inputs FIRST (forge#3149). Every value is the SAME one substituted into the Step 4A template for this
+# issue (config.md / Step 4A resolve them) - substitute the literal values, never re-derive them. The rendered
+# prompt goes in through a quoted heredoc so no shell expansion touches it. A value containing a single quote is
+# written as '\'' . PROJECT_PREFIX, SATELLITE_PREFIX, FORGE_SKILL_PREFIX and SOURCE_BRANCH may be empty.
+PROJECT_NAME='{PROJECT_NAME}';   GH_REPO='{GH_REPO}';             REPO_PATH='{REPO_PATH}'
+LANE='{LANE}';                   PR_BASE='{PR_BASE}';             STAGING_BRANCH='{STAGING_BRANCH}'
+SOURCE_BRANCH='{SOURCE_BRANCH}'; FORGE_GIST_CAPABLE='{FORGE_GIST_CAPABLE}'; SUBAGENT_MODEL='{SUBAGENT_MODEL}'
+PROJECT_PREFIX='{PROJECT_PREFIX}'; SATELLITE_PREFIX='{SATELLITE_PREFIX}'; FORGE_SKILL_PREFIX='{FORGE_SKILL_PREFIX}'
+# Heredoc into a file, then read it back: a heredoc body inside $( ) is parsed for quote balance by bash 3.2 (macOS),
+# and the rendered prompt contains apostrophes and parentheses.
+# The delimiter MUST be a string that occurs nowhere in the rendered prompt (the GIST/SOURCE_PR_HINT context blocks carry
+# untrusted text): replace RENDERED_PROMPT_EOF below with RENDERED_PROMPT_EOF_ plus 16 random hex chars, in BOTH places.
+RENDERED_PROMPT_SRC="$(mktemp)"
+cat > "$RENDERED_PROMPT_SRC" <<'RENDERED_PROMPT_EOF'
+{the fully rendered Step 4A prompt text for this issue, exactly as passed to Agent(prompt=...)}
+RENDERED_PROMPT_EOF
+RENDERED_PROMPT=$(cat "$RENDERED_PROMPT_SRC"); rm -f "$RENDERED_PROMPT_SRC"
+```
+
+```bash
 # Runs inside the per-issue dispatch loop (same loop as claim_conflicts_with_live_holder above),
 # immediately before that issue's Agent()/task() call. LINT_REFUSED_ISSUES is initialised once, empty.
 # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
@@ -1089,6 +1109,14 @@ if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="
   while IFS= read -r _c; do
     case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && FORGE_ROOT="$_c" ;; esac
   done <<< "$_k"
+fi
+# Fail closed on unbound inputs (forge#3149): an empty rendered prompt or a missing resolved value would lint an empty file
+# (rc=2) or compare against nothing; refuse with a distinct reason instead of a misleading lint verdict.
+if [ -z "$RENDERED_PROMPT" ] || [ -z "$PROJECT_NAME" ] || [ -z "$GH_REPO" ] || [ -z "$REPO_PATH" ] || [ -z "$LANE" ] \
+   || [ -z "$PR_BASE" ] || [ -z "$STAGING_BRANCH" ] || [ -z "$FORGE_GIST_CAPABLE" ] || [ -z "$SUBAGENT_MODEL" ]; then
+  echo "DISPATCH REFUSED for #{NUMBER}: lint inputs unbound (RENDERED_PROMPT/PROJECT_NAME/GH_REPO/REPO_PATH/LANE/PR_BASE/STAGING_BRANCH/FORGE_GIST_CAPABLE/SUBAGENT_MODEL must be set by the binding block above)" >&2
+  LINT_REFUSED_ISSUES+=("{NUMBER}:lint-inputs-unbound")
+  continue
 fi
 LINT_SCRIPT="$FORGE_ROOT/scripts/lint-dispatch-prompt.sh"
 if [ -z "$FORGE_ROOT" ] || [ ! -r "$LINT_SCRIPT" ]; then
@@ -1696,10 +1724,13 @@ done
    else
      # forge#3123: a docs-only merged diff legitimately has no FORGE:QUALITY_GATE marker. Derive --docs-only from the
      # merged PR's diff with the SAME shared predicate as review-pr.md Phase 8 / work-on/review.md R1.5 (scripts/is-docs-only.sh, forge#3134). Fail closed: no PR / unreadable diff -> no flag.
-     TRAIL_DOCS_FLAG=""
+     TRAIL_DOCS_FLAG="--code-diff"   # forge#3149: fail closed - no matched PR / unreadable or empty diff means NO docs-only waiver and no usable INVESTIGATION band
      # forge#3133: the text search is fuzzy and unordered, so `.[0]` can be an unrelated docs-only PR. Evaluate EVERY
      # matching merged PR and set the flag only if at least one matched AND all matched diffs are non-empty and docs-only.
-     TRAIL_PRS=$(gh pr list -R {GH_REPO} --state merged --limit 20 --search "\"Closes #{NUMBER}\" in:body" --json number --jq '.[].number' 2>/dev/null)
+     # forge#3149: the search is a fuzzy prefilter; the jq test below keeps only PRs whose body has the exact token
+     # "Closes #{NUMBER}" NOT followed by another digit (so #31490 never matches #3149). --limit 100 is a generous cap on
+     # merged PRs mentioning one issue (a pipeline issue normally has one closing PR).
+     TRAIL_PRS=$(gh pr list -R {GH_REPO} --state merged --limit 100 --search "\"Closes #{NUMBER}\" in:body" --json number,body --jq '.[] | select(.body | test("Closes #{NUMBER}([^0-9]|$)"; "i")) | .number' 2>/dev/null)
      if [ -n "$TRAIL_PRS" ]; then
        TRAIL_ALL_DOCS=1
        for TRAIL_PR in $TRAIL_PRS; do

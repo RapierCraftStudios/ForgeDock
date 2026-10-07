@@ -246,6 +246,28 @@ expect "gate launches clean prompt" "LAUNCHED" "$(gate_refused "$T/p1" "$HERE/..
 expect "gate refuses lint failure" "REFUSED 42:lint-rc-1" "$(gate_refused "$T/p3" "$HERE/..")"
 expect "gate fails closed when script missing" "REFUSED 42:lint-script-not-found" "$(gate_refused "$T/p1" "$T/nowhere")"
 grep -q 'lint script not found' "$T/gate_err" && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: missing-script message not distinct"; }
+# Unbound inputs (forge#3149): an empty rendered prompt or any unset resolved value is refused with a distinct reason, never launched.
+: > "$T/empty_prompt"
+expect "gate refuses an empty rendered prompt" "REFUSED 42:lint-inputs-unbound" "$(gate_refused "$T/empty_prompt" "$HERE/..")"
+gate_unset() { # unset-var -> prints refusal entries or LAUNCHED
+  ( LINT_REFUSED_ISSUES=(); RENDERED_PROMPT="$(cat "$T/p1")"; FORGEDOCK_HOME="$HERE/.."; unset FORGE_HOME; reset_vals; eval "$1="
+    for _i in 1; do
+      eval "$(sed 's/{NUMBER}/42/g' "$T/gate")"
+      echo LAUNCHED; exit 0
+    done
+    echo "REFUSED ${LINT_REFUSED_ISSUES[*]}" ) 2>/dev/null | tail -1
+}
+for v in PROJECT_NAME GH_REPO REPO_PATH LANE PR_BASE STAGING_BRANCH FORGE_GIST_CAPABLE SUBAGENT_MODEL; do
+  expect "gate refuses empty $v" "REFUSED 42:lint-inputs-unbound" "$(gate_unset "$v")"
+done
+# The legitimately-empty slots must not be refused by the binding guard.
+for v in PROJECT_PREFIX; do
+  expect "gate accepts empty $v" "LAUNCHED" "$(gate_unset "$v")"
+done
+# The spec binds every lint input explicitly (the snippet used to read unassigned variables).
+for v in RENDERED_PROMPT SOURCE_BRANCH SUBAGENT_MODEL PROJECT_PREFIX SATELLITE_PREFIX FORGE_SKILL_PREFIX; do
+  grep -q "^[A-Z_]*=.*\b$v='{\|^$v='{\|; *$v='{\|^$v=\$(cat" "$SPEC" && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: spec does not bind $v"; }
+done
 # Exemption is stated in the spec so the scope matches the script.
 grep -q 'Exempt (not Step 4A-template prompts' "$SPEC" && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: spec exemption missing"; }
 

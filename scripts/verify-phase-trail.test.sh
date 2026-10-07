@@ -132,9 +132,9 @@ FORGE_TRAIL_TRUSTED_ASSOCIATIONS="" expect_fail "empty associations trust no one
   "$(tj t9 "$(tc OWNER own User "$T_INV")" "$(tc OWNER own User "$T_FPI")")" INVESTIGATOR
 
 # Legacy grace (#3102): BUILDER:COMPLETE predating the quality-gate marker waives QUALITY_GATE only
-lg() { # lg <name> <builder created_at> -> fixture without QUALITY_GATE
+lg() { # lg <name> <builder updated_at> -> fixture without QUALITY_GATE
   local out="$TMP_FX/$1.json"
-  jq -nc --arg at "$2" '[{"body":"<!-- FORGE:INVESTIGATOR -->\n<!-- INVESTIGATION:COMPLETE -->"},{"body":"<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: TRIVIAL"},{"body":"<!-- FORGE:CONTRACT -->\nc"},{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","created_at":$at}] | map(. + {author_association:"OWNER", user:{login:"owner",type:"User"}})' > "$out"; echo "$out"
+  jq -nc --arg at "$2" '[{"body":"<!-- FORGE:INVESTIGATOR -->\n<!-- INVESTIGATION:COMPLETE -->"},{"body":"<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: TRIVIAL"},{"body":"<!-- FORGE:CONTRACT -->\nc"},{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","updated_at":$at}] | map(. + {author_association:"OWNER", user:{login:"owner",type:"User"}})' > "$out"; echo "$out"
 }
 expect_pass "legacy build (pre-cutoff) waives QUALITY_GATE" "$(lg lg1 2026-10-01T00:00:00Z)"
 expect_fail "post-cutoff build still requires QUALITY_GATE" "$(lg lg2 2026-10-08T00:00:00Z)" QUALITY_GATE
@@ -143,8 +143,8 @@ OUT=$(FORGE_TRAIL_QG_SINCE="" MOCK_GH_JSON="$(lg lg4 2026-10-01T00:00:00Z)" bash
 
 # Multi-page threads (#3121): gh --paginate emits one array per page; the LATEST build must win
 mp="$TMP_FX/mp.json"
-{ jq -nc '[{"body":"<!-- FORGE:INVESTIGATOR -->\n<!-- INVESTIGATION:COMPLETE -->"},{"body":"<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: TRIVIAL"},{"body":"<!-- FORGE:CONTRACT -->\nc"},{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","created_at":"2026-01-04T00:00:00Z"}] | map(. + {author_association:"OWNER", user:{login:"owner",type:"User"}})'
-  jq -nc '[{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","created_at":"2026-10-06T00:00:00Z"}] | map(. + {author_association:"OWNER", user:{login:"owner",type:"User"}})'; } > "$mp"
+{ jq -nc '[{"body":"<!-- FORGE:INVESTIGATOR -->\n<!-- INVESTIGATION:COMPLETE -->"},{"body":"<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: TRIVIAL"},{"body":"<!-- FORGE:CONTRACT -->\nc"},{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","updated_at":"2026-01-04T00:00:00Z"}] | map(. + {author_association:"OWNER", user:{login:"owner",type:"User"}})'
+  jq -nc '[{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","updated_at":"2026-10-06T00:00:00Z"}] | map(. + {author_association:"OWNER", user:{login:"owner",type:"User"}})'; } > "$mp"
 OUT=$(FORGE_TRAIL_QG_SINCE=2026-10-05T00:00:00Z MOCK_GH_JSON="$mp" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 1 ] && echo "$OUT" | grep -q 'MISSING: QUALITY_GATE' && ok "multi-page: latest build on page 2 is not waived" || bad "multi-page (rc=$RC out=$OUT)"
 
@@ -172,7 +172,7 @@ OUT=$(FORGE_TRAIL_QG_SINCE=2026-10-01T00:00:01Z MOCK_GH_JSON="$(lg lgb2 2026-10-
 [ $RC -eq 0 ] && ok "boundary: build one second before the cutoff is waived" || bad "boundary minus 1s (rc=$RC out=$OUT)"
 
 # Page-shape edge cases (#3130)
-BLD='{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","created_at":"2026-10-06T00:00:00Z"}'
+BLD='{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","updated_at":"2026-10-06T00:00:00Z"}'
 pg() { jq -nc --argjson c "$1" '$c | map(. + {author_association:"OWNER", user:{login:"owner",type:"User"}})'; }
 BASE='[{"body":"<!-- FORGE:INVESTIGATOR -->\n<!-- INVESTIGATION:COMPLETE -->"},{"body":"<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: TRIVIAL"},{"body":"<!-- FORGE:CONTRACT -->\nc"}]'
 # empty pages around a populated one
@@ -182,7 +182,7 @@ OUT=$(FORGE_TRAIL_QG_SINCE=2026-10-05T00:00:00Z MOCK_GH_JSON="$TMP_FX/empty.json
 OUT=$(MOCK_GH_JSON=<(echo '[]') bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 1 ] && echo "$OUT" | grep -q 'MISSING: INVESTIGATOR' && ok "all-empty thread fails (not error)" || bad "all-empty (rc=$RC out=$OUT)"
 # 3+ pages: latest build on the LAST page wins
-{ pg "$BASE"; pg '[{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","created_at":"2026-01-01T00:00:00Z"}]'; pg "[$BLD]"; } > "$TMP_FX/p3.json"
+{ pg "$BASE"; pg '[{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","updated_at":"2026-01-01T00:00:00Z"}]'; pg "[$BLD]"; } > "$TMP_FX/p3.json"
 OUT=$(FORGE_TRAIL_QG_SINCE=2026-10-05T00:00:00Z MOCK_GH_JSON="$TMP_FX/p3.json" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 1 ] && echo "$OUT" | grep -q 'MISSING: QUALITY_GATE' && ok "3 pages: latest build on page 3 is not waived" || bad "3 pages (rc=$RC out=$OUT)"
 # Malformed / mixed pages fail closed with exit 2
@@ -192,6 +192,50 @@ OUT=$(MOCK_GH_JSON="$TMP_FX/mixed.json" bash "$VERIFY" 3061 -R o/r 2>/dev/null);
 { pg "$BASE"; echo '[{"body":'; } > "$TMP_FX/malformed.json"
 OUT=$(MOCK_GH_JSON="$TMP_FX/malformed.json" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "malformed page fails closed (exit 2)" || bad "malformed page (rc=$RC out=$OUT)"
+
+# SEC-4 (#3149): the grace keys on updated_at -- BUILDER:COMPLETE is PATCHed in later than the comment was created
+jq -nc '[{"body":"<!-- FORGE:INVESTIGATOR -->\n<!-- INVESTIGATION:COMPLETE -->"},{"body":"<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: TRIVIAL"},{"body":"<!-- FORGE:CONTRACT -->\nc"},{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","created_at":"2026-10-01T00:00:00Z","updated_at":"2026-10-08T00:00:00Z"}] | map(. + {author_association:"OWNER", user:{login:"owner",type:"User"}})' > "$TMP_FX/patched.json"
+expect_fail "old created_at but post-cutoff updated_at is not waived" "$TMP_FX/patched.json" QUALITY_GATE
+jq -c 'map(del(.updated_at))' "$TMP_FX/patched.json" > "$TMP_FX/noupd.json"
+expect_fail "BUILDER:COMPLETE without updated_at never earns the grace" "$TMP_FX/noupd.json" QUALITY_GATE
+
+# SEC-3 (#3149): --code-diff makes an INVESTIGATION band unusable for waiving requirements
+expect_fail "INVESTIGATION band + code diff requires CONTRACT" "$(mk cd1 INV FP_INVESTIGATION)" CONTRACT --code-diff
+expect_fail "INVESTIGATION band + code diff requires QUALITY_GATE" "$(mk cd2 INV CONTRACT CONTEXT ARCH FP_INVESTIGATION)" QUALITY_GATE --code-diff
+expect_pass "INVESTIGATION band + code diff passes with a full trail" "$(mk cd3 INV CONTRACT CONTEXT ARCH QG_PASS FP_INVESTIGATION)" --code-diff
+run "$(mk cd4 INV FP_INVESTIGATION)" --code-diff
+echo "$OUT" | grep -q 'NOTE: INVESTIGATION band ignored' && ok "ignored band is reported" || bad "band note ($OUT)"
+expect_pass "INVESTIGATION band + docs-only (no code diff) still passes" "$(mk cd5 INV FP_INVESTIGATION)" --docs-only
+expect_pass "TRIVIAL band is unaffected by --code-diff" "$(mk cd6 INV CONTRACT FP_TRIVIAL QG_PASS)" --code-diff
+
+# SEC-5 (#3149): --head-tree binds the QUALITY_GATE PASS to the built tree
+T1=1111111111111111111111111111111111111111; T2=2222222222222222222222222222222222222222
+qgt() { jq -nc --arg b "$1" '{body:$b}' ; }
+ht() { # ht <name> <qg body...> -> full STANDARD trail whose only QUALITY_GATE comments are the given bodies
+  local out="$TMP_FX/$1.json"; shift
+  { echo '{"body":"<!-- FORGE:INVESTIGATOR -->\n<!-- INVESTIGATION:COMPLETE -->"}'; echo '{"body":"<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: STANDARD"}'
+    echo '{"body":"<!-- FORGE:CONTRACT -->\nc"}'; echo '{"body":"<!-- FORGE:CONTEXT -->\nc"}'; echo '{"body":"<!-- FORGE:ARCHITECT -->\nc"}'
+    local b; for b in "$@"; do qgt "$b"; done; } | jq -sc 'map(. + {author_association:"OWNER", user:{login:"owner",type:"User"}})' > "$out"; echo "$out"
+}
+QG_T1=$'<!-- FORGE:QUALITY_GATE -->\n**Result**: PASS\n**Tree**: '"$T1"$'\n**Iterations**: 1'
+QG_T2=$'<!-- FORGE:QUALITY_GATE -->\n**Result**: PASS\n**Tree**: '"$T2"
+QG_NOTREE=$'<!-- FORGE:QUALITY_GATE -->\n**Result**: PASS'
+expect_pass "head-tree matches the PASS marker's Tree" "$(ht h1 "$QG_T1")" --head-tree "$T1"
+expect_fail "PASS recorded for an earlier tree does not satisfy the gate" "$(ht h2 "$QG_T2")" QUALITY_GATE --head-tree "$T1"
+expect_fail "PASS without a Tree line does not satisfy a bound gate" "$(ht h3 "$QG_NOTREE")" QUALITY_GATE --head-tree "$T1"
+expect_pass "a later PASS for the head tree wins over an earlier-tree PASS" "$(ht h4 "$QG_T2" "$QG_T1")" --head-tree "$T1"
+expect_pass "no --head-tree keeps the unbound behaviour" "$(ht h5 "$QG_NOTREE")"
+expect_pass "uppercase head-tree is normalised" "$(ht h6 "$QG_T1")" --head-tree "$(echo "$T1" | tr a-f A-F)"
+expect_pass "docs-only still waives the bound gate" "$(ht h7)" --docs-only --head-tree "$T1"
+for bt in "" "xyz" "${T1}0" "abc123"; do
+  OUT=$(MOCK_GH_JSON="$(ht h8 "$QG_T1")" bash "$VERIFY" 3061 -R o/r --head-tree "$bt" 2>/dev/null); RC=$?
+  [ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "invalid --head-tree '$bt' fails closed (exit 2)" || bad "head-tree '$bt' (rc=$RC out=$OUT)"
+done
+# A 64-hex marker tree that merely starts with the 40-hex head tree must not match
+QG_LONG=$'<!-- FORGE:QUALITY_GATE -->\n**Result**: PASS\n**Tree**: '"${T1}1111111111111111111111"
+expect_fail "marker tree longer than (but prefixed by) the head tree is rejected" "$(ht h10 "$QG_LONG")" QUALITY_GATE --head-tree "$T1"
+OUT=$(MOCK_GH_JSON="$(ht h9 "$QG_T1")" bash "$VERIFY" 3061 -R o/r --head-tree 2>/dev/null); RC=$?
+[ $RC -eq 2 ] && ok "--head-tree without a value exits 2" || bad "head-tree no value (rc=$RC)"
 
 # -h prints the full header
 HOUT=$(bash "$VERIFY" -h)
