@@ -14,6 +14,7 @@ on:
   pull_request:
     paths:
       - 'scripts/**'
+      - 'commands/orchestrate/phase-4-execution.md'
       - '.github/workflows/**'
       - '.github/workflows/shell-compat.yml'
   push:
@@ -22,6 +23,7 @@ on:
       - main
     paths:
       - 'scripts/**'
+      - 'commands/orchestrate/phase-4-execution.md'
       - '.github/workflows/**'
       - '.github/workflows/shell-compat.yml'
 
