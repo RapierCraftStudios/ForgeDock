@@ -1391,7 +1391,7 @@ For an OpenCode completion, retain `OPENCODE_DISPATCH_MAP[{NUMBER}]` until the t
 # cleanup_trail_cache removes it on every orchestrator exit path. The cache holds only ABSENT/ACTIVE/RELEASED words.
 trail_cache_dir() { printf '%s' "${TRAIL_CACHE_DIR:-${TMPDIR:-/tmp}/forge-trail-${ORCH_RUN_ID:-${ORCH_SESSION:-$$}}}"; }
 init_trail_cache() { TRAIL_CACHE_DIR="$(trail_cache_dir)"; [ -n "$TRAIL_CACHE_DIR" ] && rm -rf "$TRAIL_CACHE_DIR"; mkdir -p "$TRAIL_CACHE_DIR"; }
-cleanup_trail_cache() { [ -n "$(trail_cache_dir)" ] && rm -rf "$(trail_cache_dir)"; unset TRAIL_CACHE_DIR; }
+cleanup_trail_cache() { TRAIL_CACHE_DIR="$(trail_cache_dir)"; [ -n "$TRAIL_CACHE_DIR" ] && rm -rf "$TRAIL_CACHE_DIR"; unset TRAIL_CACHE_DIR; }
 
 # hold_merged_trail <issue> <trail-text> (forge#3156): the single escalation path for a merged issue whose phase
 # trail failed or could not be verified. Used by Step 4B item 0 and by the classifier's wake re-verification.
