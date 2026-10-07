@@ -59,6 +59,29 @@ jobs:
         run: bash scripts/lint-dispatch-prompt.test.sh
       - name: Run forge-root.test.sh
         run: bash scripts/forge-root.test.sh
+      - name: Run verify-phase-trail.test.sh
+        run: bash scripts/verify-phase-trail.test.sh
+
+  # ---------------------------------------------------------------------------
+  # Windows Git Bash fixture smoke for the phase-trail / dispatch-lint scripts
+  # (forge#3101). Non-blocking: surfaces Windows-specific failures without gating merges.
+  # The fixtures mock `gh` on PATH but need `jq`.
+  # ---------------------------------------------------------------------------
+  windows-fixture-smoke:
+    name: Windows fixture smoke (Git Bash)
+    runs-on: windows-latest
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure jq is available
+        run: command -v jq || choco install jq -y --no-progress
+      - name: Run lint-dispatch-prompt.test.sh
+        run: bash scripts/lint-dispatch-prompt.test.sh
+      - name: Run verify-phase-trail.test.sh
+        run: bash scripts/verify-phase-trail.test.sh
 
   # ---------------------------------------------------------------------------
   # Job 1: shellcheck — static analysis for .sh files on Linux

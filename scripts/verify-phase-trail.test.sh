@@ -136,7 +136,11 @@ OUT=$(MOCK_GH_FAIL=1 MOCK_GH_JSON=/dev/null bash "$VERIFY" 3061 -R o/r 2>/dev/nu
 [ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "gh outage fails closed" || bad "gh outage (rc=$RC out=$OUT)"
 
 # -R with no value must error out, not hang
-OUT=$(timeout 5 bash "$VERIFY" 5 -R 2>/dev/null); RC=$?
+# macOS has no `timeout`; fall back to gtimeout, then perl alarm.
+if command -v timeout >/dev/null 2>&1; then TMO=(timeout 5)
+elif command -v gtimeout >/dev/null 2>&1; then TMO=(gtimeout 5)
+else TMO=(perl -e 'alarm shift; exec @ARGV' 5); fi
+OUT=$("${TMO[@]}" bash "$VERIFY" 5 -R 2>/dev/null); RC=$?
 [ $RC -eq 2 ] && ok "-R without value exits 2 (no hang)" || bad "-R without value (rc=$RC)"
 
 # Usage errors
