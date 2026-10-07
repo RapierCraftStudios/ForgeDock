@@ -8,6 +8,8 @@ install: extras
 
 # /sync-ecosystem — Cross-Project Sync & Publish
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 When the `{project.name}` API surface changes (new parameters, endpoints, modes, pricing), satellite projects need updates. This command detects what changed, creates tracking issues, checks publication status, and publishes releases.
@@ -263,7 +265,7 @@ BODY_EOF
 # the satellite repo ({TARGET_REPO}) from forge.yaml → repos.satellites, matching how a human
 # would invoke /issue for the same satellite (e.g. "mcp: add list_schemas tool"). The prefix
 # is stripped by /issue's own routing — it does not become part of the created issue title.
-Skill(skill="issue", args="\"{COMPONENT}: $SYNC_TITLE\" --title \"$SYNC_TITLE\" --body-file \"$SYNC_BODY_TMPFILE\" --label feature --label \"priority:P2\"")
+Skill(skill="{FORGE_SKILL_PREFIX}issue", args="\"{COMPONENT}: $SYNC_TITLE\" --title \"$SYNC_TITLE\" --body-file \"$SYNC_BODY_TMPFILE\" --label feature --label \"priority:P2\"")
 rm -f "$SYNC_BODY_TMPFILE"
 trap - EXIT
 SYNC_ISSUE_NUMBER=$(gh issue list -R {TARGET_REPO} \
@@ -321,7 +323,7 @@ Files that need changes:
 BODY_EOF
 # Route through the /issue create-hook (canonical dedup + body validation) instead of a raw
 # `gh issue create`. No prefix needed — this targets the default/monorepo repo.
-Skill(skill="issue", args="--title \"$MONOREPO_SYNC_TITLE\" --body-file \"$MONOREPO_SYNC_BODY_TMPFILE\" --label feature --label \"priority:P2\"")
+Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"$MONOREPO_SYNC_TITLE\" --body-file \"$MONOREPO_SYNC_BODY_TMPFILE\" --label feature --label \"priority:P2\"")
 rm -f "$MONOREPO_SYNC_BODY_TMPFILE"
 trap - EXIT
 MONOREPO_SYNC_ISSUE_NUMBER=$(gh issue list \

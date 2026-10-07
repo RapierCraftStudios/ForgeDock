@@ -8,6 +8,8 @@ install: extras
 
 # /ci-audit — Stack-Aware CI Gap Detection
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 You are the CI hygiene auditor. Given a project's declared tech stack (from `forge.yaml`), determine what config validation tools exist for each stack component and audit whether the project's GitHub Actions workflows include those validation steps. File GitHub issues for any gaps found.
@@ -370,7 +372,7 @@ ${VERSION_NOTE}
             # be unsafe to re-embed into a Skill args string.
             CI_GAP_BODY_FILE=$(mktemp)
             printf '%s' "$ISSUE_BODY" > "$CI_GAP_BODY_FILE"
-            Skill(skill="issue", args="--title \"ci($tool): add structural config validation step to CI pipeline\" --body-file \"$CI_GAP_BODY_FILE\" --label \"bug\" --label \"P2\" --label \"audit-finding\"")
+            Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"ci($tool): add structural config validation step to CI pipeline\" --body-file \"$CI_GAP_BODY_FILE\" --label \"bug\" --label \"P2\" --label \"audit-finding\"")
         fi
     fi
 done
@@ -414,7 +416,7 @@ The project has a \`$tool\` validation step in CI, but it only runs in the deplo
         # re-embed into a Skill args string.
         CI_PLACEMENT_BODY_FILE=$(mktemp)
         printf '%s' "$ISSUE_BODY" > "$CI_PLACEMENT_BODY_FILE"
-        Skill(skill="issue", args="--title \"ci($tool): move config validation to PR-time CI workflow\" --body-file \"$CI_PLACEMENT_BODY_FILE\" --label \"bug\" --label \"P3\" --label \"audit-finding\"")
+        Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"ci($tool): move config validation to PR-time CI workflow\" --body-file \"$CI_PLACEMENT_BODY_FILE\" --label \"bug\" --label \"P3\" --label \"audit-finding\"")
     fi
 done
 ```

@@ -8,6 +8,8 @@ install: extras
 
 # /autopilot — Autonomous Deploy Loop
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS (default: full autonomous loop until zero open issues remain)
 
 **Config variables used by this command** (set in `forge.yaml`):
@@ -160,7 +162,7 @@ This issue is the rolling log for `/autopilot` cycle annotations. Each cycle app
 OPS_EOF
     # Route through the /issue create-hook (canonical dedup + body validation) instead of
     # a raw `gh issue create`. See commands/issue.md Programmatic Invocation Contract.
-    Skill(skill="issue", args="--title \"ops: autopilot cycle log\" --body-file \"$OPS_BODY_TMPFILE\" --label \"$AUTOPILOT_OPS_LABEL\"")
+    Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"ops: autopilot cycle log\" --body-file \"$OPS_BODY_TMPFILE\" --label \"$AUTOPILOT_OPS_LABEL\"")
     rm -f "$OPS_BODY_TMPFILE"
     trap - EXIT
     OPS_ISSUE_NUMBER=$(gh issue list $GH_FLAG \
@@ -403,7 +405,7 @@ RECOVER_ORPHANS_AVAILABLE=$(ls ~/.claude/commands/recover-orphans.md 2>/dev/null
 if [ "$INFLIGHT_ISSUES" -gt 0 ]; then
   if [ "$RECOVER_ORPHANS_AVAILABLE" = "true" ] && [ "$DRY_RUN" = "false" ]; then
     echo "Recovering $INFLIGHT_ISSUES orphaned pipeline issue(s)..."
-    Skill("recover-orphans", args="")
+    Skill("{FORGE_SKILL_PREFIX}recover-orphans", args="")
   elif [ "$DRY_RUN" = "true" ]; then
     echo "[DRY-RUN] Would invoke: Skill(recover-orphans)"
   else
@@ -462,7 +464,7 @@ CLEANUP_AVAILABLE=$(ls ~/.claude/commands/cleanup.md 2>/dev/null && echo "true" 
 if [ "$DRY_RUN" = "false" ]; then
   if [ "$CLEANUP_AVAILABLE" = "true" ]; then
     echo "Running label hygiene sweep via /cleanup..."
-    Skill("cleanup", args="labels")
+    Skill("{FORGE_SKILL_PREFIX}cleanup", args="labels")
     CLEANUP_LABELS_FIXED=1  # /cleanup ran; detailed counts are in its own output
   else
     echo "INFO: /cleanup not installed (extras tier) — skipping label hygiene sweep. Install with: npx forgedock install --extras"
@@ -594,7 +596,7 @@ ISSUE_BODY_EOF
   # Route through the /issue create-hook (canonical dedup + body validation) instead of
   # a raw `gh issue create`. If /issue finds a near-duplicate, it reports it and does not
   # create — NEW_NUMBER will come back empty from the lookup below.
-  Skill(skill="issue", args="--title \"$FINDING_TITLE\" --body-file \"$BODY_TMPFILE\" --label P2 --label bug")
+  Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"$FINDING_TITLE\" --body-file \"$BODY_TMPFILE\" --label P2 --label bug")
 
   rm -f "$BODY_TMPFILE"
   trap - EXIT
@@ -822,7 +824,7 @@ To approve: remove \`needs-human\` label from #${ISSUE_NUM} and re-run \`/autopi
               2>/dev/null | grep -q true; then
             echo "  #$ISSUE_NUM ⟳ stalled at workflow:in-review (PR merged) — resuming via recover-orphans"
             if [ "$RECOVER_ORPHANS_AVAILABLE" = "true" ]; then
-              Skill("recover-orphans", args="--issue $ISSUE_NUM")
+              Skill("{FORGE_SKILL_PREFIX}recover-orphans", args="--issue $ISSUE_NUM")
             else
               echo "  WARNING: recover-orphans not installed — cannot auto-resume #$ISSUE_NUM"
               STALLED_ISSUES+=("$ISSUE_NUM")
@@ -858,7 +860,7 @@ To approve: remove \`needs-human\` label from #${ISSUE_NUM} and re-run \`/autopi
         2>/dev/null || echo '')
       for N in $PRE_DISPATCH_ISSUES; do DISPATCHED_ISSUES+=("$N"); done
 
-      Skill("orchestrate", args="fast-lane --auto")
+      Skill("{FORGE_SKILL_PREFIX}orchestrate", args="fast-lane --auto")
 
       # Terminal-state verification after orchestrate (fallback path).
       # Re-query GitHub state for each pre-dispatch issue.
@@ -894,7 +896,7 @@ To approve: remove \`needs-human\` label from #${ISSUE_NUM} and re-run \`/autopi
   if [ "$STAGING_AHEAD_NOW" -gt 0 ]; then
     echo "staging is $STAGING_AHEAD_NOW commit(s) ahead — deploying via /deploy-pr..."
     if [ "$DRY_RUN" = "false" ]; then
-      DEPLOY_RESULT=$(Skill("deploy-pr", args="staging"))
+      DEPLOY_RESULT=$(Skill("{FORGE_SKILL_PREFIX}deploy-pr", args="staging"))
       # Parse structured JSON result from deploy-pr
       DEPLOY_STATUS=$(echo "$DEPLOY_RESULT" | jq -r '.status // empty' 2>/dev/null || echo '')
       [ -z "$DEPLOY_STATUS" ] && DEPLOY_STATUS=$(echo "$DEPLOY_RESULT" | grep -oE '"status":"[^"]*"' | grep -oE '"[^"]*"$' | tr -d '"' || echo 'unknown')
@@ -909,7 +911,7 @@ To approve: remove \`needs-human\` label from #${ISSUE_NUM} and re-run \`/autopi
 
   # Step 3: Recover any newly orphaned issues before next iteration
   if [ "$RECOVER_ORPHANS_AVAILABLE" = "true" ] && [ "$DRY_RUN" = "false" ]; then
-    Skill("recover-orphans", args="--since 2")
+    Skill("{FORGE_SKILL_PREFIX}recover-orphans", args="--since 2")
   elif [ "$DRY_RUN" = "true" ]; then
     echo "[DRY-RUN] Would invoke: Skill(recover-orphans, --since 2)"
   fi
@@ -1083,7 +1085,7 @@ To approve: remove \`needs-human\` label from #${ISSUE_NUM} and re-run \`/autopi
           elif echo "$ISSUE_LABEL_STR" | grep -q 'workflow:in-review'; then
             echo "  #$ISSUE_NUM ⟳ stalled at workflow:in-review — resuming via recover-orphans"
             if [ "$RECOVER_ORPHANS_AVAILABLE" = "true" ]; then
-              Skill("recover-orphans", args="--issue $ISSUE_NUM")
+              Skill("{FORGE_SKILL_PREFIX}recover-orphans", args="--issue $ISSUE_NUM")
             else
               echo "  WARNING: recover-orphans not installed — cannot auto-resume #$ISSUE_NUM"
               STALLED_ISSUES+=("$ISSUE_NUM")
@@ -1112,7 +1114,7 @@ To approve: remove \`needs-human\` label from #${ISSUE_NUM} and re-run \`/autopi
           2>/dev/null || echo '')
         for N in $MS_PRE_DISPATCH; do DISPATCHED_ISSUES+=("$N"); done
 
-        Skill("orchestrate", args="milestone $MS_SLUG --auto")
+        Skill("{FORGE_SKILL_PREFIX}orchestrate", args="milestone $MS_SLUG --auto")
 
         # Terminal-state verification after orchestrate fallback.
         echo "Verifying terminal state for $( echo "$MS_PRE_DISPATCH" | wc -w | tr -d ' ') dispatched milestone issue(s) (orchestrate path)..."
@@ -1150,7 +1152,7 @@ To approve: remove \`needs-human\` label from #${ISSUE_NUM} and re-run \`/autopi
   if [ "$MILESTONE_BRANCH_EXISTS" = "true" ]; then
     echo "Shipping $MILESTONE_BRANCH → staging..."
     if [ "$DRY_RUN" = "false" ]; then
-      MS_RESULT=$(Skill("deploy-pr", args="$MILESTONE_BRANCH"))
+      MS_RESULT=$(Skill("{FORGE_SKILL_PREFIX}deploy-pr", args="$MILESTONE_BRANCH"))
       MS_STATUS=$(echo "$MS_RESULT" | jq -r '.status // empty' 2>/dev/null || echo '')
       [ -z "$MS_STATUS" ] && MS_STATUS=$(echo "$MS_RESULT" | grep -oE '"status":"[^"]*"' | grep -oE '"[^"]*"$' | tr -d '"' || echo 'unknown')
       echo "Milestone ship status: $MS_STATUS"
@@ -1163,7 +1165,7 @@ To approve: remove \`needs-human\` label from #${ISSUE_NUM} and re-run \`/autopi
         STAGING_AHEAD_MS=$(git rev-list --count "origin/${DEFAULT_BRANCH}..origin/${STAGING_BRANCH}" 2>/dev/null || echo '0')
         if [ "$STAGING_AHEAD_MS" -gt 0 ]; then
           echo "Milestone merged to staging — deploying staging → $DEFAULT_BRANCH..."
-          MAIN_RESULT=$(Skill("deploy-pr", args="staging"))
+          MAIN_RESULT=$(Skill("{FORGE_SKILL_PREFIX}deploy-pr", args="staging"))
           MAIN_STATUS=$(echo "$MAIN_RESULT" | jq -r '.status // empty' 2>/dev/null || echo 'unknown')
           echo "Main deploy status: $MAIN_STATUS"
           [ "$MAIN_STATUS" = "merged" ] && FAST_LANE_DEPLOYS=$((FAST_LANE_DEPLOYS + 1))
@@ -1377,7 +1379,7 @@ META_EOF
           # Route through the /issue create-hook (canonical dedup + body validation) instead
           # of a raw `gh issue create`. The EXISTING_META search above already guards against
           # re-creating for the same pattern; /issue's own dedup is an additional safety net.
-          Skill(skill="issue", args="--title \"$META_TITLE\" --body-file \"$META_BODY_TMPFILE\" --label priority:P2")
+          Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"$META_TITLE\" --body-file \"$META_BODY_TMPFILE\" --label priority:P2")
           rm -f "$META_BODY_TMPFILE"
           trap - EXIT
           META_NEW_NUMBER=$(gh issue list $GH_FLAG \
@@ -1591,7 +1593,7 @@ Rules are listed in **precedence order** — when two rules appear to conflict, 
 
 **Rule 8: deploy-pr result is authoritative** — if status is not "merged", do not assume the deploy succeeded. Log and continue the loop.
 
-**Rule 9: Terminal-state verification is mandatory after every dispatch batch.** After every `forgedock run-issue … wait` block or `Skill(orchestrate)` call, autopilot MUST query the actual GitHub label state for each dispatched issue. An issue whose process exits 0 but whose GitHub label is still `workflow:in-review` or `workflow:building` is NOT done — the close phase may have been interrupted. Stalls at `workflow:in-review` with a merged PR are the known recoverable class; autopilot resumes them via `Skill("recover-orphans", args="--issue N")` once before recording them as stalled. The Phase 4 report MUST emit a per-issue disposition table sourced from these GitHub-verified states — self-reported sub-process success is not sufficient. <!-- Added: forge#1751 -->
+**Rule 9: Terminal-state verification is mandatory after every dispatch batch.** After every `forgedock run-issue … wait` block or `Skill(orchestrate)` call, autopilot MUST query the actual GitHub label state for each dispatched issue. An issue whose process exits 0 but whose GitHub label is still `workflow:in-review` or `workflow:building` is NOT done — the close phase may have been interrupted. Stalls at `workflow:in-review` with a merged PR are the known recoverable class; autopilot resumes them via `Skill("{FORGE_SKILL_PREFIX}recover-orphans", args="--issue N")` once before recording them as stalled. The Phase 4 report MUST emit a per-issue disposition table sourced from these GitHub-verified states — self-reported sub-process success is not sufficient. <!-- Added: forge#1751 -->
 
 **Headless / unattended operation**: `/autopilot` has no human checkpoint and never waits for user input. When invoked via `/loop 4h /autopilot` or any other unattended runner, it runs to completion and exits. Human escalation is exclusively via the `needs-human` label (Rule 2 above) — autopilot surfaces `needs-human` issues in the recon report but never stalls waiting for a response. There is no "Phase 4B confirm before fixing" gate in the current design; that checkpoint was intentionally removed in the #1673 rewrite. If a future design adds a confirmation gate, it must be guarded by both Rule 0 (dry-run) and Rule 2 (needs-human) to remain safe.
 

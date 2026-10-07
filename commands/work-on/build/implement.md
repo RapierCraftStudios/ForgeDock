@@ -7,6 +7,8 @@ argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree 
 
 # work-on/build/implement — Implementation Subcommand
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 **Invoked by**: `work-on.md` Step 3F, after worktree is created and context is gathered.
@@ -102,7 +104,7 @@ Extract from contract:
 | Refactor / Maintenance | Implement directly following contract deliverables |
 | Investigation | Spawn research agents, create GitHub issues for findings, skip to I5 |
 
-**Investigation task special case**: Research deeply, create GitHub issues for each finding using the Pipeline Issue Template (see `commands/issue.md` § "Pipeline Issue Template"). Each issue MUST include `## Problem`, `## Affected Files`, and `## Acceptance Criteria`. Create each issue via the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") — `Skill(skill="issue", args="--title \"...\" --body-file <path> --label ...")` — instead of calling the raw issue-creation command directly; this gets dedup and body validation for free. Post a deliverables comment listing the created issues, close the original issue, return `IMPLEMENT_RESULT: status: INVESTIGATION_COMPLETE`.
+**Investigation task special case**: Research deeply, create GitHub issues for each finding using the Pipeline Issue Template (see `commands/issue.md` § "Pipeline Issue Template"). Each issue MUST include `## Problem`, `## Affected Files`, and `## Acceptance Criteria`. Create each issue via the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") — `Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"...\" --body-file <path> --label ...")` — instead of calling the raw issue-creation command directly; this gets dedup and body validation for free. Post a deliverables comment listing the created issues, close the original issue, return `IMPLEMENT_RESULT: status: INVESTIGATION_COMPLETE`.
 
 ---
 

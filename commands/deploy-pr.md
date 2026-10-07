@@ -305,7 +305,7 @@ else
       echo "=== CI Gate Iteration $CI_ITER / $MAX_CI_ITER ==="
 
       if [ "$DRY_RUN" = "false" ]; then
-        Skill("fix-ci", args="$PR_NUMBER $GH_FLAG")
+        Skill("{FORGE_SKILL_PREFIX}fix-ci", args="$PR_NUMBER $GH_FLAG")
       else
         echo "[DRY-RUN] Would invoke: Skill(fix-ci, $PR_NUMBER $GH_FLAG)"
       fi

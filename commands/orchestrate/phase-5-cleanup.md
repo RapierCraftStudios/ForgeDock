@@ -6,6 +6,8 @@ install: core
 
 # /orchestrate — Phase 5: Post-Batch Cleanup
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 ## Phase 5: Post-Batch Cleanup
 
 **This phase is MANDATORY after every orchestration batch.** It prevents the rot that accumulates when multiple agents merge PRs in parallel — stale labels, orphaned worktrees, unclosed issues.
@@ -15,7 +17,7 @@ install: core
 Invoke the `/cleanup` skill with `all` to sweep everything:
 
 ```
-Skill(skill="cleanup", args="all")
+Skill(skill="{FORGE_SKILL_PREFIX}cleanup", args="all")
 ```
 
 This will:
@@ -31,7 +33,7 @@ This will:
 Invoke `/audit-agents` on this session to measure pipeline efficiency:
 
 ```
-Skill(skill="audit-agents", args="latest")
+Skill(skill="{FORGE_SKILL_PREFIX}audit-agents", args="latest")
 ```
 
 Include the audit summary in the final report (Phase 6). Key metrics to surface:
