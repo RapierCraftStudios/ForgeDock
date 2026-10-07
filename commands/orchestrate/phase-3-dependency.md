@@ -620,7 +620,7 @@ if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ]; then
 
   case "$LEASE_STATE" in
     free|self)
-      HOSTNAME_ID=$(hostname 2>/dev/null || echo "unknown-host")
+      HOSTNAME_ID=$(hostname 2>/dev/null || uname -n 2>/dev/null || true); HOSTNAME_ID="${HOSTNAME_ID:-unknown-host}"
       # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
       gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE -->
 **Holder Batch ID**: ${BATCH_ID}
@@ -1368,7 +1368,7 @@ if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && [ -n "
     free|self)
       # Free (no live holder) or self (this exact batch already holds it) — safe to
       # refresh and continue reconstruction below.
-      HOSTNAME_ID=$(hostname 2>/dev/null || echo "unknown-host")
+      HOSTNAME_ID=$(hostname 2>/dev/null || uname -n 2>/dev/null || true); HOSTNAME_ID="${HOSTNAME_ID:-unknown-host}"
       # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
       gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE -->
 **Holder Batch ID**: ${BATCH_ID}
