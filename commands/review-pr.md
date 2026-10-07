@@ -2371,10 +2371,11 @@ else
     else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
     echo "$CI_GATE_OUT"
     if [ "$CI_GATE_RC" -ne 0 ]; then
-      gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge refused for PR #{PR_NUMBER}: CI is not green (ci gate rc=${CI_GATE_RC}). The PR stays open; fix the failing checks on its branch (remediation treats this as FIXABLE) or re-run flaky ones.
+      CI_MSG="⛔ Auto-merge refused for PR #{PR_NUMBER}: CI is not green (ci gate rc=${CI_GATE_RC}). The PR stays open; fix the failing checks on its branch (remediation treats this as FIXABLE) or re-run flaky ones.
 \`\`\`
 ${CI_GATE_OUT}
-\`\`\`" 2>/dev/null || true # allowlist:check-command-side-effects
+\`\`\`"
+      gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "$CI_MSG" 2>/dev/null || true # allowlist:check-command-side-effects
       gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
       echo "REVIEW_RESULT: status: BLOCKED, blocker: ci gate not green (rc=${CI_GATE_RC})"
     else

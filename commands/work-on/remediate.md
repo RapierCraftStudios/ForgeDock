@@ -357,10 +357,11 @@ else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fa
 echo "$CI_GATE_OUT"
 if [ "$CI_GATE_RC" -ne 0 ]; then
   # Not green: do not land. Re-escalate with the gate output (counts as RE-ESCALATED below).
-  gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "⛔ Remediation auto-land refused for PR #{PR_NUMBER}: CI is not green (rc=${CI_GATE_RC}).
+  CI_MSG="⛔ Remediation auto-land refused for PR #{PR_NUMBER}: CI is not green (rc=${CI_GATE_RC}).
 \`\`\`
 ${CI_GATE_OUT}
-\`\`\`" 2>/dev/null || true # allowlist:check-command-side-effects
+\`\`\`"
+  gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "$CI_MSG" 2>/dev/null || true # allowlist:check-command-side-effects
   gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
 else
 gh pr merge {PR_NUMBER} {GH_FLAG} --merge # allowlist:check-command-side-effects (CI-gated merge)
