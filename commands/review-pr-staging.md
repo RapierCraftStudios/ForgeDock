@@ -504,7 +504,13 @@ Missing persona templates are a fatal setup error, not permission to skip multi-
 
 ```bash
 TEMPLATE_BASE=""
-if [[ -f "$FORGE_HOME/commands/review-pr-agents/protocols.md" ]]; then
+# Tier 0: the running plugin's own root (Claude Code substitutes this exact spelling; elsewhere it stays a
+# literal that the /* check rejects). Wins over an exported FORGE_HOME, which may name an older checkout.
+_PLUGIN_ROOT='${CLAUDE_PLUGIN_ROOT}'; case "$_PLUGIN_ROOT" in /*) ;; *) _PLUGIN_ROOT="" ;; esac
+if [[ -n "$_PLUGIN_ROOT" && -f "$_PLUGIN_ROOT/commands/review-pr-agents/protocols.md" ]]; then
+  TEMPLATE_BASE="$_PLUGIN_ROOT/commands/review-pr-agents"
+  TEMPLATE_SOURCE="plugin_root"
+elif [[ -f "$FORGE_HOME/commands/review-pr-agents/protocols.md" ]]; then
   TEMPLATE_BASE="$FORGE_HOME/commands/review-pr-agents"
   TEMPLATE_SOURCE="forge_home"
 else
@@ -532,7 +538,7 @@ fi
 
 **If `TEMPLATE_SOURCE` is `none`**: HARD STOP. Post a PR comment explaining the setup is broken, instructing the user to run `npx forgedock update` to repair the install, add `needs-human`, and exit without posting any findings or a verdict. **NEVER perform the review inline in the main agent context as a substitute.**
 
-**If `TEMPLATE_SOURCE` is `forge_home` or `repo_path`** (normal cases — behavior unchanged): `Read: $TEMPLATE_BASE/protocols.md` and `Read: $TEMPLATE_BASE/<persona>.md` per selected agent.
+**If `TEMPLATE_SOURCE` is `plugin_root`, `forge_home` or `repo_path`** (normal cases — behavior unchanged): `Read: $TEMPLATE_BASE/protocols.md` and `Read: $TEMPLATE_BASE/<persona>.md` per selected agent.
 
 **If `TEMPLATE_SOURCE` is `monolithic_catalog`** (last resort): `Read: $MONOLITHIC_CATALOG` and extract the shared protocols section plus each selected persona's section from within that single file.
 

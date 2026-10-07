@@ -37,7 +37,7 @@ For each agent selected in Phase 3B, read **only** the files relevant to that ag
 
 1. **Always read first** (shared protocols, all agents require this):
    ```
-   Read: $FORGE_HOME/commands/review-pr-agents/protocols.md
+   Read: ${CLAUDE_PLUGIN_ROOT}/commands/review-pr-agents/protocols.md
    ```
 
 2. **Then read the persona file for each selected agent**:
@@ -70,11 +70,11 @@ For each agent selected in Phase 3B, read **only** the files relevant to that ag
 
 ## Loading Instructions for Phase 3C
 
-Replace the single `Read: $FORGE_HOME/commands/review-pr-agents.md` call with:
+Replace the single `Read: ${CLAUDE_PLUGIN_ROOT}/commands/review-pr-agents.md` call with:
 
 ```
-Read: $FORGE_HOME/commands/review-pr-agents/protocols.md
-Read: $FORGE_HOME/commands/review-pr-agents/<persona>.md   (one per selected agent)
+Read: ${CLAUDE_PLUGIN_ROOT}/commands/review-pr-agents/protocols.md
+Read: ${CLAUDE_PLUGIN_ROOT}/commands/review-pr-agents/<persona>.md   (one per selected agent)
 ```
 
 Each persona file contains:
@@ -87,3 +87,5 @@ The `protocols.md` file contains:
 - Tool-Result Truncation Discipline
 - Evidence-Based Review Protocol (all agents follow)
 - Structured Findings Protocol (machine-readable findings block format)
+
+**Spec root (MANDATORY)**: read every file named in this catalog from `${CLAUDE_PLUGIN_ROOT}` — the install root of the ForgeDock plugin that is running this command (Claude Code fills it in when it loads the spec). Only if that path does not start with `/` (not a Claude Code plugin session: install.sh, Codex, OpenCode) use `$FORGE_HOME` instead. Never read sub-files from `$FORGE_HOME` when the plugin root resolved: an exported `FORGE_HOME` can point at a different, older ForgeDock checkout, and mixing roots runs stale phase specs.

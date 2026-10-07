@@ -51,7 +51,7 @@ dispatch a compact plan.
 
 ## Execution Order
 
-Read and execute phases in sequence. Each phase file is self-contained.
+Read and execute phases in sequence. Each phase file is self-contained. Resolve every path from the spec root defined in the Quick Reference below.
 
 | Step | File | Description |
 |------|------|-------------|
@@ -67,15 +67,19 @@ Read and execute phases in sequence. Each phase file is self-contained.
 
 ## Quick Reference
 
+**Spec root (MANDATORY)**: read every file below from `${CLAUDE_PLUGIN_ROOT}` — the install root of the ForgeDock plugin that is running this command (Claude Code fills it in when it loads the spec). Only if that path does not start with `/` (not a Claude Code plugin session: install.sh, Codex, OpenCode) use `$FORGE_HOME` instead. Never read sub-files from `$FORGE_HOME` when the plugin root resolved: an exported `FORGE_HOME` can point at a different, older ForgeDock checkout, and mixing roots runs stale phase specs.
+
+**Raw reads are not substituted (MANDATORY)**: Claude Code fills in the plugin root only in the spec it loads (this file), never in files you open with Read. The phase files contain the placeholder written as `$` immediately followed by `{CLAUDE_PLUGIN_ROOT}`. Before running any bash block taken from a phase file, replace every occurrence of that placeholder with `${CLAUDE_PLUGIN_ROOT}` (the resolved root shown here), exactly as Claude Code would have. Left unreplaced it is rejected as a non-absolute path and resolution falls back to `$FORGE_HOME`, which may be stale.
+
 ```
-Read: $FORGE_HOME/commands/orchestrate/config.md       # ALWAYS READ FIRST
-Read: $FORGE_HOME/commands/orchestrate/phase-1-resolve.md
-Read: $FORGE_HOME/commands/orchestrate/phase-2-triage.md
-Read: $FORGE_HOME/commands/orchestrate/phase-2.5-synthesis.md
-Read: $FORGE_HOME/commands/orchestrate/phase-3-dependency.md
-Read: $FORGE_HOME/commands/orchestrate/phase-4-execution.md
-Read: $FORGE_HOME/commands/orchestrate/phase-5-cleanup.md
-Read: $FORGE_HOME/commands/orchestrate/phase-6-report.md
+Read: ${CLAUDE_PLUGIN_ROOT}/commands/orchestrate/config.md       # ALWAYS READ FIRST
+Read: ${CLAUDE_PLUGIN_ROOT}/commands/orchestrate/phase-1-resolve.md
+Read: ${CLAUDE_PLUGIN_ROOT}/commands/orchestrate/phase-2-triage.md
+Read: ${CLAUDE_PLUGIN_ROOT}/commands/orchestrate/phase-2.5-synthesis.md
+Read: ${CLAUDE_PLUGIN_ROOT}/commands/orchestrate/phase-3-dependency.md
+Read: ${CLAUDE_PLUGIN_ROOT}/commands/orchestrate/phase-4-execution.md
+Read: ${CLAUDE_PLUGIN_ROOT}/commands/orchestrate/phase-5-cleanup.md
+Read: ${CLAUDE_PLUGIN_ROOT}/commands/orchestrate/phase-6-report.md
 ```
 
 The orchestrator reads only the phase file(s) relevant to the current step rather than

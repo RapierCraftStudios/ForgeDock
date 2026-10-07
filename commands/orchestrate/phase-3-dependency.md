@@ -90,6 +90,7 @@ declare -A ISSUE_FILES  # {NUM} → newline-separated declared file set (forge#2
 # phase-4-execution.md's classify-lane resolver.
 resolve_extract_affected_files() {
   local candidates=()
+  case '${CLAUDE_PLUGIN_ROOT}' in /*) candidates+=('${CLAUDE_PLUGIN_ROOT}/scripts/extract-affected-files.sh') ;; esac  # running plugin first
   [ -n "${FORGE_HOME:-}" ] && candidates+=("$FORGE_HOME/scripts/extract-affected-files.sh")
   [ -n "${REPO_PATH:-}" ] && candidates+=("$REPO_PATH/scripts/extract-affected-files.sh")
   candidates+=("$PWD/scripts/extract-affected-files.sh")
