@@ -1705,13 +1705,16 @@ done
 
    **Do NOT re-dispatch a merged issue** (forge#3148): `/work-on` Phase 0B stops on a closed or `workflow:merged` issue before its resume preflight, so a fresh agent exits without repairing anything and the predecessor would stay unresolved forever. The PR is already merged, so the gap can only be resolved by a human. Escalate it instead, which classifies it **GATED** (`classify_predecessor_state` checks `workflow:merged` + `needs-human` before DONE; the `TRAIL_RC -ge 2` case above reaches the same state through its own `needs-human`), so item 6.5 tracks its dependents as `blocked-on-human-merge` instead of dispatching them. A bypass reported by the agent on a `workflow:merged` issue whose trail verifies is handled the same way (set `TRAIL_RC=1` before this block):
    ```bash
-   if [ "$TRAIL_RC" -eq 1 ]; then
+   # Only a merged issue is escalated here; an unmerged bypass is resumed by item 2 (see below).
+   if [ "$TRAIL_RC" -eq 1 ] && echo ",${TRAIL_LABELS:-}," | grep -q ',workflow:merged,'; then
      if [ "${DRY_RUN:-false}" = "true" ]; then
        echo "[DRY-RUN] Would post FORGE:PHASE_TRAIL_FAILED and add needs-human to merged #{NUMBER}"
      else
-       # Idempotent: one escalation comment per issue, however many completion cycles see it.
-       TRAIL_ESCALATED=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-         --jq '[.[] | select(.body | contains("FORGE:PHASE_TRAIL_FAILED") and contains("merged with an incomplete phase trail"))] | length' 2>/dev/null || echo 0)
+       # Label first: needs-human is what holds the dependents (GATED), so it must not depend on the comment post.
+       gh issue edit {NUMBER} -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
+       # Idempotent: one escalation comment per issue, however many completion cycles see it (--paginate: 30 comments per page).
+       TRAIL_ESCALATED=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments \
+         --jq '.[] | select(.body | contains("FORGE:PHASE_TRAIL_FAILED") and contains("merged with an incomplete phase trail")) | .id' 2>/dev/null | grep -c '[0-9]')
        if [ "${TRAIL_ESCALATED:-0}" -eq 0 ]; then
          gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:PHASE_TRAIL_FAILED -->
    #{NUMBER} merged with an incomplete phase trail (detected by /orchestrate on completion).
@@ -1722,7 +1725,6 @@ done
 
    The PR is already merged, so \`/work-on\` cannot re-run the missing phases. Review the merged change, then remove \`needs-human\` to release dependents held as \`blocked-on-human-merge\`."
        fi
-       gh issue edit {NUMBER} -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
      fi
    fi
    ```

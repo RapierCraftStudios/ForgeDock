@@ -324,7 +324,8 @@ else:
 Otherwise:
 - PR MERGED + issue CLOSED → proceed to Phase 6/7
 - PR MERGED + issue OPEN → close issue manually
-- PR NOT MERGED → `gh pr merge --merge {GH_FLAG}`, close issue. If merge fails → post comment, add `needs-human`, STOP.
+- PR NOT MERGED + review returned `REVIEW_RESULT: status: COMPLETE` → `gh pr merge --merge {GH_FLAG}`, close issue. If merge fails → post comment, add `needs-human`, STOP.
+- PR NOT MERGED + any other, missing, or unparseable `REVIEW_RESULT` → do NOT merge (an unrecognized refusal must never fall through to a manual merge). Add `needs-human` and STOP.
 
 ### 5D: Project board update (Workflow=Merged, Status=Done)
 

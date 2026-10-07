@@ -173,14 +173,6 @@ for NUM in $ORPHAN_LIST; do
     DIAG_REASON[$NUM]="Already in terminal state: $ISSUE_LABELS"
     continue
   fi
-  # forge#3148: an escalated orphan is waiting on a human — re-running a recovery action every sweep
-  # (e.g. re-invoking /review-pr against an unrepaired phase trail) only repeats the same refusal.
-  if echo ", $ISSUE_LABELS," | grep -q ", needs-human,"; then
-    DIAG_ACTION[$NUM]="skip"
-    DIAG_REASON[$NUM]="Escalated (needs-human) — waiting on a human"
-    continue
-  fi
-
   # Check for merged PR referencing this issue
   MERGED_PR=$(gh pr list ${GH_FLAG} \
     --state merged \
@@ -204,6 +196,15 @@ for NUM in $ORPHAN_LIST; do
     DIAG_REASON[$NUM]="PR #$MERGED_PR already merged — update labels and close issue"
     DIAG_PR_NUM[$NUM]="$MERGED_PR"
     echo "  Diagnosis: LABEL-CLEANUP (PR #$MERGED_PR already merged)"
+    continue
+  fi
+
+  # forge#3148: checked after the merged-PR label cleanup above, so a merged orphan is still closed out.
+  # An escalated orphan is waiting on a human — re-running a recovery action every sweep
+  # (e.g. re-invoking /review-pr against an unrepaired phase trail) only repeats the same refusal.
+  if echo ", $ISSUE_LABELS," | grep -q ", needs-human,"; then
+    DIAG_ACTION[$NUM]="skip"
+    DIAG_REASON[$NUM]="Escalated (needs-human) — waiting on a human"
     continue
   fi
 
@@ -386,8 +387,14 @@ for NUM in $ORPHAN_LIST; do
       else
         # forge#3148: count trail refusals that predate this sweep, so a refusal from an earlier sweep escalates
         # instead of re-reviewing the same unrepaired trail every run.
-        PRIOR_TRAIL_FAILS=$(gh api "repos/${GH_REPO}/issues/${NUM}/comments" \
-          --jq '[.[] | select(.body | contains("FORGE:PHASE_TRAIL_FAILED"))] | length' 2>/dev/null || echo 0)
+        # --paginate: the comments endpoint returns 30 per page, oldest first. An unreadable count fails toward escalation.
+        if PRIOR_TRAIL_IDS=$(gh api --paginate "repos/${GH_REPO}/issues/${NUM}/comments" \
+            --jq '.[] | select(.body | contains("FORGE:PHASE_TRAIL_FAILED")) | .id' 2>/dev/null); then
+          PRIOR_TRAIL_FAILS=$(printf '%s\n' "$PRIOR_TRAIL_IDS" | grep -c '[0-9]')
+        else
+          PRIOR_TRAIL_FAILS=1
+        fi
+        REVIEW_STATUS=""; REVIEW_BLOCKER=""   # reset per orphan so a previous orphan's result never leaks into this one
         Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="${PR_NUM} --auto-merge --issue ${NUM} --gh-flag ${GH_FLAG}")
         # REVIEW_STATUS = the `status:` field of the REVIEW_RESULT block the Skill call returned.
         if [ "$REVIEW_STATUS" = "PHASE_TRAIL_FAILED" ]; then
