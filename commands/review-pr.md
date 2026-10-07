@@ -2241,12 +2241,16 @@ else
   DOCS_ONLY_FLAG=""
   PR_FILES_ALL=$(gh pr diff {PR_NUMBER} {MERGE_GH_FLAG} --name-only 2>/dev/null)
   if [ -n "$PR_FILES_ALL" ] && [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/is-docs-only.sh" ] && echo "$PR_FILES_ALL" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"; then DOCS_ONLY_FLAG="--docs-only"; fi
+  # Band cross-check (forge#3149): a non-docs PR diff means an agent-chosen INVESTIGATION band must not waive requirements.
+  # No --head-tree here: review auto-fix commits legitimately advance the head after the gate ran; the tree binding is enforced pre-PR (work-on/review.md R1.5).
+  CODE_DIFF_FLAG=""
+  if [ -n "$PR_FILES_ALL" ] && [ -z "$DOCS_ONLY_FLAG" ]; then CODE_DIFF_FLAG="--code-diff"; fi
   if [ -z "$FORGE_ROOT" ] || [ ! -f "$TRAIL_SCRIPT" ]; then
     # Fail closed: an unresolvable verifier is NOT a pass (plugin installs set no FORGE_HOME; never fall back to the consumer repo).
     echo "PHASE TRAIL: verify-phase-trail.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install) — refusing to merge" >&2
     TRAIL="PHASE_TRAIL: ERROR (verifier not resolvable)"; TRAIL_RC=127
   else
-    TRAIL=$(bash "$TRAIL_SCRIPT" "$MERGE_ISSUE" -R {GH_REPO} $DOCS_ONLY_FLAG); TRAIL_RC=$?
+    TRAIL=$(bash "$TRAIL_SCRIPT" "$MERGE_ISSUE" -R {GH_REPO} $DOCS_ONLY_FLAG $CODE_DIFF_FLAG); TRAIL_RC=$?
   fi
   if [ "$TRAIL_RC" -ge 2 ]; then
     # rc 2 (trail unreadable) / 127 (verifier not resolvable) is an infrastructure failure, NOT missing phases:

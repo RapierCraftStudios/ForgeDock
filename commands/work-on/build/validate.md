@@ -424,16 +424,21 @@ git ls-remote --exit-code origin {PR_BASE} >/dev/null 2>&1 || echo "PR_BASE not 
 
 ### V5 Pre-Commit: Post FORGE:QUALITY_GATE Marker (MANDATORY unless docs-only) <!-- Added: forge#3061 -->
 
-The quality gate must leave a checkable artifact. `scripts/verify-phase-trail.sh` (run before PR creation and before auto-merge) requires a `FORGE:QUALITY_GATE` comment with `**Result**: PASS` for every non-docs-only change. Post it after the V1 loop ends, recording the real commands run and their real results. Do NOT hand-post this marker without having actually run the gate: a marker with no run behind it is a pipeline bypass.
+The quality gate must leave a checkable artifact. `scripts/verify-phase-trail.sh` (run before PR creation and before auto-merge) requires a `FORGE:QUALITY_GATE` comment with `**Result**: PASS` for every non-docs-only change. Post it after the V1 loop ends, recording the real commands run and their real results. The marker records the staged tree (`**Tree**`) so a PASS from an earlier build commit cannot satisfy the gate for a later one: any edit after the gate requires re-running validate. Do NOT hand-post this marker without having actually run the gate: a marker with no run behind it is a pipeline bypass.
 
 **Skip-path marker**: when the Skip Conditions above return `GATE_PASSED: true` early (single config/docs file), still post the marker with `**Result**: PASS (skipped — single config/docs file)` and `**Iterations**: 0`, so the verifier never has to guess. The verifier's `--docs-only` waiver additionally covers diffs accepted by `scripts/is-docs-only.sh` (Markdown only; nested `AGENTS.md`/`CLAUDE.md`/`SKILL.md` and `commands/`, `.claude/`, `.agents/`, `.codex/`, `.github/` excluded).
 
 ```bash
 GATE_RESULT=$([ "$GATE_PASSED" = "true" ] && echo PASS || echo FAIL)
+# Bind the PASS to what was actually gated: the staged tree is exactly the tree the V5 commit will have.
+# scripts/verify-phase-trail.sh --head-tree (work-on/review.md R1.5) rejects a PASS recorded for a different tree. <!-- Added: forge#3149 -->
+git -C {WORKTREE_PATH} add -u
+GATE_TREE=$(git -C {WORKTREE_PATH} write-tree)
 QG_BODY="<!-- FORGE:QUALITY_GATE -->
 ## Quality Gate Result
 
 **Result**: ${GATE_RESULT}
+**Tree**: ${GATE_TREE}
 **Iterations**: {N}
 **Commands run**: {quality-gate invocation, format/verify commands, test commands actually executed}
 **Findings remaining**: {none | summary}"

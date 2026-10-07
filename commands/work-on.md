@@ -325,7 +325,7 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | {id: .id, author: .u
 
 **Check**: state (closed → STOP), terminal labels (`workflow:merged`/`workflow:invalid`/`workflow:awaiting-merge` → STOP), existing agent comments (`FORGE:INVESTIGATOR`, `FORGE:DECOMPOSED`, `FORGE:CONTRACT`, `FORGE:BUILDER`, `FORGE:TRAJECTORY`, `FORGE:DECISION_RECORD`), parent tracker status, sub-issue status.
 
-**Resume preflight (MANDATORY on any resume past Phase 1)** <!-- Added: forge#3061 -->: before routing to Phase 3, 4, 5 or 6 from existing state, run `bash "$FORGE_ROOT/scripts/verify-phase-trail.sh" {NUMBER} -R {GH_REPO}` (add `--docs-only` for docs-only diffs), with `FORGE_ROOT` resolved by the bootstrap in "Script resolution" below. If `FORGE_ROOT` is empty or the script is missing, treat it as `PHASE_TRAIL: ERROR` (fail closed: stop and add `needs-human`; never skip the preflight). On `PHASE_TRAIL: FAIL`, go BACK and run each missing phase through its `Skill(...)` (investigate, Phase 3B classification, build contract/context/architect, validate) before continuing — never continue forward over a gap, never hand-post a missing marker, and never treat a recovered uncommitted worktree as a substitute for the skipped phases. The same verifier gates PR creation (`work-on/review.md` Phase R1.5) and auto-merge (`review-pr.md` Phase 8).
+**Resume preflight (MANDATORY on any resume past Phase 1)** <!-- Added: forge#3061 -->: before routing to Phase 3, 4, 5 or 6 from existing state, run `bash "$FORGE_ROOT/scripts/verify-phase-trail.sh" {NUMBER} -R {GH_REPO}` (add `--docs-only` for docs-only diffs, or `--code-diff` when the diff has any non-docs file so an INVESTIGATION band cannot waive requirements), with `FORGE_ROOT` resolved by the bootstrap in "Script resolution" below. If `FORGE_ROOT` is empty or the script is missing, treat it as `PHASE_TRAIL: ERROR` (fail closed: stop and add `needs-human`; never skip the preflight). On `PHASE_TRAIL: FAIL`, go BACK and run each missing phase through its `Skill(...)` (investigate, Phase 3B classification, build contract/context/architect, validate) before continuing — never continue forward over a gap, never hand-post a missing marker, and never treat a recovered uncommitted worktree as a substitute for the skipped phases. The same verifier gates PR creation (`work-on/review.md` Phase R1.5) and auto-merge (`review-pr.md` Phase 8).
 
 **Determine resume point**: No comments → Phase 1. Investigation exists + ready-to-build → Phase 3. Builder:COMPLETE + no PR → Phase 4. Builder without :COMPLETE (partial/interrupted build) + no PR → Phase 3 (partial-build cleanup). Builder + PR open → Phase 5. PR merged + issue open → Phase 6.
 
@@ -1604,10 +1604,13 @@ if iteration == max_iterations AND not PASS:
 
 ```bash
 GATE_RESULT=$([ "$GATE_PASSED" = "true" ] && echo PASS || echo FAIL)
+git -C {WORKTREE_PATH} add -u   # same staging as 3K, so the recorded tree is the commit's tree <!-- Added: forge#3149 -->
+GATE_TREE=$(git -C {WORKTREE_PATH} write-tree)
 QG_BODY="<!-- FORGE:QUALITY_GATE -->
 ## Quality Gate Result
 
 **Result**: ${GATE_RESULT}
+**Tree**: ${GATE_TREE}
 **Iterations**: {N}
 **Commands run**: {quality-gate invocation, format/verify commands actually executed}
 **Findings remaining**: {none | summary}"

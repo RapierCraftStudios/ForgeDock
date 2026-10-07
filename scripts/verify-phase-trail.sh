@@ -9,10 +9,17 @@
 # verdict alone after phases were silently skipped.
 #
 # Usage:
-#   verify-phase-trail.sh <issue> -R <owner/repo> [--docs-only]
+#   verify-phase-trail.sh <issue> -R <owner/repo> [--docs-only] [--code-diff] [--head-tree <sha>]
 #
 #   --docs-only   The diff is documentation-only; the FORGE:QUALITY_GATE marker
 #                 is not required.
+#   --code-diff   The diff contains at least one non-documentation file. An agent-chosen
+#                 INVESTIGATION band is then NOT honoured (investigation tasks produce issues,
+#                 not code), so the STANDARD requirement set applies (#3149).
+#   --head-tree   Git tree id (40 or 64 hex) of the commit being gated. The passing
+#                 FORGE:QUALITY_GATE marker must record the same `**Tree**: <sha>`; a PASS from an
+#                 earlier tree, or a marker without a Tree line, does not satisfy the gate (#3149).
+#                 An empty or non-hex value is a usage error (exit 2, fails closed).
 #
 # Requirements by COMPLEXITY_BAND (read from the FORGE:FAST_PATH comment).
 # The authoritative table is the `case "$EFFECTIVE"` block below; this summary must be
@@ -35,10 +42,11 @@
 # Callers route on the exit code: 1 -> re-run the MISSING phases; 2 (or 127 when the
 # verifier itself cannot be resolved) -> infrastructure BLOCKED, never "missing phases".
 #
-# Legacy grace (#3102): an issue whose trusted FORGE:BUILDER:COMPLETE comment was created before
+# Legacy grace (#3102): an issue whose trusted FORGE:BUILDER:COMPLETE comment was last updated before
 # FORGE_TRAIL_QG_SINCE (default: when the FORGE:QUALITY_GATE marker was introduced, #3061) could
-# not have posted the marker, so QUALITY_GATE is waived for it. A missing/undated BUILDER:COMPLETE
-# never earns the grace (fail closed). Set FORGE_TRAIL_QG_SINCE="" to disable the grace.
+# not have posted the marker, so QUALITY_GATE is waived for it. The time is the comment's
+# `updated_at`, not `created_at`: BUILDER:COMPLETE is appended to the existing BUILDER comment later
+# (#3149). A missing/undated BUILDER:COMPLETE never earns the grace (fail closed). Set FORGE_TRAIL_QG_SINCE="" to disable the grace.
 #
 # Comment trust: only markers posted by a trusted author count; markers from any
 # other commenter are ignored (they cannot satisfy the gate or force a band).
@@ -61,6 +69,9 @@ set -uo pipefail
 ISSUE=""
 REPO=""
 DOCS_ONLY=0
+CODE_DIFF=0
+HEAD_TREE=""
+HEAD_TREE_SET=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -68,6 +79,10 @@ while [ $# -gt 0 ]; do
       if [ $# -lt 2 ] || [ -z "${2:-}" ]; then echo "PHASE_TRAIL: ERROR"; echo "usage error: $1 needs a value" >&2; exit 2; fi
       REPO="$2"; shift 2 ;;
     --docs-only) DOCS_ONLY=1; shift ;;
+    --code-diff) CODE_DIFF=1; shift ;;
+    --head-tree)
+      if [ $# -lt 2 ]; then echo "PHASE_TRAIL: ERROR"; echo "usage error: $1 needs a value" >&2; exit 2; fi
+      HEAD_TREE="$2"; HEAD_TREE_SET=1; shift 2 ;;
     -h|--help) awk 'NR >= 5 { if (/^# END-HELP/) exit; print }' "$0"; exit 0 ;;
     *)
       if [ -z "$ISSUE" ] && [[ "$1" =~ ^[0-9]+$ ]]; then ISSUE="$1"; shift
@@ -78,8 +93,17 @@ done
 
 if [ -z "$ISSUE" ] || [ -z "$REPO" ]; then
   echo "PHASE_TRAIL: ERROR"
-  echo "usage: verify-phase-trail.sh <issue> -R <owner/repo> [--docs-only]" >&2
+  echo "usage: verify-phase-trail.sh <issue> -R <owner/repo> [--docs-only] [--code-diff] [--head-tree <sha>]" >&2
   exit 2
+fi
+if [ "$HEAD_TREE_SET" = "1" ]; then
+  # Fail closed: a caller that could not resolve the tree passes an empty value and must not silently skip the binding.
+  HEAD_TREE=$(printf '%s' "$HEAD_TREE" | tr 'A-F' 'a-f')
+  if ! [[ "$HEAD_TREE" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+    echo "PHASE_TRAIL: ERROR"
+    echo "usage error: --head-tree needs a 40 or 64 hex git tree id" >&2
+    exit 2
+  fi
 fi
 
 RAW=$(gh api "repos/${REPO}/issues/${ISSUE}/comments" --paginate 2>/dev/null) || {
@@ -116,7 +140,7 @@ COMMENTS=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins 
   exit 2
 }
 
-# Creation time of the LATEST trusted FORGE:BUILDER:COMPLETE comment (empty when absent/undated).
+# Last-update time of the LATEST trusted FORGE:BUILDER:COMPLETE comment (empty when absent/undated).
 QG_SINCE="${FORGE_TRAIL_QG_SINCE-2026-10-07T03:40:12Z}"
 # The cutoff must be ISO-8601 UTC (YYYY-MM-DDTHH:MM:SSZ) and not in the future: a malformed or
 # far-future value would otherwise waive QUALITY_GATE for every issue (#3121). Fails closed.
@@ -149,7 +173,7 @@ BUILD_AT=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins 
           or ((.user.login // "") as $x | $L | index($x) != null)
         )
       | select((.body // "") | startswith("<!-- FORGE:BUILDER -->") and contains("<!-- FORGE:BUILDER:COMPLETE -->"))
-      | .created_at // empty ] | sort | .[-1] // empty' 2>/dev/null) || BUILD_AT=""
+      | .updated_at // empty ] | sort | .[-1] // empty' 2>/dev/null) || BUILD_AT=""
 
 # NOTE: never use early-exiting `grep -q`/`head -1` after printf under pipefail: on large threads the
 # writer gets SIGPIPE and the pipeline reports failure for a marker that is present (#3099).
@@ -164,7 +188,13 @@ has_investigator() {
 
 # Quality gate: a marker comment whose result is PASS (any later PASS wins over an earlier FAIL).
 has_quality_gate_pass() {
-  printf '%s\n' "$COMMENTS" | grep -E '^<!-- FORGE:QUALITY_GATE -->' | grep -E '\*\*Result\*\*: *PASS' >/dev/null
+  # With --head-tree the PASS must also record that exact tree (a PASS for an earlier commit does not count).
+  if [ "$HEAD_TREE_SET" = "1" ]; then
+    printf '%s\n' "$COMMENTS" | grep -E '^<!-- FORGE:QUALITY_GATE -->' | grep -E '\*\*Result\*\*: *PASS' \
+      | grep -E "\*\*Tree\*\*: *${HEAD_TREE}([^0-9a-fA-F]|$)" >/dev/null
+  else
+    printf '%s\n' "$COMMENTS" | grep -E '^<!-- FORGE:QUALITY_GATE -->' | grep -E '\*\*Result\*\*: *PASS' >/dev/null
+  fi
 }
 
 BAND=""
@@ -188,6 +218,12 @@ if [ -z "$BAND" ]; then
   EFFECTIVE="STANDARD"
 else
   EFFECTIVE="$BAND"
+fi
+
+# The band is agent-chosen: do not let it waive requirements when the diff contains code (#3149).
+if [ "$EFFECTIVE" = "INVESTIGATION" ] && [ "$CODE_DIFF" = "1" ]; then
+  EFFECTIVE="STANDARD"
+  BAND_NOTE="INVESTIGATION band ignored: the diff contains non-documentation files"
 fi
 
 case "$EFFECTIVE" in
@@ -217,12 +253,14 @@ if [ "${#MISSING[@]}" -eq 0 ]; then
   echo "PHASE_TRAIL: PASS"
   echo "BAND: ${BAND:-UNKNOWN}"
   [ -n "${LEGACY_NOTE:-}" ] && echo "NOTE: $LEGACY_NOTE"
+  [ -n "${BAND_NOTE:-}" ] && echo "NOTE: $BAND_NOTE"
   exit 0
 fi
 
 echo "PHASE_TRAIL: FAIL"
 echo "BAND: ${BAND:-UNKNOWN}"
 for m in "${MISSING[@]}"; do echo "MISSING: $m"; done
+[ -n "${BAND_NOTE:-}" ] && echo "NOTE: $BAND_NOTE"
 # Diagnose the "marker present but ignored" case: count FORGE markers posted by untrusted authors.
 UNTRUSTED_FORGE=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" '
   ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
