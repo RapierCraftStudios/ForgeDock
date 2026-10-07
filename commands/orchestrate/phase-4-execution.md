@@ -1666,7 +1666,7 @@ done
    # forge#3102: only merged completions carry a full trail; invalid/decomposed/needs-human/awaiting-merge/paused do not.
    # Fail closed: a failed label read is an ERROR, never a skip.
    if ! TRAIL_LABELS=$(gh issue view {NUMBER} -R {GH_REPO} --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null); then
-     TRAIL="PHASE_TRAIL: ERROR (could not read issue labels)"; TRAIL_RC=1
+     TRAIL="PHASE_TRAIL: ERROR (could not read issue labels)"; TRAIL_RC=2   # infrastructure error, not a bypass (forge#3147)
    elif ! echo ",$TRAIL_LABELS," | grep -q ',workflow:merged,'; then
      TRAIL="PHASE_TRAIL: SKIPPED (issue not workflow:merged — classified by label)"; TRAIL_RC=0
    elif [ -z "$FORGE_ROOT" ] || [ ! -f "$FORGE_ROOT/scripts/verify-phase-trail.sh" ]; then
@@ -1690,7 +1690,11 @@ done
    fi
    echo "$TRAIL"
    ```
-   If `TRAIL_RC` is non-zero (`PHASE_TRAIL: FAIL` or `ERROR`, fail closed), classify the issue as **FAILED/bypass** — never `DONE`. Also treat an agent final report that says phases ran inline, were skipped, or "ran without Skill calls" as a bypass regardless of labels. Surface it in the operator status update (`PHASE BYPASS: #{NUMBER} — missing: ...`), do not cascade it as a satisfied predecessor, and re-dispatch ONE fresh agent with the unmodified Step 4A template (lint-checked) so `/work-on`'s resume preflight re-runs each missing phase via `Skill(...)`. Never hand-post missing markers.
+   Route on `TRAIL_RC` (forge#3147). Both non-zero cases fail closed: never `DONE`, never cascaded as a satisfied predecessor.
+   - `TRAIL_RC -ge 2` (`PHASE_TRAIL: ERROR`: unreadable trail, unreadable labels, or 127 when the verifier is unresolvable) → classify as **BLOCKED (infrastructure)**, NOT a bypass. A re-dispatched `/work-on` would hit the same unreadable or unresolvable verifier in its resume preflight, so do NOT re-dispatch. Surface `PHASE TRAIL ERROR: #{NUMBER} — <TRAIL line>` in the operator status update, add `needs-human`, and continue with the rest of the batch.
+   - `TRAIL_RC=1` (`PHASE_TRAIL: FAIL`) → classify as **FAILED/bypass** (handling below).
+
+   On `PHASE_TRAIL: FAIL`, classify the issue as **FAILED/bypass**, never `DONE`. A `PHASE_TRAIL: OVERRIDE` result (exit 0, an audited break-glass by a trusted human) is DONE; quote its `OVERRIDE_BY`/`OVERRIDE_REASON` in the status update. Also treat an agent final report that says phases ran inline, were skipped, or "ran without Skill calls" as a bypass regardless of labels. Surface it in the operator status update (`PHASE BYPASS: #{NUMBER} — missing: ...`), do not cascade it as a satisfied predecessor, and re-dispatch ONE fresh agent with the unmodified Step 4A template (lint-checked) so `/work-on`'s resume preflight re-runs each missing phase via `Skill(...)`. Never hand-post missing markers.
 
 1. **Check if the agent completed the FULL pipeline** — not just one phase:
    ```bash

@@ -206,6 +206,33 @@ OUT=$(FORGE_TRAIL_TRUSTED_LOGINS=ext MOCK_GH_JSON="$UT" bash "$VERIFY" 3061 -R o
 [ $RC -eq 0 ] && ok "FORGE_TRAIL_TRUSTED_LOGINS accepts a CONTRIBUTOR login" || bad "trusted login override (rc=$RC out=$OUT)"
 expect_pass "marker-only CONTEXT satisfies STANDARD" "$(mk minctx INV FP_STANDARD CONTRACT CONTEXT ARCH QG_PASS)"
 
+# -h is bounded by the END-HELP sentinel, not a hardcoded line range (#3147)
+echo "$HOUT" | grep -q 'Break-glass' && ! echo "$HOUT" | grep -q 'END-HELP' && ! echo "$HOUT" | grep -q 'set -uo pipefail' && ok "-h stops at the END-HELP sentinel" || bad "-h sentinel"
+
+# Break-glass override (#3147)
+OVSRC="$(mk ov_src INV FP_STANDARD CONTRACT)"   # CONTEXT/ARCHITECT/QUALITY_GATE missing -> FAIL
+ov() { # ov <name> <assoc> <type> <body> -> fixture path
+  jq -c --arg a "$2" --arg t "$3" --arg b "$4" '. + [{author_association:$a, user:{login:"maint",type:$t}, created_at:"2026-10-07T12:00:00Z", body:$b}]' "$OVSRC" > "$TMP_FX/$1.json"; echo "$TMP_FX/$1.json"
+}
+run "$(ov ov_ok OWNER User 'OVERRIDE: phase-trail — gate misfire, markers verified by hand')"
+[ $RC -eq 0 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: OVERRIDE' && echo "$OUT" | grep -q 'MISSING: CONTEXT' \
+  && echo "$OUT" | grep -q 'OVERRIDE_BY: maint' && echo "$OUT" | grep -q 'OVERRIDE_REASON: gate misfire, markers verified by hand' \
+  && ok "trusted human override passes and is audited" || bad "override ok (rc=$RC out=$OUT)"
+run "$(ov ov_dash MEMBER User 'OVERRIDE: phase-trail -- misfire')"
+[ $RC -eq 0 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: OVERRIDE' && ok "MEMBER override with -- accepted" || bad "override -- (rc=$RC out=$OUT)"
+expect_fail "Bot cannot override its own gate" "$(ov ov_bot OWNER Bot 'OVERRIDE: phase-trail — self')" CONTEXT
+expect_fail "COLLABORATOR cannot override by default" "$(ov ov_collab COLLABORATOR User 'OVERRIDE: phase-trail — x')" CONTEXT
+expect_fail "override without a reason is ignored" "$(ov ov_noreason OWNER User 'OVERRIDE: phase-trail — ')" CONTEXT
+expect_fail "override must start the comment" "$(ov ov_quoted OWNER User 'note: OVERRIDE: phase-trail — x')" CONTEXT
+OVF="$(ov ov_disabled OWNER User 'OVERRIDE: phase-trail — x')"
+OUT=$(FORGE_TRAIL_OVERRIDE_ASSOCIATIONS="" MOCK_GH_JSON="$OVF" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+[ $RC -eq 1 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: FAIL' && ok "empty FORGE_TRAIL_OVERRIDE_ASSOCIATIONS disables override" || bad "override disabled (rc=$RC out=$OUT)"
+OUT=$(FORGE_TRAIL_TRUSTED_LOGINS=maint MOCK_GH_JSON="$(ov ov_login CONTRIBUTOR User 'OVERRIDE: phase-trail — x')" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+[ $RC -eq 1 ] && ok "FORGE_TRAIL_TRUSTED_LOGINS does not grant override" || bad "login override (rc=$RC out=$OUT)"
+OUT=$(MOCK_GH_FAIL=1 MOCK_GH_JSON="$OVF" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+[ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "unreadable trail (exit 2) is never overridable" || bad "override rc2 (rc=$RC out=$OUT)"
+expect_pass "override comment does not alter a passing trail" "$(jq -c '. + [{author_association:"OWNER",user:{login:"m",type:"User"},body:"OVERRIDE: phase-trail — x"}]' "$(mk ov_full INV CONTRACT FP_STANDARD CONTEXT ARCH QG_PASS)" > "$TMP_FX/ovf.json"; echo "$TMP_FX/ovf.json")"
+
 # Outage fails closed (exit 2, never PASS)
 OUT=$(MOCK_GH_FAIL=1 MOCK_GH_JSON=/dev/null bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "gh outage fails closed" || bad "gh outage (rc=$RC out=$OUT)"

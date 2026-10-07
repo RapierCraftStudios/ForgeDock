@@ -2122,7 +2122,8 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 
 - PR MERGED + issue CLOSED → write checkpoint, then proceed to Phase 6
 - PR MERGED + issue OPEN → close issue manually, write checkpoint, proceed to Phase 6
-- PR NOT MERGED → `gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto`. If fails → post comment, add `needs-human`, STOP.
+- PR NOT MERGED + review child returned `REVIEW_RESULT: status: BLOCKED` with a phase-trail blocker ("phase trail unreadable": verifier rc ≥2 / 127, forge#3147) → do NOT run the manual merge (it would bypass the gate) and do NOT re-run phases. Add `needs-human` and STOP.
+- PR NOT MERGED (otherwise) → `gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto`. If fails → post comment, add `needs-human`, STOP.
 
 **When PR is MERGED — write machine-readable phase checkpoint (MANDATORY)**:
 ```bash
