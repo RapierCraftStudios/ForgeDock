@@ -45,8 +45,8 @@ jobs:
       fail-fast: false
       matrix:
         # Pinned (not macos-latest) so the runner image/awk/sed do not float silently.
-        # NOTE: bash on macOS runners is Homebrew bash 5.x, not the system 3.2; the
-        # script's 3.2 compatibility is covered by avoiding bash-4+ constructs.
+        # NOTE: the default /bin/bash on macOS runners is the system bash 3.2, so these
+        # fixtures exercise the script under 3.2; keep it free of bash-4+ constructs.
         os: [ubuntu-latest, macos-14]
     steps:
       - uses: actions/checkout@v4
