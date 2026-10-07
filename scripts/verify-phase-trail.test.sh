@@ -131,6 +131,16 @@ FORGE_TRAIL_TRUSTED_ASSOCIATIONS="OWNER" expect_fail "narrowed associations reje
 FORGE_TRAIL_TRUSTED_ASSOCIATIONS="" expect_fail "empty associations trust no one but Bots/allowlist" \
   "$(tj t9 "$(tc OWNER own User "$T_INV")" "$(tc OWNER own User "$T_FPI")")" INVESTIGATOR
 
+# Legacy grace (#3102): BUILDER:COMPLETE predating the quality-gate marker waives QUALITY_GATE only
+lg() { # lg <name> <builder created_at> -> fixture without QUALITY_GATE
+  local out="$TMP_FX/$1.json"
+  jq -nc --arg at "$2" '[{"body":"<!-- FORGE:INVESTIGATOR -->\n<!-- INVESTIGATION:COMPLETE -->"},{"body":"<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: TRIVIAL"},{"body":"<!-- FORGE:CONTRACT -->\nc"},{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","created_at":$at}] | map(. + {author_association:"OWNER", user:{login:"owner",type:"User"}})' > "$out"; echo "$out"
+}
+expect_pass "legacy build (pre-cutoff) waives QUALITY_GATE" "$(lg lg1 2026-10-01T00:00:00Z)"
+expect_fail "post-cutoff build still requires QUALITY_GATE" "$(lg lg2 2026-10-08T00:00:00Z)" QUALITY_GATE
+OUT=$(FORGE_TRAIL_QG_SINCE="" MOCK_GH_JSON="$(lg lg4 2026-10-01T00:00:00Z)" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+[ $RC -eq 1 ] && ok "grace disabled via empty FORGE_TRAIL_QG_SINCE" || bad "grace disable (rc=$RC)"
+
 # Outage fails closed (exit 2, never PASS)
 OUT=$(MOCK_GH_FAIL=1 MOCK_GH_JSON=/dev/null bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "gh outage fails closed" || bad "gh outage (rc=$RC out=$OUT)"

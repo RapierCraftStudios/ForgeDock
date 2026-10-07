@@ -1642,7 +1642,7 @@ done
 
 **CRITICAL — Stall detection and recovery**: Background agents sometimes stop mid-pipeline (`stop_reason=end_turn`) after completing a sub-phase (e.g., investigation completes but build never starts). This causes the agent to "complete" from the Agent tool's perspective even though the `/work-on` pipeline is only partially done. When you receive a completion notification:
 
-0. **Phase-trail verification (MANDATORY on EVERY completion, before classifying DONE)** <!-- Added: forge#3062 --> — a `workflow:merged` label alone is not proof the pipeline ran. Run the deterministic verifier (add `--docs-only` for docs-only diffs):
+0. **Phase-trail verification (MANDATORY on EVERY merge completion, before classifying DONE)** <!-- Added: forge#3062 --> — a `workflow:merged` label alone is not proof the pipeline ran. **Scope (forge#3102)**: run it only when the issue is `workflow:merged` or CLOSED-as-merged. Issues in other terminal-for-this-agent states (`workflow:invalid`, `workflow:decomposed`, `needs-human`, `workflow:awaiting-merge`, paused) legitimately lack a full trail; classify them by label per Predecessor Classification, skip this verifier, and do NOT flag them as bypass or re-dispatch them. Run the deterministic verifier (add `--docs-only` for docs-only diffs):
    ```bash
    # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
    FORGE_ROOT=""
@@ -1652,7 +1652,10 @@ done
        case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && FORGE_ROOT="$_c" ;; esac
      done
    fi
-   if [ -z "$FORGE_ROOT" ] || [ ! -f "$FORGE_ROOT/scripts/verify-phase-trail.sh" ]; then
+   # forge#3102: only merged completions carry a full trail; invalid/decomposed/needs-human/awaiting-merge/paused do not.
+   if ! gh issue view {NUMBER} -R {GH_REPO} --json labels,state --jq '(.state == "CLOSED" or ([.labels[].name] | index("workflow:merged") != null))' | grep -qx true; then
+     TRAIL="PHASE_TRAIL: SKIPPED (issue not merged — classified by label)"; TRAIL_RC=0
+   elif [ -z "$FORGE_ROOT" ] || [ ! -f "$FORGE_ROOT/scripts/verify-phase-trail.sh" ]; then
      TRAIL="PHASE_TRAIL: ERROR (verify-phase-trail.sh not resolvable; set FORGEDOCK_HOME)"; TRAIL_RC=127   # fail closed
    else
      TRAIL=$(bash "$FORGE_ROOT/scripts/verify-phase-trail.sh" {NUMBER} -R {GH_REPO} 2>&1); TRAIL_RC=$?

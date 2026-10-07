@@ -250,6 +250,8 @@ else:
 
 Wait for the completed child result and retain its `REVIEW_RESULT` in remediation state before continuing to Phase M7. A running/progress response is not a completion result. If the child errors or does not return a parseable `REVIEW_RESULT`, stop with `REMEDIATE_RESULT: status: BLOCKED`; do not report remediation in progress as a terminal parent result. The `Skill(...)` invocation above remains the non-OpenCode path.
 
+If the retained `REVIEW_RESULT` is `PHASE_TRAIL_FAILED` (forge#3102): the gate refused to merge on missing phase markers, not on a code finding. Re-run each missing phase named on the `MISSING:` lines via its `Skill(...)`, then re-invoke this phase once. If it is `PHASE_TRAIL_FAILED` again, keep `needs-human`, post `<!-- FORGE:PHASE_TRAIL_FAILED -->` listing the still-missing markers, and exit `REMEDIATE_RESULT: status: BLOCKED`. Never treat it as `HELD-AWAITING-MERGE` or `AUTO-LANDED`.
+
 This re-runs the full review (domain agents → verdict → Phase 8 auto-merge gate). The FIXABLE transition above left the issue at the non-terminal `workflow:in-review` state. `review-pr.md` recognizes the in-progress `FORGE:REMEDIATION` marker posted in Phase M5 as evidence of the prior escalation, so one of two things happens inside Phase 8:
 
 - **Re-escalated**: the re-review itself trips a fresh block (`CHANGES REQUESTED`, purpose-regression, calibration, trust, or a still-`CONFLICTING` mergeability check) → it adds `needs-human`, and this phase removes `workflow:in-review`, leaving one terminal state.

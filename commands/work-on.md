@@ -2108,6 +2108,8 @@ Review-pr handles: full domain-agent review → post findings as separate issues
 
 ### 5D: Verify merge and close (recovery)
 
+**`REVIEW_RESULT: status: PHASE_TRAIL_FAILED` handling** <!-- Added: forge#3102 -->: if the review child returns this status (the Phase 8 trail gate refused to merge), the PR is intentionally unmerged — do NOT run the `gh pr merge --auto` recovery below and do NOT add `needs-human` yet. Re-run each missing phase named on the `MISSING: <marker> -> <action>` lines via its `Skill(...)` (never hand-post markers), then re-invoke Phase 5C once. If it returns `PHASE_TRAIL_FAILED` again, post `<!-- FORGE:PHASE_TRAIL_FAILED -->` listing the still-missing markers, add `needs-human`, and STOP.
+
 ```bash
 gh pr view {PR_NUMBER} {GH_FLAG} --json state,mergedAt --jq '{state: .state, mergedAt: .mergedAt}'
 gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'

@@ -108,6 +108,8 @@ Example: "3126 --auto-merge --issue 3124 --base staging --gh-flag -R $GH_REPO --
 
 Extract: `PR_NUMBER`, `AUTO_MERGE=true`, `MERGE_ISSUE`, `MERGE_BASE`, `MERGE_GH_FLAG`, `MERGE_WORKTREE` (optional — the absolute path to the git worktree to clean up after merge)
 
+**`--auto-merge` without `--issue`** <!-- Added: forge#3102 -->: the phase-trail gate in Phase 8 needs a linked issue. Before Phase 8, if `AUTO_MERGE=true` and `MERGE_ISSUE` is empty, resolve it from the PR's closing reference (`gh pr view {PR_NUMBER} --json closingIssuesReferences --jq '.closingIssuesReferences[0].number'`, falling back to the first `Closes|Fixes|Resolves #N` in the PR body). If exactly one issue resolves, use it as `MERGE_ISSUE`. If none resolves, Phase 8 does not merge and returns the documented `REVIEW_RESULT: status: BLOCKED`, blocker: "auto-merge requires --issue (no linked issue found)" — the PR stays open for a human or a re-run with `--issue`.
+
 If `--auto-merge` is NOT present, `AUTO_MERGE=false` — Phase 8 (Auto-Merge) will be skipped.
 
 ### Thoroughness Flag
@@ -2193,7 +2195,14 @@ fi
 
 ```bash
 if [ -z "${MERGE_ISSUE:-}" ]; then
-  echo "PHASE TRAIL: auto-merge requested without --issue — cannot verify the phase trail; refusing to merge (fail closed)" >&2
+  # forge#3102: resolve the linked issue from the PR before giving up.
+  MERGE_ISSUE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json closingIssuesReferences --jq '.closingIssuesReferences[0].number // empty' 2>/dev/null)
+  [ -z "$MERGE_ISSUE" ] && MERGE_ISSUE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json body --jq '.body' 2>/dev/null | grep -oiE '(closes|fixes|resolves) #[0-9]+' | head -1 | grep -oE '[0-9]+')
+fi
+if [ -z "${MERGE_ISSUE:-}" ]; then
+  echo "PHASE TRAIL: auto-merge requested without --issue and no linked issue found on the PR — cannot verify the phase trail; refusing to merge (fail closed)" >&2
+  gh pr comment {PR_NUMBER} {MERGE_GH_FLAG} --body "Auto-merge skipped: no --issue was given and the PR links no issue, so the phase trail cannot be verified. Re-run \`/review-pr {PR_NUMBER} --auto-merge --issue <N>\` or merge manually." 2>/dev/null || true # allowlist:check-command-side-effects
+  # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "auto-merge requires --issue (no linked issue found)". Not a PHASE_TRAIL_FAILED (nothing to re-run).
   exit 1
 else
   # Same resolution as work-on/review.md Phase R1.5: the verifier ships with ForgeDock, not the consumer repo.
@@ -2228,7 +2237,7 @@ ${TRAIL}
 Re-run each missing phase via its Skill (see the \`->\` action on each MISSING line), then re-run /review-pr."
     gh issue comment "$MERGE_ISSUE" {MERGE_GH_FLAG} --body "$TRAIL_FAIL_BODY" # <!-- allowlist:check-command-side-effects -->
     # STOP — return REVIEW_RESULT: status: PHASE_TRAIL_FAILED with the MISSING lines (exit code 2 = trail unreadable, fail closed).
-    # The /work-on router re-dispatches the named phases; this is NOT a needs-human escalation.
+    # The /work-on router (work-on/review.md Phase R4), the work-on.md Phase 5 router and remediate.md Phase M6 consume this status and re-dispatch the named phases once (forge#3102); this is NOT an immediate needs-human escalation.
     exit 1
   fi
 fi
