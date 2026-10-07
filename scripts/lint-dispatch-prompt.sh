@@ -49,7 +49,7 @@ FAILS=()
 fail() { FAILS+=("$1"); }
 
 # Phrases that pre-decide a verdict or fix, or turn a relaunch into "finish the leftovers".
-STRONG='(likely|probably|possibly) (already )?(resolved|fixed|moot|invalid|a duplicate)|already (resolved|fixed|implemented)[ ,.]*(—|-|,)? *(verify|close)|verify (it|this)?[ ,]*and close|\b(proposed|suggested|recommended|prescribed) (fix|solution)\b|make (the|this|that) [a-z_ -]{1,60}(terminal|return early|raise)|implement the following|(continue|resume|pick up) (from )?where (you|the previous (agent|run)) left off|finish (what|the work|the uncommitted)|uncommitted (work|changes) (from|left)'
+STRONG='(likely|probably|possibly) (already )?(resolved|fixed|moot|invalid|a duplicate)|already (resolved|fixed|implemented)[ ,.]*(—|-|,)? *(verify|close)|verify (it|this)?[ ,]*and close|\b(proposed|suggested|recommended|prescribed) (fix|solution)\b|make (the|this|that) [a-z_ -]{1,60}(terminal|return early|raise)|implement the following|(continue|resume|pick up) (from )?where (you|the previous (agent|run)) left off|finish (what|the work|the uncommitted)|uncommitted (work|changes) (from|left)|the (fix|solution) is( to\b| ?:)'
 # Outside the context block additionally reject generic fix-design language.
 WIDE="$STRONG|the (fix|root cause|diagnosis|solution) is\\b|\\broot cause( is|:)|\\bdiagnosis:|(just|simply) (read and edit|edit the file)"
 

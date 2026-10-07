@@ -83,6 +83,21 @@ render "$T/ctx_quote" > "$T/p12"; check "quoted investigation in context" 0 "$T/
 # 16. Placeholders substituted with real values still PASS
 { sed -e 's/{NUMBER}/3072/g' -e 's/{PROJECT_NAME}/ForgeDock/g' -e 's/{ISSUE_TITLE}/fix(scripts): a normal title/' "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p16"; check "substituted template" 0 "$T/p16"
 
+# 17. Imperative "the fix/solution is to ..." inside the context block is rejected (forge#3076) -> FAIL
+printf 'The fix is to add a null check in foo.py.\n' > "$T/ctx_fixis"
+render "$T/ctx_fixis" > "$T/p17"; check "in-block 'the fix is to'" 1 "$T/p17"
+printf 'The solution is: return early in handle_fraud.\n' > "$T/ctx_soln"
+render "$T/ctx_soln" > "$T/p17b"; check "in-block 'the solution is:'" 1 "$T/p17b"
+
+# 18. Same phrase OUTSIDE the context block (WIDE) still FAILS (forge#3076)
+{ sed '0,/^\*\*LANE\*\*/s//The fix is fairly small.\n**LANE**/' "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p18"; check "outside-block 'the fix is'" 1 "$T/p18"
+
+# 19. STRONG terms still fail inside the block; descriptive (non-imperative) mention still passes (forge#3076)
+printf 'You should implement the following: add a guard.\n' > "$T/ctx_strong"
+render "$T/ctx_strong" > "$T/p19"; check "in-block STRONG term" 1 "$T/p19"
+printf 'Prior note: the fix is described in #12 and the solution is already merged.\n' > "$T/ctx_desc"
+render "$T/ctx_desc" > "$T/p19b"; check "in-block descriptive 'the fix is described'" 0 "$T/p19b"
+
 # 10. Spec snippet enforcement (forge#3070): extract the lint gate from the spec and run it in a loop.
 awk '/^LINT_SCRIPT=/{f=1} f{print} f&&/^fi$/{n++} f&&n==2{exit}' "$SPEC" > "$T/gate"
 [ -s "$T/gate" ] || { FAILN=$((FAILN+1)); echo "FAIL: could not extract spec lint gate"; }
