@@ -347,7 +347,7 @@ fi
 ```bash
 # CI gate (MANDATORY before any autonomous merge): merge only when every check on the PR is
 # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch
-# protection required none and `gh pr merge --auto` waits only for *required* checks.
+# protection required none and an auto-merge waits only for *required* checks.
 CI_GATE_SCRIPT=""
 for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}"; do
   case "$_c" in /*) [ -z "$CI_GATE_SCRIPT" ] && [ -f "$_c/scripts/wait-ci-green.sh" ] && CI_GATE_SCRIPT="$_c/scripts/wait-ci-green.sh" ;; esac
