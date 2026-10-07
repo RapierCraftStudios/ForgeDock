@@ -183,9 +183,10 @@ A PR must not be opened for work whose earlier phases were skipped. Run the dete
 ```bash
 DOCS_ONLY_FLAG=""
 CHANGED=$(git -C {WORKTREE_PATH} diff --name-only origin/{PR_BASE}...HEAD)
-if [ -n "$CHANGED" ] && ! echo "$CHANGED" | grep -qvE '\.md$|^docs/'; then DOCS_ONLY_FLAG="--docs-only"; fi
+# docs = docs/** or *.md, but commands/** and .claude/** specs are executable pipeline code, never docs
+if [ -n "$CHANGED" ] && echo "$CHANGED" | awk '!(/^docs\// || (/\.md$/ && !/^(commands|\.claude)\//)){bad=1} END{exit bad}'; then DOCS_ONLY_FLAG="--docs-only"; fi
 # The verifier ships with ForgeDock (not the consumer repo): same resolution as every universal script.
-TRAIL_SCRIPT="${FORGEDOCK_HOME:-{REPO_PATH}}/scripts/verify-phase-trail.sh"
+TRAIL_SCRIPT="${FORGEDOCK_HOME:-${FORGE_HOME:-{REPO_PATH}}}/scripts/verify-phase-trail.sh"
 if [ ! -f "$TRAIL_SCRIPT" ]; then
   echo "WARNING: verify-phase-trail.sh not installed at $TRAIL_SCRIPT — phase-trail preflight skipped (prose tier)" >&2
   TRAIL_RC=0

@@ -39,7 +39,9 @@ DOCS_ONLY=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    -R|--repo) REPO="${2:-}"; shift 2 ;;
+    -R|--repo)
+      if [ $# -lt 2 ] || [ -z "${2:-}" ]; then echo "PHASE_TRAIL: ERROR"; echo "usage error: $1 needs a value" >&2; exit 2; fi
+      REPO="$2"; shift 2 ;;
     --docs-only) DOCS_ONLY=1; shift ;;
     -h|--help) sed -n '5,32p' "$0"; exit 0 ;;
     *)
@@ -69,20 +71,24 @@ COMMENTS=$(printf '%s' "$RAW" | jq -r '.[] | .body // "" | gsub("\r?\n"; "\u001f
   exit 2
 }
 
-has() { printf '%s\n' "$COMMENTS" | grep -qE "$1"; }
+# A marker only counts when it is the FIRST thing in a comment (comments are folded to one
+# line each above), so a comment that merely quotes a marker mid-body cannot satisfy it.
+has() { printf '%s\n' "$COMMENTS" | grep -qE "^$1"; }
 
+# INVESTIGATION:INVALID is the other terminal sentinel (issue closed invalid, no PR follows).
 has_investigator() {
-  printf '%s\n' "$COMMENTS" | grep -E '<!-- FORGE:INVESTIGATOR -->' | grep -qE 'INVESTIGATION:COMPLETE'
+  printf '%s\n' "$COMMENTS" | grep -E '^<!-- FORGE:INVESTIGATOR -->' | grep -qE 'INVESTIGATION:(COMPLETE|INVALID)'
 }
 
 # Quality gate: a marker comment whose result is PASS (any later PASS wins over an earlier FAIL).
 has_quality_gate_pass() {
-  printf '%s\n' "$COMMENTS" | grep -E '<!-- FORGE:QUALITY_GATE -->' | grep -qE '\*\*Result\*\*: *PASS'
+  printf '%s\n' "$COMMENTS" | grep -E '^<!-- FORGE:QUALITY_GATE -->' | grep -qE '\*\*Result\*\*: *PASS'
 }
 
 BAND=""
 if has '<!-- FORGE:FAST_PATH -->'; then
-  BAND=$(printf '%s\n' "$COMMENTS" | grep -E '<!-- FORGE:FAST_PATH -->' | tail -1 \
+  # The FIRST classification wins: a later FAST_PATH comment cannot downgrade the requirement set.
+  BAND=$(printf '%s\n' "$COMMENTS" | grep -E '^<!-- FORGE:FAST_PATH -->' | head -1 \
     | sed -n 's/.*\*\*COMPLEXITY_BAND\*\*: *\([A-Za-z_]*\).*/\1/p' | tr '[:lower:]' '[:upper:]')
 fi
 

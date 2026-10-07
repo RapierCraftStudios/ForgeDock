@@ -41,6 +41,8 @@ mk() {
       QG_FAIL) items+=('{"body":"<!-- FORGE:QUALITY_GATE -->\n**Result**: FAIL\n"}') ;;
       FP_NOBAND) items+=('{"body":"<!-- FORGE:FAST_PATH -->\nnothing"}') ;;
       FP_*) items+=("{\"body\":\"<!-- FORGE:FAST_PATH -->\\n**COMPLEXITY_BAND**: ${k#FP_}\"}") ;;
+      QUOTED) items+=('{"body":"see `<!-- FORGE:CONTRACT -->` `<!-- FORGE:CONTEXT -->` `<!-- FORGE:ARCHITECT -->` `<!-- FORGE:QUALITY_GATE -->` **Result**: PASS"}') ;;
+      INV_INVALID) items+=('{"body":"<!-- FORGE:INVESTIGATOR -->\nInvalid\n<!-- INVESTIGATION:INVALID -->"}') ;;
       PROSE) items+=('{"body":"I ran the architect and context inline; FORGE:CONTEXT FORGE:ARCHITECT FORGE:QUALITY_GATE done"}') ;;
     esac
   done
@@ -76,6 +78,10 @@ expect_fail "QUALITY_GATE FAIL result does not count" "$(mk i INV CONTRACT FP_CO
 expect_fail "TRIVIAL still needs CONTRACT" "$(mk j INV FP_TRIVIAL QG_PASS)" CONTRACT
 expect_fail "prose mentions do not satisfy markers" "$(mk k INV CONTRACT FP_COMPLEX PROSE)" CONTEXT
 
+expect_fail "quoted markers mid-comment do not count" "$(mk q INV FP_COMPLEX QUOTED)" CONTRACT
+expect_fail "first FAST_PATH wins over a later downgrade" "$(mk r INV FP_COMPLEX FP_INVESTIGATION)" CONTRACT
+expect_pass "INVESTIGATION:INVALID accepted as terminal investigator sentinel" "$(mk s INV_INVALID FP_INVESTIGATION)"
+
 # Missing FAST_PATH uses conservative STANDARD set, so CONTEXT/ARCHITECT also named
 run "$(mk l INV CONTRACT QG_PASS)"
 echo "$OUT" | grep -q 'MISSING: FAST_PATH' && echo "$OUT" | grep -q 'MISSING: CONTEXT' && echo "$OUT" | grep -q 'MISSING: ARCHITECT' \
@@ -88,6 +94,10 @@ echo "$OUT" | grep -q 'MISSING: CONTEXT -> re-run Skill work-on/build/context' &
 # Outage fails closed (exit 2, never PASS)
 OUT=$(MOCK_GH_FAIL=1 MOCK_GH_JSON=/dev/null bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "gh outage fails closed" || bad "gh outage (rc=$RC out=$OUT)"
+
+# -R with no value must error out, not hang
+OUT=$(timeout 5 bash "$VERIFY" 5 -R 2>/dev/null); RC=$?
+[ $RC -eq 2 ] && ok "-R without value exits 2 (no hang)" || bad "-R without value (rc=$RC)"
 
 # Usage errors
 OUT=$(bash "$VERIFY" 2>/dev/null); RC=$?
