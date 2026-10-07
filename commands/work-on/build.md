@@ -599,9 +599,11 @@ while IFS= read -r check_line; do
   # only for older ACCEPTANCE_CHECK comments emitted before this fix (still correct for
   # single-token exists/contains targets; multi-word legacy targets remain truncated until the
   # issue's investigation is re-run to emit the quoted format).
-  TARGET=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target="\([^"]*\)".*/\1/p')
+  # Quoted fields may contain escaped quotes (matcher="return \"$HELD\""): match (\\.|[^"\\])* and unescape.
+  # A plain [^"]* stops at the first \" and silently checks a truncated matcher (field test #3167).
+  TARGET=$(printf '%s\n' "$check_line" | sed -nE 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target="(([^"\\]|\\.)*)".*/\1/p' | sed 's/\\"/"/g')
   [ -z "$TARGET" ] && TARGET=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=\([^ ]*\).*/\1/p')
-  MATCHER=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target="[^"]*" matcher="\([^"]*\)".*/\1/p')
+  MATCHER=$(printf '%s\n' "$check_line" | sed -nE 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=("([^"\\]|\\.)*"|[^ ]*) matcher="(([^"\\]|\\.)*)".*/\3/p' | sed 's/\\"/"/g')
   [ -z "$MATCHER" ] && MATCHER=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=[^ ]* matcher=\([^ ]*\).*/\1/p')
   DESC=$(echo "$check_line"  | sed -n 's/.*description=\(.*\)/\1/p')
 
