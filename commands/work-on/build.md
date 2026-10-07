@@ -288,6 +288,11 @@ if [ "${FORGE_RUNTIME:-}" = "opencode" ] ||
 elif [ "${FORGE_RUNTIME:-}" = "codex" ]; then
   WORKTREE_ROOT="${REPO_ROOT}/.codex/worktrees"
 fi
+# An explicit, absolute forge.yaml paths.worktree_base wins over the runtime default, so worktrees
+# land where the project's cleanup and recovery tooling expects them (e.g. a project that keeps worktrees under .forge/worktrees).
+CONFIGURED_BASE=$(yq '.paths.worktree_base // ""' forge.yaml 2>/dev/null || echo "")
+case "$CONFIGURED_BASE" in /*) WORKTREE_ROOT="${CONFIGURED_BASE%/}" ;; esac
+mkdir -p "$WORKTREE_ROOT"
 WORKTREE_PATH="${WORKTREE_ROOT}/{BRANCH_SLUG}"
 git fetch origin "{SOURCE_BRANCH}" 2>/dev/null || true
 if [ -d "$WORKTREE_PATH" ]; then
