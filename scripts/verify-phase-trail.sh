@@ -71,24 +71,26 @@ COMMENTS=$(printf '%s' "$RAW" | jq -r '.[] | .body // "" | gsub("\r?\n"; "\u001f
   exit 2
 }
 
+# NOTE: never use early-exiting `grep -q`/`head -1` after printf under pipefail: on large threads the
+# writer gets SIGPIPE and the pipeline reports failure for a marker that is present (#3099).
 # A marker only counts when it is the FIRST thing in a comment (comments are folded to one
 # line each above), so a comment that merely quotes a marker mid-body cannot satisfy it.
-has() { printf '%s\n' "$COMMENTS" | grep -qE "^$1"; }
+has() { printf '%s\n' "$COMMENTS" | grep -E "^$1" >/dev/null; }
 
 # INVESTIGATION:INVALID is the other terminal sentinel (issue closed invalid, no PR follows).
 has_investigator() {
-  printf '%s\n' "$COMMENTS" | grep -E '^<!-- FORGE:INVESTIGATOR -->' | grep -qE 'INVESTIGATION:(COMPLETE|INVALID)'
+  printf '%s\n' "$COMMENTS" | grep -E '^<!-- FORGE:INVESTIGATOR -->' | grep -E 'INVESTIGATION:(COMPLETE|INVALID)' >/dev/null
 }
 
 # Quality gate: a marker comment whose result is PASS (any later PASS wins over an earlier FAIL).
 has_quality_gate_pass() {
-  printf '%s\n' "$COMMENTS" | grep -E '^<!-- FORGE:QUALITY_GATE -->' | grep -qE '\*\*Result\*\*: *PASS'
+  printf '%s\n' "$COMMENTS" | grep -E '^<!-- FORGE:QUALITY_GATE -->' | grep -E '\*\*Result\*\*: *PASS' >/dev/null
 }
 
 BAND=""
 if has '<!-- FORGE:FAST_PATH -->'; then
   # The FIRST classification wins: a later FAST_PATH comment cannot downgrade the requirement set.
-  BAND=$(printf '%s\n' "$COMMENTS" | grep -E '^<!-- FORGE:FAST_PATH -->' | head -1 \
+  BAND=$(printf '%s\n' "$COMMENTS" | grep -E '^<!-- FORGE:FAST_PATH -->' | sed -n '1p' \
     | sed -n 's/.*\*\*COMPLEXITY_BAND\*\*: *\([A-Za-z_]*\).*/\1/p' | tr '[:lower:]' '[:upper:]')
 fi
 
