@@ -679,7 +679,7 @@ ACCEPTANCE_CHECK: id=ac-4 type=command target="grep -qE '(>= ?2|2\+)' commands/o
 
 **Check types**:
 - `exists` — assert a file or directory exists (`target` = path, `matcher` = ignored)
-- `contains` — assert a file contains a string or regex (`target` = file path, `matcher` = string/regex)
+- `contains` — assert a file contains a string or regex (`target` = file path, `matcher` = string/regex). **Prefer a literal string** for code: the matcher is applied as an extended regex first, so `$`, `(`, `[`, `.`, `*`, `+`, `?`, `|` must be escaped if you mean them literally (e.g. `return \"\$HELD\"`). The acceptance gate falls back to a literal match, but a correct matcher avoids a needless repair round. For a `command` check that looks for code, use `grep -qF '<literal>' <file>`, not `grep -qE`.
 - `command` — run a shell command and assert exit 0 (`target` = shell command, `matcher` = `exit_0`)
 - `behavior` — assert a runtime/observable behavior via shell command (`target` = shell command, `matcher` = expected output string or regex)
 
