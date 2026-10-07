@@ -2370,7 +2370,17 @@ else
     if [ -n "$CI_GATE_SCRIPT" ]; then CI_GATE_OUT=$(bash "$CI_GATE_SCRIPT" {PR_NUMBER} {MERGE_GH_FLAG}); CI_GATE_RC=$?
     else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
     echo "$CI_GATE_OUT"
-    if [ "$CI_GATE_RC" -ne 0 ]; then
+    # Reviewed-head guard: merge only the exact commit this review approved. A commit pushed after
+    # the verdict (field test: post-review "fix" commits merged unreviewed on #3156 and #3158) needs a
+    # fresh full review, not a merge. Checked after the CI wait so a push during the wait is caught.
+    MERGE_HEAD_NOW=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null)
+    if [ "$CI_GATE_RC" -eq 0 ] && [ "$MERGE_HEAD_NOW" != "$REVIEW_SHA" ]; then
+      CI_GATE_RC=4; CI_GATE_OUT="STALE_REVIEW: PR head ${MERGE_HEAD_NOW:0:7} is not the reviewed commit ${REVIEW_SHA:0:7}"
+    fi
+    if [ "$CI_GATE_RC" -eq 4 ]; then
+      # Not a human problem: the caller re-runs /review-pr on the new head (work-on/review.md R4).
+      echo "REVIEW_RESULT: status: BLOCKED, blocker: stale review — ${CI_GATE_OUT}; re-run /review-pr on the new head"
+    elif [ "$CI_GATE_RC" -ne 0 ]; then
       CI_MSG="⛔ Auto-merge refused for PR #{PR_NUMBER}: CI is not green (ci gate rc=${CI_GATE_RC}). The PR stays open; fix the failing checks on its branch (remediation treats this as FIXABLE) or re-run flaky ones.
 \`\`\`
 ${CI_GATE_OUT}

@@ -69,5 +69,12 @@ for spec in commands/review-pr.md commands/work-on/review.md commands/work-on/re
 done
 grep -q 'wait-ci-green.sh {PR_NUMBER} {GH_FLAG}' "$HERE/../commands/work-on.md" && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: work-on.md manual merge not CI-gated"; }
 
+# Reviewed-head guard: review-pr Phase 8 must refuse to merge a head other than the reviewed commit,
+# and the work-on callers must route "stale review" to a re-review, never a manual merge.
+grep -q 'MERGE_HEAD_NOW" != "$REVIEW_SHA"' "$HERE/../commands/review-pr.md" && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: review-pr Phase 8 lacks reviewed-head guard"; }
+for f in commands/work-on/review.md commands/work-on.md; do
+  grep -q 'stale review' "$HERE/../$f" && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: $f does not route stale review"; }
+done
+
 echo "wait-ci-green tests: pass=$PASS fail=$FAILN"
 [ "$FAILN" -eq 0 ]
