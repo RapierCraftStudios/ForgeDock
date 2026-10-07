@@ -2250,6 +2250,8 @@ ${TRAIL}
 
 Fix the cause (gh auth/API outage, \`FORGE_TRAIL_QG_SINCE\`/runner clock, or set \`FORGEDOCK_HOME\` when the verifier is unresolvable), then re-run /review-pr."
     gh issue comment "$MERGE_ISSUE" {MERGE_GH_FLAG} --body "$TRAIL_ERR_BODY" # <!-- allowlist:check-command-side-effects -->
+    # Nothing can resume this automatically, so park it for a human instead of leaving workflow:in-review (standalone /review-pr and remediate callers too).
+    gh issue edit "$MERGE_ISSUE" {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
     # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "phase trail unreadable (rc=${TRAIL_RC})". The PR stays open and unmerged; callers must NOT fall back to a manual merge.
     exit 1
   elif [ "$TRAIL_RC" -ne 0 ]; then
@@ -2270,7 +2272,7 @@ fi
 [ "${TRAIL_RC:-1}" -eq 0 ] || exit 1   # hard guard: nothing below runs unless the trail verified
 ```
 
-If the preflight failed, skip the rest of Phase 8. On exit code 1, return `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` listing the missing markers. On exit code ≥2 (unreadable trail, or 127 when the verifier is unresolvable), return `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail unreadable (rc=N)". This is an infrastructure failure with no MISSING lines, so callers neither re-run phases nor merge manually. A `PHASE_TRAIL: OVERRIDE` result exits 0 and the merge proceeds. Copy its `OVERRIDE_BY`/`OVERRIDE_REASON`/`MISSING` lines into the merge summary comment so the break-glass use stays on the PR record (forge#3147). (`DOCS_ONLY_FLAG` is computed in the block above: `--docs-only` when `scripts/is-docs-only.sh` accepts the PR diff: every file is a `*.md` outside `commands/`, `.claude/`, `.agents/`, `.codex/` and `.github/` at any depth, and not named `AGENTS.md`/`CLAUDE.md`/`SKILL.md`.)
+If the preflight failed, skip the rest of Phase 8. On exit code 1, return `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` listing the missing markers. On exit code ≥2 (unreadable trail, or 127 when the verifier is unresolvable), return `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail unreadable (rc=N)". This is an infrastructure failure with no MISSING lines, so callers neither re-run phases nor merge manually. (`DOCS_ONLY_FLAG` is computed in the block above: `--docs-only` when `scripts/is-docs-only.sh` accepts the PR diff: every file is a `*.md` outside `commands/`, `.claude/`, `.agents/`, `.codex/` and `.github/` at any depth, and not named `AGENTS.md`/`CLAUDE.md`/`SKILL.md`.)
 
 ```bash
 # §7B verdict + purpose-regression + calibration + trust-escalation guard — check before any merge attempt <!-- Added: forge#1601, forge#1741, forge#1745 -->

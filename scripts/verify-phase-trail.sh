@@ -26,23 +26,14 @@
 #   conservative STANDARD requirement set.
 #
 # Output (stdout, machine-readable):
-#   PHASE_TRAIL: PASS|FAIL|ERROR|OVERRIDE
+#   PHASE_TRAIL: PASS|FAIL|ERROR
 #   BAND: <band>
 #   MISSING: <marker> -> <phase to re-run>      (one line per missing artifact)
-#   OVERRIDE_BY: <login>  OVERRIDE_REASON: <text>   (only with PHASE_TRAIL: OVERRIDE)
 #
-# Exit codes: 0 pass (or audited override), 1 one or more artifacts missing, 2 could not
+# Exit codes: 0 pass, 1 one or more artifacts missing, 2 could not
 # read the issue (fails closed — an unreadable trail is never treated as a pass).
 # Callers route on the exit code: 1 -> re-run the MISSING phases; 2 (or 127 when the
 # verifier itself cannot be resolved) -> infrastructure BLOCKED, never "missing phases".
-#
-# Break-glass (#3147): when the trail would FAIL, an issue comment whose body starts with
-# "OVERRIDE: phase-trail — <reason>" (em dash or "--", non-empty reason) turns the result into
-# PHASE_TRAIL: OVERRIDE, exit 0. The MISSING lines and the overriding author and reason are
-# still printed so the override is audited. Only a human (user.type != "Bot", so the pipeline
-# cannot override its own gate) whose author_association is in FORGE_TRAIL_OVERRIDE_ASSOCIATIONS
-# (default "OWNER,MEMBER") may override. FORGE_TRAIL_TRUSTED_LOGINS does NOT grant it, and setting
-# FORGE_TRAIL_OVERRIDE_ASSOCIATIONS="" disables the override. Exit 2 is never overridable.
 #
 # Legacy grace (#3102): an issue whose trusted FORGE:BUILDER:COMPLETE comment was created before
 # FORGE_TRAIL_QG_SINCE (default: when the FORGE:QUALITY_GATE marker was introduced, #3061) could
@@ -226,28 +217,6 @@ if [ "${#MISSING[@]}" -eq 0 ]; then
   echo "PHASE_TRAIL: PASS"
   echo "BAND: ${BAND:-UNKNOWN}"
   [ -n "${LEGACY_NOTE:-}" ] && echo "NOTE: $LEGACY_NOTE"
-  exit 0
-fi
-
-# Break-glass override (#3147): the LATEST qualifying comment wins; see the header for who qualifies.
-OVERRIDE_ASSOC="${FORGE_TRAIL_OVERRIDE_ASSOCIATIONS-OWNER,MEMBER}"
-OVERRIDE=$(printf '%s' "$RAW" | jq -r --arg assoc "$OVERRIDE_ASSOC" '
-  ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
-  | [ .[]
-      | select(($A | length) > 0)
-      | select((.user.type // "") != "Bot")
-      | select((.author_association // "") as $x | $A | index($x) != null)
-      | select((.body // "") | test("^OVERRIDE: phase-trail (\u2014|--) *[^ \\r\\n]"))
-      | { at: (.created_at // ""), by: (.user.login // "unknown"),
-          reason: ((.body // "") | split("\n")[0] | sub("^OVERRIDE: phase-trail (\u2014|--) *"; "") | gsub("\r"; "")) } ]
-  | sort_by(.at) | .[-1] // empty | "\(.by)\u001f\(.reason)"' 2>/dev/null) || OVERRIDE=""
-
-if [ -n "$OVERRIDE" ]; then
-  echo "PHASE_TRAIL: OVERRIDE"
-  echo "BAND: ${BAND:-UNKNOWN}"
-  for m in "${MISSING[@]}"; do echo "MISSING: $m"; done
-  echo "OVERRIDE_BY: ${OVERRIDE%%$'\x1f'*}"
-  echo "OVERRIDE_REASON: ${OVERRIDE#*$'\x1f'}"
   exit 0
 fi
 

@@ -214,7 +214,7 @@ fi
 if [ "$TRAIL_RC" -ge 2 ]; then echo "REVIEW_RESULT: status: BLOCKED, blocker: phase trail unreadable (rc=$TRAIL_RC)"; exit 1; fi
 ```
 
-- `TRAIL_RC=0` → continue to Phase R2. If the output is `PHASE_TRAIL: OVERRIDE` (an audited break-glass by a trusted human, forge#3147), also copy its `OVERRIDE_BY`/`OVERRIDE_REASON`/`MISSING` lines into the PR body so the override is on the record.
+- `TRAIL_RC=0` → continue to Phase R2.
 - `TRAIL_RC=1` → **do not create the PR.** For each `MISSING: <marker> -> <action>` line, run that phase now via its `Skill(...)` (the action text names it), then re-run this preflight. Do NOT hand-post the missing marker and do NOT escalate to a human: the refusal routes back to the missing phase. If the preflight still fails after one re-dispatch round, post a `<!-- FORGE:PHASE_TRAIL_FAILED -->` comment listing the still-missing markers, add `needs-human`, and return `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail incomplete".
 - `TRAIL_RC>=2` (2 = trail unreadable; 127 = script not executable) → the trail could not be read; fail closed with `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail unreadable".
 
@@ -386,9 +386,9 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 
 - `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` from /review-pr (forge#3102) → the review gate refused to merge because phase markers are missing. Do NOT hand-post markers and do NOT add `needs-human` yet. For each `MISSING: <marker> -> <action>` line, run that phase via its `Skill(...)`, then re-invoke Phase R3 once (the trail preflight at the top of R3 re-runs). If the second attempt returns `PHASE_TRAIL_FAILED` again, post a `<!-- FORGE:PHASE_TRAIL_FAILED -->` comment listing the still-missing markers, add `needs-human`, and return `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail incomplete after re-dispatch". The PR stays open and unmerged throughout.
 
-- `REVIEW_RESULT: status: BLOCKED` from /review-pr with a phase-trail blocker ("phase trail unreadable", i.e. the Phase 8 verifier exited ≥2 / 127, forge#3147): the merge gate could not run. Do NOT re-run phases (nothing is missing) and do NOT attempt the manual merge below, because that would bypass the gate. Add `needs-human` and return `REVIEW_RESULT: status: BLOCKED` with the same blocker. The PR stays open and unmerged.
+- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker mentions the phase trail (any blocker containing "phase trail": "phase trail unreadable" when the Phase 8 verifier exited ≥2 / 127, "phase trail incomplete…", or "auto-merge requires --issue", forge#3147): the merge gate refused or could not run. Do NOT re-run phases (nothing is missing) and do NOT attempt the manual merge below, because that would bypass the gate. Add `needs-human` and return `REVIEW_RESULT: status: BLOCKED` with the same blocker. The PR stays open and unmerged.
 
-- PR NOT MERGED (and not a phase-trail BLOCKED above) → attempt manual merge:
+- PR NOT MERGED (and not a phase-trail or auto-merge-gate BLOCKED above) → attempt manual merge:
   ```bash
   gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto
   ```
