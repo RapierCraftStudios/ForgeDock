@@ -1510,7 +1510,7 @@ for DEP in $BLOCKED_NOW; do
     [ "$GPRED_CLASS" != "DONE" ] && STILL_GATED=true
   done
   if [ "$STILL_GATED" = "false" ]; then
-    # forge#3157: record a human release of a trail-held merged predecessor (decay of the escalation marker;
+    # forge#3157: record a human release (FORGE:PHASE_TRAIL_RELEASED) of a trail-held merged predecessor (decay of the escalation marker;
     # release_merged_trail is defined in phase-4-execution.md Step 4B and is a no-op unless the escalation is ACTIVE).
     for GPRED in $(echo "$GATING_PREDS_RAW" | jq -r '.[]' 2>/dev/null); do release_merged_trail "$GPRED"; done
     gh issue edit "$DEP" -R {GH_REPO} --remove-label "blocked-on-human-merge" 2>/dev/null || true
