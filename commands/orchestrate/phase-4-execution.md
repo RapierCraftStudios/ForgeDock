@@ -2648,8 +2648,28 @@ Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${R
     # Fail CLOSED: if the classifier cannot run (missing module, bad cwd), treat the finding as
     # non-routine so a security/billing finding is never paused. Import via {REPO_PATH} and pass
     # the text through the environment (argv text beginning with "-" is parsed as a node option).
-    BREAKER_SAFETY=$(FINDING_TEXT="$(echo "$FINDING_DATA" | jq -r '(.title // "") + "\n" + (.body // "")')" \
-      node -e 'import(process.argv[1]).then(({ classifyBatchSafety }) => process.stdout.write(classifyBatchSafety(process.env.FINDING_TEXT) || "routine"))' "file://{REPO_PATH}/bin/engine/admission.mjs" 2>/dev/null || echo "unclassified")
+    # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+    FORGE_ROOT=""
+    if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
+      # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
+      _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+      # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+      _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
+      _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+      _k="$(printf '%s\n' "${FORGE_HOME:-}" "${CLAUDE_PLUGIN_ROOT:-}" "$_l" "$_v" "$_m")"
+      while IFS= read -r _c; do
+        case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && FORGE_ROOT="$_c" ;; esac
+      done <<< "$_k"
+    fi
+    # Import ForgeDock's OWN admission.mjs from FORGE_ROOT, never from the consumer {REPO_PATH}
+    # (inert on non-ForgeDock repos, and would execute repo-controlled JS). Unresolved/missing => fail closed, loudly.
+    BREAKER_SAFETY="unclassified"
+    if [ -n "$FORGE_ROOT" ] && [ -r "$FORGE_ROOT/bin/engine/admission.mjs" ]; then
+      BREAKER_SAFETY=$(FINDING_TEXT="$(echo "$FINDING_DATA" | jq -r '(.title // "") + "\n" + (.body // "")')" \
+        node -e 'import(process.argv[1]).then(({ classifyBatchSafety }) => process.stdout.write(classifyBatchSafety(process.env.FINDING_TEXT) || "routine"))' "file://$FORGE_ROOT/bin/engine/admission.mjs" 2>/dev/null || echo "unclassified")
+    else
+      echo "WARNING: ForgeDock install root unresolved or admission.mjs missing (set FORGEDOCK_HOME) — breaker classifying #${FINDING_NUM} as unclassified (fail closed: not deferred)" >&2
+    fi
     BREAKER_LIVE_TRIPPED="$AMPLIFICATION_BREAKER_TRIPPED"
     if [ "$BREAKER_LIVE_TRIPPED" = "false" ] && [ "$UNIT_MERGED_THIS_CYCLE" = "true" ] && [ "$MERGED_UNITS" -gt 0 ] && \
        awk "BEGIN { exit !($FINDINGS_SPAWNED / $MERGED_UNITS >= 1) }"; then
@@ -2787,7 +2807,26 @@ for FINDING_NUM in "${BATCHING_CANDIDATES[@]}"; do
   FINDING_FILE=$(echo "$FINDING_DATA" | jq -r '.body' | grep -oE '`[^`]+\.(py|tsx?|jsx?|sql|json|ya?ml|sh|md)`' | head -1 | tr -d '`')
   [ -z "$FINDING_FILE" ] && continue
 
-  SAFETY_CLASS=$(node -e 'import("./bin/engine/admission.mjs").then(({ classifyBatchSafety }) => process.stdout.write(classifyBatchSafety(process.argv[1]) || "routine"))' "$(echo "$FINDING_DATA" | jq -r '.title + "\n" + .body + "\n" + (.labels | join(" "))')")
+  # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+  FORGE_ROOT=""
+  if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
+    # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
+    _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+    # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+    _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
+    _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+    _k="$(printf '%s\n' "${FORGE_HOME:-}" "${CLAUDE_PLUGIN_ROOT:-}" "$_l" "$_v" "$_m")"
+    while IFS= read -r _c; do
+      case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && FORGE_ROOT="$_c" ;; esac
+    done <<< "$_k"
+  fi
+  # Import from ForgeDock's own root, never the consumer cwd; fail closed (non-routine) when unresolved.
+  SAFETY_CLASS="unclassified"
+  if [ -n "$FORGE_ROOT" ] && [ -r "$FORGE_ROOT/bin/engine/admission.mjs" ]; then
+    SAFETY_CLASS=$(node -e 'import(process.argv[1]).then(({ classifyBatchSafety }) => process.stdout.write(classifyBatchSafety(process.argv[2]) || "routine"))' "file://$FORGE_ROOT/bin/engine/admission.mjs" "$(echo "$FINDING_DATA" | jq -r '.title + "\n" + .body + "\n" + (.labels | join(" "))')" 2>/dev/null || echo "unclassified")
+  else
+    echo "WARNING: ForgeDock install root unresolved or admission.mjs missing (set FORGEDOCK_HOME) — #${FINDING_NUM} classified unclassified (not batched)" >&2
+  fi
   # Same file is not enough for security work: the class key prevents a
   # credential finding from sharing a batch with injection/auth hardening.
   SURFACE_KEY="${SAFETY_CLASS}:${FINDING_FILE}"
