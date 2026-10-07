@@ -104,6 +104,7 @@ mkscripts "$T/h6/.claude/plugins/marketplaces/forgedock"
 expect "forgedock marketplace resolves" "$T/h6/.claude/plugins/marketplaces/forgedock" "$(run "$T/h6")"
 
 # release outranks its own pre-release; a newer pre-release core still beats an older release
+rm -rf "$T/h7"   # fixture is mutated below; reset per shell
 mkscripts "$T/h7/.claude/plugins/cache/mk/forgedock/1.9.0-rc1"; mkscripts "$T/h7/.claude/plugins/cache/mk/forgedock/1.9.0"
 expect "release beats its pre-release" "$T/h7/.claude/plugins/cache/mk/forgedock/1.9.0" "$(run "$T/h7")"
 mkscripts "$T/h7/.claude/plugins/cache/mk/forgedock/2.0.0-rc1"
