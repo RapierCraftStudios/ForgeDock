@@ -2243,8 +2243,9 @@ else
   if [ -n "$PR_FILES_ALL" ] && [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/is-docs-only.sh" ] && echo "$PR_FILES_ALL" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"; then DOCS_ONLY_FLAG="--docs-only"; fi
   # Band cross-check (forge#3149): a non-docs PR diff means an agent-chosen INVESTIGATION band must not waive requirements.
   # No --head-tree here: review auto-fix commits legitimately advance the head after the gate ran; the tree binding is enforced pre-PR (work-on/review.md R1.5).
-  CODE_DIFF_FLAG=""
-  if [ -n "$PR_FILES_ALL" ] && [ -z "$DOCS_ONLY_FLAG" ]; then CODE_DIFF_FLAG="--code-diff"; fi
+  # Fail closed: anything not positively docs-only (including an empty/unreadable diff) is treated as a code diff.
+  CODE_DIFF_FLAG="--code-diff"
+  if [ -n "$DOCS_ONLY_FLAG" ]; then CODE_DIFF_FLAG=""; fi
   if [ -z "$FORGE_ROOT" ] || [ ! -f "$TRAIL_SCRIPT" ]; then
     # Fail closed: an unresolvable verifier is NOT a pass (plugin installs set no FORGE_HOME; never fall back to the consumer repo).
     echo "PHASE TRAIL: verify-phase-trail.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install) — refusing to merge" >&2

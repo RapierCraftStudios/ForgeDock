@@ -231,6 +231,9 @@ for bt in "" "xyz" "${T1}0" "abc123"; do
   OUT=$(MOCK_GH_JSON="$(ht h8 "$QG_T1")" bash "$VERIFY" 3061 -R o/r --head-tree "$bt" 2>/dev/null); RC=$?
   [ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "invalid --head-tree '$bt' fails closed (exit 2)" || bad "head-tree '$bt' (rc=$RC out=$OUT)"
 done
+# A 64-hex marker tree that merely starts with the 40-hex head tree must not match
+QG_LONG=$'<!-- FORGE:QUALITY_GATE -->\n**Result**: PASS\n**Tree**: '"${T1}1111111111111111111111"
+expect_fail "marker tree longer than (but prefixed by) the head tree is rejected" "$(ht h10 "$QG_LONG")" QUALITY_GATE --head-tree "$T1"
 OUT=$(MOCK_GH_JSON="$(ht h9 "$QG_T1")" bash "$VERIFY" 3061 -R o/r --head-tree 2>/dev/null); RC=$?
 [ $RC -eq 2 ] && ok "--head-tree without a value exits 2" || bad "head-tree no value (rc=$RC)"
 

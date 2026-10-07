@@ -20,6 +20,8 @@
 #                 FORGE:QUALITY_GATE marker must record the same `**Tree**: <sha>`; a PASS from an
 #                 earlier tree, or a marker without a Tree line, does not satisfy the gate (#3149).
 #                 An empty or non-hex value is a usage error (exit 2, fails closed).
+#                 Scope: this binds the PASS to the built tree; it is not tamper-proof, because the
+#                 pipeline agent posts under the same trusted identity and could compute the tree itself.
 #
 # Requirements by COMPLEXITY_BAND (read from the FORGE:FAST_PATH comment).
 # The authoritative table is the `case "$EFFECTIVE"` block below; this summary must be

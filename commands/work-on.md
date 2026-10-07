@@ -1600,11 +1600,11 @@ if iteration == max_iterations AND not PASS:
 
 — and note in the builder comment that context isolation was degraded for this run.
 
-**Post the `FORGE:QUALITY_GATE` marker (MANDATORY — the one gh write permitted here)** <!-- Added: forge#3061 -->: the inline path must leave the same checkable artifact as `work-on/build/validate.md` V5 ("V5 Pre-Commit: Post FORGE:QUALITY_GATE Marker"). Immediately after the gate loop ends, post it recording the real gate invocation and its real result; skip nothing even for 1-file config/docs edits (post `**Result**: PASS (skipped — single config/docs file)`). `scripts/verify-phase-trail.sh` fails the review preflight without it unless the whole diff is docs-only.
+**Post the `FORGE:QUALITY_GATE` marker (MANDATORY — the one gh write permitted here)** <!-- Added: forge#3061 -->: the inline path must leave the same checkable artifact as `work-on/build/validate.md` V5 ("V5 Pre-Commit: Post FORGE:QUALITY_GATE Marker"). Run the gate loop here, but post the marker (and record its `**Tree**`) only at the end of 3J, immediately before the 3K commit, so the recorded tree includes every 3H formatter and 3J edit (forge#3149). Post it recording the real gate invocation and its real result; skip nothing even for 1-file config/docs edits (post `**Result**: PASS (skipped — single config/docs file)`). `scripts/verify-phase-trail.sh` fails the review preflight without it unless the whole diff is docs-only.
 
 ```bash
 GATE_RESULT=$([ "$GATE_PASSED" = "true" ] && echo PASS || echo FAIL)
-git -C {WORKTREE_PATH} add -u   # same staging as 3K, so the recorded tree is the commit's tree <!-- Added: forge#3149 -->
+git -C {WORKTREE_PATH} add -u   # same staging as 3K; valid only because this block runs after 3H-3J, immediately before the commit <!-- Added: forge#3149 -->
 GATE_TREE=$(git -C {WORKTREE_PATH} write-tree)
 QG_BODY="<!-- FORGE:QUALITY_GATE -->
 ## Quality Gate Result

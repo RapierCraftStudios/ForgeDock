@@ -204,8 +204,9 @@ TRAIL_SCRIPT="$FORGE_ROOT/scripts/verify-phase-trail.sh"
 DOCS_ONLY_FLAG=""
 if [ -n "$CHANGED" ] && [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/is-docs-only.sh" ] && echo "$CHANGED" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"; then DOCS_ONLY_FLAG="--docs-only"; fi
 # Band cross-check (forge#3149): a non-docs diff means an agent-chosen INVESTIGATION band must not waive requirements.
-CODE_DIFF_FLAG=""
-if [ -n "$CHANGED" ] && [ -z "$DOCS_ONLY_FLAG" ]; then CODE_DIFF_FLAG="--code-diff"; fi
+# Fail closed: anything not positively docs-only (including an empty/unreadable diff) is treated as a code diff.
+CODE_DIFF_FLAG="--code-diff"
+if [ -n "$DOCS_ONLY_FLAG" ]; then CODE_DIFF_FLAG=""; fi
 # Bind the QUALITY_GATE PASS to the built tree (forge#3149). An unresolved tree is passed as empty -> the verifier exits 2 (fail closed).
 HEAD_TREE=$(git -C {WORKTREE_PATH} rev-parse 'HEAD^{tree}' 2>/dev/null)
 if [ -z "$FORGE_ROOT" ] || [ ! -f "$TRAIL_SCRIPT" ]; then

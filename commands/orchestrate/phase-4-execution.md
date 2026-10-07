@@ -1078,10 +1078,15 @@ PROJECT_NAME='{PROJECT_NAME}';   GH_REPO='{GH_REPO}';             REPO_PATH='{RE
 LANE='{LANE}';                   PR_BASE='{PR_BASE}';             STAGING_BRANCH='{STAGING_BRANCH}'
 SOURCE_BRANCH='{SOURCE_BRANCH}'; FORGE_GIST_CAPABLE='{FORGE_GIST_CAPABLE}'; SUBAGENT_MODEL='{SUBAGENT_MODEL}'
 PROJECT_PREFIX='{PROJECT_PREFIX}'; SATELLITE_PREFIX='{SATELLITE_PREFIX}'; FORGE_SKILL_PREFIX='{FORGE_SKILL_PREFIX}'
-RENDERED_PROMPT=$(cat <<'RENDERED_PROMPT_EOF'
+# Heredoc into a file, then read it back: a heredoc body inside $( ) is parsed for quote balance by bash 3.2 (macOS),
+# and the rendered prompt contains apostrophes and parentheses.
+# The delimiter MUST be a string that occurs nowhere in the rendered prompt (the GIST/SOURCE_PR_HINT context blocks carry
+# untrusted text): replace RENDERED_PROMPT_EOF below with RENDERED_PROMPT_EOF_ plus 16 random hex chars, in BOTH places.
+RENDERED_PROMPT_SRC="$(mktemp)"
+cat > "$RENDERED_PROMPT_SRC" <<'RENDERED_PROMPT_EOF'
 {the fully rendered Step 4A prompt text for this issue, exactly as passed to Agent(prompt=...)}
 RENDERED_PROMPT_EOF
-)
+RENDERED_PROMPT=$(cat "$RENDERED_PROMPT_SRC"); rm -f "$RENDERED_PROMPT_SRC"
 ```
 
 ```bash
@@ -1715,13 +1720,13 @@ done
    else
      # forge#3123: a docs-only merged diff legitimately has no FORGE:QUALITY_GATE marker. Derive --docs-only from the
      # merged PR's diff with the SAME shared predicate as review-pr.md Phase 8 / work-on/review.md R1.5 (scripts/is-docs-only.sh, forge#3134). Fail closed: no PR / unreadable diff -> no flag.
-     TRAIL_DOCS_FLAG=""
+     TRAIL_DOCS_FLAG="--code-diff"   # forge#3149: fail closed - no matched PR / unreadable or empty diff means NO docs-only waiver and no usable INVESTIGATION band
      # forge#3133: the text search is fuzzy and unordered, so `.[0]` can be an unrelated docs-only PR. Evaluate EVERY
      # matching merged PR and set the flag only if at least one matched AND all matched diffs are non-empty and docs-only.
      # forge#3149: the search is a fuzzy prefilter; the jq test below keeps only PRs whose body has the exact token
      # "Closes #{NUMBER}" NOT followed by another digit (so #31490 never matches #3149). --limit 100 is a generous cap on
      # merged PRs mentioning one issue (a pipeline issue normally has one closing PR).
-     TRAIL_PRS=$(gh pr list -R {GH_REPO} --state merged --limit 100 --search "\"Closes #{NUMBER}\" in:body" --json number,body --jq '.[] | select(.body | test("Closes #{NUMBER}([^0-9]|$)")) | .number' 2>/dev/null)
+     TRAIL_PRS=$(gh pr list -R {GH_REPO} --state merged --limit 100 --search "\"Closes #{NUMBER}\" in:body" --json number,body --jq '.[] | select(.body | test("Closes #{NUMBER}([^0-9]|$)"; "i")) | .number' 2>/dev/null)
      if [ -n "$TRAIL_PRS" ]; then
        TRAIL_ALL_DOCS=1
        for TRAIL_PR in $TRAIL_PRS; do
@@ -1729,7 +1734,6 @@ done
          if [ -z "$TRAIL_FILES" ] || [ ! -f "$FORGE_ROOT/scripts/is-docs-only.sh" ] || ! echo "$TRAIL_FILES" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"; then TRAIL_ALL_DOCS=0; break; fi
        done
        [ "$TRAIL_ALL_DOCS" = "1" ] && TRAIL_DOCS_FLAG="--docs-only"
-       [ "$TRAIL_ALL_DOCS" = "0" ] && [ -n "$TRAIL_FILES" ] && TRAIL_DOCS_FLAG="--code-diff"   # forge#3149: a code diff voids an INVESTIGATION band
      fi
      TRAIL=$(bash "$FORGE_ROOT/scripts/verify-phase-trail.sh" {NUMBER} -R {GH_REPO} $TRAIL_DOCS_FLAG 2>&1); TRAIL_RC=$?
    fi
