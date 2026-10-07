@@ -159,7 +159,7 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | select(.body | conta
 | Bug + services/ | Backend Fix | Direct |
 | Refactor/docs | Maintenance | Direct |
 
-Then classify COMPLEXITY_BAND with the same table as `work-on.md` Phase 3B (TRIVIAL: single doc/config file, no logic; STANDARD: 1–5 files, existing patterns; COMPLEX: 6+ files, new abstractions, cross-service, schema changes) and post the `FORGE:FAST_PATH` marker. `scripts/verify-phase-trail.sh` reads the band from it and fails the review-pr merge gate when it is absent (forge#3148):
+Then classify COMPLEXITY_BAND with the same table as `work-on/build.md` B0.5 (TRIVIAL: single doc/config file, no logic; STANDARD: 1–5 files, existing patterns; COMPLEX: 6+ files, new abstractions, cross-service, schema changes) and post the `FORGE:FAST_PATH` marker. `scripts/verify-phase-trail.sh` reads the band from it and fails the review-pr merge gate when it is absent (forge#3148):
 
 ```bash
 FP_BODY="<!-- FORGE:FAST_PATH -->
@@ -229,7 +229,7 @@ Skill(skill="{FORGE_SKILL_PREFIX}quality-gate", args="{changed_files} --worktree
 ```
 Fix HIGH/MEDIUM findings. Max 2 iterations. Skip for 1-file config/docs edits.
 
-Then post the `FORGE:QUALITY_GATE` marker with the real gate result (same contract as `work-on.md` Phase 3G). Post it even when the gate was skipped (`**Result**: PASS (skipped — single config/docs file)`). The merge gate requires it unless the whole diff is docs-only (forge#3148):
+Then post the `FORGE:QUALITY_GATE` marker with the real gate result (same contract as `work-on/build/validate.md` V1/V5). Post it even when the gate was skipped (`**Result**: PASS (skipped — single config/docs file)`). The merge gate requires it unless the whole diff is docs-only (forge#3148):
 
 ```bash
 QG_BODY="<!-- FORGE:QUALITY_GATE -->
@@ -324,7 +324,7 @@ else:
 Otherwise:
 - PR MERGED + issue CLOSED → proceed to Phase 6/7
 - PR MERGED + issue OPEN → close issue manually
-- PR NOT MERGED + review returned `REVIEW_RESULT: status: COMPLETE` → `gh pr merge --merge {GH_FLAG}`, close issue. If merge fails → post comment, add `needs-human`, STOP.
+- PR NOT MERGED + review returned `REVIEW_RESULT: status: COMPLETE` → run `scripts/wait-ci-green.sh {PR_NUMBER} {GH_FLAG}` (resolved from the plugin root); only on exit 0 merge with `--merge --match-head-commit <the CI_GATE_HEAD it printed>` and close the issue. A non-zero gate (or a "ci gate" / "stale review" blocker) → do NOT merge; post the gate output, add `needs-human`, STOP. If the merge fails → post comment, add `needs-human`, STOP.
 - PR NOT MERGED + any other, missing, or unparseable `REVIEW_RESULT` → do NOT merge (an unrecognized refusal must never fall through to a manual merge). Add `needs-human` and STOP.
 
 ### 5D: Project board update (Workflow=Merged, Status=Done)

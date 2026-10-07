@@ -1,17 +1,18 @@
 ---
 description: Pre-implementation architecture planning — traces ALL affected code paths and produces an ordered implementation plan before any code is written
-argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--files AFFECTED_FILES]"
+argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --repo-path {WORKTREE} --files \"<space-separated>\""
+context: fork
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # work-on/build/architect — Multi-Path Implementation Planning
 
-> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+> **Skill Name Resolution (forked phase)**: `{FORGE_SKILL_PREFIX}` is the namespace this skill itself was invoked under — invoked as `forgedock:work-on:…` → `forgedock:` (nesting `:`); as `work-on:…` → empty (`install.sh`); as `forge-work-on-…` → `forge-` (Codex, nesting `-`); OpenCode → empty with `-` nesting. Confirm the target name in the available-skills list before calling it. A forked phase receives no resolved value from its caller; never guess, and if the target skill is not listed return BLOCKED "skill not found: <name>".
 
-**Invoked by**: `work-on.md` Step 3C.6, between Context Gathering and Implement.
+**Invoked by**: `work-on:build` (phase B4), between Context Gathering and Implement, via `Skill()`. Runs in its own forked context: you see only this spec and your args — re-read all other state from GitHub/git.
 **Time budget**: Max 3 minutes. Skip any file read that times out.
-**Output**: Post `<!-- FORGE:ARCHITECT -->` comment on the issue, then return structured plan to caller.
+**Output**: Post `<!-- FORGE:ARCHITECT -->` comment on the issue, then print exactly one `ARCHITECT_RESULT:` block (see Result Block) as your final reply. Every exit path — success, partial, skip, resume-complete, blocked — prints it.
 
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet", `effort: xhigh` (deep tier — full code-path tracing, multi-file architecture planning). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
@@ -31,7 +32,7 @@ COMPLEXITY_BAND=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 COMPLEXITY_BAND="${COMPLEXITY_BAND:-STANDARD}"
 ```
 
-**If COMPLEXITY_BAND: TRIVIAL** → skip all phases (A0 through A5), **post the minimal skip marker comment described in "Skip Marker" under Skip Conditions below** (reason: `TRIVIAL complexity band`), then return an empty plan to caller immediately. Do not read any files. This is not an error — trivial single-file changes have no cross-path consistency risk. The skip marker (ending in `<!-- FORGE:ARCHITECT:COMPLETE -->`) is what makes a legitimate skip observable to the headless engine's marker-only gate, so the issue advances to build instead of being stranded at `needs-human`. <!-- Added: forge#679; skip-marker on skip: forge#2689 -->
+**If COMPLEXITY_BAND: TRIVIAL or INVESTIGATION** → skip all phases (A0 through A5), **post the minimal skip marker comment described in "Skip Marker" under Skip Conditions below** (reason: `TRIVIAL complexity band` or `INVESTIGATION complexity band`), then print `ARCHITECT_RESULT:` with `status: SKIPPED` immediately. Do not read any files. This is not an error — trivial single-file changes have no cross-path consistency risk. The skip marker (ending in `<!-- FORGE:ARCHITECT:COMPLETE -->`) is what makes a legitimate skip observable to the headless engine's marker-only gate, so the issue advances to build instead of being stranded at `needs-human`. <!-- Added: forge#679; skip-marker on skip: forge#2689 -->
 
 **If COMPLEXITY_BAND: STANDARD or COMPLEX** → proceed to Phase A0 below.
 
@@ -52,14 +53,16 @@ Parse from $ARGUMENTS:
 - `--repo {GH_REPO}` — GitHub repo (e.g. `{owner}/{repo}` — resolved from `forge.yaml → project`)
 - `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`)
 - `--repo-path {REPO_PATH}` — local filesystem path to the worktree (e.g. `/path/to/.claude/worktrees/fix/issue-121`); used by Phase A1 grep commands
-- `--files {AFFECTED_FILES}` — space-separated list of files from investigation report (passed by `build.md` Phase B4)
+- `--files "{AFFECTED_FILES}"` — space-separated list of files from investigation report (quoted as one value; passed by `work-on:build` phase B4; empty triggers the empty-list skip)
 
-Also read from the calling context (in-memory, passed by parent agent):
+**Fail closed**: if `{NUMBER}`, `--repo`, `--gh-flag` or `--repo-path` is missing, print `ARCHITECT_RESULT:` with `status: BLOCKED`, `comment_url:` empty and `blocker: missing arg <name>`, and stop.
+
+You receive no state from the caller. Re-derive everything from GitHub below:
 - `{INVESTIGATION_REPORT}` — full text of FORGE:INVESTIGATOR comment
 - `{CONTEXT_BRIEFING}` — full text of FORGE:CONTEXT comment (empty string if context step was skipped)
 - `{MEMORY_PRIORS}` — structured prior run blocks emitted by investigate Phase 0.5 (empty string if no priors found or investigate predates memory). When non-empty, treat each `[MEMORY PRIOR]` block as a high-confidence prior: if any prior's affected files overlap with the current plan's affected files, explicitly note the prior's root cause and key lesson in the FORGE:ARCHITECT comment's **Prior Run Priors** section (add this section after **Context Briefing** when priors exist). <!-- Added: forge#1316 -->
 
-If any of these are not passed directly, read them from GitHub (fallback/recovery path):
+Read them from GitHub:
 
 ```bash
 # Read investigation report
@@ -82,7 +85,7 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:ARCHITECT")) | .body'
 ```
 
-- If `<!-- FORGE:ARCHITECT -->` comment exists AND `<!-- FORGE:ARCHITECT:COMPLETE -->` is present in the SAME comment → plan already complete, return existing plan to caller, EXIT.
+- If `<!-- FORGE:ARCHITECT -->` comment exists AND `<!-- FORGE:ARCHITECT:COMPLETE -->` is present in the SAME comment → plan already complete: print `ARCHITECT_RESULT:` with `status: COMPLETE` and the existing comment's `comment_url`, EXIT.
 - If `<!-- FORGE:ARCHITECT -->` comment exists BUT `<!-- FORGE:ARCHITECT:COMPLETE -->` is ABSENT → plan was interrupted, delete the partial comment and restart:
   ```bash
   COMMENT_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
@@ -437,6 +440,15 @@ Read the 3–5 most relevant files identified. Do NOT read more than 8 files tot
 
 ---
 
+## Phase A1.6: Route-Tree Classification for Shared Components *(conditional — skip if no files under `components/` are affected, except `components/ui/primitives/`)* <!-- Added: forge#381 -->
+
+When a change adds a new hook call or context dependency to a shared component, classify ALL call sites found in A1 by route context:
+1. **Authenticated routes**: Callers under `app/dashboard/`, `app/(authenticated)/`, or any layout that wraps children with an auth provider (e.g., `UserProvider`, `SessionProvider`).
+2. **Public routes**: Callers under `app/(public)/`, `app/playground/`, `app/(marketing)/`, or any layout without the relevant provider.
+3. **If both categories have callers AND the new hook throws when its provider is absent**: add an explicit implementation step to either (a) guard the hook call with a null-context check, (b) make the hook return a safe default when called outside its provider, or (c) remove the hook from the shared component and move it to the authenticated-route-only caller. Document the split in the FORGE:ARCHITECT affected paths table. Do NOT leave a shared component that crashes public routes to be discovered by the FE review agent.
+
+---
+
 ## Phase A2: Trace the Data Flow
 
 From each entry point identified in A1, trace what happens to the data being changed:
@@ -451,7 +463,37 @@ For each step in the flow, check:
 - Is there a validation or coercion that must be updated consistently?
 - Is there a test that covers this path?
 
+**For every field or key read by the changed code, enumerate ALL write paths first** — search across all services for assignments to that field. If multiple code paths write different types to the same field (e.g. dict in the standard path, string in the auth-gated path), the implementation must handle all variants. Do not assume the type you see on the primary code path is the only possible type.
+
 Produce a table of ALL files/functions that must change to maintain consistency.
+
+---
+
+## Phase A2.1: Runtime UID × Volume Ownership Check *(conditional — skip if no Dockerfile or entrypoint is affected)* <!-- Added: forge#323 -->
+
+When the PR changes the container's runtime user (Dockerfile `USER` directive, `su-exec`, `gosu`, `setuid`), the architect MUST trace the full write-path chain before writing the implementation plan:
+1. **Enumerate volume mounts**: Read all `docker-compose*.yml` files for the affected service. List every named volume and its container mount point (e.g. `storage_shared:/app/storage`). Docker named volumes are created as root-owned by default — any UID change without a corresponding ownership fix will silently break writes.
+2. **Grep for filesystem writes**: Search the affected service's codebase for all filesystem write operations (`mkdir`, `Path.mkdir`, `write_bytes`, `open(`, `os.makedirs`, `shutil.copy`, `shutil.move`). For each write operation, identify the target path.
+3. **Cross-reference**: For each write path that falls under a named volume mount point, add an explicit implementation step to ensure ownership compatibility before the privilege drop — typically `chown -R <user>:<group> <mount_point>` in the entrypoint script before the `exec su-exec` / `exec gosu` call.
+4. **Add to FORGE:ARCHITECT deliverables table**: List the entrypoint or docker-compose change as an explicit deliverable. Do NOT leave volume ownership to be discovered by the builder or reviewer.
+
+---
+
+## Phase A2.2: Gate-Condition Caller Sweep *(conditional — when the fix changes a gate condition that guards a function call or restricts a field)* <!-- Added: forge#383 -->
+
+Before finalizing the affected-paths table, grep for all callers of the gated function across sibling files in the same service directory. For each caller, verify that the gate condition applied at the call site is semantically correct.
+
+```bash
+# Identify the gated function from the issue/contract
+GATED_FUNCTION="{function_being_called_inside_the_gate}"
+SERVICE_DIR=$(dirname {PRIMARY_AFFECTED_FILE})
+# Find all call sites
+grep -rn "$GATED_FUNCTION" "$SERVICE_DIR" --include="*.py" | grep -v "#"
+```
+
+For each call site found: read the surrounding gate condition (±10 lines). If the condition includes fields that do NOT require the gated resource (e.g., `extraction_schema` gated behind an LLM key check when `extraction_schema` is processed without an LLM), add that caller file to the FORGE:ARCHITECT affected-paths table with a note explaining the incorrect gate condition.
+
+**Do NOT** omit sibling callers from the affected-paths table simply because they were not listed in the issue spec. The architect's scope is determined by code correctness, not by the issue spec's file list. A gate-condition bug that exists identically in 3 router files must be fixed in all 3 — even if the issue only named 1.
 
 ---
 
@@ -670,12 +712,13 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ARCHITECT -->
 
 ## Skip Conditions
 
-Skip the planning work (Phases A0–A5) and return an empty plan to caller — **but always post the Skip Marker below first** — if:
+Skip the planning work (Phases A0–A5) and print `ARCHITECT_RESULT:` with `status: SKIPPED` — **but always post the Skip Marker below first** — if:
 - **COMPLEXITY_BAND: TRIVIAL** — checked via FORGE:FAST_PATH comment at entry (see guard above) <!-- Primary skip path: forge#679 -->
 - Issue creates only **new files** with no callers to find (e.g. a new command file with no existing integration point yet)
 - Issue is a 1-file config or docs edit with no code logic
 - Issue title starts with "docs:" or "chore:"
 - `{AFFECTED_FILES}` is empty
+- **COMPLEXITY_BAND: INVESTIGATION** — investigation tasks produce issues, not code
 
 When skipped, the builder proceeds with investigation report + context briefing only (see Integration Point below — the builder falls back gracefully on an empty plan).
 
@@ -683,7 +726,7 @@ When skipped, the builder proceeds with investigation report + context briefing 
 
 **Do not post nothing.** The headless engine gate (`bin/engine/phases.mjs` → `architect.detectOutcome`) treats a **missing** `FORGE:ARCHITECT:COMPLETE` sentinel as a phase **failure**, retries to `maxAttempts` (3), then strands the issue at `needs-human`. It reads GitHub comment markers only — it cannot see this subcommand's in-process "empty plan" return value. So a skip that posts no marker is indistinguishable from a crashed architect run and deterministically strands **every** `chore:`/`docs:`/trivial issue.
 
-On **every** skip branch above, post exactly this minimal comment (substitute the concrete `{SKIP_REASON}`, e.g. `chore:/docs: title`, `TRIVIAL complexity band`, `new files only — no callers`, or `AFFECTED_FILES empty`) **before** returning the empty plan:
+On **every** skip branch above, post exactly this minimal comment (substitute the concrete `{SKIP_REASON}`, e.g. `chore:/docs: title`, `TRIVIAL complexity band`, `new files only — no callers`, or `AFFECTED_FILES empty`) **before** printing `ARCHITECT_RESULT:`:
 
 ```bash
 # The skip marker is mandatory and un-gated by design — posting it IS the point
@@ -706,22 +749,39 @@ The empty-plan-with-marker changes no downstream behavior — the builder alread
 
 ---
 
-## Integration Point in work-on.md
+## Result Block (MANDATORY on every path)
 
-This module runs at **Step 3C.6** — after Context Gathering, before Implement:
+Your final reply MUST end with exactly one block, printed after the plan, partial, or skip-marker comment has been posted. `work-on:build` reads only this block.
 
 ```
-3C    → Builder Contract posted
-3C.5  → Context Gathering (FORGE:CONTEXT comment)
-3C.6  → [THIS MODULE] Architecture Planning (FORGE:ARCHITECT comment)
+ARCHITECT_RESULT:
+  status: COMPLETE | PARTIAL | SKIPPED | BLOCKED
+  comment_url: {URL of the FORGE:ARCHITECT comment, or empty}
+  blocker: {description if status=BLOCKED, else empty}
+```
+
+- `COMPLETE` — plan posted with `FORGE:ARCHITECT:COMPLETE` (also the result when the Resume Check finds a complete plan).
+- `PARTIAL` — budget exceeded; `FORGE:ARCHITECT:PARTIAL` posted.
+- `SKIPPED` — a skip condition applied and the Skip Marker was posted (give its URL).
+- `BLOCKED` — conflicting constraints that cannot be resolved, or a missing required arg. Post a comment describing the conflict and add `needs-human` (guard with `DRY_RUN`) before printing the block.
+
+---
+
+## Integration Point
+
+This module runs as build phase B4 — after Context Gathering, before Implement:
+
+```
+B3    → Context Gathering (FORGE:CONTEXT comment)
+B4    → [THIS MODULE] Architecture Planning (FORGE:ARCHITECT comment)
           Phase A0: Read Custom Instructions and Project Conventions (highest precedence)
-          Phase A1: Read Entry Points
-          Phase A2: Trace the Data Flow
+          Phase A1: Read Entry Points (A1.5 Prior Decision Injection, A1.6 Route-Tree Classification)
+          Phase A2: Trace the Data Flow (A2.1 Runtime UID x Volume Ownership, A2.2 Gate-Condition Caller Sweep)
           Phase A2.5: Pipeline Phase-Dependency Check
           Phase A3: Consistency Rules
           Phase A4: Sequence the Implementation
           Phase A5: Risk Assessment
-3F    → Implement (builder reads plan, implements ALL affected paths)
+B5    → Implement (builder reads plan, implements ALL affected paths)
 ```
 
 The builder agent reads the `<!-- FORGE:ARCHITECT -->` comment as its **primary input** before writing any code. The raw issue body is secondary context. If the architect step was skipped, the builder falls back to investigation report + contract.

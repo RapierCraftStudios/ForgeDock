@@ -77,6 +77,8 @@ jobs:
         run: bash scripts/is-docs-only.test.sh
       - name: Run extract-affected-files.test.sh
         run: bash scripts/extract-affected-files.test.sh
+      - name: Run wait-ci-green.test.sh
+        run: bash scripts/wait-ci-green.test.sh
 
   # ---------------------------------------------------------------------------
   # Windows Git Bash fixture smoke for the phase-trail / dispatch-lint scripts

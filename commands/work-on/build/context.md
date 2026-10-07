@@ -1,15 +1,16 @@
 ---
 description: Pre-implementation context gathering — surfaces historical findings, bug patterns, and related code paths before the builder writes any code
-argument-hint: "[issue number] [affected_files...] [--functions function_names...]"
+argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --repo-path {WORKTREE} --files \"<space-separated>\" [--functions \"<names>\"]"
+context: fork
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # work-on/build/context — Pre-Implementation Context Gathering
 
-**Invoked by**: `work-on.md` Step 3C.5, between Builder Contract and Implement.
+**Invoked by**: `work-on:build` (phase B3), between Builder Contract and Architect, via `Skill()`. Runs in its own forked context: you see only this spec and your args — re-read all other state from GitHub/git.
 **Time budget**: Max 2 minutes of queries. Skip any query that times out.
-**Output**: Post `<!-- FORGE:CONTEXT -->` comment on the issue, then return structured briefing to caller.
+**Output**: Post `<!-- FORGE:CONTEXT -->` comment on the issue, then print exactly one `CONTEXT_RESULT:` block (see Result Block) as your final reply. Every exit path — success, partial, skip, failure — prints it.
 
 <!-- FORGE:SPEC_LOADED — work-on/build/context.md loaded and active. Agent is bound by this spec. -->
 
@@ -26,7 +27,7 @@ COMPLEXITY_BAND=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 COMPLEXITY_BAND="${COMPLEXITY_BAND:-STANDARD}"
 ```
 
-**If COMPLEXITY_BAND: TRIVIAL** → skip all phases (C-1 through C4), post NO comment, return empty briefing to caller immediately. Do not query GitHub, do not read files. This is not an error — trivial single-file changes have no institutional memory to surface. <!-- Added: forge#679 -->
+**If COMPLEXITY_BAND: TRIVIAL or INVESTIGATION** → skip all phases (C-1 through C4), post NO comment, print `CONTEXT_RESULT:` with `status: SKIPPED` and `comment_url:` empty immediately. Do not query GitHub, do not read files. This is not an error — trivial single-file changes (and investigation tasks, which produce issues rather than code) have no institutional memory to surface. <!-- Added: forge#679 -->
 
 **If COMPLEXITY_BAND: STANDARD or COMPLEX** → proceed to Phase C-1 below.
 
@@ -47,8 +48,10 @@ Parse from `$ARGUMENTS`:
 - `--repo {GH_REPO}` — GitHub repo (e.g. `{owner}/{repo}` — resolved from `forge.yaml → project`)
 - `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`)
 - `--repo-path {REPO_PATH}` — local filesystem path to the worktree (e.g. `/path/to/.claude/worktrees/fix/issue-121`); used by Phase C3 grep commands
-- `{AFFECTED_FILES}` — space-separated file paths (positional, after `{NUMBER}`, before any `--functions` flag)
-- `--functions {FUNCTION_NAMES}` — space-separated function/class names extracted from the Builder Contract deliverables table (optional)
+- `--files "{AFFECTED_FILES}"` — space-separated file paths (quoted as one value; an empty value is allowed and triggers the empty-list skip)
+- `--functions "{FUNCTION_NAMES}"` — space-separated function/class names extracted from the Builder Contract deliverables table (optional)
+
+**Fail closed**: if `{NUMBER}`, `--repo`, `--gh-flag` or `--repo-path` is missing, print `CONTEXT_RESULT:` with `status: SKIPPED` and `comment_url:` empty plus a one-line `note: missing arg <name>` and stop (context is advisory — a missing arg must never block the build, but it must be visible).
 
 **Graceful skip for empty FUNCTION_NAMES**: If `--functions` is absent or `{FUNCTION_NAMES}` is empty, Phase C3 produces zero for-loop iterations and is effectively skipped — no error, no output for that phase. This is expected behavior when the contract does not name specific functions.
 
@@ -674,6 +677,12 @@ If `GIST_SUMMARIES` is non-empty, it will be included in the `### Prior Investig
 
 ---
 
+## Batch Execution of C1–C4 (MANDATORY) <!-- Added: forge#1826 -->
+
+C1, C2 (including the direct commit-body read and the pickaxe pass), C3, and C4 below are mutually independent — none consumes another's output. Issue ALL of their underlying `gh`/`git`/`grep` calls as a single batch of parallel tool calls in one message, not as four sequential steps. This is the same rule as the "independent tool calls → same message" convention used elsewhere in the pipeline; it turns a ~4x serial round-trip chain (each `gh api` call is 0.5-2s) into one wall-clock round-trip. The per-file loop inside C1 and the per-function loop inside C3 are themselves independent across iterations — include every iteration's call in the same batch rather than looping turn-by-turn. Total budget is still 20s per query / 2 min overall; batching only removes serialization, it does not change the timeout.
+
+---
+
 ## Phase C1: Past Review Findings on These Files
 
 **Primary path — Forge Ledger** (O(1) local index lookup, zero API calls): <!-- Added: forge#1732 -->
@@ -922,14 +931,15 @@ gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
 - Each `gh issue list` call: timeout after 20s, skip if exceeded
 - Each `gh pr list` call: timeout after 20s, skip if exceeded
 - Each `grep -r` call: timeout after 10s, skip if exceeded
-- Total wall time budget: **2 minutes** (C-1 through C4 combined). If budget exceeded, post partial results with `<!-- FORGE:CONTEXT:PARTIAL -->` marker instead of `COMPLETE`.
+- Total wall time budget: **2 minutes** (C-1 through C4 combined). If budget exceeded, post partial results with `<!-- FORGE:CONTEXT:PARTIAL -->` marker instead of `COMPLETE`, and report `status: PARTIAL` in `CONTEXT_RESULT:`.
+- C1–C4 are issued as one parallel batch (see Batch Execution above) — the 2-minute budget is wall time for the batch, not per step.
 
 ---
 
 ## Skip Conditions
 
-Skip the context gathering (return an empty briefing) if:
-- **COMPLEXITY_BAND: TRIVIAL** — checked via FORGE:FAST_PATH comment at entry (see guard above); post NO comment <!-- Primary skip path: forge#679 -->
+Skip the context gathering (print `CONTEXT_RESULT:` with `status: SKIPPED`) if:
+- **COMPLEXITY_BAND: TRIVIAL or INVESTIGATION** — checked via FORGE:FAST_PATH comment at entry (see guard above); post NO comment <!-- Primary skip path: forge#679 -->
 - Issue is a 1-file config or docs edit with no code logic
 - The affected files have zero git history (new files being created)
 - `{AFFECTED_FILES}` is empty (investigation produced no file list)
@@ -954,22 +964,37 @@ fi
 
 ---
 
-## Integration Point in work-on.md
+## Result Block (MANDATORY on every path)
 
-This module runs at **Step 3C.5** — after Builder Contract is posted, before Implement:
+Your final reply MUST end with exactly one block, printed after any marker comment has been posted. `work-on:build` reads only this block.
 
 ```
-3C   → Builder Contract posted
-3C.5 → [THIS MODULE] Context gathering (max 2 min)
+CONTEXT_RESULT:
+  status: COMPLETE | PARTIAL | SKIPPED
+  comment_url: {URL of the FORGE:CONTEXT comment, or empty when no comment was posted}
+```
+
+- `COMPLETE` — full `FORGE:CONTEXT:COMPLETE` comment posted.
+- `PARTIAL` — budget exceeded or a source errored; `FORGE:CONTEXT:PARTIAL` posted.
+- `SKIPPED` — any skip condition (TRIVIAL/INVESTIGATION band: no comment; other skips: minimal marker comment, give its URL if you posted or found one).
+- An error, timeout or missing arg is never a reason to omit the block and never blocks the build.
+
+---
+
+## Integration Point
+
+This module runs as build phase B3 — after the Builder Contract is posted, before Architect:
+
+```
+B2   → Builder Contract posted
+B3   → [THIS MODULE] Context gathering (max 2 min)
          Phase C-1:  Authoritative Devdocs (project-resident knowledge — highest precedence)
          Phase C-0.5: Active Peer Claims Reader (conditional — orchestration only)
          Phase C0.5: Danger-Zone Rule Cards (fixed 400-token slot — forge#1744)
          Phase C0:  Prior Investigation Findings (from Gists)
-         Phase C1:  Past Review Findings on These Files
-         Phase C2:  Past Bugs in the Same Module
-         Phase C3:  Related Code Paths
-         Phase C4:  Successful Similar Implementations
-3F   → Implement (builder now has context briefing)
+         Phases C1–C4: batched in parallel (Past Review Findings, Past Bugs, Related Code Paths, Similar Implementations)
+B4   → Architect
+B5   → Implement (builder now has context briefing)
 ```
 
 The builder agent reads the `<!-- FORGE:CONTEXT -->` comment before writing any code. If the context step was skipped, the builder proceeds with investigation report + contract only.

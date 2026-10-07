@@ -1,18 +1,21 @@
 ---
 description: Validation agent — quality gate loop, format/verify, proxy check, deploy check
-argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree PATH] [--files FILE1 FILE2...]"
+argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE} --branch {BRANCH} --base {PR_BASE} --files \"<changed files>\""
+context: fork
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # work-on/build/validate — Validation Subcommand
 
-> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+> **Skill Name Resolution (forked phase)**: `{FORGE_SKILL_PREFIX}` is the namespace this skill itself was invoked under — invoked as `forgedock:work-on:…` → `forgedock:` (nesting `:`); as `work-on:…` → empty (`install.sh`); as `forge-work-on-…` → `forge-` (Codex, nesting `-`); OpenCode → empty with `-` nesting. Confirm the target name in the available-skills list before calling it. A forked phase receives no resolved value from its caller; never guess, and if the target skill is not listed return BLOCKED "skill not found: <name>".
 
 **Input**: $ARGUMENTS
 
-**Invoked by**: `work-on.md` Step 3F.5, after `implement.md` has written and staged code (not committed).
-**Output**: Return `GATE_PASSED: true/false` to caller. On failure after max iterations, post comment and set `needs-human`.
+**Invoked by**: `work-on:build`, after `implement.md` has written and staged code (not committed). This skill runs in an isolated forked context: it sees only this text and its args, so it re-reads all other state from GitHub/git/forge.yaml.
+**Output**: End with exactly one `VALIDATE_RESULT:` block as the final reply. On failure after max iterations, post comment and set `needs-human`.
+
+**Result-on-every-exit rule**: every exit path — success, skip path, quality-gate failure, timeout, ancestry failure, missing arg, skill not found — MUST print the `VALIDATE_RESULT:` block (see Output) as the final reply. Failures use `gate_passed: false` with a `blocker` line. Never exit with a bare `exit 1` or free text.
 
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
@@ -27,25 +30,29 @@ Parse from $ARGUMENTS:
 - `{NUMBER}` — issue number (required)
 - `--repo {GH_REPO}` — GitHub repo (e.g. `{owner}/{repo}` — resolved from `forge.yaml → project`)
 - `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`)
-- `--worktree {WORKTREE_PATH}` — absolute path to the git worktree
-- `--files {CHANGED_FILES}` — space-separated list of changed files (from implement result)
+- `--worktree {WORKTREE_PATH}` — absolute path to the git worktree (required)
+- `--branch {BRANCH}` — feature branch name (required)
+- `--base {PR_BASE}` — PR base branch name without the `origin/` prefix (required; used by the V5 ancestry audit)
+- `--files {CHANGED_FILES}` — space-separated list of changed files (required; from the implement result)
+
+**Fail closed**: if `{NUMBER}`, `--repo`, `--worktree`, `--branch`, `--base`, or `--files` is missing or empty, or `{WORKTREE_PATH}` is not an existing directory, print `VALIDATE_RESULT:` with `gate_passed: false` and `blocker: missing or invalid arg: <name>` and STOP. `{GH_FLAG}` defaults to `-R {GH_REPO}` when absent.
 
 ---
 
 ## Skip Conditions
 
-Skip all phases (return `GATE_PASSED: true` immediately) if:
+Skip Phases V0–V4 (set `GATE_PASSED=true`, iterations 0) and go straight to Phase V5 (which posts the skip-path quality-gate marker, commits, and marks the build complete) if:
 - Only 1 file was changed AND it is a config or docs file with no code logic (e.g. `.md`, `.yml` with no scripts, `.env.example`)
 
 In all other cases, the gate MUST run.
 
 ---
 
-## Phase V1: Builder Self-Check — Wire-Through Proof (MANDATORY, run BEFORE quality gate loop)
+## Phase V0: Builder Self-Check — Wire-Through Proof (MANDATORY, run BEFORE the Phase V1 quality gate loop)
 
 <!-- Added: forge#1731 -->
 
-Before invoking the quality gate, the builder MUST perform a self-check on newly added conditional paths. This mirrors the quality gate's 2G.8 check and allows the builder to resolve gaps before the gate invocation rather than after.
+Before invoking the quality gate (Phase V1), the builder MUST perform a self-check on newly added conditional paths. This mirrors the quality gate's 2G.8 check and allows the builder to resolve gaps before the gate invocation rather than after.
 
 **Self-check protocol**:
 
@@ -70,6 +77,8 @@ Before invoking the quality gate, the builder MUST perform a self-check on newly
 ---
 
 ## Phase V1: Quality Gate Loop
+
+The loop runs **in this context** and calls `quality-gate` through the `Skill` tool; `quality-gate` is itself a forked skill (isolated context) that returns only its PASS/FINDINGS result lines, so no `Agent` fork is needed here. <!-- Added: forge#1825 -->
 
 **Loop protocol** — the gate MUST pass or exhaust iterations before returning:
 
@@ -103,7 +112,7 @@ if iteration == max_iterations AND result != PASS AND blocker_findings not empty
     GATE_PASSED = false
     → post comment (see V1-FAIL below)
     → add label needs-human
-    → return GATE_PASSED: false to caller, STOP
+    → print VALIDATE_RESULT with gate_passed: false (blocker = remaining findings), STOP
 ```
 
 **Quality gate invocation**:
@@ -111,13 +120,14 @@ if iteration == max_iterations AND result != PASS AND blocker_findings not empty
 Skill("{FORGE_SKILL_PREFIX}quality-gate", args="{CHANGED_FILES} --worktree {WORKTREE_PATH}")
 ```
 
-**Timeout handling**: The quality-gate's executable checks carry their own explicit timeouts; a `QUALITY-GATE-TIMEOUT` result is a failed gate iteration. Record it as HIGH, do not apply speculative fixes, and proceed to V1-FAIL immediately (post the failure comment, add `needs-human`, return `GATE_PASSED: false`). Do not retry a timed-out check. A wall-time timeout for the in-context `Skill(...)` invocation itself requires native runtime support and is not claimed by this workflow.
+**Timeout handling**: The quality-gate's executable checks carry their own explicit timeouts; a `QUALITY-GATE-TIMEOUT` result is a failed gate iteration. Record it as HIGH, do not apply speculative fixes, and proceed to V1-FAIL immediately (post the failure comment, add `needs-human`, print `VALIDATE_RESULT` with `gate_passed: false`). Do not retry a timed-out check. A wall-time timeout for the in-context `Skill(...)` invocation itself requires native runtime support and is not claimed by this workflow.
 
 **Rules**:
 - Re-run after EVERY fix pass — never trust that fixes resolved findings without verification
 - Each iteration re-scans ALL changed files — fixes can introduce new issues
 - Only HIGH and MEDIUM findings must be fixed; LOW findings are advisory only
 - `TEST-QUARANTINE | LOW` findings (pre-broken or flaky tests classified by Step 2R) do **not** require fixing and do **not** count toward gate failure — include them in the V5 commit comment for reviewer visibility
+- If the `quality-gate` skill is not found under either name, STOP and print `VALIDATE_RESULT` with `gate_passed: false`, `blocker: skill not found: quality-gate` — never run the gate inline
 
 **V1-FAIL comment** (post when gate never passes):
 ```bash
@@ -131,6 +141,7 @@ Quality gate findings persist after 3 fix passes. Flagging for human review.
 Needs human review before proceeding to commit.
 
 <!-- FORGE:GATE_FAILED -->"
+gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" # allowlist:check-command-side-effects
 ```
 
 ---
@@ -209,11 +220,81 @@ fi
 ```
 Typecheck or build failures are BLOCKING — fix type errors before continuing.
 
-**Shell scripts**: Verify service interactions — read target middleware files, document what was verified in V4 summary.
+**Shell scripts**: Verify service interactions — read target middleware files, document what was verified in the V5 summary.
 
 **Markdown / config files**: No format step required.
 
 If no files match a language category, skip that language's step.
+
+### Known-slow test gate <!-- Added: forge#1861 -->
+
+Before running any test command below, check it against `verification.known_slow_tests` (a repo-declared list of test patterns known to hang or make live network/LLM calls). When absent or empty, this is a no-op and behavior is unchanged.
+
+```bash
+cd {WORKTREE_PATH}
+# Read directly from forge.yaml (static, operator-declared config).
+KNOWN_SLOW_TESTS=$(yq -o=json -I=0 '.verification.known_slow_tests // []' forge.yaml 2>/dev/null || echo '[]')
+
+# apply_known_slow_filter <cmd> — echoes the command to actually run, or "" to
+# skip it entirely. Matching is substring match of `pattern` against the full
+# command text. Exactly one of skip/subset is expected per matched entry.
+apply_known_slow_filter() {
+  local cmd="$1"
+  local out="$cmd"
+  if [ -n "$KNOWN_SLOW_TESTS" ] && [ "$KNOWN_SLOW_TESTS" != "[]" ] && [ "$KNOWN_SLOW_TESTS" != "null" ]; then
+    while IFS= read -r entry; do
+      [ -z "$entry" ] && continue
+      pattern=$(echo "$entry" | yq '.pattern // ""')
+      skip=$(echo "$entry" | yq '.skip // false')
+      subset=$(echo "$entry" | yq '.subset // ""')
+      reason=$(echo "$entry" | yq '.reason // "no reason given"')
+      [ -z "$pattern" ] && continue
+      case "$cmd" in
+        *"$pattern"*)
+          if [ "$skip" = "true" ]; then
+            echo "SKIPPED — known-slow test matched pattern '$pattern' ($reason)" >&2
+            out=""
+          elif [ -n "$subset" ]; then
+            echo "SUBSTITUTED — known-slow test matched pattern '$pattern' ($reason); running safe subset instead" >&2
+            out="$subset"
+          fi
+          ;;
+      esac
+    done < <(echo "$KNOWN_SLOW_TESTS" | yq -o=json -I=0 '.[]' 2>/dev/null)
+  fi
+  echo "$out"
+}
+```
+
+### Learned test commands <!-- Added: forge#667, forge#1861 -->
+
+After all `verification.commands` steps complete, run any commands from `forge.yaml → learned.test_commands` (captured from owner corrections or set manually), filtered through the known-slow gate above. This phase reads `learned:` itself — no value is passed in from the caller.
+
+```bash
+cd {WORKTREE_PATH}
+LEARNED_TEST_COMMANDS=$(yq -o=json -I=0 '.learned.test_commands // []' forge.yaml 2>/dev/null || echo '[]')
+LEARNED_FAILED=0
+if [ -n "$LEARNED_TEST_COMMANDS" ] && [ "$LEARNED_TEST_COMMANDS" != "[]" ] && [ "$LEARNED_TEST_COMMANDS" != "null" ]; then
+  echo "Running learned test commands..."
+  while IFS= read -r cmd; do
+    [ -z "$cmd" ] && continue
+    FILTERED_CMD=$(apply_known_slow_filter "$cmd")
+    [ -z "$FILTERED_CMD" ] && continue
+    echo "Running learned command: $FILTERED_CMD"
+    CMD_OUTPUT=$(run_verification_command "learned.test_commands" "$FILTERED_CMD")
+    CMD_EXIT=$?
+    echo "$CMD_OUTPUT" | tail -30
+    if [ "$CMD_EXIT" -ne 0 ]; then
+      echo "FAILED (exit $CMD_EXIT): $FILTERED_CMD"
+      LEARNED_FAILED=1
+    fi
+  done < <(echo "$LEARNED_TEST_COMMANDS" | yq -r '.[]' 2>/dev/null)
+else
+  echo "No learned test commands configured — skipping"
+fi
+```
+
+Learned test command failures (`LEARNED_FAILED=1`) are BLOCKING (same as `verification.commands` failures) — fix and re-run. A command matched and skipped by the known-slow gate is never executed and never counted as a failure.
 
 ---
 
@@ -233,7 +314,7 @@ grep -n "127.0.0.1" {CHANGED_TS_FILES}
 
 If violations found:
 1. Fix them in `{WORKTREE_PATH}`
-2. Document fixes in V4 summary
+2. Document fixes in the V5 summary
 
 ---
 
@@ -340,12 +421,29 @@ Classify:
 
 **Skip if**: No new environment variables were introduced in the changed files.
 
-Detect new env vars:
+Detect new env vars (staged + unstaged changes versus `HEAD`; the commit has not happened yet, so the diff base is `HEAD`, not `HEAD~1`):
 ```bash
 cd {WORKTREE_PATH}
-git diff HEAD~1 -- {CHANGED_FILES} | grep -oP '(?<=os\.environ\[")[^"]+|(?<=os\.getenv\()["\']?[A-Z_]+' | sort -u
-# Also check TypeScript:
-git diff HEAD~1 -- {CHANGED_FILES} | grep -oP 'process\.env\.\K[A-Z_]+' | sort -u
+ADDED_LINES=$(git diff HEAD -- {CHANGED_FILES} | grep -E '^\+' | grep -v '^+++')
+{
+  # Python: os.environ["VAR"], os.getenv("VAR")
+  echo "$ADDED_LINES" | grep -oE 'os\.environ\["[^"]+' | sed 's/^os\.environ\["//'
+  echo "$ADDED_LINES" | grep -oE "os\.getenv\([\"']?[A-Z_]+" | sed -E "s/^os\.getenv\([\"']?//"
+  # TypeScript: process.env.VAR
+  echo "$ADDED_LINES" | grep -oE 'process\.env\.[A-Z_]+' | sed 's/^process\.env\.//'
+} | sort -u
+```
+
+**Config variables used by this phase** (set in `forge.yaml`):
+- `deploy.secrets_backend` — secrets delivery method (`sops`, `aws-sm`, `vault`, `ci-env`, `none`). When absent or not `sops`, SOPS-specific checks below are skipped with an explicit log message.
+- `verification.services[name].container` — container name for post-deploy verification. Resolved by matching the service name; falls back to `{service}` (bare name) when not configured.
+
+```bash
+cd {WORKTREE_PATH}
+SECRETS_BACKEND=$(yq '.deploy.secrets_backend // ""' forge.yaml 2>/dev/null || echo '')
+if [ "$SECRETS_BACKEND" != "sops" ]; then
+    echo 'SKIP: SOPS chain check — deploy.secrets_backend is not "sops". Configure deploy.secrets_backend in forge.yaml to enable.'
+fi
 ```
 
 For each new env var found, verify it is present in ALL required locations:
@@ -353,53 +451,116 @@ For each new env var found, verify it is present in ALL required locations:
 | Location | Required for |
 |----------|-------------|
 | `.env.example` | All new vars |
-| `infra/secrets/prod.enc.yaml` (SOPS) | Production secrets |
-| `infra/decrypt-secrets.sh` ENV_MAPPING | All vars in deploy chain |
-| `app/env_validation.py` | API service vars |
-| `docker-compose.prod.yml` | Vars needing explicit injection |
+| Secrets backend (see `deploy.secrets_backend`) | Secret vars — skip if backend is `none` or unset |
+| `app/env_validation.py` | API service vars (if project has one) |
+| `docker-compose.prod.yml` | Vars needing explicit injection (if project uses Docker Compose) |
 
-**Deploy chain**: SOPS → `decrypt-secrets.sh` (ENV_MAPPING) → `.env.secrets` → `merge-env-secrets.sh` → `.env.production` → docker-compose `env_file`.
+**Secrets backend check** *(trigger: `deploy.secrets_backend == "sops"`)*: verify the new var is present in all SOPS chain locations:
+- `infra/secrets/prod.enc.yaml` — SOPS-encrypted secret store
+- `infra/decrypt-secrets.sh` ENV_MAPPING — maps SOPS key to env var name
+- Deploy chain: SOPS → `decrypt-secrets.sh` (ENV_MAPPING) → `.env.secrets` → `merge-env-secrets.sh` → `.env.production` → docker-compose `env_file`
 
 If any required location is missing the var:
 1. Add it to the missing location in `{WORKTREE_PATH}`
-2. Document the addition in V4 summary
-3. These additions are NOT new commits — they should be staged and committed together with any other pending fixes, or as a separate commit if clean
+2. Document the addition in the V5 summary
+3. These additions are NOT new commits — they are absorbed into the single V5 commit
+
+**Operator-set var classification** *(trigger: new env var is NOT in the configured secrets backend)*: <!-- Added: forge#380 -->
+
+Some env vars are operator-set (non-secret, not sourced from the secrets backend) — they must be manually added to the runtime environment on the production server. When a new env var has no entry in the secrets backend, classify it as operator-set and add a **HARD BLOCKER** item to the Testing Checklist (in the FORGE:BUILDER comment).
+
+Resolve the container name for the verification command:
+1. Look up the service in `forge.yaml → verification.services[]` by name — use the `container` field if present.
+2. If no matching entry, fall back to the bare service name: `{service}` (no suffix).
+
+```
+- [ ] HARD BLOCKER: Add {VAR_NAME} to the runtime environment on the production server.
+      This var is operator-set — it does NOT flow through the automated secrets chain.
+      It must be added manually before or after deploy.
+      Verify with: docker exec {CONTAINER_NAME} env | grep {VAR_NAME}
+      (CONTAINER_NAME resolved from verification.services[{service}].container in forge.yaml,
+       or bare service name if not configured)
+```
+
+**`env_file` re-read warning** *(trigger: any new env var added to `.env.production` path)*:
+
+> **Docker `env_file` re-read behavior**: New entries in `.env.production` are only read when a container is **recreated** (e.g., `docker compose up --force-recreate`). A plain `docker restart` restarts the existing container with its frozen env — new `env_file` entries are silently absent. The standard deploy workflow uses `--force-recreate` and handles this correctly. If any out-of-band restart is used, new env vars will not take effect.
+
+Add this warning to the Testing Checklist whenever a new env var is introduced (whether secret or operator-set).
+
+**Post-deploy in-container verification** *(trigger: any new env var)*: add the following to the Testing Checklist so the deployer can confirm delivery after deploy. Resolve `{CONTAINER_NAME}` from `forge.yaml → verification.services[{service}].container`; use `{service}` (bare) if the field is absent.
+
+```bash
+# Verify env var reached the running container (run post-deploy)
+docker exec {CONTAINER_NAME} env | grep {VAR_NAME}
+# Expected: {VAR_NAME}={value}
+# If blank: container was not recreated — run: docker compose up --no-deps --force-recreate {service}
+```
 
 ---
 
-## Phase V5: Commit (always — after GATE_PASSED=true)
+## Phase V5: Marker, Commit, Audit, Complete (always — after GATE_PASSED=true)
 
-After the gate passes, commit all staged changes in a single commit. This includes:
+Phase V5 runs in this exact order: **(1)** post the `FORGE:QUALITY_GATE` marker, **(2)** commit, **(3)** ancestry audit, **(4)** append `FORGE:BUILDER:COMPLETE` and the verification status. Do not reorder.
+
+### V5 Step 1: Post FORGE:QUALITY_GATE Marker (MANDATORY, before the commit) <!-- Added: forge#3061 -->
+
+The quality gate must leave a checkable artifact. `scripts/verify-phase-trail.sh` (run before PR creation and before auto-merge) requires a `FORGE:QUALITY_GATE` comment with `**Result**: PASS` for every non-docs-only change. Post it after the V1 loop ends, recording the real commands run and their real results. The marker records the staged tree (`**Tree**`) so a PASS from an earlier build commit cannot satisfy the gate for a later one: any edit after the gate requires re-running validate. Do NOT hand-post this marker without having actually run the gate: a marker with no run behind it is a pipeline bypass.
+
+**Skip-path marker**: when the Skip Conditions above set `GATE_PASSED=true` early (single config/docs file), still post the marker with `**Result**: PASS (skipped — single config/docs file)` and `**Iterations**: 0`, so the verifier never has to guess. The verifier's `--docs-only` waiver additionally covers diffs accepted by `scripts/is-docs-only.sh` (allowlisted Markdown only: `docs/**` or root README/CHANGELOG/CONTRIBUTING/SECURITY/GOVERNANCE; nested `AGENTS.md`/`CLAUDE.md`/`SKILL.md`/`GEMINI.md` and the instruction directories `commands/`, `devdocs/`, `templates/`, `skills/`, `agents/`, `hooks/`, `.claude/`, `.claude-plugin/`, `.agents/`, `.codex/`, `.cursor/`, `.github/`, `.opencode/`, `.gemini/`, `.kiro/` excluded; callers feed both sides of renames).
+
+```bash
+GATE_RESULT=$([ "$GATE_PASSED" = "true" ] && echo PASS || echo FAIL)
+# Bind the PASS to what was actually gated: the staged tree is exactly the tree the V5 commit will have.
+# scripts/verify-phase-trail.sh --head-tree (work-on/review.md R1.5) rejects a PASS recorded for a different tree. <!-- Added: forge#3149 -->
+git -C {WORKTREE_PATH} add -u   # same staging as the commit below; valid only because V2-V4 are done
+GATE_TREE=$(git -C {WORKTREE_PATH} write-tree)
+QG_BODY="<!-- FORGE:QUALITY_GATE -->
+## Quality Gate Result
+
+**Result**: ${GATE_RESULT}
+**Tree**: ${GATE_TREE}
+**Iterations**: {N}
+**Commands run**: {quality-gate invocation, format/verify commands, test commands actually executed}
+**Findings remaining**: {none | summary}"
+gh issue comment {NUMBER} {GH_FLAG} --body "$QG_BODY" # allowlist:check-command-side-effects
+```
+
+### V5 Step 2: Commit
+
+After the marker is posted, commit all staged changes in a single commit. This includes:
 - The implementation changes staged by `implement.md` Phase I4
 - Any format, proxy, or deploy fixes applied by phases V2–V4
 
 ```bash
 cd {WORKTREE_PATH}
 git add -u
-git commit -s -m "fix({SCOPE}): {description} (#NUMBER)"
+git commit -s -m "fix({SCOPE}): {description} (#{NUMBER})"
 ```
 
 Where `{SCOPE}` is the command or module scope from the contract (e.g. `work-on`, `quality-gate`), and `{description}` summarises the implementation. Use the commit convention from the contract:
 - Bug Fix → `fix(`
 - Feature → `feat(`
 - Refactor → `refactor(`
+- Docs-only → `docs(`
 
-This is the **only** commit for this build cycle. It replaces the old `git commit` that was previously in `implement.md` Phase I4. Do NOT create a separate commit for validation fixes — they are absorbed into this single commit.
+Reference `#{NUMBER}` in the message. This is the **only** commit for this build cycle. Do NOT create a separate commit for validation fixes — they are absorbed into this single commit.
 
 **Attribution**: The commit message is exactly the conventional-commit line above — nothing more. Do NOT append a `Co-Authored-By: Claude` trailer, a `🤖 Generated with Claude Code` line, or any assistant-tool attribution. Pipeline output is ForgeDock-branded; the assistant signature must never enter the repo's commit history. (A PreToolUse guard hard-blocks it as a backstop — see `bin/hooks/pre-tool-use.mjs` Rule 5.)
 
-### V5 Post-Commit Ancestry Audit (MANDATORY)
+### V5 Step 3: Post-Commit Ancestry Audit (MANDATORY)
 
-After committing, run the ancestry audit to detect merge commits from unrelated branches before the branch is pushed:
+After committing, run the ancestry audit to detect merge commits from unrelated branches before the branch is pushed. If `origin/{PR_BASE}` does not exist yet (new branch), skip this check — no contamination is possible from a non-existent base.
 
 ```bash
 cd {WORKTREE_PATH}
-MERGE_COMMITS=$(git log --merges HEAD ^origin/{PR_BASE} 2>/dev/null)
-if [ -n "$MERGE_COMMITS" ]; then
-  echo "ANCESTRY AUDIT FAILED: merge commits from unrelated branches detected on this branch:"
-  echo "$MERGE_COMMITS"
-  # Block push — do NOT proceed to review.md R1
-  gh issue comment {NUMBER} {GH_FLAG} --body "## Ancestry Audit Failed
+if git ls-remote --exit-code origin {PR_BASE} >/dev/null 2>&1; then
+  git fetch origin {PR_BASE} >/dev/null 2>&1 || true
+  MERGE_COMMITS=$(git log --merges HEAD ^origin/{PR_BASE} 2>/dev/null)
+  if [ -n "$MERGE_COMMITS" ]; then
+    echo "ANCESTRY AUDIT FAILED: merge commits from unrelated branches detected on this branch:"
+    echo "$MERGE_COMMITS"
+    ANCESTRY_BODY="## Ancestry Audit Failed
 
 Branch \`{BRANCH}\` contains merge commits from branches outside the PR base (\`{PR_BASE}\`). This is a staging contamination risk — these commits may carry code from milestone branches that has not been approved for \`{PR_BASE}\`.
 
@@ -411,59 +572,52 @@ ${MERGE_COMMITS}
 Human review required before this branch can be pushed.
 
 <!-- FORGE:ANCESTRY_FAILED -->"
-  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
-  # Return GATE_PASSED: false — do not push
-  exit 1
+    gh issue comment {NUMBER} {GH_FLAG} --body "$ANCESTRY_BODY" # allowlist:check-command-side-effects
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" # allowlist:check-command-side-effects
+    echo "ANCESTRY_FAILED=1"
+  fi
+else
+  echo "PR_BASE not on origin — skipping ancestry audit"
 fi
 ```
 
-If `origin/{PR_BASE}` does not exist yet (new branch), skip this check — no contamination is possible from a non-existent base. Detect with:
-```bash
-git ls-remote --exit-code origin {PR_BASE} >/dev/null 2>&1 || echo "PR_BASE not on origin — skipping ancestry audit"
-```
+If the output contains `ANCESTRY_FAILED=1`: do NOT append `:COMPLETE` and do NOT push. Print `VALIDATE_RESULT` with `gate_passed: false` and `blocker: ancestry audit failed — merge commits from unrelated branches` as the final reply, and STOP.
 
-### V5 Pre-Commit: Post FORGE:QUALITY_GATE Marker (MANDATORY unless docs-only) <!-- Added: forge#3061 -->
+### V5 Step 4: Mark Build Complete and Record Verification Status (MANDATORY)
 
-The quality gate must leave a checkable artifact. `scripts/verify-phase-trail.sh` (run before PR creation and before auto-merge) requires a `FORGE:QUALITY_GATE` comment with `**Result**: PASS` for every non-docs-only change. Post it after the V1 loop ends, recording the real commands run and their real results. The marker records the staged tree (`**Tree**`) so a PASS from an earlier build commit cannot satisfy the gate for a later one: any edit after the gate requires re-running validate. Do NOT hand-post this marker without having actually run the gate: a marker with no run behind it is a pipeline bypass.
+After the ancestry audit passes (or is skipped), patch the existing FORGE:BUILDER comment: add the `**Verification Status**` line, the best-effort `cost_usd:` line, and the `<!-- FORGE:BUILDER:COMPLETE -->` marker. This is the **only** place the marker is written — it signals that a real commit exists on the branch and the build is safe to resume-skip. <!-- Added: forge#1305 -->
 
-**Skip-path marker**: when the Skip Conditions above return `GATE_PASSED: true` early (single config/docs file), still post the marker with `**Result**: PASS (skipped — single config/docs file)` and `**Iterations**: 0`, so the verifier never has to guess. The verifier's `--docs-only` waiver additionally covers diffs accepted by `scripts/is-docs-only.sh` (allowlisted Markdown only: `docs/**` or root README/CHANGELOG/CONTRIBUTING/SECURITY/GOVERNANCE; nested `AGENTS.md`/`CLAUDE.md`/`SKILL.md`/`GEMINI.md` and the instruction directories `commands/`, `devdocs/`, `templates/`, `skills/`, `agents/`, `hooks/`, `.claude/`, `.claude-plugin/`, `.agents/`, `.codex/`, `.cursor/`, `.github/`, `.opencode/`, `.gemini/`, `.kiro/` excluded; callers feed both sides of renames).
+`SKIPPED_CHECKS` comes from Phase V2. Shell state may not persist between Bash calls, so set it here from your V2 notes before running the block (comma-separated check names, empty when every configured check ran).
 
-```bash
-GATE_RESULT=$([ "$GATE_PASSED" = "true" ] && echo PASS || echo FAIL)
-# Bind the PASS to what was actually gated: the staged tree is exactly the tree the V5 commit will have.
-# scripts/verify-phase-trail.sh --head-tree (work-on/review.md R1.5) rejects a PASS recorded for a different tree. <!-- Added: forge#3149 -->
-git -C {WORKTREE_PATH} add -u
-GATE_TREE=$(git -C {WORKTREE_PATH} write-tree)
-QG_BODY="<!-- FORGE:QUALITY_GATE -->
-## Quality Gate Result
-
-**Result**: ${GATE_RESULT}
-**Tree**: ${GATE_TREE}
-**Iterations**: {N}
-**Commands run**: {quality-gate invocation, format/verify commands, test commands actually executed}
-**Findings remaining**: {none | summary}"
-gh issue comment {NUMBER} {GH_FLAG} --body "$QG_BODY" # <!-- allowlist:check-command-side-effects -->
-```
-
----
-
-### V5 Post-Commit: Mark Build Complete (MANDATORY)
-
-After the ancestry audit passes (or is skipped), append `<!-- FORGE:BUILDER:COMPLETE -->` to the existing FORGE:BUILDER comment. This is the **only** place this marker is written — it signals that a real commit exists on the branch and the build is safe to resume-skip. <!-- Added: forge#1305 -->
+**Cost line reconciliation**: the machine-readable `cost_usd:` line (best-effort; only when `PHASE_COST_USD` is available, never blocking) is the single cost signal. Do not add a separate `**Cost (build phase)**` line.
 
 ```bash
+# SKIPPED_CHECKS: set from the V2 notes, e.g. SKIPPED_CHECKS="python.format, typescript.typecheck/build"
+SKIPPED_CHECKS="${SKIPPED_CHECKS:-}"
+if [ -z "$SKIPPED_CHECKS" ]; then
+  VERIFICATION_STATUS="✅ All configured verification commands passed"
+else
+  VERIFICATION_STATUS="⚠ Verification NOT run: ${SKIPPED_CHECKS} — verification.commands not configured for these checks"
+fi
+
 # Find the FORGE:BUILDER comment posted by implement.md Phase I6
 BUILDER_COMMENT_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '[.[] | select(.body | contains("FORGE:BUILDER") and (contains("FORGE:BUILDER:COMPLETE") | not))] | last | .id // ""')
 
 if [ -n "$BUILDER_COMMENT_ID" ]; then
-  # Fetch current body and append the completion marker plus best-effort cost signal
   CURRENT_BODY=$(gh api repos/{GH_REPO}/issues/comments/$BUILDER_COMMENT_ID --jq '.body')
+  # Insert the Verification Status line after the "**Files changed**" line (idempotent).
+  if printf '%s' "$CURRENT_BODY" | grep -q '^\*\*Verification Status\*\*'; then
+    PATCHED_BODY="$CURRENT_BODY"
+  else
+    PATCHED_BODY=$(printf '%s\n' "$CURRENT_BODY" | awk -v vs="**Verification Status**: ${VERIFICATION_STATUS}" \
+      '{print} /^\*\*Files changed\*\*/ && !done {print vs; done=1}')
+  fi
   # Best-effort cost append: only include if session telemetry provides a value; never block
   PHASE_COST_LINE=""
   [ -n "${PHASE_COST_USD:-}" ] && PHASE_COST_LINE="
 cost_usd: ${PHASE_COST_USD}"
-  UPDATED_BODY="${CURRENT_BODY}${PHASE_COST_LINE}
+  UPDATED_BODY="${PATCHED_BODY}${PHASE_COST_LINE}
 
 <!-- FORGE:BUILDER:COMPLETE -->"
   gh api repos/{GH_REPO}/issues/comments/$BUILDER_COMMENT_ID \
@@ -475,13 +629,13 @@ else
 fi
 ```
 
-**Why here and not in implement.md**: The commit (`git commit`) runs in this phase (V5). Appending `:COMPLETE` after the commit ensures that a session crash between implement.md I6 (comment posted) and this step (commit) leaves a partial BUILDER comment without `:COMPLETE`. The next resume will detect the partial comment, delete it, and restart the build. See `implement.md § Phase I1 resume check`.
+**Why here and not in implement.md**: The commit (`git commit`) runs in Step 2. Appending `:COMPLETE` after the commit and ancestry audit ensures that a session crash between implement.md I6 (comment posted) and this step leaves a partial BUILDER comment without `:COMPLETE`. The next resume will detect the partial comment, delete it, and restart the build. See `implement.md § Phase I1 resume check`.
 
 ---
 
 ## Output
 
-Return structured output to the caller:
+The final reply is exactly one `VALIDATE_RESULT:` block — on every exit path (success, skip path, and every failure):
 
 ```
 VALIDATE_RESULT:
@@ -499,18 +653,17 @@ VALIDATE_RESULT:
 
 ---
 
-## Integration Point in work-on.md
+## Integration Point
 
-This module runs at **Step 3F.5** — after implement, before commit (3J) and PR creation (Phase 4):
+This module is invoked by `work-on:build` after implement and before review:
 
 ```
-3F  → Implement (by implement.md) — code written, staged (not committed)
-3F.5 → [THIS MODULE] Validate — gate loop, format, proxy, browser signals, deploy checks
-3G  → (covered by Phase V2 above)
-3H  → (covered by Phase V3 above)
-3H.5 → (covered by Phase V3.6 above — browser signal check for UI changes)
-3I  → (covered by Phase V4 above)
-3J  → V5 commit happens here after GATE_PASSED=true (single commit for implementation + any fixes)
+implement (work-on:build:implement) — code written, staged (not committed), FORGE:BUILDER posted
+  → [THIS MODULE] validate
+      V0 self-check → V1 quality-gate loop (Skill quality-gate, forked) → V2 format/verify + known-slow/learned tests
+      → V3 proxy wiring → V3.5 DB advisory → V3.6 browser signals → V4 deploy completeness
+      → V5 marker → commit → ancestry audit → BUILDER:COMPLETE
+review (work-on:review) — push, PR, merge
 ```
 
-If `VALIDATE_RESULT: gate_passed: false`, the router adds `needs-human` label and stops — no PR is created.
+If `VALIDATE_RESULT: gate_passed: false`, the build skill reports BLOCKED (`needs-human` is set) and no PR is created.

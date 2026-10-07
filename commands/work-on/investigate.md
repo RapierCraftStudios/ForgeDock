@@ -1,6 +1,7 @@
 ---
 description: Investigate a GitHub issue — validate it's real, determine root cause, post findings
-argument-hint: "[issue number] [--repo {owner}/{repo}] [--gh-flag \"-R {owner}/{repo}\"]"
+argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\""
+context: fork
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -11,7 +12,9 @@ argument-hint: "[issue number] [--repo {owner}/{repo}] [--gh-flag \"-R {owner}/{
 
 Standalone investigation phase for the work-on pipeline. Validates whether an issue is real, determines root cause, posts a structured FORGE:INVESTIGATOR comment to GitHub, and updates workflow labels.
 
-**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (1A label set, `FORGE:CHECKPOINT` writes) stay at this tier because they're interleaved with the reasoning-heavy investigation steps in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies". <!-- Added: forge#1827 -->
+This skill runs in an **isolated forked context**: it sees only this file and its args. It has no variables from the caller — every other piece of state is re-read from GitHub/git here. It ends by printing exactly one `INVESTIGATE_RESULT:` block (see `## Output`) as its final reply, on **every** exit path (success, ALREADY_DONE, INVALID, BLOCKED).
+
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (1A label set, 1D label transitions) stay at this tier because they're interleaved with the reasoning-heavy investigation steps in the same forked `Skill()` invocation. <!-- Added: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
 <!-- FORGE:SPEC_LOADED — work-on/investigate.md loaded and active. Agent is bound by this spec. -->
@@ -20,14 +23,98 @@ Standalone investigation phase for the work-on pipeline. Validates whether an is
 
 ## Inputs
 
-Parse from $ARGUMENTS:
+Parse from $ARGUMENTS (`{NUMBER} --repo {GH_REPO} --gh-flag "{GH_FLAG}"`):
 - `{NUMBER}` — issue number (required)
-- `--repo {GH_REPO}` — GitHub repo (e.g. `{owner}/{repo}` — resolved from `forge.yaml → project`)
+- `--repo {GH_REPO}` — GitHub repo (e.g. `{owner}/{repo}`)
 - `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`)
 
-If called from `work-on`, these are passed through. If invoked standalone, `--repo` and `--gh-flag` are resolved from `forge.yaml → project`.
+The router passes all three. If `--repo` / `--gh-flag` are absent (standalone use), resolve them from `forge.yaml → project`.
+
+**Fail closed**: if `{NUMBER}` is missing/non-numeric, or `{GH_REPO}` cannot be determined, print the result block below and stop — do not guess:
+
+```
+INVESTIGATE_RESULT:
+  status: BLOCKED
+  verdict: null
+  confidence: null
+  decompose: null
+  comment_url: null
+  gist_url: null
+  milestone_index_url: null
+  blocker: missing required arg: <which one>
+```
+
+**Execution order**: run the Phase 1A resume check FIRST. If it reports ALREADY_DONE, print that result and stop — skip Phases 0.5, 0.6 and everything else. Otherwise run 0.5 → 0.6 → 1A (label) → 1A.5 → 1B → 1C → 1C.5 → 1C.6 → 1D.
 
 ---
+
+## Script resolution
+
+**Shell state does not persist between Bash tool calls** (each call is a fresh shell): paste the block below at the top of every bash command in this skill that calls `resolve_script` or uses `FORGE_ROOT`/`UNIVERSAL_DIR`.
+
+```bash
+# Canonical script resolution (keep byte-identical across specs; guarded by scripts/forge-root.test.sh).
+# Shell state does NOT persist between Bash tool calls: include this whole block at the top of
+# every command that uses resolve_script or FORGE_ROOT.
+REPO_PATH="${REPO_PATH:-$(yq '.paths.root // ""' forge.yaml 2>/dev/null)}"
+[ -n "$REPO_PATH" ] && [ "$REPO_PATH" != "null" ] || REPO_PATH="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+ADAPTIVE_DIR_RAW="${REPO_PATH}/$(yq '.adaptive_scripts.directory // ".forgedock/scripts"' forge.yaml 2>/dev/null || echo '.forgedock/scripts')"
+ADAPTIVE_DIR=$(realpath -m "$ADAPTIVE_DIR_RAW" 2>/dev/null || echo "$ADAPTIVE_DIR_RAW")
+ADAPTIVE_ENABLED=$(yq '.adaptive_scripts.enabled // "true"' forge.yaml 2>/dev/null || echo 'true')
+# Bounds check: reject adaptive_scripts.directory values that escape the repo root.
+# Normalize REPO_PATH the same way ADAPTIVE_DIR is normalized (realpath -m) so a trailing
+# slash in paths.root does not inject a '//' into the glob and trigger a false positive.
+REPO_PATH_NORM=$(realpath -m "$REPO_PATH" 2>/dev/null || echo "$REPO_PATH")
+if [[ "$ADAPTIVE_DIR" != "${REPO_PATH_NORM}/"* ]]; then
+  echo "WARNING: adaptive_scripts.directory resolves outside repo root ('$ADAPTIVE_DIR') — adaptive tier disabled" >&2
+  ADAPTIVE_ENABLED=false
+fi
+# ForgeDock's own install root (holds scripts/ and commands/), resolved ONCE by the canonical bootstrap
+# below — never the consumer repo: plugin installs set neither FORGE_HOME nor FORGEDOCK_HOME, and a
+# repo-relative fallback would execute (or miss) a same-named script controlled by the consumer repo.
+# Resolution: $FORGEDOCK_HOME (authoritative when set) > $FORGE_HOME > $CLAUDE_PLUGIN_ROOT > the
+# ~/.claude/commands symlink target > the Claude Code plugin cache/marketplace dirs. <!-- forge#3098 -->
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
+  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
+  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
+  _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+  # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
+  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
+  while IFS= read -r _c; do
+    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
+  done <<< "$_k"
+fi
+UNIVERSAL_DIR="${FORGE_ROOT:+$FORGE_ROOT/scripts}"   # empty => tier 3 skipped, prose tier
+# NOTE: never resolve this via `which` or `find` — universal scripts are
+# install-relative, not installed on $PATH, so a PATH lookup always misses.
+# FORGE_ROOT (above) is the deterministic resolution; there is NO repo-path fallback.
+# Pipeline agents MUST NOT use `find` (unbounded or filesystem-wide) to
+# locate pipeline scripts under any circumstances: if UNIVERSAL_DIR/${operation}.sh
+# does not exist, resolve_script() falls through to Tier 4 (prose) below,
+# which is always safe and available. A missing script is never a reason
+# to search the filesystem. <!-- Added: forge#1984 -->
+
+resolve_script() {
+  local operation="$1"
+  # Tier 2: per-repo adaptive (skip if disabled)
+  if [ "$ADAPTIVE_ENABLED" != "false" ] && [ -f "${ADAPTIVE_DIR}/${operation}.sh" ]; then
+    echo "adaptive:${ADAPTIVE_DIR}/${operation}.sh"
+    return
+  fi
+  # Tier 3: universal script
+  if [ -n "$UNIVERSAL_DIR" ] && [ -f "${UNIVERSAL_DIR}/${operation}.sh" ]; then
+    echo "universal:${UNIVERSAL_DIR}/${operation}.sh"
+    return
+  fi
+  # Tier 4: prose fallback
+  echo "prose:"
+}
+```
+
 
 ## Phase 0.5: Memory Retrieval — Prior Run Priors <!-- Added: forge#1316 -->
 
@@ -257,24 +344,123 @@ Store `RECALL_ISSUE_CITATIONS` in a variable — it is used in Phase 1C to popul
 
 ## Phase 1A: Load Issue & Check Resume State
 
+Re-read all state from GitHub (this fork has no inherited context):
+
 ```bash
-gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,comments
-gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | {id: .id, body: .body}'
+gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state
 ```
 
-**Resume logic**:
-- If `<!-- FORGE:INVESTIGATOR -->` comment exists AND (`<!-- INVESTIGATION:COMPLETE -->` OR `<!-- INVESTIGATION:INVALID -->`) is present in the SAME comment → investigation already complete, EXIT (return existing verdict to caller). `INVESTIGATION:INVALID` is the terminal sentinel Phase 1C emits for an INVALID verdict (see Phase 1C below) — it is just as much a completion marker as `INVESTIGATION:COMPLETE`, not an "interrupted" state.
-- If `<!-- FORGE:INVESTIGATOR -->` comment exists BUT NEITHER `<!-- INVESTIGATION:COMPLETE -->` NOR `<!-- INVESTIGATION:INVALID -->` is present → investigation was interrupted, delete the partial comment and restart:
-  ```bash
-  gh api repos/{GH_REPO}/issues/comments/{COMMENT_ID} -X DELETE
-  ```
-- If no investigator comment → proceed with fresh investigation
+**Resume check** — run this FIRST (before Phase 0.5):
 
-**Set label**:
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:investigating"
-gh issue edit {NUMBER} {GH_FLAG} --remove-label "workflow:ready-to-build,workflow:building,workflow:in-review" 2>/dev/null || true
+COMMENTS_JSON=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate --jq '.[] | {id: .id, url: .html_url, body: .body}' 2>/dev/null | jq -s '.' 2>/dev/null)
+[ -z "$COMMENTS_JSON" ] && COMMENTS_JSON='[]'
+
+# Complete = INVESTIGATOR header AND (COMPLETE or INVALID sentinel) in the SAME comment. Use the last such comment.
+DONE_JSON=$(echo "$COMMENTS_JSON" | jq -c '[.[] | select(.body | contains("<!-- FORGE:INVESTIGATOR -->"))
+  | select((.body | contains("<!-- INVESTIGATION:COMPLETE -->")) or (.body | contains("<!-- INVESTIGATION:INVALID -->")))] | last // empty')
+
+# Partial = INVESTIGATOR header but NEITHER sentinel (interrupted run)
+PARTIAL_IDS=$(echo "$COMMENTS_JSON" | jq -r '.[] | select(.body | contains("<!-- FORGE:INVESTIGATOR -->"))
+  | select((.body | contains("<!-- INVESTIGATION:COMPLETE -->") | not) and (.body | contains("<!-- INVESTIGATION:INVALID -->") | not)) | .id')
+
+if [ -n "$DONE_JSON" ]; then
+  DONE_BODY=$(echo "$DONE_JSON" | jq -r '.body')
+  DONE_URL=$(echo "$DONE_JSON" | jq -r '.url')
+  R_VERDICT=$(printf '%s\n' "$DONE_BODY" | grep -oE '\*\*Verdict\*\*: *[A-Za-z_-]+' | head -1 | sed -E 's/.*: *//')
+  R_CONF=$(printf '%s\n' "$DONE_BODY" | grep -oE '\*\*Confidence\*\*: *[A-Za-z]+' | head -1 | sed -E 's/.*: *//')
+  if printf '%s\n' "$DONE_BODY" | sed -n '/^### Decomposition Assessment/,/^###[^#]/p' | grep -qE '^\*\*YES\*\*'; then R_DECOMP=YES; else R_DECOMP=NO; fi
+  [ "$R_VERDICT" = "INVALID" ] && R_STATUS=INVALID || R_STATUS=ALREADY_DONE
+  R_GIST=$(echo "$COMMENTS_JSON" | jq -r '[.[] | .body | select(contains("FORGE:KNOWLEDGE_GIST:"))] | first // ""' | grep -oE 'https://gist[^ ]+' | head -1)
+  R_MS_NUM=$(gh issue view {NUMBER} {GH_FLAG} --json milestone --jq '.milestone.number // empty' 2>/dev/null)
+  R_MS_IDX=""
+  [ -n "$R_MS_NUM" ] && R_MS_IDX=$(gh api "repos/{GH_REPO}/milestones/${R_MS_NUM}" --jq '.description // ""' 2>/dev/null | grep -oE '<!-- FORGE:MILESTONE_INDEX: https://[^ ]+ -->' | head -1 | sed -E 's/^<!-- FORGE:MILESTONE_INDEX: //; s/ -->$//')
+  echo "INVESTIGATE_RESULT:"
+  echo "  status: $R_STATUS"
+  echo "  verdict: ${R_VERDICT:-null}"
+  echo "  confidence: ${R_CONF:-null}"
+  echo "  decompose: $R_DECOMP"
+  echo "  comment_url: $DONE_URL"
+  echo "  gist_url: ${R_GIST:-null}"
+  echo "  milestone_index_url: ${R_MS_IDX:-null}"
+  echo "  blocker: null"
+  echo "RESUME: investigation already complete — copy the block above verbatim as your final reply and STOP."
+else
+  for CID in $PARTIAL_IDS; do
+    gh api "repos/{GH_REPO}/issues/comments/${CID}" -X DELETE 2>/dev/null || true   # interrupted investigation: delete partial comment and restart
+  done
+  echo "RESUME: no completed investigation — proceeding with a fresh run."
+fi
 ```
+
+**Resume logic** (what the block implements):
+- `<!-- FORGE:INVESTIGATOR -->` comment AND (`<!-- INVESTIGATION:COMPLETE -->` OR `<!-- INVESTIGATION:INVALID -->`) in the SAME comment → investigation already complete. Print the parsed existing verdict as the `INVESTIGATE_RESULT:` block (`status: ALREADY_DONE`, or `status: INVALID` when the existing verdict is INVALID) and **STOP** — do not run any later phase. `INVESTIGATION:INVALID` is the terminal sentinel Phase 1C emits for an INVALID verdict (see Phase 1C) — it is just as much a completion marker as `INVESTIGATION:COMPLETE`.
+- `<!-- FORGE:INVESTIGATOR -->` comment but NEITHER sentinel → investigation was interrupted; the partial comment(s) are deleted and the run restarts.
+- No investigator comment → fresh investigation.
+
+**Set label** (only reached when not ALREADY_DONE). Use the tiered transition script; the prose fallback adds `workflow:investigating` and removes every other `workflow:*` state label:
+
+```bash
+RESOLUTION=$(resolve_script 'transition-label'); TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+case "$TIER" in
+  adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} investigating ;;
+  prose)
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:investigating" --remove-label "workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
+    ;;
+esac
+```
+
+---
+
+### 1A.5: Normalize Issue Body (MANDATORY)
+
+Before investigation begins, verify the issue body contains the four mandatory pipeline sections. If any are missing, add placeholder content so the investigator has the correct scaffolding.
+
+**Skip if**: All four sections (`## Problem`, `## Affected Files`, `## Expected Behavior`, `## Acceptance Criteria`) are already present.
+
+```bash
+ISSUE_BODY=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body')
+
+MISSING_SECTIONS=""
+echo "$ISSUE_BODY" | grep -q "^## Problem" || MISSING_SECTIONS="$MISSING_SECTIONS PROBLEM"
+echo "$ISSUE_BODY" | grep -q "^## Affected Files" || MISSING_SECTIONS="$MISSING_SECTIONS AFFECTED_FILES"
+echo "$ISSUE_BODY" | grep -q "^## Expected Behavior" || MISSING_SECTIONS="$MISSING_SECTIONS EXPECTED_BEHAVIOR"
+echo "$ISSUE_BODY" | grep -q "^## Acceptance Criteria" || MISSING_SECTIONS="$MISSING_SECTIONS ACCEPTANCE_CRITERIA"
+
+if [ -n "$MISSING_SECTIONS" ]; then
+  echo "Missing sections:$MISSING_SECTIONS — normalizing issue body before investigation"
+
+  APPEND_TEXT=""
+  echo "$MISSING_SECTIONS" | grep -q "PROBLEM" && APPEND_TEXT="$APPEND_TEXT
+## Problem
+
+Root cause unknown — investigation needed."
+
+  echo "$MISSING_SECTIONS" | grep -q "AFFECTED_FILES" && APPEND_TEXT="$APPEND_TEXT
+## Affected Files
+
+Files to be identified during investigation."
+
+  echo "$MISSING_SECTIONS" | grep -q "EXPECTED_BEHAVIOR" && APPEND_TEXT="$APPEND_TEXT
+## Expected Behavior
+
+Expected behavior to be determined during investigation."
+
+  echo "$MISSING_SECTIONS" | grep -q "ACCEPTANCE_CRITERIA" && APPEND_TEXT="$APPEND_TEXT
+## Acceptance Criteria
+
+- [ ] Fix confirmed during investigation."
+
+  # Append missing sections to the existing body (never replace — only extend)
+  NORMALIZED_BODY="${ISSUE_BODY}${APPEND_TEXT}"
+  gh issue edit {NUMBER} {GH_FLAG} --body "$NORMALIZED_BODY"   # allowlist:check-command-side-effects
+  echo "Issue body normalized — added:$MISSING_SECTIONS"
+else
+  echo "Issue body already contains all mandatory sections — skipping normalization"
+fi
+```
+
+**Continue to Phase 1B unconditionally.** Normalization is a compensation step — it never blocks investigation.
 
 ---
 
@@ -292,6 +478,14 @@ The target repo is `{GH_REPO}` (resolved from `forge.yaml → project`). The wor
 - Frontend: any `web/`, `frontend/`, `src/` directories
 - Infrastructure: `.github/workflows/`, `docker-compose*.yml`, `infra/`
 - Config: `forge.yaml`, `.env.example`, any `config/` directory
+
+Read `forge.yaml → review.tech_stack` and `forge.yaml → review.key_paths` (if present) to identify which files are most relevant for the affected domain. If `review.key_paths` lists domain-to-file mappings, use that table directly. If the `review` section is absent, use the issue labels, title keywords, and the affected files listed in the issue body to determine the domain. Start with the files the issue explicitly names, then expand to callers and related modules.
+
+**Workflow pipeline issues** (repo is a ForgeDock installation):
+- Key files: `commands/work-on.md`, `commands/review-pr.md`, `commands/quality-gate.md`, `commands/orchestrate.md`, `forge.yaml`, `bin/forgedock.mjs`
+
+**INFRA domain known footguns** (read before writing any `.github/workflows/*.yml` changes):
+- **appleboy/ssh-action Go template preprocessing**: Any `{{` in a `script:` block is interpreted as a Go template directive **before the script reaches SSH**. This means `docker ps --format '{{.Names}}'` and `docker inspect --format '{{index .RepoTags 0}}'` will crash the action with exit 1. Both function calls (`{{index .X Y}}`) AND field accessors (`{{.Names}}`, `{{.Status}}`) fail on the action's empty data context. Shell error handlers (`|| fallback`, `set -e`, `2>/dev/null`) are bypassed because the failure is client-side. Always use `docker inspect IMAGE | jq -r '.[0].RepoTags[0]'` and `docker ps --format json | jq -r '.Names'` patterns in `appleboy/ssh-action` scripts. (Ref: forge#226 — 6-day silent deploy failure masked by `continue-on-error: true`)
 
 If the issue specifies a **Code branch** (`**Code branch**: \`{branch}\``), check out that branch — the affected files may not be on the default branch.
 
@@ -322,7 +516,22 @@ bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN_LABEL} --repo-path
 
 1. **Check the right branch** — read from the branch specified in the issue body (`**Code branch**: \`{branch}\``) if present
 2. **Read domain files** — start with the key files for the affected domain (use index query results from Step 0E as the file list; fall back to directory inspection if index is absent)
+2.5. **Existing system search (conditional, MUST)**: If the issue describes a gap in a functional capability — content not being distributed, notifications not sending, jobs not running, data not being synced — MUST search for an existing automated system before proposing a new one. The issue body may name a specific tool or path (e.g., `reddit-bot/`, `marketing/`) — do NOT anchor on that path alone. Expand the search to all service layers:
+   ```bash
+   # Check all service layers for the capability (adapt paths to your project structure)
+   grep -rn "{capability_keyword}" {REPO_PATH}/services/ --include="*.py" -l | head -20
+   # Look for scheduled jobs, automated runners, existing integrations
+   grep -rn "scheduler\|celery\|cron\|nightly\|periodic" {REPO_PATH}/services/ --include="*.py" -l | head -10
+   ```
+   If an existing system is found that already handles the capability: the fix MUST route through the existing system (fix its config, env var, or gate) — NOT create a new parallel tool. Document the existing system in the investigation report and make it the centerpiece of the recommendation. This check is especially critical when the issue references a standalone tool directory (`reddit-bot/`, `scripts/`, `tools/`) — those directories often duplicate functionality that a service already owns. (Ref: forge#279 — investigator anchored on `reddit-bot/` from issue body, never checked `services/herald/app/scheduler/`, built parallel PRAW integration alongside Herald's existing automated crosspost scheduler)
 3. **Verify claims** — does the code actually have the problem described?
+3.5. **Type Invariant Verification (MANDATORY)**: Before declaring that a field, key, or parameter has a specific type (e.g. "content is always a dict", "status is always an int"), search for ALL code paths that write to that field across ALL services:
+   ```bash
+   grep -rn '"field_name"\s*:' services/   # Python dict key assignments
+   grep -rn 'result\["field_name"\]\s*=' services/  # Direct assignments
+   grep -rn '\.field_name\s*=' services/   # Attribute assignments
+   ```
+   If the field is written with different types in different code paths (e.g. dict in the standard path, string in the auth-gated path), document ALL variants. The fix must handle every variant — not just the one on the primary investigated code path. A type guard like `or {}` only protects against falsy values; a non-empty string is truthy and bypasses it.
 4. **Git blame** — trace when/why the relevant code was written. Run bounded, local commands (no network round-trip):
    ```bash
    # Introducing commit for each affected file (first commit that added it)
@@ -333,9 +542,10 @@ bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN_LABEL} --repo-path
    git blame -L {start},{end} -- {affected_file}
    ```
    Record the introducing commit and last-touch commit for each primary affected file — this feeds the mandatory **History findings** field in Phase 1C.
+4.5. **Rogue commit pre-state comparison (conditional)**: If the issue body references a specific commit as rogue, bad, or unintended (e.g., "rogue commit `abc1234`", "bad commit", "this was never intended"), MUST run `git show {commit}^:{file}` to see the file before that commit. Compare the pre-commit state against the current file. Any block present in the current file but absent in the pre-commit state was introduced by that commit chain and is a candidate for full reversion — not just partial editing. Report the delta (pre vs. current) in the investigation report. Do NOT assume surrounding code near a named import/bug is correct simply because the issue only named a specific sub-problem. (Ref: forge#278 — investigator confirmed the broken import but never ran `git show 18a3a2cf3^:batch.py`; the surrounding 50-line feature gate was also rogue and was preserved by the fix PR, causing a P1 access regression for all non-Scale users)
 5. **Domain context discovery** (narrow scope only, 1–5 files):
    ```bash
-   git log --oneline --all -30 -- {affected_files} | grep -oP '#\d+' | sort -u
+   git log --oneline --all -30 -- {affected_files} | grep -oE '#[0-9]+' | sort -u
    gh issue list -R {GH_REPO} --state closed --limit 8 --search "{function_name}"
    ```
    Keep only file/function-level overlap. Max 5 related issues. Everything is a hint to verify, not a fact.
@@ -349,6 +559,17 @@ bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN_LABEL} --repo-path
    Any hit here is a candidate prior fix or reintroduced defect — read the commit body (`git show {hash}`) to confirm before citing it. Feed confirmed hits into the History findings field and let them inform the verdict (e.g. a defect being reintroduced raises severity).
 6. **Determine root cause** — what's actually broken or missing?
 7. **Identify affected files** — full list of files that need changes
+7.5. **Sibling Pattern Sweep** *(conditional — when the bug is a condition, gated function call, or field presence check)*: After identifying the affected files, grep for the same pattern in sibling files within the same directory. The issue spec may name only the file where the error was first observed — but the same commit or PR that introduced the bug often applied it uniformly across related handlers.
+   ```bash
+   # Identify the broken condition or gated function call from the issue
+   # Then search sibling files in the same router/service directory
+   AFFECTED_DIR=$(dirname {PRIMARY_AFFECTED_FILE})
+   grep -rn "{broken_pattern}" "$AFFECTED_DIR" --include="*.py" | grep -v "{PRIMARY_AFFECTED_FILE}"
+   ```
+   **If identical patterns are found in files NOT listed in the issue spec**, output a scope-gap warning:
+   > **Scope-Gap Warning**: The issue spec lists `{PRIMARY_FILE}` but the same pattern exists in `{SIBLING_FILE}:{LINE}`. These were likely introduced together. Recommend widening scope to fix all callers in this PR, or creating follow-up issues for the other files before proceeding.
+
+   Do NOT silently exclude sibling matches. The appropriate output when sibling files have the same bug is to flag them explicitly — even if the issue spec's silence appears intentional. The fix-approach validation step (step 8) will confirm whether to widen scope or create follow-ups. <!-- Added: forge#383 -->
 8. **Fix-approach validation** — if the issue proposes a fix, don't adopt it as spec. Trace through the target system's middleware, auth, routing, config. Cross-domain: if fix in domain A interacts with domain B, read domain B's files too.
 
 ---
@@ -553,10 +774,10 @@ GIST_FILENAME="${REPO_SHORT}_${NUMBER}_${SLUG}.md"
 Extract verdict, task type, and confidence from the investigation body, then compose the Gist:
 
 ```bash
-VERDICT=$(echo "$INVESTIGATION_BODY" | grep -oP '(?<=\*\*Verdict\*\*: )\w+' | head -1)
-TASK_TYPE=$(echo "$INVESTIGATION_BODY" | grep -oP '(?<=\*\*Task Type\*\*: ).+' | head -1)
-CONFIDENCE=$(echo "$INVESTIGATION_BODY" | grep -oP '(?<=\*\*Confidence\*\*: )\w+' | head -1)
-SEVERITY=$(echo "$INVESTIGATION_BODY" | grep -oP '(?<=\*\*Severity\*\*: )\w+' | head -1)
+VERDICT=$(echo "$INVESTIGATION_BODY" | grep -oE '\*\*Verdict\*\*: [A-Za-z_-]+' | head -1 | sed -E 's/^\*\*Verdict\*\*: //')
+TASK_TYPE=$(echo "$INVESTIGATION_BODY" | grep -oE '\*\*Task Type\*\*: .+' | head -1 | sed -E 's/^\*\*Task Type\*\*: //')
+CONFIDENCE=$(echo "$INVESTIGATION_BODY" | grep -oE '\*\*Confidence\*\*: [A-Za-z_-]+' | head -1 | sed -E 's/^\*\*Confidence\*\*: //')
+SEVERITY=$(echo "$INVESTIGATION_BODY" | grep -oE '\*\*Severity\*\*: [A-Za-z_-]+' | head -1 | sed -E 's/^\*\*Severity\*\*: //')
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 GIST_CONTENT=$(cat <<GIST_EOF
@@ -640,16 +861,16 @@ fi
 
 ```bash
 MILESTONE_DESC=$(gh api repos/{GH_REPO}/milestones/${MILESTONE_NUM} --jq '.description // ""')
-EXISTING_INDEX_URL=$(echo "$MILESTONE_DESC" | grep -oP '(?<=<!-- FORGE:MILESTONE_INDEX: )https://[^ ]+(?= -->)' | head -1)
+EXISTING_INDEX_URL=$(echo "$MILESTONE_DESC" | grep -oE '<!-- FORGE:MILESTONE_INDEX: https://[^ ]+ -->' | head -1 | sed -E 's/^<!-- FORGE:MILESTONE_INDEX: //; s/ -->$//')
 ```
 
 ### Step 3: Build index entry for this issue
 
 ```bash
 ISSUE_TITLE=$(gh issue view {NUMBER} {GH_FLAG} --json title --jq '.title')
-VERDICT=$(echo "$INVESTIGATION_BODY" | grep -oP '(?<=\*\*Verdict\*\*: )\w+' | head -1)
-SEVERITY=$(echo "$INVESTIGATION_BODY" | grep -oP '(?<=\*\*Severity\*\*: )\w+' | head -1)
-TASK_TYPE=$(echo "$INVESTIGATION_BODY" | grep -oP '(?<=\*\*Task Type\*\*: ).+' | head -1)
+VERDICT=$(echo "$INVESTIGATION_BODY" | grep -oE '\*\*Verdict\*\*: [A-Za-z_-]+' | head -1 | sed -E 's/^\*\*Verdict\*\*: //')
+SEVERITY=$(echo "$INVESTIGATION_BODY" | grep -oE '\*\*Severity\*\*: [A-Za-z_-]+' | head -1 | sed -E 's/^\*\*Severity\*\*: //')
+TASK_TYPE=$(echo "$INVESTIGATION_BODY" | grep -oE '\*\*Task Type\*\*: .+' | head -1 | sed -E 's/^\*\*Task Type\*\*: //')
 RECOMMENDATION=$(echo "$INVESTIGATION_BODY" | sed -n '/^### Recommendation/,/^### /p' | head -5 | tail -n +2 | tr '\n' ' ' | cut -c1-120)
 
 # GIST_URL comes from Phase 1C.5 (may be empty if Gist creation failed)
@@ -700,7 +921,7 @@ fi
 
 ```bash
 if [ -n "$EXISTING_INDEX_URL" ]; then
-  INDEX_GIST_ID=$(echo "$EXISTING_INDEX_URL" | grep -oP '[a-f0-9]{20,}' | tail -1)
+  INDEX_GIST_ID=$(echo "$EXISTING_INDEX_URL" | grep -oE '[a-f0-9]{20,}' | tail -1)
 
   if [ -z "$INDEX_GIST_ID" ]; then
     echo "WARNING: Could not extract Gist ID from index URL — skipping update"
@@ -736,7 +957,7 @@ ${INDEX_ENTRY}"
 
     # Update the Gist
     # gh gist edit does not support stdin via '-'; use a temp file instead
-    TMPFILE=$(mktemp --suffix=.md)
+    TMPFILE=$(mktemp "${TMPDIR:-/tmp}/forge-index.XXXXXX")
     echo "$UPDATED_INDEX" > "$TMPFILE"
     gh gist edit "$INDEX_GIST_ID" -f "$INDEX_FILENAME" "$TMPFILE" 2>/dev/null
     EDIT_EXIT=$?
@@ -825,58 +1046,150 @@ fi
 
 ---
 
-**CONFIRMED or PARTIAL with decompose: NO**:
+### 1D.1: Correction Capture (MANDATORY — run after 1D.0, BEFORE the workflow label update) <!-- Added: forge#667 -->
+
+Before routing, scan all non-agent comments for correction signals from the repository owner. Correction signals are owner comments that contain phrases like "no, use", "actually use", "use X instead", "not X, use Y", or "wrong branch". If found, write the correction to `forge.yaml → learned:` and emit a `FORGE:LEARNED` annotation.
+
+**Scan for correction signals**:
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:ready-to-build" --remove-label "workflow:investigating"
+# Get repo owner login for filtering.
+# Tiered resolution — necessary because project.owner is the GitHub org/user NAME,
+# but comment .user.login is always a personal account login. For org-owned repos
+# these are structurally different (e.g. org="RapierCraftStudios", commenter="mrdubey"),
+# so using project.owner directly silently disables correction capture for all org repos.
+#
+# Resolution order:
+#   1. project.owner_login (explicit override — required for org repos where owner ≠ personal login)
+#   2. gh api repos/{GH_REPO} --jq '.owner.login' (auto-resolves correctly for personal repos)
+#   3. project.owner (backward-compat fallback — still broken for org repos, but avoids hard failure)
+REPO_OWNER=$(yq '.project.owner_login // ""' forge.yaml 2>/dev/null || echo '')
+if [ -z "$REPO_OWNER" ]; then
+  REPO_OWNER=$(gh api repos/{GH_REPO} --jq '.owner.login' 2>/dev/null || echo '')
+fi
+if [ -z "$REPO_OWNER" ]; then
+  REPO_OWNER=$(yq '.project.owner' forge.yaml 2>/dev/null || echo '')
+fi
+
+# Fetch all comments, filter to owner-only, look for correction signals
+CORRECTIONS=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  | jq -r --arg owner "$REPO_OWNER" \
+  '.[] | select(.user.login == $owner) | select(
+    (.body | test("no,? use|actually use|use .+ instead|not .+, use|wrong branch"; "i"))
+  ) | .body' 2>/dev/null || echo '')
 ```
 
-Write machine-readable phase checkpoint (MUST execute immediately after label update, before returning):
+**If correction signals found** — extract and write each correction:
+
 ```bash
-CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
-\`\`\`json
-{\"phase\": \"INVESTIGATION\", \"status\": \"COMPLETE\", \"next_phase\": \"BUILD\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
-\`\`\`"
+# Example: extract branch target correction "use develop not staging"
+# Adjust regex to the correction pattern detected
+
+if [ -n "$CORRECTIONS" ]; then
+  echo "Correction signals detected — writing to forge.yaml → learned:"
+  echo "$CORRECTIONS"
+
+  # Write to forge.yaml using yq in-place merge (idempotent — yq merge overwrites existing keys)
+  # Always use env variable injection to avoid YAML injection from comment content
+  # Example for branch target correction:
+  #   BRANCH_VALUE="develop"
+  #   yq eval '.learned.branch_targets.staging = env(BRANCH_VALUE)' -i forge.yaml
+
+  # After writing, emit FORGE:LEARNED annotation
+  LEARNED_KEYS="branch_targets.staging"  # replace with actual extracted keys
+  CAPTURED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  # Update captured_at and captured_by metadata
+  CAPTURED_AT_VAL="$CAPTURED_AT" yq eval '.learned.captured_at = env(CAPTURED_AT_VAL)' -i forge.yaml
+  CAPTURED_BY_VAL="work-on/{NUMBER}" yq eval '.learned.captured_by = env(CAPTURED_BY_VAL)' -i forge.yaml
+
+  LEARNED_BODY="<!-- FORGE:LEARNED -->
+## Learned Pattern Captured
+
+**Source**: Owner correction in comment on issue #{NUMBER}
+**Captured at**: $CAPTURED_AT
+**Keys written**: \`$LEARNED_KEYS\`
+
+The following project-specific pattern was detected from owner feedback and written to \`forge.yaml → learned:\`. Future sessions will use this override automatically.
+
+\`\`\`yaml
+# Written to forge.yaml
+learned:
+  # {key}: {value}
+\`\`\`
+
+**Idempotency**: yq merge-write — re-running will not duplicate entries."
+  gh issue comment {NUMBER} {GH_FLAG} --body "$LEARNED_BODY"   # allowlist:check-command-side-effects
+
+  echo "FORGE:LEARNED annotation posted."
+fi
 ```
 
-Return verdict to caller (work-on routing loop proceeds to build).
+**Idempotency guarantee**: Use `yq eval '.learned.key = env(VAR)' -i forge.yaml` — yq overwrites existing keys rather than appending. Re-running the capture step on the same comment produces the same forge.yaml state.
 
-**CONFIRMED or PARTIAL with decompose: YES**:
-```bash
-gh issue edit {NUMBER} {GH_FLAG} --remove-label "workflow:investigating"
-```
-Do NOT add `workflow:ready-to-build` — the routing loop will invoke `work-on:decompose` based on the `decompose: YES` return value.
+---
 
-Write machine-readable phase checkpoint (MUST execute immediately after label update, before returning):
+### 1D.2: Update Labels & Return Verdict
+
+Resolve the posted investigation comment URL once (used in the result block):
+
 ```bash
-CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
-\`\`\`json
-{\"phase\": \"INVESTIGATION\", \"status\": \"COMPLETE\", \"next_phase\": \"DECOMPOSE\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
-\`\`\`"
+COMMENT_URL=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate --jq '[.[] | select(.body | contains("<!-- FORGE:INVESTIGATOR -->")) | .html_url] | last' 2>/dev/null | tail -1)
 ```
 
-Return verdict to caller (work-on routing loop proceeds to decompose).
-
-**INVALID**:
+**CONFIRMED or PARTIAL with decompose: NO** — transition to `ready-to-build` (this phase owns that label):
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:invalid" --remove-label "workflow:investigating"
-gh issue close {NUMBER} {GH_FLAG} --comment "Closing as invalid: {reason from investigation}"
+RESOLUTION=$(resolve_script 'transition-label'); TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+case "$TIER" in
+  adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} ready-to-build ;;
+  prose)
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:ready-to-build" --remove-label "workflow:investigating,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
+    ;;
+esac
 ```
-Return INVALID to caller (work-on stops). No checkpoint written — INVALID is terminal.
+
+No `FORGE:CHECKPOINT` is written — the label already disambiguates the resume point (forge#1826). Print `INVESTIGATE_RESULT:` with `status: COMPLETE`, `decompose: NO` and STOP.
+
+**CONFIRMED or PARTIAL with decompose: YES** — this phase does NOT set `workflow:decomposed` (the decompose phase owns it) and does NOT add `workflow:ready-to-build`. Only remove the investigating label:
+```bash
+gh issue edit {NUMBER} {GH_FLAG} --remove-label "workflow:investigating" 2>/dev/null || true   # allowlist:check-command-side-effects
+```
+
+No `FORGE:CHECKPOINT` is written. Print `INVESTIGATE_RESULT:` with `status: COMPLETE`, `decompose: YES` and STOP.
+
+**INVALID** — transition to `invalid` and close the issue (terminal):
+```bash
+RESOLUTION=$(resolve_script 'transition-label'); TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+case "$TIER" in
+  adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} invalid ;;
+  prose)
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:invalid" --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
+    ;;
+esac
+gh issue close {NUMBER} {GH_FLAG} --comment "Closing as invalid: {reason from investigation}"   # allowlist:check-command-side-effects
+```
+
+No checkpoint written — INVALID is terminal. Print `INVESTIGATE_RESULT:` with `status: INVALID` and STOP.
 
 ---
 
 ## Output
 
-The subcommand writes its results to GitHub (FORGE:INVESTIGATOR comment). Output this structured block — the routing loop in `work-on.md` will read this result, re-evaluate state, and continue to the next phase. This subcommand is complete; control returns to the router's loop iteration.
+The subcommand writes its results to GitHub (FORGE:INVESTIGATOR comment, labels). Its **final reply** must be exactly this one block — it is all the caller sees. Print it on **every** exit path (COMPLETE, ALREADY_DONE, INVALID, BLOCKED). This subcommand is complete after printing; do not continue to any later phase.
 
 ```
 INVESTIGATE_RESULT:
-  verdict: {CONFIRMED|PARTIAL|INVALID}
-  confidence: {HIGH|MEDIUM|LOW}
-  decompose: {YES|NO}
-  comment_url: {url of posted comment}
+  status: {COMPLETE|ALREADY_DONE|INVALID|BLOCKED}
+  verdict: {CONFIRMED|PARTIAL|INVALID|null}
+  confidence: {HIGH|MEDIUM|LOW|null}
+  decompose: {YES|NO|null}
+  comment_url: {url of posted (or pre-existing) comment, or null}
   gist_url: {url of knowledge gist, or null if creation failed/skipped}
   milestone_index_url: {url of milestone index gist, or null if no milestone/creation failed}
+  blocker: {one-line reason when status is BLOCKED, else null}
 ```
+
+**Status mapping**:
+- `COMPLETE` — fresh investigation finished with verdict CONFIRMED or PARTIAL (`decompose` YES or NO).
+- `ALREADY_DONE` — resume check found a completed investigation with a non-INVALID verdict; the block carries the parsed existing verdict (Phase 1A).
+- `INVALID` — verdict INVALID (fresh run, or an existing `INVESTIGATION:INVALID` comment found on resume); issue closed with `workflow:invalid`.
+- `BLOCKED` — a required arg is missing, the issue cannot be read, or investigation cannot proceed; set `blocker` and leave the other fields `null` where unknown.
