@@ -157,6 +157,15 @@ done
 # -h prints the full header
 bash "$VERIFY" -h | grep -q 'COLLABORATOR includes read-level' && ok "-h prints the full header" || bad "-h truncated"
 
+# Untrusted-author FORGE markers are ignored AND diagnosed with a NOTE (#3123)
+UT="$TMP_FX/untrusted.json"
+jq -c 'map(. + {author_association:"CONTRIBUTOR", user:{login:"ext",type:"User"}})' "$(mk ut_src INV CONTRACT FP_TRIVIAL QG_PASS)" > "$UT"
+OUT=$(MOCK_GH_JSON="$UT" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+[ $RC -eq 1 ] && echo "$OUT" | grep -q 'MISSING: INVESTIGATOR' && echo "$OUT" | grep -q 'NOTE: .*untrusted authors were ignored' && ok "CONTRIBUTOR markers ignored with NOTE" || bad "contributor note (rc=$RC out=$OUT)"
+OUT=$(FORGE_TRAIL_TRUSTED_LOGINS=ext MOCK_GH_JSON="$UT" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+[ $RC -eq 0 ] && ok "FORGE_TRAIL_TRUSTED_LOGINS accepts a CONTRIBUTOR login" || bad "trusted login override (rc=$RC out=$OUT)"
+expect_pass "marker-only CONTEXT satisfies STANDARD" "$(mk minctx INV FP_STANDARD CONTRACT CONTEXT ARCH QG_PASS)"
+
 # Outage fails closed (exit 2, never PASS)
 OUT=$(MOCK_GH_FAIL=1 MOCK_GH_JSON=/dev/null bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "gh outage fails closed" || bad "gh outage (rc=$RC out=$OUT)"

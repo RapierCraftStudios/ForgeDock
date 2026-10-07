@@ -185,8 +185,8 @@ A PR must not be opened for work whose earlier phases were skipped. Run the dete
 ```bash
 DOCS_ONLY_FLAG=""
 CHANGED=$(git -C {WORKTREE_PATH} diff --name-only origin/{PR_BASE}...HEAD)
-# docs = docs/** or *.md, but commands/** and .claude/** specs are executable pipeline code, never docs
-if [ -n "$CHANGED" ] && echo "$CHANGED" | awk '!(/^docs\// || (/\.md$/ && !/^(commands|\.claude)\//)){bad=1} END{exit bad}'; then DOCS_ONLY_FLAG="--docs-only"; fi
+# docs = docs/** or *.md, but commands/**, .claude/**, .agents/** and root AGENTS.md/CLAUDE.md are executable pipeline/agent instructions, never docs
+if [ -n "$CHANGED" ] && echo "$CHANGED" | awk '!(/^docs\// || (/\.md$/ && !/^(commands|\.claude|\.agents)\// && !/^(AGENTS|CLAUDE)\.md$/)){bad=1} END{exit bad}'; then DOCS_ONLY_FLAG="--docs-only"; fi
 # The verifier ships with ForgeDock (not the consumer repo): same resolution as every universal script.
 # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
 FORGE_ROOT=""
