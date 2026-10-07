@@ -15,13 +15,15 @@ check() { # name expected_rc file
 
 # Portable in-place sed (BSD sed -i requires a suffix arg; GNU does not).
 sed_i() { local f="$1"; shift; sed "$@" "$f" > "$f.tmp" && mv "$f.tmp" "$f"; }
+# Portable "insert a line before the first **LANE** line" (GNU-only sed 0,/re/ and \n in replacement break on BSD sed).
+lane_before() { awk -v ins="$1" '/^\*\*LANE\*\*/ && !d { print ins; d = 1 } { print }' "$2"; }
 
 # Extract the real Step 4A template (stops at the first bare ")" line; inner ```bash fences are kept).
 awk '/Copy this template. Fill in variables/{f=1} f&&/^Agent\($/{g=1} g{print} g&&/^\)$/{exit}' "$SPEC" > "$T/tpl"
 [ -s "$T/tpl" ] || { echo "FAIL: could not extract 4A template"; exit 1; }
 sed -e '/^Agent($/d' -e '/^  subagent_type/d;/^  model=/d;/^  description=/d;/^  run_in_background/d' \
     -e 's/^  prompt="//' -e '/^)$/d' "$T/tpl" > "$T/base"
-sed_i "$T/base" -e '$ { /^"$/ d }' 
+sed_i "$T/base" -e '$ { /^"$/ d; }'
 sed_i "$T/base" -e '/^{GIST_CONTEXT}$/d' -e '/^{SOURCE_PR_HINT_CONTEXT}$/d' -e '/DISPATCH_CONTEXT:END/d' 
 sed_i "$T/base" -e '/DISPATCH_CONTEXT:BEGIN/d'
 # Fill placeholders with realistic values (the lint rejects free text in placeholders, forge#3078).
@@ -65,7 +67,7 @@ render "$T/ctx_moot" > "$T/p4"; check "likely already resolved" 1 "$T/p4"
 echo "Resume #3062 — continue from where you left off and finish the uncommitted work." > "$T/p6"; check "free-text resume prompt" 1 "$T/p6"
 
 # 7. Custom text injected into the template body -> FAIL
-{ sed '0,/^\*\*LANE\*\*/s//Root cause: handle_fraud never returns.\n**LANE**/' "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p7"; check "injected root-cause line in template" 1 "$T/p7"
+{ lane_before 'Root cause: handle_fraud never returns.' "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p7"; check "injected root-cause line in template" 1 "$T/p7"
 
 # 8. Text between title and context block -> FAIL
 { cat "$T/base"; echo 'Just read and edit the file.'; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p8"; check "text between title and block" 1 "$T/p8"
@@ -87,7 +89,7 @@ render "$T/ctx_quote" > "$T/p12"; check "quoted investigation in context" 0 "$T/
 { sed 's/^\*\*Issue title\*\*:.*/**Issue title**: fix X (likely already resolved - verify and close)/' "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p14"; check "directive in title line" 1 "$T/p14"
 
 # 15. Rephrased custom line inside the template body evades the denylist but not the allowlist -> FAIL
-{ sed '0,/^\*\*LANE\*\*/s//Please begin by editing handle_fraud to return early.\n**LANE**/' "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p15"; check "rephrased line not in template" 1 "$T/p15"
+{ lane_before 'Please begin by editing handle_fraud to return early.' "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p15"; check "rephrased line not in template" 1 "$T/p15"
 
 # 16. Placeholders substituted with real values still PASS
 { sed -e 's/{NUMBER}/3072/g' -e 's/{PROJECT_NAME}/ForgeDock/g' -e 's/{ISSUE_TITLE}/fix(scripts): a normal title/' "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p16"; check "substituted template" 0 "$T/p16"
@@ -99,7 +101,7 @@ printf 'The solution is: return early in handle_fraud.\n' > "$T/ctx_soln"
 render "$T/ctx_soln" > "$T/p17b"; check "in-block 'the solution is:'" 1 "$T/p17b"
 
 # 18. Same phrase OUTSIDE the context block (WIDE) still FAILS (forge#3076)
-{ sed '0,/^\*\*LANE\*\*/s//The fix is fairly small.\n**LANE**/' "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p18"; check "outside-block 'the fix is'" 1 "$T/p18"
+{ lane_before 'The fix is fairly small.' "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p18"; check "outside-block 'the fix is'" 1 "$T/p18"
 
 # 19. STRONG terms still fail inside the block; descriptive (non-imperative) mention still passes (forge#3076)
 printf 'You should implement the following: add a guard.\n' > "$T/ctx_strong"
