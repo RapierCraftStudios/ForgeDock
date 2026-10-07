@@ -1,4 +1,5 @@
 ---
+user-invocable: false
 description: Pre-implementation architecture planning — traces ALL affected code paths and produces an ordered implementation plan before any code is written
 argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --repo-path {WORKTREE} --files \"<space-separated>\""
 context: fork

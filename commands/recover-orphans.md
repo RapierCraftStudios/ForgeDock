@@ -317,7 +317,9 @@ done
 
 For each diagnosed issue, apply the recovery action. All mutating actions are skipped when `DRY_RUN=true`.
 
-**Claim before re-entering the pipeline** (forge#3158): the `review-pr` first-refusal resume and `create-pr` re-enter `/work-on` inline. A repeated or concurrent sweep, or a live `/orchestrate` agent, could otherwise run the pipeline twice on one issue. Every inline `/work-on` resume MUST go through `claim_orphan` first and call `release_orphan` afterwards. A sweep is not an orchestrator, so it takes an issue-scoped `FORGE:RECOVERY_CLAIM` marker (visible to other sweeps) and defers to any live orchestrator signal (a fresh `FORGE:HEARTBEAT`, which `/work-on --under-orchestration` posts at every phase entry).
+**Claim before re-entering the pipeline** (forge#3158): the `review-pr` first-refusal resume and `create-pr` re-enter `/work-on` inline. A repeated or concurrent sweep, or a live `/orchestrate` agent, could otherwise run the pipeline twice on one issue. Every inline `/work-on` resume MUST go through `claim_orphan` first and run inside `resume_orphan_inline`, which releases the claim on every exit. A sweep is not an orchestrator, so it takes an issue-scoped `FORGE:RECOVERY_CLAIM` marker (visible to other sweeps) and defers to any live orchestrator signal (a fresh `FORGE:HEARTBEAT`, which `/work-on --under-orchestration` posts at every phase entry).
+
+**Claim refresh and guaranteed release** (forge#3171): liveness is judged from the claim comment's `updated_at`, and an inline resume posts no `FORGE:HEARTBEAT` (that is gated on `--under-orchestration`, which sweeps do not pass). So the claim is kept alive by editing it: `claim_orphan` records the claim comment id, and `start_claim_keepalive` runs `refresh_orphan` in a background loop every `RECOVERY_CLAIM_TTL_MIN / 3` minutes while the resume runs. `refresh_orphan` PATCHes the claim body, keeping the `**Sweep: id**` line and appending a changing `Refreshed: <UTC>` line, so `updated_at` always advances. Refresh is best-effort; if the keepalive is lost the claim degrades to the plain TTL behavior. `resume_orphan_inline` registers `trap ... release_orphan ... EXIT` in a subshell, so the claim is released always, on success and when the `Skill(...)` call fails, and `release_orphan` stops the keepalive first and is idempotent (it never posts the release marker twice). The keepalive and the `Skill(...)` call belong to the same sweep run. DRY_RUN makes every one of these helpers a no-op.
 
 ```bash
 RECOVERY_CLAIM_TTL_MIN="${RECOVERY_CLAIM_TTL_MIN:-30}"   # a claim or heartbeat older than this is treated as dead
@@ -328,7 +330,7 @@ SWEEP_ID="sweep-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 # Both reads run under pipefail in a subshell: the pipeline status would otherwise be jq's, and a gh failure
 # (rate limit, 403) would yield "[]" with exit 0, indistinguishable from "no live holder".
 claim_orphan() {
-  local num="$1" now cutoff comments live
+  local num="$1" now cutoff comments live resp
   [ "$DRY_RUN" = "true" ] && return 0   # dry-run: no claim comment is posted (callers already skip dry-run resumes)
   now=$(date -u +%s); cutoff=$(( now - RECOVERY_CLAIM_TTL_MIN * 60 ))
   comments=$(set -o pipefail; gh api --paginate "repos/${GH_REPO}/issues/${num}/comments" 2>/dev/null \
@@ -349,10 +351,13 @@ claim_orphan() {
     return 1
   fi
 
-  gh issue comment "$num" ${GH_FLAG} --body "<!-- FORGE:RECOVERY_CLAIM -->
+  # Post via the API so the comment id is known: refresh_orphan needs it. The Sweep line must stay line 2.
+  CLAIM_BODY="<!-- FORGE:RECOVERY_CLAIM -->
 **Sweep: ${SWEEP_ID}**
-Holder: /recover-orphans — resuming /work-on #${num}. Other sweeps and dispatchers: do not re-enter this issue until the matching release marker is posted." >/dev/null 2>&1 \
-    || { CLAIM_SKIP_REASON="could not post FORGE:RECOVERY_CLAIM"; return 1; }
+Holder: /recover-orphans — resuming /work-on #${num}. Other sweeps and dispatchers: do not re-enter this issue until the matching release marker is posted."
+  resp=$(gh api -X POST "repos/${GH_REPO}/issues/${num}/comments" -f body="$CLAIM_BODY" --jq '.id' 2>/dev/null) \
+    && [ -n "$resp" ] || { CLAIM_SKIP_REASON="could not post FORGE:RECOVERY_CLAIM"; return 1; }
+  CLAIM_COMMENT_ID="$resp"; CLAIM_HELD_NUM="$num"   # set before the race check so release_orphan covers the race-lost paths
 
   # Race check: re-read; the earliest unreleased claim wins. Losing means another sweep claimed first.
   local first
@@ -371,11 +376,55 @@ Holder: /recover-orphans — resuming /work-on #${num}. Other sweeps and dispatc
   return 0
 }
 
+# refresh_orphan <issue> — best-effort: edit the claim comment so its updated_at advances. The body must change
+# every time (an identical-body edit may not bump updated_at). Never carries FORGE:HEARTBEAT or the RELEASED marker.
+refresh_orphan() {
+  [ "$DRY_RUN" = "true" ] && return 0
+  [ -n "${CLAIM_COMMENT_ID:-}" ] && [ "${CLAIM_HELD_NUM:-}" = "$1" ] || return 0
+  gh api -X PATCH "repos/${GH_REPO}/issues/comments/${CLAIM_COMMENT_ID}" \
+    -f body="${CLAIM_BODY}
+Refreshed: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1 || true
+}
+
+# start_claim_keepalive <issue> — non-blocking background refresh every TTL/3 (strictly under the TTL).
+start_claim_keepalive() {
+  [ "$DRY_RUN" = "true" ] && return 0
+  stop_claim_keepalive
+  local num="$1" interval=$(( RECOVERY_CLAIM_TTL_MIN * 60 / 3 ))
+  [ "$interval" -ge 1 ] || interval=1
+  ( while sleep "$interval"; do refresh_orphan "$num"; done ) >/dev/null 2>&1 &
+  KEEPALIVE_PID=$!
+}
+
+stop_claim_keepalive() {
+  [ -n "${KEEPALIVE_PID:-}" ] || return 0
+  pkill -P "$KEEPALIVE_PID" 2>/dev/null || true   # the pending sleep
+  kill "$KEEPALIVE_PID" 2>/dev/null || true
+  wait "$KEEPALIVE_PID" 2>/dev/null || true
+  unset KEEPALIVE_PID
+}
+
+# release_orphan <issue> — stops the keepalive first; idempotent (the release marker is posted at most once per claim).
 release_orphan() {
   [ "$DRY_RUN" = "true" ] && return 0
+  stop_claim_keepalive
+  [ "${CLAIM_HELD_NUM:-}" = "$1" ] || return 0
+  unset CLAIM_HELD_NUM CLAIM_COMMENT_ID
   gh issue comment "$1" ${GH_FLAG} --body "<!-- FORGE:RECOVERY_CLAIM_RELEASED -->
 **Sweep: ${SWEEP_ID}**
 Released by /recover-orphans." >/dev/null 2>&1 || true
+}
+
+# resume_orphan_inline <issue> — run after claim_orphan succeeded. The subshell EXIT trap releases the claim always:
+# on success and when the Skill call fails. The keepalive runs alongside the Skill call and is stopped by the release.
+resume_orphan_inline() {
+  local num="$1"
+  (
+    trap 'release_orphan "$num"' EXIT
+    start_claim_keepalive "$num"
+    refresh_orphan "$num"
+    Skill(skill="{FORGE_SKILL_PREFIX}work-on", args="${num}")
+  )
 }
 ```
 
@@ -510,8 +559,7 @@ See the latest FORGE:PHASE_TRAIL_FAILED comment for the missing phases. Re-run e
             # First refusal: resume /work-on, whose resume preflight re-runs each missing phase via Skill(...)
             # and then re-enters review (work-on.md Phase 0B resume → work-on/review.md).
             if claim_orphan "$NUM"; then
-              Skill(skill="{FORGE_SKILL_PREFIX}work-on", args="${NUM}")
-              release_orphan "$NUM"
+              resume_orphan_inline "$NUM"   # releases the claim on every exit
               RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} refused (phase trail) — resumed /work-on to re-run missing phases |\n"
             else
               RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} refused (phase trail) — /work-on resume skipped: ${CLAIM_SKIP_REASON} |\n"
@@ -545,8 +593,7 @@ See the latest FORGE:PHASE_TRAIL_FAILED comment for the missing phases. Re-run e
         echo "  [DRY-RUN] Would: Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='$NUM')"
         RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | create-pr | Would resume /work-on — branch $BRANCH has commits, no PR |\n"
       elif claim_orphan "$NUM"; then
-        Skill(skill="{FORGE_SKILL_PREFIX}work-on", args="${NUM}")
-        release_orphan "$NUM"
+        resume_orphan_inline "$NUM"   # releases the claim on every exit
         RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | create-pr | Resumed /work-on — branch $BRANCH has commits, no PR |\n"
       else
         RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | create-pr | /work-on resume skipped: ${CLAIM_SKIP_REASON} |\n"

@@ -1,4 +1,5 @@
 ---
+user-invocable: false
 description: Investigate a GitHub issue — validate it's real, determine root cause, post findings
 argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\""
 context: fork

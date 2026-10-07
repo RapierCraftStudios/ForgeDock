@@ -1,4 +1,5 @@
 ---
+user-invocable: false
 install: internal
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->

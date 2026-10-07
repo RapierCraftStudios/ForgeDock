@@ -285,6 +285,16 @@ if [ -d "$WORKFLOWS_DIR" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Merged-trail hold must not be keyed on the verifier (forge#3169)
+# ---------------------------------------------------------------------------
+
+P4_SPEC="$COMMANDS_DIR/orchestrate/phase-4-execution.md"
+if [ -f "$P4_SPEC" ] && grep -qE 'ABSENT\) +\[ "\$\(reverify_merged_trail "\$PRED"[^)]*\)" = "OK" \] *&& *echo "DONE"' "$P4_SPEC"; then
+  echo "HIGH | $P4_SPEC | merged + needs-human + ABSENT classifies DONE via the verifier (must fail closed to GATED)" >&2
+  VIOLATIONS=$((VIOLATIONS + 1))
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
