@@ -42,7 +42,11 @@ else
   echo "LINT: ERROR"; echo "VIOLATION: cannot read prompt file: $SRC"; exit 2
 fi
 # Normalize CRLF -> LF so Windows-authored prompts are compared on content (forge#3078).
-PROMPT="$(printf '%s' "$PROMPT" | tr -d '\r')"
+# Strip only a TRAILING CR per line: a mid-line CR is content and must not be silently
+# erased (it could hide text from the line-oriented checks). printf-built CR keeps this
+# portable to BSD sed, which does not interpret \r (forge#3085).
+CR="$(printf '\r')"
+PROMPT="$(printf '%s' "$PROMPT" | sed "s/${CR}\$//")"
 [ -n "$PROMPT" ] || { echo "LINT: ERROR"; echo "VIOLATION: empty prompt"; exit 2; }
 
 BEGIN='<!-- DISPATCH_CONTEXT:BEGIN -->'
@@ -129,8 +133,33 @@ else
       if (name == "PROJECT_NAME") return (length(v) > 0 && length(v) <= 40 && split(v, _w, " ") <= 4 && v ~ /^[A-Za-z0-9._ ()+-]+$/)
       if (name == "GH_REPO") return v ~ /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/
       if (name == "FORGE_GIST_CAPABLE") return (v == "true" || v == "false")
-      if (name == "REPO_PATH") return v ~ /^[A-Za-z0-9._\/:~\\-]+$/
-      return v ~ /^[A-Za-z0-9._\/:@#-]*$/
+      # REPO_PATH: validated structurally, not by charset (forge#3085). Must look like an
+      # absolute path (/..., ~..., X:\... or X:/..., \\server\...); spaces, +, parentheses and
+      # non-ASCII are legitimate path characters; shell metacharacters, quotes, sentence
+      # punctuation and control chars are not.
+      if (name == "REPO_PATH") {
+        if (length(v) == 0 || length(v) > 260) return 0
+        if (v !~ /^(\/|~|[A-Za-z]:[\\\/]|\\\\)/) return 0
+        if (v ~ /[`$;|&<>"'"'"'!?,*{}\[\]]/ || v ~ /[[:cntrl:]]/) return 0
+        if (v ~ /  / || v ~ /(^|[\/\\]) /) return 0
+        return 1
+      }
+      # Numbers: digits, optionally preceded by a satellite prefix when two placeholders are adjacent.
+      if (name == "NUMBER") return v ~ /^([A-Za-z0-9._-]+:)?[0-9]+$/
+      # Prefixes are single tokens (no "/"): SATELLITE_PREFIX is followed by ":" in the template;
+      # PROJECT_PREFIX / FORGE_SKILL_PREFIX carry their own trailing ":" (or are empty).
+      if (name == "SATELLITE_PREFIX") return v ~ /^[A-Za-z0-9._-]+$/
+      if (name == "PROJECT_PREFIX" || name == "FORGE_SKILL_PREFIX") return v ~ /^([A-Za-z0-9._-]+:)?$/
+      # Branch names: no leading "/" or "-", no empty segments or "..", so a file-path-shaped
+      # directive such as /ignore/the/issue/fix.patch cannot ride in a branch slot.
+      if (name == "STAGING_BRANCH" || name == "SOURCE_BRANCH" || name == "PR_BASE") {
+        if (length(v) == 0 || length(v) > 100) return 0
+        if (v !~ /^[A-Za-z0-9._][-A-Za-z0-9._\/]*$/) return 0
+        if (v ~ /\/\// || v ~ /\.\./ || v ~ /\/$/) return 0
+        return 1
+      }
+      # Remaining slots (LANE, SUBAGENT_MODEL, ...) are single tokens: no "/" , no spaces.
+      return v ~ /^[-A-Za-z0-9._]*$/
     }
     function matches(line, pat,   rest, lit, name, nl, idx, val) {
       rest = line
