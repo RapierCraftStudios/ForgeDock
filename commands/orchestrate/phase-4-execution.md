@@ -1060,16 +1060,28 @@ If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to
 )
 ```
 
-**Prompt lint (MANDATORY before every dispatch — mechanical enforcement of Hard Rule 1)** <!-- Added: forge#3062 -->: the only variable text allowed in the rendered prompt is the `{GIST_CONTEXT}`/`{SOURCE_PR_HINT_CONTEXT}` blocks between the `DISPATCH_CONTEXT` markers (which already carry the claims-board URL and the same-file "what changed" brief). Before every `Agent(...)`/`task(...)` launch — initial dispatch, Step 4B resume/relaunch, Step 4F sweep, remediation — write the fully rendered prompt to a `mktemp` file and run the lint. A non-zero exit means the dispatch is REFUSED: do not launch, do not "fix" the prompt by adding text — re-render from the unmodified template, drop the offending context block, and report the violation to the operator.
+**Prompt lint (MANDATORY before every dispatch — mechanical enforcement of Hard Rule 1)** <!-- Added: forge#3062 -->: the only variable text allowed in the rendered prompt is the `{GIST_CONTEXT}`/`{SOURCE_PR_HINT_CONTEXT}` blocks between the `DISPATCH_CONTEXT` markers (which already carry the claims-board URL and the same-file "what changed" brief). Before every `Agent(...)`/`task(...)` launch built from the Step 4A template — initial dispatch, Step 4B resume/relaunch, Step 4F sweep — write the fully rendered prompt to a `mktemp` file and run the lint. A non-zero exit means the dispatch is REFUSED (the snippet below sets the refusal by appending to `LINT_REFUSED_ISSUES[]` and skipping that issue with `continue`): do not launch, do not "fix" the prompt by adding text — re-render from the unmodified template, drop the offending context block, and report every `LINT_REFUSED_ISSUES[]` entry in the operator status update (`DISPATCH REFUSED: #{NUMBER} — {reason}`). A missing/unreadable `scripts/lint-dispatch-prompt.sh` is a distinct `lint-script-not-found` refusal (fail closed, never a silent pass); do not conflate it with a lint verdict. **Exempt (not Step 4A-template prompts, no free-text variable slot, so the template-anchor lint does not apply)**: the Codex/OpenCode `task()` wrapper prompt in the engine-fallback section and the remediation `Agent()` prompt in Step 4B item 6.4 — both are fixed one-purpose wrappers that only invoke `Skill(...work-on...)` with substituted identifiers; never add free text to them.
 
 ```bash
+# Runs inside the per-issue dispatch loop (same loop as claim_conflicts_with_live_holder above),
+# immediately before that issue's Agent()/task() call. LINT_REFUSED_ISSUES is initialised once, empty.
+LINT_SCRIPT="${FORGEDOCK_HOME:-${FORGE_HOME:-$REPO_PATH}}/scripts/lint-dispatch-prompt.sh"
+if [ ! -r "$LINT_SCRIPT" ]; then
+  # Fail closed: a missing lint script is NOT a pass and NOT a lint verdict.
+  echo "DISPATCH REFUSED for #{NUMBER}: lint script not found at $LINT_SCRIPT (set FORGEDOCK_HOME/FORGE_HOME) — cannot verify Hard Rule 1" >&2
+  LINT_REFUSED_ISSUES+=("{NUMBER}:lint-script-not-found")
+  continue
+fi
 PROMPT_FILE="$(mktemp)"
 printf '%s' "$RENDERED_PROMPT" > "$PROMPT_FILE"
-if ! bash "${FORGEDOCK_HOME:-${FORGE_HOME:-$REPO_PATH}}/scripts/lint-dispatch-prompt.sh" "$PROMPT_FILE"; then
-  echo "DISPATCH REFUSED for #{NUMBER}: prompt deviates from the Step 4A template (Hard Rule 1)" >&2
-  rm -f "$PROMPT_FILE"; # re-render verbatim, never launch the failing prompt
-fi
+bash "$LINT_SCRIPT" "$PROMPT_FILE"; LINT_RC=$?
 rm -f "$PROMPT_FILE"
+if [ "$LINT_RC" -ne 0 ]; then
+  # rc 1 = template deviation (violations printed above); rc 2 = unreadable/empty prompt; any other rc = lint crashed.
+  echo "DISPATCH REFUSED for #{NUMBER}: prompt lint rc=$LINT_RC (Hard Rule 1)" >&2
+  LINT_REFUSED_ISSUES+=("{NUMBER}:lint-rc-$LINT_RC")
+  continue   # skip this issue's Agent()/task() call; never launch the failing prompt
+fi
 ```
 
 The lint rejects: template deviations, any text outside the context block after the issue title, and prompts that pre-decide a verdict or fix ("likely already resolved — verify and close", "the fix is ...", "make X terminal", "finish what the previous agent left"). The orchestrator never diagnoses, designs fixes, or summarizes what an issue "probably" needs — investigation is the agent's job via `work-on/investigate`.
