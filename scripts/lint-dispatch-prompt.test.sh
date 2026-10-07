@@ -64,5 +64,24 @@ echo "Resume #3062 — continue from where you left off and finish the uncommitt
 # 9. Unreadable / empty input -> rc 2
 bash "$LINT" "$T/does-not-exist" >/dev/null 2>&1; [ $? -eq 2 ] && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: missing file rc"; }
 
+# 10. Spec snippet enforcement (forge#3070): extract the lint gate from the spec and run it in a loop.
+awk '/^LINT_SCRIPT=/{f=1} f{print} f&&/^fi$/{n++} f&&n==2{exit}' "$SPEC" > "$T/gate"
+[ -s "$T/gate" ] || { FAILN=$((FAILN+1)); echo "FAIL: could not extract spec lint gate"; }
+gate_refused() { # prompt-file home -> prints refusal entries or LAUNCHED
+  ( LINT_REFUSED_ISSUES=(); RENDERED_PROMPT="$(cat "$1")"; FORGEDOCK_HOME="$2"; unset FORGE_HOME; REPO_PATH=/nonexistent
+    for _i in 1; do
+      eval "$(sed 's/{NUMBER}/42/g' "$T/gate")"
+      echo LAUNCHED; exit 0
+    done
+    echo "REFUSED ${LINT_REFUSED_ISSUES[*]}" ) 2>"$T/gate_err" | tail -1
+}
+expect() { [ "$2" = "$3" ] && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: $1 (got '$3' want '$2')"; }; }
+expect "gate launches clean prompt" "LAUNCHED" "$(gate_refused "$T/p1" "$HERE/..")"
+expect "gate refuses lint failure" "REFUSED 42:lint-rc-1" "$(gate_refused "$T/p3" "$HERE/..")"
+expect "gate fails closed when script missing" "REFUSED 42:lint-script-not-found" "$(gate_refused "$T/p1" "$T/nowhere")"
+grep -q 'lint script not found' "$T/gate_err" && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: missing-script message not distinct"; }
+# Exemption is stated in the spec so the scope matches the script.
+grep -q 'Exempt (not Step 4A-template prompts' "$SPEC" && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: spec exemption missing"; }
+
 echo "lint-dispatch-prompt tests: pass=$PASS fail=$FAILN"
 [ "$FAILN" -eq 0 ]
