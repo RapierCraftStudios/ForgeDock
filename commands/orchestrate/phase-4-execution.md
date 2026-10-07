@@ -82,7 +82,7 @@ release_orchestrator_lease() {
 
 1. Enumerate every task id still tracked in `ENGINE_DISPATCH_MAP` whose issue has not yet reached a terminal `workflow:*` label (per Step 4B's `classify_predecessor_state()`).
 2. Call `TaskStop(task_id)` (the harness tool) for each one, in the same turn, before ending the session.
-3. Call `release_orchestrator_lease()` (Step 4A-pre.-1) so a future resume or a different operator is not blocked by a stale lease from this now-stopped session.
+3. Call `cleanup_trail_cache` (Step 4B) and `release_orchestrator_lease()` (Step 4A-pre.-1) so a future resume or a different operator is not blocked by a stale lease from this now-stopped session.
 4. Report which issues had in-flight dispatch stopped mid-pipeline (their `workflow:*` label will reflect whatever phase they reached — a future `/work-on {NUMBER}` or orchestrator resume picks them back up from GitHub state, per the Universal Phase Dispatcher in `commands/work-on.md`).
 
 **This is a documentation/behavioral contract, not a bash block**: unlike the lease gate above, there is no shell construct that reliably intercepts "the orchestrator's own session is being stopped" — that is a harness-level event the orchestrating agent must handle in its own turn when it observes an interrupt, using its own tools (`TaskStop`), exactly the way `commands/orchestrate/phase-5-cleanup.md` already documents cleanup as an agent-driven procedure rather than a background script.
@@ -1378,9 +1378,21 @@ For an OpenCode completion, retain `OPENCODE_DISPATCH_MAP[{NUMBER}]` until the t
 
 **Successor dispatch latency is measured from `agent_completed`, not from orchestrator polling.** The moment you receive an `agent_completed` notification for issue N, that is t=0 for dispatching N's successors. Any successor whose predecessors are all now terminal MUST be dispatched in the same response that processes the notification — not after a poll cycle, not after a sleep. This is the design property that makes streaming DAG execution faster than wave-based execution. <!-- Added: forge#1251 -->
 
+**Cycle-start cache reset (MANDATORY — before item 5 and before Step 4B.5 stall detection)** <!-- Added: forge#3182 -->: at the very start of every monitoring cycle, call `init_trail_cache` once so no `classify_predecessor_state` call in this cycle (item 5/6 readiness checks, stall detection, item 6.6) reads the previous cycle's cached trail state. Re-declare `trail_cache_dir` / `init_trail_cache` in the same Bash block (same-shell rule as `classify_predecessor_state`) and run it before the first classify call. Item 6.6 does not reset the cache itself. `cleanup_trail_cache` removes the directory on every exit path (Termination condition, Step 4F, "Stopping the orchestrator").
+
 **Predecessor Classification (DONE / GATED / FAILED)** <!-- Added: forge#1812 --> — every check in this file that asks "is predecessor X resolved enough for its dependents to proceed" MUST classify X into exactly one of three states below — never a single binary terminal/non-terminal grep. Earlier versions of this file independently patched `grep -qE 'workflow:merged|workflow:invalid|needs-human|CLOSED'` in multiple places, and the copies drifted: the readiness check (this step) treated `needs-human` as done-enough-to-dispatch-through, while the failure handler (item 6 below) treated the identical label as a hard failure that skips dependents. Both cannot be right at once — `needs-human` means the predecessor's code is paused pending a human decision and is NOT yet in the base branch, so dispatching a dependent against it is unsafe, but permanently skipping the dependent is also wrong once the human resolves the block. The fix is a third state:
 
 ```bash
+# Trail cache lifecycle (forge#3182). Each Bash tool call is a fresh shell, so a persisted TRAIL_CACHE_DIR and a bare
+# `rm -rf "$TRAIL_CACHE_DIR"` are silent no-ops there (and a per-call `mktemp -d` leaks a directory every cycle). The cache
+# path is therefore DETERMINISTIC per orchestrator run: trail_cache_dir derives it from ORCH_RUN_ID (else ORCH_SESSION,
+# else the shell PID) whenever TRAIL_CACHE_DIR is unset, so every block that re-declares these helpers hits the same dir.
+# init_trail_cache resets it (call once at the TOP of each monitoring cycle, see "Cycle-start cache reset");
+# cleanup_trail_cache removes it on every orchestrator exit path. The cache holds only ABSENT/ACTIVE/RELEASED words.
+trail_cache_dir() { printf '%s' "${TRAIL_CACHE_DIR:-${TMPDIR:-/tmp}/forge-trail-${ORCH_RUN_ID:-${ORCH_SESSION:-$$}}}"; }
+init_trail_cache() { TRAIL_CACHE_DIR="$(trail_cache_dir)"; [ -n "$TRAIL_CACHE_DIR" ] && rm -rf "$TRAIL_CACHE_DIR"; mkdir -p "$TRAIL_CACHE_DIR"; }
+cleanup_trail_cache() { [ -n "$(trail_cache_dir)" ] && rm -rf "$(trail_cache_dir)"; unset TRAIL_CACHE_DIR; }
+
 # hold_merged_trail <issue> <trail-text> (forge#3156): the single escalation path for a merged issue whose phase
 # trail failed or could not be verified. Used by Step 4B item 0 and by the classifier's wake re-verification.
 # Order matters (forge#3169): the escalation COMMENT is posted FIRST (re-read immediately before each post, skipped when
@@ -1394,7 +1406,7 @@ hold_merged_trail() {
   for TRY in 1 2; do
     # forge#3157: dedupe only against an ACTIVE escalation, so a re-escalation after a recorded release posts a new one.
     # forge#3169: re-read right before each post (cache entry removed) to narrow the concurrent-classifier duplicate window.
-    [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -f "$TRAIL_CACHE_DIR/trail-$N"
+    rm -f "$(trail_cache_dir)/trail-$N"
     if [ "$(trail_escalation_state "$N")" = "ACTIVE" ]; then COMMENTED=0; break; fi
     gh issue comment "$N" -R {GH_REPO} --body "<!-- FORGE:PHASE_TRAIL_FAILED -->
 #${N} merged with an incomplete phase trail (or one that could not be verified), detected by /orchestrate.
@@ -1404,7 +1416,7 @@ ${TXT}
 \`\`\`
 
 The PR is already merged, so \`/work-on\` cannot re-run the missing phases. Review the merged change, then remove \`needs-human\` to release dependents held as \`blocked-on-human-merge\`." >/dev/null 2>&1 || true # <!-- allowlist:check-command-side-effects -->
-    [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -f "$TRAIL_CACHE_DIR/trail-$N"
+    rm -f "$(trail_cache_dir)/trail-$N"
     if [ "$(trail_escalation_state "$N")" = "ACTIVE" ]; then COMMENTED=0; break; fi
   done
   for TRY in 1 2 3; do
@@ -1412,7 +1424,7 @@ The PR is already merged, so \`/work-on\` cannot re-run the missing phases. Revi
     if gh issue view "$N" -R {GH_REPO} --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null \
          | grep -qE '(^|,)needs-human(,|$)'; then HELD=0; break; fi
   done
-  [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -f "$TRAIL_CACHE_DIR/trail-$N"
+  rm -f "$(trail_cache_dir)/trail-$N"
   [ "$COMMENTED" -ne 0 ] && echo "PHASE TRAIL HOLD FAILED: #${N} — escalation comment could not be verified (audit record missing); hold dependents manually." >&2
   [ "$HELD" -ne 0 ] && echo "PHASE TRAIL HOLD FAILED: #${N} — needs-human label could not be verified; dependents are NOT held. Hold them manually." >&2
   [ "$COMMENTED" -eq 0 ] && [ "$HELD" -eq 0 ]
@@ -1438,11 +1450,12 @@ resolve_orch_login() {
 # forge#3181: both markers must also START the comment body (startswith, not contains), so a trusted comment that merely
 # quotes the marker text is not counted. hold_merged_trail / release_merged_trail emit the marker as the first line.
 # The comment read is cached per issue for the current monitoring cycle: the cache is a directory of files
-# (`$(...)` subshells lose shell arrays), `TRAIL_CACHE_DIR=$(mktemp -d)` and is recreated at the start of every
-# monitoring cycle (Step 4B item 6.6), so a human edit made between cycles is always seen. Only successful reads are cached.
+# (`$(...)` subshells lose shell arrays) at the deterministic path from `trail_cache_dir`, and is reset by
+# `init_trail_cache` at the TOP of every monitoring cycle (Step 4B "Cycle-start cache reset", before item 5 and stall
+# detection), so a human edit made between cycles is always seen. Only successful reads are cached.
 trail_escalation_state() {
-  local N="$1" F="${TRAIL_CACHE_DIR:+$TRAIL_CACHE_DIR/trail-$1}" RAW OUT FAILED_ID RELEASED_ID RES
-  if [ -n "$F" ] && [ -s "$F" ]; then cat "$F"; return; fi
+  local N="$1" F="$(trail_cache_dir)/trail-$1" RAW OUT FAILED_ID RELEASED_ID RES
+  if [ -s "$F" ]; then cat "$F"; return; fi
   if ! RAW=$(gh api --paginate "repos/{GH_REPO}/issues/${N}/comments" --jq '.[] | {id: .id, body: (.body // ""), login: (.user.login // ""), assoc: (.author_association // "")}' 2>/dev/null); then
     echo "UNREADABLE"; return
   fi
@@ -1454,7 +1467,7 @@ trail_escalation_state() {
   if [ "$FAILED_ID" -eq 0 ]; then RES="ABSENT"
   elif [ "$RELEASED_ID" -gt "$FAILED_ID" ]; then RES="RELEASED"
   else RES="ACTIVE"; fi
-  [ -n "$F" ] && printf '%s\n' "$RES" > "$F"
+  mkdir -p "$(trail_cache_dir)" 2>/dev/null && printf '%s\n' "$RES" > "$F"
   echo "$RES"
 }
 
@@ -1469,7 +1482,7 @@ release_merged_trail() {
   [ "$(trail_escalation_state "$N")" = "ACTIVE" ] || return 0
   gh issue comment "$N" -R {GH_REPO} --body "<!-- FORGE:PHASE_TRAIL_RELEASED -->
 The merged-trail hold on #${N} was released by a human (needs-human cleared or trail re-verified). Dependents held as \`blocked-on-human-merge\` are released. A later, unrelated \`needs-human\` on this merged issue no longer gates them." >/dev/null 2>&1 || true # <!-- allowlist:check-command-side-effects -->
-  [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -f "$TRAIL_CACHE_DIR/trail-$N"
+  rm -f "$(trail_cache_dir)/trail-$N"
   return 0
 }
 
@@ -1565,7 +1578,7 @@ classify_predecessor_state() {
         else
           # Unverified trail with no hold on record: establish it now so a human can release it.
           # Output is discarded (stdout is the classification), but a failed hold is reported on stderr, not swallowed.
-          [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -f "$TRAIL_CACHE_DIR/trail-$PRED"
+          rm -f "$(trail_cache_dir)/trail-$PRED"
           [ "${DRY_RUN:-false}" = "true" ] || [ "$(trail_escalation_state "$PRED")" != "ABSENT" ] || hold_merged_trail "$PRED" "PHASE_TRAIL: FAIL (re-verified at wake classification)" >/dev/null || echo "classify_predecessor_state: hold on #${PRED} could not be verified" >&2
           echo "GATED"
         fi ;;
@@ -2255,9 +2268,8 @@ Do not ask the user questions — you are running autonomously in the background
 
 6.6. **Release sweep for blocked-on-human-merge dependents** <!-- Added: forge#1812, reworked: forge#3157 --> — run this sweep on **every monitoring cycle** (after items 5-6 of each completion cycle and in each stall-detection pass), not only when an agent just merged: a human clearing `needs-human` on an already-merged, trail-held predecessor (Step 4B item 0) fires no completion event, so a sweep keyed on the just-completed `$NUM` would leave its dependents held until the next `/orchestrate` wake. Every hold the orchestrator creates needs a matching release check on each cycle. The sweep re-classifies the gating predecessors of every `blocked-on-human-merge` dependent and releases a dependent once all of them classify `DONE`:
    ```bash
-   # New per-cycle comment cache for trail_escalation_state (human edits between cycles are always re-read).
-   [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -rf "$TRAIL_CACHE_DIR"
-   TRAIL_CACHE_DIR=$(mktemp -d)
+   # The per-cycle trail cache was already reset by init_trail_cache at the top of this cycle (see "Cycle-start cache
+   # reset" in Step 4B); do NOT reset it here, that would be after items 5-6 and stall detection already read it.
    WOKEN=$(gh issue list -R {GH_REPO} --state open --label "blocked-on-human-merge" --json number \
      --jq '.[].number' 2>/dev/null || echo "")
    for DEP in $WOKEN; do
@@ -2273,9 +2285,19 @@ Do not ask the user questions — you are running autonomously in the background
      DEP_ALREADY_DISPATCHED=$(gh issue view "$DEP" -R {GH_REPO} --json labels \
        --jq '[.labels[].name | select(startswith("workflow:"))] | length' 2>/dev/null || echo "0")
      if [ "$DEP_ALREADY_DISPATCHED" -eq 0 ]; then
+       # Remove the hold label FIRST and verify it is gone (forge#3182): a swallowed failure would leave DEP held yet
+       # re-released and re-dispatched every cycle. On failure skip release, UNBLOCKED comment and dispatch; retry next cycle.
+       if ! gh issue edit "$DEP" -R {GH_REPO} --remove-label "blocked-on-human-merge" 2>/dev/null \
+          || gh issue view "$DEP" -R {GH_REPO} --json labels --jq '.labels[].name' 2>/dev/null | grep -qx "blocked-on-human-merge"; then
+         echo "WARNING: #${DEP} blocked-on-human-merge label removal failed or unverified — not dispatching; retrying next cycle." >&2
+         continue
+       fi
+       # Re-check after removal: another path may have labelled DEP workflow:* in the meantime.
+       DEP_ALREADY_DISPATCHED=$(gh issue view "$DEP" -R {GH_REPO} --json labels \
+         --jq '[.labels[].name | select(startswith("workflow:"))] | length' 2>/dev/null || echo "0")
+       [ "$DEP_ALREADY_DISPATCHED" -eq 0 ] || continue
        # Record a human release of a trail-held merged predecessor so the escalation stops gating (decay).
        for GPRED in $GATING_PREDS; do release_merged_trail "$GPRED"; done
-       gh issue edit "$DEP" -R {GH_REPO} --remove-label "blocked-on-human-merge" 2>/dev/null || true
        gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:UNBLOCKED -->
    All gating predecessor(s) (#$(echo $GATING_PREDS | sed 's/ /, #/g')) are now resolved — merged, or released by a human after a phase-trail hold — dispatching now. (Was tracked via a prior FORGE:BLOCKED_ON_HUMAN_MERGE comment.)"
        echo "#{DEP} unblocked (gating predecessors resolved) — dispatching immediately (Steps 4A.pre.0 → 4A.pre → 4A)."
@@ -2283,7 +2305,7 @@ Do not ask the user questions — you are running autonomously in the background
      fi
    done
    ```
-   `release_merged_trail` is a no-op unless the predecessor carries an ACTIVE merged-trail escalation, so ordinary merges are unaffected. The classifier's per-cycle comment cache bounds the escalation-comment reads to one per predecessor per cycle. For the case where the hold is released after the orchestrator session has already ended, the equivalent check runs in `phase-3-dependency.md`'s wake/compaction reconstruction on the next `/orchestrate` invocation — see that file's "Orchestrator state reconstruction on wake / after compaction" section.
+   `release_merged_trail` is a no-op unless the predecessor carries an ACTIVE merged-trail escalation, so ordinary merges are unaffected. The classifier's per-cycle comment cache (reset at cycle start by `init_trail_cache`) bounds the escalation-comment reads to one per predecessor per cycle. For the case where the hold is released after the orchestrator session has already ended, the equivalent check runs in `phase-3-dependency.md`'s wake/compaction reconstruction on the next `/orchestrate` invocation — see that file's "Orchestrator state reconstruction on wake / after compaction" section.
 
 6.7. **Human-gated idle/backpressure check** (`BATCH_FULLY_GATED`) <!-- Added: forge#1814 --> — run this after every completion cycle, once the per-issue classification above (items 5-6.6) has been applied for this cycle. It answers a different question than the paused-drain/blocked-on-human-merge tracking above: those items handle *individual* gated predecessors and their *direct* dependents; this check asks whether the **entire original batch** has now exhausted into human-gated states, which is the condition under which continuing to dispatch cascade-spawned review findings (Step 4C) produces net-negative churn — closing 1 issue while opening 2-4 more, with the real blockers (the GATED issues) unresolved:
 
@@ -2381,7 +2403,7 @@ Do not ask the user questions — you are running autonomously in the background
 
 9. **Run staging integrity check** (from Step 4A-pre) if the completed agent merged a PR targeting staging.
 
-**Termination condition**: All issues in the DAG have reached `DONE` or `FAILED` (merged, invalid, or skipped due to dependency failure) — OR are `blocked-on-human-merge` (item 6.5) with no further dispatchable work remaining in the batch. These two outcomes are reported differently: a batch where every issue is `DONE`/`FAILED` is a **clean drain**; a batch where one or more issues remain `blocked-on-human-merge` is a **paused drain** — the active dispatch loop stops (there is nothing left to do until a human merges a gating PR) but this MUST be reported as paused, not as fully complete (see `phase-6-report.md`'s `🔗 Blocked-on-Merge` section). `needs-human` predecessors with no open PR are neither — they remain GATED indefinitely until either a PR appears (dependent moves to blocked-on-human-merge) or the predecessor itself resolves; do not treat isolated `needs-human` issues with no dependents as blocking termination. When either drain condition is met, check whether deferred review-spawned findings exist (accumulated in `DEFERRED_FINDINGS` during Step 4C). If deferred findings exist → proceed to Step 4F (Completion Sweep). If no deferred findings → **call `release_orchestrator_lease()` (Step 4A-pre.-1)** — this is a clean/paused drain of this session's own dispatch loop, so the lease should not be left held for a now-idle session — then proceed to Phase 5. <!-- Added: forge#2627 -->
+**Termination condition**: All issues in the DAG have reached `DONE` or `FAILED` (merged, invalid, or skipped due to dependency failure) — OR are `blocked-on-human-merge` (item 6.5) with no further dispatchable work remaining in the batch. These two outcomes are reported differently: a batch where every issue is `DONE`/`FAILED` is a **clean drain**; a batch where one or more issues remain `blocked-on-human-merge` is a **paused drain** — the active dispatch loop stops (there is nothing left to do until a human merges a gating PR) but this MUST be reported as paused, not as fully complete (see `phase-6-report.md`'s `🔗 Blocked-on-Merge` section). `needs-human` predecessors with no open PR are neither — they remain GATED indefinitely until either a PR appears (dependent moves to blocked-on-human-merge) or the predecessor itself resolves; do not treat isolated `needs-human` issues with no dependents as blocking termination. When either drain condition is met, check whether deferred review-spawned findings exist (accumulated in `DEFERRED_FINDINGS` during Step 4C). If deferred findings exist → proceed to Step 4F (Completion Sweep). If no deferred findings → **call `cleanup_trail_cache` (Step 4B) and `release_orchestrator_lease()` (Step 4A-pre.-1)** — this is a clean/paused drain of this session's own dispatch loop, so the lease should not be left held for a now-idle session — then proceed to Phase 5. <!-- Added: forge#2627 -->
 
 **Reminder — this is the normal-exit lease release, distinct from the interrupted-stop procedure**: whether the drain is clean or paused, this session is no longer actively dispatching, so its lease must be released here (or, for a paused drain, at minimum have its heartbeat refresh stop — see Step 4A-pre.-1). This complements, but does not replace, the **Stopping the orchestrator** procedure (Step 4A-pre.-0.5) which handles the abnormal case of a mid-dispatch interrupt.
 
@@ -3877,7 +3899,7 @@ Completion Sweep Results:
   Token-gated — still deferred: #{H} (sweep allowance also exhausted — re-evaluable next run)
 ```
 
-**After sweep agents complete** (or if no findings were dispatched): output the budget deferred-issues report (if applicable), **call `release_orchestrator_lease()` (Step 4A-pre.-1)** — the sweep is this session's last dispatch activity, so the lease must not be left held for a now-idle session (the Termination condition's own release call, above, only fires on the no-deferred-findings branch; this is the equivalent release for the deferred-findings/Completion Sweep branch) <!-- Added: forge#2627 -->, then proceed to Phase 5.
+**After sweep agents complete** (or if no findings were dispatched): output the budget deferred-issues report (if applicable), **call `cleanup_trail_cache` (Step 4B) and `release_orchestrator_lease()` (Step 4A-pre.-1)** — the sweep is this session's last dispatch activity, so the lease must not be left held for a now-idle session (the Termination condition's own release call, above, only fires on the no-deferred-findings branch; this is the equivalent release for the deferred-findings/Completion Sweep branch) <!-- Added: forge#2627 -->, then proceed to Phase 5.
 
 **Anti-patterns — DO NOT DO THIS:**
 - Re-sweeping findings spawned during the sweep itself — this creates unbounded recursion. Sweep is a single pass.
