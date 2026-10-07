@@ -426,7 +426,7 @@ git ls-remote --exit-code origin {PR_BASE} >/dev/null 2>&1 || echo "PR_BASE not 
 
 The quality gate must leave a checkable artifact. `scripts/verify-phase-trail.sh` (run before PR creation and before auto-merge) requires a `FORGE:QUALITY_GATE` comment with `**Result**: PASS` for every non-docs-only change. Post it after the V1 loop ends, recording the real commands run and their real results. Do NOT hand-post this marker without having actually run the gate: a marker with no run behind it is a pipeline bypass.
 
-**Skip-path marker**: when the Skip Conditions above return `GATE_PASSED: true` early (single config/docs file), still post the marker with `**Result**: PASS (skipped — single config/docs file)` and `**Iterations**: 0`, so the verifier never has to guess. The verifier's `--docs-only` waiver additionally covers diffs where every file is `*.md` or `docs/**`.
+**Skip-path marker**: when the Skip Conditions above return `GATE_PASSED: true` early (single config/docs file), still post the marker with `**Result**: PASS (skipped — single config/docs file)` and `**Iterations**: 0`, so the verifier never has to guess. The verifier's `--docs-only` waiver additionally covers diffs accepted by `scripts/is-docs-only.sh` (Markdown only; nested `AGENTS.md`/`CLAUDE.md`/`SKILL.md` and `commands/`, `.claude/`, `.agents/`, `.codex/`, `.github/` excluded).
 
 ```bash
 GATE_RESULT=$([ "$GATE_PASSED" = "true" ] && echo PASS || echo FAIL)
