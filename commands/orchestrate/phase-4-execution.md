@@ -1344,7 +1344,8 @@ For an OpenCode completion, retain `OPENCODE_DISPATCH_MAP[{NUMBER}]` until the t
 # trail failed or could not be verified. Used by Step 4B item 0 and by the classifier's wake re-verification.
 # Order matters: the `needs-human` label is written FIRST (read-back verified, 3 tries) because the classifier
 # holds on merged + needs-human even before the comment exists; the comment follows (verified, 2 tries) and is
-# the audit record that lets a human release the hold. Returns 0 when the label hold is verified, 1 otherwise.
+# the audit record that lets a human release the hold. Returns 0 when the label hold is verified; returns 1 and posts
+# NO comment otherwise (a comment without the label would classify as a released hold).
 hold_merged_trail() {
   local N="$1" TXT="$2" TRY HELD=1
   for TRY in 1 2 3; do
@@ -1352,7 +1353,7 @@ hold_merged_trail() {
     if gh issue view "$N" -R {GH_REPO} --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null \
          | grep -qE '(^|,)needs-human(,|$)'; then HELD=0; break; fi
   done
-  [ "$HELD" -ne 0 ] && echo "PHASE TRAIL HOLD FAILED: #${N} — needs-human label could not be verified; dependents are NOT held. Hold them manually." >&2
+  if [ "$HELD" -ne 0 ]; then echo "PHASE TRAIL HOLD FAILED: #${N} — needs-human label could not be verified; no comment posted (a comment without the label would read as a released hold); dependents are NOT held. Hold them manually." >&2; return "$HELD"; fi
   for TRY in 1 2; do
     # forge#3157: dedupe only against an ACTIVE escalation, so a re-escalation after a recorded release posts a new one.
     [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -f "$TRAIL_CACHE_DIR/trail-$N"
@@ -1427,13 +1428,29 @@ classify_predecessor_state() {
 
   # reverify_merged_trail: re-run the phase-trail verifier for a merged predecessor that has NO escalation
   # record (forge#3156), so wake reconstruction does not trust the `workflow:merged` label alone. Prints OK
-  # when the trail verifies, UNVERIFIED otherwise. FORGE_ROOT comes from the Step 4A-pre/item 0 bootstrap; if
-  # it is unresolved the verifier cannot run, so a predecessor already holding `needs-human` fails closed
-  # (UNVERIFIED), while a plain merged one is trusted (OK) because item 0 verified it on its completion.
+  # when the trail verifies, UNVERIFIED otherwise. Fails closed: a wake runs in a fresh shell where FORGE_ROOT is
+  # unset, so the helper resolves it itself (canonical bootstrap, only when unset); if it is still unresolved or
+  # the verifier is missing, the result is UNVERIFIED for every predecessor, never OK.
   reverify_merged_trail() {
-    local P="$1" HAS_HUMAN="$2" RC
+    local P="$1" RC
+    if [ -z "${FORGE_ROOT:-}" ]; then
+      # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+      FORGE_ROOT=""
+      if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
+        # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
+        _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+        # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+        _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
+        _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+        # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
+        _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
+        while IFS= read -r _c; do
+          case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
+        done <<< "$_k"
+      fi
+    fi
     if [ -z "${FORGE_ROOT:-}" ] || [ ! -f "$FORGE_ROOT/scripts/verify-phase-trail.sh" ]; then
-      [ "$HAS_HUMAN" = "yes" ] && echo "UNVERIFIED" || echo "OK"; return
+      echo "UNVERIFIED"; return
     fi
     bash "$FORGE_ROOT/scripts/verify-phase-trail.sh" "$P" -R {GH_REPO} --code-diff >/dev/null 2>&1; RC=$?
     [ "$RC" -eq 0 ] && echo "OK" || echo "UNVERIFIED"
@@ -1450,7 +1467,7 @@ classify_predecessor_state() {
     local TRAIL_ESC
     TRAIL_ESC=$(trail_escalation_state "$PRED")
     case "$TRAIL_ESC" in
-      ABSENT)   [ "$(reverify_merged_trail "$PRED" yes)" = "OK" ] && echo "DONE" || echo "GATED" ;;
+      ABSENT)   [ "$(reverify_merged_trail "$PRED")" = "OK" ] && echo "DONE" || echo "GATED" ;;
       RELEASED) echo "DONE" ;;   # forge#3157: a human release was recorded after the last escalation; this needs-human is unrelated
       *)        echo "GATED" ;;  # ACTIVE or UNREADABLE: fail closed
     esac
@@ -1462,7 +1479,7 @@ classify_predecessor_state() {
     case "$(trail_escalation_state "$PRED")" in
       ACTIVE|RELEASED) echo "DONE" ;;
       *)
-        if [ "$(reverify_merged_trail "$PRED" no)" = "OK" ]; then
+        if [ "$(reverify_merged_trail "$PRED")" = "OK" ]; then
           echo "DONE"
         else
           # Unverified trail with no hold on record: establish it now so a human can release it.
