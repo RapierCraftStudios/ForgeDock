@@ -58,4 +58,53 @@ describe("ForgeDock skill namespace resolution", () => {
       assert.match(t, /Skill Name Resolution/, f);
     }
   });
+
+  it("resolver covers every runtime's install layout", () => {
+    const t = readFileSync(join(commandsDir, "work-on.md"), "utf8");
+    for (const re of [/forgedock:work-on:build/, /forge-work-on-build/, /`work-on:build`/, /work-on-build/, /FORGE_RUNTIME/, /nesting separator/i]) {
+      assert.match(t, re);
+    }
+  });
+});
+
+// Install-layout checks: the names each installer actually registers must equal the names the resolver produces.
+const nested = [];
+for (const f of walk(commandsDir)) {
+  const rel = f.slice(commandsDir.length, -3);
+  if (rel.includes("/") && !rel.startsWith("review-pr-agents")) nested.push(rel);
+}
+const repoRoot = new URL("../../", import.meta.url).pathname;
+
+describe("install layouts register the names the resolver produces", () => {
+  it("has nested commands to test", () => {
+    assert.ok(nested.includes("work-on/build"));
+  });
+
+  it("install.sh keeps commands/<a>/<b>.md as ~/.claude/commands/<a>/<b>.md (Claude names it <a>:<b>)", () => {
+    const sh = readFileSync(join(repoRoot, "install.sh"), "utf8");
+    assert.ok(sh.includes('rel="${cmd#"$FORGE_HOME/commands/"}"'));
+    assert.match(sh, /mkdir -p/);
+  });
+
+  it("install-codex.sh maps nested paths to forge-<a>-<b>", () => {
+    const sh = readFileSync(join(repoRoot, "install-codex.sh"), "utf8");
+    assert.ok(sh.includes('name="${name//\\//-}"'));
+    assert.match(sh, /printf 'forge-%s'/);
+    for (const rel of nested) {
+      const expected = `forge-${rel.replace(/\//g, "-")}`;
+      assert.match(expected, /^forge-[a-z0-9.-]+$/);
+    }
+  });
+
+  it("OpenCode adapter maps nested paths to <a>-<b>", async () => {
+    const { normalizeOpenCodeSkillName } = await import("../opencode-adapter.mjs");
+    assert.equal(normalizeOpenCodeSkillName("work-on/build.md"), "work-on-build");
+    assert.equal(normalizeOpenCodeSkillName("work-on/build/validate.md"), "work-on-build-validate");
+    assert.equal(normalizeOpenCodeSkillName("work-on.md"), "work-on");
+  });
+
+  it("repo-local Codex work-on override uses the forge- prefix", () => {
+    const t = readFileSync(join(repoRoot, ".agents/skills/work-on/SKILL.md"), "utf8");
+    assert.match(t, /forge-work-on-build/);
+  });
 });

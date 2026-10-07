@@ -48,6 +48,8 @@ Examples:
 | `commands/work-on/investigate.md` | `forge-work-on-investigate` |
 | `commands/work-on/build/context.md` | `forge-work-on-build-context` |
 
+Nested `Skill("{FORGE_SKILL_PREFIX}work-on:build")` references in the specs resolve under Codex to `forge-work-on-build` (prefix `forge-`, `-` nesting); see `Skill Name Resolution` in `commands/work-on.md`.
+
 `commands/review-pr-agents.md` is excluded because it is a read-on-demand catalog, not a standalone entrypoint.
 
 ## How the Adapter Works
