@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# lint-dispatch-prompt.sh — Mechanical enforcement of /orchestrate Hard Rule 1
+# lint-dispatch-prompt.sh — Best-effort enforcement of /orchestrate Hard Rule 1
+# ("copy the Phase 4A template verbatim; no custom prompts").
 #
 # NOTE: this is a best-effort, self-run guard, not a tamper-proof gate: no hook gates
 # Agent(...), so the orchestrator must run it. Free-text slots (issue title, DISPATCH_CONTEXT)
 # are phrase-scanned only and can be bypassed by rephrasing.
-# ("copy the Phase 4A template verbatim; no custom prompts").
 #
 # Lints a RENDERED dispatch prompt (the text handed to Agent(prompt=...)) so an
 # orchestrator cannot pre-solve an issue or pre-decide its verdict in a custom brief.
