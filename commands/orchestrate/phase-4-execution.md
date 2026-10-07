@@ -1676,10 +1676,16 @@ done
      # merged PR's diff with the SAME predicate as review-pr.md Phase 8 / work-on/review.md R1.5 (docs/** or *.md, excluding
      # commands/**, .claude/**, .agents/** and root AGENTS.md/CLAUDE.md). Fail closed: no PR / unreadable diff -> no flag.
      TRAIL_DOCS_FLAG=""
-     TRAIL_PR=$(gh pr list -R {GH_REPO} --state merged --search "\"Closes #{NUMBER}\" in:body" --json number --jq '.[0].number // empty' 2>/dev/null)
-     if [ -n "$TRAIL_PR" ]; then
-       TRAIL_FILES=$(gh pr diff "$TRAIL_PR" -R {GH_REPO} --name-only 2>/dev/null)
-       if [ -n "$TRAIL_FILES" ] && echo "$TRAIL_FILES" | awk '!(/^docs\// || (/\.md$/ && !/^(commands|\.claude|\.agents)\// && !/^(AGENTS|CLAUDE)\.md$/)){bad=1} END{exit bad}'; then TRAIL_DOCS_FLAG="--docs-only"; fi
+     # forge#3133: the text search is fuzzy and unordered, so `.[0]` can be an unrelated docs-only PR. Evaluate EVERY
+     # matching merged PR and set the flag only if at least one matched AND all matched diffs are non-empty and docs-only.
+     TRAIL_PRS=$(gh pr list -R {GH_REPO} --state merged --limit 20 --search "\"Closes #{NUMBER}\" in:body" --json number --jq '.[].number' 2>/dev/null)
+     if [ -n "$TRAIL_PRS" ]; then
+       TRAIL_ALL_DOCS=1
+       for TRAIL_PR in $TRAIL_PRS; do
+         TRAIL_FILES=$(gh pr diff "$TRAIL_PR" -R {GH_REPO} --name-only 2>/dev/null)
+         if [ -z "$TRAIL_FILES" ] || ! echo "$TRAIL_FILES" | awk '!(/^docs\// || (/\.md$/ && !/^(commands|\.claude|\.agents)\// && !/^(AGENTS|CLAUDE)\.md$/)){bad=1} END{exit bad}'; then TRAIL_ALL_DOCS=0; break; fi
+       done
+       [ "$TRAIL_ALL_DOCS" = "1" ] && TRAIL_DOCS_FLAG="--docs-only"
      fi
      TRAIL=$(bash "$FORGE_ROOT/scripts/verify-phase-trail.sh" {NUMBER} -R {GH_REPO} $TRAIL_DOCS_FLAG 2>&1); TRAIL_RC=$?
    fi
