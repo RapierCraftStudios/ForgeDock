@@ -2217,27 +2217,14 @@ When `CASCADE_MAX_AMPLIFICATION` is not `off`, and the current ratio is greater 
 ```bash
 # Run once for each completed issue before collecting its findings. Only merged
 # units advance the denominator; invalid/skipped units do not imply delivered work.
+# The ratio observation for this unit is recorded AFTER its findings are counted, in the
+# "Amplification settle" block that follows the Step 4C rule loop (forge#3060) — recording it
+# here would lag by one unit and could never reach 1.0 at exactly one finding per merged unit.
+UNIT_MERGED_THIS_CYCLE=false
 if gh issue view "$NUM" -R {GH_REPO} --json labels \
   --jq '[.labels[].name | select(. == "workflow:merged")] | length' | grep -qx '1'; then
   MERGED_UNITS=$((MERGED_UNITS + 1))
-  # History keeps the UNROUNDED ratio (printed value is rounded for display only) so a ratio
-  # like 0.996 is never treated as >= 1.0 by the breaker.
-  AMPLIFICATION_RATIO=$(awk "BEGIN { printf \"%.2f\", $FINDINGS_SPAWNED / $MERGED_UNITS }")
-  AMPLIFICATION_RATIO_HISTORY+=("$(awk "BEGIN { printf \"%.6f\", $FINDINGS_SPAWNED / $MERGED_UNITS }")")
-  if [ "${#AMPLIFICATION_RATIO_HISTORY[@]}" -ge "$CONVERGENCE_WINDOW" ]; then
-    RECENT_RATIOS=("${AMPLIFICATION_RATIO_HISTORY[@]: -$CONVERGENCE_WINDOW}")
-    if printf '%s\n' "${RECENT_RATIOS[@]}" | awk '$1 < 1 { exit 1 }'; then
-      echo "CONVERGENCE WARNING: amplification has remained >= 1.0 for ${CONVERGENCE_WINDOW} merged units (${AMPLIFICATION_RATIO} current). This can be productive review refinement, but the batch is not shrinking."
-      if [ "$AMPLIFICATION_BREAKER" = "on" ] && [ "$AMPLIFICATION_BREAKER_TRIPPED" = "false" ]; then
-        AMPLIFICATION_BREAKER_TRIPPED=true
-        # One operator report per trip: ratio and queue size, no per-finding spam (forge#3060).
-        echo "AMPLIFICATION BREAKER TRIPPED: ratio ${AMPLIFICATION_RATIO} (${FINDINGS_SPAWNED} findings / ${MERGED_UNITS} merged units) stayed >= 1.0 for ${CONVERGENCE_WINDOW} units. P3 cascade admission is paused; ${#AMPLIFICATION_BREAKER_DEFERRED[@]} finding(s) paused so far. P1/P2 are still admitted. Deferred P3s are routed to the P3 batch sweep (planP3BatchGroups) / Step 4F. Operator decision: batch them or defer. Opt out: orchestration.cascade.amplification_breaker: off"
-      fi
-    else
-      # Newest observation fell below 1.0 — the cascade is converging again; release the breaker.
-      AMPLIFICATION_BREAKER_TRIPPED=false
-    fi
-  fi
+  UNIT_MERGED_THIS_CYCLE=true
 fi
 
 ```
@@ -2549,32 +2536,36 @@ Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${R
   fi
 
   # Rule 6 (forge#3060): on-by-default breaker over ALL cascade findings. Applies ONLY to
-  # P3-and-below (P0/P1/P2 and untriaged/unparseable priorities are never gated by it).
-  # Re-evaluated live per finding (this finding and earlier ones in this cycle have already
-  # incremented FINDINGS_SPAWNED), so a burst spawned while the breaker was clear cannot slip
-  # through. Applied even when another rule already deferred the finding, and APPENDED to the
-  # reason, so Step 4F's `*"amplification breaker"*` hold still catches it and it is never
-  # individually dispatched by the sweep.
+  # P3-and-below (P0/P1/P2 and untriaged/unparseable priorities are never gated by it) and NEVER
+  # to security/billing-class findings (classifyBatchSafety != routine): those can neither batch
+  # with routine work nor be individually dispatched by the sweep, so pausing them would starve
+  # them; they keep their pre-existing individual triage path unchanged.
+  # Evaluated live per finding. When a unit merged this cycle (UNIT_MERGED_THIS_CYCLE), its ratio
+  # observation is not yet in the history (recorded by "Amplification settle"), so the live
+  # unrounded ratio plus the last CONVERGENCE_WINDOW-1 recorded observations form the window.
+  # Applied even when another rule already deferred the finding, and APPENDED to the reason, so
+  # Step 4F's `*"amplification breaker"*` hold (checked FIRST) still catches it.
   if [ "$AMPLIFICATION_BREAKER" = "on" ] && echo "$PRIORITY" | grep -qE '^P[3-9]$'; then
+    BREAKER_SAFETY=$(node -e 'import("./bin/engine/admission.mjs").then(({ classifyBatchSafety }) => process.stdout.write(classifyBatchSafety(process.argv[1]) || "routine"))' "$(echo "$FINDING_DATA" | jq -r '(.title // "") + "\n" + (.body // "")')" 2>/dev/null || echo "routine")
     BREAKER_LIVE_TRIPPED="$AMPLIFICATION_BREAKER_TRIPPED"
-    if [ "$BREAKER_LIVE_TRIPPED" = "false" ] && [ "$MERGED_UNITS" -gt 0 ] && \
-       [ "${#AMPLIFICATION_RATIO_HISTORY[@]}" -ge $((CONVERGENCE_WINDOW - 1)) ] && \
+    if [ "$BREAKER_LIVE_TRIPPED" = "false" ] && [ "$UNIT_MERGED_THIS_CYCLE" = "true" ] && [ "$MERGED_UNITS" -gt 0 ] && \
        awk "BEGIN { exit !($FINDINGS_SPAWNED / $MERGED_UNITS >= 1) }"; then
-      # Live ratio (unrounded) counts as the newest observation; the previous
-      # CONVERGENCE_WINDOW-1 recorded observations must also be >= 1.0.
       if [ "$CONVERGENCE_WINDOW" -le 1 ] || \
-         printf '%s\n' "${AMPLIFICATION_RATIO_HISTORY[@]: -$((CONVERGENCE_WINDOW - 1))}" | awk '$1 < 1 { exit 1 }'; then
+         { [ "${#AMPLIFICATION_RATIO_HISTORY[@]}" -ge $((CONVERGENCE_WINDOW - 1)) ] && \
+           printf '%s\n' "${AMPLIFICATION_RATIO_HISTORY[@]: -$((CONVERGENCE_WINDOW - 1))}" | awk '$1 < 1 { exit 1 }'; }; then
         BREAKER_LIVE_TRIPPED=true
         AMPLIFICATION_BREAKER_TRIPPED=true
       fi
     fi
-    if [ "$BREAKER_LIVE_TRIPPED" = "true" ]; then
+    if [ "$BREAKER_LIVE_TRIPPED" = "true" ] && [ "$BREAKER_SAFETY" = "routine" ]; then
       DEFER_REASON="${DEFER_REASON:+${DEFER_REASON}; }amplification breaker tripped (ratio >= 1.0 for ${CONVERGENCE_WINDOW} merged units) — held for bounded P3 batches"
       DEFER=true
-      AMPLIFICATION_BREAKER_DEFERRED+=("$FINDING_NUM")
-      # Route to the bounded P3 batch planner (never individual dispatch). planP3BatchGroups()
-      # still applies batchExclusionReason(), so security/billing/domain findings stay unbatched.
-      BATCHABLE_DEFERRED_P3+=("$FINDING_NUM")
+      case " ${AMPLIFICATION_BREAKER_DEFERRED[*]} " in *" $FINDING_NUM "*) ;; *) AMPLIFICATION_BREAKER_DEFERRED+=("$FINDING_NUM") ;; esac
+      # Route to the bounded P3 batch planner (never individual dispatch); dedupe so a finding
+      # already added by the generation rule is not listed twice.
+      if [ "$PRIORITY" = "P3" ]; then
+        case " ${BATCHABLE_DEFERRED_P3[*]} " in *" $FINDING_NUM "*) ;; *) BATCHABLE_DEFERRED_P3+=("$FINDING_NUM") ;; esac
+      fi
     fi
   fi
 
@@ -2586,6 +2577,30 @@ Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${R
     QUEUED_FINDINGS+=($FINDING_NUM)
   fi
 done
+```
+
+**Amplification settle (MANDATORY — after the rule loop above, before batching/dispatch; forge#3060):** now that this unit's findings are counted, record its ratio observation (unrounded; the printed value is rounded for display only) and evaluate the breaker over the latest `CONVERGENCE_WINDOW` observations. Release as soon as the newest observation is below 1.0.
+
+```bash
+if [ "$UNIT_MERGED_THIS_CYCLE" = "true" ]; then
+  AMPLIFICATION_RATIO=$(awk "BEGIN { printf \"%.2f\", $FINDINGS_SPAWNED / $MERGED_UNITS }")
+  AMPLIFICATION_RATIO_HISTORY+=("$(awk "BEGIN { printf \"%.6f\", $FINDINGS_SPAWNED / $MERGED_UNITS }")")
+  if [ "${#AMPLIFICATION_RATIO_HISTORY[@]}" -ge "$CONVERGENCE_WINDOW" ]; then
+    RECENT_RATIOS=("${AMPLIFICATION_RATIO_HISTORY[@]: -$CONVERGENCE_WINDOW}")
+    if printf '%s\n' "${RECENT_RATIOS[@]}" | awk '$1 < 1 { exit 1 }'; then
+      echo "CONVERGENCE WARNING: amplification has remained >= 1.0 for ${CONVERGENCE_WINDOW} merged units (${AMPLIFICATION_RATIO} current). This can be productive review refinement, but the batch is not shrinking."
+      if [ "$AMPLIFICATION_BREAKER" = "on" ] && [ "$AMPLIFICATION_BREAKER_TRIPPED" = "false" ]; then
+        AMPLIFICATION_BREAKER_TRIPPED=true
+        # One operator report per trip: ratio and queue size, no per-finding spam.
+        echo "AMPLIFICATION BREAKER TRIPPED: ratio ${AMPLIFICATION_RATIO} (${FINDINGS_SPAWNED} findings / ${MERGED_UNITS} merged units) stayed >= 1.0 for ${CONVERGENCE_WINDOW} units. P3 cascade admission is paused; ${#AMPLIFICATION_BREAKER_DEFERRED[@]} finding(s) paused so far. P1/P2 are still admitted. Paused P3s are routed to the bounded P3 batch planner (planP3BatchGroups) and are never dispatched individually. Operator decision: batch them or defer. Opt out: orchestration.cascade.amplification_breaker: off"
+      fi
+    else
+      # Newest observation fell below 1.0 — the cascade is converging again; release the breaker.
+      AMPLIFICATION_BREAKER_TRIPPED=false
+    fi
+  fi
+fi
+UNIT_MERGED_THIS_CYCLE=false
 ```
 
 **Concern-level batching for queued P3 findings (MANDATORY check before dispatch):** <!-- Added: forge#1818 -->
@@ -2681,7 +2696,7 @@ done
 # the batch issue in QUEUED_FINDINGS so the dispatch step below never double-dispatches
 # them. This is what makes SURFACE_BATCHED_FINDINGS a live control, not dead wiring. <!-- forge#1832, forge#1834 -->
 for FILE in "${!SURFACE_FILE_MEMBERS[@]}"; do
-  MEMBERS=(${SURFACE_FILE_MEMBERS[$FILE]})
+  MEMBERS=($(printf '%s\n' ${SURFACE_FILE_MEMBERS[$FILE]} | sort -un))   # dedupe: a finding listed twice must not form a self-batch
   [ "${#MEMBERS[@]}" -ge 2 ] || continue
 
   SAFETY_CLASS=${FILE%%:*}
@@ -3054,12 +3069,18 @@ PERMANENT_DEFERRED=()
 SWEEP_CANDIDATES=()
 IDLE_DEFERRED=()   # <!-- Added: forge#1814 -->
 TOKEN_GATED=()     # <!-- Added: forge#1858 -->
+BREAKER_HELD=()    # amplification-breaker holds: bounded P3 batches only, never individually dispatched (forge#3060)
 
 for FINDING_NUM in "${DEFERRED_FINDINGS[@]}"; do
   DEFER_REASON="${DEFERRED_REASONS[$FINDING_NUM]}"
 
+  # Amplification-breaker holds (forge#3060) are checked FIRST: the breaker reason is appended to
+  # whatever rule deferred the finding earlier (idle policy, generation, same-file, token budget),
+  # and such a finding must never fall into a bucket whose re-evaluation dispatches it individually.
+  if echo "$DEFER_REASON" | grep -qi "amplification breaker"; then
+    BREAKER_HELD+=($FINDING_NUM)
   # Generation >= 2 deferrals are PERMANENT — unbounded cascade prevention
-  if echo "$DEFER_REASON" | grep -qi "generation"; then
+  elif echo "$DEFER_REASON" | grep -qi "generation"; then
     PERMANENT_DEFERRED+=($FINDING_NUM)
   # "Batch fully human-gated" deferrals (forge#1814) are their OWN bucket — they must NOT be
   # re-evaluated by the file-overlap logic in Step 4F.2 below, because the reason they were
@@ -3082,7 +3103,7 @@ for FINDING_NUM in "${DEFERRED_FINDINGS[@]}"; do
   fi
 done
 
-echo "Completion sweep: ${#SWEEP_CANDIDATES[@]} re-evaluable, ${#PERMANENT_DEFERRED[@]} permanent, ${#IDLE_DEFERRED[@]} idle-gated, ${#TOKEN_GATED[@]} token-gated"
+echo "Completion sweep: ${#SWEEP_CANDIDATES[@]} re-evaluable, ${#PERMANENT_DEFERRED[@]} permanent, ${#IDLE_DEFERRED[@]} idle-gated, ${#TOKEN_GATED[@]} token-gated, ${#BREAKER_HELD[@]} breaker-held (P3 batches only)"
 ```
 
 **Step 4F.2: Re-evaluate sweep candidates**

@@ -260,6 +260,12 @@ describe("evaluateAmplificationBreaker (forge#3060)", () => {
     assert.equal(evaluateCascadeFinding({ ...base, priority: "P3", amplificationBreakerTripped: false }, policy).admit, true);
   });
 
+  it("rule 6 never gates untriaged (empty/unknown) priorities", () => {
+    const { policy } = resolveCascadePolicy();
+    const f = { generation: 1, priority: "", title: "x", sameFileAsBatch: false, batchFullyGated: false, projectedTokenSpend: 0, amplificationBreakerTripped: true };
+    assert.equal(evaluateCascadeFinding(f, policy).admit, true);
+  });
+
   it("rule 6 is evaluated last: a tripped typo P3 reports the keyword reason first under balanced", () => {
     const { policy } = resolveCascadePolicy();
     const f = { generation: 1, priority: "P3", title: "fix typo", sameFileAsBatch: false, batchFullyGated: false, projectedTokenSpend: 0, amplificationBreakerTripped: true };
