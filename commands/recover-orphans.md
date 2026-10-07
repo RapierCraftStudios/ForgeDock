@@ -426,14 +426,17 @@ for NUM in $ORPHAN_LIST; do
         # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch
         # protection required none and an auto-merge waits only for *required* checks.
         CI_GATE_SCRIPT=""
-        for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}"; do
+        _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+        for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l"; do
           case "$_c" in /*) [ -z "$CI_GATE_SCRIPT" ] && [ -f "$_c/scripts/wait-ci-green.sh" ] && CI_GATE_SCRIPT="$_c/scripts/wait-ci-green.sh" ;; esac
         done
         if [ -n "$CI_GATE_SCRIPT" ]; then CI_GATE_OUT=$(bash "$CI_GATE_SCRIPT" "$PR_NUM" ${GH_FLAG}); CI_GATE_RC=$?
         else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
         echo "$CI_GATE_OUT"
+        GATED_HEAD=$(printf '%s\n' "$CI_GATE_OUT" | sed -n 's/^CI_GATE_HEAD: //p' | head -1)
+        # rc 3 = CI still running: re-run this block (up to 3 more times) before treating it as a failure.
         if [ "$CI_GATE_RC" -eq 0 ]; then
-          MERGE_RESULT=$(gh pr merge "$PR_NUM" ${GH_FLAG} --merge --auto 2>&1)
+          MERGE_RESULT=$(gh pr merge "$PR_NUM" ${GH_FLAG} --merge --auto --match-head-commit "$GATED_HEAD" 2>&1)
           MERGE_EXIT=$?
         else
           MERGE_RESULT="not merged: CI gate rc=${CI_GATE_RC}"; MERGE_EXIT=1
@@ -503,7 +506,7 @@ See the latest FORGE:PHASE_TRAIL_FAILED comment for the missing phases. Re-run e
             RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} refused (phase trail) again — needs-human added |\n"
           else
             # First refusal: resume /work-on, whose resume preflight re-runs each missing phase via Skill(...)
-            # and then re-enters review (work-on.md Phase 0B, Phase 5D).
+            # and then re-enters review (work-on.md Phase 0B resume → work-on/review.md).
             if claim_orphan "$NUM"; then
               Skill(skill="{FORGE_SKILL_PREFIX}work-on", args="${NUM}")
               release_orphan "$NUM"

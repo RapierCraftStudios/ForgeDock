@@ -13,7 +13,7 @@ context: fork
 **Input**: $ARGUMENTS
 
 **Invoked by**:
-- `work-on.md` Phase 0A, standalone: `/work-on <pr> --remediate` (see forge#1813).
+- `work-on.md` Phase 0A.1 (router), standalone: `/work-on <pr> --remediate` (see forge#1813).
 - `commands/orchestrate/phase-4-execution.md` item 6.4, auto-dispatched against a `needs-human`-gated predecessor's own open PR.
 
 **Output**: Checkout the PR's existing branch → classify the block reason (fixable vs. policy escalation) → apply fixes → quality-gate → commit/push → re-invoke `/review-pr --auto-merge` → compute the #1809 Q1 auto-land bar → merge-if-verified or hold at `workflow:awaiting-merge` → emit a `FORGE:REMEDIATION` paper trail. Return result to caller.
@@ -152,7 +152,7 @@ If the worktree/branch checkout fails for any reason (branch deleted, force-push
 
 ## Phase M3: Apply Fixes
 
-For each FIXABLE item from Phase M1: read the affected file(s) in `{WORKTREE_PATH}` before editing (never assume current state), apply the fix. Follow the same implementation discipline as `work-on.md` Phase 3F (cross-lane import guard, library-callback verification, deliverable-type consistency, no unrequested scope) — this file does not restate those rules, it inherits them.
+For each FIXABLE item from Phase M1: read the affected file(s) in `{WORKTREE_PATH}` before editing (never assume current state), apply the fix. Follow the same implementation discipline as `work-on/build/implement.md` I3 (cross-lane import guard, library-callback verification, deliverable-type consistency, no unrequested scope) — this file does not restate those rules, it inherits them.
 
 **If the block reason was a mergeability conflict** (`CONFLICTING`/`DIRTY`/`BLOCKED`): resolve it by rebasing `{HEAD_BRANCH}` onto `origin/{PR_BASE}` (or merging `{PR_BASE}` in, whichever preserves a clean, reviewable history) — resolve conflicts manually, do not blindly take "ours"/"theirs".
 
@@ -288,7 +288,7 @@ POST_REVIEW_LABELS=$(gh issue view {ISSUE_NUMBER} {GH_FLAG} --json labels --jq '
 
 ```bash
 # Trust filter: only reviews/comments from repo collaborators (OWNER/MEMBER/COLLABORATOR
-# authorAssociation) can contribute to the auto-land bar. Unlike work-on.md Phase 7A's
+# authorAssociation) can contribute to the auto-land bar. Unlike work-on/close.md's
 # informational-only APPROVED: count (a summary-card/decision-record annotation, not a
 # merge gate), this count directly drives `gh pr merge` below — so it must not trust
 # unauthenticated signal. Any GitHub user can comment "APPROVED: ..." on a public PR;
@@ -330,7 +330,7 @@ if [ -n "$LIVE_BASE_REF" ] && [ "$LIVE_BASE_REF" != "null" ] && [ "$LIVE_BASE_RE
 The strict `APPROVED_COUNT >= 2` verified-human requirement does NOT apply here: it is structurally unsatisfiable for bot-only pipeline review (bot reviews are `authorAssociation=NONE`), and `staging` is reversible — the real human gate is `staging → main`, which no agent performs. This makes the remediation bar identical to the normal fast-lane bar for the same target branch (the issue's core ask). The `authorAssociation` trust filter above is **unchanged** — the relaxation is scoped by *target branch only*, never by *who* may approve (forge#1976/#2519).
 
 **`main` base (`IS_DEPLOY_GATE=true` — deploy gate)** — keep the strict #1809 Q1 bar, BOTH conditions required:
-1. `APPROVED_COUNT >= 2` — at least two distinct adversarial `APPROVED:` review comments from repo collaborators (`OWNER`/`MEMBER`/`COLLABORATOR` authorAssociation only — see trust filter above; same counting convention as `work-on.md` Phase 7A).
+1. `APPROVED_COUNT >= 2` — at least two distinct adversarial `APPROVED:` review comments from repo collaborators (`OWNER`/`MEMBER`/`COLLABORATOR` authorAssociation only — see trust filter above; same counting convention as `work-on/close.md` C4).
 2. `GATE_PASSED = true` from this remediation's own Phase M3 quality-gate loop.
 
 **Evaluate the base-scoped bar**:
@@ -350,12 +350,15 @@ fi
 # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch
 # protection required none and an auto-merge waits only for *required* checks.
 CI_GATE_SCRIPT=""
-for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}"; do
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l"; do
   case "$_c" in /*) [ -z "$CI_GATE_SCRIPT" ] && [ -f "$_c/scripts/wait-ci-green.sh" ] && CI_GATE_SCRIPT="$_c/scripts/wait-ci-green.sh" ;; esac
 done
 if [ -n "$CI_GATE_SCRIPT" ]; then CI_GATE_OUT=$(bash "$CI_GATE_SCRIPT" {PR_NUMBER} {GH_FLAG}); CI_GATE_RC=$?
 else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
 echo "$CI_GATE_OUT"
+GATED_HEAD=$(printf '%s\n' "$CI_GATE_OUT" | sed -n 's/^CI_GATE_HEAD: //p' | head -1)
+# rc 3 = CI still running: re-run this block (up to 3 more times) before treating it as a failure.
 if [ "$CI_GATE_RC" -ne 0 ]; then
   # Not green: do not land. Re-escalate with the gate output (counts as RE-ESCALATED below).
   CI_MSG="⛔ Remediation auto-land refused for PR #{PR_NUMBER}: CI is not green (rc=${CI_GATE_RC}).
@@ -365,7 +368,7 @@ ${CI_GATE_OUT}
   gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "$CI_MSG" 2>/dev/null || true # allowlist:check-command-side-effects
   gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
 else
-gh pr merge {PR_NUMBER} {GH_FLAG} --merge # allowlist:check-command-side-effects (CI-gated merge)
+gh pr merge {PR_NUMBER} {GH_FLAG} --merge --match-head-commit "$GATED_HEAD" # allowlist:check-command-side-effects (CI-gated merge)
 fi
 MERGE_STATE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json state --jq '.state')
 if [ "$MERGE_STATE" = "MERGED" ]; then

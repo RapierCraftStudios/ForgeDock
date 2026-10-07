@@ -504,9 +504,30 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 
 - `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker mentions the phase trail (any blocker containing "phase trail": "phase trail unreadable" when the Phase 8 verifier exited ≥2 / 127, "phase trail incomplete…", or "auto-merge requires --issue", forge#3147): the merge gate refused or could not run. Do NOT re-run phases (nothing is missing) and do NOT attempt the manual merge below, because that would bypass the gate. Add `needs-human` and return `REVIEW_RESULT: status: BLOCKED` with the same blocker. The PR stays open and unmerged.
 
-- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "stale review" (a commit landed on the PR after the verdict, so the merged code would not be the reviewed code): do NOT merge and do NOT add `needs-human`. First run the quality gate on the new head (`Skill(skill="{FORGE_SKILL_PREFIX}quality-gate", ...)`, which posts a fresh `FORGE:QUALITY_GATE` for the code that will actually merge), then re-invoke Phase R3 (`/review-pr {PR_NUMBER} --auto-merge --issue {NUMBER} ...`) once — a full review of the new head. If the second attempt is stale again, add `needs-human` and return `REVIEW_RESULT: status: BLOCKED`, blocker: "PR head keeps moving after review".
+- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "stale review" (a commit landed on the PR after the verdict, or the head moved during the CI wait, so the code that would merge is not the reviewed code): do NOT merge. The re-review bound is persisted, not remembered: count `<!-- FORGE:STALE_REREVIEW: pr={PR_NUMBER} -->` comments on the issue. If the count is 0, post that marker (with the new head SHA), run the quality gate on the new head (`Skill(skill="{FORGE_SKILL_PREFIX}quality-gate", args="<changed files> --worktree {WORKTREE_PATH}")`, which posts a fresh `FORGE:QUALITY_GATE` for the code that will actually merge), then re-invoke Phase R3 once — a full review of the new head. If the count is already ≥ 1 (the head keeps moving after review), add `needs-human` and return `REVIEW_RESULT: status: BLOCKED`, blocker: "PR head keeps moving after review". <!-- forge#3188 -->
 
-- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "ci gate" (Phase 8 refused to merge because the PR's checks are failing, cancelled, still pending at timeout, or unreadable): do NOT attempt the manual merge below — that would bypass the CI gate. `needs-human` is already set and the failing checks are listed on the issue. Return `REVIEW_RESULT: status: BLOCKED` with the same blocker; under `/orchestrate` the gated PR is auto-dispatched to remediation, which treats a CI-gate refusal as FIXABLE.
+- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "ci gate" (Phase 8 refused to merge because checks failed, were cancelled, or stayed pending past the gate retries): do NOT attempt the manual merge below — that would bypass the CI gate. Fixing red CI is pipeline work, not a human decision: invoke remediation **once** — `Skill(skill="{FORGE_SKILL_PREFIX}work-on:remediate", args="{PR_NUMBER} --issue {NUMBER} --base {PR_BASE}")` (forked; it classifies a CI-gate refusal as FIXABLE, clears `needs-human`, reads the failing job logs, fixes them on the PR branch, re-runs the quality gate and a full review, and auto-lands through the same CI gate). Bound: count `<!-- FORGE:CI_REMEDIATION: pr={PR_NUMBER} -->` comments on the issue first; if ≥ 1, do not remediate again. Post that marker before invoking. `REMEDIATE_RESULT` re-gate outcome `AUTO-LANDED` → treat as merged and return `REVIEW_RESULT: status: COMPLETE`; any other outcome → leave `needs-human` (remediation sets it) and return `REVIEW_RESULT: status: BLOCKED` with blocker "ci gate not green after remediation". <!-- forge#3191 -->
+
+  Persisted loop bounds for the two cases above — count first, post the marker, then act (`{BOUND}` is `STALE_REREVIEW` or `CI_REMEDIATION`):
+  ```bash
+  [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] bound check only"; }
+  if [ "{BOUND}" = "STALE_REREVIEW" ]; then
+    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
+      --jq '[.[] | select((.body | contains("FORGE:STALE_REREVIEW:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
+  else
+    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
+      --jq '[.[] | select((.body | contains("FORGE:CI_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
+  fi
+  if [ "$BOUND_COUNT" -ge 1 ]; then
+    echo "BOUND_EXHAUSTED: {BOUND} already used for PR #{PR_NUMBER}"
+  elif [ "${DRY_RUN:-false}" != "true" ]; then
+    gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:STALE_REREVIEW: pr={PR_NUMBER} -->
+Stale review on PR #{PR_NUMBER}: quality-gating and re-reviewing the new head once." 2>/dev/null || true   # when {BOUND}=STALE_REREVIEW
+    gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CI_REMEDIATION: pr={PR_NUMBER} -->
+CI gate refused PR #{PR_NUMBER}: dispatching remediation once to fix the failing checks." 2>/dev/null || true   # when {BOUND}=CI_REMEDIATION
+  fi
+  ```
+  Post only the comment matching `{BOUND}`. `BOUND_EXHAUSTED` → take the "already ≥ 1" branch of that case.
 
 - PR NOT MERGED (and not a phase-trail, auto-merge-gate, stale-review or ci-gate BLOCKED above) → attempt manual merge, **only if the PR head is still the commit named in the latest `<!-- FORGE:REVIEW -->` APPROVED verdict** (otherwise re-invoke Phase R3 instead, as for "stale review") **and only after the same CI gate**:
   ```bash
@@ -514,14 +535,17 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
   # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch
   # protection required none and an auto-merge waits only for *required* checks.
   CI_GATE_SCRIPT=""
-  for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}"; do
+  _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+  for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l"; do
     case "$_c" in /*) [ -z "$CI_GATE_SCRIPT" ] && [ -f "$_c/scripts/wait-ci-green.sh" ] && CI_GATE_SCRIPT="$_c/scripts/wait-ci-green.sh" ;; esac
   done
   if [ -n "$CI_GATE_SCRIPT" ]; then CI_GATE_OUT=$(bash "$CI_GATE_SCRIPT" {PR_NUMBER} {GH_FLAG}); CI_GATE_RC=$?
   else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
   echo "$CI_GATE_OUT"
+  GATED_HEAD=$(printf '%s\n' "$CI_GATE_OUT" | sed -n 's/^CI_GATE_HEAD: //p' | head -1)
+  # rc 3 = CI still running: re-run this block (up to 3 more times) before treating it as a failure.
   if [ "$CI_GATE_RC" -eq 0 ]; then
-    gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto # allowlist:check-command-side-effects (CI-gated merge)
+    gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto --match-head-commit "$GATED_HEAD" # allowlist:check-command-side-effects (CI-gated merge)
   else
     echo "REVIEW_RESULT: status: BLOCKED, blocker: ci gate not green (rc=${CI_GATE_RC})"
   fi

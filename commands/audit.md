@@ -242,16 +242,16 @@ Classify where the breakdown occurred. Use these categories:
 
 | Failure Point | Description | Fix Target |
 |---------------|-------------|------------|
-| **INVESTIGATION** | Wrong verdict, missed scope, insufficient analysis | `commands/work-on.md` Phase 1 |
-| **DECOMPOSITION** | Should have decomposed but didn't, or decomposed wrong | `commands/work-on.md` Phase 2 |
-| **CONTRACT** | Wrong deliverables, missing acceptance criteria | `commands/work-on.md` Phase 3C |
-| **CONTEXT** | Missed relevant prior work, bug patterns, or related code | `commands/work-on.md` Phase 3C.5 |
-| **ARCHITECT** | Missed code paths, wrong implementation plan | `commands/work-on.md` Phase 3C.6 |
-| **IMPLEMENTATION** | Code written incorrectly, incomplete, wrong approach | `commands/work-on.md` Phase 3F, builder rules |
+| **INVESTIGATION** | Wrong verdict, missed scope, insufficient analysis | `commands/work-on/investigate.md` |
+| **DECOMPOSITION** | Should have decomposed but didn't, or decomposed wrong | `commands/work-on/decompose.md` |
+| **CONTRACT** | Wrong deliverables, missing acceptance criteria | `commands/work-on/build.md` (B2 Contract) |
+| **CONTEXT** | Missed relevant prior work, bug patterns, or related code | `commands/work-on/build/context.md` |
+| **ARCHITECT** | Missed code paths, wrong implementation plan | `commands/work-on/build/architect.md` |
+| **IMPLEMENTATION** | Code written incorrectly, incomplete, wrong approach | `commands/work-on/build/implement.md` (I3 rules) |
 | **QUALITY_GATE** | Should have caught this defect class but didn't | `commands/quality-gate.md` |
 | **REVIEW** | Review agents missed the issue, or wrong agents were triggered | `commands/review-pr.md`, `commands/review-pr-agents.md` |
 | **REVIEW_FALSE_NEG** | Review agent looked at the right area but didn't flag the problem | `commands/review-pr-agents.md` (agent template) |
-| **MERGE_POLICY** | Merged despite signals that should have blocked | `commands/work-on.md` Phase 5 |
+| **MERGE_POLICY** | Merged despite signals that should have blocked | `commands/work-on/review.md` + `commands/review-pr.md` Phase 8 |
 | **DEPLOY_GATE** | Deploy-info should have flagged risk but didn't | `commands/deploy-info.md` |
 | **ORCHESTRATION** | Wave ordering wrong, dependency missed, stall | `commands/orchestrate.md` |
 | **ISSUE_SPEC** | Original issue was ambiguous/incomplete — pipeline followed it correctly but the spec was wrong | Not a pipeline fix — note for process improvement |

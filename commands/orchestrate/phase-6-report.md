@@ -39,7 +39,10 @@ for NUM in {all_completed_issue_numbers}; do
   if [ -n "$TRAJ_BODY" ]; then
     # Decode via protocol CLI — handles both Base64url form (forge#1727) and gracefully
     # exits 1 (skips) for pre-migration inline-JSON entries.
-    CARD=$(echo "$TRAJ_BODY" | node packages/protocol/src/cli.js parse --type CARD 2>/dev/null || true)
+    # The codec ships with ForgeDock, not with the consumer repo: resolve it from the install root.
+    _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"; CODEC_CLI=""
+    for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l"; do case "$_c" in /*) [ -z "$CODEC_CLI" ] && [ -f "$_c/packages/protocol/src/cli.js" ] && CODEC_CLI="$_c/packages/protocol/src/cli.js" ;; esac; done
+    CARD=$( [ -n "$CODEC_CLI" ] && printf '%s\n' "$TRAJ_BODY" | node "$CODEC_CLI" parse --type CARD 2>/dev/null | jq -c '.payload // .' 2>/dev/null || true)
     [ -n "$CARD" ] && CARDS="${CARDS}${CARD}"$'\n'
   fi
 done

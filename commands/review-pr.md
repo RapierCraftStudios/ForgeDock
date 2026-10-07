@@ -2271,7 +2271,7 @@ ${TRAIL}
 Re-run each missing phase via its Skill (see the \`->\` action on each MISSING line), then re-run /review-pr."
     gh issue comment "$MERGE_ISSUE" {MERGE_GH_FLAG} --body "$TRAIL_FAIL_BODY" # <!-- allowlist:check-command-side-effects -->
     # STOP — return REVIEW_RESULT: status: PHASE_TRAIL_FAILED with the MISSING lines (rc 1 only; rc >= 2 is handled above as BLOCKED).
-    # The /work-on router (work-on/review.md Phase R4), the work-on.md Phase 5 router and remediate.md Phase M6 consume this status and re-dispatch the named phases once (forge#3102); this is NOT an immediate needs-human escalation.
+    # The /work-on router (work-on/review.md Phase R4), the work-on.md router (Phase 4 → work-on/review.md) and remediate.md Phase M6 consume this status and re-dispatch the named phases once (forge#3102); this is NOT an immediate needs-human escalation.
     exit 1
   fi
 fi
@@ -2363,25 +2363,43 @@ else
     # CI gate (MANDATORY before any autonomous merge): merge only when every check on the PR is
     # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch
     # protection required none and an auto-merge waits only for *required* checks.
-    CI_GATE_SCRIPT=""
-    for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}"; do
-      case "$_c" in /*) [ -z "$CI_GATE_SCRIPT" ] && [ -f "$_c/scripts/wait-ci-green.sh" ] && CI_GATE_SCRIPT="$_c/scripts/wait-ci-green.sh" ;; esac
+    # Shell state does not persist between Bash calls: everything this block needs is resolved here.
+    _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+    CI_GATE_SCRIPT=""; DOCS_ONLY_SCRIPT=""
+    for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l"; do
+      case "$_c" in /*)
+        [ -z "$CI_GATE_SCRIPT" ] && [ -f "$_c/scripts/wait-ci-green.sh" ] && CI_GATE_SCRIPT="$_c/scripts/wait-ci-green.sh"
+        [ -z "$DOCS_ONLY_SCRIPT" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && DOCS_ONLY_SCRIPT="$_c/scripts/is-docs-only.sh" ;;
+      esac
     done
     if [ -n "$CI_GATE_SCRIPT" ]; then CI_GATE_OUT=$(bash "$CI_GATE_SCRIPT" {PR_NUMBER} {MERGE_GH_FLAG}); CI_GATE_RC=$?
     else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
     echo "$CI_GATE_OUT"
+    GATED_HEAD=$(printf '%s\n' "$CI_GATE_OUT" | sed -n 's/^CI_GATE_HEAD: //p' | head -1)
+    # rc 2 "head moved" is a stale review, not a human problem; rc 3 TIMEOUT means CI is still running.
+    printf '%s\n' "$CI_GATE_OUT" | grep -q 'PR head moved during the wait' && CI_GATE_RC=4
+    if [ "$CI_GATE_RC" -eq 3 ]; then
+      echo "CI_GATE_TIMEOUT: CI still running — re-run this whole block (up to 3 more times) before treating it as a failure."
+    fi
     # Reviewed-head guard: merge only the exact commit this review approved. A commit pushed after
     # the verdict (field test: post-review "fix" commits merged unreviewed on #3156 and #3158) needs a
     # fresh full review, not a merge. Checked after the CI wait so a push during the wait is caught.
     # A docs-only delta (this review's own §6B.5 note fixes) is allowed; any other change is stale.
-    MERGE_HEAD_NOW=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null)
-    if [ "$CI_GATE_RC" -eq 0 ] && [ "$MERGE_HEAD_NOW" != "$REVIEW_SHA" ]; then
-      POST_REVIEW_FILES=$(gh api "repos/{GH_REPO}/compare/${REVIEW_SHA}...${MERGE_HEAD_NOW}" --jq '.files[] | .filename, (.previous_filename // empty)' 2>/dev/null)
-      if [ -n "$POST_REVIEW_FILES" ] && [ -n "${FORGE_ROOT:-}" ] && [ -f "$FORGE_ROOT/scripts/is-docs-only.sh" ] \
-         && printf '%s\n' "$POST_REVIEW_FILES" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"; then
-        echo "Post-review commits are docs-only (note fixes) — reviewed code unchanged."
-      else
-        CI_GATE_RC=4; CI_GATE_OUT="STALE_REVIEW: PR head ${MERGE_HEAD_NOW:0:7} is not the reviewed commit ${REVIEW_SHA:0:7} and the delta is not docs-only"
+    # REVIEW_SHA is re-derived from this review's FORGE:REVIEW_ROUTE marker (sha=<7 chars>), never
+    # assumed from an earlier shell.
+    REVIEWED_SHORT=$(gh api "repos/{GH_REPO}/issues/{PR_NUMBER}/comments" --paginate --jq '.[] | select(.body | contains("FORGE:REVIEW_ROUTE")) | .body' 2>/dev/null \
+      | sed -n 's/.*FORGE:REVIEW_ROUTE[^>]* sha=\([0-9a-f]\{7,\}\).*/\1/p' | tail -1)
+    if [ "$CI_GATE_RC" -eq 0 ]; then
+      if [ -z "$REVIEWED_SHORT" ] || [ -z "$GATED_HEAD" ] || [ "$GATED_HEAD" = "unknown" ]; then
+        CI_GATE_RC=4; CI_GATE_OUT="STALE_REVIEW: cannot bind the merge to a reviewed commit (route sha='${REVIEWED_SHORT}', gated head='${GATED_HEAD}')"
+      elif [ "${GATED_HEAD#"$REVIEWED_SHORT"}" = "$GATED_HEAD" ]; then
+        REVIEW_BASE_SHA=$(gh api "repos/{GH_REPO}/commits/${REVIEWED_SHORT}" --jq '.sha' 2>/dev/null)
+        POST_REVIEW_FILES=$(gh api "repos/{GH_REPO}/compare/${REVIEW_BASE_SHA:-$REVIEWED_SHORT}...${GATED_HEAD}" --jq '.files[] | .filename, (.previous_filename // empty)' 2>/dev/null)
+        if [ -n "$POST_REVIEW_FILES" ] && [ -n "$DOCS_ONLY_SCRIPT" ] && printf '%s\n' "$POST_REVIEW_FILES" | bash "$DOCS_ONLY_SCRIPT"; then
+          echo "Post-review commits are docs-only (note fixes) — reviewed code unchanged."
+        else
+          CI_GATE_RC=4; CI_GATE_OUT="STALE_REVIEW: PR head ${GATED_HEAD:0:7} is not the reviewed commit ${REVIEWED_SHORT} and the delta is not docs-only"
+        fi
       fi
     fi
     if [ "$CI_GATE_RC" -eq 4 ]; then
@@ -2399,8 +2417,8 @@ ${CI_GATE_OUT}
     # Checkpoint comment on issue
     gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "Review complete for PR #{PR_NUMBER}. Verdict: ${VERDICT:-APPROVED}. CI green. Proceeding to merge."
 
-    # Merge
-    gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge
+    # Merge exactly the commit the CI gate (and the reviewed-head guard) checked.
+    gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge --match-head-commit "$GATED_HEAD"
 
     # Verify
     MERGE_STATE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json state --jq '.state')
@@ -2411,7 +2429,7 @@ fi
 fi
 ```
 
-**Important**: Phase 8 ONLY merges the PR. It does NOT close the issue, update labels, or clean up worktrees. When invoked via `/work-on`, those responsibilities belong to `work-on/close.md` (work-on.md Phase 6 — triggered when PR is merged and issue is still open). Doing them here would cause the issue to be closed with `workflow:merged` before Phase 6 runs, skipping the close phase entirely.
+**Important**: Phase 8 ONLY merges the PR. It does NOT close the issue, update labels, or clean up worktrees. When invoked via `/work-on`, those responsibilities belong to `work-on/close.md` (the router's Phase 5 — triggered when the PR is merged and the issue is still open). Doing them here would cause the issue to be closed with `workflow:merged` before Phase 6 runs, skipping the close phase entirely.
 
 ### 8B: Post-Merge Review Finding Demilestoning (Milestone PRs Only)
 

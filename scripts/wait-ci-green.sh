@@ -19,14 +19,22 @@
 #               FORGE_CI_REQUIRE_CHECKS=1 and no checks were reported
 #   3  TIMEOUT  checks still pending when the timeout expired (listed)
 #
-# Env: FORGE_CI_TIMEOUT (default 1800), FORGE_CI_INTERVAL (default 30),
-#      FORGE_CI_NO_CHECKS_GRACE (default 120), FORGE_CI_REQUIRE_CHECKS (default 0).
+# Every result also prints "CI_GATE_HEAD: <sha>" — the exact PR head the decision applies to. Callers
+# MUST merge with `--match-head-commit <that sha>` so a push after the gate cannot land unchecked.
+#
+# Env: FORGE_CI_TIMEOUT (default 540 — stays under the 10-minute Bash tool limit; on TIMEOUT the
+#      caller re-runs the gate, it does not raise the timeout), FORGE_CI_INTERVAL (default 20),
+#      FORGE_CI_NO_CHECKS_GRACE (default 120), FORGE_CI_SETTLE (default 45 — never PASS earlier than
+#      this after the wait starts, so workflows that register late are not missed),
+#      FORGE_CI_REQUIRE_CHECKS (default 0).
+# "No checks" passes only when GitHub Actions also reports no workflow runs for the head commit;
+# if runs exist but their checks have not appeared yet, the gate keeps waiting.
 set -uo pipefail
 
 PR=""; REPO=""
-TIMEOUT="${FORGE_CI_TIMEOUT:-1800}"; INTERVAL="${FORGE_CI_INTERVAL:-30}"
+TIMEOUT="${FORGE_CI_TIMEOUT:-540}"; INTERVAL="${FORGE_CI_INTERVAL:-20}"; SETTLE="${FORGE_CI_SETTLE:-45}"
 GRACE="${FORGE_CI_NO_CHECKS_GRACE:-120}"; REQUIRE="${FORGE_CI_REQUIRE_CHECKS:-0}"
-usage() { echo "CI_GATE: ERROR"; echo "usage: wait-ci-green.sh <pr> -R <owner/repo> [--timeout S] [--interval S]" >&2; exit 2; }
+usage() { echo "CI_GATE: ERROR"; echo "CI_GATE_HEAD: unknown"; echo "usage: wait-ci-green.sh <pr> -R <owner/repo> [--timeout S] [--interval S]" >&2; exit 2; }
 while [ $# -gt 0 ]; do
   case "$1" in
     -R) [ $# -ge 2 ] || usage; REPO="$2"; shift 2 ;;
@@ -39,12 +47,13 @@ while [ $# -gt 0 ]; do
 done
 case "$PR" in ''|*[!0-9]*) usage ;; esac
 case "$REPO" in */*) ;; *) usage ;; esac
-for v in "$TIMEOUT" "$INTERVAL" "$GRACE"; do case "$v" in ''|*[!0-9]*) usage ;; esac; done
+for v in "$TIMEOUT" "$INTERVAL" "$GRACE" "$SETTLE"; do case "$v" in ''|*[!0-9]*) usage ;; esac; done
 [ "$INTERVAL" -ge 1 ] || INTERVAL=1
 
+emit() { echo "CI_GATE: $1"; echo "CI_GATE_HEAD: ${START_SHA:-unknown}"; }
 head_sha() { gh pr view "$PR" -R "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null; }
 START_SHA="$(head_sha)"
-if [ -z "$START_SHA" ]; then echo "CI_GATE: ERROR"; echo "cannot read PR #$PR head in $REPO"; exit 2; fi
+if [ -z "$START_SHA" ]; then START_SHA=""; emit ERROR; echo "cannot read PR #$PR head in $REPO"; exit 2; fi
 
 start=$(date +%s); errors=0
 while :; do
@@ -58,26 +67,32 @@ while :; do
       if printf '%s' "$NC_OUT" | grep -qi 'no checks reported'; then JSON='[]'
       else
         errors=$((errors + 1))
-        if [ "$errors" -ge 5 ]; then echo "CI_GATE: ERROR"; echo "gh pr checks unreadable 5 times in a row"; exit 2; fi
+        if [ "$errors" -ge 5 ]; then emit ERROR; echo "gh pr checks unreadable 5 times in a row"; exit 2; fi
         sleep "$INTERVAL"; continue
       fi
     fi
   fi
   errors=0
   cur="$(head_sha)"
-  if [ -n "$cur" ] && [ "$cur" != "$START_SHA" ]; then echo "CI_GATE: ERROR"; echo "PR head moved during the wait ($START_SHA -> $cur); re-review the new head"; exit 2; fi
+  if [ -n "$cur" ] && [ "$cur" != "$START_SHA" ]; then emit ERROR; echo "PR head moved during the wait ($START_SHA -> $cur); re-review the new head"; exit 2; fi
   total=$(printf '%s' "$JSON" | jq 'length')
   failed=$(printf '%s' "$JSON" | jq -r '.[] | select(.bucket=="fail" or .bucket=="cancel") | "  - \(.name) (\(.bucket))"')
   pending=$(printf '%s' "$JSON" | jq -r '.[] | select(.bucket!="pass" and .bucket!="skipping" and .bucket!="fail" and .bucket!="cancel") | "  - \(.name) (\(.bucket))"')
-  if [ -n "$failed" ]; then echo "CI_GATE: FAIL"; echo "PR #$PR head ${START_SHA:0:7}: failing checks:"; echo "$failed"; exit 1; fi
+  if [ -n "$failed" ]; then emit FAIL; echo "PR #$PR head ${START_SHA:0:7}: failing checks:"; echo "$failed"; exit 1; fi
   if [ "$total" -eq 0 ]; then
     if [ "$elapsed" -ge "$GRACE" ]; then
-      if [ "$REQUIRE" = "1" ]; then echo "CI_GATE: ERROR"; echo "no checks reported after ${GRACE}s and FORGE_CI_REQUIRE_CHECKS=1"; exit 2; fi
-      echo "CI_GATE: PASS"; echo "no checks reported for PR #$PR after ${GRACE}s (repo has no CI on this branch)"; exit 0
+      RUNS=$(gh api "repos/$REPO/actions/runs?head_sha=$START_SHA&per_page=1" --jq '.total_count' 2>/dev/null || echo "")
+      if [ -n "$RUNS" ] && [ "$RUNS" != "0" ]; then
+        :  # workflow runs exist for this head but no checks are reported yet — keep waiting
+      elif [ "$REQUIRE" = "1" ]; then
+        emit ERROR; echo "no checks reported after ${GRACE}s and FORGE_CI_REQUIRE_CHECKS=1"; exit 2
+      else
+        emit PASS; echo "no checks reported for PR #$PR after ${GRACE}s and no workflow runs for its head (no CI on this branch)"; exit 0
+      fi
     fi
-  elif [ -z "$pending" ]; then
-    echo "CI_GATE: PASS"; echo "PR #$PR head ${START_SHA:0:7}: $total checks passed or skipped"; exit 0
+  elif [ -z "$pending" ] && [ "$elapsed" -ge "$SETTLE" ]; then
+    emit PASS; echo "PR #$PR head ${START_SHA:0:7}: $total checks passed or skipped"; exit 0
   fi
-  if [ "$elapsed" -ge "$TIMEOUT" ]; then echo "CI_GATE: TIMEOUT"; echo "PR #$PR: still pending after ${TIMEOUT}s:"; echo "$pending"; exit 3; fi
+  if [ "$elapsed" -ge "$TIMEOUT" ]; then emit TIMEOUT; echo "PR #$PR: still pending after ${TIMEOUT}s:"; echo "$pending"; exit 3; fi
   sleep "$INTERVAL"
 done
