@@ -91,6 +91,18 @@ echo "$OUT" | grep -q 'MISSING: FAST_PATH' && echo "$OUT" | grep -q 'MISSING: CO
 run "$(mk m INV CONTRACT FP_COMPLEX)"
 echo "$OUT" | grep -q 'MISSING: CONTEXT -> re-run Skill work-on/build/context' && ok "refusal routes to the missing phase" || bad "route text ($OUT)"
 
+# Large thread (pipefail + early-exit grep SIGPIPE regression, #3099): a valid trail buried in filler
+python3 - "$TMP_FX/big.json" <<'PY'
+import json,sys
+inv="<!-- FORGE:INVESTIGATOR -->\n## Investigation Report\n<!-- INVESTIGATION:COMPLETE -->"
+c=[{"body":inv},{"body":"<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: COMPLEX"},
+   {"body":"<!-- FORGE:CONTRACT -->\nx"},{"body":"<!-- FORGE:CONTEXT -->\nx"},
+   {"body":"<!-- FORGE:ARCHITECT -->\nx"},{"body":"<!-- FORGE:QUALITY_GATE -->\n**Result**: PASS\n"}]
+c+= [{"body":"filler "+("x"*2000)} for _ in range(300)]
+json.dump(c,open(sys.argv[1],"w"))
+PY
+expect_pass "large thread with present markers still passes" "$TMP_FX/big.json"
+
 # Outage fails closed (exit 2, never PASS)
 OUT=$(MOCK_GH_FAIL=1 MOCK_GH_JSON=/dev/null bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "gh outage fails closed" || bad "gh outage (rc=$RC out=$OUT)"
