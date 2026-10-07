@@ -1340,6 +1340,35 @@ For an OpenCode completion, retain `OPENCODE_DISPATCH_MAP[{NUMBER}]` until the t
 **Predecessor Classification (DONE / GATED / FAILED)** <!-- Added: forge#1812 --> — every check in this file that asks "is predecessor X resolved enough for its dependents to proceed" MUST classify X into exactly one of three states below — never a single binary terminal/non-terminal grep. Earlier versions of this file independently patched `grep -qE 'workflow:merged|workflow:invalid|needs-human|CLOSED'` in multiple places, and the copies drifted: the readiness check (this step) treated `needs-human` as done-enough-to-dispatch-through, while the failure handler (item 6 below) treated the identical label as a hard failure that skips dependents. Both cannot be right at once — `needs-human` means the predecessor's code is paused pending a human decision and is NOT yet in the base branch, so dispatching a dependent against it is unsafe, but permanently skipping the dependent is also wrong once the human resolves the block. The fix is a third state:
 
 ```bash
+# hold_merged_trail <issue> <trail-text> (forge#3156): the single escalation path for a merged issue whose phase
+# trail failed or could not be verified. Used by Step 4B item 0 and by the classifier's wake re-verification.
+# Order matters: the `needs-human` label is written FIRST (read-back verified, 3 tries) because the classifier
+# holds on merged + needs-human even before the comment exists; the comment follows (verified, 2 tries) and is
+# the audit record that lets a human release the hold. Returns 0 when the label hold is verified, 1 otherwise.
+hold_merged_trail() {
+  local N="$1" TXT="$2" TRY HELD=1
+  for TRY in 1 2 3; do
+    gh issue edit "$N" -R {GH_REPO} --add-label "needs-human" >/dev/null 2>&1 || true
+    if gh issue view "$N" -R {GH_REPO} --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null \
+         | grep -qE '(^|,)needs-human(,|$)'; then HELD=0; break; fi
+  done
+  [ "$HELD" -ne 0 ] && echo "PHASE TRAIL HOLD FAILED: #${N} — needs-human label could not be verified; dependents are NOT held. Hold them manually." >&2
+  for TRY in 1 2; do
+    gh api --paginate "repos/{GH_REPO}/issues/${N}/comments" \
+      --jq '.[] | select(.body | contains("FORGE:PHASE_TRAIL_FAILED") and contains("merged with an incomplete phase trail")) | .id' \
+      2>/dev/null | grep -q '[0-9]' && break
+    gh issue comment "$N" -R {GH_REPO} --body "<!-- FORGE:PHASE_TRAIL_FAILED -->
+#${N} merged with an incomplete phase trail (or one that could not be verified), detected by /orchestrate.
+
+\`\`\`
+${TXT}
+\`\`\`
+
+The PR is already merged, so \`/work-on\` cannot re-run the missing phases. Review the merged change, then remove \`needs-human\` to release dependents held as \`blocked-on-human-merge\`." >/dev/null 2>&1 || true
+  done
+  return "$HELD"
+}
+
 classify_predecessor_state() {
   local PRED="$1"
   local PRED_INFO
@@ -1352,23 +1381,61 @@ classify_predecessor_state() {
   PRED_STATE=$(echo "$PRED_INFO" | jq -r '.state // "OPEN"')
   PRED_LABELS=$(echo "$PRED_INFO" | jq -r '.workflow[]?' 2>/dev/null)
 
+  # forge#3156: an empty/failed label read must never fall through to IN_PROGRESS/DONE for a merged issue. PRED_INFO
+  # is '{}' on a failed read; re-read once, then fail closed (GATED) rather than guessing from absent labels.
+  if [ "$PRED_INFO" = '{}' ]; then
+    PRED_INFO=$(gh issue view "$PRED" -R {GH_REPO} --json labels,state \
+      --jq '{state: .state, workflow: [.labels[].name | select(startswith("workflow:") or . == "needs-human")]}' 2>/dev/null || echo '{}')
+    if [ "$PRED_INFO" = '{}' ]; then echo "GATED"; return; fi
+    PRED_STATE=$(echo "$PRED_INFO" | jq -r '.state // "OPEN"')
+    PRED_LABELS=$(echo "$PRED_INFO" | jq -r '.workflow[]?' 2>/dev/null)
+  fi
+
+  # reverify_merged_trail: re-run the phase-trail verifier for a merged predecessor that has NO escalation
+  # record (forge#3156), so wake reconstruction does not trust the `workflow:merged` label alone. Prints OK
+  # when the trail verifies, UNVERIFIED otherwise. FORGE_ROOT comes from the Step 4A-pre/item 0 bootstrap; if
+  # it is unresolved the verifier cannot run, so a predecessor already holding `needs-human` fails closed
+  # (UNVERIFIED), while a plain merged one is trusted (OK) because item 0 verified it on its completion.
+  reverify_merged_trail() {
+    local P="$1" HAS_HUMAN="$2" RC
+    if [ -z "${FORGE_ROOT:-}" ] || [ ! -f "$FORGE_ROOT/scripts/verify-phase-trail.sh" ]; then
+      [ "$HAS_HUMAN" = "yes" ] && echo "UNVERIFIED" || echo "OK"; return
+    fi
+    bash "$FORGE_ROOT/scripts/verify-phase-trail.sh" "$P" -R {GH_REPO} --code-diff >/dev/null 2>&1; RC=$?
+    [ "$RC" -eq 0 ] && echo "OK" || echo "UNVERIFIED"
+  }
+
   if echo "$PRED_LABELS" | grep -qx "workflow:invalid"; then
     echo "FAILED"
   elif echo "$PRED_LABELS" | grep -qx "workflow:merged" && echo "$PRED_LABELS" | grep -qx "needs-human"; then
-    # forge#3148: GATED only when Step 4B item 0 escalated a merged issue with an incomplete phase trail
+    # forge#3148: GATED when Step 4B item 0 escalated a merged issue with an incomplete phase trail
     # (the code is in the base branch, but /work-on cannot repair a merged issue, so a human must review it;
-    # dependents wait until a human clears needs-human). A stale needs-human without that escalation keeps
-    # the pre-#3148 classification, DONE. Unreadable comments fail closed (GATED).
+    # dependents wait until a human clears needs-human). Item 0 adds `needs-human` BEFORE posting the comment
+    # (forge#3156), so merged + needs-human with no comment yet is either the in-flight window or a stale label:
+    # re-verify the trail to tell them apart (clean trail => stale label => DONE). Unreadable comments fail closed.
     local TRAIL_ESC_IDS
     if TRAIL_ESC_IDS=$(gh api --paginate "repos/{GH_REPO}/issues/${PRED}/comments" \
          --jq '.[] | select(.body | contains("FORGE:PHASE_TRAIL_FAILED") and contains("merged with an incomplete phase trail")) | .id' 2>/dev/null) \
        && ! printf '%s\n' "$TRAIL_ESC_IDS" | grep -q '[0-9]'; then
-      echo "DONE"
+      [ "$(reverify_merged_trail "$PRED" yes)" = "OK" ] && echo "DONE" || echo "GATED"
     else
       echo "GATED"
     fi
   elif echo "$PRED_LABELS" | grep -qx "workflow:merged"; then
-    echo "DONE"
+    # forge#3156: no needs-human. A recorded escalation comment means a human already released the hold (DONE);
+    # otherwise re-verify the trail so a merged predecessor that item 0 never got to escalate (orchestrator died
+    # mid-hold, wake reconstruction) is not trusted on the label alone.
+    if gh api --paginate "repos/{GH_REPO}/issues/${PRED}/comments" \
+         --jq '.[] | select(.body | contains("FORGE:PHASE_TRAIL_FAILED") and contains("merged with an incomplete phase trail")) | .id' 2>/dev/null \
+         | grep -q '[0-9]'; then
+      echo "DONE"
+    elif [ "$(reverify_merged_trail "$PRED" no)" = "OK" ]; then
+      echo "DONE"
+    else
+      # Unverified trail with no hold on record: establish it now so a human can release it.
+      hold_merged_trail "$PRED" "PHASE_TRAIL: FAIL (re-verified at wake classification)" >/dev/null 2>&1 || true
+      echo "GATED"
+    fi
   elif echo "$PRED_LABELS" | grep -qxE "needs-human|workflow:awaiting-merge"; then
     echo "GATED"
   elif echo "$PRED_LABELS" | grep -qx "workflow:engine-error"; then
@@ -1749,36 +1816,21 @@ done
 
    On `PHASE_TRAIL: FAIL`, classify the issue as a **bypass**, never `DONE`. Also treat an agent final report that says phases ran inline, were skipped, or "ran without Skill calls" as a bypass regardless of labels. Surface it in the operator status update (`PHASE BYPASS: #{NUMBER} — missing: ...`) and do not cascade it as a satisfied predecessor.
 
-   **Do NOT re-dispatch a merged issue** (forge#3148): `/work-on` Phase 0B stops on a closed or `workflow:merged` issue before its resume preflight, so a fresh agent exits without repairing anything and the predecessor would stay unresolved forever. The PR is already merged, so the gap can only be resolved by a human. Escalate it instead, which classifies it **GATED** (`classify_predecessor_state` checks `workflow:merged` + `needs-human` before DONE when that escalation comment is present), so item 6.5 tracks its dependents as `blocked-on-human-merge` instead of dispatching them. A merged issue whose trail could not be read (`TRAIL_RC -ge 2`, handled above) is escalated by the same block, so it is gated the same way. A bypass reported by the agent on a `workflow:merged` issue whose trail verifies is handled the same way (set `TRAIL_RC=1` before this block):
+   **Do NOT re-dispatch a merged issue** (forge#3148): `/work-on` Phase 0B stops on a closed or `workflow:merged` issue before its resume preflight, so a fresh agent exits without repairing anything and the predecessor would stay unresolved forever. The PR is already merged, so the gap can only be resolved by a human. Escalate it instead, which classifies it **GATED** (`classify_predecessor_state` holds `workflow:merged` + `needs-human` unless the trail re-verifies clean; the label is written first, then the comment), so item 6.5 tracks its dependents as `blocked-on-human-merge` instead of dispatching them. A merged issue whose trail could not be read (`TRAIL_RC -ge 2`, handled above) is escalated by the same block, so it is gated the same way. A bypass reported by the agent on a `workflow:merged` issue whose trail verifies is handled the same way (set `TRAIL_RC=1` before this block):
    ```bash
    # Only a merged issue is escalated here; an unmerged bypass is resumed by item 2 (see below).
    # Any non-zero rc on a merged issue escalates: rc 1 (missing phases) and rc >= 2 (unverifiable trail) alike,
    # because classify_predecessor_state() gates a merged predecessor only when this escalation comment exists.
-   if [ "$TRAIL_RC" -ne 0 ] && echo ",${TRAIL_LABELS:-}," | grep -q ',workflow:merged,'; then
+   # forge#3156: also escalate when the label read itself failed (TRAIL_RC -ge 2 with empty TRAIL_LABELS): an
+   # unreadable issue cannot be proven unmerged, so fail closed instead of posting nothing.
+   if [ "$TRAIL_RC" -ne 0 ] && { [ -z "${TRAIL_LABELS:-}" ] || echo ",${TRAIL_LABELS:-}," | grep -q ',workflow:merged,'; }; then
      if [ "${DRY_RUN:-false}" = "true" ]; then
-       echo "[DRY-RUN] Would post FORGE:PHASE_TRAIL_FAILED and add needs-human to merged #{NUMBER}"
+       echo "[DRY-RUN] Would add needs-human and post FORGE:PHASE_TRAIL_FAILED on merged #{NUMBER}"
      else
-       # Comment first, then label: the classifier needs BOTH to hold dependents, and merged + needs-human
-       # without the comment reads as a stale label (DONE). Verify the comment landed (--paginate: 30 per page)
-       # and retry the post once; one escalation comment per issue across completion cycles.
-       trail_escalated() {
-         gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments \
-           --jq '.[] | select(.body | contains("FORGE:PHASE_TRAIL_FAILED") and contains("merged with an incomplete phase trail")) | .id' \
-           2>/dev/null | grep -q '[0-9]'
-       }
-       for TRAIL_ESC_TRY in 1 2; do
-         trail_escalated && break
-         gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:PHASE_TRAIL_FAILED -->
-   #{NUMBER} merged with an incomplete phase trail (or one that could not be verified), detected by /orchestrate on completion.
-
-   \`\`\`
-   ${TRAIL}
-   \`\`\`
-
-   The PR is already merged, so \`/work-on\` cannot re-run the missing phases. Review the merged change, then remove \`needs-human\` to release dependents held as \`blocked-on-human-merge\`." 2>/dev/null || true
-       done
-       trail_escalated || echo "PHASE TRAIL ESCALATION FAILED: #{NUMBER} — escalation comment could not be posted; dependents are NOT held. Hold them manually." >&2
-       gh issue edit {NUMBER} -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
+       # hold_merged_trail (defined with classify_predecessor_state) writes `needs-human` FIRST, read-back verified
+       # with retries, then the escalation comment (verified, retried). The label alone holds dependents, so there
+       # is no window where a comment without the label reads as DONE. A failed verification is reported on stderr.
+       hold_merged_trail {NUMBER} "${TRAIL}" || echo "PHASE TRAIL ESCALATION FAILED: #{NUMBER} — needs-human not verified." >&2
      fi
    fi
    ```
