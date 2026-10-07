@@ -47,6 +47,8 @@ run "$(fx relother "[$(claim sweep-A "$N"), $(release sweep-B "$N")]")"; expect 
 run "$(fx own "[$(claim sweep-A "$N")]")" --exempt-sweep sweep-A; expect "own sweep id is exempt" 0 "CLAIM: FREE"
 run "$(fx other "[$(claim sweep-A "$N")]")" --exempt-sweep sweep-B; expect "other sweep id is not exempt" 1 "CLAIM: LIVE sweep-A"
 run "$(fx two "[$(claim sweep-A "$N"), $(claim sweep-B "$N")]")" --exempt-sweep sweep-A; expect "exempting A still sees live B" 1 "CLAIM: LIVE sweep-B"
+run "$(fx unk "[{\"body\":\"<!-- FORGE:RECOVERY_CLAIM -->\\nno sweep line\",\"updated_at\":\"$N\"}]")" --exempt-sweep sweep-A; expect "claim with no sweep id is never exempt" 1 "CLAIM: LIVE"
+run "$(fx unk2 "[{\"body\":\"<!-- FORGE:RECOVERY_CLAIM -->\\nno sweep line\",\"updated_at\":\"$N\"}]")" --exempt-sweep unknown; expect "--exempt-sweep unknown is rejected" 2 "CLAIM: ERROR"
 run "$(fx none '[]')";                                            expect "no comments is FREE" 0 "CLAIM: FREE"
 run "$(fx hb "[{\"body\":\"<!-- FORGE:HEARTBEAT -->\\nPhase 3\",\"updated_at\":\"$N\"}]")"; expect "heartbeat alone is not a recovery claim" 0 "CLAIM: FREE"
 run "$(fx bad "[{\"body\":\"<!-- FORGE:RECOVERY_CLAIM -->\\nno sweep line\",\"updated_at\":\"$N\"}]")"; expect "malformed claim fails closed (LIVE)" 1 "CLAIM: LIVE"

@@ -16,7 +16,8 @@
 #   recovery-claim-live.sh <issue> -R <owner/repo> [--exempt-sweep <sweep-id>]
 #
 #   --exempt-sweep  Ignore the claim held by this sweep id (the calling sweep's own claim), so the
-#                   holder's inline /work-on is not blocked by its own claim.
+#                   holder's inline /work-on is not blocked by its own claim. A claim with no
+#                   parsable sweep id is never exempt (and `unknown` is rejected as an exemption id).
 #
 # Output (stdout): CLAIM: LIVE <sweep-id> | CLAIM: FREE | CLAIM: ERROR
 # Exit codes: 0 free, 1 live, 2 error (unreadable comments or usage; fails closed — callers must
@@ -38,6 +39,7 @@ while [ $# -gt 0 ]; do
       REPO="$2"; shift 2 ;;
     --exempt-sweep)
       [ $# -ge 2 ] && [ -n "${2:-}" ] || err "usage error: $1 needs a value"
+      [ "$2" != "unknown" ] || err "usage error: --exempt-sweep 'unknown' is the no-sweep-id sentinel and cannot exempt a claim"
       EXEMPT="$2"; shift 2 ;;
     -h|--help) awk 'NR >= 5 { if (/^# END-HELP/) exit; print }' "$0"; exit 0 ;;
     *)
@@ -62,7 +64,7 @@ LIVE=$(echo "$COMMENTS" | jq -r --argjson cutoff "$CUTOFF" --arg exempt "$EXEMPT
           | select((.body | contains("FORGE:RECOVERY_CLAIM_RELEASED")) | not)
           | select(((.updated_at // "") | fromdateiso8601? // 9999999999) >= $cutoff)
           | select(sweepid as $sid | ($rel | index($sid)) == null)
-          | select($exempt == "" or sweepid != $exempt)
+          | select($exempt == "" or sweepid == "unknown" or sweepid != $exempt)
           | sweepid ] | first // empty') \
   || err "could not evaluate recovery claims for #${ISSUE}"
 
