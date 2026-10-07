@@ -1913,7 +1913,7 @@ if [ "$FINDING_PRIORITY_EXIT" -ne 0 ]; then
 else
 
 # --label is repeatable (not comma-joined) per the /issue programmatic contract.
-ISSUE_SKILL_OUTPUT=$(Skill(skill="issue", args="--title \"$FINDING_ISSUE_TITLE\" --body-file \"$FINDING_ISSUE_BODY_FILE\" --label review-finding --label needs-validation --label \"$FINDING_PRIORITY\" ${MILESTONE_FLAG}"))
+ISSUE_SKILL_OUTPUT=$(Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"$FINDING_ISSUE_TITLE\" --body-file \"$FINDING_ISSUE_BODY_FILE\" --label review-finding --label needs-validation --label \"$FINDING_PRIORITY\" ${MILESTONE_FLAG}"))
 # /issue re-reads the created issue and hard-fails unless this exact marker is present.
 rm -f "$FINDING_ISSUE_BODY_FILE"
 

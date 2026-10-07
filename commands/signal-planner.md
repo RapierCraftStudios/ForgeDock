@@ -253,7 +253,7 @@ TRACKER_EOF
 # `gh issue create`. This body uses "## Acceptance" rather than the mandatory "## Acceptance
 # Criteria"/"## Affected Files"/"## Problem" sections — /issue's Phase 3F will non-blockingly
 # append placeholder mandatory sections; this is expected for a coordination tracker issue.
-Skill(skill="issue", args="--title \"$TRACKER_TITLE\" --body-file \"$TRACKER_BODY_TMPFILE\" --label signal-planner --label \"priority:{SIGNAL.severity}\"")
+Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"$TRACKER_TITLE\" --body-file \"$TRACKER_BODY_TMPFILE\" --label signal-planner --label \"priority:{SIGNAL.severity}\"")
 rm -f "$TRACKER_BODY_TMPFILE"
 trap - EXIT
 TRACKER_ISSUE=$(gh issue list -R {GH_REPO} \
@@ -356,7 +356,7 @@ Signal context: {relevant subset of SIGNAL.context for this work unit}
 ISSUE_EOF
 # Route through the /issue create-hook (canonical dedup + body validation) instead of a raw
 # `gh issue create`.
-Skill(skill="issue", args="--title \"$WORK_UNIT_TITLE\" --body-file \"$WORK_UNIT_BODY_TMPFILE\" --label \"priority:{work_unit.priority}\" --label \"{work_unit.type}\"")
+Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"$WORK_UNIT_TITLE\" --body-file \"$WORK_UNIT_BODY_TMPFILE\" --label \"priority:{work_unit.priority}\" --label \"{work_unit.type}\"")
 rm -f "$WORK_UNIT_BODY_TMPFILE"
 trap - EXIT
 ISSUE_NUM=$(gh issue list -R {GH_REPO} \
@@ -414,7 +414,7 @@ Wait for user response. If they adjust (e.g., drop an issue, change priority), u
 Pass `DAG_ISSUES` as an ordered issue set to `/orchestrate`:
 
 ```
-Skill(skill: "orchestrate", args: "{DAG_ISSUES joined by space — e.g. '42 43 45'}")
+Skill(skill: "{FORGE_SKILL_PREFIX}orchestrate", args: "{DAG_ISSUES joined by space — e.g. '42 43 45'}")
 ```
 
 `/orchestrate` handles parallel execution where dependencies allow — signal-planner does not re-implement execution logic.

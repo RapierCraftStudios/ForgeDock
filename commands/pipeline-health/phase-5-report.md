@@ -6,6 +6,8 @@ install: extras
 
 # /pipeline-health — Phase 5: Report & Track
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 ## Phase 5: Report & Track
 
 ### 5A: Post health report
@@ -279,7 +281,7 @@ restore_forge_yaml() {
 trap restore_forge_yaml EXIT
 cp "$FORGE_ISSUE_HOOK_CONFIG" forge.yaml
 
-ISSUE_RESULT=$(Skill(skill="issue", args="--title \"Pipeline Health: $REPO — $(date +%Y-%m-%d) — Score: [SCORE]/100\" --body-file $HEALTH_BODY_FILE --label health-report"))
+ISSUE_RESULT=$(Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"Pipeline Health: $REPO — $(date +%Y-%m-%d) — Score: [SCORE]/100\" --body-file $HEALTH_BODY_FILE --label health-report"))
 echo "$ISSUE_RESULT"
 
 # Restore the original forge.yaml immediately — so a subsequent Bash call in this same
@@ -390,7 +392,7 @@ restore_forge_yaml() {
 trap restore_forge_yaml EXIT
 cp "$FORGE_ISSUE_HOOK_CONFIG" forge.yaml
 
-ISSUE_RESULT=$(Skill(skill="issue", args="--title \"fix([command]): [description]\" --body-file $PROPOSAL_BODY_FILE --label \"[bug|enhancement|feature]\" --label \"[P1|P2|P3]\""))
+ISSUE_RESULT=$(Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"fix([command]): [description]\" --body-file $PROPOSAL_BODY_FILE --label \"[bug|enhancement|feature]\" --label \"[P1|P2|P3]\""))
 echo "$ISSUE_RESULT"
 
 # Restore the original forge.yaml immediately — same rationale as 5A. Clears the EXIT trap

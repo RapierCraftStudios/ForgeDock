@@ -7,6 +7,8 @@ install: core
 
 # /orchestrate — Phase 1: Resolve the Issue Set
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 ## Phase 1: Resolve the Issue Set
 
 ### Batch-Start Timestamp (T0) — capture FIRST, before any resolution
@@ -509,7 +511,7 @@ BATCH_EOF
 ```
 
 ```
-ISSUE_SKILL_OUTPUT=$(Skill(skill="issue", args="--title \"fix(batch): P3 review findings — ${SAFE_SURFACE_AREA} (batch #{BATCH_N})\" --body-file \"${BATCH_BODY_FILE}\" --label \"review-finding\" --label \"priority:P3\" --label \"batch\" --exclude \"${MEMBER_LIST}\""))
+ISSUE_SKILL_OUTPUT=$(Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"fix(batch): P3 review findings — ${SAFE_SURFACE_AREA} (batch #{BATCH_N})\" --body-file \"${BATCH_BODY_FILE}\" --label \"review-finding\" --label \"priority:P3\" --label \"batch\" --exclude \"${MEMBER_LIST}\""))
 ```
 
 **Consume `/issue`'s explicit result contract** (see `commands/issue.md` Phases 2D and 4C). A dedup STOP is an expected, named outcome; any output without either result marker is a hard create failure:

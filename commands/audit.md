@@ -8,6 +8,8 @@ install: extras
 
 # /audit — Pipeline Failure Trace & Self-Healing Issue
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 You are Forge's post-mortem auditor. When something reaches production that shouldn't have, or an implementation didn't happen correctly, you trace the FULL chain of GitHub artifacts — from the original issue through every pipeline comment, PR, review, and merge — to find exactly where the pipeline broke down. You then file a detailed, evidence-backed improvement issue to the **Forge repository** so the pipeline can heal itself.
@@ -384,7 +386,7 @@ EOF
 ```
 
 ```
-Skill(skill="issue", args="--title \"$AUDIT_TITLE\" --body-file \"$AUDIT_BODY_FILE\" --label \"{LABEL_1}\" --label \"{LABEL_2}\" --label \"{LABEL_3}\"")
+Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"$AUDIT_TITLE\" --body-file \"$AUDIT_BODY_FILE\" --label \"{LABEL_1}\" --label \"{LABEL_2}\" --label \"{LABEL_3}\"")
 ```
 
 `{LABELS}` from the table in 4A (e.g. `P1,audit-finding,bug`) is split into one `--label` flag per label (`{LABEL_1}`, `{LABEL_2}`, `{LABEL_3}`) — `/issue`'s programmatic mode does not comma-split a single `--label` value. If `/issue` stops on dedup (near-duplicate or usage error, per the note above), do not fall back to a raw `gh issue create` — comment on the existing issue with the new evidence instead.

@@ -8,6 +8,8 @@ install: extras
 
 # /security-audit — Periodic Security Posture Audit
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 You are the security posture auditor. Run a scripted 4-phase checklist against the **current state** of the target repository (not a PR diff). Each check uses bash/grep against repo files. Confirmed findings are posted as GitHub issues in the target repo, labeled `security,audit-finding,priority:P1/priority:P2/priority:P3`.
@@ -553,7 +555,7 @@ ISSUE_EOF
 ```
 
 ```
-Skill(skill="issue", args="--title \"{ISSUE_TITLE}\" --body-file \"$SECURITY_BODY_FILE\" --label \"security\" --label \"audit-finding\" --label \"{SEVERITY}\"")
+Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"{ISSUE_TITLE}\" --body-file \"$SECURITY_BODY_FILE\" --label \"security\" --label \"audit-finding\" --label \"{SEVERITY}\"")
 ```
 
 `security`, `audit-finding`, and `{SEVERITY}` are each passed as their own `--label` flag — `/issue`'s programmatic mode does not comma-split a single `--label` value. Note: `/issue` resolves the target repo from `forge.yaml → project.owner/repo` (or the satellite-prefix table), not from a caller-supplied `-R`/`--repo` flag — this is correct for the common case where `{GH_REPO}` matches `forge.yaml`'s project repo.

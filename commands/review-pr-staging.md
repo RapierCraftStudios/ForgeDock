@@ -595,7 +595,7 @@ TEST_GATE_REASON="Phase 6.5 not yet run"
 
 # Invoke /test-gate with the bundle PRs already computed in Phase 0A
 # ALL_PR_NUMBERS is the de-duplicated union of both scan methods (commit log + merge subjects)
-GATE_OUTPUT=$(Skill("test-gate", "--prs \"$(echo $ALL_PR_NUMBERS | tr '\n' ' ' | xargs)\" --base $DEFAULT_BRANCH"))
+GATE_OUTPUT=$(Skill("{FORGE_SKILL_PREFIX}test-gate", "--prs \"$(echo $ALL_PR_NUMBERS | tr '\n' ' ' | xargs)\" --base $DEFAULT_BRANCH"))
 
 # Extract machine-readable verdict from Skill output
 TEST_GATE_VERDICT=$(echo "$GATE_OUTPUT" | grep -oP '(?<=FORGE:TEST_GATE:RESULT=)(BLOCK|PASS|SKIP)' | tail -1 || echo "SKIP")
@@ -874,7 +874,7 @@ else
 # --label is repeatable (not comma-joined) per the /issue programmatic contract.
 # ${MILESTONE_FLAG} carries the Phase 7D derivation through — empty string is
 # a no-op arg when the reviewed branch has no milestone (plain staging→main).
-ISSUE_SKILL_OUTPUT=$(Skill(skill="issue", args="--title \"$STAGING_FINDING_TITLE\" --body-file \"$STAGING_FINDING_BODY_FILE\" --label review-finding --label needs-validation --label staging-review --label \"$STAGING_FINDING_PRIORITY\" ${MILESTONE_FLAG}"))
+ISSUE_SKILL_OUTPUT=$(Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"$STAGING_FINDING_TITLE\" --body-file \"$STAGING_FINDING_BODY_FILE\" --label review-finding --label needs-validation --label staging-review --label \"$STAGING_FINDING_PRIORITY\" ${MILESTONE_FLAG}"))
 # /issue re-reads the created issue and hard-fails unless this exact marker is present.
 rm -f "$STAGING_FINDING_BODY_FILE"
 

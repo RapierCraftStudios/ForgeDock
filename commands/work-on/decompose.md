@@ -7,6 +7,8 @@ argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG]"
 
 # work-on/decompose — Decomposition Subcommand
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 **Invoked by**: `work-on.md` routing loop, when `INVESTIGATE_RESULT.decompose = YES`.
@@ -178,7 +180,7 @@ SUB_BODY_EOF
 **Invoke `/issue` in programmatic mode**:
 
 ```
-ISSUE_SKILL_OUTPUT=$(Skill(skill="issue", args="--title \"${SUB_TITLE}\" --body-file \"${SUB_BODY_FILE}\" --label \"{PRIORITY_LABEL}\" --milestone \"{MILESTONE_TITLE}\""))
+ISSUE_SKILL_OUTPUT=$(Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"${SUB_TITLE}\" --body-file \"${SUB_BODY_FILE}\" --label \"{PRIORITY_LABEL}\" --milestone \"{MILESTONE_TITLE}\""))
 ```
 
 `/issue` runs Phase 2D dedup, Phase 3F body validation, then creates the issue (Phase 4) — no separate pre-check needed on this side.

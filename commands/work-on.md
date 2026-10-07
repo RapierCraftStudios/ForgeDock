@@ -29,7 +29,7 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 
 ### Skill Name Resolution (`{FORGE_SKILL_PREFIX}`)
 
-ForgeDock skills register under different names per install: `forgedock:work-on`, `forgedock:work-on:build` (Claude Code plugin) or `work-on`, `work-on:build` (`install.sh` symlinks). Every `Skill(skill="...")` call to a ForgeDock skill (`work-on*`, `review-pr`, `review-pr-staging`, `quality-gate`) is written `{FORGE_SKILL_PREFIX}<name>`, with `:` between nesting levels. Resolve the prefix ONCE per run, before the first Skill dispatch, and substitute it literally into every call and every sub-agent prompt:
+ForgeDock skills register under different names per install: `forgedock:work-on`, `forgedock:work-on:build` (Claude Code plugin) or `work-on`, `work-on:build` (`install.sh` symlinks). Every `Skill(skill="...")` call to a ForgeDock skill (any command under `commands/`: `work-on*`, `review-pr*`, `quality-gate`, `issue`, `orchestrate`, `cleanup`, `deploy-pr`, etc.) is written `{FORGE_SKILL_PREFIX}<name>`, with `:` between nesting levels. Resolve the prefix ONCE per run, before the first Skill dispatch, and substitute it literally into every call and every sub-agent prompt:
 
 1. If env `FORGE_SKILL_NAMESPACE` is set: `forgedock` → `{FORGE_SKILL_PREFIX}=forgedock:`; `none` → `{FORGE_SKILL_PREFIX}=` (empty). Any other value is an error.
 2. Else read the available-skills list: if it contains `forgedock:work-on` → `forgedock:`; else if it contains `work-on` → empty.
@@ -1010,7 +1010,7 @@ SUB_BODY_EOF
 # --milestone is only passed when the parent has one (see Phase 2B — "Milestone: same as parent").
 MILESTONE_ARG=""
 [ -n "{MILESTONE_TITLE}" ] && MILESTONE_ARG="--milestone \"{MILESTONE_TITLE}\""
-Skill(skill="issue", args="--title \"$SUB_ISSUE_TITLE_FULL\" --body-file \"$SUB_ISSUE_BODY_FILE\" --label \"{PRIORITY_LABEL}\" ${MILESTONE_ARG}")
+Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"$SUB_ISSUE_TITLE_FULL\" --body-file \"$SUB_ISSUE_BODY_FILE\" --label \"{PRIORITY_LABEL}\" ${MILESTONE_ARG}")
 rm -f "$SUB_ISSUE_BODY_FILE"
 
 # /issue has no machine-readable return contract — resolve the created issue's number by

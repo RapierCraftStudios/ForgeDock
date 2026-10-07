@@ -7,6 +7,8 @@ install: extras
 
 # /analytics — Production Analytics Audit & Issue Generator
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 You are the analytics orchestrator. Pull data from ALL available analytics platforms (Google Search Console, Bing Webmaster, Microsoft Clarity, Umami, Cloudflare, Google Analytics 4), cross-reference the findings, generate actionable insights, and decompose them into concrete GitHub issues that the `/work-on` pipeline can pick up.
 
 **You have access to ALL tools** — MCP tools for GSC/Clarity/Stripe, Bash for Umami/Cloudflare/Bing APIs, Agent tool for parallel data collection.
@@ -728,7 +730,7 @@ BODY_EOF
 ```
 
 ```
-Skill(skill="issue", args="--title \"{type}: {action title}\" --body-file \"$ANALYTICS_BODY_FILE\" --label \"{priority}\" --label \"{category_label_1}\" --label \"{category_label_2}\"")
+Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"{type}: {action title}\" --body-file \"$ANALYTICS_BODY_FILE\" --label \"{priority}\" --label \"{category_label_1}\" --label \"{category_label_2}\"")
 ```
 
 `{priority}`, `{category_label_1}`, and `{category_label_2}` are each passed as their own `--label` flag — `/issue`'s programmatic mode does not comma-split a single `--label` value. Resolve `{category_label_1}`/`{category_label_2}` from the label mapping below: split each mapping's comma-separated value into one label per placeholder. When a category maps to only one label, omit the `--label "{category_label_2}"` flag entirely (do not pass an empty string).

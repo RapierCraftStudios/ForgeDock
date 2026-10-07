@@ -7,6 +7,8 @@ install: extras
 
 # /geo-audit — GEO Discoverability Audit & Issue Generator
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 You are the GEO (Generative Engine Optimization) auditor. Pull AI referral data from Umami and Clarity, check every public page for GEO compliance (structured data, OG tags, freshness, sitemap, llms.txt), and auto-create GitHub issues for gaps.
 
 **You have access to ALL tools** — MCP tools for Clarity, Bash for Umami/curl checks, gh CLI for issues.
@@ -360,7 +362,7 @@ BODY_EOF
 ```
 
 ```
-Skill(skill="issue", args="--title \"{fix|feat}: {concise description}\" --body-file \"$GEO_BODY_FILE\" --label \"{priority}\" --label \"seo\" --label \"geo\"")
+Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"{fix|feat}: {concise description}\" --body-file \"$GEO_BODY_FILE\" --label \"{priority}\" --label \"seo\" --label \"geo\"")
 ```
 
 `{priority}`, `seo`, and `geo` are each passed as their own `--label` flag — `/issue`'s programmatic mode does not comma-split a single `--label` value. Every row in the Phase 3 table maps to the `seo,geo` label pair, so both are passed as separate literal `--label` flags rather than a single `{labels}` placeholder.

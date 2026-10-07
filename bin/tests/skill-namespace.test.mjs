@@ -12,11 +12,15 @@ function walk(dir) {
   });
 }
 
-// A ForgeDock Skill call whose target is a bare (unprefixed) work-on*,
-// review-pr*, or quality-gate name. Such calls fail under the plugin install,
+// A ForgeDock Skill call whose target is a bare (unprefixed) command name. Such calls fail under the plugin install,
 // where the skills register as `forgedock:<name>`.
-const BARE =
-  /Skill\(\s*(?:skill\s*[:=]\s*)?["'](?:work-on(?:[/:][a-z-]+)*|review-pr(?:-staging)?|quality-gate)["']/;
+// Every command defined under commands/ (top-level files) is a ForgeDock skill.
+const names = readdirSync(commandsDir)
+  .filter((n) => n.endsWith(".md"))
+  .map((n) => n.slice(0, -3));
+const BARE = new RegExp(
+  `Skill\\(\\s*(?:skill\\s*[:=]\\s*)?["'](?:${names.join("|")})(?:[/:][a-z-]+)*["']`,
+);
 
 describe("ForgeDock skill namespace resolution", () => {
   it("has no bare Skill(...) call to a ForgeDock phase skill in commands/", () => {
