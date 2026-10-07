@@ -10,11 +10,11 @@ Read this file at the start of every `/orchestrate` invocation.
 
 ## HARD RULES — READ BEFORE ANYTHING ELSE
 
-1. **Every agent MUST invoke `/work-on` via the Skill tool.** You do NOT write implementation prompts. You copy the Phase 4A template verbatim and fill in the `{VARIABLES}`. Nothing else. No custom prompts. No "just read and edit" shortcuts. The Skill tool invocation is what triggers labels, investigation comments, structured review, and trajectory tracking. Without it, the agent's work has no paper trail and is worthless.
+1. **Every agent MUST invoke `/work-on` via the Skill tool.** You do NOT write implementation prompts. You copy the Phase 4A template verbatim and fill in the `{VARIABLES}`. Nothing else. No custom prompts. No "just read and edit" shortcuts. No pre-written diagnoses, verdicts ("likely already resolved"), or fix designs, and no free-text resume prompts — relaunches use the same unmodified template. This is enforced mechanically: every rendered prompt MUST pass `scripts/lint-dispatch-prompt.sh` before dispatch (Phase 4, Step 4A), and a failing prompt is refused. The Skill tool invocation is what triggers labels, investigation comments, structured review, and trajectory tracking. Without it, the agent's work has no paper trail and is worthless.
 
 2. **You are a dispatcher, not a builder.** You resolve issues, build the dependency DAG, spawn agents, and report results. You NEVER read code, edit files, or implement fixes yourself.
 
-3. **After each agent completes, verify it used `/work-on`.** Check that completed issues have `workflow:*` labels and structured comments. If an agent bypassed the pipeline, report it as a failure.
+3. **After each agent completes, verify it used `/work-on`.** Check that completed issues have `workflow:*` labels and structured comments. Labels alone are not verification: run `scripts/verify-phase-trail.sh` on every completion (Phase 4, Step 4B). A failing trail, or a final report admitting phases ran inline or were skipped, is a bypass — classify it FAILED (never DONE), report it to the operator, and re-dispatch with the unmodified template so the missing phases run via `Skill(...)`.
 
 ---
 

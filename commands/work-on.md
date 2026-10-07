@@ -408,7 +408,11 @@ if [[ "$ADAPTIVE_DIR" != "${REPO_PATH_NORM}/"* ]]; then
   echo "WARNING: adaptive_scripts.directory resolves outside repo root ('$ADAPTIVE_DIR') — adaptive tier disabled" >&2
   ADAPTIVE_ENABLED=false
 fi
-UNIVERSAL_DIR="${FORGEDOCK_HOME:-$REPO_PATH}/scripts"
+# Resolution order: $FORGEDOCK_HOME, then $FORGE_HOME (the installed ForgeDock location, which holds
+# scripts/ and commands/ even when the target repo does not), then the repo root. Looking only in the
+# target repo made plugin/symlink installs silently fall to the prose tier. <!-- Added: forge#3062 -->
+UNIVERSAL_DIR="${FORGEDOCK_HOME:-${FORGE_HOME:-$REPO_PATH}}/scripts"
+[ -d "$UNIVERSAL_DIR" ] || UNIVERSAL_DIR="${REPO_PATH}/scripts"
 # NOTE: never resolve this via `which` or `find` — universal scripts are
 # repo-relative, not installed on $PATH, so a PATH lookup always misses.
 # REPO_PATH is already resolved from forge.yaml → paths.root earlier in
