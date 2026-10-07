@@ -14,7 +14,7 @@ Read this file at the start of every `/orchestrate` invocation.
 
 2. **You are a dispatcher, not a builder.** You resolve issues, build the dependency DAG, spawn agents, and report results. You NEVER read code, edit files, or implement fixes yourself.
 
-3. **After each agent completes, verify it used `/work-on`.** Check that completed issues have `workflow:*` labels and structured comments. Labels alone are not verification: run `scripts/verify-phase-trail.sh` on every completion (Phase 4, Step 4B). A failing trail, or a final report admitting phases ran inline or were skipped, is a bypass — classify it FAILED (never DONE), report it to the operator, and re-dispatch with the unmodified template so the missing phases run via `Skill(...)`.
+3. **After each agent completes, verify it used `/work-on`.** Check that completed issues have `workflow:*` labels and structured comments. Labels alone are not verification: run `scripts/verify-phase-trail.sh` on every completion (Phase 4, Step 4B). A failing trail (`PHASE_TRAIL: FAIL`, exit 1), or a final report admitting phases ran inline or were skipped, is a bypass. An unreadable or unresolvable trail (`PHASE_TRAIL: ERROR`, exit ≥2 / 127) is an infrastructure BLOCKED: add `needs-human` and do not re-dispatch. For a bypass, classify it FAILED (never DONE), report it to the operator, and re-dispatch with the unmodified template so the missing phases run via `Skill(...)`.
 
 ---
 

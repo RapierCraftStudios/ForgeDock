@@ -206,6 +206,9 @@ OUT=$(FORGE_TRAIL_TRUSTED_LOGINS=ext MOCK_GH_JSON="$UT" bash "$VERIFY" 3061 -R o
 [ $RC -eq 0 ] && ok "FORGE_TRAIL_TRUSTED_LOGINS accepts a CONTRIBUTOR login" || bad "trusted login override (rc=$RC out=$OUT)"
 expect_pass "marker-only CONTEXT satisfies STANDARD" "$(mk minctx INV FP_STANDARD CONTRACT CONTEXT ARCH QG_PASS)"
 
+# -h is bounded by the END-HELP sentinel, not a hardcoded line range (#3147)
+echo "$HOUT" | grep -q 'Callers route on the exit code' && ! echo "$HOUT" | grep -q 'END-HELP' && ! echo "$HOUT" | grep -q 'set -uo pipefail' && ok "-h stops at the END-HELP sentinel" || bad "-h sentinel"
+
 # Outage fails closed (exit 2, never PASS)
 OUT=$(MOCK_GH_FAIL=1 MOCK_GH_JSON=/dev/null bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "gh outage fails closed" || bad "gh outage (rc=$RC out=$OUT)"

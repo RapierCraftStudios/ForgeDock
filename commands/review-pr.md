@@ -2239,7 +2239,23 @@ else
   else
     TRAIL=$(bash "$TRAIL_SCRIPT" "$MERGE_ISSUE" -R {GH_REPO} $DOCS_ONLY_FLAG); TRAIL_RC=$?
   fi
-  if [ "$TRAIL_RC" -ne 0 ]; then
+  if [ "$TRAIL_RC" -ge 2 ]; then
+    # rc 2 (trail unreadable) / 127 (verifier not resolvable) is an infrastructure failure, NOT missing phases:
+    # there are no MISSING lines to re-run, so never report PHASE_TRAIL_FAILED here (same routing as work-on/review.md R1.5, forge#3147).
+    TRAIL_ERR_BODY="<!-- FORGE:PHASE_TRAIL_ERROR -->
+Auto-merge refused for PR #{PR_NUMBER}: the phase-trail verifier could not run (rc=${TRAIL_RC}). This is an infrastructure problem, not a missing phase. Do not re-run phases.
+
+\`\`\`
+${TRAIL}
+\`\`\`
+
+Fix the cause (gh auth/API outage, \`FORGE_TRAIL_QG_SINCE\`/runner clock, or set \`FORGEDOCK_HOME\` when the verifier is unresolvable), then re-run /review-pr."
+    gh issue comment "$MERGE_ISSUE" {MERGE_GH_FLAG} --body "$TRAIL_ERR_BODY" # <!-- allowlist:check-command-side-effects -->
+    # Nothing can resume this automatically, so park it for a human instead of leaving workflow:in-review (standalone /review-pr and remediate callers too).
+    gh issue edit "$MERGE_ISSUE" {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
+    # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "phase trail unreadable (rc=${TRAIL_RC})". The PR stays open and unmerged; callers must NOT fall back to a manual merge.
+    exit 1
+  elif [ "$TRAIL_RC" -ne 0 ]; then
     TRAIL_FAIL_BODY="<!-- FORGE:PHASE_TRAIL_FAILED -->
 Auto-merge refused for PR #{PR_NUMBER}: the issue's phase trail is incomplete.
 
@@ -2249,7 +2265,7 @@ ${TRAIL}
 
 Re-run each missing phase via its Skill (see the \`->\` action on each MISSING line), then re-run /review-pr."
     gh issue comment "$MERGE_ISSUE" {MERGE_GH_FLAG} --body "$TRAIL_FAIL_BODY" # <!-- allowlist:check-command-side-effects -->
-    # STOP — return REVIEW_RESULT: status: PHASE_TRAIL_FAILED with the MISSING lines (exit code 2 = trail unreadable, fail closed).
+    # STOP — return REVIEW_RESULT: status: PHASE_TRAIL_FAILED with the MISSING lines (rc 1 only; rc >= 2 is handled above as BLOCKED).
     # The /work-on router (work-on/review.md Phase R4), the work-on.md Phase 5 router and remediate.md Phase M6 consume this status and re-dispatch the named phases once (forge#3102); this is NOT an immediate needs-human escalation.
     exit 1
   fi
@@ -2257,7 +2273,7 @@ fi
 [ "${TRAIL_RC:-1}" -eq 0 ] || exit 1   # hard guard: nothing below runs unless the trail verified
 ```
 
-If the preflight failed, skip the rest of Phase 8 and return `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` listing the missing markers. (`DOCS_ONLY_FLAG` is computed in the block above: `--docs-only` when `scripts/is-docs-only.sh` accepts the PR diff: every file is a `*.md` outside `commands/`, `.claude/`, `.agents/`, `.codex/` and `.github/` at any depth, and not named `AGENTS.md`/`CLAUDE.md`/`SKILL.md`.)
+If the preflight failed, skip the rest of Phase 8. On exit code 1, return `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` listing the missing markers. On exit code ≥2 (unreadable trail, or 127 when the verifier is unresolvable), return `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail unreadable (rc=N)". This is an infrastructure failure with no MISSING lines, so callers neither re-run phases nor merge manually. (`DOCS_ONLY_FLAG` is computed in the block above: `--docs-only` when `scripts/is-docs-only.sh` accepts the PR diff: every file is a `*.md` outside `commands/`, `.claude/`, `.agents/`, `.codex/` and `.github/` at any depth, and not named `AGENTS.md`/`CLAUDE.md`/`SKILL.md`.)
 
 ```bash
 # §7B verdict + purpose-regression + calibration + trust-escalation guard — check before any merge attempt <!-- Added: forge#1601, forge#1741, forge#1745 -->

@@ -30,8 +30,10 @@
 #   BAND: <band>
 #   MISSING: <marker> -> <phase to re-run>      (one line per missing artifact)
 #
-# Exit codes: 0 pass, 1 one or more artifacts missing, 2 could not read the
-# issue (fails closed — an unreadable trail is never treated as a pass).
+# Exit codes: 0 pass, 1 one or more artifacts missing, 2 could not
+# read the issue (fails closed — an unreadable trail is never treated as a pass).
+# Callers route on the exit code: 1 -> re-run the MISSING phases; 2 (or 127 when the
+# verifier itself cannot be resolved) -> infrastructure BLOCKED, never "missing phases".
 #
 # Legacy grace (#3102): an issue whose trusted FORGE:BUILDER:COMPLETE comment was created before
 # FORGE_TRAIL_QG_SINCE (default: when the FORGE:QUALITY_GATE marker was introduced, #3061) could
@@ -52,6 +54,7 @@
 # Limits: "Bot" trusts any GitHub App/bot that can comment on the repo (set
 # FORGE_TRAIL_TRUSTED_ASSOCIATIONS and FORGE_TRAIL_TRUSTED_LOGINS to tighten);
 # COLLABORATOR includes read-level collaborators; login matching is case-sensitive.
+# END-HELP (`-h` prints the header up to this line; keep it last)
 
 set -uo pipefail
 
@@ -65,7 +68,7 @@ while [ $# -gt 0 ]; do
       if [ $# -lt 2 ] || [ -z "${2:-}" ]; then echo "PHASE_TRAIL: ERROR"; echo "usage error: $1 needs a value" >&2; exit 2; fi
       REPO="$2"; shift 2 ;;
     --docs-only) DOCS_ONLY=1; shift ;;
-    -h|--help) sed -n '5,54p' "$0"; exit 0 ;;
+    -h|--help) awk 'NR >= 5 { if (/^# END-HELP/) exit; print }' "$0"; exit 0 ;;
     *)
       if [ -z "$ISSUE" ] && [[ "$1" =~ ^[0-9]+$ ]]; then ISSUE="$1"; shift
       else echo "PHASE_TRAIL: ERROR"; echo "usage error: unexpected argument '$1'" >&2; exit 2; fi
