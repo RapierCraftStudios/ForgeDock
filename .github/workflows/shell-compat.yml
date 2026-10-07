@@ -44,7 +44,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        # Pinned (not macos-latest) so the runner image/awk/sed do not float silently.
+        # NOTE: bash on macOS runners is Homebrew bash 5.x, not the system 3.2; the
+        # script's 3.2 compatibility is covered by avoiding bash-4+ constructs.
+        os: [ubuntu-latest, macos-14]
     steps:
       - uses: actions/checkout@v4
       - name: Run lint-dispatch-prompt.test.sh
@@ -77,7 +80,7 @@ jobs:
   # ---------------------------------------------------------------------------
   macos-portability:
     name: macOS portability smoke
-    runs-on: macos-latest
+    runs-on: macos-14
 
     steps:
       - uses: actions/checkout@v4
