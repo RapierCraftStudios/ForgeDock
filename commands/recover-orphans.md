@@ -7,13 +7,15 @@ argument-hint: "[--dry-run | --since <hours> | --issue <number>]"
 
 # /recover-orphans — Pipeline Orphan Recovery
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 Scan ALL open issues with intermediate workflow labels for orphaned state — issues where the agent died mid-pipeline (context expired, rate-limited, crashed) and no active agent is continuing. Diagnose each orphan's actual GitHub state and apply the appropriate recovery action.
 
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet". Fallback: `model: "opus"` if rate-limited.
 **NEVER use plan mode (EnterPlanMode).**
-**NEVER use the Agent tool** — recover-orphans re-enters the pipeline via `Skill(skill="work-on", ...)` and `Skill(skill="review-pr", ...)` only.
+**NEVER use the Agent tool** — recover-orphans re-enters the pipeline via `Skill(skill="{FORGE_SKILL_PREFIX}work-on", ...)` and `Skill(skill="{FORGE_SKILL_PREFIX}review-pr", ...)` only.
 
 <!-- FORGE:SPEC_LOADED — recover-orphans.md loaded and active. Agent is bound by this spec. -->
 
@@ -373,9 +375,9 @@ for NUM in $ORPHAN_LIST; do
       # Open PR awaiting review — invoke /review-pr
       echo "  Applying review-pr: invoking /review-pr on PR #$PR_NUM"
       if [ "$DRY_RUN" = "true" ]; then
-        echo "  [DRY-RUN] Would: Skill(skill='review-pr', args='$PR_NUM --auto-merge --issue $NUM --gh-flag $GH_FLAG')"
+        echo "  [DRY-RUN] Would: Skill(skill='{FORGE_SKILL_PREFIX}review-pr', args='$PR_NUM --auto-merge --issue $NUM --gh-flag $GH_FLAG')"
       else
-        Skill(skill="review-pr", args="${PR_NUM} --auto-merge --issue ${NUM} --gh-flag ${GH_FLAG}")
+        Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="${PR_NUM} --auto-merge --issue ${NUM} --gh-flag ${GH_FLAG}")
         # After review: update label
         gh issue edit "$NUM" ${GH_FLAG} --add-label "workflow:in-review" \
           --remove-label "workflow:building,workflow:awaiting-merge" 2>/dev/null || true
@@ -387,9 +389,9 @@ for NUM in $ORPHAN_LIST; do
       # Branch has commits but no PR — resume /work-on to create PR
       echo "  Applying create-pr: resuming /work-on to advance from build to PR creation"
       if [ "$DRY_RUN" = "true" ]; then
-        echo "  [DRY-RUN] Would: Skill(skill='work-on', args='$NUM')"
+        echo "  [DRY-RUN] Would: Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='$NUM')"
       else
-        Skill(skill="work-on", args="${NUM}")
+        Skill(skill="{FORGE_SKILL_PREFIX}work-on", args="${NUM}")
       fi
       RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | create-pr | Resumed /work-on — branch $BRANCH has commits, no PR |\n"
       ;;

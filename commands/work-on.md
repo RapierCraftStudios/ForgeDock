@@ -19,13 +19,23 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 
 ## HARD RULES — READ BEFORE ANYTHING ELSE
 
-1. **Every sub-phase MUST be invoked via `Skill(...)`.** You do NOT implement inline. You invoke `Skill(skill="work-on/investigate", ...)`, `Skill(skill="work-on/build", ...)`, etc. The Skill tool invocation is what triggers label updates, FORGE annotations, and structured output. Without it, the phase has no paper trail.
+1. **Every sub-phase MUST be invoked via `Skill(...)`.** You do NOT implement inline. If the skill name does not resolve, STOP with "skill not found" (see Skill Name Resolution below) — never run the phase inline. You invoke `Skill(skill="{FORGE_SKILL_PREFIX}work-on:investigate", ...)`, `Skill(skill="{FORGE_SKILL_PREFIX}work-on:build", ...)`, etc. The Skill tool invocation is what triggers label updates, FORGE annotations, and structured output. Without it, the phase has no paper trail.
 
 2. **Write to GitHub after EVERY phase.** Every FORGE annotation (HEARTBEAT, INVESTIGATOR, CONTRACT, BUILDER, etc.) must be posted before the next phase starts. A phase that completes without a GitHub write is effectively invisible to the stall detector and future sessions.
 
 3. **Follow the Universal Phase Dispatcher.** The phase sequence table is the SINGLE source of truth for transitions. Do NOT skip phases, do NOT reorder phases, do NOT treat intermediate completions as terminal. Only the terminal states listed in the Dispatcher allow stopping.
 
 4. **PRs NEVER target `main`.** Target `staging` (fast lane) or `milestone/{slug}` (feature lane). A PR to main is a pipeline violation regardless of what the issue description says.
+
+### Skill Name Resolution (`{FORGE_SKILL_PREFIX}`)
+
+ForgeDock skills register under different names per install: `forgedock:work-on`, `forgedock:work-on:build` (Claude Code plugin) or `work-on`, `work-on:build` (`install.sh` symlinks). Every `Skill(skill="...")` call to a ForgeDock skill (`work-on*`, `review-pr`, `review-pr-staging`, `quality-gate`) is written `{FORGE_SKILL_PREFIX}<name>`, with `:` between nesting levels. Resolve the prefix ONCE per run, before the first Skill dispatch, and substitute it literally into every call and every sub-agent prompt:
+
+1. If env `FORGE_SKILL_NAMESPACE` is set: `forgedock` → `{FORGE_SKILL_PREFIX}=forgedock:`; `none` → `{FORGE_SKILL_PREFIX}=` (empty). Any other value is an error.
+2. Else read the available-skills list: if it contains `forgedock:work-on` → `forgedock:`; else if it contains `work-on` → empty.
+3. If neither name resolves, or a later `Skill(...)` call reports the resolved name unknown, this is a **HARD ERROR**: STOP and report "skill not found: <name>" (post a `needs-human` comment when running against an issue). NEVER fall back to running the phase inline or via the Agent tool — an inline phase has no paper trail.
+
+A sub-agent that receives no resolved value applies the same rule itself.
 
 ### Compaction Resilience
 
@@ -90,7 +100,7 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 |-----|-----------|-------|---------|
 | a | **Parallel fan-out** — two or more independent work units can execute concurrently and the total wall time saving justifies the fork overhead | YES — spawn one sub-agent per work unit | `/orchestrate` dispatching multiple `/work-on` agents; `review-pr` spawning domain-specific reviewers in parallel |
 | b | **Fresh-context isolation** — the work unit is a structured review or audit whose value depends on seeing the artefact without the builder's accumulated context bias, AND the review result is load-bearing for the merge decision | YES — spawn a dedicated sub-agent | Phase 5C review-fork when build context is large (see Row c for the quantitative threshold) |
-| c | **Parent context near overflow** — the parent agent has made ≥20 Skill invocations OR the build changed ≥10 files, meaning delegating review inline risks a mid-review token overflow | YES — spawn a fresh sub-agent for review | Phase 5C: `Skill(skill="work-on/review", …)` instead of direct `review-pr` invocation |
+| c | **Parent context near overflow** — the parent agent has made ≥20 Skill invocations OR the build changed ≥10 files, meaning delegating review inline risks a mid-review token overflow | YES — spawn a fresh sub-agent for review | Phase 5C: `Skill(skill="{FORGE_SKILL_PREFIX}work-on:review", …)` instead of direct `review-pr` invocation |
 | d | **Prompt-cache TTL** — the sub-operation (multi-domain review, multi-iteration quality-gate) is expected to run for several minutes, longer than Anthropic's ~5-minute prompt-cache TTL. Leaving it inline lets the parent's already-large accumulated context (investigation/contract/context/architect/implement annotations) sit idle past the TTL; the parent's next turn then re-hydrates that entire context **uncached**, roughly doubling effective token cost for that turn. This is independent of build size — a 1-file fix idles the parent exactly as long as a 20-file one once the sub-operation starts running | YES — spawn a fresh sub-agent, **unconditionally**, regardless of file count or Skill-invocation count | Phase 5C review (always forks — Row d supersedes Row c's threshold as the controlling reason); Phase 3G quality-gate loop (forks under Row d even though it never qualified under Row c) <!-- Added: forge#1825 --> |
 
 **If none of the four rows match: run inline.** Do not fork for convenience, narrative clarity, or to avoid reading a large file. Context cost of a fork (spawning, context reconstruction, result aggregation) is paid every time, even when parallelism, isolation, or cache preservation adds no value.
@@ -270,12 +280,12 @@ fi
 If detected, dispatch immediately and STOP — do NOT fall through to Phase 0B's normal issue-number resume logic (an issue number is not even known yet; `work-on/remediate.md` Phase M0 resolves it):
 
 ```
-Skill(skill="work-on/remediate", args="${REMEDIATE_PR_NUMBER} ${REMEDIATE_ISSUE_FLAG} --repo {GH_REPO} --gh-flag {GH_FLAG}")
+Skill(skill="{FORGE_SKILL_PREFIX}work-on:remediate", args="${REMEDIATE_PR_NUMBER} ${REMEDIATE_ISSUE_FLAG} --repo {GH_REPO} --gh-flag {GH_FLAG}")
 ```
 
-**After `REMEDIATE_RESULT` returns, STOP unconditionally** — do not run any further Phase 0–7 logic in this file. `work-on/remediate.md` is self-contained: a FIXABLE remediation replaces `needs-human` with the active `workflow:in-review` state only while it is running, then ends at `workflow:merged`, `workflow:awaiting-merge`, or a newly asserted `needs-human` label. When `re_gate_outcome: AUTO-LANDED`, it drives its own close phase internally (Phase M8 invokes `Skill("work-on:close", ...)` directly) before returning. For every other outcome (`HELD-AWAITING-MERGE`, `RE-ESCALATED`, `UNFIXABLE`, `BLOCKED`, `ALREADY_DONE`), the issue is already at a terminal state (`workflow:awaiting-merge` or `needs-human`, or already closed) per the Universal Phase Dispatcher — nothing further to do.
+**After `REMEDIATE_RESULT` returns, STOP unconditionally** — do not run any further Phase 0–7 logic in this file. `work-on/remediate.md` is self-contained: a FIXABLE remediation replaces `needs-human` with the active `workflow:in-review` state only while it is running, then ends at `workflow:merged`, `workflow:awaiting-merge`, or a newly asserted `needs-human` label. When `re_gate_outcome: AUTO-LANDED`, it drives its own close phase internally (Phase M8 invokes `Skill("{FORGE_SKILL_PREFIX}work-on:close", ...)` directly) before returning. For every other outcome (`HELD-AWAITING-MERGE`, `RE-ESCALATED`, `UNFIXABLE`, `BLOCKED`, `ALREADY_DONE`), the issue is already at a terminal state (`workflow:awaiting-merge` or `needs-human`, or already closed) per the Universal Phase Dispatcher — nothing further to do.
 
-This mode is reachable both standalone (a human or script running `/work-on <pr> --remediate` directly) and via the orchestrator (`commands/orchestrate/phase-4-execution.md` item 6.4 auto-dispatches the identical `Skill(skill='work-on', args='{PR} --remediate --issue {N} ...')` invocation against a `needs-human`-gated predecessor's own PR).
+This mode is reachable both standalone (a human or script running `/work-on <pr> --remediate` directly) and via the orchestrator (`commands/orchestrate/phase-4-execution.md` item 6.4 auto-dispatches the identical `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{PR} --remediate --issue {N} ...')` invocation against a `needs-human`-gated predecessor's own PR).
 
 **Skip this entire section if `--remediate` is absent from `$ARGUMENTS`** — proceed to the normal parse below.
 
@@ -858,7 +868,7 @@ INV_MARKER=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '[.[] | select(.body | contains("INVESTIGATION:COMPLETE"))] | length')
 if [ "${INV_MARKER:-0}" -eq 0 ]; then
   echo "MARKER GATE FAIL: INVESTIGATION:COMPLETE absent — re-invoking work-on/investigate once"
-  Skill(skill="work-on/investigate", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG}")
+  Skill(skill="{FORGE_SKILL_PREFIX}work-on:investigate", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG}")
   INV_MARKER=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
     --jq '[.[] | select(.body | contains("INVESTIGATION:COMPLETE"))] | length')
   if [ "${INV_MARKER:-0}" -eq 0 ]; then
@@ -1522,7 +1532,7 @@ Agent(
     max_iterations = 3
     while iteration < max_iterations:
         iteration += 1
-        Skill('quality-gate', args='{CHANGED_FILES} --worktree {WORKTREE_PATH}')
+        Skill('{FORGE_SKILL_PREFIX}quality-gate', args='{CHANGED_FILES} --worktree {WORKTREE_PATH}')
         if result == 'QUALITY GATE: PASS':
             GATE_PASSED = true
             break
@@ -1547,7 +1557,7 @@ max_iterations = 3
 
 while iteration < max_iterations:
     iteration += 1
-    Skill("quality-gate", args="{CHANGED_FILES} --worktree {WORKTREE_PATH}")
+    Skill("{FORGE_SKILL_PREFIX}quality-gate", args="{CHANGED_FILES} --worktree {WORKTREE_PATH}")
     if result == "QUALITY GATE: PASS":
         GATE_PASSED = true
         break
@@ -1866,7 +1876,7 @@ BUILD_MARKER=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '[.[] | select(.body | contains("FORGE:BUILDER:COMPLETE"))] | length')
 if [ "${BUILD_MARKER:-0}" -eq 0 ]; then
   echo "MARKER GATE FAIL: FORGE:BUILDER:COMPLETE absent — re-invoking work-on/build once"
-  Skill(skill="work-on/build", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE}")
+  Skill(skill="{FORGE_SKILL_PREFIX}work-on:build", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE}")
   BUILD_MARKER=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
     --jq '[.[] | select(.body | contains("FORGE:BUILDER:COMPLETE"))] | length')
   if [ "${BUILD_MARKER:-0}" -eq 0 ]; then
@@ -2026,7 +2036,7 @@ PR #${PR_NUMBER} created targeting \`{PR_BASE}\`. Invoking /review-pr with --aut
 
 `/review-pr` spawns domain review agent(s) (observed at `effort: xhigh`) that run for minutes — long enough to idle the parent's accumulated context past the prompt cache's ~5-minute TTL under **Spawn-Decision Policy Row (d)**, regardless of build size — see the [Spawn-Decision Table](#spawn-decision-table). There is no small-build exception: review ALWAYS forks.
 
-- ALWAYS invoke `work-on/review` as a fresh sub-agent (via `Skill(skill="work-on/review", args="...")`) rather than calling review-pr directly. The sub-agent starts with a clean context window and re-reads all needed state from GitHub (Phase R0) — it does not depend on anything the parent accumulated.
+- ALWAYS invoke `work-on/review` as a fresh sub-agent (via `Skill(skill="{FORGE_SKILL_PREFIX}work-on:review", args="...")`) rather than calling review-pr directly. The sub-agent starts with a clean context window and re-reads all needed state from GitHub (Phase R0) — it does not depend on anything the parent accumulated.
 - **Fallback only**: if `work-on/review` is not available (partial install), invoke review-pr directly and add a note in the progress comment that context isolation was degraded for this run.
 
 **Sub-agent invocation** (always, regardless of changed-file count or Skill-invocation count):
@@ -2059,14 +2069,17 @@ fi
 ```
 
 ```
-Skill(skill="work-on/review", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE}", context="{HOT_COPY_BLOCK}")
+Skill(skill="{FORGE_SKILL_PREFIX}work-on:review", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE}", context="{HOT_COPY_BLOCK}")
 ```
 
 The `{HOT_COPY_BLOCK}` is an optimization that avoids the child re-discovering context already held by the parent. The FORGE annotations on GitHub remain the durable, compaction-safe record. If the hot-copy block is empty (annotations not yet posted), the sub-agent falls back to reading them from GitHub as before.
 
 **Fallback invocation** (only when `work-on/review` is unavailable):
 ```
-Skill(skill="review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
+if DRY_RUN=true:
+  record "Would invoke review-pr --auto-merge for PR #{PR_NUMBER}; skipped (dry-run)."
+else:
+  Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
 ```
 
 Review-pr handles: full domain-agent review → post findings as separate issues → merge PR. It does NOT close the issue or clean up the worktree — those run in Phase 6.

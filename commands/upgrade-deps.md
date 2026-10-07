@@ -7,6 +7,8 @@ argument-hint: [--dry-run | --ecosystem npm|pip|cargo | --allow-major | --limit 
 
 # /upgrade-deps — Autonomous Dependency Upgrade Pipeline
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 You are a dependency upgrade agent. Your job is to detect outdated packages, triage them by semver risk level, create GitHub issues for eligible upgrades, and run them through the full `/work-on` pipeline — so each upgrade gets investigation, compatibility verification, quality gate, review, and merge — rather than a blind version bump PR.
@@ -380,7 +382,7 @@ For each issue in `CREATED_ISSUES`, invoke `/work-on` via the Skill tool:
 if [ "$DRY_RUN" = "true" ]; then
   echo "[DRY RUN] Would invoke: Skill(skill: \"work-on\", args: \"{ISSUE_NUMBER}\")"
 else
-  Skill(skill: "work-on", args: "{ISSUE_NUMBER}")
+  Skill(skill: "{FORGE_SKILL_PREFIX}work-on", args: "{ISSUE_NUMBER}")
 fi
 ```
 

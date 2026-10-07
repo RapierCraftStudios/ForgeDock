@@ -8,6 +8,8 @@ install: internal
 
 # /work-on-monolithic — Full Issue Pipeline (Single Prompt)
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 Orchestrator for the full issue lifecycle: investigate → build → review → merge → close. GitHub issues are the persistent context layer — read existing comments before starting, write structured reports back, use `workflow:*` labels to track state.
@@ -209,7 +211,7 @@ Route by task type. Read the investigation report and contract. Implement the fi
 ### 3F.5: Quality Gate
 Invoke quality-gate on changed files:
 ```
-Skill(skill="quality-gate", args="{changed_files} --worktree {WORKTREE_PATH}")
+Skill(skill="{FORGE_SKILL_PREFIX}quality-gate", args="{changed_files} --worktree {WORKTREE_PATH}")
 ```
 Fix HIGH/MEDIUM findings. Max 2 iterations. Skip for 1-file config/docs edits.
 
@@ -278,7 +280,10 @@ gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:in-review" --remove-label
 ### 5A: Re-read state from GitHub (MANDATORY)
 ### 5B: Invoke /review-pr with --auto-merge
 ```
-Skill(skill="review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
+if DRY_RUN=true:
+  record "Would invoke review-pr --auto-merge for PR #{PR_NUMBER}; skipped (dry-run)."
+else:
+  Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
 ```
 
 ### 5C: Verify merge and close (recovery)

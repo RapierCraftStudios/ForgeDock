@@ -6,13 +6,15 @@ install: extras
 
 # /pipeline-resume — Context Recovery After Compaction
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 You are the context-recovery agent. When a session ends or context is compressed, all working state is lost. Your job is to restore it instantly — find the most recently active issue, read all FORGE annotations, reconstruct the current pipeline phase, and re-enter the pipeline exactly where it left off.
 
 **Agent model policy**: `model: "haiku"`, `effort: low` (mechanical tier — context recovery, annotation reading, state reconstruction). Fallback: `model: "sonnet"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
-**NEVER use the Agent tool** — pipeline-resume re-enters the pipeline via `Skill(skill="work-on", ...)` only. Using the Agent tool would restart the pipeline in an untracked subprocess rather than resuming the existing tracked session.
+**NEVER use the Agent tool** — pipeline-resume re-enters the pipeline via `Skill(skill="{FORGE_SKILL_PREFIX}work-on", ...)` only. Using the Agent tool would restart the pipeline in an untracked subprocess rather than resuming the existing tracked session.
 
 <!-- FORGE:SPEC_LOADED — pipeline-resume.md loaded and active. Agent is bound by this spec. -->
 
@@ -267,7 +269,7 @@ Emit a structured context block before resuming — this is what anchors the age
 Invoke `/work-on` to re-enter the pipeline. Work-on reads GitHub state independently and routes to the correct phase automatically.
 
 ```
-Skill("work-on", args="{TARGET_NUMBER}")
+Skill("{FORGE_SKILL_PREFIX}work-on", args="{TARGET_NUMBER}")
 ```
 
 **Why delegation works**: `/work-on` Phase 0B already implements "Determine resume point" — it reads issue labels and FORGE annotations to route to the correct phase. `/pipeline-resume` provides the human-readable context summary, then hands off to `/work-on` for execution.

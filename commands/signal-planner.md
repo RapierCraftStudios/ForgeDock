@@ -8,6 +8,8 @@ install: extras
 
 # /signal-planner — Closed-Loop Production Signal to Verified Resolution
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 **Config variables used by this command** (set in `forge.yaml`):
@@ -17,7 +19,7 @@ install: extras
 - `{GOVERNOR_MAX_COST_USD}` ← `governor.max_cost_usd` (optional, default `5.00`) — hard cap on estimated LLM spend per run
 
 **NEVER use plan mode (EnterPlanMode).**
-**NEVER use the Agent tool** for implementation work — dispatch issues via `Skill(skill="work-on", ...)` or via `/orchestrate`.
+**NEVER use the Agent tool** for implementation work — dispatch issues via `Skill(skill="{FORGE_SKILL_PREFIX}work-on", ...)` or via `/orchestrate`.
 
 <!-- FORGE:SPEC_LOADED — signal-planner.md loaded and active. Agent is bound by this spec. -->
 

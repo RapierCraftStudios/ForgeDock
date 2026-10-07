@@ -7,6 +7,8 @@ argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree 
 
 # work-on/build/validate — Validation Subcommand
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 **Invoked by**: `work-on.md` Step 3F.5, after `implement.md` has written and staged code (not committed).
@@ -106,7 +108,7 @@ if iteration == max_iterations AND result != PASS AND blocker_findings not empty
 
 **Quality gate invocation**:
 ```
-Skill("quality-gate", args="{CHANGED_FILES} --worktree {WORKTREE_PATH}")
+Skill("{FORGE_SKILL_PREFIX}quality-gate", args="{CHANGED_FILES} --worktree {WORKTREE_PATH}")
 ```
 
 **Timeout handling**: The quality-gate's executable checks carry their own explicit timeouts; a `QUALITY-GATE-TIMEOUT` result is a failed gate iteration. Record it as HIGH, do not apply speculative fixes, and proceed to V1-FAIL immediately (post the failure comment, add `needs-human`, return `GATE_PASSED: false`). Do not retry a timed-out check. A wall-time timeout for the in-context `Skill(...)` invocation itself requires native runtime support and is not claimed by this workflow.

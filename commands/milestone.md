@@ -8,6 +8,8 @@ install: extras
 
 # /milestone — Milestone Lifecycle Manager
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 Milestones are the top-level planning unit. They group related issues into a shippable feature set. Each milestone gets its own long-lived Git branch (`milestone/{slug}`) where feature PRs accumulate. When the milestone is ready, it ships to `main` as a single reviewed merge.
@@ -15,7 +17,7 @@ Milestones are the top-level planning unit. They group related issues into a shi
 **Hierarchy**: Milestone → Issues → Sub-issues (optional decomposition)
 
 **NEVER use plan mode (EnterPlanMode).**
-**NEVER use the Agent tool for issue work** — milestone dispatches issue work via `Skill(skill="work-on", ...)` only. The Agent tool bypasses the Skill pipeline's label state machine, FORGE annotations, and structured review. The Agent tool may be used only for coordination tasks within milestone planning itself (e.g., parallel issue list queries) — never for /work-on sub-dispatch.
+**NEVER use the Agent tool for issue work** — milestone dispatches issue work via `Skill(skill="{FORGE_SKILL_PREFIX}work-on", ...)` only. The Agent tool bypasses the Skill pipeline's label state machine, FORGE annotations, and structured review. The Agent tool may be used only for coordination tasks within milestone planning itself (e.g., parallel issue list queries) — never for /work-on sub-dispatch.
 
 <!-- FORGE:SPEC_LOADED — milestone.md loaded and active. Agent is bound by this spec. -->
 
@@ -617,7 +619,7 @@ fi
 Use the `/review-pr` skill to review the shipping PR. This is a comprehensive review of the entire feature set:
 
 ```
-Skill(skill="review-pr", args="{PR_NUMBER}")
+Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="{PR_NUMBER}")
 ```
 
 **If the review returns blocking findings (FINDINGS, not PASSED)**:
@@ -625,7 +627,7 @@ Skill(skill="review-pr", args="{PR_NUMBER}")
 - Do NOT restart from Step 1.
 - Fix the blockers on `milestone/{slug}`, push the commits, then re-invoke review on the same PR:
   ```
-  Skill(skill="review-pr", args="{PR_NUMBER}")
+  Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="{PR_NUMBER}")
   ```
 - Step 3 will detect the open PR on the next `/milestone ship {slug}` call and update it in place — the same PR number is preserved, review history is retained, and the reviewer is re-notified.
 - This eliminates the close-and-recreate churn that inflates the failed-PR count and lowers the staging→main pass rate. <!-- Added: forge#1328 -->
