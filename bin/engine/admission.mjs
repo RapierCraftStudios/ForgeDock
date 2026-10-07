@@ -121,6 +121,12 @@ export function canDeduplicateAutomatedAlert(canonical, candidate) {
  *   unit before same-lineage refinements are deferred. `null` disables the bound.
  * @property {number} convergenceWindow - Merged-unit window used to warn when
  *   amplification remains at or above 1.0.
+ * @property {boolean} amplificationBreaker - On-by-default circuit breaker over ALL
+ *   cascade findings (not only same-lineage refinements): when the last
+ *   `convergenceWindow` amplification ratios are all >= 1.0, P3-and-below admission
+ *   pauses (P1/P2 are never affected). Opt out with `amplification_breaker: off`.
+ *   It is deliberately independent of the cascade presets, so lifting the
+ *   generation cap or token budget (`policy: all`) never disables it.
  */
 
 /**
@@ -180,6 +186,19 @@ export function parseOptionalPositiveNumber(raw) {
 }
 
 /**
+ * Parse an on/off toggle that defaults to ON. Accepts booleans and the strings
+ * "on"/"off"/"true"/"false". An unrecognized value keeps the safe default (on).
+ */
+export function parseOnByDefaultToggle(raw) {
+  if (raw === undefined || raw === null || raw === "" || raw === "null") return { value: true, warning: null };
+  if (typeof raw === "boolean") return { value: raw, warning: null };
+  const t = String(raw).trim().toLowerCase();
+  if (t === "on" || t === "true") return { value: true, warning: null };
+  if (t === "off" || t === "false") return { value: false, warning: null };
+  return { value: true, warning: `not on/off ("${raw}") — keeping the breaker on` };
+}
+
+/**
  * Parse a raw config value that may be a positive integer, the literal
  * string "unlimited" (case-insensitive), or absent/invalid. Mirrors the
  * validate-warn-fall-back idiom used for `orchestration.max_concurrent`
@@ -229,6 +248,7 @@ export function parseIntOrUnlimited(raw, fallback) {
  * @param {boolean} [config.p3_same_file_defer]
  * @param {number|string} [config.max_amplification]
  * @param {number|string} [config.convergence_window]
+ * @param {boolean|string} [config.amplification_breaker] - "on" (default) | "off".
  * @param {number|string} [legacyTokenBudgetPerBatch] - Deprecated-alias fallback:
  *   `pipeline.token_budget_per_batch`, read when `config.token_budget` is absent
  *   so existing configs keep working unchanged (see forge#1858).
@@ -308,6 +328,11 @@ export function resolveCascadePolicy(config = {}, legacyTokenBudgetPerBatch) {
     );
   }
 
+  const amplificationBreaker = parseOnByDefaultToggle(config.amplification_breaker);
+  if (amplificationBreaker.warning) {
+    warnings.push(`orchestration.cascade.amplification_breaker ${amplificationBreaker.warning}`);
+  }
+
   // Both-uncapped notice: neither generation depth nor token spend is bounded this
   // run. This is never a preset default (no preset in CASCADE_PRESETS sets both to
   // UNLIMITED... except "all", which does so deliberately) — surface it loudly so an
@@ -332,6 +357,7 @@ export function resolveCascadePolicy(config = {}, legacyTokenBudgetPerBatch) {
       p3SameFileDefer,
       maxAmplification: maxAmplification.value,
       convergenceWindow: convergenceWindow.value === UNLIMITED ? 3 : convergenceWindow.value,
+      amplificationBreaker: amplificationBreaker.value,
     },
     policyName,
     bothUncapped,
@@ -388,6 +414,26 @@ export function evaluateAmplification(mergedUnits, findingsSpawned, policy) {
 }
 
 /**
+ * Evaluate the on-by-default amplification breaker. Counts every cascade finding
+ * (the ratio history is findings spawned / merged units, not refinement-only).
+ * Trips when the latest `convergenceWindow` observations are all >= 1.0; releases
+ * as soon as the newest observation falls below 1.0.
+ *
+ * @param {number[]} ratioHistory - Amplification ratios, oldest first.
+ * @param {CascadePolicy} policy
+ * @returns {{ tripped: boolean, ratio: number }}
+ */
+export function evaluateAmplificationBreaker(ratioHistory, policy) {
+  const history = Array.isArray(ratioHistory) ? ratioHistory : [];
+  const ratio = history.length ? history[history.length - 1] : 0;
+  if (!policy.amplificationBreaker || history.length < policy.convergenceWindow) {
+    return { tripped: false, ratio };
+  }
+  const recent = history.slice(-policy.convergenceWindow);
+  return { tripped: recent.every((r) => r >= 1), ratio };
+}
+
+/**
  * Evaluate the Step 4C rule chain for a single cascade-spawned finding.
  * Mirrors `commands/orchestrate/phase-4-execution.md` Step 4C's "Evaluation
  * order" (rules 0-5) exactly, with rules 0/3/4 gated by the policy's
@@ -405,6 +451,8 @@ export function evaluateAmplification(mergedUnits, findingsSpawned, policy) {
  * @param {boolean} finding.sameFileAsBatch
  * @param {boolean} finding.batchFullyGated
  * @param {number} finding.projectedTokenSpend
+ * @param {boolean} [finding.amplificationBreakerTripped] - Result of
+ *   `evaluateAmplificationBreaker` for this batch (rule 6).
  * @param {CascadePolicy} policy
  * @returns {{ admit: boolean, reason: string|null }}
  */
@@ -420,6 +468,12 @@ export function evaluateCascadeFinding(finding, policy) {
   }
   if (finding.priority === "P1" || finding.priority === "P2") {
     return { admit: true, reason: null };
+  }
+  if (policy.amplificationBreaker && finding.amplificationBreakerTripped) {
+    return {
+      admit: false,
+      reason: "amplification breaker tripped — P3 admission paused (routed to P3 batches / completion sweep)",
+    };
   }
   if (policy.keywordHeuristic && /comment|typo/i.test(finding.title || "")) {
     return { admit: false, reason: "comment/typo heuristic" };

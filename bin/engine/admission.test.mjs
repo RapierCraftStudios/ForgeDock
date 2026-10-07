@@ -13,6 +13,7 @@ import {
   evaluateCascadeFinding,
   classifyBatchSafety,
   evaluateAmplification,
+  evaluateAmplificationBreaker,
   batchExclusionReason,
   planP3BatchGroups,
   canDeduplicateAutomatedAlert,
@@ -122,6 +123,7 @@ describe("resolveCascadePolicy — presets", () => {
       ...CASCADE_PRESETS.balanced,
       maxAmplification: null,
       convergenceWindow: 3,
+      amplificationBreaker: true,
     });
     assert.deepEqual(warnings, []);
   });
@@ -157,6 +159,7 @@ describe("resolveCascadePolicy — presets", () => {
       ...CASCADE_PRESETS.balanced,
       maxAmplification: null,
       convergenceWindow: 3,
+      amplificationBreaker: true,
     });
     assert.equal(warnings.length, 1);
     assert.match(warnings[0], /not one of/);
@@ -216,6 +219,50 @@ describe("evaluateAmplification", () => {
     const { policy } = resolveCascadePolicy({ max_amplification: 1 });
     assert.equal(evaluateAmplification(2, 2, policy).exceedsBound, false);
     assert.equal(evaluateAmplification(2, 3, policy).exceedsBound, true);
+  });
+});
+
+describe("evaluateAmplificationBreaker (forge#3060)", () => {
+  it("is on by default, including under policy: all", () => {
+    assert.equal(resolveCascadePolicy().policy.amplificationBreaker, true);
+    assert.equal(resolveCascadePolicy({ policy: "all" }).policy.amplificationBreaker, true);
+  });
+
+  it("opts out with off/false and keeps on for garbage with a warning", () => {
+    assert.equal(resolveCascadePolicy({ amplification_breaker: "off" }).policy.amplificationBreaker, false);
+    assert.equal(resolveCascadePolicy({ amplification_breaker: false }).policy.amplificationBreaker, false);
+    const r = resolveCascadePolicy({ amplification_breaker: "maybe" });
+    assert.equal(r.policy.amplificationBreaker, true);
+    assert.match(r.warnings[0], /amplification_breaker/);
+  });
+
+  it("trips only when the latest convergence_window ratios are all >= 1.0", () => {
+    const { policy } = resolveCascadePolicy();
+    assert.equal(evaluateAmplificationBreaker([1.5, 1.4], policy).tripped, false);
+    assert.equal(evaluateAmplificationBreaker([1.5, 1.4, 1.35], policy).tripped, true);
+    assert.equal(evaluateAmplificationBreaker([0.5, 1.4, 1.35], policy).tripped, false);
+    assert.equal(evaluateAmplificationBreaker([1.5, 1.4, 1.35, 0.9], policy).tripped, false);
+  });
+
+  it("never trips when opted out", () => {
+    const { policy } = resolveCascadePolicy({ amplification_breaker: "off" });
+    assert.equal(evaluateAmplificationBreaker([2, 2, 2], policy).tripped, false);
+  });
+
+  it("pauses P3 admission but never P1/P2, and ignores same-lineage max_amplification", () => {
+    const { policy } = resolveCascadePolicy({ policy: "all" });
+    const base = { generation: 1, title: "x", sameFileAsBatch: false, batchFullyGated: false, projectedTokenSpend: 0, amplificationBreakerTripped: true };
+    assert.equal(evaluateCascadeFinding({ ...base, priority: "P3" }, policy).admit, false);
+    assert.match(evaluateCascadeFinding({ ...base, priority: "P3" }, policy).reason, /amplification breaker/);
+    assert.equal(evaluateCascadeFinding({ ...base, priority: "P2" }, policy).admit, true);
+    assert.equal(evaluateCascadeFinding({ ...base, priority: "P1" }, policy).admit, true);
+    assert.equal(evaluateCascadeFinding({ ...base, priority: "P3", amplificationBreakerTripped: false }, policy).admit, true);
+  });
+
+  it("existing numeric max_amplification configs keep working alongside the breaker", () => {
+    const { policy } = resolveCascadePolicy({ max_amplification: 1.5 });
+    assert.equal(policy.maxAmplification, 1.5);
+    assert.equal(policy.amplificationBreaker, true);
   });
 });
 

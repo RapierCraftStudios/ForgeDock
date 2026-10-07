@@ -596,7 +596,7 @@ fi
 
 TOKEN_ESTIMATE_PER_FINDING=$(yq '.pipeline.token_estimate_per_finding // 150000' forge.yaml 2>/dev/null || echo 150000)
 
-# Amplification is observational by default. The optional ceiling is evaluated
+# Amplification is observational by default for the same-lineage ceiling (the breaker below is not). The optional ceiling is evaluated
 # only against same-lineage refinements in Step 4C, never against new surface.
 CASCADE_MAX_AMPLIFICATION=$(yq '.orchestration.cascade.max_amplification // "off"' forge.yaml 2>/dev/null || echo "off")
 if [ "$CASCADE_MAX_AMPLIFICATION" != "off" ]; then
@@ -611,7 +611,20 @@ if ! echo "$CONVERGENCE_WINDOW" | grep -qE '^[1-9][0-9]*$'; then
   echo "WARNING: forge.yaml → orchestration.cascade.convergence_window must be a positive integer — falling back to 3"
   CONVERGENCE_WINDOW=3
 fi
-echo "Cascade amplification: max_amplification=${CASCADE_MAX_AMPLIFICATION} convergence_window=${CONVERGENCE_WINDOW} (off preserves current admission behavior)"
+# On-by-default amplification circuit breaker (forge#3060). Unlike max_amplification (opt-in,
+# same-lineage refinements only), this counts ALL cascade findings and pauses P3-and-below
+# admission when the ratio stays >= 1.0 for CONVERGENCE_WINDOW merged units. P1/P2 are never
+# affected. It is independent of orchestration.cascade.policy, so `policy: all` and the
+# --max-generation/--token-budget unlimited CLI overrides do NOT disable it. Opt out only
+# with an explicit `orchestration.cascade.amplification_breaker: off`.
+AMPLIFICATION_BREAKER=$(yq '.orchestration.cascade.amplification_breaker // "on"' forge.yaml 2>/dev/null || echo "on")
+case "$(echo "$AMPLIFICATION_BREAKER" | tr '[:upper:]' '[:lower:]')" in
+  on|true) AMPLIFICATION_BREAKER="on" ;;
+  off|false) AMPLIFICATION_BREAKER="off" ;;
+  *) echo "WARNING: forge.yaml → orchestration.cascade.amplification_breaker must be on or off (\"${AMPLIFICATION_BREAKER}\") — keeping the breaker on"; AMPLIFICATION_BREAKER="on" ;;
+esac
+AMPLIFICATION_BREAKER_TRIPPED=false
+echo "Cascade amplification: max_amplification=${CASCADE_MAX_AMPLIFICATION} convergence_window=${CONVERGENCE_WINDOW} amplification_breaker=${AMPLIFICATION_BREAKER} (breaker is on by default; max_amplification off preserves same-lineage behavior)"
 
 # Independent boolean levers — each accepts an explicit granular override on
 # top of the resolved preset (preset supplies the default, not a hard value).
@@ -2194,6 +2207,12 @@ For each finding, extract its source PR from `**Source**: PR #N` and increment `
 
 When `CASCADE_MAX_AMPLIFICATION` is not `off`, and the current ratio is greater than that ceiling, defer only newly discovered entries in `REFINEMENT_FINDINGS` with reason `amplification bound exceeded (same-lineage refinement)`. Add them to `DEFERRED_FINDINGS` and `DEFERRED_REASONS` so Step 4F re-evaluates them after the batch drains. Do not apply this bound to new-surface findings, P1/P2 findings, or any finding when the option is `off`.
 
+**Amplification breaker (on by default — forge#3060):** `max_amplification` above only ever sees same-lineage refinements, but most cascade growth is *new-surface* P3 hardening notes on code the batch just wrote. The breaker therefore counts **all** cascade findings: while `AMPLIFICATION_BREAKER_TRIPPED=true` (the latest `CONVERGENCE_WINDOW` ratios are all `>= 1.0`; see the block below), every P3-and-below finding is deferred under rule 6 (below) regardless of lineage. Deferred P3s are not discarded — they stay eligible for the P3 batch sweep (`planP3BatchGroups()`, with `batchExclusionReason()` unchanged: security/billing/domain findings stay unbatched and individually triaged) and for Step 4F's post-drain re-evaluation. P1/P2 findings are admitted exactly as before. The breaker releases when the newest ratio drops below 1.0. It is independent of `orchestration.cascade.policy`; only an explicit `amplification_breaker: off` disables it.
+
+**Override guardrail (MANDATORY — forge#3060):** An operator directive that lifts the generation cap or token budget (`policy: all`, `--max-generation unlimited`, `--token-budget unlimited`, or a free-text request like "pick up any new issues") widens what is admitted at Phase 1/rule 1/rule 5; it MUST NOT leave P3 cascade unbounded. When such an override is active: (a) keep `AMPLIFICATION_BREAKER=on` unless the operator explicitly set `amplification_breaker: off`; (b) P1/P2 stay unlimited; (c) P3-and-below findings are never dispatched individually — they route through `planP3BatchGroups()` into bounded batches (`batch_max_generation` stays finite); (d) state the replacement bound in the Step 4B/4C status output. An orchestrator MUST NOT satisfy an override by simply deleting a bound without a replacement.
+
+**Status updates (MANDATORY):** every Step 4B/4C status update must include `amplification={FINDINGS_SPAWNED}/{MERGED_UNITS}={AMPLIFICATION_RATIO} breaker={AMPLIFICATION_BREAKER}/{tripped|clear} p3_queued={#DEFERRED_FINDINGS[@]}` so the operator sees divergence before the pipeline does.
+
 ```bash
 # Run once for each completed issue before collecting its findings. Only merged
 # units advance the denominator; invalid/skipped units do not imply delivered work.
@@ -2206,6 +2225,14 @@ if gh issue view "$NUM" -R {GH_REPO} --json labels \
     RECENT_RATIOS=("${AMPLIFICATION_RATIO_HISTORY[@]: -$CONVERGENCE_WINDOW}")
     if printf '%s\n' "${RECENT_RATIOS[@]}" | awk '$1 < 1 { exit 1 }'; then
       echo "CONVERGENCE WARNING: amplification has remained >= 1.0 for ${CONVERGENCE_WINDOW} merged units (${AMPLIFICATION_RATIO} current). This can be productive review refinement, but the batch is not shrinking."
+      if [ "$AMPLIFICATION_BREAKER" = "on" ] && [ "$AMPLIFICATION_BREAKER_TRIPPED" = "false" ]; then
+        AMPLIFICATION_BREAKER_TRIPPED=true
+        # One operator report per trip: ratio and queue size, no per-finding spam (forge#3060).
+        echo "AMPLIFICATION BREAKER TRIPPED: ratio ${AMPLIFICATION_RATIO} (${FINDINGS_SPAWNED} findings / ${MERGED_UNITS} merged units) stayed >= 1.0 for ${CONVERGENCE_WINDOW} units. P3 cascade admission is paused; ${#DEFERRED_FINDINGS[@]} finding(s) deferred so far. P1/P2 are still admitted. Deferred P3s are routed to the P3 batch sweep (planP3BatchGroups) / Step 4F. Operator decision: batch them or defer. Opt out: orchestration.cascade.amplification_breaker: off"
+      fi
+    else
+      # Newest observation fell below 1.0 — the cascade is converging again; release the breaker.
+      AMPLIFICATION_BREAKER_TRIPPED=false
     fi
   fi
 fi
@@ -2224,7 +2251,9 @@ For each spawned finding, determine whether it should be **executed** or **defer
 4. **P3 + same-file overlap**: Finding is labeled `P3` AND the file it targets overlaps with ANY file already in the current batch (active or queued in the DAG). Rationale: same-file P3 findings add predecessor edges that serialize agents — one finding per original issue increases wall-clock time with no proportional value. **Configurable** via `orchestration.cascade.p3_same_file_defer` (default `true`; `false` under `policy: all` — forge#2234).
 5. **Per-batch token budget** (P3 and below only, applied AFTER surface-area batching below — see "Per-batch token budget gate") <!-- Added: forge#1858 -->: Once `BATCH_TOKEN_SPEND` would exceed `TOKEN_BUDGET`, additional P3-and-below units (an unclubbed finding, or an already-clubbed batch issue) defer rather than dispatch. This is NOT part of the per-finding rule 0-4 chain immediately below — it is a quantity gate applied to the POST-clubbing `QUEUED_FINDINGS` list, so a same-run surface-area batch issue (surface-area batching below) is charged once for the whole cluster, not once per member. P1/P2 are NEVER gated by it (they are excluded by rule 2 before reaching this gate, same as they are excluded from rules 3-4). **Configurable** via `orchestration.cascade.token_budget` (default `900000`, deprecated alias `pipeline.token_budget_per_batch`; `unlimited` under `policy: all` — forge#2234). This is a distinct, independent lever from rule 1's generation cap — "admit gen-2, stop at gen-3" (`max_generation: 3`) and "admit cascade until N tokens" (`token_budget: N`) can each be set without the other.
 
-**Defer** (do NOT add to the DAG) if rules 0, 1, 3, 4, or 5 match.
+6. **Amplification breaker** (P3 and below only; forge#3060): `AMPLIFICATION_BREAKER=on` AND `AMPLIFICATION_BREAKER_TRIPPED=true`. Defer with reason `amplification breaker tripped`; the finding stays a candidate for the P3 batch sweep / Step 4F. Checked after rule 2 so P1/P2 are never gated by it. **Configurable** via `orchestration.cascade.amplification_breaker` (default `on`, not changed by any `cascade.policy` preset).
+
+**Defer** (do NOT add to the DAG) if rules 0, 1, 3, 4, 5, or 6 match.
 
 **Execute** (add to the DAG) if:
 - Rule 2 matches (P1 or P2) — AND rule 0 did not already match (rule 0 is checked first and overrides rule 2)
@@ -2513,6 +2542,14 @@ Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${R
      awk "BEGIN { exit !($AMPLIFICATION_RATIO > $CASCADE_MAX_AMPLIFICATION) }"; then
     DEFER=true
     DEFER_REASON="amplification bound exceeded (same-lineage refinement; ${AMPLIFICATION_RATIO} > ${CASCADE_MAX_AMPLIFICATION})"
+    AMPLIFICATION_DEFERRED+=("$FINDING_NUM")
+  fi
+
+  # Rule 6 (forge#3060): on-by-default breaker over ALL cascade findings. P1/P2 never reach it.
+  if [ "$DEFER" = "false" ] && [ "$PRIORITY" != "P1" ] && [ "$PRIORITY" != "P2" ] && \
+     [ "$AMPLIFICATION_BREAKER" = "on" ] && [ "$AMPLIFICATION_BREAKER_TRIPPED" = "true" ]; then
+    DEFER=true
+    DEFER_REASON="amplification breaker tripped (${AMPLIFICATION_RATIO} >= 1.0 for ${CONVERGENCE_WINDOW} merged units) — routed to P3 batch sweep"
     AMPLIFICATION_DEFERRED+=("$FINDING_NUM")
   fi
 
@@ -3030,6 +3067,7 @@ Re-run the Step 4C heuristics against the now-empty DAG. Since all original batc
 ```bash
 SWEEP_EXECUTE=()
 SWEEP_STILL_DEFERRED=()
+SWEEP_BREAKER_HELD=()
 
 for FINDING_NUM in "${SWEEP_CANDIDATES[@]}"; do
   FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body,state \
@@ -3050,6 +3088,17 @@ for FINDING_NUM in "${SWEEP_CANDIDATES[@]}"; do
     ([.labels[] | select(test("^P[0-9]+$"))] | .[0]) //
     "" | ltrimstr("priority:")')
   TITLE=$(echo "$FINDING_DATA" | jq -r '.title')
+
+  # Amplification-breaker deferrals (forge#3060) are NEVER individually dispatched by the sweep:
+  # draining the DAG does not make a P3 cascade bounded. Leave them open for the bounded P3
+  # batch sweep (planP3BatchGroups) and report them to the operator instead.
+  case "${DEFERRED_REASONS[$FINDING_NUM]:-}" in
+    *"amplification breaker"*)
+      SWEEP_STILL_DEFERRED+=($FINDING_NUM)
+      SWEEP_BREAKER_HELD+=($FINDING_NUM)
+      echo "Sweep: #${FINDING_NUM} held for P3 batching (amplification breaker) — not dispatched individually"
+      continue ;;
+  esac
 
   # Re-apply heuristics against the drained DAG (no active batch files)
   # Comment/typo heuristic still applies — these are cosmetic regardless of DAG state
