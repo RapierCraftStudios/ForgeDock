@@ -1,4 +1,5 @@
 ---
+user-invocable: false
 description: Validation agent — quality gate loop, format/verify, proxy check, deploy check
 argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE} --branch {BRANCH} --base {PR_BASE} --files \"<changed files>\""
 context: fork

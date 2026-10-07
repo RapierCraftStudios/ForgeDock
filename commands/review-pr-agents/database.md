@@ -1,4 +1,5 @@
 ---
+user-invocable: false
 install: core
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
