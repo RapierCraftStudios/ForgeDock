@@ -49,6 +49,9 @@
 # not have posted the marker, so QUALITY_GATE is waived for it. The time is the comment's
 # `updated_at`, not `created_at`: BUILDER:COMPLETE is appended to the existing BUILDER comment later
 # (#3149). A missing/undated BUILDER:COMPLETE never earns the grace (fail closed). Set FORGE_TRAIL_QG_SINCE="" to disable the grace.
+# TRUSTED ENVIRONMENT ONLY (#3139): any valid past FORGE_TRAIL_QG_SINCE is honoured, and an earlier
+# value waives QUALITY_GATE for every build completed before it. Never set it from untrusted input
+# (PR content, issue text, contributor-controlled CI variables); only the operator's runner environment.
 #
 # Comment trust: only markers posted by a trusted author count; markers from any
 # other commenter are ignored (they cannot satisfy the gate or force a band).
@@ -116,8 +119,9 @@ RAW=$(gh api "repos/${REPO}/issues/${ISSUE}/comments" --paginate 2>/dev/null) ||
 
 # `gh api --paginate` emits one JSON array per page; merge them into a single array so every
 # later computation (notably the latest BUILDER:COMPLETE time) sees ALL pages (#3121).
-# Every page must itself be a JSON array (an error object or scalar page fails closed, #3130).
-RAW=$(printf '%s' "$RAW" | jq -s 'if all(.[]; type == "array") then (add // []) else error("non-array page") end' 2>/dev/null) || {
+# Every page must itself be a JSON array of comment OBJECTS (an error object, a scalar page, or a
+# page holding non-object elements such as [1,"x"] fails closed, #3130/#3139).
+RAW=$(printf '%s' "$RAW" | jq -s 'if all(.[]; type == "array" and all(.[]; type == "object")) then (add // []) else error("non-array page") end' 2>/dev/null) || {
   echo "PHASE_TRAIL: ERROR"
   echo "could not parse comments for ${REPO}#${ISSUE}" >&2
   exit 2

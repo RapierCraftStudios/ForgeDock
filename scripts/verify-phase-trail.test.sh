@@ -159,11 +159,33 @@ CLK="$TMP_FX/clock"; mkdir -p "$CLK"
 REAL_DATE=$(command -v date)
 cat > "$CLK/date" <<MOCKDATE
 #!/usr/bin/env bash
-if [ "\$1" = "-u" ] && [ "\$2" = "+%Y-%m-%dT%H:%M:%SZ" ]; then echo 2020-01-01T00:00:00Z; else exec "$REAL_DATE" "\$@"; fi
+# Intercept the "now" probe by scanning every arg (not one exact arg form): a bare +FORMAT call with no -d/-j parse flags.
+mode=now; fmt=""
+for a in "\$@"; do case "\$a" in -d|-j|-f) mode=parse ;; +%Y-%m-%dT%H:%M:%SZ) fmt=1 ;; esac; done
+if [ "\$mode" = now ] && [ -n "\$fmt" ]; then echo 2020-01-01T00:00:00Z; else exec "$REAL_DATE" "\$@"; fi
 MOCKDATE
 chmod +x "$CLK/date"
 OUT=$(PATH="$CLK:$PATH" MOCK_GH_JSON="$(lg lgc 2026-10-01T00:00:00Z)" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "clock behind default cutoff fails closed (exit 2)" || bad "clock behind cutoff (rc=$RC out=$OUT)"
+
+# BSD/macOS date fallback (#3139): GNU `date -d` unavailable, `date -j -f` available -> valid cutoff still honoured;
+# neither parser available -> fails closed (exit 2).
+BSD="$TMP_FX/bsd"; mkdir -p "$BSD"
+cat > "$BSD/date" <<BSDDATE
+#!/usr/bin/env bash
+for a in "\$@"; do [ "\$a" = "-d" ] && exit 1; done
+if [ "\$2" = "-j" ] && [ "\$3" = "-f" ]; then
+  [ -n "\${BSD_NO_PARSE:-}" ] && exit 1
+  # Emulate BSD parse-and-reformat without GNU/BSD-specific flags: the value is already in the output format.
+  echo "\${5}"; exit 0
+fi
+exec "$REAL_DATE" "\$@"
+BSDDATE
+chmod +x "$BSD/date"
+OUT=$(PATH="$BSD:$PATH" FORGE_TRAIL_QG_SINCE=2026-10-05T00:00:00Z MOCK_GH_JSON="$(lg lgbsd 2026-10-01T00:00:00Z)" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+[ $RC -eq 0 ] && ok "BSD date -j -f fallback validates a real cutoff" || bad "BSD fallback (rc=$RC out=$OUT)"
+OUT=$(PATH="$BSD:$PATH" BSD_NO_PARSE=1 FORGE_TRAIL_QG_SINCE=2026-10-05T00:00:00Z MOCK_GH_JSON="$(lg lgbsd2 2026-10-01T00:00:00Z)" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+[ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "no usable date parser fails closed (exit 2)" || bad "no date parser (rc=$RC out=$OUT)"
 
 # Boundary: cutoff exactly equal to BUILDER:COMPLETE time is NOT waived (strictly-before only)
 OUT=$(FORGE_TRAIL_QG_SINCE=2026-10-01T00:00:00Z MOCK_GH_JSON="$(lg lgb 2026-10-01T00:00:00Z)" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
@@ -189,6 +211,9 @@ OUT=$(FORGE_TRAIL_QG_SINCE=2026-10-05T00:00:00Z MOCK_GH_JSON="$TMP_FX/p3.json" b
 { pg "$BASE"; echo '{"message":"Server Error"}'; } > "$TMP_FX/mixed.json"
 OUT=$(MOCK_GH_JSON="$TMP_FX/mixed.json" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "mixed array/object pages fail closed (exit 2)" || bad "mixed pages (rc=$RC out=$OUT)"
+{ pg "$BASE"; echo '[1,"x"]'; } > "$TMP_FX/nonobj.json"
+OUT=$(MOCK_GH_JSON="$TMP_FX/nonobj.json" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+[ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "page with non-object elements fails closed (exit 2)" || bad "non-object elements (rc=$RC out=$OUT)"
 { pg "$BASE"; echo '[{"body":'; } > "$TMP_FX/malformed.json"
 OUT=$(MOCK_GH_JSON="$TMP_FX/malformed.json" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "malformed page fails closed (exit 2)" || bad "malformed page (rc=$RC out=$OUT)"
@@ -239,7 +264,7 @@ OUT=$(MOCK_GH_JSON="$(ht h9 "$QG_T1")" bash "$VERIFY" 3061 -R o/r --head-tree 2>
 
 # -h prints the full header
 HOUT=$(bash "$VERIFY" -h)
-[ "$(printf '%s\n' "$HOUT" | wc -l)" -ge 45 ] && echo "$HOUT" | grep -q 'COLLABORATOR includes read-level' && echo "$HOUT" | grep -q '^# Usage:' && ok "-h prints the full multi-line header" || bad "-h truncated"
+echo "$HOUT" | grep -q 'TRUSTED ENVIRONMENT ONLY' && echo "$HOUT" | grep -q 'COLLABORATOR includes read-level' && echo "$HOUT" | grep -q '^# Usage:' && ok "-h prints the full multi-line header" || bad "-h truncated"
 
 # Untrusted-author FORGE markers are ignored AND diagnosed with a NOTE (#3123)
 UT="$TMP_FX/untrusted.json"
