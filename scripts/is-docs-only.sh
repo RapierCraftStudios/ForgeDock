@@ -4,16 +4,17 @@
 # Reads a newline-separated changed-file list on stdin. Exit 0 iff the list is non-empty and EVERY
 # path is a Markdown file that is not executable pipeline/agent instruction content:
 #   - only *.md counts (docs/** non-markdown assets do NOT)
-#   - excluded at ANY depth: commands/, .claude/, .agents/, .codex/, .github/ directories
-#   - excluded at ANY depth by basename: AGENTS.md, CLAUDE.md, SKILL.md
+#   - matching is case-insensitive and ignores a leading ./
+#   - excluded at ANY depth: commands/, .claude/, .claude-plugin/, .agents/, .codex/, .cursor/, .github/, hooks/, agents/ directories
+#   - excluded at ANY depth by basename prefix: agents*.md, claude*.md, skill*.md, gemini*.md (AGENTS.md, CLAUDE.md, CLAUDE.local.md, SKILL.md, GEMINI.md, ...)
 # Exit 1 otherwise (including empty input: fail closed).
 # SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 # SPDX-License-Identifier: AGPL-3.0-or-later
 awk '
   NF==0 {next}
-  { n++; p=$0 }
+  { n++; p=tolower($0); sub(/^\.\//, "", p) }
   !(p ~ /\.md$/) {bad=1; next}
-  p ~ /(^|\/)(commands|\.claude|\.agents|\.codex|\.github)\// {bad=1; next}
-  p ~ /(^|\/)(AGENTS|CLAUDE|SKILL)\.md$/ {bad=1; next}
+  p ~ /(^|\/)(commands|\.claude|\.claude-plugin|\.agents|\.codex|\.cursor|\.github|hooks|agents)\// {bad=1; next}
+  p ~ /(^|\/)(agents|claude|skill|gemini)[^\/]*\.md$/ {bad=1; next}
   END{exit (bad || n==0)}
 '

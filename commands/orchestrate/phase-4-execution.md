@@ -1682,7 +1682,7 @@ done
        TRAIL_ALL_DOCS=1
        for TRAIL_PR in $TRAIL_PRS; do
          TRAIL_FILES=$(gh pr diff "$TRAIL_PR" -R {GH_REPO} --name-only 2>/dev/null)
-         if [ -z "$TRAIL_FILES" ] || ! echo "$TRAIL_FILES" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"; then TRAIL_ALL_DOCS=0; break; fi
+         if [ -z "$TRAIL_FILES" ] || [ ! -f "$FORGE_ROOT/scripts/is-docs-only.sh" ] || ! echo "$TRAIL_FILES" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"; then TRAIL_ALL_DOCS=0; break; fi
        done
        [ "$TRAIL_ALL_DOCS" = "1" ] && TRAIL_DOCS_FLAG="--docs-only"
      fi

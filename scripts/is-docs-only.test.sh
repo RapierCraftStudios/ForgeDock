@@ -26,5 +26,20 @@ t "docs non-md" 1 docs/diagram.png
 t "docs yml" 1 docs/a.md docs/site/mkdocs.yml
 t "code file" 1 docs/a.md bin/x.mjs
 t "empty" 1
+t "blank only" 1 "" ""
+t "case agents.md" 1 agents.md
+t "case Skill.md" 1 Skill.md
+t "case Commands dir" 1 Commands/x.md
+t "case .GitHub" 1 .GitHub/x.md
+t "CLAUDE.local.md" 1 CLAUDE.local.md
+t "GEMINI.md" 1 GEMINI.md
+t ".cursor rules" 1 .cursor/rules/x.md
+t "hooks md" 1 hooks/README.md
+t ".claude-plugin" 1 .claude-plugin/x.md
+t "upper .MD (case-insensitive markdown)" 0 docs/a.MD
+t "leading ./ docs" 0 ./docs/a.md
+t "leading ./ excluded" 1 ./commands/x.md
+t "docs traversal" 1 docs/../commands/x.md
+t "valid + blank lines" 0 docs/a.md "" README.md
 echo "is-docs-only: $PASS passed, $FAILN failed"
 [ "$FAILN" -eq 0 ]

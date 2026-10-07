@@ -73,6 +73,8 @@ jobs:
           FORGE_ROOT_TEST_SHELLS="bash zsh" /bin/bash scripts/forge-root.test.sh
       - name: Run verify-phase-trail.test.sh
         run: bash scripts/verify-phase-trail.test.sh
+      - name: Run is-docs-only.test.sh
+        run: bash scripts/is-docs-only.test.sh
 
   # ---------------------------------------------------------------------------
   # Windows Git Bash fixture smoke for the phase-trail / dispatch-lint scripts
@@ -94,6 +96,8 @@ jobs:
         run: bash scripts/lint-dispatch-prompt.test.sh
       - name: Run verify-phase-trail.test.sh
         run: bash scripts/verify-phase-trail.test.sh
+      - name: Run is-docs-only.test.sh
+        run: bash scripts/is-docs-only.test.sh
 
   # ---------------------------------------------------------------------------
   # Job 1: shellcheck — static analysis for .sh files on Linux
