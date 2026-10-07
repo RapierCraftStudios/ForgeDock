@@ -2191,7 +2191,7 @@ fi
 
 ```bash
 if [ -z "${MERGE_ISSUE:-}" ]; then
-  echo "PHASE TRAIL: --auto-merge without --issue — cannot verify the phase trail; refusing to merge (fail closed)" >&2
+  echo "PHASE TRAIL: auto-merge requested without --issue — cannot verify the phase trail; refusing to merge (fail closed)" >&2
   exit 1
 else
   # Same resolution as work-on/review.md Phase R1.5: the verifier ships with ForgeDock, not the consumer repo.
