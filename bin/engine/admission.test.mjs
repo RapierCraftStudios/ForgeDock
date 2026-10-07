@@ -266,7 +266,10 @@ describe("evaluateAmplificationBreaker (forge#3060)", () => {
     assert.equal(evaluateCascadeFinding({ ...base, priority: "p3" }, policy).admit, false);
     assert.equal(evaluateCascadeFinding({ ...base, priority: " P3 " }, policy).admit, false);
     assert.equal(evaluateCascadeFinding({ ...base, priority: "P2" }, policy).admit, true);
+    assert.equal(evaluateCascadeFinding({ ...base, priority: "P 3" }, policy).admit, false);
     assert.equal(evaluateCascadeFinding({ ...base, priority: undefined }, policy).admit, true);
+    assert.equal(evaluateCascadeFinding({ ...base, priority: null }, policy).admit, true);
+    assert.equal(evaluateCascadeFinding({ ...base, priority: "P4" }, policy).admit, true);
   });
 
   it("rule 6 never gates untriaged (empty/unknown) priorities", () => {
