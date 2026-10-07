@@ -305,7 +305,7 @@ export function resolveCascadePolicy(config = {}, legacyTokenBudgetPerBatch) {
     typeof config.p3_same_file_defer === "boolean" ? config.p3_same_file_defer : preset.p3SameFileDefer;
   const maxAmplification = parseOptionalPositiveNumber(config.max_amplification);
   if (maxAmplification.warning) warnings.push(`orchestration.cascade.max_amplification ${maxAmplification.warning}`);
-  const p3Breaker = !(config.p3_breaker === false || config.p3_breaker === "off");
+  const p3Breaker = !(config.p3_breaker === false || config.p3_breaker === "false" || config.p3_breaker === "off");
   const convergenceWindow = parseIntOrUnlimited(config.convergence_window, 3);
   if (convergenceWindow.warning || convergenceWindow.value === UNLIMITED) {
     warnings.push(

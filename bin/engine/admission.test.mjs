@@ -457,6 +457,12 @@ describe("evaluateP3Breaker (forge#3060)", () => {
     assert.equal(evaluateP3Breaker([1.2, 0.9, 1.35], policy).tripped, false);
   });
 
+  it("accepts string opt-outs", () => {
+    for (const v of ["off", "false"]) {
+      assert.equal(resolveCascadePolicy({ p3_breaker: v }).policy.p3Breaker, false);
+    }
+  });
+
   it("can be opted out", () => {
     const { policy } = resolveCascadePolicy({ p3_breaker: false });
     assert.equal(evaluateP3Breaker([2, 2, 2], policy).tripped, false);
