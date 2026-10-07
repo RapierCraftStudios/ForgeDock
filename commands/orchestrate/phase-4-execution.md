@@ -1348,7 +1348,7 @@ For an OpenCode completion, retain `OPENCODE_DISPATCH_MAP[{NUMBER}]` until the t
 hold_merged_trail() {
   local N="$1" TXT="$2" TRY HELD=1
   for TRY in 1 2 3; do
-    gh issue edit "$N" -R {GH_REPO} --add-label "needs-human" >/dev/null 2>&1 || true
+    gh issue edit "$N" -R {GH_REPO} --add-label "needs-human" >/dev/null 2>&1 || true # <!-- allowlist:check-command-side-effects -->
     if gh issue view "$N" -R {GH_REPO} --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null \
          | grep -qE '(^|,)needs-human(,|$)'; then HELD=0; break; fi
   done
@@ -1433,7 +1433,7 @@ classify_predecessor_state() {
       echo "DONE"
     else
       # Unverified trail with no hold on record: establish it now so a human can release it.
-      hold_merged_trail "$PRED" "PHASE_TRAIL: FAIL (re-verified at wake classification)" >/dev/null 2>&1 || true
+      [ "${DRY_RUN:-false}" = "true" ] || hold_merged_trail "$PRED" "PHASE_TRAIL: FAIL (re-verified at wake classification)" >/dev/null 2>&1 || true
       echo "GATED"
     fi
   elif echo "$PRED_LABELS" | grep -qxE "needs-human|workflow:awaiting-merge"; then
