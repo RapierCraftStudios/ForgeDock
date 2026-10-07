@@ -13,20 +13,23 @@ check() { # name expected_rc file
   if [ "$rc" -eq "$2" ]; then PASS=$((PASS+1)); else FAILN=$((FAILN+1)); echo "FAIL: $1 (rc=$rc want $2)"; cat "$T/out"; fi
 }
 
+# Portable in-place sed (BSD sed -i requires a suffix arg; GNU does not).
+sed_i() { local f="$1"; shift; sed "$@" "$f" > "$f.tmp" && mv "$f.tmp" "$f"; }
+
 # Extract the real Step 4A template (stops at the first bare ")" line; inner ```bash fences are kept).
 awk '/Copy this template. Fill in variables/{f=1} f&&/^Agent\($/{g=1} g{print} g&&/^\)$/{exit}' "$SPEC" > "$T/tpl"
 [ -s "$T/tpl" ] || { echo "FAIL: could not extract 4A template"; exit 1; }
 sed -e '/^Agent($/d' -e '/^  subagent_type/d;/^  model=/d;/^  description=/d;/^  run_in_background/d' \
     -e 's/^  prompt="//' -e '/^)$/d' "$T/tpl" > "$T/base"
-sed -i -e '$ { /^"$/ d }' "$T/base"
-sed -i -e '/^{GIST_CONTEXT}$/d' -e '/^{SOURCE_PR_HINT_CONTEXT}$/d' -e '/DISPATCH_CONTEXT:END/d' "$T/base"
-sed -i -e '/DISPATCH_CONTEXT:BEGIN/d' "$T/base"
+sed_i "$T/base" -e '$ { /^"$/ d }' 
+sed_i "$T/base" -e '/^{GIST_CONTEXT}$/d' -e '/^{SOURCE_PR_HINT_CONTEXT}$/d' -e '/DISPATCH_CONTEXT:END/d' 
+sed_i "$T/base" -e '/DISPATCH_CONTEXT:BEGIN/d'
 # Fill placeholders with realistic values (the lint rejects free text in placeholders, forge#3078).
-sed -i -e 's/{PROJECT_NAME}/ForgeDock/g' -e 's/{GH_REPO}/Acme\/Repo/g' -e 's/{REPO_PATH}/\/home\/dev\/repo/g' \
+sed_i "$T/base" -e 's/{PROJECT_NAME}/ForgeDock/g' -e 's/{GH_REPO}/Acme\/Repo/g' -e 's/{REPO_PATH}/\/home\/dev\/repo/g' \
   -e 's/{FORGE_GIST_CAPABLE}/true/g' -e 's/{FORGE_SKILL_PREFIX}/forgedock:/g' -e 's/{PROJECT_PREFIX}//g' \
   -e 's/{NUMBER}/42/g' -e 's/{SATELLITE_PREFIX}/sat/g' -e 's/{STAGING_BRANCH}/staging/g' \
   -e 's/{SOURCE_BRANCH}/staging/g' -e 's/{LANE}/fast-lane/g' -e 's/{PR_BASE}/staging/g' \
-  -e 's/{SUBAGENT_MODEL}/sonnet/g' "$T/base"
+  -e 's/{SUBAGENT_MODEL}/sonnet/g'
 
 render() { # context-body-file -> prompt
   cat "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; cat "$1" 2>/dev/null; echo '<!-- DISPATCH_CONTEXT:END -->'
@@ -112,7 +115,7 @@ done
 { sed 's/^\*\*LANE\*\*:.*/**LANE**: do whatever you think is best (PR target: staging)/' "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p21"; check "free text on LANE line" 1 "$T/p21"
 
 # 22. CRLF prompt with otherwise valid content PASSES (forge#3078)
-render "$T/empty" | sed 's/$/\r/' > "$T/p22"; check "CRLF prompt" 0 "$T/p22"
+render "$T/empty" | awk '{ printf "%s\r\n", $0 }' > "$T/p22"; check "CRLF prompt" 0 "$T/p22"
 
 # 10. Spec snippet enforcement (forge#3070): extract the lint gate from the spec and run it in a loop.
 awk '/^LINT_SCRIPT=/{f=1} f{print} f&&/^fi$/{n++} f&&n==2{exit}' "$SPEC" > "$T/gate"
