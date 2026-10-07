@@ -173,6 +173,13 @@ for NUM in $ORPHAN_LIST; do
     DIAG_REASON[$NUM]="Already in terminal state: $ISSUE_LABELS"
     continue
   fi
+  # forge#3148: an escalated orphan is waiting on a human — re-running a recovery action every sweep
+  # (e.g. re-invoking /review-pr against an unrepaired phase trail) only repeats the same refusal.
+  if echo ", $ISSUE_LABELS," | grep -q ", needs-human,"; then
+    DIAG_ACTION[$NUM]="skip"
+    DIAG_REASON[$NUM]="Escalated (needs-human) — waiting on a human"
+    continue
+  fi
 
   # Check for merged PR referencing this issue
   MERGED_PR=$(gh pr list ${GH_FLAG} \
@@ -377,12 +384,46 @@ for NUM in $ORPHAN_LIST; do
       if [ "$DRY_RUN" = "true" ]; then
         echo "  [DRY-RUN] Would: Skill(skill='{FORGE_SKILL_PREFIX}review-pr', args='$PR_NUM --auto-merge --issue $NUM --gh-flag $GH_FLAG')"
       else
+        # forge#3148: count trail refusals that predate this sweep, so a refusal from an earlier sweep escalates
+        # instead of re-reviewing the same unrepaired trail every run.
+        PRIOR_TRAIL_FAILS=$(gh api "repos/${GH_REPO}/issues/${NUM}/comments" \
+          --jq '[.[] | select(.body | contains("FORGE:PHASE_TRAIL_FAILED"))] | length' 2>/dev/null || echo 0)
         Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="${PR_NUM} --auto-merge --issue ${NUM} --gh-flag ${GH_FLAG}")
-        # After review: update label
-        gh issue edit "$NUM" ${GH_FLAG} --add-label "workflow:in-review" \
-          --remove-label "workflow:building,workflow:awaiting-merge" 2>/dev/null || true
+        # REVIEW_STATUS = the `status:` field of the REVIEW_RESULT block the Skill call returned.
+        if [ "$REVIEW_STATUS" = "PHASE_TRAIL_FAILED" ]; then
+          # Phase 8 refused the merge: the issue's phase trail is incomplete (review-pr posted the
+          # MISSING lines as FORGE:PHASE_TRAIL_FAILED). Do NOT set workflow:in-review — that only re-queues
+          # the same refusal for the next sweep. Never hand-post the missing markers.
+          if [ "${PRIOR_TRAIL_FAILS:-0}" -gt 0 ]; then
+            gh issue edit "$NUM" ${GH_FLAG} --add-label "needs-human" 2>/dev/null || true
+            gh issue comment "$NUM" ${GH_FLAG} --body "<!-- FORGE:ORPHAN_RECOVERED -->
+## Orphan Recovery — Escalated
+
+**Action**: \`/review-pr\` refused to merge PR #${PR_NUM} again because the phase trail is incomplete, and an earlier refusal was not repaired.
+**Recovered by**: /recover-orphans
+
+See the latest FORGE:PHASE_TRAIL_FAILED comment for the missing phases. Re-run each one via its Skill (or \`/work-on ${NUM}\`), then remove \`needs-human\`." 2>/dev/null || true
+            RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} refused (phase trail) again — needs-human added |\n"
+          else
+            # First refusal: resume /work-on, whose resume preflight re-runs each missing phase via Skill(...)
+            # and then re-enters review (work-on.md Phase 0B, Phase 5D).
+            Skill(skill="{FORGE_SKILL_PREFIX}work-on", args="${NUM}")
+            RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} refused (phase trail) — resumed /work-on to re-run missing phases |\n"
+          fi
+        elif [ "$REVIEW_STATUS" = "BLOCKED" ] && echo "$REVIEW_BLOCKER" | grep -qE 'phase trail|auto-merge requires --issue'; then
+          # REVIEW_BLOCKER = the `blocker:` field of the same REVIEW_RESULT block. The gate could not run (verifier
+          # rc>=2 / unresolvable) or had no issue to verify (forge#3147). review-pr already added needs-human for the
+          # rc>=2 case; add it here too so the diagnosis skip above stops re-sweeping this orphan.
+          gh issue edit "$NUM" ${GH_FLAG} --add-label "needs-human" 2>/dev/null || true
+          RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} blocked by the merge gate — needs-human added |\n"
+        else
+          # After review: update label
+          gh issue edit "$NUM" ${GH_FLAG} --add-label "workflow:in-review" \
+            --remove-label "workflow:building,workflow:awaiting-merge" 2>/dev/null || true
+          RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} submitted for review |\n"
+        fi
       fi
-      RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} submitted for review |\n"
+      [ "$DRY_RUN" = "true" ] && RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} would be submitted for review |\n"
       ;;
 
     create-pr)

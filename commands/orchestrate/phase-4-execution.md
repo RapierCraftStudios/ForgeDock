@@ -1319,6 +1319,11 @@ classify_predecessor_state() {
 
   if echo "$PRED_LABELS" | grep -qx "workflow:invalid"; then
     echo "FAILED"
+  elif echo "$PRED_LABELS" | grep -qx "workflow:merged" && echo "$PRED_LABELS" | grep -qx "needs-human"; then
+    # forge#3148: merged with an incomplete phase trail (Step 4B item 0). The code is in the base
+    # branch, but /work-on cannot repair a merged issue, so a human must review it. Hold dependents
+    # (GATED) until a human clears needs-human; checked before DONE so the hold survives a wake.
+    echo "GATED"
   elif echo "$PRED_LABELS" | grep -qx "workflow:merged"; then
     echo "DONE"
   elif echo "$PRED_LABELS" | grep -qxE "needs-human|workflow:awaiting-merge"; then
@@ -1350,12 +1355,12 @@ classify_predecessor_state() {
 }
 ```
 
-- **DONE** — predecessor's code is in the base branch (`workflow:merged`), or the predecessor is closed with no pending code. Safe for dependents to dispatch.
-- **GATED** — predecessor is paused pending a human decision (`needs-human`) or pending only a human merge click (`workflow:awaiting-merge`). Its code is NOT yet in the base branch. Dependents are neither dispatched nor skipped — they move to the `blocked-on-human-merge` tracked state (item 6.5 below).
+- **DONE** — predecessor's code is in the base branch (`workflow:merged` without `needs-human`), or the predecessor is closed with no pending code. Safe for dependents to dispatch.
+- **GATED** — predecessor is paused pending a human decision (`needs-human`) or pending only a human merge click (`workflow:awaiting-merge`). Its code is NOT yet in the base branch — except for a `workflow:merged` issue that also carries `needs-human` (merged with an incomplete phase trail, Step 4B item 0), whose code is merged but whose trail needs human review. Dependents are neither dispatched nor skipped — they move to the `blocked-on-human-merge` tracked state (item 6.5 below).
 - **FAILED** — predecessor was closed as `workflow:invalid`, or the agent explicitly reported a build/test error. Dependents are marked "skipped — dependency failed" (item 6 below) — unchanged from prior behavior.
 - **IN_PROGRESS** — predecessor is still mid-pipeline (`investigating`/`ready-to-build`/`building`/`in-review`), or terminated `workflow:engine-error` (forge#2261 — an engine/tool failure, not a human-judgment block or a genuine content failure; treated as still-in-flight since stall-detection auto-resumes it). Dependent simply continues waiting; no special tracking needed.
 
-A GATED predecessor whose PR later merges reclassifies to DONE the next time `classify_predecessor_state` runs (its label flips to `workflow:merged`) — this is exactly what the merge-triggered wake check (item 6.6 below) relies on.
+A GATED predecessor whose PR later merges reclassifies to DONE the next time `classify_predecessor_state` runs (its label flips to `workflow:merged`; a merged predecessor gated on its phase trail reclassifies to DONE once a human removes `needs-human`) — this is exactly what the merge-triggered wake check (item 6.6 below) relies on.
 
 **File-overlap edge re-verification** <!-- Added: forge#1904 --> — `classify_predecessor_state()` answers "is the predecessor resolved enough to proceed," but it says nothing about whether a specific Layer 1/2/3 file-overlap edge (`EDGE_KIND`/`EDGE_FILES`, tagged in `phase-3-dependency.md` Step 3C/3D) was ever real. Both were built from a **pre-build guess** — the predecessor's `FORGE:INVESTIGATOR` "Affected Files" list, or a raw issue-body parse if no investigation existed yet. Once a predecessor reaches FAILED, GATED, **or DONE**, that guess must be checked against ground truth (the predecessor's actual PR diff, or the absence of any PR) before the edge is allowed to keep blocking a dependent or to inject a same-file brief. Without this, a predecessor that reaches `needs-human` or `workflow:invalid` having never touched the guessed shared file (or never opened a PR at all) leaves its dependents gated/skipped on a conflict that never existed — and on the happy path, an over-serialized chain is never reconciled at all and stays serialized for its entire life (forge#2848).
 
@@ -1694,9 +1699,34 @@ done
    ```
    Route on `TRAIL_RC` (forge#3147). Both non-zero cases fail closed: never `DONE`, never cascaded as a satisfied predecessor.
    - `TRAIL_RC -ge 2` (`PHASE_TRAIL: ERROR`: unreadable trail, unreadable labels, or 127 when the verifier is unresolvable) → classify as **BLOCKED (infrastructure)**, NOT a bypass. A re-dispatched `/work-on` would hit the same unreadable or unresolvable verifier in its resume preflight, so do NOT re-dispatch. Surface `PHASE TRAIL ERROR: #{NUMBER} — <TRAIL line>` in the operator status update, add `needs-human`, and continue with the rest of the batch.
-   - `TRAIL_RC=1` (`PHASE_TRAIL: FAIL`) → classify as **FAILED/bypass** (handling below).
+   - `TRAIL_RC=1` (`PHASE_TRAIL: FAIL`) → classify as a **bypass** (handling below).
 
-   On `PHASE_TRAIL: FAIL`, classify the issue as **FAILED/bypass**, never `DONE`. Also treat an agent final report that says phases ran inline, were skipped, or "ran without Skill calls" as a bypass regardless of labels. Surface it in the operator status update (`PHASE BYPASS: #{NUMBER} — missing: ...`), do not cascade it as a satisfied predecessor, and re-dispatch ONE fresh agent with the unmodified Step 4A template (lint-checked) so `/work-on`'s resume preflight re-runs each missing phase via `Skill(...)`. Never hand-post missing markers.
+   On `PHASE_TRAIL: FAIL`, classify the issue as a **bypass**, never `DONE`. Also treat an agent final report that says phases ran inline, were skipped, or "ran without Skill calls" as a bypass regardless of labels. Surface it in the operator status update (`PHASE BYPASS: #{NUMBER} — missing: ...`) and do not cascade it as a satisfied predecessor.
+
+   **Do NOT re-dispatch a merged issue** (forge#3148): `/work-on` Phase 0B stops on a closed or `workflow:merged` issue before its resume preflight, so a fresh agent exits without repairing anything and the predecessor would stay unresolved forever. The PR is already merged, so the gap can only be resolved by a human. Escalate it instead, which classifies it **GATED** (`classify_predecessor_state` checks `workflow:merged` + `needs-human` before DONE; the `TRAIL_RC -ge 2` case above reaches the same state through its own `needs-human`), so item 6.5 tracks its dependents as `blocked-on-human-merge` instead of dispatching them. A bypass reported by the agent on a `workflow:merged` issue whose trail verifies is handled the same way (set `TRAIL_RC=1` before this block):
+   ```bash
+   if [ "$TRAIL_RC" -eq 1 ]; then
+     if [ "${DRY_RUN:-false}" = "true" ]; then
+       echo "[DRY-RUN] Would post FORGE:PHASE_TRAIL_FAILED and add needs-human to merged #{NUMBER}"
+     else
+       # Idempotent: one escalation comment per issue, however many completion cycles see it.
+       TRAIL_ESCALATED=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+         --jq '[.[] | select(.body | contains("FORGE:PHASE_TRAIL_FAILED") and contains("merged with an incomplete phase trail"))] | length' 2>/dev/null || echo 0)
+       if [ "${TRAIL_ESCALATED:-0}" -eq 0 ]; then
+         gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:PHASE_TRAIL_FAILED -->
+   #{NUMBER} merged with an incomplete phase trail (detected by /orchestrate on completion).
+
+   \`\`\`
+   ${TRAIL}
+   \`\`\`
+
+   The PR is already merged, so \`/work-on\` cannot re-run the missing phases. Review the merged change, then remove \`needs-human\` to release dependents held as \`blocked-on-human-merge\`."
+       fi
+       gh issue edit {NUMBER} -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
+     fi
+   fi
+   ```
+   Never hand-post missing markers. A bypass report on an issue that is NOT merged (the agent stopped before merge) is not covered here: classify it by label and let item 2 resume it, because `/work-on`'s resume preflight re-runs each missing phase via `Skill(...)` before PR creation and merge.
 
 1. **Check if the agent completed the FULL pipeline** — not just one phase:
    ```bash
