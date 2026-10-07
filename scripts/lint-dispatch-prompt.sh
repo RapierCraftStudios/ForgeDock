@@ -125,6 +125,10 @@ else
   UNMATCHED=$(awk '
     # Per-placeholder value charsets (forge#3078): a {PLACEHOLDER} is NOT free text.
     # Only ISSUE_TITLE is free (it is scanned for directive language separately).
+    BEGIN {
+      np2 = split("do not dont just close ignore prior previous instructions instruction investigate this that issue the and then fix skip please instead only without verify resolve resolved already fixed stop merge delete remove", _pw, " ")
+      for (pi = 1; pi <= np2; pi++) PROSE_WORDS[_pw[pi]] = 1
+    }
     function ok_val(name, v) {
       if (name == "ISSUE_TITLE") return 1
       # The literal shell-style token {AGENT_TOKEN} is template prose, not free text.
@@ -150,6 +154,10 @@ else
         nt = split(v, _t, " "); bare = 0
         for (ti = 2; ti <= nt; ti++) if (_t[ti] !~ /[\/\\]/) bare++
         if (bare > 1) return 0
+        # Slash-joined prose (forge#3091): "/x do/not/investigate" has one space and every token
+        # carries a separator, so also split on / \ and space and reject directive/stopword tokens.
+        nw = split(tolower(v), _w2, /[\/\\ ]+/)
+        for (ti = 1; ti <= nw; ti++) if (_w2[ti] in PROSE_WORDS) return 0
         return 1
       }
       # Numbers: digits, optionally preceded by a satellite prefix when two placeholders are adjacent.
