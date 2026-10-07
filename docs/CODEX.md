@@ -79,6 +79,8 @@ Forge scripts (the merge trail gate, dispatch lint, engine modules) are resolved
 
 - `FORGE_HOME` must be an absolute path to the ForgeDock clone (the directory holding `scripts/` and `commands/`). Relative values are ignored.
 - `FORGEDOCK_HOME`, when set, is authoritative over everything else. Windows drive-letter forms (`C:/forge` or `C:\forge`) are accepted and normalized to `/c/forge`.
+- `FORGE_SKILL_NAMESPACE=codex` forces the `forge-` skill prefix with `-` nesting (`forge-work-on-build`). Set it when skill auto-detection from the available-skills list is ambiguous; other values are `forgedock`, `none` and `opencode`. When unset, `FORGE_RUNTIME=codex` selects the same row.
+- Resolution order is `FORGEDOCK_HOME` > `FORGE_HOME` > `CLAUDE_PLUGIN_ROOT` > the `work-on.md` symlink target > the plugin cache, with the `$CODEX_HOME/forge-home` file also consulted. See the Environment Variables section of `CONFIG.md` for the full variable reference, including the `FORGE_TRAIL_*` trust settings for the merge gate.
 - `./install-codex.sh` writes `FORGE_HOME` to `~/.bashrc`/`~/.zshrc` (interactive shells), to `~/.zshenv` and `~/.profile` (non-interactive shells), and records the clone path in `$CODEX_HOME/forge-home` (default `~/.codex/forge-home`), which the bootstrap reads even when no shell profile is sourced.
 - For Claude Code plugin installs only the official `forgedock` marketplace is trusted; set `FORGEDOCK_MARKETPLACE` (trusted environment only) to pin a differently named marketplace. Cache directories with non-semver names are ignored.
 - If none of these resolve, `FORGE_ROOT` stays empty and the trail gate refuses to merge (fail closed).
