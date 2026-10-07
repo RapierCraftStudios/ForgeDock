@@ -1383,15 +1383,30 @@ For an OpenCode completion, retain `OPENCODE_DISPATCH_MAP[{NUMBER}]` until the t
 **Predecessor Classification (DONE / GATED / FAILED)** <!-- Added: forge#1812 --> — every check in this file that asks "is predecessor X resolved enough for its dependents to proceed" MUST classify X into exactly one of three states below — never a single binary terminal/non-terminal grep. Earlier versions of this file independently patched `grep -qE 'workflow:merged|workflow:invalid|needs-human|CLOSED'` in multiple places, and the copies drifted: the readiness check (this step) treated `needs-human` as done-enough-to-dispatch-through, while the failure handler (item 6 below) treated the identical label as a hard failure that skips dependents. Both cannot be right at once — `needs-human` means the predecessor's code is paused pending a human decision and is NOT yet in the base branch, so dispatching a dependent against it is unsafe, but permanently skipping the dependent is also wrong once the human resolves the block. The fix is a third state:
 
 ```bash
-# Trail cache lifecycle (forge#3182). Each Bash tool call is a fresh shell, so a persisted TRAIL_CACHE_DIR and a bare
-# `rm -rf "$TRAIL_CACHE_DIR"` are silent no-ops there (and a per-call `mktemp -d` leaks a directory every cycle). The cache
-# path is therefore DETERMINISTIC per orchestrator run: trail_cache_dir derives it from ORCH_RUN_ID (else ORCH_SESSION,
-# else the shell PID) whenever TRAIL_CACHE_DIR is unset, so every block that re-declares these helpers hits the same dir.
+# Trail cache lifecycle (forge#3182). Each Bash tool call is a fresh shell, so a persisted TRAIL_CACHE_DIR, a `$$`-keyed
+# path and a bare `rm -rf "$TRAIL_CACHE_DIR"` all differ or no-op per call (and a per-call `mktemp -d` leaks a directory every
+# cycle). The path is therefore derived from a STABLE key that every block can recompute without shell state: the numeric uid
+# plus the target repo (never `$$`; a pre-set TRAIL_CACHE_DIR / env value is deliberately ignored so `rm -rf` can never be
+# pointed at an arbitrary path). The dir is private (mode 700, owned by us, not a symlink) under a per-user base.
 # init_trail_cache resets it (call once at the TOP of each monitoring cycle, see "Cycle-start cache reset");
 # cleanup_trail_cache removes it on every orchestrator exit path. The cache holds only ABSENT/ACTIVE/RELEASED words.
-trail_cache_dir() { printf '%s' "${TRAIL_CACHE_DIR:-${TMPDIR:-/tmp}/forge-trail-${ORCH_RUN_ID:-${ORCH_SESSION:-$$}}}"; }
-init_trail_cache() { TRAIL_CACHE_DIR="$(trail_cache_dir)"; [ -n "$TRAIL_CACHE_DIR" ] && rm -rf "$TRAIL_CACHE_DIR"; mkdir -p "$TRAIL_CACHE_DIR"; }
-cleanup_trail_cache() { TRAIL_CACHE_DIR="$(trail_cache_dir)"; [ -n "$TRAIL_CACHE_DIR" ] && rm -rf "$TRAIL_CACHE_DIR"; unset TRAIL_CACHE_DIR; }
+trail_cache_dir() {
+  printf '%s' "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/forge-trail-$(id -u)-$(printf '%s' "{GH_REPO}" | tr -c 'A-Za-z0-9._-' '_')"
+}
+init_trail_cache() {
+  local D; D="$(trail_cache_dir)"
+  case "$D" in */forge-trail-*) ;; *) echo "init_trail_cache: refusing unexpected path" >&2; return 1 ;; esac
+  case "$D" in *..*) echo "init_trail_cache: refusing unexpected path" >&2; return 1 ;; esac
+  rm -rf -- "$D"
+  mkdir -m 700 -p -- "$D" && [ -O "$D" ] && [ ! -L "$D" ] || { echo "init_trail_cache: could not create a private cache dir" >&2; return 1; }
+  TRAIL_CACHE_DIR="$D"
+}
+cleanup_trail_cache() {
+  local D; D="$(trail_cache_dir)"
+  case "$D" in */forge-trail-*) ;; *) return 0 ;; esac
+  case "$D" in *..*) return 0 ;; esac
+  rm -rf -- "$D"; unset TRAIL_CACHE_DIR; return 0
+}
 
 # hold_merged_trail <issue> <trail-text> (forge#3156): the single escalation path for a merged issue whose phase
 # trail failed or could not be verified. Used by Step 4B item 0 and by the classifier's wake re-verification.
@@ -1450,12 +1465,12 @@ resolve_orch_login() {
 # forge#3181: both markers must also START the comment body (startswith, not contains), so a trusted comment that merely
 # quotes the marker text is not counted. hold_merged_trail / release_merged_trail emit the marker as the first line.
 # The comment read is cached per issue for the current monitoring cycle: the cache is a directory of files
-# (`$(...)` subshells lose shell arrays) at the deterministic path from `trail_cache_dir`, and is reset by
+# (`$(...)` subshells lose shell arrays) at the stable per-user/per-repo path from `trail_cache_dir` (created only by `init_trail_cache`; reads/writes skip it if it is absent or not owned by us), and is reset by
 # `init_trail_cache` at the TOP of every monitoring cycle (Step 4B "Cycle-start cache reset", before item 5 and stall
 # detection), so a human edit made between cycles is always seen. Only successful reads are cached.
 trail_escalation_state() {
   local N="$1" F="$(trail_cache_dir)/trail-$1" RAW OUT FAILED_ID RELEASED_ID RES
-  if [ -s "$F" ]; then cat "$F"; return; fi
+  if [ -s "$F" ] && [ -O "$F" ]; then cat "$F"; return; fi
   if ! RAW=$(gh api --paginate "repos/{GH_REPO}/issues/${N}/comments" --jq '.[] | {id: .id, body: (.body // ""), login: (.user.login // ""), assoc: (.author_association // "")}' 2>/dev/null); then
     echo "UNREADABLE"; return
   fi
@@ -1467,7 +1482,7 @@ trail_escalation_state() {
   if [ "$FAILED_ID" -eq 0 ]; then RES="ABSENT"
   elif [ "$RELEASED_ID" -gt "$FAILED_ID" ]; then RES="RELEASED"
   else RES="ACTIVE"; fi
-  mkdir -p "$(trail_cache_dir)" 2>/dev/null && printf '%s\n' "$RES" > "$F"
+  [ -d "$(trail_cache_dir)" ] && [ -O "$(trail_cache_dir)" ] && printf '%s\n' "$RES" > "$F"
   echo "$RES"
 }
 
@@ -2285,11 +2300,22 @@ Do not ask the user questions — you are running autonomously in the background
      DEP_ALREADY_DISPATCHED=$(gh issue view "$DEP" -R {GH_REPO} --json labels \
        --jq '[.labels[].name | select(startswith("workflow:"))] | length' 2>/dev/null || echo "0")
      if [ "$DEP_ALREADY_DISPATCHED" -eq 0 ]; then
-       # Remove the hold label FIRST and verify it is gone (forge#3182): a swallowed failure would leave DEP held yet
-       # re-released and re-dispatched every cycle. On failure skip release, UNBLOCKED comment and dispatch; retry next cycle.
-       if ! gh issue edit "$DEP" -R {GH_REPO} --remove-label "blocked-on-human-merge" 2>/dev/null \
-          || gh issue view "$DEP" -R {GH_REPO} --json labels --jq '.labels[].name' 2>/dev/null | grep -qx "blocked-on-human-merge"; then
-         echo "WARNING: #${DEP} blocked-on-human-merge label removal failed or unverified — not dispatching; retrying next cycle." >&2
+       if [ "${DRY_RUN:-false}" = "true" ]; then echo "DRY_RUN: would release #${DEP} (remove blocked-on-human-merge, post FORGE:UNBLOCKED, dispatch)"; continue; fi
+       # Durable marker FIRST (forge#3182 CONC-3): a crash between label removal and dispatch would otherwise strand DEP with no
+       # hold label and no workflow:* label. Post FORGE:UNBLOCKED before removing the label (deduped against the last comment so a
+       # retried cycle does not repeat it), so an interrupted release leaves durable evidence for a human or later recovery.
+       LAST_DEP_COMMENT=$(gh issue view "$DEP" -R {GH_REPO} --json comments --jq '.comments[-1].body // ""' 2>/dev/null || echo "")
+       case "$LAST_DEP_COMMENT" in "<!-- FORGE:UNBLOCKED -->"*) ;; *)
+         gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:UNBLOCKED -->
+   All gating predecessor(s) (#$(echo $GATING_PREDS | sed 's/ /, #/g')) are now resolved — merged, or released by a human after a phase-trail hold — dispatching now. (Was tracked via a prior FORGE:BLOCKED_ON_HUMAN_MERGE comment.)" >/dev/null 2>&1 || { echo "WARNING: #${DEP} UNBLOCKED marker not posted — not releasing; retrying next cycle." >&2; continue; } ;;
+       esac
+       # Remove the hold label and verify it is gone (forge#3182). Fail CLOSED: a failed edit OR a failed/empty `view` is
+       # "unverified" — skip dispatch and retry next cycle (the view result is captured separately, never piped into grep).
+       gh issue edit "$DEP" -R {GH_REPO} --remove-label "blocked-on-human-merge" >/dev/null 2>&1 \
+         || { echo "WARNING: #${DEP} label removal failed — not dispatching; retrying next cycle." >&2; continue; }
+       if ! DEP_LABELS=$(gh issue view "$DEP" -R {GH_REPO} --json labels --jq '.labels[].name' 2>/dev/null) \
+          || printf '%s\n' "$DEP_LABELS" | grep -qx "blocked-on-human-merge"; then
+         echo "WARNING: #${DEP} label removal unverified — not dispatching; retrying next cycle." >&2
          continue
        fi
        # Re-check after removal: another path may have labelled DEP workflow:* in the meantime.
@@ -2298,8 +2324,6 @@ Do not ask the user questions — you are running autonomously in the background
        [ "$DEP_ALREADY_DISPATCHED" -eq 0 ] || continue
        # Record a human release of a trail-held merged predecessor so the escalation stops gating (decay).
        for GPRED in $GATING_PREDS; do release_merged_trail "$GPRED"; done
-       gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:UNBLOCKED -->
-   All gating predecessor(s) (#$(echo $GATING_PREDS | sed 's/ /, #/g')) are now resolved — merged, or released by a human after a phase-trail hold — dispatching now. (Was tracked via a prior FORGE:BLOCKED_ON_HUMAN_MERGE comment.)"
        echo "#{DEP} unblocked (gating predecessors resolved) — dispatching immediately (Steps 4A.pre.0 → 4A.pre → 4A)."
        # Add DEP to the same-response dispatch batch
      fi
