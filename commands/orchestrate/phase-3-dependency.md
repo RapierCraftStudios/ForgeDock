@@ -1489,7 +1489,7 @@ for ENTRY in "${NEWLY_BLOCKED[@]:-}"; do
       --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
     gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:BLOCKED_ON_HUMAN_MERGE -->
 **Gating predecessor**: #${PRED} (state: \`${ISSUE_CLASS[$PRED]}\`${GATING_PR:+, open PR #${GATING_PR}})
-**Status**: Detected on orchestrator wake/compaction reconstruction. Ready to dispatch as soon as #${PRED} reaches \`workflow:merged\`."
+**Status**: Detected on orchestrator wake/compaction reconstruction. Ready to dispatch once #${PRED} is resolved: when its gating PR merges, or — if #${PRED} is already merged and held on its phase trail — when a human clears \`needs-human\` on it."
     gh issue edit "$DEP" -R {GH_REPO} --add-label "blocked-on-human-merge" 2>/dev/null || true
   fi
 done
@@ -1510,9 +1510,12 @@ for DEP in $BLOCKED_NOW; do
     [ "$GPRED_CLASS" != "DONE" ] && STILL_GATED=true
   done
   if [ "$STILL_GATED" = "false" ]; then
+    # forge#3157: record a human release (FORGE:PHASE_TRAIL_RELEASED) of a trail-held merged predecessor (decay of the escalation marker;
+    # release_merged_trail is defined in phase-4-execution.md Step 4B and is a no-op unless the escalation is ACTIVE).
+    for GPRED in $(echo "$GATING_PREDS_RAW" | jq -r '.[]' 2>/dev/null); do release_merged_trail "$GPRED"; done
     gh issue edit "$DEP" -R {GH_REPO} --remove-label "blocked-on-human-merge" 2>/dev/null || true
     gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:UNBLOCKED -->
-All gating predecessor(s) reached \`workflow:merged\` (detected on orchestrator wake) — dispatching now."
+All gating predecessor(s) are now resolved — merged, or released by a human after a phase-trail hold (detected on orchestrator wake) — dispatching now."
     READY_ISSUES+=("$DEP")
   fi
 done

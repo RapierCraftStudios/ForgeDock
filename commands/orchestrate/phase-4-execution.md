@@ -1354,9 +1354,9 @@ hold_merged_trail() {
   done
   [ "$HELD" -ne 0 ] && echo "PHASE TRAIL HOLD FAILED: #${N} — needs-human label could not be verified; dependents are NOT held. Hold them manually." >&2
   for TRY in 1 2; do
-    gh api --paginate "repos/{GH_REPO}/issues/${N}/comments" \
-      --jq '.[] | select(.body | contains("FORGE:PHASE_TRAIL_FAILED") and contains("merged with an incomplete phase trail")) | .id' \
-      2>/dev/null | grep -q '[0-9]' && break
+    # forge#3157: dedupe only against an ACTIVE escalation, so a re-escalation after a recorded release posts a new one.
+    [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -f "$TRAIL_CACHE_DIR/trail-$N"
+    [ "$(trail_escalation_state "$N")" = "ACTIVE" ] && break
     gh issue comment "$N" -R {GH_REPO} --body "<!-- FORGE:PHASE_TRAIL_FAILED -->
 #${N} merged with an incomplete phase trail (or one that could not be verified), detected by /orchestrate.
 
@@ -1366,7 +1366,41 @@ ${TXT}
 
 The PR is already merged, so \`/work-on\` cannot re-run the missing phases. Review the merged change, then remove \`needs-human\` to release dependents held as \`blocked-on-human-merge\`." >/dev/null 2>&1 || true
   done
+  [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -f "$TRAIL_CACHE_DIR/trail-$N"
   return "$HELD"
+}
+
+# trail_escalation_state <issue> (forge#3157): prints ABSENT (no merged-trail escalation comment), ACTIVE (newest
+# FORGE:PHASE_TRAIL_FAILED comment id is greater than the newest FORGE:PHASE_TRAIL_RELEASED id), RELEASED (a human
+# release was recorded after the last escalation, so a later unrelated `needs-human` no longer gates), or UNREADABLE.
+# The comment read is cached per issue for the current monitoring cycle: the cache is a directory of files
+# (`$(...)` subshells lose shell arrays), `TRAIL_CACHE_DIR=$(mktemp -d)` and is recreated at the start of every
+# monitoring cycle (Step 4B item 6.6), so a human edit made between cycles is always seen. Only successful reads are cached.
+trail_escalation_state() {
+  local N="$1" F="${TRAIL_CACHE_DIR:+$TRAIL_CACHE_DIR/trail-$1}" OUT FAILED_ID RELEASED_ID RES
+  if [ -n "$F" ] && [ -s "$F" ]; then cat "$F"; return; fi
+  if ! OUT=$(gh api --paginate "repos/{GH_REPO}/issues/${N}/comments" --jq '.[] | if (.body | contains("FORGE:PHASE_TRAIL_FAILED") and contains("merged with an incomplete phase trail")) then "F \(.id)" elif (.body | contains("<!-- FORGE:PHASE_TRAIL_RELEASED -->")) then "R \(.id)" else empty end' 2>/dev/null); then
+    echo "UNREADABLE"; return
+  fi
+  FAILED_ID=$(printf '%s\n' "$OUT" | awk '$1=="F"&&$2+0>m{m=$2+0}END{print m+0}')
+  RELEASED_ID=$(printf '%s\n' "$OUT" | awk '$1=="R"&&$2+0>m{m=$2+0}END{print m+0}')
+  if [ "$FAILED_ID" -eq 0 ]; then RES="ABSENT"
+  elif [ "$RELEASED_ID" -gt "$FAILED_ID" ]; then RES="RELEASED"
+  else RES="ACTIVE"; fi
+  [ -n "$F" ] && printf '%s\n' "$RES" > "$F"
+  echo "$RES"
+}
+
+# release_merged_trail <issue> (forge#3157): record that a human cleared a merged-trail hold, so the escalation
+# stops gating. Call only after classify_predecessor_state reported DONE for a merged issue whose escalation is ACTIVE.
+# Idempotent (no-op unless ACTIVE) and never run in dry-run. The comment must not contain the escalation marker text.
+release_merged_trail() {
+  local N="$1"
+  [ "${DRY_RUN:-false}" = "true" ] && return 0
+  [ "$(trail_escalation_state "$N")" = "ACTIVE" ] || return 0
+  gh issue comment "$N" -R {GH_REPO} --body "<!-- FORGE:PHASE_TRAIL_RELEASED -->
+The merged-trail hold on #${N} was released by a human (needs-human cleared or trail re-verified). Dependents held as \`blocked-on-human-merge\` are released. A later, unrelated \`needs-human\` on this merged issue no longer gates them." >/dev/null 2>&1 || true # <!-- allowlist:check-command-side-effects -->
+  [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -f "$TRAIL_CACHE_DIR/trail-$N"
 }
 
 classify_predecessor_state() {
@@ -1413,29 +1447,29 @@ classify_predecessor_state() {
     # dependents wait until a human clears needs-human). Item 0 adds `needs-human` BEFORE posting the comment
     # (forge#3156), so merged + needs-human with no comment yet is either the in-flight window or a stale label:
     # re-verify the trail to tell them apart (clean trail => stale label => DONE). Unreadable comments fail closed.
-    local TRAIL_ESC_IDS
-    if TRAIL_ESC_IDS=$(gh api --paginate "repos/{GH_REPO}/issues/${PRED}/comments" \
-         --jq '.[] | select(.body | contains("FORGE:PHASE_TRAIL_FAILED") and contains("merged with an incomplete phase trail")) | .id' 2>/dev/null) \
-       && ! printf '%s\n' "$TRAIL_ESC_IDS" | grep -q '[0-9]'; then
-      [ "$(reverify_merged_trail "$PRED" yes)" = "OK" ] && echo "DONE" || echo "GATED"
-    else
-      echo "GATED"
-    fi
+    local TRAIL_ESC
+    TRAIL_ESC=$(trail_escalation_state "$PRED")
+    case "$TRAIL_ESC" in
+      ABSENT)   [ "$(reverify_merged_trail "$PRED" yes)" = "OK" ] && echo "DONE" || echo "GATED" ;;
+      RELEASED) echo "DONE" ;;   # forge#3157: a human release was recorded after the last escalation; this needs-human is unrelated
+      *)        echo "GATED" ;;  # ACTIVE or UNREADABLE: fail closed
+    esac
   elif echo "$PRED_LABELS" | grep -qx "workflow:merged"; then
-    # forge#3156: no needs-human. A recorded escalation comment means a human already released the hold (DONE);
-    # otherwise re-verify the trail so a merged predecessor that item 0 never got to escalate (orchestrator died
-    # mid-hold, wake reconstruction) is not trusted on the label alone.
-    if gh api --paginate "repos/{GH_REPO}/issues/${PRED}/comments" \
-         --jq '.[] | select(.body | contains("FORGE:PHASE_TRAIL_FAILED") and contains("merged with an incomplete phase trail")) | .id' 2>/dev/null \
-         | grep -q '[0-9]'; then
-      echo "DONE"
-    elif [ "$(reverify_merged_trail "$PRED" no)" = "OK" ]; then
-      echo "DONE"
-    else
-      # Unverified trail with no hold on record: establish it now so a human can release it.
-      [ "${DRY_RUN:-false}" = "true" ] || hold_merged_trail "$PRED" "PHASE_TRAIL: FAIL (re-verified at wake classification)" >/dev/null 2>&1 || true
-      echo "GATED"
-    fi
+    # forge#3156: no needs-human. A recorded escalation (ACTIVE or RELEASED) means a human already released the hold
+    # (DONE, forge#3157: the sweep records it via release_merged_trail); otherwise re-verify the trail so a merged
+    # predecessor that item 0 never got to escalate (orchestrator died mid-hold, wake reconstruction) is not trusted
+    # on the label alone.
+    case "$(trail_escalation_state "$PRED")" in
+      ACTIVE|RELEASED) echo "DONE" ;;
+      *)
+        if [ "$(reverify_merged_trail "$PRED" no)" = "OK" ]; then
+          echo "DONE"
+        else
+          # Unverified trail with no hold on record: establish it now so a human can release it.
+          [ "${DRY_RUN:-false}" = "true" ] || hold_merged_trail "$PRED" "PHASE_TRAIL: FAIL (re-verified at wake classification)" >/dev/null 2>&1 || true
+          echo "GATED"
+        fi ;;
+    esac
   elif echo "$PRED_LABELS" | grep -qxE "needs-human|workflow:awaiting-merge"; then
     echo "GATED"
   elif echo "$PRED_LABELS" | grep -qx "workflow:engine-error"; then
@@ -2104,33 +2138,43 @@ Do not ask the user questions — you are running autonomously in the background
    if [ "$ALREADY_TRACKED" -eq 0 ]; then
      gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:BLOCKED_ON_HUMAN_MERGE -->
 **Gating predecessor**: #${PRED} (state: \`${PRED_LABEL}\`${GATING_PR:+, open PR #${GATING_PR}})
-**Status**: This issue is ready to dispatch as soon as #${PRED}'s gating PR merges. No action needed — the orchestrator (live session via item 6.6, or the next \`/orchestrate\` invocation via phase-3-dependency.md's wake reconstruction) will auto-dispatch it the moment #${PRED} reaches \`workflow:merged\`."
+**Status**: This issue is ready to dispatch once #${PRED} is resolved: when its gating PR merges, or — if #${PRED} is already merged and held on its phase trail — when a human clears \`needs-human\` on it. No action needed — the orchestrator (live session via the item 6.6 sweep on every monitoring cycle, or the next \`/orchestrate\` invocation via phase-3-dependency.md's wake reconstruction) will auto-dispatch it as soon as #${PRED} classifies DONE."
      gh issue edit "$DEP" -R {GH_REPO} --add-label "blocked-on-human-merge" 2>/dev/null || true
    fi
    ```
    Do NOT dispatch `DEP`. Do NOT mark it skipped — it remains visibly tracked as `blocked-on-human-merge` in the DAG, re-evaluated on the next completion event, stall-detection pass, or session wake.
 
-6.6. **Merge-triggered wake for blocked-on-human-merge dependents** <!-- Added: forge#1812 --> — whenever a completed agent's issue classifies as `DONE` via `workflow:merged` (i.e. it just merged), check whether any other issue is tracked as blocked on it — this makes gated dependents dispatch the instant the gating PR merges, with no manual `/orchestrate` re-run required:
+6.6. **Release sweep for blocked-on-human-merge dependents** <!-- Added: forge#1812, reworked: forge#3157 --> — run this sweep on **every monitoring cycle** (after items 5-6 of each completion cycle and in each stall-detection pass), not only when an agent just merged: a human clearing `needs-human` on an already-merged, trail-held predecessor (Step 4B item 0) fires no completion event, so a sweep keyed on the just-completed `$NUM` would leave its dependents held until the next `/orchestrate` wake. Every hold the orchestrator creates needs a matching release check on each cycle. The sweep re-classifies the gating predecessors of every `blocked-on-human-merge` dependent and releases a dependent once all of them classify `DONE`:
    ```bash
+   # New per-cycle comment cache for trail_escalation_state (human edits between cycles are always re-read).
+   [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -rf "$TRAIL_CACHE_DIR"
+   TRAIL_CACHE_DIR=$(mktemp -d)
    WOKEN=$(gh issue list -R {GH_REPO} --state open --label "blocked-on-human-merge" --json number \
      --jq '.[].number' 2>/dev/null || echo "")
    for DEP in $WOKEN; do
-     IS_GATED_BY_THIS=$(gh api repos/{GH_REPO}/issues/${DEP}/comments \
-       --jq --arg prednum "${NUM}" '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE") and test("Gating predecessor\\*\\*: #" + $prednum + "\\b"))] | length' 2>/dev/null || echo "0")
-     [ "$IS_GATED_BY_THIS" -gt 0 ] || continue
+     GATING_PREDS=$(gh api repos/{GH_REPO}/issues/${DEP}/comments \
+       --jq '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE")) | (.body | capture("Gating predecessor\\*\\*: #(?<p>[0-9]+)").p)] | unique | .[]' 2>/dev/null || echo "")
+     [ -n "$GATING_PREDS" ] || continue
+     STILL_GATED=false
+     for GPRED in $GATING_PREDS; do
+       [ "$(classify_predecessor_state "$GPRED")" = "DONE" ] || STILL_GATED=true
+     done
+     [ "$STILL_GATED" = "false" ] || continue
      # Idempotency: only dispatch if DEP hasn't already been dispatched by another path.
      DEP_ALREADY_DISPATCHED=$(gh issue view "$DEP" -R {GH_REPO} --json labels \
        --jq '[.labels[].name | select(startswith("workflow:"))] | length' 2>/dev/null || echo "0")
      if [ "$DEP_ALREADY_DISPATCHED" -eq 0 ]; then
+       # Record a human release of a trail-held merged predecessor so the escalation stops gating (decay).
+       for GPRED in $GATING_PREDS; do release_merged_trail "$GPRED"; done
        gh issue edit "$DEP" -R {GH_REPO} --remove-label "blocked-on-human-merge" 2>/dev/null || true
        gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:UNBLOCKED -->
-Gating predecessor #${NUM} reached \`workflow:merged\` — dispatching now. (Was tracked via a prior FORGE:BLOCKED_ON_HUMAN_MERGE comment.)"
-       echo "#{DEP} unblocked by #{NUM} merge — dispatching immediately (Steps 4A.pre.0 → 4A.pre → 4A)."
+   All gating predecessor(s) (#$(echo $GATING_PREDS | sed 's/ /, #/g')) are now resolved — merged, or released by a human after a phase-trail hold — dispatching now. (Was tracked via a prior FORGE:BLOCKED_ON_HUMAN_MERGE comment.)"
+       echo "#{DEP} unblocked (gating predecessors resolved) — dispatching immediately (Steps 4A.pre.0 → 4A.pre → 4A)."
        # Add DEP to the same-response dispatch batch
      fi
    done
    ```
-   This satisfies the live-session case. For the case where the gating PR merges after the orchestrator session has already ended, the equivalent check runs in `phase-3-dependency.md`'s wake/compaction reconstruction on the next `/orchestrate` invocation — see that file's "Orchestrator state reconstruction on wake / after compaction" section.
+   `release_merged_trail` is a no-op unless the predecessor carries an ACTIVE merged-trail escalation, so ordinary merges are unaffected. The classifier's per-cycle comment cache bounds the escalation-comment reads to one per predecessor per cycle. For the case where the hold is released after the orchestrator session has already ended, the equivalent check runs in `phase-3-dependency.md`'s wake/compaction reconstruction on the next `/orchestrate` invocation — see that file's "Orchestrator state reconstruction on wake / after compaction" section.
 
 6.7. **Human-gated idle/backpressure check** (`BATCH_FULLY_GATED`) <!-- Added: forge#1814 --> — run this after every completion cycle, once the per-issue classification above (items 5-6.6) has been applied for this cycle. It answers a different question than the paused-drain/blocked-on-human-merge tracking above: those items handle *individual* gated predecessors and their *direct* dependents; this check asks whether the **entire original batch** has now exhausted into human-gated states, which is the condition under which continuing to dispatch cascade-spawned review findings (Step 4C) produces net-negative churn — closing 1 issue while opening 2-4 more, with the real blockers (the GATED issues) unresolved:
 
