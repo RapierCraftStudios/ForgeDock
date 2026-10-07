@@ -176,6 +176,34 @@ Return `REVIEW_RESULT: status: BLOCKED`, blocker: "git push failed".
 
 ---
 
+## Phase R1.5: Phase-Trail Preflight (MANDATORY — before PR creation) <!-- Added: forge#3061 -->
+
+A PR must not be opened for work whose earlier phases were skipped. Run the deterministic verifier; it requires INVESTIGATOR, FAST_PATH and CONTRACT always, CONTEXT and ARCHITECT unless the band is TRIVIAL/INVESTIGATION, and a passing FORGE:QUALITY_GATE unless the diff is docs-only.
+
+```bash
+DOCS_ONLY_FLAG=""
+CHANGED=$(git -C {WORKTREE_PATH} diff --name-only origin/{PR_BASE}...HEAD)
+# docs = docs/** or *.md, but commands/** and .claude/** specs are executable pipeline code, never docs
+if [ -n "$CHANGED" ] && echo "$CHANGED" | awk '!(/^docs\// || (/\.md$/ && !/^(commands|\.claude)\//)){bad=1} END{exit bad}'; then DOCS_ONLY_FLAG="--docs-only"; fi
+# The verifier ships with ForgeDock (not the consumer repo): same resolution as every universal script.
+TRAIL_SCRIPT="${FORGEDOCK_HOME:-${FORGE_HOME:-{REPO_PATH}}}/scripts/verify-phase-trail.sh"
+if [ ! -f "$TRAIL_SCRIPT" ]; then
+  echo "WARNING: verify-phase-trail.sh not installed at $TRAIL_SCRIPT — phase-trail preflight skipped (prose tier)" >&2
+  TRAIL_RC=0
+else
+  TRAIL=$(bash "$TRAIL_SCRIPT" {NUMBER} -R {GH_REPO} $DOCS_ONLY_FLAG); TRAIL_RC=$?
+  echo "$TRAIL"
+fi
+```
+
+- `TRAIL_RC=0` → continue to Phase R2.
+- `TRAIL_RC=1` → **do not create the PR.** For each `MISSING: <marker> -> <action>` line, run that phase now via its `Skill(...)` (the action text names it), then re-run this preflight. Do NOT hand-post the missing marker and do NOT escalate to a human: the refusal routes back to the missing phase. If the preflight still fails after one re-dispatch round, post a `<!-- FORGE:PHASE_TRAIL_FAILED -->` comment listing the still-missing markers, add `needs-human`, and return `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail incomplete".
+- `TRAIL_RC>=2` (2 = trail unreadable; 127 = script not executable) → the trail could not be read; fail closed with `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail unreadable".
+
+Run the same preflight again at the top of Phase R3, before `/review-pr --auto-merge` is invoked, since a resumed run can enter at R3 with an existing PR.
+
+---
+
 ## Phase R2: Create PR
 
 ### R2A: Determine PR title
@@ -264,6 +292,8 @@ gh issue edit {NUMBER} {GH_FLAG} \
 ---
 
 ## Phase R3: Invoke /review-pr with --auto-merge
+
+**First re-run the Phase R1.5 phase-trail preflight** (resume entry can skip R1.5). Do not invoke `/review-pr` while it fails. <!-- Added: forge#3061 -->
 
 Re-read the PR number (from creation or from resume check):
 

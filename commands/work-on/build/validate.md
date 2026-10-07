@@ -420,6 +420,26 @@ If `origin/{PR_BASE}` does not exist yet (new branch), skip this check — no co
 git ls-remote --exit-code origin {PR_BASE} >/dev/null 2>&1 || echo "PR_BASE not on origin — skipping ancestry audit"
 ```
 
+### V5 Pre-Commit: Post FORGE:QUALITY_GATE Marker (MANDATORY unless docs-only) <!-- Added: forge#3061 -->
+
+The quality gate must leave a checkable artifact. `scripts/verify-phase-trail.sh` (run before PR creation and before auto-merge) requires a `FORGE:QUALITY_GATE` comment with `**Result**: PASS` for every non-docs-only change. Post it after the V1 loop ends, recording the real commands run and their real results. Do NOT hand-post this marker without having actually run the gate: a marker with no run behind it is a pipeline bypass.
+
+**Skip-path marker**: when the Skip Conditions above return `GATE_PASSED: true` early (single config/docs file), still post the marker with `**Result**: PASS (skipped — single config/docs file)` and `**Iterations**: 0`, so the verifier never has to guess. The verifier's `--docs-only` waiver additionally covers diffs where every file is `*.md` or `docs/**`.
+
+```bash
+GATE_RESULT=$([ "$GATE_PASSED" = "true" ] && echo PASS || echo FAIL)
+QG_BODY="<!-- FORGE:QUALITY_GATE -->
+## Quality Gate Result
+
+**Result**: ${GATE_RESULT}
+**Iterations**: {N}
+**Commands run**: {quality-gate invocation, format/verify commands, test commands actually executed}
+**Findings remaining**: {none | summary}"
+gh issue comment {NUMBER} {GH_FLAG} --body "$QG_BODY" # <!-- allowlist:check-command-side-effects -->
+```
+
+---
+
 ### V5 Post-Commit: Mark Build Complete (MANDATORY)
 
 After the ancestry audit passes (or is skipped), append `<!-- FORGE:BUILDER:COMPLETE -->` to the existing FORGE:BUILDER comment. This is the **only** place this marker is written — it signals that a real commit exists on the branch and the build is safe to resume-skip. <!-- Added: forge#1305 -->
