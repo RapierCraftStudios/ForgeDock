@@ -108,7 +108,7 @@ Example: "3126 --auto-merge --issue 3124 --base staging --gh-flag -R $GH_REPO --
 
 Extract: `PR_NUMBER`, `AUTO_MERGE=true`, `MERGE_ISSUE`, `MERGE_BASE`, `MERGE_GH_FLAG`, `MERGE_WORKTREE` (optional — the absolute path to the git worktree to clean up after merge)
 
-**`--auto-merge` without `--issue`** <!-- Added: forge#3102 -->: the phase-trail gate in Phase 8 needs a linked issue. Before Phase 8, if `AUTO_MERGE=true` and `MERGE_ISSUE` is empty, resolve it from the PR's closing reference (`gh pr view {PR_NUMBER} --json closingIssuesReferences --jq '.closingIssuesReferences[0].number'`, falling back to the first `Closes|Fixes|Resolves #N` in the PR body). If exactly one issue resolves, use it as `MERGE_ISSUE`. If none resolves, Phase 8 does not merge and returns the documented `REVIEW_RESULT: status: BLOCKED`, blocker: "auto-merge requires --issue (no linked issue found)" — the PR stays open for a human or a re-run with `--issue`.
+**`--auto-merge` without `--issue`** <!-- Added: forge#3102 -->: the phase-trail gate in Phase 8 needs a linked issue. Before Phase 8, if `AUTO_MERGE=true` and `MERGE_ISSUE` is empty, resolve it from the PR's closing reference (`gh pr view {PR_NUMBER} --json closingIssuesReferences --jq '.closingIssuesReferences[0].number'`, If exactly one closing issue resolves AND its number matches the trailing `-<issue>` of the PR's head branch (the pipeline's `fix/{slug}-{N}` convention), use it as `MERGE_ISSUE`; any other case is treated as unresolved. If none resolves, Phase 8 does not merge and returns the documented `REVIEW_RESULT: status: BLOCKED`, blocker: "auto-merge requires --issue (no linked issue found)" — the PR stays open for a human or a re-run with `--issue`.
 
 If `--auto-merge` is NOT present, `AUTO_MERGE=false` — Phase 8 (Auto-Merge) will be skipped.
 
@@ -2195,9 +2195,14 @@ fi
 
 ```bash
 if [ -z "${MERGE_ISSUE:-}" ]; then
-  # forge#3102: resolve the linked issue from the PR before giving up.
-  MERGE_ISSUE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json closingIssuesReferences --jq '.closingIssuesReferences[0].number // empty' 2>/dev/null)
-  [ -z "$MERGE_ISSUE" ] && MERGE_ISSUE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json body --jq '.body' 2>/dev/null | grep -oiE '(closes|fixes|resolves) #[0-9]+' | head -1 | grep -oE '[0-9]+')
+  # forge#3102: resolve the linked issue from the PR before giving up. The candidate must be the
+  # PR's single closing reference AND match the pipeline branch convention (head ref ends in -<issue>),
+  # so a PR author cannot point the gate at an unrelated issue that already has a full trail.
+  CAND_JSON=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json closingIssuesReferences,headRefName 2>/dev/null)
+  CAND_COUNT=$(echo "$CAND_JSON" | jq -r '.closingIssuesReferences | length' 2>/dev/null)
+  CAND=$(echo "$CAND_JSON" | jq -r '.closingIssuesReferences[0].number // empty' 2>/dev/null)
+  HEAD_NUM=$(echo "$CAND_JSON" | jq -r '.headRefName' 2>/dev/null | grep -oE '[0-9]+$')
+  if [ "${CAND_COUNT:-0}" = "1" ] && [ -n "$CAND" ] && [ "$CAND" = "$HEAD_NUM" ]; then MERGE_ISSUE="$CAND"; fi
 fi
 if [ -z "${MERGE_ISSUE:-}" ]; then
   echo "PHASE TRAIL: auto-merge requested without --issue and no linked issue found on the PR — cannot verify the phase trail; refusing to merge (fail closed)" >&2

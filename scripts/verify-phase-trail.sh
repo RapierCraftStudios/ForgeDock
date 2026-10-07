@@ -97,7 +97,7 @@ COMMENTS=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins 
   exit 2
 }
 
-# Creation time of the earliest trusted FORGE:BUILDER:COMPLETE comment (empty when absent/undated).
+# Creation time of the LATEST trusted FORGE:BUILDER:COMPLETE comment (empty when absent/undated).
 QG_SINCE="${FORGE_TRAIL_QG_SINCE-2026-10-07T03:40:12Z}"
 BUILD_AT=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" '
   ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
@@ -109,7 +109,7 @@ BUILD_AT=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins 
           or ((.user.login // "") as $x | $L | index($x) != null)
         )
       | select((.body // "") | startswith("<!-- FORGE:BUILDER -->") and contains("<!-- FORGE:BUILDER:COMPLETE -->"))
-      | .created_at // empty ] | sort | .[0] // empty' 2>/dev/null) || BUILD_AT=""
+      | .created_at // empty ] | sort | .[-1] // empty' 2>/dev/null) || BUILD_AT=""
 
 # NOTE: never use early-exiting `grep -q`/`head -1` after printf under pipefail: on large threads the
 # writer gets SIGPIPE and the pipeline reports failure for a marker that is present (#3099).
