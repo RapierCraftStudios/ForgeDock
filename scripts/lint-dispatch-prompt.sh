@@ -47,17 +47,17 @@ FAILS=()
 fail() { FAILS+=("$1"); }
 
 # Phrases that pre-decide a verdict or fix, or turn a relaunch into "finish the leftovers".
-STRONG='(likely|probably|possibly) (already )?(resolved|fixed|moot|invalid|a duplicate)|already (resolved|fixed|implemented)[ ,.]*(—|-|,)? *(verify|close)|verify (it|this)?[ ,]*and close|the (fix|root cause|diagnosis|solution) is\b|\b(proposed|suggested|recommended|prescribed) (fix|solution)\b|make (the|this|that) [a-z_ -]{1,60}(terminal|return early|raise)|implement the following|(continue|resume|pick up) (from )?where (you|the previous (agent|run)) left off|finish (what|the work|the uncommitted)|uncommitted (work|changes) (from|left)'
+STRONG='(likely|probably|possibly) (already )?(resolved|fixed|moot|invalid|a duplicate)|already (resolved|fixed|implemented)[ ,.]*(—|-|,)? *(verify|close)|verify (it|this)?[ ,]*and close|\b(proposed|suggested|recommended|prescribed) (fix|solution)\b|make (the|this|that) [a-z_ -]{1,60}(terminal|return early|raise)|implement the following|(continue|resume|pick up) (from )?where (you|the previous (agent|run)) left off|finish (what|the work|the uncommitted)|uncommitted (work|changes) (from|left)'
 # Outside the context block additionally reject generic fix-design language.
-WIDE="$STRONG|\\broot cause( is|:)|\\bdiagnosis:|(just|simply) (read and edit|edit the file)"
+WIDE="$STRONG|the (fix|root cause|diagnosis|solution) is\\b|\\broot cause( is|:)|\\bdiagnosis:|(just|simply) (read and edit|edit the file)"
 
 # --- 1. anchors -------------------------------------------------------------
 for anchor in '**YOUR MISSION**' 'LABEL-STATE LOOP CONTRACT' 'Skill(skill=' '--under-orchestration' '**LANE**' '**Issue title**:'; do
-  printf '%s\n' "$PROMPT" | grep -qF -- "$anchor" || fail "missing required template anchor: $anchor"
+  grep -qF -- "$anchor" <<< "$PROMPT" || fail "missing required template anchor: $anchor"
 done
 
 # --- 2. structure after the Issue title line ---------------------------------
-TITLE_LN=$(printf '%s\n' "$PROMPT" | grep -nF -- '**Issue title**:' | head -1 | cut -d: -f1)
+TITLE_LN=$(grep -nF -- '**Issue title**:' <<< "$PROMPT" | head -1 | cut -d: -f1)
 if [ -n "$TITLE_LN" ]; then
   HEAD_PART=$(printf '%s\n' "$PROMPT" | sed -n "1,${TITLE_LN}p")
   TAIL_PART=$(printf '%s\n' "$PROMPT" | sed -n "$((TITLE_LN+1)),\$p")
@@ -65,13 +65,13 @@ else
   HEAD_PART="$PROMPT"; TAIL_PART=""
 fi
 
-FIRST_NONBLANK=$(printf '%s\n' "$TAIL_PART" | grep -v '^[[:space:]]*$' | head -1)
+FIRST_NONBLANK=$(grep -v '^[[:space:]]*$' <<< "$TAIL_PART" | head -1)
 CTX=""; AFTER=""
-if printf '%s\n' "$TAIL_PART" | grep -qF -- "$BEGIN"; then
+if grep -qF -- "$BEGIN" <<< "$TAIL_PART"; then
   if [ "$FIRST_NONBLANK" != "$BEGIN" ]; then
     fail "content between '**Issue title**' and the DISPATCH_CONTEXT block is not allowed"
   fi
-  if printf '%s\n' "$TAIL_PART" | grep -qF -- "$END"; then
+  if grep -qF -- "$END" <<< "$TAIL_PART"; then
     CTX=$(printf '%s\n' "$TAIL_PART" | sed -n "/$(printf '%s' "$BEGIN" | sed 's/[][\/.*^$]/\\&/g')/,/$(printf '%s' "$END" | sed 's/[][\/.*^$]/\\&/g')/p")
     AFTER=$(printf '%s\n' "$TAIL_PART" | sed -n "/$(printf '%s' "$END" | sed 's/[][\/.*^$]/\\&/g')/,\$p" | tail -n +2)
   else
@@ -81,7 +81,8 @@ else
   # No context block: nothing but whitespace/closing quote may follow the title line.
   AFTER="$TAIL_PART"
 fi
-if [ -n "$(printf '%s' "$AFTER" | tr -d '[:space:]")')" ]; then
+AFTER_STRIPPED=$(tr -d '[:space:]' <<< "$AFTER")
+if [ -n "$AFTER_STRIPPED" ] && [ "$AFTER_STRIPPED" != '"' ]; then
   fail "unexpected content after the DISPATCH_CONTEXT block (custom prompt text is not allowed)"
 fi
 
@@ -89,12 +90,12 @@ fi
 OUTSIDE=$(printf '%s\n' "$HEAD_PART" | grep -vF -- '**Issue title**:')
 OUTSIDE="$OUTSIDE
 $AFTER"
-HITS=$(printf '%s\n' "$OUTSIDE" | grep -inE -- "$WIDE" | head -5)
+HITS=$(grep -inE -- "$WIDE" <<< "$OUTSIDE" | head -5)
 [ -z "$HITS" ] || while IFS= read -r l; do fail "verdict/fix-prescribing language outside context block: ${l:0:160}"; done <<< "$HITS"
 
 # --- 4. strongest directives inside the context block ------------------------
 if [ -n "$CTX" ]; then
-  HITS=$(printf '%s\n' "$CTX" | grep -inE -- "$STRONG" | head -5)
+  HITS=$(grep -inE -- "$STRONG" <<< "$CTX" | head -5)
   [ -z "$HITS" ] || while IFS= read -r l; do fail "pre-solved/directive language inside context block: ${l:0:160}"; done <<< "$HITS"
 fi
 
