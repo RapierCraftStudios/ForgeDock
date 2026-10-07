@@ -1397,8 +1397,9 @@ fi
 #    nested inside the classifier). It reports a missing helper on stderr and classifies GATED. The same trusted-author
 #    filter (OWNER/MEMBER/COLLABORATOR or the orchestrator login) applies to the release/fail markers on wake.
 #    forge#3169: merged + needs-human with no escalation record classifies GATED on wake (never keyed on the verifier).
-# The helpers cache trail lookups in TRAIL_CACHE_DIR (created as in phase-4-execution.md Step 4B item 6.6).
-[ -n "${TRAIL_CACHE_DIR:-}" ] || TRAIL_CACHE_DIR=$(mktemp -d)
+# The helpers cache trail lookups in the stable per-user/per-repo dir (trail_cache_dir / init_trail_cache, phase-4-execution.md Step 4B).
+# Re-declare those helpers first (same Bash block), then reset the cache; if init fails the helpers simply skip caching.
+declare -F init_trail_cache >/dev/null && init_trail_cache || echo "WARNING: init_trail_cache not declared — trail lookups will be uncached" >&2
 for H in hold_merged_trail resolve_orch_login trail_escalation_state release_merged_trail classify_predecessor_state; do
   declare -F "$H" >/dev/null || echo "WARNING: $H not declared — re-declare it from phase-4-execution.md Step 4B before classifying; merged-trail predecessors will classify GATED" >&2
 done
