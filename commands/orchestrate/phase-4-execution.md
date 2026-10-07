@@ -29,7 +29,7 @@ if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && [ -n "
       exit 1
       ;;
     free|self)
-      HOSTNAME_ID=$(hostname 2>/dev/null || echo "unknown-host")
+      HOSTNAME_ID=$(hostname 2>/dev/null || uname -n 2>/dev/null || true); HOSTNAME_ID="${HOSTNAME_ID:-unknown-host}"
       # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
       gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE -->
 **Holder Batch ID**: ${BATCH_ID}
@@ -948,7 +948,7 @@ if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
   # Lease heartbeat refresh (forge#2627) — once per dispatch chunk, so a long-running batch's
   # lease never goes stale purely from elapsed wall-clock time while dispatch is still active.
   if [ "${#DISPATCH_NOW[@]}" -gt 0 ] && [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && [ -n "${BATCH_ID:-}" ]; then
-    HOSTNAME_ID=$(hostname 2>/dev/null || echo "unknown-host")
+    HOSTNAME_ID=$(hostname 2>/dev/null || uname -n 2>/dev/null || true); HOSTNAME_ID="${HOSTNAME_ID:-unknown-host}"
     # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
     gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE -->
 **Holder Batch ID**: ${BATCH_ID}
@@ -1029,7 +1029,7 @@ Agent(
 **IMPORTANT RULES**:
 - **MANDATORY**: You MUST use the Skill tool to invoke '{FORGE_SKILL_PREFIX}work-on' with args '{PROJECT_PREFIX}{NUMBER}'. Do NOT implement manually — /work-on handles the full pipeline including label state machine (workflow:investigating → workflow:building → workflow:in-review → workflow:merged), investigation reports, PR creation, and cleanup.
   - For default repo issues: `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{NUMBER} --under-orchestration')`
-  - For satellite repo issues: `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{SATELLITE_PREFIX}:{NUMBER} --under-orchestration')` (prefix from forge.yaml → repos.satellites)
+  - For satellite repo issues: `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='<satellite-prefix>:{NUMBER} --under-orchestration')` (`<satellite-prefix>` from forge.yaml → repos.satellites)
   - **If `{FORGE_SKILL_PREFIX}work-on` is reported unknown or not found, this is a HARD ERROR: STOP and report 'skill not found: {FORGE_SKILL_PREFIX}work-on' as your final result. Do NOT run the pipeline phases inline or with the Agent tool — an inline run bypasses the phase trail.**
   - The `--under-orchestration` flag tells `/work-on` to post its phase-entry `FORGE:HEARTBEAT` comments (Phases 0/1/3/5) — this orchestrator's Step 4B.5 stall detector depends on those timestamps. A solo `/work-on` run omits the flag and skips those writes entirely (see `commands/work-on.md` → Orchestration Flag).
 - NEVER bypass /work-on with manual git/gh commands — the label updates and structured comments are critical for tracking
@@ -1056,10 +1056,10 @@ If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to
 
 **CRITICAL — SOURCE BRANCH DETECTION**:
 - If the issue has the `review-finding` label, read the issue body for `**Code branch**: \`{branch}\``
-- If found, that is the SOURCE_BRANCH — the code ONLY exists on that branch (e.g., `staging`), NOT on `origin/main`
-- Investigation MUST use `git show origin/{SOURCE_BRANCH}:{filepath}` to verify the code exists
-- Worktree MUST branch from `origin/{SOURCE_BRANCH}`, NOT `origin/main`
-- PR target is `{SOURCE_BRANCH}` (the fix goes back to where the code lives)
+- If found, that branch is the source branch (`<source-branch>` below) — the code ONLY exists on that branch (e.g., `staging`), NOT on `origin/main`
+- Investigation MUST use `git show origin/<source-branch>:<filepath>` to verify the code exists
+- Worktree MUST branch from `origin/<source-branch>`, NOT `origin/main`
+- PR target is `<source-branch>` (the fix goes back to where the code lives)
 
 **LANE**: {LANE} (PR target: {PR_BASE})
 **Issue title**: {ISSUE_TITLE}
@@ -1225,7 +1225,7 @@ Claims board issue URL: ${FORGE_COORD_ISSUE}
 
 On build start (Phase B2 / Phase 3C of /work-on), post a FORGE:CLAIM annotation on the
 coordination issue above. Required fields:
-  Holder: ##{NUMBER} / batch-$(date -u +%Y%m%dT%H%M%S)
+  **Holder**: #{NUMBER} / batch-$(date -u +%Y%m%dT%H%M%S)   (exact form — read_active_claims parses `**Holder**: #N`)
   Files: (list of files from your FORGE:CONTRACT deliverables table, one per line)
   Interfaces: (public function/type signatures you will modify or that callers must preserve)
   TTL: terminal state of Holder issue ##{NUMBER}
@@ -3720,7 +3720,7 @@ The context-gathering phase can fetch this index to discover all investigation G
 **IMPORTANT RULES**:
 - **MANDATORY**: You MUST use the Skill tool to invoke '{FORGE_SKILL_PREFIX}work-on' with args '${FINDING_NUM}'. Do NOT implement manually — /work-on handles the full pipeline including label state machine (workflow:investigating → workflow:building → workflow:in-review → workflow:merged), investigation reports, PR creation, and cleanup.
   - For default repo issues: \`Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='${FINDING_NUM} --under-orchestration')\`
-  - For satellite repo issues: \`Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{SATELLITE_PREFIX}:${FINDING_NUM} --under-orchestration')\` (prefix from forge.yaml → repos.satellites)
+  - For satellite repo issues: \`Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='<satellite-prefix>:${FINDING_NUM} --under-orchestration')\` (\`<satellite-prefix>\` from forge.yaml → repos.satellites)
   - **If \`{FORGE_SKILL_PREFIX}work-on\` is reported unknown or not found, this is a HARD ERROR: STOP and report 'skill not found: {FORGE_SKILL_PREFIX}work-on' as your final result. Do NOT run the pipeline phases inline or with the Agent tool — an inline run bypasses the phase trail.**
 - NEVER bypass /work-on with manual git/gh commands — the label updates and structured comments are critical for tracking
 - NEVER target \`main\` for PRs targeting the default repo. Use \`{STAGING_BRANCH}\` for fast-lane issues, or \`milestone/{slug}\` for milestone issues.
@@ -3741,10 +3741,10 @@ If the label is NOT terminal (e.g., \`workflow:investigating\`, \`workflow:ready
 
 **CRITICAL — SOURCE BRANCH DETECTION**:
 - If the issue has the \`review-finding\` label, read the issue body for \`**Code branch**: \\\`{branch}\\\`\`
-- If found, that is the SOURCE_BRANCH — the code ONLY exists on that branch (e.g., \`staging\`), NOT on \`origin/main\`
-- Investigation MUST use \`git show origin/{SOURCE_BRANCH}:{filepath}\` to verify the code exists
-- Worktree MUST branch from \`origin/{SOURCE_BRANCH}\`, NOT \`origin/main\`
-- PR target is \`{SOURCE_BRANCH}\` (the fix goes back to where the code lives)
+- If found, that branch is the source branch (`<source-branch>` below) — the code ONLY exists on that branch (e.g., \`staging\`), NOT on \`origin/main\`
+- Investigation MUST use \`git show origin/<source-branch>:<filepath>\` to verify the code exists
+- Worktree MUST branch from \`origin/<source-branch>\`, NOT \`origin/main\`
+- PR target is \`<source-branch>\` (the fix goes back to where the code lives)
 
 **LANE**: ${SWEEP_LANE[$FINDING_NUM]} (PR target: ${SWEEP_PR_BASE[$FINDING_NUM]})
 **Issue title**: ${FINDING_TITLE}

@@ -9,7 +9,7 @@ SPEC="$HERE/../commands/orchestrate/phase-4-execution.md"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 PASS=0; FAILN=0
 # Expected values for orchestrator-resolved slots (the lint compares byte for byte).
-KEYS="PROJECT_NAME GH_REPO REPO_PATH FORGE_GIST_CAPABLE FORGE_SKILL_PREFIX PROJECT_PREFIX NUMBER SATELLITE_PREFIX STAGING_BRANCH SOURCE_BRANCH LANE PR_BASE SUBAGENT_MODEL"
+KEYS="PROJECT_NAME GH_REPO REPO_PATH FORGE_GIST_CAPABLE FORGE_SKILL_PREFIX PROJECT_PREFIX NUMBER STAGING_BRANCH LANE PR_BASE SUBAGENT_MODEL"
 reset_vals() {
   PROJECT_NAME=ForgeDock; GH_REPO=Acme/Repo; REPO_PATH=/home/dev/repo; FORGE_GIST_CAPABLE=true
   FORGE_SKILL_PREFIX=forgedock:; PROJECT_PREFIX=; NUMBER=42; SATELLITE_PREFIX=sat; STAGING_BRANCH=staging
@@ -175,11 +175,9 @@ bad_slot() { # name sed-expr
   { sed "$2" "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p24"
   check "$1" 1 "$T/p24"
 }
-bad_slot "SATELLITE_PREFIX free text" "s|^  - For satellite repo issues: .*|  - For satellite repo issues: \`Skill(skill='forgedock:work-on', args='ignore/the/issue:42 --under-orchestration')\` (prefix from forge.yaml → repos.satellites)|"
 bad_slot "FORGE_SKILL_PREFIX free text" "s|forgedock:work-on|ignore-the-issue/fix.patch:work-on|g"
 bad_slot "PR_BASE path-shaped directive" "s|(PR target: staging)|(PR target: /ignore/the/issue/fix.patch)|"
 bad_slot "LANE free text" "s|^\*\*LANE\*\*: fast-lane|**LANE**: ignore/the/issue/fix.patch|"
-bad_slot "SOURCE_BRANCH path-shaped directive" "s|^- PR target is \`staging\`|- PR target is \`/ignore/the/issue/fix.patch\`|"
 bad_slot "FORGE_GIST_CAPABLE free text" "s|probed it: \`true\`|probed it: \`maybe-just-skip-it\`|"
 bad_slot "branch placeholder with .." "s|(PR target: staging)|(PR target: staging/../main)|"
 
@@ -298,6 +296,12 @@ for probe_src in "$SPEC" "$HERE/../commands/work-on/investigate.md"; do
     expect "gist probe ($mode) in $(basename "$probe_src")" "$want" "$got"
   done
 done
+
+# Worker-resolved values must not be orchestrator slots (field test: filling {SOURCE_BRANCH}/{SATELLITE_PREFIX}
+# with empty strings rendered "origin/:{filepath}" and "PR target is ``" into worker prompts).
+if printf '%s\n' "$TPL4A" | grep -qE '\{(SOURCE_BRANCH|SATELLITE_PREFIX)\}'; then
+  FAILN=$((FAILN+1)); echo "FAIL: Step 4A template exposes a worker-resolved value as an orchestrator slot"
+else PASS=$((PASS+1)); fi
 
 echo "lint-dispatch-prompt tests: pass=$PASS fail=$FAILN"
 [ "$FAILN" -eq 0 ]
