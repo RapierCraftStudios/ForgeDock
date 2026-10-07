@@ -450,6 +450,9 @@ export function evaluateCascadeFinding(finding, policy) {
   if (finding.priority === "P1" || finding.priority === "P2") {
     return { admit: true, reason: null };
   }
+  if (finding.p3BreakerTripped && policy.p3Breaker) {
+    return { admit: false, reason: "P3 amplification breaker tripped" };
+  }
   if (policy.keywordHeuristic && /comment|typo/i.test(finding.title || "")) {
     return { admit: false, reason: "comment/typo heuristic" };
   }

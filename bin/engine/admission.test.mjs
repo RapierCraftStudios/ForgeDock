@@ -448,6 +448,16 @@ describe("planP3BatchGroups — concern-level P3 batching", () => {
   });
 });
 
+describe("evaluateCascadeFinding with tripped breaker (forge#3060)", () => {
+  it("defers P3 but never P1/P2 when tripped", () => {
+    const { policy } = resolveCascadePolicy();
+    const base = { generation: 1, title: "x", projectedTokenSpend: 0, p3BreakerTripped: true };
+    assert.equal(evaluateCascadeFinding({ ...base, priority: "P3" }, policy).admit, false);
+    assert.equal(evaluateCascadeFinding({ ...base, priority: "P2" }, policy).admit, true);
+    assert.equal(evaluateCascadeFinding({ ...base, priority: "P3" }, resolveCascadePolicy({ p3_breaker: false }).policy).admit, true);
+  });
+});
+
 describe("evaluateP3Breaker (forge#3060)", () => {
   it("is on by default and trips after convergenceWindow observations >= 1.0", () => {
     const { policy } = resolveCascadePolicy();
