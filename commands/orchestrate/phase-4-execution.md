@@ -1370,16 +1370,33 @@ The PR is already merged, so \`/work-on\` cannot re-run the missing phases. Revi
   return "$HELD"
 }
 
+# resolve_orch_login (forge#3168): prints the login of the identity that authors the orchestrator's own FAILED/RELEASED
+# marker comments, so trail_escalation_state can trust them even when the bot reports author_association NONE or
+# CONTRIBUTOR. Resolution order: FORGE_BOT_LOGIN env override, then the git identity (`git config user.name`, which for a
+# GitHub App is its `<app>[bot]` login). Never calls `/user` (403s for App tokens). An unresolved value prints nothing and
+# the caller fails closed: only the author_association set below is trusted, never "trust every author".
+resolve_orch_login() {
+  local L="${FORGE_BOT_LOGIN:-}"
+  [ -n "$L" ] || L=$(git config user.name 2>/dev/null || true)
+  printf '%s' "$L"
+}
+
 # trail_escalation_state <issue> (forge#3157): prints ABSENT (no merged-trail escalation comment), ACTIVE (newest
 # FORGE:PHASE_TRAIL_FAILED comment id is greater than the newest FORGE:PHASE_TRAIL_RELEASED id), RELEASED (a human
 # release was recorded after the last escalation, so a later unrelated `needs-human` no longer gates), or UNREADABLE.
+# forge#3168: only TRUSTED comments count, for BOTH markers. Trusted = author_association OWNER/MEMBER/COLLABORATOR, or
+# `.user.login` equal to the orchestrator identity (resolve_orch_login, used only when non-empty). A marker string posted
+# by anyone else is ignored (treated as absent), so an outside commenter can neither forge a release nor a failure.
 # The comment read is cached per issue for the current monitoring cycle: the cache is a directory of files
 # (`$(...)` subshells lose shell arrays), `TRAIL_CACHE_DIR=$(mktemp -d)` and is recreated at the start of every
 # monitoring cycle (Step 4B item 6.6), so a human edit made between cycles is always seen. Only successful reads are cached.
 trail_escalation_state() {
-  local N="$1" F="${TRAIL_CACHE_DIR:+$TRAIL_CACHE_DIR/trail-$1}" OUT FAILED_ID RELEASED_ID RES
+  local N="$1" F="${TRAIL_CACHE_DIR:+$TRAIL_CACHE_DIR/trail-$1}" RAW OUT FAILED_ID RELEASED_ID RES
   if [ -n "$F" ] && [ -s "$F" ]; then cat "$F"; return; fi
-  if ! OUT=$(gh api --paginate "repos/{GH_REPO}/issues/${N}/comments" --jq '.[] | if (.body | contains("FORGE:PHASE_TRAIL_FAILED") and contains("merged with an incomplete phase trail")) then "F \(.id)" elif (.body | contains("<!-- FORGE:PHASE_TRAIL_RELEASED -->")) then "R \(.id)" else empty end' 2>/dev/null); then
+  if ! RAW=$(gh api --paginate "repos/{GH_REPO}/issues/${N}/comments" --jq '.[] | {id: .id, body: (.body // ""), login: (.user.login // ""), assoc: (.author_association // "")}' 2>/dev/null); then
+    echo "UNREADABLE"; return
+  fi
+  if ! OUT=$(printf '%s\n' "$RAW" | jq -r --arg L "$(resolve_orch_login)" 'select((.assoc | IN("OWNER","MEMBER","COLLABORATOR")) or ($L != "" and .login == $L)) | if (.body | contains("FORGE:PHASE_TRAIL_FAILED") and contains("merged with an incomplete phase trail")) then "F \(.id)" elif (.body | contains("<!-- FORGE:PHASE_TRAIL_RELEASED -->")) then "R \(.id)" else empty end' 2>/dev/null); then
     echo "UNREADABLE"; return
   fi
   FAILED_ID=$(printf '%s\n' "$OUT" | awk '$1=="F"&&$2+0>m{m=$2+0}END{print m+0}')
@@ -1403,9 +1420,17 @@ The merged-trail hold on #${N} was released by a human (needs-human cleared or t
   [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -f "$TRAIL_CACHE_DIR/trail-$N"
 }
 
+# classify_predecessor_state <issue> (forge#3168): the helpers hold_merged_trail, resolve_orch_login,
+# trail_escalation_state and release_merged_trail above MUST be declared in the SAME shell before this function runs
+# (reverify_merged_trail is nested below). It has exactly ONE guarded write (the DRY_RUN-guarded hold_merged_trail
+# call in the unverified-merged branch); every other path is read-only.
 classify_predecessor_state() {
   local PRED="$1"
-  local PRED_INFO
+  local PRED_INFO H
+  for H in hold_merged_trail resolve_orch_login trail_escalation_state release_merged_trail; do
+    # Fail loudly (stderr) but closed: a missing helper must never read as DONE.
+    type "$H" >/dev/null 2>&1 || { echo "classify_predecessor_state: helper $H is not declared in this shell; classifying #${PRED} GATED" >&2; echo "GATED"; return; }
+  done
   # NOTE: the `workflow` array below deliberately also keeps `needs-human` — that label has NO
   # `workflow:` prefix (see bin/labels.json), so a bare `select(startswith("workflow:"))` would
   # drop it and the GATED branch's `needs-human` case would be dead code (forge#1812 primary case).
@@ -1466,7 +1491,8 @@ classify_predecessor_state() {
           echo "DONE"
         else
           # Unverified trail with no hold on record: establish it now so a human can release it.
-          [ "${DRY_RUN:-false}" = "true" ] || hold_merged_trail "$PRED" "PHASE_TRAIL: FAIL (re-verified at wake classification)" >/dev/null 2>&1 || true
+          # Output is discarded (stdout is the classification), but a failed hold is reported on stderr, not swallowed.
+          [ "${DRY_RUN:-false}" = "true" ] || hold_merged_trail "$PRED" "PHASE_TRAIL: FAIL (re-verified at wake classification)" >/dev/null || echo "classify_predecessor_state: hold on #${PRED} could not be verified" >&2
           echo "GATED"
         fi ;;
     esac
@@ -1816,9 +1842,10 @@ done
    fi
    # forge#3102: only merged completions carry a full trail; invalid/decomposed/needs-human/awaiting-merge/paused do not.
    # Fail closed: a failed label read is an ERROR, never a skip.
+   TRAIL_LABELS_READ_OK=0   # forge#3168: 1 only after a successful label read, so a failed read is distinct from an empty label set
    if ! TRAIL_LABELS=$(gh issue view {NUMBER} -R {GH_REPO} --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null); then
      TRAIL="PHASE_TRAIL: ERROR (could not read issue labels)"; TRAIL_RC=2   # infrastructure error, not a bypass (forge#3147)
-   elif ! echo ",$TRAIL_LABELS," | grep -q ',workflow:merged,'; then
+   elif TRAIL_LABELS_READ_OK=1; ! echo ",$TRAIL_LABELS," | grep -q ',workflow:merged,'; then
      TRAIL="PHASE_TRAIL: SKIPPED (issue not workflow:merged — classified by label)"; TRAIL_RC=0
    elif [ -z "$FORGE_ROOT" ] || [ ! -f "$FORGE_ROOT/scripts/verify-phase-trail.sh" ]; then
      TRAIL="PHASE_TRAIL: ERROR (verify-phase-trail.sh not resolvable; set FORGEDOCK_HOME)"; TRAIL_RC=127   # fail closed
@@ -1859,9 +1886,10 @@ done
    # Only a merged issue is escalated here; an unmerged bypass is resumed by item 2 (see below).
    # Any non-zero rc on a merged issue escalates: rc 1 (missing phases) and rc >= 2 (unverifiable trail) alike,
    # because classify_predecessor_state() gates a merged predecessor only when this escalation comment exists.
-   # forge#3156: also escalate when the label read itself failed (TRAIL_RC -ge 2 with empty TRAIL_LABELS): an
-   # unreadable issue cannot be proven unmerged, so fail closed instead of posting nothing.
-   if [ "$TRAIL_RC" -ne 0 ] && { [ -z "${TRAIL_LABELS:-}" ] || echo ",${TRAIL_LABELS:-}," | grep -q ',workflow:merged,'; }; then
+   # forge#3156: also escalate when the label read itself failed: an unreadable issue cannot be proven unmerged, so
+   # fail closed instead of posting nothing. forge#3168: key on TRAIL_LABELS_READ_OK, not an empty TRAIL_LABELS, so a
+   # successfully read, label-less, non-merged issue is never escalated (read OK + empty labels => no escalation).
+   if [ "$TRAIL_RC" -ne 0 ] && { [ "${TRAIL_LABELS_READ_OK:-0}" != "1" ] || echo ",${TRAIL_LABELS:-}," | grep -q ',workflow:merged,'; }; then
      if [ "${DRY_RUN:-false}" = "true" ]; then
        echo "[DRY-RUN] Would add needs-human and post FORGE:PHASE_TRAIL_FAILED on merged #{NUMBER}"
      else

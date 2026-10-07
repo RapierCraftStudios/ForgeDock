@@ -1389,6 +1389,10 @@ fi
 # 1. Re-fetch all issue labels and classify each into DONE / GATED / FAILED / IN_PROGRESS
 #    (same classify_predecessor_state() function defined in phase-4-execution.md Step 4B —
 #    re-declare it here if this block runs in a fresh context that hasn't sourced Step 4B yet).
+#    forge#3168: classify_predecessor_state() also needs these Step 4B helpers declared in the SAME shell:
+#    hold_merged_trail, resolve_orch_login, trail_escalation_state, release_merged_trail (reverify_merged_trail is
+#    nested inside the classifier). It reports a missing helper on stderr and classifies GATED. The same trusted-author
+#    filter (OWNER/MEMBER/COLLABORATOR or the orchestrator login) applies to the release/fail markers on wake.
 declare -A ISSUE_CLASS
 declare -A ISSUE_FILES
 DONE_ISSUES=()
