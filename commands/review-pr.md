@@ -23,7 +23,7 @@ allowed-tools: Task, Agent, Bash, Read, Grep, Glob, WebFetch, Skill
 
 2. **Post the FORGE:REVIEW verdict regardless of finding severity.** A review that completes but posts no `<!-- FORGE:REVIEW -->` comment is invisible to the pipeline. Even a PASS verdict must be posted.
 
-3. **Review findings do NOT block merge UNLESS they meet the Blocking Criteria in §7B** (a CONFIRMED HIGH/CRITICAL finding, a purpose regression, a merge conflict, or a build/type/test failure) **or the calibration threshold check in §7B.5 sets `CALIBRATION_NEEDS_HUMAN=true`** (HIGH-confidence task type with historical survival < 80%). File every finding as a GitHub issue with the `review-finding` label regardless of severity. Minor/style findings never block; §7B's and §7B.5's blocking conditions always do — including under `--auto-merge`. <!-- forge#1741 -->
+3. **Review findings do NOT block merge UNLESS they meet the Blocking Criteria in §7B** (a CONFIRMED HIGH/CRITICAL finding, a purpose regression, a merge conflict, or a build/type/test failure) **or the calibration threshold check in §7B.5 sets `CALIBRATION_NEEDS_HUMAN=true`** (HIGH-confidence task type with historical survival < 80%). File every finding that survives the §6B.5 note disposition (MEDIUM+ severity, or CONFIRMED/LIKELY above LOW; security/billing always) as a GitHub issue with the `review-finding` label. LOW/POSSIBLE notes are fixed in-PR, listed in the PR body, or dropped — never filed as standalone issues. Minor/style findings never block; §7B's and §7B.5's blocking conditions always do — including under `--auto-merge`. <!-- forge#1741 -->
 
 4. **Route correctly at Phase 0.** If the input is "staging" or the PR targets `main`, invoke `Skill("review-pr-staging", ...)` — do NOT run the standard PR review pipeline against a staging→main PR.
 
@@ -1673,6 +1673,23 @@ If still 0: review is clean — skip to Phase 7.
 - Dedup by file + line range ±5 — keep higher confidence (covers off-by-one from upstream insertions)
 - Also dedup by title similarity: if two findings share the same file and 3+ title keywords, keep the higher confidence one
 - Sort: CONFIRMED first, then LIKELY, then POSSIBLE; within group by severity
+
+### 6B.5: Non-blocking note disposition (MANDATORY before 6C — forge#3060)
+
+Filing a standalone `review-finding` issue for every LOW/POSSIBLE reviewer note makes the cascade amplify (each merged fix PR spawns its own P3 issues, which spawn more). Classify each deduped finding before 6C:
+
+- **NOTE** (does NOT become an issue): `**Severity**: LOW`, OR `**Confidence**: POSSIBLE` with Severity below HIGH.
+- **ISSUE** (continues to 6C unchanged): everything else — MEDIUM+ severity and CONFIRMED/LIKELY findings above LOW, i.e. P0/P1/P2 behaviour is exactly as before.
+- **Safety exemption**: a finding is never demoted to a NOTE (it is filed as before) if it came from the Security, Auth, Billing, Concurrency or Database review agent, OR its file path / title / body matches `\b(security|auth|authz|authn|billing|payment|stripe|charge|invoice|injection|xss|csrf|ssrf|idor|secrets?|credentials?|permissions?|sql)\b` (matched case-insensitively on word or underscore-separated parts, so `auth_service` and `billing_handler` match but `author`/`tokenizer` do not; also exempt: `token`, `password`, `redact`). Domain of origin is checked first so a generically titled auth/IDOR/injection finding cannot be dropped.
+- **Precedence**: the safety exemption above ALWAYS wins over the P3-lineage rule below and over every other NOTE rule. A finding with missing or unparseable severity defaults to ISSUE.
+- **Stricter rule on P3-lineage PRs** (applies only to findings not covered by the safety exemption): when the PR's linked issue (`MERGE_ISSUE`/`Closes #N`) carries the `review-finding` label and `priority:P3`, only CONFIRMED findings of MEDIUM+ severity, or any finding of HIGH+ severity, become issues. Everything else is a NOTE. A fix for a polish finding must not mint new polish findings.
+
+Each NOTE gets exactly one disposition, in this preference order:
+1. **Fix in this PR** — when the fix is cheap (a few lines, same files already in the diff, no new behaviour) and in scope, apply it as a follow-up commit on the PR branch before merge — ONLY for comment, documentation or test-only changes. Any change to executable code is not a note fix: it must be filed as an issue or fixed with a full re-review of the new HEAD before merge (never push unreviewed code under `--auto-merge`).
+2. **List in the PR body** — append the remaining notes under a `## Non-blocking notes` section of the PR body (edit the existing body, never replace it; use a `mktemp` body file named for the PR number and read the body back to confirm the section is present).
+3. **Drop** — duplicates, stale-comment/docstring nits, and speculation with no actionable evidence.
+
+Every NOTE disposition must be recorded (never silently dropped): list each NOTE (id, file:line, one-line reason) with its disposition in the review summary comment, including dropped ones, so a reviewer can audit the decision. NOTES are never passed to `Skill(issue)`. Record counts in the review summary (`notes_fixed`, `notes_listed`, `notes_dropped`, `findings_filed`). If no finding is an ISSUE after this step, skip 6C and continue to Phase 7.
 
 ### 6C: Create Issues
 
