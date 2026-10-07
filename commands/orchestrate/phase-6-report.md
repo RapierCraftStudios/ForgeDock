@@ -345,7 +345,7 @@ current session's live wake pick them up automatically if it is still running).
 | **Cascade amplification** | **{FINDINGS_SPAWNED:-0}/{MERGED_UNITS:-0} = {AMPLIFICATION_RATIO:-0} findings per merged unit** |
 | Amplification composition | {#REFINEMENT_FINDINGS[@]:-0} same-lineage refinements; {#NEW_SURFACE_FINDINGS[@]:-0} new-surface findings |
 | Amplification bound | {CASCADE_MAX_AMPLIFICATION:-off}; {#AMPLIFICATION_DEFERRED[@]:-0} same-lineage refinements deferred to completion sweep |
-| Amplification breaker | {AMPLIFICATION_BREAKER:-on}; {tripped|clear}; {#SWEEP_BREAKER_HELD[@]:-0} P3 findings held for bounded P3 batches (never dispatched individually) |
+| Amplification breaker | {AMPLIFICATION_BREAKER:-on}; {tripped|clear}; {#AMPLIFICATION_BREAKER_DEFERRED[@]:-0} P3 findings paused ({#SWEEP_BREAKER_HELD[@]:-0} still held at sweep) for bounded P3 batches (never dispatched individually) |
 | Competing recommendations reconciled (Phase 2.5) | {RECONCILED_COUNT} (investigation plans arbitrated in place + serialized) |
 | Findings validated | {N} |
 | False positives | {N} ({%}) |

@@ -1680,7 +1680,7 @@ Filing a standalone `review-finding` issue for every LOW/POSSIBLE reviewer note 
 
 - **NOTE** (does NOT become an issue): `**Severity**: LOW`, OR `**Confidence**: POSSIBLE` with Severity below HIGH.
 - **ISSUE** (continues to 6C unchanged): everything else — MEDIUM+ severity and CONFIRMED/LIKELY findings above LOW, i.e. P0/P1/P2 behaviour is exactly as before.
-- **Safety exemption**: a finding whose file path or title matches the security/billing/payment pattern used by the P3 batchable check in 6C is never demoted to a NOTE — it is filed as before.
+- **Safety exemption**: a finding is never demoted to a NOTE (it is filed as before) if it came from the Security, Auth, Billing, Concurrency or Database review agent, OR its file path / title / body matches `security|auth|billing|payment|stripe|charge|invoice|injection|xss|csrf|ssrf|idor|secret|credential|token|permission|sql`. Domain of origin is checked first so a generically titled auth/IDOR/injection finding cannot be dropped.
 - **Stricter rule on P3-lineage PRs**: when the PR's linked issue (`MERGE_ISSUE`/`Closes #N`) carries the `review-finding` label and `priority:P3`, only CONFIRMED findings of MEDIUM+ severity, or any finding of HIGH+ severity, become issues. Everything else is a NOTE. A fix for a polish finding must not mint new polish findings.
 
 Each NOTE gets exactly one disposition, in this preference order:
@@ -1688,7 +1688,7 @@ Each NOTE gets exactly one disposition, in this preference order:
 2. **List in the PR body** — append the remaining notes under a `## Non-blocking notes` section of the PR body (edit the existing body, never replace it; use a `mktemp` body file named for the PR number and read the body back to confirm the section is present).
 3. **Drop** — duplicates, stale-comment/docstring nits, and speculation with no actionable evidence.
 
-NOTES are never passed to `Skill(issue)`. Record counts in the review summary (`notes_fixed`, `notes_listed`, `notes_dropped`, `findings_filed`). If no finding is an ISSUE after this step, skip 6C and continue to Phase 7.
+Every NOTE disposition must be recorded (never silently dropped): list each NOTE (id, file:line, one-line reason) with its disposition in the review summary comment, including dropped ones, so a reviewer can audit the decision. NOTES are never passed to `Skill(issue)`. Record counts in the review summary (`notes_fixed`, `notes_listed`, `notes_dropped`, `findings_filed`). If no finding is an ISSUE after this step, skip 6C and continue to Phase 7.
 
 ### 6C: Create Issues
 

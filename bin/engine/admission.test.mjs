@@ -256,7 +256,14 @@ describe("evaluateAmplificationBreaker (forge#3060)", () => {
     assert.match(evaluateCascadeFinding({ ...base, priority: "P3" }, policy).reason, /amplification breaker/);
     assert.equal(evaluateCascadeFinding({ ...base, priority: "P2" }, policy).admit, true);
     assert.equal(evaluateCascadeFinding({ ...base, priority: "P1" }, policy).admit, true);
+    assert.equal(evaluateCascadeFinding({ ...base, priority: "P0" }, policy).admit, true);
     assert.equal(evaluateCascadeFinding({ ...base, priority: "P3", amplificationBreakerTripped: false }, policy).admit, true);
+  });
+
+  it("rule 6 is evaluated last: a tripped typo P3 reports the keyword reason first under balanced", () => {
+    const { policy } = resolveCascadePolicy();
+    const f = { generation: 1, priority: "P3", title: "fix typo", sameFileAsBatch: false, batchFullyGated: false, projectedTokenSpend: 0, amplificationBreakerTripped: true };
+    assert.match(evaluateCascadeFinding(f, policy).reason, /comment\/typo/);
   });
 
   it("existing numeric max_amplification configs keep working alongside the breaker", () => {

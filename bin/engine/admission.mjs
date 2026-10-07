@@ -466,14 +466,8 @@ export function evaluateCascadeFinding(finding, policy) {
       reason: `generation ${finding.generation} exceeds orchestration.cascade.max_generation (${policy.maxGeneration})`,
     };
   }
-  if (finding.priority === "P1" || finding.priority === "P2") {
+  if (finding.priority === "P0" || finding.priority === "P1" || finding.priority === "P2") {
     return { admit: true, reason: null };
-  }
-  if (policy.amplificationBreaker && finding.amplificationBreakerTripped) {
-    return {
-      admit: false,
-      reason: "amplification breaker tripped — P3 admission paused (routed to P3 batches / completion sweep)",
-    };
   }
   if (policy.keywordHeuristic && /comment|typo/i.test(finding.title || "")) {
     return { admit: false, reason: "comment/typo heuristic" };
@@ -483,6 +477,14 @@ export function evaluateCascadeFinding(finding, policy) {
   }
   if (!admitsTokenSpend(finding.projectedTokenSpend, policy)) {
     return { admit: false, reason: `per-batch token budget exhausted (orchestration.cascade.token_budget=${policy.tokenBudget})` };
+  }
+  // Rule 6 (forge#3060) is evaluated last, mirroring the bash chain. It only gates P3-and-below:
+  // P0/P1/P2 already returned above.
+  if (policy.amplificationBreaker && finding.amplificationBreakerTripped) {
+    return {
+      admit: false,
+      reason: "amplification breaker tripped — P3 admission paused (routed to P3 batches / completion sweep)",
+    };
   }
   return { admit: true, reason: null };
 }
