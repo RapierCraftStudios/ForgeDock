@@ -203,11 +203,31 @@ Phase 1 resolves `$ARGUMENTS` to a concrete issue-number list exactly once, at T
 Classify `$ARGUMENTS` and persist that classification alongside the resolved issue-number list, so Phase 4 (`phase-4-execution.md` Step 4B) can decide whether to re-run the query later in the batch:
 
 ```bash
-node -e '
-import("{REPO_PATH}/bin/engine/resolve.mjs").then(({ classifyInputPattern }) => {
-  console.log(JSON.stringify(classifyInputPattern(process.argv[1])));
-}, () => process.exit(0));
-' "$ARGUMENTS"
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
+  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
+  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
+  _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+  _k="$(printf '%s\n' "${FORGE_HOME:-}" "${CLAUDE_PLUGIN_ROOT:-}" "$_l" "$_v" "$_m")"
+  while IFS= read -r _c; do
+    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && FORGE_ROOT="$_c" ;; esac
+  done <<< "$_k"
+fi
+# Import ForgeDock's OWN resolve.mjs from FORGE_ROOT, never from the consumer {REPO_PATH}
+# (inert on non-ForgeDock repos, and would execute repo-controlled JS). Unresolved/missing => no output,
+# which Phase 4 treats as "literal" (never re-resolve) — fail closed, loudly.
+if [ -n "$FORGE_ROOT" ] && [ -r "$FORGE_ROOT/bin/engine/resolve.mjs" ]; then
+  node -e '
+  import(process.argv[1]).then(({ classifyInputPattern }) => {
+    console.log(JSON.stringify(classifyInputPattern(process.argv[2])));
+  }, () => process.exit(0));
+  ' "file://$FORGE_ROOT/bin/engine/resolve.mjs" "$ARGUMENTS"
+else
+  echo "WARNING: ForgeDock install root unresolved or resolve.mjs missing (set FORGEDOCK_HOME) — input pattern left unclassified (treated as literal; no re-resolution)" >&2
+fi
 ```
 
 This mirrors `bin/engine/resolve.mjs`'s `classifyInputPattern` — a typed, unit-tested reference implementation of the same literal-vs-query rule table shown here (see that file's docstring). As with `admission.mjs` for cascade policy, the two must stay in sync by hand: any change to which patterns count as `literal` vs `query` in this table must be mirrored in `resolve.mjs`, and vice versa.
@@ -365,12 +385,32 @@ After executing the plan, retain every singleton in the registry for the next ad
 # createdAt, and isBatch. OPEN_BATCHES_JSON contains existing batch issue metadata.
 # Run this after initial resolution and every later admission event; execute returned
 # actions using memberIds, never bare issue numbers, so satellite issues cannot collide.
-BATCH_PLAN=$(node -e '
-  import("{REPO_PATH}/bin/engine/admission.mjs").then(({ planP3Batches, summarizeP3BatchPlan }) => {
-    const plan = planP3Batches({ candidates: JSON.parse(process.argv[1]), openBatches: JSON.parse(process.argv[2]) });
-    console.log(JSON.stringify({ plan, summary: summarizeP3BatchPlan(plan) }));
-  });
-' "$BATCH_CANDIDATE_REGISTRY_JSON" "$OPEN_BATCHES_JSON")
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
+  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
+  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
+  _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+  _k="$(printf '%s\n' "${FORGE_HOME:-}" "${CLAUDE_PLUGIN_ROOT:-}" "$_l" "$_v" "$_m")"
+  while IFS= read -r _c; do
+    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && FORGE_ROOT="$_c" ;; esac
+  done <<< "$_k"
+fi
+# Import ForgeDock's OWN admission.mjs from FORGE_ROOT, never from the consumer {REPO_PATH}.
+# Unresolved/missing => no plan: every candidate stays an ungrouped singleton (fail closed, loudly).
+BATCH_PLAN=""
+if [ -n "$FORGE_ROOT" ] && [ -r "$FORGE_ROOT/bin/engine/admission.mjs" ]; then
+  BATCH_PLAN=$(node -e '
+    import(process.argv[1]).then(({ planP3Batches, summarizeP3BatchPlan }) => {
+      const plan = planP3Batches({ candidates: JSON.parse(process.argv[2]), openBatches: JSON.parse(process.argv[3]) });
+      console.log(JSON.stringify({ plan, summary: summarizeP3BatchPlan(plan) }));
+    });
+  ' "file://$FORGE_ROOT/bin/engine/admission.mjs" "$BATCH_CANDIDATE_REGISTRY_JSON" "$OPEN_BATCHES_JSON")
+else
+  echo "WARNING: ForgeDock install root unresolved or admission.mjs missing (set FORGEDOCK_HOME) — no P3 batch plan; candidates retained as ungrouped singletons" >&2
+fi
 ```
 
 **Priority label schema**: ForgeDock's own issue creator (`review-pr.md`) writes only the canonical `priority:P<n>` label form. Some repos this pipeline operates against (issues opened externally, imported, or predating ForgeDock adoption) instead carry a bare `P<n>` label with no `priority:` prefix. Every priority-read check in this section — and its mirrors in `phase-4-execution.md` and `cleanup.md` — MUST accept both forms. `priority:P<n>` wins when (unusually) both are present on the same issue. Issue-*creation* call sites (the batch-issue creation below) are unaffected and keep writing canonical `priority:P<n>` only — there is no case where this pipeline needs to *write* the bare form. <!-- Added: forge#2232 -->

@@ -2116,9 +2116,28 @@ Gating predecessor #${NUM} reached \`workflow:merged\` — dispatching now. (Was
 RERESOLVE_ENABLED=$(yq '.orchestration.reresolve.enabled // true' forge.yaml 2>/dev/null || echo "true")
 RERESOLVE_MAX_ROUNDS=$(yq '.orchestration.reresolve.max_rounds // "unbounded"' forge.yaml 2>/dev/null || echo "unbounded")
 
-node "{REPO_PATH}/bin/engine/orchestrate-canary.mjs" \
-  "$ORIGINATING_QUERY_KIND" "$ORIGINATING_QUERY_PATTERN" \
-  "$RERESOLVE_ENABLED" "$RERESOLVE_MAX_ROUNDS" "$RERESOLVE_ROUNDS_SO_FAR"
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
+  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
+  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
+  _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+  _k="$(printf '%s\n' "${FORGE_HOME:-}" "${CLAUDE_PLUGIN_ROOT:-}" "$_l" "$_v" "$_m")"
+  while IFS= read -r _c; do
+    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && FORGE_ROOT="$_c" ;; esac
+  done <<< "$_k"
+fi
+# Run ForgeDock's OWN orchestrate-canary.mjs from FORGE_ROOT, never from the consumer {REPO_PATH}.
+# Unresolved/missing => no result, so reResolve is treated as false for this cycle (fail closed, loudly).
+if [ -n "$FORGE_ROOT" ] && [ -r "$FORGE_ROOT/bin/engine/orchestrate-canary.mjs" ]; then
+  node "$FORGE_ROOT/bin/engine/orchestrate-canary.mjs" \
+    "$ORIGINATING_QUERY_KIND" "$ORIGINATING_QUERY_PATTERN" \
+    "$RERESOLVE_ENABLED" "$RERESOLVE_MAX_ROUNDS" "$RERESOLVE_ROUNDS_SO_FAR"
+else
+  echo "WARNING: ForgeDock install root unresolved or orchestrate-canary.mjs missing (set FORGEDOCK_HOME) — skipping re-resolution this cycle" >&2
+fi
 ```
 
 If the result's `reResolve` is `false` (off switch, or `RERESOLVE_ROUNDS_SO_FAR` has reached `max_rounds` — bounded termination per the issue's acceptance criteria), skip this step for the current cycle and log the reason. `RERESOLVE_ROUNDS_SO_FAR` starts at 0 for the batch and increments once per cycle this step actually runs (declare it alongside the other Step 4A.pre batch-scope accumulators — do not re-initialize per completion).
@@ -2128,13 +2147,32 @@ If the result's `reResolve` is `false` (off switch, or `RERESOLVE_ROUNDS_SO_FAR`
 **Fold new matches through the existing admission path — never a bypass**:
 
 ```bash
-node -e '
-import("{REPO_PATH}/bin/engine/resolve.mjs").then(({ foldNewMatches }) => {
-  const reResolved = JSON.parse(process.argv[1]);
-  const processed = JSON.parse(process.argv[2]);
-  console.log(JSON.stringify(foldNewMatches(reResolved, processed)));
-}, () => process.exit(0));
-' "$RERESOLVED_NUMBERS_JSON" "$ALL_BATCH_ISSUE_NUMBERS_JSON"
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
+  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
+  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
+  _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+  _k="$(printf '%s\n' "${FORGE_HOME:-}" "${CLAUDE_PLUGIN_ROOT:-}" "$_l" "$_v" "$_m")"
+  while IFS= read -r _c; do
+    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && FORGE_ROOT="$_c" ;; esac
+  done <<< "$_k"
+fi
+# Import ForgeDock's OWN resolve.mjs from FORGE_ROOT, never from the consumer {REPO_PATH}.
+# Unresolved/missing => no output, so no new matches are folded this cycle (fail closed, loudly).
+if [ -n "$FORGE_ROOT" ] && [ -r "$FORGE_ROOT/bin/engine/resolve.mjs" ]; then
+  node -e '
+  import(process.argv[1]).then(({ foldNewMatches }) => {
+    const reResolved = JSON.parse(process.argv[2]);
+    const processed = JSON.parse(process.argv[3]);
+    console.log(JSON.stringify(foldNewMatches(reResolved, processed)));
+  }, () => process.exit(0));
+  ' "file://$FORGE_ROOT/bin/engine/resolve.mjs" "$RERESOLVED_NUMBERS_JSON" "$ALL_BATCH_ISSUE_NUMBERS_JSON"
+else
+  echo "WARNING: ForgeDock install root unresolved or resolve.mjs missing (set FORGEDOCK_HOME) — re-resolved matches not folded this cycle" >&2
+fi
 ```
 
 `newMatches` from `foldNewMatches` are candidate issues, not admitted ones. Each one MUST be dispatched through the exact same path a T0-resolved issue takes — DAG dependency analysis (`phase-3-dependency.md`), then Step 4A/4B's standard `dispatch_headroom`-gated dispatch — **not** through Step 4C's review-finding-specific `evaluateCascadeFinding` chain (that gate's rules, e.g. the comment/typo keyword heuristic, are shaped for cascade-spawned findings, not arbitrary re-resolved issues). This is the same non-bypass requirement Step 4C already satisfies for its own admission stream; this step must not become a second, ungated entry point into the DAG. Add every `newMatch` to `ALL_BATCH_ISSUE_NUMBERS` (so a later re-resolution round or Step 4C sees it as already processed) and to `SORTED_READY_SET`/the DAG exactly as Step 4A.pre.0 processes a T0-resolved issue.
@@ -2840,7 +2878,7 @@ for FINDING_NUM in "${BATCHING_CANDIDATES[@]}"; do
   if [ -n "$FORGE_ROOT" ] && [ -r "$FORGE_ROOT/bin/engine/admission.mjs" ]; then
     SAFETY_CLASS=$(node -e 'import(process.argv[1]).then(({ classifyBatchSafety }) => process.stdout.write(classifyBatchSafety(process.argv[2]) || "routine"))' "file://$FORGE_ROOT/bin/engine/admission.mjs" "$(echo "$FINDING_DATA" | jq -r '.title + "\n" + .body + "\n" + (.labels | join(" "))')" 2>/dev/null || echo "unclassified")
   else
-    echo "WARNING: ForgeDock install root unresolved or admission.mjs missing (set FORGEDOCK_HOME) — #${FINDING_NUM} classified unclassified (not batched)" >&2
+    echo "WARNING: ForgeDock install root unresolved or admission.mjs missing (set FORGEDOCK_HOME) — #${FINDING_NUM} classified unclassified (non-routine: may batch only with other unclassified findings on the same file, capped at 3)" >&2
   fi
   # Same file is not enough for security work: the class key prevents a
   # credential finding from sharing a batch with injection/auth hardening.
