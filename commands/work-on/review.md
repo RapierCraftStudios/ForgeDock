@@ -396,11 +396,27 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 
 - `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker mentions the phase trail (any blocker containing "phase trail": "phase trail unreadable" when the Phase 8 verifier exited ≥2 / 127, "phase trail incomplete…", or "auto-merge requires --issue", forge#3147): the merge gate refused or could not run. Do NOT re-run phases (nothing is missing) and do NOT attempt the manual merge below, because that would bypass the gate. Add `needs-human` and return `REVIEW_RESULT: status: BLOCKED` with the same blocker. The PR stays open and unmerged.
 
-- PR NOT MERGED (and not a phase-trail or auto-merge-gate BLOCKED above) → attempt manual merge:
+- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "ci gate" (Phase 8 refused to merge because the PR's checks are failing, cancelled, still pending at timeout, or unreadable): do NOT attempt the manual merge below — that would bypass the CI gate. `needs-human` is already set and the failing checks are listed on the issue. Return `REVIEW_RESULT: status: BLOCKED` with the same blocker; under `/orchestrate` the gated PR is auto-dispatched to remediation, which treats a CI-gate refusal as FIXABLE.
+
+- PR NOT MERGED (and not a phase-trail, auto-merge-gate or ci-gate BLOCKED above) → attempt manual merge, **only after the same CI gate**:
   ```bash
-  gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto
+  # CI gate (MANDATORY before any autonomous merge): merge only when every check on the PR is
+  # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch
+  # protection required none and `gh pr merge --auto` waits only for *required* checks.
+  CI_GATE_SCRIPT=""
+  for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}"; do
+    case "$_c" in /*) [ -z "$CI_GATE_SCRIPT" ] && [ -f "$_c/scripts/wait-ci-green.sh" ] && CI_GATE_SCRIPT="$_c/scripts/wait-ci-green.sh" ;; esac
+  done
+  if [ -n "$CI_GATE_SCRIPT" ]; then CI_GATE_OUT=$(bash "$CI_GATE_SCRIPT" {PR_NUMBER} {GH_FLAG}); CI_GATE_RC=$?
+  else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
+  echo "$CI_GATE_OUT"
+  if [ "$CI_GATE_RC" -eq 0 ]; then
+    gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto
+  else
+    echo "REVIEW_RESULT: status: BLOCKED, blocker: ci gate not green (rc=${CI_GATE_RC})"
+  fi
   ```
-  If merge fails: post comment, add `needs-human`, return `REVIEW_RESULT: status: BLOCKED`
+  If the gate refuses: post the gate output as an issue comment, add `needs-human`, return `REVIEW_RESULT: status: BLOCKED` (blocker "ci gate not green"). If merge fails: post comment, add `needs-human`, return `REVIEW_RESULT: status: BLOCKED`
 
 ---
 
