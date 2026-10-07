@@ -422,8 +422,27 @@ for NUM in $ORPHAN_LIST; do
       if [ "$DRY_RUN" = "true" ]; then
         echo "  [DRY-RUN] Would: gh pr merge $PR_NUM --merge --auto"
       else
-        MERGE_RESULT=$(gh pr merge "$PR_NUM" ${GH_FLAG} --merge --auto 2>&1)
-        MERGE_EXIT=$?
+        # CI gate (MANDATORY before any autonomous merge): merge only when every check on the PR is
+        # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch
+        # protection required none and `gh pr merge --auto` waits only for *required* checks.
+        CI_GATE_SCRIPT=""
+        for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}"; do
+          case "$_c" in /*) [ -z "$CI_GATE_SCRIPT" ] && [ -f "$_c/scripts/wait-ci-green.sh" ] && CI_GATE_SCRIPT="$_c/scripts/wait-ci-green.sh" ;; esac
+        done
+        if [ -n "$CI_GATE_SCRIPT" ]; then CI_GATE_OUT=$(bash "$CI_GATE_SCRIPT" "$PR_NUM" ${GH_FLAG}); CI_GATE_RC=$?
+        else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
+        echo "$CI_GATE_OUT"
+        if [ "$CI_GATE_RC" -eq 0 ]; then
+          MERGE_RESULT=$(gh pr merge "$PR_NUM" ${GH_FLAG} --merge --auto 2>&1)
+          MERGE_EXIT=$?
+        else
+          MERGE_RESULT="not merged: CI gate rc=${CI_GATE_RC}"; MERGE_EXIT=1
+          gh issue comment "$NUM" ${GH_FLAG} --body "⛔ /recover-orphans did not merge PR #${PR_NUM}: CI is not green.
+\`\`\`
+${CI_GATE_OUT}
+\`\`\`" 2>/dev/null || true # allowlist:check-command-side-effects
+          gh issue edit "$NUM" ${GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
+        fi
         echo "  Merge result (exit $MERGE_EXIT): $MERGE_RESULT"
         if [ $MERGE_EXIT -eq 0 ]; then
           # Close the issue explicitly (Closes # only auto-closes on default branch)

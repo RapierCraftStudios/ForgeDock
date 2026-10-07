@@ -2360,8 +2360,26 @@ if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
     # `main`/deploy-gate base, or to remediate.md Phase M7's base-scoped auto-land bar for a
     # non-`main` base (forge#2570). Either way this guard only parks at workflow:awaiting-merge.
 else
+    # CI gate (MANDATORY before any autonomous merge): merge only when every check on the PR is
+    # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch
+    # protection required none and `gh pr merge --auto` waits only for *required* checks.
+    CI_GATE_SCRIPT=""
+    for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}"; do
+      case "$_c" in /*) [ -z "$CI_GATE_SCRIPT" ] && [ -f "$_c/scripts/wait-ci-green.sh" ] && CI_GATE_SCRIPT="$_c/scripts/wait-ci-green.sh" ;; esac
+    done
+    if [ -n "$CI_GATE_SCRIPT" ]; then CI_GATE_OUT=$(bash "$CI_GATE_SCRIPT" {PR_NUMBER} {MERGE_GH_FLAG}); CI_GATE_RC=$?
+    else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
+    echo "$CI_GATE_OUT"
+    if [ "$CI_GATE_RC" -ne 0 ]; then
+      gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge refused for PR #{PR_NUMBER}: CI is not green (ci gate rc=${CI_GATE_RC}). The PR stays open; fix the failing checks on its branch (remediation treats this as FIXABLE) or re-run flaky ones.
+\`\`\`
+${CI_GATE_OUT}
+\`\`\`" 2>/dev/null || true # allowlist:check-command-side-effects
+      gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
+      echo "REVIEW_RESULT: status: BLOCKED, blocker: ci gate not green (rc=${CI_GATE_RC})"
+    else
     # Checkpoint comment on issue
-    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "Review complete for PR #{PR_NUMBER}. Verdict: ${VERDICT:-APPROVED}. Proceeding to merge."
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "Review complete for PR #{PR_NUMBER}. Verdict: ${VERDICT:-APPROVED}. CI green. Proceeding to merge."
 
     # Merge
     gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge
@@ -2369,6 +2387,7 @@ else
     # Verify
     MERGE_STATE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json state --jq '.state')
     [ "$MERGE_STATE" != "MERGED" ] && gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "PR #{PR_NUMBER} merge failed. State: $MERGE_STATE."
+    fi
 fi
 fi
 fi
