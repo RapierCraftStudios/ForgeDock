@@ -13,6 +13,9 @@ context: fork
 
 **Input**: $ARGUMENTS
 
+> **Transient GitHub failures** (field test: a 12-minute GitHub HTTP 500 window parked an issue at needs-human): retry any `gh` call that fails with HTTP 5xx, a timeout or "Something went wrong" up to 3 times with 10s/30s/60s backoff. If it still fails, do NOT add `needs-human` — print this phase's RESULT block with `status: BLOCKED` and a blocker that starts with `github-unavailable:`. The router retries the phase; every phase resumes from GitHub state, so a retry is safe.
+
+
 **Invoked by**: the `work-on` router, as its final step, via `Skill(skill="{FORGE_SKILL_PREFIX}work-on:close", args="...")`. This file declares `context: fork`, so it runs in an isolated sub-agent context that sees ONLY this text and its args — there is no "Phase 0 state" to rely on. Everything not passed as an arg is re-derived from GitHub/git in Phase C0. The router sees ONLY the final `CLOSE_RESULT:` block (see Output), so this file is the single source of truth for the close report, the summary card, the trajectory comment and the decision record.
 **Output**: Update project board, close issue, update parent tracker, post trajectory log, post decision record, clean up the worktree. Final reply is the `CLOSE_RESULT:` block.
 
