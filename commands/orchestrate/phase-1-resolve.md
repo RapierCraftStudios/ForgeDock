@@ -214,7 +214,7 @@ if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="
   # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
   _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
   while IFS= read -r _c; do
-    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && FORGE_ROOT="$_c" ;; esac
+    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
   done <<< "$_k"
 fi
 # Import ForgeDock's OWN resolve.mjs from FORGE_ROOT, never from the consumer {REPO_PATH}
@@ -222,10 +222,10 @@ fi
 # which Phase 4 treats as "literal" (never re-resolve) — fail closed, loudly.
 if [ -n "$FORGE_ROOT" ] && [ -r "$FORGE_ROOT/bin/engine/resolve.mjs" ]; then
   node -e '
-  import(process.argv[1]).then(({ classifyInputPattern }) => {
+  import(require("node:url").pathToFileURL(process.argv[1]).href).then(({ classifyInputPattern }) => {
     console.log(JSON.stringify(classifyInputPattern(process.argv[2])));
   }, () => process.exit(0));
-  ' "file://$FORGE_ROOT/bin/engine/resolve.mjs" "$ARGUMENTS"
+  ' "$FORGE_ROOT/bin/engine/resolve.mjs" "$ARGUMENTS"
 else
   echo "WARNING: ForgeDock install root unresolved or resolve.mjs missing (set FORGEDOCK_HOME) — input pattern left unclassified (treated as literal; no re-resolution)" >&2
 fi
@@ -397,7 +397,7 @@ if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="
   # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
   _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
   while IFS= read -r _c; do
-    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && FORGE_ROOT="$_c" ;; esac
+    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
   done <<< "$_k"
 fi
 # Import ForgeDock's OWN admission.mjs from FORGE_ROOT, never from the consumer {REPO_PATH}.
@@ -405,11 +405,11 @@ fi
 BATCH_PLAN=""
 if [ -n "$FORGE_ROOT" ] && [ -r "$FORGE_ROOT/bin/engine/admission.mjs" ]; then
   BATCH_PLAN=$(node -e '
-    import(process.argv[1]).then(({ planP3Batches, summarizeP3BatchPlan }) => {
+    import(require("node:url").pathToFileURL(process.argv[1]).href).then(({ planP3Batches, summarizeP3BatchPlan }) => {
       const plan = planP3Batches({ candidates: JSON.parse(process.argv[2]), openBatches: JSON.parse(process.argv[3]) });
       console.log(JSON.stringify({ plan, summary: summarizeP3BatchPlan(plan) }));
     });
-  ' "file://$FORGE_ROOT/bin/engine/admission.mjs" "$BATCH_CANDIDATE_REGISTRY_JSON" "$OPEN_BATCHES_JSON")
+  ' "$FORGE_ROOT/bin/engine/admission.mjs" "$BATCH_CANDIDATE_REGISTRY_JSON" "$OPEN_BATCHES_JSON")
 else
   echo "WARNING: ForgeDock install root unresolved or admission.mjs missing (set FORGEDOCK_HOME) — no P3 batch plan; candidates retained as ungrouped singletons" >&2
 fi

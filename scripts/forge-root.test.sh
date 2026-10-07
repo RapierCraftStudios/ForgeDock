@@ -22,7 +22,10 @@ extract() { awk -v want="$2" '/# FORGE_ROOT bootstrap/{c++; if(c==want){f=1; mat
 count_copies() { grep -c '# FORGE_ROOT bootstrap' "$ROOT/$1"; }
 extract commands/work-on.md 1 > "$T/canon"
 [ -s "$T/canon" ] && ok || bad "canonical bootstrap not found in work-on.md"
-want_copies() { case "$1" in commands/orchestrate/phase-1-resolve.md) echo 2 ;; commands/orchestrate/phase-4-execution.md) echo 6 ;; *) echo 1 ;; esac; }
+# Expected copies per file are DERIVED from the number of FORGE_ROOT resolution loops
+# (`FORGE_ROOT="$_c"` lines) so adding a site never needs a hardcoded count here; count_copies
+# (marker comments) must still agree with it, which catches a loop pasted without its marker.
+want_copies() { grep -c 'FORGE_ROOT="\$_c"' "$ROOT/$1"; }
 for f in $SITES; do
   n=$(count_copies "$f"); expect "exact bootstrap copy count in $f" "$(want_copies "$f")" "$n"
   i=1
@@ -78,7 +81,11 @@ if [ -z "${FORGE_ROOT_TEST_SHELLS:-}" ] && command -v zsh >/dev/null 2>&1; then 
 for SH in $SHELLS; do
 echo "== bootstrap behavior under: $SH"
 mkdir -p "$T/consumer/scripts"; : > "$T/consumer/scripts/verify-phase-trail.sh"   # hostile/lookalike consumer repo
-mkscripts() { mkdir -p "$1/scripts"; : > "$1/scripts/verify-phase-trail.sh"; : > "$1/scripts/lint-dispatch-prompt.sh"; }
+mkscripts() {
+  mkdir -p "$1/scripts" "$1/bin/engine"
+  : > "$1/scripts/verify-phase-trail.sh"; : > "$1/scripts/lint-dispatch-prompt.sh"; : > "$1/scripts/is-docs-only.sh"
+  : > "$1/bin/engine/resolve.mjs"; : > "$1/bin/engine/orchestrate-canary.mjs"; : > "$1/bin/engine/admission.mjs"
+}
 # plugin install: no env vars at all
 mkscripts "$T/h1/.claude/plugins/cache/mk/forgedock/1.0.0"
 expect "plugin cache resolves with no env" "$T/h1/.claude/plugins/cache/mk/forgedock/1.0.0" "$(run "$T/h1")"
@@ -106,6 +113,15 @@ expect "relative CLAUDE_PLUGIN_ROOT ignored" "" "$(run "$T/empty" CLAUDE_PLUGIN_
 # a candidate with only one of the two needed scripts is rejected
 mkdir -p "$T/h4/.claude/plugins/cache/mk/forgedock/1.0.0/scripts"; : > "$T/h4/.claude/plugins/cache/mk/forgedock/1.0.0/scripts/verify-phase-trail.sh"
 expect "partial install (missing lint script) rejected" "" "$(run "$T/h4")"
+# stale install: has the two original gate scripts but lacks is-docs-only.sh / engine modules => rejected
+for missing in scripts/is-docs-only.sh bin/engine/resolve.mjs bin/engine/orchestrate-canary.mjs bin/engine/admission.mjs; do
+  rm -rf "$T/h12"; mkscripts "$T/h12/.claude/plugins/cache/mk/forgedock/1.0.0"; rm -f "$T/h12/.claude/plugins/cache/mk/forgedock/1.0.0/$missing"
+  expect "stale install missing $missing rejected" "" "$(run "$T/h12")"
+done
+# a stale newest version is skipped in favor of a complete older one
+rm -rf "$T/h13"; mkscripts "$T/h13/.claude/plugins/cache/mk/forgedock/1.0.0"; mkscripts "$T/h13/.claude/plugins/cache/mk/forgedock/2.0.0"
+rm -f "$T/h13/.claude/plugins/cache/mk/forgedock/2.0.0/scripts/is-docs-only.sh"
+expect "stale newest skipped for complete older" "$T/h13/.claude/plugins/cache/mk/forgedock/1.0.0" "$(run "$T/h13")"
 # non-ForgeDock marketplace dirs are ignored; ForgeDock-named ones resolve
 mkscripts "$T/h5/.claude/plugins/marketplaces/other-tool"
 expect "non-ForgeDock marketplace ignored" "" "$(run "$T/h5")"
@@ -142,6 +158,18 @@ done
 # the canonical block must use the exact substitutable spelling, single-quoted (no :- form, which Claude Code leaves verbatim)
 grep -qF "'\${CLAUDE_PLUGIN_ROOT}'" "$T/canon.code" && ok || bad "canonical bootstrap lacks the substitutable '\${CLAUDE_PLUGIN_ROOT}' candidate"
 grep -qF 'CLAUDE_PLUGIN_ROOT:-' "$T/canon.code" && bad "canonical bootstrap uses \${CLAUDE_PLUGIN_ROOT:-}, which Claude Code never substitutes" || ok
+
+# no hand-built file:// URL from FORGE_ROOT remains; imports go through pathToFileURL (a '#', '?' or space in the path must survive)
+for f in $SITES commands/work-on/close.md; do
+  grep -nE 'file://\$\{?(FORGE_ROOT|\(pwd\))' "$ROOT/$f" >/dev/null && bad "concatenated file:// URL in $f" || ok
+done
+if command -v node >/dev/null 2>&1; then
+  for d in "we#ird" "sp ace" "q?x"; do
+    mkdir -p "$T/url/$d/bin/engine"; echo 'export const v = 42;' > "$T/url/$d/bin/engine/resolve.mjs"
+    out=$(node -e 'import(require("node:url").pathToFileURL(process.argv[1]).href).then(m => process.stdout.write(String(m.v)))' "$T/url/$d/bin/engine/resolve.mjs" 2>&1)
+    expect "pathToFileURL import survives path '$d'" 42 "$out"
+  done
+fi
 
 echo "forge-root tests: pass=$PASS fail=$FAILN"
 [ "$FAILN" -eq 0 ]
