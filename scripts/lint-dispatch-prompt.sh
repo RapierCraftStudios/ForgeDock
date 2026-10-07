@@ -22,7 +22,9 @@
 # Checks:
 #   1. Required template anchors are present (mission, loop contract, Skill invocation).
 #   2. Nothing but the context block follows the "**Issue title**" line.
-#   3. Outside the context block, no verdict/fix-prescribing or resume-shortcut language.
+#   3. Outside the context block, no verdict/fix-prescribing or resume-shortcut language
+#      (the Issue title text is scanned too), and every line before the title must
+#      match a line of the real Step 4A template (allowlist, placeholder-tolerant).
 #   4. Inside the context block, the strongest directive phrases are rejected
 #      (context may legitimately quote investigations, so the list is narrower).
 #
@@ -87,11 +89,54 @@ if [ -n "$AFTER_STRIPPED" ] && [ "$AFTER_STRIPPED" != '"' ]; then
 fi
 
 # --- 3. forbidden language outside the context block -------------------------
+# The title line is NOT exempt: its text is untrusted free text, so the strongest
+# directive phrases are scanned in it (forge#3072).
+TITLE_TEXT=$(printf '%s\n' "$HEAD_PART" | grep -F -- '**Issue title**:' | head -1)
+TITLE_TEXT="${TITLE_TEXT#*\*\*Issue title\*\*:}"
+HITS=$(grep -inE -- "$STRONG" <<< "$TITLE_TEXT" | head -5)
+[ -z "$HITS" ] || while IFS= read -r l; do fail "directive language in the Issue title line: ${l:0:160}"; done <<< "$HITS"
+
 OUTSIDE=$(printf '%s\n' "$HEAD_PART" | grep -vF -- '**Issue title**:')
 OUTSIDE="$OUTSIDE
 $AFTER"
 HITS=$(grep -inE -- "$WIDE" <<< "$OUTSIDE" | head -5)
 [ -z "$HITS" ] || while IFS= read -r l; do fail "verdict/fix-prescribing language outside context block: ${l:0:160}"; done <<< "$HITS"
+
+# --- 3b. allowlist: every head line must match a Step 4A template line --------
+# The denylist above is bypassable by rephrasing, so the head is also diffed
+# against the real template extracted from the spec (placeholders {UPPER_CASE}
+# match any text; pure-placeholder template lines match nothing). Fails closed
+# when the spec/template cannot be found. Resolved relative to THIS script.
+SPEC_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../commands/orchestrate/phase-4-execution.md"
+TPL=""
+[ -r "$SPEC_FILE" ] && TPL=$(awk '/Copy this template. Fill in variables/{f=1} f&&/^Agent\($/{g=1} g{print} g&&/^\)$/{exit}' "$SPEC_FILE" \
+  | sed -e '/^Agent($/d' -e '/^  subagent_type/d;/^  model=/d;/^  description=/d;/^  run_in_background/d' \
+        -e 's/^  prompt="//' -e '/^)$/d' | sed -e '$ { /^"$/ d }' \
+  | sed -e '/DISPATCH_CONTEXT:BEGIN/,$d')
+if [ -z "$TPL" ]; then
+  fail "cannot extract the Step 4A template from $SPEC_FILE (fail closed)"
+else
+  UNMATCHED=$(awk '
+    function matches(line, pat,   n, segs, i, rest, idx) {
+      n = split(pat, segs, /\{[A-Z_]+\}/)
+      if (n == 1) return line == pat
+      if (substr(line, 1, length(segs[1])) != segs[1]) return 0
+      rest = substr(line, length(segs[1]) + 1)
+      for (i = 2; i < n; i++) {
+        if (segs[i] == "") continue
+        idx = index(rest, segs[i]); if (idx == 0) return 0
+        rest = substr(rest, idx + length(segs[i]))
+      }
+      if (segs[n] == "") return 1
+      return length(rest) >= length(segs[n]) && substr(rest, length(rest) - length(segs[n]) + 1) == segs[n]
+    }
+    FNR == NR { if ($0 !~ /^[ \t]*(\{[A-Z_]+\}[ \t]*)+$/ && $0 != "") pats[++np] = $0; next }
+    $0 ~ /^[ \t]*$/ { next }
+    { ok = 0; for (i = 1; i <= np; i++) if (matches($0, pats[i])) { ok = 1; break }
+      if (!ok) { print substr($0, 1, 120); c++ } if (c >= 5) exit }
+  ' <(printf '%s\n' "$TPL") <(printf '%s\n' "$HEAD_PART"))
+  [ -z "$UNMATCHED" ] || while IFS= read -r l; do fail "line does not match the Step 4A template: ${l}"; done <<< "$UNMATCHED"
+fi
 
 # --- 4. strongest directives inside the context block ------------------------
 if [ -n "$CTX" ]; then

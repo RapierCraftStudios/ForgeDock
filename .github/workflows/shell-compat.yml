@@ -34,6 +34,17 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Dispatch prompt lint fixtures (forge#3072) — keep the Hard Rule 1 lint tested
+  # ---------------------------------------------------------------------------
+  dispatch-lint-tests:
+    name: lint-dispatch-prompt fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run lint-dispatch-prompt.test.sh
+        run: bash scripts/lint-dispatch-prompt.test.sh
+
+  # ---------------------------------------------------------------------------
   # Job 1: shellcheck — static analysis for .sh files on Linux
   # ---------------------------------------------------------------------------
   shellcheck:
