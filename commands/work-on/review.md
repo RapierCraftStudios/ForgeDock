@@ -396,9 +396,11 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 
 - `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker mentions the phase trail (any blocker containing "phase trail": "phase trail unreadable" when the Phase 8 verifier exited ≥2 / 127, "phase trail incomplete…", or "auto-merge requires --issue", forge#3147): the merge gate refused or could not run. Do NOT re-run phases (nothing is missing) and do NOT attempt the manual merge below, because that would bypass the gate. Add `needs-human` and return `REVIEW_RESULT: status: BLOCKED` with the same blocker. The PR stays open and unmerged.
 
+- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "stale review" (a commit landed on the PR after the verdict, so the merged code would not be the reviewed code): do NOT merge and do NOT add `needs-human`. Re-invoke Phase R3 (`/review-pr {PR_NUMBER} --auto-merge --issue {NUMBER} ...`) once — a full review of the new head. If the second attempt is stale again, add `needs-human` and return `REVIEW_RESULT: status: BLOCKED`, blocker: "PR head keeps moving after review".
+
 - `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "ci gate" (Phase 8 refused to merge because the PR's checks are failing, cancelled, still pending at timeout, or unreadable): do NOT attempt the manual merge below — that would bypass the CI gate. `needs-human` is already set and the failing checks are listed on the issue. Return `REVIEW_RESULT: status: BLOCKED` with the same blocker; under `/orchestrate` the gated PR is auto-dispatched to remediation, which treats a CI-gate refusal as FIXABLE.
 
-- PR NOT MERGED (and not a phase-trail, auto-merge-gate or ci-gate BLOCKED above) → attempt manual merge, **only after the same CI gate**:
+- PR NOT MERGED (and not a phase-trail, auto-merge-gate, stale-review or ci-gate BLOCKED above) → attempt manual merge, **only if the PR head is still the commit named in the latest `<!-- FORGE:REVIEW -->` APPROVED verdict** (otherwise re-invoke Phase R3 instead, as for "stale review") **and only after the same CI gate**:
   ```bash
   # CI gate (MANDATORY before any autonomous merge): merge only when every check on the PR is
   # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch
