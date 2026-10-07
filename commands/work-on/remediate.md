@@ -363,7 +363,7 @@ ${CI_GATE_OUT}
 \`\`\`" 2>/dev/null || true # allowlist:check-command-side-effects
   gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
 else
-gh pr merge {PR_NUMBER} {GH_FLAG} --merge
+gh pr merge {PR_NUMBER} {GH_FLAG} --merge # allowlist:check-command-side-effects (CI-gated merge)
 fi
 MERGE_STATE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json state --jq '.state')
 if [ "$MERGE_STATE" = "MERGED" ]; then
