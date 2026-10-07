@@ -31,6 +31,11 @@
 # Exit codes: 0 pass, 1 one or more artifacts missing, 2 could not read the
 # issue (fails closed — an unreadable trail is never treated as a pass).
 #
+# Legacy grace (#3102): an issue whose trusted FORGE:BUILDER:COMPLETE comment was created before
+# FORGE_TRAIL_QG_SINCE (default: when the FORGE:QUALITY_GATE marker was introduced, #3061) could
+# not have posted the marker, so QUALITY_GATE is waived for it. A missing/undated BUILDER:COMPLETE
+# never earns the grace (fail closed). Set FORGE_TRAIL_QG_SINCE="" to disable the grace.
+#
 # Comment trust: only markers posted by a trusted author count; markers from any
 # other commenter are ignored (they cannot satisfy the gate or force a band).
 # Trusted = author_association in FORGE_TRAIL_TRUSTED_ASSOCIATIONS
@@ -92,6 +97,20 @@ COMMENTS=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins 
   exit 2
 }
 
+# Creation time of the LATEST trusted FORGE:BUILDER:COMPLETE comment (empty when absent/undated).
+QG_SINCE="${FORGE_TRAIL_QG_SINCE-2026-10-07T03:40:12Z}"
+BUILD_AT=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" '
+  ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
+  | ($logins | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $L
+  | [ .[]
+      | select(
+          ((.author_association // "") as $x | $A | index($x) != null)
+          or ((.user.type // "") == "Bot")
+          or ((.user.login // "") as $x | $L | index($x) != null)
+        )
+      | select((.body // "") | startswith("<!-- FORGE:BUILDER -->") and contains("<!-- FORGE:BUILDER:COMPLETE -->"))
+      | .created_at // empty ] | sort | .[-1] // empty' 2>/dev/null) || BUILD_AT=""
+
 # NOTE: never use early-exiting `grep -q`/`head -1` after printf under pipefail: on large threads the
 # writer gets SIGPIPE and the pipeline reports failure for a marker that is present (#3099).
 # A marker only counts when it is the FIRST thing in a comment (comments are folded to one
@@ -137,6 +156,11 @@ case "$EFFECTIVE" in
   *)             NEED_CONTRACT=1; NEED_CTX=1; NEED_QG=1 ;;
 esac
 [ "$DOCS_ONLY" = "1" ] && NEED_QG=0
+# Legacy grace: built before the quality-gate marker existed -> not required (string compare on ISO-8601 UTC).
+if [ "$NEED_QG" = "1" ] && [ -n "$QG_SINCE" ] && [ -n "$BUILD_AT" ] && [[ "$BUILD_AT" < "$QG_SINCE" ]]; then
+  NEED_QG=0
+  LEGACY_NOTE="QUALITY_GATE waived: build completed ${BUILD_AT} before ${QG_SINCE}"
+fi
 
 if [ "$NEED_CONTRACT" = "1" ] && ! has '<!-- FORGE:CONTRACT -->'; then
   add_missing "CONTRACT" "re-run Skill work-on/build Phase B2 (builder contract)"
@@ -152,6 +176,7 @@ fi
 if [ "${#MISSING[@]}" -eq 0 ]; then
   echo "PHASE_TRAIL: PASS"
   echo "BAND: ${BAND:-UNKNOWN}"
+  [ -n "${LEGACY_NOTE:-}" ] && echo "NOTE: $LEGACY_NOTE"
   exit 0
 fi
 

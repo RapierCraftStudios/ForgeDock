@@ -377,6 +377,8 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
   \`\`\`"
   ```
 
+- `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` from /review-pr (forge#3102) → the review gate refused to merge because phase markers are missing. Do NOT hand-post markers and do NOT add `needs-human` yet. For each `MISSING: <marker> -> <action>` line, run that phase via its `Skill(...)`, then re-invoke Phase R3 once (the trail preflight at the top of R3 re-runs). If the second attempt returns `PHASE_TRAIL_FAILED` again, post a `<!-- FORGE:PHASE_TRAIL_FAILED -->` comment listing the still-missing markers, add `needs-human`, and return `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail incomplete after re-dispatch". The PR stays open and unmerged throughout.
+
 - PR NOT MERGED → attempt manual merge:
   ```bash
   gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto
@@ -393,11 +395,12 @@ Output this structured block:
 
 ```
 REVIEW_RESULT:
-  status: COMPLETE | ALREADY_MERGED | BLOCKED
+  status: COMPLETE | ALREADY_MERGED | BLOCKED | PHASE_TRAIL_FAILED
   pr_number: {PR_NUMBER}
   pr_url: {PR_URL}
   merged_to: {PR_BASE}
   blocker: {description if status=BLOCKED}
+  missing: {MISSING lines from the verifier if status=PHASE_TRAIL_FAILED — only when propagated from a direct /review-pr invocation; R4 itself returns BLOCKED after its one re-dispatch round}
 ```
 
 ---
