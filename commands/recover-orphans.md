@@ -455,10 +455,11 @@ for NUM in $ORPHAN_LIST; do
             --jq '.[] | select(.event == "unlabeled" and .label.name == "needs-human") | .created_at' 2>/dev/null \
             | sort | tail -1)
         PRIOR_TRAIL_CUTOFF="${PRIOR_TRAIL_CUTOFF:-1970-01-01T00:00:00Z}"
-        if PRIOR_TRAIL_IDS=$(gh api --paginate "repos/${GH_REPO}/issues/${NUM}/comments" \
-            --jq --arg cutoff "$PRIOR_TRAIL_CUTOFF" '.[] | select(.body | contains("FORGE:PHASE_TRAIL_FAILED"))
+        # gh api --jq takes one expression and no --arg, so the cutoff goes through a real jq pipe.
+        if PRIOR_TRAIL_IDS=$(set -o pipefail; gh api --paginate "repos/${GH_REPO}/issues/${NUM}/comments" 2>/dev/null \
+            | jq -r --arg cutoff "$PRIOR_TRAIL_CUTOFF" '.[] | select(.body | contains("FORGE:PHASE_TRAIL_FAILED"))
               | select(.created_at > $cutoff)
-              | select(.user.type == "Bot" or (.author_association | IN("OWNER","MEMBER","COLLABORATOR"))) | .id' 2>/dev/null); then
+              | select(.user.type == "Bot" or (.author_association | IN("OWNER","MEMBER","COLLABORATOR"))) | .id'); then
           PRIOR_TRAIL_FAILS=$(printf '%s\n' "$PRIOR_TRAIL_IDS" | grep -c '[0-9]')
         else
           PRIOR_TRAIL_FAILS=1
@@ -497,7 +498,7 @@ See the latest FORGE:PHASE_TRAIL_FAILED comment for the missing phases. Re-run e
           # rc>=2 case; add it here too so the diagnosis skip above stops re-sweeping this orphan.
           gh issue edit "$NUM" ${GH_FLAG} --add-label "needs-human" 2>/dev/null || true
           RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} blocked by the merge gate — needs-human added |\n"
-        elif [ -z "$REVIEW_STATUS" ] || ! echo "$REVIEW_STATUS" | grep -qE '^(COMPLETE|ALREADY_MERGED|BLOCKED)$'; then
+        elif case "$REVIEW_STATUS" in COMPLETE|ALREADY_MERGED|BLOCKED) false ;; *) true ;; esac; then
           # forge#3159: an empty or unrecognized status means the review result could not be read. Do not report
           # "submitted for review" or re-queue it; escalate to a human.
           gh issue edit "$NUM" ${GH_FLAG} --add-label "needs-human" 2>/dev/null || true
