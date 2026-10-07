@@ -2230,7 +2230,10 @@ else
   # Docs-only predicate: ONE shared copy (scripts/is-docs-only.sh, forge#3134), same as work-on/review.md R1.5. Fail closed: unresolved script or empty diff -> no flag.
   DOCS_ONLY_FLAG=""
   # Both sides of a rename (filename + previous_filename): `gh pr diff --name-only` collapses a rename to its destination (forge#3145).
-  PR_FILES_ALL=$(gh api --paginate "repos/{GH_REPO}/pulls/{PR_NUMBER}/files" --jq '.[] | .filename, (.previous_filename // empty)' 2>/dev/null)
+  PR_FILES_ALL=$(gh api --paginate "repos/{GH_REPO}/pulls/{PR_NUMBER}/files" --jq '.[] | .filename, (.previous_filename // empty)' 2>/dev/null) || PR_FILES_ALL=""
+  # Fail closed on truncation: the files API caps at 3000 files, so a PR at/over the cap (or an unreadable count) never yields a docs-only flag.
+  PR_CHANGED_N=$(gh api "repos/{GH_REPO}/pulls/{PR_NUMBER}" --jq .changed_files 2>/dev/null) || PR_CHANGED_N=""
+  case "$PR_CHANGED_N" in ''|*[!0-9]*) PR_FILES_ALL="" ;; *) [ "$PR_CHANGED_N" -ge 3000 ] && PR_FILES_ALL="" ;; esac
   if [ -n "$PR_FILES_ALL" ] && [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/is-docs-only.sh" ] && echo "$PR_FILES_ALL" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"; then DOCS_ONLY_FLAG="--docs-only"; fi
   # Band cross-check (forge#3149): a non-docs PR diff means an agent-chosen INVESTIGATION band must not waive requirements.
   # No --head-tree here: review auto-fix commits legitimately advance the head after the gate ran; the tree binding is enforced pre-PR (work-on/review.md R1.5).

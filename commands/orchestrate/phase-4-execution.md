@@ -1836,7 +1836,10 @@ done
        TRAIL_ALL_DOCS=1
        for TRAIL_PR in $TRAIL_PRS; do
          # forge#3145: both sides of a rename (filename + previous_filename); `gh pr diff --name-only` collapses a rename to its destination.
-         TRAIL_FILES=$(gh api --paginate "repos/{GH_REPO}/pulls/${TRAIL_PR}/files" --jq '.[] | .filename, (.previous_filename // empty)' 2>/dev/null)
+         TRAIL_FILES=$(gh api --paginate "repos/{GH_REPO}/pulls/${TRAIL_PR}/files" --jq '.[] | .filename, (.previous_filename // empty)' 2>/dev/null) || TRAIL_FILES=""
+         # Fail closed on truncation: files API caps at 3000 files; at/over the cap or an unreadable count -> not docs-only.
+         TRAIL_CHANGED_N=$(gh api "repos/{GH_REPO}/pulls/${TRAIL_PR}" --jq .changed_files 2>/dev/null) || TRAIL_CHANGED_N=""
+         case "$TRAIL_CHANGED_N" in ''|*[!0-9]*) TRAIL_FILES="" ;; *) [ "$TRAIL_CHANGED_N" -ge 3000 ] && TRAIL_FILES="" ;; esac
          if [ -z "$TRAIL_FILES" ] || [ ! -f "$FORGE_ROOT/scripts/is-docs-only.sh" ] || ! echo "$TRAIL_FILES" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"; then TRAIL_ALL_DOCS=0; break; fi
        done
        [ "$TRAIL_ALL_DOCS" = "1" ] && TRAIL_DOCS_FLAG="--docs-only"
