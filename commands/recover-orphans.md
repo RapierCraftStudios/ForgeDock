@@ -327,6 +327,7 @@ SWEEP_ID="sweep-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 # Fails closed: an unreadable comment list is treated as "held by someone else".
 claim_orphan() {
   local num="$1" now cutoff comments live
+  [ "$DRY_RUN" = "true" ] && return 0   # dry-run: no claim comment is posted (callers already skip dry-run resumes)
   now=$(date -u +%s); cutoff=$(( now - RECOVERY_CLAIM_TTL_MIN * 60 ))
   comments=$(gh api --paginate "repos/${GH_REPO}/issues/${num}/comments" 2>/dev/null \
     | jq -s 'add // []') || { CLAIM_SKIP_REASON="could not read comments to check for a live holder"; return 1; }
@@ -369,6 +370,7 @@ Holder: /recover-orphans — resuming /work-on #${num}. Other sweeps and dispatc
 }
 
 release_orphan() {
+  [ "$DRY_RUN" = "true" ] && return 0
   gh issue comment "$1" ${GH_FLAG} --body "<!-- FORGE:RECOVERY_CLAIM_RELEASED -->
 **Sweep: ${SWEEP_ID}**
 Released by /recover-orphans." >/dev/null 2>&1 || true
