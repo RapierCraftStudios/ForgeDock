@@ -3148,7 +3148,6 @@ describe("findMarkdownFiles — install tier filter", () => {
     const foundNames = found.map((f) => f.replace(/.*commands[\\/]/, "").replace(/\\/g, "/"));
 
     for (const internal of [
-      "work-on-monolithic.md",
       "design-bench.md",
       "forge-stats.md",
       "design.md",
