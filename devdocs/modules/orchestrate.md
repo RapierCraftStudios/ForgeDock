@@ -56,3 +56,9 @@ pass. Cite: #2502, PR #2526, PR #2500 (source finding).
 PR #2605 touched `commands/orchestrate/phase-4-execution.md`. See FORGE:BUILDER comment on issue #2598 for full change list.
 Key gotcha recorded: `printf '%s\n' "..."` always appends a trailing newline the original inline `--body "..."` string did not have; when staging a body-file for byte-for-byte content parity with a prior inline `--body` argument, use `printf '%s'` (no `\n`) instead. Introduced by #2584/PR #2594's mktemp+--body-file refactor of the Step 4C repair guard.
 Cite: #2598, PR #2605.
+
+## Entry 2026-10-07 — Fix: anchor phase-trail markers to comment start (#3181)
+
+PR #3238 touched `orchestrate`. See FORGE:BUILDER comment on issue #3181 for full change list.
+Key gotcha recorded: phase-trail F/R marker matches must anchor with startswith, not contains, so quoted markers cannot forge a release.
+Cite: #3181 / PR #3238.
