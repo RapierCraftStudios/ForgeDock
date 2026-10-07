@@ -404,7 +404,7 @@ orchestration:
 | `cascade.convergence_window` | positive integer | No | Consecutive ratio observations at or above 1.0 before warning. Default: 3 |
 | `cascade.amplification_breaker` | `on` \| `off` | No | Pause P3-and-below cascade admission while the findings-spawned / merged-units ratio stays at or above 1.0 for `convergence_window` units. Counts all cascade findings (not only same-lineage); P1/P2 unaffected; independent of `cascade.policy`, so `policy: all` does not disable it. Paused P3s route to bounded P3 batches. Default: `on`. Opt out with `off` (boolean `false` is accepted as `off`, `true` as `on`). |
 
-**Upgrade note — `cascade.amplification_breaker` is on by default**: existing configs that do not set this key now get the breaker automatically. During a batch, once the findings-spawned / merged-units ratio stays at or above 1.0 for `convergence_window` units (it can trip at exactly 1.0 over 3 units), P3-and-below cascade admission pauses; paused P3s are routed to bounded P3 batches rather than dispatched individually. P1/P2 are unaffected. To keep the previous behavior, set `orchestration.cascade.amplification_breaker: off` (or `false`). Release notes for the version that introduced this default should call out the change.
+**Upgrade note — `cascade.amplification_breaker` is on by default**: existing configs that do not set this key now get the breaker automatically. During a batch, once the findings-spawned / merged-units ratio stays at or above 1.0 for `convergence_window` units (it can trip at exactly 1.0 over 3 units), P3-and-below cascade admission pauses; paused P3s are routed to bounded P3 batches rather than dispatched individually. P1/P2 are unaffected. To keep the previous behavior, set `orchestration.cascade.amplification_breaker: off` (or `false`). See [RELEASE-NOTES.md](RELEASE-NOTES.md) for the release that introduced this default.
 
 **Hard invariant — not configurable**: safety exclusions (findings whose `## Problem` section indicates security/billing/anti-bot/auth concerns) are never batched and never auto-admitted by any `cascade.policy`, including `all`. That exclusion is enforced upstream of this section (the P3 batching eligibility check) and has no corresponding key here by design.
 
@@ -847,6 +847,38 @@ marketing:
 | `pr_footer` | boolean | No | `false` | When `true`, the pipeline appends a 'Powered by ForgeDock' footer link to every PR description it creates. Opt-in only — non-intrusive one-line footer, not a banner. Requires pipeline support (not yet implemented). |
 
 **Commands that use this section**: `work-on` (Phase 4 PR creation — when `pr_footer: true`)
+
+---
+
+## Environment Variables
+
+These variables are read from the operator's runner environment, not from `forge.yaml`. Set them in a trusted environment only (shell profile, CI runner settings); never from PR content, issue text or contributor-controlled CI variables.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `FORGEDOCK_HOME` | unset | Absolute path to the ForgeDock install root (the directory holding `scripts/` and `commands/`). Authoritative over every other source when set. Relative values are rejected; Windows drive-letter forms (`C:/forge`, `C:\forge`) are normalized to `/c/forge`. |
+| `FORGE_HOME` | unset | Absolute path to the ForgeDock clone. Used when `FORGEDOCK_HOME` is unset. Required for Codex, which has no `~/.claude` fallback. Relative values are ignored. |
+| `FORGE_SKILL_NAMESPACE` | auto-detected | Forces the skill prefix and nesting separator for `Skill(...)` calls. `forgedock` = `forgedock:` / `:`; `none` = empty / `:`; `codex` = `forge-` / `-`; `opencode` = empty / `-`. Any other value is an error. When unset, `FORGE_RUNTIME` (`codex` or `opencode`) is used, then the available-skills list. |
+| `FORGE_TRAIL_TRUSTED_LOGINS` | empty | Comma-separated GitHub logins whose FORGE markers count toward the phase-trail merge gate. Matching is case-sensitive. |
+| `FORGE_TRAIL_TRUSTED_ASSOCIATIONS` | `OWNER,MEMBER,COLLABORATOR` | Comma-separated `author_association` values whose FORGE markers count toward the merge gate. |
+| `FORGE_TRAIL_QG_SINCE` | `2026-10-07T03:40:12Z` | ISO-8601 UTC cutoff for the legacy `FORGE:QUALITY_GATE` grace. An issue whose trusted `FORGE:BUILDER:COMPLETE` comment was last updated before this time has `QUALITY_GATE` waived. Set to an empty string to disable the grace. A malformed or future value (including a runner clock earlier than this default) fails closed: the verifier exits 2, an infrastructure block rather than `MISSING`. |
+
+### Install root resolution
+
+`FORGE_ROOT` (where the merge trail gate, dispatch lint and engine modules are resolved) is computed in this order: `FORGEDOCK_HOME` (authoritative: when set, nothing else is consulted, and a relative value leaves `FORGE_ROOT` empty so the gate fails closed) > the running plugin's own root (substituted by Claude Code; not a runtime env var) > `FORGE_HOME` > the `~/.claude/commands/work-on.md` symlink target > the clone path recorded in `$CODEX_HOME/forge-home` (Codex) > the newest semver directory in the Claude plugin cache (official `forgedock` marketplace only; `FORGEDOCK_MARKETPLACE` pins a differently named one) > the marketplace directory. If nothing resolves, `FORGE_ROOT` stays empty and the trail gate refuses to merge (fail closed). See [CODEX.md](CODEX.md#forge_home-and-install-root-resolution).
+
+### Keeping the phase-trail merge gate satisfiable
+
+The merge gate (`scripts/verify-phase-trail.sh`) ignores FORGE markers posted by untrusted commenters. A commenter is trusted when ANY of these hold: `author_association` is in `FORGE_TRAIL_TRUSTED_ASSOCIATIONS`; the account type is `Bot` (the pipeline's GitHub App identity); or the login is in `FORGE_TRAIL_TRUSTED_LOGINS`.
+
+Pipelines that run under a human login with association `CONTRIBUTOR`, `NONE` or `FIRST_TIME_CONTRIBUTOR` will see every marker reported `MISSING`, and the gate prints a NOTE when untrusted-author markers were seen. Fix it by either:
+
+```bash
+export FORGE_TRAIL_TRUSTED_LOGINS="my-pipeline-login,other-login"   # preferred: name the identity
+export FORGE_TRAIL_TRUSTED_ASSOCIATIONS="OWNER,MEMBER,COLLABORATOR,CONTRIBUTOR"   # broader
+```
+
+Limits: `Bot` trusts any GitHub App or bot able to comment on the repo, and `COLLABORATOR` includes read-level collaborators. Tighten with the two variables above if that is too broad. An earlier `FORGE_TRAIL_QG_SINCE` waives `QUALITY_GATE` for every build completed before it, so never derive it from untrusted input.
 
 ---
 
