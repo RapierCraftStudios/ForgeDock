@@ -444,6 +444,7 @@ declare -A DEFERRED_REASONS
 # makes the reported amplification ratio look better than it was.
 FINDINGS_SPAWNED=0
 MERGED_UNITS=0
+UNIT_MERGED_THIS_CYCLE=false   # set per completed unit by the Step 4C accounting block (forge#3060)
 AMPLIFICATION_RATIO_HISTORY=()
 AMPLIFICATION_DEFERRED=()
 AMPLIFICATION_BREAKER_DEFERRED=()   # findings paused by the on-by-default breaker (forge#3060)
@@ -2200,6 +2201,8 @@ gh issue list -R {GH_REPO} --state open --search "label:review-finding created:>
   --json number,title,body,createdAt
 ```
 
+**Unconditional unit accounting (forge#3060):** the merged-unit accounting block and the "Amplification settle" block below run for EVERY completed unit, including a merged unit that spawned ZERO review-findings (an empty `{spawned_finding_numbers}` list simply makes the rule loop a no-op). Skipping them for finding-free units would leave the ratio history containing only finding-producing units (every observation >= 1.0) and the breaker could never release.
+
 **If review-finding issues were spawned:**
 
 **Amplification accounting (MANDATORY, before cascade admission):** Count every finding created by this batch, including findings later deferred by any cascade rule. After each merged unit, compute `FINDINGS_SPAWNED / MERGED_UNITS`, append the value to `AMPLIFICATION_RATIO_HISTORY`, and print a convergence warning when the latest `CONVERGENCE_WINDOW` observations are all `>= 1.0`. A high ratio is a signal, not a failure: valuable deep review findings can legitimately raise it.
@@ -2546,7 +2549,11 @@ Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${R
   # Applied even when another rule already deferred the finding, and APPENDED to the reason, so
   # Step 4F's `*"amplification breaker"*` hold (checked FIRST) still catches it.
   if [ "$AMPLIFICATION_BREAKER" = "on" ] && echo "$PRIORITY" | grep -qE '^P[3-9]$'; then
-    BREAKER_SAFETY=$(node -e 'import("./bin/engine/admission.mjs").then(({ classifyBatchSafety }) => process.stdout.write(classifyBatchSafety(process.argv[1]) || "routine"))' "$(echo "$FINDING_DATA" | jq -r '(.title // "") + "\n" + (.body // "")')" 2>/dev/null || echo "routine")
+    # Fail CLOSED: if the classifier cannot run (missing module, bad cwd), treat the finding as
+    # non-routine so a security/billing finding is never paused. Import via {REPO_PATH} and pass
+    # the text through the environment (argv text beginning with "-" is parsed as a node option).
+    BREAKER_SAFETY=$(FINDING_TEXT="$(echo "$FINDING_DATA" | jq -r '(.title // "") + "\n" + (.body // "")')" \
+      node -e 'import(process.argv[1]).then(({ classifyBatchSafety }) => process.stdout.write(classifyBatchSafety(process.env.FINDING_TEXT) || "routine"))' "file://{REPO_PATH}/bin/engine/admission.mjs" 2>/dev/null || echo "unclassified")
     BREAKER_LIVE_TRIPPED="$AMPLIFICATION_BREAKER_TRIPPED"
     if [ "$BREAKER_LIVE_TRIPPED" = "false" ] && [ "$UNIT_MERGED_THIS_CYCLE" = "true" ] && [ "$MERGED_UNITS" -gt 0 ] && \
        awk "BEGIN { exit !($FINDINGS_SPAWNED / $MERGED_UNITS >= 1) }"; then
