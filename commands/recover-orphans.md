@@ -437,10 +437,11 @@ for NUM in $ORPHAN_LIST; do
           MERGE_EXIT=$?
         else
           MERGE_RESULT="not merged: CI gate rc=${CI_GATE_RC}"; MERGE_EXIT=1
-          gh issue comment "$NUM" ${GH_FLAG} --body "⛔ /recover-orphans did not merge PR #${PR_NUM}: CI is not green.
+          CI_MSG="⛔ /recover-orphans did not merge PR #${PR_NUM}: CI is not green.
 \`\`\`
 ${CI_GATE_OUT}
-\`\`\`" 2>/dev/null || true # allowlist:check-command-side-effects
+\`\`\`"
+          gh issue comment "$NUM" ${GH_FLAG} --body "$CI_MSG" 2>/dev/null || true # allowlist:check-command-side-effects
           gh issue edit "$NUM" ${GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
         fi
         echo "  Merge result (exit $MERGE_EXIT): $MERGE_RESULT"
