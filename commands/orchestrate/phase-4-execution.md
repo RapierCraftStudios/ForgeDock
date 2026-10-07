@@ -789,6 +789,42 @@ if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ]; then
 fi
 ```
 
+**Recovery-claim dispatch gate (MANDATORY, before every individual dispatch)** <!-- Added: forge#3172 -->: a `/recover-orphans` sweep that is resuming an issue inline holds an issue-scoped `<!-- FORGE:RECOVERY_CLAIM -->` comment. Dispatching a worker underneath a live claim double-runs the issue. This gate is independent of the claims board above (it applies even when `FORGE_COORD_ISSUE` is unset) and uses the shared predicate `scripts/recovery-claim-live.sh` (unreleased claim, within `RECOVERY_CLAIM_TTL_MIN`, no `FORGE:RECOVERY_CLAIM_RELEASED` for its sweep id). It fails closed: `CLAIM: LIVE` and `CLAIM: ERROR` (exit 1 or 2, or an unresolvable script) both defer. A deferral writes nothing to GitHub (no `needs-human`, no label), the claim being transient. The issue goes into `DEFERRED_CONCURRENCY_ISSUES[]`, so it re-enters the candidate set on the next dispatch computation and is never dropped; report each deferral as `RECOVERY CLAIM DEFER` in the status update. Shell state does not persist between Bash calls, so the canonical `FORGE_ROOT` bootstrap is repeated in the block; if it resolves empty, every issue defers.
+
+```bash
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
+  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
+  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
+  _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+  # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
+  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
+  while IFS= read -r _c; do
+    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
+  done <<< "$_k"
+fi
+recovery_claim_blocks() {
+  local NUM="$1" OUT RC
+  if [ -z "${FORGE_ROOT:-}" ] || [ ! -f "$FORGE_ROOT/scripts/recovery-claim-live.sh" ]; then
+    echo "RECOVERY CLAIM DEFER: #${NUM} (recovery-claim-live.sh unresolved — failing closed)" >&2
+    return 0
+  fi
+  OUT=$(bash "$FORGE_ROOT/scripts/recovery-claim-live.sh" "$NUM" -R {GH_REPO}); RC=$?
+  [ "$RC" -eq 0 ] && return 1
+  echo "RECOVERY CLAIM DEFER: #${NUM} (${OUT}) — retried on the next dispatch computation"
+  return 0
+}
+
+# Same sites as claim_conflicts_with_live_holder: engine-first loop, Agent/task launch, Step 4B newly-ready (via Step 4A).
+if recovery_claim_blocks "$NUM"; then
+  DEFERRED_CONCURRENCY_ISSUES+=("$NUM")
+  continue
+fi
+```
+
 **Engine-first dispatch (default)**: When `forgedock` is in PATH, dispatch each ready issue via the durable engine rather than spawning prose Agent sub-agents. The engine's phase table enforces gate semantics in code — its fail-closed review gate and deterministic phase ordering are not subject to LLM interpretation.
 
 **OpenCode dispatch (runtime-neutral adapter)**: When `FORGE_RUNTIME=opencode` or
@@ -925,6 +961,10 @@ if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
   # instruction below re-checks immediately before each launch to close the remaining TOCTOU gap.
   CLAIM_SAFE_DISPATCH=()
   for NUM in "${DISPATCH_NOW[@]}"; do
+    if recovery_claim_blocks "$NUM"; then   # forge#3172: live FORGE:RECOVERY_CLAIM (fails closed)
+      DEFERRED_CONCURRENCY_ISSUES+=("$NUM")
+      continue
+    fi
     if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && claim_conflicts_with_live_holder "$NUM"; then
       DEFERRED_CLAIM_ISSUES+=("$NUM")
       continue
@@ -969,7 +1009,7 @@ fi
 fi
 ```
 
-**Dispatch each issue in `DISPATCH_NOW` via its own backgrounded `Bash` call (MANDATORY when `FORGEDOCK_AVAILABLE=true`) — never shell `&`/`wait`.** Immediately before each call, run `claim_conflicts_with_live_holder "{NUM}"`; if it returns success, defer that issue rather than dispatching it. Issue one `Bash(...)` call per remaining issue in `DISPATCH_NOW`, all in the same message, so they run concurrently within the headroom already computed above:
+**Dispatch each issue in `DISPATCH_NOW` via its own backgrounded `Bash` call (MANDATORY when `FORGEDOCK_AVAILABLE=true`) — never shell `&`/`wait`.** Immediately before each call, run `recovery_claim_blocks "{NUM}"` and `claim_conflicts_with_live_holder "{NUM}"`; if either returns success, defer that issue rather than dispatching it. Issue one `Bash(...)` call per remaining issue in `DISPATCH_NOW`, all in the same message, so they run concurrently within the headroom already computed above:
 
 ```
 Bash(command="FORGE_GIST_CAPABLE=${FORGE_GIST_CAPABLE} forgedock run-issue {NUM} --lane {PR_BASE}", run_in_background=true, description="Engine-drive issue #{NUM}")
@@ -1317,7 +1357,7 @@ fi
 echo "Dispatching ${#DISPATCH_NOW[@]} issue(s) this message (headroom was ${HEADROOM})"
 ```
 
-Immediately before every Claude `Agent()` or OpenCode `task()` call, run `claim_conflicts_with_live_holder "{NUM}"`; when it returns success, append the issue to `DEFERRED_CLAIM_ISSUES[]` and do not make that call. Spawn `Agent()` for every remaining issue in `DISPATCH_NOW` (not the raw ready set) using the template above. After the batch spawn, increment `ACTIVE_DISPATCH_COUNT` by the number actually dispatched — this happens in addition to, not instead of, capturing each returned agent ID into `AGENT_ISSUE_MAP` above.
+Immediately before every Claude `Agent()` or OpenCode `task()` call, run `recovery_claim_blocks "{NUM}"` (success: append to `DEFERRED_CONCURRENCY_ISSUES[]`, forge#3172) and `claim_conflicts_with_live_holder "{NUM}"` (success: append the issue to `DEFERRED_CLAIM_ISSUES[]`); on either, do not make that call. Spawn `Agent()` for every remaining issue in `DISPATCH_NOW` (not the raw ready set) using the template above. After the batch spawn, increment `ACTIVE_DISPATCH_COUNT` by the number actually dispatched — this happens in addition to, not instead of, capturing each returned agent ID into `AGENT_ISSUE_MAP` above.
 
 If `DISPATCH_NOW` is empty (headroom is 0), do not spawn any agents this cycle — wait for the next `agent_completed` notification, which frees a slot and re-triggers this dispatch computation (Step 4B).
 
@@ -1434,6 +1474,7 @@ release_merged_trail() {
   gh issue comment "$N" -R {GH_REPO} --body "<!-- FORGE:PHASE_TRAIL_RELEASED -->
 The merged-trail hold on #${N} was released by a human (needs-human cleared or trail re-verified). Dependents held as \`blocked-on-human-merge\` are released. A later, unrelated \`needs-human\` on this merged issue no longer gates them." >/dev/null 2>&1 || true # <!-- allowlist:check-command-side-effects -->
   [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -f "$TRAIL_CACHE_DIR/trail-$N"
+  return 0
 }
 
 # classify_predecessor_state <issue> (forge#3168): the helpers hold_merged_trail, resolve_orch_login,
