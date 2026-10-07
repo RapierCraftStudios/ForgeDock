@@ -611,6 +611,12 @@ if ! echo "$CONVERGENCE_WINDOW" | grep -qE '^[1-9][0-9]*$'; then
   echo "WARNING: forge.yaml → orchestration.cascade.convergence_window must be a positive integer — falling back to 3"
   CONVERGENCE_WINDOW=3
 fi
+# On-by-default P3 amplification breaker (forge#3060): counts ALL cascade findings
+# (refinements AND new surface). `p3_breaker: false` (or "off") opts out.
+CASCADE_P3_BREAKER=$(yq '.orchestration.cascade.p3_breaker // true' forge.yaml 2>/dev/null || echo true)
+case "$CASCADE_P3_BREAKER" in false|off) CASCADE_P3_BREAKER=false ;; *) CASCADE_P3_BREAKER=true ;; esac
+P3_BREAKER_TRIPPED=false
+echo "Cascade P3 breaker: ${CASCADE_P3_BREAKER} (window=${CONVERGENCE_WINDOW})"
 echo "Cascade amplification: max_amplification=${CASCADE_MAX_AMPLIFICATION} convergence_window=${CONVERGENCE_WINDOW} (off preserves current admission behavior)"
 
 # Independent boolean levers — each accepts an explicit granular override on
@@ -2189,6 +2195,8 @@ gh issue list -R {GH_REPO} --state open --search "label:review-finding created:>
 **If review-finding issues were spawned:**
 
 **Amplification accounting (MANDATORY, before cascade admission):** Count every finding created by this batch, including findings later deferred by any cascade rule. After each merged unit, compute `FINDINGS_SPAWNED / MERGED_UNITS`, append the value to `AMPLIFICATION_RATIO_HISTORY`, and print a convergence warning when the latest `CONVERGENCE_WINDOW` observations are all `>= 1.0`. A high ratio is a signal, not a failure: valuable deep review findings can legitimately raise it.
+
+**P3 amplification breaker (on by default, forge#3060):** Unlike the opt-in `CASCADE_MAX_AMPLIFICATION` bound (refinements only), this breaker counts ALL cascade findings. When `CASCADE_P3_BREAKER=true` and the latest `CONVERGENCE_WINDOW` ratio observations are all `>= 1.0` (reference implementation: `evaluateP3Breaker()` in `bin/engine/admission.mjs`), set `P3_BREAKER_TRIPPED=true`. While tripped: (1) stop admitting P3-and-below findings for individual dispatch — route them to the bounded P3 batch pass (`planP3Batches()`; `batchExclusionReason()` security/billing exclusions unchanged, those stay unbatched and deferred) or defer them to Step 4F with reason `P3 amplification breaker tripped`; (2) P1/P2 findings are admitted exactly as before; (3) print ONE operator report: `P3 AMPLIFICATION BREAKER: ratio {AMPLIFICATION_RATIO} >= 1.0 for {CONVERGENCE_WINDOW} merged units — {N} P3 findings queued/deferred. Batch them or defer?`. Reset `P3_BREAKER_TRIPPED=false` when the latest ratio drops below 1.0. **Operator-override guardrail:** an operator directive or config that disables the generation cap or token budget (`policy: all`, `max_generation: unlimited`, `token_budget: unlimited`, "pick up any new issues") does NOT disable this breaker; P3 cascade is never left unbounded — P1/P2 stay unlimited, P3 is batched via `planP3Batches()` and never individually dispatched while tripped. Only `orchestration.cascade.p3_breaker: false` opts out explicitly. **Every status update** (item 8 above and any "waiting for agents" message) MUST include the current amplification ratio: `ratio {AMPLIFICATION_RATIO:-n/a}{ (breaker TRIPPED) if P3_BREAKER_TRIPPED}`.
 
 For each finding, extract its source PR from `**Source**: PR #N` and increment `FINDINGS_BY_SOURCE_PR[N]`. Classify it as a **same-lineage refinement** only when that source PR closes a `review-finding` issue and both that parent finding and this finding name the same affected file; otherwise classify it as **new surface**. Record the finding number in `REFINEMENT_FINDINGS` or `NEW_SURFACE_FINDINGS` respectively. If provenance or a file path cannot be established, classify as new surface conservatively; never suppress it as a refinement.
 

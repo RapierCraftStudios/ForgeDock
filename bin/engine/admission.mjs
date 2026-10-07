@@ -121,6 +121,10 @@ export function canDeduplicateAutomatedAlert(canonical, candidate) {
  *   unit before same-lineage refinements are deferred. `null` disables the bound.
  * @property {number} convergenceWindow - Merged-unit window used to warn when
  *   amplification remains at or above 1.0.
+ * @property {boolean} p3Breaker - On-by-default finding-amplification circuit
+ *   breaker (forge#3060). When the rolling ratio stays >= 1.0 for
+ *   `convergenceWindow` observations, P3-and-below admission pauses and P3s
+ *   route to bounded batches. P1/P2 are never gated by it.
  */
 
 /**
@@ -229,6 +233,8 @@ export function parseIntOrUnlimited(raw, fallback) {
  * @param {boolean} [config.p3_same_file_defer]
  * @param {number|string} [config.max_amplification]
  * @param {number|string} [config.convergence_window]
+ * @param {boolean|string} [config.p3_breaker] - `false`/`"off"` opts out of the
+ *   on-by-default P3 amplification breaker.
  * @param {number|string} [legacyTokenBudgetPerBatch] - Deprecated-alias fallback:
  *   `pipeline.token_budget_per_batch`, read when `config.token_budget` is absent
  *   so existing configs keep working unchanged (see forge#1858).
@@ -299,6 +305,7 @@ export function resolveCascadePolicy(config = {}, legacyTokenBudgetPerBatch) {
     typeof config.p3_same_file_defer === "boolean" ? config.p3_same_file_defer : preset.p3SameFileDefer;
   const maxAmplification = parseOptionalPositiveNumber(config.max_amplification);
   if (maxAmplification.warning) warnings.push(`orchestration.cascade.max_amplification ${maxAmplification.warning}`);
+  const p3Breaker = !(config.p3_breaker === false || config.p3_breaker === "off");
   const convergenceWindow = parseIntOrUnlimited(config.convergence_window, 3);
   if (convergenceWindow.warning || convergenceWindow.value === UNLIMITED) {
     warnings.push(
@@ -332,6 +339,7 @@ export function resolveCascadePolicy(config = {}, legacyTokenBudgetPerBatch) {
       p3SameFileDefer,
       maxAmplification: maxAmplification.value,
       convergenceWindow: convergenceWindow.value === UNLIMITED ? 3 : convergenceWindow.value,
+      p3Breaker,
     },
     policyName,
     bothUncapped,
@@ -385,6 +393,27 @@ export function evaluateAmplification(mergedUnits, findingsSpawned, policy) {
     ratio,
     exceedsBound: policy.maxAmplification !== null && ratio > policy.maxAmplification,
   };
+}
+
+/**
+ * On-by-default P3 amplification breaker (forge#3060). Unlike the opt-in
+ * `maxAmplification` bound (same-lineage refinements only), this counts ALL
+ * cascade findings: it trips when the last `convergenceWindow` ratio
+ * observations are all >= 1.0. A tripped breaker pauses individual admission of
+ * P3-and-below findings (they route to bounded `planP3Batches()` batches or are
+ * deferred); P1/P2 are never paused. Pure function — safe under operator
+ * overrides of the generation cap / token budget, which do not disable it.
+ *
+ * @param {number[]} ratioHistory - Per-merged-unit findings/merged ratios.
+ * @param {CascadePolicy} policy
+ * @returns {{ tripped: boolean, window: number, latest: number|null }}
+ */
+export function evaluateP3Breaker(ratioHistory, policy) {
+  const window = policy.convergenceWindow;
+  const latest = ratioHistory.length ? ratioHistory[ratioHistory.length - 1] : null;
+  if (!policy.p3Breaker || ratioHistory.length < window) return { tripped: false, window, latest };
+  const recent = ratioHistory.slice(-window);
+  return { tripped: recent.every((r) => r >= 1.0), window, latest };
 }
 
 /**
