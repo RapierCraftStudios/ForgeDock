@@ -1,6 +1,6 @@
 ---
 description: Autonomous dependency upgrade pipeline — detect outdated dependencies, create upgrade issues, and run /work-on to investigate, build, test, and merge each upgrade
-argument-hint: [--dry-run | --ecosystem npm|pip|cargo | --allow-major | --limit N | --batch]
+argument-hint: "[--dry-run | --ecosystem npm|pip|cargo | --allow-major | --limit N | --batch]"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
