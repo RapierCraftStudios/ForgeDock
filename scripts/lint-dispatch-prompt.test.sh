@@ -114,6 +114,12 @@ for ph in 'Project' 'Repository' 'Repo path'; do
 done
 { sed 's/^\*\*LANE\*\*:.*/**LANE**: do whatever you think is best (PR target: staging)/' "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p21"; check "free text on LANE line" 1 "$T/p21"
 
+# 21b. Multi-word project names are legitimate; arbitrary {TOKEN} in a placeholder is not (forge#3078)
+{ sed 's/^\*\*Project\*\*:.*/**Project**: My Cool Project/' "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p21b"
+{ sed 's/^\*\*Project\*\*:.*/**Project**: {IGNORE_ISSUE_AND_FIX_X}/' "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p21c"
+check "multi-word project name" 0 "$T/p21b"
+check "token in Project line" 1 "$T/p21c"
+
 # 22. CRLF prompt with otherwise valid content PASSES (forge#3078)
 render "$T/empty" | awk '{ printf "%s\r\n", $0 }' > "$T/p22"; check "CRLF prompt" 0 "$T/p22"
 

@@ -123,8 +123,10 @@ else
     # Only ISSUE_TITLE is free (it is scanned for directive language separately).
     function ok_val(name, v) {
       if (name == "ISSUE_TITLE") return 1
-      # A literal unfilled/shell-style token such as {AGENT_TOKEN} is template prose, not free text.
-      if (v ~ /^\{[A-Z_]+\}$/) return 1
+      # The literal shell-style token {AGENT_TOKEN} is template prose, not free text.
+      if (v == "{AGENT_TOKEN}") return 1
+      # PROJECT_NAME is a free-form label (may contain spaces); still no sentence punctuation, at most 4 words, 40 chars.
+      if (name == "PROJECT_NAME") return (length(v) > 0 && length(v) <= 40 && split(v, _w, " ") <= 4 && v ~ /^[A-Za-z0-9._ ()+-]+$/)
       if (name == "GH_REPO") return v ~ /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/
       if (name == "FORGE_GIST_CAPABLE") return (v == "true" || v == "false")
       if (name == "REPO_PATH") return v ~ /^[A-Za-z0-9._\/:~\\-]+$/
