@@ -30,6 +30,13 @@
 #
 # Exit codes: 0 pass, 1 one or more artifacts missing, 2 could not read the
 # issue (fails closed — an unreadable trail is never treated as a pass).
+#
+# Comment trust: only markers posted by a trusted author count; markers from any
+# other commenter are ignored (they cannot satisfy the gate or force a band).
+# Trusted = author_association in FORGE_TRAIL_TRUSTED_ASSOCIATIONS
+# (default "OWNER,MEMBER,COLLABORATOR"), OR user.type == "Bot" (the pipeline's
+# GitHub App identity), OR user.login in FORGE_TRAIL_TRUSTED_LOGINS
+# (comma-separated, default empty).
 
 set -uo pipefail
 
@@ -65,7 +72,18 @@ RAW=$(gh api "repos/${REPO}/issues/${ISSUE}/comments" --paginate 2>/dev/null) ||
 
 # One line per comment, newlines folded to \x1f so a marker and its sentinel can
 # be matched within the SAME comment.
-COMMENTS=$(printf '%s' "$RAW" | jq -r '.[] | .body // "" | gsub("\r?\n"; "\u001f")' 2>/dev/null) || {
+TRUSTED_ASSOC="${FORGE_TRAIL_TRUSTED_ASSOCIATIONS-OWNER,MEMBER,COLLABORATOR}"
+TRUSTED_LOGINS="${FORGE_TRAIL_TRUSTED_LOGINS-}"
+COMMENTS=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" '
+  ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
+  | ($logins | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $L
+  | .[]
+  | select(
+      ((.author_association // "") as $x | $A | index($x) != null)
+      or ((.user.type // "") == "Bot")
+      or ((.user.login // "") as $x | $L | index($x) != null)
+    )
+  | .body // "" | gsub("\r?\n"; "\u001f")' 2>/dev/null) || {
   echo "PHASE_TRAIL: ERROR"
   echo "could not parse comments for ${REPO}#${ISSUE}" >&2
   exit 2
