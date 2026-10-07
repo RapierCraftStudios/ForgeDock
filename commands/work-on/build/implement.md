@@ -1,6 +1,6 @@
 ---
 description: Implementation agent — writes code, makes commits, posts builder comment
-argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE} --branch {BRANCH} --base {PR_BASE}"
+argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE} --branch {BRANCH} --base {PR_BASE} [--fix-acceptance \"<failed checks>\"]"
 context: fork
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
@@ -39,6 +39,8 @@ Parse from $ARGUMENTS:
 **Derived values**: `{CHANGED_FILES}` (used below) is the space-separated list of files you changed in the worktree — derive it with `git -C {WORKTREE_PATH} diff --name-only HEAD` plus any untracked files from `git -C {WORKTREE_PATH} ls-files --others --exclude-standard`. `{GH_REPO}` and `{GH_FLAG}` as parsed above.
 
 ---
+
+- `--fix-acceptance "<failed checks>"` — optional. Set only by build B6.5 after a failed acceptance gate. In this mode, skip I1–I2 planning: read the listed failing `ACCEPTANCE_CHECK` ids from the FORGE:INVESTIGATOR comment, change the code in `{WORKTREE_PATH}` until each check's target/matcher holds (do not edit the checks), update the BUILDER comment's `### Changes` list, and return `IMPLEMENT_RESULT: status: COMPLETE`. If a check is impossible as written (contradicts the contract), return `status: BLOCKED` with that reason.
 
 ## Phase I1: Load Context from GitHub
 

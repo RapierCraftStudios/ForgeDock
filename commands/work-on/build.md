@@ -565,6 +565,7 @@ The acceptance spec contains only a skip sentinel (\`type=skipped\`). No automat
 
 ```bash
 GATE_PASS=true
+CORRECTED=""
 FAILED_CHECKS=""
 
 while IFS= read -r check_line; do
@@ -609,14 +610,22 @@ while IFS= read -r check_line; do
       [ -e "$TARGET" ] || { RESULT="FAIL"; DETAIL="path not found: $TARGET"; }
       ;;
     contains)
-      grep -qE "$MATCHER" "$TARGET" 2>/dev/null || { RESULT="FAIL"; DETAIL="'$MATCHER' not found in $TARGET"; }
+      # A matcher is usually literal code; an unescaped $ ( [ . turns it into a different regex. Accept a
+      # literal match and record the correction instead of failing the build on a malformed check.
+      if ! grep -qE "$MATCHER" "$TARGET" 2>/dev/null; then
+        if grep -qF -- "$MATCHER" "$TARGET" 2>/dev/null; then CORRECTED="${CORRECTED}\n- **$ID**: matched as a literal string (the regex form could not match)"
+        else RESULT="FAIL"; DETAIL="'$MATCHER' not found in $TARGET"; fi
+      fi
       ;;
     command|behavior)
       if [ "$MATCHER" = "exit_0" ]; then
         eval "$TARGET" >/dev/null 2>&1 || { RESULT="FAIL"; DETAIL="command exited non-zero: $TARGET"; }
       else
         OUTPUT=$(eval "$TARGET" 2>&1)
-        echo "$OUTPUT" | grep -qE "$MATCHER" || { RESULT="FAIL"; DETAIL="output did not match '$MATCHER'. Got: $(echo "$OUTPUT" | head -3)"; }
+        if ! printf '%s\n' "$OUTPUT" | grep -qE "$MATCHER"; then
+          if printf '%s\n' "$OUTPUT" | grep -qF -- "$MATCHER"; then CORRECTED="${CORRECTED}\n- **$ID**: output matched as a literal string"
+          else RESULT="FAIL"; DETAIL="output did not match '$MATCHER'. Got: $(printf '%s\n' "$OUTPUT" | head -3)"; fi
+        fi
       fi
       ;;
     *)
@@ -640,6 +649,7 @@ if [ "$GATE_PASS" = "true" ]; then
 ## Acceptance Gate — PASSED
 
 All machine-checkable acceptance criteria verified against real behavior.
+$( [ -n "$CORRECTED" ] && printf '\n**Checks corrected (malformed matcher, literal text present)**:%b\n' "$CORRECTED" )
 
 <!-- FORGE:ACCEPTANCE_GATE:PASSED -->"
 else
@@ -657,7 +667,14 @@ Merge is blocked. Fix the failing criteria and re-run the validate phase.
 fi
 ```
 
-If `GATE_PASS = false`: print `BUILD_RESULT: status: BLOCKED`, blocker: "Acceptance gate failed — see FORGE:ACCEPTANCE_GATE comment".
+If `GATE_PASS = false`, the build repairs itself **once** before anything escalates (a failing acceptance check is pipeline work, not a human decision):
+
+1. Count `<!-- FORGE:ACCEPTANCE_REPAIR: issue={NUMBER} -->` comments on the issue. If one already exists, skip to step 4.
+2. Post that marker (with the failed check ids), remove `needs-human` if this gate added it, then invoke
+   `Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:implement", args="{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE} --fix-acceptance \"<failed check ids and details>\"")`
+   followed by `work-on:build:validate` with the same args as B6 (the new code gets a fresh quality gate and commit).
+3. Re-run this whole B6.5 gate. PASS → continue to the checkpoint.
+4. Still failing (or already repaired once) → leave `needs-human` and print `BUILD_RESULT: status: BLOCKED`, blocker: "Acceptance gate failed after one repair — see FORGE:ACCEPTANCE_GATE comment".
 
 If `GATE_PASS = true`: continue to write the phase checkpoint below.
 
