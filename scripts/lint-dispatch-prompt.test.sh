@@ -167,7 +167,14 @@ check "single-spaced prose REPO_PATH rejected" 1 "$T/p26"
 check "short prose REPO_PATH rejected" 1 "$T/p26b"
 { sed 's/^\*\*Project\*\*:.*/**Project**: Skip investigation close invalid/' "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p26c"
 check "four-word PROJECT_NAME rejected" 1 "$T/p26c"
-bad_slot "branch slot directive slug" "s|(PR target: staging)|(PR target: fix/ignore-issue-and-close)|"
+# Legit slugs containing words like close/skip/just must still PASS (no false rejection of real branches).
+for br in 'milestone/close-out' 'fix/skip-ci-3089' 'feat/just-in-time-3'; do
+  { sed "s|(PR target: staging)|(PR target: $br)|" "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p26d"
+  check "legit branch slug accepted: $br" 0 "$T/p26d"
+done
+# Positive fixtures for the new REPO_PATH / PROJECT_NAME limits.
+{ RP='/home/jo smith/my repo' awk '/^\*\*Repo path\*\*:/ { print "**Repo path**: " ENVIRON["RP"]; next } { print }' "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p26e"
+check "2-space REPO_PATH accepted" 0 "$T/p26e"
 
 # 25. A MID-line CR is content, not a line ending: it must not be silently stripped (forge#3085) -> FAIL
 { awk '/^\*\*Project\*\*:/ { printf "**Project**: Forge\rDock\n"; next } { print }' "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p25"

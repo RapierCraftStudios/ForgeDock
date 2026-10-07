@@ -164,8 +164,6 @@ else
         if (length(v) == 0 || length(v) > 100) return 0
         if (v !~ /^[A-Za-z0-9._][-A-Za-z0-9._\/]*$/) return 0
         if (v ~ /\/\// || v ~ /\.\./ || v ~ /\/$/) return 0
-        # Directive-word segments (forge#3089): slug-shaped text such as fix/ignore-issue-and-close.
-        if (tolower(v) ~ /(^|[-\/._])(ignore|skip|close|invalid|instead|just|bypass|override|dont)([-\/._]|$)/) return 0
         return 1
       }
       # Remaining slots (LANE, SUBAGENT_MODEL, ...) are single tokens: no "/" , no spaces.
