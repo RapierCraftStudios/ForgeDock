@@ -184,13 +184,20 @@ A PR must not be opened for work whose earlier phases were skipped. Run the dete
 DOCS_ONLY_FLAG=""
 CHANGED=$(git -C {WORKTREE_PATH} diff --name-only origin/{PR_BASE}...HEAD)
 if [ -n "$CHANGED" ] && ! echo "$CHANGED" | grep -qvE '\.md$|^docs/'; then DOCS_ONLY_FLAG="--docs-only"; fi
-TRAIL=$(bash {REPO_PATH}/scripts/verify-phase-trail.sh {NUMBER} -R {GH_REPO} $DOCS_ONLY_FLAG); TRAIL_RC=$?
-echo "$TRAIL"
+# The verifier ships with ForgeDock (not the consumer repo): same resolution as every universal script.
+TRAIL_SCRIPT="${FORGEDOCK_HOME:-{REPO_PATH}}/scripts/verify-phase-trail.sh"
+if [ ! -f "$TRAIL_SCRIPT" ]; then
+  echo "WARNING: verify-phase-trail.sh not installed at $TRAIL_SCRIPT — phase-trail preflight skipped (prose tier)" >&2
+  TRAIL_RC=0
+else
+  TRAIL=$(bash "$TRAIL_SCRIPT" {NUMBER} -R {GH_REPO} $DOCS_ONLY_FLAG); TRAIL_RC=$?
+  echo "$TRAIL"
+fi
 ```
 
 - `TRAIL_RC=0` → continue to Phase R2.
 - `TRAIL_RC=1` → **do not create the PR.** For each `MISSING: <marker> -> <action>` line, run that phase now via its `Skill(...)` (the action text names it), then re-run this preflight. Do NOT hand-post the missing marker and do NOT escalate to a human: the refusal routes back to the missing phase. If the preflight still fails after one re-dispatch round, post a `<!-- FORGE:PHASE_TRAIL_FAILED -->` comment listing the still-missing markers, add `needs-human`, and return `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail incomplete".
-- `TRAIL_RC=2` → the trail could not be read; fail closed with `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail unreadable".
+- `TRAIL_RC>=2` (2 = trail unreadable; 127 = script not executable) → the trail could not be read; fail closed with `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail unreadable".
 
 Run the same preflight again at the top of Phase R3, before `/review-pr --auto-merge` is invoked, since a resumed run can enter at R3 with an existing PR.
 

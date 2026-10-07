@@ -424,17 +424,18 @@ git ls-remote --exit-code origin {PR_BASE} >/dev/null 2>&1 || echo "PR_BASE not 
 
 The quality gate must leave a checkable artifact. `scripts/verify-phase-trail.sh` (run before PR creation and before auto-merge) requires a `FORGE:QUALITY_GATE` comment with `**Result**: PASS` for every non-docs-only change. Post it after the V1 loop ends, recording the real commands run and their real results. Do NOT hand-post this marker without having actually run the gate: a marker with no run behind it is a pipeline bypass.
 
-**Skip only if** every changed file is documentation (`*.md`, `docs/**`) and the Skip Conditions above applied (the verifier is invoked with `--docs-only` for that case).
+**Skip-path marker**: when the Skip Conditions above return `GATE_PASSED: true` early (single config/docs file), still post the marker with `**Result**: PASS (skipped — single config/docs file)` and `**Iterations**: 0`, so the verifier never has to guess. The verifier's `--docs-only` waiver additionally covers diffs where every file is `*.md` or `docs/**`.
 
 ```bash
 GATE_RESULT=$([ "$GATE_PASSED" = "true" ] && echo PASS || echo FAIL)
-gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:QUALITY_GATE -->
+QG_BODY="<!-- FORGE:QUALITY_GATE -->
 ## Quality Gate Result
 
 **Result**: ${GATE_RESULT}
 **Iterations**: {N}
 **Commands run**: {quality-gate invocation, format/verify commands, test commands actually executed}
 **Findings remaining**: {none | summary}"
+gh issue comment {NUMBER} {GH_FLAG} --body "$QG_BODY" # <!-- allowlist:check-command-side-effects -->
 ```
 
 ---

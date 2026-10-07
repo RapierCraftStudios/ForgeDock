@@ -305,7 +305,7 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | {id: .id, author: .u
 
 **Check**: state (closed → STOP), terminal labels (`workflow:merged`/`workflow:invalid`/`workflow:awaiting-merge` → STOP), existing agent comments (`FORGE:INVESTIGATOR`, `FORGE:DECOMPOSED`, `FORGE:CONTRACT`, `FORGE:BUILDER`, `FORGE:TRAJECTORY`, `FORGE:DECISION_RECORD`), parent tracker status, sub-issue status.
 
-**Resume preflight (MANDATORY on any resume past Phase 1)** <!-- Added: forge#3061 -->: before routing to Phase 3, 4, 5 or 6 from existing state, run `bash scripts/verify-phase-trail.sh {NUMBER} -R {GH_REPO}` (add `--docs-only` for docs-only diffs). On `PHASE_TRAIL: FAIL`, go BACK and run each missing phase through its `Skill(...)` (investigate, Phase 3B classification, build contract/context/architect, validate) before continuing — never continue forward over a gap, never hand-post a missing marker, and never treat a recovered uncommitted worktree as a substitute for the skipped phases. The same verifier gates PR creation (`work-on/review.md` Phase R1.5) and auto-merge (`review-pr.md` Phase 8).
+**Resume preflight (MANDATORY on any resume past Phase 1)** <!-- Added: forge#3061 -->: before routing to Phase 3, 4, 5 or 6 from existing state, run `bash "${FORGEDOCK_HOME:-$REPO_PATH}/scripts/verify-phase-trail.sh" {NUMBER} -R {GH_REPO}` (add `--docs-only` for docs-only diffs). On `PHASE_TRAIL: FAIL`, go BACK and run each missing phase through its `Skill(...)` (investigate, Phase 3B classification, build contract/context/architect, validate) before continuing — never continue forward over a gap, never hand-post a missing marker, and never treat a recovered uncommitted worktree as a substitute for the skipped phases. The same verifier gates PR creation (`work-on/review.md` Phase R1.5) and auto-merge (`review-pr.md` Phase 8).
 
 **Determine resume point**: No comments → Phase 1. Investigation exists + ready-to-build → Phase 3. Builder:COMPLETE + no PR → Phase 4. Builder without :COMPLETE (partial/interrupted build) + no PR → Phase 3 (partial-build cleanup). Builder + PR open → Phase 5. PR merged + issue open → Phase 6.
 
@@ -1562,11 +1562,24 @@ if iteration == max_iterations AND not PASS:
 
 — and note in the builder comment that context isolation was degraded for this run.
 
+**Post the `FORGE:QUALITY_GATE` marker (MANDATORY — the one gh write permitted here)** <!-- Added: forge#3061 -->: the inline path must leave the same checkable artifact as `work-on/build/validate.md` V5 ("V5 Pre-Commit: Post FORGE:QUALITY_GATE Marker"). Immediately after the gate loop ends, post it recording the real gate invocation and its real result; skip nothing even for 1-file config/docs edits (post `**Result**: PASS (skipped — single config/docs file)`). `scripts/verify-phase-trail.sh` fails the review preflight without it unless the whole diff is docs-only.
+
+```bash
+GATE_RESULT=$([ "$GATE_PASSED" = "true" ] && echo PASS || echo FAIL)
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:QUALITY_GATE -->
+## Quality Gate Result
+
+**Result**: ${GATE_RESULT}
+**Iterations**: {N}
+**Commands run**: {quality-gate invocation, format/verify commands actually executed}
+**Findings remaining**: {none | summary}"
+```
+
 # MUST CONTINUE to sub-phase 3H (Format and verify) — quality gate PASS is intermediate, NOT terminal. <!-- Added: forge#220 -->
 
 **After the sub-agent returns `passed=true`: proceed immediately to sub-phase 3H below. Quality gate is an intermediate check — "PASS" means the code is clean, NOT that the build is done. Do NOT stop.**
 
-**After PASS: Do NOT re-read GitHub state, issue body, labels, or any file beyond what the sub-agent already changed on disk. Do NOT run any gh commands. Do NOT check PR status. Proceed directly to Phase 3H (Format and verify) below.** <!-- Added: forge#93 -->
+**After PASS: Do NOT re-read GitHub state, issue body, labels, or any file beyond what the sub-agent already changed on disk. Do NOT run any gh commands (except the `FORGE:QUALITY_GATE` marker post above). Do NOT check PR status. Proceed directly to Phase 3H (Format and verify) below.** <!-- Added: forge#93 -->
 
 ### 3H: Format and verify
 

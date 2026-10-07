@@ -88,7 +88,7 @@ Extract from investigation report:
 ```bash
 COMPLEXITY_BAND=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:FAST_PATH")) | .body' 2>/dev/null \
-  | sed -n 's/.*\*\*COMPLEXITY_BAND\*\*: \([A-Z_]*\).*/\1/p' | head -1)
+  | sed -n 's/.*\*\*COMPLEXITY_BAND\*\*: *\([A-Za-z_]*\).*/\1/p' | head -1 | tr '[:lower:]' '[:upper:]')
 # Missing classification is a phase-trail failure (forge#3061), not a silent default.
 # Re-run work-on Phase 3B (classify + post FORGE:FAST_PATH) first; only then continue.
 if [ -z "$COMPLEXITY_BAND" ]; then

@@ -2185,9 +2185,20 @@ fi
 
 ```bash
 if [ -n "${MERGE_ISSUE:-}" ]; then
-  TRAIL=$(bash "${FORGEDOCK_HOME:-$REPO_PATH}/scripts/verify-phase-trail.sh" "$MERGE_ISSUE" -R {GH_REPO} ${DOCS_ONLY_FLAG:-}); TRAIL_RC=$?
+  # Same resolution as work-on/review.md Phase R1.5: the verifier ships with ForgeDock, not the consumer repo.
+  TRAIL_SCRIPT="${FORGEDOCK_HOME:-${FORGE_HOME:-$REPO_PATH}}/scripts/verify-phase-trail.sh"
+  # Docs-only predicate (identical to R1.5): every file in the PR diff is *.md or docs/**
+  DOCS_ONLY_FLAG=""
+  PR_FILES_ALL=$(gh pr diff {PR_NUMBER} {MERGE_GH_FLAG} --name-only 2>/dev/null)
+  if [ -n "$PR_FILES_ALL" ] && ! echo "$PR_FILES_ALL" | grep -qvE '\.md$|^docs/'; then DOCS_ONLY_FLAG="--docs-only"; fi
+  if [ ! -f "$TRAIL_SCRIPT" ]; then
+    echo "WARNING: verify-phase-trail.sh not installed at $TRAIL_SCRIPT — phase-trail preflight skipped (prose tier)" >&2
+    TRAIL_RC=0
+  else
+    TRAIL=$(bash "$TRAIL_SCRIPT" "$MERGE_ISSUE" -R {GH_REPO} $DOCS_ONLY_FLAG); TRAIL_RC=$?
+  fi
   if [ "$TRAIL_RC" -ne 0 ]; then
-    gh issue comment "$MERGE_ISSUE" {MERGE_GH_FLAG} --body "<!-- FORGE:PHASE_TRAIL_FAILED -->
+    TRAIL_FAIL_BODY="<!-- FORGE:PHASE_TRAIL_FAILED -->
 Auto-merge refused for PR #{PR_NUMBER}: the issue's phase trail is incomplete.
 
 \`\`\`
@@ -2195,13 +2206,15 @@ ${TRAIL}
 \`\`\`
 
 Re-run each missing phase via its Skill (see the \`->\` action on each MISSING line), then re-run /review-pr."
-    # STOP — return REVIEW_RESULT: status: PHASE_TRAIL_FAILED with the MISSING lines.
+    gh issue comment "$MERGE_ISSUE" {MERGE_GH_FLAG} --body "$TRAIL_FAIL_BODY" # <!-- allowlist:check-command-side-effects -->
+    # STOP — return REVIEW_RESULT: status: PHASE_TRAIL_FAILED with the MISSING lines (exit code 2 = trail unreadable, fail closed).
     # The /work-on router re-dispatches the named phases; this is NOT a needs-human escalation.
+    exit 1
   fi
 fi
 ```
 
-If the preflight failed, skip the rest of Phase 8 and return `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` listing the missing markers. (`DOCS_ONLY_FLAG` is `--docs-only` when every file in the PR diff is `*.md`/`docs/**`.)
+If the preflight failed, skip the rest of Phase 8 and return `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` listing the missing markers. (`DOCS_ONLY_FLAG` is computed in the block above: `--docs-only` when every file in the PR diff is `*.md`/`docs/**`.)
 
 ```bash
 # §7B verdict + purpose-regression + calibration + trust-escalation guard — check before any merge attempt <!-- Added: forge#1601, forge#1741, forge#1745 -->
