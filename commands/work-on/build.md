@@ -13,6 +13,9 @@ argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --base {PR_BAS
 
 **Input**: $ARGUMENTS
 
+> **Transient GitHub failures** (field test: a 12-minute GitHub HTTP 500 window parked an issue at needs-human): retry any `gh` call that fails with HTTP 5xx, a timeout or "Something went wrong" up to 3 times with 10s/30s/60s backoff. If it still fails, do NOT add `needs-human` — print this phase's RESULT block with `status: BLOCKED` and a blocker that starts with `github-unavailable:`. The router retries the phase; every phase resumes from GitHub state, so a retry is safe.
+
+
 **Invoked by**: the work-on router, when the issue carries label `workflow:ready-to-build` or `workflow:building`. This skill runs in an isolated forked context: it sees only its args and re-reads everything else from GitHub and git.
 **Output**: Create worktree, classify complexity, post contract, run the child phases (context, architect, implement, validate) through `Skill()`, run the acceptance gate, and print exactly one `BUILD_RESULT:` block as the final reply.
 

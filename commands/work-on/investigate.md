@@ -11,6 +11,9 @@ context: fork
 
 **Input**: $ARGUMENTS
 
+> **Transient GitHub failures** (field test: a 12-minute GitHub HTTP 500 window parked an issue at needs-human): retry any `gh` call that fails with HTTP 5xx, a timeout or "Something went wrong" up to 3 times with 10s/30s/60s backoff. If it still fails, do NOT add `needs-human` — print this phase's RESULT block with `status: BLOCKED` and a blocker that starts with `github-unavailable:`. The router retries the phase; every phase resumes from GitHub state, so a retry is safe.
+
+
 Standalone investigation phase for the work-on pipeline. Validates whether an issue is real, determines root cause, posts a structured FORGE:INVESTIGATOR comment to GitHub, and updates workflow labels.
 
 This skill runs in an **isolated forked context**: it sees only this file and its args. It has no variables from the caller — every other piece of state is re-read from GitHub/git here. It ends by printing exactly one `INVESTIGATE_RESULT:` block (see `## Output`) as its final reply, on **every** exit path (success, ALREADY_DONE, INVALID, BLOCKED).

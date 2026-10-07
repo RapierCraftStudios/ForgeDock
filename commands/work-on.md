@@ -507,6 +507,12 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:HEARTBEAT -->
 
 ---
 
+## Transient GitHub failures (router-owned retry)
+
+Any phase result whose blocker starts with `github-unavailable:` is an infrastructure outage, not a decision: do not add `needs-human`. Wait 2 minutes, then re-invoke the **same phase with the same args**; repeat at most twice (5 minutes before the second retry). Phases are idempotent and resume from GitHub state. If the third attempt still returns `github-unavailable:`, post one comment with the blocker, add `needs-human`, and STOP — at that point GitHub has been unavailable for 10+ minutes.
+
+---
+
 ## Phase 1: Investigate
 
 **Skip if**: a `<!-- FORGE:INVESTIGATOR -->` comment contains `<!-- INVESTIGATION:COMPLETE -->` or `<!-- INVESTIGATION:INVALID -->` (route on the existing verdict as below — the skill's own resume check returns it if invoked).
