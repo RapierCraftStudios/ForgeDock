@@ -44,6 +44,11 @@
 # (default "OWNER,MEMBER,COLLABORATOR"), OR user.type == "Bot" (the pipeline's
 # GitHub App identity), OR user.login in FORGE_TRAIL_TRUSTED_LOGINS
 # (comma-separated, default empty).
+# Identities outside that set -- e.g. a human with author_association CONTRIBUTOR/NONE/FIRST_TIME_CONTRIBUTOR
+# (an external contributor running the pipeline under their own login) -- are NOT trusted, so their
+# markers are ignored and the gate reports them MISSING. To accept such an identity add its login to
+# FORGE_TRAIL_TRUSTED_LOGINS, or widen FORGE_TRAIL_TRUSTED_ASSOCIATIONS (e.g. add CONTRIBUTOR). On FAIL the
+# script prints a NOTE when untrusted-author FORGE markers were seen, so this is diagnosable (#3123).
 # Limits: "Bot" trusts any GitHub App/bot that can comment on the repo (set
 # FORGE_TRAIL_TRUSTED_ASSOCIATIONS and FORGE_TRAIL_TRUSTED_LOGINS to tighten);
 # COLLABORATOR includes read-level collaborators; login matching is case-sensitive.
@@ -60,7 +65,7 @@ while [ $# -gt 0 ]; do
       if [ $# -lt 2 ] || [ -z "${2:-}" ]; then echo "PHASE_TRAIL: ERROR"; echo "usage error: $1 needs a value" >&2; exit 2; fi
       REPO="$2"; shift 2 ;;
     --docs-only) DOCS_ONLY=1; shift ;;
-    -h|--help) sed -n '5,49p' "$0"; exit 0 ;;
+    -h|--help) sed -n '5,54p' "$0"; exit 0 ;;
     *)
       if [ -z "$ISSUE" ] && [[ "$1" =~ ^[0-9]+$ ]]; then ISSUE="$1"; shift
       else echo "PHASE_TRAIL: ERROR"; echo "usage error: unexpected argument '$1'" >&2; exit 2; fi
@@ -203,4 +208,16 @@ fi
 echo "PHASE_TRAIL: FAIL"
 echo "BAND: ${BAND:-UNKNOWN}"
 for m in "${MISSING[@]}"; do echo "MISSING: $m"; done
+# Diagnose the "marker present but ignored" case: count FORGE markers posted by untrusted authors.
+UNTRUSTED_FORGE=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" '
+  ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
+  | ($logins | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $L
+  | [ .[]
+      | select(((.author_association // "") as $x | $A | index($x) == null)
+               and ((.user.type // "") != "Bot")
+               and ((.user.login // "") as $x | $L | index($x) == null))
+      | select((.body // "") | startswith("<!-- FORGE:")) ] | length' 2>/dev/null || echo 0)
+if [ "${UNTRUSTED_FORGE:-0}" -gt 0 ] 2>/dev/null; then
+  echo "NOTE: ${UNTRUSTED_FORGE} FORGE marker comment(s) from untrusted authors were ignored; set FORGE_TRAIL_TRUSTED_LOGINS or FORGE_TRAIL_TRUSTED_ASSOCIATIONS to trust them"
+fi
 exit 1

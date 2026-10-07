@@ -928,11 +928,22 @@ gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
 
 ## Skip Conditions
 
-Skip this entire step (post nothing, return empty briefing) if:
-- **COMPLEXITY_BAND: TRIVIAL** — checked via FORGE:FAST_PATH comment at entry (see guard above) <!-- Primary skip path: forge#679 -->
+Skip the context gathering (return an empty briefing) if:
+- **COMPLEXITY_BAND: TRIVIAL** — checked via FORGE:FAST_PATH comment at entry (see guard above); post NO comment <!-- Primary skip path: forge#679 -->
 - Issue is a 1-file config or docs edit with no code logic
 - The affected files have zero git history (new files being created)
 - `{AFFECTED_FILES}` is empty (investigation produced no file list)
+
+**Minimal marker on every non-TRIVIAL skip (forge#3123)**: for STANDARD/COMPLEX the phase-trail gate (`scripts/verify-phase-trail.sh`) requires a `FORGE:CONTEXT` marker, so a skip must still post an empty marker comment (idempotent: skip if a `FORGE:CONTEXT` comment already exists), otherwise a re-run can never satisfy the gate:
+
+```bash
+gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
+## Implementation Context for #{NUMBER}
+
+Context gathering skipped: {REASON — config/docs-only edit | new files, no git history | empty affected-file list}. No institutional memory to surface.
+
+<!-- FORGE:CONTEXT:COMPLETE -->"
+```
 
 ---
 
