@@ -9,7 +9,16 @@
 # orchestrator cannot pre-solve an issue or pre-decide its verdict in a custom brief.
 #
 # Usage:
-#   lint-dispatch-prompt.sh <prompt-file>      (or "-" / no arg to read stdin)
+#   lint-dispatch-prompt.sh [--expect KEY=VALUE]... <prompt-file>   (or "-" / no file to read stdin)
+#
+#   Every placeholder the orchestrator resolves itself (PROJECT_NAME, GH_REPO, REPO_PATH, LANE,
+#   PR_BASE, STAGING_BRANCH, SOURCE_BRANCH, NUMBER, FORGE_GIST_CAPABLE, SUBAGENT_MODEL,
+#   PROJECT_PREFIX, SATELLITE_PREFIX, FORGE_SKILL_PREFIX) must EXACTLY equal the value passed via
+#   --expect KEY=VALUE (repeatable; split on the first "="; an empty VALUE is legal). The value
+#   is never eval'd or re-interpreted, so spaces, parentheses, backslashes and non-ASCII are safe
+#   (pass it as one quoted argument). A resolvable slot present in the prompt with NO --expect is
+#   refused (fail closed); there is no charset/stopword fallback. Free-text slots (the issue
+#   title, the DISPATCH_CONTEXT block) cannot be pre-resolved and keep the directive-phrase scan.
 #
 # Structure expected (see commands/orchestrate/phase-4-execution.md Step 4A):
 #   <fixed 4A template text>
@@ -24,7 +33,8 @@
 #   2. Nothing but the context block follows the "**Issue title**" line.
 #   3. Outside the context block, no verdict/fix-prescribing or resume-shortcut language
 #      (the Issue title text is scanned too), and every line before the title must
-#      match a line of the real Step 4A template (allowlist, placeholder-tolerant).
+#      match a line of the real Step 4A template (allowlist); resolvable placeholders must
+#      equal their --expect value byte for byte.
 #   4. Inside the context block, the strongest directive phrases are rejected
 #      (context may legitimately quote investigations, so the list is narrower).
 #
@@ -33,7 +43,26 @@
 
 set -uo pipefail
 
-SRC="${1:--}"
+# Expected values for orchestrator-resolved placeholders: one "KEY=VALUE" line per --expect in a
+# temp file that awk reads byte-exact (no shell/awk escape processing of the value).
+EXPECT_FILE="$(mktemp)"; trap 'rm -f "$EXPECT_FILE"' EXIT
+NL='
+'
+SRC="-"; SRC_SET=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --expect)
+      if [ $# -lt 2 ] || [[ "$2" != [A-Z_]*=* ]]; then
+        echo "LINT: ERROR"; echo "VIOLATION: --expect needs KEY=VALUE (KEY is UPPER_CASE)"; exit 2
+      fi
+      case "$2" in *"$NL"*) echo "LINT: ERROR"; echo "VIOLATION: --expect value must not contain a newline"; exit 2;; esac
+      printf '%s\n' "$2" >> "$EXPECT_FILE"; shift 2 ;;
+    --expect=*)
+      echo "LINT: ERROR"; echo "VIOLATION: use '--expect KEY=VALUE' (separate arguments)"; exit 2 ;;
+    *) if [ "$SRC_SET" -eq 1 ]; then echo "LINT: ERROR"; echo "VIOLATION: unexpected argument: $1"; exit 2; fi
+       SRC="$1"; SRC_SET=1; shift ;;
+  esac
+done
 if [ "$SRC" = "-" ]; then
   PROMPT="$(cat)"
 elif [ -r "$SRC" ]; then
@@ -123,60 +152,10 @@ if [ -z "$TPL" ]; then
   fail "cannot extract the Step 4A template from $SPEC_FILE (fail closed)"
 else
   UNMATCHED=$(awk '
-    # Per-placeholder value charsets (forge#3078): a {PLACEHOLDER} is NOT free text.
-    # Only ISSUE_TITLE is free (it is scanned for directive language separately).
-    BEGIN {
-      np2 = split("do not dont just close ignore prior previous instructions instruction investigate this that issue the and then fix skip please instead only without verify resolve resolved already fixed stop merge delete remove", _pw, " ")
-      for (pi = 1; pi <= np2; pi++) PROSE_WORDS[_pw[pi]] = 1
-    }
-    function ok_val(name, v) {
-      if (name == "ISSUE_TITLE") return 1
-      # The literal shell-style token {AGENT_TOKEN} is template prose, not free text.
-      if (v == "{AGENT_TOKEN}") return 1
-      # PROJECT_NAME is a free-form label (may contain spaces); still no sentence punctuation, at most 3 words, 40 chars (forge#3089).
-      if (name == "PROJECT_NAME") return (length(v) > 0 && length(v) <= 40 && split(v, _w, " ") <= 3 && v ~ /^[A-Za-z0-9._ ()+-]+$/)
-      if (name == "GH_REPO") return v ~ /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/
-      if (name == "FORGE_GIST_CAPABLE") return (v == "true" || v == "false")
-      # REPO_PATH: validated structurally, not by charset (forge#3085). Must look like an
-      # absolute path (/..., ~..., X:\... or X:/..., \\server\...); spaces, +, parentheses and
-      # non-ASCII are legitimate path characters; shell metacharacters, quotes, sentence
-      # punctuation and control chars are not.
-      if (name == "REPO_PATH") {
-        if (length(v) == 0 || length(v) > 260) return 0
-        if (v !~ /^(\/|~|[A-Za-z]:[\\\/]|\\\\)/) return 0
-        if (v ~ /[`$;|&<>"'"'"'!?,*{}\[\]]/ || v ~ /[[:cntrl:]]/) return 0
-        if (v ~ /  / || v ~ /(^|[\/\\]) /) return 0
-        # Prose guard (forge#3089): a real path with spaces has few of them, and nearly every
-        # space-separated token carries a path separator. Allow at most 2 spaces and at most
-        # one separator-less token after the first, so "/x then do not investigate ..." fails.
-        nsp = gsub(/ /, " ", v)
-        if (nsp > 2) return 0
-        nt = split(v, _t, " "); bare = 0
-        for (ti = 2; ti <= nt; ti++) if (_t[ti] !~ /[\/\\]/) bare++
-        if (bare > 1) return 0
-        # Slash-joined prose (forge#3091): "/x do/not/investigate" has one space and every token
-        # carries a separator, so also split on / \ and space and reject directive/stopword tokens.
-        nw = split(tolower(v), _w2, /[\/\\ ]+/)
-        for (ti = 1; ti <= nw; ti++) if (_w2[ti] in PROSE_WORDS) return 0
-        return 1
-      }
-      # Numbers: digits, optionally preceded by a satellite prefix when two placeholders are adjacent.
-      if (name == "NUMBER") return v ~ /^([A-Za-z0-9._-]+:)?[0-9]+$/
-      # Prefixes are single tokens (no "/"): SATELLITE_PREFIX is followed by ":" in the template;
-      # PROJECT_PREFIX / FORGE_SKILL_PREFIX carry their own trailing ":" (or are empty).
-      if (name == "SATELLITE_PREFIX") return v ~ /^[A-Za-z0-9._-]+$/
-      if (name == "PROJECT_PREFIX" || name == "FORGE_SKILL_PREFIX") return v ~ /^([A-Za-z0-9._-]+:)?$/
-      # Branch names: no leading "/" or "-", no empty segments or "..", so a file-path-shaped
-      # directive such as /ignore/the/issue/fix.patch cannot ride in a branch slot.
-      if (name == "STAGING_BRANCH" || name == "SOURCE_BRANCH" || name == "PR_BASE") {
-        if (length(v) == 0 || length(v) > 100) return 0
-        if (v !~ /^[A-Za-z0-9._][-A-Za-z0-9._\/]*$/) return 0
-        if (v ~ /\/\// || v ~ /\.\./ || v ~ /\/$/) return 0
-        return 1
-      }
-      # Remaining slots (LANE, SUBAGENT_MODEL, ...) are single tokens: no "/" , no spaces.
-      return v ~ /^[-A-Za-z0-9._]*$/
-    }
+    # Resolvable placeholders must EXACTLY equal the --expect value (EXP[], read from file 1).
+    # No expected value -> fail closed (MISSING[]). Only ISSUE_TITLE is free text (it is scanned
+    # for directive language separately); {AGENT_TOKEN} is literal template prose.
+    function expected(name) { return (name in EXP) }
     function matches(line, pat,   rest, lit, name, nl, idx, val) {
       rest = line
       while (1) {
@@ -185,27 +164,39 @@ else
         pat = substr(pat, RSTART + RLENGTH)
         if (substr(rest, 1, length(lit)) != lit) return 0
         rest = substr(rest, length(lit) + 1)
-        if (match(pat, /\{[A-Z_]+\}/)) nl = substr(pat, 1, RSTART - 1); else nl = pat
-        if (pat == "") { val = rest; rest = "" }
-        else if (nl == "") { val = "" }   # adjacent placeholders: the later one absorbs the value
-        else if (nl == pat) {
-          if (length(rest) < length(nl) || substr(rest, length(rest) - length(nl) + 1) != nl) return 0
-          val = substr(rest, 1, length(rest) - length(nl)); rest = nl
-        } else {
-          idx = index(rest, nl); if (idx == 0) return 0
-          val = substr(rest, 1, idx - 1); rest = substr(rest, idx)
+        if (name == "AGENT_TOKEN") { val = "{AGENT_TOKEN}"; if (substr(rest, 1, length(val)) != val) return 0; rest = substr(rest, length(val) + 1); continue }
+        if (name == "ISSUE_TITLE") {
+          if (match(pat, /\{[A-Z_]+\}/)) nl = substr(pat, 1, RSTART - 1); else nl = pat
+          if (pat == "") { rest = "" }
+          else if (nl == "") { }
+          else if (nl == pat) {
+            if (length(rest) < length(nl) || substr(rest, length(rest) - length(nl) + 1) != nl) return 0
+            rest = nl
+          } else { idx = index(rest, nl); if (idx == 0) return 0; rest = substr(rest, idx) }
+          continue
         }
-        if (!ok_val(name, val)) return 0
+        if (!expected(name)) { TM[name] = 1; return 0 }
+        val = EXP[name]
+        if (substr(rest, 1, length(val)) != val) return 0
+        rest = substr(rest, length(val) + 1)
       }
     }
-    FNR == NR { if ($0 !~ /^[ \t]*(\{[A-Z_]+\}[ \t]*)+$/ && $0 != "") pats[++np] = $0; next }
+    FILENAME == ARGV[1] { i = index($0, "="); if (i > 1) EXP[substr($0, 1, i - 1)] = substr($0, i + 1); next }
+    FILENAME == ARGV[2] {
+      if ($0 !~ /^[ \t]*(\{[A-Z_]+\}[ \t]*)+$/ && $0 != "") pats[++np] = $0; next }
     $0 ~ /^[ \t]*$/ { next }
-    { ok = 0; for (i = 1; i <= np; i++) if (matches($0, pats[i])) { ok = 1; break }
-      if (!ok) { print substr($0, 1, 120); c++ } if (c >= 5) exit }
-  ' <(printf '%s\n' "$TPL") <(printf '%s\n' "$HEAD_PART"))
-  [ -z "$UNMATCHED" ] || while IFS= read -r l; do fail "line does not match the Step 4A template: ${l}"; done <<< "$UNMATCHED"
+    { ok = 0; delete TM; for (i = 1; i <= np; i++) if (matches($0, pats[i])) { ok = 1; break }
+      if (!ok) { for (n in TM) MISSING[n] = 1 }
+      if (!ok) { print "LINE:" substr($0, 1, 120); c++ } if (c >= 5) exit }
+    END { for (n in MISSING) print "MISSING:" n }
+  ' "$EXPECT_FILE" <(printf '%s\n' "$TPL") <(printf '%s\n' "$HEAD_PART"))
+  while IFS= read -r l; do
+    case "$l" in
+      LINE:*) fail "line does not match the Step 4A template: ${l#LINE:}" ;;
+      MISSING:*) fail "no expected value supplied for resolvable slot {${l#MISSING:}} (pass --expect ${l#MISSING:}=VALUE; fail closed)" ;;
+    esac
+  done <<< "$UNMATCHED"
 fi
-
 # --- 4. strongest directives inside the context block ------------------------
 if [ -n "$CTX" ]; then
   HITS=$(grep -inE -- "$STRONG" <<< "$CTX" | head -5)

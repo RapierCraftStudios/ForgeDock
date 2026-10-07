@@ -1074,7 +1074,20 @@ if [ ! -r "$LINT_SCRIPT" ]; then
 fi
 PROMPT_FILE="$(mktemp)"
 printf '%s' "$RENDERED_PROMPT" > "$PROMPT_FILE"
-bash "$LINT_SCRIPT" "$PROMPT_FILE"; LINT_RC=$?
+# Exact-match expectations: every slot the orchestrator resolved itself must equal, byte for byte, the
+# value it substituted into the template (the SAME variables, never re-derived). One quoted argument per
+# slot, so spaces, parentheses, backslashes and non-ASCII are safe. A slot present in the prompt with no
+# --expect is refused (fail closed). PROJECT_PREFIX / FORGE_SKILL_PREFIX may legitimately be empty.
+LINT_EXPECT=(
+  --expect "PROJECT_NAME=$PROJECT_NAME"       --expect "GH_REPO=$GH_REPO"
+  --expect "REPO_PATH=$REPO_PATH"             --expect "LANE=$LANE"
+  --expect "PR_BASE=$PR_BASE"                 --expect "STAGING_BRANCH=$STAGING_BRANCH"
+  --expect "SOURCE_BRANCH=$SOURCE_BRANCH"     --expect "NUMBER={NUMBER}"
+  --expect "FORGE_GIST_CAPABLE=$FORGE_GIST_CAPABLE" --expect "SUBAGENT_MODEL=$SUBAGENT_MODEL"
+  --expect "PROJECT_PREFIX=$PROJECT_PREFIX"   --expect "SATELLITE_PREFIX=$SATELLITE_PREFIX"
+  --expect "FORGE_SKILL_PREFIX=$FORGE_SKILL_PREFIX"
+)
+bash "$LINT_SCRIPT" "${LINT_EXPECT[@]}" "$PROMPT_FILE"; LINT_RC=$?
 rm -f "$PROMPT_FILE"
 if [ "$LINT_RC" -ne 0 ]; then
   # rc 1 = template deviation (violations printed above); rc 2 = unreadable/empty prompt; any other rc = lint crashed.
@@ -1084,7 +1097,9 @@ if [ "$LINT_RC" -ne 0 ]; then
 fi
 ```
 
-The lint rejects: template deviations, any text outside the context block after the issue title, and prompts that pre-decide a verdict or fix ("likely already resolved — verify and close", "the fix is ...", "make X terminal", "finish what the previous agent left"). The orchestrator never diagnoses, designs fixes, or summarizes what an issue "probably" needs — investigation is the agent's job via `work-on/investigate`.
+**Exact-match placeholders**: the lint does not guess whether a slot "looks like" a project name, path or branch (every charset/stopword heuristic was bypassed within a round). Each orchestrator-resolved slot (`{PROJECT_NAME}`, `{GH_REPO}`, `{REPO_PATH}`, `{LANE}`, `{PR_BASE}`, `{STAGING_BRANCH}`, `{SOURCE_BRANCH}`, `{NUMBER}`, `{FORGE_GIST_CAPABLE}`, `{SUBAGENT_MODEL}`, `{PROJECT_PREFIX}`, `{SATELLITE_PREFIX}`, `{FORGE_SKILL_PREFIX}`) must equal the `--expect KEY=VALUE` passed for it, and a slot with no `--expect` is refused. Only the free-text slots (issue title line, `DISPATCH_CONTEXT` block) are scanned for directive phrases. When you add a new resolved placeholder to the 4A template, add its `--expect` here and its key to `scripts/lint-dispatch-prompt.test.sh`.
+
+The lint rejects: template deviations, any resolved placeholder that differs from its expected value, any text outside the context block after the issue title, and prompts that pre-decide a verdict or fix ("likely already resolved — verify and close", "the fix is ...", "make X terminal", "finish what the previous agent left"). The orchestrator never diagnoses, designs fixes, or summarizes what an issue "probably" needs — investigation is the agent's job via `work-on/investigate`.
 
 **`{GIST_CONTEXT}` generation**: For each issue being dispatched, build the context block. **Prefer the deconflicted `FORGE:SYNTHESIS_BRIEF` (from Phase 2.5) when one exists** — it is a per-issue, already-reconciled brief that carries only the arbitration decisions and sibling investigation Gists relevant to *this* issue. Injecting it instead of the full aggregated milestone-index gist means the agent does not re-arbitrate the same contradictions (less token spend, less nondeterminism). Only when Phase 2.5 did not run (0/1 investigations — no brief exists) does this fall back to the raw parent-investigation + milestone-index gist behavior. <!-- Added: forge#1192 -->
 
