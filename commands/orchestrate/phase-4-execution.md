@@ -619,7 +619,10 @@ fi
 # affected. It is independent of orchestration.cascade.policy, so `policy: all` and the
 # --max-generation/--token-budget unlimited CLI overrides do NOT disable it. Opt out only
 # with an explicit `orchestration.cascade.amplification_breaker: off`.
-AMPLIFICATION_BREAKER=$(yq '.orchestration.cascade.amplification_breaker // "on"' forge.yaml 2>/dev/null || echo "on")
+# NOTE: do NOT use yq's `// "on"` here — the alternative operator treats boolean `false` as falsy and
+# would turn `amplification_breaker: false` into "on". Read the raw value and default null/empty to "on".
+AMPLIFICATION_BREAKER=$(yq '.orchestration.cascade.amplification_breaker' forge.yaml 2>/dev/null || echo "on")
+case "$AMPLIFICATION_BREAKER" in ""|null) AMPLIFICATION_BREAKER="on" ;; esac
 case "$(echo "$AMPLIFICATION_BREAKER" | tr '[:upper:]' '[:lower:]')" in
   on|true) AMPLIFICATION_BREAKER="on" ;;
   off|false) AMPLIFICATION_BREAKER="off" ;;
