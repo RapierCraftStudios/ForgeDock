@@ -400,7 +400,7 @@ REVIEW_RESULT:
   pr_url: {PR_URL}
   merged_to: {PR_BASE}
   blocker: {description if status=BLOCKED}
-  missing: {MISSING lines from the verifier if status=PHASE_TRAIL_FAILED}
+  missing: {MISSING lines from the verifier if status=PHASE_TRAIL_FAILED — only when propagated from a direct /review-pr invocation; R4 itself returns BLOCKED after its one re-dispatch round}
 ```
 
 ---
