@@ -46,7 +46,8 @@ mk() {
       PROSE) items+=('{"body":"I ran the architect and context inline; FORGE:CONTEXT FORGE:ARCHITECT FORGE:QUALITY_GATE done"}') ;;
     esac
   done
-  local IFS=,; echo "[${items[*]}]" > "$out"; echo "$out"
+  # Fixtures model a trusted (OWNER) author; trust filtering is exercised separately below (#3100).
+  local IFS=,; echo "[${items[*]}]" | jq -c 'map(. + {author_association:"OWNER", user:{login:"owner",type:"User"}})' > "$out"; echo "$out"
 }
 
 run() { # run <fixture> [args...] -> sets OUT, RC
@@ -99,9 +100,36 @@ c=[{"body":inv},{"body":"<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: COMPLEX"
    {"body":"<!-- FORGE:CONTRACT -->\nx"},{"body":"<!-- FORGE:CONTEXT -->\nx"},
    {"body":"<!-- FORGE:ARCHITECT -->\nx"},{"body":"<!-- FORGE:QUALITY_GATE -->\n**Result**: PASS\n"}]
 c+= [{"body":"filler "+("x"*2000)} for _ in range(300)]
+for x in c: x.update({"author_association":"OWNER","user":{"login":"owner","type":"User"}})
 json.dump(c,open(sys.argv[1],"w"))
 PY
 expect_pass "large thread with present markers still passes" "$TMP_FX/big.json"
+
+# --- Comment-author trust filtering (#3100) ---
+# tc <assoc> <login> <type> <body>: one comment with explicit author metadata
+tc() { jq -nc --arg a "$1" --arg l "$2" --arg t "$3" --arg b "$4" '{author_association:$a,user:{login:$l,type:$t},body:$b}'; }
+tj() { local out="$TMP_FX/$1.json"; shift; local IFS=,; echo "[$*]" > "$out"; echo "$out"; }
+T_INV=$'<!-- FORGE:INVESTIGATOR -->\nx\n<!-- INVESTIGATION:COMPLETE -->'
+T_FPI=$'<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: INVESTIGATION'
+T_FPS=$'<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: STANDARD'
+
+# Forged early INVESTIGATION band from a stranger must not downgrade requirements.
+expect_fail "forged early FAST_PATH from untrusted user is ignored" \
+  "$(tj t1 "$(tc NONE evil User "$T_FPI")" "$(tc OWNER own User "$T_INV")" "$(tc OWNER own User "$T_FPS")")" CONTRACT
+expect_fail "untrusted-only markers satisfy nothing" \
+  "$(tj t2 "$(tc NONE evil User "$T_INV")" "$(tc NONE evil User "$T_FPI")")" INVESTIGATOR
+expect_fail "untrusted user mixed into a complete trail cannot supply the missing CONTRACT" \
+  "$(tj t3 "$(tc OWNER own User "$T_INV")" "$(tc OWNER own User "$T_FPS")" "$(tc NONE evil User '<!-- FORGE:CONTRACT -->')" "$(tc OWNER own User '<!-- FORGE:CONTEXT -->')" "$(tc OWNER own User '<!-- FORGE:ARCHITECT -->')" "$(tc OWNER own User $'<!-- FORGE:QUALITY_GATE -->\n**Result**: PASS')")" CONTRACT
+expect_fail "comment with no author metadata is untrusted" \
+  "$(tj t4 '{"body":"<!-- FORGE:INVESTIGATOR -->\n<!-- INVESTIGATION:COMPLETE -->"}')" INVESTIGATOR
+expect_pass "Bot identity is trusted" "$(tj t5 "$(tc NONE app Bot "$T_INV")" "$(tc NONE app Bot "$T_FPI")")"
+expect_pass "MEMBER and COLLABORATOR are trusted by default" "$(tj t6 "$(tc MEMBER m User "$T_INV")" "$(tc COLLABORATOR c User "$T_FPI")")"
+FORGE_TRAIL_TRUSTED_LOGINS="svc-user, other" expect_pass "allowlisted login is trusted" \
+  "$(tj t7 "$(tc NONE svc-user User "$T_INV")" "$(tc NONE svc-user User "$T_FPI")")"
+FORGE_TRAIL_TRUSTED_ASSOCIATIONS="OWNER" expect_fail "narrowed associations reject COLLABORATOR" \
+  "$(tj t8 "$(tc COLLABORATOR c User "$T_INV")" "$(tc COLLABORATOR c User "$T_FPI")")" INVESTIGATOR
+FORGE_TRAIL_TRUSTED_ASSOCIATIONS="" expect_fail "empty associations trust no one but Bots/allowlist" \
+  "$(tj t9 "$(tc OWNER own User "$T_INV")" "$(tc OWNER own User "$T_FPI")")" INVESTIGATOR
 
 # Outage fails closed (exit 2, never PASS)
 OUT=$(MOCK_GH_FAIL=1 MOCK_GH_JSON=/dev/null bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
