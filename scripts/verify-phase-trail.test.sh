@@ -141,6 +141,22 @@ expect_fail "post-cutoff build still requires QUALITY_GATE" "$(lg lg2 2026-10-08
 OUT=$(FORGE_TRAIL_QG_SINCE="" MOCK_GH_JSON="$(lg lg4 2026-10-01T00:00:00Z)" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 1 ] && ok "grace disabled via empty FORGE_TRAIL_QG_SINCE" || bad "grace disable (rc=$RC)"
 
+# Multi-page threads (#3121): gh --paginate emits one array per page; the LATEST build must win
+mp="$TMP_FX/mp.json"
+{ jq -nc '[{"body":"<!-- FORGE:INVESTIGATOR -->\n<!-- INVESTIGATION:COMPLETE -->"},{"body":"<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: TRIVIAL"},{"body":"<!-- FORGE:CONTRACT -->\nc"},{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","created_at":"2026-01-04T00:00:00Z"}] | map(. + {author_association:"OWNER", user:{login:"owner",type:"User"}})'
+  jq -nc '[{"body":"<!-- FORGE:BUILDER -->\nx\n<!-- FORGE:BUILDER:COMPLETE -->","created_at":"2026-10-06T00:00:00Z"}] | map(. + {author_association:"OWNER", user:{login:"owner",type:"User"}})'; } > "$mp"
+OUT=$(FORGE_TRAIL_QG_SINCE=2026-10-05T00:00:00Z MOCK_GH_JSON="$mp" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+[ $RC -eq 1 ] && echo "$OUT" | grep -q 'MISSING: QUALITY_GATE' && ok "multi-page: latest build on page 2 is not waived" || bad "multi-page (rc=$RC out=$OUT)"
+
+# Cutoff validation (#3121): malformed or future cutoff fails closed
+for bad_since in "garbage" "2999-01-01T00:00:00Z"; do
+  OUT=$(FORGE_TRAIL_QG_SINCE="$bad_since" MOCK_GH_JSON="$(lg lgv 2026-10-01T00:00:00Z)" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+  [ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "invalid cutoff '$bad_since' rejected" || bad "cutoff '$bad_since' (rc=$RC out=$OUT)"
+done
+
+# -h prints the full header
+bash "$VERIFY" -h | grep -q 'COLLABORATOR includes read-level' && ok "-h prints the full header" || bad "-h truncated"
+
 # Outage fails closed (exit 2, never PASS)
 OUT=$(MOCK_GH_FAIL=1 MOCK_GH_JSON=/dev/null bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 2 ] && echo "$OUT" | grep -q 'PHASE_TRAIL: ERROR' && ok "gh outage fails closed" || bad "gh outage (rc=$RC out=$OUT)"

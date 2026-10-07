@@ -60,7 +60,7 @@ while [ $# -gt 0 ]; do
       if [ $# -lt 2 ] || [ -z "${2:-}" ]; then echo "PHASE_TRAIL: ERROR"; echo "usage error: $1 needs a value" >&2; exit 2; fi
       REPO="$2"; shift 2 ;;
     --docs-only) DOCS_ONLY=1; shift ;;
-    -h|--help) sed -n '5,32p' "$0"; exit 0 ;;
+    -h|--help) sed -n '5,49p' "$0"; exit 0 ;;
     *)
       if [ -z "$ISSUE" ] && [[ "$1" =~ ^[0-9]+$ ]]; then ISSUE="$1"; shift
       else echo "PHASE_TRAIL: ERROR"; echo "usage error: unexpected argument '$1'" >&2; exit 2; fi
@@ -77,6 +77,14 @@ fi
 RAW=$(gh api "repos/${REPO}/issues/${ISSUE}/comments" --paginate 2>/dev/null) || {
   echo "PHASE_TRAIL: ERROR"
   echo "could not read comments for ${REPO}#${ISSUE}" >&2
+  exit 2
+}
+
+# `gh api --paginate` emits one JSON array per page; merge them into a single array so every
+# later computation (notably the latest BUILDER:COMPLETE time) sees ALL pages (#3121).
+RAW=$(printf '%s' "$RAW" | jq -s 'add // []' 2>/dev/null) || {
+  echo "PHASE_TRAIL: ERROR"
+  echo "could not parse comments for ${REPO}#${ISSUE}" >&2
   exit 2
 }
 
@@ -101,6 +109,16 @@ COMMENTS=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins 
 
 # Creation time of the LATEST trusted FORGE:BUILDER:COMPLETE comment (empty when absent/undated).
 QG_SINCE="${FORGE_TRAIL_QG_SINCE-2026-10-07T03:40:12Z}"
+# The cutoff must be ISO-8601 UTC (YYYY-MM-DDTHH:MM:SSZ) and not in the future: a malformed or
+# far-future value would otherwise waive QUALITY_GATE for every issue (#3121). Fails closed.
+if [ -n "$QG_SINCE" ]; then
+  NOW_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if ! [[ "$QG_SINCE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || [[ "$QG_SINCE" > "$NOW_UTC" ]]; then
+    echo "PHASE_TRAIL: ERROR"
+    echo "invalid FORGE_TRAIL_QG_SINCE '${QG_SINCE}': must be ISO-8601 UTC (YYYY-MM-DDTHH:MM:SSZ) and not in the future" >&2
+    exit 2
+  fi
+fi
 BUILD_AT=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" '
   ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
   | ($logins | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $L
