@@ -319,11 +319,14 @@ For each diagnosed issue, apply the recovery action. All mutating actions are sk
 
 **Claim before re-entering the pipeline** (forge#3158): the `review-pr` first-refusal resume and `create-pr` re-enter `/work-on` inline. A repeated or concurrent sweep, or a live `/orchestrate` agent, could otherwise run the pipeline twice on one issue. Every inline `/work-on` resume MUST go through `claim_orphan` first, then `claim_keepalive_begin`, then the `Skill(...)` tool call, then `claim_keepalive_end` (see the sequence below). A sweep is not an orchestrator, so it takes an issue-scoped `FORGE:RECOVERY_CLAIM` marker (visible to other sweeps) and defers to any live orchestrator signal (a fresh `FORGE:HEARTBEAT`, which `/work-on --under-orchestration` posts at every phase entry). The claim is honored in the other direction too (forge#3172): `/work-on` Phase 0A.4 and `/orchestrate` Phase 4 dispatch consult the shared `scripts/recovery-claim-live.sh` and defer to a live claim, so the inline resume passes `--recovery-sweep ${SWEEP_ID}` to exempt its own claim.
 
-**Claim refresh and explicit release** (forge#3171, forge#3212): liveness is judged from the claim comment's `updated_at`, and an inline resume posts no `FORGE:HEARTBEAT` (that is gated on `--under-orchestration`, which sweeps do not pass). So the claim is kept alive by editing it: `refresh_orphan` PATCHes the claim body, keeping the `**Sweep: id**` line and appending a changing `Refreshed: <UTC>` line, so `updated_at` always advances. `Skill(...)` is an agent tool call, not a bash command, and shell state does not persist across Bash tool calls, so the lifecycle is an explicit agent sequence, never a bash subshell: (1) `claim_orphan "$NUM"` (Bash call); (2) `claim_keepalive_begin "$NUM"` (Bash call: starts a best-effort background refresh every `RECOVERY_CLAIM_TTL_MIN / 3` minutes and refreshes once immediately); (3) the `Skill(skill="{FORGE_SKILL_PREFIX}work-on", args="${NUM} --recovery-sweep ${SWEEP_ID}")` tool call; (4) `claim_keepalive_end "$NUM"` (Bash call) ALWAYS, including when the Skill call fails or returns BLOCKED. Each Bash call must re-set `SWEEP_ID` to the sweep's value and re-define the helpers; the helpers re-derive the claim comment id from the comment list by `Sweep: ${SWEEP_ID}` (`claim_rehydrate`) rather than trusting shell variables, and the keepalive is stopped through a pidfile. `claim_keepalive_end` stops the keepalive first and is idempotent (it never posts the release marker twice). Refresh is best-effort and release is an explicit agent step: if either is lost the claim degrades to the plain `RECOVERY_CLAIM_TTL_MIN` expiry. DRY_RUN makes every one of these helpers a no-op.
+**Claim refresh and explicit release** (forge#3171, forge#3212): liveness is judged from the claim comment's `updated_at`, and an inline resume posts no `FORGE:HEARTBEAT` (that is gated on `--under-orchestration`, which sweeps do not pass). So the claim is kept alive by editing it: `refresh_orphan` PATCHes the claim body, keeping the `**Sweep: id**` line and appending a changing `Refreshed: <UTC>` line, so `updated_at` always advances. `Skill(...)` is an agent tool call, not a bash command, and shell state does not persist across Bash tool calls, so the lifecycle is an explicit agent sequence, never a bash subshell: (1) `claim_orphan "$NUM"` (Bash call); (2) `claim_keepalive_begin "$NUM"` (Bash call: starts a best-effort background refresh every `RECOVERY_CLAIM_TTL_MIN / 3` minutes and refreshes once immediately); (3) the `Skill(skill="{FORGE_SKILL_PREFIX}work-on", args="${NUM} --recovery-sweep ${SWEEP_ID}")` tool call; (4) `claim_keepalive_end "$NUM"` (Bash call) ALWAYS, including when the Skill call fails or returns BLOCKED. Each Bash call must start with the literal `SWEEP_ID='<value>'` (the id the first call echoed; never let it be re-minted) and then re-define the helpers; the helpers re-derive the claim comment id from the comment list by `Sweep: ${SWEEP_ID}` (`claim_rehydrate`) rather than trusting shell variables, and the keepalive is stopped through a pidfile. `claim_keepalive_end` stops the keepalive first and is idempotent (it never posts the release marker twice). Refresh is best-effort and release is an explicit agent step: if either is lost the claim degrades to the plain `RECOVERY_CLAIM_TTL_MIN` expiry. The background keepalive is best-effort: this spec relies on it surviving the Bash call that started it (a `( ... ) & disown` loop does in the Claude Code harness); on a runtime that reaps it, a work-on run longer than the TTL can lose its claim. The loop is bounded (`RECOVERY_KEEPALIVE_MAX_MIN` deadline, and it exits as soon as the claim is released or no longer found), so an aborted agent cannot keep a claim alive forever. One claim per issue per sweep is assumed. DRY_RUN makes every one of these helpers a no-op.
 
 ```bash
 RECOVERY_CLAIM_TTL_MIN="${RECOVERY_CLAIM_TTL_MIN:-30}"   # a claim or heartbeat older than this is treated as dead
-SWEEP_ID="sweep-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+# SWEEP_ID is minted ONCE per sweep. The first Bash call that defines it echoes the value; the agent then starts every
+# later Bash call with the literal `SWEEP_ID='<value>'` BEFORE re-defining the helpers, so this default never re-mints.
+SWEEP_ID="${SWEEP_ID:-sweep-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+RECOVERY_KEEPALIVE_MAX_MIN="${RECOVERY_KEEPALIVE_MAX_MIN:-240}"   # hard lifetime bound for the background keepalive
 
 # claim_orphan <issue> — returns 0 if this sweep now holds the claim, 1 if it must skip (reason in CLAIM_SKIP_REASON).
 # Fails closed: an unreadable comment list (initial read or race-check re-read) is treated as "held by someone else".
@@ -381,17 +384,21 @@ Holder: /recover-orphans — resuming /work-on #${num}. Other sweeps and dispatc
 # comment list: the latest FORGE:RECOVERY_CLAIM comment naming this SWEEP_ID with no matching RELEASED marker.
 # Returns 0 with CLAIM_HELD_NUM / CLAIM_COMMENT_ID / CLAIM_BODY set, 1 if this sweep holds no unreleased claim.
 claim_rehydrate() {
-  local num="$1" found
+  local num="$1" found me
   if [ "${CLAIM_HELD_NUM:-}" = "$num" ] && [ -n "${CLAIM_COMMENT_ID:-}" ] && [ -n "${CLAIM_BODY:-}" ]; then return 0; fi
+  # Only comments authored by the authenticated login count (any commenter can post a fake claim or RELEASED marker;
+  # same class as #3168). A read error returns 2 (distinct from "not held" = 1) so release can retry instead of skipping.
+  me=$(gh api user --jq '.login' 2>/dev/null) && [ -n "$me" ] || return 2
   found=$(set -o pipefail; gh api --paginate "repos/${GH_REPO}/issues/${num}/comments" 2>/dev/null \
-    | jq -s --arg sid "$SWEEP_ID" '
-        add // [] | ([.[] | select(.body | contains("FORGE:RECOVERY_CLAIM_RELEASED"))
+    | jq -s --arg sid "$SWEEP_ID" --arg me "$me" '
+        add // [] | map(select(.user.login == $me)) | . as $mine
+        | ([$mine[] | select(.body | contains("FORGE:RECOVERY_CLAIM_RELEASED"))
                          | select(.body | contains("Sweep: " + $sid))] | length) as $rel
         | if $rel > 0 then empty else
-            [.[] | select(.body | contains("<!-- FORGE:RECOVERY_CLAIM -->"))
-                 | select(.body | contains("**Sweep: " + $sid + "**"))] | last // empty
+            [$mine[] | select(.body | contains("<!-- FORGE:RECOVERY_CLAIM -->"))
+                 | select(.body | contains("**Sweep: " + $sid + "**"))] | first // empty
             | {id: .id, body: (.body | split("\n") | map(select(startswith("Refreshed: ") | not)) | join("\n"))}
-          end') || return 1
+          end') || return 2
   [ -n "$found" ] || return 1
   CLAIM_COMMENT_ID=$(echo "$found" | jq -r '.id'); CLAIM_BODY=$(echo "$found" | jq -r '.body'); CLAIM_HELD_NUM="$num"
   [ -n "$CLAIM_COMMENT_ID" ] && [ "$CLAIM_COMMENT_ID" != "null" ] || { unset CLAIM_HELD_NUM CLAIM_COMMENT_ID CLAIM_BODY; return 1; }
@@ -401,33 +408,50 @@ claim_rehydrate() {
 # every time (an identical-body edit may not bump updated_at). Never carries FORGE:HEARTBEAT or the RELEASED marker.
 refresh_orphan() {
   [ "$DRY_RUN" = "true" ] && return 0
-  claim_rehydrate "$1" || return 0
+  claim_rehydrate "$1"; local rc=$?
+  [ "$rc" -eq 1 ] && return 1   # claim released or gone: callers (the keepalive loop) stop. A read error (rc 2) is retried next tick.
+  [ "$rc" -eq 0 ] || return 0
   gh api -X PATCH "repos/${GH_REPO}/issues/comments/${CLAIM_COMMENT_ID}" \
     -f body="${CLAIM_BODY}
 Refreshed: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1 || true
 }
 
 # Keepalive pidfile: the background loop and stop run in different Bash tool calls, so the pid lives on disk.
-claim_keepalive_pidfile() { echo "${TMPDIR:-/tmp}/forge-claim-keepalive-${SWEEP_ID}-$1.pid"; }
+# The directory is private (0700, owned by us, never a symlink) so a pidfile cannot be pre-planted on a shared /tmp.
+claim_keepalive_pidfile() {
+  local d="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/forge-claim-keepalive-$(id -u)"
+  mkdir -p -m 700 "$d" 2>/dev/null
+  if [ -L "$d" ] || [ ! -d "$d" ] || [ ! -O "$d" ]; then return 1; fi
+  echo "${d}/${SWEEP_ID}-$1.pid"
+}
 
 # start_claim_keepalive <issue> — non-blocking background refresh every TTL/3 (strictly under the TTL). Best-effort:
 # the process may not outlive the Bash call that started it, so the agent also refreshes at phase boundaries.
 start_claim_keepalive() {
   [ "$DRY_RUN" = "true" ] && return 0
   stop_claim_keepalive "$1"
-  local num="$1" interval=$(( RECOVERY_CLAIM_TTL_MIN * 60 / 3 ))
+  local num="$1" interval=$(( RECOVERY_CLAIM_TTL_MIN * 60 / 3 )) pidfile deadline
   [ "$interval" -ge 1 ] || interval=1
-  ( while sleep "$interval"; do refresh_orphan "$num"; done ) >/dev/null 2>&1 &
-  echo $! > "$(claim_keepalive_pidfile "$num")"
+  pidfile=$(claim_keepalive_pidfile "$num") || return 1
+  [ -L "$pidfile" ] && return 1
+  deadline=$(( $(date -u +%s) + RECOVERY_KEEPALIVE_MAX_MIN * 60 ))
+  # Bounded loop: stops at the deadline, or as soon as the claim is released/gone. The cached claim state is dropped on
+  # every tick so a RELEASED marker is actually seen (otherwise the cache would keep refreshing a released claim).
+  ( while sleep "$interval" && [ "$(date -u +%s)" -lt "$deadline" ]; do
+      unset CLAIM_HELD_NUM CLAIM_COMMENT_ID CLAIM_BODY
+      refresh_orphan "$num" || break
+    done ) >/dev/null 2>&1 &
+  echo $! > "$pidfile"
   disown 2>/dev/null || true
 }
 
 # stop_claim_keepalive <issue> — safe from a different Bash call than the one that started the loop; idempotent.
 stop_claim_keepalive() {
-  local pidfile pid; pidfile=$(claim_keepalive_pidfile "$1")
-  [ -f "$pidfile" ] || return 0
+  local pidfile pid; pidfile=$(claim_keepalive_pidfile "$1") || return 0
+  [ -f "$pidfile" ] && [ ! -L "$pidfile" ] || return 0
   pid=$(cat "$pidfile" 2>/dev/null)
-  if [ -n "$pid" ]; then
+  # Only a plain integer > 1 is ever signalled (0 / 1 / negatives would hit the whole process group or init).
+  if printf '%s' "$pid" | grep -qE '^[0-9]+$' && [ "$pid" -gt 1 ] && kill -0 "$pid" 2>/dev/null; then
     pkill -P "$pid" 2>/dev/null || true   # the pending sleep
     kill "$pid" 2>/dev/null || true
   fi
@@ -438,7 +462,14 @@ stop_claim_keepalive() {
 release_orphan() {
   [ "$DRY_RUN" = "true" ] && return 0
   stop_claim_keepalive "$1"
-  if claim_rehydrate "$1"; then
+  local rc=2 try
+  for try in 1 2 3; do
+    unset CLAIM_HELD_NUM CLAIM_COMMENT_ID CLAIM_BODY
+    claim_rehydrate "$1"; rc=$?
+    [ "$rc" -ne 2 ] && break
+    sleep $(( try * 2 ))
+  done
+  if [ "$rc" -eq 0 ]; then
     gh issue comment "$1" ${GH_FLAG} --body "<!-- FORGE:RECOVERY_CLAIM_RELEASED -->
 **Sweep: ${SWEEP_ID}**
 Released by /recover-orphans." >/dev/null 2>&1 || true
@@ -451,9 +482,10 @@ Released by /recover-orphans." >/dev/null 2>&1 || true
 # inside a bash function or subshell.
 claim_keepalive_begin() {
   [ "$DRY_RUN" = "true" ] && return 0
-  claim_rehydrate "$1" || return 1
-  start_claim_keepalive "$1"
+  claim_rehydrate "$1" || { CLAIM_SKIP_REASON="could not re-derive the claim to start its keepalive"; return 1; }
+  start_claim_keepalive "$1" || { CLAIM_SKIP_REASON="could not start the claim keepalive"; return 1; }
   refresh_orphan "$1"
+  return 0
 }
 
 # claim_keepalive_end <issue> — Bash step the agent runs AFTER the Skill(...) tool call, ALWAYS, also when the Skill call
@@ -593,12 +625,15 @@ See the latest FORGE:PHASE_TRAIL_FAILED comment for the missing phases. Re-run e
           else
             # First refusal: resume /work-on, whose resume preflight re-runs each missing phase via Skill(...)
             # and then re-enters review (work-on.md Phase 0B resume → work-on/review.md).
-            if claim_orphan "$NUM"; then
-              claim_keepalive_begin "$NUM"
-              # AGENT (tool call, not bash): Skill(skill="{FORGE_SKILL_PREFIX}work-on", args="${NUM} --recovery-sweep ${SWEEP_ID}")
-              claim_keepalive_end "$NUM"    # ALWAYS, even if the Skill call failed
+            # THREE SEPARATE AGENT STEPS, never one Bash call: (1) Bash: claim + keepalive begin; (2) the Skill tool
+            # call; (3) Bash: keepalive end. Executing steps 1-3 inside a single Bash call releases the claim before
+            # the Skill starts (the #3212 bug). Each Bash call starts with the literal SWEEP_ID='<value>' + helpers.
+            if claim_orphan "$NUM" && claim_keepalive_begin "$NUM"; then      # STEP 1 (Bash call) — ends here
+              Skill(skill="{FORGE_SKILL_PREFIX}work-on", args="${NUM} --recovery-sweep ${SWEEP_ID}")   # STEP 2 (agent tool call)
+              claim_keepalive_end "$NUM"    # STEP 3 (Bash call) — ALWAYS, even if the Skill call failed or returned BLOCKED
               RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} refused (phase trail) — resumed /work-on to re-run missing phases |\n"
             else
+              release_orphan "$NUM"   # idempotent: frees a claim posted before keepalive begin failed; no-op if never claimed
               RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} refused (phase trail) — /work-on resume skipped: ${CLAIM_SKIP_REASON} |\n"
             fi
           fi
@@ -629,12 +664,13 @@ See the latest FORGE:PHASE_TRAIL_FAILED comment for the missing phases. Re-run e
       if [ "$DRY_RUN" = "true" ]; then
         echo "  [DRY-RUN] Would: Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='$NUM --recovery-sweep $SWEEP_ID')"
         RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | create-pr | Would resume /work-on — branch $BRANCH has commits, no PR |\n"
-      elif claim_orphan "$NUM"; then
-        claim_keepalive_begin "$NUM"
-        # AGENT (tool call, not bash): Skill(skill="{FORGE_SKILL_PREFIX}work-on", args="${NUM} --recovery-sweep ${SWEEP_ID}")
-        claim_keepalive_end "$NUM"    # ALWAYS, even if the Skill call failed
+      elif claim_orphan "$NUM" && claim_keepalive_begin "$NUM"; then      # STEP 1 (Bash call) — ends here
+        # Same three separate agent steps as the review-pr site above: Bash begin, Skill tool call, Bash end.
+        Skill(skill="{FORGE_SKILL_PREFIX}work-on", args="${NUM} --recovery-sweep ${SWEEP_ID}")   # STEP 2 (agent tool call)
+        claim_keepalive_end "$NUM"    # STEP 3 (Bash call) — ALWAYS, even if the Skill call failed or returned BLOCKED
         RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | create-pr | Resumed /work-on — branch $BRANCH has commits, no PR |\n"
       else
+        release_orphan "$NUM"   # idempotent: frees a claim posted before keepalive begin failed; no-op if never claimed
         RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | create-pr | /work-on resume skipped: ${CLAIM_SKIP_REASON} |\n"
       fi
       ;;
