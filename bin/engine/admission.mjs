@@ -480,7 +480,7 @@ export function evaluateCascadeFinding(finding, policy) {
   }
   // Rule 6 (forge#3060) is evaluated last, mirroring the bash chain. It only gates P3-and-below:
   // P0/P1/P2 already returned above.
-  if (policy.amplificationBreaker && finding.amplificationBreakerTripped && /^P[3-9]$/.test(finding.priority || "")) {
+  if (policy.amplificationBreaker && finding.amplificationBreakerTripped && String(finding.priority ?? "").trim().toUpperCase() === "P3") {
     return {
       admit: false,
       reason: "amplification breaker tripped — P3 admission paused (routed to P3 batches / completion sweep)",
