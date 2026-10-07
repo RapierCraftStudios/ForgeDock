@@ -8,7 +8,7 @@ argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WO
 
 # work-on/review — Review & PR Creation Subcommand
 
-> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline. This skill runs with `context: fork`: it sees only this text plus its args and re-reads all other state from GitHub/git itself.
+> **Skill Name Resolution (forked phase)**: `{FORGE_SKILL_PREFIX}` is the namespace this skill itself was invoked under — invoked as `forgedock:work-on:…` → `forgedock:` (nesting `:`); as `work-on:…` → empty (`install.sh`); as `forge-work-on-…` → `forge-` (Codex, nesting `-`); OpenCode → empty with `-` nesting. Confirm the target name in the available-skills list before calling it. A forked phase receives no resolved value from its caller; never guess, and if the target skill is not listed return BLOCKED "skill not found: <name>".
 
 **Input**: $ARGUMENTS
 
@@ -45,8 +45,69 @@ REVIEW_RESULT:
 
 ## Script resolution
 
+**Shell state does not persist between Bash tool calls** (each call is a fresh shell): paste the block below at the top of every bash command in this skill that calls `resolve_script` or uses `FORGE_ROOT`/`UNIVERSAL_DIR`.
+
 ```bash
-# FORGE:SCRIPT_RESOLUTION
+# Canonical script resolution (keep byte-identical across specs; guarded by scripts/forge-root.test.sh).
+# Shell state does NOT persist between Bash tool calls: include this whole block at the top of
+# every command that uses resolve_script or FORGE_ROOT.
+REPO_PATH="${REPO_PATH:-$(yq '.paths.root // ""' forge.yaml 2>/dev/null)}"
+[ -n "$REPO_PATH" ] && [ "$REPO_PATH" != "null" ] || REPO_PATH="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+ADAPTIVE_DIR_RAW="${REPO_PATH}/$(yq '.adaptive_scripts.directory // ".forgedock/scripts"' forge.yaml 2>/dev/null || echo '.forgedock/scripts')"
+ADAPTIVE_DIR=$(realpath -m "$ADAPTIVE_DIR_RAW" 2>/dev/null || echo "$ADAPTIVE_DIR_RAW")
+ADAPTIVE_ENABLED=$(yq '.adaptive_scripts.enabled // "true"' forge.yaml 2>/dev/null || echo 'true')
+# Bounds check: reject adaptive_scripts.directory values that escape the repo root.
+# Normalize REPO_PATH the same way ADAPTIVE_DIR is normalized (realpath -m) so a trailing
+# slash in paths.root does not inject a '//' into the glob and trigger a false positive.
+REPO_PATH_NORM=$(realpath -m "$REPO_PATH" 2>/dev/null || echo "$REPO_PATH")
+if [[ "$ADAPTIVE_DIR" != "${REPO_PATH_NORM}/"* ]]; then
+  echo "WARNING: adaptive_scripts.directory resolves outside repo root ('$ADAPTIVE_DIR') — adaptive tier disabled" >&2
+  ADAPTIVE_ENABLED=false
+fi
+# ForgeDock's own install root (holds scripts/ and commands/), resolved ONCE by the canonical bootstrap
+# below — never the consumer repo: plugin installs set neither FORGE_HOME nor FORGEDOCK_HOME, and a
+# repo-relative fallback would execute (or miss) a same-named script controlled by the consumer repo.
+# Resolution: $FORGEDOCK_HOME (authoritative when set) > $FORGE_HOME > $CLAUDE_PLUGIN_ROOT > the
+# ~/.claude/commands symlink target > the Claude Code plugin cache/marketplace dirs. <!-- forge#3098 -->
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
+  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
+  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
+  _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+  # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
+  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
+  while IFS= read -r _c; do
+    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
+  done <<< "$_k"
+fi
+UNIVERSAL_DIR="${FORGE_ROOT:+$FORGE_ROOT/scripts}"   # empty => tier 3 skipped, prose tier
+# NOTE: never resolve this via `which` or `find` — universal scripts are
+# install-relative, not installed on $PATH, so a PATH lookup always misses.
+# FORGE_ROOT (above) is the deterministic resolution; there is NO repo-path fallback.
+# Pipeline agents MUST NOT use `find` (unbounded or filesystem-wide) to
+# locate pipeline scripts under any circumstances: if UNIVERSAL_DIR/${operation}.sh
+# does not exist, resolve_script() falls through to Tier 4 (prose) below,
+# which is always safe and available. A missing script is never a reason
+# to search the filesystem. <!-- Added: forge#1984 -->
+
+resolve_script() {
+  local operation="$1"
+  # Tier 2: per-repo adaptive (skip if disabled)
+  if [ "$ADAPTIVE_ENABLED" != "false" ] && [ -f "${ADAPTIVE_DIR}/${operation}.sh" ]; then
+    echo "adaptive:${ADAPTIVE_DIR}/${operation}.sh"
+    return
+  fi
+  # Tier 3: universal script
+  if [ -n "$UNIVERSAL_DIR" ] && [ -f "${UNIVERSAL_DIR}/${operation}.sh" ]; then
+    echo "universal:${UNIVERSAL_DIR}/${operation}.sh"
+    return
+  fi
+  # Tier 4: prose fallback
+  echo "prose:"
+}
 ```
 
 **BLOCKED output pattern**: every guard below that stops the phase prints the result block before exiting, e.g.:
@@ -76,6 +137,7 @@ gh pr list {GH_FLAG} --head {BRANCH} --json number,state,url 2>/dev/null
 - If PR already exists AND is OPEN → run the **HEAD-unchanged re-review guard** below before proceeding to Phase R3
 - If PR already exists AND is MERGED → write the REVIEW checkpoint (same JSON as Phase R4) if one does not already exist, then return `REVIEW_RESULT: status: ALREADY_MERGED`:
   ```bash
+  [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] would post the comment below"; exit 0; }
   MERGED_PR=$(gh pr list {GH_FLAG} --head {BRANCH} --state merged --json number --jq '.[0].number' 2>/dev/null)
   HAS_REVIEW_CKPT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
     --jq '[.[] | select((.body | contains("FORGE:CHECKPOINT")) and (.body | contains("\"phase\": \"REVIEW\"")))] | length' 2>/dev/null | tail -1)
@@ -192,12 +254,12 @@ echo "Commit count ahead of origin/{PR_BASE}: $COMMIT_COUNT — OK to push"
 
 ```bash
 cd {WORKTREE_PATH}
-git push -u origin {BRANCH}
+git push -u origin {BRANCH} # allowlist:check-command-side-effects
 ```
 
 If push fails, retry with `--force-with-lease`:
 ```bash
-git push -u origin {BRANCH} --force-with-lease
+git push -u origin {BRANCH} --force-with-lease # allowlist:check-command-side-effects
 ```
 
 If still fails:
@@ -213,7 +275,7 @@ This may indicate a merge conflict or remote rejection. Human review required.
 <!-- FORGE:PUSH_FAILED -->"
 
 gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" # allowlist:check-command-side-effects
-printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number:\n  pr_url:\n  merged_to:\n  blocker: %s\n' "git push failed"
+printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number:\n  pr_url:\n  merged_to:\n  blocker: %s\n' "git push failed" # allowlist:check-command-side-effects
 ```
 Print the block above (`status: BLOCKED`, blocker: "git push failed") and STOP.
 
@@ -430,6 +492,7 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 
   Write machine-readable phase checkpoint before returning (MANDATORY when PR is MERGED):
   ```bash
+  [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] would post the comment below"; exit 0; }
   CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
   \`\`\`json

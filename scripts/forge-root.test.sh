@@ -13,7 +13,7 @@ ok()  { PASS=$((PASS+1)); }
 bad() { FAILN=$((FAILN+1)); echo "FAIL: $1"; }
 expect() { [ "$2" = "$3" ] && ok || bad "$1 (got '$3' want '$2')"; }
 
-SITES="commands/work-on.md commands/work-on/review.md commands/review-pr.md commands/orchestrate/phase-1-resolve.md commands/orchestrate/phase-4-execution.md"
+SITES="commands/work-on.md commands/work-on/review.md commands/work-on/investigate.md commands/work-on/decompose.md commands/work-on/build.md commands/work-on/close.md commands/review-pr.md commands/orchestrate/phase-1-resolve.md commands/orchestrate/phase-4-execution.md"
 
 # extract the bootstrap block (comment line .. closing top-level fi), indentation stripped
 # Block ends at the first line (after the marker) that starts with `fi` at the marker's own indentation.
@@ -47,7 +47,8 @@ grep -E 'TRAIL_RC.* -ge 2 .*exit 1' "$ROOT/commands/work-on/review.md" | head -1
 for rc in 2 127; do
   out=$(TRAIL_RC=$rc bash -c "$(cat "$T/guard")" 2>/dev/null); grc=$?
   expect "review guard exits 1 for TRAIL_RC=$rc" 1 "$grc"
-  expect "review guard prints BLOCKED to stdout for TRAIL_RC=$rc" "REVIEW_RESULT: status: BLOCKED, blocker: phase trail unreadable (rc=$rc)" "$out"
+  # The guard prints the full REVIEW_RESULT block (multi-line) to STDOUT.
+  expect "review guard prints REVIEW_RESULT block for TRAIL_RC=$rc" "REVIEW_RESULT:|  status: BLOCKED|  blocker: phase trail unreadable (rc=$rc)" "$(printf '%s\n' "$out" | grep -E '^(REVIEW_RESULT:|  status:|  blocker:)' | paste -sd'|' -)"
 done
 for rc in 0 1; do
   out=$(TRAIL_RC=$rc bash -c "$(cat "$T/guard"); echo passed" 2>&1); expect "review guard falls through for TRAIL_RC=$rc" passed "$out"

@@ -8,7 +8,7 @@ context: fork
 
 # work-on/build/architect — Multi-Path Implementation Planning
 
-> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+> **Skill Name Resolution (forked phase)**: `{FORGE_SKILL_PREFIX}` is the namespace this skill itself was invoked under — invoked as `forgedock:work-on:…` → `forgedock:` (nesting `:`); as `work-on:…` → empty (`install.sh`); as `forge-work-on-…` → `forge-` (Codex, nesting `-`); OpenCode → empty with `-` nesting. Confirm the target name in the available-skills list before calling it. A forked phase receives no resolved value from its caller; never guess, and if the target skill is not listed return BLOCKED "skill not found: <name>".
 
 **Invoked by**: `work-on:build` (phase B4), between Context Gathering and Implement, via `Skill()`. Runs in its own forked context: you see only this spec and your args — re-read all other state from GitHub/git.
 **Time budget**: Max 3 minutes. Skip any file read that times out.

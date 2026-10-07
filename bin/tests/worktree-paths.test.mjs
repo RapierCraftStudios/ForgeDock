@@ -6,7 +6,6 @@ import test from "node:test";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const specs = [
-  readFileSync(join(repoRoot, "commands/work-on.md"), "utf8"),
   readFileSync(join(repoRoot, "commands/work-on/build.md"), "utf8"),
 ];
 

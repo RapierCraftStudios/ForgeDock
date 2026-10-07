@@ -67,12 +67,13 @@ for spec in commands/review-pr.md commands/work-on/review.md commands/work-on/re
     }' "$HERE/../$spec")
   expect "every autonomous merge in $spec is CI-gated" "" "$bad"
 done
-grep -q 'wait-ci-green.sh {PR_NUMBER} {GH_FLAG}' "$HERE/../commands/work-on.md" && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: work-on.md manual merge not CI-gated"; }
+# The /work-on router never merges: every merge lives in a CI-gated phase.
+if grep -qE '^[[:space:]]*(MERGE_RESULT=\$\()?gh pr merge ' "$HERE/../commands/work-on.md"; then FAILN=$((FAILN+1)); echo "FAIL: work-on.md router contains a merge command"; else PASS=$((PASS+1)); fi
 
 # Reviewed-head guard: review-pr Phase 8 must refuse to merge a head other than the reviewed commit,
 # and the work-on callers must route "stale review" to a re-review, never a manual merge.
 grep -q 'MERGE_HEAD_NOW" != "$REVIEW_SHA"' "$HERE/../commands/review-pr.md" && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: review-pr Phase 8 lacks reviewed-head guard"; }
-for f in commands/work-on/review.md commands/work-on.md; do
+for f in commands/work-on/review.md; do
   grep -q 'stale review' "$HERE/../$f" && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: $f does not route stale review"; }
 done
 
