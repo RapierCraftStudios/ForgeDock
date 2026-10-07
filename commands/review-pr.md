@@ -2229,7 +2229,8 @@ else
   TRAIL_SCRIPT="$FORGE_ROOT/scripts/verify-phase-trail.sh"
   # Docs-only predicate: ONE shared copy (scripts/is-docs-only.sh, forge#3134), same as work-on/review.md R1.5. Fail closed: unresolved script or empty diff -> no flag.
   DOCS_ONLY_FLAG=""
-  PR_FILES_ALL=$(gh pr diff {PR_NUMBER} {MERGE_GH_FLAG} --name-only 2>/dev/null)
+  # Both sides of a rename (filename + previous_filename): `gh pr diff --name-only` collapses a rename to its destination (forge#3145).
+  PR_FILES_ALL=$(gh api --paginate "repos/{GH_REPO}/pulls/{PR_NUMBER}/files" --jq '.[] | .filename, (.previous_filename // empty)' 2>/dev/null)
   if [ -n "$PR_FILES_ALL" ] && [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/is-docs-only.sh" ] && echo "$PR_FILES_ALL" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"; then DOCS_ONLY_FLAG="--docs-only"; fi
   # Band cross-check (forge#3149): a non-docs PR diff means an agent-chosen INVESTIGATION band must not waive requirements.
   # No --head-tree here: review auto-fix commits legitimately advance the head after the gate ran; the tree binding is enforced pre-PR (work-on/review.md R1.5).
@@ -2277,7 +2278,7 @@ fi
 [ "${TRAIL_RC:-1}" -eq 0 ] || exit 1   # hard guard: nothing below runs unless the trail verified
 ```
 
-If the preflight failed, skip the rest of Phase 8. On exit code 1, return `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` listing the missing markers. On exit code ≥2 (unreadable trail, or 127 when the verifier is unresolvable), return `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail unreadable (rc=N)". This is an infrastructure failure with no MISSING lines, so callers neither re-run phases nor merge manually. (`DOCS_ONLY_FLAG` is computed in the block above: `--docs-only` when `scripts/is-docs-only.sh` accepts the PR diff: every file is a `*.md` outside `commands/`, `.claude/`, `.agents/`, `.codex/` and `.github/` at any depth, and not named `AGENTS.md`/`CLAUDE.md`/`SKILL.md`.)
+If the preflight failed, skip the rest of Phase 8. On exit code 1, return `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` listing the missing markers. On exit code ≥2 (unreadable trail, or 127 when the verifier is unresolvable), return `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail unreadable (rc=N)". This is an infrastructure failure with no MISSING lines, so callers neither re-run phases nor merge manually. (`DOCS_ONLY_FLAG` is computed in the block above: `--docs-only` when `scripts/is-docs-only.sh` accepts the PR diff, fed both sides of every rename: every file is an allowlisted `*.md` (`docs/**` or a root README/CHANGELOG/CONTRIBUTING/SECURITY/GOVERNANCE), outside the instruction directories (`commands/`, `devdocs/`, `templates/`, `skills/`, `agents/`, `hooks/`, `.claude/`, `.claude-plugin/`, `.agents/`, `.codex/`, `.cursor/`, `.github/`, `.opencode/`, `.gemini/`, `.kiro/`) at any depth, and not named `AGENTS.md`/`CLAUDE.md`/`SKILL.md`/`GEMINI.md` (or a dotted variant).)
 
 ```bash
 # §7B verdict + purpose-regression + calibration + trust-escalation guard — check before any merge attempt <!-- Added: forge#1601, forge#1741, forge#1745 -->
