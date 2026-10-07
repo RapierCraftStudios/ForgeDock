@@ -317,6 +317,66 @@ done
 
 For each diagnosed issue, apply the recovery action. All mutating actions are skipped when `DRY_RUN=true`.
 
+**Claim before re-entering the pipeline** (forge#3158): the `review-pr` first-refusal resume and `create-pr` re-enter `/work-on` inline. A repeated or concurrent sweep, or a live `/orchestrate` agent, could otherwise run the pipeline twice on one issue. Every inline `/work-on` resume MUST go through `claim_orphan` first and call `release_orphan` afterwards. A sweep is not an orchestrator, so it takes an issue-scoped `FORGE:RECOVERY_CLAIM` marker (visible to other sweeps) and defers to any live orchestrator signal (a fresh `FORGE:HEARTBEAT`, which `/work-on --under-orchestration` posts at every phase entry).
+
+```bash
+RECOVERY_CLAIM_TTL_MIN="${RECOVERY_CLAIM_TTL_MIN:-30}"   # a claim or heartbeat older than this is treated as dead
+SWEEP_ID="sweep-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+
+# claim_orphan <issue> — returns 0 if this sweep now holds the claim, 1 if it must skip (reason in CLAIM_SKIP_REASON).
+# Fails closed: an unreadable comment list is treated as "held by someone else".
+claim_orphan() {
+  local num="$1" now cutoff comments live
+  [ "$DRY_RUN" = "true" ] && return 0   # dry-run: no claim comment is posted (callers already skip dry-run resumes)
+  now=$(date -u +%s); cutoff=$(( now - RECOVERY_CLAIM_TTL_MIN * 60 ))
+  comments=$(gh api --paginate "repos/${GH_REPO}/issues/${num}/comments" 2>/dev/null \
+    | jq -s 'add // []') || { CLAIM_SKIP_REASON="could not read comments to check for a live holder"; return 1; }
+  [ -n "$comments" ] || { CLAIM_SKIP_REASON="could not read comments to check for a live holder"; return 1; }
+
+  # Live orchestrator signal: a recent heartbeat from /work-on --under-orchestration, or a recent claim of any sweep.
+  # A claim is "released" only by a later RELEASED marker naming its sweep id.
+  live=$(echo "$comments" | jq --argjson cutoff "$cutoff" '
+    ([.[] | select(.body | contains("FORGE:RECOVERY_CLAIM_RELEASED")) | .body | capture("Sweep: (?<id>[^ \n]+)").id]) as $rel
+    | [ .[] | select(
+          ((.body | contains("FORGE:HEARTBEAT")) or (.body | contains("<!-- FORGE:RECOVERY_CLAIM -->")))
+          and ((.body | contains("FORGE:RECOVERY_CLAIM_RELEASED")) | not)
+          and ((.updated_at | fromdateiso8601) >= $cutoff)
+          and ((.body | capture("Sweep: (?<id>[^ \n]+)")? // {id:""}).id as $sid | ($rel | index($sid)) == null)
+        ) ] | length') || live=1
+  if [ "${live:-1}" -gt 0 ]; then
+    CLAIM_SKIP_REASON="live holder (heartbeat or unreleased recovery claim within ${RECOVERY_CLAIM_TTL_MIN}m)"
+    return 1
+  fi
+
+  gh issue comment "$num" ${GH_FLAG} --body "<!-- FORGE:RECOVERY_CLAIM -->
+**Sweep: ${SWEEP_ID}**
+Holder: /recover-orphans — resuming /work-on #${num}. Other sweeps and dispatchers: do not re-enter this issue until the matching release marker is posted." >/dev/null 2>&1 \
+    || { CLAIM_SKIP_REASON="could not post FORGE:RECOVERY_CLAIM"; return 1; }
+
+  # Race check: re-read; the earliest unreleased claim wins. Losing means another sweep claimed first.
+  local first
+  first=$(gh api --paginate "repos/${GH_REPO}/issues/${num}/comments" 2>/dev/null | jq -rs --argjson cutoff "$cutoff" '
+    add // [] | ([.[] | select(.body | contains("FORGE:RECOVERY_CLAIM_RELEASED")) | .body | capture("Sweep: (?<id>[^ \n]+)").id]) as $rel
+    | [.[] | select(.body | contains("<!-- FORGE:RECOVERY_CLAIM -->"))
+           | select((.updated_at | fromdateiso8601) >= $cutoff)
+           | select((.body | capture("Sweep: (?<id>[^ \n]+)").id) as $sid | ($rel | index($sid)) == null)]
+    | first | .body // ""' | sed -n 's/^\*\*Sweep: \(.*\)\*\*$/\1/p')
+  if [ "$first" != "$SWEEP_ID" ]; then
+    release_orphan "$num"
+    CLAIM_SKIP_REASON="lost claim race to ${first:-unknown}"
+    return 1
+  fi
+  return 0
+}
+
+release_orphan() {
+  [ "$DRY_RUN" = "true" ] && return 0
+  gh issue comment "$1" ${GH_FLAG} --body "<!-- FORGE:RECOVERY_CLAIM_RELEASED -->
+**Sweep: ${SWEEP_ID}**
+Released by /recover-orphans." >/dev/null 2>&1 || true
+}
+```
+
 ```bash
 RECOVERY_RESULTS=""
 
@@ -414,8 +474,13 @@ See the latest FORGE:PHASE_TRAIL_FAILED comment for the missing phases. Re-run e
           else
             # First refusal: resume /work-on, whose resume preflight re-runs each missing phase via Skill(...)
             # and then re-enters review (work-on.md Phase 0B, Phase 5D).
-            Skill(skill="{FORGE_SKILL_PREFIX}work-on", args="${NUM}")
-            RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} refused (phase trail) — resumed /work-on to re-run missing phases |\n"
+            if claim_orphan "$NUM"; then
+              Skill(skill="{FORGE_SKILL_PREFIX}work-on", args="${NUM}")
+              release_orphan "$NUM"
+              RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} refused (phase trail) — resumed /work-on to re-run missing phases |\n"
+            else
+              RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} refused (phase trail) — /work-on resume skipped: ${CLAIM_SKIP_REASON} |\n"
+            fi
           fi
         elif [ "$REVIEW_STATUS" = "BLOCKED" ] && echo "$REVIEW_BLOCKER" | grep -qE 'phase trail|auto-merge requires --issue'; then
           # REVIEW_BLOCKER = the `blocker:` field of the same REVIEW_RESULT block. The gate could not run (verifier
@@ -438,10 +503,14 @@ See the latest FORGE:PHASE_TRAIL_FAILED comment for the missing phases. Re-run e
       echo "  Applying create-pr: resuming /work-on to advance from build to PR creation"
       if [ "$DRY_RUN" = "true" ]; then
         echo "  [DRY-RUN] Would: Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='$NUM')"
-      else
+        RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | create-pr | Would resume /work-on — branch $BRANCH has commits, no PR |\n"
+      elif claim_orphan "$NUM"; then
         Skill(skill="{FORGE_SKILL_PREFIX}work-on", args="${NUM}")
+        release_orphan "$NUM"
+        RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | create-pr | Resumed /work-on — branch $BRANCH has commits, no PR |\n"
+      else
+        RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | create-pr | /work-on resume skipped: ${CLAIM_SKIP_REASON} |\n"
       fi
-      RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | create-pr | Resumed /work-on — branch $BRANCH has commits, no PR |\n"
       ;;
 
     reset-labels)
