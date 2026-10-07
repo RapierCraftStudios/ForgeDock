@@ -2181,6 +2181,28 @@ fi
 
 **Skip if** `AUTO_MERGE=false`.
 
+**Phase-trail preflight (MANDATORY before any merge attempt)** <!-- Added: forge#3061 -->: a reviewer verdict alone must not merge work whose earlier pipeline phases were skipped. Run the deterministic verifier against the linked issue; do NOT run the merge block below unless it exits 0.
+
+```bash
+if [ -n "${MERGE_ISSUE:-}" ]; then
+  TRAIL=$(bash "${FORGEDOCK_HOME:-$REPO_PATH}/scripts/verify-phase-trail.sh" "$MERGE_ISSUE" -R {GH_REPO} ${DOCS_ONLY_FLAG:-}); TRAIL_RC=$?
+  if [ "$TRAIL_RC" -ne 0 ]; then
+    gh issue comment "$MERGE_ISSUE" {MERGE_GH_FLAG} --body "<!-- FORGE:PHASE_TRAIL_FAILED -->
+Auto-merge refused for PR #{PR_NUMBER}: the issue's phase trail is incomplete.
+
+\`\`\`
+${TRAIL}
+\`\`\`
+
+Re-run each missing phase via its Skill (see the \`->\` action on each MISSING line), then re-run /review-pr."
+    # STOP — return REVIEW_RESULT: status: PHASE_TRAIL_FAILED with the MISSING lines.
+    # The /work-on router re-dispatches the named phases; this is NOT a needs-human escalation.
+  fi
+fi
+```
+
+If the preflight failed, skip the rest of Phase 8 and return `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` listing the missing markers. (`DOCS_ONLY_FLAG` is `--docs-only` when every file in the PR diff is `*.md`/`docs/**`.)
+
 ```bash
 # §7B verdict + purpose-regression + calibration + trust-escalation guard — check before any merge attempt <!-- Added: forge#1601, forge#1741, forge#1745 -->
 # HARD RULE 3 requires that VERDICT=CHANGES REQUESTED, HAS_PURPOSE_REGRESSION=true,

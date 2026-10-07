@@ -89,10 +89,16 @@ Extract from investigation report:
 COMPLEXITY_BAND=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:FAST_PATH")) | .body' 2>/dev/null \
   | sed -n 's/.*\*\*COMPLEXITY_BAND\*\*: \([A-Z_]*\).*/\1/p' | head -1)
-# Default to STANDARD if not found (conservative — runs full pipeline)
-COMPLEXITY_BAND="${COMPLEXITY_BAND:-STANDARD}"
+# Missing classification is a phase-trail failure (forge#3061), not a silent default.
+# Re-run work-on Phase 3B (classify + post FORGE:FAST_PATH) first; only then continue.
+if [ -z "$COMPLEXITY_BAND" ]; then
+  echo "PHASE TRAIL: FORGE:FAST_PATH missing — run work-on Phase 3B classification before building"
+  COMPLEXITY_BAND="STANDARD"   # conservative for the remainder of THIS read only; FAST_PATH must still be posted
+fi
 echo "COMPLEXITY_BAND: $COMPLEXITY_BAND"
 ```
+
+**FAST_PATH is mandatory.** If `FORGE:FAST_PATH` was absent, classify now (work-on.md Phase 3B) and post the comment before starting B1. `scripts/verify-phase-trail.sh` fails the review preflight otherwise.
 
 ---
 
@@ -345,7 +351,7 @@ Skill("work-on:build:validate", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FL
 Where `{CHANGED_FILES}` is the space-separated list of files changed by the implement subcommand (read from `IMPLEMENT_RESULT` or from the `<!-- FORGE:BUILDER -->` comment).
 
 **After subcommand returns**:
-- `VALIDATE_RESULT: gate_passed: true` → continue to Phase B6.5 (acceptance gate)
+- `VALIDATE_RESULT: gate_passed: true` → verify the `FORGE:QUALITY_GATE` marker exists (posted by validate V5; docs-only changes exempt). If absent, re-invoke validate once; a missing marker is not a pass. Then continue to Phase B6.5 (acceptance gate)
 - `VALIDATE_RESULT: gate_passed: false` → subcommand has already posted comment and added `needs-human` label; return `BUILD_RESULT: status: BLOCKED`
 
 ---
