@@ -411,7 +411,7 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
   else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
   echo "$CI_GATE_OUT"
   if [ "$CI_GATE_RC" -eq 0 ]; then
-    gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto
+    gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto # allowlist:check-command-side-effects (CI-gated merge)
   else
     echo "REVIEW_RESULT: status: BLOCKED, blocker: ci gate not green (rc=${CI_GATE_RC})"
   fi
