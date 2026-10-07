@@ -3172,6 +3172,7 @@ PERMANENT_DEFERRED=()
 SWEEP_CANDIDATES=()
 IDLE_DEFERRED=()   # <!-- Added: forge#1814 -->
 TOKEN_GATED=()     # <!-- Added: forge#1858 -->
+: "${BREAKER_DEFER_TAG:=amplification breaker}"   # default if this block runs in a fresh shell (an empty tag would match every defer reason)
 AMPLIFICATION_BREAKER_HELD=()    # amplification-breaker holds: bounded P3 batches only, never individually dispatched (forge#3060)
 
 for FINDING_NUM in "${DEFERRED_FINDINGS[@]}"; do
