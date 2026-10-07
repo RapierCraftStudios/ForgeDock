@@ -1070,10 +1070,11 @@ If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to
 # immediately before that issue's Agent()/task() call. LINT_REFUSED_ISSUES is initialised once, empty.
 # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
 FORGE_ROOT=""
-if [ -n "${FORGEDOCK_HOME:-}" ]; then FORGE_ROOT="$FORGEDOCK_HOME"; else
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
   _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-  for _c in "${FORGE_HOME:-}" "${CLAUDE_PLUGIN_ROOT:-}" "$_l" "$HOME"/.claude/plugins/cache/*/forgedock/* "$HOME"/.claude/plugins/marketplaces/*; do
-    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && FORGE_ROOT="$_c" ;; esac
+  mapfile -t _v < <(printf '%s\n' "$HOME"/.claude/plugins/cache/*/forgedock/* | sort -rV)   # newest cached version first (1.10.0 > 1.9.0)
+  for _c in "${FORGE_HOME:-}" "${CLAUDE_PLUGIN_ROOT:-}" "$_l" "${_v[@]}" "$HOME"/.claude/plugins/marketplaces/*[Ff]orge[Dd]ock*; do
+    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && FORGE_ROOT="$_c" ;; esac
   done
 fi
 LINT_SCRIPT="$FORGE_ROOT/scripts/lint-dispatch-prompt.sh"
@@ -1646,10 +1647,11 @@ done
    ```bash
    # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
    FORGE_ROOT=""
-   if [ -n "${FORGEDOCK_HOME:-}" ]; then FORGE_ROOT="$FORGEDOCK_HOME"; else
+   if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
      _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-     for _c in "${FORGE_HOME:-}" "${CLAUDE_PLUGIN_ROOT:-}" "$_l" "$HOME"/.claude/plugins/cache/*/forgedock/* "$HOME"/.claude/plugins/marketplaces/*; do
-       case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && FORGE_ROOT="$_c" ;; esac
+     mapfile -t _v < <(printf '%s\n' "$HOME"/.claude/plugins/cache/*/forgedock/* | sort -rV)   # newest cached version first (1.10.0 > 1.9.0)
+     for _c in "${FORGE_HOME:-}" "${CLAUDE_PLUGIN_ROOT:-}" "$_l" "${_v[@]}" "$HOME"/.claude/plugins/marketplaces/*[Ff]orge[Dd]ock*; do
+       case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && FORGE_ROOT="$_c" ;; esac
      done
    fi
    # forge#3102: only merged completions carry a full trail; invalid/decomposed/needs-human/awaiting-merge/paused do not.
