@@ -13,7 +13,7 @@ ok()  { PASS=$((PASS+1)); }
 bad() { FAILN=$((FAILN+1)); echo "FAIL: $1"; }
 expect() { [ "$2" = "$3" ] && ok || bad "$1 (got '$3' want '$2')"; }
 
-SITES="commands/work-on.md commands/work-on/review.md commands/review-pr.md commands/orchestrate/phase-4-execution.md"
+SITES="commands/work-on.md commands/work-on/review.md commands/review-pr.md commands/orchestrate/phase-1-resolve.md commands/orchestrate/phase-4-execution.md"
 
 # extract the bootstrap block (comment line .. closing top-level fi), indentation stripped
 # Block ends at the first line (after the marker) that starts with `fi` at the marker's own indentation.
@@ -22,7 +22,7 @@ extract() { awk -v want="$2" '/# FORGE_ROOT bootstrap/{c++; if(c==want){f=1; mat
 count_copies() { grep -c '# FORGE_ROOT bootstrap' "$ROOT/$1"; }
 extract commands/work-on.md 1 > "$T/canon"
 [ -s "$T/canon" ] && ok || bad "canonical bootstrap not found in work-on.md"
-want_copies() { case "$1" in commands/orchestrate/phase-4-execution.md) echo 4 ;; *) echo 1 ;; esac; }
+want_copies() { case "$1" in commands/orchestrate/phase-1-resolve.md) echo 2 ;; commands/orchestrate/phase-4-execution.md) echo 6 ;; *) echo 1 ;; esac; }
 for f in $SITES; do
   n=$(count_copies "$f"); expect "exact bootstrap copy count in $f" "$(want_copies "$f")" "$n"
   i=1
