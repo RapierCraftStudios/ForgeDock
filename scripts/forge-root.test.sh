@@ -22,7 +22,7 @@ extract() { awk -v want="$2" '/# FORGE_ROOT bootstrap/{c++; if(c==want){f=1; mat
 count_copies() { grep -c '# FORGE_ROOT bootstrap' "$ROOT/$1"; }
 extract commands/work-on.md 1 > "$T/canon"
 [ -s "$T/canon" ] && ok || bad "canonical bootstrap not found in work-on.md"
-want_copies() { case "$1" in commands/orchestrate/phase-4-execution.md) echo 2 ;; *) echo 1 ;; esac; }
+want_copies() { case "$1" in commands/orchestrate/phase-4-execution.md) echo 4 ;; *) echo 1 ;; esac; }
 for f in $SITES; do
   n=$(count_copies "$f"); expect "exact bootstrap copy count in $f" "$(want_copies "$f")" "$n"
   i=1
