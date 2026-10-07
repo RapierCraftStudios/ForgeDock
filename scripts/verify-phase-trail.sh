@@ -37,6 +37,9 @@
 # (default "OWNER,MEMBER,COLLABORATOR"), OR user.type == "Bot" (the pipeline's
 # GitHub App identity), OR user.login in FORGE_TRAIL_TRUSTED_LOGINS
 # (comma-separated, default empty).
+# Limits: "Bot" trusts any GitHub App/bot that can comment on the repo (set
+# FORGE_TRAIL_TRUSTED_ASSOCIATIONS and FORGE_TRAIL_TRUSTED_LOGINS to tighten);
+# COLLABORATOR includes read-level collaborators; login matching is case-sensitive.
 
 set -uo pipefail
 
