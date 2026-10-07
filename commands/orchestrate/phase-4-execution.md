@@ -2201,6 +2201,21 @@ gh issue list -R {GH_REPO} --state open --search "label:review-finding created:>
   --json number,title,body,createdAt
 ```
 
+```bash
+# Run once for each completed issue before collecting its findings. Only merged
+# units advance the denominator; invalid/skipped units do not imply delivered work.
+# The ratio observation for this unit is recorded AFTER its findings are counted, in the
+# "Amplification settle" block that follows the Step 4C rule loop (forge#3060) — recording it
+# here would lag by one unit and could never reach 1.0 at exactly one finding per merged unit.
+UNIT_MERGED_THIS_CYCLE=false
+if gh issue view "$NUM" -R {GH_REPO} --json labels \
+  --jq '[.labels[].name | select(. == "workflow:merged")] | length' | grep -qx '1'; then
+  MERGED_UNITS=$((MERGED_UNITS + 1))
+  UNIT_MERGED_THIS_CYCLE=true
+fi
+
+```
+
 **Unconditional unit accounting (forge#3060):** the merged-unit accounting block and the "Amplification settle" block below run for EVERY completed unit, including a merged unit that spawned ZERO review-findings (an empty `{spawned_finding_numbers}` list simply makes the rule loop a no-op). Skipping them for finding-free units would leave the ratio history containing only finding-producing units (every observation >= 1.0) and the breaker could never release.
 
 **If review-finding issues were spawned:**
@@ -2217,20 +2232,6 @@ When `CASCADE_MAX_AMPLIFICATION` is not `off`, and the current ratio is greater 
 
 **Status updates (MANDATORY):** every Step 4B/4C status update must include `amplification={FINDINGS_SPAWNED}/{MERGED_UNITS}={AMPLIFICATION_RATIO} breaker={AMPLIFICATION_BREAKER}/{tripped|clear} p3_paused={#AMPLIFICATION_BREAKER_DEFERRED[@]}` so the operator sees divergence before the pipeline does.
 
-```bash
-# Run once for each completed issue before collecting its findings. Only merged
-# units advance the denominator; invalid/skipped units do not imply delivered work.
-# The ratio observation for this unit is recorded AFTER its findings are counted, in the
-# "Amplification settle" block that follows the Step 4C rule loop (forge#3060) — recording it
-# here would lag by one unit and could never reach 1.0 at exactly one finding per merged unit.
-UNIT_MERGED_THIS_CYCLE=false
-if gh issue view "$NUM" -R {GH_REPO} --json labels \
-  --jq '[.labels[].name | select(. == "workflow:merged")] | length' | grep -qx '1'; then
-  MERGED_UNITS=$((MERGED_UNITS + 1))
-  UNIT_MERGED_THIS_CYCLE=true
-fi
-
-```
 
 **Cascade control (MANDATORY — run before folding findings into the DAG):**
 
@@ -2915,7 +2916,7 @@ A finding that fails classify-lane is removed from `QUEUED_FINDINGS` (mirrors St
 
 Track them in `DEFERRED_FINDINGS` for re-evaluation in Step 4F (Completion Sweep) after the DAG drains. Do NOT close or label them yet — the sweep will determine their final disposition.
 
-**If no review-finding issues were spawned:** Continue monitoring for the next agent completion.
+**If no review-finding issues were spawned:** Still run the "Amplification settle" block above with an empty finding list (it records this unit's ratio observation, which is what lets the breaker release), then Continue monitoring for the next agent completion.
 
 ### Step 4C.5: Milestone lane-consistency check (periodic) <!-- Added: forge#901 -->
 
