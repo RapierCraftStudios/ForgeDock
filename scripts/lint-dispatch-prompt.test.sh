@@ -229,7 +229,7 @@ bash "$LINT" --expect nokey "$T/p27" >/dev/null 2>&1; [ $? -eq 2 ] && PASS=$((PA
 check "mid-line CR not stripped" 1 "$T/p25"
 
 # 10. Spec snippet enforcement (forge#3070): extract the lint gate from the spec and run it in a loop.
-awk '/^LINT_SCRIPT=/{f=1} f{print} f&&/^fi$/{n++} f&&n==2{exit}' "$SPEC" > "$T/gate"
+awk '/^# FORGE_ROOT bootstrap/{f=1} f{print} f&&/^fi$/{n++} f&&n==3{exit}' "$SPEC" > "$T/gate"
 [ -s "$T/gate" ] || { FAILN=$((FAILN+1)); echo "FAIL: could not extract spec lint gate"; }
 gate_refused() { # prompt-file home -> prints refusal entries or LAUNCHED
   ( LINT_REFUSED_ISSUES=(); RENDERED_PROMPT="$(cat "$1")"; FORGEDOCK_HOME="$2"; unset FORGE_HOME; reset_vals

@@ -2197,14 +2197,23 @@ if [ -z "${MERGE_ISSUE:-}" ]; then
   exit 1
 else
   # Same resolution as work-on/review.md Phase R1.5: the verifier ships with ForgeDock, not the consumer repo.
-  TRAIL_SCRIPT="${FORGEDOCK_HOME:-${FORGE_HOME:-$REPO_PATH}}/scripts/verify-phase-trail.sh"
+  # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+  FORGE_ROOT=""
+  if [ -n "${FORGEDOCK_HOME:-}" ]; then FORGE_ROOT="$FORGEDOCK_HOME"; else
+    _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+    for _c in "${FORGE_HOME:-}" "${CLAUDE_PLUGIN_ROOT:-}" "$_l" "$HOME"/.claude/plugins/cache/*/forgedock/* "$HOME"/.claude/plugins/marketplaces/*; do
+      case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && FORGE_ROOT="$_c" ;; esac
+    done
+  fi
+  TRAIL_SCRIPT="$FORGE_ROOT/scripts/verify-phase-trail.sh"
   # Docs-only predicate (identical to R1.5): every file in the PR diff is *.md or docs/**
   DOCS_ONLY_FLAG=""
   PR_FILES_ALL=$(gh pr diff {PR_NUMBER} {MERGE_GH_FLAG} --name-only 2>/dev/null)
   if [ -n "$PR_FILES_ALL" ] && echo "$PR_FILES_ALL" | awk '!(/^docs\// || (/\.md$/ && !/^(commands|\.claude)\//)){bad=1} END{exit bad}'; then DOCS_ONLY_FLAG="--docs-only"; fi
-  if [ ! -f "$TRAIL_SCRIPT" ]; then
-    echo "WARNING: verify-phase-trail.sh not installed at $TRAIL_SCRIPT — phase-trail preflight skipped (prose tier)" >&2
-    TRAIL_RC=0
+  if [ -z "$FORGE_ROOT" ] || [ ! -f "$TRAIL_SCRIPT" ]; then
+    # Fail closed: an unresolvable verifier is NOT a pass (plugin installs set no FORGE_HOME; never fall back to the consumer repo).
+    echo "PHASE TRAIL: verify-phase-trail.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install) — refusing to merge" >&2
+    TRAIL="PHASE_TRAIL: ERROR (verifier not resolvable)"; TRAIL_RC=127
   else
     TRAIL=$(bash "$TRAIL_SCRIPT" "$MERGE_ISSUE" -R {GH_REPO} $DOCS_ONLY_FLAG); TRAIL_RC=$?
   fi
@@ -2223,7 +2232,7 @@ Re-run each missing phase via its Skill (see the \`->\` action on each MISSING l
     exit 1
   fi
 fi
-[ "${TRAIL_RC:-1}" -eq 0 ] || exit 1   # hard guard: nothing below runs unless the trail verified (or the verifier is not installed)
+[ "${TRAIL_RC:-1}" -eq 0 ] || exit 1   # hard guard: nothing below runs unless the trail verified
 ```
 
 If the preflight failed, skip the rest of Phase 8 and return `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` listing the missing markers. (`DOCS_ONLY_FLAG` is computed in the block above: `--docs-only` when every file in the PR diff is `docs/**` or a `*.md` outside `commands/` and `.claude/`.)
