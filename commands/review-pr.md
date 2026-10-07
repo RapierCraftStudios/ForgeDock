@@ -1751,7 +1751,9 @@ Run the deterministic dedup script first, then fall through to the line-range ch
 # Step 0: Deterministic title dedup — catches near-duplicates before line-range check
 # See scripts/issue-dedup.sh for the token-overlap algorithm. <!-- Added: forge#1335 -->
 FINDING_TITLE_DEDUP="fix: brief description of finding (review finding — PR #${PR_NUMBER})"
-DEDUP_RESULT=$(scripts/issue-dedup.sh "$FINDING_TITLE_DEDUP" "$GH_FLAG" 2>&1)
+# Never dedup against the issue this PR fixes (MERGE_ISSUE): it is about to be closed, so a
+# finding "matched" to it is tracked nowhere. Field test #3169: SEC-2 matched #3169 itself and was dropped.
+DEDUP_RESULT=$(scripts/issue-dedup.sh "$FINDING_TITLE_DEDUP" "$GH_FLAG" ${MERGE_ISSUE:+--exclude "$MERGE_ISSUE"} 2>&1)
 DEDUP_EXIT=$?
 if [ "$DEDUP_EXIT" -eq 1 ]; then
   echo "DEDUP: Skipping — $DEDUP_RESULT"
@@ -1775,7 +1777,7 @@ LINE_MAX=$((FINDING_LINE + 5))
 
 # Check open issues for line-range overlap OR title similarity on the same file
 CANDIDATES=$(gh issue list --state open --label "review-finding" --limit 100 --json number,title,body \
-  --jq "[.[] | select(.body | test(\"${FINDING_FILE}\"))]" 2>/dev/null)
+  --jq "[.[] | select(.number != ${MERGE_ISSUE:-0}) | select(.body | test(\"${FINDING_FILE}\"))]" 2>/dev/null)
 
 EXISTING=$(echo "$CANDIDATES" | jq -r --arg file "$FINDING_FILE" --argjson min "$LINE_MIN" --argjson max "$LINE_MAX" --arg title "$FINDING_TITLE" '
   .[] |
@@ -1926,7 +1928,7 @@ if [ "$FINDING_PRIORITY_EXIT" -ne 0 ]; then
 else
 
 # --label is repeatable (not comma-joined) per the /issue programmatic contract.
-ISSUE_SKILL_OUTPUT=$(Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"$FINDING_ISSUE_TITLE\" --body-file \"$FINDING_ISSUE_BODY_FILE\" --label review-finding --label needs-validation --label \"$FINDING_PRIORITY\" ${MILESTONE_FLAG}"))
+ISSUE_SKILL_OUTPUT=$(Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"$FINDING_ISSUE_TITLE\" --body-file \"$FINDING_ISSUE_BODY_FILE\" --label review-finding --label needs-validation --label \"$FINDING_PRIORITY\" ${MILESTONE_FLAG} ${MERGE_ISSUE:+--exclude \"$MERGE_ISSUE\"}"))
 # /issue re-reads the created issue and hard-fails unless this exact marker is present.
 rm -f "$FINDING_ISSUE_BODY_FILE"
 
