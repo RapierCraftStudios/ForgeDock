@@ -1693,6 +1693,8 @@ Each NOTE gets exactly one disposition, in this preference order:
 2. **List in the PR body** — append the remaining notes under a `## Non-blocking notes` section of the PR body (edit the existing body, never replace it; use a `mktemp` body file named for the PR number and read the body back to confirm the section is present).
 3. **Drop** — duplicates, stale-comment/docstring nits, and speculation with no actionable evidence.
 
+**Metrics note (forge#3106)**: because NOTEs are not filed as issues, `review-finding` issue volume and any metric derived from it (findings per PR, `/pipeline-health` finding rates, amplification ratio) drop relative to pre-#3060 history. Compare against the `notes_*` counts in the review summary, not issue counts alone, when judging review depth across the change.
+
 Every NOTE disposition must be recorded (never silently dropped): list each NOTE (id, file:line, one-line reason) with its disposition in the review summary comment, including dropped ones, so a reviewer can audit the decision. NOTES are never passed to `Skill(issue)`. Record counts in the review summary (`notes_fixed`, `notes_listed`, `notes_dropped`, `findings_filed`). If no finding is an ISSUE after this step, skip 6C and continue to Phase 7.
 
 ### 6C: Create Issues

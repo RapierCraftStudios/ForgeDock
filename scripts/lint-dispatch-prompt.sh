@@ -47,6 +47,9 @@
 
 set -uo pipefail
 
+# Max findings reported per check (also the awk template-mismatch cap).
+MAX_HITS=5
+
 # Expected values for orchestrator-resolved placeholders: one "KEY=VALUE" line per --expect in a
 # temp file that awk reads byte-exact (no shell/awk escape processing of the value).
 EXPECT_FILE="$(mktemp)"; trap 'rm -f "$EXPECT_FILE"' EXIT
@@ -132,13 +135,13 @@ fi
 # directive phrases are scanned in it (forge#3072).
 TITLE_TEXT=$(printf '%s\n' "$HEAD_PART" | grep -F -- '**Issue title**:' | head -1)
 TITLE_TEXT="${TITLE_TEXT#*\*\*Issue title\*\*:}"
-HITS=$(grep -inE -- "$STRONG" <<< "$TITLE_TEXT" | head -5)
+HITS=$(grep -inE -- "$STRONG" <<< "$TITLE_TEXT" | head -n "$MAX_HITS")
 [ -z "$HITS" ] || while IFS= read -r l; do fail "directive language in the Issue title line: ${l:0:160}"; done <<< "$HITS"
 
 OUTSIDE=$(printf '%s\n' "$HEAD_PART" | grep -vF -- '**Issue title**:')
 OUTSIDE="$OUTSIDE
 $AFTER"
-HITS=$(grep -inE -- "$WIDE" <<< "$OUTSIDE" | head -5)
+HITS=$(grep -inE -- "$WIDE" <<< "$OUTSIDE" | head -n "$MAX_HITS")
 [ -z "$HITS" ] || while IFS= read -r l; do fail "verdict/fix-prescribing language outside context block: ${l:0:160}"; done <<< "$HITS"
 
 # --- 3b. allowlist: every head line must match a Step 4A template line --------
@@ -155,7 +158,7 @@ TPL=""
 if [ -z "$TPL" ]; then
   fail "cannot extract the Step 4A template from $SPEC_FILE (fail closed)"
 else
-  UNMATCHED=$(awk '
+  UNMATCHED=$(awk -v MAXU="$MAX_HITS" '
     # Resolvable placeholders must EXACTLY equal the --expect value (EXP[], read from file 1).
     # No expected value -> fail closed (MISSING[]). Only ISSUE_TITLE is free text (it is scanned
     # for directive language separately); {AGENT_TOKEN} is literal template prose.
@@ -172,11 +175,10 @@ else
         if (name == "ISSUE_TITLE") {
           if (match(pat, /\{[A-Z_]+\}/)) nl = substr(pat, 1, RSTART - 1); else nl = pat
           if (pat == "") { rest = "" }
-          else if (nl == "") { }
-          else if (nl == pat) {
+          else if (nl != "" && nl == pat) {
             if (length(rest) < length(nl) || substr(rest, length(rest) - length(nl) + 1) != nl) return 0
             rest = nl
-          } else { idx = index(rest, nl); if (idx == 0) return 0; rest = substr(rest, idx) }
+          } else if (nl != "") { idx = index(rest, nl); if (idx == 0) return 0; rest = substr(rest, idx) }
           continue
         }
         if (!expected(name)) { TM[name] = 1; return 0 }
@@ -191,7 +193,7 @@ else
     $0 ~ /^[ \t]*$/ { next }
     { ok = 0; delete TM; for (i = 1; i <= np; i++) if (matches($0, pats[i])) { ok = 1; break }
       if (!ok) { for (n in TM) MISSING[n] = 1 }
-      if (!ok) { print "LINE:" substr($0, 1, 120); c++ } if (c >= 5) exit }
+      if (!ok) { print "LINE:" substr($0, 1, 120); c++ } if (c >= MAXU) exit }
     END { for (n in MISSING) print "MISSING:" n }
   ' "$EXPECT_FILE" <(printf '%s\n' "$TPL") <(printf '%s\n' "$HEAD_PART"))
   while IFS= read -r l; do
@@ -203,7 +205,7 @@ else
 fi
 # --- 4. strongest directives inside the context block ------------------------
 if [ -n "$CTX" ]; then
-  HITS=$(grep -inE -- "$STRONG" <<< "$CTX" | head -5)
+  HITS=$(grep -inE -- "$STRONG" <<< "$CTX" | head -n "$MAX_HITS")
   [ -z "$HITS" ] || while IFS= read -r l; do fail "pre-solved/directive language inside context block: ${l:0:160}"; done <<< "$HITS"
 fi
 

@@ -14,7 +14,9 @@
 #   --docs-only   The diff is documentation-only; the FORGE:QUALITY_GATE marker
 #                 is not required.
 #
-# Requirements by COMPLEXITY_BAND (read from the FORGE:FAST_PATH comment):
+# Requirements by COMPLEXITY_BAND (read from the FORGE:FAST_PATH comment).
+# The authoritative table is the `case "$EFFECTIVE"` block below; this summary must be
+# updated together with it (and commands/work-on/review.md):
 #   INVESTIGATION  INVESTIGATOR, FAST_PATH
 #   TRIVIAL        INVESTIGATOR, CONTRACT, FAST_PATH, QUALITY_GATE*
 #   STANDARD/COMPLEX (or unknown band)

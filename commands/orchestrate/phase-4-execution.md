@@ -448,6 +448,7 @@ UNIT_MERGED_THIS_CYCLE=false   # set per completed unit by the Step 4C accountin
 AMPLIFICATION_RATIO_HISTORY=()
 AMPLIFICATION_DEFERRED=()
 AMPLIFICATION_BREAKER_DEFERRED=()   # findings paused by the on-by-default breaker (forge#3060)
+BREAKER_DEFER_TAG="amplification breaker"   # single source for the defer-reason text matched in Step 4F
 declare -A FINDINGS_BY_SOURCE_PR
 declare -A REFINEMENT_FINDINGS
 declare -A NEW_SURFACE_FINDINGS
@@ -2660,7 +2661,7 @@ Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${R
       fi
     fi
     if [ "$BREAKER_LIVE_TRIPPED" = "true" ] && [ "$BREAKER_SAFETY" = "routine" ]; then
-      DEFER_REASON="${DEFER_REASON:+${DEFER_REASON}; }amplification breaker tripped (ratio >= 1.0 for ${CONVERGENCE_WINDOW} merged units) — held for bounded P3 batches"
+      DEFER_REASON="${DEFER_REASON:+${DEFER_REASON}; }${BREAKER_DEFER_TAG} tripped (ratio >= 1.0 for ${CONVERGENCE_WINDOW} merged units) — held for bounded P3 batches"
       DEFER=true
       case " ${AMPLIFICATION_BREAKER_DEFERRED[*]} " in *" $FINDING_NUM "*) ;; *) AMPLIFICATION_BREAKER_DEFERRED+=("$FINDING_NUM") ;; esac
       # Route to the bounded P3 batch planner (never individual dispatch); dedupe so a finding
@@ -3171,7 +3172,7 @@ PERMANENT_DEFERRED=()
 SWEEP_CANDIDATES=()
 IDLE_DEFERRED=()   # <!-- Added: forge#1814 -->
 TOKEN_GATED=()     # <!-- Added: forge#1858 -->
-BREAKER_HELD=()    # amplification-breaker holds: bounded P3 batches only, never individually dispatched (forge#3060)
+AMPLIFICATION_BREAKER_HELD=()    # amplification-breaker holds: bounded P3 batches only, never individually dispatched (forge#3060)
 
 for FINDING_NUM in "${DEFERRED_FINDINGS[@]}"; do
   DEFER_REASON="${DEFERRED_REASONS[$FINDING_NUM]}"
@@ -3179,8 +3180,8 @@ for FINDING_NUM in "${DEFERRED_FINDINGS[@]}"; do
   # Amplification-breaker holds (forge#3060) are checked FIRST: the breaker reason is appended to
   # whatever rule deferred the finding earlier (idle policy, generation, same-file, token budget),
   # and such a finding must never fall into a bucket whose re-evaluation dispatches it individually.
-  if echo "$DEFER_REASON" | grep -qi "amplification breaker"; then
-    BREAKER_HELD+=($FINDING_NUM)
+  if echo "$DEFER_REASON" | grep -qiF "$BREAKER_DEFER_TAG"; then
+    AMPLIFICATION_BREAKER_HELD+=($FINDING_NUM)
   # Generation >= 2 deferrals are PERMANENT — unbounded cascade prevention
   elif echo "$DEFER_REASON" | grep -qi "generation"; then
     PERMANENT_DEFERRED+=($FINDING_NUM)
@@ -3205,7 +3206,7 @@ for FINDING_NUM in "${DEFERRED_FINDINGS[@]}"; do
   fi
 done
 
-echo "Completion sweep: ${#SWEEP_CANDIDATES[@]} re-evaluable, ${#PERMANENT_DEFERRED[@]} permanent, ${#IDLE_DEFERRED[@]} idle-gated, ${#TOKEN_GATED[@]} token-gated, ${#BREAKER_HELD[@]} breaker-held (P3 batches only)"
+echo "Completion sweep: ${#SWEEP_CANDIDATES[@]} re-evaluable, ${#PERMANENT_DEFERRED[@]} permanent, ${#IDLE_DEFERRED[@]} idle-gated, ${#TOKEN_GATED[@]} token-gated, ${#AMPLIFICATION_BREAKER_HELD[@]} breaker-held (P3 batches only)"
 ```
 
 **Step 4F.2: Re-evaluate sweep candidates**
@@ -3215,7 +3216,7 @@ Re-run the Step 4C heuristics against the now-empty DAG. Since all original batc
 ```bash
 SWEEP_EXECUTE=()
 SWEEP_STILL_DEFERRED=()
-SWEEP_BREAKER_HELD=()
+AMPLIFICATION_BREAKER_SWEEP_HELD=()
 
 for FINDING_NUM in "${SWEEP_CANDIDATES[@]}"; do
   FINDING_DATA=$(gh issue view $FINDING_NUM -R {GH_REPO} --json labels,title,body,state \
@@ -3241,9 +3242,9 @@ for FINDING_NUM in "${SWEEP_CANDIDATES[@]}"; do
   # draining the DAG does not make a P3 cascade bounded. Leave them open for the bounded P3
   # batch sweep (planP3BatchGroups) and report them to the operator instead.
   case "${DEFERRED_REASONS[$FINDING_NUM]:-}" in
-    *"amplification breaker"*)
+    *"$BREAKER_DEFER_TAG"*)
       SWEEP_STILL_DEFERRED+=($FINDING_NUM)
-      SWEEP_BREAKER_HELD+=($FINDING_NUM)
+      AMPLIFICATION_BREAKER_SWEEP_HELD+=($FINDING_NUM)
       echo "Sweep: #${FINDING_NUM} held for P3 batching (amplification breaker) — not dispatched individually"
       continue ;;
   esac
