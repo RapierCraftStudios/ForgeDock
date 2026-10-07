@@ -129,8 +129,8 @@ else
       if (name == "ISSUE_TITLE") return 1
       # The literal shell-style token {AGENT_TOKEN} is template prose, not free text.
       if (v == "{AGENT_TOKEN}") return 1
-      # PROJECT_NAME is a free-form label (may contain spaces); still no sentence punctuation, at most 4 words, 40 chars.
-      if (name == "PROJECT_NAME") return (length(v) > 0 && length(v) <= 40 && split(v, _w, " ") <= 4 && v ~ /^[A-Za-z0-9._ ()+-]+$/)
+      # PROJECT_NAME is a free-form label (may contain spaces); still no sentence punctuation, at most 3 words, 40 chars (forge#3089).
+      if (name == "PROJECT_NAME") return (length(v) > 0 && length(v) <= 40 && split(v, _w, " ") <= 3 && v ~ /^[A-Za-z0-9._ ()+-]+$/)
       if (name == "GH_REPO") return v ~ /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/
       if (name == "FORGE_GIST_CAPABLE") return (v == "true" || v == "false")
       # REPO_PATH: validated structurally, not by charset (forge#3085). Must look like an
@@ -142,6 +142,14 @@ else
         if (v !~ /^(\/|~|[A-Za-z]:[\\\/]|\\\\)/) return 0
         if (v ~ /[`$;|&<>"'"'"'!?,*{}\[\]]/ || v ~ /[[:cntrl:]]/) return 0
         if (v ~ /  / || v ~ /(^|[\/\\]) /) return 0
+        # Prose guard (forge#3089): a real path with spaces has few of them, and nearly every
+        # space-separated token carries a path separator. Allow at most 2 spaces and at most
+        # one separator-less token after the first, so "/x then do not investigate ..." fails.
+        nsp = gsub(/ /, " ", v)
+        if (nsp > 2) return 0
+        nt = split(v, _t, " "); bare = 0
+        for (ti = 2; ti <= nt; ti++) if (_t[ti] !~ /[\/\\]/) bare++
+        if (bare > 1) return 0
         return 1
       }
       # Numbers: digits, optionally preceded by a satellite prefix when two placeholders are adjacent.
@@ -156,6 +164,8 @@ else
         if (length(v) == 0 || length(v) > 100) return 0
         if (v !~ /^[A-Za-z0-9._][-A-Za-z0-9._\/]*$/) return 0
         if (v ~ /\/\// || v ~ /\.\./ || v ~ /\/$/) return 0
+        # Directive-word segments (forge#3089): slug-shaped text such as fix/ignore-issue-and-close.
+        if (tolower(v) ~ /(^|[-\/._])(ignore|skip|close|invalid|instead|just|bypass|override|dont)([-\/._]|$)/) return 0
         return 1
       }
       # Remaining slots (LANE, SUBAGENT_MODEL, ...) are single tokens: no "/" , no spaces.
