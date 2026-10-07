@@ -1711,28 +1711,36 @@ done
 
    On `PHASE_TRAIL: FAIL`, classify the issue as a **bypass**, never `DONE`. Also treat an agent final report that says phases ran inline, were skipped, or "ran without Skill calls" as a bypass regardless of labels. Surface it in the operator status update (`PHASE BYPASS: #{NUMBER} — missing: ...`) and do not cascade it as a satisfied predecessor.
 
-   **Do NOT re-dispatch a merged issue** (forge#3148): `/work-on` Phase 0B stops on a closed or `workflow:merged` issue before its resume preflight, so a fresh agent exits without repairing anything and the predecessor would stay unresolved forever. The PR is already merged, so the gap can only be resolved by a human. Escalate it instead, which classifies it **GATED** (`classify_predecessor_state` checks `workflow:merged` + `needs-human` before DONE when that escalation comment is present), so item 6.5 tracks its dependents as `blocked-on-human-merge` instead of dispatching them. A bypass reported by the agent on a `workflow:merged` issue whose trail verifies is handled the same way (set `TRAIL_RC=1` before this block):
+   **Do NOT re-dispatch a merged issue** (forge#3148): `/work-on` Phase 0B stops on a closed or `workflow:merged` issue before its resume preflight, so a fresh agent exits without repairing anything and the predecessor would stay unresolved forever. The PR is already merged, so the gap can only be resolved by a human. Escalate it instead, which classifies it **GATED** (`classify_predecessor_state` checks `workflow:merged` + `needs-human` before DONE when that escalation comment is present), so item 6.5 tracks its dependents as `blocked-on-human-merge` instead of dispatching them. A merged issue whose trail could not be read (`TRAIL_RC -ge 2`, handled above) is escalated by the same block, so it is gated the same way. A bypass reported by the agent on a `workflow:merged` issue whose trail verifies is handled the same way (set `TRAIL_RC=1` before this block):
    ```bash
    # Only a merged issue is escalated here; an unmerged bypass is resumed by item 2 (see below).
-   if [ "$TRAIL_RC" -eq 1 ] && echo ",${TRAIL_LABELS:-}," | grep -q ',workflow:merged,'; then
+   # Any non-zero rc on a merged issue escalates: rc 1 (missing phases) and rc >= 2 (unverifiable trail) alike,
+   # because classify_predecessor_state() gates a merged predecessor only when this escalation comment exists.
+   if [ "$TRAIL_RC" -ne 0 ] && echo ",${TRAIL_LABELS:-}," | grep -q ',workflow:merged,'; then
      if [ "${DRY_RUN:-false}" = "true" ]; then
        echo "[DRY-RUN] Would post FORGE:PHASE_TRAIL_FAILED and add needs-human to merged #{NUMBER}"
      else
-       # Label first: needs-human is what holds the dependents (GATED), so it must not depend on the comment post.
-       gh issue edit {NUMBER} -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
-       # Idempotent: one escalation comment per issue, however many completion cycles see it (--paginate: 30 comments per page).
-       TRAIL_ESCALATED=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments \
-         --jq '.[] | select(.body | contains("FORGE:PHASE_TRAIL_FAILED") and contains("merged with an incomplete phase trail")) | .id' 2>/dev/null | grep -c '[0-9]')
-       if [ "${TRAIL_ESCALATED:-0}" -eq 0 ]; then
+       # Comment first, then label: the classifier needs BOTH to hold dependents, and merged + needs-human
+       # without the comment reads as a stale label (DONE). Verify the comment landed (--paginate: 30 per page)
+       # and retry the post once; one escalation comment per issue across completion cycles.
+       trail_escalated() {
+         gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments \
+           --jq '.[] | select(.body | contains("FORGE:PHASE_TRAIL_FAILED") and contains("merged with an incomplete phase trail")) | .id' \
+           2>/dev/null | grep -q '[0-9]'
+       }
+       for TRAIL_ESC_TRY in 1 2; do
+         trail_escalated && break
          gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:PHASE_TRAIL_FAILED -->
-   #{NUMBER} merged with an incomplete phase trail (detected by /orchestrate on completion).
+   #{NUMBER} merged with an incomplete phase trail (or one that could not be verified), detected by /orchestrate on completion.
 
    \`\`\`
    ${TRAIL}
    \`\`\`
 
-   The PR is already merged, so \`/work-on\` cannot re-run the missing phases. Review the merged change, then remove \`needs-human\` to release dependents held as \`blocked-on-human-merge\`."
-       fi
+   The PR is already merged, so \`/work-on\` cannot re-run the missing phases. Review the merged change, then remove \`needs-human\` to release dependents held as \`blocked-on-human-merge\`." 2>/dev/null || true
+       done
+       trail_escalated || echo "PHASE TRAIL ESCALATION FAILED: #{NUMBER} — escalation comment could not be posted; dependents are NOT held. Hold them manually." >&2
+       gh issue edit {NUMBER} -R {GH_REPO} --add-label "needs-human" 2>/dev/null || true
      fi
    fi
    ```
