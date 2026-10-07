@@ -1435,6 +1435,8 @@ resolve_orch_login() {
 # forge#3168: only TRUSTED comments count, for BOTH markers. Trusted = author_association OWNER/MEMBER/COLLABORATOR, or
 # `.user.login` equal to the orchestrator identity (resolve_orch_login, used only when non-empty). A marker string posted
 # by anyone else is ignored (treated as absent), so an outside commenter can neither forge a release nor a failure.
+# forge#3181: both markers must also START the comment body (startswith, not contains), so a trusted comment that merely
+# quotes the marker text is not counted. hold_merged_trail / release_merged_trail emit the marker as the first line.
 # The comment read is cached per issue for the current monitoring cycle: the cache is a directory of files
 # (`$(...)` subshells lose shell arrays), `TRAIL_CACHE_DIR=$(mktemp -d)` and is recreated at the start of every
 # monitoring cycle (Step 4B item 6.6), so a human edit made between cycles is always seen. Only successful reads are cached.
@@ -1444,7 +1446,7 @@ trail_escalation_state() {
   if ! RAW=$(gh api --paginate "repos/{GH_REPO}/issues/${N}/comments" --jq '.[] | {id: .id, body: (.body // ""), login: (.user.login // ""), assoc: (.author_association // "")}' 2>/dev/null); then
     echo "UNREADABLE"; return
   fi
-  if ! OUT=$(printf '%s\n' "$RAW" | jq -r --arg L "$(resolve_orch_login)" 'select((.assoc | IN("OWNER","MEMBER","COLLABORATOR")) or ($L != "" and .login == $L)) | if (.body | contains("FORGE:PHASE_TRAIL_FAILED") and contains("merged with an incomplete phase trail")) then "F \(.id)" elif (.body | contains("<!-- FORGE:PHASE_TRAIL_RELEASED -->")) then "R \(.id)" else empty end' 2>/dev/null); then
+  if ! OUT=$(printf '%s\n' "$RAW" | jq -r --arg L "$(resolve_orch_login)" 'select((.assoc | IN("OWNER","MEMBER","COLLABORATOR")) or ($L != "" and .login == $L)) | if (.body | startswith("<!-- FORGE:PHASE_TRAIL_FAILED -->") and contains("merged with an incomplete phase trail")) then "F \(.id)" elif (.body | startswith("<!-- FORGE:PHASE_TRAIL_RELEASED -->")) then "R \(.id)" else empty end' 2>/dev/null); then
     echo "UNREADABLE"; return
   fi
   FAILED_ID=$(printf '%s\n' "$OUT" | awk '$1=="F"&&$2+0>m{m=$2+0}END{print m+0}')
