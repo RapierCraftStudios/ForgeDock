@@ -113,7 +113,7 @@ SPEC_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../commands/orchestrate
 TPL=""
 [ -r "$SPEC_FILE" ] && TPL=$(awk '/Copy this template. Fill in variables/{f=1} f&&/^Agent\($/{g=1} g{print} g&&/^\)$/{exit}' "$SPEC_FILE" \
   | sed -e '/^Agent($/d' -e '/^  subagent_type/d;/^  model=/d;/^  description=/d;/^  run_in_background/d' \
-        -e 's/^  prompt="//' -e '/^)$/d' | sed -e '$ { /^"$/ d }' \
+        -e 's/^  prompt="//' -e '/^)$/d' | sed -e '$ { /^"$/ d; }' \
   | sed -e '/DISPATCH_CONTEXT:BEGIN/,$d')
 if [ -z "$TPL" ]; then
   fail "cannot extract the Step 4A template from $SPEC_FILE (fail closed)"
