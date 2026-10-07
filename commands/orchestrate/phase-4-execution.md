@@ -1065,10 +1065,18 @@ If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to
 ```bash
 # Runs inside the per-issue dispatch loop (same loop as claim_conflicts_with_live_holder above),
 # immediately before that issue's Agent()/task() call. LINT_REFUSED_ISSUES is initialised once, empty.
-LINT_SCRIPT="${FORGEDOCK_HOME:-${FORGE_HOME:-$REPO_PATH}}/scripts/lint-dispatch-prompt.sh"
-if [ ! -r "$LINT_SCRIPT" ]; then
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+if [ -n "${FORGEDOCK_HOME:-}" ]; then FORGE_ROOT="$FORGEDOCK_HOME"; else
+  _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  for _c in "${FORGE_HOME:-}" "${CLAUDE_PLUGIN_ROOT:-}" "$_l" "$HOME"/.claude/plugins/cache/*/forgedock/* "$HOME"/.claude/plugins/marketplaces/*; do
+    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && FORGE_ROOT="$_c" ;; esac
+  done
+fi
+LINT_SCRIPT="$FORGE_ROOT/scripts/lint-dispatch-prompt.sh"
+if [ -z "$FORGE_ROOT" ] || [ ! -r "$LINT_SCRIPT" ]; then
   # Fail closed: a missing lint script is NOT a pass and NOT a lint verdict.
-  echo "DISPATCH REFUSED for #{NUMBER}: lint script not found at $LINT_SCRIPT (set FORGEDOCK_HOME/FORGE_HOME) — cannot verify Hard Rule 1" >&2
+  echo "DISPATCH REFUSED for #{NUMBER}: lint script not found at $LINT_SCRIPT (set FORGEDOCK_HOME/FORGE_HOME) — cannot verify Hard Rule 1 (ForgeDock install root unresolved: set FORGEDOCK_HOME)" >&2
   LINT_REFUSED_ISSUES+=("{NUMBER}:lint-script-not-found")
   continue
 fi
@@ -1633,7 +1641,19 @@ done
 
 0. **Phase-trail verification (MANDATORY on EVERY completion, before classifying DONE)** <!-- Added: forge#3062 --> — a `workflow:merged` label alone is not proof the pipeline ran. Run the deterministic verifier (add `--docs-only` for docs-only diffs):
    ```bash
-   TRAIL=$(bash "${FORGEDOCK_HOME:-${FORGE_HOME:-$REPO_PATH}}/scripts/verify-phase-trail.sh" {NUMBER} -R {GH_REPO} 2>&1); TRAIL_RC=$?
+   # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+   FORGE_ROOT=""
+   if [ -n "${FORGEDOCK_HOME:-}" ]; then FORGE_ROOT="$FORGEDOCK_HOME"; else
+     _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+     for _c in "${FORGE_HOME:-}" "${CLAUDE_PLUGIN_ROOT:-}" "$_l" "$HOME"/.claude/plugins/cache/*/forgedock/* "$HOME"/.claude/plugins/marketplaces/*; do
+       case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && FORGE_ROOT="$_c" ;; esac
+     done
+   fi
+   if [ -z "$FORGE_ROOT" ] || [ ! -f "$FORGE_ROOT/scripts/verify-phase-trail.sh" ]; then
+     TRAIL="PHASE_TRAIL: ERROR (verify-phase-trail.sh not resolvable; set FORGEDOCK_HOME)"; TRAIL_RC=127   # fail closed
+   else
+     TRAIL=$(bash "$FORGE_ROOT/scripts/verify-phase-trail.sh" {NUMBER} -R {GH_REPO} 2>&1); TRAIL_RC=$?
+   fi
    echo "$TRAIL"
    ```
    If `TRAIL_RC` is non-zero (`PHASE_TRAIL: FAIL` or `ERROR`, fail closed), classify the issue as **FAILED/bypass** — never `DONE`. Also treat an agent final report that says phases ran inline, were skipped, or "ran without Skill calls" as a bypass regardless of labels. Surface it in the operator status update (`PHASE BYPASS: #{NUMBER} — missing: ...`), do not cascade it as a satisfied predecessor, and re-dispatch ONE fresh agent with the unmodified Step 4A template (lint-checked) so `/work-on`'s resume preflight re-runs each missing phase via `Skill(...)`. Never hand-post missing markers.

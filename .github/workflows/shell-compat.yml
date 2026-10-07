@@ -57,6 +57,8 @@ jobs:
           bash --version | head -1
       - name: Run lint-dispatch-prompt.test.sh
         run: bash scripts/lint-dispatch-prompt.test.sh
+      - name: Run forge-root.test.sh
+        run: bash scripts/forge-root.test.sh
 
   # ---------------------------------------------------------------------------
   # Job 1: shellcheck — static analysis for .sh files on Linux

@@ -188,10 +188,19 @@ CHANGED=$(git -C {WORKTREE_PATH} diff --name-only origin/{PR_BASE}...HEAD)
 # docs = docs/** or *.md, but commands/** and .claude/** specs are executable pipeline code, never docs
 if [ -n "$CHANGED" ] && echo "$CHANGED" | awk '!(/^docs\// || (/\.md$/ && !/^(commands|\.claude)\//)){bad=1} END{exit bad}'; then DOCS_ONLY_FLAG="--docs-only"; fi
 # The verifier ships with ForgeDock (not the consumer repo): same resolution as every universal script.
-TRAIL_SCRIPT="${FORGEDOCK_HOME:-${FORGE_HOME:-{REPO_PATH}}}/scripts/verify-phase-trail.sh"
-if [ ! -f "$TRAIL_SCRIPT" ]; then
-  echo "WARNING: verify-phase-trail.sh not installed at $TRAIL_SCRIPT — phase-trail preflight skipped (prose tier)" >&2
-  TRAIL_RC=0
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+if [ -n "${FORGEDOCK_HOME:-}" ]; then FORGE_ROOT="$FORGEDOCK_HOME"; else
+  _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  for _c in "${FORGE_HOME:-}" "${CLAUDE_PLUGIN_ROOT:-}" "$_l" "$HOME"/.claude/plugins/cache/*/forgedock/* "$HOME"/.claude/plugins/marketplaces/*; do
+    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && FORGE_ROOT="$_c" ;; esac
+  done
+fi
+TRAIL_SCRIPT="$FORGE_ROOT/scripts/verify-phase-trail.sh"
+if [ -z "$FORGE_ROOT" ] || [ ! -f "$TRAIL_SCRIPT" ]; then
+  # Fail closed: never skip the gate when the verifier cannot be resolved (plugin installs set no FORGE_HOME).
+  echo "PHASE TRAIL: verify-phase-trail.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install)" >&2
+  TRAIL_RC=127
 else
   TRAIL=$(bash "$TRAIL_SCRIPT" {NUMBER} -R {GH_REPO} $DOCS_ONLY_FLAG); TRAIL_RC=$?
   echo "$TRAIL"

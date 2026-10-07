@@ -315,7 +315,7 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | {id: .id, author: .u
 
 **Check**: state (closed → STOP), terminal labels (`workflow:merged`/`workflow:invalid`/`workflow:awaiting-merge` → STOP), existing agent comments (`FORGE:INVESTIGATOR`, `FORGE:DECOMPOSED`, `FORGE:CONTRACT`, `FORGE:BUILDER`, `FORGE:TRAJECTORY`, `FORGE:DECISION_RECORD`), parent tracker status, sub-issue status.
 
-**Resume preflight (MANDATORY on any resume past Phase 1)** <!-- Added: forge#3061 -->: before routing to Phase 3, 4, 5 or 6 from existing state, run `bash "${FORGEDOCK_HOME:-${FORGE_HOME:-$REPO_PATH}}/scripts/verify-phase-trail.sh" {NUMBER} -R {GH_REPO}` (add `--docs-only` for docs-only diffs). On `PHASE_TRAIL: FAIL`, go BACK and run each missing phase through its `Skill(...)` (investigate, Phase 3B classification, build contract/context/architect, validate) before continuing — never continue forward over a gap, never hand-post a missing marker, and never treat a recovered uncommitted worktree as a substitute for the skipped phases. The same verifier gates PR creation (`work-on/review.md` Phase R1.5) and auto-merge (`review-pr.md` Phase 8).
+**Resume preflight (MANDATORY on any resume past Phase 1)** <!-- Added: forge#3061 -->: before routing to Phase 3, 4, 5 or 6 from existing state, run `bash "$FORGE_ROOT/scripts/verify-phase-trail.sh" {NUMBER} -R {GH_REPO}` (add `--docs-only` for docs-only diffs), with `FORGE_ROOT` resolved by the bootstrap in "Script resolution" below. If `FORGE_ROOT` is empty or the script is missing, treat it as `PHASE_TRAIL: ERROR` (fail closed: stop and add `needs-human`; never skip the preflight). On `PHASE_TRAIL: FAIL`, go BACK and run each missing phase through its `Skill(...)` (investigate, Phase 3B classification, build contract/context/architect, validate) before continuing — never continue forward over a gap, never hand-post a missing marker, and never treat a recovered uncommitted worktree as a substitute for the skipped phases. The same verifier gates PR creation (`work-on/review.md` Phase R1.5) and auto-merge (`review-pr.md` Phase 8).
 
 **Determine resume point**: No comments → Phase 1. Investigation exists + ready-to-build → Phase 3. Builder:COMPLETE + no PR → Phase 4. Builder without :COMPLETE (partial/interrupted build) + no PR → Phase 3 (partial-build cleanup). Builder + PR open → Phase 5. PR merged + issue open → Phase 6.
 
@@ -408,15 +408,23 @@ if [[ "$ADAPTIVE_DIR" != "${REPO_PATH_NORM}/"* ]]; then
   echo "WARNING: adaptive_scripts.directory resolves outside repo root ('$ADAPTIVE_DIR') — adaptive tier disabled" >&2
   ADAPTIVE_ENABLED=false
 fi
-# Resolution order: $FORGEDOCK_HOME, then $FORGE_HOME (the installed ForgeDock location, which holds
-# scripts/ and commands/ even when the target repo does not), then the repo root. Looking only in the
-# target repo made plugin/symlink installs silently fall to the prose tier. <!-- Added: forge#3062 -->
-UNIVERSAL_DIR="${FORGEDOCK_HOME:-${FORGE_HOME:-$REPO_PATH}}/scripts"
-[ -d "$UNIVERSAL_DIR" ] || UNIVERSAL_DIR="${REPO_PATH}/scripts"
+# ForgeDock's own install root (holds scripts/ and commands/), resolved ONCE by the canonical bootstrap
+# below — never the consumer repo: plugin installs set neither FORGE_HOME nor FORGEDOCK_HOME, and a
+# repo-relative fallback would execute (or miss) a same-named script controlled by the consumer repo.
+# Resolution: $FORGEDOCK_HOME (authoritative when set) > $FORGE_HOME > $CLAUDE_PLUGIN_ROOT > the
+# ~/.claude/commands symlink target > the Claude Code plugin cache/marketplace dirs. <!-- forge#3098 -->
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+if [ -n "${FORGEDOCK_HOME:-}" ]; then FORGE_ROOT="$FORGEDOCK_HOME"; else
+  _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  for _c in "${FORGE_HOME:-}" "${CLAUDE_PLUGIN_ROOT:-}" "$_l" "$HOME"/.claude/plugins/cache/*/forgedock/* "$HOME"/.claude/plugins/marketplaces/*; do
+    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && FORGE_ROOT="$_c" ;; esac
+  done
+fi
+UNIVERSAL_DIR="${FORGE_ROOT:+$FORGE_ROOT/scripts}"   # empty => tier 3 skipped, prose tier
 # NOTE: never resolve this via `which` or `find` — universal scripts are
-# repo-relative, not installed on $PATH, so a PATH lookup always misses.
-# REPO_PATH is already resolved from forge.yaml → paths.root earlier in
-# Phase 0, so it is the deterministic fallback when FORGEDOCK_HOME is unset.
+# install-relative, not installed on $PATH, so a PATH lookup always misses.
+# FORGE_ROOT (above) is the deterministic resolution; there is NO repo-path fallback.
 # Pipeline agents MUST NOT use `find` (unbounded or filesystem-wide) to
 # locate pipeline scripts under any circumstances: if UNIVERSAL_DIR/${operation}.sh
 # does not exist, resolve_script() falls through to Tier 4 (prose) below,
@@ -431,7 +439,7 @@ resolve_script() {
     return
   fi
   # Tier 3: universal script
-  if [ -f "${UNIVERSAL_DIR}/${operation}.sh" ]; then
+  if [ -n "$UNIVERSAL_DIR" ] && [ -f "${UNIVERSAL_DIR}/${operation}.sh" ]; then
     echo "universal:${UNIVERSAL_DIR}/${operation}.sh"
     return
   fi
