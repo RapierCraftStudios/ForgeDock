@@ -1052,11 +1052,27 @@ If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to
 
 **LANE**: {LANE} (PR target: {PR_BASE})
 **Issue title**: {ISSUE_TITLE}
+<!-- DISPATCH_CONTEXT:BEGIN -->
 {GIST_CONTEXT}
 {SOURCE_PR_HINT_CONTEXT}
+<!-- DISPATCH_CONTEXT:END -->
 "
 )
 ```
+
+**Prompt lint (MANDATORY before every dispatch — mechanical enforcement of Hard Rule 1)** <!-- Added: forge#3062 -->: the only variable text allowed in the rendered prompt is the `{GIST_CONTEXT}`/`{SOURCE_PR_HINT_CONTEXT}` blocks between the `DISPATCH_CONTEXT` markers (which already carry the claims-board URL and the same-file "what changed" brief). Before every `Agent(...)`/`task(...)` launch — initial dispatch, Step 4B resume/relaunch, Step 4F sweep, remediation — write the fully rendered prompt to a `mktemp` file and run the lint. A non-zero exit means the dispatch is REFUSED: do not launch, do not "fix" the prompt by adding text — re-render from the unmodified template, drop the offending context block, and report the violation to the operator.
+
+```bash
+PROMPT_FILE="$(mktemp)"
+printf '%s' "$RENDERED_PROMPT" > "$PROMPT_FILE"
+if ! bash "${FORGEDOCK_HOME:-${FORGE_HOME:-$REPO_PATH}}/scripts/lint-dispatch-prompt.sh" "$PROMPT_FILE"; then
+  echo "DISPATCH REFUSED for #{NUMBER}: prompt deviates from the Step 4A template (Hard Rule 1)" >&2
+  rm -f "$PROMPT_FILE"; # re-render verbatim, never launch the failing prompt
+fi
+rm -f "$PROMPT_FILE"
+```
+
+The lint rejects: template deviations, any text outside the context block after the issue title, and prompts that pre-decide a verdict or fix ("likely already resolved — verify and close", "the fix is ...", "make X terminal", "finish what the previous agent left"). The orchestrator never diagnoses, designs fixes, or summarizes what an issue "probably" needs — investigation is the agent's job via `work-on/investigate`.
 
 **`{GIST_CONTEXT}` generation**: For each issue being dispatched, build the context block. **Prefer the deconflicted `FORGE:SYNTHESIS_BRIEF` (from Phase 2.5) when one exists** — it is a per-issue, already-reconciled brief that carries only the arbitration decisions and sibling investigation Gists relevant to *this* issue. Injecting it instead of the full aggregated milestone-index gist means the agent does not re-arbitrate the same contradictions (less token spend, less nondeterminism). Only when Phase 2.5 did not run (0/1 investigations — no brief exists) does this fall back to the raw parent-investigation + milestone-index gist behavior. <!-- Added: forge#1192 -->
 
@@ -1588,6 +1604,13 @@ done
 
 **CRITICAL — Stall detection and recovery**: Background agents sometimes stop mid-pipeline (`stop_reason=end_turn`) after completing a sub-phase (e.g., investigation completes but build never starts). This causes the agent to "complete" from the Agent tool's perspective even though the `/work-on` pipeline is only partially done. When you receive a completion notification:
 
+0. **Phase-trail verification (MANDATORY on EVERY completion, before classifying DONE)** <!-- Added: forge#3062 --> — a `workflow:merged` label alone is not proof the pipeline ran. Run the deterministic verifier (add `--docs-only` for docs-only diffs):
+   ```bash
+   TRAIL=$(bash "${FORGEDOCK_HOME:-${FORGE_HOME:-$REPO_PATH}}/scripts/verify-phase-trail.sh" {NUMBER} -R {GH_REPO} 2>&1); TRAIL_RC=$?
+   echo "$TRAIL"
+   ```
+   If `TRAIL_RC` is non-zero (`PHASE_TRAIL: FAIL` or `ERROR`, fail closed), classify the issue as **FAILED/bypass** — never `DONE`. Also treat an agent final report that says phases ran inline, were skipped, or "ran without Skill calls" as a bypass regardless of labels. Surface it in the operator status update (`PHASE BYPASS: #{NUMBER} — missing: ...`), do not cascade it as a satisfied predecessor, and re-dispatch ONE fresh agent with the unmodified Step 4A template (lint-checked) so `/work-on`'s resume preflight re-runs each missing phase via `Skill(...)`. Never hand-post missing markers.
+
 1. **Check if the agent completed the FULL pipeline** — not just one phase:
    ```bash
    # Check final workflow state — workflow:merged, workflow:invalid, needs-human, and
@@ -1609,9 +1632,11 @@ done
      resume=AGENT_ISSUE_MAP[{NUMBER}],
      description="Resume #{NUMBER} pipeline",
      run_in_background=true,
-     prompt="The previous /work-on invocation stopped before completing the full pipeline. The issue is currently at {CURRENT_WORKFLOW_STATE}. Continue — invoke Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{NUMBER} --under-orchestration') to resume the routing loop from the current state. /work-on will re-read GitHub state and pick up where it left off."
+     prompt="{UNMODIFIED_STEP_4A_TEMPLATE_RENDERED_FOR_{NUMBER}}"
    )
    ```
+
+   **Resume/relaunch prompts are the verbatim Step 4A template** <!-- Added: forge#3062 -->: never write free-text resume instructions such as "continue from where you left off" or "finish the uncommitted work". Render the unmodified 4A template (and pass it through the prompt lint above) so the agent re-enters via `Skill(skill='{FORGE_SKILL_PREFIX}work-on', ...)` and `/work-on`'s own checkpoint routing plus the phase-trail resume preflight pick the earliest missing phase. A recovered worktree with uncommitted work is never a substitute for the skipped phases.
 
    **2b. Engine-first-dispatched issue (`ENGINE_DISPATCH_MAP[{NUMBER}]` set, no `AGENT_ISSUE_MAP` entry)** — `Agent(resume=...)` has nothing to resume here; the completed task was a backgrounded `Bash(command="forgedock run-issue ...")` call, not an `Agent()`. Re-issuing the identical `forgedock run-issue` command would just reproduce the same environmental failure. Instead, fall back to the Agent-spawn path for this ONE issue — but only when it is safe to do so:
    ```bash
