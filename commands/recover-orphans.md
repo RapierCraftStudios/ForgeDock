@@ -324,14 +324,15 @@ RECOVERY_CLAIM_TTL_MIN="${RECOVERY_CLAIM_TTL_MIN:-30}"   # a claim or heartbeat 
 SWEEP_ID="sweep-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 
 # claim_orphan <issue> — returns 0 if this sweep now holds the claim, 1 if it must skip (reason in CLAIM_SKIP_REASON).
-# Fails closed: an unreadable comment list is treated as "held by someone else".
+# Fails closed: an unreadable comment list (initial read or race-check re-read) is treated as "held by someone else".
+# Both reads run under pipefail in a subshell: the pipeline status would otherwise be jq's, and a gh failure
+# (rate limit, 403) would yield "[]" with exit 0, indistinguishable from "no live holder".
 claim_orphan() {
   local num="$1" now cutoff comments live
   [ "$DRY_RUN" = "true" ] && return 0   # dry-run: no claim comment is posted (callers already skip dry-run resumes)
   now=$(date -u +%s); cutoff=$(( now - RECOVERY_CLAIM_TTL_MIN * 60 ))
-  comments=$(gh api --paginate "repos/${GH_REPO}/issues/${num}/comments" 2>/dev/null \
+  comments=$(set -o pipefail; gh api --paginate "repos/${GH_REPO}/issues/${num}/comments" 2>/dev/null \
     | jq -s 'add // []') || { CLAIM_SKIP_REASON="could not read comments to check for a live holder"; return 1; }
-  [ -n "$comments" ] || { CLAIM_SKIP_REASON="could not read comments to check for a live holder"; return 1; }
 
   # Live orchestrator signal: a recent heartbeat from /work-on --under-orchestration, or a recent claim of any sweep.
   # A claim is "released" only by a later RELEASED marker naming its sweep id.
@@ -355,12 +356,13 @@ Holder: /recover-orphans — resuming /work-on #${num}. Other sweeps and dispatc
 
   # Race check: re-read; the earliest unreleased claim wins. Losing means another sweep claimed first.
   local first
-  first=$(gh api --paginate "repos/${GH_REPO}/issues/${num}/comments" 2>/dev/null | jq -rs --argjson cutoff "$cutoff" '
+  first=$(set -o pipefail; gh api --paginate "repos/${GH_REPO}/issues/${num}/comments" 2>/dev/null | jq -rs --argjson cutoff "$cutoff" '
     add // [] | ([.[] | select(.body | contains("FORGE:RECOVERY_CLAIM_RELEASED")) | .body | capture("Sweep: (?<id>[^ \n]+)").id]) as $rel
     | [.[] | select(.body | contains("<!-- FORGE:RECOVERY_CLAIM -->"))
            | select((.updated_at | fromdateiso8601) >= $cutoff)
            | select((.body | capture("Sweep: (?<id>[^ \n]+)").id) as $sid | ($rel | index($sid)) == null)]
-    | first | .body // ""' | sed -n 's/^\*\*Sweep: \(.*\)\*\*$/\1/p')
+    | first | .body // ""' | sed -n 's/^\*\*Sweep: \(.*\)\*\*$/\1/p') \
+    || { release_orphan "$num"; CLAIM_SKIP_REASON="could not re-read comments to confirm the claim race"; return 1; }
   if [ "$first" != "$SWEEP_ID" ]; then
     release_orphan "$num"
     CLAIM_SKIP_REASON="lost claim race to ${first:-unknown}"
