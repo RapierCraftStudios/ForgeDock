@@ -937,12 +937,19 @@ Skip the context gathering (return an empty briefing) if:
 **Minimal marker on every non-TRIVIAL skip (forge#3123)**: for STANDARD/COMPLEX the phase-trail gate (`scripts/verify-phase-trail.sh`) requires a `FORGE:CONTEXT` marker, so a skip must still post an empty marker comment (idempotent: skip if a `FORGE:CONTEXT` comment already exists), otherwise a re-run can never satisfy the gate:
 
 ```bash
-gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
+EXISTING_CONTEXT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
+  --jq '[.[] | select(.body | contains("<!-- FORGE:CONTEXT -->"))] | length' \
+  | awk '{s+=$1} END {print s+0}')
+if [ "${DRY_RUN:-false}" = "true" ]; then
+  echo "[DRY_RUN] would post minimal FORGE:CONTEXT marker on #{NUMBER}"
+elif [ "$EXISTING_CONTEXT" -eq 0 ]; then
+  gh issue comment "{NUMBER}" -R "{GH_REPO}" --body "<!-- FORGE:CONTEXT -->
 ## Implementation Context for #{NUMBER}
 
 Context gathering skipped: {REASON — config/docs-only edit | new files, no git history | empty affected-file list}. No institutional memory to surface.
 
 <!-- FORGE:CONTEXT:COMPLETE -->"
+fi
 ```
 
 ---
