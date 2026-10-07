@@ -82,11 +82,11 @@ This is the **orchestrator**. It routes to the right review mode, runs automated
 
 | File | What | How to invoke |
 |------|------|---------------|
-| `${FORGE_HOME:-$REPO_PATH}/commands/review-pr-agents/protocols.md` | Shared review protocols (Evidence-Based + Structured Findings + Input Scoping) | `Read` tool during Phase 3C (always) |
-| `${FORGE_HOME:-$REPO_PATH}/commands/review-pr-agents/<persona>.md` | Per-persona agent prompt templates (9 files) | `Read` tool during Phase 3C (selected agents only) |
-| `${FORGE_HOME:-$REPO_PATH}/commands/review-pr-staging.md` | Full staging→main review pipeline | `Skill("{FORGE_SKILL_PREFIX}review-pr-staging", ...)` during Phase 0 |
+| `${CLAUDE_PLUGIN_ROOT}/commands/review-pr-agents/protocols.md` | Shared review protocols (Evidence-Based + Structured Findings + Input Scoping) | `Read` tool during Phase 3C (always) |
+| `${CLAUDE_PLUGIN_ROOT}/commands/review-pr-agents/<persona>.md` | Per-persona agent prompt templates (9 files) | `Read` tool during Phase 3C (selected agents only) |
+| `${CLAUDE_PLUGIN_ROOT}/commands/review-pr-staging.md` | Full staging→main review pipeline | `Skill("{FORGE_SKILL_PREFIX}review-pr-staging", ...)` during Phase 0 |
 
-`$FORGE_HOME` defaults to `~/.claude` (the directory where `npx forgedock` symlinks commands). When unset, every resolution in this file falls back to `$REPO_PATH` (the repo root, from `forge.yaml → paths.root`) rather than degrading to a bare root-anchored path — see the `TEMPLATE_BASE` tiered guard in Phase 3C and the verification-script resolution in Step 2.5B for the actual fallback chains. Never resolve a missing file via a filesystem-wide `find` — see the guardrail in `commands/review-pr-agents/protocols.md`.
+Paths above are rooted at `${CLAUDE_PLUGIN_ROOT}`, the running plugin's install (filled in by Claude Code). If that path does not start with `/` (install.sh, Codex, OpenCode), use the tiered resolution below instead. `$FORGE_HOME` defaults to `~/.claude` (the directory where `npx forgedock` symlinks commands). When unset, every resolution in this file falls back to `$REPO_PATH` (the repo root, from `forge.yaml → paths.root`) rather than degrading to a bare root-anchored path — see the `TEMPLATE_BASE` tiered guard in Phase 3C and the verification-script resolution in Step 2.5B for the actual fallback chains. Never resolve a missing file via a filesystem-wide `find` — see the guardrail in `commands/review-pr-agents/protocols.md`.
 
 **Invocation flow:**
 ```
@@ -639,7 +639,10 @@ REPO_ROOT="."  # Assumes cwd is the repo root
 # that degrades to a root-anchored path (/scripts/verify-*.sh) and silently skips
 # every check below. Never fall back to a filesystem-wide `find`.
 # <!-- Added: forge#2035 -->
-if [ -n "$FORGE_HOME" ] && [ -f "$FORGE_HOME/scripts/verify-route-registration.sh" ]; then
+_PLUGIN_ROOT='${CLAUDE_PLUGIN_ROOT}'; case "$_PLUGIN_ROOT" in /*) ;; *) _PLUGIN_ROOT="" ;; esac
+if [ -n "$_PLUGIN_ROOT" ] && [ -f "$_PLUGIN_ROOT/scripts/verify-route-registration.sh" ]; then
+    SCRIPTS_HOME="$_PLUGIN_ROOT"   # running plugin's own root first (see Phase 3C Tier 0)
+elif [ -n "$FORGE_HOME" ] && [ -f "$FORGE_HOME/scripts/verify-route-registration.sh" ]; then
     SCRIPTS_HOME="$FORGE_HOME"
 else
     FORGE_YAML="${FORGE_CONFIG:-$(git rev-parse --show-toplevel 2>/dev/null)/forge.yaml}"
@@ -1322,7 +1325,13 @@ Missing persona templates are a fatal setup error, not permission to skip multi-
 ```bash
 # Tier 1: $FORGE_HOME (the installed location — the common case)
 TEMPLATE_BASE=""
-if [[ -f "$FORGE_HOME/commands/review-pr-agents/protocols.md" ]]; then
+# Tier 0: the running plugin's own root (Claude Code substitutes this exact spelling; elsewhere it stays a
+# literal that the /* check rejects). Wins over an exported FORGE_HOME, which may name an older checkout.
+_PLUGIN_ROOT='${CLAUDE_PLUGIN_ROOT}'; case "$_PLUGIN_ROOT" in /*) ;; *) _PLUGIN_ROOT="" ;; esac
+if [[ -n "$_PLUGIN_ROOT" && -f "$_PLUGIN_ROOT/commands/review-pr-agents/protocols.md" ]]; then
+  TEMPLATE_BASE="$_PLUGIN_ROOT/commands/review-pr-agents"
+  TEMPLATE_SOURCE="plugin_root"
+elif [[ -f "$FORGE_HOME/commands/review-pr-agents/protocols.md" ]]; then
   TEMPLATE_BASE="$FORGE_HOME/commands/review-pr-agents"
   TEMPLATE_SOURCE="forge_home"
 else
@@ -1357,7 +1366,7 @@ fi
 
 **If `TEMPLATE_SOURCE` is `none`**: HARD STOP. Post a PR comment explaining the setup is broken (`gh pr comment $ARGUMENTS --body "..."`) instructing the user to run `npx forgedock update` to repair the install, add `needs-human`, and exit Phase 3 without posting any findings or a `FORGE:REVIEW` verdict. **NEVER perform the review inline in the main agent context as a substitute.** A degraded solo review that presents itself as complete is worse than no review — missing templates must fail loudly, not silently.
 
-**If `TEMPLATE_SOURCE` is `forge_home` or `repo_path`** (the normal cases — behavior unchanged from before this guard existed):
+**If `TEMPLATE_SOURCE` is `plugin_root`, `forge_home` or `repo_path`** (the normal cases — behavior unchanged from before this guard existed):
 ```
 Read: $TEMPLATE_BASE/protocols.md
 Read: $TEMPLATE_BASE/<persona>.md   (one per selected agent from Phase 3B)

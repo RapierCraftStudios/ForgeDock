@@ -31,14 +31,16 @@ Read and execute phases in sequence. Each phase file is self-contained.
 
 ## Quick Reference
 
+**Spec root (MANDATORY)**: read every file below from `${CLAUDE_PLUGIN_ROOT}` — the install root of the ForgeDock plugin that is running this command (Claude Code fills it in when it loads the spec). Only if that path does not start with `/` (not a Claude Code plugin session: install.sh, Codex, OpenCode) use `$FORGE_HOME` instead. Never read sub-files from `$FORGE_HOME` when the plugin root resolved: an exported `FORGE_HOME` can point at a different, older ForgeDock checkout, and mixing roots runs stale phase specs.
+
 ```
-Read: $FORGE_HOME/commands/pipeline-health/config.md           # ALWAYS READ FIRST
-Read: $FORGE_HOME/commands/pipeline-health/phase-1-context.md
-Read: $FORGE_HOME/commands/pipeline-health/phase-2-metrics.md
-Read: $FORGE_HOME/commands/pipeline-health/phase-3-analyze.md
-Read: $FORGE_HOME/commands/pipeline-health/phase-4-proposals.md
-Read: $FORGE_HOME/commands/pipeline-health/phase-5-report.md
-Read: $FORGE_HOME/commands/pipeline-health/phase-6-summary.md
+Read: ${CLAUDE_PLUGIN_ROOT}/commands/pipeline-health/config.md           # ALWAYS READ FIRST
+Read: ${CLAUDE_PLUGIN_ROOT}/commands/pipeline-health/phase-1-context.md
+Read: ${CLAUDE_PLUGIN_ROOT}/commands/pipeline-health/phase-2-metrics.md
+Read: ${CLAUDE_PLUGIN_ROOT}/commands/pipeline-health/phase-3-analyze.md
+Read: ${CLAUDE_PLUGIN_ROOT}/commands/pipeline-health/phase-4-proposals.md
+Read: ${CLAUDE_PLUGIN_ROOT}/commands/pipeline-health/phase-5-report.md
+Read: ${CLAUDE_PLUGIN_ROOT}/commands/pipeline-health/phase-6-summary.md
 ```
 
 The command reads only the phase file(s) relevant to the current step rather than loading

@@ -392,10 +392,12 @@ resolve_classify_lane() {
      [ -n "${OPENCODE_SESSION_ID:-}" ] ||
      [ -n "${OPENCODE_PID:-}" ] ||
      [ -n "${OPENCODE:-}" ]; then
+    case '${CLAUDE_PLUGIN_ROOT}' in /*) candidates+=('${CLAUDE_PLUGIN_ROOT}/scripts/classify-lane.sh') ;; esac  # running plugin first
     [ -n "${FORGE_HOME:-}" ] && candidates+=("$FORGE_HOME/scripts/classify-lane.sh")
     [ -n "${REPO_PATH:-}" ] && candidates+=("$REPO_PATH/scripts/classify-lane.sh")
     candidates+=("$HOME/.opencode/scripts/classify-lane.sh")
   else
+    case '${CLAUDE_PLUGIN_ROOT}' in /*) candidates+=('${CLAUDE_PLUGIN_ROOT}/scripts/classify-lane.sh') ;; esac  # running plugin first
     [ -n "${FORGE_HOME:-}" ] && candidates+=("$FORGE_HOME/scripts/classify-lane.sh")
     candidates+=("$HOME/.claude/scripts/classify-lane.sh")
     [ -n "${REPO_PATH:-}" ] && candidates+=("$REPO_PATH/scripts/classify-lane.sh")
@@ -507,6 +509,7 @@ declare -A EDGE_REDERIVE_ATTEMPTS
 # copied ForgeDock's helper scripts into its own repository (#2794/#2791).
 resolve_extract_affected_files() {
   local candidates=()
+  case '${CLAUDE_PLUGIN_ROOT}' in /*) candidates+=('${CLAUDE_PLUGIN_ROOT}/scripts/extract-affected-files.sh') ;; esac  # running plugin first
   [ -n "${FORGE_HOME:-}" ] && candidates+=("$FORGE_HOME/scripts/extract-affected-files.sh")
   [ -n "${REPO_PATH:-}" ] && candidates+=("$REPO_PATH/scripts/extract-affected-files.sh")
   candidates+=("$PWD/scripts/extract-affected-files.sh")
