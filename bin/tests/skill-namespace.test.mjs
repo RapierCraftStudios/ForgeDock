@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 
-const commandsDir = new URL("../../commands/", import.meta.url).pathname;
+const commandsDir = fileURLToPath(new URL("../../commands/", import.meta.url));
 
 function walk(dir) {
   return readdirSync(dir).flatMap((n) => {

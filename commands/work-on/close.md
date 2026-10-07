@@ -71,6 +71,12 @@ log — it does NOT abort the close phase (advisory enforcement: flag, then cont
 **Skip if**: `forge-invariants.yaml` is absent or `bin/engine/invariants.mjs`
 is unavailable (e.g. fresh install before this file ships). Fail-open.
 
+The evaluator module is imported from ForgeDock's OWN install root (`FORGE_ROOT`, else
+`FORGEDOCK_HOME`, else `FORGE_HOME` — absolute paths only), never from the consumer cwd, so a
+consumer repo cannot supply the JS that runs here. If none of them holds
+`bin/engine/invariants.mjs`, the check is skipped (fail-open). Paths are passed as argv and
+converted with `pathToFileURL`, never concatenated into a `file://` string.
+
 ```bash
 # Read local run-log for this issue (absolute path matches engine run-log dir)
 RUN_LOG_DIR="${HOME}/.forge/runs"
@@ -78,16 +84,21 @@ RUN_LOG_FILE="${RUN_LOG_DIR}/{NUMBER}.jsonl"
 
 INVARIANT_ANOMALIES=""
 
-if [ -f "${RUN_LOG_FILE}" ] && [ -f "$(dirname "$(which node)")/node" ] 2>/dev/null; then
+INV_MODULE=""
+for _r in "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}"; do
+  case "$_r" in /*) [ -z "$INV_MODULE" ] && [ -r "$_r/bin/engine/invariants.mjs" ] && INV_MODULE="$_r/bin/engine/invariants.mjs" ;; esac
+done
+
+if [ -n "$INV_MODULE" ] && [ -f "${RUN_LOG_FILE}" ] && [ -f "$(dirname "$(which node)")/node" ] 2>/dev/null; then
   # Check close-scope invariants via the evaluator
   INVARIANT_RESULT=$(node -e "
-    import(new URL('file://$(pwd)/bin/engine/invariants.mjs'))
+    import(require('node:url').pathToFileURL(process.argv[1]).href)
       .then(m => {
-        const decls = m.loadInvariants('$(pwd)/forge-invariants.yaml');
+        const decls = m.loadInvariants(process.argv[2]);
         const fs = require('fs');
         let events = [];
         try {
-          const lines = fs.readFileSync('${RUN_LOG_FILE}', 'utf-8').split('\n').filter(Boolean);
+          const lines = fs.readFileSync(process.argv[3], 'utf-8').split('\n').filter(Boolean);
           events = lines.flatMap(l => { try { return [JSON.parse(l)]; } catch { return []; } });
         } catch {}
         const results = m.assertCloseInvariants(decls, events);
@@ -98,7 +109,7 @@ if [ -f "${RUN_LOG_FILE}" ] && [ -f "$(dirname "$(which node)")/node" ] 2>/dev/n
         }
       })
       .catch(() => process.exit(0));  // fail-open on any error
-  " 2>&1) || INVARIANT_ANOMALIES="${INVARIANT_RESULT}"
+  " "$INV_MODULE" "$(pwd)/forge-invariants.yaml" "${RUN_LOG_FILE}" 2>&1) || INVARIANT_ANOMALIES="${INVARIANT_RESULT}"
 
   if [ -n "$INVARIANT_ANOMALIES" ]; then
     echo "CLOSE-SCOPE INVARIANT ANOMALY (flagging — close continues):"
