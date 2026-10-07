@@ -1,4 +1,5 @@
 ---
+user-invocable: false
 description: Pre-implementation context gathering — surfaces historical findings, bug patterns, and related code paths before the builder writes any code
 argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --repo-path {WORKTREE} --files \"<space-separated>\" [--functions \"<names>\"]"
 context: fork

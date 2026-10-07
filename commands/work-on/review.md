@@ -1,4 +1,5 @@
 ---
+user-invocable: false
 description: Review subcommand — push branch, create PR, invoke /review-pr with --auto-merge
 context: fork
 argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE} --branch {BRANCH} --base {PR_BASE}"
