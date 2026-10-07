@@ -159,10 +159,24 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | select(.body | conta
 | Bug + services/ | Backend Fix | Direct |
 | Refactor/docs | Maintenance | Direct |
 
+Then classify COMPLEXITY_BAND with the same table as `work-on.md` Phase 3B (TRIVIAL: single doc/config file, no logic; STANDARD: 1–5 files, existing patterns; COMPLEX: 6+ files, new abstractions, cross-service, schema changes) and post the `FORGE:FAST_PATH` marker. `scripts/verify-phase-trail.sh` reads the band from it and fails the review-pr merge gate when it is absent (forge#3148):
+
+```bash
+FP_BODY="<!-- FORGE:FAST_PATH -->
+## Fast-Path Classification
+
+**COMPLEXITY_BAND**: {TRIVIAL|STANDARD|COMPLEX}
+**Task type**: {TASK_TYPE}
+**Affected file count**: {N}
+**Rationale**: {one-sentence explanation of classification decision}
+**Phases skipped**: {3C.5, 3C.6 for TRIVIAL | none — full pipeline}"
+gh issue comment {NUMBER} {GH_FLAG} --body "$FP_BODY" # <!-- allowlist:check-command-side-effects -->
+```
+
 ### 3C: Builder Contract (MANDATORY)
 Post `<!-- FORGE:CONTRACT -->` comment with: task type, proposed approach, deliverables table (file/change/why), acceptance criteria, quality considerations.
 
-### 3C.5: Context Gathering (max 2 minutes)
+### 3C.5: Context Gathering (max 2 minutes — MANDATORY for STANDARD/COMPLEX, skip for TRIVIAL)
 
 Surface institutional memory before writing code. For each affected file:
 ```bash
@@ -174,9 +188,9 @@ for ISSUE_NUM in {related_issue_numbers}; do
 done
 ```
 
-Post `<!-- FORGE:CONTEXT -->` comment with findings (or skip if no relevant history).
+Post `<!-- FORGE:CONTEXT -->` comment with findings. For STANDARD/COMPLEX it is required even when no relevant history is found (say so in the comment): the merge gate checks for it.
 
-### 3C.6: Architecture Plan
+### 3C.6: Architecture Plan (MANDATORY for STANDARD/COMPLEX — skip for TRIVIAL)
 
 For multi-file changes, trace ALL affected code paths before writing code:
 - Map the call chain: entry point → middleware → handler → service → model → response
@@ -185,7 +199,7 @@ For multi-file changes, trace ALL affected code paths before writing code:
 
 Post `<!-- FORGE:ARCHITECT -->` comment with the implementation plan.
 
-For single-file or trivial changes, skip this step.
+Skip this step only when COMPLEXITY_BAND is TRIVIAL. For STANDARD/COMPLEX, the merge gate checks for the `FORGE:ARCHITECT` comment.
 
 ### 3D: Set building label
 ```bash
@@ -214,6 +228,21 @@ Invoke quality-gate on changed files:
 Skill(skill="{FORGE_SKILL_PREFIX}quality-gate", args="{changed_files} --worktree {WORKTREE_PATH}")
 ```
 Fix HIGH/MEDIUM findings. Max 2 iterations. Skip for 1-file config/docs edits.
+
+Then post the `FORGE:QUALITY_GATE` marker with the real gate result (same contract as `work-on.md` Phase 3G). Post it even when the gate was skipped (`**Result**: PASS (skipped — single config/docs file)`). The merge gate requires it unless the whole diff is docs-only (forge#3148):
+
+```bash
+QG_BODY="<!-- FORGE:QUALITY_GATE -->
+## Quality Gate Result
+
+**Result**: {PASS|FAIL}
+**Iterations**: {N}
+**Commands run**: {quality-gate invocation actually executed}
+**Findings remaining**: {none | summary}"
+gh issue comment {NUMBER} {GH_FLAG} --body "$QG_BODY" # <!-- allowlist:check-command-side-effects -->
+```
+
+If the gate still reports HIGH/MEDIUM findings after 2 iterations, post `**Result**: FAIL`, add `needs-human`, and STOP.
 
 ### 3G: Format and verify
 - Python: `black` + `isort` + `py_compile`
@@ -287,9 +316,16 @@ else:
 ```
 
 ### 5C: Verify merge and close (recovery)
+
+**`REVIEW_RESULT: status: PHASE_TRAIL_FAILED`** (forge#3148): review-pr's Phase 8 refused the merge because a phase marker is missing. The PR is intentionally unmerged — do NOT run the `gh pr merge` recovery below, which would merge around the gate. Re-run each phase named on the `MISSING: <marker> -> <action>` lines (never hand-post a marker), then re-run 5B once. If it returns `PHASE_TRAIL_FAILED` again, add `needs-human` and STOP; review-pr has already posted the `FORGE:PHASE_TRAIL_FAILED` comment.
+
+**`REVIEW_RESULT: status: BLOCKED` with a phase-trail or auto-merge-gate blocker** (any blocker containing "phase trail", or "auto-merge requires --issue"; forge#3147): the gate refused or could not run. Do NOT re-run phases and do NOT run the manual merge below. Add `needs-human` and STOP.
+
+Otherwise:
 - PR MERGED + issue CLOSED → proceed to Phase 6/7
 - PR MERGED + issue OPEN → close issue manually
-- PR NOT MERGED → `gh pr merge --merge {GH_FLAG}`, close issue. If merge fails → post comment, add `needs-human`, STOP.
+- PR NOT MERGED + review returned `REVIEW_RESULT: status: COMPLETE` → `gh pr merge --merge {GH_FLAG}`, close issue. If merge fails → post comment, add `needs-human`, STOP.
+- PR NOT MERGED + any other, missing, or unparseable `REVIEW_RESULT` → do NOT merge (an unrecognized refusal must never fall through to a manual merge). Add `needs-human` and STOP.
 
 ### 5D: Project board update (Workflow=Merged, Status=Done)
 
