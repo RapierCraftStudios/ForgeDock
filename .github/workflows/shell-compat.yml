@@ -59,6 +59,11 @@ jobs:
         run: bash scripts/lint-dispatch-prompt.test.sh
       - name: Run forge-root.test.sh
         run: bash scripts/forge-root.test.sh
+      - name: Run forge-root.test.sh bootstrap under zsh (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          command -v zsh && zsh --version
+          FORGE_ROOT_TEST_SHELLS="bash zsh" /bin/bash scripts/forge-root.test.sh
       - name: Run verify-phase-trail.test.sh
         run: bash scripts/verify-phase-trail.test.sh
 
