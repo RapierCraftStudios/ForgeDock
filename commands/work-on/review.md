@@ -1,18 +1,19 @@
 ---
 description: Review subcommand — push branch, create PR, invoke /review-pr with --auto-merge
-argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree PATH] [--branch BRANCH] [--base PR_BASE]"
+context: fork
+argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE} --branch {BRANCH} --base {PR_BASE}"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # work-on/review — Review & PR Creation Subcommand
 
-> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline. This skill runs with `context: fork`: it sees only this text plus its args and re-reads all other state from GitHub/git itself.
 
 **Input**: $ARGUMENTS
 
-**Invoked by**: `work-on.md` Phase 4–5, after `build/validate.md` returns `GATE_PASSED: true`.
-**Output**: Push branch, create PR, invoke /review-pr --auto-merge, return result to caller.
+**Invoked by**: the `work-on` router, after `build/validate.md` returns `GATE_PASSED: true`.
+**Output**: Push branch, create PR, invoke /review-pr --auto-merge, verify the merge, and print exactly one `REVIEW_RESULT:` block as the final reply (all paths, including every guard/failure).
 
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (label transitions, `FORGE:CHECKPOINT` writes) stay at this tier because they're interleaved with the review/merge-decision steps in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies". <!-- Added: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
@@ -29,7 +30,30 @@ Parse from $ARGUMENTS:
 - `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`)
 - `--worktree {WORKTREE_PATH}` — absolute path to the git worktree
 - `--branch {BRANCH}` — feature branch name (e.g. `feat/my-feature`)
-- `--base {PR_BASE}` — PR target branch (e.g. `milestone/modular-pipeline-architecture` or `staging`)
+- `--base {PR_BASE}` — PR target branch (e.g. `milestone/modular-pipeline-architecture` or `staging`). **Required.** The caller has already computed it and validated it against the classified lane; this skill never recomputes or re-validates the lane.
+
+**Fail closed**: if `{NUMBER}`, `--repo`, `--worktree`, `--branch` or `--base` is missing, print the block below and STOP (no push, no PR):
+
+```
+REVIEW_RESULT:
+  status: BLOCKED
+  pr_number:
+  pr_url:
+  merged_to:
+  blocker: missing required arg: --base (or --worktree/--branch/--repo/NUMBER)
+```
+
+## Script resolution
+
+```bash
+# FORGE:SCRIPT_RESOLUTION
+```
+
+**BLOCKED output pattern**: every guard below that stops the phase prints the result block before exiting, e.g.:
+
+```bash
+printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number:\n  pr_url:\n  merged_to:\n  blocker: %s\n' "<blocker text>"
+```
 
 ---
 
@@ -50,8 +74,21 @@ gh pr list {GH_FLAG} --head {BRANCH} --json number,state,url 2>/dev/null
 
 **Resume check**:
 - If PR already exists AND is OPEN → run the **HEAD-unchanged re-review guard** below before proceeding to Phase R3
-- If PR already exists AND is MERGED → return `REVIEW_RESULT: status: ALREADY_MERGED`
-- If no `<!-- FORGE:BUILDER -->` comment exists → EXIT with `REVIEW_RESULT: status: BLOCKED`, blocker: "FORGE:BUILDER comment not found — implement phase may not have completed"
+- If PR already exists AND is MERGED → write the REVIEW checkpoint (same JSON as Phase R4) if one does not already exist, then return `REVIEW_RESULT: status: ALREADY_MERGED`:
+  ```bash
+  MERGED_PR=$(gh pr list {GH_FLAG} --head {BRANCH} --state merged --json number --jq '.[0].number' 2>/dev/null)
+  HAS_REVIEW_CKPT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
+    --jq '[.[] | select((.body | contains("FORGE:CHECKPOINT")) and (.body | contains("\"phase\": \"REVIEW\"")))] | length' 2>/dev/null | tail -1)
+  if [ "${HAS_REVIEW_CKPT:-0}" -eq 0 ]; then
+    CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
+  \`\`\`json
+  {\"phase\": \"REVIEW\", \"status\": \"COMPLETE\", \"next_phase\": \"CLOSE\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
+  \`\`\`" # allowlist:check-command-side-effects
+  fi
+  ```
+  (`pr_number` in the result is `$MERGED_PR`.)
+- If no `<!-- FORGE:BUILDER -->` comment exists → print `REVIEW_RESULT: status: BLOCKED`, blocker: "FORGE:BUILDER comment not found — implement phase may not have completed"
 
 **HEAD-unchanged re-review guard** (MANDATORY when a PR already exists and is OPEN) <!-- Added: forge#2243 --> — a PR whose most recent review verdict was CHANGES REQUESTED must not be resubmitted for a full domain-agent review fan-out if nothing has changed since that verdict. `/review-pr` records the exact commit it reviewed in its verdict comment (`CHANGES REQUESTED: commit {sha} — ...`, see `commands/review-pr.md` Phase 8/9); compare that recorded sha against the PR's current `headRefOid`:
 
@@ -86,6 +123,7 @@ SKIP_EOF
   gh issue comment {NUMBER} {GH_FLAG} --body "$REREVIEW_SKIP_BODY" # <!-- allowlist:check-command-side-effects -->
   gh issue edit {NUMBER} {GH_FLAG} --add-label needs-human 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
   # Return REVIEW_RESULT: status: BLOCKED — do not invoke /review-pr again on unchanged HEAD
+  printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number: {PR_NUMBER}\n  pr_url:\n  merged_to:\n  blocker: %s\n' "HEAD unchanged since last CHANGES REQUESTED verdict (${LAST_VERDICT_SHA}) — re-review skipped; remediation required"
   exit 1
 fi
 ```
@@ -117,8 +155,9 @@ ${MERGE_COMMITS}
 Do NOT push this branch. Human review required to identify the source of the merge commits and clean the branch history (e.g. via \`git rebase\` to replay only the intended commits onto \`origin/{PR_BASE}\`).
 
 <!-- FORGE:PUSH_BLOCKED -->"
-    gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" # allowlist:check-command-side-effects
     # Return REVIEW_RESULT: status: BLOCKED — do not push
+    printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number:\n  pr_url:\n  merged_to:\n  blocker: %s\n' "pre-push ancestry guard failed: merge commits from outside {PR_BASE}"
     exit 1
   fi
 fi
@@ -142,7 +181,8 @@ Branch \`{BRANCH}\` has 0 commits ahead of \`origin/{PR_BASE}\`. Pushing this br
 **Resolution**: Delete this branch, re-run \`/work-on {NUMBER}\` to restart the build phase. The partial FORGE:BUILDER comment (lacking \`FORGE:BUILDER:COMPLETE\`) will be detected and deleted, and the build will restart cleanly.
 
 <!-- FORGE:PUSH_BLOCKED_EMPTY_BRANCH -->"
-  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" # allowlist:check-command-side-effects
+  printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number:\n  pr_url:\n  merged_to:\n  blocker: %s\n' "branch has 0 commits ahead of origin/{PR_BASE} — empty branch not pushed"
   exit 1
 fi
 echo "Commit count ahead of origin/{PR_BASE}: $COMMIT_COUNT — OK to push"
@@ -152,12 +192,12 @@ echo "Commit count ahead of origin/{PR_BASE}: $COMMIT_COUNT — OK to push"
 
 ```bash
 cd {WORKTREE_PATH}
-git push origin {BRANCH}
+git push -u origin {BRANCH}
 ```
 
 If push fails, retry with `--force-with-lease`:
 ```bash
-git push origin {BRANCH} --force-with-lease
+git push -u origin {BRANCH} --force-with-lease
 ```
 
 If still fails:
@@ -172,9 +212,10 @@ This may indicate a merge conflict or remote rejection. Human review required.
 
 <!-- FORGE:PUSH_FAILED -->"
 
-gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" # allowlist:check-command-side-effects
+printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number:\n  pr_url:\n  merged_to:\n  blocker: %s\n' "git push failed"
 ```
-Return `REVIEW_RESULT: status: BLOCKED`, blocker: "git push failed".
+Print the block above (`status: BLOCKED`, blocker: "git push failed") and STOP.
 
 ---
 
@@ -219,12 +260,12 @@ else
   echo "$TRAIL"
 fi
 # Hard guard (same as review-pr.md Phase 8): an unreadable/unresolvable trail never falls through to PR creation.
-if [ "$TRAIL_RC" -ge 2 ]; then echo "REVIEW_RESULT: status: BLOCKED, blocker: phase trail unreadable (rc=$TRAIL_RC)"; exit 1; fi
+if [ "$TRAIL_RC" -ge 2 ]; then printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number:\n  pr_url:\n  merged_to:\n  blocker: phase trail unreadable (rc=%s)\n' "$TRAIL_RC"; exit 1; fi
 ```
 
 - `TRAIL_RC=0` → continue to Phase R2.
-- `TRAIL_RC=1` → **do not create the PR.** For each `MISSING: <marker> -> <action>` line, run that phase now via its `Skill(...)` (the action text names it), then re-run this preflight. Do NOT hand-post the missing marker and do NOT escalate to a human: the refusal routes back to the missing phase. If the preflight still fails after one re-dispatch round, post a `<!-- FORGE:PHASE_TRAIL_FAILED -->` comment listing the still-missing markers, add `needs-human`, and return `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail incomplete".
-- `TRAIL_RC>=2` (2 = trail unreadable; 127 = script not executable) → the trail could not be read; fail closed with `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail unreadable".
+- `TRAIL_RC=1` → **do not create the PR.** For each `MISSING: <marker> -> <action>` line, run that phase now via its `Skill(...)` (the action text names it), then re-run this preflight (this skill is the SINGLE owner of the phase-trail re-dispatch; the router never re-dispatches). Do NOT hand-post the missing marker and do NOT escalate to a human: the refusal routes back to the missing phase. If the preflight still fails after one re-dispatch round, post a `<!-- FORGE:PHASE_TRAIL_FAILED -->` comment listing the still-missing markers, add `needs-human`, print `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail incomplete after re-dispatch". Do NOT close the issue.
+- `TRAIL_RC>=2` (2 = trail unreadable; 127 = script not executable) → the trail could not be read; fail closed (the block above is printed) with `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail unreadable".
 
 Run the same preflight again at the top of Phase R3, before `/review-pr --auto-merge` is invoked, since a resumed run can enter at R3 with an existing PR.
 
@@ -310,9 +351,11 @@ Use the existing PR number and continue.
 ### R2D: Update labels
 
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} \
-  --add-label "workflow:in-review" \
-  --remove-label "workflow:building"
+RESOLUTION=$(resolve_script 'transition-label'); TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+case "$TIER" in
+  adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} in-review ;;
+  prose) gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:in-review" --remove-label "workflow:investigating" --remove-label "workflow:ready-to-build" --remove-label "workflow:building" --remove-label "workflow:awaiting-merge" --remove-label "workflow:merged" --remove-label "workflow:invalid" --remove-label "workflow:decomposed" 2>/dev/null || true # allowlist:check-command-side-effects ;;
+esac
 ```
 
 ---
@@ -334,7 +377,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "## Submitting for Review
 
 PR #${PR_NUMBER} created targeting \`{PR_BASE}\`. Invoking /review-pr with --auto-merge.
 
-Review will: analyze changes → spawn domain agents → post findings → merge → close issue → clean up worktree.
+Review will: analyze changes → spawn domain agents → post findings → merge. The issue is closed and the worktree cleaned up afterwards by `work-on:close`, not by /review-pr.
 
 <!-- FORGE:REVIEW_STARTED -->"
 ```
@@ -364,7 +407,9 @@ else:
 
 Wait for that task's completed result before Phase R4. Propagate its `REVIEW_RESULT` as this module's child state; do not return `REVIEW_RESULT`, report progress, release an orchestrator slot, or begin close work while the child is running. If the child errors or returns no parseable `REVIEW_RESULT`, return `REVIEW_RESULT: status: BLOCKED` with the child failure as the blocker. The normal `Skill(...)` invocation above remains the non-OpenCode path.
 
-/review-pr handles: full domain-agent review → post findings as separate issues (non-blocking) → merge the PR → close the issue → clean up worktree.
+/review-pr handles: full domain-agent review → post findings as separate issues (non-blocking) → merge the PR. It does NOT close the issue or clean up the worktree — `work-on:close` does both.
+
+If `review-pr` is not found under `{FORGE_SKILL_PREFIX}review-pr` or `review-pr`, print `REVIEW_RESULT: status: BLOCKED`, blocker: "skill not found: review-pr" and STOP. Never review inline.
 
 ---
 
@@ -381,7 +426,7 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 ```
 
 **Cases**:
-- PR MERGED (issue OPEN or CLOSED) → write checkpoint, then return `REVIEW_RESULT: status: COMPLETE` — do NOT close the issue or add labels here; the router will route to `work-on:close` which handles issue closure, label updates, project board, trajectory log, and worktree cleanup.
+- PR MERGED (issue OPEN or CLOSED) → write checkpoint, then return `REVIEW_RESULT: status: COMPLETE` — do NOT close the issue or add labels here; the caller will route to `work-on:close` which handles issue closure, label updates, project board, trajectory log, and worktree cleanup.
 
   Write machine-readable phase checkpoint before returning (MANDATORY when PR is MERGED):
   ```bash
@@ -392,7 +437,7 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
   \`\`\`"
   ```
 
-- `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` from /review-pr (forge#3102) → the review gate refused to merge because phase markers are missing. Do NOT hand-post markers and do NOT add `needs-human` yet. For each `MISSING: <marker> -> <action>` line, run that phase via its `Skill(...)`, then re-invoke Phase R3 once (the trail preflight at the top of R3 re-runs). If the second attempt returns `PHASE_TRAIL_FAILED` again, post a `<!-- FORGE:PHASE_TRAIL_FAILED -->` comment listing the still-missing markers, add `needs-human`, and return `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail incomplete after re-dispatch". The PR stays open and unmerged throughout.
+- `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` from /review-pr (forge#3102; internal to this skill — never printed as this skill's status) → the review gate refused to merge because phase markers are missing. Do NOT hand-post markers and do NOT add `needs-human` yet. For each `MISSING: <marker> -> <action>` line, run that phase via its `Skill(...)`, then re-invoke Phase R3 once (this is the single re-dispatch owner; the trail preflight at the top of R3 re-runs). If the second attempt returns `PHASE_TRAIL_FAILED` again, post a `<!-- FORGE:PHASE_TRAIL_FAILED -->` comment listing the still-missing markers, add `needs-human`, and return `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail incomplete after re-dispatch". The PR stays open and unmerged throughout.
 
 - `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker mentions the phase trail (any blocker containing "phase trail": "phase trail unreadable" when the Phase 8 verifier exited ≥2 / 127, "phase trail incomplete…", or "auto-merge requires --issue", forge#3147): the merge gate refused or could not run. Do NOT re-run phases (nothing is missing) and do NOT attempt the manual merge below, because that would bypass the gate. Add `needs-human` and return `REVIEW_RESULT: status: BLOCKED` with the same blocker. The PR stays open and unmerged.
 
@@ -424,30 +469,27 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 
 ## Output
 
-**After posting this result, immediately proceed to the close subcommand — do NOT stop here. `REVIEW_RESULT: status: COMPLETE` is an intermediate result, NOT a terminal state. The pipeline is not done. You MUST invoke `Skill("{FORGE_SKILL_PREFIX}work-on:close", ...)` now to close the issue, update labels to `workflow:merged`, post the trajectory log, and clean up the worktree.**
+**`REVIEW_RESULT: status: COMPLETE` is an intermediate result, NOT a terminal state: the pipeline is not done. Print the block as your final reply; the caller then invokes `work-on:close` (issue closure, `workflow:merged`, trajectory log, worktree cleanup). Do not close anything here.**
 
 Output this structured block:
 
 ```
 REVIEW_RESULT:
-  status: COMPLETE | ALREADY_MERGED | BLOCKED | PHASE_TRAIL_FAILED
+  status: COMPLETE | ALREADY_MERGED | BLOCKED
   pr_number: {PR_NUMBER}
   pr_url: {PR_URL}
   merged_to: {PR_BASE}
   blocker: {description if status=BLOCKED}
-  missing: {MISSING lines from the verifier if status=PHASE_TRAIL_FAILED — only when propagated from a direct /review-pr invocation; R4 itself returns BLOCKED after its one re-dispatch round}
 ```
 
 ---
 
-## Integration Point in work-on.md
+## Integration
 
-This module runs at **Phases 4–5** — after validate returns `GATE_PASSED: true`, before close:
+This skill is invoked by the `work-on` router (forked) after validate returns `GATE_PASSED: true` and before `work-on:close`:
 
 ```
-3F.5 → Validate (by build/validate.md) — gate passed
-4    → [THIS MODULE] Push + PR creation + /review-pr invocation + merge verification
-5    → Close (by close.md) — trajectory, parent tracker, summary
+build/validate → [THIS SKILL] push + PR creation + /review-pr invocation + merge verification → work-on:close
 ```
 
-/review-pr is invoked within this module (not by the router). The router waits for REVIEW_RESULT before invoking close.md.
+/review-pr is invoked within this skill (not by the router). The router sees only the final `REVIEW_RESULT:` block and never re-dispatches phase-trail failures.

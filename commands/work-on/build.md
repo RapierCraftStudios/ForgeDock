@@ -1,39 +1,24 @@
 ---
 description: Build subcommand — create worktree, post contract, sequence context/architect/implement/validate
-argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--base PR_BASE]"
+context: fork
+argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --base {PR_BASE}"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # work-on/build — Build Phase Orchestrator
 
-> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install), `forge-` (Codex) or empty (`install.sh` / OpenCode). You run in a forked context and receive no resolved value, so resolve it yourself, once, before the first child dispatch: env `FORGE_SKILL_NAMESPACE` (`forgedock` → `forgedock:`, `none` → empty, `codex` → `forge-` with `-` as the nesting separator, `opencode` → empty with `-`), else env `FORGE_RUNTIME` (`codex` / `opencode`), else the available-skills list (`forgedock:work-on` → `forgedock:`; `forge-work-on` → `forge-`; `work-on:build` → empty; `work-on-build` → empty with `-`). When the separator is `-`, rewrite every `:` nesting level in a child name to `-` (`work-on:build:context` becomes `forge-work-on-build-context`). If a child skill is not found under the resolved name, STOP with `BUILD_RESULT: status: BLOCKED`, blocker: "skill not found: <name>" — never run a child phase inline and never substitute the Agent tool.
 
 **Input**: $ARGUMENTS
 
-**Invoked by**: `work-on.md` Phase 3 — entered when the issue carries label `workflow:ready-to-build` or `workflow:building` (see Universal Phase Dispatcher in work-on.md).
-**Output**: Create worktree, post contract, run build phases, return result to work-on.md.
+**Invoked by**: the work-on router, when the issue carries label `workflow:ready-to-build` or `workflow:building`. This skill runs in an isolated forked context: it sees only its args and re-reads everything else from GitHub and git.
+**Output**: Create worktree, classify complexity, post contract, run the child phases (context, architect, implement, validate) through `Skill()`, run the acceptance gate, and print exactly one `BUILD_RESULT:` block as the final reply.
 
-**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (3B classification, 3D label transitions) stay at this tier because they're interleaved with the reasoning-heavy build steps (3C.5/3C.6/3F) in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies". <!-- Added: forge#1827 -->
+**Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (classification, label transitions) stay at this tier because they are interleaved with the reasoning-heavy child phases in the same run. <!-- Added: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
-**CRITICAL: You MUST execute ALL phases B0–B6 in order. Phases B3 (context) and B4 (architect) are skipped ONLY when COMPLEXITY_BAND: TRIVIAL (read from FORGE:FAST_PATH comment in Phase B0). For STANDARD and COMPLEX tasks they are NOT optional — skipping them degrades build quality.**
-
-### Canonical Build Path (STANDARD/fast-lane) <!-- Added: forge#1276 -->
-
-**Default execution model: inline.** For STANDARD and fast-lane issues, phases B3 (context gathering) and B4 (architecture planning) run **inline in the current context window** — not as separate `Skill()` sub-agent spawns. B5 (implement) and B6 (validate) also run inline.
-
-`Skill()` invocations for context/architect sub-phases are only permitted when the Spawn-Decision Table (work-on.md `##Spawn-Decision Policy`) explicitly applies — specifically Row (c) (parent context near overflow: ≥20 Skill invocations or ≥10 files already changed before the build sub-phase). For most issues, the Skill() forms shown in B3 and B4 below are **reference documentation** describing the sub-phase contract, not mandatory sub-agent invocations.
-
-**Build topology summary**:
-
-| Path | When | Phases |
-|------|------|--------|
-| **STANDARD/fast-lane (default)** | All issues not matching exceptions below | B0 → B1 → B2 → B2.5 → [B3] → [B4] → B5 → B6 — all inline |
-| **Spawn exception (Row c)** | ≥20 Skill invocations OR ≥10 files changed before build | Spawn B3/B4 as fresh sub-agents via `Skill()` |
-| **TRIVIAL fast-path** | COMPLEXITY_BAND: TRIVIAL | Skip B3 and B4 entirely |
-
-This resolves the three-topology conflict: `work-on.md` Phase 3 (inline 3A–3M), `work-on/build.md` (this file), and `work-on-monolithic.md` ([BENCHMARK]) all describe the **same canonical inline path**. `work-on/build.md` adds worktree lifecycle management (B1) and the FORGE:CONTRACT handoff (B2) that the monolithic variant omits for brevity. The `Skill()` forms in B3/B4 below document the sub-phase contract and serve as the exception path only. <!-- Added: forge#1276 -->
+**CRITICAL: You MUST execute ALL phases B0–B6.5 in order. Every child (B3 context, B4 architect, B5 implement, B6 validate) is invoked via `Skill(...)` — each is a forked sub-skill with its own isolated context. B3 and B4 are invoked for every complexity band except where the band is TRIVIAL or INVESTIGATION (B2/B2.1/B2.5 are also skipped for INVESTIGATION); the children post their own skip markers, so a skipped child is still visible on the issue. Skipping a child without the band justification degrades build quality and fails the phase-trail check.**
 
 <!-- FORGE:SPEC_LOADED — work-on/build.md loaded and active. Agent is bound by this spec. -->
 
@@ -43,11 +28,52 @@ This resolves the three-topology conflict: `work-on.md` Phase 3 (inline 3A–3M)
 
 Parse from $ARGUMENTS:
 - `{NUMBER}` — issue number (required)
-- `--repo {GH_REPO}` — GitHub repo (e.g. `{owner}/{repo}` — resolved from `forge.yaml → project`)
-- `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`)
-- `--base {PR_BASE}` — PR target branch (e.g. `milestone/modular-pipeline-architecture` or `staging`)
+- `--repo {GH_REPO}` — GitHub repo (e.g. `{owner}/{repo}`) (required)
+- `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`) (required)
+- `--base {PR_BASE}` — PR target branch, computed by the router (e.g. `milestone/modular-pipeline-architecture` or `staging`) (required)
+- `--worktree {WORKTREE_PATH}` / `--branch {BRANCH}` — optional hints from a router re-invocation; when present and consistent with the issue they are reused, otherwise they are re-derived in B1
 
-**Phase notation**: This file uses **B0–B6** for its own phases. The calling orchestrator (`work-on.md`) uses **3A–3M** for its sub-phases. Mapping: work-on.md Phase 3A = B0 (load state), Phase 3B = complexity classification (posts `FORGE:FAST_PATH` before invoking build), Phase 3C onward maps to B1+ in this file. When cross-references mention "Phase 3B", they refer to work-on.md's Phase 3B, not a phase in this file. <!-- Added: forge#1380 -->
+**Fail closed**: if `{NUMBER}`, `--repo` or `--gh-flag` is missing, or `--base` is missing or empty, take the Blocked exit below with blocker "missing required arg: <name>" — never guess a base branch (no fallback to `staging`/`main`).
+
+---
+
+## Script resolution
+
+```bash
+# FORGE:SCRIPT_RESOLUTION
+```
+
+---
+
+## Result emission and Blocked exit
+
+Every exit path of this skill — COMPLETE, ALREADY_DONE, INVESTIGATION_COMPLETE, every guard, every failure — ends by printing exactly one block as the final reply:
+
+```
+BUILD_RESULT:
+  status: COMPLETE | ALREADY_DONE | INVESTIGATION_COMPLETE | BLOCKED
+  branch: {BRANCH}
+  worktree: {WORKTREE_PATH}
+  blocker: {description if status=BLOCKED, else empty}
+```
+
+`branch` / `worktree` are empty when the build stopped before B1 created them.
+
+Every `BLOCKED` exit first runs this procedure (set `BLOCKER` to the reason text), then prints the block with `status: BLOCKED`:
+
+```bash
+BLOCKER="{reason}"
+run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
+run gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" 2>/dev/null || true
+run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:BUILD_BLOCKED -->
+## Build Blocked
+
+${BLOCKER}
+
+Human attention required (needs-human)." 2>/dev/null || true
+```
+
+(When the arguments themselves are missing and no `gh` call is possible, skip the procedure and print the block only.)
 
 ---
 
@@ -59,48 +85,107 @@ Re-read current state before doing anything:
 gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,milestone
 
 # Check investigation report
-gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
   --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body'
 
-# Check if build already completed
-gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+# Check if build already completed (require FORGE:BUILDER:COMPLETE — not just FORGE:BUILDER)
+gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
   --jq '.[] | select(.body | contains("FORGE:BUILDER")) | .body'
+
+# Existing classification from a prior run (resume path)
+EXISTING_FAST_PATH=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
+  --jq '.[] | select(.body | contains("FORGE:FAST_PATH")) | .body' 2>/dev/null | head -1)
 ```
 
 **Resume check**:
-- If `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment → build already complete. Return `BUILD_RESULT: status: ALREADY_DONE` to router.
-- If `<!-- FORGE:BUILDER -->` exists BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → build was interrupted after the comment was posted but before the commit (validate.md V5). Delete the partial comment and restart from Phase B2 (contract): <!-- Added: forge#1305 -->
+- If `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment → build already complete. Derive BRANCH/WORKTREE_PATH as in B1A/B1C (without creating anything), then print `BUILD_RESULT: status: ALREADY_DONE`.
+- If `<!-- FORGE:BUILDER -->` exists BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → build was interrupted after the comment was posted but before the commit (validate V5). Delete the partial comment and restart from Phase B2 (contract): <!-- Added: forge#1305 -->
   ```bash
-  PARTIAL_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+  PARTIAL_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
     --jq '[.[] | select(.body | contains("FORGE:BUILDER") and (contains("FORGE:BUILDER:COMPLETE") | not))] | last | .id // ""')
   if [ -n "$PARTIAL_ID" ]; then
     gh api repos/{GH_REPO}/issues/comments/$PARTIAL_ID -X DELETE
     echo "Deleted partial FORGE:BUILDER comment (no FORGE:BUILDER:COMPLETE) — restarting build from Phase B2"
   fi
   ```
-- If no `<!-- FORGE:INVESTIGATOR -->` comment with `<!-- INVESTIGATION:COMPLETE -->` → EXIT with `BUILD_RESULT: status: BLOCKED`, blocker: "Investigation not complete — run investigate first".
+- If there is no `<!-- FORGE:INVESTIGATOR -->` comment with `<!-- INVESTIGATION:COMPLETE -->` → Blocked exit with blocker "Investigation not complete — run investigate first".
 
-Extract from investigation report:
-- Affected files list
+Extract from the investigation report:
+- Affected files list → `{AFFECTED_FILES}` (space-separated repo-relative paths; this is what B3/B4 receive via `--files`)
 - Root cause
 - Recommendation
 - Task type (Bug Fix / Feature / Refactor / Maintenance / UI/UX / Full-Stack)
 
-**Read COMPLEXITY_BAND** (from `FORGE:FAST_PATH` comment posted by Phase 3B of `work-on.md` — the complexity classification step that runs before invoking this file): <!-- Fixed: forge#1380 -->
+---
+
+## Phase B0.5: Classify Task Type and Complexity (MANDATORY — build owns this) <!-- Added: forge#1380 -->
+
+Build classifies the task and posts the `FORGE:FAST_PATH` comment. `scripts/verify-phase-trail.sh` fails the review preflight if it is missing.
+
+**Resume path**: If `EXISTING_FAST_PATH` is non-empty, extract COMPLEXITY_BAND from it and skip re-classification (do not post a second comment):
+
 ```bash
-COMPLEXITY_BAND=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | contains("FORGE:FAST_PATH")) | .body' 2>/dev/null \
+COMPLEXITY_BAND=$(printf '%s\n' "$EXISTING_FAST_PATH" \
   | sed -n 's/.*\*\*COMPLEXITY_BAND\*\*: *\([A-Za-z_]*\).*/\1/p' | head -1 | tr '[:lower:]' '[:upper:]')
-# Missing classification is a phase-trail failure (forge#3061), not a silent default.
-# Re-run work-on Phase 3B (classify + post FORGE:FAST_PATH) first; only then continue.
-if [ -z "$COMPLEXITY_BAND" ]; then
-  echo "PHASE TRAIL: FORGE:FAST_PATH missing — run work-on Phase 3B classification before building"
-  COMPLEXITY_BAND="STANDARD"   # conservative for the remainder of THIS read only; FAST_PATH must still be posted
-fi
-echo "COMPLEXITY_BAND: $COMPLEXITY_BAND"
+echo "COMPLEXITY_BAND (existing): ${COMPLEXITY_BAND:-<none>}"
 ```
 
-**FAST_PATH is mandatory.** If `FORGE:FAST_PATH` was absent, classify now (work-on.md Phase 3B) and post the comment before starting B1. `scripts/verify-phase-trail.sh` fails the review preflight otherwise.
+If `COMPLEXITY_BAND` is empty after this (no prior classification, or an unparseable one), classify now as below.
+
+**Step 1 — Task type classification:**
+
+| Signal | Type | Approach |
+|--------|------|----------|
+| Title starts with "Investigate:"/"Audit:"/"Research:" | Investigation | Produce issues as deliverables |
+| UI/UX, feature + web/ files | UI/UX | `frontend-design` skill |
+| Feature + services/ | Backend Feature | Implement directly |
+| Feature + both | Full-Stack | Backend first, then frontend-design |
+| Bug + web/ | Frontend Fix | Direct |
+| Bug + services/ | Backend Fix | Direct |
+| Refactor/docs | Maintenance | Direct |
+
+**Investigation tasks — early exit (skip B2, B2.1, B2.5, B3, B4):** If task type = Investigation (title prefix, or task type = Investigation in the investigator report), the Builder Contract, Context Gathering and Architecture Plan are NOT run. Post the `<!-- FORGE:FAST_PATH -->` comment below, still run B1 (worktree and `building` label), then go straight to B5 (implement → issue-creation path). Do NOT run B2/B2.1/B2.5/B3/B4 for investigation tasks.
+
+```bash
+run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
+run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:FAST_PATH -->
+## Fast-Path Classification
+
+**COMPLEXITY_BAND**: INVESTIGATION
+**Task type**: Investigation
+**Rationale**: Title prefix 'Investigate:' (or task type = Investigation from investigator report) — skipping Builder Contract, Context Gathering and Architecture Plan. Jumping directly to implement (issue creation).
+**Phases skipped**: contract, context, architect"
+```
+
+**Step 2 — Complexity classification (for non-Investigation tasks):**
+
+Classify COMPLEXITY_BAND based on affected file count and task nature:
+
+| Condition | COMPLEXITY_BAND |
+|-----------|-----------------|
+| Single file, doc/config/markdown only, no logic changes expected | TRIVIAL |
+| 1–5 files, existing patterns, no cross-service impact | STANDARD |
+| 6+ files, new abstractions, cross-service, migration, schema changes | COMPLEX |
+
+Post `<!-- FORGE:FAST_PATH -->` immediately after classification:
+
+```bash
+run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
+run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:FAST_PATH -->
+## Fast-Path Classification
+
+**COMPLEXITY_BAND**: {TRIVIAL|STANDARD|COMPLEX}
+**Task type**: {TASK_TYPE}
+**Affected file count**: {N}
+**Rationale**: {one-sentence explanation of classification decision}
+**Phases skipped**: {list phases skipped, or 'none — full pipeline' for STANDARD/COMPLEX}"
+```
+
+**TRIVIAL tasks**: B3 (context) and B4 (architect) are skipped only. B2 (Builder Contract) is **retained** — it still runs. When filling in **Phases skipped**, write: `context, architect`. (Each skipped child still posts its own skip marker when invoked — see B3/B4.)
+
+**STANDARD and COMPLEX tasks**: Run the full pipeline. No phases skipped.
+
+Whatever path was taken, set `COMPLEXITY_BAND` (uppercase) for the rest of this run and echo it. A missing or unparseable band at this point is a bug in this phase — re-classify, never default silently.
 
 ---
 
@@ -108,66 +193,80 @@ echo "COMPLEXITY_BAND: $COMPLEXITY_BAND"
 
 ### B1A: Derive branch name
 
-From issue title: lowercase, hyphenated, max 40 chars (truncate if needed).
+If `--branch` was passed, or a local/remote branch already exists whose name ends in `-{NUMBER}` (`git branch -a --list "*-{NUMBER}"`), reuse it (resume). Otherwise derive from the issue title: lowercase, hyphenated, max 40 chars (truncate if needed).
 - Bug / fix issues → prefix `fix/`
 - Feature issues → prefix `feat/`
 - Refactor / maintenance → prefix `fix/` or `refactor/`
 
-Append `-{NUMBER}` to ensure uniqueness: e.g. `fix/work-on-build-landing-file-85`.
+Append `-{NUMBER}` to ensure uniqueness: e.g. `fix/work-on-build-landing-file-85`. Then `BRANCH_SLUG` is `{BRANCH}` with every `/` replaced by `-`.
 
 ### B1B: Determine source branch
 
 - Review-finding issue → parse `**Code branch**: \`{branch}\`` from issue body; branch from `origin/{branch}`
-  - **Milestone review-finding hybrid lane** (ONLY when Code branch matches `milestone/*`): This is a high-risk lane. The worktree will carry the full milestone history. The PR target is `staging` (or the base specified). **DANGER: Agents MUST NOT use `git merge` to resolve any conflicts in this lane.** Merge-based conflict resolution will pull the entire milestone commit tree onto staging, contaminating it with unapproved code. Use `git rebase` or `git cherry-pick` only. If conflicts cannot be resolved without a merge, post a comment on the issue, add `needs-human`, and STOP.
-  - **Missing ref fallback**: After parsing, verify the Code branch still exists on remote. If not, fall back to the lane default (`staging` for fast lane, `milestone/{slug}` for feature lane) and note the fallback:
+  - **Milestone review-finding hybrid lane** (ONLY when Code branch matches `milestone/*`): This is a high-risk lane. The worktree will carry the full milestone history. The PR target is `{PR_BASE}`. **DANGER: Agents MUST NOT use `git merge` to resolve any conflicts in this lane.** Merge-based conflict resolution will pull the entire milestone commit tree onto the PR target, contaminating it with unapproved code. Use `git rebase` or `git cherry-pick` only. If conflicts cannot be resolved without a merge, post a comment on the issue, add `needs-human`, and STOP (Blocked exit).
+  - **Missing ref fallback**: After parsing, verify the Code branch still exists on remote. If not, fall back to `{PR_BASE}` and note the fallback:
     ```bash
     SOURCE_BRANCH="{CODE_BRANCH_FROM_ISSUE_BODY}"
     if ! git ls-remote --exit-code origin "$SOURCE_BRANCH" >/dev/null 2>&1; then
-      echo "WARNING: Code branch '$SOURCE_BRANCH' not found on remote — falling back to lane default '$PR_BASE'"
-      SOURCE_BRANCH="$PR_BASE"
+      echo "WARNING: Code branch '$SOURCE_BRANCH' not found on remote — falling back to PR base '{PR_BASE}'"
+      SOURCE_BRANCH="{PR_BASE}"
     fi
     ```
-- Feature lane (has milestone) → branch from `origin/{PR_BASE}`
-- Fast lane (no milestone) → branch from `origin/staging`
+- Every other issue (feature lane or fast lane) → `SOURCE_BRANCH` = `{PR_BASE}` (the `--base` arg). There is no hardcoded lane default here: the router already chose `{PR_BASE}` for the lane. <!-- Fixed: forge#639 -->
 
 ### B1C: Create worktree
 
 ```bash
-WORKTREE_ROOT="/path/to/repo/.claude/worktrees"
+REPO_ROOT=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
+WORKTREE_ROOT="${REPO_ROOT}/.claude/worktrees"
 if [ "${FORGE_RUNTIME:-}" = "opencode" ] ||
    [ -n "${OPENCODE_SESSION_ID:-}" ] ||
    [ -n "${OPENCODE_PID:-}" ] ||
    [ -n "${OPENCODE:-}" ]; then
-  WORKTREE_ROOT="/path/to/repo/.opencode/worktrees"
+  WORKTREE_ROOT="${REPO_ROOT}/.opencode/worktrees"
 elif [ "${FORGE_RUNTIME:-}" = "codex" ]; then
-  WORKTREE_ROOT="/path/to/repo/.codex/worktrees"
+  WORKTREE_ROOT="${REPO_ROOT}/.codex/worktrees"
 fi
 WORKTREE_PATH="${WORKTREE_ROOT}/{BRANCH_SLUG}"
-git worktree add {WORKTREE_PATH} -b {BRANCH} origin/{SOURCE_BRANCH}
+git fetch origin "{SOURCE_BRANCH}" 2>/dev/null || true
+if [ -d "$WORKTREE_PATH" ]; then
+  # Reuse existing worktree only when it is on the correct branch
+  CURRENT=$(git -C "$WORKTREE_PATH" branch --show-current 2>/dev/null)
+  if [ "$CURRENT" != "{BRANCH}" ]; then
+    git worktree remove "$WORKTREE_PATH" --force
+  fi
+fi
+if [ ! -d "$WORKTREE_PATH" ]; then
+  if git show-ref --verify --quiet "refs/heads/{BRANCH}"; then
+    git worktree add "$WORKTREE_PATH" "{BRANCH}"            # resume: branch already exists
+  else
+    git worktree add "$WORKTREE_PATH" -b "{BRANCH}" "origin/{SOURCE_BRANCH}"
+  fi
+fi
+echo "WORKTREE_PATH=$WORKTREE_PATH BRANCH={BRANCH} BASE={PR_BASE}"
 ```
 
-If worktree already exists at that path:
-```bash
-# Reuse existing worktree — verify it's on the correct branch
-git -C {WORKTREE_PATH} branch --show-current
-```
-If wrong branch, remove and recreate:
-```bash
-git worktree remove {WORKTREE_PATH} --force
-git worktree add {WORKTREE_PATH} -b {BRANCH} origin/{SOURCE_BRANCH}
-```
+If worktree creation fails, take the Blocked exit with the git error as the blocker. Use the resulting `$WORKTREE_PATH` as `{WORKTREE_PATH}` for every later phase and in `BUILD_RESULT`.
 
 ### B1D: Set building label
 
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} \
-  --add-label "workflow:building" \
-  --remove-label "workflow:ready-to-build"
+RESOLUTION=$(resolve_script 'transition-label'); TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+case "$TIER" in
+  adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} building ;;
+  prose)
+    [ -n "${DRY_RUN:-}" ] && echo "DRY_RUN: set workflow:building" || \
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:building" \
+      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
+    ;;
+esac
 ```
 
 ---
 
-## Phase B2: Post Builder Contract
+## Phase B2: Post Builder Contract (skip for INVESTIGATION)
+
+**Skip if COMPLEXITY_BAND: INVESTIGATION** — go to B5. For every other band (TRIVIAL included) the contract is mandatory. If a `FORGE:CONTRACT` comment already exists on the issue (resume), do not post a second one — continue to B2.1.
 
 Post `<!-- FORGE:CONTRACT -->` comment documenting what will be built and why:
 
@@ -179,7 +278,8 @@ SHOW_ATTRIBUTION=$(yq '.branding.show_attribution // "true"' forge.yaml 2>/dev/n
 ```
 
 ```bash
-gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CONTRACT -->
+run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
+run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CONTRACT -->
 ## Builder Contract
 
 **Task type**: {TASK_TYPE}
@@ -217,28 +317,29 @@ Contract must be grounded in the investigation report. Every deliverable file mu
 **When `FORGE_COORD_ISSUE` is set**: Post a `FORGE:CLAIM` annotation on the coordination issue to advertise this agent's active resource reservation to the orchestrator and peer agents. This enables the claims-board Layer-2/4 relaxation sweep (orchestrate Step 4B) to identify issue-pairs with disjoint file sets and downgrade unnecessary serialization edges.
 
 ```bash
+run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
 if [ -n "${FORGE_COORD_ISSUE:-}" ]; then
   COORD_NUM=$(echo "$FORGE_COORD_ISSUE" | grep -oE '[0-9]+$')
   if [ -n "$COORD_NUM" ]; then
     # Extract file paths from the just-posted FORGE:CONTRACT deliverables table
-    CLAIMED_FILES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+    CLAIMED_FILES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
       --jq '[.[] | select(.body | contains("FORGE:CONTRACT"))] | last | .body' 2>/dev/null \
       | awk '/^### Deliverables/{p=1; next} /^### /{p=0} p' \
-      | grep -oP '`[^`]+\.(py|tsx?|jsx?|sql|json|ya?ml|md|mjs|sh)`' \
-      | tr -d '`' | sort -u | tr '\n' '\n' | head -20)
+      | grep -oE '`[^`]+\.(py|tsx?|jsx?|sql|json|ya?ml|md|mjs|sh)`' \
+      | tr -d '`' | sort -u | head -20)
     CLAIMED_FILES="${CLAIMED_FILES:-"(files listed in FORGE:CONTRACT deliverables table)"}"
 
     # Extract preserved interfaces from the FORGE:ARCHITECT affected paths table (if present)
-    CLAIMED_INTERFACES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+    CLAIMED_INTERFACES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
       --jq '[.[] | select(.body | contains("FORGE:ARCHITECT"))] | last | .body' 2>/dev/null \
       | awk '/^### Affected Paths/{p=1; next} /^### /{p=0} p' \
-      | grep -oP 'Function/Class.*\|.*\|' | head -10 || echo "(see FORGE:ARCHITECT for interface details)")
+      | grep -oE 'Function/Class.*\|.*\|' | head -10 || true)
     CLAIMED_INTERFACES="${CLAIMED_INTERFACES:-"(see FORGE:ARCHITECT comment for interface details)"}"
 
-    CLAIM_HOLDER="#${NUMBER} / $(date -u +%Y%m%dT%H%M%S)"
-    CLAIM_TTL="terminal state of Holder issue #${NUMBER}"
+    CLAIM_HOLDER="#{NUMBER} / $(date -u +%Y%m%dT%H%M%S)"
+    CLAIM_TTL="terminal state of Holder issue #{NUMBER}"
 
-    gh issue comment "$COORD_NUM" -R {GH_REPO} --body "<!-- FORGE:CLAIM -->
+    run gh issue comment "$COORD_NUM" -R {GH_REPO} --body "<!-- FORGE:CLAIM -->
 ## Resource Claim
 
 **Holder**: ${CLAIM_HOLDER}
@@ -247,7 +348,7 @@ if [ -n "${FORGE_COORD_ISSUE:-}" ]; then
 **TTL**: ${CLAIM_TTL}
 
 <!-- CLAIM:COMPLETE -->" 2>/dev/null || true
-    echo "FORGE:CLAIM posted on coordination issue #${COORD_NUM} for #${NUMBER}"
+    echo "FORGE:CLAIM posted on coordination issue #${COORD_NUM} for #{NUMBER}"
   fi
 fi
 ```
@@ -256,12 +357,12 @@ fi
 
 ---
 
-## Phase B2.5: Extract FUNCTION_NAMES from Contract
+## Phase B2.5: Extract FUNCTION_NAMES from Contract (skip for INVESTIGATION)
 
-After posting the Builder Contract, extract the primary function/class names from the contract's deliverables table. These are passed to the context subcommand for Phase C3 caller/importer discovery.
+After posting the Builder Contract, extract the primary function/class names from the contract's deliverables table. These are passed to the context child for its C3 caller/importer discovery.
 
 ```bash
-FUNCTION_NAMES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+FUNCTION_NAMES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
   --jq '.[] | select(.body | contains("FORGE:CONTRACT")) | .body' \
   | awk '/^### Deliverables/{p=1; next} /^### /{p=0} p' \
   | grep -oE '`[A-Za-z_][A-Za-z0-9_]*`' \
@@ -271,56 +372,49 @@ FUNCTION_NAMES=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   | xargs)
 # Scope is limited to the ### Deliverables section to avoid false matches from FORGE markers,
 # phase labels (B2, C3), and identifiers mentioned in Acceptance Criteria or Quality sections.
-# Fallback: if extraction yields nothing, FUNCTION_NAMES remains empty string
-# context.md Phase C3 skips gracefully when FUNCTION_NAMES is empty (for-loop produces zero iterations)
+# Fallback: if extraction yields nothing, FUNCTION_NAMES remains the empty string and
+# context C3 skips gracefully (its for-loop produces zero iterations).
 ```
 
-If `FUNCTION_NAMES` is non-empty, it will be passed via `--functions` to the context subcommand. If empty, the `--functions` flag is omitted — Phase C3 will naturally skip with zero iterations and no error.
+If `FUNCTION_NAMES` is non-empty, pass it via `--functions` to the context child. If empty, omit the `--functions` flag.
 
 ---
 
-## Phase B3: Context Gathering (MANDATORY for STANDARD/COMPLEX — skip for TRIVIAL)
+## Phase B3: Context Gathering (invoke for every band except TRIVIAL / INVESTIGATION)
 
-**Skip if COMPLEXITY_BAND: TRIVIAL** (read from FORGE:FAST_PATH in Phase B0) — skip this phase entirely. Proceed directly to Phase B4.
+**Skip only if COMPLEXITY_BAND is TRIVIAL or INVESTIGATION** — proceed directly to Phase B4. (The context child would also detect these bands and return `SKIPPED` itself; for STANDARD and COMPLEX it is NOT optional — it must be invoked.)
 
-**For STANDARD and COMPLEX tasks**: Always run. Do NOT skip without a TRIVIAL COMPLEXITY_BAND.
+Always invoke it as a forked sub-skill — never inline:
 
-**Execution model**: Run **inline** (see Canonical Build Path above). Read the `commands/work-on/build/context.md` spec and execute its steps directly in this context window. Only spawn a Skill() sub-agent when the Spawn-Decision Table Row (c) applies (≥20 prior Skill invocations or ≥10 files already changed). <!-- Added: forge#1276 -->
-
-Surface historical review findings and bug patterns for the affected files. The full step-by-step logic is defined in `commands/work-on/build/context.md`. Key steps: search closed issues with `review-finding` label on the affected files; check git log for past bug patterns; synthesize a `FORGE:CONTEXT` annotation and post it as a GitHub comment.
-
-**Spawn exception** (only when Row (c) applies):
 ```
-Skill("{FORGE_SKILL_PREFIX}work-on:build:context", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --repo-path {WORKTREE_PATH} {AFFECTED_FILES} --functions {FUNCTION_NAMES}")
+Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:context", args="{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --repo-path {WORKTREE_PATH} --files \"{AFFECTED_FILES}\" --functions \"{FUNCTION_NAMES}\"")
 ```
-If `FUNCTION_NAMES` is empty, omit `--functions`. The Skill() form above is the exception path — not the default. <!-- Added: forge#1276 -->
 
-**After context gathering**:
-- Structured context briefing produced (or no relevant history found) → continue to B4
-- Context gathering timed out or errored → log warning, continue to B4 with empty context (non-blocking)
+If `FUNCTION_NAMES` is empty, omit `--functions`. The child posts its own `FORGE:CONTEXT` comment (a minimal marker when it skips a non-TRIVIAL issue).
+
+**After the child returns** (read its `CONTEXT_RESULT:` block):
+- `status: COMPLETE | PARTIAL | SKIPPED` → continue to B4
+- No `CONTEXT_RESULT:` block, timeout or error → log a warning and continue to B4 (context is advisory and non-blocking)
+- Skill not found → Blocked exit, blocker "skill not found: work-on:build:context"
 # MUST CONTINUE to Phase B4 — context result is intermediate, NOT terminal.
 
 ---
 
-## Phase B4: Architecture Planning (MANDATORY for STANDARD/COMPLEX — skip for TRIVIAL)
+## Phase B4: Architecture Planning (invoke for every band except TRIVIAL / INVESTIGATION)
 
-**Skip if COMPLEXITY_BAND: TRIVIAL** (read from FORGE:FAST_PATH in Phase B0) — skip this phase entirely. Proceed directly to Phase B5.
+**Skip only if COMPLEXITY_BAND is TRIVIAL or INVESTIGATION** — proceed directly to Phase B5. For STANDARD and COMPLEX it is NOT optional; even a 1-file STANDARD fix benefits from cross-path consistency checks.
 
-**For STANDARD and COMPLEX tasks**: Always run. Even a 1-file STANDARD fix benefits from cross-path consistency checks. Do NOT skip without a TRIVIAL COMPLEXITY_BAND.
-
-**Execution model**: Run **inline** (see Canonical Build Path above). Read the `commands/work-on/build/architect.md` spec and execute its steps directly in this context window. Only spawn a Skill() sub-agent when the Spawn-Decision Table Row (c) applies. <!-- Added: forge#1276 -->
-
-Trace all affected code paths and produce an ordered implementation plan. The full step-by-step logic is defined in `commands/work-on/build/architect.md`. Key steps: map all callers and importers of changed functions; check consistency rules across paths; post a `FORGE:ARCHITECT` annotation with the ordered plan and a risk table.
-
-**Spawn exception** (only when Row (c) applies):
 ```
-Skill("{FORGE_SKILL_PREFIX}work-on:build:architect", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --repo-path {WORKTREE_PATH} --files {AFFECTED_FILES}")
+Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:architect", args="{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --repo-path {WORKTREE_PATH} --files \"{AFFECTED_FILES}\"")
 ```
-The Skill() form above is the exception path — not the default. <!-- Added: forge#1276 -->
 
-**After architecture planning**:
-- Returns ordered implementation plan → continue to B5
-- BLOCKED (conflicting constraints that cannot be resolved inline) → post comment, add `needs-human`, return `BUILD_RESULT: status: BLOCKED`
+The child posts its own `FORGE:ARCHITECT` comment (a "Skipped" marker + `:COMPLETE` on every skip, forge#2689).
+
+**After the child returns** (read its `ARCHITECT_RESULT:` block):
+- `status: COMPLETE | PARTIAL | SKIPPED` → continue to B5
+- `status: BLOCKED` (conflicting constraints that cannot be resolved) → Blocked exit with the child's `blocker`
+- No `ARCHITECT_RESULT:` block → re-read the issue: if a `FORGE:ARCHITECT:COMPLETE` marker exists continue to B5, otherwise Blocked exit "architect produced no result"
+- Skill not found → Blocked exit, blocker "skill not found: work-on:build:architect"
 # MUST CONTINUE to Phase B5 — architect result is intermediate, NOT terminal.
 
 ---
@@ -330,14 +424,15 @@ The Skill() form above is the exception path — not the default. <!-- Added: fo
 Invoke the implement subcommand to write code, stage, and post the builder comment:
 
 ```
-Skill("{FORGE_SKILL_PREFIX}work-on:build:implement", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --worktree {WORKTREE_PATH} --branch {BRANCH}")
+Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:implement", args="{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE}")
 ```
 
-**After subcommand returns**:
-- `IMPLEMENT_RESULT: status: COMPLETE` → continue to B6
-- `IMPLEMENT_RESULT: status: ALREADY_DONE` → skip to B6 (validate what's already there)
-- `IMPLEMENT_RESULT: status: INVESTIGATION_COMPLETE` → issues created as deliverables; return `BUILD_RESULT: status: INVESTIGATION_COMPLETE`
-- `IMPLEMENT_RESULT: status: BLOCKED` → post comment with blocker description, add `needs-human`, return `BUILD_RESULT: status: BLOCKED`
+**After subcommand returns** (read its `IMPLEMENT_RESULT:` block):
+- `status: COMPLETE` → continue to B6
+- `status: ALREADY_DONE` → continue to B6 (validate what's already there)
+- `status: INVESTIGATION_COMPLETE` → issues were created as deliverables and the original closed; print `BUILD_RESULT: status: INVESTIGATION_COMPLETE` (skip B6/B6.5)
+- `status: BLOCKED` → Blocked exit with the child's `blocker`
+- Skill not found → Blocked exit, blocker "skill not found: work-on:build:implement"
 # MUST CONTINUE to Phase B6 — implement result is intermediate, NOT terminal (validation still required).
 
 ---
@@ -347,25 +442,30 @@ Skill("{FORGE_SKILL_PREFIX}work-on:build:implement", args="{NUMBER} --repo {GH_R
 Invoke the validate subcommand to run the quality gate loop, formatting, and deploy checks:
 
 ```
-Skill("{FORGE_SKILL_PREFIX}work-on:build:validate", args="{NUMBER} --repo {GH_REPO} --gh-flag {GH_FLAG} --worktree {WORKTREE_PATH} --files {CHANGED_FILES}")
+Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:validate", args="{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE} --files \"{CHANGED_FILES}\"")
 ```
 
-Where `{CHANGED_FILES}` is the space-separated list of files changed by the implement subcommand (read from `IMPLEMENT_RESULT` or from the `<!-- FORGE:BUILDER -->` comment).
+Where `{CHANGED_FILES}` is the space-separated list of files changed by the implement subcommand (`files_changed` in `IMPLEMENT_RESULT`, or derive it):
 
-**After subcommand returns**:
-- `VALIDATE_RESULT: gate_passed: true` → verify the `FORGE:QUALITY_GATE` marker exists (posted by validate V5; docs-only changes exempt). If absent, re-invoke validate once; a missing marker is not a pass. Then continue to Phase B6.5 (acceptance gate)
-- `VALIDATE_RESULT: gate_passed: false` → subcommand has already posted comment and added `needs-human` label; return `BUILD_RESULT: status: BLOCKED`
+```bash
+CHANGED_FILES=$(git -C "{WORKTREE_PATH}" diff --name-only "origin/{PR_BASE}...HEAD" 2>/dev/null | tr '\n' ' ' | xargs)
+```
+
+**After subcommand returns** (read its `VALIDATE_RESULT:` block):
+- `gate_passed: true` → verify the `FORGE:QUALITY_GATE` marker exists on the issue (posted by validate V5; docs-only changes exempt). If absent, re-invoke validate once; a missing marker is not a pass. Then continue to Phase B6.5 (acceptance gate)
+- `gate_passed: false` → the subcommand has already posted its comment and added `needs-human`; print `BUILD_RESULT: status: BLOCKED` with the child's `blocker` (run the Blocked exit if no comment was posted)
+- Skill not found → Blocked exit, blocker "skill not found: work-on:build:validate"
 
 ---
 
 ## Phase B6.5: Acceptance Gate (MANDATORY — cannot be silently skipped) <!-- Added: forge#1315 -->
 
-**Goal**: Execute the machine-checkable acceptance spec emitted by investigate Phase 1C and block merge if any check fails. This is a hard gate — not advisory.
+**Goal**: Execute the machine-checkable acceptance spec emitted by investigate Phase 1C and block merge if any check fails. This is a hard gate — not advisory. Run the checks from the worktree (`cd "{WORKTREE_PATH}"`) so relative targets resolve against the built code.
 
 **Read acceptance spec from FORGE:INVESTIGATOR comment**:
 
 ```bash
-ACCEPTANCE_CHECKS=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+ACCEPTANCE_CHECKS=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
   --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' \
   | grep "^ACCEPTANCE_CHECK:" )
 ```
@@ -373,7 +473,8 @@ ACCEPTANCE_CHECKS=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 **If `ACCEPTANCE_CHECKS` is empty** (investigation predates this feature or comment was deleted): post a warning comment and **block** — do not silently pass:
 
 ```bash
-gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
+run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
+run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
 ## Acceptance Gate — No Spec Found
 
 No \`ACCEPTANCE_CHECK:\` lines found in the FORGE:INVESTIGATOR comment. This may mean:
@@ -383,14 +484,15 @@ No \`ACCEPTANCE_CHECK:\` lines found in the FORGE:INVESTIGATOR comment. This may
 **Gate result: BLOCKED** — re-run \`/work-on:investigate {NUMBER}\` to regenerate the acceptance spec, then retry the build.
 
 <!-- FORGE:ACCEPTANCE_GATE:BLOCKED -->"
-gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+run gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
 ```
-Return `BUILD_RESULT: status: BLOCKED`, blocker: "No acceptance spec — re-run investigate to emit ACCEPTANCE_CHECK lines".
+Print `BUILD_RESULT: status: BLOCKED`, blocker: "No acceptance spec — re-run investigate to emit ACCEPTANCE_CHECK lines".
 
 **If all checks are `type=skipped`**: post a pass comment noting human review is required, then continue to the checkpoint (non-blocking — skip was deliberate):
 
 ```bash
-gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
+run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
+run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
 ## Acceptance Gate — Skipped (No Machine-Checkable Criteria)
 
 The acceptance spec contains only a skip sentinel (\`type=skipped\`). No automated checks were run. Human review is required before merge.
@@ -471,15 +573,16 @@ done <<< "$ACCEPTANCE_CHECKS"
 **Post gate result comment**:
 
 ```bash
+run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
 if [ "$GATE_PASS" = "true" ]; then
-  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
+  run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
 ## Acceptance Gate — PASSED
 
 All machine-checkable acceptance criteria verified against real behavior.
 
 <!-- FORGE:ACCEPTANCE_GATE:PASSED -->"
 else
-  gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
+  run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
 ## Acceptance Gate — FAILED
 
 The following acceptance checks did not pass:
@@ -489,19 +592,19 @@ $(echo -e "$FAILED_CHECKS")
 Merge is blocked. Fix the failing criteria and re-run the validate phase.
 
 <!-- FORGE:ACCEPTANCE_GATE:FAILED -->"
-  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
-  # Return BLOCKED — merge gate failed
+  run gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
 fi
 ```
 
-If `GATE_PASS = false`: return `BUILD_RESULT: status: BLOCKED`, blocker: "Acceptance gate failed — see FORGE:ACCEPTANCE_GATE comment".
+If `GATE_PASS = false`: print `BUILD_RESULT: status: BLOCKED`, blocker: "Acceptance gate failed — see FORGE:ACCEPTANCE_GATE comment".
 
 If `GATE_PASS = true`: continue to write the phase checkpoint below.
 
-**When gate_passed is true — write machine-readable phase checkpoint before returning (MANDATORY)**:
+**When the gate passed — write machine-readable phase checkpoint before returning (MANDATORY)**:
 ```bash
+run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
 CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
+run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
 \`\`\`json
 {\"phase\": \"BUILD\", \"status\": \"COMPLETE\", \"next_phase\": \"REVIEW\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
 \`\`\`"
@@ -511,7 +614,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
 
 ## Output
 
-Output this structured block — the routing loop in `work-on.md` will read this result, re-evaluate state, and continue to the next phase. This subcommand is complete; control returns to the router's loop iteration.
+Print this structured block as your final reply (and nothing after it) — the router reads only this block, re-evaluates state, and continues to the next phase. Heartbeats are posted by the router, not here.
 
 ```
 BUILD_RESULT:
@@ -521,18 +624,20 @@ BUILD_RESULT:
   blocker: {description if status=BLOCKED}
 ```
 
+- `COMPLETE` — B0–B6.5 all passed; `FORGE:BUILDER:COMPLETE` is on the issue.
+- `ALREADY_DONE` — B0 found `FORGE:BUILDER:COMPLETE`.
+- `INVESTIGATION_COMPLETE` — the implement child created the deliverable issues (B5); no review follows.
+- `BLOCKED` — any guard or failure; `needs-human` is set and the blocker is posted.
+
 ---
 
-## Integration Point in work-on.md
+## Integration Point
 
-This module runs during **Phase 3** of the work-on.md pipeline (label: `workflow:ready-to-build` or `workflow:building`). The full sequence is defined by the Universal Phase Dispatcher in work-on.md:
+Position in the work-on pipeline (label `workflow:ready-to-build` or `workflow:building`):
 
 ```
-Phase 3 (Build)   → [THIS MODULE] worktree + contract + context + architect + implement + validate + acceptance-gate
-                  → posts FORGE:BUILDER comment + FORGE:ACCEPTANCE_GATE comment, writes FORGE:CHECKPOINT next_phase=REVIEW
-Phase 4 (PR)      → work-on:review — push branch, create PR, set workflow:in-review
-Phase 5 (Review)  → work-on:review — invoke /review-pr --auto-merge
-Phase 6 (Close)   → work-on:close — trajectory + parent tracker + summary + worktree cleanup
+investigate → [THIS MODULE] worktree + classify + contract + context + architect + implement + validate + acceptance-gate
+              → posts FORGE:FAST_PATH, FORGE:CONTRACT, FORGE:BUILDER(:COMPLETE), FORGE:ACCEPTANCE_GATE; writes FORGE:CHECKPOINT next_phase=REVIEW
+            → work-on:review (push branch, create PR, review, merge)
+            → work-on:close
 ```
-
-After this module posts `FORGE:BUILDER` and returns, work-on.md's Universal continuation rule re-reads the issue labels. Since the label is not yet terminal (`workflow:merged` / `workflow:invalid` / `needs-human`), it proceeds immediately to Phase 4 (PR Creation) and then Phase 5 (Auto-Review).

@@ -1,6 +1,7 @@
 ---
 description: Pre-commit quality check — catches defects the review would flag, so the builder can fix them before committing
 argument-hint: (invoked by /work-on, not directly)
+context: fork
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -1712,13 +1713,13 @@ OR:
 
 Return the findings list directly. Do NOT post to GitHub. Do NOT create issues. The builder will fix the findings and re-run the gate if needed.
 
-**CRITICAL — continuation directive**: Your output is consumed by a calling pipeline agent. You MUST append the continuation block below to your output in ALL cases (both PASS and FINDINGS). Without it, the calling agent treats your output as a terminal signal and stops the pipeline.
+**Result delivery**: This skill runs in an isolated forked context, so your final reply is the only thing the caller sees. The PASS or FINDINGS block below MUST be your final reply, in ALL cases, with nothing after it. The caller (the validate quality-gate loop) decides what happens next.
 
 If 0 findings:
 ```
 QUALITY GATE: PASS — no issues detected.
 
-**YOU MUST NOW continue to sub-phase 3H (Format and verify) in work-on.md — this PASS is intermediate, NOT terminal. Do NOT stop.**
+Return this result to the caller.
 ```
 
 If findings exist:
@@ -1726,5 +1727,5 @@ If findings exist:
 QUALITY GATE FINDINGS: N issues detected.
 {findings list}
 
-**YOU MUST NOW fix each HIGH and MEDIUM finding, then re-run the quality gate — this result is intermediate, NOT terminal. Do NOT stop.**
+Return this result to the caller; the caller fixes each HIGH and MEDIUM finding and re-runs the gate.
 ```
