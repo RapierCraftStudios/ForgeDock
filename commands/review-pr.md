@@ -2227,10 +2227,10 @@ else
     done <<< "$_k"
   fi
   TRAIL_SCRIPT="$FORGE_ROOT/scripts/verify-phase-trail.sh"
-  # Docs-only predicate (identical to R1.5): every file in the PR diff is docs/** or *.md, excluding commands/**, .claude/**, .agents/** and root AGENTS.md/CLAUDE.md
+  # Docs-only predicate: ONE shared copy (scripts/is-docs-only.sh, forge#3134), same as work-on/review.md R1.5. Fail closed: unresolved script or empty diff -> no flag.
   DOCS_ONLY_FLAG=""
   PR_FILES_ALL=$(gh pr diff {PR_NUMBER} {MERGE_GH_FLAG} --name-only 2>/dev/null)
-  if [ -n "$PR_FILES_ALL" ] && echo "$PR_FILES_ALL" | awk '!(/^docs\// || (/\.md$/ && !/^(commands|\.claude|\.agents)\// && !/^(AGENTS|CLAUDE)\.md$/)){bad=1} END{exit bad}'; then DOCS_ONLY_FLAG="--docs-only"; fi
+  if [ -n "$PR_FILES_ALL" ] && [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/is-docs-only.sh" ] && echo "$PR_FILES_ALL" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"; then DOCS_ONLY_FLAG="--docs-only"; fi
   if [ -z "$FORGE_ROOT" ] || [ ! -f "$TRAIL_SCRIPT" ]; then
     # Fail closed: an unresolvable verifier is NOT a pass (plugin installs set no FORGE_HOME; never fall back to the consumer repo).
     echo "PHASE TRAIL: verify-phase-trail.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install) — refusing to merge" >&2
@@ -2256,7 +2256,7 @@ fi
 [ "${TRAIL_RC:-1}" -eq 0 ] || exit 1   # hard guard: nothing below runs unless the trail verified
 ```
 
-If the preflight failed, skip the rest of Phase 8 and return `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` listing the missing markers. (`DOCS_ONLY_FLAG` is computed in the block above: `--docs-only` when every file in the PR diff is `docs/**` or a `*.md` outside `commands/`, `.claude/` and `.agents/` (root `AGENTS.md`/`CLAUDE.md` also excluded).)
+If the preflight failed, skip the rest of Phase 8 and return `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` listing the missing markers. (`DOCS_ONLY_FLAG` is computed in the block above: `--docs-only` when `scripts/is-docs-only.sh` accepts the PR diff: every file is a `*.md` outside `commands/`, `.claude/`, `.agents/`, `.codex/` and `.github/` at any depth, and not named `AGENTS.md`/`CLAUDE.md`/`SKILL.md`.)
 
 ```bash
 # §7B verdict + purpose-regression + calibration + trust-escalation guard — check before any merge attempt <!-- Added: forge#1601, forge#1741, forge#1745 -->

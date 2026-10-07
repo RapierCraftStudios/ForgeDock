@@ -1673,8 +1673,7 @@ done
      TRAIL="PHASE_TRAIL: ERROR (verify-phase-trail.sh not resolvable; set FORGEDOCK_HOME)"; TRAIL_RC=127   # fail closed
    else
      # forge#3123: a docs-only merged diff legitimately has no FORGE:QUALITY_GATE marker. Derive --docs-only from the
-     # merged PR's diff with the SAME predicate as review-pr.md Phase 8 / work-on/review.md R1.5 (docs/** or *.md, excluding
-     # commands/**, .claude/**, .agents/** and root AGENTS.md/CLAUDE.md). Fail closed: no PR / unreadable diff -> no flag.
+     # merged PR's diff with the SAME shared predicate as review-pr.md Phase 8 / work-on/review.md R1.5 (scripts/is-docs-only.sh, forge#3134). Fail closed: no PR / unreadable diff -> no flag.
      TRAIL_DOCS_FLAG=""
      # forge#3133: the text search is fuzzy and unordered, so `.[0]` can be an unrelated docs-only PR. Evaluate EVERY
      # matching merged PR and set the flag only if at least one matched AND all matched diffs are non-empty and docs-only.
@@ -1683,7 +1682,7 @@ done
        TRAIL_ALL_DOCS=1
        for TRAIL_PR in $TRAIL_PRS; do
          TRAIL_FILES=$(gh pr diff "$TRAIL_PR" -R {GH_REPO} --name-only 2>/dev/null)
-         if [ -z "$TRAIL_FILES" ] || ! echo "$TRAIL_FILES" | awk '!(/^docs\// || (/\.md$/ && !/^(commands|\.claude|\.agents)\// && !/^(AGENTS|CLAUDE)\.md$/)){bad=1} END{exit bad}'; then TRAIL_ALL_DOCS=0; break; fi
+         if [ -z "$TRAIL_FILES" ] || [ ! -f "$FORGE_ROOT/scripts/is-docs-only.sh" ] || ! echo "$TRAIL_FILES" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"; then TRAIL_ALL_DOCS=0; break; fi
        done
        [ "$TRAIL_ALL_DOCS" = "1" ] && TRAIL_DOCS_FLAG="--docs-only"
      fi

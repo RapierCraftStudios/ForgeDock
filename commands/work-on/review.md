@@ -183,10 +183,7 @@ Return `REVIEW_RESULT: status: BLOCKED`, blocker: "git push failed".
 A PR must not be opened for work whose earlier phases were skipped. Run the deterministic verifier; it requires INVESTIGATOR, FAST_PATH and CONTRACT always, CONTEXT and ARCHITECT unless the band is TRIVIAL/INVESTIGATION, and a passing FORGE:QUALITY_GATE unless the diff is docs-only.
 
 ```bash
-DOCS_ONLY_FLAG=""
 CHANGED=$(git -C {WORKTREE_PATH} diff --name-only origin/{PR_BASE}...HEAD)
-# docs = docs/** or *.md, but commands/**, .claude/**, .agents/** and root AGENTS.md/CLAUDE.md are executable pipeline/agent instructions, never docs
-if [ -n "$CHANGED" ] && echo "$CHANGED" | awk '!(/^docs\// || (/\.md$/ && !/^(commands|\.claude|\.agents)\// && !/^(AGENTS|CLAUDE)\.md$/)){bad=1} END{exit bad}'; then DOCS_ONLY_FLAG="--docs-only"; fi
 # The verifier ships with ForgeDock (not the consumer repo): same resolution as every universal script.
 # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
 FORGE_ROOT=""
@@ -202,6 +199,9 @@ if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="
   done <<< "$_k"
 fi
 TRAIL_SCRIPT="$FORGE_ROOT/scripts/verify-phase-trail.sh"
+# Docs-only predicate: ONE shared copy (scripts/is-docs-only.sh, forge#3134). Fail closed: unresolved script or empty diff -> no flag.
+DOCS_ONLY_FLAG=""
+if [ -n "$CHANGED" ] && [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/is-docs-only.sh" ] && echo "$CHANGED" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"; then DOCS_ONLY_FLAG="--docs-only"; fi
 if [ -z "$FORGE_ROOT" ] || [ ! -f "$TRAIL_SCRIPT" ]; then
   # Fail closed: never skip the gate when the verifier cannot be resolved (plugin installs set no FORGE_HOME).
   echo "PHASE TRAIL: verify-phase-trail.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install)" >&2
