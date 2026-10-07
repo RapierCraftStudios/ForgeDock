@@ -317,7 +317,7 @@ done
 
 For each diagnosed issue, apply the recovery action. All mutating actions are skipped when `DRY_RUN=true`.
 
-**Claim before re-entering the pipeline** (forge#3158): the `review-pr` first-refusal resume and `create-pr` re-enter `/work-on` inline. A repeated or concurrent sweep, or a live `/orchestrate` agent, could otherwise run the pipeline twice on one issue. Every inline `/work-on` resume MUST go through `claim_orphan` first and run inside `resume_orphan_inline`, which releases the claim on every exit. A sweep is not an orchestrator, so it takes an issue-scoped `FORGE:RECOVERY_CLAIM` marker (visible to other sweeps) and defers to any live orchestrator signal (a fresh `FORGE:HEARTBEAT`, which `/work-on --under-orchestration` posts at every phase entry).
+**Claim before re-entering the pipeline** (forge#3158): the `review-pr` first-refusal resume and `create-pr` re-enter `/work-on` inline. A repeated or concurrent sweep, or a live `/orchestrate` agent, could otherwise run the pipeline twice on one issue. Every inline `/work-on` resume MUST go through `claim_orphan` first and run inside `resume_orphan_inline`, which releases the claim on every exit. A sweep is not an orchestrator, so it takes an issue-scoped `FORGE:RECOVERY_CLAIM` marker (visible to other sweeps) and defers to any live orchestrator signal (a fresh `FORGE:HEARTBEAT`, which `/work-on --under-orchestration` posts at every phase entry). The claim is honored in the other direction too (forge#3172): `/work-on` Phase 0A.4 and `/orchestrate` Phase 4 dispatch consult the shared `scripts/recovery-claim-live.sh` and defer to a live claim, so the inline resume passes `--recovery-sweep ${SWEEP_ID}` to exempt its own claim.
 
 **Claim refresh and guaranteed release** (forge#3171): liveness is judged from the claim comment's `updated_at`, and an inline resume posts no `FORGE:HEARTBEAT` (that is gated on `--under-orchestration`, which sweeps do not pass). So the claim is kept alive by editing it: `claim_orphan` records the claim comment id, and `start_claim_keepalive` runs `refresh_orphan` in a background loop every `RECOVERY_CLAIM_TTL_MIN / 3` minutes while the resume runs. `refresh_orphan` PATCHes the claim body, keeping the `**Sweep: id**` line and appending a changing `Refreshed: <UTC>` line, so `updated_at` always advances. Refresh is best-effort; if the keepalive is lost the claim degrades to the plain TTL behavior. `resume_orphan_inline` registers `trap ... release_orphan ... EXIT` in a subshell, so the claim is released always, on success and when the `Skill(...)` call fails, and `release_orphan` stops the keepalive first and is idempotent (it never posts the release marker twice). The keepalive and the `Skill(...)` call belong to the same sweep run. DRY_RUN makes every one of these helpers a no-op.
 
@@ -423,7 +423,7 @@ resume_orphan_inline() {
     trap 'release_orphan "$num"' EXIT
     start_claim_keepalive "$num"
     refresh_orphan "$num"
-    Skill(skill="{FORGE_SKILL_PREFIX}work-on", args="${num}")
+    Skill(skill="{FORGE_SKILL_PREFIX}work-on", args="${num} --recovery-sweep ${SWEEP_ID}")
   )
 }
 ```
@@ -590,7 +590,7 @@ See the latest FORGE:PHASE_TRAIL_FAILED comment for the missing phases. Re-run e
       # Branch has commits but no PR — resume /work-on to create PR
       echo "  Applying create-pr: resuming /work-on to advance from build to PR creation"
       if [ "$DRY_RUN" = "true" ]; then
-        echo "  [DRY-RUN] Would: Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='$NUM')"
+        echo "  [DRY-RUN] Would: Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='$NUM --recovery-sweep $SWEEP_ID')"
         RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | create-pr | Would resume /work-on — branch $BRANCH has commits, no PR |\n"
       elif claim_orphan "$NUM"; then
         resume_orphan_inline "$NUM"   # releases the claim on every exit

@@ -219,6 +219,8 @@ Extract project prefix and issue number. If `next`/`pick`: list open issues sort
 
 **Resolve `UNDER_ORCHESTRATION`**: `true` if the invocation args contain `--under-orchestration`, else `false`. This is a single parse done once, here — every later gated block (heartbeats) just checks this variable, no re-parsing.
 
+**Resolve `RECOVERY_SWEEP_ID`**: the value after `--recovery-sweep` in the invocation args, else empty (consumed by 0A.4; only `/recover-orphans` passes it).
+
 **Optional pre-flight**: Before committing to the full pipeline, run `/scope {NUMBER}` to get a complexity estimate (affected files, blast radius, risk flags, and decomposition recommendation). Especially useful for large or ambiguous issues.
 
 ### 0A.1: Remediation Mode Detection (`--remediate`) <!-- Added: forge#1813 -->
@@ -254,6 +256,41 @@ Skill(skill="{FORGE_SKILL_PREFIX}work-on:remediate", args="${REMEDIATE_PR_NUMBER
 This mode is reachable both standalone (a human or script running `/work-on <pr> --remediate` directly) and via the orchestrator (`commands/orchestrate/phase-4-execution.md` item 6.4 auto-dispatches the identical `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{PR} --remediate --issue {N} ...')` invocation against a `needs-human`-gated predecessor's own PR).
 
 **Skip this entire section if `--remediate` is absent from `$ARGUMENTS`** — proceed to the normal parse below.
+
+### 0A.4: Recovery-Claim Gate (MANDATORY — before any heartbeat, label, or comment write) <!-- Added: forge#3172 -->
+
+A `/recover-orphans` sweep that resumes this issue inline holds an issue-scoped `<!-- FORGE:RECOVERY_CLAIM -->` comment (see `commands/recover-orphans.md` Phase 3). Starting the pipeline underneath a live claim double-runs the issue. Before the 0A.5 heartbeat and before 0B, ask the shared predicate `scripts/recovery-claim-live.sh` (the single copy of the claim logic: unreleased claim, `updated_at` within `RECOVERY_CLAIM_TTL_MIN` (default 30), and no `FORGE:RECOVERY_CLAIM_RELEASED` marker naming the claim's sweep id).
+
+**Resolve `RECOVERY_SWEEP_ID`**: the value following `--recovery-sweep` in the invocation args, else empty. Only `/recover-orphans` passes it (its inline resume passes its own `SWEEP_ID`); it exempts the claim held by that sweep so the holder is not blocked by its own claim. Never combine it with `--under-orchestration`.
+
+```bash
+# Shell state does not persist: the bootstrap is repeated here.
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
+  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
+  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
+  _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+  # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
+  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
+  while IFS= read -r _c; do
+    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
+  done <<< "$_k"
+fi
+RECOVERY_SWEEP_ID=$(printf '%s' "$ARGUMENTS" | sed -n 's/.*--recovery-sweep[[:space:]][[:space:]]*\([^[:space:]][^[:space:]]*\).*/\1/p' | head -1)
+if [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/recovery-claim-live.sh" ]; then
+  CLAIM_OUT=$(bash "$FORGE_ROOT/scripts/recovery-claim-live.sh" {NUMBER} -R {GH_REPO} ${RECOVERY_SWEEP_ID:+--exempt-sweep "$RECOVERY_SWEEP_ID"}); CLAIM_RC=$?
+else
+  CLAIM_OUT="CLAIM: ERROR"; CLAIM_RC=2   # fail closed: an unresolvable predicate is never treated as "free"
+fi
+echo "$CLAIM_OUT"
+```
+
+- `CLAIM_RC=0` (`CLAIM: FREE`): continue to 0A.5 / 0B.
+- `CLAIM_RC=1` (`CLAIM: LIVE <sweep-id>`): STOP with "issue #{NUMBER} is held by recovery sweep <sweep-id>; retry after its `FORGE:RECOVERY_CLAIM_RELEASED` marker or `RECOVERY_CLAIM_TTL_MIN` expiry". Write nothing: no heartbeat, no label change, and NO `needs-human` (the claim is transient).
+- `CLAIM_RC=2` (unreadable comments or missing script): fail closed, same STOP and same no-write rule (transient, not `needs-human`).
 
 ### 0A.5: Post Heartbeat Annotation (orchestration-only)
 
