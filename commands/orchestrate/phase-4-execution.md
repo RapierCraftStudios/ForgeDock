@@ -3090,7 +3090,7 @@ Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${R
   # unrounded ratio plus the last CONVERGENCE_WINDOW-1 recorded observations form the window.
   # Applied even when another rule already deferred the finding, and APPENDED to the reason, so
   # Step 4F's `*"amplification breaker"*` hold (checked FIRST) still catches it.
-  if [ "$AMPLIFICATION_BREAKER" = "on" ] && echo "$PRIORITY" | grep -qE '^P[3-9]$'; then
+  if [ "$AMPLIFICATION_BREAKER" = "on" ] && [ "$(printf '%s' "$PRIORITY" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')" = "P3" ]; then
     # Fail CLOSED: if the classifier cannot run (missing module, bad cwd), treat the finding as
     # non-routine so a security/billing finding is never paused. Import via {REPO_PATH} and pass
     # the text through the environment (argv text beginning with "-" is parsed as a node option).

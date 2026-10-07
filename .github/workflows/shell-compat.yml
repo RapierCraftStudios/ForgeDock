@@ -62,7 +62,9 @@ jobs:
           /bin/bash --version | head -1 | grep -q 'version 3\.2' || { echo "::error::/bin/bash is not 3.2"; exit 1; }
           /bin/bash scripts/lint-dispatch-prompt.test.sh
           /bin/bash scripts/verify-phase-trail.test.sh
+      # macOS runs lint-dispatch-prompt/verify-phase-trail once, under /bin/bash 3.2 above.
       - name: Run lint-dispatch-prompt.test.sh
+        if: runner.os != 'macOS'
         run: bash scripts/lint-dispatch-prompt.test.sh
       - name: Run forge-root.test.sh
         run: bash scripts/forge-root.test.sh
@@ -72,6 +74,7 @@ jobs:
           command -v zsh && zsh --version
           FORGE_ROOT_TEST_SHELLS="bash zsh" /bin/bash scripts/forge-root.test.sh
       - name: Run verify-phase-trail.test.sh
+        if: runner.os != 'macOS'
         run: bash scripts/verify-phase-trail.test.sh
       - name: Run is-docs-only.test.sh
         run: bash scripts/is-docs-only.test.sh
@@ -95,7 +98,9 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Ensure jq is available
-        run: command -v jq || choco install jq -y --no-progress
+        run: command -v jq || choco install jq --version 1.7.1 -y --no-progress
+      - name: Run forge-root.test.sh
+        run: bash scripts/forge-root.test.sh
       - name: Run lint-dispatch-prompt.test.sh
         run: bash scripts/lint-dispatch-prompt.test.sh
       - name: Run verify-phase-trail.test.sh
