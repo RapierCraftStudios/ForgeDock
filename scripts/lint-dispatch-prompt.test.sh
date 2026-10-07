@@ -249,5 +249,33 @@ grep -q 'lint script not found' "$T/gate_err" && PASS=$((PASS+1)) || { FAILN=$((
 # Exemption is stated in the spec so the scope matches the script.
 grep -q 'Exempt (not Step 4A-template prompts' "$SPEC" && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: spec exemption missing"; }
 
+# Template/slot clash guard: the Step 4A template must never contain a shell expansion of a
+# slot name (e.g. ${NUMBER}). Filling the {NUMBER} slot turns it into "$42" while leaving it
+# fails the exact-match lint, so an orchestrator cannot render it consistently (field test #3149).
+TPL4A=$(awk '/Copy this template. Fill in variables/{f=1} f&&/^Agent\($/{g=1} g{print} g&&/^\)$/{exit}' "$SPEC")
+[ -n "$TPL4A" ] && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: cannot extract Step 4A template"; }
+if printf '%s\n' "$TPL4A" | grep -qE '\$\{(PROJECT_NAME|GH_REPO|REPO_PATH|LANE|PR_BASE|STAGING_BRANCH|SOURCE_BRANCH|NUMBER|FORGE_GIST_CAPABLE|SUBAGENT_MODEL|PROJECT_PREFIX|SATELLITE_PREFIX|FORGE_SKILL_PREFIX|ISSUE_TITLE)\}'; then
+  FAILN=$((FAILN+1)); echo "FAIL: Step 4A template contains a shell expansion of a slot name"
+else PASS=$((PASS+1)); fi
+
+# Knowledge Gist probe fails closed (field test: an App installation token gets HTTP 403 on /user,
+# which the old "not Bot => capable" rule treated as capable). Run each copy against a fake gh.
+for probe_src in "$SPEC" "$HERE/../commands/work-on/investigate.md"; do
+  awk '/if \[ -z "\$\{FORGE_GIST_CAPABLE\+x\}" \]; then/{f=1} f{print} f&&/^fi$/{exit}' "$probe_src" > "$T/gistprobe"
+  [ -s "$T/gistprobe" ] && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: gist probe not found in $probe_src"; continue; }
+  for case_ in "User:true" "Bot:false" "403:false" "empty:false"; do
+    mode=${case_%%:*}; want=${case_#*:}
+    mkdir -p "$T/fakegh_$mode"
+    case "$mode" in
+      User)  printf '#!/bin/sh\necho User\n' ;;
+      Bot)   printf '#!/bin/sh\necho Bot\n' ;;
+      403)   printf '#!/bin/sh\necho "HTTP 403: Resource not accessible by integration" >&2\nexit 1\n' ;;
+      empty) printf '#!/bin/sh\nexit 0\n' ;;
+    esac > "$T/fakegh_$mode/gh"; chmod +x "$T/fakegh_$mode/gh"
+    got=$(env -u FORGE_GIST_CAPABLE PATH="$T/fakegh_$mode:$PATH" bash -c "$(cat "$T/gistprobe"); printf %s \"\$FORGE_GIST_CAPABLE\"")
+    expect "gist probe ($mode) in $(basename "$probe_src")" "$want" "$got"
+  done
+done
+
 echo "lint-dispatch-prompt tests: pass=$PASS fail=$FAILN"
 [ "$FAILN" -eq 0 ]

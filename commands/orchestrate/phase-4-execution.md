@@ -696,17 +696,21 @@ Use `${ISSUE_LANE[$NUM]}` and `${ISSUE_PR_BASE[$NUM]}` to populate `{LANE}` and 
 ### Step 4A.0: Probe Knowledge Gist capability once
 
 Probe the authenticated identity once for this orchestration run before any engine, Agent, or
-OpenCode worker is dispatched. A GitHub App installation token identifies as `Bot` and cannot use
-the Gists API; cache that fact rather than letting every worker rediscover it by attempting a
-write. An unavailable identity probe preserves existing behavior for PAT-authenticated runs.
+OpenCode worker is dispatched. A GitHub App installation token cannot use the Gists API (and cannot even read `/user`); cache
+that fact rather than letting every worker rediscover it by attempting a write. The probe fails
+closed: Gists stay enabled only when `/user` positively reports a `User` account.
 
 ```bash
 if [ -z "${FORGE_GIST_CAPABLE+x}" ]; then
+  # Fail closed: only a positively identified user account can use the Gists API. A GitHub App
+  # installation token cannot read /user at all (HTTP 403, empty type), so "not Bot" is NOT
+  # evidence of capability; an unavailable probe disables Gists rather than letting every
+  # worker fail on its first Gist write.
   GIST_AUTH_TYPE=$(gh api user --jq '.type' 2>/dev/null || true)
-  if [ "$GIST_AUTH_TYPE" = "Bot" ]; then
-    FORGE_GIST_CAPABLE=false
-  else
+  if [ "$GIST_AUTH_TYPE" = "User" ]; then
     FORGE_GIST_CAPABLE=true
+  else
+    FORGE_GIST_CAPABLE=false
   fi
   export FORGE_GIST_CAPABLE
 fi
@@ -1029,7 +1033,7 @@ Agent(
   - **If `{FORGE_SKILL_PREFIX}work-on` is reported unknown or not found, this is a HARD ERROR: STOP and report 'skill not found: {FORGE_SKILL_PREFIX}work-on' as your final result. Do NOT run the pipeline phases inline or with the Agent tool — an inline run bypasses the phase trail.**
   - The `--under-orchestration` flag tells `/work-on` to post its phase-entry `FORGE:HEARTBEAT` comments (Phases 0/1/3/5) — this orchestrator's Step 4B.5 stall detector depends on those timestamps. A solo `/work-on` run omits the flag and skips those writes entirely (see `commands/work-on.md` → Orchestration Flag).
 - NEVER bypass /work-on with manual git/gh commands — the label updates and structured comments are critical for tracking
-- **File-backed GitHub bodies — entity scope plus read-back is mandatory**: Never stage a `gh --body-file` body at a generic shared `/tmp` path, including one made by bare `mktemp`, and never hand-roll a root-level path such as `/tmp_invbody_31076.txt`, which can hang unattended cleanup. Prefer the session scratchpad or a repo-relative scratch directory on Windows: a native Windows `gh` may not resolve Git Bash `/tmp` reliably. Create a filename that contains the target issue/PR number and an agent-unique token, then use `mktemp` for its random suffix. Put one caller-chosen marker such as `<!-- FORGE:BODY-INTEGRITY:${NUMBER}_investigator_${AGENT_TOKEN} -->` in the body. After every `gh issue create|edit` or `gh pr create|comment` using `--body-file`, re-read the target object and assert the exact marker is present; a mismatch is a hard error. Unique names reduce collisions, but only read-back detects a collision that substitutes plausible-looking content from another agent. Do not rely on eyeballing. (forge#2843, forge#2855) <!-- allowlist:check-command-side-effects -->
+- **File-backed GitHub bodies — entity scope plus read-back is mandatory**: Never stage a `gh --body-file` body at a generic shared `/tmp` path, including one made by bare `mktemp`, and never hand-roll a root-level path such as `/tmp_invbody_31076.txt`, which can hang unattended cleanup. Prefer the session scratchpad or a repo-relative scratch directory on Windows: a native Windows `gh` may not resolve Git Bash `/tmp` reliably. Create a filename that contains the target issue/PR number and an agent-unique token, then use `mktemp` for its random suffix. Put one caller-chosen marker such as `<!-- FORGE:BODY-INTEGRITY:<issue-number>_investigator_<agent-token> -->` in the body. After every `gh issue create|edit` or `gh pr create|comment` using `--body-file`, re-read the target object and assert the exact marker is present; a mismatch is a hard error. Unique names reduce collisions, but only read-back detects a collision that substitutes plausible-looking content from another agent. Do not rely on eyeballing. (forge#2843, forge#2855) <!-- allowlist:check-command-side-effects -->
 - **GitHub secondary rate limit**: If a GitHub API call returns HTTP 403 with `secondary rate limit` in its response, do NOT retry it or start a polling loop. Stop GitHub content creation for this phase, report the status and response body to the orchestrator in your final result, and wait for a later batch resume. Retrying extends the throttle for every sibling.
 - **Temp files — ALWAYS use `mktemp`, NEVER hand-roll a path**: You are one of several agents running concurrently on this host and you share its `/tmp` with all of them. Any time you stage content in a temp file before passing it to `gh` (e.g. `--body-file`), create that path with `mktemp` (e.g. `BODY_FILE="$(mktemp)"`). Never write a temp file to a single-segment root path such as `/tmp_invbody_31076.txt`: Claude Code treats removing it as dangerous and requires an explicit approval that bypass mode cannot clear, hanging unattended runs. Also never use a fixed literal such as `/tmp/body.md` or `/tmp/issue.json`: a fixed path collides with another concurrently-running agent and can silently overwrite the content you staged (or you can silently overwrite theirs) before either of you reads it back. Safe: `BODY_FILE="$(mktemp)"`. Unsafe: `/tmp_invbody_31076.txt` (a missing slash that creates a root-level path) and `/tmp/body.md` (a fixed path). `mktemp` costs nothing and prevents both failures. (forge#2198, forge#2855)
 - **`docker cp` — NEVER write into a bind-mounted shared container**: If the project you're working on runs its dev/test containers with a bind mount to the main (non-worktree) checkout, `docker cp` into that container writes through the mount into the main checkout — not your isolated per-issue worktree. Before running `docker cp` into any container, confirm its mount source is your own worktree, not a shared/main one; if you can't confirm that, don't assume an in-container test run reflects your feature branch. (forge#2198)

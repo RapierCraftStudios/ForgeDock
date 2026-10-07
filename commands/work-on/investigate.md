@@ -489,12 +489,15 @@ own process. GitHub App installation identities are `Bot` users and cannot use t
 
 ```bash
 if [ -z "${FORGE_GIST_CAPABLE+x}" ]; then
+  # Fail closed: only a positively identified user account can use the Gists API. A GitHub App
+  # installation token cannot read /user at all (HTTP 403, empty type), so "not Bot" is NOT
+  # evidence of capability; an unavailable probe disables Gists rather than letting every
+  # worker fail on its first Gist write.
   GIST_AUTH_TYPE=$(gh api user --jq '.type' 2>/dev/null || true)
-  if [ "$GIST_AUTH_TYPE" = "Bot" ]; then
-    FORGE_GIST_CAPABLE=false
-  else
-    # Preserve the existing behavior when the identity probe is unavailable or is a PAT user.
+  if [ "$GIST_AUTH_TYPE" = "User" ]; then
     FORGE_GIST_CAPABLE=true
+  else
+    FORGE_GIST_CAPABLE=false
   fi
   export FORGE_GIST_CAPABLE
 fi
