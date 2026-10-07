@@ -26,7 +26,7 @@ want_copies() { case "$1" in commands/orchestrate/phase-1-resolve.md) echo 2 ;; 
 for f in $SITES; do
   n=$(count_copies "$f"); expect "exact bootstrap copy count in $f" "$(want_copies "$f")" "$n"
   i=1
-  while [ "$i" -le "$n" ]; do   # compare EVERY copy (phase-4 has two)
+  while [ "$i" -le "$n" ]; do   # compare EVERY copy
     extract "$f" "$i" > "$T/s"
     cmp -s "$T/canon" "$T/s" && ok || bad "bootstrap copy $i in $f differs from canonical"
     i=$((i+1))
@@ -59,8 +59,17 @@ for f in commands/review-pr.md commands/work-on/review.md; do
 done
 
 run() { # run <home> [env assignments...] -> prints FORGE_ROOT
-  local h="$1"; shift
-  ( cd "$T/consumer" && env -i PATH="$PATH" HOME="$h" "$@" "$SH" -c "$(cat "$T/canon"); printf %s \"\$FORGE_ROOT\"" )
+  # CLAUDE_PLUGIN_ROOT=<v> is NOT an env var in a real session: Claude Code substitutes the literal
+  # text ${CLAUDE_PLUGIN_ROOT} when it loads a plugin spec. Simulate exactly that; every other
+  # assignment is passed through as environment.
+  local h="$1"; shift; local code; code="$(cat "$T/canon")"; local a; local envs=()
+  for a in "$@"; do
+    case "$a" in
+      CLAUDE_PLUGIN_ROOT=*) code="$(printf '%s' "$code" | awk -v v="${a#CLAUDE_PLUGIN_ROOT=}" '{gsub(/\$\{CLAUDE_PLUGIN_ROOT\}/, v); print}')" ;;
+      *) envs+=("$a") ;;
+    esac
+  done
+  ( cd "$T/consumer" && env -i PATH="$PATH" HOME="$h" ${envs[@]+"${envs[@]}"} "$SH" -c "$code; printf %s \"\$FORGE_ROOT\"" )
 }
 # Run the behavioral cases under every available shell: bash always, zsh when installed (macOS ships it;
 # zsh aborts on an unmatched glob, which the bootstrap must not trigger). FORGE_ROOT_TEST_SHELLS overrides.
@@ -120,7 +129,19 @@ mkdir -p "$T/h10/.claude/plugins/cache"
 expect "empty cache, no match, no abort" "" "$(run "$T/h10")"
 expect "no ~/.claude at all, no abort" "" "$(run "$T/empty")"
 expect "unmatched glob does not break later candidates" "$T/h1/.claude/plugins/cache/mk/forgedock/1.0.0" "$(run "$T/h10" CLAUDE_PLUGIN_ROOT="$T/h1/.claude/plugins/cache/mk/forgedock/1.0.0")"
+# plugin root (textually substituted) outranks an exported FORGE_HOME that also has the scripts:
+# the running plugin's own files win over a stale clone named by a global env var (forge#3147 field test)
+mkscripts "$T/h11/stale-clone"; mkscripts "$T/h11/running-plugin"
+expect "substituted plugin root beats FORGE_HOME" "$T/h11/running-plugin" "$(run "$T/h11" FORGE_HOME="$T/h11/stale-clone" CLAUDE_PLUGIN_ROOT="$T/h11/running-plugin")"
+# unsubstituted placeholder (non-Claude runtime) is a literal, rejected by the /* check, never expanded
+expect "unsubstituted placeholder ignored, FORGE_HOME used" "$T/h11/stale-clone" "$(run "$T/h11" FORGE_HOME="$T/h11/stale-clone")"
+expect "unsubstituted placeholder safe under set -u" "" "$( cd "$T/consumer" && env -i PATH="$PATH" HOME="$T/empty" "$SH" -c "set -u; $(cat "$T/canon"); printf %s \"\$FORGE_ROOT\"" 2>&1 )"
+# the env var alone (no substitution) must NOT be relied on: Claude Code does not export it to Bash
+expect "CLAUDE_PLUGIN_ROOT env var alone is not a candidate" "" "$( cd "$T/consumer" && env -i PATH="$PATH" HOME="$T/empty" CLAUDE_PLUGIN_ROOT="$T/h11/running-plugin" "$SH" -c "$(cat "$T/canon"); printf %s \"\$FORGE_ROOT\"" )"
 done
+# the canonical block must use the exact substitutable spelling, single-quoted (no :- form, which Claude Code leaves verbatim)
+grep -qF "'\${CLAUDE_PLUGIN_ROOT}'" "$T/canon.code" && ok || bad "canonical bootstrap lacks the substitutable '\${CLAUDE_PLUGIN_ROOT}' candidate"
+grep -qF 'CLAUDE_PLUGIN_ROOT:-' "$T/canon.code" && bad "canonical bootstrap uses \${CLAUDE_PLUGIN_ROOT:-}, which Claude Code never substitutes" || ok
 
 echo "forge-root tests: pass=$PASS fail=$FAILN"
 [ "$FAILN" -eq 0 ]
