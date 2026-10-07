@@ -176,7 +176,8 @@ cat > "$BSD/date" <<BSDDATE
 for a in "\$@"; do [ "\$a" = "-d" ] && exit 1; done
 if [ "\$2" = "-j" ] && [ "\$3" = "-f" ]; then
   [ -n "\${BSD_NO_PARSE:-}" ] && exit 1
-  exec "$REAL_DATE" -u -d "\${5}" "\$6"
+  # Emulate BSD parse-and-reformat without GNU/BSD-specific flags: the value is already in the output format.
+  echo "\${5}"; exit 0
 fi
 exec "$REAL_DATE" "\$@"
 BSDDATE
