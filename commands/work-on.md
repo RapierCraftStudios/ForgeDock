@@ -29,11 +29,21 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 
 ### Skill Name Resolution (`{FORGE_SKILL_PREFIX}`)
 
-ForgeDock skills register under different names per install: `forgedock:work-on`, `forgedock:work-on:build` (Claude Code plugin) or `work-on`, `work-on:build` (`install.sh` symlinks). Every `Skill(skill="...")` call to a ForgeDock skill (any command under `commands/`: `work-on*`, `review-pr*`, `quality-gate`, `issue`, `orchestrate`, `cleanup`, `deploy-pr`, etc.) is written `{FORGE_SKILL_PREFIX}<name>`, with `:` between nesting levels. Resolve the prefix ONCE per run, before the first Skill dispatch, and substitute it literally into every call and every sub-agent prompt:
+ForgeDock skills register under different names per install:
 
-1. If env `FORGE_SKILL_NAMESPACE` is set: `forgedock` → `{FORGE_SKILL_PREFIX}=forgedock:`; `none` → `{FORGE_SKILL_PREFIX}=` (empty). Any other value is an error.
-2. Else read the available-skills list: if it contains `forgedock:work-on` → `forgedock:`; else if it contains `work-on` → empty.
-3. If neither name resolves, or a later `Skill(...)` call reports the resolved name unknown, this is a **HARD ERROR**: STOP and report "skill not found: <name>" (post a `needs-human` comment when running against an issue). NEVER fall back to running the phase inline or via the Agent tool — an inline phase has no paper trail.
+| Runtime / install | `{FORGE_SKILL_PREFIX}` | Nesting separator | `work-on` / `work-on` + `build` |
+|---|---|---|---|
+| Claude Code plugin | `forgedock:` | `:` | `forgedock:work-on` / `forgedock:work-on:build` |
+| Claude Code `install.sh` symlinks (`~/.claude/commands/work-on/build.md`) | empty | `:` | `work-on` / `work-on:build` |
+| Codex (`install-codex.sh`) | `forge-` | `-` | `forge-work-on` / `forge-work-on-build` |
+| OpenCode (`forgedock opencode install`) | empty | `-` | `work-on` / `work-on-build` |
+
+Every `Skill(skill="...")` call to a ForgeDock skill (any command under `commands/`: `work-on*`, `review-pr*`, `quality-gate`, `issue`, `orchestrate`, `cleanup`, `deploy-pr`, etc.) is written `{FORGE_SKILL_PREFIX}<name>`, with `:` between nesting levels as the canonical spelling. Resolve the prefix AND the nesting separator ONCE per run, before the first Skill dispatch. Substitute the prefix literally; when the separator is `-`, also rewrite every `:` nesting level in the name to `-` (`{FORGE_SKILL_PREFIX}work-on:build` becomes `forge-work-on-build`). Apply the result to every call and every sub-agent prompt:
+
+1. If env `FORGE_SKILL_NAMESPACE` is set: `forgedock` → prefix `forgedock:`, separator `:`; `none` → empty prefix, separator `:`; `codex` → prefix `forge-`, separator `-`; `opencode` → empty prefix, separator `-`. Any other value is an error.
+2. Else if env `FORGE_RUNTIME` is `codex` or `opencode`, use that runtime's row above.
+3. Else read the available-skills list: if it contains `forgedock:work-on` → `forgedock:`/`:`; else if it contains `forge-work-on` → `forge-`/`-`; else if it contains `work-on:build` → empty/`:`; else if it contains `work-on-build` → empty/`-`; else if it contains `work-on` → empty/`:`.
+4. If none of these resolves, or a later `Skill(...)` call reports the resolved name unknown, this is a **HARD ERROR**: STOP and report "skill not found: <name>" (post a `needs-human` comment when running against an issue). NEVER fall back to running the phase inline or via the Agent tool — an inline phase has no paper trail.
 
 A sub-agent that receives no resolved value applies the same rule itself.
 

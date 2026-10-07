@@ -32,6 +32,7 @@ For Forge repo issues, set:
 - Prefer `gh api repos/{GH_REPO}/issues/{NUMBER}/comments` for comment reads instead of `gh issue view --comments`.
 - Treat GitHub Project-board sync as best-effort only for Forge issues. Do not block the pipeline if Forge-specific board/component mappings are absent.
 - Create missing `workflow:*` labels on demand if the Forge repo does not already have them.
+- Skill names: resolve `{FORGE_SKILL_PREFIX}` as `forge-` with `-` nesting (`{FORGE_SKILL_PREFIX}work-on:build` -> `forge-work-on-build`), per `Skill Name Resolution` in `commands/work-on.md`. Do not use the `forgedock:` prefix or `:` nesting under Codex.
 
 ## Forge Repo File Scope
 
