@@ -87,7 +87,8 @@ RAW=$(gh api "repos/${REPO}/issues/${ISSUE}/comments" --paginate 2>/dev/null) ||
 
 # `gh api --paginate` emits one JSON array per page; merge them into a single array so every
 # later computation (notably the latest BUILDER:COMPLETE time) sees ALL pages (#3121).
-RAW=$(printf '%s' "$RAW" | jq -s 'add // []' 2>/dev/null) || {
+# Every page must itself be a JSON array (an error object or scalar page fails closed, #3130).
+RAW=$(printf '%s' "$RAW" | jq -s 'if all(.[]; type == "array") then (add // []) else error("non-array page") end' 2>/dev/null) || {
   echo "PHASE_TRAIL: ERROR"
   echo "could not parse comments for ${REPO}#${ISSUE}" >&2
   exit 2
@@ -118,9 +119,20 @@ QG_SINCE="${FORGE_TRAIL_QG_SINCE-2026-10-07T03:40:12Z}"
 # far-future value would otherwise waive QUALITY_GATE for every issue (#3121). Fails closed.
 if [ -n "$QG_SINCE" ]; then
   NOW_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  QG_VALID=1
   if ! [[ "$QG_SINCE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || [[ "$QG_SINCE" > "$NOW_UTC" ]]; then
+    QG_VALID=0
+  else
+    # Round-trip through `date` so impossible dates (2020-13-45T99:99:99Z) are rejected (#3130).
+    # GNU date first, then BSD/macOS date; no usable parser or a mismatch fails closed.
+    QG_RT=$(date -u -d "$QG_SINCE" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+      || date -u -j -f %Y-%m-%dT%H:%M:%SZ "$QG_SINCE" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
+    [ "$QG_RT" = "$QG_SINCE" ] || QG_VALID=0
+  fi
+  if [ "$QG_VALID" != "1" ]; then
     echo "PHASE_TRAIL: ERROR"
-    echo "invalid FORGE_TRAIL_QG_SINCE '${QG_SINCE}': must be ISO-8601 UTC (YYYY-MM-DDTHH:MM:SSZ) and not in the future" >&2
+    # A runner clock behind the default cutoff also lands here (cutoff appears to be in the future): fails closed.
+    echo "invalid FORGE_TRAIL_QG_SINCE '${QG_SINCE}': must be a real ISO-8601 UTC time (YYYY-MM-DDTHH:MM:SSZ) and not in the future (check the runner clock)" >&2
     exit 2
   fi
 fi
