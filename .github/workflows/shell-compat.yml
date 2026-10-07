@@ -45,11 +45,16 @@ jobs:
       fail-fast: false
       matrix:
         # Pinned (not macos-latest) so the runner image/awk/sed do not float silently.
-        # NOTE: the default /bin/bash on macOS runners is the system bash 3.2, so these
-        # fixtures exercise the script under 3.2; keep it free of bash-4+ constructs.
+        # NOTE: the fixtures run under whichever `bash` resolves first on PATH (system or
+        # Homebrew); the "Show resolved bash" step logs which one. Keep the script free of
+        # bash-4+ constructs so it also works under the older system bash 3.2.
         os: [ubuntu-latest, macos-14]
     steps:
       - uses: actions/checkout@v4
+      - name: Show resolved bash
+        run: |
+          command -v bash
+          bash --version | head -1
       - name: Run lint-dispatch-prompt.test.sh
         run: bash scripts/lint-dispatch-prompt.test.sh
 
