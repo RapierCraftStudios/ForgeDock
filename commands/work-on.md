@@ -1600,28 +1600,15 @@ if iteration == max_iterations AND not PASS:
 
 — and note in the builder comment that context isolation was degraded for this run.
 
-**Post the `FORGE:QUALITY_GATE` marker (MANDATORY — the one gh write permitted here)** <!-- Added: forge#3061 -->: the inline path must leave the same checkable artifact as `work-on/build/validate.md` V5 ("V5 Pre-Commit: Post FORGE:QUALITY_GATE Marker"). Run the gate loop here, but post the marker (and record its `**Tree**`) only at the end of 3J, immediately before the 3K commit, so the recorded tree includes every 3H formatter and 3J edit (forge#3149). Post it recording the real gate invocation and its real result; skip nothing even for 1-file config/docs edits (post `**Result**: PASS (skipped — single config/docs file)`). `scripts/verify-phase-trail.sh` fails the review preflight without it unless the whole diff is docs-only.
+**`FORGE:QUALITY_GATE` marker (MANDATORY — posted in sub-phase 3K, not here)** <!-- Added: forge#3061 -->: the inline path must leave the same checkable artifact as `work-on/build/validate.md` V5 ("V5 Pre-Commit: Post FORGE:QUALITY_GATE Marker"). Run the gate loop here, but post the marker (and record its `**Tree**`) in 3K, immediately before the commit, so the recorded tree includes every 3H formatter and 3J edit (forge#3149). A pre-commit hook that rewrites staged files after the marker makes the tree differ and forces a validate re-run (fail closed). Post it recording the real gate invocation and its real result; skip nothing even for 1-file config/docs edits (post `**Result**: PASS (skipped — single config/docs file)`). `scripts/verify-phase-trail.sh` fails the review preflight without it unless the whole diff is docs-only.
 
-```bash
-GATE_RESULT=$([ "$GATE_PASSED" = "true" ] && echo PASS || echo FAIL)
-git -C {WORKTREE_PATH} add -u   # same staging as 3K; valid only because this block runs after 3H-3J, immediately before the commit <!-- Added: forge#3149 -->
-GATE_TREE=$(git -C {WORKTREE_PATH} write-tree)
-QG_BODY="<!-- FORGE:QUALITY_GATE -->
-## Quality Gate Result
-
-**Result**: ${GATE_RESULT}
-**Tree**: ${GATE_TREE}
-**Iterations**: {N}
-**Commands run**: {quality-gate invocation, format/verify commands actually executed}
-**Findings remaining**: {none | summary}"
-gh issue comment {NUMBER} {GH_FLAG} --body "$QG_BODY" # <!-- allowlist:check-command-side-effects -->
-```
+The marker bash block lives in sub-phase 3K (immediately before the commit). Do not post it here.
 
 # MUST CONTINUE to sub-phase 3H (Format and verify) — quality gate PASS is intermediate, NOT terminal. <!-- Added: forge#220 -->
 
 **After the sub-agent returns `passed=true`: proceed immediately to sub-phase 3H below. Quality gate is an intermediate check — "PASS" means the code is clean, NOT that the build is done. Do NOT stop.**
 
-**After PASS: Do NOT re-read GitHub state, issue body, labels, or any file beyond what the sub-agent already changed on disk. Do NOT run any gh commands (except the `FORGE:QUALITY_GATE` marker post above). Do NOT check PR status. Proceed directly to Phase 3H (Format and verify) below.** <!-- Added: forge#93 -->
+**After PASS: Do NOT re-read GitHub state, issue body, labels, or any file beyond what the sub-agent already changed on disk. Do NOT run any gh commands (the `FORGE:QUALITY_GATE` marker is posted later, in 3K). Do NOT check PR status. Proceed directly to Phase 3H (Format and verify) below.** <!-- Added: forge#93 -->
 
 ### 3H: Format and verify
 
@@ -1832,7 +1819,24 @@ docker exec {CONTAINER_NAME} env | grep {VAR_NAME}
 
 ### 3K: Commit
 
-Stage all changes and commit:
+**First post the `FORGE:QUALITY_GATE` marker** <!-- Added: forge#3061, forge#3149 --> (skip nothing, even for 1-file config/docs edits: `**Result**: PASS (skipped — single config/docs file)`):
+
+```bash
+GATE_RESULT=$([ "$GATE_PASSED" = "true" ] && echo PASS || echo FAIL)
+git -C {WORKTREE_PATH} add -u   # same staging as the commit below; valid only because 3H-3J are done
+GATE_TREE=$(git -C {WORKTREE_PATH} write-tree)
+QG_BODY="<!-- FORGE:QUALITY_GATE -->
+## Quality Gate Result
+
+**Result**: ${GATE_RESULT}
+**Tree**: ${GATE_TREE}
+**Iterations**: {N}
+**Commands run**: {quality-gate invocation, format/verify commands actually executed}
+**Findings remaining**: {none | summary}"
+gh issue comment {NUMBER} {GH_FLAG} --body "$QG_BODY" # <!-- allowlist:check-command-side-effects -->
+```
+
+Then stage and commit:
 
 ```bash
 cd {WORKTREE_PATH}
