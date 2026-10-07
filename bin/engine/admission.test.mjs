@@ -13,7 +13,6 @@ import {
   evaluateCascadeFinding,
   classifyBatchSafety,
   evaluateAmplification,
-  evaluateP3Breaker,
   batchExclusionReason,
   planP3BatchGroups,
   canDeduplicateAutomatedAlert,
@@ -123,7 +122,6 @@ describe("resolveCascadePolicy — presets", () => {
       ...CASCADE_PRESETS.balanced,
       maxAmplification: null,
       convergenceWindow: 3,
-      p3Breaker: true,
     });
     assert.deepEqual(warnings, []);
   });
@@ -159,7 +157,6 @@ describe("resolveCascadePolicy — presets", () => {
       ...CASCADE_PRESETS.balanced,
       maxAmplification: null,
       convergenceWindow: 3,
-      p3Breaker: true,
     });
     assert.equal(warnings.length, 1);
     assert.match(warnings[0], /not one of/);
@@ -445,41 +442,5 @@ describe("planP3BatchGroups — concern-level P3 batching", () => {
     assert.equal(batchExclusionReason({ labels: ["priority:P2"], affectedFile: "infra/migrations/0333_credit_balance.sql" }), "domain");
     assert.equal(batchExclusionReason({ labels: ["priority:P2"], affectedFile: "services/api/app/billing/charge.py" }), "domain");
     assert.equal(batchExclusionReason({ labels: ["priority:P2"], affectedFile: ".env.example" }), "high-blast-radius");
-  });
-});
-
-describe("evaluateCascadeFinding with tripped breaker (forge#3060)", () => {
-  it("defers P3 but never P1/P2 when tripped", () => {
-    const { policy } = resolveCascadePolicy();
-    const base = { generation: 1, title: "x", projectedTokenSpend: 0, p3BreakerTripped: true };
-    assert.equal(evaluateCascadeFinding({ ...base, priority: "P3" }, policy).admit, false);
-    assert.equal(evaluateCascadeFinding({ ...base, priority: "P2" }, policy).admit, true);
-    assert.equal(evaluateCascadeFinding({ ...base, priority: "P3" }, resolveCascadePolicy({ p3_breaker: false }).policy).admit, true);
-  });
-});
-
-describe("evaluateP3Breaker (forge#3060)", () => {
-  it("is on by default and trips after convergenceWindow observations >= 1.0", () => {
-    const { policy } = resolveCascadePolicy();
-    assert.equal(policy.p3Breaker, true);
-    assert.equal(evaluateP3Breaker([1.2, 1.3], policy).tripped, false);
-    assert.equal(evaluateP3Breaker([1.2, 1.3, 1.35], policy).tripped, true);
-    assert.equal(evaluateP3Breaker([1.2, 0.9, 1.35], policy).tripped, false);
-  });
-
-  it("accepts string opt-outs", () => {
-    for (const v of ["off", "false"]) {
-      assert.equal(resolveCascadePolicy({ p3_breaker: v }).policy.p3Breaker, false);
-    }
-  });
-
-  it("can be opted out", () => {
-    const { policy } = resolveCascadePolicy({ p3_breaker: false });
-    assert.equal(evaluateP3Breaker([2, 2, 2], policy).tripped, false);
-  });
-
-  it("is not disabled by an unlimited generation cap / token budget", () => {
-    const { policy } = resolveCascadePolicy({ policy: "all" });
-    assert.equal(evaluateP3Breaker([1, 1, 1], policy).tripped, true);
   });
 });

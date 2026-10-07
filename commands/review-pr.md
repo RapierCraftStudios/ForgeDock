@@ -1674,17 +1674,6 @@ If still 0: review is clean — skip to Phase 7.
 - Also dedup by title similarity: if two findings share the same file and 3+ title keywords, keep the higher confidence one
 - Sort: CONFIRMED first, then LIKELY, then POSSIBLE; within group by severity
 
-### 6B.5: Non-Blocking Note Disposition (cascade control — forge#3060)
-
-Standalone issues for low-value notes make the review-finding cascade amplify (each fix PR spawns more P3 findings that spawn more). Before 6C, partition the deduplicated findings:
-
-- **Issue-eligible**: Severity MEDIUM, HIGH or CRITICAL, OR Confidence CONFIRMED. These proceed to 6C unchanged (P1/P2 behavior and security/billing handling are unaffected).
-- **Non-blocking notes**: Severity LOW AND Confidence LIKELY or POSSIBLE. Do NOT file an issue. Disposition, in order of preference: (a) fix in this PR if cheap (single-hunk, in files already changed, no new scope), (b) append to the PR body under a `### Non-blocking notes` heading, or (c) drop if trivial or speculative.
-- **Domain carve-out (always filed)**: a LOW finding whose affected path or title is security, auth, or billing related (same match as the P3 batchable exclusion in 6C: `security|billing|payment|stripe|charge|invoice|auth`) is never treated as a non-blocking note; it is issue-eligible regardless of confidence.
-- **P3-source PRs**: If the PR's own issue carries `review-finding` with `priority:P3` (resolving a P3 review finding), only MEDIUM+ or CONFIRMED findings may become issues; everything else follows the non-blocking-notes disposition above.
-
-Record the count of non-blocking notes in the Phase 9 summary (never file them as standalone issues). Opt out by setting `review.file_low_findings: true` in forge.yaml (restores legacy file-everything behavior). This overrides Rule 3's "File every finding" wording for LOW/LIKELY|POSSIBLE items only.
-
 ### 6C: Create Issues
 
 ```bash
