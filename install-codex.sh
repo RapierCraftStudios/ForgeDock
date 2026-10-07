@@ -248,6 +248,23 @@ for profile in "$HOME/.bashrc" "$HOME/.zshrc"; do
     fi
 done
 
+# Non-interactive Codex shells do not source ~/.bashrc/~/.zshrc, and Codex has no ~/.claude fallback, so the
+# trail gate would see an empty FORGE_ROOT. Record the clone path in a pointer file the spec bootstrap reads
+# ($CODEX_HOME/forge-home) and in env files non-interactive shells read. Append-only, marker-guarded, idempotent.
+CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
+mkdir -p "$CODEX_DIR"
+printf '%s\n' "$FORGE_HOME" > "$CODEX_DIR/forge-home"
+for envfile in "$HOME/.zshenv" "$HOME/.profile"; do
+    if ! grep -q "# FORGE_HOME (install-codex.sh)" "$envfile" 2>/dev/null; then
+        {
+            echo ""
+            echo "# FORGE_HOME (install-codex.sh)"
+            echo "[ -n \"\${FORGE_HOME:-}\" ] || export FORGE_HOME=\"$FORGE_HOME\""
+        } >> "$envfile"
+        echo "Added FORGE_HOME to $envfile"
+    fi
+done
+
 if [ "$PROFILE_UPDATED" -gt 0 ]; then
     echo ""
     echo "Restart your shell or run:"

@@ -40,6 +40,8 @@ grep -v '^[[:space:]]*#' "$T/canon" > "$T/canon.code"   # code only: the comment
 grep -qE 'mapfile|readarray|declare -A|sort[^|]* -[a-zA-Z]*V' "$T/canon.code" && bad "canonical bootstrap uses a bash-4+/non-portable construct" || ok
 grep -q 'sort -k1,1nr -k2,2nr -k3,3nr' "$T/canon.code" && ok || bad "canonical bootstrap lacks numeric component version sort"
 grep -qF 'marketplaces/*; do' "$T/canon" && bad "canonical bootstrap globs all marketplaces" || ok
+grep -qF -- "-iname '*forgedock*'" "$T/canon.code" && bad "canonical bootstrap wildcard-matches marketplaces" || ok
+grep -qF '[A-Za-z]:' "$T/canon.code" && ok || bad "canonical bootstrap lacks drive-letter path handling"
 # review.md must hard-exit on an unreadable trail
 grep -qE 'TRAIL_RC.* -ge 2 .*exit 1' "$ROOT/commands/work-on/review.md" && ok || bad "work-on/review.md lacks hard exit guard for TRAIL_RC>=2"
 # behavioral: execute the guard line itself. rc>=2 => BLOCKED on STDOUT + exit 1; rc 0/1 => falls through.
@@ -88,9 +90,9 @@ mkscripts() {
   : > "$1/bin/engine/resolve.mjs"; : > "$1/bin/engine/orchestrate-canary.mjs"; : > "$1/bin/engine/admission.mjs"
 }
 # plugin install: no env vars at all
-mkscripts "$T/h1/.claude/plugins/cache/mk/forgedock/1.0.0"
-expect "plugin cache resolves with no env" "$T/h1/.claude/plugins/cache/mk/forgedock/1.0.0" "$(run "$T/h1")"
-expect "CLAUDE_PLUGIN_ROOT resolves" "$T/h1/.claude/plugins/cache/mk/forgedock/1.0.0" "$(run "$T/empty" CLAUDE_PLUGIN_ROOT="$T/h1/.claude/plugins/cache/mk/forgedock/1.0.0")"
+mkscripts "$T/h1/.claude/plugins/cache/forgedock/forgedock/1.0.0"
+expect "plugin cache resolves with no env" "$T/h1/.claude/plugins/cache/forgedock/forgedock/1.0.0" "$(run "$T/h1")"
+expect "CLAUDE_PLUGIN_ROOT resolves" "$T/h1/.claude/plugins/cache/forgedock/forgedock/1.0.0" "$(run "$T/empty" CLAUDE_PLUGIN_ROOT="$T/h1/.claude/plugins/cache/forgedock/forgedock/1.0.0")"
 # nothing installed: empty (never the consumer repo, never a relative path)
 expect "unresolvable stays empty" "" "$(run "$T/empty")"
 expect "relative FORGE_HOME ignored" "" "$(run "$T/empty" FORGE_HOME=.)"
@@ -103,26 +105,26 @@ expect "install.sh symlink resolves" "$(cd "$T/clone" && pwd -P)" "$(cd "$(run "
 expect "FORGE_HOME without scripts falls through" "$(cd "$T/clone" && pwd -P)" "$(cd "$(run "$T/h2" FORGE_HOME="$T/h2/.claude")" && pwd -P)"
 
 # newest cached version wins (1.10.0 must beat 1.9.0)
-for v in 1.9.0 1.10.0 1.2.0; do mkscripts "$T/h3/.claude/plugins/cache/mk/forgedock/$v"; done
-expect "newest cached version wins" "$T/h3/.claude/plugins/cache/mk/forgedock/1.10.0" "$(run "$T/h3")"
+for v in 1.9.0 1.10.0 1.2.0; do mkscripts "$T/h3/.claude/plugins/cache/forgedock/forgedock/$v"; done
+expect "newest cached version wins" "$T/h3/.claude/plugins/cache/forgedock/forgedock/1.10.0" "$(run "$T/h3")"
 # HOME containing a space still resolves
-mkscripts "$T/sp ace/.claude/plugins/cache/mk/forgedock/2.0.0"
-expect "space in HOME resolves" "$T/sp ace/.claude/plugins/cache/mk/forgedock/2.0.0" "$(run "$T/sp ace")"
+mkscripts "$T/sp ace/.claude/plugins/cache/forgedock/forgedock/2.0.0"
+expect "space in HOME resolves" "$T/sp ace/.claude/plugins/cache/forgedock/forgedock/2.0.0" "$(run "$T/sp ace")"
 # relative FORGEDOCK_HOME / CLAUDE_PLUGIN_ROOT rejected (fail closed => empty)
 expect "relative FORGEDOCK_HOME rejected" "" "$(run "$T/h1" FORGEDOCK_HOME=scripts/..)"
 expect "relative CLAUDE_PLUGIN_ROOT ignored" "" "$(run "$T/empty" CLAUDE_PLUGIN_ROOT=../consumer)"
 # a candidate with only one of the two needed scripts is rejected
-mkdir -p "$T/h4/.claude/plugins/cache/mk/forgedock/1.0.0/scripts"; : > "$T/h4/.claude/plugins/cache/mk/forgedock/1.0.0/scripts/verify-phase-trail.sh"
+mkdir -p "$T/h4/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts"; : > "$T/h4/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/verify-phase-trail.sh"
 expect "partial install (missing lint script) rejected" "" "$(run "$T/h4")"
 # stale install: has the two original gate scripts but lacks is-docs-only.sh / engine modules => rejected
 for missing in scripts/is-docs-only.sh bin/engine/resolve.mjs bin/engine/orchestrate-canary.mjs bin/engine/admission.mjs; do
-  rm -rf "$T/h12"; mkscripts "$T/h12/.claude/plugins/cache/mk/forgedock/1.0.0"; rm -f "$T/h12/.claude/plugins/cache/mk/forgedock/1.0.0/$missing"
+  rm -rf "$T/h12"; mkscripts "$T/h12/.claude/plugins/cache/forgedock/forgedock/1.0.0"; rm -f "$T/h12/.claude/plugins/cache/forgedock/forgedock/1.0.0/$missing"
   expect "stale install missing $missing rejected" "" "$(run "$T/h12")"
 done
 # a stale newest version is skipped in favor of a complete older one
-rm -rf "$T/h13"; mkscripts "$T/h13/.claude/plugins/cache/mk/forgedock/1.0.0"; mkscripts "$T/h13/.claude/plugins/cache/mk/forgedock/2.0.0"
-rm -f "$T/h13/.claude/plugins/cache/mk/forgedock/2.0.0/scripts/is-docs-only.sh"
-expect "stale newest skipped for complete older" "$T/h13/.claude/plugins/cache/mk/forgedock/1.0.0" "$(run "$T/h13")"
+rm -rf "$T/h13"; mkscripts "$T/h13/.claude/plugins/cache/forgedock/forgedock/1.0.0"; mkscripts "$T/h13/.claude/plugins/cache/forgedock/forgedock/2.0.0"
+rm -f "$T/h13/.claude/plugins/cache/forgedock/forgedock/2.0.0/scripts/is-docs-only.sh"
+expect "stale newest skipped for complete older" "$T/h13/.claude/plugins/cache/forgedock/forgedock/1.0.0" "$(run "$T/h13")"
 # non-ForgeDock marketplace dirs are ignored; ForgeDock-named ones resolve
 mkscripts "$T/h5/.claude/plugins/marketplaces/other-tool"
 expect "non-ForgeDock marketplace ignored" "" "$(run "$T/h5")"
@@ -131,21 +133,49 @@ expect "forgedock marketplace resolves" "$T/h6/.claude/plugins/marketplaces/forg
 
 # release outranks its own pre-release; a newer pre-release core still beats an older release
 rm -rf "$T/h7"   # fixture is mutated below; reset per shell
-mkscripts "$T/h7/.claude/plugins/cache/mk/forgedock/1.9.0-rc1"; mkscripts "$T/h7/.claude/plugins/cache/mk/forgedock/1.9.0"
-expect "release beats its pre-release" "$T/h7/.claude/plugins/cache/mk/forgedock/1.9.0" "$(run "$T/h7")"
-mkscripts "$T/h7/.claude/plugins/cache/mk/forgedock/2.0.0-rc1"
-expect "newer-core pre-release beats older release" "$T/h7/.claude/plugins/cache/mk/forgedock/2.0.0-rc1" "$(run "$T/h7")"
-# version component decides, not the marketplace name (zz sorts after aa lexically but holds the older version)
-mkscripts "$T/h8/.claude/plugins/cache/zz-market/forgedock/1.0.0"; mkscripts "$T/h8/.claude/plugins/cache/aa-market/forgedock/1.1.0"
-expect "version beats marketplace name" "$T/h8/.claude/plugins/cache/aa-market/forgedock/1.1.0" "$(run "$T/h8")"
+mkscripts "$T/h7/.claude/plugins/cache/forgedock/forgedock/1.9.0-rc1"; mkscripts "$T/h7/.claude/plugins/cache/forgedock/forgedock/1.9.0"
+expect "release beats its pre-release" "$T/h7/.claude/plugins/cache/forgedock/forgedock/1.9.0" "$(run "$T/h7")"
+mkscripts "$T/h7/.claude/plugins/cache/forgedock/forgedock/2.0.0-rc1"
+expect "newer-core pre-release beats older release" "$T/h7/.claude/plugins/cache/forgedock/forgedock/2.0.0-rc1" "$(run "$T/h7")"
+# marketplace pinning: a higher-versioned forgedock plugin from a non-official marketplace is never used
+mkscripts "$T/h8/.claude/plugins/cache/evil-market/forgedock/99.0.0"; mkscripts "$T/h8/.claude/plugins/cache/forgedock/forgedock/1.1.0"
+expect "hostile marketplace at 99.0.0 ignored" "$T/h8/.claude/plugins/cache/forgedock/forgedock/1.1.0" "$(run "$T/h8")"
+rm -rf "$T/h8b"; mkscripts "$T/h8b/.claude/plugins/cache/evil-market/forgedock/99.0.0"
+expect "only a hostile marketplace => empty" "" "$(run "$T/h8b")"
+expect "FORGEDOCK_MARKETPLACE pins another marketplace" "$T/h8b/.claude/plugins/cache/evil-market/forgedock/99.0.0" "$(run "$T/h8b" FORGEDOCK_MARKETPLACE=evil-market)"
+expect "invalid FORGEDOCK_MARKETPLACE falls back to forgedock" "" "$(run "$T/h8b" FORGEDOCK_MARKETPLACE=..)"
+rm -rf "$T/h8c"; mkscripts "$T/h8c/.claude/plugins/marketplaces/evil-forgedock-tools"
+expect "wildcard-named marketplace dir ignored" "" "$(run "$T/h8c")"
+# non-semver cache dir names (commit SHAs, 1e5x) are skipped, never ranked by numeric coercion
+rm -rf "$T/h14"; P14="$T/h14/.claude/plugins/cache/forgedock/forgedock"
+mkscripts "$P14/1.10.0"; mkscripts "$P14/1e5abcdef"; mkscripts "$P14/abc1234def"; mkscripts "$P14/6f3a9c0"
+expect "SHA-named cache dirs ignored" "$P14/1.10.0" "$(run "$T/h14")"
+rm -rf "$T/h14b"; mkscripts "$T/h14b/.claude/plugins/cache/forgedock/forgedock/abc1234def"
+expect "only SHA-named dir => empty" "" "$(run "$T/h14b")"
+mkscripts "$P14/1.10.0-rc1"; expect "pre-release dir name still accepted (release wins)" "$P14/1.10.0" "$(run "$T/h14")"
+# Windows drive-letter FORGEDOCK_HOME is normalized (/c/...), relative stays rejected
+rm -rf "$T/win"; mkscripts "$T/win/c/forge"
+expect "C:/ FORGEDOCK_HOME authoritative (no cygpath, bogus path)" "/c/nowhere/forge" "$(run "$T/h1" FORGEDOCK_HOME='C:/nowhere/forge')"
+expect "C:\\ FORGEDOCK_HOME normalized" "/d/x/y" "$(run "$T/h1" FORGEDOCK_HOME='D:\x\y')"
+# Codex: forge-home pointer file written by install-codex.sh
+mkscripts "$T/hx/clone"; mkdir -p "$T/hx/.codex"; printf '%s\n' "$T/hx/clone" > "$T/hx/.codex/forge-home"
+expect "codex forge-home pointer resolves" "$T/hx/clone" "$(run "$T/hx")"
+expect "CODEX_HOME override resolves" "$T/hx/clone" "$(run "$T/empty" CODEX_HOME="$T/hx/.codex")"
+printf 'relative/path\n' > "$T/hx/.codex/forge-home"
+expect "relative forge-home pointer rejected" "" "$(run "$T/hx")"
+# errexit/pipefail safety: absent readlink target, absent cache dir, no ~/.claude at all
+for opts in "-e" "-eo pipefail" "-euo pipefail"; do
+  expect "survives set $opts with nothing installed" "ok:" "$( cd "$T/consumer" && env -i PATH="$PATH" HOME="$T/empty" "$SH" -c "set $opts; $(cat "$T/canon"); printf 'ok:%s' \"\$FORGE_ROOT\"" 2>&1 )"
+  expect "resolves under set $opts" "ok:$T/h3/.claude/plugins/cache/forgedock/forgedock/1.10.0" "$( cd "$T/consumer" && env -i PATH="$PATH" HOME="$T/h3" "$SH" -c "set $opts; $(cat "$T/canon"); printf 'ok:%s' \"\$FORGE_ROOT\"" 2>&1 )"
+done
 # a non-forgedock plugin in the cache is ignored even with a higher version
-mkscripts "$T/h9/.claude/plugins/cache/mk/otherplugin/9.9.9"; mkscripts "$T/h9/.claude/plugins/cache/mk/forgedock/1.0.0"
-expect "non-forgedock cache plugin ignored" "$T/h9/.claude/plugins/cache/mk/forgedock/1.0.0" "$(run "$T/h9")"
+mkscripts "$T/h9/.claude/plugins/cache/forgedock/otherplugin/9.9.9"; mkscripts "$T/h9/.claude/plugins/cache/forgedock/forgedock/1.0.0"
+expect "non-forgedock cache plugin ignored" "$T/h9/.claude/plugins/cache/forgedock/forgedock/1.0.0" "$(run "$T/h9")"
 # unmatched globs: empty cache dir, absent marketplaces dir, absent ~/.claude entirely (must not abort under zsh)
 mkdir -p "$T/h10/.claude/plugins/cache"
 expect "empty cache, no match, no abort" "" "$(run "$T/h10")"
 expect "no ~/.claude at all, no abort" "" "$(run "$T/empty")"
-expect "unmatched glob does not break later candidates" "$T/h1/.claude/plugins/cache/mk/forgedock/1.0.0" "$(run "$T/h10" CLAUDE_PLUGIN_ROOT="$T/h1/.claude/plugins/cache/mk/forgedock/1.0.0")"
+expect "unmatched glob does not break later candidates" "$T/h1/.claude/plugins/cache/forgedock/forgedock/1.0.0" "$(run "$T/h10" CLAUDE_PLUGIN_ROOT="$T/h1/.claude/plugins/cache/forgedock/forgedock/1.0.0")"
 # plugin root (textually substituted) outranks an exported FORGE_HOME that also has the scripts:
 # the running plugin's own files win over a stale clone named by a global env var (forge#3147 field test)
 mkscripts "$T/h11/stale-clone"; mkscripts "$T/h11/running-plugin"
