@@ -64,6 +64,16 @@ echo "Resume #3062 — continue from where you left off and finish the uncommitt
 # 9. Unreadable / empty input -> rc 2
 bash "$LINT" "$T/does-not-exist" >/dev/null 2>&1; [ $? -eq 2 ] && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: missing file rc"; }
 
+# 11. Large prompt (>1MB) must not SIGPIPE-fail the anchor checks (forge#3071)
+{ cat "$T/base"; echo '<!-- DISPATCH_CONTEXT:BEGIN -->'; for _ in $(seq 1 30000); do echo 'Claims board entry: issue 1 holds file scripts/example.sh for the current batch run.'; done; echo '<!-- DISPATCH_CONTEXT:END -->'; } > "$T/p11"; check "large prompt passes" 0 "$T/p11"
+
+# 12. Context quoting a prior investigation ("the root cause is ...") is legitimate -> PASS
+printf 'Prior investigation excerpt: "the root cause is a stale cache; the fix is described in #12".\n' > "$T/ctx_quote"
+render "$T/ctx_quote" > "$T/p12"; check "quoted investigation in context" 0 "$T/p12"
+
+# 13. Trailing quote/paren-only junk after the block is not silently ignored -> FAIL
+{ render "$T/empty"; echo '")'; } > "$T/p13"; check "trailing paren junk after block" 1 "$T/p13"
+
 # 10. Spec snippet enforcement (forge#3070): extract the lint gate from the spec and run it in a loop.
 awk '/^LINT_SCRIPT=/{f=1} f{print} f&&/^fi$/{n++} f&&n==2{exit}' "$SPEC" > "$T/gate"
 [ -s "$T/gate" ] || { FAILN=$((FAILN+1)); echo "FAIL: could not extract spec lint gate"; }
