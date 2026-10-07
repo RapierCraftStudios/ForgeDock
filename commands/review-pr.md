@@ -2373,9 +2373,16 @@ else
     # Reviewed-head guard: merge only the exact commit this review approved. A commit pushed after
     # the verdict (field test: post-review "fix" commits merged unreviewed on #3156 and #3158) needs a
     # fresh full review, not a merge. Checked after the CI wait so a push during the wait is caught.
+    # A docs-only delta (this review's own §6B.5 note fixes) is allowed; any other change is stale.
     MERGE_HEAD_NOW=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null)
     if [ "$CI_GATE_RC" -eq 0 ] && [ "$MERGE_HEAD_NOW" != "$REVIEW_SHA" ]; then
-      CI_GATE_RC=4; CI_GATE_OUT="STALE_REVIEW: PR head ${MERGE_HEAD_NOW:0:7} is not the reviewed commit ${REVIEW_SHA:0:7}"
+      POST_REVIEW_FILES=$(gh api "repos/{GH_REPO}/compare/${REVIEW_SHA}...${MERGE_HEAD_NOW}" --jq '.files[] | .filename, (.previous_filename // empty)' 2>/dev/null)
+      if [ -n "$POST_REVIEW_FILES" ] && [ -n "${FORGE_ROOT:-}" ] && [ -f "$FORGE_ROOT/scripts/is-docs-only.sh" ] \
+         && printf '%s\n' "$POST_REVIEW_FILES" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"; then
+        echo "Post-review commits are docs-only (note fixes) — reviewed code unchanged."
+      else
+        CI_GATE_RC=4; CI_GATE_OUT="STALE_REVIEW: PR head ${MERGE_HEAD_NOW:0:7} is not the reviewed commit ${REVIEW_SHA:0:7} and the delta is not docs-only"
+      fi
     fi
     if [ "$CI_GATE_RC" -eq 4 ]; then
       # Not a human problem: the caller re-runs /review-pr on the new head (work-on/review.md R4).
