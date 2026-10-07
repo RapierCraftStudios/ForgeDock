@@ -1394,6 +1394,7 @@ fi
 #    hold_merged_trail, resolve_orch_login, trail_escalation_state, release_merged_trail (reverify_merged_trail is
 #    nested inside the classifier). It reports a missing helper on stderr and classifies GATED. The same trusted-author
 #    filter (OWNER/MEMBER/COLLABORATOR or the orchestrator login) applies to the release/fail markers on wake.
+#    forge#3169: merged + needs-human with no escalation record classifies GATED on wake (never keyed on the verifier).
 declare -A ISSUE_CLASS
 declare -A ISSUE_FILES
 DONE_ISSUES=()
