@@ -7,13 +7,15 @@ argument-hint: "[--dry-run | --since <hours> | --issue <number>]"
 
 # /recover-orphans — Pipeline Orphan Recovery
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 Scan ALL open issues with intermediate workflow labels for orphaned state — issues where the agent died mid-pipeline (context expired, rate-limited, crashed) and no active agent is continuing. Diagnose each orphan's actual GitHub state and apply the appropriate recovery action.
 
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet". Fallback: `model: "opus"` if rate-limited.
 **NEVER use plan mode (EnterPlanMode).**
-**NEVER use the Agent tool** — recover-orphans re-enters the pipeline via `Skill(skill="work-on", ...)` and `Skill(skill="review-pr", ...)` only.
+**NEVER use the Agent tool** — recover-orphans re-enters the pipeline via `Skill(skill="{FORGE_SKILL_PREFIX}work-on", ...)` and `Skill(skill="{FORGE_SKILL_PREFIX}review-pr", ...)` only.
 
 <!-- FORGE:SPEC_LOADED — recover-orphans.md loaded and active. Agent is bound by this spec. -->
 
@@ -171,7 +173,6 @@ for NUM in $ORPHAN_LIST; do
     DIAG_REASON[$NUM]="Already in terminal state: $ISSUE_LABELS"
     continue
   fi
-
   # Check for merged PR referencing this issue
   MERGED_PR=$(gh pr list ${GH_FLAG} \
     --state merged \
@@ -195,6 +196,15 @@ for NUM in $ORPHAN_LIST; do
     DIAG_REASON[$NUM]="PR #$MERGED_PR already merged — update labels and close issue"
     DIAG_PR_NUM[$NUM]="$MERGED_PR"
     echo "  Diagnosis: LABEL-CLEANUP (PR #$MERGED_PR already merged)"
+    continue
+  fi
+
+  # forge#3148: checked after the merged-PR label cleanup above, so a merged orphan is still closed out.
+  # An escalated orphan is waiting on a human — re-running a recovery action every sweep
+  # (e.g. re-invoking /review-pr against an unrepaired phase trail) only repeats the same refusal.
+  if echo ", $ISSUE_LABELS," | grep -q ", needs-human,"; then
+    DIAG_ACTION[$NUM]="skip"
+    DIAG_REASON[$NUM]="Escalated (needs-human) — waiting on a human"
     continue
   fi
 
@@ -307,6 +317,68 @@ done
 
 For each diagnosed issue, apply the recovery action. All mutating actions are skipped when `DRY_RUN=true`.
 
+**Claim before re-entering the pipeline** (forge#3158): the `review-pr` first-refusal resume and `create-pr` re-enter `/work-on` inline. A repeated or concurrent sweep, or a live `/orchestrate` agent, could otherwise run the pipeline twice on one issue. Every inline `/work-on` resume MUST go through `claim_orphan` first and call `release_orphan` afterwards. A sweep is not an orchestrator, so it takes an issue-scoped `FORGE:RECOVERY_CLAIM` marker (visible to other sweeps) and defers to any live orchestrator signal (a fresh `FORGE:HEARTBEAT`, which `/work-on --under-orchestration` posts at every phase entry).
+
+```bash
+RECOVERY_CLAIM_TTL_MIN="${RECOVERY_CLAIM_TTL_MIN:-30}"   # a claim or heartbeat older than this is treated as dead
+SWEEP_ID="sweep-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+
+# claim_orphan <issue> — returns 0 if this sweep now holds the claim, 1 if it must skip (reason in CLAIM_SKIP_REASON).
+# Fails closed: an unreadable comment list (initial read or race-check re-read) is treated as "held by someone else".
+# Both reads run under pipefail in a subshell: the pipeline status would otherwise be jq's, and a gh failure
+# (rate limit, 403) would yield "[]" with exit 0, indistinguishable from "no live holder".
+claim_orphan() {
+  local num="$1" now cutoff comments live
+  [ "$DRY_RUN" = "true" ] && return 0   # dry-run: no claim comment is posted (callers already skip dry-run resumes)
+  now=$(date -u +%s); cutoff=$(( now - RECOVERY_CLAIM_TTL_MIN * 60 ))
+  comments=$(set -o pipefail; gh api --paginate "repos/${GH_REPO}/issues/${num}/comments" 2>/dev/null \
+    | jq -s 'add // []') || { CLAIM_SKIP_REASON="could not read comments to check for a live holder"; return 1; }
+
+  # Live orchestrator signal: a recent heartbeat from /work-on --under-orchestration, or a recent claim of any sweep.
+  # A claim is "released" only by a later RELEASED marker naming its sweep id.
+  live=$(echo "$comments" | jq --argjson cutoff "$cutoff" '
+    ([.[] | select(.body | contains("FORGE:RECOVERY_CLAIM_RELEASED")) | .body | capture("Sweep: (?<id>[^ \n]+)").id]) as $rel
+    | [ .[] | select(
+          ((.body | contains("FORGE:HEARTBEAT")) or (.body | contains("<!-- FORGE:RECOVERY_CLAIM -->")))
+          and ((.body | contains("FORGE:RECOVERY_CLAIM_RELEASED")) | not)
+          and ((.updated_at | fromdateiso8601) >= $cutoff)
+          and ((.body | capture("Sweep: (?<id>[^ \n]+)")? // {id:""}).id as $sid | ($rel | index($sid)) == null)
+        ) ] | length') || live=1
+  if [ "${live:-1}" -gt 0 ]; then
+    CLAIM_SKIP_REASON="live holder (heartbeat or unreleased recovery claim within ${RECOVERY_CLAIM_TTL_MIN}m)"
+    return 1
+  fi
+
+  gh issue comment "$num" ${GH_FLAG} --body "<!-- FORGE:RECOVERY_CLAIM -->
+**Sweep: ${SWEEP_ID}**
+Holder: /recover-orphans — resuming /work-on #${num}. Other sweeps and dispatchers: do not re-enter this issue until the matching release marker is posted." >/dev/null 2>&1 \
+    || { CLAIM_SKIP_REASON="could not post FORGE:RECOVERY_CLAIM"; return 1; }
+
+  # Race check: re-read; the earliest unreleased claim wins. Losing means another sweep claimed first.
+  local first
+  first=$(set -o pipefail; gh api --paginate "repos/${GH_REPO}/issues/${num}/comments" 2>/dev/null | jq -rs --argjson cutoff "$cutoff" '
+    add // [] | ([.[] | select(.body | contains("FORGE:RECOVERY_CLAIM_RELEASED")) | .body | capture("Sweep: (?<id>[^ \n]+)").id]) as $rel
+    | [.[] | select(.body | contains("<!-- FORGE:RECOVERY_CLAIM -->"))
+           | select((.updated_at | fromdateiso8601) >= $cutoff)
+           | select((.body | capture("Sweep: (?<id>[^ \n]+)").id) as $sid | ($rel | index($sid)) == null)]
+    | first | .body // ""' | sed -n 's/^\*\*Sweep: \(.*\)\*\*$/\1/p') \
+    || { release_orphan "$num"; CLAIM_SKIP_REASON="could not re-read comments to confirm the claim race"; return 1; }
+  if [ "$first" != "$SWEEP_ID" ]; then
+    release_orphan "$num"
+    CLAIM_SKIP_REASON="lost claim race to ${first:-unknown}"
+    return 1
+  fi
+  return 0
+}
+
+release_orphan() {
+  [ "$DRY_RUN" = "true" ] && return 0
+  gh issue comment "$1" ${GH_FLAG} --body "<!-- FORGE:RECOVERY_CLAIM_RELEASED -->
+**Sweep: ${SWEEP_ID}**
+Released by /recover-orphans." >/dev/null 2>&1 || true
+}
+```
+
 ```bash
 RECOVERY_RESULTS=""
 
@@ -352,8 +424,31 @@ for NUM in $ORPHAN_LIST; do
       if [ "$DRY_RUN" = "true" ]; then
         echo "  [DRY-RUN] Would: gh pr merge $PR_NUM --merge --auto"
       else
-        MERGE_RESULT=$(gh pr merge "$PR_NUM" ${GH_FLAG} --merge --auto 2>&1)
-        MERGE_EXIT=$?
+        # CI gate (MANDATORY before any autonomous merge): merge only when every check on the PR is
+        # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch
+        # protection required none and an auto-merge waits only for *required* checks.
+        CI_GATE_SCRIPT=""
+        _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+        for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l"; do
+          case "$_c" in /*) [ -z "$CI_GATE_SCRIPT" ] && [ -f "$_c/scripts/wait-ci-green.sh" ] && CI_GATE_SCRIPT="$_c/scripts/wait-ci-green.sh" ;; esac
+        done
+        if [ -n "$CI_GATE_SCRIPT" ]; then CI_GATE_OUT=$(bash "$CI_GATE_SCRIPT" "$PR_NUM" ${GH_FLAG}); CI_GATE_RC=$?
+        else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
+        echo "$CI_GATE_OUT"
+        GATED_HEAD=$(printf '%s\n' "$CI_GATE_OUT" | sed -n 's/^CI_GATE_HEAD: //p' | head -1)
+        # rc 3 = CI still running: re-run this block (up to 3 more times) before treating it as a failure.
+        if [ "$CI_GATE_RC" -eq 0 ]; then
+          MERGE_RESULT=$(gh pr merge "$PR_NUM" ${GH_FLAG} --merge --auto --match-head-commit "$GATED_HEAD" 2>&1)
+          MERGE_EXIT=$?
+        else
+          MERGE_RESULT="not merged: CI gate rc=${CI_GATE_RC}"; MERGE_EXIT=1
+          CI_MSG="⛔ /recover-orphans did not merge PR #${PR_NUM}: CI is not green.
+\`\`\`
+${CI_GATE_OUT}
+\`\`\`"
+          gh issue comment "$NUM" ${GH_FLAG} --body "$CI_MSG" 2>/dev/null || true # allowlist:check-command-side-effects
+          gh issue edit "$NUM" ${GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
+        fi
         echo "  Merge result (exit $MERGE_EXIT): $MERGE_RESULT"
         if [ $MERGE_EXIT -eq 0 ]; then
           # Close the issue explicitly (Closes # only auto-closes on default branch)
@@ -373,25 +468,89 @@ for NUM in $ORPHAN_LIST; do
       # Open PR awaiting review — invoke /review-pr
       echo "  Applying review-pr: invoking /review-pr on PR #$PR_NUM"
       if [ "$DRY_RUN" = "true" ]; then
-        echo "  [DRY-RUN] Would: Skill(skill='review-pr', args='$PR_NUM --auto-merge --issue $NUM --gh-flag $GH_FLAG')"
+        echo "  [DRY-RUN] Would: Skill(skill='{FORGE_SKILL_PREFIX}review-pr', args='$PR_NUM --auto-merge --issue $NUM --gh-flag $GH_FLAG')"
       else
-        Skill(skill="review-pr", args="${PR_NUM} --auto-merge --issue ${NUM} --gh-flag ${GH_FLAG}")
-        # After review: update label
-        gh issue edit "$NUM" ${GH_FLAG} --add-label "workflow:in-review" \
-          --remove-label "workflow:building,workflow:awaiting-merge" 2>/dev/null || true
+        # forge#3148: count trail refusals that predate this sweep, so a refusal from an earlier sweep escalates
+        # instead of re-reviewing the same unrepaired trail every run.
+        # forge#3159: count only TRUSTED comments (pipeline bot, or OWNER/MEMBER/COLLABORATOR) newer than the latest
+        # repair (the most recent needs-human unlabel event), so a stranger's comment or a refusal a human already
+        # repaired never forces an escalation. Epoch fallback on a failed lookup counts more, i.e. fails toward escalation.
+        # --paginate: the comments endpoint returns 30 per page, oldest first. An unreadable count fails toward escalation.
+        PRIOR_TRAIL_CUTOFF=$(gh api --paginate "repos/${GH_REPO}/issues/${NUM}/events" \
+            --jq '.[] | select(.event == "unlabeled" and .label.name == "needs-human") | .created_at' 2>/dev/null \
+            | sort | tail -1)
+        PRIOR_TRAIL_CUTOFF="${PRIOR_TRAIL_CUTOFF:-1970-01-01T00:00:00Z}"
+        # gh api --jq takes one expression and no --arg, so the cutoff goes through a real jq pipe.
+        if PRIOR_TRAIL_IDS=$(set -o pipefail; gh api --paginate "repos/${GH_REPO}/issues/${NUM}/comments" 2>/dev/null \
+            | jq -r --arg cutoff "$PRIOR_TRAIL_CUTOFF" '.[] | select(.body | contains("FORGE:PHASE_TRAIL_FAILED"))
+              | select(.created_at > $cutoff)
+              | select(.user.type == "Bot" or (.author_association | IN("OWNER","MEMBER","COLLABORATOR"))) | .id'); then
+          PRIOR_TRAIL_FAILS=$(printf '%s\n' "$PRIOR_TRAIL_IDS" | grep -c '[0-9]')
+        else
+          PRIOR_TRAIL_FAILS=1
+        fi
+        REVIEW_STATUS=""; REVIEW_BLOCKER=""   # reset per orphan so a previous orphan's result never leaks into this one
+        Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="${PR_NUM} --auto-merge --issue ${NUM} --gh-flag ${GH_FLAG}")
+        # REVIEW_STATUS = the `status:` field of the REVIEW_RESULT block the Skill call returned.
+        if [ "$REVIEW_STATUS" = "PHASE_TRAIL_FAILED" ]; then
+          # Phase 8 refused the merge: the issue's phase trail is incomplete (review-pr posted the
+          # MISSING lines as FORGE:PHASE_TRAIL_FAILED). Do NOT set workflow:in-review — that only re-queues
+          # the same refusal for the next sweep. Never hand-post the missing markers.
+          if [ "${PRIOR_TRAIL_FAILS:-0}" -gt 0 ]; then
+            gh issue edit "$NUM" ${GH_FLAG} --add-label "needs-human" 2>/dev/null || true
+            gh issue comment "$NUM" ${GH_FLAG} --body "<!-- FORGE:ORPHAN_RECOVERED -->
+## Orphan Recovery — Escalated
+
+**Action**: \`/review-pr\` refused to merge PR #${PR_NUM} again because the phase trail is incomplete, and an earlier refusal was not repaired.
+**Recovered by**: /recover-orphans
+
+See the latest FORGE:PHASE_TRAIL_FAILED comment for the missing phases. Re-run each one via its Skill (or \`/work-on ${NUM}\`), then remove \`needs-human\`." 2>/dev/null || true
+            RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} refused (phase trail) again — needs-human added |\n"
+          else
+            # First refusal: resume /work-on, whose resume preflight re-runs each missing phase via Skill(...)
+            # and then re-enters review (work-on.md Phase 0B resume → work-on/review.md).
+            if claim_orphan "$NUM"; then
+              Skill(skill="{FORGE_SKILL_PREFIX}work-on", args="${NUM}")
+              release_orphan "$NUM"
+              RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} refused (phase trail) — resumed /work-on to re-run missing phases |\n"
+            else
+              RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} refused (phase trail) — /work-on resume skipped: ${CLAIM_SKIP_REASON} |\n"
+            fi
+          fi
+        elif [ "$REVIEW_STATUS" = "BLOCKED" ] && echo "$REVIEW_BLOCKER" | grep -qE 'phase trail|auto-merge requires --issue'; then
+          # REVIEW_BLOCKER = the `blocker:` field of the same REVIEW_RESULT block. The gate could not run (verifier
+          # rc>=2 / unresolvable) or had no issue to verify (forge#3147). review-pr already added needs-human for the
+          # rc>=2 case; add it here too so the diagnosis skip above stops re-sweeping this orphan.
+          gh issue edit "$NUM" ${GH_FLAG} --add-label "needs-human" 2>/dev/null || true
+          RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} blocked by the merge gate — needs-human added |\n"
+        elif case "$REVIEW_STATUS" in COMPLETE|ALREADY_MERGED|BLOCKED) false ;; *) true ;; esac; then
+          # forge#3159: an empty or unrecognized status means the review result could not be read. Do not report
+          # "submitted for review" or re-queue it; escalate to a human.
+          gh issue edit "$NUM" ${GH_FLAG} --add-label "needs-human" 2>/dev/null || true
+          RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} unrecognized review status '${REVIEW_STATUS}' — needs-human added |\n"
+        else
+          # After review: update label
+          gh issue edit "$NUM" ${GH_FLAG} --add-label "workflow:in-review" \
+            --remove-label "workflow:building,workflow:awaiting-merge" 2>/dev/null || true
+          RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} submitted for review |\n"
+        fi
       fi
-      RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} submitted for review |\n"
+      [ "$DRY_RUN" = "true" ] && RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} would be submitted for review |\n"
       ;;
 
     create-pr)
       # Branch has commits but no PR — resume /work-on to create PR
       echo "  Applying create-pr: resuming /work-on to advance from build to PR creation"
       if [ "$DRY_RUN" = "true" ]; then
-        echo "  [DRY-RUN] Would: Skill(skill='work-on', args='$NUM')"
+        echo "  [DRY-RUN] Would: Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='$NUM')"
+        RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | create-pr | Would resume /work-on — branch $BRANCH has commits, no PR |\n"
+      elif claim_orphan "$NUM"; then
+        Skill(skill="{FORGE_SKILL_PREFIX}work-on", args="${NUM}")
+        release_orphan "$NUM"
+        RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | create-pr | Resumed /work-on — branch $BRANCH has commits, no PR |\n"
       else
-        Skill(skill="work-on", args="${NUM}")
+        RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | create-pr | /work-on resume skipped: ${CLAIM_SKIP_REASON} |\n"
       fi
-      RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | create-pr | Resumed /work-on — branch $BRANCH has commits, no PR |\n"
       ;;
 
     reset-labels)

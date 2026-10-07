@@ -8,6 +8,8 @@ install: extras
 
 # /validate — Independent Issue Verification
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 Verify whether a reported issue is real before anyone writes code. This command exists for reports that come from outside the pipeline — user complaints, DevOps alerts, monitoring triggers, gut feelings. It is the checkpoint before creating a GitHub issue.
@@ -133,7 +135,7 @@ BODY_EOF
 
 # [priority] and [bug|enhancement] are two separate labels — passed as repeated --label flags,
 # never comma-joined (the /issue programmatic contract's --label is repeatable, not CSV).
-Skill(skill="issue", args="--title \"$VALIDATE_ISSUE_TITLE\" --body-file \"$VALIDATE_ISSUE_BODY_FILE\" --label \"[priority]\" --label \"[bug|enhancement]\"")
+Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"$VALIDATE_ISSUE_TITLE\" --body-file \"$VALIDATE_ISSUE_BODY_FILE\" --label \"[priority]\" --label \"[bug|enhancement]\"")
 rm -f "$VALIDATE_ISSUE_BODY_FILE"
 ```
 

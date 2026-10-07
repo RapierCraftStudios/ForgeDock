@@ -6,6 +6,8 @@ install: core
 
 # /orchestrate — Phase 3: Dependency Analysis & Execution Plan
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 ## Phase 3: Dependency Analysis & Execution Plan
 
 ### Step 3A: Analyze explicit dependencies
@@ -88,6 +90,7 @@ declare -A ISSUE_FILES  # {NUM} → newline-separated declared file set (forge#2
 # phase-4-execution.md's classify-lane resolver.
 resolve_extract_affected_files() {
   local candidates=()
+  case '${CLAUDE_PLUGIN_ROOT}' in /*) candidates+=('${CLAUDE_PLUGIN_ROOT}/scripts/extract-affected-files.sh') ;; esac  # running plugin first
   [ -n "${FORGE_HOME:-}" ] && candidates+=("$FORGE_HOME/scripts/extract-affected-files.sh")
   [ -n "${REPO_PATH:-}" ] && candidates+=("$REPO_PATH/scripts/extract-affected-files.sh")
   candidates+=("$PWD/scripts/extract-affected-files.sh")
@@ -617,7 +620,7 @@ if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ]; then
 
   case "$LEASE_STATE" in
     free|self)
-      HOSTNAME_ID=$(hostname 2>/dev/null || echo "unknown-host")
+      HOSTNAME_ID=$(hostname 2>/dev/null || uname -n 2>/dev/null || true); HOSTNAME_ID="${HOSTNAME_ID:-unknown-host}"
       # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
       gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE -->
 **Holder Batch ID**: ${BATCH_ID}
@@ -1140,7 +1143,7 @@ The engine drives every phase transition deterministically, mirrors state to the
 
 **Fallback — best-effort, not all-or-nothing (fixed forge#2743)**: Engine-first is guaranteed to have an Agent-spawn fallback under two distinct trigger conditions, not just CLI absence:
 
-1. **CLI absent at dispatch time**: If `forgedock` is not in PATH, `phase-4-execution.md` Step 4A falls back to spawning Agent sub-agents that run `Skill("work-on", ...)` per issue for the whole batch, before any dispatch happens.
+1. **CLI absent at dispatch time**: If `forgedock` is not in PATH, `phase-4-execution.md` Step 4A falls back to spawning Agent sub-agents that run `Skill("{FORGE_SKILL_PREFIX}work-on", ...)` per issue for the whole batch, before any dispatch happens.
 2. **Backend unavailable despite CLI presence, or a runtime engine-error with empty committed state**: `command -v forgedock` only proves the orchestrator CLI is installed — it says nothing about whether the engine's execution backend (the `claude` CLI spawn) can actually run a phase (forge#2741 is a concrete case: `spawnSync claude` ENOENTs even though a shell `command -v` probe reports the binary present). Step 4A now runs a cheap backend preflight canary before committing the whole ready set to engine-first, downgrading the entire run to Agent-spawn on failure. And per-issue, Step 4B's completion handler auto-falls-back any individual engine-dispatched issue that completes at `workflow:engine-error` with an empty committed state (`committed=[] branch=null pr=null` — see `bin/engine-cli.mjs`'s `formatTerminalDiagnostics()`) to the same Agent-spawn template, rather than leaving it stuck waiting on a resume mechanism that only exists for Agent-spawn-dispatched issues. An engine-error with partial committed state (branch/PR non-null) is NOT auto-fallen-back, to avoid double-work — it surfaces via the existing stall-detection alert instead.
 
 In both cases the SubagentStop hook still bridges the fallback Agent-spawn runs to the engine run-log for state persistence. Engine-first is therefore best-effort: it is always backed by a working Agent-spawn path, whether the gap is discovered before dispatch (canary) or after (per-issue fallback) — a whole ready set is never permanently lost to an environmental engine failure.
@@ -1365,7 +1368,7 @@ if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && [ -n "
     free|self)
       # Free (no live holder) or self (this exact batch already holds it) — safe to
       # refresh and continue reconstruction below.
-      HOSTNAME_ID=$(hostname 2>/dev/null || echo "unknown-host")
+      HOSTNAME_ID=$(hostname 2>/dev/null || uname -n 2>/dev/null || true); HOSTNAME_ID="${HOSTNAME_ID:-unknown-host}"
       # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
       gh issue comment "$COORD_ISSUE_NUMBER" -R {GH_REPO} --body "<!-- FORGE:LEASE -->
 **Holder Batch ID**: ${BATCH_ID}
@@ -1386,6 +1389,10 @@ fi
 # 1. Re-fetch all issue labels and classify each into DONE / GATED / FAILED / IN_PROGRESS
 #    (same classify_predecessor_state() function defined in phase-4-execution.md Step 4B —
 #    re-declare it here if this block runs in a fresh context that hasn't sourced Step 4B yet).
+#    forge#3168: classify_predecessor_state() also needs these Step 4B helpers declared in the SAME shell:
+#    hold_merged_trail, resolve_orch_login, trail_escalation_state, release_merged_trail (reverify_merged_trail is
+#    nested inside the classifier). It reports a missing helper on stderr and classifies GATED. The same trusted-author
+#    filter (OWNER/MEMBER/COLLABORATOR or the orchestrator login) applies to the release/fail markers on wake.
 declare -A ISSUE_CLASS
 declare -A ISSUE_FILES
 DONE_ISSUES=()
@@ -1486,7 +1493,7 @@ for ENTRY in "${NEWLY_BLOCKED[@]:-}"; do
       --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
     gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:BLOCKED_ON_HUMAN_MERGE -->
 **Gating predecessor**: #${PRED} (state: \`${ISSUE_CLASS[$PRED]}\`${GATING_PR:+, open PR #${GATING_PR}})
-**Status**: Detected on orchestrator wake/compaction reconstruction. Ready to dispatch as soon as #${PRED} reaches \`workflow:merged\`."
+**Status**: Detected on orchestrator wake/compaction reconstruction. Ready to dispatch once #${PRED} is resolved: when its gating PR merges, or — if #${PRED} is already merged and held on its phase trail — when a human clears \`needs-human\` on it."
     gh issue edit "$DEP" -R {GH_REPO} --add-label "blocked-on-human-merge" 2>/dev/null || true
   fi
 done
@@ -1507,9 +1514,12 @@ for DEP in $BLOCKED_NOW; do
     [ "$GPRED_CLASS" != "DONE" ] && STILL_GATED=true
   done
   if [ "$STILL_GATED" = "false" ]; then
+    # forge#3157: record a human release (FORGE:PHASE_TRAIL_RELEASED) of a trail-held merged predecessor (decay of the escalation marker;
+    # release_merged_trail is defined in phase-4-execution.md Step 4B and is a no-op unless the escalation is ACTIVE).
+    for GPRED in $(echo "$GATING_PREDS_RAW" | jq -r '.[]' 2>/dev/null); do release_merged_trail "$GPRED"; done
     gh issue edit "$DEP" -R {GH_REPO} --remove-label "blocked-on-human-merge" 2>/dev/null || true
     gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:UNBLOCKED -->
-All gating predecessor(s) reached \`workflow:merged\` (detected on orchestrator wake) — dispatching now."
+All gating predecessor(s) are now resolved — merged, or released by a human after a phase-trail hold (detected on orchestrator wake) — dispatching now."
     READY_ISSUES+=("$DEP")
   fi
 done

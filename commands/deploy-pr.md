@@ -8,6 +8,8 @@ allowed-tools: Bash, Read, Grep, Glob, Skill
 
 # /deploy-pr — PR Ship Orchestrator
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
@@ -146,7 +148,7 @@ fi
 echo "Source: $SOURCE → Target: $PR_TARGET (prefix: $TITLE_PREFIX)"
 ```
 
-**Routing guard — staging→main**: When `SOURCE=staging` and `PR_TARGET=main`, the review gate (Phase 4) MUST route to `Skill("review-pr-staging", ...)` rather than the standard `review-pr`. This ensures the staging deploy review (comprehensive, multi-agent) runs instead of the single-PR review.
+**Routing guard — staging→main**: When `SOURCE=staging` and `PR_TARGET=main`, the review gate (Phase 4) MUST route to `Skill("{FORGE_SKILL_PREFIX}review-pr-staging", ...)` rather than the standard `review-pr`. This ensures the staging deploy review (comprehensive, multi-agent) runs instead of the single-PR review.
 
 **Routing guard — milestone→staging**: When `SOURCE` matches `milestone/*`, this is a feature lane ship. `/review-pr` handles these normally (they target staging, not main).
 
@@ -285,12 +287,14 @@ FIX_CI_AVAILABLE=$(ls ~/.claude/commands/fix-ci.md 2>/dev/null && echo "true" ||
 
 if [ "$FIX_CI_AVAILABLE" = "false" ]; then
   echo "WARNING: /fix-ci not available — skipping CI gate. Install fix-ci (issue #1675) for automated CI fixing."
-  echo "CI gate: SKIPPED (fix-ci unavailable)"
-  CI_GATE_PASSED=true  # Allow pipeline to continue; review gate will catch CI failures
+  echo "CI fix loop: SKIPPED (fix-ci unavailable) — the Phase 5 CI gate still blocks a red merge"
+  CI_GATE_PASSED=true  # the fix loop is skipped, not the gate: Phase 5 runs wait-ci-green.sh before merging
 else
   # Check current CI status
-  CURRENT_CI_STATUS=$(gh pr checks "$PR_NUMBER" $GH_FLAG --json name,status,conclusion \
-    --jq '[.[] | select(.conclusion == "failure")] | length' 2>/dev/null || echo "0")
+  # Fail closed: valid fields only (`status`/`conclusion` do not exist on gh pr checks --json; the
+  # old query errored and defaulted to 0 = "no failures"). An unreadable result counts as failing.
+  CURRENT_CI_STATUS=$(gh pr checks "$PR_NUMBER" $GH_FLAG --json name,bucket \
+    --jq '[.[] | select(.bucket == "fail" or .bucket == "cancel")] | length' 2>/dev/null || echo "1")
 
   if [ "$CURRENT_CI_STATUS" -eq 0 ]; then
     echo "CI gate: PASSED (no failing checks)"
@@ -303,7 +307,7 @@ else
       echo "=== CI Gate Iteration $CI_ITER / $MAX_CI_ITER ==="
 
       if [ "$DRY_RUN" = "false" ]; then
-        Skill("fix-ci", args="$PR_NUMBER $GH_FLAG")
+        Skill("{FORGE_SKILL_PREFIX}fix-ci", args="$PR_NUMBER $GH_FLAG")
       else
         echo "[DRY-RUN] Would invoke: Skill(fix-ci, $PR_NUMBER $GH_FLAG)"
       fi
@@ -356,9 +360,9 @@ while [ "$REVIEW_ITER" -lt "$MAX_REVIEW_ITER" ] && [ "$REVIEW_GATE_PASSED" = "fa
   if [ "$DRY_RUN" = "false" ]; then
     # Route: staging→main uses review-pr-staging; all other uses standard review-pr
     if [ "$SOURCE" = "$STAGING_BRANCH" ] && [ "$PR_TARGET" = "$DEFAULT_BRANCH" ]; then
-      REVIEW_RESULT=$(Skill("review-pr-staging", args="$PR_NUMBER $GH_FLAG"))
+      REVIEW_RESULT=$(Skill("{FORGE_SKILL_PREFIX}review-pr-staging", args="$PR_NUMBER $GH_FLAG"))
     else
-      REVIEW_RESULT=$(Skill("review-pr", args="$PR_NUMBER $GH_FLAG"))
+      REVIEW_RESULT=$(Skill("{FORGE_SKILL_PREFIX}review-pr", args="$PR_NUMBER $GH_FLAG"))
     fi
   else
     echo "[DRY-RUN] Would invoke review-pr for PR #$PR_NUMBER"
@@ -425,9 +429,25 @@ if [ "$DRY_RUN" = "true" ]; then
   echo "[DRY-RUN] Would merge PR #$PR_NUMBER (${SOURCE} → ${PR_TARGET})"
   MERGE_STATUS="dry_run"
 else
-  echo "Merging PR #$PR_NUMBER..."
-  MERGE_OUTPUT=$(gh pr merge "$PR_NUMBER" $GH_FLAG --merge 2>&1)
-  MERGE_EXIT=$?
+  # CI gate (MANDATORY before any autonomous merge): wait for every check, merge only if all are
+  # green, and merge exactly the commit the gate checked.
+  _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+  CI_GATE_SCRIPT=""
+  for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l"; do
+    case "$_c" in /*) [ -z "$CI_GATE_SCRIPT" ] && [ -f "$_c/scripts/wait-ci-green.sh" ] && CI_GATE_SCRIPT="$_c/scripts/wait-ci-green.sh" ;; esac
+  done
+  if [ -n "$CI_GATE_SCRIPT" ]; then CI_GATE_OUT=$(bash "$CI_GATE_SCRIPT" "$PR_NUMBER" $GH_FLAG); CI_GATE_RC=$?
+  else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
+  echo "$CI_GATE_OUT"
+  GATED_HEAD=$(printf '%s\n' "$CI_GATE_OUT" | sed -n 's/^CI_GATE_HEAD: //p' | head -1)
+  # rc 3 = CI still running: re-run this block (up to 3 more times) before treating it as a failure.
+  if [ "$CI_GATE_RC" -ne 0 ]; then
+    MERGE_OUTPUT="not merged: CI gate rc=${CI_GATE_RC}"; MERGE_EXIT=1
+  else
+    echo "Merging PR #$PR_NUMBER..."
+    MERGE_OUTPUT=$(gh pr merge "$PR_NUMBER" $GH_FLAG --merge --match-head-commit "$GATED_HEAD" 2>&1)
+    MERGE_EXIT=$?
+  fi
 
   if [ "$MERGE_EXIT" -eq 0 ]; then
     echo "Merged PR #$PR_NUMBER successfully"

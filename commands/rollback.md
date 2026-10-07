@@ -8,6 +8,8 @@ install: extras
 
 # /rollback — Automated Revert PR Creation
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 **Config variables used by this command** (set in `forge.yaml`):
@@ -252,7 +254,7 @@ Regression of #{ORIGINAL_ISSUE}. Should investigate why the original approach ca
 BODY_EOF
 # Route through the /issue create-hook (canonical dedup + body validation) instead of a raw
 # `gh issue create`.
-Skill(skill="issue", args="--title \"$FOLLOWUP_TITLE\" --body-file \"$FOLLOWUP_BODY_TMPFILE\" --label bug --label \"priority:P1\"")
+Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"$FOLLOWUP_TITLE\" --body-file \"$FOLLOWUP_BODY_TMPFILE\" --label bug --label \"priority:P1\"")
 rm -f "$FOLLOWUP_BODY_TMPFILE"
 trap - EXIT
 FOLLOWUP_ISSUE_NUMBER=$(gh issue list \

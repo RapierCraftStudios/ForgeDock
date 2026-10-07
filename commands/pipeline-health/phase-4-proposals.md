@@ -6,6 +6,8 @@ install: extras
 
 # /pipeline-health — Phase 4: Generate Improvement Proposals
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 ## Phase 4: Generate Improvement Proposals
 
 ### 4A: Pattern recurrence analysis — check-promotion threshold <!-- Added: forge#1331 -->
@@ -40,7 +42,7 @@ while IFS= read -r line; do
 
   # SECURITY: $SLUG is sourced from a <!-- FORGE:PATTERN: ([^\s>]+) --> tag inside
   # a review-finding issue body — untrusted, externally-influenced text. It is
-  # interpolated below into a Skill(skill="issue", args="...") string, and
+  # interpolated below into a Skill(skill="{FORGE_SKILL_PREFIX}issue", args="...") string, and
   # commands/issue.md's Phase 1A resolves that string via `eval "set -- $ARGUMENTS"`.
   # Any shell metacharacter (quote, backtick, $, ;) in $SLUG would break out of the
   # intended --title token and be eval'd as shell. Whitelist-validate at the
@@ -108,7 +110,7 @@ ${SOURCE_FINDINGS}
 <!-- AUTO-CREATED: pipeline-health Phase 4A — pattern recurrence threshold exceeded -->
 CHECK_EOF
 
-  Skill(skill="issue", args="--title \"feat(quality-gate): promote pattern '$SLUG' to deterministic registry check (recurred ${COUNT}x)\" --body-file $CHECK_BODY_FILE --label check-promotion --label priority:P2")
+  Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"feat(quality-gate): promote pattern '$SLUG' to deterministic registry check (recurred ${COUNT}x)\" --body-file $CHECK_BODY_FILE --label check-promotion --label priority:P2")
   rm -f "$CHECK_BODY_FILE"
   echo "Created check-promotion issue for pattern '$SLUG' (recurred ${COUNT}x from: $SOURCE_FINDINGS)"
 done <<< "$PATTERN_LIST"
@@ -170,7 +172,7 @@ echo "$SPEC_CONCENTRATION" | while IFS=' ' read -r count spec_file finding_nums;
 
   # SECURITY (defense-in-depth, consistency with $SLUG above): $spec_file is
   # already constrained by the extraction regex (commands/[a-z0-9_/-]+\.md), but
-  # it is interpolated below into a Skill(skill="issue", args="...") string that
+  # it is interpolated below into a Skill(skill="{FORGE_SKILL_PREFIX}issue", args="...") string that
   # /issue's Phase 1A resolves via eval. Whitelist-validate again at point of use
   # so this call site does not depend solely on the extraction regex staying safe.
   if ! echo "$spec_file" | grep -qE '^commands/[A-Za-z0-9_/-]+\.md$'; then
@@ -235,7 +237,7 @@ This issue was auto-created by \`pipeline-health\` Phase 4A.5.
 <!-- AUTO-CREATED: pipeline-health Phase 4A.5 — spec concentration threshold exceeded -->
 TRIGGER_EOF
 
-  Skill(skill="issue", args="--title \"feat(spec-doctor): queue spec evolution pass for $(basename $spec_file .md) (${count} concentrated findings)\" --body-file $TRIGGER_BODY_FILE --label spec-doctor-trigger --label priority:P2")
+  Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"feat(spec-doctor): queue spec evolution pass for $(basename $spec_file .md) (${count} concentrated findings)\" --body-file $TRIGGER_BODY_FILE --label spec-doctor-trigger --label priority:P2")
   rm -f "$TRIGGER_BODY_FILE"
   echo "Created spec-doctor trigger for '$spec_file' (${count} findings: $finding_nums)"
 done

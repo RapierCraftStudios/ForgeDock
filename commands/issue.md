@@ -7,13 +7,15 @@ argument-hint: "[description of the problem or feature] [--dry-run] | --title \"
 
 # /issue — Deterministic Issue Creator
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 You create GitHub issues with the exact structure the `/work-on` pipeline expects. Every issue you create must give the investigation agent enough context to find the right files on the first pass — no vague descriptions, no missing domains, no ambiguous scope.
 
 `/issue` is the structured create-hook for issue creation across the pipeline — it enforces the canonical template, reads code before drafting, runs dedup, and validates mandatory sections. Because those checks are deterministic, `/issue` **creates the issue by default once they pass** — it does not wait for a human to approve the draft. Pass `--dry-run` to review the draft without creating anything (see Argument Parsing below).
 
-`/issue` also accepts a **programmatic invocation form** for callers that have already composed a title, body, labels, and (optionally) a milestone — e.g. `Skill(skill="issue", args="--title \"fix: ...\" --body-file \"$BODY_FILE\" --label bug --label P2")` (the caller writes the body to that path before invoking). This form skips the free-text parsing (Phase 1) and LLM drafting (Phase 3) entirely, but still runs the same dedup and body-validation correctness gates as the interactive path. See **Programmatic Invocation Contract** below — every `--body-file` caller must use an entity- and agent-scoped scratch path and include a unique integrity marker which `/issue` verifies after creation. This is required because a collision can substitute plausible but unrelated content, not just produce an obvious file error (forge#2843).
+`/issue` also accepts a **programmatic invocation form** for callers that have already composed a title, body, labels, and (optionally) a milestone — e.g. `Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"fix: ...\" --body-file \"$BODY_FILE\" --label bug --label P2")` (the caller writes the body to that path before invoking). This form skips the free-text parsing (Phase 1) and LLM drafting (Phase 3) entirely, but still runs the same dedup and body-validation correctness gates as the interactive path. See **Programmatic Invocation Contract** below — every `--body-file` caller must use an entity- and agent-scoped scratch path and include a unique integrity marker which `/issue` verifies after creation. This is required because a collision can substitute plausible but unrelated content, not just produce an obvious file error (forge#2843).
 
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154.
 **NEVER use plan mode (EnterPlanMode).**
@@ -43,7 +45,7 @@ PROGRAMMATIC_MILESTONE=""
 PROGRAMMATIC_EXCLUDE=""
 
 # Positional/flag parsing. $ARGUMENTS is a single opaque string (the invoking
-# agent's raw args, e.g. from `Skill(skill="issue", args="--title \"fix: ...\" ...")`)
+# agent's raw args, e.g. from `Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"fix: ...\" ...")`)
 # — it is NOT pre-tokenized by any harness, and a naive `ARGS=($ARGUMENTS)` would
 # word-split on whitespace without honoring embedded quote characters (a literal
 # `"` inside the string is not shell syntax at this point), fragmenting any

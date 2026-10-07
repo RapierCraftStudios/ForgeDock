@@ -8,6 +8,8 @@ install: extras
 
 # /incident-response — P0 Incident Coordination
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 **Config variables used by this command** (set in `forge.yaml`):
@@ -364,7 +366,7 @@ See postmortem: #{INCIDENT_NUMBER} (comment)
 BODY_EOF
 # Route through the /issue create-hook (canonical dedup + body validation) instead of a raw
 # `gh issue create`.
-Skill(skill="issue", args="--title \"$ACTION_ITEM_TITLE\" --body-file \"$ACTION_ITEM_BODY_TMPFILE\" --label \"{type_label}\" --label \"P{priority}\"")
+Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"$ACTION_ITEM_TITLE\" --body-file \"$ACTION_ITEM_BODY_TMPFILE\" --label \"{type_label}\" --label \"P{priority}\"")
 rm -f "$ACTION_ITEM_BODY_TMPFILE"
 trap - EXIT
 ACTION_ITEM_NUMBER=$(gh issue list \

@@ -8,6 +8,8 @@ install: extras
 
 # /audit-agents — Agent Output Auditor
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 ## Purpose
@@ -511,7 +513,7 @@ N/A — this is a running log issue, not a code change.
 This issue is a running log of persisted `/audit-agents` summaries. Each comment contains one session's efficiency metrics. Do not close this issue — `/pipeline-health` Phase 2K queries it to aggregate orchestration efficiency trends.
 EOF
 
-  Skill(skill="issue", args="--title \"Orchestration Metrics — Running Log\" --body-file \"$TRACKING_BODY_FILE\" --label \"orchestration-metrics\"")
+  Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"Orchestration Metrics — Running Log\" --body-file \"$TRACKING_BODY_FILE\" --label \"orchestration-metrics\"")
 
   # /issue's programmatic mode does not print a structured return value — re-query
   # by label to recover the newly created issue number.

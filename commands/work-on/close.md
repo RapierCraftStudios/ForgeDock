@@ -1,18 +1,21 @@
 ---
 description: Close subcommand — update project board, final issue body, parent tracker, summary report, trajectory log
-argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--pr PR_NUMBER] [--base PR_BASE] [--branch BRANCH] [--worktree WORKTREE_PATH]"
+argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--pr PR_NUMBER] [--base PR_BASE] [--branch BRANCH] [--worktree WORKTREE_PATH] --terminal-state merged|investigation|decomposed|invalid"
+context: fork
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # work-on/close — Close & Trajectory Subcommand
 
+> **Skill Name Resolution (forked phase)**: `{FORGE_SKILL_PREFIX}` is the namespace this skill itself was invoked under — invoked as `forgedock:work-on:…` → `forgedock:` (nesting `:`); as `work-on:…` → empty (`install.sh`); as `forge-work-on-…` → `forge-` (Codex, nesting `-`); OpenCode → empty with `-` nesting. Confirm the target name in the available-skills list before calling it. A forked phase receives no resolved value from its caller; never guess, and if the target skill is not listed return BLOCKED "skill not found: <name>".
+
 **Input**: $ARGUMENTS
 
-**Invoked by**: `work-on.md` Phase 6–7, after `review.md` returns `REVIEW_RESULT: status: COMPLETE`.
-**Output**: Update project board, close issue, update parent tracker, post trajectory log. Return final summary.
+**Invoked by**: the `work-on` router, as its final step, via `Skill(skill="{FORGE_SKILL_PREFIX}work-on:close", args="...")`. This file declares `context: fork`, so it runs in an isolated sub-agent context that sees ONLY this text and its args — there is no "Phase 0 state" to rely on. Everything not passed as an arg is re-derived from GitHub/git in Phase C0. The router sees ONLY the final `CLOSE_RESULT:` block (see Output), so this file is the single source of truth for the close report, the summary card, the trajectory comment and the decision record.
+**Output**: Update project board, close issue, update parent tracker, post trajectory log, post decision record, clean up the worktree. Final reply is the `CLOSE_RESULT:` block.
 
-**Agent model policy**: `effort: low` (mechanical tier — label transitions, annotation posting, board updates; this file is mechanical end-to-end, so a low effort level is safe here). Fallback: `model: "sonnet"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154. **Note**: this file is dispatched via `Skill("work-on:close", ...)`, which does not support a `model` override — see `work-on.md` section "Model and Effort Tiering — What Actually Applies" for why a `model: "haiku"` claim here would not take effect. <!-- Corrected: forge#1827 -->
+**Agent model policy**: `effort: low` (mechanical tier — label transitions, annotation posting, board updates; this file is mechanical end-to-end, so a low effort level is safe here). Fallback: `model: "sonnet"` if rate-limited. Feature gate: pass `effort` only on Claude Code >= 2.1.154. **Note**: this file is dispatched via `Skill("{FORGE_SKILL_PREFIX}work-on:close", ...)`, which does not support a `model` override — see `work-on.md` section "Model and Effort Tiering — What Actually Applies" for why a `model: "haiku"` claim here would not take effect. <!-- Corrected: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
 <!-- FORGE:SPEC_LOADED — work-on/close.md loaded and active. Agent is bound by this spec. -->
@@ -23,39 +26,226 @@ argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--pr PR_NUM
 
 Parse from $ARGUMENTS:
 - `{NUMBER}` — issue number (required)
-- `--repo {GH_REPO}` — GitHub repo (e.g. `{owner}/{repo}` — resolved from `forge.yaml → project`)
-- `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`)
-- `--pr {PR_NUMBER}` — merged PR number
-- `--base {PR_BASE}` — branch the PR merged into (e.g. `milestone/modular-pipeline-architecture`)
+- `--repo {GH_REPO}` — GitHub repo (e.g. `{owner}/{repo}`) (required)
+- `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`) (required)
+- `--pr {PR_NUMBER}` — merged PR number (required when `--terminal-state merged`; empty/absent for PR-less terminals)
+- `--base {PR_BASE}` — branch the PR merged into (e.g. `staging`, `milestone/modular-pipeline-architecture`). Optional — re-derived from the PR when absent
 - `--branch {BRANCH}` — feature branch name (for worktree cleanup reference)
 - `--worktree {WORKTREE_PATH}` — absolute path to the git worktree to remove (optional — skip cleanup if not provided)
+- `--terminal-state {TERMINAL_STATE}` — `merged | investigation | decomposed | invalid` (required)
+
+Set shell variables from the parsed values (the `{X}` placeholders used throughout this file and the `$X` shell variables are the same values):
+
+```bash
+NUMBER="{NUMBER}"; GH_REPO="{GH_REPO}"; GH_FLAG="{GH_FLAG}"; PR_NUMBER="{PR_NUMBER}"
+PR_BASE="{PR_BASE}"; BRANCH="{BRANCH}"; WORKTREE_PATH="{WORKTREE_PATH}"; TERMINAL_STATE="{TERMINAL_STATE}"
+# Any optional arg that was not supplied is the empty string (never the literal "{...}" text).
+```
+
+**Fail closed.** If `{NUMBER}`, `--repo`, `--gh-flag` or `--terminal-state` is missing, if `--terminal-state` is not one of the four values, or if `--terminal-state merged` is passed without `--pr`: do NOT run any phase; print the `CLOSE_RESULT:` block with `status: FAILED` and the reason in `blocker:` (e.g. `blocker: missing required arg: --terminal-state`) as the final reply and STOP.
+
+**Failure handling (status: FAILED)**: MANDATORY phases (C1, C2, C5) retry a failed `gh` write once; if it still fails, STOP at that point and print `CLOSE_RESULT: status: FAILED` with `blocker: "<phase>: <error>"`. Do NOT run C6 after a FAILED stop (the worktree is kept so the run can be retried). Phases marked non-blocking (C1.7, C1.5, C5.1–C5.5) log and continue and never produce FAILED. Every exit path — success, ALREADY_DONE, PHASE_COMPLETE, every guard, every failure — prints the `CLOSE_RESULT:` block.
+
+**Terminal-state routing** — which phases run:
+
+| `--terminal-state` | Runs | Skips (and why) |
+|---|---|---|
+| `merged` | C0 → C6, all phases | — |
+| `investigation` | C0, C0.5, C1, C1.5, C2, C3, C4, C4.5, C5, C5.1–C5.4, C6 | C1.7, C5.5 (no PR); PR lines in the issue body, report and trajectory use the "no PR" form |
+| `decomposed` | C0, C0.5, C4, C4.5, C5, C5.1–C5.4, C6 | C1, C1.7, C1.5, C2, C3, C5.5 — the parent issue stays OPEN with `workflow:decomposed` (owned by the decompose phase) |
+| `invalid` | C0, C0.5, C4, C4.5, C5, C6 | C1, C1.7, C1.5, C2, C3, C5.1–C5.5 — the issue was already closed with `workflow:invalid` by the investigate phase |
+
+Every `gh pr view {PR_NUMBER}` and every other PR-dependent step in this file is guarded on a non-empty `PR_NUMBER`: with an empty PR, the PR-derived values render as `—` and nothing aborts.
+
+## Script resolution
+
+Resolve the repo path first (needed by the dossier append, the knowledge indexer and the script resolver), then expand the canonical resolver block. Re-run both blocks if shell variables were lost between tool calls.
+
+```bash
+# REPO_PATH = main checkout root. From the worktree when one was passed (linked worktrees share a git common dir), else the current repo.
+if [ -n "$WORKTREE_PATH" ] && [ -d "$WORKTREE_PATH" ]; then
+  _gc=$(git -C "$WORKTREE_PATH" rev-parse --git-common-dir 2>/dev/null)
+  case "$_gc" in /*) ;; *) _gc="$WORKTREE_PATH/$_gc" ;; esac
+  REPO_PATH=$(dirname "$(cd "$_gc" 2>/dev/null && pwd)")
+fi
+[ -n "${REPO_PATH:-}" ] && [ -d "$REPO_PATH" ] || REPO_PATH=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+```
+
+**Shell state does not persist between Bash tool calls** (each call is a fresh shell): paste the block below at the top of every bash command in this skill that calls `resolve_script` or uses `FORGE_ROOT`/`UNIVERSAL_DIR`.
+
+```bash
+# Canonical script resolution (keep byte-identical across specs; guarded by scripts/forge-root.test.sh).
+# Shell state does NOT persist between Bash tool calls: include this whole block at the top of
+# every command that uses resolve_script or FORGE_ROOT.
+REPO_PATH="${REPO_PATH:-$(yq '.paths.root // ""' forge.yaml 2>/dev/null)}"
+[ -n "$REPO_PATH" ] && [ "$REPO_PATH" != "null" ] || REPO_PATH="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+ADAPTIVE_DIR_RAW="${REPO_PATH}/$(yq '.adaptive_scripts.directory // ".forgedock/scripts"' forge.yaml 2>/dev/null || echo '.forgedock/scripts')"
+ADAPTIVE_DIR=$(realpath -m "$ADAPTIVE_DIR_RAW" 2>/dev/null || echo "$ADAPTIVE_DIR_RAW")
+ADAPTIVE_ENABLED=$(yq '.adaptive_scripts.enabled // "true"' forge.yaml 2>/dev/null || echo 'true')
+# Bounds check: reject adaptive_scripts.directory values that escape the repo root.
+# Normalize REPO_PATH the same way ADAPTIVE_DIR is normalized (realpath -m) so a trailing
+# slash in paths.root does not inject a '//' into the glob and trigger a false positive.
+REPO_PATH_NORM=$(realpath -m "$REPO_PATH" 2>/dev/null || echo "$REPO_PATH")
+if [[ "$ADAPTIVE_DIR" != "${REPO_PATH_NORM}/"* ]]; then
+  echo "WARNING: adaptive_scripts.directory resolves outside repo root ('$ADAPTIVE_DIR') — adaptive tier disabled" >&2
+  ADAPTIVE_ENABLED=false
+fi
+# ForgeDock's own install root (holds scripts/ and commands/), resolved ONCE by the canonical bootstrap
+# below — never the consumer repo: plugin installs set neither FORGE_HOME nor FORGEDOCK_HOME, and a
+# repo-relative fallback would execute (or miss) a same-named script controlled by the consumer repo.
+# Resolution: $FORGEDOCK_HOME (authoritative when set) > $FORGE_HOME > $CLAUDE_PLUGIN_ROOT > the
+# ~/.claude/commands symlink target > the Claude Code plugin cache/marketplace dirs. <!-- forge#3098 -->
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
+  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
+  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
+  _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+  # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
+  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
+  while IFS= read -r _c; do
+    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
+  done <<< "$_k"
+fi
+UNIVERSAL_DIR="${FORGE_ROOT:+$FORGE_ROOT/scripts}"   # empty => tier 3 skipped, prose tier
+# NOTE: never resolve this via `which` or `find` — universal scripts are
+# install-relative, not installed on $PATH, so a PATH lookup always misses.
+# FORGE_ROOT (above) is the deterministic resolution; there is NO repo-path fallback.
+# Pipeline agents MUST NOT use `find` (unbounded or filesystem-wide) to
+# locate pipeline scripts under any circumstances: if UNIVERSAL_DIR/${operation}.sh
+# does not exist, resolve_script() falls through to Tier 4 (prose) below,
+# which is always safe and available. A missing script is never a reason
+# to search the filesystem. <!-- Added: forge#1984 -->
+
+resolve_script() {
+  local operation="$1"
+  # Tier 2: per-repo adaptive (skip if disabled)
+  if [ "$ADAPTIVE_ENABLED" != "false" ] && [ -f "${ADAPTIVE_DIR}/${operation}.sh" ]; then
+    echo "adaptive:${ADAPTIVE_DIR}/${operation}.sh"
+    return
+  fi
+  # Tier 3: universal script
+  if [ -n "$UNIVERSAL_DIR" ] && [ -f "${UNIVERSAL_DIR}/${operation}.sh" ]; then
+    echo "universal:${UNIVERSAL_DIR}/${operation}.sh"
+    return
+  fi
+  # Tier 4: prose fallback
+  echo "prose:"
+}
+```
+
+Workflow-state transitions use the tiered `transition-label` script (adaptive → universal → prose). A transition to state X removes every other `workflow:*` label (full set: investigating, ready-to-build, building, in-review, awaiting-merge, merged, invalid, decomposed). `set_workflow_state <issue> <state>` is used by C2 and C3:
+
+```bash
+set_workflow_state() {
+  local _issue="$1" _state="$2" _res _tier _path _s _rm=""
+  _res=$(resolve_script 'transition-label'); _tier="${_res%%:*}"; _path="${_res#*:}"
+  case "$_tier" in
+    adaptive|universal) bash "$_path" "$_issue" $GH_FLAG "$_state" ;;
+    prose)
+      for _s in investigating ready-to-build building in-review awaiting-merge merged invalid decomposed; do
+        [ "$_s" = "$_state" ] || _rm="${_rm:+$_rm,}workflow:$_s"
+      done
+      gh issue edit "$_issue" $GH_FLAG --add-label "workflow:$_state" --remove-label "$_rm" 2>/dev/null || true # allowlist:check-command-side-effects
+      ;;
+  esac
+}
+```
 
 ---
 
 ## Phase C0: Load State from GitHub (MANDATORY)
 
-Re-read current state before doing anything:
+Re-read current state before doing anything, and re-derive every value this file used to receive from the router. All derivations are best-effort: a value that cannot be found degrades (`—`, `unknown`, `0`) and never aborts the close.
 
 ```bash
 # Issue full context
-gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,milestone
+ISSUE_JSON=$(gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,milestone)
+TITLE=$(printf '%s' "$ISSUE_JSON" | jq -r '.title // ""')
+ISSUE_STATE=$(printf '%s' "$ISSUE_JSON" | jq -r '.state // "UNKNOWN"')
 
-# PR state
-gh pr view {PR_NUMBER} {GH_FLAG} --json state,mergedAt,mergeCommit
+# PR state — only when a PR exists (PR-less terminals: investigation | decomposed | invalid)
+PR_STATE=""; PR_BASE_REF=""
+if [ -n "$PR_NUMBER" ]; then
+  PR_JSON=$(gh pr view {PR_NUMBER} {GH_FLAG} --json state,mergedAt,mergeCommit,baseRefName 2>/dev/null || echo "")
+  PR_STATE=$(printf '%s' "$PR_JSON" | jq -r '.state // ""' 2>/dev/null)
+  PR_BASE_REF=$(printf '%s' "$PR_JSON" | jq -r '.baseRefName // ""' 2>/dev/null)
+fi
+[ -n "$PR_BASE" ] || PR_BASE="$PR_BASE_REF"
 
-# All agent comments (to reconstruct pipeline results)
-gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | {body: .body, created_at: .created_at}'
+# All agent comments (to reconstruct pipeline results) — one paginated read, reused below
+COMMENTS_JSON=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments 2>/dev/null | jq -s 'add // []' 2>/dev/null || echo '[]')
+[ -n "$COMMENTS_JSON" ] || COMMENTS_JSON='[]'
+last_comment_body() {  # $1 = marker substring; prints the newest matching comment body (or empty)
+  printf '%s' "$COMMENTS_JSON" | jq -r --arg m "$1" '[.[] | select(.body | contains($m)) | .body] | last // ""' 2>/dev/null
+}
+INVESTIGATOR_BODY=$(last_comment_body "FORGE:INVESTIGATOR")
+BUILDER_BODY=$(last_comment_body "FORGE:BUILDER")
+FAST_PATH_BODY=$(last_comment_body "FORGE:FAST_PATH")
 ```
 
-Extract from agent comments:
-- From FORGE:INVESTIGATOR: verdict, confidence, task type
-- From FORGE:BUILDER: branch, commits, files changed
-- From FORGE:TRAJECTORY (if exists): prior trajectory entries
+**Merged guard**: if `TERMINAL_STATE` is `merged` and `PR_STATE` is not `MERGED` → print `CLOSE_RESULT: status: FAILED` with `blocker: "PR #{PR_NUMBER} is not merged (state: <PR_STATE>)"` and STOP.
 
 **Resume check**:
-- If `<!-- FORGE:TRAJECTORY -->` comment already exists → trajectory already posted, EXIT with `CLOSE_RESULT: status: ALREADY_DONE`
-- If issue is already CLOSED and PR is MERGED → skip to C3 (just post trajectory if missing)
+- If a `FORGE:TRAJECTORY` comment already exists (`last_comment_body "FORGE:TRAJECTORY"` is non-empty) → trajectory already posted. Print `CLOSE_RESULT: status: ALREADY_DONE` (with `trajectory_url` = that comment's `html_url`, `issue_state` from the live issue) and STOP.
+- If the issue is already CLOSED and the PR is MERGED → C1, C1.7, C1.5 and C2 already ran: set `REMAINING_AFTER=0` and continue at C3 (then C4 → C4.5 → C5 → … — the trajectory is missing, and C5 posts it).
+
+### Derive the values the router no longer passes
+
+```bash
+# --- Lane: --base wins (staging -> fast, milestone/* -> feature); otherwise the PR's baseRefName; otherwise unknown ---
+lane_from_base() { case "$1" in staging) echo fast ;; milestone/*) echo feature ;; *) echo "" ;; esac; }
+LANE=$(lane_from_base "$PR_BASE")
+[ -n "$LANE" ] || LANE=$(lane_from_base "$PR_BASE_REF")
+if [ -z "$LANE" ]; then
+  if [ -n "$PR_BASE" ]; then LANE=feature; else LANE=unknown; fi   # any other base (e.g. main) is treated as feature
+fi
+case "$LANE" in fast) LANE_LABEL="FAST" ;; feature) LANE_LABEL="FEATURE" ;; *) LANE_LABEL="UNKNOWN" ;; esac
+
+# --- Investigation verdict / confidence (FORGE:INVESTIGATOR) — ERE/sed only, no PCRE ---
+VERDICT=$(printf '%s\n' "$INVESTIGATOR_BODY" | sed -n 's/.*\*\*Verdict\*\*: *\([A-Za-z0-9_]*\).*/\1/p' | head -1)
+CONFIDENCE=$(printf '%s\n' "$INVESTIGATOR_BODY" | sed -n 's/.*\*\*Confidence\*\*: *\([A-Za-z0-9_]*\).*/\1/p' | head -1)
+
+# --- Task type + complexity band (FORGE:FAST_PATH; fall back to the investigator's task type) ---
+TASK_TYPE=$(printf '%s\n' "$FAST_PATH_BODY" | sed -n 's/.*\*\*Task [Tt]ype\*\*: *\(.*[^ ]\) *$/\1/p' | head -1)
+[ -n "$TASK_TYPE" ] || TASK_TYPE=$(printf '%s\n' "$INVESTIGATOR_BODY" | sed -n 's/.*\*\*Task Type\*\*: *\(.*[^ ]\) *$/\1/p' | head -1)
+TASK_TYPE=${TASK_TYPE:-unknown}
+COMPLEXITY_BAND=$(printf '%s\n' "$FAST_PATH_BODY" | sed -n 's/.*\*\*COMPLEXITY_BAND\*\*: *\([A-Za-z_]*\).*/\1/p' | head -1 | tr '[:lower:]' '[:upper:]')
+COMPLEXITY_BAND=${COMPLEXITY_BAND:-unknown}
+
+# --- Files changed (FORGE:BUILDER) ---
+FILES_CHANGED=$(printf '%s\n' "$BUILDER_BODY" | sed -n 's/.*\*\*Files changed\*\*: *\([0-9][0-9]*\).*/\1/p' | head -1)
+FILES_CHANGED=${FILES_CHANGED:-—}
+case "$FILES_CHANGED" in ''|*[!0-9]*) FILES_CHANGED_JSON=null ;; *) FILES_CHANGED_JSON="$FILES_CHANGED" ;; esac
+
+# --- Quality gate: one FORGE:QUALITY_GATE comment per gate run => iteration count ---
+GATE_ITERATIONS=$(printf '%s' "$COMMENTS_JSON" | jq '[.[] | select(.body | contains("FORGE:QUALITY_GATE"))] | length' 2>/dev/null)
+GATE_ITERATIONS=${GATE_ITERATIONS:-0}
+GATE_RESULT=$(last_comment_body "FORGE:QUALITY_GATE" | sed -n 's/.*\*\*Result\*\*: *\([A-Za-z]*\).*/\1/p' | head -1 | tr '[:upper:]' '[:lower:]')
+if [ "$GATE_ITERATIONS" -eq 0 ]; then GATE_ROW="⏭ No gate record"; GATE_NOTE="docs-only change or gate marker not recorded"
+elif [ "$GATE_RESULT" = "pass" ]; then GATE_ROW="✅ Gate passed"; GATE_NOTE="${GATE_ITERATIONS} iteration(s)"
+else GATE_ROW="⚠ Gate result: ${GATE_RESULT:-unknown}"; GATE_NOTE="${GATE_ITERATIONS} iteration(s)"; fi
+GATE_PASS_FAIL=${GATE_RESULT:-unknown}
+
+# --- Verification status: the "**Verification Status**" line of the FORGE:BUILDER comment ---
+VERIFICATION_LINE=$(printf '%s\n' "$BUILDER_BODY" | sed -n 's/.*\*\*Verification Status\*\*: *\(.*\)$/\1/p' | head -1)
+VERIFICATION_SKIPPED_CHECKS=""
+case "$VERIFICATION_LINE" in
+  "") VERIFICATION_ROW="— (no verification status recorded)" ;;
+  *"Verification NOT run:"*)
+    VERIFICATION_SKIPPED_CHECKS=$(printf '%s' "$VERIFICATION_LINE" | sed 's/.*Verification NOT run: *//; s/ — verification.commands.*//')
+    VERIFICATION_ROW="⚠ Skipped — verification.commands not configured for: ${VERIFICATION_SKIPPED_CHECKS}" ;;
+  *) VERIFICATION_ROW="✅ Ran" ;;
+esac
+
+# --- PR reference line for the issue body (PR-less terminals use the no-PR form) ---
+if [ -n "$PR_NUMBER" ]; then PR_LINE="**PR**: #${PR_NUMBER} → merged to \`${PR_BASE}\`"
+else PR_LINE="**Result**: ${TERMINAL_STATE} (no PR)"; fi
+```
+
+Also available from the comments read above: from FORGE:INVESTIGATOR — verdict, confidence, task type; from FORGE:BUILDER — branch, commits, files changed; from FORGE:TRAJECTORY (if exists) — prior trajectory entries.
 
 ---
 
@@ -69,6 +259,12 @@ log — it does NOT abort the close phase (advisory enforcement: flag, then cont
 **Skip if**: `forge-invariants.yaml` is absent or `bin/engine/invariants.mjs`
 is unavailable (e.g. fresh install before this file ships). Fail-open.
 
+The evaluator module is imported from ForgeDock's OWN install root (`FORGE_ROOT`, else
+`FORGEDOCK_HOME`, else `FORGE_HOME` — absolute paths only), never from the consumer cwd, so a
+consumer repo cannot supply the JS that runs here. If none of them holds
+`bin/engine/invariants.mjs`, the check is skipped (fail-open). Paths are passed as argv and
+converted with `pathToFileURL`, never concatenated into a `file://` string.
+
 ```bash
 # Read local run-log for this issue (absolute path matches engine run-log dir)
 RUN_LOG_DIR="${HOME}/.forge/runs"
@@ -76,16 +272,21 @@ RUN_LOG_FILE="${RUN_LOG_DIR}/{NUMBER}.jsonl"
 
 INVARIANT_ANOMALIES=""
 
-if [ -f "${RUN_LOG_FILE}" ] && [ -f "$(dirname "$(which node)")/node" ] 2>/dev/null; then
+INV_MODULE=""
+for _r in "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}"; do
+  case "$_r" in /*) [ -z "$INV_MODULE" ] && [ -r "$_r/bin/engine/invariants.mjs" ] && INV_MODULE="$_r/bin/engine/invariants.mjs" ;; esac
+done
+
+if [ -n "$INV_MODULE" ] && [ -f "${RUN_LOG_FILE}" ] && [ -f "$(dirname "$(which node)")/node" ] 2>/dev/null; then
   # Check close-scope invariants via the evaluator
   INVARIANT_RESULT=$(node -e "
-    import(new URL('file://$(pwd)/bin/engine/invariants.mjs'))
+    import(require('node:url').pathToFileURL(process.argv[1]).href)
       .then(m => {
-        const decls = m.loadInvariants('$(pwd)/forge-invariants.yaml');
+        const decls = m.loadInvariants(process.argv[2]);
         const fs = require('fs');
         let events = [];
         try {
-          const lines = fs.readFileSync('${RUN_LOG_FILE}', 'utf-8').split('\n').filter(Boolean);
+          const lines = fs.readFileSync(process.argv[3], 'utf-8').split('\n').filter(Boolean);
           events = lines.flatMap(l => { try { return [JSON.parse(l)]; } catch { return []; } });
         } catch {}
         const results = m.assertCloseInvariants(decls, events);
@@ -96,7 +297,7 @@ if [ -f "${RUN_LOG_FILE}" ] && [ -f "$(dirname "$(which node)")/node" ] 2>/dev/n
         }
       })
       .catch(() => process.exit(0));  // fail-open on any error
-  " 2>&1) || INVARIANT_ANOMALIES="${INVARIANT_RESULT}"
+  " "$INV_MODULE" "$(pwd)/forge-invariants.yaml" "${RUN_LOG_FILE}" 2>&1) || INVARIANT_ANOMALIES="${INVARIANT_RESULT}"
 
   if [ -n "$INVARIANT_ANOMALIES" ]; then
     echo "CLOSE-SCOPE INVARIANT ANOMALY (flagging — close continues):"
@@ -112,7 +313,7 @@ fi
 CLOSE_INVARIANT_ISSUE_CHECK=true
 ```
 
-**Post-C2 check** (evaluate after Phase C2 runs the `gh issue close` command):
+**Post-C2 check** (evaluate after Phase C2 runs the `gh issue close` command; only on paths where C2 reached its close branch — `REMAINING_AFTER == 0` and `TERMINAL_STATE` is `merged` or `investigation` — otherwise skip it):
 
 ```bash
 if [ "${CLOSE_INVARIANT_ISSUE_CHECK:-false}" = "true" ]; then
@@ -125,12 +326,16 @@ if [ "${CLOSE_INVARIANT_ISSUE_CHECK:-false}" = "true" ]; then
 fi
 ```
 
-The `INVARIANT_ANOMALIES` variable is read in Phase C4.5 (trajectory post) and written to the **Anomalies** field.
+The `INVARIANT_ANOMALIES` variable is read in Phase C5 (Step 1) and rendered in the trajectory's **Anomalies** field (joined with `; `; `None` only when it is empty and the review ran).
 
 ---
 
 
 ## Phase C1: Final Issue Body Update
+
+**Skip if**: `TERMINAL_STATE` is `decomposed` or `invalid` (set `REMAINING_AFTER=0`; nothing to check off).
+
+**Fresh read — intentionally NOT covered by the session-state cache.** The body is about to be rewritten below, and the review phase's `/review-pr` invocation is an external process that can post comments/edits between the last read and here. Writing back a stale cached body would silently revert any concurrent change, so this file always fetches the body fresh immediately before a body mutation (the parent body in Phase C3 likewise).
 
 **Multi-phase guard**: Before checking off items, detect whether the issue has multiple phases. Only check off items belonging to the current completed phase — not all remaining items across future phases.
 
@@ -144,8 +349,8 @@ REMAINING_BEFORE=$(printf '%s\n' "$BODY" | grep -cE '^[-*+] \[ \]' || true)
 
 **If `REMAINING_BEFORE == 0`** (no unchecked items): skip body edit — all items already checked, proceed to add PR reference only:
 ```bash
-UPDATED_BODY="${BODY}"$'\n\n'"**PR**: #{PR_NUMBER} → merged to \`{PR_BASE}\`"
-gh issue edit {NUMBER} {GH_FLAG} --body "{UPDATED_BODY}"
+UPDATED_BODY="${BODY}"$'\n\n'"${PR_LINE}"
+gh issue edit {NUMBER} {GH_FLAG} --body "$UPDATED_BODY" # allowlist:check-command-side-effects
 REMAINING_AFTER=0
 ```
 
@@ -184,21 +389,21 @@ CHECKBOX_SECTIONS=$(printf '%s\n' "$BODY_STRIPPED" | awk '
 # issue forces multi-phase.
 SUBISSUE_ITEMS=$(printf '%s\n' "$BODY_STRIPPED" | grep -cE '^[-*+] \[ \] #[0-9]+' || true)
 
-# Keep this consuming guard synchronized with Phase 6A's Sync invariant in
-# commands/work-on.md.
+# Keep this classifier and consuming guard unchanged unless scripts/checkbox-sections.test.sh
+# is updated with them.
 # Both counters are default-expanded: a failed extraction yields an empty string,
 # not 0, which would make the integer test error out rather than evaluate false.
 if [ "${CHECKBOX_SECTIONS:-0}" -ge 2 ] || [ "${SUBISSUE_ITEMS:-0}" -gt 0 ]; then
   # Multi-phase issue: do NOT check off any [ ] items
   # Only add the PR reference so progress is recorded
-  UPDATED_BODY="${BODY}"$'\n\n'"**PR**: #{PR_NUMBER} → merged to \`{PR_BASE}\` (phase complete — remaining phases open)"
-  gh issue edit {NUMBER} {GH_FLAG} --body "{UPDATED_BODY}"
+  UPDATED_BODY="${BODY}"$'\n\n'"${PR_LINE} (phase complete — remaining phases open)"
+  gh issue edit {NUMBER} {GH_FLAG} --body "$UPDATED_BODY" # allowlist:check-command-side-effects
   REMAINING_AFTER="$REMAINING_BEFORE"
 else
   # Single-phase issue: check off all remaining GFM task items
   UPDATED_BODY=$(printf '%s\n' "$BODY" | sed 's/^\([-*+]\) \[ \]/\1 [x]/g')
-  UPDATED_BODY="${UPDATED_BODY}"$'\n\n'"**PR**: #{PR_NUMBER} → merged to \`{PR_BASE}\`"
-  gh issue edit {NUMBER} {GH_FLAG} --body "{UPDATED_BODY}"
+  UPDATED_BODY="${UPDATED_BODY}"$'\n\n'"${PR_LINE}"
+  gh issue edit {NUMBER} {GH_FLAG} --body "$UPDATED_BODY" # allowlist:check-command-side-effects
   REMAINING_AFTER=0
 fi
 ```
@@ -213,7 +418,7 @@ The `REMAINING_AFTER` variable is passed to Phase C2 to decide whether to close.
 
 **This phase is non-blocking** — if the dossier write fails, log the reason and continue to Phase C1.5. Never stall close for dossier maintenance.
 
-**Skip if**: `{PR_NUMBER}` is empty (investigation-only tasks) OR `{REPO_PATH}` is unset OR `devdocs/index.yaml` does not contain a `modules:` section OR no PR files match any module glob.
+**Skip if**: `{PR_NUMBER}` is empty (investigation / decomposed / invalid terminals — `TERMINAL_STATE` is not `merged`) OR `$REPO_PATH` is unset OR `devdocs/index.yaml` does not contain a `modules:` section OR no PR files match any module glob.
 
 ### Step 1: Resolve affected files from FORGE:BUILDER comment
 
@@ -252,7 +457,7 @@ fi
 ```bash
 CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
 DEVDOCS_REL=$(yq '.devdocs.path // "devdocs"' "$CONFIG_FILE" 2>/dev/null || echo "devdocs")
-DEVDOCS_PATH="${REPO_PATH:-{REPO_PATH}}/${DEVDOCS_REL}"
+DEVDOCS_PATH="${REPO_PATH}/${DEVDOCS_REL}"
 INDEX_PATH="${DEVDOCS_PATH}/index.yaml"
 
 if [ ! -f "$INDEX_PATH" ]; then
@@ -359,7 +564,7 @@ done <<< "$MODULE_ENTRIES"
 ```bash
 if [ -n "$DOSSIER_UPDATED_MODULES" ]; then
   # Commit the updated dossier files
-  cd "{REPO_PATH}"
+  cd "${REPO_PATH}"
   CHANGED_DOSSIER_FILES=$(echo "$DOSSIER_UPDATED_MODULES" | tr ' ' '\n' | while IFS= read -r mod; do
     yq ".modules[]? | select(.name == \"${mod}\") | \"${DEVDOCS_REL}/\" + .path" "$INDEX_PATH" 2>/dev/null
   done | grep -v '^$')
@@ -369,11 +574,11 @@ if [ -n "$DOSSIER_UPDATED_MODULES" ]; then
     # spaces are staged individually rather than word-split by the shell.
     while IFS= read -r dossier_file; do
       [ -n "$dossier_file" ] || continue
-      git -C "{REPO_PATH}" add "$dossier_file" 2>/dev/null || true
+      git -C "${REPO_PATH}" add "$dossier_file" 2>/dev/null || true
     done <<< "$CHANGED_DOSSIER_FILES"
     # Only commit if there are staged changes (new or modified dossier files)
-    if ! git -C "{REPO_PATH}" diff --cached --quiet 2>/dev/null; then
-      git -C "{REPO_PATH}" commit -s -m "docs(dossier): append entry for PR #{PR_NUMBER} (#${NUMBER})" 2>/dev/null || true
+    if ! git -C "${REPO_PATH}" diff --cached --quiet 2>/dev/null; then
+      git -C "${REPO_PATH}" commit -s -m "docs(dossier): append entry for PR #{PR_NUMBER} (#${NUMBER})" 2>/dev/null || true
       echo "Phase C1.7: Dossier commit created for modules:${DOSSIER_UPDATED_MODULES}"
     else
       echo "Phase C1.7: No staged dossier changes — skipping commit"
@@ -397,9 +602,11 @@ fi
 
 ## Phase C1.5: Project Board Update (Status=Done, Workflow=Merged)
 
+**Skip if**: `TERMINAL_STATE` is `decomposed` or `invalid`. Non-blocking: a missing board, item or option never stalls the close.
+
 Update the project board to reflect the merged state. This replaces the old Phase 5E project board update that existed before the modular refactor.
 
-**Read project board config from `forge.yaml`**. If the `project_board` section is absent or commented out, skip this phase entirely:
+**Read project board config from `forge.yaml → project_board`** (`owner`, `project_number`, `project_id`, `field_ids`, `option_ids`). **Fallback**: if the `project_board` section is absent, fall back to `forge.yaml → project.owner` and project number `1`, and resolve the project id, field ids and option ids from the board itself (`gh project view` / `gh project field-list`). If even that yields no owner, project id or Status field, skip the board update:
 
 ```bash
 # Read project board config from forge.yaml
@@ -412,8 +619,23 @@ WORKFLOW_FIELD_ID=$(yq '.project_board.field_ids.workflow // ""' "$CONFIG_FILE" 
 STATUS_DONE_OPTION_ID=$(yq '.project_board.option_ids.status.done // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
 WORKFLOW_MERGED_OPTION_ID=$(yq '.project_board.option_ids.workflow.merged // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
 
+# project_board section absent -> fall back to project.owner + project number 1 and discover the ids
+if [ -z "$PROJECT_BOARD_OWNER" ] && [ -z "$PROJECT_ID" ]; then
+  PROJECT_BOARD_OWNER=$(yq '.project.owner // ""' "$CONFIG_FILE" 2>/dev/null || echo "")
+  PROJECT_NUMBER="${PROJECT_NUMBER:-1}"
+  if [ -n "$PROJECT_BOARD_OWNER" ]; then
+    PROJECT_ID=$(gh project view "$PROJECT_NUMBER" --owner "$PROJECT_BOARD_OWNER" --format json --jq '.id' 2>/dev/null || echo "")
+    FIELDS_JSON=$(gh project field-list "$PROJECT_NUMBER" --owner "$PROJECT_BOARD_OWNER" --format json 2>/dev/null || echo "")
+    STATUS_FIELD_ID=$(printf '%s' "$FIELDS_JSON" | jq -r '.fields[]? | select(.name == "Status") | .id' 2>/dev/null | head -1)
+    STATUS_DONE_OPTION_ID=$(printf '%s' "$FIELDS_JSON" | jq -r '.fields[]? | select(.name == "Status") | .options[]? | select(.name == "Done") | .id' 2>/dev/null | head -1)
+    WORKFLOW_FIELD_ID=$(printf '%s' "$FIELDS_JSON" | jq -r '.fields[]? | select(.name == "Workflow") | .id' 2>/dev/null | head -1)
+    WORKFLOW_MERGED_OPTION_ID=$(printf '%s' "$FIELDS_JSON" | jq -r '.fields[]? | select(.name == "Workflow") | .options[]? | select(.name == "Merged") | .id' 2>/dev/null | head -1)
+  fi
+fi
+PROJECT_NUMBER="${PROJECT_NUMBER:-1}"
+
 if [ -z "$PROJECT_BOARD_OWNER" ] || [ -z "$PROJECT_ID" ] || [ -z "$STATUS_FIELD_ID" ]; then
-  echo "INFO: project_board not configured in forge.yaml — skipping board update"
+  echo "INFO: project board not configured or not discoverable — skipping board update"
   # → STOP: do not proceed to ITEM_ID fetch or board update — continue to Phase C2
 else
   # Project board is configured — find the item and update it
@@ -462,7 +684,9 @@ To find your project IDs: `gh project list --owner {owner}` and `gh project fiel
 
 ## Phase C2: Ensure Issue is Closed
 
-**Multi-phase guard**: If `REMAINING_AFTER > 0` (set in Phase C1), uncompleted phases remain — do NOT close the issue. Instead, post a phase-complete comment and exit early so the router can pick up the next phase on the next pipeline iteration.
+**Skip if**: `TERMINAL_STATE` is `decomposed` or `invalid` (the issue is not closed by this phase — see Terminal-state routing).
+
+**Multi-phase guard**: If `REMAINING_AFTER > 0` (set in Phase C1), uncompleted phases remain — do NOT close the issue. Instead, post a phase-complete comment and return early so the router can pick up the next phase.
 
 ```bash
 ISSUE_STATE=$(gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state')
@@ -470,106 +694,107 @@ ISSUE_STATE=$(gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state')
 
 **If `REMAINING_AFTER > 0`** (multi-phase: uncompleted phases remain):
 ```bash
-# Post phase-complete marker — work-on.md's Universal continuation rule will re-read labels and continue to the next phase
+# Post phase-complete marker — the router's continuation rule re-reads labels and continues to the next phase
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:PHASE:COMPLETE -->
-Phase complete. PR #{PR_NUMBER} merged to \`{PR_BASE}\`. ${REMAINING_AFTER} phase item(s) remain — leaving issue open for next pipeline iteration."
+Phase complete. PR #{PR_NUMBER} merged to \`{PR_BASE}\`. ${REMAINING_AFTER} phase item(s) remain — leaving issue open for next pipeline iteration." # allowlist:check-command-side-effects
 
-# Update labels to reflect phase complete — remove current-phase labels and set next-phase label
-# so the router has a signal for which phase comes next (fixes: issue #1381)
-gh issue edit {NUMBER} {GH_FLAG} \
-  --remove-label "workflow:in-review,workflow:building,workflow:investigating" \
-  --add-label "workflow:investigating" 2>/dev/null || true
+# Reset the workflow label to investigating so the router has a signal for which phase comes next
+# (fixes: issue #1381). The transition removes every other workflow:* label (tiered transition-label dispatch).
+set_workflow_state {NUMBER} investigating
+```
 
-# EXIT — do not close, do not post trajectory, do not run C3–C6
-# Return CLOSE_RESULT: status: PHASE_COMPLETE to caller
-exit 0
+Then STOP — do not close, do not post a trajectory, do not run C3–C6 (the worktree is kept for the next phase). Print the final reply:
+
+```
+CLOSE_RESULT:
+  status: PHASE_COMPLETE
+  issue_state: open
+  trajectory_url:
+  decision_record_url:
+  parent_updated: false
+  parent_closed: false
+  blocker:
 ```
 
 **If `REMAINING_AFTER == 0`** (all phases complete — single-phase or final phase of multi-phase):
 
 If state is `OPEN`:
 ```bash
-gh issue close {NUMBER} {GH_FLAG} \
-  --comment "Closed: PR #{PR_NUMBER} merged to \`{PR_BASE}\`. Closes #{NUMBER}."
+if [ "$ISSUE_STATE" = "OPEN" ]; then
+  if [ -n "$PR_NUMBER" ]; then CLOSE_COMMENT="Closed: PR #{PR_NUMBER} merged to \`{PR_BASE}\`. Closes #{NUMBER}."
+  else CLOSE_COMMENT="Closed: investigation complete (no PR). Closes #{NUMBER}."; fi
+  gh issue close {NUMBER} {GH_FLAG} --comment "$CLOSE_COMMENT" # allowlist:check-command-side-effects
+fi
 ```
 
-Add merged label:
+Transition the workflow label to `merged` (tiered `transition-label` dispatch; the prose tier removes the FULL set: investigating, ready-to-build, building, in-review, awaiting-merge, invalid, decomposed):
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} \
-  --add-label "workflow:merged" \
-  --remove-label "workflow:in-review,workflow:building,workflow:investigating" 2>/dev/null || true
+set_workflow_state {NUMBER} merged
 ```
 
 ---
 
 ## Phase C3: Parent Tracker Update (Sub-Issues Only)
 
-**Skip if**: Issue body does NOT contain a parent issue reference (e.g. `Part of #NNN`) or the issue has no parent in its milestone tracker.
+**Skip if**: `TERMINAL_STATE` is `decomposed` or `invalid`, OR the issue body does NOT contain a parent issue reference (e.g. `Part of #NNN`) or the issue has no parent in its milestone tracker.
 
-Detect parent reference. Markdown emphasis markers (`**bold**`, `__bold__`, `*italic*`) are stripped before matching, since sub-issue bodies commonly render the label as `**Parent**: #NNN` and the bare label alternation below would otherwise fail to match past the emphasis characters:
+Detect parent reference. Markdown emphasis markers (`**bold**`, `__bold__`, `*italic*`) are stripped before matching, since sub-issue bodies commonly render the label as `**Parent**: #NNN` and the bare label alternation below would otherwise fail to match past the emphasis characters. POSIX ERE only (no PCRE — `grep -P` is unavailable on macOS/BSD grep):
 ```bash
 PARENT_REF=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' \
   | sed -E 's/[*_]+//g' \
-  | grep -oP '(?i)(part of|spawned from|sub-issue of|parent issue[:]?|parent[:])\s*#\K\d+' \
-  | head -1)
+  | grep -ioE '(part of|spawned from|sub-issue of|parent issue:?|parent:)[[:space:]]*#[0-9]+' \
+  | head -1 | sed 's/.*#//')
+PARENT_UPDATED=false; PARENT_CLOSED=false
 ```
 
-If no parent reference found → log a warning and skip this phase:
+If no parent reference found → log a warning and skip this phase (`PARENT_STATUS="⏭ Skipped"`, `PARENT_NOTES="No parent tracker"`):
 ```bash
 echo "WARNING: No parent reference found in issue body — skipping parent tracker update"
 ```
 
 If parent found:
 ```bash
-# Read parent body
-PARENT_BODY=$(gh issue view {PARENT_REF} {GH_FLAG} --json body --jq '.body')
+# Read parent body (fresh read immediately before the body mutation)
+PARENT_BODY=$(gh issue view "$PARENT_REF" {GH_FLAG} --json body --jq '.body')
 
-# Check off this sub-issue in parent body (replace "- [ ] #{NUMBER}" with "- [x] #{NUMBER}")
-UPDATED_PARENT=$(echo "$PARENT_BODY" | sed "s/- \[ \] #${NUMBER}/- [x] #${NUMBER}/g")
-gh issue edit {PARENT_REF} {GH_FLAG} --body "$UPDATED_PARENT"
+# Check off this sub-issue in parent body (replace "- [ ] #{NUMBER}" with "- [x] #{NUMBER}"; the trailing guard stops #12 matching #123)
+UPDATED_PARENT=$(printf '%s\n' "$PARENT_BODY" | sed -E "s/- \[ \] #${NUMBER}([^0-9]|\$)/- [x] #${NUMBER}\1/g")
+gh issue edit "$PARENT_REF" {GH_FLAG} --body "$UPDATED_PARENT" # allowlist:check-command-side-effects
+PARENT_UPDATED=true
 
-# Check if all sub-issues are now closed
-OPEN_SUBS=$(echo "$UPDATED_PARENT" | grep -c '\- \[ \]' || true)
+# Check if all sub-issues are now checked off
+OPEN_SUBS=$(printf '%s\n' "$UPDATED_PARENT" | grep -cE '^[[:space:]]*[-*+] \[ \]' || true)
+OPEN_SUBS=${OPEN_SUBS:-0}
 ```
 
-If `OPEN_SUBS == 0` (all sub-issues checked off):
+If `OPEN_SUBS == 0` (all sub-issues checked off) — close the parent and transition it to `merged` with the same tiered dispatch and FULL remove list as C2:
 ```bash
-gh issue close {PARENT_REF} {GH_FLAG} \
-  --comment "All sub-issues complete. Closing parent tracker. Last completed: #{NUMBER} (PR #{PR_NUMBER})."
-gh issue edit {PARENT_REF} {GH_FLAG} --add-label "workflow:merged"
+if [ "$OPEN_SUBS" -eq 0 ]; then
+  gh issue close "$PARENT_REF" {GH_FLAG} --comment "All sub-issues complete. Closing parent tracker. Last completed: #{NUMBER}${PR_NUMBER:+ (PR #${PR_NUMBER})}." # allowlist:check-command-side-effects
+  set_workflow_state "$PARENT_REF" merged
+  PARENT_CLOSED=true
+fi
 ```
+
+Set `PARENT_STATUS="✅ Complete"` and `PARENT_NOTES="Checked off in #${PARENT_REF}"` when the parent was updated.
 
 ---
 
 ## Phase C4: Summary Report
 
-Reconstruct the pipeline summary from GitHub state:
-
-```bash
-# Get investigation verdict from FORGE:INVESTIGATOR comment
-VERDICT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' \
-  | grep -oP '(?<=\*\*Verdict\*\*: )\w+' | head -1)
-
-CONFIDENCE=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' \
-  | grep -oP '(?<=\*\*Confidence\*\*: )\w+' | head -1)
-
-# Get files changed from FORGE:BUILDER comment
-FILES_CHANGED=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | contains("FORGE:BUILDER")) | .body' \
-  | grep -oP '(?<=\*\*Files changed\*\*: )\d+' | head -1)
-```
+All values (`TITLE`, `VERDICT`, `CONFIDENCE`, `LANE_LABEL`, `FILES_CHANGED`, …) were derived from GitHub state in Phase C0 — do not re-guess them.
 
 Output to stdout (returned to calling agent):
 
 ```
 ## Done: #{NUMBER} — {TITLE}
 - Investigation: {VERDICT} ({CONFIDENCE})
-- Lane: FEATURE
+- Lane: {LANE_LABEL}
 - Fix: {BRANCH} → PR #{PR_NUMBER} → merged to `{PR_BASE}`
 - Files changed: {FILES_CHANGED}
 ```
+
+For PR-less terminals replace the `Fix:` line with `- Outcome: {TERMINAL_STATE} (no PR)`. Render a missing `VERDICT`/`CONFIDENCE` as `—`.
 
 ---
 
@@ -585,16 +810,18 @@ value renders as `—` and NEVER aborts the card. Do NOT fabricate stats.**
 ### C4.5a: Gather real stats
 
 ```bash
-# Commit / diff stats from the merged PR (single API call). Fallbacks to "—" if absent.
-PR_STATS=$(gh pr view {PR_NUMBER} {GH_FLAG} --json commits,additions,deletions,baseRefName,isDraft 2>/dev/null)
+# Commit / diff stats from the merged PR (single API call). Fallbacks to "—" if absent or PR-less.
+PR_STATS=""
+[ -n "$PR_NUMBER" ] && PR_STATS=$(gh pr view {PR_NUMBER} {GH_FLAG} --json commits,additions,deletions,baseRefName,isDraft 2>/dev/null)
 COMMITS=$(echo "$PR_STATS"   | jq -r '(.commits | length) // empty' 2>/dev/null); COMMITS=${COMMITS:-—}
 ADDITIONS=$(echo "$PR_STATS" | jq -r '.additions // empty' 2>/dev/null); ADDITIONS=${ADDITIONS:-—}
 DELETIONS=$(echo "$PR_STATS" | jq -r '.deletions // empty' 2>/dev/null); DELETIONS=${DELETIONS:-—}
-PR_TARGET=$(echo "$PR_STATS" | jq -r '.baseRefName // empty' 2>/dev/null); PR_TARGET=${PR_TARGET:-{PR_BASE}}
+PR_TARGET=$(echo "$PR_STATS" | jq -r '.baseRefName // empty' 2>/dev/null); PR_TARGET=${PR_TARGET:-${PR_BASE:-—}}
 IS_DRAFT=$(echo "$PR_STATS"  | jq -r '.isDraft // false' 2>/dev/null)
 
-# Review summary — count domain-agent verdicts posted by /review-pr on the PR.
-REVIEW_BODIES=$(gh pr view {PR_NUMBER} {GH_FLAG} --json reviews,comments \
+# Review summary — count domain-agent verdicts posted by /review-pr on the PR (PR-less: nothing to count).
+REVIEW_BODIES=""
+[ -n "$PR_NUMBER" ] && REVIEW_BODIES=$(gh pr view {PR_NUMBER} {GH_FLAG} --json reviews,comments \
   --jq '[.reviews[].body // ""] + [.comments[].body // ""] | .[]' 2>/dev/null)
 # NOTE: `grep -c` already prints `0` on no match (and exits non-zero) — do NOT add
 # `|| echo 0`, which would append a second line ("0\n0") and break the arithmetic
@@ -624,13 +851,15 @@ if [ -n "$FIRST_TS" ]; then
   else ELAPSED="—"; ELAPSED_SECS=0; fi
 else ELAPSED="—"; ELAPSED_SECS=0; fi
 
-# Pipeline line + status — reflect the ACTUAL terminal state.
-#   merged    → investigate → architect → build → review → merge ✓
-#   decomposed→ investigate → decompose ⏹ (sub-issues spawned)
-#   invalid   → investigate → invalid ✗
-#   blocked   → investigate → … → blocked ⚠ (needs-human)
-#   draft PR  → append "(draft)" to the merge segment
-case "{TERMINAL_STATE}" in
+# Pipeline line + status — reflect the ACTUAL terminal state (from --terminal-state).
+#   merged        → investigate → architect → build → review → merge ✓
+#   investigation → investigate ✓ (investigation only, no PR)
+#   decomposed    → investigate → decompose ⏹ (sub-issues spawned)
+#   invalid       → investigate → invalid ✗
+#   blocked       → investigate → … → blocked ⚠ (needs-human; not a --terminal-state value, kept for card rendering)
+#   draft PR      → append "(draft)" to the merge segment
+case "$TERMINAL_STATE" in
+  investigation) PIPELINE_LINE="investigate ✓ (investigation only)"; CARD_STATUS="investigation" ;;
   decomposed) PIPELINE_LINE="investigate → decompose ⏹"; CARD_STATUS="decomposed" ;;
   invalid)    PIPELINE_LINE="investigate → invalid ✗";   CARD_STATUS="invalid" ;;
   blocked)    PIPELINE_LINE="investigate → build → blocked ⚠"; CARD_STATUS="blocked" ;;
@@ -641,7 +870,7 @@ esac
 
 ### C4.5b: Render the card to stdout
 
-Print the card to stdout (the calling agent surfaces it in the terminal). Card inner
+Print the card to stdout (the calling agent surfaces it in the terminal; the router relays only the `CLOSE_RESULT:` block, so print the card BEFORE it). Card inner
 width is **51** columns. Truncate the title with an ellipsis (`…`) if `#{NUMBER} — {TITLE}`
 exceeds the field; pad shorter lines with spaces so the right border `║` stays aligned.
 
@@ -661,6 +890,7 @@ exceeds the field; pad shorter lines with spaces so the right border `║` stays
 ```
 
 **Edge-case rendering**:
+- Investigation-only: header `ForgeDock Pipeline — Investigation Complete`; `Pipeline:` shows `investigate ✓ (investigation only)`; `PR:`, `Review:`, `Commits:` render `—`.
 - Decomposed: title line stays; `Pipeline:` shows `investigate → decompose ⏹`; `PR:`, `Review:`, `Commits:` render `—`; the header reads `ForgeDock Pipeline — Decomposed`.
 - Invalid: header `ForgeDock Pipeline — Closed (invalid)`; `Pipeline:` shows `investigate → invalid ✗`; downstream stats `—`.
 - Blocked / needs-human: header `ForgeDock Pipeline — Blocked`; `Review:`/`PR:` reflect last known state; remaining stats `—`.
@@ -668,16 +898,16 @@ exceeds the field; pad shorter lines with spaces so the right border `║` stays
 
 ### C4.5c: Build the machine-readable twin
 
-Assemble the JSON object below (used verbatim by Phase C5). Numeric stats that were `—`
+Assemble the JSON object below. Its field set is exactly what Phase C5 passes to the codec `emit CARD --b64` call (including `title` and `blockers`); the JSON itself is for local use/debugging and is not embedded. Numeric stats that were `—`
 become `null` in JSON; never emit `"—"` as a number.
 
 ```bash
 CARD_JSON=$(jq -nc \
   --argjson issue {NUMBER} \
-  --arg title "{TITLE}" \
+  --arg title "$TITLE" \
   --arg status "$CARD_STATUS" \
   --arg pipeline "$PIPELINE_LINE" \
-  --arg pr "{PR_NUMBER}" \
+  --arg pr "$PR_NUMBER" \
   --arg target "$PR_TARGET" \
   --arg commits "$COMMITS" --arg adds "$ADDITIONS" --arg dels "$DELETIONS" \
   --arg review "$REVIEW_SUMMARY" --argjson blockers "${BLOCKERS:-0}" \
@@ -694,18 +924,92 @@ CARD_JSON=$(jq -nc \
 
 ## Phase C5: Trajectory Log (MANDATORY)
 
-**CODEC PATH (forge#1727)**: Post the `<!-- FORGE:TRAJECTORY -->` comment via the protocol codec — do NOT hand-roll the opening tag. Use `forge-annotation.sh write TRAJECTORY --field ...` or `node packages/protocol/src/cli.js emit TRAJECTORY` to produce the opening tag. The codec handles any field escaping automatically.
+**CODEC PATH (forge#1727)**: Post the `<!-- FORGE:TRAJECTORY -->` comment via the protocol codec — do NOT hand-roll the opening tag. Use `node "$CODEC_CLI" emit TRAJECTORY` (or `forge-annotation.sh write TRAJECTORY --field ...`) to produce the opening tag; the codec handles any field escaping. `CODEC_CLI` resolves from the ForgeDock install root (`FORGE_ROOT`, from the script-resolution block), never from the consumer's cwd.
+
+**This file is the single source** for the trajectory comment, the summary card and the decision record — there is no second inline copy to keep in sync.
+
+### Step 1: Resolve the codec, review row, anomalies, decisions
 
 ```bash
-# Codec produces the opening <!-- FORGE:TRAJECTORY --> tag
-TRAJECTORY_HEADER=$(node packages/protocol/src/cli.js emit TRAJECTORY)
-# $TRAJECTORY_HEADER = "<!-- FORGE:TRAJECTORY -->"
-# Append the Markdown body sections, then post via gh issue comment.
+CODEC_CLI=""
+[ -n "${FORGE_ROOT:-}" ] && [ -f "$FORGE_ROOT/packages/protocol/src/cli.js" ] && CODEC_CLI="$FORGE_ROOT/packages/protocol/src/cli.js"
+[ -z "$CODEC_CLI" ] && [ -f "$REPO_PATH/packages/protocol/src/cli.js" ] && CODEC_CLI="$REPO_PATH/packages/protocol/src/cli.js"
+TRAJECTORY_HEADER=""
+[ -n "$CODEC_CLI" ] && TRAJECTORY_HEADER=$(node "$CODEC_CLI" emit TRAJECTORY 2>/dev/null)
+# Codec CLI genuinely absent (not installed): the literal opening tag is the exact string the codec emits.
+[ -n "$TRAJECTORY_HEADER" ] || TRAJECTORY_HEADER="<!-- FORGE:TRAJECTORY -->"
 ```
 
-Post the `<!-- FORGE:TRAJECTORY -->` comment as the final pipeline record.
+**Review-presence check** (run before filling in the Review + PR row): <!-- Added: forge#381 -->
+```bash
+# Check whether /review-pr was actually invoked — look for review agent comments on the PR
+REVIEW_PRESENT="false"
+if [ -n "$PR_NUMBER" ]; then
+  REVIEW_PRESENT=$(gh pr view {PR_NUMBER} {GH_FLAG} --json reviews,comments \
+    --jq '([.reviews[].body // ""] + [.comments[].body // ""]) |
+          map(select(test("APPROVED:|CHANGES REQUESTED:|FORGE:REVIEWER|review-pr";"i"))) |
+          length > 0' 2>/dev/null || echo "false")
+  # Set the Review + PR row: ✅ Merged if review present, ⚠ Skipped (no review) if not
+  REVIEW_ROW=$([ "$REVIEW_PRESENT" = "true" ] && echo "✅ Merged" || echo "⚠ Skipped (no review)")
+else
+  REVIEW_ROW="⏭ N/A (no PR)"
+fi
 
-**Prior delta computation** — read cost-prior for this issue's task_type × module before posting (forge#1743):
+# Anomalies: close-scope invariant violations (Phase C0.5 + post-C2 check) and a skipped review.
+ANOMALIES=""
+if [ -n "${INVARIANT_ANOMALIES:-}" ]; then
+  ANOMALIES=$(printf '%s' "$INVARIANT_ANOMALIES" | tr '\n' ' ' | sed 's/  */ /g; s/ *$//')
+fi
+if [ -n "$PR_NUMBER" ] && [ "$REVIEW_PRESENT" != "true" ]; then
+  ANOMALIES="${ANOMALIES:+$ANOMALIES; }review skipped: no review-pr output found on PR #${PR_NUMBER}"
+fi
+ANOMALIES_TEXT="${ANOMALIES:-None}"
+```
+
+This check is **audit-only** — it annotates the trajectory for visibility and cannot retroactively block a merged PR. A `⚠ Skipped (no review)` is always logged in the Anomalies field so the skip is surfaced during pipeline health review.
+
+**Rows and decisions are parameterised by `TERMINAL_STATE` and `LANE`** — nothing is hard-coded to "Feature lane" / "✅ Merged" / "Anomalies: None":
+
+```bash
+if [ -n "$PR_BASE" ]; then LANE_NOTE="${LANE_LABEL} lane → \`${PR_BASE}\`"; else LANE_NOTE="${LANE_LABEL} lane"; fi
+case "$TERMINAL_STATE" in
+  merged)
+    PHASE2_ROW="⏭ Skipped | Single-concern change, no decomposition needed"
+    BUILD_ROW="✅ Complete | Branch: \`${BRANCH}\`"
+    GATE_CELL="${GATE_ROW} | ${GATE_NOTE}"
+    VERIF_CELL="${VERIFICATION_ROW} |"
+    REVIEW_CELL="${REVIEW_ROW} | PR #${PR_NUMBER} → \`${PR_BASE}\`"
+    CLOSE_CELL="✅ Complete | Issue closed"
+    DECISIONS_BLOCK="- Decomposition skipped: single-concern change, no decomposition needed
+- PR merged to: \`${PR_BASE}\` (${LANE} lane)" ;;
+  investigation)
+    PHASE2_ROW="⏭ Skipped | Investigation-only task"
+    BUILD_ROW="✅ Complete | Investigation deliverables created (no PR)"
+    GATE_CELL="⏭ N/A | no code change"; VERIF_CELL="⏭ N/A |"; REVIEW_CELL="⏭ N/A (no PR) |"
+    CLOSE_CELL="✅ Complete | Issue closed"
+    DECISIONS_BLOCK="- Investigation-only task: no PR produced" ;;
+  decomposed)
+    PHASE2_ROW="✅ Decomposed | Sub-issues spawned (see FORGE:DECOMPOSED)"
+    BUILD_ROW="⏭ Skipped | Handled by sub-issues"
+    GATE_CELL="⏭ N/A |"; VERIF_CELL="⏭ N/A |"; REVIEW_CELL="⏭ N/A (no PR) |"
+    CLOSE_CELL="✅ Complete | Issue left open (sub-issue tracker)"
+    DECISIONS_BLOCK="- Decomposed into sub-issues; this issue stays open as the tracker" ;;
+  invalid)
+    PHASE2_ROW="⏭ Skipped | Issue invalid"
+    BUILD_ROW="⏭ Skipped | Issue invalid"
+    GATE_CELL="⏭ N/A |"; VERIF_CELL="⏭ N/A |"; REVIEW_CELL="⏭ N/A (no PR) |"
+    CLOSE_CELL="✅ Complete | Issue closed (invalid)"
+    DECISIONS_BLOCK="- Closed as invalid after investigation" ;;
+esac
+# C6 runs after this post and cannot fail the close, so the planned outcome is recorded here.
+if [ -n "$WORKTREE_PATH" ] && [ -d "$WORKTREE_PATH" ]; then CLEANUP_STATUS="✅ Removed"; else CLEANUP_STATUS="⏭ Skipped"; fi
+PARENT_STATUS="${PARENT_STATUS:-⏭ Skipped}"; PARENT_NOTES="${PARENT_NOTES:-No parent tracker}"
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+```
+
+### Step 2: Prior delta computation
+
+Read cost-prior for this issue's task_type × module before posting (forge#1743):
 
 ```bash
 # Compute actual vs prior cost delta for self-correction of cost priors
@@ -714,23 +1018,19 @@ ACTUAL_TOTAL_USD=""
 PRIOR_EST_USD=""
 COST_DELTA_NOTE=""
 
-# Read actual spend from FORGE:BUILDER / FORGE:TRAJECTORY best-effort telemetry
-# (same extraction used in work-on.md Phase 7C DECISION_RECORD cost block)
-ACTUAL_TOTAL_USD=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '[.[] | select(.body | contains("FORGE:BUILDER")) | .body] | last // ""' 2>/dev/null \
-  | grep -oP '(?<=cost_usd: )\S+' | head -1 || echo "")
+# Read actual spend from FORGE:BUILDER best-effort telemetry (the same cost_usd extraction
+# is used for the per-stage cost block in Phase C5.5). ERE/sed only — no PCRE.
+ACTUAL_TOTAL_USD=$(printf '%s\n' "$BUILDER_BODY" \
+  | sed -n 's/.*cost_usd: *\([0-9][0-9]*\(\.[0-9][0-9]*\)\{0,1\}\).*/\1/p' | head -1)
 
 if [ -n "$ACTUAL_TOTAL_USD" ] && [ -f "$COST_PRIORS_PATH" ]; then
-  # Derive task_type:module key (same logic as Step 3E.5)
-  TASK_TYPE=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-    --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body] | last // ""' 2>/dev/null \
-    | grep -oP '(?<=\*\*Task Type\*\*: )\S+' | head -1 | tr '[:upper:]' '[:lower:]' | tr ' ' '-' || echo 'unknown')
-  PRIMARY_FILE=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-    --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body] | last // ""' 2>/dev/null \
-    | grep -oP '`[^`]+\.(py|mjs|ts|md|sh|yaml|yml)`' | tr -d '`' | head -1 || echo '')
+  # Derive task_type:module key (same logic as the orchestrate cost-prior step) — TASK_TYPE comes from Phase C0
+  TASK_TYPE_KEY=$(printf '%s' "$TASK_TYPE" | tr '[:upper:]' '[:lower:]' | tr -s ' ' '-')
+  PRIMARY_FILE=$(printf '%s\n' "$INVESTIGATOR_BODY" \
+    | grep -oE '`[^`]+\.(py|mjs|ts|md|sh|yaml|yml)`' | tr -d '`' | head -1 || echo '')
   MODULE=$(basename "${PRIMARY_FILE:-_unknown}" | sed 's/\.[^.]*$//' | tr '[:upper:]' '[:lower:]')
   [ -z "$MODULE" ] && MODULE="_unknown"
-  PRIOR_KEY="${TASK_TYPE}:${MODULE}"
+  PRIOR_KEY="${TASK_TYPE_KEY}:${MODULE}"
 
   PRIOR_EST_USD=$(jq -r --arg k "$PRIOR_KEY" '.priors[$k].mean // empty' "$COST_PRIORS_PATH" 2>/dev/null || echo '')
 
@@ -747,65 +1047,83 @@ else
 fi
 ```
 
+### Step 3: Build the card line and post
+
+The CARD line carries the same fields as the Phase C4.5c twin, **including `title` and `blockers`**, encoded by the codec (`--b64`):
+
 ```bash
-gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:TRAJECTORY -->
-## Pipeline Trajectory — #{NUMBER}
+CARD_LINE=""
+if [ -n "$CODEC_CLI" ]; then
+  CARD_LINE=$(node "$CODEC_CLI" emit CARD --b64 \
+    --field issue="${NUMBER}" \
+    --field title="${TITLE}" \
+    --field status="${CARD_STATUS}" \
+    --field pipeline="${PIPELINE_LINE}" \
+    --field pr="${PR_NUMBER}" \
+    --field pr_target="${PR_TARGET}" \
+    --field commits="${COMMITS}" \
+    --field additions="${ADDITIONS}" \
+    --field deletions="${DELETIONS}" \
+    --field review="${REVIEW_SUMMARY}" \
+    --field blockers="${BLOCKERS:-0}" \
+    --field elapsed="${ELAPSED_SECS:-0}" 2>/dev/null) || CARD_LINE=""
+fi
+
+TRAJ_FILE=$(mktemp)
+cat > "$TRAJ_FILE" <<TRAJ_EOF
+${TRAJECTORY_HEADER}
+## Pipeline Trajectory — #${NUMBER}
 
 | Phase | Result | Notes |
 |-------|--------|-------|
-| Phase 0: Context Load | ✅ Complete | Feature lane → \`{PR_BASE}\` |
-| Phase 1: Investigation | ✅ {VERDICT} ({CONFIDENCE}) | Task type: {TASK_TYPE} |
-| Phase 2: Decomposition | ⏭ Skipped | Single-concern change, no decomposition needed |
-| Phase 3: Build | ✅ Complete | Branch: \`{BRANCH}\` |
-| Phase 3F.5: Validate | ✅ Gate passed | Quality gate: pass |
-| Phase 4–5: Review + PR | ✅ Merged | PR #{PR_NUMBER} → \`{PR_BASE}\` |
-| Phase 6: Parent Tracker | {PARENT_STATUS} | {PARENT_NOTES} |
-| Phase C6: Cleanup | {CLEANUP_STATUS} | Worktree: {WORKTREE_PATH}, Branch: {BRANCH} |
-| Phase 7: Close | ✅ Complete | Issue closed |
+| Phase 0: Context Load | ✅ Complete | ${LANE_NOTE} |
+| Phase 1: Investigation | ✅ ${VERDICT:-—} (${CONFIDENCE:-—}) | Task type: ${TASK_TYPE} (${COMPLEXITY_BAND}) |
+| Phase 2: Decomposition | ${PHASE2_ROW} |
+| Phase 3: Build | ${BUILD_ROW} |
+| Phase 3G: Quality Gate | ${GATE_CELL} |
+| Phase 3H: Verification | ${VERIF_CELL} |
+| Phase 4–5: Review + PR | ${REVIEW_CELL} |
+| Phase 6: Parent Tracker | ${PARENT_STATUS} | ${PARENT_NOTES} |
+| Phase C6: Cleanup | ${CLEANUP_STATUS} | Worktree: ${WORKTREE_PATH:-none}, Branch: ${BRANCH:-none} |
+| Phase 7: Close | ${CLOSE_CELL} |
 
 **Decisions**:
-- Decomposition skipped: {DECOMPOSE_REASON}
-- PR merged to: \`{PR_BASE}\` (feature lane, milestone branch)
+${DECISIONS_BLOCK}
+
+**Anomalies**: ${ANOMALIES_TEXT}
 
 **Cost (economic scheduling)**: ${COST_DELTA_NOTE}
 
-**Anomalies**: None
+**Pipeline completed**: ${TIMESTAMP}
 
-**Pipeline completed**: {TIMESTAMP}
+${CARD_LINE}
+TRAJ_EOF
 
-$(node packages/protocol/src/cli.js emit CARD --b64 \
-  --field issue={NUMBER} \
-  --field status={CARD_STATUS} \
-  --field pipeline="${PIPELINE_LINE}" \
-  --field pr={PR_NUMBER} \
-  --field pr_target="${PR_TARGET}" \
-  --field commits="${COMMITS}" \
-  --field additions="${ADDITIONS}" \
-  --field deletions="${DELETIONS}" \
-  --field review="${REVIEW_SUMMARY}" \
-  --field elapsed="${ELAPSED_SECS:-0}")"
+DRY_RUN="${DRY_RUN:-false}"
+TRAJECTORY_URL=""
+if [ "$DRY_RUN" = "true" ]; then
+  echo "DRY_RUN: would post FORGE:TRAJECTORY comment on #${NUMBER}"
+else
+  TRAJECTORY_URL=$(gh issue comment {NUMBER} {GH_FLAG} --body-file "$TRAJ_FILE" 2>/dev/null) \
+    || TRAJECTORY_URL=$(gh issue comment {NUMBER} {GH_FLAG} --body-file "$TRAJ_FILE" 2>/dev/null) \
+    || CLOSE_FAILED="C5: failed to post FORGE:TRAJECTORY comment"
+fi
+rm -f "$TRAJ_FILE"
 ```
 
-The `<!-- FORGE:CARD: v1 sha:... b64:... -->` line carries the machine-readable summary computed in
-Phase C4.5c, encoded as Base64url (design decision 2026-07-08: encoding beats escaping — the
-Base64url alphabet cannot contain HTML comment delimiters by construction). It is wrapped in
-the inline-value annotation form `<!-- FORGE:CARD: ... -->` so parse() extracts the encoded
-payload. Platform consumers (e.g., `/orchestrate`) decode via `node packages/protocol/src/cli.js
-parse --type CARD --field status`. This block is **additive**: all existing `FORGE:TRAJECTORY`
-consumers select via `contains("FORGE:TRAJECTORY")` and parse the markdown table, so the
-embedded CARD line does not affect them.
+If `CLOSE_FAILED` is set, STOP: print `CLOSE_RESULT: status: FAILED` with `blocker: "$CLOSE_FAILED"` (do not run C5.1–C6).
 
-**CODEC PATH (forge#1727)**: The `$(node packages/protocol/src/cli.js emit CARD --b64 ...)` call
-above replaces the previous `<!-- FORGE:CARD ${CARD_JSON} -->` inline-JSON form. The Base64url
-form is safe against all HTML comment injection vectors and includes a sha8 integrity prefix for
-truncation detection. Consumers that parsed the old inline-JSON form must migrate to the codec
-parse path: `echo '...' | node packages/protocol/src/cli.js parse --type CARD --field <key>`.
+The `**Decisions**:` block MUST stay a bullet list and `**Decisions**:` must precede `**Anomalies**:` — the Phase C5.4 ADR extractor reads the lines between those two markers.
+
+The `<!-- FORGE:CARD: v1 sha:... b64:... -->` line carries the machine-readable summary (the Phase C4.5c fields plus `title` and `blockers`), encoded as Base64url (design decision 2026-07-08: encoding beats escaping — the Base64url alphabet cannot contain HTML comment delimiters by construction). It is wrapped in the inline-value annotation form `<!-- FORGE:CARD: ... -->` so `parse()` extracts the encoded payload. Platform consumers (e.g. `/orchestrate`) decode via `node "$CODEC_CLI" parse --type CARD [--field <key>]`. This block is **additive**: all existing `FORGE:TRAJECTORY` consumers select via `contains("FORGE:TRAJECTORY")` and parse the markdown table, so the embedded CARD line does not affect them.
+
+**CODEC PATH (forge#1727)**: the `emit CARD --b64` call replaces the previous `<!-- FORGE:CARD ${CARD_JSON} -->` inline-JSON form. The Base64url form is safe against all HTML comment injection vectors and includes a sha8 integrity prefix for truncation detection. Consumers that parsed the old inline-JSON form must migrate to the codec parse path: `echo '...' | node "$CODEC_CLI" parse --type CARD --field <key>`.
 
 Where:
-- `{PARENT_STATUS}` = `⏭ Skipped` (if no parent) or `✅ Complete` (if parent updated)
-- `{PARENT_NOTES}` = `No parent tracker` or `Checked off in #{PARENT_REF}`
-- `{CLEANUP_STATUS}` = `✅ Removed` (worktree removed + branch deleted) or `⏭ Skipped` (no path provided or path not found)
-- `{TIMESTAMP}` = current date/time in ISO format
+- `PARENT_STATUS` = `⏭ Skipped` (if no parent) or `✅ Complete` (if parent updated)
+- `PARENT_NOTES` = `No parent tracker` or `Checked off in #${PARENT_REF}`
+- `CLEANUP_STATUS` = `✅ Removed` (worktree removed + branch deleted) or `⏭ Skipped` (no path provided or path not found)
+- `TIMESTAMP` = current date/time in ISO format
 
 ---
 
@@ -819,7 +1137,10 @@ Where:
 
 ```bash
 # Re-index this issue and regenerate cost priors — non-blocking
-INDEXER_PATH=$(dirname "$(realpath "$0" 2>/dev/null || echo '.')")/../../scripts/build-knowledge-index.mjs
+# Resolve from the ForgeDock install root (FORGE_ROOT, from the script-resolution block) — never from $0, which is meaningless inside a skill
+INDEXER_PATH=""
+[ -n "${FORGE_ROOT:-}" ] && INDEXER_PATH="$FORGE_ROOT/scripts/build-knowledge-index.mjs"
+[ -f "$INDEXER_PATH" ] || INDEXER_PATH="$REPO_PATH/scripts/build-knowledge-index.mjs"
 if node --version >/dev/null 2>&1 && [ -f "$INDEXER_PATH" ]; then
   echo "[cost-prior] Re-indexing issue #${NUMBER} and regenerating cost priors..."
   node "$INDEXER_PATH" --issue {NUMBER} --no-mirror 2>&1 | tail -5 \
@@ -869,7 +1190,7 @@ MEMORY_INDEX_ID=$(gh gist list --limit 100 \
 
 if [ -z "$MEMORY_INDEX_ID" ]; then
   # First run — create the index Gist
-  TMPFILE=$(mktemp --suffix=.md)
+  TMPFILE=$(mktemp)
   cat > "$TMPFILE" <<GIST_EOF
 # ForgeDock Memory Index — {GH_REPO}
 <!-- FORGE:MEMORY_INDEX: {GH_REPO} -->
@@ -897,7 +1218,7 @@ else
 ${MEMORY_ENTRY}"
   INDEX_FILENAME=$(gh api gists/${MEMORY_INDEX_ID} --jq '.files | keys[0]' 2>/dev/null)
   INDEX_FILENAME="${INDEX_FILENAME:-memory_index.md}"
-  TMPFILE=$(mktemp --suffix=.md)
+  TMPFILE=$(mktemp)
   echo "$UPDATED_CONTENT" > "$TMPFILE"
   gh gist edit "$MEMORY_INDEX_ID" -f "$INDEX_FILENAME" "$TMPFILE" 2>/dev/null
   EDIT_EXIT=$?
@@ -979,10 +1300,12 @@ LEDGER_INDEXED=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 
 ### Step 2: Run incremental indexer
 
-Resolve the indexer script path relative to the repository root:
+Resolve the indexer script path from the ForgeDock install root (`FORGE_ROOT`), falling back to the repository root:
 
 ```bash
-INDEXER_PATH="${REPO_PATH:-$(git rev-parse --show-toplevel 2>/dev/null)}/scripts/build-knowledge-index.mjs"
+INDEXER_PATH=""
+[ -n "${FORGE_ROOT:-}" ] && INDEXER_PATH="$FORGE_ROOT/scripts/build-knowledge-index.mjs"
+[ -f "$INDEXER_PATH" ] || INDEXER_PATH="$REPO_PATH/scripts/build-knowledge-index.mjs"
 
 if [ ! -f "$INDEXER_PATH" ]; then
   echo "[LEDGER] scripts/build-knowledge-index.mjs not found — skipping Phase C5.3"
@@ -1073,10 +1396,10 @@ TRAJECTORY_BODY=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 # Extract the Decisions section (lines between **Decisions**: and **Anomalies**:)
 DECISIONS_RAW=$(echo "$TRAJECTORY_BODY" \
   | awk '/^\*\*Decisions\*\*:/{found=1; next} /^\*\*Anomalies\*\*:/{found=0} found{print}' \
-  | grep -v '^\s*$' \
+  | grep -v '^[[:space:]]*$' \
   | head -20)  # Cap at 20 bullets to prevent runaway parsing
 
-if [ -z "$DECISIONS_RAW" ] || echo "$DECISIONS_RAW" | grep -qi "^- None$\|^None$"; then
+if [ -z "$DECISIONS_RAW" ] || echo "$DECISIONS_RAW" | grep -qiE '^(- )?None$'; then
   echo "[ADR] No Decisions section found in TRAJECTORY — skipping ADR extraction"
   ADR_FILES_WRITTEN=0
 fi
@@ -1097,7 +1420,7 @@ else
 
   while IFS= read -r bullet; do
     # Strip leading "- " or "* "
-    text=$(echo "$bullet" | sed 's/^[-*]\s*//')
+    text=$(echo "$bullet" | sed 's/^[-*][[:space:]]*//')
     [ -z "$text" ] && continue
 
     # Tradeoff shape filter: must have a choice indicator + rationale connector
@@ -1217,83 +1540,138 @@ fi
 
 ## Phase C5.5: Graph Decision Record (MANDATORY when PR exists)
 
-**Skip if**: `{PR_NUMBER}` is empty OR `<!-- FORGE:DECISION_RECORD -->` already posted on the PR.
+**Skip if**: `{PR_NUMBER}` is empty (investigation-only / decomposed / invalid terminals) OR `<!-- FORGE:DECISION_RECORD -->` already posted on the PR. **Non-blocking** — a failed post is logged and the close continues to C6.
 
-Post a consolidated provenance artifact to the PR that proves the merge was backed by citable evidence. Mirrors the Phase 7C step in `work-on.md` — must stay in sync.
+**Purpose**: Post a single consolidated provenance artifact to the PR that proves the merge was backed by citable evidence. Enables downstream benchmarking queries (repeated-mistake rate, stale-edge hit rate, review escape rate) by making every pipeline run queryable via `gh api`. This file is the single source for the decision record. <!-- Added: forge#776 -->
 
 **Idempotency check**:
 ```bash
-GDR_EXISTS=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
+GDR_EXISTS="false"
+[ -n "$PR_NUMBER" ] && GDR_EXISTS=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
   --jq '[.[] | select(.body | contains("FORGE:DECISION_RECORD"))] | length > 0' 2>/dev/null || echo "false")
 ```
 
 **Extract context edge counts** from FORGE:CONTEXT comment:
 ```bash
-CONTEXT_COMMENT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | contains("FORGE:CONTEXT")) | .body' 2>/dev/null | head -1)
-REVIEW_FINDING_COUNT=$(echo "$CONTEXT_COMMENT" | grep -oP '#\d+' | wc -l | tr -d ' ')
+CONTEXT_COMMENT=$(last_comment_body "FORGE:CONTEXT")
+# Count historical review-finding issue references (#NNN patterns in the Context comment)
+REVIEW_FINDING_COUNT=$(printf '%s\n' "$CONTEXT_COMMENT" | grep -oE '#[0-9]+' | wc -l | tr -d ' ')
 REVIEW_FINDING_COUNT=${REVIEW_FINDING_COUNT:-0}
 ```
 
-**Extract review verdict** from PR review summary:
+**Extract review verdict and findings count** from the PR review summary:
 ```bash
-REVIEW_SUMMARY=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
+GDR_REVIEW_BODY=""
+[ -n "$PR_NUMBER" ] && GDR_REVIEW_BODY=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
   --jq '[.[] | select(.body | contains("FORGE:REVIEWER") or (.body | test("APPROVED:|CHANGES REQUESTED:"; "i")))] | last | .body // ""' 2>/dev/null || echo '')
-REVIEW_VERDICT=$(echo "$REVIEW_SUMMARY" | grep -oP '(?<=Verdict: )(APPROVED|CHANGES REQUESTED)' | head -1 || echo "APPROVED")
-FINDINGS_COUNT=$(echo "$REVIEW_SUMMARY" | grep -oP '\d+(?= findings)' | head -1 || echo "0")
-AGENTS_RUN=$(echo "$REVIEW_SUMMARY" | grep -oP '\d+(?= agents)' | head -1 || echo "0")
+
+REVIEW_VERDICT=$(printf '%s\n' "$GDR_REVIEW_BODY" | sed -n 's/.*Verdict: \(APPROVED\|CHANGES REQUESTED\).*/\1/p' | head -1)
+REVIEW_VERDICT="${REVIEW_VERDICT:-APPROVED}"
+FINDINGS_COUNT=$(printf '%s\n' "$GDR_REVIEW_BODY" | grep -oE '[0-9]+ findings' | grep -oE '[0-9]+' | head -1)
+FINDINGS_COUNT="${FINDINGS_COUNT:-0}"
+AGENTS_RUN=$(printf '%s\n' "$GDR_REVIEW_BODY" | grep -oE '[0-9]+ agents' | grep -oE '[0-9]+' | head -1)
+AGENTS_RUN="${AGENTS_RUN:-0}"
 ```
 
-**Post GDR to PR** (not to issue — PR comment is the permanent artifact):
+**Capture best-effort cost signal** from session telemetry before posting the GDR. This is best-effort — if the signal is unavailable, the cost block is omitted rather than blocking the pipeline or fabricating a number. Field names align with `bin/runner.mjs` usage accounting from #1295 so downstream tooling shares one schema:
 ```bash
-if [ "$GDR_EXISTS" != "true" ] && [ -n "{PR_NUMBER}" ]; then
+# Best-effort: read per-stage `cost_usd:` values from the FORGE:INVESTIGATOR / FORGE:BUILDER / FORGE:REVIEWER annotations.
+# Source: session telemetry when available (e.g. OTEL_LOG_TOOL_DETAILS, Claude Code usage reporting).
+# If unavailable, COST_BLOCK is empty — the field is omitted from the GDR rather than fabricated.
+cost_from() { sed -n 's/.*cost_usd: *\([0-9][0-9]*\(\.[0-9][0-9]*\)\{0,1\}\).*/\1/p' | head -1; }
+COST_INVESTIGATION=$(printf '%s\n' "$INVESTIGATOR_BODY" | cost_from)
+COST_BUILD=$(printf '%s\n' "$BUILDER_BODY" | cost_from)
+COST_REVIEW=""
+[ -n "$PR_NUMBER" ] && COST_REVIEW=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
+  --jq '[.[] | select(.body | contains("FORGE:REVIEWER")) | .body] | last // ""' 2>/dev/null | cost_from)
+
+# Build the cost block JSON only if at least one stage value is present; otherwise empty
+if [ -n "$COST_INVESTIGATION" ] || [ -n "$COST_BUILD" ] || [ -n "$COST_REVIEW" ]; then
+  COST_INV_JSON="${COST_INVESTIGATION:-null}"
+  COST_BUILD_JSON="${COST_BUILD:-null}"
+  COST_REVIEW_JSON="${COST_REVIEW:-null}"
+  COST_BLOCK="\"cost\": {
+    \"stages\": {
+      \"investigation\": $COST_INV_JSON,
+      \"build\": $COST_BUILD_JSON,
+      \"review\": $COST_REVIEW_JSON
+    },
+    \"total_usd\": null,
+    \"source\": \"session-telemetry\"
+  },"
+else
+  COST_BLOCK=""
+fi
+```
+
+**Post GDR to PR** (not to issue — the PR comment survives as the permanent artifact on the merged diff). `lane`, verdict, confidence, task type, files changed and gate iterations are all derived in Phase C0 — nothing is hard-coded:
+```bash
+DRY_RUN="${DRY_RUN:-false}"
+if [ "$GDR_EXISTS" != "true" ] && [ -n "$PR_NUMBER" ] && [ "$DRY_RUN" != "true" ]; then
   GDR_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   HEAD_SHA=$(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
   MERGE_COMMIT=$(gh pr view {PR_NUMBER} {GH_FLAG} --json mergeCommit --jq '.mergeCommit.oid // ""' 2>/dev/null || echo "")
 
-  gh pr comment {PR_NUMBER} {GH_FLAG} --body "<!-- FORGE:DECISION_RECORD -->
+  GDR_FILE=$(mktemp)
+  cat > "$GDR_FILE" <<GDR_EOF
+<!-- FORGE:DECISION_RECORD -->
 ## Graph Decision Record — Issue #${NUMBER} / PR #${PR_NUMBER}
 
 \`\`\`json
 {
-  \"schema_version\": \"1\",
-  \"issue\": ${NUMBER},
-  \"pr\": ${PR_NUMBER},
-  \"repo\": \"{GH_REPO}\",
-  \"lane\": \"feature\",
-  \"pr_base\": \"{PR_BASE}\",
-  \"branch\": \"{BRANCH}\",
-  \"head_sha\": \"${HEAD_SHA}\",
-  \"merge_commit\": \"${MERGE_COMMIT}\",
-  \"investigation\": {
-    \"verdict\": \"{VERDICT}\",
-    \"confidence\": \"{CONFIDENCE}\",
-    \"task_type\": \"{TASK_TYPE}\"
+  "schema_version": "1",
+  "issue": ${NUMBER},
+  "pr": ${PR_NUMBER},
+  "repo": "${GH_REPO}",
+  "lane": "${LANE}",
+  "pr_base": "${PR_BASE}",
+  "branch": "${BRANCH}",
+  "head_sha": "${HEAD_SHA}",
+  "merge_commit": "${MERGE_COMMIT}",
+  "investigation": {
+    "verdict": "${VERDICT}",
+    "confidence": "${CONFIDENCE}",
+    "task_type": "${TASK_TYPE}"
   },
-  \"context\": {
-    \"historical_edges_referenced\": ${REVIEW_FINDING_COUNT},
-    \"forge_annotations_read\": [\"FORGE:INVESTIGATOR\", \"FORGE:CONTRACT\", \"FORGE:CONTEXT\", \"FORGE:ARCHITECT\", \"FORGE:BUILDER\"]
+  ${COST_BLOCK}
+  "context": {
+    "historical_edges_referenced": ${REVIEW_FINDING_COUNT},
+    "forge_annotations_read": ["FORGE:INVESTIGATOR", "FORGE:CONTRACT", "FORGE:CONTEXT", "FORGE:ARCHITECT", "FORGE:BUILDER"]
   },
-  \"build\": {
-    \"files_changed\": {FILES_CHANGED},
-    \"quality_gate\": \"{pass|fail}\",
-    \"quality_gate_iterations\": {GATE_ITERATIONS}
+  "build": {
+    "files_changed": ${FILES_CHANGED_JSON},
+    "quality_gate": "${GATE_PASS_FAIL}",
+    "quality_gate_iterations": ${GATE_ITERATIONS}
   },
-  \"review\": {
-    \"verdict\": \"${REVIEW_VERDICT:-APPROVED}\",
-    \"findings_created\": ${FINDINGS_COUNT},
-    \"agents_run\": ${AGENTS_RUN}
+  "review": {
+    "verdict": "${REVIEW_VERDICT}",
+    "findings_created": ${FINDINGS_COUNT},
+    "agents_run": ${AGENTS_RUN}
   },
-  \"merge\": {
-    \"merged_at\": \"${GDR_TIMESTAMP}\",
-    \"justification\": \"Investigation confirmed ({VERDICT}/{CONFIDENCE}), quality gate passed, review ${REVIEW_VERDICT:-approved}\"
+  "merge": {
+    "merged_at": "${GDR_TIMESTAMP}",
+    "justification": "Investigation confirmed (${VERDICT}/${CONFIDENCE}), quality gate ${GATE_PASS_FAIL}, review ${REVIEW_VERDICT}"
   }
 }
-\`\`\`"
+\`\`\`
+
+**Queryable**: \`gh api repos/${GH_REPO}/issues/${PR_NUMBER}/comments --jq '[.[] | select(.body | contains("FORGE:DECISION_RECORD"))] | .[0].body'\`
+GDR_EOF
+  DECISION_RECORD_URL=$(gh pr comment {PR_NUMBER} {GH_FLAG} --body-file "$GDR_FILE" 2>/dev/null || echo "")
+  rm -f "$GDR_FILE"
 fi
+DECISION_RECORD_URL="${DECISION_RECORD_URL:-}"
 ```
 
-<!-- Added: forge#776 -->
+**Benchmarking** (reference — used by `/pipeline-health`): query all GDRs for a repo to compute pipeline metrics (repeated-mistake rate, stale-edge hit rate, review escape rate):
+```bash
+# Fetch all merged PRs and extract their GDR JSON blocks for metric computation
+gh pr list -R {GH_REPO} --state merged --limit 100 --json number \
+  --jq '.[].number' | while read pr; do
+    gh api repos/{GH_REPO}/issues/$pr/comments \
+      --jq '.[] | select(.body | contains("FORGE:DECISION_RECORD")) | .body' 2>/dev/null
+  done
+```
 
 ---
 
@@ -1301,7 +1679,7 @@ fi
 
 Remove the git worktree and delete the local feature branch after the PR has merged. This prevents worktree accumulation across pipeline runs.
 
-**Skip if**: `{WORKTREE_PATH}` is not provided OR the path does not exist.
+**Skip if**: `{WORKTREE_PATH}` is not provided OR the path does not exist OR the close stopped with `status: FAILED` (the worktree is kept so the run can be retried).
 
 ```bash
 # Remove worktree (--force handles detached or uncommitted state)
@@ -1330,35 +1708,28 @@ Set `{CLEANUP_STATUS}` based on outcome:
 - Worktree path provided and existed → `✅ Removed` (worktree removed, branch deleted)
 - Worktree path not provided or path didn't exist → `⏭ Skipped`
 
-Update the trajectory log `{CLEANUP_STATUS}` field accordingly (the trajectory was already posted in C5, so this is recorded in the output summary, not by re-editing the comment).
+The trajectory (C5) already recorded the planned `CLEANUP_STATUS` (computed from the same path check; the removal commands above are non-fatal, so plan and outcome match). Do not re-edit the comment. C6 is the LAST phase: it must stay last because C1.7 and C5.4 use the repo/worktree. After C6, print the Phase C4 report and C4.5b card if not already shown, then the Output block.
 
 ---
 
 ## Output
 
-Return structured output to the caller:
+Every exit path ends with exactly one `CLOSE_RESULT:` block as the final reply — it is ALL the router sees. Fill it from the shell state:
 
 ```
 CLOSE_RESULT:
-  status: COMPLETE | ALREADY_DONE | PHASE_COMPLETE
+  status: COMPLETE | ALREADY_DONE | PHASE_COMPLETE | FAILED
   issue_state: closed | open
   trajectory_url: {url of FORGE:TRAJECTORY comment}
   decision_record_url: {url of FORGE:DECISION_RECORD comment on PR, or "" if skipped}
   parent_updated: {true|false}
   parent_closed: {true|false}
+  blocker: {"" unless status is FAILED — "<phase>: <reason>"}
 ```
 
-Where `PHASE_COMPLETE` means the current phase was closed but uncompleted phases remain — the issue is left OPEN for work-on.md to re-evaluate on the next invocation (via Universal continuation rule: re-read labels, check terminal state, continue to next phase).
+- `COMPLETE` — all applicable phases ran; the pipeline is finished for this issue.
+- `ALREADY_DONE` — a `FORGE:TRAJECTORY` comment already existed (Phase C0); nothing was re-posted.
+- `PHASE_COMPLETE` — the current phase was closed but uncompleted phases remain (Phase C2); the issue is left OPEN with `<!-- FORGE:PHASE:COMPLETE -->` and `workflow:investigating`. The caller re-reads labels and continues with the next phase. Returned directly from C2 — C3–C6 do not run.
+- `FAILED` — a guard, missing arg, or mandatory phase failed (see Failure handling in Inputs); `blocker` says which. The worktree is kept.
 
----
-
-## Integration Point in work-on.md
-
-This module runs at **Phases 6–7** — after review.md returns `REVIEW_RESULT: status: COMPLETE`:
-
-```
-4–5  → Review (by review.md) — PR created, reviewed, merged, issue closed
-6–7  → [THIS MODULE] Final body update, parent tracker, summary, trajectory
-```
-
-This is the terminal phase — after CLOSE_RESULT returns, the pipeline is complete.
+For `status: COMPLETE`, the Phase C4 report and the Phase C4.5b card are printed to stdout BEFORE the result block so the caller can surface them; the result block is the last thing printed. `issue_state` is the live issue state (`gh issue view --json state`); `parent_updated` / `parent_closed` come from Phase C3 (`false` when C3 was skipped).

@@ -379,6 +379,14 @@ orchestration:
     # Number of consecutive merged-unit observations at ratio >= 1.0 before
     # printing a convergence warning. Default: 3.
     convergence_window: 3
+
+    # On-by-default amplification circuit breaker (forge#3060). Counts ALL
+    # cascade findings (new surface as well as same-lineage refinements). When
+    # the ratio stays >= 1.0 for convergence_window merged units, P3-and-below
+    # admission pauses, the operator gets a report (ratio + queue size), and the
+    # paused P3s wait for bounded P3 batches. P1/P2 are never affected, and
+    # `policy: all` / unlimited overrides do not disable it. "on" (default) | "off".
+    amplification_breaker: on
 ```
 
 | Field | Type | Required | Description |
@@ -394,6 +402,9 @@ orchestration:
 | `cascade.p3_same_file_defer` | boolean | No | Defer P3 findings sharing a file with the active batch. Default: `true` |
 | `cascade.max_amplification` | positive number or `"off"` | No | Opt-in ceiling for same-lineage refinement dispatch. Default: `"off"` |
 | `cascade.convergence_window` | positive integer | No | Consecutive ratio observations at or above 1.0 before warning. Default: 3 |
+| `cascade.amplification_breaker` | `on` \| `off` | No | Pause P3-and-below cascade admission while the findings-spawned / merged-units ratio stays at or above 1.0 for `convergence_window` units. Counts all cascade findings (not only same-lineage); P1/P2 unaffected; independent of `cascade.policy`, so `policy: all` does not disable it. Paused P3s route to bounded P3 batches. Default: `on`. Opt out with `off` (boolean `false` is accepted as `off`, `true` as `on`). |
+
+**Upgrade note — `cascade.amplification_breaker` is on by default**: existing configs that do not set this key now get the breaker automatically. During a batch, once the findings-spawned / merged-units ratio stays at or above 1.0 for `convergence_window` units (it can trip at exactly 1.0 over 3 units), P3-and-below cascade admission pauses; paused P3s are routed to bounded P3 batches rather than dispatched individually. P1/P2 are unaffected. To keep the previous behavior, set `orchestration.cascade.amplification_breaker: off` (or `false`). Release notes for the version that introduced this default should call out the change.
 
 **Hard invariant — not configurable**: safety exclusions (findings whose `## Problem` section indicates security/billing/anti-bot/auth concerns) are never batched and never auto-admitted by any `cascade.policy`, including `all`. That exclusion is enforced upstream of this section (the P3 batching eligibility check) and has no corresponding key here by design.
 

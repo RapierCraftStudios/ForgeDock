@@ -8,6 +8,8 @@ allowed-tools: Task, Agent, Bash, Read, Grep, Glob, WebFetch, Skill
 
 # PR Review — Orchestrator
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 **NEVER use plan mode (EnterPlanMode)** during review — it breaks execution context.
@@ -23,9 +25,9 @@ allowed-tools: Task, Agent, Bash, Read, Grep, Glob, WebFetch, Skill
 
 2. **Post the FORGE:REVIEW verdict regardless of finding severity.** A review that completes but posts no `<!-- FORGE:REVIEW -->` comment is invisible to the pipeline. Even a PASS verdict must be posted.
 
-3. **Review findings do NOT block merge UNLESS they meet the Blocking Criteria in §7B** (a CONFIRMED HIGH/CRITICAL finding, a purpose regression, a merge conflict, or a build/type/test failure) **or the calibration threshold check in §7B.5 sets `CALIBRATION_NEEDS_HUMAN=true`** (HIGH-confidence task type with historical survival < 80%). File every finding as a GitHub issue with the `review-finding` label regardless of severity. Minor/style findings never block; §7B's and §7B.5's blocking conditions always do — including under `--auto-merge`. <!-- forge#1741 -->
+3. **Review findings do NOT block merge UNLESS they meet the Blocking Criteria in §7B** (a CONFIRMED HIGH/CRITICAL finding, a purpose regression, a merge conflict, or a build/type/test failure) **or the calibration threshold check in §7B.5 sets `CALIBRATION_NEEDS_HUMAN=true`** (HIGH-confidence task type with historical survival < 80%). File every finding that survives the §6B.5 note disposition (MEDIUM+ severity, or CONFIRMED/LIKELY above LOW; security/billing always) as a GitHub issue with the `review-finding` label. LOW/POSSIBLE notes are fixed in-PR, listed in the PR body, or dropped — never filed as standalone issues. Minor/style findings never block; §7B's and §7B.5's blocking conditions always do — including under `--auto-merge`. <!-- forge#1741 -->
 
-4. **Route correctly at Phase 0.** If the input is "staging" or the PR targets `main`, invoke `Skill("review-pr-staging", ...)` — do NOT run the standard PR review pipeline against a staging→main PR.
+4. **Route correctly at Phase 0.** If the input is "staging" or the PR targets `main`, invoke `Skill("{FORGE_SKILL_PREFIX}review-pr-staging", ...)` — do NOT run the standard PR review pipeline against a staging→main PR.
 
 5. **`spec-evolution` PRs are NEVER auto-merged.** When a PR carries the `spec-evolution` label (created by `/spec-doctor`), Phase -1 MUST set `AUTO_MERGE=false` and add `needs-human` before any other processing. This cannot be overridden by the caller — the eval gate plus human review are the only permitted merge path. See Phase -1 `spec-evolution guard` block. <!-- Added: forge#1742 -->
 
@@ -80,17 +82,17 @@ This is the **orchestrator**. It routes to the right review mode, runs automated
 
 | File | What | How to invoke |
 |------|------|---------------|
-| `${FORGE_HOME:-$REPO_PATH}/commands/review-pr-agents/protocols.md` | Shared review protocols (Evidence-Based + Structured Findings + Input Scoping) | `Read` tool during Phase 3C (always) |
-| `${FORGE_HOME:-$REPO_PATH}/commands/review-pr-agents/<persona>.md` | Per-persona agent prompt templates (9 files) | `Read` tool during Phase 3C (selected agents only) |
-| `${FORGE_HOME:-$REPO_PATH}/commands/review-pr-staging.md` | Full staging→main review pipeline | `Skill("review-pr-staging", ...)` during Phase 0 |
+| `${CLAUDE_PLUGIN_ROOT}/commands/review-pr-agents/protocols.md` | Shared review protocols (Evidence-Based + Structured Findings + Input Scoping) | `Read` tool during Phase 3C (always) |
+| `${CLAUDE_PLUGIN_ROOT}/commands/review-pr-agents/<persona>.md` | Per-persona agent prompt templates (9 files) | `Read` tool during Phase 3C (selected agents only) |
+| `${CLAUDE_PLUGIN_ROOT}/commands/review-pr-staging.md` | Full staging→main review pipeline | `Skill("{FORGE_SKILL_PREFIX}review-pr-staging", ...)` during Phase 0 |
 
-`$FORGE_HOME` defaults to `~/.claude` (the directory where `npx forgedock` symlinks commands). When unset, every resolution in this file falls back to `$REPO_PATH` (the repo root, from `forge.yaml → paths.root`) rather than degrading to a bare root-anchored path — see the `TEMPLATE_BASE` tiered guard in Phase 3C and the verification-script resolution in Step 2.5B for the actual fallback chains. Never resolve a missing file via a filesystem-wide `find` — see the guardrail in `commands/review-pr-agents/protocols.md`.
+Paths above are rooted at `${CLAUDE_PLUGIN_ROOT}`, the running plugin's install (filled in by Claude Code). If that path does not start with `/` (install.sh, Codex, OpenCode), use the tiered resolution below instead. `$FORGE_HOME` defaults to `~/.claude` (the directory where `npx forgedock` symlinks commands). When unset, every resolution in this file falls back to `$REPO_PATH` (the repo root, from `forge.yaml → paths.root`) rather than degrading to a bare root-anchored path — see the `TEMPLATE_BASE` tiered guard in Phase 3C and the verification-script resolution in Step 2.5B for the actual fallback chains. Never resolve a missing file via a filesystem-wide `find` — see the guardrail in `commands/review-pr-agents/protocols.md`.
 
 **Invocation flow:**
 ```
 /review-pr 5428          → Phase 0 detects single PR → runs Phases 1-9 inline
-/review-pr staging       → Phase 0 detects staging mode → Skill("review-pr-staging", "staging")
-/review-pr 5500          → Phase 0 auto-detects staging→main PR → Skill("review-pr-staging", "5500")
+/review-pr staging       → Phase 0 detects staging mode → Skill("{FORGE_SKILL_PREFIX}review-pr-staging", "staging")
+/review-pr 5500          → Phase 0 auto-detects staging→main PR → Skill("{FORGE_SKILL_PREFIX}review-pr-staging", "5500")
 /review-pr 3126 --auto-merge --issue 3124 --base staging  → single PR + auto-merge after approval
 ```
 
@@ -105,6 +107,8 @@ Example: "3126 --auto-merge --issue 3124 --base staging --gh-flag -R $GH_REPO --
 ```
 
 Extract: `PR_NUMBER`, `AUTO_MERGE=true`, `MERGE_ISSUE`, `MERGE_BASE`, `MERGE_GH_FLAG`, `MERGE_WORKTREE` (optional — the absolute path to the git worktree to clean up after merge)
+
+**`--auto-merge` requires `--issue`** <!-- Added: forge#3102, forge#3124 -->: the phase-trail gate in Phase 8 verifies the trail of the linked issue, so `--issue` is mandatory whenever `AUTO_MERGE=true`. Do NOT infer `MERGE_ISSUE` from the PR: the PR body's closing reference and the head-branch suffix are both author-controlled (and the closing-issue reference list is empty for PRs based on a non-default branch such as `staging`), so neither is a trustworthy binding. If `AUTO_MERGE=true` and `MERGE_ISSUE` is empty, Phase 8 does not merge and returns the documented `REVIEW_RESULT: status: BLOCKED`, blocker: "auto-merge requires --issue". The PR stays open for a human or a re-run with `--issue`.
 
 If `--auto-merge` is NOT present, `AUTO_MERGE=false` — Phase 8 (Auto-Merge) will be skipped.
 
@@ -189,7 +193,7 @@ if [ "$REVIEW_MODE" != "staging-keyword" ] && [ "$REVIEW_MODE" != "multi-pr" ]; 
 fi
 ```
 
-**Invariant**: After this phase, `REVIEW_MODE` and (where applicable) `ROUTE_PR_NUMBER` are set. Any sub-invocation of `Skill("review-pr-staging", ...)` should immediately post its own `FORGE:REVIEW_ROUTE` marker scoped to the PR it resolves.
+**Invariant**: After this phase, `REVIEW_MODE` and (where applicable) `ROUTE_PR_NUMBER` are set. Any sub-invocation of `Skill("{FORGE_SKILL_PREFIX}review-pr-staging", ...)` should immediately post its own `FORGE:REVIEW_ROUTE` marker scoped to the PR it resolves.
 
 ---
 
@@ -204,7 +208,7 @@ Check input to determine which mode:
 If `$ARGUMENTS` is "staging", "feature", or "staging:feature":
 
 ```
->>> INVOKE: Skill("review-pr-staging", "$ARGUMENTS")
+>>> INVOKE: Skill("{FORGE_SKILL_PREFIX}review-pr-staging", "$ARGUMENTS")
 >>> THEN STOP — the staging command handles the full flow.
 ```
 
@@ -227,7 +231,7 @@ BASE=$(echo $PR_INFO | jq -r '.baseRefName')
 
 If `HEAD = "staging" AND BASE = "main"` OR `HEAD = "feature" AND BASE = "main"`:
 ```
->>> INVOKE: Skill("review-pr-staging", "$ARGUMENTS")
+>>> INVOKE: Skill("{FORGE_SKILL_PREFIX}review-pr-staging", "$ARGUMENTS")
 >>> THEN STOP.
 ```
 
@@ -635,7 +639,10 @@ REPO_ROOT="."  # Assumes cwd is the repo root
 # that degrades to a root-anchored path (/scripts/verify-*.sh) and silently skips
 # every check below. Never fall back to a filesystem-wide `find`.
 # <!-- Added: forge#2035 -->
-if [ -n "$FORGE_HOME" ] && [ -f "$FORGE_HOME/scripts/verify-route-registration.sh" ]; then
+_PLUGIN_ROOT='${CLAUDE_PLUGIN_ROOT}'; case "$_PLUGIN_ROOT" in /*) ;; *) _PLUGIN_ROOT="" ;; esac
+if [ -n "$_PLUGIN_ROOT" ] && [ -f "$_PLUGIN_ROOT/scripts/verify-route-registration.sh" ]; then
+    SCRIPTS_HOME="$_PLUGIN_ROOT"   # running plugin's own root first (see Phase 3C Tier 0)
+elif [ -n "$FORGE_HOME" ] && [ -f "$FORGE_HOME/scripts/verify-route-registration.sh" ]; then
     SCRIPTS_HOME="$FORGE_HOME"
 else
     FORGE_YAML="${FORGE_CONFIG:-$(git rev-parse --show-toplevel 2>/dev/null)/forge.yaml}"
@@ -1318,7 +1325,13 @@ Missing persona templates are a fatal setup error, not permission to skip multi-
 ```bash
 # Tier 1: $FORGE_HOME (the installed location — the common case)
 TEMPLATE_BASE=""
-if [[ -f "$FORGE_HOME/commands/review-pr-agents/protocols.md" ]]; then
+# Tier 0: the running plugin's own root (Claude Code substitutes this exact spelling; elsewhere it stays a
+# literal that the /* check rejects). Wins over an exported FORGE_HOME, which may name an older checkout.
+_PLUGIN_ROOT='${CLAUDE_PLUGIN_ROOT}'; case "$_PLUGIN_ROOT" in /*) ;; *) _PLUGIN_ROOT="" ;; esac
+if [[ -n "$_PLUGIN_ROOT" && -f "$_PLUGIN_ROOT/commands/review-pr-agents/protocols.md" ]]; then
+  TEMPLATE_BASE="$_PLUGIN_ROOT/commands/review-pr-agents"
+  TEMPLATE_SOURCE="plugin_root"
+elif [[ -f "$FORGE_HOME/commands/review-pr-agents/protocols.md" ]]; then
   TEMPLATE_BASE="$FORGE_HOME/commands/review-pr-agents"
   TEMPLATE_SOURCE="forge_home"
 else
@@ -1353,7 +1366,7 @@ fi
 
 **If `TEMPLATE_SOURCE` is `none`**: HARD STOP. Post a PR comment explaining the setup is broken (`gh pr comment $ARGUMENTS --body "..."`) instructing the user to run `npx forgedock update` to repair the install, add `needs-human`, and exit Phase 3 without posting any findings or a `FORGE:REVIEW` verdict. **NEVER perform the review inline in the main agent context as a substitute.** A degraded solo review that presents itself as complete is worse than no review — missing templates must fail loudly, not silently.
 
-**If `TEMPLATE_SOURCE` is `forge_home` or `repo_path`** (the normal cases — behavior unchanged from before this guard existed):
+**If `TEMPLATE_SOURCE` is `plugin_root`, `forge_home` or `repo_path`** (the normal cases — behavior unchanged from before this guard existed):
 ```
 Read: $TEMPLATE_BASE/protocols.md
 Read: $TEMPLATE_BASE/<persona>.md   (one per selected agent from Phase 3B)
@@ -1674,6 +1687,25 @@ If still 0: review is clean — skip to Phase 7.
 - Also dedup by title similarity: if two findings share the same file and 3+ title keywords, keep the higher confidence one
 - Sort: CONFIRMED first, then LIKELY, then POSSIBLE; within group by severity
 
+### 6B.5: Non-blocking note disposition (MANDATORY before 6C — forge#3060)
+
+Filing a standalone `review-finding` issue for every LOW/POSSIBLE reviewer note makes the cascade amplify (each merged fix PR spawns its own P3 issues, which spawn more). Classify each deduped finding before 6C:
+
+- **NOTE** (does NOT become an issue): `**Severity**: LOW`, OR `**Confidence**: POSSIBLE` with Severity below HIGH.
+- **ISSUE** (continues to 6C unchanged): everything else — MEDIUM+ severity and CONFIRMED/LIKELY findings above LOW, i.e. P0/P1/P2 behaviour is exactly as before.
+- **Safety exemption**: a finding is never demoted to a NOTE (it is filed as before) if it came from the Security, Auth, Billing, Concurrency or Database review agent, OR its file path / title / body matches `\b(security|auth|authz|authn|billing|payment|stripe|charge|invoice|injection|xss|csrf|ssrf|idor|secrets?|credentials?|permissions?|sql)\b` (matched case-insensitively on word or underscore-separated parts, so `auth_service` and `billing_handler` match but `author`/`tokenizer` do not; also exempt: `token`, `password`, `redact`). Domain of origin is checked first so a generically titled auth/IDOR/injection finding cannot be dropped.
+- **Precedence**: the safety exemption above ALWAYS wins over the P3-lineage rule below and over every other NOTE rule. A finding with missing or unparseable severity defaults to ISSUE.
+- **Stricter rule on P3-lineage PRs** (applies only to findings not covered by the safety exemption): when the PR's linked issue (`MERGE_ISSUE`/`Closes #N`) carries the `review-finding` label and `priority:P3`, only CONFIRMED findings of MEDIUM+ severity, or any finding of HIGH+ severity, become issues. Everything else is a NOTE. A fix for a polish finding must not mint new polish findings.
+
+Each NOTE gets exactly one disposition, in this preference order:
+1. **Fix in this PR** — when the fix is cheap (a few lines, same files already in the diff, no new behaviour) and in scope, apply it as a follow-up commit on the PR branch before merge — ONLY for comment, documentation or test-only changes. Any change to executable code is not a note fix: it must be filed as an issue or fixed with a full re-review of the new HEAD before merge (never push unreviewed code under `--auto-merge`).
+2. **List in the PR body** — append the remaining notes under a `## Non-blocking notes` section of the PR body (edit the existing body, never replace it; use a `mktemp` body file named for the PR number and read the body back to confirm the section is present).
+3. **Drop** — duplicates, stale-comment/docstring nits, and speculation with no actionable evidence.
+
+**Metrics note (forge#3106)**: because NOTEs are not filed as issues, `review-finding` issue volume and any metric derived from it (findings per PR, `/pipeline-health` finding rates, amplification ratio) drop relative to pre-#3060 history. Compare against the `notes_*` counts in the review summary, not issue counts alone, when judging review depth across the change.
+
+Every NOTE disposition must be recorded (never silently dropped): list each NOTE (id, file:line, one-line reason) with its disposition in the review summary comment, including dropped ones, so a reviewer can audit the decision. NOTES are never passed to `Skill(issue)`. Record counts in the review summary (`notes_fixed`, `notes_listed`, `notes_dropped`, `findings_filed`). If no finding is an ISSUE after this step, skip 6C and continue to Phase 7.
+
 ### 6C: Create Issues
 
 ```bash
@@ -1894,7 +1926,7 @@ if [ "$FINDING_PRIORITY_EXIT" -ne 0 ]; then
 else
 
 # --label is repeatable (not comma-joined) per the /issue programmatic contract.
-ISSUE_SKILL_OUTPUT=$(Skill(skill="issue", args="--title \"$FINDING_ISSUE_TITLE\" --body-file \"$FINDING_ISSUE_BODY_FILE\" --label review-finding --label needs-validation --label \"$FINDING_PRIORITY\" ${MILESTONE_FLAG}"))
+ISSUE_SKILL_OUTPUT=$(Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"$FINDING_ISSUE_TITLE\" --body-file \"$FINDING_ISSUE_BODY_FILE\" --label review-finding --label needs-validation --label \"$FINDING_PRIORITY\" ${MILESTONE_FLAG}"))
 # /issue re-reads the created issue and hard-fails unless this exact marker is present.
 rm -f "$FINDING_ISSUE_BODY_FILE"
 
@@ -2170,6 +2202,87 @@ fi
 
 **Skip if** `AUTO_MERGE=false`.
 
+**Phase-trail preflight (MANDATORY before any merge attempt)** <!-- Added: forge#3061 -->: a reviewer verdict alone must not merge work whose earlier pipeline phases were skipped. Run the deterministic verifier against the linked issue; do NOT run the merge block below unless it exits 0.
+
+```bash
+if [ -z "${MERGE_ISSUE:-}" ]; then
+  echo "PHASE TRAIL: auto-merge requested without --issue — the issue is never inferred from PR-author-controlled text, so the phase trail cannot be verified; the phase trail; refusing to merge (fail closed)" >&2
+  gh pr comment {PR_NUMBER} {MERGE_GH_FLAG} --body "Auto-merge skipped: no --issue was given, so the phase trail cannot be verified. Re-run \`/review-pr {PR_NUMBER} --auto-merge --issue <N>\` or merge manually." 2>/dev/null || true # allowlist:check-command-side-effects
+  # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "auto-merge requires --issue". Not a PHASE_TRAIL_FAILED (nothing to re-run).
+  exit 1
+else
+  # Same resolution as work-on/review.md Phase R1.5: the verifier ships with ForgeDock, not the consumer repo.
+  # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+  FORGE_ROOT=""
+  if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
+    # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
+    _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+    # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+    _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
+    _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+    # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
+    _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
+    while IFS= read -r _c; do
+      case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
+    done <<< "$_k"
+  fi
+  TRAIL_SCRIPT="$FORGE_ROOT/scripts/verify-phase-trail.sh"
+  # Docs-only predicate: ONE shared copy (scripts/is-docs-only.sh, forge#3134), same as work-on/review.md R1.5. Fail closed: unresolved script or empty diff -> no flag.
+  DOCS_ONLY_FLAG=""
+  # Both sides of a rename (filename + previous_filename): `gh pr diff --name-only` collapses a rename to its destination (forge#3145).
+  PR_FILES_ALL=$(gh api --paginate "repos/{GH_REPO}/pulls/{PR_NUMBER}/files" --jq '.[] | .filename, (.previous_filename // empty)' 2>/dev/null) || PR_FILES_ALL=""
+  # Fail closed on truncation: the files API caps at 3000 files, so a PR at/over the cap (or an unreadable count) never yields a docs-only flag.
+  PR_CHANGED_N=$(gh api "repos/{GH_REPO}/pulls/{PR_NUMBER}" --jq .changed_files 2>/dev/null) || PR_CHANGED_N=""
+  case "$PR_CHANGED_N" in ''|*[!0-9]*) PR_FILES_ALL="" ;; *) [ "$PR_CHANGED_N" -ge 3000 ] && PR_FILES_ALL="" ;; esac
+  if [ -n "$PR_FILES_ALL" ] && [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/is-docs-only.sh" ] && echo "$PR_FILES_ALL" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"; then DOCS_ONLY_FLAG="--docs-only"; fi
+  # Band cross-check (forge#3149): a non-docs PR diff means an agent-chosen INVESTIGATION band must not waive requirements.
+  # No --head-tree here: review auto-fix commits legitimately advance the head after the gate ran; the tree binding is enforced pre-PR (work-on/review.md R1.5).
+  # Fail closed: anything not positively docs-only (including an empty/unreadable diff) is treated as a code diff.
+  CODE_DIFF_FLAG="--code-diff"
+  if [ -n "$DOCS_ONLY_FLAG" ]; then CODE_DIFF_FLAG=""; fi
+  if [ -z "$FORGE_ROOT" ] || [ ! -f "$TRAIL_SCRIPT" ]; then
+    # Fail closed: an unresolvable verifier is NOT a pass (plugin installs set no FORGE_HOME; never fall back to the consumer repo).
+    echo "PHASE TRAIL: verify-phase-trail.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install) — refusing to merge" >&2
+    TRAIL="PHASE_TRAIL: ERROR (verifier not resolvable)"; TRAIL_RC=127
+  else
+    TRAIL=$(bash "$TRAIL_SCRIPT" "$MERGE_ISSUE" -R {GH_REPO} $DOCS_ONLY_FLAG $CODE_DIFF_FLAG); TRAIL_RC=$?
+  fi
+  if [ "$TRAIL_RC" -ge 2 ]; then
+    # rc 2 (trail unreadable) / 127 (verifier not resolvable) is an infrastructure failure, NOT missing phases:
+    # there are no MISSING lines to re-run, so never report PHASE_TRAIL_FAILED here (same routing as work-on/review.md R1.5, forge#3147).
+    TRAIL_ERR_BODY="<!-- FORGE:PHASE_TRAIL_ERROR -->
+Auto-merge refused for PR #{PR_NUMBER}: the phase-trail verifier could not run (rc=${TRAIL_RC}). This is an infrastructure problem, not a missing phase. Do not re-run phases.
+
+\`\`\`
+${TRAIL}
+\`\`\`
+
+Fix the cause (gh auth/API outage, \`FORGE_TRAIL_QG_SINCE\`/runner clock, or set \`FORGEDOCK_HOME\` when the verifier is unresolvable), then re-run /review-pr."
+    gh issue comment "$MERGE_ISSUE" {MERGE_GH_FLAG} --body "$TRAIL_ERR_BODY" # <!-- allowlist:check-command-side-effects -->
+    # Nothing can resume this automatically, so park it for a human instead of leaving workflow:in-review (standalone /review-pr and remediate callers too).
+    gh issue edit "$MERGE_ISSUE" {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
+    # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "phase trail unreadable (rc=${TRAIL_RC})". The PR stays open and unmerged; callers must NOT fall back to a manual merge.
+    exit 1
+  elif [ "$TRAIL_RC" -ne 0 ]; then
+    TRAIL_FAIL_BODY="<!-- FORGE:PHASE_TRAIL_FAILED -->
+Auto-merge refused for PR #{PR_NUMBER}: the issue's phase trail is incomplete.
+
+\`\`\`
+${TRAIL}
+\`\`\`
+
+Re-run each missing phase via its Skill (see the \`->\` action on each MISSING line), then re-run /review-pr."
+    gh issue comment "$MERGE_ISSUE" {MERGE_GH_FLAG} --body "$TRAIL_FAIL_BODY" # <!-- allowlist:check-command-side-effects -->
+    # STOP — return REVIEW_RESULT: status: PHASE_TRAIL_FAILED with the MISSING lines (rc 1 only; rc >= 2 is handled above as BLOCKED).
+    # The /work-on router (work-on/review.md Phase R4), the work-on.md router (Phase 4 → work-on/review.md) and remediate.md Phase M6 consume this status and re-dispatch the named phases once (forge#3102); this is NOT an immediate needs-human escalation.
+    exit 1
+  fi
+fi
+[ "${TRAIL_RC:-1}" -eq 0 ] || exit 1   # hard guard: nothing below runs unless the trail verified
+```
+
+If the preflight failed, skip the rest of Phase 8. On exit code 1, return `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` listing the missing markers. On exit code ≥2 (unreadable trail, or 127 when the verifier is unresolvable), return `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail unreadable (rc=N)". This is an infrastructure failure with no MISSING lines, so callers neither re-run phases nor merge manually. (`DOCS_ONLY_FLAG` is computed in the block above: `--docs-only` when `scripts/is-docs-only.sh` accepts the PR diff, fed both sides of every rename: every file is an allowlisted `*.md` (`docs/**` or a root README/CHANGELOG/CONTRIBUTING/SECURITY/GOVERNANCE), outside the instruction directories (`commands/`, `devdocs/`, `templates/`, `skills/`, `agents/`, `hooks/`, `.claude/`, `.claude-plugin/`, `.agents/`, `.codex/`, `.cursor/`, `.github/`, `.opencode/`, `.gemini/`, `.kiro/`) at any depth, and not named `AGENTS.md`/`CLAUDE.md`/`SKILL.md`/`GEMINI.md` (or a dotted variant).)
+
 ```bash
 # §7B verdict + purpose-regression + calibration + trust-escalation guard — check before any merge attempt <!-- Added: forge#1601, forge#1741, forge#1745 -->
 # HARD RULE 3 requires that VERDICT=CHANGES REQUESTED, HAS_PURPOSE_REGRESSION=true,
@@ -2250,21 +2363,76 @@ if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
     # `main`/deploy-gate base, or to remediate.md Phase M7's base-scoped auto-land bar for a
     # non-`main` base (forge#2570). Either way this guard only parks at workflow:awaiting-merge.
 else
+    # CI gate (MANDATORY before any autonomous merge): merge only when every check on the PR is
+    # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch
+    # protection required none and an auto-merge waits only for *required* checks.
+    # Shell state does not persist between Bash calls: everything this block needs is resolved here.
+    _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+    CI_GATE_SCRIPT=""; DOCS_ONLY_SCRIPT=""
+    for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l"; do
+      case "$_c" in /*)
+        [ -z "$CI_GATE_SCRIPT" ] && [ -f "$_c/scripts/wait-ci-green.sh" ] && CI_GATE_SCRIPT="$_c/scripts/wait-ci-green.sh"
+        [ -z "$DOCS_ONLY_SCRIPT" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && DOCS_ONLY_SCRIPT="$_c/scripts/is-docs-only.sh" ;;
+      esac
+    done
+    if [ -n "$CI_GATE_SCRIPT" ]; then CI_GATE_OUT=$(bash "$CI_GATE_SCRIPT" {PR_NUMBER} {MERGE_GH_FLAG}); CI_GATE_RC=$?
+    else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
+    echo "$CI_GATE_OUT"
+    GATED_HEAD=$(printf '%s\n' "$CI_GATE_OUT" | sed -n 's/^CI_GATE_HEAD: //p' | head -1)
+    # rc 2 "head moved" is a stale review, not a human problem; rc 3 TIMEOUT means CI is still running.
+    printf '%s\n' "$CI_GATE_OUT" | grep -q 'PR head moved during the wait' && CI_GATE_RC=4
+    if [ "$CI_GATE_RC" -eq 3 ]; then
+      echo "CI_GATE_TIMEOUT: CI still running — re-run this whole block (up to 3 more times) before treating it as a failure."
+    fi
+    # Reviewed-head guard: merge only the exact commit this review approved. A commit pushed after
+    # the verdict (field test: post-review "fix" commits merged unreviewed on #3156 and #3158) needs a
+    # fresh full review, not a merge. Checked after the CI wait so a push during the wait is caught.
+    # A docs-only delta (this review's own §6B.5 note fixes) is allowed; any other change is stale.
+    # REVIEW_SHA is re-derived from this review's FORGE:REVIEW_ROUTE marker (sha=<7 chars>), never
+    # assumed from an earlier shell.
+    REVIEWED_SHORT=$(gh api "repos/{GH_REPO}/issues/{PR_NUMBER}/comments" --paginate --jq '.[] | select(.body | contains("FORGE:REVIEW_ROUTE")) | .body' 2>/dev/null \
+      | sed -n 's/.*FORGE:REVIEW_ROUTE[^>]* sha=\([0-9a-f]\{7,\}\).*/\1/p' | tail -1)
+    if [ "$CI_GATE_RC" -eq 0 ]; then
+      if [ -z "$REVIEWED_SHORT" ] || [ -z "$GATED_HEAD" ] || [ "$GATED_HEAD" = "unknown" ]; then
+        CI_GATE_RC=4; CI_GATE_OUT="STALE_REVIEW: cannot bind the merge to a reviewed commit (route sha='${REVIEWED_SHORT}', gated head='${GATED_HEAD}')"
+      elif [ "${GATED_HEAD#"$REVIEWED_SHORT"}" = "$GATED_HEAD" ]; then
+        REVIEW_BASE_SHA=$(gh api "repos/{GH_REPO}/commits/${REVIEWED_SHORT}" --jq '.sha' 2>/dev/null)
+        POST_REVIEW_FILES=$(gh api "repos/{GH_REPO}/compare/${REVIEW_BASE_SHA:-$REVIEWED_SHORT}...${GATED_HEAD}" --jq '.files[] | .filename, (.previous_filename // empty)' 2>/dev/null)
+        if [ -n "$POST_REVIEW_FILES" ] && [ -n "$DOCS_ONLY_SCRIPT" ] && printf '%s\n' "$POST_REVIEW_FILES" | bash "$DOCS_ONLY_SCRIPT"; then
+          echo "Post-review commits are docs-only (note fixes) — reviewed code unchanged."
+        else
+          CI_GATE_RC=4; CI_GATE_OUT="STALE_REVIEW: PR head ${GATED_HEAD:0:7} is not the reviewed commit ${REVIEWED_SHORT} and the delta is not docs-only"
+        fi
+      fi
+    fi
+    if [ "$CI_GATE_RC" -eq 4 ]; then
+      # Not a human problem: the caller re-runs /review-pr on the new head (work-on/review.md R4).
+      echo "REVIEW_RESULT: status: BLOCKED, blocker: stale review — ${CI_GATE_OUT}; re-run /review-pr on the new head"
+    elif [ "$CI_GATE_RC" -ne 0 ]; then
+      CI_MSG="⛔ Auto-merge refused for PR #{PR_NUMBER}: CI is not green (ci gate rc=${CI_GATE_RC}). The PR stays open; fix the failing checks on its branch (remediation treats this as FIXABLE) or re-run flaky ones.
+\`\`\`
+${CI_GATE_OUT}
+\`\`\`"
+      gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "$CI_MSG" 2>/dev/null || true # allowlist:check-command-side-effects
+      gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
+      echo "REVIEW_RESULT: status: BLOCKED, blocker: ci gate not green (rc=${CI_GATE_RC})"
+    else
     # Checkpoint comment on issue
-    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "Review complete for PR #{PR_NUMBER}. Verdict: ${VERDICT:-APPROVED}. Proceeding to merge."
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "Review complete for PR #{PR_NUMBER}. Verdict: ${VERDICT:-APPROVED}. CI green. Proceeding to merge."
 
-    # Merge
-    gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge
+    # Merge exactly the commit the CI gate (and the reviewed-head guard) checked.
+    gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge --match-head-commit "$GATED_HEAD"
 
     # Verify
     MERGE_STATE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json state --jq '.state')
     [ "$MERGE_STATE" != "MERGED" ] && gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "PR #{PR_NUMBER} merge failed. State: $MERGE_STATE."
+    fi
 fi
 fi
 fi
 ```
 
-**Important**: Phase 8 ONLY merges the PR. It does NOT close the issue, update labels, or clean up worktrees. When invoked via `/work-on`, those responsibilities belong to `work-on/close.md` (work-on.md Phase 6 — triggered when PR is merged and issue is still open). Doing them here would cause the issue to be closed with `workflow:merged` before Phase 6 runs, skipping the close phase entirely.
+**Important**: Phase 8 ONLY merges the PR. It does NOT close the issue, update labels, or clean up worktrees. When invoked via `/work-on`, those responsibilities belong to `work-on/close.md` (the router's Phase 5 — triggered when the PR is merged and the issue is still open). Doing them here would cause the issue to be closed with `workflow:merged` before Phase 6 runs, skipping the close phase entirely.
 
 ### 8B: Post-Merge Review Finding Demilestoning (Milestone PRs Only)
 

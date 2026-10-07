@@ -39,7 +39,10 @@ for NUM in {all_completed_issue_numbers}; do
   if [ -n "$TRAJ_BODY" ]; then
     # Decode via protocol CLI — handles both Base64url form (forge#1727) and gracefully
     # exits 1 (skips) for pre-migration inline-JSON entries.
-    CARD=$(echo "$TRAJ_BODY" | node packages/protocol/src/cli.js parse --type CARD 2>/dev/null || true)
+    # The codec ships with ForgeDock, not with the consumer repo: resolve it from the install root.
+    _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"; CODEC_CLI=""
+    for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l"; do case "$_c" in /*) [ -z "$CODEC_CLI" ] && [ -f "$_c/packages/protocol/src/cli.js" ] && CODEC_CLI="$_c/packages/protocol/src/cli.js" ;; esac; done
+    CARD=$( [ -n "$CODEC_CLI" ] && printf '%s\n' "$TRAJ_BODY" | node "$CODEC_CLI" parse --type CARD 2>/dev/null | jq -c '.payload // .' 2>/dev/null || true)
     [ -n "$CARD" ] && CARDS="${CARDS}${CARD}"$'\n'
   fi
 done
@@ -163,7 +166,7 @@ ORCHESTRATION_ENDED_IDLE="${BATCH_FULLY_GATED:-false}"
 IDLE_POLICY_DEFERRED_COUNT=0
 for FINDING_NUM in "${DEFERRED_FINDINGS[@]:-}"; do
   [ -z "$FINDING_NUM" ] && continue
-  echo "${DEFERRED_REASONS[$FINDING_NUM]:-}" | grep -qi "batch fully human-gated" && \
+  echo "${DEFERRED_REASONS[$FINDING_NUM]:-}" | grep -qi "batch fully human-gated" && ! echo "${DEFERRED_REASONS[$FINDING_NUM]:-}" | grep -qi "amplification breaker" && \
     IDLE_POLICY_DEFERRED_COUNT=$((IDLE_POLICY_DEFERRED_COUNT + 1))
 done
 ```
@@ -345,6 +348,7 @@ current session's live wake pick them up automatically if it is still running).
 | **Cascade amplification** | **{FINDINGS_SPAWNED:-0}/{MERGED_UNITS:-0} = {AMPLIFICATION_RATIO:-0} findings per merged unit** |
 | Amplification composition | {#REFINEMENT_FINDINGS[@]:-0} same-lineage refinements; {#NEW_SURFACE_FINDINGS[@]:-0} new-surface findings |
 | Amplification bound | {CASCADE_MAX_AMPLIFICATION:-off}; {#AMPLIFICATION_DEFERRED[@]:-0} same-lineage refinements deferred to completion sweep |
+| Amplification breaker | {AMPLIFICATION_BREAKER:-on}; {tripped|clear}; {#AMPLIFICATION_BREAKER_DEFERRED[@]:-0} P3 findings paused ({#BREAKER_HELD[@]:-0} still held at sweep) for bounded P3 batches (never dispatched individually) |
 | Competing recommendations reconciled (Phase 2.5) | {RECONCILED_COUNT} (investigation plans arbitrated in place + serialized) |
 | Findings validated | {N} |
 | False positives | {N} ({%}) |
@@ -363,7 +367,7 @@ current session's live wake pick them up automatically if it is still running).
 
 `P3 findings clubbed` and `Findings deferred — token budget` are a DIFFERENT mechanism from the `$`-denominated `Budget limit`/`Projected spend`/`Actual spend`/`Issues deferred (budget ceiling)` rows above (forge#1743, opt-in `--budget N` flag, gates the *original* issue dispatch order). The token-budget row reads the always-on, token-denominated ceiling that scopes ONLY to Step 4C's review-finding cascade dispatch (forge#1858); `SURFACE_BATCH_COUNT` and `SURFACE_BATCHED_FINDINGS` are populated by the same Step 4C surface-area-batching block (forge#1818) that clubs P3 findings sharing a file/leaf-directory into one dispatched pipeline. Both degrade gracefully to `0`/`uncapped` when the batch had no review findings or ran with defaults. <!-- Added: forge#1858 -->
 
-**Cascade amplification detail**: render one row per `FINDINGS_BY_SOURCE_PR` entry: `| PR #{source} | {finding count} | {refinement count} | {new-surface count} |`. A ratio at or above 1.0 means the batch is not reducing its open-work count through merges alone; it does **not** mean the findings are low-value. Include any convergence warning and state that the default `max_amplification: off` never defers findings. When an opt-in bound deferred a refinement, list it under Completion Sweep as re-evaluable rather than silently omitting it.
+**Cascade amplification detail**: render one row per `FINDINGS_BY_SOURCE_PR` entry: `| PR #{source} | {finding count} | {refinement count} | {new-surface count} |`. A ratio at or above 1.0 means the batch is not reducing its open-work count through merges alone; it does **not** mean the findings are low-value. Include any convergence warning and state that the default `max_amplification: off` never defers findings. State the amplification breaker (on by default, forge#3060) separately: when it tripped, report the ratio, the number of paused P3 findings, and the operator decision (batch or defer); when opted out via `amplification_breaker: off`, say so. When an opt-in bound deferred a refinement, list it under Completion Sweep as re-evaluable rather than silently omitting it.
 
 For `policy: all`, include the full-repo intake counts and list each automated duplicate with its canonical issue. A sweep measures all new open issues, including CI alerts without `review-finding`; it must not claim that the cascade ratio alone measures total queue growth.
 

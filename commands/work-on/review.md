@@ -1,16 +1,19 @@
 ---
 description: Review subcommand — push branch, create PR, invoke /review-pr with --auto-merge
-argument-hint: "[issue number] [--repo GH_REPO] [--gh-flag GH_FLAG] [--worktree PATH] [--branch BRANCH] [--base PR_BASE]"
+context: fork
+argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE} --branch {BRANCH} --base {PR_BASE}"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
 
 # work-on/review — Review & PR Creation Subcommand
 
+> **Skill Name Resolution (forked phase)**: `{FORGE_SKILL_PREFIX}` is the namespace this skill itself was invoked under — invoked as `forgedock:work-on:…` → `forgedock:` (nesting `:`); as `work-on:…` → empty (`install.sh`); as `forge-work-on-…` → `forge-` (Codex, nesting `-`); OpenCode → empty with `-` nesting. Confirm the target name in the available-skills list before calling it. A forked phase receives no resolved value from its caller; never guess, and if the target skill is not listed return BLOCKED "skill not found: <name>".
+
 **Input**: $ARGUMENTS
 
-**Invoked by**: `work-on.md` Phase 4–5, after `build/validate.md` returns `GATE_PASSED: true`.
-**Output**: Push branch, create PR, invoke /review-pr --auto-merge, return result to caller.
+**Invoked by**: the `work-on` router, after `build/validate.md` returns `GATE_PASSED: true`.
+**Output**: Push branch, create PR, invoke /review-pr --auto-merge, verify the merge, and print exactly one `REVIEW_RESULT:` block as the final reply (all paths, including every guard/failure).
 
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (label transitions, `FORGE:CHECKPOINT` writes) stay at this tier because they're interleaved with the review/merge-decision steps in the same `Skill()` invocation — see `work-on.md` section "Model and Effort Tiering — What Actually Applies". <!-- Added: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
@@ -27,7 +30,91 @@ Parse from $ARGUMENTS:
 - `--gh-flag {GH_FLAG}` — gh CLI repo flag (e.g. `-R {owner}/{repo}`)
 - `--worktree {WORKTREE_PATH}` — absolute path to the git worktree
 - `--branch {BRANCH}` — feature branch name (e.g. `feat/my-feature`)
-- `--base {PR_BASE}` — PR target branch (e.g. `milestone/modular-pipeline-architecture` or `staging`)
+- `--base {PR_BASE}` — PR target branch (e.g. `milestone/modular-pipeline-architecture` or `staging`). **Required.** The caller has already computed it and validated it against the classified lane; this skill never recomputes or re-validates the lane.
+
+**Fail closed**: if `{NUMBER}`, `--repo`, `--worktree`, `--branch` or `--base` is missing, print the block below and STOP (no push, no PR):
+
+```
+REVIEW_RESULT:
+  status: BLOCKED
+  pr_number:
+  pr_url:
+  merged_to:
+  blocker: missing required arg: --base (or --worktree/--branch/--repo/NUMBER)
+```
+
+## Script resolution
+
+**Shell state does not persist between Bash tool calls** (each call is a fresh shell): paste the block below at the top of every bash command in this skill that calls `resolve_script` or uses `FORGE_ROOT`/`UNIVERSAL_DIR`.
+
+```bash
+# Canonical script resolution (keep byte-identical across specs; guarded by scripts/forge-root.test.sh).
+# Shell state does NOT persist between Bash tool calls: include this whole block at the top of
+# every command that uses resolve_script or FORGE_ROOT.
+REPO_PATH="${REPO_PATH:-$(yq '.paths.root // ""' forge.yaml 2>/dev/null)}"
+[ -n "$REPO_PATH" ] && [ "$REPO_PATH" != "null" ] || REPO_PATH="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+ADAPTIVE_DIR_RAW="${REPO_PATH}/$(yq '.adaptive_scripts.directory // ".forgedock/scripts"' forge.yaml 2>/dev/null || echo '.forgedock/scripts')"
+ADAPTIVE_DIR=$(realpath -m "$ADAPTIVE_DIR_RAW" 2>/dev/null || echo "$ADAPTIVE_DIR_RAW")
+ADAPTIVE_ENABLED=$(yq '.adaptive_scripts.enabled // "true"' forge.yaml 2>/dev/null || echo 'true')
+# Bounds check: reject adaptive_scripts.directory values that escape the repo root.
+# Normalize REPO_PATH the same way ADAPTIVE_DIR is normalized (realpath -m) so a trailing
+# slash in paths.root does not inject a '//' into the glob and trigger a false positive.
+REPO_PATH_NORM=$(realpath -m "$REPO_PATH" 2>/dev/null || echo "$REPO_PATH")
+if [[ "$ADAPTIVE_DIR" != "${REPO_PATH_NORM}/"* ]]; then
+  echo "WARNING: adaptive_scripts.directory resolves outside repo root ('$ADAPTIVE_DIR') — adaptive tier disabled" >&2
+  ADAPTIVE_ENABLED=false
+fi
+# ForgeDock's own install root (holds scripts/ and commands/), resolved ONCE by the canonical bootstrap
+# below — never the consumer repo: plugin installs set neither FORGE_HOME nor FORGEDOCK_HOME, and a
+# repo-relative fallback would execute (or miss) a same-named script controlled by the consumer repo.
+# Resolution: $FORGEDOCK_HOME (authoritative when set) > $FORGE_HOME > $CLAUDE_PLUGIN_ROOT > the
+# ~/.claude/commands symlink target > the Claude Code plugin cache/marketplace dirs. <!-- forge#3098 -->
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
+  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
+  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
+  _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+  # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
+  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
+  while IFS= read -r _c; do
+    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
+  done <<< "$_k"
+fi
+UNIVERSAL_DIR="${FORGE_ROOT:+$FORGE_ROOT/scripts}"   # empty => tier 3 skipped, prose tier
+# NOTE: never resolve this via `which` or `find` — universal scripts are
+# install-relative, not installed on $PATH, so a PATH lookup always misses.
+# FORGE_ROOT (above) is the deterministic resolution; there is NO repo-path fallback.
+# Pipeline agents MUST NOT use `find` (unbounded or filesystem-wide) to
+# locate pipeline scripts under any circumstances: if UNIVERSAL_DIR/${operation}.sh
+# does not exist, resolve_script() falls through to Tier 4 (prose) below,
+# which is always safe and available. A missing script is never a reason
+# to search the filesystem. <!-- Added: forge#1984 -->
+
+resolve_script() {
+  local operation="$1"
+  # Tier 2: per-repo adaptive (skip if disabled)
+  if [ "$ADAPTIVE_ENABLED" != "false" ] && [ -f "${ADAPTIVE_DIR}/${operation}.sh" ]; then
+    echo "adaptive:${ADAPTIVE_DIR}/${operation}.sh"
+    return
+  fi
+  # Tier 3: universal script
+  if [ -n "$UNIVERSAL_DIR" ] && [ -f "${UNIVERSAL_DIR}/${operation}.sh" ]; then
+    echo "universal:${UNIVERSAL_DIR}/${operation}.sh"
+    return
+  fi
+  # Tier 4: prose fallback
+  echo "prose:"
+}
+```
+
+**BLOCKED output pattern**: every guard below that stops the phase prints the result block before exiting, e.g.:
+
+```bash
+printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number:\n  pr_url:\n  merged_to:\n  blocker: %s\n' "<blocker text>"
+```
 
 ---
 
@@ -48,8 +135,22 @@ gh pr list {GH_FLAG} --head {BRANCH} --json number,state,url 2>/dev/null
 
 **Resume check**:
 - If PR already exists AND is OPEN → run the **HEAD-unchanged re-review guard** below before proceeding to Phase R3
-- If PR already exists AND is MERGED → return `REVIEW_RESULT: status: ALREADY_MERGED`
-- If no `<!-- FORGE:BUILDER -->` comment exists → EXIT with `REVIEW_RESULT: status: BLOCKED`, blocker: "FORGE:BUILDER comment not found — implement phase may not have completed"
+- If PR already exists AND is MERGED → write the REVIEW checkpoint (same JSON as Phase R4) if one does not already exist, then return `REVIEW_RESULT: status: ALREADY_MERGED`:
+  ```bash
+  [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] would post the comment below"; exit 0; }
+  MERGED_PR=$(gh pr list {GH_FLAG} --head {BRANCH} --state merged --json number --jq '.[0].number' 2>/dev/null)
+  HAS_REVIEW_CKPT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
+    --jq '[.[] | select((.body | contains("FORGE:CHECKPOINT")) and (.body | contains("\"phase\": \"REVIEW\"")))] | length' 2>/dev/null | tail -1)
+  if [ "${HAS_REVIEW_CKPT:-0}" -eq 0 ]; then
+    CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
+  \`\`\`json
+  {\"phase\": \"REVIEW\", \"status\": \"COMPLETE\", \"next_phase\": \"CLOSE\", \"timestamp\": \"${CHECKPOINT_TIMESTAMP}\"}
+  \`\`\`" # allowlist:check-command-side-effects
+  fi
+  ```
+  (`pr_number` in the result is `$MERGED_PR`.)
+- If no `<!-- FORGE:BUILDER -->` comment exists → print `REVIEW_RESULT: status: BLOCKED`, blocker: "FORGE:BUILDER comment not found — implement phase may not have completed"
 
 **HEAD-unchanged re-review guard** (MANDATORY when a PR already exists and is OPEN) <!-- Added: forge#2243 --> — a PR whose most recent review verdict was CHANGES REQUESTED must not be resubmitted for a full domain-agent review fan-out if nothing has changed since that verdict. `/review-pr` records the exact commit it reviewed in its verdict comment (`CHANGES REQUESTED: commit {sha} — ...`, see `commands/review-pr.md` Phase 8/9); compare that recorded sha against the PR's current `headRefOid`:
 
@@ -84,6 +185,7 @@ SKIP_EOF
   gh issue comment {NUMBER} {GH_FLAG} --body "$REREVIEW_SKIP_BODY" # <!-- allowlist:check-command-side-effects -->
   gh issue edit {NUMBER} {GH_FLAG} --add-label needs-human 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
   # Return REVIEW_RESULT: status: BLOCKED — do not invoke /review-pr again on unchanged HEAD
+  printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number: {PR_NUMBER}\n  pr_url:\n  merged_to:\n  blocker: %s\n' "HEAD unchanged since last CHANGES REQUESTED verdict (${LAST_VERDICT_SHA}) — re-review skipped; remediation required"
   exit 1
 fi
 ```
@@ -115,8 +217,9 @@ ${MERGE_COMMITS}
 Do NOT push this branch. Human review required to identify the source of the merge commits and clean the branch history (e.g. via \`git rebase\` to replay only the intended commits onto \`origin/{PR_BASE}\`).
 
 <!-- FORGE:PUSH_BLOCKED -->"
-    gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" # allowlist:check-command-side-effects
     # Return REVIEW_RESULT: status: BLOCKED — do not push
+    printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number:\n  pr_url:\n  merged_to:\n  blocker: %s\n' "pre-push ancestry guard failed: merge commits from outside {PR_BASE}"
     exit 1
   fi
 fi
@@ -140,7 +243,8 @@ Branch \`{BRANCH}\` has 0 commits ahead of \`origin/{PR_BASE}\`. Pushing this br
 **Resolution**: Delete this branch, re-run \`/work-on {NUMBER}\` to restart the build phase. The partial FORGE:BUILDER comment (lacking \`FORGE:BUILDER:COMPLETE\`) will be detected and deleted, and the build will restart cleanly.
 
 <!-- FORGE:PUSH_BLOCKED_EMPTY_BRANCH -->"
-  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+  gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" # allowlist:check-command-side-effects
+  printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number:\n  pr_url:\n  merged_to:\n  blocker: %s\n' "branch has 0 commits ahead of origin/{PR_BASE} — empty branch not pushed"
   exit 1
 fi
 echo "Commit count ahead of origin/{PR_BASE}: $COMMIT_COUNT — OK to push"
@@ -150,12 +254,12 @@ echo "Commit count ahead of origin/{PR_BASE}: $COMMIT_COUNT — OK to push"
 
 ```bash
 cd {WORKTREE_PATH}
-git push origin {BRANCH}
+git push -u origin {BRANCH} # allowlist:check-command-side-effects
 ```
 
 If push fails, retry with `--force-with-lease`:
 ```bash
-git push origin {BRANCH} --force-with-lease
+git push -u origin {BRANCH} --force-with-lease # allowlist:check-command-side-effects
 ```
 
 If still fails:
@@ -170,9 +274,62 @@ This may indicate a merge conflict or remote rejection. Human review required.
 
 <!-- FORGE:PUSH_FAILED -->"
 
-gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" # allowlist:check-command-side-effects
+printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number:\n  pr_url:\n  merged_to:\n  blocker: %s\n' "git push failed" # allowlist:check-command-side-effects
 ```
-Return `REVIEW_RESULT: status: BLOCKED`, blocker: "git push failed".
+Print the block above (`status: BLOCKED`, blocker: "git push failed") and STOP.
+
+---
+
+## Phase R1.5: Phase-Trail Preflight (MANDATORY — before PR creation) <!-- Added: forge#3061 -->
+
+A PR must not be opened for work whose earlier phases were skipped. Run the deterministic verifier; it requires INVESTIGATOR, FAST_PATH and CONTRACT always, CONTEXT and ARCHITECT unless the band is TRIVIAL/INVESTIGATION, and a passing FORGE:QUALITY_GATE unless the diff is docs-only.
+
+```bash
+# --no-renames: list BOTH sides of a rename so a file moved into docs/ cannot hide its source path (forge#3145).
+CHANGED=$(git -C {WORKTREE_PATH} diff --name-only --no-renames origin/{PR_BASE}...HEAD)
+# The verifier ships with ForgeDock (not the consumer repo): same resolution as every universal script.
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
+  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
+  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
+  _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+  # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
+  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
+  while IFS= read -r _c; do
+    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
+  done <<< "$_k"
+fi
+TRAIL_SCRIPT="$FORGE_ROOT/scripts/verify-phase-trail.sh"
+# Docs-only predicate: ONE shared copy (scripts/is-docs-only.sh, forge#3134). Fail closed: unresolved script or empty diff -> no flag.
+DOCS_ONLY_FLAG=""
+if [ -n "$CHANGED" ] && [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/is-docs-only.sh" ] && echo "$CHANGED" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"; then DOCS_ONLY_FLAG="--docs-only"; fi
+# Band cross-check (forge#3149): a non-docs diff means an agent-chosen INVESTIGATION band must not waive requirements.
+# Fail closed: anything not positively docs-only (including an empty/unreadable diff) is treated as a code diff.
+CODE_DIFF_FLAG="--code-diff"
+if [ -n "$DOCS_ONLY_FLAG" ]; then CODE_DIFF_FLAG=""; fi
+# Bind the QUALITY_GATE PASS to the built tree (forge#3149). An unresolved tree is passed as empty -> the verifier exits 2 (fail closed).
+HEAD_TREE=$(git -C {WORKTREE_PATH} rev-parse 'HEAD^{tree}' 2>/dev/null)
+if [ -z "$FORGE_ROOT" ] || [ ! -f "$TRAIL_SCRIPT" ]; then
+  # Fail closed: never skip the gate when the verifier cannot be resolved (plugin installs set no FORGE_HOME).
+  echo "PHASE TRAIL: verify-phase-trail.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install)" >&2
+  TRAIL_RC=127
+else
+  TRAIL=$(bash "$TRAIL_SCRIPT" {NUMBER} -R {GH_REPO} $DOCS_ONLY_FLAG $CODE_DIFF_FLAG --head-tree "$HEAD_TREE"); TRAIL_RC=$?
+  echo "$TRAIL"
+fi
+# Hard guard (same as review-pr.md Phase 8): an unreadable/unresolvable trail never falls through to PR creation.
+if [ "$TRAIL_RC" -ge 2 ]; then printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number:\n  pr_url:\n  merged_to:\n  blocker: phase trail unreadable (rc=%s)\n' "$TRAIL_RC"; exit 1; fi
+```
+
+- `TRAIL_RC=0` → continue to Phase R2.
+- `TRAIL_RC=1` → **do not create the PR.** For each `MISSING: <marker> -> <action>` line, run that phase now via its `Skill(...)` (the action text names it), then re-run this preflight (this skill is the SINGLE owner of the phase-trail re-dispatch; the router never re-dispatches). Do NOT hand-post the missing marker and do NOT escalate to a human: the refusal routes back to the missing phase. If the preflight still fails after one re-dispatch round, post a `<!-- FORGE:PHASE_TRAIL_FAILED -->` comment listing the still-missing markers, add `needs-human`, print `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail incomplete after re-dispatch". Do NOT close the issue.
+- `TRAIL_RC>=2` (2 = trail unreadable; 127 = script not executable) → the trail could not be read; fail closed (the block above is printed) with `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail unreadable".
+
+Run the same preflight again at the top of Phase R3, before `/review-pr --auto-merge` is invoked, since a resumed run can enter at R3 with an existing PR.
 
 ---
 
@@ -256,14 +413,18 @@ Use the existing PR number and continue.
 ### R2D: Update labels
 
 ```bash
-gh issue edit {NUMBER} {GH_FLAG} \
-  --add-label "workflow:in-review" \
-  --remove-label "workflow:building"
+RESOLUTION=$(resolve_script 'transition-label'); TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+case "$TIER" in
+  adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} in-review ;;
+  prose) gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:in-review" --remove-label "workflow:investigating" --remove-label "workflow:ready-to-build" --remove-label "workflow:building" --remove-label "workflow:awaiting-merge" --remove-label "workflow:merged" --remove-label "workflow:invalid" --remove-label "workflow:decomposed" 2>/dev/null || true # allowlist:check-command-side-effects ;;
+esac
 ```
 
 ---
 
 ## Phase R3: Invoke /review-pr with --auto-merge
+
+**First re-run the Phase R1.5 phase-trail preflight** (resume entry can skip R1.5). Do not invoke `/review-pr` while it fails. <!-- Added: forge#3061 -->
 
 Re-read the PR number (from creation or from resume check):
 
@@ -278,7 +439,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "## Submitting for Review
 
 PR #${PR_NUMBER} created targeting \`{PR_BASE}\`. Invoking /review-pr with --auto-merge.
 
-Review will: analyze changes → spawn domain agents → post findings → merge → close issue → clean up worktree.
+Review will: analyze changes → spawn domain agents → post findings → merge. The issue is closed and the worktree cleaned up afterwards by `work-on:close`, not by /review-pr.
 
 <!-- FORGE:REVIEW_STARTED -->"
 ```
@@ -286,7 +447,10 @@ Review will: analyze changes → spawn domain agents → post findings → merge
 Invoke the review command:
 
 ```
-Skill(skill="review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
+if DRY_RUN=true:
+  record "Would invoke review-pr --auto-merge for PR #{PR_NUMBER}; skipped (dry-run)."
+else:
+  Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
 ```
 
 **OpenCode joined-child contract**: When `FORGE_RUNTIME=opencode` (or an OpenCode runtime marker is present), invoke this load-bearing review through one native foreground `task` instead of treating the `Skill(...)` line as an asynchronous handoff:
@@ -305,7 +469,9 @@ else:
 
 Wait for that task's completed result before Phase R4. Propagate its `REVIEW_RESULT` as this module's child state; do not return `REVIEW_RESULT`, report progress, release an orchestrator slot, or begin close work while the child is running. If the child errors or returns no parseable `REVIEW_RESULT`, return `REVIEW_RESULT: status: BLOCKED` with the child failure as the blocker. The normal `Skill(...)` invocation above remains the non-OpenCode path.
 
-/review-pr handles: full domain-agent review → post findings as separate issues (non-blocking) → merge the PR → close the issue → clean up worktree.
+/review-pr handles: full domain-agent review → post findings as separate issues (non-blocking) → merge the PR. It does NOT close the issue or clean up the worktree — `work-on:close` does both.
+
+If `review-pr` is not found under `{FORGE_SKILL_PREFIX}review-pr` or `review-pr`, print `REVIEW_RESULT: status: BLOCKED`, blocker: "skill not found: review-pr" and STOP. Never review inline.
 
 ---
 
@@ -322,10 +488,11 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 ```
 
 **Cases**:
-- PR MERGED (issue OPEN or CLOSED) → write checkpoint, then return `REVIEW_RESULT: status: COMPLETE` — do NOT close the issue or add labels here; the router will route to `work-on:close` which handles issue closure, label updates, project board, trajectory log, and worktree cleanup.
+- PR MERGED (issue OPEN or CLOSED) → write checkpoint, then return `REVIEW_RESULT: status: COMPLETE` — do NOT close the issue or add labels here; the caller will route to `work-on:close` which handles issue closure, label updates, project board, trajectory log, and worktree cleanup.
 
   Write machine-readable phase checkpoint before returning (MANDATORY when PR is MERGED):
   ```bash
+  [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] would post the comment below"; exit 0; }
   CHECKPOINT_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CHECKPOINT -->
   \`\`\`json
@@ -333,17 +500,63 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
   \`\`\`"
   ```
 
-- PR NOT MERGED → attempt manual merge:
+- `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` from /review-pr (forge#3102; internal to this skill — never printed as this skill's status) → the review gate refused to merge because phase markers are missing. Do NOT hand-post markers and do NOT add `needs-human` yet. For each `MISSING: <marker> -> <action>` line, run that phase via its `Skill(...)`, then re-invoke Phase R3 once (this is the single re-dispatch owner; the trail preflight at the top of R3 re-runs). If the second attempt returns `PHASE_TRAIL_FAILED` again, post a `<!-- FORGE:PHASE_TRAIL_FAILED -->` comment listing the still-missing markers, add `needs-human`, and return `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail incomplete after re-dispatch". The PR stays open and unmerged throughout.
+
+- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker mentions the phase trail (any blocker containing "phase trail": "phase trail unreadable" when the Phase 8 verifier exited ≥2 / 127, "phase trail incomplete…", or "auto-merge requires --issue", forge#3147): the merge gate refused or could not run. Do NOT re-run phases (nothing is missing) and do NOT attempt the manual merge below, because that would bypass the gate. Add `needs-human` and return `REVIEW_RESULT: status: BLOCKED` with the same blocker. The PR stays open and unmerged.
+
+- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "stale review" (a commit landed on the PR after the verdict, or the head moved during the CI wait, so the code that would merge is not the reviewed code): do NOT merge. The re-review bound is persisted, not remembered: count `<!-- FORGE:STALE_REREVIEW: pr={PR_NUMBER} -->` comments on the issue. If the count is 0, post that marker (with the new head SHA), run the quality gate on the new head (`Skill(skill="{FORGE_SKILL_PREFIX}quality-gate", args="<changed files> --worktree {WORKTREE_PATH}")`, which posts a fresh `FORGE:QUALITY_GATE` for the code that will actually merge), then re-invoke Phase R3 once — a full review of the new head. If the count is already ≥ 1 (the head keeps moving after review), add `needs-human` and return `REVIEW_RESULT: status: BLOCKED`, blocker: "PR head keeps moving after review". <!-- forge#3188 -->
+
+- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "ci gate" (Phase 8 refused to merge because checks failed, were cancelled, or stayed pending past the gate retries): do NOT attempt the manual merge below — that would bypass the CI gate. Fixing red CI is pipeline work, not a human decision: invoke remediation **once** — `Skill(skill="{FORGE_SKILL_PREFIX}work-on:remediate", args="{PR_NUMBER} --issue {NUMBER} --base {PR_BASE}")` (forked; it classifies a CI-gate refusal as FIXABLE, clears `needs-human`, reads the failing job logs, fixes them on the PR branch, re-runs the quality gate and a full review, and auto-lands through the same CI gate). Bound: count `<!-- FORGE:CI_REMEDIATION: pr={PR_NUMBER} -->` comments on the issue first; if ≥ 1, do not remediate again. Post that marker before invoking. `REMEDIATE_RESULT` re-gate outcome `AUTO-LANDED` → treat as merged and return `REVIEW_RESULT: status: COMPLETE`; any other outcome → leave `needs-human` (remediation sets it) and return `REVIEW_RESULT: status: BLOCKED` with blocker "ci gate not green after remediation". <!-- forge#3191 -->
+
+  Persisted loop bounds for the two cases above — count first, post the marker, then act (`{BOUND}` is `STALE_REREVIEW` or `CI_REMEDIATION`):
   ```bash
-  gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto
+  [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] bound check only"; }
+  if [ "{BOUND}" = "STALE_REREVIEW" ]; then
+    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
+      --jq '[.[] | select((.body | contains("FORGE:STALE_REREVIEW:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
+  else
+    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
+      --jq '[.[] | select((.body | contains("FORGE:CI_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
+  fi
+  if [ "$BOUND_COUNT" -ge 1 ]; then
+    echo "BOUND_EXHAUSTED: {BOUND} already used for PR #{PR_NUMBER}"
+  elif [ "${DRY_RUN:-false}" != "true" ]; then
+    gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:STALE_REREVIEW: pr={PR_NUMBER} -->
+Stale review on PR #{PR_NUMBER}: quality-gating and re-reviewing the new head once." 2>/dev/null || true   # when {BOUND}=STALE_REREVIEW
+    gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CI_REMEDIATION: pr={PR_NUMBER} -->
+CI gate refused PR #{PR_NUMBER}: dispatching remediation once to fix the failing checks." 2>/dev/null || true   # when {BOUND}=CI_REMEDIATION
+  fi
   ```
-  If merge fails: post comment, add `needs-human`, return `REVIEW_RESULT: status: BLOCKED`
+  Post only the comment matching `{BOUND}`. `BOUND_EXHAUSTED` → take the "already ≥ 1" branch of that case.
+
+- PR NOT MERGED (and not a phase-trail, auto-merge-gate, stale-review or ci-gate BLOCKED above) → attempt manual merge, **only if the PR head is still the commit named in the latest `<!-- FORGE:REVIEW -->` APPROVED verdict** (otherwise re-invoke Phase R3 instead, as for "stale review") **and only after the same CI gate**:
+  ```bash
+  # CI gate (MANDATORY before any autonomous merge): merge only when every check on the PR is
+  # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch
+  # protection required none and an auto-merge waits only for *required* checks.
+  CI_GATE_SCRIPT=""
+  _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+  for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l"; do
+    case "$_c" in /*) [ -z "$CI_GATE_SCRIPT" ] && [ -f "$_c/scripts/wait-ci-green.sh" ] && CI_GATE_SCRIPT="$_c/scripts/wait-ci-green.sh" ;; esac
+  done
+  if [ -n "$CI_GATE_SCRIPT" ]; then CI_GATE_OUT=$(bash "$CI_GATE_SCRIPT" {PR_NUMBER} {GH_FLAG}); CI_GATE_RC=$?
+  else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
+  echo "$CI_GATE_OUT"
+  GATED_HEAD=$(printf '%s\n' "$CI_GATE_OUT" | sed -n 's/^CI_GATE_HEAD: //p' | head -1)
+  # rc 3 = CI still running: re-run this block (up to 3 more times) before treating it as a failure.
+  if [ "$CI_GATE_RC" -eq 0 ]; then
+    gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto --match-head-commit "$GATED_HEAD" # allowlist:check-command-side-effects (CI-gated merge)
+  else
+    echo "REVIEW_RESULT: status: BLOCKED, blocker: ci gate not green (rc=${CI_GATE_RC})"
+  fi
+  ```
+  If the gate refuses: post the gate output as an issue comment, add `needs-human`, return `REVIEW_RESULT: status: BLOCKED` (blocker "ci gate not green"). If merge fails: post comment, add `needs-human`, return `REVIEW_RESULT: status: BLOCKED`
 
 ---
 
 ## Output
 
-**After posting this result, immediately proceed to the close subcommand — do NOT stop here. `REVIEW_RESULT: status: COMPLETE` is an intermediate result, NOT a terminal state. The pipeline is not done. You MUST invoke `Skill("work-on:close", ...)` now to close the issue, update labels to `workflow:merged`, post the trajectory log, and clean up the worktree.**
+**`REVIEW_RESULT: status: COMPLETE` is an intermediate result, NOT a terminal state: the pipeline is not done. Print the block as your final reply; the caller then invokes `work-on:close` (issue closure, `workflow:merged`, trajectory log, worktree cleanup). Do not close anything here.**
 
 Output this structured block:
 
@@ -358,14 +571,12 @@ REVIEW_RESULT:
 
 ---
 
-## Integration Point in work-on.md
+## Integration
 
-This module runs at **Phases 4–5** — after validate returns `GATE_PASSED: true`, before close:
+This skill is invoked by the `work-on` router (forked) after validate returns `GATE_PASSED: true` and before `work-on:close`:
 
 ```
-3F.5 → Validate (by build/validate.md) — gate passed
-4    → [THIS MODULE] Push + PR creation + /review-pr invocation + merge verification
-5    → Close (by close.md) — trajectory, parent tracker, summary
+build/validate → [THIS SKILL] push + PR creation + /review-pr invocation + merge verification → work-on:close
 ```
 
-/review-pr is invoked within this module (not by the router). The router waits for REVIEW_RESULT before invoking close.md.
+/review-pr is invoked within this skill (not by the router). The router sees only the final `REVIEW_RESULT:` block and never re-dispatches phase-trail failures.

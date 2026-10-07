@@ -8,6 +8,8 @@ install: extras
 
 # /qa-sweep — Platform-Wide QA Testing
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 You are the QA orchestrator. Auto-discover every page across the platform (dashboard, marketing, blog, auth, docs, pricing), then systematically test every UI element, interaction, workflow, and state transition using browser automation. Create GitHub issues for every finding.
@@ -339,7 +341,7 @@ BODY_EOF
 ```
 
 ```
-Skill(skill="issue", args="--title \"{fix|feat}: {title} on {page}\" --body-file \"$QA_BODY_FILE\" --label \"qa\" --label \"{bug_or_enhancement}\" --label \"{priority}\"")
+Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"{fix|feat}: {title} on {page}\" --body-file \"$QA_BODY_FILE\" --label \"qa\" --label \"{bug_or_enhancement}\" --label \"{priority}\"")
 ```
 
 `qa`, `{bug_or_enhancement}`, and `{priority}` are each passed as their own `--label` flag — `/issue`'s programmatic mode does not comma-split a single `--label` value.

@@ -9,7 +9,9 @@ install: core
 
 # Staging Review
 
-**Trigger**: Invoked by the orchestrator via `Skill("review-pr-staging", $ARGUMENTS)`, or directly with `$ARGUMENTS` = "staging", a PR number targeting main, or "staging:feature".
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
+**Trigger**: Invoked by the orchestrator via `Skill("{FORGE_SKILL_PREFIX}review-pr-staging", $ARGUMENTS)`, or directly with `$ARGUMENTS` = "staging", a PR number targeting main, or "staging:feature".
 
 Performs comprehensive review of `staging` before merging to `main`. Handles large diffs (1,000-10,000+ lines), diverse changes, deep analysis, and business impact assessment.
 
@@ -502,7 +504,13 @@ Missing persona templates are a fatal setup error, not permission to skip multi-
 
 ```bash
 TEMPLATE_BASE=""
-if [[ -f "$FORGE_HOME/commands/review-pr-agents/protocols.md" ]]; then
+# Tier 0: the running plugin's own root (Claude Code substitutes this exact spelling; elsewhere it stays a
+# literal that the /* check rejects). Wins over an exported FORGE_HOME, which may name an older checkout.
+_PLUGIN_ROOT='${CLAUDE_PLUGIN_ROOT}'; case "$_PLUGIN_ROOT" in /*) ;; *) _PLUGIN_ROOT="" ;; esac
+if [[ -n "$_PLUGIN_ROOT" && -f "$_PLUGIN_ROOT/commands/review-pr-agents/protocols.md" ]]; then
+  TEMPLATE_BASE="$_PLUGIN_ROOT/commands/review-pr-agents"
+  TEMPLATE_SOURCE="plugin_root"
+elif [[ -f "$FORGE_HOME/commands/review-pr-agents/protocols.md" ]]; then
   TEMPLATE_BASE="$FORGE_HOME/commands/review-pr-agents"
   TEMPLATE_SOURCE="forge_home"
 else
@@ -530,7 +538,7 @@ fi
 
 **If `TEMPLATE_SOURCE` is `none`**: HARD STOP. Post a PR comment explaining the setup is broken, instructing the user to run `npx forgedock update` to repair the install, add `needs-human`, and exit without posting any findings or a verdict. **NEVER perform the review inline in the main agent context as a substitute.**
 
-**If `TEMPLATE_SOURCE` is `forge_home` or `repo_path`** (normal cases — behavior unchanged): `Read: $TEMPLATE_BASE/protocols.md` and `Read: $TEMPLATE_BASE/<persona>.md` per selected agent.
+**If `TEMPLATE_SOURCE` is `plugin_root`, `forge_home` or `repo_path`** (normal cases — behavior unchanged): `Read: $TEMPLATE_BASE/protocols.md` and `Read: $TEMPLATE_BASE/<persona>.md` per selected agent.
 
 **If `TEMPLATE_SOURCE` is `monolithic_catalog`** (last resort): `Read: $MONOLITHIC_CATALOG` and extract the shared protocols section plus each selected persona's section from within that single file.
 
@@ -593,7 +601,7 @@ TEST_GATE_REASON="Phase 6.5 not yet run"
 
 # Invoke /test-gate with the bundle PRs already computed in Phase 0A
 # ALL_PR_NUMBERS is the de-duplicated union of both scan methods (commit log + merge subjects)
-GATE_OUTPUT=$(Skill("test-gate", "--prs \"$(echo $ALL_PR_NUMBERS | tr '\n' ' ' | xargs)\" --base $DEFAULT_BRANCH"))
+GATE_OUTPUT=$(Skill("{FORGE_SKILL_PREFIX}test-gate", "--prs \"$(echo $ALL_PR_NUMBERS | tr '\n' ' ' | xargs)\" --base $DEFAULT_BRANCH"))
 
 # Extract machine-readable verdict from Skill output
 TEST_GATE_VERDICT=$(echo "$GATE_OUTPUT" | grep -oP '(?<=FORGE:TEST_GATE:RESULT=)(BLOCK|PASS|SKIP)' | tail -1 || echo "SKIP")
@@ -872,7 +880,7 @@ else
 # --label is repeatable (not comma-joined) per the /issue programmatic contract.
 # ${MILESTONE_FLAG} carries the Phase 7D derivation through — empty string is
 # a no-op arg when the reviewed branch has no milestone (plain staging→main).
-ISSUE_SKILL_OUTPUT=$(Skill(skill="issue", args="--title \"$STAGING_FINDING_TITLE\" --body-file \"$STAGING_FINDING_BODY_FILE\" --label review-finding --label needs-validation --label staging-review --label \"$STAGING_FINDING_PRIORITY\" ${MILESTONE_FLAG}"))
+ISSUE_SKILL_OUTPUT=$(Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"$STAGING_FINDING_TITLE\" --body-file \"$STAGING_FINDING_BODY_FILE\" --label review-finding --label needs-validation --label staging-review --label \"$STAGING_FINDING_PRIORITY\" ${MILESTONE_FLAG}"))
 # /issue re-reads the created issue and hard-fails unless this exact marker is present.
 rm -f "$STAGING_FINDING_BODY_FILE"
 

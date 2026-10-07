@@ -83,7 +83,10 @@
 
 set -euo pipefail
 
-EXT_REGEX='`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml|mjs|js|sh|md)`'
+# An optional line-reference suffix is accepted and stripped: review findings cite
+# `file.md:211`, `file.sh:104-114,162` or `file.md:~1685`, which the strict form missed,
+# leaving every finding-batch DAG on the low-confidence body fallback (field test).
+EXT_REGEX='`[^`]*\.(py|tsx?|jsx?|sql|json|ya?ml|mjs|js|sh|md)(:~?[0-9][0-9,~-]*)?`'
 
 # --------------------------------------------------------------------------- #
 # Argument parsing — mirrors scripts/issue-dedup.sh's -R / -R\ * case arms
@@ -190,7 +193,7 @@ extract_paths() {
   # locales` otherwise) — a portability trap the original inline pseudocode
   # in phase-3-dependency.md carried (forge#2436) and that this script fixes
   # by not needing PCRE at all.
-  grep -oE "$EXT_REGEX" <<< "$1" 2>/dev/null | tr -d '`' | sort -u || true
+  grep -oE "$EXT_REGEX" <<< "$1" 2>/dev/null | tr -d '`' | sed -E 's/:~?[0-9][0-9,~-]*$//' | sort -u || true
 }
 
 PROVENANCE="none"

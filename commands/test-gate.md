@@ -9,6 +9,8 @@ install: extras
 
 # /test-gate — Deterministic Deploy-Gate Testing
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: `$ARGUMENTS` — optional `--prs "<space-separated PR numbers>"` and `--base <branch>`.
 
 Verifies a staging→main bundle's acceptance criteria against running code before deploy. Called by `/review-pr-staging` (Phase 6.5) with the bundle PRs, or run standalone when `--prs` is absent (computes the bundle itself). Returns a machine-readable BLOCK / PASS / SKIP verdict for the caller to consume.
@@ -579,7 +581,7 @@ ISSUE_EOF
 
     # Route through the /issue create-hook's programmatic invocation contract (see
     # commands/issue.md § "Programmatic Invocation Contract") instead of the raw issue-creation call.
-    Skill(skill="issue", args="--title \"$TESTGATE_FAIL_TITLE\" --body-file \"$TESTGATE_FAIL_BODY_FILE\" --label test-failure --label priority:P1")
+    Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"$TESTGATE_FAIL_TITLE\" --body-file \"$TESTGATE_FAIL_BODY_FILE\" --label test-failure --label priority:P1")
     rm -f "$TESTGATE_FAIL_BODY_FILE"
 
     # /issue has no machine-readable return contract — resolve the created issue's number by
@@ -849,7 +851,7 @@ TGAP_EOF
 
     # Route through the /issue create-hook's programmatic invocation contract (see
     # commands/issue.md § "Programmatic Invocation Contract") instead of the raw issue-creation call.
-    Skill(skill="issue", args="--title \"$TESTGAP_TITLE\" --body-file \"$TESTGAP_BODY_FILE\" --label test-gap")
+    Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"$TESTGAP_TITLE\" --body-file \"$TESTGAP_BODY_FILE\" --label test-gap")
     rm -f "$TESTGAP_BODY_FILE"
 
     # /issue has no machine-readable return contract — resolve the created issue's number by

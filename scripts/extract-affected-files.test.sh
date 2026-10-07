@@ -473,6 +473,33 @@ MOCK_GH_CONTRACT_FAIL=1 MOCK_GH_COMMENTS="$INV_DIFFERENT" assert_output \
 unset MOCK_GH_CONTRACT_FAIL
 
 # --------------------------------------------------------------------------- #
+# Line-reference suffixes (field test, orchestrate #3149 / stress batch): review
+# findings cite paths as `file:line`, `file:a-b,c` or `file:~n`. Those must be
+# extracted with the suffix stripped, and the same file cited twice deduplicated.
+# --------------------------------------------------------------------------- #
+BODY_LINESUFFIX="$TMP_FIXTURES/body-linesuffix.md"
+cat > "$BODY_LINESUFFIX" <<'EOF'
+## Problem
+
+Gate trusts agent-chosen band.
+
+## Affected Files
+
+1. `scripts/verify-phase-trail.sh:211` — band not cross-checked
+2. `scripts/verify-phase-trail.sh:104-114,162` — pagination
+3. `commands/orchestrate/phase-4-execution.md:~1685` — completion check
+4. `commands/work-on/build/validate.md:433` — QG PASS not SHA-bound
+
+## Source Branch Context
+
+**Code branch**: `staging`
+EOF
+unset MOCK_GH_COMMENTS
+MOCK_GH_BODY="$BODY_LINESUFFIX" assert_output \
+  "line-reference suffixes are stripped and deduplicated" \
+  "body-fallback" "commands/orchestrate/phase-4-execution.md,commands/work-on/build/validate.md,scripts/verify-phase-trail.sh" 2390 -R test/repo
+
+# --------------------------------------------------------------------------- #
 # Summary
 # --------------------------------------------------------------------------- #
 echo ""
