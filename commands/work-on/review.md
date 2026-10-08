@@ -590,7 +590,7 @@ Stale review on PR #{PR_NUMBER}: quality-gating and re-reviewing the new head on
   # FORGE_TRAIL_TRUSTED_LOGINS. A GitHub App bot always has author_association NONE, so an association-only filter drops the pipeline's own disposition.
   _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
   TRUSTED_SCRIPT=""
-  for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$PWD"; do
+  for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock"; do
     case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
   done
   if [ -n "$TRUSTED_SCRIPT" ]; then DISPOSITION_COUNT=$(printf '%s' "$DISPO_JSON" | bash "$TRUSTED_SCRIPT" count '^<!-- FORGE:NOTE_DISPOSITION' 2>/dev/null || echo ""); else DISPOSITION_COUNT=""; fi
