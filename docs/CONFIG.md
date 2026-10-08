@@ -873,6 +873,8 @@ These variables are read from the operator's runner environment, not from `forge
 
 The merge gate (`scripts/verify-phase-trail.sh`) ignores FORGE markers posted by untrusted commenters. A commenter is trusted when ANY of these hold: `author_association` is in `FORGE_TRAIL_TRUSTED_ASSOCIATIONS`; the account type is `Bot` (the pipeline's GitHub App identity); or the login is in `FORGE_TRAIL_TRUSTED_LOGINS`.
 
+The note-disposition gate (`FORGE:NOTE_DISPOSITION`) and the in-PR fix markers (`FORGE:INPR_FIX*`) in `commands/review-pr.md` and `commands/work-on/review.md` use the same predicate through one shared helper, `scripts/trusted-comments.sh`, so a disposition posted by the pipeline's bot identity counts. An unresolvable helper blocks the merge (fail closed).
+
 Pipelines that run under a human login with association `CONTRIBUTOR`, `NONE` or `FIRST_TIME_CONTRIBUTOR` will see every marker reported `MISSING`, and the gate prints a NOTE when untrusted-author markers were seen. Fix it by either:
 
 ```bash

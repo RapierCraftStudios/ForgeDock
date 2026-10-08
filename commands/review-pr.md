@@ -1721,8 +1721,13 @@ fi
 # fix round on this PR. Any trusted FORGE:INPR_FIX* marker already on the PR means the round is used.
 INPR_DIFF_FILE=""
 if [ "${AUTO_MERGE:-false}" = "true" ] && [ -n "${MERGE_ISSUE:-}" ]; then
-  INPR_MARKERS=$(gh api --paginate "repos/{GH_REPO}/issues/{PR_NUMBER}/comments" 2>/dev/null \
-    | jq -s '[.[][] | select(.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") | select(.body | test("^<!-- FORGE:INPR_FIX"))] | length' 2>/dev/null || echo "")
+  _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+  TRUSTED_SCRIPT=""
+  for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$PWD"; do
+    case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+  done
+  if [ -n "$TRUSTED_SCRIPT" ]; then INPR_MARKERS=$(gh api --paginate "repos/{GH_REPO}/issues/{PR_NUMBER}/comments" 2>/dev/null \
+    | bash "$TRUSTED_SCRIPT" count '^<!-- FORGE:INPR_FIX' 2>/dev/null || echo ""); else INPR_MARKERS=""; fi
   if [ "$INPR_MARKERS" = "0" ]; then
     mkdir -p "${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"
     INPR_DIFF_FILE=$(mktemp "${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/{PR_NUMBER}_inpr-diff.XXXXXX")
@@ -2288,7 +2293,24 @@ if [ -z "$DISPO_JSON" ]; then
   exit 1
 fi
 FINDING_COUNT=$(printf '%s' "$DISPO_JSON" | jq -s '[.[][] | select(.body | test("<!-- FINDING:"))] | length')
-DISPOSITION_COUNT=$(printf '%s' "$DISPO_JSON" | jq -s '[.[][] | select(.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") | select(.body | test("^<!-- FORGE:NOTE_DISPOSITION"))] | length')
+# Trust predicate: ONE shared copy (scripts/trusted-comments.sh, same as verify-phase-trail.sh): trusted association, Bot account, or
+# FORGE_TRAIL_TRUSTED_LOGINS. A GitHub App bot always has author_association NONE, so an association-only filter drops the pipeline's own markers.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+TRUSTED_SCRIPT=""
+for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$PWD"; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done
+if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$FINDING_COUNT" ]; then
+  echo "NOTE DISPOSITION: scripts/trusted-comments.sh unresolvable or findings unreadable — refusing to merge (fail closed)" >&2
+  # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "note disposition unreadable".
+  exit 1
+fi
+DISPOSITION_COUNT=$(printf '%s' "$DISPO_JSON" | bash "$TRUSTED_SCRIPT" count '^<!-- FORGE:NOTE_DISPOSITION') || DISPOSITION_COUNT=""
+if [ -z "$DISPOSITION_COUNT" ]; then
+  echo "NOTE DISPOSITION: trust filter failed — refusing to merge (fail closed)" >&2
+  # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "note disposition unreadable".
+  exit 1
+fi
 if [ "${FINDING_COUNT:-0}" -gt 0 ] && [ "${DISPOSITION_COUNT:-0}" -eq 0 ]; then
   echo "NOTE DISPOSITION: ${FINDING_COUNT} finding comment(s) but no FORGE:NOTE_DISPOSITION record — run §6B.5 before merging" >&2
   gh pr comment {PR_NUMBER} {MERGE_GH_FLAG} --body "Auto-merge skipped: review findings exist but §6B.5 note disposition was not recorded. Re-run \`/review-pr {PR_NUMBER} --auto-merge --issue <N>\`." 2>/dev/null || true # allowlist:check-command-side-effects
@@ -2298,8 +2320,15 @@ fi
 # In-PR fix gate (§6B.6): an unanswered INPR_FIX request at the current head blocks the merge until the fix
 # round runs (a new head) or /work-on waives it for this head. Only trusted authors' markers count.
 PR_HEAD_NOW=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json headRefOid --jq .headRefOid 2>/dev/null || echo "")
-INPR_REQ=$(printf '%s' "$DISPO_JSON" | jq -s -r '[.[][] | select(.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") | select(.body | test("^<!-- FORGE:INPR_FIX: ")) | .body | capture("head=(?<h>[0-9a-f]{7,40})").h] | last // ""')
-INPR_WAIVED=$(printf '%s' "$DISPO_JSON" | jq -s -r --arg h "$PR_HEAD_NOW" '[.[][] | select(.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") | select(.body | test("^<!-- FORGE:INPR_FIX_WAIVED: head=" + $h))] | length')
+INPR_BODIES=$(printf '%s' "$DISPO_JSON" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:INPR_FIX: ') || INPR_BODIES="__ERR__"
+INPR_WAIVED=$(printf '%s' "$DISPO_JSON" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:INPR_FIX_WAIVED: head=${PR_HEAD_NOW}") || INPR_WAIVED=""
+if [ "$INPR_BODIES" = "__ERR__" ] || [ -z "$INPR_WAIVED" ]; then
+  echo "IN-PR FIX: trust filter failed — refusing to merge (fail closed)" >&2
+  # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "note disposition unreadable".
+  exit 1
+fi
+# Latest trusted request wins (bodies are JSON strings, one per line).
+INPR_REQ=$(printf '%s\n' "$INPR_BODIES" | tail -n 1 | jq -r 'capture("head=(?<h>[0-9a-f]{7,40})").h // ""' 2>/dev/null || echo "")
 if [ -n "$INPR_REQ" ] && [ "$INPR_REQ" = "$PR_HEAD_NOW" ] && [ "${INPR_WAIVED:-0}" -eq 0 ]; then
   echo "IN-PR FIX: CONFIRMED MEDIUM findings in this PR's files were requested at head ${PR_HEAD_NOW} — fix them before merging (§6B.6)" >&2
   # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "in-pr fix required". Not needs-human: /work-on R4 runs one fix round.

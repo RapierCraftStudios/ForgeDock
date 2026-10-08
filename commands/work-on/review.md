@@ -2,6 +2,7 @@
 user-invocable: false
 description: Review subcommand — push branch, create PR, invoke /review-pr with --auto-merge
 context: fork
+background: false
 argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE} --branch {BRANCH} --base {PR_BASE}"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
@@ -532,12 +533,11 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 
 - `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "stale review" (a commit landed on the PR after the verdict, or the head moved during the CI wait, so the code that would merge is not the reviewed code): do NOT merge. The re-review bound is persisted, not remembered: count `<!-- FORGE:STALE_REREVIEW: pr={PR_NUMBER} -->` comments on the issue. If the count is 0, post that marker (with the new head SHA), run the quality gate on the new head (`Skill(skill="{FORGE_SKILL_PREFIX}quality-gate", args="<changed files> --worktree {WORKTREE_PATH}")`, which posts a fresh `FORGE:QUALITY_GATE` for the code that will actually merge), then re-invoke Phase R3 once — a full review of the new head. If the count is already ≥ 1 (the head keeps moving after review), add `needs-human` and return `REVIEW_RESULT: status: BLOCKED`, blocker: "PR head keeps moving after review". <!-- forge#3188 -->
 
-- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "ci gate" (Phase 8 refused to merge because checks failed, were cancelled, or stayed pending past the gate retries): do NOT attempt the manual merge below — that would bypass the CI gate. Fixing red CI is pipeline work, not a human decision: invoke remediation **once** — `Skill(skill="{FORGE_SKILL_PREFIX}work-on:remediate", args="{PR_NUMBER} --issue {NUMBER} --base {PR_BASE}")` (forked; it classifies a CI-gate refusal as FIXABLE, clears `needs-human`, reads the failing job logs, fixes them on the PR branch, re-runs the quality gate and a full review, and auto-lands through the same CI gate). Bound: count `<!-- FORGE:CI_REMEDIATION: pr={PR_NUMBER} -->` comments on the issue first; if ≥ 1, do not remediate again. Post that marker before invoking. `REMEDIATE_RESULT` re-gate outcome `AUTO-LANDED` → treat as merged and return `REVIEW_RESULT: status: COMPLETE`; `REMEDIATE_RESULT: status: REREVIEW_REQUIRED` (forge#3240: the fix is pushed but remediation had no sub-agent dispatch tool, so no review ran) → do NOT add `needs-human` and do not re-invoke remediation; return `REVIEW_RESULT: status: BLOCKED` with blocker "re-review required: no dispatch tool" so the caller re-dispatches review from a session that has dispatch; any other outcome → leave `needs-human` (remediation sets it) and return `REVIEW_RESULT: status: BLOCKED` with blocker "ci gate not green after remediation". <!-- forge#3191 -->
+- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "ci gate" (Phase 8 refused to merge because checks failed, were cancelled, or stayed pending past the gate retries): do NOT attempt the manual merge below — that would bypass the CI gate. Fixing red CI is pipeline work, not a human decision: hand remediation to the router **once**. Bound: count `<!-- FORGE:CI_REMEDIATION: pr={PR_NUMBER} -->` comments on the issue first; if ≥ 1, do not remediate again — leave `needs-human` and return `REVIEW_RESULT: status: BLOCKED` with blocker "ci gate not green after remediation". Otherwise return `REVIEW_RESULT: status: NEXT` with `next: remediate` and `remediation: ci-gate` (see Output). Do not post the marker here: the router posts it immediately before it invokes remediation (Phase 4R), so a handoff interrupted before remediation starts is retried instead of being counted as used. **Never invoke `work-on:remediate` from this phase** (forge#3398): remediation re-reviews through `/review-pr`, which spawns domain-reviewer sub-agents, so it must run one level below the router, not nested inside this fork. Nested here, it lands at the sub-agent depth limit under `/orchestrate` with no `Agent` tool and strands the PR at `REREVIEW-REQUIRED` (forge#3391). The router runs `work-on:remediate`, which classifies a CI-gate refusal as FIXABLE, clears `needs-human`, fixes the failing jobs on the PR branch, re-runs the quality gate and a full review, and auto-lands through the same CI gate. <!-- forge#3191 -->
 
 - `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "in-pr fix required" (review-pr §6B.6: CONFIRMED MEDIUM findings in files this PR changed, requested on the PR in a `FORGE:INPR_FIX` comment at the current head): do NOT merge and do NOT leave the issue at `needs-human` because of this gate. Run **one** fix round, bounded by `<!-- FORGE:INPR_REMEDIATION: pr={PR_NUMBER} -->` on the issue (`{BOUND}` = `INPR_REMEDIATION` below).
-  - **Bound unused**: post the marker. Add `needs-human` (remediation only targets `needs-human`-gated PRs, and its Phase M1 clears it as FIXABLE). Then invoke `Skill(skill="{FORGE_SKILL_PREFIX}work-on:remediate", args="{PR_NUMBER} --issue {NUMBER} --base {PR_BASE}")`. Remediation reads the `FORGE:INPR_FIX` work order, fixes exactly those findings, re-reviews the new head and auto-lands. On the re-review, any finding still present is filed as an issue (the round is used).
-  - `REMEDIATE_RESULT` re-gate outcome `AUTO-LANDED` → return `REVIEW_RESULT: status: COMPLETE`. `REREVIEW_REQUIRED` → same handling as the ci-gate case above.
-  - **Any other outcome, or bound already used**: waive the gate for the current head. Remove `needs-human`, post `<!-- FORGE:INPR_FIX_WAIVED: head=<current head SHA> -->` on the **PR**, then re-invoke Phase R3 once under the `STALE_REREVIEW` bound. That review files the remaining findings as issues and merges as it would have before this gate. Only if `STALE_REREVIEW` is also exhausted, add `needs-human`.
+  - **Bound unused**: add `needs-human` (remediation only targets `needs-human`-gated PRs, and its Phase M1 clears it as FIXABLE). Then return `REVIEW_RESULT: status: NEXT` with `next: remediate` and `remediation: inpr-fix` (the router posts the bound marker, as in the ci-gate case) — never invoke `work-on:remediate` from this phase (same reason as the ci-gate case). The router runs remediation, which reads the `FORGE:INPR_FIX` work order, fixes exactly those findings, re-reviews the new head and auto-lands. On the re-review, any finding still present is filed as an issue (the round is used). If remediation does not land, the router re-invokes this phase, which then finds the bound used and takes the branch below.
+  - **Bound already used** (including the re-invocation after a remediation that did not land): waive the gate for the current head. Remove `needs-human`, post `<!-- FORGE:INPR_FIX_WAIVED: head=<current head SHA> -->` on the **PR**, then re-invoke Phase R3 once under the `STALE_REREVIEW` bound. That review files the remaining findings as issues and merges as it would have before this gate. Only if `STALE_REREVIEW` is also exhausted, add `needs-human`.
     ```bash
     INPR_WAIVE_HEAD=$(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefOid --jq .headRefOid)
     gh issue edit {NUMBER} {GH_FLAG} --remove-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
@@ -545,7 +545,7 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 In-PR fix round did not land; the remaining CONFIRMED MEDIUM findings are filed as issues on the next review instead of blocking the merge." # allowlist:check-command-side-effects
     ```
 
-  Persisted loop bounds for the cases above — count first, post the marker, then act (`{BOUND}` is `STALE_REREVIEW`, `CI_REMEDIATION` or `INPR_REMEDIATION`):
+  Persisted loop bounds for the cases above — count first, then act (`{BOUND}` is `STALE_REREVIEW`, `CI_REMEDIATION` or `INPR_REMEDIATION`). This phase posts only the `STALE_REREVIEW` marker; `CI_REMEDIATION` and `INPR_REMEDIATION` are posted by the router in Phase 4R, immediately before it invokes remediation (forge#3398):
   ```bash
   [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] bound check only"; }
   if [ "{BOUND}" = "STALE_REREVIEW" ]; then
@@ -560,16 +560,12 @@ In-PR fix round did not land; the remaining CONFIRMED MEDIUM findings are filed 
   fi
   if [ "$BOUND_COUNT" -ge 1 ]; then
     echo "BOUND_EXHAUSTED: {BOUND} already used for PR #{PR_NUMBER}"
-  elif [ "${DRY_RUN:-false}" != "true" ]; then
+  elif [ "{BOUND}" = "STALE_REREVIEW" ] && [ "${DRY_RUN:-false}" != "true" ]; then
     gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:STALE_REREVIEW: pr={PR_NUMBER} -->
-Stale review on PR #{PR_NUMBER}: quality-gating and re-reviewing the new head once." 2>/dev/null || true   # when {BOUND}=STALE_REREVIEW
-    gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CI_REMEDIATION: pr={PR_NUMBER} -->
-CI gate refused PR #{PR_NUMBER}: dispatching remediation once to fix the failing checks." 2>/dev/null || true   # when {BOUND}=CI_REMEDIATION
-    gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INPR_REMEDIATION: pr={PR_NUMBER} -->
-In-PR fix requested on PR #{PR_NUMBER}: dispatching remediation once to fix the CONFIRMED MEDIUM findings before merge." 2>/dev/null || true   # when {BOUND}=INPR_REMEDIATION
+Stale review on PR #{PR_NUMBER}: quality-gating and re-reviewing the new head once." 2>/dev/null || true
   fi
   ```
-  Post only the comment matching `{BOUND}`. `BOUND_EXHAUSTED` → take the "already ≥ 1" branch of that case.
+  `BOUND_EXHAUSTED` → take the "already ≥ 1" branch of that case.
 
 - PR NOT MERGED (and not a phase-trail, auto-merge-gate, stale-review, ci-gate or in-pr-fix BLOCKED above) → attempt manual merge, **only if the PR head is still the commit named in the latest `<!-- FORGE:REVIEW -->` APPROVED verdict** (otherwise re-invoke Phase R3 instead, as for "stale review") **and only after the same CI gate**:
   ```bash
@@ -590,8 +586,17 @@ In-PR fix requested on PR #{PR_NUMBER}: dispatching remediation once to fix the 
   # §6B.5 disposition must not merge, because that step is what bounds the review-finding cascade.
   DISPO_JSON=$(gh api --paginate "repos/{GH_REPO}/issues/{PR_NUMBER}/comments" 2>/dev/null) || DISPO_JSON=""
   FINDING_COUNT=$(printf '%s' "$DISPO_JSON" | jq -s '[.[][] | select(.body | test("<!-- FINDING:"))] | length' 2>/dev/null || echo "")
-  DISPOSITION_COUNT=$(printf '%s' "$DISPO_JSON" | jq -s '[.[][] | select(.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") | select(.body | test("^<!-- FORGE:NOTE_DISPOSITION"))] | length' 2>/dev/null || echo "")
-  if [ -z "$DISPO_JSON" ] || [ -z "$FINDING_COUNT" ] || { [ "$FINDING_COUNT" -gt 0 ] && [ "${DISPOSITION_COUNT:-0}" -eq 0 ]; }; then
+  # Trust predicate: ONE shared copy (scripts/trusted-comments.sh, same as verify-phase-trail.sh): trusted association, Bot account, or
+  # FORGE_TRAIL_TRUSTED_LOGINS. A GitHub App bot always has author_association NONE, so an association-only filter drops the pipeline's own disposition.
+  _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+  TRUSTED_SCRIPT=""
+  for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$PWD"; do
+    case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+  done
+  if [ -n "$TRUSTED_SCRIPT" ]; then DISPOSITION_COUNT=$(printf '%s' "$DISPO_JSON" | bash "$TRUSTED_SCRIPT" count '^<!-- FORGE:NOTE_DISPOSITION' 2>/dev/null || echo ""); else DISPOSITION_COUNT=""; fi
+  if [ -z "$DISPO_JSON" ] || [ -z "$FINDING_COUNT" ] || [ -z "$DISPOSITION_COUNT" ]; then
+    echo "REVIEW_RESULT: status: BLOCKED, blocker: note disposition unreadable (comments or scripts/trusted-comments.sh unresolvable; fail closed)"
+  elif [ "$FINDING_COUNT" -gt 0 ] && [ "$DISPOSITION_COUNT" -eq 0 ]; then
     echo "REVIEW_RESULT: status: BLOCKED, blocker: note disposition missing"
   elif [ "$CI_GATE_RC" -eq 0 ]; then
     gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto --match-head-commit "$GATED_HEAD" # allowlist:check-command-side-effects (CI-gated merge)
@@ -599,7 +604,7 @@ In-PR fix requested on PR #{PR_NUMBER}: dispatching remediation once to fix the 
     echo "REVIEW_RESULT: status: BLOCKED, blocker: ci gate not green (rc=${CI_GATE_RC})"
   fi
   ```
-  If the note-disposition gate refuses (`blocker: note disposition missing`): do NOT add `needs-human` — treat it like a stale review and re-invoke Phase R3 once under the `STALE_REREVIEW` bound so `/review-pr` records its §6B.5 disposition; only if that bound is exhausted, add `needs-human`. If the CI gate refuses: post the gate output as an issue comment, add `needs-human`, return `REVIEW_RESULT: status: BLOCKED` (blocker "ci gate not green"). If merge fails: post comment, add `needs-human`, return `REVIEW_RESULT: status: BLOCKED`
+  If the note-disposition gate refuses with `blocker: note disposition unreadable`: the comment list or the trust helper could not be read; add `needs-human` and return BLOCKED (a re-review cannot fix it). If it refuses with `blocker: note disposition missing` (no trusted disposition exists; bot, trusted-login and trusted-association authors all count): do NOT add `needs-human` — treat it like a stale review and re-invoke Phase R3 once under the `STALE_REREVIEW` bound so `/review-pr` records its §6B.5 disposition; only if that bound is exhausted, add `needs-human`. If the CI gate refuses: post the gate output as an issue comment, add `needs-human`, return `REVIEW_RESULT: status: BLOCKED` (blocker "ci gate not green"). If merge fails: post comment, add `needs-human`, return `REVIEW_RESULT: status: BLOCKED`
 
 ---
 
@@ -611,12 +616,16 @@ Output this structured block:
 
 ```
 REVIEW_RESULT:
-  status: COMPLETE | ALREADY_MERGED | BLOCKED
+  status: COMPLETE | ALREADY_MERGED | NEXT | BLOCKED
   pr_number: {PR_NUMBER}
   pr_url: {PR_URL}
   merged_to: {PR_BASE}
+  next: {remediate, only when status=NEXT}
+  remediation: {ci-gate | inpr-fix, only when status=NEXT}
   blocker: {description if status=BLOCKED}
 ```
+
+`NEXT` is a handoff, not a terminal state: the PR is open and unmerged, the bound marker is posted, and the router must run `work-on:remediate` for `{PR_NUMBER}` next (see `commands/work-on.md` Phase 4).
 
 ---
 
@@ -628,4 +637,4 @@ This skill is invoked by the `work-on` router (forked) after validate returns `G
 build/validate → [THIS SKILL] push + PR creation + /review-pr invocation + merge verification → work-on:close
 ```
 
-/review-pr is invoked within this skill (not by the router). The router sees only the final `REVIEW_RESULT:` block and never re-dispatches phase-trail failures.
+/review-pr is invoked within this skill (not by the router). The router sees only the final `REVIEW_RESULT:` block and never re-dispatches phase-trail failures. Remediation is the one exception that leaves this skill: it is returned as `status: NEXT` and run by the router, because it spawns reviewers of its own (see `docs/WORK-ON-RUNTIME.md`).

@@ -2,6 +2,7 @@
 description: Pre-commit quality check — catches defects the review would flag, so the builder can fix them before committing
 argument-hint: (invoked by /work-on, not directly)
 context: fork
+background: false
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
