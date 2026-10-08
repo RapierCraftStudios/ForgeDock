@@ -305,7 +305,7 @@ if [ -f "$P4_SPEC" ]; then
     }
     END { print buf }
   ' "$P4_SPEC" | tr -s '[:space:]' ' ' || true)
-  # WIRE:PROVEN — manual mutation in a temp copy of commands/: renamed hold_merged_trail, renamed the ABSENT arm, ABSENT->echo DONE, and moved add-label before the comment; each fired its matching HIGH violation
+  # WIRE:PROVEN — manual mutation in a temp copy of commands/: renamed hold_merged_trail, renamed the ABSENT arm, ABSENT->echo DONE, and moved the comment before add-label; each fired its matching HIGH violation
   if [ -z "${ABSENT_ARM// /}" ]; then
     echo "HIGH | $P4_SPEC | ABSENT arm missing from classify_predecessor_state (label-only hold must be classified explicitly)" >&2
     VIOLATIONS=$((VIOLATIONS + 1))
@@ -320,8 +320,9 @@ if [ -f "$P4_SPEC" ]; then
     fi
   fi
 
-  # hold_merged_trail(): the FORGE:PHASE_TRAIL_FAILED comment must be posted
-  # before the needs-human label is added.
+  # hold_merged_trail() (forge#3223): the needs-human label must be added
+  # before the FORGE:PHASE_TRAIL_FAILED comment is posted, so a comment can
+  # never exist without the label (comment-without-label reads as a release).
   HOLD_ORDER=$(awk '
     /^hold_merged_trail\(\)[[:space:]]*\{/ { infn = 1; found = 1; next }
     infn && /^\}/ { infn = 0 }
@@ -339,8 +340,8 @@ if [ -f "$P4_SPEC" ]; then
   elif [ "$HOLD_CMT" -eq 0 ] || [ "$HOLD_LBL" -eq 0 ]; then
     echo "HIGH | $P4_SPEC | hold_merged_trail() lacks the PHASE_TRAIL_FAILED comment or the needs-human add-label" >&2
     VIOLATIONS=$((VIOLATIONS + 1))
-  elif [ "$HOLD_CMT" -ge "$HOLD_LBL" ]; then
-    echo "HIGH | $P4_SPEC | hold_merged_trail() adds needs-human before posting the PHASE_TRAIL_FAILED comment (comment must come first)" >&2
+  elif [ "$HOLD_LBL" -ge "$HOLD_CMT" ]; then
+    echo "HIGH | $P4_SPEC | hold_merged_trail() posts the PHASE_TRAIL_FAILED comment before adding needs-human (label must come first)" >&2
     VIOLATIONS=$((VIOLATIONS + 1))
   fi
 fi
