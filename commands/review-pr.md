@@ -1717,11 +1717,26 @@ FINDING_LINEAGE="none"
 if [ -n "${MERGE_ISSUE:-}" ] && gh issue view "$MERGE_ISSUE" -R {GH_REPO} --json labels --jq '.labels[].name' 2>/dev/null | grep -qx 'review-finding'; then
   FINDING_LINEAGE="review-finding"
 fi
-# Per deduped finding (FINDING_TEXT_FILE = mktemp file holding title + body + affected paths):
+# In-PR fix gate (§6B.6): only for an auto-merge review with a linked issue, and only for the first
+# fix round on this PR. Any trusted FORGE:INPR_FIX* marker already on the PR means the round is used.
+INPR_DIFF_FILE=""
+if [ "${AUTO_MERGE:-false}" = "true" ] && [ -n "${MERGE_ISSUE:-}" ]; then
+  INPR_MARKERS=$(gh api --paginate "repos/{GH_REPO}/issues/{PR_NUMBER}/comments" 2>/dev/null \
+    | jq -s '[.[][] | select(.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") | select(.body | test("^<!-- FORGE:INPR_FIX"))] | length' 2>/dev/null || echo "")
+  if [ "$INPR_MARKERS" = "0" ]; then
+    mkdir -p "${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"
+    INPR_DIFF_FILE=$(mktemp "${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/{PR_NUMBER}_inpr-diff.XXXXXX")
+    gh pr diff {PR_NUMBER} -R {GH_REPO} --name-only > "$INPR_DIFF_FILE" 2>/dev/null || { rm -f "$INPR_DIFF_FILE"; INPR_DIFF_FILE=""; }
+  fi
+  # An unreadable marker list or diff leaves INPR_DIFF_FILE empty: findings are filed as before (never gated blind).
+fi
+# Per deduped finding (FINDING_TEXT_FILE = mktemp file holding title + body + affected paths;
+# FINDING_FILE = the finding's file path, file:line accepted):
 #   DISPOSITION=$(bash "$CLASSIFY_SCRIPT" --severity "$FINDING_SEVERITY" --confidence "$FINDING_CONFIDENCE" \
-#                   --agent "$FINDING_AGENT" --lineage "$FINDING_LINEAGE" --text-file "$FINDING_TEXT_FILE")
-#   case "$DISPOSITION" in ISSUE*) ;; NOTE*) ;; esac   # first word is the class, the rest is the reason
-# If CLASSIFY_SCRIPT is empty, apply the four rules above by hand and record classifier=manual below.
+#                   --agent "$FINDING_AGENT" --lineage "$FINDING_LINEAGE" --text-file "$FINDING_TEXT_FILE" \
+#                   ${INPR_DIFF_FILE:+--inpr-diff "$INPR_DIFF_FILE" --file "$FINDING_FILE"})
+#   case "$DISPOSITION" in ISSUE*) ;; NOTE*) ;; INPR_FIX*) ;; esac   # first word is the class, the rest is the reason
+# If CLASSIFY_SCRIPT is empty, apply the four rules above (and §6B.6) by hand and record classifier=manual below.
 ```
 
 Each NOTE gets exactly one disposition, in this preference order:
@@ -1731,15 +1746,36 @@ Each NOTE gets exactly one disposition, in this preference order:
 
 **Metrics note (forge#3106)**: because NOTEs are not filed as issues, `review-finding` issue volume and any metric derived from it (findings per PR, `/pipeline-health` finding rates, amplification ratio) drop relative to pre-#3060 history. Compare against the `notes_*` counts in the review summary, not issue counts alone, when judging review depth across the change.
 
-Every NOTE disposition must be recorded (never silently dropped): list each NOTE (id, file:line, one-line reason) with its disposition in the review summary comment, including dropped ones, so a reviewer can audit the decision. NOTES are never passed to `Skill(issue)`. Record counts in the review summary (`notes_fixed`, `notes_listed`, `notes_dropped`, `findings_filed`). If no finding is an ISSUE after this step, skip 6C and continue to Phase 7.
+Every NOTE disposition must be recorded (never silently dropped): list each NOTE (id, file:line, one-line reason) with its disposition in the review summary comment, including dropped ones, so a reviewer can audit the decision. NOTES are never passed to `Skill(issue)`. Record counts in the review summary (`notes_fixed`, `notes_listed`, `notes_dropped`, `findings_filed`, `inpr_fix`). If no finding is an ISSUE after this step, skip 6C and continue to Phase 7. Findings classified `INPR_FIX` (§6B.6) are neither notes nor filed this round.
 
 **Disposition marker (MANDATORY whenever Phase 6A extracted at least one finding):** post one PR comment whose first line is the machine-readable record below, followed by the NOTE list. Phase 8 refuses to auto-merge a PR that has `FINDING:` markers but no `FORGE:NOTE_DISPOSITION` comment — the disposition step is enforced, not advisory.
 
 ```bash
 CLASSIFIER_MODE=$([ -n "$CLASSIFY_SCRIPT" ] && echo script || echo manual)
 # NOTE_LIST_FILE: mktemp file named for the PR number, holding one line per NOTE (id, file:line, disposition, reason).
-gh pr comment {PR_NUMBER} -R {GH_REPO} --body "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=${NOTES_FIXED:-0} notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} lineage=${FINDING_LINEAGE} classifier=${CLASSIFIER_MODE} -->
+gh pr comment {PR_NUMBER} -R {GH_REPO} --body "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=${NOTES_FIXED:-0} notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} inpr_fix=${INPR_FIX_COUNT:-0} lineage=${FINDING_LINEAGE} classifier=${CLASSIFIER_MODE} -->
 $(cat "$NOTE_LIST_FILE" 2>/dev/null)" # allowlist:check-command-side-effects
+```
+
+### 6B.6: In-PR fix gate for CONFIRMED MEDIUM findings in the PR's own files (#3387, narrowed)
+
+A CONFIRMED MEDIUM defect in a file this PR changed is cheaper to fix before merge than through a separate `/work-on` cycle, and merging it knowingly ships the defect. A finding classified `INPR_FIX` is therefore fixed on the PR instead of filed. The gate is deliberately narrow:
+
+- **Only `MEDIUM` + `CONFIRMED`.** LIKELY and POSSIBLE are not gated. HIGH/CRITICAL already withhold APPROVED through §7B.
+- **Only files in the PR diff** (`gh pr diff --name-only`). Pre-existing defects elsewhere are filed as before.
+- **One fix round per PR.** Once any `FORGE:INPR_FIX*` marker is on the PR, later reviews classify normally: anything still present is filed as an issue and the PR merges.
+- **Never stops at `needs-human` because of this gate.** If the fix round fails, `/work-on` waives the gate for the current head and the findings are filed (work-on/review.md R4).
+- **Auto-merge reviews with `--issue` only.** A standalone review without `--auto-merge` files findings as before.
+
+When at least one finding is `INPR_FIX`, do NOT file those findings in 6C. Post the request on the PR as one comment, after the §6B.5 disposition marker. Phase 8 then refuses to merge this head and returns `REVIEW_RESULT: status: BLOCKED`, blocker `in-pr fix required`:
+
+```bash
+INPR_HEAD=$(gh pr view {PR_NUMBER} -R {GH_REPO} --json headRefOid --jq .headRefOid)
+# INPR_FIX_IDS: comma-separated finding ids classified INPR_FIX. INPR_FIX_LIST_FILE: mktemp file, one line per finding:
+# id, file:line, one-sentence problem, suggested fix — this is the remediation work order.
+gh pr comment {PR_NUMBER} -R {GH_REPO} --body "<!-- FORGE:INPR_FIX: round=1 head=${INPR_HEAD} findings=${INPR_FIX_IDS} -->
+In-PR fix requested before merge (CONFIRMED MEDIUM findings in files this PR changed). One fix round; anything still present on the next review is filed as an issue.
+$(cat "$INPR_FIX_LIST_FILE" 2>/dev/null)" # allowlist:check-command-side-effects
 ```
 
 ### 6C: Create Issues
@@ -2257,6 +2293,16 @@ if [ "${FINDING_COUNT:-0}" -gt 0 ] && [ "${DISPOSITION_COUNT:-0}" -eq 0 ]; then
   echo "NOTE DISPOSITION: ${FINDING_COUNT} finding comment(s) but no FORGE:NOTE_DISPOSITION record — run §6B.5 before merging" >&2
   gh pr comment {PR_NUMBER} {MERGE_GH_FLAG} --body "Auto-merge skipped: review findings exist but §6B.5 note disposition was not recorded. Re-run \`/review-pr {PR_NUMBER} --auto-merge --issue <N>\`." 2>/dev/null || true # allowlist:check-command-side-effects
   # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "note disposition missing".
+  exit 1
+fi
+# In-PR fix gate (§6B.6): an unanswered INPR_FIX request at the current head blocks the merge until the fix
+# round runs (a new head) or /work-on waives it for this head. Only trusted authors' markers count.
+PR_HEAD_NOW=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json headRefOid --jq .headRefOid 2>/dev/null || echo "")
+INPR_REQ=$(printf '%s' "$DISPO_JSON" | jq -s -r '[.[][] | select(.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") | select(.body | test("^<!-- FORGE:INPR_FIX: ")) | .body | capture("head=(?<h>[0-9a-f]{7,40})").h] | last // ""')
+INPR_WAIVED=$(printf '%s' "$DISPO_JSON" | jq -s -r --arg h "$PR_HEAD_NOW" '[.[][] | select(.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") | select(.body | test("^<!-- FORGE:INPR_FIX_WAIVED: head=" + $h))] | length')
+if [ -n "$INPR_REQ" ] && [ "$INPR_REQ" = "$PR_HEAD_NOW" ] && [ "${INPR_WAIVED:-0}" -eq 0 ]; then
+  echo "IN-PR FIX: CONFIRMED MEDIUM findings in this PR's files were requested at head ${PR_HEAD_NOW} — fix them before merging (§6B.6)" >&2
+  # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "in-pr fix required". Not needs-human: /work-on R4 runs one fix round.
   exit 1
 fi
 ```

@@ -66,6 +66,23 @@ printf 'Title: unchecked xss sink\n' > "$TMPF"
 expect ISSUE "text-file keyword"              -- --severity LOW --confidence LIKELY --text-file "$TMPF"
 rm -f "$TMPF"
 
+# --- In-PR fix gate (#3387, narrowed): MEDIUM CONFIRMED in the PR diff ---
+DIFF=$(mktemp "${TMPDIR:-/tmp}/classify-finding-diff.XXXXXX")
+printf 'src/api/jobs.py\ncommands/review-pr.md\n' > "$DIFF"
+expect INPR_FIX "MEDIUM CONFIRMED in diff"            -- --severity MEDIUM --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/jobs.py
+expect INPR_FIX "file:line form matches"              -- --severity MEDIUM --confidence CONFIRMED --inpr-diff "$DIFF" --file "src/api/jobs.py:142"
+expect INPR_FIX "./ prefix matches"                   -- --severity MEDIUM --confidence CONFIRMED --inpr-diff "$DIFF" --file ./commands/review-pr.md
+expect INPR_FIX "lineage PR still fixes in-PR"        -- --severity MEDIUM --confidence CONFIRMED --lineage review-finding --inpr-diff "$DIFF" --file src/api/jobs.py
+expect ISSUE "MEDIUM CONFIRMED outside diff files"    -- --severity MEDIUM --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/other.py
+expect ISSUE "MEDIUM LIKELY in diff is not gated"     -- --severity MEDIUM --confidence LIKELY --inpr-diff "$DIFF" --file src/api/jobs.py
+expect ISSUE "HIGH in diff stays ISSUE (7B blocks it)" -- --severity HIGH --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/jobs.py
+expect NOTE  "LOW in diff stays NOTE"                 -- --severity LOW --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/jobs.py
+expect ISSUE "no --inpr-diff: unchanged behaviour"    -- --severity MEDIUM --confidence CONFIRMED --file src/api/jobs.py
+expect ISSUE "no --file: unchanged behaviour"         -- --severity MEDIUM --confidence CONFIRMED --inpr-diff "$DIFF"
+expect ISSUE "prefix of a diff path does not match"   -- --severity MEDIUM --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api
+rm -f "$DIFF"
+expect_exit 2 "unreadable --inpr-diff"        -- --severity MEDIUM --inpr-diff /nonexistent/d --file x
+
 # --- usage errors ---
 expect_exit 2 "unknown flag"                  -- --bogus x
 expect_exit 2 "bad lineage"                   -- --severity LOW --lineage P3
