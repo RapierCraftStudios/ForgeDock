@@ -422,8 +422,11 @@ if [ -n "$FORGE_ROOT" ] && [ -r "$FORGE_ROOT/bin/engine/admission.mjs" ]; then
     import(require("node:url").pathToFileURL(process.argv[1]).href).then(({ planP3BatchGroups, summarizeP3BatchPlan }) => {
       const plan = planP3BatchGroups(JSON.parse(process.argv[2]), undefined, { openBatches: JSON.parse(process.argv[3]) });
       console.log(JSON.stringify({ plan, summary: summarizeP3BatchPlan(plan) }));
-    });
+    }).catch((e) => { console.error("WARNING: planP3Batches failed: " + e.message); process.exit(1); });
   ' "$FORGE_ROOT/bin/engine/admission.mjs" "$BATCH_CANDIDATE_REGISTRY_JSON" "$OPEN_BATCHES_JSON")
+  if [ -z "$BATCH_PLAN" ]; then
+    echo "WARNING: P3 batch plan empty (admission.mjs import or JSON parse failed) — candidates retained as ungrouped singletons" >&2
+  fi
 else
   echo "WARNING: ForgeDock install root unresolved or admission.mjs missing (set FORGEDOCK_HOME) — no P3 batch plan; candidates retained as ungrouped singletons" >&2
 fi
