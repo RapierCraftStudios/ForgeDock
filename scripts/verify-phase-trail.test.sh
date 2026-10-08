@@ -464,6 +464,16 @@ PL="$TMP_FX/permlog-decoy"; : > "$PL"
 ERR=$(MOCK_PERM_LOG="$PL" MOCK_GH_JSON="$(ovf a8 "${MIXD[@]}")" bash "$VERIFY" 3061 -R o/r --head-sha "$HS" 2>&1 >/dev/null); 
 [ ! -s "$PL" ] && echo "$ERR" | grep -q 'NOTE: 14 override candidate(s) ignored: author_association not in override-approver set' && ! echo "$ERR" | grep -q 'pdecoy\|cdecoy' \
   && ok "decoys trigger no permission lookups; NOTE carries the count and no logins (#3307)" || bad "decoy no-call (log=$(cat "$PL") err=$ERR)"
+# forge#3351: the NOTE count shares one predicate with the candidates: only otherwise-eligible, association-excluded
+# comments are counted (edited, bot, and pre-floor ones are not)
+EXC=$(ovc xedit User "2026-10-08T11:01:00Z" "2026-10-08T11:02:00Z" "$HS" "$CUR_MISSING" "edited" | assoc NONE)
+EXB=$(ovc xbot Bot "2026-10-08T11:03:00Z" "2026-10-08T11:03:00Z" "$HS" "$CUR_MISSING" "bot" | assoc NONE)
+EXP=$(ovc xold User "2000-01-01T00:00:00Z" "2000-01-01T00:00:00Z" "$HS" "$CUR_MISSING" "pre-floor" | assoc NONE)
+EX1=$(ovc xok1 User "2026-10-08T11:04:00Z" "2026-10-08T11:04:00Z" "$HS" "$CUR_MISSING" "dropped" | assoc NONE)
+EX2=$(ovc xok2 User "2026-10-08T11:05:00Z" "2026-10-08T11:05:00Z" "$HS" "$CUR_MISSING" "dropped" | assoc CONTRIBUTOR)
+ERR=$(MOCK_GH_JSON="$(ovf a10 "$(GOODC)" "$EXC" "$EXB" "$EXP" "$EX1" "$EX2")" bash "$VERIFY" 3061 -R o/r --head-sha "$HS" 2>&1 >/dev/null)
+echo "$ERR" | grep -q 'NOTE: 2 override candidate(s) ignored: author_association not in override-approver set' \
+  && ok "NOTE count equals only eligible association-excluded candidates (#3351)" || bad "NOTE count shared predicate (err=$ERR)"
 # 6th distinct unreadable login is cut off: the cap stops the scan before an older real approver
 UNR=(); for i in 1 2 3 4 5 6 7 8; do UNR+=("$(ovc "unr$i" User "2026-10-08T10:0$i:00Z" "2026-10-08T10:0$i:00Z" "$HS" "$CUR_MISSING" "unreadable")"); done
 PL="$TMP_FX/permlog-unr"; : > "$PL"
