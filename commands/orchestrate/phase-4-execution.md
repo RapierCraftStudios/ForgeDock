@@ -2321,7 +2321,7 @@ Do not ask the user questions — you are running autonomously in the background
 
    **Re-review handoff (forge#3240)**: a remediation worker can finish with `REMEDIATE_RESULT: status: REREVIEW_REQUIRED` — the fix is pushed and CI is green, but the remediation had no sub-agent dispatch tool, so `review-pr` (which refuses to review inline) never ran. The issue is then at `workflow:in-review` WITHOUT `needs-human`, so the trigger above does not fire and the `ALREADY_REMEDIATED` guard (which counts any `FORGE:REMEDIATION`) is irrelevant. This is not a human gate, but it must never be left for a poll to find: it ends in a re-review from THIS session (which has dispatch) or in the terminal fallback below. On the next completion-monitoring cycle, for the issue that just completed, run the three steps in order. <!-- Updated: forge#3406 -->
 
-   **Step 1 — detect (bash; read-only, no dispatch, no marker write).** The marker is trusted only from an `OWNER`/`MEMBER`/`COLLABORATOR` author (the same predicate as `trail_escalation_state` above) and only when it embeds the current head SHA; a lookup error is `UNREADABLE`, never "no marker":
+   **Step 1 — detect (bash; read-only, no dispatch, no marker write).** A marker counts only from a trusted author, using the same predicate as `trail_escalation_state` above (`OWNER`, the orchestrator login from `resolve_orch_login`, or a `MEMBER`/`COLLABORATOR` with admin/maintain/write permission; a failed permission lookup drops the row), and only as the comment's leading marker, never as text quoted inside another comment (forge#3412). The dispatched marker must also embed the current head SHA. A lookup error is `UNREADABLE`, never "no marker":
 
    ```bash
    PRED="$NUM"
@@ -2332,13 +2332,27 @@ Do not ask the user questions — you are running autonomously in the background
    elif [ -n "$REREVIEW_PR" ]; then
      if ! PR_META=$(gh pr view "$REREVIEW_PR" -R {GH_REPO} --json headRefOid,baseRefName --jq '"\(.headRefOid) \(.baseRefName)"' 2>/dev/null) \
         || ! RAW=$(gh api --paginate "repos/{GH_REPO}/issues/${REREVIEW_PR}/comments" \
-             --jq '.[] | {body: (.body // ""), assoc: (.author_association // "")}' 2>/dev/null); then
+             --jq '.[] | {body: (.body // ""), login: (.user.login // ""), assoc: (.author_association // "")}' 2>/dev/null); then
        REREVIEW_STATE="UNREADABLE"
      else
        REREVIEW_SHA="${PR_META%% *}"; REREVIEW_BASE="${PR_META#* }"
-       TRUSTED='select(.assoc == "OWNER" or .assoc == "MEMBER" or .assoc == "COLLABORATOR")'
-       NEEDS_REREVIEW=$(printf '%s\n' "$RAW" | jq -s "[.[] | $TRUSTED | select((.body | contains(\"FORGE:REMEDIATION:COMPLETE\")) and (.body | contains(\"REREVIEW-REQUIRED\")))] | length" 2>/dev/null) || NEEDS_REREVIEW=""
-       REREVIEW_DONE=$(printf '%s\n' "$RAW" | jq -s --arg sha "$REREVIEW_SHA" "[.[] | $TRUSTED | select((.body | contains(\"FORGE:REREVIEW_DISPATCHED\")) and (.body | contains(\$sha)))] | length" 2>/dev/null) || REREVIEW_DONE=""
+       # Trusted rows only, same predicate as trail_escalation_state (forge#3207): OWNER, the orchestrator login, or
+       # MEMBER/COLLABORATOR with admin/maintain/write permission. A failed permission lookup drops the row (fail closed).
+       ORCH=$(resolve_orch_login); TRUSTED_RAW=""; PERMS=""
+       while IFS= read -r ROW; do
+         [ -n "$ROW" ] || continue
+         RA=$(printf '%s' "$ROW" | jq -r '.assoc'); RL=$(printf '%s' "$ROW" | jq -r '.login')
+         if [ "$RA" = "OWNER" ] || { [ -n "$ORCH" ] && [ "$(printf '%s' "$RL" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$ORCH" | tr '[:upper:]' '[:lower:]')" ]; }; then
+           TRUSTED_RAW="${TRUSTED_RAW}${ROW}"$'\n'; continue
+         fi
+         case "$RA" in MEMBER|COLLABORATOR) ;; *) continue ;; esac
+         RP=$(printf '%s\n' "$PERMS" | awk -v l="$RL" '$1==l{print $2; exit}')
+         if [ -z "$RP" ]; then RP=$(gh api "repos/{GH_REPO}/collaborators/${RL}/permission" --jq '.permission' 2>/dev/null || true); [ -n "$RP" ] || RP="none"; PERMS="${PERMS}${RL} ${RP}"$'\n'; fi
+         case "$RP" in admin|maintain|write) TRUSTED_RAW="${TRUSTED_RAW}${ROW}"$'\n' ;; esac
+       done < <(printf '%s\n' "$RAW" | jq -c '.' 2>/dev/null)
+       # Leading-marker match only (forge#3412): remediation trail comments start with <!-- FORGE:REMEDIATION -->.
+       NEEDS_REREVIEW=$(printf '%s' "$TRUSTED_RAW" | jq -s '[.[] | select((.body | startswith("<!-- FORGE:REMEDIATION -->")) and (.body | contains("<!-- FORGE:REMEDIATION:COMPLETE -->")) and (.body | contains("REREVIEW-REQUIRED")))] | length' 2>/dev/null) || NEEDS_REREVIEW=""
+       REREVIEW_DONE=$(printf '%s' "$TRUSTED_RAW" | jq -s --arg sha "$REREVIEW_SHA" '[.[] | select((.body | startswith("<!-- FORGE:REREVIEW_DISPATCHED -->")) and (.body | contains($sha)))] | length' 2>/dev/null) || REREVIEW_DONE=""
        if [ -z "$NEEDS_REREVIEW" ] || [ -z "$REREVIEW_DONE" ]; then REREVIEW_STATE="UNREADABLE"
        elif [ "$NEEDS_REREVIEW" -ge 1 ] && [ "$REREVIEW_DONE" -eq 0 ] && [ "${DRY_RUN:-false}" != "true" ]; then REREVIEW_STATE="PENDING"
        fi
@@ -2352,12 +2366,16 @@ Do not ask the user questions — you are running autonomously in the background
    **Step 2 — dispatch (a real call, not part of the bash block above).** Invoke, with the `REREVIEW_PR`, `REREVIEW_BASE` and `PRED` values Step 1 printed:
 
    ```
-   Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="${REREVIEW_PR} --auto-merge --issue ${PRED} --base ${REREVIEW_BASE} --gh-flag -R {GH_REPO}")
+   if DRY_RUN=true:
+     record "Would re-review PR #${REREVIEW_PR} with review-pr --auto-merge; skipped (dry-run)."
+   else:
+     Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="${REREVIEW_PR} --auto-merge --issue ${PRED} --base ${REREVIEW_BASE} --gh-flag -R {GH_REPO}")
    ```
 
    If the call returns no `REVIEW_RESULT` (interrupted or no result), invoke it once more; this retry is the only one (bounded, independent of the Phase 4R `github-unavailable` waits). Then post the marker AFTER the dispatch, so an interrupted session never leaves a marker that blocks a retry:
 
    ```bash
+   [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] would post FORGE:REREVIEW_DISPATCHED on PR #${REREVIEW_PR}"; exit 0; }
    gh pr comment "$REREVIEW_PR" -R {GH_REPO} --body "<!-- FORGE:REREVIEW_DISPATCHED -->
    Re-review dispatched by the orchestrator at head ${REREVIEW_SHA}: remediation had no sub-agent dispatch tool."
    ```
