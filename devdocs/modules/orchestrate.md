@@ -86,3 +86,9 @@ Cite: #3259 / PR #3294.
 PR #3281 touched `orchestrate`. See FORGE:BUILDER comment on issue #3245 for full change list.
 Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
 Cite: #3245 / PR #3281.
+
+## Entry 2026-10-08 — Fix: orchestrated workers stall on forked phase completion notifications (#3253)
+
+PR #3299 touched `orchestrate`. See FORGE:BUILDER comment on issue #3253 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3253 / PR #3299.
