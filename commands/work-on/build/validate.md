@@ -150,7 +150,7 @@ gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" # allowlist:check-com
 
 ## Phase V2: Format and Verify
 
-Run after quality gate passes. All tool commands are read from `forge.yaml → verification.commands`; each step logs `SKIPPED — not configured` when the corresponding key is absent rather than silently passing.
+Run after quality gate passes. All tool commands are read from `forge.yaml → verification.commands`. `forge.yaml` is usually gitignored, so it is absent from the worktree: every block below resolves `FORGE_CFG` to the worktree copy if present, else the main checkout's `forge.yaml` (via `git rev-parse --git-common-dir`). Before this, every verification command, learned test command and the SOPS chain check were silently skipped in worktree builds; each step logs `SKIPPED — not configured` when the corresponding key is absent rather than silently passing.
 
 **Track skipped checks** — initialize before any check runs:
 ```bash
@@ -178,8 +178,9 @@ run_verification_command() {
 **Python**:
 ```bash
 cd {WORKTREE_PATH}
+FORGE_CFG=forge.yaml; [ -f "$FORGE_CFG" ] || { _gcd=$(git rev-parse --git-common-dir 2>/dev/null) && _gcd=$(cd "$_gcd" 2>/dev/null && pwd) && [ -f "${_gcd%/.git}/forge.yaml" ] && FORGE_CFG="${_gcd%/.git}/forge.yaml"; }  # gitignored forge.yaml exists only in the main checkout, not in worktrees
 
-PYTHON_FORMAT=$(yq '.verification.commands.python.format // ""' forge.yaml 2>/dev/null || echo '')
+PYTHON_FORMAT=$(yq '.verification.commands.python.format // ""' "$FORGE_CFG" 2>/dev/null || echo '')
 if [ -n "$PYTHON_FORMAT" ]; then
     run_verification_command "python.format" "$PYTHON_FORMAT"
 else
@@ -195,10 +196,11 @@ Failures in `py_compile` are BLOCKING — fix before continuing.
 **TypeScript**:
 ```bash
 cd {WORKTREE_PATH}
+FORGE_CFG=forge.yaml; [ -f "$FORGE_CFG" ] || { _gcd=$(git rev-parse --git-common-dir 2>/dev/null) && _gcd=$(cd "$_gcd" 2>/dev/null && pwd) && [ -f "${_gcd%/.git}/forge.yaml" ] && FORGE_CFG="${_gcd%/.git}/forge.yaml"; }  # gitignored forge.yaml exists only in the main checkout, not in worktrees
 
-TS_FORMAT=$(yq '.verification.commands.typescript.format // ""' forge.yaml 2>/dev/null || echo '')
-TS_TYPECHECK=$(yq '.verification.commands.typescript.typecheck // ""' forge.yaml 2>/dev/null || echo '')
-TS_BUILD=$(yq '.verification.commands.typescript.build // ""' forge.yaml 2>/dev/null || echo '')
+TS_FORMAT=$(yq '.verification.commands.typescript.format // ""' "$FORGE_CFG" 2>/dev/null || echo '')
+TS_TYPECHECK=$(yq '.verification.commands.typescript.typecheck // ""' "$FORGE_CFG" 2>/dev/null || echo '')
+TS_BUILD=$(yq '.verification.commands.typescript.build // ""' "$FORGE_CFG" 2>/dev/null || echo '')
 
 if [ -n "$TS_FORMAT" ]; then
     run_verification_command "typescript.format" "$TS_FORMAT"
@@ -234,8 +236,9 @@ Before running any test command below, check it against `verification.known_slow
 
 ```bash
 cd {WORKTREE_PATH}
+FORGE_CFG=forge.yaml; [ -f "$FORGE_CFG" ] || { _gcd=$(git rev-parse --git-common-dir 2>/dev/null) && _gcd=$(cd "$_gcd" 2>/dev/null && pwd) && [ -f "${_gcd%/.git}/forge.yaml" ] && FORGE_CFG="${_gcd%/.git}/forge.yaml"; }  # gitignored forge.yaml exists only in the main checkout, not in worktrees
 # Read directly from forge.yaml (static, operator-declared config).
-KNOWN_SLOW_TESTS=$(yq -o=json -I=0 '.verification.known_slow_tests // []' forge.yaml 2>/dev/null || echo '[]')
+KNOWN_SLOW_TESTS=$(yq -o=json -I=0 '.verification.known_slow_tests // []' "$FORGE_CFG" 2>/dev/null || echo '[]')
 
 # apply_known_slow_filter <cmd> — echoes the command to actually run, or "" to
 # skip it entirely. Matching is substring match of `pattern` against the full
@@ -274,7 +277,8 @@ After all `verification.commands` steps complete, run any commands from `forge.y
 
 ```bash
 cd {WORKTREE_PATH}
-LEARNED_TEST_COMMANDS=$(yq -o=json -I=0 '.learned.test_commands // []' forge.yaml 2>/dev/null || echo '[]')
+FORGE_CFG=forge.yaml; [ -f "$FORGE_CFG" ] || { _gcd=$(git rev-parse --git-common-dir 2>/dev/null) && _gcd=$(cd "$_gcd" 2>/dev/null && pwd) && [ -f "${_gcd%/.git}/forge.yaml" ] && FORGE_CFG="${_gcd%/.git}/forge.yaml"; }  # gitignored forge.yaml exists only in the main checkout, not in worktrees
+LEARNED_TEST_COMMANDS=$(yq -o=json -I=0 '.learned.test_commands // []' "$FORGE_CFG" 2>/dev/null || echo '[]')
 LEARNED_FAILED=0
 if [ -n "$LEARNED_TEST_COMMANDS" ] && [ "$LEARNED_TEST_COMMANDS" != "[]" ] && [ "$LEARNED_TEST_COMMANDS" != "null" ]; then
   echo "Running learned test commands..."
@@ -368,7 +372,8 @@ After static proxy checks, run a lightweight live browser check using Playwright
 
 ```bash
 cd {WORKTREE_PATH}
-APP_URL=$(yq '.services.app_url // ""' forge.yaml 2>/dev/null || echo '')
+FORGE_CFG=forge.yaml; [ -f "$FORGE_CFG" ] || { _gcd=$(git rev-parse --git-common-dir 2>/dev/null) && _gcd=$(cd "$_gcd" 2>/dev/null && pwd) && [ -f "${_gcd%/.git}/forge.yaml" ] && FORGE_CFG="${_gcd%/.git}/forge.yaml"; }  # gitignored forge.yaml exists only in the main checkout, not in worktrees
+APP_URL=$(yq '.services.app_url // ""' "$FORGE_CFG" 2>/dev/null || echo '')
 if [ -z "$APP_URL" ]; then
     echo "SKIPPED — services.app_url not configured in forge.yaml (browser signal check requires a running app URL)"
 else
@@ -442,7 +447,8 @@ ADDED_LINES=$(git diff HEAD -- {CHANGED_FILES} | grep -E '^\+' | grep -v '^+++')
 
 ```bash
 cd {WORKTREE_PATH}
-SECRETS_BACKEND=$(yq '.deploy.secrets_backend // ""' forge.yaml 2>/dev/null || echo '')
+FORGE_CFG=forge.yaml; [ -f "$FORGE_CFG" ] || { _gcd=$(git rev-parse --git-common-dir 2>/dev/null) && _gcd=$(cd "$_gcd" 2>/dev/null && pwd) && [ -f "${_gcd%/.git}/forge.yaml" ] && FORGE_CFG="${_gcd%/.git}/forge.yaml"; }  # gitignored forge.yaml exists only in the main checkout, not in worktrees
+SECRETS_BACKEND=$(yq '.deploy.secrets_backend // ""' "$FORGE_CFG" 2>/dev/null || echo '')
 if [ "$SECRETS_BACKEND" != "sops" ]; then
     echo 'SKIP: SOPS chain check — deploy.secrets_backend is not "sops". Configure deploy.secrets_backend in forge.yaml to enable.'
 fi

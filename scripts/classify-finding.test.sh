@@ -44,10 +44,13 @@ expect ISSUE "LOW with Secrets (case)"        -- --severity LOW --confidence LIK
 expect ISSUE "LOW with permission-check"      -- --severity LOW --confidence LIKELY --text "permission-check skipped"
 expect NOTE  "'author' is not 'auth'"         -- --severity LOW --confidence LIKELY --text "author field unused"
 expect NOTE  "'tokenizer' is not 'token'"     -- --severity LOW --confidence LIKELY --text "tokenizer splits oddly"
-expect ISSUE "LOW from Auth domain agent"     -- --severity LOW --confidence LIKELY --agent "Auth" --text "nit"
-expect ISSUE "LOW from Billing domain agent"  -- --severity LOW --confidence POSSIBLE --agent "billing" --text "nit"
-expect ISSUE "LOW from Database agent"        -- --severity LOW --confidence POSSIBLE --agent "Database" --text "nit"
-expect ISSUE "LOW from Concurrency agent"     -- --severity LOW --confidence POSSIBLE --agent "Concurrency" --text "nit"
+expect ISSUE "LOW CONFIRMED from Auth domain agent" -- --severity LOW --confidence CONFIRMED --agent "Auth" --text "nit"
+expect ISSUE "MEDIUM POSSIBLE from Billing agent"  -- --severity MEDIUM --confidence POSSIBLE --agent "billing" --text "nit"
+expect NOTE  "LOW LIKELY from Auth domain agent is a NOTE" -- --severity LOW --confidence LIKELY --agent "Auth" --text "nit"
+expect NOTE  "LOW POSSIBLE from Database agent is a NOTE"  -- --severity LOW --confidence POSSIBLE --agent "Database" --text "nit"
+expect NOTE  "LOW POSSIBLE Concurrency reviewer is a NOTE (AlterLab #34671)" -- --severity LOW --confidence POSSIBLE --agent "Concurrency reviewer" --text "lock edge cases"
+expect ISSUE "LOW CONFIRMED Concurrency reviewer files" -- --severity LOW --confidence CONFIRMED --agent "Concurrency reviewer" --text "lock edge cases"
+expect ISSUE "keyword still rescues LOW POSSIBLE from domain agent" -- --severity LOW --confidence POSSIBLE --agent "Database" --text "sql injection"
 
 # --- Rule 3: review-finding lineage (fix for a finding) ---
 expect NOTE  "lineage LOW CONFIRMED note"     -- --severity LOW --confidence CONFIRMED --lineage review-finding --text "nit"
