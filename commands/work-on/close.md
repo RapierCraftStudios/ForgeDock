@@ -428,7 +428,9 @@ The `REMAINING_AFTER` variable is passed to Phase C2 to decide whether to close.
 
 **This phase is non-blocking** — if the dossier write fails, log the reason and continue to Phase C1.5. Never stall close for dossier maintenance.
 
-**Skip if**: `{PR_NUMBER}` is empty (investigation / decomposed / invalid terminals — `TERMINAL_STATE` is not `merged`) OR `$REPO_PATH` is unset OR `devdocs/index.yaml` does not contain a `modules:` section OR no PR files match any module glob.
+**Never touch the main checkout**: `$REPO_PATH` is the operator's main checkout. This phase never writes, stages or commits there (no git add or git commit against it, no directory change into it). `index.yaml` is only read from it. The dossier edit is made in a temporary detached worktree off `origin/${DOSSIER_BASE}`, committed on branch `docs/dossier-{NUMBER}`, pushed, and opened as a PR (reviewed path to the base branch); the temporary worktree is always removed. Every failure logs `Phase C1.7: skipped - <reason>` and continues.
+
+**Skip if**: `{PR_NUMBER}` is empty (investigation / decomposed / invalid terminals — `TERMINAL_STATE` is not `merged`) OR `$REPO_PATH` is unset OR `devdocs/index.yaml` does not contain a `modules:` section OR no PR files match any module glob OR no `origin` remote / no push rights / worktree creation fails / PR creation fails (each logged as `Phase C1.7: skipped - <reason>`).
 
 ### Step 1: Resolve affected files from FORGE:BUILDER comment
 
@@ -467,8 +469,8 @@ fi
 ```bash
 CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
 DEVDOCS_REL=$(yq '.devdocs.path // "devdocs"' "$CONFIG_FILE" 2>/dev/null || echo "devdocs")
-DEVDOCS_PATH="${REPO_PATH}/${DEVDOCS_REL}"
-INDEX_PATH="${DEVDOCS_PATH}/index.yaml"
+# Read-only: the index is read from the main checkout; nothing is ever written under ${REPO_PATH}.
+INDEX_PATH="${REPO_PATH}/${DEVDOCS_REL}/index.yaml"
 
 if [ ! -f "$INDEX_PATH" ]; then
   echo "Phase C1.7: ${INDEX_PATH} not found — skipping dossier append"
@@ -483,11 +485,28 @@ if [ -z "$MODULE_ENTRIES" ]; then
   # → continue to Phase C1.5
 fi
 
+# All dossier writes happen in a temporary detached worktree off origin/<base>, never in ${REPO_PATH}.
+DOSSIER_BASE="${PR_BASE:-staging}"
+DOSSIER_TMP=""
+if ! git -C "${REPO_PATH}" fetch origin "${DOSSIER_BASE}" >/dev/null 2>&1; then
+  echo "Phase C1.7: skipped - cannot fetch origin/${DOSSIER_BASE} (no origin remote or no network)"
+else
+  DOSSIER_TMP=$(mktemp -d 2>/dev/null)
+  if [ -z "$DOSSIER_TMP" ] || ! git -C "${REPO_PATH}" worktree add --detach "$DOSSIER_TMP" "origin/${DOSSIER_BASE}" >/dev/null 2>&1; then
+    echo "Phase C1.7: skipped - git worktree add failed for origin/${DOSSIER_BASE}"
+    [ -n "$DOSSIER_TMP" ] && rm -rf "$DOSSIER_TMP"
+    DOSSIER_TMP=""
+  fi
+fi
+# If DOSSIER_TMP is empty: skip the rest of C1.7 and continue to Phase C1.5.
+DEVDOCS_PATH="${DOSSIER_TMP}/${DEVDOCS_REL}"
+
 DOSSIER_TIMESTAMP=$(date -u +"%Y-%m-%d")
 DOSSIER_UPDATED_MODULES=""
 
 # Iterate module entries; for each: check if any changed file matches the glob
 while IFS='|' read -r MOD_NAME MOD_GLOB MOD_PATH; do
+  [ -n "$DOSSIER_TMP" ] || break
   [ -z "$MOD_GLOB" ] || [ -z "$MOD_PATH" ] && continue
   DOSSIER_ABS="${DEVDOCS_PATH}/${MOD_PATH}"
 
@@ -569,42 +588,57 @@ DOSSIER_INIT_EOF
 done <<< "$MODULE_ENTRIES"
 ```
 
-### Step 3: Commit dossier changes and post annotation
+### Step 3: Commit in the temporary worktree, open a PR, post annotation
 
 ```bash
-if [ -n "$DOSSIER_UPDATED_MODULES" ]; then
-  # Commit the updated dossier files
-  cd "${REPO_PATH}"
+DOSSIER_BRANCH="docs/dossier-{NUMBER}"
+DOSSIER_PR_URL=""
+if [ "${DRY_RUN:-false}" = "true" ]; then
+  echo "DRY_RUN: would commit, push and open dossier PR ${DOSSIER_BRANCH}; skipped (dry-run)"
+elif [ -n "$DOSSIER_TMP" ] && [ -n "$DOSSIER_UPDATED_MODULES" ]; then
+  # Stage and commit ONLY inside the temporary worktree ($DOSSIER_TMP), never in ${REPO_PATH}.
   CHANGED_DOSSIER_FILES=$(echo "$DOSSIER_UPDATED_MODULES" | tr ' ' '\n' | while IFS= read -r mod; do
+    [ -n "$mod" ] || continue
     yq ".modules[]? | select(.name == \"${mod}\") | \"${DEVDOCS_REL}/\" + .path" "$INDEX_PATH" 2>/dev/null
   done | grep -v '^$')
 
-  if [ -n "$CHANGED_DOSSIER_FILES" ]; then
-    # CHANGED_DOSSIER_FILES is newline-separated — iterate so paths containing
-    # spaces are staged individually rather than word-split by the shell.
-    while IFS= read -r dossier_file; do
-      [ -n "$dossier_file" ] || continue
-      git -C "${REPO_PATH}" add "$dossier_file" 2>/dev/null || true
-    done <<< "$CHANGED_DOSSIER_FILES"
-    # Only commit if there are staged changes (new or modified dossier files)
-    if ! git -C "${REPO_PATH}" diff --cached --quiet 2>/dev/null; then
-      git -C "${REPO_PATH}" commit -s -m "docs(dossier): append entry for PR #{PR_NUMBER} (#${NUMBER})" 2>/dev/null || true
-      echo "Phase C1.7: Dossier commit created for modules:${DOSSIER_UPDATED_MODULES}"
-    else
-      echo "Phase C1.7: No staged dossier changes — skipping commit"
-    fi
-  fi
+  while IFS= read -r dossier_file; do
+    [ -n "$dossier_file" ] || continue
+    git -C "$DOSSIER_TMP" add "$dossier_file" 2>/dev/null || true
+  done <<< "$CHANGED_DOSSIER_FILES"
 
-  # Post annotation on the issue
+  if git -C "$DOSSIER_TMP" diff --cached --quiet 2>/dev/null; then
+    echo "Phase C1.7: skipped - no staged dossier changes"
+  elif ! git -C "$DOSSIER_TMP" checkout -q -B "$DOSSIER_BRANCH" 2>/dev/null; then
+    echo "Phase C1.7: skipped - cannot create branch ${DOSSIER_BRANCH}"
+  elif ! git -C "$DOSSIER_TMP" commit -s -q -m "docs(dossier): append entry for PR #{PR_NUMBER} (#${NUMBER})" 2>/dev/null; then
+    echo "Phase C1.7: skipped - commit failed in temporary worktree"
+  elif ! git -C "$DOSSIER_TMP" push -u origin "$DOSSIER_BRANCH" >/dev/null 2>&1; then
+    echo "Phase C1.7: skipped - push of ${DOSSIER_BRANCH} failed (no push rights or branch protection)"
+  else
+    DOSSIER_PR_URL=$(gh pr create {GH_FLAG} --base "${DOSSIER_BASE}" --head "$DOSSIER_BRANCH" \
+      --title "docs(dossier): append entry for PR #{PR_NUMBER} (#${NUMBER})" \
+      --body "Module dossier entry for PR #{PR_NUMBER} (#${NUMBER}):${DOSSIER_UPDATED_MODULES}. Opened by close.md Phase C1.7." 2>/dev/null || echo "")
+    [ -n "$DOSSIER_PR_URL" ] || echo "Phase C1.7: skipped - gh pr create failed for ${DOSSIER_BRANCH}"
+  fi
+fi
+
+# Always remove the temporary worktree (non-fatal); the main checkout was never modified.
+if [ -n "$DOSSIER_TMP" ]; then
+  git -C "${REPO_PATH}" worktree remove --force "$DOSSIER_TMP" >/dev/null 2>&1 || rm -rf "$DOSSIER_TMP"
+  git -C "${REPO_PATH}" worktree prune >/dev/null 2>&1 || true
+fi
+
+if [ -n "$DOSSIER_PR_URL" ]; then
   gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:DOSSIER_UPDATED -->
 Module dossier(s) updated:${DOSSIER_UPDATED_MODULES}
 
-Entries appended to \`devdocs/modules/\` after PR #{PR_NUMBER} merged. Future agents working
+Dossier PR opened after PR #{PR_NUMBER} merged: ${DOSSIER_PR_URL}. Once merged, future agents working
 on these modules will receive the updated knowledge through the devdocs channel (context.md Phase C-1).
 
 <!-- FORGE:DOSSIER_UPDATED:COMPLETE -->" 2>/dev/null || true
 else
-  echo "Phase C1.7: No module dossiers matched changed files — skipping"
+  echo "Phase C1.7: skipped - no dossier PR opened (see reasons above); continuing"
 fi
 ```
 
