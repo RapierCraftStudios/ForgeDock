@@ -292,11 +292,13 @@ fi
 
 P4_SPEC="$COMMANDS_DIR/orchestrate/phase-4-execution.md"
 if [ -f "$P4_SPEC" ]; then
-  # ABSENT arm of classify_predecessor_state: text from a line-start "ABSENT)"
-  # up to the first ";;", whitespace-collapsed so one-line and multi-line
+  # ABSENT arm of classify_predecessor_state() (scoped to that function body): text from a line-start "ABSENT)"
+  # inside that function body (an ABSENT) arm elsewhere is ignored) up to the first ";;", whitespace-collapsed so one-line and multi-line
   # forms reduce to the same span.
   ABSENT_ARM=$(awk '
-    !inarm && /^[[:space:]]*ABSENT\)/ { inarm = 1 }
+    /^classify_predecessor_state\(\)[[:space:]]*\{/ { infn = 1; next }
+    infn && !inarm && /^\}/ { infn = 0 }
+    infn && !inarm && /^[[:space:]]*ABSENT\)/ { inarm = 1 }
     inarm {
       line = $0
       # Comments are not code: skip full-line comments and drop a trailing
@@ -310,7 +312,7 @@ if [ -f "$P4_SPEC" ]; then
     }
     END { print buf }
   ' "$P4_SPEC" | tr -s '[:space:]' ' ' || true)
-  # WIRE:PROVEN — manual mutation in a temp copy of commands/: renamed hold_merged_trail, renamed the ABSENT arm, ABSENT->echo DONE, and moved the comment before add-label; each fired its matching HIGH violation; comment-only GATED fires HIGH, comment-only DONE/reverify_merged_trail does not, comment-only gh issue comment before add-label does not count, real arm still passes
+  # WIRE:PROVEN — manual mutation in a temp copy of commands/: renamed hold_merged_trail, renamed the ABSENT arm, ABSENT->echo DONE, and moved the comment before add-label; each fired its matching HIGH violation; comment-only GATED fires HIGH, comment-only DONE/reverify_merged_trail does not, comment-only gh issue comment before add-label does not count, real arm still passes; a decoy earlier ABSENT) arm outside classify_predecessor_state does not change the result, removing the function declaration fires ABSENT arm missing, and add-label=needs-human / single-quoted forms are accepted
   if [ -z "${ABSENT_ARM// /}" ]; then
     echo "HIGH | $P4_SPEC | ABSENT arm missing from classify_predecessor_state (label-only hold must be classified explicitly)" >&2
     VIOLATIONS=$((VIOLATIONS + 1))
@@ -336,7 +338,7 @@ if [ -f "$P4_SPEC" ]; then
       if (line ~ /^[[:space:]]*#/) next
       sub(/[[:space:]]+#.*$/, "", line)
       if (!cmt && (line ~ /gh issue comment/ || line ~ /FORGE:PHASE_TRAIL_FAILED/)) cmt = NR
-      if (!lbl && line ~ /add-label[[:space:]]+"?needs-human/) lbl = NR
+      if (!lbl && line ~ /add-label(=|[[:space:]]+)[\047"]?needs-human/) lbl = NR
     }
     END { printf "%d %d %d\n", found + 0, cmt + 0, lbl + 0 }
   ' "$P4_SPEC" || true)
