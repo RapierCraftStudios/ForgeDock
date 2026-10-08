@@ -98,3 +98,9 @@ Cite: #3253 / PR #3299.
 PR #3317 touched `orchestrate`. See FORGE:BUILDER comment on issue #3233 for full change list.
 Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
 Cite: #3233 / PR #3317.
+
+## Entry 2026-10-08 — Fix: add .catch handler to batch-plan dynamic import in orchestrate phase-1 (#3296)
+
+PR #3338 touched `orchestrate`. See FORGE:BUILDER comment on issue #3296 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3296 / PR #3338.
