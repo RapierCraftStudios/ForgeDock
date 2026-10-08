@@ -237,9 +237,10 @@ echo "Reference: $FORGE_HOME/docs/CODEX.md"
 
 mkdir -p "$FORGE_HOME/.codex/worktrees"
 
-# Shell-escaped FORGE_HOME for every line written into a shell startup file or printed as a hint (bash-only %q;
-# paths containing control characters are out of scope). Never splice the raw path into a double-quoted string.
-FORGE_HOME_Q=$(printf '%q' "$FORGE_HOME")
+# POSIX single-quote-escaped FORGE_HOME for every line written into a shell startup file or printed as a hint.
+# Valid in bash, zsh and dash (~/.profile is read by sh); printf %q is bash-only ($'...' for control or non-ASCII
+# bytes). Paths with a trailing newline are out of scope. Never splice the raw path into a double-quoted string.
+FORGE_HOME_Q="'$(printf '%s' "$FORGE_HOME" | sed "s/'/'\\\\''/g")'"
 
 PROFILE_UPDATED=0
 for profile in "$HOME/.bashrc" "$HOME/.zshrc"; do
