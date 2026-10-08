@@ -80,3 +80,9 @@ Cite: #3223 / PR #3290.
 PR #3294 touched `orchestrate`. See FORGE:BUILDER comment on issue #3259 for full change list.
 Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
 Cite: #3259 / PR #3294.
+
+## Entry 2026-10-08 — Fix: harden orchestrate wake-path release with verified label removal and DRY_RUN guard (#3245)
+
+PR #3281 touched `orchestrate`. See FORGE:BUILDER comment on issue #3245 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3245 / PR #3281.
