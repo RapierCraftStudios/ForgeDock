@@ -2443,7 +2443,10 @@ Do not ask the user questions — you are running autonomously in the background
    Then, on `REREVIEW_MARKER=VERIFIED` ONLY, dispatch with the `REREVIEW_PR`, `REREVIEW_BASE` and `PRED` values Step 1 printed (a real call, not part of the bash block above). `DRYRUN` records "Would re-review PR #${REREVIEW_PR} with review-pr --auto-merge; skipped (dry-run)." and dispatches nothing; `LOST` and `UNVERIFIED` dispatch nothing:
 
    ```
-   Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="${REREVIEW_PR} --auto-merge --issue ${PRED} --base ${REREVIEW_BASE} --gh-flag -R {GH_REPO}")
+   if DRY_RUN=true:
+     record "Would re-review PR #${REREVIEW_PR} with review-pr --auto-merge; skipped (dry-run)."
+   elif REREVIEW_MARKER == VERIFIED:
+     Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="${REREVIEW_PR} --auto-merge --issue ${PRED} --base ${REREVIEW_BASE} --gh-flag -R {GH_REPO}")
    ```
 
    If the call returns no `REVIEW_RESULT` (interrupted or no result), invoke it once more; this retry is the only one (bounded, independent of the Phase 4R `github-unavailable` waits) and does not post a second claim: the claim for this head is already recorded.
