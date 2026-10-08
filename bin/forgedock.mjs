@@ -3941,6 +3941,15 @@ switch (command) {
     await run();
     break;
   case "backend-check": {
+    // Exit codes: 0 = ready, 1 = no usable backend, 2 = bad usage (unknown option).
+    // Only --quiet is accepted; anything else is a usage error so callers can tell a
+    // plugin/CLI version mismatch apart from a real backend failure.
+    const unknownFlag = restArgs.find((a) => a !== "--quiet");
+    if (unknownFlag !== undefined) {
+      process.stderr.write(`Unknown option: ${unknownFlag}\n`);
+      exitCode = 2;
+      break;
+    }
     const { checkExecutionBackend } = await import("./runner.mjs");
     const result = checkExecutionBackend();
     if (!restArgs.includes("--quiet")) {

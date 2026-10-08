@@ -920,8 +920,30 @@ FORGEDOCK_AVAILABLE=$(command -v forgedock >/dev/null 2>&1 && echo "true" || ech
 # explicit FORGEDOCK_BACKEND, and accepts API fallback only when ANTHROPIC_API_KEY is configured.
 # It performs no paid model request.
 if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
-  if ! forgedock backend-check --quiet; then
-    echo "WARNING: forgedock CLI is on PATH, but no configured execution backend is locally usable. Downgrading to the Agent-spawn fallback path for this entire run — see forge#2743."
+  # Time-bounded, non-interactive probe. `backend-check` exit codes: 0 ready, 1 no usable
+  # backend, 2 bad usage (unknown option), 124 = probe timed out (hung CLI). Three distinct
+  # outcomes must not collapse into one "no backend" verdict: an older installed CLI that
+  # rejects `--quiet` is plugin/CLI version skew, not a backend failure.
+  if command -v timeout >/dev/null 2>&1; then
+    PROBE_OUT=$(timeout 10 forgedock backend-check --quiet 2>&1 </dev/null); PROBE_RC=$?
+    CLI_VERSION=$(timeout 10 forgedock --version 2>&1 </dev/null | head -n1)
+  else
+    PROBE_OUT=$(forgedock backend-check --quiet 2>&1 </dev/null); PROBE_RC=$?
+    CLI_VERSION=$(forgedock --version 2>&1 </dev/null | head -n1)
+  fi
+  if [ "$PROBE_RC" -eq 0 ]; then
+    : # backend ready — keep engine-first dispatch
+  elif [ "$PROBE_RC" -eq 124 ]; then
+    echo "WARNING: forgedock CLI probe timed out after 10s (hung CLI, installed: ${CLI_VERSION:-unknown}). Downgrading to the Agent-spawn fallback path for this entire run."
+    FORGEDOCK_AVAILABLE="false"
+  elif [ "$PROBE_RC" -eq 2 ] || printf '%s' "$PROBE_OUT" | grep -qiE 'unknown (option|command)'; then
+    echo "WARNING: plugin/CLI version skew — installed forgedock '${CLI_VERSION:-unknown}' does not support 'backend-check --quiet' (needs a newer CLI; upgrade with: npm i -g forgedock). This is NOT a backend failure. Downgrading to the Agent-spawn fallback path for this entire run."
+    FORGEDOCK_AVAILABLE="false"
+  elif [ "$PROBE_RC" -eq 1 ]; then
+    echo "WARNING: forgedock CLI is on PATH, but no configured execution backend is locally usable (${PROBE_OUT:-no detail}). Downgrading to the Agent-spawn fallback path for this entire run — see forge#2743."
+    FORGEDOCK_AVAILABLE="false"
+  else
+    echo "WARNING: forgedock backend probe failed unexpectedly (rc=$PROBE_RC, installed: ${CLI_VERSION:-unknown}): ${PROBE_OUT}. Downgrading to the Agent-spawn fallback path for this entire run."
     FORGEDOCK_AVAILABLE="false"
   fi
 fi
