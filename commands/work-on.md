@@ -351,7 +351,7 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | {id: .id, author: .u
 
 **Resume preflight (MANDATORY on any resume past Phase 1)** <!-- Added: forge#3061 -->: before routing to Phase 3 (build), 4 (review) or 5 (close) from existing state, run `bash "$FORGE_ROOT/scripts/verify-phase-trail.sh" {NUMBER} -R {GH_REPO}` (add `--docs-only` for docs-only diffs, or `--code-diff` when the diff has any non-docs file so an INVESTIGATION band cannot waive requirements), with `FORGE_ROOT` resolved by the bootstrap in "Script resolution" below. If `FORGE_ROOT` is empty or the script is missing, treat it as `PHASE_TRAIL: ERROR` (fail closed: stop and add `needs-human`; never skip the preflight). On `PHASE_TRAIL: FAIL`, go BACK and run each missing phase through its `Skill(...)` (investigate, Phase 3B classification, build contract/context/architect, validate) before continuing — never continue forward over a gap, never hand-post a missing marker, and never treat a recovered uncommitted worktree as a substitute for the skipped phases. The same verifier gates PR creation (`work-on/review.md` Phase R1.5) and auto-merge (`review-pr.md` Phase 8).
 
-**Determine resume point**: no `FORGE:INVESTIGATOR` → Phase 1 (investigate). Investigation complete with decompose YES and no `FORGE:DECOMPOSED` → Phase 2 (decompose); with `FORGE:DECOMPOSED` → Phase 5 (`--terminal-state decomposed`). Investigation complete (decompose NO) without `FORGE:BUILDER:COMPLETE` → Phase 3 (build; a partial BUILDER comment is cleaned up by the build phase). `FORGE:BUILDER:COMPLETE` and no merged PR → Phase 4 (review). PR merged and issue open → Phase 5 (close). `workflow:invalid` → STOP.
+**Determine resume point**: no `FORGE:INVESTIGATOR` → Phase 1 (investigate). Investigation complete with decompose YES and no `FORGE:DECOMPOSED` → Phase 2 (decompose); with `FORGE:DECOMPOSED` → Phase 5 (`--terminal-state decomposed`). Investigation complete (decompose NO) without `FORGE:BUILDER:COMPLETE` → Phase 3 (build; a partial BUILDER comment is cleaned up by the build phase). `FORGE:BUILDER:COMPLETE` and no merged PR → Phase 4 (review), except: an interrupted remediation (a `FORGE:REMEDIATION` comment on the PR without `FORGE:REMEDIATION:COMPLETE`, after this issue's latest `FORGE:CI_REMEDIATION`/`FORGE:INPR_REMEDIATION` marker) → Phase 4R with that marker's kind, skipping the marker post (it is already recorded); remediation restarts its own interrupted attempt. Re-entering review instead would find the bound used and stop without remediation ever finishing. PR merged and issue open → Phase 5 (close). `workflow:invalid` → STOP.
 
 ### 0B.5: Read Phase Checkpoint (MANDATORY — executes before any phase-skip decision)
 
@@ -716,9 +716,12 @@ The review phase never invokes remediation itself: remediation re-reviews throug
 ```bash
 # {REMEDIATION_KIND} is the review result's `remediation` value: ci-gate -> CI_REMEDIATION, inpr-fix -> INPR_REMEDIATION.
 BOUND_MARKER="CI_REMEDIATION"; [ "{REMEDIATION_KIND}" = "inpr-fix" ] && BOUND_MARKER="INPR_REMEDIATION"
-gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:${BOUND_MARKER}: pr={PR_NUMBER} -->
-Review handed PR #{PR_NUMBER} to remediation ({REMEDIATION_KIND}); the router is dispatching it once." # allowlist:check-command-side-effects
+BOUND_BODY="<!-- FORGE:${BOUND_MARKER}: pr={PR_NUMBER} -->
+Review handed PR #{PR_NUMBER} to remediation ({REMEDIATION_KIND}); the router is dispatching it once."
+gh issue comment {NUMBER} {GH_FLAG} --body "$BOUND_BODY" || { echo "github-unavailable: could not post FORGE:${BOUND_MARKER}; remediation not invoked"; exit 1; } # allowlist:check-command-side-effects
 ```
+
+If the marker cannot be posted, do not invoke remediation (an unrecorded bound could repeat): treat it as a `github-unavailable:` blocker under the router-owned retry rule.
 
 ```
 Skill(skill="{FORGE_SKILL_PREFIX}work-on:remediate", args="{PR_NUMBER} --issue {NUMBER} --base {PR_BASE} --repo {GH_REPO} --gh-flag {GH_FLAG}")
@@ -728,7 +731,8 @@ Skill(skill="{FORGE_SKILL_PREFIX}work-on:remediate", args="{PR_NUMBER} --issue {
 |---|---|
 | `re_gate_outcome: AUTO-LANDED` | Merged. Remediation's Phase M8 already ran `work-on:close`; if the issue is still open, run Phase 5 with `--terminal-state merged`. Then done. |
 | `status: REREVIEW_REQUIRED` | Fallback only (should not occur at this depth): run the re-review from this router as in 0A.1, then Phase 5 on `REVIEW_RESULT: status: COMPLETE`. |
-| `status: ALREADY_DONE` (single-attempt guard: an earlier remediation already completed on this PR) | Make sure `needs-human` is on the issue (add it, with a comment naming the PR and the remediation kind, if absent). STOP. |
+| `status: ALREADY_DONE` (single-attempt guard: an earlier remediation already completed on this PR), `remediation: inpr-fix` | Same as any other `inpr-fix` outcome below: re-invoke Phase 4 once, which waives the in-PR gate. |
+| `status: ALREADY_DONE`, `remediation: ci-gate` | Make sure `needs-human` is on the issue (add it, with a comment naming the PR and that remediation already ran, if absent). STOP. |
 | any other outcome, `remediation: inpr-fix` | Re-invoke Phase 4 (`work-on:review`) once with the same args. Review finds its `INPR_REMEDIATION` bound used, waives the in-PR gate for the current head, files the remaining findings as issues and re-reviews. |
 | any other outcome, `remediation: ci-gate` | Terminal: remediation left `needs-human` (or `workflow:awaiting-merge`) with its reason. STOP. |
 

@@ -87,7 +87,7 @@ remediate L2, reviewers L3, same as the table.
 
 | Phase result | Router action |
 |--------------|---------------|
-| `REVIEW_RESULT: status: NEXT, next: remediate` | Phase 4R: post the bound marker (`CI_REMEDIATION` / `INPR_REMEDIATION`) immediately before invoking `work-on:remediate`, so an interrupted handoff is retried, not counted. `AUTO-LANDED` → done (remediation already ran close). `REREVIEW_REQUIRED` → fallback re-review from the router. `ALREADY_DONE` (single-attempt guard) → ensure `needs-human`, stop. Other outcome: `inpr-fix` → re-invoke review once (it waives the in-PR gate); `ci-gate` → terminal. |
+| `REVIEW_RESULT: status: NEXT, next: remediate` | Phase 4R: post the bound marker (`CI_REMEDIATION` / `INPR_REMEDIATION`) immediately before invoking `work-on:remediate`, so an interrupted handoff is retried, not counted. `AUTO-LANDED` → done (remediation already ran close). `REREVIEW_REQUIRED` → fallback re-review from the router. `ALREADY_DONE` (single-attempt guard) → `inpr-fix`: re-invoke review (waive); `ci-gate`: ensure `needs-human`, stop. Resume after an interrupted remediation returns to 4R, not to review. Other outcome: `inpr-fix` → re-invoke review once (it waives the in-PR gate); `ci-gate` → terminal. |
 | `REMEDIATE_RESULT` from `--remediate` entry | unchanged (Phase 0A.1) |
 
 ## 6. What does not change
