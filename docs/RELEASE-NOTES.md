@@ -2,6 +2,15 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Cascade follow-ups: script resolution, domain-agent notes, verification in worktrees, spec bash check
+
+- **Script resolution works in consumer repos.** `/review-pr` §6B.5 and the orchestrator breaker now find `classify-finding.sh` and `amplification-breaker.sh` through the newest pinned ForgeDock plugin cache under `CLAUDE_CONFIG_DIR`, then `~/.claude`. They also check `FORGEDOCK_HOME` and the repo's own `scripts/`, as before. Previously the plugin-root placeholder was often left unsubstituted in forked review runs, so 4 of 9 AlterLab reviews fell back to `classifier=manual`.
+- **Domain reviewers no longer file speculative LOW findings.** A finding from the Auth, Billing, Concurrency or Database reviewer is still filed as an issue only when it is MEDIUM+ or CONFIRMED. A LOW/POSSIBLE finding becomes a note whichever reviewer raised it. Security/billing keyword content still files as before.
+- **Validate reads your real `forge.yaml` in worktrees.** `forge.yaml` is usually gitignored, so it never existed in the per-issue worktree, and every `verification.commands` entry, `learned.test_commands` entry and the SOPS chain check were silently skipped. Validate now falls back to the main checkout's `forge.yaml`.
+- **The quality gate parses spec bash.** New step 2G.10 runs `scripts/check-spec-bash.sh`, which applies `bash -n` (plus advisory `shellcheck -S error`) to every changed fenced bash block in `commands/**/*.md`. Pre-existing blocks are never checked. Mark an intentional fragment with `<!-- allowlist:check-spec-bash -->` on the line before its fence.
+
+Action: expect verification commands that you configured in `forge.yaml` to start running in `/work-on` builds. If a configured command (for example a SOPS chain with `deploy.secrets_backend: sops`) was failing unnoticed, builds will now report it.
+
 ## Review-finding cascade is now bounded by code, not prose
 
 An audit of one `/orchestrate` batch found 93 `review-finding` issues filed for 46 merges, a ratio of 2.02. The §6B.5 note-disposition step was supposed to stop LOW/POSSIBLE findings from becoming issues. It was bypassed in two ways: every finding from the always-on General Security & Quality reviewer was exempt by origin, and reviewers often skipped the step entirely.

@@ -277,6 +277,7 @@ the gate rather than leaving the workflow blocked.
 - **2R (Registry checks)**: ALWAYS run — executes all promoted checks from `scripts/check-registry/manifest.json` <!-- Added: forge#1331 -->
 - **2R.5 (Adaptive gate.d checks)**: ALWAYS run when `adaptive_scripts.enabled` — executes `.forgedock/scripts/gate.d/*.sh`; each script is repo-specific and was promoted from a recurring finding pattern <!-- Added: forge#1739 -->
 - **2G.8 (Wire-through proof)**: Run if `WIRE_THROUGH` in DOMAINS — demands each newly added conditional path be demonstrably reachable <!-- Added: forge#1731 -->
+- **2G.10 (Spec bash syntax)**: Run if `FORGE_GRAPH` in DOMAINS and any `commands/**/*.md` changed — `bash -n` on changed ```bash blocks in specs (HIGH); shellcheck advisory
 - **2G.9 (Danger-zone recurrence)**: Run if `FORGE_GRAPH` in DOMAINS — cross-references injected danger-zone rule cards from FORGE:CONTEXT against the diff; violations tagged `known-pattern-recurrence` (HIGH) <!-- Added: forge#1744 -->
 - **2U (Coverage-reduction check)**: ALWAYS run (`COVERAGE_REDUCTION` in DOMAINS) — flags diffs that delete test files, remove test cases, add skip markers, or remove/disable workflow test steps <!-- Added: forge#3257 -->
 - **2S (Test failure classification)**: Run if any Step 2 check invoked a test suite and it failed — classifies the failure as PRE_BROKEN, FLAKY, or REAL using `scripts/flaky-quarantine.sh` <!-- Added: forge#1336 -->
@@ -717,6 +718,34 @@ fi
 - Ensure the conditional qualifies as a trivial re-guard (see criterion 3 above)
 
 Do NOT suppress the finding by making the check less strict or adding fake no-op tests. The intent is a real proof that the path is reachable. <!-- Added: forge#1731 -->
+
+### 2G.10: Spec bash syntax check (FORGE_GRAPH domain)
+
+**Triggered when**: changed files include `commands/**/*.md`. Skips silently in any project without `scripts/check-spec-bash.sh`.
+
+**Why this matters**: in ForgeDock the pipeline code is bash inside Markdown specs. The executable-file checks above exclude `.md` files, and acceptance checks are mostly greps, so spec bash used to merge without ever being parsed. Reviewers were then the first to run it, which drove most review findings (2026-10-08 cascade audit). This check runs `bash -n` on every ```bash block that contains a changed line, after neutralising `{PLACEHOLDER}` notation. Blocks with pseudo tool calls (`Skill(`/`Agent(`/`Task(`) and blocks preceded by `<!-- allowlist:check-spec-bash -->` are skipped. Pre-existing blocks are never checked, so the baseline cannot block a change. `shellcheck -S error` results are advisory only.
+
+```bash
+SPEC_BASH_CHECKER="$FORGEDOCK_SCRIPTS/check-spec-bash.sh"
+[ -f "$SPEC_BASH_CHECKER" ] || SPEC_BASH_CHECKER="{WORKTREE_PATH}/scripts/check-spec-bash.sh"
+SPEC_MD_FILES=$(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '^commands/.*\.md$' || true)
+if [ -f "$SPEC_BASH_CHECKER" ] && [ -n "$SPEC_MD_FILES" ]; then
+    PR_BASE="${PR_BASE:-staging}"
+    SPEC_BASH_BASE=$(git -C "{WORKTREE_PATH}" merge-base "origin/${PR_BASE}" HEAD 2>/dev/null || true)
+    if [ -z "$SPEC_BASH_BASE" ]; then
+        echo "FORGE_GRAPH | HIGH | spec-bash | cannot resolve merge-base with origin/${PR_BASE} — spec bash not checked (fail closed)"
+    else
+        # shellcheck disable=SC2086 # SPEC_MD_FILES is a newline list of repo-relative paths without spaces
+        SPEC_BASH_REPORT=$(cd "{WORKTREE_PATH}" && bash "$SPEC_BASH_CHECKER" --base "$SPEC_BASH_BASE" --shellcheck $SPEC_MD_FILES 2>&1)
+        echo "$SPEC_BASH_REPORT"
+        echo "$SPEC_BASH_REPORT" | grep -E '^FAIL ' | while IFS= read -r hit; do
+            echo "FORGE_GRAPH | HIGH | spec-bash | ${hit#FAIL }"
+        done
+    fi
+fi
+```
+
+Report each `FAIL` line as **HIGH**: the changed block does not parse, so any agent that runs it hits a syntax error. Fix the bash. If the block is an intentional fragment (for example an `if` opened in one block and closed in the next), put `<!-- allowlist:check-spec-bash -->` on the line before the fence. `WARN` (shellcheck) lines are advisory and go in the report without blocking.
 
 ### 2G.9: Danger-zone recurrence check (FORGE_GRAPH domain) <!-- Added: forge#1744 -->
 

@@ -2837,10 +2837,20 @@ When `CASCADE_MAX_AMPLIFICATION` is not `off`, and the current ratio is greater 
 **Deterministic breaker check (MANDATORY on every dispatch path — engine CLI, Agent-spawn fallback, or a hand-driven orchestrator):** the in-spec bookkeeping above only runs when the Step 4B/4C bash runs. A batch driven through the Agent-spawn fallback never evaluated it and reached about 2 findings per merge (2026-10-08 audit). Before dispatching ANY `review-finding` issue at `priority:P3` or below, and after every completed merge, run `scripts/amplification-breaker.sh` against GitHub state. Its exit code is authoritative, and it overrides an in-memory `AMPLIFICATION_BREAKER_TRIPPED=false`:
 
 ```bash
+# Same resolver as review-pr §6B.5: plugin root, FORGE_ROOT, FORGEDOCK_HOME, newest pinned plugin cache
+# (CLAUDE_CONFIG_DIR, then ~/.claude), then the repo's own scripts/.
 AMP_SCRIPT=""
-for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}"; do
-  case "$_c" in /*) [ -z "$AMP_SCRIPT" ] && [ -f "$_c/scripts/amplification-breaker.sh" ] && AMP_SCRIPT="$_c/scripts/amplification-breaker.sh" ;; esac
+_cands="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] || continue
+  _cands="$_cands
+$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$0}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
 done
+_cands="$_cands
+$PWD"
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$AMP_SCRIPT" ] && [ -f "$_c/scripts/amplification-breaker.sh" ] && AMP_SCRIPT="$_c/scripts/amplification-breaker.sh" ;; esac
+done <<< "$_cands"
 if [ "$AMPLIFICATION_BREAKER" != "off" ]; then
   if [ -n "$AMP_SCRIPT" ]; then
     AMP_LINE=$(bash "$AMP_SCRIPT" --since "$BATCH_T0" -R {GH_REPO}); AMP_RC=$?
