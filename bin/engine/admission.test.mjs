@@ -16,6 +16,7 @@ import {
   evaluateAmplificationBreaker,
   batchExclusionReason,
   planP3BatchGroups,
+  summarizeP3BatchPlan,
   canDeduplicateAutomatedAlert,
 } from "./admission.mjs";
 
@@ -514,5 +515,29 @@ describe("planP3BatchGroups — concern-level P3 batching", () => {
     assert.equal(batchExclusionReason({ labels: ["priority:P2"], affectedFile: "infra/migrations/0333_credit_balance.sql" }), "domain");
     assert.equal(batchExclusionReason({ labels: ["priority:P2"], affectedFile: "services/api/app/billing/charge.py" }), "domain");
     assert.equal(batchExclusionReason({ labels: ["priority:P2"], affectedFile: ".env.example" }), "high-blast-radius");
+  });
+});
+
+describe("summarizeP3BatchPlan", () => {
+  it("counts clusters, absorbed, extensions and ungrouped from a real plan", () => {
+    const f = (number, affectedFile) => ({ number, affectedFile, title: "t", body: "", labels: ["priority:P3"] });
+    const plan = planP3BatchGroups(
+      [f(1, "scripts/a.sh"), f(2, "scripts/a.sh"), f(3, "scripts/b.sh"), f(4, "docs/x.md")],
+      undefined,
+      { openBatches: [{ number: 99, affectedFile: "scripts/b.sh", members: [], memberCount: 1 }] },
+    );
+    const summary = summarizeP3BatchPlan(plan);
+    assert.equal(summary.clusters, plan.groups.length);
+    assert.equal(summary.absorbed, plan.groups.reduce((n, g) => n + g.members.length, 0));
+    assert.equal(summary.extended, 1);
+    assert.equal(summary.extensionMembers, 1);
+    assert.equal(summary.ungrouped, plan.ungrouped.length);
+  });
+
+  it("tolerates empty and partial plans", () => {
+    const zero = { clusters: 0, absorbed: 0, extended: 0, extensionMembers: 0, ungrouped: 0 };
+    assert.deepEqual(summarizeP3BatchPlan({}), zero);
+    assert.deepEqual(summarizeP3BatchPlan(undefined), zero);
+    assert.deepEqual(summarizeP3BatchPlan({ ungrouped: [5, 6] }), { ...zero, ungrouped: 2 });
   });
 });

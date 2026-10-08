@@ -583,3 +583,22 @@ export function planP3BatchGroups(findings, rules = P3_BATCHING_RULES, { openBat
 
   return { groups, extensions, ungrouped: [...remaining.keys()] };
 }
+
+/**
+ * Pure per-run counts over a `planP3BatchGroups()` result, for the batching
+ * summary: clusters formed, members absorbed, open batches extended, members
+ * added to extended batches, and ungrouped members. Tolerates missing keys.
+ */
+export function summarizeP3BatchPlan(plan) {
+  const groups = Array.isArray(plan?.groups) ? plan.groups : [];
+  const extensions = Array.isArray(plan?.extensions) ? plan.extensions : [];
+  const ungrouped = Array.isArray(plan?.ungrouped) ? plan.ungrouped : [];
+  const count = (items) => items.reduce((sum, item) => sum + (Array.isArray(item?.members) ? item.members.length : 0), 0);
+  return {
+    clusters: groups.length,
+    absorbed: count(groups),
+    extended: extensions.length,
+    extensionMembers: count(extensions),
+    ungrouped: ungrouped.length,
+  };
+}
