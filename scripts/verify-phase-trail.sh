@@ -368,9 +368,9 @@ evaluate_override() {
       | select($bt == "" or .created_at > $bt)
       | (.body | split("\n") | map(sub("\r$"; ""))) as $ln
       | { login: .user.login, at: .created_at,
-          head: ([$ln[] | capture("^\\*\\*Head\\*\\*: *(?<v>[0-9A-Fa-f]{40,64}) *$")?.v] | .[0] // "-"),
-          missing: ([$ln[] | capture("^\\*\\*Missing\\*\\*: *(?<v>.+)$")?.v] | .[0] // "-"),
-          reason: ([$ln[] | capture("^\\*\\*Reason\\*\\*: *(?<v>.*)$")?.v] | .[0] // "")
+          head: ([$ln[] | capture("^\\*\\*Head\\*\\*: *(?<v>[0-9A-Fa-f]{40,64}) *$")? | .v] | .[0] // "-"),
+          missing: ([$ln[] | capture("^\\*\\*Missing\\*\\*: *(?<v>.+)$")? | .v] | .[0] // "-"),
+          reason: ([$ln[] | capture("^\\*\\*Reason\\*\\*: *(?<v>.*)$")? | .v] | .[0] // "")
             | clean | gsub("<!--"; "<!-/-") | gsub("-->"; "-/->") | gsub("`"; "'"'"'") | gsub("@"; "(at)")
             | gsub("\\s+"; " ") | sub("^ "; "") | sub(" $"; "") | .[0:200] } ]
     | sort_by(.at) | reverse | .[]
