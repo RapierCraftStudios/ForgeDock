@@ -24,7 +24,7 @@ argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --base {PR_BAS
 
 **CRITICAL: You MUST execute ALL phases B0–B6.5 in order. Every child (B3 context, B4 architect, B5 implement, B6 validate) is invoked via `Skill(...)` — each is a forked sub-skill with its own isolated context. B3 and B4 are invoked for every complexity band except where the band is TRIVIAL or INVESTIGATION (B2/B2.1/B2.5 are also skipped for INVESTIGATION); the children post their own skip markers, so a skipped child is still visible on the issue. Skipping a child without the band justification degrades build quality and fails the phase-trail check.**
 
-**Synchronous child consumption**: each child `Skill(...)` call (B3-B6) runs to completion in this phase's own turn, and you consume its result in that same turn. Never end or yield your turn to wait for a child, and never wait for a completion notification: notifications for forked children go to the root session, not to this phase, so a turn that yields is never resumed. A child return with no `*_RESULT:` block (running, backgrounded, empty) is not a result — re-read the GitHub markers for that child (`FORGE:CONTEXT`, `FORGE:ARCHITECT`, `FORGE:BUILDER`, `FORGE:VALIDATE`/`FORGE:QUALITY_GATE`) and re-invoke the same child with the same args.
+**Synchronous child consumption**: each child `Skill(...)` call (B3-B6) runs to completion in this phase's own turn, and you consume its result in that same turn. Never end or yield your turn to wait for a child, and never wait for a completion notification: notifications for forked children go to the root session, not to this phase, so a turn that yields is never resumed. A child return with no `*_RESULT:` block (running, backgrounded, empty) is not a result — re-read the GitHub markers for that child (`FORGE:CONTEXT`, `FORGE:ARCHITECT`, `FORGE:BUILDER`, `FORGE:VALIDATE`/`FORGE:QUALITY_GATE`) and apply the **bounded re-invoke rule**: re-invoke the same child with the same args at most 2 times per child on running/backgrounded/empty returns (the counter is per child and is not reset by a re-invoke). Before re-invoking, check state: if the child's marker is present, consume it instead of re-invoking; for implement and validate, also check the worktree (`git status --short` and `git log origin/{PR_BASE}..HEAD` in `{WORKTREE_PATH}`) — uncommitted in-flight edits or a fresh commit mean the original child may still be live, so wait for it by re-reading state rather than launching a second writer on the same worktree, and count that as a re-invoke attempt. After the cap is exhausted, take the Blocked exit (see Result emission and Blocked exit) with `blocker: child-stalled: <child>` (child = context|architect|implement|validate); it is terminal and is not re-invoked by the router.
 
 <!-- FORGE:SPEC_LOADED — work-on/build.md loaded and active. Agent is bound by this spec. -->
 
@@ -474,7 +474,7 @@ If `FUNCTION_NAMES` is empty, omit `--functions`. The child posts its own `FORGE
 - `status: COMPLETE | PARTIAL | SKIPPED` → continue to B4
 - No `CONTEXT_RESULT:` block, timeout or error → log a warning and continue to B4 (context is advisory and non-blocking)
 - Skill not found → Blocked exit, blocker "skill not found: work-on:build:context"
-- Returned running/backgrounded/empty (no `CONTEXT_RESULT:`) → do not end the turn; re-read for a `FORGE:CONTEXT` marker, re-invoke the same child if absent (advisory rules above still apply once it returns)
+- Returned running/backgrounded/empty (no `CONTEXT_RESULT:`) → do not end the turn; re-read for a `FORGE:CONTEXT` marker, re-invoke the same child if absent, per the bounded re-invoke rule (at most 2; check the marker before re-invoking) (advisory rules above still apply once it returns)
 # MUST CONTINUE to Phase B4 — context result is intermediate, NOT terminal.
 
 ---
@@ -494,7 +494,7 @@ The child posts its own `FORGE:ARCHITECT` comment (a "Skipped" marker + `:COMPLE
 - `status: BLOCKED` (conflicting constraints that cannot be resolved) → Blocked exit with the child's `blocker`
 - No `ARCHITECT_RESULT:` block → re-read the issue: if a `FORGE:ARCHITECT:COMPLETE` marker exists continue to B5, otherwise Blocked exit "architect produced no result"
 - Skill not found → Blocked exit, blocker "skill not found: work-on:build:architect"
-- Returned running/backgrounded/empty → do not end the turn to wait; re-read markers and re-invoke the same child (the marker fallback above applies only after a real return)
+- Returned running/backgrounded/empty → do not end the turn to wait; re-read markers and re-invoke the same child per the bounded re-invoke rule (at most 2; the marker fallback above applies only after a real return)
 # MUST CONTINUE to Phase B5 — architect result is intermediate, NOT terminal.
 
 ---
@@ -513,7 +513,7 @@ Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:implement", args="{NUMBER} --repo
 - `status: INVESTIGATION_COMPLETE` → issues were created as deliverables and the original closed; print `BUILD_RESULT: status: INVESTIGATION_COMPLETE` (skip B6/B6.5)
 - `status: BLOCKED` → Blocked exit with the child's `blocker`
 - Skill not found → Blocked exit, blocker "skill not found: work-on:build:implement"
-- Returned running/backgrounded/empty (no `IMPLEMENT_RESULT:`) → do not end the turn to wait; re-read the `FORGE:BUILDER` comment and the worktree state, then re-invoke the same child
+- Returned running/backgrounded/empty (no `IMPLEMENT_RESULT:`) → do not end the turn to wait; re-read the `FORGE:BUILDER` comment and the worktree state; if `FORGE:BUILDER:COMPLETE` is present consume it, and if the worktree shows in-flight edits or a fresh commit treat the child as possibly live; before re-invoking, apply the bounded re-invoke rule (at most 2, then `child-stalled: implement`)
 # MUST CONTINUE to Phase B6 — implement result is intermediate, NOT terminal (validation still required).
 
 ---
@@ -536,7 +536,7 @@ CHANGED_FILES=$(git -C "{WORKTREE_PATH}" diff --name-only "origin/{PR_BASE}...HE
 - `gate_passed: true` → verify the `FORGE:QUALITY_GATE` marker exists on the issue (posted by validate V5; docs-only changes exempt). If absent, re-derive `{CHANGED_FILES}` with the B6 command above and re-invoke validate once with the full B6 `Skill(...)` call, including `--files "{CHANGED_FILES}"` (never omit `--files`; an empty list falls back to the git diff); a missing marker is not a pass. Then continue to Phase B6.5 (acceptance gate)
 - `gate_passed: false` → the subcommand has already posted its comment and added `needs-human`; print `BUILD_RESULT: status: BLOCKED` with the child's `blocker` (run the Blocked exit if no comment was posted)
 - Skill not found → Blocked exit, blocker "skill not found: work-on:build:validate"
-- Returned running/backgrounded/empty (no `VALIDATE_RESULT:`) → do not end the turn to wait; re-read the `FORGE:QUALITY_GATE` marker and re-invoke the same child
+- Returned running/backgrounded/empty (no `VALIDATE_RESULT:`) → do not end the turn to wait; re-read the `FORGE:QUALITY_GATE` marker (consume it if present) and the worktree state before re-invoking, then re-invoke the same child under the bounded re-invoke rule (at most 2, then `child-stalled: validate`); this cap is separate from the single marker-absent re-invoke above
 
 ---
 
