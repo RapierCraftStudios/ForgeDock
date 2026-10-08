@@ -2,6 +2,12 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Override candidate filter hardening (forge#3307)
+
+The break-glass override prefilter now uses `FORGE_TRAIL_TRUSTED_ASSOCIATIONS` instead of a hardcoded `OWNER,MEMBER,COLLABORATOR` list (default behavior is unchanged). An empty list yields no override candidates. The verifier prints `NOTE: N override candidate(s) ignored: author_association not in trusted set` to stderr when candidates are filtered this way, so an approver with concealed org membership (shown as `CONTRIBUTOR`/`NONE`) is diagnosable.
+
+Action: if your override approvers have concealed membership, add `CONTRIBUTOR` to `FORGE_TRAIL_TRUSTED_ASSOCIATIONS`.
+
 ## Phase-trail break-glass override (forge#3152)
 
 A human can now clear a misfiring phase-trail gate with a `FORGE:PHASE_TRAIL_OVERRIDE` comment instead of a revert or manual merge. The override is bound to the head commit and the exact MISSING set, must be newer than the latest `FORGE:BUILDER:COMPLETE`, must be unedited, and must come from a human with repo write/admin permission who is not a pipeline identity. The verifier takes a new `--head-sha` flag, and the accepted override is recorded on the PR by code. Exit 2 (unreadable trail) is never overridable.
