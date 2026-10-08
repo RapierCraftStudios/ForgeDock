@@ -543,6 +543,17 @@ fi
 
 ### 2I: Build Verification (MANDATORY for staging→main AND milestone→staging)
 
+Always set the lane flags here, unconditionally and outside the fragment: Phases 3B, 3B.5, 7A, 8B and 9A read `IS_MILESTONE_TO_STAGING` even when the PR touches no `.ts`/`.js`/`.py` file and the fragment below is skipped (forge#3405 SPEC-1).
+
+```bash
+IS_STAGING_TO_MAIN="false"
+if [ "$HEAD" = "staging" ] && [ "$BASE" = "main" ]; then IS_STAGING_TO_MAIN="true"; fi
+IS_MILESTONE_TO_STAGING="false"
+case "$HEAD" in milestone/*) if [ "$BASE" = "staging" ]; then IS_MILESTONE_TO_STAGING="true"; fi ;; esac
+REQUIRES_FULL_BUILD="false"
+if [ "$IS_STAGING_TO_MAIN" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]; then REQUIRES_FULL_BUILD="true"; fi
+```
+
 Applies whenever the PR changes a `.ts`/`.tsx`/`.js`/`.jsx` or `.py` file (a docs-only or shell/markdown-only PR skips it). Read `$REVIEW_FRAGMENTS_DIR/build-verification.md` (see Conditional Phase Fragments) and run it. **BLOCKING if any check fails.** For staging→main and milestone→staging PRs a full build is required, not just typecheck.
 
 ### 2J: Builder Contract Scope Check (if PR is from /work-on pipeline)
