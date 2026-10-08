@@ -427,6 +427,13 @@ expect_override "non-collaborator decoy flood (newer, all-local-checks-passing) 
 echo '{"permission":"read"}' > "$PERM/rdr1"
 RDEC=(); for i in 1 2 3 4 5 6; do RDEC+=("$(ovc rdr1 User "2026-10-08T05:0$i:00Z" "2026-10-08T05:0$i:00Z" "$HS" "$CUR_MISSING" "same login repeated")"); done
 expect_override "one login repeated many times costs a single cap slot (#3279)" "$(ovf h6 "$(GOODC)" "${RDEC[@]}")"
+# forge#3306: read-level members (pass the association prefilter) must not consume the cap ahead of an older write approver
+RLV=(); for i in 1 2 3 4 5 6 7; do echo '{"permission":"read"}' > "$PERM/rlv$i"; RLV+=("$(ovc "rlv$i" User "2026-10-08T06:0$i:00Z" "2026-10-08T06:0$i:00Z" "$HS" "$CUR_MISSING" "decoy")"); done
+expect_override "7 distinct read-level members newer than a write approver do not starve it (#3306)" "$(ovf h7 "$(GOODC)" "${RLV[@]}")"
+orun "$(ovf h8 "${RLV[@]}")"
+[ $RC -eq 1 ] && ! echo "$OUT" | grep -q OVERRIDDEN && ok "read-level members only: override rejected (#3306)" || bad "read-level only (rc=$RC out=$OUT)"
+ULV=(); for i in 1 2 3 4 5 6 7; do ULV+=("$(ovc "ulv$i" User "2026-10-08T07:0$i:00Z" "2026-10-08T07:0$i:00Z" "$HS" "$CUR_MISSING" "unreadable")"); done
+expect_blocked "unreadable lookups stay bounded by the error cap and fail closed (#3306)" "$(ovf h9 "$(GOODC)" "${ULV[@]}")"
 MOCK_SELF_LOGIN=alice orun "$(ovf h3 "$(GOODC)")"
 [ $RC -eq 1 ] && ! echo "$OUT" | grep -q OVERRIDDEN && ok "verifier's own login cannot approve an override (#3269)" || bad "self-login exclusion (rc=$RC out=$OUT)"
 MOCK_SELF_LOGIN=someoneelse orun "$(ovf h3b "$(GOODC)")"
