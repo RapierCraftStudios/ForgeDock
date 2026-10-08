@@ -2253,7 +2253,20 @@ else
     echo "PHASE TRAIL: verify-phase-trail.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install) — refusing to merge" >&2
     TRAIL="PHASE_TRAIL: ERROR (verifier not resolvable)"; TRAIL_RC=127
   else
-    TRAIL=$(bash "$TRAIL_SCRIPT" "$MERGE_ISSUE" -R {GH_REPO} $DOCS_ONLY_FLAG $CODE_DIFF_FLAG); TRAIL_RC=$?
+    # Bind the human break-glass override (forge#3152) to the PR head. An unreadable head omits the flag, so no override is offered (fails closed).
+    PR_HEAD_SHA=$(gh api "repos/{GH_REPO}/pulls/{PR_NUMBER}" --jq .head.sha 2>/dev/null) || PR_HEAD_SHA=""
+    HEAD_SHA_ARGS=()
+    if [[ "$PR_HEAD_SHA" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then HEAD_SHA_ARGS=(--head-sha "$PR_HEAD_SHA"); fi
+    TRAIL=$(bash "$TRAIL_SCRIPT" "$MERGE_ISSUE" -R {GH_REPO} $DOCS_ONLY_FLAG $CODE_DIFF_FLAG ${HEAD_SHA_ARGS[@]+"${HEAD_SHA_ARGS[@]}"}); TRAIL_RC=$?
+    if [ "$TRAIL_RC" -eq 0 ]; then
+      # An `OVERRIDE:` line means the verifier accepted a human override. Record it on the PR from the verifier's output (never agent prose).
+      OVR=$(printf '%s\n' "$TRAIL" | sed -n 's/^OVERRIDE: //p' | sed -n '1p')
+      OVERRIDE_BOUND_HEAD=""
+      if [ -n "$OVR" ]; then
+        OVERRIDE_BOUND_HEAD="$PR_HEAD_SHA"   # forge#3273: the merge below must land exactly this commit
+        gh pr comment {PR_NUMBER} -R {GH_REPO} --body "$(printf '<!-- FORGE:PHASE_TRAIL_OVERRIDE_APPLIED -->\nThe phase-trail gate was waived by a human break-glass override.\n\n%s\n%s\n%s\n' '```' "$OVR" '```')" # <!-- allowlist:check-command-side-effects -->
+      fi
+    fi
   fi
   if [ "$TRAIL_RC" -ge 2 ]; then
     # rc 2 (trail unreadable) / 127 (verifier not resolvable) is an infrastructure failure, NOT missing phases:
@@ -2412,6 +2425,12 @@ else
           CI_GATE_RC=4; CI_GATE_OUT="STALE_REVIEW: PR head ${GATED_HEAD:0:7} is not the reviewed commit ${REVIEWED_SHORT} and the delta is not docs-only"
         fi
       fi
+    fi
+    # WIRE:PROVEN — spec prose; OVERRIDE_BOUND_HEAD is set in the verifier block above and consumed here (reviewed by trace)
+    # forge#3273: an accepted break-glass override is bound to one exact head. If the commit being merged
+    # differs (a push after the verifier ran, even a docs-only one), the override does not cover it.
+    if [ "$CI_GATE_RC" -eq 0 ] && [ -n "${OVERRIDE_BOUND_HEAD:-}" ] && [ "$GATED_HEAD" != "$OVERRIDE_BOUND_HEAD" ]; then
+      CI_GATE_RC=4; CI_GATE_OUT="STALE_REVIEW: break-glass override was bound to ${OVERRIDE_BOUND_HEAD:0:7} but the gated head is ${GATED_HEAD:0:7}"
     fi
     if [ "$CI_GATE_RC" -eq 4 ]; then
       # Not a human problem: the caller re-runs /review-pr on the new head (work-on/review.md R4).

@@ -329,19 +329,29 @@ CODE_DIFF_FLAG="--code-diff"
 if [ -n "$DOCS_ONLY_FLAG" ]; then CODE_DIFF_FLAG=""; fi
 # Bind the QUALITY_GATE PASS to the built tree (forge#3149). An unresolved tree is passed as empty -> the verifier exits 2 (fail closed).
 HEAD_TREE=$(git -C {WORKTREE_PATH} rev-parse 'HEAD^{tree}' 2>/dev/null)
+# Bind the human break-glass override (forge#3152) to the exact commit being gated. Empty -> the verifier exits 2 (fail closed).
+HEAD_SHA=$(git -C {WORKTREE_PATH} rev-parse HEAD 2>/dev/null)
 if [ -z "$FORGE_ROOT" ] || [ ! -f "$TRAIL_SCRIPT" ]; then
   # Fail closed: never skip the gate when the verifier cannot be resolved (plugin installs set no FORGE_HOME).
   echo "PHASE TRAIL: verify-phase-trail.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install)" >&2
   TRAIL_RC=127
 else
-  TRAIL=$(bash "$TRAIL_SCRIPT" {NUMBER} -R {GH_REPO} $DOCS_ONLY_FLAG $CODE_DIFF_FLAG --head-tree "$HEAD_TREE"); TRAIL_RC=$?
+  TRAIL=$(bash "$TRAIL_SCRIPT" {NUMBER} -R {GH_REPO} $DOCS_ONLY_FLAG $CODE_DIFF_FLAG --head-tree "$HEAD_TREE" --head-sha "$HEAD_SHA"); TRAIL_RC=$?
   echo "$TRAIL"
+fi
+# Break-glass (forge#3152): exit 0 with an `OVERRIDE:` line means a human override was accepted by the verifier's own checks
+# (human identity, write/admin permission, unedited, bound to this head + MISSING set). Record it from the verifier's output, never from agent prose.
+if [ "$TRAIL_RC" -eq 0 ]; then
+  OVR=$(printf '%s\n' "$TRAIL" | sed -n 's/^OVERRIDE: //p' | sed -n '1p')
+  if [ -n "$OVR" ]; then
+    gh issue comment {NUMBER} {GH_FLAG} --body "$(printf '<!-- FORGE:PHASE_TRAIL_OVERRIDE_APPLIED -->\nThe phase-trail gate was waived by a human break-glass override. No PR exists yet; /review-pr records it on the PR at merge time.\n\n%s\n%s\n%s\n' '```' "$OVR" '```')" # <!-- allowlist:check-command-side-effects -->
+  fi
 fi
 # Hard guard (same as review-pr.md Phase 8): an unreadable/unresolvable trail never falls through to PR creation.
 if [ "$TRAIL_RC" -ge 2 ]; then printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number:\n  pr_url:\n  merged_to:\n  blocker: phase trail unreadable (rc=%s)\n' "$TRAIL_RC"; exit 1; fi
 ```
 
-- `TRAIL_RC=0` → continue to Phase R2.
+- `TRAIL_RC=0` → continue to Phase R2. If the output carried an `OVERRIDE:` line, the block above has already recorded `<!-- FORGE:PHASE_TRAIL_OVERRIDE_APPLIED -->` on the issue; do not post or edit it by hand. An override is a human comment (`<!-- FORGE:PHASE_TRAIL_OVERRIDE -->` with `**Head**`, `**Missing**`, `**Reason**`) that the pipeline can never post for itself; see `scripts/verify-phase-trail.sh -h`. A new commit invalidates it.
 - `TRAIL_RC=1` → **do not create the PR.** For each `MISSING: <marker> -> <action>` line, run that phase now via its `Skill(...)` (the action text names it), then re-run this preflight (this skill is the SINGLE owner of the phase-trail re-dispatch; the router never re-dispatches). Do NOT hand-post the missing marker and do NOT escalate to a human: the refusal routes back to the missing phase. If the preflight still fails after one re-dispatch round, post a `<!-- FORGE:PHASE_TRAIL_FAILED -->` comment listing the still-missing markers, add `needs-human`, print `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail incomplete after re-dispatch". Do NOT close the issue.
 - `TRAIL_RC>=2` (2 = trail unreadable; 127 = script not executable) → the trail could not be read; fail closed (the block above is printed) with `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail unreadable".
 
