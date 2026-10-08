@@ -75,7 +75,7 @@ A sub-agent that receives no resolved value applies the same rule itself.
 | 4 | Review (push, PR, review, merge) | `work-on:review` | `FORGE:BUILDER:COMPLETE` present and PR not merged |
 | 5 | Close & trajectory | `work-on:close` | PR merged, or a PR-less terminal outcome (investigation deliverables, decomposed, invalid) |
 
-**Terminal states** (only these allow stopping): `workflow:merged` with the issue closed; `workflow:invalid`; `workflow:decomposed` (sub-issues own the work); `needs-human`; `workflow:awaiting-merge` (held for a human merge decision on the deploy gate); a `CLOSE_RESULT` with `status: COMPLETE | ALREADY_DONE`. Anything else → run the next phase immediately.
+**Terminal states** (only these allow stopping): `workflow:merged` with the issue closed; `workflow:invalid`; `workflow:decomposed` (sub-issues own the work); `needs-human` (including "re-review required, no dispatch": the fix is pushed but could not be re-reviewed, forge#3391); `workflow:awaiting-merge` (held for a human merge decision on the deploy gate); a `CLOSE_RESULT` with `status: COMPLETE | ALREADY_DONE`. Anything else → run the next phase immediately.
 
 ---
 
@@ -685,7 +685,7 @@ The review phase owns: ancestry and empty-branch guards, push, PR creation, `wor
 |---|---|
 | `COMPLETE` (PR merged) | Record `PR_NUMBER` → Phase 5 with `--terminal-state merged` |
 | `ALREADY_MERGED` | Same as COMPLETE |
-| `BLOCKED` | Terminal: the phase already added `needs-human` (or `workflow:awaiting-merge` for a deploy-gate hold) with the blocker. Do NOT merge, re-run phases, or add labels here. STOP. |
+| `BLOCKED` | Terminal: the phase already added `needs-human` (or `workflow:awaiting-merge` for a deploy-gate hold) with the blocker. Do NOT merge or re-run phases. STOP. **Exception (forge#3391)**: blocker "re-review required: no dispatch tool" — `work-on/review.md` § "No-dispatch re-review fallback" guarantees `needs-human`; if the issue nonetheless lacks it, run the Phase 0A.1 `REMEDIATE_RESULT: REREVIEW_REQUIRED` branch once from this session (it has dispatch), and if that cannot run add `needs-human` with the blocker. Never stop at `workflow:in-review`. |
 
 ---
 

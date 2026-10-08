@@ -2297,27 +2297,44 @@ Do not ask the user questions — you are running autonomously in the background
    fi
    ```
 
-   **Re-review handoff (forge#3240)**: a remediation worker can finish with `REMEDIATE_RESULT: status: REREVIEW_REQUIRED` — the fix is pushed and CI is green, but the forked remediation had no sub-agent dispatch tool, so `review-pr` (which refuses to review inline) never ran. The issue is then at `workflow:in-review` WITHOUT `needs-human`, so the trigger above does not fire and the `ALREADY_REMEDIATED` guard (which counts any `FORGE:REMEDIATION`) is irrelevant. This is not a human gate. On the next completion-monitoring cycle, for the issue that just completed, detect it from the paper trail and run the re-review from THIS session (which has dispatch), exactly once:
+   **Re-review handoff (forge#3240, forge#3391)**: a remediation worker can finish with `REMEDIATE_RESULT: status: REREVIEW_REQUIRED` — the fix is pushed and CI is green, but the forked remediation had no sub-agent dispatch tool, so `review-pr` (which refuses to review inline) never ran. The issue is then at `workflow:in-review` WITHOUT `needs-human`, so the trigger above does not fire and the `ALREADY_REMEDIATED` guard (which counts any `FORGE:REMEDIATION`) is irrelevant. This is not a human gate, but it must never be left unadvanced. Run `rereview_handoff` for the issue that just completed AND from the Step 4B.5 stall loop for any non-terminal `workflow:in-review` issue (same-shell rule: declare the function in the same Bash block as the call; it uses `resolve_orch_login` from above). The trail it acts on is the latest TRUSTED `FORGE:REMEDIATION:COMPLETE` comment containing `REREVIEW-REQUIRED` with no later `FORGE:REVIEW` verdict and no trusted `FORGE:REREVIEW_DISPATCHED` bound to the current head SHA. Trust reuses the hardened rule above (OWNER, the orchestrator login, or admin/maintain/write on `collaborators/<login>/permission`; a failed lookup fails closed) — no association-only check. The terminal rule is the shared one in `work-on/review.md` § "No-dispatch re-review fallback": dispatch once from this session, else `needs-human`.
 
    ```bash
-   PRED="$NUM"
-   REREVIEW_PR=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${PRED}\" in:body" \
-     --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
-   if [ -n "$REREVIEW_PR" ]; then
-     NEEDS_REREVIEW=$(gh api repos/{GH_REPO}/issues/${REREVIEW_PR}/comments --paginate \
-       --jq '[.[] | select((.body | contains("FORGE:REMEDIATION:COMPLETE")) and (.body | contains("REREVIEW-REQUIRED")))] | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
-     REREVIEW_DONE=$(gh api repos/{GH_REPO}/issues/${REREVIEW_PR}/comments --paginate \
-       --jq '[.[] | select(.body | contains("FORGE:REREVIEW_DISPATCHED"))] | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
-     if [ "$NEEDS_REREVIEW" -ge 1 ] && [ "$REREVIEW_DONE" -eq 0 ] && [ "${DRY_RUN:-false}" != "true" ]; then
-       gh pr comment "$REREVIEW_PR" -R {GH_REPO} --body "<!-- FORGE:REREVIEW_DISPATCHED -->
-   Re-review dispatched by the orchestrator: remediation had no sub-agent dispatch tool."
-       # then, from this session:
-       # Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="${REREVIEW_PR} --auto-merge --issue ${PRED} --base {BASE} --gh-flag -R {GH_REPO}")
+   rereview_handoff() {
+     local PRED="$1" PR HEAD ORCH ROWS L A P LATEST_REM LATEST_REV DISPATCHED
+     PR=$(gh pr list -R {GH_REPO} --state open --json number,body,headRefName \
+       --jq "[.[] | select((.body // \"\") | test(\"(?i)(closes|fixes|resolves) #${PRED}([^0-9]|$)\"))] | if length==1 then .[0].number else empty end" 2>/dev/null || echo "")
+     # No PR (or ambiguous match): nothing to re-review; surface it instead of a silent no-op.
+     if [ -z "$PR" ]; then
+       if [ "${DRY_RUN:-false}" != "true" ]; then
+         gh issue edit "$PRED" -R {GH_REPO} --add-label "needs-human" --remove-label "workflow:in-review" >/dev/null 2>&1 # allowlist:check-command-side-effects
+         gh issue comment "$PRED" -R {GH_REPO} --body "Re-review handoff: no single open PR matched #${PRED}; escalated to needs-human." >/dev/null 2>&1 # allowlist:check-command-side-effects
+       fi
+       return 0
      fi
-   fi
+     HEAD=$(gh pr view "$PR" -R {GH_REPO} --json headRefOid --jq .headRefOid 2>/dev/null || echo "")
+     ORCH=$(resolve_orch_login)
+     ROWS=$(gh api repos/{GH_REPO}/issues/${PR}/comments --paginate --jq '.[] | "\(.id) \(.user.login // "") \(.author_association // "") \((.body // "") | if startswith("<!-- FORGE:REMEDIATION:COMPLETE") and contains("REREVIEW-REQUIRED") then "REM" elif startswith("<!-- FORGE:REVIEW") then "REV" elif startswith("<!-- FORGE:REREVIEW_DISPATCHED") then "DSP:" + (try (capture("head=(?<h>[0-9a-f]+)").h) catch "") else "-" end)"' 2>/dev/null) || return 0
+     LATEST_REM=0; LATEST_REV=0; DISPATCHED=0
+     while read -r ID L A KIND; do
+       [ "$KIND" = "-" ] && continue
+       if [ "$A" != "OWNER" ] && ! { [ -n "$ORCH" ] && [ "$(printf '%s' "$L" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$ORCH" | tr '[:upper:]' '[:lower:]')" ]; }; then
+         P=$(gh api "repos/{GH_REPO}/collaborators/${L}/permission" --jq .permission 2>/dev/null || echo none)
+         case "$P" in admin|maintain|write) ;; *) continue ;; esac
+       fi
+       case "$KIND" in
+         REM) [ "$ID" -gt "$LATEST_REM" ] && LATEST_REM=$ID ;;
+         REV) [ "$ID" -gt "$LATEST_REV" ] && LATEST_REV=$ID ;;
+         DSP:*) [ -n "$HEAD" ] && [ "${KIND#DSP:}" = "$HEAD" ] && DISPATCHED=1 ;;
+       esac
+     done <<< "$ROWS"
+     [ "$LATEST_REM" -gt 0 ] && [ "$LATEST_REV" -lt "$LATEST_REM" ] && [ "$DISPATCHED" -eq 0 ] || return 0
+     [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] would re-review PR #${PR} for #${PRED}"; return 0; }
+     echo "REREVIEW_PR=$PR REREVIEW_HEAD=$HEAD PRED=$PRED"   # the dispatch step below runs when this prints
+   }
    ```
 
-   The `FORGE:REREVIEW_DISPATCHED` marker bounds this to a single re-review per PR (no loop). On `REVIEW_RESULT: status: COMPLETE` (merged), drive `work-on:close` and let item 6.6 wake dependents as normal; on any other result, review-pr's own verdict/labels (CHANGES REQUESTED, `needs-human` for genuine blockers) apply and the issue is `GATED` or failed per the existing rules. Never review inline.
+   **Dispatch step (executable, not a comment)** — when `rereview_handoff` prints `REREVIEW_PR=...`, run, from THIS session (which has dispatch): `Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="${REREVIEW_PR} --auto-merge --issue ${PRED} --base ${ISSUE_PR_BASE[$PRED]:-{PR_BASE}} --gh-flag -R {GH_REPO}")` — `{PR_BASE}` is the defined base binding, never `{BASE}`. Only AFTER the dispatch returns, post the marker on the PR so a failed or skipped dispatch is retried on the next cycle: `gh pr comment "$REREVIEW_PR" -R {GH_REPO} --body "<!-- FORGE:REREVIEW_DISPATCHED head=${REREVIEW_HEAD} -->"` followed by the result summary. If the Skill call cannot run (no dispatch tool in this session, or it errors before reviewing), do not post the marker: add `needs-human` and remove `workflow:in-review` on `#${PRED}` with a comment naming the PR and the reason (`gh issue edit ... # allowlist:check-command-side-effects`), so the issue is `GATED`, never silently stranded. On `REVIEW_RESULT: status: COMPLETE` (merged), drive `work-on:close` and let item 6.6 wake dependents as normal; on any other result, review-pr's own verdict/labels (CHANGES REQUESTED, `needs-human` for genuine blockers) apply and the issue is `GATED` or failed per the existing rules. The head-bound marker caps this at one re-review per fix commit (no loop). Never review inline.
 
    This satisfies #1809 Q2 (the orchestrator auto-dispatches remediation against the gated issue itself — the exact gap forge#1812's item 6.5/6.6 left open, since those items only ever track and wake *dependents*, never the gated PR's own remediation) — and closes forge#2243 (the gap that #1812's fix left open for *leaf* issues with no dependents: because this item's `$PRED` binding was never made explicit and self-contained, it was only ever reached while walking a dependent's predecessor list, so a `needs-human` issue that has no dependents never got remediation dispatched and its CHANGES-REQUESTED PR re-reviewed the same unchanged commit forever). The remediation agent's outcome is picked up on the **next** completion-monitoring cycle of this same Step 4B loop: if it lands (`workflow:merged`), item 6.6 below fires normally and wakes any `blocked-on-human-merge` dependents (if any exist — a leaf issue simply has none to wake); if it holds/re-escalates, the issue simply remains `GATED` and item 6.5 continues tracking its dependents (if any) unchanged.
 
@@ -2647,6 +2664,12 @@ for NUM in {active_issue_numbers}; do
   TERMINAL=$(gh issue view $NUM -R {GH_REPO} --json labels \
     --jq '[.labels[].name | select(. == "workflow:merged" or . == "workflow:invalid" or . == "needs-human" or . == "workflow:awaiting-merge")] | length')
   [ "$TERMINAL" -gt 0 ] && continue
+
+  # forge#3391: an in-review issue whose latest trusted trail is FORGE:REMEDIATION:COMPLETE with REREVIEW-REQUIRED
+  # and no later FORGE:REVIEW is not a stall to resume: run rereview_handoff (item 6.4) — re-dispatch review-pr once, else needs-human.
+  if [ "$(gh issue view $NUM -R {GH_REPO} --json labels --jq '[.labels[].name | select(. == "workflow:in-review")] | length')" -gt 0 ]; then
+    rereview_handoff "$NUM"   # prints REREVIEW_PR=... when the item 6.4 dispatch step must run for this issue
+  fi
 
   # Get last activity timestamp — prefer last comment (catches FORGE:HEARTBEAT updates)
   LAST_ACTIVITY=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
