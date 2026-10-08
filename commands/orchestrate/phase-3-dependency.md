@@ -1525,15 +1525,44 @@ for DEP in $BLOCKED_NOW; do
     [ "$GPRED_CLASS" != "DONE" ] && STILL_GATED=true
   done
   if [ "$STILL_GATED" = "false" ]; then
+    # Hardened release sequence — keep in sync with phase-4-execution.md Step 4B item 6.6 (same ordering and fail-closed semantics;
+    # a fix to one copy MUST be applied to the other). <!-- Added: forge#3245 -->
+    [ -n "$GATING_PREDS_RAW" ] || continue
+    if [ "${DRY_RUN:-false}" = "true" ]; then echo "DRY_RUN: would release #${DEP} (remove blocked-on-human-merge, post FORGE:UNBLOCKED, dispatch)"; continue; fi
+    # Idempotency: skip if another path already dispatched DEP.
+    DEP_ALREADY_DISPATCHED=$(gh issue view "$DEP" -R {GH_REPO} --json labels \
+      --jq '[.labels[].name | select(startswith("workflow:"))] | length' 2>/dev/null || echo "0")
+    [ "$DEP_ALREADY_DISPATCHED" -eq 0 ] || continue
+    # Durable marker FIRST (deduped against the last comment so a retried wake does not repeat it): an interrupted release
+    # then leaves durable evidence instead of an unlabelled, undispatched issue.
+    LAST_DEP_COMMENT=$(gh issue view "$DEP" -R {GH_REPO} --json comments --jq '.comments[-1].body // ""' 2>/dev/null || echo "")
+    case "$LAST_DEP_COMMENT" in "<!-- FORGE:UNBLOCKED -->"*) ;; *)
+      gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:UNBLOCKED -->
+All gating predecessor(s) are now resolved — merged, or released by a human after a phase-trail hold (detected on orchestrator wake) — dispatching now." >/dev/null 2>&1 \
+        || { echo "WARNING: #${DEP} UNBLOCKED marker not posted — not releasing; retrying next wake." >&2; continue; } ;;
+    esac
+    # Remove the hold label and verify it is gone. Fail CLOSED: a failed edit OR a failed/empty `view` is "unverified" —
+    # skip dispatch and retry next wake (the view result is captured separately, never piped into grep).
+    gh issue edit "$DEP" -R {GH_REPO} --remove-label "blocked-on-human-merge" >/dev/null 2>&1 \
+      || { echo "WARNING: #${DEP} label removal failed — not dispatching; retrying next wake." >&2; continue; }
+    if ! DEP_LABELS=$(gh issue view "$DEP" -R {GH_REPO} --json labels --jq '.labels[].name' 2>/dev/null) \
+       || printf '%s\n' "$DEP_LABELS" | grep -qx "blocked-on-human-merge"; then
+      echo "WARNING: #${DEP} label removal unverified — not dispatching; retrying next wake." >&2
+      continue
+    fi
+    # Re-check after removal: another path may have labelled DEP workflow:* in the meantime.
+    DEP_ALREADY_DISPATCHED=$(gh issue view "$DEP" -R {GH_REPO} --json labels \
+      --jq '[.labels[].name | select(startswith("workflow:"))] | length' 2>/dev/null || echo "0")
+    [ "$DEP_ALREADY_DISPATCHED" -eq 0 ] || continue
     # forge#3157: record a human release (FORGE:PHASE_TRAIL_RELEASED) of a trail-held merged predecessor (decay of the escalation marker;
-    # release_merged_trail is defined in phase-4-execution.md Step 4B and is a no-op unless the escalation is ACTIVE).
+    # release_merged_trail is defined in phase-4-execution.md Step 4B and is a no-op unless the escalation is ACTIVE). It is a decay
+    # record, not the dispatch gate, so a failure here is warned about but does not block dispatch.
     for GPRED in $GATING_PREDS_RAW; do
-      if declare -F release_merged_trail >/dev/null; then release_merged_trail "$GPRED"
+      if declare -F release_merged_trail >/dev/null; then
+        release_merged_trail "$GPRED" \
+          || echo "WARNING: release_merged_trail declared but failed for #${GPRED} — RELEASED record skipped" >&2
       else echo "WARNING: release_merged_trail not declared — RELEASED record for #${GPRED} skipped; re-declare from phase-4-execution.md Step 4B" >&2; fi
     done
-    gh issue edit "$DEP" -R {GH_REPO} --remove-label "blocked-on-human-merge" 2>/dev/null || true
-    gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:UNBLOCKED -->
-All gating predecessor(s) are now resolved — merged, or released by a human after a phase-trail hold (detected on orchestrator wake) — dispatching now."
     READY_ISSUES+=("$DEP")
   fi
 done
