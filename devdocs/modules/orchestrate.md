@@ -104,3 +104,9 @@ Cite: #3233 / PR #3317.
 PR #3338 touched `orchestrate`. See FORGE:BUILDER comment on issue #3296 for full change list.
 Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
 Cite: #3296 / PR #3338.
+
+## Entry 2026-10-08 — Fix: anchor and trust-filter FORGE:REMEDIATION single-attempt guard marker (#3412)
+
+PR #3422 touched `orchestrate`. See FORGE:BUILDER comment on issue #3412 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3412 / PR #3422.
