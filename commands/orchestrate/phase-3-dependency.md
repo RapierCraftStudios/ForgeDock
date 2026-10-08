@@ -1520,10 +1520,10 @@ for DEP in $BLOCKED_NOW; do
   # Fetch is split from `sort`: in a pipeline, `|| echo ""` binds to sort's status (dead code), so a failed or
   # partially paginated gh api would be read as a (truncated) list and could release DEP. Capture gh's own status.
   GATING_PREDS_RAW=$(gh api --paginate repos/{GH_REPO}/issues/${DEP}/comments \
-    --jq '.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE")) | (.body | capture("Gating predecessor\\*\\*: #(?<p>[0-9]+)").p)' 2>/dev/null) \
+    --jq '.[] | select((.body // "") | contains("FORGE:BLOCKED_ON_HUMAN_MERGE")) | ((.body // "") | capture("Gating predecessor\\*\\*: #(?<p>[0-9]+)").p)' 2>/dev/null) \
     || { echo "WARNING: #${DEP} gating-predecessor lookup failed - keeping blocked; retrying next wake." >&2; continue; }
   GATING_PREDS_RAW=$(printf '%s\n' "$GATING_PREDS_RAW" | sort -u | sed '/^$/d')
-  [ -n "$GATING_PREDS_RAW" ] || continue   # no tracked predecessor found: fail closed, stay blocked
+  [ -n "$GATING_PREDS_RAW" ] || { echo "WARNING: #${DEP} has blocked-on-human-merge but no parseable Gating predecessor line - leaving blocked" >&2; continue; }   # no tracked predecessor found: fail closed, stay blocked
   STILL_GATED=false
   for GPRED in $GATING_PREDS_RAW; do
     GPRED_CLASS=$(classify_predecessor_state "$GPRED")

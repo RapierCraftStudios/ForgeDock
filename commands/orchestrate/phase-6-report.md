@@ -130,7 +130,7 @@ for NUM in {all_batch_issue_numbers}; do
 
   TITLE=$(gh issue view "$NUM" -R {GH_REPO} --json title --jq '.title' 2>/dev/null || echo "")
   GATING_PRED=$(gh api repos/{GH_REPO}/issues/${NUM}/comments \
-    --jq '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE"))] | last | (.body | capture("Gating predecessor\\*\\*: #(?<p>[0-9]+)").p) // ""' 2>/dev/null || echo "")
+    --jq '[.[] | select((.body // "") | contains("FORGE:BLOCKED_ON_HUMAN_MERGE"))] | last | ((.body // "") | capture("Gating predecessor\\*\\*: #(?<p>[0-9]+)").p) // ""' 2>/dev/null || echo "")
   GATING_PR=""
   if [ -n "$GATING_PRED" ]; then
     GATING_PR=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${GATING_PRED}\" in:body" \

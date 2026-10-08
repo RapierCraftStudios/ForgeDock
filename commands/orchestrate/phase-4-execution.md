@@ -2331,8 +2331,8 @@ Do not ask the user questions — you are running autonomously in the background
      --jq '.[].number' 2>/dev/null || echo "")
    for DEP in $WOKEN; do
      GATING_PREDS=$(gh api repos/{GH_REPO}/issues/${DEP}/comments \
-       --jq '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE")) | (.body | capture("Gating predecessor\\*\\*: #(?<p>[0-9]+)").p)] | unique | .[]' 2>/dev/null || echo "")
-     [ -n "$GATING_PREDS" ] || continue
+       --jq '[.[] | select((.body // "") | contains("FORGE:BLOCKED_ON_HUMAN_MERGE")) | ((.body // "") | capture("Gating predecessor\\*\\*: #(?<p>[0-9]+)").p)] | unique | .[]' 2>/dev/null || echo "")
+     [ -n "$GATING_PREDS" ] || { echo "WARNING: #${DEP} has blocked-on-human-merge but no parseable Gating predecessor line - leaving blocked" >&2; continue; }
      STILL_GATED=false
      for GPRED in $GATING_PREDS; do
        [ "$(classify_predecessor_state "$GPRED")" = "DONE" ] || STILL_GATED=true
