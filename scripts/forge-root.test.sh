@@ -170,6 +170,17 @@ expect "codex forge-home pointer resolves" "$T/hx/clone" "$(run "$T/hx")"
 expect "CODEX_HOME override resolves" "$T/hx/clone" "$(run "$T/empty" CODEX_HOME="$T/hx/.codex")"
 printf 'relative/path\n' > "$T/hx/.codex/forge-home"
 expect "relative forge-home pointer rejected" "" "$(run "$T/hx")"
+# install-codex.sh: FORGE_HOME is shell-escaped in env files, and absent env files are not created (forge#3241)
+IC="$T/ic/we ird\$x"; mkdir -p "$IC/commands" "$T/ic-home"
+cp "$ROOT/install-codex.sh" "$IC/install-codex.sh"
+: > "$T/ic-home/.zshenv"
+( cd "$IC" && env -i PATH="$PATH" HOME="$T/ic-home" CODEX_HOME="$T/ic-home/.codex" bash ./install-codex.sh >/dev/null 2>&1 )
+[ ! -e "$T/ic-home/.profile" ] && ok || bad "install-codex.sh created a missing ~/.profile"
+# The installer records its own resolved dir (macOS /var -> /private/var, Git Bash /tmp -> /c/Users/...), so compare against that, not $IC.
+IC_REAL=$( cd "$IC" && env -i PATH="$PATH" bash -c 'cd "$(dirname ./install-codex.sh)" && pwd' )
+got=$(env -i PATH="$PATH" HOME="$T/ic-home" bash -c '. "$HOME/.zshenv"; printf %s "$FORGE_HOME"' 2>&1)
+expect "env-file FORGE_HOME round-trips space and \$" "$IC_REAL" "$got"
+expect "pointer file still written" "$IC_REAL" "$(cat "$T/ic-home/.codex/forge-home" 2>/dev/null)"
 # errexit/pipefail safety: absent readlink target, absent cache dir, no ~/.claude at all
 for opts in "-e" "-eo pipefail" "-euo pipefail"; do
   expect "survives set $opts with nothing installed" "ok:" "$( cd "$T/consumer" && env -i PATH="$PATH" HOME="$T/empty" "$SH" -c "set $opts; $(cat "$T/canon"); printf 'ok:%s' \"\$FORGE_ROOT\"" 2>&1 )"
