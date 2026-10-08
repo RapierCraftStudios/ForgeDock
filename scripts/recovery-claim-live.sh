@@ -59,7 +59,8 @@ COMMENTS=$(gh api --paginate "repos/${REPO}/issues/${ISSUE}/comments" 2>/dev/nul
 
 LIVE=$(echo "$COMMENTS" | jq -r --argjson cutoff "$CUTOFF" --arg exempt "$EXEMPT" '
   def sweepid: ((.body | capture("Sweep: (?<id>[^ \n*]+)")?) // {id: "unknown"}).id;
-  ([.[] | select(.body | contains("FORGE:RECOVERY_CLAIM_RELEASED")) | sweepid]) as $rel
+  # "unknown" is the no-id sentinel, never a matchable id: an unparsable release frees nothing (fail closed).
+  ([.[] | select(.body | contains("FORGE:RECOVERY_CLAIM_RELEASED")) | sweepid] | map(select(. != "unknown"))) as $rel
   | [ .[] | select(.body | contains("<!-- FORGE:RECOVERY_CLAIM -->"))
           | select((.body | contains("FORGE:RECOVERY_CLAIM_RELEASED")) | not)
           | select(((.updated_at // "") | fromdateiso8601? // 9999999999) >= $cutoff)
