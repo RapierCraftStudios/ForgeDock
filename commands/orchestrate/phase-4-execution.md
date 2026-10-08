@@ -2324,6 +2324,28 @@ Do not ask the user questions — you are running autonomously in the background
    **Step 1 — detect (bash; read-only, no dispatch, no marker write).** A marker counts only from a trusted author, using the same predicate as `trail_escalation_state` above (`OWNER`, the orchestrator login from `resolve_orch_login`, or a `MEMBER`/`COLLABORATOR` with admin/maintain/write permission; a failed permission lookup drops the row), and only as the comment's leading marker, never as text quoted inside another comment (forge#3412). The dispatched marker must also embed the current head SHA. A lookup error is `UNREADABLE`, never "no marker":
 
    ```bash
+   # SHARED HELPERS (forge#3411): Step 2's read-back re-uses these verbatim — one predicate, no copy to drift.
+   # Trusted rows only, same predicate as trail_escalation_state (forge#3207): OWNER, the orchestrator login, or
+   # MEMBER/COLLABORATOR with admin/maintain/write permission. A failed permission lookup drops the row (fail closed).
+   # stdin: rows of {body, login, assoc}; stdout: the trusted rows.
+   rereview_trusted_rows() {
+     local ORCH PERMS ROW RA RL RP
+     ORCH=$(resolve_orch_login); PERMS=""
+     while IFS= read -r ROW; do
+       [ -n "$ROW" ] || continue
+       RA=$(printf '%s' "$ROW" | jq -r '.assoc'); RL=$(printf '%s' "$ROW" | jq -r '.login')
+       if [ "$RA" = "OWNER" ] || { [ -n "$ORCH" ] && [ "$(printf '%s' "$RL" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$ORCH" | tr '[:upper:]' '[:lower:]')" ]; }; then
+         printf '%s\n' "$ROW"; continue
+       fi
+       case "$RA" in MEMBER|COLLABORATOR) ;; *) continue ;; esac
+       RP=$(printf '%s\n' "$PERMS" | awk -v l="$RL" '$1==l{print $2; exit}')
+       if [ -z "$RP" ]; then RP=$(gh api "repos/{GH_REPO}/collaborators/${RL}/permission" --jq '.permission' 2>/dev/null || true); [ -n "$RP" ] || RP="none"; PERMS="${PERMS}${RL} ${RP}"$'\n'; fi
+       case "$RP" in admin|maintain|write) printf '%s\n' "$ROW" ;; esac
+     done < <(jq -c '.' 2>/dev/null)
+   }
+   # Leading-marker count of dispatched markers embedding the head SHA (forge#3412); used by Step 1 and Step 2.
+   REREVIEW_DONE_FILTER='[.[] | select((.body | startswith("<!-- FORGE:REREVIEW_DISPATCHED -->")) and (.body | contains($sha)))] | length'
+
    PRED="$NUM"
    REREVIEW_STATE="NONE"; REREVIEW_PR=""; REREVIEW_SHA=""; REREVIEW_BASE=""
    if ! REREVIEW_PR=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${PRED}\" in:body" \
@@ -2336,23 +2358,10 @@ Do not ask the user questions — you are running autonomously in the background
        REREVIEW_STATE="UNREADABLE"
      else
        REREVIEW_SHA="${PR_META%% *}"; REREVIEW_BASE="${PR_META#* }"
-       # Trusted rows only, same predicate as trail_escalation_state (forge#3207): OWNER, the orchestrator login, or
-       # MEMBER/COLLABORATOR with admin/maintain/write permission. A failed permission lookup drops the row (fail closed).
-       ORCH=$(resolve_orch_login); TRUSTED_RAW=""; PERMS=""
-       while IFS= read -r ROW; do
-         [ -n "$ROW" ] || continue
-         RA=$(printf '%s' "$ROW" | jq -r '.assoc'); RL=$(printf '%s' "$ROW" | jq -r '.login')
-         if [ "$RA" = "OWNER" ] || { [ -n "$ORCH" ] && [ "$(printf '%s' "$RL" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$ORCH" | tr '[:upper:]' '[:lower:]')" ]; }; then
-           TRUSTED_RAW="${TRUSTED_RAW}${ROW}"$'\n'; continue
-         fi
-         case "$RA" in MEMBER|COLLABORATOR) ;; *) continue ;; esac
-         RP=$(printf '%s\n' "$PERMS" | awk -v l="$RL" '$1==l{print $2; exit}')
-         if [ -z "$RP" ]; then RP=$(gh api "repos/{GH_REPO}/collaborators/${RL}/permission" --jq '.permission' 2>/dev/null || true); [ -n "$RP" ] || RP="none"; PERMS="${PERMS}${RL} ${RP}"$'\n'; fi
-         case "$RP" in admin|maintain|write) TRUSTED_RAW="${TRUSTED_RAW}${ROW}"$'\n' ;; esac
-       done < <(printf '%s\n' "$RAW" | jq -c '.' 2>/dev/null)
+       TRUSTED_RAW=$(printf '%s\n' "$RAW" | rereview_trusted_rows)
        # Leading-marker match only (forge#3412): remediation trail comments start with <!-- FORGE:REMEDIATION -->.
        NEEDS_REREVIEW=$(printf '%s' "$TRUSTED_RAW" | jq -s '[.[] | select((.body | startswith("<!-- FORGE:REMEDIATION -->")) and (.body | contains("<!-- FORGE:REMEDIATION:COMPLETE -->")) and (.body | contains("REREVIEW-REQUIRED")))] | length' 2>/dev/null) || NEEDS_REREVIEW=""
-       REREVIEW_DONE=$(printf '%s' "$TRUSTED_RAW" | jq -s --arg sha "$REREVIEW_SHA" '[.[] | select((.body | startswith("<!-- FORGE:REREVIEW_DISPATCHED -->")) and (.body | contains($sha)))] | length' 2>/dev/null) || REREVIEW_DONE=""
+       REREVIEW_DONE=$(printf '%s' "$TRUSTED_RAW" | jq -s --arg sha "$REREVIEW_SHA" "$REREVIEW_DONE_FILTER" 2>/dev/null) || REREVIEW_DONE=""
        if [ -z "$NEEDS_REREVIEW" ] || [ -z "$REREVIEW_DONE" ]; then REREVIEW_STATE="UNREADABLE"
        elif [ "$NEEDS_REREVIEW" -ge 1 ] && [ "$REREVIEW_DONE" -eq 0 ] && [ "${DRY_RUN:-false}" != "true" ]; then REREVIEW_STATE="PENDING"
        fi
@@ -2372,15 +2381,29 @@ Do not ask the user questions — you are running autonomously in the background
      Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="${REREVIEW_PR} --auto-merge --issue ${PRED} --base ${REREVIEW_BASE} --gh-flag -R {GH_REPO}")
    ```
 
-   If the call returns no `REVIEW_RESULT` (interrupted or no result), invoke it once more; this retry is the only one (bounded, independent of the Phase 4R `github-unavailable` waits). Then post the marker AFTER the dispatch, so an interrupted session never leaves a marker that blocks a retry:
+   If the call returns no `REVIEW_RESULT` (interrupted or no result), invoke it once more; this retry is the only one (bounded, independent of the Phase 4R `github-unavailable` waits). Then post the marker AFTER the dispatch, so an interrupted session never leaves a marker that blocks a retry, and verify the write (forge#3411): an unverified marker leaves `REREVIEW_DONE=0`, so Step 1 would report `PENDING` and re-dispatch `review-pr --auto-merge` for the same head every cycle. Bash blocks are independent executions: run this block with the **SHARED HELPERS** (`rereview_trusted_rows`, `REREVIEW_DONE_FILTER`) from Step 1 pasted verbatim at its top, and `REREVIEW_PR` / `REREVIEW_SHA` set to the values Step 1 printed. The read-back lists the PR's comments by number (not via an open-PR search, so a PR that `review-pr` already merged still reads back) and applies the same trusted predicate; any API failure or zero matching rows is `UNVERIFIED` (fail closed, never `VERIFIED`):
 
    ```bash
    [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] would post FORGE:REREVIEW_DISPATCHED on PR #${REREVIEW_PR}"; exit 0; }
-   gh pr comment "$REREVIEW_PR" -R {GH_REPO} --body "<!-- FORGE:REREVIEW_DISPATCHED -->
-   Re-review dispatched by the orchestrator at head ${REREVIEW_SHA}: remediation had no sub-agent dispatch tool."
+   post_marker() { gh pr comment "$REREVIEW_PR" -R {GH_REPO} --body "<!-- FORGE:REREVIEW_DISPATCHED -->
+   Re-review dispatched by the orchestrator at head ${REREVIEW_SHA}: remediation had no sub-agent dispatch tool."; }
+   # Retry the post once, and only when the first attempt failed (a duplicate marker is harmless: Step 1 counts >= 1).
+   post_marker || { sleep 2; post_marker || echo "REREVIEW marker post failed twice" >&2; }
+   # Read back: the marker must be visible as a trusted leading marker embedding the head SHA. One re-read after a
+   # short wait absorbs read-after-write lag before declaring the write lost.
+   REREVIEW_MARKER="UNVERIFIED"
+   for _ATTEMPT in 1 2; do
+     if RB_RAW=$(gh api --paginate "repos/{GH_REPO}/issues/${REREVIEW_PR}/comments" \
+           --jq '.[] | {body: (.body // ""), login: (.user.login // ""), assoc: (.author_association // "")}' 2>/dev/null) \
+        && RB_TRUSTED=$(printf '%s\n' "$RB_RAW" | rereview_trusted_rows) \
+        && RB_N=$(printf '%s' "$RB_TRUSTED" | jq -s --arg sha "$REREVIEW_SHA" "$REREVIEW_DONE_FILTER" 2>/dev/null) \
+        && [ -n "$RB_N" ] && [ "$RB_N" -ge 1 ]; then REREVIEW_MARKER="VERIFIED"; break; fi
+     sleep 3
+   done
+   echo "REREVIEW_MARKER=$REREVIEW_MARKER"
    ```
 
-   **Step 3 — outcome.** On `REVIEW_RESULT: status: COMPLETE` (merged), drive `work-on:close` and let item 6.6 wake dependents as normal. If `review-pr` returns another result with its own labelled terminal state (CHANGES REQUESTED, or `needs-human` for genuine blockers), that verdict applies and the issue is `GATED` or failed per the existing rules. If dispatch failed, the skill did not resolve, or the issue is still at `workflow:in-review` with no `needs-human` after the retry, apply the **terminal fallback** defined in `commands/work-on.md` Phase 0A.1 (comment with the reason, add `needs-human` and remove `workflow:in-review` in one edit, verify the write), classify the issue `GATED`, and surface it to the operator in the run summary as `GATED: re-review could not run (#{PRED}, PR #{REREVIEW_PR}): <reason>`. A failed label write is reported as such, not as done. The marker bounds this to one re-review per PR head (no loop). Never review inline.
+   **Step 3 — outcome.** On `REVIEW_RESULT: status: COMPLETE` (merged), drive `work-on:close` and let item 6.6 wake dependents as normal. If `review-pr` returns another result with its own labelled terminal state (CHANGES REQUESTED, or `needs-human` for genuine blockers), that verdict applies and the issue is `GATED` or failed per the existing rules. If dispatch failed, the skill did not resolve, the issue is still at `workflow:in-review` with no `needs-human` after the retry, or Step 2 printed `REREVIEW_MARKER=UNVERIFIED`, apply the **terminal fallback** defined in `commands/work-on.md` Phase 0A.1 (comment with the reason, add `needs-human` and remove `workflow:in-review` in one edit, verify the write), classify the issue `GATED`, and surface it to the operator in the run summary as `GATED: re-review could not run (#{PRED}, PR #{REREVIEW_PR}): <reason>`. For `REREVIEW_MARKER=UNVERIFIED` the reason is `re-review marker could not be recorded` and the report line is `GATED: re-review could not run (#{PRED}, PR #{REREVIEW_PR}): marker write failed`; do not leave the issue `PENDING`, because without a recorded marker the next cycle would re-dispatch `review-pr` for the same head. A failed label write is reported as such, not as done. The marker bounds this to one re-review per PR head (no loop) only once the marker write is verified (`REREVIEW_MARKER=VERIFIED`); an unverified write has no bound, which is why it routes to the terminal fallback. Never review inline.
 
    This satisfies #1809 Q2 (the orchestrator auto-dispatches remediation against the gated issue itself — the exact gap forge#1812's item 6.5/6.6 left open, since those items only ever track and wake *dependents*, never the gated PR's own remediation) — and closes forge#2243 (the gap that #1812's fix left open for *leaf* issues with no dependents: because this item's `$PRED` binding was never made explicit and self-contained, it was only ever reached while walking a dependent's predecessor list, so a `needs-human` issue that has no dependents never got remediation dispatched and its CHANGES-REQUESTED PR re-reviewed the same unchanged commit forever). The remediation agent's outcome is picked up on the **next** completion-monitoring cycle of this same Step 4B loop: if it lands (`workflow:merged`), item 6.6 below fires normally and wakes any `blocked-on-human-merge` dependents (if any exist — a leaf issue simply has none to wake); if it holds/re-escalates, the issue simply remains `GATED` and item 6.5 continues tracking its dependents (if any) unchanged.
 
