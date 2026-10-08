@@ -29,7 +29,7 @@
 #   1. HIGH/CRITICAL, or unparseable severity → ISSUE.
 #   2. Safety exemption is CONTENT-based: the text matches the security/billing
 #      keyword set, or the finding came from a dedicated, signal-selected domain
-#      agent (Auth, Billing, Concurrency, Database). Origin from the always-on
+#      agent (Auth, Billing, Concurrency, Database) and is MEDIUM+ or CONFIRMED. Origin from the always-on
 #      "General Security & Quality" agent alone NO LONGER exempts a finding —
 #      that agent runs on every PR, so origin-based exemption filed nearly every
 #      LOW note it raised (50 of 60 would-be notes in the audited batch).
@@ -93,9 +93,12 @@ KW='security|auth|authz|authn|billing|payment|stripe|charge|invoice|injection|xs
 if printf '%s' "$TEXT" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9\n' ' ' | grep -Eqw "($KW)"; then
   SAFETY="keyword"
 fi
+# A dedicated domain agent rescues a finding only when it is MEDIUM+ or CONFIRMED:
+# a LOW/POSSIBLE finding stays a NOTE whichever reviewer raised it.
 AGENT_LC=$(printf '%s' "$AGENT" | tr '[:upper:]' '[:lower:]')
 case "$AGENT_LC" in
-  auth*|billing*|concurrency*|database*) SAFETY="${SAFETY:-domain-agent}" ;;
+  auth*|billing*|concurrency*|database*)
+    if [ "$SEV" = "MEDIUM" ] || [ "$CONF" = "CONFIRMED" ]; then SAFETY="${SAFETY:-domain-agent}"; fi ;;
 esac
 
 if [ "$LINEAGE" = "review-finding" ]; then

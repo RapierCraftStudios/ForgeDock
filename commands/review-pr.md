@@ -1692,16 +1692,27 @@ If still 0: review is clean — skip to Phase 7.
 Filing a standalone `review-finding` issue for every LOW/POSSIBLE reviewer note makes the cascade amplify (each merged fix PR spawns its own P3 issues, which spawn more). Classify each deduped finding before 6C with the deterministic classifier — do NOT hand-classify when the script resolves:
 
 - **ISSUE always**: `**Severity**: HIGH` or `CRITICAL`, or a missing/unparseable severity.
-- **Safety exemption is content-based**: a LOW or POSSIBLE finding is still filed when its file path / title / body matches the security/billing keyword set (`security|auth|authz|authn|billing|payment|stripe|charge|invoice|injection|xss|csrf|ssrf|idor|secret(s)|credential(s)|permission(s)|sql|token|password|redact`, whole words, `_`/`-`/`/` separate words — so `auth_service` matches but `author`/`tokenizer` do not), or when it came from a dedicated, signal-selected domain agent (Auth, Billing, Concurrency, Database). **Origin from the always-on General Security & Quality agent alone does NOT exempt a finding**: that agent runs on every PR, so origin-based exemption filed nearly every LOW note it raised (the 2026-10-08 cascade audit: 50 of 60 would-be notes in one batch were filed only for that reason).
+- **Safety exemption is content-based**: a LOW or POSSIBLE finding is still filed when its file path / title / body matches the security/billing keyword set (`security|auth|authz|authn|billing|payment|stripe|charge|invoice|injection|xss|csrf|ssrf|idor|secret(s)|credential(s)|permission(s)|sql|token|password|redact`, whole words, `_`/`-`/`/` separate words — so `auth_service` matches but `author`/`tokenizer` do not), or when it came from a dedicated, signal-selected domain agent (Auth, Billing, Concurrency, Database) AND is MEDIUM+ or CONFIRMED — a LOW/POSSIBLE finding stays a NOTE whichever reviewer raised it. **Origin from the always-on General Security & Quality agent alone does NOT exempt a finding**: that agent runs on every PR, so origin-based exemption filed nearly every LOW note it raised (the 2026-10-08 cascade audit: 50 of 60 would-be notes in one batch were filed only for that reason).
 - **Review-finding lineage** (the PR's linked issue `MERGE_ISSUE` carries the `review-finding` label, any priority — this PR is itself a fix for a finding): only MEDIUM findings that are CONFIRMED, or LIKELY and safety-exempt, become issues; LOW and POSSIBLE are always NOTEs. A fix for a finding must not mint a new generation of findings.
 - **Otherwise**: `**Severity**: LOW`, or `**Confidence**: POSSIBLE` below HIGH, is a NOTE unless safety-exempt; everything else (MEDIUM CONFIRMED/LIKELY) is an ISSUE.
 
 ```bash
-# Resolve the classifier: running plugin first, then the resolved ForgeDock root, then the repo copy.
+# Resolve the classifier: running plugin, FORGE_ROOT, FORGEDOCK_HOME, newest pinned forgedock plugin cache
+# under the active config dir (CLAUDE_CONFIG_DIR) then ~/.claude, then the repo's own scripts/ (ForgeDock itself).
+# The plugin-root placeholder is not always substituted in forked review runs, so the cache scan is what makes
+# consumer repos resolve the script instead of falling back to classifier=manual.
 CLASSIFY_SCRIPT=""
-for _cs in '${CLAUDE_PLUGIN_ROOT}/scripts/classify-finding.sh' "${FORGE_ROOT:+$FORGE_ROOT/scripts/classify-finding.sh}" "scripts/classify-finding.sh"; do
-  case "$_cs" in /*|scripts/*) [ -f "$_cs" ] && { CLASSIFY_SCRIPT="$_cs"; break; } ;; esac
+_cands="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] || continue
+  _cands="$_cands
+$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$0}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
 done
+_cands="$_cands
+$PWD"
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$CLASSIFY_SCRIPT" ] && [ -f "$_c/scripts/classify-finding.sh" ] && CLASSIFY_SCRIPT="$_c/scripts/classify-finding.sh" ;; esac
+done <<< "$_cands"
 FINDING_LINEAGE="none"
 if [ -n "${MERGE_ISSUE:-}" ] && gh issue view "$MERGE_ISSUE" -R {GH_REPO} --json labels --jq '.labels[].name' 2>/dev/null | grep -qx 'review-finding'; then
   FINDING_LINEAGE="review-finding"
