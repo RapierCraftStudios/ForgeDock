@@ -75,6 +75,7 @@ A sub-agent that receives no resolved value applies the same rule itself.
 | 2 | Decompose | `work-on:decompose` | `INVESTIGATE_RESULT.decompose: YES` (or resume: investigation says decompose YES and no `FORGE:DECOMPOSED`) |
 | 3 | Build | `work-on:build` | Investigation complete, decompose NO, no `FORGE:BUILDER:COMPLETE` |
 | 4 | Review (push, PR, review, merge) | `work-on:review` | `FORGE:BUILDER:COMPLETE` present and PR not merged |
+| 4R | Remediation handoff | `work-on:remediate` | `REVIEW_RESULT: status: NEXT, next: remediate` (CI gate red or in-PR fix requested) |
 | 5 | Close & trajectory | `work-on:close` | PR merged, or a PR-less terminal outcome (investigation deliverables, decomposed, invalid) |
 
 **Terminal states** (only these allow stopping): `workflow:merged` with the issue closed; `workflow:invalid`; `workflow:decomposed` (sub-issues own the work); `needs-human`; `workflow:awaiting-merge` (held for a human merge decision on the deploy gate); a `CLOSE_RESULT` with `status: COMPLETE | ALREADY_DONE`. Anything else → run the next phase immediately.
@@ -710,7 +711,14 @@ The review phase owns: ancestry and empty-branch guards, push, PR creation, `wor
 
 ### Phase 4R: Remediation handoff from review
 
-The review phase never invokes remediation itself: remediation re-reviews through `/review-pr`, which spawns domain reviewers, so it must run one level below this router (see the Depth Budget). The review phase has already posted the bound marker (`FORGE:CI_REMEDIATION` or `FORGE:INPR_REMEDIATION`), so this runs at most once per PR per kind.
+The review phase never invokes remediation itself: remediation re-reviews through `/review-pr`, which spawns domain reviewers, so it must run one level below this router (see the Depth Budget). The review phase has checked the bound; this router posts the bound marker **immediately before** invoking remediation, so a handoff interrupted before remediation starts (compaction, crash) is retried on resume instead of being counted as used. It runs at most once per PR per kind.
+
+```bash
+# {REMEDIATION_KIND} is the review result's `remediation` value: ci-gate -> CI_REMEDIATION, inpr-fix -> INPR_REMEDIATION.
+BOUND_MARKER="CI_REMEDIATION"; [ "{REMEDIATION_KIND}" = "inpr-fix" ] && BOUND_MARKER="INPR_REMEDIATION"
+gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:${BOUND_MARKER}: pr={PR_NUMBER} -->
+Review handed PR #{PR_NUMBER} to remediation ({REMEDIATION_KIND}); the router is dispatching it once." # allowlist:check-command-side-effects
+```
 
 ```
 Skill(skill="{FORGE_SKILL_PREFIX}work-on:remediate", args="{PR_NUMBER} --issue {NUMBER} --base {PR_BASE} --repo {GH_REPO} --gh-flag {GH_FLAG}")
@@ -720,6 +728,7 @@ Skill(skill="{FORGE_SKILL_PREFIX}work-on:remediate", args="{PR_NUMBER} --issue {
 |---|---|
 | `re_gate_outcome: AUTO-LANDED` | Merged. Remediation's Phase M8 already ran `work-on:close`; if the issue is still open, run Phase 5 with `--terminal-state merged`. Then done. |
 | `status: REREVIEW_REQUIRED` | Fallback only (should not occur at this depth): run the re-review from this router as in 0A.1, then Phase 5 on `REVIEW_RESULT: status: COMPLETE`. |
+| `status: ALREADY_DONE` (single-attempt guard: an earlier remediation already completed on this PR) | Make sure `needs-human` is on the issue (add it, with a comment naming the PR and the remediation kind, if absent). STOP. |
 | any other outcome, `remediation: inpr-fix` | Re-invoke Phase 4 (`work-on:review`) once with the same args. Review finds its `INPR_REMEDIATION` bound used, waives the in-PR gate for the current head, files the remaining findings as issues and re-reviews. |
 | any other outcome, `remediation: ci-gate` | Terminal: remediation left `needs-human` (or `workflow:awaiting-merge`) with its reason. STOP. |
 
