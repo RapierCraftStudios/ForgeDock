@@ -861,6 +861,7 @@ CONTEXT_BODY=$(node packages/protocol/src/cli.js emit CONTEXT)
 Post the following as a GitHub comment on `{NUMBER}`:
 
 ```bash
+# DRY_RUN: when DRY_RUN=true, print this body instead of running the command below.
 gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
 ## Implementation Context for #{NUMBER}
 
@@ -948,13 +949,19 @@ Skip the context gathering (print `CONTEXT_RESULT:` with `status: SKIPPED`) if:
 **Minimal marker on every non-TRIVIAL skip (forge#3123)**: for STANDARD/COMPLEX the phase-trail gate (`scripts/verify-phase-trail.sh`) requires a `FORGE:CONTEXT` marker, so a skip must still post an empty marker comment (idempotent: skip if a `FORGE:CONTEXT` comment already exists), otherwise a re-run can never satisfy the gate:
 
 ```bash
-EXISTING_CONTEXT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
-  --jq '[.[] | select(.body | contains("<!-- FORGE:CONTEXT -->"))] | length' \
-  | awk '{s+=$1} END {print s+0}')
+# Anchored match mirrors scripts/verify-phase-trail.sh (marker must open the comment).
+# A failed lookup sets LOOKUP_FAILED and posts nothing (unknown is not zero): the
+# phase-trail gate then flags the missing marker and a re-run retries.
+LOOKUP_FAILED=0
+EXISTING_JSON=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
+  --jq '[.[] | select((.body // "") | startswith("<!-- FORGE:CONTEXT -->"))] | length') || LOOKUP_FAILED=1
+EXISTING_CONTEXT=$(printf '%s\n' "$EXISTING_JSON" | awk '{s+=$1} END {print s+0}')
 if [ "${DRY_RUN:-false}" = "true" ]; then
   echo "[DRY_RUN] would post minimal FORGE:CONTEXT marker on #{NUMBER}"
+elif [ "$LOOKUP_FAILED" -eq 1 ]; then
+  echo "WARNING: FORGE:CONTEXT lookup failed (LOOKUP_FAILED=1) — not posting a marker; re-run to retry" >&2
 elif [ "$EXISTING_CONTEXT" -eq 0 ]; then
-  gh issue comment "{NUMBER}" -R "{GH_REPO}" --body "<!-- FORGE:CONTEXT -->
+  gh issue comment {NUMBER} -R {GH_REPO} --body "<!-- FORGE:CONTEXT -->
 ## Implementation Context for #{NUMBER}
 
 Context gathering skipped: {REASON — config/docs-only edit | new files, no git history | empty affected-file list}. No institutional memory to surface.
