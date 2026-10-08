@@ -104,6 +104,7 @@ Before running checks, classify the changed files into domains. This avoids runn
 | `*.py` files with new module-level `dict`, `set`, `Counter`, `Lock`, or `defaultdict` assignments | STATE |
 | `*.py` in `services/worker/`, `infra/`, or `browser/` with new assignments to variables containing `MB`, `SIZE`, `MAX`, `LIMIT`, `THRESHOLD`, or `TIMEOUT` | CAPACITY *(scraping pack — opt-in, see 2K)* |
 | `*.yml` in `.github/workflows/` | WORKFLOW |
+| ANY diff (universal — every changed file set) | COVERAGE_REDUCTION *(see 2U)* <!-- Added: forge#3257 --> |
 | `*.py` with new `from app.` import statements added outside `try:` blocks | IMPORT_RESOLUTION |
 | `Dockerfile*` or `entrypoint*.sh` with added/changed `USER`, `su-exec`, `gosu`, or `setuid` | INFRA |
 | `*.py` in `routers/` where the diff removes a line containing an or-gate condition (lines starting with `-` containing `if.*or`) | ROUTER_BUG |
@@ -157,6 +158,9 @@ for f in "${CHANGED_FILES_ARR[@]}"; do
         .github/workflows/*.yml) DOMAINS="$DOMAINS WORKFLOW" ;;
     esac
 done
+
+# COVERAGE_REDUCTION is universal: a deleted test or workflow step can ride along with any file set (see 2U)
+DOMAINS="$DOMAINS COVERAGE_REDUCTION"
 
 # Check for asyncio concurrency patterns in Python files
 grep -lE "asyncio\.shield|asyncio\.wait_for|Task\.cancel" {CHANGED_FILES} 2>/dev/null | grep -qE '\.py$' && DOMAINS="$DOMAINS CONCURRENCY"
@@ -274,6 +278,7 @@ the gate rather than leaving the workflow blocked.
 - **2R.5 (Adaptive gate.d checks)**: ALWAYS run when `adaptive_scripts.enabled` — executes `.forgedock/scripts/gate.d/*.sh`; each script is repo-specific and was promoted from a recurring finding pattern <!-- Added: forge#1739 -->
 - **2G.8 (Wire-through proof)**: Run if `WIRE_THROUGH` in DOMAINS — demands each newly added conditional path be demonstrably reachable <!-- Added: forge#1731 -->
 - **2G.9 (Danger-zone recurrence)**: Run if `FORGE_GRAPH` in DOMAINS — cross-references injected danger-zone rule cards from FORGE:CONTEXT against the diff; violations tagged `known-pattern-recurrence` (HIGH) <!-- Added: forge#1744 -->
+- **2U (Coverage-reduction check)**: ALWAYS run (`COVERAGE_REDUCTION` in DOMAINS) — flags diffs that delete test files, remove test cases, add skip markers, or remove/disable workflow test steps <!-- Added: forge#3257 -->
 - **2S (Test failure classification)**: Run if any Step 2 check invoked a test suite and it failed — classifies the failure as PRE_BROKEN, FLAKY, or REAL using `scripts/flaky-quarantine.sh` <!-- Added: forge#1336 -->
 - **2T (Subscribed pattern card rules)**: ALWAYS run when `pattern_feeds.enabled` is true — injects Tier-B (warning-only) learned rules from subscribed exchange cards that have a `gate.d` check template matching any changed file's stack <!-- Added: forge#1746 -->
 
@@ -1298,6 +1303,44 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 
 **Note**: 2Q-3 (stdlib logging check) fires on ALL changed Python files regardless of path — stdlib logger misuse is not specific to billing paths and is a universal crash class. 2Q-1 and 2Q-2 fire only on billing-domain files.
 
+### 2U: Coverage-reduction check (ALWAYS — a red check must be fixed, not silenced)
+
+<!-- Added: forge#3257 -->
+
+**Bug class**: a change turns a failing check green by shrinking what is checked (deleting a test file, dropping a test case, adding a skip marker, or removing/disabling a workflow test step) instead of fixing the code under test. Coverage silently disappears and nothing downstream notices.
+
+Run against the diff versus the base (`origin/{PR_BASE}` when known, else `HEAD` for staged changes). Use `--find-renames` so a rename is NOT treated as a deletion. Bash must stay portable (no `grep -P`, no GNU-only flags).
+
+```bash
+cd {WORKTREE_PATH}
+BASE_REF="${PR_BASE:+origin/$PR_BASE}"; BASE_REF="${BASE_REF:-HEAD}"
+TEST_PATH_RE='(^|/)(test_[^/]*|[^/]*_test\.[^/]*|[^/]*\.test\.[^/]*|[^/]*\.spec\.[^/]*)$|(^|/)(tests|__tests__)/'
+
+# (a) deleted test files (renames excluded via --find-renames)
+git diff --find-renames --diff-filter=D --name-only "$BASE_REF" 2>/dev/null | grep -E "$TEST_PATH_RE" \
+  && echo "COVERAGE-1: deleted test file(s)"
+
+# (b) removed test cases with no added counterpart, (c) newly added skip markers
+git diff -U0 "$BASE_REF" -- . 2>/dev/null | grep -E '^-[[:space:]]*(it|test|describe)\(|^-[[:space:]]*(async )?def test_' \
+  && echo "COVERAGE-1: removed test case line(s) — confirm each has an added counterpart in the diff"
+git diff -U0 "$BASE_REF" -- . 2>/dev/null | grep -E '^\+.*(\.skip\(|@pytest\.mark\.skip|@pytest\.mark\.xfail|xfail|continue-on-error:[[:space:]]*true|if:[[:space:]]*false)' \
+  && echo "COVERAGE-1: newly added skip/xfail/continue-on-error/if: false marker"
+
+# (d) removed or disabled workflow test steps
+git diff -U0 "$BASE_REF" -- .github/workflows 2>/dev/null | grep -E '^-.*run:.*(test|pytest|jest|vitest|mocha|\.test\.sh|npm t|go test|cargo test)' \
+  && echo "COVERAGE-1: removed workflow test step"
+```
+
+Also treat a test command that is commented out (`+#` of a previously live `run:` test line) as a removal.
+
+**Finding**: emit `COVERAGE-1 | HIGH | {file} | coverage reduction: {removed test | deleted test | disabled workflow test step} — restore it and fix the code under test`. Scan results are candidates, not verdicts: confirm each by reading the diff hunk before reporting.
+
+**Exemption (only one)**: a legitimate deletion is allowed ONLY when the commit message or PR body gives an explicit justification tying the removal to the removal of the tested code (the code the test covered is also deleted in this diff). "Flaky", "failing", "Windows-only", or "to get CI green" are NOT justifications. When exempted, record the justification in the finding as a LOW (advisory, not returned).
+
+**Fix rule**: a COVERAGE-1 finding is fixed by restoring the test or step and fixing the cause — never by suppressing the finding or re-wording the diff. If the cause cannot be fixed in scope, the caller escalates (`needs-human`) naming the failing tests/assertions.
+
+---
+
 ### 2R: Registry checks (ALWAYS — promoted patterns from recurring review findings)
 
 <!-- Added: forge#1331 -->
@@ -1698,6 +1741,7 @@ OR:
 6. SHELL-1 | HIGH | deploy.sh | Hardcoded 'localhost' in DB connection function — use ${POSTGRES_HOST:-localhost} pattern
 7. INFRA-1 | HIGH | Dockerfile | Filesystem write ops found under named volume mount — add chown before privilege drop in entrypoint
 8. ROUTER-1 | HIGH | routers/handler.py | Residual unfixed gate condition pattern found in sibling router file routers/other_handler.py:N — fix may be incomplete across all callers
+9. COVERAGE-1 | HIGH | .github/workflows/ci.yml | coverage reduction: removed workflow test step — restore it and fix the code under test
 ```
 
 **Severity classification:**

@@ -127,6 +127,7 @@ Skill("{FORGE_SKILL_PREFIX}quality-gate", args="{CHANGED_FILES} --worktree {WORK
 - Re-run after EVERY fix pass — never trust that fixes resolved findings without verification
 - Each iteration re-scans ALL changed files — fixes can introduce new issues
 - Only HIGH and MEDIUM findings must be fixed; LOW findings are advisory only
+- `COVERAGE-1 | HIGH` findings (quality-gate 2U coverage reduction) are fixed by restoring the deleted/skipped test or workflow step — never by `--no-verify` or suppression <!-- Added: forge#3257 -->
 - `TEST-QUARANTINE | LOW` findings (pre-broken or flaky tests classified by Step 2R) do **not** require fixing and do **not** count toward gate failure — include them in the V5 commit comment for reviewer visibility
 - If the `quality-gate` skill is not found under either name, STOP and print `VALIDATE_RESULT` with `gate_passed: false`, `blocker: skill not found: quality-gate` — never run the gate inline
 

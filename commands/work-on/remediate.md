@@ -158,6 +158,8 @@ If the worktree/branch checkout fails for any reason (branch deleted, force-push
 
 For each FIXABLE item from Phase M1: read the affected file(s) in `{WORKTREE_PATH}` before editing (never assume current state), apply the fix. Follow the same implementation discipline as `work-on/build/implement.md` I3 (cross-lane import guard, library-callback verification, deliverable-type consistency, no unrequested scope) — this file does not restate those rules, it inherits them.
 
+**Never delete, skip, or weaken a failing check to go green.** Removing, skipping (`skip`, `xfail`, `continue-on-error`, `if: false`, commenting out) or weakening a failing test or CI step is never a valid fix. Fix the cause in the code under test, or classify the item UNFIXABLE, add/re-affirm `needs-human`, and post a comment that names the failing tests and failing assertions (test title plus assertion text from the CI log). The only exception is a deletion justified by removal of the tested code itself (see quality-gate 2U). Enforcement is the quality gate's coverage-reduction check (2U): a `COVERAGE-1` finding is fixed by restoring the test or step, never by suppressing the finding. <!-- Added: forge#3257 -->
+
 **If the block reason was a mergeability conflict** (`CONFLICTING`/`DIRTY`/`BLOCKED`): resolve it by rebasing `{HEAD_BRANCH}` onto `origin/{PR_BASE}` (or merging `{PR_BASE}` in, whichever preserves a clean, reviewable history) — resolve conflicts manually, do not blindly take "ours"/"theirs".
 
 **Quality Gate** (same loop as Phase 3G, max 3 iterations):
