@@ -512,6 +512,9 @@ fi
 # an early return or an interrupt cannot leak the temporary worktree.
 trap '_dossier_cleanup' EXIT
 DEVDOCS_PATH="${DOSSIER_TMP}/${DEVDOCS_REL}"
+# Resolve the temp root once; the same `realpath -m` normalizes both sides of the containment test.
+# Fail closed if realpath -m is unavailable (e.g. BSD): no module is written.
+TMP_REAL=$(realpath -m "$DOSSIER_TMP" 2>/dev/null) || TMP_REAL=""
 
 DOSSIER_TIMESTAMP=$(date -u +"%Y-%m-%d")
 DOSSIER_UPDATED_MODULES=""
@@ -525,6 +528,17 @@ while IFS='|' read -r MOD_NAME MOD_GLOB MOD_PATH; do
     /*|..|../*|*/..|*/../*) echo "Phase C1.7: skipped module '${MOD_NAME}' - unsafe path '${MOD_PATH}'"; continue ;;
   esac
   DOSSIER_ABS="${DEVDOCS_PATH}/${MOD_PATH}"
+  # Symlink containment: the lexical guard cannot see symlinks tracked in the base branch, and
+  # mkdir -p / cat > / >> follow them. Resolve the path (including parent-dir symlinks) and require
+  # it to stay under the temp worktree; reject a symlinked dossier file itself.
+  ABS_REAL=$(realpath -m "$DOSSIER_ABS" 2>/dev/null) || ABS_REAL=""
+  if [ -z "$TMP_REAL" ] || [ -z "$ABS_REAL" ] || [ -L "$DOSSIER_ABS" ]; then
+    echo "Phase C1.7: skipped module '${MOD_NAME}' - unresolvable or symlinked path '${MOD_PATH}'"; continue
+  fi
+  case "$ABS_REAL" in
+    "${TMP_REAL}/"*) ;;
+    *) echo "Phase C1.7: skipped module '${MOD_NAME}' - path escapes worktree '${MOD_PATH}'"; continue ;;
+  esac
 
   MATCHED=0
   # Iterate changed files using while read — not bare for-in (IFS word-split guard per c39758d)

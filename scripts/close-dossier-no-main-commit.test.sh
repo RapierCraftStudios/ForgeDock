@@ -42,6 +42,8 @@ TRAP_LN=$(printf '%s\n' "$C17" | grep -nE "^\s*trap .*EXIT" | head -1 | cut -d: 
 printf '%s\n' "$C17" | grep -q 'force-with-lease' && ok "C1.7 pushes with --force-with-lease" || bad "C1.7 missing force-with-lease"
 printf '%s\n' "$C17" | grep -qE 'push .*--force( |$)' && bad "C1.7 uses bare --force" || ok "C1.7 has no bare --force"
 printf '%s\n' "$C17" | grep -q 'gh pr list' && ok "C1.7 checks for an existing open PR" || bad "C1.7 missing gh pr list"
+printf '%s\n' "$C17" | grep -q 'realpath -m' && printf '%s\n' "$C17" | grep -q 'TMP_REAL}/' && ok "C1.7 has realpath containment against the temp worktree" || bad "C1.7 missing realpath containment"
+printf '%s\n' "$C17" | grep -qF -- '-L "$DOSSIER_ABS"' && ok "C1.7 rejects a symlinked dossier target" || bad "C1.7 missing -L check on DOSSIER_ABS"
 grep -q 'FORGE:DOSSIER_UPDATED' "$CLOSE_MD" && ok "FORGE:DOSSIER_UPDATED marker kept" || bad "FORGE:DOSSIER_UPDATED marker missing"
 
 # --- Dynamic: execute the REAL C1.7 block extracted from close.md (gh stubbed) ---
