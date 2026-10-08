@@ -10,10 +10,10 @@ t() { # name want-rc want-prefix env-assignments... -- args...
   local envs=() args=()
   while [ $# -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
   [ $# -gt 0 ] && shift
-  args=("$@")
+  args=(); [ $# -gt 0 ] && args=("$@")
   local out rc
   out=$(env -u CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH -u FORGE_CLAUDE_VERSION -u FORGE_RUNTIME \
-        -u OPENCODE_SESSION_ID -u OPENCODE_PID -u OPENCODE "${envs[@]}" bash "$S" "${args[@]}" 2>&1); rc=$?
+        -u OPENCODE_SESSION_ID -u OPENCODE_PID -u OPENCODE ${envs[@]+"${envs[@]}"} bash "$S" ${args[@]+"${args[@]}"} 2>&1); rc=$?
   if [ "$rc" = "$want" ] && [ "${out#"$prefix"}" != "$out" ]; then PASS=$((PASS+1))
   else FAILN=$((FAILN+1)); echo "FAIL: $name (rc=$rc want $want; out=$out)"; fi
 }
