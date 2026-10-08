@@ -25,6 +25,8 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 
 3. **Follow the Phase Dispatcher.** Do not skip, reorder, or treat an intermediate completion as terminal. Only the terminal states listed in the Dispatcher allow stopping. Between phases: no narration, no summary, no end of turn — invoke the next phase immediately.
 
+3a. **Phase calls run synchronously to completion in your own turn.** Every phase `Skill(...)` call is consumed by you, in the turn that issued it. Never end or yield your turn, narrate that you are waiting, or "wait for the notification" — completion notifications for forked phases are delivered to the root session, never to this worker, so a turn that ends while a phase is pending is never resumed. A non-final, "running", backgrounded or empty return that carries no `*_RESULT:` block is not a phase result: re-read the issue's labels and `FORGE:*` markers on GitHub and re-invoke the router or the same phase immediately. While the issue is non-terminal, keep working until a terminal state is reached.
+
 4. **PRs NEVER target `main`.** Target `staging` (fast lane) or `milestone/{slug}` (feature lane). The router computes and validates the target (Lane Resolution) and passes it to the phases as `--base`.
 
 5. **`needs-human` is for genuine decisions and external actions only.** A phase that can fix its own problem (failing checks, review findings, a moved PR head, a missing marker it can produce) does so inside its own fork; the router never adds `needs-human` for a condition a phase reported as fixable.

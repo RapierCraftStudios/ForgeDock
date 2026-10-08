@@ -1100,6 +1100,7 @@ gh issue view {NUMBER} -R {GH_REPO} --json labels --jq '[.labels[].name | select
 **Terminal condition also**: `needs-human` label present, `workflow:awaiting-merge` label present, OR issue state is `closed`
 `needs-human` and `workflow:awaiting-merge` are terminal-FOR-THIS-AGENT (this individual `/work-on` run stops here — a human decision or merge is now the blocking step) but are NOT "done" from the DAG's point of view; see Predecessor Classification in Step 4B for how the orchestrator's dependency logic treats them (`GATED`, not `DONE`).
 If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to-build`, `workflow:building`, `workflow:in-review`), invoke `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{NUMBER} --under-orchestration')` again immediately. The `/work-on` skill will re-read GitHub state and advance to the next phase. Do NOT output a summary, do NOT pause, do NOT ask for confirmation — just invoke it again.
+**NEVER end a turn while the label is non-terminal.** Every `Skill(...)` call runs synchronously to completion in your own turn. Never end or yield your turn to wait for a background phase or a completion notification — notifications go to the orchestrator's root session, never to you, so a turn that ends non-terminal is never resumed. A turn that ends with a non-terminal label and no `*_RESULT:` block seen is a contract violation. A "running", backgrounded or empty return is not a result: re-read the labels and `FORGE:*` markers on GitHub and invoke `work-on` again immediately — never wait.
 
 **CRITICAL — SOURCE BRANCH DETECTION**:
 - If the issue has the `review-finding` label, read the issue body for `**Code branch**: \`{branch}\``
@@ -2626,21 +2627,36 @@ for NUM in {active_issue_numbers}; do
     CURRENT_STATE=$(gh issue view $NUM -R {GH_REPO} --json labels \
       --jq '[.labels[].name | select(startswith("workflow:"))] | .[0] // "unknown"')
 
+    # Liveness check (worker-idle-no-live-child): a live child is a harness-tracked task for this
+    # issue that has not reported completion (ENGINE_DISPATCH_MAP[NUM] / OPENCODE_DISPATCH_MAP[NUM]
+    # task still running, or an Agent-spawned worker still executing a tool call), or a FORGE:HEARTBEAT
+    # newer than STALL_TIMEOUT. Set CHILD_LIVE=true when any holds, else CHILD_LIVE=false.
+    # No live child + non-terminal label = the worker yielded waiting for a notification that was
+    # delivered to the root session; its background state is dead.
+
     if [ "$STALL_COUNT" -lt 2 ]; then
-      # Auto-resume: post stall annotation and re-invoke /work-on
+      # Auto-recover: post stall annotation, then resume (live child) or relaunch fresh (no live child)
       RESUME_ATTEMPT=$(( STALL_COUNT + 1 ))
+      if [ "$CHILD_LIVE" = "true" ]; then STALL_CAUSE="worker-idle-child-live"; else STALL_CAUSE="worker-idle-no-live-child"; fi
       gh issue comment $NUM -R {GH_REPO} --body "<!-- FORGE:STALL_DETECTED -->
 ## Stall Detected
 
 **Issue**: #${NUM}
 **Elapsed since last activity**: ${ELAPSED_MIN} min (threshold: ${STALL_TIMEOUT} min)
 **Current workflow state**: ${CURRENT_STATE}
+**Cause**: ${STALL_CAUSE}
 **Auto-resume attempt**: ${RESUME_ATTEMPT} of 2
 **Timestamp**: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-      # Resume the agent — collect all resumes and launch in a single message (see Step 4B rule)
-      # STALL_RESUME_LIST is accumulated and launched in parallel after the loop
-      STALL_RESUME_LIST="$STALL_RESUME_LIST $NUM"
+      if [ "$CHILD_LIVE" = "true" ]; then
+        # Live child: resuming the same agent is safe — collect all resumes and launch in a single message (see Step 4B rule)
+        # STALL_RESUME_LIST is accumulated and launched in parallel after the loop
+        STALL_RESUME_LIST="$STALL_RESUME_LIST $NUM"
+      else
+        # No live child: do NOT resume (a resumed worker keeps its false "background build is running" belief).
+        # STALL_FRESH_LIST is relaunched as a fresh worker after the loop.
+        STALL_FRESH_LIST="$STALL_FRESH_LIST $NUM"
+      fi
     else
       # 2+ prior stalls — auto-resume exhausted, escalate to needs-human
       gh issue edit $NUM -R {GH_REPO} --add-label "needs-human"
@@ -2661,7 +2677,9 @@ done
 # For each NUM in $STALL_RESUME_LIST, call Agent(resume=AGENT_ISSUE_MAP[NUM], run_in_background=true, ...)
 ```
 
-**Resume all stalled agents in a single message** (parallel). Use the same `Agent(resume=...)` pattern as Step 4B — do not wait between individual resumes.
+**Resume stalled agents that still have a live child** (`STALL_RESUME_LIST`) in a single message (parallel). Use the same `Agent(resume=...)` pattern as Step 4B — do not wait between individual resumes.
+
+**Relaunch a fresh worker for every issue in `STALL_FRESH_LIST`** (cause `worker-idle-no-live-child`) instead of resuming. A fresh worker/agent is spawned through the exact Step 4A dispatch path for that issue (Agent / OpenCode `task()` / engine variant, same template) — all pipeline state lives in GitHub, so nothing is lost. Append this corrective note to the worker prompt: "The previous worker's background state is dead; no phase is running. Invoke `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{NUM} --under-orchestration')` now and run every phase synchronously to completion — never end your turn to wait for a notification." Before each relaunch run `recovery_claim_blocks "{NUM}"` and `claim_conflicts_with_live_holder "{NUM}"` exactly as in Step 4B (on either, defer instead of launching). Keep slot accounting symmetric: release the stale worker's slot (decrement `ACTIVE_DISPATCH_COUNT`, drop its `AGENT_ISSUE_MAP`/`ENGINE_DISPATCH_MAP`/`OPENCODE_DISPATCH_MAP` entry), then re-increment on the fresh launch and record the new id in the map. The `STALL_COUNT < 2` cap still applies to fresh relaunches.
 
 **Track stall resume cycles separately** from completion-event resumes (Step 4B). If the same issue accumulates ≥ 2 `FORGE:STALL_DETECTED` comments AND still hasn't reached terminal state, do not resume again — the `needs-human` label is already set.
 
@@ -3954,6 +3972,7 @@ gh issue view ${FINDING_NUM} -R {GH_REPO} --json labels --jq '[.labels[].name | 
 **Terminal labels** (only these allow you to stop): \`workflow:merged\`, \`workflow:invalid\`
 **Terminal condition also**: \`needs-human\` label present, \`workflow:awaiting-merge\` label present, OR issue state is \`closed\`
 If the label is NOT terminal (e.g., \`workflow:investigating\`, \`workflow:ready-to-build\`, \`workflow:building\`, \`workflow:in-review\`), invoke \`Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='${FINDING_NUM} --under-orchestration')\` again immediately. The \`/work-on\` skill will re-read GitHub state and advance to the next phase. Do NOT output a summary, do NOT pause, do NOT ask for confirmation — just invoke it again.
+**NEVER end a turn while the label is non-terminal.** Every \`Skill(...)\` call runs synchronously to completion in your own turn. Never end or yield your turn to wait for a background phase or a completion notification — notifications go to the orchestrator's root session, never to you, so a turn that ends non-terminal is never resumed. A turn that ends with a non-terminal label and no \`*_RESULT:\` block seen is a contract violation. A \"running\", backgrounded or empty return is not a result: re-read the labels and \`FORGE:*\` markers on GitHub and invoke \`work-on\` again immediately — never wait.
 
 **CRITICAL — SOURCE BRANCH DETECTION**:
 - If the issue has the \`review-finding\` label, read the issue body for \`**Code branch**: \\\`{branch}\\\`\`
