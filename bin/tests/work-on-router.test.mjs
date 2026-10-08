@@ -83,6 +83,19 @@ test("dispatching phases (review, remediate) are invoked only by the router", ()
   assert.match(read("commands/work-on/review.md"), /status: COMPLETE \| ALREADY_MERGED \| NEXT \| BLOCKED/);
 });
 
+test("Phase 4R routes github-unavailable blockers to retry before the generic BLOCKED row", () => {
+  const router = read("commands/work-on.md");
+  const start = router.indexOf("### Phase 4R");
+  const end = router.indexOf("## Phase 5", start);
+  assert.ok(start >= 0 && end > start, "Phase 4R section not found");
+  const rows = router.slice(start, end).split("\n").filter((l) => l.startsWith("|"));
+  const retry = rows.findIndex((l) => l.includes("github-unavailable:") && l.includes("`status: BLOCKED`"));
+  const generic = rows.findIndex((l) => l.startsWith("| `status: BLOCKED` (any kind)"));
+  assert.ok(retry >= 0, "no github-unavailable: row in Phase 4R");
+  assert.ok(generic >= 0, "no generic BLOCKED row in Phase 4R");
+  assert.ok(retry < generic, "github-unavailable: retry row must precede the generic BLOCKED row");
+});
+
 test("router runs the spawn-depth preflight", () => {
   const router = read("commands/work-on.md");
   assert.match(router, /scripts\/spawn-depth-check\.sh" --router-layer "\$ROUTER_LAYER"/);
