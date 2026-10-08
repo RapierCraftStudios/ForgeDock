@@ -533,7 +533,7 @@ CHANGED_FILES=$(git -C "{WORKTREE_PATH}" diff --name-only "origin/{PR_BASE}...HE
 ```
 
 **After subcommand returns** (read its `VALIDATE_RESULT:` block):
-- `gate_passed: true` → verify the `FORGE:QUALITY_GATE` marker exists on the issue (posted by validate V5; docs-only changes exempt). If absent, re-invoke validate once; a missing marker is not a pass. Then continue to Phase B6.5 (acceptance gate)
+- `gate_passed: true` → verify the `FORGE:QUALITY_GATE` marker exists on the issue (posted by validate V5; docs-only changes exempt). If absent, re-derive `{CHANGED_FILES}` with the B6 command above and re-invoke validate once with the full B6 `Skill(...)` call, including `--files "{CHANGED_FILES}"` (never omit `--files`; an empty list falls back to the git diff); a missing marker is not a pass. Then continue to Phase B6.5 (acceptance gate)
 - `gate_passed: false` → the subcommand has already posted its comment and added `needs-human`; print `BUILD_RESULT: status: BLOCKED` with the child's `blocker` (run the Blocked exit if no comment was posted)
 - Skill not found → Blocked exit, blocker "skill not found: work-on:build:validate"
 - Returned running/backgrounded/empty (no `VALIDATE_RESULT:`) → do not end the turn to wait; re-read the `FORGE:QUALITY_GATE` marker and re-invoke the same child
@@ -695,7 +695,12 @@ If `GATE_PASS = false`, the build repairs itself **once** before anything escala
 1. Count `<!-- FORGE:ACCEPTANCE_REPAIR: issue={NUMBER} -->` comments on the issue. If one already exists, skip to step 4.
 2. Post that marker (with the failed check ids), remove `needs-human` if this gate added it, then invoke
    `Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:implement", args="{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE} --fix-acceptance \"<failed check ids and details>\"")`
-   followed by `work-on:build:validate` with the same args as B6 (the new code gets a fresh quality gate and commit).
+   then re-derive `{CHANGED_FILES}` from the repaired worktree (never reuse the pre-repair value, and never omit `--files`; an empty list falls back to this diff):
+   ```bash
+   CHANGED_FILES=$(git -C "{WORKTREE_PATH}" diff --name-only "origin/{PR_BASE}...HEAD" 2>/dev/null | tr '\n' ' ' | xargs)
+   ```
+   and invoke validate explicitly (the new code gets a fresh quality gate and commit):
+   `Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:validate", args="{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE} --files \"{CHANGED_FILES}\"")`
 3. Re-run this whole B6.5 gate. PASS → continue to the checkpoint.
 4. Still failing (or already repaired once) → leave `needs-human` and print `BUILD_RESULT: status: BLOCKED`, blocker: "Acceptance gate failed after one repair — see FORGE:ACCEPTANCE_GATE comment".
 
