@@ -31,6 +31,13 @@ describe("router", () => {
     assert.equal(unavailable.status, 1, unavailable.stdout + unavailable.stderr);
   });
 
+  it("backend-check rejects unknown flags with exit 2", () => {
+    const home = mkdtempSync(join(os.tmpdir(), "fd-backend-check-bad-"));
+    const res = runCli(["backend-check", "--bogus-flag"], { home });
+    assert.equal(res.status, 2, res.stdout + res.stderr);
+    assert.match(res.stderr, /Unknown option: --bogus-flag/);
+  });
+
   it("help lists the union of journey + engine commands — no phantom commands", () => {
     const res = runCli(["help"], { home: mkdtempSync(join(os.tmpdir(), "fd-h-")) });
     assert.equal(res.status, 0);
@@ -785,7 +792,8 @@ describe("orchestrate engine fallback guards", () => {
 
   it("uses the tested backend-check command instead of an inline spawn canary", () => {
     const spec = readFileSync(specPath, "utf-8");
-    assert.match(spec, /forgedock backend-check --quiet/);
+    assert.match(spec, /timeout \d+ forgedock backend-check --quiet/);
+    assert.match(spec, /version skew/);
     assert.doesNotMatch(spec, /spawnSync\('claude', \['--version'\]/);
   });
 
