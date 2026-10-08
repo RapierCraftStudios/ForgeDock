@@ -1315,27 +1315,42 @@ Run against the diff versus the base (`origin/{PR_BASE}` when known, else `HEAD`
 cd {WORKTREE_PATH}
 BASE_REF="${PR_BASE:+origin/$PR_BASE}"; BASE_REF="${BASE_REF:-HEAD}"
 TEST_PATH_RE='(^|/)(test_[^/]*|[^/]*_test\.[^/]*|[^/]*\.test\.[^/]*|[^/]*\.spec\.[^/]*)$|(^|/)(tests|__tests__)/'
+# Spec/doc prose is never test code: exclude markdown and docs from the content scans so
+# literal text such as "xfail" or "if: false" in a command spec cannot trip them.
+NODOC=(-- . ':!*.md' ':!docs')
+# Every check uses `if ...; then ...; fi` so a clean diff exits 0 under `set -e`.
 
 # (a) deleted test files (renames excluded via --find-renames)
-git diff --find-renames --diff-filter=D --name-only "$BASE_REF" 2>/dev/null | grep -E "$TEST_PATH_RE" \
-  && echo "COVERAGE-1: deleted test file(s)"
+DELETED_TESTS=$(git diff --find-renames --diff-filter=D --name-only "$BASE_REF" 2>/dev/null | grep -E "$TEST_PATH_RE" || true)
+if [ -n "$DELETED_TESTS" ]; then
+  echo "COVERAGE-1: deleted test file(s)"; echo "$DELETED_TESTS"
+fi
 
-# (b) removed test cases with no added counterpart, (c) newly added skip markers
-git diff -U0 "$BASE_REF" -- . 2>/dev/null | grep -E '^-[[:space:]]*(it|test|describe)\(|^-[[:space:]]*(async )?def test_' \
-  && echo "COVERAGE-1: removed test case line(s) — confirm each has an added counterpart in the diff"
-git diff -U0 "$BASE_REF" -- . 2>/dev/null | grep -E '^\+.*(\.skip\(|@pytest\.mark\.skip|@pytest\.mark\.xfail|xfail|continue-on-error:[[:space:]]*true|if:[[:space:]]*false)' \
-  && echo "COVERAGE-1: newly added skip/xfail/continue-on-error/if: false marker"
+# (b) removed test cases with no added counterpart
+if git diff -U0 "$BASE_REF" "${NODOC[@]}" 2>/dev/null | grep -qE '^-[[:space:]]*(it|test|describe)\(|^-[[:space:]]*(async )?def test_'; then
+  echo "COVERAGE-1: removed test case line(s) — confirm each has an added counterpart in the diff"
+fi
 
-# (d) removed or disabled workflow test steps
-git diff -U0 "$BASE_REF" -- .github/workflows 2>/dev/null | grep -E '^-.*run:.*(test|pytest|jest|vitest|mocha|\.test\.sh|npm t|go test|cargo test)' \
-  && echo "COVERAGE-1: removed workflow test step"
+# (c) newly added skip markers (markdown/docs excluded by NODOC)
+if git diff -U0 "$BASE_REF" "${NODOC[@]}" 2>/dev/null | grep -qE '^\+.*(\.skip\(|@pytest\.mark\.skip|@pytest\.mark\.xfail|xfail|continue-on-error:[[:space:]]*true|if:[[:space:]]*false)'; then
+  echo "COVERAGE-1: newly added skip/xfail/continue-on-error/if: false marker"
+fi
+
+# (d) removed or disabled workflow test steps — runner names are matched as whole words,
+# so `latest`, `contest`, `attest` do not match
+RUNNER_RE='(^|[^[:alnum:]_])(pytest|jest|vitest|mocha|npm (run )?test|npm t|go test|cargo test|test|[^[:space:]]*\.test\.sh)([^[:alnum:]_]|$)'
+if git diff -U0 "$BASE_REF" -- .github/workflows 2>/dev/null | grep -E '^-.*run:' | grep -qE "$RUNNER_RE"; then
+  echo "COVERAGE-1: removed workflow test step"
+fi
 ```
 
 Also treat a test command that is commented out (`+#` of a previously live `run:` test line) as a removal.
 
 **Finding**: emit `COVERAGE-1 | HIGH | {file} | coverage reduction: {removed test | deleted test | disabled workflow test step} — restore it and fix the code under test`. Scan results are candidates, not verdicts: confirm each by reading the diff hunk before reporting.
 
-**Exemption (only one)**: a legitimate deletion is allowed ONLY when the commit message or PR body gives an explicit justification tying the removal to the removal of the tested code (the code the test covered is also deleted in this diff). "Flaky", "failing", "Windows-only", or "to get CI green" are NOT justifications. When exempted, record the justification in the finding as a LOW (advisory, not returned).
+**Exemption (only one, verified mechanically)**: a deleted test is exempt ONLY when the source file it covered is ALSO deleted in the same diff — i.e. the non-test counterpart (`test_foo.py` -> `foo.py`, `foo.test.ts` -> `foo.ts`) appears in `git diff --find-renames --diff-filter=D --name-only "$BASE_REF"`. A justification in the commit message or PR body may supplement this but is NEVER sufficient on its own — a self-attested claim does not exempt. If the counterpart mapping is not obvious or the source is not deleted in the same diff, the finding stays HIGH and blocking. "Flaky", "failing", "Windows-only", or "to get CI green" are never justifications.
+
+**Exempted finding**: when the covered source is verified deleted in the same diff, emit `COVERAGE-2 | LOW | {file} | test deleted together with its covered source ({source file}) — verified in the same diff`. This LOW finding IS returned to the caller and surfaced to reviewers so the removal stays visible; it is not blocking.
 
 **Fix rule**: a COVERAGE-1 finding is fixed by restoring the test or step and fixing the cause — never by suppressing the finding or re-wording the diff. If the cause cannot be fixed in scope, the caller escalates (`needs-human`) naming the failing tests/assertions.
 

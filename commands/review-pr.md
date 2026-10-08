@@ -2071,8 +2071,21 @@ Verdict determined by standard blocking criteria.
 4. `MERGE_HEALTH == "CONFLICTING"` OR `MERGE_HEALTH_STATE` in {`DIRTY`, `BLOCKED`} — PR cannot be merged cleanly into its base branch <!-- Added: forge#194 -->
    - Verdict: CHANGES REQUESTED. Message: "Merge conflict with `{base}`. Rebase `{head}` onto `origin/{base}`, resolve the conflicting files, then re-run /review-pr."
    - If `MERGE_HEALTH == "UNKNOWN"` after retries: emit a WARNING in the verdict body (do NOT treat as a block — GitHub may still be computing it).
-5. A CONFIRMED coverage reduction (deleted test, removed test case, or disabled/removed workflow test step) in a PR that responds to a red check, or that has no justification tying it to removal of the tested code <!-- Added: forge#3257 -->
-   - Verdict: CHANGES REQUESTED. Message: "Coverage reduction: a deleted test or removed workflow test step is not a fix for a red check. Restore it and fix the code under test, or escalate naming the failing assertions." Detection follows quality-gate 2U (`COVERAGE-1`); never dedup this finding against the PR's own issue.
+5. `COVERAGE_REDUCTION_CONFIRMED=true` — a CONFIRMED `COVERAGE-1` finding (deleted test, removed test case, or disabled/removed workflow test step) exists and the covered source is not verified deleted in the same diff. This blocks whether or not the PR responds to a red check; a commit-message or PR-body justification alone never clears it. <!-- Added: forge#3257 -->
+   - Verdict: CHANGES REQUESTED. Message: "Coverage reduction: a deleted test or removed workflow test step is not a fix for a red check. Restore it and fix the code under test, or escalate naming the failing assertions." Detection follows quality-gate 2U (`COVERAGE-1`); a `COVERAGE-2` LOW finding (test deleted together with its covered source) is not blocking but MUST be listed in the verdict body. Never dedup this finding against the PR's own issue.
+
+```bash
+# Detect a confirmed coverage reduction (self-contained: defines its own variables; do not rely on earlier fences)
+COVERAGE_REDUCTION_CONFIRMED=false
+COVERAGE_LOW_NOTE=""
+# COVERAGE_FINDINGS = the confirmed findings list produced by quality-gate 2U / the review agents, one per line
+if printf '%s\n' "${COVERAGE_FINDINGS:-}" | grep -q '^COVERAGE-1'; then
+    COVERAGE_REDUCTION_CONFIRMED=true
+fi
+if printf '%s\n' "${COVERAGE_FINDINGS:-}" | grep -q '^COVERAGE-2'; then
+    COVERAGE_LOW_NOTE="COVERAGE-2 (LOW): a test was deleted together with its covered source in the same diff — verified, not blocking."
+fi
+```
 
 ```bash
 # Determine if mergeability is a blocker (MERGE_HEALTH/MERGE_HEALTH_STATE set in Phase 1A; BASE/HEAD set in Phase 0 Mode 3)
