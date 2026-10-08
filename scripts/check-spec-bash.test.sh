@@ -70,7 +70,9 @@ check 0 "SKIP allow.md:2 allowlisted"   "allowlisted fragment skipped"         -
 check 0 "checked=0 failed=0"            "non-bash fence ignored"               -- notbash.md
 check 1 "FAIL prose-mention.md:2"      "prose mention of the marker does not allowlist" -- prose-mention.md
 check 1 "checked=2 failed=1 skipped=1"  "multi-file summary"                   -- good.md bad.md pseudo.md
-check 2 ""                              "no files is a usage error"            --
+check 0 "SPEC-POSITIONAL: files="       "no args defaults to --positional over commands/" --
+check 0 "SPEC-POSITIONAL: files="       "--positional with no files uses the default set" -- --positional
+check 2 ""                              "--shellcheck alone is a usage error"  -- --shellcheck
 check 2 ""                              "unknown flag"                         -- --bogus good.md
 
 # --base: only blocks touching changed lines are checked, so pre-existing breakage never fails a change.

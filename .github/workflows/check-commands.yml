@@ -296,9 +296,8 @@ jobs:
           # pipeline-health/** and the review-pr-agents catalog are not substituted and are exempt.
           # Deliberate hits: put `allowlist:positional-arg` on the same line.
           bash scripts/check-spec-bash.test.sh
-          find commands -name '*.md' -not -path 'commands/orchestrate/*' \
-            -not -path 'commands/pipeline-health/*' -not -path 'commands/review-pr-agents/*' -print0 \
-            | xargs -0 bash scripts/check-spec-bash.sh --positional
+          # No args: the script's built-in default file set (all Skill-loaded specs under commands/).
+          bash scripts/check-spec-bash.sh
 
   admission-parity:
     name: admission.mjs / bash mirror parity check

@@ -12,7 +12,9 @@
 #
 # Usage:
 #   check-spec-bash.sh [--base <git-ref>] [--shellcheck] <file.md>...
-#   check-spec-bash.sh --positional <file.md>...
+#   check-spec-bash.sh --positional [<file.md>...]
+#   check-spec-bash.sh            (no args: same as --positional over all Skill-loaded commands/**/*.md,
+#                                  excluding orchestrate/**, pipeline-health/**, review-pr-agents/**)
 #
 #   --positional  Different check, opt-in: fail on any `$0`..`$9` inside a fenced code block.
 #                 Claude Code rewrites those tokens with the invocation's arguments whenever a
@@ -44,7 +46,7 @@
 set -u
 
 BASE=""; SHELLCHECK=0; POSITIONAL=0; FILES=""
-usage() { echo "ERROR: Usage: check-spec-bash.sh [--base <git-ref>] [--shellcheck] | --positional <file.md>..." >&2; exit 2; }
+usage() { echo "ERROR: Usage: check-spec-bash.sh [--base <git-ref>] [--shellcheck] <file.md>... | --positional [<file.md>...]" >&2; exit 2; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -56,6 +58,16 @@ while [ "$#" -gt 0 ]; do
 $1"; shift ;;
   esac
 done
+
+# No file arguments: default to the --positional check over every Skill-loaded spec under commands/
+# (orchestrate/**, pipeline-health/** and the review-pr-agents catalog are Read-loaded, not substituted).
+# Resolved relative to this script, so it works from any cwd and from linked worktrees.
+if [ -z "$FILES" ] && { [ "$#" -eq 0 ] && [ "$POSITIONAL" = 0 ] && [ -z "$BASE" ] && [ "$SHELLCHECK" = 0 ] || [ "$POSITIONAL" = 1 ]; }; then
+  POSITIONAL=1
+  cd "$(dirname "$0")/.." || exit 2
+  FILES=$(find commands -name '*.md' -not -path 'commands/orchestrate/*' \
+    -not -path 'commands/pipeline-health/*' -not -path 'commands/review-pr-agents/*' | LC_ALL=C sort)
+fi
 [ -n "$FILES" ] || usage
 
 if [ "$POSITIONAL" = 1 ]; then
