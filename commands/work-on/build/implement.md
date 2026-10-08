@@ -3,6 +3,7 @@ user-invocable: false
 description: Implementation agent — writes code, makes commits, posts builder comment
 argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE} --branch {BRANCH} --base {PR_BASE} [--fix-acceptance \"<failed checks>\"]"
 context: fork
+background: false
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->

@@ -21,11 +21,13 @@ Orchestrator for the full issue lifecycle: investigate → decompose (if needed)
 
 1. **This file is a router. Every phase runs as a forked sub-skill via `Skill(...)`; the router never executes phase logic itself.** Each phase sub-skill (`work-on:investigate`, `work-on:decompose`, `work-on:build`, `work-on:review`, `work-on:close`, `work-on:remediate`) declares `context: fork`, so Claude Code runs it in an isolated sub-agent context that holds only that phase's spec and the args you pass. The phase re-reads everything else from GitHub/git and returns exactly one `*_RESULT:` block — that block is all the router sees. Do not read phase spec files, do not re-implement a phase step here, and do not "help" a phase by posting its markers or labels. If a skill name does not resolve, STOP with "skill not found" (see Skill Name Resolution) — never run a phase inline.
 
+1a. **Dispatching phases are invoked only by this router.** `work-on:review` and `work-on:remediate` spawn sub-agents (the `/review-pr` domain reviewers), and Claude Code only grants the `Agent` tool down to a fixed depth (see Depth Budget). Invoking them from here keeps them one level below the router, where `Agent` works. No phase may invoke them; a phase that needs one returns `status: NEXT` with `next: <phase>`, and the router runs it (Phase 4R). Non-dispatching phases may nest forks freely. <!-- forge#3398 -->
+
 2. **Route only on `*_RESULT` blocks and GitHub state.** After each phase returns, apply the routing table for that phase (below). Never infer success from a phase's prose; never continue past a `BLOCKED`/`FAILED` result.
 
 3. **Follow the Phase Dispatcher.** Do not skip, reorder, or treat an intermediate completion as terminal. Only the terminal states listed in the Dispatcher allow stopping. Between phases: no narration, no summary, no end of turn — invoke the next phase immediately.
 
-3a. **Phase calls run synchronously to completion in your own turn.** Every phase `Skill(...)` call is consumed by you, in the turn that issued it. Never end or yield your turn, narrate that you are waiting, or "wait for the notification" — completion notifications for forked phases are delivered to the root session, never to this worker, so a turn that ends while a phase is pending is never resumed. A non-final, "running", backgrounded or empty return that carries no `*_RESULT:` block is not a phase result: re-read the issue's labels and `FORGE:*` markers on GitHub (consume a present marker instead of re-invoking), then re-invoke the router or the same phase at most 2 times per phase. After the cap, stop with BLOCKED / the existing GATE_FAILURE path (needs-human via the existing exit) using `child-stalled: <phase>`; a build `BLOCKED` with `child-stalled:` is terminal and is not re-invoked. While the issue is non-terminal, keep working until a terminal state is reached.
+3a. **Phase calls run synchronously to completion in your own turn.** Every phase sub-skill declares `background: false`, so its `Skill(...)` call returns its `*_RESULT:` block in your turn (a forked skill without it runs in the background and reports to the root session instead). Every phase `Skill(...)` call is consumed by you, in the turn that issued it. Never end or yield your turn, narrate that you are waiting, or "wait for the notification" — completion notifications for forked phases are delivered to the root session, never to this worker, so a turn that ends while a phase is pending is never resumed. A non-final, "running", backgrounded or empty return that carries no `*_RESULT:` block is not a phase result: re-read the issue's labels and `FORGE:*` markers on GitHub (consume a present marker instead of re-invoking), then re-invoke the router or the same phase at most 2 times per phase. After the cap, stop with BLOCKED / the existing GATE_FAILURE path (needs-human via the existing exit) using `child-stalled: <phase>`; a build `BLOCKED` with `child-stalled:` is terminal and is not re-invoked. While the issue is non-terminal, keep working until a terminal state is reached.
 
 4. **PRs NEVER target `main`.** Target `staging` (fast lane) or `milestone/{slug}` (feature lane). The router computes and validates the target (Lane Resolution) and passes it to the phases as `--base`.
 
@@ -73,6 +75,7 @@ A sub-agent that receives no resolved value applies the same rule itself.
 | 2 | Decompose | `work-on:decompose` | `INVESTIGATE_RESULT.decompose: YES` (or resume: investigation says decompose YES and no `FORGE:DECOMPOSED`) |
 | 3 | Build | `work-on:build` | Investigation complete, decompose NO, no `FORGE:BUILDER:COMPLETE` |
 | 4 | Review (push, PR, review, merge) | `work-on:review` | `FORGE:BUILDER:COMPLETE` present and PR not merged |
+| 4R | Remediation handoff | `work-on:remediate` | `REVIEW_RESULT: status: NEXT, next: remediate` (CI gate red or in-PR fix requested) |
 | 5 | Close & trajectory | `work-on:close` | PR merged, or a PR-less terminal outcome (investigation deliverables, decomposed, invalid) |
 
 **Terminal states** (only these allow stopping): `workflow:merged` with the issue closed; `workflow:invalid`; `workflow:decomposed` (sub-issues own the work); `needs-human`; `workflow:awaiting-merge` (held for a human merge decision on the deploy gate); a `CLOSE_RESULT` with `status: COMPLETE | ALREADY_DONE`. Anything else → run the next phase immediately.
@@ -94,13 +97,17 @@ A sub-agent that receives no resolved value applies the same rule itself.
 
 ### Depth Budget
 
-| Depth | Agent | Notes |
-|-------|-------|-------|
-| 1 | `/orchestrate` (or a solo `/work-on` session) | Never implements directly |
-| 2 | `/work-on` router (an orchestrated worker) | Routes only |
-| 3 | Forked phase (`work-on:<phase>`) | One at a time; `review-pr` runs inside `work-on:review`'s fork |
-| 4 | Forked build child (context, architect, implement, validate); domain reviewers dispatched by `review-pr` | |
-| 5 | Quality gate (forked, inside validate) | Deepest level used |
+Layers are counted below the main conversation (layer 0). Claude Code grants the `Agent` tool down to `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` layers (default 3 since 2.1.219): **a sub-agent at layer 1 or 2 can spawn, one at layer 3 cannot**. A `context: fork` skill always runs at any depth, but it gets `Agent` only by the same rule (measured on 2.1.294, forge#3398). Full rationale: `docs/WORK-ON-RUNTIME.md`.
+
+| Layer (solo / orchestrated) | Runs here | Spawns sub-agents |
+|-----------------------------|-----------|-------------------|
+| 0 / 0 | solo `/work-on` router / `/orchestrate` | orchestrate: one worker per issue |
+| — / 1 | `/work-on` router (orchestrated worker) | no (`Skill` only) |
+| 1 / 2 | every phase invoked by the router, including `work-on:review` and `work-on:remediate` | review/remediate: `/review-pr` domain reviewers |
+| 2 / 3 | domain reviewers (leaves); build children (context, architect, implement, validate) | no |
+| 3 / 4 | quality gate (inside validate or review) | no |
+
+The only layer constraint that matters is the spawner: `work-on:review` and `work-on:remediate` must sit at layer ≤ 2, which Hard Rule 1a guarantees. The Phase 0A spawn-depth preflight checks the effective depth before any work starts.
 
 ### Model and Effort Tiering — What Actually Applies
 
@@ -221,6 +228,40 @@ Extract project prefix and issue number. If `next`/`pick`: list open issues sort
 
 **Resolve `UNDER_ORCHESTRATION`**: `true` if the invocation args contain `--under-orchestration`, else `false`. This is a single parse done once, here — every later gated block (heartbeats) just checks this variable, no re-parsing.
 
+**Spawn-depth preflight (before 0A.1 and before any GitHub write)** <!-- forge#3398 -->: confirm the dispatching phases will have the `Agent` tool (Depth Budget). The router runs at layer 1 under `/orchestrate`, else layer 0. The block is self-contained (it carries the canonical `FORGE_ROOT` bootstrap).
+
+```bash
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+# Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+_l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+# Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+_cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+# newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+_v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+_m="$HOME/.claude/plugins/marketplaces/$_mk"
+# '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
+_k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
+while IFS= read -r _c; do
+case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
+done <<< "$_k"
+fi
+ROUTER_LAYER=0; [ "$UNDER_ORCHESTRATION" = "true" ] && ROUTER_LAYER=1
+if [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/spawn-depth-check.sh" ]; then
+  DEPTH_OUT=$(bash "$FORGE_ROOT/scripts/spawn-depth-check.sh" --router-layer "$ROUTER_LAYER"); DEPTH_RC=$?
+else
+  DEPTH_OUT="SPAWN_DEPTH: UNKNOWN (spawn-depth-check.sh not resolvable)"; DEPTH_RC=0
+fi
+echo "$DEPTH_OUT"
+```
+
+`DEPTH_RC=0` (`OK`, `SKIP`, `UNKNOWN`) or `2` (usage error — treat as `UNKNOWN`): continue. `DEPTH_RC=1` (`FAIL`): the review phase could not spawn reviewers, so nothing built now could be reviewed. When an issue number is known, post `DEPTH_OUT` as a comment with `<!-- FORGE:GATE_FAILURE:TYPE=spawn-depth -->` and add `needs-human` (raising `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` is an operator action). STOP either way.
+
 **Resolve `RECOVERY_SWEEP_ID`**: the value after `--recovery-sweep` in the invocation args, else empty (consumed by 0A.4; only `/recover-orphans` passes it).
 
 **Optional pre-flight**: Before committing to the full pipeline, run `/scope {NUMBER}` to get a complexity estimate (affected files, blast radius, risk flags, and decomposition recommendation). Especially useful for large or ambiguous issues.
@@ -253,7 +294,7 @@ If detected, dispatch immediately and STOP — do NOT fall through to Phase 0B's
 Skill(skill="{FORGE_SKILL_PREFIX}work-on:remediate", args="${REMEDIATE_PR_NUMBER} ${REMEDIATE_ISSUE_FLAG} --repo {GH_REPO} --gh-flag {GH_FLAG}")
 ```
 
-**If `REMEDIATE_RESULT: status: REREVIEW_REQUIRED`** (forge#3240: fix pushed, but the forked remediation had no sub-agent dispatch tool): run the re-review from this top-level session, which has dispatch — `Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="${REMEDIATE_PR_NUMBER} --auto-merge --issue ${ISSUE} --base ${PR_BASE} --gh-flag {GH_FLAG}")` (`ISSUE` and `PR_BASE` from the result and the PR) — never review inline. If it returns `REVIEW_RESULT: status: COMPLETE` (merged), invoke `Skill("{FORGE_SKILL_PREFIX}work-on:close", ...)` as remediate M8 does for `AUTO-LANDED`. Then STOP.
+**If `REMEDIATE_RESULT: status: REREVIEW_REQUIRED`** (forge#3240, fallback only since forge#3398: fix pushed, but remediation had no sub-agent dispatch tool, which cannot happen when the Phase 0A spawn-depth preflight passed and remediation is invoked from this router): run the re-review from this top-level session, which has dispatch — `Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="${REMEDIATE_PR_NUMBER} --auto-merge --issue ${ISSUE} --base ${PR_BASE} --gh-flag {GH_FLAG}")` (`ISSUE` and `PR_BASE` from the result and the PR) — never review inline. If it returns `REVIEW_RESULT: status: COMPLETE` (merged), invoke `Skill("{FORGE_SKILL_PREFIX}work-on:close", ...)` as remediate M8 does for `AUTO-LANDED`. Then STOP.
 
 **After `REMEDIATE_RESULT` returns (any other status), STOP unconditionally** — do not run any further Phase 0–7 logic in this file. `work-on/remediate.md` is self-contained: a FIXABLE remediation replaces `needs-human` with the active `workflow:in-review` state only while it is running, then ends at `workflow:merged`, `workflow:awaiting-merge`, or a newly asserted `needs-human` label. When `re_gate_outcome: AUTO-LANDED`, it drives its own close phase internally (Phase M8 invokes `Skill("{FORGE_SKILL_PREFIX}work-on:close", ...)` directly) before returning. For every other outcome (`HELD-AWAITING-MERGE`, `RE-ESCALATED`, `UNFIXABLE`, `BLOCKED`, `ALREADY_DONE`), the issue is already at a terminal state (`workflow:awaiting-merge` or `needs-human`, or already closed) per the Universal Phase Dispatcher — nothing further to do.
 
@@ -330,7 +371,7 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments --jq '.[] | {id: .id, author: .u
 
 **Resume preflight (MANDATORY on any resume past Phase 1)** <!-- Added: forge#3061 -->: before routing to Phase 3 (build), 4 (review) or 5 (close) from existing state, run `bash "$FORGE_ROOT/scripts/verify-phase-trail.sh" {NUMBER} -R {GH_REPO}` (add `--docs-only` for docs-only diffs, or `--code-diff` when the diff has any non-docs file so an INVESTIGATION band cannot waive requirements), with `FORGE_ROOT` resolved by the bootstrap in "Script resolution" below. If `FORGE_ROOT` is empty or the script is missing, treat it as `PHASE_TRAIL: ERROR` (fail closed: stop and add `needs-human`; never skip the preflight). On `PHASE_TRAIL: FAIL`, go BACK and run each missing phase through its `Skill(...)` (investigate, Phase 3B classification, build contract/context/architect, validate) before continuing — never continue forward over a gap, never hand-post a missing marker, and never treat a recovered uncommitted worktree as a substitute for the skipped phases. The same verifier gates PR creation (`work-on/review.md` Phase R1.5) and auto-merge (`review-pr.md` Phase 8).
 
-**Determine resume point**: no `FORGE:INVESTIGATOR` → Phase 1 (investigate). Investigation complete with decompose YES and no `FORGE:DECOMPOSED` → Phase 2 (decompose); with `FORGE:DECOMPOSED` → Phase 5 (`--terminal-state decomposed`). Investigation complete (decompose NO) without `FORGE:BUILDER:COMPLETE` → Phase 3 (build; a partial BUILDER comment is cleaned up by the build phase). `FORGE:BUILDER:COMPLETE` and no merged PR → Phase 4 (review). PR merged and issue open → Phase 5 (close). `workflow:invalid` → STOP.
+**Determine resume point**: no `FORGE:INVESTIGATOR` → Phase 1 (investigate). Investigation complete with decompose YES and no `FORGE:DECOMPOSED` → Phase 2 (decompose); with `FORGE:DECOMPOSED` → Phase 5 (`--terminal-state decomposed`). Investigation complete (decompose NO) without `FORGE:BUILDER:COMPLETE` → Phase 3 (build; a partial BUILDER comment is cleaned up by the build phase). `FORGE:BUILDER:COMPLETE` and no merged PR → Phase 4 (review), except an **unfinished remediation handoff**, which is checked first and overrides the checkpoint routing in 0B.5: the issue does NOT carry `needs-human`, and its latest `FORGE:CI_REMEDIATION: pr={PR}`/`FORGE:INPR_REMEDIATION: pr={PR}` marker (for the open PR) has no `FORGE:REMEDIATION:COMPLETE` comment on that PR created after it → first re-add `needs-human` with a comment ("resuming an interrupted remediation of PR #{PR}"), because remediation's Phase M0 only accepts `needs-human`-gated issues and its M1 clears the label again for a FIXABLE run; then Phase 4R with that marker's kind, skipping the marker post (it is already recorded). This is the silent strand: M1 cleared `needs-human` and the run was lost before M8. It cannot loop: a remediation that finishes posts `FORGE:REMEDIATION:COMPLETE` (its single-attempt guard then returns `ALREADY_DONE`), and any other exit leaves `needs-human` on the issue (Phase 4R adds it on a `BLOCKED` result), so this rule no longer matches. A run lost before M1 still has `needs-human`, so it routes to review, which finds the bound used and stops visibly at `needs-human`. Re-entering review instead would find the bound used and stop without remediation ever finishing. PR merged and issue open → Phase 5 (close). `workflow:invalid` → STOP.
 
 ### 0B.5: Read Phase Checkpoint (MANDATORY — executes before any phase-skip decision)
 
@@ -348,7 +389,7 @@ if [ -n "$CHECKPOINT" ]; then
 fi
 ```
 
-**Routing from checkpoint** (overrides prose heuristics above when a checkpoint exists):
+**Routing from checkpoint** (overrides prose heuristics above when a checkpoint exists, except the unfinished-remediation-handoff rule in 0B, which is evaluated first and routes to Phase 4R):
 
 | `next_phase` value | Resume at |
 |--------------------|-----------|
@@ -679,13 +720,42 @@ Post the Phase 4 heartbeat, run Lane Resolution including the lane validation, t
 Skill(skill="{FORGE_SKILL_PREFIX}work-on:review", args="{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE}")
 ```
 
-The review phase owns: ancestry and empty-branch guards, push, PR creation, `workflow:in-review`, the phase-trail preflight (and the single re-dispatch of any missing phase via `Skill`), `/review-pr --auto-merge` (CI gate and reviewed-head guard included), stale-review re-review, and the REVIEW checkpoint. It never closes the issue.
+The review phase owns: ancestry and empty-branch guards, push, PR creation, `workflow:in-review`, the phase-trail preflight (and the single re-dispatch of any missing phase via `Skill`), `/review-pr --auto-merge` (CI gate and reviewed-head guard included), stale-review re-review, and the REVIEW checkpoint. It never closes the issue and never runs remediation: a red CI gate or an in-PR fix request comes back as `REVIEW_RESULT: status: NEXT` for Phase 4R.
 
 | `REVIEW_RESULT` | Router action |
 |---|---|
 | `COMPLETE` (PR merged) | Record `PR_NUMBER` → Phase 5 with `--terminal-state merged` |
 | `ALREADY_MERGED` | Same as COMPLETE |
+| `NEXT`, `next: remediate` | Record `PR_NUMBER` and `remediation` (`ci-gate` or `inpr-fix`) → Phase 4R (review handoff to remediation) |
 | `BLOCKED` | Terminal: the phase already added `needs-human` (or `workflow:awaiting-merge` for a deploy-gate hold) with the blocker. Do NOT merge, re-run phases, or add labels here. STOP. |
+
+### Phase 4R: Remediation handoff from review
+
+The review phase never invokes remediation itself: remediation re-reviews through `/review-pr`, which spawns domain reviewers, so it must run one level below this router (see the Depth Budget). The review phase has checked the bound; this router posts the bound marker **immediately before** invoking remediation, so a handoff interrupted before remediation starts (compaction, crash) is retried on resume instead of being counted as used. It runs at most once per PR per kind.
+
+```bash
+# {REMEDIATION_KIND} is the review result's `remediation` value: ci-gate -> CI_REMEDIATION, inpr-fix -> INPR_REMEDIATION.
+BOUND_MARKER="CI_REMEDIATION"; [ "{REMEDIATION_KIND}" = "inpr-fix" ] && BOUND_MARKER="INPR_REMEDIATION"
+BOUND_BODY="<!-- FORGE:${BOUND_MARKER}: pr={PR_NUMBER} -->
+Review handed PR #{PR_NUMBER} to remediation ({REMEDIATION_KIND}); the router is dispatching it once."
+gh issue comment {NUMBER} {GH_FLAG} --body "$BOUND_BODY" || { echo "github-unavailable: could not post FORGE:${BOUND_MARKER}; remediation not invoked"; exit 1; } # allowlist:check-command-side-effects
+```
+
+If the marker cannot be posted, do not invoke remediation (an unrecorded bound could repeat): treat it as a `github-unavailable:` blocker under the router-owned retry rule.
+
+```
+Skill(skill="{FORGE_SKILL_PREFIX}work-on:remediate", args="{PR_NUMBER} --issue {NUMBER} --base {PR_BASE} --repo {GH_REPO} --gh-flag {GH_FLAG}")
+```
+
+| `REMEDIATE_RESULT` | Router action |
+|---|---|
+| `re_gate_outcome: AUTO-LANDED` | Merged. Remediation's Phase M8 already ran `work-on:close`; if the issue is still open, run Phase 5 with `--terminal-state merged`. Then done. |
+| `status: REREVIEW_REQUIRED` | Fallback only (should not occur at this depth): run the re-review from this router as in 0A.1, then Phase 5 on `REVIEW_RESULT: status: COMPLETE`. |
+| `status: BLOCKED` (any kind) | Make sure `needs-human` is on the issue (add it with the blocker as a comment if absent: remediation can exit after its M1 cleared the label). STOP. |
+| `status: ALREADY_DONE` (single-attempt guard: an earlier remediation already completed on this PR), `remediation: inpr-fix` | Same as any other `inpr-fix` outcome below: re-invoke Phase 4 once, which waives the in-PR gate. |
+| `status: ALREADY_DONE`, `remediation: ci-gate` | Make sure `needs-human` is on the issue (add it, with a comment naming the PR and that remediation already ran, if absent). STOP. |
+| any other outcome, `remediation: inpr-fix` | Re-invoke Phase 4 (`work-on:review`) once with the same args. Review finds its `INPR_REMEDIATION` bound used, waives the in-PR gate for the current head, files the remaining findings as issues and re-reviews. |
+| any other outcome, `remediation: ci-gate` | Terminal: remediation left `needs-human` (or `workflow:awaiting-merge`) with its reason. STOP. |
 
 ---
 

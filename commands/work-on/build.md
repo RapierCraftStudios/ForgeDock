@@ -2,6 +2,7 @@
 user-invocable: false
 description: Build subcommand — create worktree, post contract, sequence context/architect/implement/validate
 context: fork
+background: false
 argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --base {PR_BASE}"
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
