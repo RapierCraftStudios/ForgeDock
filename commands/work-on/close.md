@@ -593,7 +593,9 @@ done <<< "$MODULE_ENTRIES"
 ```bash
 DOSSIER_BRANCH="docs/dossier-{NUMBER}"
 DOSSIER_PR_URL=""
-if [ -n "$DOSSIER_TMP" ] && [ -n "$DOSSIER_UPDATED_MODULES" ]; then
+if [ "${DRY_RUN:-false}" = "true" ]; then
+  echo "DRY_RUN: would commit, push and open dossier PR ${DOSSIER_BRANCH}; skipped (dry-run)"
+elif [ -n "$DOSSIER_TMP" ] && [ -n "$DOSSIER_UPDATED_MODULES" ]; then
   # Stage and commit ONLY inside the temporary worktree ($DOSSIER_TMP), never in ${REPO_PATH}.
   CHANGED_DOSSIER_FILES=$(echo "$DOSSIER_UPDATED_MODULES" | tr ' ' '\n' | while IFS= read -r mod; do
     [ -n "$mod" ] || continue
