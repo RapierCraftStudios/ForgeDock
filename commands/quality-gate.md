@@ -278,7 +278,7 @@ the gate rather than leaving the workflow blocked.
 - **2R.5 (Adaptive gate.d checks)**: ALWAYS run when `adaptive_scripts.enabled` — executes `.forgedock/scripts/gate.d/*.sh`; each script is repo-specific and was promoted from a recurring finding pattern <!-- Added: forge#1739 -->
 - **2G.8 (Wire-through proof)**: Run if `WIRE_THROUGH` in DOMAINS — demands each newly added conditional path be demonstrably reachable <!-- Added: forge#1731 -->
 - **2G.9 (Danger-zone recurrence)**: Run if `FORGE_GRAPH` in DOMAINS — cross-references injected danger-zone rule cards from FORGE:CONTEXT against the diff; violations tagged `known-pattern-recurrence` (HIGH) <!-- Added: forge#1744 -->
-- **2U (Coverage-reduction check)**: ALWAYS run (`COVERAGE_REDUCTION` in DOMAINS) — flags diffs that delete test files, remove test cases, add skip markers, or remove/disable workflow test steps <!-- Added: forge#3257 -->
+- **2U (Coverage-reduction check)**: ALWAYS run (`COVERAGE_REDUCTION` in DOMAINS) — flags diffs that delete test files, remove test cases, add skip markers, remove/disable workflow test steps (incl. multi-line `run:` bodies, job removal, `needs:` edits), weaken assertions, or add test-config exclusions <!-- Added: forge#3257 -->
 - **2S (Test failure classification)**: Run if any Step 2 check invoked a test suite and it failed — classifies the failure as PRE_BROKEN, FLAKY, or REAL using `scripts/flaky-quarantine.sh` <!-- Added: forge#1336 -->
 - **2T (Subscribed pattern card rules)**: ALWAYS run when `pattern_feeds.enabled` is true — injects Tier-B (warning-only) learned rules from subscribed exchange cards that have a `gate.d` check template matching any changed file's stack <!-- Added: forge#1746 -->
 
@@ -1307,7 +1307,7 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 
 <!-- Added: forge#3257 -->
 
-**Bug class**: a change turns a failing check green by shrinking what is checked (deleting a test file, dropping a test case, adding a skip marker, or removing/disabling a workflow test step) instead of fixing the code under test. Coverage silently disappears and nothing downstream notices.
+**Bug class**: a change turns a failing check green by shrinking what is checked (deleting a test file, dropping a test case, adding a skip marker, weakening an assertion, excluding tests via config, or removing/disabling a workflow test step or job) instead of fixing the code under test. Coverage silently disappears and nothing downstream notices.
 
 Run against the diff versus the merge-base of `origin/{PR_BASE}` and `HEAD` (`PR_BASE` defaults to `staging`), so changes merged to the base after the branch point are not misread as PR-side deletions. A missing base ref is an error finding, never a silent pass. Use `--find-renames` so a rename is NOT treated as a deletion. Bash must stay portable (no `grep -P`, no GNU-only flags).
 
@@ -1320,27 +1320,63 @@ else
 BASE_REF=$(git merge-base "origin/$PR_BASE" HEAD) || { echo "COVERAGE-ERR | HIGH | quality-gate | merge-base failed for origin/$PR_BASE"; BASE_REF=""; }
 fi
 if [ -n "${BASE_REF:-}" ]; then
-TEST_PATH_RE='(^|/)(test_[^/]*|[^/]*_test\.[^/]*|[^/]*\.test\.[^/]*|[^/]*\.spec\.[^/]*)$|(^|/)(tests|__tests__)/'
+TEST_PATH_RE='(^|/)(test_[^/]*|test-[^/]*\.sh|conftest\.py|[^/]*_test\.[^/]*|[^/]*_spec\.[^/]*|[^/]*\.test\.[^/]*|[^/]*\.spec\.[^/]*|[^/]*\.bats|[^/]*Tests?\.[^/]*|[^/]*Spec\.[^/]*)$|(^|/)(tests?|specs?|__tests__)/'
+# Test-looking command / declaration fragments (anchored by the caller to line starts or YAML keys)
+TEST_CMD_RE='(make[[:space:]]+(check|test|ci)|npm[[:space:]]+(run[[:space:]]+)?test|npm t([[:space:]]|$)|yarn[[:space:]]+test|pnpm[[:space:]]+(run[[:space:]]+)?test|tox|nox|bats|pytest|jest|vitest|mocha|rspec|phpunit|mvn[[:space:]]+(verify|test)|gradle[[:space:]]+test|go[[:space:]]+test|cargo[[:space:]]+(test|nextest)|dotnet[[:space:]]+test|[^[:space:]]*test[^[:space:]]*\.sh)'
 
 # (a) deleted test files (renames excluded via --find-renames)
 git diff --find-renames --diff-filter=D --name-only "$BASE_REF" | grep -E "$TEST_PATH_RE" \
   && echo "COVERAGE-1: deleted test file(s)"
 
 # (b) removed test cases with no added counterpart, (c) newly added skip markers
-git diff -U0 "$BASE_REF" -- . | grep -E '^-[[:space:]]*(it|test|describe)\(|^-[[:space:]]*(async )?def test_' \
+git diff -U0 "$BASE_REF" -- . | grep -E '^-[[:space:]]*(x?it|test|x?describe)(\.[a-z]+)?[[:space:]]*\(|^-[[:space:]]*(async )?def test_|^-[[:space:]]*@(Test|ParameterizedTest)([^A-Za-z0-9_]|$)|^-[[:space:]]*func[[:space:]]+Test[A-Z_0-9]|^-[[:space:]]*#\[(tokio::)?test\]|^-[[:space:]]*(it|specify|scenario)[[:space:]]+["'"'"']|^-[[:space:]]*@test[[:space:]]+["'"'"']' \
   && echo "COVERAGE-1: removed test case line(s) — confirm each has an added counterpart in the diff"
-git diff -U0 "$BASE_REF" -- . | grep -E '^\+.*(\.skip\(|@pytest\.mark\.skip|@pytest\.mark\.xfail|xfail|continue-on-error:[[:space:]]*true|if:[[:space:]]*false)' \
-  && echo "COVERAGE-1: newly added skip/xfail/continue-on-error/if: false marker"
+git diff -U0 "$BASE_REF" -- . | grep -E '^\+.*(\.skip\(|@pytest\.mark\.skip|@pytest\.mark\.xfail|xfail|skip_test|continue-on-error:[[:space:]]*true|(^|[^A-Za-z0-9_])xit[[:space:]]*\(|(^|[^A-Za-z0-9_])xdescribe[[:space:]]*\(|it\.todo\(|t\.Skip(f|Now)?\(|@Ignore([^A-Za-z0-9_]|$)|@Disabled([^A-Za-z0-9_]|$)|#\[ignore\])|^\+[[:space:]]*pending([[:space:](]|$)|^\+[[:space:]]*(-[[:space:]]+)?if:[[:space:]]*([$][{][{][[:space:]]*)?(false|0)([[:space:]]|[}]|$)' \
+  && echo "COVERAGE-1: newly added skip/xfail/ignore/continue-on-error/if: false|0|\${{ false }} marker"
 
-# (d) removed or disabled workflow test steps
-git diff -U0 "$BASE_REF" -- .github/workflows | grep -E '^-.*run:.*(test|pytest|jest|vitest|mocha|\.test\.sh|npm t|go test|cargo test)' \
-  && echo "COVERAGE-1: removed workflow test step"
+# (d) workflow checks — hunk-aware, not limited to single-line "run: <test cmd>"
+WF_DIFF=$(git diff -U0 "$BASE_REF" -- .github/workflows)
+# removed test commands anywhere (covers multi-line "run: |" bodies and `make check`-style commands), non-comment lines only
+printf '%s\n' "$WF_DIFF" | grep -E "^-[[:space:]]*([^#[:space:]].*)?$TEST_CMD_RE" \
+  && echo "COVERAGE-1: removed workflow test command (incl. multi-line run: | body line)"
+# removed test/check job or step names (whole job or step removal)
+printf '%s\n' "$WF_DIFF" | grep -iE '^-[[:space:]]*(-[[:space:]]+)?(name|[A-Za-z0-9_-]*(test|check|spec)[A-Za-z0-9_-]*):' \
+  && echo "COVERAGE-1: removed workflow job/step with test/check name"
+# removed needs: edits (a job dropped from a dependency chain no longer gates its dependents)
+printf '%s\n' "$WF_DIFF" | grep -E '^-[[:space:]]*needs:|^-[[:space:]]+-[[:space:]]+[A-Za-z0-9_-]+[[:space:]]*$' \
+  && echo "COVERAGE-1: removed workflow needs: entry — confirm no gating dependency was dropped"
+# net reduction of run: steps
+RUN_DEL=$(printf '%s\n' "$WF_DIFF" | grep -cE '^-[[:space:]]*(-[[:space:]]+)?run:' || true)
+RUN_ADD=$(printf '%s\n' "$WF_DIFF" | grep -cE '^\+[[:space:]]*(-[[:space:]]+)?run:' || true)
+[ "${RUN_DEL:-0}" -gt "${RUN_ADD:-0}" ] && echo "COVERAGE-1: net reduction of workflow run: steps ($RUN_DEL removed, $RUN_ADD added)"
+# commented-out: a live test line removed AND the same kind of line added back as a comment
+if printf '%s\n' "$WF_DIFF" | grep -qE "^-[[:space:]]*([^#[:space:]].*)?$TEST_CMD_RE" \
+   && printf '%s\n' "$WF_DIFF" | grep -qE "^\+[[:space:]]*#.*$TEST_CMD_RE"; then
+  echo "COVERAGE-1: workflow test command commented out"
+fi
+
+# (e) weakened assertions — inspect only test files
+TEST_DIFF=$(git diff --find-renames --name-only --diff-filter=AM "$BASE_REF" | grep -E "$TEST_PATH_RE" \
+  | while IFS= read -r f; do git diff -U0 "$BASE_REF" -- "$f"; done)
+ASSERT_RE='(assert[[:space:](]|assert[A-Z_][A-Za-z_]*\(|expect\(|should[.[:space:]]|require\.)'
+A_DEL=$(printf '%s\n' "$TEST_DIFF" | grep -cE "^-[[:space:]]*$ASSERT_RE" || true)
+A_ADD=$(printf '%s\n' "$TEST_DIFF" | grep -cE "^\+[[:space:]]*$ASSERT_RE" || true)
+[ "${A_DEL:-0}" -gt "${A_ADD:-0}" ] && echo "COVERAGE-1: weakened assertions in test files ($A_DEL removed, $A_ADD added)"
+printf '%s\n' "$TEST_DIFF" | grep -E '^\+.*(assert[[:space:]]+(True|1)([[:space:]]|$)|assertTrue\(true\)|toBeTruthy\(\)|toBeDefined\(\)|expect\(true\))' \
+  && echo "COVERAGE-1: tautological/weakened assertion added"
+
+# (f) test-config edits that exclude tests (pytest.ini, setup.cfg, tox.ini, pyproject [tool.pytest], jest/vitest config)
+CONFIG_RE='(^|/)(pytest\.ini|setup\.cfg|tox\.ini|pyproject\.toml|jest\.config\.[^/]*|vitest\.config\.[^/]*|vitest\.workspace\.[^/]*|\.mocharc[^/]*|phpunit\.xml[^/]*|package\.json)$'
+git diff --name-only "$BASE_REF" | grep -E "$CONFIG_RE" \
+  | while IFS= read -r f; do git diff -U0 "$BASE_REF" -- "$f"; done \
+  | grep -iE '^\+.*(testPathIgnorePatterns|modulePathIgnorePatterns|testIgnore|norecursedirs|collect_ignore|--ignore|--deselect|deselect|exclude|testMatch|addopts.*-k)' \
+  && echo "COVERAGE-1: test-config edit may exclude tests from the run"
 fi
 ```
 
-Also treat a test command that is commented out (`+#` of a previously live `run:` test line) as a removal.
+Also treat a test command that is commented out (`+#` of a previously live `run:` test line) as a removal — the commented-out check above implements this. A multi-line `run: |` body is covered because the removed-command check matches the command on any removed line, not only the `run:` line. Note on `if:` disabling forms: the pattern matches `if: false`, `if: 0` and `if: ${{ false }}` (literal regex `if:.*(\$\{\{|0)` family).
 
-**Finding**: a `COVERAGE-ERR` line (base ref missing) is a HIGH finding returned as-is — never treat it as clean. Otherwise emit `COVERAGE-1 | HIGH | {file} | coverage reduction: {removed test | deleted test | disabled workflow test step} — restore it and fix the code under test`. Scan results are candidates, not verdicts: confirm each by reading the diff hunk before reporting.
+**Finding**: a `COVERAGE-ERR` line (base ref missing) is a HIGH finding returned as-is — never treat it as clean. Otherwise emit `COVERAGE-1 | HIGH | {file} | coverage reduction: {removed test | deleted test | disabled workflow test step | removed workflow job/needs | weakened assertion | test-config exclusion} — restore it and fix the code under test`. Scan results are candidates, not verdicts: confirm each by reading the diff hunk before reporting.
 
 **Exemption (only one)**: a legitimate deletion is allowed ONLY when the commit message or PR body gives an explicit justification tying the removal to the removal of the tested code (the code the test covered is also deleted in this diff). "Flaky", "failing", "Windows-only", or "to get CI green" are NOT justifications. When exempted, record the justification in the finding as a LOW (advisory, not returned).
 
