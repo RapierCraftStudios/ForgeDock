@@ -450,6 +450,9 @@ case "$RE_GATE_OUTCOME" in
   *)                   AUTO_LAND_BAR_TEXT="N/A"; OUTCOME_DETAIL="" ;;
 esac
 
+# forge#3413: embed the pushed head so the orchestrator scopes a REREVIEW-REQUIRED trail to the CURRENT head only.
+REMEDIATED_HEAD_SHA=$(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null || true)
+
 REMEDIATION_BODY="<!-- FORGE:REMEDIATION -->
 ## Remediation Complete for PR #{PR_NUMBER}
 
@@ -457,6 +460,7 @@ REMEDIATION_BODY="<!-- FORGE:REMEDIATION -->
 **Re-review verdict**: ${RE_REVIEW_VERDICT:-unknown}
 **Auto-land bar**: ${AUTO_LAND_BAR_TEXT}
 **Re-gate outcome**: ${RE_GATE_OUTCOME} ${OUTCOME_DETAIL}
+**Head**: ${REMEDIATED_HEAD_SHA:-unknown}
 
 <!-- FORGE:REMEDIATION:COMPLETE -->"
 
