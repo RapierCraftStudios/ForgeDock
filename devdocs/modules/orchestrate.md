@@ -68,3 +68,9 @@ Cite: #3181 / PR #3238.
 PR #3252 touched `orchestrate`. See FORGE:BUILDER comment on issue #3205 for full change list.
 Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
 Cite: #3205 / PR #3252.
+
+## Entry 2026-10-08 — Fix: orchestrate merged hold writes needs-human label before escalation comment (#3223)
+
+PR #3290 touched `orchestrate`. See FORGE:BUILDER comment on issue #3223 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3223 / PR #3290.
