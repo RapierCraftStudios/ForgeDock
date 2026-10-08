@@ -92,3 +92,9 @@ Cite: #3245 / PR #3281.
 PR #3299 touched `orchestrate`. See FORGE:BUILDER comment on issue #3253 for full change list.
 Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
 Cite: #3253 / PR #3299.
+
+## Entry 2026-10-08 — Fix: orchestrate wake sweep GATING_PREDS_RAW fail-closed on gh api failure (#3233)
+
+PR #3317 touched `orchestrate`. See FORGE:BUILDER comment on issue #3233 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3233 / PR #3317.
