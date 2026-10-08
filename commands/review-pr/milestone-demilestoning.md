@@ -35,9 +35,11 @@ if [ "${IS_MILESTONE_TO_STAGING:-false}" = "true" ] && [ "${MERGE_STATE:-}" = "M
         echo "$FINDINGS_TO_DEMILESTONE" | while IFS= read -r FINDING_NUM; do
             [ -z "$FINDING_NUM" ] && continue
             FINDING_TITLE=$(gh issue view "$FINDING_NUM" -R "${REPO}" --json title --jq '.title' 2>/dev/null || echo "#${FINDING_NUM}")
-            gh issue edit "$FINDING_NUM" -R "${REPO}" --milestone "" 2>/dev/null && \
-                echo "  Moved to fast lane: #${FINDING_NUM} — ${FINDING_TITLE}" || \
+            if gh issue edit "$FINDING_NUM" -R "${REPO}" --milestone "" 2>/dev/null; then # allowlist:check-command-side-effects (post-merge cleanup, already gated by MERGE_STATE above)
+                echo "  Moved to fast lane: #${FINDING_NUM} — ${FINDING_TITLE}"
+            else
                 echo "  WARNING: Failed to clear milestone for #${FINDING_NUM}"
+            fi
             MOVED_COUNT=$((MOVED_COUNT + 1))
         done
         echo "Phase 8B: Review finding demilestoning complete."
@@ -73,9 +75,11 @@ if [ "${IS_MILESTONE_TO_STAGING:-false}" = "true" ]; then
             echo "$FINDINGS_TO_DEMILESTONE" | while IFS= read -r FINDING_NUM; do
                 [ -z "$FINDING_NUM" ] && continue
                 FINDING_TITLE=$(gh issue view "$FINDING_NUM" -R "${REPO}" --json title --jq '.title' 2>/dev/null || echo "#${FINDING_NUM}")
-                gh issue edit "$FINDING_NUM" -R "${REPO}" --milestone "" 2>/dev/null && \
-                    echo "  Moved to fast lane: #${FINDING_NUM} — ${FINDING_TITLE}" || \
+                if gh issue edit "$FINDING_NUM" -R "${REPO}" --milestone "" 2>/dev/null; then # allowlist:check-command-side-effects (post-merge cleanup, already gated by MERGE_STATE above)
+                    echo "  Moved to fast lane: #${FINDING_NUM} — ${FINDING_TITLE}"
+                else
                     echo "  WARNING: Failed to clear milestone for #${FINDING_NUM}"
+                fi
             done
             echo "Phase 9A: Fallback demilestoning complete."
         fi

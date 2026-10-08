@@ -80,7 +80,7 @@ if [ "$PROVENANCE_TABLE_LOADED" = "true" ]; then
   if [ -n "$ISSUE_NUM_FOR_TRUST" ]; then
     TASK_TYPE_FOR_TRUST=$(gh api "repos/${REPO}/issues/${ISSUE_NUM_FOR_TRUST}/comments" \
       --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR"))] | last | .body' 2>/dev/null \
-      | grep -oP '(?<=\*\*Task Type\*\*: )[\w /]+' | head -1 | xargs || echo "")
+      | sed -n 's/.*\*\*Task Type\*\*: //p' | head -1 | xargs || echo "")
   fi
   # Fall back to title-based inference if INVESTIGATOR comment absent
   if [ -z "$TASK_TYPE_FOR_TRUST" ]; then

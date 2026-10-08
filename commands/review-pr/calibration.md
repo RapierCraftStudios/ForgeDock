@@ -23,14 +23,14 @@ CALIBRATION_CELL=""
 CALIBRATION_NOTE=""
 
 # Read task type from FORGE:INVESTIGATOR on the linked issue
-# (MERGE_ISSUE is the issue number; passed from --auto-merge args)
+# (MERGE_ISSUE is the issue number; passed from the merge-mode args)
 ISSUE_NUMBER="${MERGE_ISSUE:-}"
 
 if [ -n "$ISSUE_NUMBER" ]; then
   INVESTIGATOR_BODY=$(gh api "repos/{GH_REPO}/issues/${ISSUE_NUMBER}/comments" \
     --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR"))] | last | .body // ""' 2>/dev/null || echo '')
-  TASK_TYPE=$(echo "$INVESTIGATOR_BODY" | grep -oP '(?<=\*\*Task Type\*\*: )[^\n]+' | head -1 | tr -d ' \r')
-  CONFIDENCE=$(echo "$INVESTIGATOR_BODY" | grep -oP '(?<=\*\*Confidence\*\*: )[^\n]+' | head -1 | tr -d ' \r')
+  TASK_TYPE=$(echo "$INVESTIGATOR_BODY" | sed -n 's/.*\*\*Task Type\*\*: //p' | head -1 | tr -d ' \r')
+  CONFIDENCE=$(echo "$INVESTIGATOR_BODY" | sed -n 's/.*\*\*Confidence\*\*: //p' | head -1 | tr -d ' \r')
   echo "Phase 7B.5: task_type=${TASK_TYPE:-unknown} confidence=${CONFIDENCE:-unknown} (from issue #${ISSUE_NUMBER})"
 fi
 
@@ -76,7 +76,7 @@ fi
 
 # Log threshold decision in TRAJECTORY (append to existing issue comment or note for Phase 6)
 # This satisfies the acceptance criterion: "Threshold adjustments appear in TRAJECTORY with the cell that justified them"
-if [ -n "$ISSUE_NUMBER" ]; then
+if [ -n "$ISSUE_NUMBER" ] && [ "${DRY_RUN:-false}" != "true" ]; then
   gh issue comment "${ISSUE_NUMBER}" {MERGE_GH_FLAG} --body "<!-- FORGE:CALIBRATION_CHECK -->
 **Phase 7B.5 — Calibration Threshold Check**
 **Cell**: ${CALIBRATION_CELL:-not found}
