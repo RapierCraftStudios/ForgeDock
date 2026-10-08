@@ -8,7 +8,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$HERE/.."
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-PASS=0; FAILN=0
+PASS=0; FAILN=0; SKIPPED=0
 ok()  { PASS=$((PASS+1)); }
 bad() { FAILN=$((FAILN+1)); echo "FAIL: $1"; }
 expect() { [ "$2" = "$3" ] && ok || bad "$1 (got '$3' want '$2')"; }
@@ -100,9 +100,16 @@ expect "relative FORGE_HOME ignored" "" "$(run "$T/empty" FORGE_HOME=.)"
 expect "FORGEDOCK_HOME authoritative" "$T/nowhere" "$(run "$T/h1" FORGEDOCK_HOME="$T/nowhere")"
 # symlink install (install.sh): ~/.claude/commands/work-on.md -> <clone>/commands/work-on.md
 mkdir -p "$T/clone/commands" "$T/h2/.claude/commands"; mkscripts "$T/clone"; : > "$T/clone/commands/work-on.md"
-ln -sf "$T/clone/commands/work-on.md" "$T/h2/.claude/commands/work-on.md"
-expect "install.sh symlink resolves" "$(cd "$T/clone" && pwd -P)" "$(cd "$(run "$T/h2")" && pwd -P)"
-expect "FORGE_HOME without scripts falls through" "$(cd "$T/clone" && pwd -P)" "$(cd "$(run "$T/h2" FORGE_HOME="$T/h2/.claude")" && pwd -P)"
+# Git Bash (MSYS) makes a COPY for `ln -s` unless native symlinks are requested, which leaves readlink
+# nothing to resolve; request them, and run the two symlink cases only when a real symlink exists (a runner
+# without symlink privilege cannot exercise install.sh's layout, which is itself a symlink install).
+MSYS=winsymlinks:nativestrict ln -sf "$T/clone/commands/work-on.md" "$T/h2/.claude/commands/work-on.md" 2>/dev/null
+if [ -L "$T/h2/.claude/commands/work-on.md" ]; then
+  expect "install.sh symlink resolves" "$(cd "$T/clone" && pwd -P)" "$(cd "$(run "$T/h2")" && pwd -P)"
+  expect "FORGE_HOME without scripts falls through" "$(cd "$T/clone" && pwd -P)" "$(cd "$(run "$T/h2" FORGE_HOME="$T/h2/.claude")" && pwd -P)"
+else
+  echo "SKIP: symlink cases (this platform cannot create symlinks)"; SKIPPED=$((SKIPPED+1))
+fi
 
 # newest cached version wins (1.10.0 must beat 1.9.0)
 for v in 1.9.0 1.10.0 1.2.0; do mkscripts "$T/h3/.claude/plugins/cache/forgedock/forgedock/$v"; done
@@ -196,11 +203,13 @@ for f in $SITES commands/work-on/close.md; do
 done
 if command -v node >/dev/null 2>&1; then
   for d in "we#ird" "sp ace" "q?x"; do
+    # '?' is not a legal Windows filename character: MSYS remaps it, so node sees a different path.
+    case "$d:$(uname -s)" in *'?'*:MINGW*|*'?'*:MSYS*|*'?'*:CYGWIN*) echo "SKIP: path '$d' (illegal on Windows)"; SKIPPED=$((SKIPPED+1)); continue ;; esac
     mkdir -p "$T/url/$d/bin/engine"; echo 'export const v = 42;' > "$T/url/$d/bin/engine/resolve.mjs"
     out=$(node -e 'import(require("node:url").pathToFileURL(process.argv[1]).href).then(m => process.stdout.write(String(m.v)))' "$T/url/$d/bin/engine/resolve.mjs" 2>&1)
     expect "pathToFileURL import survives path '$d'" 42 "$out"
   done
 fi
 
-echo "forge-root tests: pass=$PASS fail=$FAILN"
+echo "forge-root tests: pass=$PASS fail=$FAILN skipped=$SKIPPED"
 [ "$FAILN" -eq 0 ]

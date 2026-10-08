@@ -99,6 +99,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Ensure jq is available
         run: command -v jq || choco install jq --version 1.7.1 -y --no-progress
+      - name: Run forge-root.test.sh
+        run: bash scripts/forge-root.test.sh
       - name: Run lint-dispatch-prompt.test.sh
         run: bash scripts/lint-dispatch-prompt.test.sh
       - name: Run verify-phase-trail.test.sh
