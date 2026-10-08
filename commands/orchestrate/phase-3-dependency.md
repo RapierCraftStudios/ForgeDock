@@ -1398,6 +1398,7 @@ fi
 #    filter (OWNER/MEMBER/COLLABORATOR or the orchestrator login) applies to the release/fail markers on wake.
 #    forge#3169: merged + needs-human with no escalation record classifies GATED on wake (never keyed on the verifier).
 # The helpers cache trail lookups in the stable per-user/per-repo dir (trail_cache_dir / init_trail_cache, phase-4-execution.md Step 4B).
+# resolve_orch_login queries the GraphQL viewer login and caches it in that same dir (forge#3205), so init_trail_cache must run before it for the cache to apply (otherwise it re-queries per call).
 # Re-declare those helpers first (same Bash block), then reset the cache; if init fails the helpers simply skip caching.
 declare -F init_trail_cache >/dev/null && init_trail_cache || echo "WARNING: init_trail_cache not declared — trail lookups will be uncached" >&2
 for H in hold_merged_trail resolve_orch_login trail_escalation_state release_merged_trail classify_predecessor_state; do

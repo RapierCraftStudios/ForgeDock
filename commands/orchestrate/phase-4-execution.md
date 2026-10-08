@@ -1457,14 +1457,27 @@ The PR is already merged, so \`/work-on\` cannot re-run the missing phases. Revi
   [ "$COMMENTED" -eq 0 ] && [ "$HELD" -eq 0 ]
 }
 
-# resolve_orch_login (forge#3168): prints the login of the identity that authors the orchestrator's own FAILED/RELEASED
-# marker comments, so trail_escalation_state can trust them even when the bot reports author_association NONE or
-# CONTRIBUTOR. Resolution order: FORGE_BOT_LOGIN env override, then the git identity (`git config user.name`, which for a
-# GitHub App is its `<app>[bot]` login). Never calls `/user` (403s for App tokens). An unresolved value prints nothing and
-# the caller fails closed: only the author_association set below is trusted, never "trust every author".
+# resolve_orch_login (forge#3168, forge#3205): prints the login of the identity that authors the orchestrator's own
+# FAILED/RELEASED marker comments, so trail_escalation_state can trust them even when the bot reports author_association
+# NONE or CONTRIBUTOR. Resolution order: FORGE_BOT_LOGIN env override, then the per-cycle cached value, then the identity
+# gh actually authenticates as (GraphQL `viewer { login }`, which works for App tokens), then `git config user.name` as a
+# last resort (a commit-author setting that can differ from the posting identity). Never calls `/user` (403s for App
+# tokens). A non-empty result is cached in `orch-login` inside the owner-checked trail cache dir (a `$(...)` subshell
+# cannot keep a shell variable; `init_trail_cache` / `cleanup_trail_cache` remove it with the dir); an empty result is
+# never cached so it is retried. An unresolved value warns on stderr and prints nothing; the caller fails closed: only
+# the author_association set below is trusted, never "trust every author".
 resolve_orch_login() {
-  local L="${FORGE_BOT_LOGIN:-}"
+  local L="${FORGE_BOT_LOGIN:-}" D C; D="$(trail_cache_dir)"; C="$D/orch-login"
+  if [ -z "$L" ] && [ -d "$D" ] && [ -O "$D" ] && [ ! -L "$D" ] && [ -f "$C" ] && [ ! -L "$C" ] && [ -O "$C" ]; then
+    L=$(head -n 1 "$C" 2>/dev/null || true)
+  fi
+  [ -n "$L" ] || L=$(gh api graphql -f query='{viewer{login}}' --jq '.data.viewer.login' 2>/dev/null || true)
   [ -n "$L" ] || L=$(git config user.name 2>/dev/null || true)
+  if [ -z "$L" ]; then
+    echo "resolve_orch_login: could not resolve the orchestrator login (set FORGE_BOT_LOGIN); trusting only OWNER/MEMBER/COLLABORATOR trail markers" >&2
+  elif [ -z "${FORGE_BOT_LOGIN:-}" ] && [ -d "$D" ] && [ -O "$D" ] && [ ! -L "$D" ] && [ ! -e "$C" ]; then
+    printf '%s\n' "$L" > "$C" 2>/dev/null || true
+  fi
   printf '%s' "$L"
 }
 
@@ -1472,7 +1485,7 @@ resolve_orch_login() {
 # FORGE:PHASE_TRAIL_FAILED comment id is greater than the newest FORGE:PHASE_TRAIL_RELEASED id), RELEASED (a human
 # release was recorded after the last escalation, so a later unrelated `needs-human` no longer gates), or UNREADABLE.
 # forge#3168: only TRUSTED comments count, for BOTH markers. Trusted = author_association OWNER/MEMBER/COLLABORATOR, or
-# `.user.login` equal to the orchestrator identity (resolve_orch_login, used only when non-empty). A marker string posted
+# `.user.login` equal to the orchestrator identity (resolve_orch_login, used only when non-empty; compared case-insensitively). A marker string posted
 # by anyone else is ignored (treated as absent), so an outside commenter can neither forge a release nor a failure.
 # forge#3181: both markers must also START the comment body (startswith, not contains), so a trusted comment that merely
 # quotes the marker text is not counted. hold_merged_trail / release_merged_trail emit the marker as the first line.
@@ -1486,7 +1499,7 @@ trail_escalation_state() {
   if ! RAW=$(gh api --paginate "repos/{GH_REPO}/issues/${N}/comments" --jq '.[] | {id: .id, body: (.body // ""), login: (.user.login // ""), assoc: (.author_association // "")}' 2>/dev/null); then
     echo "UNREADABLE"; return
   fi
-  if ! OUT=$(printf '%s\n' "$RAW" | jq -r --arg L "$(resolve_orch_login)" 'select((.assoc | IN("OWNER","MEMBER","COLLABORATOR")) or ($L != "" and .login == $L)) | if (.body | startswith("<!-- FORGE:PHASE_TRAIL_FAILED -->") and contains("merged with an incomplete phase trail")) then "F \(.id)" elif (.body | startswith("<!-- FORGE:PHASE_TRAIL_RELEASED -->")) then "R \(.id)" else empty end' 2>/dev/null); then
+  if ! OUT=$(printf '%s\n' "$RAW" | jq -r --arg L "$(resolve_orch_login)" 'select((.assoc | IN("OWNER","MEMBER","COLLABORATOR")) or ($L != "" and (.login | ascii_downcase) == ($L | ascii_downcase))) | if (.body | startswith("<!-- FORGE:PHASE_TRAIL_FAILED -->") and contains("merged with an incomplete phase trail")) then "F \(.id)" elif (.body | startswith("<!-- FORGE:PHASE_TRAIL_RELEASED -->")) then "R \(.id)" else empty end' 2>/dev/null); then
     echo "UNREADABLE"; return
   fi
   FAILED_ID=$(printf '%s\n' "$OUT" | awk '$1=="F"&&$2+0>m{m=$2+0}END{print m+0}')
