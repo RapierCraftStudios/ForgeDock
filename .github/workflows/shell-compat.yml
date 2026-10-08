@@ -67,6 +67,7 @@ jobs:
           /bin/bash scripts/classify-finding.test.sh
           /bin/bash scripts/amplification-breaker.test.sh
           /bin/bash scripts/check-spec-bash.test.sh
+          /bin/bash scripts/review-pr-arguments.test.sh
           /bin/bash scripts/spawn-depth-check.test.sh
       # macOS runs lint-dispatch-prompt/verify-phase-trail once, under /bin/bash 3.2 above.
       - name: Run lint-dispatch-prompt.test.sh
@@ -91,6 +92,7 @@ jobs:
           bash scripts/classify-finding.test.sh
           bash scripts/amplification-breaker.test.sh
           bash scripts/check-spec-bash.test.sh
+          bash scripts/review-pr-arguments.test.sh
       - name: Run is-docs-only.test.sh
         run: bash scripts/is-docs-only.test.sh
       - name: Run spawn-depth-check.test.sh
@@ -131,6 +133,7 @@ jobs:
           bash scripts/classify-finding.test.sh
           bash scripts/amplification-breaker.test.sh
           bash scripts/check-spec-bash.test.sh
+          bash scripts/review-pr-arguments.test.sh
       - name: Run is-docs-only.test.sh
         run: bash scripts/is-docs-only.test.sh
       - name: Run spawn-depth-check.test.sh
