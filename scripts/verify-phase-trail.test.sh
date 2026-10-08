@@ -421,6 +421,12 @@ echo '{"permission":"write"}' > "$PERM/octo_acme"
 expect_override "EMU login with underscore is accepted (#3270)" "$(ovf h1 "$(ovc octo_acme User "$AFTER" "$AFTER" "$HS" "$CUR_MISSING" "emu approver")")"
 DECOYS=(); for i in 1 2 3 4 5 6; do DECOYS+=("$(ovc "decoy$i" User "2026-10-08T03:0$i:00Z" "2026-10-08T03:0$i:00Z" "$HS2" "$CUR_MISSING" "decoy")"); done
 expect_override "5-candidate cap is not starved by decoys failing local checks (#3268)" "$(ovf h2 "$(GOODC)" "${DECOYS[@]}")"
+# forge#3279: non-collaborator decoys that pass every local check must not consume the cap; repeat logins cost one slot
+PDEC=(); for i in 1 2 3 4 5 6 7; do PDEC+=("$(ovc "pdecoy$i" User "2026-10-08T04:0$i:00Z" "2026-10-08T04:0$i:00Z" "$HS" "$CUR_MISSING" "decoy" | jq -c '.author_association="NONE"')"); done
+expect_override "non-collaborator decoy flood (newer, all-local-checks-passing) does not starve a real override (#3279)" "$(ovf h5 "$(GOODC)" "${PDEC[@]}")"
+echo '{"permission":"read"}' > "$PERM/rdr1"
+RDEC=(); for i in 1 2 3 4 5 6; do RDEC+=("$(ovc rdr1 User "2026-10-08T05:0$i:00Z" "2026-10-08T05:0$i:00Z" "$HS" "$CUR_MISSING" "same login repeated")"); done
+expect_override "one login repeated many times costs a single cap slot (#3279)" "$(ovf h6 "$(GOODC)" "${RDEC[@]}")"
 MOCK_SELF_LOGIN=alice orun "$(ovf h3 "$(GOODC)")"
 [ $RC -eq 1 ] && ! echo "$OUT" | grep -q OVERRIDDEN && ok "verifier's own login cannot approve an override (#3269)" || bad "self-login exclusion (rc=$RC out=$OUT)"
 MOCK_SELF_LOGIN=someoneelse orun "$(ovf h3b "$(GOODC)")"
