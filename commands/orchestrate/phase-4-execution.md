@@ -2267,7 +2267,7 @@ done
 
 **YOUR MISSION**: Invoke `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{GATING_PR} --remediate --issue {PRED} --repo {GH_REPO} --gh-flag {GH_FLAG}')` and let it run to completion. This is a self-contained flow: it classifies the gate first, replaces `needs-human` with `workflow:in-review` only for fixable remediation, checks out the PR branch, fixes any fixable review findings, re-reviews, and either auto-lands the PR, holds it at `workflow:awaiting-merge` for a human, re-escalates back to `needs-human`, or reports the block as policy-level and unfixable. Do NOT intervene manually — do not run raw git/gh commands yourself.
 
-**DO NOT STOP EARLY**: if the Skill call returns without a terminal `REMEDIATE_RESULT.status`, invoke it again — it re-reads GitHub state and resumes. Terminal statuses are: `COMPLETE`, `ALREADY_DONE`, `UNFIXABLE`, `BLOCKED`.
+**DO NOT STOP EARLY**: if the Skill call returns without a terminal `REMEDIATE_RESULT.status`, invoke it again — it re-reads GitHub state and resumes. Terminal statuses are: `COMPLETE`, `ALREADY_DONE`, `UNFIXABLE`, `BLOCKED`, `REREVIEW_REQUIRED`.
 
 Do not ask the user questions — you are running autonomously in the background."
          )
@@ -2275,6 +2275,28 @@ Do not ask the user questions — you are running autonomously in the background
      fi
    fi
    ```
+
+   **Re-review handoff (forge#3240)**: a remediation worker can finish with `REMEDIATE_RESULT: status: REREVIEW_REQUIRED` — the fix is pushed and CI is green, but the forked remediation had no sub-agent dispatch tool, so `review-pr` (which refuses to review inline) never ran. The issue is then at `workflow:in-review` WITHOUT `needs-human`, so the trigger above does not fire and the `ALREADY_REMEDIATED` guard (which counts any `FORGE:REMEDIATION`) is irrelevant. This is not a human gate. On the next completion-monitoring cycle, for the issue that just completed, detect it from the paper trail and run the re-review from THIS session (which has dispatch), exactly once:
+
+   ```bash
+   PRED="$NUM"
+   REREVIEW_PR=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${PRED}\" in:body" \
+     --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+   if [ -n "$REREVIEW_PR" ]; then
+     NEEDS_REREVIEW=$(gh api repos/{GH_REPO}/issues/${REREVIEW_PR}/comments --paginate \
+       --jq '[.[] | select((.body | contains("FORGE:REMEDIATION:COMPLETE")) and (.body | contains("REREVIEW-REQUIRED")))] | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
+     REREVIEW_DONE=$(gh api repos/{GH_REPO}/issues/${REREVIEW_PR}/comments --paginate \
+       --jq '[.[] | select(.body | contains("FORGE:REREVIEW_DISPATCHED"))] | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
+     if [ "$NEEDS_REREVIEW" -ge 1 ] && [ "$REREVIEW_DONE" -eq 0 ]; then
+       gh pr comment "$REREVIEW_PR" -R {GH_REPO} --body "<!-- FORGE:REREVIEW_DISPATCHED -->
+   Re-review dispatched by the orchestrator: remediation had no sub-agent dispatch tool."
+       # then, from this session:
+       # Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="${REREVIEW_PR} --auto-merge --issue ${PRED} --base {BASE} --gh-flag -R {GH_REPO}")
+     fi
+   fi
+   ```
+
+   The `FORGE:REREVIEW_DISPATCHED` marker bounds this to a single re-review per PR (no loop). On `REVIEW_RESULT: status: COMPLETE` (merged), drive `work-on:close` and let item 6.6 wake dependents as normal; on any other result, review-pr's own verdict/labels (CHANGES REQUESTED, `needs-human` for genuine blockers) apply and the issue is `GATED` or failed per the existing rules. Never review inline.
 
    This satisfies #1809 Q2 (the orchestrator auto-dispatches remediation against the gated issue itself — the exact gap forge#1812's item 6.5/6.6 left open, since those items only ever track and wake *dependents*, never the gated PR's own remediation) — and closes forge#2243 (the gap that #1812's fix left open for *leaf* issues with no dependents: because this item's `$PRED` binding was never made explicit and self-contained, it was only ever reached while walking a dependent's predecessor list, so a `needs-human` issue that has no dependents never got remediation dispatched and its CHANGES-REQUESTED PR re-reviewed the same unchanged commit forever). The remediation agent's outcome is picked up on the **next** completion-monitoring cycle of this same Step 4B loop: if it lands (`workflow:merged`), item 6.6 below fires normally and wakes any `blocked-on-human-merge` dependents (if any exist — a leaf issue simply has none to wake); if it holds/re-escalates, the issue simply remains `GATED` and item 6.5 continues tracking its dependents (if any) unchanged.
 
