@@ -152,7 +152,7 @@ Resolve the staging→main PR number and post a routing marker immediately. This
 ```bash
 # Resolve PR_NUMBER from $ARGUMENTS
 # $ARGUMENTS may be: a PR number, "staging", "feature", or "staging:feature"
-# Only the first token is the PR ref; later tokens are flags (--auto-merge, --issue, ...)
+# Only the first token is the PR ref; later tokens are flags (--auto-merge, --issue, ...) <!-- allowlist:check-command-side-effects -->
 PR_ARG="${ARGUMENTS%% *}"
 PR_ARG_NUM=$(printf '%s' "$PR_ARG" | sed -nE 's#^(https?://[^ ]*/pull/)?([0-9]+)$#\2#p')
 if [ -n "$PR_ARG_NUM" ]; then

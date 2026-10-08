@@ -132,7 +132,7 @@ case "$PR_REF" in -*) PR_NUMBER=""; arg_i=0 ;; esac  # leading flag, no PR ref
 while [ "$arg_i" -lt "${#ARG_TOKENS[@]}" ]; do
   arg_t="${ARG_TOKENS[$arg_i]}"
   case "$arg_t" in
-    --auto-merge) AUTO_MERGE=true ;;
+    --auto-merge) AUTO_MERGE=true ;;  # flag parse only, no side effect <!-- allowlist:check-command-side-effects -->
     --thorough) THOROUGH=true ;;
     --issue) arg_i=$((arg_i + 1)); MERGE_ISSUE="${ARG_TOKENS[$arg_i]:-}" ;;
     --base) arg_i=$((arg_i + 1)); MERGE_BASE="${ARG_TOKENS[$arg_i]:-}" ;;
