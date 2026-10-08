@@ -74,3 +74,9 @@ Cite: #3205 / PR #3252.
 PR #3290 touched `orchestrate`. See FORGE:BUILDER comment on issue #3223 for full change list.
 Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
 Cite: #3223 / PR #3290.
+
+## Entry 2026-10-08 — Fix: orchestrate phase-1-resolve references nonexistent planP3Batches/summarizeP3BatchPlan (#3259)
+
+PR #3294 touched `orchestrate`. See FORGE:BUILDER comment on issue #3259 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3259 / PR #3294.
