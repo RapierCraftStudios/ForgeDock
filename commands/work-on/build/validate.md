@@ -161,7 +161,7 @@ SKIPPED_CHECKS=""
 # formatter, typechecker, or build cannot block validation indefinitely.
 # Set FORGEDOCK_VERIFICATION_TIMEOUT_SECONDS to override the 120-second default.
 run_verification_command() {
-    local label="$1" command="$2"
+    local label="${1}" command="${2}"
     local timeout_seconds="${FORGEDOCK_VERIFICATION_TIMEOUT_SECONDS:-120}"
     if ! [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
         echo "VERIFY-CONFIG | HIGH | timeout | FORGEDOCK_VERIFICATION_TIMEOUT_SECONDS must be a positive integer (got '$timeout_seconds')"
@@ -245,7 +245,7 @@ KNOWN_SLOW_TESTS=$(yq -o=json -I=0 '.verification.known_slow_tests // []' "$FORG
 # skip it entirely. Matching is substring match of `pattern` against the full
 # command text. Exactly one of skip/subset is expected per matched entry.
 apply_known_slow_filter() {
-  local cmd="$1"
+  local cmd="${1}"
   local out="$cmd"
   if [ -n "$KNOWN_SLOW_TESTS" ] && [ "$KNOWN_SLOW_TESTS" != "[]" ] && [ "$KNOWN_SLOW_TESTS" != "null" ]; then
     while IFS= read -r entry; do

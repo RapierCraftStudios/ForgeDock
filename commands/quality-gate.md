@@ -1714,7 +1714,7 @@ if [ -f "$CLASSIFIER" ]; then
         --retries 3 \
         2>&1)
     echo "$RESULT"
-    CLASSIFICATION=$(echo "$RESULT" | grep '^CLASSIFICATION:' | awk '{print $2}')
+    CLASSIFICATION=$(echo "$RESULT" | grep '^CLASSIFICATION:' | awk '{print $(2)}')
 else
     # Script not present — fall back to treating all test failures as real.
     CLASSIFICATION="REAL"

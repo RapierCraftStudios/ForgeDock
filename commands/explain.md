@@ -140,10 +140,10 @@ Extract each annotation block from the comments. Each `<!-- FORGE:TYPE -->` bloc
 ```bash
 # Helper: extract comment body containing a FORGE marker
 extract_forge() {
-  local marker="$1"
+  local marker="${1}"
   echo "$ALL_COMMENTS" | awk "
     /<!-- ${marker}(:[A-Z]*)? -->/{found=1; buffer=\"\"}
-    found {buffer = buffer \$0 ORS}
+    found {buffer = buffer \$(0) ORS}
     /<!-- ${marker}[^>]*:COMPLETE -->/{if(found){print buffer; found=0; buffer=\"\"}}
     END {if(found && length(buffer)>0) print buffer}
   "

@@ -112,7 +112,7 @@ if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac
   # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
   _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
   # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
   _m="$HOME/.claude/plugins/marketplaces/$_mk"
   # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
   _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
@@ -131,7 +131,7 @@ UNIVERSAL_DIR="${FORGE_ROOT:+$FORGE_ROOT/scripts}"   # empty => tier 3 skipped, 
 # to search the filesystem. <!-- Added: forge#1984 -->
 
 resolve_script() {
-  local operation="$1"
+  local operation="${1}"
   # Tier 2: per-repo adaptive (skip if disabled)
   if [ "$ADAPTIVE_ENABLED" != "false" ] && [ -f "${ADAPTIVE_DIR}/${operation}.sh" ]; then
     echo "adaptive:${ADAPTIVE_DIR}/${operation}.sh"
@@ -151,7 +151,7 @@ Workflow-state transitions use the tiered `transition-label` script (adaptive �
 
 ```bash
 set_workflow_state() {
-  local _issue="$1" _state="$2" _res _tier _path _s _rm=""
+  local _issue="${1}" _state="${2}" _res _tier _path _s _rm=""
   _res=$(resolve_script 'transition-label'); _tier="${_res%%:*}"; _path="${_res#*:}"
   case "$_tier" in
     adaptive|universal) bash "$_path" "$_issue" $GH_FLAG "$_state" ;;
@@ -189,8 +189,8 @@ fi
 # All agent comments (to reconstruct pipeline results) — one paginated read, reused below
 COMMENTS_JSON=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments 2>/dev/null | jq -s 'add // []' 2>/dev/null || echo '[]')
 [ -n "$COMMENTS_JSON" ] || COMMENTS_JSON='[]'
-last_comment_body() {  # $1 = marker substring; prints the newest matching comment body (or empty)
-  printf '%s' "$COMMENTS_JSON" | jq -r --arg m "$1" '[.[] | select(.body | contains($m)) | .body] | last // ""' 2>/dev/null
+last_comment_body() {  # ${1} = marker substring; prints the newest matching comment body (or empty)
+  printf '%s' "$COMMENTS_JSON" | jq -r --arg m "${1}" '[.[] | select(.body | contains($m)) | .body] | last // ""' 2>/dev/null
 }
 INVESTIGATOR_BODY=$(last_comment_body "FORGE:INVESTIGATOR")
 BUILDER_BODY=$(last_comment_body "FORGE:BUILDER")
@@ -207,7 +207,7 @@ FAST_PATH_BODY=$(last_comment_body "FORGE:FAST_PATH")
 
 ```bash
 # --- Lane: --base wins (staging -> fast, milestone/* -> feature); otherwise the PR's baseRefName; otherwise unknown ---
-lane_from_base() { case "$1" in staging) echo fast ;; milestone/*) echo feature ;; *) echo "" ;; esac; }
+lane_from_base() { case "${1}" in staging) echo fast ;; milestone/*) echo feature ;; *) echo "" ;; esac; }
 LANE=$(lane_from_base "$PR_BASE")
 [ -n "$LANE" ] || LANE=$(lane_from_base "$PR_BASE_REF")
 if [ -z "$LANE" ]; then
@@ -390,7 +390,7 @@ fi
 CHECKBOX_SECTIONS=$(printf '%s\n' "$BODY_STRIPPED" | awk '
   /^#+ / { if (in_section && has) n++; in_section=1; has=0; previous=""; next }
   /^(=+|-+)$/ && previous != "" { if (in_section && has) n++; in_section=1; has=0; previous=""; next }
-  { if (in_section && /^[-*+] \[[ xX]\]/) has=1; previous=$0 }
+  { if (in_section && /^[-*+] \[[ xX]\]/) has=1; previous=$(0) }
   END { if (in_section && has) n++; print n+0 }
 ')
 
@@ -1206,7 +1206,7 @@ Where:
 
 ```bash
 # Re-index this issue and regenerate cost priors — non-blocking
-# Resolve from the ForgeDock install root (FORGE_ROOT, from the script-resolution block) — never from $0, which is meaningless inside a skill
+# Resolve from the ForgeDock install root (FORGE_ROOT, from the script-resolution block) — never from ${0}, which is meaningless inside a skill
 INDEXER_PATH=""
 [ -n "${FORGE_ROOT:-}" ] && INDEXER_PATH="$FORGE_ROOT/scripts/build-knowledge-index.mjs"
 [ -f "$INDEXER_PATH" ] || INDEXER_PATH="$REPO_PATH/scripts/build-knowledge-index.mjs"

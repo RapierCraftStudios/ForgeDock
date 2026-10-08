@@ -456,7 +456,7 @@ for lang in python typescript go rust; do
                     --base "$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null | sed 's|origin/||' || echo main)" \
                     --retries 3 2>&1)
                 echo "$CL_RESULT"
-                CL=$(echo "$CL_RESULT" | grep '^CLASSIFICATION:' | awk '{print $2}')
+                CL=$(echo "$CL_RESULT" | grep '^CLASSIFICATION:' | awk '{print $(2)}')
                 if [ "$CL" = "PRE_BROKEN" ] || [ "$CL" = "FLAKY" ]; then
                     echo "ADVISORY (not blocking): ${lang} tests classified ${CL} — quarantined, does not block this review"
                 else
@@ -702,7 +702,7 @@ if [ "$BASH_AVAILABLE" = "true" ]; then
             | grep -E '^\s*-\s+' \
             | sed 's/^\s*-\s*//' \
             | tr -d '"'"'" \
-            | awk 'NR>1{printf "|"}{printf $0}END{print ""}')
+            | awk 'NR>1{printf "|"}{printf "%s", $(0)}END{print ""}')
     fi
     export FORGE_INTERNAL_PATTERNS
     echo "=== Running: verify-host-headers.sh ==="
@@ -731,7 +731,7 @@ echo "$CHANGED_FILES" | grep -E '\.py$' | while IFS= read -r f; do
     # Find function-scoped imports (indented import statements)
     grep -nE "^\s+import [a-z]" "$f" 2>/dev/null | while read line; do
         LINENO=$(echo "$line" | cut -d: -f1)
-        MODULE=$(echo "$line" | grep -oE "import [a-z_]+" | awk '{print $2}')
+        MODULE=$(echo "$line" | grep -oE "import [a-z_]+" | awk '{print $(2)}')
         # Check if the same module is used BEFORE this line in the same function
         # (simplified check — agents should do full scope analysis)
         [ -n "$MODULE" ] && head -n $((LINENO-1)) "$f" 2>/dev/null | grep -qE "^\s+.*\b${MODULE}\." && \
@@ -784,8 +784,8 @@ if [ -n "$WORKFLOW_FILES" ] || [ "$IS_STAGING_PR" = "true" ]; then
             # patterns simultaneously. The flag form sets p=1 on the header line,
             # prints body lines while p=1, and clears p when the next sibling job
             # header (same indentation, lowercase start) is seen. <!-- Added: forge#310 -->
-            CI_ENVS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$CI_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
-            DEPLOY_ENVS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$DEPLOY_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
+            CI_ENVS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $(0)~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$CI_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
+            DEPLOY_ENVS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $(0)~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$DEPLOY_WF" 2>/dev/null | grep -E "PYTHONPATH|DATABASE_URL|REDIS_URL|TESTING" | sed 's/^ *//' | sort)
 
             # Check for PYTHONPATH specifically — the exact var that caused the #11356 failure
             CI_PYPATH=$(echo "$CI_ENVS" | grep "PYTHONPATH" || echo "(not set)")
@@ -798,16 +798,16 @@ if [ -n "$WORKFLOW_FILES" ] || [ "$IS_STAGING_PR" = "true" ]; then
             fi
 
             # Check for dependency installation steps that exist in one but not the other
-            CI_INSTALLS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$CI_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
-            DEPLOY_INSTALLS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$DEPLOY_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
+            CI_INSTALLS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $(0)~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$CI_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
+            DEPLOY_INSTALLS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $(0)~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$DEPLOY_WF" 2>/dev/null | grep -c "poetry install\|pip install\|npm install" || echo 0)
             if [ "$CI_INSTALLS" != "$DEPLOY_INSTALLS" ]; then
                 echo "  WARNING: Different number of dependency install steps in '$JOB' — ci.yml has $CI_INSTALLS, deploy has $DEPLOY_INSTALLS"
                 echo "  ACTION: Read both files and verify all dependencies needed by tests are installed in both workflows."
             fi
 
             # Check step names — if CI has a step that deploy doesn't, flag it
-            CI_STEPS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$CI_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
-            DEPLOY_STEPS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $0~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$DEPLOY_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
+            CI_STEPS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $(0)~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$CI_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
+            DEPLOY_STEPS=$(awk -v pat="^  ${JOB}:" 'BEGIN{p=0} $(0)~pat{p=1; print; next} p && /^  [a-z]/{p=0} p{print}' "$DEPLOY_WF" 2>/dev/null | grep "- name:" | sed 's/.*- name: //' | sort)
             MISSING_IN_DEPLOY=$(comm -23 <(echo "$CI_STEPS") <(echo "$DEPLOY_STEPS") 2>/dev/null || true)
             if [ -n "$MISSING_IN_DEPLOY" ]; then
                 echo "  WARNING: Steps in ci.yml '$JOB' missing from deploy-production.yml:"
@@ -1026,7 +1026,7 @@ Pick the top 1-2 domain agents by score:
 DOMAIN_SCORES="$SCORE_AUTH:AUTH $SCORE_BILLING:BILLING $SCORE_CONCURRENCY:CONCURRENCY $SCORE_DATABASE:DATABASE $SCORE_INFRA:INFRA $SCORE_SCRAPING:SCRAPING $SCORE_FRONTEND:FRONTEND $SCORE_API:API"
 
 # Sort descending by score, pick top 2 with score > 0
-TOP_DOMAINS=$(echo "$DOMAIN_SCORES" | tr ' ' '\n' | sort -t: -k1 -rn | head -2 | awk -F: '$1 > 0 {print $2}' | tr '\n' ' ')
+TOP_DOMAINS=$(echo "$DOMAIN_SCORES" | tr ' ' '\n' | sort -t: -k1 -rn | head -2 | awk -F: '$(1) > 0 {print $(2)}' | tr '\n' ' ')
 for DOMAIN in $TOP_DOMAINS; do
     SELECTED_AGENTS="$SELECTED_AGENTS $DOMAIN"
 done
@@ -1053,7 +1053,7 @@ echo "=== BASELINE ROSTER (top domains): $SELECTED_AGENTS ==="
 ```bash
 # Apply escalation triggers
 add_agent() {
-    local AGENT="$1"
+    local AGENT="${1}"
     echo "$SELECTED_AGENTS" | grep -qw "$AGENT" || SELECTED_AGENTS="$SELECTED_AGENTS $AGENT"
 }
 
@@ -1065,7 +1065,7 @@ add_agent() {
 [ "$SCORE_SCRAPING" -ge 3 ] && [ -n "$DOMAIN_CONTEXT_SCRAPING" ] && add_agent "Scraping"
 [ "$CHURN_ESCALATION" = "true" ] && {
     # Add the top-scoring domain for deeper churn scrutiny if not already selected
-    TOP_CHURN_DOMAIN=$(echo "$DOMAIN_SCORES" | tr ' ' '\n' | sort -t: -k1 -rn | head -1 | awk -F: '{print $2}')
+    TOP_CHURN_DOMAIN=$(echo "$DOMAIN_SCORES" | tr ' ' '\n' | sort -t: -k1 -rn | head -1 | awk -F: '{print $(2)}')
     [ -n "$TOP_CHURN_DOMAIN" ] && add_agent "$TOP_CHURN_DOMAIN"
 }
 echo "$CONTRACT_RISK_FLAGS" | grep -q "HIGH_RISK" && {
@@ -1420,10 +1420,10 @@ fi
 # Build domain-scoped index slices for each selected agent's domain
 # Replace {DOMAIN} with the agent's domain label (auth, billing, database, api, frontend, etc.)
 build_index_slice() {
-  local domain="$1"
+  local domain="${1}"
   if [[ -x "$CODE_INDEX_SCRIPT" ]]; then
     local files
-    files=$(bash "$CODE_INDEX_SCRIPT" query --domain "$domain" --repo-path "$REPO_PATH" 2>/dev/null | awk -F'\t' '{print $1}' | head -30 | tr '\n' ' ')
+    files=$(bash "$CODE_INDEX_SCRIPT" query --domain "$domain" --repo-path "$REPO_PATH" 2>/dev/null | awk -F'\t' '{print $(1)}' | head -30 | tr '\n' ' ')
     echo "Domain files (${domain}): ${files:-none}"
   else
     echo "Code index not available — agent will use grep exploration"
@@ -1523,7 +1523,7 @@ DIFF_SLICE_SCRAPER=$(echo "$FULL_DIFF" | awk '
 ```bash
 # Truncate any slice exceeding 100K chars before passing to agent
 truncate_slice() {
-  local slice="$1"
+  local slice="${1}"
   local limit=102400
   if [ "${#slice}" -gt "$limit" ]; then
     echo "${slice:0:$limit}"
@@ -1706,7 +1706,7 @@ _cands="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_H
 for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
   [ -n "$_cfg" ] || continue
   _cands="$_cands
-$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$0}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
 done
 _cands="$_cands
 $PWD"
@@ -2161,7 +2161,7 @@ if [ "$MERGE_HEALTH" = "CONFLICTING" ] || [ "$MERGE_HEALTH_STATE" = "DIRTY" ] ||
 fi
 
 # Resolve attribution footer (forge.yaml → attribution.pr_footer)
-ATTRIBUTION_PR_FOOTER=$(grep -A5 "^attribution:" forge.yaml 2>/dev/null | grep "pr_footer:" | awk '{print $2}' | tr -d '"' || echo "false")
+ATTRIBUTION_PR_FOOTER=$(grep -A5 "^attribution:" forge.yaml 2>/dev/null | grep "pr_footer:" | awk '{print $(2)}' | tr -d '"' || echo "false")
 ATTRIBUTION_FOOTER_LINE=""
 if [ "$ATTRIBUTION_PR_FOOTER" = "true" ]; then
   ATTRIBUTION_FOOTER_LINE="
@@ -2358,7 +2358,7 @@ else
     # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
     _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
     # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-    _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+    _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
     _m="$HOME/.claude/plugins/marketplaces/$_mk"
     # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
     _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"

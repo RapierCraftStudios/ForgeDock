@@ -196,7 +196,7 @@ while IFS= read -r f; do
   awk '
     /trivy|snyk|owasp|dependency.check|gitleaks|semgrep|gosec|bandit/ {
       scanner_line = NR
-      scanner_name = $0
+      scanner_name = $(0)
     }
     /continue-on-error:\s*true/ && NR - scanner_line <= 5 && scanner_line > 0 {
       print FILENAME ":" NR ": continue-on-error: true near security scanner at line " scanner_line

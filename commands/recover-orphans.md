@@ -330,7 +330,7 @@ SWEEP_ID="sweep-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 # Both reads run under pipefail in a subshell: the pipeline status would otherwise be jq's, and a gh failure
 # (rate limit, 403) would yield "[]" with exit 0, indistinguishable from "no live holder".
 claim_orphan() {
-  local num="$1" now cutoff comments live resp
+  local num="${1}" now cutoff comments live resp
   [ "$DRY_RUN" = "true" ] && return 0   # dry-run: no claim comment is posted (callers already skip dry-run resumes)
   now=$(date -u +%s); cutoff=$(( now - RECOVERY_CLAIM_TTL_MIN * 60 ))
   comments=$(set -o pipefail; gh api --paginate "repos/${GH_REPO}/issues/${num}/comments" 2>/dev/null \
@@ -380,7 +380,7 @@ Holder: /recover-orphans — resuming /work-on #${num}. Other sweeps and dispatc
 # every time (an identical-body edit may not bump updated_at). Never carries FORGE:HEARTBEAT or the RELEASED marker.
 refresh_orphan() {
   [ "$DRY_RUN" = "true" ] && return 0
-  [ -n "${CLAIM_COMMENT_ID:-}" ] && [ "${CLAIM_HELD_NUM:-}" = "$1" ] || return 0
+  [ -n "${CLAIM_COMMENT_ID:-}" ] && [ "${CLAIM_HELD_NUM:-}" = "${1}" ] || return 0
   gh api -X PATCH "repos/${GH_REPO}/issues/comments/${CLAIM_COMMENT_ID}" \
     -f body="${CLAIM_BODY}
 Refreshed: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1 || true
@@ -390,7 +390,7 @@ Refreshed: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null 2>&1 || true
 start_claim_keepalive() {
   [ "$DRY_RUN" = "true" ] && return 0
   stop_claim_keepalive
-  local num="$1" interval=$(( RECOVERY_CLAIM_TTL_MIN * 60 / 3 ))
+  local num="${1}" interval=$(( RECOVERY_CLAIM_TTL_MIN * 60 / 3 ))
   [ "$interval" -ge 1 ] || interval=1
   ( while sleep "$interval"; do refresh_orphan "$num"; done ) >/dev/null 2>&1 &
   KEEPALIVE_PID=$!
@@ -408,9 +408,9 @@ stop_claim_keepalive() {
 release_orphan() {
   [ "$DRY_RUN" = "true" ] && return 0
   stop_claim_keepalive
-  [ "${CLAIM_HELD_NUM:-}" = "$1" ] || return 0
+  [ "${CLAIM_HELD_NUM:-}" = "${1}" ] || return 0
   unset CLAIM_HELD_NUM CLAIM_COMMENT_ID
-  gh issue comment "$1" ${GH_FLAG} --body "<!-- FORGE:RECOVERY_CLAIM_RELEASED -->
+  gh issue comment "${1}" ${GH_FLAG} --body "<!-- FORGE:RECOVERY_CLAIM_RELEASED -->
 **Sweep: ${SWEEP_ID}**
 Released by /recover-orphans." >/dev/null 2>&1 || true
 }
@@ -418,7 +418,7 @@ Released by /recover-orphans." >/dev/null 2>&1 || true
 # resume_orphan_inline <issue> — run after claim_orphan succeeded. The subshell EXIT trap releases the claim always:
 # on success and when the Skill call fails. The keepalive runs alongside the Skill call and is stopped by the release.
 resume_orphan_inline() {
-  local num="$1"
+  local num="${1}"
   (
     trap 'release_orphan "$num"' EXIT
     start_claim_keepalive "$num"

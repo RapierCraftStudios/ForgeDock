@@ -576,7 +576,7 @@ gh repo view "${OWNER}/${REPO}" --json name,url 2>/dev/null \
 ### 6B: Path existence
 
 ```bash
-[ -d "$(grep 'root:' "$FORGE_YAML" | head -1 | awk '{print $2}' | tr -d '"')" ] \
+[ -d "$(grep 'root:' "$FORGE_YAML" | head -1 | awk '{print $(2)}' | tr -d '"')" ] \
   && echo "✓ paths.root exists" \
   || echo "WARNING: paths.root does not exist on this machine"
 ```
@@ -588,7 +588,7 @@ gh repo view "${OWNER}/${REPO}" --json name,url 2>/dev/null \
 ```bash
 # Only run if project_board section was written
 if grep -q "^project_board:" "$FORGE_YAML"; then
-  PROJECT_ID=$(grep "project_id:" "$FORGE_YAML" | head -1 | awk '{print $2}' | tr -d '"')
+  PROJECT_ID=$(grep "project_id:" "$FORGE_YAML" | head -1 | awk '{print $(2)}' | tr -d '"')
   # Validate PVT_ prefix before GraphQL call — any other format will produce a confusing API error
   if [[ "$PROJECT_ID" != PVT_* ]]; then
     echo "ERROR: project_board.project_id must start with 'PVT_' (got: '$PROJECT_ID')"
@@ -610,7 +610,7 @@ fi
 if grep -q "^repos:" "$FORGE_YAML"; then
   # Extract satellite repo names and verify each is accessible
   grep -A 20 "^repos:" "$FORGE_YAML" | grep "repo:" | tail -n +2 | while read -r line; do
-    SAT_REPO=$(echo "$line" | awk '{print $2}' | tr -d '"')
+    SAT_REPO=$(echo "$line" | awk '{print $(2)}' | tr -d '"')
     gh repo view "$SAT_REPO" --json name 2>/dev/null \
       && echo "✓ satellite repo ${SAT_REPO} accessible" \
       || echo "WARNING: satellite repo ${SAT_REPO} not accessible — check prefix and repo name"

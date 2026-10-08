@@ -70,7 +70,9 @@ check 0 "SKIP allow.md:2 allowlisted"   "allowlisted fragment skipped"         -
 check 0 "checked=0 failed=0"            "non-bash fence ignored"               -- notbash.md
 check 1 "FAIL prose-mention.md:2"      "prose mention of the marker does not allowlist" -- prose-mention.md
 check 1 "checked=2 failed=1 skipped=1"  "multi-file summary"                   -- good.md bad.md pseudo.md
-check 2 ""                              "no files is a usage error"            --
+check 0 "SPEC-POSITIONAL: files="       "no args defaults to --positional over commands/" --
+check 0 "SPEC-POSITIONAL: files="       "--positional with no files uses the default set" -- --positional
+check 2 ""                              "--shellcheck alone is a usage error"  -- --shellcheck
 check 2 ""                              "unknown flag"                         -- --bogus good.md
 
 # --base: only blocks touching changed lines are checked, so pre-existing breakage never fails a change.
@@ -85,6 +87,27 @@ for x in a b; do
 ${FENCE}
 EOF
 check 1 "FAIL good.md:"                 "--base: newly added broken block fails" -- --base HEAD good.md
+
+# --positional: $0-$9 inside fences are flagged; ${N}, $(N), $NF, prose and allowlisted lines are not.
+cat > "$T/pos-bad.md" <<EOF
+${FENCE}bash
+X=\$(echo a b | awk '{print \$2}')
+local a="\$1"
+${FENCE}
+EOF
+cat > "$T/pos-good.md" <<EOF
+Prose mentions \$1 and \$2 freely.
+${FENCE}bash
+X=\$(echo a b | awk '{print \$(2) \$NF}')
+local a="\${1}" b="\$@" n="\$#"
+echo \$10
+y=\$1 # allowlist:positional-arg
+${FENCE}
+EOF
+check 1 "FAIL pos-bad.md:2"             "--positional flags awk \$2"            -- --positional pos-bad.md
+check 1 "FAIL pos-bad.md:3"             "--positional flags shell \$1"          -- --positional pos-bad.md
+check 1 "violations=2"                  "--positional counts violations"       -- --positional pos-bad.md
+check 0 "violations=0"                  "--positional passes safe forms, prose, allowlist" -- --positional pos-good.md
 
 echo "check-spec-bash.test.sh: passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
