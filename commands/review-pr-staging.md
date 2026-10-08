@@ -44,9 +44,9 @@ fi
 
 When `IS_OPENCODE_RUNTIME=true`, lowercase native `task` is the preferred isolated dispatch tool. Do not enter the `Neither tool is available` branch merely because Claude's literal `Task` and `Agent` names are absent. Every native task call must use a top-level `subagent_type`: `general` for implementation/review work and `explore` for read-only discovery (Claude `general-purpose` and `codebase-explorer` map to those values). Review tasks are foreground: wait for their completed result before synthesis. If the native `task` capability itself is absent from the current tool registry, use the existing hard-stop path and post `FORGE:REVIEW_BLOCKED`; never substitute inline review.
 
-1. **If `Task` is available in the current environment**: set `{DISPATCH_TOOL} = Task`. This is the preferred tool — tightest `allowed-tools` scoping. (Identical resolution logic to `/review-pr` Phase 3C — do not diverge.)
+1. **If `Task` is available in the current environment**: set `{DISPATCH_TOOL} = Task`. This is the preferred tool — tightest `allowed-tools` scoping. (Same resolution as `/review-pr`; keep the two in step.)
 2. **Else if `Agent` is available**: set `{DISPATCH_TOOL} = Agent`. This is the documented fallback, not a degraded path — use it exactly as you would `Task`: one call per selected agent (Bug Hunters in Phase 3, Code Quality in Phase 4, domain agents in Phase 5), same prompt template, `subagent_type: "general-purpose"` (or the closest equivalent the environment offers), same requirement that each agent posts its own findings directly to the PR via `gh pr comment`. Isolation and fresh-context review are preserved either way.
-3. **Neither tool is available**: this is a genuine setup defect, not a routing decision — HARD STOP, post a PR/issue comment explaining that no sub-agent dispatch tool is available, add `needs-human`, and exit without posting a verdict. Do NOT fall back to reviewing inline in the orchestrator's own context.
+3. **Neither tool is available**: HARD STOP, post a PR/issue comment explaining that no sub-agent dispatch tool is available, add `needs-human`, and exit without posting a verdict. Do NOT fall back to reviewing inline in the orchestrator's own context. Most often the cause is the sub-agent spawn-depth limit, not a broken install: a fork at layer 3 or deeper has no `Agent` tool (F1/F5 of `docs/WORK-ON-RUNTIME.md`), which happens when a dispatching phase was invoked from inside a fork instead of by the router (R1) or when the depth preflight (R4, `scripts/spawn-depth-check.sh`) was skipped. Name that cause in the posted comment when `scripts/spawn-depth-check.sh` reports `FAIL` or the invocation is nested, and tell the operator to re-run the phase from the router at a shallower layer or raise `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`.
 4. **Dispatch pool exhausted or dispatch call fails**: this is not tool absence. If any Bug Hunter, quality, domain, material-change, or regression reviewer cannot be launched because the sub-agent pool/session limit is exhausted (or any dispatch call fails), HARD STOP. Do not substitute inline review or silently continue with a partial panel. Mark the PR `review-degraded`, post `<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity -->` with the selected and completed counts, and exit without a deploy verdict. A fresh session must re-run the full panel.
 
 **Do not halt to ask the operator which tool to use.** Steps 1–2 are deterministic and fully resolve the common case; only step 3 (both absent) requires a stop, and even then the action is HARD STOP + `needs-human`, not a question back to the operator.
@@ -504,38 +504,23 @@ gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:code-qu
 
 **MANDATORY TEMPLATE-RESOLUTION GUARD — run BEFORE reading the agent catalog:**
 
-Missing persona templates are a fatal setup error, not permission to skip multi-agent review. Resolve the template source through this ordered chain (identical to the one used by `/review-pr` Phase 3C — do not diverge) and STOP if none resolve — never fall through to reviewing inline in the main context:
+Missing persona templates are a fatal setup error, not permission to skip multi-agent review. Resolve the template source through this ordered chain (the shared `scripts/resolve-review-templates.sh`, also used by `/review-pr` Phase 3C) and STOP if none resolve — never fall through to reviewing inline in the main context:
 
 ```bash
-TEMPLATE_BASE=""
-# Tier 0: the running plugin's own root (Claude Code substitutes this exact spelling; elsewhere it stays a
-# literal that the /* check rejects). Wins over an exported FORGE_HOME, which may name an older checkout.
-_PLUGIN_ROOT='${CLAUDE_PLUGIN_ROOT}'; case "$_PLUGIN_ROOT" in /*) ;; *) _PLUGIN_ROOT="" ;; esac
-if [[ -n "$_PLUGIN_ROOT" && -f "$_PLUGIN_ROOT/commands/review-pr-agents/protocols.md" ]]; then
-  TEMPLATE_BASE="$_PLUGIN_ROOT/commands/review-pr-agents"
-  TEMPLATE_SOURCE="plugin_root"
-elif [[ -f "$FORGE_HOME/commands/review-pr-agents/protocols.md" ]]; then
-  TEMPLATE_BASE="$FORGE_HOME/commands/review-pr-agents"
-  TEMPLATE_SOURCE="forge_home"
-else
-  FORGE_YAML="${FORGE_CONFIG:-$(git rev-parse --show-toplevel 2>/dev/null)/forge.yaml}"
-  REPO_PATH=$(yq '.paths.root' "$FORGE_YAML" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || pwd)
-  if [[ -f "$REPO_PATH/commands/review-pr-agents/protocols.md" ]]; then
-    TEMPLATE_BASE="$REPO_PATH/commands/review-pr-agents"
-    TEMPLATE_SOURCE="repo_path"
-  elif [[ -f "$REPO_PATH/commands/review-pr-agents.md" ]] && grep -q "^### Agent:" "$REPO_PATH/commands/review-pr-agents.md" 2>/dev/null; then
-    # Content check (not just existence) required: a post-split repo still ships a small
-    # router stub at this same path that only points back to the (missing) persona
-    # directory — reading it would provide no actual protocol/persona content.
-    MONOLITHIC_CATALOG="$REPO_PATH/commands/review-pr-agents.md"
-    TEMPLATE_SOURCE="monolithic_catalog"
-  else
-    TEMPLATE_SOURCE="none"
-  fi
-fi
-
+# One shared resolver (scripts/resolve-review-templates.sh) for /review-pr and /review-pr-staging.
+# Tiers: running plugin root, $FORGE_HOME, repo path (forge.yaml paths.root), monolithic catalog. forge#3405
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+RESOLVER=""
+for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock" "$PWD"; do
+  case "$_c" in /*) [ -z "$RESOLVER" ] && [ -f "$_c/scripts/resolve-review-templates.sh" ] && RESOLVER="$_c/scripts/resolve-review-templates.sh" ;; esac
+done
+TEMPLATE_OUT=""; [ -n "$RESOLVER" ] && TEMPLATE_OUT=$(bash "$RESOLVER" --plugin-root '${CLAUDE_PLUGIN_ROOT}')
+TEMPLATE_SOURCE=$(printf '%s\n' "$TEMPLATE_OUT" | sed -n 's/^TEMPLATE_SOURCE=//p' | sed -n '1p')
+TEMPLATE_BASE=$(printf '%s\n' "$TEMPLATE_OUT" | sed -n 's/^TEMPLATE_BASE=//p' | sed -n '1p')
+MONOLITHIC_CATALOG=$(printf '%s\n' "$TEMPLATE_OUT" | sed -n 's/^MONOLITHIC_CATALOG=//p' | sed -n '1p')
+[ -n "$TEMPLATE_SOURCE" ] || TEMPLATE_SOURCE="none"   # resolver itself unresolvable counts as none
 if [[ "$TEMPLATE_SOURCE" == "none" ]]; then
-  echo "FATAL: no review-pr-agents template source resolved (checked \$FORGE_HOME, repo-path fallback, monolithic catalog)."
+  echo "FATAL: no review-pr-agents template source resolved (checked the plugin root, \$FORGE_HOME, repo-path fallback, monolithic catalog)."
   # HARD STOP — post error, add needs-human, do NOT review
 fi
 ```

@@ -648,6 +648,18 @@ These are invoked automatically by `/work-on` but can also be run standalone.
 | `/review-pr-agents/api` | Phase 3C | API/SDK contract auditor (API domain) |
 | `/review-pr-agents/scraper` | Phase 3C | Scraping/anti-bot auditor (SCRAPING domain) |
 
+`/review-pr` (core) also reads the following conditional fragments from `commands/review-pr/` at runtime, only when each phase's trigger holds. They ship as part of every install alongside `/review-pr` — not user-invokable directly.
+
+| Command | Phase | Purpose |
+|---------|-------|---------|
+| `/review-pr/assumption-verification` | Step 2.5B | Assumption verification scripts |
+| `/review-pr/build-verification` | Phase 2I | Build verification (TypeScript and Python) |
+| `/review-pr/provenance-trust` | Phase 3B.5 | Provenance-based trust escalation |
+| `/review-pr/purpose-regression` | Phase 7A | Purpose regression gate (milestone PRs) |
+| `/review-pr/calibration` | Phase 7B.5 | Calibration threshold consultation |
+| `/review-pr/milestone-demilestoning` | Phase 8B / 9A | Post-merge review-finding demilestoning (milestone to staging PRs) |
+| `/review-pr/welcome` | Phase 9 | New-contributor welcome comment |
+
 `/orchestrate` (core) reads the following phase files from `commands/orchestrate/` at runtime. They ship as part of every install alongside `/orchestrate` — not user-invokable directly.
 
 | Command | Phase | Purpose |
