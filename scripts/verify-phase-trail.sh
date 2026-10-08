@@ -9,7 +9,7 @@
 # verdict alone after phases were silently skipped.
 #
 # Usage:
-#   verify-phase-trail.sh <issue> -R <owner/repo> [--docs-only] [--code-diff] [--head-tree <sha>]
+#   verify-phase-trail.sh <issue> -R <owner/repo> [--docs-only] [--code-diff] [--head-tree <sha>] [--head-sha <sha>]
 #
 #   --docs-only   The diff is documentation-only; the FORGE:QUALITY_GATE marker
 #                 is not required.
@@ -22,6 +22,9 @@
 #                 An empty or non-hex value is a usage error (exit 2, fails closed).
 #                 Scope: this binds the PASS to the built tree; it is not tamper-proof, because the
 #                 pipeline agent posts under the same trusted identity and could compute the tree itself.
+#   --head-sha    Commit id (40 or 64 hex) of the head being gated. Enables the human break-glass
+#                 override (below); without it an override comment is never evaluated. An empty or
+#                 non-hex value is a usage error (exit 2, fails closed).
 #
 # Requirements by COMPLEXITY_BAND (read from the FORGE:FAST_PATH comment).
 # The authoritative table is the `case "$EFFECTIVE"` block below; this summary must be
@@ -38,9 +41,14 @@
 #   PHASE_TRAIL: PASS|FAIL|ERROR
 #   BAND: <band>
 #   MISSING: <marker> -> <phase to re-run>      (one line per missing artifact)
+#   PHASE_TRAIL: OVERRIDDEN                     (exit 0 via an accepted break-glass override)
+#   WAIVED: <marker list>                       (the MISSING set the override waived)
+#   OVERRIDE: approver=<login> head=<sha> missing=<list> reason=<sanitised>
+#                                               (the ONLY source callers use to record the override)
 #
-# Exit codes: 0 pass, 1 one or more artifacts missing, 2 could not
+# Exit codes: 0 pass (or accepted override), 1 one or more artifacts missing, 2 could not
 # read the issue (fails closed — an unreadable trail is never treated as a pass).
+# Exit 2 is NEVER overridable: override evaluation only runs on the exit-1 (MISSING) path.
 # Callers route on the exit code: 1 -> re-run the MISSING phases; 2 (or 127 when the
 # verifier itself cannot be resolved) -> infrastructure BLOCKED, never "missing phases".
 #
@@ -67,6 +75,27 @@
 # Limits: "Bot" trusts any GitHub App/bot that can comment on the repo (set
 # FORGE_TRAIL_TRUSTED_ASSOCIATIONS and FORGE_TRAIL_TRUSTED_LOGINS to tighten);
 # COLLABORATOR includes read-level collaborators; login matching is case-sensitive.
+#
+# Break-glass override (#3152): a misfiring gate can be cleared by a HUMAN, never by the pipeline.
+# A comment whose body starts with `<!-- FORGE:PHASE_TRAIL_OVERRIDE -->` and carries the lines
+#   **Head**: <full head sha>
+#   **Missing**: <marker names, comma separated>
+#   **Reason**: <one line>
+# is honoured only when ALL of these hold (any error, null field or API failure rejects it and the
+# gate stays at exit 1; never a pass):
+#   - user.type == "User" (allowlist: Bots and null users are rejected) with a plain login;
+#   - updated_at == created_at (an edited comment is rejected: tamper evidence);
+#   - the author has repo permission admin or write (collaborators/<login>/permission), not mere
+#     org membership or read access;
+#   - the author is NOT a pipeline identity: FORGE_TRAIL_PIPELINE_LOGINS (comma-separated, case-insensitive)
+#     plus the author of every trusted FORGE marker comment (BUILDER, INVESTIGATOR, CONTRACT, ...), so a
+#     pipeline running under a human token cannot approve its own gate. A solo operator therefore needs a
+#     second human with write access to post the override;
+#   - **Head** equals --head-sha and **Missing** equals the current MISSING marker-name set exactly
+#     (a new commit or a different failure invalidates it);
+#   - created_at is later than the latest trusted FORGE:BUILDER:COMPLETE update time.
+# The reason is sanitised (control chars stripped, comment markers neutralised, whitespace collapsed,
+# capped at 200 chars); an empty reason rejects the override.
 # END-HELP (`-h` prints the header up to this line; keep it last)
 
 set -uo pipefail
@@ -77,6 +106,8 @@ DOCS_ONLY=0
 CODE_DIFF=0
 HEAD_TREE=""
 HEAD_TREE_SET=0
+HEAD_SHA=""
+HEAD_SHA_SET=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -88,6 +119,9 @@ while [ $# -gt 0 ]; do
     --head-tree)
       if [ $# -lt 2 ]; then echo "PHASE_TRAIL: ERROR"; echo "usage error: $1 needs a value" >&2; exit 2; fi
       HEAD_TREE="$2"; HEAD_TREE_SET=1; shift 2 ;;
+    --head-sha)
+      if [ $# -lt 2 ]; then echo "PHASE_TRAIL: ERROR"; echo "usage error: $1 needs a value" >&2; exit 2; fi
+      HEAD_SHA="$2"; HEAD_SHA_SET=1; shift 2 ;;
     -h|--help) awk 'NR >= 5 { if (/^# END-HELP/) exit; print }' "$0"; exit 0 ;;
     *)
       if [ -z "$ISSUE" ] && [[ "$1" =~ ^[0-9]+$ ]]; then ISSUE="$1"; shift
@@ -98,7 +132,7 @@ done
 
 if [ -z "$ISSUE" ] || [ -z "$REPO" ]; then
   echo "PHASE_TRAIL: ERROR"
-  echo "usage: verify-phase-trail.sh <issue> -R <owner/repo> [--docs-only] [--code-diff] [--head-tree <sha>]" >&2
+  echo "usage: verify-phase-trail.sh <issue> -R <owner/repo> [--docs-only] [--code-diff] [--head-tree <sha>] [--head-sha <sha>]" >&2
   exit 2
 fi
 if [ "$HEAD_TREE_SET" = "1" ]; then
@@ -107,6 +141,16 @@ if [ "$HEAD_TREE_SET" = "1" ]; then
   if ! [[ "$HEAD_TREE" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
     echo "PHASE_TRAIL: ERROR"
     echo "usage error: --head-tree needs a 40 or 64 hex git tree id" >&2
+    exit 2
+  fi
+fi
+
+if [ "$HEAD_SHA_SET" = "1" ]; then
+  # Fail closed: a caller that could not resolve the head passes an empty value and must not silently skip the binding.
+  HEAD_SHA=$(printf '%s' "$HEAD_SHA" | tr 'A-F' 'a-f')
+  if ! [[ "$HEAD_SHA" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+    echo "PHASE_TRAIL: ERROR"
+    echo "usage error: --head-sha needs a 40 or 64 hex commit id" >&2
     exit 2
   fi
 fi
@@ -259,6 +303,81 @@ if [ "${#MISSING[@]}" -eq 0 ]; then
   echo "PHASE_TRAIL: PASS"
   echo "BAND: ${BAND:-UNKNOWN}"
   [ -n "${LEGACY_NOTE:-}" ] && echo "NOTE: $LEGACY_NOTE"
+  [ -n "${BAND_NOTE:-}" ] && echo "NOTE: $BAND_NOTE"
+  exit 0
+fi
+
+# --- Break-glass override (#3152) ---------------------------------------------------------------
+# Reached ONLY with a non-empty MISSING set (exit-1 path); every `exit 2` above precedes it.
+# Prints the OVERRIDE/WAIVED lines and returns 0 only when a comment passes every rule; any failure
+# (jq error, permission API error, empty field) returns 1 and the caller falls through to FAIL.
+# Name set normaliser shared by BOTH sides of the comparison: drops ` -> action` and `(qualifier)`,
+# trims, de-duplicates, sorts, joins with commas. bash 3.2/BSD portable.
+norm_set() {
+  sed -e 's/ -> .*$//' -e 's/([^)]*)//g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    | grep -v '^$' | LC_ALL=C sort -u | paste -sd, -
+}
+
+evaluate_override() {
+  [ "$HEAD_SHA_SET" = "1" ] || return 1
+  local cur_set cands pipeline_logins login created head missing reason perm n=0
+  cur_set=$(printf '%s\n' "${MISSING[@]}" | norm_set) || return 1
+  [ -n "$cur_set" ] || return 1
+  # BUILDER exists but its completion time is unknown -> cannot prove the override is newer: reject.
+  if has '<!-- FORGE:BUILDER -->' && [ -z "$BUILD_AT" ]; then return 1; fi
+  # Pipeline identity set (configured + derived): authors of trusted FORGE marker comments other than overrides.
+  pipeline_logins=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" --arg extra "${FORGE_TRAIL_PIPELINE_LOGINS-}" '
+    ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
+    | ($logins | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $L
+    | ($extra | split(",") | map(gsub("^\\s+|\\s+$"; "") | ascii_downcase) | map(select(length > 0))) as $E
+    | ( [ .[]
+          | select(
+              ((.author_association // "") as $x | $A | index($x) != null)
+              or ((.user.type // "") == "Bot")
+              or ((.user.login // "") as $x | $L | index($x) != null))
+          | select((.body // "") | startswith("<!-- FORGE:") and (startswith("<!-- FORGE:PHASE_TRAIL_OVERRIDE -->") | not))
+          | (.user.login // empty) | ascii_downcase ] + $E ) | unique | .[]' 2>/dev/null) || return 1
+  # Candidates, newest first, as TSV: login created_at head missing reason (reason last, others never empty).
+  cands=$(printf '%s' "$RAW" | jq -r --arg bt "$BUILD_AT" '
+    def clean: explode | map(select(. >= 32 and . != 127 and (. < 128 or . > 159) and (. < 8203 or . > 8207) and (. < 8234 or . > 8238) and (. < 8288 or . > 8297) and . != 65279)) | implode;
+    [ .[]
+      | select((.body // "") | startswith("<!-- FORGE:PHASE_TRAIL_OVERRIDE -->"))
+      | select((.user.type // "") == "User")
+      | select(((.user.login // "") | test("^[A-Za-z0-9-]+$")))
+      | select((.created_at // "") != "" and (.updated_at // "") != "" and .created_at == .updated_at)
+      | select($bt == "" or .created_at > $bt)
+      | (.body | split("\n") | map(sub("\r$"; ""))) as $ln
+      | { login: .user.login, at: .created_at,
+          head: ([$ln[] | capture("^\\*\\*Head\\*\\*: *(?<v>[0-9A-Fa-f]{40,64}) *$")?.v] | .[0] // "-"),
+          missing: ([$ln[] | capture("^\\*\\*Missing\\*\\*: *(?<v>.+)$")?.v] | .[0] // "-"),
+          reason: ([$ln[] | capture("^\\*\\*Reason\\*\\*: *(?<v>.*)$")?.v] | .[0] // "")
+            | clean | gsub("<!--"; "<!-/-") | gsub("-->"; "-/->") | gsub("`"; "'"'"'")
+            | gsub("\\s+"; " ") | sub("^ "; "") | sub(" $"; "") | .[0:200] } ]
+    | sort_by(.at) | reverse | .[]
+    | [.login, .at, .head, .missing, (if .reason == "" then "-" else .reason end)] | @tsv' 2>/dev/null) || return 1
+  [ -n "$cands" ] || return 1
+  while IFS=$'\t' read -r login created head missing reason; do
+    [ -n "$login" ] || continue
+    n=$((n+1)); [ "$n" -le 5 ] || break          # bound API calls
+    [ "$reason" != "-" ] && [ -n "$reason" ] || continue
+    reason=$(printf '%s' "$reason" | tr -d '[:cntrl:]')   # belt and braces: cntrl (incl. ESC) stripped again
+    [ -n "$reason" ] || continue
+    [ "$(printf '%s' "$head" | tr 'A-F' 'a-f')" = "$HEAD_SHA" ] || continue
+    [ "$(printf '%s' "$missing" | tr ',' '\n' | norm_set)" = "$cur_set" ] || continue
+    if printf '%s\n' "$pipeline_logins" | grep -Fx -- "$(printf '%s' "$login" | tr 'A-Z' 'a-z')" >/dev/null; then continue; fi
+    # Login already matched ^[A-Za-z0-9-]+$ in jq, so it is safe to interpolate into the API path.
+    perm=$(gh api "repos/${REPO}/collaborators/${login}/permission" 2>/dev/null | jq -r '.permission // empty' 2>/dev/null) || perm=""
+    case "$perm" in admin|write) ;; *) continue ;; esac
+    echo "PHASE_TRAIL: OVERRIDDEN"
+    echo "BAND: ${BAND:-UNKNOWN}"
+    echo "WAIVED: ${cur_set}"
+    echo "OVERRIDE: approver=${login} head=${HEAD_SHA} missing=${cur_set} reason=${reason}"
+    return 0
+  done <<< "$cands"
+  return 1
+}
+
+if evaluate_override; then
   [ -n "${BAND_NOTE:-}" ] && echo "NOTE: $BAND_NOTE"
   exit 0
 fi

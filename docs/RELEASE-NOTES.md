@@ -2,6 +2,12 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Phase-trail break-glass override (forge#3152)
+
+A human can now clear a misfiring phase-trail gate with a `FORGE:PHASE_TRAIL_OVERRIDE` comment instead of a revert or manual merge. The override is bound to the head commit and the exact MISSING set, must be newer than the latest `FORGE:BUILDER:COMPLETE`, must be unedited, and must come from a human with repo write/admin permission who is not a pipeline identity. The verifier takes a new `--head-sha` flag, and the accepted override is recorded on the PR by code. Exit 2 (unreadable trail) is never overridable.
+
+Action: optionally set `FORGE_TRAIL_PIPELINE_LOGINS` to the pipeline's own login(s). A solo operator running the pipeline under their own token cannot self-approve; a second human with write access must post the override. Format and rules are in [CONFIG.md](CONFIG.md).
+
 ## Staging to main bundle (PR #3120)
 
 ### Amplification breaker is on by default

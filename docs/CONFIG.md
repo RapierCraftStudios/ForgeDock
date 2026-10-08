@@ -861,6 +861,7 @@ These variables are read from the operator's runner environment, not from `forge
 | `FORGE_SKILL_NAMESPACE` | auto-detected | Forces the skill prefix and nesting separator for `Skill(...)` calls. `forgedock` = `forgedock:` / `:`; `none` = empty / `:`; `codex` = `forge-` / `-`; `opencode` = empty / `-`. Any other value is an error. When unset, `FORGE_RUNTIME` (`codex` or `opencode`) is used, then the available-skills list. |
 | `FORGE_TRAIL_TRUSTED_LOGINS` | empty | Comma-separated GitHub logins whose FORGE markers count toward the phase-trail merge gate. Matching is case-sensitive. |
 | `FORGE_TRAIL_TRUSTED_ASSOCIATIONS` | `OWNER,MEMBER,COLLABORATOR` | Comma-separated `author_association` values whose FORGE markers count toward the merge gate. |
+| `FORGE_TRAIL_PIPELINE_LOGINS` | empty | Comma-separated GitHub logins (case-insensitive) that are the pipeline's own identity and can never approve a phase-trail break-glass override. The authors of trusted FORGE marker comments on the issue are added automatically. |
 | `FORGE_TRAIL_QG_SINCE` | `2026-10-07T03:40:12Z` | ISO-8601 UTC cutoff for the legacy `FORGE:QUALITY_GATE` grace. An issue whose trusted `FORGE:BUILDER:COMPLETE` comment was last updated before this time has `QUALITY_GATE` waived. Set to an empty string to disable the grace. A malformed or future value (including a runner clock earlier than this default) fails closed: the verifier exits 2, an infrastructure block rather than `MISSING`. |
 
 ### Install root resolution
@@ -877,6 +878,18 @@ Pipelines that run under a human login with association `CONTRIBUTOR`, `NONE` or
 export FORGE_TRAIL_TRUSTED_LOGINS="my-pipeline-login,other-login"   # preferred: name the identity
 export FORGE_TRAIL_TRUSTED_ASSOCIATIONS="OWNER,MEMBER,COLLABORATOR,CONTRIBUTOR"   # broader
 ```
+
+#### Break-glass override
+
+A misfiring phase-trail gate can be cleared by a human without a revert or manual merge. Post a comment on the issue that starts with `<!-- FORGE:PHASE_TRAIL_OVERRIDE -->` and has these lines:
+
+```
+**Head**: <full 40/64-hex head commit>
+**Missing**: <the MISSING marker names, comma separated, e.g. CONTEXT,ARCHITECT>
+**Reason**: <one line>
+```
+
+`scripts/verify-phase-trail.sh` honours it only when the verifier would otherwise exit 1 and every rule holds: the author is `user.type == "User"` with repo `admin` or `write` permission; the author is not a pipeline identity (`FORGE_TRAIL_PIPELINE_LOGINS` plus the authors of the issue's trusted FORGE marker comments, so a pipeline running under a human token cannot approve itself, and a solo operator needs a second human with write access); the comment was never edited (`updated_at == created_at`); `**Head**` equals the commit being gated (passed as `--head-sha`) and `**Missing**` equals the current MISSING set; and the comment is newer than the latest `FORGE:BUILDER:COMPLETE`. Any API error or missing field rejects it. An unreadable trail (exit 2) is never overridable. The reason is sanitized (control characters stripped, comment markers neutralized, capped at 200 characters) and `/review-pr` and `/work-on` record the accepted override as `FORGE:PHASE_TRAIL_OVERRIDE_APPLIED` from the verifier's output. A new commit invalidates the override: post a new one for the new head.
 
 Limits: `Bot` trusts any GitHub App or bot able to comment on the repo, and `COLLABORATOR` includes read-level collaborators. Tighten with the two variables above if that is too broad. An earlier `FORGE_TRAIL_QG_SINCE` waives `QUALITY_GATE` for every build completed before it, so never derive it from untrusted input.
 
