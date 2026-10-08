@@ -64,6 +64,7 @@ jobs:
           /bin/bash scripts/lint-build-validate-files.test.sh
           /bin/bash scripts/verify-phase-trail.test.sh
           /bin/bash scripts/trusted-comments.test.sh
+          /bin/bash scripts/remediation-marker-match.test.sh
           /bin/bash scripts/classify-finding.test.sh
           /bin/bash scripts/amplification-breaker.test.sh
           /bin/bash scripts/check-spec-bash.test.sh
@@ -83,7 +84,9 @@ jobs:
           command -v zsh && zsh --version
           FORGE_ROOT_TEST_SHELLS="bash zsh" /bin/bash scripts/forge-root.test.sh
       - name: Run trusted-comments.test.sh
-        run: bash scripts/trusted-comments.test.sh
+        run: |
+          bash scripts/trusted-comments.test.sh
+          bash scripts/remediation-marker-match.test.sh
       - name: Run verify-phase-trail.test.sh
         if: runner.os != 'macOS'
         run: bash scripts/verify-phase-trail.test.sh
@@ -125,7 +128,9 @@ jobs:
           bash scripts/lint-dispatch-prompt.test.sh
           bash scripts/lint-build-validate-files.test.sh
       - name: Run trusted-comments.test.sh
-        run: bash scripts/trusted-comments.test.sh
+        run: |
+          bash scripts/trusted-comments.test.sh
+          bash scripts/remediation-marker-match.test.sh
       - name: Run verify-phase-trail.test.sh
         run: bash scripts/verify-phase-trail.test.sh
       - name: Run classify-finding.test.sh and amplification-breaker.test.sh

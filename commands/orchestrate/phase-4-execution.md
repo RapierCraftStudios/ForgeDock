@@ -2292,8 +2292,17 @@ done
        # Idempotency guard: only one remediation attempt per PR, ever (single-attempt
        # semantics — remediate.md's own Phase M0 enforces this too, but checking here
        # avoids spawning a redundant agent that would immediately no-op on entry).
-       ALREADY_REMEDIATED=$(gh api repos/{GH_REPO}/issues/${GATING_PR}/comments \
-         --jq '[.[] | select(.body | contains("FORGE:REMEDIATION"))] | length' 2>/dev/null || echo "0")
+       # Leading-marker + trusted-author count (forge#3412): a comment that merely quotes FORGE:REMEDIATION
+       # (review findings, INPR_FIX work order) must not suppress dispatch. Unreadable => skip dispatch (fail closed).
+       _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+       TRUSTED_SCRIPT=""
+       for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l"; do
+         case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+       done
+       ALREADY_REMEDIATED=1
+       if [ -n "$TRUSTED_SCRIPT" ] && GATING_COMMENTS=$(gh api --paginate repos/{GH_REPO}/issues/${GATING_PR}/comments 2>/dev/null); then
+         ALREADY_REMEDIATED=$(printf '%s' "$GATING_COMMENTS" | bash "$TRUSTED_SCRIPT" count '^<!-- FORGE:REMEDIATION -->' 2>/dev/null || echo "1")
+       fi
 
        if [ "$ALREADY_REMEDIATED" -eq 0 ]; then
          echo "Dispatching remediation for #{PRED}'s gating PR #{GATING_PR} (needs-human)"
