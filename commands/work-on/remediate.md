@@ -3,6 +3,7 @@ user-invocable: false
 description: Remediate subcommand — checkout a needs-human PR, fix review findings, re-review, and re-gate with a FORGE:REMEDIATION paper trail
 argument-hint: "[PR number] [--issue N] [--repo GH_REPO] [--gh-flag GH_FLAG] [--base PR_BASE]"
 context: fork
+background: false
 ---
 <!-- SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios -->
 <!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
@@ -19,6 +20,9 @@ context: fork
 **Invoked by**:
 - `work-on.md` Phase 0A.1 (router), standalone: `/work-on <pr> --remediate` (see forge#1813).
 - `commands/orchestrate/phase-4-execution.md` item 6.4, auto-dispatched against a `needs-human`-gated predecessor's own open PR.
+- `work-on.md` Phase 4R (router), when the review phase hands off a red CI gate or an in-PR fix request (`REVIEW_RESULT: status: NEXT`).
+
+**Only the router invokes this skill** (forge#3398, `work-on.md` Hard Rule 1a). It re-reviews through `/review-pr`, which spawns domain reviewers, so it must run one level below the router. No phase may invoke it from inside its own fork.
 
 **Output**: Checkout the PR's existing branch → classify the block reason (fixable vs. policy escalation) → apply fixes → quality-gate → commit/push → re-invoke `/review-pr --auto-merge` → compute the #1809 Q1 auto-land bar → merge-if-verified or hold at `workflow:awaiting-merge` → emit a `FORGE:REMEDIATION` paper trail. Return result to caller.
 
@@ -234,7 +238,7 @@ Note the marker is `<!-- FORGE:REMEDIATION -->` with **no** `:COMPLETE` suffix y
 
 ## Phase M6: Re-Invoke /review-pr
 
-**Dispatch-tool probe (forge#3240 — run FIRST)**: `review-pr` must launch its domain review agents through a sub-agent dispatch tool and refuses to review inline. A forked remediation can be nested deep enough that neither `Task` nor `Agent` is available. Resolve the tool with the identical order `commands/review-pr.md` § "Sub-Agent Dispatch Tool Resolution" uses (`Task`, then `Agent`; OpenCode uses `task`). Do not copy or weaken that section, and never review inline here.
+**Dispatch-tool probe (forge#3240 — run FIRST)**: `review-pr` must launch its domain review agents through a sub-agent dispatch tool and refuses to review inline. This only fails when remediation was invoked deeper than the router allows (see `docs/WORK-ON-RUNTIME.md`); invoked from the router, a dispatch tool is available, so the branch below is a safety net. Resolve the tool with the identical order `commands/review-pr.md` § "Sub-Agent Dispatch Tool Resolution" uses (`Task`, then `Agent`; OpenCode uses `task`). Do not copy or weaken that section, and never review inline here.
 
 If no dispatch tool resolves, a missing tool is not a human decision, so do NOT invoke `review-pr`, do NOT add `needs-human`, and leave `workflow:in-review` in place. Set `RE_GATE_OUTCOME="REREVIEW-REQUIRED"`, skip Phase M7, go to Phase M8 (which posts `FORGE:REMEDIATION:COMPLETE` with a `REREVIEW-REQUIRED` re-gate line), and return `REMEDIATE_RESULT: status: REREVIEW_REQUIRED`. The caller re-runs `/review-pr {PR_NUMBER} --auto-merge --issue {ISSUE_NUMBER} --base {PR_BASE}` from a session that has dispatch. If a dispatch tool resolves, continue below.
 

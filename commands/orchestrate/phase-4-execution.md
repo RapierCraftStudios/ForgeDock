@@ -2286,7 +2286,7 @@ done
            run_in_background=true,
            prompt="You are remediating GitHub PR #{GATING_PR} for the {PROJECT_NAME} project (repo: {GH_REPO}), which is currently held at `needs-human` on its linked issue #{PRED}.
 
-**YOUR MISSION**: Invoke `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{GATING_PR} --remediate --issue {PRED} --repo {GH_REPO} --gh-flag {GH_FLAG}')` and let it run to completion. This is a self-contained flow: it classifies the gate first, replaces `needs-human` with `workflow:in-review` only for fixable remediation, checks out the PR branch, fixes any fixable review findings, re-reviews, and either auto-lands the PR, holds it at `workflow:awaiting-merge` for a human, re-escalates back to `needs-human`, or reports the block as policy-level and unfixable. Do NOT intervene manually — do not run raw git/gh commands yourself.
+**YOUR MISSION**: Invoke `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{GATING_PR} --remediate --issue {PRED} --repo {GH_REPO} --gh-flag {GH_FLAG} --under-orchestration')` and let it run to completion. This is a self-contained flow: it classifies the gate first, replaces `needs-human` with `workflow:in-review` only for fixable remediation, checks out the PR branch, fixes any fixable review findings, re-reviews, and either auto-lands the PR, holds it at `workflow:awaiting-merge` for a human, re-escalates back to `needs-human`, or reports the block as policy-level and unfixable. Do NOT intervene manually — do not run raw git/gh commands yourself.
 
 **DO NOT STOP EARLY**: if the Skill call returns without a terminal `REMEDIATE_RESULT.status`, invoke it again — it re-reads GitHub state and resumes. Terminal statuses are: `COMPLETE`, `ALREADY_DONE`, `UNFIXABLE`, `BLOCKED`, `REREVIEW_REQUIRED`.
 

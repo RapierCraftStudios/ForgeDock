@@ -89,6 +89,8 @@ jobs:
           bash scripts/check-spec-bash.test.sh
       - name: Run is-docs-only.test.sh
         run: bash scripts/is-docs-only.test.sh
+      - name: Run spawn-depth-check.test.sh
+        run: bash scripts/spawn-depth-check.test.sh
       - name: Run extract-affected-files.test.sh
         run: bash scripts/extract-affected-files.test.sh
       - name: Run wait-ci-green.test.sh
@@ -125,6 +127,8 @@ jobs:
           bash scripts/check-spec-bash.test.sh
       - name: Run is-docs-only.test.sh
         run: bash scripts/is-docs-only.test.sh
+      - name: Run spawn-depth-check.test.sh
+        run: bash scripts/spawn-depth-check.test.sh
 
   # ---------------------------------------------------------------------------
   # Job 1: shellcheck — static analysis for .sh files on Linux
