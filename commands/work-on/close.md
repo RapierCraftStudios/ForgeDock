@@ -626,13 +626,22 @@ elif [ -n "$DOSSIER_TMP" ] && [ -n "$DOSSIER_UPDATED_MODULES" ]; then
     echo "Phase C1.7: skipped - cannot create branch ${DOSSIER_BRANCH}"
   elif ! git -C "$DOSSIER_TMP" commit -s -q -m "docs(dossier): append entry for PR #{PR_NUMBER} (#${NUMBER})" 2>/dev/null; then
     echo "Phase C1.7: skipped - commit failed in temporary worktree"
-  elif ! git -C "$DOSSIER_TMP" push -u origin "$DOSSIER_BRANCH" >/dev/null 2>&1; then
-    echo "Phase C1.7: skipped - push of ${DOSSIER_BRANCH} failed (no push rights or branch protection)"
+  elif { git -C "$DOSSIER_TMP" fetch -q origin "$DOSSIER_BRANCH" >/dev/null 2>&1 || true; \
+         ! git -C "$DOSSIER_TMP" push -u --force-with-lease="refs/heads/${DOSSIER_BRANCH}" origin "$DOSSIER_BRANCH" >/dev/null 2>&1; }; then
+    # Retry-safe: the branch is a pipeline-owned throwaway, so a stale remote copy from an earlier attempt is
+    # overwritten under a lease (fetched above; absent branch is fine). Never a bare --force.
+    echo "Phase C1.7: skipped - push of ${DOSSIER_BRANCH} failed (no push rights, branch protection, or lease rejected)"
   else
+    # Reuse an already-open PR for this branch instead of creating a duplicate.
+    DOSSIER_PR_URL=$(gh pr list {GH_FLAG} --head "$DOSSIER_BRANCH" --state open --json url --jq '.[0].url // empty' 2>/dev/null || echo "")
+    if [ -n "$DOSSIER_PR_URL" ]; then
+      echo "Phase C1.7: reusing open dossier PR ${DOSSIER_PR_URL}"
+    else
     DOSSIER_PR_URL=$(gh pr create {GH_FLAG} --base "${DOSSIER_BASE}" --head "$DOSSIER_BRANCH" \
       --title "docs(dossier): append entry for PR #{PR_NUMBER} (#${NUMBER})" \
       --body "Module dossier entry for PR #{PR_NUMBER} (#${NUMBER}):${DOSSIER_UPDATED_MODULES}. Opened by close.md Phase C1.7." 2>/dev/null || echo "")
     [ -n "$DOSSIER_PR_URL" ] || echo "Phase C1.7: skipped - gh pr create failed for ${DOSSIER_BRANCH}"
+    fi
   fi
 fi
 
