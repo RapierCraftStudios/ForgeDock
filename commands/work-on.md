@@ -751,11 +751,14 @@ Skill(skill="{FORGE_SKILL_PREFIX}work-on:remediate", args="{PR_NUMBER} --issue {
 |---|---|
 | `re_gate_outcome: AUTO-LANDED` | Merged. Remediation's Phase M8 already ran `work-on:close`; if the issue is still open, run Phase 5 with `--terminal-state merged`. Then done. |
 | `status: REREVIEW_REQUIRED` | Fallback only (should not occur at this depth): run the re-review from this router as in 0A.1, then Phase 5 on `REVIEW_RESULT: status: COMPLETE`. |
+| `status: BLOCKED`, blocker starts with `github-unavailable:` | Transient, not a decision (see Transient GitHub failures). Re-add `needs-human` with a short comment (remediation's Phase M0 only accepts `needs-human`-gated issues and its M1 clears the label for a FIXABLE run), wait 2 min (5 min before the second retry), then re-invoke `work-on:remediate` with the same args; do NOT re-post the bound marker. At most 2 retries; if the third attempt still returns `github-unavailable:`, fall through to the `status: BLOCKED` (any kind) row below. |
 | `status: BLOCKED` (any kind) | Make sure `needs-human` is on the issue (add it with the blocker as a comment if absent: remediation can exit after its M1 cleared the label). STOP. |
 | `status: ALREADY_DONE` (single-attempt guard: an earlier remediation already completed on this PR), `remediation: inpr-fix` | Same as any other `inpr-fix` outcome below: re-invoke Phase 4 once, which waives the in-PR gate. |
 | `status: ALREADY_DONE`, `remediation: ci-gate` | Make sure `needs-human` is on the issue (add it, with a comment naming the PR and that remediation already ran, if absent). STOP. |
 | any other outcome, `remediation: inpr-fix` | Re-invoke Phase 4 (`work-on:review`) once with the same args. Review finds its `INPR_REMEDIATION` bound used, waives the in-PR gate for the current head, files the remaining findings as issues and re-reviews. |
 | any other outcome, `remediation: ci-gate` | Terminal: remediation left `needs-human` (or `workflow:awaiting-merge`) with its reason. STOP. |
+
+Row order matters: the `github-unavailable:` row is evaluated before the generic `status: BLOCKED` (any kind) row, which only handles non-transient blockers and the exhausted retry budget (see Transient GitHub failures). <!-- Added: forge#3402 -->
 
 ---
 
