@@ -123,7 +123,7 @@ export function canDeduplicateAutomatedAlert(canonical, candidate) {
  *   amplification remains at or above 1.0.
  * @property {boolean} amplificationBreaker - On-by-default circuit breaker over ALL
  *   cascade findings (not only same-lineage refinements): when the last
- *   `convergenceWindow` amplification ratios are all >= 1.0, P3-and-below admission
+ *   `convergenceWindow` amplification ratios are all >= 1.0, P3 admission
  *   pauses (P1/P2 are never affected). Opt out with `amplification_breaker: off`.
  *   It is deliberately independent of the cascade presets, so lifting the
  *   generation cap or token budget (`policy: all`) never disables it.
@@ -478,9 +478,9 @@ export function evaluateCascadeFinding(finding, policy) {
   if (!admitsTokenSpend(finding.projectedTokenSpend, policy)) {
     return { admit: false, reason: `per-batch token budget exhausted (orchestration.cascade.token_budget=${policy.tokenBudget})` };
   }
-  // Rule 6 (forge#3060) is evaluated last, mirroring the bash chain. It only gates P3-and-below:
-  // P0/P1/P2 already returned above.
-  if (policy.amplificationBreaker && finding.amplificationBreakerTripped && /^P[3-9]$/.test(finding.priority || "")) {
+  // Rule 6 (forge#3060) is evaluated last, mirroring the bash chain. It only gates P3 (whitespace stripped
+  // and upper-cased, matching the bash twin's `tr -d '[:space:]'`): P0/P1/P2 already returned above.
+  if (policy.amplificationBreaker && finding.amplificationBreakerTripped && String(finding.priority ?? "").replace(/\s+/g, "").toUpperCase() === "P3") {
     return {
       admit: false,
       reason: "amplification breaker tripped — P3 admission paused (routed to P3 batches / completion sweep)",

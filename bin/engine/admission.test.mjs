@@ -260,6 +260,18 @@ describe("evaluateAmplificationBreaker (forge#3060)", () => {
     assert.equal(evaluateCascadeFinding({ ...base, priority: "P3", amplificationBreakerTripped: false }, policy).admit, true);
   });
 
+  it("rule 6 normalizes case/whitespace on priority (fail closed)", () => {
+    const { policy } = resolveCascadePolicy({ policy: "all" });
+    const base = { generation: 1, title: "x", sameFileAsBatch: false, batchFullyGated: false, projectedTokenSpend: 0, amplificationBreakerTripped: true };
+    assert.equal(evaluateCascadeFinding({ ...base, priority: "p3" }, policy).admit, false);
+    assert.equal(evaluateCascadeFinding({ ...base, priority: " P3 " }, policy).admit, false);
+    assert.equal(evaluateCascadeFinding({ ...base, priority: "P2" }, policy).admit, true);
+    assert.equal(evaluateCascadeFinding({ ...base, priority: "P 3" }, policy).admit, false);
+    assert.equal(evaluateCascadeFinding({ ...base, priority: undefined }, policy).admit, true);
+    assert.equal(evaluateCascadeFinding({ ...base, priority: null }, policy).admit, true);
+    assert.equal(evaluateCascadeFinding({ ...base, priority: "P4" }, policy).admit, true);
+  });
+
   it("rule 6 never gates untriaged (empty/unknown) priorities", () => {
     const { policy } = resolveCascadePolicy();
     const f = { generation: 1, priority: "", title: "x", sameFileAsBatch: false, batchFullyGated: false, projectedTokenSpend: 0, amplificationBreakerTripped: true };
