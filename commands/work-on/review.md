@@ -590,8 +590,17 @@ In-PR fix requested on PR #{PR_NUMBER}: dispatching remediation once to fix the 
   # §6B.5 disposition must not merge, because that step is what bounds the review-finding cascade.
   DISPO_JSON=$(gh api --paginate "repos/{GH_REPO}/issues/{PR_NUMBER}/comments" 2>/dev/null) || DISPO_JSON=""
   FINDING_COUNT=$(printf '%s' "$DISPO_JSON" | jq -s '[.[][] | select(.body | test("<!-- FINDING:"))] | length' 2>/dev/null || echo "")
-  DISPOSITION_COUNT=$(printf '%s' "$DISPO_JSON" | jq -s '[.[][] | select(.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") | select(.body | test("^<!-- FORGE:NOTE_DISPOSITION"))] | length' 2>/dev/null || echo "")
-  if [ -z "$DISPO_JSON" ] || [ -z "$FINDING_COUNT" ] || { [ "$FINDING_COUNT" -gt 0 ] && [ "${DISPOSITION_COUNT:-0}" -eq 0 ]; }; then
+  # Trust predicate: ONE shared copy (scripts/trusted-comments.sh, same as verify-phase-trail.sh): trusted association, Bot account, or
+  # FORGE_TRAIL_TRUSTED_LOGINS. A GitHub App bot always has author_association NONE, so an association-only filter drops the pipeline's own disposition.
+  _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+  TRUSTED_SCRIPT=""
+  for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$PWD"; do
+    case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+  done
+  if [ -n "$TRUSTED_SCRIPT" ]; then DISPOSITION_COUNT=$(printf '%s' "$DISPO_JSON" | bash "$TRUSTED_SCRIPT" count '^<!-- FORGE:NOTE_DISPOSITION' 2>/dev/null || echo ""); else DISPOSITION_COUNT=""; fi
+  if [ -z "$DISPO_JSON" ] || [ -z "$FINDING_COUNT" ] || [ -z "$DISPOSITION_COUNT" ]; then
+    echo "REVIEW_RESULT: status: BLOCKED, blocker: note disposition unreadable (comments or scripts/trusted-comments.sh unresolvable; fail closed)"
+  elif [ "$FINDING_COUNT" -gt 0 ] && [ "$DISPOSITION_COUNT" -eq 0 ]; then
     echo "REVIEW_RESULT: status: BLOCKED, blocker: note disposition missing"
   elif [ "$CI_GATE_RC" -eq 0 ]; then
     gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto --match-head-commit "$GATED_HEAD" # allowlist:check-command-side-effects (CI-gated merge)
@@ -599,7 +608,7 @@ In-PR fix requested on PR #{PR_NUMBER}: dispatching remediation once to fix the 
     echo "REVIEW_RESULT: status: BLOCKED, blocker: ci gate not green (rc=${CI_GATE_RC})"
   fi
   ```
-  If the note-disposition gate refuses (`blocker: note disposition missing`): do NOT add `needs-human` — treat it like a stale review and re-invoke Phase R3 once under the `STALE_REREVIEW` bound so `/review-pr` records its §6B.5 disposition; only if that bound is exhausted, add `needs-human`. If the CI gate refuses: post the gate output as an issue comment, add `needs-human`, return `REVIEW_RESULT: status: BLOCKED` (blocker "ci gate not green"). If merge fails: post comment, add `needs-human`, return `REVIEW_RESULT: status: BLOCKED`
+  If the note-disposition gate refuses with `blocker: note disposition unreadable`: the comment list or the trust helper could not be read; add `needs-human` and return BLOCKED (a re-review cannot fix it). If it refuses with `blocker: note disposition missing` (no trusted disposition exists; bot, trusted-login and trusted-association authors all count): do NOT add `needs-human` — treat it like a stale review and re-invoke Phase R3 once under the `STALE_REREVIEW` bound so `/review-pr` records its §6B.5 disposition; only if that bound is exhausted, add `needs-human`. If the CI gate refuses: post the gate output as an issue comment, add `needs-human`, return `REVIEW_RESULT: status: BLOCKED` (blocker "ci gate not green"). If merge fails: post comment, add `needs-human`, return `REVIEW_RESULT: status: BLOCKED`
 
 ---
 
