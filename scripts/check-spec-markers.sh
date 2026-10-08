@@ -289,9 +289,58 @@ fi
 # ---------------------------------------------------------------------------
 
 P4_SPEC="$COMMANDS_DIR/orchestrate/phase-4-execution.md"
-if [ -f "$P4_SPEC" ] && grep -qE 'ABSENT\) +\[ "\$\(reverify_merged_trail "\$PRED"[^)]*\)" = "OK" \] *&& *echo "DONE"' "$P4_SPEC"; then
-  echo "HIGH | $P4_SPEC | merged + needs-human + ABSENT classifies DONE via the verifier (must fail closed to GATED)" >&2
-  VIOLATIONS=$((VIOLATIONS + 1))
+if [ -f "$P4_SPEC" ]; then
+  # ABSENT arm of classify_predecessor_state: text from a line-start "ABSENT)"
+  # up to the first ";;", whitespace-collapsed so one-line and multi-line
+  # forms reduce to the same span.
+  ABSENT_ARM=$(awk '
+    !inarm && /^[[:space:]]*ABSENT\)/ { inarm = 1 }
+    inarm {
+      line = $0
+      idx = index(line, ";;")
+      if (idx > 0) { buf = buf " " substr(line, 1, idx - 1); exit }
+      buf = buf " " line
+    }
+    END { print buf }
+  ' "$P4_SPEC" | tr -s '[:space:]' ' ' || true)
+  # WIRE:PROVEN — manual mutation in a temp copy of commands/: renamed hold_merged_trail, renamed the ABSENT arm, ABSENT->echo DONE, and moved add-label before the comment; each fired its matching HIGH violation
+  if [ -z "${ABSENT_ARM// /}" ]; then
+    echo "HIGH | $P4_SPEC | ABSENT arm missing from classify_predecessor_state (label-only hold must be classified explicitly)" >&2
+    VIOLATIONS=$((VIOLATIONS + 1))
+  else
+    if [[ "$ABSENT_ARM" == *reverify_merged_trail* ]] || [[ "$ABSENT_ARM" == *DONE* ]]; then
+      echo "HIGH | $P4_SPEC | merged + needs-human + ABSENT classifies DONE / calls the verifier (must fail closed to GATED)" >&2
+      VIOLATIONS=$((VIOLATIONS + 1))
+    fi
+    if ! [[ "$ABSENT_ARM" =~ (echo|printf)[^\;]*GATED ]]; then
+      echo "HIGH | $P4_SPEC | ABSENT arm does not resolve to GATED" >&2
+      VIOLATIONS=$((VIOLATIONS + 1))
+    fi
+  fi
+
+  # hold_merged_trail(): the FORGE:PHASE_TRAIL_FAILED comment must be posted
+  # before the needs-human label is added.
+  HOLD_ORDER=$(awk '
+    /^hold_merged_trail\(\)[[:space:]]*\{/ { infn = 1; found = 1; next }
+    infn && /^\}/ { infn = 0 }
+    infn {
+      if (!cmt && ($0 ~ /gh issue comment/ || $0 ~ /FORGE:PHASE_TRAIL_FAILED/)) cmt = NR
+      if (!lbl && $0 ~ /add-label[[:space:]]+"?needs-human/) lbl = NR
+    }
+    END { printf "%d %d %d\n", found + 0, cmt + 0, lbl + 0 }
+  ' "$P4_SPEC" || true)
+  set -- $HOLD_ORDER
+  HOLD_FOUND="${1:-0}"; HOLD_CMT="${2:-0}"; HOLD_LBL="${3:-0}"
+  if [ "$HOLD_FOUND" -eq 0 ]; then
+    echo "HIGH | $P4_SPEC | hold_merged_trail() function missing" >&2
+    VIOLATIONS=$((VIOLATIONS + 1))
+  elif [ "$HOLD_CMT" -eq 0 ] || [ "$HOLD_LBL" -eq 0 ]; then
+    echo "HIGH | $P4_SPEC | hold_merged_trail() lacks the PHASE_TRAIL_FAILED comment or the needs-human add-label" >&2
+    VIOLATIONS=$((VIOLATIONS + 1))
+  elif [ "$HOLD_CMT" -ge "$HOLD_LBL" ]; then
+    echo "HIGH | $P4_SPEC | hold_merged_trail() adds needs-human before posting the PHASE_TRAIL_FAILED comment (comment must come first)" >&2
+    VIOLATIONS=$((VIOLATIONS + 1))
+  fi
 fi
 
 # ---------------------------------------------------------------------------
