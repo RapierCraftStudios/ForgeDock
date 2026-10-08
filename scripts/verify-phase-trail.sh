@@ -370,37 +370,37 @@ evaluate_override() {
   # optimization (forge#3279): the permission API stays authoritative. A real write/admin approver with concealed
   # org membership can show CONTRIBUTOR/NONE and is filtered out here; widen FORGE_TRAIL_OVERRIDE_ASSOCIATIONS to
   # accept them (never the trail list). An empty list yields no candidates (fail closed). Filtered candidates are counted in a NOTE.
-  local assoc_dropped
-  assoc_dropped=$(printf '%s' "$RAW" | jq -r --arg assoc "$OVERRIDE_ASSOC" --arg bt "$marker_floor" '
-    ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
-    | [ .[]
-        | select((.body // "") | startswith("<!-- FORGE:PHASE_TRAIL_OVERRIDE -->"))
-        | select((.user.type // "") == "User")
-        | select(((.user.login // "") | test("^[A-Za-z0-9_-]+$")))
-        | select((.author_association // "") as $x | $A | index($x) == null)
-        | select((.created_at // "") != "" and (.updated_at // "") != "" and .created_at == .updated_at)
-        | select($bt == "" or .created_at > $bt) ] | length' 2>/dev/null) || assoc_dropped=0
-  case "$assoc_dropped" in ''|*[!0-9]*) assoc_dropped=0 ;; esac
-  if [ "$assoc_dropped" -gt 0 ]; then echo "NOTE: ${assoc_dropped} override candidate(s) ignored: author_association not in override-approver set" >&2; fi
-  cands=$(printf '%s' "$RAW" | jq -r --arg assoc "$OVERRIDE_ASSOC" --arg bt "$marker_floor" '
+  # One jq pass (forge#3351): the eligibility predicate is defined once (`eligible`); the first output line is the
+  # count of eligible comments dropped by the association prefilter, the rest are the candidate TSV rows.
+  local assoc_dropped out
+  out=$(printf '%s' "$RAW" | jq -r --arg assoc "$OVERRIDE_ASSOC" --arg bt "$marker_floor" '
     ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
     | def clean: explode | map(select(. >= 32 and . != 127 and (. < 128 or . > 159) and (. < 8203 or . > 8207) and (. < 8232 or . > 8238) and (. < 8288 or . > 8297) and . != 65279)) | implode;
-    [ .[]
-      | select((.body // "") | startswith("<!-- FORGE:PHASE_TRAIL_OVERRIDE -->"))
+    def eligible:
+      select((.body // "") | startswith("<!-- FORGE:PHASE_TRAIL_OVERRIDE -->"))
       | select((.user.type // "") == "User")
       | select(((.user.login // "") | test("^[A-Za-z0-9_-]+$")))
-      | select((.author_association // "") as $x | $A | index($x) != null)
       | select((.created_at // "") != "" and (.updated_at // "") != "" and .created_at == .updated_at)
-      | select($bt == "" or .created_at > $bt)
-      | (.body | split("\n") | map(sub("\r$"; ""))) as $ln
-      | { login: .user.login, at: .created_at,
-          head: ([$ln[] | capture("^\\*\\*Head\\*\\*: *(?<v>[0-9A-Fa-f]{40,64}) *$")? | .v] | .[0] // "-"),
-          missing: ([$ln[] | capture("^\\*\\*Missing\\*\\*: *(?<v>.+)$")? | .v] | .[0] // "-"),
-          reason: ([$ln[] | capture("^\\*\\*Reason\\*\\*: *(?<v>.*)$")? | .v] | .[0] // "")
-            | clean | gsub("<!--"; "<!-/-") | gsub("-->"; "-/->") | gsub("`"; "'"'"'") | gsub("@"; "(at)")
-            | gsub("\\s+"; " ") | sub("^ "; "") | sub(" $"; "") | .[0:200] } ]
-    | sort_by(.at) | reverse | .[]
-    | [.login, .at, .head, .missing, (if .reason == "" then "-" else .reason end)] | @tsv' 2>/dev/null) || return 1
+      | select($bt == "" or .created_at > $bt);
+    def assoc_ok: (.author_association // "") as $x | $A | index($x) != null;
+    ( [ .[] | eligible | select(assoc_ok | not) ] | length ) as $dropped
+    | ( [ .[]
+        | eligible
+        | select(assoc_ok)
+        | (.body | split("\n") | map(sub("\r$"; ""))) as $ln
+        | { login: .user.login, at: .created_at,
+            head: ([$ln[] | capture("^\\*\\*Head\\*\\*: *(?<v>[0-9A-Fa-f]{40,64}) *$")? | .v] | .[0] // "-"),
+            missing: ([$ln[] | capture("^\\*\\*Missing\\*\\*: *(?<v>.+)$")? | .v] | .[0] // "-"),
+            reason: ([$ln[] | capture("^\\*\\*Reason\\*\\*: *(?<v>.*)$")? | .v] | .[0] // "")
+              | clean | gsub("<!--"; "<!-/-") | gsub("-->"; "-/->") | gsub("`"; "'"'"'") | gsub("@"; "(at)")
+              | gsub("\\s+"; " ") | sub("^ "; "") | sub(" $"; "") | .[0:200] } ]
+      | sort_by(.at) | reverse ) as $rows
+    | "#DROPPED\t\($dropped)",
+      ($rows[] | [.login, .at, .head, .missing, (if .reason == "" then "-" else .reason end)] | @tsv)' 2>/dev/null) || return 1
+  assoc_dropped=$(printf '%s\n' "$out" | head -n 1 | cut -f2)
+  case "$assoc_dropped" in ''|*[!0-9]*) assoc_dropped=0 ;; esac
+  if [ "$assoc_dropped" -gt 0 ]; then echo "NOTE: ${assoc_dropped} override candidate(s) ignored: author_association not in override-approver set" >&2; fi
+  cands=$(printf '%s\n' "$out" | tail -n +2)
   [ -n "$cands" ] || return 1
   while IFS=$'\t' read -r login created head missing reason; do
     [ -n "$login" ] || continue
