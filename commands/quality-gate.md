@@ -1309,31 +1309,38 @@ done < <(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '\.py$')
 
 **Bug class**: a change turns a failing check green by shrinking what is checked (deleting a test file, dropping a test case, adding a skip marker, or removing/disabling a workflow test step) instead of fixing the code under test. Coverage silently disappears and nothing downstream notices.
 
-Run against the diff versus the base (`origin/{PR_BASE}` when known, else `HEAD` for staged changes). Use `--find-renames` so a rename is NOT treated as a deletion. Bash must stay portable (no `grep -P`, no GNU-only flags).
+Run against the diff versus the merge-base of `origin/{PR_BASE}` and `HEAD` (`PR_BASE` defaults to `staging`), so changes merged to the base after the branch point are not misread as PR-side deletions. A missing base ref is an error finding, never a silent pass. Use `--find-renames` so a rename is NOT treated as a deletion. Bash must stay portable (no `grep -P`, no GNU-only flags).
 
 ```bash
 cd {WORKTREE_PATH}
-BASE_REF="${PR_BASE:+origin/$PR_BASE}"; BASE_REF="${BASE_REF:-HEAD}"
+PR_BASE="${PR_BASE:-staging}"
+if ! git rev-parse --verify --quiet "origin/$PR_BASE^{commit}" >/dev/null; then
+  echo "COVERAGE-ERR | HIGH | quality-gate | base ref origin/$PR_BASE not found — fetch it; coverage-reduction check could not run"
+else
+BASE_REF=$(git merge-base "origin/$PR_BASE" HEAD) || { echo "COVERAGE-ERR | HIGH | quality-gate | merge-base failed for origin/$PR_BASE"; BASE_REF=""; }
+fi
+if [ -n "${BASE_REF:-}" ]; then
 TEST_PATH_RE='(^|/)(test_[^/]*|[^/]*_test\.[^/]*|[^/]*\.test\.[^/]*|[^/]*\.spec\.[^/]*)$|(^|/)(tests|__tests__)/'
 
 # (a) deleted test files (renames excluded via --find-renames)
-git diff --find-renames --diff-filter=D --name-only "$BASE_REF" 2>/dev/null | grep -E "$TEST_PATH_RE" \
+git diff --find-renames --diff-filter=D --name-only "$BASE_REF" | grep -E "$TEST_PATH_RE" \
   && echo "COVERAGE-1: deleted test file(s)"
 
 # (b) removed test cases with no added counterpart, (c) newly added skip markers
-git diff -U0 "$BASE_REF" -- . 2>/dev/null | grep -E '^-[[:space:]]*(it|test|describe)\(|^-[[:space:]]*(async )?def test_' \
+git diff -U0 "$BASE_REF" -- . | grep -E '^-[[:space:]]*(it|test|describe)\(|^-[[:space:]]*(async )?def test_' \
   && echo "COVERAGE-1: removed test case line(s) — confirm each has an added counterpart in the diff"
-git diff -U0 "$BASE_REF" -- . 2>/dev/null | grep -E '^\+.*(\.skip\(|@pytest\.mark\.skip|@pytest\.mark\.xfail|xfail|continue-on-error:[[:space:]]*true|if:[[:space:]]*false)' \
+git diff -U0 "$BASE_REF" -- . | grep -E '^\+.*(\.skip\(|@pytest\.mark\.skip|@pytest\.mark\.xfail|xfail|continue-on-error:[[:space:]]*true|if:[[:space:]]*false)' \
   && echo "COVERAGE-1: newly added skip/xfail/continue-on-error/if: false marker"
 
 # (d) removed or disabled workflow test steps
-git diff -U0 "$BASE_REF" -- .github/workflows 2>/dev/null | grep -E '^-.*run:.*(test|pytest|jest|vitest|mocha|\.test\.sh|npm t|go test|cargo test)' \
+git diff -U0 "$BASE_REF" -- .github/workflows | grep -E '^-.*run:.*(test|pytest|jest|vitest|mocha|\.test\.sh|npm t|go test|cargo test)' \
   && echo "COVERAGE-1: removed workflow test step"
+fi
 ```
 
 Also treat a test command that is commented out (`+#` of a previously live `run:` test line) as a removal.
 
-**Finding**: emit `COVERAGE-1 | HIGH | {file} | coverage reduction: {removed test | deleted test | disabled workflow test step} — restore it and fix the code under test`. Scan results are candidates, not verdicts: confirm each by reading the diff hunk before reporting.
+**Finding**: a `COVERAGE-ERR` line (base ref missing) is a HIGH finding returned as-is — never treat it as clean. Otherwise emit `COVERAGE-1 | HIGH | {file} | coverage reduction: {removed test | deleted test | disabled workflow test step} — restore it and fix the code under test`. Scan results are candidates, not verdicts: confirm each by reading the diff hunk before reporting.
 
 **Exemption (only one)**: a legitimate deletion is allowed ONLY when the commit message or PR body gives an explicit justification tying the removal to the removal of the tested code (the code the test covered is also deleted in this diff). "Flaky", "failing", "Windows-only", or "to get CI green" are NOT justifications. When exempted, record the justification in the finding as a LOW (advisory, not returned).
 
