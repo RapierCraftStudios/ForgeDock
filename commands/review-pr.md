@@ -833,9 +833,9 @@ echo "=== CHURN_ESCALATION: $CHURN_ESCALATION ==="
 
 #### Step 4: Build Selected Agent Roster
 
-**If `THOROUGH=true`** (user passed `--thorough`, or `IS_MILESTONE_TO_STAGING=true`): run full union dispatch — all agents matching any signal. Skip to "Full union dispatch" below.
+**If `THOROUGH=true`** (user passed `--thorough`, or `IS_MILESTONE_TO_STAGING=true`): run full union dispatch — all agents matching any signal. Use the "Full union dispatch" block below (kept inline, outside the 3B.5 fragment, so it always runs in these modes) instead of the default roster.
 
-**Default (THOROUGH=false):**
+**Default (THOROUGH=false only):**
 
 Start with the baseline roster: `SELECTED_AGENTS="Security"` (General Security always runs).
 
@@ -904,6 +904,31 @@ echo "=== FINAL ROSTER (after escalation): $SELECTED_AGENTS ==="
 AGENT_COUNT=$(echo "$SELECTED_AGENTS" | wc -w)
 echo "=== AGENT COUNT: $AGENT_COUNT ==="
 ```
+
+<!-- Added: forge#1745; kept inline per forge#3405 BILL-1 -->
+**Full union dispatch (THOROUGH=true or IS_MILESTONE_TO_STAGING=true):**
+
+```bash
+if [ "$THOROUGH" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]; then
+    SELECTED_AGENTS="Security"
+    [ "$SCORE_AUTH" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Auth"
+    [ "$SCORE_BILLING" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Billing Concurrency"
+    [ "$SCORE_DATABASE" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Database"
+    [ "$SCORE_INFRA" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Infrastructure"
+    # Scraping agent only added in thorough mode when review.domains.scraping is configured
+    SCRAPING_ENABLED=$(yq '.review.domains.scraping' "$FORGE_YAML" 2>/dev/null || echo "")
+    [ "$SCORE_SCRAPING" -gt 0 ] && [ -n "$SCRAPING_ENABLED" ] && SELECTED_AGENTS="$SELECTED_AGENTS Scraping"
+    [ "$SCORE_FRONTEND" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS Frontend"
+    [ "$SCORE_API" -gt 0 ] && SELECTED_AGENTS="$SELECTED_AGENTS API"
+    # Deduplicate
+    SELECTED_AGENTS=$(echo "$SELECTED_AGENTS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+    echo "=== THOROUGH mode: FULL UNION DISPATCH — $SELECTED_AGENTS ==="
+fi
+```
+
+**Why cross-critical domain pairs always escalate**: A 2-file PR touching both `services/api/app/core/auth.py` and `services/api/app/routers/billing.py` creates interaction bugs that single-domain reviewers cannot catch. Never rely on a single agent for multi-domain risk.
+
+**General Security agent ALWAYS runs.** If BILLING is selected, Concurrency is always added. If SHARED module is touched, add agents for all importing services.
 
 ### 3B.5: Provenance-Based Trust Escalation (Conditional)
 

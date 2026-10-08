@@ -23,15 +23,25 @@ REQUIRES_FULL_BUILD="false"
 if [ "$IS_STAGING_TO_MAIN" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]; then REQUIRES_FULL_BUILD="true"; fi
 ```
 
-**TypeScript files changed:**
-
-Read `forge.yaml → verification.commands.typescript.typecheck` and `.build`:
+**Trust boundary (forge#3434, forge#3435)**: `verification.commands.*` are executed with `eval`, so they are read from the trusted **base branch** (`origin/$BASE`), never from the checked-out PR head, where a fork PR could rewrite `forge.yaml`. Returning from the PR checkout fails closed: if the original ref cannot be restored, stop the review rather than continue (later steps and fragment Reads must not run against a PR-controlled tree).
 
 ```bash
-gh pr checkout "$PR_NUMBER" -R "$REPO" --detach 2>/dev/null
+git fetch origin "$BASE" -q 2>/dev/null || true
+TRUSTED_CFG=$(git show "origin/$BASE:forge.yaml" 2>/dev/null || true)
+trusted_cmd() { local q="${*}"; [ -n "$TRUSTED_CFG" ] && printf '%s\n' "$TRUSTED_CFG" | yq "$q // \"\"" 2>/dev/null || echo ''; }
+ORIG_REF=$(git symbolic-ref -q --short HEAD || git rev-parse HEAD)
+checkout_pr()   { gh pr checkout "$PR_NUMBER" -R "$REPO" --detach 2>/dev/null || { echo "BLOCKED: gh pr checkout failed — build verification not run"; return 1; }; }
+restore_ref()   { git checkout "$ORIG_REF" 2>/dev/null || { echo "BLOCKED: could not restore $ORIG_REF after PR checkout — stop the review (fail closed)"; return 1; }; }
+```
 
-TS_TYPECHECK=$(yq '.verification.commands.typescript.typecheck // ""' forge.yaml 2>/dev/null || echo '')
-TS_BUILD=$(yq '.verification.commands.typescript.build // ""' forge.yaml 2>/dev/null || echo '')
+**TypeScript files changed:**
+
+Read (from the base branch) `forge.yaml → verification.commands.typescript.typecheck` and `.build`:
+
+```bash
+TS_TYPECHECK=$(trusted_cmd '.verification.commands.typescript.typecheck')
+TS_BUILD=$(trusted_cmd '.verification.commands.typescript.build')
+checkout_pr || exit 1
 
 if [ -n "$TS_TYPECHECK" ]; then
     eval "$TS_TYPECHECK" 2>&1
@@ -48,7 +58,7 @@ elif [ -z "$TS_BUILD" ]; then
     echo "SKIPPED — typescript.build not configured in verification.commands"
 fi
 
-git checkout - 2>/dev/null
+restore_ref || exit 1
 ```
 
 If `TSC_EXIT != 0`: **CONFIRMED blocking** — type errors.
@@ -58,16 +68,16 @@ If `BUILD_EXIT != 0`: **CONFIRMED blocking** — build/prerender failure.
 
 **Python files changed:**
 
-Read `forge.yaml → verification.commands.python.format` and `.build`:
+Read (from the base branch) `forge.yaml → verification.commands.python.format` and `.build`:
 
 ```bash
-gh pr checkout "$PR_NUMBER" -R "$REPO" --detach 2>/dev/null
+PYTHON_FORMAT=$(trusted_cmd '.verification.commands.python.format')
+checkout_pr || exit 1
 
 # Compile-check all changed Python files (language-universal — no config needed)
 echo "$CHANGED_FILES" | grep '\.py$' | while IFS= read -r f; do python3 -m py_compile "$f" 2>&1; done
 
 if [ "$REQUIRES_FULL_BUILD" = "true" ]; then
-    PYTHON_FORMAT=$(yq '.verification.commands.python.format // ""' forge.yaml 2>/dev/null || echo '')
     if [ -n "$PYTHON_FORMAT" ]; then
         eval "$PYTHON_FORMAT" 2>&1
     else
@@ -75,7 +85,7 @@ if [ "$REQUIRES_FULL_BUILD" = "true" ]; then
     fi
 fi
 
-git checkout - 2>/dev/null
+restore_ref || exit 1
 ```
 
 **BLOCKING if any check fails.** Fix before merge — do not approve with known build/format failures.
