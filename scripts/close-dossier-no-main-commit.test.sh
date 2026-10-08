@@ -39,6 +39,9 @@ printf '%s\n' "$C17" | grep -q 'worktree remove --force' && ok "C1.7 cleanup rem
 ADD_LN=$(printf '%s\n' "$C17" | grep -n 'worktree add --detach' | head -1 | cut -d: -f1)
 TRAP_LN=$(printf '%s\n' "$C17" | grep -nE "^\s*trap .*EXIT" | head -1 | cut -d: -f1)
 [ -n "$ADD_LN" ] && [ -n "$TRAP_LN" ] && [ "$TRAP_LN" -gt "$ADD_LN" ] && ok "EXIT trap registered after worktree add" || bad "EXIT trap must follow worktree add"
+printf '%s\n' "$C17" | grep -q 'force-with-lease' && ok "C1.7 pushes with --force-with-lease" || bad "C1.7 missing force-with-lease"
+printf '%s\n' "$C17" | grep -qE 'push .*--force( |$)' && bad "C1.7 uses bare --force" || ok "C1.7 has no bare --force"
+printf '%s\n' "$C17" | grep -q 'gh pr list' && ok "C1.7 checks for an existing open PR" || bad "C1.7 missing gh pr list"
 grep -q 'FORGE:DOSSIER_UPDATED' "$CLOSE_MD" && ok "FORGE:DOSSIER_UPDATED marker kept" || bad "FORGE:DOSSIER_UPDATED marker missing"
 
 # --- Dynamic: simulate the temp-worktree sequence ---
@@ -79,6 +82,24 @@ WT2=$(mktemp -d)
   trap _cl EXIT
   exit 3 ) ; true
 [ ! -d "$WT2" ] && ! git -C "$TMP/main" worktree list | grep -qF "$WT2" && ok "EXIT trap cleans worktree on abort" || bad "EXIT trap did not clean worktree"
+
+# Dynamic: retry with a pre-existing divergent remote branch must succeed via fetch + lease push
+OLD=$(git -C "$TMP/origin.git" rev-parse refs/heads/docs/dossier-1)
+WT3=$(mktemp -d)
+git -C "$TMP/main" fetch -q origin staging
+git -C "$TMP/main" worktree add --detach "$WT3" origin/staging >/dev/null 2>&1
+printf '\n## Entry retry\n' >> "$WT3/devdocs/modules/m.md"
+git -C "$WT3" add devdocs/modules/m.md
+git -C "$WT3" checkout -q -B docs/dossier-1
+git -C "$WT3" commit -q -s -m "docs(dossier): retry"
+git -C "$WT3" fetch -q origin docs/dossier-1 >/dev/null 2>&1 || true
+if git -C "$WT3" push -q -u --force-with-lease="refs/heads/docs/dossier-1" origin docs/dossier-1 >/dev/null 2>&1; then
+  NEW=$(git -C "$WT3" rev-parse HEAD)
+  [ "$(git -C "$TMP/origin.git" rev-parse refs/heads/docs/dossier-1)" = "$NEW" ] && [ "$OLD" != "$NEW" ] \
+    && ok "retry push over existing remote branch succeeds" || bad "retry push did not update origin ref"
+else bad "retry push over existing remote branch rejected"; fi
+git -C "$TMP/main" worktree remove --force "$WT3"
+git -C "$TMP/main" worktree prune
 
 echo "Passed: $PASS  Failed: $FAIL"
 [ "$FAIL" -eq 0 ]
