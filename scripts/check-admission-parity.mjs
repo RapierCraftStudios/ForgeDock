@@ -90,16 +90,28 @@ function listMarkdown(dir) {
 /**
  * Collect identifiers the orchestrate specs name as admission.mjs APIs:
  * (a) names destructured from an admission.mjs import snippet (`({ a, b }) =>`), and (b) backticked `name()` calls
- * on any line that mentions admission.mjs. Returns [{ name, file, line }].
+ * on any line that mentions admission.mjs. Returns [{ name, file, line }], plus
+ * `{ unattributed: true, file, line }` for destructure snippets that name no module.
+ *
+ * Heuristic limits: a destructure snippet is attributed to the first `engine/<name>.mjs` path found between its
+ * `.then(({` and the next `.then(({` (or end of text), capped at 1500 chars. A snippet naming no module in that
+ * window is reported as unattributable (the lint fails closed). The backtick-call rule is line-scoped: it only
+ * fires on lines that themselves mention admission.mjs, so `plan*()` calls in other prose are not linted.
  */
 function extractSpecNamedIdentifiers(file, text) {
   const found = [];
   const lineOf = (index) => text.slice(0, index).split("\n").length;
   // The module loaded by a snippet is the first `engine/<name>.mjs` path passed after its `.then(({...}) =>`.
   const destructure = /\.then\(\(\s*\{([^}]*)\}\s*\)\s*=>/g;
+  const starts = [...text.matchAll(destructure)].map((x) => x.index);
   let m;
   while ((m = destructure.exec(text))) {
-    const target = text.slice(m.index, m.index + 1500).match(/engine\/([\w-]+)\.mjs/)?.[1];
+    const next = starts.find((s) => s > m.index) ?? text.length;
+    const target = text.slice(m.index, Math.min(next, m.index + 1500)).match(/engine\/([\w-]+)\.mjs/)?.[1];
+    if (!target) {
+      found.push({ unattributed: true, file, line: lineOf(m.index) });
+      continue;
+    }
     if (target !== "admission") continue;
     for (const part of m[1].split(",")) {
       const name = part.trim().split(/\s*:\s*/)[0];
@@ -191,7 +203,14 @@ async function main() {
   const specDir = path.join(REPO_ROOT, "commands/orchestrate");
   let namedCount = 0;
   for (const file of listMarkdown(specDir)) {
-    for (const { name, line } of extractSpecNamedIdentifiers(file, readFileSync(file, "utf8"))) {
+    for (const { name, line, unattributed } of extractSpecNamedIdentifiers(file, readFileSync(file, "utf8"))) {
+      if (unattributed) {
+        console.error(
+          `UNATTRIBUTABLE: ${path.relative(REPO_ROOT, file)}:${line} could not attribute .then(({...}) => snippet to an engine/<module>.mjs path`,
+        );
+        failed = true;
+        continue;
+      }
       namedCount++;
       if (!(name in admissionModule)) {
         console.error(
