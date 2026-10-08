@@ -14,6 +14,7 @@ on:
       - 'scripts/check-spec-markers.sh'
       - 'scripts/check-spec-bash.sh'
       - 'scripts/check-spec-bash.test.sh'
+      - 'scripts/review-pr-arguments.test.sh'
       - 'scripts/check-admission-parity.mjs'
       - 'bin/engine/admission.mjs'
       - 'scripts/check-phase-registry-drift.mjs'
@@ -37,6 +38,7 @@ on:
       - 'scripts/check-spec-markers.sh'
       - 'scripts/check-spec-bash.sh'
       - 'scripts/check-spec-bash.test.sh'
+      - 'scripts/review-pr-arguments.test.sh'
       - 'scripts/check-admission-parity.mjs'
       - 'bin/engine/admission.mjs'
       - 'scripts/check-phase-registry-drift.mjs'
@@ -296,6 +298,7 @@ jobs:
           # pipeline-health/** and the review-pr-agents catalog are not substituted and are exempt.
           # Deliberate hits: put `allowlist:positional-arg` on the same line.
           bash scripts/check-spec-bash.test.sh
+          bash scripts/review-pr-arguments.test.sh
           # No args: the script's built-in default file set (all Skill-loaded specs under commands/).
           bash scripts/check-spec-bash.sh
 

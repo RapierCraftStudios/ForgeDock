@@ -106,7 +106,53 @@ If `$ARGUMENTS` contains `--auto-merge`, this review was invoked from `/work-on`
 Example: "3126 --auto-merge --issue 3124 --base staging --gh-flag -R $GH_REPO --worktree /path/to/worktree"
 ```
 
-Extract: `PR_NUMBER`, `AUTO_MERGE=true`, `MERGE_ISSUE`, `MERGE_BASE`, `MERGE_GH_FLAG`, `MERGE_WORKTREE` (optional — the absolute path to the git worktree to clean up after merge)
+Extract: `PR_NUMBER`, `AUTO_MERGE=true`, `MERGE_ISSUE`, `MERGE_BASE`, `MERGE_GH_FLAG`, `MERGE_WORKTREE` (optional — the absolute path to the git worktree to clean up after merge) using the **Argument Parse** block below.
+
+**`$ARGUMENTS` is the whole argument string, never a PR number.** Every `gh` call in this spec uses `"$PR_NUMBER"` (and `-R "$REPO"`), bound once by the block below. Shell state does not persist between Bash calls, so any later Bash block that reads `PR_NUMBER`, `REPO`, `REPO_FLAG` or `MERGE_*` must re-run this block first. <!-- Added: forge#3404 -->
+
+#### Argument Parse
+
+```bash
+# BEGIN review-pr-arg-parse
+# Tokenize the argument string without eval. First token is the PR ref (number or .../pull/N URL)
+# or a mode keyword; the rest are flags.
+ARGS_RAW="$ARGUMENTS"
+read -r -a ARG_TOKENS <<< "$ARGS_RAW"
+PR_REF="${ARG_TOKENS[0]:-}"
+PR_NUMBER=""
+case "$PR_REF" in
+  *[!0-9]*) PR_NUMBER=$(printf '%s' "$PR_REF" | sed -nE 's#^https?://[^ ]*/pull/([0-9]+).*$#\1#p') ;;
+  "") ;;
+  *) PR_NUMBER="$PR_REF" ;;
+esac
+AUTO_MERGE=false; THOROUGH=false
+MERGE_ISSUE=""; MERGE_BASE=""; MERGE_WORKTREE=""; MERGE_GH_FLAG=""; REPO_FLAG=""; REPO=""
+arg_i=1
+case "$PR_REF" in -*) PR_NUMBER=""; arg_i=0 ;; esac  # leading flag, no PR ref
+while [ "$arg_i" -lt "${#ARG_TOKENS[@]}" ]; do
+  arg_t="${ARG_TOKENS[$arg_i]}"
+  case "$arg_t" in
+    --auto-merge) AUTO_MERGE=true ;;
+    --thorough) THOROUGH=true ;;
+    --issue) arg_i=$((arg_i + 1)); MERGE_ISSUE="${ARG_TOKENS[$arg_i]:-}" ;;
+    --base) arg_i=$((arg_i + 1)); MERGE_BASE="${ARG_TOKENS[$arg_i]:-}" ;;
+    --worktree) arg_i=$((arg_i + 1)); MERGE_WORKTREE="${ARG_TOKENS[$arg_i]:-}" ;;
+    --gh-flag)
+      # Value is "-R owner/repo" (quoted or not): strip quotes, consume flag + repo tokens
+      arg_i=$((arg_i + 1)); arg_f=$(printf '%s' "${ARG_TOKENS[$arg_i]:-}" | tr -d "\"'")
+      if [ "$arg_f" = "-R" ] || [ "$arg_f" = "--repo" ]; then
+        arg_i=$((arg_i + 1)); REPO=$(printf '%s' "${ARG_TOKENS[$arg_i]:-}" | tr -d "\"'")
+      fi ;;
+  esac
+  arg_i=$((arg_i + 1))
+done
+if [ -n "$REPO" ]; then MERGE_GH_FLAG="-R $REPO"; REPO_FLAG="-R $REPO"; fi
+if [ -n "$PR_NUMBER" ] && [ -z "$REPO" ]; then
+  REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
+  [ -n "$REPO" ] && REPO_FLAG="-R $REPO"
+fi
+# END review-pr-arg-parse
+```
 
 **`--auto-merge` requires `--issue`** <!-- Added: forge#3102, forge#3124 -->: the phase-trail gate in Phase 8 verifies the trail of the linked issue, so `--issue` is mandatory whenever `AUTO_MERGE=true`. Do NOT infer `MERGE_ISSUE` from the PR: the PR body's closing reference and the head-branch suffix are both author-controlled (and the closing-issue reference list is empty for PRs based on a non-default branch such as `staging`), so neither is a trustworthy binding. If `AUTO_MERGE=true` and `MERGE_ISSUE` is empty, Phase 8 does not merge and returns the documented `REVIEW_RESULT: status: BLOCKED`, blocker: "auto-merge requires --issue". The PR stays open for a human or a re-run with `--issue`.
 
@@ -114,11 +160,11 @@ If `--auto-merge` is NOT present, `AUTO_MERGE=false` — Phase 8 (Auto-Merge) wi
 
 ### Thoroughness Flag
 
-If `$ARGUMENTS` contains `--thorough`, set `THOROUGH=true`. This restores full union-dispatch (all matched domain agents run) for release-critical PRs. Default is `THOROUGH=false` — risk-scaled dispatch (2-3 agents).
+If the arguments contain `--thorough` (parsed above), set `THOROUGH=true`. This restores full union-dispatch (all matched domain agents run) for release-critical PRs. Default is `THOROUGH=false` — risk-scaled dispatch (2-3 agents).
 
 ```bash
-THOROUGH=false
-echo "$ARGUMENTS" | grep -q "\-\-thorough" && THOROUGH=true
+# THOROUGH is bound by the Argument Parse block (default false)
+echo "THOROUGH=$THOROUGH"
 ```
 
 ---
@@ -130,18 +176,19 @@ echo "$ARGUMENTS" | grep -q "\-\-thorough" && THOROUGH=true
 Resolve the PR number and post a routing marker immediately. This creates an audit trail — if a PR has no `FORGE:REVIEW_ROUTE` comment after a review command was run, the review was bypassed or never started.
 
 ```bash
-# Determine REVIEW_MODE from $ARGUMENTS before any routing decision
-REVIEW_MODE_RAW="$ARGUMENTS"
-if echo "$ARGUMENTS" | grep -qE '^(staging|feature|staging:feature)$'; then
+# Determine REVIEW_MODE from the first token (PR_REF, bound by Argument Parse) before any routing decision
+REVIEW_MODE_RAW="$ARGS_RAW"
+if echo "$PR_REF" | grep -qE '^(staging|feature|staging:feature)$'; then
   REVIEW_MODE="staging-keyword"
   ROUTE_PR_NUMBER="(resolved by staging sub-command)"
-elif echo "$ARGUMENTS" | grep -qE '^(open|all)$'; then
+elif echo "$PR_REF" | grep -qE '^(open|all)$'; then
   REVIEW_MODE="multi-pr"
   ROUTE_PR_NUMBER="(list mode)"
 else
   # Single PR number or URL — resolve HEAD/BASE now
-  PR_ROUTE_INFO=$(gh pr view $ARGUMENTS --json number,baseRefName,headRefName --jq '{number:.number,base:.baseRefName,head:.headRefName}')
+  PR_ROUTE_INFO=$(gh pr view "$PR_NUMBER" ${REPO_FLAG} --json number,baseRefName,headRefName --jq '{number:.number,base:.baseRefName,head:.headRefName}')
   ROUTE_PR_NUMBER=$(echo "$PR_ROUTE_INFO" | jq -r '.number')
+  PR_NUMBER="$ROUTE_PR_NUMBER"
   ROUTE_HEAD=$(echo "$PR_ROUTE_INFO" | jq -r '.head')
   ROUTE_BASE=$(echo "$PR_ROUTE_INFO" | jq -r '.base')
   if [ "$ROUTE_HEAD" = "staging" ] && [ "$ROUTE_BASE" = "main" ] || [ "$ROUTE_HEAD" = "feature" ] && [ "$ROUTE_BASE" = "main" ]; then
@@ -151,7 +198,7 @@ else
   fi
 fi
 
-REVIEW_SHA_ROUTE=$(gh pr view ${ROUTE_PR_NUMBER:-$ARGUMENTS} --json headRefOid --jq '.headRefOid' 2>/dev/null | cut -c1-7 || echo "n/a")
+REVIEW_SHA_ROUTE=$(gh pr view "${ROUTE_PR_NUMBER:-$PR_NUMBER}" ${REPO_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null | cut -c1-7 || echo "n/a")
 
 # spec-evolution guard — MUST run before posting FORGE:REVIEW_ROUTE <!-- Added: forge#1742 -->
 # spec-evolution PRs are produced by /spec-doctor and require eval-gate + human review.
@@ -164,10 +211,10 @@ if [ "$REVIEW_MODE" = "single-pr" ] && [ -n "$ROUTE_PR_NUMBER" ] && [ "$ROUTE_PR
   if [ "$SPEC_EVOL_CHECK" = "true" ]; then
     IS_SPEC_EVOLUTION=true
     AUTO_MERGE=false
-    # Add needs-human label to the associated issue (if --issue was passed in $ARGUMENTS)
-    SPEC_EVOL_ISSUE=$(echo "$ARGUMENTS" | grep -oP '(?<=--issue )\d+' || echo "")
+    # Add needs-human label to the associated issue (if --issue was passed)
+    SPEC_EVOL_ISSUE="$MERGE_ISSUE"
     if [ -n "$SPEC_EVOL_ISSUE" ]; then
-      GH_FLAG_SPEC=$(echo "$ARGUMENTS" | grep -oP '(?<=-R )\S+' | head -1 | sed 's/^/-R /' || echo "")
+      GH_FLAG_SPEC="$MERGE_GH_FLAG"
       gh issue edit "$SPEC_EVOL_ISSUE" $GH_FLAG_SPEC --add-label "needs-human" 2>/dev/null || true
     fi
     echo "SPEC-EVOLUTION GUARD: PR #${ROUTE_PR_NUMBER} carries 'spec-evolution' label."
@@ -224,7 +271,7 @@ Show list, ask user which to review, then loop through each with full review.
 
 **Auto-detect staging mode:**
 ```bash
-PR_INFO=$(gh pr view $ARGUMENTS --json baseRefName,headRefName,additions,deletions,title)
+PR_INFO=$(gh pr view "$PR_NUMBER" ${REPO_FLAG} --json baseRefName,headRefName,additions,deletions,title)
 HEAD=$(echo $PR_INFO | jq -r '.headRefName')
 BASE=$(echo $PR_INFO | jq -r '.baseRefName')
 ```
@@ -251,22 +298,22 @@ Otherwise → proceed to Phase 1.
 
 ### 1A: Fetch PR Data
 ```bash
-gh pr view $ARGUMENTS --json number,title,body,author,baseRefName,headRefName,files,additions,deletions
-REVIEW_SHA=$(gh pr view $ARGUMENTS --json headRefOid --jq '.headRefOid')
+gh pr view "$PR_NUMBER" -R "$REPO" --json number,title,body,author,baseRefName,headRefName,files,additions,deletions
+REVIEW_SHA=$(gh pr view "$PR_NUMBER" -R "$REPO" --json headRefOid --jq '.headRefOid')
 REVIEW_SHA_SHORT=$(echo "$REVIEW_SHA" | cut -c1-7)
-gh pr diff $ARGUMENTS --name-only
-gh pr diff $ARGUMENTS
+gh pr diff "$PR_NUMBER" -R "$REPO" --name-only
+gh pr diff "$PR_NUMBER" -R "$REPO"
 
 # Mergeability check — GitHub computes this asynchronously; retry up to 3× on UNKNOWN
 # <!-- Added: forge#194 -->
-MERGE_HEALTH_RESULT=$(gh pr view $ARGUMENTS --json mergeable,mergeStateStatus --jq '"\\(.mergeable)|\\(.mergeStateStatus)"')
+MERGE_HEALTH_RESULT=$(gh pr view "$PR_NUMBER" -R "$REPO" --json mergeable,mergeStateStatus --jq '"\\(.mergeable)|\\(.mergeStateStatus)"')
 MERGE_HEALTH=${MERGE_HEALTH_RESULT%%|*}
 MERGE_HEALTH_STATE=${MERGE_HEALTH_RESULT##*|}
 MERGE_RETRY=0
 while [ "$MERGE_HEALTH" = "UNKNOWN" ] && [ "$MERGE_RETRY" -lt 3 ]; do
     MERGE_RETRY=$((MERGE_RETRY + 1))
     sleep 5
-    MERGE_HEALTH_RESULT=$(gh pr view $ARGUMENTS --json mergeable,mergeStateStatus --jq '"\\(.mergeable)|\\(.mergeStateStatus)"')
+    MERGE_HEALTH_RESULT=$(gh pr view "$PR_NUMBER" -R "$REPO" --json mergeable,mergeStateStatus --jq '"\\(.mergeable)|\\(.mergeStateStatus)"')
     MERGE_HEALTH=${MERGE_HEALTH_RESULT%%|*}
     MERGE_HEALTH_STATE=${MERGE_HEALTH_RESULT##*|}
 done
@@ -274,12 +321,12 @@ done
 # MERGE_HEALTH_STATE: CLEAN | DIRTY | BLOCKED | UNSTABLE | UNKNOWN
 
 # Resolve repo name early — used in Phases 5, 6, 8B, 9A (clean-review skip path bypasses Phase 6A) <!-- Added: forge#820 -->
-REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+REPO="${REPO:-$(gh repo view --json nameWithOwner --jq '.nameWithOwner')}"
 
 # First-time contributor detection <!-- Added: forge#960 -->
 # Requires REPO to be set (line above). Checks whether the PR author has any prior merged PRs in this repo.
 # IS_FIRST_TIME_CONTRIBUTOR is consumed in Phase 9 to conditionally post an onboarding welcome comment.
-PR_AUTHOR=$(gh pr view "$ARGUMENTS" -R "$REPO" --json author --jq '.author.login')
+PR_AUTHOR=$(gh pr view "$PR_NUMBER" -R "$REPO" --json author --jq '.author.login')
 PRIOR_MERGED_COUNT=$(gh pr list -R "$REPO" --author "$PR_AUTHOR" --state merged --limit 1 --json number --jq 'length' 2>/dev/null || echo "1")
 IS_FIRST_TIME_CONTRIBUTOR="false"
 [ "$PRIOR_MERGED_COUNT" -eq 0 ] && IS_FIRST_TIME_CONTRIBUTOR="true"
@@ -287,8 +334,8 @@ IS_FIRST_TIME_CONTRIBUTOR="false"
 
 ### 1B: Classify
 ```bash
-FILES=$(gh pr diff $ARGUMENTS --name-only)
-DIFF=$(gh pr diff $ARGUMENTS)
+FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)
+DIFF=$(gh pr diff "$PR_NUMBER" -R "$REPO")
 
 echo "=== SERVICES ==="
 # Service detection is path-agnostic — matches project-specific and generic structures
@@ -348,7 +395,7 @@ else
 fi
 
 # Always run compile check on changed Python files (fast, language-universal)
-gh pr diff $ARGUMENTS --name-only | grep '\.py$' | while IFS= read -r f; do
+gh pr diff "$PR_NUMBER" -R "$REPO" --name-only | grep '\.py$' | while IFS= read -r f; do
     python3 -m py_compile "$f" 2>&1
 done
 ```
@@ -392,19 +439,19 @@ Covered by `PYTHON_TYPECHECK` command in 2A above. If `verification.commands.pyt
 
 ### 2D: Environment Variable Audit
 ```bash
-gh pr diff $ARGUMENTS | grep -E "os\.getenv|os\.environ|process\.env" | head -30
+gh pr diff "$PR_NUMBER" -R "$REPO" | grep -E "os\.getenv|os\.environ|process\.env" | head -30
 ```
 Flag if new env vars not in `.env.example`.
 
 ### 2E: Secrets Detection (CRITICAL — BLOCKING if found)
 ```bash
-gh pr diff $ARGUMENTS | grep -iE "(api[_-]?key|secret[_-]?key|password|token|credential|private[_-]?key)" | grep -vE "(#|//|\.example|placeholder|PLACEHOLDER|YOUR_|<|>)" | head -20
-gh pr diff $ARGUMENTS | grep -oE "['\"][A-Za-z0-9+/=]{40,}['\"]" | head -10
+gh pr diff "$PR_NUMBER" -R "$REPO" | grep -iE "(api[_-]?key|secret[_-]?key|password|token|credential|private[_-]?key)" | grep -vE "(#|//|\.example|placeholder|PLACEHOLDER|YOUR_|<|>)" | head -20
+gh pr diff "$PR_NUMBER" -R "$REPO" | grep -oE "['\"][A-Za-z0-9+/=]{40,}['\"]" | head -10
 ```
 
 ### 2F: SQL Migration Validation (if *.sql changed)
 ```bash
-gh pr diff $ARGUMENTS --name-only | grep "\.sql$" | while IFS= read -r sql_file; do
+gh pr diff "$PR_NUMBER" -R "$REPO" --name-only | grep "\.sql$" | while IFS= read -r sql_file; do
     grep -E "FOR UPDATE" "$sql_file" | grep -qE "(SUM|COUNT|AVG|MIN|MAX)\s*\(" && echo "ERROR: FOR UPDATE with aggregate"
     grep -qE "DROP (TABLE|COLUMN|INDEX)" "$sql_file" && ! grep -qE "IF EXISTS" "$sql_file" && echo "WARNING: DROP without IF EXISTS"
     grep -qE "ALTER TABLE.*ADD COLUMN.*NOT NULL" "$sql_file" && ! grep -qE "DEFAULT" "$sql_file" && echo "WARNING: NOT NULL without DEFAULT"
@@ -481,7 +528,7 @@ fi
 ### 2I: Build Verification (MANDATORY for staging→main AND milestone→staging)
 
 ```bash
-CHANGED_FILES=$(gh pr diff $ARGUMENTS --name-only)
+CHANGED_FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)
 HAS_TS=$(echo "$CHANGED_FILES" | grep -E '\.(tsx?|jsx?)$' | head -1)
 HAS_PY=$(echo "$CHANGED_FILES" | grep -E '\.py$' | head -1)
 # Use POSIX-portable if/else (avoid bash-only [[ ]])
@@ -498,7 +545,7 @@ if [ "$IS_STAGING_TO_MAIN" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]
 Read `forge.yaml → verification.commands.typescript.typecheck` and `.build`:
 
 ```bash
-gh pr checkout $ARGUMENTS --detach 2>/dev/null
+gh pr checkout "$PR_NUMBER" -R "$REPO" --detach 2>/dev/null
 
 TS_TYPECHECK=$(yq '.verification.commands.typescript.typecheck // ""' forge.yaml 2>/dev/null || echo '')
 TS_BUILD=$(yq '.verification.commands.typescript.build // ""' forge.yaml 2>/dev/null || echo '')
@@ -531,7 +578,7 @@ If `BUILD_EXIT != 0`: **CONFIRMED blocking** — build/prerender failure.
 Read `forge.yaml → verification.commands.python.format` and `.build`:
 
 ```bash
-gh pr checkout $ARGUMENTS --detach 2>/dev/null
+gh pr checkout "$PR_NUMBER" -R "$REPO" --detach 2>/dev/null
 
 # Compile-check all changed Python files (language-universal — no config needed)
 echo "$CHANGED_FILES" | grep '\.py$' | while IFS= read -r f; do python3 -m py_compile "$f" 2>&1; done
@@ -556,10 +603,10 @@ Check whether the PR's actual changes match what the builder committed to in its
 
 ```bash
 # Find the contract comment on the linked issue
-ISSUE_NUM=$(gh pr view $ARGUMENTS --json body --jq '.body | gsub("(?s).*?(?:Closes #|#)(?<n>[0-9]+).*"; "\(.n)") // empty' 2>/dev/null | head -1)
+ISSUE_NUM=$(gh pr view "$PR_NUMBER" -R "$REPO" --json body --jq '.body | gsub("(?s).*?(?:Closes #|#)(?<n>[0-9]+).*"; "\(.n)") // empty' 2>/dev/null | head -1)
 if [ -n "$ISSUE_NUM" ]; then
     CONTRACT_FILES=$(gh api repos/${REPO}/issues/${ISSUE_NUM}/comments --jq '[.[] | select(.body | contains("FORGE:CONTRACT"))] | .[0].body' 2>/dev/null | grep -E '`[^`]+\.(py|tsx?|sql|sh|yml|yaml|json)`' | grep -oE '`[^`]+\.(py|tsx?|sql|sh|yml|yaml|json)`' | tr -d '`' | sort -u)
-    PR_FILES=$(gh pr diff $ARGUMENTS --name-only | sort -u)
+    PR_FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only | sort -u)
 
     # Files in PR but NOT in contract
     SCOPE_CREEP=$(comm -23 <(echo "$PR_FILES") <(echo "$CONTRACT_FILES") 2>/dev/null | grep -vE '\.(md|txt|example)$')
@@ -629,7 +676,7 @@ For each changed file, execute the relevant checks using the standalone verifica
 **Platform note**: The verify-*.sh scripts require bash and standard POSIX tools. On Windows without bash (Git Bash / WSL / MSYS2), these checks are skipped with an explicit message — the review continues without them.
 
 ```bash
-CHANGED_FILES=$(gh pr diff $ARGUMENTS --name-only)
+CHANGED_FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)
 REPO_ROOT="."  # Assumes cwd is the repo root
 
 # Resolve the verify-*.sh scripts source directory with the same deterministic
@@ -663,7 +710,7 @@ if [ "$BASH_AVAILABLE" = "true" ]; then
     CHANGED_FILES_TMP="/tmp/forge-review-changed-$$.tmp"
     DIFF_TMP="/tmp/forge-review-diff-$$.tmp"
     echo "$CHANGED_FILES" > "$CHANGED_FILES_TMP"
-    gh pr diff $ARGUMENTS > "$DIFF_TMP"
+    gh pr diff "$PR_NUMBER" -R "$REPO" > "$DIFF_TMP"
 
     # --- Script-based checks (reusable, testable, deterministic) ---
     # Each script exits 0 (pass), 1 (blocking findings), or 2 (warnings only).
@@ -835,8 +882,8 @@ Format: `INTEG-N|CONFIRMED|HIGH|file:line|Changed code may be unreachable: {reas
 **NEVER scale review depth by line count.** A 5-line shell script processing LLM output is more dangerous than a 500-line React component.
 
 ```bash
-DIFF=$(gh pr diff $ARGUMENTS)
-FILES=$(gh pr diff $ARGUMENTS --name-only)
+DIFF=$(gh pr diff "$PR_NUMBER" -R "$REPO")
+FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)
 echo "=== RISK SIGNALS ==="
 echo "$DIFF" | grep -cE "subprocess|exec|eval|system\(|popen|heredoc" && echo "  UNTRUSTED_INPUT_PROCESSING" || true
 echo "$DIFF" | grep -cE "\.sh$|bash|shell|cron" && echo "  SHELL_SCRIPT" || true
@@ -985,7 +1032,7 @@ echo "AUTH=$SCORE_AUTH BILLING=$SCORE_BILLING CONCURRENCY=$SCORE_CONCURRENCY DAT
 
 ```bash
 CONTRACT_RISK_FLAGS=""
-ISSUE_NUM=$(gh pr view $ARGUMENTS --json body --jq '.body | gsub("(?s).*?(?:Closes #|#)(?<n>[0-9]+).*"; "\(.n)") // empty' 2>/dev/null | head -1)
+ISSUE_NUM=$(gh pr view "$PR_NUMBER" -R "$REPO" --json body --jq '.body | gsub("(?s).*?(?:Closes #|#)(?<n>[0-9]+).*"; "\(.n)") // empty' 2>/dev/null | head -1)
 if [ -n "$ISSUE_NUM" ]; then
     CONTRACT_BODY=$(gh api repos/${REPO}/issues/${ISSUE_NUM}/comments \
         --jq '[.[] | select(.body | contains("FORGE:CONTRACT"))] | .[0].body' 2>/dev/null || echo "")
@@ -1151,7 +1198,7 @@ if [ "$PROVENANCE_TABLE_LOADED" = "true" ]; then
   done | sort -u | tr '\n' '|' | sed 's/|$//')
 
   # Determine task type from FORGE:INVESTIGATOR annotation on the linked issue (if available)
-  ISSUE_NUM_FOR_TRUST=$(gh pr view "$ARGUMENTS" --json body \
+  ISSUE_NUM_FOR_TRUST=$(gh pr view "$PR_NUMBER" -R "$REPO" --json body \
     --jq '.body | gsub("(?s).*?(?:Closes #|#)(?<n>[0-9]+).*"; "\(.n)") // ""' 2>/dev/null | head -1)
   TASK_TYPE_FOR_TRUST=""
   if [ -n "$ISSUE_NUM_FOR_TRUST" ]; then
@@ -1161,7 +1208,7 @@ if [ "$PROVENANCE_TABLE_LOADED" = "true" ]; then
   fi
   # Fall back to title-based inference if INVESTIGATOR comment absent
   if [ -z "$TASK_TYPE_FOR_TRUST" ]; then
-    PR_TITLE=$(gh pr view "$ARGUMENTS" --json title --jq '.title' 2>/dev/null || echo "")
+    PR_TITLE=$(gh pr view "$PR_NUMBER" -R "$REPO" --json title --jq '.title' 2>/dev/null || echo "")
     case "$PR_TITLE" in
       fix*|Fix*)   TASK_TYPE_FOR_TRUST="Bug Fix" ;;
       feat*|Feat*) TASK_TYPE_FOR_TRUST="Feature" ;;
@@ -1364,7 +1411,7 @@ if [[ "$TEMPLATE_SOURCE" == "none" ]]; then
 fi
 ```
 
-**If `TEMPLATE_SOURCE` is `none`**: HARD STOP. Post a PR comment explaining the setup is broken (`gh pr comment $ARGUMENTS --body "..."`) instructing the user to run `npx forgedock update` to repair the install, add `needs-human`, and exit Phase 3 without posting any findings or a `FORGE:REVIEW` verdict. **NEVER perform the review inline in the main agent context as a substitute.** A degraded solo review that presents itself as complete is worse than no review — missing templates must fail loudly, not silently.
+**If `TEMPLATE_SOURCE` is `none`**: HARD STOP. Post a PR comment explaining the setup is broken (`gh pr comment "$PR_NUMBER" -R "$REPO" --body "..."`) instructing the user to run `npx forgedock update` to repair the install, add `needs-human`, and exit Phase 3 without posting any findings or a `FORGE:REVIEW` verdict. **NEVER perform the review inline in the main agent context as a substitute.** A degraded solo review that presents itself as complete is worse than no review — missing templates must fail loudly, not silently.
 
 **If `TEMPLATE_SOURCE` is `plugin_root`, `forge_home` or `repo_path`** (the normal cases — behavior unchanged from before this guard existed):
 ```
@@ -1447,8 +1494,8 @@ Each domain agent receives only the diff slice relevant to its domain, not the f
 
 ```bash
 # Full diff fetched once — agents do NOT re-fetch it
-FULL_DIFF=$(gh pr diff $ARGUMENTS)
-FULL_FILES=$(gh pr diff $ARGUMENTS --name-only)
+FULL_DIFF=$(gh pr diff "$PR_NUMBER" -R "$REPO")
+FULL_FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)
 
 # --- Security agent: always receives the full diff (cross-cutting domain) ---
 DIFF_SLICE_SECURITY="$FULL_DIFF"
@@ -1603,8 +1650,8 @@ When substituting `[FILE_LIST]` in each agent's template:
 ## Phase 4: Wait for Agents
 
 ```bash
-gh pr view $ARGUMENTS --json comments --jq '.comments | length'
-gh api repos/{owner}/{repo}/issues/$ARGUMENTS/comments --jq '.[-10:] | .[].body[:100]'
+gh pr view "$PR_NUMBER" -R "$REPO" --json comments --jq '.comments | length'
+gh api repos/${REPO}/issues/${PR_NUMBER}/comments --jq '.[-10:] | .[].body[:100]'
 
 # Every dispatched agent must have delivered its own persisted review to GitHub.
 # Do not infer a clean review from a missing comment: its return text may contain
@@ -2174,16 +2221,16 @@ fi
 TRUST_ANNOTATION="**Intensity tier**: ${INTENSITY_TIER:-SHADOW} | **Cell**: \`${TABLE_CELL_KEY:-(unavailable)}\` | **Shadow mode**: ${TRUST_SHADOW_MODE:-true}"
 
 # Stale review:
-gh pr review $ARGUMENTS --comment --body "Review of commit $REVIEW_SHA_SHORT is stale — PR HEAD changed. Re-run /review-pr."
+gh pr review "$PR_NUMBER" -R "$REPO" --comment --body "Review of commit $REVIEW_SHA_SHORT is stale — PR HEAD changed. Re-run /review-pr."
 
 # Clean (no blocking issues):
-gh pr review $ARGUMENTS --comment --body "APPROVED: commit $REVIEW_SHA_SHORT after context-aware review ([N] agents: [names]). [M] findings created as issues. Safe to merge.
+gh pr review "$PR_NUMBER" -R "$REPO" --comment --body "APPROVED: commit $REVIEW_SHA_SHORT after context-aware review ([N] agents: [names]). [M] findings created as issues. Safe to merge.
 ${TRUST_ANNOTATION}
 $([ "$MERGE_HEALTH" = "UNKNOWN" ] && echo "
 ⚠ Mergeability: GitHub is still computing merge state (UNKNOWN after retries). Verify manually before merging.")${ATTRIBUTION_FOOTER_LINE}"
 
 # Blocking issues (including merge conflicts and purpose regressions):
-gh pr review $ARGUMENTS --comment --body "CHANGES REQUESTED: commit $REVIEW_SHA_SHORT — [N] blocking issues found. See GitHub issues.
+gh pr review "$PR_NUMBER" -R "$REPO" --comment --body "CHANGES REQUESTED: commit $REVIEW_SHA_SHORT — [N] blocking issues found. See GitHub issues.
 ${TRUST_ANNOTATION}
 $([ "$HAS_MERGE_CONFLICT" = "true" ] && echo "
 🔴 Merge Conflict: ${MERGE_CONFLICT_MSG}")
@@ -2646,7 +2693,7 @@ fi
 
 ```bash
 if [ "${IS_MILESTONE_TO_STAGING:-false}" = "true" ]; then
-    PR_MERGE_STATE=$(gh pr view $ARGUMENTS --json state --jq '.state' 2>/dev/null || echo "")
+    PR_MERGE_STATE=$(gh pr view "$PR_NUMBER" -R "$REPO" --json state --jq '.state' 2>/dev/null || echo "")
     if [ "$PR_MERGE_STATE" = "MERGED" ]; then
         echo "Phase 9A: Checking for open review-finding issues to demilestone (fallback — manual merge path)..."
 
@@ -2677,7 +2724,7 @@ fi
 <!-- Added: forge#815 -->
 
 ```bash
-CURRENT_SHA=$(gh pr view $ARGUMENTS --json headRefOid --jq '.headRefOid')
+CURRENT_SHA=$(gh pr view "$PR_NUMBER" -R "$REPO" --json headRefOid --jq '.headRefOid')
 REVIEW_IS_STALE="false"
 if [ "$CURRENT_SHA" != "$REVIEW_SHA" ]; then REVIEW_IS_STALE="true"; fi
 ```
@@ -2715,7 +2762,7 @@ if [ "$IS_FIRST_TIME_CONTRIBUTOR" = "true" ] && [ "$WELCOME_ENABLED" != "false" 
     # ${VAR} interpolation, which a quoted heredoc would disable. Literal backticks in
     # the static text are still escaped (\`) since they remain live inside an unquoted
     # heredoc, same as inside a double-quoted string. See forge#2223.
-    gh pr comment "$ARGUMENTS" --body "$(cat <<EOF
+    gh pr comment "$PR_NUMBER" -R "$REPO" --body "$(cat <<EOF
 ## Welcome to ${PROJECT_NAME_WELCOME}! 🎉
 
 Hi @${PR_AUTHOR} — this looks like your first merged contribution here. Thanks for opening a PR!
@@ -2757,7 +2804,7 @@ ACTUAL_AGENT_COUNT=$(echo "$ACTUAL_AGENT_DOMAINS" | tr ',' '\n' | grep -c '.' 2>
 Substitute `ACTUAL_AGENT_COUNT`/`ACTUAL_AGENT_DOMAINS` into the summary's `**Agents**: [N] ([names])` field below — do NOT substitute a manually-counted or remembered figure. Compare it to `SELECTED_AGENT_COUNT` from Phase 3C. If it is smaller, the panel is degraded: the Phase 3C hard-stop path must already have labelled the PR `review-degraded`, added `needs-human`, and exited without a verdict. Never summarize, approve, or merge a partial panel. `ACTUAL_AGENT_COUNT=0` is the same hard stop, not a solo/inline review mode.
 
 ```bash
-gh pr comment $ARGUMENTS --body "$(cat <<'EOF'
+gh pr comment "$PR_NUMBER" -R "$REPO" --body "$(cat <<'EOF'
 # PR Review Summary: #[NUMBER] - [TITLE]
 
 ## Review Integrity
