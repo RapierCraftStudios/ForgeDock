@@ -949,12 +949,26 @@ Skip the context gathering (print `CONTEXT_RESULT:` with `status: SKIPPED`) if:
 **Minimal marker on every non-TRIVIAL skip (forge#3123)**: for STANDARD/COMPLEX the phase-trail gate (`scripts/verify-phase-trail.sh`) requires a `FORGE:CONTEXT` marker, so a skip must still post an empty marker comment (idempotent: skip if a `FORGE:CONTEXT` comment already exists), otherwise a re-run can never satisfy the gate:
 
 ```bash
-# Anchored match mirrors scripts/verify-phase-trail.sh (marker must open the comment).
+# Anchored match mirrors scripts/verify-phase-trail.sh (marker must open the comment) AND its
+# trusted-author predicate (author_association in FORGE_TRAIL_TRUSTED_ASSOCIATIONS, Bot user, or login in
+# FORGE_TRAIL_TRUSTED_LOGINS): an untrusted commenter's pre-posted marker must not suppress the skip
+# marker, because the gate ignores it and would then fail closed on every re-run (forge#3289).
 # A failed lookup sets LOOKUP_FAILED and posts nothing (unknown is not zero): the
 # phase-trail gate then flags the missing marker and a re-run retries.
 LOOKUP_FAILED=0
-EXISTING_JSON=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
-  --jq '[.[] | select((.body // "") | startswith("<!-- FORGE:CONTEXT -->"))] | length') || LOOKUP_FAILED=1
+TRUSTED_ASSOC="${FORGE_TRAIL_TRUSTED_ASSOCIATIONS-OWNER,MEMBER,COLLABORATOR}"
+TRUSTED_LOGINS="${FORGE_TRAIL_TRUSTED_LOGINS-}"
+EXISTING_JSON=$(set -o pipefail; gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate | jq -r \
+  --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" '
+  ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
+  | ($logins | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $L
+  | [.[]
+     | select((.body // "") | startswith("<!-- FORGE:CONTEXT -->"))
+     | select(
+         ((.author_association // "") as $x | $A | index($x) != null)
+         or ((.user.type // "") == "Bot")
+         or ((.user.login // "") as $x | $L | index($x) != null)
+       )] | length') || LOOKUP_FAILED=1
 EXISTING_CONTEXT=$(printf '%s\n' "$EXISTING_JSON" | awk '{s+=$1} END {print s+0}')
 if [ "${DRY_RUN:-false}" = "true" ]; then
   echo "[DRY_RUN] would post minimal FORGE:CONTEXT marker on #{NUMBER}"

@@ -2078,13 +2078,22 @@ Verdict determined by standard blocking criteria.
 # Detect a confirmed coverage reduction (self-contained: defines its own variables; do not rely on earlier fences)
 COVERAGE_REDUCTION_CONFIRMED=false
 COVERAGE_LOW_NOTE=""
-# COVERAGE_FINDINGS = the confirmed findings list produced by quality-gate 2U / the review agents, one per line
-if printf '%s\n' "${COVERAGE_FINDINGS:-}" | grep -q '^COVERAGE-1'; then
+# Source of COVERAGE_FINDINGS: the quality-gate 2U output (the `COVERAGE-*` lines it prints), the
+# FORGE:QUALITY_GATE comment on the linked issue, and every FORGE:REVIEW-AGENT comment on the PR.
+# Fail closed: build it here rather than trusting a caller-exported variable.
+COVERAGE_FINDINGS="${COVERAGE_FINDINGS:-}
+$(gh api "repos/{GH_REPO}/issues/{PR_NUMBER}/comments" --paginate --jq '.[].body' 2>/dev/null || true)
+$(gh api "repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments" --paginate --jq '.[] | select(.body | contains("FORGE:QUALITY_GATE")) | .body' 2>/dev/null || true)"
+# Tolerate bullet / bold / quote / numbering prefixes before the ID.
+COV_RE='^[[:space:]>*_0-9.-]*COVERAGE-'
+if printf '%s\n' "$COVERAGE_FINDINGS" | grep -Eq "${COV_RE}1([^0-9]|$)"; then
     COVERAGE_REDUCTION_CONFIRMED=true
 fi
-if printf '%s\n' "${COVERAGE_FINDINGS:-}" | grep -q '^COVERAGE-2'; then
+if printf '%s\n' "$COVERAGE_FINDINGS" | grep -Eq "${COV_RE}2([^0-9]|$)"; then
     COVERAGE_LOW_NOTE="COVERAGE-2 (LOW): a test was deleted together with its covered source in the same diff — verified, not blocking."
 fi
+# If 2U was required but produced no output at all (no COVERAGE lines and no quality-gate result), treat as NOT evaluated:
+# re-run quality-gate 2U before approving rather than reading the empty result as clean.
 ```
 
 ```bash

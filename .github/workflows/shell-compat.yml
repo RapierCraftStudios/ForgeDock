@@ -61,11 +61,14 @@ jobs:
           /bin/bash --version | head -1
           /bin/bash --version | head -1 | grep -q 'version 3\.2' || { echo "::error::/bin/bash is not 3.2"; exit 1; }
           /bin/bash scripts/lint-dispatch-prompt.test.sh
+          /bin/bash scripts/lint-build-validate-files.test.sh
           /bin/bash scripts/verify-phase-trail.test.sh
       # macOS runs lint-dispatch-prompt/verify-phase-trail once, under /bin/bash 3.2 above.
       - name: Run lint-dispatch-prompt.test.sh
         if: runner.os != 'macOS'
-        run: bash scripts/lint-dispatch-prompt.test.sh
+        run: |
+          bash scripts/lint-dispatch-prompt.test.sh
+          bash scripts/lint-build-validate-files.test.sh
       - name: Run forge-root.test.sh
         run: bash scripts/forge-root.test.sh
       - name: Run forge-root.test.sh bootstrap under zsh (macOS)
@@ -102,7 +105,9 @@ jobs:
       - name: Run forge-root.test.sh
         run: bash scripts/forge-root.test.sh
       - name: Run lint-dispatch-prompt.test.sh
-        run: bash scripts/lint-dispatch-prompt.test.sh
+        run: |
+          bash scripts/lint-dispatch-prompt.test.sh
+          bash scripts/lint-build-validate-files.test.sh
       - name: Run verify-phase-trail.test.sh
         run: bash scripts/verify-phase-trail.test.sh
       - name: Run is-docs-only.test.sh

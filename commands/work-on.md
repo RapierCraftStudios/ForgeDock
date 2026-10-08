@@ -253,7 +253,9 @@ If detected, dispatch immediately and STOP — do NOT fall through to Phase 0B's
 Skill(skill="{FORGE_SKILL_PREFIX}work-on:remediate", args="${REMEDIATE_PR_NUMBER} ${REMEDIATE_ISSUE_FLAG} --repo {GH_REPO} --gh-flag {GH_FLAG}")
 ```
 
-**After `REMEDIATE_RESULT` returns, STOP unconditionally** — do not run any further Phase 0–7 logic in this file. `work-on/remediate.md` is self-contained: a FIXABLE remediation replaces `needs-human` with the active `workflow:in-review` state only while it is running, then ends at `workflow:merged`, `workflow:awaiting-merge`, or a newly asserted `needs-human` label. When `re_gate_outcome: AUTO-LANDED`, it drives its own close phase internally (Phase M8 invokes `Skill("{FORGE_SKILL_PREFIX}work-on:close", ...)` directly) before returning. For every other outcome (`HELD-AWAITING-MERGE`, `RE-ESCALATED`, `UNFIXABLE`, `BLOCKED`, `ALREADY_DONE`), the issue is already at a terminal state (`workflow:awaiting-merge` or `needs-human`, or already closed) per the Universal Phase Dispatcher — nothing further to do.
+**If `REMEDIATE_RESULT: status: REREVIEW_REQUIRED`** (forge#3240: fix pushed, but the forked remediation had no sub-agent dispatch tool): run the re-review from this top-level session, which has dispatch — `Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="${REMEDIATE_PR_NUMBER} --auto-merge --issue ${ISSUE} --base ${PR_BASE} --gh-flag {GH_FLAG}")` (`ISSUE` and `PR_BASE` from the result and the PR) — never review inline. If it returns `REVIEW_RESULT: status: COMPLETE` (merged), invoke `Skill("{FORGE_SKILL_PREFIX}work-on:close", ...)` as remediate M8 does for `AUTO-LANDED`. Then STOP.
+
+**After `REMEDIATE_RESULT` returns (any other status), STOP unconditionally** — do not run any further Phase 0–7 logic in this file. `work-on/remediate.md` is self-contained: a FIXABLE remediation replaces `needs-human` with the active `workflow:in-review` state only while it is running, then ends at `workflow:merged`, `workflow:awaiting-merge`, or a newly asserted `needs-human` label. When `re_gate_outcome: AUTO-LANDED`, it drives its own close phase internally (Phase M8 invokes `Skill("{FORGE_SKILL_PREFIX}work-on:close", ...)` directly) before returning. For every other outcome (`HELD-AWAITING-MERGE`, `RE-ESCALATED`, `UNFIXABLE`, `BLOCKED`, `ALREADY_DONE`), the issue is already at a terminal state (`workflow:awaiting-merge` or `needs-human`, or already closed) per the Universal Phase Dispatcher — nothing further to do.
 
 This mode is reachable both standalone (a human or script running `/work-on <pr> --remediate` directly) and via the orchestrator (`commands/orchestrate/phase-4-execution.md` item 6.4 auto-dispatches the identical `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{PR} --remediate --issue {N} ...')` invocation against a `needs-human`-gated predecessor's own PR).
 
@@ -706,7 +708,7 @@ Omit `--pr/--branch/--worktree` when the value is unknown (PR-less terminals).
 
 ## Remediation entry (`--remediate`)
 
-Handled in Phase 0A.1: `/work-on <pr> --remediate [--issue N]` dispatches `Skill(skill="{FORGE_SKILL_PREFIX}work-on:remediate", ...)` (forked) and STOPS after its `REMEDIATE_RESULT`.
+Handled in Phase 0A.1: `/work-on <pr> --remediate [--issue N]` dispatches `Skill(skill="{FORGE_SKILL_PREFIX}work-on:remediate", ...)` (forked) and STOPS after its `REMEDIATE_RESULT`, except that `REREVIEW_REQUIRED` makes the router run `review-pr` itself first (see 0A.1).
 
 ---
 

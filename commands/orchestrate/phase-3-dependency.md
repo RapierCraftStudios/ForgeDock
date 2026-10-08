@@ -1517,8 +1517,13 @@ BLOCKED_NOW=$(gh issue list -R {GH_REPO} --state open --label "blocked-on-human-
   --jq '.[].number' 2>/dev/null || echo "")
 for DEP in $BLOCKED_NOW; do
   # Read which predecessor(s) this DEP is tracked against
+  # Fetch is split from `sort`: in a pipeline, `|| echo ""` binds to sort's status (dead code), so a failed or
+  # partially paginated gh api would be read as a (truncated) list and could release DEP. Capture gh's own status.
   GATING_PREDS_RAW=$(gh api --paginate repos/{GH_REPO}/issues/${DEP}/comments \
-    --jq '.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE")) | (.body | capture("Gating predecessor\\*\\*: #(?<p>[0-9]+)").p)' 2>/dev/null | sort -u || echo "")
+    --jq '.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE")) | (.body | capture("Gating predecessor\\*\\*: #(?<p>[0-9]+)").p)' 2>/dev/null) \
+    || { echo "WARNING: #${DEP} gating-predecessor lookup failed - keeping blocked; retrying next wake." >&2; continue; }
+  GATING_PREDS_RAW=$(printf '%s\n' "$GATING_PREDS_RAW" | sort -u | sed '/^$/d')
+  [ -n "$GATING_PREDS_RAW" ] || continue   # no tracked predecessor found: fail closed, stay blocked
   STILL_GATED=false
   for GPRED in $GATING_PREDS_RAW; do
     GPRED_CLASS=$(classify_predecessor_state "$GPRED")
@@ -1527,7 +1532,6 @@ for DEP in $BLOCKED_NOW; do
   if [ "$STILL_GATED" = "false" ]; then
     # Hardened release sequence — keep in sync with phase-4-execution.md Step 4B item 6.6 (same ordering and fail-closed semantics;
     # a fix to one copy MUST be applied to the other). <!-- Added: forge#3245 -->
-    [ -n "$GATING_PREDS_RAW" ] || continue
     if [ "${DRY_RUN:-false}" = "true" ]; then echo "DRY_RUN: would release #${DEP} (remove blocked-on-human-merge, post FORGE:UNBLOCKED, dispatch)"; continue; fi
     # Idempotency: skip if another path already dispatched DEP.
     DEP_ALREADY_DISPATCHED=$(gh issue view "$DEP" -R {GH_REPO} --json labels \

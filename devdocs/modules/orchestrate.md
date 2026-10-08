@@ -56,3 +56,51 @@ pass. Cite: #2502, PR #2526, PR #2500 (source finding).
 PR #2605 touched `commands/orchestrate/phase-4-execution.md`. See FORGE:BUILDER comment on issue #2598 for full change list.
 Key gotcha recorded: `printf '%s\n' "..."` always appends a trailing newline the original inline `--body "..."` string did not have; when staging a body-file for byte-for-byte content parity with a prior inline `--body` argument, use `printf '%s'` (no `\n`) instead. Introduced by #2584/PR #2594's mktemp+--body-file refactor of the Step 4C repair guard.
 Cite: #2598, PR #2605.
+
+## Entry 2026-10-07 — Fix: anchor phase-trail markers to comment start (#3181)
+
+PR #3238 touched `orchestrate`. See FORGE:BUILDER comment on issue #3181 for full change list.
+Key gotcha recorded: phase-trail F/R marker matches must anchor with startswith, not contains, so quoted markers cannot forge a release.
+Cite: #3181 / PR #3238.
+
+## Entry 2026-10-08 — Fix: orchestrator login for trail-marker trust matches posting identity (#3205)
+
+PR #3252 touched `orchestrate`. See FORGE:BUILDER comment on issue #3205 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3205 / PR #3252.
+
+## Entry 2026-10-08 — Fix: orchestrate merged hold writes needs-human label before escalation comment (#3223)
+
+PR #3290 touched `orchestrate`. See FORGE:BUILDER comment on issue #3223 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3223 / PR #3290.
+
+## Entry 2026-10-08 — Fix: orchestrate phase-1-resolve references nonexistent planP3Batches/summarizeP3BatchPlan (#3259)
+
+PR #3294 touched `orchestrate`. See FORGE:BUILDER comment on issue #3259 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3259 / PR #3294.
+
+## Entry 2026-10-08 — Fix: harden orchestrate wake-path release with verified label removal and DRY_RUN guard (#3245)
+
+PR #3281 touched `orchestrate`. See FORGE:BUILDER comment on issue #3245 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3245 / PR #3281.
+
+## Entry 2026-10-08 — Fix: orchestrated workers stall on forked phase completion notifications (#3253)
+
+PR #3299 touched `orchestrate`. See FORGE:BUILDER comment on issue #3253 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3253 / PR #3299.
+
+## Entry 2026-10-08 — Fix: orchestrate wake sweep GATING_PREDS_RAW fail-closed on gh api failure (#3233)
+
+PR #3317 touched `orchestrate`. See FORGE:BUILDER comment on issue #3233 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3233 / PR #3317.
+
+## Entry 2026-10-08 — Fix: add .catch handler to batch-plan dynamic import in orchestrate phase-1 (#3296)
+
+PR #3338 touched `orchestrate`. See FORGE:BUILDER comment on issue #3296 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3296 / PR #3338.
