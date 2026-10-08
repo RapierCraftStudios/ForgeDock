@@ -326,7 +326,13 @@ evaluate_override() {
   # BUILDER exists but its completion time is unknown -> cannot prove the override is newer: reject.
   if has '<!-- FORGE:BUILDER -->' && [ -z "$BUILD_AT" ]; then return 1; fi
   # Pipeline identity set (configured + derived): authors of trusted FORGE marker comments other than overrides.
-  pipeline_logins=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" --arg extra "${FORGE_TRAIL_PIPELINE_LOGINS-}" '
+  # The token this verifier runs under is the pipeline's identity too (forge#3269): a pipeline using a human
+  # token with no markers yet must not approve its own override. Lookup failure adds nothing (derived set still applies).
+  local self_login extra_logins marker_floor
+  self_login=$(gh api user --jq '.login' 2>/dev/null || true)
+  case "$self_login" in *[!A-Za-z0-9_-]*) self_login="" ;; esac
+  extra_logins="${FORGE_TRAIL_PIPELINE_LOGINS-}${self_login:+,$self_login}"
+  pipeline_logins=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" --arg extra "$extra_logins" '
     ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
     | ($logins | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $L
     | ($extra | split(",") | map(gsub("^\\s+|\\s+$"; "") | ascii_downcase) | map(select(length > 0))) as $E
@@ -337,13 +343,27 @@ evaluate_override() {
               or ((.user.login // "") as $x | $L | index($x) != null))
           | select((.body // "") | startswith("<!-- FORGE:") and (startswith("<!-- FORGE:PHASE_TRAIL_OVERRIDE -->") | not))
           | (.user.login // empty) | ascii_downcase ] + $E ) | unique | .[]' 2>/dev/null) || return 1
+  # Time floor (forge#3271): the latest trusted BUILDER:COMPLETE. With none, fall back to the newest trusted
+  # non-override FORGE marker so an override still has to post-date the pipeline's own activity.
+  marker_floor="$BUILD_AT"
+  if [ -z "$marker_floor" ]; then
+    marker_floor=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" '
+      ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
+      | ($logins | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $L
+      | [ .[]
+          | select(((.author_association // "") as $x | $A | index($x) != null)
+                   or ((.user.type // "") == "Bot")
+                   or ((.user.login // "") as $x | $L | index($x) != null))
+          | select((.body // "") | startswith("<!-- FORGE:") and (startswith("<!-- FORGE:PHASE_TRAIL_OVERRIDE -->") | not))
+          | .created_at // empty ] | sort | .[-1] // empty' 2>/dev/null) || return 1
+  fi
   # Candidates, newest first, as TSV: login created_at head missing reason (reason last, others never empty).
-  cands=$(printf '%s' "$RAW" | jq -r --arg bt "$BUILD_AT" '
-    def clean: explode | map(select(. >= 32 and . != 127 and (. < 128 or . > 159) and (. < 8203 or . > 8207) and (. < 8234 or . > 8238) and (. < 8288 or . > 8297) and . != 65279)) | implode;
+  cands=$(printf '%s' "$RAW" | jq -r --arg bt "$marker_floor" '
+    def clean: explode | map(select(. >= 32 and . != 127 and (. < 128 or . > 159) and (. < 8203 or . > 8207) and (. < 8232 or . > 8238) and (. < 8288 or . > 8297) and . != 65279)) | implode;
     [ .[]
       | select((.body // "") | startswith("<!-- FORGE:PHASE_TRAIL_OVERRIDE -->"))
       | select((.user.type // "") == "User")
-      | select(((.user.login // "") | test("^[A-Za-z0-9-]+$")))
+      | select(((.user.login // "") | test("^[A-Za-z0-9_-]+$")))
       | select((.created_at // "") != "" and (.updated_at // "") != "" and .created_at == .updated_at)
       | select($bt == "" or .created_at > $bt)
       | (.body | split("\n") | map(sub("\r$"; ""))) as $ln
@@ -351,23 +371,23 @@ evaluate_override() {
           head: ([$ln[] | capture("^\\*\\*Head\\*\\*: *(?<v>[0-9A-Fa-f]{40,64}) *$")?.v] | .[0] // "-"),
           missing: ([$ln[] | capture("^\\*\\*Missing\\*\\*: *(?<v>.+)$")?.v] | .[0] // "-"),
           reason: ([$ln[] | capture("^\\*\\*Reason\\*\\*: *(?<v>.*)$")?.v] | .[0] // "")
-            | clean | gsub("<!--"; "<!-/-") | gsub("-->"; "-/->") | gsub("`"; "'"'"'")
+            | clean | gsub("<!--"; "<!-/-") | gsub("-->"; "-/->") | gsub("`"; "'"'"'") | gsub("@"; "(at)")
             | gsub("\\s+"; " ") | sub("^ "; "") | sub(" $"; "") | .[0:200] } ]
     | sort_by(.at) | reverse | .[]
     | [.login, .at, .head, .missing, (if .reason == "" then "-" else .reason end)] | @tsv' 2>/dev/null) || return 1
   [ -n "$cands" ] || return 1
   while IFS=$'\t' read -r login created head missing reason; do
     [ -n "$login" ] || continue
-    n=$((n+1)); [ "$n" -le 5 ] || break          # bound API calls
     [ "$reason" != "-" ] && [ -n "$reason" ] || continue
     reason=$(printf '%s' "$reason" | tr -d '[:cntrl:]')   # belt and braces: cntrl (incl. ESC) stripped again
     [ -n "$reason" ] || continue
     [ "$(printf '%s' "$head" | tr 'A-F' 'a-f')" = "$HEAD_SHA" ] || continue
     [ "$(printf '%s' "$missing" | tr ',' '\n' | norm_set)" = "$cur_set" ] || continue
     if printf '%s\n' "$pipeline_logins" | grep -Fx -- "$(printf '%s' "$login" | tr 'A-Z' 'a-z')" >/dev/null; then continue; fi
-    # Login already matched ^[A-Za-z0-9-]+$ in jq, so it is safe to interpolate into the API path.
+    n=$((n+1)); [ "$n" -le 5 ] || { echo "NOTE: break-glass override: more than 5 eligible candidates; extra ones ignored" >&2; break; }   # bound API calls (counted only for candidates that passed every local check)
+    # Login already matched ^[A-Za-z0-9_-]+$ in jq, so it is safe to interpolate into the API path.
     perm=$(gh api "repos/${REPO}/collaborators/${login}/permission" 2>/dev/null | jq -r '.permission // empty' 2>/dev/null) || perm=""
-    case "$perm" in admin|write) ;; *) continue ;; esac
+    case "$perm" in admin|write) ;; *) echo "NOTE: break-glass override by ${login} rejected: permission='${perm:-unreadable}' (needs admin/write; the lookup needs a token with push access)" >&2; continue ;; esac
     echo "PHASE_TRAIL: OVERRIDDEN"
     echo "BAND: ${BAND:-UNKNOWN}"
     echo "WAIVED: ${cur_set}"

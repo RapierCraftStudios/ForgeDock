@@ -2261,7 +2261,9 @@ else
     if [ "$TRAIL_RC" -eq 0 ]; then
       # An `OVERRIDE:` line means the verifier accepted a human override. Record it on the PR from the verifier's output (never agent prose).
       OVR=$(printf '%s\n' "$TRAIL" | sed -n 's/^OVERRIDE: //p' | sed -n '1p')
+      OVERRIDE_BOUND_HEAD=""
       if [ -n "$OVR" ]; then
+        OVERRIDE_BOUND_HEAD="$PR_HEAD_SHA"   # forge#3273: the merge below must land exactly this commit
         gh pr comment {PR_NUMBER} -R {GH_REPO} --body "$(printf '<!-- FORGE:PHASE_TRAIL_OVERRIDE_APPLIED -->\nThe phase-trail gate was waived by a human break-glass override.\n\n%s\n%s\n%s\n' '```' "$OVR" '```')" # <!-- allowlist:check-command-side-effects -->
       fi
     fi
@@ -2423,6 +2425,12 @@ else
           CI_GATE_RC=4; CI_GATE_OUT="STALE_REVIEW: PR head ${GATED_HEAD:0:7} is not the reviewed commit ${REVIEWED_SHORT} and the delta is not docs-only"
         fi
       fi
+    fi
+    # WIRE:PROVEN — spec prose; OVERRIDE_BOUND_HEAD is set in the verifier block above and consumed here (reviewed by trace)
+    # forge#3273: an accepted break-glass override is bound to one exact head. If the commit being merged
+    # differs (a push after the verifier ran, even a docs-only one), the override does not cover it.
+    if [ "$CI_GATE_RC" -eq 0 ] && [ -n "${OVERRIDE_BOUND_HEAD:-}" ] && [ "$GATED_HEAD" != "$OVERRIDE_BOUND_HEAD" ]; then
+      CI_GATE_RC=4; CI_GATE_OUT="STALE_REVIEW: break-glass override was bound to ${OVERRIDE_BOUND_HEAD:0:7} but the gated head is ${GATED_HEAD:0:7}"
     fi
     if [ "$CI_GATE_RC" -eq 4 ]; then
       # Not a human problem: the caller re-runs /review-pr on the new head (work-on/review.md R4).

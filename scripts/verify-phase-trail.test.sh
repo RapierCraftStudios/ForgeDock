@@ -20,6 +20,7 @@ if [ "${MOCK_GH_FAIL:-}" = "1" ]; then echo "mock gh: outage" >&2; exit 1; fi
 for a in "$@"; do
   case "$a" in
     repos/*/issues/*/comments) cat "$MOCK_GH_JSON"; exit 0 ;;
+    user) [ -n "${MOCK_SELF_LOGIN:-}" ] && { echo "$MOCK_SELF_LOGIN"; exit 0; }; exit 1 ;;
     repos/*/collaborators/*/permission)
       [ "${MOCK_PERM_FAIL:-}" = "1" ] && { echo "mock gh: permission api error" >&2; exit 1; }
       u="${a#repos/*/collaborators/}"; u="${u%/permission}"
@@ -415,6 +416,32 @@ echo "$NOBAND" > "$TMP_FX/nb.json"
 CUR2='ARCHITECT,CONTEXT,FAST_PATH,QUALITY_GATE'
 { jq -c '.[]' "$TMP_FX/nb.json"; ovc alice User "$AFTER" "$AFTER" "$HS" "$CUR2" "qualifier variant"; } | jq -sc . > "$TMP_FX/nb2.json"
 expect_override "MISSING 'FAST_PATH (no COMPLEXITY_BAND value)' binds by marker name" "$TMP_FX/nb2.json"
+# --- Review-finding hardening (#3268-#3274) ---
+echo '{"permission":"write"}' > "$PERM/octo_acme"
+expect_override "EMU login with underscore is accepted (#3270)" "$(ovf h1 "$(ovc octo_acme User "$AFTER" "$AFTER" "$HS" "$CUR_MISSING" "emu approver")")"
+DECOYS=(); for i in 1 2 3 4 5 6; do DECOYS+=("$(ovc "decoy$i" User "2026-10-08T03:0$i:00Z" "2026-10-08T03:0$i:00Z" "$HS2" "$CUR_MISSING" "decoy")"); done
+expect_override "5-candidate cap is not starved by decoys failing local checks (#3268)" "$(ovf h2 "$(GOODC)" "${DECOYS[@]}")"
+MOCK_SELF_LOGIN=alice orun "$(ovf h3 "$(GOODC)")"
+[ $RC -eq 1 ] && ! echo "$OUT" | grep -q OVERRIDDEN && ok "verifier's own login cannot approve an override (#3269)" || bad "self-login exclusion (rc=$RC out=$OUT)"
+MOCK_SELF_LOGIN=someoneelse orun "$(ovf h3b "$(GOODC)")"
+[ $RC -eq 0 ] && echo "$OUT" | grep -q OVERRIDDEN && ok "an unrelated self-login does not block a valid override (#3269)" || bad "self-login unrelated (rc=$RC out=$OUT)"
+orun "$(ovf h4 "$(ovc alice User "$AFTER" "$AFTER" "$HS" "$CUR_MISSING" $'ping @octocat\u2028next\u2029line')")"
+RS=$(echo "$OUT" | grep '^OVERRIDE:' | sed 's/.*reason=//')
+[ $RC -eq 0 ] && ! printf '%s' "$RS" | grep -q '@' && ! printf '%s' "$RS" | grep -q $'\xe2\x80\xa8' && ok "reason sanitiser neutralises @mentions and U+2028/2029 (#3274)" || bad "sanitiser unicode (rc=$RC rs=$RS)"
+# No BUILDER at all: floor falls back to the newest trusted FORGE marker (#3271)
+ov_base | jq -c '[.[] | select((.body|startswith("<!-- FORGE:BUILDER -->"))|not)] | map(if (.body|startswith("<!-- FORGE:CONTRACT -->")) then .created_at="2026-10-08T01:30:00Z" else . end)' > "$TMP_FX/nobuilder.json"
+orun "$TMP_FX/nobuilder.json"; NB_OUT="$OUT"
+NB_MISS=$(echo "$NB_OUT" | sed -n 's/^MISSING: //p' | sed -e 's/ -> .*$//' | paste -sd, -)
+if [ -n "$NB_MISS" ]; then
+  { jq -c '.[]' "$TMP_FX/nobuilder.json"; ovc alice User "2026-10-08T01:10:00Z" "2026-10-08T01:10:00Z" "$HS" "$NB_MISS" "older than marker"; } | jq -sc . > "$TMP_FX/nbo1.json"
+  expect_blocked "override older than newest trusted marker is rejected when BUILDER is absent (#3271)" "$TMP_FX/nbo1.json"
+  { jq -c '.[]' "$TMP_FX/nobuilder.json"; ovc alice User "$AFTER" "$AFTER" "$HS" "$NB_MISS" "newer than marker"; } | jq -sc . > "$TMP_FX/nbo2.json"
+  expect_override "override newer than newest trusted marker is accepted when BUILDER is absent (#3271)" "$TMP_FX/nbo2.json"
+else bad "no-BUILDER fixture produced no MISSING set ($NB_OUT)"; fi
+# Rejected permission is explained on stderr (#3272)
+ERRTXT=$(MOCK_GH_JSON="$(ovf h5 "$(ovc reader User "$AFTER" "$AFTER" "$HS" "$CUR_MISSING" "no perm")")" bash "$VERIFY" 3061 -R o/r --head-sha "$HS" 2>&1 >/dev/null)
+echo "$ERRTXT" | grep -q "rejected: permission='read'" && ok "rejected permission prints a diagnostic to stderr (#3272)" || bad "permission diagnostic ($ERRTXT)"
+
 # -h documents the override
 HOUT2=$(bash "$VERIFY" -h)
 echo "$HOUT2" | grep -q 'FORGE_TRAIL_PIPELINE_LOGINS' && echo "$HOUT2" | grep -q -- '--head-sha' && ok "-h documents the override and --head-sha" || bad "-h override docs"
