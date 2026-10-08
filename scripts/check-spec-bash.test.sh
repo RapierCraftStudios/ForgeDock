@@ -86,5 +86,26 @@ ${FENCE}
 EOF
 check 1 "FAIL good.md:"                 "--base: newly added broken block fails" -- --base HEAD good.md
 
+# --positional: $0-$9 inside fences are flagged; ${N}, $(N), $NF, prose and allowlisted lines are not.
+cat > "$T/pos-bad.md" <<EOF
+${FENCE}bash
+X=\$(echo a b | awk '{print \$2}')
+local a="\$1"
+${FENCE}
+EOF
+cat > "$T/pos-good.md" <<EOF
+Prose mentions \$1 and \$2 freely.
+${FENCE}bash
+X=\$(echo a b | awk '{print \$(2) \$NF}')
+local a="\${1}" b="\$@" n="\$#"
+echo \$10
+y=\$1 # allowlist:positional-arg
+${FENCE}
+EOF
+check 1 "FAIL pos-bad.md:2"             "--positional flags awk \$2"            -- --positional pos-bad.md
+check 1 "FAIL pos-bad.md:3"             "--positional flags shell \$1"          -- --positional pos-bad.md
+check 1 "violations=2"                  "--positional counts violations"       -- --positional pos-bad.md
+check 0 "violations=0"                  "--positional passes safe forms, prose, allowlist" -- --positional pos-good.md
+
 echo "check-spec-bash.test.sh: passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

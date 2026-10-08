@@ -93,12 +93,12 @@ DRY_RUN=false
 # Parse optional flags
 shift 2>/dev/null || true
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --target)      TARGET="$2";           shift 2 ;;
-    --issue)       ISSUE_NUMBER="$2";     shift 2 ;;
-    --repo)        GH_REPO="$2"; GH_FLAG="-R $GH_REPO"; shift 2 ;;
-    --max-ci-iterations)     MAX_CI_ITER="$2";     shift 2 ;;
-    --max-review-iterations) MAX_REVIEW_ITER="$2"; shift 2 ;;
+  case "${1}" in
+    --target)      TARGET="${2}";           shift 2 ;;
+    --issue)       ISSUE_NUMBER="${2}";     shift 2 ;;
+    --repo)        GH_REPO="${2}"; GH_FLAG="-R $GH_REPO"; shift 2 ;;
+    --max-ci-iterations)     MAX_CI_ITER="${2}";     shift 2 ;;
+    --max-review-iterations) MAX_REVIEW_ITER="${2}"; shift 2 ;;
     --dry-run)     DRY_RUN=true;          shift ;;
     *) shift ;;
   esac

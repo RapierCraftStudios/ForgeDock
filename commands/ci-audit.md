@@ -253,7 +253,7 @@ For each gap detected (tool present in repo but no CI validation step found), fi
 **Skip issue creation if `--dry-run` flag is passed** (or `forge.yaml → ci_audit.dry_run: true`):
 ```bash
 DRY_RUN=$(yq '.ci_audit.dry_run // "false"' forge.yaml 2>/dev/null || echo "false")
-[ "$1" = "--dry-run" ] || [ "$2" = "--dry-run" ] && DRY_RUN="true"
+[ "${1}" = "--dry-run" ] || [ "${2}" = "--dry-run" ] && DRY_RUN="true"
 ```
 
 ### 3A: Determine validator recommendation
@@ -262,8 +262,8 @@ For each gap, compose a concrete, version-aware recommendation:
 
 ```bash
 get_validator_recommendation() {
-    local tool="$1"
-    local version="$2"  # may be empty if unknown
+    local tool="${1}"
+    local version="${2}"  # may be empty if unknown
 
     case "$tool" in
         traefik)

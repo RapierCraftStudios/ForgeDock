@@ -330,7 +330,7 @@ If the gate exits with `RESULT: PASS` → a `<!-- FORGE:GATE_PASS -->` structure
 ```bash
 git fetch origin $DEFAULT_BRANCH $STAGING_BRANCH
 git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH --stat | tail -20
-git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH --numstat | awk '{add+=$1; del+=$2} END {print "Added:", add, "Deleted:", del, "Total:", add+del}'
+git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH --numstat | awk '{add+=$(1); del+=$(2)} END {print "Added:", add, "Deleted:", del, "Total:", add+del}'
 git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH --name-only | sort | uniq
 ```
 

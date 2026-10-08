@@ -970,7 +970,7 @@ EXISTING_JSON=$(set -o pipefail; gh api "repos/{GH_REPO}/issues/{NUMBER}/comment
          or ((.user.type // "") == "Bot")
          or ((.user.login // "") as $x | $L | index($x) != null)
        )] | length') || LOOKUP_FAILED=1
-EXISTING_CONTEXT=$(printf '%s\n' "$EXISTING_JSON" | awk '{s+=$1} END {print s+0}')
+EXISTING_CONTEXT=$(printf '%s\n' "$EXISTING_JSON" | awk '{s+=$(1)} END {print s+0}')
 if [ "${DRY_RUN:-false}" = "true" ]; then
   echo "[DRY_RUN] would post minimal FORGE:CONTEXT marker on #{NUMBER}"
 elif [ "$LOOKUP_FAILED" -eq 1 ]; then

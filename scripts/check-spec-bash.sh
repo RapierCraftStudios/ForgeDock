@@ -12,7 +12,17 @@
 #
 # Usage:
 #   check-spec-bash.sh [--base <git-ref>] [--shellcheck] <file.md>...
+#   check-spec-bash.sh --positional <file.md>...
 #
+#   --positional  Different check, opt-in: fail on any `$0`..`$9` inside a fenced code block.
+#                 Claude Code rewrites those tokens with the invocation's arguments whenever a
+#                 spec is loaded via Skill/slash command WITH args (awk `{print $2}` silently
+#                 becomes `{print --issue}`). Use `${1}` in shell and `$(1)` in awk instead;
+#                 `${N}`, `$(N)`, `$NF`, `$@`, `$#` and `$10`+ are not substituted. Suppress a
+#                 deliberate hit by putting `allowlist:positional-arg` on the same line.
+#                 Scope the file list to Skill-loaded specs (Read-loaded orchestrate/**,
+#                 pipeline-health/** and the review-pr-agents catalog are not substituted).
+#                 Output: `FAIL <file>:<line> positional arg ...` then `SPEC-POSITIONAL: ...`.
 #   --base <ref>   Only check blocks that contain a line changed relative to <ref>
 #                  (`git diff -U0 <ref> -- <file>`), so pre-existing blocks never fail
 #                  a new change. Without --base every block is checked.
@@ -33,19 +43,40 @@
 
 set -u
 
-BASE=""; SHELLCHECK=0; FILES=""
-usage() { echo "ERROR: Usage: check-spec-bash.sh [--base <git-ref>] [--shellcheck] <file.md>..." >&2; exit 2; }
+BASE=""; SHELLCHECK=0; POSITIONAL=0; FILES=""
+usage() { echo "ERROR: Usage: check-spec-bash.sh [--base <git-ref>] [--shellcheck] | --positional <file.md>..." >&2; exit 2; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --base) [ "$#" -ge 2 ] || usage; BASE="$2"; shift 2 ;;
     --shellcheck) SHELLCHECK=1; shift ;;
+    --positional) POSITIONAL=1; shift ;;
     --*) usage ;;
     *) FILES="$FILES
 $1"; shift ;;
   esac
 done
 [ -n "$FILES" ] || usage
+
+if [ "$POSITIONAL" = 1 ]; then
+  pfail=0; pfiles=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in *.md) ;; *) continue ;; esac
+    [ -f "$f" ] || { echo "SKIP $f missing"; continue; }
+    pfiles=$((pfiles + 1))
+    hits=$(awk -v f="$f" '
+      /^[ \t]*```/ { inb = !inb; next }
+      inb && /\$[0-9]([^0-9]|$)/ && !/allowlist:positional-arg/ { print "FAIL " f ":" NR " positional arg ($0-$9) in fenced block: " $0 }
+    ' "$f")
+    if [ -n "$hits" ]; then printf '%s\n' "$hits"; pfail=$((pfail + $(printf '%s\n' "$hits" | wc -l))); fi
+  done <<EOP
+$FILES
+EOP
+  echo "SPEC-POSITIONAL: files=$pfiles violations=$pfail"
+  [ "$pfail" -eq 0 ]
+  exit $?
+fi
 
 TMPD=$(mktemp -d "${TMPDIR:-/tmp}/check-spec-bash.XXXXXX") || exit 2
 trap 'rm -rf "$TMPD"' EXIT
