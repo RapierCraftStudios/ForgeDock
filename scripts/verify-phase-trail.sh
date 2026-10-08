@@ -320,7 +320,7 @@ norm_set() {
 
 evaluate_override() {
   [ "$HEAD_SHA_SET" = "1" ] || return 1
-  local cur_set cands pipeline_logins login created head missing reason perm n=0
+  local cur_set cands pipeline_logins login created head missing reason perm n=0 seen_logins="" llogin
   cur_set=$(printf '%s\n' "${MISSING[@]}" | norm_set) || return 1
   [ -n "$cur_set" ] || return 1
   # BUILDER exists but its completion time is unknown -> cannot prove the override is newer: reject.
@@ -364,6 +364,7 @@ evaluate_override() {
       | select((.body // "") | startswith("<!-- FORGE:PHASE_TRAIL_OVERRIDE -->"))
       | select((.user.type // "") == "User")
       | select(((.user.login // "") | test("^[A-Za-z0-9_-]+$")))
+      | select((.author_association // "") | IN("OWNER", "MEMBER", "COLLABORATOR"))   # forge#3279: a write/admin user always has one of these; NONE/CONTRIBUTOR decoys never become candidates (the permission API stays authoritative)
       | select((.created_at // "") != "" and (.updated_at // "") != "" and .created_at == .updated_at)
       | select($bt == "" or .created_at > $bt)
       | (.body | split("\n") | map(sub("\r$"; ""))) as $ln
@@ -384,7 +385,12 @@ evaluate_override() {
     [ "$(printf '%s' "$head" | tr 'A-F' 'a-f')" = "$HEAD_SHA" ] || continue
     [ "$(printf '%s' "$missing" | tr ',' '\n' | norm_set)" = "$cur_set" ] || continue
     if printf '%s\n' "$pipeline_logins" | grep -Fx -- "$(printf '%s' "$login" | tr 'A-Z' 'a-z')" >/dev/null; then continue; fi
-    n=$((n+1)); [ "$n" -le 5 ] || { echo "NOTE: break-glass override: more than 5 eligible candidates; extra ones ignored" >&2; break; }   # bound API calls (counted only for candidates that passed every local check)
+    # forge#3279: the cap bounds DISTINCT logins looked up (bash 3.2-portable newline list, no associative arrays);
+    # a login seen before was already rejected (an accepted one returns), so repeat comments cost no slot and no API call.
+    llogin=$(printf '%s' "$login" | tr 'A-Z' 'a-z')
+    if printf '%s\n' "$seen_logins" | grep -Fx -- "$llogin" >/dev/null; then continue; fi
+    n=$((n+1)); [ "$n" -le 5 ] || { echo "NOTE: break-glass override: more than 5 eligible candidate logins; extra ones ignored" >&2; break; }   # bound API calls
+    seen_logins="${seen_logins}${llogin}"$'\n'
     # Login already matched ^[A-Za-z0-9_-]+$ in jq, so it is safe to interpolate into the API path.
     perm=$(gh api "repos/${REPO}/collaborators/${login}/permission" 2>/dev/null | jq -r '.permission // empty' 2>/dev/null) || perm=""
     case "$perm" in admin|write) ;; *) echo "NOTE: break-glass override by ${login} rejected: permission='${perm:-unreadable}' (needs admin/write; the lookup needs a token with push access)" >&2; continue ;; esac
