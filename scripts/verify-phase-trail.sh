@@ -75,6 +75,7 @@
 # Limits: "Bot" trusts any GitHub App/bot that can comment on the repo (set
 # FORGE_TRAIL_TRUSTED_ASSOCIATIONS and FORGE_TRAIL_TRUSTED_LOGINS to tighten);
 # COLLABORATOR includes read-level collaborators; login matching is case-sensitive.
+# The same association list also prefilters break-glass override candidates (forge#3307).
 #
 # Break-glass override (#3152): a misfiring gate can be cleared by a HUMAN, never by the pipeline.
 # A comment whose body starts with `<!-- FORGE:PHASE_TRAIL_OVERRIDE -->` and carries the lines
@@ -358,13 +359,30 @@ evaluate_override() {
           | .created_at // empty ] | sort | .[-1] // empty' 2>/dev/null) || return 1
   fi
   # Candidates, newest first, as TSV: login created_at head missing reason (reason last, others never empty).
-  cands=$(printf '%s' "$RAW" | jq -r --arg bt "$marker_floor" '
-    def clean: explode | map(select(. >= 32 and . != 127 and (. < 128 or . > 159) and (. < 8203 or . > 8207) and (. < 8232 or . > 8238) and (. < 8288 or . > 8297) and . != 65279)) | implode;
+  # The author_association prefilter reuses the configured trusted list ($TRUSTED_ASSOC) and is only an
+  # optimization (forge#3279): the permission API stays authoritative. A real write/admin approver with concealed
+  # org membership can show CONTRIBUTOR/NONE and is filtered out here; widen FORGE_TRAIL_TRUSTED_ASSOCIATIONS to
+  # accept them. An empty list yields no candidates (fail closed). Filtered candidates are counted in a NOTE.
+  local assoc_dropped
+  assoc_dropped=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg bt "$marker_floor" '
+    ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
+    | [ .[]
+        | select((.body // "") | startswith("<!-- FORGE:PHASE_TRAIL_OVERRIDE -->"))
+        | select((.user.type // "") == "User")
+        | select(((.user.login // "") | test("^[A-Za-z0-9_-]+$")))
+        | select((.author_association // "") as $x | $A | index($x) == null)
+        | select((.created_at // "") != "" and (.updated_at // "") != "" and .created_at == .updated_at)
+        | select($bt == "" or .created_at > $bt) ] | length' 2>/dev/null) || assoc_dropped=0
+  case "$assoc_dropped" in ''|*[!0-9]*) assoc_dropped=0 ;; esac
+  if [ "$assoc_dropped" -gt 0 ]; then echo "NOTE: ${assoc_dropped} override candidate(s) ignored: author_association not in trusted set" >&2; fi
+  cands=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg bt "$marker_floor" '
+    ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
+    | def clean: explode | map(select(. >= 32 and . != 127 and (. < 128 or . > 159) and (. < 8203 or . > 8207) and (. < 8232 or . > 8238) and (. < 8288 or . > 8297) and . != 65279)) | implode;
     [ .[]
       | select((.body // "") | startswith("<!-- FORGE:PHASE_TRAIL_OVERRIDE -->"))
       | select((.user.type // "") == "User")
       | select(((.user.login // "") | test("^[A-Za-z0-9_-]+$")))
-      | select((.author_association // "") | IN("OWNER", "MEMBER", "COLLABORATOR"))   # forge#3279: a write/admin user always has one of these; NONE/CONTRIBUTOR decoys never become candidates (the permission API stays authoritative)
+      | select((.author_association // "") as $x | $A | index($x) != null)
       | select((.created_at // "") != "" and (.updated_at // "") != "" and .created_at == .updated_at)
       | select($bt == "" or .created_at > $bt)
       | (.body | split("\n") | map(sub("\r$"; ""))) as $ln

@@ -24,6 +24,7 @@ for a in "$@"; do
     repos/*/collaborators/*/permission)
       [ "${MOCK_PERM_FAIL:-}" = "1" ] && { echo "mock gh: permission api error" >&2; exit 1; }
       u="${a#repos/*/collaborators/}"; u="${u%/permission}"
+      [ -n "${MOCK_PERM_LOG:-}" ] && echo "$u" >> "$MOCK_PERM_LOG"
       f="${MOCK_PERM_DIR:-/nonexistent}/$u"
       [ -f "$f" ] && { cat "$f"; exit 0; }
       echo "mock gh: 404" >&2; exit 1 ;;
@@ -434,6 +435,35 @@ orun "$(ovf h8 "${RLV[@]}")"
 [ $RC -eq 1 ] && ! echo "$OUT" | grep -q OVERRIDDEN && ok "read-level members only: override rejected (#3306)" || bad "read-level only (rc=$RC out=$OUT)"
 ULV=(); for i in 1 2 3 4 5 6 7; do ULV+=("$(ovc "ulv$i" User "2026-10-08T07:0$i:00Z" "2026-10-08T07:0$i:00Z" "$HS" "$CUR_MISSING" "unreadable")"); done
 expect_blocked "unreadable lookups stay bounded by the error cap and fail closed (#3306)" "$(ovf h9 "$(GOODC)" "${ULV[@]}")"
+# forge#3307: association prefilter reuses the configured list; each association value is pinned
+echo '{"permission":"write"}' > "$PERM/memb"; echo '{"permission":"write"}' > "$PERM/collab"; echo '{"permission":"write"}' > "$PERM/concealed"
+assoc() { jq -c --arg a "$1" '.author_association=$a'; }
+expect_override "MEMBER write approver is accepted (#3307)" "$(ovf a1 "$(ovc memb User "$AFTER" "$AFTER" "$HS" "$CUR_MISSING" "r" | assoc MEMBER)")"
+expect_override "COLLABORATOR write approver is accepted (#3307)" "$(ovf a2 "$(ovc collab User "$AFTER" "$AFTER" "$HS" "$CUR_MISSING" "r" | assoc COLLABORATOR)")"
+CDEC=(); for i in 1 2 3 4 5 6 7; do CDEC+=("$(ovc "cdecoy$i" User "2026-10-08T08:0$i:00Z" "2026-10-08T08:0$i:00Z" "$HS" "$CUR_MISSING" "decoy" | assoc CONTRIBUTOR)"); done
+expect_override "CONTRIBUTOR decoy flood does not starve a real override (#3307)" "$(ovf a3 "$(GOODC)" "${CDEC[@]}")"
+CONC=$(ovc concealed User "$AFTER" "$AFTER" "$HS" "$CUR_MISSING" "concealed membership" | assoc CONTRIBUTOR)
+expect_blocked "CONTRIBUTOR write approver is rejected under the default list (#3307)" "$(ovf a4 "$CONC")"
+FORGE_TRAIL_TRUSTED_ASSOCIATIONS="OWNER,MEMBER,COLLABORATOR,CONTRIBUTOR" expect_override "widened list accepts a CONTRIBUTOR write approver (#3307)" "$(ovf a4 "$CONC")"
+FORGE_TRAIL_TRUSTED_ASSOCIATIONS="OWNER" expect_blocked "narrowed list rejects a MEMBER approver (#3307)" "$(ovf a5 "$(ovc memb User "$AFTER" "$AFTER" "$HS" "$CUR_MISSING" "r" | assoc MEMBER)")"
+FORGE_TRAIL_TRUSTED_ASSOCIATIONS="" expect_blocked "empty list yields no override candidates (fail closed) (#3307)" "$(ovf a6 "$(GOODC)")"
+# Case-variant duplicate logins cost one lookup / one slot
+echo '{"permission":"read"}' > "$PERM/cvx"
+CVV=(); i=0; for l in Cvx cvx CVX cvX Cvx CVx; do i=$((i+1)); CVV+=("$(ovc "$l" User "2026-10-08T09:0$i:00Z" "2026-10-08T09:0$i:00Z" "$HS" "$CUR_MISSING" "dup")"); done
+PL="$TMP_FX/permlog-cv"; : > "$PL"
+OUT=$(MOCK_PERM_LOG="$PL" MOCK_GH_JSON="$(ovf a7 "$(GOODC)" "${CVV[@]}")" bash "$VERIFY" 3061 -R o/r --head-sha "$HS" 2>/dev/null); RC=$?
+[ $RC -eq 0 ] && echo "$OUT" | grep -q OVERRIDDEN && [ "$(grep -ic '^cvx$' "$PL")" -eq 1 ] && ok "case-variant duplicate logins cost a single lookup (#3307)" || bad "case-variant dup (rc=$RC lookups=$(grep -ic '^cvx$' "$PL"))"
+# Decoys (NONE/CONTRIBUTOR) never reach the permission API; the NOTE reports the filtered count without logins
+MIXD=("${PDEC[@]}" "${CDEC[@]}")
+PL="$TMP_FX/permlog-decoy"; : > "$PL"
+ERR=$(MOCK_PERM_LOG="$PL" MOCK_GH_JSON="$(ovf a8 "${MIXD[@]}")" bash "$VERIFY" 3061 -R o/r --head-sha "$HS" 2>&1 >/dev/null); 
+[ ! -s "$PL" ] && echo "$ERR" | grep -q 'NOTE: 14 override candidate(s) ignored: author_association not in trusted set' && ! echo "$ERR" | grep -q 'pdecoy\|cdecoy' \
+  && ok "decoys trigger no permission lookups; NOTE carries the count and no logins (#3307)" || bad "decoy no-call (log=$(cat "$PL") err=$ERR)"
+# 6th distinct unreadable login is cut off: the cap stops the scan before an older real approver
+UNR=(); for i in 1 2 3 4 5 6 7 8; do UNR+=("$(ovc "unr$i" User "2026-10-08T10:0$i:00Z" "2026-10-08T10:0$i:00Z" "$HS" "$CUR_MISSING" "unreadable")"); done
+PL="$TMP_FX/permlog-unr"; : > "$PL"
+OUT=$(MOCK_PERM_LOG="$PL" MOCK_GH_JSON="$(ovf a9 "$(GOODC)" "${UNR[@]}")" bash "$VERIFY" 3061 -R o/r --head-sha "$HS" 2>/dev/null); RC=$?
+[ $RC -eq 1 ] && ! echo "$OUT" | grep -q OVERRIDDEN && [ "$(wc -l < "$PL" | tr -d ' ')" -eq 6 ] && ! grep -qx alice "$PL" && ok "unreadable lookups stop at the 6th login; older approver never queried (#3307)" || bad "unreadable cutoff (rc=$RC lookups=$(wc -l < "$PL"))"
 MOCK_SELF_LOGIN=alice orun "$(ovf h3 "$(GOODC)")"
 [ $RC -eq 1 ] && ! echo "$OUT" | grep -q OVERRIDDEN && ok "verifier's own login cannot approve an override (#3269)" || bad "self-login exclusion (rc=$RC out=$OUT)"
 MOCK_SELF_LOGIN=someoneelse orun "$(ovf h3b "$(GOODC)")"
