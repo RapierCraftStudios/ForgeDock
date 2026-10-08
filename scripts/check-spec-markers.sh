@@ -299,13 +299,18 @@ if [ -f "$P4_SPEC" ]; then
     !inarm && /^[[:space:]]*ABSENT\)/ { inarm = 1 }
     inarm {
       line = $0
+      # Comments are not code: skip full-line comments and drop a trailing
+      # whitespace-preceded "#..." so comment text cannot satisfy or perturb
+      # the assertions below (not quote-aware; the arm text has no quoted "#").
+      if (line ~ /^[[:space:]]*#/) next
+      sub(/[[:space:]]+#.*$/, "", line)
       idx = index(line, ";;")
       if (idx > 0) { buf = buf " " substr(line, 1, idx - 1); exit }
       buf = buf " " line
     }
     END { print buf }
   ' "$P4_SPEC" | tr -s '[:space:]' ' ' || true)
-  # WIRE:PROVEN — manual mutation in a temp copy of commands/: renamed hold_merged_trail, renamed the ABSENT arm, ABSENT->echo DONE, and moved the comment before add-label; each fired its matching HIGH violation
+  # WIRE:PROVEN — manual mutation in a temp copy of commands/: renamed hold_merged_trail, renamed the ABSENT arm, ABSENT->echo DONE, and moved the comment before add-label; each fired its matching HIGH violation; comment-only GATED fires HIGH, comment-only DONE/reverify_merged_trail does not, comment-only gh issue comment before add-label does not count, real arm still passes
   if [ -z "${ABSENT_ARM// /}" ]; then
     echo "HIGH | $P4_SPEC | ABSENT arm missing from classify_predecessor_state (label-only hold must be classified explicitly)" >&2
     VIOLATIONS=$((VIOLATIONS + 1))
@@ -327,8 +332,11 @@ if [ -f "$P4_SPEC" ]; then
     /^hold_merged_trail\(\)[[:space:]]*\{/ { infn = 1; found = 1; next }
     infn && /^\}/ { infn = 0 }
     infn {
-      if (!cmt && ($0 ~ /gh issue comment/ || $0 ~ /FORGE:PHASE_TRAIL_FAILED/)) cmt = NR
-      if (!lbl && $0 ~ /add-label[[:space:]]+"?needs-human/) lbl = NR
+      line = $0
+      if (line ~ /^[[:space:]]*#/) next
+      sub(/[[:space:]]+#.*$/, "", line)
+      if (!cmt && (line ~ /gh issue comment/ || line ~ /FORGE:PHASE_TRAIL_FAILED/)) cmt = NR
+      if (!lbl && line ~ /add-label[[:space:]]+"?needs-human/) lbl = NR
     }
     END { printf "%d %d %d\n", found + 0, cmt + 0, lbl + 0 }
   ' "$P4_SPEC" || true)
