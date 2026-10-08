@@ -240,7 +240,7 @@ Note the marker is `<!-- FORGE:REMEDIATION -->` with **no** `:COMPLETE` suffix y
 
 **Dispatch-tool probe (forge#3240 — run FIRST)**: `review-pr` must launch its domain review agents through a sub-agent dispatch tool and refuses to review inline. This only fails when remediation was invoked deeper than the router allows (see `docs/WORK-ON-RUNTIME.md`); invoked from the router, a dispatch tool is available, so the branch below is a safety net. Resolve the tool with the identical order `commands/review-pr.md` § "Sub-Agent Dispatch Tool Resolution" uses (`Task`, then `Agent`; OpenCode uses `task`). Do not copy or weaken that section, and never review inline here.
 
-If no dispatch tool resolves, a missing tool is not a human decision, so do NOT invoke `review-pr`, do NOT add `needs-human`, and leave `workflow:in-review` in place. Set `RE_GATE_OUTCOME="REREVIEW-REQUIRED"`, skip Phase M7, go to Phase M8 (which posts `FORGE:REMEDIATION:COMPLETE` with a `REREVIEW-REQUIRED` re-gate line), and return `REMEDIATE_RESULT: status: REREVIEW_REQUIRED`. The caller re-runs `/review-pr {PR_NUMBER} --auto-merge --issue {ISSUE_NUMBER} --base {PR_BASE}` from a session that has dispatch. If a dispatch tool resolves, continue below.
+If no dispatch tool resolves, a missing tool is not a human decision, so do NOT invoke `review-pr`, do NOT add `needs-human`, and leave `workflow:in-review` in place. Set `RE_GATE_OUTCOME="REREVIEW-REQUIRED"`, skip Phase M7, go to Phase M8 (which posts `FORGE:REMEDIATION:COMPLETE` with a `REREVIEW-REQUIRED` re-gate line), and return `REMEDIATE_RESULT: status: REREVIEW_REQUIRED`. The caller re-runs `/review-pr {PR_NUMBER} --auto-merge --issue {ISSUE_NUMBER} --base {PR_BASE}` from a session that has dispatch. The caller owns the terminal fallback if that re-review cannot run (`commands/work-on.md` Phase 0A.1); remediation itself stays single-attempt and adds no `needs-human` here. If a dispatch tool resolves, continue below.
 
 ```
 if DRY_RUN=true:
@@ -454,7 +454,7 @@ Skill("{FORGE_SKILL_PREFIX}work-on:close", args="{ISSUE_NUMBER} --repo {GH_REPO}
 
 `work-on:close` handles project board update, final issue body, parent tracker, trajectory log, and worktree cleanup (including the remediation worktree at `{WORKTREE_PATH}`) — do not duplicate any of that here.
 
-**If the outcome was `REREVIEW-REQUIRED`** (forge#3240): do not invoke close and do not add `needs-human`. Leave the worktree and `workflow:in-review` in place and return `REMEDIATE_RESULT: status: REREVIEW_REQUIRED`; the caller runs the re-review and, on `AUTO-LANDED`, drives close itself.
+**If the outcome was `REREVIEW-REQUIRED`** (forge#3240): do not invoke close and do not add `needs-human`. Leave the worktree and `workflow:in-review` in place and return `REMEDIATE_RESULT: status: REREVIEW_REQUIRED`; the caller runs the re-review and, on `AUTO-LANDED`, drives close itself; if the re-review cannot run, the caller applies the terminal fallback (`commands/work-on.md` Phase 0A.1).
 
 **If the outcome was `HELD-AWAITING-MERGE`, `RE-ESCALATED`, or `UNFIXABLE`**: leave the worktree in place (a human may need it for manual inspection/merge) and return the structured result below without invoking close. Do not close the issue.
 
