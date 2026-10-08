@@ -2287,7 +2287,7 @@ Do not ask the user questions — you are running autonomously in the background
        --jq '[.[] | select((.body | contains("FORGE:REMEDIATION:COMPLETE")) and (.body | contains("REREVIEW-REQUIRED")))] | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
      REREVIEW_DONE=$(gh api repos/{GH_REPO}/issues/${REREVIEW_PR}/comments --paginate \
        --jq '[.[] | select(.body | contains("FORGE:REREVIEW_DISPATCHED"))] | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
-     if [ "$NEEDS_REREVIEW" -ge 1 ] && [ "$REREVIEW_DONE" -eq 0 ]; then
+     if [ "$NEEDS_REREVIEW" -ge 1 ] && [ "$REREVIEW_DONE" -eq 0 ] && [ "${DRY_RUN:-false}" != "true" ]; then
        gh pr comment "$REREVIEW_PR" -R {GH_REPO} --body "<!-- FORGE:REREVIEW_DISPATCHED -->
    Re-review dispatched by the orchestrator: remediation had no sub-agent dispatch tool."
        # then, from this session:
