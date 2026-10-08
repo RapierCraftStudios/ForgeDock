@@ -70,12 +70,15 @@
 # Identities outside that set -- e.g. a human with author_association CONTRIBUTOR/NONE/FIRST_TIME_CONTRIBUTOR
 # (an external contributor running the pipeline under their own login) -- are NOT trusted, so their
 # markers are ignored and the gate reports them MISSING. To accept such an identity add its login to
-# FORGE_TRAIL_TRUSTED_LOGINS, or widen FORGE_TRAIL_TRUSTED_ASSOCIATIONS (e.g. add CONTRIBUTOR). On FAIL the
+# FORGE_TRAIL_TRUSTED_LOGINS (do NOT widen FORGE_TRAIL_TRUSTED_ASSOCIATIONS to CONTRIBUTOR: that lets any
+# contributor forge FORGE:* trail markers). On FAIL the
 # script prints a NOTE when untrusted-author FORGE markers were seen, so this is diagnosable (#3123).
 # Limits: "Bot" trusts any GitHub App/bot that can comment on the repo (set
 # FORGE_TRAIL_TRUSTED_ASSOCIATIONS and FORGE_TRAIL_TRUSTED_LOGINS to tighten);
 # COLLABORATOR includes read-level collaborators; login matching is case-sensitive.
-# The same association list also prefilters break-glass override candidates (forge#3307).
+# The override prefilter uses FORGE_TRAIL_OVERRIDE_ASSOCIATIONS (default: the trail list). Widen THAT variable,
+# not the trail list, for concealed-membership approvers; it never affects which FORGE markers count toward the
+# gate. Blast radius of widening FORGE_TRAIL_TRUSTED_ASSOCIATIONS: every listed association can forge trail markers.
 #
 # Break-glass override (#3152): a misfiring gate can be cleared by a HUMAN, never by the pipeline.
 # A comment whose body starts with `<!-- FORGE:PHASE_TRAIL_OVERRIDE -->` and carries the lines
@@ -175,6 +178,10 @@ RAW=$(printf '%s' "$RAW" | jq -s 'if all(.[]; type == "array" and all(.[]; type 
 # One line per comment, newlines folded to \x1f so a marker and its sentinel can
 # be matched within the SAME comment.
 TRUSTED_ASSOC="${FORGE_TRAIL_TRUSTED_ASSOCIATIONS-OWNER,MEMBER,COLLABORATOR}"
+# Separate trust decision (forge#3350): the break-glass override prefilter has its own list so it can be widened
+# (e.g. CONTRIBUTOR for concealed-membership approvers) without loosening the trail-marker gate. Defaults to the
+# trail list; ${VAR-default} (no colon) so an explicitly empty value yields no override candidates (fail closed).
+OVERRIDE_ASSOC="${FORGE_TRAIL_OVERRIDE_ASSOCIATIONS-$TRUSTED_ASSOC}"
 TRUSTED_LOGINS="${FORGE_TRAIL_TRUSTED_LOGINS-}"
 COMMENTS=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg logins "$TRUSTED_LOGINS" '
   ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
@@ -359,12 +366,12 @@ evaluate_override() {
           | .created_at // empty ] | sort | .[-1] // empty' 2>/dev/null) || return 1
   fi
   # Candidates, newest first, as TSV: login created_at head missing reason (reason last, others never empty).
-  # The author_association prefilter reuses the configured trusted list ($TRUSTED_ASSOC) and is only an
+  # The author_association prefilter uses its own list ($OVERRIDE_ASSOC, default = trail list) and is only an
   # optimization (forge#3279): the permission API stays authoritative. A real write/admin approver with concealed
-  # org membership can show CONTRIBUTOR/NONE and is filtered out here; widen FORGE_TRAIL_TRUSTED_ASSOCIATIONS to
-  # accept them. An empty list yields no candidates (fail closed). Filtered candidates are counted in a NOTE.
+  # org membership can show CONTRIBUTOR/NONE and is filtered out here; widen FORGE_TRAIL_OVERRIDE_ASSOCIATIONS to
+  # accept them (never the trail list). An empty list yields no candidates (fail closed). Filtered candidates are counted in a NOTE.
   local assoc_dropped
-  assoc_dropped=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg bt "$marker_floor" '
+  assoc_dropped=$(printf '%s' "$RAW" | jq -r --arg assoc "$OVERRIDE_ASSOC" --arg bt "$marker_floor" '
     ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
     | [ .[]
         | select((.body // "") | startswith("<!-- FORGE:PHASE_TRAIL_OVERRIDE -->"))
@@ -374,8 +381,8 @@ evaluate_override() {
         | select((.created_at // "") != "" and (.updated_at // "") != "" and .created_at == .updated_at)
         | select($bt == "" or .created_at > $bt) ] | length' 2>/dev/null) || assoc_dropped=0
   case "$assoc_dropped" in ''|*[!0-9]*) assoc_dropped=0 ;; esac
-  if [ "$assoc_dropped" -gt 0 ]; then echo "NOTE: ${assoc_dropped} override candidate(s) ignored: author_association not in trusted set" >&2; fi
-  cands=$(printf '%s' "$RAW" | jq -r --arg assoc "$TRUSTED_ASSOC" --arg bt "$marker_floor" '
+  if [ "$assoc_dropped" -gt 0 ]; then echo "NOTE: ${assoc_dropped} override candidate(s) ignored: author_association not in override-approver set" >&2; fi
+  cands=$(printf '%s' "$RAW" | jq -r --arg assoc "$OVERRIDE_ASSOC" --arg bt "$marker_floor" '
     ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
     | def clean: explode | map(select(. >= 32 and . != 127 and (. < 128 or . > 159) and (. < 8203 or . > 8207) and (. < 8232 or . > 8238) and (. < 8288 or . > 8297) and . != 65279)) | implode;
     [ .[]
