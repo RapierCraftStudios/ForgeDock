@@ -1321,28 +1321,76 @@ BASE_REF=$(git merge-base "origin/$PR_BASE" HEAD) || { echo "COVERAGE-ERR | HIGH
 fi
 if [ -n "${BASE_REF:-}" ]; then
 TEST_PATH_RE='(^|/)(test_[^/]*|[^/]*_test\.[^/]*|[^/]*\.test\.[^/]*|[^/]*\.spec\.[^/]*)$|(^|/)(tests|__tests__)/'
+# Spec/doc prose is never test code: exclude markdown and docs from the content scans so
+# literal text such as "xfail" or "if: false" in a command spec cannot trip them.
+NODOC=(-- . ':!*.md' ':!docs')
+# Every check uses `if ...; then ...; fi` so a clean diff exits 0 under `set -e`.
 
-# (a) deleted test files (renames excluded via --find-renames)
-git diff --find-renames --diff-filter=D --name-only "$BASE_REF" | grep -E "$TEST_PATH_RE" \
-  && echo "COVERAGE-1: deleted test file(s)"
+NL='
+'
+# (a) deleted test files (renames excluded via --find-renames). A deleted test is exempt ONLY when
+# its counterpart source is also deleted at the SAME path stem (same directory, or the parent
+# directory when the test lives in tests/ or __tests__/); the full path must match.
+DELETED_FILES=$(git diff --find-renames --diff-filter=D --name-only "$BASE_REF")
+DELETED_TESTS=$(printf '%s\n' "$DELETED_FILES" | grep -E "$TEST_PATH_RE" || true)
+while IFS= read -r t; do
+  [ -n "$t" ] || continue
+  d=$(dirname "$t"); b=$(basename "$t")
+  s=$(printf '%s\n' "$b" | sed -E 's/^test_//; s/_test(\.[^.]*)$/\1/; s/\.(test|spec)(\.[^.]*)$/\2/')
+  src=""
+  if [ "$s" != "$b" ]; then
+    up=$(dirname "$d")
+    for c in "$d/$s" "$up/$s"; do
+      [ "$d" = "." ] && c="$s"
+      case "$NL$DELETED_FILES$NL" in *"$NL$c$NL"*) src="$c"; break ;; esac
+    done
+  fi
+  if [ -n "$src" ]; then
+    echo "COVERAGE-2 | LOW | $t | test deleted together with its covered source ($src) — verified in the same diff"
+  else
+    echo "COVERAGE-1 | HIGH | $t | coverage reduction: deleted test file, covered source not deleted in the same diff"
+  fi
+done <<EOT
+$DELETED_TESTS
+EOT
 
-# (b) removed test cases with no added counterpart, (c) newly added skip markers
-git diff -U0 "$BASE_REF" -- . | grep -E '^-[[:space:]]*(it|test|describe)\(|^-[[:space:]]*(async )?def test_' \
-  && echo "COVERAGE-1: removed test case line(s) — confirm each has an added counterpart in the diff"
-git diff -U0 "$BASE_REF" -- . | grep -E '^\+.*(\.skip\(|@pytest\.mark\.skip|@pytest\.mark\.xfail|xfail|continue-on-error:[[:space:]]*true|if:[[:space:]]*false)' \
-  && echo "COVERAGE-1: newly added skip/xfail/continue-on-error/if: false marker"
+# (b)/(c)/(d) read the diff from a temp file, NOT a `git diff | grep -q` pipe: grep -q exits on
+# first match, git diff then gets SIGPIPE (141) and `set -o pipefail` turns a real hit into a miss.
+DIFF_TMP=$(mktemp)
+# (b) removed test cases with no added counterpart — modified files only (deleted files are (a))
+git diff -U0 --find-renames --diff-filter=MR "$BASE_REF" "${NODOC[@]}" > "$DIFF_TMP" || true
+HITS=$(grep -nE '^-[[:space:]]*(it|test|describe)\(|^-[[:space:]]*(async )?def test_' "$DIFF_TMP" | head -20 || true)
+if [ -n "$HITS" ]; then
+  echo "COVERAGE-1 | HIGH | (see diff) | removed test case line(s) — confirm each has an added counterpart in the diff"; echo "$HITS"
+fi
 
-# (d) removed or disabled workflow test steps
-git diff -U0 "$BASE_REF" -- .github/workflows | grep -E '^-.*run:.*(test|pytest|jest|vitest|mocha|\.test\.sh|npm t|go test|cargo test)' \
-  && echo "COVERAGE-1: removed workflow test step"
+# (c) newly added skip markers (markdown/docs excluded by NODOC)
+git diff -U0 "$BASE_REF" "${NODOC[@]}" > "$DIFF_TMP" || true
+HITS=$(grep -nE '^\+.*(\.skip\(|@pytest\.mark\.skip|@pytest\.mark\.xfail|xfail|continue-on-error:[[:space:]]*true|if:[[:space:]]*false)' "$DIFF_TMP" | head -20 || true)
+if [ -n "$HITS" ]; then
+  echo "COVERAGE-1 | HIGH | (see diff) | newly added skip/xfail/continue-on-error/if: false marker"; echo "$HITS"
+fi
+
+# (d) removed or disabled workflow test steps. Matches ANY removed line (not only `run:`), so the
+# body of a `run: |` block scalar is covered; runner names match as whole words (`latest`,
+# `contest`, `attest` do not match). Hits are candidates — confirm each by reading the hunk.
+RUNNER_RE='(^|[^[:alnum:]_])(pytest|unittest|tox|bats|jest|vitest|mocha|ctest|npm (run )?tests?[a-z:_-]*|npm t|yarn (run )?test|pnpm (run )?test|bun test|go test|cargo test|make (test|check)|gradlew? (test|check)|run[-_]tests?\.sh|tests?/run\.sh|[^[:space:]]*\.test\.sh|name:.*[Tt]ests?)([^[:alnum:]_]|$)'
+git diff -U0 "$BASE_REF" -- .github/workflows > "$DIFF_TMP" || true
+HITS=$(grep -E '^-' "$DIFF_TMP" | grep -vE '^---' | grep -E "$RUNNER_RE" | head -20 || true)
+if [ -n "$HITS" ]; then
+  echo "COVERAGE-1 | HIGH | .github/workflows | removed workflow test step"; echo "$HITS"
+fi
+rm -f "$DIFF_TMP"
 fi
 ```
 
 Also treat a test command that is commented out (`+#` of a previously live `run:` test line) as a removal.
 
-**Finding**: a `COVERAGE-ERR` line (base ref missing) is a HIGH finding returned as-is — never treat it as clean. Otherwise emit `COVERAGE-1 | HIGH | {file} | coverage reduction: {removed test | deleted test | disabled workflow test step} — restore it and fix the code under test`. Scan results are candidates, not verdicts: confirm each by reading the diff hunk before reporting.
+**Finding**: a `COVERAGE-ERR` line (base ref missing) is a HIGH finding returned as-is — never treat it as clean. The scan above emits the `COVERAGE-1 | HIGH | {file} | coverage reduction: ... — restore it and fix the code under test` lines itself (deleted test, removed test case, added skip marker, removed workflow test step; matching diff lines are printed as evidence). Scan results are candidates, not verdicts: confirm each by reading the diff hunk before reporting.
 
-**Exemption (only one)**: a legitimate deletion is allowed ONLY when the commit message or PR body gives an explicit justification tying the removal to the removal of the tested code (the code the test covered is also deleted in this diff). "Flaky", "failing", "Windows-only", or "to get CI green" are NOT justifications. When exempted, record the justification in the finding as a LOW (advisory, not returned).
+**Exemption (only one, verified mechanically)**: a deleted test is exempt ONLY when the source file it covered is ALSO deleted in the same diff — i.e. the non-test counterpart (`test_foo.py` -> `foo.py`, `foo.test.ts` -> `foo.ts`) appears at the same path stem (same directory, or the parent directory for tests under `tests/`/`__tests__/`) in `git diff --find-renames --diff-filter=D --name-only "$BASE_REF"` — this mapping is implemented by check (a), which emits `COVERAGE-2` instead of `COVERAGE-1`. Checks (b)-(d) (removed test cases, skip markers, workflow steps) have no exemption path and always stay blocking. A justification in the commit message or PR body may supplement this but is NEVER sufficient on its own — a self-attested claim does not exempt. If the counterpart mapping is not obvious or the source is not deleted in the same diff, the finding stays HIGH and blocking. "Flaky", "failing", "Windows-only", or "to get CI green" are never justifications.
+
+**Exempted finding**: when the covered source is verified deleted in the same diff, check (a) emits `COVERAGE-2 | LOW | {file} | test deleted together with its covered source ({source file}) — verified in the same diff`. This LOW finding IS returned to the caller and surfaced to reviewers so the removal stays visible; it is not blocking. It is the one LOW finding exempted from the return rule at the end of this file ("Return only HIGH and MEDIUM findings"): always return `COVERAGE-2` lines.
 
 **Fix rule**: a COVERAGE-1 finding is fixed by restoring the test or step and fixing the cause — never by suppressing the finding or re-wording the diff. If the cause cannot be fixed in scope, the caller escalates (`needs-human`) naming the failing tests/assertions.
 
@@ -1756,7 +1804,7 @@ OR:
 - **MEDIUM**: Will cause incorrect behavior, performance degradation, or deploy issue
 - **LOW**: Style issue, missing optimization, or defensive improvement
 
-**Return only HIGH and MEDIUM findings.** LOW findings are noise at this stage — the review can catch those.
+**Return only HIGH and MEDIUM findings** (plus `COVERAGE-2` LOW lines from 2U, which must stay visible to reviewers). Other LOW findings are noise at this stage — the review can catch those.
 
 ---
 
