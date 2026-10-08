@@ -13,7 +13,7 @@
  * Usage: node scripts/check-admission-parity.mjs
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 
@@ -76,6 +76,44 @@ function extractBashMirrorPresets(specText) {
     presets[name] = parseArmBody(body);
   }
   return presets;
+}
+
+/** Recursively list *.md files under a directory. */
+function listMarkdown(dir) {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) return listMarkdown(full);
+    return entry.name.endsWith(".md") ? [full] : [];
+  });
+}
+
+/**
+ * Collect identifiers the orchestrate specs name as admission.mjs APIs:
+ * (a) names destructured from an admission.mjs import snippet (`({ a, b }) =>`), and (b) backticked `name()` calls
+ * on any line that mentions admission.mjs. Returns [{ name, file, line }].
+ */
+function extractSpecNamedIdentifiers(file, text) {
+  const found = [];
+  const lineOf = (index) => text.slice(0, index).split("\n").length;
+  // The module loaded by a snippet is the first `engine/<name>.mjs` path passed after its `.then(({...}) =>`.
+  const destructure = /\.then\(\(\s*\{([^}]*)\}\s*\)\s*=>/g;
+  let m;
+  while ((m = destructure.exec(text))) {
+    const target = text.slice(m.index, m.index + 1500).match(/engine\/([\w-]+)\.mjs/)?.[1];
+    if (target !== "admission") continue;
+    for (const part of m[1].split(",")) {
+      const name = part.trim().split(/\s*:\s*/)[0];
+      if (/^[A-Za-z_$][\w$]*$/.test(name)) found.push({ name, file, line: lineOf(m.index) });
+    }
+  }
+  const lines = text.split("\n");
+  lines.forEach((lineText, i) => {
+    if (!lineText.includes("admission.mjs")) return;
+    for (const call of lineText.matchAll(/`([A-Za-z_$][\w$]*)\(\)`/g)) {
+      found.push({ name: call[1], file, line: i + 1 });
+    }
+  });
+  return found;
 }
 
 async function main() {
@@ -149,6 +187,21 @@ async function main() {
     }
   }
 
+  // Spec-lint: every admission.mjs identifier named in commands/orchestrate/** must be exported.
+  const specDir = path.join(REPO_ROOT, "commands/orchestrate");
+  let namedCount = 0;
+  for (const file of listMarkdown(specDir)) {
+    for (const { name, line } of extractSpecNamedIdentifiers(file, readFileSync(file, "utf8"))) {
+      namedCount++;
+      if (!(name in admissionModule)) {
+        console.error(
+          `MISSING EXPORT: ${path.relative(REPO_ROOT, file)}:${line} names "${name}" from admission.mjs, but it is not exported`,
+        );
+        failed = true;
+      }
+    }
+  }
+
   if (failed) {
     console.error("");
     console.error(
@@ -160,6 +213,7 @@ async function main() {
     process.exit(1);
   }
 
+  console.log(`OK: all ${namedCount} admission.mjs identifiers named in commands/orchestrate/** are exported`);
   console.log(
     `OK: admission.mjs CASCADE_PRESETS matches the phase-4-execution.md bash mirror for: ${mjsNames.join(", ")}`,
   );

@@ -383,16 +383,17 @@ done
 
 Before finalizing the issue set, apply the shared batching rule to reduce full-pipeline overhead on routine review findings.
 
-**Single implementation (MANDATORY):** `bin/engine/admission.mjs` owns the eligibility, same-file, leaf-directory, age, eight-member, open-batch-extension, and singleton-reason rules through `planP3Batches()`. Every admission point supplies its complete current candidate registry plus parsed open batch metadata to that function, then executes only its returned `create`/`extend` actions. Do not independently reproduce thresholds or eligibility predicates in this file. The legacy shell examples below describe GitHub data collection and action execution only; their grouping decisions must be replaced by the evaluator result. Include original resolved issues, prior-cycle singletons, cascade findings, predicate re-resolution matches, and completion-sweep candidates in the registry. <!-- Added: forge#2851 -->
+**Single implementation (MANDATORY):** `bin/engine/admission.mjs` owns the eligibility, same-file, source-PR, defect-class, leaf-directory, eight-member and open-batch-extension rules through `planP3BatchGroups()`. Every admission point supplies its complete current candidate registry plus parsed open batch metadata to that function, then executes only its returned `groups`/`extensions` (member issue numbers). Do not independently reproduce thresholds or eligibility predicates in this file. The legacy shell examples below describe GitHub data collection and action execution only; their grouping decisions must be replaced by the evaluator result. Include original resolved issues, prior-cycle singletons, cascade findings, predicate re-resolution matches, and completion-sweep candidates in the registry. <!-- Added: forge#2851 -->
 
-After executing the plan, retain every singleton in the registry for the next admission event and record `summarizeP3BatchPlan()` in the per-run batching summary: clusters formed, members absorbed, open batches extended, and ungrouped members with their reasons.
+After executing the plan, retain every ungrouped finding in the registry for the next admission event and record `summarizeP3BatchPlan()` in the per-run batching summary: clusters formed, members absorbed, open batches extended, and ungrouped member count. The engine returns ungrouped members as issue numbers only; use `batchExclusionReason()` when the reason for an exclusion is needed.
 
 ```bash
 # BATCH_CANDIDATE_REGISTRY_JSON contains every candidate accumulated so far, with
-# a stable `id` (`{repo}:{number}`), repo, title, problem/body, labels, affectedFile,
-# createdAt, and isBatch. OPEN_BATCHES_JSON contains existing batch issue metadata.
-# Run this after initial resolution and every later admission event; execute returned
-# actions using memberIds, never bare issue numbers, so satellite issues cannot collide.
+# `number` and `affectedFile` (required: the engine silently drops findings without
+# them), plus repo, title, problem/body, labels. OPEN_BATCHES_JSON contains existing
+# batch metadata as `{number, affectedFile, members, memberCount}`.
+# Run this after initial resolution and every later admission event; execute the
+# returned `groups`/`extensions` member numbers against the repo each candidate came from.
 # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
 FORGE_ROOT=""
 # Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
@@ -418,8 +419,8 @@ fi
 BATCH_PLAN=""
 if [ -n "$FORGE_ROOT" ] && [ -r "$FORGE_ROOT/bin/engine/admission.mjs" ]; then
   BATCH_PLAN=$(node -e '
-    import(require("node:url").pathToFileURL(process.argv[1]).href).then(({ planP3Batches, summarizeP3BatchPlan }) => {
-      const plan = planP3Batches({ candidates: JSON.parse(process.argv[2]), openBatches: JSON.parse(process.argv[3]) });
+    import(require("node:url").pathToFileURL(process.argv[1]).href).then(({ planP3BatchGroups, summarizeP3BatchPlan }) => {
+      const plan = planP3BatchGroups(JSON.parse(process.argv[2]), undefined, { openBatches: JSON.parse(process.argv[3]) });
       console.log(JSON.stringify({ plan, summary: summarizeP3BatchPlan(plan) }));
     });
   ' "$FORGE_ROOT/bin/engine/admission.mjs" "$BATCH_CANDIDATE_REGISTRY_JSON" "$OPEN_BATCHES_JSON")
