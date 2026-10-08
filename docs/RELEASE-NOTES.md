@@ -2,6 +2,16 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Review-finding cascade is now bounded by code, not prose
+
+An audit of one `/orchestrate` batch found 93 `review-finding` issues filed for 46 merges, a ratio of 2.02. The §6B.5 note-disposition step was supposed to stop LOW/POSSIBLE findings from becoming issues. It was bypassed in two ways: every finding from the always-on General Security & Quality reviewer was exempt by origin, and reviewers often skipped the step entirely.
+
+- `scripts/classify-finding.sh` now decides ISSUE versus NOTE deterministically. The safety exemption is content-based (security/billing keywords) or applies to dedicated Auth/Billing/Concurrency/Database agents. Origin from the always-on reviewer no longer exempts a finding. On PRs that fix a review finding, LOW and POSSIBLE findings are always notes. HIGH and CRITICAL findings always file, as before. Replayed on the audited batch, 41 of the 93 would be filed, which is a ratio of 0.89, and no HIGH finding is demoted.
+- `/review-pr` posts a `FORGE:NOTE_DISPOSITION` record. Auto-merge, in `/review-pr` Phase 8 and `/work-on` review, refuses to merge a PR that has findings but no disposition record. `/work-on` re-runs the review once instead of escalating to `needs-human`.
+- `scripts/amplification-breaker.sh` measures findings per merged unit since `BATCH_T0` from GitHub state. `/orchestrate` must run it before dispatching any P3 review finding, on every dispatch path including the Agent-spawn fallback. Exit 3 (tripped) or 4 (unreadable) defers P3 findings to bounded batches.
+
+Action: none required. LOW review notes now appear in the PR's `Non-blocking notes` section and the disposition comment instead of as issues. A PR reviewed by an older plugin version gets one re-review before auto-merge.
+
 ## Override candidate filter hardening (forge#3307)
 
 The break-glass override prefilter now uses `FORGE_TRAIL_OVERRIDE_ASSOCIATIONS` instead of a hardcoded `OWNER,MEMBER,COLLABORATOR` list. It defaults to the resolved `FORGE_TRAIL_TRUSTED_ASSOCIATIONS` value, so default behavior is unchanged, and it never affects which FORGE markers count toward the merge gate. An empty list yields no override candidates. The verifier prints `NOTE: N override candidate(s) ignored: author_association not in override-approver set` to stderr when candidates are filtered this way, so an approver with concealed org membership (shown as `CONTRIBUTOR`/`NONE`) is diagnosable.

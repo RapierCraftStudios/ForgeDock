@@ -63,6 +63,8 @@ jobs:
           /bin/bash scripts/lint-dispatch-prompt.test.sh
           /bin/bash scripts/lint-build-validate-files.test.sh
           /bin/bash scripts/verify-phase-trail.test.sh
+          /bin/bash scripts/classify-finding.test.sh
+          /bin/bash scripts/amplification-breaker.test.sh
       # macOS runs lint-dispatch-prompt/verify-phase-trail once, under /bin/bash 3.2 above.
       - name: Run lint-dispatch-prompt.test.sh
         if: runner.os != 'macOS'
@@ -79,6 +81,10 @@ jobs:
       - name: Run verify-phase-trail.test.sh
         if: runner.os != 'macOS'
         run: bash scripts/verify-phase-trail.test.sh
+      - name: Run classify-finding.test.sh and amplification-breaker.test.sh
+        run: |
+          bash scripts/classify-finding.test.sh
+          bash scripts/amplification-breaker.test.sh
       - name: Run is-docs-only.test.sh
         run: bash scripts/is-docs-only.test.sh
       - name: Run extract-affected-files.test.sh
@@ -110,6 +116,10 @@ jobs:
           bash scripts/lint-build-validate-files.test.sh
       - name: Run verify-phase-trail.test.sh
         run: bash scripts/verify-phase-trail.test.sh
+      - name: Run classify-finding.test.sh and amplification-breaker.test.sh
+        run: |
+          bash scripts/classify-finding.test.sh
+          bash scripts/amplification-breaker.test.sh
       - name: Run is-docs-only.test.sh
         run: bash scripts/is-docs-only.test.sh
 
