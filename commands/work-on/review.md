@@ -534,12 +534,26 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 
 - `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "ci gate" (Phase 8 refused to merge because checks failed, were cancelled, or stayed pending past the gate retries): do NOT attempt the manual merge below — that would bypass the CI gate. Fixing red CI is pipeline work, not a human decision: invoke remediation **once** — `Skill(skill="{FORGE_SKILL_PREFIX}work-on:remediate", args="{PR_NUMBER} --issue {NUMBER} --base {PR_BASE}")` (forked; it classifies a CI-gate refusal as FIXABLE, clears `needs-human`, reads the failing job logs, fixes them on the PR branch, re-runs the quality gate and a full review, and auto-lands through the same CI gate). Bound: count `<!-- FORGE:CI_REMEDIATION: pr={PR_NUMBER} -->` comments on the issue first; if ≥ 1, do not remediate again. Post that marker before invoking. `REMEDIATE_RESULT` re-gate outcome `AUTO-LANDED` → treat as merged and return `REVIEW_RESULT: status: COMPLETE`; `REMEDIATE_RESULT: status: REREVIEW_REQUIRED` (forge#3240: the fix is pushed but remediation had no sub-agent dispatch tool, so no review ran) → do NOT add `needs-human` and do not re-invoke remediation; return `REVIEW_RESULT: status: BLOCKED` with blocker "re-review required: no dispatch tool" so the caller re-dispatches review from a session that has dispatch; any other outcome → leave `needs-human` (remediation sets it) and return `REVIEW_RESULT: status: BLOCKED` with blocker "ci gate not green after remediation". <!-- forge#3191 -->
 
-  Persisted loop bounds for the two cases above — count first, post the marker, then act (`{BOUND}` is `STALE_REREVIEW` or `CI_REMEDIATION`):
+- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "in-pr fix required" (review-pr §6B.6: CONFIRMED MEDIUM findings in files this PR changed, requested on the PR in a `FORGE:INPR_FIX` comment at the current head): do NOT merge and do NOT leave the issue at `needs-human` because of this gate. Run **one** fix round, bounded by `<!-- FORGE:INPR_REMEDIATION: pr={PR_NUMBER} -->` on the issue (`{BOUND}` = `INPR_REMEDIATION` below).
+  - **Bound unused**: post the marker. Add `needs-human` (remediation only targets `needs-human`-gated PRs, and its Phase M1 clears it as FIXABLE). Then invoke `Skill(skill="{FORGE_SKILL_PREFIX}work-on:remediate", args="{PR_NUMBER} --issue {NUMBER} --base {PR_BASE}")`. Remediation reads the `FORGE:INPR_FIX` work order, fixes exactly those findings, re-reviews the new head and auto-lands. On the re-review, any finding still present is filed as an issue (the round is used).
+  - `REMEDIATE_RESULT` re-gate outcome `AUTO-LANDED` → return `REVIEW_RESULT: status: COMPLETE`. `REREVIEW_REQUIRED` → same handling as the ci-gate case above.
+  - **Any other outcome, or bound already used**: waive the gate for the current head. Remove `needs-human`, post `<!-- FORGE:INPR_FIX_WAIVED: head=<current head SHA> -->` on the **PR**, then re-invoke Phase R3 once under the `STALE_REREVIEW` bound. That review files the remaining findings as issues and merges as it would have before this gate. Only if `STALE_REREVIEW` is also exhausted, add `needs-human`.
+    ```bash
+    INPR_WAIVE_HEAD=$(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefOid --jq .headRefOid)
+    gh issue edit {NUMBER} {GH_FLAG} --remove-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
+    gh pr comment {PR_NUMBER} {GH_FLAG} --body "<!-- FORGE:INPR_FIX_WAIVED: head=${INPR_WAIVE_HEAD} -->
+In-PR fix round did not land; the remaining CONFIRMED MEDIUM findings are filed as issues on the next review instead of blocking the merge." # allowlist:check-command-side-effects
+    ```
+
+  Persisted loop bounds for the cases above — count first, post the marker, then act (`{BOUND}` is `STALE_REREVIEW`, `CI_REMEDIATION` or `INPR_REMEDIATION`):
   ```bash
   [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] bound check only"; }
   if [ "{BOUND}" = "STALE_REREVIEW" ]; then
     BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
       --jq '[.[] | select((.body | contains("FORGE:STALE_REREVIEW:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
+  elif [ "{BOUND}" = "INPR_REMEDIATION" ]; then
+    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
+      --jq '[.[] | select((.body | contains("FORGE:INPR_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
   else
     BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
       --jq '[.[] | select((.body | contains("FORGE:CI_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
@@ -551,11 +565,13 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 Stale review on PR #{PR_NUMBER}: quality-gating and re-reviewing the new head once." 2>/dev/null || true   # when {BOUND}=STALE_REREVIEW
     gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CI_REMEDIATION: pr={PR_NUMBER} -->
 CI gate refused PR #{PR_NUMBER}: dispatching remediation once to fix the failing checks." 2>/dev/null || true   # when {BOUND}=CI_REMEDIATION
+    gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INPR_REMEDIATION: pr={PR_NUMBER} -->
+In-PR fix requested on PR #{PR_NUMBER}: dispatching remediation once to fix the CONFIRMED MEDIUM findings before merge." 2>/dev/null || true   # when {BOUND}=INPR_REMEDIATION
   fi
   ```
   Post only the comment matching `{BOUND}`. `BOUND_EXHAUSTED` → take the "already ≥ 1" branch of that case.
 
-- PR NOT MERGED (and not a phase-trail, auto-merge-gate, stale-review or ci-gate BLOCKED above) → attempt manual merge, **only if the PR head is still the commit named in the latest `<!-- FORGE:REVIEW -->` APPROVED verdict** (otherwise re-invoke Phase R3 instead, as for "stale review") **and only after the same CI gate**:
+- PR NOT MERGED (and not a phase-trail, auto-merge-gate, stale-review, ci-gate or in-pr-fix BLOCKED above) → attempt manual merge, **only if the PR head is still the commit named in the latest `<!-- FORGE:REVIEW -->` APPROVED verdict** (otherwise re-invoke Phase R3 instead, as for "stale review") **and only after the same CI gate**:
   ```bash
   # CI gate (MANDATORY before any autonomous merge): merge only when every check on the PR is
   # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch
