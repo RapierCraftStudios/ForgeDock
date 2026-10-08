@@ -1492,6 +1492,8 @@ resolve_orch_login() {
 # forge#3168: only TRUSTED comments count, for BOTH markers. Trusted = author_association OWNER/MEMBER/COLLABORATOR, or
 # `.user.login` equal to the orchestrator identity (resolve_orch_login, used only when non-empty; compared case-insensitively). A marker string posted
 # by anyone else is ignored (treated as absent), so an outside commenter can neither forge a release nor a failure.
+# forge#3207: MEMBER/COLLABORATOR association is not write access, so those authors additionally need admin/maintain/write on
+# `collaborators/<login>/permission` (OWNER and the orchestrator login pass directly; a failed lookup fails closed = untrusted).
 # forge#3181: both markers must also START the comment body (startswith, not contains), so a trusted comment that merely
 # quotes the marker text is not counted. hold_merged_trail / release_merged_trail emit the marker as the first line.
 # The comment read is cached per issue for the current monitoring cycle: the cache is a directory of files
@@ -1504,9 +1506,28 @@ trail_escalation_state() {
   if ! RAW=$(gh api --paginate "repos/{GH_REPO}/issues/${N}/comments" --jq '.[] | {id: .id, body: (.body // ""), login: (.user.login // ""), assoc: (.author_association // "")}' 2>/dev/null); then
     echo "UNREADABLE"; return
   fi
-  if ! OUT=$(printf '%s\n' "$RAW" | jq -r --arg L "$(resolve_orch_login)" 'select((.assoc | IN("OWNER","MEMBER","COLLABORATOR")) or ($L != "" and (.login | ascii_downcase) == ($L | ascii_downcase))) | if (.body | startswith("<!-- FORGE:PHASE_TRAIL_FAILED -->") and contains("merged with an incomplete phase trail")) then "F \(.id)" elif (.body | startswith("<!-- FORGE:PHASE_TRAIL_RELEASED -->")) then "R \(.id)" else empty end' 2>/dev/null); then
+  local ORCH; ORCH=$(resolve_orch_login)
+  if ! OUT=$(printf '%s\n' "$RAW" | jq -r --arg L "$ORCH" 'select((.assoc | IN("OWNER","MEMBER","COLLABORATOR")) or ($L != "" and (.login | ascii_downcase) == ($L | ascii_downcase))) | if (.body | startswith("<!-- FORGE:PHASE_TRAIL_FAILED -->") and contains("merged with an incomplete phase trail")) then "F \(.id) \(.assoc) \(.login)" elif (.body | startswith("<!-- FORGE:PHASE_TRAIL_RELEASED -->")) then "R \(.id) \(.assoc) \(.login)" else empty end' 2>/dev/null); then
     echo "UNREADABLE"; return
   fi
+  # forge#3207: MEMBER / COLLABORATOR association is NOT write access (read-only org members, triage/read collaborators).
+  # Keep only marker rows whose author is OWNER, the orchestrator login, or has admin/maintain/write permission per
+  # collaborators/<login>/permission (one lookup per login, memoised in $PERMS for this call). Fail closed: a failed lookup drops the row.
+  local PERMS="" KEPT="" KIND KID KASSOC KLOGIN KP
+  while read -r KIND KID KASSOC KLOGIN; do
+    [ -n "$KID" ] || continue
+    if [ "$KASSOC" = "OWNER" ] || { [ -n "$ORCH" ] && [ "$(printf '%s' "$KLOGIN" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$ORCH" | tr '[:upper:]' '[:lower:]')" ]; }; then
+      KEPT="${KEPT}${KIND} ${KID}"$'\n'; continue
+    fi
+    KP=$(printf '%s\n' "$PERMS" | awk -v l="$KLOGIN" '$1==l{print $2; exit}')
+    if [ -z "$KP" ]; then
+      KP=$(gh api "repos/{GH_REPO}/collaborators/${KLOGIN}/permission" --jq '.permission' 2>/dev/null || true)
+      [ -n "$KP" ] || KP="none"
+      PERMS="${PERMS}${KLOGIN} ${KP}"$'\n'
+    fi
+    case "$KP" in admin|maintain|write) KEPT="${KEPT}${KIND} ${KID}"$'\n' ;; esac
+  done <<< "$OUT"
+  OUT="$KEPT"
   FAILED_ID=$(printf '%s\n' "$OUT" | awk '$1=="F"&&$2+0>m{m=$2+0}END{print m+0}')
   RELEASED_ID=$(printf '%s\n' "$OUT" | awk '$1=="R"&&$2+0>m{m=$2+0}END{print m+0}')
   if [ "$FAILED_ID" -eq 0 ]; then RES="ABSENT"

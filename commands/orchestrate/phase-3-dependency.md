@@ -1395,7 +1395,7 @@ fi
 #    forge#3168: classify_predecessor_state() also needs these Step 4B helpers declared in the SAME shell:
 #    hold_merged_trail, resolve_orch_login, trail_escalation_state, release_merged_trail (reverify_merged_trail is
 #    nested inside the classifier). It reports a missing helper on stderr and classifies GATED. The same trusted-author
-#    filter (OWNER/MEMBER/COLLABORATOR or the orchestrator login) applies to the release/fail markers on wake.
+#    filter (OWNER, the orchestrator login, or a MEMBER/COLLABORATOR with admin/maintain/write on `collaborators/<login>/permission`; forge#3207) applies to the release/fail markers on wake.
 #    forge#3169: merged + needs-human with no escalation record classifies GATED on wake (never keyed on the verifier).
 # The helpers cache trail lookups in the stable per-user/per-repo dir (trail_cache_dir / init_trail_cache, phase-4-execution.md Step 4B).
 # resolve_orch_login queries the GraphQL viewer login and caches it in that same dir (forge#3205), so init_trail_cache must run before it for the cache to apply (otherwise it re-queries per call).
