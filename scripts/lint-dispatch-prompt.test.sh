@@ -229,7 +229,8 @@ check "mid-line CR not stripped" 1 "$T/p25"
 # 10. Spec snippet enforcement (forge#3070): extract the lint gate from the spec and run it in a loop.
 # Gate = from the bootstrap marker to the end of its fenced code block (not a hard-coded count of
 # top-level fi lines, which breaks whenever the bootstrap gains or loses a conditional).
-awk '/^# FORGE_ROOT bootstrap/{f=1} f&&/^```/{exit} f{print}' "$SPEC" > "$T/gate"
+# Several spec blocks carry the bootstrap marker (e.g. the recovery-claim gate, forge#3172); pick the one holding the lint gate.
+awk '/^# FORGE_ROOT bootstrap/{f=1;buf=""} f&&/^```/{if(buf ~ /LINT_REFUSED_ISSUES/){printf "%s",buf;exit} f=0} f{buf=buf $0 "\n"}' "$SPEC" > "$T/gate"
 [ -s "$T/gate" ] || { FAILN=$((FAILN+1)); echo "FAIL: could not extract spec lint gate"; }
 gate_refused() { # prompt-file home -> prints refusal entries or LAUNCHED
   ( LINT_REFUSED_ISSUES=(); RENDERED_PROMPT="$(cat "$1")"; FORGEDOCK_HOME="$2"; unset FORGE_HOME; reset_vals

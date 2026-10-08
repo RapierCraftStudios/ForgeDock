@@ -237,21 +237,44 @@ echo "Reference: $FORGE_HOME/docs/CODEX.md"
 
 mkdir -p "$FORGE_HOME/.codex/worktrees"
 
+# POSIX single-quote-escaped FORGE_HOME for every line written into a shell startup file or printed as a hint.
+# Valid in bash, zsh and dash (~/.profile is read by sh); printf %q is bash-only ($'...' for control or non-ASCII
+# bytes). Paths with a trailing newline are out of scope. Never splice the raw path into a double-quoted string.
+FORGE_HOME_Q="'$(printf '%s' "$FORGE_HOME" | sed "s/'/'\\\\''/g")'"
+
 PROFILE_UPDATED=0
 for profile in "$HOME/.bashrc" "$HOME/.zshrc"; do
     if [ -f "$profile" ] && ! grep -q "FORGE_HOME" "$profile" 2>/dev/null; then
         echo "" >> "$profile"
         echo "# RapierCraft Forge — autonomous development pipeline" >> "$profile"
-        echo "export FORGE_HOME=\"$FORGE_HOME\"" >> "$profile"
+        printf 'export FORGE_HOME=%s\n' "$FORGE_HOME_Q" >> "$profile"
         echo "Added FORGE_HOME to $profile"
         PROFILE_UPDATED=$((PROFILE_UPDATED + 1))
+    fi
+done
+
+# Non-interactive Codex shells do not source ~/.bashrc/~/.zshrc, and Codex has no ~/.claude fallback, so the
+# trail gate would see an empty FORGE_ROOT. Record the clone path in a pointer file the spec bootstrap reads
+# ($CODEX_HOME/forge-home) and in env files non-interactive shells read. Append-only, marker-guarded, idempotent.
+# Env files are only appended to when they already exist; the pointer file is the fallback for users with neither.
+CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
+mkdir -p "$CODEX_DIR"
+printf '%s\n' "$FORGE_HOME" > "$CODEX_DIR/forge-home"
+for envfile in "$HOME/.zshenv" "$HOME/.profile"; do
+    if [ -f "$envfile" ] && ! grep -q "# FORGE_HOME (install-codex.sh)" "$envfile" 2>/dev/null; then
+        {
+            echo ""
+            echo "# FORGE_HOME (install-codex.sh)"
+            printf '[ -n "${FORGE_HOME:-}" ] || export FORGE_HOME=%s\n' "$FORGE_HOME_Q"
+        } >> "$envfile"
+        echo "Added FORGE_HOME to $envfile"
     fi
 done
 
 if [ "$PROFILE_UPDATED" -gt 0 ]; then
     echo ""
     echo "Restart your shell or run:"
-    echo "  export FORGE_HOME=\"$FORGE_HOME\""
+    printf '  export FORGE_HOME=%s\n' "$FORGE_HOME_Q"
 fi
 
 if [ -f "$HOME/.codex/config.toml" ] && ! grep -Fq "[projects.\"$FORGE_HOME\"]" "$HOME/.codex/config.toml"; then

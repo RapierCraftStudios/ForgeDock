@@ -101,14 +101,20 @@ fi
 # ~/.claude/commands symlink target > the Claude Code plugin cache/marketplace dirs. <!-- forge#3098 -->
 # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
 FORGE_ROOT=""
-if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
-  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
-  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-  # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
-  _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+  _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+  # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+  _m="$HOME/.claude/plugins/marketplaces/$_mk"
   # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
+  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
   while IFS= read -r _c; do
     case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
   done <<< "$_k"
@@ -422,11 +428,25 @@ The `REMAINING_AFTER` variable is passed to Phase C2 to decide whether to close.
 
 **This phase is non-blocking** — if the dossier write fails, log the reason and continue to Phase C1.5. Never stall close for dossier maintenance.
 
-**Skip if**: `{PR_NUMBER}` is empty (investigation / decomposed / invalid terminals — `TERMINAL_STATE` is not `merged`) OR `$REPO_PATH` is unset OR `devdocs/index.yaml` does not contain a `modules:` section OR no PR files match any module glob.
+**Never touch the main checkout**: `$REPO_PATH` is the operator's main checkout. This phase never writes, stages or commits there (no git add or git commit against it, no directory change into it). `index.yaml` is only read from it. The dossier edit is made in a temporary detached worktree off `origin/${DOSSIER_BASE}`, committed on branch `docs/dossier-{NUMBER}`, pushed, and opened as a PR (reviewed path to the base branch); the temporary worktree is always removed (EXIT trap). Every failure logs `Phase C1.7: skipped - <reason>` and continues.
 
-### Step 1: Resolve affected files from FORGE:BUILDER comment
+**Skip if**: `{PR_NUMBER}` is empty (investigation / decomposed / invalid terminals — `TERMINAL_STATE` is not `merged`) OR `$REPO_PATH` is unset OR `devdocs/index.yaml` does not contain a `modules:` section OR no PR files match any module glob OR no `origin` remote / no push rights / worktree creation fails / PR creation fails (each logged as `Phase C1.7: skipped - <reason>`).
+
+### Steps 1-3: One self-contained block
+
+**Single block, by design**: shell state (variables, traps) does not persist between Bash tool calls, so Steps 1-3 below run as ONE fenced block in ONE Bash call. Splitting it would leave `DOSSIER_TMP`, `INDEX_PATH`, `DOSSIER_UPDATED_MODULES` and `CHANGED_FILES_RAW` empty in later calls and leak the temporary worktree. An `EXIT` trap removes the worktree and prunes on any exit path (skip, abort, interrupt); each skip is a `return` from `_dossier_run`, which continues to Phase C1.5.
 
 ```bash
+_dossier_cleanup() {
+  if [ -n "${DOSSIER_TMP:-}" ]; then
+    git -C "${REPO_PATH}" worktree remove --force "$DOSSIER_TMP" >/dev/null 2>&1 || rm -rf "$DOSSIER_TMP"
+    git -C "${REPO_PATH}" worktree prune >/dev/null 2>&1 || true
+    DOSSIER_TMP=""
+  fi
+}
+
+_dossier_run() {
+# --- Step 1: Resolve affected files from FORGE:BUILDER comment ---
 # Read FORGE:BUILDER comment to get the list of changed files
 BUILDER_COMMENT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '[.[] | select(.body | contains("FORGE:BUILDER"))] | last | .body // ""' 2>/dev/null || echo "")
@@ -452,21 +472,18 @@ fi
 
 if [ -z "$CHANGED_FILES_RAW" ]; then
   echo "Phase C1.7: No changed files found from FORGE:BUILDER or FORGE:INVESTIGATOR — skipping dossier append"
-  # → continue to Phase C1.5
+  return 0
 fi
-```
 
-### Step 2: Match against module globs and append entries
-
-```bash
+# --- Step 2: Match against module globs and append entries ---
 CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
 DEVDOCS_REL=$(yq '.devdocs.path // "devdocs"' "$CONFIG_FILE" 2>/dev/null || echo "devdocs")
-DEVDOCS_PATH="${REPO_PATH}/${DEVDOCS_REL}"
-INDEX_PATH="${DEVDOCS_PATH}/index.yaml"
+# Read-only: the index is read from the main checkout; nothing is ever written under ${REPO_PATH}.
+INDEX_PATH="${REPO_PATH}/${DEVDOCS_REL}/index.yaml"
 
 if [ ! -f "$INDEX_PATH" ]; then
   echo "Phase C1.7: ${INDEX_PATH} not found — skipping dossier append"
-  # → continue to Phase C1.5
+  return 0
 fi
 
 # Extract modules entries: "name|glob|path"
@@ -474,15 +491,39 @@ MODULE_ENTRIES=$(yq '.modules[]? | .name + "|" + .glob + "|" + .path' "$INDEX_PA
 
 if [ -z "$MODULE_ENTRIES" ]; then
   echo "Phase C1.7: No modules[] section in index.yaml — skipping dossier append"
-  # → continue to Phase C1.5
+  return 0
 fi
+
+# All dossier writes happen in a temporary detached worktree off origin/<base>, never in ${REPO_PATH}.
+DOSSIER_BASE="${PR_BASE:-staging}"
+DOSSIER_TMP=""
+if ! git -C "${REPO_PATH}" fetch origin "${DOSSIER_BASE}" >/dev/null 2>&1; then
+  echo "Phase C1.7: skipped - cannot fetch origin/${DOSSIER_BASE} (no origin remote or no network)"
+  return 0
+fi
+DOSSIER_TMP=$(mktemp -d "${TMPDIR:-/tmp}/forge-dossier-{NUMBER}.XXXXXX" 2>/dev/null)
+if [ -z "$DOSSIER_TMP" ] || ! git -C "${REPO_PATH}" worktree add --detach "$DOSSIER_TMP" "origin/${DOSSIER_BASE}" >/dev/null 2>&1; then
+  echo "Phase C1.7: skipped - git worktree add failed for origin/${DOSSIER_BASE}"
+  [ -n "$DOSSIER_TMP" ] && rm -rf "$DOSSIER_TMP"
+  DOSSIER_TMP=""
+  return 0
+fi
+# Cleanup guarantee: registered right after a successful worktree add, so an abort,
+# an early return or an interrupt cannot leak the temporary worktree.
+trap '_dossier_cleanup' EXIT
+DEVDOCS_PATH="${DOSSIER_TMP}/${DEVDOCS_REL}"
 
 DOSSIER_TIMESTAMP=$(date -u +"%Y-%m-%d")
 DOSSIER_UPDATED_MODULES=""
 
 # Iterate module entries; for each: check if any changed file matches the glob
 while IFS='|' read -r MOD_NAME MOD_GLOB MOD_PATH; do
+  [ -n "$DOSSIER_TMP" ] || break
   [ -z "$MOD_GLOB" ] || [ -z "$MOD_PATH" ] && continue
+  # Reject traversal / absolute module paths: writes must stay inside the temp worktree.
+  case "$MOD_PATH" in
+    /*|..|../*|*/..|*/../*) echo "Phase C1.7: skipped module '${MOD_NAME}' - unsafe path '${MOD_PATH}'"; continue ;;
+  esac
   DOSSIER_ABS="${DEVDOCS_PATH}/${MOD_PATH}"
 
   MATCHED=0
@@ -561,45 +602,68 @@ DOSSIER_INIT_EOF
   DOSSIER_UPDATED_MODULES="${DOSSIER_UPDATED_MODULES} ${MOD_NAME}"
 
 done <<< "$MODULE_ENTRIES"
-```
 
-### Step 3: Commit dossier changes and post annotation
-
-```bash
-if [ -n "$DOSSIER_UPDATED_MODULES" ]; then
-  # Commit the updated dossier files
-  cd "${REPO_PATH}"
+# --- Step 3: Commit in the temporary worktree, open a PR, post annotation ---
+DOSSIER_BRANCH="docs/dossier-{NUMBER}"
+DOSSIER_PR_URL=""
+if [ "${DRY_RUN:-false}" = "true" ]; then
+  echo "DRY_RUN: would commit, push and open dossier PR ${DOSSIER_BRANCH}; skipped (dry-run)"
+elif [ -n "$DOSSIER_TMP" ] && [ -n "$DOSSIER_UPDATED_MODULES" ]; then
+  # Stage and commit ONLY inside the temporary worktree ($DOSSIER_TMP), never in ${REPO_PATH}.
   CHANGED_DOSSIER_FILES=$(echo "$DOSSIER_UPDATED_MODULES" | tr ' ' '\n' | while IFS= read -r mod; do
+    [ -n "$mod" ] || continue
     yq ".modules[]? | select(.name == \"${mod}\") | \"${DEVDOCS_REL}/\" + .path" "$INDEX_PATH" 2>/dev/null
   done | grep -v '^$')
 
-  if [ -n "$CHANGED_DOSSIER_FILES" ]; then
-    # CHANGED_DOSSIER_FILES is newline-separated — iterate so paths containing
-    # spaces are staged individually rather than word-split by the shell.
-    while IFS= read -r dossier_file; do
-      [ -n "$dossier_file" ] || continue
-      git -C "${REPO_PATH}" add "$dossier_file" 2>/dev/null || true
-    done <<< "$CHANGED_DOSSIER_FILES"
-    # Only commit if there are staged changes (new or modified dossier files)
-    if ! git -C "${REPO_PATH}" diff --cached --quiet 2>/dev/null; then
-      git -C "${REPO_PATH}" commit -s -m "docs(dossier): append entry for PR #{PR_NUMBER} (#${NUMBER})" 2>/dev/null || true
-      echo "Phase C1.7: Dossier commit created for modules:${DOSSIER_UPDATED_MODULES}"
+  while IFS= read -r dossier_file; do
+    [ -n "$dossier_file" ] || continue
+    git -C "$DOSSIER_TMP" add "$dossier_file" 2>/dev/null || true
+  done <<< "$CHANGED_DOSSIER_FILES"
+
+  if git -C "$DOSSIER_TMP" diff --cached --quiet 2>/dev/null; then
+    echo "Phase C1.7: skipped - no staged dossier changes"
+  elif ! git -C "$DOSSIER_TMP" checkout -q -B "$DOSSIER_BRANCH" 2>/dev/null; then
+    echo "Phase C1.7: skipped - cannot create branch ${DOSSIER_BRANCH}"
+  elif ! git -C "$DOSSIER_TMP" commit -s -q -m "docs(dossier): append entry for PR #{PR_NUMBER} (#${NUMBER})" 2>/dev/null; then
+    echo "Phase C1.7: skipped - commit failed in temporary worktree"
+  elif { git -C "$DOSSIER_TMP" fetch -q origin "$DOSSIER_BRANCH" >/dev/null 2>&1 || true; \
+         ! git -C "$DOSSIER_TMP" push -u --force-with-lease="refs/heads/${DOSSIER_BRANCH}" origin "$DOSSIER_BRANCH" >/dev/null 2>&1; }; then
+    # Retry-safe: the branch is a pipeline-owned throwaway, so a stale remote copy from an earlier attempt is
+    # overwritten under a lease (fetched above; absent branch is fine). Never a bare --force.
+    echo "Phase C1.7: skipped - push of ${DOSSIER_BRANCH} failed (no push rights, branch protection, or lease rejected)"
+  else
+    # Reuse an already-open PR for this branch instead of creating a duplicate.
+    DOSSIER_PR_URL=$(gh pr list {GH_FLAG} --head "$DOSSIER_BRANCH" --state open --json url --jq '.[0].url // empty' 2>/dev/null || echo "")
+    if [ -n "$DOSSIER_PR_URL" ]; then
+      echo "Phase C1.7: reusing open dossier PR ${DOSSIER_PR_URL}"
     else
-      echo "Phase C1.7: No staged dossier changes — skipping commit"
+    DOSSIER_PR_URL=$(gh pr create {GH_FLAG} --base "${DOSSIER_BASE}" --head "$DOSSIER_BRANCH" \
+      --title "docs(dossier): append entry for PR #{PR_NUMBER} (#${NUMBER})" \
+      --body "Module dossier entry for PR #{PR_NUMBER} (#${NUMBER}):${DOSSIER_UPDATED_MODULES}. Opened by close.md Phase C1.7." 2>/dev/null || echo "")
+    [ -n "$DOSSIER_PR_URL" ] || echo "Phase C1.7: skipped - gh pr create failed for ${DOSSIER_BRANCH}"
     fi
   fi
+fi
 
-  # Post annotation on the issue
+# Always remove the temporary worktree (non-fatal); the main checkout was never modified.
+_dossier_cleanup
+
+if [ -n "$DOSSIER_PR_URL" ]; then
   gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:DOSSIER_UPDATED -->
 Module dossier(s) updated:${DOSSIER_UPDATED_MODULES}
 
-Entries appended to \`devdocs/modules/\` after PR #{PR_NUMBER} merged. Future agents working
+Dossier PR opened after PR #{PR_NUMBER} merged: ${DOSSIER_PR_URL}. Once merged, future agents working
 on these modules will receive the updated knowledge through the devdocs channel (context.md Phase C-1).
 
 <!-- FORGE:DOSSIER_UPDATED:COMPLETE -->" 2>/dev/null || true
 else
-  echo "Phase C1.7: No module dossiers matched changed files — skipping"
+  echo "Phase C1.7: skipped - no dossier PR opened (see reasons above); continuing"
 fi
+}
+
+_dossier_run
+_dossier_cleanup
+trap - EXIT
 ```
 
 ---

@@ -80,6 +80,23 @@ fi
 
 **Idempotency**: `gh issue close` on an already-closed issue succeeds as a no-op (no error) — safe to re-run this step on a resumed/compacted session without an extra pre-check.
 
+### Step 5C.5: Remove the trail cache directory <!-- Added: forge#3206 -->
+
+Defense in depth for the per-run `$TRAIL_CACHE_DIR` (see `phase-4-execution.md` "Cycle-start cache reset"). Phase 4 already calls `cleanup_trail_cache` on Termination, Step 4F and "Stopping the orchestrator"; this step guarantees removal when Phase 5 is reached by any other path. It is idempotent and a no-op when the directory is absent. Re-declare the path helper in the same Bash block (each Bash call is a fresh shell; never trust a pre-set `TRAIL_CACHE_DIR` before `rm -rf`):
+
+```bash
+trail_cache_dir() {
+  printf '%s' "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/forge-trail-$(id -u)-$(printf '%s' "{GH_REPO}" | tr -c 'A-Za-z0-9._-' '_')"
+}
+cleanup_trail_cache() {
+  local D; D="$(trail_cache_dir)"
+  case "$D" in */forge-trail-*) ;; *) return 0 ;; esac
+  case "$D" in *..*) return 0 ;; esac
+  rm -rf -- "$D"; unset TRAIL_CACHE_DIR; return 0
+}
+cleanup_trail_cache
+```
+
 ### Step 5D: Report cleanup results
 
 Include the cleanup summary in the final report (Phase 6), including whether the coordination issue was closed this run (see Step 5C). If cleanup found problems, call them out — they indicate agent pipeline failures that may need investigation.

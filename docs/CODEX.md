@@ -73,6 +73,18 @@ When a repo-local adapter exists under `.agents/skills/`, it becomes authoritati
 - Forge-specific review heuristics
 - best-effort handling of project-board steps that may be project-specific upstream
 
+## FORGE_HOME and Install Root Resolution
+
+Forge scripts (the merge trail gate, dispatch lint, engine modules) are resolved from ForgeDock's own install root, never from the consumer repo. Codex has no `~/.claude` fallback, so it relies on `FORGE_HOME`:
+
+- `FORGE_HOME` must be an absolute path to the ForgeDock clone (the directory holding `scripts/` and `commands/`). Relative values are ignored.
+- `FORGEDOCK_HOME`, when set, is authoritative over everything else. Windows drive-letter forms (`C:/forge` or `C:\forge`) are accepted and normalized to `/c/forge`.
+- `FORGE_SKILL_NAMESPACE=codex` forces the `forge-` skill prefix with `-` nesting (`forge-work-on-build`). Set it when skill auto-detection from the available-skills list is ambiguous; other values are `forgedock`, `none` and `opencode`. When unset, `FORGE_RUNTIME=codex` selects the same row.
+- Resolution order is `FORGEDOCK_HOME` (authoritative: when set, nothing else is consulted, and a relative value leaves `FORGE_ROOT` empty) > the running plugin's own root (Claude Code plugin installs only) > `FORGE_HOME` > the `work-on.md` symlink target > the `$CODEX_HOME/forge-home` file (skipped when `CODEX_HOME` is set to a relative path) > the plugin cache > the marketplace directory. See the Environment Variables section of `CONFIG.md` for the full variable reference, including the `FORGE_TRAIL_*` trust settings for the merge gate.
+- `./install-codex.sh` writes `FORGE_HOME` to `~/.bashrc`/`~/.zshrc` (interactive shells), to `~/.zshenv` and `~/.profile` (non-interactive shells), each only when the file already exists and with the path POSIX single-quote-escaped, and records the clone path in `$CODEX_HOME/forge-home` (default `~/.codex/forge-home`), which the bootstrap reads even when no shell profile is sourced.
+- For Claude Code plugin installs only the official `forgedock` marketplace is trusted; set `FORGEDOCK_MARKETPLACE` (trusted environment only) to pin a differently named marketplace. Cache directories with non-semver names are ignored.
+- If none of these resolve, `FORGE_ROOT` stays empty and the trail gate refuses to merge (fail closed).
+
 ## Trust and Global Config
 
 Codex may require the repo directory to be trusted in `~/.codex/config.toml`.

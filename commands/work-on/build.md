@@ -24,6 +24,8 @@ argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --base {PR_BAS
 
 **CRITICAL: You MUST execute ALL phases B0–B6.5 in order. Every child (B3 context, B4 architect, B5 implement, B6 validate) is invoked via `Skill(...)` — each is a forked sub-skill with its own isolated context. B3 and B4 are invoked for every complexity band except where the band is TRIVIAL or INVESTIGATION (B2/B2.1/B2.5 are also skipped for INVESTIGATION); the children post their own skip markers, so a skipped child is still visible on the issue. Skipping a child without the band justification degrades build quality and fails the phase-trail check.**
 
+**Synchronous child consumption**: each child `Skill(...)` call (B3-B6) runs to completion in this phase's own turn, and you consume its result in that same turn. Never end or yield your turn to wait for a child, and never wait for a completion notification: notifications for forked children go to the root session, not to this phase, so a turn that yields is never resumed. A child return with no `*_RESULT:` block (running, backgrounded, empty) is not a result — re-read the GitHub markers for that child (`FORGE:CONTEXT`, `FORGE:ARCHITECT`, `FORGE:BUILDER`, `FORGE:VALIDATE`/`FORGE:QUALITY_GATE`) and apply the **bounded re-invoke rule**: re-invoke the same child with the same args at most 2 times per child on running/backgrounded/empty returns (the counter is per child and is not reset by a re-invoke). Before re-invoking, check state: if the child's marker is present, consume it instead of re-invoking; for implement and validate, also check the worktree (`git status --short` and `git log origin/{PR_BASE}..HEAD` in `{WORKTREE_PATH}`) — uncommitted in-flight edits or a fresh commit mean the original child may still be live, so wait for it by re-reading state rather than launching a second writer on the same worktree, and count that as a re-invoke attempt. After the cap is exhausted, take the Blocked exit (see Result emission and Blocked exit) with `blocker: child-stalled: <child>` (child = context|architect|implement|validate); it is terminal and is not re-invoked by the router.
+
 <!-- FORGE:SPEC_LOADED — work-on/build.md loaded and active. Agent is bound by this spec. -->
 
 ---
@@ -69,14 +71,20 @@ fi
 # ~/.claude/commands symlink target > the Claude Code plugin cache/marketplace dirs. <!-- forge#3098 -->
 # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
 FORGE_ROOT=""
-if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
-  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
-  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-  # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
-  _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+  _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+  # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+  _m="$HOME/.claude/plugins/marketplaces/$_mk"
   # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
+  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
   while IFS= read -r _c; do
     case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
   done <<< "$_k"
@@ -466,6 +474,7 @@ If `FUNCTION_NAMES` is empty, omit `--functions`. The child posts its own `FORGE
 - `status: COMPLETE | PARTIAL | SKIPPED` → continue to B4
 - No `CONTEXT_RESULT:` block, timeout or error → log a warning and continue to B4 (context is advisory and non-blocking)
 - Skill not found → Blocked exit, blocker "skill not found: work-on:build:context"
+- Returned running/backgrounded/empty (no `CONTEXT_RESULT:`) → do not end the turn; re-read for a `FORGE:CONTEXT` marker, re-invoke the same child if absent, per the bounded re-invoke rule (at most 2; check the marker before re-invoking) (advisory rules above still apply once it returns)
 # MUST CONTINUE to Phase B4 — context result is intermediate, NOT terminal.
 
 ---
@@ -485,6 +494,7 @@ The child posts its own `FORGE:ARCHITECT` comment (a "Skipped" marker + `:COMPLE
 - `status: BLOCKED` (conflicting constraints that cannot be resolved) → Blocked exit with the child's `blocker`
 - No `ARCHITECT_RESULT:` block → re-read the issue: if a `FORGE:ARCHITECT:COMPLETE` marker exists continue to B5, otherwise Blocked exit "architect produced no result"
 - Skill not found → Blocked exit, blocker "skill not found: work-on:build:architect"
+- Returned running/backgrounded/empty → do not end the turn to wait; re-read markers and re-invoke the same child per the bounded re-invoke rule (at most 2; the marker fallback above applies only after a real return)
 # MUST CONTINUE to Phase B5 — architect result is intermediate, NOT terminal.
 
 ---
@@ -503,6 +513,7 @@ Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:implement", args="{NUMBER} --repo
 - `status: INVESTIGATION_COMPLETE` → issues were created as deliverables and the original closed; print `BUILD_RESULT: status: INVESTIGATION_COMPLETE` (skip B6/B6.5)
 - `status: BLOCKED` → Blocked exit with the child's `blocker`
 - Skill not found → Blocked exit, blocker "skill not found: work-on:build:implement"
+- Returned running/backgrounded/empty (no `IMPLEMENT_RESULT:`) → do not end the turn to wait; re-read the `FORGE:BUILDER` comment and the worktree state; if `FORGE:BUILDER:COMPLETE` is present consume it, and if the worktree shows in-flight edits or a fresh commit treat the child as possibly live; before re-invoking, apply the bounded re-invoke rule (at most 2, then `child-stalled: implement`)
 # MUST CONTINUE to Phase B6 — implement result is intermediate, NOT terminal (validation still required).
 
 ---
@@ -522,9 +533,10 @@ CHANGED_FILES=$(git -C "{WORKTREE_PATH}" diff --name-only "origin/{PR_BASE}...HE
 ```
 
 **After subcommand returns** (read its `VALIDATE_RESULT:` block):
-- `gate_passed: true` → verify the `FORGE:QUALITY_GATE` marker exists on the issue (posted by validate V5; docs-only changes exempt). If absent, re-invoke validate once; a missing marker is not a pass. Then continue to Phase B6.5 (acceptance gate)
+- `gate_passed: true` → verify the `FORGE:QUALITY_GATE` marker exists on the issue (posted by validate V5; docs-only changes exempt). If absent, re-derive `{CHANGED_FILES}` with the B6 command above and re-invoke validate once with the full B6 `Skill(...)` call, including `--files "{CHANGED_FILES}"` (never omit `--files`; an empty list falls back to the git diff); a missing marker is not a pass. Then continue to Phase B6.5 (acceptance gate)
 - `gate_passed: false` → the subcommand has already posted its comment and added `needs-human`; print `BUILD_RESULT: status: BLOCKED` with the child's `blocker` (run the Blocked exit if no comment was posted)
 - Skill not found → Blocked exit, blocker "skill not found: work-on:build:validate"
+- Returned running/backgrounded/empty (no `VALIDATE_RESULT:`) → do not end the turn to wait; re-read the `FORGE:QUALITY_GATE` marker (consume it if present) and the worktree state before re-invoking, then re-invoke the same child under the bounded re-invoke rule (at most 2, then `child-stalled: validate`); this cap is separate from the single marker-absent re-invoke above
 
 ---
 
@@ -683,7 +695,12 @@ If `GATE_PASS = false`, the build repairs itself **once** before anything escala
 1. Count `<!-- FORGE:ACCEPTANCE_REPAIR: issue={NUMBER} -->` comments on the issue. If one already exists, skip to step 4.
 2. Post that marker (with the failed check ids), remove `needs-human` if this gate added it, then invoke
    `Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:implement", args="{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE} --fix-acceptance \"<failed check ids and details>\"")`
-   followed by `work-on:build:validate` with the same args as B6 (the new code gets a fresh quality gate and commit).
+   then re-derive `{CHANGED_FILES}` from the repaired worktree (never reuse the pre-repair value, and never omit `--files`; an empty list falls back to this diff):
+   ```bash
+   CHANGED_FILES=$(git -C "{WORKTREE_PATH}" diff --name-only "origin/{PR_BASE}...HEAD" 2>/dev/null | tr '\n' ' ' | xargs)
+   ```
+   and invoke validate explicitly (the new code gets a fresh quality gate and commit):
+   `Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:validate", args="{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE} --files \"{CHANGED_FILES}\"")`
 3. Re-run this whole B6.5 gate. PASS → continue to the checkpoint.
 4. Still failing (or already repaired once) → leave `needs-human` and print `BUILD_RESULT: status: BLOCKED`, blocker: "Acceptance gate failed after one repair — see FORGE:ACCEPTANCE_GATE comment".
 

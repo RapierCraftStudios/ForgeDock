@@ -82,7 +82,7 @@ release_orchestrator_lease() {
 
 1. Enumerate every task id still tracked in `ENGINE_DISPATCH_MAP` whose issue has not yet reached a terminal `workflow:*` label (per Step 4B's `classify_predecessor_state()`).
 2. Call `TaskStop(task_id)` (the harness tool) for each one, in the same turn, before ending the session.
-3. Call `release_orchestrator_lease()` (Step 4A-pre.-1) so a future resume or a different operator is not blocked by a stale lease from this now-stopped session.
+3. Call `cleanup_trail_cache` (Step 4B) and `release_orchestrator_lease()` (Step 4A-pre.-1) so a future resume or a different operator is not blocked by a stale lease from this now-stopped session.
 4. Report which issues had in-flight dispatch stopped mid-pipeline (their `workflow:*` label will reflect whatever phase they reached — a future `/work-on {NUMBER}` or orchestrator resume picks them back up from GitHub state, per the Universal Phase Dispatcher in `commands/work-on.md`).
 
 **This is a documentation/behavioral contract, not a bash block**: unlike the lease gate above, there is no shell construct that reliably intercepts "the orchestrator's own session is being stopped" — that is a harness-level event the orchestrating agent must handle in its own turn when it observes an interrupt, using its own tools (`TaskStop`), exactly the way `commands/orchestrate/phase-5-cleanup.md` already documents cleanup as an agent-driven procedure rather than a background script.
@@ -789,6 +789,48 @@ if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ]; then
 fi
 ```
 
+**Recovery-claim dispatch gate (MANDATORY, before every individual dispatch)** <!-- Added: forge#3172 -->: a `/recover-orphans` sweep that is resuming an issue inline holds an issue-scoped `<!-- FORGE:RECOVERY_CLAIM -->` comment. Dispatching a worker underneath a live claim double-runs the issue. This gate is independent of the claims board above (it applies even when `FORGE_COORD_ISSUE` is unset) and uses the shared predicate `scripts/recovery-claim-live.sh` (unreleased claim, within `RECOVERY_CLAIM_TTL_MIN`, no `FORGE:RECOVERY_CLAIM_RELEASED` for its sweep id). It fails closed: `CLAIM: LIVE` and `CLAIM: ERROR` (exit 1 or 2, or an unresolvable script) both defer. A deferral writes nothing to GitHub (no `needs-human`, no label), the claim being transient. The issue goes into `DEFERRED_CONCURRENCY_ISSUES[]`, so it re-enters the candidate set on the next dispatch computation and is never dropped; report each deferral as `RECOVERY CLAIM DEFER` in the status update. Shell state does not persist between Bash calls, so the canonical `FORGE_ROOT` bootstrap is repeated in the block; if it resolves empty, every issue defers.
+
+```bash
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+# Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+_l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+# Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+_cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+# newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+_v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+_m="$HOME/.claude/plugins/marketplaces/$_mk"
+# '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
+_k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
+while IFS= read -r _c; do
+case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
+done <<< "$_k"
+fi
+recovery_claim_blocks() {
+  local NUM="$1" OUT RC
+  if [ -z "${FORGE_ROOT:-}" ] || [ ! -f "$FORGE_ROOT/scripts/recovery-claim-live.sh" ]; then
+    echo "RECOVERY CLAIM DEFER: #${NUM} (recovery-claim-live.sh unresolved — failing closed)" >&2
+    return 0
+  fi
+  OUT=$(bash "$FORGE_ROOT/scripts/recovery-claim-live.sh" "$NUM" -R {GH_REPO}); RC=$?
+  [ "$RC" -eq 0 ] && return 1
+  echo "RECOVERY CLAIM DEFER: #${NUM} (${OUT}) — retried on the next dispatch computation"
+  return 0
+}
+
+# Same sites as claim_conflicts_with_live_holder: engine-first loop, Agent/task launch, Step 4B newly-ready (via Step 4A).
+if recovery_claim_blocks "$NUM"; then
+  DEFERRED_CONCURRENCY_ISSUES+=("$NUM")
+  continue
+fi
+```
+
 **Engine-first dispatch (default)**: When `forgedock` is in PATH, dispatch each ready issue via the durable engine rather than spawning prose Agent sub-agents. The engine's phase table enforces gate semantics in code — its fail-closed review gate and deterministic phase ordering are not subject to LLM interpretation.
 
 **OpenCode dispatch (runtime-neutral adapter)**: When `FORGE_RUNTIME=opencode` or
@@ -925,6 +967,10 @@ if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
   # instruction below re-checks immediately before each launch to close the remaining TOCTOU gap.
   CLAIM_SAFE_DISPATCH=()
   for NUM in "${DISPATCH_NOW[@]}"; do
+    if recovery_claim_blocks "$NUM"; then   # forge#3172: live FORGE:RECOVERY_CLAIM (fails closed)
+      DEFERRED_CONCURRENCY_ISSUES+=("$NUM")
+      continue
+    fi
     if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && claim_conflicts_with_live_holder "$NUM"; then
       DEFERRED_CLAIM_ISSUES+=("$NUM")
       continue
@@ -969,7 +1015,7 @@ fi
 fi
 ```
 
-**Dispatch each issue in `DISPATCH_NOW` via its own backgrounded `Bash` call (MANDATORY when `FORGEDOCK_AVAILABLE=true`) — never shell `&`/`wait`.** Immediately before each call, run `claim_conflicts_with_live_holder "{NUM}"`; if it returns success, defer that issue rather than dispatching it. Issue one `Bash(...)` call per remaining issue in `DISPATCH_NOW`, all in the same message, so they run concurrently within the headroom already computed above:
+**Dispatch each issue in `DISPATCH_NOW` via its own backgrounded `Bash` call (MANDATORY when `FORGEDOCK_AVAILABLE=true`) — never shell `&`/`wait`.** Immediately before each call, run `recovery_claim_blocks "{NUM}"` and `claim_conflicts_with_live_holder "{NUM}"`; if either returns success, defer that issue rather than dispatching it. Issue one `Bash(...)` call per remaining issue in `DISPATCH_NOW`, all in the same message, so they run concurrently within the headroom already computed above:
 
 ```
 Bash(command="FORGE_GIST_CAPABLE=${FORGE_GIST_CAPABLE} forgedock run-issue {NUM} --lane {PR_BASE}", run_in_background=true, description="Engine-drive issue #{NUM}")
@@ -1054,6 +1100,7 @@ gh issue view {NUMBER} -R {GH_REPO} --json labels --jq '[.labels[].name | select
 **Terminal condition also**: `needs-human` label present, `workflow:awaiting-merge` label present, OR issue state is `closed`
 `needs-human` and `workflow:awaiting-merge` are terminal-FOR-THIS-AGENT (this individual `/work-on` run stops here — a human decision or merge is now the blocking step) but are NOT "done" from the DAG's point of view; see Predecessor Classification in Step 4B for how the orchestrator's dependency logic treats them (`GATED`, not `DONE`).
 If the label is NOT terminal (e.g., `workflow:investigating`, `workflow:ready-to-build`, `workflow:building`, `workflow:in-review`), invoke `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{NUMBER} --under-orchestration')` again immediately. The `/work-on` skill will re-read GitHub state and advance to the next phase. Do NOT output a summary, do NOT pause, do NOT ask for confirmation — just invoke it again.
+**NEVER end a turn while the label is non-terminal.** Every `Skill(...)` call runs synchronously to completion in your own turn. Never end or yield your turn to wait for a background phase or a completion notification — notifications go to the orchestrator's root session, never to you, so a turn that ends non-terminal is never resumed. A turn that ends with a non-terminal label and no `*_RESULT:` block seen is a contract violation. A "running", backgrounded or empty return is not a result: re-read the labels and `FORGE:*` markers on GitHub and invoke `work-on` again immediately — never wait.
 
 **CRITICAL — SOURCE BRANCH DETECTION**:
 - If the issue has the `review-finding` label, read the issue body for `**Code branch**: \`{branch}\``
@@ -1099,14 +1146,20 @@ RENDERED_PROMPT=$(cat "$RENDERED_PROMPT_SRC"); rm -f "$RENDERED_PROMPT_SRC"
 # immediately before that issue's Agent()/task() call. LINT_REFUSED_ISSUES is initialised once, empty.
 # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
 FORGE_ROOT=""
-if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
-  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
-  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-  # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
-  _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+  _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+  # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+  _m="$HOME/.claude/plugins/marketplaces/$_mk"
   # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
+  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
   while IFS= read -r _c; do
     case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
   done <<< "$_k"
@@ -1311,7 +1364,7 @@ fi
 echo "Dispatching ${#DISPATCH_NOW[@]} issue(s) this message (headroom was ${HEADROOM})"
 ```
 
-Immediately before every Claude `Agent()` or OpenCode `task()` call, run `claim_conflicts_with_live_holder "{NUM}"`; when it returns success, append the issue to `DEFERRED_CLAIM_ISSUES[]` and do not make that call. Spawn `Agent()` for every remaining issue in `DISPATCH_NOW` (not the raw ready set) using the template above. After the batch spawn, increment `ACTIVE_DISPATCH_COUNT` by the number actually dispatched — this happens in addition to, not instead of, capturing each returned agent ID into `AGENT_ISSUE_MAP` above.
+Immediately before every Claude `Agent()` or OpenCode `task()` call, run `recovery_claim_blocks "{NUM}"` (success: append to `DEFERRED_CONCURRENCY_ISSUES[]`, forge#3172) and `claim_conflicts_with_live_holder "{NUM}"` (success: append the issue to `DEFERRED_CLAIM_ISSUES[]`); on either, do not make that call. Spawn `Agent()` for every remaining issue in `DISPATCH_NOW` (not the raw ready set) using the template above. After the batch spawn, increment `ACTIVE_DISPATCH_COUNT` by the number actually dispatched — this happens in addition to, not instead of, capturing each returned agent ID into `AGENT_ISSUE_MAP` above.
 
 If `DISPATCH_NOW` is empty (headroom is 0), do not spawn any agents this cycle — wait for the next `agent_completed` notification, which frees a slot and re-triggers this dispatch computation (Step 4B).
 
@@ -1338,23 +1391,60 @@ For an OpenCode completion, retain `OPENCODE_DISPATCH_MAP[{NUMBER}]` until the t
 
 **Successor dispatch latency is measured from `agent_completed`, not from orchestrator polling.** The moment you receive an `agent_completed` notification for issue N, that is t=0 for dispatching N's successors. Any successor whose predecessors are all now terminal MUST be dispatched in the same response that processes the notification — not after a poll cycle, not after a sleep. This is the design property that makes streaming DAG execution faster than wave-based execution. <!-- Added: forge#1251 -->
 
+**Cycle-start cache reset (MANDATORY — before item 0 (phase-trail verification), before item 5, and before Step 4B.5 stall detection)** <!-- Added: forge#3182 -->: at the very start of every monitoring cycle, call `init_trail_cache` once so no `classify_predecessor_state` call in this cycle (item 0 phase-trail verification, item 5/6 readiness checks, stall detection, item 6.6) reads the previous cycle's cached trail state. Re-declare `trail_cache_dir` / `init_trail_cache` in the same Bash block (same-shell rule as `classify_predecessor_state`) and run it before the first classify call. Item 6.6 does not reset the cache itself. `cleanup_trail_cache` removes the directory on every exit path (Termination condition, Step 4F, "Stopping the orchestrator").
+
 **Predecessor Classification (DONE / GATED / FAILED)** <!-- Added: forge#1812 --> — every check in this file that asks "is predecessor X resolved enough for its dependents to proceed" MUST classify X into exactly one of three states below — never a single binary terminal/non-terminal grep. Earlier versions of this file independently patched `grep -qE 'workflow:merged|workflow:invalid|needs-human|CLOSED'` in multiple places, and the copies drifted: the readiness check (this step) treated `needs-human` as done-enough-to-dispatch-through, while the failure handler (item 6 below) treated the identical label as a hard failure that skips dependents. Both cannot be right at once — `needs-human` means the predecessor's code is paused pending a human decision and is NOT yet in the base branch, so dispatching a dependent against it is unsafe, but permanently skipping the dependent is also wrong once the human resolves the block. The fix is a third state:
 
 ```bash
+# Trail cache lifecycle (forge#3182). Each Bash tool call is a fresh shell, so a persisted TRAIL_CACHE_DIR, a `$$`-keyed
+# path and a bare `rm -rf "$TRAIL_CACHE_DIR"` all differ or no-op per call (and a per-call `mktemp -d` leaks a directory every
+# cycle). The path is therefore derived from a STABLE key that every block can recompute without shell state: the numeric uid
+# plus the target repo (never `$$`; a pre-set TRAIL_CACHE_DIR / env value is deliberately ignored so `rm -rf` can never be
+# pointed at an arbitrary path). The dir is private (mode 700, owned by us, not a symlink) under a per-user base.
+# init_trail_cache resets it (call once at the TOP of each monitoring cycle, see "Cycle-start cache reset");
+# cleanup_trail_cache removes it on every orchestrator exit path. The cache holds only ABSENT/ACTIVE/RELEASED words.
+trail_cache_dir() {
+  printf '%s' "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/forge-trail-$(id -u)-$(printf '%s' "{GH_REPO}" | tr -c 'A-Za-z0-9._-' '_')"
+}
+init_trail_cache() {
+  local D; D="$(trail_cache_dir)"
+  case "$D" in */forge-trail-*) ;; *) echo "init_trail_cache: refusing unexpected path" >&2; return 1 ;; esac
+  case "$D" in *..*) echo "init_trail_cache: refusing unexpected path" >&2; return 1 ;; esac
+  rm -rf -- "$D"
+  mkdir -m 700 -p -- "$D" && [ -O "$D" ] && [ ! -L "$D" ] || { echo "init_trail_cache: could not create a private cache dir" >&2; return 1; }
+  TRAIL_CACHE_DIR="$D"
+}
+cleanup_trail_cache() {
+  local D; D="$(trail_cache_dir)"
+  case "$D" in */forge-trail-*) ;; *) return 0 ;; esac
+  case "$D" in *..*) return 0 ;; esac
+  rm -rf -- "$D"; unset TRAIL_CACHE_DIR; return 0
+}
+
 # hold_merged_trail <issue> <trail-text> (forge#3156): the single escalation path for a merged issue whose phase
 # trail failed or could not be verified. Used by Step 4B item 0 and by the classifier's wake re-verification.
-# Order matters (forge#3169): the escalation COMMENT is posted FIRST (re-read immediately before each post, skipped when
-# an ACTIVE escalation already exists, verified ACTIVE by re-read after), then the `needs-human` label is written
-# (read-back verified, 3 tries). The comment is the durable audit record, independent of the verifier, so a label-only
-# hold is not the normal state and a human release always has an anchor to be recorded against. Returns 0 only when both
-# halves are verified; otherwise returns 1 and stderr names which half failed (the label is still attempted after a
-# comment failure, because holding dependents is the safe side).
+# Order matters (forge#3223): the `needs-human` label is written FIRST (read-back verified, 3 tries). Only when the
+# label is verified is the escalation comment posted (re-read immediately before each post, skipped when an ACTIVE
+# escalation already exists, verified ACTIVE by re-read after, 2 tries). A comment can therefore only exist after the label
+# did, so the merged + no-label + ACTIVE state (which classifies as a human release) is unreachable through this path.
+# If the label cannot be verified, NO comment is posted and the function returns 1. If the comment fails after a verified
+# label, the label hold stays (a labelled ABSENT hold classifies GATED, fail-closed). Returns 0 only when both halves are
+# verified; otherwise returns 1 and stderr names which half failed.
 hold_merged_trail() {
   local N="$1" TXT="$2" TRY COMMENTED=1 HELD=1
+  for TRY in 1 2 3; do
+    gh issue edit "$N" -R {GH_REPO} --add-label "needs-human" >/dev/null 2>&1 || true # <!-- allowlist:check-command-side-effects -->
+    if gh issue view "$N" -R {GH_REPO} --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null \
+         | grep -qE '(^|,)needs-human(,|$)'; then HELD=0; break; fi
+  done
+  if [ "$HELD" -ne 0 ]; then
+    echo "PHASE TRAIL HOLD FAILED: #${N} — needs-human label could not be verified; no escalation comment posted (a comment without the label would read as a released hold); dependents are NOT held. Hold them manually." >&2
+    return 1
+  fi
   for TRY in 1 2; do
     # forge#3157: dedupe only against an ACTIVE escalation, so a re-escalation after a recorded release posts a new one.
     # forge#3169: re-read right before each post (cache entry removed) to narrow the concurrent-classifier duplicate window.
-    [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -f "$TRAIL_CACHE_DIR/trail-$N"
+    rm -f "$(trail_cache_dir)/trail-$N"
     if [ "$(trail_escalation_state "$N")" = "ACTIVE" ]; then COMMENTED=0; break; fi
     gh issue comment "$N" -R {GH_REPO} --body "<!-- FORGE:PHASE_TRAIL_FAILED -->
 #${N} merged with an incomplete phase trail (or one that could not be verified), detected by /orchestrate.
@@ -1364,28 +1454,35 @@ ${TXT}
 \`\`\`
 
 The PR is already merged, so \`/work-on\` cannot re-run the missing phases. Review the merged change, then remove \`needs-human\` to release dependents held as \`blocked-on-human-merge\`." >/dev/null 2>&1 || true # <!-- allowlist:check-command-side-effects -->
-    [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -f "$TRAIL_CACHE_DIR/trail-$N"
+    rm -f "$(trail_cache_dir)/trail-$N"
     if [ "$(trail_escalation_state "$N")" = "ACTIVE" ]; then COMMENTED=0; break; fi
   done
-  for TRY in 1 2 3; do
-    gh issue edit "$N" -R {GH_REPO} --add-label "needs-human" >/dev/null 2>&1 || true # <!-- allowlist:check-command-side-effects -->
-    if gh issue view "$N" -R {GH_REPO} --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null \
-         | grep -qE '(^|,)needs-human(,|$)'; then HELD=0; break; fi
-  done
-  [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -f "$TRAIL_CACHE_DIR/trail-$N"
-  [ "$COMMENTED" -ne 0 ] && echo "PHASE TRAIL HOLD FAILED: #${N} — escalation comment could not be verified (audit record missing); hold dependents manually." >&2
-  [ "$HELD" -ne 0 ] && echo "PHASE TRAIL HOLD FAILED: #${N} — needs-human label could not be verified; dependents are NOT held. Hold them manually." >&2
-  [ "$COMMENTED" -eq 0 ] && [ "$HELD" -eq 0 ]
+  rm -f "$(trail_cache_dir)/trail-$N"
+  [ "$COMMENTED" -ne 0 ] && echo "PHASE TRAIL HOLD FAILED: #${N} — escalation comment could not be verified (audit record missing); the needs-human label hold stays (fail-closed)." >&2
+  [ "$COMMENTED" -eq 0 ]
 }
 
-# resolve_orch_login (forge#3168): prints the login of the identity that authors the orchestrator's own FAILED/RELEASED
-# marker comments, so trail_escalation_state can trust them even when the bot reports author_association NONE or
-# CONTRIBUTOR. Resolution order: FORGE_BOT_LOGIN env override, then the git identity (`git config user.name`, which for a
-# GitHub App is its `<app>[bot]` login). Never calls `/user` (403s for App tokens). An unresolved value prints nothing and
-# the caller fails closed: only the author_association set below is trusted, never "trust every author".
+# resolve_orch_login (forge#3168, forge#3205): prints the login of the identity that authors the orchestrator's own
+# FAILED/RELEASED marker comments, so trail_escalation_state can trust them even when the bot reports author_association
+# NONE or CONTRIBUTOR. Resolution order: FORGE_BOT_LOGIN env override, then the per-cycle cached value, then the identity
+# gh actually authenticates as (GraphQL `viewer { login }`, which works for App tokens), then `git config user.name` as a
+# last resort (a commit-author setting that can differ from the posting identity). Never calls `/user` (403s for App
+# tokens). A non-empty result is cached in `orch-login` inside the owner-checked trail cache dir (a `$(...)` subshell
+# cannot keep a shell variable; `init_trail_cache` / `cleanup_trail_cache` remove it with the dir); an empty result is
+# never cached so it is retried. An unresolved value warns on stderr and prints nothing; the caller fails closed: only
+# the author_association set below is trusted, never "trust every author".
 resolve_orch_login() {
-  local L="${FORGE_BOT_LOGIN:-}"
+  local L="${FORGE_BOT_LOGIN:-}" D C; D="$(trail_cache_dir)"; C="$D/orch-login"
+  if [ -z "$L" ] && [ -d "$D" ] && [ -O "$D" ] && [ ! -L "$D" ] && [ -f "$C" ] && [ ! -L "$C" ] && [ -O "$C" ]; then
+    L=$(head -n 1 "$C" 2>/dev/null || true)
+  fi
+  [ -n "$L" ] || L=$(gh api graphql -f query='{viewer{login}}' --jq '.data.viewer.login' 2>/dev/null || true)
   [ -n "$L" ] || L=$(git config user.name 2>/dev/null || true)
+  if [ -z "$L" ]; then
+    echo "resolve_orch_login: could not resolve the orchestrator login (set FORGE_BOT_LOGIN); trusting only OWNER/MEMBER/COLLABORATOR trail markers" >&2
+  elif [ -z "${FORGE_BOT_LOGIN:-}" ] && [ -d "$D" ] && [ -O "$D" ] && [ ! -L "$D" ] && [ ! -e "$C" ]; then
+    printf '%s\n' "$L" > "$C" 2>/dev/null || true
+  fi
   printf '%s' "$L"
 }
 
@@ -1393,33 +1490,57 @@ resolve_orch_login() {
 # FORGE:PHASE_TRAIL_FAILED comment id is greater than the newest FORGE:PHASE_TRAIL_RELEASED id), RELEASED (a human
 # release was recorded after the last escalation, so a later unrelated `needs-human` no longer gates), or UNREADABLE.
 # forge#3168: only TRUSTED comments count, for BOTH markers. Trusted = author_association OWNER/MEMBER/COLLABORATOR, or
-# `.user.login` equal to the orchestrator identity (resolve_orch_login, used only when non-empty). A marker string posted
+# `.user.login` equal to the orchestrator identity (resolve_orch_login, used only when non-empty; compared case-insensitively). A marker string posted
 # by anyone else is ignored (treated as absent), so an outside commenter can neither forge a release nor a failure.
+# forge#3207: MEMBER/COLLABORATOR association is not write access, so those authors additionally need admin/maintain/write on
+# `collaborators/<login>/permission` (OWNER and the orchestrator login pass directly; a failed lookup fails closed = untrusted).
+# forge#3181: both markers must also START the comment body (startswith, not contains), so a trusted comment that merely
+# quotes the marker text is not counted. hold_merged_trail / release_merged_trail emit the marker as the first line.
 # The comment read is cached per issue for the current monitoring cycle: the cache is a directory of files
-# (`$(...)` subshells lose shell arrays), `TRAIL_CACHE_DIR=$(mktemp -d)` and is recreated at the start of every
-# monitoring cycle (Step 4B item 6.6), so a human edit made between cycles is always seen. Only successful reads are cached.
+# (`$(...)` subshells lose shell arrays) at the stable per-user/per-repo path from `trail_cache_dir` (created only by `init_trail_cache`; reads/writes skip it if it is absent or not owned by us), and is reset by
+# `init_trail_cache` at the TOP of every monitoring cycle (Step 4B "Cycle-start cache reset", before item 5 and stall
+# detection), so a human edit made between cycles is always seen. Only successful reads are cached.
 trail_escalation_state() {
-  local N="$1" F="${TRAIL_CACHE_DIR:+$TRAIL_CACHE_DIR/trail-$1}" RAW OUT FAILED_ID RELEASED_ID RES
-  if [ -n "$F" ] && [ -s "$F" ]; then cat "$F"; return; fi
+  local N="$1" F="$(trail_cache_dir)/trail-$1" RAW OUT FAILED_ID RELEASED_ID RES
+  if [ -s "$F" ] && [ -O "$F" ]; then cat "$F"; return; fi
   if ! RAW=$(gh api --paginate "repos/{GH_REPO}/issues/${N}/comments" --jq '.[] | {id: .id, body: (.body // ""), login: (.user.login // ""), assoc: (.author_association // "")}' 2>/dev/null); then
     echo "UNREADABLE"; return
   fi
-  if ! OUT=$(printf '%s\n' "$RAW" | jq -r --arg L "$(resolve_orch_login)" 'select((.assoc | IN("OWNER","MEMBER","COLLABORATOR")) or ($L != "" and .login == $L)) | if (.body | contains("FORGE:PHASE_TRAIL_FAILED") and contains("merged with an incomplete phase trail")) then "F \(.id)" elif (.body | contains("<!-- FORGE:PHASE_TRAIL_RELEASED -->")) then "R \(.id)" else empty end' 2>/dev/null); then
+  local ORCH; ORCH=$(resolve_orch_login)
+  if ! OUT=$(printf '%s\n' "$RAW" | jq -r --arg L "$ORCH" 'select((.assoc | IN("OWNER","MEMBER","COLLABORATOR")) or ($L != "" and (.login | ascii_downcase) == ($L | ascii_downcase))) | if (.body | startswith("<!-- FORGE:PHASE_TRAIL_FAILED -->") and contains("merged with an incomplete phase trail")) then "F \(.id) \(.assoc) \(.login)" elif (.body | startswith("<!-- FORGE:PHASE_TRAIL_RELEASED -->")) then "R \(.id) \(.assoc) \(.login)" else empty end' 2>/dev/null); then
     echo "UNREADABLE"; return
   fi
+  # forge#3207: MEMBER / COLLABORATOR association is NOT write access (read-only org members, triage/read collaborators).
+  # Keep only marker rows whose author is OWNER, the orchestrator login, or has admin/maintain/write permission per
+  # collaborators/<login>/permission (one lookup per login, memoised in $PERMS for this call). Fail closed: a failed lookup drops the row.
+  local PERMS="" KEPT="" KIND KID KASSOC KLOGIN KP
+  while read -r KIND KID KASSOC KLOGIN; do
+    [ -n "$KID" ] || continue
+    if [ "$KASSOC" = "OWNER" ] || { [ -n "$ORCH" ] && [ "$(printf '%s' "$KLOGIN" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$ORCH" | tr '[:upper:]' '[:lower:]')" ]; }; then
+      KEPT="${KEPT}${KIND} ${KID}"$'\n'; continue
+    fi
+    KP=$(printf '%s\n' "$PERMS" | awk -v l="$KLOGIN" '$1==l{print $2; exit}')
+    if [ -z "$KP" ]; then
+      KP=$(gh api "repos/{GH_REPO}/collaborators/${KLOGIN}/permission" --jq '.permission' 2>/dev/null || true)
+      [ -n "$KP" ] || KP="none"
+      PERMS="${PERMS}${KLOGIN} ${KP}"$'\n'
+    fi
+    case "$KP" in admin|maintain|write) KEPT="${KEPT}${KIND} ${KID}"$'\n' ;; esac
+  done <<< "$OUT"
+  OUT="$KEPT"
   FAILED_ID=$(printf '%s\n' "$OUT" | awk '$1=="F"&&$2+0>m{m=$2+0}END{print m+0}')
   RELEASED_ID=$(printf '%s\n' "$OUT" | awk '$1=="R"&&$2+0>m{m=$2+0}END{print m+0}')
   if [ "$FAILED_ID" -eq 0 ]; then RES="ABSENT"
   elif [ "$RELEASED_ID" -gt "$FAILED_ID" ]; then RES="RELEASED"
   else RES="ACTIVE"; fi
-  [ -n "$F" ] && printf '%s\n' "$RES" > "$F"
+  [ -d "$(trail_cache_dir)" ] && [ -O "$(trail_cache_dir)" ] && printf '%s\n' "$RES" > "$F"
   echo "$RES"
 }
 
 # release_merged_trail <issue> (forge#3157): record that a human cleared a merged-trail hold, so the escalation
 # stops gating. Call only after classify_predecessor_state reported DONE for a merged issue whose escalation is ACTIVE.
-# Only an ACTIVE escalation is released here: hold_merged_trail posts the comment before the label (forge#3169), so a
-# human release of a label-only (ABSENT) hold is not expected and is not recorded (avoids a stray RELEASED marker).
+# Only an ACTIVE escalation is released here: hold_merged_trail writes the label before the comment (forge#3223), so an
+# ACTIVE escalation with no label only arises from a human removing needs-human, and a label-only (ABSENT) hold is not recorded (avoids a stray RELEASED marker).
 # Idempotent (no-op unless ACTIVE) and never run in dry-run. The comment must not contain the escalation marker text.
 release_merged_trail() {
   local N="$1"
@@ -1427,7 +1548,8 @@ release_merged_trail() {
   [ "$(trail_escalation_state "$N")" = "ACTIVE" ] || return 0
   gh issue comment "$N" -R {GH_REPO} --body "<!-- FORGE:PHASE_TRAIL_RELEASED -->
 The merged-trail hold on #${N} was released by a human (needs-human cleared or trail re-verified). Dependents held as \`blocked-on-human-merge\` are released. A later, unrelated \`needs-human\` on this merged issue no longer gates them." >/dev/null 2>&1 || true # <!-- allowlist:check-command-side-effects -->
-  [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -f "$TRAIL_CACHE_DIR/trail-$N"
+  rm -f "$(trail_cache_dir)/trail-$N"
+  return 0
 }
 
 # classify_predecessor_state <issue> (forge#3168): the helpers hold_merged_trail, resolve_orch_login,
@@ -1470,14 +1592,20 @@ classify_predecessor_state() {
     if [ -z "${FORGE_ROOT:-}" ]; then
       # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
       FORGE_ROOT=""
-      if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
-        # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
-        _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-        # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-        _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
-        _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+      # Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+      _h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+      # Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+      _mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+      if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+        # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+        _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+        # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+        _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+        # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+        _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+        _m="$HOME/.claude/plugins/marketplaces/$_mk"
         # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-        _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
+        _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
         while IFS= read -r _c; do
           case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
         done <<< "$_k"
@@ -1496,8 +1624,8 @@ classify_predecessor_state() {
     # forge#3148: GATED when Step 4B item 0 escalated a merged issue with an incomplete phase trail
     # (the code is in the base branch, but /work-on cannot repair a merged issue, so a human must review it;
     # dependents wait until a human clears needs-human). forge#3169: the hold is NOT keyed on the verifier. A passing
-    # verifier does not mean "not held" (an agent-reported bypass verifies clean), and hold_merged_trail posts the
-    # comment before the label, so merged + needs-human with no record is a failed/partial hold: fail closed (GATED).
+    # verifier does not mean "not held" (an agent-reported bypass verifies clean), and hold_merged_trail writes the
+    # label before the comment (forge#3223), so merged + needs-human with no record is a partial hold: fail closed (GATED).
     # A human release is the removal of needs-human, recorded by the release sweep via release_merged_trail.
     local TRAIL_ESC
     TRAIL_ESC=$(trail_escalation_state "$PRED")
@@ -1522,7 +1650,7 @@ classify_predecessor_state() {
         else
           # Unverified trail with no hold on record: establish it now so a human can release it.
           # Output is discarded (stdout is the classification), but a failed hold is reported on stderr, not swallowed.
-          [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -f "$TRAIL_CACHE_DIR/trail-$PRED"
+          rm -f "$(trail_cache_dir)/trail-$PRED"
           [ "${DRY_RUN:-false}" = "true" ] || [ "$(trail_escalation_state "$PRED")" != "ABSENT" ] || hold_merged_trail "$PRED" "PHASE_TRAIL: FAIL (re-verified at wake classification)" >/dev/null || echo "classify_predecessor_state: hold on #${PRED} could not be verified" >&2
           echo "GATED"
         fi ;;
@@ -1859,14 +1987,20 @@ done
    ```bash
    # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
    FORGE_ROOT=""
-   if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
-     # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
-     _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-     # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-     _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
-     _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+   # Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+   _h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+   # Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+   _mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+   if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+     # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+     _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+     # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+     _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+     # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+     _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+     _m="$HOME/.claude/plugins/marketplaces/$_mk"
      # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-     _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
+     _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
      while IFS= read -r _c; do
        case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
      done <<< "$_k"
@@ -1914,7 +2048,7 @@ done
 
    On `PHASE_TRAIL: FAIL`, classify the issue as a **bypass**, never `DONE`. Classify ONLY on objective evidence — the trail verdict above and the issue's labels. Do NOT reclassify an issue from a worker's own narrative ("ran inline", "dispatched reviewers directly", "skipped an optional step"): every phase runs forked and the merge itself is gated (CI green on the exact merged commit, reviewed head or docs-only delta, phase trail), so a merged issue whose trail passes is DONE. Field evidence: narrative-based holds flagged spec-compliant behaviour and put 5 of 6 merged issues in a stress batch on needs-human. Surface it in the operator status update (`PHASE BYPASS: #{NUMBER} — missing: ...`) and do not cascade it as a satisfied predecessor.
 
-   **Do NOT re-dispatch a merged issue** (forge#3148): `/work-on` Phase 0B stops on a closed or `workflow:merged` issue before its resume preflight, so a fresh agent exits without repairing anything and the predecessor would stay unresolved forever. The PR is already merged, so the gap can only be resolved by a human. Escalate it instead, which classifies it **GATED** (`classify_predecessor_state` holds `workflow:merged` + `needs-human` with no recorded release, regardless of the verifier; the comment is posted first, then the label, both verified), so item 6.5 tracks its dependents as `blocked-on-human-merge` instead of dispatching them. A merged issue whose trail could not be read (`TRAIL_RC -ge 2`, handled above) is escalated by the same block, so it is gated the same way. A bypass reported by the agent on a `workflow:merged` issue whose trail verifies is handled the same way (set `TRAIL_RC=1` before this block):
+   **Do NOT re-dispatch a merged issue** (forge#3148): `/work-on` Phase 0B stops on a closed or `workflow:merged` issue before its resume preflight, so a fresh agent exits without repairing anything and the predecessor would stay unresolved forever. The PR is already merged, so the gap can only be resolved by a human. Escalate it instead, which classifies it **GATED** (`classify_predecessor_state` holds `workflow:merged` + `needs-human` with no recorded release, regardless of the verifier; the label is written and verified first, then the comment, which is posted only after the label is verified), so item 6.5 tracks its dependents as `blocked-on-human-merge` instead of dispatching them. A merged issue whose trail could not be read (`TRAIL_RC -ge 2`, handled above) is escalated by the same block, so it is gated the same way. A bypass reported by the agent on a `workflow:merged` issue whose trail verifies is handled the same way (set `TRAIL_RC=1` before this block):
    ```bash
    # Only a merged issue is escalated here; an unmerged bypass is resumed by item 2 (see below).
    # Any non-zero rc on a merged issue escalates: rc 1 (missing phases) and rc >= 2 (unverifiable trail) alike,
@@ -1926,10 +2060,10 @@ done
      if [ "${DRY_RUN:-false}" = "true" ]; then
        echo "[DRY-RUN] Would add needs-human and post FORGE:PHASE_TRAIL_FAILED on merged #{NUMBER}"
      else
-       # hold_merged_trail (defined with classify_predecessor_state) posts the escalation comment FIRST (re-read before
-       # posting, verified), then writes `needs-human` (read-back verified, retried). A merged + needs-human issue with no
-       # comment classifies GATED regardless of the verifier. A failed half is reported on stderr and the operator must
-       # hold dependents manually (residual: a human clearing the label after both comment attempts failed).
+       # hold_merged_trail (defined with classify_predecessor_state) writes `needs-human` FIRST (read-back verified,
+       # retried), then posts the escalation comment (re-read before posting, verified). If the label is not verified no
+       # comment is posted. A merged + needs-human issue with no comment classifies GATED regardless of the verifier. A
+       # failed half is reported on stderr and the operator must hold dependents manually when the label failed.
        hold_merged_trail {NUMBER} "${TRAIL}" || echo "PHASE TRAIL ESCALATION FAILED: #{NUMBER} — comment or needs-human not verified." >&2
      fi
    fi
@@ -2154,7 +2288,7 @@ done
 
 **YOUR MISSION**: Invoke `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{GATING_PR} --remediate --issue {PRED} --repo {GH_REPO} --gh-flag {GH_FLAG}')` and let it run to completion. This is a self-contained flow: it classifies the gate first, replaces `needs-human` with `workflow:in-review` only for fixable remediation, checks out the PR branch, fixes any fixable review findings, re-reviews, and either auto-lands the PR, holds it at `workflow:awaiting-merge` for a human, re-escalates back to `needs-human`, or reports the block as policy-level and unfixable. Do NOT intervene manually — do not run raw git/gh commands yourself.
 
-**DO NOT STOP EARLY**: if the Skill call returns without a terminal `REMEDIATE_RESULT.status`, invoke it again — it re-reads GitHub state and resumes. Terminal statuses are: `COMPLETE`, `ALREADY_DONE`, `UNFIXABLE`, `BLOCKED`.
+**DO NOT STOP EARLY**: if the Skill call returns without a terminal `REMEDIATE_RESULT.status`, invoke it again — it re-reads GitHub state and resumes. Terminal statuses are: `COMPLETE`, `ALREADY_DONE`, `UNFIXABLE`, `BLOCKED`, `REREVIEW_REQUIRED`.
 
 Do not ask the user questions — you are running autonomously in the background."
          )
@@ -2162,6 +2296,28 @@ Do not ask the user questions — you are running autonomously in the background
      fi
    fi
    ```
+
+   **Re-review handoff (forge#3240)**: a remediation worker can finish with `REMEDIATE_RESULT: status: REREVIEW_REQUIRED` — the fix is pushed and CI is green, but the forked remediation had no sub-agent dispatch tool, so `review-pr` (which refuses to review inline) never ran. The issue is then at `workflow:in-review` WITHOUT `needs-human`, so the trigger above does not fire and the `ALREADY_REMEDIATED` guard (which counts any `FORGE:REMEDIATION`) is irrelevant. This is not a human gate. On the next completion-monitoring cycle, for the issue that just completed, detect it from the paper trail and run the re-review from THIS session (which has dispatch), exactly once:
+
+   ```bash
+   PRED="$NUM"
+   REREVIEW_PR=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${PRED}\" in:body" \
+     --json number --jq '.[0].number // empty' 2>/dev/null || echo "")
+   if [ -n "$REREVIEW_PR" ]; then
+     NEEDS_REREVIEW=$(gh api repos/{GH_REPO}/issues/${REREVIEW_PR}/comments --paginate \
+       --jq '[.[] | select((.body | contains("FORGE:REMEDIATION:COMPLETE")) and (.body | contains("REREVIEW-REQUIRED")))] | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
+     REREVIEW_DONE=$(gh api repos/{GH_REPO}/issues/${REREVIEW_PR}/comments --paginate \
+       --jq '[.[] | select(.body | contains("FORGE:REREVIEW_DISPATCHED"))] | length' 2>/dev/null | awk '{s+=$1} END {print s+0}')
+     if [ "$NEEDS_REREVIEW" -ge 1 ] && [ "$REREVIEW_DONE" -eq 0 ] && [ "${DRY_RUN:-false}" != "true" ]; then
+       gh pr comment "$REREVIEW_PR" -R {GH_REPO} --body "<!-- FORGE:REREVIEW_DISPATCHED -->
+   Re-review dispatched by the orchestrator: remediation had no sub-agent dispatch tool."
+       # then, from this session:
+       # Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="${REREVIEW_PR} --auto-merge --issue ${PRED} --base {BASE} --gh-flag -R {GH_REPO}")
+     fi
+   fi
+   ```
+
+   The `FORGE:REREVIEW_DISPATCHED` marker bounds this to a single re-review per PR (no loop). On `REVIEW_RESULT: status: COMPLETE` (merged), drive `work-on:close` and let item 6.6 wake dependents as normal; on any other result, review-pr's own verdict/labels (CHANGES REQUESTED, `needs-human` for genuine blockers) apply and the issue is `GATED` or failed per the existing rules. Never review inline.
 
    This satisfies #1809 Q2 (the orchestrator auto-dispatches remediation against the gated issue itself — the exact gap forge#1812's item 6.5/6.6 left open, since those items only ever track and wake *dependents*, never the gated PR's own remediation) — and closes forge#2243 (the gap that #1812's fix left open for *leaf* issues with no dependents: because this item's `$PRED` binding was never made explicit and self-contained, it was only ever reached while walking a dependent's predecessor list, so a `needs-human` issue that has no dependents never got remediation dispatched and its CHANGES-REQUESTED PR re-reviewed the same unchanged commit forever). The remediation agent's outcome is picked up on the **next** completion-monitoring cycle of this same Step 4B loop: if it lands (`workflow:merged`), item 6.6 below fires normally and wakes any `blocked-on-human-merge` dependents (if any exist — a leaf issue simply has none to wake); if it holds/re-escalates, the issue simply remains `GATED` and item 6.5 continues tracking its dependents (if any) unchanged.
 
@@ -2212,15 +2368,14 @@ Do not ask the user questions — you are running autonomously in the background
 
 6.6. **Release sweep for blocked-on-human-merge dependents** <!-- Added: forge#1812, reworked: forge#3157 --> — run this sweep on **every monitoring cycle** (after items 5-6 of each completion cycle and in each stall-detection pass), not only when an agent just merged: a human clearing `needs-human` on an already-merged, trail-held predecessor (Step 4B item 0) fires no completion event, so a sweep keyed on the just-completed `$NUM` would leave its dependents held until the next `/orchestrate` wake. Every hold the orchestrator creates needs a matching release check on each cycle. The sweep re-classifies the gating predecessors of every `blocked-on-human-merge` dependent and releases a dependent once all of them classify `DONE`:
    ```bash
-   # New per-cycle comment cache for trail_escalation_state (human edits between cycles are always re-read).
-   [ -n "${TRAIL_CACHE_DIR:-}" ] && rm -rf "$TRAIL_CACHE_DIR"
-   TRAIL_CACHE_DIR=$(mktemp -d)
+   # The per-cycle trail cache was already reset by init_trail_cache at the top of this cycle (see "Cycle-start cache
+   # reset" in Step 4B); do NOT reset it here, that would be after items 5-6 and stall detection already read it.
    WOKEN=$(gh issue list -R {GH_REPO} --state open --label "blocked-on-human-merge" --json number \
      --jq '.[].number' 2>/dev/null || echo "")
    for DEP in $WOKEN; do
      GATING_PREDS=$(gh api repos/{GH_REPO}/issues/${DEP}/comments \
-       --jq '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE")) | (.body | capture("Gating predecessor\\*\\*: #(?<p>[0-9]+)").p)] | unique | .[]' 2>/dev/null || echo "")
-     [ -n "$GATING_PREDS" ] || continue
+       --jq '[.[] | select((.body // "") | contains("FORGE:BLOCKED_ON_HUMAN_MERGE")) | ((.body // "") | capture("Gating predecessor\\*\\*: #(?<p>[0-9]+)").p)] | unique | .[]' 2>/dev/null || echo "")
+     [ -n "$GATING_PREDS" ] || { echo "WARNING: #${DEP} has blocked-on-human-merge but no parseable Gating predecessor line - leaving blocked" >&2; continue; }
      STILL_GATED=false
      for GPRED in $GATING_PREDS; do
        [ "$(classify_predecessor_state "$GPRED")" = "DONE" ] || STILL_GATED=true
@@ -2230,17 +2385,36 @@ Do not ask the user questions — you are running autonomously in the background
      DEP_ALREADY_DISPATCHED=$(gh issue view "$DEP" -R {GH_REPO} --json labels \
        --jq '[.labels[].name | select(startswith("workflow:"))] | length' 2>/dev/null || echo "0")
      if [ "$DEP_ALREADY_DISPATCHED" -eq 0 ]; then
+       if [ "${DRY_RUN:-false}" = "true" ]; then echo "DRY_RUN: would release #${DEP} (remove blocked-on-human-merge, post FORGE:UNBLOCKED, dispatch)"; continue; fi
+       # Durable marker FIRST (forge#3182 CONC-3): a crash between label removal and dispatch would otherwise strand DEP with no
+       # hold label and no workflow:* label. Post FORGE:UNBLOCKED before removing the label (deduped against the last comment so a
+       # retried cycle does not repeat it), so an interrupted release leaves durable evidence for a human or later recovery.
+       LAST_DEP_COMMENT=$(gh issue view "$DEP" -R {GH_REPO} --json comments --jq '.comments[-1].body // ""' 2>/dev/null || echo "")
+       case "$LAST_DEP_COMMENT" in "<!-- FORGE:UNBLOCKED -->"*) ;; *)
+         gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:UNBLOCKED -->
+   All gating predecessor(s) (#$(echo $GATING_PREDS | sed 's/ /, #/g')) are now resolved — merged, or released by a human after a phase-trail hold — dispatching now. (Was tracked via a prior FORGE:BLOCKED_ON_HUMAN_MERGE comment.)" >/dev/null 2>&1 || { echo "WARNING: #${DEP} UNBLOCKED marker not posted — not releasing; retrying next cycle." >&2; continue; } ;;
+       esac
+       # Remove the hold label and verify it is gone (forge#3182). Fail CLOSED: a failed edit OR a failed/empty `view` is
+       # "unverified" — skip dispatch and retry next cycle (the view result is captured separately, never piped into grep).
+       gh issue edit "$DEP" -R {GH_REPO} --remove-label "blocked-on-human-merge" >/dev/null 2>&1 \
+         || { echo "WARNING: #${DEP} label removal failed — not dispatching; retrying next cycle." >&2; continue; }
+       if ! DEP_LABELS=$(gh issue view "$DEP" -R {GH_REPO} --json labels --jq '.labels[].name' 2>/dev/null) \
+          || printf '%s\n' "$DEP_LABELS" | grep -qx "blocked-on-human-merge"; then
+         echo "WARNING: #${DEP} label removal unverified — not dispatching; retrying next cycle." >&2
+         continue
+       fi
+       # Re-check after removal: another path may have labelled DEP workflow:* in the meantime.
+       DEP_ALREADY_DISPATCHED=$(gh issue view "$DEP" -R {GH_REPO} --json labels \
+         --jq '[.labels[].name | select(startswith("workflow:"))] | length' 2>/dev/null || echo "0")
+       [ "$DEP_ALREADY_DISPATCHED" -eq 0 ] || continue
        # Record a human release of a trail-held merged predecessor so the escalation stops gating (decay).
        for GPRED in $GATING_PREDS; do release_merged_trail "$GPRED"; done
-       gh issue edit "$DEP" -R {GH_REPO} --remove-label "blocked-on-human-merge" 2>/dev/null || true
-       gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:UNBLOCKED -->
-   All gating predecessor(s) (#$(echo $GATING_PREDS | sed 's/ /, #/g')) are now resolved — merged, or released by a human after a phase-trail hold — dispatching now. (Was tracked via a prior FORGE:BLOCKED_ON_HUMAN_MERGE comment.)"
        echo "#{DEP} unblocked (gating predecessors resolved) — dispatching immediately (Steps 4A.pre.0 → 4A.pre → 4A)."
        # Add DEP to the same-response dispatch batch
      fi
    done
    ```
-   `release_merged_trail` is a no-op unless the predecessor carries an ACTIVE merged-trail escalation, so ordinary merges are unaffected. The classifier's per-cycle comment cache bounds the escalation-comment reads to one per predecessor per cycle. For the case where the hold is released after the orchestrator session has already ended, the equivalent check runs in `phase-3-dependency.md`'s wake/compaction reconstruction on the next `/orchestrate` invocation — see that file's "Orchestrator state reconstruction on wake / after compaction" section.
+   `release_merged_trail` is a no-op unless the predecessor carries an ACTIVE merged-trail escalation, so ordinary merges are unaffected. The classifier's per-cycle comment cache (reset at cycle start by `init_trail_cache`) bounds the escalation-comment reads to one per predecessor per cycle. For the case where the hold is released after the orchestrator session has already ended, the equivalent check runs in `phase-3-dependency.md`'s wake/compaction reconstruction on the next `/orchestrate` invocation — see that file's "Orchestrator state reconstruction on wake / after compaction" section.
 
 6.7. **Human-gated idle/backpressure check** (`BATCH_FULLY_GATED`) <!-- Added: forge#1814 --> — run this after every completion cycle, once the per-issue classification above (items 5-6.6) has been applied for this cycle. It answers a different question than the paused-drain/blocked-on-human-merge tracking above: those items handle *individual* gated predecessors and their *direct* dependents; this check asks whether the **entire original batch** has now exhausted into human-gated states, which is the condition under which continuing to dispatch cascade-spawned review findings (Step 4C) produces net-negative churn — closing 1 issue while opening 2-4 more, with the real blockers (the GATED issues) unresolved:
 
@@ -2338,7 +2512,7 @@ Do not ask the user questions — you are running autonomously in the background
 
 9. **Run staging integrity check** (from Step 4A-pre) if the completed agent merged a PR targeting staging.
 
-**Termination condition**: All issues in the DAG have reached `DONE` or `FAILED` (merged, invalid, or skipped due to dependency failure) — OR are `blocked-on-human-merge` (item 6.5) with no further dispatchable work remaining in the batch. These two outcomes are reported differently: a batch where every issue is `DONE`/`FAILED` is a **clean drain**; a batch where one or more issues remain `blocked-on-human-merge` is a **paused drain** — the active dispatch loop stops (there is nothing left to do until a human merges a gating PR) but this MUST be reported as paused, not as fully complete (see `phase-6-report.md`'s `🔗 Blocked-on-Merge` section). `needs-human` predecessors with no open PR are neither — they remain GATED indefinitely until either a PR appears (dependent moves to blocked-on-human-merge) or the predecessor itself resolves; do not treat isolated `needs-human` issues with no dependents as blocking termination. When either drain condition is met, check whether deferred review-spawned findings exist (accumulated in `DEFERRED_FINDINGS` during Step 4C). If deferred findings exist → proceed to Step 4F (Completion Sweep). If no deferred findings → **call `release_orchestrator_lease()` (Step 4A-pre.-1)** — this is a clean/paused drain of this session's own dispatch loop, so the lease should not be left held for a now-idle session — then proceed to Phase 5. <!-- Added: forge#2627 -->
+**Termination condition**: All issues in the DAG have reached `DONE` or `FAILED` (merged, invalid, or skipped due to dependency failure) — OR are `blocked-on-human-merge` (item 6.5) with no further dispatchable work remaining in the batch. These two outcomes are reported differently: a batch where every issue is `DONE`/`FAILED` is a **clean drain**; a batch where one or more issues remain `blocked-on-human-merge` is a **paused drain** — the active dispatch loop stops (there is nothing left to do until a human merges a gating PR) but this MUST be reported as paused, not as fully complete (see `phase-6-report.md`'s `🔗 Blocked-on-Merge` section). `needs-human` predecessors with no open PR are neither — they remain GATED indefinitely until either a PR appears (dependent moves to blocked-on-human-merge) or the predecessor itself resolves; do not treat isolated `needs-human` issues with no dependents as blocking termination. When either drain condition is met, check whether deferred review-spawned findings exist (accumulated in `DEFERRED_FINDINGS` during Step 4C). If deferred findings exist → proceed to Step 4F (Completion Sweep). If no deferred findings → **call `cleanup_trail_cache` (Step 4B) and `release_orchestrator_lease()` (Step 4A-pre.-1)** — this is a clean/paused drain of this session's own dispatch loop, so the lease should not be left held for a now-idle session — then proceed to Phase 5. <!-- Added: forge#2627 -->
 
 **Reminder — this is the normal-exit lease release, distinct from the interrupted-stop procedure**: whether the drain is clean or paused, this session is no longer actively dispatching, so its lease must be released here (or, for a paused drain, at minimum have its heartbeat refresh stop — see Step 4A-pre.-1). This complements, but does not replace, the **Stopping the orchestrator** procedure (Step 4A-pre.-0.5) which handles the abnormal case of a mid-dispatch interrupt.
 
@@ -2371,14 +2545,20 @@ RERESOLVE_MAX_ROUNDS=$(yq '.orchestration.reresolve.max_rounds // "unbounded"' f
 
 # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
 FORGE_ROOT=""
-if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
-  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
-  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-  # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
-  _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+  _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+  # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+  _m="$HOME/.claude/plugins/marketplaces/$_mk"
   # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
+  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
   while IFS= read -r _c; do
     case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
   done <<< "$_k"
@@ -2403,14 +2583,20 @@ If the result's `reResolve` is `false` (off switch, or `RERESOLVE_ROUNDS_SO_FAR`
 ```bash
 # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
 FORGE_ROOT=""
-if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
-  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
-  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-  # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
-  _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+  _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+  # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+  _m="$HOME/.claude/plugins/marketplaces/$_mk"
   # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
+  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
   while IFS= read -r _c; do
     case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
   done <<< "$_k"
@@ -2484,21 +2670,36 @@ for NUM in {active_issue_numbers}; do
     CURRENT_STATE=$(gh issue view $NUM -R {GH_REPO} --json labels \
       --jq '[.labels[].name | select(startswith("workflow:"))] | .[0] // "unknown"')
 
+    # Liveness check (worker-idle-no-live-child): a live child is a harness-tracked task for this
+    # issue that has not reported completion (ENGINE_DISPATCH_MAP[NUM] / OPENCODE_DISPATCH_MAP[NUM]
+    # task still running, or an Agent-spawned worker still executing a tool call), or a FORGE:HEARTBEAT
+    # newer than STALL_TIMEOUT. Set CHILD_LIVE=true when any holds, else CHILD_LIVE=false.
+    # No live child + non-terminal label = the worker yielded waiting for a notification that was
+    # delivered to the root session; its background state is dead.
+
     if [ "$STALL_COUNT" -lt 2 ]; then
-      # Auto-resume: post stall annotation and re-invoke /work-on
+      # Auto-recover: post stall annotation, then resume (live child) or relaunch fresh (no live child)
       RESUME_ATTEMPT=$(( STALL_COUNT + 1 ))
+      if [ "$CHILD_LIVE" = "true" ]; then STALL_CAUSE="worker-idle-child-live"; else STALL_CAUSE="worker-idle-no-live-child"; fi
       gh issue comment $NUM -R {GH_REPO} --body "<!-- FORGE:STALL_DETECTED -->
 ## Stall Detected
 
 **Issue**: #${NUM}
 **Elapsed since last activity**: ${ELAPSED_MIN} min (threshold: ${STALL_TIMEOUT} min)
 **Current workflow state**: ${CURRENT_STATE}
+**Cause**: ${STALL_CAUSE}
 **Auto-resume attempt**: ${RESUME_ATTEMPT} of 2
 **Timestamp**: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-      # Resume the agent — collect all resumes and launch in a single message (see Step 4B rule)
-      # STALL_RESUME_LIST is accumulated and launched in parallel after the loop
-      STALL_RESUME_LIST="$STALL_RESUME_LIST $NUM"
+      if [ "$CHILD_LIVE" = "true" ]; then
+        # Live child: resuming the same agent is safe — collect all resumes and launch in a single message (see Step 4B rule)
+        # STALL_RESUME_LIST is accumulated and launched in parallel after the loop
+        STALL_RESUME_LIST="$STALL_RESUME_LIST $NUM"
+      else
+        # No live child: do NOT resume (a resumed worker keeps its false "background build is running" belief).
+        # STALL_FRESH_LIST is relaunched as a fresh worker after the loop.
+        STALL_FRESH_LIST="$STALL_FRESH_LIST $NUM"
+      fi
     else
       # 2+ prior stalls — auto-resume exhausted, escalate to needs-human
       gh issue edit $NUM -R {GH_REPO} --add-label "needs-human"
@@ -2519,7 +2720,9 @@ done
 # For each NUM in $STALL_RESUME_LIST, call Agent(resume=AGENT_ISSUE_MAP[NUM], run_in_background=true, ...)
 ```
 
-**Resume all stalled agents in a single message** (parallel). Use the same `Agent(resume=...)` pattern as Step 4B — do not wait between individual resumes.
+**Resume stalled agents that still have a live child** (`STALL_RESUME_LIST`) in a single message (parallel). Use the same `Agent(resume=...)` pattern as Step 4B — do not wait between individual resumes.
+
+**Relaunch a fresh worker for every issue in `STALL_FRESH_LIST`** (cause `worker-idle-no-live-child`) instead of resuming. A fresh worker/agent is spawned through the exact Step 4A dispatch path for that issue (Agent / OpenCode `task()` / engine variant, same template) — all pipeline state lives in GitHub, so nothing is lost. Append this corrective note to the worker prompt: "The previous worker's background state is dead; no phase is running. Invoke `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{NUM} --under-orchestration')` now and run every phase synchronously to completion — never end your turn to wait for a notification." Before each relaunch run `recovery_claim_blocks "{NUM}"` and `claim_conflicts_with_live_holder "{NUM}"` exactly as in Step 4B (on either, defer instead of launching). Keep slot accounting symmetric: release the stale worker's slot (decrement `ACTIVE_DISPATCH_COUNT`, drop its `AGENT_ISSUE_MAP`/`ENGINE_DISPATCH_MAP`/`OPENCODE_DISPATCH_MAP` entry), then re-increment on the fresh launch and record the new id in the map. The `STALL_COUNT < 2` cap still applies to fresh relaunches.
 
 **Track stall resume cycles separately** from completion-event resumes (Step 4B). If the same issue accumulates ≥ 2 `FORGE:STALL_DETECTED` comments AND still hasn't reached terminal state, do not resume again — the `needs-human` label is already set.
 
@@ -2630,6 +2833,28 @@ For each finding, extract its source PR from `**Source**: PR #N` and increment `
 When `CASCADE_MAX_AMPLIFICATION` is not `off`, and the current ratio is greater than that ceiling, defer only newly discovered entries in `REFINEMENT_FINDINGS` with reason `amplification bound exceeded (same-lineage refinement)`. Add them to `DEFERRED_FINDINGS` and `DEFERRED_REASONS` so Step 4F re-evaluates them after the batch drains. Do not apply this bound to new-surface findings, P1/P2 findings, or any finding when the option is `off`.
 
 **Amplification breaker (on by default — forge#3060):** `max_amplification` above only ever sees same-lineage refinements, but most cascade growth is *new-surface* P3 hardening notes on code the batch just wrote. The breaker therefore counts **all** cascade findings: while `AMPLIFICATION_BREAKER_TRIPPED=true` (the latest `CONVERGENCE_WINDOW` ratios are all `>= 1.0`; see the block below), every P3-and-below finding is deferred under rule 6 (below) regardless of lineage. Deferred P3s are not discarded — they stay eligible for the P3 batch sweep (`planP3BatchGroups()`, with `batchExclusionReason()` unchanged: security/billing/domain findings stay unbatched and individually triaged) and for Step 4F's post-drain re-evaluation. P1/P2 findings are admitted exactly as before. The breaker releases when the newest ratio drops below 1.0. It is independent of `orchestration.cascade.policy`; only an explicit `amplification_breaker: off` disables it.
+
+**Deterministic breaker check (MANDATORY on every dispatch path — engine CLI, Agent-spawn fallback, or a hand-driven orchestrator):** the in-spec bookkeeping above only runs when the Step 4B/4C bash runs. A batch driven through the Agent-spawn fallback never evaluated it and reached about 2 findings per merge (2026-10-08 audit). Before dispatching ANY `review-finding` issue at `priority:P3` or below, and after every completed merge, run `scripts/amplification-breaker.sh` against GitHub state. Its exit code is authoritative, and it overrides an in-memory `AMPLIFICATION_BREAKER_TRIPPED=false`:
+
+```bash
+AMP_SCRIPT=""
+for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}"; do
+  case "$_c" in /*) [ -z "$AMP_SCRIPT" ] && [ -f "$_c/scripts/amplification-breaker.sh" ] && AMP_SCRIPT="$_c/scripts/amplification-breaker.sh" ;; esac
+done
+if [ "$AMPLIFICATION_BREAKER" != "off" ]; then
+  if [ -n "$AMP_SCRIPT" ]; then
+    AMP_LINE=$(bash "$AMP_SCRIPT" --since "$BATCH_T0" -R {GH_REPO}); AMP_RC=$?
+  else
+    AMP_LINE="AMPLIFICATION: script not resolvable — fail closed"; AMP_RC=4
+  fi
+  echo "$AMP_LINE"   # include this line verbatim in the Step 4B/4C status update
+  # rc 3 (tripped) or 4 (unreadable / unresolved): defer every P3-and-below finding under rule 6
+  # into planP3BatchGroups() bounded batches. P1/P2 findings are admitted as before.
+  [ "$AMP_RC" -eq 3 ] || [ "$AMP_RC" -eq 4 ] && AMPLIFICATION_BREAKER_TRIPPED=true
+fi
+```
+
+A run that did not record `BATCH_T0` uses the coordination issue's creation time. An operator instruction such as "everything" or "pick up new issues" does not skip this check (see the override guardrail below).
 
 **Override guardrail (MANDATORY — forge#3060):** An operator directive that lifts the generation cap or token budget (`policy: all`, `--max-generation unlimited`, `--token-budget unlimited`, or a free-text request like "pick up any new issues") widens what is admitted at Phase 1/rule 1/rule 5; it MUST NOT leave P3 cascade unbounded. When such an override is active: (a) keep `AMPLIFICATION_BREAKER=on` unless the operator explicitly set `amplification_breaker: off`; (b) P1/P2 stay unlimited; (c) P3-and-below findings are never dispatched individually — they route through `planP3BatchGroups()` into bounded batches (`batch_max_generation` stays finite); (d) state the replacement bound in the Step 4B/4C status output. An orchestrator MUST NOT satisfy an override by simply deleting a bound without a replacement.
 
@@ -2952,20 +3177,26 @@ Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${R
   # unrounded ratio plus the last CONVERGENCE_WINDOW-1 recorded observations form the window.
   # Applied even when another rule already deferred the finding, and APPENDED to the reason, so
   # Step 4F's `*"amplification breaker"*` hold (checked FIRST) still catches it.
-  if [ "$AMPLIFICATION_BREAKER" = "on" ] && echo "$PRIORITY" | grep -qE '^P[3-9]$'; then
+  if [ "$AMPLIFICATION_BREAKER" = "on" ] && [ "$(printf '%s' "$PRIORITY" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')" = "P3" ]; then
     # Fail CLOSED: if the classifier cannot run (missing module, bad cwd), treat the finding as
     # non-routine so a security/billing finding is never paused. Import via {REPO_PATH} and pass
     # the text through the environment (argv text beginning with "-" is parsed as a node option).
     # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
     FORGE_ROOT=""
-    if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
-      # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
-      _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-      # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-      _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
-      _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+    # Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+    _h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+    # Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+    _mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+    if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+      # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+      _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+      # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+      _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+      # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+      _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+      _m="$HOME/.claude/plugins/marketplaces/$_mk"
       # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-      _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
+      _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
       while IFS= read -r _c; do
         case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
       done <<< "$_k"
@@ -3118,14 +3349,20 @@ for FINDING_NUM in "${BATCHING_CANDIDATES[@]}"; do
 
   # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
   FORGE_ROOT=""
-  if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
-    # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
-    _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-    # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-    _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
-    _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+  # Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+  _h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+  # Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+  _mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+  if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+    # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+    _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+    # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+    _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+    # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+    _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+    _m="$HOME/.claude/plugins/marketplaces/$_mk"
     # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-    _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
+    _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
     while IFS= read -r _c; do
       case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
     done <<< "$_k"
@@ -3800,6 +4037,7 @@ gh issue view ${FINDING_NUM} -R {GH_REPO} --json labels --jq '[.labels[].name | 
 **Terminal labels** (only these allow you to stop): \`workflow:merged\`, \`workflow:invalid\`
 **Terminal condition also**: \`needs-human\` label present, \`workflow:awaiting-merge\` label present, OR issue state is \`closed\`
 If the label is NOT terminal (e.g., \`workflow:investigating\`, \`workflow:ready-to-build\`, \`workflow:building\`, \`workflow:in-review\`), invoke \`Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='${FINDING_NUM} --under-orchestration')\` again immediately. The \`/work-on\` skill will re-read GitHub state and advance to the next phase. Do NOT output a summary, do NOT pause, do NOT ask for confirmation — just invoke it again.
+**NEVER end a turn while the label is non-terminal.** Every \`Skill(...)\` call runs synchronously to completion in your own turn. Never end or yield your turn to wait for a background phase or a completion notification — notifications go to the orchestrator's root session, never to you, so a turn that ends non-terminal is never resumed. A turn that ends with a non-terminal label and no \`*_RESULT:\` block seen is a contract violation. A \"running\", backgrounded or empty return is not a result: re-read the labels and \`FORGE:*\` markers on GitHub and invoke \`work-on\` again immediately — never wait.
 
 **CRITICAL — SOURCE BRANCH DETECTION**:
 - If the issue has the \`review-finding\` label, read the issue body for \`**Code branch**: \\\`{branch}\\\`\`
@@ -3834,7 +4072,7 @@ Completion Sweep Results:
   Token-gated — still deferred: #{H} (sweep allowance also exhausted — re-evaluable next run)
 ```
 
-**After sweep agents complete** (or if no findings were dispatched): output the budget deferred-issues report (if applicable), **call `release_orchestrator_lease()` (Step 4A-pre.-1)** — the sweep is this session's last dispatch activity, so the lease must not be left held for a now-idle session (the Termination condition's own release call, above, only fires on the no-deferred-findings branch; this is the equivalent release for the deferred-findings/Completion Sweep branch) <!-- Added: forge#2627 -->, then proceed to Phase 5.
+**After sweep agents complete** (or if no findings were dispatched): output the budget deferred-issues report (if applicable), **call `cleanup_trail_cache` (Step 4B) and `release_orchestrator_lease()` (Step 4A-pre.-1)** — the sweep is this session's last dispatch activity, so the lease must not be left held for a now-idle session (the Termination condition's own release call, above, only fires on the no-deferred-findings branch; this is the equivalent release for the deferred-findings/Completion Sweep branch) <!-- Added: forge#2627 -->, then proceed to Phase 5.
 
 **Anti-patterns — DO NOT DO THIS:**
 - Re-sweeping findings spawned during the sweep itself — this creates unbounded recursion. Sweep is a single pass.

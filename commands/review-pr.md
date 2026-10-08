@@ -25,7 +25,7 @@ allowed-tools: Task, Agent, Bash, Read, Grep, Glob, WebFetch, Skill
 
 2. **Post the FORGE:REVIEW verdict regardless of finding severity.** A review that completes but posts no `<!-- FORGE:REVIEW -->` comment is invisible to the pipeline. Even a PASS verdict must be posted.
 
-3. **Review findings do NOT block merge UNLESS they meet the Blocking Criteria in §7B** (a CONFIRMED HIGH/CRITICAL finding, a purpose regression, a merge conflict, or a build/type/test failure) **or the calibration threshold check in §7B.5 sets `CALIBRATION_NEEDS_HUMAN=true`** (HIGH-confidence task type with historical survival < 80%). File every finding that survives the §6B.5 note disposition (MEDIUM+ severity, or CONFIRMED/LIKELY above LOW; security/billing always) as a GitHub issue with the `review-finding` label. LOW/POSSIBLE notes are fixed in-PR, listed in the PR body, or dropped — never filed as standalone issues. Minor/style findings never block; §7B's and §7B.5's blocking conditions always do — including under `--auto-merge`. <!-- forge#1741 -->
+3. **Review findings do NOT block merge UNLESS they meet the Blocking Criteria in §7B** (a CONFIRMED HIGH/CRITICAL finding, a purpose regression, a merge conflict, or a build/type/test failure) **or the calibration threshold check in §7B.5 sets `CALIBRATION_NEEDS_HUMAN=true`** (HIGH-confidence task type with historical survival < 80%). File every finding that survives the §6B.5 note disposition (`scripts/classify-finding.sh`: HIGH+ always; MEDIUM CONFIRMED/LIKELY; LOW/POSSIBLE only when security/billing content matches; stricter on review-finding lineage) as a GitHub issue with the `review-finding` label. LOW/POSSIBLE notes are fixed in-PR, listed in the PR body, or dropped — never filed as standalone issues. Minor/style findings never block; §7B's and §7B.5's blocking conditions always do — including under `--auto-merge`. <!-- forge#1741 -->
 
 4. **Route correctly at Phase 0.** If the input is "staging" or the PR targets `main`, invoke `Skill("{FORGE_SKILL_PREFIX}review-pr-staging", ...)` — do NOT run the standard PR review pipeline against a staging→main PR.
 
@@ -1657,7 +1657,7 @@ If synthesis needed, launch a `general-purpose` Task (model: `"{SUBAGENT_MODEL}"
 
 ## Phase 6: Finding Triage & Issue Creation (MANDATORY)
 
-**STOP. DO NOT skip this phase. DO NOT post summary first.** Every finding MUST become a GitHub issue BEFORE the summary.
+**STOP. DO NOT skip this phase. DO NOT post summary first.** Every finding that §6B.5 classifies as ISSUE MUST become a GitHub issue BEFORE the summary; every NOTE gets a recorded disposition instead (§6B.5).
 
 ### 6A: Extract Findings
 
@@ -1689,13 +1689,29 @@ If still 0: review is clean — skip to Phase 7.
 
 ### 6B.5: Non-blocking note disposition (MANDATORY before 6C — forge#3060)
 
-Filing a standalone `review-finding` issue for every LOW/POSSIBLE reviewer note makes the cascade amplify (each merged fix PR spawns its own P3 issues, which spawn more). Classify each deduped finding before 6C:
+Filing a standalone `review-finding` issue for every LOW/POSSIBLE reviewer note makes the cascade amplify (each merged fix PR spawns its own P3 issues, which spawn more). Classify each deduped finding before 6C with the deterministic classifier — do NOT hand-classify when the script resolves:
 
-- **NOTE** (does NOT become an issue): `**Severity**: LOW`, OR `**Confidence**: POSSIBLE` with Severity below HIGH.
-- **ISSUE** (continues to 6C unchanged): everything else — MEDIUM+ severity and CONFIRMED/LIKELY findings above LOW, i.e. P0/P1/P2 behaviour is exactly as before.
-- **Safety exemption**: a finding is never demoted to a NOTE (it is filed as before) if it came from the Security, Auth, Billing, Concurrency or Database review agent, OR its file path / title / body matches `\b(security|auth|authz|authn|billing|payment|stripe|charge|invoice|injection|xss|csrf|ssrf|idor|secrets?|credentials?|permissions?|sql)\b` (matched case-insensitively on word or underscore-separated parts, so `auth_service` and `billing_handler` match but `author`/`tokenizer` do not; also exempt: `token`, `password`, `redact`). Domain of origin is checked first so a generically titled auth/IDOR/injection finding cannot be dropped.
-- **Precedence**: the safety exemption above ALWAYS wins over the P3-lineage rule below and over every other NOTE rule. A finding with missing or unparseable severity defaults to ISSUE.
-- **Stricter rule on P3-lineage PRs** (applies only to findings not covered by the safety exemption): when the PR's linked issue (`MERGE_ISSUE`/`Closes #N`) carries the `review-finding` label and `priority:P3`, only CONFIRMED findings of MEDIUM+ severity, or any finding of HIGH+ severity, become issues. Everything else is a NOTE. A fix for a polish finding must not mint new polish findings.
+- **ISSUE always**: `**Severity**: HIGH` or `CRITICAL`, or a missing/unparseable severity.
+- **Safety exemption is content-based**: a LOW or POSSIBLE finding is still filed when its file path / title / body matches the security/billing keyword set (`security|auth|authz|authn|billing|payment|stripe|charge|invoice|injection|xss|csrf|ssrf|idor|secret(s)|credential(s)|permission(s)|sql|token|password|redact`, whole words, `_`/`-`/`/` separate words — so `auth_service` matches but `author`/`tokenizer` do not), or when it came from a dedicated, signal-selected domain agent (Auth, Billing, Concurrency, Database). **Origin from the always-on General Security & Quality agent alone does NOT exempt a finding**: that agent runs on every PR, so origin-based exemption filed nearly every LOW note it raised (the 2026-10-08 cascade audit: 50 of 60 would-be notes in one batch were filed only for that reason).
+- **Review-finding lineage** (the PR's linked issue `MERGE_ISSUE` carries the `review-finding` label, any priority — this PR is itself a fix for a finding): only MEDIUM findings that are CONFIRMED, or LIKELY and safety-exempt, become issues; LOW and POSSIBLE are always NOTEs. A fix for a finding must not mint a new generation of findings.
+- **Otherwise**: `**Severity**: LOW`, or `**Confidence**: POSSIBLE` below HIGH, is a NOTE unless safety-exempt; everything else (MEDIUM CONFIRMED/LIKELY) is an ISSUE.
+
+```bash
+# Resolve the classifier: running plugin first, then the resolved ForgeDock root, then the repo copy.
+CLASSIFY_SCRIPT=""
+for _cs in '${CLAUDE_PLUGIN_ROOT}/scripts/classify-finding.sh' "${FORGE_ROOT:+$FORGE_ROOT/scripts/classify-finding.sh}" "scripts/classify-finding.sh"; do
+  case "$_cs" in /*|scripts/*) [ -f "$_cs" ] && { CLASSIFY_SCRIPT="$_cs"; break; } ;; esac
+done
+FINDING_LINEAGE="none"
+if [ -n "${MERGE_ISSUE:-}" ] && gh issue view "$MERGE_ISSUE" -R {GH_REPO} --json labels --jq '.labels[].name' 2>/dev/null | grep -qx 'review-finding'; then
+  FINDING_LINEAGE="review-finding"
+fi
+# Per deduped finding (FINDING_TEXT_FILE = mktemp file holding title + body + affected paths):
+#   DISPOSITION=$(bash "$CLASSIFY_SCRIPT" --severity "$FINDING_SEVERITY" --confidence "$FINDING_CONFIDENCE" \
+#                   --agent "$FINDING_AGENT" --lineage "$FINDING_LINEAGE" --text-file "$FINDING_TEXT_FILE")
+#   case "$DISPOSITION" in ISSUE*) ;; NOTE*) ;; esac   # first word is the class, the rest is the reason
+# If CLASSIFY_SCRIPT is empty, apply the four rules above by hand and record classifier=manual below.
+```
 
 Each NOTE gets exactly one disposition, in this preference order:
 1. **Fix in this PR** — when the fix is cheap (a few lines, same files already in the diff, no new behaviour) and in scope, apply it as a follow-up commit on the PR branch before merge — ONLY for comment, documentation or test-only changes. Any change to executable code is not a note fix: it must be filed as an issue or fixed with a full re-review of the new HEAD before merge (never push unreviewed code under `--auto-merge`).
@@ -1705,6 +1721,15 @@ Each NOTE gets exactly one disposition, in this preference order:
 **Metrics note (forge#3106)**: because NOTEs are not filed as issues, `review-finding` issue volume and any metric derived from it (findings per PR, `/pipeline-health` finding rates, amplification ratio) drop relative to pre-#3060 history. Compare against the `notes_*` counts in the review summary, not issue counts alone, when judging review depth across the change.
 
 Every NOTE disposition must be recorded (never silently dropped): list each NOTE (id, file:line, one-line reason) with its disposition in the review summary comment, including dropped ones, so a reviewer can audit the decision. NOTES are never passed to `Skill(issue)`. Record counts in the review summary (`notes_fixed`, `notes_listed`, `notes_dropped`, `findings_filed`). If no finding is an ISSUE after this step, skip 6C and continue to Phase 7.
+
+**Disposition marker (MANDATORY whenever Phase 6A extracted at least one finding):** post one PR comment whose first line is the machine-readable record below, followed by the NOTE list. Phase 8 refuses to auto-merge a PR that has `FINDING:` markers but no `FORGE:NOTE_DISPOSITION` comment — the disposition step is enforced, not advisory.
+
+```bash
+CLASSIFIER_MODE=$([ -n "$CLASSIFY_SCRIPT" ] && echo script || echo manual)
+# NOTE_LIST_FILE: mktemp file named for the PR number, holding one line per NOTE (id, file:line, disposition, reason).
+gh pr comment {PR_NUMBER} -R {GH_REPO} --body "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=${NOTES_FIXED:-0} notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} lineage=${FINDING_LINEAGE} classifier=${CLASSIFIER_MODE} -->
+$(cat "$NOTE_LIST_FILE" 2>/dev/null)" # allowlist:check-command-side-effects
+```
 
 ### 6C: Create Issues
 
@@ -2071,6 +2096,8 @@ Verdict determined by standard blocking criteria.
 4. `MERGE_HEALTH == "CONFLICTING"` OR `MERGE_HEALTH_STATE` in {`DIRTY`, `BLOCKED`} — PR cannot be merged cleanly into its base branch <!-- Added: forge#194 -->
    - Verdict: CHANGES REQUESTED. Message: "Merge conflict with `{base}`. Rebase `{head}` onto `origin/{base}`, resolve the conflicting files, then re-run /review-pr."
    - If `MERGE_HEALTH == "UNKNOWN"` after retries: emit a WARNING in the verdict body (do NOT treat as a block — GitHub may still be computing it).
+5. A CONFIRMED coverage reduction (deleted test, removed test case, or disabled/removed workflow test step) in a PR that responds to a red check, or that has no justification tying it to removal of the tested code <!-- Added: forge#3257 -->
+   - Verdict: CHANGES REQUESTED. Message: "Coverage reduction: a deleted test or removed workflow test step is not a fix for a red check. Restore it and fix the code under test, or escalate naming the failing assertions." Detection follows quality-gate 2U (`COVERAGE-1`); never dedup this finding against the PR's own issue.
 
 ```bash
 # Determine if mergeability is a blocker (MERGE_HEALTH/MERGE_HEALTH_STATE set in Phase 1A; BASE/HEAD set in Phase 0 Mode 3)
@@ -2204,6 +2231,25 @@ fi
 
 **Skip if** `AUTO_MERGE=false`.
 
+**Note-disposition preflight (MANDATORY before any merge attempt)**: §6B.5 is what bounds the review-finding cascade, so a review that extracted findings but never recorded their disposition must not auto-merge. Fail closed on an unreadable comment list.
+
+```bash
+DISPO_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null) || DISPO_JSON=""
+if [ -z "$DISPO_JSON" ]; then
+  echo "NOTE DISPOSITION: could not read PR comments — refusing to merge (fail closed)" >&2
+  # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "note disposition unreadable".
+  exit 1
+fi
+FINDING_COUNT=$(printf '%s' "$DISPO_JSON" | jq -s '[.[][] | select(.body | test("<!-- FINDING:"))] | length')
+DISPOSITION_COUNT=$(printf '%s' "$DISPO_JSON" | jq -s '[.[][] | select(.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") | select(.body | test("^<!-- FORGE:NOTE_DISPOSITION"))] | length')
+if [ "${FINDING_COUNT:-0}" -gt 0 ] && [ "${DISPOSITION_COUNT:-0}" -eq 0 ]; then
+  echo "NOTE DISPOSITION: ${FINDING_COUNT} finding comment(s) but no FORGE:NOTE_DISPOSITION record — run §6B.5 before merging" >&2
+  gh pr comment {PR_NUMBER} {MERGE_GH_FLAG} --body "Auto-merge skipped: review findings exist but §6B.5 note disposition was not recorded. Re-run \`/review-pr {PR_NUMBER} --auto-merge --issue <N>\`." 2>/dev/null || true # allowlist:check-command-side-effects
+  # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "note disposition missing".
+  exit 1
+fi
+```
+
 **Phase-trail preflight (MANDATORY before any merge attempt)** <!-- Added: forge#3061 -->: a reviewer verdict alone must not merge work whose earlier pipeline phases were skipped. Run the deterministic verifier against the linked issue; do NOT run the merge block below unless it exits 0.
 
 ```bash
@@ -2216,14 +2262,20 @@ else
   # Same resolution as work-on/review.md Phase R1.5: the verifier ships with ForgeDock, not the consumer repo.
   # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
   FORGE_ROOT=""
-  if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$FORGEDOCK_HOME" in /*) FORGE_ROOT="$FORGEDOCK_HOME" ;; esac; else
-    # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match).
-    _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-    # newest cached version first: numeric major.minor.patch of the version dir name only; a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-    _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ '$(NF-1)=="forgedock"{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5-)"
-    _m="$(find -L "$HOME/.claude/plugins/marketplaces" -mindepth 1 -maxdepth 1 -type d -iname '*forgedock*' 2>/dev/null)"
+  # Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+  _h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+  # Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+  _mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+  if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+    # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+    _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+    # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+    _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+    # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+    _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+    _m="$HOME/.claude/plugins/marketplaces/$_mk"
     # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-    _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_v" "$_m")"
+    _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
     while IFS= read -r _c; do
       case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
     done <<< "$_k"
@@ -2247,7 +2299,20 @@ else
     echo "PHASE TRAIL: verify-phase-trail.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install) — refusing to merge" >&2
     TRAIL="PHASE_TRAIL: ERROR (verifier not resolvable)"; TRAIL_RC=127
   else
-    TRAIL=$(bash "$TRAIL_SCRIPT" "$MERGE_ISSUE" -R {GH_REPO} $DOCS_ONLY_FLAG $CODE_DIFF_FLAG); TRAIL_RC=$?
+    # Bind the human break-glass override (forge#3152) to the PR head. An unreadable head omits the flag, so no override is offered (fails closed).
+    PR_HEAD_SHA=$(gh api "repos/{GH_REPO}/pulls/{PR_NUMBER}" --jq .head.sha 2>/dev/null) || PR_HEAD_SHA=""
+    HEAD_SHA_ARGS=()
+    if [[ "$PR_HEAD_SHA" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then HEAD_SHA_ARGS=(--head-sha "$PR_HEAD_SHA"); fi
+    TRAIL=$(bash "$TRAIL_SCRIPT" "$MERGE_ISSUE" -R {GH_REPO} $DOCS_ONLY_FLAG $CODE_DIFF_FLAG ${HEAD_SHA_ARGS[@]+"${HEAD_SHA_ARGS[@]}"}); TRAIL_RC=$?
+    if [ "$TRAIL_RC" -eq 0 ]; then
+      # An `OVERRIDE:` line means the verifier accepted a human override. Record it on the PR from the verifier's output (never agent prose).
+      OVR=$(printf '%s\n' "$TRAIL" | sed -n 's/^OVERRIDE: //p' | sed -n '1p')
+      OVERRIDE_BOUND_HEAD=""
+      if [ -n "$OVR" ]; then
+        OVERRIDE_BOUND_HEAD="$PR_HEAD_SHA"   # forge#3273: the merge below must land exactly this commit
+        gh pr comment {PR_NUMBER} -R {GH_REPO} --body "$(printf '<!-- FORGE:PHASE_TRAIL_OVERRIDE_APPLIED -->\nThe phase-trail gate was waived by a human break-glass override.\n\n%s\n%s\n%s\n' '```' "$OVR" '```')" # <!-- allowlist:check-command-side-effects -->
+      fi
+    fi
   fi
   if [ "$TRAIL_RC" -ge 2 ]; then
     # rc 2 (trail unreadable) / 127 (verifier not resolvable) is an infrastructure failure, NOT missing phases:
@@ -2406,6 +2471,12 @@ else
           CI_GATE_RC=4; CI_GATE_OUT="STALE_REVIEW: PR head ${GATED_HEAD:0:7} is not the reviewed commit ${REVIEWED_SHORT} and the delta is not docs-only"
         fi
       fi
+    fi
+    # WIRE:PROVEN — spec prose; OVERRIDE_BOUND_HEAD is set in the verifier block above and consumed here (reviewed by trace)
+    # forge#3273: an accepted break-glass override is bound to one exact head. If the commit being merged
+    # differs (a push after the verifier ran, even a docs-only one), the override does not cover it.
+    if [ "$CI_GATE_RC" -eq 0 ] && [ -n "${OVERRIDE_BOUND_HEAD:-}" ] && [ "$GATED_HEAD" != "$OVERRIDE_BOUND_HEAD" ]; then
+      CI_GATE_RC=4; CI_GATE_OUT="STALE_REVIEW: break-glass override was bound to ${OVERRIDE_BOUND_HEAD:0:7} but the gated head is ${GATED_HEAD:0:7}"
     fi
     if [ "$CI_GATE_RC" -eq 4 ]; then
       # Not a human problem: the caller re-runs /review-pr on the new head (work-on/review.md R4).

@@ -123,7 +123,7 @@ export function canDeduplicateAutomatedAlert(canonical, candidate) {
  *   amplification remains at or above 1.0.
  * @property {boolean} amplificationBreaker - On-by-default circuit breaker over ALL
  *   cascade findings (not only same-lineage refinements): when the last
- *   `convergenceWindow` amplification ratios are all >= 1.0, P3-and-below admission
+ *   `convergenceWindow` amplification ratios are all >= 1.0, P3 admission
  *   pauses (P1/P2 are never affected). Opt out with `amplification_breaker: off`.
  *   It is deliberately independent of the cascade presets, so lifting the
  *   generation cap or token budget (`policy: all`) never disables it.
@@ -478,9 +478,9 @@ export function evaluateCascadeFinding(finding, policy) {
   if (!admitsTokenSpend(finding.projectedTokenSpend, policy)) {
     return { admit: false, reason: `per-batch token budget exhausted (orchestration.cascade.token_budget=${policy.tokenBudget})` };
   }
-  // Rule 6 (forge#3060) is evaluated last, mirroring the bash chain. It only gates P3-and-below:
-  // P0/P1/P2 already returned above.
-  if (policy.amplificationBreaker && finding.amplificationBreakerTripped && /^P[3-9]$/.test(finding.priority || "")) {
+  // Rule 6 (forge#3060) is evaluated last, mirroring the bash chain. It only gates P3 (whitespace stripped
+  // and upper-cased, matching the bash twin's `tr -d '[:space:]'`): P0/P1/P2 already returned above.
+  if (policy.amplificationBreaker && finding.amplificationBreakerTripped && String(finding.priority ?? "").replace(/\s+/g, "").toUpperCase() === "P3") {
     return {
       admit: false,
       reason: "amplification breaker tripped — P3 admission paused (routed to P3 batches / completion sweep)",
@@ -582,4 +582,23 @@ export function planP3BatchGroups(findings, rules = P3_BATCHING_RULES, { openBat
   claim("leaf-directory", (finding) => leafDirectory(finding.affectedFile), rules.leafDirectoryMinimum);
 
   return { groups, extensions, ungrouped: [...remaining.keys()] };
+}
+
+/**
+ * Pure per-run counts over a `planP3BatchGroups()` result, for the batching
+ * summary: clusters formed, members absorbed, open batches extended, members
+ * added to extended batches, and ungrouped members. Tolerates missing keys.
+ */
+export function summarizeP3BatchPlan(plan) {
+  const groups = Array.isArray(plan?.groups) ? plan.groups : [];
+  const extensions = Array.isArray(plan?.extensions) ? plan.extensions : [];
+  const ungrouped = Array.isArray(plan?.ungrouped) ? plan.ungrouped : [];
+  const count = (items) => items.reduce((sum, item) => sum + (Array.isArray(item?.members) ? item.members.length : 0), 0);
+  return {
+    clusters: groups.length,
+    absorbed: count(groups),
+    extended: extensions.length,
+    extensionMembers: count(extensions),
+    ungrouped: ungrouped.length,
+  };
 }

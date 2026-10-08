@@ -1388,13 +1388,22 @@ if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && [ -n "
 fi
 
 # 1. Re-fetch all issue labels and classify each into DONE / GATED / FAILED / IN_PROGRESS
-#    (same classify_predecessor_state() function defined in phase-4-execution.md Step 4B —
-#    re-declare it here if this block runs in a fresh context that hasn't sourced Step 4B yet).
+#    (same classify_predecessor_state() function defined in phase-4-execution.md Step 4B).
+#    MANDATORY in a fresh context (wake/compaction): re-declare byte-identically from phase-4-execution.md Step 4B,
+#    in this order, hold_merged_trail, resolve_orch_login, trail_escalation_state, release_merged_trail and
+#    classify_predecessor_state, in the SAME shell as the loop below (guarded by the declare -F check below).
 #    forge#3168: classify_predecessor_state() also needs these Step 4B helpers declared in the SAME shell:
 #    hold_merged_trail, resolve_orch_login, trail_escalation_state, release_merged_trail (reverify_merged_trail is
 #    nested inside the classifier). It reports a missing helper on stderr and classifies GATED. The same trusted-author
-#    filter (OWNER/MEMBER/COLLABORATOR or the orchestrator login) applies to the release/fail markers on wake.
+#    filter (OWNER, the orchestrator login, or a MEMBER/COLLABORATOR with admin/maintain/write on `collaborators/<login>/permission`; forge#3207) applies to the release/fail markers on wake.
 #    forge#3169: merged + needs-human with no escalation record classifies GATED on wake (never keyed on the verifier).
+# The helpers cache trail lookups in the stable per-user/per-repo dir (trail_cache_dir / init_trail_cache, phase-4-execution.md Step 4B).
+# resolve_orch_login queries the GraphQL viewer login and caches it in that same dir (forge#3205), so init_trail_cache must run before it for the cache to apply (otherwise it re-queries per call).
+# Re-declare those helpers first (same Bash block), then reset the cache; if init fails the helpers simply skip caching.
+declare -F init_trail_cache >/dev/null && init_trail_cache || echo "WARNING: init_trail_cache not declared — trail lookups will be uncached" >&2
+for H in hold_merged_trail resolve_orch_login trail_escalation_state release_merged_trail classify_predecessor_state; do
+  declare -F "$H" >/dev/null || echo "WARNING: $H not declared — re-declare it from phase-4-execution.md Step 4B before classifying; merged-trail predecessors will classify GATED" >&2
+done
 declare -A ISSUE_CLASS
 declare -A ISSUE_FILES
 DONE_ISSUES=()
@@ -1508,20 +1517,56 @@ BLOCKED_NOW=$(gh issue list -R {GH_REPO} --state open --label "blocked-on-human-
   --jq '.[].number' 2>/dev/null || echo "")
 for DEP in $BLOCKED_NOW; do
   # Read which predecessor(s) this DEP is tracked against
-  GATING_PREDS_RAW=$(gh api repos/{GH_REPO}/issues/${DEP}/comments \
-    --jq '[.[] | select(.body | contains("FORGE:BLOCKED_ON_HUMAN_MERGE")) | (.body | capture("Gating predecessor\\*\\*: #(?<p>[0-9]+)").p)]' 2>/dev/null || echo '[]')
+  # Fetch is split from `sort`: in a pipeline, `|| echo ""` binds to sort's status (dead code), so a failed or
+  # partially paginated gh api would be read as a (truncated) list and could release DEP. Capture gh's own status.
+  GATING_PREDS_RAW=$(gh api --paginate repos/{GH_REPO}/issues/${DEP}/comments \
+    --jq '.[] | select((.body // "") | contains("FORGE:BLOCKED_ON_HUMAN_MERGE")) | ((.body // "") | capture("Gating predecessor\\*\\*: #(?<p>[0-9]+)").p)' 2>/dev/null) \
+    || { echo "WARNING: #${DEP} gating-predecessor lookup failed - keeping blocked; retrying next wake." >&2; continue; }
+  GATING_PREDS_RAW=$(printf '%s\n' "$GATING_PREDS_RAW" | sort -u | sed '/^$/d')
+  [ -n "$GATING_PREDS_RAW" ] || { echo "WARNING: #${DEP} has blocked-on-human-merge but no parseable Gating predecessor line - leaving blocked" >&2; continue; }   # no tracked predecessor found: fail closed, stay blocked
   STILL_GATED=false
-  for GPRED in $(echo "$GATING_PREDS_RAW" | jq -r '.[]' 2>/dev/null); do
+  for GPRED in $GATING_PREDS_RAW; do
     GPRED_CLASS=$(classify_predecessor_state "$GPRED")
     [ "$GPRED_CLASS" != "DONE" ] && STILL_GATED=true
   done
   if [ "$STILL_GATED" = "false" ]; then
+    # Hardened release sequence — keep in sync with phase-4-execution.md Step 4B item 6.6 (same ordering and fail-closed semantics;
+    # a fix to one copy MUST be applied to the other). <!-- Added: forge#3245 -->
+    if [ "${DRY_RUN:-false}" = "true" ]; then echo "DRY_RUN: would release #${DEP} (remove blocked-on-human-merge, post FORGE:UNBLOCKED, dispatch)"; continue; fi
+    # Idempotency: skip if another path already dispatched DEP.
+    DEP_ALREADY_DISPATCHED=$(gh issue view "$DEP" -R {GH_REPO} --json labels \
+      --jq '[.labels[].name | select(startswith("workflow:"))] | length' 2>/dev/null || echo "0")
+    [ "$DEP_ALREADY_DISPATCHED" -eq 0 ] || continue
+    # Durable marker FIRST (deduped against the last comment so a retried wake does not repeat it): an interrupted release
+    # then leaves durable evidence instead of an unlabelled, undispatched issue.
+    LAST_DEP_COMMENT=$(gh issue view "$DEP" -R {GH_REPO} --json comments --jq '.comments[-1].body // ""' 2>/dev/null || echo "")
+    case "$LAST_DEP_COMMENT" in "<!-- FORGE:UNBLOCKED -->"*) ;; *)
+      gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:UNBLOCKED -->
+All gating predecessor(s) are now resolved — merged, or released by a human after a phase-trail hold (detected on orchestrator wake) — dispatching now." >/dev/null 2>&1 \
+        || { echo "WARNING: #${DEP} UNBLOCKED marker not posted — not releasing; retrying next wake." >&2; continue; } ;;
+    esac
+    # Remove the hold label and verify it is gone. Fail CLOSED: a failed edit OR a failed/empty `view` is "unverified" —
+    # skip dispatch and retry next wake (the view result is captured separately, never piped into grep).
+    gh issue edit "$DEP" -R {GH_REPO} --remove-label "blocked-on-human-merge" >/dev/null 2>&1 \
+      || { echo "WARNING: #${DEP} label removal failed — not dispatching; retrying next wake." >&2; continue; }
+    if ! DEP_LABELS=$(gh issue view "$DEP" -R {GH_REPO} --json labels --jq '.labels[].name' 2>/dev/null) \
+       || printf '%s\n' "$DEP_LABELS" | grep -qx "blocked-on-human-merge"; then
+      echo "WARNING: #${DEP} label removal unverified — not dispatching; retrying next wake." >&2
+      continue
+    fi
+    # Re-check after removal: another path may have labelled DEP workflow:* in the meantime.
+    DEP_ALREADY_DISPATCHED=$(gh issue view "$DEP" -R {GH_REPO} --json labels \
+      --jq '[.labels[].name | select(startswith("workflow:"))] | length' 2>/dev/null || echo "0")
+    [ "$DEP_ALREADY_DISPATCHED" -eq 0 ] || continue
     # forge#3157: record a human release (FORGE:PHASE_TRAIL_RELEASED) of a trail-held merged predecessor (decay of the escalation marker;
-    # release_merged_trail is defined in phase-4-execution.md Step 4B and is a no-op unless the escalation is ACTIVE).
-    for GPRED in $(echo "$GATING_PREDS_RAW" | jq -r '.[]' 2>/dev/null); do release_merged_trail "$GPRED"; done
-    gh issue edit "$DEP" -R {GH_REPO} --remove-label "blocked-on-human-merge" 2>/dev/null || true
-    gh issue comment "$DEP" -R {GH_REPO} --body "<!-- FORGE:UNBLOCKED -->
-All gating predecessor(s) are now resolved — merged, or released by a human after a phase-trail hold (detected on orchestrator wake) — dispatching now."
+    # release_merged_trail is defined in phase-4-execution.md Step 4B and is a no-op unless the escalation is ACTIVE). It is a decay
+    # record, not the dispatch gate, so a failure here is warned about but does not block dispatch.
+    for GPRED in $GATING_PREDS_RAW; do
+      if declare -F release_merged_trail >/dev/null; then
+        release_merged_trail "$GPRED" \
+          || echo "WARNING: release_merged_trail declared but failed for #${GPRED} — RELEASED record skipped" >&2
+      else echo "WARNING: release_merged_trail not declared — RELEASED record for #${GPRED} skipped; re-declare from phase-4-execution.md Step 4B" >&2; fi
+    done
     READY_ISSUES+=("$DEP")
   fi
 done
