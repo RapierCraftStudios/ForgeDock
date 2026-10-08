@@ -168,6 +168,10 @@ expect "C:\\ FORGEDOCK_HOME normalized" "/d/x/y" "$(run "$T/h1" FORGEDOCK_HOME='
 mkscripts "$T/hx/clone"; mkdir -p "$T/hx/.codex"; printf '%s\n' "$T/hx/clone" > "$T/hx/.codex/forge-home"
 expect "codex forge-home pointer resolves" "$T/hx/clone" "$(run "$T/hx")"
 expect "CODEX_HOME override resolves" "$T/hx/clone" "$(run "$T/empty" CODEX_HOME="$T/hx/.codex")"
+# A relative CODEX_HOME must not resolve the pointer against the consumer cwd
+mkdir -p "$T/consumer/.codex"; printf '%s\n' "$T/hx/clone" > "$T/consumer/.codex/forge-home"
+expect "relative CODEX_HOME ignored (cwd-local pointer not read)" "" "$(run "$T/empty" CODEX_HOME=.codex)"
+rm -rf "$T/consumer/.codex"
 printf 'relative/path\n' > "$T/hx/.codex/forge-home"
 expect "relative forge-home pointer rejected" "" "$(run "$T/hx")"
 # install-codex.sh: FORGE_HOME is shell-escaped in env files, and absent env files are not created (forge#3241)
