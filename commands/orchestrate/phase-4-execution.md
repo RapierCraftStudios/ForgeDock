@@ -2330,10 +2330,10 @@ Do not ask the user questions — you are running autonomously in the background
 
    **Re-review handoff (forge#3240)**: a remediation worker can finish with `REMEDIATE_RESULT: status: REREVIEW_REQUIRED` — the fix is pushed and CI is green, but the remediation had no sub-agent dispatch tool, so `review-pr` (which refuses to review inline) never ran. The issue is then at `workflow:in-review` WITHOUT `needs-human`, so the trigger above does not fire and the `ALREADY_REMEDIATED` guard (which counts any `FORGE:REMEDIATION`) is irrelevant. This is not a human gate, but it must never be left for a poll to find: it ends in a re-review from THIS session (which has dispatch) or in the terminal fallback below. On the next completion-monitoring cycle, for the issue that just completed, run the three steps in order. <!-- Updated: forge#3406 -->
 
-   **Step 1 — detect (bash; read-only, no dispatch, no marker write).** A marker counts only from a trusted author, using the same predicate as `trail_escalation_state` above (`OWNER`, the orchestrator login from `resolve_orch_login`, or a `MEMBER`/`COLLABORATOR` with admin/maintain/write permission; a failed permission lookup drops the row), and only as the comment's leading marker, never as text quoted inside another comment (forge#3412). The dispatched marker must also embed the current head SHA. A lookup error is `UNREADABLE`, never "no marker":
+   **Step 1 — detect (bash; read-only, no dispatch, no marker write).** One authoritative per-head marker (forge#3413): `<!-- FORGE:REREVIEW_DISPATCHED -->` as the comment's FIRST line, then `Head: <sha>`, `Actor: orchestrator|router`, `Claim: <actor>-<epoch>-<pid>` and `Lease: <UTC ISO-8601>`. It is a **claim** posted and read back BEFORE `review-pr` is dispatched, by whichever actor dispatches (this orchestrator in Step 2, or the worker router in `commands/work-on.md` Phase 0A.1), so either actor sees the other's claim. A marker counts only from a trusted author, using the same predicate as `trail_escalation_state` above (`OWNER`, the orchestrator login from `resolve_orch_login`, or a `MEMBER`/`COLLABORATOR` with admin/maintain/write permission; a failed permission lookup drops the row), and only as the comment's leading marker, never as text quoted inside another comment (forge#3412). The `REREVIEW-REQUIRED` remediation trail must embed the CURRENT head SHA (`**Head**:` line written by `work-on/remediate.md` Phase M8), so a trail for an older head never triggers a re-review of a newer one. The issue's own labels are consulted first: only `workflow:in-review` without `needs-human`, still open, is eligible. A lookup error, or an unresolved orchestrator login, is `UNREADABLE`, never "no marker" (fail closed, no dispatch):
 
    ```bash
-   # SHARED HELPERS (forge#3411): Step 2's read-back re-uses these verbatim — one predicate, no copy to drift.
+   # SHARED HELPERS (forge#3411): Step 2's claim/read-back re-uses these verbatim — one predicate, no copy to drift.
    # Trusted rows only, same predicate as trail_escalation_state (forge#3207): OWNER, the orchestrator login, or
    # MEMBER/COLLABORATOR with admin/maintain/write permission. A failed permission lookup drops the row (fail closed).
    # stdin: rows of {body, login, assoc}; stdout: the trusted rows.
@@ -2352,12 +2352,24 @@ Do not ask the user questions — you are running autonomously in the background
        case "$RP" in admin|maintain|write) printf '%s\n' "$ROW" ;; esac
      done < <(jq -c '.' 2>/dev/null)
    }
-   # Leading-marker count of dispatched markers embedding the head SHA (forge#3412); used by Step 1 and Step 2.
-   REREVIEW_DONE_FILTER='[.[] | select((.body | startswith("<!-- FORGE:REREVIEW_DISPATCHED -->")) and (.body | contains($sha)))] | length'
+   # Per-head claim rows (forge#3412/#3413): leading marker AND the exact `Head: <sha>` line, in comment order (oldest first).
+   REREVIEW_CLAIMS='[.[] | select((.body | startswith("<!-- FORGE:REREVIEW_DISPATCHED -->")) and (.body | contains("Head: " + $sha)))]'
+   REREVIEW_DONE_FILTER="${REREVIEW_CLAIMS} | length"
+   REREVIEW_LEASE_SECS=3600   # a claim older than this with the issue still at workflow:in-review is stale (crashed actor)
 
    PRED="$NUM"
    REREVIEW_STATE="NONE"; REREVIEW_PR=""; REREVIEW_SHA=""; REREVIEW_BASE=""
-   if ! REREVIEW_PR=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${PRED}\" in:body" \
+   # 1. Labels first (forge#3413 CONC-1): only an open issue at workflow:in-review WITHOUT needs-human is eligible.
+   if ! ISSUE_META=$(gh issue view "$PRED" -R {GH_REPO} --json labels,state \
+       --jq '"\(.state) \([.labels[].name] | map(select(. == "workflow:in-review" or . == "needs-human")) | sort | join(","))"' 2>/dev/null); then
+     REREVIEW_STATE="UNREADABLE"
+   elif [ "${ISSUE_META%% *}" != "OPEN" ] || [ "${ISSUE_META#* }" != "workflow:in-review" ]; then
+     REREVIEW_STATE="NONE"   # closed/merged, already at needs-human, or not at workflow:in-review: nothing to re-review
+   elif [ -z "$(resolve_orch_login)" ]; then
+     # SEC-8: with no own login the orchestrator's own marker is dropped as untrusted, so a dispatch could never be
+     # recorded or deduped. Fail closed BEFORE any dispatch.
+     REREVIEW_STATE="UNREADABLE"
+   elif ! REREVIEW_PR=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${PRED}\" in:body" \
        --json number,body --jq '[.[] | select(.body | test("(?i)closes\\s+#'"${PRED}"'\\b"))][0].number // empty' 2>/dev/null); then
      REREVIEW_STATE="UNREADABLE"
    elif [ -n "$REREVIEW_PR" ]; then
@@ -2368,51 +2380,78 @@ Do not ask the user questions — you are running autonomously in the background
      else
        REREVIEW_SHA="${PR_META%% *}"; REREVIEW_BASE="${PR_META#* }"
        TRUSTED_RAW=$(printf '%s\n' "$RAW" | rereview_trusted_rows)
-       # Leading-marker match only (forge#3412): remediation trail comments start with <!-- FORGE:REMEDIATION -->.
-       NEEDS_REREVIEW=$(printf '%s' "$TRUSTED_RAW" | jq -s '[.[] | select((.body | startswith("<!-- FORGE:REMEDIATION -->")) and (.body | contains("<!-- FORGE:REMEDIATION:COMPLETE -->")) and (.body | contains("REREVIEW-REQUIRED")))] | length' 2>/dev/null) || NEEDS_REREVIEW=""
+       # Leading-marker match only (forge#3412), scoped to the CURRENT head (forge#3413 CONC-2): the M8 trail comment
+       # carries `**Head**: <sha>`. NEEDS_ANY counts every trail row (any head) to detect a stale, pre-#3413 trail.
+       NEEDS_REREVIEW=$(printf '%s' "$TRUSTED_RAW" | jq -s --arg sha "$REREVIEW_SHA" '[.[] | select((.body | startswith("<!-- FORGE:REMEDIATION -->")) and (.body | contains("<!-- FORGE:REMEDIATION:COMPLETE -->")) and (.body | contains("REREVIEW-REQUIRED")) and (.body | contains($sha)))] | length' 2>/dev/null) || NEEDS_REREVIEW=""
+       NEEDS_ANY=$(printf '%s' "$TRUSTED_RAW" | jq -s '[.[] | select((.body | startswith("<!-- FORGE:REMEDIATION -->")) and (.body | contains("<!-- FORGE:REMEDIATION:COMPLETE -->")) and (.body | contains("REREVIEW-REQUIRED")))] | length' 2>/dev/null) || NEEDS_ANY=""
        REREVIEW_DONE=$(printf '%s' "$TRUSTED_RAW" | jq -s --arg sha "$REREVIEW_SHA" "$REREVIEW_DONE_FILTER" 2>/dev/null) || REREVIEW_DONE=""
-       if [ -z "$NEEDS_REREVIEW" ] || [ -z "$REREVIEW_DONE" ]; then REREVIEW_STATE="UNREADABLE"
-       elif [ "$NEEDS_REREVIEW" -ge 1 ] && [ "$REREVIEW_DONE" -eq 0 ] && [ "${DRY_RUN:-false}" != "true" ]; then REREVIEW_STATE="PENDING"
+       if [ -z "$NEEDS_REREVIEW" ] || [ -z "$NEEDS_ANY" ] || [ -z "$REREVIEW_DONE" ]; then REREVIEW_STATE="UNREADABLE"
+       elif [ "$NEEDS_REREVIEW" -ge 1 ] && [ "$REREVIEW_DONE" -eq 0 ]; then
+         REREVIEW_STATE="PENDING"          # DRY_RUN is handled in Step 2 (no `DRY_RUN != true` term here, so its branch is reachable)
+       elif [ "$NEEDS_REREVIEW" -ge 1 ]; then
+         # A claim for this head already exists (orchestrator or router). Fresh claim: another actor is reviewing, do
+         # nothing. Old claim, issue still at workflow:in-review: the claimant crashed; surface it via the fallback.
+         CLAIM_T=$(printf '%s' "$TRUSTED_RAW" | jq -s -r --arg sha "$REREVIEW_SHA" "${REREVIEW_CLAIMS} | .[0].body | capture(\"Lease: (?<t>[0-9T:Z-]+)\").t" 2>/dev/null || true)
+         CLAIM_EPOCH=$(printf '%s' "$CLAIM_T" | jq -R 'fromdateiso8601' 2>/dev/null || true)
+         if [ -z "$CLAIM_EPOCH" ]; then REREVIEW_STATE="STALE"
+         elif [ $(( $(date -u +%s) - CLAIM_EPOCH )) -gt "$REREVIEW_LEASE_SECS" ]; then REREVIEW_STATE="STALE"
+         else REREVIEW_STATE="CLAIMED"; fi
+       elif [ "$NEEDS_ANY" -ge 1 ]; then
+         REREVIEW_STATE="STALE"            # trail is for another head (or predates the Head line): never re-dispatch silently
        fi
      fi
    fi
    echo "REREVIEW_STATE=$REREVIEW_STATE PR=$REREVIEW_PR SHA=$REREVIEW_SHA BASE=$REREVIEW_BASE"
    ```
 
-   `REREVIEW_STATE=NONE` means nothing to do. `UNREADABLE` fails closed: classify the issue `GATED` this cycle without writing anything, and re-run Step 1 next cycle. Only `PENDING` continues.
+   `REREVIEW_STATE=NONE` means nothing to do (including an issue already at `needs-human`, closed, or not at `workflow:in-review`). `CLAIMED` means another actor holds a fresh claim for this head: do nothing, re-run Step 1 next cycle. `UNREADABLE` fails closed: classify the issue `GATED` this cycle without writing anything, and re-run Step 1 next cycle. `STALE` (an expired or unparseable claim, or a trail that does not match the current head) goes straight to the Step 3 terminal fallback with the reason `stale re-review claim or trail`, without dispatching. Only `PENDING` continues.
 
-   **Step 2 — dispatch (a real call, not part of the bash block above).** Invoke, with the `REREVIEW_PR`, `REREVIEW_BASE` and `PRED` values Step 1 printed:
+   **Step 2 — dispatch (claim first, forge#3413).** The claim is written and read back BEFORE `review-pr` is invoked. A failed post or read-back means NO dispatch (fail closed, terminal fallback), so there is never a wasted duplicate dispatch, and a second actor sees the claim and stands down. Bash blocks are independent executions: run the claim block with the **SHARED HELPERS** (`rereview_trusted_rows`, `REREVIEW_CLAIMS`, `REREVIEW_DONE_FILTER`) from Step 1 pasted verbatim at its top, and `REREVIEW_PR` / `REREVIEW_SHA` set to the values Step 1 printed. The read-back lists the PR's comments by number and applies the same trusted predicate. The EARLIEST trusted claim for the head wins: if the first matching row does not carry this actor's `Claim:` id, another actor claimed first (`LOST`) and this one stands down. Any API failure or zero matching rows is `UNVERIFIED` (fail closed, never `VERIFIED`). The block has no `exit`, so it is safe in a shared or sourced shell:
+
+   ```bash
+   REREVIEW_MARKER="UNVERIFIED"
+   if [ "${DRY_RUN:-false}" = "true" ]; then
+     echo "[DRY_RUN] would claim FORGE:REREVIEW_DISPATCHED for head ${REREVIEW_SHA} on PR #${REREVIEW_PR} and dispatch review-pr --auto-merge"
+     REREVIEW_MARKER="DRYRUN"
+   else
+     CLAIM_ID="orchestrator-$(date -u +%s)-$$"
+     post_marker() { gh pr comment "$REREVIEW_PR" -R {GH_REPO} --body "<!-- FORGE:REREVIEW_DISPATCHED -->
+   Head: ${REREVIEW_SHA}
+   Actor: orchestrator
+   Claim: ${CLAIM_ID}
+   Lease: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+   Re-review claimed by the orchestrator: remediation had no sub-agent dispatch tool."; }
+     # Retry the post once, and only when the first attempt failed (a duplicate with the same Claim id is harmless).
+     post_marker || { sleep 2; post_marker || echo "REREVIEW claim post failed twice" >&2; }
+     # Read back: oldest trusted claim for this head must be ours. One re-read after a short wait absorbs lag.
+     for _ATTEMPT in 1 2; do
+       if RB_RAW=$(gh api --paginate "repos/{GH_REPO}/issues/${REREVIEW_PR}/comments" \
+             --jq '.[] | {body: (.body // ""), login: (.user.login // ""), assoc: (.author_association // "")}' 2>/dev/null) \
+          && RB_TRUSTED=$(printf '%s\n' "$RB_RAW" | rereview_trusted_rows) \
+          && RB_FIRST=$(printf '%s' "$RB_TRUSTED" | jq -s -r --arg sha "$REREVIEW_SHA" "${REREVIEW_CLAIMS} | .[0].body // \"\"" 2>/dev/null) \
+          && [ -n "$RB_FIRST" ]; then
+         if printf '%s' "$RB_FIRST" | grep -qxF "Claim: ${CLAIM_ID}"; then REREVIEW_MARKER="VERIFIED"; else REREVIEW_MARKER="LOST"; fi
+         break
+       fi
+       sleep 3
+     done
+   fi
+   echo "REREVIEW_MARKER=$REREVIEW_MARKER"
+   ```
+
+   Then, on `REREVIEW_MARKER=VERIFIED` ONLY, dispatch with the `REREVIEW_PR`, `REREVIEW_BASE` and `PRED` values Step 1 printed (a real call, not part of the bash block above). `DRYRUN` records "Would re-review PR #${REREVIEW_PR} with review-pr --auto-merge; skipped (dry-run)." and dispatches nothing; `LOST` and `UNVERIFIED` dispatch nothing:
 
    ```
    if DRY_RUN=true:
      record "Would re-review PR #${REREVIEW_PR} with review-pr --auto-merge; skipped (dry-run)."
-   else:
+   elif REREVIEW_MARKER == VERIFIED:
      Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="${REREVIEW_PR} --auto-merge --issue ${PRED} --base ${REREVIEW_BASE} --gh-flag -R {GH_REPO}")
    ```
 
-   If the call returns no `REVIEW_RESULT` (interrupted or no result), invoke it once more; this retry is the only one (bounded, independent of the Phase 4R `github-unavailable` waits). Then post the marker AFTER the dispatch, so an interrupted session never leaves a marker that blocks a retry, and verify the write (forge#3411): an unverified marker leaves `REREVIEW_DONE=0`, so Step 1 would report `PENDING` and re-dispatch `review-pr --auto-merge` for the same head every cycle. Bash blocks are independent executions: run this block with the **SHARED HELPERS** (`rereview_trusted_rows`, `REREVIEW_DONE_FILTER`) from Step 1 pasted verbatim at its top, and `REREVIEW_PR` / `REREVIEW_SHA` set to the values Step 1 printed. The read-back lists the PR's comments by number (not via an open-PR search, so a PR that `review-pr` already merged still reads back) and applies the same trusted predicate; any API failure or zero matching rows is `UNVERIFIED` (fail closed, never `VERIFIED`):
+   If the call returns no `REVIEW_RESULT` (interrupted or no result), invoke it once more; this retry is the only one (bounded, independent of the Phase 4R `github-unavailable` waits) and does not post a second claim: the claim for this head is already recorded.
 
-   ```bash
-   [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] would post FORGE:REREVIEW_DISPATCHED on PR #${REREVIEW_PR}"; exit 0; }
-   post_marker() { gh pr comment "$REREVIEW_PR" -R {GH_REPO} --body "<!-- FORGE:REREVIEW_DISPATCHED -->
-   Re-review dispatched by the orchestrator at head ${REREVIEW_SHA}: remediation had no sub-agent dispatch tool."; }
-   # Retry the post once, and only when the first attempt failed (a duplicate marker is harmless: Step 1 counts >= 1).
-   post_marker || { sleep 2; post_marker || echo "REREVIEW marker post failed twice" >&2; }
-   # Read back: the marker must be visible as a trusted leading marker embedding the head SHA. One re-read after a
-   # short wait absorbs read-after-write lag before declaring the write lost.
-   REREVIEW_MARKER="UNVERIFIED"
-   for _ATTEMPT in 1 2; do
-     if RB_RAW=$(gh api --paginate "repos/{GH_REPO}/issues/${REREVIEW_PR}/comments" \
-           --jq '.[] | {body: (.body // ""), login: (.user.login // ""), assoc: (.author_association // "")}' 2>/dev/null) \
-        && RB_TRUSTED=$(printf '%s\n' "$RB_RAW" | rereview_trusted_rows) \
-        && RB_N=$(printf '%s' "$RB_TRUSTED" | jq -s --arg sha "$REREVIEW_SHA" "$REREVIEW_DONE_FILTER" 2>/dev/null) \
-        && [ -n "$RB_N" ] && [ "$RB_N" -ge 1 ]; then REREVIEW_MARKER="VERIFIED"; break; fi
-     sleep 3
-   done
-   echo "REREVIEW_MARKER=$REREVIEW_MARKER"
-   ```
-
-   **Step 3 — outcome.** On `REVIEW_RESULT: status: COMPLETE` (merged), drive `work-on:close` and let item 6.6 wake dependents as normal. If `review-pr` returns another result with its own labelled terminal state (CHANGES REQUESTED, or `needs-human` for genuine blockers), that verdict applies and the issue is `GATED` or failed per the existing rules. If dispatch failed, the skill did not resolve, the issue is still at `workflow:in-review` with no `needs-human` after the retry, or Step 2 printed `REREVIEW_MARKER=UNVERIFIED`, apply the **terminal fallback** defined in `commands/work-on.md` Phase 0A.1 (comment with the reason, add `needs-human` and remove `workflow:in-review` in one edit, verify the write), classify the issue `GATED`, and surface it to the operator in the run summary as `GATED: re-review could not run (#{PRED}, PR #{REREVIEW_PR}): <reason>`. For `REREVIEW_MARKER=UNVERIFIED` the reason is `re-review marker could not be recorded` and the report line is `GATED: re-review could not run (#{PRED}, PR #{REREVIEW_PR}): marker write failed`; do not leave the issue `PENDING`, because without a recorded marker the next cycle would re-dispatch `review-pr` for the same head. A failed label write is reported as such, not as done. The marker bounds this to one re-review per PR head (no loop) only once the marker write is verified (`REREVIEW_MARKER=VERIFIED`); an unverified write has no bound, which is why it routes to the terminal fallback. Never review inline.
+   **Step 3 — outcome.** On `REVIEW_RESULT: status: COMPLETE` (merged), drive `work-on:close` and let item 6.6 wake dependents as normal. If `review-pr` returns another result with its own labelled terminal state (CHANGES REQUESTED, or `needs-human` for genuine blockers), that verdict applies and the issue is `GATED` or failed per the existing rules. `REREVIEW_MARKER=LOST` (another actor claimed this head first) and `REREVIEW_STATE=CLAIMED` take no action: leave the issue as it is and re-check next cycle. If dispatch failed, the skill did not resolve, the issue is still at `workflow:in-review` with no `needs-human` after the retry, Step 1 printed `STALE`, or Step 2 printed `REREVIEW_MARKER=UNVERIFIED`, apply the **terminal fallback** defined in `commands/work-on.md` Phase 0A.1 (labels re-read first, comment with the reason, add `needs-human` and remove `workflow:in-review` in one edit, verify the write), classify the issue `GATED`, and surface it to the operator in the run summary as `GATED: re-review could not run (#{PRED}, PR #{REREVIEW_PR}): <reason>`. For `REREVIEW_MARKER=UNVERIFIED` the reason is `re-review claim could not be recorded` and the report line is `GATED: re-review could not run (#{PRED}, PR #{REREVIEW_PR}): marker write failed`; because the claim is written first, `UNVERIFIED` now means `review-pr` was NOT dispatched. Do not leave the issue `PENDING`. A failed label write is reported as such, not as done. The verified per-head claim bounds this to one re-review per PR head across the orchestrator and the router (no loop). Never review inline.
 
    This satisfies #1809 Q2 (the orchestrator auto-dispatches remediation against the gated issue itself — the exact gap forge#1812's item 6.5/6.6 left open, since those items only ever track and wake *dependents*, never the gated PR's own remediation) — and closes forge#2243 (the gap that #1812's fix left open for *leaf* issues with no dependents: because this item's `$PRED` binding was never made explicit and self-contained, it was only ever reached while walking a dependent's predecessor list, so a `needs-human` issue that has no dependents never got remediation dispatched and its CHANGES-REQUESTED PR re-reviewed the same unchanged commit forever). The remediation agent's outcome is picked up on the **next** completion-monitoring cycle of this same Step 4B loop: if it lands (`workflow:merged`), item 6.6 below fires normally and wakes any `blocked-on-human-merge` dependents (if any exist — a leaf issue simply has none to wake); if it holds/re-escalates, the issue simply remains `GATED` and item 6.5 continues tracking its dependents (if any) unchanged.
 
