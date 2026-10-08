@@ -33,6 +33,12 @@ else ok "C1.7 does not cd into REPO_PATH"; fi
 printf '%s\n' "$C17" | grep -q 'Phase C1.7: skipped' && ok "C1.7 logs skip reasons" || bad "C1.7 missing 'Phase C1.7: skipped'"
 printf '%s\n' "$C17" | grep -q 'worktree add --detach' && ok "C1.7 uses a temporary detached worktree" || bad "C1.7 missing temp worktree"
 printf '%s\n' "$C17" | grep -q 'gh pr create' && ok "C1.7 opens a PR" || bad "C1.7 missing gh pr create"
+[ "$(printf '%s\n' "$C17" | grep -c '^```bash')" -eq 1 ] && ok "C1.7 is a single bash block (no cross-block shell state)" || bad "C1.7 must be exactly one bash block"
+printf '%s\n' "$C17" | grep -qE "^\s*trap .*EXIT" && ok "C1.7 registers an EXIT trap" || bad "C1.7 missing EXIT trap"
+printf '%s\n' "$C17" | grep -q 'worktree remove --force' && ok "C1.7 cleanup removes the worktree" || bad "C1.7 cleanup missing worktree remove"
+ADD_LN=$(printf '%s\n' "$C17" | grep -n 'worktree add --detach' | head -1 | cut -d: -f1)
+TRAP_LN=$(printf '%s\n' "$C17" | grep -nE "^\s*trap .*EXIT" | head -1 | cut -d: -f1)
+[ -n "$ADD_LN" ] && [ -n "$TRAP_LN" ] && [ "$TRAP_LN" -gt "$ADD_LN" ] && ok "EXIT trap registered after worktree add" || bad "EXIT trap must follow worktree add"
 grep -q 'FORGE:DOSSIER_UPDATED' "$CLOSE_MD" && ok "FORGE:DOSSIER_UPDATED marker kept" || bad "FORGE:DOSSIER_UPDATED marker missing"
 
 # --- Dynamic: simulate the temp-worktree sequence ---
@@ -64,6 +70,15 @@ git -C "$TMP/main" worktree prune
 [ -z "$(git -C "$TMP/main" status --porcelain)" ] && ok "main checkout working tree clean" || bad "main checkout working tree dirty"
 git -C "$TMP/origin.git" rev-parse -q --verify refs/heads/docs/dossier-1 >/dev/null && ok "dossier branch pushed to origin" || bad "dossier branch not pushed"
 [ ! -d "$WT" ] && ok "temporary worktree removed" || bad "temporary worktree leaked"
+
+# Dynamic: trap-based cleanup removes the worktree even when the block exits without explicit removal
+WT2=$(mktemp -d)
+( set -e
+  _cl() { git -C "$TMP/main" worktree remove --force "$WT2" >/dev/null 2>&1 || rm -rf "$WT2"; git -C "$TMP/main" worktree prune >/dev/null 2>&1 || true; }
+  git -C "$TMP/main" worktree add --detach "$WT2" origin/staging >/dev/null 2>&1
+  trap _cl EXIT
+  exit 3 ) ; true
+[ ! -d "$WT2" ] && ! git -C "$TMP/main" worktree list | grep -qF "$WT2" && ok "EXIT trap cleans worktree on abort" || bad "EXIT trap did not clean worktree"
 
 echo "Passed: $PASS  Failed: $FAIL"
 [ "$FAIL" -eq 0 ]

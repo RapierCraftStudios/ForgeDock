@@ -428,13 +428,25 @@ The `REMAINING_AFTER` variable is passed to Phase C2 to decide whether to close.
 
 **This phase is non-blocking** — if the dossier write fails, log the reason and continue to Phase C1.5. Never stall close for dossier maintenance.
 
-**Never touch the main checkout**: `$REPO_PATH` is the operator's main checkout. This phase never writes, stages or commits there (no git add or git commit against it, no directory change into it). `index.yaml` is only read from it. The dossier edit is made in a temporary detached worktree off `origin/${DOSSIER_BASE}`, committed on branch `docs/dossier-{NUMBER}`, pushed, and opened as a PR (reviewed path to the base branch); the temporary worktree is always removed. Every failure logs `Phase C1.7: skipped - <reason>` and continues.
+**Never touch the main checkout**: `$REPO_PATH` is the operator's main checkout. This phase never writes, stages or commits there (no git add or git commit against it, no directory change into it). `index.yaml` is only read from it. The dossier edit is made in a temporary detached worktree off `origin/${DOSSIER_BASE}`, committed on branch `docs/dossier-{NUMBER}`, pushed, and opened as a PR (reviewed path to the base branch); the temporary worktree is always removed (EXIT trap). Every failure logs `Phase C1.7: skipped - <reason>` and continues.
 
 **Skip if**: `{PR_NUMBER}` is empty (investigation / decomposed / invalid terminals — `TERMINAL_STATE` is not `merged`) OR `$REPO_PATH` is unset OR `devdocs/index.yaml` does not contain a `modules:` section OR no PR files match any module glob OR no `origin` remote / no push rights / worktree creation fails / PR creation fails (each logged as `Phase C1.7: skipped - <reason>`).
 
-### Step 1: Resolve affected files from FORGE:BUILDER comment
+### Steps 1-3: One self-contained block
+
+**Single block, by design**: shell state (variables, traps) does not persist between Bash tool calls, so Steps 1-3 below run as ONE fenced block in ONE Bash call. Splitting it would leave `DOSSIER_TMP`, `INDEX_PATH`, `DOSSIER_UPDATED_MODULES` and `CHANGED_FILES_RAW` empty in later calls and leak the temporary worktree. An `EXIT` trap removes the worktree and prunes on any exit path (skip, abort, interrupt); each skip is a `return` from `_dossier_run`, which continues to Phase C1.5.
 
 ```bash
+_dossier_cleanup() {
+  if [ -n "${DOSSIER_TMP:-}" ]; then
+    git -C "${REPO_PATH}" worktree remove --force "$DOSSIER_TMP" >/dev/null 2>&1 || rm -rf "$DOSSIER_TMP"
+    git -C "${REPO_PATH}" worktree prune >/dev/null 2>&1 || true
+    DOSSIER_TMP=""
+  fi
+}
+
+_dossier_run() {
+# --- Step 1: Resolve affected files from FORGE:BUILDER comment ---
 # Read FORGE:BUILDER comment to get the list of changed files
 BUILDER_COMMENT=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '[.[] | select(.body | contains("FORGE:BUILDER"))] | last | .body // ""' 2>/dev/null || echo "")
@@ -460,13 +472,10 @@ fi
 
 if [ -z "$CHANGED_FILES_RAW" ]; then
   echo "Phase C1.7: No changed files found from FORGE:BUILDER or FORGE:INVESTIGATOR — skipping dossier append"
-  # → continue to Phase C1.5
+  return 0
 fi
-```
 
-### Step 2: Match against module globs and append entries
-
-```bash
+# --- Step 2: Match against module globs and append entries ---
 CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"
 DEVDOCS_REL=$(yq '.devdocs.path // "devdocs"' "$CONFIG_FILE" 2>/dev/null || echo "devdocs")
 # Read-only: the index is read from the main checkout; nothing is ever written under ${REPO_PATH}.
@@ -474,7 +483,7 @@ INDEX_PATH="${REPO_PATH}/${DEVDOCS_REL}/index.yaml"
 
 if [ ! -f "$INDEX_PATH" ]; then
   echo "Phase C1.7: ${INDEX_PATH} not found — skipping dossier append"
-  # → continue to Phase C1.5
+  return 0
 fi
 
 # Extract modules entries: "name|glob|path"
@@ -482,7 +491,7 @@ MODULE_ENTRIES=$(yq '.modules[]? | .name + "|" + .glob + "|" + .path' "$INDEX_PA
 
 if [ -z "$MODULE_ENTRIES" ]; then
   echo "Phase C1.7: No modules[] section in index.yaml — skipping dossier append"
-  # → continue to Phase C1.5
+  return 0
 fi
 
 # All dossier writes happen in a temporary detached worktree off origin/<base>, never in ${REPO_PATH}.
@@ -490,15 +499,18 @@ DOSSIER_BASE="${PR_BASE:-staging}"
 DOSSIER_TMP=""
 if ! git -C "${REPO_PATH}" fetch origin "${DOSSIER_BASE}" >/dev/null 2>&1; then
   echo "Phase C1.7: skipped - cannot fetch origin/${DOSSIER_BASE} (no origin remote or no network)"
-else
-  DOSSIER_TMP=$(mktemp -d 2>/dev/null)
-  if [ -z "$DOSSIER_TMP" ] || ! git -C "${REPO_PATH}" worktree add --detach "$DOSSIER_TMP" "origin/${DOSSIER_BASE}" >/dev/null 2>&1; then
-    echo "Phase C1.7: skipped - git worktree add failed for origin/${DOSSIER_BASE}"
-    [ -n "$DOSSIER_TMP" ] && rm -rf "$DOSSIER_TMP"
-    DOSSIER_TMP=""
-  fi
+  return 0
 fi
-# If DOSSIER_TMP is empty: skip the rest of C1.7 and continue to Phase C1.5.
+DOSSIER_TMP=$(mktemp -d "${TMPDIR:-/tmp}/forge-dossier-{NUMBER}.XXXXXX" 2>/dev/null)
+if [ -z "$DOSSIER_TMP" ] || ! git -C "${REPO_PATH}" worktree add --detach "$DOSSIER_TMP" "origin/${DOSSIER_BASE}" >/dev/null 2>&1; then
+  echo "Phase C1.7: skipped - git worktree add failed for origin/${DOSSIER_BASE}"
+  [ -n "$DOSSIER_TMP" ] && rm -rf "$DOSSIER_TMP"
+  DOSSIER_TMP=""
+  return 0
+fi
+# Cleanup guarantee: registered right after a successful worktree add, so an abort,
+# an early return or an interrupt cannot leak the temporary worktree.
+trap '_dossier_cleanup' EXIT
 DEVDOCS_PATH="${DOSSIER_TMP}/${DEVDOCS_REL}"
 
 DOSSIER_TIMESTAMP=$(date -u +"%Y-%m-%d")
@@ -508,6 +520,10 @@ DOSSIER_UPDATED_MODULES=""
 while IFS='|' read -r MOD_NAME MOD_GLOB MOD_PATH; do
   [ -n "$DOSSIER_TMP" ] || break
   [ -z "$MOD_GLOB" ] || [ -z "$MOD_PATH" ] && continue
+  # Reject traversal / absolute module paths: writes must stay inside the temp worktree.
+  case "$MOD_PATH" in
+    /*|..|../*|*/..|*/../*) echo "Phase C1.7: skipped module '${MOD_NAME}' - unsafe path '${MOD_PATH}'"; continue ;;
+  esac
   DOSSIER_ABS="${DEVDOCS_PATH}/${MOD_PATH}"
 
   MATCHED=0
@@ -586,11 +602,8 @@ DOSSIER_INIT_EOF
   DOSSIER_UPDATED_MODULES="${DOSSIER_UPDATED_MODULES} ${MOD_NAME}"
 
 done <<< "$MODULE_ENTRIES"
-```
 
-### Step 3: Commit in the temporary worktree, open a PR, post annotation
-
-```bash
+# --- Step 3: Commit in the temporary worktree, open a PR, post annotation ---
 DOSSIER_BRANCH="docs/dossier-{NUMBER}"
 DOSSIER_PR_URL=""
 if [ "${DRY_RUN:-false}" = "true" ]; then
@@ -624,10 +637,7 @@ elif [ -n "$DOSSIER_TMP" ] && [ -n "$DOSSIER_UPDATED_MODULES" ]; then
 fi
 
 # Always remove the temporary worktree (non-fatal); the main checkout was never modified.
-if [ -n "$DOSSIER_TMP" ]; then
-  git -C "${REPO_PATH}" worktree remove --force "$DOSSIER_TMP" >/dev/null 2>&1 || rm -rf "$DOSSIER_TMP"
-  git -C "${REPO_PATH}" worktree prune >/dev/null 2>&1 || true
-fi
+_dossier_cleanup
 
 if [ -n "$DOSSIER_PR_URL" ]; then
   gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:DOSSIER_UPDATED -->
@@ -640,6 +650,11 @@ on these modules will receive the updated knowledge through the devdocs channel 
 else
   echo "Phase C1.7: skipped - no dossier PR opened (see reasons above); continuing"
 fi
+}
+
+_dossier_run
+_dossier_cleanup
+trap - EXIT
 ```
 
 ---
