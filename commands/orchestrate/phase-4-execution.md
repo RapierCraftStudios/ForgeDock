@@ -2834,6 +2834,28 @@ When `CASCADE_MAX_AMPLIFICATION` is not `off`, and the current ratio is greater 
 
 **Amplification breaker (on by default — forge#3060):** `max_amplification` above only ever sees same-lineage refinements, but most cascade growth is *new-surface* P3 hardening notes on code the batch just wrote. The breaker therefore counts **all** cascade findings: while `AMPLIFICATION_BREAKER_TRIPPED=true` (the latest `CONVERGENCE_WINDOW` ratios are all `>= 1.0`; see the block below), every P3-and-below finding is deferred under rule 6 (below) regardless of lineage. Deferred P3s are not discarded — they stay eligible for the P3 batch sweep (`planP3BatchGroups()`, with `batchExclusionReason()` unchanged: security/billing/domain findings stay unbatched and individually triaged) and for Step 4F's post-drain re-evaluation. P1/P2 findings are admitted exactly as before. The breaker releases when the newest ratio drops below 1.0. It is independent of `orchestration.cascade.policy`; only an explicit `amplification_breaker: off` disables it.
 
+**Deterministic breaker check (MANDATORY on every dispatch path — engine CLI, Agent-spawn fallback, or a hand-driven orchestrator):** the in-spec bookkeeping above only runs when the Step 4B/4C bash runs. A batch driven through the Agent-spawn fallback never evaluated it and reached about 2 findings per merge (2026-10-08 audit). Before dispatching ANY `review-finding` issue at `priority:P3` or below, and after every completed merge, run `scripts/amplification-breaker.sh` against GitHub state. Its exit code is authoritative, and it overrides an in-memory `AMPLIFICATION_BREAKER_TRIPPED=false`:
+
+```bash
+AMP_SCRIPT=""
+for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}"; do
+  case "$_c" in /*) [ -z "$AMP_SCRIPT" ] && [ -f "$_c/scripts/amplification-breaker.sh" ] && AMP_SCRIPT="$_c/scripts/amplification-breaker.sh" ;; esac
+done
+if [ "$AMPLIFICATION_BREAKER" != "off" ]; then
+  if [ -n "$AMP_SCRIPT" ]; then
+    AMP_LINE=$(bash "$AMP_SCRIPT" --since "$BATCH_T0" -R {GH_REPO}); AMP_RC=$?
+  else
+    AMP_LINE="AMPLIFICATION: script not resolvable — fail closed"; AMP_RC=4
+  fi
+  echo "$AMP_LINE"   # include this line verbatim in the Step 4B/4C status update
+  # rc 3 (tripped) or 4 (unreadable / unresolved): defer every P3-and-below finding under rule 6
+  # into planP3BatchGroups() bounded batches. P1/P2 findings are admitted as before.
+  [ "$AMP_RC" -eq 3 ] || [ "$AMP_RC" -eq 4 ] && AMPLIFICATION_BREAKER_TRIPPED=true
+fi
+```
+
+A run that did not record `BATCH_T0` uses the coordination issue's creation time. An operator instruction such as "everything" or "pick up new issues" does not skip this check (see the override guardrail below).
+
 **Override guardrail (MANDATORY — forge#3060):** An operator directive that lifts the generation cap or token budget (`policy: all`, `--max-generation unlimited`, `--token-budget unlimited`, or a free-text request like "pick up any new issues") widens what is admitted at Phase 1/rule 1/rule 5; it MUST NOT leave P3 cascade unbounded. When such an override is active: (a) keep `AMPLIFICATION_BREAKER=on` unless the operator explicitly set `amplification_breaker: off`; (b) P1/P2 stay unlimited; (c) P3-and-below findings are never dispatched individually — they route through `planP3BatchGroups()` into bounded batches (`batch_max_generation` stays finite); (d) state the replacement bound in the Step 4B/4C status output. An orchestrator MUST NOT satisfy an override by simply deleting a bound without a replacement.
 
 **Status updates (MANDATORY):** every Step 4B/4C status update must include `amplification={FINDINGS_SPAWNED}/{MERGED_UNITS}={AMPLIFICATION_RATIO} breaker={AMPLIFICATION_BREAKER}/{tripped|clear} p3_paused={#AMPLIFICATION_BREAKER_DEFERRED[@]}` so the operator sees divergence before the pipeline does.

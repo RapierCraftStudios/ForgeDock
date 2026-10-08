@@ -570,13 +570,20 @@ CI gate refused PR #{PR_NUMBER}: dispatching remediation once to fix the failing
   echo "$CI_GATE_OUT"
   GATED_HEAD=$(printf '%s\n' "$CI_GATE_OUT" | sed -n 's/^CI_GATE_HEAD: //p' | head -1)
   # rc 3 = CI still running: re-run this block (up to 3 more times) before treating it as a failure.
-  if [ "$CI_GATE_RC" -eq 0 ]; then
+  # Note-disposition gate (same rule as review-pr.md Phase 8): findings without a recorded
+  # §6B.5 disposition must not merge, because that step is what bounds the review-finding cascade.
+  DISPO_JSON=$(gh api --paginate "repos/{GH_REPO}/issues/{PR_NUMBER}/comments" 2>/dev/null) || DISPO_JSON=""
+  FINDING_COUNT=$(printf '%s' "$DISPO_JSON" | jq -s '[.[][] | select(.body | test("<!-- FINDING:"))] | length' 2>/dev/null || echo "")
+  DISPOSITION_COUNT=$(printf '%s' "$DISPO_JSON" | jq -s '[.[][] | select(.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR") | select(.body | test("^<!-- FORGE:NOTE_DISPOSITION"))] | length' 2>/dev/null || echo "")
+  if [ -z "$DISPO_JSON" ] || [ -z "$FINDING_COUNT" ] || { [ "$FINDING_COUNT" -gt 0 ] && [ "${DISPOSITION_COUNT:-0}" -eq 0 ]; }; then
+    echo "REVIEW_RESULT: status: BLOCKED, blocker: note disposition missing"
+  elif [ "$CI_GATE_RC" -eq 0 ]; then
     gh pr merge {PR_NUMBER} {GH_FLAG} --merge --auto --match-head-commit "$GATED_HEAD" # allowlist:check-command-side-effects (CI-gated merge)
   else
     echo "REVIEW_RESULT: status: BLOCKED, blocker: ci gate not green (rc=${CI_GATE_RC})"
   fi
   ```
-  If the gate refuses: post the gate output as an issue comment, add `needs-human`, return `REVIEW_RESULT: status: BLOCKED` (blocker "ci gate not green"). If merge fails: post comment, add `needs-human`, return `REVIEW_RESULT: status: BLOCKED`
+  If the note-disposition gate refuses (`blocker: note disposition missing`): do NOT add `needs-human` — treat it like a stale review and re-invoke Phase R3 once under the `STALE_REREVIEW` bound so `/review-pr` records its §6B.5 disposition; only if that bound is exhausted, add `needs-human`. If the CI gate refuses: post the gate output as an issue comment, add `needs-human`, return `REVIEW_RESULT: status: BLOCKED` (blocker "ci gate not green"). If merge fails: post comment, add `needs-human`, return `REVIEW_RESULT: status: BLOCKED`
 
 ---
 
