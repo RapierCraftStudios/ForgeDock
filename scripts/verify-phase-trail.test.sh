@@ -287,6 +287,9 @@ OUT=$(MOCK_GH_JSON="$UT" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 1 ] && echo "$OUT" | grep -q 'MISSING: INVESTIGATOR' && echo "$OUT" | grep -q 'NOTE: .*untrusted authors were ignored' && ok "CONTRIBUTOR markers ignored with NOTE" || bad "contributor note (rc=$RC out=$OUT)"
 OUT=$(FORGE_TRAIL_TRUSTED_LOGINS=ext MOCK_GH_JSON="$UT" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
 [ $RC -eq 0 ] && ok "FORGE_TRAIL_TRUSTED_LOGINS accepts a CONTRIBUTOR login" || bad "trusted login override (rc=$RC out=$OUT)"
+# forge#3350: widening only the override list must not make CONTRIBUTOR trail markers count
+OUT=$(FORGE_TRAIL_OVERRIDE_ASSOCIATIONS="OWNER,MEMBER,COLLABORATOR,CONTRIBUTOR" MOCK_GH_JSON="$UT" bash "$VERIFY" 3061 -R o/r 2>/dev/null); RC=$?
+[ $RC -eq 1 ] && echo "$OUT" | grep -q 'MISSING: INVESTIGATOR' && ok "override list widened only: CONTRIBUTOR trail markers still ignored (#3350)" || bad "override-only widen trail (rc=$RC out=$OUT)"
 expect_pass "marker-only CONTEXT satisfies STANDARD" "$(mk minctx INV FP_STANDARD CONTRACT CONTEXT ARCH QG_PASS)"
 
 # -h is bounded by the END-HELP sentinel, not a hardcoded line range (#3147)
@@ -444,7 +447,9 @@ CDEC=(); for i in 1 2 3 4 5 6 7; do CDEC+=("$(ovc "cdecoy$i" User "2026-10-08T08
 expect_override "CONTRIBUTOR decoy flood does not starve a real override (#3307)" "$(ovf a3 "$(GOODC)" "${CDEC[@]}")"
 CONC=$(ovc concealed User "$AFTER" "$AFTER" "$HS" "$CUR_MISSING" "concealed membership" | assoc CONTRIBUTOR)
 expect_blocked "CONTRIBUTOR write approver is rejected under the default list (#3307)" "$(ovf a4 "$CONC")"
-FORGE_TRAIL_TRUSTED_ASSOCIATIONS="OWNER,MEMBER,COLLABORATOR,CONTRIBUTOR" expect_override "widened list accepts a CONTRIBUTOR write approver (#3307)" "$(ovf a4 "$CONC")"
+FORGE_TRAIL_OVERRIDE_ASSOCIATIONS="OWNER,MEMBER,COLLABORATOR,CONTRIBUTOR" expect_override "widened override list accepts a CONTRIBUTOR write approver (#3307, #3350)" "$(ovf a4 "$CONC")"
+FORGE_TRAIL_TRUSTED_ASSOCIATIONS="OWNER,MEMBER,COLLABORATOR,CONTRIBUTOR" expect_override "trail list widened still widens override by default inheritance (#3350)" "$(ovf a4i "$CONC")"
+FORGE_TRAIL_OVERRIDE_ASSOCIATIONS="" expect_blocked "empty override list yields no candidates with default trail list (#3350)" "$(ovf a4e "$(GOODC)")"
 FORGE_TRAIL_TRUSTED_ASSOCIATIONS="OWNER" expect_blocked "narrowed list rejects a MEMBER approver (#3307)" "$(ovf a5 "$(ovc memb User "$AFTER" "$AFTER" "$HS" "$CUR_MISSING" "r" | assoc MEMBER)")"
 FORGE_TRAIL_TRUSTED_ASSOCIATIONS="" expect_blocked "empty list yields no override candidates (fail closed) (#3307)" "$(ovf a6 "$(GOODC)")"
 # Case-variant duplicate logins cost one lookup / one slot
@@ -457,7 +462,7 @@ OUT=$(MOCK_PERM_LOG="$PL" MOCK_GH_JSON="$(ovf a7 "$(GOODC)" "${CVV[@]}")" bash "
 MIXD=("${PDEC[@]}" "${CDEC[@]}")
 PL="$TMP_FX/permlog-decoy"; : > "$PL"
 ERR=$(MOCK_PERM_LOG="$PL" MOCK_GH_JSON="$(ovf a8 "${MIXD[@]}")" bash "$VERIFY" 3061 -R o/r --head-sha "$HS" 2>&1 >/dev/null); 
-[ ! -s "$PL" ] && echo "$ERR" | grep -q 'NOTE: 14 override candidate(s) ignored: author_association not in trusted set' && ! echo "$ERR" | grep -q 'pdecoy\|cdecoy' \
+[ ! -s "$PL" ] && echo "$ERR" | grep -q 'NOTE: 14 override candidate(s) ignored: author_association not in override-approver set' && ! echo "$ERR" | grep -q 'pdecoy\|cdecoy' \
   && ok "decoys trigger no permission lookups; NOTE carries the count and no logins (#3307)" || bad "decoy no-call (log=$(cat "$PL") err=$ERR)"
 # 6th distinct unreadable login is cut off: the cap stops the scan before an older real approver
 UNR=(); for i in 1 2 3 4 5 6 7 8; do UNR+=("$(ovc "unr$i" User "2026-10-08T10:0$i:00Z" "2026-10-08T10:0$i:00Z" "$HS" "$CUR_MISSING" "unreadable")"); done

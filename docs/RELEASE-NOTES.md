@@ -4,9 +4,9 @@ Operator-facing notes for behavior changes that need action or awareness. Newest
 
 ## Override candidate filter hardening (forge#3307)
 
-The break-glass override prefilter now uses `FORGE_TRAIL_TRUSTED_ASSOCIATIONS` instead of a hardcoded `OWNER,MEMBER,COLLABORATOR` list (default behavior is unchanged). An empty list yields no override candidates. The verifier prints `NOTE: N override candidate(s) ignored: author_association not in trusted set` to stderr when candidates are filtered this way, so an approver with concealed org membership (shown as `CONTRIBUTOR`/`NONE`) is diagnosable.
+The break-glass override prefilter now uses `FORGE_TRAIL_OVERRIDE_ASSOCIATIONS` instead of a hardcoded `OWNER,MEMBER,COLLABORATOR` list. It defaults to the resolved `FORGE_TRAIL_TRUSTED_ASSOCIATIONS` value, so default behavior is unchanged, and it never affects which FORGE markers count toward the merge gate. An empty list yields no override candidates. The verifier prints `NOTE: N override candidate(s) ignored: author_association not in override-approver set` to stderr when candidates are filtered this way, so an approver with concealed org membership (shown as `CONTRIBUTOR`/`NONE`) is diagnosable.
 
-Action: if your override approvers have concealed membership, add `CONTRIBUTOR` to `FORGE_TRAIL_TRUSTED_ASSOCIATIONS`.
+Action: if your override approvers have concealed membership, add `CONTRIBUTOR` to `FORGE_TRAIL_OVERRIDE_ASSOCIATIONS`. Do not add it to the trail list: that lets any contributor forge FORGE markers.
 
 ## Phase-trail break-glass override (forge#3152)
 
@@ -29,7 +29,7 @@ Merging now requires a complete phase trail, verified by `scripts/verify-phase-t
 Issues whose `FORGE:BUILDER:COMPLETE` comment was last updated before `FORGE_TRAIL_QG_SINCE` (default `2026-10-07T03:40:12Z`) have `QUALITY_GATE` waived. Set it to an empty string to disable the grace.
 
 Actions:
-- Pipelines that run under a non-Bot login without OWNER/MEMBER/COLLABORATOR association must set `FORGE_TRAIL_TRUSTED_LOGINS` (or widen `FORGE_TRAIL_TRUSTED_ASSOCIATIONS`).
+- Pipelines that run under a non-Bot login without OWNER/MEMBER/COLLABORATOR association must set `FORGE_TRAIL_TRUSTED_LOGINS` (preferred; widening `FORGE_TRAIL_TRUSTED_ASSOCIATIONS` also lets those associations forge markers).
 - Make sure `FORGEDOCK_HOME` or `FORGE_HOME` resolves to the ForgeDock install (required on Codex).
 - Set `FORGE_SKILL_NAMESPACE` if skill-prefix auto-detection picks the wrong runtime.
 

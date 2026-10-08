@@ -860,7 +860,8 @@ These variables are read from the operator's runner environment, not from `forge
 | `FORGE_HOME` | unset | Absolute path to the ForgeDock clone. Used when `FORGEDOCK_HOME` is unset. Required for Codex, which has no `~/.claude` fallback. Relative values are ignored. |
 | `FORGE_SKILL_NAMESPACE` | auto-detected | Forces the skill prefix and nesting separator for `Skill(...)` calls. `forgedock` = `forgedock:` / `:`; `none` = empty / `:`; `codex` = `forge-` / `-`; `opencode` = empty / `-`. Any other value is an error. When unset, `FORGE_RUNTIME` (`codex` or `opencode`) is used, then the available-skills list. |
 | `FORGE_TRAIL_TRUSTED_LOGINS` | empty | Comma-separated GitHub logins whose FORGE markers count toward the phase-trail merge gate. Matching is case-sensitive. |
-| `FORGE_TRAIL_TRUSTED_ASSOCIATIONS` | `OWNER,MEMBER,COLLABORATOR` | Comma-separated `author_association` values whose FORGE markers count toward the merge gate. The same list also prefilters break-glass override candidates; an empty list means no override candidates. An approver with concealed org membership can show `CONTRIBUTOR`/`NONE`, so add `CONTRIBUTOR` to accept them. |
+| `FORGE_TRAIL_TRUSTED_ASSOCIATIONS` | `OWNER,MEMBER,COLLABORATOR` | Comma-separated `author_association` values whose FORGE markers count toward the merge gate. Do not add `CONTRIBUTOR` here: any listed association can post FORGE markers that satisfy the gate. |
+| `FORGE_TRAIL_OVERRIDE_ASSOCIATIONS` | the resolved `FORGE_TRAIL_TRUSTED_ASSOCIATIONS` value | Comma-separated `author_association` values prefiltering break-glass override candidates (the permission API stays authoritative). Never affects which FORGE markers count toward the gate. An approver with concealed org membership can show `CONTRIBUTOR`/`NONE`, so widen this variable (not the trail list) to accept them. An explicitly empty value means no override candidates. |
 | `FORGE_TRAIL_PIPELINE_LOGINS` | empty | Comma-separated GitHub logins (case-insensitive) that are the pipeline's own identity and can never approve a phase-trail break-glass override. The authors of trusted FORGE marker comments on the issue are added automatically. |
 | `FORGE_TRAIL_QG_SINCE` | `2026-10-07T03:40:12Z` | ISO-8601 UTC cutoff for the legacy `FORGE:QUALITY_GATE` grace. An issue whose trusted `FORGE:BUILDER:COMPLETE` comment was last updated before this time has `QUALITY_GATE` waived. Set to an empty string to disable the grace. A malformed or future value (including a runner clock earlier than this default) fails closed: the verifier exits 2, an infrastructure block rather than `MISSING`. |
 
@@ -878,6 +879,8 @@ Pipelines that run under a human login with association `CONTRIBUTOR`, `NONE` or
 export FORGE_TRAIL_TRUSTED_LOGINS="my-pipeline-login,other-login"   # preferred: name the identity
 export FORGE_TRAIL_TRUSTED_ASSOCIATIONS="OWNER,MEMBER,COLLABORATOR,CONTRIBUTOR"   # broader
 ```
+
+Warning: widening `FORGE_TRAIL_TRUSTED_ASSOCIATIONS` to include `CONTRIBUTOR` lets any contributor post forged `FORGE:*` markers that satisfy the merge gate. To only accept override approvers with concealed org membership, widen `FORGE_TRAIL_OVERRIDE_ASSOCIATIONS` instead.
 
 #### Break-glass override
 
