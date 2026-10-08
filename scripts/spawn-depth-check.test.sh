@@ -37,6 +37,9 @@ t "env non-integer unknown"       0 "SPAWN_DEPTH: UNKNOWN" CLAUDE_CODE_MAX_SUBAG
 # Non-Claude runtimes skip.
 t "codex skip"                    0 "SPAWN_DEPTH: SKIP"    FORGE_RUNTIME=codex CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1 --
 t "opencode marker skip"          0 "SPAWN_DEPTH: SKIP"    OPENCODE_SESSION_ID=x CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1 --
+# Leading zeros are decimal (not octal).
+t "router layer 08 decimal"        1 "SPAWN_DEPTH: FAIL"    FORGE_CLAUDE_VERSION=2.1.294 -- --router-layer 08
+t "env depth 09 decimal"           0 "SPAWN_DEPTH: OK"      CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=09 -- --router-layer 1
 # Usage errors.
 t "bad router layer"              2 "spawn-depth-check:"   -- --router-layer x
 t "unknown flag"                  2 "usage:"               -- --nope

@@ -23,6 +23,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$ROUTER_LAYER" in ''|*[!0-9]*) echo "spawn-depth-check: --router-layer must be a non-negative integer" >&2; exit 2 ;; esac
+ROUTER_LAYER=$((10#$ROUTER_LAYER))   # leading zeros are decimal, not octal
 
 # Non-Claude runtimes (Codex, OpenCode) have their own sub-agent models; this check does not apply.
 if [ "${FORGE_RUNTIME:-}" = "codex" ] || [ "${FORGE_RUNTIME:-}" = "opencode" ] ||
@@ -39,7 +40,7 @@ if [ -n "$ENV_DEPTH" ]; then
   case "$ENV_DEPTH" in
     *[!0-9]*) echo "SPAWN_DEPTH: UNKNOWN (CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH='${ENV_DEPTH}' is not an integer)"; exit 0 ;;
   esac
-  DEPTH="$ENV_DEPTH"; SOURCE="CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"
+  DEPTH=$((10#$ENV_DEPTH)); SOURCE="CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"
 else
   VERSION="${FORGE_CLAUDE_VERSION:-}"
   [ -n "$VERSION" ] || VERSION=$(claude --version 2>/dev/null | head -1 || true)
@@ -49,6 +50,7 @@ else
     exit 0
   fi
   MAJ=${VERSION%%.*}; REST=${VERSION#*.}; MIN=${REST%%.*}; PAT=${REST#*.}
+  MAJ=$((10#$MAJ)); MIN=$((10#$MIN)); PAT=$((10#$PAT))
   if [ "$MAJ" -gt 2 ] || { [ "$MAJ" -eq 2 ] && [ "$MIN" -gt 1 ]; }; then DEPTH=3
   elif [ "$MAJ" -eq 2 ] && [ "$MIN" -eq 1 ]; then
     if [ "$PAT" -ge 219 ]; then DEPTH=3

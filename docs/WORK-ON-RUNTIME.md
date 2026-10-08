@@ -75,7 +75,8 @@ normal remediation path.
 | `work-on` (router) | — | no | user / orchestrator worker | 0 / 1 |
 | `work-on:investigate`, `work-on:decompose`, `work-on:build`, `work-on:close` | yes | no | router | 1 / 2 |
 | `work-on:build:{context,architect,implement,validate}` | yes | no | `work-on:build` (R2) | 2 / 3 |
-| `quality-gate` | yes | no | validate, review (R2) | 3 / 4 |
+| `quality-gate` | yes | no | validate (R2) | 3 / 4 |
+| `quality-gate` (stale-review re-gate) | yes | no | review (R2) | 2 / 3 |
 | `work-on:review` → `/review-pr` | yes | **yes** | router only (R1) | 1 / 2 |
 | `work-on:remediate` → `/review-pr` | yes | **yes** | router only (R1) | 1 / 2 |
 | `/review-pr` domain reviewers | Agent | no (leaves) | `/review-pr` | 2 / 3 |
