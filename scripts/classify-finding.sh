@@ -21,8 +21,13 @@
 #                 review finding. Default `none`.
 #   --text/--text-file  Finding title + body + affected file paths, used for the
 #                 content-based safety exemption.
+#   --inpr-diff <F> --file <P>  In-PR fix gate (#3387, narrowed): F is a file listing the
+#                 PR's changed paths, one per line; P is the finding's file path. When both
+#                 are given, a MEDIUM CONFIRMED finding whose path is in the PR diff is
+#                 classified INPR_FIX — fix it on the PR before merge instead of filing it.
+#                 Callers pass these only for the first fix round of an auto-merge review.
 #
-# Output (stdout, one line): `ISSUE <reason>` or `NOTE <reason>`.
+# Output (stdout, one line): `ISSUE <reason>`, `NOTE <reason>` or `INPR_FIX <reason>`.
 # Exit codes: 0 classified, 2 usage error.
 #
 # Rules (forge#3060, tightened after the 2026-10-08 cascade audit):
@@ -50,9 +55,11 @@ CONFIDENCE=""
 AGENT=""
 LINEAGE="none"
 TEXT=""
+INPR_DIFF=""
+FINDING_FILE=""
 
 usage() {
-  echo "ERROR: Usage: classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>] [--lineage none|review-finding] [--text <T> | --text-file <F>]" >&2
+  echo "ERROR: Usage: classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>] [--lineage none|review-finding] [--text <T> | --text-file <F>] [--inpr-diff <F> --file <P>]" >&2
   exit 2
 }
 
@@ -63,6 +70,8 @@ while [ "$#" -gt 0 ]; do
     --agent)      [ "$#" -ge 2 ] || usage; AGENT="$2"; shift 2 ;;
     --lineage)    [ "$#" -ge 2 ] || usage; LINEAGE="$2"; shift 2 ;;
     --text)       [ "$#" -ge 2 ] || usage; TEXT="$2"; shift 2 ;;
+    --inpr-diff)  [ "$#" -ge 2 ] || usage; INPR_DIFF="$2"; shift 2 ;;
+    --file)       [ "$#" -ge 2 ] || usage; FINDING_FILE="$2"; shift 2 ;;
     --text-file)
       [ "$#" -ge 2 ] || usage
       [ -r "$2" ] || { echo "ERROR: --text-file not readable: $2" >&2; exit 2; }
@@ -76,6 +85,10 @@ case "$LINEAGE" in
   *) echo "ERROR: --lineage must be 'none' or 'review-finding' (got '$LINEAGE')" >&2; exit 2 ;;
 esac
 
+if [ -n "$INPR_DIFF" ] && [ ! -r "$INPR_DIFF" ]; then
+  echo "ERROR: --inpr-diff not readable: $INPR_DIFF" >&2; exit 2
+fi
+
 upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]'; }
 SEV=$(upper "$SEVERITY")
 CONF=$(upper "$CONFIDENCE")
@@ -85,6 +98,17 @@ case "$SEV" in
   MEDIUM|LOW) ;;
   *) echo "ISSUE unparseable-severity"; exit 0 ;;
 esac
+
+# In-PR fix gate (#3387, narrowed). MEDIUM CONFIRMED is an ISSUE under every rule below
+# (lineage included), so checking here changes only where it is handled, never whether.
+if [ -n "$INPR_DIFF" ] && [ -n "$FINDING_FILE" ] && [ "$SEV" = "MEDIUM" ] && [ "$CONF" = "CONFIRMED" ]; then
+  _path="${FINDING_FILE#./}"; _path="${_path%%:*}"
+  if grep -Fxq -- "$_path" "$INPR_DIFF"; then
+    echo "INPR_FIX medium-confirmed-in-diff"
+    exit 0
+  fi
+fi
+
 
 # Safety exemption. Keywords match whole words, where `_`, `-`, `/` and other
 # punctuation separate words (so `auth_service` matches, `author` does not).

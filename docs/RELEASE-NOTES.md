@@ -2,6 +2,17 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## In-PR fix round for CONFIRMED MEDIUM findings (#3387, narrowed)
+
+Under `--auto-merge` with `--issue` (the `/work-on` pipeline), a review finding that is **MEDIUM + CONFIRMED** in a file the PR itself changed is no longer merged and filed as a follow-up issue. `/review-pr` §6B.6 posts a `FORGE:INPR_FIX` work order on the PR, and Phase 8 holds the merge for that head (`blocker: in-pr fix required`). `/work-on` review then runs **one** remediation round (bound: `FORGE:INPR_REMEDIATION` on the issue) that fixes exactly those findings and re-reviews.
+
+- **Narrow by design.** LIKELY/POSSIBLE, findings outside the PR's changed files, and standalone reviews are unchanged. HIGH/CRITICAL already block through §7B.
+- **One round only.** Anything still present on the re-review is filed as an issue, as before.
+- **Never a `needs-human` stop because of this gate.** If the round does not land, `/work-on` posts `FORGE:INPR_FIX_WAIVED` for the current head and re-reviews once, so the findings are filed and the PR merges as it did before.
+- **A missing finding path never gates.** If a finding has no file path, or the PR diff cannot be read, it is filed as before.
+
+Action: none. Expect a few PRs to take one extra fix round before merging, and fewer MEDIUM `review-finding` issues.
+
 ## Cascade follow-ups: script resolution, domain-agent notes, verification in worktrees, spec bash check
 
 - **Script resolution works in consumer repos.** `/review-pr` §6B.5 and the orchestrator breaker now find `classify-finding.sh` and `amplification-breaker.sh` through the newest pinned ForgeDock plugin cache under `CLAUDE_CONFIG_DIR`, then `~/.claude`. They also check `FORGEDOCK_HOME` and the repo's own `scripts/`, as before. Previously the plugin-root placeholder was often left unsubstituted in forked review runs, so 4 of 9 AlterLab reviews fell back to `classifier=manual`.
