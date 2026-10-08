@@ -62,3 +62,9 @@ Cite: #2598, PR #2605.
 PR #3238 touched `orchestrate`. See FORGE:BUILDER comment on issue #3181 for full change list.
 Key gotcha recorded: phase-trail F/R marker matches must anchor with startswith, not contains, so quoted markers cannot forge a release.
 Cite: #3181 / PR #3238.
+
+## Entry 2026-10-08 — Fix: orchestrator login for trail-marker trust matches posting identity (#3205)
+
+PR #3252 touched `orchestrate`. See FORGE:BUILDER comment on issue #3205 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3205 / PR #3252.
