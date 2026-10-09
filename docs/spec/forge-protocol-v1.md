@@ -510,6 +510,16 @@ These markers carry no Markdown body; their presence is the signal.
 Error markers signal that automated processing stopped and human attention is
 needed.
 
+**Build diff-size markers** (posted to issue comments by the build phase, `work-on:build` B5.5):
+
+| Marker | Category | Meaning |
+|--------|----------|---------|
+| `<!-- FORGE:DIFF_SIZE -->` | Lifecycle (no completion sentinel) | Measured diff size of the staged build: `diff_lines`, `excluded_lines`, `threshold`, `result: OK \| OVERRIDDEN \| OVER`, and on `OVER` a `### Split Proposal`. Refreshed in place; readers take the latest trusted comment. Consumed by decompose (plan source) and close (records `diff_lines` in `FORGE:TRAJECTORY`) |
+| `<!-- FORGE:SIZE_OVERRIDE -->` | Control | Posted by a human to let an over-threshold build proceed. Valid only from a trusted author and with a non-empty justification on the line after the marker |
+
+Both lookups are anchored at the start of the comment body and trust-filtered
+(`scripts/trusted-comments.sh`); an unreadable lookup fails closed.
+
 ---
 
 ### 4.4 Design pipeline annotations

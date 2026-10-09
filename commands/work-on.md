@@ -72,7 +72,7 @@ A sub-agent that receives no resolved value applies the same rule itself.
 |------|-------|----------------|-----------------|
 | 0 | Resolve & resume | — (router) | Always first |
 | 1 | Investigate | `work-on:investigate` | No `FORGE:INVESTIGATOR` comment containing `INVESTIGATION:COMPLETE` or `INVESTIGATION:INVALID` |
-| 2 | Decompose | `work-on:decompose` | `INVESTIGATE_RESULT.decompose: YES` (or resume: investigation says decompose YES and no `FORGE:DECOMPOSED`) |
+| 2 | Decompose | `work-on:decompose` | `INVESTIGATE_RESULT.decompose: YES` (or resume: investigation says decompose YES and no `FORGE:DECOMPOSED`) or `BUILD_RESULT: NEEDS_DECOMPOSE` (`FORGE:DIFF_SIZE` over, no override) |
 | 3 | Build | `work-on:build` | Investigation complete, decompose NO, no `FORGE:BUILDER:COMPLETE` |
 | 4 | Review (push, PR, review, merge) | `work-on:review` | `FORGE:BUILDER:COMPLETE` present and PR not merged |
 | 4R | Remediation handoff | `work-on:remediate` | `REVIEW_RESULT: status: NEXT, next: remediate` (CI gate red or in-PR fix requested) |
@@ -715,6 +715,7 @@ The build phase owns classification (`FORGE:FAST_PATH`), the worktree, the `work
 | `COMPLETE` | Marker gate (below) → record `BRANCH` and `WORKTREE_PATH` from the result → Phase 4 |
 | `ALREADY_DONE` | Record `BRANCH`/`WORKTREE_PATH` (from the result, or `git worktree list` for the issue branch) → Phase 4 |
 | `INVESTIGATION_COMPLETE` | Investigation-type task: deliverable issues were filed and the original closed by the phase → Phase 5 with `--terminal-state investigation` (no review) |
+| `NEEDS_DECOMPOSE` | The build's diff-size gate found the staged diff over `build.diff_size.threshold` with no `FORGE:SIZE_OVERRIDE` (split proposal in `FORGE:DIFF_SIZE`; not a failure, no `needs-human`) → run Phase 2 (`work-on:decompose`) and apply its `DECOMPOSE_RESULT` table; build never calls decompose itself |
 | `BLOCKED` | Terminal: confirm `needs-human` is present (the phase adds it with the blocker) and STOP |
 
 **Marker gate — Phase 3 exit**: a `FORGE:BUILDER` comment must contain `FORGE:BUILDER:COMPLETE`. If absent, invoke `work-on:build` once more with the same args; if still absent, post `<!-- FORGE:GATE_FAILURE -->` ("builder completion marker missing after one re-invoke"), add `needs-human`, remove `workflow:building`, STOP. <!-- forge#1418 -->
