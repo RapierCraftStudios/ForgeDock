@@ -155,7 +155,7 @@ Resolve the staging→main PR number and post a routing marker immediately. This
 # The argument string may be: a PR number, "staging", "feature", or "staging:feature"
 # Only the first token is the PR ref; later tokens are flags (--auto-merge, --issue, ...) <!-- allowlist:check-command-side-effects -->
 # The loader substitutes the text before bash parses it, so read it from a quoted heredoc (never a quoted
-# assignment) and reject any string with a quote, backtick, dollar sign, backslash or newline. <!-- Added: forge#3466 -->
+# assignment) and reject any string with a quote, backtick, dollar sign, backslash, newline or tab. <!-- Added: forge#3466 -->
 # NONCE RULE: before running, replace NONCE in BOTH delimiter lines with a fresh random hex string (e.g. `openssl rand -hex 16`) not present in the argument text. <!-- Added: forge#3466 -->
 IFS= read -r -d '' STAGING_ARGS_RAW <<'FORGE_ARGS_EOF_NONCE'
 $ARGUMENTS
@@ -163,8 +163,8 @@ FORGE_ARGS_EOF_NONCE
 STAGING_ARGS_RAW="${STAGING_ARGS_RAW%$'\n'}"
 STAGING_ARGS_REJECTED=false
 case "$STAGING_ARGS_RAW" in
-  *'"'*|*'`'*|*'$'*|*'\'*|*$'\n'*)
-    echo "review-pr-staging: rejected argument string (contains a quote, backtick, dollar sign, backslash or newline) - nothing parsed" >&2
+  *'"'*|*'`'*|*'$'*|*'\'*|*$'\n'*|*$'\t'*)
+    echo "review-pr-staging: rejected argument string (contains a quote, backtick, dollar sign, backslash, newline or tab) - nothing parsed" >&2
     STAGING_ARGS_REJECTED=true; STAGING_ARGS_RAW="" ;;
 esac
 PR_ARG="${STAGING_ARGS_RAW%% *}"
@@ -172,7 +172,9 @@ PR_ARG_NUM=$(printf '%s' "$PR_ARG" | sed -nE 's#^(https?://[^ ]*/pull/)?([0-9]+)
 if [ -n "$PR_ARG_NUM" ]; then
   PR_NUMBER="$PR_ARG_NUM"
 elif [ "$STAGING_ARGS_REJECTED" = true ]; then
-  PR_NUMBER=""  # rejected string: do not fall through to the open staging PR lookup
+  # Rejected string: stop. Never fall through to the open staging PR lookup or run later phases with no PR. <!-- Added: forge#3466 -->
+  echo "review-pr-staging: rejected argument string - stopping (nothing reviewed, nothing posted)" >&2
+  exit 1
 else
   # Find the open staging→main PR
   PR_NUMBER=$(gh pr list ${GH_FLAG} \

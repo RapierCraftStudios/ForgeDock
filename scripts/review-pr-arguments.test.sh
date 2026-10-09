@@ -27,6 +27,9 @@ if [ -z "$others" ]; then ok; else bad "unexpected \$ARGUMENTS use"; echo "$othe
 for f in "$SPEC" "$STAGING"; do
   fenced=$(awk '/^```/{in_f=!in_f; next} in_f && /ARGUMENTS/ && $0 != "$ARGUMENTS" {print FILENAME": "NR": "$0}' "$f")
   if [ -z "$fenced" ]; then ok; else bad "placeholder inside a bash fence outside the heredoc body"; echo "$fenced" | sed 's/^/    /'; fi
+  # ...and the standalone heredoc body line appears exactly once (a second bare line would be a second splice)
+  bare=$(awk '/^```/{in_f=!in_f; next} in_f && $0 == "$ARGUMENTS" {n++} END{print n+0}' "$f")
+  if [ "$bare" = 1 ]; then ok; else bad "$(basename "$f"): expected exactly 1 bare placeholder line in bash fences, found $bare"; fi
 done
 
 # Test 3: parse block extracted from the spec
@@ -147,6 +150,31 @@ touch $SENTINEL"; do
   elif [ "$got" = "|true" ] && grep -q 'rejected argument string' "$ERR"; then ok
   else bad "staging injection not rejected: '$got'"; fi
 done
+
+# Test 7: Phase -1 stops on an empty PR_NUMBER before any `gh pr view` (gh falls back to the current-branch PR)
+GUARD=$(awk '/^  if \[ -z "\$PR_NUMBER" \]; then$/{p=1} p{print} p && /^  fi$/{exit}' "$SPEC")
+if [ -n "$GUARD" ]; then ok; else bad "Phase -1 empty-PR_NUMBER guard not found"; fi
+g_line=$(grep -n '^  if \[ -z "\$PR_NUMBER" \]; then$' "$SPEC" | head -1 | cut -d: -f1)
+v_line=$(grep -n '^  PR_ROUTE_INFO=\$(gh pr view' "$SPEC" | head -1 | cut -d: -f1)
+if [ -n "$g_line" ] && [ -n "$v_line" ] && [ "$g_line" -lt "$v_line" ]; then ok; else bad "guard does not precede the Phase -1 gh pr view"; fi
+run_route() { gen_script "$BLOCK"$'\n'"$GUARD" "$1" "$WORK/route.sh" 'echo REACHED'; : > "$ERR"; (cd "$WORK" && "${BASH:-bash}" "$WORK/route.sh" 2>"$ERR"); }
+for a in "\"; touch $SENTINEL; \"" "--thorough" ""; do
+  rm -f "$SENTINEL"; got=$(run_route "$a"); rc=$?
+  if [ -e "$SENTINEL" ]; then bad "route: injected command ran"; rm -f "$SENTINEL"
+  elif [ "$rc" -ne 0 ] && [ -z "$got" ] && grep -q 'no PR number resolved' "$ERR"; then ok
+  else bad "route did not stop for '$a': rc=$rc out='$got'"; fi
+done
+got=$(run_route "3401 --auto-merge --issue 3398"); if [ "$got" = REACHED ]; then ok; else bad "route stopped a valid PR number: '$got'"; fi
+
+# Test 8: the whole staging fence stops (non-zero, no REVIEW_ROUTE post) on a rejected string
+STAGING_FENCE=$(awk '/^```bash/{buf=""; in_f=1; next} /^```$/{if (in_f && buf ~ /STAGING_ARGS_RAW/) {printf "%s", buf; exit}; in_f=0; next} in_f{buf=buf $0 "\n"}' "$STAGING")
+if [ -n "$STAGING_FENCE" ]; then ok; else bad "staging fence not found"; fi
+run_stg_fence() { gen_script "$STAGING_FENCE" "$1" "$WORK/stgf.sh" 'echo REACHED'; : > "$ERR"; (cd "$WORK" && "${BASH:-bash}" "$WORK/stgf.sh" 2>"$ERR"); }
+got=$(run_stg_fence "\$(touch $SENTINEL)"); rc=$?
+if [ ! -e "$SENTINEL" ] && [ "$rc" -ne 0 ] && [ -z "$got" ] && grep -q 'stopping' "$ERR"; then ok; else bad "staging fence did not stop on rejection: rc=$rc out='$got'"; rm -f "$SENTINEL"; fi
+got=$(run_stg_fence "3401"); if printf '%s' "$got" | grep -q REACHED; then ok; else bad "staging fence stopped a valid PR number: '$got'"; fi
+got=$(run_staging "3401	--auto-merge"); if [ "$got" = "|true" ]; then ok; else bad "staging tab not rejected: '$got'"; fi
+expect_rejected "tab separator" "3401	--auto-merge	--issue	3398"
 
 echo "review-pr-arguments: $pass passed, $fail failed"
 [ "$fail" = 0 ]
