@@ -164,7 +164,7 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR") | not) | {author: .user.login, body: .body}'
 ```
 
-Scan non-agent comments for override signals — phrases like "do not", "do NOT", "instead", "revert", "remove this", "override", "actually", or explicit disagreement with the investigation's recommendation. If an override comment is found from a repo owner or admin (not a bot):
+Ignore machine-posted marker comments (`FORGE:DIFF_SIZE`, `FORGE:SIZE_OVERRIDE`) in this scan: a `FORGE:DIFF_SIZE` comment is a plan source (below), never an owner override direction. Scan non-agent comments for override signals — phrases like "do not", "do NOT", "instead", "revert", "remove this", "override", "actually", or explicit disagreement with the investigation's recommendation. If an override comment is found from a repo owner or admin (not a bot):
 
 1. **Document the override**: Note which direction the owner is steering (e.g., "remove the feature" vs. investigation's "keep with warnings")
 2. **Re-derive sub-issue scopes**: Derive sub-issue titles, bodies, and file scope from the override direction — NOT from the original investigation recommendation. The investigation's Decomposition Assessment may list sub-issues that are now stale or contradictory with the override.
@@ -177,6 +177,20 @@ Scan non-agent comments for override signals — phrases like "do not", "do NOT"
 
 Extract from investigation report:
 - Decomposition Assessment section: list of proposed sub-issues with titles and dependencies
+
+**Size-gate plan source** <!-- Added: forge#3450 -->: when the build's diff-size gate routed here, the investigation said no decomposition, so its assessment lists no sub-issues. Read the latest TRUSTED `FORGE:DIFF_SIZE` comment (anchored, through `scripts/trusted-comments.sh`; the Script resolution block applies) and use it when it has `result: OVER`:
+
+```bash
+# <Script resolution block, verbatim>
+set -o pipefail
+TRUSTED_SCRIPT="${UNIVERSAL_DIR:+$UNIVERSAL_DIR/trusted-comments.sh}"
+if [ -n "$TRUSTED_SCRIPT" ] && [ -f "$TRUSTED_SCRIPT" ]; then
+  SIZE_PLAN=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:DIFF_SIZE' | jq -r 'select(type == "string")' ) \
+    && echo "SIZE_PLAN_READ=ok" || echo "SIZE_PLAN_READ=FAILED"
+else echo "SIZE_PLAN_READ=FAILED"; fi
+```
+
+A `FAILED` read or a comment without `result: OVER` means there is no size-gate plan (the assessment rules below then apply unchanged). Its `### Split Proposal` lines (`- **{title}** — {files}`) are the proposed sub-issues, in dependency order, for Phase D2.
 - Milestone (from issue metadata)
 - Priority label (P0/P1/P2) from issue labels
 
@@ -203,7 +217,7 @@ If `PARENT_REF` is non-empty → BLOCKED, blocker: "Issue #{NUMBER} is a sub-iss
 
 **Guard 2 — investigation report present**: If the FORGE:INVESTIGATOR comment is absent → BLOCKED, blocker: "No investigation report found — run investigate first".
 
-**Guard 3 — decomposition plan present**: If the investigation report has no Decomposition Assessment section, OR the assessment does not list any sub-issues → BLOCKED, blocker: "Investigation report has no decomposition plan — re-run investigate with explicit decomposition scope".
+**Guard 3 — decomposition plan present**: If the investigation report has no Decomposition Assessment section, OR the assessment does not list any sub-issues, AND there is no trusted `FORGE:DIFF_SIZE` comment with `result: OVER` and a `### Split Proposal` (the size-gate plan source from D0) → BLOCKED, blocker: "Investigation report has no decomposition plan — re-run investigate with explicit decomposition scope".
 
 **Resume check**:
 
@@ -246,7 +260,7 @@ If `GIST_URLS` is non-empty, a `## Prior Investigation` section will be appended
 
 ## Phase D2: Design Sub-Issues
 
-From the Decomposition Assessment in the investigation report (adjusted for any owner override detected in Phase D0), extract:
+From the Decomposition Assessment in the investigation report (adjusted for any owner override detected in Phase D0), or, when the assessment lists none, from the size-gate `### Split Proposal` in the trusted `FORGE:DIFF_SIZE` comment (Phase D0), extract:
 1. Sub-issue titles (in dependency order — independent issues first)
 2. Dependencies between sub-issues (if issue B depends on issue A, A is created first)
 3. Brief description for each sub-issue body

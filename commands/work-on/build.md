@@ -23,7 +23,7 @@ argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --base {PR_BAS
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (classification, label transitions) stay at this tier because they are interleaved with the reasoning-heavy child phases in the same run. <!-- Added: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
-**CRITICAL: You MUST execute ALL phases B0–B6.5 in order. Every child (B3 context, B4 architect, B5 implement, B6 validate) is invoked via `Skill(...)` — each is a forked sub-skill with its own isolated context. B3 and B4 are invoked for every complexity band except where the band is TRIVIAL or INVESTIGATION (B2/B2.1/B2.5 are also skipped for INVESTIGATION); the children post their own skip markers, so a skipped child is still visible on the issue. Skipping a child without the band justification degrades build quality and fails the phase-trail check.**
+**CRITICAL: You MUST execute ALL phases B0–B6.5 (including B5.5) in order. Every child (B3 context, B4 architect, B5 implement, B6 validate) is invoked via `Skill(...)` — each is a forked sub-skill with its own isolated context. B3 and B4 are invoked for every complexity band except where the band is TRIVIAL or INVESTIGATION (B2/B2.1/B2.5 are also skipped for INVESTIGATION); the children post their own skip markers, so a skipped child is still visible on the issue. Skipping a child without the band justification degrades build quality and fails the phase-trail check.**
 
 **Synchronous child consumption**: each child `Skill(...)` call (B3-B6) runs to completion in this phase's own turn, and you consume its result in that same turn. Never end or yield your turn to wait for a child, and never wait for a completion notification: notifications for forked children go to the root session, not to this phase, so a turn that yields is never resumed. A child return with no `*_RESULT:` block (running, backgrounded, empty) is not a result — re-read the GitHub markers for that child (`FORGE:CONTEXT`, `FORGE:ARCHITECT`, `FORGE:BUILDER`, `FORGE:VALIDATE`/`FORGE:QUALITY_GATE`) and apply the **bounded re-invoke rule**: re-invoke the same child with the same args at most 2 times per child on running/backgrounded/empty returns (the counter is per child and is not reset by a re-invoke). Before re-invoking, check state: if the child's marker is present, consume it instead of re-invoking; for implement and validate, also check the worktree (`git status --short` and `git log origin/{PR_BASE}..HEAD` in `{WORKTREE_PATH}`) — uncommitted in-flight edits or a fresh commit mean the original child may still be live, so wait for it by re-reading state rather than launching a second writer on the same worktree, and count that as a re-invoke attempt. After the cap is exhausted, take the Blocked exit (see Result emission and Blocked exit) with `blocker: child-stalled: <child>` (child = context|architect|implement|validate); it is terminal and is not re-invoked by the router.
 
@@ -125,7 +125,7 @@ Every exit path of this skill — COMPLETE, ALREADY_DONE, INVESTIGATION_COMPLETE
 
 ```
 BUILD_RESULT:
-  status: COMPLETE | ALREADY_DONE | INVESTIGATION_COMPLETE | BLOCKED
+  status: COMPLETE | ALREADY_DONE | INVESTIGATION_COMPLETE | NEEDS_DECOMPOSE | BLOCKED
   branch: {BRANCH}
   worktree: {WORKTREE_PATH}
   blocker: {description if status=BLOCKED, else empty}
@@ -509,13 +509,100 @@ Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:implement", args="{NUMBER} --repo
 ```
 
 **After subcommand returns** (read its `IMPLEMENT_RESULT:` block):
-- `status: COMPLETE` → continue to B6
-- `status: ALREADY_DONE` → continue to B6 (validate what's already there)
-- `status: INVESTIGATION_COMPLETE` → issues were created as deliverables and the original closed; print `BUILD_RESULT: status: INVESTIGATION_COMPLETE` (skip B6/B6.5)
+- `status: COMPLETE` → continue to B5.5
+- `status: ALREADY_DONE` → continue to B5.5 (size-check what's already there)
+- `status: INVESTIGATION_COMPLETE` → issues were created as deliverables and the original closed; print `BUILD_RESULT: status: INVESTIGATION_COMPLETE` (skip B5.5/B6/B6.5)
 - `status: BLOCKED` → Blocked exit with the child's `blocker`
 - Skill not found → Blocked exit, blocker "skill not found: work-on:build:implement"
 - Returned running/backgrounded/empty (no `IMPLEMENT_RESULT:`) → do not end the turn to wait; re-read the `FORGE:BUILDER` comment and the worktree state; if `FORGE:BUILDER:COMPLETE` is present consume it, and if the worktree shows in-flight edits or a fresh commit treat the child as possibly live; before re-invoking, apply the bounded re-invoke rule (at most 2, then `child-stalled: implement`)
-# MUST CONTINUE to Phase B6 — implement result is intermediate, NOT terminal (validation still required).
+# MUST CONTINUE to Phase B5.5 — implement result is intermediate, NOT terminal (the size gate and validation still follow).
+
+---
+
+## Phase B5.5: Diff-Size Gate
+
+Review findings per PR rise steeply with diff size, so an oversized diff is split before it is validated. This phase measures the staged diff (implement staged everything in I4; nothing is committed until validate V5) and either continues, routes to decompose, or requires a justified override. It never edits code. <!-- Added: forge#3450 -->
+
+**Skip** (continue to B6) when the task type is Investigation (B5 already exited), or when `build.diff_size.threshold` resolves to `0`. Never skip because a lookup failed: unknown is not under threshold.
+
+**Step 1 — measure.** Paste the Script resolution block first (shell state does not persist); quote every interpolation:
+
+```bash
+# <Script resolution block from above goes here, verbatim>
+THRESHOLD=$(yq '.build.diff_size.threshold // 1000' forge.yaml 2>/dev/null || echo 1000)
+EXCLUDES=()
+while IFS= read -r _g; do [ -n "$_g" ] && [ "$_g" != "null" ] && EXCLUDES+=(--exclude-glob "$_g"); done \
+  < <(yq '.build.diff_size.exclude_globs // [] | .[]' forge.yaml 2>/dev/null || true)
+SCRIPT_REF=$(resolve_script 'diff-size')
+case "$SCRIPT_REF" in
+  prose:*) echo "SIZE_GATE: scripts/diff-size.sh unresolved (prose tier) — gate skipped with a note in the FORGE:BUILDER comment" ;;
+  *)
+    SIZE_OUT=$(bash "${SCRIPT_REF#*:}" --repo-path "{WORKTREE_PATH}" --base "{PR_BASE}" --threshold "$THRESHOLD" ${EXCLUDES[@]+"${EXCLUDES[@]}"}) && SIZE_RC=0 || SIZE_RC=$?
+    echo "SIZE_RC=${SIZE_RC}"; printf '%s\n' "$SIZE_OUT" ;;
+esac
+```
+
+- Prose tier (script unresolvable) → skip the gate, continue to B6 (the script is part of the install; a missing install must not strand every build).
+- Exit 2, empty output, or output without `diff_lines=`, `threshold=` and `over=` → Blocked exit with blocker `size-gate-unavailable: diff-size.sh failed (rc=<N>)`. Do NOT treat an unmeasurable diff as under threshold.
+- Otherwise parse `diff_lines`, `excluded_lines`, `threshold`, `over` and the `top=` lines.
+
+**Step 2 — look up an override** (only when `over=true`). Both lookups are anchored, trust-filtered through `scripts/trusted-comments.sh` (trusted association, Bot, or `FORGE_TRAIL_TRUSTED_LOGINS`), and fail closed:
+
+```bash
+# <Script resolution block from above goes here, verbatim>
+set -o pipefail
+TRUSTED_SCRIPT="${UNIVERSAL_DIR:+$UNIVERSAL_DIR/trusted-comments.sh}"
+[ -n "$TRUSTED_SCRIPT" ] && [ -f "$TRUSTED_SCRIPT" ] || { echo "OVERRIDE_LOOKUP=FAILED (trusted-comments.sh unresolved)"; exit 0; }
+OVR=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:SIZE_OVERRIDE') \
+  || { echo "OVERRIDE_LOOKUP=FAILED"; exit 0; }
+# A valid override has a non-empty justification: the first non-blank, non-marker line after the marker line.
+JUSTIFICATION=$(printf '%s\n' "$OVR" | jq -r 'select(type == "string") | split("\n") | .[1:] | map(select(test("\\S") and (test("^\\s*<!--") | not))) | first // empty' | tail -n 1)
+if [ -n "$JUSTIFICATION" ]; then echo "OVERRIDE=VALID"; else echo "OVERRIDE=NONE"; fi
+```
+
+- `OVERRIDE_LOOKUP=FAILED` → Blocked exit with blocker `size-gate-unavailable: could not read FORGE:SIZE_OVERRIDE` (a transient GitHub failure uses the `github-unavailable:` prefix per the retry rule above). Never read a failed lookup as "no override".
+- `OVERRIDE=VALID` → result `OVERRIDDEN`. A marker with an empty justification is not valid.
+
+**Step 3 — record.** Set `DIFF_LINES`, `EXCLUDED_LINES`, `THRESHOLD`, `RESULT` (`OK`, `OVERRIDDEN` or `OVER`) and `SPLIT_PROPOSAL` from the steps above, then post one `<!-- FORGE:DIFF_SIZE -->` comment, idempotently: find the latest trusted comment starting with the marker and edit it, otherwise create it (on resume never stack duplicates; readers use the latest trusted one):
+
+```bash
+BODY="<!-- FORGE:DIFF_SIZE -->
+## Diff Size
+
+diff_lines: ${DIFF_LINES}
+excluded_lines: ${EXCLUDED_LINES}
+threshold: ${THRESHOLD}
+result: ${RESULT}
+${SPLIT_PROPOSAL:-}"
+run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
+CID=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" --jq '[.[] | select(.body | startswith("<!-- FORGE:DIFF_SIZE")) | select((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or (.user.type == "Bot"))] | last | .id // ""' 2>/dev/null || true)
+if [ -n "$CID" ]; then run gh api "repos/{GH_REPO}/issues/comments/${CID}" -X PATCH -f body="$BODY" >/dev/null 2>&1 || run gh issue comment {NUMBER} {GH_FLAG} --body "$BODY"
+else run gh issue comment {NUMBER} {GH_FLAG} --body "$BODY"; fi
+```
+
+**Step 4 — decide.**
+
+| Condition | Result | Action |
+|-----------|--------|--------|
+| `over=false` | `OK` | Post/refresh `FORGE:DIFF_SIZE`, continue to B6 |
+| `over=true`, valid override | `OVERRIDDEN` | Post/refresh `FORGE:DIFF_SIZE` (quote the justification), continue to B6 |
+| `over=true`, no override, issue body has a `**Parent**: #N` line OR a trusted `FORGE:DECOMPOSED` comment exists | `OVER` | Decompose-loop guard: do NOT route to decompose. Post/refresh `FORGE:DIFF_SIZE`, then Blocked exit with blocker `diff-size-over-threshold: {diff_lines} > {threshold}; post a FORGE:SIZE_OVERRIDE with a justification to proceed` |
+| `over=true`, no override, otherwise | `OVER` | Put a `### Split Proposal` in the `FORGE:DIFF_SIZE` comment, then print `BUILD_RESULT: status: NEEDS_DECOMPOSE` (see below) |
+
+**`### Split Proposal`** (written into the `FORGE:DIFF_SIZE` comment): list the top files by changed lines from the `top=` output, then propose 2-4 sub-issues split along directory or phase seams, each independently buildable and no more than about half the threshold, in dependency order, one `- **{title}** — {files}` line each (this is the plan `work-on:decompose` consumes in D0/D2).
+
+**`NEEDS_DECOMPOSE` exit**: leave the staged worktree and branch as they are; do not add `needs-human`; do not post `FORGE:BUILDER:COMPLETE`; do NOT call `work-on:decompose` here (the router is the sole dispatcher). The labels stay `workflow:building`; decompose owns the `workflow:decomposed` transition. Print:
+
+```
+BUILD_RESULT:
+  status: NEEDS_DECOMPOSE
+  branch: {BRANCH}
+  worktree: {WORKTREE_PATH}
+  blocker: diff-size-over-threshold: {diff_lines} > {threshold}; split proposal posted in FORGE:DIFF_SIZE
+```
+
+**Resume**: a re-invoked build whose latest trusted `FORGE:DIFF_SIZE` says `result: OVER` re-measures; if still over with no override it re-emits `NEEDS_DECOMPOSE` without a duplicate comment. When a valid `FORGE:SIZE_OVERRIDE` has appeared since, B5.5 re-measures and continues via `OVERRIDDEN`.
+# MUST CONTINUE to Phase B6 — the size gate result is intermediate, NOT terminal (validation still required), except the NEEDS_DECOMPOSE and Blocked exits above.
 
 ---
 
@@ -725,7 +812,7 @@ Print this structured block as your final reply (and nothing after it) — the r
 
 ```
 BUILD_RESULT:
-  status: COMPLETE | ALREADY_DONE | INVESTIGATION_COMPLETE | BLOCKED
+  status: COMPLETE | ALREADY_DONE | INVESTIGATION_COMPLETE | NEEDS_DECOMPOSE | BLOCKED
   branch: {BRANCH}
   worktree: {WORKTREE_PATH}
   blocker: {description if status=BLOCKED}
@@ -734,6 +821,7 @@ BUILD_RESULT:
 - `COMPLETE` — B0–B6.5 all passed; `FORGE:BUILDER:COMPLETE` is on the issue.
 - `ALREADY_DONE` — B0 found `FORGE:BUILDER:COMPLETE`.
 - `INVESTIGATION_COMPLETE` — the implement child created the deliverable issues (B5); no review follows.
+- `NEEDS_DECOMPOSE` — B5.5 measured the staged diff over `build.diff_size.threshold` with no valid `FORGE:SIZE_OVERRIDE`; a split proposal is in `FORGE:DIFF_SIZE`. The router runs `work-on:decompose`. Not a failure: no `needs-human`.
 - `BLOCKED` — any guard or failure; `needs-human` is set and the blocker is posted.
 
 ---

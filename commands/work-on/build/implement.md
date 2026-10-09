@@ -269,6 +269,20 @@ git add {CHANGED_FILES}
 
 Do NOT run `git commit` here. The commit (with conventional commit message and issue reference) is made by validate.md Phase V5 after `GATE_PASSED=true`.
 
+**Informational diff size** <!-- Added: forge#3450 -->: after staging, read the changed-line count so the builder comment and result carry it. This is a hint only. Implement never gates or decides: the diff-size gate lives in build B5.5, which re-measures authoritatively. Leave `DIFF_LINES` empty when the script is unavailable or fails.
+
+```bash
+# <Script resolution block from work-on/build.md, verbatim>
+SCRIPT_REF=$(resolve_script 'diff-size')
+DIFF_LINES=""
+case "$SCRIPT_REF" in
+  prose:*) ;;
+  *) DIFF_LINES=$(bash "${SCRIPT_REF#*:}" --repo-path "{WORKTREE_PATH}" --base "{PR_BASE}" 2>/dev/null | sed -n 's/^diff_lines=//p' | head -n 1) || DIFF_LINES="" ;;
+esac
+case "$DIFF_LINES" in ''|*[!0-9]*) DIFF_LINES="" ;; esac
+echo "DIFF_LINES=${DIFF_LINES}"
+```
+
 ---
 
 ## Phase I5: Update Issue Body
@@ -293,6 +307,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:BUILDER -->
 **Branch**: \`{BRANCH}\`
 **Commits**: {COMMIT_SHA(S)}
 **Files changed**: {COUNT}
+**Diff lines**: {DIFF_LINES or —}
 
 ### Approach
 {One paragraph: what was built, key decisions, why this approach over alternatives}
@@ -325,6 +340,7 @@ IMPLEMENT_RESULT:
   branch: {BRANCH}
   commits: [{SHA}, ...]
   files_changed: [{file}, ...]
+  diff_lines: {N — informational, from scripts/diff-size.sh after I4; empty when unavailable}
   comment_url: {url of FORGE:BUILDER comment}
   blocker: {description if status=BLOCKED}
 ```

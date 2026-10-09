@@ -50,6 +50,7 @@ If you have both a local `claude` CLI and `ANTHROPIC_API_KEY` set and want to pi
 | [`project_board`](#project_board-optional) | No | GitHub Projects v2 integration |
 | [`orchestration`](#orchestration-optional) | No | `/orchestrate` concurrency and cascade admission policy |
 | [`pipeline`](#pipeline-optional) | No | `/orchestrate` batch-engine tuning (stall detection, token budget, narration) |
+| [`build`](#build-optional) | No | `/work-on` build-phase diff-size gate (threshold, exclusion globs) |
 | [`services`](#services-optional) | No | External service URLs and IDs |
 | [`review`](#review-optional) | No | Context injected into review agents |
 | [`devdocs`](#devdocs-optional) | No | Devdocs knowledge tree path |
@@ -453,6 +454,35 @@ pipeline:
 | `narration` | string | No | `terse` \| `verbose`. Default: `terse` |
 
 **Commands that use this section**: CLI backend (`cli_timeout_minutes`); `orchestrate` (remaining keys)
+
+---
+
+## `build` (OPTIONAL)
+
+Tuning for the `/work-on` build phase. Today it holds the diff-size gate: after the implement phase stages its changes and before validation commits them, the build measures the changed lines (added plus deleted) of the index and any earlier commits against `origin/{base}`, using `scripts/diff-size.sh`. Review findings per PR rise steeply with diff size, so an oversized build is split before it is validated.
+
+```yaml
+build:
+  diff_size:
+    # Changed-line ceiling. Default: 1000. 0 disables the gate.
+    threshold: 1000
+
+    # Extra exclusion globs, ADDITIVE to the built-in defaults below.
+    exclude_globs:
+      - "docs/api/*"
+      - "*.pb.go"
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `diff_size.threshold` | integer | No | Changed lines allowed before the gate trips. Default: 1000. `0` disables the gate |
+| `diff_size.exclude_globs` | list of strings | No | Globs excluded from the measurement, in addition to the built-in defaults. Default: `[]` |
+
+**Built-in default exclusions** (always applied, defined once in `scripts/diff-size.sh`): lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `poetry.lock`, `uv.lock`, `go.sum`, `Gemfile.lock`, `composer.lock`), `*.min.*`, `*.snap`, and the directories `dist/`, `build/`, `generated/`, `__generated__/`, `fixtures/`, `__snapshots__/`, `vendor/`. A glob ending in `/` matches that directory at any depth; any other glob is matched against the file basename and the full path. Globs are treated as data, never evaluated.
+
+**Over the threshold**: the build posts a `FORGE:DIFF_SIZE` comment with a split proposal and exits `BUILD_RESULT: status: NEEDS_DECOMPOSE`; the router then runs `work-on:decompose`. To build the oversized diff anyway, post a `FORGE:SIZE_OVERRIDE` comment whose body has a non-empty justification on the line after the marker (only comments from trusted authors count). An issue that is already a decomposed child, or that already has `FORGE:DECOMPOSED`, is not decomposed again: the build blocks until an override is posted. The measured `diff_lines` is recorded in the `FORGE:TRAJECTORY` comment.
+
+**Commands that use this section**: `work-on` (build phase B5.5, `decompose`, `close`)
 
 ---
 
