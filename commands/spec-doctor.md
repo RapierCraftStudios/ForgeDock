@@ -133,12 +133,12 @@ cat /tmp/spec_ranked.txt | head -10
 ```bash
 if [ "$SELECT_MODE" = "auto" ]; then
   # Pick the top-ranked spec file with ≥ 5 findings
-  TARGET_SPEC=$(awk '$1 >= 5 {print $2; exit}' /tmp/spec_ranked.txt || echo "")
+  TARGET_SPEC=$(awk '$(1) >= 5 {print $(2); exit}' /tmp/spec_ranked.txt || echo "")
   if [ -z "$TARGET_SPEC" ]; then
     echo "No spec file has ≥5 findings in the last 30 days. Top offender:"
     head -1 /tmp/spec_ranked.txt
     # Use top offender even if below threshold for explicit runs
-    TARGET_SPEC=$(awk 'NR==1{print $2}' /tmp/spec_ranked.txt || echo "")
+    TARGET_SPEC=$(awk 'NR==1{print $(2)}' /tmp/spec_ranked.txt || echo "")
     if [ -z "$TARGET_SPEC" ]; then
       echo "ERROR: No finding data available. Run pipeline-health first to accumulate findings."
       exit 1

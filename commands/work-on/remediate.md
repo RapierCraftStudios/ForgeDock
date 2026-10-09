@@ -84,15 +84,33 @@ ISSUE_LABELS=$(echo "$ISSUE_STATE" | jq -r '[.labels[].name] | join(",")')
 **Idempotency / resume check** — the paper trail lives on **both** the PR (primary — checked by the orchestrator's item 6.4 dispatch guard) and the linked issue (mirror — keeps `/work-on`'s standard FORGE-annotation trajectory and resume logic consistent with every other phase):
 
 ```bash
-PR_REMEDIATION_COMMENT=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
-  --jq '[.[] | select(.body | contains("FORGE:REMEDIATION"))] | last')
+# Trust predicate: ONE shared copy (scripts/trusted-comments.sh). Markers are matched as the comment's LEADING
+# text (^ anchors at the start of the body, not of a line), never with a bare contains(): a review comment or
+# an INPR_FIX work order that merely QUOTES FORGE:REMEDIATION:COMPLETE must not read as a remediation trail (forge#3412).
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+TRUSTED_SCRIPT=""
+for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l"; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done
+PR_COMMENTS=$(gh api --paginate repos/{GH_REPO}/issues/{PR_NUMBER}/comments 2>/dev/null) || PR_COMMENTS=""
+if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$PR_COMMENTS" ]; then
+  # Real trail comments (M5 interim, M8 final) START with <!-- FORGE:REMEDIATION -->; M8 also carries <!-- FORGE:REMEDIATION:COMPLETE -->.
+  REMEDIATION_COMPLETE_N=$(printf '%s' "$PR_COMMENTS" | bash "$TRUSTED_SCRIPT" count '^<!-- FORGE:REMEDIATION -->[\s\S]*<!-- FORGE:REMEDIATION:COMPLETE -->' 2>/dev/null || echo "")
+  REMEDIATION_TRAIL_N=$(printf '%s' "$PR_COMMENTS" | bash "$TRUSTED_SCRIPT" count '^<!-- FORGE:REMEDIATION -->' 2>/dev/null || echo "")
+else
+  REMEDIATION_COMPLETE_N=""; REMEDIATION_TRAIL_N=""
+fi
+# Partial (interim, no COMPLETE) comment ids for cleanup: anchored leading marker, no COMPLETE marker, same bot/association trust.
+PARTIAL_PR_COMMENT_IDS=$(printf '%s' "$PR_COMMENTS" | jq -rs '[.[][] | select((.body // "") | startswith("<!-- FORGE:REMEDIATION -->")) | select((.body | contains("<!-- FORGE:REMEDIATION:COMPLETE -->")) | not) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | .id] | .[]' 2>/dev/null || true)
 ```
 
-- If a comment is found AND its body contains `FORGE:REMEDIATION:COMPLETE` → EXIT `REMEDIATE_RESULT: status: ALREADY_DONE`. **Single-attempt semantics (AC5)**: once a `FORGE:REMEDIATION:COMPLETE` marker exists for this PR, do NOT re-attempt fixes on a subsequent invocation, regardless of the prior verdict — this is what prevents an infinite remediation retry loop on a genuinely-blocked PR.
-- If a comment is found WITHOUT `:COMPLETE` → a prior attempt was interrupted mid-flight (same failure mode as the investigation phase's partial-comment case). Delete the partial comment(s) on both the PR and the issue, then continue below as a fresh attempt:
+- If `REMEDIATION_COMPLETE_N` or `REMEDIATION_TRAIL_N` is empty (comments or `scripts/trusted-comments.sh` unreadable or unresolvable) → fail closed: EXIT `REMEDIATE_RESULT: status: BLOCKED`, blocker: "github-unavailable: remediation trail unreadable (comments or scripts/trusted-comments.sh unresolvable)". Never treat unreadable as "no trail" and never as `ALREADY_DONE`.
+- If `REMEDIATION_COMPLETE_N` is at least 1 (a trusted comment that starts with `<!-- FORGE:REMEDIATION -->` and contains `<!-- FORGE:REMEDIATION:COMPLETE -->`) → EXIT `REMEDIATE_RESULT: status: ALREADY_DONE`. **Single-attempt semantics (AC5)**: once a genuine `FORGE:REMEDIATION:COMPLETE` trail comment exists for this PR, do NOT re-attempt fixes on a subsequent invocation, regardless of the prior verdict — this is what prevents an infinite remediation retry loop on a genuinely-blocked PR. A comment that only quotes the marker mid-body (review findings, an `INPR_FIX` work order, a disposition record) or comes from an untrusted author never counts.
+- If `REMEDIATION_COMPLETE_N` is 0 and `REMEDIATION_TRAIL_N` is at least 1 → a prior attempt was interrupted mid-flight (same failure mode as the investigation phase's partial-comment case). Delete the partial comment(s) on both the PR and the issue (ids from `PARTIAL_PR_COMMENT_IDS` above and the same anchored filter over the issue's comments), then continue below as a fresh attempt:
   ```bash
-  gh api repos/{GH_REPO}/issues/comments/{PARTIAL_PR_COMMENT_ID} -X DELETE 2>/dev/null || true
-  gh api repos/{GH_REPO}/issues/comments/{PARTIAL_ISSUE_COMMENT_ID} -X DELETE 2>/dev/null || true
+  for _id in $PARTIAL_PR_COMMENT_IDS; do gh api repos/{GH_REPO}/issues/comments/$_id -X DELETE 2>/dev/null || true; done
+  ISSUE_PARTIAL_IDS=$(gh api --paginate repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments 2>/dev/null | jq -rs '[.[][] | select((.body // "") | startswith("<!-- FORGE:REMEDIATION -->")) | select((.body | contains("<!-- FORGE:REMEDIATION:COMPLETE -->")) | not) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | .id] | .[]' 2>/dev/null || true)
+  for _id in $ISSUE_PARTIAL_IDS; do gh api repos/{GH_REPO}/issues/comments/$_id -X DELETE 2>/dev/null || true; done
   ```
 - If no comment is found → fresh attempt, continue below.
 
@@ -248,6 +266,8 @@ if DRY_RUN=true:
 else:
   Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="{PR_NUMBER} --auto-merge --issue {ISSUE_NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
 ```
+
+**Reviewer ownership (spawn-site rule, `docs/WORK-ON-RUNTIME.md` R6)**: `/review-pr` runs inline in this fork. Under async `Agent` dispatch its domain reviewers are attributed to the root session, so their completion notifications never reach this phase: do not end the turn to wait for them. `/review-pr` Phase 4 waits on the reviewers' current-SHA `FORGE:REVIEW-AGENT` PR comments (bounded), and that GitHub comment, not a notification, is the completion signal. If the call returns with no parseable `REVIEW_RESULT` (empty, running or backgrounded), first re-read the PR and issue: a complete current-SHA reviewer panel plus a `FORGE:REVIEW` verdict means consume that state; otherwise re-invoke `/review-pr` once more with the same args (idempotent: it reuses the current-SHA reviewer comments already posted and dispatches only missing domains). Never review inline.
 
 **OpenCode joined-child contract**: When `FORGE_RUNTIME=opencode` (or an OpenCode runtime marker is present), run this required re-review through one native foreground `task`:
 
@@ -432,6 +452,9 @@ case "$RE_GATE_OUTCOME" in
   *)                   AUTO_LAND_BAR_TEXT="N/A"; OUTCOME_DETAIL="" ;;
 esac
 
+# forge#3413: embed the pushed head so the orchestrator scopes a REREVIEW-REQUIRED trail to the CURRENT head only.
+REMEDIATED_HEAD_SHA=$(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null || true)
+
 REMEDIATION_BODY="<!-- FORGE:REMEDIATION -->
 ## Remediation Complete for PR #{PR_NUMBER}
 
@@ -439,6 +462,7 @@ REMEDIATION_BODY="<!-- FORGE:REMEDIATION -->
 **Re-review verdict**: ${RE_REVIEW_VERDICT:-unknown}
 **Auto-land bar**: ${AUTO_LAND_BAR_TEXT}
 **Re-gate outcome**: ${RE_GATE_OUTCOME} ${OUTCOME_DETAIL}
+**Head**: ${REMEDIATED_HEAD_SHA:-unknown}
 
 <!-- FORGE:REMEDIATION:COMPLETE -->"
 

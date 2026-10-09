@@ -45,6 +45,14 @@ export const RESERVED_TYPES = {
     inlineValue: false,
     requiredFields: [],
   },
+  DIFF_SIZE: {
+    type: 'DIFF_SIZE',
+    category: Category.LIFECYCLE,
+    completionSentinel: null, // single-shot measurement record; refreshed in place, no completion sentinel
+    partialSentinel: null,
+    inlineValue: false,
+    requiredFields: [],
+  },
   CONTRACT: {
     type: 'CONTRACT',
     category: Category.LIFECYCLE,
@@ -201,6 +209,15 @@ export const RESERVED_TYPES = {
   },
   GATE_FAILED: {
     type: 'GATE_FAILED',
+    category: Category.CONTROL,
+    completionSentinel: null,
+    partialSentinel: null,
+    inlineValue: false,
+    controlMarker: true,
+    requiredFields: [],
+  },
+  SIZE_OVERRIDE: {
+    type: 'SIZE_OVERRIDE',
     category: Category.CONTROL,
     completionSentinel: null,
     partialSentinel: null,

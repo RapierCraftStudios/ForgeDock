@@ -804,7 +804,7 @@ _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || r
 # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
 _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
 # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-_v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+_v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
 _m="$HOME/.claude/plugins/marketplaces/$_mk"
 # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
 _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
@@ -1178,7 +1178,7 @@ if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac
   # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
   _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
   # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
   _m="$HOME/.claude/plugins/marketplaces/$_mk"
   # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
   _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
@@ -1624,7 +1624,7 @@ classify_predecessor_state() {
         # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
         _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
         # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-        _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+        _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
         _m="$HOME/.claude/plugins/marketplaces/$_mk"
         # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
         _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
@@ -2019,7 +2019,7 @@ done
      # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
      _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
      # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-     _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+     _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
      _m="$HOME/.claude/plugins/marketplaces/$_mk"
      # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
      _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
@@ -2292,8 +2292,17 @@ done
        # Idempotency guard: only one remediation attempt per PR, ever (single-attempt
        # semantics — remediate.md's own Phase M0 enforces this too, but checking here
        # avoids spawning a redundant agent that would immediately no-op on entry).
-       ALREADY_REMEDIATED=$(gh api repos/{GH_REPO}/issues/${GATING_PR}/comments \
-         --jq '[.[] | select(.body | contains("FORGE:REMEDIATION"))] | length' 2>/dev/null || echo "0")
+       # Leading-marker + trusted-author count (forge#3412): a comment that merely quotes FORGE:REMEDIATION
+       # (review findings, INPR_FIX work order) must not suppress dispatch. Unreadable => skip dispatch (fail closed).
+       _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+       TRUSTED_SCRIPT=""
+       for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l"; do
+         case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+       done
+       ALREADY_REMEDIATED=1
+       if [ -n "$TRUSTED_SCRIPT" ] && GATING_COMMENTS=$(gh api --paginate repos/{GH_REPO}/issues/${GATING_PR}/comments 2>/dev/null); then
+         ALREADY_REMEDIATED=$(printf '%s' "$GATING_COMMENTS" | bash "$TRUSTED_SCRIPT" count '^<!-- FORGE:REMEDIATION -->' 2>/dev/null || echo "1")
+       fi
 
        if [ "$ALREADY_REMEDIATED" -eq 0 ]; then
          echo "Dispatching remediation for #{PRED}'s gating PR #{GATING_PR} (needs-human)"
@@ -2321,66 +2330,198 @@ Do not ask the user questions — you are running autonomously in the background
 
    **Re-review handoff (forge#3240)**: a remediation worker can finish with `REMEDIATE_RESULT: status: REREVIEW_REQUIRED` — the fix is pushed and CI is green, but the remediation had no sub-agent dispatch tool, so `review-pr` (which refuses to review inline) never ran. The issue is then at `workflow:in-review` WITHOUT `needs-human`, so the trigger above does not fire and the `ALREADY_REMEDIATED` guard (which counts any `FORGE:REMEDIATION`) is irrelevant. This is not a human gate, but it must never be left for a poll to find: it ends in a re-review from THIS session (which has dispatch) or in the terminal fallback below. On the next completion-monitoring cycle, for the issue that just completed, run the three steps in order. <!-- Updated: forge#3406 -->
 
-   **Step 1 — detect (bash; read-only, no dispatch, no marker write).** A marker counts only from a trusted author, using the same predicate as `trail_escalation_state` above (`OWNER`, the orchestrator login from `resolve_orch_login`, or a `MEMBER`/`COLLABORATOR` with admin/maintain/write permission; a failed permission lookup drops the row), and only as the comment's leading marker, never as text quoted inside another comment (forge#3412). The dispatched marker must also embed the current head SHA. A lookup error is `UNREADABLE`, never "no marker":
+   **Step 1 — detect (bash; read-only, no dispatch, no marker write).** One authoritative per-head marker (forge#3413): `<!-- FORGE:REREVIEW_DISPATCHED -->` as the comment's FIRST line, then `Head: <sha>`, `Actor: orchestrator|router`, `Claim: <actor>-<epoch>-<pid>` and `Lease: <UTC ISO-8601>`. It is a **claim** posted and read back BEFORE `review-pr` is dispatched, by whichever actor dispatches (this orchestrator in Step 2, or the worker router in `commands/work-on.md` Phase 0A.1), so either actor sees the other's claim. A marker counts only from a trusted author, using the same predicate as `trail_escalation_state` above (`OWNER`, the orchestrator login from `resolve_orch_login`, or a `MEMBER`/`COLLABORATOR` with admin/maintain/write permission; a failed permission lookup drops the row), and only as the comment's leading marker, never as text quoted inside another comment (forge#3412). The `REREVIEW-REQUIRED` remediation trail must embed the CURRENT head SHA (`**Head**:` line written by `work-on/remediate.md` Phase M8), so a trail for an older head never triggers a re-review of a newer one. The issue's own labels are consulted first: only `workflow:in-review` without `needs-human`, still open, is eligible. A lookup error, or an unresolved orchestrator login, is `UNREADABLE`, never "no marker" (fail closed, no dispatch):
 
    ```bash
+   # SHARED HELPERS (forge#3411): Step 2's claim/read-back re-uses these verbatim — one predicate, no copy to drift.
+   # The set is `rereview_trusted_rows` + the `REREVIEW_*` definitions below AND its transitive deps `resolve_orch_login` and
+   # `trail_cache_dir` (defined earlier in this file, NOT in this block). A standalone caller (the work-on router) must paste those too.
+   # Trusted rows only, same predicate as trail_escalation_state (forge#3207): OWNER, the orchestrator login, or
+   # MEMBER/COLLABORATOR with admin/maintain/write permission. A failed permission lookup drops the row (fail closed).
+   # stdin: rows of {id, body, login, assoc, at}; stdout: the trusted rows.
+   rereview_trusted_rows() {
+     local ORCH PERMS ROW RA RL RP
+     ORCH=$(resolve_orch_login); PERMS=""
+     while IFS= read -r ROW; do
+       [ -n "$ROW" ] || continue
+       RA=$(printf '%s' "$ROW" | jq -r '.assoc'); RL=$(printf '%s' "$ROW" | jq -r '.login')
+       if [ "$RA" = "OWNER" ] || { [ -n "$ORCH" ] && [ "$(printf '%s' "$RL" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$ORCH" | tr '[:upper:]' '[:lower:]')" ]; }; then
+         printf '%s\n' "$ROW"; continue
+       fi
+       case "$RA" in MEMBER|COLLABORATOR) ;; *) continue ;; esac
+       RP=$(printf '%s\n' "$PERMS" | awk -v l="$RL" '$1==l{print $2; exit}')
+       if [ -z "$RP" ]; then RP=$(gh api "repos/{GH_REPO}/collaborators/${RL}/permission" --jq '.permission' 2>/dev/null || true); [ -n "$RP" ] || RP="none"; PERMS="${PERMS}${RL} ${RP}"$'\n'; fi
+       case "$RP" in admin|maintain|write) printf '%s\n' "$ROW" ;; esac
+     done < <(jq -c '.' 2>/dev/null)
+   }
+   # Per-head claim rows (forge#3412/#3413): leading marker AND the exact `Head: <sha>` line, sorted by comment id (forge#3429: an explicit total order, never implicit API row order), so `.[0]` is the lowest-id claim.
+   REREVIEW_CLAIMS='[.[] | select((.body | startswith("<!-- FORGE:REREVIEW_DISPATCHED -->")) and (.body | contains("Head: " + $sha)))] | sort_by(.id)'
+   REREVIEW_DONE_FILTER="${REREVIEW_CLAIMS} | length"
+   # Lease (forge#3428): a claim older than REREVIEW_LEASE_SECS is NOT stale by age alone; it is stale only when there is also no
+   # liveness (renewal, recent review activity, running checks). REREVIEW_MAX_SECS is the absolute ceiling for inferred liveness.
+   REREVIEW_LEASE_SECS=3600
+   REREVIEW_MAX_SECS=$(( REREVIEW_LEASE_SECS * 4 ))
+   # Lease age reads the NEWEST row carrying the same `Claim:` id as the earliest claim (.[0]); ownership/LOST stays on .[0].
+   REREVIEW_LEASE_FILTER='(.[0].body | capture("Claim: (?<c>[^\\n]+)").c) as $c | [.[] | select(.body | split("\n") | any(. == ("Claim: " + $c)))] | .[-1].body | capture("Lease: (?<t>[0-9T:Z-]+)").t'
+   REREVIEW_FIRST_LEASE_FILTER='.[0].body | capture("Lease: (?<t>[0-9T:Z-]+)").t'
+   # Explicit release: a trusted leading `<!-- FORGE:REREVIEW_RELEASED -->` row for this head (posted by the claimant after review-pr returned).
+   REREVIEW_RELEASED_FILTER='[.[] | select((.body | startswith("<!-- FORGE:REREVIEW_RELEASED -->")) and (.body | contains("Head: " + $sha)))] | length'
+
    PRED="$NUM"
    REREVIEW_STATE="NONE"; REREVIEW_PR=""; REREVIEW_SHA=""; REREVIEW_BASE=""
-   if ! REREVIEW_PR=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${PRED}\" in:body" \
+   # 1. Labels first (forge#3413 CONC-1): only an open issue at workflow:in-review WITHOUT needs-human is eligible.
+   if ! ISSUE_META=$(gh issue view "$PRED" -R {GH_REPO} --json labels,state \
+       --jq '"\(.state) \([.labels[].name] | map(select(. == "workflow:in-review" or . == "needs-human")) | sort | join(","))"' 2>/dev/null); then
+     REREVIEW_STATE="UNREADABLE"
+   elif [ "${ISSUE_META%% *}" != "OPEN" ] || [ "${ISSUE_META#* }" != "workflow:in-review" ]; then
+     REREVIEW_STATE="NONE"   # closed/merged, already at needs-human, or not at workflow:in-review: nothing to re-review
+   elif [ -z "$(resolve_orch_login)" ]; then
+     # SEC-8: with no own login the orchestrator's own marker is dropped as untrusted, so a dispatch could never be
+     # recorded or deduped. Fail closed BEFORE any dispatch.
+     REREVIEW_STATE="UNREADABLE"
+   elif ! REREVIEW_PR=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${PRED}\" in:body" \
        --json number,body --jq '[.[] | select(.body | test("(?i)closes\\s+#'"${PRED}"'\\b"))][0].number // empty' 2>/dev/null); then
      REREVIEW_STATE="UNREADABLE"
    elif [ -n "$REREVIEW_PR" ]; then
      if ! PR_META=$(gh pr view "$REREVIEW_PR" -R {GH_REPO} --json headRefOid,baseRefName --jq '"\(.headRefOid) \(.baseRefName)"' 2>/dev/null) \
         || ! RAW=$(gh api --paginate "repos/{GH_REPO}/issues/${REREVIEW_PR}/comments" \
-             --jq '.[] | {body: (.body // ""), login: (.user.login // ""), assoc: (.author_association // "")}' 2>/dev/null); then
+             --jq '.[] | {id: (.id // 0), body: (.body // ""), login: (.user.login // ""), assoc: (.author_association // ""), at: (.created_at // "")}' 2>/dev/null); then
        REREVIEW_STATE="UNREADABLE"
      else
        REREVIEW_SHA="${PR_META%% *}"; REREVIEW_BASE="${PR_META#* }"
-       # Trusted rows only, same predicate as trail_escalation_state (forge#3207): OWNER, the orchestrator login, or
-       # MEMBER/COLLABORATOR with admin/maintain/write permission. A failed permission lookup drops the row (fail closed).
-       ORCH=$(resolve_orch_login); TRUSTED_RAW=""; PERMS=""
-       while IFS= read -r ROW; do
-         [ -n "$ROW" ] || continue
-         RA=$(printf '%s' "$ROW" | jq -r '.assoc'); RL=$(printf '%s' "$ROW" | jq -r '.login')
-         if [ "$RA" = "OWNER" ] || { [ -n "$ORCH" ] && [ "$(printf '%s' "$RL" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$ORCH" | tr '[:upper:]' '[:lower:]')" ]; }; then
-           TRUSTED_RAW="${TRUSTED_RAW}${ROW}"$'\n'; continue
+       TRUSTED_RAW=$(printf '%s\n' "$RAW" | rereview_trusted_rows)
+       # Leading-marker match only (forge#3412), scoped to the CURRENT head (forge#3413 CONC-2): the M8 trail comment
+       # carries `**Head**: <sha>`. NEEDS_ANY counts every trail row (any head) to detect a stale, pre-#3413 trail.
+       NEEDS_REREVIEW=$(printf '%s' "$TRUSTED_RAW" | jq -s --arg sha "$REREVIEW_SHA" '[.[] | select((.body | startswith("<!-- FORGE:REMEDIATION -->")) and (.body | contains("<!-- FORGE:REMEDIATION:COMPLETE -->")) and (.body | contains("REREVIEW-REQUIRED")) and (.body | contains($sha)))] | length' 2>/dev/null) || NEEDS_REREVIEW=""
+       NEEDS_ANY=$(printf '%s' "$TRUSTED_RAW" | jq -s '[.[] | select((.body | startswith("<!-- FORGE:REMEDIATION -->")) and (.body | contains("<!-- FORGE:REMEDIATION:COMPLETE -->")) and (.body | contains("REREVIEW-REQUIRED")))] | length' 2>/dev/null) || NEEDS_ANY=""
+       REREVIEW_DONE=$(printf '%s' "$TRUSTED_RAW" | jq -s --arg sha "$REREVIEW_SHA" "$REREVIEW_DONE_FILTER" 2>/dev/null) || REREVIEW_DONE=""
+       if [ -z "$NEEDS_REREVIEW" ] || [ -z "$NEEDS_ANY" ] || [ -z "$REREVIEW_DONE" ]; then REREVIEW_STATE="UNREADABLE"
+       elif [ "$NEEDS_REREVIEW" -ge 1 ] && [ "$REREVIEW_DONE" -eq 0 ]; then
+         REREVIEW_STATE="PENDING"          # DRY_RUN is handled in Step 2 (no `DRY_RUN != true` term here, so its branch is reachable)
+       elif [ "$NEEDS_REREVIEW" -ge 1 ]; then
+         # A claim for this head already exists (orchestrator or router). forge#3428: age alone never makes it stale.
+         #   released            -> NONE (claimant finished; nothing to dispatch or escalate)
+         #   lease still fresh   -> CLAIMED (the lease is the newest row of the owner's claim; a renewal extends it)
+         #   lease expired       -> LIVENESS probe: PR not open -> NONE; recent trusted FORGE:REVIEW* activity inside the lease
+         #                          window or running checks -> CLAIMED; no sign of life -> STALE. A lookup error is UNREADABLE.
+         #   past REREVIEW_MAX_SECS since the first claim -> inferred liveness no longer counts (a hung claimant is escalated).
+         RELEASED=$(printf '%s' "$TRUSTED_RAW" | jq -s --arg sha "$REREVIEW_SHA" "$REREVIEW_RELEASED_FILTER" 2>/dev/null) || RELEASED=""
+         CLAIM_T=$(printf '%s' "$TRUSTED_RAW" | jq -s -r --arg sha "$REREVIEW_SHA" "${REREVIEW_CLAIMS} | ${REREVIEW_LEASE_FILTER}" 2>/dev/null || true)
+         FIRST_T=$(printf '%s' "$TRUSTED_RAW" | jq -s -r --arg sha "$REREVIEW_SHA" "${REREVIEW_CLAIMS} | ${REREVIEW_FIRST_LEASE_FILTER}" 2>/dev/null || true)
+         CLAIM_EPOCH=$(printf '%s' "$CLAIM_T" | jq -R 'fromdateiso8601' 2>/dev/null || true)
+         FIRST_EPOCH=$(printf '%s' "$FIRST_T" | jq -R 'fromdateiso8601' 2>/dev/null || true)
+         NOW=$(date -u +%s)
+         if [ -z "$RELEASED" ]; then REREVIEW_STATE="UNREADABLE"
+         elif [ "$RELEASED" -ge 1 ]; then REREVIEW_STATE="NONE"
+         elif [ -z "$CLAIM_EPOCH" ] || [ -z "$FIRST_EPOCH" ]; then REREVIEW_STATE="STALE"   # malformed claim (no parseable Lease)
+         elif [ $(( NOW - CLAIM_EPOCH )) -le "$REREVIEW_LEASE_SECS" ]; then REREVIEW_STATE="CLAIMED"
+         elif ! LIVE_META=$(gh pr view "$REREVIEW_PR" -R {GH_REPO} --json state,statusCheckRollup \
+             --jq '"\(.state) \([.statusCheckRollup[]? | select(((.status // "") | test("^(IN_PROGRESS|QUEUED|PENDING|WAITING)$")) or ((.state // "") == "PENDING"))] | length)"' 2>/dev/null) \
+             || ! ACTIVE=$(printf '%s' "$TRUSTED_RAW" | jq -s --argjson cutoff "$(( NOW - REREVIEW_LEASE_SECS ))" \
+             '[.[] | select((.body | startswith("<!-- FORGE:REVIEW")) and (((.at | fromdateiso8601?) // 0) > $cutoff))] | length' 2>/dev/null); then
+           REREVIEW_STATE="UNREADABLE"            # liveness lookup failed: fail closed, never STALE
+         else
+           LIVE_PR_STATE="${LIVE_META%% *}"; LIVE_CHECKS="${LIVE_META#* }"
+           case "$LIVE_CHECKS$ACTIVE" in *[!0-9]*|"") REREVIEW_STATE="UNREADABLE" ;;
+             *) if [ "$LIVE_PR_STATE" != "OPEN" ]; then REREVIEW_STATE="NONE"     # merged/closed: nothing to escalate
+                elif [ $(( NOW - FIRST_EPOCH )) -gt "$REREVIEW_MAX_SECS" ]; then REREVIEW_STATE="STALE"
+                elif [ "$LIVE_CHECKS" -gt 0 ] || [ "$ACTIVE" -gt 0 ]; then REREVIEW_STATE="CLAIMED"   # liveness: claimant still working
+                else REREVIEW_STATE="STALE"; fi ;;
+           esac
          fi
-         case "$RA" in MEMBER|COLLABORATOR) ;; *) continue ;; esac
-         RP=$(printf '%s\n' "$PERMS" | awk -v l="$RL" '$1==l{print $2; exit}')
-         if [ -z "$RP" ]; then RP=$(gh api "repos/{GH_REPO}/collaborators/${RL}/permission" --jq '.permission' 2>/dev/null || true); [ -n "$RP" ] || RP="none"; PERMS="${PERMS}${RL} ${RP}"$'\n'; fi
-         case "$RP" in admin|maintain|write) TRUSTED_RAW="${TRUSTED_RAW}${ROW}"$'\n' ;; esac
-       done < <(printf '%s\n' "$RAW" | jq -c '.' 2>/dev/null)
-       # Leading-marker match only (forge#3412): remediation trail comments start with <!-- FORGE:REMEDIATION -->.
-       NEEDS_REREVIEW=$(printf '%s' "$TRUSTED_RAW" | jq -s '[.[] | select((.body | startswith("<!-- FORGE:REMEDIATION -->")) and (.body | contains("<!-- FORGE:REMEDIATION:COMPLETE -->")) and (.body | contains("REREVIEW-REQUIRED")))] | length' 2>/dev/null) || NEEDS_REREVIEW=""
-       REREVIEW_DONE=$(printf '%s' "$TRUSTED_RAW" | jq -s --arg sha "$REREVIEW_SHA" '[.[] | select((.body | startswith("<!-- FORGE:REREVIEW_DISPATCHED -->")) and (.body | contains($sha)))] | length' 2>/dev/null) || REREVIEW_DONE=""
-       if [ -z "$NEEDS_REREVIEW" ] || [ -z "$REREVIEW_DONE" ]; then REREVIEW_STATE="UNREADABLE"
-       elif [ "$NEEDS_REREVIEW" -ge 1 ] && [ "$REREVIEW_DONE" -eq 0 ] && [ "${DRY_RUN:-false}" != "true" ]; then REREVIEW_STATE="PENDING"
+       elif [ "$NEEDS_ANY" -ge 1 ]; then
+         REREVIEW_STATE="STALE"            # trail is for another head (or predates the Head line): never re-dispatch silently
        fi
      fi
    fi
-   echo "REREVIEW_STATE=$REREVIEW_STATE PR=$REREVIEW_PR SHA=$REREVIEW_SHA BASE=$REREVIEW_BASE"
+   # forge#3429: also print the lowest-id (winning) claim's `Claim:` id so a re-check can tell its own claim from another actor's.
+   FIRST_CLAIM_ID=""
+   if [ -n "${TRUSTED_RAW:-}" ]; then FIRST_CLAIM_ID=$(printf '%s' "$TRUSTED_RAW" | jq -s -r --arg sha "$REREVIEW_SHA" "${REREVIEW_CLAIMS} | (.[0].body // \"\") | capture(\"Claim: (?<c>[^\\\\n]+)\").c // \"\"" 2>/dev/null || true); fi
+   echo "REREVIEW_STATE=$REREVIEW_STATE PR=$REREVIEW_PR SHA=$REREVIEW_SHA BASE=$REREVIEW_BASE FIRST_CLAIM_ID=$FIRST_CLAIM_ID"
    ```
 
-   `REREVIEW_STATE=NONE` means nothing to do. `UNREADABLE` fails closed: classify the issue `GATED` this cycle without writing anything, and re-run Step 1 next cycle. Only `PENDING` continues.
+   `REREVIEW_STATE=NONE` means nothing to do (including an issue already at `needs-human`, closed, or not at `workflow:in-review`). `CLAIMED` means another actor holds a live claim for this head (an unexpired or renewed lease, or an expired lease with recent liveness such as a trusted `FORGE:REVIEW*` comment inside the lease window or running checks): do nothing, re-run Step 1 next cycle. A `FORGE:REREVIEW_RELEASED` marker for the head (posted by the claimant after `review-pr` returned) or a merged/closed PR is `NONE`: the claimant finished, so there is nothing to dispatch or escalate. `UNREADABLE` fails closed: classify the issue `GATED` this cycle without writing anything, and re-run Step 1 next cycle. `STALE` (an expired lease with no liveness and the PR still open, a lease past the `REREVIEW_MAX_SECS` ceiling, an unparseable claim, or a trail that does not match the current head) goes straight to the Step 3 terminal fallback with the reason `stale re-review claim or trail`, without dispatching. Only `PENDING` continues.
 
-   **Step 2 — dispatch (a real call, not part of the bash block above).** Invoke, with the `REREVIEW_PR`, `REREVIEW_BASE` and `PRED` values Step 1 printed:
+   **Step 2 — dispatch (claim first, forge#3413).** The claim is written and read back BEFORE `review-pr` is invoked. A failed post or read-back means NO dispatch (fail closed, terminal fallback), so there is never a wasted duplicate dispatch, and a second actor sees the claim and stands down. Bash blocks are independent executions: run the claim block with the **SHARED HELPERS** (`rereview_trusted_rows`, `REREVIEW_CLAIMS`, `REREVIEW_DONE_FILTER`, the lease/released filters and `REREVIEW_LEASE_SECS` / `REREVIEW_MAX_SECS`, plus its transitive deps `resolve_orch_login` and `trail_cache_dir`, pasted if not already defined in the block) from Step 1 pasted verbatim at its top, and `REREVIEW_PR` / `REREVIEW_SHA` set to the values Step 1 printed. The read-back lists the PR's comments by number and applies the same trusted predicate. The EARLIEST trusted claim for the head wins, defined as the LOWEST comment id (`.[0]` of the id-sorted `REREVIEW_CLAIMS`, unchanged by renewals; forge#3429): if the first matching row does not carry this actor's `Claim:` id, another actor claimed first (`LOST`) and this one stands down. The read-back waits a short settle delay before the first read and re-reads once after `VERIFIED` (a lower-id claim that appears late demotes it to `LOST`). Any API failure, zero matching rows, or a failed confirming re-read is `UNVERIFIED` (fail closed, never `VERIFIED`). The block has no `exit`, so it is safe in a shared or sourced shell:
+
+   ```bash
+   REREVIEW_MARKER="UNVERIFIED"
+   if [ "${DRY_RUN:-false}" = "true" ]; then
+     echo "[DRY_RUN] would claim FORGE:REREVIEW_DISPATCHED for head ${REREVIEW_SHA} on PR #${REREVIEW_PR} and dispatch review-pr --auto-merge"
+     REREVIEW_MARKER="DRYRUN"
+   else
+     CLAIM_ID="orchestrator-$(date -u +%s)-$$"
+     post_marker() { gh pr comment "$REREVIEW_PR" -R {GH_REPO} --body "<!-- FORGE:REREVIEW_DISPATCHED -->
+   Head: ${REREVIEW_SHA}
+   Actor: orchestrator
+   Claim: ${CLAIM_ID}
+   Lease: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+   Re-review claimed by the orchestrator: remediation had no sub-agent dispatch tool."; }
+     # Retry the post once, and only when the first attempt failed (a duplicate with the same Claim id is harmless).
+     post_marker || { sleep 2; post_marker || echo "REREVIEW claim post failed twice" >&2; }
+     # Read back: the lowest-id trusted claim for this head must be ours (forge#3429). Settle delay before the first read so a
+     # winner's comment that is still replicating is visible; one re-read after a short wait absorbs lag on failure.
+     # rb_first_claim prints the body of the lowest-id claim; any failure or zero rows returns non-zero (fail closed).
+     rb_first_claim() {
+       local RB_RAW RB_TRUSTED RB_FIRST
+       RB_RAW=$(gh api --paginate "repos/{GH_REPO}/issues/${REREVIEW_PR}/comments" \
+             --jq '.[] | {id: (.id // 0), body: (.body // ""), login: (.user.login // ""), assoc: (.author_association // "")}' 2>/dev/null) || return 1
+       RB_TRUSTED=$(printf '%s\n' "$RB_RAW" | rereview_trusted_rows) || return 1
+       RB_FIRST=$(printf '%s' "$RB_TRUSTED" | jq -s -r --arg sha "$REREVIEW_SHA" "${REREVIEW_CLAIMS} | .[0].body // \"\"" 2>/dev/null) || return 1
+       [ -n "$RB_FIRST" ] || return 1
+       printf '%s' "$RB_FIRST"
+     }
+     sleep 2
+     for _ATTEMPT in 1 2; do
+       if RB_FIRST=$(rb_first_claim); then
+         if printf '%s' "$RB_FIRST" | grep -qxF "Claim: ${CLAIM_ID}"; then REREVIEW_MARKER="VERIFIED"; else REREVIEW_MARKER="LOST"; fi
+         break
+       fi
+       sleep 3
+     done
+     # Confirming re-read after VERIFIED: a lower-id claim that became visible late means LOST; a failed re-read means
+     # UNVERIFIED (never dispatch on an unconfirmed claim).
+     if [ "$REREVIEW_MARKER" = "VERIFIED" ]; then
+       sleep 2
+       if RB_CONFIRM=$(rb_first_claim); then
+         printf '%s' "$RB_CONFIRM" | grep -qxF "Claim: ${CLAIM_ID}" || REREVIEW_MARKER="LOST"
+       else
+         REREVIEW_MARKER="UNVERIFIED"
+       fi
+     fi
+   fi
+   echo "REREVIEW_MARKER=$REREVIEW_MARKER"
+   ```
+
+   Then, on `REREVIEW_MARKER=VERIFIED` ONLY, dispatch with the `REREVIEW_PR`, `REREVIEW_BASE` and `PRED` values Step 1 printed (a real call, not part of the bash block above). `DRYRUN` records "Would re-review PR #${REREVIEW_PR} with review-pr --auto-merge; skipped (dry-run)." and dispatches nothing; `LOST` and `UNVERIFIED` dispatch nothing:
 
    ```
    if DRY_RUN=true:
      record "Would re-review PR #${REREVIEW_PR} with review-pr --auto-merge; skipped (dry-run)."
-   else:
+   elif REREVIEW_MARKER == VERIFIED:
      Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="${REREVIEW_PR} --auto-merge --issue ${PRED} --base ${REREVIEW_BASE} --gh-flag -R {GH_REPO}")
    ```
 
-   If the call returns no `REVIEW_RESULT` (interrupted or no result), invoke it once more; this retry is the only one (bounded, independent of the Phase 4R `github-unavailable` waits). Then post the marker AFTER the dispatch, so an interrupted session never leaves a marker that blocks a retry:
+   If the call returns no `REVIEW_RESULT` (interrupted or no result), invoke it once more; this retry is the only one (bounded, independent of the Phase 4R `github-unavailable` waits) and does not post a second claim: the claim for this head is already recorded.
+
+   **Renew and release (forge#3428).** After `review-pr` returns (any result, including none), the claimant posts a checked, DRY_RUN-guarded release so the next Step 1 reads `NONE` instead of aging the claim into `STALE`. Run it with the SHARED HELPERS (the same set, including `resolve_orch_login` and `trail_cache_dir`) pasted at the top and `REREVIEW_PR` / `REREVIEW_SHA` / `CLAIM_ID` from Step 2. A failed post is reported (never ignored) but is not fatal: liveness in Step 1 still protects a live claimant. Renewal is best-effort: between review phases the claimant may re-post `<!-- FORGE:REREVIEW_DISPATCHED -->` with the SAME `Claim:` id and a fresh `Lease:` (Step 1 reads the newest row of the earliest claim's id for lease age; the earliest-claim-wins read-back stays on `.[0]`):
 
    ```bash
-   [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] would post FORGE:REREVIEW_DISPATCHED on PR #${REREVIEW_PR}"; exit 0; }
-   gh pr comment "$REREVIEW_PR" -R {GH_REPO} --body "<!-- FORGE:REREVIEW_DISPATCHED -->
-   Re-review dispatched by the orchestrator at head ${REREVIEW_SHA}: remediation had no sub-agent dispatch tool."
+   if [ "${DRY_RUN:-false}" = "true" ]; then
+     echo "[DRY_RUN] would post FORGE:REREVIEW_RELEASED for head ${REREVIEW_SHA} on PR #${REREVIEW_PR}"
+   else
+     post_release() { gh pr comment "$REREVIEW_PR" -R {GH_REPO} --body "<!-- FORGE:REREVIEW_RELEASED -->
+   Head: ${REREVIEW_SHA}
+   Actor: orchestrator
+   Claim: ${CLAIM_ID}
+
+   Re-review finished by the orchestrator: claim released."; }
+     post_release || { sleep 2; post_release || echo "REREVIEW release post failed twice (liveness still protects the claim)" >&2; }
+   fi
    ```
 
-   **Step 3 — outcome.** On `REVIEW_RESULT: status: COMPLETE` (merged), drive `work-on:close` and let item 6.6 wake dependents as normal. If `review-pr` returns another result with its own labelled terminal state (CHANGES REQUESTED, or `needs-human` for genuine blockers), that verdict applies and the issue is `GATED` or failed per the existing rules. If dispatch failed, the skill did not resolve, or the issue is still at `workflow:in-review` with no `needs-human` after the retry, apply the **terminal fallback** defined in `commands/work-on.md` Phase 0A.1 (comment with the reason, add `needs-human` and remove `workflow:in-review` in one edit, verify the write), classify the issue `GATED`, and surface it to the operator in the run summary as `GATED: re-review could not run (#{PRED}, PR #{REREVIEW_PR}): <reason>`. A failed label write is reported as such, not as done. The marker bounds this to one re-review per PR head (no loop). Never review inline.
+   **Step 3 — outcome.** On `REVIEW_RESULT: status: COMPLETE` (merged), drive `work-on:close` and let item 6.6 wake dependents as normal. If `review-pr` returns another result with its own labelled terminal state (CHANGES REQUESTED, or `needs-human` for genuine blockers), that verdict applies and the issue is `GATED` or failed per the existing rules. `REREVIEW_MARKER=LOST` (another actor claimed this head first) and `REREVIEW_STATE=CLAIMED` take no action: leave the issue as it is and re-check next cycle. Before applying the terminal fallback for `STALE`, re-read the PR state and the issue labels once more: a merged or closed PR, or an issue that already advanced, means skip the fallback and report the state (forge#3428). If dispatch failed, the skill did not resolve, the issue is still at `workflow:in-review` with no `needs-human` after the retry, Step 1 printed `STALE`, or Step 2 printed `REREVIEW_MARKER=UNVERIFIED` and the re-check below found no live claim, apply the **terminal fallback** defined in `commands/work-on.md` Phase 0A.1 (labels re-read first, comment with the reason, add `needs-human` and remove `workflow:in-review` in one edit, verify the write), classify the issue `GATED`, and surface it to the operator in the run summary as `GATED: re-review could not run (#{PRED}, PR #{REREVIEW_PR}): <reason>`. For `REREVIEW_MARKER=UNVERIFIED`, first re-check for another actor's fresh claim (forge#3429): re-run the Step 1 CLAIMED/STALE/DONE classification for this head (with the SHARED HELPERS pasted at the top of that block). Map the result, reading the printed `FIRST_CLAIM_ID` (the lowest-id, winning claim, the same `.[0]` row that decides ownership everywhere else): if `FIRST_CLAIM_ID` equals this actor's own `CLAIM_ID`, the winning claim is our own unverified one, so go to the fallback (do not stand down on it). If `FIRST_CLAIM_ID` is another actor's id, the winning claim is not ours: classify it with the mapping below, exactly as the router's Claim pre-check step 4 does for `LOST` (forge#3431), so a `STALE` foreign winner (a crashed earlier claimant) goes to the fallback and never strands the issue, even though our own row still exists. Otherwise (and for a foreign winner) `CLAIMED` (another actor's live claim) and `NONE` (released or done) stand down like `LOST` (no dispatch, no fallback, re-check next cycle); `UNREADABLE` writes nothing (fail closed, classify `GATED` this cycle without the fallback, as in Step 1); `STALE` and `PENDING` go to the fallback. The reason is `re-review claim could not be recorded` and the report line is `GATED: re-review could not run (#{PRED}, PR #{REREVIEW_PR}): marker write failed`; because the claim is written first, `UNVERIFIED` now means `review-pr` was NOT dispatched. Do not leave the issue `PENDING`. A failed label write is reported as such, not as done. The verified per-head claim bounds this to one re-review per PR head across the orchestrator and the router (no loop). Never review inline.
 
    This satisfies #1809 Q2 (the orchestrator auto-dispatches remediation against the gated issue itself — the exact gap forge#1812's item 6.5/6.6 left open, since those items only ever track and wake *dependents*, never the gated PR's own remediation) — and closes forge#2243 (the gap that #1812's fix left open for *leaf* issues with no dependents: because this item's `$PRED` binding was never made explicit and self-contained, it was only ever reached while walking a dependent's predecessor list, so a `needs-human` issue that has no dependents never got remediation dispatched and its CHANGES-REQUESTED PR re-reviewed the same unchanged commit forever). The remediation agent's outcome is picked up on the **next** completion-monitoring cycle of this same Step 4B loop: if it lands (`workflow:merged`), item 6.6 below fires normally and wakes any `blocked-on-human-merge` dependents (if any exist — a leaf issue simply has none to wake); if it holds/re-escalates, the issue simply remains `GATED` and item 6.5 continues tracking its dependents (if any) unchanged.
 
@@ -2618,7 +2759,7 @@ if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac
   # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
   _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
   # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
   _m="$HOME/.claude/plugins/marketplaces/$_mk"
   # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
   _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
@@ -2656,7 +2797,7 @@ if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac
   # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
   _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
   # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
   _m="$HOME/.claude/plugins/marketplaces/$_mk"
   # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
   _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
@@ -2907,7 +3048,7 @@ _cands="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_H
 for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
   [ -n "$_cfg" ] || continue
   _cands="$_cands
-$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$0}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
 done
 _cands="$_cands
 $PWD"
@@ -3266,7 +3407,7 @@ Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${R
       # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
       _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
       # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-      _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+      _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
       _m="$HOME/.claude/plugins/marketplaces/$_mk"
       # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
       _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
@@ -3432,7 +3573,7 @@ for FINDING_NUM in "${BATCHING_CANDIDATES[@]}"; do
     # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
     _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
     # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-    _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$0}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+    _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
     _m="$HOME/.claude/plugins/marketplaces/$_mk"
     # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
     _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"

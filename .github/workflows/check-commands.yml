@@ -12,6 +12,9 @@ on:
       - 'scripts/check-command-docs-drift.sh'
       - 'scripts/check-command-side-effects.sh'
       - 'scripts/check-spec-markers.sh'
+      - 'scripts/check-spec-bash.sh'
+      - 'scripts/check-spec-bash.test.sh'
+      - 'scripts/review-pr-arguments.test.sh'
       - 'scripts/check-admission-parity.mjs'
       - 'bin/engine/admission.mjs'
       - 'scripts/check-phase-registry-drift.mjs'
@@ -33,6 +36,9 @@ on:
       - 'scripts/check-command-docs-drift.sh'
       - 'scripts/check-command-side-effects.sh'
       - 'scripts/check-spec-markers.sh'
+      - 'scripts/check-spec-bash.sh'
+      - 'scripts/check-spec-bash.test.sh'
+      - 'scripts/review-pr-arguments.test.sh'
       - 'scripts/check-admission-parity.mjs'
       - 'bin/engine/admission.mjs'
       - 'scripts/check-phase-registry-drift.mjs'
@@ -283,6 +289,18 @@ jobs:
           #
           # <!-- Added: forge#1609 -->
           bash scripts/check-spec-markers.sh commands/ .
+
+      - name: Check Skill-loaded specs for positional-arg placeholders ($0-$9) in fenced blocks
+        run: |
+          # Claude Code rewrites $0..$9 in a skill body with the invocation's arguments, so
+          # awk '{print $2}' / local x="$1" in a spec are silently corrupted when it is loaded
+          # with args. Use ${1} (shell) and $(1) (awk). Read-loaded orchestrate/**,
+          # pipeline-health/** and the review-pr-agents catalog are not substituted and are exempt.
+          # Deliberate hits: put `allowlist:positional-arg` on the same line.
+          bash scripts/check-spec-bash.test.sh
+          bash scripts/review-pr-arguments.test.sh
+          # No args: the script's built-in default file set (all Skill-loaded specs under commands/).
+          bash scripts/check-spec-bash.sh
 
   admission-parity:
     name: admission.mjs / bash mirror parity check

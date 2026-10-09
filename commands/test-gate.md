@@ -65,9 +65,9 @@ BASE_BRANCH="${DEFAULT_BRANCH}"
 
 # Parse --prs and --base from $ARGUMENTS
 while [[ "$@" ]]; do
-  case "$1" in
-    --prs)   shift; BUNDLE_PRS="$1";;
-    --base)  shift; BASE_BRANCH="$1";;
+  case "${1}" in
+    --prs)   shift; BUNDLE_PRS="${1}";;
+    --base)  shift; BASE_BRANCH="${1}";;
   esac
   shift
 done
@@ -630,11 +630,11 @@ echo ""
 
 # Helper: classify a single criterion line into one of four buckets:
 #   covered, uncovered, untestable, manual
-# Arguments: $1 = criterion text, $2 = source_issue, $3 = source_pr
+# Arguments: ${1} = criterion text, ${2} = source_issue, ${3} = source_pr
 classify_criterion() {
-  local criterion="$1"
-  local source_issue="$2"
-  local source_pr="$3"
+  local criterion="${1}"
+  local source_issue="${2}"
+  local source_pr="${3}"
 
   # --- Step 1: Detect explicitly manual criteria ---
   if echo "$criterion" | grep -qP '\[type:manual\]'; then

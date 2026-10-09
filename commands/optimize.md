@@ -250,7 +250,7 @@ declare -A LABEL_MAP=(
 )
 
 map_label() {
-  local canonical="$1"
+  local canonical="${1}"
   echo "${LABEL_MAP[$canonical]:-$canonical}"
 }
 SCRIPT_EOF
@@ -514,8 +514,8 @@ for candidate in "${TIER_A_PROMOTIONS[@]}"; do
 # Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 #
 # CONTRACT:
-#   \$1 = absolute path to unified diff (git diff HEAD)
-#   \$2 = absolute path to worktree root
+#   \${1} = absolute path to unified diff (git diff HEAD)
+#   \${2} = absolute path to worktree root
 #   stdout = findings lines: SLUG | SEVERITY | FILE | MESSAGE
 #   exit 0 = pass, exit 1 = findings, exit 2 = inapplicable
 #   30s timeout enforced by quality-gate (fail-closed)
@@ -612,8 +612,8 @@ ${CITATIONS_BODY}
 ## gate.d contract
 
 Each script receives:
-- \$1 = path to unified diff
-- \$2 = path to worktree root
+- \${1} = path to unified diff
+- \${2} = path to worktree root
 - exits 0 (pass), 1 (findings on stdout), or 2 (inapplicable)
 - 30-second timeout enforced by quality-gate (fail-closed on timeout)
 

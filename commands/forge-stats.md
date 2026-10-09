@@ -104,7 +104,7 @@ for cmd in commands/*.md; do
 done
 
 echo ""
-echo "Total: $(wc -l commands/*.md | tail -1 | awk '{print $1}') lines across $(ls commands/*.md | wc -l) commands"
+echo "Total: $(wc -l commands/*.md | tail -1 | awk '{print $(1)}') lines across $(ls commands/*.md | wc -l) commands"
 ```
 
 **After running, flag any command where:**

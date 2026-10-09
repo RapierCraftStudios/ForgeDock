@@ -2,6 +2,15 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Spec bash no longer corrupted by Claude Code argument substitution
+
+Claude Code replaces `$0`..`$9` in a skill body with the invocation's arguments (0-based), so spec bash loaded via `Skill(...)` with args was silently rewritten: `awk '{print $2}'` became `awk '{print --issue}'`, `local AGENT="$1"` became `local AGENT="--auto-merge"`, which broke `/review-pr` agent selection and the CI/deploy comparisons with no error. `${N}`, `$(N)`, `$NF`, `$@`, `$#` and `$10`+ are not substituted.
+
+- Skill-loaded specs now use `${1}` in shell and `$(1)` in awk (`printf "%s", $(0)` instead of `printf $0`). Behavior is otherwise unchanged. The shared FORGE_ROOT bootstrap block was updated byte-identically everywhere, including `orchestrate/**`.
+- New `scripts/check-spec-bash.sh --positional` fails CI on `$0`..`$9` inside fenced blocks of Skill-loaded specs (suppress a deliberate hit with `allowlist:positional-arg` on the line). Read-loaded `orchestrate/**`, `pipeline-health/**` and the `review-pr-agents` catalog are exempt.
+
+Action: none.
+
 ## In-PR fix round for CONFIRMED MEDIUM findings (#3387, narrowed)
 
 Under `--auto-merge` with `--issue` (the `/work-on` pipeline), a review finding that is **MEDIUM + CONFIRMED** in a file the PR itself changed is no longer merged and filed as a follow-up issue. `/review-pr` §6B.6 posts a `FORGE:INPR_FIX` work order on the PR, and Phase 8 holds the merge for that head (`blocker: in-pr fix required`). `/work-on` review then runs **one** remediation round (bound: `FORGE:INPR_REMEDIATION` on the issue) that fixes exactly those findings and re-reviews.

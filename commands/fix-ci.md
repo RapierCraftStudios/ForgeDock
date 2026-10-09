@@ -49,7 +49,7 @@ Parse `$ARGUMENTS`:
 
 ```bash
 # Extract PR number (accept raw number or full GitHub URL)
-PR_INPUT=$(echo "$ARGUMENTS" | awk '{print $1}')
+PR_INPUT=$(echo "$ARGUMENTS" | awk '{print $(1)}')
 if echo "$PR_INPUT" | grep -qE '^https?://'; then
   PR_NUMBER=$(echo "$PR_INPUT" | grep -oE '[0-9]+$')
 else
@@ -58,7 +58,7 @@ fi
 
 MAX_ATTEMPTS=5
 if echo "$ARGUMENTS" | grep -q -- "--max-attempts"; then
-  MAX_ATTEMPTS=$(echo "$ARGUMENTS" | grep -oE -- '--max-attempts [0-9]+' | awk '{print $2}')
+  MAX_ATTEMPTS=$(echo "$ARGUMENTS" | grep -oE -- '--max-attempts [0-9]+' | awk '{print $(2)}')
 fi
 
 if [ -z "$PR_NUMBER" ]; then

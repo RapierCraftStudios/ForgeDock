@@ -17,13 +17,16 @@ agree with it.
 | F3 | A forked skill runs **in the background by default**: the invoking turn does not wait and the result arrives later as a notification to the main conversation. `background: false` makes the invoking turn wait for the result. | code.claude.com/docs/en/skills |
 | F4 | Measured on 2.1.294 with plain agents: layer 1 and layer 2 have `Agent`; layer 3 does not. | probe, 2026-10-08 (forge#3398) |
 | F5 | Measured on 2.1.294 with forked skills: a fork **always runs**, at any layer (a fork invoked from layer 3 ran at layer 4). Only its `Agent` tool follows F1: a fork at layer 2 has `Agent`, a fork at layer 3 or deeper does not. | probe, 2026-10-08 (forge#3398) |
+| F6 | Measured on 2.1.294 / 2.1.295 (forge#3437): an `Agent` launched **directly** by a sub-agent reports its completion to that sub-agent, but an `Agent` launched from inside a **forked skill** is attributed to the **root session**, so its completion notification goes to the root and never reaches the worker. Inside a sub-agent the spawn surface is `Agent(description, effort, isolation, prompt, subagent_type)` only: async-only (no `run_in_background`/wait parameter) and no `Task` tool. | orchestrate batch 20261008T170649, probe |
 
 So the depth limit constrains exactly one thing: **where a sub-agent can be spawned**. Forking
 for context isolation is free at any depth; spawning `Agent(...)` sub-agents only works from layer 2
 or shallower (under the default limit of 3).
 
 F3 explains two field symptoms: phases returning "running"/empty results to the router, and phase
-completion notifications arriving in the orchestrator's root session instead of the worker.
+completion notifications arriving in the orchestrator's root session instead of the worker. F6 adds
+the spawn-site ownership rule (R6): reviewers that `/review-pr` launches inside a forked phase are
+owned by the root, so their completion is read from GitHub, not from notifications.
 
 ## 2. Observed failure (forge#3391, AlterLab#34442)
 
@@ -56,7 +59,8 @@ R1 applies.
 
 **R3 — Phases run synchronously.** Every forked phase and child declares `background: false`, so a
 `Skill(...)` call returns the `*_RESULT` block in the caller's turn. The "running/empty return"
-handling in the router's Hard Rule 3a stays as a defensive fallback only.
+handling in the router's Hard Rule 3a stays as a defensive fallback only (see R6 for reviewers
+spawned inside those phases).
 
 **R4 — Depth preflight, fail loud.** Router Phase 0 checks that a dispatching phase will have the
 `Agent` tool: router layer + 2 ≤ effective spawn depth (router layer 1 with `--under-orchestration`,
@@ -67,6 +71,22 @@ code is written (`scripts/spawn-depth-check.sh`).
 **R5 — Fallbacks stay fallbacks.** `REREVIEW_REQUIRED` (forge#3240) and the stranded-handoff
 handling from forge#3391 / PR #3395 remain as safety nets for an unexpected runtime, not as the
 normal remediation path.
+
+**R6 — Spawn-site ownership: completion is read from GitHub, not notifications.** Who receives a
+child's completion notification depends on where it was spawned (F6): directly by the worker, the
+worker; from inside a forked phase (the `/review-pr` domain reviewers launched in `work-on:review` /
+`work-on:remediate`), the root session. Because the sub-agent `Agent` tool is async-only, a forked
+phase hosting `/review-pr` cannot wait on a notification. Therefore:
+- `/review-pr` treats each selected reviewer's `FORGE:REVIEW-AGENT:{domain}` PR comment, carrying a
+  `Reviewed-SHA:` line equal to the current head, as the completion signal and polls for it with a
+  bounded wait (`REVIEWER_WAIT_SECS`) when its dispatch tool is `Agent`. A missing notification is
+  never a missing review. On timeout it keeps the `review-degraded` hard stop.
+- A re-invocation of review or remediate is idempotent: a complete current-SHA panel is reused, only
+  missing domains are re-dispatched, and the router consumes an existing current-SHA panel and
+  verdict instead of counting the re-invoke as a stall.
+- Dispatching phases remain router-only (R1); this rule adds no nesting and does not raise the
+  router's 2-retry cap. Reviewer notifications still reach the root session under `/orchestrate`
+  (noise only); fully nesting them needs an upstream Claude Code change.
 
 ## 4. Layer map
 

@@ -229,5 +229,20 @@ if command -v node >/dev/null 2>&1; then
   done
 fi
 
+# Guard (#3400): gate-helper (trusted-comments.sh) resolution loops must never list "$PWD" — the repo
+# under review is author-controlled. Exact copy counts + normalized identity prevent drift.
+TC_LOOPS="commands/review-pr.md:7 commands/work-on/review.md:1"
+: > "$T/tc_all"
+for e in $TC_LOOPS; do
+  f="${e%%:*}"; want="${e##*:}"
+  n=$(grep -c 'trusted-comments.sh" \]' "$ROOT/$f"); expect "trusted-comments.sh loop count in $f" "$want" "$n"
+  grep -n 'for _c in' "$ROOT/$f" | while IFS=: read -r ln _; do
+    sed -n "$((ln+1))p" "$ROOT/$f" | grep -q 'trusted-comments.sh' && sed -n "${ln}p" "$ROOT/$f" | sed 's/^[ ]*//' >> "$T/tc_all"
+  done
+done
+expect "trusted-comments.sh loops total" 8 "$(wc -l < "$T/tc_all" | tr -d ' ')"
+expect "trusted-comments.sh loops byte-identical" 1 "$(sort -u "$T/tc_all" | wc -l | tr -d ' ')"
+grep -qF '"$PWD"' "$T/tc_all" && bad 'trusted-comments.sh loop lists "$PWD"' || ok
+
 echo "forge-root tests: pass=$PASS fail=$FAILN skipped=$SKIPPED"
 [ "$FAILN" -eq 0 ]
