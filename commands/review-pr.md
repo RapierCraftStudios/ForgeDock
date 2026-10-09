@@ -126,8 +126,8 @@ IFS= read -r -d '' ARGS_RAW <<'FORGE_ARGS_EOF_NONCE'
 $ARGUMENTS
 FORGE_ARGS_EOF_NONCE
 ARGS_RAW="${ARGS_RAW%$'\n'}"
-# Fail closed: a string holding a quote, backtick, dollar sign, backslash or newline is rejected whole.
-# Nothing is parsed from it, so no PR number, repo, merge value or --auto-merge survives.
+# Fail closed: a string holding a quote, backtick, dollar sign, backslash, newline or tab is rejected whole.
+# Nothing is parsed from it, so no PR number, repo, merge value or auto-merge flag survives.
 case "$ARGS_RAW" in
   *'"'*|*'`'*|*'$'*|*'\'*|*$'\n'*|*$'\t'*)
     echo "review-pr: rejected argument string (contains a quote, backtick, dollar sign, backslash, newline or tab) - nothing parsed, auto-merge not honoured" >&2
