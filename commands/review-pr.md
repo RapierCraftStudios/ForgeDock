@@ -165,7 +165,7 @@ while [ "$arg_i" -lt "${#ARG_TOKENS[@]}" ]; do
   arg_i=$((arg_i + 1))
 done
 # Shape-check parsed values before anything substitutes them into shell or jq; invalid values are
-# cleared (fail closed: --auto-merge without a valid --issue returns BLOCKED in Phase 8).
+# cleared (fail closed: a merge request without a valid issue number returns BLOCKED in Phase 8).
 if [ -n "$MERGE_ISSUE" ] && ! printf '%s' "$MERGE_ISSUE" | grep -qE '^[0-9]+$'; then
   echo "review-pr: --issue must be numeric - ignoring '$MERGE_ISSUE'" >&2; MERGE_ISSUE=""
 fi
