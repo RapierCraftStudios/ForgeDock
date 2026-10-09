@@ -120,9 +120,11 @@ Extract: `PR_NUMBER`, `AUTO_MERGE=true`, `MERGE_ISSUE`, `MERGE_BASE`, `MERGE_GH_
 # or a mode keyword; the rest are flags.
 # The loader substitutes the argument text into this block BEFORE bash parses it, so it is read from a
 # quoted heredoc (inert for quotes, $(...), backticks and backslashes) and never from a quoted assignment.
-IFS= read -r -d '' ARGS_RAW <<'FORGE_ARGS_EOF_7f3a91c4d2b84e60a5c1'
+# NONCE RULE: before running, replace the word NONCE in BOTH delimiter lines below with a fresh random hex string
+# (e.g. `openssl rand -hex 16`) that does not occur in the argument text. Never run the literal NONCE delimiter. <!-- Added: forge#3466 -->
+IFS= read -r -d '' ARGS_RAW <<'FORGE_ARGS_EOF_NONCE'
 $ARGUMENTS
-FORGE_ARGS_EOF_7f3a91c4d2b84e60a5c1
+FORGE_ARGS_EOF_NONCE
 ARGS_RAW="${ARGS_RAW%$'\n'}"
 # Fail closed: a string holding a quote, backtick, dollar sign, backslash or newline is rejected whole.
 # Nothing is parsed from it, so no PR number, repo, merge value or --auto-merge survives.
@@ -198,7 +200,7 @@ fi
 # END review-pr-arg-parse
 ```
 
-**Argument injection hardening** <!-- Added: forge#3466 -->: the loader substitutes `$ARGUMENTS` textually, so a quoted assignment (`ARGS_RAW="..."`) can be broken out of by any caller that forwards text it does not control. The block therefore reads the string from a quoted heredoc and rejects any string containing a quote, backtick, dollar sign, backslash or newline: it prints `review-pr: rejected argument string`, parses nothing, and binds `PR_NUMBER`, `REPO` and `MERGE_*` empty with `AUTO_MERGE=false`, so `--auto-merge` is never honoured from a rejected string (a non-merge run with no PR number stops). Residual risk: the heredoc delimiter is public spec text, so an argument holding a newline followed by the exact delimiter line still ends the heredoc early; the delimiter is a long unusual token for that reason, and the complete fix is for the loader to pass arguments out of band. Callers must pass `--gh-flag -R owner/repo` unquoted.
+**Argument injection hardening** <!-- Added: forge#3466 -->: the loader substitutes `$ARGUMENTS` textually, so a quoted assignment (`ARGS_RAW="..."`) can be broken out of by any caller that forwards text it does not control. The block therefore reads the string from a quoted heredoc and rejects any string containing a quote, backtick, dollar sign, backslash or newline: it prints `review-pr: rejected argument string`, parses nothing, and binds `PR_NUMBER`, `REPO` and `MERGE_*` empty with `AUTO_MERGE=false`, so `--auto-merge` is never honoured from a rejected string (a non-merge run with no PR number stops). The heredoc delimiter is not a constant: the spec carries the placeholder `FORGE_ARGS_EOF_NONCE` and the executor MUST replace `NONCE` with a fresh random hex string before running, so a caller cannot pre-compute a delimiter line (a newline followed by the literal placeholder or any earlier public token stays inert text and is then rejected by the newline check). Residual risk: this depends on the executor following the NONCE rule; the complete fix is for the loader to pass arguments out of band. Callers must pass `--gh-flag -R owner/repo` unquoted.
 
 **`--auto-merge` requires `--issue`** <!-- Added: forge#3102, forge#3124 -->: the phase-trail gate in Phase 8 verifies the trail of the linked issue, so `--issue` is mandatory whenever `AUTO_MERGE=true`. Do NOT infer `MERGE_ISSUE` from the PR: the PR body's closing reference and the head-branch suffix are both author-controlled (and the closing-issue reference list is empty for PRs based on a non-default branch such as `staging`), so neither is a trustworthy binding. If `AUTO_MERGE=true` and `MERGE_ISSUE` is empty, Phase 8 does not merge and returns the documented `REVIEW_RESULT: status: BLOCKED`, blocker: "auto-merge requires --issue". The PR stays open for a human or a re-run with `--issue`.
 

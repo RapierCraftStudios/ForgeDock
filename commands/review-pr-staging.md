@@ -155,9 +155,10 @@ Resolve the staging→main PR number and post a routing marker immediately. This
 # Only the first token is the PR ref; later tokens are flags (--auto-merge, --issue, ...) <!-- allowlist:check-command-side-effects -->
 # The loader substitutes the text before bash parses it, so read it from a quoted heredoc (never a quoted
 # assignment) and reject any string with a quote, backtick, dollar sign, backslash or newline. <!-- Added: forge#3466 -->
-IFS= read -r -d '' STAGING_ARGS_RAW <<'FORGE_ARGS_EOF_7f3a91c4d2b84e60a5c1'
+# NONCE RULE: before running, replace NONCE in BOTH delimiter lines with a fresh random hex string (e.g. `openssl rand -hex 16`) not present in the argument text. <!-- Added: forge#3466 -->
+IFS= read -r -d '' STAGING_ARGS_RAW <<'FORGE_ARGS_EOF_NONCE'
 $ARGUMENTS
-FORGE_ARGS_EOF_7f3a91c4d2b84e60a5c1
+FORGE_ARGS_EOF_NONCE
 STAGING_ARGS_RAW="${STAGING_ARGS_RAW%$'\n'}"
 STAGING_ARGS_REJECTED=false
 case "$STAGING_ARGS_RAW" in

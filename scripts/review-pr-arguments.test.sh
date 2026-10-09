@@ -38,10 +38,13 @@ ERR="$WORK/stderr"
 # verbatim) and run it as a script file, exactly as the loader's output would run. stderr goes to $ERR.
 # gen_script <source> <args> <outfile> [tail]
 gen_script() {
+  # Mimic the executor's NONCE rule: a fresh random delimiter per run, unknown to the caller.
+  NONCE_VAL="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"; [ -n "$NONCE_VAL" ] || NONCE_VAL="r$$$RANDOM$RANDOM"
   {
     printf '%s\n' 'gh() { return 1; }'
     while IFS= read -r line; do
-      if [ "$line" = '$ARGUMENTS' ]; then printf '%s\n' "$2"; else printf '%s\n' "$line"; fi
+      if [ "$line" = '$ARGUMENTS' ]; then printf '%s\n' "$2"
+      else case "$line" in *FORGE_ARGS_EOF_NONCE*) printf '%s\n' "${line//NONCE/$NONCE_VAL}" ;; *) printf '%s\n' "$line" ;; esac; fi
     done <<EOB
 $1
 EOB
@@ -99,6 +102,12 @@ expect_rejected "breakout after valid prefix" "3401 --auto-merge --issue 3398 \"
 expect_rejected "substitution in --base value" "3401 --auto-merge --issue 3398 --base x\$(touch $SENTINEL)"
 expect_rejected "backslash" '3401 --auto-merge --issue 3398 --base x\y'
 expect_rejected "double-quoted gh-flag" '3401 --auto-merge --issue 3398 --base staging --gh-flag "-R o/r" --worktree /w/t'
+expect_rejected "delimiter collision (placeholder)" "3401
+FORGE_ARGS_EOF_NONCE
+touch $SENTINEL"
+expect_rejected "delimiter collision (previous static token)" "3401
+FORGE_ARGS_EOF_7f3a91c4d2b84e60a5c1
+touch $SENTINEL"
 expect_rejected "embedded newline" "3401 --auto-merge --issue 3398
 --base staging"
 
