@@ -46,13 +46,20 @@ OUT="$(run --threshold 150)"; check "at threshold" "$OUT" over false
 # threshold 0 disables
 OUT="$(run --threshold 0)"; check "threshold 0 disables" "$OUT" over false
 
-# default exclusions: lockfile, min, snap, dist/, fixtures/ at depth
+# default exclusions: lockfile, min, snap, root dist/, any-depth __snapshots__/
 reset; gen 5 > a.txt
 gen 500 > package-lock.json; gen 500 > app.min.js; gen 500 > x.snap
-mkdir -p dist pkg/fixtures/deep; gen 500 > dist/out.js; gen 500 > pkg/fixtures/deep/f.json
+mkdir -p dist pkg/__snapshots__/deep; gen 500 > dist/out.js; gen 500 > pkg/__snapshots__/deep/f.json
 git add -A
 OUT="$(run --threshold 100)"
 check "defaults diff_lines" "$OUT" diff_lines 5; check "defaults excluded" "$OUT" excluded_lines 2500; check "defaults over" "$OUT" over false
+
+# SEC-2: built-in directory defaults are root-anchored; first-party nested dirs are counted
+reset; mkdir -p commands/work-on/build pkg/vendor pkg/fixtures; gen 300 > commands/work-on/build/a.md
+gen 200 > pkg/vendor/v.js; gen 100 > pkg/fixtures/f.json; mkdir -p build; gen 50 > build/root.js; git add -A
+OUT="$(run --threshold 100)"
+check "nested defaults counted" "$OUT" diff_lines 600; check "root build excluded" "$OUT" excluded_lines 50; check "nested defaults over" "$OUT" over true
+
 
 # a directory glob is not a substring match (distribution/ is not dist/)
 reset; mkdir -p distribution; gen 30 > distribution/a.txt; git add -A
@@ -99,6 +106,12 @@ OUT="$(bash "$S" --repo-path "$TMP/w" --bogus 2>/dev/null)"; rc=$?
 { [ "$rc" = 2 ] && [ -z "$OUT" ]; } && ok || bad "unknown arg (rc=$rc)"
 OUT="$(bash "$S" --repo-path "$TMP/w" 2>/dev/null)"; rc=$?
 { [ "$rc" = 2 ] && [ -z "$OUT" ]; } && ok || bad "missing base (rc=$rc)"
+
+# SEC-1: commits landing on the base after the branch point are not counted
+reset; git checkout -q staging; gen 3000 > base-only.txt; git add base-only.txt; git commit -qm "base moves"
+git push -q origin staging 2>/dev/null; git checkout -q feat; gen 10 > a.txt; git add a.txt
+OUT="$(run --threshold 100)"
+check "moving base lines" "$OUT" diff_lines 10; check "moving base over" "$OUT" over false
 
 echo "diff-size.test.sh: $PASS passed, $FAILN failed"
 [ "$FAILN" = 0 ]

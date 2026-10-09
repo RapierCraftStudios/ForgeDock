@@ -529,6 +529,7 @@ Review findings per PR rise steeply with diff size, so an oversized diff is spli
 
 ```bash
 # <Script resolution block from above goes here, verbatim>
+git -C "{WORKTREE_PATH}" fetch origin "{PR_BASE}" 2>/dev/null || true  # fresh origin/base for the merge-base measurement
 THRESHOLD=$(yq '.build.diff_size.threshold // 1000' forge.yaml 2>/dev/null || echo 1000)
 EXCLUDES=()
 while IFS= read -r _g; do [ -n "$_g" ] && [ "$_g" != "null" ] && EXCLUDES+=(--exclude-glob "$_g"); done \
