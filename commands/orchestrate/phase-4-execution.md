@@ -2355,7 +2355,15 @@ Do not ask the user questions — you are running autonomously in the background
    # Per-head claim rows (forge#3412/#3413): leading marker AND the exact `Head: <sha>` line, in comment order (oldest first).
    REREVIEW_CLAIMS='[.[] | select((.body | startswith("<!-- FORGE:REREVIEW_DISPATCHED -->")) and (.body | contains("Head: " + $sha)))]'
    REREVIEW_DONE_FILTER="${REREVIEW_CLAIMS} | length"
-   REREVIEW_LEASE_SECS=3600   # a claim older than this with the issue still at workflow:in-review is stale (crashed actor)
+   # Lease (forge#3428): a claim older than REREVIEW_LEASE_SECS is NOT stale by age alone; it is stale only when there is also no
+   # liveness (renewal, recent review activity, running checks). REREVIEW_MAX_SECS is the absolute ceiling for inferred liveness.
+   REREVIEW_LEASE_SECS=3600
+   REREVIEW_MAX_SECS=$(( REREVIEW_LEASE_SECS * 4 ))
+   # Lease age reads the NEWEST row carrying the same `Claim:` id as the earliest claim (.[0]); ownership/LOST stays on .[0].
+   REREVIEW_LEASE_FILTER='(.[0].body | capture("Claim: (?<c>[^\\n]+)").c) as $c | [.[] | select(.body | split("\n") | any(. == ("Claim: " + $c)))] | .[-1].body | capture("Lease: (?<t>[0-9T:Z-]+)").t'
+   REREVIEW_FIRST_LEASE_FILTER='.[0].body | capture("Lease: (?<t>[0-9T:Z-]+)").t'
+   # Explicit release: a trusted leading `<!-- FORGE:REREVIEW_RELEASED -->` row for this head (posted by the claimant after review-pr returned).
+   REREVIEW_RELEASED_FILTER='[.[] | select((.body | startswith("<!-- FORGE:REREVIEW_RELEASED -->")) and (.body | contains("Head: " + $sha)))] | length'
 
    PRED="$NUM"
    REREVIEW_STATE="NONE"; REREVIEW_PR=""; REREVIEW_SHA=""; REREVIEW_BASE=""
@@ -2375,7 +2383,7 @@ Do not ask the user questions — you are running autonomously in the background
    elif [ -n "$REREVIEW_PR" ]; then
      if ! PR_META=$(gh pr view "$REREVIEW_PR" -R {GH_REPO} --json headRefOid,baseRefName --jq '"\(.headRefOid) \(.baseRefName)"' 2>/dev/null) \
         || ! RAW=$(gh api --paginate "repos/{GH_REPO}/issues/${REREVIEW_PR}/comments" \
-             --jq '.[] | {body: (.body // ""), login: (.user.login // ""), assoc: (.author_association // "")}' 2>/dev/null); then
+             --jq '.[] | {body: (.body // ""), login: (.user.login // ""), assoc: (.author_association // ""), at: (.created_at // "")}' 2>/dev/null); then
        REREVIEW_STATE="UNREADABLE"
      else
        REREVIEW_SHA="${PR_META%% *}"; REREVIEW_BASE="${PR_META#* }"
@@ -2389,13 +2397,36 @@ Do not ask the user questions — you are running autonomously in the background
        elif [ "$NEEDS_REREVIEW" -ge 1 ] && [ "$REREVIEW_DONE" -eq 0 ]; then
          REREVIEW_STATE="PENDING"          # DRY_RUN is handled in Step 2 (no `DRY_RUN != true` term here, so its branch is reachable)
        elif [ "$NEEDS_REREVIEW" -ge 1 ]; then
-         # A claim for this head already exists (orchestrator or router). Fresh claim: another actor is reviewing, do
-         # nothing. Old claim, issue still at workflow:in-review: the claimant crashed; surface it via the fallback.
-         CLAIM_T=$(printf '%s' "$TRUSTED_RAW" | jq -s -r --arg sha "$REREVIEW_SHA" "${REREVIEW_CLAIMS} | .[0].body | capture(\"Lease: (?<t>[0-9T:Z-]+)\").t" 2>/dev/null || true)
+         # A claim for this head already exists (orchestrator or router). forge#3428: age alone never makes it stale.
+         #   released            -> NONE (claimant finished; nothing to dispatch or escalate)
+         #   lease still fresh   -> CLAIMED (the lease is the newest row of the owner's claim; a renewal extends it)
+         #   lease expired       -> LIVENESS probe: PR not open -> NONE; recent trusted FORGE:REVIEW* activity inside the lease
+         #                          window or running checks -> CLAIMED; no sign of life -> STALE. A lookup error is UNREADABLE.
+         #   past REREVIEW_MAX_SECS since the first claim -> inferred liveness no longer counts (a hung claimant is escalated).
+         RELEASED=$(printf '%s' "$TRUSTED_RAW" | jq -s --arg sha "$REREVIEW_SHA" "$REREVIEW_RELEASED_FILTER" 2>/dev/null) || RELEASED=""
+         CLAIM_T=$(printf '%s' "$TRUSTED_RAW" | jq -s -r --arg sha "$REREVIEW_SHA" "${REREVIEW_CLAIMS} | ${REREVIEW_LEASE_FILTER}" 2>/dev/null || true)
+         FIRST_T=$(printf '%s' "$TRUSTED_RAW" | jq -s -r --arg sha "$REREVIEW_SHA" "${REREVIEW_CLAIMS} | ${REREVIEW_FIRST_LEASE_FILTER}" 2>/dev/null || true)
          CLAIM_EPOCH=$(printf '%s' "$CLAIM_T" | jq -R 'fromdateiso8601' 2>/dev/null || true)
-         if [ -z "$CLAIM_EPOCH" ]; then REREVIEW_STATE="STALE"
-         elif [ $(( $(date -u +%s) - CLAIM_EPOCH )) -gt "$REREVIEW_LEASE_SECS" ]; then REREVIEW_STATE="STALE"
-         else REREVIEW_STATE="CLAIMED"; fi
+         FIRST_EPOCH=$(printf '%s' "$FIRST_T" | jq -R 'fromdateiso8601' 2>/dev/null || true)
+         NOW=$(date -u +%s)
+         if [ -z "$RELEASED" ]; then REREVIEW_STATE="UNREADABLE"
+         elif [ "$RELEASED" -ge 1 ]; then REREVIEW_STATE="NONE"
+         elif [ -z "$CLAIM_EPOCH" ] || [ -z "$FIRST_EPOCH" ]; then REREVIEW_STATE="STALE"   # malformed claim (no parseable Lease)
+         elif [ $(( NOW - CLAIM_EPOCH )) -le "$REREVIEW_LEASE_SECS" ]; then REREVIEW_STATE="CLAIMED"
+         elif ! LIVE_META=$(gh pr view "$REREVIEW_PR" -R {GH_REPO} --json state,statusCheckRollup \
+             --jq '"\(.state) \([.statusCheckRollup[]? | select(((.status // "") | test("^(IN_PROGRESS|QUEUED|PENDING|WAITING)$")) or ((.state // "") == "PENDING"))] | length)"' 2>/dev/null) \
+             || ! ACTIVE=$(printf '%s' "$TRUSTED_RAW" | jq -s --argjson cutoff "$(( NOW - REREVIEW_LEASE_SECS ))" \
+             '[.[] | select((.body | startswith("<!-- FORGE:REVIEW")) and (((.at | fromdateiso8601?) // 0) > $cutoff))] | length' 2>/dev/null); then
+           REREVIEW_STATE="UNREADABLE"            # liveness lookup failed: fail closed, never STALE
+         else
+           LIVE_PR_STATE="${LIVE_META%% *}"; LIVE_CHECKS="${LIVE_META#* }"
+           case "$LIVE_CHECKS$ACTIVE" in *[!0-9]*|"") REREVIEW_STATE="UNREADABLE" ;;
+             *) if [ "$LIVE_PR_STATE" != "OPEN" ]; then REREVIEW_STATE="NONE"     # merged/closed: nothing to escalate
+                elif [ $(( NOW - FIRST_EPOCH )) -gt "$REREVIEW_MAX_SECS" ]; then REREVIEW_STATE="STALE"
+                elif [ "$LIVE_CHECKS" -gt 0 ] || [ "$ACTIVE" -gt 0 ]; then REREVIEW_STATE="CLAIMED"   # liveness: claimant still working
+                else REREVIEW_STATE="STALE"; fi ;;
+           esac
+         fi
        elif [ "$NEEDS_ANY" -ge 1 ]; then
          REREVIEW_STATE="STALE"            # trail is for another head (or predates the Head line): never re-dispatch silently
        fi
@@ -2404,9 +2435,9 @@ Do not ask the user questions — you are running autonomously in the background
    echo "REREVIEW_STATE=$REREVIEW_STATE PR=$REREVIEW_PR SHA=$REREVIEW_SHA BASE=$REREVIEW_BASE"
    ```
 
-   `REREVIEW_STATE=NONE` means nothing to do (including an issue already at `needs-human`, closed, or not at `workflow:in-review`). `CLAIMED` means another actor holds a fresh claim for this head: do nothing, re-run Step 1 next cycle. `UNREADABLE` fails closed: classify the issue `GATED` this cycle without writing anything, and re-run Step 1 next cycle. `STALE` (an expired or unparseable claim, or a trail that does not match the current head) goes straight to the Step 3 terminal fallback with the reason `stale re-review claim or trail`, without dispatching. Only `PENDING` continues.
+   `REREVIEW_STATE=NONE` means nothing to do (including an issue already at `needs-human`, closed, or not at `workflow:in-review`). `CLAIMED` means another actor holds a live claim for this head (an unexpired or renewed lease, or an expired lease with recent liveness such as a trusted `FORGE:REVIEW*` comment inside the lease window or running checks): do nothing, re-run Step 1 next cycle. A `FORGE:REREVIEW_RELEASED` marker for the head (posted by the claimant after `review-pr` returned) or a merged/closed PR is `NONE`: the claimant finished, so there is nothing to dispatch or escalate. `UNREADABLE` fails closed: classify the issue `GATED` this cycle without writing anything, and re-run Step 1 next cycle. `STALE` (an expired lease with no liveness and the PR still open, a lease past the `REREVIEW_MAX_SECS` ceiling, an unparseable claim, or a trail that does not match the current head) goes straight to the Step 3 terminal fallback with the reason `stale re-review claim or trail`, without dispatching. Only `PENDING` continues.
 
-   **Step 2 — dispatch (claim first, forge#3413).** The claim is written and read back BEFORE `review-pr` is invoked. A failed post or read-back means NO dispatch (fail closed, terminal fallback), so there is never a wasted duplicate dispatch, and a second actor sees the claim and stands down. Bash blocks are independent executions: run the claim block with the **SHARED HELPERS** (`rereview_trusted_rows`, `REREVIEW_CLAIMS`, `REREVIEW_DONE_FILTER`) from Step 1 pasted verbatim at its top, and `REREVIEW_PR` / `REREVIEW_SHA` set to the values Step 1 printed. The read-back lists the PR's comments by number and applies the same trusted predicate. The EARLIEST trusted claim for the head wins: if the first matching row does not carry this actor's `Claim:` id, another actor claimed first (`LOST`) and this one stands down. Any API failure or zero matching rows is `UNVERIFIED` (fail closed, never `VERIFIED`). The block has no `exit`, so it is safe in a shared or sourced shell:
+   **Step 2 — dispatch (claim first, forge#3413).** The claim is written and read back BEFORE `review-pr` is invoked. A failed post or read-back means NO dispatch (fail closed, terminal fallback), so there is never a wasted duplicate dispatch, and a second actor sees the claim and stands down. Bash blocks are independent executions: run the claim block with the **SHARED HELPERS** (`rereview_trusted_rows`, `REREVIEW_CLAIMS`, `REREVIEW_DONE_FILTER`) from Step 1 pasted verbatim at its top, and `REREVIEW_PR` / `REREVIEW_SHA` set to the values Step 1 printed. The read-back lists the PR's comments by number and applies the same trusted predicate. The EARLIEST trusted claim for the head wins (`.[0]`, unchanged by renewals): if the first matching row does not carry this actor's `Claim:` id, another actor claimed first (`LOST`) and this one stands down. Any API failure or zero matching rows is `UNVERIFIED` (fail closed, never `VERIFIED`). The block has no `exit`, so it is safe in a shared or sourced shell:
 
    ```bash
    REREVIEW_MARKER="UNVERIFIED"
@@ -2451,7 +2482,23 @@ Do not ask the user questions — you are running autonomously in the background
 
    If the call returns no `REVIEW_RESULT` (interrupted or no result), invoke it once more; this retry is the only one (bounded, independent of the Phase 4R `github-unavailable` waits) and does not post a second claim: the claim for this head is already recorded.
 
-   **Step 3 — outcome.** On `REVIEW_RESULT: status: COMPLETE` (merged), drive `work-on:close` and let item 6.6 wake dependents as normal. If `review-pr` returns another result with its own labelled terminal state (CHANGES REQUESTED, or `needs-human` for genuine blockers), that verdict applies and the issue is `GATED` or failed per the existing rules. `REREVIEW_MARKER=LOST` (another actor claimed this head first) and `REREVIEW_STATE=CLAIMED` take no action: leave the issue as it is and re-check next cycle. If dispatch failed, the skill did not resolve, the issue is still at `workflow:in-review` with no `needs-human` after the retry, Step 1 printed `STALE`, or Step 2 printed `REREVIEW_MARKER=UNVERIFIED`, apply the **terminal fallback** defined in `commands/work-on.md` Phase 0A.1 (labels re-read first, comment with the reason, add `needs-human` and remove `workflow:in-review` in one edit, verify the write), classify the issue `GATED`, and surface it to the operator in the run summary as `GATED: re-review could not run (#{PRED}, PR #{REREVIEW_PR}): <reason>`. For `REREVIEW_MARKER=UNVERIFIED` the reason is `re-review claim could not be recorded` and the report line is `GATED: re-review could not run (#{PRED}, PR #{REREVIEW_PR}): marker write failed`; because the claim is written first, `UNVERIFIED` now means `review-pr` was NOT dispatched. Do not leave the issue `PENDING`. A failed label write is reported as such, not as done. The verified per-head claim bounds this to one re-review per PR head across the orchestrator and the router (no loop). Never review inline.
+   **Renew and release (forge#3428).** After `review-pr` returns (any result, including none), the claimant posts a checked, DRY_RUN-guarded release so the next Step 1 reads `NONE` instead of aging the claim into `STALE`. Run it with the SHARED HELPERS pasted at the top and `REREVIEW_PR` / `REREVIEW_SHA` / `CLAIM_ID` from Step 2. A failed post is reported (never ignored) but is not fatal: liveness in Step 1 still protects a live claimant. Renewal is best-effort: between review phases the claimant may re-post `<!-- FORGE:REREVIEW_DISPATCHED -->` with the SAME `Claim:` id and a fresh `Lease:` (Step 1 reads the newest row of the earliest claim's id for lease age; the earliest-claim-wins read-back stays on `.[0]`):
+
+   ```bash
+   if [ "${DRY_RUN:-false}" = "true" ]; then
+     echo "[DRY_RUN] would post FORGE:REREVIEW_RELEASED for head ${REREVIEW_SHA} on PR #${REREVIEW_PR}"
+   else
+     post_release() { gh pr comment "$REREVIEW_PR" -R {GH_REPO} --body "<!-- FORGE:REREVIEW_RELEASED -->
+   Head: ${REREVIEW_SHA}
+   Actor: orchestrator
+   Claim: ${CLAIM_ID}
+
+   Re-review finished by the orchestrator: claim released."; }
+     post_release || { sleep 2; post_release || echo "REREVIEW release post failed twice (liveness still protects the claim)" >&2; }
+   fi
+   ```
+
+   **Step 3 — outcome.** On `REVIEW_RESULT: status: COMPLETE` (merged), drive `work-on:close` and let item 6.6 wake dependents as normal. If `review-pr` returns another result with its own labelled terminal state (CHANGES REQUESTED, or `needs-human` for genuine blockers), that verdict applies and the issue is `GATED` or failed per the existing rules. `REREVIEW_MARKER=LOST` (another actor claimed this head first) and `REREVIEW_STATE=CLAIMED` take no action: leave the issue as it is and re-check next cycle. Before applying the terminal fallback for `STALE`, re-read the PR state and the issue labels once more: a merged or closed PR, or an issue that already advanced, means skip the fallback and report the state (forge#3428). If dispatch failed, the skill did not resolve, the issue is still at `workflow:in-review` with no `needs-human` after the retry, Step 1 printed `STALE`, or Step 2 printed `REREVIEW_MARKER=UNVERIFIED`, apply the **terminal fallback** defined in `commands/work-on.md` Phase 0A.1 (labels re-read first, comment with the reason, add `needs-human` and remove `workflow:in-review` in one edit, verify the write), classify the issue `GATED`, and surface it to the operator in the run summary as `GATED: re-review could not run (#{PRED}, PR #{REREVIEW_PR}): <reason>`. For `REREVIEW_MARKER=UNVERIFIED` the reason is `re-review claim could not be recorded` and the report line is `GATED: re-review could not run (#{PRED}, PR #{REREVIEW_PR}): marker write failed`; because the claim is written first, `UNVERIFIED` now means `review-pr` was NOT dispatched. Do not leave the issue `PENDING`. A failed label write is reported as such, not as done. The verified per-head claim bounds this to one re-review per PR head across the orchestrator and the router (no loop). Never review inline.
 
    This satisfies #1809 Q2 (the orchestrator auto-dispatches remediation against the gated issue itself — the exact gap forge#1812's item 6.5/6.6 left open, since those items only ever track and wake *dependents*, never the gated PR's own remediation) — and closes forge#2243 (the gap that #1812's fix left open for *leaf* issues with no dependents: because this item's `$PRED` binding was never made explicit and self-contained, it was only ever reached while walking a dependent's predecessor list, so a `needs-human` issue that has no dependents never got remediation dispatched and its CHANGES-REQUESTED PR re-reviewed the same unchanged commit forever). The remediation agent's outcome is picked up on the **next** completion-monitoring cycle of this same Step 4B loop: if it lands (`workflow:merged`), item 6.6 below fires normally and wakes any `blocked-on-human-merge` dependents (if any exist — a leaf issue simply has none to wake); if it holds/re-escalates, the issue simply remains `GATED` and item 6.5 continues tracking its dependents (if any) unchanged.
 
