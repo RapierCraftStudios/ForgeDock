@@ -1610,6 +1610,13 @@ The `protocols.md` file contains the Evidence-Based Review Protocol, Structured 
 ```bash
 # Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"; SELECTED_AGENTS="{SELECTED_AGENTS}"
+case "$REVIEW_SHA" in *[!0-9a-f]*|"") REVIEW_SHA_OK=false ;; *) [ "${#REVIEW_SHA}" -eq 40 ] || [ "${#REVIEW_SHA}" -eq 64 ] && REVIEW_SHA_OK=true || REVIEW_SHA_OK=false ;; esac
+if [ "$REVIEW_SHA_OK" != "true" ]; then
+  # An empty or malformed SHA would make the Reviewed-SHA match accept any head (fail open): refuse instead.
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: REVIEW_SHA '${REVIEW_SHA}' is not a 40/64-hex commit id; re-run /review-pr"; exit 0
+fi
+WAIT_DIR="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/forge-review-wait-$(id -u)"   # absolute and identical in every Bash call (cwd is not)
+rm -f "${WAIT_DIR}/${PR_NUMBER}_${REVIEW_SHA}_review-wait-deadline"   # a (re)dispatch always starts a fresh wait window
 _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
 TRUSTED_SCRIPT=""
 for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock"; do
@@ -1621,7 +1628,7 @@ for AGENT in $SELECTED_AGENTS; do
   HAVE=""
   if [ -n "$TRUSTED_SCRIPT" ]; then
     HAVE=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
-      | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}" 2>/dev/null || echo "")
+      | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)" 2>/dev/null || echo "")
   fi
   case "$HAVE" in ''|*[!0-9]*) HAVE=0 ;; esac   # fail closed: unreadable or untrusted counts as not posted
   [ "$HAVE" -lt 1 ] && PENDING_AGENTS="${PENDING_AGENTS} ${AGENT}"
@@ -1681,7 +1688,7 @@ When substituting `[FILE_LIST]` in each agent's template:
 Reviewer completion is read from GitHub, never from notifications (see the "Reviewer completion model" under Sub-Agent Dispatch Tool Resolution). A reviewer counts as complete only when a **trusted** comment (see the trust rule in Phase 3C) starting with `<!-- FORGE:REVIEW-AGENT:{domain} -->` also carries `Reviewed-SHA: <current head>`.
 
 - **Joined tools** (`Task`, OpenCode `task`): the reviewers already returned, so one pass decides: anything missing is a delivery failure.
-- **Async `Agent`** (and any tool not known to be joined): bounded wait, **one poll pass per Bash call**. A Bash call is capped at 120s by default (600s max), so a single 900s sleep loop would be killed mid-wait and the hard stop would never run. The first pass records an epoch deadline in a scratchpad file; each later pass re-reads it, so the deadline survives across calls. Re-run the block while it prints `PANEL_STATUS: WAITING` (it sleeps `REVIEWER_POLL_SECS`, at most 60s, before exiting).
+- **Async `Agent`** (and any tool not known to be joined): bounded wait, **one poll pass per Bash call**. A Bash call is capped at 120s by default (600s max), so a single 900s sleep loop would be killed mid-wait and the hard stop would never run. The first pass records an epoch deadline in a private, absolute state file keyed by PR and head SHA (`$XDG_RUNTIME_DIR`/`$TMPDIR`, never the cwd, which changes between calls); each later pass re-reads it, so the deadline survives across calls. Every exit path removes it, and Phase 3C removes it before (re)dispatch, so a re-review never inherits an expired window. Re-run the block while it prints `PANEL_STATUS: WAITING` (it sleeps `REVIEWER_POLL_SECS`, at most 60s, before exiting).
 - Each pass re-reads the PR head. If it moved off `REVIEW_SHA`, stop: the panel reviewed a stale head, so the block returns the documented `REVIEW_RESULT` BLOCKED (stale review). If the head probe itself fails, that is a BLOCKED result too (fail closed), never a pass.
 - `PANEL_STATUS: TIMEOUT` or `PANEL_STATUS: SHORTFALL`, or a poll call that was killed or timed out, is the hard stop: run the **Panel hard-stop block** from Phase 3C with `ACTUAL_AGENT_COUNT` set to the count the block printed (0 if the call was killed). Never review the missing domain inline.
 
@@ -1689,8 +1696,19 @@ Reviewer completion is read from GitHub, never from notifications (see the "Revi
 # Each Bash call is a fresh shell: re-declare state with the orchestrator's values (never rely on Phase 3C variables).
 REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"; SELECTED_AGENTS="{SELECTED_AGENTS}"
 DISPATCH_TOOL="{DISPATCH_TOOL}"   # Task | Agent | task (OpenCode)
-SCRATCH="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$SCRATCH"
-DEADLINE_FILE="${SCRATCH}/${PR_NUMBER}_review-wait-deadline"
+case "$REVIEW_SHA" in *[!0-9a-f]*|"") REVIEW_SHA_OK=false ;; *) [ "${#REVIEW_SHA}" -eq 40 ] || [ "${#REVIEW_SHA}" -eq 64 ] && REVIEW_SHA_OK=true || REVIEW_SHA_OK=false ;; esac
+if [ "$REVIEW_SHA_OK" != "true" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: REVIEW_SHA '${REVIEW_SHA}' is not a 40/64-hex commit id; re-run /review-pr"
+  echo "PANEL_STATUS: STOP"; exit 0
+fi
+# Deadline state is keyed by PR AND head SHA, so a re-review of a new head never inherits an expired deadline.
+WAIT_DIR="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/forge-review-wait-$(id -u)"   # absolute and identical in every Bash call (cwd is not)
+mkdir -m 700 -p "$WAIT_DIR" 2>/dev/null
+if [ ! -d "$WAIT_DIR" ] || [ ! -O "$WAIT_DIR" ] || [ -L "$WAIT_DIR" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: reviewer-wait state dir ${WAIT_DIR} is not a private directory owned by this user"
+  echo "PANEL_STATUS: STOP"; exit 0
+fi
+DEADLINE_FILE="${WAIT_DIR}/${PR_NUMBER}_${REVIEW_SHA}_review-wait-deadline"
 
 REVIEWER_WAIT_SECS="${REVIEWER_WAIT_SECS:-900}"
 case "$REVIEWER_WAIT_SECS" in ''|*[!0-9]*) REVIEWER_WAIT_SECS=900 ;; esac
@@ -1707,10 +1725,12 @@ case "$DEADLINE" in ''|*[!0-9]*) DEADLINE=$NOW ;; esac
 
 NOW_SHA=$(gh pr view "$PR_NUMBER" -R "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
 if [ -z "$NOW_SHA" ]; then
+  rm -f "$DEADLINE_FILE"
   echo "REVIEW_RESULT: status: BLOCKED, blocker: head probe failed during reviewer wait; re-run /review-pr"
   echo "PANEL_STATUS: STOP"; exit 0
 fi
 if [ "$NOW_SHA" != "$REVIEW_SHA" ]; then
+  rm -f "$DEADLINE_FILE"
   echo "REVIEW_RESULT: status: BLOCKED, blocker: stale review (head moved from ${REVIEW_SHA} to ${NOW_SHA} during the reviewer wait); re-run /review-pr on the new head"
   echo "PANEL_STATUS: STOP"; exit 0
 fi
@@ -1727,7 +1747,7 @@ for AGENT in $SELECTED_AGENTS; do
   AGENT_DOMAIN=$(printf '%s' "$AGENT" | tr '[:upper:]' '[:lower:]')
   N=""
   if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$COMMENTS_JSON" ]; then
-    N=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}" 2>/dev/null || echo "")
+    N=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)" 2>/dev/null || echo "")
   fi
   case "$N" in ''|*[!0-9]*) N=0 ;; esac   # fail closed
   if [ "$N" -lt 1 ]; then MISSING_AGENT_COMMENTS="${MISSING_AGENT_COMMENTS} ${AGENT_DOMAIN}"; else ACTUAL_AGENT_COUNT=$(( ACTUAL_AGENT_COUNT + 1 )); fi
@@ -1757,8 +1777,12 @@ On `PANEL_STATUS: STOP`, return the printed `REVIEW_RESULT` and do nothing else 
 **Skip if**: Only 1 agent OR total findings ≤ 3.
 
 ```bash
+# Each Bash call is a fresh shell: re-declare state with the orchestrator's values.
+REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"
+case "$REVIEW_SHA" in *[!0-9a-f]*|"") REVIEW_SHA_OK=false ;; *) [ "${#REVIEW_SHA}" -eq 40 ] || [ "${#REVIEW_SHA}" -eq 64 ] && REVIEW_SHA_OK=true || REVIEW_SHA_OK=false ;; esac
+[ "$REVIEW_SHA_OK" = "true" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: REVIEW_SHA is not a commit id (an empty SHA would count every head's findings)"; exit 0; }
 # Extract structured finding IDs from FINDING HTML comments.
-# Uses jq's scan() (POSIX-portable, no grep -oP required).
+# Uses jq's scan() (POSIX-portable, no PCRE grep required).
 # Scope every extraction to reviewer bodies for the CURRENT head (Reviewed-SHA line): after a re-entry or a
 # head move, comments for earlier heads would inflate AGENT_COUNT and re-file already-fixed findings.
 ALL_FINDINGS=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" \
@@ -1785,15 +1809,19 @@ If synthesis needed, launch a `general-purpose` Task (model: `"{SUBAGENT_MODEL}"
 ### 6A: Extract Findings
 
 ```bash
+# Each Bash call is a fresh shell: re-declare state with the orchestrator's values.
+REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"
+case "$REVIEW_SHA" in *[!0-9a-f]*|"") REVIEW_SHA_OK=false ;; *) [ "${#REVIEW_SHA}" -eq 40 ] || [ "${#REVIEW_SHA}" -eq 64 ] && REVIEW_SHA_OK=true || REVIEW_SHA_OK=false ;; esac
+[ "$REVIEW_SHA_OK" = "true" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: REVIEW_SHA is not a commit id (an empty SHA would count every head's findings)"; exit 0; }
 # Only bodies for the CURRENT head count (Reviewed-SHA line): findings from earlier heads are already fixed or re-reviewed.
 HAS_SYNTHESIS=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" | jq -s --arg sha "Reviewed-SHA: ${REVIEW_SHA}" '[.[][] | select((.body | test("REVIEW-FINDINGS-SYNTHESIZED-START")) and (.body | contains($sha)))] | length')
 
 if [ "$HAS_SYNTHESIS" -gt 0 ]; then
-    # Extract finding IDs from the current-head synthesized block using jq scan() — no grep -oP needed
+    # Extract finding IDs from the current-head synthesized block using jq scan() (no PCRE grep needed)
     FINDINGS=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" \
         --jq "[.[] | select((.body | test(\"REVIEW-FINDINGS-SYNTHESIZED-START\")) and (.body | contains(\"Reviewed-SHA: ${REVIEW_SHA}\"))) | .body | scan(\"<!-- FINDING:([^>]+) -->\") | .[0]] | join(\"\\n\")")
 else
-    # Extract finding IDs from the current-head agent comments using jq scan() — portable, no grep -oP
+    # Extract finding IDs from the current-head agent comments using jq scan() (portable, no PCRE grep)
     FINDINGS=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" \
         --jq "[.[] | select(.body | contains(\"Reviewed-SHA: ${REVIEW_SHA}\")) | .body | scan(\"<!-- FINDING:([^>]+) -->\") | .[0]] | join(\"\\n\")")
 fi
