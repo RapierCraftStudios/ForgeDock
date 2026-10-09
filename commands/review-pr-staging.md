@@ -372,7 +372,7 @@ if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$ALL_PR_NUMBERS" ]; then
 fi
 if [ "$SCOPE_MODE" = "scoped" ]; then
   # Cross-PR interactions: files touched by 2+ bundle PRs.
-  CROSS_PR_FILES=$(awk '{c[$2]++} END{for(f in c) if(c[f]>=2) print f}' "$_PF" | sort)
+  CROSS_PR_FILES=$(cut -d' ' -f2 "$_PF" | sort | uniq -d)
   # Unreviewed commits: on staging, not in main, and not a commit of any reviewed PR (direct pushes, fast-lane fixes, post-review pushes).
   for c in $(git log origin/$DEFAULT_BRANCH..origin/$STAGING_BRANCH --no-merges --format=%H); do
     case " $REVIEWED_COMMITS " in *" $c "*) ;; *) UNREVIEWED_COMMITS="$UNREVIEWED_COMMITS $c" ;; esac
