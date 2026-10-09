@@ -118,7 +118,21 @@ Extract: `PR_NUMBER`, `AUTO_MERGE=true`, `MERGE_ISSUE`, `MERGE_BASE`, `MERGE_GH_
 # BEGIN review-pr-arg-parse
 # Tokenize the argument string without eval. First token is the PR ref (number or .../pull/N URL)
 # or a mode keyword; the rest are flags.
-ARGS_RAW="$ARGUMENTS"
+# The loader substitutes the argument text into this block BEFORE bash parses it, so it is read from a
+# quoted heredoc (inert for quotes, $(...), backticks and backslashes) and never from a quoted assignment.
+# NONCE RULE: before running, replace the word NONCE in BOTH delimiter lines below with a fresh random hex string
+# (e.g. `openssl rand -hex 16`) that does not occur in the argument text. Never run the literal NONCE delimiter. <!-- Added: forge#3466 -->
+IFS= read -r -d '' ARGS_RAW <<'FORGE_ARGS_EOF_NONCE'
+$ARGUMENTS
+FORGE_ARGS_EOF_NONCE
+ARGS_RAW="${ARGS_RAW%$'\n'}"
+# Fail closed: a string holding a quote, backtick, dollar sign, backslash, newline or tab is rejected whole.
+# Nothing is parsed from it, so no PR number, repo, merge value or auto-merge flag survives.
+case "$ARGS_RAW" in
+  *'"'*|*'`'*|*'$'*|*'\'*|*$'\n'*|*$'\t'*)
+    echo "review-pr: rejected argument string (contains a quote, backtick, dollar sign, backslash, newline or tab) - nothing parsed, auto-merge not honoured" >&2
+    ARGS_RAW="" ;;
+esac
 read -r -a ARG_TOKENS <<< "$ARGS_RAW"
 PR_REF="${ARG_TOKENS[0]:-}"
 PR_NUMBER=""
@@ -149,7 +163,8 @@ while [ "$arg_i" -lt "${#ARG_TOKENS[@]}" ]; do
            esac ;;
       esac ;;
     --gh-flag)
-      # Value is "-R owner/repo" (quoted or not): strip quotes, consume flag + repo tokens
+      # Value is -R owner/repo, unquoted (a double quote rejects the whole string above; single quotes are
+      # stripped for older callers): consume flag + repo tokens
       arg_f=$(printf '%s' "${ARG_TOKENS[$((arg_i + 1))]:-}" | tr -d "\"'")
       if [ "$arg_f" = "-R" ] || [ "$arg_f" = "--repo" ]; then
         arg_i=$((arg_i + 1))
@@ -172,6 +187,12 @@ fi
 if [ -n "$REPO" ] && ! printf '%s' "$REPO" | grep -qE '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
   echo "review-pr: --gh-flag repo must be owner/repo - ignoring '$REPO'" >&2; REPO=""
 fi
+if [ -n "$MERGE_BASE" ] && ! printf '%s' "$MERGE_BASE" | grep -qE '^[A-Za-z0-9._/-]+$'; then
+  echo "review-pr: --base must be a branch name - ignoring '$MERGE_BASE'" >&2; MERGE_BASE=""
+fi
+if [ -n "$MERGE_WORKTREE" ] && ! printf '%s' "$MERGE_WORKTREE" | grep -qE '^/[A-Za-z0-9._/@+=,:-]+$'; then
+  echo "review-pr: --worktree must be an absolute path without shell metacharacters - ignoring '$MERGE_WORKTREE'" >&2; MERGE_WORKTREE=""
+fi
 if [ -n "$REPO" ]; then MERGE_GH_FLAG="-R $REPO"; REPO_FLAG="-R $REPO"; fi
 if [ -n "$PR_NUMBER" ] && [ -z "$REPO" ]; then
   REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
@@ -179,6 +200,8 @@ if [ -n "$PR_NUMBER" ] && [ -z "$REPO" ]; then
 fi
 # END review-pr-arg-parse
 ```
+
+**Argument injection hardening** <!-- Added: forge#3466 -->: the loader substitutes `$ARGUMENTS` textually, so a quoted assignment (`ARGS_RAW="..."`) can be broken out of by any caller that forwards text it does not control. The block therefore reads the string from a quoted heredoc and rejects any string containing a quote, backtick, dollar sign, backslash, newline or tab: it prints `review-pr: rejected argument string`, parses nothing, and binds `PR_NUMBER`, `REPO` and `MERGE_*` empty with `AUTO_MERGE=false`, so `--auto-merge` is never honoured from a rejected string (a run with no PR number stops in Phase -1 before any `gh pr view`). The heredoc delimiter is not a constant: the spec carries the placeholder `FORGE_ARGS_EOF_NONCE` and the executor MUST replace `NONCE` with a fresh random hex string before running, so a caller cannot pre-compute a delimiter line (a newline followed by the literal placeholder or any earlier public token stays inert text and is then rejected by the newline check). Residual risk: this depends on the executor following the NONCE rule; the complete fix is for the loader to pass arguments out of band. Callers must pass `--gh-flag -R owner/repo` unquoted.
 
 **`--auto-merge` requires `--issue`** <!-- Added: forge#3102, forge#3124 -->: the phase-trail gate in Phase 8 verifies the trail of the linked issue, so `--issue` is mandatory whenever `AUTO_MERGE=true`. Do NOT infer `MERGE_ISSUE` from the PR: the PR body's closing reference and the head-branch suffix are both author-controlled (and the closing-issue reference list is empty for PRs based on a non-default branch such as `staging`), so neither is a trustworthy binding. If `AUTO_MERGE=true` and `MERGE_ISSUE` is empty, Phase 8 does not merge and returns the documented `REVIEW_RESULT: status: BLOCKED`, blocker: "auto-merge requires --issue". The PR stays open for a human or a re-run with `--issue`.
 
@@ -211,7 +234,12 @@ elif echo "$PR_REF" | grep -qE '^(open|all)$'; then
   REVIEW_MODE="multi-pr"
   ROUTE_PR_NUMBER="(list mode)"
 else
-  # Single PR number or URL — resolve HEAD/BASE now
+  # Single PR number or URL. An empty PR_NUMBER (rejected or unparseable argument string) must stop here:
+  # `gh pr view ""` falls back to the current branch's PR and would review the wrong PR. <!-- Added: forge#3466 -->
+  if [ -z "$PR_NUMBER" ]; then
+    echo "review-pr: no PR number resolved from the argument string - stopping (nothing reviewed, nothing posted)" >&2
+    exit 1
+  fi
   PR_ROUTE_INFO=$(gh pr view "$PR_NUMBER" ${REPO_FLAG} --json number,baseRefName,headRefName --jq '{number:.number,base:.baseRefName,head:.headRefName}')
   ROUTE_PR_NUMBER=$(echo "$PR_ROUTE_INFO" | jq -r '.number')
   PR_NUMBER="$ROUTE_PR_NUMBER"
@@ -278,10 +306,10 @@ Check input to determine which mode:
 
 ### MODE 1: Staging Review
 
-If `$ARGUMENTS` is "staging", "feature", or "staging:feature":
+If `$ARGUMENTS` is "staging", "feature", or "staging:feature" (forward the validated `ARGS_RAW` from the Argument Parse block, never a rejected string):
 
 ```
->>> INVOKE: Skill("{FORGE_SKILL_PREFIX}review-pr-staging", "$ARGUMENTS")
+>>> INVOKE: Skill("{FORGE_SKILL_PREFIX}review-pr-staging", "{ARGS_RAW}")
 >>> THEN STOP — the staging command handles the full flow.
 ```
 
@@ -297,6 +325,7 @@ Show list, ask user which to review, then loop through each with full review.
 
 **Auto-detect staging mode:**
 ```bash
+[ -n "$PR_NUMBER" ] || { echo "review-pr: no PR number - stopping" >&2; exit 1; }  # never let gh pick the current-branch PR <!-- Added: forge#3466 -->
 PR_INFO=$(gh pr view "$PR_NUMBER" ${REPO_FLAG} --json baseRefName,headRefName,additions,deletions,title)
 HEAD=$(echo $PR_INFO | jq -r '.headRefName')
 BASE=$(echo $PR_INFO | jq -r '.baseRefName')
@@ -304,7 +333,7 @@ BASE=$(echo $PR_INFO | jq -r '.baseRefName')
 
 If `HEAD = "staging" AND BASE = "main"` OR `HEAD = "feature" AND BASE = "main"`:
 ```
->>> INVOKE: Skill("{FORGE_SKILL_PREFIX}review-pr-staging", "$ARGUMENTS")
+>>> INVOKE: Skill("{FORGE_SKILL_PREFIX}review-pr-staging", "{ARGS_RAW}")
 >>> THEN STOP.
 ```
 
