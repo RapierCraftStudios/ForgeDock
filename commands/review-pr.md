@@ -1806,12 +1806,27 @@ REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"
 case "$REVIEW_SHA" in *[!0-9a-f]*|"") REVIEW_SHA_OK=false ;; *) [ "${#REVIEW_SHA}" -eq 40 ] || [ "${#REVIEW_SHA}" -eq 64 ] && REVIEW_SHA_OK=true || REVIEW_SHA_OK=false ;; esac
 [ "$REVIEW_SHA_OK" = "true" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: REVIEW_SHA is not a commit id (an empty SHA would count every head's findings)"; exit 0; }
 # Extract structured finding IDs from FINDING HTML comments.
-# Uses jq's scan() (POSIX-portable, no PCRE grep required).
-# Scope every extraction to reviewer bodies for the CURRENT head (Reviewed-SHA line): after a re-entry or a
-# head move, comments for earlier heads would inflate AGENT_COUNT and re-file already-fixed findings.
-ALL_FINDINGS=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-    --jq "[.[] | select(.body | contains(\"Reviewed-SHA: ${REVIEW_SHA}\")) | .body | scan(\"<!-- FINDING:([^>]+) -->\") | .[0]] | join(\"\\n\")")
-AGENT_COUNT=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" | jq -s --arg sha "Reviewed-SHA: ${REVIEW_SHA}" '[.[][] | select((.body | test("REVIEW-FINDINGS-START")) and (.body | contains($sha)))] | length')
+# Only TRUSTED reviewer bodies count (scripts/trusted-comments.sh: trusted association, Bot account, or
+# FORGE_TRAIL_TRUSTED_LOGINS), each must START with the FORGE:REVIEW-AGENT marker and carry a Reviewed-SHA line for the
+# CURRENT head. The head SHA is public, so the SHA line alone proves nothing: a bare contains() selection would let any
+# commenter forge FINDING markers that get filed as issues or inflate the agent count. Earlier-head comments are excluded
+# so a re-entry or head move does not re-file already-fixed findings. Uses jq scan() (POSIX-portable, no PCRE grep).
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+TRUSTED_SCRIPT=""
+for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock"; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done
+COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
+AGENT_RE="^<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)"
+if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/trusted-comments.sh unresolvable or PR comments unreadable; refusing to read reviewer findings (fail closed)"; exit 0
+fi
+AGENT_BODIES=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies "$AGENT_RE" 2>/dev/null) \
+  || { echo "REVIEW_RESULT: status: BLOCKED, blocker: trusted reviewer comments unreadable (fail closed)"; exit 0; }
+ALL_FINDINGS=$(printf '%s\n' "$AGENT_BODIES" | jq -r 'scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null)
+# Agent bodies start with the REVIEW-AGENT marker and carry REVIEW-FINDINGS-START inside, so count it with a lookahead.
+AGENT_COUNT=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->)<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)" 2>/dev/null || echo "")
+case "$AGENT_COUNT" in ''|*[!0-9]*) AGENT_COUNT=0 ;; esac   # fail closed
 FINDING_COUNT=$(echo "$ALL_FINDINGS" | grep -c '.' || echo 0)
 ```
 
@@ -1819,7 +1834,7 @@ If synthesis needed, launch a `general-purpose` Task (model: `"{SUBAGENT_MODEL}"
 - Deduplicate findings by file + line range ±5 (keep higher confidence)
 - Resolve contradictions by reading disputed code
 - Dismiss false positives with evidence
-- Post synthesis comment with `<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->` block and a `Reviewed-SHA: ${REVIEW_SHA}` line (Phase 6A only reads synthesized blocks for the current head)
+- Post synthesis comment whose body **starts with** `<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->` (first line, nothing before it), followed by a `Reviewed-SHA: ${REVIEW_SHA}` line on its own line (Phase 6A only reads trusted synthesized blocks that open with the marker and match the current head; a body with a preamble is ignored and Phase 6A falls back to the raw agent bodies)
 - Do NOT add new findings — only triage existing ones
 
 **IMPORTANT**: When synthesized block exists, Phase 6 MUST use it instead of raw findings.
@@ -1837,18 +1852,35 @@ If synthesis needed, launch a `general-purpose` Task (model: `"{SUBAGENT_MODEL}"
 REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"
 case "$REVIEW_SHA" in *[!0-9a-f]*|"") REVIEW_SHA_OK=false ;; *) [ "${#REVIEW_SHA}" -eq 40 ] || [ "${#REVIEW_SHA}" -eq 64 ] && REVIEW_SHA_OK=true || REVIEW_SHA_OK=false ;; esac
 [ "$REVIEW_SHA_OK" = "true" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: REVIEW_SHA is not a commit id (an empty SHA would count every head's findings)"; exit 0; }
-# Only bodies for the CURRENT head count (Reviewed-SHA line): findings from earlier heads are already fixed or re-reviewed.
-HAS_SYNTHESIS=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" | jq -s --arg sha "Reviewed-SHA: ${REVIEW_SHA}" '[.[][] | select((.body | test("REVIEW-FINDINGS-SYNTHESIZED-START")) and (.body | contains($sha)))] | length')
+# Only TRUSTED bodies for the CURRENT head count (scripts/trusted-comments.sh + anchored marker + Reviewed-SHA line):
+# findings from earlier heads are already fixed or re-reviewed, and an untrusted commenter must never be able to inject
+# findings or post a forged synthesis block that makes the review read clean (the head SHA is public).
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+TRUSTED_SCRIPT=""
+for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock"; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done
+COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
+if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/trusted-comments.sh unresolvable or PR comments unreadable; refusing to read clean (fail closed)"; exit 0
+fi
+SYNTH_RE="^<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)"
+AGENT_RE="^<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)"
+HAS_SYNTHESIS=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "$SYNTH_RE" 2>/dev/null || echo "")
+case "$HAS_SYNTHESIS" in ''|*[!0-9]*) echo "REVIEW_RESULT: status: BLOCKED, blocker: synthesis count unreadable (fail closed)"; exit 0 ;; esac
 
 if [ "$HAS_SYNTHESIS" -gt 0 ]; then
-    # Extract finding IDs from the current-head synthesized block using jq scan() (no PCRE grep needed)
-    FINDINGS=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-        --jq "[.[] | select((.body | test(\"REVIEW-FINDINGS-SYNTHESIZED-START\")) and (.body | contains(\"Reviewed-SHA: ${REVIEW_SHA}\"))) | .body | scan(\"<!-- FINDING:([^>]+) -->\") | .[0]] | join(\"\\n\")")
+    # Extract finding IDs from the trusted current-head synthesized block using jq scan() (no PCRE grep needed)
+    SOURCE_BODIES=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies "$SYNTH_RE" 2>/dev/null) \
+      || { echo "REVIEW_RESULT: status: BLOCKED, blocker: trusted synthesis unreadable (fail closed)"; exit 0; }
 else
-    # Extract finding IDs from the current-head agent comments using jq scan() (portable, no PCRE grep)
-    FINDINGS=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-        --jq "[.[] | select(.body | contains(\"Reviewed-SHA: ${REVIEW_SHA}\")) | .body | scan(\"<!-- FINDING:([^>]+) -->\") | .[0]] | join(\"\\n\")")
+    # Extract finding IDs from the trusted current-head agent comments using jq scan() (portable, no PCRE grep)
+    SOURCE_BODIES=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies "$AGENT_RE" 2>/dev/null) \
+      || { echo "REVIEW_RESULT: status: BLOCKED, blocker: trusted reviewer comments unreadable (fail closed)"; exit 0; }
+    # The panel guard guarantees at least one trusted reviewer body for this head; none means a misread, never "clean".
+    [ -n "$SOURCE_BODIES" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: no trusted reviewer comments for head ${REVIEW_SHA} (fail closed)"; exit 0; }
 fi
+FINDINGS=$(printf '%s\n' "$SOURCE_BODIES" | jq -r 'scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null)
 ```
 
 Also include any `INTEG-N` findings from Phase 2.5 that weren't already covered by agents.
@@ -2987,8 +3019,18 @@ fi
 A degraded run that skipped Task-based agent dispatch must be visible from this summary alone, without interrogating the agent afterward. Compute the actual launched-agent count from the `<!-- FORGE:REVIEW-AGENT:{domain} -->` comments each agent is required to post (Phase 3C), rather than trusting a free-text tally:
 
 ```bash
-ACTUAL_AGENT_DOMAINS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-    --jq '[.[].body | scan("<!-- FORGE:REVIEW-AGENT:([a-z-]+) -->") | .[0]] | unique | join(", ")' 2>/dev/null || echo "")
+# Same trust rule as Phase 3C/4: only trusted comments whose body starts with the marker count.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+TRUSTED_SCRIPT=""
+for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock"; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done
+ACTUAL_AGENT_DOMAINS=""
+if [ -n "$TRUSTED_SCRIPT" ]; then
+  ACTUAL_AGENT_DOMAINS=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
+    | bash "$TRUSTED_SCRIPT" bodies "^<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->" 2>/dev/null \
+    | jq -rs '[.[] | scan("^<!-- FORGE:REVIEW-AGENT:([a-z-]+) -->") | .[0]] | unique | join(", ")' 2>/dev/null || echo "")   # unresolvable => empty => count 0 (degraded, fail closed)
+fi
 # NOTE: no `|| echo 0` fallback here — grep -c always prints a count (including 0 on
 # no match) even though it exits 1 in that case. Appending `|| echo 0` after a `grep -c`
 # pipeline double-counts: the pipeline already printed "0", then the fallback prints a
