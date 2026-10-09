@@ -775,12 +775,17 @@ From PR comments, extract structured findings (`<!-- FINDING:... -->`). If none 
 ### 7B: Filter & Deduplicate
 Keep ALL findings (CONFIRMED/LIKELY/POSSIBLE). Deduplicate by file:line (keep higher confidence). Sort: CONFIRMED first, then by severity.
 
+### 7B.5: Provenance and concreteness gates (forge#3452)
+
+Before filing, apply the three gates defined in `commands/review-pr.md` §6B.4 (head-SHA, introduced-line, failure scenario), in that order, to every finding — do not duplicate the algorithm here. Use the staging diff (`staging...main`, or the reviewed PR's diff) as the introduced-line source and the reviewed head as the SHA. Stale findings are dropped (`findings_dropped_stale`), findings outside the diff are `pre-existing` (`findings_preexisting`: listed in the summary, filed only when CRITICAL/HIGH or safety-domain with the `pre-existing` label and never `review-finding`, so they are excluded from findings-per-PR and the amplification ratio), and findings without a `**Failure scenario**` are demoted to notes (`notes_demoted_no_scenario`) unless CRITICAL/HIGH CONFIRMED. Unreadable inputs keep the finding. Report the three counts in the staging review summary using the same names.
+
 ### 7C: Ensure Labels
 ```bash
 # Colors match the canonical ForgeDock label manifest (bin/labels.json).
 # Run `npx forgedock labels setup` to bootstrap all managed labels at once.
 gh label create "review-finding" --color "D93F0B" --description "Defect or improvement found during automated PR review. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
 gh label create "needs-validation" --color "FBCA04" --description "Review finding awaiting human validation. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+gh label create "pre-existing" --color "BFD4F2" --description "Defect noticed during PR review that the PR did not introduce. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
 gh label create "staging-review" --color "1D76DB" --description "Finding from a staging branch review before deploy to main. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
 ```
 

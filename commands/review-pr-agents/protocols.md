@@ -178,6 +178,7 @@ Append this block at the very end of your comment (after the `---` footer line, 
 8. **HTML comments**: The block is invisible in rendered markdown but parseable by the review system
 9. **Agent marker**: Include exactly one `<!-- FORGE:REVIEW-AGENT:{domain} -->` marker in the persisted body, where `{domain}` is the lowercase dispatched domain.
 10. **Reviewed SHA**: Include exactly one line `Reviewed-SHA: [REVIEW_SHA]` (the full 40-hex head you were pinned to) in the persisted body, outside the marker. `/review-pr` scopes its completion wait and idempotent re-entry to this line, so a comment without the current head does not count as a completed review. Do NOT put the SHA inside the `<!-- FORGE:REVIEW-AGENT:{domain} -->` marker.
+11. **Failure scenario and scope (provenance inputs)**: every finding's body section (the prose above the findings block) MUST carry a `**Failure scenario**` line — concrete inputs leading to a wrong output or behaviour — and a `**Scope**: changed` or `**Scope**: pre-existing` line (`changed` = the cited line is added or modified by this PR; `pre-existing` = it was already there). `/review-pr` §6B.4 reads these: a finding without a failure scenario is demoted to a note (unless CRITICAL/HIGH CONFIRMED), and a finding whose cited line is not in the PR diff is routed as pre-existing. Speculative hardening with no failure scenario is a note, not a finding. The one-line `<!-- FINDING:... -->` grammar above is unchanged. <!-- Added: forge#3452 -->
 
 ### Domain Prefixes
 

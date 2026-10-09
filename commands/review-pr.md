@@ -25,7 +25,7 @@ allowed-tools: Task, Agent, Bash, Read, Grep, Glob, WebFetch, Skill
 
 2. **Post the FORGE:REVIEW verdict regardless of finding severity.** A review that completes but posts no `<!-- FORGE:REVIEW -->` comment is invisible to the pipeline. Even a PASS verdict must be posted.
 
-3. **Review findings do NOT block merge UNLESS they meet the Blocking Criteria in §7B** (a CONFIRMED HIGH/CRITICAL finding, a purpose regression, a merge conflict, or a build/type/test failure) **or the calibration threshold check in §7B.5 sets `CALIBRATION_NEEDS_HUMAN=true`** (HIGH-confidence task type with historical survival < 80%). File every finding that survives the §6B.5 note disposition (`scripts/classify-finding.sh`: HIGH+ always; MEDIUM CONFIRMED/LIKELY; LOW/POSSIBLE only when security/billing content matches; stricter on review-finding lineage) as a GitHub issue with the `review-finding` label. LOW/POSSIBLE notes are fixed in-PR, listed in the PR body, or dropped — never filed as standalone issues. Minor/style findings never block; §7B's and §7B.5's blocking conditions always do — including under `--auto-merge`. <!-- forge#1741 -->
+3. **Review findings do NOT block merge UNLESS they meet the Blocking Criteria in §7B** (a CONFIRMED HIGH/CRITICAL finding, a purpose regression, a merge conflict, or a build/type/test failure) **or the calibration threshold check in §7B.5 sets `CALIBRATION_NEEDS_HUMAN=true`** (HIGH-confidence task type with historical survival < 80%). File every finding that passes the §6B.4 provenance gates (head-SHA, introduced-line, failure scenario; pre-existing defects are routed separately and never filed as this PR's review-finding) and survives the §6B.5 note disposition (`scripts/classify-finding.sh`: HIGH+ always; MEDIUM CONFIRMED/LIKELY; LOW/POSSIBLE only when security/billing content matches; stricter on review-finding lineage) as a GitHub issue with the `review-finding` label. LOW/POSSIBLE notes are fixed in-PR, listed in the PR body, or dropped — never filed as standalone issues. Minor/style findings never block; §7B's and §7B.5's blocking conditions always do — including under `--auto-merge`. <!-- forge#1741 -->
 
 4. **Route correctly at Phase 0.** If the input is "staging" or the PR targets `main`, invoke `Skill("{FORGE_SKILL_PREFIX}review-pr-staging", ...)` — do NOT run the standard PR review pipeline against a staging→main PR.
 
@@ -1828,7 +1828,7 @@ If synthesis needed, launch a `general-purpose` Task (model: `"{SUBAGENT_MODEL}"
 
 ## Phase 6: Finding Triage & Issue Creation (MANDATORY)
 
-**STOP. DO NOT skip this phase. DO NOT post summary first.** Every finding that §6B.5 classifies as ISSUE MUST become a GitHub issue BEFORE the summary; every NOTE gets a recorded disposition instead (§6B.5).
+**STOP. DO NOT skip this phase. DO NOT post summary first.** Every finding that survives §6B.4 and that §6B.5 classifies as ISSUE MUST become a GitHub issue BEFORE the summary; every NOTE gets a recorded disposition instead (§6B.5).
 
 ### 6A: Extract Findings
 
@@ -1863,12 +1863,43 @@ If still 0: review is clean — skip to Phase 7.
 - Also dedup by title similarity: if two findings share the same file and 3+ title keywords, keep the higher confidence one
 - Sort: CONFIRMED first, then LIKELY, then POSSIBLE; within group by severity
 
+### 6B.4: Provenance and concreteness gates (MANDATORY before 6B.5 — forge#3452)
+
+A finding is only attributable to this PR when it names a line that exists at the reviewed head, was introduced by this PR, and comes with a concrete way to fail. Run these three gates, in this order, on every deduped finding before §6B.5. The gates are mode-independent: they run for every review mode (standard, thorough, milestone) and are never behind a fragment or mode skip. Every gate fails toward keeping the finding when its input is unreadable — never drop or reclassify blind.
+
+1. **Head-SHA gate.** The cited `file:line` must exist at `REVIEW_SHA` (validated as 40/64-hex in 6A before use). Read the file at that SHA (`git show "${REVIEW_SHA}:${FILE}"`, else `gh api "repos/{GH_REPO}/contents/${FILE}?ref=${REVIEW_SHA}"`) and compare its line count to the cited line. File or line missing at that SHA means the finding targets an intermediate or old commit: DROP it and count it in `findings_dropped_stale`. If the file cannot be read either way, keep the finding.
+2. **Introduced-line gate.** Intersect the cited line range (±5, the same tolerance as 6B dedup) with the added or changed lines of the PR diff (reuse the Phase 1 diff; fetch `gh pr diff` once, never per finding). A finding with no intersection is `pre-existing`: its defect was not introduced by this PR. Two cases always count as intersecting: a finding whose file is in the diff but cites deleted code or a call site of changed code (a whole-file match when the finding is tagged `**Scope**: changed`), and a finding with no usable line number. An unreadable diff classifies nothing as pre-existing.
+3. **Concrete-failure gate.** The finding body must carry a non-empty `**Failure scenario**` (concrete inputs leading to a wrong output or behaviour; see the Structured Findings Protocol). A finding without one is speculative hardening: demote it to a NOTE and count it in `notes_demoted_no_scenario`. A CONFIRMED finding of CRITICAL or HIGH severity is exempt and stays an ISSUE, so a real severe defect is never lost for a missing field.
+
+```bash
+# Each Bash call is a fresh shell: re-declare state with the orchestrator's values.
+REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"
+case "$REVIEW_SHA" in *[!0-9a-f]*|"") echo "REVIEW_RESULT: status: BLOCKED, blocker: REVIEW_SHA is not a commit id"; exit 0 ;; esac
+# One list of every added line in the PR: "path:line". An empty file means the diff was unreadable (gates then keep every finding).
+ADDED_LINES_FILE=$(mktemp "${FORGE_SCRATCHPAD:-${TMPDIR:-/tmp}}/forge-added-lines-${PR_NUMBER}.XXXXXX")
+gh pr diff "$PR_NUMBER" -R "$REPO" 2>/dev/null | awk '
+  /^\+\+\+ /{f=($(0) ~ /^\+\+\+ b\//)?substr($(0),7):"";next}
+  /^@@/{s=$(0);sub(/^@@ -[0-9,]+ \+/,"",s);sub(/[ ,].*/,"",s);n=s+0;next}
+  /^\+/{if(f!="")print f":"n;n++;next}
+  /^-/{next}
+  {n++}' > "$ADDED_LINES_FILE" || : > "$ADDED_LINES_FILE"
+# Per finding (FILE, LINE from the file:line field):
+#   head gate:  LINES=$(git show "${REVIEW_SHA}:${FILE}" 2>/dev/null | wc -l)   # fall back to the contents API; empty probe = keep
+#               [ "$LINE" -gt "$LINES" ] && DROP (findings_dropped_stale)
+#   introduced: for L in $(seq $((LINE-5)) $((LINE+5))); do grep -qxF "${FILE}:${L}" "$ADDED_LINES_FILE" && INTRODUCED=1; done
+#               [ -s "$ADDED_LINES_FILE" ] && [ "$INTRODUCED" != 1 ] && SCOPE=pre-existing (findings_preexisting)
+```
+
+**Pre-existing route.** A `pre-existing` finding is never filed with `review-finding` or `needs-validation`, and is never linked to this PR as its source, so it is excluded from findings-per-PR and from the amplification ratio (the amplification breaker and the orchestrate admission check count `review-finding` issues only). List it once in the review summary (id, file:line, one-line reason). When it is CRITICAL or HIGH, or in a security/billing/auth/concurrency/database domain, file it once through `Skill(skill="{FORGE_SKILL_PREFIX}issue", ...)` with the label `pre-existing` only (plus its `priority:*`), citing this PR as where it was noticed, deduped by the 6C dedup path. Other pre-existing findings stay in the summary and feed the periodic `security-audit` queue; they are not filed. Pre-existing findings skip §6B.5 and are not counted in `findings_filed`.
+
+Count `findings_dropped_stale`, `findings_preexisting` and `notes_demoted_no_scenario` and add them to the disposition marker below. Demoted notes flow into §6B.5 as NOTEs.
+
 ### 6B.5: Non-blocking note disposition (MANDATORY before 6C — forge#3060)
 
-Filing a standalone `review-finding` issue for every LOW/POSSIBLE reviewer note makes the cascade amplify (each merged fix PR spawns its own P3 issues, which spawn more). Classify each deduped finding before 6C with the deterministic classifier — do NOT hand-classify when the script resolves:
+Filing a standalone `review-finding` issue for every LOW/POSSIBLE reviewer note makes the cascade amplify (each merged fix PR spawns its own P3 issues, which spawn more). Classify each finding that survived §6B.4 (not dropped as stale, not routed as pre-existing; demoted ones are NOTEs) before 6C with the deterministic classifier — do NOT hand-classify when the script resolves:
 
 - **ISSUE always**: `**Severity**: HIGH` or `CRITICAL`, or a missing/unparseable severity.
-- **Safety exemption is content-based**: a LOW or POSSIBLE finding is still filed when its file path / title / body matches the security/billing keyword set (`security|auth|authz|authn|billing|payment|stripe|charge|invoice|injection|xss|csrf|ssrf|idor|secret(s)|credential(s)|permission(s)|sql|token|password|redact`, whole words, `_`/`-`/`/` separate words — so `auth_service` matches but `author`/`tokenizer` do not), or when it came from a dedicated, signal-selected domain agent (Auth, Billing, Concurrency, Database) AND is MEDIUM+ or CONFIRMED — a LOW/POSSIBLE finding stays a NOTE whichever reviewer raised it. **Origin from the always-on General Security & Quality agent alone does NOT exempt a finding**: that agent runs on every PR, so origin-based exemption filed nearly every LOW note it raised (the 2026-10-08 cascade audit: 50 of 60 would-be notes in one batch were filed only for that reason).
+- **Safety exemption is content-based** (it bypasses only this severity damper, never the §6B.4 provenance gate: a pre-existing auth gap is flagged through the pre-existing route, not attributed to this PR): a LOW or POSSIBLE finding is still filed when its file path / title / body matches the security/billing keyword set (`security|auth|authz|authn|billing|payment|stripe|charge|invoice|injection|xss|csrf|ssrf|idor|secret(s)|credential(s)|permission(s)|sql|token|password|redact`, whole words, `_`/`-`/`/` separate words — so `auth_service` matches but `author`/`tokenizer` do not), or when it came from a dedicated, signal-selected domain agent (Auth, Billing, Concurrency, Database) AND is MEDIUM+ or CONFIRMED — a LOW/POSSIBLE finding stays a NOTE whichever reviewer raised it. **Origin from the always-on General Security & Quality agent alone does NOT exempt a finding**: that agent runs on every PR, so origin-based exemption filed nearly every LOW note it raised (the 2026-10-08 cascade audit: 50 of 60 would-be notes in one batch were filed only for that reason).
 - **Review-finding lineage** (the PR's linked issue `MERGE_ISSUE` carries the `review-finding` label, any priority — this PR is itself a fix for a finding): only MEDIUM findings that are CONFIRMED, or LIKELY and safety-exempt, become issues; LOW and POSSIBLE are always NOTEs. A fix for a finding must not mint a new generation of findings.
 - **Otherwise**: `**Severity**: LOW`, or `**Confidence**: POSSIBLE` below HIGH, is a NOTE unless safety-exempt; everything else (MEDIUM CONFIRMED/LIKELY) is an ISSUE.
 
@@ -1927,14 +1958,14 @@ Each NOTE gets exactly one disposition, in this preference order:
 
 **Metrics note (forge#3106)**: because NOTEs are not filed as issues, `review-finding` issue volume and any metric derived from it (findings per PR, `/pipeline-health` finding rates, amplification ratio) drop relative to pre-#3060 history. Compare against the `notes_*` counts in the review summary, not issue counts alone, when judging review depth across the change.
 
-Every NOTE disposition must be recorded (never silently dropped): list each NOTE (id, file:line, one-line reason) with its disposition in the review summary comment, including dropped ones, so a reviewer can audit the decision. NOTES are never passed to `Skill(issue)`. Record counts in the review summary (`notes_fixed`, `notes_listed`, `notes_dropped`, `findings_filed`, `inpr_fix`). If no finding is an ISSUE after this step, skip 6C and continue to Phase 7. Findings classified `INPR_FIX` (§6B.6) are neither notes nor filed this round.
+Every NOTE disposition must be recorded (never silently dropped): list each NOTE (id, file:line, one-line reason) with its disposition in the review summary comment, including dropped ones, so a reviewer can audit the decision. NOTES are never passed to `Skill(issue)`. Record counts in the review summary (`notes_fixed`, `notes_listed`, `notes_dropped`, `findings_filed`, `inpr_fix`) and the §6B.4 counts (`findings_dropped_stale`, `findings_preexisting`, `notes_demoted_no_scenario`). If no finding is an ISSUE after this step, skip 6C and continue to Phase 7. Findings classified `INPR_FIX` (§6B.6) are neither notes nor filed this round.
 
 **Disposition marker (MANDATORY whenever Phase 6A extracted at least one finding):** post one PR comment whose first line is the machine-readable record below, followed by the NOTE list. Phase 8 refuses to auto-merge a PR that has `FINDING:` markers but no `FORGE:NOTE_DISPOSITION` comment — the disposition step is enforced, not advisory.
 
 ```bash
 CLASSIFIER_MODE=$([ -n "$CLASSIFY_SCRIPT" ] && echo script || echo manual)
 # NOTE_LIST_FILE: mktemp file named for the PR number, holding one line per NOTE (id, file:line, disposition, reason).
-gh pr comment {PR_NUMBER} -R {GH_REPO} --body "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=${NOTES_FIXED:-0} notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} inpr_fix=${INPR_FIX_COUNT:-0} lineage=${FINDING_LINEAGE} classifier=${CLASSIFIER_MODE} -->
+gh pr comment {PR_NUMBER} -R {GH_REPO} --body "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=${NOTES_FIXED:-0} notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} inpr_fix=${INPR_FIX_COUNT:-0} findings_dropped_stale=${FINDINGS_DROPPED_STALE:-0} findings_preexisting=${FINDINGS_PREEXISTING:-0} notes_demoted_no_scenario=${NOTES_DEMOTED_NO_SCENARIO:-0} lineage=${FINDING_LINEAGE} classifier=${CLASSIFIER_MODE} -->
 $(cat "$NOTE_LIST_FILE" 2>/dev/null)" # allowlist:check-command-side-effects
 ```
 
@@ -1968,6 +1999,7 @@ gh label create "review-finding" --color "D93F0B" --description "Defect or impro
 gh label create "needs-validation" --color "FBCA04" --description "Review finding awaiting human validation. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
 gh label create "validated" --color "0E8A16" --description "Review finding confirmed as a real issue. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
 gh label create "false-positive" --color "CCCCCC" --description "Review finding dismissed as a false positive. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+gh label create "pre-existing" --color "BFD4F2" --description "Defect noticed during PR review that the PR did not introduce. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
 ```
 
 **Milestone detection:**

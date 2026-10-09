@@ -2,6 +2,12 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Review provenance gates and noise share (#3452)
+
+`/review-pr` §6B.4 now checks each finding before it can become a `review-finding` issue: the cited line must exist at the reviewed head SHA (else dropped as stale), must be added or changed by the PR diff (else routed as `pre-existing`), and must carry a concrete `**Failure scenario**` (else demoted to a note; CRITICAL/HIGH CONFIRMED are exempt). Pre-existing defects are never counted as this PR's findings or in the amplification ratio; CRITICAL/HIGH or safety-domain ones are filed once with the new `pre-existing` label. The `FORGE:NOTE_DISPOSITION` record gains `findings_dropped_stale`, `findings_preexisting`, `notes_demoted_no_scenario`, and `/pipeline-health` reports a noise share (2E.5).
+
+Action: run `npx forgedock labels setup` to create the `pre-existing` label (the review also creates it on demand).
+
 ## Spec bash no longer corrupted by Claude Code argument substitution
 
 Claude Code replaces `$0`..`$9` in a skill body with the invocation's arguments (0-based), so spec bash loaded via `Skill(...)` with args was silently rewritten: `awk '{print $2}'` became `awk '{print --issue}'`, `local AGENT="$1"` became `local AGENT="--auto-merge"`, which broke `/review-pr` agent selection and the CI/deploy comparisons with no error. `${N}`, `$(N)`, `$NF`, `$@`, `$#` and `$10`+ are not substituted.
