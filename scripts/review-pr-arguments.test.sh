@@ -22,6 +22,13 @@ if [ -z "$hits" ]; then ok; else bad "gh/issues use of \$ARGUMENTS in review-pr.
 others=$(grep -n 'ARGUMENTS' "$SPEC" | grep -vE '^[0-9]+:(\*\*Input\*\*|If `\$ARGUMENTS`|\*\*`\$ARGUMENTS`|\$ARGUMENTS$|\*\*Argument injection hardening|>>> INVOKE: Skill\(.*review-pr-staging)' || true)
 if [ -z "$others" ]; then ok; else bad "unexpected \$ARGUMENTS use"; echo "$others" | sed 's/^/    /'; fi
 
+# Test 2b: inside bash fences of either spec, the loader placeholder may appear only as the standalone heredoc
+# body line - a mention in a comment is substituted too, and a newline in the arguments ends the comment
+for f in "$SPEC" "$STAGING"; do
+  fenced=$(awk '/^```/{in_f=!in_f; next} in_f && /ARGUMENTS/ && $0 != "$ARGUMENTS" {print FILENAME": "NR": "$0}' "$f")
+  if [ -z "$fenced" ]; then ok; else bad "placeholder inside a bash fence outside the heredoc body"; echo "$fenced" | sed 's/^/    /'; fi
+done
+
 # Test 3: parse block extracted from the spec
 BLOCK=$(sed -n '/^# BEGIN review-pr-arg-parse/,/^# END review-pr-arg-parse/p' "$SPEC")
 if [ -n "$BLOCK" ]; then ok; else bad "parse block markers missing"; fi
@@ -44,7 +51,11 @@ gen_script() {
     printf '%s\n' 'gh() { return 1; }'
     while IFS= read -r line; do
       if [ "$line" = '$ARGUMENTS' ]; then printf '%s\n' "$2"
-      else case "$line" in *FORGE_ARGS_EOF_NONCE*) printf '%s\n' "${line//NONCE/$NONCE_VAL}" ;; *) printf '%s\n' "$line" ;; esac; fi
+      else case "$line" in
+        # The loader substitutes EVERY occurrence, comments included; mimic that so a stray mention is caught.
+        *'$ARGUMENTS'*) printf '%s\n' "${line//'$ARGUMENTS'/$2}" ;;
+        *FORGE_ARGS_EOF_NONCE*) printf '%s\n' "${line//NONCE/$NONCE_VAL}" ;;
+        *) printf '%s\n' "$line" ;; esac; fi
     done <<EOB
 $1
 EOB
@@ -120,13 +131,17 @@ if grep -qF 'ARGS_RAW="$ARGUMENTS"' "$SPEC"; then bad "review-pr splices ARGUMEN
 if grep -qE '^[A-Za-z_]+="[^"]*\$\{?ARGUMENTS' "$SPEC" "$STAGING"; then bad "quoted \$ARGUMENTS assignment in a spec"; else ok; fi
 
 # Test 6: staging block, extracted and run under textual substitution
-STAGING_BLOCK=$(sed -n "/^IFS= read -r -d '' STAGING_ARGS_RAW/,/^PR_ARG=/p" "$STAGING")
+# Whole fence up to PR_ARG=, comments included, so a placeholder mention above the heredoc is exercised too
+STAGING_BLOCK=$(awk '/^```bash/{buf=""; in_f=1; next} in_f{buf=buf $0 "\n"} in_f && /^PR_ARG=/{if (buf ~ /STAGING_ARGS_RAW/) {printf "%s", buf; exit}} /^```$/{in_f=0}' "$STAGING")
 if [ -n "$STAGING_BLOCK" ]; then ok; else bad "staging parse block not found"; fi
 STAGING_TAIL='printf "%s|%s" "$PR_ARG" "$STAGING_ARGS_REJECTED"'
 run_staging() { gen_script "$STAGING_BLOCK" "$1" "$WORK/stg.sh" "$STAGING_TAIL"; : > "$ERR"; (cd "$WORK" && "${BASH:-bash}" "$WORK/stg.sh" 2>"$ERR"); }
 got=$(run_staging "3401 --auto-merge"); if [ "$got" = "3401|false" ]; then ok; else bad "staging first token: '$got'"; fi
 got=$(run_staging "staging:feature"); if [ "$got" = "staging:feature|false" ]; then ok; else bad "staging keyword: '$got'"; fi
-for inj in "\"; touch $SENTINEL; \"" "\$(touch $SENTINEL)" "\`touch $SENTINEL\`"; do
+for inj in "\"; touch $SENTINEL; \"" "\$(touch $SENTINEL)" "\`touch $SENTINEL\`" "3401
+touch $SENTINEL" "3401
+FORGE_ARGS_EOF_NONCE
+touch $SENTINEL"; do
   rm -f "$SENTINEL"; got=$(run_staging "$inj")
   if [ -e "$SENTINEL" ]; then bad "staging: injected command ran"; rm -f "$SENTINEL"
   elif [ "$got" = "|true" ] && grep -q 'rejected argument string' "$ERR"; then ok
