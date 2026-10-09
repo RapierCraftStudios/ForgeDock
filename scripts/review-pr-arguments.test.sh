@@ -27,13 +27,40 @@ BLOCK=$(sed -n '/^# BEGIN review-pr-arg-parse/,/^# END review-pr-arg-parse/p' "$
 if [ -n "$BLOCK" ]; then ok; else bad "parse block markers missing"; fi
 if printf '%s' "$BLOCK" | grep -qE '(^|[^a-z_])eval( |$)'; then bad "parse block uses eval"; else ok; fi
 
-run_parse() { # run_parse <args> -> prints PR_NUMBER|REPO|MERGE_GH_FLAG|MERGE_ISSUE|MERGE_BASE|AUTO_MERGE|THOROUGH|MERGE_WORKTREE
-  ARGUMENTS="$1" bash -c "gh() { return 1; }; $BLOCK"'
+TAIL='
 printf "%s|%s|%s|%s|%s|%s|%s|%s" "$PR_NUMBER" "$REPO" "$MERGE_GH_FLAG" "$MERGE_ISSUE" "$MERGE_BASE" "$AUTO_MERGE" "$THOROUGH" "$MERGE_WORKTREE"'
+# Run with the interpreter executing this test (system bash 3.2 on the macOS step), never a PATH bash.
+run_parse() { # run_parse <args> -> prints PR_NUMBER|REPO|MERGE_GH_FLAG|MERGE_ISSUE|MERGE_BASE|AUTO_MERGE|THOROUGH|MERGE_WORKTREE
+  ARGUMENTS="$1" "${BASH:-bash}" -c "gh() { return 1; }; $BLOCK$TAIL"
+}
+SUBST_TMP=""
+trap '[ -n "$SUBST_TMP" ] && rm -f "$SUBST_TMP"' EXIT
+# Textual-substitution runner: the spec loader replaces $ARGUMENTS in the text BEFORE bash parses it, so a
+# value containing double quotes is spliced into the ARGS_RAW="..." assignment. Rebuild the block line-wise
+# (no sed/regex on user data, so quotes, backslashes, & and / survive verbatim) and run it as a script file.
+run_parse_subst() { # run_parse_subst <args> -> same 8-field line as run_parse
+  SUBST_TMP=$(mktemp "${TMPDIR:-/tmp}/review-pr-subst.XXXXXX")
+  {
+    printf '%s\n' 'gh() { return 1; }'
+    while IFS= read -r line; do
+      if [ "$line" = 'ARGS_RAW="$ARGUMENTS"' ]; then printf 'ARGS_RAW="%s"\n' "$1"; else printf '%s\n' "$line"; fi
+    done <<EOB
+$BLOCK
+EOB
+    printf '%s\n' "$TAIL"
+  } > "$SUBST_TMP"
+  # sanity: the literal args were spliced in and the placeholder is gone
+  grep -qF "ARGS_RAW=\"$1\"" "$SUBST_TMP" && ! grep -qF 'ARGS_RAW="$ARGUMENTS"' "$SUBST_TMP" || echo "SUBST-GENERATION-FAILED"
+  "${BASH:-bash}" "$SUBST_TMP"
+  rm -f "$SUBST_TMP"; SUBST_TMP=""
 }
 expect() { # expect <desc> <want> <args>
   got=$(run_parse "$3")
   if [ "$got" = "$2" ]; then ok; else bad "$1: got '$got' want '$2'"; fi
+}
+expect_subst() { # expect_subst <desc> <want> <args> -- textual substitution of the args into the block source
+  got=$(run_parse_subst "$3")
+  if [ "$got" = "$2" ]; then ok; else bad "substitution $1: got '$got' want '$2'"; fi
 }
 expect "bare number" "3401|||||false|false|" "3401"
 expect "full flags quoted" "3401|o/r|-R o/r|3398|staging|true|false|/w/t" '3401 --auto-merge --issue 3398 --base staging --gh-flag "-R o/r" --worktree /w/t'
@@ -52,6 +79,15 @@ expect "bad repo shape" "3401|||||false|false|" "3401 --gh-flag -R a/b/c"
 expect "base followed by flag" "3401|||||false|false|/w" "3401 --base --worktree /w"
 expect "leading-dash worktree" "3401|||||false|false|" "3401 --worktree -x"
 expect "duplicate flags last wins" "3401|||7||false|false|" "3401 --issue 5 --issue 7"
+
+# Textual-substitution cases (loader fidelity)
+expect_subst "bare number" "3401|||||false|false|" "3401"
+expect_subst "unquoted flags" "3401|o/r|-R o/r|3398|staging|true|false|/w/t" '3401 --auto-merge --issue 3398 --base staging --gh-flag -R o/r --worktree /w/t'
+expect_subst "single-quoted gh-flag" "3401|o/r|-R o/r|||false|false|" "3401 --gh-flag '-R o/r'"
+# Known loader-quoting gap: a double-quoted value is spliced into ARGS_RAW="..." and closes the string early,
+# so the block aborts and binds nothing. Pinned here so the divergence stays visible (spec change tracked separately);
+# if the spec is hardened (e.g. a quoted heredoc), update this to the quoted-form result used by run_parse.
+expect_subst "double-quoted gh-flag breaks out of ARGS_RAW (known gap)" "|||||false|false|" '3401 --auto-merge --issue 3398 --base staging --gh-flag "-R o/r" --worktree /w/t' 2>/dev/null
 
 # Test 4: staging numeric test no longer needs the whole string to be numeric
 if grep -q "grep -qE '^\[0-9\]+\$'" "$STAGING"; then bad "staging still tests the whole argument string"; else ok; fi
