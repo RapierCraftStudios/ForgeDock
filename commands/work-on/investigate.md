@@ -581,23 +581,25 @@ bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN_LABEL} --repo-path
    > **Scope-Gap Warning**: The issue spec lists `{PRIMARY_FILE}` but the same pattern exists in `{SIBLING_FILE}:{LINE}`. These were likely introduced together. Recommend widening scope to fix all callers in this PR, or creating follow-up issues for the other files before proceeding.
 
    Do NOT silently exclude sibling matches. The appropriate output when sibling files have the same bug is to flag them explicitly — even if the issue spec's silence appears intentional. The fix-approach validation step (step 8) will confirm whether to widen scope or create follow-ups. <!-- Added: forge#383 -->
-7.6. **Finding Pattern Sweep** *(conditional — eligible when the issue has label `review-finding`, or its body/comments carry a `FORGE:PATTERN` or `FORGE:CLASS` tag)*: Review findings are instances of a defect class. Fixing only the cited instance lets sibling instances resurface in the next review, so sweep the whole repo for the class before settling the affected-file list. Step 7.5 stays the lightweight fallback for non-finding issues; do not repeat it for eligible issues. <!-- Added: forge#3449 -->
+7.6. **Finding Pattern Sweep** *(conditional — eligible when the issue has label `review-finding`, or its body carries a `FORGE:PATTERN` or `FORGE:PATTERN-CLASS` tag)*: Review findings are instances of a defect class. Fixing only the cited instance lets sibling instances resurface in the next review, so sweep the whole repo for the class before settling the affected-file list. For eligible issues this step replaces step 7.5; step 7.5 runs for non-eligible issues, and as the fallback when 7.6 is skipped or degrades. <!-- Added: forge#3449 -->
    ```bash
    REPO="{GH_REPO}"; NUMBER="{NUMBER}"
    BODY=$(gh issue view "$NUMBER" -R "$REPO" --json body --jq '.body') || BODY=""
    # Slug comes from model-written text: validate before ANY shell or jq use.
+   # Class-level issues carry `<!-- FORGE:PATTERN: slug -->` too (review-pr Phase 6C), so one extractor covers both.
    SLUG=$(printf '%s\n' "$BODY" | grep -o 'FORGE:PATTERN: [A-Za-z0-9_-]*' | head -1 | sed 's/^FORGE:PATTERN: //')
-   if ! printf '%s' "$SLUG" | grep -qE '^[a-z0-9-]+$'; then
+   if ! [[ "$SLUG" =~ ^[a-z0-9-]+$ ]]; then
      echo "PATTERN SWEEP SKIPPED: no valid FORGE:PATTERN slug (expected ^[a-z0-9-]+$) — fall back to step 7.5"
      SLUG=""
    fi
    ```
    When `SLUG` is non-empty:
-   - **Derive queries** from: the slug itself, the finding's **Prevention** sentence (extract its key identifiers), every path under **Files**, and the symbol, call, or condition cited at the defect site. Use 2-5 queries; each query is a fixed string, not a regex built from untrusted text.
-   - **Search the whole repo** (not just the affected directory): `git grep -n -F -- "$QUERY" | head -31`. Quote the variable, always pass `-F` and `--`. Bound each query with `timeout 30`.
-   - **Hit cap**: record at most 30 hits per query. If a query returns more, record the first 30 and mark the row `truncated` — never silently drop hits.
-   - **Disposition per hit** (MANDATORY, no unlabeled hits): `fix` (same defect class, must be changed in this PR) or `not-affected` with a one-line reason (e.g. already guarded, different semantics). The cited instance is always a `fix` row.
-   - **Degrade, never block**: if the search tooling fails or times out, write `Pattern sweep skipped: {reason}` in the `### Pattern Sweep` section and continue. The sweep is advisory evidence, not a gate.
+   - **Derive queries** from: the slug itself, the finding's **Prevention** sentence (extract its key identifiers), every path under **Files**, and the symbol, call, or condition cited at the defect site. Use 2-5 queries; each query is a fixed string, not a regex. A query must match `^[A-Za-z0-9_.:/-]{3,80}$` (identifier-like, no spaces, quotes, backticks, `$`, `|`); drop any query that does not, and never run an empty query (`-F ""` matches every line).
+   - **Search the whole repo** (not just the affected directory), capturing the exit status so a failure is visible instead of masked by a pipe: `OUT=$(timeout 30 git grep -n -F -- "$QUERY"); RC=$?` (use `timeout` only if `command -v timeout` succeeds; stock macOS lacks it). `RC=0` means hits, `RC=1` means no match (0 hits is a valid result), any other `RC` (including 124, timeout) means the query failed. Quote the variable, always pass `-F` and `--`. Then cap: `printf '%s\n' "$OUT" | head -31`.
+   - **Hit cap**: record at most 30 hits per query. If a query returns more, record the first 30 and mark the query `truncated at 30` — never silently drop hits.
+   - **Disposition per hit** (MANDATORY, no unlabeled hits): `fix` (same defect class, must be changed in this PR) or `not-affected` with a one-line reason (e.g. already guarded, different semantics). The cited instance is always a `fix` row. Record each hit as `file:line` only (never the matched line text), one table row per hit.
+   - **Scope cap**: if more than 25 `fix` rows result, do not grow one PR to fit them. Record the cited instance plus the rows in the same subsystem as `fix`, mark the rest `fix-deferred`, and recommend decomposition in the report (set `decompose: YES` if the remaining scope is too large for one PR).
+   - **Degrade, never block**: if any query fails (`RC` other than 0 or 1), write `Pattern sweep skipped: {reason}` in the `### Pattern Sweep` section, fall back to step 7.5, and continue. A failed query must never be recorded as 0 hits. The sweep is advisory evidence, not a gate.
    - Every `fix` row MUST appear in `### Affected Files`, and the acceptance spec MUST include a class-wide coverage check plus a check that the added test exercises more than the reviewer's single repro (see Phase 1C).
 8. **Fix-approach validation** — if the issue proposes a fix, don't adopt it as spec. Trace through the target system's middleware, auth, routing, config. Cross-domain: if fix in domain A interacts with domain B, read domain B's files too.
 
@@ -672,12 +674,12 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 ### Affected Files
 {numbered list of files that need changes. For \`review-finding\` issues, include every file with a \`fix\` row from the Pattern Sweep below.}
 
-### Pattern Sweep <!-- Added: forge#3449 -->
-{Emit for \`review-finding\` issues (step 7.6). Omit this section for other issues. One row per query; list individual hits as \`file:line\` in the Hits column. On skip, write \`Pattern sweep skipped: {reason}\`.}
+### Pattern Sweep
+{Emit for \`review-finding\` issues (step 7.6). Omit this section for other issues. One row per hit, hit as \`file:line\` only. A query with no hits gets one row with Hit \`none\`. On skip, write \`Pattern sweep skipped: {reason}\`. Queries are pre-validated identifier-like text (step 7.6), so they are safe to place in this template.}
 
-| Query | Hits | Disposition |
-|-------|------|-------------|
-| {fixed-string query} | {count and file:line list, or \`truncated at 30\`} | {fix \| not-affected — reason} |
+| Query | Hit | Disposition |
+|-------|-----|-------------|
+| {validated fixed-string query} | {file:line, \`none\`, or \`truncated at 30\`} | {fix \| not-affected — reason} |
 
 ### Evidence
 {specific findings — function names, line numbers, behavior observed}
