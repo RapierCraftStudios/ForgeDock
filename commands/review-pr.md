@@ -1603,47 +1603,56 @@ The `protocols.md` file contains the Evidence-Based Review Protocol, Structured 
 8. If Phase 2.5 found broken assumptions, append them to the agent's prompt as "Pre-found integration issues to verify"
 9. Launch via the resolved `{DISPATCH_TOOL}` (see Sub-Agent Dispatch Tool Resolution above) with `model: "{SUBAGENT_MODEL}"` (forge.yaml `agents.subagent_model`, else `agents.default_model`, else `"sonnet"`; fallback `"opus"` if rate-limited). Under OpenCode, emit a top-level `subagent_type: "general"` or `"explore"` in the native `task` argument object and use `background: false` for each reviewer.
 
-**Idempotent re-entry (before launching)**: a re-invoked review must reuse reviewers that already posted for the current head instead of re-dispatching the full panel. For each domain in `$SELECTED_AGENTS`, check for an existing `<!-- FORGE:REVIEW-AGENT:{domain} -->` comment whose body also contains `Reviewed-SHA: ${REVIEW_SHA}` (the reviewed head SHA); launch only the domains without one (possibly none), then continue to Phase 4. Comments for a different SHA never count. The selected roster for the panel guard stays the full `$SELECTED_AGENTS` set.
+**Reviewer-comment trust and shape (applies to every check below and in Phase 4)**: a reviewer comment counts only when it is from a trusted author (`scripts/trusted-comments.sh`, the same predicate as the in-PR fix gate and `verify-phase-trail.sh`: trusted association, Bot account, or `FORGE_TRAIL_TRUSTED_LOGINS`), its body **starts with** `<!-- FORGE:REVIEW-AGENT:{domain} -->`, and it carries a line `Reviewed-SHA: ${REVIEW_SHA}` for the current head. The head SHA is public, so the SHA line alone proves nothing: an untrusted commenter must never be able to suppress dispatch or satisfy the panel guard. If the trust script cannot be resolved, or its count is not an integer, the reviewer is treated as **not posted** (fail closed: re-dispatch in 3C, missing in Phase 4).
+
+**Idempotent re-entry (before launching)**: a re-invoked review must reuse reviewers that already posted for the current head instead of re-dispatching the full panel. For each domain in `$SELECTED_AGENTS`, check for an existing trusted comment of the shape above; launch only the domains without one (possibly none), then continue to Phase 4. Comments for a different SHA never count. The selected roster for the panel guard stays the full `$SELECTED_AGENTS` set.
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"; SELECTED_AGENTS="{SELECTED_AGENTS}"
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+TRUSTED_SCRIPT=""
+for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock"; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done
 PENDING_AGENTS=""
 for AGENT in $SELECTED_AGENTS; do
   AGENT_DOMAIN=$(printf '%s' "$AGENT" | tr '[:upper:]' '[:lower:]')
-  HAVE=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
-    --jq "[.[] | select((.body | contains(\"<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->\")) and (.body | contains(\"Reviewed-SHA: ${REVIEW_SHA}\")))] | .[].id" \
-    2>/dev/null | grep -c . || true)
-  [ "${HAVE:-0}" -lt 1 ] && PENDING_AGENTS="${PENDING_AGENTS} ${AGENT}"
+  HAVE=""
+  if [ -n "$TRUSTED_SCRIPT" ]; then
+    HAVE=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
+      | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}" 2>/dev/null || echo "")
+  fi
+  case "$HAVE" in ''|*[!0-9]*) HAVE=0 ;; esac   # fail closed: unreadable or untrusted counts as not posted
+  [ "$HAVE" -lt 1 ] && PENDING_AGENTS="${PENDING_AGENTS} ${AGENT}"
 done
-# Dispatch only $PENDING_AGENTS in the launch step below.
+echo "PENDING_AGENTS:${PENDING_AGENTS:- (none)}"
 ```
 
-**CRITICAL**: Launch ALL selected agents in a SINGLE message using multiple `{DISPATCH_TOOL}` calls. Each agent must persist its finalized body before posting it with `gh pr comment --body-file`, include `<!-- FORGE:REVIEW-AGENT:{lowercase-domain} -->` plus a `Reviewed-SHA: ${REVIEW_SHA}` line (the full head SHA, outside the marker), and return its verdict and findings to the orchestrator independently of GitHub delivery.
+**CRITICAL**: Launch ALL agents in `PENDING_AGENTS` in a SINGLE message using multiple `{DISPATCH_TOOL}` calls. If `PENDING_AGENTS` is empty, every selected reviewer already posted for this head: launch nothing and go straight to Phase 4. Each agent must persist its finalized body before posting it with `gh pr comment --body-file`, start the body with `<!-- FORGE:REVIEW-AGENT:{lowercase-domain} -->` followed by a `Reviewed-SHA: ${REVIEW_SHA}` line (the full head SHA, outside the marker), and return its verdict and findings to the orchestrator independently of GitHub delivery.
 
-**Dispatch failure and partial-panel guard (MANDATORY):** Count the selected roster before dispatch. If any launch fails, including from pool exhaustion, do not continue with the agents that did launch as a sufficient panel. Immediately create the managed label if necessary, label the PR `review-degraded`, add `needs-human` to the linked issue, post `FORGE:GATE_FAILURE`, and exit without a verdict. After reviewers complete (joined `Task`/`task` return) or, under async `Agent`, after the Phase 4 bounded wait ends, independently compare their posted current-SHA `FORGE:REVIEW-AGENT` markers with the selected count; a smaller count is the same hard stop. This catches a reviewer that accepted dispatch but failed before posting. Under async `Agent` the comparison runs only after the wait, so a reviewer that is merely late is not a false degraded stop.
+**Dispatch failure and partial-panel guard (MANDATORY):** Count the selected roster before dispatch. If any launch fails, including from pool exhaustion, do not continue with the agents that did launch as a sufficient panel. Immediately run the **Panel hard-stop block** below with `ACTUAL_AGENT_COUNT=0` and exit without a verdict. After reviewers complete (joined `Task`/`task` return) or, under async `Agent`, after the Phase 4 bounded wait ends, independently compare their posted trusted current-SHA `FORGE:REVIEW-AGENT` markers with the selected count; a smaller count is the same hard stop. This catches a reviewer that accepted dispatch but failed before posting. Under async `Agent` the comparison runs only after the wait, so a reviewer that is merely late is not a false degraded stop.
+
+**Panel hard-stop block** (run as its own Bash call from 3C on a launch failure and from Phase 4 on a timeout or shortfall; it is self-contained because each Bash call is a fresh shell and nothing defined in another block survives):
 
 ```bash
-SELECTED_AGENT_COUNT=$(echo "$SELECTED_AGENTS" | tr ' ' '\n' | grep -c '.')
-
-# Shared by the launch-failure stop here and the post-wait count check in Phase 4.
-review_panel_hard_stop() {
-  gh label create "review-degraded" --color "E4E669" --description "PR review panel was incomplete; re-review required before deployment. Managed by ForgeDock." --force -R "$REPO" 2>/dev/null || true
-  gh pr edit "$PR_NUMBER" -R "$REPO" --add-label "review-degraded" --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
-  gh pr comment "$PR_NUMBER" -R "$REPO" --body "<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity -->
+REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; MERGE_ISSUE="{MERGE_ISSUE}"   # MERGE_ISSUE empty when no --issue
+SELECTED_AGENT_COUNT=$(printf '%s' "{SELECTED_AGENTS}" | tr ' ' '\n' | grep -c '.' || true)
+ACTUAL_AGENT_COUNT="{ACTUAL_AGENT_COUNT}"   # 0 on a launch failure; the Phase 4 count otherwise
+gh label create "review-degraded" --color "E4E669" --description "PR review panel was incomplete; re-review required before deployment. Managed by ForgeDock." --force -R "$REPO" 2>/dev/null || true
+gh pr edit "$PR_NUMBER" -R "$REPO" --add-label "review-degraded" --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
+gh pr comment "$PR_NUMBER" -R "$REPO" --body "<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity -->
 ## Review Blocked: Incomplete Isolated Review Panel
 
 **Selected isolated reviewers**: ${SELECTED_AGENT_COUNT}
 **Completed isolated reviewers**: ${ACTUAL_AGENT_COUNT:-0}
 
-At least one reviewer could not be dispatched or complete, commonly because the per-session sub-agent pool was exhausted or the bounded wait (${REVIEWER_WAIT_SECS:-900}s) for current-SHA reviewer comments expired. No inline substitution was performed. Re-run the full panel in a fresh session before merging."
-  [ -n "${MERGE_ISSUE:-}" ] && gh issue edit "$MERGE_ISSUE" {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
-  exit 1
-}
-
-if [ "$DISPATCH_FAILED" = "true" ]; then
-  ACTUAL_AGENT_COUNT=0
-  review_panel_hard_stop
-fi
+At least one reviewer could not be dispatched or complete, commonly because the per-session sub-agent pool was exhausted or the bounded wait for current-SHA reviewer comments expired. No inline substitution was performed. Re-run the full panel in a fresh session before merging."
+if [ -n "$MERGE_ISSUE" ]; then gh issue edit "$MERGE_ISSUE" {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true; fi # allowlist:check-command-side-effects
+echo "REVIEW_RESULT: status: BLOCKED, blocker: incomplete review panel (${ACTUAL_AGENT_COUNT:-0}/${SELECTED_AGENT_COUNT})"
 ```
+
+After this block prints its `REVIEW_RESULT` line, stop: return that result with no verdict.
 
 #### Domain Diff Slicing
 
@@ -1669,56 +1678,75 @@ When substituting `[FILE_LIST]` in each agent's template:
 
 ## Phase 4: Wait for Agents
 
-Reviewer completion is read from GitHub, never from notifications (see the "Reviewer completion model" under Sub-Agent Dispatch Tool Resolution). A reviewer counts as complete only when its `<!-- FORGE:REVIEW-AGENT:{domain} -->` comment on the PR also carries `Reviewed-SHA: <current head>`.
+Reviewer completion is read from GitHub, never from notifications (see the "Reviewer completion model" under Sub-Agent Dispatch Tool Resolution). A reviewer counts as complete only when a **trusted** comment (see the trust rule in Phase 3C) starting with `<!-- FORGE:REVIEW-AGENT:{domain} -->` also carries `Reviewed-SHA: <current head>`.
 
-- **Joined tools** (`Task`, OpenCode `task`): the reviewers already returned, so the loop below runs one pass and exits.
-- **Async `Agent`**: bounded wait. Poll every 30s until every selected domain has a current-SHA comment or `REVIEWER_WAIT_SECS` (default 900) elapses. Re-read the PR head each pass; if it moved off `REVIEW_SHA`, stop waiting: the panel reviewed a stale head, so treat it as a stale review and follow the existing stale-review handling (re-run the review for the new head), not an indefinite wait.
-- On timeout the existing hard stop applies unchanged (`review-degraded`, `needs-human`, `FORGE:GATE_FAILURE:TYPE=review-panel-integrity`). Never review the missing domain inline.
+- **Joined tools** (`Task`, OpenCode `task`): the reviewers already returned, so one pass decides: anything missing is a delivery failure.
+- **Async `Agent`** (and any tool not known to be joined): bounded wait, **one poll pass per Bash call**. A Bash call is capped at 120s by default (600s max), so a single 900s sleep loop would be killed mid-wait and the hard stop would never run. The first pass records an epoch deadline in a scratchpad file; each later pass re-reads it, so the deadline survives across calls. Re-run the block while it prints `PANEL_STATUS: WAITING` (it sleeps `REVIEWER_POLL_SECS`, at most 60s, before exiting).
+- Each pass re-reads the PR head. If it moved off `REVIEW_SHA`, stop: the panel reviewed a stale head, so the block returns the documented `REVIEW_RESULT` BLOCKED (stale review). If the head probe itself fails, that is a BLOCKED result too (fail closed), never a pass.
+- `PANEL_STATUS: TIMEOUT` or `PANEL_STATUS: SHORTFALL`, or a poll call that was killed or timed out, is the hard stop: run the **Panel hard-stop block** from Phase 3C with `ACTUAL_AGENT_COUNT` set to the count the block printed (0 if the call was killed). Never review the missing domain inline.
 
 ```bash
-REVIEWER_WAIT_SECS="${REVIEWER_WAIT_SECS:-900}"
-REVIEWER_POLL_SECS=30
-WAIT_MAX_PASSES=$(( REVIEWER_WAIT_SECS / REVIEWER_POLL_SECS + 1 ))
-[ "$DISPATCH_TOOL" = "Agent" ] || WAIT_MAX_PASSES=1
+# Each Bash call is a fresh shell: re-declare state with the orchestrator's values (never rely on Phase 3C variables).
+REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"; SELECTED_AGENTS="{SELECTED_AGENTS}"
+DISPATCH_TOOL="{DISPATCH_TOOL}"   # Task | Agent | task (OpenCode)
+SCRATCH="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$SCRATCH"
+DEADLINE_FILE="${SCRATCH}/${PR_NUMBER}_review-wait-deadline"
 
+REVIEWER_WAIT_SECS="${REVIEWER_WAIT_SECS:-900}"
+case "$REVIEWER_WAIT_SECS" in ''|*[!0-9]*) REVIEWER_WAIT_SECS=900 ;; esac
+[ "$REVIEWER_WAIT_SECS" -gt 3600 ] && REVIEWER_WAIT_SECS=3600
+REVIEWER_POLL_SECS=30
+SELECTED_AGENT_COUNT=$(printf '%s' "$SELECTED_AGENTS" | tr ' ' '\n' | grep -c '.' || true)
+
+# Joined tools return only when the reviewer is done: no waiting. Everything else polls to the deadline.
+case "$DISPATCH_TOOL" in Task|task) JOINED=true ;; *) JOINED=false ;; esac
+NOW=$(date +%s)
+[ -s "$DEADLINE_FILE" ] || echo $(( NOW + REVIEWER_WAIT_SECS )) > "$DEADLINE_FILE"
+DEADLINE=$(cat "$DEADLINE_FILE" 2>/dev/null)
+case "$DEADLINE" in ''|*[!0-9]*) DEADLINE=$NOW ;; esac
+
+NOW_SHA=$(gh pr view "$PR_NUMBER" -R "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
+if [ -z "$NOW_SHA" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: head probe failed during reviewer wait; re-run /review-pr"
+  echo "PANEL_STATUS: STOP"; exit 0
+fi
+if [ "$NOW_SHA" != "$REVIEW_SHA" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: stale review (head moved from ${REVIEW_SHA} to ${NOW_SHA} during the reviewer wait); re-run /review-pr on the new head"
+  echo "PANEL_STATUS: STOP"; exit 0
+fi
+
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+TRUSTED_SCRIPT=""
+for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock"; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done
+COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
 MISSING_AGENT_COMMENTS=""
-HEAD_MOVED=false
-PASS=0
-while [ "$PASS" -lt "$WAIT_MAX_PASSES" ]; do
-    PASS=$(( PASS + 1 ))
-    NOW_SHA=$(gh pr view "$PR_NUMBER" -R "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null || printf '%s' "$REVIEW_SHA")
-    if [ -n "$NOW_SHA" ] && [ "$NOW_SHA" != "$REVIEW_SHA" ]; then
-        HEAD_MOVED=true
-        break
-    fi
-    MISSING_AGENT_COMMENTS=""
-    ACTUAL_AGENT_COUNT=0
-    for AGENT in $SELECTED_AGENTS; do
-        AGENT_DOMAIN=$(printf '%s' "$AGENT" | tr '[:upper:]' '[:lower:]')
-        AGENT_COMMENT_COUNT=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
-            --jq "[.[] | select((.body | contains(\"<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->\")) and (.body | contains(\"Reviewed-SHA: ${REVIEW_SHA}\")))] | .[].id" \
-            2>/dev/null | grep -c . || true)
-        if [ "${AGENT_COMMENT_COUNT:-0}" -lt 1 ]; then
-            MISSING_AGENT_COMMENTS="${MISSING_AGENT_COMMENTS} ${AGENT_DOMAIN}"
-        else
-            ACTUAL_AGENT_COUNT=$(( ACTUAL_AGENT_COUNT + 1 ))
-        fi
-    done
-    [ -z "$MISSING_AGENT_COMMENTS" ] && break
-    [ "$PASS" -lt "$WAIT_MAX_PASSES" ] && sleep "$REVIEWER_POLL_SECS"
+ACTUAL_AGENT_COUNT=0
+for AGENT in $SELECTED_AGENTS; do
+  AGENT_DOMAIN=$(printf '%s' "$AGENT" | tr '[:upper:]' '[:lower:]')
+  N=""
+  if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$COMMENTS_JSON" ]; then
+    N=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}" 2>/dev/null || echo "")
+  fi
+  case "$N" in ''|*[!0-9]*) N=0 ;; esac   # fail closed
+  if [ "$N" -lt 1 ]; then MISSING_AGENT_COMMENTS="${MISSING_AGENT_COMMENTS} ${AGENT_DOMAIN}"; else ACTUAL_AGENT_COUNT=$(( ACTUAL_AGENT_COUNT + 1 )); fi
 done
 
-if [ "$HEAD_MOVED" = "true" ]; then
-    echo "REVIEW STALE: head moved from ${REVIEW_SHA} to ${NOW_SHA} during the reviewer wait; re-run review-pr for the new head"
-    exit 1
-fi
-
-if [ -n "$MISSING_AGENT_COMMENTS" ] || [ "$ACTUAL_AGENT_COUNT" -lt "$SELECTED_AGENT_COUNT" ]; then
-    echo "REVIEW DELIVERY FAILURE: missing current-SHA findings comment(s) for:${MISSING_AGENT_COMMENTS}"
-    echo "Use each agent's returned verdict, findings, and durable body path to recover the review."
-    review_panel_hard_stop
+if [ -z "$MISSING_AGENT_COMMENTS" ] && [ "$ACTUAL_AGENT_COUNT" -ge "$SELECTED_AGENT_COUNT" ]; then
+  rm -f "$DEADLINE_FILE"; echo "PANEL_STATUS: COMPLETE (${ACTUAL_AGENT_COUNT}/${SELECTED_AGENT_COUNT})"
+elif [ "$JOINED" = "true" ] || [ "$(date +%s)" -ge "$DEADLINE" ]; then
+  rm -f "$DEADLINE_FILE"
+  echo "REVIEW DELIVERY FAILURE: missing trusted current-SHA findings comment(s) for:${MISSING_AGENT_COMMENTS}"
+  echo "Use each agent's returned verdict, findings, and durable body path to recover the review."
+  [ "$JOINED" = "true" ] && echo "PANEL_STATUS: SHORTFALL (ACTUAL_AGENT_COUNT=${ACTUAL_AGENT_COUNT})" || echo "PANEL_STATUS: TIMEOUT (ACTUAL_AGENT_COUNT=${ACTUAL_AGENT_COUNT})"
+else
+  echo "PANEL_STATUS: WAITING (${ACTUAL_AGENT_COUNT}/${SELECTED_AGENT_COUNT}; missing:${MISSING_AGENT_COMMENTS})"
+  sleep "$REVIEWER_POLL_SECS"
 fi
 ```
+
+On `PANEL_STATUS: STOP`, return the printed `REVIEW_RESULT` and do nothing else (no hard stop, no verdict, no label change: the panel is intact, only the head moved).
 
 **Do NOT proceed until ALL selected agents' current-SHA comments are visible on the PR.** Under OpenCode, each foreground `task(..., background: false)` returns only when that reviewer is complete; verify its corresponding structured PR comment before continuing. A missing comment after the wait is an explicit delivery failure: do not synthesize a verdict or treat it as a clean result. Do not infer a clean review from a missing comment: a reviewer's return text may contain findings that could not be posted because GitHub writes were throttled.
 
@@ -1731,9 +1759,11 @@ fi
 ```bash
 # Extract structured finding IDs from FINDING HTML comments.
 # Uses jq's scan() (POSIX-portable, no grep -oP required).
-ALL_FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-    --jq '[.[].body | scan("<!-- FINDING:([^>]+) -->") | .[0]] | join("\n")')
-AGENT_COUNT=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '[.[] | select(.body | test("REVIEW-FINDINGS-START"))] | length')
+# Scope every extraction to reviewer bodies for the CURRENT head (Reviewed-SHA line): after a re-entry or a
+# head move, comments for earlier heads would inflate AGENT_COUNT and re-file already-fixed findings.
+ALL_FINDINGS=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+    --jq "[.[] | select(.body | contains(\"Reviewed-SHA: ${REVIEW_SHA}\")) | .body | scan(\"<!-- FINDING:([^>]+) -->\") | .[0]] | join(\"\\n\")")
+AGENT_COUNT=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" | jq -s --arg sha "Reviewed-SHA: ${REVIEW_SHA}" '[.[][] | select((.body | test("REVIEW-FINDINGS-START")) and (.body | contains($sha)))] | length')
 FINDING_COUNT=$(echo "$ALL_FINDINGS" | grep -c '.' || echo 0)
 ```
 
@@ -1741,7 +1771,7 @@ If synthesis needed, launch a `general-purpose` Task (model: `"{SUBAGENT_MODEL}"
 - Deduplicate findings by file + line range ±5 (keep higher confidence)
 - Resolve contradictions by reading disputed code
 - Dismiss false positives with evidence
-- Post synthesis comment with `<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->` block
+- Post synthesis comment with `<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->` block and a `Reviewed-SHA: ${REVIEW_SHA}` line (Phase 6A only reads synthesized blocks for the current head)
 - Do NOT add new findings — only triage existing ones
 
 **IMPORTANT**: When synthesized block exists, Phase 6 MUST use it instead of raw findings.
@@ -1755,16 +1785,17 @@ If synthesis needed, launch a `general-purpose` Task (model: `"{SUBAGENT_MODEL}"
 ### 6A: Extract Findings
 
 ```bash
-HAS_SYNTHESIS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[].body' | grep -c 'REVIEW-FINDINGS-SYNTHESIZED-START' || echo 0)
+# Only bodies for the CURRENT head count (Reviewed-SHA line): findings from earlier heads are already fixed or re-reviewed.
+HAS_SYNTHESIS=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" | jq -s --arg sha "Reviewed-SHA: ${REVIEW_SHA}" '[.[][] | select((.body | test("REVIEW-FINDINGS-SYNTHESIZED-START")) and (.body | contains($sha)))] | length')
 
 if [ "$HAS_SYNTHESIS" -gt 0 ]; then
-    # Extract finding IDs from synthesized block using jq scan() — no grep -oP needed
-    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-        --jq '[.[] | select(.body | test("REVIEW-FINDINGS-SYNTHESIZED-START")) | .body | scan("<!-- FINDING:([^>]+) -->") | .[0]] | join("\n")')
+    # Extract finding IDs from the current-head synthesized block using jq scan() — no grep -oP needed
+    FINDINGS=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+        --jq "[.[] | select((.body | test(\"REVIEW-FINDINGS-SYNTHESIZED-START\")) and (.body | contains(\"Reviewed-SHA: ${REVIEW_SHA}\"))) | .body | scan(\"<!-- FINDING:([^>]+) -->\") | .[0]] | join(\"\\n\")")
 else
-    # Extract finding IDs from all agent comments using jq scan() — portable, no grep -oP
-    FINDINGS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-        --jq '[.[].body | scan("<!-- FINDING:([^>]+) -->") | .[0]] | join("\n")')
+    # Extract finding IDs from the current-head agent comments using jq scan() — portable, no grep -oP
+    FINDINGS=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+        --jq "[.[] | select(.body | contains(\"Reviewed-SHA: ${REVIEW_SHA}\")) | .body | scan(\"<!-- FINDING:([^>]+) -->\") | .[0]] | join(\"\\n\")")
 fi
 ```
 
