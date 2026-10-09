@@ -365,6 +365,56 @@ if [ -f "$P4_SPEC" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Router claim pre-check must classify the existing/winning claim's lease (forge#3431)
+# ---------------------------------------------------------------------------
+
+WORKON_SPEC="$COMMANDS_DIR/work-on.md"
+if [ -f "$WORKON_SPEC" ]; then
+  # Scope: the "Claim pre-check" paragraph only, from its "**Claim pre-check" line up to the line before
+  # "**Terminal fallback". Full-line HTML comments are skipped, then each numbered step (N. ...) is collapsed
+  # to one whitespace-normalised line tagged "STEP<N>:" so tokens in other steps, the Terminal fallback
+  # paragraph, or comments cannot satisfy another step's assertion.
+  PRECHECK_STEPS=$(awk '
+    /^\*\*Terminal fallback/ { inpre = 0 }
+    /^\*\*Claim pre-check/ { inpre = 1; next }
+    inpre {
+      line = $0
+      if (line ~ /^[[:space:]]*<!--.*-->[[:space:]]*$/) next
+      gsub(/<!--[^>]*-->/, "", line)
+      if (match(line, /^[0-9]+\. /)) {
+        n = substr(line, 1, RLENGTH - 2)
+        cur = n
+        steps[cur] = "STEP" n ": " substr(line, RLENGTH + 1)
+        next
+      }
+      if (line ~ /^Only after the read-back/) { cur = ""; next }
+      if (cur != "") steps[cur] = steps[cur] " " line
+    }
+    END { for (k in steps) print steps[k] }
+  ' "$WORKON_SPEC" | tr -s '[:space:]' ' ' | sed 's/ STEP/\nSTEP/g' || true)
+  # WIRE:PROVEN: manual mutation in a temp copy of commands/work-on.md: removing `STALE` from step 4 only fired step 4, removing it from step 2 only fired step 2, tokens only in an HTML comment or only in the Terminal fallback paragraph still fired, a router-local REREVIEW_LEASE_SECS= or rereview_lease_state fired, clean tree passes
+  for STEP_N in 2 4; do
+    STEP_TXT=$(printf '%s\n' "$PRECHECK_STEPS" | grep "^STEP${STEP_N}:" || true)
+    if [ -z "$STEP_TXT" ] \
+       || [[ "$STEP_TXT" != *STALE* ]] \
+       || [[ "$STEP_TXT" != *phase-4-execution.md* ]] \
+       || [[ "$STEP_TXT" != *fallback* ]]; then
+      echo "HIGH | $WORKON_SPEC | claim pre-check step $STEP_N does not route STALE to the terminal fallback via the shared phase-4-execution.md Step 1 classification" >&2
+      VIOLATIONS=$((VIOLATIONS + 1))
+    fi
+  done
+  # The router must reference the orchestrator's single lease definition, never redefine it.
+  if grep -qE '^[[:space:]]*REREVIEW_LEASE_SECS=' "$WORKON_SPEC"; then
+    echo "HIGH | $WORKON_SPEC | router redefines REREVIEW_LEASE_SECS (single definition lives in phase-4-execution.md Step 1)" >&2
+    VIOLATIONS=$((VIOLATIONS + 1))
+  fi
+  if grep -rq 'rereview_lease_state' "$COMMANDS_DIR" 2>/dev/null; then
+    echo "HIGH | $COMMANDS_DIR | competing lease helper rereview_lease_state reintroduced (router must reuse the shared Step 1 classification)" >&2
+    VIOLATIONS=$((VIOLATIONS + 1))
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
