@@ -480,6 +480,8 @@ else:
   Skill(skill="{FORGE_SKILL_PREFIX}review-pr", args="{PR_NUMBER} --auto-merge --issue {NUMBER} --base {PR_BASE} --gh-flag {GH_FLAG}")
 ```
 
+**Reviewer ownership (spawn-site rule, `docs/WORK-ON-RUNTIME.md` R6)**: `/review-pr` runs inline in this fork. Under async `Agent` dispatch its domain reviewers are attributed to the root session, so their completion notifications never reach this phase: do not end the turn to wait for them. `/review-pr` Phase 4 waits on the reviewers' current-SHA `FORGE:REVIEW-AGENT` PR comments (bounded), and that GitHub comment, not a notification, is the completion signal. If the call returns with no parseable `REVIEW_RESULT` (empty, running or backgrounded), first re-read the PR and issue: a complete current-SHA reviewer panel plus a `FORGE:REVIEW` verdict means consume that state; otherwise re-invoke `/review-pr` once more with the same args (idempotent: it reuses the current-SHA reviewer comments already posted and dispatches only missing domains). Never review inline.
+
 **OpenCode joined-child contract**: When `FORGE_RUNTIME=opencode` (or an OpenCode runtime marker is present), invoke this load-bearing review through one native foreground `task` instead of treating the `Skill(...)` line as an asynchronous handoff:
 
 ```

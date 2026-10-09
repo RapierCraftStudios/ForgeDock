@@ -58,6 +58,8 @@ When `IS_OPENCODE_RUNTIME=true`, lowercase native `task` is the preferred isolat
 3. **Neither tool is available**: this is a genuine setup defect, not a routing decision — HARD STOP, post a PR/issue comment explaining that no sub-agent dispatch tool is available, add `needs-human`, and exit without posting a verdict. Do NOT fall back to reviewing inline in the orchestrator's own context — inline self-review is strictly weaker than an isolated fresh-context reviewer and is never a substitute for a missing dispatch tool.
 4. **Dispatch pool exhausted or dispatch call fails**: this is distinct from tool absence. If any selected reviewer cannot be launched because the runtime reports a sub-agent/session/pool limit (or any dispatch call fails), HARD STOP immediately. Do not review that domain inline, do not silently reduce the panel, and do not merge. Mark the PR `review-degraded`, add `needs-human` to the linked issue, post `<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity -->` with the selected and completed reviewer counts, then exit without a `FORGE:REVIEW` verdict. A later fresh session must re-run the full selected panel.
 
+**Reviewer completion model (spawn-site ownership)**: `Task` and OpenCode `task` calls are joined, so their return is the completion signal. `Agent` is async-only (no wait parameter): the call returns `Async agent launched`, and when this skill runs inside a forked phase (`work-on:review` / `work-on:remediate`) the reviewers' completion notifications are attributed to the root session, not to this phase (see `docs/WORK-ON-RUNTIME.md` R6). With `{DISPATCH_TOOL}=Agent`, never end the turn waiting for notifications and never treat a missing notification as a missing review: the completion signal is each reviewer's `FORGE:REVIEW-AGENT:{domain}` PR comment for the reviewed head SHA, read by the bounded wait in Phase 4.
+
 **Do not halt to ask the operator which tool to use.** Steps 1–2 are deterministic and fully resolve the common case; only step 3 (both absent) requires a stop, and even then the action is HARD STOP + `needs-human`, not a question back to the operator.
 
 Everywhere this file (and `review-pr-agents.md` / the `review-pr-agents/*.md` persona files) says `Task(...)`, read it as `{DISPATCH_TOOL}(...)` using the value resolved here.
@@ -1601,27 +1603,45 @@ The `protocols.md` file contains the Evidence-Based Review Protocol, Structured 
 8. If Phase 2.5 found broken assumptions, append them to the agent's prompt as "Pre-found integration issues to verify"
 9. Launch via the resolved `{DISPATCH_TOOL}` (see Sub-Agent Dispatch Tool Resolution above) with `model: "{SUBAGENT_MODEL}"` (forge.yaml `agents.subagent_model`, else `agents.default_model`, else `"sonnet"`; fallback `"opus"` if rate-limited). Under OpenCode, emit a top-level `subagent_type: "general"` or `"explore"` in the native `task` argument object and use `background: false` for each reviewer.
 
-**CRITICAL**: Launch ALL selected agents in a SINGLE message using multiple `{DISPATCH_TOOL}` calls. Each agent must persist its finalized body before posting it with `gh pr comment --body-file`, include `<!-- FORGE:REVIEW-AGENT:{lowercase-domain} -->`, and return its verdict and findings to the orchestrator independently of GitHub delivery.
+**Idempotent re-entry (before launching)**: a re-invoked review must reuse reviewers that already posted for the current head instead of re-dispatching the full panel. For each domain in `$SELECTED_AGENTS`, check for an existing `<!-- FORGE:REVIEW-AGENT:{domain} -->` comment whose body also contains `Reviewed-SHA: ${REVIEW_SHA}` (the reviewed head SHA); launch only the domains without one (possibly none), then continue to Phase 4. Comments for a different SHA never count. The selected roster for the panel guard stays the full `$SELECTED_AGENTS` set.
 
-**Dispatch failure and partial-panel guard (MANDATORY):** Count the selected roster before dispatch. If any launch fails, including from pool exhaustion, do not continue with the agents that did launch as a sufficient panel. Immediately create the managed label if necessary, label the PR `review-degraded`, add `needs-human` to the linked issue, post `FORGE:GATE_FAILURE`, and exit without a verdict. After all foreground reviewers return, independently compare their posted `FORGE:REVIEW-AGENT` markers with the selected count; a smaller count is the same hard stop. This catches a reviewer that accepted dispatch but failed before posting.
+```bash
+PENDING_AGENTS=""
+for AGENT in $SELECTED_AGENTS; do
+  AGENT_DOMAIN=$(printf '%s' "$AGENT" | tr '[:upper:]' '[:lower:]')
+  HAVE=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
+    --jq "[.[] | select((.body | contains(\"<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->\")) and (.body | contains(\"Reviewed-SHA: ${REVIEW_SHA}\")))] | .[].id" \
+    2>/dev/null | grep -c . || true)
+  [ "${HAVE:-0}" -lt 1 ] && PENDING_AGENTS="${PENDING_AGENTS} ${AGENT}"
+done
+# Dispatch only $PENDING_AGENTS in the launch step below.
+```
+
+**CRITICAL**: Launch ALL selected agents in a SINGLE message using multiple `{DISPATCH_TOOL}` calls. Each agent must persist its finalized body before posting it with `gh pr comment --body-file`, include `<!-- FORGE:REVIEW-AGENT:{lowercase-domain} -->` plus a `Reviewed-SHA: ${REVIEW_SHA}` line (the full head SHA, outside the marker), and return its verdict and findings to the orchestrator independently of GitHub delivery.
+
+**Dispatch failure and partial-panel guard (MANDATORY):** Count the selected roster before dispatch. If any launch fails, including from pool exhaustion, do not continue with the agents that did launch as a sufficient panel. Immediately create the managed label if necessary, label the PR `review-degraded`, add `needs-human` to the linked issue, post `FORGE:GATE_FAILURE`, and exit without a verdict. After reviewers complete (joined `Task`/`task` return) or, under async `Agent`, after the Phase 4 bounded wait ends, independently compare their posted current-SHA `FORGE:REVIEW-AGENT` markers with the selected count; a smaller count is the same hard stop. This catches a reviewer that accepted dispatch but failed before posting. Under async `Agent` the comparison runs only after the wait, so a reviewer that is merely late is not a false degraded stop.
 
 ```bash
 SELECTED_AGENT_COUNT=$(echo "$SELECTED_AGENTS" | tr ' ' '\n' | grep -c '.')
-ACTUAL_AGENT_COUNT=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-  --jq '[.[].body | scan("<!-- FORGE:REVIEW-AGENT:([a-z-]+) -->") | .[0]] | unique | length' 2>/dev/null || echo 0)
 
-if [ "$DISPATCH_FAILED" = "true" ] || [ "$ACTUAL_AGENT_COUNT" -lt "$SELECTED_AGENT_COUNT" ]; then
+# Shared by the launch-failure stop here and the post-wait count check in Phase 4.
+review_panel_hard_stop() {
   gh label create "review-degraded" --color "E4E669" --description "PR review panel was incomplete; re-review required before deployment. Managed by ForgeDock." --force -R "$REPO" 2>/dev/null || true
   gh pr edit "$PR_NUMBER" -R "$REPO" --add-label "review-degraded" --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
   gh pr comment "$PR_NUMBER" -R "$REPO" --body "<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity -->
 ## Review Blocked: Incomplete Isolated Review Panel
 
 **Selected isolated reviewers**: ${SELECTED_AGENT_COUNT}
-**Completed isolated reviewers**: ${ACTUAL_AGENT_COUNT}
+**Completed isolated reviewers**: ${ACTUAL_AGENT_COUNT:-0}
 
-At least one reviewer could not be dispatched or complete, commonly because the per-session sub-agent pool was exhausted. No inline substitution was performed. Re-run the full panel in a fresh session before merging."
+At least one reviewer could not be dispatched or complete, commonly because the per-session sub-agent pool was exhausted or the bounded wait (${REVIEWER_WAIT_SECS:-900}s) for current-SHA reviewer comments expired. No inline substitution was performed. Re-run the full panel in a fresh session before merging."
   [ -n "${MERGE_ISSUE:-}" ] && gh issue edit "$MERGE_ISSUE" {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
   exit 1
+}
+
+if [ "$DISPATCH_FAILED" = "true" ]; then
+  ACTUAL_AGENT_COUNT=0
+  review_panel_hard_stop
 fi
 ```
 
@@ -1649,32 +1669,58 @@ When substituting `[FILE_LIST]` in each agent's template:
 
 ## Phase 4: Wait for Agents
 
-```bash
-gh pr view "$PR_NUMBER" -R "$REPO" --json comments --jq '.comments | length'
-gh api repos/${REPO}/issues/${PR_NUMBER}/comments --jq '.[-10:] | .[].body[:100]'
+Reviewer completion is read from GitHub, never from notifications (see the "Reviewer completion model" under Sub-Agent Dispatch Tool Resolution). A reviewer counts as complete only when its `<!-- FORGE:REVIEW-AGENT:{domain} -->` comment on the PR also carries `Reviewed-SHA: <current head>`.
 
-# Every dispatched agent must have delivered its own persisted review to GitHub.
-# Do not infer a clean review from a missing comment: its return text may contain
-# findings that could not be posted because GitHub writes were throttled.
+- **Joined tools** (`Task`, OpenCode `task`): the reviewers already returned, so the loop below runs one pass and exits.
+- **Async `Agent`**: bounded wait. Poll every 30s until every selected domain has a current-SHA comment or `REVIEWER_WAIT_SECS` (default 900) elapses. Re-read the PR head each pass; if it moved off `REVIEW_SHA`, stop waiting: the panel reviewed a stale head, so treat it as a stale review and follow the existing stale-review handling (re-run the review for the new head), not an indefinite wait.
+- On timeout the existing hard stop applies unchanged (`review-degraded`, `needs-human`, `FORGE:GATE_FAILURE:TYPE=review-panel-integrity`). Never review the missing domain inline.
+
+```bash
+REVIEWER_WAIT_SECS="${REVIEWER_WAIT_SECS:-900}"
+REVIEWER_POLL_SECS=30
+WAIT_MAX_PASSES=$(( REVIEWER_WAIT_SECS / REVIEWER_POLL_SECS + 1 ))
+[ "$DISPATCH_TOOL" = "Agent" ] || WAIT_MAX_PASSES=1
+
 MISSING_AGENT_COMMENTS=""
-for AGENT in $SELECTED_AGENTS; do
-    AGENT_DOMAIN=$(printf '%s' "$AGENT" | tr '[:upper:]' '[:lower:]')
-    AGENT_COMMENT_COUNT=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-        --jq "[.[] | select(.body | contains(\"<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->\"))] | length" \
-        2>/dev/null || printf '0')
-    if [ "${AGENT_COMMENT_COUNT:-0}" -lt 1 ]; then
-        MISSING_AGENT_COMMENTS="${MISSING_AGENT_COMMENTS} ${AGENT_DOMAIN}"
+HEAD_MOVED=false
+PASS=0
+while [ "$PASS" -lt "$WAIT_MAX_PASSES" ]; do
+    PASS=$(( PASS + 1 ))
+    NOW_SHA=$(gh pr view "$PR_NUMBER" -R "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null || printf '%s' "$REVIEW_SHA")
+    if [ -n "$NOW_SHA" ] && [ "$NOW_SHA" != "$REVIEW_SHA" ]; then
+        HEAD_MOVED=true
+        break
     fi
+    MISSING_AGENT_COMMENTS=""
+    ACTUAL_AGENT_COUNT=0
+    for AGENT in $SELECTED_AGENTS; do
+        AGENT_DOMAIN=$(printf '%s' "$AGENT" | tr '[:upper:]' '[:lower:]')
+        AGENT_COMMENT_COUNT=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
+            --jq "[.[] | select((.body | contains(\"<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->\")) and (.body | contains(\"Reviewed-SHA: ${REVIEW_SHA}\")))] | .[].id" \
+            2>/dev/null | grep -c . || true)
+        if [ "${AGENT_COMMENT_COUNT:-0}" -lt 1 ]; then
+            MISSING_AGENT_COMMENTS="${MISSING_AGENT_COMMENTS} ${AGENT_DOMAIN}"
+        else
+            ACTUAL_AGENT_COUNT=$(( ACTUAL_AGENT_COUNT + 1 ))
+        fi
+    done
+    [ -z "$MISSING_AGENT_COMMENTS" ] && break
+    [ "$PASS" -lt "$WAIT_MAX_PASSES" ] && sleep "$REVIEWER_POLL_SECS"
 done
 
-if [ -n "$MISSING_AGENT_COMMENTS" ]; then
-    echo "REVIEW DELIVERY FAILURE: missing findings comment(s) for:${MISSING_AGENT_COMMENTS}"
-    echo "Use each agent's returned verdict, findings, and durable body path to recover the review."
+if [ "$HEAD_MOVED" = "true" ]; then
+    echo "REVIEW STALE: head moved from ${REVIEW_SHA} to ${NOW_SHA} during the reviewer wait; re-run review-pr for the new head"
     exit 1
+fi
+
+if [ -n "$MISSING_AGENT_COMMENTS" ] || [ "$ACTUAL_AGENT_COUNT" -lt "$SELECTED_AGENT_COUNT" ]; then
+    echo "REVIEW DELIVERY FAILURE: missing current-SHA findings comment(s) for:${MISSING_AGENT_COMMENTS}"
+    echo "Use each agent's returned verdict, findings, and durable body path to recover the review."
+    review_panel_hard_stop
 fi
 ```
 
-**Do NOT proceed until ALL launched agent comments are visible on the PR.** Under OpenCode, each foreground `task(..., background: false)` returns only when that reviewer is complete; verify its corresponding structured PR comment before continuing. A missing comment is an explicit delivery failure: do not synthesize a verdict or treat it as a clean result.
+**Do NOT proceed until ALL selected agents' current-SHA comments are visible on the PR.** Under OpenCode, each foreground `task(..., background: false)` returns only when that reviewer is complete; verify its corresponding structured PR comment before continuing. A missing comment after the wait is an explicit delivery failure: do not synthesize a verdict or treat it as a clean result. Do not infer a clean review from a missing comment: a reviewer's return text may contain findings that could not be posted because GitHub writes were throttled.
 
 ---
 
