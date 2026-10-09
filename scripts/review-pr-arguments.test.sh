@@ -44,6 +44,14 @@ expect "thorough" "12|o/r|-R o/r|||false|true|" "12 --thorough --gh-flag -R o/r"
 expect "keyword staging" "|||||false|false|" "staging"
 expect "keyword open" "|||||false|false|" "open"
 expect "thorough is not a PR ref" "|||||false|true|" "--thorough"
+expect "flag-as-value swallow" "3401|||||true|false|" "3401 --auto-merge --issue --auto-merge"
+expect "non-numeric issue" "3401|||||false|false|" "3401 --issue 1;touch"
+expect "non-numeric issue shape" "3401|||||false|false|" "3401 --issue 12x"
+expect "gh-flag swallows flag" "3401|||||true|false|" "3401 --gh-flag -R --auto-merge"
+expect "bad repo shape" "3401|||||false|false|" "3401 --gh-flag -R a/b/c"
+expect "base followed by flag" "3401|||||false|false|/w" "3401 --base --worktree /w"
+expect "leading-dash worktree" "3401|||||false|false|" "3401 --worktree -x"
+expect "duplicate flags last wins" "3401|||7||false|false|" "3401 --issue 5 --issue 7"
 
 # Test 4: staging numeric test no longer needs the whole string to be numeric
 if grep -q "grep -qE '^\[0-9\]+\$'" "$STAGING"; then bad "staging still tests the whole argument string"; else ok; fi
