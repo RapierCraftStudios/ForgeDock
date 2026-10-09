@@ -362,6 +362,52 @@ if [ -f "$P4_SPEC" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Router claim pre-check must evaluate the claim lease (forge#3431)
+# ---------------------------------------------------------------------------
+
+WORKON_SPEC="$COMMANDS_DIR/work-on.md"
+if [ -f "$WORKON_SPEC" ]; then
+  # "Claim pre-check" paragraph through the line before "Terminal fallback"; full-line HTML comments skipped,
+  # whitespace collapsed, so comment text cannot satisfy the assertions.
+  PRECHECK=$(awk '
+    /^\*\*Terminal fallback\*\*/ { inchk = 0 }
+    /^\*\*Claim pre-check/ { inchk = 1 }
+    inchk {
+      line = $0
+      if (line ~ /^[[:space:]]*<!--.*-->[[:space:]]*$/) next
+      buf = buf " " line
+    }
+    END { print buf }
+  ' "$WORKON_SPEC" | tr -s '[:space:]' ' ' || true)
+  if [ -z "${PRECHECK// /}" ]; then
+    echo "HIGH | $WORKON_SPEC | Claim pre-check section missing" >&2
+    VIOLATIONS=$((VIOLATIONS + 1))
+  else
+    if ! [[ "$PRECHECK" == *rereview_lease_state* || "$PRECHECK" == *REREVIEW_LEASE_SECS* ]]; then
+      echo "HIGH | $WORKON_SPEC | Claim pre-check does not evaluate the claim lease (rereview_lease_state / REREVIEW_LEASE_SECS)" >&2
+      VIOLATIONS=$((VIOLATIONS + 1))
+    fi
+    if ! [[ "$PRECHECK" == *STALE* && "$PRECHECK" == *unparseable* ]]; then
+      echo "HIGH | $WORKON_SPEC | Claim pre-check must route a STALE (expired or unparseable) claim to the terminal fallback" >&2
+      VIOLATIONS=$((VIOLATIONS + 1))
+    fi
+  fi
+fi
+
+if [ -f "$P4_SPEC" ]; then
+  LEASE_FN_COUNT=$(grep -c '^[[:space:]]*rereview_lease_state()[[:space:]]*{' "$P4_SPEC" || true)
+  if [ "${LEASE_FN_COUNT:-0}" -ne 1 ]; then
+    echo "HIGH | $P4_SPEC | rereview_lease_state() must be defined exactly once (found ${LEASE_FN_COUNT:-0})" >&2
+    VIOLATIONS=$((VIOLATIONS + 1))
+  fi
+  LEASE_VAR_COUNT=$(grep -rE '^[[:space:]]*REREVIEW_LEASE_SECS=' "$COMMANDS_DIR" | wc -l | tr -d ' ')
+  if [ "${LEASE_VAR_COUNT:-0}" -ne 1 ]; then
+    echo "HIGH | $COMMANDS_DIR | REREVIEW_LEASE_SECS must be assigned exactly once across commands/ (found ${LEASE_VAR_COUNT:-0})" >&2
+    VIOLATIONS=$((VIOLATIONS + 1))
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 

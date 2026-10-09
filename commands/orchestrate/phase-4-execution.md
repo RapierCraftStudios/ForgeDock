@@ -2356,6 +2356,17 @@ Do not ask the user questions — you are running autonomously in the background
    REREVIEW_CLAIMS='[.[] | select((.body | startswith("<!-- FORGE:REREVIEW_DISPATCHED -->")) and (.body | contains("Head: " + $sha)))]'
    REREVIEW_DONE_FILTER="${REREVIEW_CLAIMS} | length"
    REREVIEW_LEASE_SECS=3600   # a claim older than this with the issue still at workflow:in-review is stale (crashed actor)
+   # Lease state of the EARLIEST claim for $REREVIEW_SHA (shared by the orchestrator and the /work-on router, forge#3431).
+   # stdin: trusted rows (rereview_trusted_rows output); env: REREVIEW_SHA. stdout: exactly CLAIMED (fresh lease) or STALE
+   # (expired, missing, or unparseable `Lease:`; fail closed, an error never reads as fresh).
+   rereview_lease_state() {
+     local ROWS T E
+     ROWS=$(cat)
+     T=$(printf '%s' "$ROWS" | jq -s -r --arg sha "$REREVIEW_SHA" "${REREVIEW_CLAIMS} | .[0].body | capture(\"Lease: (?<t>[0-9T:Z-]+)\").t" 2>/dev/null || true)
+     E=$(printf '%s' "$T" | jq -R 'fromdateiso8601' 2>/dev/null || true)
+     case "$E" in ''|*[!0-9]*) echo "STALE"; return 0 ;; esac
+     if [ $(( $(date -u +%s) - E )) -gt "$REREVIEW_LEASE_SECS" ]; then echo "STALE"; else echo "CLAIMED"; fi
+   }
 
    PRED="$NUM"
    REREVIEW_STATE="NONE"; REREVIEW_PR=""; REREVIEW_SHA=""; REREVIEW_BASE=""
@@ -2391,11 +2402,8 @@ Do not ask the user questions — you are running autonomously in the background
        elif [ "$NEEDS_REREVIEW" -ge 1 ]; then
          # A claim for this head already exists (orchestrator or router). Fresh claim: another actor is reviewing, do
          # nothing. Old claim, issue still at workflow:in-review: the claimant crashed; surface it via the fallback.
-         CLAIM_T=$(printf '%s' "$TRUSTED_RAW" | jq -s -r --arg sha "$REREVIEW_SHA" "${REREVIEW_CLAIMS} | .[0].body | capture(\"Lease: (?<t>[0-9T:Z-]+)\").t" 2>/dev/null || true)
-         CLAIM_EPOCH=$(printf '%s' "$CLAIM_T" | jq -R 'fromdateiso8601' 2>/dev/null || true)
-         if [ -z "$CLAIM_EPOCH" ]; then REREVIEW_STATE="STALE"
-         elif [ $(( $(date -u +%s) - CLAIM_EPOCH )) -gt "$REREVIEW_LEASE_SECS" ]; then REREVIEW_STATE="STALE"
-         else REREVIEW_STATE="CLAIMED"; fi
+         REREVIEW_STATE=$(printf '%s' "$TRUSTED_RAW" | rereview_lease_state)
+         [ "$REREVIEW_STATE" = "CLAIMED" ] || REREVIEW_STATE="STALE"   # anything but a clean CLAIMED fails closed
        elif [ "$NEEDS_ANY" -ge 1 ]; then
          REREVIEW_STATE="STALE"            # trail is for another head (or predates the Head line): never re-dispatch silently
        fi
@@ -2406,7 +2414,7 @@ Do not ask the user questions — you are running autonomously in the background
 
    `REREVIEW_STATE=NONE` means nothing to do (including an issue already at `needs-human`, closed, or not at `workflow:in-review`). `CLAIMED` means another actor holds a fresh claim for this head: do nothing, re-run Step 1 next cycle. `UNREADABLE` fails closed: classify the issue `GATED` this cycle without writing anything, and re-run Step 1 next cycle. `STALE` (an expired or unparseable claim, or a trail that does not match the current head) goes straight to the Step 3 terminal fallback with the reason `stale re-review claim or trail`, without dispatching. Only `PENDING` continues.
 
-   **Step 2 — dispatch (claim first, forge#3413).** The claim is written and read back BEFORE `review-pr` is invoked. A failed post or read-back means NO dispatch (fail closed, terminal fallback), so there is never a wasted duplicate dispatch, and a second actor sees the claim and stands down. Bash blocks are independent executions: run the claim block with the **SHARED HELPERS** (`rereview_trusted_rows`, `REREVIEW_CLAIMS`, `REREVIEW_DONE_FILTER`) from Step 1 pasted verbatim at its top, and `REREVIEW_PR` / `REREVIEW_SHA` set to the values Step 1 printed. The read-back lists the PR's comments by number and applies the same trusted predicate. The EARLIEST trusted claim for the head wins: if the first matching row does not carry this actor's `Claim:` id, another actor claimed first (`LOST`) and this one stands down. Any API failure or zero matching rows is `UNVERIFIED` (fail closed, never `VERIFIED`). The block has no `exit`, so it is safe in a shared or sourced shell:
+   **Step 2 — dispatch (claim first, forge#3413).** The claim is written and read back BEFORE `review-pr` is invoked. A failed post or read-back means NO dispatch (fail closed, terminal fallback), so there is never a wasted duplicate dispatch, and a second actor sees the claim and stands down. Bash blocks are independent executions: run the claim block with the **SHARED HELPERS** (`rereview_trusted_rows`, `REREVIEW_CLAIMS`, `REREVIEW_DONE_FILTER`, `REREVIEW_LEASE_SECS`, `rereview_lease_state`) from Step 1 pasted verbatim at its top, and `REREVIEW_PR` / `REREVIEW_SHA` set to the values Step 1 printed. The read-back lists the PR's comments by number and applies the same trusted predicate. The EARLIEST trusted claim for the head wins: if the first matching row does not carry this actor's `Claim:` id, another actor claimed first (`LOST`) and this one stands down. Any API failure or zero matching rows is `UNVERIFIED` (fail closed, never `VERIFIED`). The block has no `exit`, so it is safe in a shared or sourced shell:
 
    ```bash
    REREVIEW_MARKER="UNVERIFIED"
