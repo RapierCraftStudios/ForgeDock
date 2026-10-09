@@ -581,6 +581,24 @@ bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN_LABEL} --repo-path
    > **Scope-Gap Warning**: The issue spec lists `{PRIMARY_FILE}` but the same pattern exists in `{SIBLING_FILE}:{LINE}`. These were likely introduced together. Recommend widening scope to fix all callers in this PR, or creating follow-up issues for the other files before proceeding.
 
    Do NOT silently exclude sibling matches. The appropriate output when sibling files have the same bug is to flag them explicitly — even if the issue spec's silence appears intentional. The fix-approach validation step (step 8) will confirm whether to widen scope or create follow-ups. <!-- Added: forge#383 -->
+7.6. **Finding Pattern Sweep** *(conditional — eligible when the issue has label `review-finding`, or its body/comments carry a `FORGE:PATTERN` or `FORGE:CLASS` tag)*: Review findings are instances of a defect class. Fixing only the cited instance lets sibling instances resurface in the next review, so sweep the whole repo for the class before settling the affected-file list. Step 7.5 stays the lightweight fallback for non-finding issues; do not repeat it for eligible issues. <!-- Added: forge#3449 -->
+   ```bash
+   REPO="{GH_REPO}"; NUMBER="{NUMBER}"
+   BODY=$(gh issue view "$NUMBER" -R "$REPO" --json body --jq '.body') || BODY=""
+   # Slug comes from model-written text: validate before ANY shell or jq use.
+   SLUG=$(printf '%s\n' "$BODY" | grep -o 'FORGE:PATTERN: [A-Za-z0-9_-]*' | head -1 | sed 's/^FORGE:PATTERN: //')
+   if ! printf '%s' "$SLUG" | grep -qE '^[a-z0-9-]+$'; then
+     echo "PATTERN SWEEP SKIPPED: no valid FORGE:PATTERN slug (expected ^[a-z0-9-]+$) — fall back to step 7.5"
+     SLUG=""
+   fi
+   ```
+   When `SLUG` is non-empty:
+   - **Derive queries** from: the slug itself, the finding's **Prevention** sentence (extract its key identifiers), every path under **Files**, and the symbol, call, or condition cited at the defect site. Use 2-5 queries; each query is a fixed string, not a regex built from untrusted text.
+   - **Search the whole repo** (not just the affected directory): `git grep -n -F -- "$QUERY" | head -31`. Quote the variable, always pass `-F` and `--`. Bound each query with `timeout 30`.
+   - **Hit cap**: record at most 30 hits per query. If a query returns more, record the first 30 and mark the row `truncated` — never silently drop hits.
+   - **Disposition per hit** (MANDATORY, no unlabeled hits): `fix` (same defect class, must be changed in this PR) or `not-affected` with a one-line reason (e.g. already guarded, different semantics). The cited instance is always a `fix` row.
+   - **Degrade, never block**: if the search tooling fails or times out, write `Pattern sweep skipped: {reason}` in the `### Pattern Sweep` section and continue. The sweep is advisory evidence, not a gate.
+   - Every `fix` row MUST appear in `### Affected Files`, and the acceptance spec MUST include a class-wide coverage check plus a check that the added test exercises more than the reviewer's single repro (see Phase 1C).
 8. **Fix-approach validation** — if the issue proposes a fix, don't adopt it as spec. Trace through the target system's middleware, auth, routing, config. Cross-domain: if fix in domain A interacts with domain B, read domain B's files too.
 
 ---
@@ -632,6 +650,7 @@ if [ "$ATTRIBUTION_ANNOTATION_LINK" = "true" ]; then
 fi
 ```
 
+<!-- allowlist:check-spec-bash -->
 ```bash
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 ## Investigation Report
@@ -651,7 +670,14 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 {specific root cause, with file:line references where applicable}
 
 ### Affected Files
-{numbered list of files that need changes}
+{numbered list of files that need changes. For \`review-finding\` issues, include every file with a \`fix\` row from the Pattern Sweep below.}
+
+### Pattern Sweep <!-- Added: forge#3449 -->
+{Emit for \`review-finding\` issues (step 7.6). Omit this section for other issues. One row per query; list individual hits as \`file:line\` in the Hits column. On skip, write \`Pattern sweep skipped: {reason}\`.}
+
+| Query | Hits | Disposition |
+|-------|------|-------------|
+| {fixed-string query} | {count and file:line list, or \`truncated at 30\`} | {fix \| not-affected — reason} |
 
 ### Evidence
 {specific findings — function names, line numbers, behavior observed}
@@ -695,6 +721,8 @@ ACCEPTANCE_CHECK: id=ac-4 type=command target="grep -qE '(>= ?2|2\+)' commands/o
 - `behavior` — assert a runtime/observable behavior via shell command (`target` = shell command, `matcher` = expected output string or regex)
 
 **Self-defeating pipe guideline**: do NOT chain a `-q`/`--quiet` command into a downstream pipe consumer (e.g. `grep -q ... | grep ...`). A `-q` flag suppresses all stdout, so the next command in the pipe always receives empty input and the check can never pass regardless of the actual file content. If a check needs to verify two conditions against the same output, sequence them instead — e.g. `grep -qE 'first' file && grep -qE 'second' file` — or capture the output once and grep the captured variable.
+
+**Class-wide checks (review-finding issues)**: when a Pattern Sweep was recorded, emit at least one `ACCEPTANCE_CHECK` that verifies the fix covers every `fix` row (for example a `command` check that the defective pattern no longer matches anywhere in the swept paths) and one that verifies the added test covers a representative set of instances rather than the reviewer's single repro. <!-- Added: forge#3449 -->
 
 **Skipping**: if the issue has no verifiable acceptance criteria and none can be derived from the recommendation, emit a single sentinel: `ACCEPTANCE_CHECK: id=ac-skip type=skipped target="none" matcher="none" description=No machine-checkable criteria available — human review required`
 ${ANNOTATION_LINK_FOOTER}

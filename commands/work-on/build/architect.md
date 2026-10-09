@@ -562,6 +562,20 @@ If no downstream phases are found (the change is additive only — new sections,
 
 ---
 
+## Phase A2.7: Pattern Sweep Intake *(conditional — skip silently when the investigation report has no `### Pattern Sweep` section)* <!-- Added: forge#3449 -->
+
+For `review-finding` issues the investigator records a `### Pattern Sweep` table (`Query | Hits | Disposition`) listing every instance of the finding's defect class. Treat it as the seed for the plan:
+
+1. Extract the section from `{INVESTIGATION_REPORT}` (the text between `### Pattern Sweep` and the next `###` heading). If it says `Pattern sweep skipped`, note that in the plan and continue.
+2. Every hit with disposition `fix` becomes a **required row** in `### Affected Paths` — the plan must cover the whole class, not only the cited instance. A `truncated` row means the sweep was capped: re-run the query yourself with a higher cap before sequencing.
+3. Every `not-affected` hit needs its justification carried into the plan; if the reason does not hold after you trace the code, promote it to `fix`.
+4. If a blast-radius manifest section exists in this plan format, seed it from the sweep rows; if it does not exist, skip this step (degrade, never block).
+5. Add a Consistency Check: "all `fix` rows in the Pattern Sweep are changed and the test exercises a representative set of instances, not only the reviewer's repro".
+
+The comment below passes the table through in a `### Pattern Sweep` section so the builder reads it from the plan. Absent table means this phase is a no-op.
+
+---
+
 ## Phase A3: Consistency Rules
 
 Identify invariants that ALL affected paths must satisfy. These become the builder's consistency checklist.
@@ -676,6 +690,13 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ARCHITECT -->
 | # | File | Function/Class | Change Required | Why |
 |---|------|----------------|-----------------|-----|
 | 1 | {FILE} | {FUNCTION} | {CHANGE} | {REASON} |
+
+### Pattern Sweep
+<!-- Pass-through from the FORGE:INVESTIGATOR '### Pattern Sweep' table (Phase A2.7).
+     Omit this section when the investigation report had none. -->
+| Query | Hits | Disposition |
+|-------|------|-------------|
+| {QUERY} | {HITS} | {fix | not-affected — reason} |
 
 ### Implementation Order
 1. {FIRST_CHANGE} — {WHY_FIRST}

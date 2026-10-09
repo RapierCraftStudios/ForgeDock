@@ -2049,6 +2049,46 @@ fi
 - Open `review-finding` issue at same file with similar title (3+ shared keywords) → **skip** (likely same finding despite line drift)
 - Closed `review-finding` at same file within ±5 lines → create with regression warning, elevate to `priority:P1`
 
+**Pattern recurrence check (MANDATORY before creating, after the dedup above):** <!-- Added: forge#3449 -->
+
+Title and line-range dedup is instance-keyed, so the same defect class re-filed in a sibling file slips through and fix chains grow. Key recurrence on the `FORGE:PATTERN` slug plus subsystem. **Subsystem** = the first two path segments of the finding's primary file (e.g. `commands/work-on/build/x.md` -> `commands/work-on`); a project may override this in `forge.yaml`. This step runs only for findings that survived the note-disposition classifier above, so it never re-admits a finding the cascade damper already suppressed.
+
+```bash
+REPO="${GH_REPO}"                    # re-declare: each bash call is a fresh shell
+PATTERN_SLUG="pattern-slug"          # the finding's FORGE:PATTERN value
+PRIMARY_FILE="path/to/file.py"       # the finding's primary file
+# Slug is model-written text: validate before any shell or jq use.
+if ! printf '%s' "$PATTERN_SLUG" | grep -qE '^[a-z0-9-]+$'; then
+  echo "RECURRENCE: skipped - invalid slug, filing normally"
+else
+  SUBSYSTEM=$(printf '%s' "$PRIMARY_FILE" | cut -d/ -f1-2)
+  # Open + closed review-finding issues carrying the same slug tag in the same subsystem.
+  PRIOR=$(gh issue list -R "$REPO" --state all --label review-finding --limit 200 \
+    --json number,body,labels 2>/dev/null) || PRIOR="__LOOKUP_FAILED__"
+  if [ "$PRIOR" = "__LOOKUP_FAILED__" ]; then
+    # Fail closed on lookup errors: file the finding normally, never drop it.
+    echo "RECURRENCE: lookup failed - filing as a normal instance issue"
+  else
+    PRIOR_NUMS=$(printf '%s' "$PRIOR" | jq -r --arg slug "$PATTERN_SLUG" --arg sub "$SUBSYSTEM" --argjson self "${MERGE_ISSUE:-0}" '
+      [.[] | select(.number != $self)
+           | select((.labels | map(.name) | index("pattern-class")) | not)
+           | select(.body | contains("FORGE:PATTERN: " + $slug))
+           | select(.body | contains($sub))
+           | .number] | join(" ")')
+    if [ -n "$PRIOR_NUMS" ]; then
+      echo "RECURRENCE: $PATTERN_SLUG seen before in $SUBSYSTEM (#${PRIOR_NUMS// /, #}) - consolidating"
+    fi
+  fi
+fi
+```
+
+When `PRIOR_NUMS` is non-empty (this is the 2nd or later occurrence), consolidate instead of filing another instance issue:
+
+1. Look for an existing class-level issue: open, label `pattern-class`, body containing `<!-- FORGE:PATTERN-CLASS: ${PATTERN_SLUG} ${SUBSYSTEM} -->`. If that lookup errors, stop consolidating and file normally (fail closed).
+2. If found, add one comment to it listing this finding (file, line, PR) unless a comment already contains the same `PR #${PR_NUMBER}` and file (idempotent marker check first). If not found, ensure the label exists (`gh label create pattern-class --force`), then create one class-level issue titled `fix: class-wide ${PATTERN_SLUG} in ${SUBSYSTEM}` that carries the marker above, the Prevention text, and links to every prior instance and this finding. The fix for it must follow the investigate Pattern Sweep.
+3. Comment on this PR (the finding's source) with the class-level issue link, and skip creating the instance issue.
+4. **Never consolidate away** a `Security`-category finding or a REGRESSION (closed-issue match): file it as normal and add the class-level link to its body. Consolidation links findings; it does not drop them.
+
 **For each finding** (that passes dedup), create issue through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") — this preserves the bespoke line-range/title dedup above as a precise pre-check, while `/issue`'s own Phase 2D dedup runs as a coarser second pass:
 ```bash
 FINDING_ISSUE_TITLE="fix: [summary] (review finding — PR #${PR_NUMBER})"
