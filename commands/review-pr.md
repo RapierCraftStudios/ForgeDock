@@ -136,18 +136,42 @@ while [ "$arg_i" -lt "${#ARG_TOKENS[@]}" ]; do
   case "$arg_t" in
     --auto-merge) AUTO_MERGE=true ;;  # flag parse only, no side effect <!-- allowlist:check-command-side-effects -->
     --thorough) THOROUGH=true ;;
-    --issue) arg_i=$((arg_i + 1)); MERGE_ISSUE="${ARG_TOKENS[$arg_i]:-}" ;;
-    --base) arg_i=$((arg_i + 1)); MERGE_BASE="${ARG_TOKENS[$arg_i]:-}" ;;
-    --worktree) arg_i=$((arg_i + 1)); MERGE_WORKTREE="${ARG_TOKENS[$arg_i]:-}" ;;
+    --issue|--base|--worktree)
+      # A value that is empty or starts with "-" is another flag: treat the value as missing, do not consume it
+      arg_v="${ARG_TOKENS[$((arg_i + 1))]:-}"
+      case "$arg_v" in
+        ""|-*) echo "review-pr: $arg_t needs a value, got '${arg_v}' - ignoring" >&2 ;;
+        *) arg_i=$((arg_i + 1))
+           case "$arg_t" in
+             --issue) MERGE_ISSUE="$arg_v" ;;
+             --base) MERGE_BASE="$arg_v" ;;
+             --worktree) MERGE_WORKTREE="$arg_v" ;;
+           esac ;;
+      esac ;;
     --gh-flag)
       # Value is "-R owner/repo" (quoted or not): strip quotes, consume flag + repo tokens
-      arg_i=$((arg_i + 1)); arg_f=$(printf '%s' "${ARG_TOKENS[$arg_i]:-}" | tr -d "\"'")
+      arg_f=$(printf '%s' "${ARG_TOKENS[$((arg_i + 1))]:-}" | tr -d "\"'")
       if [ "$arg_f" = "-R" ] || [ "$arg_f" = "--repo" ]; then
-        arg_i=$((arg_i + 1)); REPO=$(printf '%s' "${ARG_TOKENS[$arg_i]:-}" | tr -d "\"'")
+        arg_i=$((arg_i + 1))
+        arg_v=$(printf '%s' "${ARG_TOKENS[$((arg_i + 1))]:-}" | tr -d "\"'")
+        case "$arg_v" in
+          ""|-*) echo "review-pr: --gh-flag needs owner/repo, got '${arg_v}' - ignoring" >&2 ;;
+          *) arg_i=$((arg_i + 1)); REPO="$arg_v" ;;
+        esac
+      else
+        echo "review-pr: --gh-flag expects -R owner/repo - ignoring" >&2
       fi ;;
   esac
   arg_i=$((arg_i + 1))
 done
+# Shape-check parsed values before anything substitutes them into shell or jq; invalid values are
+# cleared (fail closed: a merge request without a valid issue number returns BLOCKED in Phase 8).
+if [ -n "$MERGE_ISSUE" ] && ! printf '%s' "$MERGE_ISSUE" | grep -qE '^[0-9]+$'; then
+  echo "review-pr: --issue must be numeric - ignoring '$MERGE_ISSUE'" >&2; MERGE_ISSUE=""
+fi
+if [ -n "$REPO" ] && ! printf '%s' "$REPO" | grep -qE '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
+  echo "review-pr: --gh-flag repo must be owner/repo - ignoring '$REPO'" >&2; REPO=""
+fi
 if [ -n "$REPO" ]; then MERGE_GH_FLAG="-R $REPO"; REPO_FLAG="-R $REPO"; fi
 if [ -n "$PR_NUMBER" ] && [ -z "$REPO" ]; then
   REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
