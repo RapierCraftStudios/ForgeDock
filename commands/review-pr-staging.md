@@ -153,10 +153,24 @@ Resolve the staging→main PR number and post a routing marker immediately. This
 # Resolve PR_NUMBER from $ARGUMENTS
 # $ARGUMENTS may be: a PR number, "staging", "feature", or "staging:feature"
 # Only the first token is the PR ref; later tokens are flags (--auto-merge, --issue, ...) <!-- allowlist:check-command-side-effects -->
-PR_ARG="${ARGUMENTS%% *}"
+# The loader substitutes the text before bash parses it, so read it from a quoted heredoc (never a quoted
+# assignment) and reject any string with a quote, backtick, dollar sign, backslash or newline. <!-- Added: forge#3466 -->
+IFS= read -r -d '' STAGING_ARGS_RAW <<'FORGE_ARGS_EOF_7f3a91c4d2b84e60a5c1'
+$ARGUMENTS
+FORGE_ARGS_EOF_7f3a91c4d2b84e60a5c1
+STAGING_ARGS_RAW="${STAGING_ARGS_RAW%$'\n'}"
+STAGING_ARGS_REJECTED=false
+case "$STAGING_ARGS_RAW" in
+  *'"'*|*'`'*|*'$'*|*'\'*|*$'\n'*)
+    echo "review-pr-staging: rejected argument string (contains a quote, backtick, dollar sign, backslash or newline) - nothing parsed" >&2
+    STAGING_ARGS_REJECTED=true; STAGING_ARGS_RAW="" ;;
+esac
+PR_ARG="${STAGING_ARGS_RAW%% *}"
 PR_ARG_NUM=$(printf '%s' "$PR_ARG" | sed -nE 's#^(https?://[^ ]*/pull/)?([0-9]+)$#\2#p')
 if [ -n "$PR_ARG_NUM" ]; then
   PR_NUMBER="$PR_ARG_NUM"
+elif [ "$STAGING_ARGS_REJECTED" = true ]; then
+  PR_NUMBER=""  # rejected string: do not fall through to the open staging PR lookup
 else
   # Find the open staging→main PR
   PR_NUMBER=$(gh pr list ${GH_FLAG} \
