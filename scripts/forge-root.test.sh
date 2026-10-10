@@ -265,5 +265,51 @@ expect "cache-only install resolves newest cached trusted-comments.sh" "$T/tchom
 out=$(cd "$T/tcwork" && env -i PATH="$PATH" HOME="$T/nohome" bash -c 'source "$1"; printf %s "$TRUSTED_SCRIPT"' _ "$T/tc_block.sh" 2>&1)
 expect "no install resolves empty (cwd copy never used)" "" "$out"
 
+# Guard (#3483): the other executable-helper resolvers (classify-finding.sh, amplification-breaker.sh,
+# extract-affected-files.sh) must use the same trusted-install tiers: no "$PWD", no "$REPO_PATH", plugin-cache
+# scan present. Blocks are extracted from the real specs (header '# HELPER_SCRIPT resolver' to 'done <<< "$_tc"',
+# or the resolve_extract_affected_files function) so a drifting copy cannot pass on a hand-written stand-in.
+extract_helper_block() { # file var -> block on stdout
+  awk -v var="$2" '/^[ ]*# HELPER_SCRIPT resolver \(/ && index($0, "(" var ";") {inb=1} inb {sub(/^[ ]+/, ""); print} inb && /^done <<< "\$_tc"$/ {exit}' "$1"
+}
+extract_helper_fn() { # file -> function on stdout
+  awk '/^resolve_extract_affected_files\(\) \{/ {inb=1} inb {print} inb && /^\}$/ {exit}' "$1"
+}
+HR_CLASSIFY="$ROOT/commands/review-pr.md"
+HR_AMP="$ROOT/commands/orchestrate/phase-4-execution.md"
+HR_EX3="$ROOT/commands/orchestrate/phase-3-dependency.md"
+extract_helper_block "$HR_CLASSIFY" CLASSIFY_SCRIPT > "$T/hr_classify.sh"
+extract_helper_block "$HR_AMP" AMP_SCRIPT > "$T/hr_amp.sh"
+extract_helper_fn "$HR_AMP" > "$T/hr_ex4.sh"
+extract_helper_fn "$HR_EX3" > "$T/hr_ex3.sh"
+expect "CLASSIFY_SCRIPT resolver block found" 1 "$(grep -c '^CLASSIFY_SCRIPT=""' "$T/hr_classify.sh")"
+expect "AMP_SCRIPT resolver block found" 1 "$(grep -c '^AMP_SCRIPT=""' "$T/hr_amp.sh")"
+expect "extract-affected-files resolver found in phase-4" 1 "$(grep -c 'resolve_extract_affected_files() {' "$T/hr_ex4.sh")"
+expect "extract-affected-files resolver found in phase-3" 1 "$(grep -c 'resolve_extract_affected_files() {' "$T/hr_ex3.sh")"
+cmp -s "$T/hr_ex3.sh" "$T/hr_ex4.sh" && ok || bad 'resolve_extract_affected_files copies differ between phase-3 and phase-4'
+for hr in classify amp ex3 ex4; do
+  grep -qF 'plugins/cache/forgedock/forgedock' "$T/hr_$hr.sh" && ok || bad "$hr helper resolver lacks the plugin-cache scan"
+  grep -qF 'CLAUDE_CONFIG_DIR' "$T/hr_$hr.sh" && ok || bad "$hr helper resolver lacks CLAUDE_CONFIG_DIR"
+  grep -qE '\$PWD|\$REPO_PATH|\$\{PWD|\$\{REPO_PATH' "$T/hr_$hr.sh" && bad "$hr helper resolver lists the working directory or repo path" || ok
+done
+# no leftover cwd-derived helper tier anywhere under commands/
+if grep -rnE 'PWD/scripts/|^\$PWD$|REPO_PATH/scripts/extract' "$ROOT/commands" >/dev/null 2>&1; then bad 'commands/ still lists a working-directory helper tier'; else ok; fi
+
+# Behavior (#3483): a planted scripts/<helper>.sh in the cwd must never be selected; a cache-only install must resolve.
+mkdir -p "$T/hrwork/scripts" "$T/hrhome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts"
+for h in classify-finding amplification-breaker extract-affected-files; do
+  : > "$T/hrwork/scripts/$h.sh"; : > "$T/hrhome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts/$h.sh"
+done
+CACHE_SCRIPTS="$T/hrhome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts"
+hr_run() { # home blockfile expr
+  (cd "$T/hrwork" && env -i PATH="$PATH" HOME="$1" REPO_PATH="$T/hrwork" bash -c 'source "$1"; '"$3" _ "$2" 2>/dev/null)
+}
+expect "CLASSIFY_SCRIPT: cache-only install resolves (cwd copy ignored)" "$CACHE_SCRIPTS/classify-finding.sh" "$(hr_run "$T/hrhome" "$T/hr_classify.sh" 'printf %s "$CLASSIFY_SCRIPT"')"
+expect "CLASSIFY_SCRIPT: no install resolves empty (cwd copy ignored)" "" "$(hr_run "$T/nohome" "$T/hr_classify.sh" 'printf %s "$CLASSIFY_SCRIPT"')"
+expect "AMP_SCRIPT: cache-only install resolves (cwd copy ignored)" "$CACHE_SCRIPTS/amplification-breaker.sh" "$(hr_run "$T/hrhome" "$T/hr_amp.sh" 'printf %s "$AMP_SCRIPT"')"
+expect "AMP_SCRIPT: no install resolves empty (cwd copy ignored)" "" "$(hr_run "$T/nohome" "$T/hr_amp.sh" 'printf %s "$AMP_SCRIPT"')"
+expect "extract-affected-files: cache-only install resolves (cwd and REPO_PATH copies ignored)" "$CACHE_SCRIPTS/extract-affected-files.sh" "$(hr_run "$T/hrhome" "$T/hr_ex4.sh" 'resolve_extract_affected_files')"
+expect "extract-affected-files: no install resolves nothing (cwd and REPO_PATH copies ignored)" "" "$(hr_run "$T/nohome" "$T/hr_ex4.sh" 'resolve_extract_affected_files')"
+
 echo "forge-root tests: pass=$PASS fail=$FAILN skipped=$SKIPPED"
 [ "$FAILN" -eq 0 ]

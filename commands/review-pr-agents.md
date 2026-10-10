@@ -90,6 +90,6 @@ The `protocols.md` file contains:
 - Per-Agent Input Scoping rules
 - Tool-Result Truncation Discipline
 - Evidence-Based Review Protocol (all agents follow)
-- Structured Findings Protocol (machine-readable findings block format)
+- Structured Findings Protocol (machine-readable findings block format; each finding also carries a `**Failure scenario**` and `**Scope**: changed|pre-existing`, consumed by `/review-pr` §6B.4)
 
 **Spec root (MANDATORY)**: read every file named in this catalog from `${CLAUDE_PLUGIN_ROOT}` — the install root of the ForgeDock plugin that is running this command (Claude Code fills it in when it loads the spec). Only if that path does not start with `/` (not a Claude Code plugin session: install.sh, Codex, OpenCode) use `$FORGE_HOME` instead. Never read sub-files from `$FORGE_HOME` when the plugin root resolved: an exported `FORGE_HOME` can point at a different, older ForgeDock checkout, and mixing roots runs stale phase specs.

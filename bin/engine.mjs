@@ -613,8 +613,11 @@ export async function runIssue(opts) {
     // without ever resolving a PR (e.g. retries exhausted before one existed)
     // has nothing to remediate and stays a plain needs-human stop — it must not
     // fall through to `close`, which would otherwise be the next eligible phase.
+    // The handoff is opt-in: only an explicit escalation signal (outcome.handoff
+    // === true, set by review detectOutcome) permits it. The PR number merely
+    // supplies the remediate argument and is never itself a permission.
     const isRemediationHandoff = outcome.status === "blocked" &&
-      phase.id === "review" && (outcome.reason || "needs-human") === "needs-human" && outcome.handoff !== false &&
+      phase.id === "review" && (outcome.reason || "needs-human") === "needs-human" && outcome.handoff === true &&
       (outcome.outputs?.pr ?? state.pr) != null;
     if (outcome.status === "blocked") {
       emitProgress({ event: "phase_exit", phase: phase.id, status: "blocked", detail: outcome.detail });
@@ -790,8 +793,9 @@ async function runPhaseWithRetry(phase, state, ctx) {
     // for every phase that doesn't opt in — investigate/context/architect/
     // review/close — is unchanged, preserving transient-failure retries).
     if (outcome.retryable === false) {
-      // forge#3521: keep outcome.outputs (e.g. the PR number) so the blocked
-      // commit persists it and isRemediationHandoff can see it.
+      // forge#3521: keep outcome.outputs (e.g. the PR number) for persistence and
+      // forward `handoff` so only an explicit opt-in escalation is honoured; a
+      // no-signal failure carries no handoff and stops at needs-human.
       return { status: "blocked", detail: outcome.detail, outputs: outcome.outputs, handoff: outcome.handoff, usage: lastUsage };
     }
   }
