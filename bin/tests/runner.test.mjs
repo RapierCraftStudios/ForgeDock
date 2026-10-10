@@ -2662,6 +2662,41 @@ describe("extractSessionLimitResetTime (issue #2241)", () => {
   });
 });
 
+describe("extractSessionLimitResetTime bounded cost (issue #3522)", () => {
+  const timed = (input) => {
+    const t0 = Date.now();
+    const result = extractSessionLimitResetTime(input);
+    return { result, ms: Date.now() - t0 };
+  };
+
+  for (const phrase of ["session", "weekly", "usage"]) {
+    const base = `${phrase} limit resets `.repeat(2400);
+    for (const [label, tail] of [["no paren", "x"], ["trailing quote", '"x']]) {
+      it(`${phrase} limit repeated ~50KB (${label}) returns quickly`, () => {
+        const { ms } = timed(base + tail);
+        assert.ok(ms < 250, `took ${ms} ms`);
+      });
+    }
+  }
+
+  it("JSON-envelope one-liner with repeated phrase returns quickly", () => {
+    const env = JSON.stringify({ type: "result", result: "session limit resets ".repeat(2400) + '"x' });
+    const { ms } = timed(env);
+    assert.ok(ms < 250, `took ${ms} ms`);
+  });
+
+  it("genuine message after a long noise prefix still extracts", () => {
+    const noise = "unrelated output line\n".repeat(5000);
+    const out = noise + "You have hit your session limit · resets 3pm (Asia/Kolkata)";
+    assert.equal(extractSessionLimitResetTime(out), "3pm (Asia/Kolkata)");
+  });
+
+  it("parenthesized zone later in input still beats an earlier line fallback", () => {
+    const out = "session limit resets soon\nsession limit resets 3pm (UTC)";
+    assert.equal(extractSessionLimitResetTime(out), "3pm (UTC)");
+  });
+});
+
 describe("runCliBackend attaches resetAt to CLI_BACKEND_FAILED on a session-limit exit (issue #2241)", () => {
   it("sets err.resetAt when the captured output reports a session-limit reset time", () => {
     const spawnFn = () => ({
