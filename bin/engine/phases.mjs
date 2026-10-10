@@ -74,23 +74,80 @@ async function issueMarkers(issue, io) {
   return { blob, comments };
 }
 /**
+ * Trust predicate for FORGE marker comments — mirrors scripts/trusted-comments.sh
+ * exactly (the ONE spec predicate). A comment is trusted when its
+ * `author_association` is in FORGE_TRAIL_TRUSTED_ASSOCIATIONS (default
+ * OWNER,MEMBER,COLLABORATOR; `${VAR-default}` semantics, so an explicitly empty
+ * value trusts no association), OR `user.type` is "Bot", OR `user.login` is in
+ * FORGE_TRAIL_TRUSTED_LOGINS (default empty). Absent author data is untrusted.
+ */
+function isTrustedComment(c) {
+  if (!c || typeof c !== "object") return false;
+  const list = (v) => v.split(",").map((x) => x.trim()).filter((x) => x.length > 0);
+  const assoc = list(process.env.FORGE_TRAIL_TRUSTED_ASSOCIATIONS ?? "OWNER,MEMBER,COLLABORATOR");
+  const logins = list(process.env.FORGE_TRAIL_TRUSTED_LOGINS ?? "");
+  const user = c.user && typeof c.user === "object" ? c.user : {};
+  return assoc.includes(c.author_association || "")
+    || (user.type || "") === "Bot"
+    || logins.includes(user.login || "");
+}
+
+/**
+ * Fetch the issue's comments WITH author fields and return only the bodies of
+ * trusted authors (see isTrustedComment), chronological. Fail closed: a fetch
+ * error, unparsable output, or comments lacking author data yield `[]`.
+ * Used for markers that drive a state-changing branch (size-gate routing).
+ */
+async function trustedCommentBodies(issue, io) {
+  let out;
+  try {
+    out = await io.gh(["api", "--paginate", `repos/{owner}/{repo}/issues/${issue}/comments`,
+      "--jq", ".[] | {body, author_association, user: {login: .user.login, type: .user.type}} | @json"]);
+  } catch { return []; }
+  let items = null;
+  try {
+    const parsed = JSON.parse(out);
+    if (Array.isArray(parsed)) items = parsed;
+  } catch { /* not a single document — try one JSON object per line */ }
+  if (!items) {
+    try { items = String(out || "").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l)); }
+    catch { return []; }
+  }
+  return items.filter(isTrustedComment).map((c) => (typeof c.body === "string" ? c.body : ""));
+}
+
+/** build.md B5.5 Step 2: a SIZE_OVERRIDE needs a non-empty justification — the first non-blank, non-HTML-comment line after the marker line. */
+function overrideHasJustification(body) {
+  const lines = String(body).replace(/\r\n/g, "\n").split("\n");
+  return lines.slice(1).some((l) => l.trim() !== "" && !l.trimStart().startsWith("<!--"));
+}
+
+/**
  * Size-gate routing (build.md B5.5). True only when the latest `FORGE:DIFF_SIZE`
  * says `result: OVER`, carries a `### Split Proposal` (the discriminator against
  * the decompose-loop-guard Blocked exit, which also posts OVER but must not
- * re-enter decompose), and no `FORGE:SIZE_OVERRIDE` comment follows it.
- * Comments are bodies in chronological order (see issueMarkers).
+ * re-enter decompose), and no justified `FORGE:SIZE_OVERRIDE` comment follows it,
+ * and the issue is not already decomposed. `comments` MUST be TRUSTED bodies in
+ * chronological order (see trustedCommentBodies); an untrusted comment never
+ * reaches this function.
  */
 function sizeGateRoutesToDecompose(comments) {
   const gate = PHASE_MARKERS.build.sizeGateMarker;
   const override = PHASE_MARKERS.build.sizeOverrideMarker;
   const starts = (c, m) => typeof c === "string" && c.trimStart().startsWith(`<!-- ${m}`);
+  if (comments.some((c) => starts(c, "FORGE:DECOMPOSED"))) return false;
   let idx = -1;
   for (let i = comments.length - 1; i >= 0; i--) if (starts(comments[i], gate)) { idx = i; break; }
   if (idx < 0) return false;
-  const body = comments[idx];
+  const body = comments[idx].replace(/\r\n/g, "\n");
   const m = /^result:[ \t]*(OK|OVERRIDDEN|OVER)[ \t]*$/m.exec(body);
   if (!m || m[1] !== "OVER" || !/^###[ \t]+Split Proposal\b/m.test(body)) return false;
-  return !comments.slice(idx + 1).some((c) => starts(c, override));
+  return !comments.slice(idx + 1).some((c) => starts(c, override) && overrideHasJustification(c));
+}
+/** Cheap untrusted pre-check: does ANY comment look like an OVER gate? Only then is the trusted fetch worth making. */
+function mayRouteToDecompose(comments) {
+  const gate = PHASE_MARKERS.build.sizeGateMarker;
+  return comments.some((c) => typeof c === "string" && c.trimStart().startsWith(`<!-- ${gate}`) && /^result:[ \t]*OVER[ \t]*\r?$/m.test(c));
 }
 /**
  * Count commits on `branch` ahead of `lane`'s base. On the first build the
@@ -141,7 +198,8 @@ async function commitsAhead(lane, branch, io) {
  * alone for a "structured" parse would be inconsistent and would not close
  * any real gap: the actual trust boundary for issue-comment content is
  * *authorship* (can an untrusted actor post a comment on this issue at all),
- * not *format*. Nothing in this engine validates comment authorship for any
+ * not *format*. Only the size-gate markers (DIFF_SIZE / SIZE_OVERRIDE) are
+ * author-filtered (trustedCommentBodies); nothing else here validates authorship for any
  * marker today, so an actor able to post an arbitrary comment could just as
  * easily post whatever "structured" shape a parser would accept — format
  * hardening alone buys nothing here. If comment-spoofing is ever a concern
@@ -490,7 +548,7 @@ export const PHASES = [
       // build.md says the router (not build) dispatches decompose with no
       // needs-human. Non-retryable by construction: a retry re-measures and
       // re-emits the same exit.
-      if (!complete && sizeGateRoutesToDecompose(comments)) {
+      if (!complete && mayRouteToDecompose(comments) && sizeGateRoutesToDecompose(await trustedCommentBodies(state.issue, io))) {
         return { status: "committed", terminalReason: "decomposed", outputs: branch ? { branch } : {} };
       }
       const detail = `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}`;
