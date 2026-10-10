@@ -529,7 +529,12 @@ Review findings per PR rise steeply with diff size, so an oversized diff is spli
 
 ```bash
 # <Script resolution block from above goes here, verbatim>
-git -C "{WORKTREE_PATH}" fetch origin "{PR_BASE}" 2>/dev/null || true  # fresh origin/base for the merge-base measurement
+# Fresh origin/base for the merge-base measurement: retry with 10s/30s/60s backoff, record whether it ever succeeded
+FETCH_OK=0
+for _delay in 0 10 30 60; do
+  [ "$_delay" -gt 0 ] && sleep "$_delay"
+  if git -C "{WORKTREE_PATH}" fetch origin "{PR_BASE}" 2>/dev/null; then FETCH_OK=1; break; fi
+done
 THRESHOLD=$(yq '.build.diff_size.threshold // 1000' forge.yaml 2>/dev/null || echo 1000)
 EXCLUDES=()
 while IFS= read -r _g; do [ -n "$_g" ] && [ "$_g" != "null" ] && EXCLUDES+=(--exclude-glob "$_g"); done \
@@ -539,12 +544,13 @@ case "$SCRIPT_REF" in
   prose:*) echo "SIZE_GATE: scripts/diff-size.sh unresolved (prose tier) — gate skipped with a note in the FORGE:BUILDER comment" ;;
   *)
     SIZE_OUT=$(bash "${SCRIPT_REF#*:}" --repo-path "{WORKTREE_PATH}" --base "{PR_BASE}" --threshold "$THRESHOLD" ${EXCLUDES[@]+"${EXCLUDES[@]}"}) && SIZE_RC=0 || SIZE_RC=$?
-    echo "SIZE_RC=${SIZE_RC}"; printf '%s\n' "$SIZE_OUT" ;;
+    echo "SIZE_RC=${SIZE_RC}"; echo "FETCH_OK=${FETCH_OK}"; printf '%s\n' "$SIZE_OUT" ;;
 esac
 ```
 
 - Prose tier (script unresolvable) → skip the gate, continue to B6 (the script is part of the install; a missing install must not strand every build).
-- Exit 2, empty output, or output without `diff_lines=`, `threshold=` and `over=` → Blocked exit with blocker `size-gate-unavailable: diff-size.sh failed (rc=<N>)`. Do NOT treat an unmeasurable diff as under threshold.
+- Exit 2, empty output, or output without `diff_lines=`, `threshold=` and `over=`, AND `FETCH_OK=0` (the base fetch failed after the 10s/30s/60s retries, worst case about 100s) → Blocked exit with blocker `github-unavailable: could not fetch origin/{PR_BASE} for diff-size measurement` (transient; the router retry rule applies).
+- The same unmeasurable result with `FETCH_OK=1` (the fetch succeeded, so the script itself failed) → Blocked exit with blocker `size-gate-unavailable: diff-size.sh failed (rc=<N>)`. Either way, do NOT treat an unmeasurable diff as under threshold.
 - Otherwise parse `diff_lines`, `excluded_lines`, `threshold`, `over` and the `top=` lines.
 
 **Step 2 — look up an override** (only when `over=true`). Both lookups are anchored, trust-filtered through `scripts/trusted-comments.sh` (trusted association, Bot, or `FORGE_TRAIL_TRUSTED_LOGINS`), and fail closed:
