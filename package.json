@@ -48,6 +48,7 @@
   ],
   "scripts": {
     "test": "node --test \"bin/tests/**/*.test.mjs\" \"bin/engine/**/*.test.mjs\" \"packages/protocol/test/**/*.test.mjs\"",
+    "test:sh": "bash scripts/run-shell-tests.sh",
     "docs:dev": "vitepress dev docs/site",
     "docs:build": "vitepress build docs/site",
     "docs:preview": "vitepress preview docs/site"

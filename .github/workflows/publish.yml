@@ -96,6 +96,9 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Run shell tests
+        run: npm run test:sh
+
       - name: Determine version bump type
         if: env.SKIP_PUBLISH != 'true'
         run: |
