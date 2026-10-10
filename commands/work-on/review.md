@@ -207,30 +207,66 @@ If `LAST_VERDICT_SHA` is empty (no prior CHANGES REQUESTED verdict found) or dif
 
 ## Phase R1: Pre-Push Ancestry Guard
 
-Before pushing, verify the branch contains no merge commits from branches outside the PR base ancestry. This is the final defense against milestone-code-onto-staging contamination.
+Before pushing, verify the branch contains no merge commits that bring in history from outside the PR base. Merging `origin/{PR_BASE}` itself into the branch (a base sync) is allowed: every non-first parent of each merge in `origin/{PR_BASE}..{BRANCH}` must be an ancestor of `origin/{PR_BASE}`. This is the final defense against milestone-code-onto-staging contamination.
 
 ```bash
+# <Script resolution block from the top of this file, verbatim>
 cd {WORKTREE_PATH}
 # Skip if PR_BASE does not exist on origin yet (new branch — no contamination possible)
 if git ls-remote --exit-code origin {PR_BASE} >/dev/null 2>&1; then
-  MERGE_COMMITS=$(git log --merges {BRANCH} ^origin/{PR_BASE} 2>/dev/null)
-  if [ -n "$MERGE_COMMITS" ]; then
-    echo "PRE-PUSH ANCESTRY GUARD FAILED: merge commits from outside {PR_BASE} detected"
+  git fetch origin {PR_BASE} >/dev/null 2>&1 || true
+  RESOLUTION=$(resolve_script 'check-branch-ancestry'); TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+  if [ "$TIER" = "prose" ]; then
+    # Prose fallback: same checks inline (exit 0 clean, 1 foreign, 2 error). Fails closed: unresolvable refs or git errors give rc=2.
+    ANCESTRY_RC=0; MERGE_COMMITS=""
+    if ! git rev-parse --verify --quiet "origin/{PR_BASE}^{commit}" >/dev/null 2>&1 || ! git rev-parse --verify --quiet "{BRANCH}^{commit}" >/dev/null 2>&1; then
+      ANCESTRY_RC=2
+    elif ! MERGES=$(git rev-list --merges origin/{PR_BASE}..{BRANCH} 2>/dev/null) || ! FP=$(git rev-list --first-parent origin/{PR_BASE}..{BRANCH} 2>/dev/null); then
+      ANCESTRY_RC=2
+    else
+      for M in $MERGES; do
+        PARENTS=$(git rev-list --parents -n 1 "$M" 2>/dev/null) || { ANCESTRY_RC=2; continue; }
+        for P in $(printf '%s\n' "$PARENTS" | cut -d' ' -f3-); do
+          git merge-base --is-ancestor "$P" origin/{PR_BASE} 2>/dev/null; rc=$?
+          if [ "$rc" -eq 1 ]; then MERGE_COMMITS="${MERGE_COMMITS}${M} ${P}
+"; [ "$ANCESTRY_RC" -eq 2 ] || ANCESTRY_RC=1
+          elif [ "$rc" -ne 0 ]; then ANCESTRY_RC=2; fi
+        done
+      done
+      # First-parent line must not carry milestone history (branch cut from a milestone, then base sync).
+      for F in $(git for-each-ref --format='%(refname)' refs/remotes/origin/milestone/ refs/heads/milestone/ 2>/dev/null); do
+        for C in $FP; do
+          git merge-base --is-ancestor "$C" "$F" 2>/dev/null; rc=$?
+          if [ "$rc" -eq 0 ]; then MERGE_COMMITS="${MERGE_COMMITS}${C} first-parent history reachable from ${F}
+"; [ "$ANCESTRY_RC" -eq 2 ] || ANCESTRY_RC=1
+          elif [ "$rc" -ne 1 ]; then ANCESTRY_RC=2; fi
+        done
+      done
+    fi
+  else
+    MERGE_COMMITS=$(bash "$SCRIPT_PATH" {BRANCH} origin/{PR_BASE} 2>&1); ANCESTRY_RC=$?
+  fi
+  if [ "$ANCESTRY_RC" -ne 0 ]; then
+    if [ "$ANCESTRY_RC" -eq 1 ]; then
+      echo "PRE-PUSH ANCESTRY GUARD FAILED: merge commits from outside {PR_BASE} detected"
+    else
+      echo "PRE-PUSH ANCESTRY GUARD FAILED: could not verify ancestry (failing closed)"
+    fi
     gh issue comment {NUMBER} {GH_FLAG} --body "## Pre-Push Ancestry Guard Failed
 
-Branch \`{BRANCH}\` contains merge commits from branches outside the PR base (\`{PR_BASE}\`). Pushing this branch risks contaminating \`{PR_BASE}\` with unapproved code (e.g. milestone code leaking onto staging).
+Branch \`{BRANCH}\` contains merge commits that bring in history from outside the PR base (\`{PR_BASE}\`), or ancestry could not be verified. Pushing this branch risks contaminating \`{PR_BASE}\` with unapproved code (e.g. milestone code leaking onto staging). Merges of \`{PR_BASE}\` itself are allowed and do not trigger this guard.
 
-**Detected merge commits**:
+**Detected merge commits** (merge, foreign parent, subject — or the verification error):
 \`\`\`
 ${MERGE_COMMITS}
 \`\`\`
 
 Do NOT push this branch. Human review required to identify the source of the merge commits and clean the branch history (e.g. via \`git rebase\` to replay only the intended commits onto \`origin/{PR_BASE}\`).
 
-<!-- FORGE:PUSH_BLOCKED -->"
+<!-- FORGE:PUSH_BLOCKED -->" # allowlist:check-command-side-effects
     gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" # allowlist:check-command-side-effects
     # Return REVIEW_RESULT: status: BLOCKED — do not push
-    printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number:\n  pr_url:\n  merged_to:\n  blocker: %s\n' "pre-push ancestry guard failed: merge commits from outside {PR_BASE}"
+    printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number:\n  pr_url:\n  merged_to:\n  blocker: %s\n' "pre-push ancestry guard failed: merge commits from outside {PR_BASE} or ancestry unverifiable"
     exit 1
   fi
 fi
