@@ -2,6 +2,10 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Introduced-line gate no longer demotes CRITICAL/HIGH (#3597, #3598)
+
+`/review-pr` §6B.4 gate 2 never routes a CRITICAL/HIGH finding (any confidence) as `pre-existing`: a new caller of an unchanged unsafe helper is an interaction defect (`protocols.md` §5), so it stays a blocking `review-finding` under §7B criterion 2, including with `--auto-merge`. The pre-existing route now covers MEDIUM and lower only. A file with no `patch` in the PR files API (large or truncated diff) is treated as UNKNOWN and its findings are kept, never routed as pre-existing. Expect slightly more blocking findings on PRs that touch unsafe code through unchanged helpers.
+
 ## Contract out-of-scope items now typed; review demotes matching findings (#3447)
 
 The `### Out of Scope` section of `FORGE:CONTRACT` is no longer free text. It is `None.` or bullets that each name a backticked path and one disposition: `deferred → #N`, `not-affected: <evidence>` or `accepted-risk: <reason>`. A contract that keeps a known-flawed design must list it as `deferred → #N`.
@@ -14,7 +18,7 @@ Action: none. Older contracts with free-text Out of Scope sections are not parse
 
 ## Review provenance gates and noise share (#3452)
 
-`/review-pr` §6B.4 now checks each finding before it can become a `review-finding` issue: the cited line must exist at the reviewed head SHA (else dropped as stale), must be added or changed by the PR diff (else routed as `pre-existing`), and must carry a concrete `**Failure scenario**` (else demoted to a note; CRITICAL/HIGH CONFIRMED are exempt). Pre-existing defects are never counted as this PR's findings or in the amplification ratio; CRITICAL/HIGH or safety-domain ones are filed once with the new `pre-existing` label. The `FORGE:NOTE_DISPOSITION` record gains `findings_dropped_stale`, `findings_preexisting`, `notes_demoted_no_scenario`, and `/pipeline-health` reports a noise share (2E.5).
+`/review-pr` §6B.4 now checks each finding before it can become a `review-finding` issue: the cited line must exist at the reviewed head SHA (else dropped as stale), must be added or changed by the PR diff (else routed as `pre-existing`), and must carry a concrete `**Failure scenario**` (else demoted to a note; CRITICAL/HIGH, any confidence, are exempt). Pre-existing defects are never counted as this PR's findings or in the amplification ratio; only MEDIUM or lower ones are routed this way, and the safety-domain ones are filed once with the new `pre-existing` label. The `FORGE:NOTE_DISPOSITION` record gains `findings_dropped_stale`, `findings_preexisting`, `notes_demoted_no_scenario`, and `/pipeline-health` reports a noise share (2E.5).
 
 Action: run `npx forgedock labels setup` to create the `pre-existing` label (the review also creates it on demand).
 

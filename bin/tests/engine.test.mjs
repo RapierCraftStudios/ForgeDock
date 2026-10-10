@@ -559,6 +559,42 @@ describe("runIssue", () => {
       "no PHASE_FAILED event should be logged for a fail-fast rethrow — it never reaches the retry bookkeeping, matching NO_API_KEY/NO_SDK");
   });
 
+  it("forge#3589: CLI_MAX_TURNS terminates engine-error with detail max-turns, never PHASE_COMMIT, and --retry re-enters the same phase", async () => {
+    const { w, io } = fakeWorld();
+    let buildCalls = 0;
+    let exhaust = true;
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => {
+        buildCalls++;
+        if (exhaust) {
+          throw Object.assign(new Error("claude CLI stopped at the --max-turns limit (40)"),
+            { code: "CLI_MAX_TURNS", numTurns: 41, usage: null });
+        }
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+
+    assert.equal(res.terminalReason, "engine-error");
+    assert.match(res.detail, /max-turns/);
+    assert.equal(buildCalls, 1, "max-turns must not be retried within the run");
+    const events = readLog(dir, 42);
+    assert.ok(!events.some((e) => e.event === "PHASE_COMMIT" && e.phase === "build"),
+      "an exhausted phase must never be committed");
+    const failed = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "build");
+    assert.equal(failed.length, 1);
+    assert.equal(failed[0].turns, 41);
+
+    // --retry reopens the engine-error run and re-enters build (not the next phase).
+    exhaust = false;
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 2000, maxAttempts: 1, retry: true });
+    assert.equal(buildCalls, 2, "--retry must re-run the exhausted build phase");
+  });
+
   it("forge#2241: a session-limit CLI_BACKEND_FAILED carrying resetAt threads the reset time into the engine-error detail", async () => {
     // bin/runner.mjs's runCliBackend() attaches err.resetAt (extracted via
     // extractSessionLimitResetTime()) only when the CLI's captured output

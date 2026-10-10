@@ -285,7 +285,7 @@ fi
 
 # Read current workflow labels
 WORKFLOW_LABEL=""
-for label in "workflow:in-review" "workflow:building" "workflow:ready-to-build" "workflow:investigating"; do
+for label in "workflow:in-review" "workflow:remediating" "workflow:building" "workflow:ready-to-build" "workflow:investigating"; do
   if printf '%s' "$LABELS_JSON" | jq -e --arg l "$label" 'contains([$l])' > /dev/null 2>&1; then
     WORKFLOW_LABEL="$label"
     break
@@ -299,7 +299,7 @@ ACTION=""
 if [ "$REVIEW_STARTED" = "true" ]; then
   PHASE="in-review"
   ACTION="Review in progress — /review-pr handles merge. Check PR state."
-elif [ "$BUILDER_COMPLETE" = "true" ] && [ "$WORKFLOW_LABEL" != "workflow:in-review" ]; then
+elif [ "$BUILDER_COMPLETE" = "true" ] && [ "$WORKFLOW_LABEL" != "workflow:in-review" ] && [ "$WORKFLOW_LABEL" != "workflow:remediating" ]; then
   PHASE="awaiting-pr"
   ACTION="Builder complete. Create PR targeting the classified lane branch."
 elif [ "$BUILDER_PRESENT" = "true" ] && [ "$BUILDER_COMPLETE" = "false" ]; then
