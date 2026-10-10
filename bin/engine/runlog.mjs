@@ -75,6 +75,12 @@ export function deriveState(events) {
       case "RUN_TERMINAL":
         s.terminal = true; s.terminalReason = e.reason ?? "done"; s.v = e.seq;
         break;
+      // forge#3511: an explicit `run-issue --retry` reopens an engine-error
+      // terminal. Bumping `v` makes the local state newer than the stale
+      // remote terminal index so reconcile remirrors instead of re-terminating.
+      case "RUN_REOPEN":
+        s.terminal = false; s.terminalReason = null; s.v = e.seq;
+        break;
       // forge#2524: a session-limit pause is purely informational — it does
       // NOT touch committed/terminal/terminalReason. The phase that hit the
       // pause is, by construction, not yet committed (the engine is about to

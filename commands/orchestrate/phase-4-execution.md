@@ -2119,7 +2119,9 @@ done
 
    **Two distinct resume mechanisms, dispatched by which map resolved the completion (fixed forge#2743)** — `AGENT_ISSUE_MAP`-resolved completions (Agent-spawn path) and `ENGINE_DISPATCH_MAP`-resolved completions (engine-first path) hit `workflow:engine-error` for structurally different reasons and need different recovery:
 
-   **2a. Agent-spawn-dispatched issue (`AGENT_ISSUE_MAP[{NUMBER}]` set)** — unchanged from prior behavior. Resume the same agent in place:
+   **Engine-error with committed phases (forge#3511)**: `forgedock resume-stalled` cannot recover a run that already terminated `engine-error`. The supported recovery is `forgedock run-issue {NUMBER} --lane {PR_BASE} --retry`, which reopens that terminal and resumes at the first uncommitted phase (never reopens needs-human/merged/decomposed runs).
+
+**2a. Agent-spawn-dispatched issue (`AGENT_ISSUE_MAP[{NUMBER}]` set)** — unchanged from prior behavior. Resume the same agent in place:
    ```
    Agent(
      resume=AGENT_ISSUE_MAP[{NUMBER}],
@@ -2228,7 +2230,7 @@ done
        echo "#{NUMBER}: engine fallback claim lost or could not be verified — no duplicate Agent dispatch."
      fi
    else
-     echo "#{NUMBER}: engine-error with non-empty committed state (partial work exists) — NOT auto-falling back. Surfaces via standard stall-detection alert; forgedock resume-stalled remains available for manual/scripted recovery."
+     echo "#{NUMBER}: engine-error with non-empty committed state (partial work exists) — NOT auto-falling back. Resume from the last committed phase with: forgedock run-issue {NUMBER} --lane {PR_BASE} --retry (a session-limit hit during a phase ends here; --retry reopens only engine-error runs)."
    fi
    ```
 

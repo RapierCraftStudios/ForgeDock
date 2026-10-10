@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runIssue } from "../engine.mjs";
+import { runIssue, DEFAULT_SESSION_LIMIT_WAIT_MS } from "../engine.mjs";
 import { readLog, deriveState } from "../engine/runlog.mjs";
 import { serializeState } from "../engine/state.mjs";
 import { VALID_BACKENDS } from "../runner.mjs";
@@ -38,7 +38,8 @@ function fakeWorld() {
       if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
       if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
       if (a.startsWith("issue edit")) { const i = args.indexOf("--body"); if (i>=0) w.body = args[i+1];
-        const j = args.indexOf("--add-label"); if (j>=0) w.labels.push(args[j+1]); return ""; }
+        const j = args.indexOf("--add-label"); if (j>=0) w.labels.push(args[j+1]); 
+        const r = args.indexOf("--remove-label"); if (r>=0) w.labels = w.labels.filter((l) => l !== args[r+1]); return ""; }
       if (a.startsWith("pr list")) return JSON.stringify(w.pr ? [{ number: w.pr }] : []);
       if (a.startsWith("pr view")) return JSON.stringify({ number: w.pr, state: w.prMerged?"MERGED":"OPEN",
         mergedAt: w.prMerged ? "t" : null, labels: w.prNeedsHuman ? [{name:"needs-human"}] : [] });
@@ -2251,5 +2252,174 @@ describe("runIssue — forge#2524: session-limit auto-resume", () => {
         return true;
       },
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// forge#3511: usage-limit default wait + `--retry` reopen of an engine-error run
+// ---------------------------------------------------------------------------
+
+function limitWorldScript(w, { failBuild }) {
+  return {
+    "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+    "work-on/build": () => {
+      const f = failBuild(); if (f) throw f;
+      w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2;
+    },
+    "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+    "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+  };
+}
+
+describe("runIssue — forge#3511: usage-limit default wait", () => {
+  it("pauses for the default wait when usageLimit is set but no reset epoch exists, then resumes", async () => {
+    const { w, io } = fakeWorld();
+    let calls = 0;
+    const script = limitWorldScript(w, {
+      failBuild: () => (++calls === 1
+        ? Object.assign(new Error("claude CLI exited with status 1"), { code: "CLI_BACKEND_FAILED", usageLimit: true })
+        : null),
+    });
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+    const sleepCalls = [];
+    const events = [];
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner,
+      now: () => 1000, maxAttempts: 3, sleep: async (ms) => { sleepCalls.push(ms); },
+      sessionLimitDefaultWaitMs: 1234, onProgress: (e) => events.push(e) });
+    assert.equal(res.terminalReason, "merged");
+    assert.deepEqual(sleepCalls, [1234]);
+    const rl = readLog(dir, 42).filter((e) => e.event === "PHASE_RATE_LIMITED");
+    assert.equal(rl.length, 1);
+    assert.equal(rl[0].resetAt, null);
+    assert.equal(rl[0].waitMs, 1234);
+    assert.match(events.find((e) => e.event === "phase_paused").detail, /reset time unknown/);
+  });
+
+  it("uses DEFAULT_SESSION_LIMIT_WAIT_MS when no override is given", async () => {
+    const { w, io } = fakeWorld();
+    let calls = 0;
+    const script = limitWorldScript(w, {
+      failBuild: () => (++calls === 1
+        ? Object.assign(new Error("x"), { code: "CLI_BACKEND_FAILED", usageLimit: true }) : null),
+    });
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+    const sleepCalls = [];
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner,
+      now: () => 1000, maxAttempts: 3, sleep: async (ms) => { sleepCalls.push(ms); } });
+    assert.deepEqual(sleepCalls, [DEFAULT_SESSION_LIMIT_WAIT_MS]);
+  });
+
+  it("is capped by maxSessionLimitPauses and then terminates engine-error", async () => {
+    const { w, io } = fakeWorld();
+    const script = limitWorldScript(w, {
+      failBuild: () => Object.assign(new Error("x"), { code: "CLI_BACKEND_FAILED", usageLimit: true }),
+    });
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+    const sleepCalls = [];
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner,
+      now: () => 1000, maxAttempts: 1, maxSessionLimitPauses: 2, sleep: async (ms) => { sleepCalls.push(ms); } });
+    assert.equal(res.terminalReason, "engine-error");
+    assert.equal(sleepCalls.length, 2);
+  });
+
+  it("does not pause an ordinary CLI_BACKEND_FAILED without usageLimit", async () => {
+    const { w, io } = fakeWorld();
+    const script = limitWorldScript(w, {
+      failBuild: () => Object.assign(new Error("boom"), { code: "CLI_BACKEND_FAILED" }),
+    });
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+    let slept = false;
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner,
+      now: () => 1000, maxAttempts: 3, sleep: async () => { slept = true; } });
+    assert.equal(res.terminalReason, "engine-error");
+    assert.equal(slept, false);
+  });
+
+  it("rejects an invalid sessionLimitDefaultWaitMs", async () => {
+    const { io } = fakeWorld();
+    await assert.rejects(
+      runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner: async () => ({}),
+        sessionLimitDefaultWaitMs: -1 }),
+      (e) => e.code === "INVALID_SESSION_LIMIT_CONFIG");
+  });
+});
+
+describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
+  async function runToEngineError(w, io) {
+    const script = limitWorldScript(w, {
+      failBuild: () => Object.assign(new Error("boom"), { code: "CLI_BACKEND_FAILED" }),
+    });
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner,
+      now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "engine-error");
+    assert.deepEqual(deriveState(readLog(dir, 42)).committed, ["investigate"]);
+    assert.ok(w.labels.includes("workflow:engine-error"));
+  }
+
+  const okRunner = (w) => {
+    const script = limitWorldScript(w, { failBuild: () => null });
+    return async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+  };
+
+  it("resumes at build, clears the label, and reaches merged", async () => {
+    const { w, io } = fakeWorld();
+    await runToEngineError(w, io);
+    const ran = [];
+    const base = okRunner(w);
+    const runner = async (a) => { ran.push(a.commandName); return base(a); };
+    const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner,
+      now: () => 2000, maxAttempts: 1, retry: true });
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(ran[0], "work-on/build", "must resume at the first uncommitted phase, not re-run investigate");
+    assert.ok(!ran.includes("work-on/investigate"));
+    assert.ok(!w.labels.includes("workflow:engine-error"));
+    const log = readLog(dir, 42);
+    assert.ok(log.some((e) => e.event === "RUN_REOPEN"));
+    assert.deepEqual(deriveState(log).committed, ["investigate", "build", "review", "close"]);
+  });
+
+  it("resumes after a remote-hydrate (no local log)", async () => {
+    const { w, io } = fakeWorld();
+    await runToEngineError(w, io);
+    rmSync(join(dir, "42.jsonl"));
+    const ran = [];
+    const base = okRunner(w);
+    const runner = async (a) => { ran.push(a.commandName); return base(a); };
+    const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner,
+      now: () => 2000, maxAttempts: 1, retry: true });
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(ran[0], "work-on/build");
+  });
+
+  it("without retry an engine-error run stays terminal (back-compat)", async () => {
+    const { w, io } = fakeWorld();
+    await runToEngineError(w, io);
+    let ran = 0;
+    const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io,
+      runner: async () => { ran++; return { status: "complete" }; }, now: () => 2000, maxAttempts: 1 });
+    assert.equal(ran, 0);
+    assert.ok(!readLog(dir, 42).some((e) => e.event === "RUN_REOPEN"));
+    assert.notEqual(res.terminalReason, "merged");
+  });
+
+  it("does not reopen a needs-human terminal and reports not-retryable", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; },
+    };
+    const first = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io,
+      runner: async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; },
+      now: () => 1000, maxAttempts: 1 });
+    assert.equal(first.terminalReason, "needs-human");
+    const before = readLog(dir, 42).length;
+    let ran = 0;
+    const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io,
+      runner: async () => { ran++; return { status: "complete" }; }, now: () => 2000, maxAttempts: 1, retry: true });
+    assert.equal(res.terminalReason, "not-retryable");
+    assert.equal(ran, 0);
+    assert.equal(readLog(dir, 42).length, before, "no events appended for a non-retryable terminal");
   });
 });

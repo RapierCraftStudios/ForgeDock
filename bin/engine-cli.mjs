@@ -337,16 +337,21 @@ export function lastLocalRun(dir) {
  *                          `runCommand()` call; only applies on the "api" backend.
  *                          Omit to keep runner.mjs's default (`FORGEDOCK_MODEL` env
  *                          or its built-in default).
+ *   --retry                Optional (forge#3511). Reopen a run that ended `engine-error`
+ *                          (e.g. a session-limit hit) and resume from its last committed
+ *                          phase. Other terminal reasons are not reopened.
  */
 export async function runFromCli(argv, deps = {}) {
   const issue = parseInt(argv[0], 10);
-  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> --lane <lane>");
+  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> --lane <lane> [--retry]");
   assertOpenCodeNativeRuntime({ operation: "forgedock run-issue" });
   const lane = flag(argv, "--lane");
   if (!lane) throw new Error("--lane is required: e.g. --lane main or --lane staging. No default to prevent accidental production targeting.");
   const repo = flag(argv, "--repo");
   const backend = flag(argv, "--backend");
   const model = flag(argv, "--model");
+  // Boolean flag: only counts at a flag position, never as another flag's value.
+  const retry = argv.some((a, i) => a === "--retry" && !["--lane", "--repo", "--backend", "--model"].includes(argv[i - 1]));
   const io = deps.io ?? makeIo();
   await assertRepoMatchesCwd(io, repo);
   const runIssueFn = deps.runIssue ?? runIssue;
@@ -381,8 +386,13 @@ export async function runFromCli(argv, deps = {}) {
     // Only forwarded when explicitly provided — omitting them preserves
     // runIssue's/runner.mjs's existing defaults (forge#2028).
     ...(backend ? { backend } : {}),
-    ...(model ? { model } : {}) });
+    ...(model ? { model } : {}),
+    ...(retry ? { retry: true } : {}) });
   console.log(`issue #${issue} → ${res.terminalReason}`);
+  if (res.terminalReason === "not-retryable") {
+    console.log(res.detail ?? "run is not retryable");
+    return res;
+  }
   // forge#2175: a non-success termination previously printed nothing beyond
   // the bare reason above — the actual failing phase/attempt/reason was only
   // recoverable by manually reading ~/.forge/runs/{issue}.jsonl and then the
