@@ -2,6 +2,23 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Diff-size gate in `/work-on` build (#3450)
+
+`/work-on` build now measures the changed lines (added plus deleted) after implement stages its changes and before validate commits them. The gate is **on by default at 1000 lines**. Review findings per PR rise steeply with diff size, so an oversized build is split instead of validated.
+
+- **Over the threshold**: the build posts a `FORGE:DIFF_SIZE` comment with a split proposal and exits `NEEDS_DECOMPOSE`; the router then runs `work-on:decompose`.
+- **Tune or disable**: set `build.diff_size.threshold` in `forge.yaml` (`0` disables the gate) and add exclusions with `build.diff_size.exclude_globs`. Lockfiles, `*.min.*`, `*.snap` and vendored/generated directories are excluded by default.
+- **Per-issue bypass**: post a `FORGE:SIZE_OVERRIDE` comment with a non-empty justification on the line after the marker. Only comments from trusted authors count.
+- **No re-decomposition**: an issue that is already a decomposed child, or has `FORGE:DECOMPOSED`, blocks until an override is posted instead of being split again.
+
+Action: if your builds routinely exceed 1000 changed lines, raise `build.diff_size.threshold` or set it to `0`. See the `build` section of [CONFIG.md](CONFIG.md).
+
+## Stricter `review-pr` / `review-pr-staging` argument rejection (#3466)
+
+`/review-pr` and `/review-pr-staging` now reject an argument string as a whole if it contains a quote, backtick, `$`, backslash, newline or tab. Nothing is parsed from a rejected string, so no PR number, repo, merge value or flag survives, and `--auto-merge` is not honoured. `/review-pr-staging` stops with nothing reviewed and nothing posted.
+
+Action: callers must pass `--gh-flag -R owner/repo` unquoted, and must not forward untrusted text (issue titles, comment bodies) into the argument string.
+
 ## Spec bash no longer corrupted by Claude Code argument substitution
 
 Claude Code replaces `$0`..`$9` in a skill body with the invocation's arguments (0-based), so spec bash loaded via `Skill(...)` with args was silently rewritten: `awk '{print $2}'` became `awk '{print --issue}'`, `local AGENT="$1"` became `local AGENT="--auto-merge"`, which broke `/review-pr` agent selection and the CI/deploy comparisons with no error. `${N}`, `$(N)`, `$NF`, `$@`, `$#` and `$10`+ are not substituted.
