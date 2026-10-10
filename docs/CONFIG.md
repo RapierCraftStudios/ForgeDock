@@ -457,6 +457,35 @@ pipeline:
 
 ---
 
+## `engine` (OPTIONAL)
+
+Per-command `--model` and `--max-turns` for the CLI backend (`forgedock run-issue` phases and `forgedock run <command>`). Opt-in: with no keys set, the `claude` invocation is unchanged and uses the CLI's own default model with no turn bound. `forge.yaml` is parsed one level deep, so settings are **flat** keys under `engine:`, named `<key>_model` and `<key>_max_turns`, where `<key>` is the command name with every non-alphanumeric character replaced by `_`.
+
+```yaml
+engine:
+  # work-on/review -> work_on_review (the review phase is the most expensive).
+  work_on_review_model: sonnet
+  work_on_review_max_turns: 120
+
+  # review-pr-staging -> review_pr_staging (non-work-on commands work the same way).
+  review_pr_staging_max_turns: 80
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `<key>_model` | string | No | Model alias (`sonnet`, `opus`, `haiku`) or full model id passed as `--model`. Invalid values are ignored. |
+| `<key>_max_turns` | integer | No | Positive integer passed as `--max-turns`. Invalid values are ignored. |
+
+**Precedence** (model): `engine.<key>_model`, then the run-level model the caller passed explicitly, then omitted. `max_turns` comes only from this section. No defaults ship.
+
+**Version gate**: the flags are added only when the installed `claude --version` supports them (`--max-turns` is hidden from `claude --help`, so help text is never scraped); an unparseable version omits both flags.
+
+**Turn exhaustion**: when `--max-turns` is exhausted the run ends `engine-error` (detail `max-turns`) and the phase is never committed, so `forgedock run-issue --retry` re-enters the same phase. Raise `<key>_max_turns` before retrying. Phase runlog events record `model` and `turns` next to `usage` so a limit can be sized from measured turn counts.
+
+**Commands that use this section**: CLI backend (`runCommand` in `bin/runner.mjs`)
+
+---
+
 ## `build` (OPTIONAL)
 
 Tuning for the `/work-on` build phase. Today it holds the diff-size gate: after the implement phase stages its changes and before validation commits them, the build measures the changed lines (added plus deleted) of the index and any earlier commits against `origin/{base}`, using `scripts/diff-size.sh`. Review findings per PR rise steeply with diff size, so an oversized build is split before it is validated.

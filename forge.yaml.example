@@ -257,6 +257,19 @@ branches:
 #       label: "MCP Server"
 
 # =============================================================================
+# ENGINE (OPTIONAL)
+# Per-command --model / --max-turns for the CLI backend. Flat keys:
+# <command with non-alphanumerics replaced by _>_model / _max_turns.
+# Opt-in; nothing is forwarded unless set. See docs/CONFIG.md -> `engine`.
+# Commands: run-issue, run
+# =============================================================================
+
+# engine:
+#   work_on_review_model: sonnet
+#   work_on_review_max_turns: 120
+#   review_pr_staging_max_turns: 80
+
+# =============================================================================
 # ORCHESTRATION (OPTIONAL)
 # Concurrency limits and cascade admission policy for the /orchestrate batch
 # engine. `max_concurrent` already existed at runtime but was undocumented
