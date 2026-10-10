@@ -10,6 +10,10 @@ to version bumps.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-10
+
+Minor — additive phase-marker fields only (no reserved type removed).
+
 ### Added
 
 - `PHASE_MARKERS.<phase>.header` (additive): the typed-comment header
