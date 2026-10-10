@@ -60,7 +60,7 @@ If no infra context is configured above, derive the deployment model from the ch
    **Scan all consumer locations for references to the old response format:**
    ```bash
    # Identify old response field values from the diff
-   OLD_VALUES=$(gh pr diff [PR_NUMBER] | grep "^\-" | grep -oP '"status"\s*:\s*"\K[^"]+' | sort -u)
+   OLD_VALUES=$(grep "^\-" "$SLICE_FILE" | grep -oE '"status"[[:space:]]*:[[:space:]]*"[^"]+' | sed -E 's/.*"//' | sort -u)
 
    # Search all non-application consumer locations for those old values
    while IFS= read -r val; do
@@ -71,7 +71,7 @@ If no infra context is configured above, derive the deployment model from the ch
    done <<< "$OLD_VALUES"
 
    # Also search for endpoint path references in consumer locations
-   HEALTH_PATHS=$(gh pr diff [PR_NUMBER] | grep "^\+" | grep -oP '@\w+\.(?:get|post)\("\K[^"]+(?:health|status|ping|ready|live|readiness|liveness)[^"]*')
+   HEALTH_PATHS=$(grep "^\+" "$SLICE_FILE" | grep -oE '@[[:alnum:]_]+\.(get|post)\("[^"]+(health|status|ping|ready|live|readiness|liveness)[^"]*' | sed -E 's/^@[[:alnum:]_]+\.(get|post)\("//')
    while IFS= read -r path; do
        [ -z "$path" ] && continue
        grep -rn "$path" scripts/ infra/ .github/ traefik/ docker-compose*.yml 2>/dev/null | grep -v "^Binary"
@@ -159,7 +159,7 @@ If no infra context is configured above, derive the deployment model from the ch
    When a new env var is introduced as a pydantic-settings field with a collection type (`list[str]`, `List[str]`, `set[str]`, `Set[str]`), cross-reference the field's type annotation against the format hint documented in `.env.example`. **pydantic-settings v2 parses collection-type fields via `json.loads()` — they require JSON array format like `["a","b"]`, NOT comma-separated format like `a,b`**. A doc comment saying "comma-separated" on a `list[str]` field is a CONFIRMED HIGH finding — it guarantees a startup crash for anyone following the documented format.
    ```bash
    # Find new pydantic-settings fields with collection types in the diff
-   gh pr diff [PR_NUMBER] | grep "^\+" | grep -E ":\s*(list|List|set|Set)\[str\]" | grep -oP "[A-Z_]{3,}(?=\s*:)" | sort -u
+   grep "^\+" "$SLICE_FILE" | grep -E ":\s*(list|List|set|Set)\[str\]" | grep -oE "[A-Z_]{3,}[[:space:]]*:" | sed -E 's/[[:space:]]*:$//' | sort -u
    # For each field, find its .env.example entry and read the format documentation
    for field in $COLLECTION_FIELDS; do
        echo "=== $field ==="

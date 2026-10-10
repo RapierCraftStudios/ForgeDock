@@ -16,6 +16,8 @@ on:
       - 'scripts/check-spec-bash.test.sh'
       - 'scripts/check-branch-ancestry.sh'
       - 'scripts/check-branch-ancestry.test.sh'
+      - 'scripts/check-blast-radius.sh'
+      - 'scripts/check-blast-radius.test.sh'
       - 'scripts/spec-no-worktree-script.test.sh'
       - 'scripts/review-pr-arguments.test.sh'
       - 'scripts/review-pr-domain-map.test.sh'
@@ -48,6 +50,8 @@ on:
       - 'scripts/check-spec-bash.test.sh'
       - 'scripts/check-branch-ancestry.sh'
       - 'scripts/check-branch-ancestry.test.sh'
+      - 'scripts/check-blast-radius.sh'
+      - 'scripts/check-blast-radius.test.sh'
       - 'scripts/spec-no-worktree-script.test.sh'
       - 'scripts/review-pr-arguments.test.sh'
       - 'scripts/review-pr-domain-map.test.sh'
@@ -315,6 +319,7 @@ jobs:
           # Deliberate hits: put `allowlist:positional-arg` on the same line.
           bash scripts/check-spec-bash.test.sh
           bash scripts/check-branch-ancestry.test.sh
+          bash scripts/check-blast-radius.test.sh
           bash scripts/spec-no-worktree-script.test.sh
           bash scripts/review-pr-arguments.test.sh
           bash scripts/review-pr-domain-map.test.sh

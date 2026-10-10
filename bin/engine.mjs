@@ -565,7 +565,7 @@ export async function runIssue(opts) {
         // "needs-human" — this is the engine/tool breaking, not a genuine
         // human-judgment block (see #2244/#2261). Any other thrown error is
         // a true unexpected crash and keeps propagating unchanged.
-        if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED") {
+        if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED" || e.code === "CLI_MAX_TURNS") {
           // forge#2241: when the runner attached a session-limit reset time
           // (bin/runner.mjs's extractSessionLimitResetTime(), only ever set
           // for a genuine session-limit CLI_BACKEND_FAILED — never
@@ -573,7 +573,9 @@ export async function runIssue(opts) {
           // reading raw logs. Purely additive: the base detail string is
           // unchanged, and this appends nothing when e.resetAt is absent.
           const resetSuffix = e.resetAt ? ` (resets: ${e.resetAt})` : "";
-          const detail = `phase ${phase.id}: ${e.code} - ${e.message}${resetSuffix}`;
+          const detail = e.code === "CLI_MAX_TURNS"
+            ? `phase ${phase.id}: CLI_MAX_TURNS - max-turns exhausted${e.numTurns != null ? ` after ${e.numTurns} turns` : ""}: ${e.message}`
+            : `phase ${phase.id}: ${e.code} - ${e.message}${resetSuffix}`;
           // forge#2240 (review finding): this fail-fast path previously left
           // phase_exit unreported — a caller tailing progress output would see
           // "→ phase X started" and then nothing, dangling exactly on the
@@ -637,7 +639,7 @@ export async function runIssue(opts) {
     }
     // forge#2377: `outcome.usage` is populated by runPhaseWithRetry() below
     // from the injected runner()'s (== bin/runner.mjs's runCommand()) return
-    // value — null when the backend doesn't report usage (CLI backend today)
+    // value — null when the backend doesn't report usage (the CLI backend parses it from its JSON envelope)
     // or when detectOutcome() never ran (this call site is only reached on
     // the "committed" path, so that case doesn't apply here). Kept as a
     // sibling of `outputs` rather than nested inside it, since `outputs` is
@@ -656,6 +658,8 @@ export async function runIssue(opts) {
     const commitReason = blockedReason ?? outcome.terminalReason ?? null;
     appendEvent(dir, issue, {
       event: "PHASE_COMMIT", phase: phase.id, outputs: commitOutputs, usage: outcome.usage ?? null,
+      // forge#3589: model + turn count per phase (null when the backend does not report them).
+      model: outcome.model ?? null, turns: outcome.turns ?? null,
       ...(commitReason ? { terminalReason: commitReason } : {}),
     });
     state = deriveState(readLog(dir, issue));
@@ -733,7 +737,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
   // forge#2377: the last successful attempt's `usage` (from runner()'s ==
   // runCommand()'s resolved value — {input_tokens, output_tokens,
   // cache_creation_input_tokens, cache_read_input_tokens} on the API
-  // backend, or null on the CLI backend / when the field is absent). Reset
+  // backend or the CLI JSON envelope, null when the field is absent). Reset
   // is unnecessary since a thrown attempt never reaches the assignment
   // below — `lastUsage` simply stays whatever the previous successful
   // attempt (if any) set it to, which is correct: it always reflects the
@@ -768,6 +772,16 @@ async function runPhaseWithRetry(phase, state, ctx) {
       // *why* the CLI exited 1 (the quota/session-limit theory in #2244 is
       // unproven) — a deterministic tool crash should not be retried as if
       // transient regardless of its root cause.
+      // forge#3589: CLI_MAX_TURNS (turn bound exhausted) is likewise deterministic and is
+      // NOT a commit: record the exhausted attempt, then rethrow so runIssue terminates
+      // `engine-error` with no PHASE_COMMIT — `--retry` then re-enters this same phase.
+      if (e.code === "CLI_MAX_TURNS") {
+        appendEvent(dir, issue, {
+          event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, maxAttempts,
+          turns: e.numTurns ?? null, usage: e.usage ?? null,
+        });
+        throw e;
+      }
       if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED") throw e;
       // forge#2377: no `usage` field here — the runner threw, so no result
       // (and therefore no usage data) was ever produced for this attempt.
@@ -779,9 +793,12 @@ async function runPhaseWithRetry(phase, state, ctx) {
     }
     allAttemptsThrew = false;
     lastUsage = result?.usage ?? null;
+    // forge#3589: model/turns recorded alongside usage (additive; null when absent).
+    const lastModel = result?.cliModel ?? result?.model ?? null;
+    const lastTurns = result?.turns ?? null;
     const outcome = await phase.detectOutcome(state, io, result);
-    if (outcome.status === "committed" || outcome.status === "blocked") return { ...outcome, usage: lastUsage };
-    appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail, maxAttempts, usage: lastUsage });
+    if (outcome.status === "committed" || outcome.status === "blocked") return { ...outcome, usage: lastUsage, model: lastModel, turns: lastTurns };
+    appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail, maxAttempts, usage: lastUsage, model: lastModel, turns: lastTurns });
     // forge#2176: a phase's detectOutcome can mark a failure as a known,
     // state-derived fixed point — re-running the phase's runner is
     // guaranteed to reproduce the identical failure (e.g. the build phase's

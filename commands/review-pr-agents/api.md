@@ -53,7 +53,7 @@ If no API context is configured above, derive conventions from the changed files
 
     # For each recent PR that touched schema files, check if Literal types changed
     for PR_NUM in $(echo "$RECENT_MERGED" | grep -oP '"number":\s*\K\d+'); do
-      SCHEMA_DIFF=$(gh pr diff "$PR_NUM" 2>/dev/null | grep -E '^\+.*Literal\[|^\-.*Literal\[' | grep -v '^\+\+\+\|^---')
+      SCHEMA_DIFF=$(gh api "repos/{owner}/{repo}/pulls/$PR_NUM/files" --paginate --jq '.[].patch // empty' 2>/dev/null | grep -E '^\+.*Literal\[|^\-.*Literal\[' | grep -v '^\+\+\+\|^---')
       if [ -n "$SCHEMA_DIFF" ]; then
         echo "SCHEMA CHANGE in PR #$PR_NUM (already merged to $BASE):"
         echo "$SCHEMA_DIFF"

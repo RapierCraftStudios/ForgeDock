@@ -73,7 +73,7 @@ grep -rn "@router\.(get\|post\|put\|delete)\|app\.(get\|post\|put\|delete)" [CHA
 - PR description: [PR_BODY]
 
 ## Steps
-1. Read the diff: `gh pr diff [PR_NUMBER]`
+1. Read the pre-supplied diff slice (`$SLICE_FILE`, materialized in Evidence-Based Review Protocol §1) — do NOT re-fetch `gh pr diff [PR_NUMBER]`; use `--name-only` for the file list
 2. For each endpoint, verify auth dependency matches route type
 3. Check ownership queries for multi-tenancy
 4. Search for auth dependency patterns: `grep -rn "get_current\|require_auth\|authenticated_user\|current_user" $(git ls-files | grep -E "router|route|endpoint" | head -20)`

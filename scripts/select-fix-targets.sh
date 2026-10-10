@@ -28,7 +28,8 @@
 #   - Issues with needs-human label
 #   - Issues with a milestone (feature-lane issues — autopilot handles these in Phase 3)
 #   - Issues with terminal workflow labels (workflow:merged, workflow:invalid, workflow:decomposed)
-#   - Issues with active workflow labels (workflow:building, workflow:in-review) — already in flight
+#   - Issues with active workflow labels (workflow:building, workflow:in-review,
+#     workflow:remediating, workflow:awaiting-merge) — already in flight
 #
 # Exit codes: 0 = success (or fixture test passed), 1 = error (or fixture test failed)
 #
@@ -133,11 +134,18 @@ if [ "$FIXTURE_TEST" = "true" ]; then
       "createdAt": "2026-01-01T00:00:00Z",
       "milestone": {"title": "v2.0"},
       "labels": [{"name": "priority:P0"}]
+    },
+    {
+      "number": 107,
+      "createdAt": "2026-01-01T00:00:00Z",
+      "milestone": null,
+      "labels": [{"name": "priority:P0"}, {"name": "workflow:remediating"}]
     }
   ]'
 
   # Expected order: 100, 101, 103, 104
-  # Excluded: 102 (no priority label), 105 (needs-human), 106 (has milestone)
+  # Excluded: 102 (no priority label), 105 (needs-human), 106 (has milestone),
+  #           107 (workflow:remediating)
   EXPECTED="100
 101
 103
@@ -150,7 +158,9 @@ if [ "$FIXTURE_TEST" = "true" ]; then
       (.labels | map(.name) | any(. == "needs-human" or
         . == "workflow:merged" or . == "workflow:invalid" or
         . == "workflow:decomposed" or . == "workflow:building" or
-        . == "workflow:in-review") | not) and
+        . == "workflow:in-review" or
+        . == "workflow:remediating" or
+        . == "workflow:awaiting-merge") | not) and
       # Only include issues with an explicit priority:P* label (unlabeled = excluded)
       (.labels | map(.name) | any(startswith("priority:P")))
     )] |
@@ -174,7 +184,7 @@ if [ "$FIXTURE_TEST" = "true" ]; then
 
   if [ "$ACTUAL" = "$EXPECTED" ]; then
     echo "FIXTURE TEST PASSED — ranking: $(echo "$ACTUAL" | tr '\n' ' ')"
-    echo "Excluded correctly: 102 (unlabeled), 105 (needs-human), 106 (has milestone)"
+    echo "Excluded correctly: 102 (unlabeled), 105 (needs-human), 106 (has milestone), 107 (workflow:remediating)"
     exit 0
   else
     echo "FIXTURE TEST FAILED" >&2
@@ -212,7 +222,9 @@ echo "$ISSUES_JSON" | jq -r --argjson limit "$LIMIT" '
     (.labels | map(.name) | any(. == "needs-human" or
       . == "workflow:merged" or . == "workflow:invalid" or
       . == "workflow:decomposed" or . == "workflow:building" or
-      . == "workflow:in-review") | not) and
+      . == "workflow:in-review" or
+      . == "workflow:remediating" or
+      . == "workflow:awaiting-merge") | not) and
     # Only include issues with an explicit priority:P* label (unlabeled = excluded)
     (.labels | map(.name) | any(startswith("priority:P")))
   )] |
