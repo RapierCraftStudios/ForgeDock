@@ -311,5 +311,28 @@ expect "AMP_SCRIPT: no install resolves empty (cwd copy ignored)" "" "$(hr_run "
 expect "extract-affected-files: cache-only install resolves (cwd and REPO_PATH copies ignored)" "$CACHE_SCRIPTS/extract-affected-files.sh" "$(hr_run "$T/hrhome" "$T/hr_ex4.sh" 'resolve_extract_affected_files')"
 expect "extract-affected-files: no install resolves nothing (cwd and REPO_PATH copies ignored)" "" "$(hr_run "$T/nohome" "$T/hr_ex4.sh" 'resolve_extract_affected_files')"
 
+# Guard (#3636): review-delta.sh takes its trust script ONLY from an explicit absolute --trusted-script. Any
+# commands/ block that resolves review-delta.sh (added by the specs that consume it) must use the trusted-install
+# tiers: plugin-cache scan and CLAUDE_CONFIG_DIR present, no "$PWD"/"$REPO_PATH" tier. Passes with 0 blocks today.
+RD_BLOCKS=0
+while IFS= read -r f; do
+  awk '/^[ ]*# HELPER_SCRIPT resolver \(/ && index($0, "(REVIEW_DELTA_SCRIPT;") {inb=1} inb {sub(/^[ ]+/, ""); print} inb && /^done <<< "\$_tc"$/ {exit}' "$f" > "$T/rd_block.sh"
+  [ -s "$T/rd_block.sh" ] || { bad "review-delta.sh referenced in $f without a canonical REVIEW_DELTA_SCRIPT resolver block"; continue; }
+  RD_BLOCKS=$((RD_BLOCKS + 1))
+  grep -qF 'plugins/cache/forgedock/forgedock' "$T/rd_block.sh" && ok || bad "review-delta resolver in $f lacks the plugin-cache scan"
+  grep -qF 'CLAUDE_CONFIG_DIR' "$T/rd_block.sh" && ok || bad "review-delta resolver in $f lacks CLAUDE_CONFIG_DIR"
+  grep -qE '\$PWD|\$REPO_PATH|\$\{PWD|\$\{REPO_PATH' "$T/rd_block.sh" && bad "review-delta resolver in $f lists the working directory or repo path" || ok
+done < <(grep -rl 'review-delta\.sh' "$ROOT/commands" 2>/dev/null)
+
+# Behavior (#3636): a planted scripts/trusted-comments.sh in the cwd must never be used. Without --trusted-script the
+# resolver fails closed (FULL); a stub that would trust everything cannot change that.
+mkdir -p "$T/rdwork/scripts"
+printf '#!/usr/bin/env bash\ncat >/dev/null\nprintf "%%s\\n" "\\"<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->\\""\n' > "$T/rdwork/scripts/trusted-comments.sh"
+echo '[]' > "$T/rdwork/comments.json"
+out=$(cd "$T/rdwork" && bash "$ROOT/scripts/review-delta.sh" --pr 1 --head 0123456789abcdef0123456789abcdef01234567 --base main --comments-file comments.json --labels "" 2>&1 | sed -n 1p)
+expect "review-delta.sh without --trusted-script prints FULL (cwd trust script ignored)" "FULL" "$out"
+out=$(cd "$T/rdwork" && bash "$ROOT/scripts/review-delta.sh" --pr 1 --head 0123456789abcdef0123456789abcdef01234567 --base main --trusted-script scripts/trusted-comments.sh --comments-file comments.json --labels "" 2>&1 | sed -n 1p)
+expect "review-delta.sh with a relative cwd --trusted-script prints FULL" "FULL" "$out"
+
 echo "forge-root tests: pass=$PASS fail=$FAILN skipped=$SKIPPED"
 [ "$FAILN" -eq 0 ]
