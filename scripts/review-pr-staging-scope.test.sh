@@ -69,5 +69,31 @@ run1() { # severity stub-disposition paths -> prints DISPOSITION
 [ "$(run1 MEDIUM 'ISSUE MEDIUM-CONFIRMED' 'z/out.sh')" = "NOTE out_of_scope" ] && ok || bad "MEDIUM out of scope should be demoted"
 [ "$(run1 MEDIUM 'ISSUE MEDIUM-CONFIRMED' $'z/out.sh\na/in.sh')" = "ISSUE MEDIUM-CONFIRMED" ] && ok || bad "multi-file finding with an in-scope file must not be demoted"
 [ "$(run1 LOW 'ISSUE safety-exemption-auth' 'z/out.sh')" = "ISSUE safety-exemption-auth" ] && ok || bad "safety-exempt finding must not be demoted"
+# (6) behavioural --text-file: each classify_one call must hand the classifier its OWN finding text (a shared/stale text file would leak the first finding into the second)
+cat > "$TMP/classify-textfile.sh" <<'STUB'
+#!/bin/bash
+tf=""
+while [ $# -gt 0 ]; do case "$1" in --text-file) tf="$2"; shift ;; esac; shift; done
+[ -n "$tf" ] && [ -r "$tf" ] || { echo "NOTE no-text-file"; exit 0; }
+if grep -q 'MARKER_TOKEN' "$tf"; then echo "ISSUE saw-marker"; else echo "NOTE no-marker"; fi
+STUB
+mkdir -p "$TMP/sd6"
+run2() { # prints the dispositions of two consecutive classify_one calls in ONE shell
+  ( _SD="$TMP/sd6"; PR_NUMBER=9; CLASSIFY_SCRIPT="$TMP/classify-textfile.sh"; SCOPE_MODE=full; CROSS_PR_FILES=""; UNREVIEWED_FILES=""; DEPLOY_WIRING_FILES=""
+    NOTE_LIST_FILE="$TMP/n6.md"; : > "$NOTE_LIST_FILE"; NOTES_LISTED=0; FINDINGS_FILED=0; OUT_OF_SCOPE=0
+    FINDING_ID=X1; FINDING_SEVERITY=LOW; FINDING_CONFIDENCE=CONFIRMED; FINDING_AGENT=Security; FINDING_BODY=b; FINDING_FILE=z/a.sh; FINDING_PATHS=z/a.sh
+    . "$TMP/fn.sh"
+    FINDING_TITLE="has MARKER_TOKEN"; classify_one; echo "$DISPOSITION"
+    FINDING_TITLE="plain title"; classify_one; echo "$DISPOSITION"
+    FINDING_TITLE="has MARKER_TOKEN"; classify_one; echo "$DISPOSITION" ) 2>&1
+}
+OUT6=$(run2 | tr '\n' '|')
+[ "$OUT6" = "ISSUE saw-marker|NOTE no-marker|ISSUE saw-marker|" ] && ok || bad "each classify_one call must classify its own text-file content (got '$OUT6')"
+if ls "$TMP/sd6"/staging-finding.* >/dev/null 2>&1; then bad "classify_one must remove its per-finding temp file"; else ok; fi
+# (7) fail-closed guard: BLOCKED when the classifier is unresolvable, no manual classifier mode, no classifier-unavailable fallback
+SPEC_MAIN="$(dirname "$SPEC")/review-pr.md"
+for _s in "$SPEC" "$SPEC_MAIN"; do
+  if grep -qE 'BLOCKED.*classifier unavailable' "$_s" && ! grep -qF 'echo script || echo manual' "$_s" && ! grep -qF 'classifier=manual' "$_s" && ! grep -qF 'classifier-unavailable' "$_s"; then ok; else bad "$(basename "$_s") must fail closed with BLOCKED classifier unavailable and have no manual fallback"; fi
+done
 echo "review-pr-staging-scope.test.sh: passed=$PASS failed=$FAILN"
 [ "$FAILN" -eq 0 ]
