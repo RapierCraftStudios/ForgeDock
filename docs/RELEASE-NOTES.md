@@ -2,6 +2,12 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Review provenance gates and noise share (#3452)
+
+`/review-pr` §6B.4 now checks each finding before it can become a `review-finding` issue: the cited line must exist at the reviewed head SHA (else dropped as stale), must be added or changed by the PR diff (else routed as `pre-existing`), and must carry a concrete `**Failure scenario**` (else demoted to a note; CRITICAL/HIGH CONFIRMED are exempt). Pre-existing defects are never counted as this PR's findings or in the amplification ratio; CRITICAL/HIGH or safety-domain ones are filed once with the new `pre-existing` label. The `FORGE:NOTE_DISPOSITION` record gains `findings_dropped_stale`, `findings_preexisting`, `notes_demoted_no_scenario`, and `/pipeline-health` reports a noise share (2E.5).
+
+Action: run `npx forgedock labels setup` to create the `pre-existing` label (the review also creates it on demand).
+
 ## Diff-size gate in `/work-on` build (#3450)
 
 `/work-on` build now measures the changed lines (added plus deleted) after implement stages its changes and before validate commits them. The gate is **on by default at 1000 lines**. Review findings per PR rise steeply with diff size, so an oversized build is split instead of validated.
