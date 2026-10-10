@@ -91,6 +91,31 @@ expect "base merge plus regular commit" "DELTA $R..$HEAD" 1
 mkrepo; R=$(sha HEAD); panel "$R"; g checkout -q -b other; commit o.txt "o" "other"; g checkout -q feat; g merge -q --no-ff -m "merge other" other >/dev/null 2>&1; HEAD=$(sha HEAD)
 expect "merge of a non-base branch" "DELTA $R..$HEAD" 1
 
+# 6c. crafted base "merge" whose second parent is an OLD base commit, reverting a binary file or a mode to that
+# old version. diff-tree --cc is empty (result equals the second parent) and the 3-dot diffs have identical +/-
+# lines, so only the per-path shape (binary blob ids, modes) can tell the PR change moved.
+crafted_merge() { # path-from-old-base -> HEAD = merge(R, old base) taking that one path from the old base
+  local tree; g checkout -q "$OLD_B" -- "$1"; tree=$(g write-tree); HEAD=$(g commit-tree "$tree" -p "$R" -p "$OLD_B" -m "merge main")
+  g reset -q --hard "$HEAD"
+}
+mkrepo; g checkout -q main; printf '\000\001v1' > "$W/img.bin"; g add -A >/dev/null; g commit -q -m "img v1" >/dev/null; OLD_B=$(sha HEAD)
+printf '\000\001v2' > "$W/img.bin"; g add -A >/dev/null; g commit -q -m "img v2" >/dev/null; g push -q origin main; g fetch -q origin
+g checkout -q feat; g merge -q --no-ff -m "sync" origin/main >/dev/null 2>&1; R=$(sha HEAD); panel "$R"
+crafted_merge img.bin
+expect "crafted merge reverting a binary file" "DELTA $R..$HEAD" 1
+# binary the PR already changes, swapped for the old base's bytes: same path set and modes, only the blob id differs
+mkrepo; g checkout -q main; printf '\000\001v1' > "$W/img.bin"; g add -A >/dev/null; g commit -q -m "img v1" >/dev/null; OLD_B=$(sha HEAD)
+printf '\000\001v2' > "$W/img.bin"; g add -A >/dev/null; g commit -q -m "img v2" >/dev/null; g push -q origin main; g fetch -q origin
+g checkout -q feat; g merge -q --no-ff -m "sync" origin/main >/dev/null 2>&1
+printf '\000\001pr' > "$W/img.bin"; g add -A >/dev/null; g commit -q -m "pr img" >/dev/null; R=$(sha HEAD); panel "$R"
+crafted_merge img.bin
+expect "crafted merge swapping a PR-changed binary" "DELTA $R..$HEAD" 1
+mkrepo; g checkout -q main; chmod +x "$W/a.txt"; g add -A >/dev/null; g commit -q -m "a 755" >/dev/null; OLD_B=$(sha HEAD)
+chmod -x "$W/a.txt"; g add -A >/dev/null; g commit -q -m "a 644" >/dev/null; g push -q origin main; g fetch -q origin
+g checkout -q feat; g merge -q --no-ff -m "sync" origin/main >/dev/null 2>&1; R=$(sha HEAD); panel "$R"
+crafted_merge a.txt
+expect "crafted merge reverting a file mode" "DELTA $R..$HEAD" 1
+
 # 7. spec / config changes in the delta -> FULL
 for f in forge.yaml commands/review-pr.md commands/review-pr-agents.md commands/review-pr-agents/x.md scripts/review-delta.sh scripts/trusted-comments.sh; do
   mkrepo; R=$(sha HEAD); panel "$R"; commit "$f" "changed" "touch $f"; HEAD=$(sha HEAD)

@@ -34,6 +34,8 @@
 #     FORGE:REVIEW_ROUTE sha= value is 7 chars and is never a checkpoint. A trusted review-panel-integrity gate
 #     failure / REVIEW_DEGRADED / REVIEW_BLOCKED marker posted after a SHA's first agent body disqualifies it.
 #   - FULL also when forge.yaml, the review specs, this script or the trust script changed in reviewed..head.
+#   - BASE_SYNC_ONLY also needs the per-path diff shape (modes, status, binary blob ids) of both 3-dot diffs
+#     to match: the +/- line comparison cannot see binary content or mode changes.
 #
 # bash 3.2 portable. No `set -e`: every read is captured and status-tested, never behind a pipe.
 
@@ -172,6 +174,19 @@ while IFS= read -r c; do
   if [ -n "$CC" ]; then SYNC=0; break; fi            # conflict-resolution content in the merge
 done <<< "$CHAIN"
 
+# per-path shape of a diff: modes, status and path for every file, plus both blob ids for binary files
+# (whose content the +/- line comparison cannot see). Text blob ids are left out: they shift when base moves.
+diff_shape() {
+  local raw bin
+  raw=$(G diff --raw --no-abbrev --no-renames "$1" 2>/dev/null) || return 1
+  bin=$(G diff --numstat --no-renames "$1" 2>/dev/null) || return 1
+  { printf '%s\n' "$bin"; printf '%s\n' '--RAW--'; printf '%s\n' "$raw"; } | awk -F'\t' '
+    $0 == "--RAW--" { r = 1; next }
+    !r { if ($1 == "-" && $2 == "-") b[$3] = 1; next }
+    $0 == "" { next }
+    { split($1, m, " "); line = m[1] " " m[2] " " m[5] "\t" $2; if ($2 in b) line = line " " m[3] " " m[4]; print line }'
+}
+
 if [ "$SYNC" -eq 1 ]; then
   # the PR's own change must be unchanged: compare the +/- lines of both 3-dot diffs (index/hunk numbers shift
   # when base moves, content lines do not)
@@ -180,7 +195,10 @@ if [ "$SYNC" -eq 1 ]; then
   D_NEW=$(G diff --no-color --no-ext-diff --no-renames -U0 "origin/${BASE}...${HEAD_SHA}" 2>/dev/null); rc=$?
   [ "$rc" -eq 0 ] || full
   L_OLD=$(printf '%s\n' "$D_OLD" | sed -n '/^[-+]/p'); L_NEW=$(printf '%s\n' "$D_NEW" | sed -n '/^[-+]/p')
-  if [ "$L_OLD" = "$L_NEW" ]; then
+  # +/- lines miss binary content and mode changes, so the per-path shape must match too
+  S_OLD=$(diff_shape "origin/${BASE}...${REVIEWED}") || full
+  S_NEW=$(diff_shape "origin/${BASE}...${HEAD_SHA}") || full
+  if [ "$L_OLD" = "$L_NEW" ] && [ "$S_OLD" = "$S_NEW" ]; then
     echo "BASE_SYNC_ONLY ${REVIEWED}"; echo "FULL_ROUNDS=${ROUNDS}"; exit 0
   fi
 fi
