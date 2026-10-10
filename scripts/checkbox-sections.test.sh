@@ -49,4 +49,21 @@ SINGLE_BODY=$'## Acceptance Criteria\n- [ ] complete this work'
   exit 1
 }
 
+PLACEHOLDER_TWO=$'## Acceptance Criteria\n- [ ] real criterion\n\n## Acceptance Criteria\n- [ ] Fix confirmed during investigation.'
+[[ "$(printf '%s\n' "$PLACEHOLDER_TWO" | awk "$CLOSE_CLASSIFIER")" == "1" ]] || {
+  printf 'FAIL: placeholder box must not count as a second checkbox section\n' >&2
+  exit 1
+}
+
+PLACEHOLDER_ONLY=$'## Acceptance Criteria\n- [ ] Fix confirmed during investigation.'
+[[ "$(printf '%s\n' "$PLACEHOLDER_ONLY" | awk "$CLOSE_CLASSIFIER")" == "0" ]] || {
+  printf 'FAIL: placeholder-only body must have zero checkbox sections\n' >&2
+  exit 1
+}
+
+grep -Fq 'Fix confirmed during investigation' "$ROOT/commands/work-on/close.md" || {
+  printf 'FAIL: close.md must exclude the investigate placeholder box\n' >&2
+  exit 1
+}
+
 printf 'PASS: close-path classifier supports setext section boundaries\n'

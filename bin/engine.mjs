@@ -677,7 +677,7 @@ export async function runIssue(opts) {
     // is seen), phase.id is "decompose" — not "investigate" — so this
     // exemption does not apply and the normal terminate() path below fires,
     // ending the run for real.
-    // build also hands off: the B5.5 size gate (NEEDS_DECOMPOSE) reports "decomposed".
+    // build also hands off: the B5.5 size gate (NEEDS_DECOMPOSE) reports "decomposed" (forge#3545).
     const isDecomposeHandoff = (phase.id === "investigate" || phase.id === "build") && terminalReason === "decomposed";
     if (terminalReason && TERMINAL_REASONS.includes(terminalReason) &&
         !isDecomposeHandoff && !isRemediationHandoff)

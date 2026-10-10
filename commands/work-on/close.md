@@ -355,7 +355,9 @@ The `INVARIANT_ANOMALIES` variable is read in Phase C5 (Step 1) and rendered in 
 BODY=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body')
 
 # Count remaining unchecked items BEFORE any edit
-REMAINING_BEFORE=$(printf '%s\n' "$BODY" | grep -cE '^[-*+] \[ \]' || true)
+# The investigate placeholder box ("Fix confirmed during investigation.") is pipeline
+# scaffolding, not a phase: it is excluded from every count below.
+REMAINING_BEFORE=$(printf '%s\n' "$BODY" | grep -vE '^[-*+] \[ \] Fix confirmed during investigation\.?[[:space:]]*$' | grep -cE '^[-*+] \[ \]' || true)
 ```
 
 **If `REMAINING_BEFORE == 0`** (no unchecked items): skip body edit — all items already checked, proceed to add PR reference only:
@@ -379,6 +381,9 @@ Multi-phase issues have **two or more checkbox-bearing sections** — that is, t
 #   unterminated fence keeps the original body so later work is never hidden.
 # - ATX headings and setext underlines both delimit sections. The ATX pattern
 #   avoids awk interval-quantifier variance across awk implementations.
+# - The investigate placeholder box ('- [ ] Fix confirmed during investigation.') never
+#   makes a section checkbox-bearing: it is appended under a synthetic '## Acceptance
+#   Criteria' when the body had none, and would otherwise fake a second phase.
 # - grep -E / awk only — no PCRE. '^#+ ' needs none.
 FENCE_COUNT=$(printf '%s\n' "$BODY" | grep -cE '^(```+|~~~+)' || true)
 if [ $(( ${FENCE_COUNT:-0} % 2 )) -ne 0 ]; then
@@ -390,7 +395,7 @@ fi
 CHECKBOX_SECTIONS=$(printf '%s\n' "$BODY_STRIPPED" | awk '
   /^#+ / { if (in_section && has) n++; in_section=1; has=0; previous=""; next }
   /^(=+|-+)$/ && previous != "" { if (in_section && has) n++; in_section=1; has=0; previous=""; next }
-  { if (in_section && /^[-*+] \[[ xX]\]/) has=1; previous=$(0) }
+  { if (in_section && /^[-*+] \[[ xX]\]/ && $(0) !~ /Fix confirmed during investigation\.?[ \t]*$/) has=1; previous=$(0) }
   END { if (in_section && has) n++; print n+0 }
 ')
 

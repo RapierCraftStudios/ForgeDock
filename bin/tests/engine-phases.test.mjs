@@ -463,6 +463,137 @@ describe("pickPhase", () => {
     });
   });
 
+  // forge#3545: close PHASE_COMPLETE is a committed terminal state, not "issue not closed".
+  describe("close.detectOutcome/reconcile — PHASE_COMPLETE (forge#3545)", () => {
+    const close = PHASES.find(p => p.id === "close");
+    // snapshot for `gh issue view`, comment bodies (oldest-first) for `gh api`
+    const io = (snap, ...bodies) => ({
+      gh: async (args) => (args[0] === "api" ? JSON.stringify(bodies) : JSON.stringify(snap)),
+      git: async () => "0",
+    });
+    const open = { state: "OPEN", labels: [{ name: "workflow:investigating" }] };
+
+    it("OPEN + FORGE:PHASE:COMPLETE -> committed phase-complete, first attempt", async () => {
+      const o = await close.detectOutcome(base, io(open, "<!-- FORGE:PHASE:COMPLETE -->\nPR merged"));
+      assert.equal(o.status, "committed");
+      assert.equal(o.terminalReason, "phase-complete");
+    });
+
+    it("phase-complete is a distinct engine terminal reason (not merged / awaiting-merge)", async () => {
+      const { TERMINAL_REASONS } = await import("../engine/phases.mjs");
+      assert.ok(TERMINAL_REASONS.includes("phase-complete"));
+      const o = await close.detectOutcome(base, io(open, "<!-- FORGE:PHASE:COMPLETE -->"));
+      assert.notEqual(o.terminalReason, "merged");
+      assert.notEqual(o.terminalReason, "awaiting-merge");
+    });
+
+    it("regression: workflow:merged and CLOSED are still evaluated first", async () => {
+      const m = await close.detectOutcome(base, io({ state: "OPEN", labels: [{ name: "workflow:merged" }] }, "<!-- FORGE:PHASE:COMPLETE -->"));
+      assert.equal(m.terminalReason, "merged");
+      const c = await close.detectOutcome(base, io({ state: "CLOSED", labels: [] }, "<!-- FORGE:PHASE:COMPLETE -->"));
+      assert.equal(c.terminalReason, "invalid");
+    });
+
+    it("regression: OPEN with no marker still fails (retryable)", async () => {
+      const o = await close.detectOutcome(base, io(open, "unrelated comment"));
+      assert.equal(o.status, "failed");
+      assert.notEqual(o.retryable, false);
+    });
+
+    it("reconcile: PHASE:COMPLETE satisfied; none not satisfied", async () => {
+      assert.equal((await close.reconcile(base, io(open, "<!-- FORGE:PHASE:COMPLETE -->"))).satisfied, true);
+      assert.equal((await close.reconcile(base, io(open, "nothing"))).satisfied, false);
+    });
+  });
+
+  // forge#3545: BUILDER:COMPLETE is posted before the B6.5 acceptance gate; the newest gate marker wins.
+  describe("build — acceptance gate / NEEDS_DECOMPOSE outcomes (forge#3545)", () => {
+    const build = PHASES.find(p => p.id === "build");
+    const asObj = (c) => ({ body: c, author_association: "OWNER", user: { login: "owner", type: "User" } });
+    const withComments = (...bodies) => ({
+      gh: async (args) => JSON.stringify(args.join(" ").includes("author_association") ? bodies.map(asObj) : bodies),
+      git: async () => "2",
+    });
+    const st = { ...base, branch: "fix/x-42" };
+    const builder = "<!-- FORGE:BUILDER:COMPLETE -->";
+    const failed = "<!-- FORGE:ACCEPTANCE_GATE -->\n<!-- FORGE:ACCEPTANCE_GATE:FAILED -->";
+    const passed = "<!-- FORGE:ACCEPTANCE_GATE -->\n<!-- FORGE:ACCEPTANCE_GATE:PASSED -->";
+
+    it("COMPLETE + commits ahead + newer GATE:FAILED -> failed, retryable false", async () => {
+      const o = await build.detectOutcome(st, withComments(builder, failed));
+      assert.equal(o.status, "failed");
+      assert.equal(o.retryable, false);
+    });
+
+    it("COMPLETE + newer GATE:BLOCKED -> failed, retryable false", async () => {
+      const o = await build.detectOutcome(st, withComments(builder, "<!-- FORGE:ACCEPTANCE_GATE:BLOCKED -->"));
+      assert.equal(o.status, "failed");
+      assert.equal(o.retryable, false);
+    });
+
+    it("COMPLETE + newer FORGE:BUILD_BLOCKED -> failed, retryable false", async () => {
+      const o = await build.detectOutcome(st, withComments(builder, "<!-- FORGE:BUILD_BLOCKED -->\n## Build Blocked"));
+      assert.equal(o.status, "failed");
+      assert.equal(o.retryable, false);
+    });
+
+    it("FAILED then a newer PASSED -> committed", async () => {
+      const o = await build.detectOutcome(st, withComments(builder, failed, passed));
+      assert.equal(o.status, "committed");
+    });
+
+    it("PASSED then a newer FAILED -> failed (order, not presence, decides)", async () => {
+      const o = await build.detectOutcome(st, withComments(builder, passed, failed));
+      assert.equal(o.status, "failed");
+      assert.equal(o.retryable, false);
+    });
+
+    it("COMPLETE + PASSED -> committed (happy path unchanged)", async () => {
+      const o = await build.detectOutcome(st, withComments(builder, passed));
+      assert.equal(o.status, "committed");
+    });
+
+    it("regression: no-marker crash stays failed and retryable", async () => {
+      const o = await build.detectOutcome(st, withComments("<!-- FORGE:CONTRACT -->"));
+      assert.equal(o.status, "failed");
+      assert.notEqual(o.retryable, false);
+    });
+
+    it("reconcile: not satisfied while the newest gate marker blocks; satisfied after PASSED", async () => {
+      assert.equal((await build.reconcile(st, withComments(builder, failed))).satisfied, false);
+      assert.equal((await build.reconcile(st, withComments(builder, failed, passed))).satisfied, true);
+      assert.equal((await build.reconcile(st, withComments(builder))).satisfied, true);
+    });
+
+    const over = "<!-- FORGE:DIFF_SIZE -->\n## Diff Size\n\ndiff_lines: 900\nthreshold: 500\nresult: OVER\n### Split Proposal\n- **A** — a.mjs\n";
+    it("DIFF_SIZE result: OVER without COMPLETE -> committed, terminalReason decomposed", async () => {
+      const o = await build.detectOutcome(st, withComments(over));
+      assert.equal(o.status, "committed");
+      assert.equal(o.terminalReason, "decomposed");
+    });
+
+    it("decompose is picked after a build that committed as decomposed", () => {
+      const next = pickPhase({ ...base, committed: ["investigate", "build"], terminalReason: "decomposed" });
+      assert.equal(next.id, "decompose");
+    });
+
+    it("DIFF_SIZE OVER followed by BUILD_BLOCKED (decompose-loop guard) is a failure, not decomposed", async () => {
+      const o = await build.detectOutcome(st, withComments(over, "<!-- FORGE:BUILD_BLOCKED -->"));
+      assert.equal(o.status, "failed");
+    });
+
+    it("DIFF_SIZE OVERRIDDEN does not decompose", async () => {
+      const o = await build.detectOutcome(st, withComments("<!-- FORGE:DIFF_SIZE -->\nresult: OVERRIDDEN\n"));
+      assert.equal(o.status, "failed");
+    });
+
+    it("DIFF_SIZE OVER with COMPLETE present is not decomposed", async () => {
+      const o = await build.detectOutcome(st, withComments(over, builder));
+      assert.equal(o.status, "committed");
+      assert.notEqual(o.terminalReason, "decomposed");
+    });
+  });
+
   // forge#3499: context/architect are no longer engine phases — work-on/build owns
   // them. Their markers survive as NON-BLOCKING sub-evidence on build's outcome.
   describe("build.detectOutcome — context/architect sub-evidence is non-blocking (forge#3499)", () => {
