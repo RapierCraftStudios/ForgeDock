@@ -73,12 +73,29 @@ jobs:
           /bin/bash scripts/review-pr-arguments.test.sh
           /bin/bash scripts/review-pr-domain-map.test.sh
           /bin/bash scripts/spawn-depth-check.test.sh
+          /bin/bash scripts/diff-size.test.sh
+          /bin/bash scripts/close-dossier-no-main-commit.test.sh
+          /bin/bash scripts/recovery-claim-live.test.sh
+          /bin/bash scripts/issue-dedup.test.sh
+          /bin/bash scripts/checkbox-sections.test.sh
       # macOS runs lint-dispatch-prompt/verify-phase-trail once, under /bin/bash 3.2 above.
       - name: Run lint-dispatch-prompt.test.sh
         if: runner.os != 'macOS'
         run: |
           bash scripts/lint-dispatch-prompt.test.sh
           bash scripts/lint-build-validate-files.test.sh
+      # macOS runs these once, under /bin/bash 3.2 above.
+      - name: Run diff-size / close-dossier / recovery-claim-live / issue-dedup / checkbox-sections tests
+        if: runner.os != 'macOS'
+        run: |
+          bash scripts/diff-size.test.sh
+          bash scripts/close-dossier-no-main-commit.test.sh
+          bash scripts/recovery-claim-live.test.sh
+          bash scripts/issue-dedup.test.sh
+          bash scripts/checkbox-sections.test.sh
+      - name: Run review-pr-gate2.test.sh
+        if: runner.os != 'macOS'
+        run: bash scripts/review-pr-gate2.test.sh
       - name: Run forge-root.test.sh
         run: bash scripts/forge-root.test.sh
       - name: Run forge-root.test.sh bootstrap under zsh (macOS)
@@ -127,6 +144,13 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Ensure jq is available
         run: command -v jq || choco install jq --version 1.7.1 -y --no-progress
+      # close-dossier-no-main-commit.test.sh fails (never skips) its dynamic section without
+      # perl and mikefarah yq v4; Git Bash ships perl, the runner image does not ship yq.
+      - name: Ensure perl and mikefarah yq v4 are available
+        run: |
+          command -v perl
+          grep -q mikefarah <<< "$(yq --version 2>&1)" || choco install yq --version 4.45.1 -y --no-progress
+          yq --version
       - name: Run forge-root.test.sh
         run: bash scripts/forge-root.test.sh
       - name: Run lint-dispatch-prompt.test.sh
@@ -140,6 +164,13 @@ jobs:
           bash scripts/remediate-basesync.test.sh
       - name: Run verify-phase-trail.test.sh
         run: bash scripts/verify-phase-trail.test.sh
+      - name: Run diff-size / close-dossier / recovery-claim-live / issue-dedup / checkbox-sections tests
+        run: |
+          bash scripts/diff-size.test.sh
+          bash scripts/close-dossier-no-main-commit.test.sh
+          bash scripts/recovery-claim-live.test.sh
+          bash scripts/issue-dedup.test.sh
+          bash scripts/checkbox-sections.test.sh
       - name: Run classify-finding.test.sh and amplification-breaker.test.sh
         run: |
           bash scripts/classify-finding.test.sh
