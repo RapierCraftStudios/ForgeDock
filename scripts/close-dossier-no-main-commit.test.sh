@@ -78,7 +78,7 @@ case "$1 $2" in
     printf '<!-- FORGE:BUILDER -->\n### Changes\n- `scripts/foo.sh` changed\n### Next\n' ;;
   "pr view") echo "Test PR title" ;;
   "pr list")
-    echo "pr-list worktrees: $(git -C "$REPO_PATH" worktree list | wc -l)" >> "$GH_LOG"
+    echo "pr-list worktrees: $(git -C "$REPO_PATH" worktree list | wc -l | tr -d ' ')" >> "$GH_LOG"
     [ "${GH_KILL_ON_PR_LIST:-}" = 1 ] && kill -TERM "$(cat "$PIDF")" && sleep 1
     echo "${GH_PR_LIST_URL:-}" ;;
   "pr create") [ "${GH_FAIL_PR_CREATE:-}" = 1 ] && exit 1; echo "https://example.invalid/o/r/pull/9" ;;

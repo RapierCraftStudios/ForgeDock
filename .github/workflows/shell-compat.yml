@@ -139,6 +139,13 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Ensure jq is available
         run: command -v jq || choco install jq --version 1.7.1 -y --no-progress
+      # close-dossier-no-main-commit.test.sh fails (never skips) its dynamic section without
+      # perl and mikefarah yq v4; Git Bash ships perl, the runner image does not ship yq.
+      - name: Ensure perl and mikefarah yq v4 are available
+        run: |
+          command -v perl
+          grep -q mikefarah <<< "$(yq --version 2>&1)" || choco install yq --version 4.44.3 -y --no-progress
+          yq --version
       - name: Run forge-root.test.sh
         run: bash scripts/forge-root.test.sh
       - name: Run lint-dispatch-prompt.test.sh
