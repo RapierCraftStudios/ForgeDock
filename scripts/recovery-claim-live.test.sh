@@ -32,6 +32,9 @@ old_iso()  { date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u
 fx() { echo "$2" > "$TMP_FX/$1.json"; echo "$TMP_FX/$1.json"; }
 claim()   { jq -cn --arg id "$1" --arg t "$2" '{body:("<!-- FORGE:RECOVERY_CLAIM -->\n**Sweep: "+$id+"**\nHolder: /recover-orphans"), updated_at:$t}'; }
 release() { jq -cn --arg id "$1" --arg t "$2" '{body:("<!-- FORGE:RECOVERY_CLAIM_RELEASED -->\n**Sweep: "+$id+"**\nReleased"), updated_at:$t}'; }
+# comment <marker> <second-line> <updated_at>: built by jq, never hand-escaped. macOS /bin/bash 3.2 mis-parses
+# escaped double quotes inside "$(fx name "...")", which turned literal JSON fixtures into invalid JSON there.
+comment() { jq -cn --arg m "$1" --arg l "$2" --arg t "$3" '{body:("<!-- "+$m+" -->\n"+$l), updated_at:$t}'; }
 
 run() { local f="$1"; shift; OUT=$(MOCK_GH_JSON="$f" bash "$CHECK" 7 -R o/r "$@" 2>/dev/null); RC=$?; }
 expect() { # name rc needle
@@ -44,16 +47,16 @@ run "$(fx live "[$(claim sweep-A "$N")]")";                      expect "fresh c
 run "$(fx exp "[$(claim sweep-A "$O")]")";                       expect "expired claim is FREE" 0 "CLAIM: FREE"
 run "$(fx rel "[$(claim sweep-A "$N"), $(release sweep-A "$N")]")"; expect "released claim is FREE" 0 "CLAIM: FREE"
 run "$(fx relother "[$(claim sweep-A "$N"), $(release sweep-B "$N")]")"; expect "release of another sweep does not free the claim" 1 "CLAIM: LIVE sweep-A"
-run "$(fx unkrel "[{\"body\":\"<!-- FORGE:RECOVERY_CLAIM -->\\nno sweep line\",\"updated_at\":\"$N\"}, {\"body\":\"<!-- FORGE:RECOVERY_CLAIM_RELEASED -->\\nno sweep line\",\"updated_at\":\"$N\"}]")"; expect "release with no sweep id does not free an id-less claim" 1 "CLAIM: LIVE unknown"
+run "$(fx unkrel "[$(comment FORGE:RECOVERY_CLAIM "no sweep line" "$N"), $(comment FORGE:RECOVERY_CLAIM_RELEASED "no sweep line" "$N")]")"; expect "release with no sweep id does not free an id-less claim" 1 "CLAIM: LIVE unknown"
 run "$(fx own "[$(claim sweep-A "$N")]")" --exempt-sweep sweep-A; expect "own sweep id is exempt" 0 "CLAIM: FREE"
 run "$(fx other "[$(claim sweep-A "$N")]")" --exempt-sweep sweep-B; expect "other sweep id is not exempt" 1 "CLAIM: LIVE sweep-A"
 run "$(fx two "[$(claim sweep-A "$N"), $(claim sweep-B "$N")]")" --exempt-sweep sweep-A; expect "exempting A still sees live B" 1 "CLAIM: LIVE sweep-B"
-run "$(fx unk "[{\"body\":\"<!-- FORGE:RECOVERY_CLAIM -->\\nno sweep line\",\"updated_at\":\"$N\"}]")" --exempt-sweep sweep-A; expect "claim with no sweep id is never exempt" 1 "CLAIM: LIVE"
-run "$(fx unk2 "[{\"body\":\"<!-- FORGE:RECOVERY_CLAIM -->\\nno sweep line\",\"updated_at\":\"$N\"}]")" --exempt-sweep unknown; expect "--exempt-sweep unknown is rejected" 2 "CLAIM: ERROR"
+run "$(fx unk "[$(comment FORGE:RECOVERY_CLAIM "no sweep line" "$N")]")" --exempt-sweep sweep-A; expect "claim with no sweep id is never exempt" 1 "CLAIM: LIVE"
+run "$(fx unk2 "[$(comment FORGE:RECOVERY_CLAIM "no sweep line" "$N")]")" --exempt-sweep unknown; expect "--exempt-sweep unknown is rejected" 2 "CLAIM: ERROR"
 run "$(fx none '[]')";                                            expect "no comments is FREE" 0 "CLAIM: FREE"
-run "$(fx hb "[{\"body\":\"<!-- FORGE:HEARTBEAT -->\\nPhase 3\",\"updated_at\":\"$N\"}]")"; expect "heartbeat alone is not a recovery claim" 0 "CLAIM: FREE"
-run "$(fx bad "[{\"body\":\"<!-- FORGE:RECOVERY_CLAIM -->\\nno sweep line\",\"updated_at\":\"$N\"}]")"; expect "malformed claim fails closed (LIVE)" 1 "CLAIM: LIVE"
-run "$(fx nodate "[{\"body\":\"<!-- FORGE:RECOVERY_CLAIM -->\\n**Sweep: sweep-A**\",\"updated_at\":\"garbage\"}]")"; expect "unparsable updated_at fails closed (LIVE)" 1 "CLAIM: LIVE"
+run "$(fx hb "[$(comment FORGE:HEARTBEAT "Phase 3" "$N")]")"; expect "heartbeat alone is not a recovery claim" 0 "CLAIM: FREE"
+run "$(fx bad "[$(comment FORGE:RECOVERY_CLAIM "no sweep line" "$N")]")"; expect "malformed claim fails closed (LIVE)" 1 "CLAIM: LIVE"
+run "$(fx nodate "[$(comment FORGE:RECOVERY_CLAIM "**Sweep: sweep-A**" garbage)]")"; expect "unparsable updated_at fails closed (LIVE)" 1 "CLAIM: LIVE"
 
 OUT=$(MOCK_GH_FAIL=1 MOCK_GH_JSON=/dev/null bash "$CHECK" 7 -R o/r 2>/dev/null); RC=$?
 expect "gh outage is ERROR (exit 2)" 2 "CLAIM: ERROR"

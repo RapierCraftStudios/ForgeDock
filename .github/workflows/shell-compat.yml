@@ -92,6 +92,9 @@ jobs:
           bash scripts/recovery-claim-live.test.sh
           bash scripts/issue-dedup.test.sh
           bash scripts/checkbox-sections.test.sh
+      - name: Run review-pr-gate2.test.sh
+        if: runner.os != 'macOS'
+        run: bash scripts/review-pr-gate2.test.sh
       - name: Run forge-root.test.sh
         run: bash scripts/forge-root.test.sh
       - name: Run forge-root.test.sh bootstrap under zsh (macOS)
@@ -144,7 +147,7 @@ jobs:
       - name: Ensure perl and mikefarah yq v4 are available
         run: |
           command -v perl
-          grep -q mikefarah <<< "$(yq --version 2>&1)" || choco install yq --version 4.44.3 -y --no-progress
+          grep -q mikefarah <<< "$(yq --version 2>&1)" || choco install yq --version 4.45.1 -y --no-progress
           yq --version
       - name: Run forge-root.test.sh
         run: bash scripts/forge-root.test.sh
