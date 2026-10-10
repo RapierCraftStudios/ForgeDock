@@ -1461,6 +1461,9 @@ export function runCliBackend({
       usage,
       model: "cli",
       backend: "cli",
+      // forge#3521: the phase's final reply (the CLI envelope's `.result`), so
+      // callers can read its structured `*_RESULT` block. Additive; "" when absent.
+      text: parsedResult ?? "",
     };
   } finally {
     if (tmpDir) {
@@ -2446,6 +2449,11 @@ export async function runCommand(opts = {}) {
         usage,
         model,
         backend: "api",
+        // forge#3521: final assistant text (see the CLI backend's `text`).
+        text: (response.content || [])
+          .filter((blk) => blk.type === "text" && typeof blk.text === "string")
+          .map((blk) => blk.text)
+          .join("\n"),
       };
     }
 

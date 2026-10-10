@@ -246,10 +246,12 @@ describe("pickPhase", () => {
     const review = PHASES.find(p => p.id === "review");
     const reviewState = { ...base, branch: "fix/x-42" };
 
-    function ioFor({ prList, prView }) {
+    function ioFor({ prList, prView, issueLabels }) {
       return {
         gh: async (args) => {
           const cmd = args.join(" ");
+          if (cmd.startsWith("issue view") && issueLabels)
+            return JSON.stringify({ state: "OPEN", labels: issueLabels.map((name) => ({ name })) });
           if (cmd.startsWith("pr list")) return prList;
           if (cmd.startsWith("pr view")) return prView;
           throw new Error(`unexpected gh call: ${cmd}`);
@@ -282,6 +284,57 @@ describe("pickPhase", () => {
       const outcome = await review.detectOutcome(reviewState, io);
       assert.equal(outcome.status, "blocked");
       assert.equal(outcome.outputs.pr, 7);
+    });
+
+    const openUnlabelled = {
+      prList: JSON.stringify([{ number: 7 }]),
+      prView: JSON.stringify({ number: 7, state: "OPEN", mergedAt: null, labels: [] }),
+    };
+    const rr = (body) => ({ text: `done\nREVIEW_RESULT:\n${body}\n` });
+
+    it("forge#3521: needs-human on the issue only (PR unlabelled) -> blocked with outputs.pr", async () => {
+      const io = ioFor({ ...openUnlabelled, issueLabels: ["workflow:in-review", "needs-human"] });
+      const outcome = await review.detectOutcome(reviewState, io);
+      assert.equal(outcome.status, "blocked");
+      assert.equal(outcome.outputs.pr, 7);
+    });
+
+    it("forge#3521: REVIEW_RESULT next: remediate with no labels -> blocked with outputs.pr", async () => {
+      const io = ioFor({ ...openUnlabelled, issueLabels: [] });
+      const outcome = await review.detectOutcome(reviewState, io,
+        rr("  status: NEXT\n  next: remediate\n  remediation: inpr-fix\n  pr_number: 7"));
+      assert.equal(outcome.status, "blocked");
+      assert.equal(outcome.outputs.pr, 7);
+    });
+
+    it("forge#3521: non-digit pr_number is ignored; openPrFor number wins when they disagree", async () => {
+      const io = ioFor({ ...openUnlabelled, issueLabels: [] });
+      let outcome = await review.detectOutcome(reviewState, io,
+        rr("  status: NEXT\n  next: remediate\n  pr_number: 7; rm -rf /"));
+      assert.equal(outcome.status, "blocked");
+      assert.equal(outcome.outputs.pr, 7);
+      outcome = await review.detectOutcome(reviewState, io,
+        rr("  status: NEXT\n  next: remediate\n  pr_number: 99"));
+      assert.equal(outcome.outputs.pr, 7);
+    });
+
+    it("forge#3521: a non-remediate NEXT is not a handoff; no signal -> failed/non-retryable carrying outputs.pr", async () => {
+      const io = ioFor({ ...openUnlabelled, issueLabels: [] });
+      const outcome = await review.detectOutcome(reviewState, io,
+        rr("  status: NEXT\n  next: close\n  pr_number: 7"));
+      assert.equal(outcome.status, "failed");
+      assert.equal(outcome.retryable, false);
+      assert.equal(outcome.outputs.pr, 7);
+      const noText = await review.detectOutcome(reviewState, io);
+      assert.equal(noText.status, "failed");
+    });
+
+    it("forge#3521: only the last REVIEW_RESULT block counts; issue-read failure does not throw", async () => {
+      const io = ioFor(openUnlabelled); // issue view throws
+      const outcome = await review.detectOutcome(reviewState, io, {
+        text: "REVIEW_RESULT:\n  status: NEXT\n  next: remediate\nlater\nREVIEW_RESULT:\n  status: BLOCKED\n  pr_number: 7\n",
+      });
+      assert.equal(outcome.status, "failed");
     });
   });
 

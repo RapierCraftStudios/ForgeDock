@@ -228,6 +228,28 @@ describe("runIssue", () => {
       ["investigate", "build", "review", "remediate"]);
   });
 
+  it("forge#3521: #3511-shaped run (review opens PR, labels the issue only) hands off to remediate with the PR number", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 1; },
+      // PR opened, issue (not PR) labelled needs-human, as commands/work-on/review.md does.
+      "work-on/review": () => { w.pr = 7; w.prNeedsHuman = false; w.labels.push("needs-human"); },
+      "work-on/remediate": () => { w.markers += " FORGE:REMEDIATION:COMPLETE **Re-gate outcome**: HELD-AWAITING-MERGE"; },
+    };
+    const calls = [];
+    const runner = async ({ commandName, args }) => { calls.push({ commandName, args }); script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "awaiting-merge");
+    const rem = calls.find((c) => c.commandName === "work-on/remediate");
+    assert.ok(rem, "remediate must run");
+    assert.equal(String(Array.isArray(rem.args) ? rem.args[0] : rem.args).split(/\s+/)[0], "7");
+    const s = deriveState(readLog(dir, 42));
+    assert.equal(s.pr, 7);
+    assert.deepEqual(s.committed, ["investigate", "build", "review", "remediate"]);
+  });
+
   it("C1: commitsAhead swallows a git rejection on first build (no ref yet) and still drives build to merged", async () => {
     const { w, io } = fakeWorld();
     // Simulate the real first-build failure mode: `git rev-list origin/<lane>..<branch>`

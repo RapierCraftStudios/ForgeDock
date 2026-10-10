@@ -422,12 +422,23 @@ export const PHASES = [
       const pr = await openPrFor(state, io);   // adopt an existing PR instead of opening a second
       return pr ? { satisfied: false, outputs: { pr } } : { satisfied: false };
     },
-    async detectOutcome(state, io) {
+    async detectOutcome(state, io, result) {
       const pr = await prStatusFor(state, io);
       if (!pr) return { status: "failed", detail: "no PR created" };
       if (pr.merged) return { status: "committed", outputs: { pr: pr.number } };
-      if (pr.needsHuman) return { status: "blocked", detail: "review escalated", outputs: { pr: pr.number } };
-      return { status: "failed", detail: "PR open, not merged", retryable: false };
+      // forge#3521: the spec (commands/work-on/review.md) signals an in-PR fix
+      // by labelling the ISSUE needs-human and returning REVIEW_RESULT
+      // `status: NEXT / next: remediate`; the PR label is back-compat only.
+      // The PR number from GitHub (openPrFor) always wins over parsed text.
+      const outputs = { pr: pr.number };
+      const escalated = { status: "blocked", detail: "review escalated", outputs };
+      if (pr.needsHuman) return escalated;
+      const rr = parseReviewResult(result?.text);
+      if (rr && rr.status === "NEXT" && rr.next === "remediate") return escalated;
+      let snap = null;
+      try { snap = await issueSnapshot(state.issue, io); } catch { snap = null; }
+      if (snap?.ok && snap.labels.includes("needs-human")) return escalated;
+      return { status: "failed", detail: "PR open, not merged", retryable: false, outputs };
     },
   },
   {
@@ -537,6 +548,28 @@ export const PHASES = [
     isTerminalAfter: () => true,
   },
 ];
+
+/**
+ * Parse the LAST `REVIEW_RESULT:` block from a phase's final reply (forge#3521).
+ * Untrusted model output: only the fixed keys below are read, via anchored
+ * line matches; `pr_number` must be digits-only. Returns null when absent.
+ */
+export function parseReviewResult(text) {
+  if (typeof text !== "string" || !text) return null;
+  const lines = text.split(/\r?\n/);
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) if (/^\s*REVIEW_RESULT:\s*$/.test(lines[i])) start = i;
+  if (start < 0) return null;
+  const out = {};
+  for (let i = start + 1; i < lines.length; i++) {
+    const m = /^\s+(status|next|remediation|pr_number):[ \t]*(\S*)[ \t]*$/.exec(lines[i]);
+    if (m) { if (!(m[1] in out)) out[m[1]] = m[2]; continue; }
+    if (/^\s+[A-Za-z_]+:/.test(lines[i]) || !lines[i].trim()) continue;
+    break;
+  }
+  if (out.pr_number !== undefined && !/^[0-9]+$/.test(out.pr_number)) delete out.pr_number;
+  return out;
+}
 
 async function openPrFor(state, io) {
   if (!state.branch) return null;
