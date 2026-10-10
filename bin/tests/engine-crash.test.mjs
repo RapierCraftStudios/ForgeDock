@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runIssue } from "../engine.mjs";
 import { readLog, deriveState } from "../engine/runlog.mjs";
+import { trusted, builderBody, invBody, asComments, inv as investigationComment, ctx, arch, builder, remediation, decomposed } from "./helpers/comments.mjs";
 
 let dir;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "fd-crash-")); });
@@ -74,7 +75,7 @@ function makeWorld() {
           }
         }
         if (w.commentCalls === w.crashAtComments) { w.crashAtComments = Infinity; throw new Error("CRASH mid-phase (comments)"); }
-        return w.markers;
+        return asComments(w.markers);
       }
       if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
       if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
@@ -106,14 +107,14 @@ function makeWorld() {
   };
   const runner = async ({ commandName }) => {
     switch (commandName) {
-      case "work-on/investigate": w.markers += " INVESTIGATION:COMPLETE"; break;
-      case "work-on/build/context": w.markers += " FORGE:CONTEXT FORGE:CONTEXT:COMPLETE"; break;
-      case "work-on/build/architect": w.markers += " FORGE:ARCHITECT FORGE:ARCHITECT:COMPLETE"; break;
+      case "work-on/investigate": w.markers += investigationComment("COMPLETE"); break;
+      case "work-on/build/context": w.markers += ctx(); break;
+      case "work-on/build/architect": w.markers += arch(); break;
       // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
       // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
       // engine now resolves the build branch from this ground truth instead
       // of a guessed default (forge#2174), so the mock must emit it too.
-      case "work-on/build": w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; w.buildRuns++; break;
+      case "work-on/build": w.markers += builder("fix/real-branch-42"); w.commitsAhead = 2; w.buildRuns++; break;
       // Idempotent review runner: adopts an existing PR instead of creating a
       // second one on resume, so a duplicate-create would be observable via
       // prCreateCount instead of being silently masked by `w.pr = 7`.
@@ -251,11 +252,13 @@ describe("crash injection: resume from the durable run-log", () => {
 describe("crash injection: forge#3506 handoff reasons survive a crash before RUN_TERMINAL", () => {
   it("investigate decomposed: killed on the mirror write after its commit, resume routes to decompose (local log)", async () => {
     const { w, io, runner } = makeWorld();
-    w.markers = " DECOMPOSE:YES";
+    w.markers = investigationComment("COMPLETE", { decompose: true });
     const ran = [];
     const wrapped = async (a) => {
       ran.push(a.commandName);
-      if (a.commandName === "work-on/decompose") { w.markers += " <!-- FORGE:DECOMPOSED:COMPLETE -->"; return { status: "complete" }; }
+      // The seeded decompose=YES report is the newest investigator comment; do not post a fresh NO one.
+      if (a.commandName === "work-on/investigate") return { status: "complete" };
+      if (a.commandName === "work-on/decompose") { w.markers += decomposed(); return { status: "complete" }; }
       return runner(a);
     };
     w.crashAtEdit = 2; // first mirror write after the investigate PHASE_COMMIT
@@ -270,9 +273,10 @@ describe("crash injection: forge#3506 handoff reasons survive a crash before RUN
 
   it("investigate INVALID committed, killed before RUN_TERMINAL: resume terminates invalid, never builds (issue open, unlabeled)", async () => {
     const { w, io, runner } = makeWorld();
-    w.markers = " INVESTIGATION:INVALID"; // issue stays OPEN and unlabeled, so the forge#2352 divergence guard cannot rescue it
+    w.markers = investigationComment("INVALID"); // issue stays OPEN and unlabeled, so the forge#2352 divergence guard cannot rescue it
     const ran = [];
-    const wrapped = async (a) => { ran.push(a.commandName); return runner(a); };
+    // The seeded INVALID report is the newest investigator comment; do not post a fresh COMPLETE one over it.
+    const wrapped = async (a) => { ran.push(a.commandName); if (a.commandName === "work-on/investigate") return { status: "complete" }; return runner(a); };
     const probe = crashAfterCommitOf(io, "investigate");
     const { res, launches } = await runToCompletion({ dir, io, runner: wrapped });
     assert.ok(launches >= 2, "crash must fire");
@@ -286,11 +290,13 @@ describe("crash injection: forge#3506 handoff reasons survive a crash before RUN
 
   it("decompose committed, killed before RUN_TERMINAL: resume terminates decomposed, never builds the parent", async () => {
     const { w, io, runner } = makeWorld();
-    w.markers = " DECOMPOSE:YES";
+    w.markers = investigationComment("COMPLETE", { decompose: true });
     const ran = [];
     const wrapped = async (a) => {
       ran.push(a.commandName);
-      if (a.commandName === "work-on/decompose") { w.markers += " <!-- FORGE:DECOMPOSED:COMPLETE -->"; return { status: "complete" }; }
+      // The seeded decompose=YES report is the newest investigator comment; do not post a fresh NO one.
+      if (a.commandName === "work-on/investigate") return { status: "complete" };
+      if (a.commandName === "work-on/decompose") { w.markers += decomposed(); return { status: "complete" }; }
       return runner(a);
     };
     const probe = crashAfterCommitOf(io, "decompose");
@@ -308,7 +314,7 @@ describe("crash injection: forge#3506 handoff reasons survive a crash before RUN
     const wrapped = async (a) => {
       ran.push(a.commandName);
       if (a.commandName === "work-on/review") { w.reviewRuns++; w.pr = 7; w.labels.push("needs-human"); return { status: "complete" }; }
-      if (a.commandName === "work-on/remediate") { w.markers += " FORGE:REMEDIATION:COMPLETE **Re-gate outcome**: HELD-AWAITING-MERGE"; return { status: "complete" }; }
+      if (a.commandName === "work-on/remediate") { w.markers += remediation("HELD-AWAITING-MERGE"); return { status: "complete" }; }
       return runner(a);
     };
     // review's detectOutcome sees an open PR carrying needs-human
@@ -352,7 +358,7 @@ describe("crash injection: forge#2184 comment-scoped last-match resume semantics
       gh: async (args) => {
         const a = args.join(" ");
         if (a.startsWith("repo view")) return "acme/widgets";
-        if (a.includes("/comments")) return JSON.stringify(w.comments);
+        if (a.includes("/comments")) return JSON.stringify(w.comments.map((b) => (typeof b === "string" ? trusted(b) : b)));
         if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
         if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
         if (a.startsWith("issue edit")) {
@@ -393,10 +399,10 @@ describe("crash injection: forge#2184 comment-scoped last-match resume semantics
 
     // Pre-seed the world as if a prior (crashed) session already posted its
     // own investigate/context/architect/stale-build markers before dying.
-    w.comments.push("INVESTIGATION:COMPLETE");
-    w.comments.push("FORGE:CONTEXT:COMPLETE");
-    w.comments.push("FORGE:ARCHITECT:COMPLETE");
-    w.comments.push(`FORGE:BUILDER:COMPLETE **Branch**: \`${STALE_BRANCH}\``);
+    w.comments.push(invBody("COMPLETE"));
+    w.comments.push(ctx().slice(1));
+    w.comments.push(arch().slice(1));
+    w.comments.push(builderBody(STALE_BRANCH));
 
     // Pre-seed the local run-log to match: investigate/context/architect
     // already committed locally (mirrors the crashed session having gotten
@@ -409,7 +415,7 @@ describe("crash injection: forge#2184 comment-scoped last-match resume semantics
       "work-on/build": () => {
         // The resumed run's own build attempt completes and posts a fresh
         // completion comment naming a different, real branch.
-        w.comments.push(`FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``);
+        w.comments.push(builderBody(REAL_BRANCH));
         w.commitsAheadByBranch[REAL_BRANCH] = 2;
       },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },

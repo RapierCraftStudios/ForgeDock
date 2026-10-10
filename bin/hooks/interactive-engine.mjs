@@ -116,6 +116,9 @@ const PHASE_MARKERS = [
  * @param {string} text
  * @returns {{ phaseId: string|null, terminalReason: string|null }}
  */
+// forge#3542: this scans a session TRANSCRIPT (tool results / assistant text), which carries no
+// comment authorship, so it is outside the headless engine's trusted + anchored marker model
+// (bin/engine/phases.mjs). Advisory phase detection only.
 export function detectPhaseFromText(text) {
   const str = typeof text === "string" ? text : "";
   let phaseId = null;

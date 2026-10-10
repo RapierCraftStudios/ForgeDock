@@ -12,6 +12,11 @@ to version bumps.
 
 ### Added
 
+- `PHASE_MARKERS.<phase>.header` (additive): the typed-comment header
+  (`FORGE:INVESTIGATOR`, `FORGE:DECOMPOSED`, `FORGE:CONTEXT`, `FORGE:ARCHITECT`,
+  `FORGE:BUILDER`, `FORGE:REMEDIATION`) that the headless engine now requires a
+  phase comment to start with, together with a trusted author, before it reads a
+  sentinel (forge#3542). Bare marker strings are unchanged.
 - `PHASE_MARKERS.investigate.notDecomposedMarker` (`DECOMPOSE:NO`), the explicit counterpart to `decomposedMarker`; `investigate.md` now emits both as HTML-comment markers.
 
 ## [1.2.1] - 2026-07-16
