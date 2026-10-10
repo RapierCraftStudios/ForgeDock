@@ -88,3 +88,9 @@ at the zone's `)` or a quote, so trailing JSON is never swallowed), and
 `api_error_status: 429` or limit text; stdout is parsed ALONE (#2422). The
 runner never fabricates a reset epoch — the bounded default wait lives in
 `bin/engine.mjs`. Cite: #3511.
+
+## Entry 2026-10-10 — Fix: review→remediate handoff checks needs-human on the PR, not the issue — engine runs stop at needs-human instead of remediating (#3521)
+
+PR #3524 touched `runner`. See FORGE:BUILDER comment on issue #3521 for full change list.
+Key gotcha recorded: runner now returns the final reply as `text`; engine passes it to phase detectOutcome.
+Cite: #3521 / PR #3524.
