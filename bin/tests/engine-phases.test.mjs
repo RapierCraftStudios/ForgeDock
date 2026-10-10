@@ -643,6 +643,65 @@ describe("pickPhase", () => {
   // Regression tests for #2193: within-comment `**Branch**:` field match order is
   // first-match, by design (see phases.mjs parseBranchFromMarkers doc comment).
   // Comment-level last-match (#2184) is unaffected/untouched by these tests.
+  // NEEDS_DECOMPOSE routing: build.md B5.5 size-gate exit posts FORGE:DIFF_SIZE
+  // (result: OVER + ### Split Proposal) and no FORGE:BUILDER:COMPLETE.
+  describe("build.detectOutcome — size-gate NEEDS_DECOMPOSE routes to decompose", () => {
+    const build = PHASES.find(p => p.id === "build");
+    const withComments = (...bodies) => ({ gh: async () => JSON.stringify(bodies), git: async () => "0" });
+    const gate = (result, proposal = true) =>
+      `<!-- FORGE:DIFF_SIZE -->\n## Diff Size\n\ndiff_lines: 1906\nexcluded_lines: 0\nthreshold: 1000\nresult: ${result}\n` +
+      (proposal ? "### Split Proposal\n- **A** — a.mjs\n" : "");
+    const override = "<!-- FORGE:SIZE_OVERRIDE -->\nJustified: generated bulk.";
+    const st = { ...base, committed: ["investigate"] };
+
+    it("OVER + Split Proposal -> committed, decomposed, non-retryable", async () => {
+      const o = await build.detectOutcome(st, withComments("<!-- FORGE:INVESTIGATOR -->", gate("OVER")));
+      assert.equal(o.status, "committed");
+      assert.equal(o.terminalReason, "decomposed");
+      assert.equal(o.retryable, undefined);
+    });
+
+    it("pickPhase selects decompose after the build commit", () => {
+      const s = { ...base, committed: ["investigate", "build"], terminalReason: "decomposed" };
+      assert.equal(pickPhase(s).id, "decompose");
+    });
+
+    it("OVER followed by FORGE:SIZE_OVERRIDE does not route", async () => {
+      const o = await build.detectOutcome(st, withComments(gate("OVER"), override));
+      assert.equal(o.status, "failed");
+      assert.equal(o.terminalReason, undefined);
+    });
+
+    it("an override posted BEFORE the latest OVER does not suppress it", async () => {
+      const o = await build.detectOutcome(st, withComments(override, gate("OVER")));
+      assert.equal(o.terminalReason, "decomposed");
+    });
+
+    it("OVER without Split Proposal (loop-guard Blocked exit) falls through to the failure", async () => {
+      const o = await build.detectOutcome(st, withComments(gate("OVER", false)));
+      assert.equal(o.status, "failed");
+    });
+
+    it("OK, OVERRIDDEN, malformed and absent DIFF_SIZE fall through", async () => {
+      for (const c of [gate("OK"), gate("OVERRIDDEN"), "<!-- FORGE:DIFF_SIZE -->\nresult: OVERFLOW\n### Split Proposal", "nothing"]) {
+        const o = await build.detectOutcome(st, withComments(c));
+        assert.equal(o.status, "failed", c);
+      }
+    });
+
+    it("only the latest DIFF_SIZE counts (OVER then refreshed OK)", async () => {
+      const o = await build.detectOutcome(st, withComments(gate("OVER"), gate("OK")));
+      assert.equal(o.status, "failed");
+    });
+
+    it("a posted FORGE:BUILDER:COMPLETE with commits wins over a stale OVER", async () => {
+      const o = await build.detectOutcome({ ...st, branch: "fix/x-42" },
+        { gh: async () => JSON.stringify([gate("OVER"), "<!-- FORGE:BUILDER:COMPLETE -->"]), git: async () => "2" });
+      assert.equal(o.status, "committed");
+      assert.equal(o.terminalReason, undefined);
+    });
+  });
+
   describe("build — within-comment **Branch** field match order (#2193)", () => {
     const build = PHASES.find(p => p.id === "build");
 

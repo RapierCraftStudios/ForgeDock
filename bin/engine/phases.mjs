@@ -74,6 +74,25 @@ async function issueMarkers(issue, io) {
   return { blob, comments };
 }
 /**
+ * Size-gate routing (build.md B5.5). True only when the latest `FORGE:DIFF_SIZE`
+ * says `result: OVER`, carries a `### Split Proposal` (the discriminator against
+ * the decompose-loop-guard Blocked exit, which also posts OVER but must not
+ * re-enter decompose), and no `FORGE:SIZE_OVERRIDE` comment follows it.
+ * Comments are bodies in chronological order (see issueMarkers).
+ */
+function sizeGateRoutesToDecompose(comments) {
+  const gate = PHASE_MARKERS.build.sizeGateMarker;
+  const override = PHASE_MARKERS.build.sizeOverrideMarker;
+  const starts = (c, m) => typeof c === "string" && c.trimStart().startsWith(`<!-- ${m}`);
+  let idx = -1;
+  for (let i = comments.length - 1; i >= 0; i--) if (starts(comments[i], gate)) { idx = i; break; }
+  if (idx < 0) return false;
+  const body = comments[idx];
+  const m = /^result:[ \t]*(OK|OVERRIDDEN|OVER)[ \t]*$/m.exec(body);
+  if (!m || m[1] !== "OVER" || !/^###[ \t]+Split Proposal\b/m.test(body)) return false;
+  return !comments.slice(idx + 1).some((c) => starts(c, override));
+}
+/**
  * Count commits on `branch` ahead of `lane`'s base. On the first build the
  * branch does not exist yet, so real git rejects the ref range — swallow
  * that (and any other git failure) as "0 ahead" rather than letting it
@@ -466,6 +485,13 @@ export const PHASES = [
       }
       if (complete && ahead > 0) {
         return { status: "committed", outputs: { branch, ...buildChildEvidence(blob, comments) } };
+      }
+      // B5.5 NEEDS_DECOMPOSE: the size gate posts no FORGE:BUILDER:COMPLETE and
+      // build.md says the router (not build) dispatches decompose with no
+      // needs-human. Non-retryable by construction: a retry re-measures and
+      // re-emits the same exit.
+      if (!complete && sizeGateRoutesToDecompose(comments)) {
+        return { status: "committed", terminalReason: "decomposed", outputs: branch ? { branch } : {} };
       }
       const detail = `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}`;
       // forge#2176: when the builder has already posted FORGE:BUILDER:COMPLETE
