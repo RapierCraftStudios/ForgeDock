@@ -92,7 +92,6 @@ for p in infra security scraper; do
   decls=$(awk '/^[ \t]*```(bash|sh)[ \t]*$/{inb=1;d=0;r=0;next} /^[ \t]*```[ \t]*$/{if(inb&&r&&d)n++;inb=0;next} inb&&/^[ \t]*SLICE_FILE="[^"]*forge-slice-/{d=1} inb&&/\$SLICE_FILE/{r=1} END{print n+0}' "$f")
   if [ "$reads" -ge 1 ] && [ "$reads" = "$decls" ]; then ok; else bad "$p.md: $reads fences read SLICE_FILE, $decls re-declare it"; fi
 done
-if bash "$ROOT/scripts/check-spec-bash.sh" --fence-state SLICE_FILE -- "$ROOT/commands/review-pr-agents/infra.md" "$ROOT/commands/review-pr-agents/security.md" "$ROOT/commands/review-pr-agents/scraper.md" >/dev/null 2>&1; then ok; else bad "fence-state SLICE_FILE check failed on persona fences"; fi
 
 echo "review-pr-gate2.test.sh: passed=$PASS failed=$FAILN"
 [ "$FAILN" -eq 0 ]

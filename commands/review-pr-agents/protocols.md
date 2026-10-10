@@ -67,6 +67,7 @@ gh pr diff [PR_NUMBER] --name-only
 # Deterministic path (PR + reviewed SHA + domain): every Bash call is a fresh shell, so later fences
 # re-declare this exact line instead of relying on a variable set here.
 SLICE_FILE="${TMPDIR:-/tmp}/forge-slice-[PR_NUMBER]-[REVIEW_SHA_SHORT]-[AGENT_DOMAIN].diff"
+rm -f "$SLICE_FILE"
 cat > "$SLICE_FILE" <<'FORGE_SLICE_EOF'
 [DOMAIN_DIFF_SLICE]
 FORGE_SLICE_EOF
