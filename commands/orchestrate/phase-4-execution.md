@@ -504,26 +504,22 @@ declare -A EDGE_REDERIVED
 declare -A EDGE_REDERIVE_ATTEMPTS
 
 # Affected-file extraction helper, resolved for the DONE-path cohort re-derivation
-# (forge#2848). Same resolver precedence as phase-3-dependency.md Step 3C Layer 1 —
-# ForgeDock's runtime installation before the target repository — because the
-# orchestrator runs inside the project being worked on, where a bare
-# `bash scripts/extract-affected-files.sh` silently fails when that project has not
-# copied ForgeDock's helper scripts into its own repository (#2794/#2791).
+# (forge#2848). Same trusted-install-only resolver as phase-3-dependency.md Step 3C Layer 1:
+# neither the working directory nor the target repository may supply the script
+# (#3400/#3483), and a bare `bash scripts/extract-affected-files.sh` silently fails on
+# consumer repos that have not copied ForgeDock's helpers (#2794/#2791).
 resolve_extract_affected_files() {
-  local candidates=()
-  case '${CLAUDE_PLUGIN_ROOT}' in /*) candidates+=('${CLAUDE_PLUGIN_ROOT}/scripts/extract-affected-files.sh') ;; esac  # running plugin first
-  [ -n "${FORGE_HOME:-}" ] && candidates+=("$FORGE_HOME/scripts/extract-affected-files.sh")
-  [ -n "${REPO_PATH:-}" ] && candidates+=("$REPO_PATH/scripts/extract-affected-files.sh")
-  candidates+=("$PWD/scripts/extract-affected-files.sh")
-
-  local candidate
-  for candidate in "${candidates[@]}"; do
-    if [ -f "$candidate" ]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
+  # HELPER_SCRIPT resolver (EXTRACT_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude.
+  local _l _tc _cfg _c
+  _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+  _tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+  for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+    [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
   done
-  echo "ERROR: extract-affected-files.sh is not installed in any configured runtime path." >&2
+  while IFS= read -r _c; do
+    case "$_c" in /*) if [ -f "$_c/scripts/extract-affected-files.sh" ]; then printf '%s\n' "$_c/scripts/extract-affected-files.sh"; return 0; fi ;; esac
+  done <<< "$_tc"
+  echo "ERROR: extract-affected-files.sh is not installed in any trusted ForgeDock install path." >&2
   return 1
 }
 
@@ -3077,20 +3073,16 @@ When `CASCADE_MAX_AMPLIFICATION` is not `off`, and the current ratio is greater 
 **Deterministic breaker check (MANDATORY on every dispatch path — engine CLI, Agent-spawn fallback, or a hand-driven orchestrator):** the in-spec bookkeeping above only runs when the Step 4B/4C bash runs. A batch driven through the Agent-spawn fallback never evaluated it and reached about 2 findings per merge (2026-10-08 audit). Before dispatching ANY `review-finding` issue at `priority:P3` or below, and after every completed merge, run `scripts/amplification-breaker.sh` against GitHub state. Its exit code is authoritative, and it overrides an in-memory `AMPLIFICATION_BREAKER_TRIPPED=false`:
 
 ```bash
-# Same resolver as review-pr §6B.5: plugin root, FORGE_ROOT, FORGEDOCK_HOME, newest pinned plugin cache
-# (CLAUDE_CONFIG_DIR, then ~/.claude), then the repo's own scripts/.
-AMP_SCRIPT=""
-_cands="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}")"
+# HELPER_SCRIPT resolver (AMP_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
 for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] || continue
-  _cands="$_cands
-$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
 done
-_cands="$_cands
-$PWD"
+AMP_SCRIPT=""
 while IFS= read -r _c; do
   case "$_c" in /*) [ -z "$AMP_SCRIPT" ] && [ -f "$_c/scripts/amplification-breaker.sh" ] && AMP_SCRIPT="$_c/scripts/amplification-breaker.sh" ;; esac
-done <<< "$_cands"
+done <<< "$_tc"
 if [ "$AMPLIFICATION_BREAKER" != "off" ]; then
   if [ -n "$AMP_SCRIPT" ]; then
     AMP_LINE=$(bash "$AMP_SCRIPT" --since "$BATCH_T0" -R {GH_REPO}); AMP_RC=$?
