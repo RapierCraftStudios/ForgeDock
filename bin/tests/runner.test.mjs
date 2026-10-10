@@ -3817,14 +3817,28 @@ describe("parseSessionLimitResetEpochMs — 3pm / 24h formats (forge#3511)", () 
   });
 });
 
-describe("detectUsageLimit (forge#3511)", () => {
-  it("is true for the structured api_error / 429 fields", () => {
+describe("detectUsageLimit (forge#3511, narrowed forge#3523)", () => {
+  it("is true for the structured api_error field", () => {
     assert.equal(detectUsageLimit(JSON.stringify({ api_error: "usage_limit_reached", result: "x" })), true);
-    assert.equal(detectUsageLimit(JSON.stringify({ api_error_status: 429, result: "x" })), true);
   });
-  it("is true for limit text inside the envelope result and for plain text with a reset clause", () => {
-    assert.equal(detectUsageLimit(JSON.stringify({ result: "You've hit your session limit" })), true);
+  it("is false for a bare 429 (transient rate limit)", () => {
+    assert.equal(detectUsageLimit(JSON.stringify({ api_error_status: 429, result: "x" })), false);
+    assert.equal(detectUsageLimit(JSON.stringify({ is_error: true, api_error_status: 429, api_error: "rate_limit_error", result: "slow down" })), false);
+  });
+  it("is true for is_error limit text with a reset clause, and plain text with a reset clause", () => {
+    assert.equal(detectUsageLimit(JSON.stringify({ is_error: true, result: "You've hit your session limit \u00b7 resets 3pm (UTC)" })), true);
     assert.equal(detectUsageLimit("", "You've hit your session limit \u00b7 resets 3pm (UTC)"), true);
+  });
+  it("is false for keyword-only or reset-less envelope result text", () => {
+    assert.equal(detectUsageLimit(JSON.stringify({ result: "I fixed the usage limit handling" })), false);
+    assert.equal(detectUsageLimit(JSON.stringify({ is_error: true, result: "You've hit your session limit" })), false);
+  });
+  it("is false for limit+reset text when is_error is absent", () => {
+    assert.equal(detectUsageLimit(JSON.stringify({ result: "You've hit your session limit \u00b7 resets 3pm (UTC)" })), false);
+  });
+  it("is false when the phrase and resets are not one clause", () => {
+    assert.equal(detectUsageLimit("", "updated the usage limit doc\nconfig resets daily"), false);
+    assert.equal(detectUsageLimit("", "weekly limit docs\nthe cache resets nightly"), false);
   });
   it("is false for ordinary failures", () => {
     assert.equal(detectUsageLimit(JSON.stringify({ is_error: true, result: "boom", api_error_status: 500 })), false);
@@ -3859,6 +3873,11 @@ describe("runCliBackend usage-limit via JSON envelope (forge#3511)", () => {
   });
   it("does not set usageLimit on an ordinary failure", () => {
     const e = run(JSON.stringify({ is_error: true, result: "boom" }));
+    assert.equal(e.usageLimit, undefined);
+  });
+  it("does not set usageLimit on a bare 429 rate-limit envelope (forge#3523)", () => {
+    const e = run(JSON.stringify({ is_error: true, api_error_status: 429, result: "rate limited" }));
+    assert.equal(e.code, "CLI_BACKEND_FAILED");
     assert.equal(e.usageLimit, undefined);
   });
 });
