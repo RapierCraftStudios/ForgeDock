@@ -167,6 +167,9 @@ render_template() {
 
 <!-- INVESTIGATION:COMPLETE -->'
       ;;
+    # OUT_OF_SCOPE format (forge#3447): the value is `None.` (the default) or typed bullets, one per item:
+    #   - `path` — deferred → #N: <why>  |  not-affected: <evidence>  |  accepted-risk: <reason>
+    # scripts/check-contract-scope.sh validates and lists them. The codec does not validate.
     CONTRACT)
       body='<!-- FORGE:CONTRACT -->
 ## Builder Contract

@@ -6,6 +6,16 @@ Operator-facing notes for behavior changes that need action or awareness. Newest
 
 `/review-pr` §6B.4 gate 2 never routes a CRITICAL/HIGH finding (any confidence) as `pre-existing`: a new caller of an unchanged unsafe helper is an interaction defect (`protocols.md` §5), so it stays a blocking `review-finding` under §7B criterion 2, including with `--auto-merge`. The pre-existing route now covers MEDIUM and lower only. A file with no `patch` in the PR files API (large or truncated diff) is treated as UNKNOWN and its findings are kept, never routed as pre-existing. Expect slightly more blocking findings on PRs that touch unsafe code through unchanged helpers.
 
+## Contract out-of-scope items now typed; review demotes matching findings (#3447)
+
+The `### Out of Scope` section of `FORGE:CONTRACT` is no longer free text. It is `None.` or bullets that each name a backticked path and one disposition: `deferred → #N`, `not-affected: <evidence>` or `accepted-risk: <reason>`. A contract that keeps a known-flawed design must list it as `deferred → #N`.
+
+- **Build** (B2.0) files a follow-up issue for each `deferred` item before the contract is posted (idempotent through a `FORGE:DEFERRED_FROM: #N` body marker) and validates the section with the new `scripts/check-contract-scope.sh`. An untyped item blocks the build after one retry.
+- **Review** (`/review-pr` §6B.5) reads the latest trusted contract and passes it to `scripts/classify-finding.sh --contract-scope`. A finding on a `deferred` path (follow-up still open) or an `accepted-risk` path becomes a note instead of a new `review-finding`; deferred matches are commented on the existing issue. `not-affected` items, HIGH/CRITICAL findings, safety-exempt `accepted-risk` findings and files the PR itself changed are never demoted. `FORGE:NOTE_DISPOSITION` gains `contract_demoted=N`.
+- The review scope-creep check now reads only the contract's `### Deliverables`, so backticked out-of-scope paths no longer count as in-scope files.
+
+Action: none. Older contracts with free-text Out of Scope sections are not parsed and demote nothing.
+
 ## Review provenance gates and noise share (#3452)
 
 `/review-pr` §6B.4 now checks each finding before it can become a `review-finding` issue: the cited line must exist at the reviewed head SHA (else dropped as stale), must be added or changed by the PR diff (else routed as `pre-existing`), and must carry a concrete `**Failure scenario**` (else demoted to a note; CRITICAL/HIGH, any confidence, are exempt). Pre-existing defects are never counted as this PR's findings or in the amplification ratio; only MEDIUM or lower ones are routed this way, and the safety-domain ones are filed once with the new `pre-existing` label. The `FORGE:NOTE_DISPOSITION` record gains `findings_dropped_stale`, `findings_preexisting`, `notes_demoted_no_scenario`, and `/pipeline-health` reports a noise share (2E.5).
