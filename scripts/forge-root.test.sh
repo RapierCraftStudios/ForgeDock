@@ -246,7 +246,7 @@ while IFS= read -r f; do
   arms=$(grep -c 'trusted-comments.sh" \]' "$f" || true)
   [ "$arms" = "$(cat "$T/tc_n")" ] || { TC_STRAY=$((TC_STRAY + 1)); echo "  stray resolver in $f: $arms arms vs $(cat "$T/tc_n") blocks"; }
 done < <(grep -rl 'trusted-comments.sh" \]' "$ROOT/commands")
-expect "trusted-comments.sh resolver blocks discovered (review-pr 8 + review + remediate + phase-4)" 11 "$TC_BLOCKS"
+expect "trusted-comments.sh resolver blocks discovered (review-pr 8 + review + remediate + phase-4 + review-pr-staging)" 12 "$TC_BLOCKS"
 expect "trusted-comments.sh resolvers without a canonical block" 0 "$TC_STRAY"
 expect "trusted-comments.sh resolvers byte-identical" 1 "$(sort -u "$T/tc_all" | wc -l | tr -d ' ')"
 grep -qF 'plugins/cache/forgedock/forgedock' "$T/tc_all" && ok || bad 'trusted-comments.sh resolver lacks the plugin-cache scan'

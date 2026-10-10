@@ -21,6 +21,10 @@ on:
       - 'scripts/spec-no-worktree-script.test.sh'
       - 'scripts/review-pr-arguments.test.sh'
       - 'scripts/review-pr-domain-map.test.sh'
+      - 'scripts/check-test-wiring.sh'
+      - 'scripts/check-test-wiring.test.sh'
+      - 'scripts/*.test.sh'
+      - '.github/workflows/**'
       - 'scripts/check-admission-parity.mjs'
       - 'bin/engine/admission.mjs'
       - 'scripts/check-phase-registry-drift.mjs'
@@ -51,6 +55,10 @@ on:
       - 'scripts/spec-no-worktree-script.test.sh'
       - 'scripts/review-pr-arguments.test.sh'
       - 'scripts/review-pr-domain-map.test.sh'
+      - 'scripts/check-test-wiring.sh'
+      - 'scripts/check-test-wiring.test.sh'
+      - 'scripts/*.test.sh'
+      - '.github/workflows/**'
       - 'scripts/check-admission-parity.mjs'
       - 'bin/engine/admission.mjs'
       - 'scripts/check-phase-registry-drift.mjs'
@@ -317,6 +325,9 @@ jobs:
           bash scripts/review-pr-domain-map.test.sh
           # No args: the script's built-in default file set (all Skill-loaded specs under commands/).
           bash scripts/check-spec-bash.sh
+          # Every Bash call is a fresh shell: a fence that reads these variables must bind them itself
+          # (re-declare with the orchestrator's values). Deliberate reads: `allowlist:fence-state`.
+          bash scripts/check-spec-bash.sh --fence-state PR_NUMBER REPO REPO_FLAG MERGE_ISSUE MERGE_GH_FLAG AUTO_MERGE REVIEW_SHA -- commands/review-pr.md
 
   admission-parity:
     name: admission.mjs / bash mirror parity check
@@ -360,3 +371,16 @@ jobs:
           # marker *strings* are single-sourced (see forge#2375/PR#2395, the
           # incident this issue's registry makes structurally impossible).
           node scripts/check-phase-registry-drift.mjs
+
+  test-wiring:
+    name: Test wiring lint (every scripts/*.test.sh runs in a workflow)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run lint fixtures
+        run: bash scripts/check-test-wiring.test.sh
+
+      - name: Check every scripts/*.test.sh is referenced by a workflow
+        run: bash scripts/check-test-wiring.sh
