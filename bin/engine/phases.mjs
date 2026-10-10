@@ -221,11 +221,90 @@ function resolveBranch(state, comments) {
   return parseBranchFromMarkers(comments) || state.branch || null;
 }
 
+
+/**
+ * forge#3499: non-blocking evidence about the context / architect children that
+ * `work-on/build` now runs itself. Recorded for visibility only — a missing
+ * marker NEVER fails build (context is advisory; the TRIVIAL band legitimately
+ * skips both children). A BLOCKED / missing-arg child is not hidden here: it
+ * shows up as `absent`, never as a fabricated "skipped" commit.
+ */
+function buildChildEvidence(blob, comments) {
+  const trivial = complexityBand(comments) === "TRIVIAL";
+  const state = (marker) => (has(blob, marker) ? "complete" : trivial ? "skipped-trivial" : "absent");
+  return {
+    context: state(PHASE_MARKERS.context.completionMarker),
+    architect: state(PHASE_MARKERS.architect.completionMarker),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// forge#3499: per-phase argument construction.
+//
+// Every `work-on` phase sub-skill takes ALL of its inputs as arguments (forge#3398
+// forked-phase router) and stops with BLOCKED when one is missing. Each phase's
+// `buildArgs` emits exactly the flags its `commands/<command>.md` `argument-hint`
+// requires; bin/engine/phases-args.test.mjs pins the two together.
+//
+// Values are validated against strict allowlists before use: the runner joins the
+// args array with single spaces into the prompt, so a value with whitespace,
+// quotes or newlines would splice extra arguments (forge#3466 class).
+// ---------------------------------------------------------------------------
+
+export class PhaseArgsError extends Error {
+  constructor(message) { super(message); this.name = "PhaseArgsError"; this.code = "PHASE_ARGS_INVALID"; }
+}
+
+const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const BRANCH_RE = /^[A-Za-z0-9._][A-Za-z0-9._\/-]*$/;
+const LANE_RE = BRANCH_RE;
+const PATH_RE = /^[A-Za-z0-9_.\/\\:@+~-]+$/;
+
+function need(value, name, re) {
+  if (value === null || value === undefined || value === "") throw new PhaseArgsError(`missing ${name}`);
+  const v = String(value);
+  if (!re.test(v) || v.includes("..")) throw new PhaseArgsError(`invalid ${name}: ${JSON.stringify(v)}`);
+  return v;
+}
+/** @returns {string[]} the `--repo`/`--gh-flag` pair (gh-flag is ONE quoted token, as in the argument-hint). */
+function repoArgs(ctx) {
+  const repo = need(ctx.repo, "repo", REPO_RE);
+  return ["--repo", repo, "--gh-flag", `"-R ${repo}"`];
+}
+function baseArgs(state) { return ["--base", need(state.lane, "base (lane)", LANE_RE)]; }
+
+/**
+ * Resolve the linked worktree checked out on `branch` from `git worktree list
+ * --porcelain` — the only engine-side ground truth (build.md B1C creates it).
+ * Returns null when absent/prunable/unresolvable; never invents a path.
+ */
+export async function resolveWorktree(state, io) {
+  if (state.worktree) return state.worktree;
+  if (!state.branch) return null;
+  let out;
+  try { out = await io.git(["worktree", "list", "--porcelain"]); } catch { return null; }
+  for (const block of String(out || "").split(/\n\s*\n/)) {
+    const lines = block.split("\n");
+    const wt = lines.find((l) => l.startsWith("worktree "));
+    const br = lines.find((l) => l.startsWith("branch "));
+    if (!wt || !br || lines.some((l) => l.startsWith("prunable"))) continue;
+    if (br.slice("branch ".length).trim() === `refs/heads/${state.branch}`) return wt.slice("worktree ".length).trim();
+  }
+  return null;
+}
+
+async function reviewArgs(state, ctx, io) {
+  const worktree = need(await resolveWorktree(state, io), "worktree (no linked worktree for branch)", PATH_RE);
+  return [String(state.issue), ...repoArgs(ctx), "--worktree", worktree,
+          "--branch", need(state.branch, "branch", BRANCH_RE), ...baseArgs(state)];
+}
+
 /** @type {Phase[]} */
 export const PHASES = [
   {
     id: "investigate",
     command: "work-on/investigate",
+    buildArgs: async (state, ctx) => [String(state.issue), ...repoArgs(ctx)],
     entryCondition: () => true,
     async detectOutcome(state, io) {
       const { blob } = await issueMarkers(state.issue, io);
@@ -255,6 +334,7 @@ export const PHASES = [
     // before the run terminates.
     id: "decompose",
     command: "work-on/decompose",
+    buildArgs: async (state, ctx) => [String(state.issue), ...repoArgs(ctx)],
     entryCondition: (s) => s.terminalReason === "decomposed",
     async detectOutcome(state, io) {
       const { blob } = await issueMarkers(state.issue, io);
@@ -267,49 +347,14 @@ export const PHASES = [
     isTerminalAfter: () => true,
   },
   {
-    id: "context",
-    command: "work-on/build/context",
-    entryCondition: (s) => s.committed.includes("investigate"),
-    async reconcile(state, io) {
-      const markers = await issueMarkers(state.issue, io);
-      if (complexityBand(markers.comments) === "TRIVIAL") {
-        return { satisfied: true, outputs: { skipped: "trivial-complexity-band", phase: "context" } };
-      }
-      // Idempotent resume: FORGE:CONTEXT:COMPLETE present → skip the LLM re-run.
-      // Bare FORGE:CONTEXT matches a partial/interrupted annotation — require :COMPLETE.
-      return has(markers.blob, PHASE_MARKERS.context.completionMarker) ? { satisfied: true } : { satisfied: false };
-    },
-    async detectOutcome(state, io) {
-      const { blob } = await issueMarkers(state.issue, io);
-      // Context is non-critical: a missing marker is a VISIBLE skip, not a hard fail (spec §7).
-      if (has(blob, PHASE_MARKERS.context.presenceMarker)) return { status: "committed", outputs: {} };
-      return { status: "committed", outputs: { skipped: true, which: "context" } };
-    },
-  },
-  {
-    id: "architect",
-    command: "work-on/build/architect",
-    entryCondition: (s) => s.committed.includes("context"),
-    async reconcile(state, io) {
-      const markers = await issueMarkers(state.issue, io);
-      if (complexityBand(markers.comments) === "TRIVIAL") {
-        return { satisfied: true, outputs: { skipped: "trivial-complexity-band", phase: "architect" } };
-      }
-      // Idempotent resume: FORGE:ARCHITECT:COMPLETE present → skip the LLM re-run.
-      // Bare FORGE:ARCHITECT matches a partial/interrupted annotation — require :COMPLETE.
-      return has(markers.blob, PHASE_MARKERS.architect.completionMarker) ? { satisfied: true } : { satisfied: false };
-    },
-    async detectOutcome(state, io) {
-      const { blob } = await issueMarkers(state.issue, io);
-      return has(blob, PHASE_MARKERS.architect.completionMarker)
-        ? { status: "committed", outputs: {} }
-        : { status: "failed", detail: `no ${PHASE_MARKERS.architect.completionMarker}` };
-    },
-  },
-  {
     id: "build",
     command: "work-on/build",
-    entryCondition: (s) => s.committed.includes("architect"),
+    buildArgs: async (state, ctx) => [String(state.issue), ...repoArgs(ctx), ...baseArgs(state)],
+    // forge#3499: work-on/build owns worktree creation and runs the context /
+    // architect / implement / validate children itself (it needs the worktree
+    // as `--repo-path`), so the engine no longer schedules context/architect as
+    // top-level phases — build is eligible as soon as investigate committed.
+    entryCondition: (s) => s.committed.includes("investigate"),
     async reconcile(state, io) {
       // Idempotent resume: resolve the real branch from ground truth (FORGE:BUILDER
       // comment) rather than trusting a possibly-stale/absent state.branch, then
@@ -334,7 +379,9 @@ export const PHASES = [
       // from a genuine git-confirmed zero and would wrongly trip the
       // non-retryable guard below on the very first attempt.
       const ahead = branch ? await commitsAhead(state.lane, branch, io) : -1; // … AND real commits
-      if (complete && ahead > 0) return { status: "committed", outputs: { branch } };
+      if (complete && ahead > 0) {
+        return { status: "committed", outputs: { branch, ...buildChildEvidence(blob, comments) } };
+      }
       const detail = `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}`;
       // forge#2176: when the builder has already posted FORGE:BUILDER:COMPLETE
       // but the resolved (real, ground-truth) branch has zero commits ahead of
@@ -369,6 +416,7 @@ export const PHASES = [
   {
     id: "review",
     command: "work-on/review",
+    buildArgs: reviewArgs,
     entryCondition: (s) => s.committed.includes("build"),
     async reconcile(state, io) {
       const pr = await openPrFor(state, io);   // adopt an existing PR instead of opening a second
@@ -398,6 +446,9 @@ export const PHASES = [
     // handing the PR to remediation in the same run.
     id: "remediate",
     command: "work-on/remediate",
+    buildArgs: async (state, ctx) => [
+      need(state.pr, "pr", /^[0-9]+$/), "--issue", String(state.issue), ...repoArgs(ctx), ...baseArgs(state),
+    ],
     entryCondition: (s) => s.committed.includes("review") && s.terminalReason === "needs-human",
     async detectOutcome(state, io) {
       const { blob } = await issueMarkers(state.issue, io);
@@ -435,6 +486,18 @@ export const PHASES = [
   {
     id: "close",
     command: "work-on/close",
+    buildArgs: async (state, ctx, io) => {
+      // Only --terminal-state is required by close.md; the rest are optional context.
+      const terminal = state.terminalReason === "decomposed" ? "decomposed"
+        : state.terminalReason === "invalid" ? "invalid" : "merged";
+      const args = [String(state.issue), ...repoArgs(ctx), ...baseArgs(state)];
+      if (state.pr != null) args.push("--pr", need(state.pr, "pr", /^[0-9]+$/));
+      if (state.branch) args.push("--branch", need(state.branch, "branch", BRANCH_RE));
+      const wt = await resolveWorktree(state, io);
+      if (wt && PATH_RE.test(wt)) args.push("--worktree", wt);
+      args.push("--terminal-state", terminal);
+      return args;
+    },
     entryCondition: (s) => s.committed.includes("review"),
     async reconcile(state, io) {
       // Idempotent resume: issue already closed or workflow:merged label set → skip the LLM re-run.

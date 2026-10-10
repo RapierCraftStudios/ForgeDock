@@ -27,11 +27,22 @@ let dir;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "fd-crash-")); });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
-const ALL = ["investigate", "context", "architect", "build", "review", "close"];
+const ALL = ["investigate", "build", "review", "close"];
 
 // A scriptable fake GitHub/git world. State persists across runIssue relaunches
 // within one scenario (that is what makes resume observable). A one-shot crash is
 // armed via crashAtEdit (Nth FORGE:STATE mirror write) or crashAtGit (Nth git call).
+
+// forge#3499: engine phases now receive `--repo`/`--worktree`/`--branch`. The fake
+// world answers `gh repo view` and `git worktree list --porcelain` (one linked
+// worktree per `**Branch**:` named in the posted FORGE:BUILDER comments).
+function fakeWorktreeList(text) {
+  const out = ["worktree /repo\nHEAD 0000000\nbranch refs/heads/main\n"];
+  for (const m of String(text).matchAll(/\*\*Branch\*\*:\s*`([^`]+)`/g))
+    out.push(`worktree /repo/.claude/worktrees/${m[1].replace(/\//g, "-")}\nHEAD 1111111\nbranch refs/heads/${m[1]}\n`);
+  return out.join("\n");
+}
+
 function makeWorld() {
   const w = { markers: "", pr: null, prMerged: false, issueState: "OPEN", labels: [],
               commitsAhead: 0, body: "Issue.", editCalls: 0, gitCalls: 0,
@@ -48,6 +59,7 @@ function makeWorld() {
   const io = {
     gh: async (args) => {
       const a = args.join(" ");
+      if (a.startsWith("repo view")) return "acme/widgets";
       if (a.includes("/comments")) {
         w.commentCalls++;
         // Scoped channel: count and optionally crash BEFORE the legacy channel
@@ -85,7 +97,8 @@ function makeWorld() {
       }
       return "";
     },
-    git: async () => {
+    git: async (args) => {
+      if (args?.[0] === "worktree") return fakeWorktreeList(w.markers);
       w.gitCalls++;
       if (w.gitCalls === w.crashAtGit) { w.crashAtGit = Infinity; throw new Error("CRASH mid-phase (git)"); }
       return String(w.commitsAhead);
@@ -232,6 +245,7 @@ describe("crash injection: forge#2184 comment-scoped last-match resume semantics
     const io = {
       gh: async (args) => {
         const a = args.join(" ");
+        if (a.startsWith("repo view")) return "acme/widgets";
         if (a.includes("/comments")) return JSON.stringify(w.comments);
         if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
         if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
@@ -246,6 +260,7 @@ describe("crash injection: forge#2184 comment-scoped last-match resume semantics
         return "";
       },
       git: async (args) => {
+        if (args[0] === "worktree") return fakeWorktreeList(w.comments.join("\n"));
         const range = args[args.length - 1] || "";
         const branch = range.split("..")[1] || "";
         return String(w.commitsAheadByBranch[branch] || 0);
@@ -283,8 +298,6 @@ describe("crash injection: forge#2184 comment-scoped last-match resume semantics
     const { appendEvent } = await import("../engine/runlog.mjs");
     appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
     appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
-    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "context", outputs: {} });
-    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "architect", outputs: {} });
 
     const script = {
       "work-on/build": () => {

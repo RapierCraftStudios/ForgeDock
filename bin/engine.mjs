@@ -214,6 +214,11 @@ export async function runIssue(opts) {
           // callers keep runner.mjs's own "auto" ladder default unchanged —
           // this is purely additive pass-through, not a new default.
           backend, model,
+          // forge#3499: "owner/repo" the phase sub-skills must target
+          // (`--repo` / `--gh-flag`). Optional override; otherwise resolved
+          // lazily — once, only if a phase's runner is actually invoked —
+          // from the cwd-resolved repo (`gh repo view`).
+          repo,
           leaseTtlMs = DEFAULT_LEASE_TTL_MS,
           leaseRenewIntervalMs = DEFAULT_LEASE_RENEW_INTERVAL_MS,
           // forge#2524: real default is a genuine setTimeout-based wait —
@@ -284,6 +289,15 @@ export async function runIssue(opts) {
   // against a nonexistent ref and silently evaluated to 0 (forge#2174). The
   // build phase's `reconcile`/`detectOutcome` (bin/engine/phases.mjs) resolve
   // the real branch from the `FORGE:BUILDER` comment instead.
+  let repoPromise = null;
+  const resolveRepo = () => (repoPromise ??= (async () => {
+    if (repo) return String(repo).trim();
+    try {
+      const out = await io.gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
+      return String(out || "").trim() || null;
+    } catch { return null; }
+  })());
+
   let phase;
   while ((phase = pickPhase(state))) {
     // forge#2352: state-vs-GitHub divergence guard. Every phase's own
@@ -428,7 +442,7 @@ export async function runIssue(opts) {
         let pauseCount = 0;
         for (;;) {
           try {
-            outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model });
+            outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo });
             break;
           } catch (e) {
             const resetAtMs = e.resetAtEpochMs;
@@ -522,8 +536,14 @@ export async function runIssue(opts) {
       }
     }
 
+    // forge#3499: remediate takes the PR number as its positional argument, so
+    // the handoff only applies when review resolved one. A review that blocked
+    // without ever resolving a PR (e.g. retries exhausted before one existed)
+    // has nothing to remediate and stays a plain needs-human stop — it must not
+    // fall through to `close`, which would otherwise be the next eligible phase.
     const isRemediationHandoff = outcome.status === "blocked" &&
-      phase.id === "review" && (outcome.reason || "needs-human") === "needs-human";
+      phase.id === "review" && (outcome.reason || "needs-human") === "needs-human" &&
+      (outcome.outputs?.pr ?? state.pr) != null;
     if (outcome.status === "blocked") {
       emitProgress({ event: "phase_exit", phase: phase.id, status: "blocked", detail: outcome.detail });
       if (!isRemediationHandoff)
@@ -597,7 +617,21 @@ export async function runIssue(opts) {
 }
 
 async function runPhaseWithRetry(phase, state, ctx) {
-  const { io, runner, dir, issue, commandsDir, maxAttempts, backend, model } = ctx;
+  const { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo } = ctx;
+  // forge#3499: build the phase's full argument set ONCE, up front. Every
+  // work-on phase sub-skill stops with BLOCKED when a required flag is absent,
+  // so an incomplete/invalid set is a deterministic engine failure — fail
+  // closed here (no runner call, no retries) instead of sending a partial
+  // `[issue]`-only invocation that burns the attempt budget.
+  let phaseArgs;
+  try {
+    phaseArgs = await phase.buildArgs(state, { repo: await resolveRepo() }, io);
+  } catch (e) {
+    if (e?.code !== "PHASE_ARGS_INVALID") throw e;
+    const detail = `phase ${phase.id} args unresolved: ${e.message}`;
+    appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt: 0, reason: detail, maxAttempts });
+    return { status: "blocked", detail, reason: "engine-error", usage: null };
+  }
   // forge#2261: true only if EVERY attempt failed by the runner itself
   // throwing (never once reached phase.detectOutcome()). This is the signal
   // that distinguishes an engine/tool crash (the tool never even produced a
@@ -621,7 +655,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
     let result;
     try {
       result = await runner({
-        commandsDir, commandName: phase.command, args: [String(issue)],
+        commandsDir, commandName: phase.command, args: phaseArgs,
         // Only forwarded when explicitly provided — omitting them preserves
         // runner.mjs's existing default ("auto" backend / DEFAULT_MODEL).
         ...(backend ? { backend } : {}),

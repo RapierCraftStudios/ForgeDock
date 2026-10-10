@@ -375,6 +375,7 @@ export async function runFromCli(argv, deps = {}) {
     else if (e.event === "phase_paused") console.log(`⏸ phase ${e.phase} paused: ${e.detail ?? "session limit"}`);
   };
   const res = await runIssueFn({ issue, dir, agentId, lane, io,
+    ...(repo ? { repo } : {}),
     runner: (await import("./runner.mjs")).runCommand, now: () => Date.now(),
     onProgress,
     // Only forwarded when explicitly provided — omitting them preserves

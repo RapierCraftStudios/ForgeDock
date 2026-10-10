@@ -12,7 +12,7 @@ const base = { v: 0, run: "r1", issue: 42, lane: "staging", committed: [], phase
 describe("pickPhase", () => {
   it("returns the first uncommitted phase whose entryCondition holds", () => {
     assert.equal(pickPhase(base).id, "investigate");
-    assert.equal(pickPhase({ ...base, committed: ["investigate"] }).id, "context");
+    assert.equal(pickPhase({ ...base, committed: ["investigate"] }).id, "build");
   });
 
   it("returns null once all phases are committed", () => {
@@ -32,13 +32,14 @@ describe("pickPhase", () => {
 
   it("does NOT return 'decompose' when investigate committed but terminalReason is unset (normal happy path)", () => {
     const state = { ...base, committed: ["investigate"], terminalReason: null };
-    assert.equal(pickPhase(state).id, "context");
+    assert.equal(pickPhase(state).id, "build");
   });
 
   it("returns 'remediate' when review committed with terminalReason 'needs-human'", () => {
     const state = {
       ...base,
-      committed: ["investigate", "context", "architect", "build", "review"],
+      committed: ["investigate", "build", "review"],
+      pr: 7,
       terminalReason: "needs-human",
     };
     assert.equal(pickPhase(state).id, "remediate");
@@ -47,7 +48,7 @@ describe("pickPhase", () => {
   it("does NOT return 'remediate' when review committed but terminalReason is unset (normal happy path)", () => {
     const state = {
       ...base,
-      committed: ["investigate", "context", "architect", "build", "review"],
+      committed: ["investigate", "build", "review"],
       terminalReason: null,
     };
     assert.equal(pickPhase(state).id, "close");
@@ -330,106 +331,53 @@ describe("pickPhase", () => {
     });
   });
 
-  // Regression tests for #1669: reconcile must require :COMPLETE markers, not bare annotation openers.
-  describe("context.reconcile — requires FORGE:CONTEXT:COMPLETE (not bare FORGE:CONTEXT)", () => {
-    const context = PHASES.find(p => p.id === "context");
-    const ioWith = (blob) => ({ gh: async () => blob, git: async () => "0" });
+  // forge#3499: context/architect are no longer engine phases — work-on/build owns
+  // them. Their markers survive as NON-BLOCKING sub-evidence on build's outcome.
+  describe("build.detectOutcome — context/architect sub-evidence is non-blocking (forge#3499)", () => {
+    const build = PHASES.find(p => p.id === "build");
+    const withComments = (...bodies) => ({
+      gh: async () => JSON.stringify(bodies),
+      git: async () => "2",
+    });
+    const builder = "<!-- FORGE:BUILDER:COMPLETE -->";
 
-    it("bare FORGE:CONTEXT (partial annotation) -> not satisfied", async () => {
-      const r = await context.reconcile(base, ioWith("<!-- FORGE:CONTEXT -->"));
-      assert.equal(r.satisfied, false);
+    it("context/architect are not engine phases", () => {
+      assert.equal(PHASES.find(p => p.id === "context"), undefined);
+      assert.equal(PHASES.find(p => p.id === "architect"), undefined);
     });
 
-    it("FORGE:CONTEXT:COMPLETE present -> satisfied", async () => {
-      const r = await context.reconcile(base, ioWith("<!-- FORGE:CONTEXT -->\n<!-- FORGE:CONTEXT:COMPLETE -->"));
-      assert.equal(r.satisfied, true);
+    it("records complete markers without requiring them", async () => {
+      const o = await build.detectOutcome({ ...base, branch: "fix/x-42" },
+        withComments("<!-- FORGE:CONTEXT:COMPLETE -->", "<!-- FORGE:ARCHITECT:COMPLETE -->", builder));
+      assert.equal(o.status, "committed");
+      assert.equal(o.outputs.context, "complete");
+      assert.equal(o.outputs.architect, "complete");
     });
 
-    it("no marker at all -> not satisfied", async () => {
-      const r = await context.reconcile(base, ioWith("nothing here"));
-      assert.equal(r.satisfied, false);
+    it("bare/partial annotations are reported as absent, never as complete", async () => {
+      const o = await build.detectOutcome({ ...base, branch: "fix/x-42" },
+        withComments("<!-- FORGE:CONTEXT -->", "<!-- FORGE:ARCHITECT:PARTIAL -->", builder));
+      assert.equal(o.status, "committed");
+      assert.equal(o.outputs.context, "absent");
+      assert.equal(o.outputs.architect, "absent");
     });
 
-    it("latest TRIVIAL fast-path annotation skips context and records the reason", async () => {
-      const r = await context.reconcile(base, ioWith(JSON.stringify([
-        { body: "<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: STANDARD" },
-        { body: "<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: TRIVIAL" },
-      ])));
-      assert.deepEqual(r, {
-        satisfied: true,
-        outputs: { skipped: "trivial-complexity-band", phase: "context" },
-      });
+    it("TRIVIAL fast-path band is recorded as skipped-trivial", async () => {
+      const o = await build.detectOutcome({ ...base, branch: "fix/x-42" },
+        withComments("<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: TRIVIAL", builder));
+      assert.equal(o.outputs.context, "skipped-trivial");
+      assert.equal(o.outputs.architect, "skipped-trivial");
     });
 
-    it("missing or malformed fast-path annotations retain the full pipeline", async () => {
-      const r = await context.reconcile(base, ioWith("<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: trivial"));
-      assert.equal(r.satisfied, false);
-    });
-  });
-
-  describe("architect.reconcile — requires FORGE:ARCHITECT:COMPLETE (not bare FORGE:ARCHITECT)", () => {
-    const architect = PHASES.find(p => p.id === "architect");
-    const ioWith = (blob) => ({ gh: async () => blob, git: async () => "0" });
-
-    it("bare FORGE:ARCHITECT (partial annotation) -> not satisfied", async () => {
-      const r = await architect.reconcile(base, ioWith("<!-- FORGE:ARCHITECT -->"));
-      assert.equal(r.satisfied, false);
+    it("a malformed band (lowercase) is not treated as TRIVIAL", async () => {
+      const o = await build.detectOutcome({ ...base, branch: "fix/x-42" },
+        withComments("<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: trivial", builder));
+      assert.equal(o.outputs.context, "absent");
     });
 
-    it("FORGE:ARCHITECT:COMPLETE present -> satisfied", async () => {
-      const r = await architect.reconcile(base, ioWith("<!-- FORGE:ARCHITECT -->\n<!-- FORGE:ARCHITECT:COMPLETE -->"));
-      assert.equal(r.satisfied, true);
-    });
-
-    it("no marker at all -> not satisfied", async () => {
-      const r = await architect.reconcile(base, ioWith("nothing here"));
-      assert.equal(r.satisfied, false);
-    });
-
-    it("TRIVIAL fast-path annotation skips architect and records the reason", async () => {
-      const r = await architect.reconcile(base, ioWith(JSON.stringify([
-        { body: "<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: TRIVIAL" },
-      ])));
-      assert.deepEqual(r, {
-        satisfied: true,
-        outputs: { skipped: "trivial-complexity-band", phase: "architect" },
-      });
-    });
-  });
-
-  describe("architect.detectOutcome — requires FORGE:ARCHITECT:COMPLETE (not bare FORGE:ARCHITECT)", () => {
-    const architect = PHASES.find(p => p.id === "architect");
-    const ioWith = (blob) => ({ gh: async () => blob, git: async () => "0" });
-
-    it("bare FORGE:ARCHITECT (partial annotation) -> failed", async () => {
-      const outcome = await architect.detectOutcome(base, ioWith("<!-- FORGE:ARCHITECT -->"));
-      assert.equal(outcome.status, "failed");
-    });
-
-    it("FORGE:ARCHITECT:COMPLETE present -> committed", async () => {
-      const outcome = await architect.detectOutcome(base, ioWith("<!-- FORGE:ARCHITECT:COMPLETE -->"));
-      assert.equal(outcome.status, "committed");
-    });
-
-    // Regression #2689: the architect SKIP path (chore:/docs:/trivial titles) must
-    // post a minimal FORGE:ARCHITECT comment ending in the :COMPLETE sentinel so the
-    // marker-only headless gate advances the issue to build instead of stranding it
-    // at needs-human. A skip that emits the sentinel is indistinguishable, to this
-    // gate, from a full plan — both -> committed. Crash detection is preserved: a
-    // skip that posts NO marker still -> failed (see the case below).
-    it("architect skip-path comment (chore/docs skip note) with :COMPLETE -> committed (advances, not needs-human)", async () => {
-      const skipBlob = "<!-- FORGE:ARCHITECT -->\n" +
-        "## Architecture Plan — Skipped\n\n" +
-        "**Skipped**: chore:/docs: title. No cross-path consistency risk.\n\n" +
-        "<!-- FORGE:ARCHITECT:COMPLETE -->";
-      const outcome = await architect.detectOutcome(base, ioWith(skipBlob));
-      assert.equal(outcome.status, "committed");
-    });
-
-    it("architect skip note WITHOUT the :COMPLETE sentinel (genuine crash) -> failed (still escalates)", async () => {
-      const crashBlob = "<!-- FORGE:ARCHITECT -->\n## Architecture Plan — Skipped\n**Skipped**: chore: title.";
-      const outcome = await architect.detectOutcome(base, ioWith(crashBlob));
-      assert.equal(outcome.status, "failed");
+    it("never fails build for a missing context/architect marker", async () => {
+      const o = await build.detectOutcome({ ...base, branch: "fix/x-42" }, withComments(builder));
+      assert.equal(o.status, "committed");
     });
   });
 
