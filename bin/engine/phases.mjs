@@ -491,7 +491,8 @@ export const PHASES = [
       const terminal = state.terminalReason === "decomposed" ? "decomposed"
         : state.terminalReason === "invalid" ? "invalid" : "merged";
       const args = [String(state.issue), ...repoArgs(ctx), ...baseArgs(state)];
-      if (state.pr != null) args.push("--pr", need(state.pr, "pr", /^[0-9]+$/));
+      // forge#3504: a merged close with no PR is fabricated evidence — require it.
+      if (state.pr != null || terminal === "merged") args.push("--pr", need(state.pr, "pr", /^[0-9]+$/));
       if (state.branch) args.push("--branch", need(state.branch, "branch", BRANCH_RE));
       const wt = await resolveWorktree(state, io);
       if (wt && PATH_RE.test(wt)) args.push("--worktree", wt);

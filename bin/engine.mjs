@@ -567,11 +567,20 @@ export async function runIssue(opts) {
     // the "committed" path, so that case doesn't apply here). Kept as a
     // sibling of `outputs` rather than nested inside it, since `outputs` is
     // owned by phase.detectOutcome() (bin/engine/phases.mjs).
-    appendEvent(dir, issue, { event: "PHASE_COMMIT", phase: phase.id, outputs: outcome.outputs || {}, usage: outcome.usage ?? null });
+    // forge#3503/#3504: a blocked review hands off to remediate, which reads the PR
+    // number and the needs-human reason from state re-derived from the run log. Persist
+    // both in the PHASE_COMMIT event itself so a rebuild (the next line, or a resume)
+    // sees them; in-memory-only values are discarded by deriveState.
+    const commitOutputs = { ...(outcome.outputs || {}) };
+    if (outcome.status === "blocked" && commitOutputs.pr == null && state.pr != null)
+      commitOutputs.pr = state.pr;
+    const blockedReason = outcome.status === "blocked" ? (outcome.reason || "needs-human") : null;
+    appendEvent(dir, issue, {
+      event: "PHASE_COMMIT", phase: phase.id, outputs: commitOutputs, usage: outcome.usage ?? null,
+      ...(blockedReason ? { terminalReason: blockedReason } : {}),
+    });
     state = deriveState(readLog(dir, issue));
-    const terminalReason = outcome.status === "blocked"
-      ? (outcome.reason || "needs-human")
-      : outcome.terminalReason;
+    const terminalReason = blockedReason ?? outcome.terminalReason;
     if (terminalReason) state.terminalReason = terminalReason;
     await projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } });
 

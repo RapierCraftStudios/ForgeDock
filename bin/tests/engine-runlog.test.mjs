@@ -10,6 +10,15 @@ beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "fd-runlog-")); });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
 describe("runlog", () => {
+  it("a blocked PHASE_COMMIT persists its pr and terminalReason across deriveState (forge#3503/#3504)", () => {
+    appendEvent(dir, 7, { event: "RUN_START", issue: 7, run: "r", lane: "staging" });
+    appendEvent(dir, 7, { event: "PHASE_COMMIT", phase: "review", outputs: { pr: 12 }, terminalReason: "needs-human" });
+    const s = deriveState(readLog(dir, 7));
+    assert.equal(s.pr, 12);
+    assert.equal(s.terminalReason, "needs-human");
+    assert.ok(s.committed.includes("review"));
+  });
+
   it("append then read returns events in order with assigned seq", () => {
     appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r1", lane: "staging" });
     appendEvent(dir, 42, { event: "PHASE_START", phase: "investigate" });

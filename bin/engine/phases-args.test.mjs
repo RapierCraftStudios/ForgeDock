@@ -94,6 +94,11 @@ describe("engine phase args satisfy each target spec's argument-hint (forge#3499
     await assert.rejects(() => PHASES.find((p) => p.id === "remediate").buildArgs({ ...state, pr: null }, ctx, io), PhaseArgsError);
   });
 
+  it("close refuses a merged terminal state without a PR (forge#3504)", async () => {
+    const close = PHASES.find((p) => p.id === "close");
+    await assert.rejects(() => close.buildArgs({ ...state, pr: null, terminalReason: "merged" }, ctx, io), PhaseArgsError);
+  });
+
   it("close derives --terminal-state from the run's terminal reason", async () => {
     const close = PHASES.find((p) => p.id === "close");
     for (const [reason, expected] of [[null, "merged"], ["invalid", "invalid"], ["decomposed", "decomposed"]]) {
