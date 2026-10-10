@@ -230,6 +230,47 @@ describe("runIssue", () => {
       ["investigate", "build", "review", "remediate"]);
   });
 
+  it("forge#3624: remediate AUTO-LANDED with the issue still open hands off to close", async () => {
+    const { w, io } = fakeWorld();
+    const calls = [];
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; w.labels.push("needs-human"); },
+      "work-on/remediate": () => { w.markers += remediation("AUTO-LANDED"); },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName, args }) => { calls.push({ commandName, args }); script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "merged");
+    const closes = calls.filter((c) => c.commandName === "work-on/close");
+    assert.equal(closes.length, 1, "close must run exactly once");
+    const flat = (Array.isArray(closes[0].args) ? closes[0].args : [closes[0].args]).join(" ");
+    assert.match(flat, /--terminal-state merged/);
+    assert.deepEqual(deriveState(readLog(dir, 42)).committed,
+      ["investigate", "build", "review", "remediate", "close"]);
+  });
+
+  it("forge#3624: remediate AUTO-LANDED with the issue already CLOSED + workflow:merged ends merged without close", async () => {
+    const { w, io } = fakeWorld();
+    const calls = [];
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; w.labels.push("needs-human"); },
+      "work-on/remediate": () => { w.markers += remediation("AUTO-LANDED"); w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+      "work-on/close": () => { throw new Error("close must not re-run"); },
+    };
+    const runner = async ({ commandName, args }) => { calls.push({ commandName, args }); script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(calls.filter((c) => c.commandName === "work-on/close").length, 0);
+    assert.deepEqual(deriveState(readLog(dir, 42)).committed,
+      ["investigate", "build", "review", "remediate"]);
+  });
+
   it("forge#3521: #3511-shaped run (review opens PR, labels the issue only) hands off to remediate with the PR number", async () => {
     const { w, io } = fakeWorld();
     const script = {
