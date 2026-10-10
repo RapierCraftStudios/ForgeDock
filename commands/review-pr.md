@@ -1172,11 +1172,47 @@ echo "=== BASELINE ROSTER (top domains): $SELECTED_AGENTS ==="
 | Cross-critical domains | `SCORE_AUTH >= 2` AND `SCORE_DATABASE >= 3` | Auth + Database |
 | Cross-critical domains | `SCORE_BILLING >= 2` AND `SCORE_CONCURRENCY >= 2` | Billing + Concurrency + Database |
 
+**Roster label to marker domain (single source of truth)**: roster labels come in three spellings (score keys such as `INFRA`/`SCRAPING`, display names such as `Infrastructure`/`Scraping`, persona files such as `infra`/`scraper`). The marker domain in `<!-- FORGE:REVIEW-AGENT:{domain} -->` is always the canonical value below, never the lowercased roster label. Phase 4 stays fail closed on that canonical marker: no alias is accepted. <!-- Added: forge#3485 -->
+
+| Roster label (any case) | Marker domain | Persona file |
+|-------------------------|---------------|--------------|
+| `Security` | `security` | `security.md` |
+| `Auth` | `auth` | `auth.md` |
+| `Billing` | `billing` | `billing.md` |
+| `Concurrency` | `concurrency` | `concurrency.md` |
+| `Database` | `database` | `database.md` |
+| `INFRA`, `Infrastructure` | `infra` | `infra.md` |
+| `SCRAPING`, `Scraping`, `Scraper` | `scraper` | `scraper.md` |
+| `FRONTEND`, `Frontend`, `Web` | `frontend` | `frontend.md` |
+| `API` | `api` | `api.md` |
+
+A label outside the table falls back to its lowercase form. The `agent_domain()` helper is defined inline in every Bash block that needs it (each Bash call is a fresh shell); all copies must stay identical, which `scripts/review-pr-domain-map.test.sh` enforces.
+
 ```bash
 # Apply escalation triggers
+# BEGIN review-pr-agent-domain
+agent_domain() {
+    case "$(printf '%s' "${1}" | tr '[:upper:]' '[:lower:]')" in
+        security) echo security ;;
+        auth) echo auth ;;
+        billing) echo billing ;;
+        concurrency) echo concurrency ;;
+        database) echo database ;;
+        infra|infrastructure) echo infra ;;
+        scraper|scraping) echo scraper ;;
+        frontend|web) echo frontend ;;
+        api) echo api ;;
+        *) printf '%s' "${1}" | tr '[:upper:]' '[:lower:]' ;;
+    esac
+}
+# END review-pr-agent-domain
 add_agent() {
-    local AGENT="${1}"
-    echo "$SELECTED_AGENTS" | grep -qw "$AGENT" || SELECTED_AGENTS="$SELECTED_AGENTS $AGENT"
+    local AGENT CUR HAVE=""
+    AGENT=$(agent_domain "${1}")
+    for CUR in $SELECTED_AGENTS; do
+        [ "$(agent_domain "$CUR")" = "$AGENT" ] && HAVE=1
+    done
+    [ -n "$HAVE" ] || SELECTED_AGENTS="$SELECTED_AGENTS $AGENT"
 }
 
 [ "$SCORE_AUTH" -ge 3 ] && add_agent "Auth"
@@ -1410,6 +1446,34 @@ if [ "$THOROUGH" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]; then
     SELECTED_AGENTS=$(echo "$SELECTED_AGENTS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
     echo "=== THOROUGH mode: FULL UNION DISPATCH — $SELECTED_AGENTS ==="
 fi
+```
+
+**Roster canonicalization (final step of 3B, mandatory)**: rewrite `SELECTED_AGENTS` to canonical marker domains with one entry per persona, so `INFRA` and `Infrastructure` (or `SCRAPING` and `Scraping`) dispatch once and `SELECTED_AGENT_COUNT` counts each persona once. Pass the rewritten value to Phase 3C and Phase 4 as `{SELECTED_AGENTS}`. <!-- Added: forge#3485 -->
+
+```bash
+# BEGIN review-pr-agent-domain
+agent_domain() {
+    case "$(printf '%s' "${1}" | tr '[:upper:]' '[:lower:]')" in
+        security) echo security ;;
+        auth) echo auth ;;
+        billing) echo billing ;;
+        concurrency) echo concurrency ;;
+        database) echo database ;;
+        infra|infrastructure) echo infra ;;
+        scraper|scraping) echo scraper ;;
+        frontend|web) echo frontend ;;
+        api) echo api ;;
+        *) printf '%s' "${1}" | tr '[:upper:]' '[:lower:]' ;;
+    esac
+}
+# END review-pr-agent-domain
+CANON_ROSTER=""
+for AGENT in $SELECTED_AGENTS; do
+  D=$(agent_domain "$AGENT")
+  case " $CANON_ROSTER " in *" $D "*) ;; *) CANON_ROSTER="$CANON_ROSTER $D" ;; esac
+done
+SELECTED_AGENTS="${CANON_ROSTER# }"
+echo "=== CANONICAL ROSTER: $SELECTED_AGENTS ==="
 ```
 
 **Why cross-critical domain pairs always escalate**: A 2-file PR touching both `services/api/app/core/auth.py` and `services/api/app/routers/billing.py` creates interaction bugs that single-domain reviewers cannot catch. Never rely on a single agent for multi-domain risk.
@@ -1701,8 +1765,24 @@ while IFS= read -r _c; do
   case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
 done <<< "$_tc"
 PENDING_AGENTS=""
+# BEGIN review-pr-agent-domain
+agent_domain() {
+    case "$(printf '%s' "${1}" | tr '[:upper:]' '[:lower:]')" in
+        security) echo security ;;
+        auth) echo auth ;;
+        billing) echo billing ;;
+        concurrency) echo concurrency ;;
+        database) echo database ;;
+        infra|infrastructure) echo infra ;;
+        scraper|scraping) echo scraper ;;
+        frontend|web) echo frontend ;;
+        api) echo api ;;
+        *) printf '%s' "${1}" | tr '[:upper:]' '[:lower:]' ;;
+    esac
+}
+# END review-pr-agent-domain
 for AGENT in $SELECTED_AGENTS; do
-  AGENT_DOMAIN=$(printf '%s' "$AGENT" | tr '[:upper:]' '[:lower:]')
+  AGENT_DOMAIN=$(agent_domain "$AGENT")
   HAVE=""
   if [ -n "$TRUSTED_SCRIPT" ]; then
     HAVE=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
@@ -1714,7 +1794,7 @@ done
 echo "PENDING_AGENTS:${PENDING_AGENTS:- (none)}"
 ```
 
-**CRITICAL**: Launch ALL agents in `PENDING_AGENTS` in a SINGLE message using multiple `{DISPATCH_TOOL}` calls. If `PENDING_AGENTS` is empty, every selected reviewer already posted for this head: launch nothing and go straight to Phase 4. Each agent must persist its finalized body before posting it with `gh pr comment --body-file`, start the body with `<!-- FORGE:REVIEW-AGENT:{lowercase-domain} -->` followed by a `Reviewed-SHA: ${REVIEW_SHA}` line (the full head SHA, outside the marker), and return its verdict and findings to the orchestrator independently of GitHub delivery.
+**CRITICAL**: Launch ALL agents in `PENDING_AGENTS` in a SINGLE message using multiple `{DISPATCH_TOOL}` calls. If `PENDING_AGENTS` is empty, every selected reviewer already posted for this head: launch nothing and go straight to Phase 4. Each agent must persist its finalized body before posting it with `gh pr comment --body-file`, start the body with `<!-- FORGE:REVIEW-AGENT:{marker-domain} -->` (`{marker-domain}` is the canonical value from the roster-to-marker table, i.e. the `AGENT_DOMAIN` computed above for that agent; pass it to each persona explicitly) followed by a `Reviewed-SHA: ${REVIEW_SHA}` line (the full head SHA, outside the marker), and return its verdict and findings to the orchestrator independently of GitHub delivery.
 
 **Dispatch failure and partial-panel guard (MANDATORY):** Count the selected roster before dispatch. If any launch fails, including from pool exhaustion, do not continue with the agents that did launch as a sufficient panel. Immediately run the **Panel hard-stop block** below with `ACTUAL_AGENT_COUNT=0` and exit without a verdict. After reviewers complete (joined `Task`/`task` return) or, under async `Agent`, after the Phase 4 bounded wait ends, independently compare their posted trusted current-SHA `FORGE:REVIEW-AGENT` markers with the selected count; a smaller count is the same hard stop. This catches a reviewer that accepted dispatch but failed before posting. Under async `Agent` the comparison runs only after the wait, so a reviewer that is merely late is not a false degraded stop.
 
@@ -1826,8 +1906,24 @@ done <<< "$_tc"
 COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
 MISSING_AGENT_COMMENTS=""
 ACTUAL_AGENT_COUNT=0
+# BEGIN review-pr-agent-domain
+agent_domain() {
+    case "$(printf '%s' "${1}" | tr '[:upper:]' '[:lower:]')" in
+        security) echo security ;;
+        auth) echo auth ;;
+        billing) echo billing ;;
+        concurrency) echo concurrency ;;
+        database) echo database ;;
+        infra|infrastructure) echo infra ;;
+        scraper|scraping) echo scraper ;;
+        frontend|web) echo frontend ;;
+        api) echo api ;;
+        *) printf '%s' "${1}" | tr '[:upper:]' '[:lower:]' ;;
+    esac
+}
+# END review-pr-agent-domain
 for AGENT in $SELECTED_AGENTS; do
-  AGENT_DOMAIN=$(printf '%s' "$AGENT" | tr '[:upper:]' '[:lower:]')
+  AGENT_DOMAIN=$(agent_domain "$AGENT")
   N=""
   if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$COMMENTS_JSON" ]; then
     N=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)" 2>/dev/null || echo "")
