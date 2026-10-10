@@ -366,7 +366,7 @@ Create review chunks by priority: Billing/Pricing (CRITICAL) → Security/Auth (
 A bundle PR already got a full line-level review before it merged to staging, so re-reviewing its diff here re-files the same defects. Compute the already-reviewed commit set and scope line-level review to what a feature-PR review could not see. Consumes `ALL_PR_NUMBERS` (Phase 0A). Trust comes from `scripts/trusted-comments.sh` (resolved with the canonical helper-script resolver below: plugin root, `FORGE_ROOT`, `FORGEDOCK_HOME`, `FORGE_HOME`, install symlink, marketplaces, pinned plugin cache; never the working directory, which is author-controlled).
 
 ```bash
-SCOPE_MODE=full; REVIEWED_COMMITS=""; UNREVIEWED_COMMITS=""; UNREVIEWED_FILES=""; _LOG=""; CROSS_PR_FILES=""; REVIEWED_PR_COUNT=0
+SCOPE_MODE=full; REVIEWED_COMMITS=""; REVIEWED_MERGES=""; DEPLOY_WIRING_FILES=""; UNREVIEWED_COMMITS=""; UNREVIEWED_FILES=""; _LOG=""; CROSS_PR_FILES=""; REVIEWED_PR_COUNT=0
 _SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"; _PF="$_SD/${PR_NUMBER}_bundle-pr-files.txt"; : > "$_PF"
 # TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
 _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
@@ -399,6 +399,7 @@ if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$ALL_PR_NUMBERS" ]; then
     if [ "$_ROUTE" -ge 1 ] && [ "$_AGENT" -ge 1 ] && [ "$_DEGRADED" -eq 0 ] && [ "$(printf '%s' "$_J" | jq '.commits|length')" -lt 100 ]; then
       REVIEWED_PR_COUNT=$((REVIEWED_PR_COUNT+1))
       REVIEWED_COMMITS="$REVIEWED_COMMITS $(printf '%s' "$_J" | jq -r '[.commits[].oid, .mergeCommit.oid // empty] | join(" ")')"
+      REVIEWED_MERGES="$REVIEWED_MERGES $(printf '%s' "$_J" | jq -r '.mergeCommit.oid // empty')"
     fi
     printf '%s\n' "$_FILES" | sort -u | sed "s|^|$pr |" >> "$_PF"
   done
@@ -423,11 +424,18 @@ if [ "$SCOPE_MODE" = "scoped" ]; then
     _DC=$(git diff-tree --no-commit-id --name-only -r --cc "$c") || { SCOPE_MODE=full; break; }
     UNREVIEWED_FILES="$UNREVIEWED_FILES"$'\n'"$_DT"$'\n'"$_DC"
   done
+  # A reviewed PR's own merge commit may carry conflict-resolution content its review never saw: count its --cc files as unreviewed too.
+  for c in $REVIEWED_MERGES; do
+    _DC=$(git diff-tree --no-commit-id --name-only -r --cc "$c") || { SCOPE_MODE=full; break; }
+    UNREVIEWED_FILES="$UNREVIEWED_FILES"$'\n'"$_DC"
+  done
   UNREVIEWED_FILES=$(printf '%s\n' "$UNREVIEWED_FILES" | sed '/^$/d' | sort -u)
 fi
 # Deploy/runtime readiness files are always in scope: migrations, env, workflows, compose/infra, dependency manifests.
 _DW=$(git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH --name-only) || { SCOPE_MODE=full; _DW=""; }
 DEPLOY_WIRING_FILES=$(printf '%s\n' "$_DW" | grep -E '(^|/)(migrations?/|\.github/workflows/|infra/|deploy/|docker-compose[^/]*\.ya?ml$|\.env[^/]*$|Dockerfile[^/]*$|package(-lock)?\.json$|pnpm-lock\.yaml$|yarn\.lock$|requirements[^/]*\.txt$|pyproject\.toml$|poetry\.lock$|go\.(mod|sum)$|Cargo\.(toml|lock)$)' || true)
+# Persist the results for 7B.5 (a later Bash call is a fresh shell). %q keeps multi-line file lists intact.
+printf 'SCOPE_MODE=%q\nCROSS_PR_FILES=%q\nUNREVIEWED_FILES=%q\nDEPLOY_WIRING_FILES=%q\n' "$SCOPE_MODE" "${CROSS_PR_FILES:-}" "${UNREVIEWED_FILES:-}" "${DEPLOY_WIRING_FILES:-}" > "$_SD/${PR_NUMBER}_scope.env"
 echo "SCOPE_MODE=$SCOPE_MODE reviewed_prs=$REVIEWED_PR_COUNT unreviewed_commits=$(echo $UNREVIEWED_COMMITS | wc -w) unreviewed_files=$(echo "$UNREVIEWED_FILES" | grep -c .) cross_pr_files=$(echo "$CROSS_PR_FILES" | grep -c .)"
 ```
 
@@ -869,12 +877,7 @@ Missing comments are an explicit failure, never evidence of no findings. Do not 
 From PR comments, extract structured findings (`<!-- FINDING:... -->`). If none found, scan for unstructured findings. If still 0 → skip to Phase 8.
 
 ### 7B: Filter & Deduplicate
-Keep ALL findings (CONFIRMED/LIKELY/POSSIBLE) for classification (7B.5). Deduplicate within this run by file + pattern + location: same file, location within +-5 lines, and 3+ shared title keywords (a shared explicit finding id is an additional match, never a substitute for the keyword test) are one finding (keep higher confidence). When `SCOPE_MODE=scoped`, a finding is `out_of_scope` only when it cites at least one file and EVERY cited file is outside `CROSS_PR_FILES`, `UNREVIEWED_FILES` and `DEPLOY_WIRING_FILES` (0B.1; a finding with any in-scope file, such as a cross-file interaction, stays in scope), and the filter may only DEMOTE it, never drop it: only a finding whose normalised severity is `MEDIUM`, `LOW` or `INFO` becomes a listed note. `CRITICAL` and `HIGH` (any confidence), and any missing or unrecognised severity, are always kept and go to 7B.5 as usual, so scope can never remove a blocking finding. Every demoted finding is listed (id, file:line, reason `out_of_scope`) in the 7B.5 disposition; none is silently dropped. Findings with no file (readiness-checklist items such as undocumented env vars or a migration-number collision across PRs) are never demoted. The executable rule (`scripts/review-pr-staging-scope.test.sh` evaluates these two lines):
-
-```bash
-# SCOPE_RULE: SEV=$(printf '%s' "$FINDING_SEVERITY" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')
-# SCOPE_RULE: case "$SEV" in MEDIUM|LOW|INFO) OOS_DEMOTE=1 ;; *) OOS_DEMOTE=0 ;; esac   # applies only to a finding whose file is out of scope
-```
+Keep ALL findings (CONFIRMED/LIKELY/POSSIBLE) for classification (7B.5). Deduplicate within this run by file + pattern + location: same file, location within +-5 lines, and 3+ shared title keywords (a shared explicit finding id is an additional match, never a substitute for the keyword test) are one finding (keep higher confidence). When `SCOPE_MODE=scoped`, a finding is `out_of_scope` only when it cites at least one file and EVERY cited file is outside `CROSS_PR_FILES`, `UNREVIEWED_FILES` and `DEPLOY_WIRING_FILES` (0B.1; a finding with any in-scope file, such as a cross-file interaction, stays in scope), and the filter may only DEMOTE it, never drop it: only a finding whose normalised severity is `MEDIUM`, `LOW` or `INFO` becomes a listed note. `CRITICAL` and `HIGH` (any confidence), and any missing or unrecognised severity, are always kept and go to 7B.5 as usual, so scope can never remove a blocking finding. Every demoted finding is listed (id, file:line, reason `out_of_scope`) in the 7B.5 disposition; none is silently dropped. Findings with no file (readiness-checklist items such as undocumented env vars or a migration-number collision across PRs) are never demoted. The executable rule is the two `SCOPE_RULE` lines inside `classify_one` in 7B.5 (`scripts/review-pr-staging-scope.test.sh` evaluates them).
 
 Sort: CONFIRMED first, then by severity.
 
@@ -892,37 +895,47 @@ CLASSIFY_SCRIPT=""
 while IFS= read -r _c; do
   case "$_c" in /*) [ -z "$CLASSIFY_SCRIPT" ] && [ -f "$_c/scripts/classify-finding.sh" ] && CLASSIFY_SCRIPT="$_c/scripts/classify-finding.sh" ;; esac
 done <<< "$_tc"
-# Per finding: FINDING_SEVERITY / FINDING_CONFIDENCE / FINDING_AGENT come from its structured block.
+# Per-finding inputs come from each structured block: FINDING_ID, FINDING_SEVERITY, FINDING_CONFIDENCE, FINDING_AGENT, FINDING_TITLE, FINDING_BODY,
+# FINDING_FILE (primary) and FINDING_PATHS (newline-separated, every cited file). Run THIS WHOLE BLOCK in ONE Bash call, looping over every deduped finding
+# (init once, then classify_one per finding, then the disposition record), because counters and the note list live in shell state and a fresh shell loses them.
 _SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"
-FINDING_TEXT_FILE=$(mktemp "$_SD/staging-finding.XXXXXX")
-# FINDING_ID/TITLE/BODY/FILE/PATHS (newline-separated, every cited file) come from the structured block. The classifier's content-based safety
-# exemption reads this file, so it MUST hold the finding text: an empty file silently disables the exemption.
-printf '%s\n%s\n%s\n' "${FINDING_TITLE:-}" "${FINDING_BODY:-}" "${FINDING_PATHS:-${FINDING_FILE:-}}" > "$FINDING_TEXT_FILE"
 NOTE_LIST_FILE="$_SD/${PR_NUMBER}_notes.md"; : > "$NOTE_LIST_FILE"
 NOTES_LISTED=0; NOTES_DROPPED=0; FINDINGS_FILED=0; OUT_OF_SCOPE=0
-DISPOSITION=""
-if [ -n "$CLASSIFY_SCRIPT" ]; then
-  DISPOSITION=$(bash "$CLASSIFY_SCRIPT" --severity "$FINDING_SEVERITY" --confidence "$FINDING_CONFIDENCE" \
-    --agent "$FINDING_AGENT" --lineage none --text-file "$FINDING_TEXT_FILE") || DISPOSITION=""
-fi
-# Fail toward filing, never drop: an empty/unknown classifier result is ISSUE (the classifier's own convention). INPR_FIX is never emitted (no --inpr-diff on a bundle).
-case "$DISPOSITION" in ISSUE*|NOTE*) ;; *) DISPOSITION="ISSUE classifier-unavailable" ;; esac
-# 7B scope demotion (consumes OOS_DEMOTE from the SCOPE_RULE lines): demote ONLY when scoped, the severity rule allows it, and EVERY cited file is out of scope.
-# A finding with no file, or with any file in scope, is never demoted. The demotion is recorded as a listed note, never dropped.
-if [ "$SCOPE_MODE" = "scoped" ] && [ "${OOS_DEMOTE:-0}" = "1" ] && [ -n "${FINDING_PATHS:-${FINDING_FILE:-}}" ]; then
-  _ANY_IN=false
-  while IFS= read -r _f; do
-    [ -n "$_f" ] || continue
-    printf '%s\n' "$CROSS_PR_FILES" "$UNREVIEWED_FILES" "$DEPLOY_WIRING_FILES" | grep -qxF -- "$_f" && _ANY_IN=true
-  done <<< "${FINDING_PATHS:-$FINDING_FILE}"
-  if [ "$_ANY_IN" = "false" ]; then
-    DISPOSITION="NOTE out_of_scope"; OUT_OF_SCOPE=$((OUT_OF_SCOPE+1))
+# 0B.1 results were written to a scope file by the Phase 0B.1 block; a missing or unreadable file means SCOPE_MODE=full (no demotion, fail open).
+SCOPE_MODE=full; CROSS_PR_FILES=""; UNREVIEWED_FILES=""; DEPLOY_WIRING_FILES=""
+[ -r "$_SD/${PR_NUMBER}_scope.env" ] && . "$_SD/${PR_NUMBER}_scope.env"
+classify_one() {
+  # FINDING_TEXT_FILE holds the finding text: the classifier's content-based safety exemption reads it, so an empty file silently disables the exemption.
+  local FINDING_TEXT_FILE; FINDING_TEXT_FILE=$(mktemp "$_SD/staging-finding.XXXXXX")
+  printf '%s\n%s\n%s\n' "${FINDING_TITLE:-}" "${FINDING_BODY:-}" "${FINDING_PATHS:-${FINDING_FILE:-}}" > "$FINDING_TEXT_FILE"
+  DISPOSITION=""
+  if [ -n "$CLASSIFY_SCRIPT" ]; then
+    DISPOSITION=$(bash "$CLASSIFY_SCRIPT" --severity "$FINDING_SEVERITY" --confidence "$FINDING_CONFIDENCE" \
+      --agent "$FINDING_AGENT" --lineage none --text-file "$FINDING_TEXT_FILE") || DISPOSITION=""
   fi
-fi
-case "$DISPOSITION" in
-  NOTE*) NOTES_LISTED=$((NOTES_LISTED+1)); printf '%s\n' "- ${FINDING_ID:-?} ${FINDING_FILE:-?}: ${DISPOSITION}" >> "$NOTE_LIST_FILE" ;;
-  *) FINDINGS_FILED=$((FINDINGS_FILED+1)) ;;   # classified ISSUE; 7E dedup may still skip creation
-esac
+  rm -f "$FINDING_TEXT_FILE"
+  # Fail toward filing, never drop: an empty/unknown classifier result is ISSUE (the classifier's own convention). INPR_FIX is never emitted (no --inpr-diff on a bundle).
+  case "$DISPOSITION" in ISSUE*|NOTE*) ;; *) DISPOSITION="ISSUE classifier-unavailable" ;; esac
+  # 7B scope rule (the two SCOPE_RULE lines are executed here and evaluated by scripts/review-pr-staging-scope.test.sh):
+  SEV=$(printf '%s' "$FINDING_SEVERITY" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')   # SCOPE_RULE
+  case "$SEV" in MEDIUM|LOW|INFO) OOS_DEMOTE=1 ;; *) OOS_DEMOTE=0 ;; esac   # SCOPE_RULE
+  # Demote ONLY when scoped, the rule allows it, the classifier did not apply its safety exemption, and EVERY cited file is out of scope.
+  # A finding with no file, or with any file in scope, is never demoted. The demotion is recorded as a listed note, never dropped.
+  case "$DISPOSITION" in *safety-exemption*) OOS_DEMOTE=0 ;; esac
+  if [ "$SCOPE_MODE" = "scoped" ] && [ "$OOS_DEMOTE" = "1" ] && [ -n "${FINDING_PATHS:-${FINDING_FILE:-}}" ]; then
+    local _ANY_IN=false _f
+    while IFS= read -r _f; do
+      [ -n "$_f" ] || continue
+      printf '%s\n' "$CROSS_PR_FILES" "$UNREVIEWED_FILES" "$DEPLOY_WIRING_FILES" | grep -qxF -- "$_f" && _ANY_IN=true
+    done <<< "${FINDING_PATHS:-$FINDING_FILE}"
+    if [ "$_ANY_IN" = "false" ]; then DISPOSITION="NOTE out_of_scope"; OUT_OF_SCOPE=$((OUT_OF_SCOPE+1)); fi
+  fi
+  case "$DISPOSITION" in
+    NOTE*) NOTES_LISTED=$((NOTES_LISTED+1)); printf '%s\n' "- ${FINDING_ID:-?} ${FINDING_FILE:-?} [${SEV:-?}] ${FINDING_TITLE:-}: ${DISPOSITION}" >> "$NOTE_LIST_FILE" ;;
+    *) FINDINGS_FILED=$((FINDINGS_FILED+1)) ;;   # classified ISSUE; 7E dedup may still skip creation
+  esac
+}
+# for each deduped finding: set the FINDING_* inputs, call classify_one, then use $DISPOSITION (ISSUE continues to 7E/7F).
 ```
 
 Only `ISSUE` findings continue to 7E/7F. Each `NOTE` is listed in the PR body (`## Non-blocking notes`, edit never replace) or dropped as a duplicate or nit; NOTEs are NEVER passed to `Skill(issue)`. Post one disposition record (counts only plus the NOTE list; every NOTE is recorded, never silently dropped), whenever 7A extracted at least one finding:
@@ -976,25 +989,34 @@ Re-reviewing the same bundle must not re-file existing findings. For each `ISSUE
 ```bash
 # FINDING_FILE/FINDING_LINE come from the finding's structured block. Define the title and scratch dir BEFORE use (7F reuses them).
 SCRATCHPAD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$SCRATCHPAD"
-STAGING_FINDING_TITLE="chore: [summary] (staging review — PR #${PR_NUMBER})"
+STAGING_FINDING_TITLE="chore: ${FINDING_TITLE:-[summary]} (staging review — PR #${PR_NUMBER})"
+EXISTING_ISSUE_EXCLUDE="${EXISTING_ISSUE_EXCLUDE:-}"   # optional comma-separated issue numbers already linked to this bundle
+_SAFE_FILE=$(printf '%s' "$FINDING_FILE" | tr -d '"\\')
 # issue-dedup.sh ships with ForgeDock next to classify-finding.sh (resolved in 7B.5, install-root only, never the repo under review).
 DEDUP_SCRIPT=""; [ -n "${CLASSIFY_SCRIPT:-}" ] && [ -f "$(dirname "$CLASSIFY_SCRIPT")/issue-dedup.sh" ] && DEDUP_SCRIPT="$(dirname "$CLASSIFY_SCRIPT")/issue-dedup.sh"
 if [ -n "$DEDUP_SCRIPT" ]; then
-  DEDUP_OUT=$(bash "$DEDUP_SCRIPT" "$STAGING_FINDING_TITLE" "$GH_FLAG" ${EXISTING_ISSUE_EXCLUDE:+--exclude "$EXISTING_ISSUE_EXCLUDE"} 2>&1)   # open issues, token match
+  DEDUP_OUT=$(bash "$DEDUP_SCRIPT" "${FINDING_TITLE:-$STAGING_FINDING_TITLE}" "$GH_FLAG" ${EXISTING_ISSUE_EXCLUDE:+--exclude "$EXISTING_ISSUE_EXCLUDE"} 2>&1)   # open issues, token match
   DEDUP_EXIT=$?
 else
   DEDUP_EXIT=127   # dedup unavailable
 fi
+# The title token match alone is weak (any two findings share words like "staging" and "review" in the boilerplate, which is why only the finding's own
+# title is matched above): an exit 1 is a duplicate ONLY when the matched open issue also cites this finding's file. Otherwise it is not a duplicate.
+if [ "$DEDUP_EXIT" -eq 1 ]; then
+  _DUP_N=$(printf '%s' "$DEDUP_OUT" | sed -n 's/^DUPLICATE: #\([0-9][0-9]*\).*/\1/p' | head -1)
+  _DUP_BODY=$(gh issue view "${_DUP_N:-0}" -R {GH_REPO} --json body --jq '.body' 2>/dev/null) || _DUP_BODY=""
+  printf '%s' "$_DUP_BODY" | grep -qF -- "$_SAFE_FILE" || DEDUP_EXIT=0
+fi
 # Closed issues that cite this file at a line within +-5 of the finding. FINDING_FILE is finding content: strip quotes/backslashes so it cannot add search qualifiers.
-_SAFE_FILE=$(printf '%s' "$FINDING_FILE" | tr -d '"\\')
 _FILE_RE=$(printf '%s' "$_SAFE_FILE" | sed 's/[][\.^$*+?(){}|\/]/\\&/g')
 REGRESSION_CHECK=ok; CLOSED_HIT=""
 # Capture the gh read first and test its own status: through a pipe a failed read looks like "no closed hit".
 _CL=$(gh issue list -R {GH_REPO} --label review-finding --state closed --search "\"${_SAFE_FILE}\" in:body" --json number,title,body,stateReason --limit 100 2>/dev/null) || REGRESSION_CHECK=unavailable
 # FINDING_LINE may be a range such as 12-15: use its first integer, and 0 when there is none.
 _L=$(printf '%s' "${FINDING_LINE:-0}" | grep -oE '[0-9]+' | head -1); _L="${_L:-0}"
-[ "$REGRESSION_CHECK" = "ok" ] && CLOSED_HIT=$(printf '%s' "$_CL" | jq -r --arg re "$_FILE_RE" --argjson l "$_L" '.[] | select((.body // "") != "") | select(.stateReason != "NOT_PLANNED")
-      | select([.body | scan($re + "[:#L]+([0-9]+)") | .[0] | tonumber | select((. - $l) <= 5 and ($l - .) <= 5)] | length > 0) | "#\(.number) \(.title)"' | head -3) || REGRESSION_CHECK=unavailable
+_HITS=""; [ "$REGRESSION_CHECK" = "ok" ] && { _HITS=$(printf '%s' "$_CL" | jq -r --arg re "$_FILE_RE" --argjson l "$_L" '.[] | select((.body // "") != "") | select(.stateReason != "NOT_PLANNED")
+      | select([.body | scan($re + "[:#L]+([0-9]+)") | .[0] | tonumber | select((. - $l) <= 5 and ($l - .) <= 5)] | length > 0) | "#\(.number) \(.title)"') || REGRESSION_CHECK=unavailable; }
+CLOSED_HIT=$(printf '%s\n' "$_HITS" | sed '/^$/d' | head -3)
 # Confirm the 3+ shared title keywords against each hit before treating it as a regression.
 ```
 
