@@ -29,12 +29,29 @@ RE=$(printf '%s' "$LINE" | sed -n 's/.*count "\(.*\)") ||.*/\1/p')
 if [ -n "$RE" ]; then ok; else bad "_AGENT regex not found in review-pr-staging.md"; fi
 FULL=0123456789abcdef0123456789abcdef01234567; SHORT=${FULL:0:7}
 RE=${RE//\\\\/\\}; RE=${RE//\$\{_HEAD\}/$FULL}
+FB=$'<!-- REVIEW-FINDINGS-START -->\nNo findings.\n<!-- REVIEW-FINDINGS-END -->'
 mk() { jq -n --arg b "$1" --arg t "$2" '[{"body":$b,"author_association":"NONE","user":{"type":$t,"login":"x"}}]'; }
 cnt() { bash "$TC" count "$RE"; }
-[ "$(mk $'<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: '"$FULL"$'\n\nok' Bot | cnt)" = 1 ] && ok || bad "full Reviewed-SHA line should count"
+[ "$(mk $'<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: '"$FULL"$'\n\n'"$FB" Bot | cnt)" = 1 ] && ok || bad "full Reviewed-SHA line should count"
 [ "$(mk $'<!-- FORGE:REVIEW-AGENT:security -->\nreviewed '"$SHORT"' only' Bot | cnt)" = 0 ] && ok || bad "7-char substring must not count"
 [ "$(mk $'<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: '"$SHORT"$'\n' Bot | cnt)" = 0 ] && ok || bad "short Reviewed-SHA must not count"
-[ "$(mk $'<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: '"${FULL}"$'ff\n' Bot | cnt)" = 0 ] && ok || bad "longer sha must not count"
-[ "$(mk $'<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: '"$FULL"$'\n' User | cnt)" = 0 ] && ok || bad "untrusted author must not count"
+[ "$(mk $'<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: '"${FULL}"$'ff\n'"$FB" Bot | cnt)" = 0 ] && ok || bad "longer sha must not count"
+[ "$(mk $'<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: '"$FULL"$'\n'"$FB" User | cnt)" = 0 ] && ok || bad "untrusted author must not count"
+[ "$(mk $'<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: '"$FULL"$'\n\nno findings block here' Bot | cnt)" = 0 ] && ok || bad "comment without a findings block must not count (panel integrity)"
+
+# (3) _ROUTE regex: real mode on the final head counts, spec-evolution-blocked and a stale sha do not
+RLINE=$(grep -E '^[[:space:]]*_ROUTE=' "$SPEC" | head -1)
+RRE=$(printf '%s' "$RLINE" | sed -n 's/.*count "\(.*\)") ||.*/\1/p'); RRE=${RRE//\\\\/\\}; RRE=${RRE//\$\{_HEAD7\}/$SHORT}
+rcnt() { bash "$TC" count "$RRE"; }
+[ "$(mk '<!-- FORGE:REVIEW_ROUTE mode=single-pr spec=review-pr.md sha='"$SHORT"' -->' Bot | rcnt)" = 1 ] && ok || bad "route marker on the final head should count"
+[ "$(mk '<!-- FORGE:REVIEW_ROUTE mode=spec-evolution-blocked spec=review-pr.md sha='"$SHORT"' -->' Bot | rcnt)" = 0 ] && ok || bad "spec-evolution-blocked route must not count"
+[ "$(mk '<!-- FORGE:REVIEW_ROUTE mode=single-pr spec=review-pr.md sha=abcdef0 -->' Bot | rcnt)" = 0 ] && ok || bad "stale-sha route must not count"
+
+# (4) spec text guards: agents may not be told to suppress findings; no $PWD tier in the classifier resolver; git reads are status-checked
+if grep -q 'MUST NOT report a defect' "$SPEC"; then bad "Phase 2 must not tell agents to suppress findings (7B owns demotion)"; else ok; fi
+if grep -n 'FINDING_TEXT_FILE=$(mktemp' "$SPEC" >/dev/null && grep -q '> "$FINDING_TEXT_FILE"' "$SPEC"; then ok; else bad "FINDING_TEXT_FILE must be written before the classifier call"; fi
+if awk '/^CLASSIFY_SCRIPT=""/,/^done <<</' "$SPEC" | grep -q 'PWD'; then bad "classifier resolver must have no PWD tier"; else ok; fi
+if grep -qE "^DEPLOY_WIRING_FILES=.*git diff" "$SPEC"; then bad "DEPLOY_WIRING_FILES must not pipe git diff directly"; else ok; fi
+if grep -q 'git diff-tree .*|| { SCOPE_MODE=full' "$SPEC"; then ok; else bad "git diff-tree reads must fall back to full scope"; fi
 echo "review-pr-staging-scope.test.sh: passed=$PASS failed=$FAILN"
 [ "$FAILN" -eq 0 ]
