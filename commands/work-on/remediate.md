@@ -201,9 +201,10 @@ fi
 - Conflicts: read BOTH sides of every conflicted hunk and the surrounding code, then write the combined result by hand. No `-X ours`/`-X theirs`, no wholesale `git checkout --ours/--theirs`, no blanket take-one-side. After resolving, `git add` the files and conclude with `git commit -s --no-edit` (the merge commit).
 - **Unresolvable with confidence** (a hunk whose intent on either side you cannot reconcile, or the branch is refused above): capture the file list first, then abort, and park:
   ```bash
+  run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
   CONFLICT_FILES=$(git diff --name-only --diff-filter=U)
   git merge --abort # allowlist:check-command-side-effects
-  gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "<!-- FORGE:BASESYNC_FAILED -->
+  run gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "<!-- FORGE:BASESYNC_FAILED -->
   Base sync of PR #{PR_NUMBER} (\`origin/{PR_BASE}\` into \`{HEAD_BRANCH}\`) could not be resolved with confidence. Conflicting files:
 
   \`\`\`
@@ -236,6 +237,7 @@ If still failing after 3 iterations: post a comment, re-affirm `needs-human`, EX
 ```bash
 # <Script resolution block from work-on/review.md, verbatim>
 cd {WORKTREE_PATH}
+run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
 git fetch origin {PR_BASE} >/dev/null 2>&1 || true
 RESOLUTION=$(resolve_script 'check-branch-ancestry'); TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
 if [ "$TIER" = "prose" ]; then
@@ -244,7 +246,7 @@ else
   MERGE_COMMITS=$(bash "$SCRIPT_PATH" {HEAD_BRANCH} origin/{PR_BASE} 2>&1); ANCESTRY_RC=$?
 fi
 if [ "$ANCESTRY_RC" -ne 0 ]; then
-  gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "## Pre-Push Ancestry Guard Failed
+  run gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "## Pre-Push Ancestry Guard Failed
 
 Branch \`{HEAD_BRANCH}\` has merge commits from outside \`{PR_BASE}\`, or ancestry could not be verified (rc=${ANCESTRY_RC}). Not pushing.
 
