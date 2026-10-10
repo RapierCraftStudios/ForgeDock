@@ -42,7 +42,8 @@ function fakeWorld() {
       if (a.startsWith("issue edit")) { const i = args.indexOf("--body"); if (i>=0) w.body = args[i+1];
         const j = args.indexOf("--add-label"); if (j>=0) w.labels.push(args[j+1]); 
         const r = args.indexOf("--remove-label"); if (r>=0) w.labels = w.labels.filter((l) => l !== args[r+1]); return ""; }
-      if (a.startsWith("pr list")) return JSON.stringify(w.pr ? [{ number: w.pr }] : []);
+      // forge#3562: w.prList(args) lets a test model per-branch PR history (mergedAt/baseRefName).
+      if (a.startsWith("pr list")) return JSON.stringify(w.prList ? w.prList(args) : (w.pr ? [{ number: w.pr }] : []));
       if (a.startsWith("pr view")) return JSON.stringify({ number: w.pr, state: w.prMerged?"MERGED":"OPEN",
         mergedAt: w.prMerged ? "t" : null, labels: w.prNeedsHuman ? [{name:"needs-human"}] : [] });
       return "";
@@ -228,6 +229,67 @@ describe("runIssue", () => {
     assert.equal(reviewExit.status, "blocked");
     assert.deepEqual(deriveState(readLog(dir, 42)).committed,
       ["investigate", "build", "review", "remediate"]);
+  });
+
+  it("forge#3624: remediate AUTO-LANDED with the issue still open hands off to close", async () => {
+    const { w, io } = fakeWorld();
+    const calls = [];
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; w.labels.push("needs-human"); },
+      "work-on/remediate": () => { w.markers += remediation("AUTO-LANDED"); },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName, args }) => { calls.push({ commandName, args }); script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "merged");
+    const closes = calls.filter((c) => c.commandName === "work-on/close");
+    assert.equal(closes.length, 1, "close must run exactly once");
+    const flat = (Array.isArray(closes[0].args) ? closes[0].args : [closes[0].args]).join(" ");
+    assert.match(flat, /--terminal-state merged/);
+    assert.deepEqual(deriveState(readLog(dir, 42)).committed,
+      ["investigate", "build", "review", "remediate", "close"]);
+  });
+
+  it("forge#3624: remediate AUTO-LANDED with the issue already CLOSED + workflow:merged ends merged without close", async () => {
+    const { w, io } = fakeWorld();
+    const calls = [];
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; w.labels.push("needs-human"); },
+      "work-on/remediate": () => { w.markers += remediation("AUTO-LANDED"); w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+      "work-on/close": () => { throw new Error("close must not re-run"); },
+    };
+    const runner = async ({ commandName, args }) => { calls.push({ commandName, args }); script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(calls.filter((c) => c.commandName === "work-on/close").length, 0);
+    assert.deepEqual(deriveState(readLog(dir, 42)).committed,
+      ["investigate", "build", "review", "remediate"]);
+  });
+
+  it("forge#3644: remediate AUTO-LANDED with the issue OPEN + workflow:merged still runs close exactly once", async () => {
+    const { w, io } = fakeWorld();
+    const calls = [];
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; w.labels.push("needs-human"); },
+      // remediate M7 labels workflow:merged right after the merge; a staging-base PR leaves the issue OPEN.
+      "work-on/remediate": () => { w.markers += remediation("AUTO-LANDED"); w.labels.push("workflow:merged"); },
+      "work-on/close": () => { w.issueState = "CLOSED"; },
+    };
+    const runner = async ({ commandName, args }) => { calls.push({ commandName, args }); script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(calls.filter((c) => c.commandName === "work-on/close").length, 1, "close must run exactly once");
+    assert.deepEqual(deriveState(readLog(dir, 42)).committed,
+      ["investigate", "build", "review", "remediate", "close"]);
   });
 
   it("forge#3521: #3511-shaped run (review opens PR, labels the issue only) hands off to remediate with the PR number", async () => {
@@ -2668,6 +2730,173 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
     assert.equal(ran, 0);
     assert.ok(!readLog(dir, 42).some((e) => e.event === "RUN_REOPEN"));
     assert.notEqual(res.terminalReason, "merged");
+  });
+
+  describe("forge#3562 --retry starts a new cycle on a phase-complete run", () => {
+    // Seed the run log directly (the phase-complete producer may not be on this
+    // base); the resume path keys only on the reason string.
+    function seedPhaseComplete() {
+      appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+      appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+      appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "build", outputs: { branch: "fix/old-42" } });
+      appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "review", outputs: { pr: 7 } });
+      appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "close", outputs: {} });
+      appendEvent(dir, 42, { event: "RUN_TERMINAL", issue: 42, reason: "phase-complete" });
+    }
+
+    it("reducer: RUN_NEXT_CYCLE resets committed/branch/pr/terminalReason and bumps v", () => {
+      seedPhaseComplete();
+      const before = deriveState(readLog(dir, 42));
+      assert.equal(before.terminal, true);
+      assert.equal(before.terminalReason, "phase-complete");
+      appendEvent(dir, 42, { event: "RUN_NEXT_CYCLE", issue: 42 });
+      const s = deriveState(readLog(dir, 42));
+      assert.equal(s.terminal, false);
+      assert.equal(s.terminalReason, null);
+      assert.deepEqual(s.committed, []);
+      assert.equal(s.branch, null);
+      assert.equal(s.pr, null);
+      assert.equal(s.remediationKind, null);
+      assert.ok(s.v > before.v);
+      assert.equal(pickPhase(s).id, "investigate");
+    });
+
+    it("reducer: a stale handoff reason does not leak through a later RUN_REOPEN", () => {
+      const s = deriveState([{ event: "RUN_START", issue: 1 },
+        { seq: 2, event: "PHASE_COMMIT", phase: "investigate", outputs: {}, terminalReason: "decomposed" },
+        { seq: 3, event: "RUN_TERMINAL", reason: "phase-complete" },
+        { seq: 4, event: "RUN_NEXT_CYCLE" }, { seq: 5, event: "RUN_TERMINAL", reason: "engine-error" },
+        { seq: 6, event: "RUN_REOPEN" }]);
+      assert.equal(s.terminalReason, null);
+    });
+
+    it("a plain re-run stays phase-complete and invokes no runner", async () => {
+      const { io } = fakeWorld();
+      seedPhaseComplete();
+      let ran = 0;
+      const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io,
+        runner: async () => { ran++; return { status: "complete" }; }, now: () => 2000, maxAttempts: 1 });
+      assert.equal(ran, 0);
+      assert.equal(res.terminalReason, "phase-complete");
+      assert.ok(!readLog(dir, 42).some((e) => e.event === "RUN_NEXT_CYCLE"));
+    });
+
+    it("--retry runs investigate first with committed reset and reaches merged", async () => {
+      const { w, io } = fakeWorld();
+      seedPhaseComplete();
+      const ran = [];
+      const base = okRunner(w);
+      const runner = async (a) => { ran.push(a.commandName); return base(a); };
+      const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner,
+        now: () => 2000, maxAttempts: 1, retry: true });
+      assert.equal(ran[0], "work-on/investigate");
+      assert.equal(res.terminalReason, "merged");
+      const log = readLog(dir, 42);
+      assert.equal(log.filter((e) => e.event === "RUN_NEXT_CYCLE").length, 1);
+      assert.ok(!log.some((e) => e.event === "RUN_REOPEN"));
+      assert.ok(ran.includes("work-on/build"));
+      assert.equal(deriveState(log).branch, "fix/real-branch-42");
+    });
+
+    // SEC-4: a real phase-complete issue still carries cycle-1 GitHub evidence
+    // (a FORGE:BUILDER:COMPLETE comment on the old branch and its merged PR).
+    function seedCycleOneEvidence(w) {
+      w.markers += investigationComment("COMPLETE") + builder("fix/old-42");
+      w.prList = (args) => {
+        const head = args[args.indexOf("--head") + 1];
+        if (head === "fix/old-42") return [{ number: 7, state: "MERGED", mergedAt: "t", baseRefName: "staging" }];
+        return w.pr && w.pr !== 7 ? [{ number: w.pr }] : [];
+      };
+    }
+
+    // todo: build.reconcile re-adopts the cycle-1 branch and merged PR, so build
+    // is skipped in the new cycle (SEC-1, tracked in #3545). Flip to a plain
+    // `it` once the reconcilers are cycle-aware.
+    it("--retry with cycle-1 evidence runs build and ends on the new branch", { todo: "SEC-1 / #3545" }, async () => {
+      const { w, io } = fakeWorld();
+      seedPhaseComplete();
+      seedCycleOneEvidence(w);
+      const ran = [];
+      const script = { ...limitWorldScript(w, { failBuild: () => null }),
+        "work-on/review": () => { w.pr = 8; w.prMerged = true; } };
+      const runner = async (a) => { ran.push(a.commandName); script[a.commandName](); return { status: "complete" }; };
+      await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner,
+        now: () => 2000, maxAttempts: 1, retry: true });
+      assert.ok(ran.includes("work-on/build"), `build must run in the new cycle; ran=${ran.join(",")}`);
+      const s = deriveState(readLog(dir, 42));
+      assert.equal(s.branch, "fix/real-branch-42");
+      assert.notEqual(s.pr, 7);
+    });
+
+    it("--retry with cycle-1 evidence still restarts at investigate", async () => {
+      const { w, io } = fakeWorld();
+      seedPhaseComplete();
+      seedCycleOneEvidence(w);
+      const ran = [];
+      const base = okRunner(w);
+      const runner = async (a) => { ran.push(a.commandName); return base(a); };
+      await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner,
+        now: () => 2000, maxAttempts: 1, retry: true });
+      assert.equal(ran[0], "work-on/investigate");
+      assert.equal(readLog(dir, 42).filter((e) => e.event === "RUN_NEXT_CYCLE").length, 1);
+    });
+
+    // SEC-3: --retry must not start a new cycle on a CLOSED issue.
+    for (const labels of [["workflow:merged"], []]) {
+      it(`--retry on a CLOSED issue (labels=[${labels}]) is not-retryable and appends nothing`, async () => {
+        const { w, io } = fakeWorld();
+        seedPhaseComplete();
+        w.issueState = "CLOSED"; w.labels = [...labels];
+        const before = readLog(dir, 42).length;
+        let ran = 0;
+        const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io,
+          runner: async () => { ran++; return { status: "complete" }; }, now: () => 2000, maxAttempts: 1, retry: true });
+        assert.equal(res.terminalReason, "not-retryable");
+        assert.match(res.detail, /CLOSED/);
+        assert.equal(ran, 0);
+        assert.equal(readLog(dir, 42).length, before);
+        assert.equal(deriveState(readLog(dir, 42)).terminalReason, "phase-complete");
+      });
+    }
+
+    it("--retry fails closed when the issue state cannot be read", async () => {
+      const { io } = fakeWorld();
+      const gh = io.gh;
+      io.gh = async (args) => (args[0] === "issue" && args[1] === "view" && !args.join(" ").includes("body") ? "not json" : gh(args));
+      seedPhaseComplete();
+      const before = readLog(dir, 42).length;
+      let ran = 0;
+      const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io,
+        runner: async () => { ran++; return { status: "complete" }; }, now: () => 2000, maxAttempts: 1, retry: true });
+      assert.equal(res.terminalReason, "not-retryable");
+      assert.equal(ran, 0);
+      assert.equal(readLog(dir, 42).length, before);
+    });
+
+    it("a second --retry after the cycle started does not append another RUN_NEXT_CYCLE", async () => {
+      const { io } = fakeWorld();
+      seedPhaseComplete();
+      appendEvent(dir, 42, { event: "RUN_NEXT_CYCLE", issue: 42 });
+      await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner: async () => ({ status: "complete" }),
+        now: () => 2000, maxAttempts: 1, retry: true });
+      assert.equal(readLog(dir, 42).filter((e) => e.event === "RUN_NEXT_CYCLE").length, 1);
+    });
+
+    for (const reason of ["merged", "invalid"]) {
+      it(`--retry on ${reason} still returns not-retryable`, async () => {
+        const { io } = fakeWorld();
+        appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+        appendEvent(dir, 42, { event: "RUN_TERMINAL", issue: 42, reason });
+        const before = readLog(dir, 42).length;
+        let ran = 0;
+        const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io,
+          runner: async () => { ran++; return { status: "complete" }; }, now: () => 2000, maxAttempts: 1, retry: true });
+        assert.equal(res.terminalReason, "not-retryable");
+        assert.ok(!/only reopens an engine-error run/.test(res.detail));
+        assert.equal(ran, 0);
+        assert.equal(readLog(dir, 42).length, before);
+      });
+    }
   });
 
   it("does not reopen a needs-human terminal and reports not-retryable", async () => {

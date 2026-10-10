@@ -388,6 +388,55 @@ describe("pickPhase", () => {
       assert.equal(outcome.outputs.reGateOutcome, "AUTO-LANDED");
     });
 
+    // forge#3624: AUTO-LANDED verifies the issue's real state before ending the run.
+    const snapIo = (snap) => ({
+      gh: async (args) => {
+        if (args[0] === "issue" && args[1] === "view") {
+          if (snap instanceof Error) throw snap;
+          return typeof snap === "string" ? snap : JSON.stringify(snap);
+        }
+        return jsonLines([trusted(remediateBody("AUTO-LANDED"))]);
+      },
+      git: async () => "0",
+    });
+
+    it("AUTO-LANDED + issue CLOSED with workflow:merged -> terminal merged, no closeHandoff", async () => {
+      const o = await remediate.detectOutcome(base, snapIo({ state: "CLOSED", labels: [{ name: "workflow:merged" }] }));
+      assert.equal(o.status, "committed");
+      assert.equal(o.terminalReason, "merged");
+      assert.equal(o.outputs.closeHandoff, undefined);
+    });
+
+    for (const [name, snap] of [
+      ["issue OPEN", { state: "OPEN", labels: [{ name: "workflow:investigating" }] }],
+      ["CLOSED but workflow:merged label missing", { state: "CLOSED", labels: [] }],
+      ["malformed snapshot", "not json"],
+      ["snapshot throws", new Error("gh down")],
+    ]) {
+      it(`AUTO-LANDED + ${name} -> merged with closeHandoff`, async () => {
+        const o = await remediate.detectOutcome(base, snapIo(snap));
+        assert.equal(o.status, "committed");
+        assert.equal(o.terminalReason, "merged");
+        assert.equal(o.outputs.closeHandoff, true);
+      });
+    }
+
+    it("forge#3644: AUTO-LANDED + issue OPEN with workflow:merged -> closeHandoff, and close.reconcile is not satisfied", async () => {
+      const snap = { state: "OPEN", labels: [{ name: "workflow:merged" }] };
+      const o = await remediate.detectOutcome(base, snapIo(snap));
+      assert.equal(o.outputs.closeHandoff, true);
+      const close = PHASES.find(p => p.id === "close");
+      assert.equal((await close.reconcile(base, snapIo(snap))).satisfied, false);
+      assert.equal((await close.reconcile(base, snapIo({ state: "CLOSED", labels: [{ name: "workflow:merged" }] }))).satisfied, true);
+    });
+
+    it("other outcomes never set closeHandoff", async () => {
+      for (const r of ["HELD-AWAITING-MERGE", "RE-ESCALATED", "UNFIXABLE"]) {
+        const o = await remediate.detectOutcome(base, ioWith(remediateBody(r)));
+        assert.equal(o.outputs.closeHandoff, undefined);
+      }
+    });
+
     it("HELD-AWAITING-MERGE -> committed, terminalReason awaiting-merge", async () => {
       const outcome = await remediate.detectOutcome(base, ioWith(remediateBody("HELD-AWAITING-MERGE")));
       assert.equal(outcome.status, "committed");

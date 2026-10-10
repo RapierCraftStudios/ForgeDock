@@ -23,6 +23,7 @@ on:
       - 'scripts/review-pr-domain-map.test.sh'
       - 'scripts/review-delta.sh'
       - 'scripts/review-delta.test.sh'
+      - 'scripts/review-pr-staging-scope.test.sh'
       - 'scripts/check-test-wiring.sh'
       - 'scripts/check-test-wiring.test.sh'
       - 'scripts/*.test.sh'
@@ -59,6 +60,7 @@ on:
       - 'scripts/review-pr-domain-map.test.sh'
       - 'scripts/review-delta.sh'
       - 'scripts/review-delta.test.sh'
+      - 'scripts/review-pr-staging-scope.test.sh'
       - 'scripts/check-test-wiring.sh'
       - 'scripts/check-test-wiring.test.sh'
       - 'scripts/*.test.sh'
@@ -328,6 +330,7 @@ jobs:
           bash scripts/review-pr-arguments.test.sh
           bash scripts/review-pr-domain-map.test.sh
           bash scripts/review-delta.test.sh
+          bash scripts/review-pr-staging-scope.test.sh
           # No args: the script's built-in default file set (all Skill-loaded specs under commands/).
           bash scripts/check-spec-bash.sh
           # Every Bash call is a fresh shell: a fence that reads these variables must bind them itself
