@@ -261,7 +261,7 @@ Branch \`{BRANCH}\` contains merge commits that bring in history from outside th
 ${MERGE_COMMITS}
 \`\`\`
 
-Do NOT push this branch. Human review required to identify the source of the merge commits and clean the branch history (e.g. via \`git rebase\` to replay only the intended commits onto \`origin/{PR_BASE}\`).
+Do NOT push this branch. Human review required to identify the source of the merge commits and clean the branch history (a human re-creates the branch from \`origin/{PR_BASE}\` with only the intended commits).
 
 <!-- FORGE:PUSH_BLOCKED -->" # allowlist:check-command-side-effects
     gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" # allowlist:check-command-side-effects
@@ -304,12 +304,7 @@ cd {WORKTREE_PATH}
 git push -u origin {BRANCH} # allowlist:check-command-side-effects
 ```
 
-If push fails, retry with `--force-with-lease`:
-```bash
-git push -u origin {BRANCH} --force-with-lease # allowlist:check-command-side-effects
-```
-
-If still fails:
+If the push fails, do NOT retry with a force flag (never force-push): a raced or diverged remote is a human decision, and a conflict with the base is handled by the base-sync path (`base-conflict` in Phase R4), not by overwriting the remote. Fall straight through to:
 ```bash
 gh issue comment {NUMBER} {GH_FLAG} --body "## Push Failed
 
@@ -583,7 +578,7 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 In-PR fix round did not land; the remaining CONFIRMED MEDIUM findings are filed as issues on the next review instead of blocking the merge." # allowlist:check-command-side-effects
     ```
 
-  Persisted loop bounds for the cases above — count first, then act (`{BOUND}` is `STALE_REREVIEW`, `CI_REMEDIATION` or `INPR_REMEDIATION`). This phase posts only the `STALE_REREVIEW` marker; `CI_REMEDIATION` and `INPR_REMEDIATION` are posted by the router in Phase 4R, immediately before it invokes remediation (forge#3398):
+  Persisted loop bounds for the cases above — count first, then act (`{BOUND}` is `STALE_REREVIEW`, `CI_REMEDIATION`, `INPR_REMEDIATION` or `BASESYNC_REMEDIATION`). This phase posts only the `STALE_REREVIEW` marker; `CI_REMEDIATION`, `INPR_REMEDIATION` and `BASESYNC_REMEDIATION` are posted by the router in Phase 4R, immediately before it invokes remediation (forge#3398):
   ```bash
   [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] bound check only"; }
   if [ "{BOUND}" = "STALE_REREVIEW" ]; then
@@ -592,6 +587,9 @@ In-PR fix round did not land; the remaining CONFIRMED MEDIUM findings are filed 
   elif [ "{BOUND}" = "INPR_REMEDIATION" ]; then
     BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
       --jq '[.[] | select((.body | contains("FORGE:INPR_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
+  elif [ "{BOUND}" = "BASESYNC_REMEDIATION" ]; then
+    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
+      --jq '[.[] | select((.body | contains("FORGE:BASESYNC_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
   else
     BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
       --jq '[.[] | select((.body | contains("FORGE:CI_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
@@ -605,7 +603,11 @@ Stale review on PR #{PR_NUMBER}: quality-gating and re-reviewing the new head on
   ```
   `BOUND_EXHAUSTED` → take the "already ≥ 1" branch of that case.
 
-- PR NOT MERGED (and not a phase-trail, auto-merge-gate, stale-review, ci-gate or in-pr-fix BLOCKED above) → attempt manual merge, **only if the PR head is still the commit named in the latest `<!-- FORGE:REVIEW -->` APPROVED verdict** (otherwise re-invoke Phase R3 instead, as for "stale review") **and only after the same CI gate**:
+- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "base-conflict" (review-pr Phase 7B / Phase 8: `mergeable=CONFLICTING` or `mergeStateStatus=DIRTY`, or `BEHIND` under required-up-to-date protection, and no other blocking finding; forge#3496): do NOT attempt the manual merge below and do NOT merge by any other route. Syncing the base is pipeline work: merge `origin/{PR_BASE}` into the issue's own branch (merge only, never rebase, never force-push, never touch a shared branch). Run **one** sync round, bounded by `<!-- FORGE:BASESYNC_REMEDIATION: pr={PR_NUMBER} -->` on the issue (`{BOUND}` = `BASESYNC_REMEDIATION` below).
+  - **Bound unused**: add `needs-human` (remediation only targets `needs-human`-gated PRs, and its Phase M1 clears it as FIXABLE). Then return `REVIEW_RESULT: status: NEXT` with `next: remediate` and `remediation: base-sync`. The router posts the bound marker (Phase 4R) and runs `work-on:remediate`, which merges the base in, re-runs the quality gate and re-reviews the new head. Never invoke `work-on:remediate` from this phase (same reason as the ci-gate case).
+  - **Bound already used** (the sync ran and the PR still conflicts, or the sync could not resolve a hunk): do not sync again. Leave `needs-human` and return `REVIEW_RESULT: status: BLOCKED` with blocker "base conflict persists after base-sync remediation". List the conflicting files in the issue comment you post, taken from the remediation's `FORGE:BASESYNC_FAILED` comment (the `git diff --name-only --diff-filter=U` list) when present.
+
+- PR NOT MERGED (and not a phase-trail, auto-merge-gate, stale-review, ci-gate, in-pr-fix or base-conflict BLOCKED above) → attempt manual merge, **only if the PR head is still the commit named in the latest `<!-- FORGE:REVIEW -->` APPROVED verdict** (otherwise re-invoke Phase R3 instead, as for "stale review") **and only after the same CI gate**:
   ```bash
   # CI gate (MANDATORY before any autonomous merge): merge only when every check on the PR is
   # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch
@@ -659,7 +661,7 @@ REVIEW_RESULT:
   pr_url: {PR_URL}
   merged_to: {PR_BASE}
   next: {remediate, only when status=NEXT}
-  remediation: {ci-gate | inpr-fix, only when status=NEXT}
+  remediation: {ci-gate | inpr-fix | base-sync, only when status=NEXT}
   blocker: {description if status=BLOCKED}
 ```
 
