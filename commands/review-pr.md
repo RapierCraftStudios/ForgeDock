@@ -2497,13 +2497,8 @@ elif [ "$MERGE_HEALTH_STATE" = "BLOCKED" ]; then
     MERGE_PROTECTION_WARNING="Merge state is BLOCKED: branch protection is not satisfied (required review or check). Syncing the base cannot clear this."
 fi
 
-# ONLY_BASE_CONFLICT: the base conflict is the ONLY reason the verdict is CHANGES REQUESTED.
-# Set OTHER_BLOCKING=true when ANY other blocking criterion (1, 2, 3 or 5 above) fired for this PR.
-# When true, Phase 8 routes to the base-sync path (blocker base-conflict) instead of needs-human.
-ONLY_BASE_CONFLICT=false
-if [ "$BASE_CONFLICT" = "true" ] && [ "${OTHER_BLOCKING:-false}" != "true" ] && [ "$HAS_PURPOSE_REGRESSION" != "true" ] && [ "${CALIBRATION_NEEDS_HUMAN:-false}" != "true" ] && [ "${TRUST_NEEDS_HUMAN:-false}" != "true" ]; then
-    ONLY_BASE_CONFLICT=true
-fi
+# ONLY_BASE_CONFLICT is NOT computed here: CALIBRATION_NEEDS_HUMAN is only set later (Phase 7B.5) and TRUST_NEEDS_HUMAN in Phase 3B.5,
+# so it is evaluated at the top of the Phase 8 guard, after every human gate has been set. <!-- forge#3496 -->
 
 # Resolve attribution footer (forge.yaml → attribution.pr_footer)
 ATTRIBUTION_PR_FOOTER=$(grep -A5 "^attribution:" forge.yaml 2>/dev/null | grep "pr_footer:" | awk '{print $(2)}' | tr -d '"' || echo "false")
@@ -2790,6 +2785,13 @@ If the preflight failed, skip the rest of Phase 8. On exit code 1, return `REVIE
 # These vars are set in Phase 7A/7B/7B.5/3B.5 earlier in the same agent session.
 # An unset/empty VERDICT is safe — it evaluates to "" which does not equal "CHANGES REQUESTED".
 # TRUST_NEEDS_HUMAN: set to true by Phase 3B.5 when INTENSITY_TIER=NOVEL_NEEDS_HUMAN AND shadow mode is off.
+# ONLY_BASE_CONFLICT: the base conflict is the ONLY reason the verdict is CHANGES REQUESTED. Computed HERE (after Phase 7B.5 and 3B.5) so the
+# calibration and trust human gates are already set and can never be skipped for a base-conflict PR. <!-- forge#3496 -->
+# Set OTHER_BLOCKING=true when ANY other blocking criterion (1, 2, 3 or 5 in Phase 7B) fired for this PR. When true, route to needs-human below.
+ONLY_BASE_CONFLICT=false
+if [ "${BASE_CONFLICT:-false}" = "true" ] && [ "${OTHER_BLOCKING:-false}" != "true" ] && [ "${HAS_PURPOSE_REGRESSION:-false}" != "true" ] && [ "${CALIBRATION_NEEDS_HUMAN:-false}" != "true" ] && [ "${TRUST_NEEDS_HUMAN:-false}" != "true" ]; then
+    ONLY_BASE_CONFLICT=true
+fi
 if [ "${ONLY_BASE_CONFLICT:-false}" = "true" ] && [ "$VERDICT" = "CHANGES REQUESTED" ]; then
     # Pure base conflict (set in Phase 7B: the ONLY blocker): route to the base-sync path, NOT needs-human. <!-- Added: forge#3496 -->
     # work-on/review.md R4 adds needs-human only when it hands off to remediate; a standalone /review-pr caller just sees the blocker.
