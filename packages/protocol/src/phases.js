@@ -56,6 +56,8 @@ export const PHASE_IDS = ['investigate', 'decompose', 'build', 'review', 'remedi
  * @property {string} [decomposedMarker] - (investigate only) marks the issue DECOMPOSED.
  * @property {string} [investigationMarker] - (build only) deliverables comment posted on the
  *   INVESTIGATION_COMPLETE exit, where no commits (and no `completionMarker`) exist.
+ * @property {string} [sizeGateMarker] - (build only) bare annotation-opener of the diff-size gate record.
+ * @property {string} [sizeOverrideMarker] - (build only) bare annotation-opener of the size-gate override.
  * @property {string} [partialMarker] - sentinel for an interrupted/partial annotation.
  * @property {string} [presenceMarker] - bare annotation-opener substring, used only by
  *   phases whose completion is non-critical (see `context` below) — presence alone
@@ -98,6 +100,11 @@ export const PHASE_MARKERS = {
     // that ends INVESTIGATION_COMPLETE writes no commits, so `completionMarker` never
     // appears; the engine reads this marker instead. Not checked by the registry drift script.
     investigationMarker: 'FORGE:INVESTIGATION:DELIVERABLES',
+    // Size-gate (B5.5) records. Neither is a completion sentinel: the gate's
+    // NEEDS_DECOMPOSE exit posts no FORGE:BUILDER:COMPLETE, so the engine reads
+    // these to route an oversized build to decompose instead of retrying it.
+    sizeGateMarker: `FORGE:${RESERVED_TYPES.DIFF_SIZE.type}`, // 'FORGE:DIFF_SIZE'
+    sizeOverrideMarker: `FORGE:${RESERVED_TYPES.SIZE_OVERRIDE.type}`, // 'FORGE:SIZE_OVERRIDE'
   },
   review: {
     // No RESERVED_TYPES entry defines this sentinel (REVIEWER has no
