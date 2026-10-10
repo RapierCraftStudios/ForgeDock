@@ -21,6 +21,16 @@ describe("runlog", () => {
     assert.ok(s.committed.includes("review"));
   });
 
+  it("forge#3530: the review remediation kind survives deriveState; a remediate commit consumes it; a later review replaces it", () => {
+    appendEvent(dir, 7, { event: "RUN_START", issue: 7, run: "r", lane: "staging" });
+    appendEvent(dir, 7, { event: "PHASE_COMMIT", phase: "review", outputs: { pr: 12, remediation: "base-sync" }, terminalReason: "needs-human" });
+    assert.equal(deriveState(readLog(dir, 7)).remediationKind, "base-sync");
+    appendEvent(dir, 7, { event: "PHASE_COMMIT", phase: "remediate", outputs: {} });
+    assert.equal(deriveState(readLog(dir, 7)).remediationKind, null);
+    appendEvent(dir, 7, { event: "PHASE_COMMIT", phase: "review", outputs: { pr: 12, remediation: "ci-gate" } });
+    assert.equal(deriveState(readLog(dir, 7)).remediationKind, "ci-gate");
+  });
+
   it("append then read returns events in order with assigned seq", () => {
     appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r1", lane: "staging" });
     appendEvent(dir, 42, { event: "PHASE_START", phase: "investigate" });

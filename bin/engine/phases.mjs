@@ -37,7 +37,8 @@ export const TERMINAL_REASONS = ["merged", "invalid", "needs-human", "decomposed
  *    boundaries, for extraction that MUST be scoped to a specific comment (see
  *    `parseBranchFromMarkers()` below — forge#2184).
  *
- * The `--jq '[.[].body]'` query asks `gh` for a JSON array of bodies. If the
+ * The `--jq '.[].body | @json'` query asks `gh` for one JSON string per comment
+ * (paginated); a single JSON array of bodies is also accepted. If the
  * response isn't valid JSON (a non-JSON gh error string, or a test mock that
  * supplies a raw marker string instead of the real API shape), fall back to
  * treating the whole blob as a single pseudo-comment — `has()` checks are
@@ -45,17 +46,25 @@ export const TERMINAL_REASONS = ["merged", "invalid", "needs-human", "decomposed
  * which is the safe, conservative behavior.
  */
 async function issueMarkers(issue, io) {
-  const out = await io.gh(["api", `repos/{owner}/{repo}/issues/${issue}/comments`, "--jq", "[.[].body]"]);
+  // `--paginate` so an issue with >30 comments still exposes its newest trail;
+  // `.[].body | @json` emits one JSON string per line per page, which (unlike
+  // `[.[].body]`, one array per page) concatenates safely across pages.
+  const out = await io.gh(["api", "--paginate", `repos/{owner}/{repo}/issues/${issue}/comments`, "--jq", ".[].body | @json"]);
   const blob = out || "";
-  let comments = [];
+  const toBody = (c) => (typeof c === "string" ? c : (c && c.body) || "");
+  let comments = null;
   try {
     const parsed = JSON.parse(out);
-    if (Array.isArray(parsed)) {
-      comments = parsed.map((c) => (typeof c === "string" ? c : (c && c.body) || ""));
-    }
-  } catch {
-    comments = blob ? [blob] : [];
+    if (Array.isArray(parsed)) comments = parsed.map(toBody);
+  } catch { /* not a single JSON document — try one JSON string per line */ }
+  if (!comments) {
+    const lines = blob.split("\n").filter((l) => l.trim());
+    try {
+      const bodies = lines.map((l) => JSON.parse(l));
+      if (bodies.length > 0 && bodies.every((b) => typeof b === "string")) comments = bodies;
+    } catch { /* fall through */ }
   }
+  if (!comments) comments = blob ? [blob] : [];
   return { blob, comments };
 }
 /**
@@ -255,6 +264,20 @@ export class PhaseArgsError extends Error {
   constructor(message) { super(message); this.name = "PhaseArgsError"; this.code = "PHASE_ARGS_INVALID"; }
 }
 
+/**
+ * forge#3530: review `remediation` kind -> the bound marker router Phase 4R posts
+ * (commands/work-on.md). review.md R4 counts these; remediate.md M0 keys its per-kind
+ * guard on them.
+ */
+export const REMEDIATION_BOUND_MARKERS = Object.freeze({
+  "ci-gate": "CI_REMEDIATION",
+  "inpr-fix": "INPR_REMEDIATION",
+  "base-sync": "BASESYNC_REMEDIATION",
+});
+function isRemediationKind(k) {
+  return typeof k === "string" && Object.hasOwn(REMEDIATION_BOUND_MARKERS, k);
+}
+
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const BRANCH_RE = /^[A-Za-z0-9._][A-Za-z0-9._\/-]*$/;
 const LANE_RE = BRANCH_RE;
@@ -432,8 +455,14 @@ export const PHASES = [
       // The PR number from GitHub (openPrFor) always wins over parsed text.
       const outputs = { pr: pr.number };
       const escalated = { status: "blocked", detail: "review escalated", outputs };
-      if (pr.needsHuman) return escalated;
       const rr = parseReviewResult(result?.text);
+      // forge#3530: carry the review's remediation kind (router Phase 4R parity) so the
+      // remediate phase can post the matching bound marker. Untrusted model output: only
+      // the three known kinds are carried verbatim; any other non-empty value is recorded as
+      // the "unknown" sentinel (never the raw text) so remediate's buildArgs fails closed.
+      if (rr && rr.status === "NEXT" && rr.next === "remediate" && rr.remediation)
+        outputs.remediation = isRemediationKind(rr.remediation) ? rr.remediation : "unknown";
+      if (pr.needsHuman) return escalated;
       if (rr && rr.status === "NEXT" && rr.next === "remediate") return escalated;
       // An explicit REVIEW_RESULT status is authoritative: BLOCKED/COMPLETE exits
       // (phase trail, ci gate, base conflict, merge refusal) also label the issue
@@ -461,18 +490,53 @@ export const PHASES = [
     // handing the PR to remediation in the same run.
     id: "remediate",
     command: "work-on/remediate",
-    buildArgs: async (state, ctx) => [
-      need(state.pr, "pr", /^[0-9]+$/), "--issue", String(state.issue), ...repoArgs(ctx), ...baseArgs(state),
-    ],
+    // forge#3530: this is the engine's second implementation of router Phase 4R
+    // (commands/work-on.md): post the per-kind bound marker immediately BEFORE
+    // dispatching remediation, so remediate.md M0's per-kind guard and review.md R4's
+    // loop bounds see it. Fail closed (PhaseArgsError -> engine-error, no runner call)
+    // on a missing/unknown kind or a marker that cannot be posted: an unrecorded bound
+    // must not run. Keep in sync with Phase 4R.
+    buildArgs: async (state, ctx, io) => {
+      const pr = need(state.pr, "pr", /^[0-9]+$/);
+      const kind = state.remediationKind ?? null;
+      const legacyArgs = () => [pr, "--issue", String(state.issue), ...repoArgs(ctx), ...baseArgs(state)];
+      // Legacy handoff with no kind (needs-human label fallback, or no REVIEW_RESULT): there
+      // is nothing to bind, so dispatch as before. remediate.md M0 then applies its default
+      // single-attempt guard. A present-but-unknown kind is never dispatched.
+      if (kind === null) return legacyArgs();
+      if (!isRemediationKind(kind))
+        throw new PhaseArgsError(`unknown remediation kind: ${JSON.stringify(kind)}`);
+      const boundMarker = REMEDIATION_BOUND_MARKERS[kind];
+      const marker = `<!-- FORGE:${boundMarker}: pr=${pr} -->`;
+      try {
+        const { blob } = await issueMarkers(state.issue, io);
+        // Resume idempotency: a handoff interrupted after the marker post must not double-count.
+        if (!has(blob, marker)) {
+          await io.gh(["issue", "comment", String(state.issue), "--body",
+            `${marker}\nReview handed PR #${pr} to remediation (${kind}); the engine is dispatching it once.`]);
+        }
+      } catch (e) {
+        throw new PhaseArgsError(`github-unavailable: could not post FORGE:${boundMarker}; remediation not invoked (${e?.message || e})`);
+      }
+      return legacyArgs();
+    },
     entryCondition: (s) => s.committed.includes("review") && s.terminalReason === "needs-human",
     async detectOutcome(state, io) {
-      const { blob } = await issueMarkers(state.issue, io);
-      if (!has(blob, PHASE_MARKERS.remediate.completionMarker))
-        return { status: "failed", detail: `no ${PHASE_MARKERS.remediate.completionMarker} marker` };
+      // forge#3530: read the NEWEST completed trail only. A concatenated oldest-first blob
+      // returned a stale outcome from an earlier remediation when a later one posted nothing.
+      const { comments } = await issueMarkers(state.issue, io);
+      const completion = PHASE_MARKERS.remediate.completionMarker;
+      let latest = null;
+      for (let i = comments.length - 1; i >= 0; i--) {
+        if (has(comments[i], completion)) { latest = comments[i]; break; }
+      }
+      if (latest === null)
+        return { status: "failed", detail: `no ${completion} marker` };
       // Parse the **Re-gate outcome**: field remediate.md's Phase M8 posts
       // (e.g. "**Re-gate outcome**: AUTO-LANDED to staging" — value is the
       // first whitespace-delimited token after the colon).
-      const match = blob.match(/\*\*Re-gate outcome\*\*:\s*([A-Z-]+)/);
+      const matches = [...latest.matchAll(/\*\*Re-gate outcome\*\*:\s*([A-Z-]+)/g)];
+      const match = matches.length ? matches[matches.length - 1] : null;
       const reGateOutcome = match ? match[1] : null;
       switch (reGateOutcome) {
         case "AUTO-LANDED":

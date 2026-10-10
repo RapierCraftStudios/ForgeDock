@@ -153,6 +153,53 @@ describe("pickPhase", () => {
   // outcome + the needs-human divergence-guard pause both terminate first).
   // These tests exercise detectOutcome/entryCondition directly, which is the
   // acceptance criterion ("pickPhase covers remediate") this issue targets.
+  describe("remediate.buildArgs bound marker (forge#3530)", () => {
+    const remediate = PHASES.find(p => p.id === "remediate");
+    const st = { ...base, issue: 42, pr: 7, committed: ["investigate", "build", "review"], terminalReason: "needs-human" };
+    const mk = (existing = "", fail = false) => {
+      const posted = [];
+      return { posted, io: { gh: async (a) => {
+        if (a[0] === "issue" && a[1] === "comment") { if (fail) throw new Error("boom"); posted.push(a[a.indexOf("--body") + 1]); return ""; }
+        return existing;
+      }, git: async () => "" } };
+    };
+    const ctx = { repo: "acme/widgets" };
+
+    for (const [kind, name] of [["ci-gate", "CI_REMEDIATION"], ["inpr-fix", "INPR_REMEDIATION"], ["base-sync", "BASESYNC_REMEDIATION"]]) {
+      it(`${kind} -> posts <!-- FORGE:${name}: pr=7 -->`, async () => {
+        const { io, posted } = mk();
+        const args = await remediate.buildArgs({ ...st, remediationKind: kind }, ctx, io);
+        assert.equal(args[0], "7");
+        assert.equal(posted.length, 1);
+        assert.ok(posted[0].startsWith(`<!-- FORGE:${name}: pr=7 -->`));
+      });
+    }
+
+    it("resume: an existing marker for this PR+kind is not re-posted", async () => {
+      const { io, posted } = mk(JSON.stringify(["<!-- FORGE:BASESYNC_REMEDIATION: pr=7 -->"]));
+      await remediate.buildArgs({ ...st, remediationKind: "base-sync" }, ctx, io);
+      assert.equal(posted.length, 0);
+    });
+
+    it("unknown kind throws PhaseArgsError and posts nothing", async () => {
+      const { io, posted } = mk();
+      await assert.rejects(remediate.buildArgs({ ...st, remediationKind: "unknown" }, ctx, io), { code: "PHASE_ARGS_INVALID" });
+      assert.equal(posted.length, 0);
+    });
+
+    it("post failure throws PhaseArgsError (remediation not invoked)", async () => {
+      const { io } = mk("", true);
+      await assert.rejects(remediate.buildArgs({ ...st, remediationKind: "ci-gate" }, ctx, io), { code: "PHASE_ARGS_INVALID" });
+    });
+
+    it("no kind (legacy label-fallback handoff) dispatches without a marker", async () => {
+      const { io, posted } = mk();
+      const args = await remediate.buildArgs({ ...st, remediationKind: null }, ctx, io);
+      assert.equal(args[0], "7");
+      assert.equal(posted.length, 0);
+    });
+  });
+
   describe("remediate.detectOutcome", () => {
     const remediate = PHASES.find(p => p.id === "remediate");
     const ioWith = (blob) => ({ gh: async () => blob, git: async () => "0" });
@@ -182,6 +229,27 @@ describe("pickPhase", () => {
       const outcome = await remediate.detectOutcome(base, ioWith(remediateBody("UNFIXABLE")));
       assert.equal(outcome.status, "committed");
       assert.equal(outcome.terminalReason, "needs-human");
+    });
+
+    // forge#3530: the NEWEST completed trail wins, not the oldest.
+    it("two trails: newest RE-ESCALATED beats older HELD-AWAITING-MERGE -> needs-human", async () => {
+      const io = { gh: async () => JSON.stringify([remediateBody("HELD-AWAITING-MERGE"), "unrelated", remediateBody("RE-ESCALATED")]), git: async () => "0" };
+      const outcome = await remediate.detectOutcome(base, io);
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "needs-human");
+      assert.equal(outcome.outputs.reGateOutcome, "RE-ESCALATED");
+    });
+
+    it("paginated gh output (one JSON string per line) is parsed per comment, newest last", async () => {
+      const io = { gh: async () => [remediateBody("RE-ESCALATED"), "other", remediateBody("AUTO-LANDED")].map((b) => JSON.stringify(b)).join("\n"), git: async () => "0" };
+      const outcome = await remediate.detectOutcome(base, io);
+      assert.equal(outcome.outputs.reGateOutcome, "AUTO-LANDED");
+    });
+
+    it("a stale trail is not read from a later comment lacking the completion marker", async () => {
+      const io = { gh: async () => JSON.stringify([remediateBody("HELD-AWAITING-MERGE"), "**Re-gate outcome**: RE-ESCALATED (no completion marker)"]), git: async () => "0" };
+      const outcome = await remediate.detectOutcome(base, io);
+      assert.equal(outcome.outputs.reGateOutcome, "HELD-AWAITING-MERGE");
     });
 
     it("FORGE:REMEDIATION:COMPLETE present but Re-gate outcome unrecognized -> failed", async () => {
@@ -305,6 +373,17 @@ describe("pickPhase", () => {
         rr("  status: NEXT\n  next: remediate\n  remediation: inpr-fix\n  pr_number: 7"));
       assert.equal(outcome.status, "blocked");
       assert.equal(outcome.outputs.pr, 7);
+    });
+
+    it("forge#3530: carries a valid remediation kind; unknown kind recorded as the sentinel, never raw text", async () => {
+      const io = ioFor({ ...openUnlabelled, issueLabels: [] });
+      for (const kind of ["ci-gate", "inpr-fix", "base-sync"]) {
+        const o = await review.detectOutcome(reviewState, io, rr(`  status: NEXT\n  next: remediate\n  remediation: ${kind}\n  pr_number: 7`));
+        assert.equal(o.outputs.remediation, kind);
+      }
+      const bad = await review.detectOutcome(reviewState, io, rr("  status: NEXT\n  next: remediate\n  remediation: $(evil)\n  pr_number: 7"));
+      assert.equal(bad.status, "blocked");
+      assert.equal(bad.outputs.remediation, "unknown");
     });
 
     it("forge#3521: non-digit pr_number is ignored; openPrFor number wins when they disagree", async () => {

@@ -822,6 +822,7 @@ function eventsFromIndex(idx) {
     const outputs = {};
     if (phase === "build" && idx.branch) outputs.branch = idx.branch;
     if (phase === "review" && idx.pr != null) outputs.pr = idx.pr;
+    if (phase === "review" && idx.remediationKind) outputs.remediation = idx.remediationKind;
     events.push({ event: "PHASE_COMMIT", phase, outputs });
   }
   // forge#3506: a non-terminal reason is a handoff (e.g. review -> remediate). Replay it on
