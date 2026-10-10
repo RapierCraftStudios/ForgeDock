@@ -677,7 +677,8 @@ export async function runIssue(opts) {
     // is seen), phase.id is "decompose" — not "investigate" — so this
     // exemption does not apply and the normal terminate() path below fires,
     // ending the run for real.
-    const isDecomposeHandoff = phase.id === "investigate" && terminalReason === "decomposed";
+    // build also hands off: the B5.5 size gate (NEEDS_DECOMPOSE) reports "decomposed".
+    const isDecomposeHandoff = (phase.id === "investigate" || phase.id === "build") && terminalReason === "decomposed";
     if (terminalReason && TERMINAL_REASONS.includes(terminalReason) &&
         !isDecomposeHandoff && !isRemediationHandoff)
       return await terminate(state, terminalReason, outcome.detail);
