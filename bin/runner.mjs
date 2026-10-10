@@ -942,6 +942,24 @@ const USAGE_LIMIT_RESET_PAREN_RE = new RegExp(
 // Zone-less fallback: capture to end of line, but never across a quote.
 const USAGE_LIMIT_RESET_LINE_RE = new RegExp(
   `${USAGE_LIMIT_PHRASE}[^\\n"]*?resets?\\s+([^\\n"]+?)\\s*$`, "im");
+// The two regexes above are polynomial on long no-match lines, so they only
+// ever run on a short window per phrase hit (untrusted input can be tens of MB).
+const USAGE_LIMIT_SCAN_WINDOW_CHARS = 512;
+const USAGE_LIMIT_MAX_PHRASE_HITS = 32;
+
+/** Linear scan for phrase hits; returns at most MAX_PHRASE_HITS newline-cut windows. */
+function collectUsageLimitWindows(source) {
+  const windows = [];
+  const phraseRe = new RegExp(USAGE_LIMIT_PHRASE, "gi");
+  let hit;
+  while (windows.length < USAGE_LIMIT_MAX_PHRASE_HITS && (hit = phraseRe.exec(source)) !== null) {
+    let window = source.slice(hit.index, hit.index + USAGE_LIMIT_SCAN_WINDOW_CHARS);
+    const nl = window.indexOf("\n");
+    if (nl !== -1) window = window.slice(0, nl);
+    windows.push(window);
+  }
+  return windows;
+}
 
 /**
  * Parses a `claude --output-format json` single-result envelope from `text`.
@@ -1006,8 +1024,12 @@ export function extractSessionLimitResetTime(output) {
   // JSON-wrapped message cannot swallow the trailing `","type":...` fields.
   const text = parseCliEnvelope(output)?.result ?? output;
   const source = typeof text === "string" ? text : output;
-  const match =
-    USAGE_LIMIT_RESET_PAREN_RE.exec(source) ?? USAGE_LIMIT_RESET_LINE_RE.exec(source);
+  const windows = collectUsageLimitWindows(source);
+  let match = null;
+  for (const w of windows) { if ((match = USAGE_LIMIT_RESET_PAREN_RE.exec(w))) break; }
+  if (!match) {
+    for (const w of windows) { if ((match = USAGE_LIMIT_RESET_LINE_RE.exec(w))) break; }
+  }
   if (!match) return undefined;
   const resetAt = match[1].trim();
   if (resetAt.length === 0) return undefined;
