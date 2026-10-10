@@ -165,7 +165,10 @@ async function main() {
 
     if (!state) {
       // Fresh run — bootstrap in memory only.
-      const lane = detectLane(transcript) || "staging";
+      // forge#3594: the lane feeds git refs (origin/<lane>..branch), so it must be a real
+      // base branch. Never derive it from transcript text (pseudo-lane "feature" is not a ref).
+      const lane = (await refExists("staging", io)) ? "staging" : null;
+      if (!lane) return; // no verifiable base: fail open (no events, no enforcement)
       state = {
         v: 0,
         run: `r_${issueNumber}_${lane}_interactive`,
@@ -198,7 +201,9 @@ async function main() {
     // Skill ran but no trusted, anchored annotation exists on GitHub: block the
     // subagent and inject corrective context. Only for phases whose failure is
     // exactly "missing marker".
-    if (ENFORCED_PHASES.includes(phaseId)) {
+    // forge#3594: never re-block a stop that is already a hook continuation, and only
+    // block when the failure is exactly a missing marker (not a git/lane/GitHub error).
+    if (ENFORCED_PHASES.includes(phaseId) && !payload.stop_hook_active && isMissingMarkerOutcome(outcome)) {
       const PHASE_ANNOTATION_MAP = {
         investigate: `${PHASE_MARKER_REGISTRY.investigate.completionMarker} (or ${PHASE_MARKER_REGISTRY.investigate.invalidMarker} / ${PHASE_MARKER_REGISTRY.investigate.decomposedMarker})`,
         context:     PHASE_MARKER_REGISTRY.context.completionMarker,
@@ -224,6 +229,11 @@ async function main() {
   }
 
   const terminalReason = outcome.terminalReason || null;
+
+  // forge#3595: the idempotency check above ran before the GitHub round-trip; re-read the
+  // run log immediately before appending so a concurrent hook for the same phase is not duplicated.
+  const freshLog = readLog(runLogDir, issueNumber);
+  if (freshLog.length && deriveState(freshLog).committed.includes(phaseId)) return;
 
   if (bootstrapped) {
     appendEvent(runLogDir, issueNumber, {
@@ -281,6 +291,21 @@ export function parseTranscript(transcriptPath) {
   } catch {
     return null;
   }
+}
+
+/**
+ * True only when an outcome failed because the phase's FORGE marker is missing
+ * (investigate/context/architect "no <marker> marker", build "builder complete=false").
+ * Anything else (unresolvable lane/branch, git or GitHub error) must not block (forge#3594).
+ */
+export function isMissingMarkerOutcome(outcome) {
+  if (!outcome || outcome.status !== "failed") return false;
+  const d = String(outcome.detail || "");
+  return /^no .+ marker$/.test(d) || /^builder complete=false\b/.test(d);
+}
+
+async function refExists(lane, io) {
+  try { await io.git(["rev-parse", "--verify", "--quiet", `origin/${lane}`]); return true; } catch { return false; }
 }
 
 /**

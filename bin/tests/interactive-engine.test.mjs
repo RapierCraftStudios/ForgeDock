@@ -39,6 +39,7 @@ import {
   detectPhase,
   detectLane,
   phaseFromSkill,
+  isMissingMarkerOutcome,
 } from "../hooks/interactive-engine.mjs";
 
 // ---------------------------------------------------------------------------
@@ -490,5 +491,20 @@ describe("extractFlag helper", () => {
       extractFlag("gh issue edit 42 --add-label workflow:building", "--add-label"),
       "workflow:building",
     );
+  });
+});
+
+describe("isMissingMarkerOutcome — enforce only on a missing marker (forge#3594)", () => {
+  it("true for 'no <marker> marker' and builder complete=false", () => {
+    assert.equal(isMissingMarkerOutcome({ status: "failed", detail: "no <!-- INVESTIGATION:COMPLETE --> marker" }), true);
+    assert.equal(isMissingMarkerOutcome({ status: "failed", detail: "builder complete=false commitsAhead=-1 branch=unresolved" }), true);
+  });
+  it("false when the marker exists but the ahead-count could not be computed", () => {
+    assert.equal(isMissingMarkerOutcome({ status: "failed", detail: "builder complete=true commitsAhead=-1 branch=fix/x" }), false);
+  });
+  it("false for committed, blocked, and missing outcomes", () => {
+    assert.equal(isMissingMarkerOutcome({ status: "committed" }), false);
+    assert.equal(isMissingMarkerOutcome({ status: "blocked", detail: "no x marker" }), false);
+    assert.equal(isMissingMarkerOutcome(null), false);
   });
 });
