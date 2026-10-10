@@ -29,6 +29,12 @@ export const DEFAULT_LEASE_RENEW_INTERVAL_MS = 240000;
 // need at most one or two pauses in practice.
 export const DEFAULT_MAX_SESSION_LIMIT_PAUSES = 5;
 
+// forge#3511: bounded wait applied ONLY when the runner flagged a confirmed
+// usage-limit failure (`err.usageLimit`) but could not produce a parseable
+// reset epoch. The runner never fabricates a reset time; this default lives in
+// the engine and is still capped by `maxSessionLimitPauses`.
+export const DEFAULT_SESSION_LIMIT_WAIT_MS = 30 * 60 * 1000;
+
 /**
  * Validates the subset of `runIssue()`'s options that must fail fast,
  * synchronously, before any state I/O or timer creation — `backend` and the
@@ -44,7 +50,7 @@ export const DEFAULT_MAX_SESSION_LIMIT_PAUSES = 5;
  * @param {number} params.maxSessionLimitPauses - forge#2524: bound on consecutive session-limit pauses.
  * @throws {Error & {code: "INVALID_BACKEND"|"INVALID_LEASE_CONFIG"|"INVALID_SESSION_LIMIT_CONFIG"}}
  */
-function validateRunIssueOptions({ backend, leaseTtlMs, leaseRenewIntervalMs, maxSessionLimitPauses }) {
+function validateRunIssueOptions({ backend, leaseTtlMs, leaseRenewIntervalMs, maxSessionLimitPauses, sessionLimitDefaultWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS }) {
   // forge#2054: validate `backend` before anything else — before state is
   // read/written and before the phase/retry loop begins below. An invalid
   // value must fail fast and non-retryably. Without this check, an invalid
@@ -128,6 +134,15 @@ function validateRunIssueOptions({ backend, leaseTtlMs, leaseRenewIntervalMs, ma
       { code: "INVALID_SESSION_LIMIT_CONFIG" },
     );
   }
+  // forge#3511: same guard for the unknown-reset default wait.
+  if (typeof sessionLimitDefaultWaitMs !== "number" || !Number.isFinite(sessionLimitDefaultWaitMs) || sessionLimitDefaultWaitMs < 0) {
+    throw Object.assign(
+      new Error(
+        `Invalid session-limit config: sessionLimitDefaultWaitMs must be a finite number >= 0, got ${typeof sessionLimitDefaultWaitMs === "number" ? sessionLimitDefaultWaitMs : `${typeof sessionLimitDefaultWaitMs} (${JSON.stringify(sessionLimitDefaultWaitMs)})`}.`,
+      ),
+      { code: "INVALID_SESSION_LIMIT_CONFIG" },
+    );
+  }
 }
 
 /**
@@ -204,6 +219,14 @@ function makeProgressEmitter(onProgress) {
  *   Defaults to DEFAULT_MAX_SESSION_LIMIT_PAUSES. Purely a defensive backstop
  *   against a persistently-misreported reset time; a genuine reset is
  *   expected to need at most one or two pauses in practice.
+ * @param {number} [opts.sessionLimitDefaultWaitMs] - forge#3511: how long to
+ *   pause when the failure is a confirmed usage limit but no reset time could
+ *   be parsed. Defaults to DEFAULT_SESSION_LIMIT_WAIT_MS; counts against
+ *   `maxSessionLimitPauses`.
+ * @param {boolean} [opts.retry] - forge#3511: explicit opt-in. When the run's
+ *   terminal reason is `engine-error`, reopen it (RUN_REOPEN) and resume from
+ *   the last committed phase. Any other terminal reason is left untouched and
+ *   returns `not-retryable`.
  */
 export async function runIssue(opts) {
   const { issue, dir, agentId, lane = "staging", io, runner,
@@ -225,6 +248,8 @@ export async function runIssue(opts) {
           // tests inject a fast/no-op replacement (see opts.sleep doc above).
           sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
           maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES,
+          sessionLimitDefaultWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS,
+          retry = false,
           onProgress = () => {} } = opts;
 
   // forge#2452: extracted into makeProgressEmitter() — see its docstring for
@@ -235,7 +260,7 @@ export async function runIssue(opts) {
   // for the forge#2054/#2313/#2329 rationale and required call-order (before
   // any state I/O or timer creation, unchanged from the inline block this
   // replaces).
-  validateRunIssueOptions({ backend, leaseTtlMs, leaseRenewIntervalMs, maxSessionLimitPauses });
+  validateRunIssueOptions({ backend, leaseTtlMs, leaseRenewIntervalMs, maxSessionLimitPauses, sessionLimitDefaultWaitMs });
 
   const projector = makeProjector(io);
 
@@ -265,6 +290,25 @@ export async function runIssue(opts) {
     rewriteLog(dir, issue, eventsFromIndex(state));
     state = deriveState(readLog(dir, issue));
   }
+
+  // forge#3511: explicit `--retry` reopens a transient `engine-error` terminal
+  // so the run resumes from its last committed phase. Placed AFTER the I3
+  // lease guard (never weaken that ordering) and BEFORE the unconditional
+  // lease write below, which then publishes `terminal:false` at the reopen's
+  // higher `v`. Only `engine-error` is ever reopened; needs-human / merged /
+  // decomposed / etc. terminals are left untouched.
+  let reopened = false;
+  if (retry && state?.terminal) {
+    if (state.terminalReason !== "engine-error") {
+      return {
+        terminalReason: "not-retryable",
+        detail: `issue ${issue} ended ${state.terminalReason}; --retry only reopens an engine-error run`,
+      };
+    }
+    appendEvent(dir, issue, { event: "RUN_REOPEN", issue });
+    state = deriveState(readLog(dir, issue));
+    reopened = true;
+  }
   // forge#2239: claim the lease unconditionally here — before the phase loop
   // starts, for EVERY reconcile action ("fresh", "remirror", "hydrate", and
   // "local"). Previously only "fresh"/"remirror"/"hydrate" wrote any state at
@@ -278,6 +322,17 @@ export async function runIssue(opts) {
   // check above (commit 541a3e5 fixed the reverse ordering as a real bug —
   // do not reintroduce it).
   await projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } });
+  // forge#3511: clear the stale label only after the reopened state is
+  // published, so a crash in between leaves the run still marked engine-error.
+  // On `--retry` this runs whether or not THIS invocation did the reopen: a prior
+  // retry may have published the reopen and died before removing the label, so the
+  // next one sees a non-terminal state (reopened=false) with the label still set.
+  // Best-effort — a transient `gh` error must not abort a reopen already published.
+  // Removing an absent label is a harmless no-op.
+  if (retry) {
+    try { await projector.removeLabel(issue, "workflow:engine-error"); }
+    catch (err) { console.warn(`forge#3511: could not clear workflow:engine-error on #${issue}: ${err?.message || err}`); }
+  }
 
   // 2. Drive phases until terminal.
   //
@@ -455,14 +510,17 @@ export async function runIssue(opts) {
             break;
           } catch (e) {
             const resetAtMs = e.resetAtEpochMs;
+            const hasResetEpoch =
+              typeof resetAtMs === "number" && Number.isFinite(resetAtMs) && resetAtMs > now();
+            // forge#3511: a confirmed usage limit whose reset time is
+            // missing/unparseable/already past still pauses, by a bounded default.
             const canPause =
               e.code === "CLI_BACKEND_FAILED" &&
-              typeof resetAtMs === "number" && Number.isFinite(resetAtMs) &&
-              resetAtMs > now() &&
+              (hasResetEpoch || e.usageLimit === true) &&
               pauseCount < maxSessionLimitPauses;
             if (!canPause) throw e; // falls through to the unchanged outer catch below
             pauseCount += 1;
-            const waitMs = Math.max(0, resetAtMs - now());
+            const waitMs = hasResetEpoch ? Math.max(0, resetAtMs - now()) : sessionLimitDefaultWaitMs;
             // forge#2524 AC4: append a run-log event so a crash mid-wait
             // leaves a durable record of the pause (deriveState() folds this
             // into RunState.lastRateLimit — see bin/engine/runlog.mjs). This
@@ -472,15 +530,17 @@ export async function runIssue(opts) {
             // was ever written.
             appendEvent(dir, issue, {
               event: "PHASE_RATE_LIMITED", phase: phase.id,
-              resetAt: resetAtMs, resetAtDisplay: e.resetAt || null, waitMs,
+              resetAt: hasResetEpoch ? resetAtMs : null, resetAtDisplay: e.resetAt || null, waitMs,
             });
             // forge#2524 AC6: progress observer sees the pause so a caller
             // (bin/engine-cli.mjs) can render the wait state instead of the
             // process going silent for the duration.
             emitProgress({
               event: "phase_paused", phase: phase.id, reason: "session-limit",
-              resetAt: resetAtMs,
-              detail: `session limit hit — pausing until ${e.resetAt || new Date(resetAtMs).toISOString()}`,
+              resetAt: hasResetEpoch ? resetAtMs : null,
+              detail: hasResetEpoch
+                ? `session limit hit — pausing until ${e.resetAt || new Date(resetAtMs).toISOString()}`
+                : `session limit hit — reset time unknown, waiting default ${Math.round(waitMs / 60000)} min`,
             });
             await sleep(waitMs);
             // Loop back and retry the same phase with a fresh attempt budget

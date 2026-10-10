@@ -933,6 +933,53 @@ export function sanitizeOutputExcerptForLog(output) {
   return sanitizeAndCap(String(output), MAX_LOGGED_OUTPUT_EXCERPT_LEN);
 }
 
+// Shared usage-limit phrasing: detection and reset extraction must agree on it.
+const USAGE_LIMIT_PHRASE = "(?:session|weekly|usage) limit";
+const USAGE_LIMIT_RE = new RegExp(USAGE_LIMIT_PHRASE, "i");
+// `... limit · resets 3pm (Asia/Kolkata)` — capture stops at the zone's `)`.
+const USAGE_LIMIT_RESET_PAREN_RE = new RegExp(
+  `${USAGE_LIMIT_PHRASE}[^\\n"]*?resets?\\s+([^\\n"]+?\\))`, "i");
+// Zone-less fallback: capture to end of line, but never across a quote.
+const USAGE_LIMIT_RESET_LINE_RE = new RegExp(
+  `${USAGE_LIMIT_PHRASE}[^\\n"]*?resets?\\s+([^\\n"]+?)\\s*$`, "im");
+
+/**
+ * Parses a `claude --output-format json` single-result envelope from `text`.
+ * Returns the parsed object, or `undefined` when `text` is not exactly one
+ * JSON object. Never throws.
+ */
+function parseCliEnvelope(text) {
+  if (typeof text !== "string") return undefined;
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{")) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Detects whether a failed CLI run was a Claude usage/session/weekly limit.
+ * Prefers the envelope's structured fields (`api_error: "usage_limit_reached"`,
+ * `api_error_status: 429`), then the envelope's `result` text, then the plain
+ * combined output. `stdout` is parsed ALONE (forge#2422 invariant); never throws.
+ *
+ * @param {string} stdout - raw stdout of the CLI run
+ * @param {string} [output] - combined stdout+stderr, for the plain-text fallback
+ * @returns {boolean}
+ */
+export function detectUsageLimit(stdout, output = "") {
+  const env = parseCliEnvelope(stdout);
+  if (env) {
+    if (env.api_error === "usage_limit_reached" || env.api_error_status === 429) return true;
+    if (typeof env.result === "string" && USAGE_LIMIT_RE.test(env.result)) return true;
+    return false;
+  }
+  return USAGE_LIMIT_RE.test(output || "") && /resets?\s/i.test(output || "");
+}
+
 /**
  * Best-effort extraction of a Claude CLI session-limit reset time from
  * captured stdout/stderr (forge#2241). The CLI's own session-limit message
@@ -952,7 +999,15 @@ export function sanitizeOutputExcerptForLog(output) {
  */
 export function extractSessionLimitResetTime(output) {
   if (!output) return undefined;
-  const match = /session limit[^\n]*?resets?\s+([^\n]+?)\s*$/im.exec(output);
+  // The engine runs phases with `--output-format json`, so the limit message
+  // usually arrives inside a one-line JSON envelope. Read the structured
+  // `result` text when the whole input parses; otherwise fall back to the raw
+  // text. The plain-text captures below never cross a quote or newline, so a
+  // JSON-wrapped message cannot swallow the trailing `","type":...` fields.
+  const text = parseCliEnvelope(output)?.result ?? output;
+  const source = typeof text === "string" ? text : output;
+  const match =
+    USAGE_LIMIT_RESET_PAREN_RE.exec(source) ?? USAGE_LIMIT_RESET_LINE_RE.exec(source);
   if (!match) return undefined;
   const resetAt = match[1].trim();
   if (resetAt.length === 0) return undefined;
@@ -1036,19 +1091,26 @@ function wallTimeInZoneToEpochMs(y, mo, d, h, mi, s, timeZone) {
  */
 export function parseSessionLimitResetEpochMs(resetAtText, nowMs = Date.now()) {
   if (!resetAtText) return undefined;
-  const match = /^(\d{1,2}):(\d{2})\s*([ap]m)\s*\(([^)]+)\)\s*$/i.exec(resetAtText.trim());
+  const match = /^(\d{1,2})(?::(\d{2}))?\s*([ap]m)?\s*\(([^)]+)\)\s*$/i.exec(resetAtText.trim());
   if (!match) return undefined;
   const [, hourStr, minuteStr, ampm, timeZone] = match;
   const rawHour = parseInt(hourStr, 10);
-  // Reject out-of-range hours BEFORE the `% 12` conversion below — otherwise
-  // malformed input like "13:30pm" or "99:30pm" silently aliases to a
-  // plausible-but-wrong hour (13 % 12 = 1, 99 % 12 = 3) instead of being
-  // rejected, violating this function's own "never fabricate a value"
-  // contract. Mirrors the `minute > 59` guard further down.
-  if (rawHour < 1 || rawHour > 12) return undefined;
-  let hour = rawHour % 12;
-  if (/pm/i.test(ampm)) hour += 12;
-  const minute = parseInt(minuteStr, 10);
+  let hour;
+  if (ampm) {
+    // Reject out-of-range hours BEFORE the `% 12` conversion below — otherwise
+    // malformed input like "13:30pm" or "99:30pm" silently aliases to a
+    // plausible-but-wrong hour (13 % 12 = 1, 99 % 12 = 3) instead of being
+    // rejected, violating this function's own "never fabricate a value"
+    // contract. Mirrors the `minute > 59` guard further down.
+    if (rawHour < 1 || rawHour > 12) return undefined;
+    hour = rawHour % 12;
+    if (/pm/i.test(ampm)) hour += 12;
+  } else {
+    // 24-hour form: minutes are required (a bare "15" is too ambiguous).
+    if (minuteStr === undefined || rawHour > 23) return undefined;
+    hour = rawHour;
+  }
+  const minute = minuteStr === undefined ? 0 : parseInt(minuteStr, 10);
   if (!Number.isFinite(hour) || !Number.isFinite(minute) || minute > 59) return undefined;
 
   let todayParts;
@@ -1261,7 +1323,14 @@ export function runCliBackend({
       // present) so callers (bin/engine.mjs) can surface *when* a
       // quota-exhaustion failure will clear without reading raw logs. Only
       // ever set when the pattern actually matches — never fabricated.
-      const resetAt = extractSessionLimitResetTime(output);
+      // The reset text is read from stdout's parsed envelope first (stdout
+      // ALONE, forge#2422), then from the combined output.
+      const resetAt =
+        extractSessionLimitResetTime(stdout) ?? extractSessionLimitResetTime(output);
+      // Structured usage-limit flag: lets the engine pause by a bounded
+      // default when the reset time itself is missing or unparseable. The
+      // engine, not the runner, owns that default — no epoch is fabricated here.
+      if (detectUsageLimit(stdout, output)) err.usageLimit = true;
       if (resetAt) {
         err.resetAt = resetAt;
         // forge#2524: also attach a machine-usable epoch-ms timestamp so
