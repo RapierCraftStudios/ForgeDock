@@ -30,42 +30,89 @@ import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
 export const TERMINAL_REASONS = ["merged", "invalid", "needs-human", "decomposed", "engine-error", "awaiting-merge"];
 
 /**
- * Fetch the issue's comments. Returns both:
- *  - `blob`: all bodies joined into one string, for simple marker-presence checks
- *    (`has(blob, marker)`) where it doesn't matter which comment posted the marker.
- *  - `comments`: an array of individual comment bodies, preserving per-comment
- *    boundaries, for extraction that MUST be scoped to a specific comment (see
- *    `parseBranchFromMarkers()` below — forge#2184).
+ * Trust predicate for FORGE marker comments (forge#3542) — a JS port of
+ * `scripts/trusted-comments.sh`, the ONE predicate the specs use. A comment is
+ * trusted when
+ *   - its `author_association` is in FORGE_TRAIL_TRUSTED_ASSOCIATIONS
+ *     (default OWNER,MEMBER,COLLABORATOR; an explicitly EMPTY value trusts no
+ *     association — `??`, not `||`), OR
+ *   - its `user.type` is "Bot" (a GitHub App installation always reports
+ *     association NONE), OR
+ *   - its `user.login` is in FORGE_TRAIL_TRUSTED_LOGINS (default empty).
+ * A comment carrying no author data at all (a bare string, `{body}` only) is
+ * UNTRUSTED: fail closed.
+ */
+export function isTrustedComment(c) {
+  if (!c || typeof c !== "object") return false;
+  const list = (v) => String(v).split(",").map((x) => x.trim()).filter(Boolean);
+  const assoc = list(process.env.FORGE_TRAIL_TRUSTED_ASSOCIATIONS ?? "OWNER,MEMBER,COLLABORATOR");
+  const logins = list(process.env.FORGE_TRAIL_TRUSTED_LOGINS ?? "");
+  return assoc.includes(c.author_association ?? "")
+    || (c.user?.type ?? "") === "Bot"
+    || logins.includes(c.user?.login ?? "");
+}
+
+/**
+ * Fetch the issue's comments, keeping ONLY trusted ones (forge#3542). Returns
+ * `{ comments }`: an array of trusted comment bodies, preserving per-comment
+ * boundaries and chronological order. Every marker gate below goes through
+ * `markedComments()`/`hasMarker()`/`latestMarked()`, which additionally require
+ * the marker to be ANCHORED (typed header leading, sentinel on its own line) —
+ * prose that merely quotes a marker never matches.
  *
- * The `--jq '.[].body | @json'` query asks `gh` for one JSON string per comment
- * (paginated); a single JSON array of bodies is also accepted. If the
- * response isn't valid JSON (a non-JSON gh error string, or a test mock that
- * supplies a raw marker string instead of the real API shape), fall back to
- * treating the whole blob as a single pseudo-comment — `has()` checks are
- * unaffected either way, and comment-scoped extraction simply won't match,
- * which is the safe, conservative behavior.
+ * The `--jq` query asks `gh` for one JSON object per comment
+ * (`{body, author_association, user:{type,login}}`, paginated, one per line); a
+ * single JSON array of such objects is also accepted. Anything unparsable, or a
+ * comment without author data, yields no trusted comment (fail closed) — there is
+ * deliberately no "trust unauthored" escape hatch; tests supply authored comments.
  */
 async function issueMarkers(issue, io) {
   // `--paginate` so an issue with >30 comments still exposes its newest trail;
-  // `.[].body | @json` emits one JSON string per line per page, which (unlike
-  // `[.[].body]`, one array per page) concatenates safely across pages.
-  const out = await io.gh(["api", "--paginate", `repos/{owner}/{repo}/issues/${issue}/comments`, "--jq", ".[].body | @json"]);
-  const blob = out || "";
-  const toBody = (c) => (typeof c === "string" ? c : (c && c.body) || "");
-  let comments = null;
+  // `{...} | @json` emits one JSON document per line per page, which (unlike
+  // `[.[]]`, one array per page) concatenates safely across pages.
+  const out = await io.gh(["api", "--paginate", `repos/{owner}/{repo}/issues/${issue}/comments`, "--jq",
+    ".[] | {body, author_association, user: {type: .user.type, login: .user.login}} | @json"]);
+  const text = out || "";
+  let raw = null;
   try {
-    const parsed = JSON.parse(out);
-    if (Array.isArray(parsed)) comments = parsed.map(toBody);
-  } catch { /* not a single JSON document — try one JSON string per line */ }
-  if (!comments) {
-    const lines = blob.split("\n").filter((l) => l.trim());
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) raw = parsed;
+  } catch { /* not a single JSON document — try one JSON value per line */ }
+  if (!raw) {
     try {
-      const bodies = lines.map((l) => JSON.parse(l));
-      if (bodies.length > 0 && bodies.every((b) => typeof b === "string")) comments = bodies;
+      const vals = text.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
+      // Tolerate a line that is itself an array (concatenated pages).
+      if (vals.length > 0) raw = vals.flatMap((v) => (Array.isArray(v) ? v : [v]));
     } catch { /* fall through */ }
   }
-  if (!comments) comments = blob ? [blob] : [];
-  return { blob, comments };
+  const comments = (raw || [])
+    .filter((c) => c && typeof c === "object" && typeof c.body === "string" && isTrustedComment(c))
+    .map((c) => c.body);
+  return { comments };
+}
+
+const reEscape = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** True when `body` STARTS with the typed header `<!-- {header}` (e.g. `FORGE:BUILDER`). */
+function startsWithHeader(body, header) {
+  return typeof body === "string" && new RegExp(`^\\s*<!--\\s*${reEscape(header)}(?![A-Za-z0-9_])`).test(body);
+}
+/** True when `body` carries `<!-- {sentinel} -->` as a full line of its own. */
+function hasSentinelLine(body, sentinel) {
+  return new RegExp(`^[ \\t]*<!--[ \\t]*${reEscape(sentinel)}[ \\t]*-->[ \\t]*$`, "m").test(body);
+}
+/**
+ * Trusted comments that START with `header` AND carry `sentinel` as a full line.
+ * The sentinel is not required to be the LAST line: `FORGE:BUILDER:COMPLETE` is
+ * appended in place to an existing builder comment (validate.md Phase V5).
+ */
+function markedComments(comments, header, sentinel) {
+  return comments.filter((b) => startsWithHeader(b, header) && hasSentinelLine(b, sentinel));
+}
+function hasMarker(comments, header, sentinel) { return markedComments(comments, header, sentinel).length > 0; }
+/** Newest marked comment, or null. */
+function latestMarked(comments, header, sentinel) {
+  const all = markedComments(comments, header, sentinel);
+  return all.length ? all[all.length - 1] : null;
 }
 /**
  * Count commits on `branch` ahead of `lane`'s base. On the first build the
@@ -104,28 +151,6 @@ async function commitsAhead(lane, branch, io) {
   }
 }
 /**
- * Marker-presence check used throughout this file — including
- * `FORGE:BUILDER:COMPLETE` eligibility gates in the "build" phase's
- * `reconcile`/`detectOutcome` below (forge#2194 — investigated, no change).
- *
- * This is a plain substring test, deliberately, for consistency: every other
- * marker gate in this file (`INVESTIGATION:INVALID`, `DECOMPOSE:YES`,
- * `INVESTIGATION:COMPLETE`, `FORGE:CONTEXT:COMPLETE`,
- * `FORGE:ARCHITECT:COMPLETE`, `workflow:merged`) uses the identical
- * substring/membership technique — singling out `FORGE:BUILDER:COMPLETE`
- * alone for a "structured" parse would be inconsistent and would not close
- * any real gap: the actual trust boundary for issue-comment content is
- * *authorship* (can an untrusted actor post a comment on this issue at all),
- * not *format*. Nothing in this engine validates comment authorship for any
- * marker today, so an actor able to post an arbitrary comment could just as
- * easily post whatever "structured" shape a parser would accept — format
- * hardening alone buys nothing here. If comment-spoofing is ever a concern
- * worth addressing, the fix is an author allowlist applied uniformly to all
- * markers, not a bespoke parser for this one field.
- */
-function has(blob, marker) { return blob.includes(marker); }
-
-/**
  * The interactive workflow persists its conservative complexity decision in a
  * FORGE:FAST_PATH comment. The engine must consume that decision too; otherwise
  * its separate context/architect phases negate the documented trivial path.
@@ -135,7 +160,7 @@ function has(blob, marker) { return blob.includes(marker); }
 function complexityBand(comments) {
   for (let i = comments.length - 1; i >= 0; i--) {
     const body = comments[i];
-    if (!body?.includes("FORGE:FAST_PATH")) continue;
+    if (!startsWithHeader(body, "FORGE:FAST_PATH")) continue;
     const match = body.match(/\*\*COMPLEXITY_BAND\*\*:\s*([A-Z_]+)/);
     if (match) return match[1];
   }
@@ -180,8 +205,9 @@ export async function issueSnapshot(issue, io) {
  * reliable source, since the branch name is slug-derived from the issue
  * title and cannot be guessed or precomputed (forge#2174).
  *
- * SCOPING (forge#2184): only comments whose body contains `FORGE:BUILDER:COMPLETE`
- * — the same completion marker the build phase already gates on — are eligible
+ * SCOPING (forge#2184, forge#3542): only TRUSTED comments that start with the
+ * `<!-- FORGE:BUILDER` header and carry `<!-- FORGE:BUILDER:COMPLETE -->` as a full
+ * line — the same anchored completion check the build phase gates on — are eligible
  * to supply the branch. A `**Branch**:` field inside any other comment (a
  * FORGE:CONTRACT, FORGE:ARCHITECT, FORGE:CONTEXT, reviewer, or remediation
  * comment) is never considered, even if it happens to match the same regex
@@ -212,7 +238,7 @@ function parseBranchFromMarkers(comments) {
   const re = /\*\*Branch\*\*:\s*`([^`]+)`/;
   for (let i = comments.length - 1; i >= 0; i--) {
     const body = comments[i];
-    if (!body || !body.includes(PHASE_MARKERS.build.completionMarker)) continue;
+    if (!body || !startsWithHeader(body, PHASE_MARKERS.build.header) || !hasSentinelLine(body, PHASE_MARKERS.build.completionMarker)) continue;
     const match = body.match(re);
     if (match) return match[1];
   }
@@ -238,13 +264,11 @@ function resolveBranch(state, comments) {
  * skips both children). A BLOCKED / missing-arg child is not hidden here: it
  * shows up as `absent`, never as a fabricated "skipped" commit.
  */
-function buildChildEvidence(blob, comments) {
+function buildChildEvidence(comments) {
   const trivial = complexityBand(comments) === "TRIVIAL";
-  const state = (marker) => (has(blob, marker) ? "complete" : trivial ? "skipped-trivial" : "absent");
-  return {
-    context: state(PHASE_MARKERS.context.completionMarker),
-    architect: state(PHASE_MARKERS.architect.completionMarker),
-  };
+  const state = (phase) => (hasMarker(comments, PHASE_MARKERS[phase].header, PHASE_MARKERS[phase].completionMarker)
+    ? "complete" : trivial ? "skipped-trivial" : "absent");
+  return { context: state("context"), architect: state("architect") };
 }
 
 // ---------------------------------------------------------------------------
@@ -330,13 +354,24 @@ export const PHASES = [
     buildArgs: async (state, ctx) => [String(state.issue), ...repoArgs(ctx)],
     entryCondition: () => true,
     async detectOutcome(state, io) {
-      const { blob } = await issueMarkers(state.issue, io);
-      if (has(blob, PHASE_MARKERS.investigate.invalidMarker))
+      // forge#3542: evaluate ONE comment — the newest trusted comment that starts with
+      // the `<!-- FORGE:INVESTIGATOR` header — and read its verdict from its LAST
+      // non-empty line (the sentinel investigate.md Phase 1C closes with). A report that
+      // merely quotes `INVESTIGATION:INVALID` in prose, or any untrusted comment, can
+      // never flip the verdict.
+      const { comments } = await issueMarkers(state.issue, io);
+      const report = [...comments].reverse().find((b) => startsWithHeader(b, PHASE_MARKERS.investigate.header));
+      const closing = report ? report.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).pop() : "";
+      const invalid = `<!-- ${PHASE_MARKERS.investigate.invalidMarker} -->`;
+      const complete = `<!-- ${PHASE_MARKERS.investigate.completionMarker} -->`;
+      if (closing === invalid)
         return { status: "committed", terminalReason: "invalid", outputs: { verdict: "INVALID" } };
-      if (has(blob, PHASE_MARKERS.investigate.decomposedMarker))
-        return { status: "committed", terminalReason: "decomposed", outputs: { decompose: true } };
-      if (has(blob, PHASE_MARKERS.investigate.completionMarker))
+      if (closing === complete) {
+        // investigate.md emits `### Decomposition Assessment` then `**YES**|**NO**`.
+        if (/^###[ \t]+Decomposition Assessment[ \t]*\r?\n\s*\*\*YES\*\*/m.test(report))
+          return { status: "committed", terminalReason: "decomposed", outputs: { decompose: true } };
         return { status: "committed", outputs: { verdict: "CONFIRMED" } };
+      }
       return { status: "failed", detail: `no ${PHASE_MARKERS.investigate.completionMarker} marker` };
     },
     // forge#2379: no longer terminal after "decomposed" — that reason now
@@ -360,8 +395,8 @@ export const PHASES = [
     buildArgs: async (state, ctx) => [String(state.issue), ...repoArgs(ctx)],
     entryCondition: (s) => s.terminalReason === "decomposed",
     async detectOutcome(state, io) {
-      const { blob } = await issueMarkers(state.issue, io);
-      if (has(blob, PHASE_MARKERS.decompose.completionMarker))
+      const { comments } = await issueMarkers(state.issue, io);
+      if (hasMarker(comments, PHASE_MARKERS.decompose.header, PHASE_MARKERS.decompose.completionMarker))
         return { status: "committed", terminalReason: "decomposed", outputs: {} };
       return { status: "failed", detail: `no ${PHASE_MARKERS.decompose.completionMarker} marker` };
     },
@@ -382,16 +417,16 @@ export const PHASES = [
       // Idempotent resume: resolve the real branch from ground truth (FORGE:BUILDER
       // comment) rather than trusting a possibly-stale/absent state.branch, then
       // check it's already ahead of base → treat as done, skip the LLM (forge#2174).
-      const { blob, comments } = await issueMarkers(state.issue, io);
+      const { comments } = await issueMarkers(state.issue, io);
       const branch = resolveBranch(state, comments);
-      if (branch && has(blob, PHASE_MARKERS.build.completionMarker) && (await commitsAhead(state.lane, branch, io)) > 0) {
+      if (branch && hasMarker(comments, PHASE_MARKERS.build.header, PHASE_MARKERS.build.completionMarker) && (await commitsAhead(state.lane, branch, io)) > 0) {
         return { satisfied: true, outputs: { branch } };
       }
       return { satisfied: false };
     },
     async detectOutcome(state, io) {
-      const { blob, comments } = await issueMarkers(state.issue, io);
-      const complete = has(blob, PHASE_MARKERS.build.completionMarker); // #1305: require :COMPLETE …
+      const { comments } = await issueMarkers(state.issue, io);
+      const complete = hasMarker(comments, PHASE_MARKERS.build.header, PHASE_MARKERS.build.completionMarker); // #1305: require :COMPLETE …
       // Resolve the branch the builder actually created from the FORGE:BUILDER:COMPLETE
       // comment (ground truth), scoped to that specific comment — see
       // resolveBranch()/parseBranchFromMarkers() above (forge#2174, forge#2184).
@@ -403,7 +438,7 @@ export const PHASES = [
       // non-retryable guard below on the very first attempt.
       const ahead = branch ? await commitsAhead(state.lane, branch, io) : -1; // … AND real commits
       if (complete && ahead > 0) {
-        return { status: "committed", outputs: { branch, ...buildChildEvidence(blob, comments) } };
+        return { status: "committed", outputs: { branch, ...buildChildEvidence(comments) } };
       }
       const detail = `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}`;
       // forge#2176: when the builder has already posted FORGE:BUILDER:COMPLETE
@@ -509,9 +544,10 @@ export const PHASES = [
       const boundMarker = REMEDIATION_BOUND_MARKERS[kind];
       const marker = `<!-- FORGE:${boundMarker}: pr=${pr} -->`;
       try {
-        const { blob } = await issueMarkers(state.issue, io);
+        const { comments } = await issueMarkers(state.issue, io);
         // Resume idempotency: a handoff interrupted after the marker post must not double-count.
-        if (!has(blob, marker)) {
+        // forge#3542: only a full-line marker in a trusted comment counts.
+        if (!comments.some((b) => hasSentinelLine(b, `FORGE:${boundMarker}: pr=${pr}`))) {
           await io.gh(["issue", "comment", String(state.issue), "--body",
             `${marker}\nReview handed PR #${pr} to remediation (${kind}); the engine is dispatching it once.`]);
         }
@@ -526,10 +562,8 @@ export const PHASES = [
       // returned a stale outcome from an earlier remediation when a later one posted nothing.
       const { comments } = await issueMarkers(state.issue, io);
       const completion = PHASE_MARKERS.remediate.completionMarker;
-      let latest = null;
-      for (let i = comments.length - 1; i >= 0; i--) {
-        if (has(comments[i], completion)) { latest = comments[i]; break; }
-      }
+      // forge#3542: trusted, header-led comment with the sentinel as its own line.
+      const latest = latestMarked(comments, PHASE_MARKERS.remediate.header, completion);
       if (latest === null)
         return { status: "failed", detail: `no ${completion} marker` };
       // Parse the **Re-gate outcome**: field remediate.md's Phase M8 posts
