@@ -513,7 +513,7 @@ case "$TIER" in
   adaptive|universal) run bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} decomposed ;;
   prose)
     run gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:decomposed" \
-      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:invalid" 2>/dev/null || true
+      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:awaiting-merge,workflow:merged,workflow:invalid" 2>/dev/null || true
     ;;
 esac
 ```

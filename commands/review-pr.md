@@ -2920,8 +2920,8 @@ if [ "${BASE_CONFLICT:-false}" = "true" ] && [ "${OTHER_BLOCKING:-false}" != "tr
 fi
 if [ "${ONLY_BASE_CONFLICT:-false}" = "true" ] && [ "$VERDICT" = "CHANGES REQUESTED" ]; then
     # Pure base conflict (set in Phase 7B: the ONLY blocker): route to the base-sync path, NOT needs-human. <!-- Added: forge#3496 -->
-    # work-on/review.md R4 adds needs-human only when it hands off to remediate; a standalone /review-pr caller just sees the blocker.
-    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: base conflict with \`{MERGE_BASE}\` (the only blocking reason). Next step is a base sync: merge \`origin/{MERGE_BASE}\` into the PR branch (merge only, no rebase, no force-push), resolve conflicts by reading both sides, re-run the quality gate, then re-run /review-pr on the new head." # <!-- allowlist:check-command-side-effects -->
+    # work-on/review.md R4 sets workflow:remediating (not needs-human) when it hands off to remediate; a standalone /review-pr caller just sees the blocker.
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: base conflict with \`{MERGE_BASE}\` (the only blocking reason). No operator action is needed: the pipeline is performing the base sync automatically (merging \`origin/{MERGE_BASE}\` into the PR branch, merge only, no rebase, no force-push), re-running the quality gate, then re-reviewing the new head. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
     # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "base-conflict". Do NOT add needs-human and do NOT attempt gh pr merge.
 elif [ "$VERDICT" = "CHANGES REQUESTED" ] || [ "$HAS_PURPOSE_REGRESSION" = "true" ] || [ "$CALIBRATION_NEEDS_HUMAN" = "true" ] || [ "${TRUST_NEEDS_HUMAN:-false}" = "true" ]; then
     BLOCK_REASON=""
@@ -2951,7 +2951,7 @@ fi
 
 if [ "$PRE_MERGE_BASE_CONFLICT" = "true" ]; then
     # Base moved during review: route to the base-sync path, NOT needs-human. <!-- Added: forge#3496 -->
-    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: base conflict (\`mergeable=${PRE_MERGE_HEALTH}\`, \`mergeStateStatus=${PRE_MERGE_HEALTH_STATE}\`). Merge \`origin/{MERGE_BASE}\` into the PR branch (merge only, no rebase, no force-push), resolve conflicts by reading both sides, then re-run /review-pr." # <!-- allowlist:check-command-side-effects -->
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: base conflict (\`mergeable=${PRE_MERGE_HEALTH}\`, \`mergeStateStatus=${PRE_MERGE_HEALTH_STATE}\`). No operator action is needed: the pipeline is performing the base sync automatically (merging \`origin/{MERGE_BASE}\` into the PR branch, merge only, no rebase, no force-push) and then re-reviewing. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
     # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "base-conflict". Do NOT add needs-human and do NOT attempt gh pr merge.
 elif [ "$PRE_MERGE_HEALTH_STATE" = "BLOCKED" ]; then
     # Branch protection not satisfied: syncing the base cannot clear it, so this is NOT a base-conflict blocker.
@@ -2978,7 +2978,7 @@ else
 #     bot-only re-review (authorAssociation=NONE) could never satisfy the strict ≥2 verified-
 #     human bar and so stranded staging PRs the fast lane would auto-merge.
 PREVIOUSLY_ESCALATED=$(gh issue view {MERGE_ISSUE} {MERGE_GH_FLAG} --json labels,comments \
-  --jq '([.labels[].name | . == "needs-human"] + [.comments[].body | contains("FORGE:REMEDIATION")]) | any' 2>/dev/null || echo "false")
+  --jq '([.labels[].name | . == "needs-human" or . == "workflow:remediating"] + [.comments[].body | contains("FORGE:REMEDIATION")]) | any' 2>/dev/null || echo "false")
 GUARD_BASE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
 
 if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
@@ -3002,7 +3002,7 @@ if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
       adaptive|universal) bash "$SCRIPT_PATH" {MERGE_ISSUE} {MERGE_GH_FLAG} awaiting-merge ;;
       prose)
         gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "workflow:awaiting-merge" \
-          --remove-label "needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
+          --remove-label "needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
         ;;
     esac
     # STOP — do not attempt gh pr merge here. The merge decision belongs to a human for a

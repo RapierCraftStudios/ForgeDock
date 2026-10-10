@@ -416,7 +416,7 @@ RESOLUTION=$(resolve_script 'transition-label'); TIER="${RESOLUTION%%:*}"; SCRIP
 case "$TIER" in
   adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} investigating ;;
   prose)
-    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:investigating" --remove-label "workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:investigating" --remove-label "workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
     ;;
 esac
 ```
@@ -1193,7 +1193,7 @@ RESOLUTION=$(resolve_script 'transition-label'); TIER="${RESOLUTION%%:*}"; SCRIP
 case "$TIER" in
   adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} ready-to-build ;;
   prose)
-    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:ready-to-build" --remove-label "workflow:investigating,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:ready-to-build" --remove-label "workflow:investigating,workflow:building,workflow:in-review,workflow:remediating,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
     ;;
 esac
 ```
@@ -1213,7 +1213,7 @@ RESOLUTION=$(resolve_script 'transition-label'); TIER="${RESOLUTION%%:*}"; SCRIP
 case "$TIER" in
   adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} invalid ;;
   prose)
-    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:invalid" --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:invalid" --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:awaiting-merge,workflow:merged,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
     ;;
 esac
 gh issue close {NUMBER} {GH_FLAG} --comment "Closing as invalid: {reason from investigation}"   # allowlist:check-command-side-effects

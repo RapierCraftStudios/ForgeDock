@@ -26,6 +26,7 @@ export const ACTIVE_WORKFLOW_LABELS = [
   "workflow:ready-to-build",
   "workflow:building",
   "workflow:in-review",
+  "workflow:remediating",
 ];
 
 const pexec = promisify(execFile);
