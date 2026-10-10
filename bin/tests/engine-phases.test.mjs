@@ -588,6 +588,14 @@ describe("pickPhase", () => {
       const outcome = await review.detectOutcome(reviewState, io);
       assert.equal(outcome.status, "blocked");
       assert.equal(outcome.outputs.pr, 7);
+      assert.equal(outcome.handoff, true, "escalation is an explicit opt-in handoff");
+    });
+
+    it("forge#3525: no-signal review failure carries no handoff opt-in", async () => {
+      const io = ioFor({ ...openUnlabelled, issueLabels: [] });
+      const outcome = await review.detectOutcome(reviewState, io);
+      assert.equal(outcome.status, "failed");
+      assert.notEqual(outcome.handoff, true);
     });
 
     it("forge#3541: an explicit REVIEW_RESULT BLOCKED with workflow:remediating on the issue is not a handoff", async () => {
@@ -614,6 +622,7 @@ describe("pickPhase", () => {
         rr("  status: NEXT\n  next: remediate\n  remediation: inpr-fix\n  pr_number: 7"));
       assert.equal(outcome.status, "blocked");
       assert.equal(outcome.outputs.pr, 7);
+      assert.equal(outcome.handoff, true);
     });
 
     it("forge#3530: carries a valid remediation kind; unknown kind recorded as the sentinel, never raw text", async () => {

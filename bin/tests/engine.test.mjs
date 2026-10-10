@@ -252,6 +252,36 @@ describe("runIssue", () => {
     assert.deepEqual(s.committed, ["investigate", "build", "review", "remediate"]);
   });
 
+  it("forge#3525: no-signal review (PR created during the run) stops at needs-human without remediate", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; },
+    };
+    const calls = [];
+    const runner = async ({ commandName }) => { calls.push(commandName); script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "needs-human");
+    assert.ok(!calls.includes("work-on/remediate"), "no-signal must not run remediate");
+  });
+
+  it("forge#3525: no-signal review (PR pre-existing via reconcile) stops at needs-human without remediate", async () => {
+    const { w, io } = fakeWorld();
+    w.pr = 7; // found by reconcile (openPrFor) before review runs -> state.pr seeded
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; },
+    };
+    const calls = [];
+    const runner = async ({ commandName }) => { calls.push(commandName); script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "needs-human");
+    assert.ok(!calls.includes("work-on/remediate"), "no-signal must not run remediate");
+  });
+
   it("forge#3521 SPEC-1: explicit REVIEW_RESULT BLOCKED + issue needs-human + open PR does not hand off to remediate", async () => {
     const { w, io } = fakeWorld();
     const script = {
