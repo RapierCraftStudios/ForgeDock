@@ -110,7 +110,7 @@ Example: "3126 --auto-merge --issue 3124 --base staging --gh-flag -R $GH_REPO --
 
 Extract: `PR_NUMBER`, `AUTO_MERGE=true`, `MERGE_ISSUE`, `MERGE_BASE`, `MERGE_GH_FLAG`, `MERGE_WORKTREE` (optional — the absolute path to the git worktree to clean up after merge) using the **Argument Parse** block below.
 
-**`$ARGUMENTS` is the whole argument string, never a PR number.** Every `gh` call in this spec uses `"$PR_NUMBER"` (and `-R "$REPO"`), bound once by the block below. Shell state does not persist between Bash calls, so any later Bash block that reads `PR_NUMBER`, `REPO`, `REPO_FLAG` or `MERGE_*` must re-run this block first. <!-- Added: forge#3404 -->
+**`$ARGUMENTS` is the whole argument string, never a PR number.** Every `gh` call in this spec uses `"$PR_NUMBER"` (and `-R "$REPO"`), bound once by the block below. Shell state does not persist between Bash calls, so any later Bash block that reads `PR_NUMBER`, `REPO`, `REPO_FLAG` or `MERGE_*` must re-declare it at the top of that block (`PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"; REPO_FLAG="-R {GH_REPO}"` with the orchestrator's values, as the Phase 3C and Phase 4 blocks do). `scripts/check-spec-bash.sh --fence-state` enforces this in CI. <!-- Added: forge#3404, forge#3484 -->
 
 #### Argument Parse
 
@@ -225,6 +225,8 @@ echo "THOROUGH=$THOROUGH"
 Resolve the PR number and post a routing marker immediately. This creates an audit trail — if a PR has no `FORGE:REVIEW_ROUTE` comment after a review command was run, the review was bypassed or never started.
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO_FLAG="-R {GH_REPO}"; MERGE_ISSUE="{MERGE_ISSUE}"; MERGE_GH_FLAG="{MERGE_GH_FLAG}"
 # Determine REVIEW_MODE from the first token (PR_REF, bound by Argument Parse) before any routing decision
 REVIEW_MODE_RAW="$ARGS_RAW"
 if echo "$PR_REF" | grep -qE '^(staging|feature|staging:feature)$'; then
@@ -325,6 +327,8 @@ Show list, ask user which to review, then loop through each with full review.
 
 **Auto-detect staging mode:**
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO_FLAG="-R {GH_REPO}"
 [ -n "$PR_NUMBER" ] || { echo "review-pr: no PR number - stopping" >&2; exit 1; }  # never let gh pick the current-branch PR <!-- Added: forge#3466 -->
 PR_INFO=$(gh pr view "$PR_NUMBER" ${REPO_FLAG} --json baseRefName,headRefName,additions,deletions,title)
 HEAD=$(echo $PR_INFO | jq -r '.headRefName')
@@ -353,6 +357,8 @@ Otherwise → proceed to Phase 1.
 
 ### 1A: Fetch PR Data
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 gh pr view "$PR_NUMBER" -R "$REPO" --json number,title,body,author,baseRefName,headRefName,files,additions,deletions
 REVIEW_SHA=$(gh pr view "$PR_NUMBER" -R "$REPO" --json headRefOid --jq '.headRefOid')
 REVIEW_SHA_SHORT=$(echo "$REVIEW_SHA" | cut -c1-7)
@@ -389,6 +395,8 @@ IS_FIRST_TIME_CONTRIBUTOR="false"
 
 ### 1B: Classify
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)
 DIFF=$(gh pr diff "$PR_NUMBER" -R "$REPO")
 
@@ -423,6 +431,8 @@ Record: services touched, domains detected, PR scope (1-2 sentences), change cat
 Read `forge.yaml → verification.commands.python` for project-specific tool commands:
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 # Read toolchain commands from forge.yaml
 PYTHON_FORMAT=$(yq '.verification.commands.python.format // ""' forge.yaml 2>/dev/null || echo '')
 PYTHON_LINT=$(yq '.verification.commands.python.lint // ""' forge.yaml 2>/dev/null || echo '')
@@ -494,18 +504,24 @@ Covered by `PYTHON_TYPECHECK` command in 2A above. If `verification.commands.pyt
 
 ### 2D: Environment Variable Audit
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 gh pr diff "$PR_NUMBER" -R "$REPO" | grep -E "os\.getenv|os\.environ|process\.env" | head -30
 ```
 Flag if new env vars not in `.env.example`.
 
 ### 2E: Secrets Detection (CRITICAL — BLOCKING if found)
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 gh pr diff "$PR_NUMBER" -R "$REPO" | grep -iE "(api[_-]?key|secret[_-]?key|password|token|credential|private[_-]?key)" | grep -vE "(#|//|\.example|placeholder|PLACEHOLDER|YOUR_|<|>)" | head -20
 gh pr diff "$PR_NUMBER" -R "$REPO" | grep -oE "['\"][A-Za-z0-9+/=]{40,}['\"]" | head -10
 ```
 
 ### 2F: SQL Migration Validation (if *.sql changed)
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 gh pr diff "$PR_NUMBER" -R "$REPO" --name-only | grep "\.sql$" | while IFS= read -r sql_file; do
     grep -E "FOR UPDATE" "$sql_file" | grep -qE "(SUM|COUNT|AVG|MIN|MAX)\s*\(" && echo "ERROR: FOR UPDATE with aggregate"
     grep -qE "DROP (TABLE|COLUMN|INDEX)" "$sql_file" && ! grep -qE "IF EXISTS" "$sql_file" && echo "WARNING: DROP without IF EXISTS"
@@ -603,6 +619,8 @@ fi
 ### 2I: Build Verification (MANDATORY for staging→main AND milestone→staging)
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 CHANGED_FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)
 HAS_TS=$(echo "$CHANGED_FILES" | grep -E '\.(tsx?|jsx?)$' | head -1)
 HAS_PY=$(echo "$CHANGED_FILES" | grep -E '\.py$' | head -1)
@@ -620,6 +638,8 @@ if [ "$IS_STAGING_TO_MAIN" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]
 Read `forge.yaml → verification.commands.typescript.typecheck` and `.build`:
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 gh pr checkout "$PR_NUMBER" -R "$REPO" --detach 2>/dev/null
 
 TS_TYPECHECK=$(yq '.verification.commands.typescript.typecheck // ""' forge.yaml 2>/dev/null || echo '')
@@ -653,6 +673,8 @@ If `BUILD_EXIT != 0`: **CONFIRMED blocking** — build/prerender failure.
 Read `forge.yaml → verification.commands.python.format` and `.build`:
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 gh pr checkout "$PR_NUMBER" -R "$REPO" --detach 2>/dev/null
 
 # Compile-check all changed Python files (language-universal — no config needed)
@@ -677,6 +699,8 @@ git checkout - 2>/dev/null
 Check whether the PR's actual changes match what the builder committed to in its contract:
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 # Find the contract comment on the linked issue
 ISSUE_NUM=$(gh pr view "$PR_NUMBER" -R "$REPO" --json body --jq '.body | gsub("(?s).*?(?:Closes #|#)(?<n>[0-9]+).*"; "\(.n)") // empty' 2>/dev/null | head -1)
 if [ -n "$ISSUE_NUM" ]; then
@@ -751,6 +775,8 @@ For each changed file, execute the relevant checks using the standalone verifica
 **Platform note**: The verify-*.sh scripts require bash and standard POSIX tools. On Windows without bash (Git Bash / WSL / MSYS2), these checks are skipped with an explicit message — the review continues without them.
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 CHANGED_FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)
 REPO_ROOT="."  # Assumes cwd is the repo root
 
@@ -957,6 +983,8 @@ Format: `INTEG-N|CONFIRMED|HIGH|file:line|Changed code may be unreachable: {reas
 **NEVER scale review depth by line count.** A 5-line shell script processing LLM output is more dangerous than a 500-line React component.
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 DIFF=$(gh pr diff "$PR_NUMBER" -R "$REPO")
 FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)
 echo "=== RISK SIGNALS ==="
@@ -1106,6 +1134,8 @@ echo "AUTH=$SCORE_AUTH BILLING=$SCORE_BILLING CONCURRENCY=$SCORE_CONCURRENCY DAT
 #### Step 2: Read Architect CONTRACT for Risk Flags (if PR is from /work-on)
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 CONTRACT_RISK_FLAGS=""
 ISSUE_NUM=$(gh pr view "$PR_NUMBER" -R "$REPO" --json body --jq '.body | gsub("(?s).*?(?:Closes #|#)(?<n>[0-9]+).*"; "\(.n)") // empty' 2>/dev/null | head -1)
 if [ -n "$ISSUE_NUM" ]; then
@@ -1287,6 +1317,8 @@ fi
 #### Step 3: Compute module key and look up cell
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 if [ "$PROVENANCE_TABLE_LOADED" = "true" ]; then
   # Normalize changed files to module key (mirrors normalizeModules() in calibration.mjs):
   # Take the top-level directory of each file; for two-level prefixes (services/*, apps/*,
@@ -1632,6 +1664,8 @@ INDEX_SLICE_INFRA=$(build_index_slice "infrastructure")
 Each domain agent receives only the diff slice relevant to its domain, not the full PR changeset. This caps per-child input cost on large PRs. Compute slices once here; substitute `[DOMAIN_DIFF_SLICE]` per agent below.
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 # Full diff fetched once — agents do NOT re-fetch it
 FULL_DIFF=$(gh pr diff "$PR_NUMBER" -R "$REPO")
 FULL_FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)
@@ -2130,6 +2164,8 @@ Filing a standalone `review-finding` issue for every LOW/POSSIBLE reviewer note 
 - **Contract-declared scope** <!-- Added: forge#3447 -->: the trusted, latest FORGE:CONTRACT of `MERGE_ISSUE` lists out-of-scope items as `deferred → #N`, `not-affected:` or `accepted-risk:` (parsed by `scripts/check-contract-scope.sh list`). A finding whose file equals, or sits under, a `deferred` item whose issue is verified becomes `NOTE contract-deferred #N` and is commented on that issue instead of being filed again. A finding under an `accepted-risk` item becomes `NOTE contract-accepted-risk`. A deferred issue is verified only when it is OPEN, is an issue (not a PR), is not `MERGE_ISSUE` itself, and its body carries `FORGE:DEFERRED_FROM: #<MERGE_ISSUE>` and the deferred path; an unverified item is dropped from the scope list. Never demoted: HIGH/CRITICAL, `not-affected` items (a contradicting finding means the contract was wrong), safety-exempt findings under either disposition, findings on a file this PR changed, and anything when the contract is missing, untrusted, unparseable or the deferred issue is closed, unverified or unreadable.
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+MERGE_ISSUE="{MERGE_ISSUE}"; AUTO_MERGE="{AUTO_MERGE}"
 # HELPER_SCRIPT resolver (CLASSIFY_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
 _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
 _tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
@@ -2290,6 +2326,8 @@ gh label create "pre-existing" --color "BFD4F2" --description "Defect noticed du
 
 **Milestone detection:**
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 # BASE_BRANCH is what the finding template stamps as **Code branch** below
 # (see the rationale comment at that template block) — HEAD_BRANCH is no
 # longer needed here; derive-finding-milestone.sh resolves its own
@@ -2319,6 +2357,8 @@ MILESTONE_TITLE=$(bash scripts/derive-finding-milestone.sh "${PR_NUMBER}" -R "${
 Run the deterministic dedup script first, then fall through to the line-range check:
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; MERGE_ISSUE="{MERGE_ISSUE}"
 # Step 0: Deterministic title dedup — catches near-duplicates before line-range check
 # See scripts/issue-dedup.sh for the token-overlap algorithm. <!-- Added: forge#1335 -->
 FINDING_TITLE_DEDUP="fix: brief description of finding (review finding — PR #${PR_NUMBER})"
@@ -2337,6 +2377,8 @@ fi
 ```
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; MERGE_ISSUE="{MERGE_ISSUE}"
 # For each finding (that passes the title dedup above), check line-range overlap
 FINDING_FILE="path/to/file.py"
 FINDING_LINE="123"
@@ -2398,6 +2440,8 @@ Title and line-range dedup is instance-keyed, so the same defect class re-filed 
 **Exemptions are decided FIRST, before any lookup or consolidation.** A finding is never consolidated away, and skips this check entirely (file it as a normal instance issue), when ANY of these hold: category `Security`, a REGRESSION (closed-issue match above), severity `HIGH` or `CRITICAL`, or priority `P0`/`P1`. Consolidation exists to damp repeated low-severity noise; it must never lower the `review-finding` counts the Phase 6 cascade damper and breaker read for severe findings.
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+MERGE_ISSUE="{MERGE_ISSUE}"
 REPO="{GH_REPO}"                     # placeholder, not an env var: review-pr never exports GH_REPO
 PATTERN_SLUG="pattern-slug"          # the finding's FORGE:PATTERN value
 PRIMARY_FILE="path/to/file.py"       # the finding's primary file
@@ -2447,6 +2491,8 @@ fi
 Each bash call is a fresh shell. Run the consolidation commands below in the SAME call as the block above, or re-declare `REPO`, `PATTERN_SLUG`, `SUBSYSTEM`, `PRIOR_NUMS` and `CONSOLIDATE` first. When `CONSOLIDATE=true` (this is the 2nd or later occurrence), consolidate instead of filing another instance issue. `CLASS_DONE` stays `false` unless every step below succeeds:
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+REPO="{GH_REPO}"
 CLASS_DONE="false"; CLASS_MARKER="<!-- FORGE:PATTERN-CLASS: ${PATTERN_SLUG} ${SUBSYSTEM} -->"
 find_class() { gh issue list -R "$REPO" --state open --label pattern-class --limit 100 --json number,body 2>/dev/null \
   | jq -r --arg m "$CLASS_MARKER" '[.[] | select(.body | contains($m)) | .number] | sort | .[0] // empty'; }
@@ -2460,6 +2506,8 @@ CLASS_NUM=$(find_class) || CLASS_NUM="__LOOKUP_FAILED__"      # lookup error: st
 
 **For each finding** (that passes dedup), create issue through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") — this preserves the bespoke line-range/title dedup above as a precise pre-check, while `/issue`'s own Phase 2D dedup runs as a coarser second pass:
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; MERGE_ISSUE="{MERGE_ISSUE}"
 FINDING_ISSUE_TITLE="fix: [summary] (review finding — PR #${PR_NUMBER})"
 # Defense-in-depth: /issue's arg tokenizer (commands/issue.md Argument Parsing,
 # forge#2094) uses an xargs-based tokenizer that never expands backtick/$(...)
@@ -2715,6 +2763,8 @@ Verdict determined by standard blocking criteria.
    - Verdict: CHANGES REQUESTED. Message: "Coverage reduction: a deleted test or removed workflow test step is not a fix for a red check. Restore it and fix the code under test, or escalate naming the failing assertions." Detection follows quality-gate 2U (`COVERAGE-1`); never dedup this finding against the PR's own issue.
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 # Determine if mergeability is a blocker (MERGE_HEALTH/MERGE_HEALTH_STATE set in Phase 1A; BASE/HEAD set in Phase 0 Mode 3)
 # BASE_CONFLICT is the single source of truth for "a base sync would fix this"; the Phase 8 guards read it. <!-- Added: forge#3496 -->
 HAS_MERGE_CONFLICT=false
@@ -2781,6 +2831,8 @@ $([ "$HAS_PURPOSE_REGRESSION" = "true" ] && echo "
 **Fail-safe**: ANY error reading the calibration table (branch absent, file missing, JSON parse error, git failure) MUST result in `CALIBRATION_NEEDS_HUMAN=false` and the current static blocking criteria (Phase 7B verdict) remaining authoritative. The calibration table can ONLY tighten behavior (add needs-human); it NEVER loosens behavior below the current static baseline.
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+MERGE_ISSUE="{MERGE_ISSUE}"
 # Phase 7B.5: Calibration threshold consultation
 CALIBRATION_NEEDS_HUMAN=false
 CALIBRATION_CELL=""
@@ -2865,6 +2917,8 @@ fi
 **Note-disposition preflight (MANDATORY before any merge attempt)**: §6B.5 is what bounds the review-finding cascade, so a review that extracted findings but never recorded their disposition must not auto-merge. Fail closed on an unreadable comment list.
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 DISPO_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null) || DISPO_JSON=""
 if [ -z "$DISPO_JSON" ]; then
   echo "NOTE DISPOSITION: could not read PR comments — refusing to merge (fail closed)" >&2
@@ -2923,6 +2977,8 @@ fi
 **Phase-trail preflight (MANDATORY before any merge attempt)** <!-- Added: forge#3061 -->: a reviewer verdict alone must not merge work whose earlier pipeline phases were skipped. Run the deterministic verifier against the linked issue; do NOT run the merge block below unless it exits 0.
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+MERGE_ISSUE="{MERGE_ISSUE}"
 if [ -z "${MERGE_ISSUE:-}" ]; then
   echo "PHASE TRAIL: auto-merge requested without --issue — the issue is never inferred from PR-author-controlled text, so the phase trail cannot be verified; the phase trail; refusing to merge (fail closed)" >&2
   gh pr comment {PR_NUMBER} {MERGE_GH_FLAG} --body "Auto-merge skipped: no --issue was given, so the phase trail cannot be verified. Re-run \`/review-pr {PR_NUMBER} --auto-merge --issue <N>\` or merge manually." 2>/dev/null || true # allowlist:check-command-side-effects
@@ -3021,11 +3077,31 @@ fi
 If the preflight failed, skip the rest of Phase 8. On exit code 1, return `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` listing the missing markers. On exit code ≥2 (unreadable trail, or 127 when the verifier is unresolvable), return `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail unreadable (rc=N)". This is an infrastructure failure with no MISSING lines, so callers neither re-run phases nor merge manually. (`DOCS_ONLY_FLAG` is computed in the block above: `--docs-only` when `scripts/is-docs-only.sh` accepts the PR diff, fed both sides of every rename: every file is an allowlisted `*.md` (`docs/**` or a root README/CHANGELOG/CONTRIBUTING/SECURITY/GOVERNANCE), outside the instruction directories (`commands/`, `devdocs/`, `templates/`, `skills/`, `agents/`, `hooks/`, `.claude/`, `.claude-plugin/`, `.agents/`, `.codex/`, `.cursor/`, `.github/`, `.opencode/`, `.gemini/`, `.kiro/`) at any depth, and not named `AGENTS.md`/`CLAUDE.md`/`SKILL.md`/`GEMINI.md` (or a dotted variant).)
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+REPO="{GH_REPO}"
 # §7B verdict + purpose-regression + calibration + trust-escalation guard — check before any merge attempt <!-- Added: forge#1601, forge#1741, forge#1745 -->
 # HARD RULE 3 requires that VERDICT=CHANGES REQUESTED, HAS_PURPOSE_REGRESSION=true,
 # CALIBRATION_NEEDS_HUMAN=true, AND TRUST_NEEDS_HUMAN=true all block merge, including under --auto-merge.
-# These vars are set in Phase 7A/7B/7B.5/3B.5 earlier in the same agent session.
-# An unset/empty VERDICT is safe — it evaluates to "" which does not equal "CHANGES REQUESTED".
+# These values are decided in Phase 7A/7B/7B.5/3B.5, in earlier fences (earlier shells): re-declare them here with the
+# orchestrator's values. VERDICT is the token of the 7B verdict comment (`APPROVED:` / `CHANGES REQUESTED:`), i.e.
+# APPROVED or CHANGES REQUESTED; the report template's APPROVE is normalized below, and NEEDS RE-REVIEW (stale head)
+# deliberately fails closed. The other five are true or false.
+VERDICT="{VERDICT}"; HAS_PURPOSE_REGRESSION="{HAS_PURPOSE_REGRESSION}"; CALIBRATION_NEEDS_HUMAN="{CALIBRATION_NEEDS_HUMAN}"
+TRUST_NEEDS_HUMAN="{TRUST_NEEDS_HUMAN}"; BASE_CONFLICT="{BASE_CONFLICT}"; OTHER_BLOCKING="{OTHER_BLOCKING}"
+[ "$VERDICT" = "APPROVE" ] && VERDICT="APPROVED"
+# Fail closed: an empty or unsubstituted value would read as "not blocking" and fall through to the merge path,
+# so any value outside the expected set stops here instead of merging.
+GUARD_STATE_OK=true
+case "$VERDICT" in "APPROVED"|"CHANGES REQUESTED") ;; *) GUARD_STATE_OK=false ;; esac
+for _guard_val in "$HAS_PURPOSE_REGRESSION" "$CALIBRATION_NEEDS_HUMAN" "$TRUST_NEEDS_HUMAN" "$BASE_CONFLICT" "$OTHER_BLOCKING"; do
+    case "$_guard_val" in true|false) ;; *) GUARD_STATE_OK=false ;; esac
+done
+if [ "$GUARD_STATE_OK" != "true" ]; then
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: the Phase 8 merge guard state is unbound (VERDICT='${VERDICT}', HAS_PURPOSE_REGRESSION='${HAS_PURPOSE_REGRESSION}', CALIBRATION_NEEDS_HUMAN='${CALIBRATION_NEEDS_HUMAN}', TRUST_NEEDS_HUMAN='${TRUST_NEEDS_HUMAN}', BASE_CONFLICT='${BASE_CONFLICT}', OTHER_BLOCKING='${OTHER_BLOCKING}'). Not merging; re-run /review-pr." # <!-- allowlist:check-command-side-effects -->
+    gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
+    # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "merge guard state unbound". Do NOT attempt gh pr merge.
+    exit 1
+fi
 # TRUST_NEEDS_HUMAN: set to true by Phase 3B.5 when INTENSITY_TIER=NOVEL_NEEDS_HUMAN AND shadow mode is off.
 # ONLY_BASE_CONFLICT: the base conflict is the ONLY reason the verdict is CHANGES REQUESTED. Computed HERE (after Phase 7B.5 and 3B.5) so the
 # calibration and trust human gates are already set and can never be skipped for a base-conflict PR. <!-- forge#3496 -->
@@ -3209,6 +3285,8 @@ fi
 **Purpose**: Review-finding issues created during a milestone PR review (Phase 6C) inherit the milestone. Once the milestone PR merges, those findings should flow through the fast lane independently — not remain stranded on a closed milestone. This step clears their milestone assignment automatically.
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 if [ "${IS_MILESTONE_TO_STAGING:-false}" = "true" ] && [ "${MERGE_STATE:-}" = "MERGED" ]; then
     echo "Phase 8B: Clearing milestone from open review-finding issues referencing PR #${PR_NUMBER}..."
 
@@ -3254,6 +3332,8 @@ fi
 **Detection**: Check if the PR is now MERGED. If so and `IS_MILESTONE_TO_STAGING=true`, run the same demilestoning logic as Phase 8B.
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 if [ "${IS_MILESTONE_TO_STAGING:-false}" = "true" ]; then
     PR_MERGE_STATE=$(gh pr view "$PR_NUMBER" -R "$REPO" --json state --jq '.state' 2>/dev/null || echo "")
     if [ "$PR_MERGE_STATE" = "MERGED" ]; then
@@ -3286,6 +3366,8 @@ fi
 <!-- Added: forge#815 -->
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"; REVIEW_SHA="{REVIEW_SHA}"
 CURRENT_SHA=$(gh pr view "$PR_NUMBER" -R "$REPO" --json headRefOid --jq '.headRefOid')
 REVIEW_IS_STALE="false"
 if [ "$CURRENT_SHA" != "$REVIEW_SHA" ]; then REVIEW_IS_STALE="true"; fi
@@ -3299,6 +3381,8 @@ Post a welcome comment when all three conditions are true:
 3. This is a single-PR review (MODE 3) — not a staging→main or multi-PR review
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 # Read config — default enabled when key is absent
 WELCOME_ENABLED=$(yq '.community.welcome_new_contributors // true' forge.yaml 2>/dev/null || echo 'true')
 
@@ -3353,6 +3437,8 @@ fi
 A degraded run that skipped Task-based agent dispatch must be visible from this summary alone, without interrogating the agent afterward. Compute the actual launched-agent count from the `<!-- FORGE:REVIEW-AGENT:{domain} -->` comments each agent is required to post (Phase 3C), rather than trusting a free-text tally:
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 # Same trust rule as Phase 3C/4: only trusted comments whose body starts with the marker count.
 # TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
 _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
@@ -3381,6 +3467,8 @@ ACTUAL_AGENT_COUNT=$(echo "$ACTUAL_AGENT_DOMAINS" | tr ',' '\n' | grep -c '.' 2>
 Substitute `ACTUAL_AGENT_COUNT`/`ACTUAL_AGENT_DOMAINS` into the summary's `**Agents**: [N] ([names])` field below — do NOT substitute a manually-counted or remembered figure. Compare it to `SELECTED_AGENT_COUNT` from Phase 3C. If it is smaller, the panel is degraded: the Phase 3C hard-stop path must already have labelled the PR `review-degraded`, added `needs-human`, and exited without a verdict. Never summarize, approve, or merge a partial panel. `ACTUAL_AGENT_COUNT=0` is the same hard stop, not a solo/inline review mode.
 
 ```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 gh pr comment "$PR_NUMBER" -R "$REPO" --body "$(cat <<'EOF'
 # PR Review Summary: #[NUMBER] - [TITLE]
 
