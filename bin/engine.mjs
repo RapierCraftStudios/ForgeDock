@@ -225,8 +225,11 @@ function makeProgressEmitter(onProgress) {
  *   `maxSessionLimitPauses`.
  * @param {boolean} [opts.retry] - forge#3511: explicit opt-in. When the run's
  *   terminal reason is `engine-error`, reopen it (RUN_REOPEN) and resume from
- *   the last committed phase. Any other terminal reason is left untouched and
- *   returns `not-retryable`.
+ *   the last committed phase. forge#3562: when it is `phase-complete` (a
+ *   multi-phase issue whose phase merged with more remaining), start a new
+ *   cycle (RUN_NEXT_CYCLE) that resets committed/branch/pr and restarts at
+ *   investigate. Any other terminal reason is left untouched and returns
+ *   `not-retryable`.
  */
 export async function runIssue(opts) {
   const { issue, dir, agentId, lane = "staging", io, runner,
@@ -297,15 +300,35 @@ export async function runIssue(opts) {
   // lease write below, which then publishes `terminal:false` at the reopen's
   // higher `v`. Only `engine-error` is ever reopened; needs-human / merged /
   // decomposed / etc. terminals are left untouched.
+  // forge#3562: `phase-complete` is also retryable, but as a NEW cycle
+  // (RUN_NEXT_CYCLE clears committed) rather than a reopen of the same one.
   let reopened = false;
   if (retry && state?.terminal) {
-    if (state.terminalReason !== "engine-error") {
+    if (state.terminalReason !== "engine-error" && state.terminalReason !== "phase-complete") {
       return {
         terminalReason: "not-retryable",
-        detail: `issue ${issue} ended ${state.terminalReason}; --retry only reopens an engine-error run`,
+        detail: `issue ${issue} ended ${state.terminalReason}; --retry only resumes an engine-error or phase-complete run`,
       };
     }
-    appendEvent(dir, issue, { event: "RUN_REOPEN", issue });
+    // forge#3562 (SEC-3): a new cycle discards `committed`, so check the live
+    // issue first. A CLOSED issue has nothing left to run; an unreadable
+    // snapshot fails closed rather than resetting a possibly-finished run.
+    if (state.terminalReason === "phase-complete") {
+      let snap;
+      try { snap = await issueSnapshot(issue, io); } catch { snap = { ok: false, state: null }; }
+      if (!snap.ok || snap.state === "CLOSED") {
+        return {
+          terminalReason: "not-retryable",
+          detail: snap.ok
+            ? `issue ${issue} is CLOSED; --retry does not start a new cycle on a closed issue`
+            : `issue ${issue} state could not be read; --retry did not start a new cycle`,
+        };
+      }
+    }
+    appendEvent(dir, issue, {
+      event: state.terminalReason === "phase-complete" ? "RUN_NEXT_CYCLE" : "RUN_REOPEN",
+      issue,
+    });
     state = deriveState(readLog(dir, issue));
     reopened = true;
   }
@@ -565,7 +588,7 @@ export async function runIssue(opts) {
         // "needs-human" — this is the engine/tool breaking, not a genuine
         // human-judgment block (see #2244/#2261). Any other thrown error is
         // a true unexpected crash and keeps propagating unchanged.
-        if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED") {
+        if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED" || e.code === "CLI_MAX_TURNS") {
           // forge#2241: when the runner attached a session-limit reset time
           // (bin/runner.mjs's extractSessionLimitResetTime(), only ever set
           // for a genuine session-limit CLI_BACKEND_FAILED — never
@@ -573,7 +596,9 @@ export async function runIssue(opts) {
           // reading raw logs. Purely additive: the base detail string is
           // unchanged, and this appends nothing when e.resetAt is absent.
           const resetSuffix = e.resetAt ? ` (resets: ${e.resetAt})` : "";
-          const detail = `phase ${phase.id}: ${e.code} - ${e.message}${resetSuffix}`;
+          const detail = e.code === "CLI_MAX_TURNS"
+            ? `phase ${phase.id}: CLI_MAX_TURNS - max-turns exhausted${e.numTurns != null ? ` after ${e.numTurns} turns` : ""}: ${e.message}`
+            : `phase ${phase.id}: ${e.code} - ${e.message}${resetSuffix}`;
           // forge#2240 (review finding): this fail-fast path previously left
           // phase_exit unreported — a caller tailing progress output would see
           // "→ phase X started" and then nothing, dangling exactly on the
@@ -613,8 +638,11 @@ export async function runIssue(opts) {
     // without ever resolving a PR (e.g. retries exhausted before one existed)
     // has nothing to remediate and stays a plain needs-human stop — it must not
     // fall through to `close`, which would otherwise be the next eligible phase.
+    // The handoff is opt-in: only an explicit escalation signal (outcome.handoff
+    // === true, set by review detectOutcome) permits it. The PR number merely
+    // supplies the remediate argument and is never itself a permission.
     const isRemediationHandoff = outcome.status === "blocked" &&
-      phase.id === "review" && (outcome.reason || "needs-human") === "needs-human" && outcome.handoff !== false &&
+      phase.id === "review" && (outcome.reason || "needs-human") === "needs-human" && outcome.handoff === true &&
       (outcome.outputs?.pr ?? state.pr) != null;
     if (outcome.status === "blocked") {
       emitProgress({ event: "phase_exit", phase: phase.id, status: "blocked", detail: outcome.detail });
@@ -634,7 +662,7 @@ export async function runIssue(opts) {
     }
     // forge#2377: `outcome.usage` is populated by runPhaseWithRetry() below
     // from the injected runner()'s (== bin/runner.mjs's runCommand()) return
-    // value — null when the backend doesn't report usage (CLI backend today)
+    // value — null when the backend doesn't report usage (the CLI backend parses it from its JSON envelope)
     // or when detectOutcome() never ran (this call site is only reached on
     // the "committed" path, so that case doesn't apply here). Kept as a
     // sibling of `outputs` rather than nested inside it, since `outputs` is
@@ -653,6 +681,8 @@ export async function runIssue(opts) {
     const commitReason = blockedReason ?? outcome.terminalReason ?? null;
     appendEvent(dir, issue, {
       event: "PHASE_COMMIT", phase: phase.id, outputs: commitOutputs, usage: outcome.usage ?? null,
+      // forge#3589: model + turn count per phase (null when the backend does not report them).
+      model: outcome.model ?? null, turns: outcome.turns ?? null,
       ...(commitReason ? { terminalReason: commitReason } : {}),
     });
     state = deriveState(readLog(dir, issue));
@@ -679,10 +709,14 @@ export async function runIssue(opts) {
     // ending the run for real.
     // build also hands off: the B5.5 size gate (NEEDS_DECOMPOSE) reports "decomposed".
     const isDecomposeHandoff = (phase.id === "investigate" || phase.id === "build") && terminalReason === "decomposed";
+    // forge#3624: remediate AUTO-LANDED whose issue is not yet CLOSED+workflow:merged hands off
+    // to `close` instead of ending the run (close is idempotent). Exempts BOTH terminate paths.
+    const isCloseHandoff = phase.id === "remediate" && outcome.status === "committed" &&
+      outcome.outputs?.closeHandoff === true && terminalReason === "merged";
     if (terminalReason && TERMINAL_REASONS.includes(terminalReason) &&
-        !isDecomposeHandoff && !isRemediationHandoff)
+        !isDecomposeHandoff && !isRemediationHandoff && !isCloseHandoff)
       return await terminate(state, terminalReason, outcome.detail);
-    if (phase.isTerminalAfter && phase.isTerminalAfter(state))
+    if (phase.isTerminalAfter && !isCloseHandoff && phase.isTerminalAfter(state))
       return await terminate(state, state.terminalReason || "merged");
   }
   return await terminate(state, state.terminalReason || "merged");
@@ -730,7 +764,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
   // forge#2377: the last successful attempt's `usage` (from runner()'s ==
   // runCommand()'s resolved value — {input_tokens, output_tokens,
   // cache_creation_input_tokens, cache_read_input_tokens} on the API
-  // backend, or null on the CLI backend / when the field is absent). Reset
+  // backend or the CLI JSON envelope, null when the field is absent). Reset
   // is unnecessary since a thrown attempt never reaches the assignment
   // below — `lastUsage` simply stays whatever the previous successful
   // attempt (if any) set it to, which is correct: it always reflects the
@@ -765,6 +799,16 @@ async function runPhaseWithRetry(phase, state, ctx) {
       // *why* the CLI exited 1 (the quota/session-limit theory in #2244 is
       // unproven) — a deterministic tool crash should not be retried as if
       // transient regardless of its root cause.
+      // forge#3589: CLI_MAX_TURNS (turn bound exhausted) is likewise deterministic and is
+      // NOT a commit: record the exhausted attempt, then rethrow so runIssue terminates
+      // `engine-error` with no PHASE_COMMIT — `--retry` then re-enters this same phase.
+      if (e.code === "CLI_MAX_TURNS") {
+        appendEvent(dir, issue, {
+          event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, maxAttempts,
+          turns: e.numTurns ?? null, usage: e.usage ?? null,
+        });
+        throw e;
+      }
       if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED") throw e;
       // forge#2377: no `usage` field here — the runner threw, so no result
       // (and therefore no usage data) was ever produced for this attempt.
@@ -776,9 +820,12 @@ async function runPhaseWithRetry(phase, state, ctx) {
     }
     allAttemptsThrew = false;
     lastUsage = result?.usage ?? null;
+    // forge#3589: model/turns recorded alongside usage (additive; null when absent).
+    const lastModel = result?.cliModel ?? result?.model ?? null;
+    const lastTurns = result?.turns ?? null;
     const outcome = await phase.detectOutcome(state, io, result);
-    if (outcome.status === "committed" || outcome.status === "blocked") return { ...outcome, usage: lastUsage };
-    appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail, maxAttempts, usage: lastUsage });
+    if (outcome.status === "committed" || outcome.status === "blocked") return { ...outcome, usage: lastUsage, model: lastModel, turns: lastTurns };
+    appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail, maxAttempts, usage: lastUsage, model: lastModel, turns: lastTurns });
     // forge#2176: a phase's detectOutcome can mark a failure as a known,
     // state-derived fixed point — re-running the phase's runner is
     // guaranteed to reproduce the identical failure (e.g. the build phase's
@@ -790,8 +837,9 @@ async function runPhaseWithRetry(phase, state, ctx) {
     // for every phase that doesn't opt in — investigate/context/architect/
     // review/close — is unchanged, preserving transient-failure retries).
     if (outcome.retryable === false) {
-      // forge#3521: keep outcome.outputs (e.g. the PR number) so the blocked
-      // commit persists it and isRemediationHandoff can see it.
+      // forge#3521: keep outcome.outputs (e.g. the PR number) for persistence and
+      // forward `handoff` so only an explicit opt-in escalation is honoured; a
+      // no-signal failure carries no handoff and stops at needs-human.
       return { status: "blocked", detail: outcome.detail, outputs: outcome.outputs, handoff: outcome.handoff, usage: lastUsage };
     }
   }

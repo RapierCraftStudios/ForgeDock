@@ -228,9 +228,9 @@ INFLIGHT_ISSUES=$(gh issue list $GH_FLAG \
   --state open \
   --limit 200 \
   --json number,title,labels \
-  --jq '[.[] | select(.labels | map(.name) | any(. == "workflow:building" or . == "workflow:in-review"))] | length' \
+  --jq '[.[] | select(.labels | map(.name) | any(. == "workflow:building" or . == "workflow:in-review" or . == "workflow:remediating"))] | length' \
   2>/dev/null || echo '0')
-echo "STATE: $INFLIGHT_ISSUES in-flight issue(s) (workflow:building or workflow:in-review)"
+echo "STATE: $INFLIGHT_ISSUES in-flight issue(s) (workflow:building, workflow:in-review, or workflow:remediating)"
 ```
 
 ### 0D: Detect staging vs main delta
@@ -725,7 +725,7 @@ while true; do
         --json number,milestone,labels \
         --jq '[.[] | select(
           .milestone == null and
-          (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "needs-human") | not)
+          (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "workflow:remediating" or . == "needs-human") | not)
         )] | .[].number' \
         2>/dev/null || echo '')
 
@@ -855,7 +855,7 @@ To approve: remove \`needs-human\` label from #${ISSUE_NUM} and re-run \`/autopi
         --json number,milestone,labels \
         --jq '[.[] | select(
           .milestone == null and
-          (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "needs-human") | not)
+          (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "workflow:remediating" or . == "needs-human") | not)
         )] | .[].number' \
         2>/dev/null || echo '')
       for N in $PRE_DISPATCH_ISSUES; do DISPATCHED_ISSUES+=("$N"); done
@@ -1005,7 +1005,7 @@ while IFS= read -r milestone; do
           '[.[] | select(
             .milestone != null and
             (.milestone.title | ascii_downcase | gsub("[^a-z0-9]+"; "-") | ltrimstr("-") | rtrimstr("-")) == $slug and
-            (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "needs-human") | not)
+            (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "workflow:remediating" or . == "needs-human") | not)
           )] | .[].number' \
           2>/dev/null || echo '')
 
@@ -1109,7 +1109,7 @@ To approve: remove \`needs-human\` label from #${ISSUE_NUM} and re-run \`/autopi
           '[.[] | select(
             .milestone != null and
             (.milestone.title | ascii_downcase | gsub("[^a-z0-9]+"; "-") | ltrimstr("-") | rtrimstr("-")) == $slug and
-            (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "needs-human") | not)
+            (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "workflow:remediating" or . == "needs-human") | not)
           )] | .[].number' \
           2>/dev/null || echo '')
         for N in $MS_PRE_DISPATCH; do DISPATCHED_ISSUES+=("$N"); done

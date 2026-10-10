@@ -84,7 +84,7 @@ release_orchestrator_lease() {
 2. Call `TaskStop(task_id)` (the harness tool) for each one, in the same turn, before ending the session.
 3. Call `cleanup_trail_cache` (Step 4B) and `release_orchestrator_lease()` (Step 4A-pre.-1) so a future resume or a different operator is not blocked by a stale lease from this now-stopped session.
 4. Report which issues had in-flight dispatch stopped mid-pipeline (their `workflow:*` label will reflect whatever phase they reached — a future `/work-on {NUMBER}` or orchestrator resume picks them back up from GitHub state, per the Universal Phase Dispatcher in `commands/work-on.md`).
-5. If `PENDING_DECISIONS` is non-empty and `DECISIONS_PRESENTED` is false, present every queued entry together, one question per gated issue (same format as the Termination condition drain), and set `DECISIONS_PRESENTED=true`. An explicit interrupt is a sanctioned ask point (forge#3497).
+5. If `PENDING_DECISIONS` is non-empty after the liveness filter (drop stale entries, forge#3508) and `DECISIONS_PRESENTED` is false, present every surviving entry together, one question per gated issue (same format as the Termination condition drain), and set `DECISIONS_PRESENTED=true`. An explicit interrupt is a sanctioned ask point (forge#3497).
 
 **This is a documentation/behavioral contract, not a bash block**: unlike the lease gate above, there is no shell construct that reliably intercepts "the orchestrator's own session is being stopped" — that is a harness-level event the orchestrating agent must handle in its own turn when it observes an interrupt, using its own tools (`TaskStop`), exactly the way `commands/orchestrate/phase-5-cleanup.md` already documents cleanup as an agent-driven procedure rather than a background script.
 
@@ -504,26 +504,22 @@ declare -A EDGE_REDERIVED
 declare -A EDGE_REDERIVE_ATTEMPTS
 
 # Affected-file extraction helper, resolved for the DONE-path cohort re-derivation
-# (forge#2848). Same resolver precedence as phase-3-dependency.md Step 3C Layer 1 —
-# ForgeDock's runtime installation before the target repository — because the
-# orchestrator runs inside the project being worked on, where a bare
-# `bash scripts/extract-affected-files.sh` silently fails when that project has not
-# copied ForgeDock's helper scripts into its own repository (#2794/#2791).
+# (forge#2848). Same trusted-install-only resolver as phase-3-dependency.md Step 3C Layer 1:
+# neither the working directory nor the target repository may supply the script
+# (#3400/#3483), and a bare `bash scripts/extract-affected-files.sh` silently fails on
+# consumer repos that have not copied ForgeDock's helpers (#2794/#2791).
 resolve_extract_affected_files() {
-  local candidates=()
-  case '${CLAUDE_PLUGIN_ROOT}' in /*) candidates+=('${CLAUDE_PLUGIN_ROOT}/scripts/extract-affected-files.sh') ;; esac  # running plugin first
-  [ -n "${FORGE_HOME:-}" ] && candidates+=("$FORGE_HOME/scripts/extract-affected-files.sh")
-  [ -n "${REPO_PATH:-}" ] && candidates+=("$REPO_PATH/scripts/extract-affected-files.sh")
-  candidates+=("$PWD/scripts/extract-affected-files.sh")
-
-  local candidate
-  for candidate in "${candidates[@]}"; do
-    if [ -f "$candidate" ]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
+  # HELPER_SCRIPT resolver (EXTRACT_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude.
+  local _l _tc _cfg _c
+  _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+  _tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+  for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+    [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
   done
-  echo "ERROR: extract-affected-files.sh is not installed in any configured runtime path." >&2
+  while IFS= read -r _c; do
+    case "$_c" in /*) if [ -f "$_c/scripts/extract-affected-files.sh" ]; then printf '%s\n' "$_c/scripts/extract-affected-files.sh"; return 0; fi ;; esac
+  done <<< "$_tc"
+  echo "ERROR: extract-affected-files.sh is not installed in any trusted ForgeDock install path." >&2
   return 1
 }
 
@@ -542,6 +538,15 @@ BATCH_FULLY_GATED=false
 # Batch scope: must survive every Step 4B completion cycle, like BATCH_FULLY_GATED. Each entry
 # is "{issue}|{reason}|{decision question}". Presented once, together, at drain/interrupt/sweep
 # exit. If lost to context compaction, Phase 6 Step 6A.8 rebuilds it from `needs-human` labels.
+# The queue is append-only, so every presentation point first runs the present-time liveness
+# filter (forge#3508) on it: drop stale entries, then present what is left.
+#   - numeric `{issue}` entry: run `gh issue view {issue} --json state,labels </dev/null`; keep the
+#     entry only while the issue is OPEN and still carries `needs-human`; drop it otherwise.
+#   - a `gh` lookup error is NOT "resolved": keep the entry (fail toward showing a decision,
+#     never toward silently losing one). Drop only on a confirmed read.
+#   - `breaker` entry: its issue field is not an issue number, so keep the breaker entry only while AMPLIFICATION_BREAKER_TRIPPED=true.
+#   - if the pruned queue is empty, present nothing and leave DECISIONS_PRESENTED unchanged.
+# Initialise the per-entry keep flag to "keep" at the top of each iteration (unknown = keep).
 PENDING_DECISIONS=()
 DECISIONS_PRESENTED=false
 
@@ -1400,7 +1405,7 @@ If `DISPATCH_NOW` is empty (headroom is 0), do not spawn any agents this cycle �
 
 ### Step 4B: Monitor completions and dispatch newly ready issues
 
-**Hard Rule (root orchestrator) — never ask the operator mid-batch; no mid-batch operator question while any issue is dispatchable or in flight** <!-- Added: forge#3497 -->: The worker prompts' "NEVER ask the user questions" rule binds the root session too. A question blocks the root turn, so no completion is processed and no dispatch happens until it is answered, which lets one issue's decision stall every independent issue. When an issue reaches `needs-human`, classify it `GATED` (items 6.4/6.5 below, unchanged), append its decision to `PENDING_DECISIONS` (item 6.5), print the one-line status (item 8), and keep dispatching every issue not gated by it. All queued decisions are presented together, one question per gated issue, at the drain point (see Termination condition), on an operator interrupt (Step 4A-pre.-0.5), or at the Step 4F exit, whichever comes first.
+**Hard Rule (root orchestrator) — never ask the operator mid-batch; no mid-batch operator question while any issue is dispatchable or in flight** <!-- Added: forge#3497 -->: The worker prompts' "NEVER ask the user questions" rule binds the root session too. A question blocks the root turn, so no completion is processed and no dispatch happens until it is answered, which lets one issue's decision stall every independent issue. When an issue reaches `needs-human`, classify it `GATED` (items 6.4/6.5 below, unchanged), append its decision to `PENDING_DECISIONS` (item 6.5), print the one-line status (item 8), and keep dispatching every issue not gated by it. All queued decisions are presented together, one question per gated issue, at the drain point (see Termination condition), on an operator interrupt (Step 4A-pre.-0.5), or at the Step 4F exit, whichever comes first. Each of those presentation points first runs the `PENDING_DECISIONS` present-time liveness filter (declared with the array in Step 4A; drops entries whose issue is no longer `needs-human`/open, or whose breaker has released) <!-- Added: forge#3508 -->.
 
 **Exceptions — batch-wide blockers that may still be raised immediately** (each blocks every remaining issue, so there is no independent work left to stall): an orchestrator lease conflict (Step 4A-pre.-1), `SECONDARY_RATE_LIMITED` (Step 4A-pre.0.3, rate limit pause awaiting operator resume), and a fully gated batch with nothing runnable (`BATCH_FULLY_GATED`, item 6.7, which is the drain itself). No other condition is a reason to ask.
 
@@ -2468,11 +2473,13 @@ Do not ask the user questions — you are running autonomously in the background
 
    `REREVIEW_STATE=NONE` means nothing to do (including an issue already at `needs-human`, closed, or not at `workflow:in-review`). `CLAIMED` means another actor holds a live claim for this head (an unexpired or renewed lease, or an expired lease with recent liveness such as a trusted `FORGE:REVIEW*` comment inside the lease window or running checks): do nothing, re-run Step 1 next cycle. A merged/closed PR is `NONE`. A `FORGE:REREVIEW_RELEASED` marker (`Outcome: SETTLED`) for the head whose issue is still at `workflow:in-review` is `STALE`, not `NONE` (forge#3486): the release was posted but the terminal outcome never landed (a crash between the release and the fallback write, or a human label reset on the same head), so the release is not terminal and the fallback re-applies. `UNREADABLE` fails closed: classify the issue `GATED` this cycle without writing anything, and re-run Step 1 next cycle. `STALE` (an expired lease with no liveness and the PR still open, a lease past the `REREVIEW_MAX_SECS` ceiling, an unparseable claim, or a trail that does not match the current head) goes straight to the Step 3 terminal fallback with the reason `stale re-review claim or trail`, without dispatching. Only `PENDING` continues.
 
-   **Step 2 — dispatch (claim first, forge#3413).** The claim is written and read back BEFORE `review-pr` is invoked. A failed post or read-back means NO dispatch (fail closed, terminal fallback), so there is never a wasted duplicate dispatch, and a second actor sees the claim and stands down. Bash blocks are independent executions: run the claim block with the **SHARED HELPERS** (`rereview_trusted_rows`, `REREVIEW_CLAIMS`, `REREVIEW_DONE_FILTER`, the lease/released filters and `REREVIEW_LEASE_SECS` / `REREVIEW_MAX_SECS`, plus its transitive deps `resolve_orch_login` and `trail_cache_dir`, pasted if not already defined in the block) from Step 1 pasted verbatim at its top, and `REREVIEW_PR` / `REREVIEW_SHA` set to the values Step 1 printed. The read-back lists the PR's comments by number and applies the same trusted predicate. The EARLIEST trusted claim for the head wins, defined as the LOWEST comment id (`.[0]` of the id-sorted `REREVIEW_CLAIMS`, unchanged by renewals; forge#3429): if the first matching row does not carry this actor's `Claim:` id, another actor claimed first (`LOST`) and this one stands down. The read-back waits a short settle delay before the first read and re-reads once after `VERIFIED` (a lower-id claim that appears late demotes it to `LOST`). Any API failure, zero matching rows, or a failed confirming re-read is `UNVERIFIED` (fail closed, never `VERIFIED`). The block has no `exit`, so it is safe in a shared or sourced shell:
+   **Step 2 — dispatch (claim first, forge#3413).** The claim is written and read back BEFORE `review-pr` is invoked. A failed post or read-back means NO dispatch (fail closed, terminal fallback), so there is never a wasted duplicate dispatch, and a second actor sees the claim and stands down. Bash blocks are independent executions: run the claim block with the **SHARED HELPERS** (`rereview_trusted_rows`, `REREVIEW_CLAIMS`, `REREVIEW_DONE_FILTER`, the lease/released filters and `REREVIEW_LEASE_SECS` / `REREVIEW_MAX_SECS`, plus its transitive deps `resolve_orch_login` and `trail_cache_dir`, pasted if not already defined in the block) from Step 1 pasted verbatim at its top, and `REREVIEW_PR` / `REREVIEW_SHA` set to the values Step 1 printed. The block's final line prints `REREVIEW_MARKER=` and `CLAIM_ID=` (empty in a dry run); every later block (Step 3 own-claim check, release, renewal) takes the actor's own claim id from that printed `CLAIM_ID=` line, since a later fresh shell cannot see it (forge#3472). `DRY_RUN` is likewise lost across blocks, so the block re-declares it from the orchestrator's run flag: substitute `{DRY_RUN}` with `true` or `false` before running (only an exact `true` is a dry run, so an unsubstituted placeholder behaves as a live run). The read-back lists the PR's comments by number and applies the same trusted predicate. The EARLIEST trusted claim for the head wins, defined as the LOWEST comment id (`.[0]` of the id-sorted `REREVIEW_CLAIMS`, unchanged by renewals; forge#3429): if the first matching row does not carry this actor's `Claim:` id, another actor claimed first (`LOST`) and this one stands down. The read-back waits a short settle delay before the first read and re-reads once after `VERIFIED` (a lower-id claim that appears late demotes it to `LOST`). Any API failure, zero matching rows, or a failed confirming re-read is `UNVERIFIED` (fail closed, never `VERIFIED`). The block has no `exit`, so it is safe in a shared or sourced shell:
 
    ```bash
+   DRY_RUN="{DRY_RUN}"   # substitute true/false from the orchestrator run flag (forge#3472); a fresh shell has no DRY_RUN
    REREVIEW_MARKER="UNVERIFIED"
-   if [ "${DRY_RUN:-false}" = "true" ]; then
+   CLAIM_ID=""
+   if [ "$DRY_RUN" = "true" ]; then
      echo "[DRY_RUN] would claim FORGE:REREVIEW_DISPATCHED for head ${REREVIEW_SHA} on PR #${REREVIEW_PR} and dispatch review-pr --auto-merge"
      REREVIEW_MARKER="DRYRUN"
    else
@@ -2517,7 +2524,7 @@ Do not ask the user questions — you are running autonomously in the background
        fi
      fi
    fi
-   echo "REREVIEW_MARKER=$REREVIEW_MARKER"
+   echo "REREVIEW_MARKER=$REREVIEW_MARKER CLAIM_ID=${CLAIM_ID:-}"
    ```
 
    Then, on `REREVIEW_MARKER=VERIFIED` ONLY, dispatch with the `REREVIEW_PR`, `REREVIEW_BASE` and `PRED` values Step 1 printed (a real call, not part of the bash block above). `DRYRUN` records "Would re-review PR #${REREVIEW_PR} with review-pr --auto-merge; skipped (dry-run)." and dispatches nothing; `LOST` and `UNVERIFIED` dispatch nothing:
@@ -2531,10 +2538,12 @@ Do not ask the user questions — you are running autonomously in the background
 
    If the call returns no `REVIEW_RESULT` (interrupted or no result), invoke it once more; this retry is the only one (bounded, independent of the Phase 4R `github-unavailable` waits) and does not post a second claim: the claim for this head is already recorded.
 
-   **Renew and release (forge#3428).** After `review-pr` returns (any result, including none), the claimant posts a checked, DRY_RUN-guarded release, but only AFTER the outcome is settled (forge#3486): `review-pr` produced a labelled terminal state (merged, or `needs-human`), or the Step 3 terminal fallback's label write was verified. Never post it before Step 3 has run: a release that precedes an unfinished outcome would hide a crash from Step 1. Because Step 1 only classifies issues still at `workflow:in-review`, a release found there means the outcome never landed and reads `STALE`. Run it with the SHARED HELPERS (the same set, including `resolve_orch_login` and `trail_cache_dir`) pasted at the top and `REREVIEW_PR` / `REREVIEW_SHA` / `CLAIM_ID` from Step 2. A failed post is reported (never ignored) but is not fatal: liveness in Step 1 still protects a live claimant. Renewal is best-effort: between review phases the claimant may re-post `<!-- FORGE:REREVIEW_DISPATCHED -->` with the SAME `Claim:` id and a fresh `Lease:` (Step 1 reads the newest row of the earliest claim's id for lease age; the earliest-claim-wins read-back stays on `.[0]`):
+   **Renew and release (forge#3428).** After `review-pr` returns (any result, including none), the claimant posts a checked, DRY_RUN-guarded release, but only AFTER the outcome is settled (forge#3486): `review-pr` produced a labelled terminal state (merged, or `needs-human`), or the Step 3 terminal fallback's label write was verified. Never post it before Step 3 has run: a release that precedes an unfinished outcome would hide a crash from Step 1. Because Step 1 only classifies issues still at `workflow:in-review`, a release found there means the outcome never landed and reads `STALE`. Run it with the SHARED HELPERS (the same set, including `resolve_orch_login` and `trail_cache_dir`) pasted at the top and `REREVIEW_PR` / `REREVIEW_SHA` from Step 1 plus the `CLAIM_ID` Step 2 printed (set it at the top of the block; never leave it empty, and renewal reuses that same printed id). A failed post is reported (never ignored) but is not fatal: liveness in Step 1 still protects a live claimant. Renewal is best-effort: between review phases the claimant may re-post `<!-- FORGE:REREVIEW_DISPATCHED -->` with the SAME `Claim:` id and a fresh `Lease:` (Step 1 reads the newest row of the earliest claim's id for lease age; the earliest-claim-wins read-back stays on `.[0]`):
 
    ```bash
-   if [ "${DRY_RUN:-false}" = "true" ]; then
+   DRY_RUN="{DRY_RUN}"   # substitute true/false from the orchestrator run flag (forge#3472)
+   CLAIM_ID="<the CLAIM_ID value Step 2 printed>"   # carried from the Step 2 printed line; a fresh shell cannot see it
+   if [ "$DRY_RUN" = "true" ]; then
      echo "[DRY_RUN] would post FORGE:REREVIEW_RELEASED for head ${REREVIEW_SHA} on PR #${REREVIEW_PR}"
    else
      post_release() { gh pr comment "$REREVIEW_PR" -R {GH_REPO} --body "<!-- FORGE:REREVIEW_RELEASED -->
@@ -2550,7 +2559,7 @@ Do not ask the user questions — you are running autonomously in the background
 
    Run the release block only at the end of Step 3 below, once the outcome is settled (merged or labelled terminal state, or the fallback's label write verified), not right after `review-pr` returns.
 
-   **Step 3 — outcome.** On `REVIEW_RESULT: status: COMPLETE` (merged), drive `work-on:close` and let item 6.6 wake dependents as normal. If `review-pr` returns another result with its own labelled terminal state (CHANGES REQUESTED, or `needs-human` for genuine blockers), that verdict applies and the issue is `GATED` or failed per the existing rules. `REREVIEW_MARKER=LOST` (another actor claimed this head first) and `REREVIEW_STATE=CLAIMED` take no action: leave the issue as it is and re-check next cycle. Before applying the terminal fallback for `STALE`, re-read the PR state and the issue labels once more: a merged or closed PR, or an issue that already advanced, means skip the fallback and report the state (forge#3428). If dispatch failed, the skill did not resolve, the issue is still at `workflow:in-review` with no `needs-human` after the retry, Step 1 printed `STALE`, or Step 2 printed `REREVIEW_MARKER=UNVERIFIED` and the re-check below found no live claim, apply the **terminal fallback** defined in `commands/work-on.md` Phase 0A.1 (labels re-read first, comment with the reason, add `needs-human` and remove `workflow:in-review` in one edit, verify the write), classify the issue `GATED`, and surface it to the operator in the run summary as `GATED: re-review could not run (#{PRED}, PR #{REREVIEW_PR}): <reason>`. For `REREVIEW_MARKER=UNVERIFIED`, first re-check for another actor's fresh claim (forge#3429): re-run the Step 1 CLAIMED/STALE/DONE classification for this head (with the SHARED HELPERS pasted at the top of that block). Map the result, reading the printed `FIRST_CLAIM_ID` (the lowest-id, winning claim, the same `.[0]` row that decides ownership everywhere else): if `FIRST_CLAIM_ID` equals this actor's own `CLAIM_ID`, the winning claim is our own unverified one, so go to the fallback (do not stand down on it). If `FIRST_CLAIM_ID` is another actor's id, the winning claim is not ours: classify it with the mapping below, exactly as the router's Claim pre-check step 4 does for `LOST` (forge#3431), so a `STALE` foreign winner (a crashed earlier claimant) goes to the fallback and never strands the issue, even though our own row still exists. Otherwise (and for a foreign winner) `CLAIMED` (another actor's live claim) and `NONE` (merged, closed, or advanced past in-review) stand down like `LOST` (no dispatch, no fallback, re-check next cycle); `UNREADABLE` writes nothing (fail closed, classify `GATED` this cycle without the fallback, as in Step 1); `STALE` and `PENDING` go to the fallback. The reason is `re-review claim could not be recorded` and the report line is `GATED: re-review could not run (#{PRED}, PR #{REREVIEW_PR}): marker write failed`; because the claim is written first, `UNVERIFIED` now means `review-pr` was NOT dispatched. Do not leave the issue `PENDING`. A failed label write is reported as such, not as done. The verified per-head claim bounds this to one re-review per PR head across the orchestrator and the router (no loop). Never review inline.
+   **Step 3 — outcome.** On `REVIEW_RESULT: status: COMPLETE` (merged), drive `work-on:close` and let item 6.6 wake dependents as normal. If `review-pr` returns another result with its own labelled terminal state (CHANGES REQUESTED, or `needs-human` for genuine blockers), that verdict applies and the issue is `GATED` or failed per the existing rules. `REREVIEW_MARKER=LOST` (another actor claimed this head first) and `REREVIEW_STATE=CLAIMED` take no action: leave the issue as it is and re-check next cycle. Before applying the terminal fallback for `STALE`, re-read the PR state and the issue labels once more: a merged or closed PR, or an issue that already advanced, means skip the fallback and report the state (forge#3428). If dispatch failed, the skill did not resolve, the issue is still at `workflow:in-review` with no `needs-human` after the retry, Step 1 printed `STALE`, or Step 2 printed `REREVIEW_MARKER=UNVERIFIED` and the re-check below found no live claim, apply the **terminal fallback** defined in `commands/work-on.md` Phase 0A.1 (labels re-read first, comment with the reason, add `needs-human` and remove `workflow:in-review` in one edit, verify the write), classify the issue `GATED`, and surface it to the operator in the run summary as `GATED: re-review could not run (#{PRED}, PR #{REREVIEW_PR}): <reason>`. For `REREVIEW_MARKER=UNVERIFIED`, first re-check for another actor's fresh claim (forge#3429): re-run the Step 1 CLAIMED/STALE/DONE classification for this head (with the SHARED HELPERS pasted at the top of that block). Map the result, reading the printed `FIRST_CLAIM_ID` (the lowest-id, winning claim, the same `.[0]` row that decides ownership everywhere else): if `FIRST_CLAIM_ID` equals this actor's own `CLAIM_ID` (the value Step 2 printed; an empty value never matches), the winning claim is our own unverified one, so go to the fallback (do not stand down on it). If `FIRST_CLAIM_ID` is another actor's id, the winning claim is not ours: classify it with the mapping below, exactly as the router's Claim pre-check step 4 does for `LOST` (forge#3431), so a `STALE` foreign winner (a crashed earlier claimant) goes to the fallback and never strands the issue, even though our own row still exists. Otherwise (and for a foreign winner) `CLAIMED` (another actor's live claim) and `NONE` (merged, closed, or advanced past in-review) stand down like `LOST` (no dispatch, no fallback, re-check next cycle); `UNREADABLE` writes nothing (fail closed, classify `GATED` this cycle without the fallback, as in Step 1); `STALE` and `PENDING` go to the fallback. The reason is `re-review claim could not be recorded` and the report line is `GATED: re-review could not run (#{PRED}, PR #{REREVIEW_PR}): marker write failed`; because the claim is written first, `UNVERIFIED` now means `review-pr` was NOT dispatched. Do not leave the issue `PENDING`. A failed label write is reported as such, not as done. The verified per-head claim bounds this to one re-review per PR head across the orchestrator and the router (no loop). Never review inline.
 
    This satisfies #1809 Q2 (the orchestrator auto-dispatches remediation against the gated issue itself — the exact gap forge#1812's item 6.5/6.6 left open, since those items only ever track and wake *dependents*, never the gated PR's own remediation) — and closes forge#2243 (the gap that #1812's fix left open for *leaf* issues with no dependents: because this item's `$PRED` binding was never made explicit and self-contained, it was only ever reached while walking a dependent's predecessor list, so a `needs-human` issue that has no dependents never got remediation dispatched and its CHANGES-REQUESTED PR re-reviewed the same unchanged commit forever). The remediation agent's outcome is picked up on the **next** completion-monitoring cycle of this same Step 4B loop: if it lands (`workflow:merged`), item 6.6 below fires normally and wakes any `blocked-on-human-merge` dependents (if any exist — a leaf issue simply has none to wake); if it holds/re-escalates, the issue simply remains `GATED` and item 6.5 continues tracking its dependents (if any) unchanged.
 
@@ -2748,7 +2757,7 @@ Do not ask the user questions — you are running autonomously in the background
 
 **Termination condition**: All issues in the DAG have reached `DONE` or `FAILED` (merged, invalid, or skipped due to dependency failure) — OR are `blocked-on-human-merge` (item 6.5) with no further dispatchable work remaining in the batch. These two outcomes are reported differently: a batch where every issue is `DONE`/`FAILED` is a **clean drain**; a batch where one or more issues remain `blocked-on-human-merge` is a **paused drain** — the active dispatch loop stops (there is nothing left to do until a human merges a gating PR) but this MUST be reported as paused, not as fully complete (see `phase-6-report.md`'s `🔗 Blocked-on-Merge` section). `needs-human` predecessors with no open PR are neither — they remain GATED indefinitely until either a PR appears (dependent moves to blocked-on-human-merge) or the predecessor itself resolves; do not treat isolated `needs-human` issues with no dependents as blocking termination. When either drain condition is met, check whether deferred review-spawned findings exist (accumulated in `DEFERRED_FINDINGS` during Step 4C). If deferred findings exist → proceed to Step 4F (Completion Sweep). If no deferred findings → **call `cleanup_trail_cache` (Step 4B) and `release_orchestrator_lease()` (Step 4A-pre.-1)** — this is a clean/paused drain of this session's own dispatch loop, so the lease should not be left held for a now-idle session — then proceed to Phase 5. <!-- Added: forge#2627 -->
 
-**Drain: present queued operator decisions (forge#3497)**: on either drain condition (clean or paused), before the lease release or the Step 4F hand-off above takes effect, if `PENDING_DECISIONS` is non-empty and `DECISIONS_PRESENTED` is false, present every entry together in one message, one question per gated issue (`#{issue} — {reason}: {question}`), set `DECISIONS_PRESENTED=true`, and do not wait on the answers before continuing to the lease release and Phase 5; answers are acted on by the operator (or a follow-up `/work-on`) after the report. This is the one legitimate ask point. Operator interrupt (Step 4A-pre.-0.5 step 5) and the Step 4F exit use the same present-once guard.
+**Drain: present queued operator decisions (forge#3497)**: on either drain condition (clean or paused), before the lease release or the Step 4F hand-off above takes effect, if `PENDING_DECISIONS` is non-empty after the liveness filter (drop stale entries first, forge#3508) and `DECISIONS_PRESENTED` is false, present every surviving entry together in one message, one question per gated issue (`#{issue} — {reason}: {question}`), set `DECISIONS_PRESENTED=true`, and do not wait on the answers before continuing to the lease release and Phase 5; answers are acted on by the operator (or a follow-up `/work-on`) after the report. This is the one legitimate ask point. Operator interrupt (Step 4A-pre.-0.5 step 5) and the Step 4F exit use the same present-once guard.
 
 **Reminder — this is the normal-exit lease release, distinct from the interrupted-stop procedure**: whether the drain is clean or paused, this session is no longer actively dispatching, so its lease must be released here (or, for a paused drain, at minimum have its heartbeat refresh stop — see Step 4A-pre.-1). This complements, but does not replace, the **Stopping the orchestrator** procedure (Step 4A-pre.-0.5) which handles the abnormal case of a mid-dispatch interrupt.
 
@@ -3073,20 +3082,16 @@ When `CASCADE_MAX_AMPLIFICATION` is not `off`, and the current ratio is greater 
 **Deterministic breaker check (MANDATORY on every dispatch path — engine CLI, Agent-spawn fallback, or a hand-driven orchestrator):** the in-spec bookkeeping above only runs when the Step 4B/4C bash runs. A batch driven through the Agent-spawn fallback never evaluated it and reached about 2 findings per merge (2026-10-08 audit). Before dispatching ANY `review-finding` issue at `priority:P3` or below, and after every completed merge, run `scripts/amplification-breaker.sh` against GitHub state. Its exit code is authoritative, and it overrides an in-memory `AMPLIFICATION_BREAKER_TRIPPED=false`:
 
 ```bash
-# Same resolver as review-pr §6B.5: plugin root, FORGE_ROOT, FORGEDOCK_HOME, newest pinned plugin cache
-# (CLAUDE_CONFIG_DIR, then ~/.claude), then the repo's own scripts/.
-AMP_SCRIPT=""
-_cands="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}")"
+# HELPER_SCRIPT resolver (AMP_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
 for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] || continue
-  _cands="$_cands
-$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
 done
-_cands="$_cands
-$PWD"
+AMP_SCRIPT=""
 while IFS= read -r _c; do
   case "$_c" in /*) [ -z "$AMP_SCRIPT" ] && [ -f "$_c/scripts/amplification-breaker.sh" ] && AMP_SCRIPT="$_c/scripts/amplification-breaker.sh" ;; esac
-done <<< "$_cands"
+done <<< "$_tc"
 if [ "$AMPLIFICATION_BREAKER" != "off" ]; then
   if [ -n "$AMP_SCRIPT" ]; then
     AMP_LINE=$(bash "$AMP_SCRIPT" --since "$BATCH_T0" -R {GH_REPO}); AMP_RC=$?
@@ -3508,6 +3513,13 @@ if [ "$UNIT_MERGED_THIS_CYCLE" = "true" ]; then
     else
       # Newest observation fell below 1.0 — the cascade is converging again; release the breaker.
       AMPLIFICATION_BREAKER_TRIPPED=false
+      # forge#3508: the breaker released, so drop its queued `breaker|...` entry from PENDING_DECISIONS.
+      _KEPT_DECISIONS=()
+      for _d in "${PENDING_DECISIONS[@]}"; do
+        case "$_d" in breaker\|*) ;; *) _KEPT_DECISIONS+=("$_d") ;; esac
+      done
+      PENDING_DECISIONS=("${_KEPT_DECISIONS[@]}")
+      echo "PENDING_DECISIONS_AFTER_BREAKER_RELEASE=${#PENDING_DECISIONS[@]}"
     fi
   fi
 fi
@@ -4320,7 +4332,7 @@ Completion Sweep Results:
   Token-gated — still deferred: #{H} (sweep allowance also exhausted — re-evaluable next run)
 ```
 
-**After sweep agents complete** (or if no findings were dispatched): output the budget deferred-issues report (if applicable), **call `cleanup_trail_cache` (Step 4B) and `release_orchestrator_lease()` (Step 4A-pre.-1)** — the sweep is this session's last dispatch activity, so the lease must not be left held for a now-idle session (the Termination condition's own release call, above, only fires on the no-deferred-findings branch; this is the equivalent release for the deferred-findings/Completion Sweep branch) <!-- Added: forge#2627 -->, then, if `PENDING_DECISIONS` is non-empty and `DECISIONS_PRESENTED` is false (the Termination condition's drain presentation is skipped on this branch), present every queued entry together, one question per gated issue, and set `DECISIONS_PRESENTED=true` <!-- Added: forge#3497 -->, then proceed to Phase 5.
+**After sweep agents complete** (or if no findings were dispatched): output the budget deferred-issues report (if applicable), **call `cleanup_trail_cache` (Step 4B) and `release_orchestrator_lease()` (Step 4A-pre.-1)** — the sweep is this session's last dispatch activity, so the lease must not be left held for a now-idle session (the Termination condition's own release call, above, only fires on the no-deferred-findings branch; this is the equivalent release for the deferred-findings/Completion Sweep branch) <!-- Added: forge#2627 -->, then, if `PENDING_DECISIONS` is non-empty after the liveness filter (drop stale entries, forge#3508) and `DECISIONS_PRESENTED` is false (the Termination condition's drain presentation is skipped on this branch), present every surviving entry together, one question per gated issue, and set `DECISIONS_PRESENTED=true` <!-- Added: forge#3497 -->, then proceed to Phase 5.
 
 **Anti-patterns — DO NOT DO THIS:**
 - Re-sweeping findings spawned during the sweep itself — this creates unbounded recursion. Sweep is a single pass.

@@ -577,7 +577,8 @@ export const PHASES = [
       // (needs-human = back-compat for older runs). The PR label is back-compat only.
       // The PR number from GitHub (openPrFor) always wins over parsed text.
       const outputs = { pr: pr.number };
-      const escalated = { status: "blocked", detail: "review escalated", outputs };
+      // Opt-in: only an explicit escalation signal sets handoff:true. A PR number alone never hands off.
+      const escalated = { status: "blocked", detail: "review escalated", outputs, handoff: true };
       const rr = parseReviewResult(result?.text);
       // forge#3530: carry the review's remediation kind (router Phase 4R parity) so the
       // remediate phase can post the matching bound marker. Untrusted model output: only
@@ -671,13 +672,24 @@ export const PHASES = [
       const match = matches.length ? matches[matches.length - 1] : null;
       const reGateOutcome = match ? match[1] : null;
       switch (reGateOutcome) {
-        case "AUTO-LANDED":
-          // remediate.md's own Phase M8 already drove close in this case
-          // (see that file's "If the outcome was AUTO-LANDED" branch) — the
-          // issue should already carry workflow:merged by the time this
-          // reads, but the terminal reason here is what THIS phase reports,
-          // independent of close's own idempotent detectOutcome re-check.
-          return { status: "committed", terminalReason: "merged", outputs: { reGateOutcome } };
+        case "AUTO-LANDED": {
+          // forge#3624: remediate.md M8 drives close itself on this outcome, but an
+          // engine phase session may skip or fail that delegated close and nothing
+          // verified it. Check the issue's real state: CLOSED + workflow:merged means
+          // the run is genuinely finished (terminal merged). Anything else, including
+          // an unreadable snapshot, hands off to `close` (idempotent via its reconcile).
+          // The reason stays "merged" either way so the commit replaces the review's
+          // sticky "needs-human" and close.buildArgs accepts --terminal-state merged.
+          let closed = false;
+          try {
+            const snap = await issueSnapshot(state.issue, io);
+            closed = snap.ok && snap.state === "CLOSED" &&
+              snap.labels.includes(PHASE_MARKERS.close.completionLabel);
+          } catch { closed = false; }
+          return closed
+            ? { status: "committed", terminalReason: "merged", outputs: { reGateOutcome } }
+            : { status: "committed", terminalReason: "merged", outputs: { reGateOutcome, closeHandoff: true } };
+        }
         case "HELD-AWAITING-MERGE":
           return { status: "committed", terminalReason: "awaiting-merge", outputs: { reGateOutcome } };
         case "RE-ESCALATED":
@@ -718,12 +730,15 @@ export const PHASES = [
     },
     entryCondition: (s) => s.committed.includes("review"),
     async reconcile(state, io) {
-      // Idempotent resume: issue already closed or workflow:merged label set → skip the LLM re-run.
+      // Idempotent resume: issue already CLOSED → skip the LLM re-run. forge#3644: the
+      // workflow:merged label alone is NOT proof close ran — remediate M7 labels the issue
+      // merged right after `gh pr merge`, while a staging-base PR leaves it OPEN. Treating
+      // OPEN + workflow:merged as done made close.reconcile swallow remediate's closeHandoff
+      // (remediate's own check, in its AUTO-LANDED branch, requires CLOSED + the label, a
+      // strict subset of what satisfies this predicate on a CLOSED issue).
       const snap = await issueSnapshot(state.issue, io);
       if (!snap.ok) return { satisfied: false };
-      return (snap.state === "CLOSED" || snap.labels.includes(PHASE_MARKERS.close.completionLabel))
-        ? { satisfied: true }
-        : { satisfied: false };
+      return snap.state === "CLOSED" ? { satisfied: true } : { satisfied: false };
     },
     async detectOutcome(state, io) {
       const snap = await issueSnapshot(state.issue, io);
@@ -748,6 +763,33 @@ export const PHASES = [
     isTerminalAfter: () => true,
   },
 ];
+
+/**
+ * forge#3570: confirm a phase's outcome from GitHub ground truth, through the
+ * same trusted (`isTrustedComment`) + anchored (header-led, full-line sentinel)
+ * marker model the headless engine uses. For callers that only know a phase id
+ * (the interactive SubagentStop hook) and must never trust transcript text.
+ *
+ * `context` / `architect` are not engine phases (forge#3499) but the interactive
+ * path still tracks them: committed iff a trusted, anchored `:COMPLETE` comment
+ * exists. Unknown phase ids fail. Fetch errors propagate (the caller fails open).
+ *
+ * @param {string} phaseId
+ * @param {object} state
+ * @param {object} io
+ * @returns {Promise<{status: string, detail?: string, terminalReason?: string, outputs?: object}>}
+ */
+export async function detectTrustedOutcome(phaseId, state, io) {
+  const phase = PHASES.find((p) => p.id === phaseId);
+  if (phase) return phase.detectOutcome(state, io);
+  if (phaseId === "context" || phaseId === "architect") {
+    const m = PHASE_MARKERS[phaseId];
+    const { comments } = await issueMarkers(state.issue, io);
+    if (hasMarker(comments, m.header, m.completionMarker)) return { status: "committed", outputs: {} };
+    return { status: "failed", detail: `no ${m.completionMarker} marker` };
+  }
+  return { status: "failed", detail: `unknown phase: ${phaseId}` };
+}
 
 /**
  * Parse the LAST `REVIEW_RESULT:` block from a phase's final reply (forge#3521).

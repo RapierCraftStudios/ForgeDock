@@ -263,6 +263,83 @@ export function resolveConfiguredCliTimeout(cwd) {
   }
 }
 
+/**
+ * Derive the flat forge.yaml key stem for a runner command name (forge#3589).
+ * `parseForgeYaml` only supports `section:` + one nested `key: scalar` level,
+ * so per-command settings live flat under `engine:` as `<stem>_model` /
+ * `<stem>_max_turns`, where the stem is the command name with every
+ * non-alphanumeric character replaced by `_`
+ * (`review-pr-staging` -> `review_pr_staging`, `work-on/review` -> `work_on_review`).
+ * The single derivation shared by the resolver, docs, and tests.
+ *
+ * @param {string} commandName
+ * @returns {string}
+ */
+export function engineConfigKey(commandName) {
+  return String(commandName ?? "").replace(/[^A-Za-z0-9]/g, "_");
+}
+
+// A model value reaches argv as a discrete element (no shell), but is still
+// restricted to the characters real model ids/aliases use.
+const CLI_MODEL_PATTERN = /^[A-Za-z0-9._:[\]-]+$/;
+
+/**
+ * Validate a model string destined for `--model`. Returns the trimmed value,
+ * or `null` when absent/invalid (never forwarded).
+ *
+ * @param {unknown} value
+ * @returns {string|null}
+ */
+export function sanitizeCliModel(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 && trimmed.length <= 128 && CLI_MODEL_PATTERN.test(trimmed)
+    ? trimmed
+    : null;
+}
+
+/**
+ * Validate a turn bound destined for `--max-turns`: a positive integer (number
+ * or all-digit string), else `null`.
+ *
+ * @param {unknown} value
+ * @returns {number|null}
+ */
+export function sanitizeMaxTurns(value) {
+  if (typeof value === "string" && !/^\d{1,6}$/.test(value.trim())) return null;
+  const n = typeof value === "string" ? Number(value.trim()) : value;
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
+/**
+ * Resolve per-command CLI settings from forge.yaml's flat
+ * `engine.<stem>_model` / `engine.<stem>_max_turns` keys (forge#3589), where
+ * `<stem>` comes from `engineConfigKey(commandName)`. Opt-in: with no config
+ * both fields are `null`. Fail-soft on any read/parse error. Invalid values
+ * are dropped (never forwarded to argv).
+ *
+ * @param {string} cwd
+ * @param {string} commandName
+ * @returns {{model: string|null, maxTurns: number|null}}
+ */
+export function resolveCommandEngineSettings(cwd, commandName) {
+  const none = { model: null, maxTurns: null };
+  try {
+    const forgeYamlPath = join(cwd, "forge.yaml");
+    if (!existsSync(forgeYamlPath)) return none;
+    const engine = parseForgeYaml(readFileSync(forgeYamlPath, "utf-8"))?.engine;
+    if (!engine || typeof engine !== "object") return none;
+    const stem = engineConfigKey(commandName);
+    if (!stem) return none;
+    return {
+      model: sanitizeCliModel(resolveModelAlias(engine[`${stem}_model`])),
+      maxTurns: sanitizeMaxTurns(engine[`${stem}_max_turns`]),
+    };
+  } catch {
+    return none;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Backend selection (issue #2003) — CLI vs API execution backend
 // ---------------------------------------------------------------------------
@@ -442,6 +519,7 @@ export function isClaudeCliAvailable(
   const resolveCmd = process.platform === "win32" ? "where claude" : "command -v claude";
   let available;
   let cliPath = null;
+  let version = null;
   try {
     const raw = execImpl(
       `${resolveCmd} && echo ${CLI_PROBE_OUTPUT_SENTINEL} && claude --version`,
@@ -454,6 +532,7 @@ export function isClaudeCliAvailable(
     );
     available = true;
     cliPath = selectResolvedCliPath(parseProbeOutput(raw), { platform, existsImpl });
+    version = parseCliVersion(raw);
   } catch {
     available = false;
   }
@@ -462,12 +541,59 @@ export function isClaudeCliAvailable(
   // entry — whether "oldest" means "never refreshed" or "not refreshed in
   // the longest time."
   cliAvailabilityCache.delete(cwd);
-  cliAvailabilityCache.set(cwd, { available, cliPath, cachedAt: Date.now() });
+  cliAvailabilityCache.set(cwd, { available, cliPath, version, cachedAt: Date.now() });
   if (cliAvailabilityCache.size > CLI_AVAILABILITY_CACHE_MAX_SIZE) {
     const oldestKey = cliAvailabilityCache.keys().next().value;
     cliAvailabilityCache.delete(oldestKey);
   }
   return available;
+}
+
+// Minimum `claude` CLI versions that accept the print-mode flags (forge#3589).
+// `--max-turns` is intentionally absent from `claude --help`, so support is
+// gated on the cached `claude --version` probe, never on help-text scraping.
+const CLI_MIN_VERSION_MODEL_FLAG = [1, 0, 0];
+const CLI_MIN_VERSION_MAX_TURNS_FLAG = [1, 0, 0];
+
+/**
+ * Extract a `major.minor.patch` version from probe output (the text after the
+ * probe sentinel when present, else the whole string). Bounded, linear regex.
+ *
+ * @param {string} raw
+ * @returns {number[]|null}
+ */
+export function parseCliVersion(raw) {
+  const text = String(raw ?? "");
+  const idx = text.indexOf(CLI_PROBE_OUTPUT_SENTINEL);
+  const tail = idx >= 0 ? text.slice(idx + CLI_PROBE_OUTPUT_SENTINEL.length) : text;
+  const m = /(\d{1,4})\.(\d{1,4})\.(\d{1,4})/.exec(tail.slice(0, 512));
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+function versionAtLeast(version, min) {
+  if (!Array.isArray(version)) return false;
+  for (let i = 0; i < 3; i++) {
+    if (version[i] !== min[i]) return version[i] > min[i];
+  }
+  return true;
+}
+
+/**
+ * Which print-mode flags the installed `claude` CLI supports, derived from the
+ * cached `--version` probe. Unparseable version or unavailable CLI means
+ * unsupported (flags omitted).
+ *
+ * @param {string} [cwd]
+ * @param {object} [opts] - Forwarded to `isClaudeCliAvailable()` (test seams).
+ * @returns {{model: boolean, maxTurns: boolean}}
+ */
+export function getClaudeCliCapabilities(cwd = process.cwd(), opts = {}) {
+  isClaudeCliAvailable(cwd, opts);
+  const version = cliAvailabilityCache.get(cwd)?.version ?? null;
+  return {
+    model: versionAtLeast(version, CLI_MIN_VERSION_MODEL_FLAG),
+    maxTurns: versionAtLeast(version, CLI_MIN_VERSION_MAX_TURNS_FLAG),
+  };
 }
 
 /**
@@ -935,7 +1061,6 @@ export function sanitizeOutputExcerptForLog(output) {
 
 // Shared usage-limit phrasing: detection and reset extraction must agree on it.
 const USAGE_LIMIT_PHRASE = "(?:session|weekly|usage) limit";
-const USAGE_LIMIT_RE = new RegExp(USAGE_LIMIT_PHRASE, "i");
 // `... limit · resets 3pm (Asia/Kolkata)` — capture stops at the zone's `)`.
 const USAGE_LIMIT_RESET_PAREN_RE = new RegExp(
   `${USAGE_LIMIT_PHRASE}[^\\n"]*?resets?\\s+([^\\n"]+?\\))`, "i");
@@ -962,6 +1087,16 @@ function collectUsageLimitWindows(source) {
 }
 
 /**
+ * True when `text` holds a `limit ... resets ...` clause (the shape the reset
+ * extractor needs). Only bounded windows reach the polynomial regexes (#3522).
+ */
+function hasUsageLimitResetClause(text) {
+  if (typeof text !== "string") return false;
+  return collectUsageLimitWindows(text).some(
+    (w) => USAGE_LIMIT_RESET_PAREN_RE.test(w) || USAGE_LIMIT_RESET_LINE_RE.test(w));
+}
+
+/**
  * Parses a `claude --output-format json` single-result envelope from `text`.
  * Returns the parsed object, or `undefined` when `text` is not exactly one
  * JSON object. Never throws.
@@ -980,9 +1115,13 @@ function parseCliEnvelope(text) {
 
 /**
  * Detects whether a failed CLI run was a Claude usage/session/weekly limit.
- * Prefers the envelope's structured fields (`api_error: "usage_limit_reached"`,
- * `api_error_status: 429`), then the envelope's `result` text, then the plain
- * combined output. `stdout` is parsed ALONE (forge#2422 invariant); never throws.
+ * Deliberately narrow (forge#3523): the envelope's `api_error` must be
+ * `"usage_limit_reached"`, or the envelope must be `is_error: true` with a
+ * `result` carrying a full `limit ... resets ...` clause, or (no envelope) the
+ * plain combined output must carry that same clause. A bare HTTP 429 (a
+ * transient rate limit) or a keyword-only mention is NOT a usage limit; a limit
+ * with neither signal is treated as an ordinary failure. `stdout` is parsed
+ * ALONE (forge#2422 invariant); never throws.
  *
  * @param {string} stdout - raw stdout of the CLI run
  * @param {string} [output] - combined stdout+stderr, for the plain-text fallback
@@ -991,11 +1130,10 @@ function parseCliEnvelope(text) {
 export function detectUsageLimit(stdout, output = "") {
   const env = parseCliEnvelope(stdout);
   if (env) {
-    if (env.api_error === "usage_limit_reached" || env.api_error_status === 429) return true;
-    if (typeof env.result === "string" && USAGE_LIMIT_RE.test(env.result)) return true;
-    return false;
+    if (env.api_error === "usage_limit_reached") return true;
+    return env.is_error === true && hasUsageLimitResetClause(env.result);
   }
-  return USAGE_LIMIT_RE.test(output || "") && /resets?\s/i.test(output || "");
+  return hasUsageLimitResetClause(output || "");
 }
 
 /**
@@ -1185,7 +1323,17 @@ export function runCliBackend({
   logger = console,
   bin = "claude",
   spawnFn = spawnSync,
+  model = null,
+  maxTurns = null,
 }) {
+  // forge#3589: opt-in flags, validated again here as defence in depth. Callers
+  // (runCommand) are responsible for the version gate. Unset -> argv unchanged.
+  const modelFlag = sanitizeCliModel(model);
+  const maxTurnsFlag = sanitizeMaxTurns(maxTurns);
+  const optionalFlags = [
+    ...(modelFlag ? ["--model", modelFlag] : []),
+    ...(maxTurnsFlag ? ["--max-turns", String(maxTurnsFlag)] : []),
+  ];
   const rawTimeout = parseInt(process.env.FORGEDOCK_CLI_TIMEOUT_MS, 10);
   const configuredTimeout = resolveConfiguredCliTimeout(cwd);
   const timeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0
@@ -1212,6 +1360,7 @@ export function runCliBackend({
     userMessage,
     "--output-format",
     "json",
+    ...optionalFlags,
     "--dangerously-skip-permissions",
   ];
 
@@ -1226,6 +1375,7 @@ export function runCliBackend({
         userMessage,
         "--output-format",
         "json",
+        ...optionalFlags,
         "--append-system-prompt-file",
         systemPromptPath,
         "--dangerously-skip-permissions",
@@ -1297,6 +1447,41 @@ export function runCliBackend({
 
     const output = (stdout + stderr).trim();
 
+    // forge#3589: turn-limit exhaustion arrives as a JSON envelope with
+    // `subtype: "error_max_turns"`, possibly on a non-zero exit. Detect it from
+    // the parsed stdout alone (no regex over output, #3522/#2422) on BOTH exit
+    // paths, before the generic non-zero classification below, so callers can
+    // tell it apart from a crash and resume the same phase.
+    let maxTurnsEnvelope = null;
+    try {
+      const parsedEnvelope = JSON.parse(stdout.trim());
+      if (parsedEnvelope && typeof parsedEnvelope === "object") maxTurnsEnvelope = parsedEnvelope;
+    } catch {
+      // Non-JSON stdout: not a max-turns envelope.
+    }
+    if (maxTurnsEnvelope?.subtype === "error_max_turns") {
+      const numTurns = Number.isFinite(maxTurnsEnvelope.num_turns) ? maxTurnsEnvelope.num_turns : null;
+      const err = new Error(
+        `claude CLI stopped at the --max-turns limit` +
+          (maxTurnsFlag ? ` (${maxTurnsFlag})` : "") +
+          (numTurns !== null ? ` after ${numTurns} turns` : "") +
+          `. Raise the engine max_turns setting and re-run (--retry resumes this phase).`,
+      );
+      err.code = "CLI_MAX_TURNS";
+      err.numTurns = numTurns;
+      const u = maxTurnsEnvelope.usage;
+      err.usage =
+        u && typeof u === "object"
+          ? {
+              input_tokens: toFiniteUsageNumber(u.input_tokens),
+              output_tokens: toFiniteUsageNumber(u.output_tokens),
+              cache_creation_input_tokens: toFiniteUsageNumber(u.cache_creation_input_tokens),
+              cache_read_input_tokens: toFiniteUsageNumber(u.cache_read_input_tokens),
+            }
+          : null;
+      throw err;
+    }
+
     if (result.status !== 0) {
       // Non-zero exit: always emit a self-contained diagnostic, regardless of
       // whether stdout/stderr captured anything. Previously this branch threw
@@ -1346,13 +1531,18 @@ export function runCliBackend({
       // quota-exhaustion failure will clear without reading raw logs. Only
       // ever set when the pattern actually matches — never fabricated.
       // The reset text is read from stdout's parsed envelope first (stdout
-      // ALONE, forge#2422), then from the combined output.
-      const resetAt =
-        extractSessionLimitResetTime(stdout) ?? extractSessionLimitResetTime(output);
+      // ALONE, forge#2422), then from the combined output. Gated on the same
+      // narrowed predicate as `usageLimit` (forge#3523): the engine pauses on
+      // `resetAtEpochMs` alone, so a bare 429 or keyword-only failure whose
+      // output happens to contain a reset clause must not carry one either.
+      const isUsageLimit = detectUsageLimit(stdout, output);
+      const resetAt = isUsageLimit
+        ? extractSessionLimitResetTime(stdout) ?? extractSessionLimitResetTime(output)
+        : undefined;
       // Structured usage-limit flag: lets the engine pause by a bounded
       // default when the reset time itself is missing or unparseable. The
       // engine, not the runner, owns that default — no epoch is fabricated here.
-      if (detectUsageLimit(stdout, output)) err.usageLimit = true;
+      if (isUsageLimit) err.usageLimit = true;
       if (resetAt) {
         err.resetAt = resetAt;
         // forge#2524: also attach a machine-usable epoch-ms timestamp so
@@ -1399,9 +1589,11 @@ export function runCliBackend({
     const stdoutTrimmed = stdout.trim();
     let parsedResult = null;
     let usage = null;
+    let turns = null;
     try {
       const parsed = JSON.parse(stdoutTrimmed);
       if (parsed && typeof parsed === "object") {
+        if (Number.isFinite(parsed.num_turns)) turns = parsed.num_turns;
         parsedResult = typeof parsed.result === "string" ? parsed.result : null;
         if (parsed.usage && typeof parsed.usage === "object") {
           usage = {
@@ -1482,6 +1674,10 @@ export function runCliBackend({
       stopReason: "cli_exit_0",
       usage,
       model: "cli",
+      // forge#3589: additive — the model forced via --model (null = CLI default)
+      // and the envelope's turn count (null when absent), for runlog recording.
+      cliModel: modelFlag,
+      turns,
       backend: "cli",
       // forge#3521: the phase's final reply (the CLI envelope's `.result`), so
       // callers can read its structured `*_RESULT` block. Additive; "" when absent.
@@ -2319,25 +2515,24 @@ export async function runCommand(opts = {}) {
       );
     }
 
-    // model/maxIterations only apply to the api backend — the cli backend
-    // uses whatever model the `claude` CLI itself is configured for, and has
-    // no equivalent iteration-cap concept for a single `claude --print`
-    // invocation. Warn (rather than silently drop) when the caller explicitly
-    // supplied either, so the behavior is discoverable outside of --dry-run.
+    // maxIterations only applies to the api backend — a single `claude --print`
+    // invocation has no iteration-cap concept (it is NOT `--max-turns`; see the
+    // per-command settings below). `model` is forwarded as `--model` (forge#3589).
+    // Warn (rather than silently drop) when the caller explicitly supplied
+    // maxIterations, so the behavior is discoverable outside of --dry-run.
     // hasOwnProperty on the raw opts (not the destructured, default-applied
     // values above) is required here: model/maxIterations always resolve to
     // a computed default, so checking their truthiness would fire this
     // warning on every single cli-backend run.
     const ignoredOptions = [];
-    if (Object.prototype.hasOwnProperty.call(opts, "model")) ignoredOptions.push("model");
     if (Object.prototype.hasOwnProperty.call(opts, "maxIterations"))
       ignoredOptions.push("maxIterations");
     if (ignoredOptions.length > 0) {
       logger.log(
         `Warning: --${ignoredOptions.join(" and --")} ${
           ignoredOptions.length > 1 ? "are" : "is"
-        } ignored on the cli backend (backend: cli uses whatever model the ` +
-          `claude CLI itself is configured for). Use --backend api to honor ${
+        } ignored on the cli backend (a single claude --print has no iteration cap). ` +
+          `Use --backend api to honor ${
             ignoredOptions.length > 1 ? "these options" : "this option"
           }.`,
       );
@@ -2349,6 +2544,22 @@ export async function runCommand(opts = {}) {
     // (e.g. an injected-execImpl test scenario with no path-like output),
     // preserving prior behavior in that edge case.
     const resolvedBin = resolveClaudeCliBinary(cwd);
+    // forge#3589: per-command CLI settings. Precedence: forge.yaml
+    // engine.<stem>_model (most specific), then the run-level model the caller
+    // explicitly supplied (opts.model, e.g. the engine's --model), else omit (the CLI's own default; no behaviour change).
+    // max_turns comes from config only. Flags are forwarded only when the
+    // installed CLI version supports them.
+    const commandSettings = resolveCommandEngineSettings(cwd, commandName);
+    const runLevelModel = Object.prototype.hasOwnProperty.call(opts, "model")
+      ? sanitizeCliModel(resolveModelAlias(opts.model))
+      : null;
+    let cliModel = commandSettings.model ?? runLevelModel;
+    let cliMaxTurns = commandSettings.maxTurns;
+    if (resolvedBin && (cliModel || cliMaxTurns)) {
+      const caps = getClaudeCliCapabilities(cwd);
+      if (cliModel && !caps.model) cliModel = null;
+      if (cliMaxTurns && !caps.maxTurns) cliMaxTurns = null;
+    }
     if (!resolvedBin && backend === "auto") {
       resolvedBackend = "api";
     } else if (!resolvedBin) {
@@ -2367,6 +2578,8 @@ export async function runCommand(opts = {}) {
           args,
           cwd,
           logger,
+          model: cliModel,
+          maxTurns: cliMaxTurns,
         },
       });
     }

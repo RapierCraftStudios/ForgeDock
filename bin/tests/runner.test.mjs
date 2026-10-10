@@ -26,6 +26,7 @@ import {
   readFileSync,
   existsSync,
   symlinkSync,
+  chmodSync,
 } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
@@ -60,6 +61,12 @@ import {
   resolveBackend,
   resolveBackendLadder,
   runCliBackend,
+  engineConfigKey,
+  sanitizeCliModel,
+  sanitizeMaxTurns,
+  resolveCommandEngineSettings,
+  parseCliVersion,
+  getClaudeCliCapabilities,
   sanitizeArgvForLog,
   sanitizeOutputExcerptForLog,
   extractSessionLimitResetTime,
@@ -3589,7 +3596,9 @@ describe("runCommand backend resolution", () => {
     }
     const warning = lines.find((l) => /ignored on the cli backend/.test(l));
     assert.ok(warning, "expected a warning about ignored options to be logged");
-    assert.match(warning, /--model/);
+    // forge#3589: model is forwarded as --model on the cli backend now; only
+    // maxIterations (no single-invocation equivalent) is still ignored.
+    assert.doesNotMatch(warning, /--model/);
     assert.match(warning, /--maxIterations/);
   });
 
@@ -3817,14 +3826,28 @@ describe("parseSessionLimitResetEpochMs — 3pm / 24h formats (forge#3511)", () 
   });
 });
 
-describe("detectUsageLimit (forge#3511)", () => {
-  it("is true for the structured api_error / 429 fields", () => {
+describe("detectUsageLimit (forge#3511, narrowed forge#3523)", () => {
+  it("is true for the structured api_error field", () => {
     assert.equal(detectUsageLimit(JSON.stringify({ api_error: "usage_limit_reached", result: "x" })), true);
-    assert.equal(detectUsageLimit(JSON.stringify({ api_error_status: 429, result: "x" })), true);
   });
-  it("is true for limit text inside the envelope result and for plain text with a reset clause", () => {
-    assert.equal(detectUsageLimit(JSON.stringify({ result: "You've hit your session limit" })), true);
+  it("is false for a bare 429 (transient rate limit)", () => {
+    assert.equal(detectUsageLimit(JSON.stringify({ api_error_status: 429, result: "x" })), false);
+    assert.equal(detectUsageLimit(JSON.stringify({ is_error: true, api_error_status: 429, api_error: "rate_limit_error", result: "slow down" })), false);
+  });
+  it("is true for is_error limit text with a reset clause, and plain text with a reset clause", () => {
+    assert.equal(detectUsageLimit(JSON.stringify({ is_error: true, result: "You've hit your session limit \u00b7 resets 3pm (UTC)" })), true);
     assert.equal(detectUsageLimit("", "You've hit your session limit \u00b7 resets 3pm (UTC)"), true);
+  });
+  it("is false for keyword-only or reset-less envelope result text", () => {
+    assert.equal(detectUsageLimit(JSON.stringify({ result: "I fixed the usage limit handling" })), false);
+    assert.equal(detectUsageLimit(JSON.stringify({ is_error: true, result: "You've hit your session limit" })), false);
+  });
+  it("is false for limit+reset text when is_error is absent", () => {
+    assert.equal(detectUsageLimit(JSON.stringify({ result: "You've hit your session limit \u00b7 resets 3pm (UTC)" })), false);
+  });
+  it("is false when the phrase and resets are not one clause", () => {
+    assert.equal(detectUsageLimit("", "updated the usage limit doc\nconfig resets daily"), false);
+    assert.equal(detectUsageLimit("", "weekly limit docs\nthe cache resets nightly"), false);
   });
   it("is false for ordinary failures", () => {
     assert.equal(detectUsageLimit(JSON.stringify({ is_error: true, result: "boom", api_error_status: 500 })), false);
@@ -3834,13 +3857,13 @@ describe("detectUsageLimit (forge#3511)", () => {
 });
 
 describe("runCliBackend usage-limit via JSON envelope (forge#3511)", () => {
-  const run = (stdout) => {
+  const run = (stdout, stderr = "") => {
     let thrown;
     try {
       runCliBackend({
         spec: loadCommandSpec(COMMANDS_DIR, "work-on"), userMessage: "Execute: /work-on 3511", args: ["3511"],
         cwd: TMP, logger: { log: () => {} }, bin: "claude",
-        spawnFn: () => ({ status: 1, signal: null, stdout, stderr: "", error: undefined }),
+        spawnFn: () => ({ status: 1, signal: null, stdout, stderr, error: undefined }),
       });
     } catch (err) { thrown = err; }
     return thrown;
@@ -3861,4 +3884,170 @@ describe("runCliBackend usage-limit via JSON envelope (forge#3511)", () => {
     const e = run(JSON.stringify({ is_error: true, result: "boom" }));
     assert.equal(e.usageLimit, undefined);
   });
+  it("does not set usageLimit on a bare 429 rate-limit envelope (forge#3523)", () => {
+    const e = run(JSON.stringify({ is_error: true, api_error_status: 429, result: "rate limited" }));
+    assert.equal(e.code, "CLI_BACKEND_FAILED");
+    assert.equal(e.usageLimit, undefined);
+  });
+  it("attaches no reset epoch for a bare 429 envelope with stderr reset text (forge#3523)", () => {
+    const e = run(JSON.stringify({ api_error_status: 429, result: "x" }),
+      "npm test failed: the usage limit check resets 3pm (UTC)");
+    assert.equal(e.code, "CLI_BACKEND_FAILED");
+    assert.equal(e.resetAt, undefined);
+    assert.equal(e.resetAtEpochMs, undefined);
+    assert.equal(e.usageLimit, undefined);
+  });
+  it("attaches no reset epoch for an is_error:false envelope with reset text (forge#3523)", () => {
+    const e = run(JSON.stringify({ is_error: false, result: "You've hit your session limit \u00b7 resets 3pm (UTC)" }));
+    assert.equal(e.resetAtEpochMs, undefined);
+    assert.equal(e.usageLimit, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// forge#3589: per-command --model / --max-turns for the CLI backend
+// ---------------------------------------------------------------------------
+
+describe("per-command CLI model/max-turns (forge#3589)", () => {
+  const quiet = { log: () => {} };
+  const okSpawn = (capture) => (bin, argv) => {
+    capture.argv = argv;
+    return { status: 0, stdout: JSON.stringify({ result: "ok", num_turns: 7 }), stderr: "" };
+  };
+  const base = () => ({
+    spec: { name: "work-on/review" },
+    userMessage: "Execute: /work-on/review 1",
+    args: ["1"],
+    cwd: TMP,
+    logger: quiet,
+  });
+
+  it("no config: argv is byte-identical to the legacy shape (with and without systemPrompt)", () => {
+    const a = {};
+    runCliBackend({ ...base(), spawnFn: okSpawn(a) });
+    assert.deepEqual(a.argv, ["--print", "Execute: /work-on/review 1", "--output-format", "json", "--dangerously-skip-permissions"]);
+    const b = {};
+    runCliBackend({ ...base(), systemPrompt: "sys", spawnFn: okSpawn(b) });
+    assert.equal(b.argv.length, 7);
+    assert.deepEqual(b.argv.slice(0, 5), ["--print", "Execute: /work-on/review 1", "--output-format", "json", "--append-system-prompt-file"]);
+    assert.equal(b.argv[6], "--dangerously-skip-permissions");
+  });
+
+  it("appends --model X --max-turns N in both argv branches, before the trailing flags", () => {
+    const a = {};
+    runCliBackend({ ...base(), model: "sonnet-x", maxTurns: 40, spawnFn: okSpawn(a) });
+    assert.deepEqual(a.argv.slice(2), ["--output-format", "json", "--model", "sonnet-x", "--max-turns", "40", "--dangerously-skip-permissions"]);
+    const b = {};
+    const r = runCliBackend({ ...base(), systemPrompt: "sys", model: "m1", maxTurns: "12", spawnFn: okSpawn(b) });
+    assert.deepEqual(b.argv.slice(4, 8), ["--model", "m1", "--max-turns", "12"]);
+    assert.equal(b.argv[8], "--append-system-prompt-file");
+    assert.equal(r.turns, 7);
+    assert.equal(r.cliModel, "m1");
+    assert.equal(r.model, "cli");
+  });
+
+  it("drops invalid model / max_turns values instead of forwarding them", () => {
+    const a = {};
+    runCliBackend({ ...base(), model: "bad model; rm -rf", maxTurns: "-3", spawnFn: okSpawn(a) });
+    assert.equal(a.argv.length, 5);
+    assert.equal(sanitizeCliModel("claude-sonnet-4-5"), "claude-sonnet-4-5");
+    assert.equal(sanitizeCliModel("x y"), null);
+    assert.equal(sanitizeMaxTurns(0), null);
+    assert.equal(sanitizeMaxTurns("1.5"), null);
+    assert.equal(sanitizeMaxTurns("25"), 25);
+  });
+
+  for (const status of [0, 1]) {
+    it(`error_max_turns envelope on exit ${status} raises CLI_MAX_TURNS`, () => {
+      const spawnFn = () => ({
+        status,
+        stdout: JSON.stringify({ type: "result", subtype: "error_max_turns", is_error: true, num_turns: 41,
+          usage: { input_tokens: 5, output_tokens: 6 } }),
+        stderr: "",
+      });
+      assert.throws(
+        () => runCliBackend({ ...base(), maxTurns: 40, spawnFn }),
+        (e) => e.code === "CLI_MAX_TURNS" && e.numTurns === 41 && e.usage.output_tokens === 6,
+      );
+    });
+  }
+
+  it("a plain non-zero exit is still CLI_BACKEND_FAILED", () => {
+    const spawnFn = () => ({ status: 1, stdout: JSON.stringify({ subtype: "error_during_execution" }), stderr: "" });
+    assert.throws(() => runCliBackend({ ...base(), spawnFn }), (e) => e.code === "CLI_BACKEND_FAILED");
+  });
+
+  it("engineConfigKey derives flat stems", () => {
+    assert.equal(engineConfigKey("review-pr-staging"), "review_pr_staging");
+    assert.equal(engineConfigKey("work-on/review"), "work_on_review");
+  });
+
+  it("resolveCommandEngineSettings reads flat engine keys for work-on and non-work-on commands", () => {
+    const d = mkdtempSync(join(os.tmpdir(), "fd-3589-cfg-"));
+    try {
+      writeFileSync(join(d, "forge.yaml"),
+        'project: x/y\nengine:\n  max_concurrent: 3\n  work_on_review_model: sonnet\n  work_on_review_max_turns: 60\n' +
+        '  review_pr_staging_model: haiku\n  review_pr_staging_max_turns: 25\n  bad_max_turns: nope\n');
+      const review = resolveCommandEngineSettings(d, "work-on/review");
+      assert.equal(review.maxTurns, 60);
+      assert.ok(review.model && review.model.length > 0);
+      const staging = resolveCommandEngineSettings(d, "review-pr-staging");
+      assert.equal(staging.maxTurns, 25);
+      assert.notEqual(staging.model, review.model);
+      assert.deepEqual(resolveCommandEngineSettings(d, "bad"), { model: null, maxTurns: null });
+      assert.deepEqual(resolveCommandEngineSettings(d, "work-on/build"), { model: null, maxTurns: null });
+      assert.deepEqual(resolveCommandEngineSettings(join(d, "nope"), "work-on/review"), { model: null, maxTurns: null });
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
+  });
+
+  it("capability probe is version-gated and fails safe on an unparseable version", () => {
+    assert.deepEqual(parseCliVersion(`/usr/bin/claude\n${CLI_PROBE_OUTPUT_SENTINEL}\n2.1.296 (Claude Code)\n`), [2, 1, 296]);
+    assert.equal(parseCliVersion("no version"), null);
+    const cwdOk = mkdtempSync(join(os.tmpdir(), "fd-3589-cap-"));
+    const cwdBad = mkdtempSync(join(os.tmpdir(), "fd-3589-cap-"));
+    try {
+      assert.deepEqual(getClaudeCliCapabilities(cwdOk, { execImpl: () => "2.1.296 (Claude Code)" }), { model: true, maxTurns: true });
+      assert.deepEqual(getClaudeCliCapabilities(cwdBad, { execImpl: () => "garbage" }), { model: false, maxTurns: false });
+    } finally {
+      rmSync(cwdOk, { recursive: true, force: true });
+      rmSync(cwdBad, { recursive: true, force: true });
+    }
+  });
+
+  // End-to-end through runCommand with a fake `claude` on PATH (POSIX only).
+  const posix = process.platform !== "win32";
+  for (const [commandName, specName] of [["review-pr", "review-pr"], ["review-pr-staging", "review-pr-staging"]]) {
+    it(`runCommand(${commandName}) applies forge.yaml per-command settings to the CLI argv`, { skip: !posix }, async () => {
+      const root = mkdtempSync(join(os.tmpdir(), "fd-3589-e2e-"));
+      const oldPath = process.env.PATH;
+      try {
+        mkdirSync(join(root, "bin"));
+        mkdirSync(join(root, "commands"));
+        writeFileSync(join(root, "commands", `${specName}.md`), `# ${specName} spec`);
+        const argvFile = join(root, "argv.txt");
+        const stem = engineConfigKey(commandName);
+        writeFileSync(join(root, "forge.yaml"),
+          `project: x/y\nengine:\n  ${stem}_model: sonnet\n  ${stem}_max_turns: 33\n`);
+        const fake = join(root, "bin", "claude");
+        writeFileSync(fake,
+          `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "2.1.296 (Claude Code)"; exit 0; fi\n` +
+          `printf '%s\\n' "$@" > '${argvFile}'\necho '{"result":"ok","num_turns":3}'\n`);
+        chmodSync(fake, 0o755);
+        process.env.PATH = `${join(root, "bin")}:${oldPath}`;
+        const res = await runCommand({ commandsDir: join(root, "commands"), commandName, args: ["1"],
+          cwd: root, backend: "cli", logger: quiet });
+        assert.equal(res.turns, 3);
+        const argv = readFileSync(argvFile, "utf-8").split("\n");
+        const i = argv.indexOf("--max-turns");
+        assert.ok(i > 0, "--max-turns present");
+        assert.equal(argv[i + 1], "33");
+        assert.equal(argv[argv.indexOf("--model") + 1].length > 0, true);
+      } finally {
+        process.env.PATH = oldPath;
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
 });

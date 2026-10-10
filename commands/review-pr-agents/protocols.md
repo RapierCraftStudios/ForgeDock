@@ -62,9 +62,15 @@ fi
 # List files in your domain slice
 gh pr diff [PR_NUMBER] --name-only
 
-# Use the pre-computed domain diff slice supplied by the orchestrator:
-# [DOMAIN_DIFF_SLICE]
+# Materialize the pre-computed domain diff slice supplied by the orchestrator.
+# Persona greps below read "$SLICE_FILE" -- they never re-fetch the full diff.
+SLICE_FILE=$(mktemp)
+cat > "$SLICE_FILE" <<'FORGE_SLICE_EOF'
+[DOMAIN_DIFF_SLICE]
+FORGE_SLICE_EOF
 ```
+
+**Empty or truncated slice**: if the slice is empty or ends mid-hunk, read the specific changed files with bounded reads (`sed -n 'X,Yp'`, `head -N`) — never fall back to fetching the full PR diff.
 
 **Tool-result truncation**: When reading individual files or running commands for deeper investigation, always cap output: `cat file.py | head -200`, `grep ... | head -50`. Never pipe unbounded output into context.
 
@@ -112,7 +118,7 @@ If a file you are reviewing is listed above as a hot-spot, apply deeper scrutiny
 3. Will this cause degraded performance? → **MEDIUM**
 4. Is it genuinely cosmetic with no runtime impact after tracing all consumers? → **LOW**
 
-If you're unsure whether something is cosmetic or a runtime error, **assume it's a runtime error** and flag it for investigation. A false positive costs a minute of review time. A missed runtime error costs production downtime.
+**Precision first.** Report defects that are likely to be real in the code this PR changes and the code it reaches. If you cannot verify a runtime impact after tracing the path, report the finding at **POSSIBLE** confidence — do not inflate its severity or confidence to be safe. A false positive costs reviewer trust and triggers a cascade of follow-up issues and re-reviews; an unverified suspicion belongs at POSSIBLE, where it stays a non-blocking note, not at an inflated severity.
 
 ### 5. INTERACTION ANALYSIS — "Pre-existing" Is Not "Safe"
 
@@ -124,6 +130,8 @@ A redundant import, an unused variable, or a duplicated constant may be harmless
 1. List every NEW line in the PR that references the pre-existing construct
 2. For each reference, ask: "Does the pre-existing construct cause this new line to fail at runtime?"
 3. If yes → CONFIRMED finding, not a dismissal
+
+**Severity rule**: CRITICAL/HIGH findings, any confidence, are never routed as pre-existing by the `/review-pr` introduced-line gate (§6B.4): they stay blocking `review-finding` issues. The `**Scope**` tag does not gate routing.
 
 ### 6. FALSE POSITIVE PREVENTION
 
@@ -150,7 +158,7 @@ Every finding must include:
 
 ## Structured Findings Protocol
 
-**All review agents MUST include a machine-readable findings block at the end of their PR comment.** This is NON-OPTIONAL. Without structured findings, the review system cannot create GitHub issues, and findings die as unread PR comments. Every finding that doesn't become a GitHub issue is a finding that will never be addressed.
+**All review agents MUST include a machine-readable findings block at the end of their PR comment.** This is NON-OPTIONAL. Without structured findings, the review system cannot classify, file, or track what you found. The orchestrator (`/review-pr` §6B.4/§6B.5) decides disposition: CONFIRMED/LIKELY findings that pass its gates become issues, while LOW severity and POSSIBLE confidence findings are non-blocking NOTEs that are not filed as standalone issues.
 
 ### Persist Before Post
 
@@ -168,7 +176,7 @@ Append this block at the very end of your comment (after the `---` footer line, 
 
 ### Rules
 
-1. **Include ALL findings at CONFIRMED, LIKELY, and POSSIBLE confidence** — every finding becomes a GitHub issue. Nothing stays as just a PR comment. **POSSIBLE findings are informational advisories (P3/non-blocking)** — they are tracked but do not require a fix PR and do not block merge. CONFIRMED and LIKELY findings are blocking at P1/P2 respectively.
+1. **Include every finding you can support at CONFIRMED, LIKELY, or POSSIBLE confidence in the block** — the orchestrator needs them all to classify. Inclusion does not mean a GitHub issue is filed: `/review-pr` §6B.4/§6B.5 decide filing. **POSSIBLE confidence and LOW severity findings are non-blocking NOTEs** — reported in the review, never filed as standalone issues, never block merge. CONFIRMED and LIKELY findings are blocking at P1/P2 respectively. Do not pad the block with unverified or speculative items; precision over recall.
 2. **One line per finding** — sequential numbering (PREFIX-1, PREFIX-2, ...)
 3. **Confidence**: `CONFIRMED`, `LIKELY`, or `POSSIBLE`
 4. **Severity**: `CRITICAL`, `HIGH`, `MEDIUM`, or `LOW`
@@ -178,6 +186,7 @@ Append this block at the very end of your comment (after the `---` footer line, 
 8. **HTML comments**: The block is invisible in rendered markdown but parseable by the review system
 9. **Agent marker**: Include exactly one `<!-- FORGE:REVIEW-AGENT:{domain} -->` marker in the persisted body, where `{domain}` is the marker domain the orchestrator passes you (the canonical value from the roster-to-marker table in `review-pr.md`, e.g. `infra` and `scraper`; never a lowercased display name such as `infrastructure` or `scraping`).
 10. **Reviewed SHA**: Include exactly one line `Reviewed-SHA: [REVIEW_SHA]` (the full 40-hex head you were pinned to) in the persisted body, outside the marker. `/review-pr` scopes its completion wait and idempotent re-entry to this line, so a comment without the current head does not count as a completed review. Do NOT put the SHA inside the `<!-- FORGE:REVIEW-AGENT:{domain} -->` marker.
+11. **Failure scenario and scope (provenance inputs)**: every finding's body section (the prose above the findings block) MUST carry a `**Failure scenario**` line — concrete inputs leading to a wrong output or behaviour — and a `**Scope**: changed` or `**Scope**: pre-existing` line (`changed` = the cited line is added or modified by this PR; `pre-existing` = it was already there). `/review-pr` §6B.4 reads these: a finding without a failure scenario is demoted to a note (unless CRITICAL/HIGH, any confidence), and a MEDIUM or lower finding whose cited line is not in the PR diff is routed as pre-existing (CRITICAL/HIGH never are; see §5). The `**Scope**` tag is informational and never gates routing. Speculative hardening with no failure scenario is a note, not a finding. The one-line `<!-- FINDING:... -->` grammar above is unchanged. <!-- Added: forge#3452 -->
 
 ### Domain Prefixes
 

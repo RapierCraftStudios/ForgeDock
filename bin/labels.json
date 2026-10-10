@@ -85,6 +85,11 @@
     "description": "Defect or improvement found during automated PR review. Managed by ForgeDock."
   },
   {
+    "name": "pre-existing",
+    "color": "BFD4F2",
+    "description": "Defect noticed during PR review that the PR did not introduce. Managed by ForgeDock."
+  },
+  {
     "name": "review-degraded",
     "color": "E4E669",
     "description": "PR review panel was incomplete; re-review required before deployment. Managed by ForgeDock."

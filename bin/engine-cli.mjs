@@ -340,7 +340,9 @@ export function lastLocalRun(dir) {
  *                          or its built-in default).
  *   --retry                Optional (forge#3511). Reopen a run that ended `engine-error`
  *                          (e.g. a session-limit hit) and resume from its last committed
- *                          phase. Other terminal reasons are not reopened.
+ *                          phase. A run that ended `phase-complete` (multi-phase issue, phase merged,
+ *                          more remain) starts its next cycle from investigate. Other
+ *                          terminal reasons are not reopened.
  */
 export async function runFromCli(argv, deps = {}) {
   const issue = parseInt(argv[0], 10);

@@ -43,7 +43,7 @@ Parse from $ARGUMENTS:
 
 ## Skip Conditions
 
-Skip Phases V0–V4 (set `GATE_PASSED=true`, iterations 0) and go straight to Phase V5 (which posts the skip-path quality-gate marker, commits, and marks the build complete) if:
+Skip Phases V0–V4.5 (set `GATE_PASSED=true`, iterations 0) and go straight to Phase V5 (which posts the skip-path quality-gate marker, commits, and marks the build complete) if:
 - Only 1 file was changed AND the shared predicate classifies it as documentation: `printf '%s\n' "<that file>" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"` exits 0 (resolve `FORGE_ROOT` with the canonical block; unresolvable → the gate runs). A single file under `commands/`, `.claude/`, `.agents/`, `hooks/`, … or any agent-instruction Markdown is **code** for this purpose (it contains executable shell and agent instructions) and is never skipped. <!-- field test: phase-4-execution.md was skipped as "docs" -->
 
 In all other cases, the gate MUST run.
@@ -508,6 +508,86 @@ docker exec {CONTAINER_NAME} env | grep {VAR_NAME}
 
 ---
 
+## Phase V4.5: Blast-Radius Check *(runs after V4, before V5 — skipped only on the docs-only skip path)* <!-- Added: forge#3446 -->
+
+The architect records the caller and sibling sweep as a machine-readable manifest between `<!-- FORGE:BLAST_RADIUS:BEGIN -->` and `<!-- FORGE:BLAST_RADIUS:END -->` inside its FORGE:ARCHITECT comment. This phase runs `check-blast-radius.sh`, a script and not a prompt, which re-runs every manifest query against the final tree and fails on any matching file that is neither changed nor marked `verified-unaffected`.
+
+- **Trust**: the manifest drives a gate, so it is read only from the newest comment that `trusted-comments.sh` accepts (the same trust predicate as the phase-trail verifier). An untrusted comment is never parsed.
+- **Install root only**: both scripts resolve from `FORGE_ROOT` and never from the worktree, because the branch under audit must not supply its own gate. An unresolvable script is DEGRADED, never a pass.
+- **Exit codes**: `0` covered or no manifest (SKIP); `1` an `UNLISTED:` or `NOT_DONE:` line was printed, so set `GATE_PASSED=false`, fix the code (or add a justified `verified-unaffected` row to the plan by editing the FORGE:ARCHITECT comment; never delete a row), and re-run V1 onward; anything else, a failed fetch, or an unresolvable script is DEGRADED: append `blast-radius` to `SKIPPED_CHECKS` so it appears in `verification_skipped`, and print the reason. DEGRADED never passes silently and a failed fetch is never treated as "no manifest".
+- **Carry-forward**: each Bash call is a fresh shell, so V4.5's variables do not reach V5. The block prints its result as explicit lines: `BLAST_RADIUS_STATE: <PASS|SKIP|FAIL|DEGRADED>`, plus `GATE_PASSED: false` on FAIL and `SKIPPED_CHECKS+=blast-radius` on DEGRADED. Record those lines in your notes; V5 Step 1 sets `GATE_PASSED` and V5 Step 4 sets `SKIPPED_CHECKS` from them, alongside the V2 notes.
+
+```bash
+cd {WORKTREE_PATH}
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+# Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+_l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+# Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+_cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+# newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+_v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+_m="$HOME/.claude/plugins/marketplaces/$_mk"
+# '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
+_k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
+while IFS= read -r _c; do
+case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
+done <<< "$_k"
+fi
+BR_SCRIPT="${FORGE_ROOT:+$FORGE_ROOT/scripts/check-blast-radius.sh}"; [ -f "$BR_SCRIPT" ] || BR_SCRIPT=""
+TRUST_SCRIPT="${FORGE_ROOT:+$FORGE_ROOT/scripts/trusted-comments.sh}"; [ -f "$TRUST_SCRIPT" ] || TRUST_SCRIPT=""
+BR_STATE=""; BR_NOTE=""; BR_FILE=$(mktemp "${TMPDIR:-/tmp}/forge-blast-radius.XXXXXX")
+if [ -z "$BR_SCRIPT" ] || [ -z "$TRUST_SCRIPT" ]; then
+  BR_STATE="DEGRADED"; BR_NOTE="check-blast-radius.sh or trusted-comments.sh not found under FORGE_ROOT"
+else
+  COMMENTS_JSON=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments 2>/dev/null); FETCH_RC=$?
+  if [ "$FETCH_RC" -ne 0 ]; then
+    BR_STATE="DEGRADED"; BR_NOTE="could not fetch issue comments (rc=${FETCH_RC})"
+  else
+    BODIES=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUST_SCRIPT" bodies '^<!-- FORGE:ARCHITECT -->'); TRUST_RC=$?
+    if [ "$TRUST_RC" -ne 0 ]; then
+      BR_STATE="DEGRADED"; BR_NOTE="trusted-comments.sh failed (rc=${TRUST_RC})"
+    elif [ -z "$BODIES" ]; then
+      BR_STATE="SKIP"; BR_NOTE="no trusted FORGE:ARCHITECT comment"
+    else
+      # one JSON string per line, newest last
+      printf '%s\n' "$BODIES" | tail -n 1 | jq -r . > "$BR_FILE"; JQ_RC=$?
+      if [ "$JQ_RC" -ne 0 ]; then
+        BR_STATE="DEGRADED"; BR_NOTE="could not decode the FORGE:ARCHITECT comment (rc=${JQ_RC})"
+      else
+        git fetch origin {PR_BASE} >/dev/null 2>&1 || true
+        BR_OUT=$(bash "$BR_SCRIPT" --manifest "$BR_FILE" --base "origin/{PR_BASE}" --repo "{WORKTREE_PATH}" 2>&1); BR_RC=$?
+        printf '%s\n' "$BR_OUT"
+        case "$BR_RC" in
+          0) BR_STATE="PASS" ;;
+          1) BR_STATE="FAIL"; GATE_PASSED=false ;;
+          *) BR_STATE="DEGRADED"; BR_NOTE="check-blast-radius.sh exited ${BR_RC}" ;;
+        esac
+      fi
+    fi
+  fi
+fi
+rm -f "$BR_FILE"
+echo "BLAST_RADIUS: ${BR_STATE}${BR_NOTE:+ — $BR_NOTE}"
+# Carry-forward lines for V5 (fresh shell): read them back in V5 Step 1 and Step 4.
+echo "BLAST_RADIUS_STATE: ${BR_STATE}"
+if [ "$BR_STATE" = "FAIL" ]; then
+  echo "GATE_PASSED: false"
+elif [ "$BR_STATE" = "DEGRADED" ]; then
+  SKIPPED_CHECKS="${SKIPPED_CHECKS:+$SKIPPED_CHECKS, }blast-radius"
+  echo "SKIPPED_CHECKS+=blast-radius"
+fi
+```
+
+On `FAIL`, the blocker line for `VALIDATE_RESULT` is `blast-radius: <UNLISTED/NOT_DONE lines>`; the repair loop (build B6.5) fixes the listed files, not the checker or the manifest.
+
+---
+
 ## Phase V5: Marker, Commit, Audit, Complete (always — after GATE_PASSED=true)
 
 Phase V5 runs in this exact order: **(1)** post the `FORGE:QUALITY_GATE` marker, **(2)** commit, **(3)** ancestry audit, **(4)** append `FORGE:BUILDER:COMPLETE` and the verification status. Do not reorder.
@@ -518,7 +598,10 @@ The quality gate must leave a checkable artifact. `scripts/verify-phase-trail.sh
 
 **Skip-path marker**: when the Skip Conditions above set `GATE_PASSED=true` early (single config/docs file), still post the marker with `**Result**: PASS (skipped — single config/docs file)` and `**Iterations**: 0`, so the verifier never has to guess. The verifier's `--docs-only` waiver additionally covers diffs accepted by `scripts/is-docs-only.sh` (allowlisted Markdown only: `docs/**` or root README/CHANGELOG/CONTRIBUTING/SECURITY/GOVERNANCE; nested `AGENTS.md`/`CLAUDE.md`/`SKILL.md`/`GEMINI.md` and the instruction directories `commands/`, `devdocs/`, `templates/`, `skills/`, `agents/`, `hooks/`, `.claude/`, `.claude-plugin/`, `.agents/`, `.codex/`, `.cursor/`, `.github/`, `.opencode/`, `.gemini/`, `.kiro/` excluded; callers feed both sides of renames).
 
+Set `GATE_PASSED` from the V1 loop result, then apply V4.5's printed carry-forward line: if V4.5 printed `GATE_PASSED: false` (`BLAST_RADIUS_STATE: FAIL`), `GATE_PASSED` is `false` here even if the V1 loop passed.
+
 ```bash
+# GATE_PASSED: set from the V1 loop result, and forced to false when V4.5 printed "GATE_PASSED: false"
 GATE_RESULT=$([ "$GATE_PASSED" = "true" ] && echo PASS || echo FAIL)
 # Bind the PASS to what was actually gated: the staged tree is exactly the tree the V5 commit will have.
 # scripts/verify-phase-trail.sh --head-tree (work-on/review.md R1.5) rejects a PASS recorded for a different tree. <!-- Added: forge#3149 -->
@@ -647,12 +730,12 @@ If the output contains `ANCESTRY_FAILED=1`: do NOT append `:COMPLETE` and do NOT
 
 After the ancestry audit passes (or is skipped), patch the existing FORGE:BUILDER comment: add the `**Verification Status**` line, the best-effort `cost_usd:` line, and the `<!-- FORGE:BUILDER:COMPLETE -->` marker. This is the **only** place the marker is written — it signals that a real commit exists on the branch and the build is safe to resume-skip. <!-- Added: forge#1305 -->
 
-`SKIPPED_CHECKS` comes from Phase V2. Shell state may not persist between Bash calls, so set it here from your V2 notes before running the block (comma-separated check names, empty when every configured check ran).
+`SKIPPED_CHECKS` comes from Phase V2 and Phase V4.5. Shell state may not persist between Bash calls, so set it here from your V2 notes before running the block (comma-separated check names, empty when every configured check ran), and append `blast-radius` when V4.5 printed `SKIPPED_CHECKS+=blast-radius` (`BLAST_RADIUS_STATE: DEGRADED`).
 
 **Cost line reconciliation**: the machine-readable `cost_usd:` line (best-effort; only when `PHASE_COST_USD` is available, never blocking) is the single cost signal. Do not add a separate `**Cost (build phase)**` line.
 
 ```bash
-# SKIPPED_CHECKS: set from the V2 notes, e.g. SKIPPED_CHECKS="python.format, typescript.typecheck/build"
+# SKIPPED_CHECKS: set from the V2 notes plus V4.5's carry-forward line, e.g. SKIPPED_CHECKS="python.format, blast-radius"
 SKIPPED_CHECKS="${SKIPPED_CHECKS:-}"
 if [ -z "$SKIPPED_CHECKS" ]; then
   VERIFICATION_STATUS="✅ All configured verification commands passed"
@@ -708,7 +791,7 @@ VALIDATE_RESULT:
   blocker: {description if gate_passed=false}
   verification_skipped: []  # empty when all configured checks ran; list of skipped check names otherwise
                             # e.g. ["python.format", "typescript.typecheck/build"]
-                            # populated from SKIPPED_CHECKS in Phase V2
+                            # populated from SKIPPED_CHECKS in Phase V2 and V4.5
 ```
 
 ---
@@ -722,6 +805,7 @@ implement (work-on:build:implement) — code written, staged (not committed), FO
   → [THIS MODULE] validate
       V0 self-check → V1 quality-gate loop (Skill quality-gate, forked) → V2 format/verify + known-slow/learned tests
       → V3 proxy wiring → V3.5 DB advisory → V3.6 browser signals → V4 deploy completeness
+      → V4.5 blast-radius manifest check (check-blast-radius.sh, install-root only)
       → V5 marker → commit → ancestry audit → BUILDER:COMPLETE
 review (work-on:review) — push, PR, merge
 ```
