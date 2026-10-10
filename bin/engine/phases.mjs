@@ -577,7 +577,8 @@ export const PHASES = [
       // (needs-human = back-compat for older runs). The PR label is back-compat only.
       // The PR number from GitHub (openPrFor) always wins over parsed text.
       const outputs = { pr: pr.number };
-      const escalated = { status: "blocked", detail: "review escalated", outputs };
+      // Opt-in: only an explicit escalation signal sets handoff:true. A PR number alone never hands off.
+      const escalated = { status: "blocked", detail: "review escalated", outputs, handoff: true };
       const rr = parseReviewResult(result?.text);
       // forge#3530: carry the review's remediation kind (router Phase 4R parity) so the
       // remediate phase can post the matching bound marker. Untrusted model output: only
