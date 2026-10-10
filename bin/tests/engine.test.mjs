@@ -35,7 +35,14 @@ function fakeWorld() {
     gh: async (args) => {
       const a = args.join(" ");
       if (a.startsWith("repo view")) return "acme/widgets";
-      if (a.startsWith("api ") && a.includes("/comments")) return w.markers;
+      if (a.startsWith("api ") && a.includes("/comments")) {
+        // Author-aware (trust-filtered) fetch: shape the string bodies as trusted OWNER comments.
+        if (a.includes("author_association")) {
+          try { return JSON.stringify(JSON.parse(w.markers).map((body) => ({ body, author_association: "OWNER", user: { login: "owner", type: "User" } }))); }
+          catch { return w.markers; }
+        }
+        return w.markers;
+      }
       if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
       if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
       if (a.startsWith("issue edit")) { const i = args.indexOf("--body"); if (i>=0) w.body = args[i+1];
