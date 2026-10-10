@@ -3001,8 +3001,26 @@ REPO="{GH_REPO}"
 # §7B verdict + purpose-regression + calibration + trust-escalation guard — check before any merge attempt <!-- Added: forge#1601, forge#1741, forge#1745 -->
 # HARD RULE 3 requires that VERDICT=CHANGES REQUESTED, HAS_PURPOSE_REGRESSION=true,
 # CALIBRATION_NEEDS_HUMAN=true, AND TRUST_NEEDS_HUMAN=true all block merge, including under --auto-merge.
-# These vars are set in Phase 7A/7B/7B.5/3B.5 earlier in the same agent session.
-# An unset/empty VERDICT is safe — it evaluates to "" which does not equal "CHANGES REQUESTED".
+# These values are decided in Phase 7A/7B/7B.5/3B.5, in earlier fences (earlier shells): re-declare them here with the
+# orchestrator's values. VERDICT is the token of the 7B verdict comment (`APPROVED:` / `CHANGES REQUESTED:`), i.e.
+# APPROVED or CHANGES REQUESTED; the report template's APPROVE is normalized below, and NEEDS RE-REVIEW (stale head)
+# deliberately fails closed. The other five are true or false.
+VERDICT="{VERDICT}"; HAS_PURPOSE_REGRESSION="{HAS_PURPOSE_REGRESSION}"; CALIBRATION_NEEDS_HUMAN="{CALIBRATION_NEEDS_HUMAN}"
+TRUST_NEEDS_HUMAN="{TRUST_NEEDS_HUMAN}"; BASE_CONFLICT="{BASE_CONFLICT}"; OTHER_BLOCKING="{OTHER_BLOCKING}"
+[ "$VERDICT" = "APPROVE" ] && VERDICT="APPROVED"
+# Fail closed: an empty or unsubstituted value would read as "not blocking" and fall through to the merge path,
+# so any value outside the expected set stops here instead of merging.
+GUARD_STATE_OK=true
+case "$VERDICT" in "APPROVED"|"CHANGES REQUESTED") ;; *) GUARD_STATE_OK=false ;; esac
+for _guard_val in "$HAS_PURPOSE_REGRESSION" "$CALIBRATION_NEEDS_HUMAN" "$TRUST_NEEDS_HUMAN" "$BASE_CONFLICT" "$OTHER_BLOCKING"; do
+    case "$_guard_val" in true|false) ;; *) GUARD_STATE_OK=false ;; esac
+done
+if [ "$GUARD_STATE_OK" != "true" ]; then
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: the Phase 8 merge guard state is unbound (VERDICT='${VERDICT}', HAS_PURPOSE_REGRESSION='${HAS_PURPOSE_REGRESSION}', CALIBRATION_NEEDS_HUMAN='${CALIBRATION_NEEDS_HUMAN}', TRUST_NEEDS_HUMAN='${TRUST_NEEDS_HUMAN}', BASE_CONFLICT='${BASE_CONFLICT}', OTHER_BLOCKING='${OTHER_BLOCKING}'). Not merging; re-run /review-pr." # <!-- allowlist:check-command-side-effects -->
+    gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
+    # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "merge guard state unbound". Do NOT attempt gh pr merge.
+    exit 1
+fi
 # TRUST_NEEDS_HUMAN: set to true by Phase 3B.5 when INTENSITY_TIER=NOVEL_NEEDS_HUMAN AND shadow mode is off.
 # ONLY_BASE_CONFLICT: the base conflict is the ONLY reason the verdict is CHANGES REQUESTED. Computed HERE (after Phase 7B.5 and 3B.5) so the
 # calibration and trust human gates are already set and can never be skipped for a base-conflict PR. <!-- forge#3496 -->
@@ -3268,7 +3286,7 @@ fi
 
 ```bash
 # Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
-PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"; REVIEW_SHA="{REVIEW_SHA}"
 CURRENT_SHA=$(gh pr view "$PR_NUMBER" -R "$REPO" --json headRefOid --jq '.headRefOid')
 REVIEW_IS_STALE="false"
 if [ "$CURRENT_SHA" != "$REVIEW_SHA" ]; then REVIEW_IS_STALE="true"; fi
