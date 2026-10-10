@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
 import { PHASES, pickPhase } from "../engine/phases.mjs";
+import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
 import { RESERVED_TYPES } from "../../packages/protocol/src/types.js";
 
 const base = { v: 0, run: "r1", issue: 42, lane: "staging", committed: [], phase: null,
@@ -99,6 +100,81 @@ describe("pickPhase", () => {
       const outcome = await investigate.detectOutcome(base, ioWith("DECOMPOSE:YES"));
       assert.equal(outcome.status, "committed");
       assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    // forge#3543: structured per-comment fixtures (one JSON string per line,
+    // the shape issueMarkers() asks gh for) so `comments` is populated.
+    const ioComments = (...bodies) => ioWith(bodies.map((b) => JSON.stringify(b)).join("\n"));
+    const inv = (assessment, tail = "") =>
+      `<!-- FORGE:INVESTIGATOR -->\n## Investigation Report\n\n### Recommendation\nDo it.\n\n### Decomposition Assessment\n${assessment}\n${tail}\n<!-- INVESTIGATION:COMPLETE -->`;
+
+    it("investigator **YES** heading without marker -> decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(inv("**YES**: three independent pieces.\n1. feat(a)\n2. feat(b)")));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("<!-- DECOMPOSE:YES --> marker -> decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(inv("**YES** — split", `<!-- ${PHASE_MARKERS.investigate.decomposedMarker} -->`)));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("**NO** + <!-- DECOMPOSE:NO --> -> committed, goes to build", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(inv("**NO** — one PR", `<!-- ${PHASE_MARKERS.investigate.notDecomposedMarker} -->`)));
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("NO investigator comment quoting DECOMPOSE:YES is not decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(
+        inv("**NO** — fits one PR", "Note: engine waits for DECOMPOSE:YES and <!-- DECOMPOSE:YES --> text"),
+        "architect plan mentions DECOMPOSE:YES"));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("quoted DECOMPOSE:YES in another comment does not override NO verdict", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(inv("**NO** — fits one PR"), "see DECOMPOSE:YES docs"));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("latest investigator comment wins (YES then re-investigated NO)", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(inv("**YES** — split"), inv("**NO** — fits")));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("INVALID still wins over a YES assessment", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(inv("**YES** — split", "<!-- INVESTIGATION:INVALID -->")));
+      assert.equal(outcome.terminalReason, "invalid");
+    });
+
+    it("tolerates CRLF line endings in the assessment", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(inv("**YES** — split").replace(/\n/g, "\r\n")));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("later comment merely mentioning FORGE:INVESTIGATOR does not shadow a real DECOMPOSE:YES (SEC-1)", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(
+        inv("**YES** — split", `<!-- ${PHASE_MARKERS.investigate.decomposedMarker} -->`),
+        "architect: read the FORGE:INVESTIGATOR report first"));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("a stray quoted NO marker does not override an explicit YES verdict + marker (SEC-2)", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(
+        inv("**YES** — split", `<!-- ${PHASE_MARKERS.investigate.decomposedMarker} -->\nEmit \`<!-- DECOMPOSE:NO -->\` when not splitting.`)));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("conflicting heading and own-line marker fails safe (not decomposed)", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(
+        inv("**YES** — split", `<!-- ${PHASE_MARKERS.investigate.notDecomposedMarker} -->`)));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("investigate.md emits the template marker line and both exact marker constants", () => {
+      const spec = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "../../commands/work-on/investigate.md"), "utf8");
+      assert.ok(spec.includes("<!-- DECOMPOSE:{YES|NO} -->"));
+      assert.ok(spec.includes(`<!-- ${PHASE_MARKERS.investigate.decomposedMarker} -->`));
+      assert.ok(spec.includes(`<!-- ${PHASE_MARKERS.investigate.notDecomposedMarker} -->`));
     });
 
     it("INVESTIGATION:COMPLETE only -> committed, no terminalReason", async () => {

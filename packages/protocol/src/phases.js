@@ -54,6 +54,9 @@ export const PHASE_IDS = ['investigate', 'decompose', 'build', 'review', 'remedi
  *   whose presence means this phase has committed.
  * @property {string} [invalidMarker] - (investigate only) marks the issue INVALID.
  * @property {string} [decomposedMarker] - (investigate only) marks the issue DECOMPOSED.
+ *   investigate.md emits it as the HTML comment `<!-- DECOMPOSE:YES -->`.
+ * @property {string} [notDecomposedMarker] - (investigate only) the explicit not-decomposed
+ *   verdict, emitted as `<!-- DECOMPOSE:NO -->`.
  * @property {string} [sizeGateMarker] - (build only) bare annotation-opener of the diff-size gate record.
  * @property {string} [sizeOverrideMarker] - (build only) bare annotation-opener of the size-gate override.
  * @property {string} [partialMarker] - sentinel for an interrupted/partial annotation.
@@ -70,6 +73,7 @@ export const PHASE_MARKERS = {
     completionMarker: RESERVED_TYPES.INVESTIGATOR.completionSentinel, // 'INVESTIGATION:COMPLETE'
     invalidMarker: 'INVESTIGATION:INVALID',
     decomposedMarker: 'DECOMPOSE:YES',
+    notDecomposedMarker: 'DECOMPOSE:NO',
   },
   // forge#2379: `decompose` actually runs work-on/decompose (sub-issue
   // fan-out) once `investigate` hands off on `DECOMPOSE:YES` — see

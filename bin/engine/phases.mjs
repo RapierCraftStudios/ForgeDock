@@ -399,6 +399,38 @@ async function reviewArgs(state, ctx, io) {
           "--branch", need(state.branch, "branch", BRANCH_RE), ...baseArgs(state)];
 }
 
+/**
+ * Is the issue assessed for decomposition? Scoped to the LATEST
+ * FORGE:INVESTIGATOR comment, selected by its OPENING annotation
+ * (`<!-- FORGE:INVESTIGATOR`), so a later comment that merely mentions the
+ * string (architect plans, specs) cannot shadow it. Only when no comment opens
+ * with that annotation does selection fall back to the legacy substring test.
+ * Within the comment the strict structured signals decide, in order: the
+ * `**YES**`/`**NO**` verdict under `### Decomposition Assessment`, then a
+ * marker alone on its own line (`<!-- DECOMPOSE:YES|NO -->`). Quoted markers
+ * mid-line are ignored. A heading/marker conflict fails safe (not decomposed)
+ * and is logged. With no investigator comment at all, fall back to the legacy
+ * bare-substring test over the whole blob.
+ */
+function isDecomposed(comments, blob) {
+  const { decomposedMarker: yes } = PHASE_MARKERS.investigate;
+  let latest = null;
+  for (const c of comments) if (/^\s*<!-- FORGE:INVESTIGATOR\b/.test(c)) latest = c;
+  if (latest === null) for (const c of comments) if (c.includes("FORGE:INVESTIGATOR")) latest = c;
+  if (latest === null) return has(blob, yes);
+  const text = latest.replace(/\r\n/g, "\n");
+  const section = text.match(/^### Decomposition Assessment[^\n]*\n([\s\S]*?)(?=^###[^#]|(?![\s\S]))/m);
+  const verdict = section ? (/^\s*\*\*(YES|NO)\*\*/m.exec(section[1]) || [])[1] : undefined;
+  const markers = new Set();
+  for (const m of text.matchAll(/^<!-- DECOMPOSE:(YES|NO) -->[ \t]*$/gm)) markers.add(m[1]);
+  const marker = markers.size === 1 ? [...markers][0] : undefined;
+  if (markers.size > 1 || (verdict && marker && verdict !== marker)) {
+    console.error(`[engine] conflicting decomposition signals (heading=${verdict ?? "none"}, markers=${[...markers].join("+") || "none"}); treating as not decomposed`);
+    return false;
+  }
+  return (verdict ?? marker) === "YES";
+}
+
 /** @type {Phase[]} */
 export const PHASES = [
   {
@@ -407,10 +439,10 @@ export const PHASES = [
     buildArgs: async (state, ctx) => [String(state.issue), ...repoArgs(ctx)],
     entryCondition: () => true,
     async detectOutcome(state, io) {
-      const { blob } = await issueMarkers(state.issue, io);
+      const { blob, comments } = await issueMarkers(state.issue, io);
       if (has(blob, PHASE_MARKERS.investigate.invalidMarker))
         return { status: "committed", terminalReason: "invalid", outputs: { verdict: "INVALID" } };
-      if (has(blob, PHASE_MARKERS.investigate.decomposedMarker))
+      if (isDecomposed(comments, blob))
         return { status: "committed", terminalReason: "decomposed", outputs: { decompose: true } };
       if (has(blob, PHASE_MARKERS.investigate.completionMarker))
         return { status: "committed", outputs: { verdict: "CONFIRMED" } };
