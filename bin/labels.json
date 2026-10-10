@@ -40,6 +40,11 @@
     "description": "Pipeline: PR created, under review. Managed by ForgeDock."
   },
   {
+    "name": "workflow:remediating",
+    "color": "C5DEF5",
+    "description": "Pipeline: autonomous remediation pending (no human action needed). Managed by ForgeDock."
+  },
+  {
     "name": "workflow:awaiting-merge",
     "color": "FF8C00",
     "description": "Pipeline: remediated + re-reviewed, awaiting a human merge decision. Managed by ForgeDock."
@@ -78,6 +83,11 @@
     "name": "review-finding",
     "color": "D93F0B",
     "description": "Defect or improvement found during automated PR review. Managed by ForgeDock."
+  },
+  {
+    "name": "pre-existing",
+    "color": "BFD4F2",
+    "description": "Defect noticed during PR review that the PR did not introduce. Managed by ForgeDock."
   },
   {
     "name": "review-degraded",

@@ -2,6 +2,33 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Introduced-line gate no longer demotes CRITICAL/HIGH (#3597, #3598)
+
+`/review-pr` §6B.4 gate 2 never routes a CRITICAL/HIGH finding (any confidence) as `pre-existing`: a new caller of an unchanged unsafe helper is an interaction defect (`protocols.md` §5), so it stays a blocking `review-finding` under §7B criterion 2, including with `--auto-merge`. The pre-existing route now covers MEDIUM and lower only. A file with no `patch` in the PR files API (large or truncated diff) is treated as UNKNOWN and its findings are kept, never routed as pre-existing. Expect slightly more blocking findings on PRs that touch unsafe code through unchanged helpers.
+
+## Review provenance gates and noise share (#3452)
+
+`/review-pr` §6B.4 now checks each finding before it can become a `review-finding` issue: the cited line must exist at the reviewed head SHA (else dropped as stale), must be added or changed by the PR diff (else routed as `pre-existing`), and must carry a concrete `**Failure scenario**` (else demoted to a note; CRITICAL/HIGH, any confidence, are exempt). Pre-existing defects are never counted as this PR's findings or in the amplification ratio; only MEDIUM or lower ones are routed this way, and the safety-domain ones are filed once with the new `pre-existing` label. The `FORGE:NOTE_DISPOSITION` record gains `findings_dropped_stale`, `findings_preexisting`, `notes_demoted_no_scenario`, and `/pipeline-health` reports a noise share (2E.5).
+
+Action: run `npx forgedock labels setup` to create the `pre-existing` label (the review also creates it on demand).
+
+## Diff-size gate in `/work-on` build (#3450)
+
+`/work-on` build now measures the changed lines (added plus deleted) after implement stages its changes and before validate commits them. The gate is **on by default at 1000 lines**. Review findings per PR rise steeply with diff size, so an oversized build is split instead of validated.
+
+- **Over the threshold**: the build posts a `FORGE:DIFF_SIZE` comment with a split proposal and exits `NEEDS_DECOMPOSE`; the router then runs `work-on:decompose`.
+- **Tune or disable**: set `build.diff_size.threshold` in `forge.yaml` (`0` disables the gate) and add exclusions with `build.diff_size.exclude_globs`. Lockfiles, `*.min.*`, `*.snap` and vendored/generated directories are excluded by default.
+- **Per-issue bypass**: post a `FORGE:SIZE_OVERRIDE` comment with a non-empty justification on the line after the marker. Only comments from trusted authors count.
+- **No re-decomposition**: an issue that is already a decomposed child, or has `FORGE:DECOMPOSED`, blocks until an override is posted instead of being split again.
+
+Action: if your builds routinely exceed 1000 changed lines, raise `build.diff_size.threshold` or set it to `0`. See the `build` section of [CONFIG.md](CONFIG.md).
+
+## Stricter `review-pr` / `review-pr-staging` argument rejection (#3466)
+
+`/review-pr` and `/review-pr-staging` now reject an argument string as a whole if it contains a quote, backtick, `$`, backslash, newline or tab. Nothing is parsed from a rejected string, so no PR number, repo, merge value or flag survives, and `--auto-merge` is not honoured. `/review-pr-staging` stops with nothing reviewed and nothing posted.
+
+Action: callers must pass `--gh-flag -R owner/repo` unquoted, and must not forward untrusted text (issue titles, comment bodies) into the argument string.
+
 ## Spec bash no longer corrupted by Claude Code argument substitution
 
 Claude Code replaces `$0`..`$9` in a skill body with the invocation's arguments (0-based), so spec bash loaded via `Skill(...)` with args was silently rewritten: `awk '{print $2}'` became `awk '{print --issue}'`, `local AGENT="$1"` became `local AGENT="--auto-merge"`, which broke `/review-pr` agent selection and the CI/deploy comparisons with no error. `${N}`, `$(N)`, `$NF`, `$@`, `$#` and `$10`+ are not substituted.

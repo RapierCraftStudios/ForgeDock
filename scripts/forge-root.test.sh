@@ -13,7 +13,7 @@ ok()  { PASS=$((PASS+1)); }
 bad() { FAILN=$((FAILN+1)); echo "FAIL: $1"; }
 expect() { [ "$2" = "$3" ] && ok || bad "$1 (got '$3' want '$2')"; }
 
-SITES="commands/work-on.md commands/work-on/review.md commands/work-on/investigate.md commands/work-on/decompose.md commands/work-on/build.md commands/work-on/close.md commands/review-pr.md commands/orchestrate/phase-1-resolve.md commands/orchestrate/phase-4-execution.md"
+SITES="commands/work-on.md commands/work-on/build/validate.md commands/quality-gate.md commands/work-on/review.md commands/work-on/investigate.md commands/work-on/decompose.md commands/work-on/build.md commands/work-on/close.md commands/review-pr.md commands/orchestrate/phase-1-resolve.md commands/orchestrate/phase-4-execution.md"
 
 # extract the bootstrap block (comment line .. closing top-level fi), indentation stripped
 # Block ends at the first line (after the marker) that starts with `fi` at the marker's own indentation.
@@ -229,20 +229,87 @@ if command -v node >/dev/null 2>&1; then
   done
 fi
 
-# Guard (#3400): gate-helper (trusted-comments.sh) resolution loops must never list "$PWD" — the repo
-# under review is author-controlled. Exact copy counts + normalized identity prevent drift.
-TC_LOOPS="commands/review-pr.md:4 commands/work-on/review.md:1"
-: > "$T/tc_all"
-for e in $TC_LOOPS; do
-  f="${e%%:*}"; want="${e##*:}"
-  n=$(grep -c 'trusted-comments.sh" \]' "$ROOT/$f"); expect "trusted-comments.sh loop count in $f" "$want" "$n"
-  grep -n 'for _c in' "$ROOT/$f" | while IFS=: read -r ln _; do
-    sed -n "$((ln+1))p" "$ROOT/$f" | grep -q 'trusted-comments.sh' && sed -n "${ln}p" "$ROOT/$f" | sed 's/^[ ]*//' >> "$T/tc_all"
-  done
+# Guard (#3400, #3454): every gate-helper (trusted-comments.sh) resolver block under commands/ must be
+# byte-identical, must scan the plugin cache (the plugin-root placeholder is not always substituted in
+# forked runs, so without the scan a cache-only install never resolves the script), and must never list the
+# working directory (the repo under review is author-controlled). Blocks are discovered, not hard-coded, so a
+# new copy cannot drift unnoticed. A block runs from its '# TRUSTED_SCRIPT resolver' header to 'done <<< "$_tc"'.
+: > "$T/tc_all"; TC_BLOCKS=0; TC_STRAY=0
+while IFS= read -r f; do
+  awk -v out="$T/tc_all" '
+    /^[ ]*# TRUSTED_SCRIPT resolver/ {inb=1; line=""}
+    inb { sub(/^[ ]+/, ""); line = line $0 "\\n" }
+    inb && /^done <<< "\$_tc"$/ { print line >> out; inb=0; n++ }
+    END { print n+0 }' "$f" > "$T/tc_n"
+  TC_BLOCKS=$((TC_BLOCKS + $(cat "$T/tc_n")))
+  # every trusted-comments.sh resolution case-arm must belong to a block (no stray short copies)
+  arms=$(grep -c 'trusted-comments.sh" \]' "$f" || true)
+  [ "$arms" = "$(cat "$T/tc_n")" ] || { TC_STRAY=$((TC_STRAY + 1)); echo "  stray resolver in $f: $arms arms vs $(cat "$T/tc_n") blocks"; }
+done < <(grep -rl 'trusted-comments.sh" \]' "$ROOT/commands")
+expect "trusted-comments.sh resolver blocks discovered (review-pr 7 + review + remediate + phase-4)" 10 "$TC_BLOCKS"
+expect "trusted-comments.sh resolvers without a canonical block" 0 "$TC_STRAY"
+expect "trusted-comments.sh resolvers byte-identical" 1 "$(sort -u "$T/tc_all" | wc -l | tr -d ' ')"
+grep -qF 'plugins/cache/forgedock/forgedock' "$T/tc_all" && ok || bad 'trusted-comments.sh resolver lacks the plugin-cache scan'
+grep -qF 'CLAUDE_CONFIG_DIR' "$T/tc_all" && ok || bad 'trusted-comments.sh resolver lacks CLAUDE_CONFIG_DIR'
+grep -qF '"$PWD"' "$T/tc_all" && bad 'trusted-comments.sh resolver lists "$PWD"' || ok
+
+# Behavior (#3454): a cache-only install with an unsubstituted plugin-root placeholder must resolve the script.
+# Run the real block from review.md against a fake HOME that has only plugins/cache/forgedock/forgedock/<semver>.
+awk '/^[ ]*# TRUSTED_SCRIPT resolver/ {inb=1} inb {sub(/^[ ]+/, ""); print} inb && /^done <<< "\$_tc"$/ {exit}' "$ROOT/commands/work-on/review.md" > "$T/tc_block.sh"
+mkdir -p "$T/tchome/.claude/plugins/cache/forgedock/forgedock/1.9.0/scripts" "$T/tchome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts" "$T/tcwork"
+: > "$T/tchome/.claude/plugins/cache/forgedock/forgedock/1.9.0/scripts/trusted-comments.sh"
+: > "$T/tchome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts/trusted-comments.sh"
+mkdir -p "$T/tcwork/scripts"; : > "$T/tcwork/scripts/trusted-comments.sh"   # author-controlled cwd copy must NOT win
+out=$(cd "$T/tcwork" && env -i PATH="$PATH" HOME="$T/tchome" bash -c 'source "$1"; printf %s "$TRUSTED_SCRIPT"' _ "$T/tc_block.sh" 2>&1)
+expect "cache-only install resolves newest cached trusted-comments.sh" "$T/tchome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts/trusted-comments.sh" "$out"
+out=$(cd "$T/tcwork" && env -i PATH="$PATH" HOME="$T/nohome" bash -c 'source "$1"; printf %s "$TRUSTED_SCRIPT"' _ "$T/tc_block.sh" 2>&1)
+expect "no install resolves empty (cwd copy never used)" "" "$out"
+
+# Guard (#3483): the other executable-helper resolvers (classify-finding.sh, amplification-breaker.sh,
+# extract-affected-files.sh) must use the same trusted-install tiers: no "$PWD", no "$REPO_PATH", plugin-cache
+# scan present. Blocks are extracted from the real specs (header '# HELPER_SCRIPT resolver' to 'done <<< "$_tc"',
+# or the resolve_extract_affected_files function) so a drifting copy cannot pass on a hand-written stand-in.
+extract_helper_block() { # file var -> block on stdout
+  awk -v var="$2" '/^[ ]*# HELPER_SCRIPT resolver \(/ && index($0, "(" var ";") {inb=1} inb {sub(/^[ ]+/, ""); print} inb && /^done <<< "\$_tc"$/ {exit}' "$1"
+}
+extract_helper_fn() { # file -> function on stdout
+  awk '/^resolve_extract_affected_files\(\) \{/ {inb=1} inb {print} inb && /^\}$/ {exit}' "$1"
+}
+HR_CLASSIFY="$ROOT/commands/review-pr.md"
+HR_AMP="$ROOT/commands/orchestrate/phase-4-execution.md"
+HR_EX3="$ROOT/commands/orchestrate/phase-3-dependency.md"
+extract_helper_block "$HR_CLASSIFY" CLASSIFY_SCRIPT > "$T/hr_classify.sh"
+extract_helper_block "$HR_AMP" AMP_SCRIPT > "$T/hr_amp.sh"
+extract_helper_fn "$HR_AMP" > "$T/hr_ex4.sh"
+extract_helper_fn "$HR_EX3" > "$T/hr_ex3.sh"
+expect "CLASSIFY_SCRIPT resolver block found" 1 "$(grep -c '^CLASSIFY_SCRIPT=""' "$T/hr_classify.sh")"
+expect "AMP_SCRIPT resolver block found" 1 "$(grep -c '^AMP_SCRIPT=""' "$T/hr_amp.sh")"
+expect "extract-affected-files resolver found in phase-4" 1 "$(grep -c 'resolve_extract_affected_files() {' "$T/hr_ex4.sh")"
+expect "extract-affected-files resolver found in phase-3" 1 "$(grep -c 'resolve_extract_affected_files() {' "$T/hr_ex3.sh")"
+cmp -s "$T/hr_ex3.sh" "$T/hr_ex4.sh" && ok || bad 'resolve_extract_affected_files copies differ between phase-3 and phase-4'
+for hr in classify amp ex3 ex4; do
+  grep -qF 'plugins/cache/forgedock/forgedock' "$T/hr_$hr.sh" && ok || bad "$hr helper resolver lacks the plugin-cache scan"
+  grep -qF 'CLAUDE_CONFIG_DIR' "$T/hr_$hr.sh" && ok || bad "$hr helper resolver lacks CLAUDE_CONFIG_DIR"
+  grep -qE '\$PWD|\$REPO_PATH|\$\{PWD|\$\{REPO_PATH' "$T/hr_$hr.sh" && bad "$hr helper resolver lists the working directory or repo path" || ok
 done
-expect "trusted-comments.sh loops total" 5 "$(wc -l < "$T/tc_all" | tr -d ' ')"
-expect "trusted-comments.sh loops byte-identical" 1 "$(sort -u "$T/tc_all" | wc -l | tr -d ' ')"
-grep -qF '"$PWD"' "$T/tc_all" && bad 'trusted-comments.sh loop lists "$PWD"' || ok
+# no leftover cwd-derived helper tier anywhere under commands/
+if grep -rnE 'PWD/scripts/|^\$PWD$|REPO_PATH/scripts/extract' "$ROOT/commands" >/dev/null 2>&1; then bad 'commands/ still lists a working-directory helper tier'; else ok; fi
+
+# Behavior (#3483): a planted scripts/<helper>.sh in the cwd must never be selected; a cache-only install must resolve.
+mkdir -p "$T/hrwork/scripts" "$T/hrhome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts"
+for h in classify-finding amplification-breaker extract-affected-files; do
+  : > "$T/hrwork/scripts/$h.sh"; : > "$T/hrhome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts/$h.sh"
+done
+CACHE_SCRIPTS="$T/hrhome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts"
+hr_run() { # home blockfile expr
+  (cd "$T/hrwork" && env -i PATH="$PATH" HOME="$1" REPO_PATH="$T/hrwork" bash -c 'source "$1"; '"$3" _ "$2" 2>/dev/null)
+}
+expect "CLASSIFY_SCRIPT: cache-only install resolves (cwd copy ignored)" "$CACHE_SCRIPTS/classify-finding.sh" "$(hr_run "$T/hrhome" "$T/hr_classify.sh" 'printf %s "$CLASSIFY_SCRIPT"')"
+expect "CLASSIFY_SCRIPT: no install resolves empty (cwd copy ignored)" "" "$(hr_run "$T/nohome" "$T/hr_classify.sh" 'printf %s "$CLASSIFY_SCRIPT"')"
+expect "AMP_SCRIPT: cache-only install resolves (cwd copy ignored)" "$CACHE_SCRIPTS/amplification-breaker.sh" "$(hr_run "$T/hrhome" "$T/hr_amp.sh" 'printf %s "$AMP_SCRIPT"')"
+expect "AMP_SCRIPT: no install resolves empty (cwd copy ignored)" "" "$(hr_run "$T/nohome" "$T/hr_amp.sh" 'printf %s "$AMP_SCRIPT"')"
+expect "extract-affected-files: cache-only install resolves (cwd and REPO_PATH copies ignored)" "$CACHE_SCRIPTS/extract-affected-files.sh" "$(hr_run "$T/hrhome" "$T/hr_ex4.sh" 'resolve_extract_affected_files')"
+expect "extract-affected-files: no install resolves nothing (cwd and REPO_PATH copies ignored)" "" "$(hr_run "$T/nohome" "$T/hr_ex4.sh" 'resolve_extract_affected_files')"
 
 echo "forge-root tests: pass=$PASS fail=$FAILN skipped=$SKIPPED"
 [ "$FAILN" -eq 0 ]

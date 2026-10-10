@@ -25,7 +25,7 @@ allowed-tools: Task, Agent, Bash, Read, Grep, Glob, WebFetch, Skill
 
 2. **Post the FORGE:REVIEW verdict regardless of finding severity.** A review that completes but posts no `<!-- FORGE:REVIEW -->` comment is invisible to the pipeline. Even a PASS verdict must be posted.
 
-3. **Review findings do NOT block merge UNLESS they meet the Blocking Criteria in §7B** (a CONFIRMED HIGH/CRITICAL finding, a purpose regression, a merge conflict, or a build/type/test failure) **or the calibration threshold check in §7B.5 sets `CALIBRATION_NEEDS_HUMAN=true`** (HIGH-confidence task type with historical survival < 80%). File every finding that survives the §6B.5 note disposition (`scripts/classify-finding.sh`: HIGH+ always; MEDIUM CONFIRMED/LIKELY; LOW/POSSIBLE only when security/billing content matches; stricter on review-finding lineage) as a GitHub issue with the `review-finding` label. LOW/POSSIBLE notes are fixed in-PR, listed in the PR body, or dropped — never filed as standalone issues. Minor/style findings never block; §7B's and §7B.5's blocking conditions always do — including under `--auto-merge`. <!-- forge#1741 -->
+3. **Review findings do NOT block merge UNLESS they meet the Blocking Criteria in §7B** (a CONFIRMED HIGH/CRITICAL finding, a purpose regression, a merge conflict, or a build/type/test failure) **or the calibration threshold check in §7B.5 sets `CALIBRATION_NEEDS_HUMAN=true`** (HIGH-confidence task type with historical survival < 80%). File every finding that passes the §6B.4 provenance gates (head-SHA, introduced-line, failure scenario; pre-existing defects are routed separately and never filed as this PR's review-finding) and survives the §6B.5 note disposition (`scripts/classify-finding.sh`: HIGH+ always; MEDIUM CONFIRMED/LIKELY; LOW/POSSIBLE only when security/billing content matches; stricter on review-finding lineage) as a GitHub issue with the `review-finding` label. LOW/POSSIBLE notes are fixed in-PR, listed in the PR body, or dropped — never filed as standalone issues. Minor/style findings never block; §7B's and §7B.5's blocking conditions always do — including under `--auto-merge`. <!-- forge#1741 -->
 
 4. **Route correctly at Phase 0.** If the input is "staging" or the PR targets `main`, invoke `Skill("{FORGE_SKILL_PREFIX}review-pr-staging", ...)` — do NOT run the standard PR review pipeline against a staging→main PR.
 
@@ -118,7 +118,21 @@ Extract: `PR_NUMBER`, `AUTO_MERGE=true`, `MERGE_ISSUE`, `MERGE_BASE`, `MERGE_GH_
 # BEGIN review-pr-arg-parse
 # Tokenize the argument string without eval. First token is the PR ref (number or .../pull/N URL)
 # or a mode keyword; the rest are flags.
-ARGS_RAW="$ARGUMENTS"
+# The loader substitutes the argument text into this block BEFORE bash parses it, so it is read from a
+# quoted heredoc (inert for quotes, $(...), backticks and backslashes) and never from a quoted assignment.
+# NONCE RULE: before running, replace the word NONCE in BOTH delimiter lines below with a fresh random hex string
+# (e.g. `openssl rand -hex 16`) that does not occur in the argument text. Never run the literal NONCE delimiter. <!-- Added: forge#3466 -->
+IFS= read -r -d '' ARGS_RAW <<'FORGE_ARGS_EOF_NONCE'
+$ARGUMENTS
+FORGE_ARGS_EOF_NONCE
+ARGS_RAW="${ARGS_RAW%$'\n'}"
+# Fail closed: a string holding a quote, backtick, dollar sign, backslash, newline or tab is rejected whole.
+# Nothing is parsed from it, so no PR number, repo, merge value or auto-merge flag survives.
+case "$ARGS_RAW" in
+  *'"'*|*'`'*|*'$'*|*'\'*|*$'\n'*|*$'\t'*)
+    echo "review-pr: rejected argument string (contains a quote, backtick, dollar sign, backslash, newline or tab) - nothing parsed, auto-merge not honoured" >&2
+    ARGS_RAW="" ;;
+esac
 read -r -a ARG_TOKENS <<< "$ARGS_RAW"
 PR_REF="${ARG_TOKENS[0]:-}"
 PR_NUMBER=""
@@ -136,18 +150,49 @@ while [ "$arg_i" -lt "${#ARG_TOKENS[@]}" ]; do
   case "$arg_t" in
     --auto-merge) AUTO_MERGE=true ;;  # flag parse only, no side effect <!-- allowlist:check-command-side-effects -->
     --thorough) THOROUGH=true ;;
-    --issue) arg_i=$((arg_i + 1)); MERGE_ISSUE="${ARG_TOKENS[$arg_i]:-}" ;;
-    --base) arg_i=$((arg_i + 1)); MERGE_BASE="${ARG_TOKENS[$arg_i]:-}" ;;
-    --worktree) arg_i=$((arg_i + 1)); MERGE_WORKTREE="${ARG_TOKENS[$arg_i]:-}" ;;
+    --issue|--base|--worktree)
+      # A value that is empty or starts with "-" is another flag: treat the value as missing, do not consume it
+      arg_v="${ARG_TOKENS[$((arg_i + 1))]:-}"
+      case "$arg_v" in
+        ""|-*) echo "review-pr: $arg_t needs a value, got '${arg_v}' - ignoring" >&2 ;;
+        *) arg_i=$((arg_i + 1))
+           case "$arg_t" in
+             --issue) MERGE_ISSUE="$arg_v" ;;
+             --base) MERGE_BASE="$arg_v" ;;
+             --worktree) MERGE_WORKTREE="$arg_v" ;;
+           esac ;;
+      esac ;;
     --gh-flag)
-      # Value is "-R owner/repo" (quoted or not): strip quotes, consume flag + repo tokens
-      arg_i=$((arg_i + 1)); arg_f=$(printf '%s' "${ARG_TOKENS[$arg_i]:-}" | tr -d "\"'")
+      # Value is -R owner/repo, unquoted (a double quote rejects the whole string above; single quotes are
+      # stripped for older callers): consume flag + repo tokens
+      arg_f=$(printf '%s' "${ARG_TOKENS[$((arg_i + 1))]:-}" | tr -d "\"'")
       if [ "$arg_f" = "-R" ] || [ "$arg_f" = "--repo" ]; then
-        arg_i=$((arg_i + 1)); REPO=$(printf '%s' "${ARG_TOKENS[$arg_i]:-}" | tr -d "\"'")
+        arg_i=$((arg_i + 1))
+        arg_v=$(printf '%s' "${ARG_TOKENS[$((arg_i + 1))]:-}" | tr -d "\"'")
+        case "$arg_v" in
+          ""|-*) echo "review-pr: --gh-flag needs owner/repo, got '${arg_v}' - ignoring" >&2 ;;
+          *) arg_i=$((arg_i + 1)); REPO="$arg_v" ;;
+        esac
+      else
+        echo "review-pr: --gh-flag expects -R owner/repo - ignoring" >&2
       fi ;;
   esac
   arg_i=$((arg_i + 1))
 done
+# Shape-check parsed values before anything substitutes them into shell or jq; invalid values are
+# cleared (fail closed: a merge request without a valid issue number returns BLOCKED in Phase 8).
+if [ -n "$MERGE_ISSUE" ] && ! printf '%s' "$MERGE_ISSUE" | grep -qE '^[0-9]+$'; then
+  echo "review-pr: --issue must be numeric - ignoring '$MERGE_ISSUE'" >&2; MERGE_ISSUE=""
+fi
+if [ -n "$REPO" ] && ! printf '%s' "$REPO" | grep -qE '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
+  echo "review-pr: --gh-flag repo must be owner/repo - ignoring '$REPO'" >&2; REPO=""
+fi
+if [ -n "$MERGE_BASE" ] && ! printf '%s' "$MERGE_BASE" | grep -qE '^[A-Za-z0-9._/-]+$'; then
+  echo "review-pr: --base must be a branch name - ignoring '$MERGE_BASE'" >&2; MERGE_BASE=""
+fi
+if [ -n "$MERGE_WORKTREE" ] && ! printf '%s' "$MERGE_WORKTREE" | grep -qE '^/[A-Za-z0-9._/@+=,:-]+$'; then
+  echo "review-pr: --worktree must be an absolute path without shell metacharacters - ignoring '$MERGE_WORKTREE'" >&2; MERGE_WORKTREE=""
+fi
 if [ -n "$REPO" ]; then MERGE_GH_FLAG="-R $REPO"; REPO_FLAG="-R $REPO"; fi
 if [ -n "$PR_NUMBER" ] && [ -z "$REPO" ]; then
   REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null || echo "")
@@ -155,6 +200,8 @@ if [ -n "$PR_NUMBER" ] && [ -z "$REPO" ]; then
 fi
 # END review-pr-arg-parse
 ```
+
+**Argument injection hardening** <!-- Added: forge#3466 -->: the loader substitutes `$ARGUMENTS` textually, so a quoted assignment (`ARGS_RAW="..."`) can be broken out of by any caller that forwards text it does not control. The block therefore reads the string from a quoted heredoc and rejects any string containing a quote, backtick, dollar sign, backslash, newline or tab: it prints `review-pr: rejected argument string`, parses nothing, and binds `PR_NUMBER`, `REPO` and `MERGE_*` empty with `AUTO_MERGE=false`, so `--auto-merge` is never honoured from a rejected string (a run with no PR number stops in Phase -1 before any `gh pr view`). The heredoc delimiter is not a constant: the spec carries the placeholder `FORGE_ARGS_EOF_NONCE` and the executor MUST replace `NONCE` with a fresh random hex string before running, so a caller cannot pre-compute a delimiter line (a newline followed by the literal placeholder or any earlier public token stays inert text and is then rejected by the newline check). Residual risk: this depends on the executor following the NONCE rule; the complete fix is for the loader to pass arguments out of band. Callers must pass `--gh-flag -R owner/repo` unquoted.
 
 **`--auto-merge` requires `--issue`** <!-- Added: forge#3102, forge#3124 -->: the phase-trail gate in Phase 8 verifies the trail of the linked issue, so `--issue` is mandatory whenever `AUTO_MERGE=true`. Do NOT infer `MERGE_ISSUE` from the PR: the PR body's closing reference and the head-branch suffix are both author-controlled (and the closing-issue reference list is empty for PRs based on a non-default branch such as `staging`), so neither is a trustworthy binding. If `AUTO_MERGE=true` and `MERGE_ISSUE` is empty, Phase 8 does not merge and returns the documented `REVIEW_RESULT: status: BLOCKED`, blocker: "auto-merge requires --issue". The PR stays open for a human or a re-run with `--issue`.
 
@@ -187,7 +234,12 @@ elif echo "$PR_REF" | grep -qE '^(open|all)$'; then
   REVIEW_MODE="multi-pr"
   ROUTE_PR_NUMBER="(list mode)"
 else
-  # Single PR number or URL — resolve HEAD/BASE now
+  # Single PR number or URL. An empty PR_NUMBER (rejected or unparseable argument string) must stop here:
+  # `gh pr view ""` falls back to the current branch's PR and would review the wrong PR. <!-- Added: forge#3466 -->
+  if [ -z "$PR_NUMBER" ]; then
+    echo "review-pr: no PR number resolved from the argument string - stopping (nothing reviewed, nothing posted)" >&2
+    exit 1
+  fi
   PR_ROUTE_INFO=$(gh pr view "$PR_NUMBER" ${REPO_FLAG} --json number,baseRefName,headRefName --jq '{number:.number,base:.baseRefName,head:.headRefName}')
   ROUTE_PR_NUMBER=$(echo "$PR_ROUTE_INFO" | jq -r '.number')
   PR_NUMBER="$ROUTE_PR_NUMBER"
@@ -254,10 +306,10 @@ Check input to determine which mode:
 
 ### MODE 1: Staging Review
 
-If `$ARGUMENTS` is "staging", "feature", or "staging:feature":
+If `$ARGUMENTS` is "staging", "feature", or "staging:feature" (forward the validated `ARGS_RAW` from the Argument Parse block, never a rejected string):
 
 ```
->>> INVOKE: Skill("{FORGE_SKILL_PREFIX}review-pr-staging", "$ARGUMENTS")
+>>> INVOKE: Skill("{FORGE_SKILL_PREFIX}review-pr-staging", "{ARGS_RAW}")
 >>> THEN STOP — the staging command handles the full flow.
 ```
 
@@ -273,6 +325,7 @@ Show list, ask user which to review, then loop through each with full review.
 
 **Auto-detect staging mode:**
 ```bash
+[ -n "$PR_NUMBER" ] || { echo "review-pr: no PR number - stopping" >&2; exit 1; }  # never let gh pick the current-branch PR <!-- Added: forge#3466 -->
 PR_INFO=$(gh pr view "$PR_NUMBER" ${REPO_FLAG} --json baseRefName,headRefName,additions,deletions,title)
 HEAD=$(echo $PR_INFO | jq -r '.headRefName')
 BASE=$(echo $PR_INFO | jq -r '.baseRefName')
@@ -280,7 +333,7 @@ BASE=$(echo $PR_INFO | jq -r '.baseRefName')
 
 If `HEAD = "staging" AND BASE = "main"` OR `HEAD = "feature" AND BASE = "main"`:
 ```
->>> INVOKE: Skill("{FORGE_SKILL_PREFIX}review-pr-staging", "$ARGUMENTS")
+>>> INVOKE: Skill("{FORGE_SKILL_PREFIX}review-pr-staging", "{ARGS_RAW}")
 >>> THEN STOP.
 ```
 
@@ -485,6 +538,27 @@ fi
 ```
 
 ```bash
+# Install-root-only classifier resolution (no cwd-relative `scripts/` fallback: the PR under review is author-controlled).
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+# Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+_l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+# Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+_cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+# newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+_v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+_m="$HOME/.claude/plugins/marketplaces/$_mk"
+# '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
+_k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
+while IFS= read -r _c; do
+case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
+done <<< "$_k"
+fi
 # Check each configured language for a test command
 for lang in python typescript go rust; do
     TEST_CMD=$(yq ".verification.commands.${lang}.test // \"\"" forge.yaml 2>/dev/null || echo '')
@@ -497,9 +571,8 @@ for lang in python typescript go rust; do
             # If ALL failing test names appear in $QUARANTINED_TESTS, suppress the block.
             # Without per-test granularity from the test runner, fall back to treating
             # any failure as blocking unless the classifier script is available.
-            CLASSIFIER="${FORGEDOCK_SCRIPTS:-scripts}/flaky-quarantine.sh"
-            [ -f "$CLASSIFIER" ] || CLASSIFIER="scripts/flaky-quarantine.sh"
-            if [ -f "$CLASSIFIER" ]; then
+            CLASSIFIER="${FORGE_ROOT:+$FORGE_ROOT/scripts/flaky-quarantine.sh}"
+            if [ -n "$CLASSIFIER" ] && [ -f "$CLASSIFIER" ]; then
                 CL_RESULT=$(bash "$CLASSIFIER" \
                     --test "$TEST_CMD" \
                     --base "$(git rev-parse --abbrev-ref origin/HEAD 2>/dev/null | sed 's|origin/||' || echo main)" \
@@ -1099,11 +1172,47 @@ echo "=== BASELINE ROSTER (top domains): $SELECTED_AGENTS ==="
 | Cross-critical domains | `SCORE_AUTH >= 2` AND `SCORE_DATABASE >= 3` | Auth + Database |
 | Cross-critical domains | `SCORE_BILLING >= 2` AND `SCORE_CONCURRENCY >= 2` | Billing + Concurrency + Database |
 
+**Roster label to marker domain (single source of truth)**: roster labels come in three spellings (score keys such as `INFRA`/`SCRAPING`, display names such as `Infrastructure`/`Scraping`, persona files such as `infra`/`scraper`). The marker domain in `<!-- FORGE:REVIEW-AGENT:{domain} -->` is always the canonical value below, never the lowercased roster label. Phase 4 stays fail closed on that canonical marker: no alias is accepted. <!-- Added: forge#3485 -->
+
+| Roster label (any case) | Marker domain | Persona file |
+|-------------------------|---------------|--------------|
+| `Security` | `security` | `security.md` |
+| `Auth` | `auth` | `auth.md` |
+| `Billing` | `billing` | `billing.md` |
+| `Concurrency` | `concurrency` | `concurrency.md` |
+| `Database` | `database` | `database.md` |
+| `INFRA`, `Infrastructure` | `infra` | `infra.md` |
+| `SCRAPING`, `Scraping`, `Scraper` | `scraper` | `scraper.md` |
+| `FRONTEND`, `Frontend`, `Web` | `frontend` | `frontend.md` |
+| `API` | `api` | `api.md` |
+
+A label outside the table falls back to its lowercase form. The `agent_domain()` helper is defined inline in every Bash block that needs it (each Bash call is a fresh shell); all copies must stay identical, which `scripts/review-pr-domain-map.test.sh` enforces.
+
 ```bash
 # Apply escalation triggers
+# BEGIN review-pr-agent-domain
+agent_domain() {
+    case "$(printf '%s' "${1}" | tr '[:upper:]' '[:lower:]')" in
+        security) echo security ;;
+        auth) echo auth ;;
+        billing) echo billing ;;
+        concurrency) echo concurrency ;;
+        database) echo database ;;
+        infra|infrastructure) echo infra ;;
+        scraper|scraping) echo scraper ;;
+        frontend|web) echo frontend ;;
+        api) echo api ;;
+        *) printf '%s' "${1}" | tr '[:upper:]' '[:lower:]' ;;
+    esac
+}
+# END review-pr-agent-domain
 add_agent() {
-    local AGENT="${1}"
-    echo "$SELECTED_AGENTS" | grep -qw "$AGENT" || SELECTED_AGENTS="$SELECTED_AGENTS $AGENT"
+    local AGENT CUR HAVE=""
+    AGENT=$(agent_domain "${1}")
+    for CUR in $SELECTED_AGENTS; do
+        [ "$(agent_domain "$CUR")" = "$AGENT" ] && HAVE=1
+    done
+    [ -n "$HAVE" ] || SELECTED_AGENTS="$SELECTED_AGENTS $AGENT"
 }
 
 [ "$SCORE_AUTH" -ge 3 ] && add_agent "Auth"
@@ -1337,6 +1446,34 @@ if [ "$THOROUGH" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]; then
     SELECTED_AGENTS=$(echo "$SELECTED_AGENTS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
     echo "=== THOROUGH mode: FULL UNION DISPATCH — $SELECTED_AGENTS ==="
 fi
+```
+
+**Roster canonicalization (final step of 3B, mandatory)**: rewrite `SELECTED_AGENTS` to canonical marker domains with one entry per persona, so `INFRA` and `Infrastructure` (or `SCRAPING` and `Scraping`) dispatch once and `SELECTED_AGENT_COUNT` counts each persona once. Pass the rewritten value to Phase 3C and Phase 4 as `{SELECTED_AGENTS}`. <!-- Added: forge#3485 -->
+
+```bash
+# BEGIN review-pr-agent-domain
+agent_domain() {
+    case "$(printf '%s' "${1}" | tr '[:upper:]' '[:lower:]')" in
+        security) echo security ;;
+        auth) echo auth ;;
+        billing) echo billing ;;
+        concurrency) echo concurrency ;;
+        database) echo database ;;
+        infra|infrastructure) echo infra ;;
+        scraper|scraping) echo scraper ;;
+        frontend|web) echo frontend ;;
+        api) echo api ;;
+        *) printf '%s' "${1}" | tr '[:upper:]' '[:lower:]' ;;
+    esac
+}
+# END review-pr-agent-domain
+CANON_ROSTER=""
+for AGENT in $SELECTED_AGENTS; do
+  D=$(agent_domain "$AGENT")
+  case " $CANON_ROSTER " in *" $D "*) ;; *) CANON_ROSTER="$CANON_ROSTER $D" ;; esac
+done
+SELECTED_AGENTS="${CANON_ROSTER# }"
+echo "=== CANONICAL ROSTER: $SELECTED_AGENTS ==="
 ```
 
 **Why cross-critical domain pairs always escalate**: A 2-file PR touching both `services/api/app/core/auth.py` and `services/api/app/routers/billing.py` creates interaction bugs that single-domain reviewers cannot catch. Never rely on a single agent for multi-domain risk.
@@ -1617,14 +1754,35 @@ if [ "$REVIEW_SHA_OK" != "true" ]; then
 fi
 WAIT_DIR="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/forge-review-wait-$(id -u)"   # absolute and identical in every Bash call (cwd is not)
 rm -f "${WAIT_DIR}/${PR_NUMBER}_${REVIEW_SHA}_review-wait-deadline"   # a (re)dispatch always starts a fresh wait window
+# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
 _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-TRUSTED_SCRIPT=""
-for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock"; do
-  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
 done
+TRUSTED_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done <<< "$_tc"
 PENDING_AGENTS=""
+# BEGIN review-pr-agent-domain
+agent_domain() {
+    case "$(printf '%s' "${1}" | tr '[:upper:]' '[:lower:]')" in
+        security) echo security ;;
+        auth) echo auth ;;
+        billing) echo billing ;;
+        concurrency) echo concurrency ;;
+        database) echo database ;;
+        infra|infrastructure) echo infra ;;
+        scraper|scraping) echo scraper ;;
+        frontend|web) echo frontend ;;
+        api) echo api ;;
+        *) printf '%s' "${1}" | tr '[:upper:]' '[:lower:]' ;;
+    esac
+}
+# END review-pr-agent-domain
 for AGENT in $SELECTED_AGENTS; do
-  AGENT_DOMAIN=$(printf '%s' "$AGENT" | tr '[:upper:]' '[:lower:]')
+  AGENT_DOMAIN=$(agent_domain "$AGENT")
   HAVE=""
   if [ -n "$TRUSTED_SCRIPT" ]; then
     HAVE=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
@@ -1636,7 +1794,7 @@ done
 echo "PENDING_AGENTS:${PENDING_AGENTS:- (none)}"
 ```
 
-**CRITICAL**: Launch ALL agents in `PENDING_AGENTS` in a SINGLE message using multiple `{DISPATCH_TOOL}` calls. If `PENDING_AGENTS` is empty, every selected reviewer already posted for this head: launch nothing and go straight to Phase 4. Each agent must persist its finalized body before posting it with `gh pr comment --body-file`, start the body with `<!-- FORGE:REVIEW-AGENT:{lowercase-domain} -->` followed by a `Reviewed-SHA: ${REVIEW_SHA}` line (the full head SHA, outside the marker), and return its verdict and findings to the orchestrator independently of GitHub delivery.
+**CRITICAL**: Launch ALL agents in `PENDING_AGENTS` in a SINGLE message using multiple `{DISPATCH_TOOL}` calls. If `PENDING_AGENTS` is empty, every selected reviewer already posted for this head: launch nothing and go straight to Phase 4. Each agent must persist its finalized body before posting it with `gh pr comment --body-file`, start the body with `<!-- FORGE:REVIEW-AGENT:{marker-domain} -->` (`{marker-domain}` is the canonical value from the roster-to-marker table, i.e. the `AGENT_DOMAIN` computed above for that agent; pass it to each persona explicitly) followed by a `Reviewed-SHA: ${REVIEW_SHA}` line (the full head SHA, outside the marker), and return its verdict and findings to the orchestrator independently of GitHub delivery.
 
 **Dispatch failure and partial-panel guard (MANDATORY):** Count the selected roster before dispatch. If any launch fails, including from pool exhaustion, do not continue with the agents that did launch as a sufficient panel. Immediately run the **Panel hard-stop block** below with `ACTUAL_AGENT_COUNT=0` and exit without a verdict. After reviewers complete (joined `Task`/`task` return) or, under async `Agent`, after the Phase 4 bounded wait ends, independently compare their posted trusted current-SHA `FORGE:REVIEW-AGENT` markers with the selected count; a smaller count is the same hard stop. This catches a reviewer that accepted dispatch but failed before posting. Under async `Agent` the comparison runs only after the wait, so a reviewer that is merely late is not a false degraded stop.
 
@@ -1735,16 +1893,37 @@ if [ "$NOW_SHA" != "$REVIEW_SHA" ]; then
   echo "PANEL_STATUS: STOP"; exit 0
 fi
 
+# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
 _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-TRUSTED_SCRIPT=""
-for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock"; do
-  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
 done
+TRUSTED_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done <<< "$_tc"
 COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
 MISSING_AGENT_COMMENTS=""
 ACTUAL_AGENT_COUNT=0
+# BEGIN review-pr-agent-domain
+agent_domain() {
+    case "$(printf '%s' "${1}" | tr '[:upper:]' '[:lower:]')" in
+        security) echo security ;;
+        auth) echo auth ;;
+        billing) echo billing ;;
+        concurrency) echo concurrency ;;
+        database) echo database ;;
+        infra|infrastructure) echo infra ;;
+        scraper|scraping) echo scraper ;;
+        frontend|web) echo frontend ;;
+        api) echo api ;;
+        *) printf '%s' "${1}" | tr '[:upper:]' '[:lower:]' ;;
+    esac
+}
+# END review-pr-agent-domain
 for AGENT in $SELECTED_AGENTS; do
-  AGENT_DOMAIN=$(printf '%s' "$AGENT" | tr '[:upper:]' '[:lower:]')
+  AGENT_DOMAIN=$(agent_domain "$AGENT")
   N=""
   if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$COMMENTS_JSON" ]; then
     N=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)" 2>/dev/null || echo "")
@@ -1782,12 +1961,32 @@ REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"
 case "$REVIEW_SHA" in *[!0-9a-f]*|"") REVIEW_SHA_OK=false ;; *) [ "${#REVIEW_SHA}" -eq 40 ] || [ "${#REVIEW_SHA}" -eq 64 ] && REVIEW_SHA_OK=true || REVIEW_SHA_OK=false ;; esac
 [ "$REVIEW_SHA_OK" = "true" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: REVIEW_SHA is not a commit id (an empty SHA would count every head's findings)"; exit 0; }
 # Extract structured finding IDs from FINDING HTML comments.
-# Uses jq's scan() (POSIX-portable, no PCRE grep required).
-# Scope every extraction to reviewer bodies for the CURRENT head (Reviewed-SHA line): after a re-entry or a
-# head move, comments for earlier heads would inflate AGENT_COUNT and re-file already-fixed findings.
-ALL_FINDINGS=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-    --jq "[.[] | select(.body | contains(\"Reviewed-SHA: ${REVIEW_SHA}\")) | .body | scan(\"<!-- FINDING:([^>]+) -->\") | .[0]] | join(\"\\n\")")
-AGENT_COUNT=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" | jq -s --arg sha "Reviewed-SHA: ${REVIEW_SHA}" '[.[][] | select((.body | test("REVIEW-FINDINGS-START")) and (.body | contains($sha)))] | length')
+# Only TRUSTED reviewer bodies count (scripts/trusted-comments.sh: trusted association, Bot account, or
+# FORGE_TRAIL_TRUSTED_LOGINS), each must START with the FORGE:REVIEW-AGENT marker and carry a Reviewed-SHA line for the
+# CURRENT head. The head SHA is public, so the SHA line alone proves nothing: a bare contains() selection would let any
+# commenter forge FINDING markers that get filed as issues or inflate the agent count. Earlier-head comments are excluded
+# so a re-entry or head move does not re-file already-fixed findings. Uses jq scan() (POSIX-portable, no PCRE grep).
+# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+done
+TRUSTED_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done <<< "$_tc"
+COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
+AGENT_RE="^<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)"
+if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/trusted-comments.sh unresolvable or PR comments unreadable; refusing to read reviewer findings (fail closed)"; exit 0
+fi
+AGENT_BODIES=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies "$AGENT_RE" 2>/dev/null) \
+  || { echo "REVIEW_RESULT: status: BLOCKED, blocker: trusted reviewer comments unreadable (fail closed)"; exit 0; }
+ALL_FINDINGS=$(printf '%s\n' "$AGENT_BODIES" | jq -r 'scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null)
+# Agent bodies start with the REVIEW-AGENT marker and carry REVIEW-FINDINGS-START inside, so count it with a lookahead.
+AGENT_COUNT=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->)<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)" 2>/dev/null || echo "")
+case "$AGENT_COUNT" in ''|*[!0-9]*) AGENT_COUNT=0 ;; esac   # fail closed
 FINDING_COUNT=$(echo "$ALL_FINDINGS" | grep -c '.' || echo 0)
 ```
 
@@ -1795,7 +1994,7 @@ If synthesis needed, launch a `general-purpose` Task (model: `"{SUBAGENT_MODEL}"
 - Deduplicate findings by file + line range ±5 (keep higher confidence)
 - Resolve contradictions by reading disputed code
 - Dismiss false positives with evidence
-- Post synthesis comment with `<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->` block and a `Reviewed-SHA: ${REVIEW_SHA}` line (Phase 6A only reads synthesized blocks for the current head)
+- Post synthesis comment whose body **starts with** `<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->` (first line, nothing before it), followed by a `Reviewed-SHA: ${REVIEW_SHA}` line on its own line (Phase 6A only reads trusted synthesized blocks that open with the marker and match the current head; a body with a preamble is ignored and Phase 6A falls back to the raw agent bodies)
 - Do NOT add new findings — only triage existing ones
 
 **IMPORTANT**: When synthesized block exists, Phase 6 MUST use it instead of raw findings.
@@ -1804,7 +2003,7 @@ If synthesis needed, launch a `general-purpose` Task (model: `"{SUBAGENT_MODEL}"
 
 ## Phase 6: Finding Triage & Issue Creation (MANDATORY)
 
-**STOP. DO NOT skip this phase. DO NOT post summary first.** Every finding that §6B.5 classifies as ISSUE MUST become a GitHub issue BEFORE the summary; every NOTE gets a recorded disposition instead (§6B.5).
+**STOP. DO NOT skip this phase. DO NOT post summary first.** Every finding that survives §6B.4 and that §6B.5 classifies as ISSUE MUST become a GitHub issue BEFORE the summary; every NOTE gets a recorded disposition instead (§6B.5).
 
 ### 6A: Extract Findings
 
@@ -1813,18 +2012,40 @@ If synthesis needed, launch a `general-purpose` Task (model: `"{SUBAGENT_MODEL}"
 REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"
 case "$REVIEW_SHA" in *[!0-9a-f]*|"") REVIEW_SHA_OK=false ;; *) [ "${#REVIEW_SHA}" -eq 40 ] || [ "${#REVIEW_SHA}" -eq 64 ] && REVIEW_SHA_OK=true || REVIEW_SHA_OK=false ;; esac
 [ "$REVIEW_SHA_OK" = "true" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: REVIEW_SHA is not a commit id (an empty SHA would count every head's findings)"; exit 0; }
-# Only bodies for the CURRENT head count (Reviewed-SHA line): findings from earlier heads are already fixed or re-reviewed.
-HAS_SYNTHESIS=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" | jq -s --arg sha "Reviewed-SHA: ${REVIEW_SHA}" '[.[][] | select((.body | test("REVIEW-FINDINGS-SYNTHESIZED-START")) and (.body | contains($sha)))] | length')
+# Only TRUSTED bodies for the CURRENT head count (scripts/trusted-comments.sh + anchored marker + Reviewed-SHA line):
+# findings from earlier heads are already fixed or re-reviewed, and an untrusted commenter must never be able to inject
+# findings or post a forged synthesis block that makes the review read clean (the head SHA is public).
+# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+done
+TRUSTED_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done <<< "$_tc"
+COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
+if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/trusted-comments.sh unresolvable or PR comments unreadable; refusing to read clean (fail closed)"; exit 0
+fi
+SYNTH_RE="^<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)"
+AGENT_RE="^<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)"
+HAS_SYNTHESIS=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "$SYNTH_RE" 2>/dev/null || echo "")
+case "$HAS_SYNTHESIS" in ''|*[!0-9]*) echo "REVIEW_RESULT: status: BLOCKED, blocker: synthesis count unreadable (fail closed)"; exit 0 ;; esac
 
 if [ "$HAS_SYNTHESIS" -gt 0 ]; then
-    # Extract finding IDs from the current-head synthesized block using jq scan() (no PCRE grep needed)
-    FINDINGS=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-        --jq "[.[] | select((.body | test(\"REVIEW-FINDINGS-SYNTHESIZED-START\")) and (.body | contains(\"Reviewed-SHA: ${REVIEW_SHA}\"))) | .body | scan(\"<!-- FINDING:([^>]+) -->\") | .[0]] | join(\"\\n\")")
+    # Extract finding IDs from the trusted current-head synthesized block using jq scan() (no PCRE grep needed)
+    SOURCE_BODIES=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies "$SYNTH_RE" 2>/dev/null) \
+      || { echo "REVIEW_RESULT: status: BLOCKED, blocker: trusted synthesis unreadable (fail closed)"; exit 0; }
 else
-    # Extract finding IDs from the current-head agent comments using jq scan() (portable, no PCRE grep)
-    FINDINGS=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-        --jq "[.[] | select(.body | contains(\"Reviewed-SHA: ${REVIEW_SHA}\")) | .body | scan(\"<!-- FINDING:([^>]+) -->\") | .[0]] | join(\"\\n\")")
+    # Extract finding IDs from the trusted current-head agent comments using jq scan() (portable, no PCRE grep)
+    SOURCE_BODIES=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies "$AGENT_RE" 2>/dev/null) \
+      || { echo "REVIEW_RESULT: status: BLOCKED, blocker: trusted reviewer comments unreadable (fail closed)"; exit 0; }
+    # The panel guard guarantees at least one trusted reviewer body for this head; none means a misread, never "clean".
+    [ -n "$SOURCE_BODIES" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: no trusted reviewer comments for head ${REVIEW_SHA} (fail closed)"; exit 0; }
 fi
+FINDINGS=$(printf '%s\n' "$SOURCE_BODIES" | jq -r 'scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null)
 ```
 
 Also include any `INTEG-N` findings from Phase 2.5 that weren't already covered by agents.
@@ -1839,32 +2060,71 @@ If still 0: review is clean — skip to Phase 7.
 - Also dedup by title similarity: if two findings share the same file and 3+ title keywords, keep the higher confidence one
 - Sort: CONFIRMED first, then LIKELY, then POSSIBLE; within group by severity
 
+### 6B.4: Provenance and concreteness gates (MANDATORY before 6B.5 — forge#3452)
+
+A finding is only attributable to this PR when it names a line that exists at the reviewed head, was introduced by this PR, and comes with a concrete way to fail. Run these three gates, in this order, on every deduped finding before §6B.5. The gates are mode-independent: they run for every review mode (standard, thorough, milestone) and are never behind a fragment or mode skip. Every gate fails toward keeping the finding when its input is unreadable — never drop or reclassify blind.
+
+1. **Head-SHA gate.** Runs after the deleted/renamed rule in gate 2 (a finding whose file the PR deleted or renamed is kept, never dropped as stale). The cited `file:line` must exist at `REVIEW_SHA` (validated as 40/64-hex in 6A before use). Read the file at that SHA (`git show "${REVIEW_SHA}:${FILE}"` to a temp file, checking the command's exit status, else `gh api "repos/{GH_REPO}/contents/${FILE}?ref=${REVIEW_SHA}"`) and compare its line count to the cited line. Count lines with `awk 'END{print NR}'`, not `wc -l` (which undercounts a file with no trailing newline). If neither read succeeds, keep the finding: a failed probe is never a line count of 0. Only when the file is read successfully and the cited line is past its end, or the file is absent at that SHA while absent from the PR file list too, is the finding stale: DROP it and count it in `findings_dropped_stale`.
+2. **Introduced-line gate.** Intersect the cited line range (±5, the same tolerance as 6B dedup) with the added lines of the PR diff (fetch the PR file list once, never per finding). A MEDIUM or lower finding with no intersection is `pre-existing`: its defect was not introduced by this PR. CRITICAL/HIGH findings are never routed as pre-existing, whatever their confidence (CRITICAL/HIGH, any confidence): a new caller of an unchanged unsafe helper is exactly the interaction `protocols.md` §5 ("Pre-existing is not safe") forbids dismissing, and the line-proximity test cannot see it. They count as intersecting, stay ISSUEs, keep blocking per §7B criterion 2 and are filed as `review-finding`. Gate input comes from the diff only, never from a reviewer's self-declared `**Scope**` tag. These cases always count as intersecting (checked first, before gate 1): the finding's file was deleted or renamed by the PR; the file is in the files API with no `patch` (a large or truncated diff, so its added lines are UNKNOWN, not absent); and a finding with no usable line number (anything other than a plain integer, or a `N-M` range, whose start is used). An unreadable diff classifies nothing as pre-existing.
+3. **Concrete-failure gate.** The finding body must carry a non-empty `**Failure scenario**` (concrete inputs leading to a wrong output or behaviour; see the Structured Findings Protocol). The scenario prose lives in the reviewer's PR comment, not in the `FINDING:` one-liner 6A extracts: look it up by the finding id (e.g. `BUG-3`) in the comment that carried the marker, and keep the finding when that comment cannot be re-read. A MEDIUM or lower finding without one is speculative hardening: demote it to a NOTE and count it in `notes_demoted_no_scenario`. CRITICAL/HIGH, any confidence, are exempt and stay ISSUEs (§6B.5: HIGH is always filed), so a real severe defect is never lost for a missing field.
+
+```bash
+# Each Bash call is a fresh shell: re-declare state with the orchestrator's values.
+REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"
+case "$REVIEW_SHA" in *[!0-9a-f]*|"") echo "REVIEW_RESULT: status: BLOCKED, blocker: REVIEW_SHA is not a commit id"; exit 0 ;; esac
+# Paths come from the files API (raw names), never from `+++` header lines: those are quoted/tab-suffixed for special names.
+FILES_JSON=$(mktemp "${FORGE_SCRATCHPAD:-${TMPDIR:-/tmp}}/forge-pr-files-${PR_NUMBER}.XXXXXX")
+gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" --paginate > "$FILES_JSON" 2>/dev/null || : > "$FILES_JSON"
+# "path:line" for every added line; an empty file means the diff was unreadable (gates then keep every finding).
+ADDED_LINES_FILE=$(mktemp "${FORGE_SCRATCHPAD:-${TMPDIR:-/tmp}}/forge-added-lines-${PR_NUMBER}.XXXXXX")
+jq -r '.[] | select(.patch != null) | "FILE\t\(.filename)", .patch' "$FILES_JSON" 2>/dev/null | awk '
+  /^FILE\t/{f=substr($(0),6);next}
+  /^@@/{s=$(0);sub(/^@@ -[0-9,]+ \+/,"",s);sub(/[ ,].*/,"",s);n=s+0;next}
+  /^\\/{next}
+  /^\+/{print f":"n;n++;next}
+  /^-/{next}
+  {n++}' > "$ADDED_LINES_FILE" || : > "$ADDED_LINES_FILE"
+# Files the PR deleted or renamed (the old name too): findings on them always intersect.
+GONE_FILES_FILE=$(mktemp "${FORGE_SCRATCHPAD:-${TMPDIR:-/tmp}}/forge-gone-files-${PR_NUMBER}.XXXXXX")
+jq -r '.[] | select(.status=="removed" or .status=="renamed") | .filename, (.previous_filename // empty)' "$FILES_JSON" > "$GONE_FILES_FILE" 2>/dev/null || : > "$GONE_FILES_FILE"
+# Files present with no `patch` (large/truncated diff): their added lines are UNKNOWN, so findings on them are always kept.
+NOPATCH_FILES_FILE=$(mktemp "${FORGE_SCRATCHPAD:-${TMPDIR:-/tmp}}/forge-nopatch-files-${PR_NUMBER}.XXXXXX")
+jq -r '.[] | select(.patch == null and .status != "removed") | .filename' "$FILES_JSON" > "$NOPATCH_FILES_FILE" 2>/dev/null || : > "$NOPATCH_FILES_FILE"
+# Per finding (FILE, RAW_LINE from the file:line field). Validate before any arithmetic: never expand reviewer text in $(( )).
+#   LINE="${RAW_LINE%%-*}"; case "$LINE" in ""|*[!0-9]*) KEEP (no usable line number) ;; esac   # also blocks x[$(cmd)]
+#   gone:       grep -qxF -- "$FILE" "$GONE_FILES_FILE" && KEEP (skip head gate and introduced gate)
+#   no patch:   grep -qxF -- "$FILE" "$NOPATCH_FILES_FILE" && KEEP (UNKNOWN added lines; never pre-existing; skip introduced gate)
+#   head gate:  git show "${REVIEW_SHA}:${FILE}" > "$TMP" 2>/dev/null  (fall back to the contents API); on failure KEEP
+#               LINES=$(awk 'END{print NR}' "$TMP"); [ "$LINE" -gt "$LINES" ] && DROP (findings_dropped_stale)
+#   introduced: LO=$((LINE>5?LINE-5:1)); for L in $(seq "$LO" $((LINE+5))); do grep -qxF -- "${FILE}:${L}" "$ADDED_LINES_FILE" && INTRODUCED=1; done
+#               SEV=$(printf '%s' "$SEVERITY" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+#               case "$SEV" in MEDIUM|LOW|INFO) [ -s "$ADDED_LINES_FILE" ] && [ "$INTRODUCED" != 1 ] && SCOPE=pre-existing ;; esac   # findings_preexisting; only known low severities, anything else (CRITICAL/HIGH, lowercase, empty, unparseable) is kept
+```
+
+**Pre-existing route.** CRITICAL/HIGH findings are never routed as pre-existing (gate 2), so this route applies to MEDIUM and lower only. A `pre-existing` finding is never filed with `review-finding` or `needs-validation`, and is never linked to this PR as its source, so it is excluded from findings-per-PR and from the amplification ratio (the amplification breaker and the orchestrate admission check count `review-finding` issues only). List it once in the review summary (id, file:line, one-line reason). Because that exclusion removes the usual bounds, the route carries its own: run each pre-existing finding through the §6B.5 classifier first (its severity floor and safety exemption apply unchanged; a finding the classifier calls NOTE is only listed), and file at most 3 per review, highest severity first. A pre-existing finding that passes is filed once through `Skill(skill="{FORGE_SKILL_PREFIX}issue", ...)` with the label `pre-existing` only (plus its `priority:*`), citing this PR as where it was noticed, deduped by the 6C dedup path. The rest stay in the summary and feed the periodic `security-audit` queue. Pre-existing findings are not counted in `findings_filed`; count the ones filed as `preexisting_filed`.
+
+Count `findings_dropped_stale`, `findings_preexisting` and `notes_demoted_no_scenario` and add them to the disposition marker below. Demoted notes flow into §6B.5 as NOTEs.
+
 ### 6B.5: Non-blocking note disposition (MANDATORY before 6C — forge#3060)
 
-Filing a standalone `review-finding` issue for every LOW/POSSIBLE reviewer note makes the cascade amplify (each merged fix PR spawns its own P3 issues, which spawn more). Classify each deduped finding before 6C with the deterministic classifier — do NOT hand-classify when the script resolves:
+Filing a standalone `review-finding` issue for every LOW/POSSIBLE reviewer note makes the cascade amplify (each merged fix PR spawns its own P3 issues, which spawn more). Classify each finding that survived §6B.4 (not dropped as stale, not routed as pre-existing; demoted ones are NOTEs) before 6C with the deterministic classifier — do NOT hand-classify when the script resolves:
 
 - **ISSUE always**: `**Severity**: HIGH` or `CRITICAL`, or a missing/unparseable severity.
-- **Safety exemption is content-based**: a LOW or POSSIBLE finding is still filed when its file path / title / body matches the security/billing keyword set (`security|auth|authz|authn|billing|payment|stripe|charge|invoice|injection|xss|csrf|ssrf|idor|secret(s)|credential(s)|permission(s)|sql|token|password|redact`, whole words, `_`/`-`/`/` separate words — so `auth_service` matches but `author`/`tokenizer` do not), or when it came from a dedicated, signal-selected domain agent (Auth, Billing, Concurrency, Database) AND is MEDIUM+ or CONFIRMED — a LOW/POSSIBLE finding stays a NOTE whichever reviewer raised it. **Origin from the always-on General Security & Quality agent alone does NOT exempt a finding**: that agent runs on every PR, so origin-based exemption filed nearly every LOW note it raised (the 2026-10-08 cascade audit: 50 of 60 would-be notes in one batch were filed only for that reason).
+- **Safety exemption is content-based** (it bypasses only this severity damper, never the §6B.4 provenance gate: a pre-existing auth gap is flagged through the pre-existing route, not attributed to this PR): a LOW or POSSIBLE finding is still filed when its file path / title / body matches the security/billing keyword set (`security|auth|authz|authn|billing|payment|stripe|charge|invoice|injection|xss|csrf|ssrf|idor|secret(s)|credential(s)|permission(s)|sql|token|password|redact`, whole words, `_`/`-`/`/` separate words — so `auth_service` matches but `author`/`tokenizer` do not), or when it came from a dedicated, signal-selected domain agent (Auth, Billing, Concurrency, Database) AND is MEDIUM+ or CONFIRMED — a LOW/POSSIBLE finding stays a NOTE whichever reviewer raised it. **Origin from the always-on General Security & Quality agent alone does NOT exempt a finding**: that agent runs on every PR, so origin-based exemption filed nearly every LOW note it raised (the 2026-10-08 cascade audit: 50 of 60 would-be notes in one batch were filed only for that reason).
 - **Review-finding lineage** (the PR's linked issue `MERGE_ISSUE` carries the `review-finding` label, any priority — this PR is itself a fix for a finding): only MEDIUM findings that are CONFIRMED, or LIKELY and safety-exempt, become issues; LOW and POSSIBLE are always NOTEs. A fix for a finding must not mint a new generation of findings.
 - **Otherwise**: `**Severity**: LOW`, or `**Confidence**: POSSIBLE` below HIGH, is a NOTE unless safety-exempt; everything else (MEDIUM CONFIRMED/LIKELY) is an ISSUE.
 
 ```bash
-# Resolve the classifier: running plugin, FORGE_ROOT, FORGEDOCK_HOME, newest pinned forgedock plugin cache
-# under the active config dir (CLAUDE_CONFIG_DIR) then ~/.claude, then the repo's own scripts/ (ForgeDock itself).
-# The plugin-root placeholder is not always substituted in forked review runs, so the cache scan is what makes
-# consumer repos resolve the script instead of falling back to classifier=manual.
-CLASSIFY_SCRIPT=""
-_cands="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}")"
+# HELPER_SCRIPT resolver (CLASSIFY_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
 for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] || continue
-  _cands="$_cands
-$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
 done
-_cands="$_cands
-$PWD"
+CLASSIFY_SCRIPT=""
 while IFS= read -r _c; do
   case "$_c" in /*) [ -z "$CLASSIFY_SCRIPT" ] && [ -f "$_c/scripts/classify-finding.sh" ] && CLASSIFY_SCRIPT="$_c/scripts/classify-finding.sh" ;; esac
-done <<< "$_cands"
+done <<< "$_tc"
 FINDING_LINEAGE="none"
 if [ -n "${MERGE_ISSUE:-}" ] && gh issue view "$MERGE_ISSUE" -R {GH_REPO} --json labels --jq '.labels[].name' 2>/dev/null | grep -qx 'review-finding'; then
   FINDING_LINEAGE="review-finding"
@@ -1873,11 +2133,16 @@ fi
 # fix round on this PR. Any trusted FORGE:INPR_FIX* marker already on the PR means the round is used.
 INPR_DIFF_FILE=""
 if [ "${AUTO_MERGE:-false}" = "true" ] && [ -n "${MERGE_ISSUE:-}" ]; then
+  # TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
   _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-  TRUSTED_SCRIPT=""
-  for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock"; do
-    case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+  _tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+  for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+    [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
   done
+  TRUSTED_SCRIPT=""
+  while IFS= read -r _c; do
+    case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+  done <<< "$_tc"
   if [ -n "$TRUSTED_SCRIPT" ]; then INPR_MARKERS=$(gh api --paginate "repos/{GH_REPO}/issues/{PR_NUMBER}/comments" 2>/dev/null \
     | bash "$TRUSTED_SCRIPT" count '^<!-- FORGE:INPR_FIX' 2>/dev/null || echo ""); else INPR_MARKERS=""; fi
   if [ "$INPR_MARKERS" = "0" ]; then
@@ -1903,14 +2168,14 @@ Each NOTE gets exactly one disposition, in this preference order:
 
 **Metrics note (forge#3106)**: because NOTEs are not filed as issues, `review-finding` issue volume and any metric derived from it (findings per PR, `/pipeline-health` finding rates, amplification ratio) drop relative to pre-#3060 history. Compare against the `notes_*` counts in the review summary, not issue counts alone, when judging review depth across the change.
 
-Every NOTE disposition must be recorded (never silently dropped): list each NOTE (id, file:line, one-line reason) with its disposition in the review summary comment, including dropped ones, so a reviewer can audit the decision. NOTES are never passed to `Skill(issue)`. Record counts in the review summary (`notes_fixed`, `notes_listed`, `notes_dropped`, `findings_filed`, `inpr_fix`). If no finding is an ISSUE after this step, skip 6C and continue to Phase 7. Findings classified `INPR_FIX` (§6B.6) are neither notes nor filed this round.
+Every NOTE disposition must be recorded (never silently dropped): list each NOTE (id, file:line, one-line reason) with its disposition in the review summary comment, including dropped ones, so a reviewer can audit the decision. NOTES are never passed to `Skill(issue)`. Record counts in the review summary (`notes_fixed`, `notes_listed`, `notes_dropped`, `findings_filed`, `inpr_fix`) and the §6B.4 counts (`findings_dropped_stale`, `findings_preexisting`, `notes_demoted_no_scenario`). If no finding is an ISSUE after this step, skip 6C and continue to Phase 7. Findings classified `INPR_FIX` (§6B.6) are neither notes nor filed this round.
 
 **Disposition marker (MANDATORY whenever Phase 6A extracted at least one finding):** post one PR comment whose first line is the machine-readable record below, followed by the NOTE list. Phase 8 refuses to auto-merge a PR that has `FINDING:` markers but no `FORGE:NOTE_DISPOSITION` comment — the disposition step is enforced, not advisory.
 
 ```bash
 CLASSIFIER_MODE=$([ -n "$CLASSIFY_SCRIPT" ] && echo script || echo manual)
 # NOTE_LIST_FILE: mktemp file named for the PR number, holding one line per NOTE (id, file:line, disposition, reason).
-gh pr comment {PR_NUMBER} -R {GH_REPO} --body "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=${NOTES_FIXED:-0} notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} inpr_fix=${INPR_FIX_COUNT:-0} lineage=${FINDING_LINEAGE} classifier=${CLASSIFIER_MODE} -->
+gh pr comment {PR_NUMBER} -R {GH_REPO} --body "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=${NOTES_FIXED:-0} notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} inpr_fix=${INPR_FIX_COUNT:-0} findings_dropped_stale=${FINDINGS_DROPPED_STALE:-0} findings_preexisting=${FINDINGS_PREEXISTING:-0} notes_demoted_no_scenario=${NOTES_DEMOTED_NO_SCENARIO:-0} lineage=${FINDING_LINEAGE} classifier=${CLASSIFIER_MODE} -->
 $(cat "$NOTE_LIST_FILE" 2>/dev/null)" # allowlist:check-command-side-effects
 ```
 
@@ -1944,6 +2209,7 @@ gh label create "review-finding" --color "D93F0B" --description "Defect or impro
 gh label create "needs-validation" --color "FBCA04" --description "Review finding awaiting human validation. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
 gh label create "validated" --color "0E8A16" --description "Review finding confirmed as a real issue. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
 gh label create "false-positive" --color "CCCCCC" --description "Review finding dismissed as a false positive. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+gh label create "pre-existing" --color "BFD4F2" --description "Defect noticed during PR review that the PR did not introduce. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
 ```
 
 **Milestone detection:**
@@ -2048,6 +2314,73 @@ fi
 - Open `review-finding` issue at same file within ±5 lines → **skip** (do not create duplicate)
 - Open `review-finding` issue at same file with similar title (3+ shared keywords) → **skip** (likely same finding despite line drift)
 - Closed `review-finding` at same file within ±5 lines → create with regression warning, elevate to `priority:P1`
+
+**Pattern recurrence check (MANDATORY before creating, after the dedup above):** <!-- Added: forge#3449 -->
+
+Title and line-range dedup is instance-keyed, so the same defect class re-filed in a sibling file slips through and fix chains grow. Key recurrence on the `FORGE:PATTERN` slug plus subsystem. **Subsystem** = the directory of the finding's primary file, truncated to its first two segments (`commands/work-on/build/x.md` -> `commands/work-on`; `commands/review-pr.md` -> `commands`). A file at the repo root has no subsystem and skips the check. This step runs only for findings that survived the note-disposition classifier above, so it never re-admits a finding the cascade damper already suppressed.
+
+**Exemptions are decided FIRST, before any lookup or consolidation.** A finding is never consolidated away, and skips this check entirely (file it as a normal instance issue), when ANY of these hold: category `Security`, a REGRESSION (closed-issue match above), severity `HIGH` or `CRITICAL`, or priority `P0`/`P1`. Consolidation exists to damp repeated low-severity noise; it must never lower the `review-finding` counts the Phase 6 cascade damper and breaker read for severe findings.
+
+```bash
+REPO="{GH_REPO}"                     # placeholder, not an env var: review-pr never exports GH_REPO
+PATTERN_SLUG="pattern-slug"          # the finding's FORGE:PATTERN value
+PRIMARY_FILE="path/to/file.py"       # the finding's primary file
+FINDING_EXEMPT="false"               # set true for Security / REGRESSION / HIGH / CRITICAL / P0 / P1
+CONSOLIDATE="false"; PRIOR_NUMS=""; SUBSYSTEM=""
+# Slug and path are model-written text: validate before any shell or jq use.
+# A bash pattern test (not per-line grep) so a multi-line value cannot pass on one valid line.
+if [ "$FINDING_EXEMPT" = "true" ]; then
+  echo "RECURRENCE: exempt (severity/category/regression) - filing normally"
+elif [ -z "$REPO" ]; then
+  echo "RECURRENCE: skipped - repo not resolved, filing normally"
+elif ! [[ "$PATTERN_SLUG" =~ ^[a-z0-9-]+$ ]]; then
+  echo "RECURRENCE: skipped - invalid slug, filing normally"
+else
+  SUBSYSTEM=$(dirname -- "$PRIMARY_FILE" | cut -d/ -f1-2)
+  if [ "$SUBSYSTEM" = "." ] || ! [[ "$SUBSYSTEM" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+    echo "RECURRENCE: skipped - no valid subsystem, filing normally"
+  else
+    SELF="${MERGE_ISSUE:-0}"; [[ "$SELF" =~ ^[0-9]+$ ]] || SELF=0
+    # Narrow server-side by the exact slug tag (the slug is validated, so safe in --search), then
+    # filter in jq. Excludes class issues, false-positive findings and issues closed as not planned.
+    PRIOR=$(gh issue list -R "$REPO" --state all --label review-finding --limit 200 \
+      --search "FORGE:PATTERN: ${PATTERN_SLUG} in:body" \
+      --json number,body,labels,stateReason 2>/dev/null) || PRIOR="__LOOKUP_FAILED__"
+    if [ "$PRIOR" = "__LOOKUP_FAILED__" ]; then
+      # Fail closed on lookup errors: file the finding normally, never drop it.
+      echo "RECURRENCE: lookup failed - filing as a normal instance issue"
+    else
+      [ "$(printf '%s' "$PRIOR" | jq 'length')" -ge 200 ] && echo "RECURRENCE: WARNING lookup hit the 200-result cap, older priors may be missed"
+      PRIOR_NUMS=$(printf '%s' "$PRIOR" | jq -r --arg slug "$PATTERN_SLUG" --arg sub "$SUBSYSTEM" --argjson self "$SELF" '
+        ($sub | gsub("\\."; "\\.")) as $esc
+        | [.[] | select(.number != $self)
+               | select(.stateReason != "NOT_PLANNED")
+               | select((.labels | map(.name)) as $l | (($l | index("pattern-class")) or ($l | index("false-positive"))) | not)
+               | select(.body | contains("<!-- FORGE:PATTERN: " + $slug + " -->"))
+               | select(.body | test("(^|[^A-Za-z0-9._-])" + $esc + "/"))
+               | .number] | join(" ")')
+      if [ -n "$PRIOR_NUMS" ]; then
+        CONSOLIDATE="true"
+        echo "RECURRENCE: $PATTERN_SLUG seen before in $SUBSYSTEM (#${PRIOR_NUMS// /, #}) - consolidating"
+      fi
+    fi
+  fi
+fi
+```
+
+Each bash call is a fresh shell. Run the consolidation commands below in the SAME call as the block above, or re-declare `REPO`, `PATTERN_SLUG`, `SUBSYSTEM`, `PRIOR_NUMS` and `CONSOLIDATE` first. When `CONSOLIDATE=true` (this is the 2nd or later occurrence), consolidate instead of filing another instance issue. `CLASS_DONE` stays `false` unless every step below succeeds:
+
+```bash
+CLASS_DONE="false"; CLASS_MARKER="<!-- FORGE:PATTERN-CLASS: ${PATTERN_SLUG} ${SUBSYSTEM} -->"
+find_class() { gh issue list -R "$REPO" --state open --label pattern-class --limit 100 --json number,body 2>/dev/null \
+  | jq -r --arg m "$CLASS_MARKER" '[.[] | select(.body | contains($m)) | .number] | sort | .[0] // empty'; }
+CLASS_NUM=$(find_class) || CLASS_NUM="__LOOKUP_FAILED__"      # lookup error: stop consolidating, file normally
+```
+
+1. If the lookup failed, stop consolidating and file normally (fail closed). Otherwise, if `CLASS_NUM` is set, add one comment to that issue listing this finding (file, line, PR), unless a comment already contains the marker `<!-- FORGE:PATTERN-CLASS-ITEM: PR #${PR_NUMBER} ${PRIMARY_FILE}:${LINE} -->` (check it with `jq --arg` and an exact `contains`, so `PR #12` never matches `PR #123`). Set `CLASS_DONE=true` on success.
+2. If `CLASS_NUM` is empty, ensure the label exists (`gh label create pattern-class -R "$REPO" --color ededed --description "Class-level consolidation of a recurring finding pattern" --force`), re-run `find_class` immediately before creating (tie-break for parallel reviewers: if more than one class issue exists, the lowest number wins and a duplicate you created is closed as a duplicate of it), then create ONE class-level issue through the `/issue` programmatic invocation contract (same as the per-finding path below), titled `fix: class-wide ${PATTERN_SLUG} in ${SUBSYSTEM}`. Its body MUST carry BOTH `${CLASS_MARKER}` and `<!-- FORGE:PATTERN: ${PATTERN_SLUG} -->`, the Prevention text, and links to every prior instance and this finding. Labels: `review-finding`, `pattern-class`, plus the highest priority among the linked issues. The `FORGE:PATTERN` tag plus `review-finding` label are what make investigate step 7.6 sweep it, and they keep it counted by pipeline-health Phase 4A (two instances plus the class issue reach its 3-distinct-issue threshold). The fix for it must follow the investigate Pattern Sweep. Set `CLASS_DONE=true` only if the create returned an issue number.
+3. Only when `CLASS_DONE=true`: comment on this PR with the class-level issue link (marker `<!-- FORGE:PATTERN-CLASS-LINK: ${PATTERN_SLUG} ${SUBSYSTEM} PR #${PR_NUMBER} -->`; skip if a PR comment already has it) and skip creating the instance issue. **If class create or comment failed for any reason, do NOT skip the instance issue: file it normally** so the finding is never lost.
+4. Consolidation links findings; it does not drop them. A finding that is exempt (see above) is filed as normal and may add the class-level link to its body.
 
 **For each finding** (that passes dedup), create issue through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") — this preserves the bespoke line-range/title dedup above as a precise pre-check, while `/issue`'s own Phase 2D dedup runs as a coarser second pass:
 ```bash
@@ -2295,22 +2628,38 @@ Verdict determined by standard blocking criteria.
 
 **Blocking criteria** — a finding is BLOCKING if ANY of the following are true:
 1. Phase 2 automated checks failed (build error, type error, test failure)
-2. Agent finding is CONFIRMED at HIGH or CRITICAL severity
+2. Agent finding is CONFIRMED at HIGH or CRITICAL severity and survived §6B.4 (a finding dropped as stale never blocks this PR; CRITICAL/HIGH findings are never routed as `pre-existing`, so the introduced-line gate cannot demote them, and a MEDIUM or lower finding routed as `pre-existing` never blocks)
 3. **[Milestone PRs only]** Phase 7A Purpose Regression Gate flagged `HAS_PURPOSE_REGRESSION=true` for this finding — regardless of whether it causes a runtime error
-4. `MERGE_HEALTH == "CONFLICTING"` OR `MERGE_HEALTH_STATE` in {`DIRTY`, `BLOCKED`} — PR cannot be merged cleanly into its base branch <!-- Added: forge#194 -->
-   - Verdict: CHANGES REQUESTED. Message: "Merge conflict with `{base}`. Rebase `{head}` onto `origin/{base}`, resolve the conflicting files, then re-run /review-pr."
+4. **Base conflict** — `BASE_CONFLICT=true` (computed in the block below): `MERGE_HEALTH == "CONFLICTING"`, OR `MERGE_HEALTH_STATE == "DIRTY"`, OR `MERGE_HEALTH_STATE == "BEHIND"` while the base branch requires up-to-date branches — PR cannot be merged cleanly into its base branch <!-- Added: forge#194, forge#3496 -->
+   - Verdict: CHANGES REQUESTED. Message: "Base conflict with `{base}`. Merge `origin/{base}` into `{head}` (merge only; no rebase, no force-push), resolve the conflicting files by reading both sides, then re-run /review-pr."
+   - A merely-`BEHIND` branch on a base that does NOT require up-to-date branches is not a conflict and needs no sync: GitHub merges it fine.
+   - `MERGE_HEALTH_STATE == "BLOCKED"` alone (branch protection not satisfied: missing required review or check) is NOT a base conflict: syncing the base cannot clear it. Emit a WARNING line in the verdict body and leave `HAS_MERGE_CONFLICT=false`; the Phase 8 pre-merge guard handles it as a protection abort.
    - If `MERGE_HEALTH == "UNKNOWN"` after retries: emit a WARNING in the verdict body (do NOT treat as a block — GitHub may still be computing it).
 5. A CONFIRMED coverage reduction (deleted test, removed test case, or disabled/removed workflow test step) in a PR that responds to a red check, or that has no justification tying it to removal of the tested code <!-- Added: forge#3257 -->
    - Verdict: CHANGES REQUESTED. Message: "Coverage reduction: a deleted test or removed workflow test step is not a fix for a red check. Restore it and fix the code under test, or escalate naming the failing assertions." Detection follows quality-gate 2U (`COVERAGE-1`); never dedup this finding against the PR's own issue.
 
 ```bash
 # Determine if mergeability is a blocker (MERGE_HEALTH/MERGE_HEALTH_STATE set in Phase 1A; BASE/HEAD set in Phase 0 Mode 3)
+# BASE_CONFLICT is the single source of truth for "a base sync would fix this"; the Phase 8 guards read it. <!-- Added: forge#3496 -->
 HAS_MERGE_CONFLICT=false
+BASE_CONFLICT=false
 MERGE_CONFLICT_MSG=""
-if [ "$MERGE_HEALTH" = "CONFLICTING" ] || [ "$MERGE_HEALTH_STATE" = "DIRTY" ] || [ "$MERGE_HEALTH_STATE" = "BLOCKED" ]; then
-    HAS_MERGE_CONFLICT=true
-    MERGE_CONFLICT_MSG="Merge conflict with \`${BASE}\`. Rebase \`${HEAD}\` onto \`origin/${BASE}\`, resolve the conflicting files, then re-run /review-pr."
+MERGE_PROTECTION_WARNING=""
+BASE_REQUIRES_UPTODATE=false
+if [ "$MERGE_HEALTH_STATE" = "BEHIND" ]; then
+    # Unreadable protection (404 / 403 / no admin access) is treated as "not required": no sync, and a later failed merge lands in the existing needs-human path.
+    [ "$(gh api "repos/${REPO}/branches/${BASE}/protection" --jq '.required_status_checks.strict // false' 2>/dev/null)" = "true" ] && BASE_REQUIRES_UPTODATE=true
 fi
+if [ "$MERGE_HEALTH" = "CONFLICTING" ] || [ "$MERGE_HEALTH_STATE" = "DIRTY" ] || { [ "$MERGE_HEALTH_STATE" = "BEHIND" ] && [ "$BASE_REQUIRES_UPTODATE" = "true" ]; }; then
+    HAS_MERGE_CONFLICT=true
+    BASE_CONFLICT=true
+    MERGE_CONFLICT_MSG="Base conflict with \`${BASE}\`. Merge \`origin/${BASE}\` into \`${HEAD}\` (merge only, no rebase, no force-push), resolve the conflicting files by reading both sides, then re-run /review-pr."
+elif [ "$MERGE_HEALTH_STATE" = "BLOCKED" ]; then
+    MERGE_PROTECTION_WARNING="Merge state is BLOCKED: branch protection is not satisfied (required review or check). Syncing the base cannot clear this."
+fi
+
+# ONLY_BASE_CONFLICT is NOT computed here: CALIBRATION_NEEDS_HUMAN is only set later (Phase 7B.5) and TRUST_NEEDS_HUMAN in Phase 3B.5,
+# so it is evaluated at the top of the Phase 8 guard, after every human gate has been set. <!-- forge#3496 -->
 
 # Resolve attribution footer (forge.yaml → attribution.pr_footer)
 ATTRIBUTION_PR_FOOTER=$(grep -A5 "^attribution:" forge.yaml 2>/dev/null | grep "pr_footer:" | awk '{print $(2)}' | tr -d '"' || echo "false")
@@ -2338,7 +2687,9 @@ $([ "$MERGE_HEALTH" = "UNKNOWN" ] && echo "
 gh pr review "$PR_NUMBER" -R "$REPO" --comment --body "CHANGES REQUESTED: commit $REVIEW_SHA_SHORT — [N] blocking issues found. See GitHub issues.
 ${TRUST_ANNOTATION}
 $([ "$HAS_MERGE_CONFLICT" = "true" ] && echo "
-🔴 Merge Conflict: ${MERGE_CONFLICT_MSG}")
+🔴 Base Conflict: ${MERGE_CONFLICT_MSG}")
+$([ -n "$MERGE_PROTECTION_WARNING" ] && echo "
+⚠ ${MERGE_PROTECTION_WARNING}")
 $([ "$HAS_PURPOSE_REGRESSION" = "true" ] && echo "
 ⚠ Purpose Regression: [N] finding(s) contradict the milestone's stated goal and are automatically blocking regardless of runtime impact. See: ${PURPOSE_REGRESSION_FINDINGS[@]}")${ATTRIBUTION_FOOTER_LINE}"
 ```
@@ -2447,11 +2798,16 @@ fi
 FINDING_COUNT=$(printf '%s' "$DISPO_JSON" | jq -s '[.[][] | select(.body | test("<!-- FINDING:"))] | length')
 # Trust predicate: ONE shared copy (scripts/trusted-comments.sh, same as verify-phase-trail.sh): trusted association, Bot account, or
 # FORGE_TRAIL_TRUSTED_LOGINS. A GitHub App bot always has author_association NONE, so an association-only filter drops the pipeline's own markers.
+# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
 _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-TRUSTED_SCRIPT=""
-for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock"; do
-  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
 done
+TRUSTED_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done <<< "$_tc"
 if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$FINDING_COUNT" ]; then
   echo "NOTE DISPOSITION: scripts/trusted-comments.sh unresolvable or findings unreadable — refusing to merge (fail closed)" >&2
   # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "note disposition unreadable".
@@ -2595,7 +2951,19 @@ If the preflight failed, skip the rest of Phase 8. On exit code 1, return `REVIE
 # These vars are set in Phase 7A/7B/7B.5/3B.5 earlier in the same agent session.
 # An unset/empty VERDICT is safe — it evaluates to "" which does not equal "CHANGES REQUESTED".
 # TRUST_NEEDS_HUMAN: set to true by Phase 3B.5 when INTENSITY_TIER=NOVEL_NEEDS_HUMAN AND shadow mode is off.
-if [ "$VERDICT" = "CHANGES REQUESTED" ] || [ "$HAS_PURPOSE_REGRESSION" = "true" ] || [ "$CALIBRATION_NEEDS_HUMAN" = "true" ] || [ "${TRUST_NEEDS_HUMAN:-false}" = "true" ]; then
+# ONLY_BASE_CONFLICT: the base conflict is the ONLY reason the verdict is CHANGES REQUESTED. Computed HERE (after Phase 7B.5 and 3B.5) so the
+# calibration and trust human gates are already set and can never be skipped for a base-conflict PR. <!-- forge#3496 -->
+# Set OTHER_BLOCKING=true when ANY other blocking criterion (1, 2, 3 or 5 in Phase 7B) fired for this PR. When true, route to needs-human below.
+ONLY_BASE_CONFLICT=false
+if [ "${BASE_CONFLICT:-false}" = "true" ] && [ "${OTHER_BLOCKING:-false}" != "true" ] && [ "${HAS_PURPOSE_REGRESSION:-false}" != "true" ] && [ "${CALIBRATION_NEEDS_HUMAN:-false}" != "true" ] && [ "${TRUST_NEEDS_HUMAN:-false}" != "true" ]; then
+    ONLY_BASE_CONFLICT=true
+fi
+if [ "${ONLY_BASE_CONFLICT:-false}" = "true" ] && [ "$VERDICT" = "CHANGES REQUESTED" ]; then
+    # Pure base conflict (set in Phase 7B: the ONLY blocker): route to the base-sync path, NOT needs-human. <!-- Added: forge#3496 -->
+    # work-on/review.md R4 sets workflow:remediating (not needs-human) when it hands off to remediate; a standalone /review-pr caller just sees the blocker.
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: base conflict with \`{MERGE_BASE}\` (the only blocking reason). No operator action is needed: the pipeline is performing the base sync automatically (merging \`origin/{MERGE_BASE}\` into the PR branch, merge only, no rebase, no force-push), re-running the quality gate, then re-reviewing the new head. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
+    # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "base-conflict". Do NOT add needs-human and do NOT attempt gh pr merge.
+elif [ "$VERDICT" = "CHANGES REQUESTED" ] || [ "$HAS_PURPOSE_REGRESSION" = "true" ] || [ "$CALIBRATION_NEEDS_HUMAN" = "true" ] || [ "${TRUST_NEEDS_HUMAN:-false}" = "true" ]; then
     BLOCK_REASON=""
     [ "$VERDICT" = "CHANGES REQUESTED" ] && BLOCK_REASON="review verdict is CHANGES REQUESTED (blocking finding confirmed by Phase 7B)"
     [ "$HAS_PURPOSE_REGRESSION" = "true" ] && BLOCK_REASON="${BLOCK_REASON:+${BLOCK_REASON}; }purpose regression detected by Phase 7A (\`HAS_PURPOSE_REGRESSION=true\`)"
@@ -2613,10 +2981,23 @@ PRE_MERGE_RESULT=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json mergeable,merge
 PRE_MERGE_HEALTH=${PRE_MERGE_RESULT%%|*}
 PRE_MERGE_HEALTH_STATE=${PRE_MERGE_RESULT##*|}
 
-if [ "$PRE_MERGE_HEALTH" = "CONFLICTING" ] || [ "$PRE_MERGE_HEALTH_STATE" = "DIRTY" ] || [ "$PRE_MERGE_HEALTH_STATE" = "BLOCKED" ]; then
-    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: PR is not mergeable (\`mergeable=${PRE_MERGE_HEALTH}\`, \`mergeStateStatus=${PRE_MERGE_HEALTH_STATE}\`). Rebase the branch onto \`{MERGE_BASE}\` and resolve conflicts, then re-run /review-pr."
+PRE_MERGE_BASE_CONFLICT=false
+if [ "$PRE_MERGE_HEALTH" = "CONFLICTING" ] || [ "$PRE_MERGE_HEALTH_STATE" = "DIRTY" ]; then
+    PRE_MERGE_BASE_CONFLICT=true
+elif [ "$PRE_MERGE_HEALTH_STATE" = "BEHIND" ]; then
+    # BEHIND is a conflict only under required-up-to-date protection; unreadable protection counts as "not required". <!-- Added: forge#3496 -->
+    [ "$(gh api "repos/${REPO}/branches/{MERGE_BASE}/protection" --jq '.required_status_checks.strict // false' 2>/dev/null)" = "true" ] && PRE_MERGE_BASE_CONFLICT=true
+fi
+
+if [ "$PRE_MERGE_BASE_CONFLICT" = "true" ]; then
+    # Base moved during review: route to the base-sync path, NOT needs-human. <!-- Added: forge#3496 -->
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: base conflict (\`mergeable=${PRE_MERGE_HEALTH}\`, \`mergeStateStatus=${PRE_MERGE_HEALTH_STATE}\`). No operator action is needed: the pipeline is performing the base sync automatically (merging \`origin/{MERGE_BASE}\` into the PR branch, merge only, no rebase, no force-push) and then re-reviewing. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
+    # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "base-conflict". Do NOT add needs-human and do NOT attempt gh pr merge.
+elif [ "$PRE_MERGE_HEALTH_STATE" = "BLOCKED" ]; then
+    # Branch protection not satisfied: syncing the base cannot clear it, so this is NOT a base-conflict blocker.
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: branch protection is not satisfied (\`mergeStateStatus=BLOCKED\`); syncing the base cannot clear it. Satisfy the required review/checks, then re-run /review-pr."
     gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true
-    # STOP — do not attempt gh pr merge on a CONFLICTING/DIRTY PR
+    # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "branch protection not satisfied" (never "base-conflict")
 else
 
 # Previously-escalated re-review guard <!-- Added: forge#1810; base-scoped: forge#2570 -->
@@ -2637,7 +3018,7 @@ else
 #     bot-only re-review (authorAssociation=NONE) could never satisfy the strict ≥2 verified-
 #     human bar and so stranded staging PRs the fast lane would auto-merge.
 PREVIOUSLY_ESCALATED=$(gh issue view {MERGE_ISSUE} {MERGE_GH_FLAG} --json labels,comments \
-  --jq '([.labels[].name | . == "needs-human"] + [.comments[].body | contains("FORGE:REMEDIATION")]) | any' 2>/dev/null || echo "false")
+  --jq '([.labels[].name | . == "needs-human" or . == "workflow:remediating"] + [.comments[].body | contains("FORGE:REMEDIATION")]) | any' 2>/dev/null || echo "false")
 GUARD_BASE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
 
 if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
@@ -2661,7 +3042,7 @@ if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
       adaptive|universal) bash "$SCRIPT_PATH" {MERGE_ISSUE} {MERGE_GH_FLAG} awaiting-merge ;;
       prose)
         gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "workflow:awaiting-merge" \
-          --remove-label "needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
+          --remove-label "needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
         ;;
     esac
     # STOP — do not attempt gh pr merge here. The merge decision belongs to a human for a
@@ -2896,8 +3277,23 @@ fi
 A degraded run that skipped Task-based agent dispatch must be visible from this summary alone, without interrogating the agent afterward. Compute the actual launched-agent count from the `<!-- FORGE:REVIEW-AGENT:{domain} -->` comments each agent is required to post (Phase 3C), rather than trusting a free-text tally:
 
 ```bash
-ACTUAL_AGENT_DOMAINS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-    --jq '[.[].body | scan("<!-- FORGE:REVIEW-AGENT:([a-z-]+) -->") | .[0]] | unique | join(", ")' 2>/dev/null || echo "")
+# Same trust rule as Phase 3C/4: only trusted comments whose body starts with the marker count.
+# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+done
+TRUSTED_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done <<< "$_tc"
+ACTUAL_AGENT_DOMAINS=""
+if [ -n "$TRUSTED_SCRIPT" ]; then
+  ACTUAL_AGENT_DOMAINS=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
+    | bash "$TRUSTED_SCRIPT" bodies "^<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->" 2>/dev/null \
+    | jq -rs '[.[] | scan("^<!-- FORGE:REVIEW-AGENT:([a-z-]+) -->") | .[0]] | unique | join(", ")' 2>/dev/null || echo "")   # unresolvable => empty => count 0 (degraded, fail closed)
+fi
 # NOTE: no `|| echo 0` fallback here — grep -c always prints a count (including 0 on
 # no match) even though it exits 1 in that case. Appending `|| echo 0` after a `grep -c`
 # pipeline double-counts: the pipeline already printed "0", then the fallback prints a

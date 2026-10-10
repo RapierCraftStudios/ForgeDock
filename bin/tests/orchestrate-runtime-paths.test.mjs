@@ -46,10 +46,11 @@ describe("orchestrate runtime helper paths", () => {
     }
   });
 
-  it("resolves affected-file extraction from ForgeDock before the target repo", () => {
+  it("resolves affected-file extraction from trusted ForgeDock installs only", () => {
     assert.match(phase3, /resolve_extract_affected_files\(\)/);
-    assert.match(phase3, /\$FORGE_HOME\/scripts\/extract-affected-files\.sh/);
-    assert.match(phase3, /\$REPO_PATH\/scripts\/extract-affected-files\.sh/);
+    assert.match(phase3, /"\$\{FORGE_HOME:-\}"/);
+    assert.doesNotMatch(phase3, /\$REPO_PATH\/scripts\/extract-affected-files\.sh/);
+    assert.doesNotMatch(phase3, /\$PWD\/scripts\/extract-affected-files\.sh/);
     assert.match(phase3, /AFFECTED_FILES_SCRIPT=\$\(resolve_extract_affected_files\)/);
     assert.match(phase3, /bash "\$AFFECTED_FILES_SCRIPT"/);
     assert.match(phase3, /FILE_SOURCE\[\$NUM\].*=.*error/);

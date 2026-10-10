@@ -76,3 +76,25 @@ hours (13, 25, 99) into a plausible-but-wrong value instead of returning
 `undefined` — any future edit to this parser must bounds-check the raw hour
 (1-12) BEFORE the `% 12` conversion, mirroring the existing `minute > 59`
 guard. Cite: #2524, PR #2555, #2560.
+
+## Entry 2026-10-10 — fix(engine): session-limit reset parsing and engine-error resume (#3511)
+
+`extractSessionLimitResetTime()` now reads the `result` text of a
+`--output-format json` envelope (falling back to plain text whose capture stops
+at the zone's `)` or a quote, so trailing JSON is never swallowed), and
+`parseSessionLimitResetEpochMs()` accepts `3pm`, `3:00pm` and 24-hour `15:00`
+(hour 0-23 and minutes required without am/pm). New `detectUsageLimit()` sets
+`err.usageLimit` on CLI_BACKEND_FAILED from `api_error: usage_limit_reached`,
+`api_error_status: 429` or limit text; stdout is parsed ALONE (#2422). The
+runner never fabricates a reset epoch — the bounded default wait lives in
+`bin/engine.mjs`. Cite: #3511.
+
+## Entry 2026-10-10 — fix(runner): narrow detectUsageLimit (#3523)
+
+Corrects the #3511 entry: a bare `api_error_status` 429 and keyword-only limit
+text no longer set `err.usageLimit`. It is set only for `api_error:
+usage_limit_reached`, or a full `limit ... resets ...` clause in an `is_error`
+envelope `result` or in plain output (shared `hasUsageLimitResetClause`, bounded
+windows per #3522). A limit with neither signal is an ordinary failure.
+`runCliBackend` attaches `resetAt`/`resetAtEpochMs` only when the same predicate
+holds, since the engine pauses on the epoch alone. Cite: #3523.

@@ -50,6 +50,7 @@ If you have both a local `claude` CLI and `ANTHROPIC_API_KEY` set and want to pi
 | [`project_board`](#project_board-optional) | No | GitHub Projects v2 integration |
 | [`orchestration`](#orchestration-optional) | No | `/orchestrate` concurrency and cascade admission policy |
 | [`pipeline`](#pipeline-optional) | No | `/orchestrate` batch-engine tuning (stall detection, token budget, narration) |
+| [`build`](#build-optional) | No | `/work-on` build-phase diff-size gate (threshold, exclusion globs) |
 | [`services`](#services-optional) | No | External service URLs and IDs |
 | [`review`](#review-optional) | No | Context injected into review agents |
 | [`devdocs`](#devdocs-optional) | No | Devdocs knowledge tree path |
@@ -453,6 +454,64 @@ pipeline:
 | `narration` | string | No | `terse` \| `verbose`. Default: `terse` |
 
 **Commands that use this section**: CLI backend (`cli_timeout_minutes`); `orchestrate` (remaining keys)
+
+---
+
+## `engine` (OPTIONAL)
+
+Per-command `--model` and `--max-turns` for the CLI backend (`forgedock run-issue` phases and `forgedock run <command>`). Opt-in: with no keys set, the `claude` invocation is unchanged and uses the CLI's own default model with no turn bound. `forge.yaml` is parsed one level deep, so settings are **flat** keys under `engine:`, named `<key>_model` and `<key>_max_turns`, where `<key>` is the command name with every non-alphanumeric character replaced by `_`.
+
+```yaml
+engine:
+  # work-on/review -> work_on_review (the review phase is the most expensive).
+  work_on_review_model: sonnet
+  work_on_review_max_turns: 120
+
+  # review-pr-staging -> review_pr_staging (non-work-on commands work the same way).
+  review_pr_staging_max_turns: 80
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `<key>_model` | string | No | Model alias (`sonnet`, `opus`, `haiku`) or full model id passed as `--model`. Invalid values are ignored. |
+| `<key>_max_turns` | integer | No | Positive integer passed as `--max-turns`. Invalid values are ignored. |
+
+**Precedence** (model): `engine.<key>_model`, then the run-level model the caller passed explicitly, then omitted. `max_turns` comes only from this section. No defaults ship.
+
+**Version gate**: the flags are added only when the installed `claude --version` supports them (`--max-turns` is hidden from `claude --help`, so help text is never scraped); an unparseable version omits both flags.
+
+**Turn exhaustion**: when `--max-turns` is exhausted the run ends `engine-error` (detail `max-turns`) and the phase is never committed, so `forgedock run-issue --retry` re-enters the same phase. Raise `<key>_max_turns` before retrying. Phase runlog events record `model` and `turns` next to `usage` so a limit can be sized from measured turn counts.
+
+**Commands that use this section**: CLI backend (`runCommand` in `bin/runner.mjs`)
+
+---
+
+## `build` (OPTIONAL)
+
+Tuning for the `/work-on` build phase. Today it holds the diff-size gate: after the implement phase stages its changes and before validation commits them, the build measures the changed lines (added plus deleted) of the index and any earlier commits against `origin/{base}`, using `scripts/diff-size.sh`. Review findings per PR rise steeply with diff size, so an oversized build is split before it is validated.
+
+```yaml
+build:
+  diff_size:
+    # Changed-line ceiling. Default: 1000. 0 disables the gate.
+    threshold: 1000
+
+    # Extra exclusion globs, ADDITIVE to the built-in defaults below.
+    exclude_globs:
+      - "docs/api/*"
+      - "*.pb.go"
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `diff_size.threshold` | integer | No | Changed lines allowed before the gate trips. Default: 1000. `0` disables the gate |
+| `diff_size.exclude_globs` | list of strings | No | Globs excluded from the measurement, in addition to the built-in defaults. Default: `[]` |
+
+**Built-in default exclusions** (always applied, defined once in `scripts/diff-size.sh`): lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `poetry.lock`, `uv.lock`, `go.sum`, `Gemfile.lock`, `composer.lock`), `*.min.*`, `*.snap`, and the directories `dist/`, `build/`, `generated/`, `fixtures/`, `vendor/` (anchored to the repo root, so first-party directories such as `commands/work-on/build/` are counted) plus `__generated__/` and `__snapshots__/` (any depth). The diff is measured against the merge base of `HEAD` and `origin/<base>`, so commits that landed on the base after the branch point are not counted. A configured glob ending in `/` matches that directory at any depth; any other glob is matched against the file basename and the full path. Globs are treated as data, never evaluated.
+
+**Over the threshold**: the build posts a `FORGE:DIFF_SIZE` comment with a split proposal and exits `BUILD_RESULT: status: NEEDS_DECOMPOSE`; the router then runs `work-on:decompose`. To build the oversized diff anyway, post a `FORGE:SIZE_OVERRIDE` comment whose body has a non-empty justification on the line after the marker (only comments from trusted authors count). An issue that is already a decomposed child, or that already has `FORGE:DECOMPOSED`, is not decomposed again: the build blocks until an override is posted. The measured `diff_lines` is recorded in the `FORGE:TRAJECTORY` comment.
+
+**Commands that use this section**: `work-on` (build phase B5.5, `decompose`, `close`)
 
 ---
 

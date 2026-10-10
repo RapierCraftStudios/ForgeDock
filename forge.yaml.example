@@ -10,7 +10,7 @@
 #   # Add forge.yaml to your .gitignore if it contains sensitive paths
 #
 # Required sections: project, paths, branches
-# Optional sections: agents, repos, project_board, orchestration, pipeline, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
+# Optional sections: agents, repos, project_board, orchestration, pipeline, build, services, review, verification, deploy, billing, devdocs, adaptive_scripts, learned, attribution
 
 # =============================================================================
 # PROJECT (REQUIRED)
@@ -257,6 +257,19 @@ branches:
 #       label: "MCP Server"
 
 # =============================================================================
+# ENGINE (OPTIONAL)
+# Per-command --model / --max-turns for the CLI backend. Flat keys:
+# <command with non-alphanumerics replaced by _>_model / _max_turns.
+# Opt-in; nothing is forwarded unless set. See docs/CONFIG.md -> `engine`.
+# Commands: run-issue, run
+# =============================================================================
+
+# engine:
+#   work_on_review_model: sonnet
+#   work_on_review_max_turns: 120
+#   review_pr_staging_max_turns: 80
+
+# =============================================================================
 # ORCHESTRATION (OPTIONAL)
 # Concurrency limits and cascade admission policy for the /orchestrate batch
 # engine. `max_concurrent` already existed at runtime but was undocumented
@@ -366,6 +379,28 @@ branches:
 #   # Results, Review-Spawned Issues, Batch Trajectory Analytics — full tables)
 #   # always renders in full exactly once at the end, regardless of this value.
 #   narration: "terse"
+
+# =============================================================================
+# BUILD (OPTIONAL)
+# Build-phase diff-size gate (forge#3450). After implement stages its changes,
+# /work-on build measures the changed lines (added + deleted) against the PR
+# base. Over the threshold, the build routes to /work-on decompose, or proceeds
+# when a justified FORGE:SIZE_OVERRIDE comment is on the issue.
+# Read via `yq '.build.diff_size.threshold // 1000'`.
+# Commands: work-on (build phase B5.5), work-on close (records diff_lines)
+# =============================================================================
+
+# build:
+#   diff_size:
+#     # Changed-line ceiling. Default: 1000. 0 disables the gate.
+#     threshold: 1000
+#     # ADDITIVE to the built-in defaults (lockfiles, *.min.*, *.snap, dist/,
+#     # build/, generated/, __generated__/, fixtures/, __snapshots__/, vendor/).
+#     # A glob ending in "/" matches that directory at any depth; any other glob
+#     # is matched against the file basename and the full path.
+#     exclude_globs:
+#       - "docs/api/*"
+#       - "*.pb.go"
 
 # =============================================================================
 # SERVICES (OPTIONAL)

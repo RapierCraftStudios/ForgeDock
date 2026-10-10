@@ -967,6 +967,23 @@ exceeds the field; pad shorter lines with spaces so the right border `║` stays
 
 ### C4.5c: Build the machine-readable twin
 
+First read the build's diff size (forge#3450). `FORGE:DIFF_SIZE` is posted by `work-on:build` B5.5; use the latest TRUSTED one (anchored, through `scripts/trusted-comments.sh`; the Script resolution block applies). Absent data, or any lookup failure, renders `—` and is never `0`:
+
+```bash
+# <Script resolution block, verbatim>
+DIFF_LINES="—"; DIFF_THRESHOLD="—"; SIZE_OVERRIDE_USED="no"
+TRUSTED_SCRIPT="${UNIVERSAL_DIR:+$UNIVERSAL_DIR/trusted-comments.sh}"
+if [ -n "$TRUSTED_SCRIPT" ] && [ -f "$TRUSTED_SCRIPT" ]; then
+  _ds=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" 2>/dev/null \
+    | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:DIFF_SIZE' 2>/dev/null | tail -n 1 | jq -r 'select(type == "string")' 2>/dev/null) || _ds=""
+  _n=$(printf '%s\n' "$_ds" | sed -n 's/^diff_lines: *\([0-9][0-9]*\).*/\1/p' | head -n 1)
+  _t=$(printf '%s\n' "$_ds" | sed -n 's/^threshold: *\([0-9][0-9]*\).*/\1/p' | head -n 1)
+  [ -n "$_n" ] && DIFF_LINES="$_n"
+  [ -n "$_t" ] && DIFF_THRESHOLD="$_t"
+  printf '%s\n' "$_ds" | grep -q '^result: *OVERRIDDEN' && SIZE_OVERRIDE_USED="yes"
+fi
+```
+
 Assemble the JSON object below. Its field set is exactly what Phase C5 passes to the codec `emit CARD --b64` call (including `title` and `blockers`); the JSON itself is for local use/debugging and is not embedded. Numeric stats that were `—`
 become `null` in JSON; never emit `"—"` as a number.
 
@@ -981,12 +998,14 @@ CARD_JSON=$(jq -nc \
   --arg commits "$COMMITS" --arg adds "$ADDITIONS" --arg dels "$DELETIONS" \
   --arg review "$REVIEW_SUMMARY" --argjson blockers "${BLOCKERS:-0}" \
   --argjson elapsed "${ELAPSED_SECS:-0}" \
+  --arg diff_lines "$DIFF_LINES" \
   '{issue:$issue, title:$title, status:$status, pipeline:$pipeline,
     pr:($pr|tonumber? // null), pr_target:$target,
     commits:($commits|tonumber? // null),
     additions:($adds|tonumber? // null),
     deletions:($dels|tonumber? // null),
-    review:$review, blockers:$blockers, elapsed_seconds:$elapsed}')
+    review:$review, blockers:$blockers, elapsed_seconds:$elapsed,
+    diff_lines:($diff_lines|tonumber? // null)}')
 ```
 
 ---
@@ -1135,7 +1154,8 @@ if [ -n "$CODEC_CLI" ]; then
     --field deletions="${DELETIONS}" \
     --field review="${REVIEW_SUMMARY}" \
     --field blockers="${BLOCKERS:-0}" \
-    --field elapsed="${ELAPSED_SECS:-0}" 2>/dev/null) || CARD_LINE=""
+    --field elapsed="${ELAPSED_SECS:-0}" \
+    --field diff_lines="${DIFF_LINES:-—}" 2>/dev/null) || CARD_LINE=""
 fi
 
 TRAJ_FILE=$(mktemp)
@@ -1163,6 +1183,8 @@ ${DECISIONS_BLOCK}
 
 **Cost (economic scheduling)**: ${COST_DELTA_NOTE}
 
+**Diff size**: ${DIFF_LINES:-—} lines (threshold ${DIFF_THRESHOLD:-—}, override: ${SIZE_OVERRIDE_USED:-no})
+
 **Pipeline completed**: ${TIMESTAMP}
 
 ${CARD_LINE}
@@ -1184,7 +1206,7 @@ If `CLOSE_FAILED` is set, STOP: print `CLOSE_RESULT: status: FAILED` with `block
 
 The `**Decisions**:` block MUST stay a bullet list and `**Decisions**:` must precede `**Anomalies**:` — the Phase C5.4 ADR extractor reads the lines between those two markers.
 
-The `<!-- FORGE:CARD: v1 sha:... b64:... -->` line carries the machine-readable summary (the Phase C4.5c fields plus `title` and `blockers`), encoded as Base64url (design decision 2026-07-08: encoding beats escaping — the Base64url alphabet cannot contain HTML comment delimiters by construction). It is wrapped in the inline-value annotation form `<!-- FORGE:CARD: ... -->` so `parse()` extracts the encoded payload. Platform consumers (e.g. `/orchestrate`) decode via `node "$CODEC_CLI" parse --type CARD [--field <key>]`. This block is **additive**: all existing `FORGE:TRAJECTORY` consumers select via `contains("FORGE:TRAJECTORY")` and parse the markdown table, so the embedded CARD line does not affect them.
+The `<!-- FORGE:CARD: v1 sha:... b64:... -->` line carries the machine-readable summary (the Phase C4.5c fields plus `title` and `blockers`, including `diff_lines`), encoded as Base64url (design decision 2026-07-08: encoding beats escaping — the Base64url alphabet cannot contain HTML comment delimiters by construction). It is wrapped in the inline-value annotation form `<!-- FORGE:CARD: ... -->` so `parse()` extracts the encoded payload. Platform consumers (e.g. `/orchestrate`) decode via `node "$CODEC_CLI" parse --type CARD [--field <key>]`. This block is **additive**: all existing `FORGE:TRAJECTORY` consumers select via `contains("FORGE:TRAJECTORY")` and parse the markdown table, so the embedded CARD line does not affect them.
 
 **CODEC PATH (forge#1727)**: the `emit CARD --b64` call replaces the previous `<!-- FORGE:CARD ${CARD_JSON} -->` inline-JSON form. The Base64url form is safe against all HTML comment injection vectors and includes a sha8 integrity prefix for truncation detection. Consumers that parsed the old inline-JSON form must migrate to the codec parse path: `echo '...' | node "$CODEC_CLI" parse --type CARD --field <key>`.
 

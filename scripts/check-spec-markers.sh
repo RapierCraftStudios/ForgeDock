@@ -84,6 +84,8 @@ MARKER_REGISTRY="
   AUTOPILOT_IMPACT
   BATCHABLE
   BATCH_ID
+  BASESYNC_FAILED
+  BASESYNC_REMEDIATION
   BATCH_MEMBERS
   BENCH_SCORECARD
   BLOCKED_ON_HUMAN_MERGE
@@ -105,6 +107,7 @@ MARKER_REGISTRY="
   DECOMPOSED
   DECOMPOSE_BLOCKED
   DESIGN
+  DIFF_SIZE
   DISPATCH
   DISPATCHER
   DOSSIER_UPDATED
@@ -166,6 +169,7 @@ MARKER_REGISTRY="
   SECURITY_AUDIT
   SIGNAL_RESOLVED
   SIGNAL_UNRESOLVED
+  SIZE_OVERRIDE
   SPAWN_POLICY
   SPEC_DOCTOR_COMPLETE
   SPEC_LOADED
@@ -358,6 +362,83 @@ if [ -f "$P4_SPEC" ]; then
     VIOLATIONS=$((VIOLATIONS + 1))
   elif [ "$HOLD_LBL" -ge "$HOLD_CMT" ]; then
     echo "HIGH | $P4_SPEC | hold_merged_trail() posts the PHASE_TRAIL_FAILED comment before adding needs-human (label must come first)" >&2
+    VIOLATIONS=$((VIOLATIONS + 1))
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Router claim pre-check must classify the existing/winning claim's lease (forge#3431)
+# ---------------------------------------------------------------------------
+
+WORKON_SPEC="$COMMANDS_DIR/work-on.md"
+if [ -f "$WORKON_SPEC" ]; then
+  # Scope: the "Claim pre-check" paragraph only, from its "**Claim pre-check" line up to the line before
+  # "**Terminal fallback". Full-line HTML comments are skipped, then each numbered step (N. ...) is collapsed
+  # to one whitespace-normalised line tagged "STEP<N>:" so tokens in other steps, the Terminal fallback
+  # paragraph, or comments cannot satisfy another step's assertion.
+  PRECHECK_STEPS=$(awk '
+    /^\*\*Terminal fallback/ { inpre = 0 }
+    /^\*\*Claim pre-check/ { inpre = 1; next }
+    inpre {
+      line = $0
+      if (line ~ /^[[:space:]]*<!--.*-->[[:space:]]*$/) next
+      gsub(/<!--[^>]*-->/, "", line)
+      if (match(line, /^[0-9]+\. /)) {
+        n = substr(line, 1, RLENGTH - 2)
+        cur = n
+        steps[cur] = "STEP" n ": " substr(line, RLENGTH + 1)
+        next
+      }
+      if (line ~ /^Only after the read-back/) { cur = ""; next }
+      if (cur != "") steps[cur] = steps[cur] " " line
+    }
+    END { for (k in steps) print steps[k] }
+  ' "$WORKON_SPEC" | tr -s '[:space:]' ' ' | sed 's/ STEP/\nSTEP/g' || true)
+  # WIRE:PROVEN: manual mutation in a temp copy of commands/work-on.md: removing `STALE` from step 4 only fired step 4, removing it from step 2 only fired step 2, tokens only in an HTML comment or only in the Terminal fallback paragraph still fired, a router-local REREVIEW_LEASE_SECS= or rereview_lease_state fired, clean tree passes
+  for STEP_N in 2 4; do
+    STEP_TXT=$(printf '%s\n' "$PRECHECK_STEPS" | grep "^STEP${STEP_N}:" || true)
+    if [ -z "$STEP_TXT" ] \
+       || [[ "$STEP_TXT" != *STALE* ]] \
+       || [[ "$STEP_TXT" != *phase-4-execution.md* ]] \
+       || [[ "$STEP_TXT" != *fallback* ]]; then
+      echo "HIGH | $WORKON_SPEC | claim pre-check step $STEP_N does not route STALE to the terminal fallback via the shared phase-4-execution.md Step 1 classification" >&2
+      VIOLATIONS=$((VIOLATIONS + 1))
+    fi
+  done
+  # The router must reference the orchestrator's single lease definition, never redefine it.
+  if grep -qE '^[[:space:]]*REREVIEW_LEASE_SECS=' "$WORKON_SPEC"; then
+    echo "HIGH | $WORKON_SPEC | router redefines REREVIEW_LEASE_SECS (single definition lives in phase-4-execution.md Step 1)" >&2
+    VIOLATIONS=$((VIOLATIONS + 1))
+  fi
+  if grep -rq 'rereview_lease_state' "$COMMANDS_DIR" 2>/dev/null; then
+    echo "HIGH | $COMMANDS_DIR | competing lease helper rereview_lease_state reintroduced (router must reuse the shared Step 1 classification)" >&2
+    VIOLATIONS=$((VIOLATIONS + 1))
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Re-review claim id must be printed by both producers (forge#3472)
+# ---------------------------------------------------------------------------
+# A claim id generated in one bash block and compared in a later one is lost unless the producer prints it.
+# Orchestrator: the Step 2 claim block's final echo must carry CLAIM_ID=. Router: Claim pre-check step 3 must
+# require printing CLAIM_ID=. Scoped to the Step 2 / Claim pre-check text only; full-line HTML comments skipped.
+# WIRE:PROVEN: manual mutation in a temp copy: removing CLAIM_ID= from the Step 2 echo fired the orchestrator check, removing it from router step 3 fired the router check, clean tree passes
+P4_SPEC="$COMMANDS_DIR/orchestrate/phase-4-execution.md"
+if [ -f "$P4_SPEC" ]; then
+  STEP2_ECHO=$(awk '
+    /Step 2 — dispatch/ { on = 1 }
+    /Step 3 — outcome/ { on = 0 }
+    on && !/^[[:space:]]*<!--.*-->[[:space:]]*$/ && /^[[:space:]]*echo "REREVIEW_MARKER=/ { print }
+  ' "$P4_SPEC" || true)
+  if ! printf '%s\n' "$STEP2_ECHO" | grep -qF 'CLAIM_ID='; then
+    echo "HIGH | $P4_SPEC | Step 2 claim block's final echo does not print CLAIM_ID= (own claim id is lost across bash blocks)" >&2
+    VIOLATIONS=$((VIOLATIONS + 1))
+  fi
+fi
+if [ -f "$WORKON_SPEC" ]; then
+  ROUTER_STEP3=$(printf '%s\n' "${PRECHECK_STEPS:-}" | grep '^STEP3:' || true)
+  if [ -z "$ROUTER_STEP3" ] || [[ "$ROUTER_STEP3" != *CLAIM_ID=* ]]; then
+    echo "HIGH | $WORKON_SPEC | claim pre-check step 3 does not require printing CLAIM_ID= (router own claim id is lost across bash blocks)" >&2
     VIOLATIONS=$((VIOLATIONS + 1))
   fi
 fi
