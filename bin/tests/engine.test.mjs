@@ -42,7 +42,8 @@ function fakeWorld() {
       if (a.startsWith("issue edit")) { const i = args.indexOf("--body"); if (i>=0) w.body = args[i+1];
         const j = args.indexOf("--add-label"); if (j>=0) w.labels.push(args[j+1]); 
         const r = args.indexOf("--remove-label"); if (r>=0) w.labels = w.labels.filter((l) => l !== args[r+1]); return ""; }
-      if (a.startsWith("pr list")) return JSON.stringify(w.pr ? [{ number: w.pr }] : []);
+      // forge#3562: w.prList(args) lets a test model per-branch PR history (mergedAt/baseRefName).
+      if (a.startsWith("pr list")) return JSON.stringify(w.prList ? w.prList(args) : (w.pr ? [{ number: w.pr }] : []));
       if (a.startsWith("pr view")) return JSON.stringify({ number: w.pr, state: w.prMerged?"MERGED":"OPEN",
         mergedAt: w.prMerged ? "t" : null, labels: w.prNeedsHuman ? [{name:"needs-human"}] : [] });
       return "";
@@ -2696,7 +2697,83 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
       const log = readLog(dir, 42);
       assert.equal(log.filter((e) => e.event === "RUN_NEXT_CYCLE").length, 1);
       assert.ok(!log.some((e) => e.event === "RUN_REOPEN"));
-      assert.notEqual(deriveState(log).branch, "fix/old-42");
+      assert.ok(ran.includes("work-on/build"));
+      assert.equal(deriveState(log).branch, "fix/real-branch-42");
+    });
+
+    // SEC-4: a real phase-complete issue still carries cycle-1 GitHub evidence
+    // (a FORGE:BUILDER:COMPLETE comment on the old branch and its merged PR).
+    function seedCycleOneEvidence(w) {
+      w.markers += investigationComment("COMPLETE") + builder("fix/old-42");
+      w.prList = (args) => {
+        const head = args[args.indexOf("--head") + 1];
+        if (head === "fix/old-42") return [{ number: 7, state: "MERGED", mergedAt: "t", baseRefName: "staging" }];
+        return w.pr && w.pr !== 7 ? [{ number: w.pr }] : [];
+      };
+    }
+
+    // todo: build.reconcile re-adopts the cycle-1 branch and merged PR, so build
+    // is skipped in the new cycle (SEC-1, tracked in #3545). Flip to a plain
+    // `it` once the reconcilers are cycle-aware.
+    it("--retry with cycle-1 evidence runs build and ends on the new branch", { todo: "SEC-1 / #3545" }, async () => {
+      const { w, io } = fakeWorld();
+      seedPhaseComplete();
+      seedCycleOneEvidence(w);
+      const ran = [];
+      const script = { ...limitWorldScript(w, { failBuild: () => null }),
+        "work-on/review": () => { w.pr = 8; w.prMerged = true; } };
+      const runner = async (a) => { ran.push(a.commandName); script[a.commandName](); return { status: "complete" }; };
+      await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner,
+        now: () => 2000, maxAttempts: 1, retry: true });
+      assert.ok(ran.includes("work-on/build"), `build must run in the new cycle; ran=${ran.join(",")}`);
+      const s = deriveState(readLog(dir, 42));
+      assert.equal(s.branch, "fix/real-branch-42");
+      assert.notEqual(s.pr, 7);
+    });
+
+    it("--retry with cycle-1 evidence still restarts at investigate", async () => {
+      const { w, io } = fakeWorld();
+      seedPhaseComplete();
+      seedCycleOneEvidence(w);
+      const ran = [];
+      const base = okRunner(w);
+      const runner = async (a) => { ran.push(a.commandName); return base(a); };
+      await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner,
+        now: () => 2000, maxAttempts: 1, retry: true });
+      assert.equal(ran[0], "work-on/investigate");
+      assert.equal(readLog(dir, 42).filter((e) => e.event === "RUN_NEXT_CYCLE").length, 1);
+    });
+
+    // SEC-3: --retry must not start a new cycle on a CLOSED issue.
+    for (const labels of [["workflow:merged"], []]) {
+      it(`--retry on a CLOSED issue (labels=[${labels}]) is not-retryable and appends nothing`, async () => {
+        const { w, io } = fakeWorld();
+        seedPhaseComplete();
+        w.issueState = "CLOSED"; w.labels = [...labels];
+        const before = readLog(dir, 42).length;
+        let ran = 0;
+        const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io,
+          runner: async () => { ran++; return { status: "complete" }; }, now: () => 2000, maxAttempts: 1, retry: true });
+        assert.equal(res.terminalReason, "not-retryable");
+        assert.match(res.detail, /CLOSED/);
+        assert.equal(ran, 0);
+        assert.equal(readLog(dir, 42).length, before);
+        assert.equal(deriveState(readLog(dir, 42)).terminalReason, "phase-complete");
+      });
+    }
+
+    it("--retry fails closed when the issue state cannot be read", async () => {
+      const { io } = fakeWorld();
+      const gh = io.gh;
+      io.gh = async (args) => (args[0] === "issue" && args[1] === "view" && !args.join(" ").includes("body") ? "not json" : gh(args));
+      seedPhaseComplete();
+      const before = readLog(dir, 42).length;
+      let ran = 0;
+      const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io,
+        runner: async () => { ran++; return { status: "complete" }; }, now: () => 2000, maxAttempts: 1, retry: true });
+      assert.equal(res.terminalReason, "not-retryable");
+      assert.equal(ran, 0);
+      assert.equal(readLog(dir, 42).length, before);
     });
 
     it("a second --retry after the cycle started does not append another RUN_NEXT_CYCLE", async () => {

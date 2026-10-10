@@ -310,6 +310,21 @@ export async function runIssue(opts) {
         detail: `issue ${issue} ended ${state.terminalReason}; --retry only resumes an engine-error or phase-complete run`,
       };
     }
+    // forge#3562 (SEC-3): a new cycle discards `committed`, so check the live
+    // issue first. A CLOSED issue has nothing left to run; an unreadable
+    // snapshot fails closed rather than resetting a possibly-finished run.
+    if (state.terminalReason === "phase-complete") {
+      let snap;
+      try { snap = await issueSnapshot(issue, io); } catch { snap = { ok: false, state: null }; }
+      if (!snap.ok || snap.state === "CLOSED") {
+        return {
+          terminalReason: "not-retryable",
+          detail: snap.ok
+            ? `issue ${issue} is CLOSED; --retry does not start a new cycle on a closed issue`
+            : `issue ${issue} state could not be read; --retry did not start a new cycle`,
+        };
+      }
+    }
     appendEvent(dir, issue, {
       event: state.terminalReason === "phase-complete" ? "RUN_NEXT_CYCLE" : "RUN_REOPEN",
       issue,
