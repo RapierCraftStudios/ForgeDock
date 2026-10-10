@@ -644,6 +644,72 @@ describe("pickPhase", () => {
     });
   });
 
+  describe("build - already-merged PR (forge#3535)", () => {
+    const build = PHASES.find(p => p.id === "build");
+    const builder = "<!-- FORGE:BUILDER:COMPLETE -->\n**Branch**: `fix/x-42`";
+    const mk = ({ prs, ahead = "0", prThrows = false }) => ({
+      gh: async (args) => {
+        if (args[0] === "pr") { if (prThrows) throw new Error("gh down"); return JSON.stringify(prs); }
+        return JSON.stringify([builder]);
+      },
+      git: async () => ahead,
+    });
+    const st = { ...base, branch: null };
+    const mergedInLane = { number: 77, state: "MERGED", mergedAt: "2026-10-10T06:39:07Z", baseRefName: "staging" };
+
+    it("detectOutcome: PR merged into lane commits with branch and pr", async () => {
+      const o = await build.detectOutcome(st, mk({ prs: [mergedInLane] }));
+      assert.equal(o.status, "committed");
+      assert.equal(o.outputs.pr, 77);
+      assert.equal(o.outputs.branch, "fix/x-42");
+    });
+
+    it("reconcile: PR merged into lane is satisfied with pr", async () => {
+      const r = await build.reconcile(st, mk({ prs: [mergedInLane] }));
+      assert.equal(r.satisfied, true);
+      assert.equal(r.outputs.pr, 77);
+      assert.equal(r.outputs.branch, "fix/x-42");
+    });
+
+    it("PR merged into a different base than the lane does not count", async () => {
+      const prs = [{ ...mergedInLane, baseRefName: "main" }];
+      const o = await build.detectOutcome(st, mk({ prs }));
+      assert.equal(o.status, "failed");
+      assert.equal(o.retryable, false);
+      assert.equal((await build.reconcile(st, mk({ prs }))).satisfied, false);
+    });
+
+    it("closed-unmerged PR or no PR keeps the non-retryable fixed point (merged base check)", async () => {
+      for (const prs of [[], [{ number: 5, state: "CLOSED", mergedAt: null, baseRefName: "staging" }]]) {
+        const o = await build.detectOutcome(st, mk({ prs }));
+        assert.equal(o.status, "failed");
+        assert.equal(o.retryable, false);
+      }
+    });
+
+    it("gh failure on the PR lookup degrades to existing behaviour", async () => {
+      const o = await build.detectOutcome(st, mk({ prs: [], prThrows: true }));
+      assert.equal(o.status, "failed");
+      assert.equal(o.retryable, false);
+      assert.equal((await build.reconcile(st, mk({ prs: [], prThrows: true }))).satisfied, false);
+    });
+
+    it("picks the merged-into-lane PR among several", async () => {
+      const prs = [{ number: 1, state: "CLOSED", mergedAt: null, baseRefName: "staging" }, mergedInLane];
+      const o = await build.detectOutcome(st, mk({ prs }));
+      assert.equal(o.outputs.pr, 77);
+    });
+
+    it("incomplete builder never consults the PR and stays retryable", async () => {
+      let consulted = false;
+      const io = { gh: async (a) => { if (a[0] === "pr") consulted = true; return JSON.stringify([]); }, git: async () => "0" };
+      const o = await build.detectOutcome({ ...st, branch: "fix/x-42" }, io);
+      assert.equal(o.status, "failed");
+      assert.equal(o.retryable, undefined);
+      assert.equal(consulted, false);
+    });
+  });
+
   // Regression tests for #2193: within-comment `**Branch**:` field match order is
   // first-match, by design (see phases.mjs parseBranchFromMarkers doc comment).
   // Comment-level last-match (#2184) is unaffected/untouched by these tests.
