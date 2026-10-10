@@ -151,10 +151,30 @@ describe("pickPhase", () => {
       assert.equal(outcome.terminalReason, "decomposed");
     });
 
-    it("investigate.md emits both exact marker constants", () => {
+    it("later comment merely mentioning FORGE:INVESTIGATOR does not shadow a real DECOMPOSE:YES (SEC-1)", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(
+        inv("**YES** — split", `<!-- ${PHASE_MARKERS.investigate.decomposedMarker} -->`),
+        "architect: read the FORGE:INVESTIGATOR report first"));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("a stray quoted NO marker does not override an explicit YES verdict + marker (SEC-2)", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(
+        inv("**YES** — split", `<!-- ${PHASE_MARKERS.investigate.decomposedMarker} -->\nEmit \`<!-- DECOMPOSE:NO -->\` when not splitting.`)));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("conflicting heading and own-line marker fails safe (not decomposed)", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(
+        inv("**YES** — split", `<!-- ${PHASE_MARKERS.investigate.notDecomposedMarker} -->`)));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("investigate.md emits the template marker line and both exact marker constants", () => {
       const spec = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "../../commands/work-on/investigate.md"), "utf8");
-      assert.ok(spec.includes(`<!-- ${PHASE_MARKERS.investigate.decomposedMarker} -->`) || spec.includes(PHASE_MARKERS.investigate.decomposedMarker));
-      assert.ok(spec.includes(PHASE_MARKERS.investigate.notDecomposedMarker));
+      assert.ok(spec.includes("<!-- DECOMPOSE:{YES|NO} -->"));
+      assert.ok(spec.includes(`<!-- ${PHASE_MARKERS.investigate.decomposedMarker} -->`));
+      assert.ok(spec.includes(`<!-- ${PHASE_MARKERS.investigate.notDecomposedMarker} -->`));
     });
 
     it("INVESTIGATION:COMPLETE only -> committed, no terminalReason", async () => {
