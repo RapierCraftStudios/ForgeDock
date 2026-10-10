@@ -34,6 +34,11 @@ import { RESERVED_TYPES } from './types.js';
  * "Universal Phase Dispatcher" table and `bin/engine/phases.mjs`'s `PHASES`
  * array).
  *
+ * `context` and `architect` are intentionally NOT engine phase ids (forge#3499):
+ * `work-on/build` creates the worktree they need as `--repo-path` and invokes
+ * them itself. Their `PHASE_MARKERS` entries below stay — the interactive
+ * SubagentStop hook still gates on those markers.
+ *
  * `decompose` and `remediate` (forge#2379) are branch phases, not part of the
  * six-phase linear happy path — `decompose` is reached only when `investigate`
  * signals `DECOMPOSE:YES`, and `remediate` only when `review` escalates to
@@ -41,7 +46,7 @@ import { RESERVED_TYPES } from './types.js';
  * position `bin/engine/phases.mjs`'s `PHASES` array declares them, because
  * `scripts/check-phase-registry-drift.mjs` requires the two lists to match
  * index-for-index — see that file's own doc comment. */
-export const PHASE_IDS = ['investigate', 'decompose', 'context', 'architect', 'build', 'review', 'remediate', 'close'];
+export const PHASE_IDS = ['investigate', 'decompose', 'build', 'review', 'remediate', 'close'];
 
 /**
  * @typedef {Object} PhaseMarkerEntry

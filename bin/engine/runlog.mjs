@@ -68,6 +68,9 @@ export function deriveState(events) {
         s.v = e.seq;
         if (e.outputs?.branch) s.branch = e.outputs.branch;
         if (e.outputs?.pr != null) s.pr = e.outputs.pr;
+        // forge#3504: a blocked phase persists its reason so a resumed run still routes to
+        // remediate instead of defaulting to a "merged" close.
+        if (e.terminalReason) s.terminalReason = e.terminalReason;
         break;
       case "RUN_TERMINAL":
         s.terminal = true; s.terminalReason = e.reason ?? "done"; s.v = e.seq;

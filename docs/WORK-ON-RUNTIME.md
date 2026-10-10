@@ -113,7 +113,7 @@ remediate L2, reviewers L3, same as the table.
 
 ## 6. What does not change
 
-- Build still sequences its own children; the headless engine (`bin/engine/phases.mjs`) is unaffected.
+- Build still sequences its own children (worktree, then context / architect / implement / validate). The headless engine (`bin/engine/phases.mjs`) is **not** exempt from the argument contract: every phase sub-skill takes all inputs as arguments, so each engine phase builds them via `buildArgs` (`--repo`, `--gh-flag`, `--base`, `--worktree`, `--branch`, `--pr`, `--terminal-state` as the target spec's `argument-hint` requires). The engine's phase table is investigate, decompose, build, review, remediate, close; `context` and `architect` are no longer engine phases because they need the worktree build creates. `bin/engine/phases-args.test.mjs` fails CI when a phase's args drift from its spec's `argument-hint`.
 - `/orchestrate` still dispatches one worker `Agent` per issue (L1).
 - Phases keep their specs, `*_RESULT` contracts and GitHub markers; phase-trail verification is unchanged.
 - Solo `/work-on` gets one extra layer of headroom.
