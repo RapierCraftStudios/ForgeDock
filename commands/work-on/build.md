@@ -347,7 +347,83 @@ esac
 
 **Skip if COMPLEXITY_BAND: INVESTIGATION** — go to B5. For every other band (TRIVIAL included) the contract is mandatory. If a `FORGE:CONTRACT` comment already exists on the issue (resume), do not post a second one — continue to B2.1.
 
-Post `<!-- FORGE:CONTRACT -->` comment documenting what will be built and why:
+Post `<!-- FORGE:CONTRACT -->` comment documenting what will be built and why. Run B2.0 first: it files the follow-up issues for `deferred` out-of-scope items and validates the section, so `{OUT_OF_SCOPE_ITEMS}` below already holds real issue numbers.
+
+### B2.0: Out-of-scope dispositions — file deferred follow-ups, validate the section <!-- Added: forge#3447 -->
+
+Every item in the contract's `### Out of Scope` section must carry exactly one disposition, or the section is the single line `None.`. Each bullet names at least one backticked path or symbol so review can match findings against it:
+
+```
+- `path/or/symbol` — deferred → #N: <why it is deferred>
+- `path/or/symbol` — not-affected: <evidence, e.g. the grep or call-graph check that shows no impact>
+- `path/or/symbol` — accepted-risk: <reason the risk is acceptable>
+```
+
+- **`deferred → #N`**: a follow-up issue `#N` already exists (filed in this step, before the contract is posted). Use it for a sibling path the work leaves alone but that still needs the change.
+- **`not-affected: <evidence>`**: the path was checked and the change does not reach it. The evidence must be concrete. Review never demotes a finding against a `not-affected` item: a finding that contradicts the evidence means the contract was wrong.
+- **`accepted-risk: <reason>`**: a known gap that is knowingly kept. Review demotes a non-security finding on this path to a note.
+- **Known-flaw rule**: a contract that keeps a known-flawed design (a design the investigation or architect plan identified as flawed, a fail-open caller, an unsound threshold) must state the flaw and list it as a `deferred → #N` item with a linked follow-up. It may not hide behind `accepted-risk` or free text.
+- Free-text exclusions without a disposition are invalid. `->` is accepted for `→`.
+
+**File the `deferred` follow-ups** (skip the filing on resume when the contract already exists):
+
+```bash
+# <Script resolution block from work-on/build.md, verbatim>
+run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
+# For each deferred item (DEFERRED_PATH = the backticked path, DEFERRED_WHY = one line), repeat:
+DEFERRED_MARKER="<!-- FORGE:DEFERRED_FROM: #{NUMBER} -->"
+LOOKUP=$(gh issue list {GH_FLAG} --state open --search "\"FORGE:DEFERRED_FROM: #{NUMBER}\" in:body" \
+  --json number,body --limit 50 2>/dev/null) || LOOKUP="FAILED"
+if [ "$LOOKUP" = "FAILED" ]; then
+  echo "DEFERRED_LOOKUP=FAILED"   # a failed lookup is not "none found": Blocked exit, never re-file blind
+else
+  DEFERRED_NUM=$(printf '%s' "$LOOKUP" | jq -r --arg p "$DEFERRED_PATH" \
+    '[.[] | select(.body | contains($p))] | first | .number // empty' 2>/dev/null)
+  if [ -z "$DEFERRED_NUM" ]; then
+    DEFERRED_URL=$(run gh issue create {GH_FLAG} --title "follow-up: ${DEFERRED_PATH} (deferred from #{NUMBER})" \
+      --body "## Problem
+
+${DEFERRED_WHY}
+
+Deferred from #{NUMBER}: \`${DEFERRED_PATH}\` was declared out of scope in its contract and is tracked here instead of surfacing later as a review finding.
+
+## Affected Files
+
+- \`${DEFERRED_PATH}\`
+
+## Acceptance Criteria
+
+- [ ] The concern above is resolved for \`${DEFERRED_PATH}\`
+
+${DEFERRED_MARKER}")
+    DEFERRED_NUM=$(printf '%s' "$DEFERRED_URL" | grep -oE '[0-9]+$')
+    [ -n "${DRY_RUN:-}" ] && DEFERRED_NUM="0"
+  fi
+  echo "DEFERRED_ISSUE=${DEFERRED_NUM:-}"
+fi
+```
+
+- `DEFERRED_LOOKUP=FAILED`, or an empty `DEFERRED_NUM` after a real (non-`DRY_RUN`) create → Blocked exit with blocker `github-unavailable: could not file or look up deferred follow-up for <path>` (a transient failure follows the retry rule above; no `needs-human` for `github-unavailable:`).
+- On resume the lookup reuses the open issue that carries the marker and the same path, so a retried build never files a duplicate.
+- Prefer filing through the `/issue` create-hook's programmatic contract (`Skill(skill="{FORGE_SKILL_PREFIX}issue", ...)`) when it is available; the raw create above is the fallback and must keep the `FORGE:DEFERRED_FROM` marker in the body.
+
+**Validate the composed section** with `scripts/check-contract-scope.sh validate` (the exact text that will replace `{OUT_OF_SCOPE_ITEMS}`):
+
+```bash
+# <Script resolution block from work-on/build.md, verbatim>
+SCOPE_FILE=$(mktemp "${TMPDIR:-/tmp}/contract-scope.XXXXXX")
+printf '### Out of Scope\n\n%s\n' "{OUT_OF_SCOPE_ITEMS}" > "$SCOPE_FILE"
+SCRIPT_REF=$(resolve_script 'check-contract-scope')
+case "$SCRIPT_REF" in
+  prose:*) echo "SCOPE_CHECK=PROSE" ;;   # apply the three-disposition rules above by hand
+  *) bash "${SCRIPT_REF#*:}" validate "$SCOPE_FILE"; echo "SCOPE_CHECK_RC=$?" ;;
+esac
+rm -f "$SCOPE_FILE"
+```
+
+- `SCOPE_CHECK_RC=0` (or `SCOPE_CHECK=PROSE` after a manual check) → post the contract.
+- `SCOPE_CHECK_RC=1` → the stderr lists each bad item. Fix the items (add the missing disposition, file the missing follow-up, name a backticked path), recompose, and re-run once. Still invalid → Blocked exit with blocker `contract-scope-invalid: <first bad item>`.
+- `SCOPE_CHECK_RC=2` → a usage error in this step: fix the invocation and retry once, then Blocked exit.
 
 **Before posting, read the attribution config**:
 ```bash
@@ -386,6 +462,8 @@ run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CONTRACT -->
 {OUT_OF_SCOPE_ITEMS}
 ${ATTRIBUTION_LINE}"
 ```
+
+`{OUT_OF_SCOPE_ITEMS}` is the validated B2.0 section body: `None.`, or typed bullets using the literal dispositions `deferred → #N`, `not-affected:` and `accepted-risk:`. Never post free text there.
 
 Contract must be grounded in the investigation report. Every deliverable file must appear in the affected files list from the investigator. Adversarially validate the proposed fix against adjacent system layers before posting.
 

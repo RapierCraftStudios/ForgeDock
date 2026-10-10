@@ -2,6 +2,16 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Contract out-of-scope items now typed; review demotes matching findings (#3447)
+
+The `### Out of Scope` section of `FORGE:CONTRACT` is no longer free text. It is `None.` or bullets that each name a backticked path and one disposition: `deferred → #N`, `not-affected: <evidence>` or `accepted-risk: <reason>`. A contract that keeps a known-flawed design must list it as `deferred → #N`.
+
+- **Build** (B2.0) files a follow-up issue for each `deferred` item before the contract is posted (idempotent through a `FORGE:DEFERRED_FROM: #N` body marker) and validates the section with the new `scripts/check-contract-scope.sh`. An untyped item blocks the build after one retry.
+- **Review** (`/review-pr` §6B.5) reads the latest trusted contract and passes it to `scripts/classify-finding.sh --contract-scope`. A finding on a `deferred` path (follow-up still open) or an `accepted-risk` path becomes a note instead of a new `review-finding`; deferred matches are commented on the existing issue. `not-affected` items, HIGH/CRITICAL findings, safety-exempt `accepted-risk` findings and files the PR itself changed are never demoted. `FORGE:NOTE_DISPOSITION` gains `contract_demoted=N`.
+- The review scope-creep check now reads only the contract's `### Deliverables`, so backticked out-of-scope paths no longer count as in-scope files.
+
+Action: none. Older contracts with free-text Out of Scope sections are not parsed and demote nothing.
+
 ## Spec bash no longer corrupted by Claude Code argument substitution
 
 Claude Code replaces `$0`..`$9` in a skill body with the invocation's arguments (0-based), so spec bash loaded via `Skill(...)` with args was silently rewritten: `awk '{print $2}'` became `awk '{print --issue}'`, `local AGENT="$1"` became `local AGENT="--auto-merge"`, which broke `/review-pr` agent selection and the CI/deploy comparisons with no error. `${N}`, `$(N)`, `$NF`, `$@`, `$#` and `$10`+ are not substituted.

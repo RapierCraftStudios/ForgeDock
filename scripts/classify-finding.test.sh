@@ -83,6 +83,57 @@ expect ISSUE "prefix of a diff path does not match"   -- --severity MEDIUM --con
 rm -f "$DIFF"
 expect_exit 2 "unreadable --inpr-diff"        -- --severity MEDIUM --inpr-diff /nonexistent/d --file x
 
+# --- Contract-declared scope gate (#3447) ---
+CSCOPE=$(mktemp "${TMPDIR:-/tmp}/classify-finding-scope.XXXXXX")
+COPEN=$(mktemp "${TMPDIR:-/tmp}/classify-finding-open.XXXXXX")
+TAB=$(printf '\t')
+printf 'deferred%ssrc/sync.sh%s3446\naccepted-risk%ssrc/legacy%s\nnot-affected%ssrc/engine%s\ndeferred%ssrc/closed.py%s99\ndeferred%ssrc/a/b%s3446\n' \
+  "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" "$TAB" > "$CSCOPE"
+printf '3446\n' > "$COPEN"
+CS=(--contract-scope "$CSCOPE" --contract-open "$COPEN")
+expect NOTE  "deferred + open issue demotes"          -- --severity MEDIUM --confidence CONFIRMED --text "sync gap" --file src/sync.sh "${CS[@]}"
+got=$(bash "$S" --severity MEDIUM --confidence CONFIRMED --text "sync gap" --file src/sync.sh "${CS[@]}")
+if [ "$got" = "NOTE contract-deferred #3446" ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL: deferred reason (got '$got')"; fi
+expect NOTE  "file:line form demotes"                 -- --severity MEDIUM --confidence LIKELY --text "gap" --file src/sync.sh:42 "${CS[@]}"
+expect NOTE  "./ prefix demotes"                      -- --severity MEDIUM --confidence LIKELY --text "gap" --file ./src/sync.sh "${CS[@]}"
+expect NOTE  "directory prefix demotes accepted-risk" -- --severity MEDIUM --confidence CONFIRMED --text "gap" --file src/legacy/old.py:9 "${CS[@]}"
+got=$(bash "$S" --severity MEDIUM --confidence CONFIRMED --text "gap" --file src/legacy "${CS[@]}")
+if [ "$got" = "NOTE contract-accepted-risk" ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL: accepted-risk reason (got '$got')"; fi
+expect NOTE  "nested deferred path demotes"           -- --severity MEDIUM --confidence CONFIRMED --text "gap" --file src/a/b/c.py "${CS[@]}"
+expect ISSUE "sibling with shared name prefix is not under dir" -- --severity MEDIUM --confidence CONFIRMED --text "gap" --file src/legacy2/x.py "${CS[@]}"
+expect ISSUE "unrelated path unchanged"               -- --severity MEDIUM --confidence CONFIRMED --text "gap" --file src/other.py "${CS[@]}"
+expect ISSUE "deferred issue closed (not listed) files" -- --severity MEDIUM --confidence CONFIRMED --text "gap" --file src/closed.py "${CS[@]}"
+expect ISSUE "no --contract-open means no deferred demotion" -- --severity MEDIUM --confidence CONFIRMED --text "gap" --file src/sync.sh --contract-scope "$CSCOPE"
+expect NOTE  "accepted-risk needs no --contract-open" -- --severity MEDIUM --confidence CONFIRMED --text "gap" --file src/legacy/x.py --contract-scope "$CSCOPE"
+expect ISSUE "not-affected never demotes"             -- --severity MEDIUM --confidence CONFIRMED --text "gap" --file src/engine/x.py "${CS[@]}"
+expect ISSUE "CRITICAL never demotes"                 -- --severity CRITICAL --confidence CONFIRMED --text "gap" --file src/sync.sh "${CS[@]}"
+expect ISSUE "HIGH never demotes"                     -- --severity HIGH --confidence CONFIRMED --text "gap" --file src/legacy/x.py "${CS[@]}"
+expect ISSUE "accepted-risk + security keyword files" -- --severity MEDIUM --confidence CONFIRMED --text "token leak in logs" --file src/legacy/x.py "${CS[@]}"
+expect ISSUE "accepted-risk + domain agent files"     -- --severity MEDIUM --confidence CONFIRMED --agent Billing --text "nit" --file src/legacy/x.py "${CS[@]}"
+expect NOTE  "deferred + security keyword still demotes (tracked on open issue)" -- --severity MEDIUM --confidence CONFIRMED --text "token leak" --file src/sync.sh "${CS[@]}"
+DIFF2=$(mktemp "${TMPDIR:-/tmp}/classify-finding-diff.XXXXXX")
+printf 'src/sync.sh\nsrc/legacy/touched.py\n' > "$DIFF2"
+expect ISSUE "path in PR diff is not demoted (deferred)"      -- --severity MEDIUM --confidence LIKELY --text "gap" --file src/sync.sh --inpr-diff "$DIFF2" "${CS[@]}"
+expect ISSUE "path in PR diff is not demoted (accepted-risk)" -- --severity MEDIUM --confidence LIKELY --text "gap" --file src/legacy/touched.py --inpr-diff "$DIFF2" "${CS[@]}"
+expect NOTE  "untouched path under accepted dir demotes with diff given" -- --severity MEDIUM --confidence LIKELY --text "gap" --file src/legacy/other.py --inpr-diff "$DIFF2" "${CS[@]}"
+rm -f "$DIFF2"
+PRF=$(mktemp "${TMPDIR:-/tmp}/classify-finding-prf.XXXXXX")
+printf 'src/sync.sh\nsrc/legacy/touched.py\n' > "$PRF"
+expect ISSUE "path in --pr-files is not demoted (deferred)"      -- --severity MEDIUM --confidence LIKELY --text "gap" --file src/sync.sh --pr-files "$PRF" "${CS[@]}"
+expect ISSUE "path in --pr-files is not demoted (accepted-risk)" -- --severity MEDIUM --confidence LIKELY --text "gap" --file src/legacy/touched.py --pr-files "$PRF" "${CS[@]}"
+expect NOTE  "untouched path demotes with --pr-files given"      -- --severity MEDIUM --confidence LIKELY --text "gap" --file src/legacy/other.py --pr-files "$PRF" "${CS[@]}"
+expect ISSUE "--pr-files alone never triggers INPR_FIX"          -- --severity MEDIUM --confidence CONFIRMED --text "gap" --file src/other.py --pr-files "$PRF"
+rm -f "$PRF"
+expect_exit 2 "unreadable --pr-files"         -- --severity MEDIUM --pr-files /nonexistent/p --file x
+expect ISSUE "no --file: no contract demotion"        -- --severity MEDIUM --confidence CONFIRMED --text "gap" "${CS[@]}"
+expect ISSUE "no contract flags: unchanged"           -- --severity MEDIUM --confidence CONFIRMED --text "gap" --file src/sync.sh
+expect NOTE  "LOW stays NOTE through the gate"        -- --severity LOW --confidence CONFIRMED --text "gap" --file src/other.py "${CS[@]}"
+: > "$CSCOPE"
+expect ISSUE "empty scope file: unchanged"            -- --severity MEDIUM --confidence CONFIRMED --text "gap" --file src/sync.sh "${CS[@]}"
+rm -f "$CSCOPE" "$COPEN"
+expect_exit 2 "unreadable --contract-scope"   -- --severity MEDIUM --contract-scope /nonexistent/s --file x
+expect_exit 2 "unreadable --contract-open"    -- --severity MEDIUM --contract-open /nonexistent/o --file x
+
 # --- usage errors ---
 expect_exit 2 "unknown flag"                  -- --bogus x
 expect_exit 2 "bad lineage"                   -- --severity LOW --lineage P3

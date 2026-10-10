@@ -680,7 +680,7 @@ Check whether the PR's actual changes match what the builder committed to in its
 # Find the contract comment on the linked issue
 ISSUE_NUM=$(gh pr view "$PR_NUMBER" -R "$REPO" --json body --jq '.body | gsub("(?s).*?(?:Closes #|#)(?<n>[0-9]+).*"; "\(.n)") // empty' 2>/dev/null | head -1)
 if [ -n "$ISSUE_NUM" ]; then
-    CONTRACT_FILES=$(gh api repos/${REPO}/issues/${ISSUE_NUM}/comments --jq '[.[] | select(.body | contains("FORGE:CONTRACT"))] | .[0].body' 2>/dev/null | grep -E '`[^`]+\.(py|tsx?|sql|sh|yml|yaml|json)`' | grep -oE '`[^`]+\.(py|tsx?|sql|sh|yml|yaml|json)`' | tr -d '`' | sort -u)
+    CONTRACT_FILES=$(gh api repos/${REPO}/issues/${ISSUE_NUM}/comments --jq '[.[] | select(.body | contains("FORGE:CONTRACT"))] | .[0].body' 2>/dev/null | awk '/^### Deliverables/{p=1;next} /^### /{p=0} p' | grep -E '`[^`]+\.(py|tsx?|sql|sh|yml|yaml|json)`' | grep -oE '`[^`]+\.(py|tsx?|sql|sh|yml|yaml|json)`' | tr -d '`' | sort -u)
     PR_FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only | sort -u)
 
     # Files in PR but NOT in contract
@@ -2068,6 +2068,7 @@ Filing a standalone `review-finding` issue for every LOW/POSSIBLE reviewer note 
 - **Safety exemption is content-based**: a LOW or POSSIBLE finding is still filed when its file path / title / body matches the security/billing keyword set (`security|auth|authz|authn|billing|payment|stripe|charge|invoice|injection|xss|csrf|ssrf|idor|secret(s)|credential(s)|permission(s)|sql|token|password|redact`, whole words, `_`/`-`/`/` separate words — so `auth_service` matches but `author`/`tokenizer` do not), or when it came from a dedicated, signal-selected domain agent (Auth, Billing, Concurrency, Database) AND is MEDIUM+ or CONFIRMED — a LOW/POSSIBLE finding stays a NOTE whichever reviewer raised it. **Origin from the always-on General Security & Quality agent alone does NOT exempt a finding**: that agent runs on every PR, so origin-based exemption filed nearly every LOW note it raised (the 2026-10-08 cascade audit: 50 of 60 would-be notes in one batch were filed only for that reason).
 - **Review-finding lineage** (the PR's linked issue `MERGE_ISSUE` carries the `review-finding` label, any priority — this PR is itself a fix for a finding): only MEDIUM findings that are CONFIRMED, or LIKELY and safety-exempt, become issues; LOW and POSSIBLE are always NOTEs. A fix for a finding must not mint a new generation of findings.
 - **Otherwise**: `**Severity**: LOW`, or `**Confidence**: POSSIBLE` below HIGH, is a NOTE unless safety-exempt; everything else (MEDIUM CONFIRMED/LIKELY) is an ISSUE.
+- **Contract-declared scope** <!-- Added: forge#3447 -->: the trusted, latest FORGE:CONTRACT of `MERGE_ISSUE` lists out-of-scope items as `deferred → #N`, `not-affected:` or `accepted-risk:` (parsed by `scripts/check-contract-scope.sh list`). A finding whose file equals, or sits under, a `deferred` item whose issue is still open becomes `NOTE contract-deferred #N` and is commented on that issue instead of being filed again. A finding under an `accepted-risk` item becomes `NOTE contract-accepted-risk`. Never demoted: HIGH/CRITICAL, `not-affected` items (a contradicting finding means the contract was wrong), `accepted-risk` findings that are safety-exempt, findings on a file this PR changed, and anything when the contract is missing, untrusted, unparseable or the deferred issue is closed or unreadable.
 
 ```bash
 # Resolve the classifier: running plugin, FORGE_ROOT, FORGEDOCK_HOME, newest pinned forgedock plugin cache
@@ -2113,12 +2114,59 @@ if [ "${AUTO_MERGE:-false}" = "true" ] && [ -n "${MERGE_ISSUE:-}" ]; then
   fi
   # An unreadable marker list or diff leaves INPR_DIFF_FILE empty: findings are filed as before (never gated blind).
 fi
+# Contract-declared scope (#3447): findings on a path the contract declared `deferred → #N` (follow-up
+# issue still open) or `accepted-risk:` become NOTEs. `not-affected` items never demote. Fail toward
+# filing: any missing input (no linked issue, no trusted contract, unparseable section, unreadable
+# PR file list, closed or unreadable deferred issue) leaves CONTRACT_SCOPE_FILE empty and nothing demotes.
+CONTRACT_SCOPE_FILE=""; CONTRACT_OPEN_FILE=""; PR_FILES_FILE=""; CONTRACT_DEMOTED=0
+if [ -n "${MERGE_ISSUE:-}" ]; then
+  # TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+  _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+  _tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+  for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+    [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+  done
+  TRUSTED_SCRIPT=""
+  while IFS= read -r _c; do
+    case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+  done <<< "$_tc"
+  SCOPE_SCRIPT=""
+  [ -n "$TRUSTED_SCRIPT" ] && [ -f "$(dirname "$TRUSTED_SCRIPT")/check-contract-scope.sh" ] && SCOPE_SCRIPT="$(dirname "$TRUSTED_SCRIPT")/check-contract-scope.sh"
+  if [ -n "$SCOPE_SCRIPT" ]; then
+    mkdir -p "${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"
+    _scratch="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"
+    CONTRACT_BODY_FILE=$(mktemp "$_scratch/{PR_NUMBER}_contract.XXXXXX")
+    CONTRACT_SCOPE_FILE=$(mktemp "$_scratch/{PR_NUMBER}_contract-scope.XXXXXX")
+    CONTRACT_OPEN_FILE=$(mktemp "$_scratch/{PR_NUMBER}_contract-open.XXXXXX")
+    PR_FILES_FILE=$(mktemp "$_scratch/{PR_NUMBER}_pr-files.XXXXXX")
+    # Only a trusted author's contract counts (an untrusted comment must not suppress findings); the LAST one wins.
+    gh api --paginate "repos/{GH_REPO}/issues/${MERGE_ISSUE}/comments" 2>/dev/null \
+      | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:CONTRACT -->' 2>/dev/null | tail -n 1 | jq -r . > "$CONTRACT_BODY_FILE" 2>/dev/null
+    if [ -s "$CONTRACT_BODY_FILE" ] \
+       && bash "$SCOPE_SCRIPT" list "$CONTRACT_BODY_FILE" > "$CONTRACT_SCOPE_FILE" 2>/dev/null \
+       && [ -s "$CONTRACT_SCOPE_FILE" ] \
+       && gh pr diff {PR_NUMBER} -R {GH_REPO} --name-only > "$PR_FILES_FILE" 2>/dev/null; then
+      for _n in $(awk -F'\t' '$(1)=="deferred" && $(3)!="" {print $(3)}' "$CONTRACT_SCOPE_FILE" | sort -u); do
+        [ "$(gh issue view "$_n" -R {GH_REPO} --json state --jq .state 2>/dev/null)" = "OPEN" ] && echo "$_n" >> "$CONTRACT_OPEN_FILE"
+      done
+    else
+      rm -f "$CONTRACT_SCOPE_FILE" "$CONTRACT_OPEN_FILE" "$PR_FILES_FILE"; CONTRACT_SCOPE_FILE=""; CONTRACT_OPEN_FILE=""; PR_FILES_FILE=""
+    fi
+    rm -f "$CONTRACT_BODY_FILE"
+  fi
+fi
 # Per deduped finding (FINDING_TEXT_FILE = mktemp file holding title + body + affected paths;
 # FINDING_FILE = the finding's file path, file:line accepted):
 #   DISPOSITION=$(bash "$CLASSIFY_SCRIPT" --severity "$FINDING_SEVERITY" --confidence "$FINDING_CONFIDENCE" \
 #                   --agent "$FINDING_AGENT" --lineage "$FINDING_LINEAGE" --text-file "$FINDING_TEXT_FILE" \
-#                   ${INPR_DIFF_FILE:+--inpr-diff "$INPR_DIFF_FILE" --file "$FINDING_FILE"})
+#                   ${FINDING_FILE:+--file "$FINDING_FILE"} ${INPR_DIFF_FILE:+--inpr-diff "$INPR_DIFF_FILE"} \
+#                   ${CONTRACT_SCOPE_FILE:+--contract-scope "$CONTRACT_SCOPE_FILE" --contract-open "$CONTRACT_OPEN_FILE" --pr-files "$PR_FILES_FILE"})
 #   case "$DISPOSITION" in ISSUE*) ;; NOTE*) ;; INPR_FIX*) ;; esac   # first word is the class, the rest is the reason
+#   Contract-matched NOTE (`NOTE contract-deferred #N`): comment the finding (file:line + title) on the open
+#   deferred issue instead of filing a new one, and count it:
+#     gh issue comment N -R {GH_REPO} --body "Review of #{PR_NUMBER} also found this on a path declared deferred here: <file:line> <title>"  # allowlist:check-command-side-effects
+#     CONTRACT_DEMOTED=$((CONTRACT_DEMOTED + 1))
+#   `NOTE contract-accepted-risk` is counted in CONTRACT_DEMOTED too (no comment; the contract already records the reason).
 # If CLASSIFY_SCRIPT is empty, apply the four rules above (and §6B.6) by hand and record classifier=manual below.
 ```
 
@@ -2129,14 +2177,14 @@ Each NOTE gets exactly one disposition, in this preference order:
 
 **Metrics note (forge#3106)**: because NOTEs are not filed as issues, `review-finding` issue volume and any metric derived from it (findings per PR, `/pipeline-health` finding rates, amplification ratio) drop relative to pre-#3060 history. Compare against the `notes_*` counts in the review summary, not issue counts alone, when judging review depth across the change.
 
-Every NOTE disposition must be recorded (never silently dropped): list each NOTE (id, file:line, one-line reason) with its disposition in the review summary comment, including dropped ones, so a reviewer can audit the decision. NOTES are never passed to `Skill(issue)`. Record counts in the review summary (`notes_fixed`, `notes_listed`, `notes_dropped`, `findings_filed`, `inpr_fix`). If no finding is an ISSUE after this step, skip 6C and continue to Phase 7. Findings classified `INPR_FIX` (§6B.6) are neither notes nor filed this round.
+Every NOTE disposition must be recorded (never silently dropped): list each NOTE (id, file:line, one-line reason) with its disposition in the review summary comment, including dropped ones, so a reviewer can audit the decision. NOTES are never passed to `Skill(issue)`. Record counts in the review summary (`notes_fixed`, `notes_listed`, `notes_dropped`, `findings_filed`, `inpr_fix`, `contract_demoted`). A contract-demoted NOTE is listed with its disposition (`tracked on #N` or `accepted-risk`) and counted only in `contract_demoted`. If no finding is an ISSUE after this step, skip 6C and continue to Phase 7. Findings classified `INPR_FIX` (§6B.6) are neither notes nor filed this round.
 
 **Disposition marker (MANDATORY whenever Phase 6A extracted at least one finding):** post one PR comment whose first line is the machine-readable record below, followed by the NOTE list. Phase 8 refuses to auto-merge a PR that has `FINDING:` markers but no `FORGE:NOTE_DISPOSITION` comment — the disposition step is enforced, not advisory.
 
 ```bash
 CLASSIFIER_MODE=$([ -n "$CLASSIFY_SCRIPT" ] && echo script || echo manual)
 # NOTE_LIST_FILE: mktemp file named for the PR number, holding one line per NOTE (id, file:line, disposition, reason).
-gh pr comment {PR_NUMBER} -R {GH_REPO} --body "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=${NOTES_FIXED:-0} notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} inpr_fix=${INPR_FIX_COUNT:-0} lineage=${FINDING_LINEAGE} classifier=${CLASSIFIER_MODE} -->
+gh pr comment {PR_NUMBER} -R {GH_REPO} --body "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=${NOTES_FIXED:-0} notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} inpr_fix=${INPR_FIX_COUNT:-0} contract_demoted=${CONTRACT_DEMOTED:-0} lineage=${FINDING_LINEAGE} classifier=${CLASSIFIER_MODE} -->
 $(cat "$NOTE_LIST_FILE" 2>/dev/null)" # allowlist:check-command-side-effects
 ```
 

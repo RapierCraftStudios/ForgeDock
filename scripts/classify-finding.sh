@@ -10,6 +10,7 @@
 # Usage:
 #   classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>]
 #                       [--lineage none|review-finding] [--text <T> | --text-file <F>]
+#                       [--inpr-diff <F> --file <P>] [--contract-scope <F> --contract-open <F> [--pr-files <F>]]
 #
 #   --severity    CRITICAL | HIGH | MEDIUM | LOW (case-insensitive). Missing or
 #                 unparseable → ISSUE (fail toward filing, never drop).
@@ -26,6 +27,19 @@
 #                 are given, a MEDIUM CONFIRMED finding whose path is in the PR diff is
 #                 classified INPR_FIX — fix it on the PR before merge instead of filing it.
 #                 Callers pass these only for the first fix round of an auto-merge review.
+#
+#   --contract-scope <F> --contract-open <F> --file <P>  Contract-declared scope gate: F is the TSV
+#                 from `check-contract-scope.sh list` (disposition<TAB>path<TAB>issue). A finding
+#                 whose path equals, or sits under, a `deferred` or `accepted-risk` item becomes
+#                 `NOTE contract-deferred #N` / `NOTE contract-accepted-risk`. `--contract-open`
+#                 lists the deferred issue numbers confirmed open, one per line; a deferred item
+#                 demotes only when its number is listed (closed, unreadable or absent: no demotion).
+#                 Never demoted: CRITICAL/HIGH, `not-affected` items, `accepted-risk` findings that
+#                 are safety-exempt (security/billing keywords or a dedicated domain agent), and
+#                 findings whose path is in `--inpr-diff` or `--pr-files` (this PR touched it; the
+#                 contract excluded the sibling path, not regressions the PR introduced in it).
+#                 `--pr-files <F>` is the PR's changed paths, one per line, supplied for this guard
+#                 alone (it never triggers INPR_FIX). The gate runs after the severity and in-PR gates. Without the flags output is unchanged.
 #
 # Output (stdout, one line): `ISSUE <reason>`, `NOTE <reason>` or `INPR_FIX <reason>`.
 # Exit codes: 0 classified, 2 usage error.
@@ -57,9 +71,12 @@ LINEAGE="none"
 TEXT=""
 INPR_DIFF=""
 FINDING_FILE=""
+CONTRACT_SCOPE=""
+CONTRACT_OPEN=""
+PR_FILES=""
 
 usage() {
-  echo "ERROR: Usage: classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>] [--lineage none|review-finding] [--text <T> | --text-file <F>] [--inpr-diff <F> --file <P>]" >&2
+  echo "ERROR: Usage: classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>] [--lineage none|review-finding] [--text <T> | --text-file <F>] [--inpr-diff <F> --file <P>] [--contract-scope <F> --contract-open <F> [--pr-files <F>]]" >&2
   exit 2
 }
 
@@ -72,6 +89,9 @@ while [ "$#" -gt 0 ]; do
     --text)       [ "$#" -ge 2 ] || usage; TEXT="$2"; shift 2 ;;
     --inpr-diff)  [ "$#" -ge 2 ] || usage; INPR_DIFF="$2"; shift 2 ;;
     --file)       [ "$#" -ge 2 ] || usage; FINDING_FILE="$2"; shift 2 ;;
+    --contract-scope) [ "$#" -ge 2 ] || usage; CONTRACT_SCOPE="$2"; shift 2 ;;
+    --contract-open)  [ "$#" -ge 2 ] || usage; CONTRACT_OPEN="$2"; shift 2 ;;
+    --pr-files)       [ "$#" -ge 2 ] || usage; PR_FILES="$2"; shift 2 ;;
     --text-file)
       [ "$#" -ge 2 ] || usage
       [ -r "$2" ] || { echo "ERROR: --text-file not readable: $2" >&2; exit 2; }
@@ -87,6 +107,17 @@ esac
 
 if [ -n "$INPR_DIFF" ] && [ ! -r "$INPR_DIFF" ]; then
   echo "ERROR: --inpr-diff not readable: $INPR_DIFF" >&2; exit 2
+fi
+
+if [ -n "$CONTRACT_SCOPE" ] && [ ! -r "$CONTRACT_SCOPE" ]; then
+  echo "ERROR: --contract-scope not readable: $CONTRACT_SCOPE" >&2; exit 2
+fi
+if [ -n "$CONTRACT_OPEN" ] && [ ! -r "$CONTRACT_OPEN" ]; then
+  echo "ERROR: --contract-open not readable: $CONTRACT_OPEN" >&2; exit 2
+fi
+
+if [ -n "$PR_FILES" ] && [ ! -r "$PR_FILES" ]; then
+  echo "ERROR: --pr-files not readable: $PR_FILES" >&2; exit 2
 fi
 
 upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]'; }
@@ -109,7 +140,6 @@ if [ -n "$INPR_DIFF" ] && [ -n "$FINDING_FILE" ] && [ "$SEV" = "MEDIUM" ] && [ "
   fi
 fi
 
-
 # Safety exemption. Keywords match whole words, where `_`, `-`, `/` and other
 # punctuation separate words (so `auth_service` matches, `author` does not).
 SAFETY=""
@@ -124,6 +154,30 @@ case "$AGENT_LC" in
   auth*|billing*|concurrency*|database*)
     if [ "$SEV" = "MEDIUM" ] || [ "$CONF" = "CONFIRMED" ]; then SAFETY="${SAFETY:-domain-agent}"; fi ;;
 esac
+
+# Contract-declared scope gate (#3447). Fails toward filing: any missing input, closed or unlisted
+# deferred issue, in-PR path, or safety-exempt accepted-risk finding keeps the classification below.
+if [ -n "$CONTRACT_SCOPE" ] && [ -n "$FINDING_FILE" ]; then
+  _fpath="${FINDING_FILE#./}"; _fpath="${_fpath%%:*}"
+  _inpr=""
+  if [ -n "$INPR_DIFF" ] && grep -Fxq -- "$_fpath" "$INPR_DIFF"; then _inpr=1; fi
+  if [ -n "$PR_FILES" ] && grep -Fxq -- "$_fpath" "$PR_FILES"; then _inpr=1; fi
+  if [ -z "$_inpr" ]; then
+    while IFS="$(printf '\t')" read -r _disp _ipath _inum; do
+      [ -n "$_ipath" ] || continue
+      _ipath="${_ipath#./}"; _ipath="${_ipath%/}"
+      [ "$_fpath" = "$_ipath" ] || case "$_fpath" in "$_ipath"/*) ;; *) continue ;; esac
+      case "$_disp" in
+        deferred)
+          if [ -n "$_inum" ] && [ -n "$CONTRACT_OPEN" ] && grep -Fxq -- "$_inum" "$CONTRACT_OPEN"; then
+            echo "NOTE contract-deferred #$_inum"; exit 0
+          fi ;;
+        accepted-risk)
+          if [ -z "$SAFETY" ]; then echo "NOTE contract-accepted-risk"; exit 0; fi ;;
+      esac
+    done < "$CONTRACT_SCOPE"
+  fi
+fi
 
 if [ "$LINEAGE" = "review-finding" ]; then
   if [ "$SEV" = "MEDIUM" ] && { [ "$CONF" = "CONFIRMED" ] || { [ -n "$SAFETY" ] && [ "$CONF" = "LIKELY" ]; }; }; then
