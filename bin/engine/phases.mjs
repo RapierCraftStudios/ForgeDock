@@ -115,23 +115,45 @@ function latestMarked(comments, header, sentinel) {
   return all.length ? all[all.length - 1] : null;
 }
 /**
+ * Trusted comment bodies, chronological — the same single fetch + trust predicate
+ * as issueMarkers() (one path, forge#3542). Fail closed: a fetch error yields `[]` here (issueMarkers itself propagates it).
+ */
+async function trustedCommentBodies(issue, io) {
+  try { return (await issueMarkers(issue, io)).comments; } catch { return []; }
+}
+
+/** build.md B5.5 Step 2: a SIZE_OVERRIDE needs a non-empty justification — the first non-blank, non-HTML-comment line after the marker line. */
+function overrideHasJustification(body) {
+  const lines = String(body).replace(/\r\n/g, "\n").split("\n");
+  return lines.slice(1).some((l) => l.trim() !== "" && !l.trimStart().startsWith("<!--"));
+}
+
+/**
  * Size-gate routing (build.md B5.5). True only when the latest `FORGE:DIFF_SIZE`
  * says `result: OVER`, carries a `### Split Proposal` (the discriminator against
  * the decompose-loop-guard Blocked exit, which also posts OVER but must not
- * re-enter decompose), and no `FORGE:SIZE_OVERRIDE` comment follows it.
- * Comments are bodies in chronological order (see issueMarkers).
+ * re-enter decompose), and no justified `FORGE:SIZE_OVERRIDE` comment follows it,
+ * and the issue is not already decomposed. `comments` MUST be TRUSTED bodies in
+ * chronological order (see trustedCommentBodies); an untrusted comment never
+ * reaches this function.
  */
 function sizeGateRoutesToDecompose(comments) {
   const gate = PHASE_MARKERS.build.sizeGateMarker;
   const override = PHASE_MARKERS.build.sizeOverrideMarker;
   const starts = (c, m) => typeof c === "string" && c.trimStart().startsWith(`<!-- ${m}`);
+  if (comments.some((c) => starts(c, "FORGE:DECOMPOSED"))) return false;
   let idx = -1;
   for (let i = comments.length - 1; i >= 0; i--) if (starts(comments[i], gate)) { idx = i; break; }
   if (idx < 0) return false;
-  const body = comments[idx];
+  const body = comments[idx].replace(/\r\n/g, "\n");
   const m = /^result:[ \t]*(OK|OVERRIDDEN|OVER)[ \t]*$/m.exec(body);
   if (!m || m[1] !== "OVER" || !/^###[ \t]+Split Proposal\b/m.test(body)) return false;
-  return !comments.slice(idx + 1).some((c) => starts(c, override));
+  return !comments.slice(idx + 1).some((c) => starts(c, override) && overrideHasJustification(c));
+}
+/** Cheap untrusted pre-check: does ANY comment look like an OVER gate? Only then is the trusted fetch worth making. */
+function mayRouteToDecompose(comments) {
+  const gate = PHASE_MARKERS.build.sizeGateMarker;
+  return comments.some((c) => typeof c === "string" && c.trimStart().startsWith(`<!-- ${gate}`) && /^result:[ \t]*OVER[ \t]*\r?$/m.test(c));
 }
 /**
  * Count commits on `branch` ahead of `lane`'s base. On the first build the
@@ -365,6 +387,29 @@ async function reviewArgs(state, ctx, io) {
           "--branch", need(state.branch, "branch", BRANCH_RE), ...baseArgs(state)];
 }
 
+/**
+ * Is the issue assessed for decomposition? Evaluated on ONE comment: the newest
+ * trusted `<!-- FORGE:INVESTIGATOR` report (forge#3542 selects it; forge#3543's
+ * parsing applies within it). Within the comment the strict structured signals
+ * decide, in order: the `**YES**`/`**NO**` verdict under `### Decomposition
+ * Assessment`, then a marker alone on its own line (`<!-- DECOMPOSE:YES|NO -->`).
+ * Quoted markers mid-line are ignored. A heading/marker conflict fails safe (not
+ * decomposed) and is logged.
+ */
+function isDecomposed(report) {
+  const text = String(report || "").replace(/\r\n/g, "\n");
+  const section = text.match(/^### Decomposition Assessment[^\n]*\n([\s\S]*?)(?=^###[^#]|(?![\s\S]))/m);
+  const verdict = section ? (/^\s*\*\*(YES|NO)\*\*/m.exec(section[1]) || [])[1] : undefined;
+  const markers = new Set();
+  for (const m of text.matchAll(/^<!-- DECOMPOSE:(YES|NO) -->[ \t]*$/gm)) markers.add(m[1]);
+  const marker = markers.size === 1 ? [...markers][0] : undefined;
+  if (markers.size > 1 || (verdict && marker && verdict !== marker)) {
+    console.error(`[engine] conflicting decomposition signals (heading=${verdict ?? "none"}, markers=${[...markers].join("+") || "none"}); treating as not decomposed`);
+    return false;
+  }
+  return (verdict ?? marker) === "YES";
+}
+
 /** @type {Phase[]} */
 export const PHASES = [
   {
@@ -387,7 +432,7 @@ export const PHASES = [
         return { status: "committed", terminalReason: "invalid", outputs: { verdict: "INVALID" } };
       if (closing === complete) {
         // investigate.md emits `### Decomposition Assessment` then `**YES**|**NO**`.
-        if (/^###[ \t]+Decomposition Assessment[ \t]*\r?\n\s*\*\*YES\*\*/m.test(report))
+        if (isDecomposed(report))
           return { status: "committed", terminalReason: "decomposed", outputs: { decompose: true } };
         return { status: "committed", outputs: { verdict: "CONFIRMED" } };
       }
@@ -441,6 +486,12 @@ export const PHASES = [
       if (branch && hasMarker(comments, PHASE_MARKERS.build.header, PHASE_MARKERS.build.completionMarker) && (await commitsAhead(state.lane, branch, io)) > 0) {
         return { satisfied: true, outputs: { branch } };
       }
+      // forge#3535: work already merged into the lane has ahead=0 by definition;
+      // positive merged-PR evidence (base === lane) means build is satisfied.
+      if (branch && hasMarker(comments, PHASE_MARKERS.build.header, PHASE_MARKERS.build.completionMarker)) {
+        const merged = await mergedPrForBranch(branch, state.lane, io);
+        if (merged) return { satisfied: true, outputs: { branch, pr: merged.number } };
+      }
       return { satisfied: false };
     },
     async detectOutcome(state, io) {
@@ -463,7 +514,7 @@ export const PHASES = [
       // build.md says the router (not build) dispatches decompose with no
       // needs-human. Non-retryable by construction: a retry re-measures and
       // re-emits the same exit.
-      if (!complete && sizeGateRoutesToDecompose(comments)) {
+      if (!complete && mayRouteToDecompose(comments) && sizeGateRoutesToDecompose(await trustedCommentBodies(state.issue, io))) {
         return { status: "committed", terminalReason: "decomposed", outputs: branch ? { branch } : {} };
       }
       const detail = `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}`;
@@ -493,6 +544,15 @@ export const PHASES = [
       // resolve, so both must stay retryable. Only a successfully-computed
       // ahead of 0 on a *resolved* branch (a real "nothing new to commit"
       // result) is the true fixed point this non-retryable signal targets.
+      // forge#3535: before the fixed point, check whether the branch already
+      // merged into the lane — then ahead=0 is the success state, not a missing
+      // build. Only positive evidence converts; everything else falls through.
+      if (complete && branch) {
+        const merged = await mergedPrForBranch(branch, state.lane, io);
+        if (merged) {
+          return { status: "committed", outputs: { branch, pr: merged.number, ...buildChildEvidence(comments) } };
+        }
+      }
       if (complete && ahead !== -1) return { status: "failed", detail, retryable: false };
       return { status: "failed", detail };
     },
@@ -511,8 +571,10 @@ export const PHASES = [
       if (!pr) return { status: "failed", detail: "no PR created" };
       if (pr.merged) return { status: "committed", outputs: { pr: pr.number } };
       // forge#3521: the spec (commands/work-on/review.md) signals an in-PR fix
-      // by labelling the ISSUE needs-human and returning REVIEW_RESULT
-      // `status: NEXT / next: remediate`; the PR label is back-compat only.
+      // by returning REVIEW_RESULT `status: NEXT / next: remediate`. forge#3541: the
+      // issue is labelled `workflow:remediating` (non-human "autonomous remediation
+      // pending"), no longer `needs-human`; both labels still trigger the handoff below
+      // (needs-human = back-compat for older runs). The PR label is back-compat only.
       // The PR number from GitHub (openPrFor) always wins over parsed text.
       const outputs = { pr: pr.number };
       const escalated = { status: "blocked", detail: "review escalated", outputs };
@@ -523,7 +585,7 @@ export const PHASES = [
       // the "unknown" sentinel (never the raw text) so remediate's buildArgs fails closed.
       if (rr && rr.status === "NEXT" && rr.next === "remediate" && rr.remediation)
         outputs.remediation = isRemediationKind(rr.remediation) ? rr.remediation : "unknown";
-      if (pr.needsHuman) return escalated;
+      if (pr.needsHuman || pr.remediating) return escalated;
       if (rr && rr.status === "NEXT" && rr.next === "remediate") return escalated;
       // An explicit REVIEW_RESULT status is authoritative: BLOCKED/COMPLETE exits
       // (phase trail, ci gate, base conflict, merge refusal) also label the issue
@@ -531,7 +593,7 @@ export const PHASES = [
       if (rr && rr.status) return { status: "failed", detail: "PR open, not merged", retryable: false, handoff: false, outputs };
       let snap = null;
       try { snap = await issueSnapshot(state.issue, io); } catch { snap = null; }
-      if (snap?.ok && snap.labels.includes("needs-human")) return escalated;
+      if (snap?.ok && (snap.labels.includes("needs-human") || snap.labels.includes("workflow:remediating"))) return escalated;
       return { status: "failed", detail: "PR open, not merged", retryable: false, outputs };
     },
   },
@@ -589,7 +651,17 @@ export const PHASES = [
       const { comments } = await issueMarkers(state.issue, io);
       const completion = PHASE_MARKERS.remediate.completionMarker;
       // forge#3542: trusted, header-led comment with the sentinel as its own line.
-      const latest = latestMarked(comments, PHASE_MARKERS.remediate.header, completion);
+      // The trail must also belong to THIS run: when a per-kind bound marker was posted for
+      // this PR (buildArgs above), only trails posted AFTER the newest such trusted marker
+      // count — a stale earlier trail (or a forged one that predates dispatch) never decides.
+      let scoped = comments;
+      if (isRemediationKind(state.remediationKind ?? null) && state.pr != null) {
+        const bound = `FORGE:${REMEDIATION_BOUND_MARKERS[state.remediationKind]}: pr=${state.pr}`;
+        let at = -1;
+        comments.forEach((b, i) => { if (hasSentinelLine(b, bound)) at = i; });
+        if (at >= 0) scoped = comments.slice(at + 1);
+      }
+      const latest = latestMarked(scoped, PHASE_MARKERS.remediate.header, completion);
       if (latest === null)
         return { status: "failed", detail: `no ${completion} marker` };
       // Parse the **Re-gate outcome**: field remediate.md's Phase M8 posts
@@ -704,6 +776,26 @@ async function openPrFor(state, io) {
   const out = await io.gh(["pr", "list", "--head", state.branch, "--json", "number", "--state", "all"]);
   try { const a = JSON.parse(out || "[]"); return a[0]?.number ?? null; } catch { return null; }
 }
+/**
+ * forge#3535: the merged PR (if any) that shipped `branch` into `lane`.
+ * Build keys off the branch resolved from FORGE:BUILDER:COMPLETE, not
+ * `state.branch` (null on a fresh re-run), so this takes the branch explicitly.
+ * A PR merged into a different base, a closed-unmerged PR, no PR, or any
+ * gh/JSON error yields null: unknown is never "merged" (forge#3504/#3506).
+ * Returns `{ number }` with a real integer PR number, else null.
+ */
+async function mergedPrForBranch(branch, lane, io) {
+  if (!branch || !lane) return null;
+  try {
+    const out = await io.gh(["pr", "list", "--head", branch, "--state", "all",
+      "--json", "number,state,mergedAt,baseRefName"]);
+    const a = JSON.parse(out || "[]");
+    if (!Array.isArray(a)) return null;
+    const hit = a.find((p) => p && typeof p === "object" && Number.isInteger(p.number)
+      && (!!p.mergedAt || p.state === "MERGED") && p.baseRefName === lane);
+    return hit ? { number: hit.number } : null;
+  } catch { return null; }
+}
 async function prStatusFor(state, io) {
   const n = await openPrFor(state, io);
   if (!n) return null;
@@ -712,7 +804,8 @@ async function prStatusFor(state, io) {
   try { j = JSON.parse(out || "{}"); } catch { return null; }
   const labels = (j.labels || []).map((l) => l.name || l);
   return { number: j.number, merged: !!j.mergedAt || j.state === "MERGED",
-           needsHuman: labels.includes("needs-human") };
+           needsHuman: labels.includes("needs-human"),
+           remediating: labels.includes("workflow:remediating") };
 }
 
 /** The engine's transition function: first uncommitted phase whose gate holds. */

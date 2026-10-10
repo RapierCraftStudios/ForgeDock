@@ -1469,6 +1469,8 @@ describe("doctor --fix (forge#1944)", () => {
       // stay in sync with every workflow:* label in bin/labels.json — this
       // list existing exactly to mirror that filter, not the full manifest.
       "workflow:engine-error",
+      // forge#3541: autonomous remediation pending state.
+      "workflow:remediating",
     ].map((name) => ({ name }));
 
     const ghStubPath = join(stubBin, "gh-stub.js");

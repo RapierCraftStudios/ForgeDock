@@ -229,20 +229,41 @@ if command -v node >/dev/null 2>&1; then
   done
 fi
 
-# Guard (#3400): gate-helper (trusted-comments.sh) resolution loops must never list "$PWD" — the repo
-# under review is author-controlled. Exact copy counts + normalized identity prevent drift.
-TC_LOOPS="commands/review-pr.md:7 commands/work-on/review.md:1"
-: > "$T/tc_all"
-for e in $TC_LOOPS; do
-  f="${e%%:*}"; want="${e##*:}"
-  n=$(grep -c 'trusted-comments.sh" \]' "$ROOT/$f"); expect "trusted-comments.sh loop count in $f" "$want" "$n"
-  grep -n 'for _c in' "$ROOT/$f" | while IFS=: read -r ln _; do
-    sed -n "$((ln+1))p" "$ROOT/$f" | grep -q 'trusted-comments.sh' && sed -n "${ln}p" "$ROOT/$f" | sed 's/^[ ]*//' >> "$T/tc_all"
-  done
-done
-expect "trusted-comments.sh loops total" 8 "$(wc -l < "$T/tc_all" | tr -d ' ')"
-expect "trusted-comments.sh loops byte-identical" 1 "$(sort -u "$T/tc_all" | wc -l | tr -d ' ')"
-grep -qF '"$PWD"' "$T/tc_all" && bad 'trusted-comments.sh loop lists "$PWD"' || ok
+# Guard (#3400, #3454): every gate-helper (trusted-comments.sh) resolver block under commands/ must be
+# byte-identical, must scan the plugin cache (the plugin-root placeholder is not always substituted in
+# forked runs, so without the scan a cache-only install never resolves the script), and must never list the
+# working directory (the repo under review is author-controlled). Blocks are discovered, not hard-coded, so a
+# new copy cannot drift unnoticed. A block runs from its '# TRUSTED_SCRIPT resolver' header to 'done <<< "$_tc"'.
+: > "$T/tc_all"; TC_BLOCKS=0; TC_STRAY=0
+while IFS= read -r f; do
+  awk -v out="$T/tc_all" '
+    /^[ ]*# TRUSTED_SCRIPT resolver/ {inb=1; line=""}
+    inb { sub(/^[ ]+/, ""); line = line $0 "\\n" }
+    inb && /^done <<< "\$_tc"$/ { print line >> out; inb=0; n++ }
+    END { print n+0 }' "$f" > "$T/tc_n"
+  TC_BLOCKS=$((TC_BLOCKS + $(cat "$T/tc_n")))
+  # every trusted-comments.sh resolution case-arm must belong to a block (no stray short copies)
+  arms=$(grep -c 'trusted-comments.sh" \]' "$f" || true)
+  [ "$arms" = "$(cat "$T/tc_n")" ] || { TC_STRAY=$((TC_STRAY + 1)); echo "  stray resolver in $f: $arms arms vs $(cat "$T/tc_n") blocks"; }
+done < <(grep -rl 'trusted-comments.sh" \]' "$ROOT/commands")
+expect "trusted-comments.sh resolver blocks discovered (review-pr 7 + review + remediate + phase-4)" 10 "$TC_BLOCKS"
+expect "trusted-comments.sh resolvers without a canonical block" 0 "$TC_STRAY"
+expect "trusted-comments.sh resolvers byte-identical" 1 "$(sort -u "$T/tc_all" | wc -l | tr -d ' ')"
+grep -qF 'plugins/cache/forgedock/forgedock' "$T/tc_all" && ok || bad 'trusted-comments.sh resolver lacks the plugin-cache scan'
+grep -qF 'CLAUDE_CONFIG_DIR' "$T/tc_all" && ok || bad 'trusted-comments.sh resolver lacks CLAUDE_CONFIG_DIR'
+grep -qF '"$PWD"' "$T/tc_all" && bad 'trusted-comments.sh resolver lists "$PWD"' || ok
+
+# Behavior (#3454): a cache-only install with an unsubstituted plugin-root placeholder must resolve the script.
+# Run the real block from review.md against a fake HOME that has only plugins/cache/forgedock/forgedock/<semver>.
+awk '/^[ ]*# TRUSTED_SCRIPT resolver/ {inb=1} inb {sub(/^[ ]+/, ""); print} inb && /^done <<< "\$_tc"$/ {exit}' "$ROOT/commands/work-on/review.md" > "$T/tc_block.sh"
+mkdir -p "$T/tchome/.claude/plugins/cache/forgedock/forgedock/1.9.0/scripts" "$T/tchome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts" "$T/tcwork"
+: > "$T/tchome/.claude/plugins/cache/forgedock/forgedock/1.9.0/scripts/trusted-comments.sh"
+: > "$T/tchome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts/trusted-comments.sh"
+mkdir -p "$T/tcwork/scripts"; : > "$T/tcwork/scripts/trusted-comments.sh"   # author-controlled cwd copy must NOT win
+out=$(cd "$T/tcwork" && env -i PATH="$PATH" HOME="$T/tchome" bash -c 'source "$1"; printf %s "$TRUSTED_SCRIPT"' _ "$T/tc_block.sh" 2>&1)
+expect "cache-only install resolves newest cached trusted-comments.sh" "$T/tchome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts/trusted-comments.sh" "$out"
+out=$(cd "$T/tcwork" && env -i PATH="$PATH" HOME="$T/nohome" bash -c 'source "$1"; printf %s "$TRUSTED_SCRIPT"' _ "$T/tc_block.sh" 2>&1)
+expect "no install resolves empty (cwd copy never used)" "" "$out"
 
 echo "forge-root tests: pass=$PASS fail=$FAILN skipped=$SKIPPED"
 [ "$FAILN" -eq 0 ]
