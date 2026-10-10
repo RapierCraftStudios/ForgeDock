@@ -793,6 +793,54 @@ describe("runIssue", () => {
     assert.equal(s.issue, 42);
   });
 
+  it("forge#3506: hydrate from a blocked-review index (terminal:false, needs-human) resumes into remediate, never close", async () => {
+    const { w, io } = fakeWorld();
+    w.body = serializeState({
+      v: 5, run: "r_42_staging", issue: 42, lane: "staging",
+      committed: ["investigate", "build", "review"],
+      phase: "remediate", branch: "fix/real-branch-42", pr: 7,
+      terminal: false, terminalReason: "needs-human", lease: null,
+    });
+    w.pr = 7; w.prNeedsHuman = true; w.commitsAhead = 1;
+    w.markers = " INVESTIGATION:COMPLETE FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`";
+    const runCounts = {};
+    const script = {
+      "work-on/remediate": () => { w.markers += " FORGE:REMEDIATION:COMPLETE **Re-gate outcome**: HELD-AWAITING-MERGE"; },
+      "work-on/close": () => { throw new Error("close must not run for a blocked, open PR"); },
+    };
+    const runner = async ({ commandName }) => {
+      runCounts[commandName] = (runCounts[commandName] || 0) + 1;
+      script[commandName]?.();
+      return { status: "complete" };
+    };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(runCounts["work-on/remediate"], 1);
+    assert.equal(runCounts["work-on/close"] || 0, 0);
+    assert.equal(res.terminalReason, "awaiting-merge");
+  });
+
+  it("forge#3506: hydrate from a decomposed index (terminal:false) resumes into decompose, not build", async () => {
+    const { w, io } = fakeWorld();
+    w.body = serializeState({
+      v: 2, run: "r_42_staging", issue: 42, lane: "staging",
+      committed: ["investigate"], phase: "decompose", branch: null, pr: null,
+      terminal: false, terminalReason: "decomposed", lease: null,
+    });
+    w.markers = " DECOMPOSE:YES INVESTIGATION:COMPLETE";
+    const runCounts = {};
+    const runner = async ({ commandName }) => {
+      runCounts[commandName] = (runCounts[commandName] || 0) + 1;
+      if (commandName === "work-on/decompose") w.markers += " <!-- FORGE:DECOMPOSED:COMPLETE -->";
+      return { status: "complete" };
+    };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(runCounts["work-on/decompose"], 1);
+    assert.equal(runCounts["work-on/build"] || 0, 0);
+    assert.equal(res.terminalReason, "decomposed");
+  });
+
   it("forge#3499: a legacy run-log that committed context/architect still resolves to build (unknown committed ids are ignored)", async () => {
     const { w, io } = fakeWorld();
     w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT:COMPLETE";

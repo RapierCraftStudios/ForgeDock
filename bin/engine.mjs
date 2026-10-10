@@ -300,6 +300,15 @@ export async function runIssue(opts) {
 
   let phase;
   while ((phase = pickPhase(state))) {
+    // forge#3506 (SPEC-1/SPEC-2): a crash after a terminal-after phase committed (remediate or
+    // decompose) and before RUN_TERMINAL leaves its persisted reason on the commit event. Resume
+    // must honour that reason instead of picking the next phase (close would throw in buildArgs
+    // and end as engine-error; build would run on a decomposed parent). Review's `needs-human`
+    // is a handoff to remediate, so only these two committed phases trigger the guard.
+    if (state.terminalReason && TERMINAL_REASONS.includes(state.terminalReason) &&
+        ((state.committed.includes("remediate") && !["merged", "decomposed", "invalid"].includes(state.terminalReason)) ||
+         (state.committed.includes("decompose") && state.terminalReason === "decomposed")))
+      return await terminate(state, state.terminalReason);
     // forge#2352: state-vs-GitHub divergence guard. Every phase's own
     // `entryCondition` only ever checked `state.committed` (local run-log
     // progress) — never the issue's live GitHub state/labels — so a phase
@@ -575,9 +584,13 @@ export async function runIssue(opts) {
     if (outcome.status === "blocked" && commitOutputs.pr == null && state.pr != null)
       commitOutputs.pr = state.pr;
     const blockedReason = outcome.status === "blocked" ? (outcome.reason || "needs-human") : null;
+    // forge#3506: committed outcomes also carry handoff/terminal reasons (investigate
+    // `decomposed`, remediate `merged`/`awaiting-merge`/`needs-human`). Persist them on the
+    // commit event too, so a crash before RUN_TERMINAL or a rebuild cannot drop them.
+    const commitReason = blockedReason ?? outcome.terminalReason ?? null;
     appendEvent(dir, issue, {
       event: "PHASE_COMMIT", phase: phase.id, outputs: commitOutputs, usage: outcome.usage ?? null,
-      ...(blockedReason ? { terminalReason: blockedReason } : {}),
+      ...(commitReason ? { terminalReason: commitReason } : {}),
     });
     state = deriveState(readLog(dir, issue));
     const terminalReason = blockedReason ?? outcome.terminalReason;
@@ -748,6 +761,14 @@ function eventsFromIndex(idx) {
     if (phase === "build" && idx.branch) outputs.branch = idx.branch;
     if (phase === "review" && idx.pr != null) outputs.pr = idx.pr;
     events.push({ event: "PHASE_COMMIT", phase, outputs });
+  }
+  // forge#3506: a non-terminal reason is a handoff (e.g. review -> remediate). Replay it on
+  // the last committed PHASE_COMMIT (deriveState is last-wins), never as RUN_TERMINAL, which
+  // would terminate the run. Nothing to attach it to when no phase is committed.
+  if (!idx.terminal && idx.terminalReason && idx.committed.length > 0) {
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i].event === "PHASE_COMMIT") { events[i].terminalReason = idx.terminalReason; break; }
+    }
   }
   if (idx.terminal) events.push({ event: "RUN_TERMINAL", reason: idx.terminalReason });
   return events;

@@ -128,6 +128,26 @@ function makeWorld() {
   return { w, io, runner };
 }
 
+// forge#3506: deterministic crash armed on the first FORGE:STATE mirror write that follows a
+// PHASE_COMMIT of `phase` (i.e. after the commit event, before RUN_TERMINAL). Returns a probe
+// recording the run-log tail at the moment of the crash so tests can assert the window was hit.
+function crashAfterCommitOf(io, phase) {
+  const probe = { fired: false, tail: null };
+  const gh = io.gh;
+  io.gh = async (args) => {
+    if (!probe.fired && args.join(" ").startsWith("issue edit") && args.includes("--body")) {
+      const ev = readLog(dir, 42);
+      const last = ev[ev.length - 1];
+      if (last?.event === "PHASE_COMMIT" && last.phase === phase) {
+        probe.fired = true; probe.tail = ev.map((e) => e.event + (e.phase ? ":" + e.phase : ""));
+        throw new Error("CRASH after " + phase + " commit, before RUN_TERMINAL");
+      }
+    }
+    return gh(args);
+  };
+  return probe;
+}
+
 // Re-launch runIssue like a supervisor re-spawning a killed process. The run-log
 // on disk persists between relaunches; a clean run returns without throwing.
 // Returns { res, launches } so tests can assert a crash actually fired (launches >= 2),
@@ -225,6 +245,76 @@ describe("crash injection: resume from the durable run-log", () => {
     assert.ok(launches >= 2, `mid-review crash must fire and require resume (launches=${launches})`);
     assert.equal(res.terminalReason, "merged");
     assertCleanMerge(w);
+  });
+});
+
+describe("crash injection: forge#3506 handoff reasons survive a crash before RUN_TERMINAL", () => {
+  it("investigate decomposed: killed on the mirror write after its commit, resume routes to decompose (local log)", async () => {
+    const { w, io, runner } = makeWorld();
+    w.markers = " DECOMPOSE:YES";
+    const ran = [];
+    const wrapped = async (a) => {
+      ran.push(a.commandName);
+      if (a.commandName === "work-on/decompose") { w.markers += " <!-- FORGE:DECOMPOSED:COMPLETE -->"; return { status: "complete" }; }
+      return runner(a);
+    };
+    w.crashAtEdit = 2; // first mirror write after the investigate PHASE_COMMIT
+    const { res, launches } = await runToCompletion({ dir, io, runner: wrapped });
+    assert.ok(launches >= 2, "crash must fire");
+    assert.equal(res.terminalReason, "decomposed");
+    assert.ok(ran.includes("work-on/decompose"));
+    assert.ok(!ran.includes("work-on/build"), "must not fall through to build");
+    const inv = readLog(dir, 42).find((e) => e.event === "PHASE_COMMIT" && e.phase === "investigate");
+    assert.equal(inv.terminalReason, "decomposed");
+  });
+
+  it("decompose committed, killed before RUN_TERMINAL: resume terminates decomposed, never builds the parent", async () => {
+    const { w, io, runner } = makeWorld();
+    w.markers = " DECOMPOSE:YES";
+    const ran = [];
+    const wrapped = async (a) => {
+      ran.push(a.commandName);
+      if (a.commandName === "work-on/decompose") { w.markers += " <!-- FORGE:DECOMPOSED:COMPLETE -->"; return { status: "complete" }; }
+      return runner(a);
+    };
+    const probe = crashAfterCommitOf(io, "decompose");
+    const { res, launches } = await runToCompletion({ dir, io, runner: wrapped });
+    assert.ok(launches >= 2, "crash must fire");
+    assert.ok(probe.fired, "crash must hit the window after the decompose commit");
+    assert.ok(!probe.tail.includes("RUN_TERMINAL"), "crash is before RUN_TERMINAL");
+    assert.equal(res.terminalReason, "decomposed");
+    assert.ok(!ran.includes("work-on/build"), "resume must not fall through to build on the decomposed parent");
+  });
+
+  it("blocked review then remediate commit, killed before RUN_TERMINAL: resume never closes as merged (needs-human persisted)", async () => {
+    const { w, io, runner } = makeWorld();
+    const ran = [];
+    const wrapped = async (a) => {
+      ran.push(a.commandName);
+      if (a.commandName === "work-on/review") { w.reviewRuns++; w.pr = 7; w.labels.push("needs-human"); return { status: "complete" }; }
+      if (a.commandName === "work-on/remediate") { w.markers += " FORGE:REMEDIATION:COMPLETE **Re-gate outcome**: HELD-AWAITING-MERGE"; return { status: "complete" }; }
+      return runner(a);
+    };
+    // review's detectOutcome sees an open PR carrying needs-human
+    const gh = io.gh;
+    io.gh = async (args) => {
+      if (args.join(" ").startsWith("pr view")) return JSON.stringify({ number: w.pr, state: "OPEN", mergedAt: null, labels: [{ name: "needs-human" }] });
+      return gh(args);
+    };
+    const probe = crashAfterCommitOf(io, "remediate");
+    const { res, launches } = await runToCompletion({ dir, io, runner: wrapped });
+    assert.ok(launches >= 2, "crash must fire");
+    assert.ok(probe.fired, "crash must hit the window after the remediate commit");
+    assert.equal(probe.tail[probe.tail.length - 1], "PHASE_COMMIT:remediate", "log ends at the remediate commit");
+    assert.ok(!probe.tail.includes("RUN_TERMINAL"), "crash is before RUN_TERMINAL");
+    assert.equal(ran.filter((c) => c === "work-on/remediate").length, 1, "resume must not re-run remediate");
+    assert.equal(ran.filter((c) => c === "work-on/review").length, 1, "resume must not re-run review");
+    assert.equal(res.terminalReason, "awaiting-merge");
+    assert.ok(!ran.includes("work-on/close"), "close must never run for a blocked/held PR");
+    const rem = readLog(dir, 42).find((e) => e.event === "PHASE_COMMIT" && e.phase === "remediate");
+    assert.equal(rem.terminalReason, "awaiting-merge");
+    const rev = readLog(dir, 42).find((e) => e.event === "PHASE_COMMIT" && e.phase === "review");
+    assert.equal(rev.terminalReason, "needs-human"); // needs-human handoff persisted on review's commit
   });
 });
 

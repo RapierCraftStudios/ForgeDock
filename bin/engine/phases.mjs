@@ -488,8 +488,14 @@ export const PHASES = [
     command: "work-on/close",
     buildArgs: async (state, ctx, io) => {
       // Only --terminal-state is required by close.md; the rest are optional context.
-      const terminal = state.terminalReason === "decomposed" ? "decomposed"
-        : state.terminalReason === "invalid" ? "invalid" : "merged";
+      // forge#3506: fail closed — `merged` only from a null/merged reason. A residual
+      // non-merged handoff reason (needs-human, awaiting-merge, engine-error, ...) must never
+      // be closed as merged.
+      const reason = state.terminalReason ?? null;
+      if (reason !== null && !["merged", "decomposed", "invalid"].includes(reason))
+        throw new PhaseArgsError(`refusing close --terminal-state merged from terminalReason ${JSON.stringify(reason)}`);
+      const terminal = reason === "decomposed" ? "decomposed"
+        : reason === "invalid" ? "invalid" : "merged";
       const args = [String(state.issue), ...repoArgs(ctx), ...baseArgs(state)];
       // forge#3504: a merged close with no PR is fabricated evidence — require it.
       if (state.pr != null || terminal === "merged") args.push("--pr", need(state.pr, "pr", /^[0-9]+$/));
