@@ -520,7 +520,15 @@ describe("pickPhase", () => {
   // (result: OVER + ### Split Proposal) and no FORGE:BUILDER:COMPLETE.
   describe("build.detectOutcome — size-gate NEEDS_DECOMPOSE routes to decompose", () => {
     const build = PHASES.find(p => p.id === "build");
-    const withComments = (...bodies) => ({ gh: async () => JSON.stringify(bodies), git: async () => "0" });
+    // Bodies are strings (trusted OWNER) or {body, ...authorFields} objects. The
+    // body-only fetch gets bodies; the author-aware fetch (author_association in
+    // the jq) gets full comment objects, as the real API shape.
+    const asObj = (c) => (typeof c === "string" ? { body: c, author_association: "OWNER", user: { login: "owner", type: "User" } } : c);
+    const withComments = (...items) => ({
+      gh: async (args) => JSON.stringify(args.join(" ").includes("author_association") ? items.map(asObj) : items.map((c) => asObj(c).body)),
+      git: async () => "0",
+    });
+    const stranger = (body) => ({ body, author_association: "NONE", user: { login: "rando", type: "User" } });
     const gate = (result, proposal = true) =>
       `<!-- FORGE:DIFF_SIZE -->\n## Diff Size\n\ndiff_lines: 1906\nexcluded_lines: 0\nthreshold: 1000\nresult: ${result}\n` +
       (proposal ? "### Split Proposal\n- **A** — a.mjs\n" : "");
@@ -565,6 +573,83 @@ describe("pickPhase", () => {
     it("only the latest DIFF_SIZE counts (OVER then refreshed OK)", async () => {
       const o = await build.detectOutcome(st, withComments(gate("OVER"), gate("OK")));
       assert.equal(o.status, "failed");
+    });
+
+    describe("trust filter", () => {
+      const withEnv = async (env, fn) => {
+        const saved = {};
+        for (const k of Object.keys(env)) { saved[k] = process.env[k]; if (env[k] === undefined) delete process.env[k]; else process.env[k] = env[k]; }
+        try { return await fn(); } finally { for (const k of Object.keys(saved)) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } }
+      };
+      const noEnv = { FORGE_TRAIL_TRUSTED_ASSOCIATIONS: undefined, FORGE_TRAIL_TRUSTED_LOGINS: undefined };
+
+      it("untrusted OVER gate never routes", async () => {
+        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(stranger(gate("OVER")))));
+        assert.equal(o.status, "failed");
+        assert.equal(o.terminalReason, undefined);
+      });
+
+      it("untrusted override does not suppress a trusted OVER gate", async () => {
+        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(gate("OVER"), stranger(override))));
+        assert.equal(o.terminalReason, "decomposed");
+      });
+
+      it("trusted override with empty justification does not suppress", async () => {
+        for (const bare of ["<!-- FORGE:SIZE_OVERRIDE -->", "<!-- FORGE:SIZE_OVERRIDE -->\r\n\r\n<!-- note -->\r\n  \r\n"]) {
+          const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(gate("OVER"), bare)));
+          assert.equal(o.terminalReason, "decomposed", JSON.stringify(bare));
+        }
+      });
+
+      it("trusted override with a justification suppresses (CRLF body too)", async () => {
+        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(gate("OVER"), "<!-- FORGE:SIZE_OVERRIDE -->\r\nJustified: bulk.\r\n")));
+        assert.equal(o.status, "failed");
+      });
+
+      it("CRLF gate body routes", async () => {
+        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(gate("OVER").replace(/\n/g, "\r\n"))));
+        assert.equal(o.terminalReason, "decomposed");
+      });
+
+      it("only trusted comments count when an untrusted later OK is interleaved", async () => {
+        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(gate("OVER"), stranger(gate("OK")))));
+        assert.equal(o.terminalReason, "decomposed");
+      });
+
+      it("trusted Bot author is accepted", async () => {
+        const bot = { body: gate("OVER"), author_association: "NONE", user: { login: "app[bot]", type: "Bot" } };
+        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(bot)));
+        assert.equal(o.terminalReason, "decomposed");
+      });
+
+      it("login in FORGE_TRAIL_TRUSTED_LOGINS is accepted", async () => {
+        const c = { body: gate("OVER"), author_association: "NONE", user: { login: "ci-user", type: "User" } };
+        const o = await withEnv({ ...noEnv, FORGE_TRAIL_TRUSTED_LOGINS: "x, ci-user" }, () => build.detectOutcome(st, withComments(c)));
+        assert.equal(o.terminalReason, "decomposed");
+      });
+
+      it("explicitly empty FORGE_TRAIL_TRUSTED_ASSOCIATIONS trusts no association", async () => {
+        const o = await withEnv({ ...noEnv, FORGE_TRAIL_TRUSTED_ASSOCIATIONS: "" }, () => build.detectOutcome(st, withComments(gate("OVER"))));
+        assert.equal(o.status, "failed");
+      });
+
+      it("fails closed on fetch error, non-JSON, and missing author data", async () => {
+        const mk = (fn) => ({ gh: fn, git: async () => "0" });
+        const body = gate("OVER");
+        for (const io of [
+          mk(async (a) => { if (a.join(" ").includes("author_association")) throw new Error("boom"); return JSON.stringify([body]); }),
+          mk(async (a) => (a.join(" ").includes("author_association") ? "not json" : JSON.stringify([body]))),
+          mk(async () => JSON.stringify([body])), // bodies only, no author fields
+        ]) {
+          const o = await withEnv(noEnv, () => build.detectOutcome(st, io));
+          assert.equal(o.status, "failed");
+        }
+      });
+
+      it("a trusted FORGE:DECOMPOSED comment suppresses re-routing", async () => {
+        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(gate("OVER"), "<!-- FORGE:DECOMPOSED:COMPLETE -->")));
+        assert.equal(o.status, "failed");
+      });
     });
 
     it("a posted FORGE:BUILDER:COMPLETE with commits wins over a stale OVER", async () => {
