@@ -108,12 +108,12 @@ remediate L2, reviewers L3, same as the table.
 
 | Phase result | Router action |
 |--------------|---------------|
-| `REVIEW_RESULT: status: NEXT, next: remediate` | Phase 4R: post the bound marker (`CI_REMEDIATION` / `INPR_REMEDIATION`) immediately before invoking `work-on:remediate`, so an interrupted handoff is retried, not counted. `AUTO-LANDED` → done (remediation already ran close). `REREVIEW_REQUIRED` → fallback re-review from the router. `ALREADY_DONE` (single-attempt guard) → `inpr-fix`: re-invoke review (waive); `ci-gate`: ensure `needs-human`, stop. `BLOCKED` → ensure `needs-human`, stop. Resume after an interrupted remediation (no `needs-human`, no later `REMEDIATION:COMPLETE`) re-adds `needs-human` and returns to 4R, not to review. Other outcome: `inpr-fix` → re-invoke review once (it waives the in-PR gate); `ci-gate` → terminal. |
+| `REVIEW_RESULT: status: NEXT, next: remediate` | Phase 4R: post the bound marker (`CI_REMEDIATION` / `INPR_REMEDIATION` / `BASESYNC_REMEDIATION`, the last for `remediation: base-sync`, a merge-only base sync) immediately before invoking `work-on:remediate`, so an interrupted handoff is retried, not counted. `AUTO-LANDED` → done (remediation already ran close). `REREVIEW_REQUIRED` → fallback re-review from the router. `ALREADY_DONE` (single-attempt guard) → `inpr-fix`: re-invoke review (waive); `ci-gate`: ensure `needs-human`, stop. `BLOCKED` → ensure `needs-human`, stop. Resume after an interrupted remediation (no `needs-human`, no later `REMEDIATION:COMPLETE`) re-adds `needs-human` and returns to 4R, not to review. Other outcome: `inpr-fix` → re-invoke review once (it waives the in-PR gate); `ci-gate` → terminal. |
 | `REMEDIATE_RESULT` from `--remediate` entry | unchanged (Phase 0A.1) |
 
 ## 6. What does not change
 
-- Build still sequences its own children; the headless engine (`bin/engine/phases.mjs`) is unaffected.
+- Build still sequences its own children (worktree, then context / architect / implement / validate). The headless engine (`bin/engine/phases.mjs`) is **not** exempt from the argument contract: every phase sub-skill takes all inputs as arguments, so each engine phase builds them via `buildArgs` (`--repo`, `--gh-flag`, `--base`, `--worktree`, `--branch`, `--pr`, `--terminal-state` as the target spec's `argument-hint` requires). The engine's phase table is investigate, decompose, build, review, remediate, close; `context` and `architect` are no longer engine phases because they need the worktree build creates. `bin/engine/phases-args.test.mjs` fails CI when a phase's args drift from its spec's `argument-hint`.
 - `/orchestrate` still dispatches one worker `Agent` per issue (L1).
 - Phases keep their specs, `*_RESULT` contracts and GitHub markers; phase-trail verification is unchanged.
 - Solo `/work-on` gets one extra layer of headroom.

@@ -150,13 +150,31 @@ Agents receive `$IS_REENTRY`, `$PRIOR_OPEN_FINDINGS`, and `$PRIOR_RESOLVED_FINDI
 Resolve the staging→main PR number and post a routing marker immediately. This creates an audit trail — if a staging→main PR has no `FORGE:REVIEW_ROUTE` comment after this command was invoked, the review was bypassed or never started.
 
 ```bash
-# Resolve PR_NUMBER from $ARGUMENTS
-# $ARGUMENTS may be: a PR number, "staging", "feature", or "staging:feature"
+# Resolve PR_NUMBER from the argument string (never name the loader placeholder in this block: every
+# occurrence is substituted textually, comments included) <!-- Added: forge#3466 -->
+# The argument string may be: a PR number, "staging", "feature", or "staging:feature"
 # Only the first token is the PR ref; later tokens are flags (--auto-merge, --issue, ...) <!-- allowlist:check-command-side-effects -->
-PR_ARG="${ARGUMENTS%% *}"
+# The loader substitutes the text before bash parses it, so read it from a quoted heredoc (never a quoted
+# assignment) and reject any string with a quote, backtick, dollar sign, backslash, newline or tab. <!-- Added: forge#3466 -->
+# NONCE RULE: before running, replace NONCE in BOTH delimiter lines with a fresh random hex string (e.g. `openssl rand -hex 16`) not present in the argument text. <!-- Added: forge#3466 -->
+IFS= read -r -d '' STAGING_ARGS_RAW <<'FORGE_ARGS_EOF_NONCE'
+$ARGUMENTS
+FORGE_ARGS_EOF_NONCE
+STAGING_ARGS_RAW="${STAGING_ARGS_RAW%$'\n'}"
+STAGING_ARGS_REJECTED=false
+case "$STAGING_ARGS_RAW" in
+  *'"'*|*'`'*|*'$'*|*'\'*|*$'\n'*|*$'\t'*)
+    echo "review-pr-staging: rejected argument string (contains a quote, backtick, dollar sign, backslash, newline or tab) - nothing parsed" >&2
+    STAGING_ARGS_REJECTED=true; STAGING_ARGS_RAW="" ;;
+esac
+PR_ARG="${STAGING_ARGS_RAW%% *}"
 PR_ARG_NUM=$(printf '%s' "$PR_ARG" | sed -nE 's#^(https?://[^ ]*/pull/)?([0-9]+)$#\2#p')
 if [ -n "$PR_ARG_NUM" ]; then
   PR_NUMBER="$PR_ARG_NUM"
+elif [ "$STAGING_ARGS_REJECTED" = true ]; then
+  # Rejected string: stop. Never fall through to the open staging PR lookup or run later phases with no PR. <!-- Added: forge#3466 -->
+  echo "review-pr-staging: rejected argument string - stopping (nothing reviewed, nothing posted)" >&2
+  exit 1
 else
   # Find the open staging→main PR
   PR_NUMBER=$(gh pr list ${GH_FLAG} \
@@ -167,7 +185,8 @@ else
     --jq '.[0].number' 2>/dev/null || echo "")
 fi
 
-REVIEW_SHA_STAGING=$(gh pr view "$PR_NUMBER" ${GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null | cut -c1-7 || echo "n/a")
+REVIEW_SHA_STAGING="n/a"  # gh pr view "" falls back to the current branch PR, so only look up a resolved number <!-- Added: forge#3466 -->
+[ -n "$PR_NUMBER" ] && REVIEW_SHA_STAGING=$(gh pr view "$PR_NUMBER" ${GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null | cut -c1-7 || echo "n/a")
 
 if [ -n "$PR_NUMBER" ]; then
   gh pr comment "$PR_NUMBER" ${GH_FLAG} --body "<!-- FORGE:REVIEW_ROUTE mode=staging-deploy spec=review-pr-staging.md sha=${REVIEW_SHA_STAGING} -->"

@@ -416,7 +416,7 @@ RESOLUTION=$(resolve_script 'transition-label'); TIER="${RESOLUTION%%:*}"; SCRIP
 case "$TIER" in
   adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} investigating ;;
   prose)
-    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:investigating" --remove-label "workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:investigating" --remove-label "workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
     ;;
 esac
 ```
@@ -581,6 +581,26 @@ bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN_LABEL} --repo-path
    > **Scope-Gap Warning**: The issue spec lists `{PRIMARY_FILE}` but the same pattern exists in `{SIBLING_FILE}:{LINE}`. These were likely introduced together. Recommend widening scope to fix all callers in this PR, or creating follow-up issues for the other files before proceeding.
 
    Do NOT silently exclude sibling matches. The appropriate output when sibling files have the same bug is to flag them explicitly — even if the issue spec's silence appears intentional. The fix-approach validation step (step 8) will confirm whether to widen scope or create follow-ups. <!-- Added: forge#383 -->
+7.6. **Finding Pattern Sweep** *(conditional — eligible when the issue has label `review-finding`, or its body carries a `FORGE:PATTERN` or `FORGE:PATTERN-CLASS` tag)*: Review findings are instances of a defect class. Fixing only the cited instance lets sibling instances resurface in the next review, so sweep the whole repo for the class before settling the affected-file list. For eligible issues this step replaces step 7.5; step 7.5 runs for non-eligible issues, and as the fallback when 7.6 is skipped or degrades. <!-- Added: forge#3449 -->
+   ```bash
+   REPO="{GH_REPO}"; NUMBER="{NUMBER}"
+   BODY=$(gh issue view "$NUMBER" -R "$REPO" --json body --jq '.body') || BODY=""
+   # Slug comes from model-written text: validate before ANY shell or jq use.
+   # Class-level issues carry `<!-- FORGE:PATTERN: slug -->` too (review-pr Phase 6C), so one extractor covers both.
+   SLUG=$(printf '%s\n' "$BODY" | grep -o 'FORGE:PATTERN: [A-Za-z0-9_-]*' | head -1 | sed 's/^FORGE:PATTERN: //')
+   if ! [[ "$SLUG" =~ ^[a-z0-9-]+$ ]]; then
+     echo "PATTERN SWEEP SKIPPED: no valid FORGE:PATTERN slug (expected ^[a-z0-9-]+$) — fall back to step 7.5"
+     SLUG=""
+   fi
+   ```
+   When `SLUG` is non-empty:
+   - **Derive queries** from: the slug itself, the finding's **Prevention** sentence (extract its key identifiers), every path under **Files**, and the symbol, call, or condition cited at the defect site. Use 2-5 queries; each query is a fixed string, not a regex. A query must match `^[A-Za-z0-9_.:/-]{3,80}$` (identifier-like, no spaces, quotes, backticks, `$`, `|`); drop any query that does not, and never run an empty query (`-F ""` matches every line).
+   - **Search the whole repo** (not just the affected directory), capturing the exit status so a failure is visible instead of masked by a pipe: `OUT=$(timeout 30 git grep -n -F -- "$QUERY"); RC=$?` (use `timeout` only if `command -v timeout` succeeds; stock macOS lacks it). `RC=0` means hits, `RC=1` means no match (0 hits is a valid result), any other `RC` (including 124, timeout) means the query failed. Quote the variable, always pass `-F` and `--`. Then cap: `printf '%s\n' "$OUT" | head -31`.
+   - **Hit cap**: record at most 30 hits per query. If a query returns more, record the first 30 and mark the query `truncated at 30` — never silently drop hits.
+   - **Disposition per hit** (MANDATORY, no unlabeled hits): `fix` (same defect class, must be changed in this PR) or `not-affected` with a one-line reason (e.g. already guarded, different semantics). The cited instance is always a `fix` row. Record each hit as `file:line` only (never the matched line text), one table row per hit.
+   - **Scope cap**: if more than 25 `fix` rows result, do not grow one PR to fit them. Record the cited instance plus the rows in the same subsystem as `fix`, mark the rest `fix-deferred`, and recommend decomposition in the report (set `decompose: YES` if the remaining scope is too large for one PR).
+   - **Degrade, never block**: if any query fails (`RC` other than 0 or 1), write `Pattern sweep skipped: {reason}` in the `### Pattern Sweep` section, fall back to step 7.5, and continue. A failed query must never be recorded as 0 hits. The sweep is advisory evidence, not a gate.
+   - Every `fix` row MUST appear in `### Affected Files`, and the acceptance spec MUST include a class-wide coverage check plus a check that the added test exercises more than the reviewer's single repro (see Phase 1C).
 8. **Fix-approach validation** — if the issue proposes a fix, don't adopt it as spec. Trace through the target system's middleware, auth, routing, config. Cross-domain: if fix in domain A interacts with domain B, read domain B's files too.
 
 ---
@@ -589,7 +609,7 @@ bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN_LABEL} --repo-path
 
 The comment MUST include a terminal sentinel at the very end, AFTER all required sections are present. **The sentinel is conditional on the resolved Verdict — it is NOT always `<!-- INVESTIGATION:COMPLETE -->`:**
 
-- **Verdict is INVALID** → close with `<!-- INVESTIGATION:INVALID -->`. This is a distinct, already-wired-up terminal marker: `bin/engine/phases.mjs`'s `detectOutcome` for the `investigate` phase checks for it explicitly (ahead of `INVESTIGATION:COMPLETE`) and routes to `terminalReason: "invalid"`; `bin/hooks/interactive-engine.mjs`'s `PHASE_MARKERS` table also already treats it as terminal. Emitting `INVESTIGATION:COMPLETE` for an INVALID verdict is what previously caused every completed investigation to read as `{verdict: "CONFIRMED"}` regardless of actual outcome — do NOT regress this (forge#2350).
+- **Verdict is INVALID** → close with `<!-- INVESTIGATION:INVALID -->`. This is a distinct, already-wired-up terminal marker: `bin/engine/phases.mjs`'s `detectOutcome` for the `investigate` phase reads it as the closing line of the newest trusted `<!-- FORGE:INVESTIGATOR -->` comment (never as a substring of prose or from an untrusted author) and routes to `terminalReason: "invalid"`; `bin/hooks/interactive-engine.mjs`'s `PHASE_MARKERS` table also already treats it as terminal. Emitting `INVESTIGATION:COMPLETE` for an INVALID verdict is what previously caused every completed investigation to read as `{verdict: "CONFIRMED"}` regardless of actual outcome — do NOT regress this (forge#2350).
 - **Verdict is CONFIRMED or PARTIAL** → close with `<!-- INVESTIGATION:COMPLETE -->` as before (PARTIAL still routes to `ready-to-build` in Phase 1D — only INVALID gets the distinct terminal sentinel).
 
 Compute the sentinel once, before building the comment body:
@@ -615,6 +635,9 @@ ANNOTATION_BODY=$(node packages/protocol/src/cli.js emit INVESTIGATOR \
   --field "Task Type={TASK_TYPE}" \
   --field "Decomposition Assessment={YES|NO} — {reason}")
 # ANNOTATION_BODY now has opening tag + required fields + INVESTIGATION:COMPLETE sentinel.
+# After appending the body sections, the Decomposition Assessment MUST be followed by exactly one
+# machine-readable marker line (`<!-- DECOMPOSE:YES -->` or `<!-- DECOMPOSE:NO -->`) — see the
+# "Decomposition marker" rule below the template. The codec does not add it for you.
 # NOTE: the codec's sentinel is fixed — do not use this path when Verdict=INVALID (see caveat above).
 # Append the Markdown body sections to it before posting.
 ```
@@ -632,6 +655,7 @@ if [ "$ATTRIBUTION_ANNOTATION_LINK" = "true" ]; then
 fi
 ```
 
+<!-- allowlist:check-spec-bash -->
 ```bash
 gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 ## Investigation Report
@@ -651,7 +675,14 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 {specific root cause, with file:line references where applicable}
 
 ### Affected Files
-{numbered list of files that need changes}
+{numbered list of files that need changes. For \`review-finding\` issues, include every file with a \`fix\` row from the Pattern Sweep below.}
+
+### Pattern Sweep
+{Emit for \`review-finding\` issues (step 7.6). Omit this section for other issues. One row per hit, hit as \`file:line\` only. A query with no hits gets one row with Hit \`none\`. On skip, write \`Pattern sweep skipped: {reason}\`. Queries are pre-validated identifier-like text (step 7.6), so they are safe to place in this template.}
+
+| Query | Hit | Disposition |
+|-------|-----|-------------|
+| {validated fixed-string query} | {file:line, \`none\`, or \`truncated at 30\`} | {fix \| not-affected — reason} |
 
 ### Evidence
 {specific findings — function names, line numbers, behavior observed}
@@ -672,6 +703,7 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 ### Decomposition Assessment
 **{YES|NO}** — {reason}
 {if YES: proposed sub-issues with titles and dependencies}
+<!-- DECOMPOSE:{YES|NO} -->
 
 ### Acceptance Spec <!-- Added: forge#1829 -->
 {For each item in the issue's ## Acceptance Criteria section, emit one machine-checkable check line using the format below. If the issue has no Acceptance Criteria section, derive checks from the Recommendation above. Each check MUST be specific, observable, and testable — not vague prose. Checks are consumed by build/validate Phase B6.5 as the merge gate.}
@@ -696,10 +728,18 @@ ACCEPTANCE_CHECK: id=ac-4 type=command target="grep -qE '(>= ?2|2\+)' commands/o
 
 **Self-defeating pipe guideline**: do NOT chain a `-q`/`--quiet` command into a downstream pipe consumer (e.g. `grep -q ... | grep ...`). A `-q` flag suppresses all stdout, so the next command in the pipe always receives empty input and the check can never pass regardless of the actual file content. If a check needs to verify two conditions against the same output, sequence them instead — e.g. `grep -qE 'first' file && grep -qE 'second' file` — or capture the output once and grep the captured variable.
 
+**Class-wide checks (review-finding issues)**: when a Pattern Sweep was recorded, emit at least one `ACCEPTANCE_CHECK` that verifies the fix covers every `fix` row (for example a `command` check that the defective pattern no longer matches anywhere in the swept paths) and one that verifies the added test covers a representative set of instances rather than the reviewer's single repro. <!-- Added: forge#3449 -->
+
 **Skipping**: if the issue has no verifiable acceptance criteria and none can be derived from the recommendation, emit a single sentinel: `ACCEPTANCE_CHECK: id=ac-skip type=skipped target="none" matcher="none" description=No machine-checkable criteria available — human review required`
 ${ANNOTATION_LINK_FOOTER}
 ${INVESTIGATION_SENTINEL}"
 ```
+
+**Rules for the template above (instructions, not template text; never copy them into the posted comment):**
+
+**Decomposition marker (MANDATORY, both output paths — template and codec)**: emit exactly one `<!-- DECOMPOSE:YES -->` or `<!-- DECOMPOSE:NO -->` line per investigator comment, matching the `**YES**`/`**NO**` verdict, on its own line (nothing else on that line) after the verdict line and any sub-issue list (the `**YES**`/`**NO**` line must stay directly under the heading — the resume parser reads it). The headless engine routes to `work-on/decompose` on this marker (or on the `**YES**` heading in older comments). Never quote or mention the opposite marker anywhere in the comment. Never emit it when Verdict=INVALID. <!-- Added: forge#3543 -->
+
+**Decomposition scopes the Acceptance Spec**: when the assessment is YES, the Acceptance Spec MUST cover only the first, in-scope item — or tag each check with the sub-item it belongs to (append `# item-N` to the description). Never emit checks for work the assessment assigns to a separate sub-issue: build's acceptance gate would otherwise fail on them and its repair loop would pull that work into this branch. <!-- Added: forge#3543 -->
 
 **Do not hardcode `<!-- INVESTIGATION:COMPLETE -->` as the closing line.** The closing line MUST be the `${INVESTIGATION_SENTINEL}` variable computed above — it resolves to `<!-- INVESTIGATION:INVALID -->` for an INVALID verdict and `<!-- INVESTIGATION:COMPLETE -->` otherwise. `INVESTIGATION:COMPLETE` and `INVESTIGATION:INVALID` are mutually exclusive within a single posted comment — never emit both.
 
@@ -1153,7 +1193,7 @@ RESOLUTION=$(resolve_script 'transition-label'); TIER="${RESOLUTION%%:*}"; SCRIP
 case "$TIER" in
   adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} ready-to-build ;;
   prose)
-    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:ready-to-build" --remove-label "workflow:investigating,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:ready-to-build" --remove-label "workflow:investigating,workflow:building,workflow:in-review,workflow:remediating,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
     ;;
 esac
 ```
@@ -1173,7 +1213,7 @@ RESOLUTION=$(resolve_script 'transition-label'); TIER="${RESOLUTION%%:*}"; SCRIP
 case "$TIER" in
   adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} invalid ;;
   prose)
-    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:invalid" --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:invalid" --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:awaiting-merge,workflow:merged,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
     ;;
 esac
 gh issue close {NUMBER} {GH_FLAG} --comment "Closing as invalid: {reason from investigation}"   # allowlist:check-command-side-effects

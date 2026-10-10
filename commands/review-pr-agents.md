@@ -46,17 +46,17 @@ For each agent selected in Phase 3B, read **only** the files relevant to that ag
 
 2. **Then read the persona file for each selected agent**:
 
-| Agent | Trigger | File |
-|-------|---------|------|
-| General Security & Quality Scan | ALWAYS RUNS | `review-pr-agents/security.md` |
-| Auth Conventions Auditor | AUTH domain | `review-pr-agents/auth.md` |
-| Billing Integrity Auditor | BILLING domain | `review-pr-agents/billing.md` |
-| Concurrency & Race Condition Auditor | CONCURRENCY or BILLING domain | `review-pr-agents/concurrency.md` |
-| Domain Logic Auditor | SCRAPING domain (requires `review.domains.scraping` in forge.yaml) | `review-pr-agents/scraper.md` |
-| Frontend Quality Auditor | WEB service touched | `review-pr-agents/frontend.md` |
-| API Design & Consistency Auditor | New/modified routers or SDK/OpenAPI files | `review-pr-agents/api.md` |
-| Database & Migration Auditor | DATABASE domain | `review-pr-agents/database.md` |
-| Infrastructure & Deploy Safety Auditor | INFRA service touched | `review-pr-agents/infra.md` |
+| Agent | Trigger | Marker domain | File |
+|-------|---------|---------------|------|
+| General Security & Quality Scan | ALWAYS RUNS | `security` | `review-pr-agents/security.md` |
+| Auth Conventions Auditor | AUTH domain | `auth` | `review-pr-agents/auth.md` |
+| Billing Integrity Auditor | BILLING domain | `billing` | `review-pr-agents/billing.md` |
+| Concurrency & Race Condition Auditor | CONCURRENCY or BILLING domain | `concurrency` | `review-pr-agents/concurrency.md` |
+| Domain Logic Auditor | SCRAPING domain (requires `review.domains.scraping` in forge.yaml) | `scraper` | `review-pr-agents/scraper.md` |
+| Frontend Quality Auditor | WEB service touched | `frontend` | `review-pr-agents/frontend.md` |
+| API Design & Consistency Auditor | New/modified routers or SDK/OpenAPI files | `api` | `review-pr-agents/api.md` |
+| Database & Migration Auditor | DATABASE domain | `database` | `review-pr-agents/database.md` |
+| Infrastructure & Deploy Safety Auditor | INFRA service touched | `infra` | `review-pr-agents/infra.md` |
 
 ## Domain Prefixes (for Structured Findings)
 

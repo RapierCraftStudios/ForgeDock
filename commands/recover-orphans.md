@@ -100,7 +100,7 @@ if [ -n "$TARGET_ISSUE" ]; then
 else
   # Fleet scan: query each workflow label separately, merge, deduplicate
   ORPHAN_JSON=$(
-    for LABEL in "workflow:investigating" "workflow:ready-to-build" "workflow:building" "workflow:in-review"; do
+    for LABEL in "workflow:investigating" "workflow:ready-to-build" "workflow:building" "workflow:in-review" "workflow:remediating"; do
       gh issue list ${GH_FLAG} \
         --state open \
         --label "$LABEL" \
@@ -457,7 +457,7 @@ for NUM in $ORPHAN_LIST; do
       else
         gh issue edit "$NUM" ${GH_FLAG} \
           --add-label "workflow:merged" \
-          --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:invalid,workflow:decomposed" \
+          --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:awaiting-merge,workflow:invalid,workflow:decomposed" \
           2>/dev/null || true
         gh issue close "$NUM" ${GH_FLAG} \
           --comment "Closed by /recover-orphans: PR #${PR_NUM} was already merged. Labels corrected." \
@@ -506,7 +506,7 @@ ${CI_GATE_OUT}
             2>/dev/null || true
           gh issue edit "$NUM" ${GH_FLAG} \
             --add-label "workflow:merged" \
-            --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:invalid,workflow:decomposed" \
+            --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:awaiting-merge,workflow:invalid,workflow:decomposed" \
             2>/dev/null || true
         fi
       fi
@@ -579,7 +579,7 @@ See the latest FORGE:PHASE_TRAIL_FAILED comment for the missing phases. Re-run e
         else
           # After review: update label
           gh issue edit "$NUM" ${GH_FLAG} --add-label "workflow:in-review" \
-            --remove-label "workflow:building,workflow:awaiting-merge" 2>/dev/null || true
+            --remove-label "workflow:building,workflow:remediating,workflow:awaiting-merge" 2>/dev/null || true
           RECOVERY_RESULTS="${RECOVERY_RESULTS}| #${NUM} | review-pr | PR #${PR_NUM} submitted for review |\n"
         fi
       fi
@@ -607,7 +607,7 @@ See the latest FORGE:PHASE_TRAIL_FAILED comment for the missing phases. Re-run e
         echo "  [DRY-RUN] Would: remove workflow:investigating, workflow:ready-to-build, workflow:building, workflow:in-review"
       else
         gh issue edit "$NUM" ${GH_FLAG} \
-          --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge" \
+          --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:awaiting-merge" \
           2>/dev/null || true
         gh issue comment "$NUM" ${GH_FLAG} \
           --body "<!-- FORGE:ORPHAN_RECOVERED -->

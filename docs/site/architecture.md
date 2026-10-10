@@ -171,7 +171,7 @@ The `.md` files in `commands/` are detailed prompt engineering documents — som
 - **Phase boundaries** are explicit with entry conditions and exit actions
 - **Universal continuation rule** prevents premature stopping after intermediate results
 - **Structured output requirements** (e.g., `<!-- INVESTIGATION:COMPLETE -->` marker) are machine-readable gates that downstream phases check before proceeding
-- **Domain-specific rules** (INFRA footguns, type invariant verification, sibling pattern sweeps) encode institutional memory directly into the prompt
+- **Domain-specific rules** (INFRA footguns, type invariant verification, sibling pattern sweeps, class-wide finding pattern sweeps with recurrence consolidation) encode institutional memory directly into the prompt
 
 ---
 

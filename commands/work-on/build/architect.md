@@ -562,6 +562,19 @@ If no downstream phases are found (the change is additive only — new sections,
 
 ---
 
+## Phase A2.7: Pattern Sweep Intake *(conditional — skip silently when the investigation report has no `### Pattern Sweep` section)* <!-- Added: forge#3449 -->
+
+For `review-finding` issues the investigator records a `### Pattern Sweep` table (`Query | Hit | Disposition`, one row per hit) listing every instance of the finding's defect class. Treat it as the seed for the plan:
+
+1. Extract the section from `{INVESTIGATION_REPORT}` (the text between `### Pattern Sweep` and the next `###` heading). If it says `Pattern sweep skipped`, note that in the plan and continue.
+2. Every hit with disposition `fix` becomes a **required row** in `### Affected Paths` — the plan must cover the whole class, not only the cited instance. A `truncated at 30` row means the sweep was capped: re-run the query yourself with a higher cap before sequencing.
+3. Every `not-affected` hit needs its justification carried into the plan; if the reason does not hold after you trace the code, promote it to `fix`.
+4. Add a Consistency Check: "all `fix` rows in the Pattern Sweep are changed and the test exercises a representative set of instances, not only the reviewer's repro".
+
+The comment below passes the table through in a `### Pattern Sweep` section so the builder reads it from the plan. Absent table means this phase is a no-op.
+
+---
+
 ## Phase A3: Consistency Rules
 
 Identify invariants that ALL affected paths must satisfy. These become the builder's consistency checklist.
@@ -677,6 +690,13 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ARCHITECT -->
 |---|------|----------------|-----------------|-----|
 | 1 | {FILE} | {FUNCTION} | {CHANGE} | {REASON} |
 
+### Pattern Sweep
+<!-- Pass-through from the FORGE:INVESTIGATOR '### Pattern Sweep' table (Phase A2.7).
+     Omit this section when the investigation report had none. -->
+| Query | Hit | Disposition |
+|-------|-----|-------------|
+| {QUERY} | {FILE:LINE} | {fix \| not-affected — reason} |
+
 ### Implementation Order
 1. {FIRST_CHANGE} — {WHY_FIRST}
 2. {SECOND_CHANGE} — {WHY_SECOND}
@@ -780,6 +800,7 @@ B4    → [THIS MODULE] Architecture Planning (FORGE:ARCHITECT comment)
           Phase A1: Read Entry Points (A1.5 Prior Decision Injection, A1.6 Route-Tree Classification)
           Phase A2: Trace the Data Flow (A2.1 Runtime UID x Volume Ownership, A2.2 Gate-Condition Caller Sweep)
           Phase A2.5: Pipeline Phase-Dependency Check
+          Phase A2.7: Pattern Sweep Intake (review-finding issues only)
           Phase A3: Consistency Rules
           Phase A4: Sequence the Implementation
           Phase A5: Risk Assessment
