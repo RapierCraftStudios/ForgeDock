@@ -35,7 +35,14 @@ function fakeWorld() {
     gh: async (args) => {
       const a = args.join(" ");
       if (a.startsWith("repo view")) return "acme/widgets";
-      if (a.startsWith("api ") && a.includes("/comments")) return w.markers;
+      if (a.startsWith("api ") && a.includes("/comments")) {
+        // Author-aware (trust-filtered) fetch: shape the string bodies as trusted OWNER comments.
+        if (a.includes("author_association")) {
+          try { return JSON.stringify(JSON.parse(w.markers).map((body) => ({ body, author_association: "OWNER", user: { login: "owner", type: "User" } }))); }
+          catch { return w.markers; }
+        }
+        return w.markers;
+      }
       if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
       if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
       if (a.startsWith("issue edit")) { const i = args.indexOf("--body"); if (i>=0) w.body = args[i+1];
@@ -883,6 +890,28 @@ describe("runIssue", () => {
     assert.equal(runCounts["work-on/decompose"], 1);
     assert.equal(runCounts["work-on/build"] || 0, 0);
     assert.equal(res.terminalReason, "decomposed");
+  });
+
+  it("NEEDS_DECOMPOSE: build size-gate OVER hands off to decompose, runs build once, no needs-human", async () => {
+    const { w, io } = fakeWorld();
+    const diffSize = "<!-- FORGE:DIFF_SIZE -->\n## Diff Size\n\nresult: OVER\n### Split Proposal\n- **A** — a.mjs";
+    w.markers = JSON.stringify(["INVESTIGATION:COMPLETE"]);
+    const runCounts = {};
+    const runner = async ({ commandName }) => {
+      runCounts[commandName] = (runCounts[commandName] || 0) + 1;
+      if (commandName === "work-on/build")
+        w.markers = JSON.stringify(["INVESTIGATION:COMPLETE", diffSize]);
+      if (commandName === "work-on/decompose")
+        w.markers = JSON.stringify(["INVESTIGATION:COMPLETE", diffSize, "<!-- FORGE:DECOMPOSED:COMPLETE -->"]);
+      return { status: "complete" };
+    };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+    assert.equal(runCounts["work-on/build"], 1);
+    assert.equal(runCounts["work-on/decompose"], 1);
+    assert.equal(runCounts["work-on/review"] || 0, 0);
+    assert.equal(res.terminalReason, "decomposed");
+    assert.ok(!w.labels.includes("needs-human"));
   });
 
   it("forge#3499: a legacy run-log that committed context/architect still resolves to build (unknown committed ids are ignored)", async () => {

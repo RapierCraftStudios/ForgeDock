@@ -68,6 +68,82 @@ async function issueMarkers(issue, io) {
   return { blob, comments };
 }
 /**
+ * Trust predicate for FORGE marker comments — mirrors scripts/trusted-comments.sh
+ * exactly (the ONE spec predicate). A comment is trusted when its
+ * `author_association` is in FORGE_TRAIL_TRUSTED_ASSOCIATIONS (default
+ * OWNER,MEMBER,COLLABORATOR; `${VAR-default}` semantics, so an explicitly empty
+ * value trusts no association), OR `user.type` is "Bot", OR `user.login` is in
+ * FORGE_TRAIL_TRUSTED_LOGINS (default empty). Absent author data is untrusted.
+ */
+function isTrustedComment(c) {
+  if (!c || typeof c !== "object") return false;
+  const list = (v) => v.split(",").map((x) => x.trim()).filter((x) => x.length > 0);
+  const assoc = list(process.env.FORGE_TRAIL_TRUSTED_ASSOCIATIONS ?? "OWNER,MEMBER,COLLABORATOR");
+  const logins = list(process.env.FORGE_TRAIL_TRUSTED_LOGINS ?? "");
+  const user = c.user && typeof c.user === "object" ? c.user : {};
+  return assoc.includes(c.author_association || "")
+    || (user.type || "") === "Bot"
+    || logins.includes(user.login || "");
+}
+
+/**
+ * Fetch the issue's comments WITH author fields and return only the bodies of
+ * trusted authors (see isTrustedComment), chronological. Fail closed: a fetch
+ * error, unparsable output, or comments lacking author data yield `[]`.
+ * Used for markers that drive a state-changing branch (size-gate routing).
+ */
+async function trustedCommentBodies(issue, io) {
+  let out;
+  try {
+    out = await io.gh(["api", "--paginate", `repos/{owner}/{repo}/issues/${issue}/comments`,
+      "--jq", ".[] | {body, author_association, user: {login: .user.login, type: .user.type}} | @json"]);
+  } catch { return []; }
+  let items = null;
+  try {
+    const parsed = JSON.parse(out);
+    if (Array.isArray(parsed)) items = parsed;
+  } catch { /* not a single document — try one JSON object per line */ }
+  if (!items) {
+    try { items = String(out || "").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l)); }
+    catch { return []; }
+  }
+  return items.filter(isTrustedComment).map((c) => (typeof c.body === "string" ? c.body : ""));
+}
+
+/** build.md B5.5 Step 2: a SIZE_OVERRIDE needs a non-empty justification — the first non-blank, non-HTML-comment line after the marker line. */
+function overrideHasJustification(body) {
+  const lines = String(body).replace(/\r\n/g, "\n").split("\n");
+  return lines.slice(1).some((l) => l.trim() !== "" && !l.trimStart().startsWith("<!--"));
+}
+
+/**
+ * Size-gate routing (build.md B5.5). True only when the latest `FORGE:DIFF_SIZE`
+ * says `result: OVER`, carries a `### Split Proposal` (the discriminator against
+ * the decompose-loop-guard Blocked exit, which also posts OVER but must not
+ * re-enter decompose), and no justified `FORGE:SIZE_OVERRIDE` comment follows it,
+ * and the issue is not already decomposed. `comments` MUST be TRUSTED bodies in
+ * chronological order (see trustedCommentBodies); an untrusted comment never
+ * reaches this function.
+ */
+function sizeGateRoutesToDecompose(comments) {
+  const gate = PHASE_MARKERS.build.sizeGateMarker;
+  const override = PHASE_MARKERS.build.sizeOverrideMarker;
+  const starts = (c, m) => typeof c === "string" && c.trimStart().startsWith(`<!-- ${m}`);
+  if (comments.some((c) => starts(c, "FORGE:DECOMPOSED"))) return false;
+  let idx = -1;
+  for (let i = comments.length - 1; i >= 0; i--) if (starts(comments[i], gate)) { idx = i; break; }
+  if (idx < 0) return false;
+  const body = comments[idx].replace(/\r\n/g, "\n");
+  const m = /^result:[ \t]*(OK|OVERRIDDEN|OVER)[ \t]*$/m.exec(body);
+  if (!m || m[1] !== "OVER" || !/^###[ \t]+Split Proposal\b/m.test(body)) return false;
+  return !comments.slice(idx + 1).some((c) => starts(c, override) && overrideHasJustification(c));
+}
+/** Cheap untrusted pre-check: does ANY comment look like an OVER gate? Only then is the trusted fetch worth making. */
+function mayRouteToDecompose(comments) {
+  const gate = PHASE_MARKERS.build.sizeGateMarker;
+  return comments.some((c) => typeof c === "string" && c.trimStart().startsWith(`<!-- ${gate}`) && /^result:[ \t]*OVER[ \t]*\r?$/m.test(c));
+}
+/**
  * Count commits on `branch` ahead of `lane`'s base. On the first build the
  * branch does not exist yet, so real git rejects the ref range — swallow
  * that (and any other git failure) as "0 ahead" rather than letting it
@@ -116,7 +192,8 @@ async function commitsAhead(lane, branch, io) {
  * alone for a "structured" parse would be inconsistent and would not close
  * any real gap: the actual trust boundary for issue-comment content is
  * *authorship* (can an untrusted actor post a comment on this issue at all),
- * not *format*. Nothing in this engine validates comment authorship for any
+ * not *format*. Only the size-gate markers (DIFF_SIZE / SIZE_OVERRIDE) are
+ * author-filtered (trustedCommentBodies); nothing else here validates authorship for any
  * marker today, so an actor able to post an arbitrary comment could just as
  * easily post whatever "structured" shape a parser would accept — format
  * hardening alone buys nothing here. If comment-spoofing is ever a concern
@@ -322,6 +399,38 @@ async function reviewArgs(state, ctx, io) {
           "--branch", need(state.branch, "branch", BRANCH_RE), ...baseArgs(state)];
 }
 
+/**
+ * Is the issue assessed for decomposition? Scoped to the LATEST
+ * FORGE:INVESTIGATOR comment, selected by its OPENING annotation
+ * (`<!-- FORGE:INVESTIGATOR`), so a later comment that merely mentions the
+ * string (architect plans, specs) cannot shadow it. Only when no comment opens
+ * with that annotation does selection fall back to the legacy substring test.
+ * Within the comment the strict structured signals decide, in order: the
+ * `**YES**`/`**NO**` verdict under `### Decomposition Assessment`, then a
+ * marker alone on its own line (`<!-- DECOMPOSE:YES|NO -->`). Quoted markers
+ * mid-line are ignored. A heading/marker conflict fails safe (not decomposed)
+ * and is logged. With no investigator comment at all, fall back to the legacy
+ * bare-substring test over the whole blob.
+ */
+function isDecomposed(comments, blob) {
+  const { decomposedMarker: yes } = PHASE_MARKERS.investigate;
+  let latest = null;
+  for (const c of comments) if (/^\s*<!-- FORGE:INVESTIGATOR\b/.test(c)) latest = c;
+  if (latest === null) for (const c of comments) if (c.includes("FORGE:INVESTIGATOR")) latest = c;
+  if (latest === null) return has(blob, yes);
+  const text = latest.replace(/\r\n/g, "\n");
+  const section = text.match(/^### Decomposition Assessment[^\n]*\n([\s\S]*?)(?=^###[^#]|(?![\s\S]))/m);
+  const verdict = section ? (/^\s*\*\*(YES|NO)\*\*/m.exec(section[1]) || [])[1] : undefined;
+  const markers = new Set();
+  for (const m of text.matchAll(/^<!-- DECOMPOSE:(YES|NO) -->[ \t]*$/gm)) markers.add(m[1]);
+  const marker = markers.size === 1 ? [...markers][0] : undefined;
+  if (markers.size > 1 || (verdict && marker && verdict !== marker)) {
+    console.error(`[engine] conflicting decomposition signals (heading=${verdict ?? "none"}, markers=${[...markers].join("+") || "none"}); treating as not decomposed`);
+    return false;
+  }
+  return (verdict ?? marker) === "YES";
+}
+
 /** @type {Phase[]} */
 export const PHASES = [
   {
@@ -330,10 +439,10 @@ export const PHASES = [
     buildArgs: async (state, ctx) => [String(state.issue), ...repoArgs(ctx)],
     entryCondition: () => true,
     async detectOutcome(state, io) {
-      const { blob } = await issueMarkers(state.issue, io);
+      const { blob, comments } = await issueMarkers(state.issue, io);
       if (has(blob, PHASE_MARKERS.investigate.invalidMarker))
         return { status: "committed", terminalReason: "invalid", outputs: { verdict: "INVALID" } };
-      if (has(blob, PHASE_MARKERS.investigate.decomposedMarker))
+      if (isDecomposed(comments, blob))
         return { status: "committed", terminalReason: "decomposed", outputs: { decompose: true } };
       if (has(blob, PHASE_MARKERS.investigate.completionMarker))
         return { status: "committed", outputs: { verdict: "CONFIRMED" } };
@@ -387,6 +496,12 @@ export const PHASES = [
       if (branch && has(blob, PHASE_MARKERS.build.completionMarker) && (await commitsAhead(state.lane, branch, io)) > 0) {
         return { satisfied: true, outputs: { branch } };
       }
+      // forge#3535: work already merged into the lane has ahead=0 by definition;
+      // positive merged-PR evidence (base === lane) means build is satisfied.
+      if (branch && has(blob, PHASE_MARKERS.build.completionMarker)) {
+        const merged = await mergedPrForBranch(branch, state.lane, io);
+        if (merged) return { satisfied: true, outputs: { branch, pr: merged.number } };
+      }
       return { satisfied: false };
     },
     async detectOutcome(state, io) {
@@ -404,6 +519,13 @@ export const PHASES = [
       const ahead = branch ? await commitsAhead(state.lane, branch, io) : -1; // … AND real commits
       if (complete && ahead > 0) {
         return { status: "committed", outputs: { branch, ...buildChildEvidence(blob, comments) } };
+      }
+      // B5.5 NEEDS_DECOMPOSE: the size gate posts no FORGE:BUILDER:COMPLETE and
+      // build.md says the router (not build) dispatches decompose with no
+      // needs-human. Non-retryable by construction: a retry re-measures and
+      // re-emits the same exit.
+      if (!complete && mayRouteToDecompose(comments) && sizeGateRoutesToDecompose(await trustedCommentBodies(state.issue, io))) {
+        return { status: "committed", terminalReason: "decomposed", outputs: branch ? { branch } : {} };
       }
       const detail = `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}`;
       // forge#2176: when the builder has already posted FORGE:BUILDER:COMPLETE
@@ -432,6 +554,15 @@ export const PHASES = [
       // resolve, so both must stay retryable. Only a successfully-computed
       // ahead of 0 on a *resolved* branch (a real "nothing new to commit"
       // result) is the true fixed point this non-retryable signal targets.
+      // forge#3535: before the fixed point, check whether the branch already
+      // merged into the lane — then ahead=0 is the success state, not a missing
+      // build. Only positive evidence converts; everything else falls through.
+      if (complete && branch) {
+        const merged = await mergedPrForBranch(branch, state.lane, io);
+        if (merged) {
+          return { status: "committed", outputs: { branch, pr: merged.number, ...buildChildEvidence(blob, comments) } };
+        }
+      }
       if (complete && ahead !== -1) return { status: "failed", detail, retryable: false };
       return { status: "failed", detail };
     },
@@ -645,6 +776,26 @@ async function openPrFor(state, io) {
   if (!state.branch) return null;
   const out = await io.gh(["pr", "list", "--head", state.branch, "--json", "number", "--state", "all"]);
   try { const a = JSON.parse(out || "[]"); return a[0]?.number ?? null; } catch { return null; }
+}
+/**
+ * forge#3535: the merged PR (if any) that shipped `branch` into `lane`.
+ * Build keys off the branch resolved from FORGE:BUILDER:COMPLETE, not
+ * `state.branch` (null on a fresh re-run), so this takes the branch explicitly.
+ * A PR merged into a different base, a closed-unmerged PR, no PR, or any
+ * gh/JSON error yields null: unknown is never "merged" (forge#3504/#3506).
+ * Returns `{ number }` with a real integer PR number, else null.
+ */
+async function mergedPrForBranch(branch, lane, io) {
+  if (!branch || !lane) return null;
+  try {
+    const out = await io.gh(["pr", "list", "--head", branch, "--state", "all",
+      "--json", "number,state,mergedAt,baseRefName"]);
+    const a = JSON.parse(out || "[]");
+    if (!Array.isArray(a)) return null;
+    const hit = a.find((p) => p && typeof p === "object" && Number.isInteger(p.number)
+      && (!!p.mergedAt || p.state === "MERGED") && p.baseRefName === lane);
+    return hit ? { number: hit.number } : null;
+  } catch { return null; }
 }
 async function prStatusFor(state, io) {
   const n = await openPrFor(state, io);

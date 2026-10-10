@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 See `README.md` for the versioning policy that governs how schema changes map
 to version bumps.
 
+## [Unreleased]
+
+### Added
+
+- `PHASE_MARKERS.investigate.notDecomposedMarker` (`DECOMPOSE:NO`), the explicit counterpart to `decomposedMarker`; `investigate.md` now emits both as HTML-comment markers.
+
 ## [1.2.1] - 2026-07-16
 
 Patch — internal escaping bugfix only. No reserved type, field, or public

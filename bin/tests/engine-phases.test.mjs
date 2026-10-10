@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
 import { PHASES, pickPhase } from "../engine/phases.mjs";
+import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
 import { RESERVED_TYPES } from "../../packages/protocol/src/types.js";
 
 const base = { v: 0, run: "r1", issue: 42, lane: "staging", committed: [], phase: null,
@@ -99,6 +100,81 @@ describe("pickPhase", () => {
       const outcome = await investigate.detectOutcome(base, ioWith("DECOMPOSE:YES"));
       assert.equal(outcome.status, "committed");
       assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    // forge#3543: structured per-comment fixtures (one JSON string per line,
+    // the shape issueMarkers() asks gh for) so `comments` is populated.
+    const ioComments = (...bodies) => ioWith(bodies.map((b) => JSON.stringify(b)).join("\n"));
+    const inv = (assessment, tail = "") =>
+      `<!-- FORGE:INVESTIGATOR -->\n## Investigation Report\n\n### Recommendation\nDo it.\n\n### Decomposition Assessment\n${assessment}\n${tail}\n<!-- INVESTIGATION:COMPLETE -->`;
+
+    it("investigator **YES** heading without marker -> decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(inv("**YES**: three independent pieces.\n1. feat(a)\n2. feat(b)")));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("<!-- DECOMPOSE:YES --> marker -> decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(inv("**YES** — split", `<!-- ${PHASE_MARKERS.investigate.decomposedMarker} -->`)));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("**NO** + <!-- DECOMPOSE:NO --> -> committed, goes to build", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(inv("**NO** — one PR", `<!-- ${PHASE_MARKERS.investigate.notDecomposedMarker} -->`)));
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("NO investigator comment quoting DECOMPOSE:YES is not decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(
+        inv("**NO** — fits one PR", "Note: engine waits for DECOMPOSE:YES and <!-- DECOMPOSE:YES --> text"),
+        "architect plan mentions DECOMPOSE:YES"));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("quoted DECOMPOSE:YES in another comment does not override NO verdict", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(inv("**NO** — fits one PR"), "see DECOMPOSE:YES docs"));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("latest investigator comment wins (YES then re-investigated NO)", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(inv("**YES** — split"), inv("**NO** — fits")));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("INVALID still wins over a YES assessment", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(inv("**YES** — split", "<!-- INVESTIGATION:INVALID -->")));
+      assert.equal(outcome.terminalReason, "invalid");
+    });
+
+    it("tolerates CRLF line endings in the assessment", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(inv("**YES** — split").replace(/\n/g, "\r\n")));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("later comment merely mentioning FORGE:INVESTIGATOR does not shadow a real DECOMPOSE:YES (SEC-1)", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(
+        inv("**YES** — split", `<!-- ${PHASE_MARKERS.investigate.decomposedMarker} -->`),
+        "architect: read the FORGE:INVESTIGATOR report first"));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("a stray quoted NO marker does not override an explicit YES verdict + marker (SEC-2)", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(
+        inv("**YES** — split", `<!-- ${PHASE_MARKERS.investigate.decomposedMarker} -->\nEmit \`<!-- DECOMPOSE:NO -->\` when not splitting.`)));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("conflicting heading and own-line marker fails safe (not decomposed)", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(
+        inv("**YES** — split", `<!-- ${PHASE_MARKERS.investigate.notDecomposedMarker} -->`)));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("investigate.md emits the template marker line and both exact marker constants", () => {
+      const spec = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "../../commands/work-on/investigate.md"), "utf8");
+      assert.ok(spec.includes("<!-- DECOMPOSE:{YES|NO} -->"));
+      assert.ok(spec.includes(`<!-- ${PHASE_MARKERS.investigate.decomposedMarker} -->`));
+      assert.ok(spec.includes(`<!-- ${PHASE_MARKERS.investigate.notDecomposedMarker} -->`));
     });
 
     it("INVESTIGATION:COMPLETE only -> committed, no terminalReason", async () => {
@@ -549,9 +625,219 @@ describe("pickPhase", () => {
     });
   });
 
+  describe("build - already-merged PR (forge#3535)", () => {
+    const build = PHASES.find(p => p.id === "build");
+    const builder = "<!-- FORGE:BUILDER:COMPLETE -->\n**Branch**: `fix/x-42`";
+    const mk = ({ prs, ahead = "0", prThrows = false }) => ({
+      gh: async (args) => {
+        if (args[0] === "pr") { if (prThrows) throw new Error("gh down"); return JSON.stringify(prs); }
+        return JSON.stringify([builder]);
+      },
+      git: async () => ahead,
+    });
+    const st = { ...base, branch: null };
+    const mergedInLane = { number: 77, state: "MERGED", mergedAt: "2026-10-10T06:39:07Z", baseRefName: "staging" };
+
+    it("detectOutcome: PR merged into lane commits with branch and pr", async () => {
+      const o = await build.detectOutcome(st, mk({ prs: [mergedInLane] }));
+      assert.equal(o.status, "committed");
+      assert.equal(o.outputs.pr, 77);
+      assert.equal(o.outputs.branch, "fix/x-42");
+    });
+
+    it("reconcile: PR merged into lane is satisfied with pr", async () => {
+      const r = await build.reconcile(st, mk({ prs: [mergedInLane] }));
+      assert.equal(r.satisfied, true);
+      assert.equal(r.outputs.pr, 77);
+      assert.equal(r.outputs.branch, "fix/x-42");
+    });
+
+    it("PR merged into a different base than the lane does not count", async () => {
+      const prs = [{ ...mergedInLane, baseRefName: "main" }];
+      const o = await build.detectOutcome(st, mk({ prs }));
+      assert.equal(o.status, "failed");
+      assert.equal(o.retryable, false);
+      assert.equal((await build.reconcile(st, mk({ prs }))).satisfied, false);
+    });
+
+    it("closed-unmerged PR or no PR keeps the non-retryable fixed point (merged base check)", async () => {
+      for (const prs of [[], [{ number: 5, state: "CLOSED", mergedAt: null, baseRefName: "staging" }]]) {
+        const o = await build.detectOutcome(st, mk({ prs }));
+        assert.equal(o.status, "failed");
+        assert.equal(o.retryable, false);
+      }
+    });
+
+    it("gh failure on the PR lookup degrades to existing behaviour", async () => {
+      const o = await build.detectOutcome(st, mk({ prs: [], prThrows: true }));
+      assert.equal(o.status, "failed");
+      assert.equal(o.retryable, false);
+      assert.equal((await build.reconcile(st, mk({ prs: [], prThrows: true }))).satisfied, false);
+    });
+
+    it("picks the merged-into-lane PR among several", async () => {
+      const prs = [{ number: 1, state: "CLOSED", mergedAt: null, baseRefName: "staging" }, mergedInLane];
+      const o = await build.detectOutcome(st, mk({ prs }));
+      assert.equal(o.outputs.pr, 77);
+    });
+
+    it("incomplete builder never consults the PR and stays retryable", async () => {
+      let consulted = false;
+      const io = { gh: async (a) => { if (a[0] === "pr") consulted = true; return JSON.stringify([]); }, git: async () => "0" };
+      const o = await build.detectOutcome({ ...st, branch: "fix/x-42" }, io);
+      assert.equal(o.status, "failed");
+      assert.equal(o.retryable, undefined);
+      assert.equal(consulted, false);
+    });
+  });
+
   // Regression tests for #2193: within-comment `**Branch**:` field match order is
   // first-match, by design (see phases.mjs parseBranchFromMarkers doc comment).
   // Comment-level last-match (#2184) is unaffected/untouched by these tests.
+  // NEEDS_DECOMPOSE routing: build.md B5.5 size-gate exit posts FORGE:DIFF_SIZE
+  // (result: OVER + ### Split Proposal) and no FORGE:BUILDER:COMPLETE.
+  describe("build.detectOutcome — size-gate NEEDS_DECOMPOSE routes to decompose", () => {
+    const build = PHASES.find(p => p.id === "build");
+    // Bodies are strings (trusted OWNER) or {body, ...authorFields} objects. The
+    // body-only fetch gets bodies; the author-aware fetch (author_association in
+    // the jq) gets full comment objects, as the real API shape.
+    const asObj = (c) => (typeof c === "string" ? { body: c, author_association: "OWNER", user: { login: "owner", type: "User" } } : c);
+    const withComments = (...items) => ({
+      gh: async (args) => JSON.stringify(args.join(" ").includes("author_association") ? items.map(asObj) : items.map((c) => asObj(c).body)),
+      git: async () => "0",
+    });
+    const stranger = (body) => ({ body, author_association: "NONE", user: { login: "rando", type: "User" } });
+    const gate = (result, proposal = true) =>
+      `<!-- FORGE:DIFF_SIZE -->\n## Diff Size\n\ndiff_lines: 1906\nexcluded_lines: 0\nthreshold: 1000\nresult: ${result}\n` +
+      (proposal ? "### Split Proposal\n- **A** — a.mjs\n" : "");
+    const override = "<!-- FORGE:SIZE_OVERRIDE -->\nJustified: generated bulk.";
+    const st = { ...base, committed: ["investigate"] };
+
+    it("OVER + Split Proposal -> committed, decomposed, non-retryable", async () => {
+      const o = await build.detectOutcome(st, withComments("<!-- FORGE:INVESTIGATOR -->", gate("OVER")));
+      assert.equal(o.status, "committed");
+      assert.equal(o.terminalReason, "decomposed");
+      assert.equal(o.retryable, undefined);
+    });
+
+    it("pickPhase selects decompose after the build commit", () => {
+      const s = { ...base, committed: ["investigate", "build"], terminalReason: "decomposed" };
+      assert.equal(pickPhase(s).id, "decompose");
+    });
+
+    it("OVER followed by FORGE:SIZE_OVERRIDE does not route", async () => {
+      const o = await build.detectOutcome(st, withComments(gate("OVER"), override));
+      assert.equal(o.status, "failed");
+      assert.equal(o.terminalReason, undefined);
+    });
+
+    it("an override posted BEFORE the latest OVER does not suppress it", async () => {
+      const o = await build.detectOutcome(st, withComments(override, gate("OVER")));
+      assert.equal(o.terminalReason, "decomposed");
+    });
+
+    it("OVER without Split Proposal (loop-guard Blocked exit) falls through to the failure", async () => {
+      const o = await build.detectOutcome(st, withComments(gate("OVER", false)));
+      assert.equal(o.status, "failed");
+    });
+
+    it("OK, OVERRIDDEN, malformed and absent DIFF_SIZE fall through", async () => {
+      for (const c of [gate("OK"), gate("OVERRIDDEN"), "<!-- FORGE:DIFF_SIZE -->\nresult: OVERFLOW\n### Split Proposal", "nothing"]) {
+        const o = await build.detectOutcome(st, withComments(c));
+        assert.equal(o.status, "failed", c);
+      }
+    });
+
+    it("only the latest DIFF_SIZE counts (OVER then refreshed OK)", async () => {
+      const o = await build.detectOutcome(st, withComments(gate("OVER"), gate("OK")));
+      assert.equal(o.status, "failed");
+    });
+
+    describe("trust filter", () => {
+      const withEnv = async (env, fn) => {
+        const saved = {};
+        for (const k of Object.keys(env)) { saved[k] = process.env[k]; if (env[k] === undefined) delete process.env[k]; else process.env[k] = env[k]; }
+        try { return await fn(); } finally { for (const k of Object.keys(saved)) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } }
+      };
+      const noEnv = { FORGE_TRAIL_TRUSTED_ASSOCIATIONS: undefined, FORGE_TRAIL_TRUSTED_LOGINS: undefined };
+
+      it("untrusted OVER gate never routes", async () => {
+        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(stranger(gate("OVER")))));
+        assert.equal(o.status, "failed");
+        assert.equal(o.terminalReason, undefined);
+      });
+
+      it("untrusted override does not suppress a trusted OVER gate", async () => {
+        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(gate("OVER"), stranger(override))));
+        assert.equal(o.terminalReason, "decomposed");
+      });
+
+      it("trusted override with empty justification does not suppress", async () => {
+        for (const bare of ["<!-- FORGE:SIZE_OVERRIDE -->", "<!-- FORGE:SIZE_OVERRIDE -->\r\n\r\n<!-- note -->\r\n  \r\n"]) {
+          const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(gate("OVER"), bare)));
+          assert.equal(o.terminalReason, "decomposed", JSON.stringify(bare));
+        }
+      });
+
+      it("trusted override with a justification suppresses (CRLF body too)", async () => {
+        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(gate("OVER"), "<!-- FORGE:SIZE_OVERRIDE -->\r\nJustified: bulk.\r\n")));
+        assert.equal(o.status, "failed");
+      });
+
+      it("CRLF gate body routes", async () => {
+        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(gate("OVER").replace(/\n/g, "\r\n"))));
+        assert.equal(o.terminalReason, "decomposed");
+      });
+
+      it("only trusted comments count when an untrusted later OK is interleaved", async () => {
+        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(gate("OVER"), stranger(gate("OK")))));
+        assert.equal(o.terminalReason, "decomposed");
+      });
+
+      it("trusted Bot author is accepted", async () => {
+        const bot = { body: gate("OVER"), author_association: "NONE", user: { login: "app[bot]", type: "Bot" } };
+        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(bot)));
+        assert.equal(o.terminalReason, "decomposed");
+      });
+
+      it("login in FORGE_TRAIL_TRUSTED_LOGINS is accepted", async () => {
+        const c = { body: gate("OVER"), author_association: "NONE", user: { login: "ci-user", type: "User" } };
+        const o = await withEnv({ ...noEnv, FORGE_TRAIL_TRUSTED_LOGINS: "x, ci-user" }, () => build.detectOutcome(st, withComments(c)));
+        assert.equal(o.terminalReason, "decomposed");
+      });
+
+      it("explicitly empty FORGE_TRAIL_TRUSTED_ASSOCIATIONS trusts no association", async () => {
+        const o = await withEnv({ ...noEnv, FORGE_TRAIL_TRUSTED_ASSOCIATIONS: "" }, () => build.detectOutcome(st, withComments(gate("OVER"))));
+        assert.equal(o.status, "failed");
+      });
+
+      it("fails closed on fetch error, non-JSON, and missing author data", async () => {
+        const mk = (fn) => ({ gh: fn, git: async () => "0" });
+        const body = gate("OVER");
+        for (const io of [
+          mk(async (a) => { if (a.join(" ").includes("author_association")) throw new Error("boom"); return JSON.stringify([body]); }),
+          mk(async (a) => (a.join(" ").includes("author_association") ? "not json" : JSON.stringify([body]))),
+          mk(async () => JSON.stringify([body])), // bodies only, no author fields
+        ]) {
+          const o = await withEnv(noEnv, () => build.detectOutcome(st, io));
+          assert.equal(o.status, "failed");
+        }
+      });
+
+      it("a trusted FORGE:DECOMPOSED comment suppresses re-routing", async () => {
+        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(gate("OVER"), "<!-- FORGE:DECOMPOSED:COMPLETE -->")));
+        assert.equal(o.status, "failed");
+      });
+    });
+
+    it("a posted FORGE:BUILDER:COMPLETE with commits wins over a stale OVER", async () => {
+      const o = await build.detectOutcome({ ...st, branch: "fix/x-42" },
+        { gh: async () => JSON.stringify([gate("OVER"), "<!-- FORGE:BUILDER:COMPLETE -->"]), git: async () => "2" });
+      assert.equal(o.status, "committed");
+      assert.equal(o.terminalReason, undefined);
+    });
+  });
+
   describe("build — within-comment **Branch** field match order (#2193)", () => {
     const build = PHASES.find(p => p.id === "build");
 
