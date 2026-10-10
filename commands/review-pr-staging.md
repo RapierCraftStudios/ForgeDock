@@ -382,15 +382,18 @@ if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$ALL_PR_NUMBERS" ]; then
   SCOPE_MODE=scoped
   for pr in $ALL_PR_NUMBERS; do
     _J=$(gh pr view "$pr" -R {GH_REPO} --json headRefOid,mergeCommit,commits,state 2>/dev/null) || { SCOPE_MODE=full; break; }
-    _HEAD7=$(printf '%s' "$_J" | jq -r '.headRefOid[0:7]')
+    _HEAD=$(printf '%s' "$_J" | jq -r '.headRefOid')
+    case "$_HEAD" in *[!0-9a-f]*|"") SCOPE_MODE=full; break ;; esac   # a malformed head id would make the sha match accept any comment (fail open): review everything
+    [ "${#_HEAD}" -eq 40 ] || [ "${#_HEAD}" -eq 64 ] || { SCOPE_MODE=full; break; }
+    _HEAD7=$(printf '%s' "$_HEAD" | cut -c1-7)
     # Capture each gh read into a variable FIRST and test its own exit status: in a pipeline `||` only sees the last stage (no pipefail),
     # so a failed gh read piped into another command would silently look like "no comments" / "no files".
     _CM=$(gh api --paginate "repos/{GH_REPO}/issues/$pr/comments" 2>/dev/null) || { SCOPE_MODE=full; break; }
     _FILES=$(gh pr diff "$pr" -R {GH_REPO} --name-only 2>/dev/null) || { SCOPE_MODE=full; break; }
     # Reviewed = trusted FORGE:REVIEW_ROUTE (a real review mode) whose sha is the PR's FINAL head, plus at least one review-agent comment
-    # that names that same head sha, and no degraded/blocked review marker. A PR pushed to after its review has a stale sha, so its commits stay UNREVIEWED.
+    # carrying the full-length `Reviewed-SHA: <head>` line (same predicate as review-pr.md; a 7-char substring never counts), and no degraded/blocked review marker. A PR pushed to after its review has a stale sha, so its commits stay UNREVIEWED.
     _ROUTE=$(printf '%s' "$_CM" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW_ROUTE mode=(?!spec-evolution-blocked)[^ ]+ spec=review-pr.md sha=${_HEAD7} -->") || { SCOPE_MODE=full; break; }
-    _AGENT=$(printf '%s' "$_CM" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*${_HEAD7}") || { SCOPE_MODE=full; break; }
+    _AGENT=$(printf '%s' "$_CM" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${_HEAD}(\\r?\\n|$)") || { SCOPE_MODE=full; break; }
     _DEGRADED=$(printf '%s' "$_CM" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:(REVIEW_DEGRADED|REVIEW_BLOCKED)") || { SCOPE_MODE=full; break; }
     case "$_ROUTE$_AGENT$_DEGRADED" in ''|*[!0-9]*) SCOPE_MODE=full; break ;; esac
     if [ "$_ROUTE" -ge 1 ] && [ "$_AGENT" -ge 1 ] && [ "$_DEGRADED" -eq 0 ] && [ "$(printf '%s' "$_J" | jq '.commits|length')" -lt 100 ]; then
@@ -858,11 +861,17 @@ Missing comments are an explicit failure, never evidence of no findings. Do not 
 From PR comments, extract structured findings (`<!-- FINDING:... -->`). If none found, scan for unstructured findings. If still 0 → skip to Phase 8.
 
 ### 7B: Filter & Deduplicate
-Keep ALL findings (CONFIRMED/LIKELY/POSSIBLE) for classification (7B.5). Deduplicate within this run by file + pattern + location: same file, location within +-5 lines, and 3+ shared title keywords (a shared explicit finding id is an additional match, never a substitute for the keyword test) are one finding (keep higher confidence). When `SCOPE_MODE=scoped`, drop only a finding that has a file and whose file is not in `CROSS_PR_FILES`, `UNREVIEWED_FILES` or `DEPLOY_WIRING_FILES` (0B.1), and count it as `out_of_scope`. Findings with no file (readiness-checklist items such as undocumented env vars or a migration-number collision across PRs) are never dropped by this filter. Sort: CONFIRMED first, then by severity.
+Keep ALL findings (CONFIRMED/LIKELY/POSSIBLE) for classification (7B.5). Deduplicate within this run by file + pattern + location: same file, location within +-5 lines, and 3+ shared title keywords (a shared explicit finding id is an additional match, never a substitute for the keyword test) are one finding (keep higher confidence). When `SCOPE_MODE=scoped`, a finding that has a file outside `CROSS_PR_FILES`, `UNREVIEWED_FILES` and `DEPLOY_WIRING_FILES` (0B.1) is `out_of_scope`, and the filter may only DEMOTE it, never drop it: only a finding whose normalised severity is `MEDIUM`, `LOW` or `INFO` becomes a listed note. `CRITICAL` and `HIGH` (any confidence), and any missing or unrecognised severity, are always kept and go to 7B.5 as usual, so scope can never remove a blocking finding. Every demoted finding is listed (id, file:line, reason `out_of_scope`) in the 7B.5 disposition; none is silently dropped. Findings with no file (readiness-checklist items such as undocumented env vars or a migration-number collision across PRs) are never demoted. The executable rule (`scripts/review-pr-staging-scope.test.sh` evaluates these two lines):
+
+```bash
+# SCOPE_RULE: SEV=$(printf '%s' "$FINDING_SEVERITY" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')
+# SCOPE_RULE: case "$SEV" in MEDIUM|LOW|INFO) OOS_DEMOTE=1 ;; *) OOS_DEMOTE=0 ;; esac   # applies only to a finding whose file is out of scope
+```
+ Sort: CONFIRMED first, then by severity.
 
 ### 7B.5: Note Disposition (same damper and classifier as `/review-pr` §6B.5)
 
-Classify every deduped finding with `scripts/classify-finding.sh` before filing, exactly as `commands/review-pr.md` §6B.5 does (the rules live in the script, not here: HIGH/CRITICAL always ISSUE, content-based safety exemption, LOW/POSSIBLE become NOTEs). Resolve it with the same resolver (`${CLAUDE_PLUGIN_ROOT}`, `FORGE_ROOT`, `FORGEDOCK_HOME`, pinned plugin cache under `CLAUDE_CONFIG_DIR` then `~/.claude`, then `$PWD`). The staging PR is not a finding fix, so `FINDING_LINEAGE=none`.
+Classify every deduped finding with `scripts/classify-finding.sh` before filing, exactly as `commands/review-pr.md` §6B.5 does (the rules live in the script, not here: HIGH/CRITICAL always ISSUE, content-based safety exemption, LOW/POSSIBLE become NOTEs). Resolve it with the same resolver (`${CLAUDE_PLUGIN_ROOT}`, `FORGE_ROOT`, `FORGEDOCK_HOME`, pinned plugin cache under `CLAUDE_CONFIG_DIR` then `~/.claude`. There is no `$PWD` tier: the repo under review is author-controlled. The staging PR is not a finding fix, so `FINDING_LINEAGE=none`.
 
 ```bash
 _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
