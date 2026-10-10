@@ -58,7 +58,7 @@ If no domain context is configured above, derive the architecture from the chang
    ```bash
    # Identify gate conditions in changed router files
    ROUTER_FILES=$(gh pr diff [PR_NUMBER] --name-only | grep -E "(router|route|endpoint|handler)" | head -10)
-   gh pr diff [PR_NUMBER] -- $ROUTER_FILES | grep "^\+" | grep -E "if request\.|if.*or.*request\." | head -20
+   awk -v files="$ROUTER_FILES" 'BEGIN{n=split(files,a,"\n");for(i=1;i<=n;i++)w[a[i]]=1} /^diff --git /{p=((substr($4,3)) in w)} p' "$SLICE_FILE" | grep "^\+" | grep -E "if request\.|if.*or.*request\." | head -20
 
    # For each gated field, check its pre-existing handling path
    git log --all --oneline -10 -- $ROUTER_FILES | head -10

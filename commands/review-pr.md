@@ -1736,7 +1736,7 @@ The `protocols.md` file contains the Evidence-Based Review Protocol, Structured 
 4. Substitute per-agent domain context: `[DOMAIN_CONTEXT]` → the agent's matching key from `forge.yaml → review.domains` (e.g., `$DOMAIN_CONTEXT_AUTH` for the auth agent, `$DOMAIN_CONTEXT_BILLING` for the billing agent, `$DOMAIN_CONTEXT_CONCURRENCY` for the concurrency agent, `$DOMAIN_CONTEXT_SCRAPING` for the scraping agent)
 5. Substitute the shared hot-spot prior: `[CHURN_CONTEXT]` → `$CHURN_CONTEXT` (computed once in Phase 3A, same value for every agent — this is a PR-level fact, not a per-domain config value, so it is NOT read from `forge.yaml`)
 6. Substitute code index slice: `[INDEX_SLICE]` → the matching `$INDEX_SLICE_{DOMAIN}` variable for this agent (e.g., `$INDEX_SLICE_AUTH` for the auth agent). Agents MUST query index data first; fall back to grep only when index slice is empty or unavailable.
-7. Substitute per-agent diff slice: `[DOMAIN_DIFF_SLICE]` → the matching `$DIFF_SLICE_*` variable (e.g., `$DIFF_SLICE_AUTH` for the auth agent, `$DIFF_SLICE_SECURITY` for the security agent). This replaces any `gh pr diff [PR_NUMBER]` call inside the agent template — the agent works from the pre-computed slice, not the full changeset.
+7. Substitute per-agent diff slice: `[DOMAIN_DIFF_SLICE]` → the matching `$DIFF_SLICE_*` variable (e.g., `$DIFF_SLICE_AUTH` for the auth agent, `$DIFF_SLICE_SECURITY` for the security agent). Persona templates and `protocols.md` §1 materialize the slice into `$SLICE_FILE` and grep that file instead of calling `gh pr diff [PR_NUMBER]` (only `--name-only` is allowed) — placeholder substitution alone does not rewrite literal commands, so the templates themselves read the slice. The agent works from the pre-computed slice, not the full changeset.
 8. If Phase 2.5 found broken assumptions, append them to the agent's prompt as "Pre-found integration issues to verify"
 9. Launch via the resolved `{DISPATCH_TOOL}` (see Sub-Agent Dispatch Tool Resolution above) with `model: "{SUBAGENT_MODEL}"` (forge.yaml `agents.subagent_model`, else `agents.default_model`, else `"sonnet"`; fallback `"opus"` if rate-limited). Under OpenCode, emit a top-level `subagent_type: "general"` or `"explore"` in the native `task` argument object and use `background: false` for each reviewer.
 
@@ -1837,7 +1837,7 @@ When substituting `[FILE_LIST]` in each agent's template:
 - API agent → `$DOMAIN_FILES_API`
 - Security agent → `$FILES` (full list)
 
-**Note**: Domain agents still run `gh pr diff $PR_NUMBER` inside their execution context. The scoped `[FILE_LIST]` tells each agent which files are most relevant to its domain — it is a focused starting point, not a hard restriction. Agents should follow code paths beyond their slice if those paths are needed to complete a trace.
+**Note**: Domain agents do not re-fetch the full `gh pr diff`; they read the pre-supplied `[DOMAIN_DIFF_SLICE]`. The scoped `[FILE_LIST]` tells each agent which files are most relevant to its domain — it is a focused starting point, not a hard restriction. Agents may follow code paths beyond their slice with targeted, bounded file reads (`sed -n 'X,Yp'`, `head -N`) when needed to complete a trace, never by fetching the full diff.
 
 ---
 

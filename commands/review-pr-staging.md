@@ -565,7 +565,17 @@ fi
 
 **If `TEMPLATE_SOURCE` is `monolithic_catalog`** (last resort): `Read: $MONOLITHIC_CATALOG` and extract the shared protocols section plus each selected persona's section from within that single file.
 
-Launch domain-specific agents based on which domains have changes. Substitute PR diff commands with staging diff commands. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure.
+Launch domain-specific agents based on which domains have changes. Substitute PR diff commands with staging diff commands.
+
+**Per-domain diff slices (MANDATORY)**: `protocols.md` tells agents to use a pre-supplied `[DOMAIN_DIFF_SLICE]` and not to re-fetch the diff, so staging MUST supply one — the staging→main diff is the largest diff in the pipeline. Compute the slices once, then substitute `[DOMAIN_DIFF_SLICE]` in each persona's prompt before dispatch:
+```bash
+# Fetched once; agents do NOT re-fetch it
+FULL_DIFF=$(git diff "origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH" | head -c 100000)
+# DIFF_SLICE_{DOMAIN}: same per-domain awk filters, fallback, and security-gets-full-diff rule as
+# commands/review-pr.md "Domain Diff Slicing", applied to this FULL_DIFF. Cap each slice at ~100K chars.
+DIFF_SLICE_SECURITY="$FULL_DIFF"
+```
+For each dispatched persona, substitute `[DOMAIN_DIFF_SLICE]` → its matching `$DIFF_SLICE_*` variable (an empty slice falls back to the capped `$FULL_DIFF`). Agents never run a full `gh pr diff`; only `--name-only` is allowed. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure.
 
 **MANDATORY — each domain agent MUST persist its finalized body before posting its findings directly to the PR immediately upon completion** (not batched by the orchestrator). It MUST return verdict, finding count, and one line per finding to the orchestrator independently of delivery; if posting fails, return the durable file path and stop without retrying:
 ```bash
@@ -929,7 +939,7 @@ fi
 
 Labels: `review-finding` + `needs-validation` + `staging-review` + priority. `priority:*` is derived from the finding's `**Severity**` field via `scripts/severity-to-priority.sh` (identical script used by `commands/review-pr.md` — single documented mapping, see that script's header comment): `CRITICAL` → `priority:P0`, `HIGH` → `priority:P1`, `MEDIUM` → `priority:P2`, `LOW` → `priority:P3`. **Never derive `priority:*` from Confidence** (CONFIRMED/LIKELY/POSSIBLE) — conflating the two axes previously mislabeled LOW-severity CONFIRMED findings as `priority:P1`, defeating orchestrate's P3 batching rule. <!-- forge#2447 -->
 
-**No pre-filtering**: Every finding becomes an issue. Validation agents sort out false positives downstream.
+**Filing disposition**: Filing follows §7B.5 and the `commands/review-pr.md` §6B.4/§6B.5 rules — LOW severity and POSSIBLE confidence findings are non-blocking NOTEs (recorded in `FORGE:NOTE_DISPOSITION`), not standalone issues. Validation agents sort out false positives downstream for the findings that are filed.
 
 ### 7G: Add to Project Board
 ### 7H: Update PR Description with Findings Table
