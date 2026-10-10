@@ -2469,19 +2469,40 @@ Verdict determined by standard blocking criteria.
 1. Phase 2 automated checks failed (build error, type error, test failure)
 2. Agent finding is CONFIRMED at HIGH or CRITICAL severity
 3. **[Milestone PRs only]** Phase 7A Purpose Regression Gate flagged `HAS_PURPOSE_REGRESSION=true` for this finding — regardless of whether it causes a runtime error
-4. `MERGE_HEALTH == "CONFLICTING"` OR `MERGE_HEALTH_STATE` in {`DIRTY`, `BLOCKED`} — PR cannot be merged cleanly into its base branch <!-- Added: forge#194 -->
-   - Verdict: CHANGES REQUESTED. Message: "Merge conflict with `{base}`. Rebase `{head}` onto `origin/{base}`, resolve the conflicting files, then re-run /review-pr."
+4. **Base conflict** — `BASE_CONFLICT=true` (computed in the block below): `MERGE_HEALTH == "CONFLICTING"`, OR `MERGE_HEALTH_STATE == "DIRTY"`, OR `MERGE_HEALTH_STATE == "BEHIND"` while the base branch requires up-to-date branches — PR cannot be merged cleanly into its base branch <!-- Added: forge#194, forge#3496 -->
+   - Verdict: CHANGES REQUESTED. Message: "Base conflict with `{base}`. Merge `origin/{base}` into `{head}` (merge only; no rebase, no force-push), resolve the conflicting files by reading both sides, then re-run /review-pr."
+   - A merely-`BEHIND` branch on a base that does NOT require up-to-date branches is not a conflict and needs no sync: GitHub merges it fine.
+   - `MERGE_HEALTH_STATE == "BLOCKED"` alone (branch protection not satisfied: missing required review or check) is NOT a base conflict: syncing the base cannot clear it. Emit a WARNING line in the verdict body and leave `HAS_MERGE_CONFLICT=false`; the Phase 8 pre-merge guard handles it as a protection abort.
    - If `MERGE_HEALTH == "UNKNOWN"` after retries: emit a WARNING in the verdict body (do NOT treat as a block — GitHub may still be computing it).
 5. A CONFIRMED coverage reduction (deleted test, removed test case, or disabled/removed workflow test step) in a PR that responds to a red check, or that has no justification tying it to removal of the tested code <!-- Added: forge#3257 -->
    - Verdict: CHANGES REQUESTED. Message: "Coverage reduction: a deleted test or removed workflow test step is not a fix for a red check. Restore it and fix the code under test, or escalate naming the failing assertions." Detection follows quality-gate 2U (`COVERAGE-1`); never dedup this finding against the PR's own issue.
 
 ```bash
 # Determine if mergeability is a blocker (MERGE_HEALTH/MERGE_HEALTH_STATE set in Phase 1A; BASE/HEAD set in Phase 0 Mode 3)
+# BASE_CONFLICT is the single source of truth for "a base sync would fix this"; the Phase 8 guards read it. <!-- Added: forge#3496 -->
 HAS_MERGE_CONFLICT=false
+BASE_CONFLICT=false
 MERGE_CONFLICT_MSG=""
-if [ "$MERGE_HEALTH" = "CONFLICTING" ] || [ "$MERGE_HEALTH_STATE" = "DIRTY" ] || [ "$MERGE_HEALTH_STATE" = "BLOCKED" ]; then
+MERGE_PROTECTION_WARNING=""
+BASE_REQUIRES_UPTODATE=false
+if [ "$MERGE_HEALTH_STATE" = "BEHIND" ]; then
+    # Unreadable protection (404 / 403 / no admin access) is treated as "not required": no sync, and a later failed merge lands in the existing needs-human path.
+    [ "$(gh api "repos/${REPO}/branches/${BASE}/protection" --jq '.required_status_checks.strict // false' 2>/dev/null)" = "true" ] && BASE_REQUIRES_UPTODATE=true
+fi
+if [ "$MERGE_HEALTH" = "CONFLICTING" ] || [ "$MERGE_HEALTH_STATE" = "DIRTY" ] || { [ "$MERGE_HEALTH_STATE" = "BEHIND" ] && [ "$BASE_REQUIRES_UPTODATE" = "true" ]; }; then
     HAS_MERGE_CONFLICT=true
-    MERGE_CONFLICT_MSG="Merge conflict with \`${BASE}\`. Rebase \`${HEAD}\` onto \`origin/${BASE}\`, resolve the conflicting files, then re-run /review-pr."
+    BASE_CONFLICT=true
+    MERGE_CONFLICT_MSG="Base conflict with \`${BASE}\`. Merge \`origin/${BASE}\` into \`${HEAD}\` (merge only, no rebase, no force-push), resolve the conflicting files by reading both sides, then re-run /review-pr."
+elif [ "$MERGE_HEALTH_STATE" = "BLOCKED" ]; then
+    MERGE_PROTECTION_WARNING="Merge state is BLOCKED: branch protection is not satisfied (required review or check). Syncing the base cannot clear this."
+fi
+
+# ONLY_BASE_CONFLICT: the base conflict is the ONLY reason the verdict is CHANGES REQUESTED.
+# Set OTHER_BLOCKING=true when ANY other blocking criterion (1, 2, 3 or 5 above) fired for this PR.
+# When true, Phase 8 routes to the base-sync path (blocker base-conflict) instead of needs-human.
+ONLY_BASE_CONFLICT=false
+if [ "$BASE_CONFLICT" = "true" ] && [ "${OTHER_BLOCKING:-false}" != "true" ] && [ "$HAS_PURPOSE_REGRESSION" != "true" ] && [ "${CALIBRATION_NEEDS_HUMAN:-false}" != "true" ] && [ "${TRUST_NEEDS_HUMAN:-false}" != "true" ]; then
+    ONLY_BASE_CONFLICT=true
 fi
 
 # Resolve attribution footer (forge.yaml → attribution.pr_footer)
@@ -2510,7 +2531,9 @@ $([ "$MERGE_HEALTH" = "UNKNOWN" ] && echo "
 gh pr review "$PR_NUMBER" -R "$REPO" --comment --body "CHANGES REQUESTED: commit $REVIEW_SHA_SHORT — [N] blocking issues found. See GitHub issues.
 ${TRUST_ANNOTATION}
 $([ "$HAS_MERGE_CONFLICT" = "true" ] && echo "
-🔴 Merge Conflict: ${MERGE_CONFLICT_MSG}")
+🔴 Base Conflict: ${MERGE_CONFLICT_MSG}")
+$([ -n "$MERGE_PROTECTION_WARNING" ] && echo "
+⚠ ${MERGE_PROTECTION_WARNING}")
 $([ "$HAS_PURPOSE_REGRESSION" = "true" ] && echo "
 ⚠ Purpose Regression: [N] finding(s) contradict the milestone's stated goal and are automatically blocking regardless of runtime impact. See: ${PURPOSE_REGRESSION_FINDINGS[@]}")${ATTRIBUTION_FOOTER_LINE}"
 ```
@@ -2767,7 +2790,12 @@ If the preflight failed, skip the rest of Phase 8. On exit code 1, return `REVIE
 # These vars are set in Phase 7A/7B/7B.5/3B.5 earlier in the same agent session.
 # An unset/empty VERDICT is safe — it evaluates to "" which does not equal "CHANGES REQUESTED".
 # TRUST_NEEDS_HUMAN: set to true by Phase 3B.5 when INTENSITY_TIER=NOVEL_NEEDS_HUMAN AND shadow mode is off.
-if [ "$VERDICT" = "CHANGES REQUESTED" ] || [ "$HAS_PURPOSE_REGRESSION" = "true" ] || [ "$CALIBRATION_NEEDS_HUMAN" = "true" ] || [ "${TRUST_NEEDS_HUMAN:-false}" = "true" ]; then
+if [ "${ONLY_BASE_CONFLICT:-false}" = "true" ] && [ "$VERDICT" = "CHANGES REQUESTED" ]; then
+    # Pure base conflict (set in Phase 7B: the ONLY blocker): route to the base-sync path, NOT needs-human. <!-- Added: forge#3496 -->
+    # work-on/review.md R4 adds needs-human only when it hands off to remediate; a standalone /review-pr caller just sees the blocker.
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: base conflict with \`{MERGE_BASE}\` (the only blocking reason). Next step is a base sync: merge \`origin/{MERGE_BASE}\` into the PR branch (merge only, no rebase, no force-push), resolve conflicts by reading both sides, re-run the quality gate, then re-run /review-pr on the new head." # <!-- allowlist:check-command-side-effects -->
+    # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "base-conflict". Do NOT add needs-human and do NOT attempt gh pr merge.
+elif [ "$VERDICT" = "CHANGES REQUESTED" ] || [ "$HAS_PURPOSE_REGRESSION" = "true" ] || [ "$CALIBRATION_NEEDS_HUMAN" = "true" ] || [ "${TRUST_NEEDS_HUMAN:-false}" = "true" ]; then
     BLOCK_REASON=""
     [ "$VERDICT" = "CHANGES REQUESTED" ] && BLOCK_REASON="review verdict is CHANGES REQUESTED (blocking finding confirmed by Phase 7B)"
     [ "$HAS_PURPOSE_REGRESSION" = "true" ] && BLOCK_REASON="${BLOCK_REASON:+${BLOCK_REASON}; }purpose regression detected by Phase 7A (\`HAS_PURPOSE_REGRESSION=true\`)"
@@ -2785,10 +2813,23 @@ PRE_MERGE_RESULT=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json mergeable,merge
 PRE_MERGE_HEALTH=${PRE_MERGE_RESULT%%|*}
 PRE_MERGE_HEALTH_STATE=${PRE_MERGE_RESULT##*|}
 
-if [ "$PRE_MERGE_HEALTH" = "CONFLICTING" ] || [ "$PRE_MERGE_HEALTH_STATE" = "DIRTY" ] || [ "$PRE_MERGE_HEALTH_STATE" = "BLOCKED" ]; then
-    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: PR is not mergeable (\`mergeable=${PRE_MERGE_HEALTH}\`, \`mergeStateStatus=${PRE_MERGE_HEALTH_STATE}\`). Rebase the branch onto \`{MERGE_BASE}\` and resolve conflicts, then re-run /review-pr."
+PRE_MERGE_BASE_CONFLICT=false
+if [ "$PRE_MERGE_HEALTH" = "CONFLICTING" ] || [ "$PRE_MERGE_HEALTH_STATE" = "DIRTY" ]; then
+    PRE_MERGE_BASE_CONFLICT=true
+elif [ "$PRE_MERGE_HEALTH_STATE" = "BEHIND" ]; then
+    # BEHIND is a conflict only under required-up-to-date protection; unreadable protection counts as "not required". <!-- Added: forge#3496 -->
+    [ "$(gh api "repos/${REPO}/branches/{MERGE_BASE}/protection" --jq '.required_status_checks.strict // false' 2>/dev/null)" = "true" ] && PRE_MERGE_BASE_CONFLICT=true
+fi
+
+if [ "$PRE_MERGE_BASE_CONFLICT" = "true" ]; then
+    # Base moved during review: route to the base-sync path, NOT needs-human. <!-- Added: forge#3496 -->
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: base conflict (\`mergeable=${PRE_MERGE_HEALTH}\`, \`mergeStateStatus=${PRE_MERGE_HEALTH_STATE}\`). Merge \`origin/{MERGE_BASE}\` into the PR branch (merge only, no rebase, no force-push), resolve conflicts by reading both sides, then re-run /review-pr." # <!-- allowlist:check-command-side-effects -->
+    # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "base-conflict". Do NOT add needs-human and do NOT attempt gh pr merge.
+elif [ "$PRE_MERGE_HEALTH_STATE" = "BLOCKED" ]; then
+    # Branch protection not satisfied: syncing the base cannot clear it, so this is NOT a base-conflict blocker.
+    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: branch protection is not satisfied (\`mergeStateStatus=BLOCKED\`); syncing the base cannot clear it. Satisfy the required review/checks, then re-run /review-pr."
     gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true
-    # STOP — do not attempt gh pr merge on a CONFLICTING/DIRTY PR
+    # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "branch protection not satisfied" (never "base-conflict")
 else
 
 # Previously-escalated re-review guard <!-- Added: forge#1810; base-scoped: forge#2570 -->
