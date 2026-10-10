@@ -92,6 +92,18 @@ export function deriveState(events) {
       case "RUN_REOPEN":
         s.terminal = false; s.terminalReason = lastCommitReason; s.v = e.seq;
         break;
+      // forge#3562: an explicit `run-issue --retry` on a `phase-complete` run
+      // (multi-phase issue: this phase merged, more remain) starts a NEW cycle.
+      // RUN_REOPEN keeps `committed`, so pickPhase would find nothing to run and
+      // re-terminate; a new cycle clears committed/branch/pr so it restarts at
+      // investigate with a fresh branch. `v` is bumped like RUN_REOPEN, and
+      // lastCommitReason is reset so a stale handoff reason cannot leak into
+      // the new cycle through a later RUN_REOPEN.
+      case "RUN_NEXT_CYCLE":
+        s.terminal = false; s.terminalReason = null; s.committed = [];
+        s.branch = null; s.pr = null; s.remediationKind = null;
+        lastCommitReason = null; s.v = e.seq;
+        break;
       // forge#2524: a session-limit pause is purely informational — it does
       // NOT touch committed/terminal/terminalReason. The phase that hit the
       // pause is, by construction, not yet committed (the engine is about to
