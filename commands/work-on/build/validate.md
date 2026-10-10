@@ -559,21 +559,37 @@ Reference `#{NUMBER}` in the message. This is the **only** commit for this build
 
 ### V5 Step 3: Post-Commit Ancestry Audit (MANDATORY)
 
-After committing, run the ancestry audit to detect merge commits from unrelated branches before the branch is pushed. If `origin/{PR_BASE}` does not exist yet (new branch), skip this check — no contamination is possible from a non-existent base.
+After committing, run the ancestry audit to detect merge commits that bring in history from outside the PR base before the branch is pushed. Merging `origin/{PR_BASE}` itself into the branch (a base sync) is allowed: every non-first parent of each merge must be an ancestor of `origin/{PR_BASE}`. If `origin/{PR_BASE}` does not exist yet (new branch), skip this check — no contamination is possible from a non-existent base.
 
 ```bash
 cd {WORKTREE_PATH}
 if git ls-remote --exit-code origin {PR_BASE} >/dev/null 2>&1; then
   git fetch origin {PR_BASE} >/dev/null 2>&1 || true
-  MERGE_COMMITS=$(git log --merges HEAD ^origin/{PR_BASE} 2>/dev/null)
-  if [ -n "$MERGE_COMMITS" ]; then
-    echo "ANCESTRY AUDIT FAILED: merge commits from unrelated branches detected on this branch:"
+  # Resolve the shared check from ForgeDock's install root ($FORGE_ROOT, set by the canonical bootstrap when present) or the worktree's own scripts/ (ForgeDock repo itself).
+  ANCESTRY_SCRIPT=""
+  for _d in "${FORGE_ROOT:-}/scripts" "{WORKTREE_PATH}/scripts"; do [ -f "$_d/check-branch-ancestry.sh" ] && { ANCESTRY_SCRIPT="$_d/check-branch-ancestry.sh"; break; }; done
+  if [ -n "$ANCESTRY_SCRIPT" ]; then
+    MERGE_COMMITS=$(bash "$ANCESTRY_SCRIPT" HEAD origin/{PR_BASE} 2>&1); ANCESTRY_RC=$?
+  else
+    # Prose fallback: same per-parent check inline (exit 0 clean, 1 foreign, 2 error).
+    ANCESTRY_RC=0; MERGE_COMMITS=""
+    for M in $(git rev-list --merges origin/{PR_BASE}..HEAD 2>/dev/null); do
+      for P in $(git rev-list --parents -n 1 "$M" | cut -d' ' -f3-); do
+        git merge-base --is-ancestor "$P" origin/{PR_BASE} 2>/dev/null; rc=$?
+        if [ "$rc" -eq 1 ]; then MERGE_COMMITS="${MERGE_COMMITS}${M} ${P}
+"; [ "$ANCESTRY_RC" -eq 2 ] || ANCESTRY_RC=1
+        elif [ "$rc" -ne 0 ]; then ANCESTRY_RC=2; fi
+      done
+    done
+  fi
+  if [ "$ANCESTRY_RC" -ne 0 ]; then
+    echo "ANCESTRY AUDIT FAILED (rc=$ANCESTRY_RC): merge commits from outside {PR_BASE} detected, or ancestry could not be verified:"
     echo "$MERGE_COMMITS"
     ANCESTRY_BODY="## Ancestry Audit Failed
 
-Branch \`{BRANCH}\` contains merge commits from branches outside the PR base (\`{PR_BASE}\`). This is a staging contamination risk — these commits may carry code from milestone branches that has not been approved for \`{PR_BASE}\`.
+Branch \`{BRANCH}\` contains merge commits that bring in history from outside the PR base (\`{PR_BASE}\`), or ancestry could not be verified (failing closed). This is a staging contamination risk — these commits may carry code from milestone branches that has not been approved for \`{PR_BASE}\`. Merges of \`{PR_BASE}\` itself are allowed and do not trigger this audit.
 
-**Detected merge commits**:
+**Detected merge commits** (merge, foreign parent, subject — or the verification error):
 \`\`\`
 ${MERGE_COMMITS}
 \`\`\`
@@ -590,7 +606,7 @@ else
 fi
 ```
 
-If the output contains `ANCESTRY_FAILED=1`: do NOT append `:COMPLETE` and do NOT push. Print `VALIDATE_RESULT` with `gate_passed: false` and `blocker: ancestry audit failed — merge commits from unrelated branches` as the final reply, and STOP.
+If the output contains `ANCESTRY_FAILED=1`: do NOT append `:COMPLETE` and do NOT push. Print `VALIDATE_RESULT` with `gate_passed: false` and `blocker: ancestry audit failed — merge commits from outside the PR base` as the final reply, and STOP.
 
 ### V5 Step 4: Mark Build Complete and Record Verification Status (MANDATORY)
 
