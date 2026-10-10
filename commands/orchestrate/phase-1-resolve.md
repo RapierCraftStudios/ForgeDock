@@ -281,7 +281,7 @@ Remove issues that should NOT be worked on:
 - Has `workflow:invalid` label
 - Has `needs-human` label (requires manual action)
 - Has `workflow:decomposed` label (parent tracker — its sub-issues should be picked up instead)
-- Has `workflow:building` or `workflow:in-review` label (already in progress)
+- Has `workflow:building`, `workflow:in-review`, or `workflow:remediating` label (already in progress; `workflow:remediating` is a review-handoff state awaiting a remediation worker)
 - Is an epic (`epic` label) — these are planning containers, not buildable
 
 If a `workflow:decomposed` issue is found, automatically expand it to its open sub-issues instead.

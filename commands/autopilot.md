@@ -228,9 +228,9 @@ INFLIGHT_ISSUES=$(gh issue list $GH_FLAG \
   --state open \
   --limit 200 \
   --json number,title,labels \
-  --jq '[.[] | select(.labels | map(.name) | any(. == "workflow:building" or . == "workflow:in-review"))] | length' \
+  --jq '[.[] | select(.labels | map(.name) | any(. == "workflow:building" or . == "workflow:in-review" or . == "workflow:remediating"))] | length' \
   2>/dev/null || echo '0')
-echo "STATE: $INFLIGHT_ISSUES in-flight issue(s) (workflow:building or workflow:in-review)"
+echo "STATE: $INFLIGHT_ISSUES in-flight issue(s) (workflow:building, workflow:in-review, or workflow:remediating)"
 ```
 
 ### 0D: Detect staging vs main delta

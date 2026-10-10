@@ -159,7 +159,7 @@ These were closed outside the pipeline. Report count but don't fix (not necessar
 
 ### 1D: Detect stale OPEN issues in intermediate workflow states
 
-Open issues stuck in `workflow:building`, `workflow:in-review`, or `workflow:investigating` beyond a configurable threshold indicate a stalled agent. These are invisible to Phase 1A–1C (which only query closed issues).
+Open issues stuck in `workflow:building`, `workflow:in-review`, `workflow:remediating`, or `workflow:investigating` beyond a configurable threshold indicate a stalled agent. These are invisible to Phase 1A–1C (which only query closed issues).
 
 ```bash
 # Configurable threshold — override by setting STALE_THRESHOLD_HOURS before invoking /cleanup
@@ -174,7 +174,7 @@ echo "=== Stale-Open Intermediate Issues (threshold: ${STALE_THRESHOLD_HOURS}h) 
 
 STALE_OPEN_COUNT=0
 
-for LABEL in "workflow:building" "workflow:in-review" "workflow:investigating"; do
+for LABEL in "workflow:building" "workflow:in-review" "workflow:remediating" "workflow:investigating"; do
   ISSUES=$(gh issue list {GH_FLAG} \
     --state open \
     --label "$LABEL" \

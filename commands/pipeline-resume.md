@@ -72,7 +72,7 @@ The `gh issue list --label` flag uses AND filtering when multiple labels are giv
 # Find open issues with any active workflow label, sorted by most recently updated
 # (gh --label uses AND, so query each label separately and merge)
 ACTIVE_ISSUES=$(
-  for LABEL in "workflow:investigating" "workflow:ready-to-build" "workflow:building" "workflow:in-review"; do
+  for LABEL in "workflow:investigating" "workflow:ready-to-build" "workflow:building" "workflow:in-review" "workflow:remediating"; do
     gh issue list {GH_FLAG} \
       --state open \
       --label "$LABEL" \
