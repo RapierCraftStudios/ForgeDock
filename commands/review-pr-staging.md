@@ -187,6 +187,11 @@ fi
 
 REVIEW_SHA_STAGING="n/a"  # gh pr view "" falls back to the current branch PR, so only look up a resolved number <!-- Added: forge#3466 -->
 [ -n "$PR_NUMBER" ] && REVIEW_SHA_STAGING=$(gh pr view "$PR_NUMBER" ${GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null | cut -c1-7 || echo "n/a")
+# Full head SHA (40/64 hex) for the Reviewed-SHA line in reviewer comments and the trusted-comment regexes. Empty or malformed stays empty; every consumer refuses on empty. <!-- Added: forge#3492 -->
+REVIEW_SHA_FULL=""
+[ -n "$PR_NUMBER" ] && REVIEW_SHA_FULL=$(gh pr view "$PR_NUMBER" ${GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
+case "$REVIEW_SHA_FULL" in *[!0-9a-f]*|"") REVIEW_SHA_FULL="" ;; *) [ "${#REVIEW_SHA_FULL}" -eq 40 ] || [ "${#REVIEW_SHA_FULL}" -eq 64 ] || REVIEW_SHA_FULL="" ;; esac
+[ -n "$REVIEW_SHA_FULL" ] || echo "WARNING: could not resolve a full head SHA; reviewer trust checks will refuse (fail closed)." >&2
 
 if [ -n "$PR_NUMBER" ]; then
   gh pr comment "$PR_NUMBER" ${GH_FLAG} --body "<!-- FORGE:REVIEW_ROUTE mode=staging-deploy spec=review-pr-staging.md sha=${REVIEW_SHA_STAGING} -->"
@@ -276,9 +281,19 @@ fi
 if [ -n "$BLOCKING_FINDINGS" ]; then
   # Check for human override comment on the staging→main PR
   if [ -n "$PR_NUMBER" ]; then
-    OVERRIDE=$(gh pr view "$PR_NUMBER" -R {GH_REPO} \
-      --json comments \
-      --jq '[.comments[].body | select(startswith("OVERRIDE: shipping with open findings"))] | length' 2>/dev/null)
+    # Trusted authors only (scripts/trusted-comments.sh: OWNER/MEMBER/COLLABORATOR or a Bot), all comment pages,
+    # marker anchored at the start of the body. Fail closed: unresolvable script or unreadable comments = no override (#3492).
+    _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+    OVR_SCRIPT=""
+    for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock"; do
+      case "$_c" in /*) [ -z "$OVR_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && OVR_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+    done
+    OVR_COMMENTS=$(gh api --paginate "repos/{GH_REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null) || OVR_COMMENTS=""
+    if [ -n "$OVR_SCRIPT" ] && [ -n "$OVR_COMMENTS" ]; then
+      OVERRIDE=$(printf '%s' "$OVR_COMMENTS" | bash "$OVR_SCRIPT" count '^OVERRIDE: shipping with open findings' 2>/dev/null || echo 0)
+    else
+      OVERRIDE=0
+    fi
   else
     OVERRIDE=0
   fi
@@ -461,6 +476,7 @@ Launch agent (model: {SUBAGENT_MODEL}) to analyze all commits since last deploy.
 **MANDATORY — post findings as PR comment**: Before its first post attempt, the agent MUST persist the final report to a uniquely named durable file, then post it with `--body-file`. It MUST also return verdict, finding count, and one line per finding to the orchestrator whether the post succeeds or fails; on failure, return the file path and stop without retrying. After completing analysis, the agent posts its full report directly to the PR:
 ```bash
 gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:material-change -->
+Reviewed-SHA: ${REVIEW_SHA_FULL}
 ## Material Change Analysis
 
 [full analysis report here]
@@ -488,6 +504,7 @@ Each reads the service diff, hunts for bugs, traces context across imports, pers
 **MANDATORY — each Bug Hunter agent MUST post its findings directly to the PR immediately upon completion** (do not wait for the orchestrator to batch-post):
 ```bash
 gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:bug-hunter-{service} -->
+Reviewed-SHA: ${REVIEW_SHA_FULL}
 ## Bug Hunter Review — {service}
 
 [full findings here]
@@ -507,6 +524,7 @@ Agent hunts for: dead code, duplicate logic, complexity (>50 line functions), na
 **MANDATORY — post findings as PR comment**: Before its first post attempt, the agent MUST persist the final report to a uniquely named durable file, then post it with `--body-file`. It MUST also return verdict, finding count, and one line per finding to the orchestrator whether the post succeeds or fails; on failure, return the file path and stop without retrying. After completing analysis, the agent posts its full report directly to the PR:
 ```bash
 gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:code-quality -->
+Reviewed-SHA: ${REVIEW_SHA_FULL}
 ## Code Quality Review
 
 [full analysis here]
@@ -570,6 +588,7 @@ Launch domain-specific agents based on which domains have changes. Substitute PR
 **MANDATORY — each domain agent MUST persist its finalized body before posting its findings directly to the PR immediately upon completion** (not batched by the orchestrator). It MUST return verdict, finding count, and one line per finding to the orchestrator independently of delivery; if posting fails, return the durable file path and stop without retrying:
 ```bash
 gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:{domain} -->
+Reviewed-SHA: ${REVIEW_SHA_FULL}
 ## {Domain} Review
 
 [full analysis here]
@@ -589,6 +608,7 @@ Agent maps dependencies, assesses integration points (service boundaries, env va
 **MANDATORY — post findings as PR comment**: Before its first post attempt, the agent MUST persist the final report to a uniquely named durable file, then post it with `--body-file`. It MUST also return verdict, finding count, and one line per finding to the orchestrator whether the post succeeds or fails; on failure, return the file path and stop without retrying. After completing analysis, the agent posts its full report directly to the PR:
 ```bash
 gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:regression-risk -->
+Reviewed-SHA: ${REVIEW_SHA_FULL}
 ## Regression Risk Assessment
 
 [full risk matrix and rollback plan here]
@@ -663,17 +683,25 @@ case "$TEST_GATE_VERDICT" in
   BLOCK)
     # Check for override comment on the staging→main PR (mirrors Phase 0A pattern)
     if [ -n "$PR_NUMBER" ]; then
-      TG_OVERRIDE=$(gh pr view "$PR_NUMBER" ${GH_FLAG} \
-        --json comments \
-        --jq "[.comments[].body | select(startswith(\"${OVERRIDE_PHRASE}\"))] | length" 2>/dev/null || echo 0)
+      # Trusted authors only, all comment pages, anchored; fail closed (no override) if the script or comments are
+      # unreadable (#3492). OVERRIDE_PHRASE comes from forge.yaml, so regex-escape it before using it as a pattern.
+      _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+      TG_SCRIPT=""
+      for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock"; do
+        case "$_c" in /*) [ -z "$TG_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TG_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+      done
+      TG_COMMENTS=$(gh api --paginate "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null) || TG_COMMENTS=""
+      TG_OVERRIDE=0; OVERRIDE_REASON="(reason not captured)"
+      if [ -n "$TG_SCRIPT" ] && [ -n "$TG_COMMENTS" ]; then
+        TG_RE="^$(printf '%s' "$OVERRIDE_PHRASE" | sed 's/[][\\.^$*+?(){}|\/]/\\&/g')"
+        TG_OVERRIDE=$(printf '%s' "$TG_COMMENTS" | bash "$TG_SCRIPT" count "$TG_RE" 2>/dev/null || echo 0)
+        [ "${TG_OVERRIDE:-0}" -gt 0 ] && OVERRIDE_REASON=$(printf '%s' "$TG_COMMENTS" | bash "$TG_SCRIPT" bodies "$TG_RE" 2>/dev/null | tail -1 | jq -r '.' 2>/dev/null || echo "(reason not captured)")
+      fi
     else
       TG_OVERRIDE=0
     fi
 
     if [ "${TG_OVERRIDE:-0}" -gt 0 ]; then
-      OVERRIDE_REASON=$(gh pr view "$PR_NUMBER" ${GH_FLAG} \
-        --json comments \
-        --jq "[.comments[].body | select(startswith(\"${OVERRIDE_PHRASE}\"))] | last" 2>/dev/null || echo "(reason not captured)")
       echo "⚠️  Test gate: BLOCK — but override comment detected on PR #${PR_NUMBER}."
       echo "   Override: ${OVERRIDE_REASON}"
       echo "   Proceeding with deploy. Override is logged in Phase 8 summary."
@@ -743,11 +771,26 @@ If the gate exits with `RESULT: BLOCK DEPLOY` → **STOP**. A `<!-- FORGE:GATE_F
 
 ---
 
-**Incomplete-panel guard (MANDATORY):** Increment `SELECTED_AGENT_COUNT` for every reviewer selected across Phases 2–6 before launching it. If any dispatch fails, set `DISPATCH_FAILED=true`. Before Phase 7, count unique `FORGE:REVIEW-AGENT` markers. If the completed count is lower than selected, follow the same hard-stop path as pool exhaustion: create `review-degraded` if needed, label the PR, post `FORGE:GATE_FAILURE`, and exit. Do not create a deploy verdict from partial reviewer output.
+**Incomplete-panel guard (MANDATORY):** Increment `SELECTED_AGENT_COUNT` for every reviewer selected across Phases 2–6 before launching it. If any dispatch fails, set `DISPATCH_FAILED=true`. Before Phase 7, count unique trusted, current-head `FORGE:REVIEW-AGENT` markers (author trusted per `scripts/trusted-comments.sh`, body starting with the marker, `Reviewed-SHA:` line matching the full head SHA, all comment pages read; an unresolvable script or unreadable comments count as 0). If the completed count is lower than selected, follow the same hard-stop path as pool exhaustion: create `review-degraded` if needed, label the PR, post `FORGE:GATE_FAILURE`, and exit. Do not create a deploy verdict from partial reviewer output.
 
 ```bash
-ACTUAL_AGENT_COUNT=$(gh api "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" \
-  --jq '[.[].body | scan("<!-- FORGE:REVIEW-AGENT:([a-z-]+) -->") | .[0]] | unique | length' 2>/dev/null || echo 0)
+# Each Bash call is a fresh shell: re-resolve the full head SHA if it is not set, and refuse when it is not a commit id
+# (an empty SHA would make the Reviewed-SHA match accept any head).
+[ -n "${REVIEW_SHA_FULL:-}" ] || REVIEW_SHA_FULL=$(gh pr view "$PR_NUMBER" -R "$GH_REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
+case "$REVIEW_SHA_FULL" in *[!0-9a-f]*|"") REVIEW_SHA_FULL="" ;; *) [ "${#REVIEW_SHA_FULL}" -eq 40 ] || [ "${#REVIEW_SHA_FULL}" -eq 64 ] || REVIEW_SHA_FULL="" ;; esac
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+TRUSTED_SCRIPT=""
+for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock"; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done
+ACTUAL_AGENT_COUNT=0
+if [ -n "$REVIEW_SHA_FULL" ] && [ -n "$TRUSTED_SCRIPT" ]; then
+  # Only TRUSTED, current-head reviewer comments count, over every page of comments. Unique domains, so a duplicate does not inflate the count.
+  ACTUAL_AGENT_COUNT=$(gh api --paginate "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
+    | bash "$TRUSTED_SCRIPT" bodies "^<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA_FULL}(\\r?\\n|$)" 2>/dev/null \
+    | jq -r 'scan("^<!-- FORGE:REVIEW-AGENT:([a-z0-9-]+) -->") | .[0]' 2>/dev/null | sort -u | grep -c . || echo 0)
+fi
+case "$ACTUAL_AGENT_COUNT" in ''|*[!0-9]*) ACTUAL_AGENT_COUNT=0 ;; esac   # fail closed: unreadable or untrusted counts as not posted
 if [ "$DISPATCH_FAILED" = "true" ] || [ "$ACTUAL_AGENT_COUNT" -lt "$SELECTED_AGENT_COUNT" ]; then
   gh label create "review-degraded" --color "E4E669" --description "PR review panel was incomplete; re-review required before deployment. Managed by ForgeDock." --force -R "$GH_REPO" 2>/dev/null || true
   gh pr edit "$PR_NUMBER" -R "$GH_REPO" --add-label "review-degraded" --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
@@ -766,14 +809,26 @@ fi
 
 ### Phase 6.75: Verify Agent Delivery
 
-Before launching every Phase 2-6 review agent, append its lowercase marker domain (for example, `security`, `bug-hunter-api`, or `regression-risk`) to `LAUNCHED_REVIEW_AGENTS`. A completed agent is accounted for only when its corresponding marker comment is present on the PR.
+Before launching every Phase 2-6 review agent, append its lowercase marker domain (for example, `security`, `bug-hunter-api`, or `regression-risk`) to `LAUNCHED_REVIEW_AGENTS`. A completed agent is accounted for only when its marker comment is present on the PR from a trusted author, starts with the marker, and carries the `Reviewed-SHA:` line for the current head.
 
 ```bash
 MISSING_AGENT_COMMENTS=""
+# Each Bash call is a fresh shell: re-resolve the full head SHA if it is not set, and refuse when it is not a commit id
+# (an empty SHA would make the Reviewed-SHA match accept any head).
+[ -n "${REVIEW_SHA_FULL:-}" ] || REVIEW_SHA_FULL=$(gh pr view "$PR_NUMBER" -R "$GH_REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
+case "$REVIEW_SHA_FULL" in *[!0-9a-f]*|"") REVIEW_SHA_FULL="" ;; *) [ "${#REVIEW_SHA_FULL}" -eq 40 ] || [ "${#REVIEW_SHA_FULL}" -eq 64 ] || REVIEW_SHA_FULL="" ;; esac
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+TRUSTED_SCRIPT=""
+for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock"; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done
 for AGENT_DOMAIN in $LAUNCHED_REVIEW_AGENTS; do
-  AGENT_COMMENT_COUNT=$(gh api "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" \
-    --jq "[.[] | select(.body | contains(\"<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->\"))] | length" \
-    2>/dev/null || printf '0')
+  AGENT_COMMENT_COUNT=0
+  if [ -n "$REVIEW_SHA_FULL" ] && [ -n "$TRUSTED_SCRIPT" ]; then
+    AGENT_COMMENT_COUNT=$(gh api --paginate "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
+      | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA_FULL}(\\r?\\n|$)" 2>/dev/null || echo 0)
+  fi
+  case "$AGENT_COMMENT_COUNT" in ''|*[!0-9]*) AGENT_COMMENT_COUNT=0 ;; esac   # fail closed: counts as missing
   if [ "${AGENT_COMMENT_COUNT:-0}" -lt 1 ]; then
     MISSING_AGENT_COMMENTS="${MISSING_AGENT_COMMENTS} ${AGENT_DOMAIN}"
   fi
@@ -789,7 +844,30 @@ fi
 Missing comments are an explicit failure, never evidence of no findings. Do not triage or synthesize a deploy verdict while any launched agent is unaccounted for.
 
 ### 7A: Extract Findings
-From PR comments, extract structured findings (`<!-- FINDING:... -->`). If none found, scan for unstructured findings. If still 0 → skip to Phase 8.
+Only findings inside trusted, current-head reviewer comments count: the head SHA is public, so an untrusted commenter must never be able to inject `FINDING` markers that get filed as issues. Read every page of comments, fail closed when the trust script or comments are unreadable (never fall through to "no findings").
+
+```bash
+# Each Bash call is a fresh shell: re-resolve the full head SHA if it is not set, and refuse when it is not a commit id
+# (an empty SHA would make the Reviewed-SHA match accept any head).
+[ -n "${REVIEW_SHA_FULL:-}" ] || REVIEW_SHA_FULL=$(gh pr view "$PR_NUMBER" -R "$GH_REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
+case "$REVIEW_SHA_FULL" in *[!0-9a-f]*|"") REVIEW_SHA_FULL="" ;; *) [ "${#REVIEW_SHA_FULL}" -eq 40 ] || [ "${#REVIEW_SHA_FULL}" -eq 64 ] || REVIEW_SHA_FULL="" ;; esac
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+TRUSTED_SCRIPT=""
+for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock"; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done
+[ -n "$REVIEW_SHA_FULL" ] || { echo "STAGING_REVIEW: BLOCKED - head SHA is not a commit id; refusing to extract findings (fail closed)"; exit 1; }
+COMMENTS_JSON=$(gh api --paginate "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
+if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then
+  echo "STAGING_REVIEW: BLOCKED - scripts/trusted-comments.sh unresolvable or PR comments unreadable; refusing to extract findings (fail closed)"; exit 1
+fi
+AGENT_RE="^<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA_FULL}(\\r?\\n|$)"
+AGENT_BODIES=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies "$AGENT_RE" 2>/dev/null) \
+  || { echo "STAGING_REVIEW: BLOCKED - trusted reviewer comments unreadable (fail closed)"; exit 1; }
+ALL_FINDINGS=$(printf '%s\n' "$AGENT_BODIES" | jq -r 'scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null)
+```
+
+Extract structured findings (`<!-- FINDING:... -->`) from `ALL_FINDINGS`. If none found, scan the trusted bodies for unstructured findings. If still 0 → skip to Phase 8.
 
 ### 7B: Filter & Deduplicate
 Keep ALL findings (CONFIRMED/LIKELY/POSSIBLE). Deduplicate by file:line (keep higher confidence). Sort: CONFIRMED first, then by severity.
