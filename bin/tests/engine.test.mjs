@@ -7,6 +7,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runIssue, DEFAULT_SESSION_LIMIT_WAIT_MS } from "../engine.mjs";
 import { readLog, deriveState, appendEvent } from "../engine/runlog.mjs";
+import { pickPhase } from "../engine/phases.mjs";
 import { serializeState, parseState, upsertStateBlock } from "../engine/state.mjs";
 import { VALID_BACKENDS } from "../runner.mjs";
 
@@ -2460,6 +2461,41 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
     const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io: flaky, runner: okRunner(w),
       now: () => 2000, maxAttempts: 1, retry: true });
     assert.equal(res.terminalReason, "merged");
+  });
+
+  describe("forge#3528 RUN_REOPEN restores the last handoff reason", () => {
+    const start = { event: "RUN_START", issue: 1 };
+    const commit = (seq, phase, extra = {}) => ({ seq, event: "PHASE_COMMIT", phase, outputs: {}, ...extra });
+    const crash = (seq) => ({ seq, event: "RUN_TERMINAL", reason: "engine-error" });
+    const reopen = (seq) => ({ seq, event: "RUN_REOPEN" });
+
+    it("review handoff -> engine-error -> reopen picks remediate with the PR", async () => {
+      const s = deriveState([start, commit(2, "investigate"), commit(3, "build", { outputs: { branch: "b" } }),
+        commit(4, "review", { outputs: { pr: 9 }, terminalReason: "needs-human" }), crash(5), reopen(6)]);
+      assert.equal(s.terminalReason, "needs-human");
+      assert.equal(s.terminal, false);
+      const ph = pickPhase(s);
+      assert.equal(ph.id, "remediate");
+      assert.equal((await ph.buildArgs(s, { repo: "o/r" }))[0], "9");
+    });
+
+    it("decompose handoff -> engine-error -> reopen picks decompose, never build", () => {
+      const s = deriveState([start, commit(2, "investigate", { terminalReason: "decomposed" }), crash(3), reopen(4)]);
+      assert.equal(pickPhase(s).id, "decompose");
+    });
+
+    it("reopen without a prior handoff still yields null", () => {
+      const s = deriveState([start, commit(2, "investigate"), crash(3), reopen(4)]);
+      assert.equal(s.terminalReason, null);
+      assert.equal(s.terminal, false);
+      assert.equal(s.v, 4);
+    });
+
+    it("a later reason-less commit clears the handoff (non-sticky)", () => {
+      const s = deriveState([start, commit(2, "investigate", { terminalReason: "decomposed" }),
+        commit(3, "build"), crash(4), reopen(5)]);
+      assert.equal(s.terminalReason, null);
+    });
   });
 
   it("without retry an engine-error run stays terminal (back-compat)", async () => {
