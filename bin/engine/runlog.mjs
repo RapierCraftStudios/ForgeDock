@@ -57,7 +57,8 @@ export function deriveState(events) {
   /** @type {import("./phases.mjs").RunState} */
   const s = { v: 0, run: null, issue: null, lane: "staging", committed: [],
               phase: null, branch: null, pr: null, terminal: false,
-              terminalReason: null, lease: null, lastRateLimit: null };
+              terminalReason: null, lease: null, lastRateLimit: null,
+              remediationKind: null };
   for (const e of events) {
     switch (e.event) {
       case "RUN_START":
@@ -71,6 +72,10 @@ export function deriveState(events) {
         // forge#3504: a blocked phase persists its reason so a resumed run still routes to
         // remediate instead of defaulting to a "merged" close.
         if (e.terminalReason) s.terminalReason = e.terminalReason;
+        // forge#3530: the review's remediation kind must survive resume. A later review
+        // commit replaces it; a committed remediate consumes it, so it is never reused.
+        if (e.phase === "review") s.remediationKind = e.outputs?.remediation ?? null;
+        else if (e.phase === "remediate") s.remediationKind = null;
         break;
       case "RUN_TERMINAL":
         s.terminal = true; s.terminalReason = e.reason ?? "done"; s.v = e.seq;

@@ -1176,6 +1176,12 @@ describe("runIssue", () => {
         const a = args.join(" ");
         if (a.startsWith("repo view")) return "acme/widgets";
         if (a.startsWith("api ") && a.includes("/comments")) return JSON.stringify(w.comments);
+        if (a.startsWith("issue comment")) {
+          if (w.commentFails) throw new Error("gh: HTTP 502");
+          (w.posted ||= []).push(args[args.indexOf("--body") + 1]);
+          w.comments.push(args[args.indexOf("--body") + 1]);
+          return "";
+        }
         if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
         if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
         if (a.startsWith("issue edit")) { const i = args.indexOf("--body"); if (i>=0) w.body = args[i+1];
@@ -1198,6 +1204,72 @@ describe("runIssue", () => {
     };
     return { w, io };
   }
+
+  // forge#3530: engine path must post the router Phase 4R bound marker before remediate runs.
+  const reviewHandoff = (w, kind) => async ({ commandName }) => {
+    if (commandName === "work-on/investigate") w.comments.push("INVESTIGATION:COMPLETE");
+    if (commandName === "work-on/build") {
+      w.comments.push("FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"); w.commitsAheadByBranch["fix/real-branch-42"] = 1;
+    }
+    if (commandName === "work-on/review") {
+      w.pr = 7; w.labels.push("needs-human");
+      return { status: "complete", text: `REVIEW_RESULT:\n  status: NEXT\n  next: remediate\n  remediation: ${kind}\n  pr_number: 7` };
+    }
+    return { status: "complete" };
+  };
+
+  it("forge#3530: base-sync handoff after a prior ci-gate remediation posts FORGE:BASESYNC_REMEDIATION before remediate runs", async () => {
+    const { w, io } = multiCommentWorld();
+    // An earlier ci-gate remediation already completed on this issue (older trail).
+    w.comments.push("<!-- FORGE:CI_REMEDIATION: pr=7 -->");
+    w.comments.push("<!-- FORGE:REMEDIATION -->\n**Re-gate outcome**: HELD-AWAITING-MERGE to staging\n<!-- FORGE:REMEDIATION:COMPLETE -->");
+    const base = reviewHandoff(w, "base-sync");
+    let seenAtRemediate = null;
+    const runner = async (req) => {
+      if (req.commandName === "work-on/remediate") {
+        seenAtRemediate = w.comments.some((c) => c.includes("<!-- FORGE:BASESYNC_REMEDIATION: pr=7 -->"));
+        w.comments.push("<!-- FORGE:REMEDIATION -->\n**Re-gate outcome**: RE-ESCALATED\n<!-- FORGE:REMEDIATION:COMPLETE -->");
+        return { status: "complete" };
+      }
+      return base(req);
+    };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(seenAtRemediate, true, "bound marker must exist before remediate is dispatched");
+    assert.equal(w.posted.length, 1);
+    assert.match(w.posted[0], /^<!-- FORGE:BASESYNC_REMEDIATION: pr=7 -->/);
+    // The newest trail (RE-ESCALATED) wins over the older HELD-AWAITING-MERGE one.
+    assert.equal(res.terminalReason, "needs-human");
+    assert.equal(deriveState(readLog(dir, 42)).remediationKind, null, "a committed remediate consumes the kind");
+  });
+
+  it("forge#3530: marker-post failure does not dispatch remediate (engine-error)", async () => {
+    const { w, io } = multiCommentWorld();
+    const base = reviewHandoff(w, "ci-gate");
+    let remediateRan = false;
+    const runner = async (req) => {
+      if (req.commandName === "work-on/remediate") { remediateRan = true; return { status: "complete" }; }
+      const r = await base(req);
+      if (req.commandName === "work-on/review") w.commentFails = true;
+      return r;
+    };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(remediateRan, false);
+    assert.equal(res.terminalReason, "engine-error");
+  });
+
+  it("forge#3530: unknown remediation kind posts no marker and does not dispatch remediate", async () => {
+    const { w, io } = multiCommentWorld();
+    const base = reviewHandoff(w, "rm-rf");
+    let remediateRan = false;
+    const runner = async (req) => {
+      if (req.commandName === "work-on/remediate") { remediateRan = true; return { status: "complete" }; }
+      return base(req);
+    };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(remediateRan, false);
+    assert.equal(w.posted, undefined);
+    assert.equal(res.terminalReason, "engine-error");
+  });
 
   it("forge#2184: resolves the LAST FORGE:BUILDER:COMPLETE comment's branch when an earlier stale comment names a different branch", async () => {
     // Regression test for the documented-but-unasserted "last match wins"

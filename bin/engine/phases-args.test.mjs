@@ -38,6 +38,7 @@ const state = { v: 0, run: "r", issue: 3499, lane: "staging", committed: ["inves
   phase: null, branch: "fix/example-3499", pr: 77, terminal: false, terminalReason: null, lease: null };
 const ctx = { repo: "acme/widgets" };
 const io = {
+  gh: async () => "",
   git: async () =>
     "worktree /repo/.claude/worktrees/fix-example-3499\nHEAD 1111111\nbranch refs/heads/fix/example-3499\n",
 };
@@ -52,7 +53,7 @@ describe("engine phase args satisfy each target spec's argument-hint (forge#3499
     it(`${phase.id} (${phase.command})`, async () => {
       assert.equal(typeof phase.buildArgs, "function", `${phase.id} must define buildArgs`);
       const hint = parseHint(argumentHint(phase.command));
-      const args = await phase.buildArgs({ ...state, terminalReason: phase.id === "remediate" ? "needs-human" : null }, ctx, io);
+      const args = await phase.buildArgs({ ...state, terminalReason: phase.id === "remediate" ? "needs-human" : null, remediationKind: phase.id === "remediate" ? "inpr-fix" : null }, ctx, io);
 
       assert.ok(Array.isArray(args) && args.every((a) => typeof a === "string"), "args must be an array of strings");
       assert.ok(args.length > 1, `${phase.id} must not be invoked with only a positional`);
