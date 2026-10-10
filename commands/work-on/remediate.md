@@ -114,7 +114,7 @@ fi
 PARTIAL_PR_COMMENT_IDS=$(printf '%s' "$PR_COMMENTS" | jq -rs '[.[][] | select((.body // "") | startswith("<!-- FORGE:REMEDIATION -->")) | select((.body | contains("<!-- FORGE:REMEDIATION:COMPLETE -->")) | not) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | .id] | .[]' 2>/dev/null || true)
 ```
 
-**Per-kind scoping of the single-attempt guard** (forge#3496): the guard is scoped per remediation kind so a base-sync round is not swallowed by an earlier `ci-gate` / `inpr-fix` remediation on the same PR. A base-sync handoff is recognised by the router's `FORGE:BASESYNC_REMEDIATION: pr={PR_NUMBER}` bound marker on the issue (the router posts it immediately before invoking this phase); a completed base-sync round is recognised by a `FORGE:REMEDIATION:COMPLETE` trail carrying the `**Base sync**: ran` line that Phase M8 posts. The base-sync round is itself bounded to one, by that marker count in `work-on/review.md` R4 and by this check:
+**Per-kind scoping of the single-attempt guard** (forge#3496): the guard is scoped per remediation kind so a base-sync round is not swallowed by an earlier `ci-gate` / `inpr-fix` remediation on the same PR. A base-sync handoff is recognised by the router's `FORGE:BASESYNC_REMEDIATION: pr={PR_NUMBER}` bound marker on the issue (the router posts it immediately before invoking this phase); a completed base-sync round is recognised by a `FORGE:REMEDIATION:COMPLETE` trail carrying the `**Base sync**: ran` line that Phase M8 posts. The router handoff is bounded to one per PR (the marker count in `work-on/review.md` R4, unchanged) and this check; inside one remediation run the sync is bounded per distinct base head and hard-capped at `BASESYNC_MAX_ROUNDS` (see Phase M3 and M6):
 
 ```bash
 if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$PR_COMMENTS" ]; then
@@ -222,8 +222,11 @@ esac
 if ! { git diff --quiet && git diff --cached --quiet; }; then
   echo "refusing base sync: working tree has uncommitted changes"; BASESYNC_REFUSED=true
 fi
+BASESYNC_MAX_ROUNDS=2                       # hard cap on sync rounds per remediation run (M3 plus M6 re-syncs)
+BASESYNC_ROUNDS=$(( ${BASESYNC_ROUNDS:-0} + 1 ))
 if [ "${BASESYNC_REFUSED:-false}" != "true" ]; then
   git fetch origin {PR_BASE} # allowlist:check-command-side-effects
+  BASESYNC_BASE_SHA=$(git rev-parse origin/{PR_BASE})   # the base head this round merges; persisted by M8 as `Base sync**: ran (base=<sha>)`
   MERGE_OUT=$(git merge origin/{PR_BASE} --no-edit 2>&1); MERGE_RC=$? # allowlist:check-command-side-effects
   echo "$MERGE_OUT"
   # rc alone cannot tell a conflict from a refusal (both exit 1); MERGE_HEAD can.
@@ -268,6 +271,7 @@ Exactly one outcome applies. `BASESYNC_RAN=true` is set only on a clean merge (o
   gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
   ```
   EXIT `REMEDIATE_RESULT: status: BLOCKED` with blocker "base-sync: merge refused (rc=N)" (N = `MERGE_RC`). Never fall through to M4 as synced.
+- **Re-entry (per distinct base head)**: Phase M3's sync is re-enterable from Phase M6, but only when the base advanced past `BASESYNC_BASE_SHA` and `BASESYNC_ROUNDS` is below `BASESYNC_MAX_ROUNDS`. A re-sync round runs this same block on the new head with the same guards (shared-branch refusal, clean tree, merge-only, no force-push, resolve-or-park, `FORGE:BASESYNC_FAILED`). Shell state may not survive between blocks, so before a re-sync recover the round count from the interim trail and recorded SHA, and treat an unknown count as the cap. `BASESYNC_RAN=true` is still set only on a clean or concluded merge.
 - After a sync, the quality gate below re-runs on the merged tree, and Phase M6's re-review covers the new head (the reviewed-head guard forces a fresh review).
 
 **Quality Gate** (same loop as Phase 3G, max 3 iterations):
@@ -374,6 +378,23 @@ Note the marker is `<!-- FORGE:REMEDIATION -->` with **no** `:COMPLETE` suffix y
 
 If no dispatch tool resolves, a missing tool is not a human decision, so do NOT invoke `review-pr`, do NOT add `needs-human`, and leave `workflow:in-review` in place. Set `RE_GATE_OUTCOME="REREVIEW-REQUIRED"`, skip Phase M7, go to Phase M8 (which posts `FORGE:REMEDIATION:COMPLETE` with a `REREVIEW-REQUIRED` re-gate line), and return `REMEDIATE_RESULT: status: REREVIEW_REQUIRED`. The caller re-runs `/review-pr {PR_NUMBER} --auto-merge --issue {ISSUE_NUMBER} --base {PR_BASE}` from a session that has dispatch. The caller owns the terminal fallback if that re-review cannot run (`commands/work-on.md` Phase 0A.1); remediation itself stays single-attempt and adds no `needs-human` here. If a dispatch tool resolves, continue below.
 
+**Pre-review freshness pass** (only when `BASESYNC_RAN=true` and not dry-run): the quality gate, push and trail took minutes, so re-fetch right before the re-review.
+
+```bash
+cd {WORKTREE_PATH}
+git fetch origin {PR_BASE} # allowlist:check-command-side-effects
+NOW_BASE_SHA=$(git rev-parse origin/{PR_BASE})
+if [ -n "${BASESYNC_BASE_SHA:-}" ] && [ "$NOW_BASE_SHA" != "$BASESYNC_BASE_SHA" ] && [ "${BASESYNC_ROUNDS:-0}" -lt "${BASESYNC_MAX_ROUNDS:-2}" ] && git diff --quiet && git diff --cached --quiet; then
+  echo "base advanced since M3 (${BASESYNC_BASE_SHA} -> ${NOW_BASE_SHA}); re-merging once"
+  if git merge origin/{PR_BASE} --no-edit; then # allowlist:check-command-side-effects
+    BASESYNC_ROUNDS=$(( BASESYNC_ROUNDS + 1 )); BASESYNC_BASE_SHA="$NOW_BASE_SHA"
+    git push origin HEAD:{HEAD_BRANCH} # allowlist:check-command-side-effects
+  elif git rev-parse -q --verify MERGE_HEAD >/dev/null; then git merge --abort; fi # allowlist:check-command-side-effects
+fi
+```
+
+Clean merges only: a conflicted or refused freshness merge is aborted (MERGE_HEAD-guarded) and left to the `base-conflict` handling below. It counts against the same `BASESYNC_MAX_ROUNDS` cap, and the push is a plain non-force push of a merge-only update.
+
 ```
 if DRY_RUN=true:
   record "Would invoke review-pr --auto-merge for PR #{PR_NUMBER}; skipped (dry-run)."
@@ -403,7 +424,17 @@ If the retained `REVIEW_RESULT` is `PHASE_TRAIL_FAILED` (forge#3102): the gate r
 
 If the retained `REVIEW_RESULT` is `BLOCKED` with a blocker mentioning the phase trail (e.g. "phase trail unreadable (rc=N)": the Phase 8 verifier exited ≥2 / 127, forge#3147): the gate could not run, so nothing is missing and nothing is re-run. Keep `needs-human` (review-pr Phase 8 already re-asserted it), do not merge, and exit `REMEDIATE_RESULT: status: BLOCKED` with the same blocker.
 
-If the retained `REVIEW_RESULT` is `BLOCKED` with blocker "base-conflict" (forge#3496): the base moved again, or the sync did not clear the conflict. Treat it as re-escalated: the `BASESYNC_REMEDIATION` bound is already used, so do NOT sync a second time. Add `needs-human`, post a comment naming the PR and the conflicting files (`git diff --name-only --diff-filter=U` against a trial merge, or the GitHub mergeability report), and exit `REMEDIATE_RESULT: status: BLOCKED` with blocker "base conflict persists after base-sync remediation".
+If the retained `REVIEW_RESULT` is `BLOCKED` with blocker "base-conflict" (forge#3496): either the base moved again during the re-review, or the sync did not clear the conflict. Tell the two apart by base head, not by attempt count:
+
+```bash
+cd {WORKTREE_PATH}
+git fetch origin {PR_BASE} # allowlist:check-command-side-effects
+CUR_BASE_SHA=$(git rev-parse origin/{PR_BASE})
+# Recorded head: shell var, else the `Base sync**: ran (base=<sha>)` interim/final trail line. Unknown is treated as advanced, but only below the cap.
+```
+
+- **Base advanced** (`CUR_BASE_SHA` differs from the recorded `BASESYNC_BASE_SHA`) and `BASESYNC_ROUNDS` is below `BASESYNC_MAX_ROUNDS` (2, total within this run): this is a new conflict a human did not cause. Re-run the Phase M3 base-sync on the new head (same resolve-or-park rules), then the Phase M4 quality gate, ancestry guard and push, the M5 trail, and this Phase M6 once more. Increment `BASESYNC_ROUNDS` and update `BASESYNC_BASE_SHA`. Do not post a second `FORGE:REMEDIATION:COMPLETE`; only M8 does, once.
+- **Base unchanged** (the sync did not clear the conflict) or `BASESYNC_ROUNDS` has reached `BASESYNC_MAX_ROUNDS` (a base that never settles): park. Add `needs-human`, post a comment naming the PR, the base SHA(s) tried (recorded and current) and the conflicting files (`git diff --name-only --diff-filter=U` against a trial merge, or the GitHub mergeability report), and exit `REMEDIATE_RESULT: status: BLOCKED` with blocker "base conflict persists after base-sync remediation".
 
 This re-runs the full review (domain agents → verdict → Phase 8 auto-merge gate). The FIXABLE transition above left the issue at the non-terminal `workflow:in-review` state. `review-pr.md` recognizes the in-progress `FORGE:REMEDIATION` marker posted in Phase M5 as evidence of the prior escalation, so one of two things happens inside Phase 8:
 
@@ -572,7 +603,12 @@ esac
 REMEDIATED_HEAD_SHA=$(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null || true)
 
 # forge#3496: mark a base-sync round so Phase M0 scopes the single-attempt guard per kind.
-BASESYNC_LINE=""; [ "${BASESYNC_RAN:-false}" = "true" ] && BASESYNC_LINE="**Base sync**: ran"
+# Persist the merged base head so it survives across blocks: fall back to the merge's second parent when the shell var is unset.
+BASESYNC_LINE=""
+if [ "${BASESYNC_RAN:-false}" = "true" ]; then
+  BASESYNC_BASE_SHA="${BASESYNC_BASE_SHA:-$(git -C {WORKTREE_PATH} rev-parse -q --verify 'HEAD^2' 2>/dev/null || true)}"
+  BASESYNC_LINE="**Base sync**: ran (base=${BASESYNC_BASE_SHA:-unknown})"
+fi
 
 REMEDIATION_BODY="<!-- FORGE:REMEDIATION -->
 ## Remediation Complete for PR #{PR_NUMBER}

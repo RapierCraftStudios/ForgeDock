@@ -32,6 +32,12 @@ if grep -E 'git merge (origin|--abort)' "$SPEC" | grep -v 'allowlist:check-comma
   grep -E 'git merge (origin|--abort)' "$SPEC" | grep -v 'allowlist:check-command-side-effects' | grep -qE '^[[:space:]]*(MERGE_OUT=|git merge|if git rev-parse)' && bad "side-effect lines annotated" || ok "side-effect lines annotated"
 else ok "side-effect lines annotated"; fi
 
+has "M3 records merged base head" 'BASESYNC_BASE_SHA=\$\(git rev-parse origin/'
+has "re-sync rounds hard-capped" 'BASESYNC_MAX_ROUNDS'
+has "M6 distinguishes advanced base" 'Base advanced'
+has "M8 trail persists base sha" 'Base sync\*\*: ran \(base='
+if grep -qF 'do NOT sync a second time' "$SPEC"; then bad "unconditional second-sync refusal removed"; else ok "unconditional second-sync refusal removed"; fi
+
 # Behavioural: dirty tree + base change -> refused (rc!=0, no MERGE_HEAD, empty U-list); real conflict -> MERGE_HEAD present.
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 (
@@ -45,6 +51,23 @@ T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 )
 eq "refused merge: rc=1, no MERGE_HEAD, empty conflict list" "$(cat "$T/refused.out")" "1 nohead []"
 eq "real conflict: rc=1 with MERGE_HEAD" "$(cat "$T/conflict.out")" "1 head"
+
+# Advanced base: merge main at T0, main advances, head differs and a second merge is clean; unchanged base keeps the same SHA.
+(
+  R="$T/adv"; mkdir "$R" && cd "$R" && git init -q -b main . && git config user.email t@t && git config user.name t
+  echo a > f && git add f && git commit -qm base
+  git checkout -qb feat && echo x > g && git add g && git commit -qm feat
+  git checkout -q main && echo b > f && git commit -qam m1 && git checkout -q feat
+  git update-ref refs/remotes/origin/main main
+  sha0=$(git rev-parse origin/main); git merge origin/main --no-edit >/dev/null 2>&1
+  same=$(git rev-parse origin/main)
+  git checkout -q main && echo c > h && git add h && git commit -qm sibling && git checkout -q feat
+  git update-ref refs/remotes/origin/main main
+  sha1=$(git rev-parse origin/main)
+  git merge origin/main --no-edit >/dev/null 2>&1; rc=$?
+  echo "$([ "$sha0" = "$same" ] && echo unchanged-same || echo unchanged-differs) $([ "$sha0" != "$sha1" ] && echo advanced || echo notadvanced) $rc" > "$T/adv.out"
+)
+eq "advanced base: SHA differs, unchanged base same, second merge clean" "$(cat "$T/adv.out")" "unchanged-same advanced 0"
 
 echo "passed=$PASS failed=$FAILN"
 [ "$FAILN" -eq 0 ]
