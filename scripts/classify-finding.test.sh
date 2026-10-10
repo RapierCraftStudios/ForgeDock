@@ -38,19 +38,27 @@ expect NOTE  "LOW from Security agent, no keyword, is a NOTE (audit fix)" -- --s
 expect NOTE  "LOW from General Security & Quality, no keyword" -- --severity LOW --confidence LIKELY --agent "General Security & Quality" --text "duplicated predicate in NOTE count"
 
 # --- Safety exemption (content-based) ---
-expect ISSUE "LOW with injection keyword"     -- --severity LOW --confidence POSSIBLE --text "shell injection via unquoted var"
-expect ISSUE "LOW with auth_service path"     -- --severity LOW --confidence LIKELY --text "src/auth_service.py:12 missing check"
-expect ISSUE "LOW with Secrets (case)"        -- --severity LOW --confidence LIKELY --text "Secrets leak to log"
-expect ISSUE "LOW with permission-check"      -- --severity LOW --confidence LIKELY --text "permission-check skipped"
+expect NOTE  "LOW POSSIBLE injection keyword is a NOTE" -- --severity LOW --confidence POSSIBLE --text "shell injection via unquoted var"
+expect NOTE  "LOW LIKELY auth_service path is a NOTE" -- --severity LOW --confidence LIKELY --text "src/auth_service.py:12 missing check"
+expect NOTE  "LOW LIKELY Secrets (case) is a NOTE" -- --severity LOW --confidence LIKELY --text "Secrets leak to log"
+expect NOTE  "LOW LIKELY permission-check is a NOTE" -- --severity LOW --confidence LIKELY --text "permission-check skipped"
 expect NOTE  "'author' is not 'auth'"         -- --severity LOW --confidence LIKELY --text "author field unused"
 expect NOTE  "'tokenizer' is not 'token'"     -- --severity LOW --confidence LIKELY --text "tokenizer splits oddly"
-expect ISSUE "LOW CONFIRMED from Auth domain agent" -- --severity LOW --confidence CONFIRMED --agent "Auth" --text "nit"
+expect NOTE  "LOW CONFIRMED from Auth domain agent is a NOTE (no LOW rescue)" -- --severity LOW --confidence CONFIRMED --agent "Auth" --text "nit"
 expect ISSUE "MEDIUM POSSIBLE from Billing agent"  -- --severity MEDIUM --confidence POSSIBLE --agent "billing" --text "nit"
 expect NOTE  "LOW LIKELY from Auth domain agent is a NOTE" -- --severity LOW --confidence LIKELY --agent "Auth" --text "nit"
 expect NOTE  "LOW POSSIBLE from Database agent is a NOTE"  -- --severity LOW --confidence POSSIBLE --agent "Database" --text "nit"
 expect NOTE  "LOW POSSIBLE Concurrency reviewer is a NOTE (AlterLab #34671)" -- --severity LOW --confidence POSSIBLE --agent "Concurrency reviewer" --text "lock edge cases"
-expect ISSUE "LOW CONFIRMED Concurrency reviewer files" -- --severity LOW --confidence CONFIRMED --agent "Concurrency reviewer" --text "lock edge cases"
-expect ISSUE "keyword still rescues LOW POSSIBLE from domain agent" -- --severity LOW --confidence POSSIBLE --agent "Database" --text "sql injection"
+expect NOTE  "LOW CONFIRMED Concurrency reviewer is a NOTE" -- --severity LOW --confidence CONFIRMED --agent "Concurrency reviewer" --text "lock edge cases"
+expect NOTE  "LOW POSSIBLE domain agent + keyword is a NOTE" -- --severity LOW --confidence POSSIBLE --agent "Database" --text "sql injection"
+# --- LOW needs keyword AND CONFIRMED; domain agents rescue MEDIUM only (#3639) ---
+expect NOTE  "LOW LIKELY + keyword is a NOTE"        -- --severity LOW --confidence LIKELY --text "shell injection via unquoted var"
+expect ISSUE "LOW CONFIRMED + keyword files"         -- --severity LOW --confidence CONFIRMED --text "shell injection via unquoted var"
+expect NOTE  "LOW CONFIRMED Auth agent, no keyword"  -- --severity LOW --confidence CONFIRMED --agent Auth --text "nit"
+expect ISSUE "MEDIUM POSSIBLE + keyword still files" -- --severity MEDIUM --confidence POSSIBLE --text "sql injection"
+expect ISSUE "MEDIUM POSSIBLE Billing agent still files" -- --severity MEDIUM --confidence POSSIBLE --agent Billing --text "nit"
+expect ISSUE "HIGH POSSIBLE files"                   -- --severity HIGH --confidence POSSIBLE
+
 
 # --- Rule 3: review-finding lineage (fix for a finding) ---
 expect NOTE  "lineage LOW CONFIRMED note"     -- --severity LOW --confidence CONFIRMED --lineage review-finding --text "nit"
@@ -63,7 +71,7 @@ expect NOTE  "lineage MEDIUM POSSIBLE with keyword note" -- --severity MEDIUM --
 # --- text-file input ---
 TMPF=$(mktemp "${TMPDIR:-/tmp}/classify-finding-test.XXXXXX")
 printf 'Title: unchecked xss sink\n' > "$TMPF"
-expect ISSUE "text-file keyword"              -- --severity LOW --confidence LIKELY --text-file "$TMPF"
+expect NOTE  "text-file keyword, LOW LIKELY, is a NOTE"           -- --severity LOW --confidence LIKELY --text-file "$TMPF"
 rm -f "$TMPF"
 
 # --- In-PR fix gate (#3387, narrowed): MEDIUM CONFIRMED in the PR diff ---
@@ -116,6 +124,10 @@ expect ISSUE "deferred + domain agent files"          -- --severity MEDIUM --con
 expect ISSUE "deferred to own issue never demotes"    -- --severity MEDIUM --confidence CONFIRMED --text "gap" --file src/sync.sh --merge-issue 3446 "${CS[@]}"
 expect ISSUE "deferred to own issue (#N form) files"  -- --severity MEDIUM --confidence CONFIRMED --text "gap" --file src/sync.sh --merge-issue "#3446" "${CS[@]}"
 expect NOTE  "deferred to another issue still demotes" -- --severity MEDIUM --confidence CONFIRMED --text "gap" --file src/sync.sh --merge-issue 3447 "${CS[@]}"
+expect NOTE  "LOW LIKELY keyword on deferred path demotes (#3639)" -- --severity LOW --confidence LIKELY --text "token leak" --file src/sync.sh "${CS[@]}"
+got=$(bash "$S" --severity LOW --confidence LIKELY --text "token leak" --file src/sync.sh "${CS[@]}")
+if [ "$got" = "NOTE contract-deferred #3446" ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL: LOW LIKELY keyword deferred reason (got '$got')"; fi
+expect ISSUE "LOW CONFIRMED keyword on deferred path still files (#3639)" -- --severity LOW --confidence CONFIRMED --text "token leak" --file src/sync.sh "${CS[@]}"
 expect NOTE  "accepted-risk unaffected by --merge-issue" -- --severity MEDIUM --confidence CONFIRMED --text "gap" --file src/legacy/x.py --merge-issue 3446 "${CS[@]}"
 DIFF2=$(mktemp "${TMPDIR:-/tmp}/classify-finding-diff.XXXXXX")
 printf 'src/sync.sh\nsrc/legacy/touched.py\n' > "$DIFF2"

@@ -51,8 +51,9 @@
 # Rules (forge#3060, tightened after the 2026-10-08 cascade audit):
 #   1. HIGH/CRITICAL, or unparseable severity → ISSUE.
 #   2. Safety exemption is CONTENT-based: the text matches the security/billing
-#      keyword set, or the finding came from a dedicated, signal-selected domain
-#      agent (Auth, Billing, Concurrency, Database) and is MEDIUM+ or CONFIRMED. Origin from the always-on
+#      keyword set (a LOW finding additionally needs CONFIRMED confidence), or the
+#      finding came from a dedicated, signal-selected domain
+#      agent (Auth, Billing, Concurrency, Database) and is MEDIUM. Origin from the always-on
 #      "General Security & Quality" agent alone NO LONGER exempts a finding —
 #      that agent runs on every PR, so origin-based exemption filed nearly every
 #      LOW note it raised (50 of 60 would-be notes in the audited batch).
@@ -151,14 +152,15 @@ fi
 SAFETY=""
 KW='security|auth|authz|authn|billing|payment|stripe|charge|invoice|injection|xss|csrf|ssrf|idor|secret|secrets|credential|credentials|permission|permissions|sql|token|password|redact'
 if printf '%s' "$TEXT" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9\n' ' ' | grep -Eqw "($KW)"; then
-  SAFETY="keyword"
+  # A LOW finding needs the keyword AND CONFIRMED; MEDIUM keeps the keyword exemption at any confidence.
+  if [ "$SEV" != "LOW" ] || [ "$CONF" = "CONFIRMED" ]; then SAFETY="keyword"; fi
 fi
-# A dedicated domain agent rescues a finding only when it is MEDIUM+ or CONFIRMED:
-# a LOW/POSSIBLE finding stays a NOTE whichever reviewer raised it.
+# A dedicated domain agent rescues a MEDIUM finding only: a LOW finding stays a NOTE
+# whichever reviewer raised it, even when CONFIRMED.
 AGENT_LC=$(printf '%s' "$AGENT" | tr '[:upper:]' '[:lower:]')
 case "$AGENT_LC" in
   auth*|billing*|concurrency*|database*)
-    if [ "$SEV" = "MEDIUM" ] || [ "$CONF" = "CONFIRMED" ]; then SAFETY="${SAFETY:-domain-agent}"; fi ;;
+    if [ "$SEV" = "MEDIUM" ]; then SAFETY="${SAFETY:-domain-agent}"; fi ;;
 esac
 
 # Contract-declared scope gate (#3447). Fails toward filing: any missing input, closed or unlisted

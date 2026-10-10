@@ -2155,12 +2155,12 @@ Count `findings_dropped_stale`, `findings_preexisting` and `notes_demoted_no_sce
 
 ### 6B.5: Non-blocking note disposition (MANDATORY before 6C — forge#3060)
 
-Filing a standalone `review-finding` issue for every LOW/POSSIBLE reviewer note makes the cascade amplify (each merged fix PR spawns its own P3 issues, which spawn more). Classify each finding that survived §6B.4 (not dropped as stale, not routed as pre-existing; demoted ones are NOTEs) before 6C with the deterministic classifier — do NOT hand-classify when the script resolves:
+Filing a standalone `review-finding` issue for every LOW/POSSIBLE reviewer note makes the cascade amplify (each merged fix PR spawns its own P3 issues, which spawn more). Classify each finding that survived §6B.4 (not dropped as stale, not routed as pre-existing; demoted ones are NOTEs) before 6C with the deterministic classifier. Never hand-classify: when the script cannot be resolved the review fails closed (guard below).
 
 - **ISSUE always**: `**Severity**: HIGH` or `CRITICAL`, or a missing/unparseable severity.
-- **Safety exemption is content-based** (it bypasses only this severity damper, never the §6B.4 provenance gate: a pre-existing auth gap is flagged through the pre-existing route, not attributed to this PR): a LOW or POSSIBLE finding is still filed when its file path / title / body matches the security/billing keyword set (`security|auth|authz|authn|billing|payment|stripe|charge|invoice|injection|xss|csrf|ssrf|idor|secret(s)|credential(s)|permission(s)|sql|token|password|redact`, whole words, `_`/`-`/`/` separate words — so `auth_service` matches but `author`/`tokenizer` do not), or when it came from a dedicated, signal-selected domain agent (Auth, Billing, Concurrency, Database) AND is MEDIUM+ or CONFIRMED — a LOW/POSSIBLE finding stays a NOTE whichever reviewer raised it. **Origin from the always-on General Security & Quality agent alone does NOT exempt a finding**: that agent runs on every PR, so origin-based exemption filed nearly every LOW note it raised (the 2026-10-08 cascade audit: 50 of 60 would-be notes in one batch were filed only for that reason).
+- **Safety exemption is content-based** (it bypasses only this severity damper, never the §6B.4 provenance gate: a pre-existing auth gap is flagged through the pre-existing route, not attributed to this PR): a LOW or POSSIBLE finding is still filed when its file path / title / body matches the security/billing keyword set — a LOW finding additionally needs `**Confidence**: CONFIRMED`, so LOW LIKELY/POSSIBLE with a keyword is a NOTE (`security|auth|authz|authn|billing|payment|stripe|charge|invoice|injection|xss|csrf|ssrf|idor|secret(s)|credential(s)|permission(s)|sql|token|password|redact`, whole words, `_`/`-`/`/` separate words — so `auth_service` matches but `author`/`tokenizer` do not), or when it came from a dedicated, signal-selected domain agent (Auth, Billing, Concurrency, Database) AND is MEDIUM — a domain agent rescues MEDIUM only, and a LOW finding stays a NOTE whichever reviewer raised it, CONFIRMED or not. **Origin from the always-on General Security & Quality agent alone does NOT exempt a finding**: that agent runs on every PR, so origin-based exemption filed nearly every LOW note it raised (the 2026-10-08 cascade audit: 50 of 60 would-be notes in one batch were filed only for that reason).
 - **Review-finding lineage** (the PR's linked issue `MERGE_ISSUE` carries the `review-finding` label, any priority — this PR is itself a fix for a finding): only MEDIUM findings that are CONFIRMED, or LIKELY and safety-exempt, become issues; LOW and POSSIBLE are always NOTEs. A fix for a finding must not mint a new generation of findings.
-- **Otherwise**: `**Severity**: LOW`, or `**Confidence**: POSSIBLE` below HIGH, is a NOTE unless safety-exempt; everything else (MEDIUM CONFIRMED/LIKELY) is an ISSUE.
+- **Otherwise**: `**Severity**: LOW`, or `**Confidence**: POSSIBLE` below HIGH, is a NOTE unless safety-exempt (LOW: keyword AND CONFIRMED; MEDIUM: keyword at any confidence, or a domain agent); everything else (MEDIUM CONFIRMED/LIKELY) is an ISSUE.
 - **Contract-declared scope** <!-- Added: forge#3447 -->: the trusted, latest FORGE:CONTRACT of `MERGE_ISSUE` lists out-of-scope items as `deferred → #N`, `not-affected:` or `accepted-risk:` (parsed by `scripts/check-contract-scope.sh list`). A finding whose file equals, or sits under, a `deferred` item whose issue is verified becomes `NOTE contract-deferred #N` and is commented on that issue instead of being filed again. A finding under an `accepted-risk` item becomes `NOTE contract-accepted-risk`. A deferred issue is verified only when it is OPEN, is an issue (not a PR), is not `MERGE_ISSUE` itself, and its body carries `FORGE:DEFERRED_FROM: #<MERGE_ISSUE>` and the deferred path; an unverified item is dropped from the scope list. Never demoted: HIGH/CRITICAL, `not-affected` items (a contradicting finding means the contract was wrong), safety-exempt findings under either disposition, findings on a file this PR changed, and anything when the contract is missing, untrusted, unparseable or the deferred issue is closed, unverified or unreadable.
 
 ```bash
@@ -2176,6 +2176,11 @@ CLASSIFY_SCRIPT=""
 while IFS= read -r _c; do
   case "$_c" in /*) [ -z "$CLASSIFY_SCRIPT" ] && [ -f "$_c/scripts/classify-finding.sh" ] && CLASSIFY_SCRIPT="$_c/scripts/classify-finding.sh" ;; esac
 done <<< "$_tc"
+# Fail closed (#3639): no hand classification. An unresolvable classifier ends the review here.
+if [ -z "$CLASSIFY_SCRIPT" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: classifier unavailable (classify-finding.sh not resolvable through the trusted resolver)"
+  exit 0
+fi
 FINDING_LINEAGE="none"
 if [ -n "${MERGE_ISSUE:-}" ] && gh issue view "$MERGE_ISSUE" -R {GH_REPO} --json labels --jq '.labels[].name' 2>/dev/null | grep -qx 'review-finding'; then
   FINDING_LINEAGE="review-finding"
@@ -2270,8 +2275,9 @@ fi
 #     gh issue comment N -R {GH_REPO} --body "Review of #{PR_NUMBER} also found this on a path declared deferred here: <file:line> <title>"  # allowlist:check-command-side-effects
 #     CONTRACT_DEMOTED=$((CONTRACT_DEMOTED + 1))
 #   `NOTE contract-accepted-risk` is counted in CONTRACT_DEMOTED too (no comment; the contract already records the reason).
-# If CLASSIFY_SCRIPT is empty, apply the four rules above (and §6B.6) by hand and record classifier=manual below.
 ```
+
+If the guard printed `REVIEW_RESULT: status: BLOCKED` (`classifier unavailable`), STOP the whole review: `exit 0` only ends that Bash block, so do not continue to 6C or any later phase, file no issues, post no `FORGE:NOTE_DISPOSITION`, and do not merge (Phase 8 never runs, `--auto-merge` included). The caller treats it like any other `BLOCKED` result.
 
 Each NOTE gets exactly one disposition, in this preference order:
 1. **Fix in this PR** — when the fix is cheap (a few lines, same files already in the diff, no new behaviour) and in scope, apply it as a follow-up commit on the PR branch before merge — ONLY for comment, documentation or test-only changes. Any change to executable code is not a note fix: it must be filed as an issue or fixed with a full re-review of the new HEAD before merge (never push unreviewed code under `--auto-merge`).
@@ -2285,7 +2291,7 @@ Every NOTE disposition must be recorded (never silently dropped): list each NOTE
 **Disposition marker (MANDATORY whenever Phase 6A extracted at least one finding):** post one PR comment whose first line is the machine-readable record below, followed by the NOTE list. Phase 8 refuses to auto-merge a PR that has `FINDING:` markers but no `FORGE:NOTE_DISPOSITION` comment — the disposition step is enforced, not advisory.
 
 ```bash
-CLASSIFIER_MODE=$([ -n "$CLASSIFY_SCRIPT" ] && echo script || echo manual)
+CLASSIFIER_MODE=script   # the §6B.5 guard blocks the review when the classifier is unresolvable, so this is always script
 # NOTE_LIST_FILE: mktemp file named for the PR number, holding one line per NOTE (id, file:line, disposition, reason).
 gh pr comment {PR_NUMBER} -R {GH_REPO} --body "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=${NOTES_FIXED:-0} notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} inpr_fix=${INPR_FIX_COUNT:-0} contract_demoted=${CONTRACT_DEMOTED:-0} findings_dropped_stale=${FINDINGS_DROPPED_STALE:-0} findings_preexisting=${FINDINGS_PREEXISTING:-0} notes_demoted_no_scenario=${NOTES_DEMOTED_NO_SCENARIO:-0} lineage=${FINDING_LINEAGE} classifier=${CLASSIFIER_MODE} -->
 $(cat "$NOTE_LIST_FILE" 2>/dev/null)" # allowlist:check-command-side-effects
