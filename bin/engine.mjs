@@ -300,6 +300,15 @@ export async function runIssue(opts) {
 
   let phase;
   while ((phase = pickPhase(state))) {
+    // forge#3506 (SPEC-1/SPEC-2): a crash after a terminal-after phase committed (remediate or
+    // decompose) and before RUN_TERMINAL leaves its persisted reason on the commit event. Resume
+    // must honour that reason instead of picking the next phase (close would throw in buildArgs
+    // and end as engine-error; build would run on a decomposed parent). Review's `needs-human`
+    // is a handoff to remediate, so only these two committed phases trigger the guard.
+    if (state.terminalReason && TERMINAL_REASONS.includes(state.terminalReason) &&
+        ((state.committed.includes("remediate") && !["merged", "decomposed", "invalid"].includes(state.terminalReason)) ||
+         (state.committed.includes("decompose") && state.terminalReason === "decomposed")))
+      return await terminate(state, state.terminalReason);
     // forge#2352: state-vs-GitHub divergence guard. Every phase's own
     // `entryCondition` only ever checked `state.committed` (local run-log
     // progress) — never the issue's live GitHub state/labels — so a phase
