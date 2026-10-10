@@ -15,8 +15,13 @@
 #   1  foreign merge(s) found; each printed as "<merge-sha> <foreign-parent-sha> <subject>"
 #   2  error (bad usage, unresolvable ref, git failure) — callers MUST treat as a failure, never a pass
 #
-# Known limit (unchanged from the old check): a fast-forward onto a foreign branch, or a merge
-# whose foreign line is the FIRST parent, is not detected.
+# The first-parent line of <base-ref>..<branch> must also not carry foreign history: a branch cut
+# from a milestone line (then, say, syncing the base) has no foreign non-first parent, so each
+# first-parent commit is also checked against the milestone refs (refs/remotes/origin/milestone/*,
+# refs/heads/milestone/*). A commit reachable from one of them but not from <base-ref> is foreign.
+# Override the ref patterns with CHECK_BRANCH_ANCESTRY_FOREIGN_REFS (space-separated for-each-ref patterns).
+#
+# Known limit: foreign history on a branch with no milestone ref available locally is not detected.
 # Portable to bash 3.2: no mapfile, no grep -P, no state accumulated inside piped subshells.
 
 set -u
@@ -46,6 +51,28 @@ for M in $MERGES; do
       FOREIGN=1
     elif [ "$rc" -ne 0 ]; then
       echo "check-branch-ancestry: merge-base --is-ancestor failed (rc=$rc) for $P" >&2
+      exit 2
+    fi
+  done
+done
+
+# First-parent line: every commit must be absent from every milestone ref (other than base/branch themselves).
+BASE_SHA=$(git rev-parse "${BASE}^{commit}") || exit 2
+BRANCH_SHA=$(git rev-parse "${BRANCH}^{commit}") || exit 2
+FP=$(git rev-list --first-parent "${BASE}..${BRANCH}" 2>/dev/null) || { echo "check-branch-ancestry: git rev-list --first-parent failed" >&2; exit 2; }
+# shellcheck disable=SC2086
+REFS=$(git for-each-ref --format='%(refname)' ${CHECK_BRANCH_ANCESTRY_FOREIGN_REFS:-refs/remotes/origin/milestone/ refs/heads/milestone/} 2>/dev/null) || { echo "check-branch-ancestry: git for-each-ref failed" >&2; exit 2; }
+for F in $REFS; do
+  F_SHA=$(git rev-parse --verify --quiet "${F}^{commit}" 2>/dev/null) || continue
+  [ "$F_SHA" = "$BASE_SHA" ] || [ "$F_SHA" = "$BRANCH_SHA" ] && continue
+  for C in $FP; do
+    git merge-base --is-ancestor "$C" "$F_SHA" >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      printf '%s %s first-parent history reachable from foreign ref %s\n' "$C" "$F_SHA" "$F"
+      FOREIGN=1
+    elif [ "$rc" -ne 1 ]; then
+      echo "check-branch-ancestry: merge-base --is-ancestor failed (rc=$rc) for $C" >&2
       exit 2
     fi
   done

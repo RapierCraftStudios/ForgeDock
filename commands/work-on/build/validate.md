@@ -571,16 +571,32 @@ if git ls-remote --exit-code origin {PR_BASE} >/dev/null 2>&1; then
   if [ -n "$ANCESTRY_SCRIPT" ]; then
     MERGE_COMMITS=$(bash "$ANCESTRY_SCRIPT" HEAD origin/{PR_BASE} 2>&1); ANCESTRY_RC=$?
   else
-    # Prose fallback: same per-parent check inline (exit 0 clean, 1 foreign, 2 error).
+    # Prose fallback: same checks inline (exit 0 clean, 1 foreign, 2 error). Fails closed: unresolvable refs or git errors give rc=2.
     ANCESTRY_RC=0; MERGE_COMMITS=""
-    for M in $(git rev-list --merges origin/{PR_BASE}..HEAD 2>/dev/null); do
-      for P in $(git rev-list --parents -n 1 "$M" | cut -d' ' -f3-); do
-        git merge-base --is-ancestor "$P" origin/{PR_BASE} 2>/dev/null; rc=$?
-        if [ "$rc" -eq 1 ]; then MERGE_COMMITS="${MERGE_COMMITS}${M} ${P}
+    if ! git rev-parse --verify --quiet "origin/{PR_BASE}^{commit}" >/dev/null 2>&1 || ! git rev-parse --verify --quiet "HEAD^{commit}" >/dev/null 2>&1; then
+      ANCESTRY_RC=2
+    elif ! MERGES=$(git rev-list --merges origin/{PR_BASE}..HEAD 2>/dev/null) || ! FP=$(git rev-list --first-parent origin/{PR_BASE}..HEAD 2>/dev/null); then
+      ANCESTRY_RC=2
+    else
+      for M in $MERGES; do
+        PARENTS=$(git rev-list --parents -n 1 "$M" 2>/dev/null) || { ANCESTRY_RC=2; continue; }
+        for P in $(printf '%s\n' "$PARENTS" | cut -d' ' -f3-); do
+          git merge-base --is-ancestor "$P" origin/{PR_BASE} 2>/dev/null; rc=$?
+          if [ "$rc" -eq 1 ]; then MERGE_COMMITS="${MERGE_COMMITS}${M} ${P}
 "; [ "$ANCESTRY_RC" -eq 2 ] || ANCESTRY_RC=1
-        elif [ "$rc" -ne 0 ]; then ANCESTRY_RC=2; fi
+          elif [ "$rc" -ne 0 ]; then ANCESTRY_RC=2; fi
+        done
       done
-    done
+      # First-parent line must not carry milestone history (branch cut from a milestone, then base sync).
+      for F in $(git for-each-ref --format='%(refname)' refs/remotes/origin/milestone/ refs/heads/milestone/ 2>/dev/null); do
+        for C in $FP; do
+          git merge-base --is-ancestor "$C" "$F" 2>/dev/null; rc=$?
+          if [ "$rc" -eq 0 ]; then MERGE_COMMITS="${MERGE_COMMITS}${C} first-parent history reachable from ${F}
+"; [ "$ANCESTRY_RC" -eq 2 ] || ANCESTRY_RC=1
+          elif [ "$rc" -ne 1 ]; then ANCESTRY_RC=2; fi
+        done
+      done
+    fi
   fi
   if [ "$ANCESTRY_RC" -ne 0 ]; then
     echo "ANCESTRY AUDIT FAILED (rc=$ANCESTRY_RC): merge commits from outside {PR_BASE} detected, or ancestry could not be verified:"
