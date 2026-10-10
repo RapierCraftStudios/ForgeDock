@@ -54,10 +54,19 @@ export const PHASE_IDS = ['investigate', 'decompose', 'build', 'review', 'remedi
  *   whose presence means this phase has committed.
  * @property {string} [invalidMarker] - (investigate only) marks the issue INVALID.
  * @property {string} [decomposedMarker] - (investigate only) marks the issue DECOMPOSED.
+ *   investigate.md emits it as the HTML comment `<!-- DECOMPOSE:YES -->`.
+ * @property {string} [notDecomposedMarker] - (investigate only) the explicit not-decomposed
+ *   verdict, emitted as `<!-- DECOMPOSE:NO -->`.
+ * @property {string} [sizeGateMarker] - (build only) bare annotation-opener of the diff-size gate record.
+ * @property {string} [sizeOverrideMarker] - (build only) bare annotation-opener of the size-gate override.
  * @property {string} [partialMarker] - sentinel for an interrupted/partial annotation.
  * @property {string} [presenceMarker] - bare annotation-opener substring, used only by
  *   phases whose completion is non-critical (see `context` below) — presence alone
  *   (without `:COMPLETE`) is enough to report a soft/visible skip rather than a hard fail.
+ * @property {string} [header] - the typed-comment header (without `<!-- ` / ` -->`) a genuine
+ *   phase comment must START with (e.g. `FORGE:INVESTIGATOR`). The engine matches the
+ *   sentinel only inside a trusted comment that leads with this header (forge#3542);
+ *   additive, the bare marker strings above are unchanged.
  * @property {string} [completionLabel] - a GitHub issue *label* (not a comment marker)
  *   whose presence means this phase has committed. Only `close` uses this form.
  */
@@ -66,17 +75,21 @@ export const PHASE_IDS = ['investigate', 'decompose', 'build', 'review', 'remedi
 export const PHASE_MARKERS = {
   investigate: {
     completionMarker: RESERVED_TYPES.INVESTIGATOR.completionSentinel, // 'INVESTIGATION:COMPLETE'
+    header: 'FORGE:INVESTIGATOR',
     invalidMarker: 'INVESTIGATION:INVALID',
     decomposedMarker: 'DECOMPOSE:YES',
+    notDecomposedMarker: 'DECOMPOSE:NO',
   },
   // forge#2379: `decompose` actually runs work-on/decompose (sub-issue
   // fan-out) once `investigate` hands off on `DECOMPOSE:YES` — see
   // bin/engine/phases.mjs's `decompose` phase entry for the handoff mechanics.
   decompose: {
     completionMarker: RESERVED_TYPES.DECOMPOSED.completionSentinel, // 'FORGE:DECOMPOSED:COMPLETE'
+    header: 'FORGE:DECOMPOSED',
   },
   context: {
     completionMarker: RESERVED_TYPES.CONTEXT.completionSentinel, // 'FORGE:CONTEXT:COMPLETE'
+    header: 'FORGE:CONTEXT',
     partialMarker: RESERVED_TYPES.CONTEXT.partialSentinel, // 'FORGE:CONTEXT:PARTIAL'
     // Bare presence marker: context is documented as non-critical (spec §7) — a
     // missing completion marker is a visible skip, not a hard fail. Only
@@ -87,10 +100,17 @@ export const PHASE_MARKERS = {
   },
   architect: {
     completionMarker: RESERVED_TYPES.ARCHITECT.completionSentinel, // 'FORGE:ARCHITECT:COMPLETE'
+    header: 'FORGE:ARCHITECT',
     partialMarker: RESERVED_TYPES.ARCHITECT.partialSentinel, // 'FORGE:ARCHITECT:PARTIAL'
   },
   build: {
     completionMarker: RESERVED_TYPES.BUILDER.completionSentinel, // 'FORGE:BUILDER:COMPLETE'
+    header: 'FORGE:BUILDER',
+    // Size-gate (B5.5) records. Neither is a completion sentinel: the gate's
+    // NEEDS_DECOMPOSE exit posts no FORGE:BUILDER:COMPLETE, so the engine reads
+    // these to route an oversized build to decompose instead of retrying it.
+    sizeGateMarker: `FORGE:${RESERVED_TYPES.DIFF_SIZE.type}`, // 'FORGE:DIFF_SIZE'
+    sizeOverrideMarker: `FORGE:${RESERVED_TYPES.SIZE_OVERRIDE.type}`, // 'FORGE:SIZE_OVERRIDE'
   },
   review: {
     // No RESERVED_TYPES entry defines this sentinel (REVIEWER has no
@@ -102,6 +122,7 @@ export const PHASE_MARKERS = {
   // `remediate` phase reads it off the issue, consistent with every other phase here.
   remediate: {
     completionMarker: RESERVED_TYPES.REMEDIATION.completionSentinel, // 'FORGE:REMEDIATION:COMPLETE'
+    header: 'FORGE:REMEDIATION',
   },
   close: {
     // A GitHub label, not a comment marker — see `completionLabel` above.

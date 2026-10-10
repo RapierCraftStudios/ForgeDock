@@ -57,7 +57,10 @@ export function deriveState(events) {
   /** @type {import("./phases.mjs").RunState} */
   const s = { v: 0, run: null, issue: null, lane: "staging", committed: [],
               phase: null, branch: null, pr: null, terminal: false,
-              terminalReason: null, lease: null, lastRateLimit: null };
+              terminalReason: null, lease: null, lastRateLimit: null,
+              remediationKind: null };
+  // forge#3528: handoff reason of the LAST PHASE_COMMIT only (replaced, not sticky).
+  let lastCommitReason = null;
   for (const e of events) {
     switch (e.event) {
       case "RUN_START":
@@ -71,6 +74,11 @@ export function deriveState(events) {
         // forge#3504: a blocked phase persists its reason so a resumed run still routes to
         // remediate instead of defaulting to a "merged" close.
         if (e.terminalReason) s.terminalReason = e.terminalReason;
+        lastCommitReason = e.terminalReason ?? null;
+        // forge#3530: the review's remediation kind must survive resume. A later review
+        // commit replaces it; a committed remediate consumes it, so it is never reused.
+        if (e.phase === "review") s.remediationKind = e.outputs?.remediation ?? null;
+        else if (e.phase === "remediate") s.remediationKind = null;
         break;
       case "RUN_TERMINAL":
         s.terminal = true; s.terminalReason = e.reason ?? "done"; s.v = e.seq;
@@ -78,8 +86,11 @@ export function deriveState(events) {
       // forge#3511: an explicit `run-issue --retry` reopens an engine-error
       // terminal. Bumping `v` makes the local state newer than the stale
       // remote terminal index so reconcile remirrors instead of re-terminating.
+      // forge#3528: RUN_TERMINAL overwrote the persisted handoff reason
+      // (needs-human / decomposed); restore the last commit's reason so the
+      // retry re-enters remediate/decompose instead of close/build.
       case "RUN_REOPEN":
-        s.terminal = false; s.terminalReason = null; s.v = e.seq;
+        s.terminal = false; s.terminalReason = lastCommitReason; s.v = e.seq;
         break;
       // forge#2524: a session-limit pause is purely informational — it does
       // NOT touch committed/terminal/terminalReason. The phase that hit the

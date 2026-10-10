@@ -359,10 +359,13 @@ export async function runIssue(opts) {
     // decompose) and before RUN_TERMINAL leaves its persisted reason on the commit event. Resume
     // must honour that reason instead of picking the next phase (close would throw in buildArgs
     // and end as engine-error; build would run on a decomposed parent). Review's `needs-human`
-    // is a handoff to remediate, so only these two committed phases trigger the guard.
+    // is a handoff to remediate, so only these committed phases trigger the guard.
     if (state.terminalReason && TERMINAL_REASONS.includes(state.terminalReason) &&
         ((state.committed.includes("remediate") && !["merged", "decomposed", "invalid"].includes(state.terminalReason)) ||
-         (state.committed.includes("decompose") && state.terminalReason === "decomposed")))
+         (state.committed.includes("decompose") && state.terminalReason === "decomposed") ||
+         // forge#3512: investigate persists `invalid` on its own commit. Only when investigate is
+         // the LAST committed phase: a later remediate/close commit carrying `invalid` is a handoff.
+         (state.committed[state.committed.length - 1] === "investigate" && state.terminalReason === "invalid")))
       return await terminate(state, state.terminalReason);
     // forge#2352: state-vs-GitHub divergence guard. Every phase's own
     // `entryCondition` only ever checked `state.committed` (local run-log
@@ -674,7 +677,8 @@ export async function runIssue(opts) {
     // is seen), phase.id is "decompose" — not "investigate" — so this
     // exemption does not apply and the normal terminate() path below fires,
     // ending the run for real.
-    const isDecomposeHandoff = phase.id === "investigate" && terminalReason === "decomposed";
+    // build also hands off: the B5.5 size gate (NEEDS_DECOMPOSE) reports "decomposed".
+    const isDecomposeHandoff = (phase.id === "investigate" || phase.id === "build") && terminalReason === "decomposed";
     if (terminalReason && TERMINAL_REASONS.includes(terminalReason) &&
         !isDecomposeHandoff && !isRemediationHandoff)
       return await terminate(state, terminalReason, outcome.detail);
@@ -822,6 +826,7 @@ function eventsFromIndex(idx) {
     const outputs = {};
     if (phase === "build" && idx.branch) outputs.branch = idx.branch;
     if (phase === "review" && idx.pr != null) outputs.pr = idx.pr;
+    if (phase === "review" && idx.remediationKind) outputs.remediation = idx.remediationKind;
     events.push({ event: "PHASE_COMMIT", phase, outputs });
   }
   // forge#3506: a non-terminal reason is a handoff (e.g. review -> remediate). Replay it on

@@ -176,7 +176,7 @@ Append this block at the very end of your comment (after the `---` footer line, 
 6. **Summary**: Concise one-line description (no pipe `|` characters in summary)
 7. **Empty block**: If no findings at all, include just the START/END markers
 8. **HTML comments**: The block is invisible in rendered markdown but parseable by the review system
-9. **Agent marker**: Include exactly one `<!-- FORGE:REVIEW-AGENT:{domain} -->` marker in the persisted body, where `{domain}` is the lowercase dispatched domain.
+9. **Agent marker**: Include exactly one `<!-- FORGE:REVIEW-AGENT:{domain} -->` marker in the persisted body, where `{domain}` is the marker domain the orchestrator passes you (the canonical value from the roster-to-marker table in `review-pr.md`, e.g. `infra` and `scraper`; never a lowercased display name such as `infrastructure` or `scraping`).
 10. **Reviewed SHA**: Include exactly one line `Reviewed-SHA: [REVIEW_SHA]` (the full 40-hex head you were pinned to) in the persisted body, outside the marker. `/review-pr` scopes its completion wait and idempotent re-entry to this line, so a comment without the current head does not count as a completed review. Do NOT put the SHA inside the `<!-- FORGE:REVIEW-AGENT:{domain} -->` marker.
 
 ### Domain Prefixes

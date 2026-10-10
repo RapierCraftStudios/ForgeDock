@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { appendEvent, readLog, deriveState } from "../engine/runlog.mjs";
 import { runIssue } from "../engine.mjs";
 import { serializeState } from "../engine/state.mjs";
+import { asComments, inv as investigationComment, ctx, arch, builder, remediation, decomposed } from "./helpers/comments.mjs";
 
 let dir;
 beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "fd-runlog-")); });
@@ -19,6 +20,16 @@ describe("runlog", () => {
     assert.equal(s.pr, 12);
     assert.equal(s.terminalReason, "needs-human");
     assert.ok(s.committed.includes("review"));
+  });
+
+  it("forge#3530: the review remediation kind survives deriveState; a remediate commit consumes it; a later review replaces it", () => {
+    appendEvent(dir, 7, { event: "RUN_START", issue: 7, run: "r", lane: "staging" });
+    appendEvent(dir, 7, { event: "PHASE_COMMIT", phase: "review", outputs: { pr: 12, remediation: "base-sync" }, terminalReason: "needs-human" });
+    assert.equal(deriveState(readLog(dir, 7)).remediationKind, "base-sync");
+    appendEvent(dir, 7, { event: "PHASE_COMMIT", phase: "remediate", outputs: {} });
+    assert.equal(deriveState(readLog(dir, 7)).remediationKind, null);
+    appendEvent(dir, 7, { event: "PHASE_COMMIT", phase: "review", outputs: { pr: 12, remediation: "ci-gate" } });
+    assert.equal(deriveState(readLog(dir, 7)).remediationKind, "ci-gate");
   });
 
   it("append then read returns events in order with assigned seq", () => {
@@ -85,7 +96,7 @@ describe("runlog", () => {
       gh: async (args) => {
         const a = args.join(" ");
         if (a.startsWith("repo view")) return "acme/widgets";
-        if (a.startsWith("api ") && a.includes("/comments")) return w.markers;
+        if (a.startsWith("api ") && a.includes("/comments")) return asComments(w.markers);
         if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
         if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
         if (a.startsWith("issue edit")) {
@@ -109,10 +120,10 @@ describe("runlog", () => {
   it("forge#3506: runIssue writes pr and terminalReason needs-human into the blocked review PHASE_COMMIT", async () => {
     const { w, io } = world();
     const script = {
-      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/b-42`"; w.commitsAhead = 1; },
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/b-42"); w.commitsAhead = 1; },
       "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; w.labels.push("needs-human"); },
-      "work-on/remediate": () => { w.markers += " FORGE:REMEDIATION:COMPLETE **Re-gate outcome**: HELD-AWAITING-MERGE"; },
+      "work-on/remediate": () => { w.markers += remediation("HELD-AWAITING-MERGE"); },
     };
     const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
     await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
@@ -126,9 +137,9 @@ describe("runlog", () => {
 
   it("forge#3506: runIssue persists investigate's decomposed reason on its PHASE_COMMIT", async () => {
     const { w, io } = world();
-    w.markers = " DECOMPOSE:YES";
+    w.markers = investigationComment("COMPLETE", { decompose: true });
     const runner = async ({ commandName }) => {
-      if (commandName === "work-on/decompose") w.markers += " <!-- FORGE:DECOMPOSED:COMPLETE -->";
+      if (commandName === "work-on/decompose") w.markers += decomposed();
       return { status: "complete" };
     };
     await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
@@ -144,12 +155,12 @@ describe("runlog", () => {
       terminal: false, terminalReason: "needs-human", lease: null,
     });
     w.pr = 7; w.prNeedsHuman = true; w.commitsAhead = 1;
-    w.markers = " INVESTIGATION:COMPLETE FORGE:BUILDER:COMPLETE **Branch**: `fix/b-42`";
+    w.markers = investigationComment("COMPLETE") + builder("fix/b-42");
     let seen = null;
     const runner = async ({ commandName }) => {
       if (commandName === "work-on/remediate") {
         seen = deriveState(readLog(dir, 42));
-        w.markers += " FORGE:REMEDIATION:COMPLETE **Re-gate outcome**: RE-ESCALATED";
+        w.markers += remediation("RE-ESCALATED");
       }
       return { status: "complete" };
     };
