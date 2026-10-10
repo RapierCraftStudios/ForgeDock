@@ -271,6 +271,22 @@ describe("crash injection: forge#3506 handoff reasons survive a crash before RUN
     assert.equal(inv.terminalReason, "decomposed");
   });
 
+  it("investigate INVALID committed, killed before RUN_TERMINAL: resume terminates invalid, never builds (issue open, unlabeled)", async () => {
+    const { w, io, runner } = makeWorld();
+    w.markers = " INVESTIGATION:INVALID"; // issue stays OPEN and unlabeled, so the forge#2352 divergence guard cannot rescue it
+    const ran = [];
+    const wrapped = async (a) => { ran.push(a.commandName); return runner(a); };
+    const probe = crashAfterCommitOf(io, "investigate");
+    const { res, launches } = await runToCompletion({ dir, io, runner: wrapped });
+    assert.ok(launches >= 2, "crash must fire");
+    assert.ok(probe.fired, "crash must hit the window after the investigate commit");
+    assert.ok(!probe.tail.includes("RUN_TERMINAL"), "crash is before RUN_TERMINAL");
+    assert.equal(res.terminalReason, "invalid");
+    assert.ok(!ran.includes("work-on/build"), "resume must not build an issue investigate declared INVALID");
+    const inv = readLog(dir, 42).find((e) => e.event === "PHASE_COMMIT" && e.phase === "investigate");
+    assert.equal(inv.terminalReason, "invalid");
+  });
+
   it("decompose committed, killed before RUN_TERMINAL: resume terminates decomposed, never builds the parent", async () => {
     const { w, io, runner } = makeWorld();
     w.markers = investigationComment("COMPLETE", { decompose: true });
