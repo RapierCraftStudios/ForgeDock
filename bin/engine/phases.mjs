@@ -672,13 +672,24 @@ export const PHASES = [
       const match = matches.length ? matches[matches.length - 1] : null;
       const reGateOutcome = match ? match[1] : null;
       switch (reGateOutcome) {
-        case "AUTO-LANDED":
-          // remediate.md's own Phase M8 already drove close in this case
-          // (see that file's "If the outcome was AUTO-LANDED" branch) — the
-          // issue should already carry workflow:merged by the time this
-          // reads, but the terminal reason here is what THIS phase reports,
-          // independent of close's own idempotent detectOutcome re-check.
-          return { status: "committed", terminalReason: "merged", outputs: { reGateOutcome } };
+        case "AUTO-LANDED": {
+          // forge#3624: remediate.md M8 drives close itself on this outcome, but an
+          // engine phase session may skip or fail that delegated close and nothing
+          // verified it. Check the issue's real state: CLOSED + workflow:merged means
+          // the run is genuinely finished (terminal merged). Anything else, including
+          // an unreadable snapshot, hands off to `close` (idempotent via its reconcile).
+          // The reason stays "merged" either way so the commit replaces the review's
+          // sticky "needs-human" and close.buildArgs accepts --terminal-state merged.
+          let closed = false;
+          try {
+            const snap = await issueSnapshot(state.issue, io);
+            closed = snap.ok && snap.state === "CLOSED" &&
+              snap.labels.includes(PHASE_MARKERS.close.completionLabel);
+          } catch { closed = false; }
+          return closed
+            ? { status: "committed", terminalReason: "merged", outputs: { reGateOutcome } }
+            : { status: "committed", terminalReason: "merged", outputs: { reGateOutcome, closeHandoff: true } };
+        }
         case "HELD-AWAITING-MERGE":
           return { status: "committed", terminalReason: "awaiting-merge", outputs: { reGateOutcome } };
         case "RE-ESCALATED":
@@ -719,12 +730,15 @@ export const PHASES = [
     },
     entryCondition: (s) => s.committed.includes("review"),
     async reconcile(state, io) {
-      // Idempotent resume: issue already closed or workflow:merged label set → skip the LLM re-run.
+      // Idempotent resume: issue already CLOSED → skip the LLM re-run. forge#3644: the
+      // workflow:merged label alone is NOT proof close ran — remediate M7 labels the issue
+      // merged right after `gh pr merge`, while a staging-base PR leaves it OPEN. Treating
+      // OPEN + workflow:merged as done made close.reconcile swallow remediate's closeHandoff
+      // (remediate's own check, in its AUTO-LANDED branch, requires CLOSED + the label, a
+      // strict subset of what satisfies this predicate on a CLOSED issue).
       const snap = await issueSnapshot(state.issue, io);
       if (!snap.ok) return { satisfied: false };
-      return (snap.state === "CLOSED" || snap.labels.includes(PHASE_MARKERS.close.completionLabel))
-        ? { satisfied: true }
-        : { satisfied: false };
+      return snap.state === "CLOSED" ? { satisfied: true } : { satisfied: false };
     },
     async detectOutcome(state, io) {
       const snap = await issueSnapshot(state.issue, io);

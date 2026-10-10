@@ -709,10 +709,14 @@ export async function runIssue(opts) {
     // ending the run for real.
     // build also hands off: the B5.5 size gate (NEEDS_DECOMPOSE) reports "decomposed".
     const isDecomposeHandoff = (phase.id === "investigate" || phase.id === "build") && terminalReason === "decomposed";
+    // forge#3624: remediate AUTO-LANDED whose issue is not yet CLOSED+workflow:merged hands off
+    // to `close` instead of ending the run (close is idempotent). Exempts BOTH terminate paths.
+    const isCloseHandoff = phase.id === "remediate" && outcome.status === "committed" &&
+      outcome.outputs?.closeHandoff === true && terminalReason === "merged";
     if (terminalReason && TERMINAL_REASONS.includes(terminalReason) &&
-        !isDecomposeHandoff && !isRemediationHandoff)
+        !isDecomposeHandoff && !isRemediationHandoff && !isCloseHandoff)
       return await terminate(state, terminalReason, outcome.detail);
-    if (phase.isTerminalAfter && phase.isTerminalAfter(state))
+    if (phase.isTerminalAfter && !isCloseHandoff && phase.isTerminalAfter(state))
       return await terminate(state, state.terminalReason || "merged");
   }
   return await terminate(state, state.terminalReason || "merged");
