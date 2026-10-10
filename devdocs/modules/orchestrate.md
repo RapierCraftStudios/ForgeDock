@@ -104,3 +104,9 @@ Cite: #3233 / PR #3317.
 PR #3338 touched `orchestrate`. See FORGE:BUILDER comment on issue #3296 for full change list.
 Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
 Cite: #3296 / PR #3338.
+
+## Entry 2026-10-10 — Fix: helper resolvers (classify-finding / amplification-breaker / extract-affected-files) no longer resolve from $PWD (#3483)
+
+PR #3584 touched `orchestrate`. See FORGE:BUILDER comment on issue #3483 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3483 / PR #3584.
