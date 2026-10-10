@@ -730,12 +730,15 @@ export const PHASES = [
     },
     entryCondition: (s) => s.committed.includes("review"),
     async reconcile(state, io) {
-      // Idempotent resume: issue already closed or workflow:merged label set → skip the LLM re-run.
+      // Idempotent resume: issue already CLOSED → skip the LLM re-run. forge#3644: the
+      // workflow:merged label alone is NOT proof close ran — remediate M7 labels the issue
+      // merged right after `gh pr merge`, while a staging-base PR leaves it OPEN. Treating
+      // OPEN + workflow:merged as done made close.reconcile swallow remediate's closeHandoff
+      // (remediate's own check, in its AUTO-LANDED branch, requires CLOSED + the label, a
+      // strict subset of what satisfies this predicate on a CLOSED issue).
       const snap = await issueSnapshot(state.issue, io);
       if (!snap.ok) return { satisfied: false };
-      return (snap.state === "CLOSED" || snap.labels.includes(PHASE_MARKERS.close.completionLabel))
-        ? { satisfied: true }
-        : { satisfied: false };
+      return snap.state === "CLOSED" ? { satisfied: true } : { satisfied: false };
     },
     async detectOutcome(state, io) {
       const snap = await issueSnapshot(state.issue, io);

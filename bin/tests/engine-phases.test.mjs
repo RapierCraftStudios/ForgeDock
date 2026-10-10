@@ -421,6 +421,15 @@ describe("pickPhase", () => {
       });
     }
 
+    it("forge#3644: AUTO-LANDED + issue OPEN with workflow:merged -> closeHandoff, and close.reconcile is not satisfied", async () => {
+      const snap = { state: "OPEN", labels: [{ name: "workflow:merged" }] };
+      const o = await remediate.detectOutcome(base, snapIo(snap));
+      assert.equal(o.outputs.closeHandoff, true);
+      const close = PHASES.find(p => p.id === "close");
+      assert.equal((await close.reconcile(base, snapIo(snap))).satisfied, false);
+      assert.equal((await close.reconcile(base, snapIo({ state: "CLOSED", labels: [{ name: "workflow:merged" }] }))).satisfied, true);
+    });
+
     it("other outcomes never set closeHandoff", async () => {
       for (const r of ["HELD-AWAITING-MERGE", "RE-ESCALATED", "UNFIXABLE"]) {
         const o = await remediate.detectOutcome(base, ioWith(remediateBody(r)));
