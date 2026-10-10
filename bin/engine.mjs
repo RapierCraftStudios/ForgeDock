@@ -324,7 +324,15 @@ export async function runIssue(opts) {
   await projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } });
   // forge#3511: clear the stale label only after the reopened state is
   // published, so a crash in between leaves the run still marked engine-error.
-  if (reopened) await projector.removeLabel(issue, "workflow:engine-error");
+  // On `--retry` this runs whether or not THIS invocation did the reopen: a prior
+  // retry may have published the reopen and died before removing the label, so the
+  // next one sees a non-terminal state (reopened=false) with the label still set.
+  // Best-effort — a transient `gh` error must not abort a reopen already published.
+  // Removing an absent label is a harmless no-op.
+  if (retry) {
+    try { await projector.removeLabel(issue, "workflow:engine-error"); }
+    catch (err) { console.warn(`forge#3511: could not clear workflow:engine-error on #${issue}: ${err?.message || err}`); }
+  }
 
   // 2. Drive phases until terminal.
   //

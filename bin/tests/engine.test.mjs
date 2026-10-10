@@ -6,8 +6,8 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runIssue, DEFAULT_SESSION_LIMIT_WAIT_MS } from "../engine.mjs";
-import { readLog, deriveState } from "../engine/runlog.mjs";
-import { serializeState } from "../engine/state.mjs";
+import { readLog, deriveState, appendEvent } from "../engine/runlog.mjs";
+import { serializeState, parseState, upsertStateBlock } from "../engine/state.mjs";
 import { VALID_BACKENDS } from "../runner.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -2390,6 +2390,34 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
       now: () => 2000, maxAttempts: 1, retry: true });
     assert.equal(res.terminalReason, "merged");
     assert.equal(ran[0], "work-on/build");
+  });
+
+  it("clears a stale engine-error label when a prior retry crashed after publishing the reopen", async () => {
+    const { w, io } = fakeWorld();
+    await runToEngineError(w, io);
+    // Simulate the crash window: reopen appended locally and published remotely
+    // (terminal:false), but the label removal never ran.
+    appendEvent(dir, 42, { event: "RUN_REOPEN", issue: 42 });
+    const remote = parseState(w.body);
+    w.body = upsertStateBlock(w.body, { ...remote, terminal: false, terminalReason: null, v: (remote.v || 0) + 1 });
+    assert.ok(w.labels.includes("workflow:engine-error"));
+    const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner: okRunner(w),
+      now: () => 2000, maxAttempts: 1, retry: true });
+    assert.equal(res.terminalReason, "merged");
+    assert.ok(!w.labels.includes("workflow:engine-error"));
+  });
+
+  it("a failing label removal does not abort a published reopen", async () => {
+    const { w, io } = fakeWorld();
+    await runToEngineError(w, io);
+    const gh = io.gh;
+    const flaky = { ...io, gh: async (args) => {
+      if (args.includes("--remove-label")) throw new Error("HTTP 502");
+      return gh(args);
+    } };
+    const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io: flaky, runner: okRunner(w),
+      now: () => 2000, maxAttempts: 1, retry: true });
+    assert.equal(res.terminalReason, "merged");
   });
 
   it("without retry an engine-error run stays terminal (back-compat)", async () => {
