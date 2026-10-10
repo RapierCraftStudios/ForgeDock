@@ -1358,13 +1358,18 @@ export function runCliBackend({
       // quota-exhaustion failure will clear without reading raw logs. Only
       // ever set when the pattern actually matches — never fabricated.
       // The reset text is read from stdout's parsed envelope first (stdout
-      // ALONE, forge#2422), then from the combined output.
-      const resetAt =
-        extractSessionLimitResetTime(stdout) ?? extractSessionLimitResetTime(output);
+      // ALONE, forge#2422), then from the combined output. Gated on the same
+      // narrowed predicate as `usageLimit` (forge#3523): the engine pauses on
+      // `resetAtEpochMs` alone, so a bare 429 or keyword-only failure whose
+      // output happens to contain a reset clause must not carry one either.
+      const isUsageLimit = detectUsageLimit(stdout, output);
+      const resetAt = isUsageLimit
+        ? extractSessionLimitResetTime(stdout) ?? extractSessionLimitResetTime(output)
+        : undefined;
       // Structured usage-limit flag: lets the engine pause by a bounded
       // default when the reset time itself is missing or unparseable. The
       // engine, not the runner, owns that default — no epoch is fabricated here.
-      if (detectUsageLimit(stdout, output)) err.usageLimit = true;
+      if (isUsageLimit) err.usageLimit = true;
       if (resetAt) {
         err.resetAt = resetAt;
         // forge#2524: also attach a machine-usable epoch-ms timestamp so

@@ -3848,13 +3848,13 @@ describe("detectUsageLimit (forge#3511, narrowed forge#3523)", () => {
 });
 
 describe("runCliBackend usage-limit via JSON envelope (forge#3511)", () => {
-  const run = (stdout) => {
+  const run = (stdout, stderr = "") => {
     let thrown;
     try {
       runCliBackend({
         spec: loadCommandSpec(COMMANDS_DIR, "work-on"), userMessage: "Execute: /work-on 3511", args: ["3511"],
         cwd: TMP, logger: { log: () => {} }, bin: "claude",
-        spawnFn: () => ({ status: 1, signal: null, stdout, stderr: "", error: undefined }),
+        spawnFn: () => ({ status: 1, signal: null, stdout, stderr, error: undefined }),
       });
     } catch (err) { thrown = err; }
     return thrown;
@@ -3878,6 +3878,19 @@ describe("runCliBackend usage-limit via JSON envelope (forge#3511)", () => {
   it("does not set usageLimit on a bare 429 rate-limit envelope (forge#3523)", () => {
     const e = run(JSON.stringify({ is_error: true, api_error_status: 429, result: "rate limited" }));
     assert.equal(e.code, "CLI_BACKEND_FAILED");
+    assert.equal(e.usageLimit, undefined);
+  });
+  it("attaches no reset epoch for a bare 429 envelope with stderr reset text (forge#3523)", () => {
+    const e = run(JSON.stringify({ api_error_status: 429, result: "x" }),
+      "npm test failed: the usage limit check resets 3pm (UTC)");
+    assert.equal(e.code, "CLI_BACKEND_FAILED");
+    assert.equal(e.resetAt, undefined);
+    assert.equal(e.resetAtEpochMs, undefined);
+    assert.equal(e.usageLimit, undefined);
+  });
+  it("attaches no reset epoch for an is_error:false envelope with reset text (forge#3523)", () => {
+    const e = run(JSON.stringify({ is_error: false, result: "You've hit your session limit \u00b7 resets 3pm (UTC)" }));
+    assert.equal(e.resetAtEpochMs, undefined);
     assert.equal(e.usageLimit, undefined);
   });
 });

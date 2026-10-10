@@ -95,4 +95,6 @@ Corrects the #3511 entry: a bare `api_error_status` 429 and keyword-only limit
 text no longer set `err.usageLimit`. It is set only for `api_error:
 usage_limit_reached`, or a full `limit ... resets ...` clause in an `is_error`
 envelope `result` or in plain output (shared `hasUsageLimitResetClause`, bounded
-windows per #3522). A limit with neither signal is an ordinary failure. Cite: #3523.
+windows per #3522). A limit with neither signal is an ordinary failure.
+`runCliBackend` attaches `resetAt`/`resetAtEpochMs` only when the same predicate
+holds, since the engine pauses on the epoch alone. Cite: #3523.
