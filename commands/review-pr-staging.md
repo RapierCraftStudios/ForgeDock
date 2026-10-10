@@ -281,9 +281,19 @@ fi
 if [ -n "$BLOCKING_FINDINGS" ]; then
   # Check for human override comment on the staging→main PR
   if [ -n "$PR_NUMBER" ]; then
-    OVERRIDE=$(gh pr view "$PR_NUMBER" -R {GH_REPO} \
-      --json comments \
-      --jq '[.comments[].body | select(startswith("OVERRIDE: shipping with open findings"))] | length' 2>/dev/null)
+    # Trusted authors only (scripts/trusted-comments.sh: OWNER/MEMBER/COLLABORATOR or a Bot), all comment pages,
+    # marker anchored at the start of the body. Fail closed: unresolvable script or unreadable comments = no override (#3492).
+    _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+    OVR_SCRIPT=""
+    for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock"; do
+      case "$_c" in /*) [ -z "$OVR_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && OVR_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+    done
+    OVR_COMMENTS=$(gh api --paginate "repos/{GH_REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null) || OVR_COMMENTS=""
+    if [ -n "$OVR_SCRIPT" ] && [ -n "$OVR_COMMENTS" ]; then
+      OVERRIDE=$(printf '%s' "$OVR_COMMENTS" | bash "$OVR_SCRIPT" count '^OVERRIDE: shipping with open findings' 2>/dev/null || echo 0)
+    else
+      OVERRIDE=0
+    fi
   else
     OVERRIDE=0
   fi
@@ -673,17 +683,25 @@ case "$TEST_GATE_VERDICT" in
   BLOCK)
     # Check for override comment on the staging→main PR (mirrors Phase 0A pattern)
     if [ -n "$PR_NUMBER" ]; then
-      TG_OVERRIDE=$(gh pr view "$PR_NUMBER" ${GH_FLAG} \
-        --json comments \
-        --jq "[.comments[].body | select(startswith(\"${OVERRIDE_PHRASE}\"))] | length" 2>/dev/null || echo 0)
+      # Trusted authors only, all comment pages, anchored; fail closed (no override) if the script or comments are
+      # unreadable (#3492). OVERRIDE_PHRASE comes from forge.yaml, so regex-escape it before using it as a pattern.
+      _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+      TG_SCRIPT=""
+      for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock"; do
+        case "$_c" in /*) [ -z "$TG_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TG_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+      done
+      TG_COMMENTS=$(gh api --paginate "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null) || TG_COMMENTS=""
+      TG_OVERRIDE=0; OVERRIDE_REASON="(reason not captured)"
+      if [ -n "$TG_SCRIPT" ] && [ -n "$TG_COMMENTS" ]; then
+        TG_RE="^$(printf '%s' "$OVERRIDE_PHRASE" | sed 's/[][\\.^$*+?(){}|\/]/\\&/g')"
+        TG_OVERRIDE=$(printf '%s' "$TG_COMMENTS" | bash "$TG_SCRIPT" count "$TG_RE" 2>/dev/null || echo 0)
+        [ "${TG_OVERRIDE:-0}" -gt 0 ] && OVERRIDE_REASON=$(printf '%s' "$TG_COMMENTS" | bash "$TG_SCRIPT" bodies "$TG_RE" 2>/dev/null | tail -1 | jq -r '.' 2>/dev/null || echo "(reason not captured)")
+      fi
     else
       TG_OVERRIDE=0
     fi
 
     if [ "${TG_OVERRIDE:-0}" -gt 0 ]; then
-      OVERRIDE_REASON=$(gh pr view "$PR_NUMBER" ${GH_FLAG} \
-        --json comments \
-        --jq "[.comments[].body | select(startswith(\"${OVERRIDE_PHRASE}\"))] | last" 2>/dev/null || echo "(reason not captured)")
       echo "⚠️  Test gate: BLOCK — but override comment detected on PR #${PR_NUMBER}."
       echo "   Override: ${OVERRIDE_REASON}"
       echo "   Proceeding with deploy. Override is logged in Phase 8 summary."
