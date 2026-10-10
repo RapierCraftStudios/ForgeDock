@@ -23,7 +23,7 @@ argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --base {PR_BAS
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (classification, label transitions) stay at this tier because they are interleaved with the reasoning-heavy child phases in the same run. <!-- Added: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
-**CRITICAL: You MUST execute ALL phases B0–B6.5 (including B5.5) in order. Every child (B3 context, B4 architect, B5 implement, B6 validate) is invoked via `Skill(...)` — each is a forked sub-skill with its own isolated context. B3 and B4 are invoked for every complexity band except where the band is TRIVIAL or INVESTIGATION (B2/B2.1/B2.5 are also skipped for INVESTIGATION); the children post their own skip markers, so a skipped child is still visible on the issue. Skipping a child without the band justification degrades build quality and fails the phase-trail check.**
+**CRITICAL: You MUST execute ALL phases B0–B6.5 (including B5.5) in order (the one exception is the B0 size-gate resume branch, which enters at B5.5 with its state verified). Every child (B3 context, B4 architect, B5 implement, B6 validate) is invoked via `Skill(...)` — each is a forked sub-skill with its own isolated context. B3 and B4 are invoked for every complexity band except where the band is TRIVIAL or INVESTIGATION (B2/B2.1/B2.5 are also skipped for INVESTIGATION); the children post their own skip markers, so a skipped child is still visible on the issue. Skipping a child without the band justification degrades build quality and fails the phase-trail check.**
 
 **Synchronous child consumption**: each child `Skill(...)` call (B3-B6) runs to completion in this phase's own turn, and you consume its result in that same turn. Never end or yield your turn to wait for a child, and never wait for a completion notification: notifications for forked children go to the root session, not to this phase, so a turn that yields is never resumed. A child return with no `*_RESULT:` block (running, backgrounded, empty) is not a result — re-read the GitHub markers for that child (`FORGE:CONTEXT`, `FORGE:ARCHITECT`, `FORGE:BUILDER`, `FORGE:VALIDATE`/`FORGE:QUALITY_GATE`) and apply the **bounded re-invoke rule**: re-invoke the same child with the same args at most 2 times per child on running/backgrounded/empty returns (the counter is per child and is not reset by a re-invoke). Before re-invoking, check state: if the child's marker is present, consume it instead of re-invoking; for implement and validate, also check the worktree (`git status --short` and `git log origin/{PR_BASE}..HEAD` in `{WORKTREE_PATH}`) — uncommitted in-flight edits or a fresh commit mean the original child may still be live, so wait for it by re-reading state rather than launching a second writer on the same worktree, and count that as a re-invoke attempt. After the cap is exhausted, take the Blocked exit (see Result emission and Blocked exit) with `blocker: child-stalled: <child>` (child = context|architect|implement|validate); it is terminal and is not re-invoked by the router.
 
@@ -173,6 +173,20 @@ EXISTING_FAST_PATH=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate 
 
 **Resume check**:
 - If `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment → build already complete. Derive BRANCH/WORKTREE_PATH as in B1A/B1C (without creating anything), then print `BUILD_RESULT: status: ALREADY_DONE`.
+- **Size-gate resume** (checked BEFORE the partial-BUILDER rule below; first match wins) <!-- Added: forge#3463 -->: if a `<!-- FORGE:BUILDER -->` comment exists without `<!-- FORGE:BUILDER:COMPLETE -->` AND the latest trusted `FORGE:DIFF_SIZE` comment has `result: OVER`, the build stopped at a deliberate B5.5 exit (`NEEDS_DECOMPOSE` or the decompose-loop-guard Blocked exit), not in a crash. Keep the BUILDER comment, do not re-run B2-B5, and re-enter at **Phase B5.5**. Read the marker through the same anchored, trust-filtered lookup B5.5 uses (script resolution block verbatim):
+  ```bash
+  # <Script resolution block from above goes here, verbatim>
+  set -o pipefail
+  TRUSTED_SCRIPT="${UNIVERSAL_DIR:+$UNIVERSAL_DIR/trusted-comments.sh}"
+  [ -n "$TRUSTED_SCRIPT" ] && [ -f "$TRUSTED_SCRIPT" ] || { echo "DIFF_SIZE_LOOKUP=FAILED (trusted-comments.sh unresolved)"; exit 0; }
+  DS=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:DIFF_SIZE') \
+    || { echo "DIFF_SIZE_LOOKUP=FAILED"; exit 0; }
+  LAST_RESULT=$(printf '%s\n' "$DS" | jq -r 'select(type == "string")' | sed -n 's/^result: *\([A-Z]*\).*/\1/p' | tail -n 1)
+  echo "DIFF_SIZE_RESULT=${LAST_RESULT:-<none>}"
+  ```
+  - `DIFF_SIZE_LOOKUP=FAILED` → Blocked exit with blocker `size-gate-unavailable: could not read FORGE:DIFF_SIZE` (a transient GitHub failure uses the `github-unavailable:` prefix). Never read a failed lookup as "no DIFF_SIZE".
+  - `DIFF_SIZE_RESULT=OVER` → verify, without creating anything, that the branch and worktree exist (derive BRANCH/WORKTREE_PATH as in B1A/B1C), that `git -C "$WORKTREE_PATH" branch --show-current` equals BRANCH, and that a staged diff is present (`! git -C "$WORKTREE_PATH" diff --cached --quiet`). Recover `COMPLEXITY_BAND` from `EXISTING_FAST_PATH` with the B0.5 resume extraction. When all hold, skip B0.5-B5 and continue at B5.5 (it re-measures, then applies the override / `NEEDS_DECOMPOSE` / `OK` logic).
+  - Anything else (no `FORGE:DIFF_SIZE`, `result` is not `OVER`, worktree or branch missing or mismatched, nothing staged, band unrecoverable) → never skip ahead on missing state; fall through to the next rule.
 - If `<!-- FORGE:BUILDER -->` exists BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → build was interrupted after the comment was posted but before the commit (validate V5). Delete the partial comment and restart from Phase B2 (contract): <!-- Added: forge#1305 -->
   ```bash
   PARTIAL_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
@@ -686,7 +700,7 @@ BUILD_RESULT:
   blocker: diff-size-over-threshold: {diff_lines} > {threshold}; split proposal posted in FORGE:DIFF_SIZE
 ```
 
-**Resume**: a re-invoked build whose latest trusted `FORGE:DIFF_SIZE` says `result: OVER` re-measures; if still over with no override it re-emits `NEEDS_DECOMPOSE` without a duplicate comment. When a valid `FORGE:SIZE_OVERRIDE` has appeared since, B5.5 re-measures and continues via `OVERRIDDEN`.
+**Resume**: a re-invoked build re-enters here via the B0 size-gate resume branch (partial `FORGE:BUILDER` plus latest trusted `FORGE:DIFF_SIZE` `result: OVER` plus a staged diff in the kept worktree), so it does not re-run implement; this covers both exits that leave BUILDER incomplete, `NEEDS_DECOMPOSE` and the decompose-loop-guard Blocked exit. B5.5 re-measures: if still over with no override it re-emits `NEEDS_DECOMPOSE` without a duplicate comment (the loop-guard case re-emits the same Blocked exit); when a valid `FORGE:SIZE_OVERRIDE` has appeared since, it continues via `OVERRIDDEN`.
 # MUST CONTINUE to Phase B6 — the size gate result is intermediate, NOT terminal (validation still required), except the NEEDS_DECOMPOSE and Blocked exits above.
 
 ---
