@@ -80,5 +80,19 @@ for f in commands/review-pr-staging.md commands/review-pr-agents/protocols.md do
 done
 if grep -qF 'only known low severities' "$SPEC"; then ok; else bad "spec lacks inverted severity rule comment"; fi
 
+# SLICE_FILE must be a deterministic path re-declared and guarded in every persona fence (random mktemp is lost between Bash calls).
+for f in commands/review-pr-agents/protocols.md docs/spec/review-protocol.md; do
+  if grep -qF 'SLICE_FILE=$(mktemp)' "$ROOT/$f"; then bad "$f still uses a random mktemp SLICE_FILE"; else ok; fi
+  if grep -qF 'forge-slice-' "$ROOT/$f"; then ok; else bad "$f lacks the deterministic forge-slice- path"; fi
+done
+for p in infra security scraper; do
+  f="$ROOT/commands/review-pr-agents/$p.md"
+  if grep -qF 'SLICE_FILE missing' "$f"; then ok; else bad "$p.md lacks the SLICE_FILE missing guard"; fi
+  reads=$(awk '/^[ \t]*```(bash|sh)[ \t]*$/{inb=1;d=0;r=0;next} /^[ \t]*```[ \t]*$/{if(inb&&r)n++;inb=0;next} inb&&/forge-slice-/{d=1} inb&&/\$SLICE_FILE/{r=1} END{print n+0}' "$f")
+  decls=$(awk '/^[ \t]*```(bash|sh)[ \t]*$/{inb=1;d=0;r=0;next} /^[ \t]*```[ \t]*$/{if(inb&&r&&d)n++;inb=0;next} inb&&/^[ \t]*SLICE_FILE="[^"]*forge-slice-/{d=1} inb&&/\$SLICE_FILE/{r=1} END{print n+0}' "$f")
+  if [ "$reads" -ge 1 ] && [ "$reads" = "$decls" ]; then ok; else bad "$p.md: $reads fences read SLICE_FILE, $decls re-declare it"; fi
+done
+if bash "$ROOT/scripts/check-spec-bash.sh" --fence-state SLICE_FILE -- "$ROOT/commands/review-pr-agents/infra.md" "$ROOT/commands/review-pr-agents/security.md" "$ROOT/commands/review-pr-agents/scraper.md" >/dev/null 2>&1; then ok; else bad "fence-state SLICE_FILE check failed on persona fences"; fi
+
 echo "review-pr-gate2.test.sh: passed=$PASS failed=$FAILN"
 [ "$FAILN" -eq 0 ]

@@ -336,6 +336,8 @@ jobs:
           # Every Bash call is a fresh shell: a fence that reads these variables must bind them itself
           # (re-declare with the orchestrator's values). Deliberate reads: `allowlist:fence-state`.
           bash scripts/check-spec-bash.sh --fence-state PR_NUMBER REPO REPO_FLAG MERGE_ISSUE MERGE_GH_FLAG AUTO_MERGE REVIEW_SHA -- commands/review-pr.md
+          # Persona fences re-declare the slice path (protocols.md §1 writes it in an earlier Bash call).
+          bash scripts/check-spec-bash.sh --fence-state SLICE_FILE -- commands/review-pr-agents/infra.md commands/review-pr-agents/security.md commands/review-pr-agents/scraper.md commands/review-pr-agents/protocols.md docs/spec/review-protocol.md
 
   admission-parity:
     name: admission.mjs / bash mirror parity check

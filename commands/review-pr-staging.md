@@ -660,7 +660,7 @@ FULL_DIFF=$(git diff "origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH" | head -c
 # commands/review-pr.md "Domain Diff Slicing", applied to this FULL_DIFF. Cap each slice at ~100K chars.
 DIFF_SLICE_SECURITY="$FULL_DIFF"
 ```
-For each dispatched persona, substitute `[DOMAIN_DIFF_SLICE]` → its matching `$DIFF_SLICE_*` variable (an empty slice falls back to the capped `$FULL_DIFF`). Agents never run a full `gh pr diff`; only `--name-only` is allowed. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure.
+For each dispatched persona, substitute `[DOMAIN_DIFF_SLICE]` → its matching `$DIFF_SLICE_*` variable (an empty slice falls back to the capped `$FULL_DIFF`). Also substitute `[AGENT_DOMAIN]` → the persona's marker domain (the `{domain}` used in its `FORGE:REVIEW-AGENT` marker), and keep `[PR_NUMBER]` / `[REVIEW_SHA_SHORT]` bound to the staging review's PR number and short head SHA (`staging` as the key when there is no PR number): personas derive their slice path `forge-slice-[PR_NUMBER]-[REVIEW_SHA_SHORT]-[AGENT_DOMAIN].diff` from them. Agents never run a full `gh pr diff`; only `--name-only` is allowed. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure.
 
 **MANDATORY — each domain agent MUST persist its finalized body before posting its findings directly to the PR immediately upon completion** (not batched by the orchestrator). It MUST return verdict, finding count, and one line per finding to the orchestrator independently of delivery; if posting fails, return the durable file path and stop without retrying:
 ```bash
