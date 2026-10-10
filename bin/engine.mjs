@@ -225,8 +225,11 @@ function makeProgressEmitter(onProgress) {
  *   `maxSessionLimitPauses`.
  * @param {boolean} [opts.retry] - forge#3511: explicit opt-in. When the run's
  *   terminal reason is `engine-error`, reopen it (RUN_REOPEN) and resume from
- *   the last committed phase. Any other terminal reason is left untouched and
- *   returns `not-retryable`.
+ *   the last committed phase. forge#3562: when it is `phase-complete` (a
+ *   multi-phase issue whose phase merged with more remaining), start a new
+ *   cycle (RUN_NEXT_CYCLE) that resets committed/branch/pr and restarts at
+ *   investigate. Any other terminal reason is left untouched and returns
+ *   `not-retryable`.
  */
 export async function runIssue(opts) {
   const { issue, dir, agentId, lane = "staging", io, runner,
@@ -297,15 +300,20 @@ export async function runIssue(opts) {
   // lease write below, which then publishes `terminal:false` at the reopen's
   // higher `v`. Only `engine-error` is ever reopened; needs-human / merged /
   // decomposed / etc. terminals are left untouched.
+  // forge#3562: `phase-complete` is also retryable, but as a NEW cycle
+  // (RUN_NEXT_CYCLE clears committed) rather than a reopen of the same one.
   let reopened = false;
   if (retry && state?.terminal) {
-    if (state.terminalReason !== "engine-error") {
+    if (state.terminalReason !== "engine-error" && state.terminalReason !== "phase-complete") {
       return {
         terminalReason: "not-retryable",
-        detail: `issue ${issue} ended ${state.terminalReason}; --retry only reopens an engine-error run`,
+        detail: `issue ${issue} ended ${state.terminalReason}; --retry only resumes an engine-error or phase-complete run`,
       };
     }
-    appendEvent(dir, issue, { event: "RUN_REOPEN", issue });
+    appendEvent(dir, issue, {
+      event: state.terminalReason === "phase-complete" ? "RUN_NEXT_CYCLE" : "RUN_REOPEN",
+      issue,
+    });
     state = deriveState(readLog(dir, issue));
     reopened = true;
   }

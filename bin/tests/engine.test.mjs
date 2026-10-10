@@ -2634,6 +2634,97 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
     assert.notEqual(res.terminalReason, "merged");
   });
 
+  describe("forge#3562 --retry starts a new cycle on a phase-complete run", () => {
+    // Seed the run log directly (the phase-complete producer may not be on this
+    // base); the resume path keys only on the reason string.
+    function seedPhaseComplete() {
+      appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+      appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+      appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "build", outputs: { branch: "fix/old-42" } });
+      appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "review", outputs: { pr: 7 } });
+      appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "close", outputs: {} });
+      appendEvent(dir, 42, { event: "RUN_TERMINAL", issue: 42, reason: "phase-complete" });
+    }
+
+    it("reducer: RUN_NEXT_CYCLE resets committed/branch/pr/terminalReason and bumps v", () => {
+      seedPhaseComplete();
+      const before = deriveState(readLog(dir, 42));
+      assert.equal(before.terminal, true);
+      assert.equal(before.terminalReason, "phase-complete");
+      appendEvent(dir, 42, { event: "RUN_NEXT_CYCLE", issue: 42 });
+      const s = deriveState(readLog(dir, 42));
+      assert.equal(s.terminal, false);
+      assert.equal(s.terminalReason, null);
+      assert.deepEqual(s.committed, []);
+      assert.equal(s.branch, null);
+      assert.equal(s.pr, null);
+      assert.equal(s.remediationKind, null);
+      assert.ok(s.v > before.v);
+      assert.equal(pickPhase(s).id, "investigate");
+    });
+
+    it("reducer: a stale handoff reason does not leak through a later RUN_REOPEN", () => {
+      const s = deriveState([{ event: "RUN_START", issue: 1 },
+        { seq: 2, event: "PHASE_COMMIT", phase: "investigate", outputs: {}, terminalReason: "decomposed" },
+        { seq: 3, event: "RUN_TERMINAL", reason: "phase-complete" },
+        { seq: 4, event: "RUN_NEXT_CYCLE" }, { seq: 5, event: "RUN_TERMINAL", reason: "engine-error" },
+        { seq: 6, event: "RUN_REOPEN" }]);
+      assert.equal(s.terminalReason, null);
+    });
+
+    it("a plain re-run stays phase-complete and invokes no runner", async () => {
+      const { io } = fakeWorld();
+      seedPhaseComplete();
+      let ran = 0;
+      const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io,
+        runner: async () => { ran++; return { status: "complete" }; }, now: () => 2000, maxAttempts: 1 });
+      assert.equal(ran, 0);
+      assert.equal(res.terminalReason, "phase-complete");
+      assert.ok(!readLog(dir, 42).some((e) => e.event === "RUN_NEXT_CYCLE"));
+    });
+
+    it("--retry runs investigate first with committed reset and reaches merged", async () => {
+      const { w, io } = fakeWorld();
+      seedPhaseComplete();
+      const ran = [];
+      const base = okRunner(w);
+      const runner = async (a) => { ran.push(a.commandName); return base(a); };
+      const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner,
+        now: () => 2000, maxAttempts: 1, retry: true });
+      assert.equal(ran[0], "work-on/investigate");
+      assert.equal(res.terminalReason, "merged");
+      const log = readLog(dir, 42);
+      assert.equal(log.filter((e) => e.event === "RUN_NEXT_CYCLE").length, 1);
+      assert.ok(!log.some((e) => e.event === "RUN_REOPEN"));
+      assert.notEqual(deriveState(log).branch, "fix/old-42");
+    });
+
+    it("a second --retry after the cycle started does not append another RUN_NEXT_CYCLE", async () => {
+      const { io } = fakeWorld();
+      seedPhaseComplete();
+      appendEvent(dir, 42, { event: "RUN_NEXT_CYCLE", issue: 42 });
+      await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner: async () => ({ status: "complete" }),
+        now: () => 2000, maxAttempts: 1, retry: true });
+      assert.equal(readLog(dir, 42).filter((e) => e.event === "RUN_NEXT_CYCLE").length, 1);
+    });
+
+    for (const reason of ["merged", "invalid"]) {
+      it(`--retry on ${reason} still returns not-retryable`, async () => {
+        const { io } = fakeWorld();
+        appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+        appendEvent(dir, 42, { event: "RUN_TERMINAL", issue: 42, reason });
+        const before = readLog(dir, 42).length;
+        let ran = 0;
+        const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io,
+          runner: async () => { ran++; return { status: "complete" }; }, now: () => 2000, maxAttempts: 1, retry: true });
+        assert.equal(res.terminalReason, "not-retryable");
+        assert.ok(!/only reopens an engine-error run/.test(res.detail));
+        assert.equal(ran, 0);
+        assert.equal(readLog(dir, 42).length, before);
+      });
+    }
+  });
+
   it("does not reopen a needs-human terminal and reports not-retryable", async () => {
     const { w, io } = fakeWorld();
     const script = {
