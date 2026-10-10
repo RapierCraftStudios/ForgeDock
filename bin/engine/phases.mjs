@@ -450,8 +450,10 @@ export const PHASES = [
       if (!pr) return { status: "failed", detail: "no PR created" };
       if (pr.merged) return { status: "committed", outputs: { pr: pr.number } };
       // forge#3521: the spec (commands/work-on/review.md) signals an in-PR fix
-      // by labelling the ISSUE needs-human and returning REVIEW_RESULT
-      // `status: NEXT / next: remediate`; the PR label is back-compat only.
+      // by returning REVIEW_RESULT `status: NEXT / next: remediate`. forge#3541: the
+      // issue is labelled `workflow:remediating` (non-human "autonomous remediation
+      // pending"), no longer `needs-human`; both labels still trigger the handoff below
+      // (needs-human = back-compat for older runs). The PR label is back-compat only.
       // The PR number from GitHub (openPrFor) always wins over parsed text.
       const outputs = { pr: pr.number };
       const escalated = { status: "blocked", detail: "review escalated", outputs };
@@ -462,7 +464,7 @@ export const PHASES = [
       // the "unknown" sentinel (never the raw text) so remediate's buildArgs fails closed.
       if (rr && rr.status === "NEXT" && rr.next === "remediate" && rr.remediation)
         outputs.remediation = isRemediationKind(rr.remediation) ? rr.remediation : "unknown";
-      if (pr.needsHuman) return escalated;
+      if (pr.needsHuman || pr.remediating) return escalated;
       if (rr && rr.status === "NEXT" && rr.next === "remediate") return escalated;
       // An explicit REVIEW_RESULT status is authoritative: BLOCKED/COMPLETE exits
       // (phase trail, ci gate, base conflict, merge refusal) also label the issue
@@ -470,7 +472,7 @@ export const PHASES = [
       if (rr && rr.status) return { status: "failed", detail: "PR open, not merged", retryable: false, handoff: false, outputs };
       let snap = null;
       try { snap = await issueSnapshot(state.issue, io); } catch { snap = null; }
-      if (snap?.ok && snap.labels.includes("needs-human")) return escalated;
+      if (snap?.ok && (snap.labels.includes("needs-human") || snap.labels.includes("workflow:remediating"))) return escalated;
       return { status: "failed", detail: "PR open, not merged", retryable: false, outputs };
     },
   },
@@ -652,7 +654,8 @@ async function prStatusFor(state, io) {
   try { j = JSON.parse(out || "{}"); } catch { return null; }
   const labels = (j.labels || []).map((l) => l.name || l);
   return { number: j.number, merged: !!j.mergedAt || j.state === "MERGED",
-           needsHuman: labels.includes("needs-human") };
+           needsHuman: labels.includes("needs-human"),
+           remediating: labels.includes("workflow:remediating") };
 }
 
 /** The engine's transition function: first uncommitted phase whose gate holds. */

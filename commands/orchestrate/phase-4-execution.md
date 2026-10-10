@@ -1691,6 +1691,11 @@ classify_predecessor_state() {
     esac
   elif echo "$PRED_LABELS" | grep -qxE "needs-human|workflow:awaiting-merge"; then
     echo "GATED"
+  elif echo "$PRED_LABELS" | grep -qx "workflow:remediating"; then
+    # forge#3541: autonomous remediation (ci-gate / in-pr-fix / base-sync) is pending or running. No human decision is
+    # needed, so this is NOT GATED: dependents keep waiting exactly as for any mid-pipeline predecessor, and item 6.4
+    # (or the engine handoff) drives the fix. A concurrent `needs-human` is matched by the GATED arm above first.
+    echo "IN_PROGRESS"
   elif echo "$PRED_LABELS" | grep -qx "workflow:engine-error"; then
     # forge#2261: the engine/tool itself broke on this run (e.g. a fail-fast
     # CLI_BACKEND_FAILED, or an exhausted retry loop where the runner never
@@ -1721,7 +1726,7 @@ classify_predecessor_state() {
 - **DONE** — predecessor's code is in the base branch (`workflow:merged`, unless gated by a Step 4B item 0 trail escalation), or the predecessor is closed with no pending code. Safe for dependents to dispatch.
 - **GATED** — predecessor is paused pending a human decision (`needs-human`) or pending only a human merge click (`workflow:awaiting-merge`). Its code is NOT yet in the base branch — except for a `workflow:merged` issue that also carries `needs-human` and the Step 4B item 0 trail-escalation comment (merged with an incomplete phase trail), whose code is merged but whose trail needs human review. Dependents are neither dispatched nor skipped — they move to the `blocked-on-human-merge` tracked state (item 6.5 below).
 - **FAILED** — predecessor was closed as `workflow:invalid`, or the agent explicitly reported a build/test error. Dependents are marked "skipped — dependency failed" (item 6 below) — unchanged from prior behavior.
-- **IN_PROGRESS** — predecessor is still mid-pipeline (`investigating`/`ready-to-build`/`building`/`in-review`), or terminated `workflow:engine-error` (forge#2261 — an engine/tool failure, not a human-judgment block or a genuine content failure; treated as still-in-flight since stall-detection auto-resumes it). Dependent simply continues waiting; no special tracking needed.
+- **IN_PROGRESS** — predecessor is still mid-pipeline (`investigating`/`ready-to-build`/`building`/`in-review`), or autonomous remediation is pending (`workflow:remediating`, forge#3541 — the pipeline is fixing a base conflict, red CI or an in-PR finding itself; no human gate, so dependents are not held as GATED), or terminated `workflow:engine-error` (forge#2261 — an engine/tool failure, not a human-judgment block or a genuine content failure; treated as still-in-flight since stall-detection auto-resumes it). Dependent simply continues waiting; no special tracking needed.
 
 A GATED predecessor whose PR later merges reclassifies to DONE the next time `classify_predecessor_state` runs (its label flips to `workflow:merged`; a merged predecessor gated on its phase trail reclassifies to DONE once a human removes `needs-human`) — this is exactly what the merge-triggered wake check (item 6.6 below) relies on.
 
@@ -2284,7 +2289,7 @@ done
 
    Report every dependent whose skip was avoided this way — e.g. "#{DEP} — predecessor #{PRED} failed but never touched the shared file(s); edge dropped, #{DEP} not skipped." For all remaining dependents (real `EDGE_KIND` overlap confirmed, or a non-`EDGE_KIND` edge type), mark them "skipped — dependency #{X} failed" and report them. Do NOT dispatch them.
 
-6.4. **Auto-dispatch remediation against a `needs-human`-gated issue's own PR — runs unconditionally per completion, with or without dependents** <!-- Added: forge#1813, fixed: forge#2243 --> — item 6.5 below tracks the *dependents* of a `GATED` predecessor; this item handles the gated issue's own PR, which item 6.5/6.6 never re-drive on their own. **This check is bound directly to the issue that just completed — `PRED="$NUM"` (the same issue number carried from items 1-4 of this Step 4B sequence) — NOT to any `$PRED` produced by walking a dependent's predecessor list (item 5's readiness loop) or by item 6's FAILED-specific dependent-walk.** Run it for every completed agent, every cycle, regardless of whether that issue has any dependents in the DAG at all — a leaf issue (no dependents) is just as eligible as an issue that blocks others. Trigger condition: the completed issue classifies `GATED` **specifically via `needs-human`** — NOT `workflow:awaiting-merge`. That second state already means "remediated and re-reviewed to a clean verdict" (see forge#1810's guard) — dispatching remediation again would be redundant, not just wasteful, since there is nothing left to fix. A PR that reaches `workflow:awaiting-merge` now does so only when it targets `main` / the deploy gate (where `staging → main` is the genuine human gate and a human's merge click is required); a remediated-clean PR targeting a non-`main` base (`staging`, `milestone/*`) auto-lands to `workflow:merged` via remediate.md Phase M7's base-scoped auto-land bar (forge#2570) and never parks here. Either way this item's skip of `workflow:awaiting-merge` is unchanged.
+6.4. **Auto-dispatch remediation against a `needs-human`-gated or `workflow:remediating` issue's own PR — runs unconditionally per completion, with or without dependents** <!-- Added: forge#1813, fixed: forge#2243 --> — item 6.5 below tracks the *dependents* of a `GATED` predecessor; this item handles the gated issue's own PR, which item 6.5/6.6 never re-drive on their own. **This check is bound directly to the issue that just completed — `PRED="$NUM"` (the same issue number carried from items 1-4 of this Step 4B sequence) — NOT to any `$PRED` produced by walking a dependent's predecessor list (item 5's readiness loop) or by item 6's FAILED-specific dependent-walk.** Run it for every completed agent, every cycle, regardless of whether that issue has any dependents in the DAG at all — a leaf issue (no dependents) is just as eligible as an issue that blocks others. Trigger condition: the completed issue carries `needs-human` (classifies `GATED`) **or `workflow:remediating`** (classifies `IN_PROGRESS`, forge#3541 — the non-human state review sets for autonomous ci-gate / in-pr-fix / base-sync handoffs) — NOT `workflow:awaiting-merge`. That second state already means "remediated and re-reviewed to a clean verdict" (see forge#1810's guard) — dispatching remediation again would be redundant, not just wasteful, since there is nothing left to fix. A PR that reaches `workflow:awaiting-merge` now does so only when it targets `main` / the deploy gate (where `staging → main` is the genuine human gate and a human's merge click is required); a remediated-clean PR targeting a non-`main` base (`staging`, `milestone/*`) auto-lands to `workflow:merged` via remediate.md Phase M7's base-scoped auto-land bar (forge#2570) and never parks here. Either way this item's skip of `workflow:awaiting-merge` is unchanged.
 
    ```bash
    # Bind PRED to the issue that just completed — independent of item 5's dependent-walk loop
@@ -2294,9 +2299,9 @@ done
    PRED="$NUM"
 
    PRED_CURRENT_LABEL=$(gh issue view "$PRED" -R {GH_REPO} --json labels \
-     --jq '[.labels[].name | select(. == "needs-human" or . == "workflow:awaiting-merge")] | .[0] // empty' 2>/dev/null)
+     --jq '[.labels[].name | select(. == "needs-human" or . == "workflow:remediating" or . == "workflow:awaiting-merge")] | .[0] // empty' 2>/dev/null)
 
-   if [ "$PRED_CURRENT_LABEL" = "needs-human" ]; then
+   if [ "$PRED_CURRENT_LABEL" = "needs-human" ] || [ "$PRED_CURRENT_LABEL" = "workflow:remediating" ]; then
      # Resolve PRED's open PR using the anchored search (forge#1634/#1646 precedent —
      # never a bare-number search, which would misattribute an unrelated PR).
      GATING_PR=$(gh pr list -R {GH_REPO} --state open --search "\"Closes #${PRED}\" in:body" \
@@ -2319,7 +2324,7 @@ done
        fi
 
        if [ "$ALREADY_REMEDIATED" -eq 0 ]; then
-         echo "Dispatching remediation for #{PRED}'s gating PR #{GATING_PR} (needs-human)"
+         echo "Dispatching remediation for #{PRED}'s gating PR #{GATING_PR} (${PRED_CURRENT_LABEL})"
          # Same Agent-spawn-fallback style as Step 4A's template — one background agent,
          # whose sole job is to invoke /work-on in remediation mode and let it run to
          # completion (AUTO-LANDED, HELD-AWAITING-MERGE, RE-ESCALATED, or UNFIXABLE — all
@@ -2329,9 +2334,9 @@ done
            model="{SUBAGENT_MODEL}",
            description="Remediate PR #{GATING_PR} (needs-human, blocks #{PRED})",
            run_in_background=true,
-           prompt="You are remediating GitHub PR #{GATING_PR} for the {PROJECT_NAME} project (repo: {GH_REPO}), which is currently held at `needs-human` on its linked issue #{PRED}.
+           prompt="You are remediating GitHub PR #{GATING_PR} for the {PROJECT_NAME} project (repo: {GH_REPO}), which is currently held at `needs-human` or `workflow:remediating` (autonomous remediation pending) on its linked issue #{PRED}.
 
-**YOUR MISSION**: Invoke `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{GATING_PR} --remediate --issue {PRED} --repo {GH_REPO} --gh-flag {GH_FLAG} --under-orchestration')` and let it run to completion. This is a self-contained flow: it classifies the gate first, replaces `needs-human` with `workflow:in-review` only for fixable remediation, checks out the PR branch, fixes any fixable review findings, re-reviews, and either auto-lands the PR, holds it at `workflow:awaiting-merge` for a human, re-escalates back to `needs-human`, or reports the block as policy-level and unfixable. Do NOT intervene manually — do not run raw git/gh commands yourself.
+**YOUR MISSION**: Invoke `Skill(skill='{FORGE_SKILL_PREFIX}work-on', args='{GATING_PR} --remediate --issue {PRED} --repo {GH_REPO} --gh-flag {GH_FLAG} --under-orchestration')` and let it run to completion. This is a self-contained flow: it classifies the gate first, replaces `needs-human` / `workflow:remediating` with `workflow:in-review` only for fixable remediation, checks out the PR branch, fixes any fixable review findings, re-reviews, and either auto-lands the PR, holds it at `workflow:awaiting-merge` for a human, re-escalates back to `needs-human`, or reports the block as policy-level and unfixable. Do NOT intervene manually — do not run raw git/gh commands yourself.
 
 **DO NOT STOP EARLY**: if the Skill call returns without a terminal `REMEDIATE_RESULT.status`, invoke it again — it re-reads GitHub state and resumes. Terminal statuses are: `COMPLETE`, `ALREADY_DONE`, `UNFIXABLE`, `BLOCKED`, `REREVIEW_REQUIRED`. `REREVIEW_REQUIRED` is terminal for the worker only: the orchestrator then runs the re-review handoff (item 6.4) or the terminal fallback, so it is never a silent end state.
 

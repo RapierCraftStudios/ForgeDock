@@ -336,7 +336,7 @@ case "$TIER" in
   prose)
     [ -n "${DRY_RUN:-}" ] && echo "DRY_RUN: set workflow:building" || \
     gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:building" \
-      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
+      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:in-review,workflow:remediating,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
     ;;
 esac
 ```

@@ -367,6 +367,42 @@ describe("pickPhase", () => {
       assert.equal(outcome.outputs.pr, 7);
     });
 
+    it("forge#3541: workflow:remediating on the issue only (no needs-human, PR unlabelled) -> blocked with outputs.pr", async () => {
+      const io = ioFor({ ...openUnlabelled, issueLabels: ["workflow:remediating"] });
+      const outcome = await review.detectOutcome(reviewState, io);
+      assert.equal(outcome.status, "blocked");
+      assert.equal(outcome.outputs.pr, 7);
+    });
+
+    it("forge#3541: workflow:remediating on the PR -> blocked with outputs.pr", async () => {
+      const io = ioFor({
+        prList: JSON.stringify([{ number: 7 }]),
+        prView: JSON.stringify({ number: 7, state: "OPEN", mergedAt: null, labels: [{ name: "workflow:remediating" }] }),
+        issueLabels: [],
+      });
+      const outcome = await review.detectOutcome(reviewState, io);
+      assert.equal(outcome.status, "blocked");
+      assert.equal(outcome.outputs.pr, 7);
+    });
+
+    it("forge#3541: an explicit REVIEW_RESULT BLOCKED with workflow:remediating on the issue is not a handoff", async () => {
+      const io = ioFor({ ...openUnlabelled, issueLabels: ["workflow:remediating"] });
+      const outcome = await review.detectOutcome(reviewState, io,
+        rr("  status: BLOCKED\n  blocker: x"));
+      assert.equal(outcome.status, "failed");
+      assert.equal(outcome.handoff, false);
+    });
+
+    it("forge#3541: each autonomous kind hands off with no needs-human label anywhere", async () => {
+      const io = ioFor({ ...openUnlabelled, issueLabels: ["workflow:remediating"] });
+      for (const kind of ["ci-gate", "inpr-fix", "base-sync"]) {
+        const outcome = await review.detectOutcome(reviewState, io,
+          rr(`  status: NEXT\n  next: remediate\n  remediation: ${kind}\n  pr_number: 7`));
+        assert.equal(outcome.status, "blocked", kind);
+        assert.equal(outcome.outputs.remediation, kind);
+      }
+    });
+
     it("forge#3521: REVIEW_RESULT next: remediate with no labels -> blocked with outputs.pr", async () => {
       const io = ioFor({ ...openUnlabelled, issueLabels: [] });
       const outcome = await review.detectOutcome(reviewState, io,

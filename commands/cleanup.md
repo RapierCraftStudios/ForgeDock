@@ -226,7 +226,7 @@ For each orphaned issue found:
 ```bash
 gh issue close $NUM {GH_FLAG} --comment "Closed by cleanup — PR #$MERGED_PR was already merged."
 gh issue edit $NUM {GH_FLAG} --add-label "workflow:merged"
-gh issue edit $NUM {GH_FLAG} --remove-label "workflow:in-review,workflow:awaiting-merge" 2>/dev/null || true
+gh issue edit $NUM {GH_FLAG} --remove-label "workflow:in-review,workflow:remediating,workflow:awaiting-merge" 2>/dev/null || true
 ```
 
 Also check open issues with `workflow:building` — same pattern (search for merged PRs referencing them).
