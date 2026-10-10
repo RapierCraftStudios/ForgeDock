@@ -368,6 +368,7 @@ A bundle PR already got a full line-level review before it merged to staging, so
 ```bash
 SCOPE_MODE=full; REVIEWED_COMMITS=""; UNREVIEWED_COMMITS=""; UNREVIEWED_FILES=""; _LOG=""; CROSS_PR_FILES=""; REVIEWED_PR_COUNT=0
 _SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"; _PF="$_SD/${PR_NUMBER}_bundle-pr-files.txt"; : > "$_PF"
+# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
 _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
 _tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
 for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
