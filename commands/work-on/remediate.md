@@ -114,16 +114,19 @@ fi
 PARTIAL_PR_COMMENT_IDS=$(printf '%s' "$PR_COMMENTS" | jq -rs '[.[][] | select((.body // "") | startswith("<!-- FORGE:REMEDIATION -->")) | select((.body | contains("<!-- FORGE:REMEDIATION:COMPLETE -->")) | not) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | .id] | .[]' 2>/dev/null || true)
 ```
 
-**Per-kind scoping of the single-attempt guard** (forge#3496): the guard is scoped per remediation kind so a base-sync round is not swallowed by an earlier `ci-gate` / `inpr-fix` remediation on the same PR. A base-sync handoff is recognised by the router's `FORGE:BASESYNC_REMEDIATION: pr={PR_NUMBER}` bound marker on the issue (the router posts it immediately before invoking this phase); a completed base-sync round is recognised by a `FORGE:REMEDIATION:COMPLETE` trail carrying the `**Base sync**: ran` line that Phase M8 posts. The router handoff is bounded to one per PR (the marker count in `work-on/review.md` R4, unchanged) and this check; inside remediation the sync is bounded per distinct base head and hard-capped at `BASESYNC_MAX_ROUNDS` pushed sync merges on the branch, counted from git rather than shell state (see Phase M3 and M6):
+**Per-kind scoping of the single-attempt guard** (forge#3496): the guard is scoped per remediation kind so a base-sync round is not swallowed by an earlier `ci-gate` / `inpr-fix` remediation on the same PR. A base-sync handoff is recognised by the router's `FORGE:BASESYNC_REMEDIATION: pr={PR_NUMBER}` bound marker on the issue (the router posts it immediately before invoking this phase); the guard is relaxed only when the NEWEST bound marker (any of `CI` / `INPR` / `BASESYNC`) is the base-sync one, and a completed base-sync round is recognised by a `FORGE:REMEDIATION:COMPLETE` trail carrying the `**Base sync**: ran` or `**Base sync**: attempted` line that Phase M8 posts (a round that merged nothing is still recorded as `attempted`). The router handoff is bounded to one per PR (the marker count in `work-on/review.md` R4, unchanged) and this check; inside remediation the sync is bounded per distinct base head and hard-capped at `BASESYNC_MAX_ROUNDS` pushed sync merges on the branch, counted from git rather than shell state (see Phase M3 and M6):
 
 ```bash
 if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$PR_COMMENTS" ]; then
-  BASESYNC_DONE_N=$(printf '%s' "$PR_COMMENTS" | bash "$TRUSTED_SCRIPT" count '^<!-- FORGE:REMEDIATION -->[\s\S]*\*\*Base sync\*\*: ran[\s\S]*<!-- FORGE:REMEDIATION:COMPLETE -->' 2>/dev/null || echo "")
+  BASESYNC_DONE_N=$(printf '%s' "$PR_COMMENTS" | bash "$TRUSTED_SCRIPT" count '^<!-- FORGE:REMEDIATION -->[\s\S]*\*\*Base sync\*\*: (ran|attempted)[\s\S]*<!-- FORGE:REMEDIATION:COMPLETE -->' 2>/dev/null || echo "")
   ISSUE_COMMENTS=$(gh api --paginate repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments 2>/dev/null) || ISSUE_COMMENTS=""
-  BASESYNC_BOUND_N=$(printf '%s' "$ISSUE_COMMENTS" | bash "$TRUSTED_SCRIPT" count '^<!-- FORGE:BASESYNC_REMEDIATION: pr={PR_NUMBER} -->' 2>/dev/null || echo "")
-  # A base-sync handoff (bound marker present) with no completed base-sync round yet is a fresh attempt for ITS kind,
-  # whatever earlier ci-gate / inpr-fix trails exist. Fail closed: an unreadable count keeps the kind-agnostic guard.
-  if [ -n "$BASESYNC_DONE_N" ] && [ -n "$BASESYNC_BOUND_N" ] && [ "$BASESYNC_BOUND_N" -ge 1 ] && [ "$BASESYNC_DONE_N" -eq 0 ]; then REMEDIATION_COMPLETE_N=0; fi
+  # The override applies only when the CURRENT handoff is base-sync. The current kind is the NEWEST trusted bound marker
+  # (`bodies` is oldest-first, so tail -1): the router posts it immediately before invoking this phase. A base-sync handoff with no
+  # completed base-sync round (a `ran` or `attempted` trail) is a fresh attempt for ITS kind, whatever earlier ci-gate / inpr-fix
+  # trails exist. Fail closed: an unreadable count or kind, or any other kind (including a standalone --remediate with no bound
+  # marker), keeps the kind-agnostic guard.
+  CURRENT_KIND=$(printf '%s' "$ISSUE_COMMENTS" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:(CI|INPR|BASESYNC)_REMEDIATION: pr={PR_NUMBER} -->' 2>/dev/null | tail -1 | grep -oE '(CI|INPR|BASESYNC)_REMEDIATION' | head -1) || CURRENT_KIND=""
+  if [ "$CURRENT_KIND" = "BASESYNC_REMEDIATION" ] && [ -n "$BASESYNC_DONE_N" ] && [ "$BASESYNC_DONE_N" -eq 0 ]; then REMEDIATION_COMPLETE_N=0; fi
 fi
 ```
 
@@ -224,24 +227,25 @@ if ! { git diff --quiet && git diff --cached --quiet; }; then
 fi
 git fetch origin {PR_BASE} {HEAD_BRANCH} # allowlist:check-command-side-effects
 # Durable sync state (forge#3517): every block runs in a fresh shell, so never carry rounds or the base head in shell vars.
-# Rounds = merge commits on the PUSHED branch's first-parent chain that are not on the base (a round counts only once pushed;
-# a manual merge counts too, fail closed). Recorded base head = the newest such merge's second parent, when that is a base commit.
-# An unreadable count is the cap.
+# Rounds = SYNC merges on the PUSHED branch's first-parent chain: merges not on the base whose second parent is an ancestor of
+# origin/{PR_BASE} (a round counts only once pushed; a manual "Update branch" or feature-branch merge is not a sync and does not
+# burn the cap). Recorded base head = the newest sync merge's second parent. An unreadable count is the cap.
 BASESYNC_MAX_ROUNDS=2                       # hard cap on sync rounds per PR (M3 plus M6 re-syncs)
-BASESYNC_ROUNDS=$(git rev-list --first-parent --merges --count origin/{PR_BASE}..origin/{HEAD_BRANCH} 2>/dev/null) || BASESYNC_ROUNDS=$BASESYNC_MAX_ROUNDS
-_lm=$(git rev-list --first-parent --merges -1 origin/{PR_BASE}..origin/{HEAD_BRANCH} 2>/dev/null || true); _p2=""
-[ -n "$_lm" ] && _p2=$(git rev-parse -q --verify "$_lm^2" 2>/dev/null) && git merge-base --is-ancestor "$_p2" origin/{PR_BASE} 2>/dev/null || _p2=""
+BASESYNC_ROUNDS=0; _p2=""
+if _rl=$(git rev-list --first-parent --merges origin/{PR_BASE}..origin/{HEAD_BRANCH} 2>/dev/null); then
+  for _m in $_rl; do _q=$(git rev-parse -q --verify "$_m^2" 2>/dev/null) && git merge-base --is-ancestor "$_q" origin/{PR_BASE} 2>/dev/null && { BASESYNC_ROUNDS=$((BASESYNC_ROUNDS+1)); [ -n "$_p2" ] || _p2="$_q"; }; done
+else BASESYNC_ROUNDS=$BASESYNC_MAX_ROUNDS; fi
 BASESYNC_BASE_SHA="$_p2"
 if [ "$BASESYNC_ROUNDS" -ge "$BASESYNC_MAX_ROUNDS" ]; then
   echo "refusing base sync: ${BASESYNC_ROUNDS} sync round(s) already on {HEAD_BRANCH} (cap ${BASESYNC_MAX_ROUNDS})"; BASESYNC_REFUSED=true
 fi
 if [ "${BASESYNC_REFUSED:-false}" != "true" ]; then
-  BASESYNC_BASE_SHA=$(git rev-parse origin/{PR_BASE})   # the base head this round merges; persisted by M8 as `Base sync**: ran (base=<sha>)`
+  BASESYNC_BASE_SHA=$(git rev-parse origin/{PR_BASE})   # the base head this round merges
   MERGE_OUT=$(git merge origin/{PR_BASE} --no-edit 2>&1); MERGE_RC=$? # allowlist:check-command-side-effects
   echo "$MERGE_OUT"
   # rc alone cannot tell a conflict from a refusal (both exit 1); MERGE_HEAD can.
   if [ "$MERGE_RC" -eq 0 ]; then
-    BASESYNC_RAN=true
+    echo "base sync merged"   # nothing is carried in shell state: Phase M8 re-derives "a sync ran" from the pushed merge
   elif git rev-parse -q --verify MERGE_HEAD >/dev/null; then
     BASESYNC_CONFLICTED=true   # merge in progress with conflicts: resolve or park below
   else
@@ -250,10 +254,10 @@ if [ "${BASESYNC_REFUSED:-false}" != "true" ]; then
 fi
 ```
 
-Exactly one outcome applies. `BASESYNC_RAN=true` is set only on a clean merge (or after a conflicted merge is concluded below); a refused merge is never treated as synced.
+Exactly one outcome applies. A refused merge is never treated as synced. No shell variable records that the sync ran: Phase M8 derives that from the pushed sync merge in git (a fresh shell has no `BASESYNC_*` vars).
 
 - Clean merge (`MERGE_RC=0`): nothing more to resolve; the merge commit is the sync.
-- Conflicts (`MERGE_RC` nonzero, `MERGE_HEAD` present): read BOTH sides of every conflicted hunk and the surrounding code, then write the combined result by hand. No `-X ours`/`-X theirs`, no wholesale `git checkout --ours/--theirs`, no blanket take-one-side. After resolving, `git add` the files and conclude with `git commit -s --no-edit` (the merge commit), then set `BASESYNC_RAN=true`.
+- Conflicts (`MERGE_RC` nonzero, `MERGE_HEAD` present): read BOTH sides of every conflicted hunk and the surrounding code, then write the combined result by hand. No `-X ours`/`-X theirs`, no wholesale `git checkout --ours/--theirs`, no blanket take-one-side. After resolving, `git add` the files and conclude with `git commit -s --no-edit` (the merge commit).
 - **Unresolvable with confidence** (a hunk whose intent on either side you cannot reconcile, or the branch/tree is refused above): capture the file list first, then abort only if a merge is in progress, and park:
   ```bash
   run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
@@ -281,7 +285,7 @@ Exactly one outcome applies. `BASESYNC_RAN=true` is set only on a clean merge (o
   gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
   ```
   EXIT `REMEDIATE_RESULT: status: BLOCKED` with blocker "base-sync: merge refused (rc=N)" (N = `MERGE_RC`). Never fall through to M4 as synced.
-- **Re-entry (per distinct base head)**: Phase M3's sync is re-enterable from Phase M6, but only when the base advanced past `BASESYNC_BASE_SHA` and `BASESYNC_ROUNDS` is below `BASESYNC_MAX_ROUNDS`. A re-sync round runs this same block on the new head with the same guards (shared-branch refusal, clean tree, merge-only, no force-push, resolve-or-park, `FORGE:BASESYNC_FAILED`). The block derives `BASESYNC_ROUNDS` and `BASESYNC_BASE_SHA` from git on every entry (pushed sync merges on the branch), never from shell state, and refuses at the cap; an unreadable count is the cap. `BASESYNC_RAN=true` is still set only on a clean or concluded merge.
+- **Re-entry (per distinct base head)**: Phase M3's sync is re-enterable from Phase M6, but only when the base advanced past `BASESYNC_BASE_SHA` and `BASESYNC_ROUNDS` is below `BASESYNC_MAX_ROUNDS`. A re-sync round runs this same block on the new head with the same guards (shared-branch refusal, clean tree, merge-only, no force-push, resolve-or-park, `FORGE:BASESYNC_FAILED`). The block derives `BASESYNC_ROUNDS` and `BASESYNC_BASE_SHA` from git on every entry (pushed sync merges on the branch), never from shell state, and refuses at the cap; an unreadable count is the cap.
 - After a sync, the quality gate below re-runs on the merged tree, and Phase M6's re-review covers the new head (the reviewed-head guard forces a fresh review).
 
 **Quality Gate** (same loop as Phase 3G, max 3 iterations):
@@ -394,9 +398,10 @@ If no dispatch tool resolves, a missing tool is not a human decision, so do NOT 
 cd {WORKTREE_PATH}
 git fetch origin {PR_BASE} {HEAD_BRANCH} # allowlist:check-command-side-effects
 BASESYNC_MAX_ROUNDS=2
-BASESYNC_ROUNDS=$(git rev-list --first-parent --merges --count origin/{PR_BASE}..origin/{HEAD_BRANCH} 2>/dev/null) || BASESYNC_ROUNDS=$BASESYNC_MAX_ROUNDS
-_lm=$(git rev-list --first-parent --merges -1 origin/{PR_BASE}..origin/{HEAD_BRANCH} 2>/dev/null || true); _p2=""
-[ -n "$_lm" ] && _p2=$(git rev-parse -q --verify "$_lm^2" 2>/dev/null) && git merge-base --is-ancestor "$_p2" origin/{PR_BASE} 2>/dev/null || _p2=""
+BASESYNC_ROUNDS=0; _p2=""
+if _rl=$(git rev-list --first-parent --merges origin/{PR_BASE}..origin/{HEAD_BRANCH} 2>/dev/null); then
+  for _m in $_rl; do _q=$(git rev-parse -q --verify "$_m^2" 2>/dev/null) && git merge-base --is-ancestor "$_q" origin/{PR_BASE} 2>/dev/null && { BASESYNC_ROUNDS=$((BASESYNC_ROUNDS+1)); [ -n "$_p2" ] || _p2="$_q"; }; done
+else BASESYNC_ROUNDS=$BASESYNC_MAX_ROUNDS; fi
 BASESYNC_BASE_SHA="$_p2"
 NOW_BASE_SHA=$(git rev-parse origin/{PR_BASE})
 FRESH_MERGED=false
@@ -461,14 +466,15 @@ CUR_BASE_SHA=$(git rev-parse origin/{PR_BASE})
 # Recorded head and rounds come from the pushed branch's sync merges (same derivation as M3), never from shell vars or
 # the M8 trail line, which is written after this phase (forge#3517). No recorded head is treated as advanced, but only below the cap.
 BASESYNC_MAX_ROUNDS=2
-BASESYNC_ROUNDS=$(git rev-list --first-parent --merges --count origin/{PR_BASE}..origin/{HEAD_BRANCH} 2>/dev/null) || BASESYNC_ROUNDS=$BASESYNC_MAX_ROUNDS
-_lm=$(git rev-list --first-parent --merges -1 origin/{PR_BASE}..origin/{HEAD_BRANCH} 2>/dev/null || true); _p2=""
-[ -n "$_lm" ] && _p2=$(git rev-parse -q --verify "$_lm^2" 2>/dev/null) && git merge-base --is-ancestor "$_p2" origin/{PR_BASE} 2>/dev/null || _p2=""
+BASESYNC_ROUNDS=0; _p2=""
+if _rl=$(git rev-list --first-parent --merges origin/{PR_BASE}..origin/{HEAD_BRANCH} 2>/dev/null); then
+  for _m in $_rl; do _q=$(git rev-parse -q --verify "$_m^2" 2>/dev/null) && git merge-base --is-ancestor "$_q" origin/{PR_BASE} 2>/dev/null && { BASESYNC_ROUNDS=$((BASESYNC_ROUNDS+1)); [ -n "$_p2" ] || _p2="$_q"; }; done
+else BASESYNC_ROUNDS=$BASESYNC_MAX_ROUNDS; fi
 BASESYNC_BASE_SHA="$_p2"
 echo "recorded=${BASESYNC_BASE_SHA:-none} current=${CUR_BASE_SHA} rounds=${BASESYNC_ROUNDS}/${BASESYNC_MAX_ROUNDS}"
 ```
 
-- **Base advanced** (`CUR_BASE_SHA` differs from the recorded `BASESYNC_BASE_SHA`) and `BASESYNC_ROUNDS` is below `BASESYNC_MAX_ROUNDS` (2 pushed sync merges on the branch): this is a new conflict a human did not cause. Re-run the Phase M3 base-sync on the new head (same resolve-or-park rules), then the Phase M4 quality gate, ancestry guard and push, the M5 trail, and this Phase M6 once more. The pushed merge raises the derived count and moves the recorded head, so nothing is carried in shell state. Do not post a second `FORGE:REMEDIATION:COMPLETE`; only M8 does, once.
+- **Base advanced** (`CUR_BASE_SHA` differs from the recorded `BASESYNC_BASE_SHA`) and `BASESYNC_ROUNDS` is below `BASESYNC_MAX_ROUNDS` (2 pushed sync merges on the branch; only merges whose second parent is a base ancestor count): this is a new conflict a human did not cause. Re-run the Phase M3 base-sync on the new head (same resolve-or-park rules), then the Phase M4 quality gate, ancestry guard and push, the M5 trail, and this Phase M6 once more. The pushed merge raises the derived count and moves the recorded head, so nothing is carried in shell state. Do not post a second `FORGE:REMEDIATION:COMPLETE`; only M8 does, once.
 - **Base unchanged** (the sync did not clear the conflict) or `BASESYNC_ROUNDS` has reached `BASESYNC_MAX_ROUNDS` (a base that never settles): park. Add `needs-human`, post a comment naming the PR, the base SHA(s) tried (recorded and current) and the conflicting files (`git diff --name-only --diff-filter=U` against a trial merge, or the GitHub mergeability report), and exit `REMEDIATE_RESULT: status: BLOCKED` with blocker "base conflict persists after base-sync remediation".
 
 This re-runs the full review (domain agents → verdict → Phase 8 auto-merge gate). The FIXABLE transition above left the issue at the non-terminal `workflow:in-review` state. `review-pr.md` recognizes the in-progress `FORGE:REMEDIATION` marker posted in Phase M5 as evidence of the prior escalation, so one of two things happens inside Phase 8:
@@ -637,12 +643,44 @@ esac
 # forge#3413: embed the pushed head so the orchestrator scopes a REREVIEW-REQUIRED trail to the CURRENT head only.
 REMEDIATED_HEAD_SHA=$(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null || true)
 
-# forge#3496: mark a base-sync round so Phase M0 scopes the single-attempt guard per kind.
-# Persist the merged base head so it survives across blocks: fall back to the merge's second parent when the shell var is unset.
+# forge#3496 / forge#3518: mark a base-sync round so Phase M0 scopes the single-attempt guard per kind. This block runs in a fresh
+# shell, so it derives the record from durable state (pushed git history + trusted bound markers), never from a shell variable.
+# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+done
+TRUSTED_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done <<< "$_tc"
+cd {WORKTREE_PATH}
+git fetch origin {PR_BASE} {HEAD_BRANCH} # allowlist:check-command-side-effects
+BASESYNC_MAX_ROUNDS=2
+BASESYNC_ROUNDS=0; _p2=""
+if _rl=$(git rev-list --first-parent --merges origin/{PR_BASE}..origin/{HEAD_BRANCH} 2>/dev/null); then
+  for _m in $_rl; do _q=$(git rev-parse -q --verify "$_m^2" 2>/dev/null) && git merge-base --is-ancestor "$_q" origin/{PR_BASE} 2>/dev/null && { BASESYNC_ROUNDS=$((BASESYNC_ROUNDS+1)); [ -n "$_p2" ] || _p2="$_q"; }; done
+else BASESYNC_ROUNDS=$BASESYNC_MAX_ROUNDS; fi
+BASESYNC_BASE_SHA="$_p2"
+ISSUE_COMMENTS=$(gh api --paginate repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments 2>/dev/null) || ISSUE_COMMENTS=""
+# Current kind = the NEWEST trusted bound marker (bodies are oldest-first, so tail -1). Unreadable or non-base-sync: no line (fail closed).
+BASESYNC_KIND=""
+if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$ISSUE_COMMENTS" ]; then
+  BASESYNC_KIND=$(printf '%s' "$ISSUE_COMMENTS" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:(CI|INPR|BASESYNC)_REMEDIATION: pr={PR_NUMBER} -->' 2>/dev/null | tail -1 | grep -oE '(CI|INPR|BASESYNC)_REMEDIATION' | head -1) || BASESYNC_KIND=""
+fi
 BASESYNC_LINE=""
-if [ "${BASESYNC_RAN:-false}" = "true" ]; then
-  BASESYNC_BASE_SHA="${BASESYNC_BASE_SHA:-$(git -C {WORKTREE_PATH} rev-parse -q --verify 'HEAD^2' 2>/dev/null || true)}"
-  BASESYNC_LINE="**Base sync**: ran (base=${BASESYNC_BASE_SHA:-unknown})"
+if [ "$BASESYNC_KIND" = "BASESYNC_REMEDIATION" ]; then
+  # A sync merge is this round's when its base head is not already recorded by an earlier trusted `Base sync: ran` trail.
+  _seen=""
+  [ -n "$BASESYNC_BASE_SHA" ] && _seen=$(printf '%s' "$ISSUE_COMMENTS" | bash "$TRUSTED_SCRIPT" bodies '\*\*Base sync\*\*: ran \(base='"$BASESYNC_BASE_SHA" 2>/dev/null || true)
+  if [ -n "$BASESYNC_BASE_SHA" ] && [ -z "$_seen" ]; then
+    BASESYNC_LINE="**Base sync**: ran (base=${BASESYNC_BASE_SHA})"
+  else
+    # No merge pushed this round (refused, capped, nothing to merge): still a durable completion record, so M0 counts the round
+    # as done and the per-kind override cannot re-arm for every later invocation.
+    BASESYNC_LINE="**Base sync**: attempted (no merge)"
+  fi
 fi
 
 REMEDIATION_BODY="<!-- FORGE:REMEDIATION -->
