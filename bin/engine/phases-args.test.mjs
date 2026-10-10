@@ -100,6 +100,17 @@ describe("engine phase args satisfy each target spec's argument-hint (forge#3499
     await assert.rejects(() => close.buildArgs({ ...state, pr: null, terminalReason: "merged" }, ctx, io), PhaseArgsError);
   });
 
+  it("close builds an investigation close without --pr (forge#3534)", async () => {
+    const close = PHASES.find((p) => p.id === "close");
+    const args = await close.buildArgs({ ...state, pr: null, terminalReason: "investigation" }, ctx, io);
+    assert.equal(args[args.indexOf("--terminal-state") + 1], "investigation");
+    assert.ok(!args.includes("--pr"));
+    const stale = await close.buildArgs({ ...state, pr: 9, terminalReason: "investigation" }, ctx, io);
+    assert.ok(!stale.includes("--pr"));
+    for (const reason of ["needs-human", "awaiting-merge", "engine-error"])
+      await assert.rejects(() => close.buildArgs({ ...state, terminalReason: reason }, ctx, io), PhaseArgsError);
+  });
+
   it("close derives --terminal-state from the run's terminal reason", async () => {
     const close = PHASES.find((p) => p.id === "close");
     for (const [reason, expected] of [[null, "merged"], ["invalid", "invalid"], ["decomposed", "decomposed"]]) {

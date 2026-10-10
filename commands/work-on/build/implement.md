@@ -118,6 +118,8 @@ Extract from contract:
 
 **Investigation task special case**: Research deeply, create GitHub issues for each finding using the Pipeline Issue Template (see `commands/issue.md` § "Pipeline Issue Template"). Each issue MUST include `## Problem`, `## Affected Files`, and `## Acceptance Criteria`. Create each issue via the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") — `Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"...\" --body-file <path> --label ...")` — instead of calling the raw issue-creation command directly; this gets dedup and body validation for free. Post a deliverables comment listing the created issues, close the original issue, and print `IMPLEMENT_RESULT: status: INVESTIGATION_COMPLETE` as the final reply (the build skill passes this up and the router skips review). <!-- Added: forge#2090 -->
 
+**Durable exit marker** (the engine reads this, not the free-text result): the deliverables comment MUST begin with the exact first line `<!-- FORGE:INVESTIGATION:DELIVERABLES -->` followed by the list of created issues. Post it BEFORE closing the original issue, remove the stale `workflow:building` label (`gh issue edit {NUMBER} {GH_FLAG} --remove-label "workflow:building"`), then close the issue and print the result. Without this marker an investigation exit is indistinguishable from a crashed build. <!-- Added: forge#3534 -->
+
 ---
 
 ## Phase I3: Implement
