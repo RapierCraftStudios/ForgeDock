@@ -36,6 +36,12 @@ has "M3 records merged base head" 'BASESYNC_BASE_SHA=\$\(git rev-parse origin/'
 has "re-sync rounds hard-capped" 'BASESYNC_MAX_ROUNDS'
 has "M6 distinguishes advanced base" 'Base advanced'
 has "M8 trail persists base sha" 'Base sync\*\*: ran \(base='
+has "rounds derived from pushed sync merges" 'BASESYNC_ROUNDS=\$\(git rev-list --first-parent --merges --count origin/\{PR_BASE\}\.\.origin/\{HEAD_BRANCH\}'
+has "unreadable round count treated as the cap" '\|\| BASESYNC_ROUNDS=\$BASESYNC_MAX_ROUNDS'
+if grep -qF 'BASESYNC_ROUNDS=$(( ${BASESYNC_ROUNDS:-0}' "$SPEC"; then bad "no shell-state round counter"; else ok "no shell-state round counter"; fi
+if grep -qF '[ -n "${BASESYNC_BASE_SHA:-}" ]' "$SPEC"; then bad "freshness pass not gated on a shell var"; else ok "freshness pass not gated on a shell var"; fi
+has "freshness push rc checked" 'if git push origin HEAD:\{HEAD_BRANCH\}; then'
+has "freshness merge re-gated before push" 'Run the Phase M4 pre-push ancestry guard'
 if grep -qF 'do NOT sync a second time' "$SPEC"; then bad "unconditional second-sync refusal removed"; else ok "unconditional second-sync refusal removed"; fi
 
 # Behavioural: dirty tree + base change -> refused (rc!=0, no MERGE_HEAD, empty U-list); real conflict -> MERGE_HEAD present.
@@ -68,6 +74,30 @@ eq "real conflict: rc=1 with MERGE_HEAD" "$(cat "$T/conflict.out")" "1 head"
   echo "$([ "$sha0" = "$same" ] && echo unchanged-same || echo unchanged-differs) $([ "$sha0" != "$sha1" ] && echo advanced || echo notadvanced) $rc" > "$T/adv.out"
 )
 eq "advanced base: SHA differs, unchanged base same, second merge clean" "$(cat "$T/adv.out")" "unchanged-same advanced 0"
+
+# Durable derivation (forge#3517): the M3/M6 lines, run in a fresh shell against a scratch repo, recover rounds and the
+# recorded base head from the pushed branch; an unpushed merge does not count.
+DERIVE="$(grep -m1 -E '^BASESYNC_ROUNDS=\$\(git rev-list' "$SPEC")"$'\n'"$(grep -m1 -E '^_lm=\$\(git rev-list' "$SPEC")"$'\n'"$(grep -m1 -E '^\[ -n "\$_lm" \]' "$SPEC")"
+DERIVE="${DERIVE//\{PR_BASE\}/main}"; DERIVE="${DERIVE//\{HEAD_BRANCH\}/feat}"
+(
+  R="$T/derive"; mkdir "$R" && cd "$R" && git init -q -b main . && git config user.email t@t && git config user.name t
+  derive() { BASESYNC_MAX_ROUNDS=2; eval "$DERIVE"; echo "$BASESYNC_ROUNDS ${_p2:-none}"; }
+  echo a > f && git add f && git commit -qm base
+  git checkout -qb feat && echo x > g && git add g && git commit -qm feat
+  git update-ref refs/remotes/origin/main main; git update-ref refs/remotes/origin/feat feat
+  r0=$(derive)
+  git checkout -q main && echo b > f && git commit -qam m1 && git checkout -q feat
+  git update-ref refs/remotes/origin/main main; b1=$(git rev-parse main)
+  git merge origin/main --no-edit >/dev/null 2>&1
+  r_unpushed=$(derive)
+  git update-ref refs/remotes/origin/feat feat
+  r1=$(derive)
+  echo "$r0|$r_unpushed|$r1|$b1" > "$T/derive.out"
+)
+IFS='|' read -r D0 DU D1 B1 < "$T/derive.out"
+eq "derive: no sync merge -> 0 rounds, no recorded head" "$D0" "0 none"
+eq "derive: unpushed merge does not count" "$DU" "0 none"
+eq "derive: pushed sync merge -> 1 round, recorded head = merged base" "$D1" "1 $B1"
 
 echo "passed=$PASS failed=$FAILN"
 [ "$FAILN" -eq 0 ]
