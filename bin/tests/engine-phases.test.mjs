@@ -509,7 +509,11 @@ describe("pickPhase", () => {
   // forge#3545: BUILDER:COMPLETE is posted before the B6.5 acceptance gate; the newest gate marker wins.
   describe("build — acceptance gate / NEEDS_DECOMPOSE outcomes (forge#3545)", () => {
     const build = PHASES.find(p => p.id === "build");
-    const withComments = (...bodies) => ({ gh: async () => JSON.stringify(bodies), git: async () => "2" });
+    const asObj = (c) => ({ body: c, author_association: "OWNER", user: { login: "owner", type: "User" } });
+    const withComments = (...bodies) => ({
+      gh: async (args) => JSON.stringify(args.join(" ").includes("author_association") ? bodies.map(asObj) : bodies),
+      git: async () => "2",
+    });
     const st = { ...base, branch: "fix/x-42" };
     const builder = "<!-- FORGE:BUILDER:COMPLETE -->";
     const failed = "<!-- FORGE:ACCEPTANCE_GATE -->\n<!-- FORGE:ACCEPTANCE_GATE:FAILED -->";
@@ -561,7 +565,7 @@ describe("pickPhase", () => {
       assert.equal((await build.reconcile(st, withComments(builder))).satisfied, true);
     });
 
-    const over = "<!-- FORGE:DIFF_SIZE -->\n## Diff Size\n\ndiff_lines: 900\nthreshold: 500\nresult: OVER\n";
+    const over = "<!-- FORGE:DIFF_SIZE -->\n## Diff Size\n\ndiff_lines: 900\nthreshold: 500\nresult: OVER\n### Split Proposal\n- **A** — a.mjs\n";
     it("DIFF_SIZE result: OVER without COMPLETE -> committed, terminalReason decomposed", async () => {
       const o = await build.detectOutcome(st, withComments(over));
       assert.equal(o.status, "committed");

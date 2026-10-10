@@ -532,7 +532,9 @@ export const PHASES = [
       // and no newer blocking marker (the decompose-loop-guard exit posts BUILD_BLOCKED after DIFF_SIZE).
       if (!complete) {
         const overIdx = latestDiffSizeOverIndex(comments);
-        if (overIdx >= 0 && overIdx > gate.index)
+        // Routing still goes through the trusted-author size-gate check (Split Proposal, justified override, #3547).
+        if (overIdx >= 0 && overIdx > gate.index && mayRouteToDecompose(comments) &&
+            sizeGateRoutesToDecompose(await trustedCommentBodies(state.issue, io)))
           return { status: "committed", terminalReason: "decomposed", outputs: { ...(branch ? { branch } : {}), decompose: true } };
       }
       // Fail closed: a FAILED/BLOCKED gate newer than any PASSED is not a committed build even though
