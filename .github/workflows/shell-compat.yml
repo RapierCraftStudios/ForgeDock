@@ -67,6 +67,7 @@ jobs:
           /bin/bash scripts/remediation-marker-match.test.sh
           /bin/bash scripts/remediate-basesync.test.sh
           /bin/bash scripts/classify-finding.test.sh
+          /bin/bash scripts/check-contract-scope.test.sh
           /bin/bash scripts/amplification-breaker.test.sh
           /bin/bash scripts/check-spec-bash.test.sh
           /bin/bash scripts/review-pr-arguments.test.sh
@@ -96,6 +97,7 @@ jobs:
       - name: Run classify-finding.test.sh and amplification-breaker.test.sh
         run: |
           bash scripts/classify-finding.test.sh
+          bash scripts/check-contract-scope.test.sh
           bash scripts/amplification-breaker.test.sh
           bash scripts/check-spec-bash.test.sh
           bash scripts/review-pr-arguments.test.sh
@@ -141,6 +143,7 @@ jobs:
       - name: Run classify-finding.test.sh and amplification-breaker.test.sh
         run: |
           bash scripts/classify-finding.test.sh
+          bash scripts/check-contract-scope.test.sh
           bash scripts/amplification-breaker.test.sh
           bash scripts/check-spec-bash.test.sh
           bash scripts/review-pr-arguments.test.sh
