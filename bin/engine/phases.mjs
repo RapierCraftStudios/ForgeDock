@@ -435,6 +435,10 @@ export const PHASES = [
       if (pr.needsHuman) return escalated;
       const rr = parseReviewResult(result?.text);
       if (rr && rr.status === "NEXT" && rr.next === "remediate") return escalated;
+      // An explicit REVIEW_RESULT status is authoritative: BLOCKED/COMPLETE exits
+      // (phase trail, ci gate, base conflict, merge refusal) also label the issue
+      // needs-human but are NOT remediation handoffs, so skip the label fallback.
+      if (rr && rr.status) return { status: "failed", detail: "PR open, not merged", retryable: false, handoff: false, outputs };
       let snap = null;
       try { snap = await issueSnapshot(state.issue, io); } catch { snap = null; }
       if (snap?.ok && snap.labels.includes("needs-human")) return escalated;

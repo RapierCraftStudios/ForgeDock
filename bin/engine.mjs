@@ -611,7 +611,7 @@ export async function runIssue(opts) {
     // has nothing to remediate and stays a plain needs-human stop — it must not
     // fall through to `close`, which would otherwise be the next eligible phase.
     const isRemediationHandoff = outcome.status === "blocked" &&
-      phase.id === "review" && (outcome.reason || "needs-human") === "needs-human" &&
+      phase.id === "review" && (outcome.reason || "needs-human") === "needs-human" && outcome.handoff !== false &&
       (outcome.outputs?.pr ?? state.pr) != null;
     if (outcome.status === "blocked") {
       emitProgress({ event: "phase_exit", phase: phase.id, status: "blocked", detail: outcome.detail });
@@ -788,7 +788,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
     if (outcome.retryable === false) {
       // forge#3521: keep outcome.outputs (e.g. the PR number) so the blocked
       // commit persists it and isRemediationHandoff can see it.
-      return { status: "blocked", detail: outcome.detail, outputs: outcome.outputs, usage: lastUsage };
+      return { status: "blocked", detail: outcome.detail, outputs: outcome.outputs, handoff: outcome.handoff, usage: lastUsage };
     }
   }
   // Exhausted transient retries → escalate (spec §7).

@@ -250,6 +250,26 @@ describe("runIssue", () => {
     assert.deepEqual(s.committed, ["investigate", "build", "review", "remediate"]);
   });
 
+  it("forge#3521 SPEC-1: explicit REVIEW_RESULT BLOCKED + issue needs-human + open PR does not hand off to remediate", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; w.prNeedsHuman = false; w.labels.push("needs-human"); },
+    };
+    const calls = [];
+    const runner = async ({ commandName }) => {
+      calls.push(commandName); script[commandName]?.();
+      return commandName === "work-on/review"
+        ? { status: "complete", text: "REVIEW_RESULT:\n  status: BLOCKED\n  blocker: ci gate not green\n" }
+        : { status: "complete" };
+    };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "needs-human");
+    assert.ok(!calls.includes("work-on/remediate"), "explicit BLOCKED must not run remediate");
+  });
+
   it("C1: commitsAhead swallows a git rejection on first build (no ref yet) and still drives build to merged", async () => {
     const { w, io } = fakeWorld();
     // Simulate the real first-build failure mode: `git rev-list origin/<lane>..<branch>`
