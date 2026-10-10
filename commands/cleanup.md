@@ -71,6 +71,9 @@ gh issue list {GH_FLAG} --state closed --label "workflow:building" --limit 100 -
 echo "=== Stale workflow:awaiting-merge ==="
 gh issue list {GH_FLAG} --state closed --label "workflow:awaiting-merge" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
 
+echo "=== Stale workflow:remediating ==="
+gh issue list {GH_FLAG} --state closed --label "workflow:remediating" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
+
 echo "=== Stale workflow:investigating ==="
 gh issue list {GH_FLAG} --state closed --label "workflow:investigating" --limit 100 --json number,title --jq '.[] | "#\(.number) — \(.title)"'
 
@@ -82,11 +85,11 @@ gh issue list {GH_FLAG} --state closed --label "needs-validation" --limit 100 --
 
 For each closed issue with a stale intermediate label:
 
-**Stale `workflow:in-review`, `workflow:building`, `workflow:awaiting-merge`** — these were merged but label wasn't updated:
+**Stale `workflow:in-review`, `workflow:building`, `workflow:awaiting-merge`, `workflow:remediating`** — these were merged but label wasn't updated:
 ```bash
 for NUM in {stale_issue_numbers}; do
   gh issue edit $NUM {GH_FLAG} --add-label "workflow:merged"
-  gh issue edit $NUM {GH_FLAG} --remove-label "workflow:in-review,workflow:building,workflow:awaiting-merge,needs-validation" 2>/dev/null || true
+  gh issue edit $NUM {GH_FLAG} --remove-label "workflow:in-review,workflow:building,workflow:awaiting-merge,workflow:remediating,needs-validation" 2>/dev/null || true
 done
 ```
 

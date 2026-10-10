@@ -224,7 +224,7 @@ fi
 Worktree/branch-already-exists and stale-label conditions are surfaced later (by the build phase's worktree step and the `## Error Handling` section) with their own recovery guidance in `docs/site/troubleshooting.md`.
 
 ### 0A: Parse input
-Extract project prefix and issue number. If `next`/`pick`: list open issues sorted by priority, skip `needs-human`, `workflow:decomposed`, and `workflow:awaiting-merge`, pick highest priority.
+Extract project prefix and issue number. If `next`/`pick`: list open issues sorted by priority, skip `needs-human`, `workflow:remediating`, `workflow:decomposed`, and `workflow:awaiting-merge`, pick highest priority.
 
 **Resolve `UNDER_ORCHESTRATION`**: `true` if the invocation args contain `--under-orchestration`, else `false`. This is a single parse done once, here — every later gated block (heartbeats) just checks this variable, no re-parsing.
 

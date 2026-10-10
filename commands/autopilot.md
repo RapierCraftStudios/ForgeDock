@@ -725,7 +725,7 @@ while true; do
         --json number,milestone,labels \
         --jq '[.[] | select(
           .milestone == null and
-          (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "needs-human") | not)
+          (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "workflow:remediating" or . == "needs-human") | not)
         )] | .[].number' \
         2>/dev/null || echo '')
 
@@ -855,7 +855,7 @@ To approve: remove \`needs-human\` label from #${ISSUE_NUM} and re-run \`/autopi
         --json number,milestone,labels \
         --jq '[.[] | select(
           .milestone == null and
-          (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "needs-human") | not)
+          (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "workflow:remediating" or . == "needs-human") | not)
         )] | .[].number' \
         2>/dev/null || echo '')
       for N in $PRE_DISPATCH_ISSUES; do DISPATCHED_ISSUES+=("$N"); done
@@ -1005,7 +1005,7 @@ while IFS= read -r milestone; do
           '[.[] | select(
             .milestone != null and
             (.milestone.title | ascii_downcase | gsub("[^a-z0-9]+"; "-") | ltrimstr("-") | rtrimstr("-")) == $slug and
-            (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "needs-human") | not)
+            (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "workflow:remediating" or . == "needs-human") | not)
           )] | .[].number' \
           2>/dev/null || echo '')
 
@@ -1109,7 +1109,7 @@ To approve: remove \`needs-human\` label from #${ISSUE_NUM} and re-run \`/autopi
           '[.[] | select(
             .milestone != null and
             (.milestone.title | ascii_downcase | gsub("[^a-z0-9]+"; "-") | ltrimstr("-") | rtrimstr("-")) == $slug and
-            (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "needs-human") | not)
+            (.labels | map(.name) | any(. == "workflow:merged" or . == "workflow:invalid" or . == "workflow:decomposed" or . == "workflow:remediating" or . == "needs-human") | not)
           )] | .[].number' \
           2>/dev/null || echo '')
         for N in $MS_PRE_DISPATCH; do DISPATCHED_ISSUES+=("$N"); done

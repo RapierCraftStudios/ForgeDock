@@ -74,6 +74,12 @@ describe("workflow:remediating consumer parity", () => {
     }
   });
 
+  it("every autopilot dispatch selector excludes workflow:remediating", () => {
+    const sel = read("commands/autopilot.md").split("\n").filter((l) => l.includes('. == "needs-human"') && l.includes("map(.name)"));
+    assert.ok(sel.length >= 4, `expected >=4 autopilot selectors, found ${sel.length}`);
+    for (const l of sel) assert.ok(l.includes('. == "workflow:remediating"'), `selector lacks workflow:remediating: ${l.trim()}`);
+  });
+
   it("select-fix-targets.sh --fixture-test passes (remediating P0 fixture excluded)", () => {
     const r = spawnSync("bash", [join(ROOT, "scripts/select-fix-targets.sh"), "--fixture-test"], { encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr);
