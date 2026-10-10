@@ -88,3 +88,9 @@ at the zone's `)` or a quote, so trailing JSON is never swallowed), and
 `api_error_status: 429` or limit text; stdout is parsed ALONE (#2422). The
 runner never fabricates a reset epoch — the bounded default wait lives in
 `bin/engine.mjs`. Cite: #3511.
+
+## Entry 2026-10-10 — Fix: catastrophic regex backtracking in usage-limit reset parsing (#3522)
+
+PR #3538 touched `runner`. See FORGE:BUILDER comment on issue #3522 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/runner.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3522 / PR #3538.
