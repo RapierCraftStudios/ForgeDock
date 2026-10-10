@@ -68,9 +68,18 @@ export function deriveState(events) {
         s.v = e.seq;
         if (e.outputs?.branch) s.branch = e.outputs.branch;
         if (e.outputs?.pr != null) s.pr = e.outputs.pr;
+        // forge#3504: a blocked phase persists its reason so a resumed run still routes to
+        // remediate instead of defaulting to a "merged" close.
+        if (e.terminalReason) s.terminalReason = e.terminalReason;
         break;
       case "RUN_TERMINAL":
         s.terminal = true; s.terminalReason = e.reason ?? "done"; s.v = e.seq;
+        break;
+      // forge#3511: an explicit `run-issue --retry` reopens an engine-error
+      // terminal. Bumping `v` makes the local state newer than the stale
+      // remote terminal index so reconcile remirrors instead of re-terminating.
+      case "RUN_REOPEN":
+        s.terminal = false; s.terminalReason = null; s.v = e.seq;
         break;
       // forge#2524: a session-limit pause is purely informational — it does
       // NOT touch committed/terminal/terminalReason. The phase that hit the

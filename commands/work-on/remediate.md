@@ -104,6 +104,21 @@ fi
 PARTIAL_PR_COMMENT_IDS=$(printf '%s' "$PR_COMMENTS" | jq -rs '[.[][] | select((.body // "") | startswith("<!-- FORGE:REMEDIATION -->")) | select((.body | contains("<!-- FORGE:REMEDIATION:COMPLETE -->")) | not) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | .id] | .[]' 2>/dev/null || true)
 ```
 
+**Per-kind scoping of the single-attempt guard** (forge#3496): the guard is scoped per remediation kind so a base-sync round is not swallowed by an earlier `ci-gate` / `inpr-fix` remediation on the same PR. A base-sync handoff is recognised by the router's `FORGE:BASESYNC_REMEDIATION: pr={PR_NUMBER}` bound marker on the issue (the router posts it immediately before invoking this phase); a completed base-sync round is recognised by a `FORGE:REMEDIATION:COMPLETE` trail carrying the `**Base sync**: ran` line that Phase M8 posts. The base-sync round is itself bounded to one, by that marker count in `work-on/review.md` R4 and by this check:
+
+```bash
+if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$PR_COMMENTS" ]; then
+  BASESYNC_DONE_N=$(printf '%s' "$PR_COMMENTS" | bash "$TRUSTED_SCRIPT" count '^<!-- FORGE:REMEDIATION -->[\s\S]*\*\*Base sync\*\*: ran[\s\S]*<!-- FORGE:REMEDIATION:COMPLETE -->' 2>/dev/null || echo "")
+  ISSUE_COMMENTS=$(gh api --paginate repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments 2>/dev/null) || ISSUE_COMMENTS=""
+  BASESYNC_BOUND_N=$(printf '%s' "$ISSUE_COMMENTS" | bash "$TRUSTED_SCRIPT" count '^<!-- FORGE:BASESYNC_REMEDIATION: pr={PR_NUMBER} -->' 2>/dev/null || echo "")
+  # A base-sync handoff (bound marker present) with no completed base-sync round yet is a fresh attempt for ITS kind,
+  # whatever earlier ci-gate / inpr-fix trails exist. Fail closed: an unreadable count keeps the kind-agnostic guard.
+  if [ -n "$BASESYNC_DONE_N" ] && [ -n "$BASESYNC_BOUND_N" ] && [ "$BASESYNC_BOUND_N" -ge 1 ] && [ "$BASESYNC_DONE_N" -eq 0 ]; then REMEDIATION_COMPLETE_N=0; fi
+fi
+```
+
+Completed trails of other kinds are left in place (never deleted); only the interrupted-partial cleanup below deletes anything.
+
 - If `REMEDIATION_COMPLETE_N` or `REMEDIATION_TRAIL_N` is empty (comments or `scripts/trusted-comments.sh` unreadable or unresolvable) → fail closed: EXIT `REMEDIATE_RESULT: status: BLOCKED`, blocker: "github-unavailable: remediation trail unreadable (comments or scripts/trusted-comments.sh unresolvable)". Never treat unreadable as "no trail" and never as `ALREADY_DONE`.
 - If `REMEDIATION_COMPLETE_N` is at least 1 (a trusted comment that starts with `<!-- FORGE:REMEDIATION -->` and contains `<!-- FORGE:REMEDIATION:COMPLETE -->`) → EXIT `REMEDIATE_RESULT: status: ALREADY_DONE`. **Single-attempt semantics (AC5)**: once a genuine `FORGE:REMEDIATION:COMPLETE` trail comment exists for this PR, do NOT re-attempt fixes on a subsequent invocation, regardless of the prior verdict — this is what prevents an infinite remediation retry loop on a genuinely-blocked PR. A comment that only quotes the marker mid-body (review findings, an `INPR_FIX` work order, a disposition record) or comes from an untrusted author never counts.
 - If `REMEDIATION_COMPLETE_N` is 0 and `REMEDIATION_TRAIL_N` is at least 1 → a prior attempt was interrupted mid-flight (same failure mode as the investigation phase's partial-comment case). Delete the partial comment(s) on both the PR and the issue (ids from `PARTIAL_PR_COMMENT_IDS` above and the same anchored filter over the issue's comments), then continue below as a fresh attempt:
@@ -134,7 +149,7 @@ BLOCK_COMMENTS=$(gh api repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments \
 ```
 
 **Classify into FIXABLE vs. UNFIXABLE**:
-- **FIXABLE** — open `review-finding` issues (CONFIRMED/LIKELY code defects), a `VERDICT=CHANGES REQUESTED` block with concrete findings attached, a mergeability guard failure (`CONFLICTING`/`DIRTY`/`BLOCKED` — resolvable by rebasing onto `{PR_BASE}`), a quality-gate/build failure, or a CI-gate refusal (`ci gate not green` — the failing/cancelled/timed-out checks are listed on the linked issue; read each failing job's log with `gh run view --log-failed`, fix the cause on the PR branch, or re-run a check that failed for an infrastructure reason), or an in-PR fix request (`in-pr fix required` — review-pr §6B.6 posted a `<!-- FORGE:INPR_FIX: round=1 head=<sha> findings=<ids> -->` comment on the PR listing CONFIRMED MEDIUM findings in files this PR changed. That comment is the work order: fix exactly the listed findings, at the listed `file:line`, and nothing else. Do not file them as issues; the re-review in Phase M6 files any that remain).
+- **FIXABLE** — open `review-finding` issues (CONFIRMED/LIKELY code defects), a `VERDICT=CHANGES REQUESTED` block with concrete findings attached, a base conflict (`base-conflict`: `CONFLICTING`/`DIRTY`, or `BEHIND` under required-up-to-date protection — resolvable by merging `origin/{PR_BASE}` in, the base-sync step in Phase M3; `BLOCKED` alone is branch protection that a sync cannot clear and is UNFIXABLE unless a conflict state is also present), a quality-gate/build failure, or a CI-gate refusal (`ci gate not green` — the failing/cancelled/timed-out checks are listed on the linked issue; read each failing job's log with `gh run view --log-failed`, fix the cause on the PR branch, or re-run a check that failed for an infrastructure reason), or an in-PR fix request (`in-pr fix required` — review-pr §6B.6 posted a `<!-- FORGE:INPR_FIX: round=1 head=<sha> findings=<ids> -->` comment on the PR listing CONFIRMED MEDIUM findings in files this PR changed. That comment is the work order: fix exactly the listed findings, at the listed `file:line`, and nothing else. Do not file them as issues; the re-review in Phase M6 files any that remain).
 - **UNFIXABLE (policy escalation)** — `HAS_PURPOSE_REGRESSION=true` (the PR's behavior diverges from the issue's intent — a judgment call, not a code defect), `CALIBRATION_NEEDS_HUMAN=true` (statistical trust threshold), or `TRUST_NEEDS_HUMAN=true` (provenance `NOVEL_NEEDS_HUMAN` tier, insufficient prior data — a policy gate, not a bug). None of these are mechanically "fixable" by re-editing code.
 
 **If the block reason classifies as UNFIXABLE** (and no FIXABLE item accompanies it): do NOT attempt any fix. Skip directly to Phase M8 with verdict `UNFIXABLE`, re-affirm `needs-human` (it should already be present), and return `REMEDIATE_RESULT: status: UNFIXABLE`. This satisfies AC5 — "genuinely-blocked PRs still terminate at `needs-human`."
@@ -157,7 +172,7 @@ Do not perform this transition for an UNFIXABLE policy escalation. Any later qua
 
 ## Phase M2: Checkout the PR's Existing Branch
 
-Remediation always fixes forward on top of the PR's existing head commit — never rebase onto a different base and never force-push over the PR's history unless a fix genuinely requires it (e.g. resolving a merge conflict per the mergeability guard case, in which case use `git rebase`/`git merge` onto `origin/{PR_BASE}` exactly as the branch's own commit history would, then `--force-with-lease`).
+Remediation always fixes forward on top of the PR's existing head commit — never rebase and never force-push. The only history-affecting operation permitted is the base sync (`git merge origin/{PR_BASE}`, Phase M3), which adds a merge commit and pushes with a plain `git push`.
 
 ```bash
 cd {REPO_PATH}
@@ -182,7 +197,39 @@ For each FIXABLE item from Phase M1: read the affected file(s) in `{WORKTREE_PAT
 
 **Never delete, skip, or weaken a failing check to go green.** Removing, skipping (`skip`, `xfail`, `continue-on-error`, `if: false`, commenting out) or weakening a failing test or CI step is never a valid fix. Fix the cause in the code under test, or classify the item UNFIXABLE, add/re-affirm `needs-human`, and post a comment that names the failing tests and failing assertions (test title plus assertion text from the CI log). The only exception is a deletion justified by removal of the tested code itself (see quality-gate 2U). Enforcement is the quality gate's coverage-reduction check (2U): a `COVERAGE-1` finding is fixed by restoring the test or step, never by suppressing the finding. <!-- Added: forge#3257 -->
 
-**If the block reason was a mergeability conflict** (`CONFLICTING`/`DIRTY`/`BLOCKED`): resolve it by rebasing `{HEAD_BRANCH}` onto `origin/{PR_BASE}` (or merging `{PR_BASE}` in, whichever preserves a clean, reviewable history) — resolve conflicts manually, do not blindly take "ours"/"theirs".
+**Base-sync (merge-only)** <!-- Added: forge#3496 -->: runs when the block reason was a base conflict (`base-conflict`, or `CONFLICTING`/`DIRTY`, or `BEHIND` under required-up-to-date protection). This step is authorized by the operator's batch dispatch and by the router's `FORGE:BASESYNC_REMEDIATION` bound; it applies to the PR's own branch in `{WORKTREE_PATH}` only. Never rebase, never force-push, never merge into or push to a shared branch.
+
+```bash
+cd {WORKTREE_PATH}
+CUR_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+case "{HEAD_BRANCH}" in
+  "{PR_BASE}"|main|master|staging|milestone/*) echo "refusing base sync: {HEAD_BRANCH} is a shared branch"; BASESYNC_REFUSED=true ;;
+esac
+[ "$CUR_BRANCH" = "{HEAD_BRANCH}" ] || BASESYNC_REFUSED=true
+if [ "${BASESYNC_REFUSED:-false}" != "true" ]; then
+  git fetch origin {PR_BASE} # allowlist:check-command-side-effects
+  git merge origin/{PR_BASE} --no-edit # allowlist:check-command-side-effects
+  BASESYNC_RAN=true
+fi
+```
+
+- Clean merge: nothing more to resolve; the merge commit is the sync.
+- Conflicts: read BOTH sides of every conflicted hunk and the surrounding code, then write the combined result by hand. No `-X ours`/`-X theirs`, no wholesale `git checkout --ours/--theirs`, no blanket take-one-side. After resolving, `git add` the files and conclude with `git commit -s --no-edit` (the merge commit).
+- **Unresolvable with confidence** (a hunk whose intent on either side you cannot reconcile, or the branch is refused above): capture the file list first, then abort, and park:
+  ```bash
+  run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
+  CONFLICT_FILES=$(git diff --name-only --diff-filter=U)
+  git merge --abort # allowlist:check-command-side-effects
+  run gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "<!-- FORGE:BASESYNC_FAILED -->
+  Base sync of PR #{PR_NUMBER} (\`origin/{PR_BASE}\` into \`{HEAD_BRANCH}\`) could not be resolved with confidence. Conflicting files:
+
+  \`\`\`
+  ${CONFLICT_FILES}
+  \`\`\`" # allowlist:check-command-side-effects
+  gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
+  ```
+  EXIT `REMEDIATE_RESULT: status: BLOCKED` with blocker "base-sync: unresolvable conflicts". Only that issue is parked.
+- After a sync, the quality gate below re-runs on the merged tree, and Phase M6's re-review covers the new head (the reviewed-head guard forces a fresh review).
 
 **Quality Gate** (same loop as Phase 3G, max 3 iterations):
 ```
@@ -201,14 +248,42 @@ If still failing after 3 iterations: post a comment, re-affirm `needs-human`, EX
 
 ## Phase M4: Commit, Push, and Close Addressed Findings
 
+**Pre-push ancestry guard** (same guard as `work-on/review.md` Phase R1; reuse it, do not write a parallel check): a base-sync merge of `origin/{PR_BASE}` passes it, a merge that brings in history from outside the base fails it.
+
+```bash
+# <Script resolution block from work-on/review.md, verbatim>
+cd {WORKTREE_PATH}
+run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
+git fetch origin {PR_BASE} >/dev/null 2>&1 || true
+RESOLUTION=$(resolve_script 'check-branch-ancestry'); TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+if [ "$TIER" = "prose" ]; then
+  MERGE_COMMITS="check-branch-ancestry script not resolvable (fail closed)"; ANCESTRY_RC=2
+else
+  MERGE_COMMITS=$(bash "$SCRIPT_PATH" {HEAD_BRANCH} origin/{PR_BASE} 2>&1); ANCESTRY_RC=$?
+fi
+if [ "$ANCESTRY_RC" -ne 0 ]; then
+  run gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "## Pre-Push Ancestry Guard Failed
+
+Branch \`{HEAD_BRANCH}\` has merge commits from outside \`{PR_BASE}\`, or ancestry could not be verified (rc=${ANCESTRY_RC}). Not pushing.
+
+\`\`\`
+${MERGE_COMMITS}
+\`\`\`" # allowlist:check-command-side-effects
+  gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
+  # EXIT REMEDIATE_RESULT: status: BLOCKED (blocker: pre-push ancestry guard failed) - do not push
+fi
+```
+
+Then commit and push. A base-sync merge commit already exists from Phase M3; commit only additional quality-gate or fix edits on top.
+
 ```bash
 cd {WORKTREE_PATH}
 git add -u
-git commit -s -m "fix(remediate): {description} (#{ISSUE_NUMBER})"
-git push origin {HEAD_BRANCH}
+git diff --cached --quiet || git commit -s -m "fix(remediate): {description} (#{ISSUE_NUMBER})"
+git push origin {HEAD_BRANCH} # allowlist:check-command-side-effects
 ```
 
-If push fails, retry with `--force-with-lease` (expected when M3 rebased to resolve a conflict). If it still fails: post a comment, add `needs-human`, EXIT `REMEDIATE_RESULT: status: BLOCKED`.
+If the push fails, do NOT retry with a force flag (never force-push): post a comment, add `needs-human`, EXIT `REMEDIATE_RESULT: status: BLOCKED`. A raced remote is resolved by a re-run, which fetches and merges naturally.
 
 **Close each addressed review-finding issue directly** (this remediation fixes findings in-place on the existing PR, rather than each finding spawning its own downstream `/work-on` pipeline — leaving them open would have a future run rediscover already-fixed code). Track the closed numbers in `ADDRESSED_FINDING_NUMBERS[]` — Phase M8 reports this array in the final paper trail:
 ```bash
@@ -288,6 +363,8 @@ Wait for the completed child result and retain its `REVIEW_RESULT` in remediatio
 If the retained `REVIEW_RESULT` is `PHASE_TRAIL_FAILED` (forge#3102): the gate refused to merge on missing phase markers, not on a code finding. Re-run each missing phase named on the `MISSING:` lines via its `Skill(...)`, then re-invoke this phase once. If it is `PHASE_TRAIL_FAILED` again, keep `needs-human`, post `<!-- FORGE:PHASE_TRAIL_FAILED -->` listing the still-missing markers, and exit `REMEDIATE_RESULT: status: BLOCKED`. Never treat it as `HELD-AWAITING-MERGE` or `AUTO-LANDED`. A still-failing trail can also be cleared by a human `<!-- FORGE:PHASE_TRAIL_OVERRIDE -->` comment (forge#3152, see `scripts/verify-phase-trail.sh -h`); the verifier decides, this phase never posts one.
 
 If the retained `REVIEW_RESULT` is `BLOCKED` with a blocker mentioning the phase trail (e.g. "phase trail unreadable (rc=N)": the Phase 8 verifier exited ≥2 / 127, forge#3147): the gate could not run, so nothing is missing and nothing is re-run. Keep `needs-human` (review-pr Phase 8 already re-asserted it), do not merge, and exit `REMEDIATE_RESULT: status: BLOCKED` with the same blocker.
+
+If the retained `REVIEW_RESULT` is `BLOCKED` with blocker "base-conflict" (forge#3496): the base moved again, or the sync did not clear the conflict. Treat it as re-escalated: the `BASESYNC_REMEDIATION` bound is already used, so do NOT sync a second time. Add `needs-human`, post a comment naming the PR and the conflicting files (`git diff --name-only --diff-filter=U` against a trial merge, or the GitHub mergeability report), and exit `REMEDIATE_RESULT: status: BLOCKED` with blocker "base conflict persists after base-sync remediation".
 
 This re-runs the full review (domain agents → verdict → Phase 8 auto-merge gate). The FIXABLE transition above left the issue at the non-terminal `workflow:in-review` state. `review-pr.md` recognizes the in-progress `FORGE:REMEDIATION` marker posted in Phase M5 as evidence of the prior escalation, so one of two things happens inside Phase 8:
 
@@ -455,6 +532,9 @@ esac
 # forge#3413: embed the pushed head so the orchestrator scopes a REREVIEW-REQUIRED trail to the CURRENT head only.
 REMEDIATED_HEAD_SHA=$(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null || true)
 
+# forge#3496: mark a base-sync round so Phase M0 scopes the single-attempt guard per kind.
+BASESYNC_LINE=""; [ "${BASESYNC_RAN:-false}" = "true" ] && BASESYNC_LINE="**Base sync**: ran"
+
 REMEDIATION_BODY="<!-- FORGE:REMEDIATION -->
 ## Remediation Complete for PR #{PR_NUMBER}
 
@@ -463,7 +543,7 @@ REMEDIATION_BODY="<!-- FORGE:REMEDIATION -->
 **Auto-land bar**: ${AUTO_LAND_BAR_TEXT}
 **Re-gate outcome**: ${RE_GATE_OUTCOME} ${OUTCOME_DETAIL}
 **Head**: ${REMEDIATED_HEAD_SHA:-unknown}
-
+${BASESYNC_LINE}
 <!-- FORGE:REMEDIATION:COMPLETE -->"
 
 gh pr comment {PR_NUMBER} {GH_FLAG} --body "$REMEDIATION_BODY"

@@ -5,15 +5,26 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runIssue } from "../engine.mjs";
-import { readLog, deriveState } from "../engine/runlog.mjs";
-import { serializeState } from "../engine/state.mjs";
+import { runIssue, DEFAULT_SESSION_LIMIT_WAIT_MS } from "../engine.mjs";
+import { readLog, deriveState, appendEvent } from "../engine/runlog.mjs";
+import { serializeState, parseState, upsertStateBlock } from "../engine/state.mjs";
 import { VALID_BACKENDS } from "../runner.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 let dir; beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "fd-engine-")); });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+
+// forge#3499: engine phases now receive `--repo`/`--worktree`/`--branch`. The fake
+// world answers `gh repo view` and `git worktree list --porcelain` (one linked
+// worktree per `**Branch**:` named in the posted FORGE:BUILDER comments).
+function fakeWorktreeList(text) {
+  const out = ["worktree /repo\nHEAD 0000000\nbranch refs/heads/main\n"];
+  for (const m of String(text).matchAll(/\*\*Branch\*\*:\s*`([^`]+)`/g))
+    out.push(`worktree /repo/.claude/worktrees/${m[1].replace(/\//g, "-")}\nHEAD 1111111\nbranch refs/heads/${m[1]}\n`);
+  return out.join("\n");
+}
 
 // A scriptable fake GitHub/git world whose markers advance as phases "run".
 function fakeWorld() {
@@ -22,17 +33,19 @@ function fakeWorld() {
   const io = {
     gh: async (args) => {
       const a = args.join(" ");
+      if (a.startsWith("repo view")) return "acme/widgets";
       if (a.startsWith("api ") && a.includes("/comments")) return w.markers;
       if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
       if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
       if (a.startsWith("issue edit")) { const i = args.indexOf("--body"); if (i>=0) w.body = args[i+1];
-        const j = args.indexOf("--add-label"); if (j>=0) w.labels.push(args[j+1]); return ""; }
+        const j = args.indexOf("--add-label"); if (j>=0) w.labels.push(args[j+1]); 
+        const r = args.indexOf("--remove-label"); if (r>=0) w.labels = w.labels.filter((l) => l !== args[r+1]); return ""; }
       if (a.startsWith("pr list")) return JSON.stringify(w.pr ? [{ number: w.pr }] : []);
       if (a.startsWith("pr view")) return JSON.stringify({ number: w.pr, state: w.prMerged?"MERGED":"OPEN",
         mergedAt: w.prMerged ? "t" : null, labels: w.prNeedsHuman ? [{name:"needs-human"}] : [] });
       return "";
     },
-    git: async () => String(w.commitsAhead),
+    git: async (args) => (args[0] === "worktree" ? fakeWorktreeList(w.markers) : String(w.commitsAhead)),
   };
   return { w, io };
 }
@@ -43,8 +56,6 @@ describe("runIssue", () => {
     // Each phase run advances the world so detectOutcome sees a committed result.
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
       // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
       // engine resolves the build branch from this ground truth, never from
@@ -60,7 +71,7 @@ describe("runIssue", () => {
 
     assert.equal(res.terminalReason, "merged");
     const s = deriveState(readLog(dir, 42));
-    assert.deepEqual(s.committed, ["investigate","context","architect","build","review","close"]);
+    assert.deepEqual(s.committed, ["investigate", "build","review","close"]);
     // forge#2174: branch must be the real, ground-truth branch parsed from the
     // FORGE:BUILDER comment — never a guessed default the engine invented.
     assert.equal(s.branch, "fix/real-branch-42");
@@ -70,8 +81,6 @@ describe("runIssue", () => {
     const { w, io } = fakeWorld();
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
@@ -92,8 +101,8 @@ describe("runIssue", () => {
     assert.equal(res.terminalReason, "merged", "a throwing onProgress must not crash or alter the run's outcome");
     const enters = events.filter((e) => e.event === "phase_enter").map((e) => e.phase);
     const exits = events.filter((e) => e.event === "phase_exit").map((e) => e.phase);
-    assert.deepEqual(enters, ["investigate", "context", "architect", "build", "review", "close"]);
-    assert.deepEqual(exits, ["investigate", "context", "architect", "build", "review", "close"]);
+    assert.deepEqual(enters, ["investigate", "build", "review", "close"]);
+    assert.deepEqual(exits, ["investigate", "build", "review", "close"]);
     assert.ok(events.filter((e) => e.event === "phase_exit").every((e) => e.status === "committed"));
   });
 
@@ -107,8 +116,6 @@ describe("runIssue", () => {
     const { w, io } = fakeWorld();
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
@@ -140,8 +147,7 @@ describe("runIssue", () => {
     const { w, io } = fakeWorld();
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => {
+      "work-on/build": () => {
         throw Object.assign(new Error("claude CLI exited with status 1"), { code: "CLI_BACKEND_FAILED" });
       },
     };
@@ -151,10 +157,10 @@ describe("runIssue", () => {
       io, runner, now: () => 1000, maxAttempts: 3, onProgress: (e) => events.push(e) });
 
     assert.equal(res.terminalReason, "engine-error");
-    const architectEvents = events.filter((e) => e.phase === "architect");
-    assert.deepEqual(architectEvents.map((e) => e.event), ["phase_enter", "phase_exit"],
-      "the architect phase must report both entry AND exit on the engine-error fail-fast path");
-    const exitEvent = architectEvents.find((e) => e.event === "phase_exit");
+    const buildEvents = events.filter((e) => e.phase === "build");
+    assert.deepEqual(buildEvents.map((e) => e.event), ["phase_enter", "phase_exit"],
+      "the build phase must report both entry AND exit on the engine-error fail-fast path");
+    const exitEvent = buildEvents.find((e) => e.event === "phase_exit");
     assert.equal(exitEvent.status, "blocked");
   });
 
@@ -162,8 +168,6 @@ describe("runIssue", () => {
     const { w, io } = fakeWorld();
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
@@ -175,21 +179,17 @@ describe("runIssue", () => {
   });
 
   it("forge#2321: phase_exit is not emitted without a matching phase_enter for a reconcile-satisfied phase", async () => {
-    // Regression for the R1 resume scenario (context.reconcile short-circuits
-    // when FORGE:CONTEXT is already present): the phase's runner never
-    // executes on this path, so phase_enter is never emitted for it either —
-    // phase_exit must not be emitted for it, to avoid a dangling exit with no
-    // preceding enter (bin/engine-cli.mjs would otherwise print "✓ phase
-    // context committed" with no prior "→ phase context started" line).
+    // build.reconcile short-circuits when FORGE:BUILDER:COMPLETE is already present
+    // and the branch is ahead of base: the runner never executes, so neither
+    // phase_enter nor phase_exit may be emitted for it.
     const { w, io } = fakeWorld();
-    w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT:COMPLETE";
+    w.markers = " INVESTIGATION:COMPLETE FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`";
+    w.commitsAhead = 2;
     const { appendEvent } = await import("../engine/runlog.mjs");
     appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
     appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
 
     const script = {
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
-      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
@@ -200,21 +200,16 @@ describe("runIssue", () => {
       io, runner, now: () => 1000, maxAttempts: 3, onProgress: (e) => events.push(e) });
 
     assert.equal(res.terminalReason, "merged");
-    const contextEvents = events.filter((e) => e.phase === "context");
-    assert.deepEqual(contextEvents, [], "a reconcile-satisfied phase must emit neither phase_enter nor phase_exit");
-
-    // Sanity: a phase that DID actually run (architect, not pre-satisfied)
-    // still gets a paired enter+exit — proves the fix does not over-suppress.
-    const architectEvents = events.filter((e) => e.phase === "architect").map((e) => e.event);
-    assert.deepEqual(architectEvents, ["phase_enter", "phase_exit"]);
+    assert.deepEqual(events.filter((e) => e.phase === "build"), [],
+      "a reconcile-satisfied phase must emit neither phase_enter nor phase_exit");
+    const reviewEvents = events.filter((e) => e.phase === "review").map((e) => e.event);
+    assert.deepEqual(reviewEvents, ["phase_enter", "phase_exit"]);
   });
 
   it("forge#2889: commits a blocked review and hands it to remediation in the same run", async () => {
     const { w, io } = fakeWorld();
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 1; },
       "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; w.labels.push("needs-human"); },
       "work-on/remediate": () => { w.markers += " FORGE:REMEDIATION:COMPLETE **Re-gate outcome**: HELD-AWAITING-MERGE"; },
@@ -230,7 +225,49 @@ describe("runIssue", () => {
     const reviewExit = events.find((e) => e.event === "phase_exit" && e.phase === "review");
     assert.equal(reviewExit.status, "blocked");
     assert.deepEqual(deriveState(readLog(dir, 42)).committed,
-      ["investigate", "context", "architect", "build", "review", "remediate"]);
+      ["investigate", "build", "review", "remediate"]);
+  });
+
+  it("forge#3521: #3511-shaped run (review opens PR, labels the issue only) hands off to remediate with the PR number", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 1; },
+      // PR opened, issue (not PR) labelled needs-human, as commands/work-on/review.md does.
+      "work-on/review": () => { w.pr = 7; w.prNeedsHuman = false; w.labels.push("needs-human"); },
+      "work-on/remediate": () => { w.markers += " FORGE:REMEDIATION:COMPLETE **Re-gate outcome**: HELD-AWAITING-MERGE"; },
+    };
+    const calls = [];
+    const runner = async ({ commandName, args }) => { calls.push({ commandName, args }); script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "awaiting-merge");
+    const rem = calls.find((c) => c.commandName === "work-on/remediate");
+    assert.ok(rem, "remediate must run");
+    assert.equal(String(Array.isArray(rem.args) ? rem.args[0] : rem.args).split(/\s+/)[0], "7");
+    const s = deriveState(readLog(dir, 42));
+    assert.equal(s.pr, 7);
+    assert.deepEqual(s.committed, ["investigate", "build", "review", "remediate"]);
+  });
+
+  it("forge#3521 SPEC-1: explicit REVIEW_RESULT BLOCKED + issue needs-human + open PR does not hand off to remediate", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; w.prNeedsHuman = false; w.labels.push("needs-human"); },
+    };
+    const calls = [];
+    const runner = async ({ commandName }) => {
+      calls.push(commandName); script[commandName]?.();
+      return commandName === "work-on/review"
+        ? { status: "complete", text: "REVIEW_RESULT:\n  status: BLOCKED\n  blocker: ci gate not green\n" }
+        : { status: "complete" };
+    };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "needs-human");
+    assert.ok(!calls.includes("work-on/remediate"), "explicit BLOCKED must not run remediate");
   });
 
   it("C1: commitsAhead swallows a git rejection on first build (no ref yet) and still drives build to merged", async () => {
@@ -238,14 +275,13 @@ describe("runIssue", () => {
     // Simulate the real first-build failure mode: `git rev-list origin/<lane>..<branch>`
     // rejects because the branch does not exist yet. Once the build runner has
     // actually pushed commits (w.commitsAhead > 0), git succeeds normally.
-    io.git = async () => {
+    io.git = async (args) => {
+      if (args[0] === "worktree") return fakeWorktreeList(w.markers);
       if (w.commitsAhead === 0) throw new Error("fatal: unknown revision or path not in the working tree.");
       return String(w.commitsAhead);
     };
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
       // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
       // engine resolves the build branch from this ground truth, never from
@@ -261,7 +297,7 @@ describe("runIssue", () => {
 
     assert.equal(res.terminalReason, "merged");
     const s = deriveState(readLog(dir, 42));
-    assert.deepEqual(s.committed, ["investigate", "context", "architect", "build", "review", "close"]);
+    assert.deepEqual(s.committed, ["investigate", "build", "review", "close"]);
   });
 
   it("forge#2174: build commits when the builder's real (slug-derived) branch has commits, even though a naively-guessed default branch name never existed", async () => {
@@ -275,6 +311,7 @@ describe("runIssue", () => {
     const { w, io } = fakeWorld();
     const REAL_BRANCH = "fix/role-arn-unbounded-error-msg-42";
     io.git = async (args) => {
+      if (args[0] === "worktree") return fakeWorktreeList(w.markers);
       const range = args[args.indexOf("--count") + 1] || "";
       if (range.endsWith(`..${REAL_BRANCH}`)) return String(w.commitsAhead);
       // Any other ref (e.g. a guessed "fix/pipeline-42") does not exist.
@@ -282,8 +319,6 @@ describe("runIssue", () => {
     };
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += ` FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``; w.commitsAhead = 1; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
@@ -295,7 +330,7 @@ describe("runIssue", () => {
 
     assert.equal(res.terminalReason, "merged");
     const s = deriveState(readLog(dir, 42));
-    assert.deepEqual(s.committed, ["investigate", "context", "architect", "build", "review", "close"]);
+    assert.deepEqual(s.committed, ["investigate", "build", "review", "close"]);
     assert.equal(s.branch, REAL_BRANCH, "resolved branch must be the real, ground-truth branch, not a guess");
   });
 
@@ -304,8 +339,6 @@ describe("runIssue", () => {
     const REAL_BRANCH = "fix/some-real-branch-42";
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       // Builder reports complete and even names a real branch, but never actually
       // committed anything — commitsAhead stays 0 (w.commitsAhead is never bumped).
       "work-on/build": () => { w.markers += ` FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``; },
@@ -333,8 +366,6 @@ describe("runIssue", () => {
     let buildRunnerCalls = 0;
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       // Builder reports complete on every invocation (mirrors the real builder's
       // BUILD_RESULT: status: ALREADY_DONE early-exit) but never commits anything
       // new — commitsAhead stays 0 no matter how many times this runs.
@@ -373,8 +404,6 @@ describe("runIssue", () => {
     io.git = async () => { throw new Error("fatal: unable to read current working directory: Device or resource busy"); };
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => {
         buildRunnerCalls++;
         w.markers += ` FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``;
@@ -409,8 +438,6 @@ describe("runIssue", () => {
     io.git = async () => { gitCalls++; return String(w.commitsAhead); };
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       // Builder reports complete but never names a branch (no **Branch**: `x`
       // marker) — resolveBranch() must return null since state.branch is also
       // never set by a prior PHASE_COMMIT in this scenario.
@@ -438,8 +465,6 @@ describe("runIssue", () => {
     let reviewRunnerCalls = 0;
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       // An unchanged open PR cannot become merged by repeating review.
       "work-on/review": () => { reviewRunnerCalls++; w.pr = 7; w.prMerged = false; },
@@ -475,12 +500,11 @@ describe("runIssue", () => {
     // label at all (the uncaught throw only ever reached bin/forgedock.mjs's
     // outermost catch, which just prints to stderr).
     const { w, io } = fakeWorld();
-    let architectRunnerCalls = 0;
+    let buildRunnerCalls = 0;
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => {
-        architectRunnerCalls++;
+      "work-on/build": () => {
+        buildRunnerCalls++;
         throw Object.assign(new Error("claude CLI exited with status 1"), { code: "CLI_BACKEND_FAILED" });
       },
     };
@@ -495,11 +519,11 @@ describe("runIssue", () => {
       "the workflow:engine-error label must be written — not needs-human");
     assert.ok(!w.labels.includes("needs-human"),
       "needs-human must NOT be written for an engine/tool-level failure");
-    assert.equal(architectRunnerCalls, 1,
-      "the architect runner must be invoked exactly once — CLI_BACKEND_FAILED must not be retried");
+    assert.equal(buildRunnerCalls, 1,
+      "the build runner must be invoked exactly once — CLI_BACKEND_FAILED must not be retried");
     const events = readLog(dir, 42);
-    const architectFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "architect");
-    assert.equal(architectFailures.length, 0,
+    const buildFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "build");
+    assert.equal(buildFailures.length, 0,
       "no PHASE_FAILED event should be logged for a fail-fast rethrow — it never reaches the retry bookkeeping, matching NO_API_KEY/NO_SDK");
   });
 
@@ -514,8 +538,7 @@ describe("runIssue", () => {
     const { w, io } = fakeWorld();
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => {
+      "work-on/build": () => {
         throw Object.assign(
           new Error("claude CLI exited with status 1"),
           { code: "CLI_BACKEND_FAILED", resetAt: "12:50am (Asia/Calcutta)" },
@@ -538,8 +561,7 @@ describe("runIssue", () => {
     const { w, io } = fakeWorld();
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => {
+      "work-on/build": () => {
         throw Object.assign(new Error("claude CLI exited with status 1"), { code: "CLI_BACKEND_FAILED" });
       },
     };
@@ -563,12 +585,11 @@ describe("runIssue", () => {
     // previous version of this test) — that conflation is exactly the defect
     // #2261 fixes.
     const { w, io } = fakeWorld();
-    let architectRunnerCalls = 0;
+    let buildRunnerCalls = 0;
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => {
-        architectRunnerCalls++;
+      "work-on/build": () => {
+        buildRunnerCalls++;
         throw new Error("transient network blip");
       },
     };
@@ -583,11 +604,11 @@ describe("runIssue", () => {
       "the workflow:engine-error label must be written");
     assert.ok(!w.labels.includes("needs-human"),
       "needs-human must NOT be written when the runner never once succeeded");
-    assert.equal(architectRunnerCalls, 3,
+    assert.equal(buildRunnerCalls, 3,
       "an uncoded error (no .code, or a code other than NO_API_KEY/NO_SDK/CLI_BACKEND_FAILED) must retry all 3 attempts unchanged");
     const events = readLog(dir, 42);
-    const architectFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "architect");
-    assert.equal(architectFailures.length, 3, "all 3 attempts must be logged for a genuinely retryable error");
+    const buildFailures = events.filter((e) => e.event === "PHASE_FAILED" && e.phase === "build");
+    assert.equal(buildFailures.length, 3, "all 3 attempts must be logged for a genuinely retryable error");
   });
 
   it("forge#2889: a fixed-point review failure still escalates to needs-human, not engine-error", async () => {
@@ -598,8 +619,6 @@ describe("runIssue", () => {
     let reviewRunnerCalls = 0;
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { reviewRunnerCalls++; w.pr = 7; w.prMerged = false; },
     };
@@ -781,7 +800,7 @@ describe("runIssue", () => {
     const runCounts = {};
     const remoteIndex = {
       v: 4, run: "r_42_staging", issue: 42, lane: "staging",
-      committed: ["investigate", "context", "architect", "build"],
+      committed: ["investigate", "build"],
       phase: "review", branch: "fix/pipeline-42", pr: null,
       terminal: false, terminalReason: null, lease: null,
     };
@@ -789,12 +808,10 @@ describe("runIssue", () => {
     // The remote index says build already committed; mirror that in the world so
     // review's own reconcile/detectOutcome see a consistent picture.
     w.commitsAhead = 2;
-    w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT:COMPLETE FORGE:ARCHITECT:COMPLETE FORGE:BUILDER:COMPLETE";
+    w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT:COMPLETE FORGE:ARCHITECT:COMPLETE FORGE:BUILDER:COMPLETE **Branch**: `fix/pipeline-42`";
 
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
       // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
       // engine resolves the build branch from this ground truth, never from
@@ -815,65 +832,67 @@ describe("runIssue", () => {
     assert.equal(res.terminalReason, "merged");
     assert.equal(runCounts["work-on/investigate"] || 0, 0, "investigate must not re-run after hydrate");
     const s = deriveState(readLog(dir, 42));
-    assert.deepEqual(s.committed, ["investigate", "context", "architect", "build", "review", "close"]);
+    assert.deepEqual(s.committed, ["investigate", "build", "review", "close"]);
     assert.equal(s.issue, 42);
   });
 
-  it("R1: context.reconcile short-circuits when FORGE:CONTEXT already present (no LLM re-run)", async () => {
-    // Crash-injection: simulate a resume where context already completed (FORGE:CONTEXT present)
-    // but only investigate is in the committed list. context.reconcile should fire and skip the LLM.
+  it("forge#3506: hydrate from a blocked-review index (terminal:false, needs-human) resumes into remediate, never close", async () => {
     const { w, io } = fakeWorld();
-    w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT:COMPLETE";
+    w.body = serializeState({
+      v: 5, run: "r_42_staging", issue: 42, lane: "staging",
+      committed: ["investigate", "build", "review"],
+      phase: "remediate", branch: "fix/real-branch-42", pr: 7,
+      terminal: false, terminalReason: "needs-human", lease: null,
+    });
+    w.pr = 7; w.prNeedsHuman = true; w.commitsAhead = 1;
+    w.markers = " INVESTIGATION:COMPLETE FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`";
     const runCounts = {};
-
-    // Pre-populate local log with investigate committed (crash happened after context LLM ran
-    // and posted its marker, but before PHASE_COMMIT was written).
-    const { appendEvent } = await import("../engine/runlog.mjs");
-    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
-    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
-
     const script = {
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
-      // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
-      // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
-      // engine resolves the build branch from this ground truth, never from
-      // a guessed default (forge#2174).
-      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
-      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
-      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+      "work-on/remediate": () => { w.markers += " FORGE:REMEDIATION:COMPLETE **Re-gate outcome**: HELD-AWAITING-MERGE"; },
+      "work-on/close": () => { throw new Error("close must not run for a blocked, open PR"); },
     };
     const runner = async ({ commandName }) => {
       runCounts[commandName] = (runCounts[commandName] || 0) + 1;
       script[commandName]?.();
       return { status: "complete" };
     };
-
     const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
-      io, runner, now: () => 1000, maxAttempts: 3 });
-
-    assert.equal(res.terminalReason, "merged");
-    assert.equal(runCounts["work-on/build/context"] || 0, 0, "context must not re-run when FORGE:CONTEXT present");
-    const s = deriveState(readLog(dir, 42));
-    assert.ok(s.committed.includes("context"), "context must be in committed after reconcile");
+      io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(runCounts["work-on/remediate"], 1);
+    assert.equal(runCounts["work-on/close"] || 0, 0);
+    assert.equal(res.terminalReason, "awaiting-merge");
   });
 
-  it("R2: architect.reconcile short-circuits when FORGE:ARCHITECT already present (no LLM re-run)", async () => {
-    // Crash-injection: resume where architect already completed (FORGE:ARCHITECT present)
-    // but only investigate+context are committed. architect.reconcile should fire and skip LLM.
+  it("forge#3506: hydrate from a decomposed index (terminal:false) resumes into decompose, not build", async () => {
     const { w, io } = fakeWorld();
-    w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT:COMPLETE FORGE:ARCHITECT:COMPLETE";
+    w.body = serializeState({
+      v: 2, run: "r_42_staging", issue: 42, lane: "staging",
+      committed: ["investigate"], phase: "decompose", branch: null, pr: null,
+      terminal: false, terminalReason: "decomposed", lease: null,
+    });
+    w.markers = " DECOMPOSE:YES INVESTIGATION:COMPLETE";
     const runCounts = {};
+    const runner = async ({ commandName }) => {
+      runCounts[commandName] = (runCounts[commandName] || 0) + 1;
+      if (commandName === "work-on/decompose") w.markers += " <!-- FORGE:DECOMPOSED:COMPLETE -->";
+      return { status: "complete" };
+    };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(runCounts["work-on/decompose"], 1);
+    assert.equal(runCounts["work-on/build"] || 0, 0);
+    assert.equal(res.terminalReason, "decomposed");
+  });
 
+  it("forge#3499: a legacy run-log that committed context/architect still resolves to build (unknown committed ids are ignored)", async () => {
+    const { w, io } = fakeWorld();
+    w.markers = " INVESTIGATION:COMPLETE FORGE:CONTEXT:COMPLETE";
     const { appendEvent } = await import("../engine/runlog.mjs");
     appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
     appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
     appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "context", outputs: {} });
-
+    const runCounts = {};
     const script = {
-      // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
-      // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
-      // engine resolves the build branch from this ground truth, never from
-      // a guessed default (forge#2174).
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
@@ -883,14 +902,61 @@ describe("runIssue", () => {
       script[commandName]?.();
       return { status: "complete" };
     };
-
     const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
       io, runner, now: () => 1000, maxAttempts: 3 });
-
     assert.equal(res.terminalReason, "merged");
-    assert.equal(runCounts["work-on/build/architect"] || 0, 0, "architect must not re-run when FORGE:ARCHITECT present");
-    const s = deriveState(readLog(dir, 42));
-    assert.ok(s.committed.includes("architect"), "architect must be in committed after reconcile");
+    assert.deepEqual(Object.keys(runCounts), ["work-on/build", "work-on/review", "work-on/close"]);
+  });
+
+  it("forge#3499: every phase runner call carries the full argument set its spec requires (never just the issue number)", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const calls = {};
+    const runner = async ({ commandName, args }) => { calls[commandName] = args; script[commandName](); return {}; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+    assert.equal(res.terminalReason, "merged");
+    const gh = '"-R acme/widgets"';
+    assert.deepEqual(calls["work-on/investigate"], ["42", "--repo", "acme/widgets", "--gh-flag", gh]);
+    assert.deepEqual(calls["work-on/build"], ["42", "--repo", "acme/widgets", "--gh-flag", gh, "--base", "staging"]);
+    assert.deepEqual(calls["work-on/review"], ["42", "--repo", "acme/widgets", "--gh-flag", gh,
+      "--worktree", "/repo/.claude/worktrees/fix-real-branch-42", "--branch", "fix/real-branch-42", "--base", "staging"]);
+    assert.deepEqual(calls["work-on/close"], ["42", "--repo", "acme/widgets", "--gh-flag", gh, "--base", "staging",
+      "--pr", "7", "--branch", "fix/real-branch-42", "--worktree", "/repo/.claude/worktrees/fix-real-branch-42",
+      "--terminal-state", "merged"]);
+  });
+
+  it("forge#3499: an unresolvable repo fails closed (engine-error) without ever invoking a runner", async () => {
+    const { io } = fakeWorld();
+    const ghOrig = io.gh;
+    io.gh = async (args) => (args[0] === "repo" ? "" : ghOrig(args));
+    let runnerCalls = 0;
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner: async () => { runnerCalls++; return {}; }, now: () => 1000, maxAttempts: 3 });
+    assert.equal(res.terminalReason, "engine-error");
+    assert.match(res.detail, /missing repo/);
+    assert.equal(runnerCalls, 0, "no partial-arg invocation");
+  });
+
+  it("forge#3499: review with no resolvable worktree fails closed instead of sending a partial arg set", async () => {
+    const { w, io } = fakeWorld();
+    io.git = async (args) => (args[0] === "worktree" ? "worktree /repo\nHEAD 0\nbranch refs/heads/main\n" : String(w.commitsAhead));
+    const calls = [];
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+    };
+    const runner = async ({ commandName }) => { calls.push(commandName); script[commandName]?.(); return {}; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",
+      io, runner, now: () => 1000, maxAttempts: 3 });
+    assert.equal(res.terminalReason, "engine-error");
+    assert.match(res.detail, /worktree/);
+    assert.ok(!calls.includes("work-on/review"));
   });
 
   it("R3: close.reconcile short-circuits when issue already closed (no LLM re-run)", async () => {
@@ -954,8 +1020,6 @@ describe("runIssue", () => {
     const { w, io } = fakeWorld();
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       // The Branch marker mirrors the real `**Branch**: `{BRANCH}`` field the
       // FORGE:BUILDER comment always reports (implement.md Phase I6) — the
       // engine resolves the build branch from this ground truth, never from
@@ -1110,6 +1174,7 @@ describe("runIssue", () => {
     const io = {
       gh: async (args) => {
         const a = args.join(" ");
+        if (a.startsWith("repo view")) return "acme/widgets";
         if (a.startsWith("api ") && a.includes("/comments")) return JSON.stringify(w.comments);
         if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
         if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
@@ -1125,6 +1190,7 @@ describe("runIssue", () => {
       // the requested branch out of the range arg so distinct branches can have
       // distinct (and independently controllable) commit counts.
       git: async (args) => {
+        if (args[0] === "worktree") return fakeWorktreeList(w.comments.join("\n"));
         const range = args[args.length - 1] || "";
         const branch = range.split("..")[1] || "";
         return String(w.commitsAheadByBranch[branch] || 0);
@@ -1151,8 +1217,6 @@ describe("runIssue", () => {
 
     const script = {
       "work-on/investigate": () => { w.comments.push("INVESTIGATION:COMPLETE"); },
-      "work-on/build/context": () => { w.comments.push("FORGE:CONTEXT:COMPLETE"); },
-      "work-on/build/architect": () => { w.comments.push("FORGE:ARCHITECT:COMPLETE"); },
       "work-on/build": () => {
         // Stale comment first (earlier attempt, never actually committed),
         // fresh real comment appended after it (this run's own completion).
@@ -1190,8 +1254,6 @@ describe("runIssue", () => {
 
     const script = {
       "work-on/investigate": () => { w.comments.push("INVESTIGATION:COMPLETE"); },
-      "work-on/build/context": () => { w.comments.push("FORGE:CONTEXT:COMPLETE"); },
-      "work-on/build/architect": () => { w.comments.push("FORGE:ARCHITECT:COMPLETE"); },
       "work-on/build": () => {
         w.comments.push(`FORGE:BUILDER:COMPLETE **Branch**: \`${REAL_BRANCH}\``);
         // Posted AFTER the real completion comment but has no FORGE:BUILDER:COMPLETE
@@ -1219,8 +1281,6 @@ describe("runIssue — forge#2377: per-phase usage recording", () => {
     const USAGE = { input_tokens: 1200, output_tokens: 340, cache_creation_input_tokens: 0, cache_read_input_tokens: 500 };
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
@@ -1249,8 +1309,6 @@ describe("runIssue — forge#2377: per-phase usage recording", () => {
     const { w, io } = fakeWorld();
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
@@ -1278,8 +1336,6 @@ describe("runIssue — forge#2377: per-phase usage recording", () => {
     let investigateCalls = 0;
     const script = {
       "work-on/investigate": () => { investigateCalls++; if (investigateCalls > 1) w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
@@ -1310,8 +1366,6 @@ describe("runIssue — forge#2377: per-phase usage recording", () => {
     let buildCalls = 0;
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => {
         buildCalls++;
         // First attempt: builder posts its marker but no commits landed yet
@@ -1910,7 +1964,7 @@ describe("runIssue — forge#2352: state-vs-GitHub divergence guard", () => {
         w.issueState = "CLOSED";
         w.labels.push("workflow:invalid");
       },
-      "work-on/build/context": () => { throw new Error("context must never run against a closed/invalid issue"); },
+      "work-on/build": () => { throw new Error("build must never run against a closed/invalid issue"); },
     };
     const runner = async ({ commandName }) => {
       runCounts[commandName] = (runCounts[commandName] || 0) + 1;
@@ -1923,19 +1977,17 @@ describe("runIssue — forge#2352: state-vs-GitHub divergence guard", () => {
 
     assert.equal(res.terminalReason, "invalid");
     assert.equal(runCounts["work-on/investigate"], 1);
-    assert.equal(runCounts["work-on/build/context"] || 0, 0, "context must not have run");
+    assert.equal(runCounts["work-on/build"] || 0, 0, "build must not have run");
     const s = deriveState(readLog(dir, 42));
     assert.deepEqual(s.committed, ["investigate"]);
   });
 
-  it("halts before 'build' when the issue is closed (no workflow:merged) after 'architect' commits", async () => {
+  it("halts before 'build' when the issue is closed (no workflow:merged) after 'investigate' commits", async () => {
     const { w, io } = fakeWorld();
     const runCounts = {};
     const script = {
-      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => {
-        w.markers += " FORGE:ARCHITECT:COMPLETE";
+      "work-on/investigate": () => {
+        w.markers += " INVESTIGATION:COMPLETE";
         // Issue closed out-of-band (not via workflow:invalid this time — a
         // bare CLOSED state with no workflow:merged label must be treated
         // the same way: dead, not a merge).
@@ -1955,7 +2007,7 @@ describe("runIssue — forge#2352: state-vs-GitHub divergence guard", () => {
     assert.equal(res.terminalReason, "invalid");
     assert.equal(runCounts["work-on/build"] || 0, 0, "build must not have run");
     const s = deriveState(readLog(dir, 42));
-    assert.deepEqual(s.committed, ["investigate", "context", "architect"]);
+    assert.deepEqual(s.committed, ["investigate"]);
   });
 
   it("pauses (terminalReason needs-human) rather than advancing when the issue carries needs-human mid-run, and does not touch the needs-human label itself", async () => {
@@ -1968,13 +2020,12 @@ describe("runIssue — forge#2352: state-vs-GitHub divergence guard", () => {
     };
     const runCounts = {};
     const script = {
-      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => {
-        w.markers += " FORGE:CONTEXT:COMPLETE";
+      "work-on/investigate": () => {
+        w.markers += " INVESTIGATION:COMPLETE";
         // A human (or a sibling automation) escalates the issue mid-run.
         w.labels.push("needs-human");
       },
-      "work-on/build/architect": () => { throw new Error("architect must not run while needs-human is set"); },
+      "work-on/build": () => { throw new Error("build must not run while needs-human is set"); },
     };
     const runner = async ({ commandName }) => {
       runCounts[commandName] = (runCounts[commandName] || 0) + 1;
@@ -1986,17 +2037,15 @@ describe("runIssue — forge#2352: state-vs-GitHub divergence guard", () => {
       io, runner, now: () => 1000, maxAttempts: 3 });
 
     assert.equal(res.terminalReason, "needs-human");
-    assert.equal(runCounts["work-on/build/architect"] || 0, 0, "architect must not have run");
+    assert.equal(runCounts["work-on/build"] || 0, 0, "build must not have run");
     const s = deriveState(readLog(dir, 42));
-    assert.deepEqual(s.committed, ["investigate", "context"]);
+    assert.deepEqual(s.committed, ["investigate"]);
   });
 
   it("does not guard the close phase itself — close still runs and reads the same CLOSED state as its normal success signal", async () => {
     const { w, io } = fakeWorld();
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
@@ -2008,15 +2057,13 @@ describe("runIssue — forge#2352: state-vs-GitHub divergence guard", () => {
 
     assert.equal(res.terminalReason, "merged");
     const s = deriveState(readLog(dir, 42));
-    assert.deepEqual(s.committed, ["investigate", "context", "architect", "build", "review", "close"]);
+    assert.deepEqual(s.committed, ["investigate", "build", "review", "close"]);
   });
 
   it("a healthy, non-diverged run is unaffected by the guard (baseline — no closed/invalid/needs-human state at any point)", async () => {
     const { w, io } = fakeWorld();
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
@@ -2048,8 +2095,6 @@ describe("runIssue — forge#2352: state-vs-GitHub divergence guard", () => {
     };
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => { w.markers += " FORGE:ARCHITECT:COMPLETE"; },
       "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
@@ -2076,20 +2121,18 @@ describe("runIssue — forge#2352: state-vs-GitHub divergence guard", () => {
 describe("runIssue — forge#2524: session-limit auto-resume", () => {
   it("pauses on a session-limit CLI_BACKEND_FAILED, then retries the same phase and reaches merged", async () => {
     const { w, io } = fakeWorld();
-    let architectCalls = 0;
+    let buildCalls = 0;
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => {
-        architectCalls++;
-        if (architectCalls === 1) {
+      "work-on/build": () => {
+        buildCalls++;
+        if (buildCalls === 1) {
           throw Object.assign(new Error("claude CLI exited with status 1"), {
             code: "CLI_BACKEND_FAILED", resetAt: "12:00am (UTC)", resetAtEpochMs: 5000,
           });
         }
-        w.markers += " FORGE:ARCHITECT:COMPLETE";
+        w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2;
       },
-      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
@@ -2103,37 +2146,36 @@ describe("runIssue — forge#2524: session-limit auto-resume", () => {
       io, runner, now: () => 1000, maxAttempts: 3, sleep, onProgress: (e) => events.push(e) });
 
     assert.equal(res.terminalReason, "merged");
-    assert.equal(architectCalls, 2, "the architect phase's runner must be invoked again after the pause (fresh attempt budget)");
+    assert.equal(buildCalls, 2, "the build phase's runner must be invoked again after the pause (fresh attempt budget)");
     assert.deepEqual(sleepCalls, [4000], "sleep must be awaited for exactly resetAtEpochMs - now()");
 
     const pauseEvents = events.filter((e) => e.event === "phase_paused");
     assert.equal(pauseEvents.length, 1, "exactly one phase_paused progress event must be emitted (AC6)");
-    assert.equal(pauseEvents[0].phase, "architect");
+    assert.equal(pauseEvents[0].phase, "build");
     assert.equal(pauseEvents[0].reason, "session-limit");
     assert.equal(pauseEvents[0].resetAt, 5000);
 
     const log = readLog(dir, 42);
     const rateLimited = log.filter((e) => e.event === "PHASE_RATE_LIMITED");
     assert.equal(rateLimited.length, 1, "exactly one PHASE_RATE_LIMITED run-log event must be appended (AC4)");
-    assert.equal(rateLimited[0].phase, "architect");
+    assert.equal(rateLimited[0].phase, "build");
     assert.equal(rateLimited[0].resetAt, 5000);
     assert.equal(rateLimited[0].waitMs, 4000);
 
     const s = deriveState(log);
-    assert.deepEqual(s.lastRateLimit, { phase: "architect", resetAt: 5000, waitMs: 4000 },
+    assert.deepEqual(s.lastRateLimit, { phase: "build", resetAt: 5000, waitMs: 4000 },
       "deriveState() must fold PHASE_RATE_LIMITED into RunState.lastRateLimit without touching committed/terminal state");
-    assert.deepEqual(s.committed, ["investigate", "context", "architect", "build", "review", "close"],
+    assert.deepEqual(s.committed, ["investigate", "build", "review", "close"],
       "the pause must not have skipped or duplicated any phase's commit");
   });
 
   it("falls through to engine-error once the pause-count budget is exhausted (defensive backstop)", async () => {
     const { w, io } = fakeWorld();
-    let architectCalls = 0;
+    let buildCalls = 0;
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => {
-        architectCalls++;
+      "work-on/build": () => {
+        buildCalls++;
         throw Object.assign(new Error("claude CLI exited with status 1"), {
           code: "CLI_BACKEND_FAILED", resetAt: "12:00am (UTC)", resetAtEpochMs: 5000,
         });
@@ -2147,7 +2189,7 @@ describe("runIssue — forge#2524: session-limit auto-resume", () => {
       io, runner, now: () => 1000, maxAttempts: 1, maxSessionLimitPauses: 2, sleep });
 
     assert.equal(res.terminalReason, "engine-error");
-    assert.equal(architectCalls, 3, "expected 2 paused retries + 1 final over-budget failure");
+    assert.equal(buildCalls, 3, "expected 2 paused retries + 1 final over-budget failure");
     assert.equal(sleepCalls.length, 2, "exactly maxSessionLimitPauses waits should have occurred, not unbounded");
     assert.ok(w.labels.includes("workflow:engine-error"));
   });
@@ -2156,8 +2198,7 @@ describe("runIssue — forge#2524: session-limit auto-resume", () => {
     const { w, io } = fakeWorld();
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => {
+      "work-on/build": () => {
         throw Object.assign(new Error("claude CLI exited with status 1"), {
           code: "CLI_BACKEND_FAILED", resetAt: "garbled text — could not parse",
         });
@@ -2179,8 +2220,7 @@ describe("runIssue — forge#2524: session-limit auto-resume", () => {
     const { w, io } = fakeWorld();
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => {
+      "work-on/build": () => {
         throw Object.assign(new Error("claude CLI exited with status 1"), {
           code: "CLI_BACKEND_FAILED", resetAt: "12:00am (UTC)", resetAtEpochMs: 500,
         });
@@ -2207,20 +2247,18 @@ describe("runIssue — forge#2524: session-limit auto-resume", () => {
       if (a.startsWith("issue edit") && args.includes("--body")) renewalWrites++;
       return origGh(args);
     };
-    let architectCalls = 0;
+    let buildCalls = 0;
     const script = {
       "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
-      "work-on/build/context": () => { w.markers += " FORGE:CONTEXT:COMPLETE"; },
-      "work-on/build/architect": () => {
-        architectCalls++;
-        if (architectCalls === 1) {
+      "work-on/build": () => {
+        buildCalls++;
+        if (buildCalls === 1) {
           throw Object.assign(new Error("claude CLI exited with status 1"), {
             code: "CLI_BACKEND_FAILED", resetAt: "12:00am (UTC)", resetAtEpochMs: 2000,
           });
         }
-        w.markers += " FORGE:ARCHITECT:COMPLETE";
+        w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2;
       },
-      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
       "work-on/review": () => { w.pr = 7; w.prMerged = true; },
       "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
     };
@@ -2256,5 +2294,202 @@ describe("runIssue — forge#2524: session-limit auto-resume", () => {
         return true;
       },
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// forge#3511: usage-limit default wait + `--retry` reopen of an engine-error run
+// ---------------------------------------------------------------------------
+
+function limitWorldScript(w, { failBuild }) {
+  return {
+    "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+    "work-on/build": () => {
+      const f = failBuild(); if (f) throw f;
+      w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2;
+    },
+    "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+    "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+  };
+}
+
+describe("runIssue — forge#3511: usage-limit default wait", () => {
+  it("pauses for the default wait when usageLimit is set but no reset epoch exists, then resumes", async () => {
+    const { w, io } = fakeWorld();
+    let calls = 0;
+    const script = limitWorldScript(w, {
+      failBuild: () => (++calls === 1
+        ? Object.assign(new Error("claude CLI exited with status 1"), { code: "CLI_BACKEND_FAILED", usageLimit: true })
+        : null),
+    });
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+    const sleepCalls = [];
+    const events = [];
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner,
+      now: () => 1000, maxAttempts: 3, sleep: async (ms) => { sleepCalls.push(ms); },
+      sessionLimitDefaultWaitMs: 1234, onProgress: (e) => events.push(e) });
+    assert.equal(res.terminalReason, "merged");
+    assert.deepEqual(sleepCalls, [1234]);
+    const rl = readLog(dir, 42).filter((e) => e.event === "PHASE_RATE_LIMITED");
+    assert.equal(rl.length, 1);
+    assert.equal(rl[0].resetAt, null);
+    assert.equal(rl[0].waitMs, 1234);
+    assert.match(events.find((e) => e.event === "phase_paused").detail, /reset time unknown/);
+  });
+
+  it("uses DEFAULT_SESSION_LIMIT_WAIT_MS when no override is given", async () => {
+    const { w, io } = fakeWorld();
+    let calls = 0;
+    const script = limitWorldScript(w, {
+      failBuild: () => (++calls === 1
+        ? Object.assign(new Error("x"), { code: "CLI_BACKEND_FAILED", usageLimit: true }) : null),
+    });
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+    const sleepCalls = [];
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner,
+      now: () => 1000, maxAttempts: 3, sleep: async (ms) => { sleepCalls.push(ms); } });
+    assert.deepEqual(sleepCalls, [DEFAULT_SESSION_LIMIT_WAIT_MS]);
+  });
+
+  it("is capped by maxSessionLimitPauses and then terminates engine-error", async () => {
+    const { w, io } = fakeWorld();
+    const script = limitWorldScript(w, {
+      failBuild: () => Object.assign(new Error("x"), { code: "CLI_BACKEND_FAILED", usageLimit: true }),
+    });
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+    const sleepCalls = [];
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner,
+      now: () => 1000, maxAttempts: 1, maxSessionLimitPauses: 2, sleep: async (ms) => { sleepCalls.push(ms); } });
+    assert.equal(res.terminalReason, "engine-error");
+    assert.equal(sleepCalls.length, 2);
+  });
+
+  it("does not pause an ordinary CLI_BACKEND_FAILED without usageLimit", async () => {
+    const { w, io } = fakeWorld();
+    const script = limitWorldScript(w, {
+      failBuild: () => Object.assign(new Error("boom"), { code: "CLI_BACKEND_FAILED" }),
+    });
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+    let slept = false;
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner,
+      now: () => 1000, maxAttempts: 3, sleep: async () => { slept = true; } });
+    assert.equal(res.terminalReason, "engine-error");
+    assert.equal(slept, false);
+  });
+
+  it("rejects an invalid sessionLimitDefaultWaitMs", async () => {
+    const { io } = fakeWorld();
+    await assert.rejects(
+      runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner: async () => ({}),
+        sessionLimitDefaultWaitMs: -1 }),
+      (e) => e.code === "INVALID_SESSION_LIMIT_CONFIG");
+  });
+});
+
+describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
+  async function runToEngineError(w, io) {
+    const script = limitWorldScript(w, {
+      failBuild: () => Object.assign(new Error("boom"), { code: "CLI_BACKEND_FAILED" }),
+    });
+    const runner = async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner,
+      now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "engine-error");
+    assert.deepEqual(deriveState(readLog(dir, 42)).committed, ["investigate"]);
+    assert.ok(w.labels.includes("workflow:engine-error"));
+  }
+
+  const okRunner = (w) => {
+    const script = limitWorldScript(w, { failBuild: () => null });
+    return async ({ commandName }) => { script[commandName](); return { status: "complete" }; };
+  };
+
+  it("resumes at build, clears the label, and reaches merged", async () => {
+    const { w, io } = fakeWorld();
+    await runToEngineError(w, io);
+    const ran = [];
+    const base = okRunner(w);
+    const runner = async (a) => { ran.push(a.commandName); return base(a); };
+    const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner,
+      now: () => 2000, maxAttempts: 1, retry: true });
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(ran[0], "work-on/build", "must resume at the first uncommitted phase, not re-run investigate");
+    assert.ok(!ran.includes("work-on/investigate"));
+    assert.ok(!w.labels.includes("workflow:engine-error"));
+    const log = readLog(dir, 42);
+    assert.ok(log.some((e) => e.event === "RUN_REOPEN"));
+    assert.deepEqual(deriveState(log).committed, ["investigate", "build", "review", "close"]);
+  });
+
+  it("resumes after a remote-hydrate (no local log)", async () => {
+    const { w, io } = fakeWorld();
+    await runToEngineError(w, io);
+    rmSync(join(dir, "42.jsonl"));
+    const ran = [];
+    const base = okRunner(w);
+    const runner = async (a) => { ran.push(a.commandName); return base(a); };
+    const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner,
+      now: () => 2000, maxAttempts: 1, retry: true });
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(ran[0], "work-on/build");
+  });
+
+  it("clears a stale engine-error label when a prior retry crashed after publishing the reopen", async () => {
+    const { w, io } = fakeWorld();
+    await runToEngineError(w, io);
+    // Simulate the crash window: reopen appended locally and published remotely
+    // (terminal:false), but the label removal never ran.
+    appendEvent(dir, 42, { event: "RUN_REOPEN", issue: 42 });
+    const remote = parseState(w.body);
+    w.body = upsertStateBlock(w.body, { ...remote, terminal: false, terminalReason: null, v: (remote.v || 0) + 1 });
+    assert.ok(w.labels.includes("workflow:engine-error"));
+    const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner: okRunner(w),
+      now: () => 2000, maxAttempts: 1, retry: true });
+    assert.equal(res.terminalReason, "merged");
+    assert.ok(!w.labels.includes("workflow:engine-error"));
+  });
+
+  it("a failing label removal does not abort a published reopen", async () => {
+    const { w, io } = fakeWorld();
+    await runToEngineError(w, io);
+    const gh = io.gh;
+    const flaky = { ...io, gh: async (args) => {
+      if (args.includes("--remove-label")) throw new Error("HTTP 502");
+      return gh(args);
+    } };
+    const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io: flaky, runner: okRunner(w),
+      now: () => 2000, maxAttempts: 1, retry: true });
+    assert.equal(res.terminalReason, "merged");
+  });
+
+  it("without retry an engine-error run stays terminal (back-compat)", async () => {
+    const { w, io } = fakeWorld();
+    await runToEngineError(w, io);
+    let ran = 0;
+    const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io,
+      runner: async () => { ran++; return { status: "complete" }; }, now: () => 2000, maxAttempts: 1 });
+    assert.equal(ran, 0);
+    assert.ok(!readLog(dir, 42).some((e) => e.event === "RUN_REOPEN"));
+    assert.notEqual(res.terminalReason, "merged");
+  });
+
+  it("does not reopen a needs-human terminal and reports not-retryable", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += " INVESTIGATION:COMPLETE"; },
+      "work-on/build": () => { w.markers += " FORGE:BUILDER:COMPLETE **Branch**: `fix/real-branch-42`"; w.commitsAhead = 2; },
+      "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; },
+    };
+    const first = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io,
+      runner: async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; },
+      now: () => 1000, maxAttempts: 1 });
+    assert.equal(first.terminalReason, "needs-human");
+    const before = readLog(dir, 42).length;
+    let ran = 0;
+    const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io,
+      runner: async () => { ran++; return { status: "complete" }; }, now: () => 2000, maxAttempts: 1, retry: true });
+    assert.equal(res.terminalReason, "not-retryable");
+    assert.equal(ran, 0);
+    assert.equal(readLog(dir, 42).length, before, "no events appended for a non-retryable terminal");
   });
 });

@@ -12,7 +12,7 @@ const base = { v: 0, run: "r1", issue: 42, lane: "staging", committed: [], phase
 describe("pickPhase", () => {
   it("returns the first uncommitted phase whose entryCondition holds", () => {
     assert.equal(pickPhase(base).id, "investigate");
-    assert.equal(pickPhase({ ...base, committed: ["investigate"] }).id, "context");
+    assert.equal(pickPhase({ ...base, committed: ["investigate"] }).id, "build");
   });
 
   it("returns null once all phases are committed", () => {
@@ -32,13 +32,14 @@ describe("pickPhase", () => {
 
   it("does NOT return 'decompose' when investigate committed but terminalReason is unset (normal happy path)", () => {
     const state = { ...base, committed: ["investigate"], terminalReason: null };
-    assert.equal(pickPhase(state).id, "context");
+    assert.equal(pickPhase(state).id, "build");
   });
 
   it("returns 'remediate' when review committed with terminalReason 'needs-human'", () => {
     const state = {
       ...base,
-      committed: ["investigate", "context", "architect", "build", "review"],
+      committed: ["investigate", "build", "review"],
+      pr: 7,
       terminalReason: "needs-human",
     };
     assert.equal(pickPhase(state).id, "remediate");
@@ -47,7 +48,7 @@ describe("pickPhase", () => {
   it("does NOT return 'remediate' when review committed but terminalReason is unset (normal happy path)", () => {
     const state = {
       ...base,
-      committed: ["investigate", "context", "architect", "build", "review"],
+      committed: ["investigate", "build", "review"],
       terminalReason: null,
     };
     assert.equal(pickPhase(state).id, "close");
@@ -245,10 +246,12 @@ describe("pickPhase", () => {
     const review = PHASES.find(p => p.id === "review");
     const reviewState = { ...base, branch: "fix/x-42" };
 
-    function ioFor({ prList, prView }) {
+    function ioFor({ prList, prView, issueLabels }) {
       return {
         gh: async (args) => {
           const cmd = args.join(" ");
+          if (cmd.startsWith("issue view") && issueLabels)
+            return JSON.stringify({ state: "OPEN", labels: issueLabels.map((name) => ({ name })) });
           if (cmd.startsWith("pr list")) return prList;
           if (cmd.startsWith("pr view")) return prView;
           throw new Error(`unexpected gh call: ${cmd}`);
@@ -281,6 +284,57 @@ describe("pickPhase", () => {
       const outcome = await review.detectOutcome(reviewState, io);
       assert.equal(outcome.status, "blocked");
       assert.equal(outcome.outputs.pr, 7);
+    });
+
+    const openUnlabelled = {
+      prList: JSON.stringify([{ number: 7 }]),
+      prView: JSON.stringify({ number: 7, state: "OPEN", mergedAt: null, labels: [] }),
+    };
+    const rr = (body) => ({ text: `done\nREVIEW_RESULT:\n${body}\n` });
+
+    it("forge#3521: needs-human on the issue only (PR unlabelled) -> blocked with outputs.pr", async () => {
+      const io = ioFor({ ...openUnlabelled, issueLabels: ["workflow:in-review", "needs-human"] });
+      const outcome = await review.detectOutcome(reviewState, io);
+      assert.equal(outcome.status, "blocked");
+      assert.equal(outcome.outputs.pr, 7);
+    });
+
+    it("forge#3521: REVIEW_RESULT next: remediate with no labels -> blocked with outputs.pr", async () => {
+      const io = ioFor({ ...openUnlabelled, issueLabels: [] });
+      const outcome = await review.detectOutcome(reviewState, io,
+        rr("  status: NEXT\n  next: remediate\n  remediation: inpr-fix\n  pr_number: 7"));
+      assert.equal(outcome.status, "blocked");
+      assert.equal(outcome.outputs.pr, 7);
+    });
+
+    it("forge#3521: non-digit pr_number is ignored; openPrFor number wins when they disagree", async () => {
+      const io = ioFor({ ...openUnlabelled, issueLabels: [] });
+      let outcome = await review.detectOutcome(reviewState, io,
+        rr("  status: NEXT\n  next: remediate\n  pr_number: 7; rm -rf /"));
+      assert.equal(outcome.status, "blocked");
+      assert.equal(outcome.outputs.pr, 7);
+      outcome = await review.detectOutcome(reviewState, io,
+        rr("  status: NEXT\n  next: remediate\n  pr_number: 99"));
+      assert.equal(outcome.outputs.pr, 7);
+    });
+
+    it("forge#3521: a non-remediate NEXT is not a handoff; no signal -> failed/non-retryable carrying outputs.pr", async () => {
+      const io = ioFor({ ...openUnlabelled, issueLabels: [] });
+      const outcome = await review.detectOutcome(reviewState, io,
+        rr("  status: NEXT\n  next: close\n  pr_number: 7"));
+      assert.equal(outcome.status, "failed");
+      assert.equal(outcome.retryable, false);
+      assert.equal(outcome.outputs.pr, 7);
+      const noText = await review.detectOutcome(reviewState, io);
+      assert.equal(noText.status, "failed");
+    });
+
+    it("forge#3521: only the last REVIEW_RESULT block counts; issue-read failure does not throw", async () => {
+      const io = ioFor(openUnlabelled); // issue view throws
+      const outcome = await review.detectOutcome(reviewState, io, {
+        text: "REVIEW_RESULT:\n  status: NEXT\n  next: remediate\nlater\nREVIEW_RESULT:\n  status: BLOCKED\n  pr_number: 7\n",
+      });
+      assert.equal(outcome.status, "failed");
     });
   });
 
@@ -330,106 +384,53 @@ describe("pickPhase", () => {
     });
   });
 
-  // Regression tests for #1669: reconcile must require :COMPLETE markers, not bare annotation openers.
-  describe("context.reconcile — requires FORGE:CONTEXT:COMPLETE (not bare FORGE:CONTEXT)", () => {
-    const context = PHASES.find(p => p.id === "context");
-    const ioWith = (blob) => ({ gh: async () => blob, git: async () => "0" });
+  // forge#3499: context/architect are no longer engine phases — work-on/build owns
+  // them. Their markers survive as NON-BLOCKING sub-evidence on build's outcome.
+  describe("build.detectOutcome — context/architect sub-evidence is non-blocking (forge#3499)", () => {
+    const build = PHASES.find(p => p.id === "build");
+    const withComments = (...bodies) => ({
+      gh: async () => JSON.stringify(bodies),
+      git: async () => "2",
+    });
+    const builder = "<!-- FORGE:BUILDER:COMPLETE -->";
 
-    it("bare FORGE:CONTEXT (partial annotation) -> not satisfied", async () => {
-      const r = await context.reconcile(base, ioWith("<!-- FORGE:CONTEXT -->"));
-      assert.equal(r.satisfied, false);
+    it("context/architect are not engine phases", () => {
+      assert.equal(PHASES.find(p => p.id === "context"), undefined);
+      assert.equal(PHASES.find(p => p.id === "architect"), undefined);
     });
 
-    it("FORGE:CONTEXT:COMPLETE present -> satisfied", async () => {
-      const r = await context.reconcile(base, ioWith("<!-- FORGE:CONTEXT -->\n<!-- FORGE:CONTEXT:COMPLETE -->"));
-      assert.equal(r.satisfied, true);
+    it("records complete markers without requiring them", async () => {
+      const o = await build.detectOutcome({ ...base, branch: "fix/x-42" },
+        withComments("<!-- FORGE:CONTEXT:COMPLETE -->", "<!-- FORGE:ARCHITECT:COMPLETE -->", builder));
+      assert.equal(o.status, "committed");
+      assert.equal(o.outputs.context, "complete");
+      assert.equal(o.outputs.architect, "complete");
     });
 
-    it("no marker at all -> not satisfied", async () => {
-      const r = await context.reconcile(base, ioWith("nothing here"));
-      assert.equal(r.satisfied, false);
+    it("bare/partial annotations are reported as absent, never as complete", async () => {
+      const o = await build.detectOutcome({ ...base, branch: "fix/x-42" },
+        withComments("<!-- FORGE:CONTEXT -->", "<!-- FORGE:ARCHITECT:PARTIAL -->", builder));
+      assert.equal(o.status, "committed");
+      assert.equal(o.outputs.context, "absent");
+      assert.equal(o.outputs.architect, "absent");
     });
 
-    it("latest TRIVIAL fast-path annotation skips context and records the reason", async () => {
-      const r = await context.reconcile(base, ioWith(JSON.stringify([
-        { body: "<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: STANDARD" },
-        { body: "<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: TRIVIAL" },
-      ])));
-      assert.deepEqual(r, {
-        satisfied: true,
-        outputs: { skipped: "trivial-complexity-band", phase: "context" },
-      });
+    it("TRIVIAL fast-path band is recorded as skipped-trivial", async () => {
+      const o = await build.detectOutcome({ ...base, branch: "fix/x-42" },
+        withComments("<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: TRIVIAL", builder));
+      assert.equal(o.outputs.context, "skipped-trivial");
+      assert.equal(o.outputs.architect, "skipped-trivial");
     });
 
-    it("missing or malformed fast-path annotations retain the full pipeline", async () => {
-      const r = await context.reconcile(base, ioWith("<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: trivial"));
-      assert.equal(r.satisfied, false);
-    });
-  });
-
-  describe("architect.reconcile — requires FORGE:ARCHITECT:COMPLETE (not bare FORGE:ARCHITECT)", () => {
-    const architect = PHASES.find(p => p.id === "architect");
-    const ioWith = (blob) => ({ gh: async () => blob, git: async () => "0" });
-
-    it("bare FORGE:ARCHITECT (partial annotation) -> not satisfied", async () => {
-      const r = await architect.reconcile(base, ioWith("<!-- FORGE:ARCHITECT -->"));
-      assert.equal(r.satisfied, false);
+    it("a malformed band (lowercase) is not treated as TRIVIAL", async () => {
+      const o = await build.detectOutcome({ ...base, branch: "fix/x-42" },
+        withComments("<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: trivial", builder));
+      assert.equal(o.outputs.context, "absent");
     });
 
-    it("FORGE:ARCHITECT:COMPLETE present -> satisfied", async () => {
-      const r = await architect.reconcile(base, ioWith("<!-- FORGE:ARCHITECT -->\n<!-- FORGE:ARCHITECT:COMPLETE -->"));
-      assert.equal(r.satisfied, true);
-    });
-
-    it("no marker at all -> not satisfied", async () => {
-      const r = await architect.reconcile(base, ioWith("nothing here"));
-      assert.equal(r.satisfied, false);
-    });
-
-    it("TRIVIAL fast-path annotation skips architect and records the reason", async () => {
-      const r = await architect.reconcile(base, ioWith(JSON.stringify([
-        { body: "<!-- FORGE:FAST_PATH -->\n**COMPLEXITY_BAND**: TRIVIAL" },
-      ])));
-      assert.deepEqual(r, {
-        satisfied: true,
-        outputs: { skipped: "trivial-complexity-band", phase: "architect" },
-      });
-    });
-  });
-
-  describe("architect.detectOutcome — requires FORGE:ARCHITECT:COMPLETE (not bare FORGE:ARCHITECT)", () => {
-    const architect = PHASES.find(p => p.id === "architect");
-    const ioWith = (blob) => ({ gh: async () => blob, git: async () => "0" });
-
-    it("bare FORGE:ARCHITECT (partial annotation) -> failed", async () => {
-      const outcome = await architect.detectOutcome(base, ioWith("<!-- FORGE:ARCHITECT -->"));
-      assert.equal(outcome.status, "failed");
-    });
-
-    it("FORGE:ARCHITECT:COMPLETE present -> committed", async () => {
-      const outcome = await architect.detectOutcome(base, ioWith("<!-- FORGE:ARCHITECT:COMPLETE -->"));
-      assert.equal(outcome.status, "committed");
-    });
-
-    // Regression #2689: the architect SKIP path (chore:/docs:/trivial titles) must
-    // post a minimal FORGE:ARCHITECT comment ending in the :COMPLETE sentinel so the
-    // marker-only headless gate advances the issue to build instead of stranding it
-    // at needs-human. A skip that emits the sentinel is indistinguishable, to this
-    // gate, from a full plan — both -> committed. Crash detection is preserved: a
-    // skip that posts NO marker still -> failed (see the case below).
-    it("architect skip-path comment (chore/docs skip note) with :COMPLETE -> committed (advances, not needs-human)", async () => {
-      const skipBlob = "<!-- FORGE:ARCHITECT -->\n" +
-        "## Architecture Plan — Skipped\n\n" +
-        "**Skipped**: chore:/docs: title. No cross-path consistency risk.\n\n" +
-        "<!-- FORGE:ARCHITECT:COMPLETE -->";
-      const outcome = await architect.detectOutcome(base, ioWith(skipBlob));
-      assert.equal(outcome.status, "committed");
-    });
-
-    it("architect skip note WITHOUT the :COMPLETE sentinel (genuine crash) -> failed (still escalates)", async () => {
-      const crashBlob = "<!-- FORGE:ARCHITECT -->\n## Architecture Plan — Skipped\n**Skipped**: chore: title.";
-      const outcome = await architect.detectOutcome(base, ioWith(crashBlob));
-      assert.equal(outcome.status, "failed");
+    it("never fails build for a missing context/architect marker", async () => {
+      const o = await build.detectOutcome({ ...base, branch: "fix/x-42" }, withComments(builder));
+      assert.equal(o.status, "committed");
     });
   });
 
@@ -496,5 +497,24 @@ describe("pickPhase", () => {
       const outcome = await build.detectOutcome({ ...base, branch: null }, io);
       assert.equal(outcome.status, "failed");
     });
+  });
+
+  // forge#3506: close must never derive `merged` from a non-merged handoff reason.
+  describe("close.buildArgs fail-closed", () => {
+    const close = PHASES.find(p => p.id === "close");
+    const st = (terminalReason) => ({ ...base, committed: ["review"], pr: 7, terminalReason });
+    const io = { gh: async () => "", git: async () => "" };
+    const ctx = { repo: "acme/widgets" };
+    for (const reason of ["needs-human", "awaiting-merge", "engine-error"]) {
+      it(`${reason} throws instead of defaulting to merged`, async () => {
+        await assert.rejects(() => close.buildArgs(st(reason), ctx, io), /refusing close/);
+      });
+    }
+    for (const [reason, expected] of [[null, "merged"], ["merged", "merged"], ["decomposed", "decomposed"], ["invalid", "invalid"]]) {
+      it(`${reason} still maps to ${expected}`, async () => {
+        const args = await close.buildArgs(st(reason), ctx, io);
+        assert.equal(args[args.indexOf("--terminal-state") + 1], expected);
+      });
+    }
   });
 });

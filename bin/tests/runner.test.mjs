@@ -64,6 +64,7 @@ import {
   sanitizeOutputExcerptForLog,
   extractSessionLimitResetTime,
   parseSessionLimitResetEpochMs,
+  detectUsageLimit,
   VALID_BACKENDS,
 } from "../runner.mjs";
 
@@ -3731,5 +3732,98 @@ describe("runCommand backend resolution", () => {
       const notice = lines.find((l) => /Using the claude CLI backend/.test(l));
       assert.equal(notice, undefined, "no live-run notice expected during --dry-run");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// forge#3511: JSON-envelope session-limit detection, 3pm/24h reset formats
+// ---------------------------------------------------------------------------
+
+const LIMIT_ENVELOPE = JSON.stringify({
+  type: "result", subtype: "success", is_error: true, api_error_status: 429,
+  api_error: "usage_limit_reached",
+  result: "You've hit your session limit \u00b7 resets 3pm (Asia/Kolkata)", uuid: "x",
+});
+
+describe("extractSessionLimitResetTime — JSON envelope (forge#3511)", () => {
+  it("reads the reset text from the envelope's result, not trailing JSON", () => {
+    assert.equal(extractSessionLimitResetTime(LIMIT_ENVELOPE), "3pm (Asia/Kolkata)");
+  });
+  it("plain-text capture stops at the zone's closing paren even when JSON-wrapped but unparseable", () => {
+    const wrapped = `warn\n{"result":"You've hit your session limit \u00b7 resets 3pm (Asia/Kolkata)","type":"result"}`;
+    assert.equal(extractSessionLimitResetTime(wrapped), "3pm (Asia/Kolkata)");
+  });
+  it("matches weekly and usage limit phrasings", () => {
+    assert.equal(extractSessionLimitResetTime("You've hit your weekly limit \u00b7 resets 9:00am (UTC)"), "9:00am (UTC)");
+    assert.equal(extractSessionLimitResetTime("usage limit reached, resets 15:00 (UTC)"), "15:00 (UTC)");
+  });
+  it("returns undefined for unrelated output", () => {
+    assert.equal(extractSessionLimitResetTime('{"result":"all good"}'), undefined);
+  });
+});
+
+describe("parseSessionLimitResetEpochMs — 3pm / 24h formats (forge#3511)", () => {
+  const now = Date.UTC(2026, 9, 10, 0, 0, 0);
+  it("parses 3pm, 3:00pm and 15:00 identically", () => {
+    const a = parseSessionLimitResetEpochMs("3pm (Asia/Kolkata)", now);
+    assert.ok(Number.isFinite(a) && a > now);
+    assert.equal(parseSessionLimitResetEpochMs("3:00pm (Asia/Kolkata)", now), a);
+    assert.equal(parseSessionLimitResetEpochMs("15:00 (Asia/Kolkata)", now), a);
+  });
+  it("handles 12am and 12pm", () => {
+    assert.equal(parseSessionLimitResetEpochMs("12am (UTC)", now), Date.UTC(2026, 9, 11, 0, 0, 0));
+    assert.equal(parseSessionLimitResetEpochMs("12pm (UTC)", now), Date.UTC(2026, 9, 10, 12, 0, 0));
+  });
+  it("rejects out-of-range or ambiguous forms", () => {
+    for (const bad of ["13pm (UTC)", "0pm (UTC)", "25:00 (UTC)", "24:00 (UTC)", "3 (UTC)", "15 (UTC)",
+      "3:60pm (UTC)", "3pm", "3pm (Not/AZone)"]) {
+      assert.equal(parseSessionLimitResetEpochMs(bad, now), undefined, bad);
+    }
+  });
+});
+
+describe("detectUsageLimit (forge#3511)", () => {
+  it("is true for the structured api_error / 429 fields", () => {
+    assert.equal(detectUsageLimit(JSON.stringify({ api_error: "usage_limit_reached", result: "x" })), true);
+    assert.equal(detectUsageLimit(JSON.stringify({ api_error_status: 429, result: "x" })), true);
+  });
+  it("is true for limit text inside the envelope result and for plain text with a reset clause", () => {
+    assert.equal(detectUsageLimit(JSON.stringify({ result: "You've hit your session limit" })), true);
+    assert.equal(detectUsageLimit("", "You've hit your session limit \u00b7 resets 3pm (UTC)"), true);
+  });
+  it("is false for ordinary failures", () => {
+    assert.equal(detectUsageLimit(JSON.stringify({ is_error: true, result: "boom", api_error_status: 500 })), false);
+    assert.equal(detectUsageLimit("", "TypeError: boom"), false);
+    assert.equal(detectUsageLimit("not json at all"), false);
+  });
+});
+
+describe("runCliBackend usage-limit via JSON envelope (forge#3511)", () => {
+  const run = (stdout) => {
+    let thrown;
+    try {
+      runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"), userMessage: "Execute: /work-on 3511", args: ["3511"],
+        cwd: TMP, logger: { log: () => {} }, bin: "claude",
+        spawnFn: () => ({ status: 1, signal: null, stdout, stderr: "", error: undefined }),
+      });
+    } catch (err) { thrown = err; }
+    return thrown;
+  };
+  it("attaches resetAt, a finite future resetAtEpochMs and usageLimit", () => {
+    const e = run(LIMIT_ENVELOPE);
+    assert.equal(e.code, "CLI_BACKEND_FAILED");
+    assert.equal(e.resetAt, "3pm (Asia/Kolkata)");
+    assert.ok(Number.isFinite(e.resetAtEpochMs) && e.resetAtEpochMs > Date.now() - 1000);
+    assert.equal(e.usageLimit, true);
+  });
+  it("sets usageLimit but no epoch when the reset time is unparseable", () => {
+    const e = run(JSON.stringify({ is_error: true, api_error: "usage_limit_reached", result: "limit reached" }));
+    assert.equal(e.usageLimit, true);
+    assert.equal(e.resetAtEpochMs, undefined);
+  });
+  it("does not set usageLimit on an ordinary failure", () => {
+    const e = run(JSON.stringify({ is_error: true, result: "boom" }));
+    assert.equal(e.usageLimit, undefined);
   });
 });

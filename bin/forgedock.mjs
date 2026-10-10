@@ -3207,7 +3207,7 @@ function help() {
     ["npx forgedock disable [dir]", "Opt a directory out of ForgeDock"],
     ["npx forgedock status [dir]", "Show ForgeDock state for a directory"],
     ["npx forgedock run <cmd> [args]", "Run a command headlessly (local claude CLI or Anthropic API)"],
-    ["npx forgedock run-issue <issue>", "Drive one issue through the durable engine"],
+    ["npx forgedock run-issue <issue> --lane <lane> [--retry]", "Drive one issue through the durable engine (--retry reopens an engine-error run)"],
     ["npx forgedock resume-stalled [--dry-run]", "Fleet stall recovery — re-dispatch expired-lease issues"],
     ["npx forgedock demo", "Set up a risk-free demo repo and print next steps"],
     ["npx forgedock labels [setup] [--repo owner/repo]", "Bootstrap ForgeDock-managed labels on a GitHub repo (idempotent)"],
@@ -3971,7 +3971,7 @@ switch (command) {
       // an uncaught throw, which already set exitCode = 1 below. Now that
       // runIssue() resolves cleanly with a terminalReason instead of throwing,
       // preserve that same non-zero exit code for this reason too.
-      if (result && (result.terminalReason === "needs-human" || result.terminalReason === "engine-error")) exitCode = 1;
+      if (result && (result.terminalReason === "needs-human" || result.terminalReason === "engine-error" || result.terminalReason === "not-retryable")) exitCode = 1;
     } catch (err) {
       process.stderr.write(`${RED}${err.message}${RESET}\n`);
       exitCode = 1;

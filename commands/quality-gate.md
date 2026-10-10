@@ -588,9 +588,31 @@ Report any hit as **HIGH** — the DB connection will fail in any environment wh
 
 ```bash
 # Run only when commands/*.md or scripts/* changed and the validator ships in this repo.
-VALIDATOR="$FORGEDOCK_SCRIPTS/validate-spec-graph.sh"
-[ -f "$VALIDATOR" ] || VALIDATOR="{WORKTREE_PATH}/scripts/validate-spec-graph.sh"
-if [ -f "$VALIDATOR" ]; then
+# Install-root-only resolution (no worktree/cwd fallback: the branch under review must not supply the script that gates it).
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+# Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+_l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+# Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+_cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+# newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+_v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+_m="$HOME/.claude/plugins/marketplaces/$_mk"
+# '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
+_k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
+while IFS= read -r _c; do
+case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
+done <<< "$_k"
+fi
+VALIDATOR="${FORGE_ROOT:+$FORGE_ROOT/scripts/validate-spec-graph.sh}"
+if [ -z "$FORGE_ROOT" ]; then
+    echo "FORGE_GRAPH | INFO | spec-graph | ForgeDock install root unresolved — spec graph check skipped"
+elif [ -f "$VALIDATOR" ]; then
     # The graph is auto-built from the worktree (gitignored JSON not required).
     # --soft keeps the gate non-blocking on the documented baseline orphans;
     # HARD findings are still reported below and surfaced as gate findings.
@@ -616,9 +638,31 @@ Report each `[HARD]` line as **HIGH** — a dangling `Skill()` target or a label
 # Sub-phase files in subdirectories (commands/work-on/*.md) are installed with their
 # relative path preserved and resolve to namespaced commands — they cannot shadow
 # root-level native commands and are not scanned.
-CONFLICT_CHECKER="$FORGEDOCK_SCRIPTS/check-native-conflicts.sh"
-[ -f "$CONFLICT_CHECKER" ] || CONFLICT_CHECKER="{WORKTREE_PATH}/scripts/check-native-conflicts.sh"
-if [ -f "$CONFLICT_CHECKER" ]; then
+# Install-root-only resolution (no worktree/cwd fallback: the branch under review must not supply the script that gates it).
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+# Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+_l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+# Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+_cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+# newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+_v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+_m="$HOME/.claude/plugins/marketplaces/$_mk"
+# '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
+_k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
+while IFS= read -r _c; do
+case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
+done <<< "$_k"
+fi
+CONFLICT_CHECKER="${FORGE_ROOT:+$FORGE_ROOT/scripts/check-native-conflicts.sh}"
+if [ -z "$FORGE_ROOT" ]; then
+    echo "FORGE_GRAPH | INFO | native-conflict | ForgeDock install root unresolved — native conflict check skipped"
+elif [ -f "$CONFLICT_CHECKER" ]; then
     CONFLICT_REPORT=$(bash "$CONFLICT_CHECKER" "{WORKTREE_PATH}/commands" 2>&1) || CONFLICT_EXIT=$?
     echo "$CONFLICT_REPORT"
     if [ "${CONFLICT_EXIT:-0}" -ne 0 ]; then
@@ -727,8 +771,28 @@ Do NOT suppress the finding by making the check less strict or adding fake no-op
 **Why this matters**: in ForgeDock the pipeline code is bash inside Markdown specs. The executable-file checks above exclude `.md` files, and acceptance checks are mostly greps, so spec bash used to merge without ever being parsed. Reviewers were then the first to run it, which drove most review findings (2026-10-08 cascade audit). This check runs `bash -n` on every ```bash block that contains a changed line, after neutralising `{PLACEHOLDER}` notation. Blocks with pseudo tool calls (`Skill(`/`Agent(`/`Task(`) and blocks preceded by `<!-- allowlist:check-spec-bash -->` are skipped. Pre-existing blocks are never checked, so the baseline cannot block a change. `shellcheck -S error` results are advisory only.
 
 ```bash
-SPEC_BASH_CHECKER="$FORGEDOCK_SCRIPTS/check-spec-bash.sh"
-[ -f "$SPEC_BASH_CHECKER" ] || SPEC_BASH_CHECKER="{WORKTREE_PATH}/scripts/check-spec-bash.sh"
+# Install-root-only resolution (no worktree/cwd fallback: the branch under review must not supply the script that gates it).
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+# Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+_l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+# Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+_cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+# newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+_v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+_m="$HOME/.claude/plugins/marketplaces/$_mk"
+# '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
+_k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
+while IFS= read -r _c; do
+case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
+done <<< "$_k"
+fi
+SPEC_BASH_CHECKER="${FORGE_ROOT:+$FORGE_ROOT/scripts/check-spec-bash.sh}"
 SPEC_MD_FILES=$(echo {CHANGED_FILES} | tr ' ' '\n' | grep -E '^commands/.*\.md$' || true)
 if [ -f "$SPEC_BASH_CHECKER" ] && [ -n "$SPEC_MD_FILES" ]; then
     PR_BASE="${PR_BASE:-staging}"
@@ -1701,10 +1765,30 @@ For each failing test ID (or test command) surfaced in Step 2:
 # GH_REPO is owner/repo from forge.yaml (used to file the quarantine issue)
 # PR_ISSUE_NUMBER is the issue this quality gate was invoked from (optional)
 
-CLASSIFIER="${FORGEDOCK_SCRIPTS:-scripts}/flaky-quarantine.sh"
-[ -f "$CLASSIFIER" ] || CLASSIFIER="{WORKTREE_PATH}/scripts/flaky-quarantine.sh"
+# Install-root-only resolution (no worktree/cwd fallback: the branch under review must not supply the script that gates it).
+# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+FORGE_ROOT=""
+# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+# Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+_l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+# Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+_cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+# newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+_v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+_m="$HOME/.claude/plugins/marketplaces/$_mk"
+# '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
+_k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
+while IFS= read -r _c; do
+case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
+done <<< "$_k"
+fi
+CLASSIFIER="${FORGE_ROOT:+$FORGE_ROOT/scripts/flaky-quarantine.sh}"
 
-if [ -f "$CLASSIFIER" ]; then
+if [ -n "$CLASSIFIER" ] && [ -f "$CLASSIFIER" ]; then
     RESULT=$(bash "$CLASSIFIER" \
         --test   "{FAILING_TEST}" \
         --base   "{PR_BASE}" \
@@ -1718,7 +1802,7 @@ if [ -f "$CLASSIFIER" ]; then
 else
     # Script not present — fall back to treating all test failures as real.
     CLASSIFICATION="REAL"
-    echo "NOTE: scripts/flaky-quarantine.sh not found — treating test failure as REAL (no classification)"
+    echo "NOTE: flaky-quarantine.sh not found in the ForgeDock install root — treating test failure as REAL (no classification)"
 fi
 ```
 

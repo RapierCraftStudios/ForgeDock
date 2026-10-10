@@ -29,6 +29,12 @@ export const DEFAULT_LEASE_RENEW_INTERVAL_MS = 240000;
 // need at most one or two pauses in practice.
 export const DEFAULT_MAX_SESSION_LIMIT_PAUSES = 5;
 
+// forge#3511: bounded wait applied ONLY when the runner flagged a confirmed
+// usage-limit failure (`err.usageLimit`) but could not produce a parseable
+// reset epoch. The runner never fabricates a reset time; this default lives in
+// the engine and is still capped by `maxSessionLimitPauses`.
+export const DEFAULT_SESSION_LIMIT_WAIT_MS = 30 * 60 * 1000;
+
 /**
  * Validates the subset of `runIssue()`'s options that must fail fast,
  * synchronously, before any state I/O or timer creation — `backend` and the
@@ -44,7 +50,7 @@ export const DEFAULT_MAX_SESSION_LIMIT_PAUSES = 5;
  * @param {number} params.maxSessionLimitPauses - forge#2524: bound on consecutive session-limit pauses.
  * @throws {Error & {code: "INVALID_BACKEND"|"INVALID_LEASE_CONFIG"|"INVALID_SESSION_LIMIT_CONFIG"}}
  */
-function validateRunIssueOptions({ backend, leaseTtlMs, leaseRenewIntervalMs, maxSessionLimitPauses }) {
+function validateRunIssueOptions({ backend, leaseTtlMs, leaseRenewIntervalMs, maxSessionLimitPauses, sessionLimitDefaultWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS }) {
   // forge#2054: validate `backend` before anything else — before state is
   // read/written and before the phase/retry loop begins below. An invalid
   // value must fail fast and non-retryably. Without this check, an invalid
@@ -128,6 +134,15 @@ function validateRunIssueOptions({ backend, leaseTtlMs, leaseRenewIntervalMs, ma
       { code: "INVALID_SESSION_LIMIT_CONFIG" },
     );
   }
+  // forge#3511: same guard for the unknown-reset default wait.
+  if (typeof sessionLimitDefaultWaitMs !== "number" || !Number.isFinite(sessionLimitDefaultWaitMs) || sessionLimitDefaultWaitMs < 0) {
+    throw Object.assign(
+      new Error(
+        `Invalid session-limit config: sessionLimitDefaultWaitMs must be a finite number >= 0, got ${typeof sessionLimitDefaultWaitMs === "number" ? sessionLimitDefaultWaitMs : `${typeof sessionLimitDefaultWaitMs} (${JSON.stringify(sessionLimitDefaultWaitMs)})`}.`,
+      ),
+      { code: "INVALID_SESSION_LIMIT_CONFIG" },
+    );
+  }
 }
 
 /**
@@ -204,6 +219,14 @@ function makeProgressEmitter(onProgress) {
  *   Defaults to DEFAULT_MAX_SESSION_LIMIT_PAUSES. Purely a defensive backstop
  *   against a persistently-misreported reset time; a genuine reset is
  *   expected to need at most one or two pauses in practice.
+ * @param {number} [opts.sessionLimitDefaultWaitMs] - forge#3511: how long to
+ *   pause when the failure is a confirmed usage limit but no reset time could
+ *   be parsed. Defaults to DEFAULT_SESSION_LIMIT_WAIT_MS; counts against
+ *   `maxSessionLimitPauses`.
+ * @param {boolean} [opts.retry] - forge#3511: explicit opt-in. When the run's
+ *   terminal reason is `engine-error`, reopen it (RUN_REOPEN) and resume from
+ *   the last committed phase. Any other terminal reason is left untouched and
+ *   returns `not-retryable`.
  */
 export async function runIssue(opts) {
   const { issue, dir, agentId, lane = "staging", io, runner,
@@ -214,12 +237,19 @@ export async function runIssue(opts) {
           // callers keep runner.mjs's own "auto" ladder default unchanged —
           // this is purely additive pass-through, not a new default.
           backend, model,
+          // forge#3499: "owner/repo" the phase sub-skills must target
+          // (`--repo` / `--gh-flag`). Optional override; otherwise resolved
+          // lazily — once, only if a phase's runner is actually invoked —
+          // from the cwd-resolved repo (`gh repo view`).
+          repo,
           leaseTtlMs = DEFAULT_LEASE_TTL_MS,
           leaseRenewIntervalMs = DEFAULT_LEASE_RENEW_INTERVAL_MS,
           // forge#2524: real default is a genuine setTimeout-based wait —
           // tests inject a fast/no-op replacement (see opts.sleep doc above).
           sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
           maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES,
+          sessionLimitDefaultWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS,
+          retry = false,
           onProgress = () => {} } = opts;
 
   // forge#2452: extracted into makeProgressEmitter() — see its docstring for
@@ -230,7 +260,7 @@ export async function runIssue(opts) {
   // for the forge#2054/#2313/#2329 rationale and required call-order (before
   // any state I/O or timer creation, unchanged from the inline block this
   // replaces).
-  validateRunIssueOptions({ backend, leaseTtlMs, leaseRenewIntervalMs, maxSessionLimitPauses });
+  validateRunIssueOptions({ backend, leaseTtlMs, leaseRenewIntervalMs, maxSessionLimitPauses, sessionLimitDefaultWaitMs });
 
   const projector = makeProjector(io);
 
@@ -260,6 +290,25 @@ export async function runIssue(opts) {
     rewriteLog(dir, issue, eventsFromIndex(state));
     state = deriveState(readLog(dir, issue));
   }
+
+  // forge#3511: explicit `--retry` reopens a transient `engine-error` terminal
+  // so the run resumes from its last committed phase. Placed AFTER the I3
+  // lease guard (never weaken that ordering) and BEFORE the unconditional
+  // lease write below, which then publishes `terminal:false` at the reopen's
+  // higher `v`. Only `engine-error` is ever reopened; needs-human / merged /
+  // decomposed / etc. terminals are left untouched.
+  let reopened = false;
+  if (retry && state?.terminal) {
+    if (state.terminalReason !== "engine-error") {
+      return {
+        terminalReason: "not-retryable",
+        detail: `issue ${issue} ended ${state.terminalReason}; --retry only reopens an engine-error run`,
+      };
+    }
+    appendEvent(dir, issue, { event: "RUN_REOPEN", issue });
+    state = deriveState(readLog(dir, issue));
+    reopened = true;
+  }
   // forge#2239: claim the lease unconditionally here — before the phase loop
   // starts, for EVERY reconcile action ("fresh", "remirror", "hydrate", and
   // "local"). Previously only "fresh"/"remirror"/"hydrate" wrote any state at
@@ -273,6 +322,17 @@ export async function runIssue(opts) {
   // check above (commit 541a3e5 fixed the reverse ordering as a real bug —
   // do not reintroduce it).
   await projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } });
+  // forge#3511: clear the stale label only after the reopened state is
+  // published, so a crash in between leaves the run still marked engine-error.
+  // On `--retry` this runs whether or not THIS invocation did the reopen: a prior
+  // retry may have published the reopen and died before removing the label, so the
+  // next one sees a non-terminal state (reopened=false) with the label still set.
+  // Best-effort — a transient `gh` error must not abort a reopen already published.
+  // Removing an absent label is a harmless no-op.
+  if (retry) {
+    try { await projector.removeLabel(issue, "workflow:engine-error"); }
+    catch (err) { console.warn(`forge#3511: could not clear workflow:engine-error on #${issue}: ${err?.message || err}`); }
+  }
 
   // 2. Drive phases until terminal.
   //
@@ -284,8 +344,26 @@ export async function runIssue(opts) {
   // against a nonexistent ref and silently evaluated to 0 (forge#2174). The
   // build phase's `reconcile`/`detectOutcome` (bin/engine/phases.mjs) resolve
   // the real branch from the `FORGE:BUILDER` comment instead.
+  let repoPromise = null;
+  const resolveRepo = () => (repoPromise ??= (async () => {
+    if (repo) return String(repo).trim();
+    try {
+      const out = await io.gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
+      return String(out || "").trim() || null;
+    } catch { return null; }
+  })());
+
   let phase;
   while ((phase = pickPhase(state))) {
+    // forge#3506 (SPEC-1/SPEC-2): a crash after a terminal-after phase committed (remediate or
+    // decompose) and before RUN_TERMINAL leaves its persisted reason on the commit event. Resume
+    // must honour that reason instead of picking the next phase (close would throw in buildArgs
+    // and end as engine-error; build would run on a decomposed parent). Review's `needs-human`
+    // is a handoff to remediate, so only these two committed phases trigger the guard.
+    if (state.terminalReason && TERMINAL_REASONS.includes(state.terminalReason) &&
+        ((state.committed.includes("remediate") && !["merged", "decomposed", "invalid"].includes(state.terminalReason)) ||
+         (state.committed.includes("decompose") && state.terminalReason === "decomposed")))
+      return await terminate(state, state.terminalReason);
     // forge#2352: state-vs-GitHub divergence guard. Every phase's own
     // `entryCondition` only ever checked `state.committed` (local run-log
     // progress) — never the issue's live GitHub state/labels — so a phase
@@ -428,18 +506,21 @@ export async function runIssue(opts) {
         let pauseCount = 0;
         for (;;) {
           try {
-            outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model });
+            outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo });
             break;
           } catch (e) {
             const resetAtMs = e.resetAtEpochMs;
+            const hasResetEpoch =
+              typeof resetAtMs === "number" && Number.isFinite(resetAtMs) && resetAtMs > now();
+            // forge#3511: a confirmed usage limit whose reset time is
+            // missing/unparseable/already past still pauses, by a bounded default.
             const canPause =
               e.code === "CLI_BACKEND_FAILED" &&
-              typeof resetAtMs === "number" && Number.isFinite(resetAtMs) &&
-              resetAtMs > now() &&
+              (hasResetEpoch || e.usageLimit === true) &&
               pauseCount < maxSessionLimitPauses;
             if (!canPause) throw e; // falls through to the unchanged outer catch below
             pauseCount += 1;
-            const waitMs = Math.max(0, resetAtMs - now());
+            const waitMs = hasResetEpoch ? Math.max(0, resetAtMs - now()) : sessionLimitDefaultWaitMs;
             // forge#2524 AC4: append a run-log event so a crash mid-wait
             // leaves a durable record of the pause (deriveState() folds this
             // into RunState.lastRateLimit — see bin/engine/runlog.mjs). This
@@ -449,15 +530,17 @@ export async function runIssue(opts) {
             // was ever written.
             appendEvent(dir, issue, {
               event: "PHASE_RATE_LIMITED", phase: phase.id,
-              resetAt: resetAtMs, resetAtDisplay: e.resetAt || null, waitMs,
+              resetAt: hasResetEpoch ? resetAtMs : null, resetAtDisplay: e.resetAt || null, waitMs,
             });
             // forge#2524 AC6: progress observer sees the pause so a caller
             // (bin/engine-cli.mjs) can render the wait state instead of the
             // process going silent for the duration.
             emitProgress({
               event: "phase_paused", phase: phase.id, reason: "session-limit",
-              resetAt: resetAtMs,
-              detail: `session limit hit — pausing until ${e.resetAt || new Date(resetAtMs).toISOString()}`,
+              resetAt: hasResetEpoch ? resetAtMs : null,
+              detail: hasResetEpoch
+                ? `session limit hit — pausing until ${e.resetAt || new Date(resetAtMs).toISOString()}`
+                : `session limit hit — reset time unknown, waiting default ${Math.round(waitMs / 60000)} min`,
             });
             await sleep(waitMs);
             // Loop back and retry the same phase with a fresh attempt budget
@@ -522,8 +605,14 @@ export async function runIssue(opts) {
       }
     }
 
+    // forge#3499: remediate takes the PR number as its positional argument, so
+    // the handoff only applies when review resolved one. A review that blocked
+    // without ever resolving a PR (e.g. retries exhausted before one existed)
+    // has nothing to remediate and stays a plain needs-human stop — it must not
+    // fall through to `close`, which would otherwise be the next eligible phase.
     const isRemediationHandoff = outcome.status === "blocked" &&
-      phase.id === "review" && (outcome.reason || "needs-human") === "needs-human";
+      phase.id === "review" && (outcome.reason || "needs-human") === "needs-human" && outcome.handoff !== false &&
+      (outcome.outputs?.pr ?? state.pr) != null;
     if (outcome.status === "blocked") {
       emitProgress({ event: "phase_exit", phase: phase.id, status: "blocked", detail: outcome.detail });
       if (!isRemediationHandoff)
@@ -547,11 +636,24 @@ export async function runIssue(opts) {
     // the "committed" path, so that case doesn't apply here). Kept as a
     // sibling of `outputs` rather than nested inside it, since `outputs` is
     // owned by phase.detectOutcome() (bin/engine/phases.mjs).
-    appendEvent(dir, issue, { event: "PHASE_COMMIT", phase: phase.id, outputs: outcome.outputs || {}, usage: outcome.usage ?? null });
+    // forge#3503/#3504: a blocked review hands off to remediate, which reads the PR
+    // number and the needs-human reason from state re-derived from the run log. Persist
+    // both in the PHASE_COMMIT event itself so a rebuild (the next line, or a resume)
+    // sees them; in-memory-only values are discarded by deriveState.
+    const commitOutputs = { ...(outcome.outputs || {}) };
+    if (outcome.status === "blocked" && commitOutputs.pr == null && state.pr != null)
+      commitOutputs.pr = state.pr;
+    const blockedReason = outcome.status === "blocked" ? (outcome.reason || "needs-human") : null;
+    // forge#3506: committed outcomes also carry handoff/terminal reasons (investigate
+    // `decomposed`, remediate `merged`/`awaiting-merge`/`needs-human`). Persist them on the
+    // commit event too, so a crash before RUN_TERMINAL or a rebuild cannot drop them.
+    const commitReason = blockedReason ?? outcome.terminalReason ?? null;
+    appendEvent(dir, issue, {
+      event: "PHASE_COMMIT", phase: phase.id, outputs: commitOutputs, usage: outcome.usage ?? null,
+      ...(commitReason ? { terminalReason: commitReason } : {}),
+    });
     state = deriveState(readLog(dir, issue));
-    const terminalReason = outcome.status === "blocked"
-      ? (outcome.reason || "needs-human")
-      : outcome.terminalReason;
+    const terminalReason = blockedReason ?? outcome.terminalReason;
     if (terminalReason) state.terminalReason = terminalReason;
     await projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } });
 
@@ -597,7 +699,21 @@ export async function runIssue(opts) {
 }
 
 async function runPhaseWithRetry(phase, state, ctx) {
-  const { io, runner, dir, issue, commandsDir, maxAttempts, backend, model } = ctx;
+  const { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo } = ctx;
+  // forge#3499: build the phase's full argument set ONCE, up front. Every
+  // work-on phase sub-skill stops with BLOCKED when a required flag is absent,
+  // so an incomplete/invalid set is a deterministic engine failure — fail
+  // closed here (no runner call, no retries) instead of sending a partial
+  // `[issue]`-only invocation that burns the attempt budget.
+  let phaseArgs;
+  try {
+    phaseArgs = await phase.buildArgs(state, { repo: await resolveRepo() }, io);
+  } catch (e) {
+    if (e?.code !== "PHASE_ARGS_INVALID") throw e;
+    const detail = `phase ${phase.id} args unresolved: ${e.message}`;
+    appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt: 0, reason: detail, maxAttempts });
+    return { status: "blocked", detail, reason: "engine-error", usage: null };
+  }
   // forge#2261: true only if EVERY attempt failed by the runner itself
   // throwing (never once reached phase.detectOutcome()). This is the signal
   // that distinguishes an engine/tool crash (the tool never even produced a
@@ -621,7 +737,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
     let result;
     try {
       result = await runner({
-        commandsDir, commandName: phase.command, args: [String(issue)],
+        commandsDir, commandName: phase.command, args: phaseArgs,
         // Only forwarded when explicitly provided — omitting them preserves
         // runner.mjs's existing default ("auto" backend / DEFAULT_MODEL).
         ...(backend ? { backend } : {}),
@@ -656,7 +772,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
     }
     allAttemptsThrew = false;
     lastUsage = result?.usage ?? null;
-    const outcome = await phase.detectOutcome(state, io);
+    const outcome = await phase.detectOutcome(state, io, result);
     if (outcome.status === "committed" || outcome.status === "blocked") return { ...outcome, usage: lastUsage };
     appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail, maxAttempts, usage: lastUsage });
     // forge#2176: a phase's detectOutcome can mark a failure as a known,
@@ -670,7 +786,9 @@ async function runPhaseWithRetry(phase, state, ctx) {
     // for every phase that doesn't opt in — investigate/context/architect/
     // review/close — is unchanged, preserving transient-failure retries).
     if (outcome.retryable === false) {
-      return { status: "blocked", detail: outcome.detail, usage: lastUsage };
+      // forge#3521: keep outcome.outputs (e.g. the PR number) so the blocked
+      // commit persists it and isRemediationHandoff can see it.
+      return { status: "blocked", detail: outcome.detail, outputs: outcome.outputs, handoff: outcome.handoff, usage: lastUsage };
     }
   }
   // Exhausted transient retries → escalate (spec §7).
@@ -705,6 +823,14 @@ function eventsFromIndex(idx) {
     if (phase === "build" && idx.branch) outputs.branch = idx.branch;
     if (phase === "review" && idx.pr != null) outputs.pr = idx.pr;
     events.push({ event: "PHASE_COMMIT", phase, outputs });
+  }
+  // forge#3506: a non-terminal reason is a handoff (e.g. review -> remediate). Replay it on
+  // the last committed PHASE_COMMIT (deriveState is last-wins), never as RUN_TERMINAL, which
+  // would terminate the run. Nothing to attach it to when no phase is committed.
+  if (!idx.terminal && idx.terminalReason && idx.committed.length > 0) {
+    for (let i = events.length - 1; i >= 0; i--) {
+      if (events[i].event === "PHASE_COMMIT") { events[i].terminalReason = idx.terminalReason; break; }
+    }
   }
   if (idx.terminal) events.push({ event: "RUN_TERMINAL", reason: idx.terminalReason });
   return events;

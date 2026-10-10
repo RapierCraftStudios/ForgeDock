@@ -207,30 +207,66 @@ If `LAST_VERDICT_SHA` is empty (no prior CHANGES REQUESTED verdict found) or dif
 
 ## Phase R1: Pre-Push Ancestry Guard
 
-Before pushing, verify the branch contains no merge commits from branches outside the PR base ancestry. This is the final defense against milestone-code-onto-staging contamination.
+Before pushing, verify the branch contains no merge commits that bring in history from outside the PR base. Merging `origin/{PR_BASE}` itself into the branch (a base sync) is allowed: every non-first parent of each merge in `origin/{PR_BASE}..{BRANCH}` must be an ancestor of `origin/{PR_BASE}`. This is the final defense against milestone-code-onto-staging contamination.
 
 ```bash
+# <Script resolution block from the top of this file, verbatim>
 cd {WORKTREE_PATH}
 # Skip if PR_BASE does not exist on origin yet (new branch — no contamination possible)
 if git ls-remote --exit-code origin {PR_BASE} >/dev/null 2>&1; then
-  MERGE_COMMITS=$(git log --merges {BRANCH} ^origin/{PR_BASE} 2>/dev/null)
-  if [ -n "$MERGE_COMMITS" ]; then
-    echo "PRE-PUSH ANCESTRY GUARD FAILED: merge commits from outside {PR_BASE} detected"
+  git fetch origin {PR_BASE} >/dev/null 2>&1 || true
+  RESOLUTION=$(resolve_script 'check-branch-ancestry'); TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+  if [ "$TIER" = "prose" ]; then
+    # Prose fallback: same checks inline (exit 0 clean, 1 foreign, 2 error). Fails closed: unresolvable refs or git errors give rc=2.
+    ANCESTRY_RC=0; MERGE_COMMITS=""
+    if ! git rev-parse --verify --quiet "origin/{PR_BASE}^{commit}" >/dev/null 2>&1 || ! git rev-parse --verify --quiet "{BRANCH}^{commit}" >/dev/null 2>&1; then
+      ANCESTRY_RC=2
+    elif ! MERGES=$(git rev-list --merges origin/{PR_BASE}..{BRANCH} 2>/dev/null) || ! FP=$(git rev-list --first-parent origin/{PR_BASE}..{BRANCH} 2>/dev/null); then
+      ANCESTRY_RC=2
+    else
+      for M in $MERGES; do
+        PARENTS=$(git rev-list --parents -n 1 "$M" 2>/dev/null) || { ANCESTRY_RC=2; continue; }
+        for P in $(printf '%s\n' "$PARENTS" | cut -d' ' -f3-); do
+          git merge-base --is-ancestor "$P" origin/{PR_BASE} 2>/dev/null; rc=$?
+          if [ "$rc" -eq 1 ]; then MERGE_COMMITS="${MERGE_COMMITS}${M} ${P}
+"; [ "$ANCESTRY_RC" -eq 2 ] || ANCESTRY_RC=1
+          elif [ "$rc" -ne 0 ]; then ANCESTRY_RC=2; fi
+        done
+      done
+      # First-parent line must not carry milestone history (branch cut from a milestone, then base sync).
+      for F in $(git for-each-ref --format='%(refname)' refs/remotes/origin/milestone/ refs/heads/milestone/ 2>/dev/null); do
+        for C in $FP; do
+          git merge-base --is-ancestor "$C" "$F" 2>/dev/null; rc=$?
+          if [ "$rc" -eq 0 ]; then MERGE_COMMITS="${MERGE_COMMITS}${C} first-parent history reachable from ${F}
+"; [ "$ANCESTRY_RC" -eq 2 ] || ANCESTRY_RC=1
+          elif [ "$rc" -ne 1 ]; then ANCESTRY_RC=2; fi
+        done
+      done
+    fi
+  else
+    MERGE_COMMITS=$(bash "$SCRIPT_PATH" {BRANCH} origin/{PR_BASE} 2>&1); ANCESTRY_RC=$?
+  fi
+  if [ "$ANCESTRY_RC" -ne 0 ]; then
+    if [ "$ANCESTRY_RC" -eq 1 ]; then
+      echo "PRE-PUSH ANCESTRY GUARD FAILED: merge commits from outside {PR_BASE} detected"
+    else
+      echo "PRE-PUSH ANCESTRY GUARD FAILED: could not verify ancestry (failing closed)"
+    fi
     gh issue comment {NUMBER} {GH_FLAG} --body "## Pre-Push Ancestry Guard Failed
 
-Branch \`{BRANCH}\` contains merge commits from branches outside the PR base (\`{PR_BASE}\`). Pushing this branch risks contaminating \`{PR_BASE}\` with unapproved code (e.g. milestone code leaking onto staging).
+Branch \`{BRANCH}\` contains merge commits that bring in history from outside the PR base (\`{PR_BASE}\`), or ancestry could not be verified. Pushing this branch risks contaminating \`{PR_BASE}\` with unapproved code (e.g. milestone code leaking onto staging). Merges of \`{PR_BASE}\` itself are allowed and do not trigger this guard.
 
-**Detected merge commits**:
+**Detected merge commits** (merge, foreign parent, subject — or the verification error):
 \`\`\`
 ${MERGE_COMMITS}
 \`\`\`
 
-Do NOT push this branch. Human review required to identify the source of the merge commits and clean the branch history (e.g. via \`git rebase\` to replay only the intended commits onto \`origin/{PR_BASE}\`).
+Do NOT push this branch. Human review required to identify the source of the merge commits and clean the branch history (a human re-creates the branch from \`origin/{PR_BASE}\` with only the intended commits).
 
-<!-- FORGE:PUSH_BLOCKED -->"
+<!-- FORGE:PUSH_BLOCKED -->" # allowlist:check-command-side-effects
     gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" # allowlist:check-command-side-effects
     # Return REVIEW_RESULT: status: BLOCKED — do not push
-    printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number:\n  pr_url:\n  merged_to:\n  blocker: %s\n' "pre-push ancestry guard failed: merge commits from outside {PR_BASE}"
+    printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number:\n  pr_url:\n  merged_to:\n  blocker: %s\n' "pre-push ancestry guard failed: merge commits from outside {PR_BASE} or ancestry unverifiable"
     exit 1
   fi
 fi
@@ -268,12 +304,7 @@ cd {WORKTREE_PATH}
 git push -u origin {BRANCH} # allowlist:check-command-side-effects
 ```
 
-If push fails, retry with `--force-with-lease`:
-```bash
-git push -u origin {BRANCH} --force-with-lease # allowlist:check-command-side-effects
-```
-
-If still fails:
+If the push fails, do NOT retry with a force flag (never force-push): a raced or diverged remote is a human decision, and a conflict with the base is handled by the base-sync path (`base-conflict` in Phase R4), not by overwriting the remote. Fall straight through to:
 ```bash
 gh issue comment {NUMBER} {GH_FLAG} --body "## Push Failed
 
@@ -547,7 +578,7 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 In-PR fix round did not land; the remaining CONFIRMED MEDIUM findings are filed as issues on the next review instead of blocking the merge." # allowlist:check-command-side-effects
     ```
 
-  Persisted loop bounds for the cases above — count first, then act (`{BOUND}` is `STALE_REREVIEW`, `CI_REMEDIATION` or `INPR_REMEDIATION`). This phase posts only the `STALE_REREVIEW` marker; `CI_REMEDIATION` and `INPR_REMEDIATION` are posted by the router in Phase 4R, immediately before it invokes remediation (forge#3398):
+  Persisted loop bounds for the cases above — count first, then act (`{BOUND}` is `STALE_REREVIEW`, `CI_REMEDIATION`, `INPR_REMEDIATION` or `BASESYNC_REMEDIATION`). This phase posts only the `STALE_REREVIEW` marker; `CI_REMEDIATION`, `INPR_REMEDIATION` and `BASESYNC_REMEDIATION` are posted by the router in Phase 4R, immediately before it invokes remediation (forge#3398):
   ```bash
   [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] bound check only"; }
   if [ "{BOUND}" = "STALE_REREVIEW" ]; then
@@ -556,6 +587,9 @@ In-PR fix round did not land; the remaining CONFIRMED MEDIUM findings are filed 
   elif [ "{BOUND}" = "INPR_REMEDIATION" ]; then
     BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
       --jq '[.[] | select((.body | contains("FORGE:INPR_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
+  elif [ "{BOUND}" = "BASESYNC_REMEDIATION" ]; then
+    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
+      --jq '[.[] | select((.body | contains("FORGE:BASESYNC_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
   else
     BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
       --jq '[.[] | select((.body | contains("FORGE:CI_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
@@ -569,7 +603,11 @@ Stale review on PR #{PR_NUMBER}: quality-gating and re-reviewing the new head on
   ```
   `BOUND_EXHAUSTED` → take the "already ≥ 1" branch of that case.
 
-- PR NOT MERGED (and not a phase-trail, auto-merge-gate, stale-review, ci-gate or in-pr-fix BLOCKED above) → attempt manual merge, **only if the PR head is still the commit named in the latest `<!-- FORGE:REVIEW -->` APPROVED verdict** (otherwise re-invoke Phase R3 instead, as for "stale review") **and only after the same CI gate**:
+- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "base-conflict" (review-pr Phase 7B / Phase 8: `mergeable=CONFLICTING` or `mergeStateStatus=DIRTY`, or `BEHIND` under required-up-to-date protection, and no other blocking finding; forge#3496): do NOT attempt the manual merge below and do NOT merge by any other route. Syncing the base is pipeline work: merge `origin/{PR_BASE}` into the issue's own branch (merge only, never rebase, never force-push, never touch a shared branch). Run **one** sync round, bounded by `<!-- FORGE:BASESYNC_REMEDIATION: pr={PR_NUMBER} -->` on the issue (`{BOUND}` = `BASESYNC_REMEDIATION` below).
+  - **Bound unused**: add `needs-human` (remediation only targets `needs-human`-gated PRs, and its Phase M1 clears it as FIXABLE). Then return `REVIEW_RESULT: status: NEXT` with `next: remediate` and `remediation: base-sync`. The router posts the bound marker (Phase 4R) and runs `work-on:remediate`, which merges the base in, re-runs the quality gate and re-reviews the new head. Never invoke `work-on:remediate` from this phase (same reason as the ci-gate case).
+  - **Bound already used** (the sync ran and the PR still conflicts, or the sync could not resolve a hunk): do not sync again. Leave `needs-human` and return `REVIEW_RESULT: status: BLOCKED` with blocker "base conflict persists after base-sync remediation". List the conflicting files in the issue comment you post, taken from the remediation's `FORGE:BASESYNC_FAILED` comment (the `git diff --name-only --diff-filter=U` list) when present.
+
+- PR NOT MERGED (and not a phase-trail, auto-merge-gate, stale-review, ci-gate, in-pr-fix or base-conflict BLOCKED above) → attempt manual merge, **only if the PR head is still the commit named in the latest `<!-- FORGE:REVIEW -->` APPROVED verdict** (otherwise re-invoke Phase R3 instead, as for "stale review") **and only after the same CI gate**:
   ```bash
   # CI gate (MANDATORY before any autonomous merge): merge only when every check on the PR is
   # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch
@@ -623,7 +661,7 @@ REVIEW_RESULT:
   pr_url: {PR_URL}
   merged_to: {PR_BASE}
   next: {remediate, only when status=NEXT}
-  remediation: {ci-gate | inpr-fix, only when status=NEXT}
+  remediation: {ci-gate | inpr-fix | base-sync, only when status=NEXT}
   blocker: {description if status=BLOCKED}
 ```
 

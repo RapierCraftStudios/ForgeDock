@@ -559,21 +559,72 @@ Reference `#{NUMBER}` in the message. This is the **only** commit for this build
 
 ### V5 Step 3: Post-Commit Ancestry Audit (MANDATORY)
 
-After committing, run the ancestry audit to detect merge commits from unrelated branches before the branch is pushed. If `origin/{PR_BASE}` does not exist yet (new branch), skip this check — no contamination is possible from a non-existent base.
+After committing, run the ancestry audit to detect merge commits that bring in history from outside the PR base before the branch is pushed. Merging `origin/{PR_BASE}` itself into the branch (a base sync) is allowed: every non-first parent of each merge must be an ancestor of `origin/{PR_BASE}`. If `origin/{PR_BASE}` does not exist yet (new branch), skip this check — no contamination is possible from a non-existent base.
 
 ```bash
 cd {WORKTREE_PATH}
 if git ls-remote --exit-code origin {PR_BASE} >/dev/null 2>&1; then
   git fetch origin {PR_BASE} >/dev/null 2>&1 || true
-  MERGE_COMMITS=$(git log --merges HEAD ^origin/{PR_BASE} 2>/dev/null)
-  if [ -n "$MERGE_COMMITS" ]; then
-    echo "ANCESTRY AUDIT FAILED: merge commits from unrelated branches detected on this branch:"
+  # Same install-root-only resolution as work-on/review.md R1 (resolve_script 'check-branch-ancestry'): the script gates this branch's own push, so it is NEVER taken from the worktree (the PR branch under audit) or a cwd-relative path. Unresolvable -> prose fallback below, which fails closed.
+  # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+  FORGE_ROOT=""
+  # Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+  _h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+  # Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+  _mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+  if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+  # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+  _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+  # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+  _m="$HOME/.claude/plugins/marketplaces/$_mk"
+  # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
+  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
+  while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
+  done <<< "$_k"
+  fi
+  ANCESTRY_SCRIPT="${FORGE_ROOT:+$FORGE_ROOT/scripts/check-branch-ancestry.sh}"; [ -f "$ANCESTRY_SCRIPT" ] || ANCESTRY_SCRIPT=""
+  if [ -n "$ANCESTRY_SCRIPT" ]; then
+    MERGE_COMMITS=$(bash "$ANCESTRY_SCRIPT" HEAD origin/{PR_BASE} 2>&1); ANCESTRY_RC=$?
+  else
+    # Prose fallback: same checks inline (exit 0 clean, 1 foreign, 2 error). Fails closed: unresolvable refs or git errors give rc=2.
+    ANCESTRY_RC=0; MERGE_COMMITS=""
+    if ! git rev-parse --verify --quiet "origin/{PR_BASE}^{commit}" >/dev/null 2>&1 || ! git rev-parse --verify --quiet "HEAD^{commit}" >/dev/null 2>&1; then
+      ANCESTRY_RC=2
+    elif ! MERGES=$(git rev-list --merges origin/{PR_BASE}..HEAD 2>/dev/null) || ! FP=$(git rev-list --first-parent origin/{PR_BASE}..HEAD 2>/dev/null); then
+      ANCESTRY_RC=2
+    else
+      for M in $MERGES; do
+        PARENTS=$(git rev-list --parents -n 1 "$M" 2>/dev/null) || { ANCESTRY_RC=2; continue; }
+        for P in $(printf '%s\n' "$PARENTS" | cut -d' ' -f3-); do
+          git merge-base --is-ancestor "$P" origin/{PR_BASE} 2>/dev/null; rc=$?
+          if [ "$rc" -eq 1 ]; then MERGE_COMMITS="${MERGE_COMMITS}${M} ${P}
+"; [ "$ANCESTRY_RC" -eq 2 ] || ANCESTRY_RC=1
+          elif [ "$rc" -ne 0 ]; then ANCESTRY_RC=2; fi
+        done
+      done
+      # First-parent line must not carry milestone history (branch cut from a milestone, then base sync).
+      for F in $(git for-each-ref --format='%(refname)' refs/remotes/origin/milestone/ refs/heads/milestone/ 2>/dev/null); do
+        for C in $FP; do
+          git merge-base --is-ancestor "$C" "$F" 2>/dev/null; rc=$?
+          if [ "$rc" -eq 0 ]; then MERGE_COMMITS="${MERGE_COMMITS}${C} first-parent history reachable from ${F}
+"; [ "$ANCESTRY_RC" -eq 2 ] || ANCESTRY_RC=1
+          elif [ "$rc" -ne 1 ]; then ANCESTRY_RC=2; fi
+        done
+      done
+    fi
+  fi
+  if [ "$ANCESTRY_RC" -ne 0 ]; then
+    echo "ANCESTRY AUDIT FAILED (rc=$ANCESTRY_RC): merge commits from outside {PR_BASE} detected, or ancestry could not be verified:"
     echo "$MERGE_COMMITS"
     ANCESTRY_BODY="## Ancestry Audit Failed
 
-Branch \`{BRANCH}\` contains merge commits from branches outside the PR base (\`{PR_BASE}\`). This is a staging contamination risk — these commits may carry code from milestone branches that has not been approved for \`{PR_BASE}\`.
+Branch \`{BRANCH}\` contains merge commits that bring in history from outside the PR base (\`{PR_BASE}\`), or ancestry could not be verified (failing closed). This is a staging contamination risk — these commits may carry code from milestone branches that has not been approved for \`{PR_BASE}\`. Merges of \`{PR_BASE}\` itself are allowed and do not trigger this audit.
 
-**Detected merge commits**:
+**Detected merge commits** (merge, foreign parent, subject — or the verification error):
 \`\`\`
 ${MERGE_COMMITS}
 \`\`\`
@@ -590,7 +641,7 @@ else
 fi
 ```
 
-If the output contains `ANCESTRY_FAILED=1`: do NOT append `:COMPLETE` and do NOT push. Print `VALIDATE_RESULT` with `gate_passed: false` and `blocker: ancestry audit failed — merge commits from unrelated branches` as the final reply, and STOP.
+If the output contains `ANCESTRY_FAILED=1`: do NOT append `:COMPLETE` and do NOT push. Print `VALIDATE_RESULT` with `gate_passed: false` and `blocker: ancestry audit failed — merge commits from outside the PR base` as the final reply, and STOP.
 
 ### V5 Step 4: Mark Build Complete and Record Verification Status (MANDATORY)
 
