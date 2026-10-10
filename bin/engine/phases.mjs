@@ -126,6 +126,17 @@ async function commitsAhead(lane, branch, io) {
 function has(blob, marker) { return blob.includes(marker); }
 
 /**
+ * forge#3534: true when the build phase's investigation exit left its durable marker.
+ * Anchored on the full HTML-comment form at the START of a comment body, so the marker
+ * quoted inside another annotation (investigator/architect prose, a quoted reply) never
+ * counts as ground truth.
+ */
+function hasInvestigationMarker(comments) {
+  const opener = `<!-- ${PHASE_MARKERS.build.investigationMarker} -->`;
+  return comments.some((c) => typeof c === "string" && c.trimStart().startsWith(opener));
+}
+
+/**
  * The interactive workflow persists its conservative complexity decision in a
  * FORGE:FAST_PATH comment. The engine must consume that decision too; otherwise
  * its separate context/architect phases negate the documented trivial path.
@@ -387,6 +398,9 @@ export const PHASES = [
       if (branch && has(blob, PHASE_MARKERS.build.completionMarker) && (await commitsAhead(state.lane, branch, io)) > 0) {
         return { satisfied: true, outputs: { branch } };
       }
+      // forge#3534: investigation exit already recorded — nothing to rebuild. Carry the
+      // reason so a resumed run skips review and routes straight to close.
+      if (hasInvestigationMarker(comments)) return { satisfied: true, terminalReason: "investigation", outputs: {} };
       return { satisfied: false };
     },
     async detectOutcome(state, io) {
@@ -405,6 +419,12 @@ export const PHASES = [
       if (complete && ahead > 0) {
         return { status: "committed", outputs: { branch, ...buildChildEvidence(blob, comments) } };
       }
+      // forge#3534: INVESTIGATION_COMPLETE writes no code, so `ahead` is never > 0 and the
+      // spec does not require FORGE:BUILDER:COMPLETE on that exit. The durable deliverables
+      // marker is the ground truth. Only reached when the code-producing branch above did
+      // not match; a crash (no marker) and complete-without-marker keep their old handling.
+      if (hasInvestigationMarker(comments))
+        return { status: "committed", terminalReason: "investigation", outputs: {} };
       const detail = `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}`;
       // forge#2176: when the builder has already posted FORGE:BUILDER:COMPLETE
       // but the resolved (real, ground-truth) branch has zero commits ahead of
@@ -440,7 +460,8 @@ export const PHASES = [
     id: "review",
     command: "work-on/review",
     buildArgs: reviewArgs,
-    entryCondition: (s) => s.committed.includes("build"),
+    // forge#3534: an investigation build opens no PR — skip review, go straight to close.
+    entryCondition: (s) => s.committed.includes("build") && s.terminalReason !== "investigation",
     async reconcile(state, io) {
       const pr = await openPrFor(state, io);   // adopt an existing PR instead of opening a second
       return pr ? { satisfied: false, outputs: { pr } } : { satisfied: false };
@@ -571,24 +592,31 @@ export const PHASES = [
       // non-merged handoff reason (needs-human, awaiting-merge, engine-error, ...) must never
       // be closed as merged.
       const reason = state.terminalReason ?? null;
-      if (reason !== null && !["merged", "decomposed", "invalid"].includes(reason))
+      if (reason !== null && !["merged", "decomposed", "invalid", "investigation"].includes(reason))
         throw new PhaseArgsError(`refusing close --terminal-state merged from terminalReason ${JSON.stringify(reason)}`);
       const terminal = reason === "decomposed" ? "decomposed"
-        : reason === "invalid" ? "invalid" : "merged";
+        : reason === "invalid" ? "invalid"
+        : reason === "investigation" ? "investigation" : "merged";
       const args = [String(state.issue), ...repoArgs(ctx), ...baseArgs(state)];
       // forge#3504: a merged close with no PR is fabricated evidence — require it.
-      if (state.pr != null || terminal === "merged") args.push("--pr", need(state.pr, "pr", /^[0-9]+$/));
+      // forge#3534: an investigation close has no PR; never forward a stale one.
+      if (terminal !== "investigation" && (state.pr != null || terminal === "merged")) args.push("--pr", need(state.pr, "pr", /^[0-9]+$/));
       if (state.branch) args.push("--branch", need(state.branch, "branch", BRANCH_RE));
       const wt = await resolveWorktree(state, io);
       if (wt && PATH_RE.test(wt)) args.push("--worktree", wt);
       args.push("--terminal-state", terminal);
       return args;
     },
-    entryCondition: (s) => s.committed.includes("review"),
+    // forge#3534: also reachable straight from an investigation build (no review, no PR).
+    entryCondition: (s) => s.committed.includes("review") ||
+      (s.committed.includes("build") && s.terminalReason === "investigation"),
     async reconcile(state, io) {
       // Idempotent resume: issue already closed or workflow:merged label set → skip the LLM re-run.
       const snap = await issueSnapshot(state.issue, io);
       if (!snap.ok) return { satisfied: false };
+      // forge#3534: the investigation exit closes the issue itself, but close.md still owns
+      // the project board / trajectory work. A closed issue is therefore NOT proof close ran.
+      if (state.terminalReason === "investigation") return { satisfied: false };
       return (snap.state === "CLOSED" || snap.labels.includes(PHASE_MARKERS.close.completionLabel))
         ? { satisfied: true }
         : { satisfied: false };
@@ -610,7 +638,7 @@ export const PHASES = [
       if (snap.labels.includes(PHASE_MARKERS.close.completionLabel))
         return { status: "committed", terminalReason: "merged", outputs: {} };
       if (snap.state === "CLOSED")
-        return { status: "committed", terminalReason: "invalid", outputs: {} };
+        return { status: "committed", terminalReason: state.terminalReason === "investigation" ? "investigation" : "invalid", outputs: {} };
       return { status: "failed", detail: "issue not closed" };
     },
     isTerminalAfter: () => true,

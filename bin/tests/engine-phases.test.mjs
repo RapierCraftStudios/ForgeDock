@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
-import { PHASES, pickPhase } from "../engine/phases.mjs";
+import { PHASES, pickPhase, TERMINAL_REASONS } from "../engine/phases.mjs";
 import { RESERVED_TYPES } from "../../packages/protocol/src/types.js";
 
 const base = { v: 0, run: "r1", issue: 42, lane: "staging", committed: [], phase: null,
@@ -73,6 +73,89 @@ describe("pickPhase", () => {
     const outcome = await build.detectOutcome({ ...base, branch: "fix/x-42" }, io);
     assert.equal(outcome.status, "committed");
     assert.equal(outcome.outputs.branch, "fix/x-42");
+  });
+
+  // forge#3534: INVESTIGATION_COMPLETE builds write no code; the durable
+  // FORGE:INVESTIGATION:DELIVERABLES comment is the engine's ground truth.
+  describe("build investigation exit (forge#3534)", () => {
+    const build = PHASES.find(p => p.id === "build");
+    const review = PHASES.find(p => p.id === "review");
+    const close = PHASES.find(p => p.id === "close");
+    const marker = "<!-- FORGE:INVESTIGATION:DELIVERABLES -->\n## Investigation deliverables\n- #31464";
+    const ioWith = (bodies, ahead = "0") => ({
+      gh: async () => JSON.stringify(bodies.map((body) => ({ body }))),
+      git: async () => ahead,
+    });
+
+    it("marker present, no commits -> committed on first attempt with terminalReason investigation", async () => {
+      const outcome = await build.detectOutcome(base, ioWith([marker]));
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "investigation");
+    });
+
+    it("real crash (no :COMPLETE, no marker) stays failed and retryable", async () => {
+      const outcome = await build.detectOutcome(base, ioWith(["<!-- FORGE:BUILDER --> partial"]));
+      assert.equal(outcome.status, "failed");
+      assert.notEqual(outcome.retryable, false);
+    });
+
+    it("complete=true ahead=0 without marker keeps the non-retryable fixed point (forge#2176)", async () => {
+      const outcome = await build.detectOutcome({ ...base, branch: "fix/x-42" },
+        ioWith(["<!-- FORGE:BUILDER:COMPLETE -->"], "0"));
+      assert.equal(outcome.status, "failed");
+      assert.equal(outcome.retryable, false);
+    });
+
+    it("marker plus :COMPLETE with commits takes the normal code path", async () => {
+      const outcome = await build.detectOutcome({ ...base, branch: "fix/x-42" },
+        ioWith([marker, "<!-- FORGE:BUILDER:COMPLETE -->"], "2"));
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("marker quoted inside another annotation is ignored", async () => {
+      const quoted = "<!-- FORGE:ARCHITECT -->\nplan mentions <!-- FORGE:INVESTIGATION:DELIVERABLES --> here";
+      const outcome = await build.detectOutcome(base, ioWith([quoted]));
+      assert.equal(outcome.status, "failed");
+    });
+
+    it("reconcile is satisfied (carrying the reason) on resume when the marker exists", async () => {
+      const r = await build.reconcile(base, ioWith([marker]));
+      assert.equal(r.satisfied, true);
+      assert.equal(r.terminalReason, "investigation");
+      assert.equal((await build.reconcile(base, ioWith(["nothing"]))).satisfied, false);
+    });
+
+    it("pickPhase skips review and picks close after an investigation build", () => {
+      const state = { ...base, committed: ["investigate", "build"], terminalReason: "investigation" };
+      assert.equal(review.entryCondition(state), false);
+      assert.equal(close.entryCondition(state), true);
+      assert.equal(pickPhase(state).id, "close");
+    });
+
+    it("a normal committed build still routes to review, not close", () => {
+      const state = { ...base, committed: ["investigate", "build"], terminalReason: null };
+      assert.equal(pickPhase(state).id, "review");
+      assert.equal(close.entryCondition(state), false);
+    });
+
+    it("investigation is NOT a TERMINAL_REASON (the run must reach close)", () => {
+      assert.equal(TERMINAL_REASONS.includes("investigation"), false);
+    });
+
+    it("close.detectOutcome keeps the investigation reason for a CLOSED, unmerged issue", async () => {
+      const io = { gh: async () => JSON.stringify({ state: "CLOSED", labels: [] }), git: async () => "0" };
+      const outcome = await close.detectOutcome({ ...base, terminalReason: "investigation" }, io);
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, "investigation");
+      const other = await close.detectOutcome({ ...base }, io);
+      assert.equal(other.terminalReason, "invalid");
+    });
+
+    it("close.reconcile does not short-circuit an investigation on a CLOSED issue", async () => {
+      const io = { gh: async () => JSON.stringify({ state: "CLOSED", labels: [] }), git: async () => "0" };
+      assert.equal((await close.reconcile({ ...base, terminalReason: "investigation" }, io)).satisfied, false);
+    });
   });
 
   it("close.detectOutcome does not throw on malformed gh response and reports failed", async () => {

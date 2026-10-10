@@ -54,6 +54,8 @@ export const PHASE_IDS = ['investigate', 'decompose', 'build', 'review', 'remedi
  *   whose presence means this phase has committed.
  * @property {string} [invalidMarker] - (investigate only) marks the issue INVALID.
  * @property {string} [decomposedMarker] - (investigate only) marks the issue DECOMPOSED.
+ * @property {string} [investigationMarker] - (build only) deliverables comment posted on the
+ *   INVESTIGATION_COMPLETE exit, where no commits (and no `completionMarker`) exist.
  * @property {string} [partialMarker] - sentinel for an interrupted/partial annotation.
  * @property {string} [presenceMarker] - bare annotation-opener substring, used only by
  *   phases whose completion is non-critical (see `context` below) — presence alone
@@ -91,6 +93,11 @@ export const PHASE_MARKERS = {
   },
   build: {
     completionMarker: RESERVED_TYPES.BUILDER.completionSentinel, // 'FORGE:BUILDER:COMPLETE'
+    // Durable marker for the non-code investigation exit (forge#3534): posted by
+    // work-on/build/implement as the first line of its deliverables comment. A build
+    // that ends INVESTIGATION_COMPLETE writes no commits, so `completionMarker` never
+    // appears; the engine reads this marker instead. Not checked by the registry drift script.
+    investigationMarker: 'FORGE:INVESTIGATION:DELIVERABLES',
   },
   review: {
     // No RESERVED_TYPES entry defines this sentinel (REVIEWER has no
