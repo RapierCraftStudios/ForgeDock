@@ -228,6 +228,53 @@ describe("crash injection: resume from the durable run-log", () => {
   });
 });
 
+describe("crash injection: forge#3506 handoff reasons survive a crash before RUN_TERMINAL", () => {
+  it("investigate decomposed: killed on the mirror write after its commit, resume routes to decompose (local log)", async () => {
+    const { w, io, runner } = makeWorld();
+    w.markers = " DECOMPOSE:YES";
+    const ran = [];
+    const wrapped = async (a) => {
+      ran.push(a.commandName);
+      if (a.commandName === "work-on/decompose") { w.markers += " <!-- FORGE:DECOMPOSED:COMPLETE -->"; return { status: "complete" }; }
+      return runner(a);
+    };
+    w.crashAtEdit = 2; // first mirror write after the investigate PHASE_COMMIT
+    const { res, launches } = await runToCompletion({ dir, io, runner: wrapped });
+    assert.ok(launches >= 2, "crash must fire");
+    assert.equal(res.terminalReason, "decomposed");
+    assert.ok(ran.includes("work-on/decompose"));
+    assert.ok(!ran.includes("work-on/build"), "must not fall through to build");
+    const inv = readLog(dir, 42).find((e) => e.event === "PHASE_COMMIT" && e.phase === "investigate");
+    assert.equal(inv.terminalReason, "decomposed");
+  });
+
+  it("blocked review then remediate commit, killed before RUN_TERMINAL: resume never closes as merged (needs-human persisted)", async () => {
+    const { w, io, runner } = makeWorld();
+    const ran = [];
+    const wrapped = async (a) => {
+      ran.push(a.commandName);
+      if (a.commandName === "work-on/review") { w.reviewRuns++; w.pr = 7; w.labels.push("needs-human"); return { status: "complete" }; }
+      if (a.commandName === "work-on/remediate") { w.markers += " FORGE:REMEDIATION:COMPLETE **Re-gate outcome**: HELD-AWAITING-MERGE"; return { status: "complete" }; }
+      return runner(a);
+    };
+    // review's detectOutcome sees an open PR carrying needs-human
+    const gh = io.gh;
+    io.gh = async (args) => {
+      if (args.join(" ").startsWith("pr view")) return JSON.stringify({ number: w.pr, state: "OPEN", mergedAt: null, labels: [{ name: "needs-human" }] });
+      return gh(args);
+    };
+    w.crashAtEdit = 5; // mirror write after remediate's commit (init, investigate, build, review, remediate)
+    const { res, launches } = await runToCompletion({ dir, io, runner: wrapped });
+    assert.ok(launches >= 2, "crash must fire");
+    assert.equal(res.terminalReason, "awaiting-merge");
+    assert.ok(!ran.includes("work-on/close"), "close must never run for a blocked/held PR");
+    const rem = readLog(dir, 42).find((e) => e.event === "PHASE_COMMIT" && e.phase === "remediate");
+    assert.equal(rem.terminalReason, "awaiting-merge");
+    const rev = readLog(dir, 42).find((e) => e.event === "PHASE_COMMIT" && e.phase === "review");
+    assert.equal(rev.terminalReason, "needs-human"); // needs-human handoff persisted on review's commit
+  });
+});
+
 describe("crash injection: forge#2184 comment-scoped last-match resume semantics", () => {
   // makeWorld() above models the `.../comments` endpoint as one concatenated
   // string blob (`w.markers`). issueMarkers() (bin/engine/phases.mjs) can only

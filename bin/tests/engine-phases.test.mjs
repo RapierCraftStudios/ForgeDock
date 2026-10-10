@@ -445,4 +445,23 @@ describe("pickPhase", () => {
       assert.equal(outcome.status, "failed");
     });
   });
+
+  // forge#3506: close must never derive `merged` from a non-merged handoff reason.
+  describe("close.buildArgs fail-closed", () => {
+    const close = PHASES.find(p => p.id === "close");
+    const st = (terminalReason) => ({ ...base, committed: ["review"], pr: 7, terminalReason });
+    const io = { gh: async () => "", git: async () => "" };
+    const ctx = { repo: "acme/widgets" };
+    for (const reason of ["needs-human", "awaiting-merge", "engine-error"]) {
+      it(`${reason} throws instead of defaulting to merged`, async () => {
+        await assert.rejects(() => close.buildArgs(st(reason), ctx, io), /refusing close/);
+      });
+    }
+    for (const [reason, expected] of [[null, "merged"], ["merged", "merged"], ["decomposed", "decomposed"], ["invalid", "invalid"]]) {
+      it(`${reason} still maps to ${expected}`, async () => {
+        const args = await close.buildArgs(st(reason), ctx, io);
+        assert.equal(args[args.indexOf("--terminal-state") + 1], expected);
+      });
+    }
+  });
 });
