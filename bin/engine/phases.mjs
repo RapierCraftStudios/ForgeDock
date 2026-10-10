@@ -387,6 +387,12 @@ export const PHASES = [
       if (branch && has(blob, PHASE_MARKERS.build.completionMarker) && (await commitsAhead(state.lane, branch, io)) > 0) {
         return { satisfied: true, outputs: { branch } };
       }
+      // forge#3535: work already merged into the lane has ahead=0 by definition;
+      // positive merged-PR evidence (base === lane) means build is satisfied.
+      if (branch && has(blob, PHASE_MARKERS.build.completionMarker)) {
+        const merged = await mergedPrForBranch(branch, state.lane, io);
+        if (merged) return { satisfied: true, outputs: { branch, pr: merged.number } };
+      }
       return { satisfied: false };
     },
     async detectOutcome(state, io) {
@@ -432,6 +438,15 @@ export const PHASES = [
       // resolve, so both must stay retryable. Only a successfully-computed
       // ahead of 0 on a *resolved* branch (a real "nothing new to commit"
       // result) is the true fixed point this non-retryable signal targets.
+      // forge#3535: before the fixed point, check whether the branch already
+      // merged into the lane — then ahead=0 is the success state, not a missing
+      // build. Only positive evidence converts; everything else falls through.
+      if (complete && branch) {
+        const merged = await mergedPrForBranch(branch, state.lane, io);
+        if (merged) {
+          return { status: "committed", outputs: { branch, pr: merged.number, ...buildChildEvidence(blob, comments) } };
+        }
+      }
       if (complete && ahead !== -1) return { status: "failed", detail, retryable: false };
       return { status: "failed", detail };
     },
@@ -643,6 +658,26 @@ async function openPrFor(state, io) {
   if (!state.branch) return null;
   const out = await io.gh(["pr", "list", "--head", state.branch, "--json", "number", "--state", "all"]);
   try { const a = JSON.parse(out || "[]"); return a[0]?.number ?? null; } catch { return null; }
+}
+/**
+ * forge#3535: the merged PR (if any) that shipped `branch` into `lane`.
+ * Build keys off the branch resolved from FORGE:BUILDER:COMPLETE, not
+ * `state.branch` (null on a fresh re-run), so this takes the branch explicitly.
+ * A PR merged into a different base, a closed-unmerged PR, no PR, or any
+ * gh/JSON error yields null: unknown is never "merged" (forge#3504/#3506).
+ * Returns `{ number }` with a real integer PR number, else null.
+ */
+async function mergedPrForBranch(branch, lane, io) {
+  if (!branch || !lane) return null;
+  try {
+    const out = await io.gh(["pr", "list", "--head", branch, "--state", "all",
+      "--json", "number,state,mergedAt,baseRefName"]);
+    const a = JSON.parse(out || "[]");
+    if (!Array.isArray(a)) return null;
+    const hit = a.find((p) => p && typeof p === "object" && Number.isInteger(p.number)
+      && (!!p.mergedAt || p.state === "MERGED") && p.baseRefName === lane);
+    return hit ? { number: hit.number } : null;
+  } catch { return null; }
 }
 async function prStatusFor(state, io) {
   const n = await openPrFor(state, io);
