@@ -322,6 +322,27 @@ async function reviewArgs(state, ctx, io) {
           "--branch", need(state.branch, "branch", BRANCH_RE), ...baseArgs(state)];
 }
 
+/**
+ * Is the issue assessed for decomposition? Scoped to the LATEST
+ * FORGE:INVESTIGATOR comment so quoted text elsewhere (architect plans, the
+ * spec itself) cannot trigger the handoff. Within that comment the verdict is
+ * the structured marker (`<!-- DECOMPOSE:YES -->` / `<!-- DECOMPOSE:NO -->`)
+ * or, for comments that predate the marker, the `**YES**`/`**NO**` line under
+ * `### Decomposition Assessment`. An explicit NO wins over stray prose.
+ * With no investigator comment at all, fall back to the legacy bare-substring
+ * test over the whole blob.
+ */
+function isDecomposed(comments, blob) {
+  const { decomposedMarker: yes, notDecomposedMarker: no } = PHASE_MARKERS.investigate;
+  let latest = null;
+  for (const c of comments) if (c.includes("FORGE:INVESTIGATOR")) latest = c;
+  if (latest === null) return has(blob, yes);
+  const section = latest.replace(/\r\n/g, "\n").match(/^### Decomposition Assessment[^\n]*\n([\s\S]*?)(?=^###[^#]|(?![\s\S]))/m);
+  const verdict = section ? (/^\s*\*\*(YES|NO)\*\*/m.exec(section[1]) || [])[1] : undefined;
+  if (verdict === "NO" || has(latest, `<!-- ${no} -->`)) return false;
+  return verdict === "YES" || has(latest, `<!-- ${yes} -->`);
+}
+
 /** @type {Phase[]} */
 export const PHASES = [
   {
@@ -330,10 +351,10 @@ export const PHASES = [
     buildArgs: async (state, ctx) => [String(state.issue), ...repoArgs(ctx)],
     entryCondition: () => true,
     async detectOutcome(state, io) {
-      const { blob } = await issueMarkers(state.issue, io);
+      const { blob, comments } = await issueMarkers(state.issue, io);
       if (has(blob, PHASE_MARKERS.investigate.invalidMarker))
         return { status: "committed", terminalReason: "invalid", outputs: { verdict: "INVALID" } };
-      if (has(blob, PHASE_MARKERS.investigate.decomposedMarker))
+      if (isDecomposed(comments, blob))
         return { status: "committed", terminalReason: "decomposed", outputs: { decompose: true } };
       if (has(blob, PHASE_MARKERS.investigate.completionMarker))
         return { status: "committed", outputs: { verdict: "CONFIRMED" } };

@@ -782,6 +782,7 @@ fi
 If `GATE_PASS = false`, the build repairs itself **once** before anything escalates (a failing acceptance check is pipeline work, not a human decision):
 
 1. Count `<!-- FORGE:ACCEPTANCE_REPAIR: issue={NUMBER} -->` comments on the issue. If one already exists, skip to step 4.
+1.5. **Decomposition guard** <!-- Added: forge#3543 -->: read the `### Decomposition Assessment` of the latest FORGE:INVESTIGATOR comment. If it is `**YES**`, a failing check that belongs to a sub-item the assessment assigns to a separate issue (named in the check's `description`/`# item-N` tag, or matching a listed sub-issue title) is NOT repaired: exclude it from the `--fix-acceptance` list. When ambiguous, treat the check as decomposed-out (fail safe). If every remaining failure is decomposed-out, do not invoke implement: leave `needs-human` and print `BUILD_RESULT: status: BLOCKED`, blocker: "acceptance check {ID} belongs to decomposed item {N} — repair refuses to implement work the investigator assigned to a separate issue".
 2. Post that marker (with the failed check ids), remove `needs-human` if this gate added it, then invoke
    `Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:implement", args="{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE} --fix-acceptance \"<failed check ids and details>\"")`
    then re-derive `{CHANGED_FILES}` from the repaired worktree (never reuse the pre-repair value, and never omit `--files`; an empty list falls back to this diff):

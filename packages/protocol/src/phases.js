@@ -54,6 +54,9 @@ export const PHASE_IDS = ['investigate', 'decompose', 'build', 'review', 'remedi
  *   whose presence means this phase has committed.
  * @property {string} [invalidMarker] - (investigate only) marks the issue INVALID.
  * @property {string} [decomposedMarker] - (investigate only) marks the issue DECOMPOSED.
+ *   investigate.md emits it as the HTML comment `<!-- DECOMPOSE:YES -->`.
+ * @property {string} [notDecomposedMarker] - (investigate only) the explicit not-decomposed
+ *   verdict, emitted as `<!-- DECOMPOSE:NO -->`.
  * @property {string} [partialMarker] - sentinel for an interrupted/partial annotation.
  * @property {string} [presenceMarker] - bare annotation-opener substring, used only by
  *   phases whose completion is non-critical (see `context` below) — presence alone
@@ -68,6 +71,7 @@ export const PHASE_MARKERS = {
     completionMarker: RESERVED_TYPES.INVESTIGATOR.completionSentinel, // 'INVESTIGATION:COMPLETE'
     invalidMarker: 'INVESTIGATION:INVALID',
     decomposedMarker: 'DECOMPOSE:YES',
+    notDecomposedMarker: 'DECOMPOSE:NO',
   },
   // forge#2379: `decompose` actually runs work-on/decompose (sub-issue
   // fan-out) once `investigate` hands off on `DECOMPOSE:YES` — see
