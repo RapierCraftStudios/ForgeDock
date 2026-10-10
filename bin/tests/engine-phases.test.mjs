@@ -644,7 +644,7 @@ describe("pickPhase", () => {
   // (result: OVER + ### Split Proposal) and no FORGE:BUILDER:COMPLETE.
   describe("build.detectOutcome — size-gate NEEDS_DECOMPOSE routes to decompose", () => {
     const build = PHASES.find(p => p.id === "build");
-    const withComments = (...bodies) => ({ gh: async () => JSON.stringify(bodies), git: async () => "0" });
+    const withComments = (...bodies) => ({ gh: async () => JSON.stringify(bodies.map((b) => trusted(b))), git: async () => "0" });
     const gate = (result, proposal = true) =>
       `<!-- FORGE:DIFF_SIZE -->\n## Diff Size\n\ndiff_lines: 1906\nexcluded_lines: 0\nthreshold: 1000\nresult: ${result}\n` +
       (proposal ? "### Split Proposal\n- **A** — a.mjs\n" : "");
@@ -693,7 +693,7 @@ describe("pickPhase", () => {
 
     it("a posted FORGE:BUILDER:COMPLETE with commits wins over a stale OVER", async () => {
       const o = await build.detectOutcome({ ...st, branch: "fix/x-42" },
-        { gh: async () => JSON.stringify([gate("OVER"), "<!-- FORGE:BUILDER:COMPLETE -->"]), git: async () => "2" });
+        { gh: async () => JSON.stringify([trusted(gate("OVER")), trusted("<!-- FORGE:BUILDER -->\n<!-- FORGE:BUILDER:COMPLETE -->")]), git: async () => "2" });
       assert.equal(o.status, "committed");
       assert.equal(o.terminalReason, undefined);
     });

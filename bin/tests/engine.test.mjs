@@ -10,7 +10,7 @@ import { readLog, deriveState, appendEvent } from "../engine/runlog.mjs";
 import { pickPhase } from "../engine/phases.mjs";
 import { serializeState, parseState, upsertStateBlock } from "../engine/state.mjs";
 import { VALID_BACKENDS } from "../runner.mjs";
-import { trusted, builderBody, invBody, asComments, inv as investigationComment, ctx, arch, builder, remediation, decomposed } from "./helpers/comments.mjs";
+import { SEP, trusted, builderBody, invBody, asComments, inv as investigationComment, ctx, arch, builder, remediation, decomposed } from "./helpers/comments.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -889,14 +889,14 @@ describe("runIssue", () => {
   it("NEEDS_DECOMPOSE: build size-gate OVER hands off to decompose, runs build once, no needs-human", async () => {
     const { w, io } = fakeWorld();
     const diffSize = "<!-- FORGE:DIFF_SIZE -->\n## Diff Size\n\nresult: OVER\n### Split Proposal\n- **A** — a.mjs";
-    w.markers = JSON.stringify(["INVESTIGATION:COMPLETE"]);
+    w.markers = investigationComment("COMPLETE");
     const runCounts = {};
     const runner = async ({ commandName }) => {
       runCounts[commandName] = (runCounts[commandName] || 0) + 1;
       if (commandName === "work-on/build")
-        w.markers = JSON.stringify(["INVESTIGATION:COMPLETE", diffSize]);
+        w.markers = investigationComment("COMPLETE") + SEP + diffSize;
       if (commandName === "work-on/decompose")
-        w.markers = JSON.stringify(["INVESTIGATION:COMPLETE", diffSize, "<!-- FORGE:DECOMPOSED:COMPLETE -->"]);
+        w.markers = investigationComment("COMPLETE") + SEP + diffSize + decomposed();
       return { status: "complete" };
     };
     const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging",

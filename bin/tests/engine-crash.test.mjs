@@ -273,9 +273,10 @@ describe("crash injection: forge#3506 handoff reasons survive a crash before RUN
 
   it("investigate INVALID committed, killed before RUN_TERMINAL: resume terminates invalid, never builds (issue open, unlabeled)", async () => {
     const { w, io, runner } = makeWorld();
-    w.markers = " INVESTIGATION:INVALID"; // issue stays OPEN and unlabeled, so the forge#2352 divergence guard cannot rescue it
+    w.markers = investigationComment("INVALID"); // issue stays OPEN and unlabeled, so the forge#2352 divergence guard cannot rescue it
     const ran = [];
-    const wrapped = async (a) => { ran.push(a.commandName); return runner(a); };
+    // The seeded INVALID report is the newest investigator comment; do not post a fresh COMPLETE one over it.
+    const wrapped = async (a) => { ran.push(a.commandName); if (a.commandName === "work-on/investigate") return { status: "complete" }; return runner(a); };
     const probe = crashAfterCommitOf(io, "investigate");
     const { res, launches } = await runToCompletion({ dir, io, runner: wrapped });
     assert.ok(launches >= 2, "crash must fire");
