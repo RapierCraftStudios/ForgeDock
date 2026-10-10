@@ -751,6 +751,33 @@ export const PHASES = [
 ];
 
 /**
+ * forge#3570: confirm a phase's outcome from GitHub ground truth, through the
+ * same trusted (`isTrustedComment`) + anchored (header-led, full-line sentinel)
+ * marker model the headless engine uses. For callers that only know a phase id
+ * (the interactive SubagentStop hook) and must never trust transcript text.
+ *
+ * `context` / `architect` are not engine phases (forge#3499) but the interactive
+ * path still tracks them: committed iff a trusted, anchored `:COMPLETE` comment
+ * exists. Unknown phase ids fail. Fetch errors propagate (the caller fails open).
+ *
+ * @param {string} phaseId
+ * @param {object} state
+ * @param {object} io
+ * @returns {Promise<{status: string, detail?: string, terminalReason?: string, outputs?: object}>}
+ */
+export async function detectTrustedOutcome(phaseId, state, io) {
+  const phase = PHASES.find((p) => p.id === phaseId);
+  if (phase) return phase.detectOutcome(state, io);
+  if (phaseId === "context" || phaseId === "architect") {
+    const m = PHASE_MARKERS[phaseId];
+    const { comments } = await issueMarkers(state.issue, io);
+    if (hasMarker(comments, m.header, m.completionMarker)) return { status: "committed", outputs: {} };
+    return { status: "failed", detail: `no ${m.completionMarker} marker` };
+  }
+  return { status: "failed", detail: `unknown phase: ${phaseId}` };
+}
+
+/**
  * Parse the LAST `REVIEW_RESULT:` block from a phase's final reply (forge#3521).
  * Untrusted model output: only the fixed keys below are read, via anchored
  * line matches; `pr_number` must be digits-only. Returns null when absent.
