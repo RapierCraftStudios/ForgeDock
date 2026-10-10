@@ -13,7 +13,7 @@ ok()  { PASS=$((PASS+1)); }
 bad() { FAILN=$((FAILN+1)); echo "FAIL: $1"; }
 expect() { [ "$2" = "$3" ] && ok || bad "$1 (got '$3' want '$2')"; }
 
-SITES="commands/work-on.md commands/work-on/review.md commands/work-on/investigate.md commands/work-on/decompose.md commands/work-on/build.md commands/work-on/close.md commands/review-pr.md commands/orchestrate/phase-1-resolve.md commands/orchestrate/phase-4-execution.md"
+SITES="commands/work-on.md commands/work-on/build/validate.md commands/quality-gate.md commands/work-on/review.md commands/work-on/investigate.md commands/work-on/decompose.md commands/work-on/build.md commands/work-on/close.md commands/review-pr.md commands/orchestrate/phase-1-resolve.md commands/orchestrate/phase-4-execution.md"
 
 # extract the bootstrap block (comment line .. closing top-level fi), indentation stripped
 # Block ends at the first line (after the marker) that starts with `fi` at the marker's own indentation.
