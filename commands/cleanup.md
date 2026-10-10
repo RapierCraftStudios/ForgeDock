@@ -89,7 +89,7 @@ For each closed issue with a stale intermediate label:
 ```bash
 for NUM in {stale_issue_numbers}; do
   gh issue edit $NUM {GH_FLAG} --add-label "workflow:merged"
-  gh issue edit $NUM {GH_FLAG} --remove-label "workflow:in-review,workflow:building,workflow:awaiting-merge,workflow:remediating,needs-validation" 2>/dev/null || true
+  gh issue edit $NUM {GH_FLAG} --remove-label "workflow:in-review,workflow:building,workflow:awaiting-merge,workflow:remediating,needs-validation" 2>/dev/null || true # allowlist:check-command-side-effects
 done
 ```
 
