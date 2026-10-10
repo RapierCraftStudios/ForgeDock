@@ -9,7 +9,7 @@
 #                 May be multiple tokens — pass before TARGET_STATE
 #   TARGET_STATE  One of: investigating, ready-to-build, building, in-review,
 #                         merged, invalid, decomposed, awaiting-merge,
-#                         remediating
+#                         remediating  (label workflow:remediating: autonomous remediation pending, not a human gate)
 #
 #   --validate    Sub-command mode: translate an investigation verdict into a
 #                 finding-lifecycle label (needs-validation → validated/false-positive).
