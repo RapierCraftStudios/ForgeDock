@@ -611,7 +611,7 @@ export async function runIssue(opts) {
     // has nothing to remediate and stays a plain needs-human stop — it must not
     // fall through to `close`, which would otherwise be the next eligible phase.
     const isRemediationHandoff = outcome.status === "blocked" &&
-      phase.id === "review" && (outcome.reason || "needs-human") === "needs-human" &&
+      phase.id === "review" && (outcome.reason || "needs-human") === "needs-human" && outcome.handoff !== false &&
       (outcome.outputs?.pr ?? state.pr) != null;
     if (outcome.status === "blocked") {
       emitProgress({ event: "phase_exit", phase: phase.id, status: "blocked", detail: outcome.detail });
@@ -772,7 +772,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
     }
     allAttemptsThrew = false;
     lastUsage = result?.usage ?? null;
-    const outcome = await phase.detectOutcome(state, io);
+    const outcome = await phase.detectOutcome(state, io, result);
     if (outcome.status === "committed" || outcome.status === "blocked") return { ...outcome, usage: lastUsage };
     appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail, maxAttempts, usage: lastUsage });
     // forge#2176: a phase's detectOutcome can mark a failure as a known,
@@ -786,7 +786,9 @@ async function runPhaseWithRetry(phase, state, ctx) {
     // for every phase that doesn't opt in — investigate/context/architect/
     // review/close — is unchanged, preserving transient-failure retries).
     if (outcome.retryable === false) {
-      return { status: "blocked", detail: outcome.detail, usage: lastUsage };
+      // forge#3521: keep outcome.outputs (e.g. the PR number) so the blocked
+      // commit persists it and isRemediationHandoff can see it.
+      return { status: "blocked", detail: outcome.detail, outputs: outcome.outputs, handoff: outcome.handoff, usage: lastUsage };
     }
   }
   // Exhausted transient retries → escalate (spec §7).
