@@ -64,11 +64,16 @@ gh pr diff [PR_NUMBER] --name-only
 
 # Materialize the pre-computed domain diff slice supplied by the orchestrator.
 # Persona greps below read "$SLICE_FILE" -- they never re-fetch the full diff.
-SLICE_FILE=$(mktemp)
+# Deterministic path (PR + reviewed SHA + domain): every Bash call is a fresh shell, so later fences
+# re-declare this exact line instead of relying on a variable set here.
+SLICE_FILE="${TMPDIR:-/tmp}/forge-slice-[PR_NUMBER]-[REVIEW_SHA_SHORT]-[AGENT_DOMAIN].diff"
+rm -f "$SLICE_FILE"
 cat > "$SLICE_FILE" <<'FORGE_SLICE_EOF'
 [DOMAIN_DIFF_SLICE]
 FORGE_SLICE_EOF
 ```
+
+**Later fences**: persona fences that read `$SLICE_FILE` re-declare the identical `SLICE_FILE=` line above and guard it with `[ -f "$SLICE_FILE" ] || { echo "SLICE_FILE missing ..." >&2; exit 1; }`. The guard tests existence, not size, so a legitimately empty slice still takes the fallback below while a lost path fails loudly instead of reporting a false clean scan.
 
 **Empty or truncated slice**: if the slice is empty or ends mid-hunk, read the specific changed files with bounded reads (`sed -n 'X,Yp'`, `head -N`) — never fall back to fetching the full PR diff.
 

@@ -56,6 +56,9 @@ If no domain context is configured above, derive the architecture from the chang
    - If different fields in the condition reach different execution paths (one resource-dependent, one not), the condition must be split — gate only the fields that require the resource.
 
    ```bash
+   # Fresh shell per Bash call: re-declare the slice path (same value as protocols.md §1) and fail loudly if it is gone.
+   SLICE_FILE="${TMPDIR:-/tmp}/forge-slice-[PR_NUMBER]-[REVIEW_SHA_SHORT]-[AGENT_DOMAIN].diff"
+   [ -f "$SLICE_FILE" ] || { echo "SLICE_FILE missing: $SLICE_FILE (materialize it per Evidence-Based Review Protocol §1)" >&2; exit 1; }
    # Identify gate conditions in changed router files
    ROUTER_FILES=$(gh pr diff [PR_NUMBER] --name-only | grep -E "(router|route|endpoint|handler)" | head -10)
    awk -v files="$ROUTER_FILES" 'BEGIN{n=split(files,a,"\n");for(i=1;i<=n;i++)w[a[i]]=1} /^diff --git /{p=((substr($4,3)) in w)} p' "$SLICE_FILE" | grep "^\+" | grep -E "if request\.|if.*or.*request\." | head -20

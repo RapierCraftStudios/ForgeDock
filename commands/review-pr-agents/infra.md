@@ -59,6 +59,9 @@ If no infra context is configured above, derive the deployment model from the ch
 
    **Scan all consumer locations for references to the old response format:**
    ```bash
+   # Fresh shell per Bash call: re-declare the slice path (same value as protocols.md §1) and fail loudly if it is gone.
+   SLICE_FILE="${TMPDIR:-/tmp}/forge-slice-[PR_NUMBER]-[REVIEW_SHA_SHORT]-[AGENT_DOMAIN].diff"
+   [ -f "$SLICE_FILE" ] || { echo "SLICE_FILE missing: $SLICE_FILE (materialize it per Evidence-Based Review Protocol §1)" >&2; exit 1; }
    # Identify old response field values from the diff
    OLD_VALUES=$(grep "^\-" "$SLICE_FILE" | grep -oE '"status"[[:space:]]*:[[:space:]]*"[^"]+' | sed -E 's/.*"//' | sort -u)
 
@@ -158,6 +161,9 @@ If no infra context is configured above, derive the deployment model from the ch
 11. **Config field type/doc-comment consistency** (when the diff introduces new pydantic-settings fields):
    When a new env var is introduced as a pydantic-settings field with a collection type (`list[str]`, `List[str]`, `set[str]`, `Set[str]`), cross-reference the field's type annotation against the format hint documented in `.env.example`. **pydantic-settings v2 parses collection-type fields via `json.loads()` — they require JSON array format like `["a","b"]`, NOT comma-separated format like `a,b`**. A doc comment saying "comma-separated" on a `list[str]` field is a CONFIRMED HIGH finding — it guarantees a startup crash for anyone following the documented format.
    ```bash
+   # Fresh shell per Bash call: re-declare the slice path (same value as protocols.md §1) and fail loudly if it is gone.
+   SLICE_FILE="${TMPDIR:-/tmp}/forge-slice-[PR_NUMBER]-[REVIEW_SHA_SHORT]-[AGENT_DOMAIN].diff"
+   [ -f "$SLICE_FILE" ] || { echo "SLICE_FILE missing: $SLICE_FILE (materialize it per Evidence-Based Review Protocol §1)" >&2; exit 1; }
    # Find new pydantic-settings fields with collection types in the diff
    grep "^\+" "$SLICE_FILE" | grep -E ":\s*(list|List|set|Set)\[str\]" | grep -oE "[A-Z_]{3,}[[:space:]]*:" | sed -E 's/[[:space:]]*:$//' | sort -u
    # For each field, find its .env.example entry and read the format documentation
