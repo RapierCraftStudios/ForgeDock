@@ -3194,11 +3194,21 @@ if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
       # forge#2570: `main` / deploy gate (or unresolved base — fail closed to the human gate).
       gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "🟠 PR #{PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check. This PR targets the deploy gate (\`${GUARD_BASE:-unresolved base}\`), so it is held at \`workflow:awaiting-merge\` for a human merge decision — \`staging → main\` is the genuine human gate. Merge manually once reviewed: \`gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge\`."
     fi
-    RESOLUTION=$(resolve_script 'transition-label')
-    TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+    # Shell state does not persist between Bash calls and `resolve_script` is not defined in this spec:
+    # resolve transition-label.sh inline from the install roots only (never repo-relative / $PWD — the
+    # PR under review is author-controlled). Unresolvable or unknown TIER falls through to the prose
+    # label edit so the awaiting-merge transition can never be silently skipped.
+    _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+    TRANSITION_SCRIPT=""
+    for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l"; do
+      case "$_c" in /*)
+        [ -z "$TRANSITION_SCRIPT" ] && [ -f "$_c/scripts/transition-label.sh" ] && TRANSITION_SCRIPT="$_c/scripts/transition-label.sh" ;;
+      esac
+    done
+    if [ -n "$TRANSITION_SCRIPT" ]; then TIER=universal; else TIER=prose; fi
     case "$TIER" in
-      adaptive|universal) bash "$SCRIPT_PATH" {MERGE_ISSUE} {MERGE_GH_FLAG} awaiting-merge ;;
-      prose)
+      universal) bash "$TRANSITION_SCRIPT" {MERGE_ISSUE} {MERGE_GH_FLAG} awaiting-merge ;;
+      prose|*)
         gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "workflow:awaiting-merge" \
           --remove-label "needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
         ;;
