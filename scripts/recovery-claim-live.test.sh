@@ -35,7 +35,7 @@ release() { jq -cn --arg id "$1" --arg t "$2" '{body:("<!-- FORGE:RECOVERY_CLAIM
 
 run() { local f="$1"; shift; OUT=$(MOCK_GH_JSON="$f" bash "$CHECK" 7 -R o/r "$@" 2>/dev/null); RC=$?; }
 expect() { # name rc needle
-  [ "$RC" -eq "$2" ] && echo "$OUT" | grep -q "$3" && ok "$1" || bad "$1 (rc=$RC out=$OUT)"
+  [ "$RC" -eq "$2" ] && grep -q "$3" <<< "$OUT" && ok "$1" || bad "$1 (rc=$RC out=$OUT)"
 }
 
 N=$(now_iso); O=$(old_iso)

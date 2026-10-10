@@ -30,28 +30,28 @@ C17=$(sed -n '/^## Phase C1.7/,/^## Phase C1.5/p' "$CLOSE_MD")
 if printf '%s\n' "$C17" | grep -nE '^\s*cd "\$\{REPO_PATH\}"' >/dev/null; then
   bad "C1.7 changes directory into REPO_PATH"
 else ok "C1.7 does not cd into REPO_PATH"; fi
-printf '%s\n' "$C17" | grep -q 'Phase C1.7: skipped' && ok "C1.7 logs skip reasons" || bad "C1.7 missing 'Phase C1.7: skipped'"
-printf '%s\n' "$C17" | grep -q 'worktree add --detach' && ok "C1.7 uses a temporary detached worktree" || bad "C1.7 missing temp worktree"
-printf '%s\n' "$C17" | grep -q 'gh pr create' && ok "C1.7 opens a PR" || bad "C1.7 missing gh pr create"
+grep -q 'Phase C1.7: skipped' <<< "$C17" && ok "C1.7 logs skip reasons" || bad "C1.7 missing 'Phase C1.7: skipped'"
+grep -q 'worktree add --detach' <<< "$C17" && ok "C1.7 uses a temporary detached worktree" || bad "C1.7 missing temp worktree"
+grep -q 'gh pr create' <<< "$C17" && ok "C1.7 opens a PR" || bad "C1.7 missing gh pr create"
 [ "$(printf '%s\n' "$C17" | grep -c '^```bash')" -eq 1 ] && ok "C1.7 is a single bash block (no cross-block shell state)" || bad "C1.7 must be exactly one bash block"
-printf '%s\n' "$C17" | grep -qE "^\s*trap .*EXIT" && ok "C1.7 registers an EXIT trap" || bad "C1.7 missing EXIT trap"
-printf '%s\n' "$C17" | grep -q 'worktree remove --force' && ok "C1.7 cleanup removes the worktree" || bad "C1.7 cleanup missing worktree remove"
+grep -qE "^\s*trap .*EXIT" <<< "$C17" && ok "C1.7 registers an EXIT trap" || bad "C1.7 missing EXIT trap"
+grep -q 'worktree remove --force' <<< "$C17" && ok "C1.7 cleanup removes the worktree" || bad "C1.7 cleanup missing worktree remove"
 ADD_LN=$(printf '%s\n' "$C17" | grep -n 'worktree add --detach' | head -1 | cut -d: -f1)
 TRAP_LN=$(printf '%s\n' "$C17" | grep -nE "^\s*trap .*EXIT" | head -1 | cut -d: -f1)
 [ -n "$ADD_LN" ] && [ -n "$TRAP_LN" ] && [ "$TRAP_LN" -gt "$ADD_LN" ] && ok "EXIT trap registered after worktree add" || bad "EXIT trap must follow worktree add"
-printf '%s\n' "$C17" | grep -q 'force-with-lease' && ok "C1.7 pushes with --force-with-lease" || bad "C1.7 missing force-with-lease"
-printf '%s\n' "$C17" | grep -qE 'push .*--force( |$)' && bad "C1.7 uses bare --force" || ok "C1.7 has no bare --force"
-printf '%s\n' "$C17" | grep -q 'gh pr list' && ok "C1.7 checks for an existing open PR" || bad "C1.7 missing gh pr list"
+grep -q 'force-with-lease' <<< "$C17" && ok "C1.7 pushes with --force-with-lease" || bad "C1.7 missing force-with-lease"
+grep -qE 'push .*--force( |$)' <<< "$C17" && bad "C1.7 uses bare --force" || ok "C1.7 has no bare --force"
+grep -q 'gh pr list' <<< "$C17" && ok "C1.7 checks for an existing open PR" || bad "C1.7 missing gh pr list"
 grep -q 'FORGE:DOSSIER_UPDATED' "$CLOSE_MD" && ok "FORGE:DOSSIER_UPDATED marker kept" || bad "FORGE:DOSSIER_UPDATED marker missing"
 
 # --- Dynamic: execute the REAL C1.7 block extracted from close.md (gh stubbed) ---
 BLOCK=$(printf '%s\n' "$C17" | awk '/^```bash/{f=1;next} /^```/{f=0} f')
 if [ -z "$BLOCK" ]; then
   bad "could not extract the C1.7 bash block"
-elif ! command -v perl >/dev/null 2>&1 || ! yq --version 2>&1 | grep -q 'mikefarah'; then
+elif ! command -v perl >/dev/null 2>&1 || ! grep -q 'mikefarah' <<< "$(yq --version 2>&1)"; then
   bad "dynamic section needs perl and mikefarah yq v4 (not silently skipped)"
 else
-printf '%s\n' "$BLOCK" | grep -q '^_dossier_run()' && printf '%s\n' "$BLOCK" | grep -q '^_dossier_cleanup()' \
+grep -q '^_dossier_run()' <<< "$BLOCK" && grep -q '^_dossier_cleanup()' <<< "$BLOCK" \
   && ok "extracted block defines _dossier_run and _dossier_cleanup" || bad "extracted block missing _dossier_run/_dossier_cleanup"
 
 # Substitute only the exact {NAME} placeholders; leave ${NAME} shell expansions intact.
@@ -107,7 +107,7 @@ run_block; RC=$?
 [ "$RC" -eq 0 ] && ok "A: real block exits 0" || bad "A: real block exit $RC"
 main_untouched && ok "A: main checkout untouched (HEAD, branch, clean tree)" || bad "A: main checkout modified"
 git -C "$TMP/origin.git" rev-parse -q --verify refs/heads/docs/dossier-1 >/dev/null && ok "A: dossier branch pushed to origin" || bad "A: dossier branch not pushed"
-git -C "$TMP/origin.git" show refs/heads/docs/dossier-1:devdocs/modules/m.md 2>/dev/null | grep -q '^## Entry' && ok "A: dossier entry appended on pushed branch" || bad "A: no entry on pushed branch"
+grep -q '^## Entry' <<< "$(git -C "$TMP/origin.git" show refs/heads/docs/dossier-1:devdocs/modules/m.md 2>/dev/null)" && ok "A: dossier entry appended on pushed branch" || bad "A: no entry on pushed branch"
 grep -q '^gh pr create' "$GH_LOG" && ok "A: gh pr create called" || bad "A: gh pr create not called"
 grep -q 'FORGE:DOSSIER_UPDATED' "$GH_LOG" && ok "A: FORGE:DOSSIER_UPDATED comment posted" || bad "A: no FORGE:DOSSIER_UPDATED comment"
 no_leak && ok "A: temporary worktree removed" || bad "A: temporary worktree leaked"
