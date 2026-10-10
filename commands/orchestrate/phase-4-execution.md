@@ -84,7 +84,7 @@ release_orchestrator_lease() {
 2. Call `TaskStop(task_id)` (the harness tool) for each one, in the same turn, before ending the session.
 3. Call `cleanup_trail_cache` (Step 4B) and `release_orchestrator_lease()` (Step 4A-pre.-1) so a future resume or a different operator is not blocked by a stale lease from this now-stopped session.
 4. Report which issues had in-flight dispatch stopped mid-pipeline (their `workflow:*` label will reflect whatever phase they reached — a future `/work-on {NUMBER}` or orchestrator resume picks them back up from GitHub state, per the Universal Phase Dispatcher in `commands/work-on.md`).
-5. If `PENDING_DECISIONS` is non-empty and `DECISIONS_PRESENTED` is false, present every queued entry together, one question per gated issue (same format as the Termination condition drain), and set `DECISIONS_PRESENTED=true`. An explicit interrupt is a sanctioned ask point (forge#3497).
+5. If `PENDING_DECISIONS` is non-empty after the liveness filter (drop stale entries, forge#3508) and `DECISIONS_PRESENTED` is false, present every surviving entry together, one question per gated issue (same format as the Termination condition drain), and set `DECISIONS_PRESENTED=true`. An explicit interrupt is a sanctioned ask point (forge#3497).
 
 **This is a documentation/behavioral contract, not a bash block**: unlike the lease gate above, there is no shell construct that reliably intercepts "the orchestrator's own session is being stopped" — that is a harness-level event the orchestrating agent must handle in its own turn when it observes an interrupt, using its own tools (`TaskStop`), exactly the way `commands/orchestrate/phase-5-cleanup.md` already documents cleanup as an agent-driven procedure rather than a background script.
 
@@ -538,6 +538,15 @@ BATCH_FULLY_GATED=false
 # Batch scope: must survive every Step 4B completion cycle, like BATCH_FULLY_GATED. Each entry
 # is "{issue}|{reason}|{decision question}". Presented once, together, at drain/interrupt/sweep
 # exit. If lost to context compaction, Phase 6 Step 6A.8 rebuilds it from `needs-human` labels.
+# The queue is append-only, so every presentation point first runs the present-time liveness
+# filter (forge#3508) on it: drop stale entries, then present what is left.
+#   - numeric `{issue}` entry: run `gh issue view {issue} --json state,labels </dev/null`; keep the
+#     entry only while the issue is OPEN and still carries `needs-human`; drop it otherwise.
+#   - a `gh` lookup error is NOT "resolved": keep the entry (fail toward showing a decision,
+#     never toward silently losing one). Drop only on a confirmed read.
+#   - `breaker` entry: its issue field is not an issue number, so keep the breaker entry only while AMPLIFICATION_BREAKER_TRIPPED=true.
+#   - if the pruned queue is empty, present nothing and leave DECISIONS_PRESENTED unchanged.
+# Initialise the per-entry keep flag to "keep" at the top of each iteration (unknown = keep).
 PENDING_DECISIONS=()
 DECISIONS_PRESENTED=false
 
@@ -1396,7 +1405,7 @@ If `DISPATCH_NOW` is empty (headroom is 0), do not spawn any agents this cycle �
 
 ### Step 4B: Monitor completions and dispatch newly ready issues
 
-**Hard Rule (root orchestrator) — never ask the operator mid-batch; no mid-batch operator question while any issue is dispatchable or in flight** <!-- Added: forge#3497 -->: The worker prompts' "NEVER ask the user questions" rule binds the root session too. A question blocks the root turn, so no completion is processed and no dispatch happens until it is answered, which lets one issue's decision stall every independent issue. When an issue reaches `needs-human`, classify it `GATED` (items 6.4/6.5 below, unchanged), append its decision to `PENDING_DECISIONS` (item 6.5), print the one-line status (item 8), and keep dispatching every issue not gated by it. All queued decisions are presented together, one question per gated issue, at the drain point (see Termination condition), on an operator interrupt (Step 4A-pre.-0.5), or at the Step 4F exit, whichever comes first.
+**Hard Rule (root orchestrator) — never ask the operator mid-batch; no mid-batch operator question while any issue is dispatchable or in flight** <!-- Added: forge#3497 -->: The worker prompts' "NEVER ask the user questions" rule binds the root session too. A question blocks the root turn, so no completion is processed and no dispatch happens until it is answered, which lets one issue's decision stall every independent issue. When an issue reaches `needs-human`, classify it `GATED` (items 6.4/6.5 below, unchanged), append its decision to `PENDING_DECISIONS` (item 6.5), print the one-line status (item 8), and keep dispatching every issue not gated by it. All queued decisions are presented together, one question per gated issue, at the drain point (see Termination condition), on an operator interrupt (Step 4A-pre.-0.5), or at the Step 4F exit, whichever comes first. Each of those presentation points first runs the `PENDING_DECISIONS` present-time liveness filter (declared with the array in Step 4A; drops entries whose issue is no longer `needs-human`/open, or whose breaker has released) <!-- Added: forge#3508 -->.
 
 **Exceptions — batch-wide blockers that may still be raised immediately** (each blocks every remaining issue, so there is no independent work left to stall): an orchestrator lease conflict (Step 4A-pre.-1), `SECONDARY_RATE_LIMITED` (Step 4A-pre.0.3, rate limit pause awaiting operator resume), and a fully gated batch with nothing runnable (`BATCH_FULLY_GATED`, item 6.7, which is the drain itself). No other condition is a reason to ask.
 
@@ -2748,7 +2757,7 @@ Do not ask the user questions — you are running autonomously in the background
 
 **Termination condition**: All issues in the DAG have reached `DONE` or `FAILED` (merged, invalid, or skipped due to dependency failure) — OR are `blocked-on-human-merge` (item 6.5) with no further dispatchable work remaining in the batch. These two outcomes are reported differently: a batch where every issue is `DONE`/`FAILED` is a **clean drain**; a batch where one or more issues remain `blocked-on-human-merge` is a **paused drain** — the active dispatch loop stops (there is nothing left to do until a human merges a gating PR) but this MUST be reported as paused, not as fully complete (see `phase-6-report.md`'s `🔗 Blocked-on-Merge` section). `needs-human` predecessors with no open PR are neither — they remain GATED indefinitely until either a PR appears (dependent moves to blocked-on-human-merge) or the predecessor itself resolves; do not treat isolated `needs-human` issues with no dependents as blocking termination. When either drain condition is met, check whether deferred review-spawned findings exist (accumulated in `DEFERRED_FINDINGS` during Step 4C). If deferred findings exist → proceed to Step 4F (Completion Sweep). If no deferred findings → **call `cleanup_trail_cache` (Step 4B) and `release_orchestrator_lease()` (Step 4A-pre.-1)** — this is a clean/paused drain of this session's own dispatch loop, so the lease should not be left held for a now-idle session — then proceed to Phase 5. <!-- Added: forge#2627 -->
 
-**Drain: present queued operator decisions (forge#3497)**: on either drain condition (clean or paused), before the lease release or the Step 4F hand-off above takes effect, if `PENDING_DECISIONS` is non-empty and `DECISIONS_PRESENTED` is false, present every entry together in one message, one question per gated issue (`#{issue} — {reason}: {question}`), set `DECISIONS_PRESENTED=true`, and do not wait on the answers before continuing to the lease release and Phase 5; answers are acted on by the operator (or a follow-up `/work-on`) after the report. This is the one legitimate ask point. Operator interrupt (Step 4A-pre.-0.5 step 5) and the Step 4F exit use the same present-once guard.
+**Drain: present queued operator decisions (forge#3497)**: on either drain condition (clean or paused), before the lease release or the Step 4F hand-off above takes effect, if `PENDING_DECISIONS` is non-empty after the liveness filter (drop stale entries first, forge#3508) and `DECISIONS_PRESENTED` is false, present every surviving entry together in one message, one question per gated issue (`#{issue} — {reason}: {question}`), set `DECISIONS_PRESENTED=true`, and do not wait on the answers before continuing to the lease release and Phase 5; answers are acted on by the operator (or a follow-up `/work-on`) after the report. This is the one legitimate ask point. Operator interrupt (Step 4A-pre.-0.5 step 5) and the Step 4F exit use the same present-once guard.
 
 **Reminder — this is the normal-exit lease release, distinct from the interrupted-stop procedure**: whether the drain is clean or paused, this session is no longer actively dispatching, so its lease must be released here (or, for a paused drain, at minimum have its heartbeat refresh stop — see Step 4A-pre.-1). This complements, but does not replace, the **Stopping the orchestrator** procedure (Step 4A-pre.-0.5) which handles the abnormal case of a mid-dispatch interrupt.
 
@@ -3504,6 +3513,13 @@ if [ "$UNIT_MERGED_THIS_CYCLE" = "true" ]; then
     else
       # Newest observation fell below 1.0 — the cascade is converging again; release the breaker.
       AMPLIFICATION_BREAKER_TRIPPED=false
+      # forge#3508: the breaker released, so drop its queued `breaker|...` entry from PENDING_DECISIONS.
+      _KEPT_DECISIONS=()
+      for _d in "${PENDING_DECISIONS[@]}"; do
+        case "$_d" in breaker\|*) ;; *) _KEPT_DECISIONS+=("$_d") ;; esac
+      done
+      PENDING_DECISIONS=("${_KEPT_DECISIONS[@]}")
+      echo "PENDING_DECISIONS_AFTER_BREAKER_RELEASE=${#PENDING_DECISIONS[@]}"
     fi
   fi
 fi
@@ -4316,7 +4332,7 @@ Completion Sweep Results:
   Token-gated — still deferred: #{H} (sweep allowance also exhausted — re-evaluable next run)
 ```
 
-**After sweep agents complete** (or if no findings were dispatched): output the budget deferred-issues report (if applicable), **call `cleanup_trail_cache` (Step 4B) and `release_orchestrator_lease()` (Step 4A-pre.-1)** — the sweep is this session's last dispatch activity, so the lease must not be left held for a now-idle session (the Termination condition's own release call, above, only fires on the no-deferred-findings branch; this is the equivalent release for the deferred-findings/Completion Sweep branch) <!-- Added: forge#2627 -->, then, if `PENDING_DECISIONS` is non-empty and `DECISIONS_PRESENTED` is false (the Termination condition's drain presentation is skipped on this branch), present every queued entry together, one question per gated issue, and set `DECISIONS_PRESENTED=true` <!-- Added: forge#3497 -->, then proceed to Phase 5.
+**After sweep agents complete** (or if no findings were dispatched): output the budget deferred-issues report (if applicable), **call `cleanup_trail_cache` (Step 4B) and `release_orchestrator_lease()` (Step 4A-pre.-1)** — the sweep is this session's last dispatch activity, so the lease must not be left held for a now-idle session (the Termination condition's own release call, above, only fires on the no-deferred-findings branch; this is the equivalent release for the deferred-findings/Completion Sweep branch) <!-- Added: forge#2627 -->, then, if `PENDING_DECISIONS` is non-empty after the liveness filter (drop stale entries, forge#3508) and `DECISIONS_PRESENTED` is false (the Termination condition's drain presentation is skipped on this branch), present every surviving entry together, one question per gated issue, and set `DECISIONS_PRESENTED=true` <!-- Added: forge#3497 -->, then proceed to Phase 5.
 
 **Anti-patterns — DO NOT DO THIS:**
 - Re-sweeping findings spawned during the sweep itself — this creates unbounded recursion. Sweep is a single pass.
