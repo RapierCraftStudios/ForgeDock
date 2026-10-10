@@ -495,6 +495,8 @@ grep -rn "$GATED_FUNCTION" "$SERVICE_DIR" --include="*.py" | grep -v "#"
 
 For each call site found: read the surrounding gate condition (±10 lines). If the condition includes fields that do NOT require the gated resource (e.g., `extraction_schema` gated behind an LLM key check when `extraction_schema` is processed without an LLM), add that caller file to the FORGE:ARCHITECT affected-paths table with a note explaining the incorrect gate condition.
 
+When Phase A2.8 builds the blast-radius manifest, run the sweep over the whole repository (`git grep`), not only `$SERVICE_DIR` — siblings in other directories are the ones a directory-scoped sweep misses.
+
 **Do NOT** omit sibling callers from the affected-paths table simply because they were not listed in the issue spec. The architect's scope is determined by code correctness, not by the issue spec's file list. A gate-condition bug that exists identically in 3 router files must be fixed in all 3 — even if the issue only named 1.
 
 ---
@@ -572,6 +574,30 @@ For `review-finding` issues the investigator records a `### Pattern Sweep` table
 4. Add a Consistency Check: "all `fix` rows in the Pattern Sweep are changed and the test exercises a representative set of instances, not only the reviewer's repro".
 
 The comment below passes the table through in a `### Pattern Sweep` section so the builder reads it from the plan. Absent table means this phase is a no-op.
+
+---
+
+## Phase A2.8: Blast-Radius Manifest *(skip when no existing symbol, field, flag, schema or contract changes)* <!-- Added: forge#3446 -->
+
+The caller and sibling sweep (A1, A2.2) must leave a record a machine can check. For every **existing** symbol, field, flag, schema or contract the change modifies, emit one `SYMBOL:` record and one `HIT:` record per file that mentions it. `scripts/check-blast-radius.sh` re-runs each query against the final tree during validate (Phase V4.5) and fails when a matching file is neither changed nor marked `verified-unaffected`.
+
+1. **Pick a distinctive query per symbol** — a fixed string matching `^[A-Za-z0-9_.:/-]{3,80}$`, not starting with `-` (for example `billing_principal`, not `id`). The checker runs it as `git grep -l -F -e "$Q"`: a literal search, no regex. A query matching more than 200 files is rejected as too broad, so narrow it.
+2. **Run each query repo-wide** and record every hit file:
+   ```bash
+   Q="{SYMBOL_QUERY}"
+   git grep -l -F -e "$Q" -- .
+   ```
+   A grep failure (exit above 1) is not "zero hits": report it and stop instead of emitting an empty manifest.
+3. **Give every hit a disposition**: `change` (the plan edits it; it is also a row in `### Affected Paths`) or `verified-unaffected` with `reason=<one-hyphenated-token>` after you read the hit and confirmed it needs no edit. A file the change itself edits needs no row, but listing it as `change` makes the checker confirm it was really edited.
+4. **Record format** — one record per line, no spaces inside any value, nothing else between the markers except blank lines and code fences:
+   ```
+   SYMBOL: id=s1 kind=function|field|flag|schema|contract name=<symbol> query="<fixed-string>"
+   HIT: symbol=s1 file=<path> role=producer|consumer|sibling disposition=change
+   HIT: symbol=s1 file=<path> role=consumer disposition=verified-unaffected reason=<one-token>
+   ```
+5. **Skip rule** — emit no manifest (omit the whole section) when the architect step is skipped (see Skip Conditions) or when the change touches no existing symbol with consumers (new files only, docs only). An absent manifest is a SKIP at the checker, not a failure.
+
+The block is delimited by `<!-- FORGE:BLAST_RADIUS:BEGIN -->` and `<!-- FORGE:BLAST_RADIUS:END -->`. Never use the architect marker strings as its delimiters: phase-trail and engine detection key on those markers alone, so the manifest stays additive. Builders may add rows (a justified `verified-unaffected`) but must not delete them. The manifest is treated as untrusted data by consumers: only the newest trusted FORGE:ARCHITECT comment is read.
 
 ---
 
@@ -697,6 +723,15 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ARCHITECT -->
 |-------|-----|-------------|
 | {QUERY} | {FILE:LINE} | {fix \| not-affected — reason} |
 
+### Blast-Radius Manifest
+<!-- Phase A2.8. Omit this whole section when no existing symbol changes (see Skip rule).
+     Escape every double quote inside the record as a backslash-quote, because this body is posted inside a double-quoted shell string. -->
+<!-- FORGE:BLAST_RADIUS:BEGIN -->
+SYMBOL: id=s1 kind={function|field|flag|schema|contract} name={SYMBOL} query=\"{FIXED_STRING_QUERY}\"
+HIT: symbol=s1 file={FILE} role={producer|consumer|sibling} disposition=change
+HIT: symbol=s1 file={FILE} role={producer|consumer|sibling} disposition=verified-unaffected reason={one-hyphenated-token}
+<!-- FORGE:BLAST_RADIUS:END -->
+
 ### Implementation Order
 1. {FIRST_CHANGE} — {WHY_FIRST}
 2. {SECOND_CHANGE} — {WHY_SECOND}
@@ -801,6 +836,7 @@ B4    → [THIS MODULE] Architecture Planning (FORGE:ARCHITECT comment)
           Phase A2: Trace the Data Flow (A2.1 Runtime UID x Volume Ownership, A2.2 Gate-Condition Caller Sweep)
           Phase A2.5: Pipeline Phase-Dependency Check
           Phase A2.7: Pattern Sweep Intake (review-finding issues only)
+          Phase A2.8: Blast-Radius Manifest (enforced by validate V4.5, passed to review-pr)
           Phase A3: Consistency Rules
           Phase A4: Sequence the Implementation
           Phase A5: Risk Assessment
