@@ -652,15 +652,91 @@ fi
 
 Launch domain-specific agents based on which domains have changes. Substitute PR diff commands with staging diff commands.
 
-**Per-domain diff slices (MANDATORY)**: `protocols.md` tells agents to use a pre-supplied `[DOMAIN_DIFF_SLICE]` and not to re-fetch the diff, so staging MUST supply one — the staging→main diff is the largest diff in the pipeline. Compute the slices once, then substitute `[DOMAIN_DIFF_SLICE]` in each persona's prompt before dispatch:
+**Per-domain diff slices (MANDATORY)**: `protocols.md` tells agents to use a pre-supplied `[DOMAIN_DIFF_SLICE]` and not to re-fetch the diff, so staging MUST supply one — the staging→main diff is the largest diff in the pipeline. Slice the uncapped diff first, then cap each slice at ~100K chars with `truncate_slice` (same order as `commands/review-pr.md` "Domain Diff Slicing"). Compute the slices once, then substitute `[DOMAIN_DIFF_SLICE]` in each persona's prompt before dispatch:
 ```bash
-# Fetched once; agents do NOT re-fetch it
-FULL_DIFF=$(git diff "origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH" | head -c 100000)
-# DIFF_SLICE_{DOMAIN}: same per-domain awk filters, fallback, and security-gets-full-diff rule as
-# commands/review-pr.md "Domain Diff Slicing", applied to this FULL_DIFF. Cap each slice at ~100K chars.
+# Fetched once, UNCAPPED; agents do NOT re-fetch it. Never cap here: slicing must see the whole bundle.
+FULL_DIFF=$(git diff "origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH")
+
+# --- Security agent: always receives the full diff (cross-cutting domain) ---
 DIFF_SLICE_SECURITY="$FULL_DIFF"
+
+# --- Auth agent: auth, session, jwt, oauth, middleware, permission files ---
+DIFF_SLICE_AUTH=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(auth|session|jwt|oauth|permission|middleware|login|token)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_AUTH" ] && DIFF_SLICE_AUTH="$FULL_DIFF"
+
+# --- Billing agent: billing, payment, credit, pricing, stripe, subscription files ---
+DIFF_SLICE_BILLING=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(billing|payment|credit|pricing|stripe|subscription|invoice|charge|refund)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_BILLING" ] && DIFF_SLICE_BILLING="$FULL_DIFF"
+
+# --- Concurrency agent: transaction, lock, queue, async, worker, race-condition files ---
+DIFF_SLICE_CONCURRENCY=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(worker|queue|task|async|lock|transaction|pipeline|job)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_CONCURRENCY" ] && DIFF_SLICE_CONCURRENCY="$FULL_DIFF"
+
+# --- Database agent: migration, model, schema, ORM, SQL files ---
+DIFF_SLICE_DATABASE=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(migration|model|schema|\.sql$|orm|database|db)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_DATABASE" ] && DIFF_SLICE_DATABASE="$FULL_DIFF"
+
+# --- API Design agent: router, endpoint, openapi, schema, serializer files ---
+DIFF_SLICE_API=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(router|route|endpoint|openapi|serializer|schema|api)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_API" ] && DIFF_SLICE_API="$FULL_DIFF"
+
+# --- Infrastructure agent: docker, nginx, ci, deploy, infra, workflow files ---
+DIFF_SLICE_INFRA=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(docker|nginx|infra|\.github|deploy|ci|traefik|k8s|helm)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_INFRA" ] && DIFF_SLICE_INFRA="$FULL_DIFF"
+
+# --- Domain Logic agent: scraping/browser-automation files (does not match bare playwright/E2E test files) ---
+DIFF_SLICE_SCRAPER=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(scrape|scraper|stealth|browser_pool|headless|anti_bot|captcha|crawl)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_SCRAPER" ] && DIFF_SLICE_SCRAPER="$FULL_DIFF"
+
+# Cap each slice AFTER slicing and after the empty-slice fallback (a fallback slice is the truncated full diff)
+truncate_slice() {
+  local slice="${1}"
+  local limit=102400
+  if [ "${#slice}" -gt "$limit" ]; then
+    echo "${slice:0:$limit}"
+    echo "... [TRUNCATED — diff exceeded 100K chars; focus on the files listed above]"
+  else
+    echo "$slice"
+  fi
+}
+DIFF_SLICE_SECURITY=$(truncate_slice "$DIFF_SLICE_SECURITY")
+DIFF_SLICE_AUTH=$(truncate_slice "$DIFF_SLICE_AUTH")
+DIFF_SLICE_BILLING=$(truncate_slice "$DIFF_SLICE_BILLING")
+DIFF_SLICE_CONCURRENCY=$(truncate_slice "$DIFF_SLICE_CONCURRENCY")
+DIFF_SLICE_DATABASE=$(truncate_slice "$DIFF_SLICE_DATABASE")
+DIFF_SLICE_API=$(truncate_slice "$DIFF_SLICE_API")
+DIFF_SLICE_INFRA=$(truncate_slice "$DIFF_SLICE_INFRA")
+DIFF_SLICE_SCRAPER=$(truncate_slice "$DIFF_SLICE_SCRAPER")
 ```
-For each dispatched persona, substitute `[DOMAIN_DIFF_SLICE]` → its matching `$DIFF_SLICE_*` variable (an empty slice falls back to the capped `$FULL_DIFF`). Also substitute `[AGENT_DOMAIN]` → the persona's marker domain (the `{domain}` used in its `FORGE:REVIEW-AGENT` marker), and keep `[PR_NUMBER]` / `[REVIEW_SHA_SHORT]` bound to the staging review's PR number and short head SHA (`staging` as the key when there is no PR number): personas derive their slice path `forge-slice-[PR_NUMBER]-[REVIEW_SHA_SHORT]-[AGENT_DOMAIN].diff` from them. Agents never run a full `gh pr diff`; only `--name-only` is allowed. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure.
+For each dispatched persona, substitute `[DOMAIN_DIFF_SLICE]` → its matching `$DIFF_SLICE_*` variable (an empty slice falls back to the full diff, which is then truncated like every other slice). Also substitute `[AGENT_DOMAIN]` → the persona's marker domain (the `{domain}` used in its `FORGE:REVIEW-AGENT` marker), and keep `[PR_NUMBER]` / `[REVIEW_SHA_SHORT]` bound to the staging review's PR number and short head SHA (`staging` as the key when there is no PR number): personas derive their slice path `forge-slice-[PR_NUMBER]-[REVIEW_SHA_SHORT]-[AGENT_DOMAIN].diff` from them. Agents never run a full `gh pr diff`; only `--name-only` is allowed. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure.
 
 **MANDATORY — each domain agent MUST persist its finalized body before posting its findings directly to the PR immediately upon completion** (not batched by the orchestrator). It MUST return verdict, finding count, and one line per finding to the orchestrator independently of delivery; if posting fails, return the durable file path and stop without retrying:
 ```bash
