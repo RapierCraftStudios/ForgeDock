@@ -21,8 +21,7 @@
  *
  * The hook:
  *   1. Reads the transcript to identify which /work-on sub-phase just ran
- *      (by scanning the last Skill invocation and the FORGE annotations
- *      written to GitHub).
+ *      (the last Skill invocation) and the issue number.
  *   2. Determines the issue number from the FORGE:STATE block on the issue
  *      body (GitHub is the authoritative store).
  *   3. Appends the appropriate PHASE_COMMIT event to the local run-log.
@@ -31,17 +30,23 @@
  * If no /work-on phase is detected (the subagent was something else), the
  * hook exits 0 silently — fail-open.
  *
- * === Phase detection ===
+ * === Phase detection (forge#3570) ===
  *
- * The hook looks for FORGE annotation markers in the transcript's tool
- * results (gh issue comment / gh api calls):
+ * The transcript is used ONLY to identify which /work-on skill ran and for
+ * which issue (the `Skill` tool_use input). It is never scanned for FORGE
+ * markers: transcript text carries no comment authorship and can quote
+ * untrusted commenters or spec files. Whether the phase committed (and whether
+ * the run is terminal) is confirmed from GitHub through the engine's trusted,
+ * anchored detector (`detectTrustedOutcome` in bin/engine/phases.mjs):
  *
- *   INVESTIGATION:COMPLETE     → phase "investigate" committed
- *   FORGE:CONTEXT:COMPLETE     → phase "context" committed
- *   FORGE:ARCHITECT:COMPLETE   → phase "architect" committed
- *   FORGE:BUILDER:COMPLETE     → phase "build" committed
- *   FORGE:REVIEWER          → phase "review" committed
- *   workflow:merged label   → phase "close" committed (terminal)
+ *   investigate  → trusted FORGE:INVESTIGATOR report (COMPLETE / INVALID / decomposed)
+ *   context      → trusted, anchored FORGE:CONTEXT:COMPLETE
+ *   architect    → trusted, anchored FORGE:ARCHITECT:COMPLETE
+ *   build        → trusted, anchored FORGE:BUILDER:COMPLETE (+ commits ahead)
+ *   review/close → their engine detectOutcome (PR state / workflow:merged label)
+ *
+ * Events are appended only on `status: "committed"`; any GitHub error fails
+ * open with no events and no enforcement.
  *
  * === Fail-open contract ===
  *
@@ -71,66 +76,8 @@ const __dirname = dirname(__filename);
 /** Absolute path to the ForgeDock installation root (parent of bin/). */
 const FORGE_HOME = resolve(__dirname, "..", "..");
 
-// ---------------------------------------------------------------------------
-// Phase marker table
-// Maps FORGE annotation markers (found in transcript tool results) to phase IDs.
-// ---------------------------------------------------------------------------
-
-// forge#2378: marker strings are single-sourced from packages/protocol's phase
-// registry (bin/engine/phases.mjs imports the identical registry) — do NOT
-// reintroduce inline "FORGE:..."/"INVESTIGATION:..."/"workflow:merged" literals
-// here. This table previously hand-duplicated those strings and drifted out of
-// sync with the engine's stricter :COMPLETE gate (forge#2375/PR#2395) — sourcing
-// both consumers from one registry makes that class of drift structurally
-// impossible going forward.
-//
-// Require the :COMPLETE suffix — a bare "FORGE:CONTEXT"/"FORGE:ARCHITECT"
-// substring also matches a partial/interrupted annotation (e.g.
-// FORGE:CONTEXT:PARTIAL), which is not actually committed. bin/engine/phases.mjs's
-// architect detectOutcome() requires the identical :COMPLETE marker to consider
-// the phase committed.
-/** @type {Array<{marker: string, phase: string, terminal?: boolean, terminalReason?: string}>} */
-const PHASE_MARKERS = [
-  { marker: PHASE_MARKER_REGISTRY.investigate.completionMarker, phase: "investigate" },
-  { marker: PHASE_MARKER_REGISTRY.investigate.invalidMarker,    phase: "investigate", terminal: true, terminalReason: "invalid" },
-  { marker: PHASE_MARKER_REGISTRY.investigate.decomposedMarker, phase: "investigate", terminal: true, terminalReason: "decomposed" },
-  { marker: PHASE_MARKER_REGISTRY.context.completionMarker,     phase: "context" },
-  { marker: PHASE_MARKER_REGISTRY.architect.completionMarker,   phase: "architect" },
-  { marker: PHASE_MARKER_REGISTRY.build.completionMarker,       phase: "build" },
-  // review phase: PR merged is detected from gh label/state
-  { marker: PHASE_MARKER_REGISTRY.review.completionMarker,      phase: "review" },
-  // close phase: issue closed with workflow:merged
-  { marker: PHASE_MARKER_REGISTRY.close.completionLabel,        phase: "close", terminal: true, terminalReason: "merged" },
-];
-
-/**
- * Match a single string of text against the PHASE_MARKERS table and return
- * the phase (and terminal reason) implied by the first marker found, in
- * table order — a terminal marker stops the scan. This is the same
- * marker-matching rule `detectPhase()` applies per-block below, factored
- * out as a standalone export so it can be tested directly against a bare
- * string without needing a full transcript-entries array. Purely additive:
- * `detectPhase()`'s existing multi-entry accumulation algorithm is
- * untouched and does not call this function. See #1592.
- *
- * @param {string} text
- * @returns {{ phaseId: string|null, terminalReason: string|null }}
- */
-// forge#3542: this scans a session TRANSCRIPT (tool results / assistant text), which carries no
-// comment authorship, so it is outside the headless engine's trusted + anchored marker model
-// (bin/engine/phases.mjs). Advisory phase detection only.
-export function detectPhaseFromText(text) {
-  const str = typeof text === "string" ? text : "";
-  let phaseId = null;
-  let terminalReason = null;
-  for (const { marker, phase, terminal, terminalReason: tr } of PHASE_MARKERS) {
-    if (str.includes(marker)) {
-      phaseId = phase;
-      if (terminal) { terminalReason = tr; break; }
-    }
-  }
-  return { phaseId, terminalReason };
-}
+/** Phases whose only failure mode is a missing marker — safe to enforce. */
+const ENFORCED_PHASES = ["investigate", "context", "architect", "build"];
 
 // ---------------------------------------------------------------------------
 // Main — fail-open wrapper
@@ -174,41 +121,7 @@ async function main() {
   const transcript = parseTranscript(transcriptPath);
   if (!transcript) return;
 
-  const { issueNumber, phaseId, terminalReason, outputs, skillInvoked, annotationMissing } = detectPhase(transcript);
-
-  // --- Annotation enforcement (#1250) ---
-  // If a /work-on skill was invoked but the expected FORGE annotation is
-  // missing, block the subagent from completing silently and inject
-  // corrective context so the agent knows what to do.
-  if (skillInvoked && annotationMissing && phaseId) {
-    // forge#2378: sourced from the same registry as PHASE_MARKERS above — no
-    // second hand-written copy of these marker strings.
-    const PHASE_ANNOTATION_MAP = {
-      investigate: `${PHASE_MARKER_REGISTRY.investigate.completionMarker} (or ${PHASE_MARKER_REGISTRY.investigate.invalidMarker} / ${PHASE_MARKER_REGISTRY.investigate.decomposedMarker})`,
-      context:     PHASE_MARKER_REGISTRY.context.completionMarker,
-      architect:   PHASE_MARKER_REGISTRY.architect.completionMarker,
-      build:       PHASE_MARKER_REGISTRY.build.completionMarker,
-      review:      PHASE_MARKER_REGISTRY.review.completionMarker,
-      close:       `${PHASE_MARKER_REGISTRY.close.completionLabel} label`,
-    };
-    const expected = PHASE_ANNOTATION_MAP[phaseId] || `the ${phaseId} phase annotation`;
-    // Output additionalContext JSON (v2.1.163+ SubagentStop format).
-    // Claude Code reads this and injects it as context for the agent.
-    const feedback = {
-      decision: "block",
-      reason: `[ForgeDock] Phase "${phaseId}" completed without posting its FORGE annotation.`,
-      additionalContext: [
-        `The ${phaseId} phase must post annotation: ${expected}`,
-        `Post this annotation now via gh issue comment, then re-complete this phase.`,
-        `This is a pipeline enforcement check — annotation-free completions are not tracked`,
-        `and cannot be resumed across compaction events.`,
-      ].join("\n"),
-    };
-    process.stdout.write(JSON.stringify(feedback) + "\n");
-    process.exit(2);
-    return;
-  }
-
+  const { issueNumber, phaseId } = detectPhase(transcript);
   if (!issueNumber || !phaseId) return; // not a /work-on sub-phase
 
   // Resolve the run-log directory.
@@ -216,9 +129,9 @@ async function main() {
   if (!runLogDir) return;
 
   // Import engine modules dynamically (fail-open if missing).
-  let appendEvent, deriveState, readLog, rewriteLog, makeProjector, reconcileState, freshState;
+  let appendEvent, deriveState, readLog, makeProjector, reconcileState, detectTrustedOutcome;
   try {
-    ({ appendEvent, deriveState, readLog, rewriteLog } = await import(
+    ({ appendEvent, deriveState, readLog } = await import(
       pathToFileURL(join(FORGE_HOME, "bin", "engine", "runlog.mjs")).href
     ));
     ({ makeProjector } = await import(
@@ -226,6 +139,9 @@ async function main() {
     ));
     ({ reconcileState } = await import(
       pathToFileURL(join(FORGE_HOME, "bin", "engine", "reconcile.mjs")).href
+    ));
+    ({ detectTrustedOutcome } = await import(
+      pathToFileURL(join(FORGE_HOME, "bin", "engine", "phases.mjs")).href
     ));
   } catch (importErr) {
     process.stderr.write(`[ForgeDock:interactive-engine] engine modules unavailable: ${importErr.message}\n`);
@@ -235,47 +151,95 @@ async function main() {
   // Build a minimal io adapter using the gh CLI.
   const io = makeCliIo();
 
-  // Load or reconcile state.
+  // Load or reconcile state. Everything up to the trusted outcome check is
+  // read-only: no event is written unless GitHub confirms the phase committed.
   const projector = makeProjector(io);
   const local = readLog(runLogDir, issueNumber).length
     ? deriveState(readLog(runLogDir, issueNumber))
     : null;
-  const remote = await projector.readState(issueNumber);
-  let { state } = reconcileState(local, remote);
+  let state, bootstrapped = false;
+  let outcome;
+  try {
+    const remote = await projector.readState(issueNumber);
+    ({ state } = reconcileState(local, remote));
 
-  if (!state) {
-    // Fresh run — bootstrap.
-    const lane = detectLane(transcript) || "staging";
-    state = {
-      v: 0,
-      run: `r_${issueNumber}_${lane}_interactive`,
-      issue: issueNumber,
-      lane,
-      committed: [],
-      phase: null,
-      branch: null,
-      pr: null,
-      terminal: false,
-      terminalReason: null,
-      lease: null,
-    };
+    if (!state) {
+      // Fresh run — bootstrap in memory only.
+      const lane = detectLane(transcript) || "staging";
+      state = {
+        v: 0,
+        run: `r_${issueNumber}_${lane}_interactive`,
+        issue: issueNumber,
+        lane,
+        committed: [],
+        phase: null,
+        branch: null,
+        pr: null,
+        terminal: false,
+        terminalReason: null,
+        lease: null,
+      };
+      bootstrapped = true;
+    }
+
+    // Skip if phase already committed (idempotent) — before the GitHub call.
+    if (state.committed.includes(phaseId)) return;
+
+    // forge#3570: ground truth from trusted, anchored GitHub comments — never transcript text.
+    outcome = await detectTrustedOutcome(phaseId, state, io);
+  } catch (checkErr) {
+    // Fail open: no events, no enforcement.
+    process.stderr.write(`[ForgeDock:interactive-engine] trusted outcome check failed: ${checkErr.message}\n`);
+    return;
+  }
+
+  if (!outcome || outcome.status !== "committed") {
+    // --- Annotation enforcement (#1250) ---
+    // Skill ran but no trusted, anchored annotation exists on GitHub: block the
+    // subagent and inject corrective context. Only for phases whose failure is
+    // exactly "missing marker".
+    if (ENFORCED_PHASES.includes(phaseId)) {
+      const PHASE_ANNOTATION_MAP = {
+        investigate: `${PHASE_MARKER_REGISTRY.investigate.completionMarker} (or ${PHASE_MARKER_REGISTRY.investigate.invalidMarker} / ${PHASE_MARKER_REGISTRY.investigate.decomposedMarker})`,
+        context:     PHASE_MARKER_REGISTRY.context.completionMarker,
+        architect:   PHASE_MARKER_REGISTRY.architect.completionMarker,
+        build:       PHASE_MARKER_REGISTRY.build.completionMarker,
+      };
+      const expected = PHASE_ANNOTATION_MAP[phaseId] || `the ${phaseId} phase annotation`;
+      // Output additionalContext JSON (v2.1.163+ SubagentStop format).
+      const feedback = {
+        decision: "block",
+        reason: `[ForgeDock] Phase "${phaseId}" completed without posting its FORGE annotation.`,
+        additionalContext: [
+          `The ${phaseId} phase must post annotation: ${expected}`,
+          `Post this annotation now via gh issue comment, then re-complete this phase.`,
+          `This is a pipeline enforcement check — annotation-free completions are not tracked`,
+          `and cannot be resumed across compaction events.`,
+        ].join("\n"),
+      };
+      process.stdout.write(JSON.stringify(feedback) + "\n");
+      process.exit(2);
+    }
+    return;
+  }
+
+  const terminalReason = outcome.terminalReason || null;
+
+  if (bootstrapped) {
     appendEvent(runLogDir, issueNumber, {
       event: "RUN_START",
       issue: issueNumber,
       run: state.run,
-      lane,
+      lane: state.lane,
       source: "interactive",
     });
   }
 
-  // Skip if phase already committed (idempotent).
-  if (state.committed.includes(phaseId)) return;
-
-  // Append the PHASE_COMMIT event.
+  // Append the PHASE_COMMIT event (outputs come from the GitHub-derived outcome).
   appendEvent(runLogDir, issueNumber, {
     event: "PHASE_COMMIT",
     phase: phaseId,
-    outputs: outputs || {},
+    outputs: outcome.outputs || {},
     source: "interactive",
   });
   state = deriveState(readLog(runLogDir, issueNumber));
@@ -320,53 +284,32 @@ export function parseTranscript(transcriptPath) {
 }
 
 /**
- * Detect which /work-on phase completed and the issue number from transcript entries.
+ * Identify the /work-on phase that ran and the issue number from the `Skill`
+ * tool_use input ONLY (forge#3570).
  *
- * Strategy:
- *   - Scan tool_use entries for Skill invocations to find the skill name (→ phase)
- *   - Scan tool_result entries for gh CLI output containing FORGE annotation markers
- *   - Extract issue number from Skill args or from the skill name context
+ * Transcript text (tool results, assistant prose) is deliberately never scanned
+ * for FORGE markers: it carries no comment authorship and routinely quotes
+ * untrusted commenters or spec files, so it must not decide committed/terminal
+ * state. The caller confirms the outcome from GitHub via `detectTrustedOutcome`.
  *
- * `outputs` is intentionally always `{}` from this function (forge#2375): earlier
- * versions matched a bare `"number"` field and a bare `branch[:space]` token against
- * the full text of every tool_result block, with no scoping to a FORGE-authoritative
- * source. That regularly matched unrelated JSON (e.g. `gh issue view`'s own `"number"`
- * field, matching the issue's own number as if it were a PR) or unrelated prose
- * containing the word "branch", producing corrupt PHASE_COMMIT run-log entries
- * (observed: `branch:"diff"`, `branch:"writer"`, `branch:"refs"`, `pr:<issue#>`).
- * Those values were also consumed as a state fallback by
- * bin/engine/runlog.mjs:deriveState() → bin/engine/phases.mjs:resolveBranch(), so a
- * corrupt hook-derived value could leak into the engine's own resolution path. The
- * engine already resolves branch/PR from GitHub ground truth
- * (bin/engine/phases.mjs:parseBranchFromMarkers(), scoped to the FORGE:BUILDER:COMPLETE
- * comment — forge#2184) on next pickup, so no replacement extraction is needed here.
+ * `outputs` stays `{}` (forge#2375): branch/PR are never derived from transcript text.
  *
  * @param {object[]} entries
- * @returns {{ issueNumber: number|null, phaseId: string|null, terminalReason: string|null, outputs: object, skillInvoked: boolean, annotationMissing: boolean }}
+ * @returns {{ issueNumber: number|null, phaseId: string|null, outputs: object, skillInvoked: boolean }}
  */
 export function detectPhase(entries) {
   let skillName = null;
   let issueNumber = null;
-  const foundMarkers = new Set();
-  const outputs = {};
   let skillInvoked = false;
 
   for (const entry of entries) {
-    // Real Claude Code transcript entries nest role/content under
-    // `entry.message` (e.g. {"type":"assistant","message":{"role":"assistant",
-    // "content":[{"type":"tool_use",...}]}}) — the block-level types
-    // (tool_use/tool_result/text) live inside message.content[], never at
-    // the entry's own top level. Fall back to a flat/legacy shape
-    // (entry.role/entry.content directly) if entry.message is absent, so
-    // any pre-normalized or synthetic transcript still works (issue #1580).
+    // Real Claude Code transcript entries nest role/content under `entry.message`;
+    // fall back to a flat/legacy shape (issue #1580).
     const message = entry && typeof entry === "object" && entry.message ? entry.message : entry;
-    const role = message?.role;
     const contentBlocks = Array.isArray(message?.content) ? message.content : [];
 
     for (const block of contentBlocks) {
       if (!block || typeof block !== "object") continue;
-
-      // Tool use blocks — find Skill invocations.
       if (block.type === "tool_use" && block.name === "Skill") {
         const input = block.input || {};
         if (input.skill) { skillName = input.skill; skillInvoked = true; }
@@ -376,56 +319,11 @@ export function detectPhase(entries) {
           if (m) issueNumber = parseInt(m[1], 10);
         }
       }
-
-      // Tool result blocks — scan for FORGE markers in gh output.
-      if (block.type === "tool_result") {
-        const content = Array.isArray(block.content)
-          ? block.content.map((c) => (typeof c === "string" ? c : c?.text || "")).join("\n")
-          : String(block.content || "");
-        for (const { marker } of PHASE_MARKERS) {
-          if (content.includes(marker)) foundMarkers.add(marker);
-        }
-        // No PR/branch extraction here (forge#2375) — see the JSDoc above
-        // detectPhase() for why. `outputs` stays empty from this scan.
-      }
-
-      // Also scan assistant message text blocks for FORGE markers.
-      if (role === "assistant") {
-        const text = block.text || block.content || "";
-        if (typeof text === "string") {
-          for (const { marker } of PHASE_MARKERS) {
-            if (text.includes(marker)) foundMarkers.add(marker);
-          }
-        }
-      }
     }
   }
 
-  // Match markers to phase, most-specific first (terminal markers take priority).
-  let phaseId = null;
-  let terminalReason = null;
-
-  for (const { marker, phase, terminal, terminalReason: tr } of PHASE_MARKERS) {
-    if (foundMarkers.has(marker)) {
-      phaseId = phase;
-      if (terminal) terminalReason = tr || null;
-      // Keep first match unless a more specific (terminal) marker overrides.
-      if (terminal) break;
-    }
-  }
-
-  // Fallback: derive phase from skill name if no markers found.
-  // annotationMissing is true when a skill was invoked but no FORGE markers
-  // were found in the transcript — the agent ran but didn't post its annotation.
-  const markersFound = foundMarkers.size > 0;
-  const phaseFromSkillFallback = !phaseId && skillName ? phaseFromSkill(skillName) : null;
-  if (!phaseId && phaseFromSkillFallback) {
-    phaseId = phaseFromSkillFallback;
-  }
-
-  const annotationMissing = skillInvoked && !markersFound;
-
-  return { issueNumber, phaseId, terminalReason, outputs, skillInvoked, annotationMissing };
+  const phaseId = skillName ? phaseFromSkill(skillName) : null;
+  return { issueNumber, phaseId, outputs: {}, skillInvoked };
 }
 
 /**

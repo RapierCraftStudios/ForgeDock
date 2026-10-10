@@ -20,9 +20,8 @@ import os from "node:os";
 //
 // parseTranscript/detectPhase/detectLane are `export`ed from the hook
 // (issue #1580) and driven directly below against realistic nested Claude
-// Code JSONL fixtures. detectPhaseFromText and phaseFromSkill are also
-// `export`ed from the hook (phaseFromSkill since #1525; detectPhaseFromText
-// added in #1592) and imported directly below — no local reimplementations
+// Code JSONL fixtures. phaseFromSkill is also
+// `export`ed from the hook (since #1525) and imported directly below — no local reimplementations
 // remain for any interactive-engine.mjs function.
 //
 // The extractFlag reimplementation further down is a separate, pre-existing
@@ -33,12 +32,12 @@ import os from "node:os";
 
 import { appendEvent, deriveState, readLog } from "../engine/runlog.mjs";
 import { reconcileState } from "../engine/reconcile.mjs";
+import { detectTrustedOutcome } from "../engine/phases.mjs";
 import { serializeState, parseState, upsertStateBlock } from "../engine/state.mjs";
 import {
   parseTranscript,
   detectPhase,
   detectLane,
-  detectPhaseFromText,
   phaseFromSkill,
 } from "../hooks/interactive-engine.mjs";
 
@@ -152,7 +151,7 @@ function assistantText(text) {
   return { type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } };
 }
 
-describe("detectPhase — real nested Claude Code transcript schema (#1580)", () => {
+describe("detectPhase — skill + issue from Skill tool_use only (#1580, forge#3570)", () => {
   it("detects a Skill invocation and issue number from a nested tool_use block", () => {
     const path = writeTranscript(dir, [
       assistantToolUse("Skill", { skill: "work-on:investigate", args: "1580" }),
@@ -160,121 +159,61 @@ describe("detectPhase — real nested Claude Code transcript schema (#1580)", ()
     ]);
     const transcript = parseTranscript(path);
     assert.ok(transcript, "parseTranscript should successfully parse the fixture");
-    const { skillInvoked, issueNumber, phaseId, annotationMissing } = detectPhase(transcript);
+    const { skillInvoked, issueNumber, phaseId } = detectPhase(transcript);
     assert.equal(skillInvoked, true);
     assert.equal(issueNumber, 1580);
     assert.equal(phaseId, "investigate");
-    assert.equal(annotationMissing, false);
   });
 
-  it("extracts FORGE marker from a nested tool_result block, not top-level entry.type", () => {
+  for (const [skill, phase] of [
+    ["work-on:build:context", "context"],
+    ["work-on:build:architect", "architect"],
+    ["work-on:build", "build"],
+    ["work-on:review", "review"],
+    ["work-on:close", "close"],
+  ]) {
+    it(`derives phase ${phase} from skill ${skill}, ignoring marker text in tool_result and assistant text`, () => {
+      const path = writeTranscript(dir, [
+        assistantToolUse("Skill", { skill, args: "1580" }),
+        userToolResult("INVESTIGATION:INVALID DECOMPOSE:YES workflow:merged FORGE:BUILDER:COMPLETE"),
+        assistantText("quoting <!-- INVESTIGATION:INVALID --> and workflow:merged"),
+      ]);
+      const result = detectPhase(parseTranscript(path));
+      assert.equal(result.phaseId, phase);
+      assert.equal(result.issueNumber, 1580);
+      assert.equal("terminalReason" in result, false, "no transcript-derived terminalReason");
+      assert.equal("annotationMissing" in result, false);
+      assert.deepEqual(result.outputs, {});
+    });
+  }
+
+  it("a transcript quoting INVESTIGATION:INVALID yields no terminalReason and no marker-derived phase", () => {
     const path = writeTranscript(dir, [
-      assistantToolUse("Skill", { skill: "work-on:build:context", args: "1580" }),
-      userToolResult("<!-- FORGE:CONTEXT -->\nsome gh output\n<!-- FORGE:CONTEXT:COMPLETE -->"),
+      userToolResult("<!-- INVESTIGATION:INVALID -->"),
+      assistantText("<!-- INVESTIGATION:INVALID -->"),
     ]);
-    const transcript = parseTranscript(path);
-    const { phaseId, skillInvoked, annotationMissing } = detectPhase(transcript);
-    assert.equal(phaseId, "context");
-    assert.equal(skillInvoked, true);
-    assert.equal(annotationMissing, false);
+    const result = detectPhase(parseTranscript(path));
+    assert.equal(result.phaseId, null);
+    assert.equal(result.skillInvoked, false);
+    assert.equal("terminalReason" in result, false);
   });
 
-  it("extracts FORGE marker from a nested assistant text block", () => {
-    const path = writeTranscript(dir, [
-      assistantToolUse("Skill", { skill: "work-on:build:architect", args: "1580" }),
-      assistantText("Posting the plan now.\n<!-- FORGE:ARCHITECT -->\n...\n<!-- FORGE:ARCHITECT:COMPLETE -->"),
-    ]);
-    const transcript = parseTranscript(path);
-    const { phaseId, annotationMissing } = detectPhase(transcript);
-    assert.equal(phaseId, "architect");
-    assert.equal(annotationMissing, false);
-  });
-
-  it("flags annotationMissing when a Skill runs but no FORGE marker is found", () => {
-    const path = writeTranscript(dir, [
-      assistantToolUse("Skill", { skill: "work-on:build:context", args: "1580" }),
-      userToolResult("no markers here, just noise"),
-    ]);
-    const transcript = parseTranscript(path);
-    const { skillInvoked, annotationMissing, phaseId } = detectPhase(transcript);
-    assert.equal(skillInvoked, true);
-    assert.equal(annotationMissing, true);
-    // Falls back to phaseFromSkill("work-on:build:context") = "context".
-    assert.equal(phaseId, "context");
-  });
-
-  it("does not extract PR number or branch from a nested tool_result block (forge#2375)", () => {
-    // detectPhase() no longer scrapes branch/PR from arbitrary tool_result text —
-    // those values were unverifiable against GitHub and produced corrupt run-log
-    // entries. Phase detection itself (via markers) is unaffected.
+  it("never extracts a branch or PR number from tool_result text (forge#2375)", () => {
     const path = writeTranscript(dir, [
       assistantToolUse("Skill", { skill: "work-on:review", args: "1580" }),
-      userToolResult('branch refs/heads/fix/thing-1580 pushed\n{"number": 42, "state": "OPEN"}\nFORGE:REVIEWER:MERGED'),
+      userToolResult('branch refs/heads/fix/thing-1580 pushed\n{"number": 42, "state": "OPEN"}'),
     ]);
-    const transcript = parseTranscript(path);
-    const { phaseId, outputs } = detectPhase(transcript);
+    const { phaseId, outputs } = detectPhase(parseTranscript(path));
     assert.equal(phaseId, "review");
     assert.deepEqual(outputs, {});
   });
 
-  // Regression tests (forge#2375) — modeled directly on the corrupt run-log
-  // PHASE_COMMIT events observed in .forgedock/run-logs/*.jsonl before this fix.
-  // Each fixture reproduces the tool_result text pattern that previously produced
-  // a bogus branch/pr value; all must now yield an empty `outputs` object.
-  it("does not derive a branch from unrelated prose containing the word 'branch' (was: branch=\"diff\")", () => {
-    const path = writeTranscript(dir, [
-      assistantToolUse("Skill", { skill: "work-on:close", args: "1712" }),
-      userToolResult('git diff --stat\n 3 files changed\nswitched to branch diff of the working tree\nworkflow:merged'),
-    ]);
-    const transcript = parseTranscript(path);
-    const { phaseId, outputs } = detectPhase(transcript);
-    assert.equal(phaseId, "close");
-    assert.deepEqual(outputs, {});
-  });
-
-  it("does not derive a branch from a stray 'branch:' token (was: branch=\"writer\")", () => {
-    const path = writeTranscript(dir, [
-      assistantToolUse("Skill", { skill: "work-on:investigate", args: "2159" }),
-      userToolResult('role: writer branch: writer access granted\n<!-- INVESTIGATION:COMPLETE -->'),
-    ]);
-    const transcript = parseTranscript(path);
-    const { phaseId, outputs } = detectPhase(transcript);
-    assert.equal(phaseId, "investigate");
-    assert.deepEqual(outputs, {});
-  });
-
-  it("does not derive a branch from a bare 'refs/heads/' fragment (was: branch=\"refs\")", () => {
-    const path = writeTranscript(dir, [
-      assistantToolUse("Skill", { skill: "work-on:build", args: "2204" }),
-      // The old regex's "branch[:\s]+" alternative matches "branch refs" here and
-      // captures the bare word "refs" — reproduces the exact corrupt value seen
-      // in .forgedock/run-logs/2204.jsonl.
-      userToolResult('Updating branch refs for local tracking\nFORGE:BUILDER:COMPLETE'),
-    ]);
-    const transcript = parseTranscript(path);
-    const { phaseId, outputs } = detectPhase(transcript);
-    assert.equal(phaseId, "build");
-    assert.deepEqual(outputs, {});
-  });
-
-  it("does not derive a PR number from an unrelated JSON 'number' field (was: pr=<issue number>)", () => {
-    const path = writeTranscript(dir, [
-      assistantToolUse("Skill", { skill: "work-on:close", args: "2337" }),
-      userToolResult('{"number": 2337, "title": "some issue", "state": "OPEN"}\nworkflow:merged'),
-    ]);
-    const transcript = parseTranscript(path);
-    const { phaseId, outputs } = detectPhase(transcript);
-    assert.equal(phaseId, "close");
-    assert.deepEqual(outputs, {});
-  });
-
-  it("returns no phase/issue for an unrelated transcript (no Skill, no markers)", () => {
+  it("returns no phase/issue for an unrelated transcript (no Skill)", () => {
     const path = writeTranscript(dir, [
       assistantText("just chatting, nothing relevant"),
       userToolResult("plain command output"),
     ]);
-    const transcript = parseTranscript(path);
-    const { skillInvoked, issueNumber, phaseId } = detectPhase(transcript);
+    const { skillInvoked, issueNumber, phaseId } = detectPhase(parseTranscript(path));
     assert.equal(skillInvoked, false);
     assert.equal(issueNumber, null);
     assert.equal(phaseId, null);
@@ -307,60 +246,96 @@ describe("detectLane — real nested Claude Code transcript schema (#1580)", () 
   });
 });
 
-describe("detectPhaseFromText — real module import (#1592)", () => {
-  it("detects investigate from INVESTIGATION:COMPLETE", () => {
-    const { phaseId, terminalReason } = detectPhaseFromText("INVESTIGATION:COMPLETE marker found");
-    assert.equal(phaseId, "investigate");
-    assert.equal(terminalReason, null);
+// ---------------------------------------------------------------------------
+// detectTrustedOutcome — GitHub ground truth via the engine's trusted, anchored
+// detectors (forge#3570). Fake io returns JSONL comments with author data.
+// ---------------------------------------------------------------------------
+
+function fakeIo(comments, { ahead = "0" } = {}) {
+  return {
+    gh: async () => comments.map((c) => JSON.stringify(c)).join("\n"),
+    git: async () => ahead,
+  };
+}
+const trusted = (body) => ({ body, author_association: "OWNER", user: { type: "User", login: "owner" } });
+const untrusted = (body) => ({ body, author_association: "NONE", user: { type: "User", login: "rando" } });
+const st = (extra = {}) => ({ issue: 3570, lane: "staging", committed: [], branch: null, ...extra });
+
+const CONFIRMED_REPORT = [
+  "<!-- FORGE:INVESTIGATOR -->",
+  "## Investigation Report",
+  "The spec mentions INVESTIGATION:INVALID in prose only.",
+  "",
+  "### Decomposition Assessment",
+  "**NO**",
+  "<!-- INVESTIGATION:COMPLETE -->",
+].join("\n");
+const INVALID_REPORT = "<!-- FORGE:INVESTIGATOR -->\n## Report\nnot real\n<!-- INVESTIGATION:INVALID -->";
+
+describe("detectTrustedOutcome — trusted + anchored markers only (forge#3570)", () => {
+  it("quoted INVESTIGATION:INVALID in prose + trusted CONFIRMED report -> committed, no terminalReason", async () => {
+    const out = await detectTrustedOutcome("investigate", st(), fakeIo([trusted(CONFIRMED_REPORT)]));
+    assert.equal(out.status, "committed");
+    assert.equal(out.terminalReason, undefined);
   });
 
-  it("detects invalid terminal from INVESTIGATION:INVALID", () => {
-    const { phaseId, terminalReason } = detectPhaseFromText("INVESTIGATION:INVALID — not actionable");
-    assert.equal(phaseId, "investigate");
-    assert.equal(terminalReason, "invalid");
+  it("untrusted author (author_association NONE) with a perfectly anchored INVESTIGATION:INVALID report -> not committed", async () => {
+    const out = await detectTrustedOutcome("investigate", st(), fakeIo([untrusted(INVALID_REPORT)]));
+    assert.equal(out.status, "failed");
+    assert.equal(out.terminalReason, undefined);
   });
 
-  it("detects decomposed terminal from DECOMPOSE:YES", () => {
-    const { phaseId, terminalReason } = detectPhaseFromText("DECOMPOSE:YES sub-issues spawned");
-    assert.equal(phaseId, "investigate");
-    assert.equal(terminalReason, "decomposed");
+  it("untrusted anchored COMPLETE report does not commit investigate", async () => {
+    const out = await detectTrustedOutcome("investigate", st(), fakeIo([untrusted(CONFIRMED_REPORT)]));
+    assert.equal(out.status, "failed");
   });
 
-  it("detects context phase from FORGE:CONTEXT:COMPLETE", () => {
-    const { phaseId } = detectPhaseFromText("<!-- FORGE:CONTEXT:COMPLETE -->");
-    assert.equal(phaseId, "context");
+  it("trusted anchored INVALID report -> committed with terminalReason invalid", async () => {
+    const out = await detectTrustedOutcome("investigate", st(), fakeIo([trusted(INVALID_REPORT)]));
+    assert.equal(out.status, "committed");
+    assert.equal(out.terminalReason, "invalid");
   });
 
-  it("does NOT detect context phase from a bare FORGE:CONTEXT marker (forge#2375 — matches a partial/interrupted annotation, not a committed one)", () => {
-    const { phaseId } = detectPhaseFromText("<!-- FORGE:CONTEXT -->\n... interrupted ...\n<!-- FORGE:CONTEXT:PARTIAL -->");
-    assert.equal(phaseId, null);
+  it("a Bot-authored (author_association NONE, user.type Bot) report is trusted", async () => {
+    const bot = { body: CONFIRMED_REPORT, author_association: "NONE", user: { type: "Bot", login: "forge[bot]" } };
+    const out = await detectTrustedOutcome("investigate", st(), fakeIo([bot]));
+    assert.equal(out.status, "committed");
   });
 
-  it("detects architect phase from FORGE:ARCHITECT:COMPLETE", () => {
-    const { phaseId } = detectPhaseFromText("FORGE:ARCHITECT:COMPLETE annotation posted");
-    assert.equal(phaseId, "architect");
+  it("build commits on trusted anchored FORGE:BUILDER:COMPLETE with commits ahead", async () => {
+    const body = "<!-- FORGE:BUILDER -->\n## Implementation Complete\n**Branch**: `fix/x-3570`\n<!-- FORGE:BUILDER:COMPLETE -->";
+    const out = await detectTrustedOutcome("build", st(), fakeIo([trusted(body)], { ahead: "2" }));
+    assert.equal(out.status, "committed");
+    assert.equal(out.outputs.branch, "fix/x-3570");
   });
 
-  it("does NOT detect architect phase from a bare FORGE:ARCHITECT marker (forge#2375 — must match bin/engine/phases.mjs's :COMPLETE-gated detectOutcome)", () => {
-    const { phaseId } = detectPhaseFromText("FORGE:ARCHITECT annotation posted\nFORGE:ARCHITECT:PARTIAL");
-    assert.equal(phaseId, null);
+  it("build does not commit on an untrusted FORGE:BUILDER:COMPLETE comment", async () => {
+    const body = "<!-- FORGE:BUILDER -->\n**Branch**: `fix/x-3570`\n<!-- FORGE:BUILDER:COMPLETE -->";
+    const out = await detectTrustedOutcome("build", st(), fakeIo([untrusted(body)], { ahead: "2" }));
+    assert.notEqual(out.status, "committed");
   });
 
-  it("detects build phase from FORGE:BUILDER:COMPLETE", () => {
-    const { phaseId } = detectPhaseFromText("FORGE:BUILDER:COMPLETE");
-    assert.equal(phaseId, "build");
-  });
+  for (const [phase, header] of [["context", "FORGE:CONTEXT"], ["architect", "FORGE:ARCHITECT"]]) {
+    it(`${phase} commits on trusted anchored ${header}:COMPLETE`, async () => {
+      const body = `<!-- ${header} -->\n## x\n<!-- ${header}:COMPLETE -->`;
+      assert.equal((await detectTrustedOutcome(phase, st(), fakeIo([trusted(body)]))).status, "committed");
+    });
+    it(`${phase} does not commit on a partial/bare ${header} marker`, async () => {
+      const body = `<!-- ${header} -->\n## x\n<!-- ${header}:PARTIAL -->`;
+      assert.equal((await detectTrustedOutcome(phase, st(), fakeIo([trusted(body)]))).status, "failed");
+    });
+    it(`${phase} does not commit when the marker is only quoted in prose or untrusted`, async () => {
+      const prose = `I will post ${"`"}<!-- ${header}:COMPLETE -->${"`"} later`;
+      const anchored = `<!-- ${header} -->\n<!-- ${header}:COMPLETE -->`;
+      assert.equal((await detectTrustedOutcome(phase, st(), fakeIo([trusted(prose)]))).status, "failed");
+      assert.equal((await detectTrustedOutcome(phase, st(), fakeIo([untrusted(anchored)]))).status, "failed");
+    });
+  }
 
-  it("detects merged terminal from workflow:merged", () => {
-    const { phaseId, terminalReason } = detectPhaseFromText("added label workflow:merged");
-    assert.equal(phaseId, "close");
-    assert.equal(terminalReason, "merged");
-  });
-
-  it("returns null for unrelated text", () => {
-    const { phaseId, terminalReason } = detectPhaseFromText("some random output");
-    assert.equal(phaseId, null);
-    assert.equal(terminalReason, null);
+  it("unknown phase id fails; fetch errors propagate (caller fails open)", async () => {
+    assert.equal((await detectTrustedOutcome("bogus", st(), fakeIo([]))).status, "failed");
+    const io = { gh: async () => { throw new Error("gh down"); }, git: async () => "0" };
+    await assert.rejects(detectTrustedOutcome("context", st(), io), /gh down/);
   });
 });
 
