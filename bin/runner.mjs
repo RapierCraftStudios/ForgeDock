@@ -935,7 +935,6 @@ export function sanitizeOutputExcerptForLog(output) {
 
 // Shared usage-limit phrasing: detection and reset extraction must agree on it.
 const USAGE_LIMIT_PHRASE = "(?:session|weekly|usage) limit";
-const USAGE_LIMIT_RE = new RegExp(USAGE_LIMIT_PHRASE, "i");
 // `... limit · resets 3pm (Asia/Kolkata)` — capture stops at the zone's `)`.
 const USAGE_LIMIT_RESET_PAREN_RE = new RegExp(
   `${USAGE_LIMIT_PHRASE}[^\\n"]*?resets?\\s+([^\\n"]+?\\))`, "i");
@@ -962,6 +961,16 @@ function collectUsageLimitWindows(source) {
 }
 
 /**
+ * True when `text` holds a `limit ... resets ...` clause (the shape the reset
+ * extractor needs). Only bounded windows reach the polynomial regexes (#3522).
+ */
+function hasUsageLimitResetClause(text) {
+  if (typeof text !== "string") return false;
+  return collectUsageLimitWindows(text).some(
+    (w) => USAGE_LIMIT_RESET_PAREN_RE.test(w) || USAGE_LIMIT_RESET_LINE_RE.test(w));
+}
+
+/**
  * Parses a `claude --output-format json` single-result envelope from `text`.
  * Returns the parsed object, or `undefined` when `text` is not exactly one
  * JSON object. Never throws.
@@ -980,9 +989,13 @@ function parseCliEnvelope(text) {
 
 /**
  * Detects whether a failed CLI run was a Claude usage/session/weekly limit.
- * Prefers the envelope's structured fields (`api_error: "usage_limit_reached"`,
- * `api_error_status: 429`), then the envelope's `result` text, then the plain
- * combined output. `stdout` is parsed ALONE (forge#2422 invariant); never throws.
+ * Deliberately narrow (forge#3523): the envelope's `api_error` must be
+ * `"usage_limit_reached"`, or the envelope must be `is_error: true` with a
+ * `result` carrying a full `limit ... resets ...` clause, or (no envelope) the
+ * plain combined output must carry that same clause. A bare HTTP 429 (a
+ * transient rate limit) or a keyword-only mention is NOT a usage limit; a limit
+ * with neither signal is treated as an ordinary failure. `stdout` is parsed
+ * ALONE (forge#2422 invariant); never throws.
  *
  * @param {string} stdout - raw stdout of the CLI run
  * @param {string} [output] - combined stdout+stderr, for the plain-text fallback
@@ -991,11 +1004,10 @@ function parseCliEnvelope(text) {
 export function detectUsageLimit(stdout, output = "") {
   const env = parseCliEnvelope(stdout);
   if (env) {
-    if (env.api_error === "usage_limit_reached" || env.api_error_status === 429) return true;
-    if (typeof env.result === "string" && USAGE_LIMIT_RE.test(env.result)) return true;
-    return false;
+    if (env.api_error === "usage_limit_reached") return true;
+    return env.is_error === true && hasUsageLimitResetClause(env.result);
   }
-  return USAGE_LIMIT_RE.test(output || "") && /resets?\s/i.test(output || "");
+  return hasUsageLimitResetClause(output || "");
 }
 
 /**
@@ -1346,13 +1358,18 @@ export function runCliBackend({
       // quota-exhaustion failure will clear without reading raw logs. Only
       // ever set when the pattern actually matches — never fabricated.
       // The reset text is read from stdout's parsed envelope first (stdout
-      // ALONE, forge#2422), then from the combined output.
-      const resetAt =
-        extractSessionLimitResetTime(stdout) ?? extractSessionLimitResetTime(output);
+      // ALONE, forge#2422), then from the combined output. Gated on the same
+      // narrowed predicate as `usageLimit` (forge#3523): the engine pauses on
+      // `resetAtEpochMs` alone, so a bare 429 or keyword-only failure whose
+      // output happens to contain a reset clause must not carry one either.
+      const isUsageLimit = detectUsageLimit(stdout, output);
+      const resetAt = isUsageLimit
+        ? extractSessionLimitResetTime(stdout) ?? extractSessionLimitResetTime(output)
+        : undefined;
       // Structured usage-limit flag: lets the engine pause by a bounded
       // default when the reset time itself is missing or unparseable. The
       // engine, not the runner, owns that default — no epoch is fabricated here.
-      if (detectUsageLimit(stdout, output)) err.usageLimit = true;
+      if (isUsageLimit) err.usageLimit = true;
       if (resetAt) {
         err.resetAt = resetAt;
         // forge#2524: also attach a machine-usable epoch-ms timestamp so
