@@ -501,7 +501,7 @@ if [ "$MERGE_STATE" = "MERGED" ]; then
     adaptive|universal) bash "$SCRIPT_PATH" {ISSUE_NUMBER} {GH_FLAG} merged ;;
     prose)
       gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "workflow:merged" \
-        --remove-label "workflow:awaiting-merge,needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:invalid,workflow:decomposed" 2>/dev/null || true
+        --remove-label "workflow:awaiting-merge,needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:invalid,workflow:decomposed" 2>/dev/null || true # allowlist:check-command-side-effects
       ;;
   esac
   RE_GATE_OUTCOME="AUTO-LANDED"
