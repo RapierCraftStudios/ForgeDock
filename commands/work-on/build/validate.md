@@ -515,6 +515,7 @@ The architect records the caller and sibling sweep as a machine-readable manifes
 - **Trust**: the manifest drives a gate, so it is read only from the newest comment that `trusted-comments.sh` accepts (the same trust predicate as the phase-trail verifier). An untrusted comment is never parsed.
 - **Install root only**: both scripts resolve from `FORGE_ROOT` and never from the worktree, because the branch under audit must not supply its own gate. An unresolvable script is DEGRADED, never a pass.
 - **Exit codes**: `0` covered or no manifest (SKIP); `1` an `UNLISTED:` or `NOT_DONE:` line was printed, so set `GATE_PASSED=false`, fix the code (or add a justified `verified-unaffected` row to the plan by editing the FORGE:ARCHITECT comment; never delete a row), and re-run V1 onward; anything else, a failed fetch, or an unresolvable script is DEGRADED: append `blast-radius` to `SKIPPED_CHECKS` so it appears in `verification_skipped`, and print the reason. DEGRADED never passes silently and a failed fetch is never treated as "no manifest".
+- **Carry-forward**: each Bash call is a fresh shell, so V4.5's variables do not reach V5. The block prints its result as explicit lines: `BLAST_RADIUS_STATE: <PASS|SKIP|FAIL|DEGRADED>`, plus `GATE_PASSED: false` on FAIL and `SKIPPED_CHECKS+=blast-radius` on DEGRADED. Record those lines in your notes; V5 Step 1 sets `GATE_PASSED` and V5 Step 4 sets `SKIPPED_CHECKS` from them, alongside the V2 notes.
 
 ```bash
 cd {WORKTREE_PATH}
@@ -573,7 +574,14 @@ else
 fi
 rm -f "$BR_FILE"
 echo "BLAST_RADIUS: ${BR_STATE}${BR_NOTE:+ — $BR_NOTE}"
-[ "$BR_STATE" = "DEGRADED" ] && SKIPPED_CHECKS="${SKIPPED_CHECKS:+$SKIPPED_CHECKS, }blast-radius"
+# Carry-forward lines for V5 (fresh shell): read them back in V5 Step 1 and Step 4.
+echo "BLAST_RADIUS_STATE: ${BR_STATE}"
+if [ "$BR_STATE" = "FAIL" ]; then
+  echo "GATE_PASSED: false"
+elif [ "$BR_STATE" = "DEGRADED" ]; then
+  SKIPPED_CHECKS="${SKIPPED_CHECKS:+$SKIPPED_CHECKS, }blast-radius"
+  echo "SKIPPED_CHECKS+=blast-radius"
+fi
 ```
 
 On `FAIL`, the blocker line for `VALIDATE_RESULT` is `blast-radius: <UNLISTED/NOT_DONE lines>`; the repair loop (build B6.5) fixes the listed files, not the checker or the manifest.
@@ -590,7 +598,10 @@ The quality gate must leave a checkable artifact. `scripts/verify-phase-trail.sh
 
 **Skip-path marker**: when the Skip Conditions above set `GATE_PASSED=true` early (single config/docs file), still post the marker with `**Result**: PASS (skipped — single config/docs file)` and `**Iterations**: 0`, so the verifier never has to guess. The verifier's `--docs-only` waiver additionally covers diffs accepted by `scripts/is-docs-only.sh` (allowlisted Markdown only: `docs/**` or root README/CHANGELOG/CONTRIBUTING/SECURITY/GOVERNANCE; nested `AGENTS.md`/`CLAUDE.md`/`SKILL.md`/`GEMINI.md` and the instruction directories `commands/`, `devdocs/`, `templates/`, `skills/`, `agents/`, `hooks/`, `.claude/`, `.claude-plugin/`, `.agents/`, `.codex/`, `.cursor/`, `.github/`, `.opencode/`, `.gemini/`, `.kiro/` excluded; callers feed both sides of renames).
 
+Set `GATE_PASSED` from the V1 loop result, then apply V4.5's printed carry-forward line: if V4.5 printed `GATE_PASSED: false` (`BLAST_RADIUS_STATE: FAIL`), `GATE_PASSED` is `false` here even if the V1 loop passed.
+
 ```bash
+# GATE_PASSED: set from the V1 loop result, and forced to false when V4.5 printed "GATE_PASSED: false"
 GATE_RESULT=$([ "$GATE_PASSED" = "true" ] && echo PASS || echo FAIL)
 # Bind the PASS to what was actually gated: the staged tree is exactly the tree the V5 commit will have.
 # scripts/verify-phase-trail.sh --head-tree (work-on/review.md R1.5) rejects a PASS recorded for a different tree. <!-- Added: forge#3149 -->
@@ -719,12 +730,12 @@ If the output contains `ANCESTRY_FAILED=1`: do NOT append `:COMPLETE` and do NOT
 
 After the ancestry audit passes (or is skipped), patch the existing FORGE:BUILDER comment: add the `**Verification Status**` line, the best-effort `cost_usd:` line, and the `<!-- FORGE:BUILDER:COMPLETE -->` marker. This is the **only** place the marker is written — it signals that a real commit exists on the branch and the build is safe to resume-skip. <!-- Added: forge#1305 -->
 
-`SKIPPED_CHECKS` comes from Phase V2. Shell state may not persist between Bash calls, so set it here from your V2 notes before running the block (comma-separated check names, empty when every configured check ran).
+`SKIPPED_CHECKS` comes from Phase V2 and Phase V4.5. Shell state may not persist between Bash calls, so set it here from your V2 notes before running the block (comma-separated check names, empty when every configured check ran), and append `blast-radius` when V4.5 printed `SKIPPED_CHECKS+=blast-radius` (`BLAST_RADIUS_STATE: DEGRADED`).
 
 **Cost line reconciliation**: the machine-readable `cost_usd:` line (best-effort; only when `PHASE_COST_USD` is available, never blocking) is the single cost signal. Do not add a separate `**Cost (build phase)**` line.
 
 ```bash
-# SKIPPED_CHECKS: set from the V2 notes, e.g. SKIPPED_CHECKS="python.format, typescript.typecheck/build"
+# SKIPPED_CHECKS: set from the V2 notes plus V4.5's carry-forward line, e.g. SKIPPED_CHECKS="python.format, blast-radius"
 SKIPPED_CHECKS="${SKIPPED_CHECKS:-}"
 if [ -z "$SKIPPED_CHECKS" ]; then
   VERIFICATION_STATUS="✅ All configured verification commands passed"
@@ -780,7 +791,7 @@ VALIDATE_RESULT:
   blocker: {description if gate_passed=false}
   verification_skipped: []  # empty when all configured checks ran; list of skipped check names otherwise
                             # e.g. ["python.format", "typescript.typecheck/build"]
-                            # populated from SKIPPED_CHECKS in Phase V2
+                            # populated from SKIPPED_CHECKS in Phase V2 and V4.5
 ```
 
 ---
