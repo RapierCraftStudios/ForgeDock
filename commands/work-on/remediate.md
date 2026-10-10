@@ -203,11 +203,13 @@ If the worktree/branch checkout fails for any reason (branch deleted, force-push
 
 ## Phase M3: Apply Fixes
 
-For each FIXABLE item from Phase M1: read the affected file(s) in `{WORKTREE_PATH}` before editing (never assume current state), apply the fix. Follow the same implementation discipline as `work-on/build/implement.md` I3 (cross-lane import guard, library-callback verification, deliverable-type consistency, no unrequested scope) — this file does not restate those rules, it inherits them.
+For each FIXABLE item from Phase M1 (the base-sync item, when present, goes first; see below): read the affected file(s) in `{WORKTREE_PATH}` before editing (never assume current state), apply the fix. Follow the same implementation discipline as `work-on/build/implement.md` I3 (cross-lane import guard, library-callback verification, deliverable-type consistency, no unrequested scope) — this file does not restate those rules, it inherits them.
 
 **Never delete, skip, or weaken a failing check to go green.** Removing, skipping (`skip`, `xfail`, `continue-on-error`, `if: false`, commenting out) or weakening a failing test or CI step is never a valid fix. Fix the cause in the code under test, or classify the item UNFIXABLE, add/re-affirm `needs-human`, and post a comment that names the failing tests and failing assertions (test title plus assertion text from the CI log). The only exception is a deletion justified by removal of the tested code itself (see quality-gate 2U). Enforcement is the quality gate's coverage-reduction check (2U): a `COVERAGE-1` finding is fixed by restoring the test or step, never by suppressing the finding. <!-- Added: forge#3257 -->
 
 **Base-sync (merge-only)** <!-- Added: forge#3496 -->: runs when the block reason was a base conflict (`base-conflict`, or `CONFLICTING`/`DIRTY`, or `BEHIND` under required-up-to-date protection). This step is authorized by the operator's batch dispatch and by the router's `FORGE:BASESYNC_REMEDIATION` bound; it applies to the PR's own branch in `{WORKTREE_PATH}` only. Never rebase, never force-push, never merge into or push to a shared branch.
+
+**Ordering**: the base sync runs first in M3, right after M2's clean checkout and before any other FIXABLE edit. `git merge` needs a clean tree, and merging over uncommitted edits is refused (rc=1, no merge in progress) or leaves a merge that cannot be safely aborted. Apply the other FIXABLE items only after the sync has concluded (clean merge, or conflicts resolved and committed). Runs with no base-conflict block reason skip this step and are unchanged. <!-- Added: forge#3515 -->
 
 ```bash
 cd {WORKTREE_PATH}
@@ -216,20 +218,35 @@ case "{HEAD_BRANCH}" in
   "{PR_BASE}"|main|master|staging|milestone/*) echo "refusing base sync: {HEAD_BRANCH} is a shared branch"; BASESYNC_REFUSED=true ;;
 esac
 [ "$CUR_BRANCH" = "{HEAD_BRANCH}" ] || BASESYNC_REFUSED=true
+# Clean-tree precondition: never merge over pending edits.
+if ! { git diff --quiet && git diff --cached --quiet; }; then
+  echo "refusing base sync: working tree has uncommitted changes"; BASESYNC_REFUSED=true
+fi
 if [ "${BASESYNC_REFUSED:-false}" != "true" ]; then
   git fetch origin {PR_BASE} # allowlist:check-command-side-effects
-  git merge origin/{PR_BASE} --no-edit # allowlist:check-command-side-effects
-  BASESYNC_RAN=true
+  MERGE_OUT=$(git merge origin/{PR_BASE} --no-edit 2>&1); MERGE_RC=$? # allowlist:check-command-side-effects
+  echo "$MERGE_OUT"
+  # rc alone cannot tell a conflict from a refusal (both exit 1); MERGE_HEAD can.
+  if [ "$MERGE_RC" -eq 0 ]; then
+    BASESYNC_RAN=true
+  elif git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+    BASESYNC_CONFLICTED=true   # merge in progress with conflicts: resolve or park below
+  else
+    BASESYNC_MERGE_REFUSED=true   # rc!=0 and no MERGE_HEAD: refused, nothing was merged
+  fi
 fi
 ```
 
-- Clean merge: nothing more to resolve; the merge commit is the sync.
-- Conflicts: read BOTH sides of every conflicted hunk and the surrounding code, then write the combined result by hand. No `-X ours`/`-X theirs`, no wholesale `git checkout --ours/--theirs`, no blanket take-one-side. After resolving, `git add` the files and conclude with `git commit -s --no-edit` (the merge commit).
-- **Unresolvable with confidence** (a hunk whose intent on either side you cannot reconcile, or the branch is refused above): capture the file list first, then abort, and park:
+Exactly one outcome applies. `BASESYNC_RAN=true` is set only on a clean merge (or after a conflicted merge is concluded below); a refused merge is never treated as synced.
+
+- Clean merge (`MERGE_RC=0`): nothing more to resolve; the merge commit is the sync.
+- Conflicts (`MERGE_RC` nonzero, `MERGE_HEAD` present): read BOTH sides of every conflicted hunk and the surrounding code, then write the combined result by hand. No `-X ours`/`-X theirs`, no wholesale `git checkout --ours/--theirs`, no blanket take-one-side. After resolving, `git add` the files and conclude with `git commit -s --no-edit` (the merge commit), then set `BASESYNC_RAN=true`.
+- **Unresolvable with confidence** (a hunk whose intent on either side you cannot reconcile, or the branch/tree is refused above): capture the file list first, then abort only if a merge is in progress, and park:
   ```bash
   run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
   CONFLICT_FILES=$(git diff --name-only --diff-filter=U)
-  git merge --abort # allowlist:check-command-side-effects
+  [ -n "$CONFLICT_FILES" ] || CONFLICT_FILES="(no conflicted files reported)"
+  if git rev-parse -q --verify MERGE_HEAD >/dev/null; then git merge --abort; fi # allowlist:check-command-side-effects
   run gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "<!-- FORGE:BASESYNC_FAILED -->
   Base sync of PR #{PR_NUMBER} (\`origin/{PR_BASE}\` into \`{HEAD_BRANCH}\`) could not be resolved with confidence. Conflicting files:
 
@@ -239,6 +256,18 @@ fi
   gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
   ```
   EXIT `REMEDIATE_RESULT: status: BLOCKED` with blocker "base-sync: unresolvable conflicts". Only that issue is parked.
+- **Refused merge** (`MERGE_RC` nonzero and no `MERGE_HEAD`, i.e. `BASESYNC_MERGE_REFUSED=true`): git declined to start the merge (for example local changes would be overwritten). This is not a conflict and not a sync. There is nothing to abort. Park with the git output:
+  ```bash
+  run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
+  run gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "<!-- FORGE:BASESYNC_FAILED -->
+  Base sync of PR #{PR_NUMBER} (\`origin/{PR_BASE}\` into \`{HEAD_BRANCH}\`) was refused by git (rc=${MERGE_RC}); no merge was started. Git output:
+
+  \`\`\`
+  ${MERGE_OUT}
+  \`\`\`" # allowlist:check-command-side-effects
+  gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
+  ```
+  EXIT `REMEDIATE_RESULT: status: BLOCKED` with blocker "base-sync: merge refused (rc=N)" (N = `MERGE_RC`). Never fall through to M4 as synced.
 - After a sync, the quality gate below re-runs on the merged tree, and Phase M6's re-review covers the new head (the reviewed-head guard forces a fresh review).
 
 **Quality Gate** (same loop as Phase 3G, max 3 iterations):
@@ -284,7 +313,7 @@ ${MERGE_COMMITS}
 fi
 ```
 
-Then commit and push. A base-sync merge commit already exists from Phase M3; commit only additional quality-gate or fix edits on top.
+Then commit and push. When a base sync ran, it ran first in Phase M3 on a clean tree and its merge commit already exists; commit only the additional quality-gate or fix edits on top of it.
 
 ```bash
 cd {WORKTREE_PATH}
