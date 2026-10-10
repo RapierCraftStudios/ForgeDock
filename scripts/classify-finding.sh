@@ -10,7 +10,7 @@
 # Usage:
 #   classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>]
 #                       [--lineage none|review-finding] [--text <T> | --text-file <F>]
-#                       [--inpr-diff <F> --file <P>] [--contract-scope <F> --contract-open <F> [--pr-files <F>]]
+#                       [--inpr-diff <F> --file <P>] [--contract-scope <F> --contract-open <F> [--pr-files <F>] [--merge-issue <N>]]
 #
 #   --severity    CRITICAL | HIGH | MEDIUM | LOW (case-insensitive). Missing or
 #                 unparseable → ISSUE (fail toward filing, never drop).
@@ -34,8 +34,12 @@
 #                 `NOTE contract-deferred #N` / `NOTE contract-accepted-risk`. `--contract-open`
 #                 lists the deferred issue numbers confirmed open, one per line; a deferred item
 #                 demotes only when its number is listed (closed, unreadable or absent: no demotion).
-#                 Never demoted: CRITICAL/HIGH, `not-affected` items, `accepted-risk` findings that
-#                 are safety-exempt (security/billing keywords or a dedicated domain agent), and
+#                 The caller lists a number only after verifying it is an open issue (not a PR) whose
+#                 body carries `FORGE:DEFERRED_FROM: #<merge issue>` and the path.
+#                 `--merge-issue <N>` is the PR's linked issue: `deferred → #N` never demotes (that
+#                 issue is always open during review, so it is no follow-up).
+#                 Never demoted: CRITICAL/HIGH, `not-affected` items, safety-exempt findings
+#                 (security/billing keywords or a dedicated domain agent) under either disposition, and
 #                 findings whose path is in `--inpr-diff` or `--pr-files` (this PR touched it; the
 #                 contract excluded the sibling path, not regressions the PR introduced in it).
 #                 `--pr-files <F>` is the PR's changed paths, one per line, supplied for this guard
@@ -74,9 +78,10 @@ FINDING_FILE=""
 CONTRACT_SCOPE=""
 CONTRACT_OPEN=""
 PR_FILES=""
+MERGE_ISSUE=""
 
 usage() {
-  echo "ERROR: Usage: classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>] [--lineage none|review-finding] [--text <T> | --text-file <F>] [--inpr-diff <F> --file <P>] [--contract-scope <F> --contract-open <F> [--pr-files <F>]]" >&2
+  echo "ERROR: Usage: classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>] [--lineage none|review-finding] [--text <T> | --text-file <F>] [--inpr-diff <F> --file <P>] [--contract-scope <F> --contract-open <F> [--pr-files <F>] [--merge-issue <N>]]" >&2
   exit 2
 }
 
@@ -92,6 +97,7 @@ while [ "$#" -gt 0 ]; do
     --contract-scope) [ "$#" -ge 2 ] || usage; CONTRACT_SCOPE="$2"; shift 2 ;;
     --contract-open)  [ "$#" -ge 2 ] || usage; CONTRACT_OPEN="$2"; shift 2 ;;
     --pr-files)       [ "$#" -ge 2 ] || usage; PR_FILES="$2"; shift 2 ;;
+    --merge-issue)    [ "$#" -ge 2 ] || usage; MERGE_ISSUE="${2#\#}"; shift 2 ;;
     --text-file)
       [ "$#" -ge 2 ] || usage
       [ -r "$2" ] || { echo "ERROR: --text-file not readable: $2" >&2; exit 2; }
@@ -156,7 +162,8 @@ case "$AGENT_LC" in
 esac
 
 # Contract-declared scope gate (#3447). Fails toward filing: any missing input, closed or unlisted
-# deferred issue, in-PR path, or safety-exempt accepted-risk finding keeps the classification below.
+# deferred issue, a deferral to the PR's own issue, an in-PR path, or a safety-exempt finding keeps
+# the classification below.
 if [ -n "$CONTRACT_SCOPE" ] && [ -n "$FINDING_FILE" ]; then
   _fpath="${FINDING_FILE#./}"; _fpath="${_fpath%%:*}"
   _inpr=""
@@ -169,7 +176,8 @@ if [ -n "$CONTRACT_SCOPE" ] && [ -n "$FINDING_FILE" ]; then
       [ "$_fpath" = "$_ipath" ] || case "$_fpath" in "$_ipath"/*) ;; *) continue ;; esac
       case "$_disp" in
         deferred)
-          if [ -n "$_inum" ] && [ -n "$CONTRACT_OPEN" ] && grep -Fxq -- "$_inum" "$CONTRACT_OPEN"; then
+          if [ -z "$SAFETY" ] && [ -n "$_inum" ] && [ "$_inum" != "$MERGE_ISSUE" ] \
+             && [ -n "$CONTRACT_OPEN" ] && grep -Fxq -- "$_inum" "$CONTRACT_OPEN"; then
             echo "NOTE contract-deferred #$_inum"; exit 0
           fi ;;
         accepted-risk)
