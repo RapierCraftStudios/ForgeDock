@@ -2,6 +2,12 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## remediate.md uses the shared resolver stub (#3779)
+
+`commands/work-on/remediate.md` no longer inlines the `FORGE_ROOT` bootstrap or the `TRUSTED_SCRIPT` / `CI_GATE_SCRIPT` resolvers; each fence uses the pinned `forge_resolve` locator from `scripts/lib/forge-resolve.sh` (unresolved script => empty => the existing strict branch). The spec shrinks from 95,283 to 80,957 bytes (-15.0%).
+
+Action: none. Internal refactor; resolution tiers and fail-closed behavior are unchanged.
+
 ## Re-flag gate ignores generic words (#3719)
 
 `scripts/classify-finding.sh` no longer counts generic stopwords (`the`, `with`, `before`, `write`, ...) as topical similarity in the cross-head/cross-PR re-flag gate. The line-overlap match needs >= 1 shared non-stopword title token, and the title-only match needs >= 3 shared tokens of which >= 2 are non-stopword. Domain words such as `lock` and `retry` still count. `/review-pr` §6B.5 and `/review-pr-staging` §7B.5 carry the same wording.
