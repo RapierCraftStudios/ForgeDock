@@ -53,8 +53,8 @@ const staticDetector = build
 const grepClassifier = join(root, "scripts", "classify-grep-exit.sh");
 const rcDetector = build
   .split("\n")
-  .filter((l) => /^ {8}\[ "\$RC" -ge 2 \] && MALFORMED=/.test(l))
-  .slice(0, 1)
+  .filter((l) => /^ {8}\[ "\$RC" -ge 2 \] && MALFORMED=|^ {8}\[ "\$RC" -eq 127 \]/.test(l))
+  .slice(0, 2)
   .join("\n");
 
 function classify(target, type = "command") {
@@ -140,4 +140,46 @@ test("review gate selects non-review checks by gh pr target only (no unanchored 
   const src = readFileSync(new URL("../../scripts/review-acceptance-gate.sh", import.meta.url), "utf8");
   assert.ok(!src.includes("grep -qE ' phase=(build|review)( |$)'"));
   assert.ok(src.includes("*'gh pr'*"));
+});
+
+// #3825: manual criteria typed behavior/target="none" and command-not-found targets are check defects.
+test("malformed-check: #35004 ac-4/ac-5 shape (target=\"none\" on a behavior check) is malformed", () => {
+  const ac4 = 'ACCEPTANCE_CHECK: id=ac-4 type=behavior target="none" matcher="5/5" description=5/5 fresh force_refresh in production after promotion (manual)';
+  const ac5 = 'ACCEPTANCE_CHECK: id=ac-5 type=behavior target="none" matcher="no regression" description=no regression (manual)';
+  for (const line of [ac4, ac5]) assert.match(classify(parse(line).target, "behavior"), /target "none"/);
+  assert.match(classify("NONE", "command"), /target "none"/);
+});
+
+test("malformed-check: rc 127 with 'command not found' is malformed", () => {
+  assert.match(classify("no-such-command-xyzzy --flag"), /command not found/);
+  assert.match(classify("true && no-such-command-xyzzy"), /command not found/);
+});
+
+test("a missing script (rc 127, 'No such file or directory') and a #3802 missing-file grep stay real failures", () => {
+  assert.equal(classify("bash scripts/no-such-script-xyzzy.sh"), "");
+  assert.equal(classify("./scripts/no-such-script-xyzzy.sh"), "");
+  assert.equal(classify("grep -qF -e 'x' commands/work-on/no-such-file-xyzzy.md"), "");
+});
+
+test("a spec with one real check plus manual checks: skipped is never executed or counted", () => {
+  assert.ok(build.includes('[ "$TYPE" = "skipped" ] && { MANUAL_CHECKS='));
+  assert.ok(build.indexOf('[ "$TYPE" = "skipped" ]') < build.indexOf("VERIFIED_COUNT=$((VERIFIED_COUNT+1))"));
+  assert.ok(build.includes("Manual follow-up"));
+});
+
+test("zero verified checks is a spec-defect BLOCKED that skips the --fix-acceptance repair (#3774)", () => {
+  assert.ok(build.includes("SPEC_DEFECT=true") && build.includes("spec-defect"));
+  assert.ok(build.includes("If `SPEC_DEFECT = true`") && build.includes("do NOT run the repair below"));
+  assert.ok(/SPEC_DEFECT" = "true" \]; then[\s\S]*?FORGE:ACCEPTANCE_GATE:BLOCKED/.test(build));
+});
+
+test("investigate.md documents per-check manual criteria and the usage dry-run", () => {
+  const inv = readFileSync(join(root, "commands/work-on/investigate.md"), "utf8");
+  assert.ok(inv.includes("Manual and post-deploy criteria") && inv.includes("type=skipped target=\"none\""));
+  assert.ok(inv.includes("usage"));
+});
+
+test("review gate script applies the same none / command-not-found rules as B6.5", () => {
+  const gate = readFileSync(join(root, "scripts/review-acceptance-gate.sh"), "utf8");
+  assert.ok(gate.includes("in none)") && gate.split("command not found (rc 127)").length - 1 === 2);
 });

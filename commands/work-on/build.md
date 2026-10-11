@@ -800,6 +800,8 @@ VERIFIED_COUNT=0       # checks actually executed and judged (PASS or FAIL); mal
 MALFORMED_CHECKS=""   # malformed-check: generated check that can never pass; reported, never repaired, never needs-human
 DEFERRED_COUNT=0       # phase=review checks (and legacy "no pull requests found" results): evaluated by review R2.5, never counted here
 DEFERRED_CHECKS=""    # <!-- Added: forge#3793 -->
+MANUAL_CHECKS=""      # per-check type=skipped (manual / post-deploy): never executed, listed as unchecked follow-ups <!-- Added: forge#3825 -->
+SPEC_DEFECT=false     # nothing verifiable: a spec defect that code repair cannot fix <!-- Added: forge#3825 -->
 
 while IFS= read -r check_line; do
   # Fields are extracted by anchoring each sed pattern to `^ACCEPTANCE_CHECK:` and walking
@@ -839,7 +841,7 @@ while IFS= read -r check_line; do
   PHASE=$(printf '%s\n' "$check_line" | sed -nE 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=("(([^"\\]|\\.)*)"|[^ ]*) matcher=("(([^"\\]|\\.)*)"|[^ ]*) phase=(build|review)( .*)?$/\7/p')
   [ "$PHASE" = "review" ] || PHASE=build
 
-  [ "$TYPE" = "skipped" ] && continue
+  [ "$TYPE" = "skipped" ] && { MANUAL_CHECKS="${MANUAL_CHECKS}\n- [ ] **$ID** ($DESC)"; continue; }
 
   # Deferred (review) <!-- Added: forge#3793 -->: never executed, never VERIFIED, never GATE_PASS=false, never in FAILED_CHECKS / --fix-acceptance.
   if [ "$PHASE" = "review" ]; then DEFERRED_COUNT=$((DEFERRED_COUNT+1)); DEFERRED_CHECKS="${DEFERRED_CHECKS}\n- **$ID** ($DESC): DEFERRED (review)"; continue; fi
@@ -848,6 +850,7 @@ while IFS= read -r check_line; do
   # check defect, not an implementation failure. Static detection only parses (bash -n), never executes.
   MALFORMED=""
   { [ "$TYPE" = "command" ] || [ "$TYPE" = "behavior" ]; } && { case "$TARGET" in *'\\\\'*) MALFORMED="run of 4+ backslashes (over-escaped target)";; esac; [ -n "$MALFORMED" ] || bash -n -c "$TARGET" 2>/dev/null || MALFORMED="shell syntax error (unbalanced quotes)"; }
+  { [ "$TYPE" = "command" ] || [ "$TYPE" = "behavior" ]; } && [ -z "$MALFORMED" ] && case "$(printf '%s' "$TARGET" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" in none) MALFORMED='target "none" is not a command (a manual criterion must be type=skipped)';; esac
   if [ -n "$MALFORMED" ]; then MALFORMED_CHECKS="${MALFORMED_CHECKS}\n- **$ID** ($DESC): $MALFORMED"; continue; fi
 
   RESULT="PASS"
@@ -872,10 +875,12 @@ while IFS= read -r check_line; do
         # grep exit >= 2 is a usage/syntax error (e.g. a pattern starting with `-`), never a verdict on the code; exit 1 stays FAIL.
         # Malformed only when stderr positively names a usage error (classify-grep-exit.sh); empty stderr (`2>/dev/null`, `-s`) or any operand error is a REAL failure.
         [ "$RC" -ge 2 ] && MALFORMED=$(bash "$GREP_CLS" "$RC" "$ERR" "$TARGET" 2>/dev/null)
+        [ "$RC" -eq 127 ] && [ -z "$MALFORMED" ] && printf '%s' "$ERR" | grep -qF 'command not found' && MALFORMED="command not found (rc 127): the target is not an executable command"
         [ "$RC" -eq 0 ] || [ -n "$MALFORMED" ] || { RESULT="FAIL"; DETAIL="command exited non-zero: $TARGET"; }
       else
         ERRF=$(mktemp); OUTPUT=$(eval "$TARGET" 2>"$ERRF"); RC=$?; ERR=$(cat "$ERRF"); rm -f "$ERRF"; [ -z "$ERR" ] || OUTPUT="${OUTPUT}${OUTPUT:+$'\n'}${ERR}" # classify on stderr only, match on both
         [ "$RC" -ge 2 ] && MALFORMED=$(bash "$GREP_CLS" "$RC" "$ERR" "$TARGET" 2>/dev/null)
+        [ "$RC" -eq 127 ] && [ -z "$MALFORMED" ] && printf '%s' "$ERR" | grep -qF 'command not found' && MALFORMED="command not found (rc 127): the target is not an executable command"
         if [ -n "$MALFORMED" ]; then :
         elif ! printf '%s\n' "$OUTPUT" | grep -qE "$MATCHER"; then
           if printf '%s\n' "$OUTPUT" | grep -qF -- "$MATCHER"; then CORRECTED="${CORRECTED}\n- **$ID**: output matched as a literal string"
@@ -905,8 +910,9 @@ done <<< "$ACCEPTANCE_CHECKS"
 # A gate that verified nothing must not pass: with every check skipped as malformed, PASSED would be a green light on zero evidence.
 # A spec whose checks are all deferred to review (DEFERRED_COUNT > 0) is not vacuous: review R2.5 evaluates them before merge.
 if [ "$VERIFIED_COUNT" -eq 0 ] && [ "$DEFERRED_COUNT" -eq 0 ]; then
+  # spec-defect <!-- Added: forge#3825 -->: only the spec is wrong, so this is a BLOCKED verdict that never enters the --fix-acceptance repair (#3774).
   GATE_PASS=false
-  FAILED_CHECKS="${FAILED_CHECKS}\n- **(gate)**: no acceptance check could be verified (all were malformed or none ran); regenerate the acceptance spec"
+  SPEC_DEFECT=true
 fi
 ```
 
@@ -914,12 +920,25 @@ fi
 
 ```bash
 run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
-if [ "$GATE_PASS" = "true" ]; then
+if [ "$SPEC_DEFECT" = "true" ]; then
+  run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
+## Acceptance Gate — BLOCKED (spec-defect)
+
+No acceptance check could be verified: every check was malformed, manual, or empty. The implementation is not at fault and a code repair cannot fix this, so the repair step is skipped.
+$( [ -n "$MALFORMED_CHECKS" ] && printf '\n**malformed-check**:%b\n' "$MALFORMED_CHECKS" )
+$( [ -n "$MANUAL_CHECKS" ] && printf '\n**Manual follow-up (type=skipped; not verified at build time)**:%b\n' "$MANUAL_CHECKS" )
+
+**Gate result: BLOCKED** — regenerate the acceptance spec by re-running \`/work-on:investigate {NUMBER}\`, then retry the build.
+
+<!-- FORGE:ACCEPTANCE_GATE:BLOCKED -->"
+  run gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+elif [ "$GATE_PASS" = "true" ]; then
   run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
 ## Acceptance Gate — PASSED
 
 All machine-checkable build-phase acceptance criteria verified against real behavior.
 $( [ -n "$DEFERRED_CHECKS" ] && printf '\n**Deferred to review (phase=review; evaluated against the PR before merge)**:%b\n' "$DEFERRED_CHECKS" )
+$( [ -n "$MANUAL_CHECKS" ] && printf '\n**Manual follow-up (type=skipped; not verified at build time, confirm after merge/deploy)**:%b\n' "$MANUAL_CHECKS" )
 $( [ -n "$CORRECTED" ] && printf '\n**Checks corrected (malformed matcher, literal text present)**:%b\n' "$CORRECTED" )
 $( [ -n "$MALFORMED_CHECKS" ] && printf '\n**malformed-check (not counted as failures; regenerate the acceptance spec by re-running investigate)**:%b\n' "$MALFORMED_CHECKS" )
 
@@ -940,11 +959,15 @@ Merge is blocked. Fix the failing criteria and re-run the validate phase.
 fi
 ```
 
-A `malformed-check` (a command/behavior target with a run of 4+ backslashes or a `bash -n` syntax error, or a grep target exiting >= 2 for a reason other than a missing/unreadable operand file, which stays a real FAIL) is reported in the comment and never sets `GATE_PASS=false` by itself, never enters `FAILED_CHECKS`, is never passed to `--fix-acceptance`, and never adds `needs-human` by itself; the gate still posts exactly one of PASSED/FAILED. The gate never posts PASSED with zero verified checks: if every check was malformed (`VERIFIED_COUNT=0` and `DEFERRED_COUNT=0`) it posts FAILED so the repair step regenerates the spec. <!-- Added: forge#3694 -->
+A `malformed-check` (a command/behavior target with a run of 4+ backslashes or a `bash -n` syntax error, or a grep target exiting >= 2 for a reason other than a missing/unreadable operand file, which stays a real FAIL) is reported in the comment and never sets `GATE_PASS=false` by itself, never enters `FAILED_CHECKS`, is never passed to `--fix-acceptance`, and never adds `needs-human` by itself; the gate still posts exactly one of PASSED/FAILED. The gate never posts PASSED with zero verified checks: if every check was malformed (`VERIFIED_COUNT=0` and `DEFERRED_COUNT=0`) it is a spec-defect: it posts `FORGE:ACCEPTANCE_GATE:BLOCKED`, adds `needs-human`, prints `BUILD_RESULT: status: BLOCKED` (blocker: "regenerate acceptance spec via investigate") and skips the `--fix-acceptance` repair entirely, because implement cannot fix a spec defect. <!-- Added: forge#3694, forge#3825 -->
+
+Also `malformed-check` <!-- Added: forge#3825 -->: a `command`/`behavior` target that is literally `none` (any case), or that exits 127 with `command not found` on stderr. Classification keys on that stderr text, never on the code alone: a missing script (a `bash` run of a nonexistent script path, with `No such file or directory`) also exits 127 and stays a real FAIL, so the missing-operand class is not reopened. A per-check `type=skipped` is never executed, never counted, and is listed under "Manual follow-up" as unchecked items in the PASSED comment.
 
 A `phase=review` check (or, for legacy specs, tagged or not, a `command`/`behavior` check on a `gh pr` target whose output contains `no pull requests found`) is recorded as `DEFERRED (review)` in the PASSED comment: it is never executed here, never counted in `VERIFIED_COUNT`, never sets `GATE_PASS=false`, never enters `FAILED_CHECKS` or `--fix-acceptance`, and never spends the repair. A spec whose checks are all deferred posts PASSED (it is not "No Spec Found"). Review R2.5 evaluates the deferred checks against the real PR and blocks merge on failure. <!-- Added: forge#3793 -->
 
-If `GATE_PASS = false`, the build repairs itself **once** before anything escalates (a failing acceptance check is pipeline work, not a human decision):
+If `SPEC_DEFECT = true`: leave `needs-human`, print `BUILD_RESULT: status: BLOCKED`, blocker: "regenerate acceptance spec via investigate (spec-defect: no check could be verified)", and do NOT run the repair below.
+
+If `GATE_PASS = false` and `SPEC_DEFECT` is not `true`, the build repairs itself **once** before anything escalates (a failing acceptance check is pipeline work, not a human decision):
 
 1. Count `<!-- FORGE:ACCEPTANCE_REPAIR: issue={NUMBER} -->` comments on the issue. If one already exists, skip to step 4.
 1.5. **Decomposition guard** <!-- Added: forge#3543 -->: read the `### Decomposition Assessment` of the latest FORGE:INVESTIGATOR comment. If it is `**YES**`, a failing check that belongs to a sub-item the assessment assigns to a separate issue (named in the check's `description`/`# item-N` tag, or matching a listed sub-issue title) is NOT repaired: exclude it from the `--fix-acceptance` list. When ambiguous, treat the check as decomposed-out (fail safe). If every remaining failure is decomposed-out, do not invoke implement: leave `needs-human` and print `BUILD_RESULT: status: BLOCKED`, blocker: "acceptance check {ID} belongs to decomposed item {N} — repair refuses to implement work the investigator assigned to a separate issue".
