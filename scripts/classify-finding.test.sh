@@ -183,6 +183,8 @@ expect_out "NOTE reflag-note" "NOTE row with empty line columns matches by title
 expect ISSUE "same line, different topic MEDIUM CONFIRMED is not swallowed (SEC-1)" -- "${M[@]}" --agent security "${PF[@]}" --file src/sync.sh --line-start 42 --line-end 50 --title "SQL injection via unsanitized token"
 expect ISSUE "same line with no title at all is not swallowed" -- "${M[@]}" "${PF[@]}" --file src/sync.sh --line-start 42 --line-end 50
 expect_out "NOTE reflag-note" "same line, same topic (one shared token) still NOTE" -- "${M[@]}" "${PF[@]}" --file src/sync.sh --line-start 42 --line-end 50 --title "Lock handling is racy"
+expect ISSUE "same line, only a stopword-class word shared is not swallowed (#3719)" -- "${M[@]}" "${PF[@]}" --file src/sync.sh --line-start 42 --line-end 50 --title "Path traversal in the write target"
+expect ISSUE "far line, only generic words shared is not swallowed (#3719)" -- "${M[@]}" "${PF[@]}" --file src/sync.sh --line-start 300 --title "Command injection before write with the lock"
 expect ISSUE "non-overlapping same-file finding is classified normally" -- "${M[@]}" "${PF[@]}" --file src/sync.sh --line-start 200 --line-end 210 --title "missing bounds check"
 expect ISSUE "two shared tokens are not enough"       -- "${M[@]}" "${PF[@]}" --file src/sync.sh --line-start 200 --title "lock released late"
 expect ISSUE "same title on a different file is classified normally" -- "${M[@]}" "${PF[@]}" --file src/other.sh --line-start 45 --title "lock released before write completes"
