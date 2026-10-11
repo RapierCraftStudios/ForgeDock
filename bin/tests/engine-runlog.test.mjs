@@ -32,6 +32,18 @@ describe("runlog", () => {
     assert.equal(deriveState(readLog(dir, 7)).remediationKind, "ci-gate");
   });
 
+  it("forge#3824: RUN_START version/repo/hydrated fields persist through the log and do not disturb deriveState", () => {
+    appendEvent(dir, 9, { event: "RUN_START", issue: 9, run: "r", lane: "staging", version: "1.16.2", repo: "o/r", hydrated: true });
+    const events = readLog(dir, 9);
+    assert.equal(events[0].version, "1.16.2");
+    assert.equal(events[0].repo, "o/r");
+    assert.equal(events[0].hydrated, true);
+    const s = deriveState(events);
+    assert.equal(s.issue, 9);
+    assert.equal(s.run, "r");
+    assert.equal(s.lane, "staging");
+  });
+
   it("append then read returns events in order with assigned seq", () => {
     appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r1", lane: "staging" });
     appendEvent(dir, 42, { event: "PHASE_START", phase: "investigate" });

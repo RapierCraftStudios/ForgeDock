@@ -1,0 +1,5 @@
+{"seq":1,"event":"RUN_START","issue":6,"run":"r_6_staging","lane":"staging","version":"2.0.0","repo":"o/a"}
+{"seq":2,"event":"PHASE_COMMIT","phase":"build","outputs":{},"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":1,"cache_read_input_tokens":9999000}}
+{"seq":3,"event":"RUN_TERMINAL","reason":"needs-human"}
+{"seq":4,"event":"RUN_REOPEN","issue":6}
+{"seq":5,"event":"PHASE_COMMIT","phase":"build","outputs":{},"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":1,"cache_read_input_tokens":9999000}}

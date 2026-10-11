@@ -4,6 +4,7 @@
  * GitHub state (phase.detectOutcome). All effects are injected → fully testable.
  */
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 import { createHash, scryptSync } from "node:crypto";
 import { hostname as osHostname, homedir } from "node:os";
 import { appendEvent, readLog, deriveState, rewriteLog } from "./engine/runlog.mjs";
@@ -297,6 +298,12 @@ export const MAX_RESUME_RATE_LIMIT_WAIT_MS = 6 * 60 * 60 * 1000;
  * @param {string} [opts.hostname] - injectable host name (tests).
  * @param {Function} [opts.killFn] - injectable `process.kill` (tests).
  */
+// forge#3824: stamped on RUN_START for per-release cost attribution; null when unreadable.
+export const ENGINE_VERSION = (() => {
+  try { return JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version || null; }
+  catch { return null; }
+})();
+
 export async function runIssue(opts) {
   const { issue, dir, agentId, lane = "staging", io, runner,
           now = () => Date.now(), maxAttempts = DEFAULT_MAX_ATTEMPTS,
@@ -370,16 +377,27 @@ export async function runIssue(opts) {
     remote = cur;
     ({ state, action } = reconcileState(local, remote));
   }
+  // forge#3824: hoisted so RUN_START can carry the repo (lazy, memoised; null when unresolved).
+  let repoPromise = null;
+  const resolveRepo = () => (repoPromise ??= (async () => {
+    if (repo) return String(repo).trim();
+    try {
+      const out = await io.gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
+      return String(out || "").trim() || null;
+    } catch { return null; }
+  })());
+
+  const runMeta = async () => ({ version: ENGINE_VERSION, repo: await resolveRepo().catch(() => null) });
   if (!state) {
     state = freshState(issue, lane);
-    appendEvent(dir, issue, { event: "RUN_START", issue, run: state.run, lane });
+    appendEvent(dir, issue, { event: "RUN_START", issue, run: state.run, lane, ...(await runMeta()) });
   } else if (action === "hydrate") {
     // GitHub is ahead of (or the only source of) local state. Rebuild the
     // local run-log to match the remote compact index so downstream
     // `deriveState(readLog(...))` calls stay consistent — otherwise the
     // post-commit re-derive below would fold over an empty/stale local log
     // and regress committed/issue/v (C2).
-    rewriteLog(dir, issue, eventsFromIndex(state));
+    rewriteLog(dir, issue, eventsFromIndex(state, await runMeta()));
     state = deriveState(readLog(dir, issue));
   }
 
@@ -494,14 +512,6 @@ export async function runIssue(opts) {
   // against a nonexistent ref and silently evaluated to 0 (forge#2174). The
   // build phase's `reconcile`/`detectOutcome` (bin/engine/phases.mjs) resolve
   // the real branch from the `FORGE:BUILDER` comment instead.
-  let repoPromise = null;
-  const resolveRepo = () => (repoPromise ??= (async () => {
-    if (repo) return String(repo).trim();
-    try {
-      const out = await io.gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]);
-      return String(out || "").trim() || null;
-    } catch { return null; }
-  })());
 
   // forge#3574: a relaunch after a crash mid rate-limit pause must not re-run
   // the phase early. Same-host resume reads the LOCAL run-log's lastRateLimit
@@ -1065,8 +1075,10 @@ async function runPhaseWithRetry(phase, state, ctx) {
  * Build a run-log event sequence that reproduces a compact FORGE:STATE index,
  * used to reconstruct the local run-log on hydrate (C2).
  */
-function eventsFromIndex(idx) {
-  const events = [{ event: "RUN_START", issue: idx.issue, run: idx.run, lane: idx.lane }];
+function eventsFromIndex(idx, meta = {}) {
+  // forge#3824: `hydrated` marks a reconstructed log (no usage data) so cost-report can exclude it.
+  const events = [{ event: "RUN_START", issue: idx.issue, run: idx.run, lane: idx.lane,
+                    version: meta.version ?? null, repo: meta.repo ?? null, hydrated: true }];
   for (const phase of idx.committed) {
     const outputs = {};
     if (phase === "build" && idx.branch) outputs.branch = idx.branch;
