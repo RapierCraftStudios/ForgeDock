@@ -111,15 +111,13 @@ else
   echo "SKIP: symlink cases (this platform cannot create symlinks)"; SKIPPED=$((SKIPPED+1))
 fi
 
-# forge#3758: deploy-gate script resolves on a plugin-only install (cache only, no symlink, no FORGE_* env).
+# forge#3758 (hgate is a fixture of its own: the loop runs once per shell and h14 is reused below with other versions): deploy-gate script resolves on a plugin-only install (cache only, no symlink, no FORGE_* env).
 # The gate-script line is taken verbatim from the spec so the test exercises exactly what ships.
-mkscripts "$T/h14/.claude/plugins/cache/forgedock/forgedock/1.0.0"; : > "$T/h14/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh"
+mkscripts "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0"; : > "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh"
 grep -hE '^[[:space:]]*GATE_SCRIPT=""; \[ -n "\$FORGE_ROOT" \]' "$ROOT/commands/work-on/remediate.md" "$ROOT/commands/review-pr.md" | sed 's/^[[:space:]]*//' | sort -u > "$T/gs"
 expect "gate-script resolver line is identical across sites" 1 "$(wc -l < "$T/gs" | tr -d ' ')"
-# The bootstrap runs under $SH via run() (the proven path); the one-line gate resolver is plain POSIX and runs
-# in bash with the resolved FORGE_ROOT, so a shell-specific -c concatenation cannot mask or fake a result.
-gate_run() { local fr; fr="$(run "$1")"; ( cd "$T/consumer" && env -i PATH="$PATH" HOME="$1" FORGE_ROOT="$fr" bash -c "$(cat "$T/gs"); printf %s \"\$GATE_SCRIPT\"" ); }
-expect "plugin-only install resolves resolve-deploy-gate.sh [$SH root=$(run "$T/h14") gs=$(cat "$T/gs")]" "$T/h14/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh" "$(gate_run "$T/h14")"
+gate_run() { ( cd "$T/consumer" && env -i PATH="$PATH" HOME="$1" "$SH" -c "$(cat "$T/canon"); $(cat "$T/gs"); printf %s \"\$GATE_SCRIPT\"" ); }
+expect "plugin-only install resolves resolve-deploy-gate.sh" "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh" "$(gate_run "$T/hgate")"
 expect "unresolved gate script stays empty (strict)" "" "$(gate_run "$T/empty")"
 # cwd/consumer repo is never a candidate even when it carries the gate script
 : > "$T/consumer/scripts/resolve-deploy-gate.sh"
