@@ -1175,8 +1175,8 @@ describe("pickPhase", () => {
       assert.equal(o.status, "failed");
     });
 
-    it("OK, OVERRIDDEN, malformed and absent DIFF_SIZE fall through", async () => {
-      for (const c of [gate("OK"), gate("OVERRIDDEN"), "<!-- FORGE:DIFF_SIZE -->\nresult: OVERFLOW\n### Split Proposal", "nothing"]) {
+    it("OK, OVERRIDDEN, COHESIVE, malformed and absent DIFF_SIZE fall through", async () => {
+      for (const c of [gate("OK"), gate("OVERRIDDEN"), gate("COHESIVE"), gate("COHESIVE", false), "<!-- FORGE:DIFF_SIZE -->\nresult: OVERFLOW\n### Split Proposal", "nothing"]) {
         const o = await build.detectOutcome(st, withComments(c));
         assert.equal(o.status, "failed", c);
       }

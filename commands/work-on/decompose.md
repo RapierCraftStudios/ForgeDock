@@ -244,13 +244,13 @@ If `GIST_URLS` is non-empty, a `## Prior Investigation` section will be appended
 ## Phase D2: Design Sub-Issues
 
 From the Decomposition Assessment in the investigation report (adjusted for any owner override detected in Phase D0), or, when the assessment lists none, from the size-gate `### Split Proposal` in the trusted `FORGE:DIFF_SIZE` comment (Phase D0), extract:
-1. Sub-issue titles (in dependency order — independent issues first). **Packing** <!-- Added: forge#3786 -->: do not create one sub-issue per seam. Bin-pack the seams into the fewest sub-issues whose estimate (code plus tests) is at or under 0.8 x threshold, i.e. `max(2, ceil(ESTIMATED_DIFF_LINES / (0.8 x threshold)))` sub-issues, keeping related seams together; each sub-issue body lists the seams it covers. Migration-ordering seams may stay separate. The parent is a terminal tracker and builds nothing, so every packed item, including the first, becomes a sub-issue (N packed items give N sub-issues)
+1. Sub-issue titles (in dependency order — independent issues first). **Packing** <!-- Added: forge#3786 -->: do not create one sub-issue per seam. Bin-pack the seams into the fewest sub-issues whose estimate (code plus tests) is at or under 0.8 x threshold, i.e. `max(2, ceil(ESTIMATED_DIFF_LINES / (0.8 x threshold)))` sub-issues, keeping related seams together; each sub-issue body lists the seams it covers. Migration-ordering seams may stay separate. **Budget check** <!-- Added: forge#3790 -->: reject or repack any plan item whose estimate (code plus tests) is over 0.8 x threshold: split it along a real seam or merge-and-resplit until each item fits. A seam that can't fit (one cohesive module plus its tests) stays as one item, and its body states that explicitly with the estimate; build B5.5 then treats a cohesive overage as `COHESIVE` instead of stranding it. Never inflate the sub-issue count to force a fit. Record each item's estimate as `ESTIMATED_DIFF_LINES` for Phase D3. The parent is a terminal tracker and builds nothing, so every packed item, including the first, becomes a sub-issue (N packed items give N sub-issues)
 2. Dependencies between sub-issues (if issue B depends on issue A, A is created first)
 3. Brief description for each sub-issue body
 
 For each sub-issue, prepare:
 - **Title**: from investigation report's proposed sub-issue title (re-derived from the owner override when one was detected), including the final `{fix|feat|refactor}: ` prefix used in Phase D3
-- **Body**: brief description of scope + `**Parent**: #{NUMBER}` + dependency note if applicable + a `## Staged Hunks` section when the Split Proposal line carries a wip ref or patch (see D3)
+- **Body**: brief description of scope + `**Parent**: #{NUMBER}` + an own-line `ESTIMATED_DIFF_LINES: {N}` (the packed item's estimate, code plus tests; build B5.5 compares it with the actual diff in `FORGE:DIFF_SIZE`) + dependency note if applicable + a `## Staged Hunks` section when the Split Proposal line carries a wip ref or patch (see D3)
 - **Labels**: inherit priority label (P0/P1/P2) from parent; do NOT copy workflow labels
 - **Milestone**: same milestone title as parent (if parent has one)
 
@@ -338,6 +338,7 @@ Files that need changes:
 
 **Parent**: #{NUMBER}
 {If depends on another sub-issue: "**Depends on**: #{SUB_ISSUE_N} — {reason}"}
+ESTIMATED_DIFF_LINES: {N}
 
 {Only when this seam's Split Proposal line carries a wip ref or patch (D0); otherwise omit this section entirely:}
 ## Staged Hunks
