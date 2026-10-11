@@ -2,6 +2,7 @@ name: Check Command Conflicts
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
     paths:
       - 'commands/**'
       - 'docs/FORGE-PROTOCOL.md'
@@ -409,7 +410,8 @@ jobs:
   spec-size-budget:
     name: Spec-size budget (review specs may not grow)
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    # Release PRs (staging -> main) carry cumulative growth already checked per PR.
+    if: github.event_name == 'pull_request' && !(github.head_ref == 'staging' && github.base_ref == 'main')
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -420,9 +422,16 @@ jobs:
       - name: Run budget fixtures
         run: bash scripts/check-spec-size.test.sh
 
-      - name: Check budgeted specs against the PR base
+      - name: Check budgeted specs against the PR base (checker from the base ref)
         env:
-          BASE_REF: origin/${{ github.base_ref }}
+          BASE_NAME: ${{ github.base_ref }}
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-        run: bash scripts/check-spec-size.sh "$BASE_REF"
+          PR_HEAD_REF: ${{ github.head_ref }}
+          PR_BASE_REF: ${{ github.base_ref }}
+        run: |
+          # Run the checker from the base ref so a PR cannot edit its own gate.
+          if ! git show "origin/${BASE_NAME}:scripts/check-spec-size.sh" > "$RUNNER_TEMP/check-spec-size.sh"; then
+            echo "ERROR: origin/${BASE_NAME} has no scripts/check-spec-size.sh (first adoption?); failing closed" >&2
+            exit 2
+          fi
+          bash "$RUNNER_TEMP/check-spec-size.sh" "origin/${BASE_NAME}"
