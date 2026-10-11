@@ -228,6 +228,17 @@ async function hasTrajectory(issue, io) {
 }
 
 /**
+ * forge#3772: investigation close evidence, shared by close.reconcile and close.detectOutcome.
+ * A trusted FORGE:TRAJECTORY, or a trusted current-cycle FORGE:PHASE:COMPLETE (multi-phase body).
+ * Throws on fetch error; callers fail closed.
+ */
+async function hasInvestigationCloseEvidence(issue, io) {
+  const { comments } = await issueMarkers(issue, io);
+  return comments.some((b) => startsWithHeader(b, "FORGE:TRAJECTORY"))
+    || hasPhaseComplete(sliceToCurrentCycle(comments));
+}
+
+/**
  * Trusted comment bodies, chronological — the same single fetch + trust predicate
  * as issueMarkers() (one path, forge#3542). Fail closed: a fetch error yields `[]` here (issueMarkers itself propagates it).
  */
@@ -968,8 +979,11 @@ export const PHASES = [
         // forge#3534: the implement child closes an investigation issue itself, so CLOSED is no
         // proof close.md ran (board, summary, trajectory). Its own idempotency key is the
         // FORGE:TRAJECTORY comment; only that makes this satisfied.
+        // forge#3772: investigation exits are normally single-phase (close.md C1 skips the
+        // multi-phase guard for them); a trusted current-cycle PHASE:COMPLETE is accepted as a
+        // safety net so a multi-phase body cannot make every retry fail.
         try {
-          return { satisfied: await hasTrajectory(state.issue, io), terminalReason: "investigation" };
+          return { satisfied: await hasInvestigationCloseEvidence(state.issue, io), terminalReason: "investigation" };
         } catch { return { satisfied: false }; }
       }
       if (snap.state === "CLOSED") return { satisfied: true };
@@ -1006,7 +1020,7 @@ export const PHASES = [
         // The issue is always already CLOSED for an investigation run, so require the same
         // positive evidence as reconcile (a trusted FORGE:TRAJECTORY); fail closed on error.
         let ran = false;
-        try { ran = await hasTrajectory(state.issue, io); } catch { ran = false; }
+        try { ran = await hasInvestigationCloseEvidence(state.issue, io); } catch { ran = false; }
         return ran
           ? { status: "committed", terminalReason: "investigation", outputs: {} }
           : { status: "failed", detail: "investigation close: no FORGE:TRAJECTORY" };
