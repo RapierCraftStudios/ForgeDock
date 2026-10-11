@@ -523,8 +523,7 @@ if [ "$(printf '%s' "$PR_LIVE" | jq -r '.state // ""' 2>/dev/null)" = "MERGED" ]
   case "$TIER" in
     adaptive|universal) bash "$SCRIPT_PATH" {ISSUE_NUMBER} {GH_FLAG} merged ;;
     prose)
-      gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "workflow:merged" \
-        --remove-label "workflow:awaiting-merge,needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:invalid,workflow:decomposed" 2>/dev/null || true # allowlist:check-command-side-effects
+      gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "workflow:merged" --remove-label "workflow:awaiting-merge,needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:invalid,workflow:decomposed" 2>/dev/null || true # allowlist:check-command-side-effects
       ;;
   esac
   # PR_ALREADY_MERGED=true: SKIP the rest of Phase M7 (needs-human, awaiting-merge and bar blocks) and go to Phase M8.
@@ -663,8 +662,7 @@ if [ "$MERGE_STATE" = "MERGED" ]; then
   case "$TIER" in
     adaptive|universal) bash "$SCRIPT_PATH" {ISSUE_NUMBER} {GH_FLAG} merged ;;
     prose)
-      gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "workflow:merged" \
-        --remove-label "workflow:awaiting-merge,needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:invalid,workflow:decomposed" 2>/dev/null || true # allowlist:check-command-side-effects
+      gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "workflow:merged" --remove-label "workflow:awaiting-merge,needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:invalid,workflow:decomposed" 2>/dev/null || true # allowlist:check-command-side-effects
       ;;
   esac
   RE_GATE_OUTCOME="AUTO-LANDED"
@@ -684,6 +682,9 @@ fi
 Post the completion body to **both** `{PR_NUMBER}` and `{ISSUE_NUMBER}` — this is the single idempotency marker checked by Phase M0 (this file, on future resume) and by the orchestrator's item 6.4 dispatch guard. **Exception (forge#3685)**: a `RESUME_AT_M7=true` run whose outcome is `HELD-AWAITING-MERGE` posts a `<!-- FORGE:REMEDIATION_HELD -->` record (carrying `**Re-gate outcome**` and the hold reason) and NO `FORGE:REMEDIATION:COMPLETE`, so a transient hold (CI pending, stale approval) does not strand the PR behind the single-attempt guard. AUTO-LANDED, RE-ESCALATED, UNFIXABLE, REREVIEW-REQUIRED and non-resume HELD keep COMPLETE:
 
 ```bash
+# Fresh shell per Bash call: re-derive the live base in this fence (same derivation as above); read with the :-true fail-closed default.
+LIVE_BASE_REF=$(gh pr view {PR_NUMBER} {GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
+if [ -n "$LIVE_BASE_REF" ] && [ "$LIVE_BASE_REF" != "null" ] && [ "$LIVE_BASE_REF" != "main" ]; then IS_DEPLOY_GATE=false; else IS_DEPLOY_GATE=true; fi
 case "$RE_GATE_OUTCOME" in
   AUTO-LANDED)
     # forge#2570: the bar that was met differs by target branch. Non-`main` (staging/milestone)
