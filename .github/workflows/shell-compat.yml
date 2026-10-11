@@ -67,6 +67,7 @@ jobs:
           /bin/bash scripts/remediation-marker-match.test.sh
           /bin/bash scripts/architect-resume-match.test.sh
           /bin/bash scripts/remediate-basesync.test.sh
+          /bin/bash scripts/remediate-approved-head.test.sh
           /bin/bash scripts/classify-finding.test.sh
           /bin/bash scripts/check-contract-scope.test.sh
           /bin/bash scripts/amplification-breaker.test.sh
