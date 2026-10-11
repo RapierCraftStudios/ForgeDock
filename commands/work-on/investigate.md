@@ -601,6 +601,12 @@ bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN_LABEL} --repo-path
    - **Scope cap**: if more than 25 `fix` rows result, do not grow one PR to fit them. Record the cited instance plus the rows in the same subsystem as `fix`, mark the rest `fix-deferred`, and recommend decomposition in the report (set `decompose: YES` if the remaining scope is too large for one PR).
    - **Degrade, never block**: if any query fails (`RC` other than 0 or 1), write `Pattern sweep skipped: {reason}` in the `### Pattern Sweep` section, fall back to step 7.5, and continue. A failed query must never be recorded as 0 hits. The sweep is advisory evidence, not a gate.
    - Every `fix` row MUST appear in `### Affected Files`, and the acceptance spec MUST include a class-wide coverage check plus a check that the added test exercises more than the reviewer's single repro (see Phase 1C).
+7.7. **Size estimate** *(always, after the affected-file list is settled)*: estimate the changed lines the build will produce BEFORE anything is built, so an oversized issue is decomposed up front instead of discarded at the post-build size gate (build B5.5). <!-- Added: forge#3573 -->
+   - Per affected file: a new file counts about its full size; an edit counts about its hunks (added plus deleted lines). Add roughly 1:1 test lines for changed behavior. Skip lockfiles, generated files and fixtures (the gate excludes them).
+   - `INDEPENDENT_SEAMS`: the number of independently buildable pieces. For a batch issue (several review findings or checklist members) this is the member count; otherwise count distinct directory/phase seams. Minimum 1.
+   - Resolve config (defaults when absent): `THRESHOLD=$(yq '.build.diff_size.threshold // 1000' forge.yaml 2>/dev/null || echo 1000)`, `FACTOR=$(yq '.build.diff_size.estimate_factor // 1.2' forge.yaml 2>/dev/null || echo 1.2)`, `SEAM_MIN=$(yq '.build.diff_size.batch_seam_min // 3' forge.yaml 2>/dev/null || echo 3)`.
+   - Rule: when `build.diff_size.threshold` is `0` the rule is skipped (emit `GATE_THRESHOLD: 0`). Otherwise the Decomposition Assessment MUST be `**YES**` when `ESTIMATED_DIFF_LINES` > threshold x 1.2 (`estimate_factor`), OR when `INDEPENDENT_SEAMS` >= `batch_seam_min` and `ESTIMATED_DIFF_LINES` > threshold / 2 (not well under the gate). Propose one sub-issue per seam. A batch that is well under the gate (estimate at or under half the threshold) may stay `**NO**`.
+   - Emit the numbers in the comment as the three own-line fields in Phase 1C. A pure estimate is a heuristic; state it in the reason, do not pad it.
 8. **Fix-approach validation** — if the issue proposes a fix, don't adopt it as spec. Trace through the target system's middleware, auth, routing, config. Cross-domain: if fix in domain A interacts with domain B, read domain B's files too.
 
 ---
@@ -703,6 +709,9 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 ### Decomposition Assessment
 **{YES|NO}** — {reason}
 {if YES: proposed sub-issues with titles and dependencies}
+ESTIMATED_DIFF_LINES: {N}
+INDEPENDENT_SEAMS: {N}
+GATE_THRESHOLD: {N — build.diff_size.threshold; 0 when the gate is disabled}
 <!-- DECOMPOSE:{YES|NO} -->
 
 ### Acceptance Spec <!-- Added: forge#1829 -->
@@ -738,6 +747,8 @@ ${INVESTIGATION_SENTINEL}"
 **Rules for the template above (instructions, not template text; never copy them into the posted comment):**
 
 **Decomposition marker (MANDATORY, both output paths — template and codec)**: emit exactly one `<!-- DECOMPOSE:YES -->` or `<!-- DECOMPOSE:NO -->` line per investigator comment, matching the `**YES**`/`**NO**` verdict, on its own line (nothing else on that line) after the verdict line and any sub-issue list (the `**YES**`/`**NO**` line must stay directly under the heading — the resume parser reads it). The headless engine routes to `work-on/decompose` on this marker (or on the `**YES**` heading in older comments). Never quote or mention the opposite marker anywhere in the comment. Never emit it when Verdict=INVALID. <!-- Added: forge#3543 -->
+
+**Size-estimate fields (MANDATORY when Verdict is not INVALID)** <!-- Added: forge#3573 -->: `ESTIMATED_DIFF_LINES: N`, `INDEPENDENT_SEAMS: N` and `GATE_THRESHOLD: N` are each alone on their own line (whole numbers, no prose or backticks on the line), INSIDE `### Decomposition Assessment` after the verdict line and sub-issue list and before the `<!-- DECOMPOSE:.. -->` marker. The engine reads them with full-line anchors as a safety net: an estimate over `GATE_THRESHOLD` x 1.2 routes to decompose even when the verdict says NO, so the verdict and the numbers must agree. Never quote these field lines elsewhere in the comment.
 
 **Decomposition scopes the Acceptance Spec**: when the assessment is YES, the Acceptance Spec MUST cover only the first, in-scope item — or tag each check with the sub-item it belongs to (append `# item-N` to the description). Never emit checks for work the assessment assigns to a separate sub-issue: build's acceptance gate would otherwise fail on them and its repair loop would pull that work into this branch. <!-- Added: forge#3543 -->
 
