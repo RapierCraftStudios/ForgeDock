@@ -419,10 +419,58 @@ while IFS= read -r _c; do
   case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
 done <<< "$_tc"
 [ -n "$TRUSTED_SCRIPT" ] || echo "SCOPE_MODE=full: scoping skipped (trusted-comments.sh not resolvable)"
+# HELPER_SCRIPT resolver (REVIEW_DELTA_SCRIPT; trusted-install tiers only, never the working directory or the PR checkout, #3400/#3483/#3596): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. A PR that shipped its own resolver could otherwise decide that its own head needs no review. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+done
+REVIEW_DELTA_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$REVIEW_DELTA_SCRIPT" ] && [ -f "$_c/scripts/review-delta.sh" ] && REVIEW_DELTA_SCRIPT="$_c/scripts/review-delta.sh" ;; esac
+done <<< "$_tc"
+[ -n "$REVIEW_DELTA_SCRIPT" ] || echo "delta credit off: review-delta.sh not resolvable (stale-head PR commits stay UNREVIEWED)"
+# BEGIN bundle-delta-credit
+is_sha() { case "${1}" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]; }
+# Partial credit for a PR whose head moved after its last complete review. Only the shared resolver (scripts/review-delta.sh) decides; nothing is re-derived here.
+# Needs pr _HEAD _J _CM _SD GH_REPO TRUSTED_SCRIPT REVIEW_DELTA_SCRIPT in scope. Sets DELTA_COMMITS (space-separated PR commit oids already covered by a trusted complete panel) and DELTA_FULL (1 = whole PR covered by a trusted carried-forward base sync).
+# Every failure (script unresolved, FULL, error, malformed output, force-push, untrusted or absent carried record, git read failure) leaves DELTA_COMMITS empty and DELTA_FULL=0: those commits stay UNREVIEWED.
+bundle_delta_credit() {
+  local base labels top cf out l1 kind arg from to oid rc n
+  DELTA_COMMITS=""; DELTA_FULL=0
+  [ -n "$REVIEW_DELTA_SCRIPT" ] || return 0
+  base=$(printf '%s' "$_J" | jq -r '.baseRefName // empty') || return 0
+  labels=$(printf '%s' "$_J" | jq -r '[.labels[].name] | join(",")') || return 0
+  top=$(git rev-parse --show-toplevel 2>/dev/null) || return 0
+  [ -n "$base" ] && [ -n "$top" ] || return 0
+  cf=$(mktemp "$_SD/delta-comments.XXXXXX") || return 0
+  printf '%s' "$_CM" > "$cf" || { rm -f "$cf"; return 0; }
+  out=$(bash "$REVIEW_DELTA_SCRIPT" --pr "$pr" --head "$_HEAD" --base "$base" --trusted-script "$TRUSTED_SCRIPT" --comments-file "$cf" --labels "$labels" --repo "$GH_REPO" --repo-path "$top" 2>/dev/null) || out=""
+  rm -f "$cf"
+  l1=$(printf '%s\n' "$out" | sed -n 1p)
+  kind="${l1%% *}"; arg="${l1#* }"
+  case "$kind" in
+    DELTA)
+      from="${arg%%..*}"; to="${arg##*..}"
+      is_sha "$from" && [ "$to" = "$_HEAD" ] && [ "$from" != "$to" ] || return 0
+      for oid in $(printf '%s' "$_J" | jq -r '.commits[].oid'); do
+        git merge-base --is-ancestor "$oid" "$from" 2>/dev/null; rc=$?
+        [ "$rc" -eq 0 ] && DELTA_COMMITS="$DELTA_COMMITS $oid"   # rc 1 (not covered) and rc >1 (error) both stay UNREVIEWED
+      done ;;
+    BASE_SYNC_ONLY)
+      is_sha "$arg" && [ "$arg" != "$_HEAD" ] || return 0
+      # A marker alone never counts: a TRUSTED FORGE:REVIEW-CARRIED record for this head must name the same reviewed sha (shape owned by review-pr.md carry_verified_from).
+      n=$(printf '%s' "$_CM" | bash "$TRUSTED_SCRIPT" count "\\A(?=[\\s\\S]*\\nReviewed-SHA: ${_HEAD}\\r?(\\n|$))(?=[\\s\\S]*\\nCarried-From-SHA: ${arg}\\r?(\\n|$))<!-- FORGE:REVIEW-CARRIED -->" 2>/dev/null) || return 0
+      case "$n" in ''|*[!0-9]*) return 0 ;; esac
+      [ "$n" -ge 1 ] && DELTA_FULL=1 ;;
+  esac
+  return 0
+}
+# END bundle-delta-credit
 if [ -n "$TRUSTED_SCRIPT" ] && [ -n "${ALL_PR_NUMBERS:-}" ] && [ -n "${PR_NUMBER:-}" ] && [ -n "${GH_REPO:-}" ]; then
   SCOPE_MODE=scoped
   for pr in $ALL_PR_NUMBERS; do
-    _J=$(gh pr view "$pr" -R $GH_REPO --json headRefOid,mergeCommit,commits,state 2>/dev/null) || { SCOPE_MODE=full; break; }
+    _J=$(gh pr view "$pr" -R $GH_REPO --json headRefOid,mergeCommit,commits,state,baseRefName,labels 2>/dev/null) || { SCOPE_MODE=full; break; }
     _HEAD=$(printf '%s' "$_J" | jq -r '.headRefOid')
     case "$_HEAD" in *[!0-9a-f]*|"") SCOPE_MODE=full; break ;; esac   # a malformed head id would make the sha match accept any comment (fail open): review everything
     [ "${#_HEAD}" -eq 40 ] || [ "${#_HEAD}" -eq 64 ] || { SCOPE_MODE=full; break; }
@@ -432,7 +480,7 @@ if [ -n "$TRUSTED_SCRIPT" ] && [ -n "${ALL_PR_NUMBERS:-}" ] && [ -n "${PR_NUMBER
     _CM=$(gh api --paginate "repos/$GH_REPO/issues/$pr/comments" 2>/dev/null) || { SCOPE_MODE=full; break; }
     _FILES=$(gh pr diff "$pr" -R $GH_REPO --name-only 2>/dev/null) || { SCOPE_MODE=full; break; }
     # Reviewed = trusted FORGE:REVIEW_ROUTE (a real review mode) whose sha is the PR's FINAL head, plus at least one review-agent comment
-    # carrying the full-length `Reviewed-SHA: <head>` line and a findings block (same predicate as review-pr.md Phase 5; a 7-char substring or a comment with no findings block never counts), and no degraded/blocked review marker. A PR pushed to after its review has a stale sha, so its commits stay UNREVIEWED.
+    # carrying the full-length `Reviewed-SHA: <head>` line and a findings block (same predicate as review-pr.md Phase 5; a 7-char substring or a comment with no findings block never counts), and no degraded/blocked review marker. A PR pushed to after its review has a stale sha: the exact-head gate gives it no credit, and only the delta branch below (shared resolver `scripts/review-delta.sh`) may credit the commits an earlier trusted complete panel covered or a trusted `FORGE:REVIEW-CARRIED` base sync carried; everything else stays UNREVIEWED.
     _ROUTE=$(printf '%s' "$_CM" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW_ROUTE mode=(?!spec-evolution-blocked)[^ ]+ spec=review-pr.md sha=${_HEAD7} -->") || { SCOPE_MODE=full; break; }
     _AGENT=$(printf '%s' "$_CM" | bash "$TRUSTED_SCRIPT" count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->)<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${_HEAD}(\\r?\\n|$)") || { SCOPE_MODE=full; break; }
     _DEGRADED=$(printf '%s' "$_CM" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:(REVIEW_DEGRADED|REVIEW_BLOCKED)") || { SCOPE_MODE=full; break; }
@@ -441,6 +489,16 @@ if [ -n "$TRUSTED_SCRIPT" ] && [ -n "${ALL_PR_NUMBERS:-}" ] && [ -n "${PR_NUMBER
       REVIEWED_PR_COUNT=$((REVIEWED_PR_COUNT+1))
       REVIEWED_COMMITS="$REVIEWED_COMMITS $(printf '%s' "$_J" | jq -r '[.commits[].oid, .mergeCommit.oid // empty] | join(" ")')"
       REVIEWED_MERGES="$REVIEWED_MERGES $(printf '%s' "$_J" | jq -r '.mergeCommit.oid // empty')"
+    elif [ "$_DEGRADED" -eq 0 ] && [ "$(printf '%s' "$_J" | jq '.commits|length')" -lt 100 ]; then
+      # Stale head: the exact-head gate failed, so ask the shared resolver how much of the PR an earlier trusted complete panel covered. Additive only: it can move commits out of UNREVIEWED, never into it.
+      bundle_delta_credit
+      if [ "$DELTA_FULL" -eq 1 ]; then
+        REVIEWED_PR_COUNT=$((REVIEWED_PR_COUNT+1))
+        REVIEWED_COMMITS="$REVIEWED_COMMITS $(printf '%s' "$_J" | jq -r '[.commits[].oid, .mergeCommit.oid // empty] | join(" ")')"
+        REVIEWED_MERGES="$REVIEWED_MERGES $(printf '%s' "$_J" | jq -r '.mergeCommit.oid // empty')"
+      elif [ -n "$DELTA_COMMITS" ]; then
+        REVIEWED_COMMITS="$REVIEWED_COMMITS$DELTA_COMMITS"   # the PR's merge commit is not credited: it contains the post-review commits
+      fi
     fi
     printf '%s\n' "$_FILES" | sort -u | sed "s|^|$pr |" >> "$_PF"
   done
@@ -481,6 +539,8 @@ echo "SCOPE_MODE=$SCOPE_MODE reviewed_prs=$REVIEWED_PR_COUNT unreviewed_commits=
 ```
 
 **Fail-open (never silently review less)**: every `gh`, `git log`, `git diff`, `git diff-tree` and marker-count read above is captured into a variable and tested on its own exit status (never through a pipe, where `||` sees only the last stage). If the trust script cannot be resolved, any such read fails, or a marker count is not an integer, `SCOPE_MODE=full` and Phases 2-6 review the full bundle diff as before. Only `SCOPE_MODE=scoped` narrows review.
+
+**Stale-head delta credit (fail-closed)**: delta credit only ever moves commits out of UNREVIEWED, and only on a positive, trusted resolver answer. A resolver `FULL`, an error, malformed output, a force-push (reviewed sha not an ancestor), an untrusted or absent `FORGE:REVIEW-CARRIED` record, a degraded/blocked PR, 100+ commits or an unresolved `review-delta.sh` all leave the PR's commits UNREVIEWED (today's behaviour) and never force `SCOPE_MODE=full` by themselves. `DELTA <reviewed>..<head>` credits only the PR commits that are ancestors of `<reviewed>` (never its merge commit); `BASE_SYNC_ONLY` credits the whole PR only with a trusted carried record naming this head and that reviewed sha. A bundle that changes the review specs gets `FULL` from the resolver by design. <!-- Added: forge#3638 -->
 
 **Scoped line-level review set** = `CROSS_PR_FILES` + `UNREVIEWED_FILES` (the files of `UNREVIEWED_COMMITS`, including merge-commit conflict resolutions) + `DEPLOY_WIRING_FILES`. Files and commits that belong only to an already-reviewed PR (the already-reviewed set) are excluded from line-level review.
 
