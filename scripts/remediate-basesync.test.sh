@@ -44,6 +44,15 @@ has "freshness push rc checked" 'if git push origin HEAD:\{HEAD_BRANCH\}; then'
 has "freshness merge re-gated before push" 'Run the Phase M4 pre-push ancestry guard'
 if grep -qF 'do NOT sync a second time' "$SPEC"; then bad "unconditional second-sync refusal removed"; else ok "unconditional second-sync refusal removed"; fi
 
+# Cross-fence shell state (forge#3653): every fence is a fresh shell, so no flag/var may cross fences.
+if grep -qF 'BASESYNC_RAN:-false' "$SPEC"; then bad "M8 not gated on BASESYNC_RAN shell var"; else ok "M8 not gated on BASESYNC_RAN shell var"; fi
+if grep -qE 'BASESYNC_(RAN|CONFLICTED|MERGE_REFUSED)=' "$SPEC"; then bad "no cross-fence BASESYNC_* flags"; else ok "no cross-fence BASESYNC_* flags"; fi
+# MERGE_RC / MERGE_OUT may be read only in the fence that sets them (the M3 sync fence).
+FENCE_SET="$(awk '/^```/{f=!f; n++; next} f&&/MERGE_RC=\$\?/{print n}' "$SPEC" | head -n1)"
+FENCE_USE="$(awk '/^```/{f=!f; n++; next} f&&/\$\{?MERGE_(RC|OUT)/{print n}' "$SPEC" | sort -u | tr '\n' ' ')"
+eq "MERGE_RC/MERGE_OUT read only in the fence that sets them" "$FENCE_USE" "$FENCE_SET "
+has "refused park posts needs-human from the sync fence" 'echo "BLOCKED: base-sync: merge refused'
+
 # Behavioural: dirty tree + base change -> refused (rc!=0, no MERGE_HEAD, empty U-list); real conflict -> MERGE_HEAD present.
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 (
@@ -98,6 +107,30 @@ IFS='|' read -r D0 DU D1 B1 < "$T/derive.out"
 eq "derive: no sync merge -> 0 rounds, no recorded head" "$D0" "0 none"
 eq "derive: unpushed merge does not count" "$DU" "0 none"
 eq "derive: pushed sync merge -> 1 round, recorded head = merged base" "$D1" "1 $B1"
+
+# M8 derivation (forge#3653): extracted from the spec, run in a fresh shell; sync merge -> base head, non-sync merge/none -> empty.
+M8="$(grep -m1 -E '^_sm=\$\(git rev-list' "$SPEC")"$'\n'"$(grep -m1 -E '^\[ -n "\$_sm" \]' "$SPEC")"
+M8="${M8//\{PR_BASE\}/main}"
+(
+  R="$T/m8"; mkdir "$R" && cd "$R" && git init -q -b main . && git config user.email t@t && git config user.name t
+  m8() { eval "$M8"; echo "${_sp2:-none}"; }
+  echo a > f && git add f && git commit -qm base
+  git checkout -qb feat && echo x > g && git add g && git commit -qm feat
+  git update-ref refs/remotes/origin/main main
+  o0=$(m8)
+  git checkout -q main && echo b > f && git commit -qam m1 && git checkout -q feat
+  git update-ref refs/remotes/origin/main main; b1=$(git rev-parse main)
+  git merge origin/main --no-edit >/dev/null 2>&1
+  o1=$(m8)
+  git checkout -q -b side && echo s > s && git add s && git commit -qm side && git checkout -q feat
+  git merge --no-ff side --no-edit >/dev/null 2>&1
+  o2=$(m8)
+  echo "$o0|$o1|$o2|$b1" > "$T/m8.out"
+)
+IFS='|' read -r M0 M1 M2 MB < "$T/m8.out"
+eq "M8 derive: no merge -> empty" "$M0" "none"
+eq "M8 derive: sync merge -> merged base head" "$M1" "$MB"
+eq "M8 derive: newest merge is a non-sync merge -> empty" "$M2" "none"
 
 echo "passed=$PASS failed=$FAILN"
 [ "$FAILN" -eq 0 ]

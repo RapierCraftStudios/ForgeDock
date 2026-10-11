@@ -240,20 +240,26 @@ if [ "${BASESYNC_REFUSED:-false}" != "true" ]; then
   MERGE_OUT=$(git merge origin/{PR_BASE} --no-edit 2>&1); MERGE_RC=$? # allowlist:check-command-side-effects
   echo "$MERGE_OUT"
   # rc alone cannot tell a conflict from a refusal (both exit 1); MERGE_HEAD can.
-  if [ "$MERGE_RC" -eq 0 ]; then
-    BASESYNC_RAN=true
-  elif git rev-parse -q --verify MERGE_HEAD >/dev/null; then
-    BASESYNC_CONFLICTED=true   # merge in progress with conflicts: resolve or park below
-  else
-    BASESYNC_MERGE_REFUSED=true   # rc!=0 and no MERGE_HEAD: refused, nothing was merged
+  # Outcomes are NOT carried to later fences as shell flags: clean = rc 0; conflicts = MERGE_HEAD present (git state).
+  if [ "$MERGE_RC" -ne 0 ] && ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+    # rc!=0 and no MERGE_HEAD: refused, nothing was merged. Park HERE, while MERGE_RC/MERGE_OUT are still in scope.
+    run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
+    run gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "<!-- FORGE:BASESYNC_FAILED -->
+Base sync of PR #{PR_NUMBER} (\`origin/{PR_BASE}\` into \`{HEAD_BRANCH}\`) was refused by git (rc=$MERGE_RC); no merge was started. Git output:
+
+\`\`\`
+${MERGE_OUT}
+\`\`\`" # allowlist:check-command-side-effects
+    gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
+    echo "BLOCKED: base-sync: merge refused (rc=$MERGE_RC)"
   fi
 fi
 ```
 
-Exactly one outcome applies. `BASESYNC_RAN=true` is set only on a clean merge (or after a conflicted merge is concluded below); a refused merge is never treated as synced.
+Exactly one outcome applies, and it is read from git, never from shell flags (each fence is a fresh shell). A refused merge is never treated as synced.
 
 - Clean merge (`MERGE_RC=0`): nothing more to resolve; the merge commit is the sync.
-- Conflicts (`MERGE_RC` nonzero, `MERGE_HEAD` present): read BOTH sides of every conflicted hunk and the surrounding code, then write the combined result by hand. No `-X ours`/`-X theirs`, no wholesale `git checkout --ours/--theirs`, no blanket take-one-side. After resolving, `git add` the files and conclude with `git commit -s --no-edit` (the merge commit), then set `BASESYNC_RAN=true`.
+- Conflicts (`MERGE_RC` nonzero, `MERGE_HEAD` present): read BOTH sides of every conflicted hunk and the surrounding code, then write the combined result by hand. No `-X ours`/`-X theirs`, no wholesale `git checkout --ours/--theirs`, no blanket take-one-side. After resolving, `git add` the files and conclude with `git commit -s --no-edit` (the merge commit). The merge commit on the branch is the durable record of the sync; Phase M8 derives the trail line from git.
 - **Unresolvable with confidence** (a hunk whose intent on either side you cannot reconcile, or the branch/tree is refused above): capture the file list first, then abort only if a merge is in progress, and park:
   ```bash
   run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
@@ -269,19 +275,8 @@ Exactly one outcome applies. `BASESYNC_RAN=true` is set only on a clean merge (o
   gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
   ```
   EXIT `REMEDIATE_RESULT: status: BLOCKED` with blocker "base-sync: unresolvable conflicts". Only that issue is parked.
-- **Refused merge** (`MERGE_RC` nonzero and no `MERGE_HEAD`, i.e. `BASESYNC_MERGE_REFUSED=true`): git declined to start the merge (for example local changes would be overwritten). This is not a conflict and not a sync. There is nothing to abort. Park with the git output:
-  ```bash
-  run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
-  run gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "<!-- FORGE:BASESYNC_FAILED -->
-  Base sync of PR #{PR_NUMBER} (\`origin/{PR_BASE}\` into \`{HEAD_BRANCH}\`) was refused by git (rc=${MERGE_RC}); no merge was started. Git output:
-
-  \`\`\`
-  ${MERGE_OUT}
-  \`\`\`" # allowlist:check-command-side-effects
-  gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
-  ```
-  EXIT `REMEDIATE_RESULT: status: BLOCKED` with blocker "base-sync: merge refused (rc=N)" (N = `MERGE_RC`). Never fall through to M4 as synced.
-- **Re-entry (per distinct base head)**: Phase M3's sync is re-enterable from Phase M6, but only when the base advanced past `BASESYNC_BASE_SHA` and `BASESYNC_ROUNDS` is below `BASESYNC_MAX_ROUNDS`. A re-sync round runs this same block on the new head with the same guards (shared-branch refusal, clean tree, merge-only, no force-push, resolve-or-park, `FORGE:BASESYNC_FAILED`). The block derives `BASESYNC_ROUNDS` and `BASESYNC_BASE_SHA` from git on every entry (pushed sync merges on the branch), never from shell state, and refuses at the cap; an unreadable count is the cap. `BASESYNC_RAN=true` is still set only on a clean or concluded merge.
+- **Refused merge** (the sync fence printed `BLOCKED: base-sync: merge refused (rc=N)`): git declined to start the merge (for example local changes would be overwritten). This is not a conflict and not a sync, and there is nothing to abort. The sync fence has already posted `FORGE:BASESYNC_FAILED` (with the rc and git output) and added `needs-human` from inside that fence, because `MERGE_RC`/`MERGE_OUT` do not survive into a later fence. EXIT `REMEDIATE_RESULT: status: BLOCKED` with blocker "base-sync: merge refused (rc=N)" (N from the printed line). Never fall through to M4 as synced.
+- **Re-entry (per distinct base head)**: Phase M3's sync is re-enterable from Phase M6, but only when the base advanced past `BASESYNC_BASE_SHA` and `BASESYNC_ROUNDS` is below `BASESYNC_MAX_ROUNDS`. A re-sync round runs this same block on the new head with the same guards (shared-branch refusal, clean tree, merge-only, no force-push, resolve-or-park, `FORGE:BASESYNC_FAILED`). The block derives `BASESYNC_ROUNDS` and `BASESYNC_BASE_SHA` from git on every entry (pushed sync merges on the branch), never from shell state, and refuses at the cap; an unreadable count is the cap.
 - After a sync, the quality gate below re-runs on the merged tree, and Phase M6's re-review covers the new head (the reviewed-head guard forces a fresh review).
 
 **Quality Gate** (same loop as Phase 3G, max 3 iterations):
@@ -638,12 +633,13 @@ esac
 REMEDIATED_HEAD_SHA=$(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null || true)
 
 # forge#3496: mark a base-sync round so Phase M0 scopes the single-attempt guard per kind.
-# Persist the merged base head so it survives across blocks: fall back to the merge's second parent when the shell var is unset.
+# This is a fresh shell: derive "ran" from git (forge#3517 rounds query), never from M3 shell flags. A sync merge is the newest
+# first-parent merge on origin/{PR_BASE}..HEAD whose second parent is an ancestor of origin/{PR_BASE}; any failure leaves the line empty.
+cd {WORKTREE_PATH}
 BASESYNC_LINE=""
-if [ "${BASESYNC_RAN:-false}" = "true" ]; then
-  BASESYNC_BASE_SHA="${BASESYNC_BASE_SHA:-$(git -C {WORKTREE_PATH} rev-parse -q --verify 'HEAD^2' 2>/dev/null || true)}"
-  BASESYNC_LINE="**Base sync**: ran (base=${BASESYNC_BASE_SHA:-unknown})"
-fi
+_sm=$(git rev-list --first-parent --merges -1 origin/{PR_BASE}..HEAD 2>/dev/null || true); _sp2=""
+[ -n "$_sm" ] && _sp2=$(git rev-parse -q --verify "$_sm^2" 2>/dev/null) && git merge-base --is-ancestor "$_sp2" origin/{PR_BASE} 2>/dev/null || _sp2=""
+[ -n "$_sp2" ] && BASESYNC_LINE="**Base sync**: ran (base=${_sp2})"
 
 REMEDIATION_BODY="<!-- FORGE:REMEDIATION -->
 ## Remediation Complete for PR #{PR_NUMBER}
