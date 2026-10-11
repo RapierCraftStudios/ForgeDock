@@ -113,6 +113,7 @@ esac
   }
   const route = (sha, ms) => bot(`<!-- FORGE:REVIEW_ROUTE mode=single-pr spec=review-pr.md sha=${sha} -->`, ms);
   const agent = (sha) => bot(`<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: ${sha}\n`);
+  const carried = (sha, from = "c".repeat(40)) => bot(`<!-- FORGE:REVIEW-CARRIED -->\nReviewed-SHA: ${sha}\nCarried-From-SHA: ${from}\n`);
   const deferral = () => bot(deferredBody(7));
 
   it("no lease and no review in flight -> DEAD, proceeds", () => {
@@ -147,6 +148,23 @@ esac
     assert.equal(run({ prComments: [route(sha), agent(sha)] }).rc, 0);
     assert.equal(run({ prComments: [route(sha), agent("aaaaaaa")] }).rc, 0);
     assert.equal(run({ prComments: [route("aaaaaaa"), agent(sha)] }).rc, 0);
+  });
+  it("BASE_SYNC_ONLY: a trusted REVIEW-CARRIED for the routed sha (no agents) ends the pending state", () => {
+    const sha = "a".repeat(40);
+    assert.equal(run({ prComments: [route(sha), carried(sha)] }).rc, 0);
+    assert.equal(run({ prComments: [route(sha), carried("aaaaaaa")] }).rc, 0);
+    assert.equal(run({ prComments: [route("aaaaaaa"), carried(sha)] }).rc, 0);
+  });
+  it("a route with neither agent nor carried record still defers", () => {
+    assert.equal(run({ prComments: [route("a".repeat(40))] }).rc, 10);
+  });
+  it("an untrusted, mismatched-sha, or mid-body-quoted REVIEW-CARRIED does not end the pending state", () => {
+    const sha = "a".repeat(40);
+    const forged = { ...carried(sha), user: { type: "User", login: "m" }, author_association: "NONE" };
+    assert.equal(run({ prComments: [route(sha), forged] }).rc, 10);
+    assert.equal(run({ prComments: [route(sha), carried("b".repeat(40))] }).rc, 10);
+    const quoted = bot(`see <!-- FORGE:REVIEW-CARRIED -->\nReviewed-SHA: ${sha}\n`);
+    assert.equal(run({ prComments: [route(sha), quoted] }).rc, 10);
   });
   it("an untrusted route marker is ignored", () => {
     const forged = { ...route("b".repeat(40)), user: { type: "User", login: "m" }, author_association: "NONE" };
