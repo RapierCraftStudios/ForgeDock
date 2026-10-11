@@ -49,4 +49,23 @@ SINGLE_BODY=$'## Acceptance Criteria\n- [ ] complete this work'
   exit 1
 }
 
+# forge#3545: the investigate placeholder box is scaffolding and must not form a section.
+PLACEHOLDER_SECOND=$'## Success Criteria\n- [ ] real work\n\n## Acceptance Criteria\n- [ ] Fix confirmed during investigation.'
+[[ "$(printf '%s\n' "$PLACEHOLDER_SECOND" | awk "$CLOSE_CLASSIFIER")" == "1" ]] || {
+  printf 'FAIL: placeholder box must not count as a second checkbox section\n' >&2
+  exit 1
+}
+PLACEHOLDER_ONLY=$'## Acceptance Criteria\n- [ ] Fix confirmed during investigation.'
+[[ "$(printf '%s\n' "$PLACEHOLDER_ONLY" | awk "$CLOSE_CLASSIFIER")" == "0" ]] || {
+  printf 'FAIL: placeholder-only body must count zero checkbox sections\n' >&2
+  exit 1
+}
+grep -Fq 'Fix confirmed during investigation' "$ROOT/commands/work-on/close.md" || {
+  printf 'FAIL: close.md must exclude the investigate placeholder\n' >&2
+  exit 1
+}
+# REMAINING_BEFORE must also ignore the placeholder (placeholder-only body => 0).
+REM=$(printf '%s\n' "$PLACEHOLDER_ONLY" | grep -vE '^[-*+] \[ \] Fix confirmed during investigation\.?[[:space:]]*$' | grep -cE '^[-*+] \[ \]' || true)
+[[ "$REM" == "0" ]] || { printf 'FAIL: placeholder counted in REMAINING_BEFORE\n' >&2; exit 1; }
+
 printf 'PASS: close-path classifier supports setext section boundaries\n'

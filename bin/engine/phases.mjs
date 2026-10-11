@@ -27,7 +27,11 @@ import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
 // matching engine-level terminal reason to report instead of overloading
 // "needs-human" (which would misrepresent a clean-but-unmet-bar re-review as
 // a fresh human-judgment escalation).
-export const TERMINAL_REASONS = ["merged", "invalid", "needs-human", "decomposed", "engine-error", "awaiting-merge"];
+export const TERMINAL_REASONS = ["merged", "invalid", "needs-human", "decomposed", "engine-error", "awaiting-merge", "phase-complete"];
+// forge#3545: "phase-complete" is close's CLOSE_RESULT PHASE_COMPLETE exit: the PR
+// merged but later phases of a multi-phase issue remain, so the issue is
+// deliberately left OPEN (FORGE:PHASE:COMPLETE posted). Distinct from "merged"
+// (nothing shipped-and-closed) and "awaiting-merge" (no PR merged yet).
 
 /**
  * Trust predicate for FORGE marker comments (forge#3542) — a JS port of
@@ -162,6 +166,30 @@ export async function postCycleMarker(issue, n, io) {
   }
   await io.gh(["issue", "comment", String(issue), "--body", cycleMarker(n)]);
   return { posted: true };
+}
+
+/**
+ * Acceptance-gate state (build.md B6.5; forge#3545). `FORGE:BUILDER:COMPLETE` is
+ * appended at validate V5, BEFORE the gate runs, so the marker alone is not proof
+ * the build passed. Newest marker wins, by comment ORDER (never blob presence):
+ * `FORGE:ACCEPTANCE_GATE:PASSED` => "pass"; `:FAILED`, `:BLOCKED` or a
+ * `FORGE:BUILD_BLOCKED` comment => "blocked"; none => "none" (legacy / crash
+ * paths keep their prior behaviour). `comments` are trusted bodies, oldest first.
+ */
+function latestGateState(comments) {
+  const gate = "FORGE:ACCEPTANCE_GATE";
+  for (let i = comments.length - 1; i >= 0; i--) {
+    const b = comments[i];
+    if (startsWithHeader(b, "FORGE:BUILD_BLOCKED")) return "blocked";
+    if (!startsWithHeader(b, gate)) continue;
+    if (hasSentinelLine(b, `${gate}:PASSED`)) return "pass";
+    if (hasSentinelLine(b, `${gate}:FAILED`) || hasSentinelLine(b, `${gate}:BLOCKED`)) return "blocked";
+  }
+  return "none";
+}
+/** close.md C2 PHASE_COMPLETE evidence in the current cycle (forge#3545). */
+function hasPhaseComplete(comments) {
+  return hasMarker(comments, "FORGE:PHASE:COMPLETE", "FORGE:PHASE:COMPLETE");
 }
 
 /**
@@ -551,6 +579,8 @@ export const PHASES = [
       const { comments: allComments } = await issueMarkers(state.issue, io);
       const comments = sliceToCurrentCycle(allComments); // forge#3657: current-cycle evidence only
       const branch = resolveBranch(state, comments);
+      // forge#3545: a failed/blocked acceptance gate newer than any PASSED means build is NOT done.
+      if (latestGateState(comments) === "blocked") return { satisfied: false };
       if (branch && hasMarker(comments, PHASE_MARKERS.build.header, PHASE_MARKERS.build.completionMarker) && (await commitsAhead(state.lane, branch, io)) > 0) {
         return { satisfied: true, outputs: { branch } };
       }
@@ -576,6 +606,13 @@ export const PHASES = [
       // from a genuine git-confirmed zero and would wrongly trip the
       // non-retryable guard below on the very first attempt.
       const ahead = branch ? await commitsAhead(state.lane, branch, io) : -1; // … AND real commits
+      // forge#3545: fail closed. COMPLETE is written before the B6.5 acceptance gate, so a
+      // newer FAILED/BLOCKED gate (or BUILD_BLOCKED) must not be committed and move on to
+      // review. Non-retryable: a retry would only re-read the same append-only markers;
+      // a repaired build posts a newer PASSED, which clears this.
+      if (latestGateState(comments) === "blocked") {
+        return { status: "failed", detail: `acceptance gate blocked (builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"})`, retryable: false };
+      }
       if (complete && ahead > 0) {
         return { status: "committed", outputs: { branch, ...buildChildEvidence(comments) } };
       }
@@ -827,7 +864,16 @@ export const PHASES = [
       // strict subset of what satisfies this predicate on a CLOSED issue).
       const snap = await issueSnapshot(state.issue, io);
       if (!snap.ok) return { satisfied: false };
-      return snap.state === "CLOSED" ? { satisfied: true } : { satisfied: false };
+      if (snap.state === "CLOSED") return { satisfied: true };
+      // forge#3545: a current-cycle FORGE:PHASE:COMPLETE means close already ran to its
+      // PHASE_COMPLETE exit; do not re-run it.
+      if (snap.state === "OPEN") {
+        try {
+          const { comments } = await issueMarkers(state.issue, io);
+          if (hasPhaseComplete(sliceToCurrentCycle(comments))) return { satisfied: true, terminalReason: "phase-complete" };
+        } catch { /* fail closed: not satisfied */ }
+      }
+      return { satisfied: false };
     },
     async detectOutcome(state, io) {
       const snap = await issueSnapshot(state.issue, io);
@@ -847,6 +893,13 @@ export const PHASES = [
         return { status: "committed", terminalReason: "merged", outputs: {} };
       if (snap.state === "CLOSED")
         return { status: "committed", terminalReason: "invalid", outputs: {} };
+      // forge#3545: PHASE_COMPLETE is a valid close exit (multi-phase issue: PR merged,
+      // issue deliberately left OPEN). Only the current cycle's marker counts.
+      if (snap.state === "OPEN") {
+        const { comments } = await issueMarkers(state.issue, io);
+        if (hasPhaseComplete(sliceToCurrentCycle(comments)))
+          return { status: "committed", terminalReason: "phase-complete", outputs: {} };
+      }
       return { status: "failed", detail: "issue not closed" };
     },
     isTerminalAfter: () => true,
