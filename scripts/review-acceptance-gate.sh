@@ -25,21 +25,21 @@ fi
 
 CHECKS=$(printf '%s' "$COMMENTS" | jq -r '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' | grep "^ACCEPTANCE_CHECK:")
 GATE_PASS=true; FAILED=""; RAN=0; RESULTS=""
-while IFS= read -r line; do
-  [ -z "$line" ] && continue
-  ID=$(echo "$line" | sed -n 's/^ACCEPTANCE_CHECK: id=\([^ ]*\) type=.*/\1/p')
-  TYPE=$(echo "$line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=\([^ ]*\) target=.*/\1/p')
-  TARGET=$(printf '%s\n' "$line" | sed -nE 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target="(([^"\\]|\\.)*)".*/\1/p' | sed 's/\\"/"/g')
-  [ -z "$TARGET" ] && TARGET=$(echo "$line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=\([^ ]*\).*/\1/p')
-  MATCHER=$(printf '%s\n' "$line" | sed -nE 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=("([^"\\]|\\.)*"|[^ ]*) matcher="(([^"\\]|\\.)*)".*/\3/p' | sed 's/\\"/"/g')
-  [ -z "$MATCHER" ] && MATCHER=$(echo "$line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=[^ ]* matcher=\([^ ]*\).*/\1/p')
-  DESC=$(echo "$line" | sed -n 's/.*description=\(.*\)/\1/p')
+while IFS= read -r check_line; do
+  [ -z "$check_line" ] && continue
+  ID=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=\([^ ]*\) type=.*/\1/p')
+  TYPE=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=\([^ ]*\) target=.*/\1/p')
+  TARGET=$(printf '%s\n' "$check_line" | sed -nE 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target="(([^"\\]|\\.)*)".*/\1/p' | sed 's/\\"/"/g')
+  [ -z "$TARGET" ] && TARGET=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=\([^ ]*\).*/\1/p')
+  MATCHER=$(printf '%s\n' "$check_line" | sed -nE 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=("([^"\\]|\\.)*"|[^ ]*) matcher="(([^"\\]|\\.)*)".*/\3/p' | sed 's/\\"/"/g')
+  [ -z "$MATCHER" ] && MATCHER=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=[^ ]* matcher=\([^ ]*\).*/\1/p')
+  DESC=$(echo "$check_line" | sed -n 's/.*description=\(.*\)/\1/p')
   # phase= is anchored after matcher=, so text inside target/matcher/description cannot set it; anything else is build.
-  PHASE=$(printf '%s\n' "$line" | sed -nE 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=("(([^"\\]|\\.)*)"|[^ ]*) matcher=("(([^"\\]|\\.)*)"|[^ ]*) phase=(build|review)( .*)?$/\7/p')
+  PHASE=$(printf '%s\n' "$check_line" | sed -nE 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=("(([^"\\]|\\.)*)"|[^ ]*) matcher=("(([^"\\]|\\.)*)"|[^ ]*) phase=(build|review)( .*)?$/\7/p')
   [ "$PHASE" = "review" ] || PHASE=build
   case "$TYPE" in command|behavior) ;; *) [ "$PHASE" = "review" ] || continue ;; esac
   if [ "$PHASE" != "review" ]; then
-    printf '%s\n' "$line" | grep -qE ' phase=(build|review)( |$)' && continue
+    printf '%s\n' "$check_line" | grep -qE ' phase=(build|review)( |$)' && continue
     case "$TARGET" in *'gh pr'*) ;; *) continue ;; esac
   fi
   RESULT="PASS"; DETAIL=""
