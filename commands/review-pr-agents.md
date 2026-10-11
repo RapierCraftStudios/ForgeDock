@@ -35,6 +35,12 @@ post `FORGE:REVIEW_BLOCKED` and never replace the isolated review with inline wo
 
 ---
 
+## Read-Only Git Rule (all reviewer agents)
+
+Every reviewer agent is read-only with respect to the main checkout (the repo's shared primary working tree). It MUST NOT run `git checkout`, `git switch`, `git reset`, `git stash`, or `git merge` there: those race with the operator and other agents. Read PR code with `git show <sha>:<path>`, `gh pr diff`, `gh api`, or a per-PR worktree (`git worktree add --detach`) that the agent removes afterward. The orchestrator appends this rule to every dispatched prompt (review-pr.md Phase 3C). <!-- Added: forge#3650 -->
+
+---
+
 ## How to Load Agents (Phase 3C)
 
 For each agent selected in Phase 3B, read **only** the files relevant to that agent:
