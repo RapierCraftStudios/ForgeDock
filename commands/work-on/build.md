@@ -787,6 +787,8 @@ CORRECTED=""
 FAILED_CHECKS=""
 VERIFIED_COUNT=0       # checks actually executed and judged (PASS or FAIL); malformed ones do not count
 MALFORMED_CHECKS=""   # malformed-check: generated check that can never pass; reported, never repaired, never needs-human
+DEFERRED_COUNT=0       # phase=review checks (and legacy "no pull requests found" results): evaluated by review R2.5, never counted here
+DEFERRED_CHECKS=""    # <!-- Added: forge#3793 -->
 
 while IFS= read -r check_line; do
   # Fields are extracted by anchoring each sed pattern to `^ACCEPTANCE_CHECK:` and walking
@@ -821,8 +823,15 @@ while IFS= read -r check_line; do
   MATCHER=$(printf '%s\n' "$check_line" | sed -nE 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=("([^"\\]|\\.)*"|[^ ]*) matcher="(([^"\\]|\\.)*)".*/\3/p' | sed 's/\\"/"/g')
   [ -z "$MATCHER" ] && MATCHER=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=[^ ]* matcher=\([^ ]*\).*/\1/p')
   DESC=$(echo "$check_line"  | sed -n 's/.*description=\(.*\)/\1/p')
+  # phase= (optional, after matcher=, before description=): `review` defers the check to review R2.5 (the PR does not exist yet at build time).
+  # Anchored after the matcher field so `phase=` text inside description/target/matcher cannot hijack it; any other value or an absent token is `build` (fail closed).
+  PHASE=$(printf '%s\n' "$check_line" | sed -nE 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=("(([^"\\]|\\.)*)"|[^ ]*) matcher=("(([^"\\]|\\.)*)"|[^ ]*) phase=(build|review)( .*)?$/\7/p')
+  [ "$PHASE" = "review" ] || PHASE=build
 
   [ "$TYPE" = "skipped" ] && continue
+
+  # Deferred (review) <!-- Added: forge#3793 -->: never executed, never VERIFIED, never GATE_PASS=false, never in FAILED_CHECKS / --fix-acceptance.
+  if [ "$PHASE" = "review" ]; then DEFERRED_COUNT=$((DEFERRED_COUNT+1)); DEFERRED_CHECKS="${DEFERRED_CHECKS}\n- **$ID** ($DESC): DEFERRED (review)"; continue; fi
 
   # malformed-check <!-- Added: forge#3694 -->: a generated command/behavior target that can never pass is a
   # check defect, not an implementation failure. Static detection only parses (bash -n), never executes.
@@ -832,6 +841,7 @@ while IFS= read -r check_line; do
 
   RESULT="PASS"
   DETAIL=""
+  ERR=""
 
   case "$TYPE" in
     exists)
@@ -869,6 +879,11 @@ while IFS= read -r check_line; do
 
   if [ -n "$MALFORMED" ]; then MALFORMED_CHECKS="${MALFORMED_CHECKS}\n- **$ID** ($DESC): $MALFORMED"; continue; fi
 
+  # Legacy fallback (untagged spec): a gh pr check that finds no PR is waiting on the review phase, not failing.
+  if [ "$RESULT" = "FAIL" ] && printf '%s' "$ERR" | grep -qF 'no pull requests found'; then
+    case "$TARGET" in *'gh pr'*) DEFERRED_COUNT=$((DEFERRED_COUNT+1)); DEFERRED_CHECKS="${DEFERRED_CHECKS}\n- **$ID** ($DESC): DEFERRED (review) (no pull request exists yet)"; continue;; esac
+  fi
+
   VERIFIED_COUNT=$((VERIFIED_COUNT+1))
   if [ "$RESULT" = "FAIL" ]; then
     GATE_PASS=false
@@ -877,7 +892,8 @@ while IFS= read -r check_line; do
 done <<< "$ACCEPTANCE_CHECKS"
 
 # A gate that verified nothing must not pass: with every check skipped as malformed, PASSED would be a green light on zero evidence.
-if [ "$VERIFIED_COUNT" -eq 0 ]; then
+# A spec whose checks are all deferred to review (DEFERRED_COUNT > 0) is not vacuous: review R2.5 evaluates them before merge.
+if [ "$VERIFIED_COUNT" -eq 0 ] && [ "$DEFERRED_COUNT" -eq 0 ]; then
   GATE_PASS=false
   FAILED_CHECKS="${FAILED_CHECKS}\n- **(gate)**: no acceptance check could be verified (all were malformed or none ran); regenerate the acceptance spec"
 fi
@@ -891,7 +907,8 @@ if [ "$GATE_PASS" = "true" ]; then
   run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
 ## Acceptance Gate — PASSED
 
-All machine-checkable acceptance criteria verified against real behavior.
+All machine-checkable build-phase acceptance criteria verified against real behavior.
+$( [ -n "$DEFERRED_CHECKS" ] && printf '\n**Deferred to review (phase=review; evaluated against the PR before merge)**:%b\n' "$DEFERRED_CHECKS" )
 $( [ -n "$CORRECTED" ] && printf '\n**Checks corrected (malformed matcher, literal text present)**:%b\n' "$CORRECTED" )
 $( [ -n "$MALFORMED_CHECKS" ] && printf '\n**malformed-check (not counted as failures; regenerate the acceptance spec by re-running investigate)**:%b\n' "$MALFORMED_CHECKS" )
 
@@ -912,7 +929,9 @@ Merge is blocked. Fix the failing criteria and re-run the validate phase.
 fi
 ```
 
-A `malformed-check` (a command/behavior target with a run of 4+ backslashes or a `bash -n` syntax error, or a grep target exiting >= 2 for a reason other than a missing/unreadable operand file, which stays a real FAIL) is reported in the comment and never sets `GATE_PASS=false` by itself, never enters `FAILED_CHECKS`, is never passed to `--fix-acceptance`, and never adds `needs-human` by itself; the gate still posts exactly one of PASSED/FAILED. The gate never posts PASSED with zero verified checks: if every check was malformed (`VERIFIED_COUNT=0`) it posts FAILED so the repair step regenerates the spec. <!-- Added: forge#3694 -->
+A `malformed-check` (a command/behavior target with a run of 4+ backslashes or a `bash -n` syntax error, or a grep target exiting >= 2 for a reason other than a missing/unreadable operand file, which stays a real FAIL) is reported in the comment and never sets `GATE_PASS=false` by itself, never enters `FAILED_CHECKS`, is never passed to `--fix-acceptance`, and never adds `needs-human` by itself; the gate still posts exactly one of PASSED/FAILED. The gate never posts PASSED with zero verified checks: if every check was malformed (`VERIFIED_COUNT=0` and `DEFERRED_COUNT=0`) it posts FAILED so the repair step regenerates the spec. <!-- Added: forge#3694 -->
+
+A `phase=review` check (or, for an untagged legacy spec, a `command`/`behavior` check on a `gh pr` target whose output contains `no pull requests found`) is recorded as `DEFERRED (review)` in the PASSED comment: it is never executed here, never counted in `VERIFIED_COUNT`, never sets `GATE_PASS=false`, never enters `FAILED_CHECKS` or `--fix-acceptance`, and never spends the repair. A spec whose checks are all deferred posts PASSED (it is not "No Spec Found"). Review R2.5 evaluates the deferred checks against the real PR and blocks merge on failure. <!-- Added: forge#3793 -->
 
 If `GATE_PASS = false`, the build repairs itself **once** before anything escalates (a failing acceptance check is pipeline work, not a human decision):
 

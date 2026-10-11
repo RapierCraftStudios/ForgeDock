@@ -446,9 +446,101 @@ esac
 
 ---
 
+## Phase R2.5: Review Acceptance Gate (deferred `phase=review` checks) <!-- Added: forge#3793 -->
+
+The build gate (B6.5) defers every `ACCEPTANCE_CHECK` tagged `phase=review` (and, for untagged legacy specs, a `gh pr` check that found no PR) because the PR did not exist at build time. The PR exists now: evaluate those checks against it **before** `/review-pr --auto-merge`. Failing closed here is the only thing that enforces them. Run this after R2D, and again at the top of R3 on a resumed run (an OPEN PR resume enters at R3), right after the R1.5 preflight. It is idempotent: skip it when the newest `FORGE:ACCEPTANCE_GATE_REVIEW` comment carries `:PASSED` for the current head sha.
+
+This gate uses its own marker `FORGE:ACCEPTANCE_GATE_REVIEW`, never the `FORGE:ACCEPTANCE_GATE` header or its `:PASSED`/`:FAILED`/`:BLOCKED` sentinels, which the engine reads for the build gate state. With no deferred checks it is a no-op and posts nothing.
+
+```bash
+cd "{WORKTREE_PATH}"
+run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
+HEAD_SHA=$(git rev-parse HEAD 2>/dev/null)
+LAST_REVIEW_GATE=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
+  --jq '[.[] | select(.body | startswith("<!-- FORGE:ACCEPTANCE_GATE_REVIEW -->"))] | last | .body // ""' 2>/dev/null)
+if printf '%s' "$LAST_REVIEW_GATE" | grep -qF "<!-- FORGE:ACCEPTANCE_GATE_REVIEW:PASSED:${HEAD_SHA} -->"; then
+  echo "Review acceptance gate already PASSED for ${HEAD_SHA}; skipping."
+else
+ACCEPTANCE_CHECKS=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
+  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' \
+  | grep "^ACCEPTANCE_CHECK:" )
+GATE_PASS=true
+FAILED_CHECKS=""
+RAN_COUNT=0
+DEFERRED_RESULTS=""
+while IFS= read -r check_line; do
+  [ -z "$check_line" ] && continue
+  ID=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=\([^ ]*\) type=.*/\1/p')
+  TYPE=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=\([^ ]*\) target=.*/\1/p')
+  TARGET=$(printf '%s\n' "$check_line" | sed -nE 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target="(([^"\\]|\\.)*)".*/\1/p' | sed 's/\\"/"/g')
+  [ -z "$TARGET" ] && TARGET=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=\([^ ]*\).*/\1/p')
+  MATCHER=$(printf '%s\n' "$check_line" | sed -nE 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=("([^"\\]|\\.)*"|[^ ]*) matcher="(([^"\\]|\\.)*)".*/\3/p' | sed 's/\\"/"/g')
+  [ -z "$MATCHER" ] && MATCHER=$(echo "$check_line" | sed -n 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=[^ ]* matcher=\([^ ]*\).*/\1/p')
+  DESC=$(echo "$check_line"  | sed -n 's/.*description=\(.*\)/\1/p')
+  PHASE=$(printf '%s\n' "$check_line" | sed -nE 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=("(([^"\\]|\\.)*)"|[^ ]*) matcher=("(([^"\\]|\\.)*)"|[^ ]*) phase=(build|review)( .*)?$/\7/p')
+  [ "$PHASE" = "review" ] || PHASE=build
+  case "$TYPE" in command|behavior) ;; *) [ "$PHASE" = "review" ] || continue ;; esac
+  # Select phase=review checks, plus untagged legacy command/behavior checks on a `gh pr` target (the build fallback deferred those).
+  if [ "$PHASE" != "review" ]; then
+    printf '%s\n' "$check_line" | grep -qE ' phase=(build|review)( |$)' && continue
+    case "$TARGET" in *'gh pr'*) ;; *) continue ;; esac
+  fi
+  RESULT="PASS"; DETAIL=""
+  case "$TYPE" in
+    exists) [ -e "$TARGET" ] || { RESULT="FAIL"; DETAIL="path not found: $TARGET"; } ;;
+    contains)
+      grep -qE "$MATCHER" "$TARGET" 2>/dev/null || grep -qF -- "$MATCHER" "$TARGET" 2>/dev/null || { RESULT="FAIL"; DETAIL="'$MATCHER' not found in $TARGET"; } ;;
+    command|behavior)
+      if [ "$MATCHER" = "exit_0" ]; then
+        eval "$TARGET" >/dev/null 2>&1 || { RESULT="FAIL"; DETAIL="command exited non-zero: $TARGET"; }
+      else
+        OUTPUT=$(eval "$TARGET" 2>&1)
+        printf '%s\n' "$OUTPUT" | grep -qE "$MATCHER" || printf '%s\n' "$OUTPUT" | grep -qF -- "$MATCHER" \
+          || { RESULT="FAIL"; DETAIL="output did not match '$MATCHER'. Got: $(printf '%s\n' "$OUTPUT" | head -3)"; }
+      fi ;;
+    *) RESULT="FAIL"; DETAIL="unknown check type: $TYPE" ;;
+  esac
+  RAN_COUNT=$((RAN_COUNT+1))
+  DEFERRED_RESULTS="${DEFERRED_RESULTS}\n- **$ID** ($DESC): $RESULT"
+  if [ "$RESULT" = "FAIL" ]; then GATE_PASS=false; FAILED_CHECKS="${FAILED_CHECKS}\n- **$ID** ($DESC): $DETAIL"; fi
+done <<< "$ACCEPTANCE_CHECKS"
+if [ "$RAN_COUNT" -eq 0 ]; then
+  echo "No deferred acceptance checks; R2.5 is a no-op."
+elif [ "$GATE_PASS" = "true" ]; then
+  run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE_REVIEW -->
+## Review Acceptance Gate: PASSED
+
+Deferred (phase=review) acceptance checks verified against the PR:
+$(echo -e "$DEFERRED_RESULTS")
+
+<!-- FORGE:ACCEPTANCE_GATE_REVIEW:PASSED:${HEAD_SHA} -->"
+else
+  run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE_REVIEW -->
+## Review Acceptance Gate: FAILED
+
+The following deferred (phase=review) acceptance checks did not pass against the PR:
+
+$(echo -e "$FAILED_CHECKS")
+
+Merge is blocked. Fix the PR (for example its body) and re-run the review phase.
+
+<!-- FORGE:ACCEPTANCE_GATE_REVIEW:FAILED -->"
+  run gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+  printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number:\n  pr_url:\n  merged_to:\n  blocker: review acceptance gate failed (see FORGE:ACCEPTANCE_GATE_REVIEW comment)\n'
+  exit 1
+fi
+fi
+```
+
+On failure: do NOT invoke `/review-pr --auto-merge`; the issue stays at `needs-human` with the `REVIEW_RESULT: status: BLOCKED` block printed above as the final reply. Build-phase checks are never re-run here.
+
+---
+
 ## Phase R3: Invoke /review-pr with --auto-merge
 
 **First re-run the Phase R1.5 phase-trail preflight** (resume entry can skip R1.5). Do not invoke `/review-pr` while it fails. <!-- Added: forge#3061 -->
+
+Then re-run **Phase R2.5** (the review acceptance gate); do not invoke `/review-pr` while it fails. <!-- Added: forge#3793 -->
 
 Re-read the PR number (from creation or from resume check):
 
