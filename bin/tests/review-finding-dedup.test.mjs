@@ -13,7 +13,7 @@ import test from "node:test";
 const spec = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../..", "commands/review-pr.md"), "utf8");
 
 test("title dedup excludes the PR's own issue", () => {
-  assert.match(spec, /scripts\/issue-dedup\.sh "\$FINDING_TITLE_DEDUP" "\$GH_FLAG" \$\{MERGE_ISSUE:\+--exclude "\$MERGE_ISSUE"\}/);
+  assert.match(spec, /bash "\$DEDUP_SCRIPT" "\$FINDING_TITLE_DEDUP" "\$GH_FLAG" \$\{MERGE_ISSUE:\+--exclude "\$MERGE_ISSUE"\}/);
 });
 
 test("line-range dedup skips the PR's own issue", () => {

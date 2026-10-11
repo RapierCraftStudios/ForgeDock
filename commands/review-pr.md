@@ -2869,8 +2869,23 @@ PR_NUMBER="{PR_NUMBER}"; MERGE_ISSUE="{MERGE_ISSUE}"
 FINDING_TITLE_DEDUP="fix: brief description of finding (review finding — PR #${PR_NUMBER})"
 # Never dedup against the issue this PR fixes (MERGE_ISSUE): it is about to be closed, so a
 # finding "matched" to it is tracked nowhere. Field test #3169: SEC-2 matched #3169 itself and was dropped.
-DEDUP_RESULT=$(scripts/issue-dedup.sh "$FINDING_TITLE_DEDUP" "$GH_FLAG" ${MERGE_ISSUE:+--exclude "$MERGE_ISSUE"} 2>&1)
-DEDUP_EXIT=$?
+# HELPER_SCRIPT resolver (DEDUP_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+done
+DEDUP_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$DEDUP_SCRIPT" ] && [ -f "$_c/scripts/issue-dedup.sh" ] && DEDUP_SCRIPT="$_c/scripts/issue-dedup.sh" ;; esac
+done <<< "$_tc"
+# Unresolved helper: "not deduped" (exit 0, empty result) so the line-range check still runs; NEVER exit 1 (which means "duplicate, skip").
+if [ -n "$DEDUP_SCRIPT" ]; then
+  DEDUP_RESULT=$(bash "$DEDUP_SCRIPT" "$FINDING_TITLE_DEDUP" "$GH_FLAG" ${MERGE_ISSUE:+--exclude "$MERGE_ISSUE"} 2>&1)
+  DEDUP_EXIT=$?
+else
+  DEDUP_RESULT=""; DEDUP_EXIT=0
+fi
 if [ "$DEDUP_EXIT" -eq 1 ]; then
   echo "DEDUP: Skipping — $DEDUP_RESULT"
   # Skip this finding — do NOT create a duplicate issue
