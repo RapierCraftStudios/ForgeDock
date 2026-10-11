@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# review-acceptance-gate.test.sh — trust filtering of scripts/review-acceptance-gate.sh (forge#3813). No network (gh is stubbed).
+# review-acceptance-gate.test.sh — trust filtering (forge#3813) and behavior (pass / fail / malformed-skip, forge#3814) of scripts/review-acceptance-gate.sh. No network (gh is stubbed, DRY_RUN=1).
 # SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -uo pipefail
@@ -60,5 +60,31 @@ eq "unreadable comments fail closed" "$rc" 1
 rc=$(FORGEDOCK_HOME="$TMP/nowhere" run)
 eq "unresolvable trust helper fails closed" "$rc" 1
 [ ! -e "$SENT" ] && ok "nothing executed without helper" || bad "executed without helper"
+
+# Behavioral cases (forge#3814). DRY_RUN=1 echoes gh writes as `DRY_RUN:` lines into $TMP/out.
+printf 'x\n' > "$TMP/wt/f.txt"
+inv() { local b="<!-- FORGE:INVESTIGATOR -->"; local l; for l in "$@"; do b="$b
+$l"; done; echo "[$(c OWNER User "$b")]" > "$COMMENTS_FILE"; }
+chk() { printf 'ACCEPTANCE_CHECK: id=%s type=command target="%s" matcher="exit_0" phase=review description=d' "$1" "$2"; }
+nolabel() { ! grep -q 'needs-human' "$TMP/out"; }
+
+inv "$(chk ac-1 true)"; rc=$(run); eq "pass: rc 0" "$rc" 0
+grep -q ':PASSED:' "$TMP/out" && ok "pass: PASSED sentinel posted" || bad "pass: no PASSED sentinel"
+
+inv "$(chk ac-1 false)"; rc=$(run); eq "real fail: rc 1" "$rc" 1
+grep -q 'needs-human' "$TMP/out" && ok "real fail: needs-human added" || bad "real fail: no needs-human"
+inv "$(chk ac-1 'grep -q nomatch f.txt')"; rc=$(run); eq "grep exit 1 is a real fail" "$rc" 1
+inv "$(chk ac-1 'grep -q x nofile.txt')"; rc=$(run); eq "grep missing operand file stays a real fail" "$rc" 1
+
+for t in "echo 'unbalanced" 'echo a\\\\\\\\b' "grep -E '[' f.txt"; do
+  inv "$(chk ac-7 "$t")"; rc=$(run); eq "malformed skipped, rc 0: $t" "$rc" 0
+  nolabel && ok "malformed: no needs-human" || bad "malformed: needs-human added: $t"
+  grep -qi 'malformed' "$TMP/out" && ok "malformed reported" || bad "malformed not reported: $t"
+  grep -q ':PASSED:' "$TMP/out" && bad "all-malformed wrote PASSED marker: $t" || ok "all-malformed: no PASSED marker"
+done
+
+inv "$(chk ac-1 true)" "$(chk ac-7 "echo 'unbalanced")"; rc=$(run); eq "mixed pass+malformed: rc 0" "$rc" 0
+grep -q ':PASSED:' "$TMP/out" && grep -qi 'malformed' "$TMP/out" && ok "mixed: PASSED with malformed listed" || bad "mixed: wrong output"
+inv "$(chk ac-1 false)" "$(chk ac-7 "echo 'unbalanced")"; rc=$(run); eq "mixed fail+malformed: fails closed" "$rc" 1
 
 echo "$PASS passed, $FAILN failed"; [ "$FAILN" -eq 0 ]
