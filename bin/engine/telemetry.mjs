@@ -6,14 +6,15 @@
  * rejects its caller; FORGE_TELEMETRY=off disables it. Records hold ids, counts and codes only.
  */
 import { spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(here, "..", "..");
-const RESERVED = new Set(["v", "ts", "forge_version", "repo", "issue", "pr", "run", "phase", "event"]);
+const RESERVED = new Set(["v", "ts", "forge_version", "repo", "issue", "pr", "run", "phase", "event", "eid"]);
 const MARKER_RE = /^<!-- FORGE:TELEMETRY v1( part=(\d+))? -->/;
 const REVIEW_SIDE = new Set(["review_panel", "finding_disposition", "ci_gate"]);
 
@@ -40,7 +41,8 @@ export function buildRecord(event, payload = {}, ctx = {}, now = new Date()) {
   }
   return {
     v: 1, ts: now.toISOString().replace(/\.\d+Z$/, "Z"), forge_version: forgeVersion(), repo: str(c.repo),
-    issue: num(String(c.issue ?? "")), pr: num(String(c.pr ?? "")), run: str(c.run), phase: str(c.phase), event, ...extra,
+    issue: num(String(c.issue ?? "")), pr: num(String(c.pr ?? "")), run: str(c.run), phase: str(c.phase), event,
+    eid: `${Math.floor(now.getTime() / 1000)}-${process.pid}-${randomBytes(4).toString("hex")}`, ...extra,
   };
 }
 
@@ -68,13 +70,16 @@ function upsert(repo, n, lines) {
   const raw = gh(["api", "--paginate", `repos/${repo}/issues/${n}/comments`]).trim();
   const pages = raw ? JSON.parse(`[${raw.replace(/\]\s*\[/g, "],[")}]`) : [[]];
   let best = null;
+  const parts = [];
   for (const c of pages.flat()) {
     const m = MARKER_RE.exec(c.body || "");
     if (!m || !trusted(c)) continue;
     const part = m[2] ? Number(m[2]) : 1;
+    parts.push({ body: c.body });
     if (!best || part >= best.part) best = { id: c.id, part, body: c.body };
   }
-  const fresh = lines.filter((l) => !(best && best.body.includes(l)));
+  const all = parts.map((p) => p.body).join("\n");
+  const fresh = lines.filter((l) => !all.includes(l));
   if (fresh.length === 0) return;
   if (best) {
     const cut = best.body.lastIndexOf("\n```");
@@ -96,13 +101,32 @@ export function emit(event, payload = {}, ctx = {}) {
     const dir = process.env.FORGE_TELEMETRY_BUFFER_DIR || join(homedir(), ".forge", "telemetry-buffer");
     const buf = join(dir, `${rec.repo.replace("/", "_")}__${n}.jsonl`);
     const line = JSON.stringify(rec);
-    const pending = existsSync(buf) ? [...readFileSync(buf, "utf8").split("\n").filter(Boolean), line] : [line];
+    // Per-target lock (mkdir is atomic): serializes emitters on this host so the unversioned GitHub read-modify-write
+    // cannot lose a record or double-POST a part. A lock over 60s old is stale; on timeout the record is buffered.
+    let canLock = true;
+    try { mkdirSync(dir, { recursive: true }); } catch { canLock = false; }
+    const lock = join(dir, `.lock-${rec.repo.replace("/", "_")}__${n}`);
+    let got = !canLock;
+    for (let i = 0; i < 100 && !got; i++) {
+      try { mkdirSync(lock); got = true; } catch {
+        try { if (Date.now() - statSync(lock).mtimeMs > 60000) { rmSync(lock, { recursive: true, force: true }); continue; } } catch { /* raced */ }
+        spawnSync("sleep", ["0.1"]);
+      }
+    }
+    if (!got) { appendFileSync(buf, `${line}\n`); return rec; }
+    // Claim the buffer by renaming it: records appended meanwhile land in a fresh file and are never deleted.
+    const claimed = `${buf}.flush.${process.pid}`;
+    let pending = [line];
+    try { if (existsSync(buf)) { renameSync(buf, claimed); pending = [...readFileSync(claimed, "utf8").split("\n").filter(Boolean), line]; } } catch { /* nothing claimed */ }
     try {
       upsert(rec.repo, n, pending);
-      rmSync(buf, { force: true });
+      rmSync(claimed, { force: true });
     } catch {
-      try { mkdirSync(dir, { recursive: true }); appendFileSync(buf, `${line}\n`); } catch { /* lost record costs completeness only */ }
-    }
+      try {
+        if (existsSync(claimed)) { appendFileSync(buf, readFileSync(claimed, "utf8")); rmSync(claimed, { force: true }); }
+        appendFileSync(buf, `${line}\n`);
+      } catch { /* lost record costs completeness only */ }
+    } finally { if (canLock) rmSync(lock, { recursive: true, force: true }); }
     return rec;
   } catch {
     return null;

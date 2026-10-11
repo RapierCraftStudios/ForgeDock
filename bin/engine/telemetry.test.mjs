@@ -63,7 +63,7 @@ describe("telemetry emitter (node twin)", () => {
     emit("liveness", { decision: "DEFER", why: "lease" });
     const patched = readFileSync(join(td, "patched"), "utf8");
     assert.equal(patched.split("\n").filter((l) => l.startsWith("{")).length, 2);
-    assert.equal(existsSync(join(td, "buf")), false);
+    assert.deepEqual(existsSync(join(td, "buf")) ? readdirSync(join(td, "buf")) : [], []);
   });
 
   it("ignores an untrusted telemetry comment", () => {
@@ -115,6 +115,6 @@ describe("telemetry emitter (node twin)", () => {
     const sh = spawnSync("bash", ["-c", `. "${join(import.meta.dirname, "..", "..", "scripts", "lib", "telemetry.sh")}"; _forge_tel_record diff_size lines=10 result=OK`], { encoding: "utf8", env: process.env });
     const a = JSON.parse(sh.stdout); const b = buildRecord("diff_size", { lines: 10, result: "OK" });
     assert.deepEqual(Object.keys(a), Object.keys(b));
-    for (const k of Object.keys(a)) if (k !== "ts") assert.deepEqual(a[k], b[k], k);
+    for (const k of Object.keys(a)) if (k !== "ts" && k !== "eid") assert.deepEqual(a[k], b[k], k);
   });
 });

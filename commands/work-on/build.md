@@ -373,7 +373,7 @@ esac
 
 **Skip if COMPLEXITY_BAND: INVESTIGATION** — go to B5. For every other band (TRIVIAL included) the contract is mandatory. If a `FORGE:CONTRACT` comment already exists on the issue (resume), do not post a second one — continue to B2.1.
 
-Post `<!-- FORGE:CONTRACT -->` comment documenting what will be built and why. Run B2.0 first: it files the follow-up issues for `deferred` out-of-scope items and validates the section, so `{OUT_OF_SCOPE_ITEMS}` below already holds real issue numbers.
+Post `<!-- FORGE:CONTRACT -->` comment documenting what will be built and why. Run B2.0 first: it folds small siblings and files one batched follow-up for the `deferred` out-of-scope items and validates the section, so `{OUT_OF_SCOPE_ITEMS}` below already holds real issue numbers.
 
 ### B2.0: Out-of-scope dispositions — file deferred follow-ups, validate the section <!-- Added: forge#3447 -->
 
@@ -391,51 +391,26 @@ Every item in the contract's `### Out of Scope` section must carry exactly one d
 - **Known-flaw rule**: a contract that keeps a known-flawed design (a design the investigation or architect plan identified as flawed, a fail-open caller, an unsound threshold) must state the flaw and list it as a `deferred → #N` item with a linked follow-up. It may not hide behind `accepted-risk` or free text.
 - Free-text exclusions without a disposition are invalid. `->` is accepted for `→`.
 
+**Fold, then batch** <!-- Added: forge#3843 -->: before filing anything, fold small siblings into scope. A candidate deferred item that is the same mechanical change at a sibling path and fits the remaining size budget (estimate within `0.8 × build.diff_size.threshold`, `1000` when the threshold is `0` or unset, minus the current estimate) goes into the contract's Deliverables, not Out of Scope; count it as `folded`. Defer only genuinely separate work (different module, design or owner). All remaining deferred items of this build go into ONE follow-up issue with a checklist; `scripts/file-deferred-followups.sh` appends to an open trusted follow-up for the same parent (exact path match) or creates one.
+
 **File the `deferred` follow-ups** (skip the filing on resume when the contract already exists):
 
 ```bash
 # <Script resolution block from work-on/build.md, verbatim>
-run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
-# Trusted-author filter (OWNER/MEMBER/COLLABORATOR or Bot, same predicate as trusted-comments.sh) is applied at
-# the source in the LOOKUP --jq, before the path match: an untrusted match is never reused. The REST search API is used because it exposes
-# author_association and user.type (`gh issue list --json` has no authorAssociation field).
-# For each deferred item (DEFERRED_PATH = the backticked path, DEFERRED_WHY = one line), repeat:
-DEFERRED_MARKER="<!-- FORGE:DEFERRED_FROM: #{NUMBER} -->"
-LOOKUP=$(gh api -X GET search/issues -f per_page=50 \
-  -f q="\"FORGE:DEFERRED_FROM: #{NUMBER}\" in:body repo:{GH_REPO} is:issue is:open" --jq '[.items[] | select(((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR")) or ((.user.type // "") == "Bot"))]' 2>/dev/null) || LOOKUP="FAILED"
-if [ "$LOOKUP" = "FAILED" ]; then
-  echo "DEFERRED_LOOKUP=FAILED"   # a failed lookup is not "none found": Blocked exit, never re-file blind
-else
-  DEFERRED_NUM=$(printf '%s' "$LOOKUP" | jq -r --arg p "$DEFERRED_PATH" \
-    '[.[] | select((.body // "") | contains($p))] | first | .number // empty' 2>/dev/null)
-  if [ -z "$DEFERRED_NUM" ]; then
-    DEFERRED_URL=$(run gh issue create {GH_FLAG} --title "follow-up: ${DEFERRED_PATH} (deferred from #{NUMBER})" \
-      --body "## Problem
-
-${DEFERRED_WHY}
-
-Deferred from #{NUMBER}: \`${DEFERRED_PATH}\` was declared out of scope in its contract and is tracked here instead of surfacing later as a review finding.
-
-## Affected Files
-
-- \`${DEFERRED_PATH}\`
-
-## Acceptance Criteria
-
-- [ ] The concern above is resolved for \`${DEFERRED_PATH}\`
-
-${DEFERRED_MARKER}")
-    DEFERRED_NUM=$(printf '%s' "$DEFERRED_URL" | grep -oE '[0-9]+$')
-    [ -n "${DRY_RUN:-}" ] && DEFERRED_NUM="0"
-  fi
-  echo "DEFERRED_ISSUE=${DEFERRED_NUM:-}"
-fi
+# DEFERRED_TSV: one line per remaining deferred item: path<TAB>one-line why<TAB>known-flaw (or empty)
+SCRIPT_REF=$(resolve_script 'file-deferred-followups')
+case "$SCRIPT_REF" in
+  prose:*) echo "DEFERRED_SCRIPT=PROSE" ;;   # file ONE issue by hand: marker + checklist of every path (see below)
+  *) printf '%s\n' "$DEFERRED_TSV" | bash "${SCRIPT_REF#*:}" --parent {NUMBER} --repo {GH_REPO} --folded "${FOLDED_COUNT:-0}"; echo "DEFERRED_RC=$?" ;;
+esac
 ```
 
-- Only follow-up issues authored by a trusted author (OWNER/MEMBER/COLLABORATOR or Bot) are reused; an untrusted match carrying the marker is ignored and a fresh follow-up is filed.
-- `DEFERRED_LOOKUP=FAILED`, or an empty `DEFERRED_NUM` after a real (non-`DRY_RUN`) create → Blocked exit with blocker `github-unavailable: could not file or look up deferred follow-up for <path>` (a transient failure follows the retry rule above; no `needs-human` for `github-unavailable:`).
-- On resume the lookup reuses the open issue that carries the marker and the same path, so a retried build never files a duplicate.
-- Prefer filing through the `/issue` create-hook's programmatic contract (`Skill(skill="{FORGE_SKILL_PREFIX}issue", ...)`) when it is available; the raw create above is the fallback and must keep the `FORGE:DEFERRED_FROM` marker in the body.
+- Output is one `path<TAB>issue` row per item (rows share the batched issue number: use it as the `#N` in each `deferred → #N` bullet) plus a `DEFERRED_TELEMETRY deferred_items=N folded=N batched_into=#M filed=N` line (forwarded to the #3834 emitter when present).
+- A known-flawed design is recorded as a `known-flaw` checklist item in that batched issue (pass the flag in the TSV); it is never dropped or hidden behind `accepted-risk`.
+- Only follow-ups by a trusted author (OWNER/MEMBER/COLLABORATOR or Bot; `FORGE_TRAIL_TRUSTED_*` honoured) are reused; an untrusted match is ignored.
+- `DEFERRED_LOOKUP=FAILED` or `DEFERRED_FILE=FAILED` (non-zero `DEFERRED_RC`) → Blocked exit with blocker `github-unavailable: could not file or look up deferred follow-ups` (a transient failure follows the retry rule above; no `needs-human` for `github-unavailable:`).
+- Prose tier (script absent): create one issue by hand whose body has the exact `<!-- FORGE:DEFERRED_FROM: #{NUMBER} -->` marker and a `- [ ] \`path\` — why` checklist line per path, after a trusted-author marker lookup; a failed lookup is a Blocked exit.
+- On resume the lookup reuses the open issue carrying the marker and appends only missing paths, so a retried build never files a duplicate.
 
 **Validate the composed section** with `scripts/check-contract-scope.sh validate` (the exact text that will replace `{OUT_OF_SCOPE_ITEMS}`):
 

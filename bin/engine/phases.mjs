@@ -12,6 +12,8 @@
 // imports the identical registry, so the two can no longer drift apart the way
 // they did in forge#2375/PR#2395.
 import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
+// forge#3833: closed outcome-code enum; every code below comes from structured evidence, never `detail` prose.
+import { OUTCOME_CODES as OC } from "./outcome-codes.mjs";
 
 // forge#2261: "engine-error" is a distinct terminal reason for engine/tool-level
 // failures (e.g. an exhausted retry loop where the runner itself never once
@@ -658,7 +660,7 @@ export const PHASES = [
       const invalid = `<!-- ${PHASE_MARKERS.investigate.invalidMarker} -->`;
       const complete = `<!-- ${PHASE_MARKERS.investigate.completionMarker} -->`;
       if (closing === invalid)
-        return { status: "committed", terminalReason: "invalid", outputs: { verdict: "INVALID" } };
+        return { status: "committed", terminalReason: "invalid", code: OC.INVALID, outputs: { verdict: "INVALID" } };
       if (closing === complete) {
         // investigate.md emits `### Decomposition Assessment` then `**YES**|**NO**`.
         if (isDecomposed(report)) {
@@ -669,7 +671,7 @@ export const PHASES = [
             console.error(`[engine] decompose suppressed for #${state.issue}: ${guard}; treating as not decomposed`);
             return { status: "committed", outputs: { verdict: "CONFIRMED" } };
           }
-          return { status: "committed", terminalReason: "decomposed", outputs: { decompose: true } };
+          return { status: "committed", terminalReason: "decomposed", code: OC.DECOMPOSED, outputs: { decompose: true } };
         }
         return { status: "committed", outputs: { verdict: "CONFIRMED" } };
       }
@@ -698,7 +700,7 @@ export const PHASES = [
     async detectOutcome(state, io) {
       const { comments } = await issueMarkers(state.issue, io);
       if (hasMarker(comments, PHASE_MARKERS.decompose.header, PHASE_MARKERS.decompose.completionMarker))
-        return { status: "committed", terminalReason: "decomposed", outputs: {} };
+        return { status: "committed", terminalReason: "decomposed", code: OC.DECOMPOSED, outputs: {} };
       return { status: "failed", detail: `no ${PHASE_MARKERS.decompose.completionMarker} marker` };
     },
     // Always terminal: decomposition spawns independent sub-issues, each of
@@ -760,10 +762,10 @@ export const PHASES = [
       // Equal/absent index stays fail-closed, as does a newer blocked marker.
       if (!complete && latestGateState(comments) === "blocked" && mayRouteToDecompose(comments)
           && sizeGateRouteIndex(comments) > latestBlockedIndex(comments)) {
-        return { status: "committed", terminalReason: "decomposed", outputs: branch ? { branch } : {} };
+        return { status: "committed", terminalReason: "decomposed", code: OC.BUILD_SIZE_OVER_GATE, outputs: branch ? { branch } : {} };
       }
       if (latestGateState(comments) === "blocked") {
-        return { status: "failed", detail: `acceptance gate blocked (builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"})`, retryable: false };
+        return { status: "failed", detail: `acceptance gate blocked (builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"})`, code: OC.BUILD_ACCEPTANCE_FAILED, retryable: false };
       }
       if (complete && ahead > 0) {
         return { status: "committed", outputs: { branch, ...buildChildEvidence(comments) } };
@@ -779,7 +781,7 @@ export const PHASES = [
       // needs-human. Non-retryable by construction: a retry re-measures and
       // re-emits the same exit.
       if (!complete && mayRouteToDecompose(comments) && sizeGateRoutesToDecompose(comments)) {
-        return { status: "committed", terminalReason: "decomposed", outputs: branch ? { branch } : {} };
+        return { status: "committed", terminalReason: "decomposed", code: OC.BUILD_SIZE_OVER_GATE, outputs: branch ? { branch } : {} };
       }
       const detail = `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}`;
       // forge#2176: when the builder has already posted FORGE:BUILDER:COMPLETE
@@ -843,7 +845,7 @@ export const PHASES = [
       // The PR number from GitHub (openPrFor) always wins over parsed text.
       const outputs = { pr: pr.number };
       // Opt-in: only an explicit escalation signal sets handoff:true. A PR number alone never hands off.
-      const escalated = { status: "blocked", detail: "review escalated", outputs, handoff: true };
+      const escalated = { status: "blocked", detail: "review escalated", outputs, handoff: true, code: OC.REVIEW_ESCALATED };
       const rr = parseReviewResult(result?.text);
       // forge#3530: carry the review's remediation kind (router Phase 4R parity) so the
       // remediate phase can post the matching bound marker. Untrusted model output: only
@@ -852,7 +854,7 @@ export const PHASES = [
       if (rr && rr.status === "NEXT" && rr.next === "remediate" && rr.remediation)
         outputs.remediation = isRemediationKind(rr.remediation) ? rr.remediation : "unknown";
       if (pr.needsHuman || pr.remediating) return escalated;
-      if (rr && rr.status === "NEXT" && rr.next === "remediate") return escalated;
+      if (rr && rr.status === "NEXT" && rr.next === "remediate") return { ...escalated, code: OC.REVIEW_CHANGES_REQUESTED };
       // An explicit REVIEW_RESULT status is authoritative: BLOCKED/COMPLETE exits
       // (phase trail, ci gate, base conflict, merge refusal) also label the issue
       // needs-human but are NOT remediation handoffs, so skip the label fallback.
@@ -997,9 +999,9 @@ export const PHASES = [
         });
         if (deferred !== null && deferredAt > trailAt && deferredAt > dispatchAt && (state.pr == null || /^pr=(\d+)\s*$/m.exec(deferred)?.[1] === String(state.pr))) {
           const kind = /^kind=(\w+)\s*$/m.exec(deferred)?.[1] ?? "lease";
-          return { status: "blocked", reason: "deferred", retryable: false, detail: `deferred-live-run: ${kind}` };
+          return { status: "blocked", reason: "deferred", code: OC.REMEDIATE_DEFERRED_LIVE_RUN, retryable: false, detail: `deferred-live-run: ${kind}` };
         }
-        return { status: "failed", detail: `no ${completion} marker` };
+        return { status: "failed", code: OC.REMEDIATE_NO_MARKER, detail: `no ${completion} marker` };
       }
       // Parse the **Re-gate outcome**: field remediate.md's Phase M8 posts
       // (e.g. "**Re-gate outcome**: AUTO-LANDED to staging" — value is the
@@ -1027,8 +1029,11 @@ export const PHASES = [
           // policy judgment call respectively) — reuse the existing
           // "needs-human" terminal reason rather than inventing two more,
           // matching the #2352/#2353 precedent of reusing an existing
-          // TERMINAL_REASONS value where semantically equivalent.
-          return { status: "committed", terminalReason: "needs-human", outputs: { reGateOutcome } };
+          // TERMINAL_REASONS value where semantically equivalent. forge#3833:
+          // the two stay distinguishable by outcome code.
+          return { status: "committed", terminalReason: "needs-human",
+                   code: reGateOutcome === "UNFIXABLE" ? OC.REMEDIATE_UNFIXABLE : OC.REMEDIATE_RE_ESCALATED,
+                   outputs: { reGateOutcome } };
         default:
           return { status: "failed", detail: `FORGE:REMEDIATION:COMPLETE present but Re-gate outcome unrecognized/missing: ${reGateOutcome || "none"}` };
       }

@@ -37,18 +37,18 @@ _forge_tel_record() { # event k=v... -> one JSON line on stdout
     k="${kv%%=*}"; v="${kv#*=}"
     case "$kv" in *=*) ;; *) continue ;; esac
     case "$k" in ''|*[!A-Za-z0-9_]*) continue ;; esac
-    case "$k" in v|ts|forge_version|repo|issue|pr|run|phase|event) continue ;; esac
+    case "$k" in v|ts|forge_version|repo|issue|pr|run|phase|event|eid) continue ;; esac
     args+=("$k" "$(_forge_tel_clean "$v")")
   done
   jq -nc --arg ev "$ev" --arg ver "$ver" --arg repo "$repo" --arg issue "${FORGE_ISSUE:-}" --arg pr "${FORGE_PR:-}" \
-    --arg run "${FORGE_RUN:-}" --arg phase "${FORGE_PHASE:-}" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+    --arg run "${FORGE_RUN:-}" --arg phase "${FORGE_PHASE:-}" --arg eid "$(date +%s)-$$-${RANDOM}${RANDOM}${RANDOM}" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
     def num: if test("^[0-9]+$") then tonumber else null end;
     def str: if . == "" then null else . end;
     ($ARGS.positional | [range(0; length; 2) as $i | {key: .[$i], value: .[$i+1]}]
       | map(.value |= (if test("^-?[0-9]+$") then tonumber elif . == "true" then true elif . == "false" then false else . end))
       | from_entries) as $p
     | {v: 1, ts: $ts, forge_version: ($ver | str), repo: ($repo | str), issue: ($issue | num), pr: ($pr | num),
-       run: ($run | str), phase: ($phase | str), event: $ev} + $p' --args "${args[@]}"
+       run: ($run | str), phase: ($phase | str), event: $ev, eid: $eid} + $p' --args "${args[@]}"
 }
 
 # Prints "<number> <repo>" of the comment target (issue or PR) for this event, or nothing when none is usable.
@@ -66,7 +66,7 @@ _forge_tel_target() {
 # Appends the JSONL lines on stdin to the trusted telemetry comment of <repo>#<n>; returns non-zero on any failure.
 _forge_tel_upsert() {
   local repo="$1" n="$2" gh="${FORGE_TELEMETRY_GH:-gh}" max="${FORGE_TELEMETRY_MAX_CHARS:-60000}"
-  local new comments cand id body part best_id="" best_part=0 best_body="" lines hdr out tc
+  local new comments cand id body part best_id="" best_part=0 best_body="" all_bodies="" lines hdr out tc
   new=$(cat); [ -n "$new" ] || return 0
   tc="$_FORGE_TEL_DIR/../trusted-comments.sh"; [ -f "$tc" ] || return 1
   command -v jq >/dev/null 2>&1 || return 1
@@ -79,14 +79,16 @@ _forge_tel_upsert() {
     id=$(printf '%s' "$cand" | jq -r '.id')
     [ "$(printf '[%s]' "$cand" | bash "$tc" count '^<!-- FORGE:TELEMETRY v1( part=[0-9]+)? -->' 2>/dev/null)" = "1" ] || continue
     body=$(printf '%s' "$cand" | jq -r '.body')
+    all_bodies="${all_bodies}${body}"$'\n'
     part=$(printf '%s' "$body" | sed -n '1s/^<!-- FORGE:TELEMETRY v1 part=\([0-9]*\) -->.*/\1/p'); part="${part:-1}"
     if [ "$part" -ge "$best_part" ]; then best_part="$part"; best_id="$id"; best_body="$body"; fi
   done < <(printf '%s' "$comments" | jq -c -s '.[][] | select((.body // "") | test("^<!-- FORGE:TELEMETRY v1( part=[0-9]+)? -->")) | {id, body, user, author_association}' 2>/dev/null)
-  # Drop lines the comment already holds (a PATCH whose reply was lost, or a re-flushed buffer).
+  # Drop lines any part already holds (a PATCH whose reply was lost, or a re-flushed buffer). Every record carries a
+  # unique eid, so two distinct same-second events are never byte-identical and are never dropped by this check.
   lines=""
   while IFS= read -r l; do
     [ -n "$l" ] || continue
-    case "$best_body" in *"$l"*) continue ;; esac
+    case "$all_bodies" in *"$l"*) continue ;; esac
     lines="${lines}${l}"$'\n'
   done <<< "$new"
   [ -n "$lines" ] || return 0
@@ -117,13 +119,29 @@ _forge_tel_impl() {
   n="${tgt%% *}"
   bdir="${FORGE_TELEMETRY_BUFFER_DIR:-$HOME/.forge/telemetry-buffer}"
   buf="$bdir/$(printf '%s' "$repo" | tr '/' '_')__${n}.jsonl"
+  # Serialize emitters on this host per target: the GitHub read-modify-write has no version check, so two overlapping
+  # emitters would each PATCH a stale snapshot (lost record) or both POST a first/rollover part (duplicate comments).
+  # Bounded wait; a lock older than 60s is stale and reclaimed; on timeout the record is buffered, never dropped.
+  local lock="$bdir/.lock-$(printf '%s' "$repo" | tr '/' '_')__${n}" tries=0 got=""
+  mkdir -p "$bdir" 2>/dev/null || { tries=100; got=nolock; }
+  while [ "$tries" -lt 100 ]; do
+    if mkdir "$lock" 2>/dev/null; then got=1; break; fi
+    if [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then rmdir "$lock" 2>/dev/null; continue; fi
+    tries=$((tries + 1)); sleep 0.1 2>/dev/null || sleep 1
+  done
+  if [ -z "$got" ]; then printf '%s\n' "$rec" >> "$buf" 2>/dev/null; return 0; fi
+  # Claim the buffer by renaming it first: a record appended by another emitter after this point lands in a fresh
+  # buffer file and survives, instead of being deleted by a later rm of the whole file.
+  local claimed="$buf.flush.$$"
   pending="$rec"
-  [ -s "$buf" ] && pending="$(cat "$buf")"$'\n'"$rec"
+  if [ -s "$buf" ] && mv "$buf" "$claimed" 2>/dev/null; then pending="$(cat "$claimed")"$'\n'"$rec"; fi
   if printf '%s\n' "$pending" | _forge_tel_upsert "$repo" "$n"; then
-    rm -f "$buf" 2>/dev/null
+    rm -f "$claimed" 2>/dev/null
   else
-    mkdir -p "$bdir" 2>/dev/null && printf '%s\n' "$rec" >> "$buf" 2>/dev/null
+    if [ -f "$claimed" ]; then cat "$claimed" >> "$buf" 2>/dev/null; rm -f "$claimed" 2>/dev/null; fi
+    printf '%s\n' "$rec" >> "$buf" 2>/dev/null
   fi
+  [ "$got" = 1 ] && rmdir "$lock" 2>/dev/null
   return 0
 }
 
