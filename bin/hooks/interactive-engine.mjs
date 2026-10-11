@@ -236,11 +236,17 @@ async function main() {
   if (freshLog.length && deriveState(freshLog).committed.includes(phaseId)) return;
 
   if (bootstrapped) {
+    // forge#3824: attribute the run to a release and repo (best-effort; null when unavailable).
+    let version = null, repo = null;
+    try { version = JSON.parse(readFileSync(join(FORGE_HOME, "package.json"), "utf8")).version || null; } catch { /* fail-soft */ }
+    try { repo = String(await io.gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]) || "").trim() || null; } catch { /* fail-soft */ }
     appendEvent(runLogDir, issueNumber, {
       event: "RUN_START",
       issue: issueNumber,
       run: state.run,
       lane: state.lane,
+      version,
+      repo,
       source: "interactive",
     });
   }

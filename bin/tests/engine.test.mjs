@@ -210,6 +210,20 @@ describe("runIssue", () => {
     assert.deepEqual(reviewEvents, ["phase_enter", "phase_exit"]);
   });
 
+  it("forge#3824: a fresh run stamps version and repo on RUN_START", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("INVALID"); },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", repo: "o/r",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+    const start = readLog(dir, 42).find((e) => e.event === "RUN_START");
+    assert.equal(start.repo, "o/r");
+    assert.equal(start.version, JSON.parse(readFileSync(join(__dirname, "..", "..", "package.json"), "utf8")).version);
+    assert.equal(deriveState(readLog(dir, 42)).run, "r_42_staging", "deriveState ignores the new fields");
+  });
+
   it("forge#2889: commits a blocked review and hands it to remediation in the same run", async () => {
     const { w, io } = fakeWorld();
     const script = {

@@ -1538,6 +1538,14 @@ If `TEST_GATE_VERDICT` is `BLOCK` and Phase 8 was reached (advisory posture or o
 
 > **Test Gate: BLOCK (override/advisory)** — Runtime failures were detected but deploy is proceeding. Reason: `${TEST_GATE_REASON}`. Filed `test-failure` issues track the failures.
 
+**Pipeline cost** (fail-soft, informational; never changes the verdict) <!-- Added: forge#3824 -->: add a "Pipeline cost" table from `scripts/cost-report.sh` (current version vs the previous two). An unresolvable script or an empty runs dir omits the table.
+
+```bash
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+COST_SCRIPT=$(forge_resolve cost-report.sh)
+[ -n "$COST_SCRIPT" ] && bash "$COST_SCRIPT" --last 3 2>/dev/null || echo "Pipeline cost: unavailable"
+```
+
 **CRITICAL**: This review NEVER merges staging → main. User makes deploy decision via GitHub web UI.
 
 ---
