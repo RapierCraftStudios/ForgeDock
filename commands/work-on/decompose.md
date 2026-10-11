@@ -190,7 +190,7 @@ if [ -n "$TRUSTED_SCRIPT" ] && [ -f "$TRUSTED_SCRIPT" ]; then
 else echo "SIZE_PLAN_READ=FAILED"; fi
 ```
 
-A `FAILED` read or a comment without `result: OVER` means there is no size-gate plan (the assessment rules below then apply unchanged). Its `### Split Proposal` lines (`- **{title}** — {files}`) are the proposed sub-issues, in dependency order, for Phase D2.
+A `FAILED` read or a comment without `result: OVER` means there is no size-gate plan (the assessment rules below then apply unchanged). Its `### Split Proposal` lines (`- **{title}** — {files}`) are the proposed sub-issues, in dependency order, for Phase D2. <!-- Added: forge#3573 --> A line may end with `— wip: {REF}@{SHA} (git checkout {SHA} -- {files})` (the durable staged hunks build B5.5 pushed to `forge/wip/{NUMBER}`), or `— patch: {PATH}` when the push failed and a patch file was written. Parse that per-seam reference as `WIP_REF_{N}` for Phase D2/D3. A line without one (or `wip: unavailable`) means no hunks were persisted; behaviour is unchanged.
 - Milestone (from issue metadata)
 - Priority label (P0/P1/P2) from issue labels
 
@@ -267,7 +267,7 @@ From the Decomposition Assessment in the investigation report (adjusted for any 
 
 For each sub-issue, prepare:
 - **Title**: from investigation report's proposed sub-issue title (re-derived from the owner override when one was detected), including the final `{fix|feat|refactor}: ` prefix used in Phase D3
-- **Body**: brief description of scope + `**Parent**: #{NUMBER}` + dependency note if applicable
+- **Body**: brief description of scope + `**Parent**: #{NUMBER}` + dependency note if applicable + a `## Staged Hunks` section when the Split Proposal line carries a wip ref or patch (see D3)
 - **Labels**: inherit priority label (P0/P1/P2) from parent; do NOT copy workflow labels
 - **Milestone**: same milestone title as parent (if parent has one)
 
@@ -355,6 +355,11 @@ Files that need changes:
 
 **Parent**: #{NUMBER}
 {If depends on another sub-issue: "**Depends on**: #{SUB_ISSUE_N} — {reason}"}
+
+{Only when this seam's Split Proposal line carries a wip ref or patch (D0); otherwise omit this section entirely:}
+## Staged Hunks
+
+The parent build's staged hunks for this seam are preserved outside the worktree: `{REF}@{SHA}`. Reuse them with `git fetch origin {REF} && git checkout {SHA} -- {files}` (wip ref), or `git apply {PATCH_PATH}` (patch file). They survive worktree cleanup.
 SUB_BODY_EOF
 ```
 

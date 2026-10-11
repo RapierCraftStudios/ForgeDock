@@ -394,6 +394,12 @@ branches:
 #   diff_size:
 #     # Changed-line ceiling. Default: 1000. 0 disables the gate.
 #     threshold: 1000
+#     # Pre-build estimate (investigate): estimate > threshold x estimate_factor
+#     # routes to decompose before building. Default: 1.2. Skipped when threshold is 0.
+#     estimate_factor: 1.2
+#     # Batch with >= this many independent seams defaults to one sub-issue per
+#     # seam unless the estimate is at or under half the threshold. Default: 3.
+#     batch_seam_min: 3
 #     # ADDITIVE to the built-in defaults (lockfiles, *.min.*, *.snap, dist/,
 #     # build/, generated/, __generated__/, fixtures/, __snapshots__/, vendor/).
 #     # A glob ending in "/" matches that directory at any depth; any other glob

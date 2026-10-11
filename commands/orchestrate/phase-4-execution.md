@@ -387,7 +387,8 @@ Before building agent prompts, run `classify-lane.sh` for every issue in the cur
 ```bash
 # Resolve the helper once and reuse it for the initial dispatch and all finding
 # classification loops. Claude keeps its installed path as the default, while
-# OpenCode and Codex can use ForgeDock's repository-local scripts.
+# OpenCode and Codex use FORGE_HOME / FORGEDOCK_HOME / FORGE_ROOT. Never the target repo
+# ($REPO_PATH): it holds consumer-controlled code (#3400/#3483, #3596).
 resolve_classify_lane() {
   local candidates=()
   if [ "${FORGE_RUNTIME:-}" = "opencode" ] ||
@@ -395,14 +396,22 @@ resolve_classify_lane() {
      [ -n "${OPENCODE_PID:-}" ] ||
      [ -n "${OPENCODE:-}" ]; then
     case '${CLAUDE_PLUGIN_ROOT}' in /*) candidates+=('${CLAUDE_PLUGIN_ROOT}/scripts/classify-lane.sh') ;; esac  # running plugin first
+    [ -n "${FORGE_ROOT:-}" ] && candidates+=("$FORGE_ROOT/scripts/classify-lane.sh")
+    [ -n "${FORGEDOCK_HOME:-}" ] && candidates+=("$FORGEDOCK_HOME/scripts/classify-lane.sh")
     [ -n "${FORGE_HOME:-}" ] && candidates+=("$FORGE_HOME/scripts/classify-lane.sh")
-    [ -n "${REPO_PATH:-}" ] && candidates+=("$REPO_PATH/scripts/classify-lane.sh")
     candidates+=("$HOME/.opencode/scripts/classify-lane.sh")
   else
     case '${CLAUDE_PLUGIN_ROOT}' in /*) candidates+=('${CLAUDE_PLUGIN_ROOT}/scripts/classify-lane.sh') ;; esac  # running plugin first
+    [ -n "${FORGE_ROOT:-}" ] && candidates+=("$FORGE_ROOT/scripts/classify-lane.sh")
+    [ -n "${FORGEDOCK_HOME:-}" ] && candidates+=("$FORGEDOCK_HOME/scripts/classify-lane.sh")
     [ -n "${FORGE_HOME:-}" ] && candidates+=("$FORGE_HOME/scripts/classify-lane.sh")
     candidates+=("$HOME/.claude/scripts/classify-lane.sh")
-    [ -n "${REPO_PATH:-}" ] && candidates+=("$REPO_PATH/scripts/classify-lane.sh")
+    local _cfg _d
+    for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do  # newest pinned plugin cache
+      [ -n "$_cfg" ] || continue
+      _d=$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -1)
+      [ -n "$_d" ] && candidates+=("$_d/scripts/classify-lane.sh")
+    done
   fi
 
   local candidate
@@ -549,6 +558,17 @@ BATCH_FULLY_GATED=false
 # Initialise the per-entry keep flag to "keep" at the top of each iteration (unknown = keep).
 PENDING_DECISIONS=()
 DECISIONS_PRESENTED=false
+# forge#3621: the breaker decision is enqueued on the false->true trip transition, not at one call site.
+# Every `AMPLIFICATION_BREAKER_TRIPPED=true` assignment (deterministic check, live pre-trip, settle) runs
+# this idempotent helper right after it; it mirrors the release dequeue (`breaker\|*`) and queues at most
+# one breaker entry. Trip sites live in separate bash fences: re-declare this function where it is not in scope.
+enqueue_breaker_decision() {
+  [ "$AMPLIFICATION_BREAKER" = "on" ] || return 0
+  for _d in ${PENDING_DECISIONS[@]+"${PENDING_DECISIONS[@]}"}; do
+    case "$_d" in breaker\|*) return 0 ;; esac
+  done
+  PENDING_DECISIONS+=("breaker|amplification breaker tripped, P3 cascade admission paused|Batch the paused P3 findings or defer them?")
+}
 
 # Per-batch token budget for Step 4C's review-finding cascade control (forge#1858).
 # Distinct from the $-denominated `--budget N` flag (economic scheduling, forge#1743,
@@ -3101,7 +3121,10 @@ if [ "$AMPLIFICATION_BREAKER" != "off" ]; then
   echo "$AMP_LINE"   # include this line verbatim in the Step 4B/4C status update
   # rc 3 (tripped) or 4 (unreadable / unresolved): defer every P3-and-below finding under rule 6
   # into planP3BatchGroups() bounded batches. P1/P2 findings are admitted as before.
-  [ "$AMP_RC" -eq 3 ] || [ "$AMP_RC" -eq 4 ] && AMPLIFICATION_BREAKER_TRIPPED=true
+  if [ "$AMP_RC" -eq 3 ] || [ "$AMP_RC" -eq 4 ]; then
+    AMPLIFICATION_BREAKER_TRIPPED=true
+    enqueue_breaker_decision   # forge#3621: idempotent; re-trip after a release re-queues the decision
+  fi
 fi
 ```
 
@@ -3469,6 +3492,7 @@ Finding #${FINDING_NUM} has no **Code branch** annotation and its parent PR #${R
            printf '%s\n' "${AMPLIFICATION_RATIO_HISTORY[@]: -$((CONVERGENCE_WINDOW - 1))}" | awk '$1 < 1 { exit 1 }'; }; then
         BREAKER_LIVE_TRIPPED=true
         AMPLIFICATION_BREAKER_TRIPPED=true
+        enqueue_breaker_decision   # forge#3621: the settle's TRIPPED=false guard will skip its own enqueue
       fi
     fi
     if [ "$BREAKER_LIVE_TRIPPED" = "true" ] && [ "$BREAKER_SAFETY" = "routine" ]; then
@@ -3506,7 +3530,7 @@ if [ "$UNIT_MERGED_THIS_CYCLE" = "true" ]; then
       if [ "$AMPLIFICATION_BREAKER" = "on" ] && [ "$AMPLIFICATION_BREAKER_TRIPPED" = "false" ]; then
         AMPLIFICATION_BREAKER_TRIPPED=true
         # Queue the decision instead of asking mid-batch (forge#3497); batch-level entry, issue field = breaker.
-        PENDING_DECISIONS+=("breaker|amplification breaker tripped, P3 cascade admission paused|Batch the paused P3 findings or defer them?")
+        enqueue_breaker_decision   # forge#3621: shared idempotent enqueue (dedups against earlier trip sites)
         # One operator report per trip: ratio and queue size, no per-finding spam.
         echo "AMPLIFICATION BREAKER TRIPPED: ratio ${AMPLIFICATION_RATIO} (${FINDINGS_SPAWNED} findings / ${MERGED_UNITS} merged units) stayed >= 1.0 for ${CONVERGENCE_WINDOW} units. P3 cascade admission is paused; ${#AMPLIFICATION_BREAKER_DEFERRED[@]} finding(s) paused so far. P1/P2 are still admitted. Paused P3s are routed to the bounded P3 batch planner (planP3BatchGroups) and are never dispatched individually. Operator decision queued for drain: batch them or defer. Opt out: orchestration.cascade.amplification_breaker: off"
       fi

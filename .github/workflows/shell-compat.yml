@@ -65,6 +65,7 @@ jobs:
           /bin/bash scripts/verify-phase-trail.test.sh
           /bin/bash scripts/trusted-comments.test.sh
           /bin/bash scripts/remediation-marker-match.test.sh
+          /bin/bash scripts/architect-resume-match.test.sh
           /bin/bash scripts/remediate-basesync.test.sh
           /bin/bash scripts/classify-finding.test.sh
           /bin/bash scripts/check-contract-scope.test.sh
@@ -107,6 +108,7 @@ jobs:
         run: |
           bash scripts/trusted-comments.test.sh
           bash scripts/remediation-marker-match.test.sh
+          bash scripts/architect-resume-match.test.sh
           bash scripts/remediate-basesync.test.sh
       - name: Run verify-phase-trail.test.sh
         if: runner.os != 'macOS'
@@ -161,6 +163,7 @@ jobs:
         run: |
           bash scripts/trusted-comments.test.sh
           bash scripts/remediation-marker-match.test.sh
+          bash scripts/architect-resume-match.test.sh
           bash scripts/remediate-basesync.test.sh
       - name: Run verify-phase-trail.test.sh
         run: bash scripts/verify-phase-trail.test.sh

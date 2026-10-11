@@ -193,9 +193,12 @@ if [ -n "$PR_NUMBER" ]; then
 else
   echo "WARNING: Could not resolve staging→main PR number. FORGE:REVIEW_ROUTE marker not posted."
 fi
+# Persist for later fences (each Bash call is a fresh shell). Remove a stale file from a previous run when nothing resolved.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"
+if [ -n "$PR_NUMBER" ]; then printf '%s\n' "$PR_NUMBER" > "$_SD/staging_pr_number"; else rm -f "$_SD/staging_pr_number"; fi
 ```
 
-`$PR_NUMBER` is now set for all downstream phases that conditionally post gate comments to the PR.
+`$PR_NUMBER` is now set for all downstream phases that conditionally post gate comments to the PR. It is also persisted to `$_SD/staging_pr_number`, because every Bash call is a fresh shell. Fences that consume cross-fence state (`PR_NUMBER`, `ALL_PR_NUMBERS`, `GH_REPO`, branch names) begin with the `# FENCE_BOOTSTRAP` block, which re-derives it; the 0B.1 and 7B.5 fences carry it today. Other fences (1E, 2-6.75, 7E, 7F) still rely on earlier-fence state and are tracked separately (#3681).
 
 ---
 
@@ -223,6 +226,11 @@ MERGE_PRS=$(git log origin/$DEFAULT_BRANCH..origin/$STAGING_BRANCH --merges --on
 ALL_PR_NUMBERS=$(echo "$BUNDLE_PRS $MERGE_PRS" | tr ' ' '\n' | sort -u | grep -E '^[0-9]+$')
 
 echo "PRs in staging→main bundle: $(echo $ALL_PR_NUMBERS | tr '\n' ' ')"
+# Persist for the 0B.1 fence (a later Bash call is a fresh shell); keyed by the PR number resolved in Phase -1.
+if [ -n "${PR_NUMBER:-}" ]; then
+  _SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"
+  printf '%s\n' "$ALL_PR_NUMBERS" > "$_SD/${PR_NUMBER}_bundle-prs.txt"
+fi
 
 # Step 2: For each PR in the bundle, check for open review-finding issues and degraded panels
 BLOCKING_FINDINGS=""
@@ -366,8 +374,19 @@ Create review chunks by priority: Billing/Pricing (CRITICAL) → Security/Auth (
 A bundle PR already got a full line-level review before it merged to staging, so re-reviewing its diff here re-files the same defects. Compute the already-reviewed commit set and scope line-level review to what a feature-PR review could not see. Consumes `ALL_PR_NUMBERS` (Phase 0A). Trust comes from `scripts/trusted-comments.sh` (resolved with the canonical helper-script resolver below: plugin root, `FORGE_ROOT`, `FORGEDOCK_HOME`, `FORGE_HOME`, install symlink, marketplaces, pinned plugin cache; never the working directory, which is author-controlled).
 
 ```bash
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
 SCOPE_MODE=full; REVIEWED_COMMITS=""; REVIEWED_MERGES=""; DEPLOY_WIRING_FILES=""; UNREVIEWED_COMMITS=""; UNREVIEWED_FILES=""; _LOG=""; CROSS_PR_FILES=""; REVIEWED_PR_COUNT=0
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"; _PF="$_SD/${PR_NUMBER}_bundle-pr-files.txt"; : > "$_PF"
+_PF="$_SD/${PR_NUMBER}_bundle-pr-files.txt"; : > "$_PF"
+[ -n "${PR_NUMBER:-}" ] && [ -n "${GH_REPO:-}" ] || echo "SCOPE_MODE=full: scoping skipped (PR_NUMBER or GH_REPO empty after reload)"
+[ -n "${ALL_PR_NUMBERS:-}" ] || echo "SCOPE_MODE=full: scoping skipped (ALL_PR_NUMBERS empty: Phase 0A did not persist a bundle list)"
 # TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
 _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
 _tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
@@ -378,18 +397,19 @@ TRUSTED_SCRIPT=""
 while IFS= read -r _c; do
   case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
 done <<< "$_tc"
-if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$ALL_PR_NUMBERS" ]; then
+[ -n "$TRUSTED_SCRIPT" ] || echo "SCOPE_MODE=full: scoping skipped (trusted-comments.sh not resolvable)"
+if [ -n "$TRUSTED_SCRIPT" ] && [ -n "${ALL_PR_NUMBERS:-}" ] && [ -n "${PR_NUMBER:-}" ] && [ -n "${GH_REPO:-}" ]; then
   SCOPE_MODE=scoped
   for pr in $ALL_PR_NUMBERS; do
-    _J=$(gh pr view "$pr" -R {GH_REPO} --json headRefOid,mergeCommit,commits,state 2>/dev/null) || { SCOPE_MODE=full; break; }
+    _J=$(gh pr view "$pr" -R $GH_REPO --json headRefOid,mergeCommit,commits,state 2>/dev/null) || { SCOPE_MODE=full; break; }
     _HEAD=$(printf '%s' "$_J" | jq -r '.headRefOid')
     case "$_HEAD" in *[!0-9a-f]*|"") SCOPE_MODE=full; break ;; esac   # a malformed head id would make the sha match accept any comment (fail open): review everything
     [ "${#_HEAD}" -eq 40 ] || [ "${#_HEAD}" -eq 64 ] || { SCOPE_MODE=full; break; }
     _HEAD7=$(printf '%s' "$_HEAD" | cut -c1-7)
     # Capture each gh read into a variable FIRST and test its own exit status: in a pipeline `||` only sees the last stage (no pipefail),
     # so a failed gh read piped into another command would silently look like "no comments" / "no files".
-    _CM=$(gh api --paginate "repos/{GH_REPO}/issues/$pr/comments" 2>/dev/null) || { SCOPE_MODE=full; break; }
-    _FILES=$(gh pr diff "$pr" -R {GH_REPO} --name-only 2>/dev/null) || { SCOPE_MODE=full; break; }
+    _CM=$(gh api --paginate "repos/$GH_REPO/issues/$pr/comments" 2>/dev/null) || { SCOPE_MODE=full; break; }
+    _FILES=$(gh pr diff "$pr" -R $GH_REPO --name-only 2>/dev/null) || { SCOPE_MODE=full; break; }
     # Reviewed = trusted FORGE:REVIEW_ROUTE (a real review mode) whose sha is the PR's FINAL head, plus at least one review-agent comment
     # carrying the full-length `Reviewed-SHA: <head>` line and a findings block (same predicate as review-pr.md Phase 5; a 7-char substring or a comment with no findings block never counts), and no degraded/blocked review marker. A PR pushed to after its review has a stale sha, so its commits stay UNREVIEWED.
     _ROUTE=$(printf '%s' "$_CM" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW_ROUTE mode=(?!spec-evolution-blocked)[^ ]+ spec=review-pr.md sha=${_HEAD7} -->") || { SCOPE_MODE=full; break; }
@@ -652,15 +672,91 @@ fi
 
 Launch domain-specific agents based on which domains have changes. Substitute PR diff commands with staging diff commands.
 
-**Per-domain diff slices (MANDATORY)**: `protocols.md` tells agents to use a pre-supplied `[DOMAIN_DIFF_SLICE]` and not to re-fetch the diff, so staging MUST supply one — the staging→main diff is the largest diff in the pipeline. Compute the slices once, then substitute `[DOMAIN_DIFF_SLICE]` in each persona's prompt before dispatch:
+**Per-domain diff slices (MANDATORY)**: `protocols.md` tells agents to use a pre-supplied `[DOMAIN_DIFF_SLICE]` and not to re-fetch the diff, so staging MUST supply one — the staging→main diff is the largest diff in the pipeline. Slice the uncapped diff first, then cap each slice at ~100K chars with `truncate_slice` (same order as `commands/review-pr.md` "Domain Diff Slicing"). Compute the slices once, then substitute `[DOMAIN_DIFF_SLICE]` in each persona's prompt before dispatch:
 ```bash
-# Fetched once; agents do NOT re-fetch it
-FULL_DIFF=$(git diff "origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH" | head -c 100000)
-# DIFF_SLICE_{DOMAIN}: same per-domain awk filters, fallback, and security-gets-full-diff rule as
-# commands/review-pr.md "Domain Diff Slicing", applied to this FULL_DIFF. Cap each slice at ~100K chars.
+# Fetched once, UNCAPPED; agents do NOT re-fetch it. Never cap here: slicing must see the whole bundle.
+FULL_DIFF=$(git diff "origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH")
+
+# --- Security agent: always receives the full diff (cross-cutting domain) ---
 DIFF_SLICE_SECURITY="$FULL_DIFF"
+
+# --- Auth agent: auth, session, jwt, oauth, middleware, permission files ---
+DIFF_SLICE_AUTH=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(auth|session|jwt|oauth|permission|middleware|login|token)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_AUTH" ] && DIFF_SLICE_AUTH="$FULL_DIFF"
+
+# --- Billing agent: billing, payment, credit, pricing, stripe, subscription files ---
+DIFF_SLICE_BILLING=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(billing|payment|credit|pricing|stripe|subscription|invoice|charge|refund)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_BILLING" ] && DIFF_SLICE_BILLING="$FULL_DIFF"
+
+# --- Concurrency agent: transaction, lock, queue, async, worker, race-condition files ---
+DIFF_SLICE_CONCURRENCY=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(worker|queue|task|async|lock|transaction|pipeline|job)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_CONCURRENCY" ] && DIFF_SLICE_CONCURRENCY="$FULL_DIFF"
+
+# --- Database agent: migration, model, schema, ORM, SQL files ---
+DIFF_SLICE_DATABASE=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(migration|model|schema|\.sql$|orm|database|db)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_DATABASE" ] && DIFF_SLICE_DATABASE="$FULL_DIFF"
+
+# --- API Design agent: router, endpoint, openapi, schema, serializer files ---
+DIFF_SLICE_API=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(router|route|endpoint|openapi|serializer|schema|api)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_API" ] && DIFF_SLICE_API="$FULL_DIFF"
+
+# --- Infrastructure agent: docker, nginx, ci, deploy, infra, workflow files ---
+DIFF_SLICE_INFRA=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(docker|nginx|infra|\.github|deploy|ci|traefik|k8s|helm)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_INFRA" ] && DIFF_SLICE_INFRA="$FULL_DIFF"
+
+# --- Domain Logic agent: scraping/browser-automation files (does not match bare playwright/E2E test files) ---
+DIFF_SLICE_SCRAPER=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git.*\/(scrape|scraper|stealth|browser_pool|headless|anti_bot|captcha|crawl)/ { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_SCRAPER" ] && DIFF_SLICE_SCRAPER="$FULL_DIFF"
+
+# Cap each slice AFTER slicing and after the empty-slice fallback (a fallback slice is the truncated full diff)
+truncate_slice() {
+  local slice="${1}"
+  local limit=102400
+  if [ "${#slice}" -gt "$limit" ]; then
+    echo "${slice:0:$limit}"
+    echo "... [TRUNCATED — diff exceeded 100K chars; focus on the files listed above]"
+  else
+    echo "$slice"
+  fi
+}
+DIFF_SLICE_SECURITY=$(truncate_slice "$DIFF_SLICE_SECURITY")
+DIFF_SLICE_AUTH=$(truncate_slice "$DIFF_SLICE_AUTH")
+DIFF_SLICE_BILLING=$(truncate_slice "$DIFF_SLICE_BILLING")
+DIFF_SLICE_CONCURRENCY=$(truncate_slice "$DIFF_SLICE_CONCURRENCY")
+DIFF_SLICE_DATABASE=$(truncate_slice "$DIFF_SLICE_DATABASE")
+DIFF_SLICE_API=$(truncate_slice "$DIFF_SLICE_API")
+DIFF_SLICE_INFRA=$(truncate_slice "$DIFF_SLICE_INFRA")
+DIFF_SLICE_SCRAPER=$(truncate_slice "$DIFF_SLICE_SCRAPER")
 ```
-For each dispatched persona, substitute `[DOMAIN_DIFF_SLICE]` → its matching `$DIFF_SLICE_*` variable (an empty slice falls back to the capped `$FULL_DIFF`). Agents never run a full `gh pr diff`; only `--name-only` is allowed. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure.
+For each dispatched persona, substitute `[DOMAIN_DIFF_SLICE]` → its matching `$DIFF_SLICE_*` variable (an empty slice falls back to the full diff, which is then truncated like every other slice). Also substitute `[AGENT_DOMAIN]` → the persona's marker domain (the `{domain}` used in its `FORGE:REVIEW-AGENT` marker), and keep `[PR_NUMBER]` / `[REVIEW_SHA_SHORT]` bound to the staging review's PR number and short head SHA (`staging` as the key when there is no PR number): personas derive their slice path `forge-slice-[PR_NUMBER]-[REVIEW_SHA_SHORT]-[AGENT_DOMAIN].diff` from them. Agents never run a full `gh pr diff`; only `--name-only` is allowed. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure.
 
 **MANDATORY — each domain agent MUST persist its finalized body before posting its findings directly to the PR immediately upon completion** (not batched by the orchestrator). It MUST return verdict, finding count, and one line per finding to the orchestrator independently of delivery; if posting fails, return the durable file path and stop without retrying:
 ```bash
@@ -893,7 +989,7 @@ Sort: CONFIRMED first, then by severity.
 
 ### 7B.5: Note Disposition (same damper and classifier as `/review-pr` §6B.5)
 
-Classify every deduped finding with `scripts/classify-finding.sh` before filing, exactly as `commands/review-pr.md` §6B.5 does (the rules live in the script, not here: HIGH/CRITICAL always ISSUE, content-based safety exemption, LOW/POSSIBLE become NOTEs). Resolve it with the same resolver (`${CLAUDE_PLUGIN_ROOT}`, `FORGE_ROOT`, `FORGEDOCK_HOME`, pinned plugin cache under `CLAUDE_CONFIG_DIR` then `~/.claude`). There is no `$PWD` tier: the repo under review is author-controlled. The staging PR is not a finding fix, so `FINDING_LINEAGE=none`.
+Classify every deduped finding with `scripts/classify-finding.sh` before filing, exactly as `commands/review-pr.md` §6B.5 does (the rules live in the script, not here: HIGH/CRITICAL always ISSUE, content-based safety exemption where LOW needs a keyword AND CONFIRMED and a domain agent rescues MEDIUM only, otherwise LOW/POSSIBLE become NOTEs). Resolve it with the same resolver (`${CLAUDE_PLUGIN_ROOT}`, `FORGE_ROOT`, `FORGEDOCK_HOME`, pinned plugin cache under `CLAUDE_CONFIG_DIR` then `~/.claude`). There is no `$PWD` tier: the repo under review is author-controlled. The staging PR is not a finding fix, so `FINDING_LINEAGE=none`.
 
 ```bash
 _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
@@ -905,15 +1001,30 @@ CLASSIFY_SCRIPT=""
 while IFS= read -r _c; do
   case "$_c" in /*) [ -z "$CLASSIFY_SCRIPT" ] && [ -f "$_c/scripts/classify-finding.sh" ] && CLASSIFY_SCRIPT="$_c/scripts/classify-finding.sh" ;; esac
 done <<< "$_tc"
+# Fail closed (#3639): no hand classification and no ISSUE fallback. Kept OUTSIDE classify_one (the scope test sources that function with a stubbed CLASSIFY_SCRIPT).
+if [ -z "$CLASSIFY_SCRIPT" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: classifier unavailable (classify-finding.sh not resolvable through the trusted resolver)"
+  exit 0
+fi
 # Per-finding inputs come from each structured block: FINDING_ID, FINDING_SEVERITY, FINDING_CONFIDENCE, FINDING_AGENT, FINDING_TITLE, FINDING_BODY,
 # FINDING_FILE (primary) and FINDING_PATHS (newline-separated, every cited file). Run THIS WHOLE BLOCK in ONE Bash call, looping over every deduped finding
 # (init once, then classify_one per finding, then the disposition record), because counters and the note list live in shell state and a fresh shell loses them.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+# An empty PR_NUMBER would key every scratch file as "_notes.md" / "_scope.env" and the disposition record could not be posted: stop and report it.
+[ -n "${PR_NUMBER:-}" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: PR_NUMBER unavailable (Phase -1 did not persist staging_pr_number); FORGE:NOTE_DISPOSITION cannot be recorded"; exit 0; }
 NOTE_LIST_FILE="$_SD/${PR_NUMBER}_notes.md"; : > "$NOTE_LIST_FILE"
 NOTES_LISTED=0; NOTES_DROPPED=0; FINDINGS_FILED=0; OUT_OF_SCOPE=0
-# 0B.1 results were written to a scope file by the Phase 0B.1 block; a missing or unreadable file means SCOPE_MODE=full (no demotion, fail open).
+# 0B.1 results were written to a scope file by the Phase 0B.1 block; a missing or unreadable file means SCOPE_MODE=full (no demotion, fail open), announced rather than silent.
 SCOPE_MODE=full; CROSS_PR_FILES=""; UNREVIEWED_FILES=""; DEPLOY_WIRING_FILES=""
-[ -r "$_SD/${PR_NUMBER}_scope.env" ] && . "$_SD/${PR_NUMBER}_scope.env"
+if [ -r "$_SD/${PR_NUMBER}_scope.env" ]; then . "$_SD/${PR_NUMBER}_scope.env"; else echo "WARNING: $_SD/${PR_NUMBER}_scope.env unreadable: SCOPE_MODE=full (no out-of-scope demotion)"; fi
 classify_one() {
   # FINDING_TEXT_FILE holds the finding text: the classifier's content-based safety exemption reads it, so an empty file silently disables the exemption.
   local FINDING_TEXT_FILE; FINDING_TEXT_FILE=$(mktemp "$_SD/staging-finding.XXXXXX")
@@ -924,8 +1035,8 @@ classify_one() {
       --agent "$FINDING_AGENT" --lineage none --text-file "$FINDING_TEXT_FILE") || DISPOSITION=""
   fi
   rm -f "$FINDING_TEXT_FILE"
-  # Fail toward filing, never drop: an empty/unknown classifier result is ISSUE (the classifier's own convention). INPR_FIX is never emitted (no --inpr-diff on a bundle).
-  case "$DISPOSITION" in ISSUE*|NOTE*) ;; *) DISPOSITION="ISSUE classifier-unavailable" ;; esac
+  # Fail toward filing, never drop: a classifier runtime failure or garbled result on one finding is ISSUE (the classifier's own convention); an unresolvable classifier never reaches here (guard above). INPR_FIX is never emitted (no --inpr-diff on a bundle).
+  case "$DISPOSITION" in ISSUE*|NOTE*) ;; *) DISPOSITION="ISSUE classifier-error" ;; esac
   # 7B scope rule (the two SCOPE_RULE lines are executed here and evaluated by scripts/review-pr-staging-scope.test.sh):
   SEV=$(printf '%s' "$FINDING_SEVERITY" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')   # SCOPE_RULE
   case "$SEV" in MEDIUM|LOW|INFO) OOS_DEMOTE=1 ;; *) OOS_DEMOTE=0 ;; esac   # SCOPE_RULE
@@ -948,13 +1059,32 @@ classify_one() {
 # for each deduped finding: set the FINDING_* inputs, call classify_one, then use $DISPOSITION (ISSUE continues to 7E/7F).
 ```
 
+If the guard printed `REVIEW_RESULT: status: BLOCKED` (`classifier unavailable`), STOP: `exit 0` only ends that Bash block, so do not run 7E/7F or any later phase, file no issues, emit no deploy approval, and report `RESULT: BLOCK DEPLOY` with the blocker.
+
 Only `ISSUE` findings continue to 7E/7F. Each `NOTE` is listed in the PR body (`## Non-blocking notes`, edit never replace) or dropped as a duplicate or nit; NOTEs are NEVER passed to `Skill(issue)`. Post one disposition record (counts only plus the NOTE list; every NOTE is recorded, never silently dropped), whenever 7A extracted at least one finding:
 
 ```bash
-CLASSIFIER_MODE=$([ -n "$CLASSIFY_SCRIPT" ] && echo script || echo manual)
+CLASSIFIER_MODE=script   # the 7B.5 guard blocks the review when the classifier is unresolvable, so this is always script
+# This is a separate Bash call: shell state is lost. Re-derive PR_NUMBER and GH_REPO; counters the caller did not carry over are recomputed from the note list file (NOTES_LISTED) or flagged.
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+if [ -z "${PR_NUMBER:-}" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: PR_NUMBER unavailable; FORGE:NOTE_DISPOSITION not posted (record lost)"
+else
+NOTE_LIST_FILE="${NOTE_LIST_FILE:-$_SD/${PR_NUMBER}_notes.md}"
+[ -n "${NOTES_LISTED:-}" ] || { NOTES_LISTED=$(grep -c '^- ' "$NOTE_LIST_FILE" 2>/dev/null || true); echo "WARNING: classification counters lost (fresh shell): notes_listed recomputed from $NOTE_LIST_FILE; set SCOPE_MODE, FINDINGS_FILED and OUT_OF_SCOPE from the 7B.5 block output before posting"; }
+[ -n "${SCOPE_MODE:-}" ] || { SCOPE_MODE=full; echo "WARNING: SCOPE_MODE lost (fresh shell): recording scope=full"; }
 _DISP_BODY="$_SD/${PR_NUMBER}_note_disposition.md"
 { printf '%s\n' "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=0 notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} out_of_scope=${OUT_OF_SCOPE:-0} lineage=none classifier=${CLASSIFIER_MODE} scope=${SCOPE_MODE} -->"; cat "$NOTE_LIST_FILE" 2>/dev/null; } > "$_DISP_BODY"
-gh pr comment ${PR_NUMBER} -R {GH_REPO} --body-file "$_DISP_BODY" # allowlist:check-command-side-effects
+gh pr comment "$PR_NUMBER" -R "$GH_REPO" --body-file "$_DISP_BODY" # allowlist:check-command-side-effects
+fi
 ```
 
 ### 7B.6: Provenance and concreteness gates (forge#3452)
@@ -983,7 +1113,19 @@ MILESTONE_FLAG=""
 # milestone derivation — commands/review-pr.md and commands/review-pr-staging.md
 # both call it identically so the two specs cannot independently drift.
 # <!-- forge#2443 -->
-MILESTONE_TITLE=$(bash scripts/derive-finding-milestone.sh "${PR_NUMBER}" -R {GH_REPO})
+# HELPER_SCRIPT resolver (DERIVE_MILESTONE_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+done
+DERIVE_MILESTONE_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$DERIVE_MILESTONE_SCRIPT" ] && [ -f "$_c/scripts/derive-finding-milestone.sh" ] && DERIVE_MILESTONE_SCRIPT="$_c/scripts/derive-finding-milestone.sh" ;; esac
+done <<< "$_tc"
+# Unresolved helper: empty milestone (non-blocking), never a cwd-relative fallback.
+MILESTONE_TITLE=""
+[ -n "$DERIVE_MILESTONE_SCRIPT" ] && MILESTONE_TITLE=$(bash "$DERIVE_MILESTONE_SCRIPT" "${PR_NUMBER}" -R {GH_REPO})
 # Quoted so multi-word milestone titles survive as a single value wherever
 # MILESTONE_FLAG is later interpolated — matches the quoting convention already
 # used for --title/--body-file/--label below.
@@ -1097,8 +1239,23 @@ STAGING_FINDING_SEVERITY="LOW"
 # (CONFIRMED/LIKELY/POSSIBLE). scripts/severity-to-priority.sh is the single
 # source of truth for this mapping; commands/review-pr.md calls the identical
 # script so the two specs cannot independently drift. <!-- forge#2447 -->
-STAGING_FINDING_PRIORITY=$(bash scripts/severity-to-priority.sh "$STAGING_FINDING_SEVERITY")
-STAGING_FINDING_PRIORITY_EXIT=$?
+# HELPER_SCRIPT resolver (PRIORITY_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+done
+PRIORITY_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$PRIORITY_SCRIPT" ] && [ -f "$_c/scripts/severity-to-priority.sh" ] && PRIORITY_SCRIPT="$_c/scripts/severity-to-priority.sh" ;; esac
+done <<< "$_tc"
+# Unresolved helper: non-zero status so finding creation is skipped (never defaulted to a priority).
+if [ -n "$PRIORITY_SCRIPT" ]; then
+  STAGING_FINDING_PRIORITY=$(bash "$PRIORITY_SCRIPT" "$STAGING_FINDING_SEVERITY")
+  STAGING_FINDING_PRIORITY_EXIT=$?
+else
+  STAGING_FINDING_PRIORITY=""; STAGING_FINDING_PRIORITY_EXIT=127
+fi
 
 # Exit code MUST be checked before use — severity-to-priority.sh exits 1 (empty stdout)
 # on a missing/unrecognized severity. Proceeding with an empty $STAGING_FINDING_PRIORITY

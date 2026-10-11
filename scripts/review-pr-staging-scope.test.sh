@@ -69,5 +69,55 @@ run1() { # severity stub-disposition paths -> prints DISPOSITION
 [ "$(run1 MEDIUM 'ISSUE MEDIUM-CONFIRMED' 'z/out.sh')" = "NOTE out_of_scope" ] && ok || bad "MEDIUM out of scope should be demoted"
 [ "$(run1 MEDIUM 'ISSUE MEDIUM-CONFIRMED' $'z/out.sh\na/in.sh')" = "ISSUE MEDIUM-CONFIRMED" ] && ok || bad "multi-file finding with an in-scope file must not be demoted"
 [ "$(run1 LOW 'ISSUE safety-exemption-auth' 'z/out.sh')" = "ISSUE safety-exemption-auth" ] && ok || bad "safety-exempt finding must not be demoted"
+# (6) behavioural --text-file: each classify_one call must hand the classifier its OWN finding text (a shared/stale text file would leak the first finding into the second)
+cat > "$TMP/classify-textfile.sh" <<'STUB'
+#!/bin/bash
+tf=""
+while [ $# -gt 0 ]; do case "$1" in --text-file) tf="$2"; shift ;; esac; shift; done
+[ -n "$tf" ] && [ -r "$tf" ] || { echo "NOTE no-text-file"; exit 0; }
+if grep -q 'MARKER_TOKEN' "$tf"; then echo "ISSUE saw-marker"; else echo "NOTE no-marker"; fi
+STUB
+mkdir -p "$TMP/sd6"
+run2() { # prints the dispositions of two consecutive classify_one calls in ONE shell
+  ( _SD="$TMP/sd6"; PR_NUMBER=9; CLASSIFY_SCRIPT="$TMP/classify-textfile.sh"; SCOPE_MODE=full; CROSS_PR_FILES=""; UNREVIEWED_FILES=""; DEPLOY_WIRING_FILES=""
+    NOTE_LIST_FILE="$TMP/n6.md"; : > "$NOTE_LIST_FILE"; NOTES_LISTED=0; FINDINGS_FILED=0; OUT_OF_SCOPE=0
+    FINDING_ID=X1; FINDING_SEVERITY=LOW; FINDING_CONFIDENCE=CONFIRMED; FINDING_AGENT=Security; FINDING_BODY=b; FINDING_FILE=z/a.sh; FINDING_PATHS=z/a.sh
+    . "$TMP/fn.sh"
+    FINDING_TITLE="has MARKER_TOKEN"; classify_one; echo "$DISPOSITION"
+    FINDING_TITLE="plain title"; classify_one; echo "$DISPOSITION"
+    FINDING_TITLE="has MARKER_TOKEN"; classify_one; echo "$DISPOSITION" ) 2>&1
+}
+OUT6=$(run2 | tr '\n' '|')
+[ "$OUT6" = "ISSUE saw-marker|NOTE no-marker|ISSUE saw-marker|" ] && ok || bad "each classify_one call must classify its own text-file content (got '$OUT6')"
+if ls "$TMP/sd6"/staging-finding.* >/dev/null 2>&1; then bad "classify_one must remove its per-finding temp file"; else ok; fi
+# (7) fail-closed guard: BLOCKED when the classifier is unresolvable, no manual classifier mode, no classifier-unavailable fallback
+SPEC_MAIN="$(dirname "$SPEC")/review-pr.md"
+for _s in "$SPEC" "$SPEC_MAIN"; do
+  if grep -qE 'BLOCKED.*classifier unavailable' "$_s" && ! grep -qF 'echo script || echo manual' "$_s" && ! grep -qF 'classifier=manual' "$_s" && ! grep -qF 'classifier-unavailable' "$_s"; then ok; else bad "$(basename "$_s") must fail closed with BLOCKED classifier unavailable and have no manual fallback"; fi
+done
+# (8) fresh-shell reload (forge#3654): the FENCE_BOOTSTRAP lines must reload PR_NUMBER / ALL_PR_NUMBERS from the scratchpad, stay empty (with a warning) when nothing was persisted, and reject a tampered number
+awk '/^[^ `#].*   # FENCE_BOOTSTRAP/ && !seen[$0]++' "$SPEC" > "$TMP/boot.sh"
+[ "$(wc -l < "$TMP/boot.sh")" -eq 8 ] && ok || bad "FENCE_BOOTSTRAP block expected 8 distinct lines (got $(wc -l < "$TMP/boot.sh"))"
+[ "$(grep -c '^# Fence bootstrap' "$SPEC")" -ge 3 ] && ok || bad "bootstrap must be carried by 0B.1 and both 7B.5 fences"
+mkdir -p "$TMP/sd8/full" "$TMP/sd8/empty" "$TMP/sd8/bad" "$TMP/bin"
+printf '#!/bin/sh\necho stub-value\n' > "$TMP/bin/yq"; chmod +x "$TMP/bin/yq"
+printf '42\n' > "$TMP/sd8/full/staging_pr_number"; printf '7\n8\n' > "$TMP/sd8/full/42_bundle-prs.txt"
+printf '42; rm -rf /\n' > "$TMP/sd8/bad/staging_pr_number"
+boot() { # scratch-dir -> prints "PR_NUMBER|ALL_PR_NUMBERS(joined)|GH_REPO" then any warning
+  ( unset PR_NUMBER ALL_PR_NUMBERS GH_REPO DEFAULT_BRANCH STAGING_BRANCH; export PATH="$TMP/bin:$PATH" FORGE_SCRATCHPAD="$1"
+    . "$TMP/boot.sh" 2>&1; echo "PR=${PR_NUMBER:-}|ALL=$(echo ${ALL_PR_NUMBERS:-})|REPO=${GH_REPO:-}|BR=${STAGING_BRANCH:-}" ) 2>&1; }
+OUT8=$(boot "$TMP/sd8/full")
+[ "$OUT8" = "PR=42|ALL=7 8|REPO=stub-value|BR=stub-value" ] && ok || bad "fresh shell must reload staging_pr_number and bundle-prs from the scratchpad (got '$OUT8')"
+OUT8=$(boot "$TMP/sd8/empty")
+case "$OUT8" in *"WARNING: PR_NUMBER is empty"*"PR=|ALL=|"*) ok ;; *) bad "empty scratchpad must leave PR_NUMBER empty and warn (got '$OUT8')" ;; esac
+OUT8=$(boot "$TMP/sd8/bad")
+case "$OUT8" in *"PR=|"*) ok ;; *) bad "non-numeric staging_pr_number must be rejected (got '$OUT8')" ;; esac
+# an already-set PR_NUMBER wins over a stale scratch file
+OUT8=$( ( unset ALL_PR_NUMBERS; PR_NUMBER=99; export PATH="$TMP/bin:$PATH" FORGE_SCRATCHPAD="$TMP/sd8/full"; . "$TMP/boot.sh" >/dev/null 2>&1; echo "PR=$PR_NUMBER|ALL=${ALL_PR_NUMBERS:-}" ) )
+[ "$OUT8" = "PR=99|ALL=" ] && ok || bad "in-shell PR_NUMBER must not be overridden by the scratch file (got '$OUT8')"
+# producers persist, and 0B.1 / 7B.5 no longer use the unsubstituted-template repo token or a bare unquoted PR number in gh pr comment
+grep -q 'staging_pr_number' "$SPEC" && grep -q '_bundle-prs.txt' "$SPEC" && ok || bad "Phase -1 / 0A must persist staging_pr_number and _bundle-prs.txt"
+if awk '/^### 0B.1:/,/^## Phase 1:/' "$SPEC" | grep -q '{GH_REPO}'; then bad "0B.1 must not use the {GH_REPO} template token"; else ok; fi
+if awk '/^### 7B.5:/,/^### 7B.6:/' "$SPEC" | grep -qE '\{GH_REPO\}|gh pr comment \$\{PR_NUMBER\}'; then bad "7B.5 must use quoted \$GH_REPO / \$PR_NUMBER"; else ok; fi
 echo "review-pr-staging-scope.test.sh: passed=$PASS failed=$FAILN"
 [ "$FAILN" -eq 0 ]

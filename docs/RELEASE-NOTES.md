@@ -2,6 +2,14 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Review damper: LOW needs keyword + CONFIRMED; a missing classifier blocks the review (#3639)
+
+`scripts/classify-finding.sh` is stricter for LOW findings. A safety keyword now files a LOW finding only when it is also CONFIRMED (LOW LIKELY/POSSIBLE with a keyword is a NOTE), and a dedicated domain agent (Auth, Billing, Concurrency, Database) rescues MEDIUM findings only, no longer LOW CONFIRMED. MEDIUM behaviour is unchanged.
+
+`/review-pr` §6B.5 and `/review-pr-staging` §7B.5 no longer let the model hand-classify (`classifier=manual`) when the script cannot be resolved. They return `REVIEW_RESULT: status: BLOCKED` with blocker `classifier unavailable (classify-finding.sh not resolvable through the trusted resolver)`, file nothing and do not merge or approve a deploy. The staging per-finding runtime-failure fallback is renamed `ISSUE classifier-error`. The `classifier=` marker stays and is always `script`.
+
+Action: if reviews now report `classifier unavailable`, fix the ForgeDock install so the trusted resolver finds `scripts/classify-finding.sh`, then re-run the review.
+
 ## Introduced-line gate no longer demotes CRITICAL/HIGH (#3597, #3598)
 
 `/review-pr` §6B.4 gate 2 never routes a CRITICAL/HIGH finding (any confidence) as `pre-existing`: a new caller of an unchanged unsafe helper is an interaction defect (`protocols.md` §5), so it stays a blocking `review-finding` under §7B criterion 2, including with `--auto-merge`. The pre-existing route now covers MEDIUM and lower only. A file with no `patch` in the PR files API (large or truncated diff) is treated as UNKNOWN and its findings are kept, never routed as pre-existing. Expect slightly more blocking findings on PRs that touch unsafe code through unchanged helpers.

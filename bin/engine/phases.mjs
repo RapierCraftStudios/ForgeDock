@@ -115,6 +115,56 @@ function latestMarked(comments, header, sentinel) {
   return all.length ? all[all.length - 1] : null;
 }
 /**
+ * Cycle boundary (forge#3657). `--retry` on a phase-complete run starts a new
+ * cycle; the engine publishes `<!-- FORGE:CYCLE: n -->` so builder evidence from
+ * earlier cycles (branch, merged PR) is not re-adopted. Callers pass TRUSTED
+ * comments only (issueMarkers), so an untrusted comment cannot move the boundary.
+ */
+export function cycleMarker(n) { return `<!-- FORGE:CYCLE: ${n} -->`; }
+const CYCLE_RE = /^[ \t]*<!--[ \t]*FORGE:CYCLE:[ \t]*(\d+)[ \t]*-->[ \t]*$/m;
+function cycleNumber(body) {
+  if (!startsWithHeader(body, "FORGE:CYCLE")) return null;
+  const m = String(body).match(CYCLE_RE);
+  return m ? Number(m[1]) : null;
+}
+/** Comments after the newest cycle marker; all comments when none is present. */
+export function sliceToCurrentCycle(comments) {
+  for (let i = comments.length - 1; i >= 0; i--) {
+    if (cycleNumber(comments[i]) !== null) return comments.slice(i + 1);
+  }
+  return comments;
+}
+/**
+ * Next cycle number: one past the higher of the newest trusted FORGE:CYCLE on
+ * GitHub and `localCycles` (the local RUN_NEXT_CYCLE count). A rehydrated log
+ * never replays RUN_NEXT_CYCLE, so the local count alone can reset to 0 while
+ * GitHub already carries markers. Errors propagate (caller fails closed).
+ */
+export async function nextCycleNumber(issue, localCycles, io) {
+  const { comments } = await issueMarkers(issue, io);
+  let highest = 0;
+  for (const body of comments) {
+    const c = cycleNumber(body);
+    if (c !== null && c > highest) highest = c;
+  }
+  return Math.max(highest, localCycles) + 1;
+}
+/**
+ * Idempotently publish the FORGE:CYCLE marker for cycle `n`: skipped when the
+ * newest trusted cycle marker already is `n` (crash between post and the log
+ * append retries safely). Errors propagate so the caller can fail closed.
+ */
+export async function postCycleMarker(issue, n, io) {
+  const { comments } = await issueMarkers(issue, io);
+  for (let i = comments.length - 1; i >= 0; i--) {
+    const c = cycleNumber(comments[i]);
+    if (c !== null) { if (c === n) return { posted: false }; break; }
+  }
+  await io.gh(["issue", "comment", String(issue), "--body", cycleMarker(n)]);
+  return { posted: true };
+}
+
+/**
  * Trusted comment bodies, chronological — the same single fetch + trust predicate
  * as issueMarkers() (one path, forge#3542). Fail closed: a fetch error yields `[]` here (issueMarkers itself propagates it).
  */
@@ -387,6 +437,9 @@ async function reviewArgs(state, ctx, io) {
           "--branch", need(state.branch, "branch", BRANCH_RE), ...baseArgs(state)];
 }
 
+/** Default `build.diff_size.estimate_factor` (docs/CONFIG.md); mirrored here for the isDecomposed safety net. */
+const ESTIMATE_FACTOR = 1.2;
+
 /**
  * Is the issue assessed for decomposition? Evaluated on ONE comment: the newest
  * trusted `<!-- FORGE:INVESTIGATOR` report (forge#3542 selects it; forge#3543's
@@ -407,7 +460,21 @@ function isDecomposed(report) {
     console.error(`[engine] conflicting decomposition signals (heading=${verdict ?? "none"}, markers=${[...markers].join("+") || "none"}); treating as not decomposed`);
     return false;
   }
-  return (verdict ?? marker) === "YES";
+  if ((verdict ?? marker) === "YES") return true;
+  // forge#3573 safety net: an investigator NO whose own size estimate is clearly over
+  // the gate (estimate > threshold x factor) fails toward decompose. Own-line,
+  // whole-number fields only; absent/0/non-numeric fields have no effect.
+  const est = /^ESTIMATED_DIFF_LINES:[ \t]*(\d+)[ \t]*$/m.exec(text);
+  const gate = /^GATE_THRESHOLD:[ \t]*(\d+)[ \t]*$/m.exec(text);
+  if (est && gate) {
+    const estimate = Number(est[1]);
+    const threshold = Number(gate[1]);
+    if (threshold > 0 && estimate > threshold * ESTIMATE_FACTOR) {
+      console.error(`[engine] investigator estimate ${estimate} exceeds gate ${threshold} x ${ESTIMATE_FACTOR}; routing to decompose`);
+      return true;
+    }
+  }
+  return false;
 }
 
 /** @type {Phase[]} */
@@ -481,7 +548,8 @@ export const PHASES = [
       // Idempotent resume: resolve the real branch from ground truth (FORGE:BUILDER
       // comment) rather than trusting a possibly-stale/absent state.branch, then
       // check it's already ahead of base → treat as done, skip the LLM (forge#2174).
-      const { comments } = await issueMarkers(state.issue, io);
+      const { comments: allComments } = await issueMarkers(state.issue, io);
+      const comments = sliceToCurrentCycle(allComments); // forge#3657: current-cycle evidence only
       const branch = resolveBranch(state, comments);
       if (branch && hasMarker(comments, PHASE_MARKERS.build.header, PHASE_MARKERS.build.completionMarker) && (await commitsAhead(state.lane, branch, io)) > 0) {
         return { satisfied: true, outputs: { branch } };
@@ -495,7 +563,8 @@ export const PHASES = [
       return { satisfied: false };
     },
     async detectOutcome(state, io) {
-      const { comments } = await issueMarkers(state.issue, io);
+      const { comments: allComments } = await issueMarkers(state.issue, io);
+      const comments = sliceToCurrentCycle(allComments); // forge#3657
       const complete = hasMarker(comments, PHASE_MARKERS.build.header, PHASE_MARKERS.build.completionMarker); // #1305: require :COMPLETE …
       // Resolve the branch the builder actually created from the FORGE:BUILDER:COMPLETE
       // comment (ground truth), scoped to that specific comment — see
@@ -514,7 +583,7 @@ export const PHASES = [
       // build.md says the router (not build) dispatches decompose with no
       // needs-human. Non-retryable by construction: a retry re-measures and
       // re-emits the same exit.
-      if (!complete && mayRouteToDecompose(comments) && sizeGateRoutesToDecompose(await trustedCommentBodies(state.issue, io))) {
+      if (!complete && mayRouteToDecompose(comments) && sizeGateRoutesToDecompose(comments)) {
         return { status: "committed", terminalReason: "decomposed", outputs: branch ? { branch } : {} };
       }
       const detail = `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}`;
@@ -663,8 +732,35 @@ export const PHASES = [
         if (at >= 0) scoped = comments.slice(at + 1);
       }
       const latest = latestMarked(scoped, PHASE_MARKERS.remediate.header, completion);
-      if (latest === null)
+      // forge#3647: ground-truth PR read. An interrupted or rate-limited remediation can leave the
+      // PR already merged with no COMPLETE marker (or a stale HELD-AWAITING-MERGE report). The
+      // reported outcome is never upgraded to a merge decision; only the live PR state is. Same
+      // merged predicate as reconcile (`mergedAt` or state MERGED). Unreadable => null (fail closed).
+      const prMerged = async () => {
+        if (state.pr == null) return false;
+        try {
+          const out = await io.gh(["pr", "view", String(state.pr), "--json", "state,mergedAt,baseRefName"]);
+          const j = JSON.parse(out || "{}");
+          return !!j.mergedAt || j.state === "MERGED";
+        } catch { return false; }
+      };
+      // Shared with the AUTO-LANDED case: CLOSED + workflow:merged means genuinely finished;
+      // anything else (including an unreadable snapshot) hands off to idempotent `close`.
+      const mergedResult = async (reGateOutcome) => {
+        let closed = false;
+        try {
+          const snap = await issueSnapshot(state.issue, io);
+          closed = snap.ok && snap.state === "CLOSED" &&
+            snap.labels.includes(PHASE_MARKERS.close.completionLabel);
+        } catch { closed = false; }
+        return closed
+          ? { status: "committed", terminalReason: "merged", outputs: { reGateOutcome } }
+          : { status: "committed", terminalReason: "merged", outputs: { reGateOutcome, closeHandoff: true } };
+      };
+      if (latest === null) {
+        if (await prMerged()) return mergedResult("AUTO-LANDED");
         return { status: "failed", detail: `no ${completion} marker` };
+      }
       // Parse the **Re-gate outcome**: field remediate.md's Phase M8 posts
       // (e.g. "**Re-gate outcome**: AUTO-LANDED to staging" — value is the
       // first whitespace-delimited token after the colon).
@@ -673,13 +769,17 @@ export const PHASES = [
       const reGateOutcome = match ? match[1] : null;
       switch (reGateOutcome) {
         case "AUTO-LANDED":
-          // remediate.md's own Phase M8 already drove close in this case
-          // (see that file's "If the outcome was AUTO-LANDED" branch) — the
-          // issue should already carry workflow:merged by the time this
-          // reads, but the terminal reason here is what THIS phase reports,
-          // independent of close's own idempotent detectOutcome re-check.
-          return { status: "committed", terminalReason: "merged", outputs: { reGateOutcome } };
+          // forge#3624: remediate.md M8 drives close itself on this outcome, but an
+          // engine phase session may skip or fail that delegated close and nothing
+          // verified it. Check the issue's real state: CLOSED + workflow:merged means
+          // the run is genuinely finished (terminal merged). Anything else, including
+          // an unreadable snapshot, hands off to `close` (idempotent via its reconcile).
+          // The reason stays "merged" either way so the commit replaces the review's
+          // sticky "needs-human" and close.buildArgs accepts --terminal-state merged.
+          return mergedResult(reGateOutcome);
         case "HELD-AWAITING-MERGE":
+          // forge#3647: a HELD report for a PR that has since merged must still drive close.
+          if (await prMerged()) return mergedResult(reGateOutcome);
           return { status: "committed", terminalReason: "awaiting-merge", outputs: { reGateOutcome } };
         case "RE-ESCALATED":
         case "UNFIXABLE":
@@ -719,12 +819,15 @@ export const PHASES = [
     },
     entryCondition: (s) => s.committed.includes("review"),
     async reconcile(state, io) {
-      // Idempotent resume: issue already closed or workflow:merged label set → skip the LLM re-run.
+      // Idempotent resume: issue already CLOSED → skip the LLM re-run. forge#3644: the
+      // workflow:merged label alone is NOT proof close ran — remediate M7 labels the issue
+      // merged right after `gh pr merge`, while a staging-base PR leaves it OPEN. Treating
+      // OPEN + workflow:merged as done made close.reconcile swallow remediate's closeHandoff
+      // (remediate's own check, in its AUTO-LANDED branch, requires CLOSED + the label, a
+      // strict subset of what satisfies this predicate on a CLOSED issue).
       const snap = await issueSnapshot(state.issue, io);
       if (!snap.ok) return { satisfied: false };
-      return (snap.state === "CLOSED" || snap.labels.includes(PHASE_MARKERS.close.completionLabel))
-        ? { satisfied: true }
-        : { satisfied: false };
+      return snap.state === "CLOSED" ? { satisfied: true } : { satisfied: false };
     },
     async detectOutcome(state, io) {
       const snap = await issueSnapshot(state.issue, io);

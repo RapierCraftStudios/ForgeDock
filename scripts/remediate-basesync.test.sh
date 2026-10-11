@@ -56,6 +56,15 @@ has "freshness push rc checked" 'if git push origin HEAD:\{HEAD_BRANCH\}; then'
 has "freshness merge re-gated before push" 'Run the Phase M4 pre-push ancestry guard'
 if grep -qF 'do NOT sync a second time' "$SPEC"; then bad "unconditional second-sync refusal removed"; else ok "unconditional second-sync refusal removed"; fi
 
+# Cross-fence shell state (forge#3653): every fence is a fresh shell, so no flag/var may cross fences.
+if grep -qF 'BASESYNC_RAN:-false' "$SPEC"; then bad "M8 not gated on BASESYNC_RAN shell var"; else ok "M8 not gated on BASESYNC_RAN shell var"; fi
+if grep -qE 'BASESYNC_(RAN|CONFLICTED|MERGE_REFUSED)=' "$SPEC"; then bad "no cross-fence BASESYNC_* flags"; else ok "no cross-fence BASESYNC_* flags"; fi
+# MERGE_RC / MERGE_OUT may be read only in the fence that sets them (the M3 sync fence).
+FENCE_SET="$(awk '/^```/{f=!f; n++; next} f&&/MERGE_RC=\$\?/{print n}' "$SPEC" | head -n1)"
+FENCE_USE="$(awk '/^```/{f=!f; n++; next} f&&/\$\{?MERGE_(RC|OUT)/{print n}' "$SPEC" | sort -u | tr '\n' ' ')"
+eq "MERGE_RC/MERGE_OUT read only in the fence that sets them" "$FENCE_USE" "$FENCE_SET "
+has "refused park posts needs-human from the sync fence" 'echo "BLOCKED: base-sync: merge refused'
+
 # Behavioural: dirty tree + base change -> refused (rc!=0, no MERGE_HEAD, empty U-list); real conflict -> MERGE_HEAD present.
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 (

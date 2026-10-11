@@ -22,7 +22,8 @@ describe("orchestrate runtime helper paths", () => {
     assert.match(phase4, /resolve_classify_lane\(\)/);
     assert.match(phase4, /\$HOME\/\.claude\/scripts\/classify-lane\.sh/);
     assert.match(phase4, /\$HOME\/\.opencode\/scripts\/classify-lane\.sh/);
-    assert.match(phase4, /\$REPO_PATH\/scripts\/classify-lane\.sh/);
+    assert.doesNotMatch(phase4, /\$REPO_PATH\/scripts\/classify-lane\.sh/);
+    assert.match(phase4, /\$FORGE_ROOT\/scripts\/classify-lane\.sh/);
     assert.match(phase4, /CLASSIFY_LANE_SCRIPT=\$\(resolve_classify_lane\)/);
     assert.doesNotMatch(
       phase4,
