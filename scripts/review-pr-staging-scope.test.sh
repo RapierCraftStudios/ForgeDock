@@ -109,6 +109,9 @@ UNCOVERED=$(awk '
 [ -z "$UNCOVERED" ] && ok || bad "bash fences starting at line(s) ${UNCOVERED}consume cross-fence state without the FENCE_BOOTSTRAP block"
 # the persisted Phase 6.5 / 6.75 values: producers write them, consumers reload them validated
 grep -q 'test_gate_verdict' "$SPEC" && grep -q 'launched_review_agents' "$SPEC" && ok || bad "TEST_GATE_VERDICT and LAUNCHED_REVIEW_AGENTS must be persisted to the scratchpad"
+# PR-keyed (concurrent runs in one cwd must not share state) and reset by an executable command, not prose
+if grep -qE '\$_SD/(test_gate_verdict|test_gate_reason|launched_review_agents)|\.forge-scratch\}/launched_review_agents' "$SPEC"; then bad "gate/launched-agent scratch files must be keyed by \${PR_NUMBER}_"; else ok; fi
+grep -qF ': > "$_SD/${PR_NUMBER}_launched_review_agents"' "$SPEC" && grep -qF 'rm -f "$_SD/${PR_NUMBER}_test_gate_verdict" "$_SD/${PR_NUMBER}_test_gate_reason"' "$SPEC" && ok || bad "Phase 2 must truncate and Phase 6.5 must rm -f the PR-keyed scratch files in executable commands"
 if awk '/^### 7E:/,/^### 7F:/' "$SPEC" | grep -qF '{GH_REPO}'; then bad "7E must not use the {GH_REPO} template token"; else ok; fi
 mkdir -p "$TMP/sd8/full" "$TMP/sd8/empty" "$TMP/sd8/bad" "$TMP/bin"
 printf '#!/bin/sh\necho stub-value\n' > "$TMP/bin/yq"; chmod +x "$TMP/bin/yq"

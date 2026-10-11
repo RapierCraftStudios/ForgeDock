@@ -598,6 +598,20 @@ For fixable failures: checkout staging, apply fix, verify locally, commit as `fi
 
 ## Phase 2: Material Change Analysis
 
+**Reset launched-agent state (once, before any Phase 2-6 agent launches)**: the list is PR-keyed and append-only, so a prior run or `--retry` would otherwise leave stale domains behind.
+```bash
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] && : > "$_SD/${PR_NUMBER}_launched_review_agents"
+```
+
 **Review scope (applies to Phases 2-6, from Phase 0B.1)**: when `SCOPE_MODE=scoped`, pass every agent `REVIEWED_COMMITS`, `UNREVIEWED_COMMITS`, `CROSS_PR_FILES` and `DEPLOY_WIRING_FILES` in its prompt. Line-level review is limited to `CROSS_PR_FILES`, the diffs of `UNREVIEWED_COMMITS`, and a runtime/deploy readiness checklist (required secrets and env vars present and documented, migration ordering and collisions, deploy wiring and workflow sibling drift). Agents report every finding they see, with its severity and file, whatever file or commit it lives in; a defect that lives only in an already-reviewed PR's files was visible to that PR's own review, so the 7B scope filter may demote it, but only when it is `MEDIUM`, `LOW` or `INFO`: a `CRITICAL` or `HIGH` finding is always reported and kept. Safety-domain agents (Security, Auth, Billing, Concurrency, Database) still read the whole diff of any in-scope file, not just the changed hunks. When `SCOPE_MODE=full`, review the full bundle diff. Report the scope used in the agent comment. <!-- Added: forge#3451 -->
 
 Launch agent (model: {SUBAGENT_MODEL}) to analyze all commits since last deploy. Categorize as: NEW FEATURE, ENHANCEMENT, BUG FIX, REFACTOR, SECURITY, PERFORMANCE, INFRASTRUCTURE, DEPENDENCY. Separate user-facing vs internal. Document breaking changes and required pre-deploy actions.
@@ -921,6 +935,8 @@ echo "=== Phase 6.5: Runtime Test Gate ==="
 echo "Bundle PRs: $(echo $ALL_PR_NUMBERS | tr '\n' ' ')"
 echo "Posture: ${GATE_POSTURE}"
 
+# Reset any stale gate result from a prior run before the Skill call (files are PR-keyed)
+rm -f "$_SD/${PR_NUMBER}_test_gate_verdict" "$_SD/${PR_NUMBER}_test_gate_reason"
 # Initialize test-gate verdict (default SKIP — safe if Phase 6.5 is bypassed)
 TEST_GATE_VERDICT="SKIP"
 TEST_GATE_REASON="Phase 6.5 not yet run"
@@ -934,7 +950,7 @@ TEST_GATE_VERDICT=$(echo "$GATE_OUTPUT" | grep -oP '(?<=FORGE:TEST_GATE:RESULT=)
 
 echo "Test-gate verdict: ${TEST_GATE_VERDICT}"
 # Persist the gate result: every Bash call is a fresh shell, and the verdict-handling fence and Phase 8 read it back (validated on reload).
-printf '%s\n' "$TEST_GATE_VERDICT" > "$_SD/test_gate_verdict"; printf '%s\n' "$TEST_GATE_REASON" > "$_SD/test_gate_reason"
+printf '%s\n' "$TEST_GATE_VERDICT" > "$_SD/${PR_NUMBER}_test_gate_verdict"; printf '%s\n' "$TEST_GATE_REASON" > "$_SD/${PR_NUMBER}_test_gate_reason"
 ```
 
 **Verdict handling**:
@@ -953,8 +969,8 @@ GH_FLAG="-R $GH_REPO"
 GATE_POSTURE=$(yq '.verification.test_gate.posture // "blocking"' "$CONFIG_FILE" 2>/dev/null || echo "blocking")
 OVERRIDE_PHRASE=$(yq '.verification.test_gate.override_phrase // "OVERRIDE: shipping with test failures —"' "$CONFIG_FILE" 2>/dev/null || echo "OVERRIDE: shipping with test failures —")
 # Reload the Phase 6.5 gate result persisted by its producer (validated: only a known verdict reaches a gate decision).
-[ -n "${TEST_GATE_VERDICT:-}" ] || { [ -r "$_SD/test_gate_verdict" ] && TEST_GATE_VERDICT=$(sed -n -E '1{/^(BLOCK|PASS|SKIP)$/p;q}' "$_SD/test_gate_verdict"); }
-[ -n "${TEST_GATE_REASON:-}" ] || { [ -r "$_SD/test_gate_reason" ] && TEST_GATE_REASON=$(sed -n 1p "$_SD/test_gate_reason" | tr -d '\r\000-\037' | cut -c1-400); }
+[ -n "${TEST_GATE_VERDICT:-}" ] || { [ -r "$_SD/${PR_NUMBER}_test_gate_verdict" ] && TEST_GATE_VERDICT=$(sed -n -E '1{/^(BLOCK|PASS|SKIP)$/p;q}' "$_SD/${PR_NUMBER}_test_gate_verdict"); }
+[ -n "${TEST_GATE_REASON:-}" ] || { [ -r "$_SD/${PR_NUMBER}_test_gate_reason" ] && TEST_GATE_REASON=$(sed -n 1p "$_SD/${PR_NUMBER}_test_gate_reason" | tr -d '\r\000-\037' | cut -c1-400); }
 case "$TEST_GATE_VERDICT" in
 
   SKIP)
@@ -1060,7 +1076,7 @@ To override (ship known failures with documented reason), post a comment contain
 
 <!-- FORGE:GATE_FAILURE:TYPE=test-gate|BUNDLE=$(echo $ALL_PR_NUMBERS | tr '\n' ' ' | xargs) -->" 2>/dev/null || true
       fi
-      printf '%s\n' "$TEST_GATE_VERDICT" > "$_SD/test_gate_verdict"; printf '%s\n' "BLOCK (blocking posture, no override)" > "$_SD/test_gate_reason"
+      printf '%s\n' "$TEST_GATE_VERDICT" > "$_SD/${PR_NUMBER}_test_gate_verdict"; printf '%s\n' "BLOCK (blocking posture, no override)" > "$_SD/${PR_NUMBER}_test_gate_reason"
       exit 1
     fi
     ;;
@@ -1073,7 +1089,7 @@ To override (ship known failures with documented reason), post a comment contain
 
 esac
 # Persist the gate result: every Bash call is a fresh shell, and the verdict-handling fence and Phase 8 read it back (validated on reload).
-printf '%s\n' "$TEST_GATE_VERDICT" > "$_SD/test_gate_verdict"; printf '%s\n' "$TEST_GATE_REASON" > "$_SD/test_gate_reason"
+printf '%s\n' "$TEST_GATE_VERDICT" > "$_SD/${PR_NUMBER}_test_gate_verdict"; printf '%s\n' "$TEST_GATE_REASON" > "$_SD/${PR_NUMBER}_test_gate_reason"
 ```
 
 If the gate exits with `RESULT: BLOCK DEPLOY` → **STOP**. A `<!-- FORGE:GATE_FAILURE -->` structured comment is automatically posted on the staging→main PR (if `$PR_NUMBER` is set) for pipeline-health tracking. `/test-gate` will have filed `test-failure` issues for each failing cluster before returning BLOCK.
@@ -1132,7 +1148,7 @@ fi
 
 ### Phase 6.75: Verify Agent Delivery
 
-Before launching every Phase 2-6 review agent, append its lowercase marker domain (for example, `security`, `bug-hunter-api`, or `regression-risk`) to `LAUNCHED_REVIEW_AGENTS` and persist it with `printf '%s\n' "$AGENT_DOMAIN" >> "${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/launched_review_agents"` (each Bash call is a fresh shell; the fence below reloads the file, accepting only `^[a-z0-9-]+$` lines). Truncate that file once when Phase 2 starts. A completed agent is accounted for only when its marker comment is present on the PR from a trusted author, starts with the marker, and carries the `Reviewed-SHA:` line for the current head.
+Before launching every Phase 2-6 review agent, append its lowercase marker domain (for example, `security`, `bug-hunter-api`, or `regression-risk`) to `LAUNCHED_REVIEW_AGENTS` and persist it with `printf '%s\n' "$AGENT_DOMAIN" >> "${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/${PR_NUMBER}_launched_review_agents"` (each Bash call is a fresh shell; the fence below reloads the file, accepting only `^[a-z0-9-]+$` lines). The file is truncated by the executable fence at the start of Phase 2. A completed agent is accounted for only when its marker comment is present on the PR from a trusted author, starts with the marker, and carries the `Reviewed-SHA:` line for the current head.
 
 ```bash
 # Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
@@ -1145,7 +1161,7 @@ CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
 [ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
 [ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
 # Reload the launched-agent list persisted at dispatch (validated: lowercase marker domains only).
-[ -n "${LAUNCHED_REVIEW_AGENTS:-}" ] || { [ -r "$_SD/launched_review_agents" ] && LAUNCHED_REVIEW_AGENTS=$(grep -E '^[a-z0-9-]+$' "$_SD/launched_review_agents" | sort -u | tr '\n' ' '); }
+[ -n "${LAUNCHED_REVIEW_AGENTS:-}" ] || { [ -r "$_SD/${PR_NUMBER}_launched_review_agents" ] && LAUNCHED_REVIEW_AGENTS=$(grep -E '^[a-z0-9-]+$' "$_SD/${PR_NUMBER}_launched_review_agents" | sort -u | tr '\n' ' '); }
 MISSING_AGENT_COMMENTS=""
 # Each Bash call is a fresh shell: re-resolve the full head SHA if it is not set, and refuse when it is not a commit id
 # (an empty SHA would make the Reviewed-SHA match accept any head).
@@ -1657,7 +1673,7 @@ Include in Finding Triage Results: `SCOPE_MODE`, `reviewed_prs`, `unreviewed_com
 
 Include: Material Changes Summary, Risk Matrix (CI, Build, Bugs, Security, Billing, Quality, Regression, **Test Gate**), Finding Triage Results, Blocking Issues, Deployment Checklist (pre-deploy, deploy, post-deploy verification, rollback triggers), Stats.
 
-**Risk Matrix must include a Test Gate row** (use `$TEST_GATE_VERDICT` and `$TEST_GATE_REASON` set in Phase 6.5; both are persisted to `$_SD/test_gate_verdict` / `$_SD/test_gate_reason` by that phase, so reload them in a fresh shell with the validated `TEST_GATE_VERDICT` / `TEST_GATE_REASON` reload lines carried by the Phase 6.5 verdict-handling fence):
+**Risk Matrix must include a Test Gate row** (use `$TEST_GATE_VERDICT` and `$TEST_GATE_REASON` set in Phase 6.5; both are persisted to `$_SD/${PR_NUMBER}_test_gate_verdict` / `$_SD/${PR_NUMBER}_test_gate_reason` by that phase, so reload them in a fresh shell with the validated `TEST_GATE_VERDICT` / `TEST_GATE_REASON` reload lines carried by the Phase 6.5 verdict-handling fence):
 
 | Domain | Result | Notes |
 |--------|--------|-------|
