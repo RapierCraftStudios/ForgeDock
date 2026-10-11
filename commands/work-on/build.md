@@ -174,12 +174,15 @@ EXISTING_FAST_PATH=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate 
   - `DIFF_SIZE_RESULT=OVER` or `DIFF_SIZE_RESULT=COHESIVE` → verify, without creating anything, that the branch and worktree exist (derive BRANCH/WORKTREE_PATH as in B1A/B1C), that `git -C "$WORKTREE_PATH" branch --show-current` equals BRANCH, and that a staged diff is present (`! git -C "$WORKTREE_PATH" diff --cached --quiet`). Recover `COMPLEXITY_BAND` from `EXISTING_FAST_PATH` with the B0.5 resume extraction. When all hold, skip B0.5-B5 and continue at B5.5 (it re-measures, then applies the override / `COHESIVE` / `NEEDS_DECOMPOSE` / `OK` logic; never re-run implement).
   - Anything else (no `FORGE:DIFF_SIZE`, `result` is not `OVER`, worktree or branch missing or mismatched, nothing staged, band unrecoverable) → never skip ahead on missing state; fall through to the next rule.
 - If `<!-- FORGE:BUILDER -->` exists BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → build was interrupted after the comment was posted but before the commit (validate V5). Delete the partial comment and restart from Phase B2 (contract): <!-- Added: forge#1305 -->
+  Select with ONE anchored, trusted selector (body must start with the marker; author must be a Bot or OWNER/MEMBER/COLLABORATOR). Delete ONLY when exactly one non-complete candidate exists and it carries no other FORGE phase marker; unparsable, zero, or multiple matches delete nothing (fail closed). <!-- Added: forge#3668 -->
   ```bash
-  PARTIAL_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
-    --jq '[.[] | select(.body | contains("FORGE:BUILDER") and (contains("FORGE:BUILDER:COMPLETE") | not))] | last | .id // ""')
+  BLD=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments | jq -s '[.[][] | select((.body // "") | startswith("<!-- FORGE:BUILDER -->")) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | {id: .id, complete: (.body | contains("<!-- FORGE:BUILDER:COMPLETE -->")), other: (.body | test("<!-- FORGE:(INVESTIGATOR|CONTEXT|CONTRACT|ARCHITECT)"))}]') || BLD=""
+  PARTIAL_ID=$(printf '%s' "$BLD" | jq -r '[.[] | select(.complete | not)] | if length == 1 and (.[0].other | not) then .[0].id else empty end' 2>/dev/null)
   if [ -n "$PARTIAL_ID" ]; then
     gh api repos/{GH_REPO}/issues/comments/$PARTIAL_ID -X DELETE
     echo "Deleted partial FORGE:BUILDER comment (no FORGE:BUILDER:COMPLETE) — restarting build from Phase B2"
+  else
+    echo "builder resume: no single safe partial BUILDER comment — deleting nothing"
   fi
   ```
 - If there is no `<!-- FORGE:INVESTIGATOR -->` comment with `<!-- INVESTIGATION:COMPLETE -->` → Blocked exit with blocker "Investigation not complete — run investigate first".

@@ -72,12 +72,15 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 **Resume check**:
 - If `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment → implementation is done — EXIT and print `IMPLEMENT_RESULT: status: ALREADY_DONE` as the final reply.
 - If `<!-- FORGE:BUILDER -->` exists BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → implementation was interrupted after the comment was posted but before the commit (validate.md V5). Delete the partial comment and restart from Phase I2:
+  Select with ONE anchored, trusted selector (body must start with the marker; author must be a Bot or OWNER/MEMBER/COLLABORATOR; mirrors `scripts/trusted-comments.sh`). A comment that merely mentions the marker (INVESTIGATOR, CONTEXT, ARCHITECT) never matches. Delete ONLY when exactly one non-complete candidate exists and it carries no other FORGE phase marker; unparsable, zero, or multiple matches delete nothing (fail closed). <!-- Added: forge#3668 -->
   ```bash
-  PARTIAL_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-    --jq '[.[] | select(.body | contains("FORGE:BUILDER") and (contains("FORGE:BUILDER:COMPLETE") | not))] | last | .id // ""')
+  BLD=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments | jq -s '[.[][] | select((.body // "") | startswith("<!-- FORGE:BUILDER -->")) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | {id: .id, complete: (.body | contains("<!-- FORGE:BUILDER:COMPLETE -->")), other: (.body | test("<!-- FORGE:(INVESTIGATOR|CONTEXT|CONTRACT|ARCHITECT)"))}]') || BLD=""
+  PARTIAL_ID=$(printf '%s' "$BLD" | jq -r '[.[] | select(.complete | not)] | if length == 1 and (.[0].other | not) then .[0].id else empty end' 2>/dev/null)
   if [ -n "$PARTIAL_ID" ]; then
     gh api repos/{GH_REPO}/issues/comments/$PARTIAL_ID -X DELETE
     echo "Deleted partial FORGE:BUILDER comment (no FORGE:BUILDER:COMPLETE) — restarting implementation"
+  else
+    echo "builder resume: no single safe partial BUILDER comment — deleting nothing"
   fi
   ```
 

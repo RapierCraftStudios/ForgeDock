@@ -66,6 +66,7 @@ jobs:
           /bin/bash scripts/trusted-comments.test.sh
           /bin/bash scripts/remediation-marker-match.test.sh
           /bin/bash scripts/architect-resume-match.test.sh
+          /bin/bash scripts/builder-resume-match.test.sh
           /bin/bash scripts/remediate-basesync.test.sh
           /bin/bash scripts/remediate-approved-head.test.sh
           /bin/bash scripts/classify-finding.test.sh
@@ -114,6 +115,7 @@ jobs:
           bash scripts/trusted-comments.test.sh
           bash scripts/remediation-marker-match.test.sh
           bash scripts/architect-resume-match.test.sh
+          bash scripts/builder-resume-match.test.sh
           bash scripts/remediate-basesync.test.sh
           bash scripts/review-acceptance-gate.test.sh
           bash scripts/cost-report.test.sh
@@ -172,6 +174,7 @@ jobs:
           bash scripts/trusted-comments.test.sh
           bash scripts/remediation-marker-match.test.sh
           bash scripts/architect-resume-match.test.sh
+          bash scripts/builder-resume-match.test.sh
           bash scripts/remediate-basesync.test.sh
           bash scripts/review-acceptance-gate.test.sh
           bash scripts/cost-report.test.sh
