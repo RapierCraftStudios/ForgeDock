@@ -293,7 +293,7 @@ if grep -qE 'merge-base --is-ancestor.*REVIEWED_SHA_STALE|diff_shape\(\)' "$SPEC
 grep -qF 'printf '"'"'%s\n'"'"' "$_FILES" | sort -u | sed "s|^|$pr |" >> "$_PF"' "$SPEC" && grep -qF 'git diff-tree --no-commit-id --name-only -r --cc "$c"' "$SPEC" && ok || bad "CROSS_PR_FILES accumulation and --cc merge scoping must stay intact"
 [ "$(grep -c '# FENCE_BOOTSTRAP$' "$SPEC" | head -1)" -ge 3 ] && ok || bad "FENCE_BOOTSTRAP stubs must remain"
 # an unresolvable helper fails the fence closed (exit 1), never an unsourced bootstrap
-OUT8=$( ( unset FORGEDOCK_HOME; export HOME="$TMP/nohome"; cd "$TMP" && bash -c "$(cat "$TMP/boot.sh"); echo reached" ) 2>&1 )
+OUT8=$( ( unset FORGEDOCK_HOME FORGE_HOME FORGE_ROOT CLAUDE_PLUGIN_ROOT CLAUDE_CONFIG_DIR CODEX_HOME FORGE_SOURCED_ROOT FORGEDOCK_MARKETPLACE; export HOME="$TMP/nohome"; cd "$TMP" && bash -c "$(cat "$TMP/boot.sh"); echo reached" ) 2>&1 )
 case "$OUT8" in *BLOCKED*) case "$OUT8" in *reached*) bad "unresolved bootstrap helper must stop the fence" ;; *) ok ;; esac ;; *) bad "unresolved bootstrap helper must print BLOCKED (got '$OUT8')" ;; esac
 # a stale-head PR must not credit its own merge commit (it contains the post-review commits): the DELTA branch only appends DELTA_COMMITS
 if awk '/^bundle_delta_credit\(\)/,/^\}/' "$SPEC" | grep -q 'mergeCommit'; then bad "the DELTA path must not credit the PR merge commit"; else ok; fi
