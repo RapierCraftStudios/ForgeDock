@@ -141,21 +141,42 @@ Re-read current state before doing anything:
 ```bash
 gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,milestone
 
-# Check investigation report
+# Check investigation report — intentionally NOT cycle-scoped: investigate may commit CONFIRMED in a later cycle without re-posting INVESTIGATOR, so scoping it would block every new-cycle build
 TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh) # script resolution block verbatim; unresolved/failed read = fail closed
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:INVESTIGATOR -->'
 
-# Check if build already completed (require FORGE:BUILDER:COMPLETE — not just FORGE:BUILDER)
-gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
-  --jq '.[] | select(.body | contains("FORGE:BUILDER")) | .body'
+# Current-cycle slice (forge#3666): every resume read below runs on the comments AFTER the newest TRUSTED
+# `<!-- FORGE:CYCLE: n -->` marker (same predicate as `cycleNumber`/`sliceToCurrentCycle` in bin/engine/phases.mjs:
+# trusted author incl. the FORGE_TRAIL_TRUSTED_ASSOCIATIONS / FORGE_TRAIL_TRUSTED_LOGINS overrides, same `${VAR-default}`
+# handling as scripts/trusted-comments.sh; body starts with the header, marker on its own line); all comments when no marker exists.
+# A cycle-1 BUILDER:COMPLETE must never yield ALREADY_DONE in cycle 2. Re-declare this function verbatim in every
+# fence that uses it (shell functions do not survive across fences).
+cycle_slice() {
+  jq -s --arg assoc "${FORGE_TRAIL_TRUSTED_ASSOCIATIONS-OWNER,MEMBER,COLLABORATOR}" --arg logins "${FORGE_TRAIL_TRUSTED_LOGINS-}" '[.[][]] as $c
+    | ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
+    | ($logins | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $L
+    | ([$c | to_entries[]
+        | select(((.value.author_association // "") as $x | $A | index($x) != null) or ((.value.user.type // "") == "Bot") or ((.value.user.login // "") as $x | $L | index($x) != null))
+        | select((.value.body // "") | test("\\A\\s*<!--\\s*FORGE:CYCLE:") and test("(?m)^[ \\t]*<!--[ \\t]*FORGE:CYCLE:[ \\t]*[0-9]+[ \\t]*-->[ \\t]*$"))
+        | .key] | last) as $i
+    | if $i == null then $c else $c[($i + 1):] end'
+}
+COMMENTS_JSON=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate) \
+  && CYCLE_SLICE=$(printf '%s' "$COMMENTS_JSON" | cycle_slice) && [ -n "$CYCLE_SLICE" ] \
+  || echo "CYCLE_LOOKUP=FAILED"  # a failed read is NEVER "no marker"
 
-# Existing classification from a prior run (resume path)
-EXISTING_FAST_PATH=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
-  --jq '.[] | select(.body | contains("FORGE:FAST_PATH")) | .body' 2>/dev/null | head -1)
+# Check if build already completed (require FORGE:BUILDER:COMPLETE — not just FORGE:BUILDER); current-cycle slice only
+printf '%s' "$CYCLE_SLICE" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:BUILDER'
+
+# Existing classification from a prior run of THIS cycle (resume path); none in a fresh cycle, so B0.5 re-classifies and re-posts
+EXISTING_FAST_PATH=$(printf '%s' "$CYCLE_SLICE" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:FAST_PATH' 2>/dev/null \
+  | head -n 1 | jq -r 'select(type == "string")')
 ```
 
+`CYCLE_LOOKUP=FAILED` (or `trusted-comments.sh` unresolved) → Blocked exit with blocker `cycle-lookup-unavailable: could not read FORGE:CYCLE` (a transient GitHub failure uses the `github-unavailable:` prefix); never read a failed lookup as "no marker". Below, "present" and "exists" for BUILDER, BUILDER:COMPLETE, FAST_PATH, DIFF_SIZE, ACCEPTANCE_GATE and BUILD_BLOCKED comments always mean present in the **current-cycle slice** (comments after the newest trusted `FORGE:CYCLE` marker); a cycle-1 `BUILDER:COMPLETE` is invisible in cycle 2, so a new cycle with no slice COMPLETE falls through to B1 and builds fresh.
+
 **Resume check**:
-- If `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment → the builder finished, but COMPLETE is posted at validate V5, BEFORE the B6.5 acceptance gate, so it is not proof the build passed. **Gate resume** (checked first; first match wins) <!-- Added: forge#3725 -->: read the newest trusted, current-cycle (after the newest `FORGE:CYCLE`) comment that starts with `FORGE:ACCEPTANCE_GATE` or `FORGE:BUILD_BLOCKED`, through the same anchored, trust-filtered lookup as the size-gate resume below (script resolution block verbatim; use `bodies '^<!-- FORGE:(ACCEPTANCE_GATE|BUILD_BLOCKED)'`, and compare by comment order, never by presence):
+- If `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment of the current-cycle slice → the builder finished, but COMPLETE is posted at validate V5, BEFORE the B6.5 acceptance gate, so it is not proof the build passed. **Gate resume** (checked first; first match wins) <!-- Added: forge#3725 -->: read the newest trusted, comment of the current-cycle slice that starts with `FORGE:ACCEPTANCE_GATE` or `FORGE:BUILD_BLOCKED`, through the same anchored, trust-filtered lookup as the size-gate resume below (script resolution block verbatim; pipe `cycle_slice` into `bodies '^<!-- FORGE:(ACCEPTANCE_GATE|BUILD_BLOCKED)'`, and compare by comment order, never by presence):
   - Lookup failed (`trusted-comments.sh` unresolved or `gh` error) → Blocked exit with blocker `gate-lookup-unavailable: could not read FORGE:ACCEPTANCE_GATE` (a transient GitHub failure uses the `github-unavailable:` prefix). Never read a failed lookup as "no gate marker".
   - Newest is `FORGE:ACCEPTANCE_GATE:FAILED`, `FORGE:ACCEPTANCE_GATE:BLOCKED`, or a `FORGE:BUILD_BLOCKED` comment → the gate is blocked and the engine fails closed on it, so returning ALREADY_DONE would deadlock every re-run. Derive BRANCH/WORKTREE_PATH/PR_BASE as in B1A/B1C (without creating anything), verify the branch and worktree exist and that `git -C "$WORKTREE_PATH" branch --show-current` equals BRANCH (missing or mismatched → Blocked exit `worktree-missing: cannot re-enter B6.5`; never recreate silently), recover `COMPLEXITY_BAND` from `EXISTING_FAST_PATH` with the B0.5 resume extraction, then skip B0.5-B6 and re-enter at **Phase B6.5**, which posts a fresh PASSED/FAILED/BLOCKED verdict (the one-repair `FORGE:ACCEPTANCE_REPAIR` bound still applies).
   - Newest is `FORGE:ACCEPTANCE_GATE:PASSED`, or no gate marker exists → build already complete. Derive BRANCH/WORKTREE_PATH as in B1A/B1C (without creating anything), then print `BUILD_RESULT: status: ALREADY_DONE`.
@@ -165,7 +186,8 @@ EXISTING_FAST_PATH=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate 
   set -o pipefail
   TRUSTED_SCRIPT="${UNIVERSAL_DIR:+$UNIVERSAL_DIR/trusted-comments.sh}"
   [ -n "$TRUSTED_SCRIPT" ] && [ -f "$TRUSTED_SCRIPT" ] || { echo "DIFF_SIZE_LOOKUP=FAILED (trusted-comments.sh unresolved)"; exit 0; }
-  DS=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:DIFF_SIZE') \
+  # <cycle_slice function from B0, verbatim>
+  DS=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" | cycle_slice | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:DIFF_SIZE') \
     || { echo "DIFF_SIZE_LOOKUP=FAILED"; exit 0; }
   LAST_RESULT=$(printf '%s\n' "$DS" | jq -r 'select(type == "string")' | sed -n 's/^result: *\([A-Z]*\).*/\1/p' | tail -n 1)
   echo "DIFF_SIZE_RESULT=${LAST_RESULT:-<none>}"
@@ -173,10 +195,11 @@ EXISTING_FAST_PATH=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate 
   - `DIFF_SIZE_LOOKUP=FAILED` → Blocked exit with blocker `size-gate-unavailable: could not read FORGE:DIFF_SIZE` (a transient GitHub failure uses the `github-unavailable:` prefix). Never read a failed lookup as "no DIFF_SIZE".
   - `DIFF_SIZE_RESULT=OVER` or `DIFF_SIZE_RESULT=COHESIVE` → verify, without creating anything, that the branch and worktree exist (derive BRANCH/WORKTREE_PATH as in B1A/B1C), that `git -C "$WORKTREE_PATH" branch --show-current` equals BRANCH, and that a staged diff is present (`! git -C "$WORKTREE_PATH" diff --cached --quiet`). Recover `COMPLEXITY_BAND` from `EXISTING_FAST_PATH` with the B0.5 resume extraction. When all hold, skip B0.5-B5 and continue at B5.5 (it re-measures, then applies the override / `COHESIVE` / `NEEDS_DECOMPOSE` / `OK` logic; never re-run implement).
   - Anything else (no `FORGE:DIFF_SIZE`, `result` is not `OVER`, worktree or branch missing or mismatched, nothing staged, band unrecoverable) → never skip ahead on missing state; fall through to the next rule.
-- If `<!-- FORGE:BUILDER -->` exists BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → build was interrupted after the comment was posted but before the commit (validate V5). Delete the partial comment and restart from Phase B2 (contract): <!-- Added: forge#1305 -->
+- If `<!-- FORGE:BUILDER -->` exists in the current-cycle slice BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → build was interrupted after the comment was posted but before the commit (validate V5). Delete the partial comment and restart from Phase B2 (contract): <!-- Added: forge#1305 -->
   Select with ONE anchored, trusted selector (body must start with the marker; author must be a Bot or OWNER/MEMBER/COLLABORATOR). Delete ONLY when exactly one non-complete candidate exists and it carries no other FORGE phase marker; unparsable, zero, or multiple matches delete nothing (fail closed). <!-- Added: forge#3668 -->
   ```bash
-  BLD=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments | jq -s '[.[][] | select((.body // "") | startswith("<!-- FORGE:BUILDER -->")) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | {id: .id, complete: (.body | contains("<!-- FORGE:BUILDER:COMPLETE -->")), other: (.body | test("<!-- FORGE:(INVESTIGATOR|CONTEXT|CONTRACT|ARCHITECT)"))}]') || BLD=""
+  # <cycle_slice function from B0, verbatim> — only a current-cycle partial is ever deleted; prior-cycle comments are never touched
+  BLD=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments | cycle_slice | jq -s '[.[][] | select((.body // "") | startswith("<!-- FORGE:BUILDER -->")) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | {id: .id, complete: (.body | contains("<!-- FORGE:BUILDER:COMPLETE -->")), other: (.body | test("<!-- FORGE:(INVESTIGATOR|CONTEXT|CONTRACT|ARCHITECT)"))}]') || BLD=""
   PARTIAL_ID=$(printf '%s' "$BLD" | jq -r '[.[] | select(.complete | not)] | if length == 1 and (.[0].other | not) then .[0].id else empty end' 2>/dev/null)
   if [ -n "$PARTIAL_ID" ]; then
     gh api repos/{GH_REPO}/issues/comments/$PARTIAL_ID -X DELETE
@@ -270,7 +293,7 @@ Whatever path was taken, set `COMPLEXITY_BAND` (uppercase) for the rest of this 
 
 ### B1A: Derive branch name
 
-If `--branch` was passed, or a local/remote branch already exists whose name ends in `-{NUMBER}` (`git branch -a --list "*-{NUMBER}"`), reuse it (resume). Otherwise derive from the issue title: lowercase, hyphenated, max 40 chars (truncate if needed).
+If `--branch` was passed, or a local/remote branch already exists whose name ends in `-{NUMBER}` (`git branch -a --list "*-{NUMBER}"`), reuse it (resume). **New-cycle guard** <!-- Added: forge#3666 -->: when a trusted `FORGE:CYCLE` marker exists and the current-cycle slice has no `FORGE:BUILDER`, never re-adopt a prior-cycle branch whose PR is already merged or closed (`gh pr list {GH_FLAG} --head "<branch>" --state all --json state --jq '.[].state'` shows `MERGED`/`CLOSED`, or the branch is already merged into `origin/{PR_BASE}`); derive a fresh name instead (append `-c<cycle>` before `-{NUMBER}`, e.g. `fix/foo-c2-{NUMBER}`). Otherwise derive from the issue title: lowercase, hyphenated, max 40 chars (truncate if needed).
 - Bug / fix issues → prefix `fix/`
 - Feature issues → prefix `feat/`
 - Refactor / maintenance → prefix `fix/` or `refactor/`
