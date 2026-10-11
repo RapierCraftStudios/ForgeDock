@@ -70,6 +70,7 @@ jobs:
           /bin/bash scripts/remediate-basesync.test.sh
           /bin/bash scripts/remediate-approved-head.test.sh
           /bin/bash scripts/classify-finding.test.sh
+          /bin/bash scripts/cap-findings.test.sh
           /bin/bash scripts/check-contract-scope.test.sh
           /bin/bash scripts/amplification-breaker.test.sh
           /bin/bash scripts/check-spec-bash.test.sh
@@ -124,9 +125,10 @@ jobs:
       - name: Run verify-phase-trail.test.sh
         if: runner.os != 'macOS'
         run: bash scripts/verify-phase-trail.test.sh
-      - name: Run classify-finding.test.sh and amplification-breaker.test.sh
+      - name: Run classify-finding.test.sh, cap-findings.test.sh and amplification-breaker.test.sh
         run: |
           bash scripts/classify-finding.test.sh
+          bash scripts/cap-findings.test.sh
           bash scripts/check-contract-scope.test.sh
           bash scripts/amplification-breaker.test.sh
           bash scripts/check-spec-bash.test.sh
@@ -191,9 +193,10 @@ jobs:
           bash scripts/issue-dedup.test.sh
           bash scripts/checkbox-sections.test.sh
           bash scripts/resolve-deploy-gate.test.sh
-      - name: Run classify-finding.test.sh and amplification-breaker.test.sh
+      - name: Run classify-finding.test.sh, cap-findings.test.sh and amplification-breaker.test.sh
         run: |
           bash scripts/classify-finding.test.sh
+          bash scripts/cap-findings.test.sh
           bash scripts/check-contract-scope.test.sh
           bash scripts/amplification-breaker.test.sh
           bash scripts/check-spec-bash.test.sh

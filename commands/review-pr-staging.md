@@ -1179,6 +1179,14 @@ if [ -z "$CLASSIFY_SCRIPT" ]; then
   echo "REVIEW_RESULT: status: BLOCKED, blocker: classifier unavailable (classify-finding.sh not resolvable through the trusted resolver)"
   exit 0
 fi
+# Per-review cap (#3642): same trusted resolver, same fail-closed rule (an unresolvable cap helper would file unbounded).
+CAP_SCRIPT=$(forge_resolve cap-findings.sh)
+if [ -z "$CAP_SCRIPT" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: cap helper unavailable (cap-findings.sh not resolvable through the trusted resolver)"
+  exit 0
+fi
+# forge.yaml review.max_filed_findings (optional; absent = helper default 2). The helper falls back on an invalid value, so never validate here.
+MAX_FILED_FINDINGS=$(yq '.review.max_filed_findings // ""' forge.yaml 2>/dev/null || echo '')
 # Per-finding inputs come from each structured block: FINDING_ID, FINDING_SEVERITY, FINDING_CONFIDENCE, FINDING_AGENT, FINDING_TITLE, FINDING_BODY,
 # FINDING_FILE (primary) and FINDING_PATHS (newline-separated, every cited file). Run THIS WHOLE BLOCK in ONE Bash call, looping over every deduped finding
 # (init once, then classify_one per finding, then the disposition record), because counters and the note list live in shell state and a fresh shell loses them.
@@ -1187,7 +1195,9 @@ type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FO
 # An empty PR_NUMBER would key every scratch file as "_notes.md" / "_scope.env" and the disposition record could not be posted: stop and report it.
 [ -n "${PR_NUMBER:-}" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: PR_NUMBER unavailable (Phase -1 did not persist staging_pr_number); FORGE:NOTE_DISPOSITION cannot be recorded"; exit 0; }
 NOTE_LIST_FILE="$_SD/${PR_NUMBER}_notes.md"; : > "$NOTE_LIST_FILE"
-NOTES_LISTED=0; NOTES_DROPPED=0; FINDINGS_FILED=0; OUT_OF_SCOPE=0
+NOTES_LISTED=0; NOTES_DROPPED=0; FINDINGS_FILED=0; OUT_OF_SCOPE=0; NOTES_CAPPED=0
+CAP_ROWS_FILE="$_SD/${PR_NUMBER}_cap-rows.tsv"; : > "$CAP_ROWS_FILE"   # ISSUE rows awaiting the per-review cap (id, severity, confidence, disposition, agent, file, title; `-` = empty)
+CAPPED_IDS_FILE="$_SD/${PR_NUMBER}_capped-ids.txt"; : > "$CAPPED_IDS_FILE"   # ids the cap turned into NOTEs: 7E/7F must skip them
 # 0B.1 results were written to a scope file by the Phase 0B.1 block; a missing or unreadable file means SCOPE_MODE=full (no demotion, fail open), announced rather than silent.
 SCOPE_MODE=full; CROSS_PR_FILES=""; UNREVIEWED_FILES=""; DEPLOY_WIRING_FILES=""
 if [ -r "$_SD/${PR_NUMBER}_scope.env" ]; then . "$_SD/${PR_NUMBER}_scope.env"; else echo "WARNING: $_SD/${PR_NUMBER}_scope.env unreadable: SCOPE_MODE=full (no out-of-scope demotion)"; fi
@@ -1282,15 +1292,36 @@ classify_one() {
   case "$DISPOSITION" in
     "NOTE reflag"*) NOTES_REFLAG=$((NOTES_REFLAG+1)); printf '%s\n' "- ${FINDING_ID:-?} ${FINDING_FILE:-?} [${SEV:-?}] ${FINDING_TITLE:-}: ${DISPOSITION}" >> "$NOTE_LIST_FILE" ;;   # counted in notes_reflag only
     NOTE*) NOTES_LISTED=$((NOTES_LISTED+1)); printf '%s\n' "- ${FINDING_ID:-?} ${FINDING_FILE:-?} [${SEV:-?}] ${FINDING_TITLE:-}: ${DISPOSITION}" >> "$NOTE_LIST_FILE" ;;
-    *) FINDINGS_FILED=$((FINDINGS_FILED+1)) ;;   # classified ISSUE; 7E dedup may still skip creation
+    *) [ -n "${CAP_ROWS_FILE:-}" ] && printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${FINDING_ID:--}" "${SEV:--}" "${FINDING_CONFIDENCE:--}" "$DISPOSITION" "${FINDING_AGENT:--}" "${FINDING_FILE:--}" "$(printf '%s' "${FINDING_TITLE:--}" | tr '\t\n' '  ')" >> "$CAP_ROWS_FILE" ;;   # classified ISSUE: counted in FINDINGS_FILED by cap_pass AFTER the per-review cap; 7E dedup may still skip creation
   esac
 }
-# for each deduped finding: set the FINDING_* inputs, call classify_one, then use $DISPOSITION (ISSUE continues to 7E/7F).
+cap_pass() {
+  # Per-review cap (#3642): run ONCE after the last classify_one and before 7E. Keeps at most review.max_filed_findings ISSUE rows (default 2; HIGH/CRITICAL never capped),
+  # turns the overflow into listed `NOTE capped` entries (never filed, never dropped), and sets FINDINGS_FILED (post-cap ISSUE count) and NOTES_CAPPED.
+  local _out="$_SD/${PR_NUMBER}_cap-out.tsv" _total
+  FINDINGS_FILED=0; NOTES_CAPPED=0; : > "$CAPPED_IDS_FILE"
+  [ -s "$CAP_ROWS_FILE" ] || return 0
+  _total=$(grep -c . "$CAP_ROWS_FILE")
+  # A helper runtime failure keeps every ISSUE (fail toward filing; the cap is a damper, not a gate).
+  if ! bash "$CAP_SCRIPT" --lineage none ${MAX_FILED_FINDINGS:+--cap "$MAX_FILED_FINDINGS"} --input "$CAP_ROWS_FILE" > "$_out" 2>/dev/null || ! grep -q '^CAPPED=' "$_out"; then
+    FINDINGS_FILED="$_total"; echo "WARNING: cap-findings.sh failed: all $_total ISSUE findings kept"; return 0
+  fi
+  NOTES_CAPPED=$(sed -n 's/^CAPPED=//p' "$_out" | tail -n 1); NOTES_CAPPED="${NOTES_CAPPED:-0}"
+  # Output rows are in input order, line-aligned with CAP_ROWS_FILE.
+  awk -F'\t' -v ids="$CAPPED_IDS_FILE" 'NR == FNR { if ($0 !~ /^CAPPED=/) o[++n] = $2; next }   # allowlist:positional-arg (awk fields)
+    { k++; if (o[k] == "NOTE capped") { printf "%s\n", $1 > ids; printf "- %s %s [%s] %s: NOTE capped (over review.max_filed_findings)\n", $1, $6, $2, $7 } }' "$_out" "$CAP_ROWS_FILE" >> "$NOTE_LIST_FILE"   # allowlist:positional-arg (awk fields)
+  FINDINGS_FILED=$((_total - NOTES_CAPPED))
+  echo "cap_pass: findings_filed=$FINDINGS_FILED notes_capped=$NOTES_CAPPED (carry both into the disposition record)"
+}
+# for each deduped finding: set the FINDING_* inputs and call classify_one (it records ISSUE rows; nothing is filed yet), then call cap_pass ONCE.
+# After cap_pass, an ISSUE finding whose id is in $CAPPED_IDS_FILE is a capped NOTE: skip it in 7E/7F. Every other ISSUE continues to 7E/7F.
 ```
 
-If the guard printed `REVIEW_RESULT: status: BLOCKED` (`classifier unavailable`), STOP: `exit 0` only ends that Bash block, so do not run 7E/7F or any later phase, file no issues, emit no deploy approval, and report `RESULT: BLOCK DEPLOY` with the blocker.
+If the guard printed `REVIEW_RESULT: status: BLOCKED` (`classifier unavailable` or `cap helper unavailable`), STOP: `exit 0` only ends that Bash block, so do not run 7E/7F or any later phase, file no issues, emit no deploy approval, and report `RESULT: BLOCK DEPLOY` with the blocker.
 
-Only `ISSUE` findings continue to 7E/7F. Each `NOTE` is listed in the PR body (`## Non-blocking notes`, edit never replace) or dropped as a duplicate or nit; NOTEs are NEVER passed to `Skill(issue)`. Post one disposition record (counts only plus the NOTE list; every NOTE is recorded, never silently dropped), whenever 7A extracted at least one finding:
+**Per-review cap** <!-- Added: forge#3642 -->: `classify_one` no longer counts ISSUE rows. It appends them to `CAP_ROWS_FILE`, and `cap_pass` (called once after the last finding, before 7E) runs `scripts/cap-findings.sh` (resolved through `forge_resolve cap-findings.sh`, fail closed like the classifier). At most `review.max_filed_findings` ISSUE findings are kept (default 2), ranked by severity, then confidence, then safety-domain agent, then input order; an unparseable severity or confidence ranks as MEDIUM/LIKELY. The overflow becomes `NOTE capped`: listed under `## Non-blocking notes` (with the other NOTEs) and counted in `notes_capped` only, never filed and never dropped. HIGH/CRITICAL are never capped and still block via §7B. `FINDINGS_FILED` is the post-cap ISSUE count. A helper runtime failure keeps every ISSUE.
+
+Only `ISSUE` findings that are not in `CAPPED_IDS_FILE` continue to 7E/7F. Each `NOTE` is listed in the PR body (`## Non-blocking notes`, edit never replace) or dropped as a duplicate or nit; NOTEs are NEVER passed to `Skill(issue)`. Post one disposition record (counts only plus the NOTE list; every NOTE is recorded, never silently dropped), whenever 7A extracted at least one finding:
 
 ```bash
 CLASSIFIER_MODE=script   # the 7B.5 guard blocks the review when the classifier is unresolvable, so this is always script
@@ -1301,10 +1332,11 @@ if [ -z "${PR_NUMBER:-}" ]; then
   echo "REVIEW_RESULT: status: BLOCKED, blocker: PR_NUMBER unavailable; FORGE:NOTE_DISPOSITION not posted (record lost)"
 else
 NOTE_LIST_FILE="${NOTE_LIST_FILE:-$_SD/${PR_NUMBER}_notes.md}"
-[ -n "${NOTES_LISTED:-}" ] || { NOTES_LISTED=$(grep -c '^- ' "$NOTE_LIST_FILE" 2>/dev/null || true); echo "WARNING: classification counters lost (fresh shell): notes_listed recomputed from $NOTE_LIST_FILE; set SCOPE_MODE, FINDINGS_FILED, OUT_OF_SCOPE and NOTES_REFLAG from the 7B.5 block output before posting"; }
+[ -n "${NOTES_LISTED:-}" ] || { NOTES_LISTED=$(grep -v ': NOTE capped (' "$NOTE_LIST_FILE" 2>/dev/null | grep -c '^- ' || true); echo "WARNING: classification counters lost (fresh shell): notes_listed recomputed from $NOTE_LIST_FILE; set SCOPE_MODE, FINDINGS_FILED, OUT_OF_SCOPE, NOTES_REFLAG and NOTES_CAPPED from the 7B.5 block output before posting"; }
+[ -n "${NOTES_CAPPED:-}" ] || NOTES_CAPPED=$(grep -c ': NOTE capped (' "$NOTE_LIST_FILE" 2>/dev/null || true)
 [ -n "${SCOPE_MODE:-}" ] || { SCOPE_MODE=full; echo "WARNING: SCOPE_MODE lost (fresh shell): recording scope=full"; }
 _DISP_BODY="$_SD/${PR_NUMBER}_note_disposition.md"
-{ printf '%s\n' "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=0 notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} out_of_scope=${OUT_OF_SCOPE:-0} notes_reflag=${NOTES_REFLAG:-0} lineage=none classifier=${CLASSIFIER_MODE} scope=${SCOPE_MODE} -->"; cat "$NOTE_LIST_FILE" 2>/dev/null; } > "$_DISP_BODY"
+{ printf '%s\n' "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=0 notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} out_of_scope=${OUT_OF_SCOPE:-0} notes_reflag=${NOTES_REFLAG:-0} notes_capped=${NOTES_CAPPED:-0} lineage=none classifier=${CLASSIFIER_MODE} scope=${SCOPE_MODE} -->"; cat "$NOTE_LIST_FILE" 2>/dev/null; } > "$_DISP_BODY"
 gh pr comment "$PR_NUMBER" -R "$GH_REPO" --body-file "$_DISP_BODY" # allowlist:check-command-side-effects
 fi
 ```

@@ -191,16 +191,38 @@ jq -n --arg sha "$OLDSHA" '[{author_association:"MEMBER",user:{type:"User",login
 PRIOR_OUT=$( ( export FIX_COMMENTS="$TMP/member-comments.json" PATH="$TMP/bin:$PATH"; REPO=o/r; _pscr="$TMP"; TRUSTED_SCRIPT="$TC"; . "$TMP/prior-fn.sh"; PF_SKIP="" PF_PRS=41 prior_findings_tsv ) 2>/dev/null )
 printf '%s\n' "$PRIOR_OUT" > "$TMP/prior.tsv"
 [ "$(printf '%s\n' "$PRIOR_OUT" | grep -c .)" = "1" ] && printf '%s' "$PRIOR_OUT" | grep -q '^src/api.py	12	12	Missing retry on timeout handler	filed	123$' && ok || bad "member PR finding must reach the TSV (open issue linked) and an untrusted comment must not (got: $PRIOR_OUT)"
+awk '/^cap_pass\(\) \{/,/^\}/' "$SPEC" > "$TMP/cap-fn.sh"
+[ -s "$TMP/cap-fn.sh" ] && ok || bad "cap_pass not found in the spec"
 run_dup() { # finding-file finding-line -> "DISPOSITION|FILED|REFLAG|LISTED"
   ( _SD="$TMP"; PR_NUMBER=9; CLASSIFY_SCRIPT="$ROOT/scripts/classify-finding.sh"; PRIOR_FILE="$TMP/prior.tsv"; SCOPE_MODE=full; CROSS_PR_FILES=""; UNREVIEWED_FILES=""; DEPLOY_WIRING_FILES=""
     NOTE_LIST_FILE="$TMP/dup-notes.md"; : > "$NOTE_LIST_FILE"; NOTES_LISTED=0; FINDINGS_FILED=0; OUT_OF_SCOPE=0; NOTES_REFLAG=0
     FINDING_ID=Z1; FINDING_SEVERITY="${3:-MEDIUM}"; FINDING_CONFIDENCE=CONFIRMED; FINDING_AGENT="General"; FINDING_TITLE="${4:-retry missing for the timeout handler}"; FINDING_BODY=b; FINDING_FILE="$1"; FINDING_PATHS="$1"
-    . "$TMP/fn.sh"; classify_one; echo "$DISPOSITION|$FINDINGS_FILED|$NOTES_REFLAG|$NOTES_LISTED" ) 2>&1 | tail -1; }
+    CAP_ROWS_FILE="$TMP/dup-rows.tsv"; : > "$CAP_ROWS_FILE"; CAPPED_IDS_FILE="$TMP/dup-capped.txt"; CAP_SCRIPT="$ROOT/scripts/cap-findings.sh"; NOTES_CAPPED=0
+    . "$TMP/fn.sh"; . "$TMP/cap-fn.sh"; classify_one; cap_pass >/dev/null; echo "$DISPOSITION|$FINDINGS_FILED|$NOTES_REFLAG|$NOTES_LISTED" ) 2>&1 | tail -1; }
 [ "$(run_dup src/api.py:12)" = "NOTE reflag-filed #123|0|1|0" ] && ok || bad "a staging finding duplicating a member PR finding must be NOTE reflag-filed and file nothing (got '$(run_dup src/api.py:12)')"
 [ "$(run_dup src/api.py:12 x HIGH)" = "ISSUE severity-HIGH|1|0|0" ] && ok || bad "a HIGH duplicate of a member PR finding must still be an ISSUE (got '$(run_dup src/api.py:12 x HIGH)')"
 [ "$(run_dup src/other.py:12)" = "ISSUE MEDIUM-CONFIRMED|1|0|0" ] && ok || bad "a non-duplicate on another file must classify normally (got '$(run_dup src/other.py:12)')"
 run_dup src/api.py:12 >/dev/null
 grep -q 'reflag-filed #123' "$TMP/dup-notes.md" && ok || bad "a re-flag NOTE must be listed, not dropped"
+# (8b) per-review cap (forge#3642): classify_one only records ISSUE rows; cap_pass keeps review.max_filed_findings (default 2), lists the rest as NOTE capped, never caps HIGH.
+run_cap() { # "<sev>:<conf>:<id>"... -> "FILED|CAPPED|NOTES_LISTED|capped-ids(comma)|note-lines-with-capped"
+  ( _SD="$TMP"; PR_NUMBER=9; CLASSIFY_SCRIPT="$ROOT/scripts/classify-finding.sh"; PRIOR_FILE=""; SCOPE_MODE=full; CROSS_PR_FILES=""; UNREVIEWED_FILES=""; DEPLOY_WIRING_FILES=""
+    NOTE_LIST_FILE="$TMP/cap-notes.md"; : > "$NOTE_LIST_FILE"; NOTES_LISTED=0; FINDINGS_FILED=0; OUT_OF_SCOPE=0; NOTES_REFLAG=0; NOTES_CAPPED=0
+    CAP_ROWS_FILE="$TMP/cap-rows.tsv"; : > "$CAP_ROWS_FILE"; CAPPED_IDS_FILE="$TMP/cap-capped.txt"; CAP_SCRIPT="$ROOT/scripts/cap-findings.sh"; MAX_FILED_FINDINGS="${CAPMAX:-}"
+    . "$TMP/fn.sh"; . "$TMP/cap-fn.sh"
+    for spec in "$@"; do
+      IFS=: read -r FINDING_SEVERITY FINDING_CONFIDENCE FINDING_ID <<EOF3
+$spec
+EOF3
+      FINDING_AGENT=General; FINDING_TITLE="finding $FINDING_ID"; FINDING_BODY=b; FINDING_FILE="src/$FINDING_ID.py"; FINDING_PATHS="$FINDING_FILE"
+      classify_one
+    done
+    cap_pass >/dev/null
+    echo "$FINDINGS_FILED|$NOTES_CAPPED|$NOTES_LISTED|$(paste -sd, "$CAPPED_IDS_FILE")|$(grep -c 'NOTE capped (' "$NOTE_LIST_FILE")" ) 2>&1 | tail -1; }
+[ "$(run_cap MEDIUM:LIKELY:a MEDIUM:CONFIRMED:b MEDIUM:LIKELY:c)" = "2|1|0|c|1" ] && ok || bad "3 MEDIUM findings: 2 filed, the lowest-ranked capped and listed (got '$(run_cap MEDIUM:LIKELY:a MEDIUM:CONFIRMED:b MEDIUM:LIKELY:c)')"
+[ "$(run_cap HIGH:LIKELY:a HIGH:POSSIBLE:b CRITICAL:CONFIRMED:c MEDIUM:LIKELY:d)" = "4|0|0||0" ] && ok || bad "HIGH/CRITICAL must never be capped (got '$(run_cap HIGH:LIKELY:a HIGH:POSSIBLE:b CRITICAL:CONFIRMED:c MEDIUM:LIKELY:d)')"
+[ "$(CAPMAX=1 run_cap MEDIUM:LIKELY:a MEDIUM:CONFIRMED:b)" = "1|1|0|a|1" ] && ok || bad "review.max_filed_findings=1 must be honoured (got '$(CAPMAX=1 run_cap MEDIUM:LIKELY:a MEDIUM:CONFIRMED:b)')"
+[ "$(CAPMAX=zzz run_cap MEDIUM:LIKELY:a MEDIUM:LIKELY:b MEDIUM:LIKELY:c)" = "2|1|0|c|1" ] && ok || bad "an invalid review.max_filed_findings must fall back to the default 2"
 # (9) stale-head delta credit (forge#3638): the spec's bundle_delta_credit runs against real git fixtures and the REAL review-delta.sh / trusted-comments.sh.
 # Fail-closed cases first: every FULL / error / untrusted path must leave the PR's commits UNREVIEWED (empty credit).
 if command -v git >/dev/null 2>&1; then
@@ -284,7 +306,7 @@ if grep -qE 'merge-base --is-ancestor.*REVIEWED_SHA_STALE|diff_shape\(\)' "$SPEC
 grep -qF 'printf '"'"'%s\n'"'"' "$_FILES" | sort -u | sed "s|^|$pr |" >> "$_PF"' "$SPEC" && grep -qF 'git diff-tree --no-commit-id --name-only -r --cc "$c"' "$SPEC" && ok || bad "CROSS_PR_FILES accumulation and --cc merge scoping must stay intact"
 [ "$(grep -c '# FENCE_BOOTSTRAP$' "$SPEC" | head -1)" -ge 3 ] && ok || bad "FENCE_BOOTSTRAP stubs must remain"
 # an unresolvable helper fails the fence closed (exit 1), never an unsourced bootstrap
-OUT8=$( ( unset FORGEDOCK_HOME; export HOME="$TMP/nohome"; cd "$TMP" && bash -c "$(cat "$TMP/boot.sh"); echo reached" ) 2>&1 )
+OUT8=$( ( unset FORGEDOCK_HOME CLAUDE_CONFIG_DIR CODEX_HOME FORGE_ROOT FORGE_HOME CLAUDE_PLUGIN_ROOT; export HOME="$TMP/nohome"; cd "$TMP" && bash -c "$(cat "$TMP/boot.sh"); echo reached" ) 2>&1 )
 case "$OUT8" in *BLOCKED*) case "$OUT8" in *reached*) bad "unresolved bootstrap helper must stop the fence" ;; *) ok ;; esac ;; *) bad "unresolved bootstrap helper must print BLOCKED (got '$OUT8')" ;; esac
 # a stale-head PR must not credit its own merge commit (it contains the post-review commits): the DELTA branch only appends DELTA_COMMITS
 if awk '/^bundle_delta_credit\(\)/,/^\}/' "$SPEC" | grep -q 'mergeCommit'; then bad "the DELTA path must not credit the PR merge commit"; else ok; fi
