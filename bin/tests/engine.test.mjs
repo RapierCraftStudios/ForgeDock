@@ -2715,6 +2715,35 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
       assert.equal(s.v, 4);
     });
 
+    it("forge#3754 remediate needs-human -> terminal -> reopen un-commits remediate and re-picks it", async () => {
+      const s = deriveState([start, commit(2, "investigate"), commit(3, "build", { outputs: { branch: "b" } }),
+        commit(4, "review", { outputs: { pr: 9 }, terminalReason: "needs-human" }),
+        commit(5, "remediate", { terminalReason: "needs-human" }),
+        { seq: 6, event: "RUN_TERMINAL", reason: "needs-human" }, reopen(7)]);
+      assert.equal(s.terminal, false);
+      assert.equal(s.terminalReason, "needs-human");
+      assert.ok(!s.committed.includes("remediate"));
+      assert.equal(s.pr, 9);
+      const ph = pickPhase(s);
+      assert.equal(ph.id, "remediate");
+      assert.equal((await ph.buildArgs(s, { repo: "o/r" }))[0], "9");
+    });
+
+    it("forge#3754 remediate awaiting-merge -> engine-error -> reopen keeps remediate committed", () => {
+      const s = deriveState([start, commit(2, "investigate"), commit(3, "build"),
+        commit(4, "review", { outputs: { pr: 9 }, terminalReason: "needs-human" }),
+        commit(5, "remediate", { terminalReason: "awaiting-merge" }), crash(6), reopen(7)]);
+      assert.ok(s.committed.includes("remediate"));
+    });
+
+    it("forge#3754 RUN_NEXT_CYCLE resets the last-commit phase", () => {
+      const s = deriveState([start, commit(2, "investigate"), commit(3, "review", { terminalReason: "needs-human" }),
+        commit(4, "remediate", { terminalReason: "needs-human" }),
+        { seq: 5, event: "RUN_NEXT_CYCLE" }, reopen(6)]);
+      assert.deepEqual(s.committed, []);
+      assert.equal(s.terminalReason, null);
+    });
+
     it("a later reason-less commit clears the handoff (non-sticky)", () => {
       const s = deriveState([start, commit(2, "investigate", { terminalReason: "decomposed" }),
         commit(3, "build"), crash(4), reopen(5)]);
@@ -2983,6 +3012,54 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
       const published = w.body.match(/FORGE:STATE\s*(\{[\s\S]*?\})\s*-->/);
       assert.ok(published, "FORGE:STATE published");
       assert.equal(JSON.parse(published[1]).terminalReason === "needs-human", false);
+    });
+
+    // forge#3754: drive to a remediate-terminal needs-human run.
+    async function remediateBlockedWorld() {
+      const { w, io } = fakeWorld();
+      const first = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io,
+        runner: async ({ commandName }) => {
+          if (commandName === "work-on/investigate") w.markers += investigationComment("COMPLETE");
+          if (commandName === "work-on/build") { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; }
+          if (commandName === "work-on/review") { w.pr = 7; w.labels.push("needs-human"); }
+          if (commandName === "work-on/remediate") w.markers += remediation("RE-ESCALATED");
+          return { status: "complete" };
+        }, now: () => 1000, maxAttempts: 1 });
+      assert.equal(first.terminalReason, "needs-human");
+      assert.ok(deriveState(readLog(dir, 42)).committed.includes("remediate"));
+      return { w, io };
+    }
+
+    it("forge#3754 remediate-terminal, label cleared: --retry re-runs remediate, no re-terminate, label not re-added", async () => {
+      const { w, io } = await remediateBlockedWorld();
+      w.labels = w.labels.filter((l) => l !== "needs-human");
+      const ran = [];
+      const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io,
+        runner: async ({ commandName }) => {
+          ran.push(commandName);
+          if (commandName === "work-on/remediate") w.markers += remediation("HELD-AWAITING-MERGE");
+          return { status: "complete" };
+        }, now: () => 2000, maxAttempts: 1, retry: true });
+      assert.equal(ran[0], "work-on/remediate");
+      assert.notEqual(res.terminalReason, "not-retryable");
+      assert.ok(!w.labels.includes("needs-human"), "label must not be re-added");
+      const log = readLog(dir, 42);
+      const reopenIdx = log.findIndex((e) => e.event === "RUN_REOPEN");
+      assert.ok(reopenIdx >= 0);
+      const nextTerminal = log.findIndex((e, i) => i > reopenIdx && e.event === "RUN_TERMINAL");
+      const nextPhase = log.findIndex((e, i) => i > reopenIdx && e.event === "PHASE_START");
+      assert.ok(nextPhase >= 0 && (nextTerminal < 0 || nextPhase < nextTerminal), "no RUN_TERMINAL before the phase runs");
+    });
+
+    it("forge#3754 remediate-terminal, label still present: still refused", async () => {
+      const { w, io } = await remediateBlockedWorld();
+      assert.ok(w.labels.includes("needs-human"));
+      let ran = 0;
+      const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io,
+        runner: async () => { ran++; return { status: "complete" }; }, now: () => 2000, maxAttempts: 1, retry: true });
+      assert.equal(res.terminalReason, "not-retryable");
+      assert.match(res.detail, /still carries needs-human/);
+      assert.equal(ran, 0);
     });
 
     it("label still present: not-retryable, nothing appended, no runner call", async () => {
