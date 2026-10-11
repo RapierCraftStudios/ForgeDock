@@ -104,3 +104,9 @@ Cite: #3233 / PR #3317.
 PR #3338 touched `orchestrate`. See FORGE:BUILDER comment on issue #3296 for full change list.
 Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
 Cite: #3296 / PR #3338.
+
+## Entry 2026-10-11 — Fix: enqueue_breaker_decision declared in the three breaker trip-site fences (#3690)
+
+PR #3692 touched `orchestrate`. See FORGE:BUILDER comment on issue #3690 for full change list.
+Key gotcha recorded: breaker helper must be re-declared per fence (fresh shell per Bash call); `check-spec-bash.sh --fence-funcs` now guards cross-fence function calls.
+Cite: #3690 / PR #3692.
