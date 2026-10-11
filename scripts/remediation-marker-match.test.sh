@@ -28,6 +28,8 @@ INTERIM=$'<!-- FORGE:REMEDIATION -->\n## Remediation (in progress)'
 QUOTED_REVIEW=$'## Review\nThe prior run posted FORGE:REMEDIATION:COMPLETE on this PR.\n<!-- FORGE:REMEDIATION:COMPLETE -->'
 QUOTED_WORK_ORDER=$'<!-- FORGE:INPR_FIX: head=abc1234 -->\nquoting <!-- FORGE:REMEDIATION -->\n<!-- FORGE:REMEDIATION:COMPLETE -->'
 
+HELD=$'<!-- FORGE:REMEDIATION_HELD -->\n**Re-gate outcome**: HELD-AWAITING-MERGE'
+eq "held-resume record matches neither COMPLETE nor TRAIL (forge#3685)" "$(complete_n "[$(c NONE Bot b "$HELD")]")/$(trail_n "[$(c NONE Bot b "$HELD")]")" "0/0"
 eq "genuine M8 trail by bot matches COMPLETE" "$(complete_n "[$(c NONE Bot 'app[bot]' "$REAL")]")" 1
 eq "review comment quoting COMPLETE mid-body does not match" "$(complete_n "[$(c OWNER User u "$QUOTED_REVIEW")]")" 0
 eq "INPR_FIX work order quoting the markers does not match COMPLETE" "$(complete_n "[$(c NONE Bot b "$QUOTED_WORK_ORDER")]")" 0
@@ -46,6 +48,10 @@ for f in commands/work-on/remediate.md commands/work-on.md commands/orchestrate/
   grep -qF 'trusted-comments.sh' "$ROOT/$f" && ok "$f references trusted-comments.sh" || bad "$f does not reference trusted-comments.sh"
 done
 grep -qF "count '$COMPLETE_RE'" "$ROOT/commands/work-on/remediate.md" && ok "remediate.md uses the tested COMPLETE regex" || bad "remediate.md COMPLETE regex drifted from this test"
+
+grep -qF 'FORGE:REMEDIATION_HELD' "$ROOT/commands/work-on/remediate.md" && ok "remediate.md documents FORGE:REMEDIATION_HELD" || bad "remediate.md lacks FORGE:REMEDIATION_HELD"
+! grep -qE 'PR_OPEN_STATE = .?MERGED.? → EXIT .REMEDIATE_RESULT: status: ALREADY_DONE. \(nothing to remediate' "$ROOT/commands/work-on/remediate.md" && ok "M0 has no unconditional merged ALREADY_DONE exit" || bad "M0 still exits ALREADY_DONE unconditionally on MERGED"
+grep -qiE 'merged.*(skip|exclusive|do not fall through)' "$ROOT/commands/work-on/remediate.md" && ok "M7 merged-first branch is exclusive" || bad "M7 merged-first exclusivity missing"
 
 echo "passed=$PASS failed=$FAILN"
 [ "$FAILN" -eq 0 ]

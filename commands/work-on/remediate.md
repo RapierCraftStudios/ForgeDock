@@ -29,9 +29,9 @@ background: false
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
 **NEVER use plan mode (EnterPlanMode).**
 
-**Scope note**: This mode owns exactly one gap — re-driving a `needs-human` or `workflow:remediating` PR's own remediation, plus resuming an interrupted M7 auto-land from `workflow:awaiting-merge` when no `FORGE:REMEDIATION:COMPLETE` trail exists (forge#3647; M1-M6 are skipped, only M7/M8 run) (the `workflow:remediating` state is the non-human "autonomous remediation pending" state review sets for ci-gate, in-pr-fix and base-sync handoffs, forge#3541). It does NOT implement the `needs-human` sub-label taxonomy (#1815's scope) and it does NOT edit `review-pr.md`'s Phase 8 guard (forge#1810) — that guard's existing safe-default (`workflow:awaiting-merge` on any clean re-review of a previously-escalated PR) is reused as-is; this file only adds a bar-check *after* that guard has already fired.
+**Scope note**: This mode owns exactly one gap — re-driving a `needs-human` or `workflow:remediating` PR's own remediation, plus resuming an interrupted M7 auto-land from `workflow:awaiting-merge` when no `FORGE:REMEDIATION:COMPLETE` trail exists (forge#3647; M1-M6 are skipped, only M7/M8 run), finishing a merged PR whose M7 run was cut off before M8 (forge#3685), and re-entering a held resume (a `FORGE:REMEDIATION_HELD` record, not COMPLETE, is posted when a resume ends HELD) (the `workflow:remediating` state is the non-human "autonomous remediation pending" state review sets for ci-gate, in-pr-fix and base-sync handoffs, forge#3541). It does NOT implement the `needs-human` sub-label taxonomy (#1815's scope) and it does NOT edit `review-pr.md`'s Phase 8 guard (forge#1810) — that guard's existing safe-default (`workflow:awaiting-merge` on any clean re-review of a previously-escalated PR) is reused as-is; this file only adds a bar-check *after* that guard has already fired.
 
-**Engine coverage** (forge#2379, #2889): this subcommand's `command` name (`work-on/remediate`) and completion marker (`FORGE:REMEDIATION:COMPLETE`, including the `**Re-gate outcome**` field Phase M8 posts below) are registered in the headless engine's phase table — `RESERVED_TYPES.REMEDIATION` in `packages/protocol/src/types.js`, `remediate` in `packages/protocol/src/phases.js`'s `PHASE_IDS`/`PHASE_MARKERS`, and a matching `remediate` entry in `bin/engine/phases.mjs`'s `PHASES` array. A blocked review is committed with `terminalReason: "needs-human"`, then the engine continues directly into remediation; the divergence guard permits this specific handoff while keeping all other `needs-human` states paused.
+**Engine coverage** (forge#2379, #2889): this subcommand's `command` name (`work-on/remediate`) and completion marker (`FORGE:REMEDIATION:COMPLETE`, including the `**Re-gate outcome**` field Phase M8 posts below) are registered in the headless engine's phase table — `RESERVED_TYPES.REMEDIATION` in `packages/protocol/src/types.js`, `remediate` in `packages/protocol/src/phases.js`'s `PHASE_IDS`/`PHASE_MARKERS`, and a matching `remediate` entry in `bin/engine/phases.mjs`'s `PHASES` array. The non-terminal held-resume record `FORGE:REMEDIATION_HELD` (forge#3685) is NOT a completion marker; the engine's `detectOutcome` reads it as `terminalReason: "awaiting-merge"`. A blocked review is committed with `terminalReason: "needs-human"`, then the engine continues directly into remediation; the divergence guard permits this specific handoff while keeping all other `needs-human` states paused.
 
 ---
 
@@ -59,7 +59,7 @@ PR_BODY=$(echo "$PR_STATE" | jq -r '.body')
 ```
 
 **PR state guard**:
-- `PR_OPEN_STATE = MERGED` → EXIT `REMEDIATE_RESULT: status: ALREADY_DONE` (nothing to remediate — already landed).
+- `PR_OPEN_STATE = MERGED` → do NOT exit blindly (forge#3685): a PR merged by an M7 run that was cut off before M8 still needs its post-merge bookkeeping, trail and close. Set `PR_ALREADY_MERGED=true` and continue; the merged-PR routing step after the idempotency check below exits `ALREADY_DONE` only when a trusted `FORGE:REMEDIATION:COMPLETE` trail exists or the issue is already CLOSED with `workflow:merged`, and otherwise routes straight to Phase M7's exclusive merged-first branch (M1-M6 skipped). The `needs-human` / `workflow:remediating` / `workflow:awaiting-merge` label requirement below and the park-evidence requirement do not apply to a merged PR. <!-- Added: forge#3685 -->
 - `PR_OPEN_STATE = CLOSED` (not merged) → EXIT `REMEDIATE_RESULT: status: BLOCKED`, blocker: "PR #{PR_NUMBER} is closed, not merged — nothing to remediate."
 
 **Resolve the linked issue** (`--issue` flag takes precedence; else parse from the PR body — anchored, matching the `"Closes #N" in:body` precedent from forge#1634/#1646, never a bare-number scan):
@@ -79,8 +79,8 @@ ISSUE_STATE=$(gh issue view {ISSUE_NUMBER} {GH_FLAG} --json labels,state,body,mi
 ISSUE_LABELS=$(echo "$ISSUE_STATE" | jq -r '[.labels[].name] | join(",")')
 ```
 
-- If none of `needs-human`, `workflow:remediating` or `workflow:awaiting-merge` is among `ISSUE_LABELS` → EXIT `REMEDIATE_RESULT: status: BLOCKED`, blocker: "issue #{ISSUE_NUMBER} is none of `needs-human`, `workflow:remediating` or `workflow:awaiting-merge` — remediation mode only targets PRs in one of those states; use the normal `/work-on {ISSUE_NUMBER}` resume path instead." This keeps blast radius scoped to exactly the gap this mode fills — it is not a general-purpose re-review trigger. `workflow:remediating` is the non-human state review sets when it hands an autonomous ci-gate / in-pr-fix / base-sync fix to this phase (forge#3541); a bare `needs-human` (older runs, genuine escalations being re-driven) is still accepted. <!-- Added: forge#3541 -->
-- **Resume-at-M7 (forge#3647, hardened forge#3684)**: `workflow:awaiting-merge` is admitted ONLY as a resume of an interrupted M7 auto-land: the PR is OPEN (the PR state guard above already exited otherwise), `needs-human` and `workflow:remediating` are both absent, the idempotency check below finds NO completed `FORGE:REMEDIATION:COMPLETE` trail (`REMEDIATION_COMPLETE_N` = 0), AND there is evidence the PR was engine-parked for the M7 bar rather than parked for a human: the live base is non-empty, non-`null` and non-`main`, and the LATEST trusted (OWNER/MEMBER/COLLABORATOR or Bot) `review-pr.md` Phase 8 park comment on the issue is the non-`main` "parked at `workflow:awaiting-merge` for the remediation auto-land bar" comment AND names this PR (`PR #{PR_NUMBER} was previously escalated`, so a park for a different PR never admits the resume; M7 then binds approval to the live head SHA, not a timestamp) (not the deploy-gate "held ... for a human merge decision" comment). When all hold, set `RESUME_AT_M7=true`: skip Phases M1-M6 entirely (no checkout, no fixes, no re-review) and continue at Phase M7, which re-verifies the bar from scratch. Without park evidence, return `BLOCKED` (blocker: "awaiting-merge PR is not engine-parked for the remediation auto-land bar"); the issue stays at `workflow:awaiting-merge`. If a COMPLETE trail exists the single-attempt `ALREADY_DONE` guard below still wins. On a BLOCKED exit from this path the issue stays at `workflow:awaiting-merge` (it never gains `workflow:remediating`; the stranded-state rule below applies only to `workflow:remediating`).
+- If `PR_ALREADY_MERGED` is not `true` and none of `needs-human`, `workflow:remediating` or `workflow:awaiting-merge` is among `ISSUE_LABELS` → EXIT `REMEDIATE_RESULT: status: BLOCKED`, blocker: "issue #{ISSUE_NUMBER} is none of `needs-human`, `workflow:remediating` or `workflow:awaiting-merge` — remediation mode only targets PRs in one of those states; use the normal `/work-on {ISSUE_NUMBER}` resume path instead." This keeps blast radius scoped to exactly the gap this mode fills — it is not a general-purpose re-review trigger. `workflow:remediating` is the non-human state review sets when it hands an autonomous ci-gate / in-pr-fix / base-sync fix to this phase (forge#3541); a bare `needs-human` (older runs, genuine escalations being re-driven) is still accepted. <!-- Added: forge#3541 -->
+- **Resume-at-M7 (forge#3647, hardened forge#3684)**: `workflow:awaiting-merge` is admitted ONLY as a resume of an interrupted M7 auto-land: the PR is OPEN (the PR state guard above already exited otherwise), `needs-human` and `workflow:remediating` are both absent, the idempotency check below finds NO completed `FORGE:REMEDIATION:COMPLETE` trail (`REMEDIATION_COMPLETE_N` = 0), AND there is evidence the PR was engine-parked for the M7 bar rather than parked for a human: the live base is non-empty, non-`null` and non-`main`, and the LATEST trusted (OWNER/MEMBER/COLLABORATOR or Bot) `review-pr.md` Phase 8 park comment on the issue is the non-`main` "parked at `workflow:awaiting-merge` for the remediation auto-land bar" comment AND names this PR (`PR #{PR_NUMBER} was previously escalated`, so a park for a different PR never admits the resume; M7 then binds approval to the live head SHA, not a timestamp) (not the deploy-gate "held ... for a human merge decision" comment). When all hold, set `RESUME_AT_M7=true`: skip Phases M1-M6 entirely (no checkout, no fixes, no re-review) and continue at Phase M7, which re-verifies the bar from scratch. Without park evidence, return `BLOCKED` (blocker: "awaiting-merge PR is not engine-parked for the remediation auto-land bar"); the issue stays at `workflow:awaiting-merge`. If a COMPLETE trail exists the single-attempt `ALREADY_DONE` guard below still wins. A resume that ends `HELD-AWAITING-MERGE` (CI pending, stale or mismatched approval head, deploy-gate base) writes NO `FORGE:REMEDIATION:COMPLETE` (Phase M8 posts a `FORGE:REMEDIATION_HELD` record instead), so the next invocation re-enters this same resume path rather than exiting `ALREADY_DONE` (forge#3685). On a BLOCKED exit from this path the issue stays at `workflow:awaiting-merge` (it never gains `workflow:remediating`; the stranded-state rule below applies only to `workflow:remediating`).
 - **Stranded-state rule**: `workflow:remediating` must never outlive this run. Every exit that returns `BLOCKED` or `UNFIXABLE` (including exits before Phase M1; except a `RESUME_AT_M7` run, which leaves the issue at `workflow:awaiting-merge` untouched) removes `workflow:remediating` and adds `needs-human`, because at that point a human really is needed:
 
   ```bash
@@ -135,6 +135,7 @@ Completed trails of other kinds are left in place (never deleted); only the inte
 
 - If `REMEDIATION_COMPLETE_N` or `REMEDIATION_TRAIL_N` is empty (comments or `scripts/trusted-comments.sh` unreadable or unresolvable) → fail closed: EXIT `REMEDIATE_RESULT: status: BLOCKED`, blocker: "github-unavailable: remediation trail unreadable (comments or scripts/trusted-comments.sh unresolvable)". Never treat unreadable as "no trail" and never as `ALREADY_DONE`.
 - If `REMEDIATION_COMPLETE_N` is at least 1 (a trusted comment that starts with `<!-- FORGE:REMEDIATION -->` and contains `<!-- FORGE:REMEDIATION:COMPLETE -->`) → EXIT `REMEDIATE_RESULT: status: ALREADY_DONE`. **Single-attempt semantics (AC5)**: once a genuine `FORGE:REMEDIATION:COMPLETE` trail comment exists for this PR, do NOT re-attempt fixes on a subsequent invocation, regardless of the prior verdict — this is what prevents an infinite remediation retry loop on a genuinely-blocked PR. A comment that only quotes the marker mid-body (review findings, an `INPR_FIX` work order, a disposition record) or comes from an untrusted author never counts.
+- **Merged-PR routing (forge#3685)**: if `PR_ALREADY_MERGED=true` and `REMEDIATION_COMPLETE_N` is 0 (the fail-closed unreadable-trail exit above already ran, so the count is known): if the linked issue is already `CLOSED` with the `workflow:merged` label (`ISSUE_STATE`), EXIT `REMEDIATE_RESULT: status: ALREADY_DONE` (landed and finished, nothing to do). Otherwise (not yet `workflow:merged`/CLOSED, no completed trail) set `RESUME_AT_M7=true` and `PR_ALREADY_MERGED=true`: skip Phases M1-M6 and continue at Phase M7, whose merged-first branch is exclusive, runs the idempotent `merged` label bookkeeping, sets `AUTO-LANDED` and goes to M8, which posts the trail and drives close. No park evidence is required. A `FORGE:REMEDIATION_HELD` record never counts toward `REMEDIATION_COMPLETE_N`.
 - If `REMEDIATION_COMPLETE_N` is 0 and `REMEDIATION_TRAIL_N` is at least 1 → a prior attempt was interrupted mid-flight (same failure mode as the investigation phase's partial-comment case). Delete the partial comment(s) on both the PR and the issue (ids from `PARTIAL_PR_COMMENT_IDS` above and the same anchored filter over the issue's comments), then continue below as a fresh attempt:
   ```bash
   for _id in $PARTIAL_PR_COMMENT_IDS; do gh api repos/{GH_REPO}/issues/comments/$_id -X DELETE 2>/dev/null || true; done
@@ -142,7 +143,7 @@ Completed trails of other kinds are left in place (never deleted); only the inte
   for _id in $ISSUE_PARTIAL_IDS; do gh api repos/{GH_REPO}/issues/comments/$_id -X DELETE 2>/dev/null || true; done
   ```
 - If no comment is found → fresh attempt, continue below.
-- If the issue is at `workflow:awaiting-merge` (and neither `needs-human` nor `workflow:remediating`) and `REMEDIATION_COMPLETE_N` is 0 → require engine-park evidence (see Resume-at-M7 above); only then `RESUME_AT_M7=true`: skip to Phase M7. Any other label combination keeps the normal flow.
+- If `PR_ALREADY_MERGED` is not `true`, the issue is at `workflow:awaiting-merge` (and neither `needs-human` nor `workflow:remediating`) and `REMEDIATION_COMPLETE_N` is 0 → require engine-park evidence (see Resume-at-M7 above); only then `RESUME_AT_M7=true`: skip to Phase M7. Any other label combination keeps the normal flow.
 
   ```bash
   # forge#3684: admit the resume only for a PR the engine parked for the M7 bar. Fail closed.
@@ -160,7 +161,7 @@ Completed trails of other kinds are left in place (never deleted); only the inte
 
 ## Phase M1: Load Prior Findings & Classify the Block Reason
 
-**If `RESUME_AT_M7=true`** (forge#3647): skip Phases M1-M6 and go straight to Phase M7.
+**If `RESUME_AT_M7=true`** (forge#3647; includes the merged-PR route, forge#3685): skip Phases M1-M6 and go straight to Phase M7.
 
 Gather everything that caused (or is still causing) `needs-human`:
 
@@ -510,14 +511,27 @@ RE_REVIEW_VERDICT=$(gh api repos/{GH_REPO}/issues/{PR_NUMBER}/comments \
 
 ## Phase M7: Compute the #1809 Q1 Auto-Land Bar
 
-**Merged-first check (forge#3647)**: before anything else, re-read the live PR. If it is already merged (a prior run merged it, then was cut off before M8), do NOT report HELD: set `RE_GATE_OUTCOME="AUTO-LANDED"`, run the same post-merge label bookkeeping as the merge branch below (idempotent), and skip to Phase M8.
+**Merged-first check (forge#3647, exclusive branch forge#3685)**: before anything else, re-read the live PR. If it is already merged (a prior run merged it, then was cut off before M8, or Phase M0 routed a merged PR here), this is an **exclusive** branch: do NOT report HELD and do NOT fall through. Run the idempotent post-merge label bookkeeping, set `RE_GATE_OUTCOME="AUTO-LANDED"`, **skip every later M7 block** (the live-base and resume-approval derivation, the `REREVIEW-REQUIRED`, `needs-human` and `workflow:awaiting-merge` blocks, the bar evaluation and the CI-gated merge), and go straight to Phase M8. A merged PR is never RE-ESCALATED or HELD, whatever labels or approval evidence it carries (after a merge the head has moved, so `RESUME_APPROVED_N=0` is expected). Every later `RE_GATE_OUTCOME=` assignment in this phase is guarded by "only if not already `AUTO-LANDED`".
 
 ```bash
 PR_LIVE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json state,mergedAt,headRefOid 2>/dev/null || echo "")
 if [ "$(printf '%s' "$PR_LIVE" | jq -r '.state // ""' 2>/dev/null)" = "MERGED" ] || [ -n "$(printf '%s' "$PR_LIVE" | jq -r '.mergedAt // empty' 2>/dev/null)" ]; then
-  RE_GATE_OUTCOME="AUTO-LANDED"   # then the post-merge transition-label block below, then M8
+  RE_GATE_OUTCOME="AUTO-LANDED"
+  # Idempotent post-merge bookkeeping (same case as the merge branch below; harmless when already applied).
+  RESOLUTION=$(resolve_script 'transition-label')
+  TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+  case "$TIER" in
+    adaptive|universal) bash "$SCRIPT_PATH" {ISSUE_NUMBER} {GH_FLAG} merged ;;
+    prose)
+      gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "workflow:merged" \
+        --remove-label "workflow:awaiting-merge,needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:invalid,workflow:decomposed" 2>/dev/null || true # allowlist:check-command-side-effects
+      ;;
+  esac
+  # PR_ALREADY_MERGED=true: SKIP the rest of Phase M7 (needs-human, awaiting-merge and bar blocks) and go to Phase M8.
 fi
 ```
+
+**If `RE_GATE_OUTCOME` is already `AUTO-LANDED` after the check above, skip the remainder of Phase M7 and go to Phase M8.** Everything below applies only to a PR that is still open.
 
 **Live base (computed BEFORE the resume substitution, forge#3684)**: re-derive the base fresh — do NOT reuse `$PR_BASE` for this decision (forge#2624): `$PR_BASE` was resolved in Phase M0 and a caller-supplied `--base` wins over the PR's actual live base. This is a security-relevant decision point, so re-query the PR's live base independent of `$PR_BASE`. Fail closed: only a KNOWN, non-empty, non-`null`, non-`main` live base reconciles to the fast lane (forge#2570); empty, the literal string `null` (jq stringifies JSON null, forge#2625) or `main` is the deploy gate (strict).
 
@@ -563,7 +577,7 @@ POST_REVIEW_LABELS=$(gh issue view {ISSUE_NUMBER} {GH_FLAG} --json labels --jq '
 
 **If `RE_GATE_OUTCOME="REREVIEW-REQUIRED"`** (forge#3240, set in M6): the bar does not apply — no review ran. Skip to Phase M8.
 
-**If `needs-human` is present** (re-escalated case): the bar does not apply — nothing to compute. `RE_GATE_OUTCOME="RE-ESCALATED"`. Skip to Phase M8.
+**If `needs-human` is present** (re-escalated case): the bar does not apply — nothing to compute. `RE_GATE_OUTCOME="RE-ESCALATED"` (only if not already `AUTO-LANDED`). Skip to Phase M8.
 
 **If `workflow:awaiting-merge` is present** (clean re-review case — the only branch where `review-pr.md`'s guard has already safely parked this PR): compute the bar.
 
@@ -655,19 +669,19 @@ if [ "$MERGE_STATE" = "MERGED" ]; then
   esac
   RE_GATE_OUTCOME="AUTO-LANDED"
 else
-  RE_GATE_OUTCOME="HELD-AWAITING-MERGE"
+  [ "${RE_GATE_OUTCOME:-}" = "AUTO-LANDED" ] || RE_GATE_OUTCOME="HELD-AWAITING-MERGE"
   # gh pr merge reported success but the PR isn't actually MERGED — leave workflow:awaiting-merge
   # in place (unchanged) and let a human merge manually rather than retrying automatically.
 fi
 ```
 
-**If the bar is NOT met** (`BAR_MET=false`): leave the issue at `workflow:awaiting-merge` exactly as `review-pr.md`'s guard set it — do NOT attempt a merge. `RE_GATE_OUTCOME="HELD-AWAITING-MERGE"`. Fail-safe direction: any doubt about the bar (including an unresolved or unexpected `LIVE_BASE_REF`, which leaves `IS_DEPLOY_GATE=true`-equivalent strict handling) defaults to holding, matching `review-pr.md`'s own existing default for every other caller.
+**If the bar is NOT met** (`BAR_MET=false`): leave the issue at `workflow:awaiting-merge` exactly as `review-pr.md`'s guard set it — do NOT attempt a merge. `RE_GATE_OUTCOME="HELD-AWAITING-MERGE"` (only if not already `AUTO-LANDED`). Fail-safe direction: any doubt about the bar (including an unresolved or unexpected `LIVE_BASE_REF`, which leaves `IS_DEPLOY_GATE=true`-equivalent strict handling) defaults to holding, matching `review-pr.md`'s own existing default for every other caller.
 
 ---
 
 ## Phase M8: Finalize FORGE:REMEDIATION Paper Trail
 
-Post the completion body to **both** `{PR_NUMBER}` and `{ISSUE_NUMBER}` — this is the single idempotency marker checked by Phase M0 (this file, on future resume) and by the orchestrator's item 6.4 dispatch guard:
+Post the completion body to **both** `{PR_NUMBER}` and `{ISSUE_NUMBER}` — this is the single idempotency marker checked by Phase M0 (this file, on future resume) and by the orchestrator's item 6.4 dispatch guard. **Exception (forge#3685)**: a `RESUME_AT_M7=true` run whose outcome is `HELD-AWAITING-MERGE` posts a `<!-- FORGE:REMEDIATION_HELD -->` record (carrying `**Re-gate outcome**` and the hold reason) and NO `FORGE:REMEDIATION:COMPLETE`, so a transient hold (CI pending, stale approval) does not strand the PR behind the single-attempt guard. AUTO-LANDED, RE-ESCALATED, UNFIXABLE, REREVIEW-REQUIRED and non-resume HELD keep COMPLETE:
 
 ```bash
 case "$RE_GATE_OUTCOME" in
@@ -731,6 +745,18 @@ if [ "$BASESYNC_KIND" = "BASESYNC_REMEDIATION" ]; then
   fi
 fi
 
+if [ "${RESUME_AT_M7:-false}" = "true" ] && [ "$RE_GATE_OUTCOME" = "HELD-AWAITING-MERGE" ]; then
+  # forge#3685: a resume that ends HELD is NOT a completed attempt. Post a distinct, non-terminal record: header is
+  # FORGE:REMEDIATION_HELD (never "<!-- FORGE:REMEDIATION -->", so the M0 partial-trail cleanup and the COMPLETE/TRAIL
+  # matchers never see it) and NO FORGE:REMEDIATION:COMPLETE, so the next invocation re-enters M7 instead of ALREADY_DONE.
+  REMEDIATION_BODY="<!-- FORGE:REMEDIATION_HELD -->
+## Remediation Resume Held for PR #{PR_NUMBER}
+
+**Re-gate outcome**: ${RE_GATE_OUTCOME} ${OUTCOME_DETAIL}
+**Auto-land bar**: ${AUTO_LAND_BAR_TEXT}
+**Hold reason**: ${HOLD_REASON:-CI pending, approval not bound to the live head, or deploy-gate base (see Phase M7 output above)}
+**Head**: ${REMEDIATED_HEAD_SHA:-unknown}"
+else
 REMEDIATION_BODY="<!-- FORGE:REMEDIATION -->
 ## Remediation Complete for PR #{PR_NUMBER}
 
@@ -741,6 +767,7 @@ REMEDIATION_BODY="<!-- FORGE:REMEDIATION -->
 **Head**: ${REMEDIATED_HEAD_SHA:-unknown}
 ${BASESYNC_LINE}
 <!-- FORGE:REMEDIATION:COMPLETE -->"
+fi
 
 gh pr comment {PR_NUMBER} {GH_FLAG} --body "$REMEDIATION_BODY"
 gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "$REMEDIATION_BODY"
@@ -758,7 +785,7 @@ Skill("{FORGE_SKILL_PREFIX}work-on:close", args="{ISSUE_NUMBER} --repo {GH_REPO}
 
 **If the outcome was `REREVIEW-REQUIRED`** (forge#3240): do not invoke close and do not add `needs-human`. Leave the worktree and `workflow:in-review` in place and return `REMEDIATE_RESULT: status: REREVIEW_REQUIRED`; the caller runs the re-review and, on `AUTO-LANDED`, drives close itself; if the re-review cannot run, the caller applies the terminal fallback (`commands/work-on.md` Phase 0A.1).
 
-**If the outcome was `HELD-AWAITING-MERGE`, `RE-ESCALATED`, or `UNFIXABLE`**: leave the worktree in place (a human may need it for manual inspection/merge) and return the structured result below without invoking close. Do not close the issue.
+**If the outcome was `HELD-AWAITING-MERGE`, `RE-ESCALATED`, or `UNFIXABLE`** (a held resume leaves `workflow:awaiting-merge` in place and is re-enterable): leave the worktree in place (a human may need it for manual inspection/merge) and return the structured result below without invoking close. Do not close the issue.
 
 ---
 
@@ -776,4 +803,4 @@ REMEDIATE_RESULT:
   blocker: {description if status=BLOCKED}
 ```
 
-**Caller behavior**: this Skill already drives its own close phase when `re_gate_outcome: AUTO-LANDED` (see Phase M8) — the caller does not need to invoke close itself (under the headless engine, the engine verifies the issue is CLOSED + `workflow:merged` and runs close if it is missing). For `re_gate_outcome: REREVIEW-REQUIRED` (`status: REREVIEW_REQUIRED`, forge#3240) the fix is pushed but no review ran because this session has no sub-agent dispatch tool: the caller MUST run `review-pr {PR_NUMBER} --auto-merge --issue {ISSUE_NUMBER} --base {PR_BASE}` from a session that has dispatch (never inline) and then drive close itself on a merge. For every other `re_gate_outcome`, this result is terminal for the current invocation: the issue is left at `needs-human` or `workflow:awaiting-merge`, both already recognized as terminal states in the Universal Phase Dispatcher (see `work-on.md`). Whether invoked standalone (`/work-on <pr> --remediate`) or via the orchestrator's item 6.4 dispatch, no further action is required from the caller.
+**Caller behavior**: this Skill already drives its own close phase when `re_gate_outcome: AUTO-LANDED` (see Phase M8) — the caller does not need to invoke close itself (under the headless engine, the engine verifies the issue is CLOSED + `workflow:merged` and runs close if it is missing). For `re_gate_outcome: REREVIEW-REQUIRED` (`status: REREVIEW_REQUIRED`, forge#3240) the fix is pushed but no review ran because this session has no sub-agent dispatch tool: the caller MUST run `review-pr {PR_NUMBER} --auto-merge --issue {ISSUE_NUMBER} --base {PR_BASE}` from a session that has dispatch (never inline) and then drive close itself on a merge. For every other `re_gate_outcome`, this result is terminal for the current invocation (a held resume, which wrote `FORGE:REMEDIATION_HELD` and not COMPLETE, can be re-invoked by an operator later and re-enters Phase M7): the issue is left at `needs-human` or `workflow:awaiting-merge`, both already recognized as terminal states in the Universal Phase Dispatcher (see `work-on.md`). Whether invoked standalone (`/work-on <pr> --remediate`) or via the orchestrator's item 6.4 dispatch, no further action is required from the caller.
