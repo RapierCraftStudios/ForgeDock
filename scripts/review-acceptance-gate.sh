@@ -42,6 +42,7 @@ if printf '%s' "$LAST" | grep -qF "<!-- FORGE:ACCEPTANCE_GATE_REVIEW:PASSED:${HE
 fi
 
 CHECKS=$(printf '%s\n' "$TRUSTED_INV" | jq -r '.' 2>/dev/null | grep "^ACCEPTANCE_CHECK:")
+GREP_CLS=$(forge_resolve classify-grep-exit.sh) # unresolved = grep exit>=2 stays a real FAIL (fail closed, forge#3802)
 GATE_PASS=true; FAILED=""; VERIFIED_COUNT=0; MALFORMED_CHECKS=""; RESULTS=""
 while IFS= read -r check_line; do
   [ -z "$check_line" ] && continue
@@ -72,12 +73,12 @@ while IFS= read -r check_line; do
     command|behavior)
       if [ "$MATCHER" = "exit_0" ]; then
         ERR=$(eval "$TARGET" 2>&1 >/dev/null); RC=$?
-        # grep exit >= 2 is a usage error, not a verdict; a missing/unreadable operand also exits 2 but stays a real FAIL.
-        [ "$RC" -ge 2 ] && case "$TARGET" in grep\ *|egrep\ *|fgrep\ *) printf '%s' "$ERR" | grep -qE 'No such file or directory|Permission denied|Is a directory' || MALFORMED="grep usage error (exit $RC)";; esac
+        # grep exit >= 2 is a usage error, not a verdict; only a positively identified usage error (classify-grep-exit.sh) is malformed; a missing operand stays a real FAIL even with stderr suppressed.
+        [ "$RC" -ge 2 ] && MALFORMED=$(bash "$GREP_CLS" "$RC" "$ERR" "$TARGET" 2>/dev/null)
         [ "$RC" -eq 0 ] || [ -n "$MALFORMED" ] || { RESULT="FAIL"; DETAIL="command exited non-zero: $TARGET"; }
       else
-        OUTPUT=$(eval "$TARGET" 2>&1); RC=$?; ERR="$OUTPUT"
-        [ "$RC" -ge 2 ] && case "$TARGET" in grep\ *|egrep\ *|fgrep\ *) printf '%s' "$ERR" | grep -qE 'No such file or directory|Permission denied|Is a directory' || MALFORMED="grep usage error (exit $RC)";; esac
+        ERRF=$(mktemp); OUTPUT=$(eval "$TARGET" 2>"$ERRF"); RC=$?; ERR=$(cat "$ERRF"); rm -f "$ERRF"; [ -z "$ERR" ] || OUTPUT="${OUTPUT}${OUTPUT:+$'\n'}${ERR}" # classify on stderr only, match on both
+        [ "$RC" -ge 2 ] && MALFORMED=$(bash "$GREP_CLS" "$RC" "$ERR" "$TARGET" 2>/dev/null)
         if [ -n "$MALFORMED" ]; then :
         else
           printf '%s\n' "$OUTPUT" | grep -qE "$MATCHER" || printf '%s\n' "$OUTPUT" | grep -qF -- "$MATCHER" \
