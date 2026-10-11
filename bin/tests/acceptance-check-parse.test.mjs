@@ -115,10 +115,12 @@ test("build.md defers review checks and the legacy 'no pull requests found' resu
   assert.ok(build.includes("no pull requests found") && build.includes('"$DEFERRED_COUNT" -eq 0'));
 });
 
-test("review.md R2.5 evaluates deferred checks with its own marker and the same phase extraction", () => {
+test("review.md R2.5 calls a script that evaluates deferred checks with its own marker and the same phase extraction", () => {
   const review = readFileSync(join(root, "commands/work-on/review.md"), "utf8");
-  assert.ok(review.includes("## Phase R2.5") && review.includes("FORGE:ACCEPTANCE_GATE_REVIEW:FAILED"));
-  assert.ok(!review.includes("FORGE:ACCEPTANCE_GATE -->") && !review.includes("FORGE:ACCEPTANCE_GATE:"));
+  const gate = readFileSync(join(root, "scripts/review-acceptance-gate.sh"), "utf8");
+  assert.ok(review.includes("## Phase R2.5") && review.includes("resolve_script 'review-acceptance-gate'"));
+  assert.ok(gate.includes("FORGE:ACCEPTANCE_GATE_REVIEW:FAILED") && gate.includes("FORGE:ACCEPTANCE_GATE_REVIEW:PASSED:"));
+  assert.ok(!gate.includes("FORGE:ACCEPTANCE_GATE -->") && !gate.includes("FORGE:ACCEPTANCE_GATE:"));
   const phaseLine = build.split("\n").find((l) => /^ {2}PHASE=\$\(/.test(l));
-  assert.ok(review.includes(phaseLine));
+  assert.ok(gate.includes(phaseLine));
 });
