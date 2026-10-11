@@ -83,7 +83,20 @@ expect INPR_FIX "./ prefix matches"                   -- --severity MEDIUM --con
 expect INPR_FIX "lineage PR still fixes in-PR"        -- --severity MEDIUM --confidence CONFIRMED --lineage review-finding --inpr-diff "$DIFF" --file src/api/jobs.py
 expect ISSUE "MEDIUM CONFIRMED outside diff files"    -- --severity MEDIUM --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/other.py
 expect ISSUE "MEDIUM LIKELY in diff is not gated"     -- --severity MEDIUM --confidence LIKELY --inpr-diff "$DIFF" --file src/api/jobs.py
-expect ISSUE "HIGH in diff stays ISSUE (7B blocks it)" -- --severity HIGH --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/jobs.py
+expect INPR_FIX "HIGH CONFIRMED in diff (#3592)"       -- --severity HIGH --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/jobs.py
+expect INPR_FIX "CRITICAL CONFIRMED in diff (#3592)"   -- --severity CRITICAL --confidence CONFIRMED --inpr-diff "$DIFF" --file "src/api/jobs.py:9"
+expect INPR_FIX "HIGH in diff with safety keyword"     -- --severity HIGH --confidence CONFIRMED --title "billing refund leg unreachable" --inpr-diff "$DIFF" --file src/api/jobs.py
+expect ISSUE "HIGH LIKELY in diff stays ISSUE"         -- --severity HIGH --confidence LIKELY --inpr-diff "$DIFF" --file src/api/jobs.py
+expect ISSUE "CRITICAL LIKELY in diff stays ISSUE"     -- --severity CRITICAL --confidence LIKELY --inpr-diff "$DIFF" --file src/api/jobs.py
+expect ISSUE "HIGH CONFIRMED outside diff stays ISSUE" -- --severity HIGH --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/other.py
+expect ISSUE "CRITICAL CONFIRMED outside diff"         -- --severity CRITICAL --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/other.py
+expect ISSUE "HIGH CONFIRMED without --inpr-diff"      -- --severity HIGH --confidence CONFIRMED --file src/api/jobs.py
+expect ISSUE "HIGH CONFIRMED without --file"           -- --severity HIGH --confidence CONFIRMED --inpr-diff "$DIFF"
+for _s in HIGH CRITICAL MEDIUM; do
+  _want="INPR_FIX $(printf '%s' "$_s" | tr '[:upper:]' '[:lower:]')-confirmed-in-diff"
+  _got=$(bash "$S" --severity "$_s" --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/jobs.py 2>/dev/null)
+  if [ "$_got" = "$_want" ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL: reason carries severity $_s (want '$_want', got '$_got')"; fi
+done
 expect NOTE  "LOW in diff stays NOTE"                 -- --severity LOW --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/jobs.py
 expect ISSUE "no --inpr-diff: unchanged behaviour"    -- --severity MEDIUM --confidence CONFIRMED --file src/api/jobs.py
 expect ISSUE "no --file: unchanged behaviour"         -- --severity MEDIUM --confidence CONFIRMED --inpr-diff "$DIFF"
