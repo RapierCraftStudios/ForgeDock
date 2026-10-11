@@ -61,6 +61,8 @@ export function deriveState(events) {
               remediationKind: null };
   // forge#3528: handoff reason of the LAST PHASE_COMMIT only (replaced, not sticky).
   let lastCommitReason = null;
+  // forge#3754: phase of the LAST PHASE_COMMIT, so a reopen can tell a remediate-terminal run.
+  let lastCommitPhase = null;
   for (const e of events) {
     switch (e.event) {
       case "RUN_START":
@@ -75,6 +77,7 @@ export function deriveState(events) {
         // remediate instead of defaulting to a "merged" close.
         if (e.terminalReason) s.terminalReason = e.terminalReason;
         lastCommitReason = e.terminalReason ?? null;
+        lastCommitPhase = e.phase ?? null;
         // forge#3530: the review's remediation kind must survive resume. A later review
         // commit replaces it; a committed remediate consumes it, so it is never reused.
         if (e.phase === "review") s.remediationKind = e.outputs?.remediation ?? null;
@@ -91,6 +94,12 @@ export function deriveState(events) {
       // retry re-enters remediate/decompose instead of close/build.
       case "RUN_REOPEN":
         s.terminal = false; s.terminalReason = lastCommitReason; s.v = e.seq;
+        // forge#3754: a remediate that ended needs-human is re-run after a human clears the
+        // label. Un-commit it (new array, no in-place mutation) so the forge#3506 resume guard
+        // does not re-terminate and remediate's entryCondition re-selects it.
+        if (lastCommitPhase === "remediate" && lastCommitReason === "needs-human") {
+          s.committed = s.committed.filter((p) => p !== "remediate");
+        }
         break;
       // forge#3562: an explicit `run-issue --retry` on a `phase-complete` run
       // (multi-phase issue: this phase merged, more remain) starts a NEW cycle.
@@ -102,7 +111,7 @@ export function deriveState(events) {
       case "RUN_NEXT_CYCLE":
         s.terminal = false; s.terminalReason = null; s.committed = [];
         s.branch = null; s.pr = null; s.remediationKind = null;
-        lastCommitReason = null; s.v = e.seq;
+        lastCommitReason = null; lastCommitPhase = null; s.v = e.seq;
         break;
       // forge#2524: a session-limit pause is purely informational — it does
       // NOT touch committed/terminal/terminalReason. The phase that hit the

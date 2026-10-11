@@ -1579,12 +1579,20 @@ describe("build investigation exit (forge#3534)", () => {
     assert.equal(pickPhase({ ...s, terminalReason: null }).id, "review");
   });
 
-  it("close.detectOutcome keeps the investigation reason for a CLOSED issue", async () => {
-    const io = { gh: async (a) => (a[0] === "issue" ? JSON.stringify({ state: "CLOSED", labels: [] }) : "[]"), git: async () => "0" };
-    const o = await close.detectOutcome({ ...base, terminalReason: "investigation" }, io);
-    assert.equal(o.status, "committed");
-    assert.equal(o.terminalReason, "investigation");
-    assert.equal((await close.detectOutcome(base, io)).terminalReason, "invalid");
+  it("close.detectOutcome on a CLOSED investigation issue requires the trajectory (without trajectory fails)", async () => {
+    const snap = JSON.stringify({ state: "CLOSED", labels: [] });
+    const io = (bodies) => ({ gh: async (a) => (a[0] === "issue" ? snap : jsonLines(bodies.map((b) => trusted(b)))), git: async () => "0" });
+    const s = { ...base, terminalReason: "investigation" };
+    const ok = await close.detectOutcome(s, io(["<!-- FORGE:TRAJECTORY -->\nrow"]));
+    assert.equal(ok.status, "committed");
+    assert.equal(ok.terminalReason, "investigation");
+    const none = await close.detectOutcome(s, io([marker]));
+    assert.equal(none.status, "failed");
+    assert.match(none.detail, /no FORGE:TRAJECTORY/);
+    const throwing = { gh: async (a) => { if (a[0] === "issue") return snap; throw new Error("gh down"); }, git: async () => "0" };
+    assert.equal((await close.detectOutcome(s, throwing)).status, "failed");
+    // non-investigation CLOSED is unchanged
+    assert.equal((await close.detectOutcome(base, io([]))).terminalReason, "invalid");
   });
 
   it("close.reconcile on a CLOSED investigation issue needs the trajectory before it is satisfied", async () => {

@@ -25,6 +25,8 @@ on:
       - 'scripts/review-delta.test.sh'
       - 'scripts/review-pr-delta-wiring.test.sh'
       - 'scripts/review-pr-staging-scope.test.sh'
+      - 'scripts/check-spec-size.sh'
+      - 'scripts/check-spec-size.test.sh'
       - 'scripts/check-test-wiring.sh'
       - 'scripts/check-test-wiring.test.sh'
       - 'scripts/*.test.sh'
@@ -63,6 +65,8 @@ on:
       - 'scripts/review-delta.test.sh'
       - 'scripts/review-pr-delta-wiring.test.sh'
       - 'scripts/review-pr-staging-scope.test.sh'
+      - 'scripts/check-spec-size.sh'
+      - 'scripts/check-spec-size.test.sh'
       - 'scripts/check-test-wiring.sh'
       - 'scripts/check-test-wiring.test.sh'
       - 'scripts/*.test.sh'
@@ -401,3 +405,24 @@ jobs:
 
       - name: Check every scripts/*.test.sh is referenced by a workflow
         run: bash scripts/check-test-wiring.sh
+
+  spec-size-budget:
+    name: Spec-size budget (review specs may not grow)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Run budget fixtures
+        run: bash scripts/check-spec-size.test.sh
+
+      - name: Check budgeted specs against the PR base
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: bash scripts/check-spec-size.sh "$BASE_REF"
