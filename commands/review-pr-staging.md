@@ -1090,13 +1090,19 @@ ALL_FINDINGS=$(printf '%s\n' "$AGENT_BODIES" | jq -r 'scan("<!-- FINDING:([^>]+)
 Extract structured findings (`<!-- FINDING:... -->`) from `ALL_FINDINGS`. If none found, scan the trusted bodies for unstructured findings. If still 0 → skip to Phase 8.
 
 ### 7B: Filter & Deduplicate
-Keep ALL findings (CONFIRMED/LIKELY/POSSIBLE) for classification (7B.5). Deduplicate within this run by file + pattern + location: same file, location within +-5 lines, and 3+ shared title keywords (a shared explicit finding id is an additional match, never a substitute for the keyword test) are one finding (keep higher confidence). When `SCOPE_MODE=scoped`, a finding is `out_of_scope` only when it cites at least one file and EVERY cited file is outside `CROSS_PR_FILES`, `UNREVIEWED_FILES` and `DEPLOY_WIRING_FILES` (0B.1; a finding with any in-scope file, such as a cross-file interaction, stays in scope), and the filter may only DEMOTE it, never drop it: only a finding whose normalised severity is `MEDIUM`, `LOW` or `INFO` becomes a listed note. `CRITICAL` and `HIGH` (any confidence), and any missing or unrecognised severity, are always kept and go to 7B.5 as usual, so scope can never remove a blocking finding. Every demoted finding is listed (id, file:line, reason `out_of_scope`) in the 7B.5 disposition; none is silently dropped. Findings with no file (readiness-checklist items such as undocumented env vars or a migration-number collision across PRs) are never demoted. The executable rule is the two `SCOPE_RULE` lines inside `classify_one` in 7B.5 (`scripts/review-pr-staging-scope.test.sh` evaluates them).
+Keep ALL findings (CONFIRMED/LIKELY/POSSIBLE) for the 7B.6 provenance gates and then classification (7B.5). Deduplicate within this run by file + pattern + location: same file, location within +-5 lines, and 3+ shared title keywords (a shared explicit finding id is an additional match, never a substitute for the keyword test) are one finding (keep higher confidence). When `SCOPE_MODE=scoped`, a finding is `out_of_scope` only when it cites at least one file and EVERY cited file is outside `CROSS_PR_FILES`, `UNREVIEWED_FILES` and `DEPLOY_WIRING_FILES` (0B.1; a finding with any in-scope file, such as a cross-file interaction, stays in scope), and the filter may only DEMOTE it, never drop it: only a finding whose normalised severity is `MEDIUM`, `LOW` or `INFO` becomes a listed note. `CRITICAL` and `HIGH` (any confidence), and any missing or unrecognised severity, are always kept and go to 7B.5 as usual, so scope can never remove a blocking finding. Every demoted finding is listed (id, file:line, reason `out_of_scope`) in the 7B.5 disposition; none is silently dropped. Findings with no file (readiness-checklist items such as undocumented env vars or a migration-number collision across PRs) are never demoted. The executable rule is the two `SCOPE_RULE` lines inside `classify_one` in 7B.5 (`scripts/review-pr-staging-scope.test.sh` evaluates them).
 
 Sort: CONFIRMED first, then by severity.
+
+### 7B.6: Provenance and concreteness gates (forge#3452)
+
+Before filing, apply the three gates defined in `commands/review-pr.md` §6B.4 (head-SHA, introduced-line, failure scenario), in that order, to every finding — do not duplicate the algorithm here. Use the staging diff (`git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH`, or the reviewed PR's diff) as the introduced-line source and the full 40-hex head SHA (`git rev-parse origin/$STAGING_BRANCH`, never an abbreviated one) as the reviewed SHA. Stale findings are dropped (`findings_dropped_stale`), findings outside the diff are `pre-existing` (`findings_preexisting`: listed in the summary, MEDIUM or lower only, since CRITICAL/HIGH, any confidence, are never routed as pre-existing and a file with no `patch` in the diff API is UNKNOWN and kept; filed only when safety-domain with the `pre-existing` label and never `review-finding`, so they are excluded from findings-per-PR and the amplification ratio), and findings without a `**Failure scenario**` are demoted to notes (`notes_demoted_no_scenario`) unless CRITICAL/HIGH, any confidence. Unreadable inputs keep the finding. Report the three counts in the staging review summary using the same names, and record every demoted or listed note in a `FORGE:NOTE_DISPOSITION` record in the same format as `commands/review-pr.md` §6B.5.
 
 ### 7B.5: Note Disposition (same damper and classifier as `/review-pr` §6B.5)
 
 Classify every deduped finding with `scripts/classify-finding.sh` before filing, exactly as `commands/review-pr.md` §6B.5 does (the rules live in the script, not here: HIGH/CRITICAL always ISSUE, content-based safety exemption where LOW needs a keyword AND CONFIRMED and a domain agent rescues MEDIUM only, otherwise LOW/POSSIBLE become NOTEs). Resolve it with the same resolver (`${CLAUDE_PLUGIN_ROOT}`, `FORGE_ROOT`, `FORGEDOCK_HOME`, pinned plugin cache under `CLAUDE_CONFIG_DIR` then `~/.claude`). There is no `$PWD` tier: the repo under review is author-controlled. The staging PR is not a finding fix, so `FINDING_LINEAGE=none`.
+
+**Cross-PR re-flag** <!-- Added: forge#3641 -->: the 7B.6 gates run first, so re-flag counts cover only findings that survived them. A finding that a bundle member PR's review already posted, or that a member PR's `FORGE:NOTE_DISPOSITION` list recorded, is not filed or noted again. The fence builds a prior-findings TSV (file, line-start, line-end, title, prior-disposition, issue#) from each member PR in `ALL_PR_NUMBERS`, reading every comment through `scripts/trusted-comments.sh` (never an untrusted author), and passes it to the classifier as `--prior-findings`. A finding re-flags a row when it is the same file AND (line IoU >= 0.6 OR >= 3 shared title tokens); the classifier answers `NOTE reflag-filed #N` (the prior issue is still open) or `NOTE reflag-note`, never a new ISSUE. HIGH/CRITICAL are never demoted (they keep blocking via §7B), and a row whose linked issue is closed is ignored so a regressed defect is classified normally. Re-flag NOTEs are listed with the other NOTEs and counted in `notes_reflag` only. An unreadable member PR only shrinks the TSV; it never blocks.
 
 ```bash
 _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
@@ -1132,6 +1138,71 @@ NOTES_LISTED=0; NOTES_DROPPED=0; FINDINGS_FILED=0; OUT_OF_SCOPE=0
 # 0B.1 results were written to a scope file by the Phase 0B.1 block; a missing or unreadable file means SCOPE_MODE=full (no demotion, fail open), announced rather than silent.
 SCOPE_MODE=full; CROSS_PR_FILES=""; UNREVIEWED_FILES=""; DEPLOY_WIRING_FILES=""
 if [ -r "$_SD/${PR_NUMBER}_scope.env" ]; then . "$_SD/${PR_NUMBER}_scope.env"; else echo "WARNING: $_SD/${PR_NUMBER}_scope.env unreadable: SCOPE_MODE=full (no out-of-scope demotion)"; fi
+# Cross-PR re-flag input (forge#3641): prior findings and NOTE lists of every bundle member PR, trusted authors only. Unresolvable script or unreadable PRs leave PRIOR_FILE empty (no demotion).
+# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+done
+TRUSTED_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done <<< "$_tc"
+REPO="$GH_REPO"; _pscr="$_SD"; NOTES_REFLAG=0; PRIOR_FILE=""
+# Cross-head re-flag input (#3641). Fail soft: every unreadable source just leaves the TSV smaller, never blocks the review.
+# PF_SKIP="<sha or empty>" PF_PRS="<pr numbers>" prior_findings_tsv prints file<TAB>line-start<TAB>line-end<TAB>title<TAB>disposition<TAB>issue# rows
+# (disposition: filed = linked issue OPEN, filed-closed = linked issue CLOSED, note = no linked issue). Every comment is read through
+# scripts/trusted-comments.sh, so an untrusted commenter cannot pre-post a finding to suppress a real one. With PF_SKIP set, reviewer
+# bodies for that head are skipped and only NOTE_DISPOSITION records carrying a different `reviewed_sha=` count (this head's own record,
+# from an earlier run of this same review, must never swallow its findings).
+pf_split_loc() { # PF_LOC="file[:N[-M]]" -> file<TAB>N<TAB>M (line columns empty when absent)
+  local _loc="$PF_LOC" _file _r _a="" _b=""; _file="$_loc"
+  case "$_loc" in *:[0-9]*) _r="${_loc##*:}"; case "$_r" in *[!0-9-]*|"") ;; *) _file="${_loc%:*}"; _a="${_r%%-*}"; _b="${_r#*-}"; [ "$_b" != "$_r" ] || _b="$_a" ;; esac ;; esac
+  printf '%s\t%s\t%s\n' "$_file" "$_a" "$_b"
+}
+prior_findings_tsv() {
+  local pr cj rows issues _id _c _s _loc _t _p _hit _f _a _b
+  [ -n "${TRUSTED_SCRIPT:-}" ] || return 0
+  rows=$(mktemp "${_pscr}/prior-rows.XXXXXX"); issues=$(mktemp "${_pscr}/prior-issues.XXXXXX")
+  for pr in $PF_PRS; do
+    case "$pr" in ''|*[!0-9]*) continue ;; esac
+    cj=$(gh api --paginate "repos/${REPO}/issues/${pr}/comments" 2>/dev/null) || continue
+    [ -n "$cj" ] || continue
+    printf '%s' "$cj" | bash "$TRUSTED_SCRIPT" bodies '^<!-- (FORGE:REVIEW-AGENT:[a-z-]+|REVIEW-FINDINGS-SYNTHESIZED-START) -->[\s\S]*(^|\n)Reviewed-SHA: [0-9a-f]{40,64}' 2>/dev/null \
+      | jq -r --arg skip "${PF_SKIP:-}" 'select($skip == "" or (test("(^|\\n)Reviewed-SHA: " + $skip + "\\r?(\\n|$)") | not)) | scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null \
+      | while IFS='|' read -r _id _c _s _loc _t; do
+          [ -n "$_t" ] || continue
+          _p=$(PF_LOC="$_loc" pf_split_loc); printf '%s\t%s\n' "$_p" "$(printf '%s' "$_t" | tr '\t' ' ')"
+        done >> "$rows"
+    printf '%s' "$cj" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:NOTE_DISPOSITION' 2>/dev/null \
+      | jq -r --arg skip "${PF_SKIP:-}" 'select($skip == "" or ((capture("^<!-- FORGE:NOTE_DISPOSITION:[^>]*reviewed_sha=(?<s>[0-9a-f]{40,64})") | .s) as $s | $s != $skip)) | split("\n")[] | select(startswith("- "))' 2>/dev/null \
+      | sed -n 's/^- [^ ]* \([^ ]*\) \[[A-Za-z?]*\] \(.*\): [^:]*$/\1\t\2/p' \
+      | while IFS="$(printf '\t')" read -r _loc _t; do
+          [ "$_loc" != "?" ] || continue
+          _p=$(PF_LOC="$_loc" pf_split_loc); printf '%s\t%s\n' "$_p" "$_t"
+        done >> "$rows"
+    gh issue list -R "$REPO" --label review-finding --state all --search "${pr} in:body" --limit 100 --json number,state,title,body 2>/dev/null \
+      | jq -c '.[]' >> "$issues" 2>/dev/null || true
+  done
+  # Linkage: a filed issue whose body names the file and whose title shares >= 3 tokens with the finding (open preferred).
+  sort -u "$rows" | while IFS="$(printf '\t')" read -r _f _a _b _t; do
+    [ -n "$_f" ] || continue
+    _hit=$(jq -rs --arg f "$_f" --arg t "$_t" 'def toks: ascii_downcase | [scan("[a-z0-9]{3,}")] | unique;
+      ($t | toks) as $a | [ .[] | select((.body // "") | contains($f))
+        | select((((.title // "") | toks) as $b | [$a[] | select(. as $x | $b | index($x))] | length) >= 3)
+        | {n: .number, s: (.state | ascii_downcase)} ]
+      | (map(select(.s == "open")) + map(select(.s != "open"))) | .[0] // empty | "\(.s)\t\(.n)"' "$issues" 2>/dev/null) || _hit=""
+    case "$_hit" in
+      open*) printf '%s\t%s\t%s\t%s\tfiled\t%s\n' "$_f" "$_a" "$_b" "$_t" "${_hit#*	}" ;;
+      closed*) printf '%s\t%s\t%s\t%s\tfiled-closed\t%s\n' "$_f" "$_a" "$_b" "$_t" "${_hit#*	}" ;;
+      *) printf '%s\t%s\t%s\t%s\tnote\t\n' "$_f" "$_a" "$_b" "$_t" ;;
+    esac
+  done
+  rm -f "$rows" "$issues"
+}
+PRIOR_ROWS=$(PF_SKIP="" PF_PRS="$ALL_PR_NUMBERS" prior_findings_tsv)
+if [ -n "$PRIOR_ROWS" ]; then PRIOR_FILE="$_SD/${PR_NUMBER}_prior-findings.tsv"; printf '%s\n' "$PRIOR_ROWS" > "$PRIOR_FILE"; fi
 classify_one() {
   # FINDING_TEXT_FILE holds the finding text: the classifier's content-based safety exemption reads it, so an empty file silently disables the exemption.
   local FINDING_TEXT_FILE; FINDING_TEXT_FILE=$(mktemp "$_SD/staging-finding.XXXXXX")
@@ -1139,7 +1210,8 @@ classify_one() {
   DISPOSITION=""
   if [ -n "$CLASSIFY_SCRIPT" ]; then
     DISPOSITION=$(bash "$CLASSIFY_SCRIPT" --severity "$FINDING_SEVERITY" --confidence "$FINDING_CONFIDENCE" \
-      --agent "$FINDING_AGENT" --lineage none --text-file "$FINDING_TEXT_FILE") || DISPOSITION=""
+      --agent "$FINDING_AGENT" --lineage none --text-file "$FINDING_TEXT_FILE" \
+      ${PRIOR_FILE:+--prior-findings "$PRIOR_FILE" --title "${FINDING_TITLE:-}" --file "${FINDING_FILE:-}"}) || DISPOSITION=""
   fi
   rm -f "$FINDING_TEXT_FILE"
   # Fail toward filing, never drop: a classifier runtime failure or garbled result on one finding is ISSUE (the classifier's own convention); an unresolvable classifier never reaches here (guard above). INPR_FIX is never emitted (no --inpr-diff on a bundle).
@@ -1149,7 +1221,7 @@ classify_one() {
   case "$SEV" in MEDIUM|LOW|INFO) OOS_DEMOTE=1 ;; *) OOS_DEMOTE=0 ;; esac   # SCOPE_RULE
   # Demote ONLY when scoped, the rule allows it, the classifier did not apply its safety exemption, and EVERY cited file is out of scope.
   # A finding with no file, or with any file in scope, is never demoted. The demotion is recorded as a listed note, never dropped.
-  case "$DISPOSITION" in *safety-exemption*) OOS_DEMOTE=0 ;; esac
+  case "$DISPOSITION" in *safety-exemption*|"NOTE reflag"*) OOS_DEMOTE=0 ;; esac   # a re-flag is already a recorded NOTE: never double-count it as out_of_scope
   if [ "$SCOPE_MODE" = "scoped" ] && [ "$OOS_DEMOTE" = "1" ] && [ -n "${FINDING_PATHS:-${FINDING_FILE:-}}" ]; then
     local _ANY_IN=false _f
     while IFS= read -r _f; do
@@ -1159,6 +1231,7 @@ classify_one() {
     if [ "$_ANY_IN" = "false" ]; then DISPOSITION="NOTE out_of_scope"; OUT_OF_SCOPE=$((OUT_OF_SCOPE+1)); fi
   fi
   case "$DISPOSITION" in
+    "NOTE reflag"*) NOTES_REFLAG=$((NOTES_REFLAG+1)); printf '%s\n' "- ${FINDING_ID:-?} ${FINDING_FILE:-?} [${SEV:-?}] ${FINDING_TITLE:-}: ${DISPOSITION}" >> "$NOTE_LIST_FILE" ;;   # counted in notes_reflag only
     NOTE*) NOTES_LISTED=$((NOTES_LISTED+1)); printf '%s\n' "- ${FINDING_ID:-?} ${FINDING_FILE:-?} [${SEV:-?}] ${FINDING_TITLE:-}: ${DISPOSITION}" >> "$NOTE_LIST_FILE" ;;
     *) FINDINGS_FILED=$((FINDINGS_FILED+1)) ;;   # classified ISSUE; 7E dedup may still skip creation
   esac
@@ -1186,17 +1259,13 @@ if [ -z "${PR_NUMBER:-}" ]; then
   echo "REVIEW_RESULT: status: BLOCKED, blocker: PR_NUMBER unavailable; FORGE:NOTE_DISPOSITION not posted (record lost)"
 else
 NOTE_LIST_FILE="${NOTE_LIST_FILE:-$_SD/${PR_NUMBER}_notes.md}"
-[ -n "${NOTES_LISTED:-}" ] || { NOTES_LISTED=$(grep -c '^- ' "$NOTE_LIST_FILE" 2>/dev/null || true); echo "WARNING: classification counters lost (fresh shell): notes_listed recomputed from $NOTE_LIST_FILE; set SCOPE_MODE, FINDINGS_FILED and OUT_OF_SCOPE from the 7B.5 block output before posting"; }
+[ -n "${NOTES_LISTED:-}" ] || { NOTES_LISTED=$(grep -c '^- ' "$NOTE_LIST_FILE" 2>/dev/null || true); echo "WARNING: classification counters lost (fresh shell): notes_listed recomputed from $NOTE_LIST_FILE; set SCOPE_MODE, FINDINGS_FILED, OUT_OF_SCOPE and NOTES_REFLAG from the 7B.5 block output before posting"; }
 [ -n "${SCOPE_MODE:-}" ] || { SCOPE_MODE=full; echo "WARNING: SCOPE_MODE lost (fresh shell): recording scope=full"; }
 _DISP_BODY="$_SD/${PR_NUMBER}_note_disposition.md"
-{ printf '%s\n' "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=0 notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} out_of_scope=${OUT_OF_SCOPE:-0} lineage=none classifier=${CLASSIFIER_MODE} scope=${SCOPE_MODE} -->"; cat "$NOTE_LIST_FILE" 2>/dev/null; } > "$_DISP_BODY"
+{ printf '%s\n' "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=0 notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} out_of_scope=${OUT_OF_SCOPE:-0} notes_reflag=${NOTES_REFLAG:-0} lineage=none classifier=${CLASSIFIER_MODE} scope=${SCOPE_MODE} -->"; cat "$NOTE_LIST_FILE" 2>/dev/null; } > "$_DISP_BODY"
 gh pr comment "$PR_NUMBER" -R "$GH_REPO" --body-file "$_DISP_BODY" # allowlist:check-command-side-effects
 fi
 ```
-
-### 7B.6: Provenance and concreteness gates (forge#3452)
-
-Before filing, apply the three gates defined in `commands/review-pr.md` §6B.4 (head-SHA, introduced-line, failure scenario), in that order, to every finding — do not duplicate the algorithm here. Use the staging diff (`git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH`, or the reviewed PR's diff) as the introduced-line source and the full 40-hex head SHA (`git rev-parse origin/$STAGING_BRANCH`, never an abbreviated one) as the reviewed SHA. Stale findings are dropped (`findings_dropped_stale`), findings outside the diff are `pre-existing` (`findings_preexisting`: listed in the summary, MEDIUM or lower only, since CRITICAL/HIGH, any confidence, are never routed as pre-existing and a file with no `patch` in the diff API is UNKNOWN and kept; filed only when safety-domain with the `pre-existing` label and never `review-finding`, so they are excluded from findings-per-PR and the amplification ratio), and findings without a `**Failure scenario**` are demoted to notes (`notes_demoted_no_scenario`) unless CRITICAL/HIGH, any confidence. Unreadable inputs keep the finding. Report the three counts in the staging review summary using the same names, and record every demoted or listed note in a `FORGE:NOTE_DISPOSITION` record in the same format as `commands/review-pr.md` §6B.5.
 
 ### 7C: Ensure Labels
 ```bash

@@ -2,6 +2,14 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Cross-head and cross-PR re-flag dedup (#3641)
+
+`scripts/classify-finding.sh` takes `--prior-findings <TSV>` (file, line-start, line-end, title, prior-disposition, issue#) plus `--title`, `--line-start`/`--line-end` and an optional `--diff-map`. A finding that re-raises one already posted or noted earlier (same file AND line IoU >= 0.6 or >= 3 shared title tokens) becomes `NOTE reflag-filed #N` or `NOTE reflag-note` instead of a new issue. HIGH/CRITICAL are never demoted, and a prior row whose issue is closed is ignored so a regression is not swallowed.
+
+`/review-pr` §6B.5 builds the TSV from trusted reviewer comments of earlier heads and earlier `FORGE:NOTE_DISPOSITION` records; `/review-pr-staging` §7B.5 builds it from every bundle member PR. Both read comments only through `scripts/trusted-comments.sh`. In the staging spec §7B.6 (provenance gates) now comes before §7B.5. The `FORGE:NOTE_DISPOSITION` marker gains `notes_reflag=` (and `/review-pr` also `reviewed_sha=`); consumers match the marker prefix only.
+
+Action: none. Records posted before this change lack `reviewed_sha=` and are not read as prior findings by `/review-pr`.
+
 ## Review damper: LOW needs keyword + CONFIRMED; a missing classifier blocks the review (#3639)
 
 `scripts/classify-finding.sh` is stricter for LOW findings. A safety keyword now files a LOW finding only when it is also CONFIRMED (LOW LIKELY/POSSIBLE with a keyword is a NOTE), and a dedicated domain agent (Auth, Billing, Concurrency, Database) rescues MEDIUM findings only, no longer LOW CONFIRMED. MEDIUM behaviour is unchanged.
