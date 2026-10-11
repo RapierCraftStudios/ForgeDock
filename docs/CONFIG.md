@@ -514,7 +514,7 @@ build:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `diff_size.threshold` | integer | No | Changed lines allowed before the gate trips. Default: 1000. `0` disables the gate |
-| `diff_size.estimate_factor` | number | No | Multiplier on `threshold` for the pre-build estimate: the investigator forces a decomposition when `ESTIMATED_DIFF_LINES` > `threshold` x `estimate_factor`. The engine's fail-toward-decompose net (`isDecomposed`) does not read this setting: it always uses the fixed default 1.2, even if the verdict says NO. Default: 1.2. Skipped when `threshold` is `0` |
+| `diff_size.estimate_factor` | number | No | Multiplier on `threshold` for the pre-build estimate: the investigator forces a decomposition when `ESTIMATED_DIFF_LINES` > `threshold` x `estimate_factor`. The engine's fail-toward-decompose net (`isDecomposed`) does not read this setting: it always uses the fixed default 1.2, even if the verdict says NO. That net is suppressed (treated as not decomposed) for a sub-issue (`**Parent**: #N`), an issue with a trusted `FORGE:DECOMPOSED` comment, or a justified `FORGE:SIZE_OVERRIDE`, because decompose Guard 1 refuses those. Default: 1.2. Skipped when `threshold` is `0` |
 | `diff_size.batch_seam_min` | integer | No | Independent seams (batch members) at which an issue defaults to one sub-issue per seam, unless `ESTIMATED_DIFF_LINES` is at or under half of `threshold`. Default: 3. Skipped when `threshold` is `0` |
 | `diff_size.exclude_globs` | list of strings | No | Globs excluded from the measurement, in addition to the built-in defaults. Default: `[]` |
 

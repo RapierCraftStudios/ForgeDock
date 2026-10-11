@@ -249,6 +249,33 @@ function sizeGateRoutesToDecompose(comments) {
   if (!m || m[1] !== "OVER" || !/^###[ \t]+Split Proposal\b/m.test(body)) return false;
   return !comments.slice(idx + 1).some((c) => starts(c, override) && overrideHasJustification(c));
 }
+/**
+ * Decompose loop guard (mirrors build.md B5.5 and decompose.md Guard 1). Returns a
+ * short reason string when the issue must NOT be routed to decompose, else null:
+ * a `**Parent**: #N` body line (a sub-issue; decompose Guard 1 would BLOCK it), a
+ * TRUSTED `FORGE:DECOMPOSED` comment, or a TRUSTED justified `FORGE:SIZE_OVERRIDE`.
+ * `comments` MUST be trusted bodies. A body-fetch failure fails toward the guard
+ * (not decomposed) so an error can never route into a refusing decompose phase.
+ */
+async function decomposeLoopGuard(issue, comments, io) {
+  const starts = (c, m) => typeof c === "string" && c.trimStart().startsWith(`<!-- ${m}`);
+  if (comments.some((c) => starts(c, "FORGE:DECOMPOSED"))) return "already decomposed (FORGE:DECOMPOSED)";
+  if (comments.some((c) => starts(c, PHASE_MARKERS.build.sizeOverrideMarker) && overrideHasJustification(c)))
+    return "justified FORGE:SIZE_OVERRIDE";
+  let body;
+  try {
+    const out = String((await io.gh(["issue", "view", String(issue), "--json", "body", "--jq", ".body"])) ?? "");
+    body = out;
+    if (out.trimStart().startsWith("{")) {
+      try { const j = JSON.parse(out); if (j && typeof j.body === "string") body = j.body; } catch { /* raw text */ }
+    }
+  } catch {
+    return "issue body unavailable (failing toward not decomposed)";
+  }
+  if (/^\*\*Parent\*\*:[ \t]*#\d+/m.test(body.replace(/\r\n/g, "\n"))) return "sub-issue (**Parent**: #N)";
+  return null;
+}
+
 /** Cheap untrusted pre-check: does ANY comment look like an OVER gate? Only then is the trusted fetch worth making. */
 function mayRouteToDecompose(comments) {
   const gate = PHASE_MARKERS.build.sizeGateMarker;
@@ -548,8 +575,16 @@ export const PHASES = [
         return { status: "committed", terminalReason: "invalid", outputs: { verdict: "INVALID" } };
       if (closing === complete) {
         // investigate.md emits `### Decomposition Assessment` then `**YES**|**NO**`.
-        if (isDecomposed(report))
+        if (isDecomposed(report)) {
+          // Lazy: the body fetch only happens on the decompose path. A child / already
+          // decomposed / overridden issue cannot be decomposed (decompose Guard 1 BLOCKs).
+          const guard = await decomposeLoopGuard(state.issue, comments, io);
+          if (guard) {
+            console.error(`[engine] decompose suppressed for #${state.issue}: ${guard}; treating as not decomposed`);
+            return { status: "committed", outputs: { verdict: "CONFIRMED" } };
+          }
           return { status: "committed", terminalReason: "decomposed", outputs: { decompose: true } };
+        }
         return { status: "committed", outputs: { verdict: "CONFIRMED" } };
       }
       return { status: "failed", detail: `no ${PHASE_MARKERS.investigate.completionMarker} marker` };

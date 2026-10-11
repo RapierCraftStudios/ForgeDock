@@ -90,7 +90,12 @@ describe("pickPhase", () => {
   describe("investigate.detectOutcome", () => {
     const investigate = PHASES.find(p => p.id === "investigate");
     // Each argument is a comment: a body string (OWNER-authored) or a full author object.
-    const ioWith = (...cs) => ({ gh: async () => jsonLines(cs.map((c) => (typeof c === "string" ? trusted(c) : c))), git: async () => "0" });
+    // `issue view` (body fetch) is dispatched separately from `api` (comments): configure via ioWith.body / ioWith.bodyError.
+    const ioWithBody = (body, ...cs) => ({
+      gh: async (args) => (args[0] === "issue" ? (body instanceof Error ? Promise.reject(body) : body) : jsonLines(cs.map((c) => (typeof c === "string" ? trusted(c) : c)))),
+      git: async () => "0",
+    });
+    const ioWith = (...cs) => ioWithBody("", ...cs);
 
     it("INVALID sentinel as the closing line -> committed, terminalReason invalid", async () => {
       const outcome = await investigate.detectOutcome(base, ioWith(invBody("INVALID")));
@@ -207,6 +212,51 @@ describe("pickPhase", () => {
       const outcome = await investigate.detectOutcome(base, ioComments(
         inv("**YES** — split", `ESTIMATED_DIFF_LINES: 5000\nGATE_THRESHOLD: 1000\n<!-- ${PHASE_MARKERS.investigate.notDecomposedMarker} -->`)));
       assert.equal(outcome.terminalReason, undefined);
+    });
+
+    // forge#3676: loop guard — a child / decomposed / overridden issue is never routed to decompose.
+    const over = () => sized("**NO** — one PR", 1500, 1000);
+    const childBody = "## Problem\n\n**Parent**: #12\n\nbody";
+    const override = (just) => `<!-- ${PHASE_MARKERS.build.sizeOverrideMarker} -->${just ? `\n${just}` : ""}`;
+
+    it("child issue with over-gate estimate -> not decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioWithBody(childBody, over()));
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("child issue with explicit YES -> not decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioWithBody(childBody, sized("**YES** — split", 1500, 1000)));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("trusted FORGE:DECOMPOSED comment suppresses the estimate net", async () => {
+      const outcome = await investigate.detectOutcome(base, ioWithBody("", over(), "<!-- FORGE:DECOMPOSED -->\nspawned"));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("untrusted FORGE:DECOMPOSED comment does not suppress", async () => {
+      const fake = trusted("<!-- FORGE:DECOMPOSED -->\nspawned", { assoc: "NONE", type: "User", login: "drive-by" });
+      const outcome = await investigate.detectOutcome(base, ioWithBody("", over(), fake));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("justified SIZE_OVERRIDE suppresses; unjustified does not", async () => {
+      const ok = await investigate.detectOutcome(base, ioWithBody("", over(), override("Accepted: one cohesive change.")));
+      assert.equal(ok.terminalReason, undefined);
+      const bad = await investigate.detectOutcome(base, ioWithBody("", over(), override("")));
+      assert.equal(bad.terminalReason, "decomposed");
+    });
+
+    it("body fetch failure fails toward not decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioWithBody(new Error("gh down"), over()));
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("mid-line Parent mention does not make an issue a child (control still decomposes)", async () => {
+      const outcome = await investigate.detectOutcome(base, ioWithBody("see **Parent**: #12 in docs", over()));
+      assert.equal(outcome.terminalReason, "decomposed");
     });
 
     it("investigate.md emits the template marker line and both exact marker constants", () => {
