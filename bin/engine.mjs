@@ -329,7 +329,10 @@ export async function runIssue(opts) {
           waitLease = false,
           hostname = osHostname(),
           killFn = process.kill.bind(process),
-          onProgress = () => {} } = opts;
+          onProgress = () => {},
+          // forge#3696: per-attempt telemetry seam (FORGE:TELEMETRY emitter, #3834). No-op by
+          // default; failures are swallowed so telemetry can never fail a phase.
+          emitTelemetry = () => {} } = opts;
 
   // forge#2452: extracted into makeProgressEmitter() — see its docstring for
   // the forge#2240 rationale this wrapper implements.
@@ -387,7 +390,7 @@ export async function runIssue(opts) {
     } catch { return null; }
   })());
 
-  const runMeta = async () => ({ version: ENGINE_VERSION, repo: await resolveRepo().catch(() => null) });
+  const runMeta = async () => ({ version: ENGINE_VERSION, forge_version: ENGINE_VERSION, repo: await resolveRepo().catch(() => null) });
   if (!state) {
     state = freshState(issue, lane);
     appendEvent(dir, issue, { event: "RUN_START", issue, run: state.run, lane, ...(await runMeta()) });
@@ -709,7 +712,7 @@ export async function runIssue(opts) {
         let pauseCount = 0;
         for (;;) {
           try {
-            outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo, agentId });
+            outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo, agentId, emitTelemetry });
             break;
           } catch (e) {
             const resetAtMs = e.resetAtEpochMs;
@@ -865,7 +868,9 @@ export async function runIssue(opts) {
     // commit event too, so a crash before RUN_TERMINAL or a rebuild cannot drop them.
     const commitReason = blockedReason ?? outcome.terminalReason ?? null;
     appendEvent(dir, issue, {
-      event: "PHASE_COMMIT", phase: phase.id, outputs: commitOutputs, usage: outcome.usage ?? null,
+      event: "PHASE_COMMIT", phase: phase.id, outputs: commitOutputs,
+      // forge#3696: `usage` is cumulative over every attempt of the phase; the last attempt's alone is `last_attempt_usage`.
+      usage: outcome.usage ?? null, last_attempt_usage: outcome.last_attempt_usage ?? null,
       // forge#3589: model + turn count per phase (null when the backend does not report them).
       model: outcome.model ?? null, turns: outcome.turns ?? null,
       ...(commitReason ? { terminalReason: commitReason } : {}),
@@ -944,7 +949,7 @@ export async function runIssue(opts) {
 }
 
 async function runPhaseWithRetry(phase, state, ctx) {
-  const { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo, agentId } = ctx;
+  const { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo, agentId, emitTelemetry } = ctx;
   // forge#3499: build the phase's full argument set ONCE, up front. Every
   // work-on phase sub-skill stops with BLOCKED when a required flag is absent,
   // so an incomplete/invalid set is a deterministic engine failure — fail
@@ -977,9 +982,28 @@ async function runPhaseWithRetry(phase, state, ctx) {
   // attempt (if any) set it to, which is correct: it always reflects the
   // most recent attempt that actually produced a result.
   let lastUsage = null;
+  // forge#3696: usage summed over every attempt (null if none reported usage — never 0).
+  let cumulativeUsage = null;
+  const addUsage = (u) => {
+    if (!u || typeof u !== "object") return;
+    cumulativeUsage ??= { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+    for (const k of Object.keys(cumulativeUsage)) cumulativeUsage[k] += Number.isFinite(u[k]) ? u[k] : 0;
+  };
+  // One PHASE_ATTEMPT_USAGE event per attempt (null for anything unreported), then the
+  // telemetry seam, which must never throw into the phase.
+  const recordAttempt = async (attempt, usage, t0, extra) => {
+    const rec = {
+      event: "PHASE_ATTEMPT_USAGE", phase: phase.id, attempt,
+      usage: usage ?? null, duration_ms: Math.round(performance.now() - t0),
+      cost_usd: extra?.cost_usd ?? null, model: extra?.model ?? null, turns: extra?.turns ?? null,
+    };
+    appendEvent(dir, issue, rec);
+    try { await emitTelemetry?.({ ...rec, issue }); } catch { /* telemetry never fails a phase */ }
+  };
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     appendEvent(dir, issue, { event: "PHASE_START", phase: phase.id, attempt });
     let result;
+    const t0 = performance.now();
     try {
       result = await runner({
         commandsDir, commandName: phase.command, args: phaseArgs,
@@ -1010,6 +1034,8 @@ async function runPhaseWithRetry(phase, state, ctx) {
       // NOT a commit: record the exhausted attempt, then rethrow so runIssue terminates
       // `engine-error` with no PHASE_COMMIT — `--retry` then re-enters this same phase.
       if (e.code === "CLI_MAX_TURNS") {
+        addUsage(e.usage);
+        await recordAttempt(attempt, e.usage, t0, { turns: e.numTurns });
         appendEvent(dir, issue, {
           event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, maxAttempts,
           turns: e.numTurns ?? null, usage: e.usage ?? null,
@@ -1022,6 +1048,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
       // Do not fabricate a value; omitting the field (rather than a stale
       // `lastUsage` from a prior attempt) keeps this event's usage
       // trustworthy as "usage actually observed on this attempt".
+      await recordAttempt(attempt, null, t0, null);
       appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, maxAttempts });
       continue;
     }
@@ -1030,8 +1057,10 @@ async function runPhaseWithRetry(phase, state, ctx) {
     // forge#3589: model/turns recorded alongside usage (additive; null when absent).
     const lastModel = result?.cliModel ?? result?.model ?? null;
     const lastTurns = result?.turns ?? null;
+    addUsage(lastUsage);
+    await recordAttempt(attempt, lastUsage, t0, { cost_usd: result?.costUsd ?? null, model: lastModel, turns: lastTurns });
     const outcome = await phase.detectOutcome(state, io, result);
-    if (outcome.status === "committed" || outcome.status === "blocked") return { ...outcome, usage: lastUsage, model: lastModel, turns: lastTurns };
+    if (outcome.status === "committed" || outcome.status === "blocked") return { ...outcome, usage: cumulativeUsage, last_attempt_usage: lastUsage, model: lastModel, turns: lastTurns };
     appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail, maxAttempts, usage: lastUsage, model: lastModel, turns: lastTurns });
     // forge#2176: a phase's detectOutcome can mark a failure as a known,
     // state-derived fixed point — re-running the phase's runner is
@@ -1047,7 +1076,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
       // forge#3521: keep outcome.outputs (e.g. the PR number) for persistence and
       // forward `handoff` so only an explicit opt-in escalation is honoured; a
       // no-signal failure carries no handoff and stops at needs-human.
-      return { status: "blocked", detail: outcome.detail, outputs: outcome.outputs, handoff: outcome.handoff, usage: lastUsage };
+      return { status: "blocked", detail: outcome.detail, outputs: outcome.outputs, handoff: outcome.handoff, usage: cumulativeUsage, last_attempt_usage: lastUsage };
     }
   }
   // Exhausted transient retries → escalate (spec §7).
@@ -1068,7 +1097,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
       usage: null,
     };
   }
-  return { status: "blocked", detail: `phase ${phase.id} failed after ${maxAttempts} attempts`, usage: lastUsage };
+  return { status: "blocked", detail: `phase ${phase.id} failed after ${maxAttempts} attempts`, usage: cumulativeUsage, last_attempt_usage: lastUsage };
 }
 
 /**
@@ -1078,7 +1107,8 @@ async function runPhaseWithRetry(phase, state, ctx) {
 function eventsFromIndex(idx, meta = {}) {
   // forge#3824: `hydrated` marks a reconstructed log (no usage data) so cost-report can exclude it.
   const events = [{ event: "RUN_START", issue: idx.issue, run: idx.run, lane: idx.lane,
-                    version: meta.version ?? null, repo: meta.repo ?? null, hydrated: true }];
+                    version: meta.version ?? null, forge_version: meta.forge_version ?? meta.version ?? null,
+                    repo: meta.repo ?? null, hydrated: true }];
   for (const phase of idx.committed) {
     const outputs = {};
     if (phase === "build" && idx.branch) outputs.branch = idx.branch;

@@ -13,7 +13,9 @@
 #     RUN_TERMINAL after any RUN_REOPEN / RUN_NEXT_CYCLE. A log is counted once.
 #   - Runs with no usage events, or with a hydrated (reconstructed) RUN_START, are excluded:
 #     they carry no usage and would drag the means down.
-#   - Tokens = usage.cache_read_input_tokens summed over PHASE_COMMIT and PHASE_FAILED.
+#   - Tokens = usage.cache_read_input_tokens summed per phase over PHASE_ATTEMPT_USAGE when the
+#     phase has any (PHASE_COMMIT.usage is then cumulative, so it is not added again), else over
+#     PHASE_COMMIT and PHASE_FAILED (older logs).
 #     Per-phase means divide by n (a run that skipped a phase counts 0), so the phase
 #     columns add up to the per-issue mean. "merged" is RUN_TERMINAL.reason == "merged".
 #   - Version/repo come from RUN_START. Older logs lack them: repo becomes "unknown", and the
@@ -86,7 +88,10 @@ for f in "$RUNS_DIR"/*.jsonl; do
       | $ev[0] as $start
       | ([range(0; $ev | length) | select($ev[.].event == "RUN_TERMINAL")] | last) as $t
       | ([range(0; $ev | length) | select($ev[.].event == "RUN_REOPEN" or $ev[.].event == "RUN_NEXT_CYCLE")] | last) as $r
-      | [$ev[] | select((.event == "PHASE_COMMIT" or .event == "PHASE_FAILED") and (.usage | type) == "object")] as $u
+      | ([$ev[] | select(.event == "PHASE_ATTEMPT_USAGE") | .phase] | unique) as $ap
+      | [$ev[] | select(((.event == "PHASE_ATTEMPT_USAGE")
+                         or ((.event == "PHASE_COMMIT" or .event == "PHASE_FAILED") and ((.phase as $p | $ap | index($p)) == null)))
+                        and (.usage | type) == "object")] as $u
       | {
           version: ($start.version // null), repo: ($start.repo // null), mt: $mt,
           hydrated: ($start.hydrated == true),
