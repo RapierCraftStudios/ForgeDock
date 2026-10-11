@@ -799,6 +799,7 @@ The acceptance spec contains only a skip sentinel (\`type=skipped\`). No automat
 GATE_PASS=true
 CORRECTED=""
 FAILED_CHECKS=""
+VERIFIED_COUNT=0       # checks actually executed and judged (PASS or FAIL); malformed ones do not count
 MALFORMED_CHECKS=""   # malformed-check: generated check that can never pass; reported, never repaired, never needs-human
 
 while IFS= read -r check_line; do
@@ -860,13 +861,14 @@ while IFS= read -r check_line; do
       ;;
     command|behavior)
       if [ "$MATCHER" = "exit_0" ]; then
-        eval "$TARGET" >/dev/null 2>&1; RC=$?
-        # grep exit >= 2 is a usage/syntax error (e.g. a pattern starting with `-`), never a verdict on the code; exit 1 stays FAIL
-        [ "$RC" -ge 2 ] && case "$TARGET" in grep\ *|egrep\ *|fgrep\ *) MALFORMED="grep usage error (exit $RC)";; esac
+        ERR=$(eval "$TARGET" 2>&1 >/dev/null); RC=$?
+        # grep exit >= 2 is a usage/syntax error (e.g. a pattern starting with `-`), never a verdict on the code; exit 1 stays FAIL.
+        # A missing/unreadable operand file also exits 2 but is a REAL failure (the check asserts a file exists), so it is never malformed.
+        [ "$RC" -ge 2 ] && case "$TARGET" in grep\ *|egrep\ *|fgrep\ *) printf '%s' "$ERR" | grep -qE 'No such file or directory|Permission denied|Is a directory' || MALFORMED="grep usage error (exit $RC)";; esac
         [ "$RC" -eq 0 ] || [ -n "$MALFORMED" ] || { RESULT="FAIL"; DETAIL="command exited non-zero: $TARGET"; }
       else
-        OUTPUT=$(eval "$TARGET" 2>&1); RC=$?
-        [ "$RC" -ge 2 ] && case "$TARGET" in grep\ *|egrep\ *|fgrep\ *) MALFORMED="grep usage error (exit $RC)";; esac
+        OUTPUT=$(eval "$TARGET" 2>&1); RC=$?; ERR="$OUTPUT"
+        [ "$RC" -ge 2 ] && case "$TARGET" in grep\ *|egrep\ *|fgrep\ *) printf '%s' "$ERR" | grep -qE 'No such file or directory|Permission denied|Is a directory' || MALFORMED="grep usage error (exit $RC)";; esac
         if [ -n "$MALFORMED" ]; then :
         elif ! printf '%s\n' "$OUTPUT" | grep -qE "$MATCHER"; then
           if printf '%s\n' "$OUTPUT" | grep -qF -- "$MATCHER"; then CORRECTED="${CORRECTED}\n- **$ID**: output matched as a literal string"
@@ -881,11 +883,18 @@ while IFS= read -r check_line; do
 
   if [ -n "$MALFORMED" ]; then MALFORMED_CHECKS="${MALFORMED_CHECKS}\n- **$ID** ($DESC): $MALFORMED"; continue; fi
 
+  VERIFIED_COUNT=$((VERIFIED_COUNT+1))
   if [ "$RESULT" = "FAIL" ]; then
     GATE_PASS=false
     FAILED_CHECKS="${FAILED_CHECKS}\n- **$ID** ($DESC): $DETAIL"
   fi
 done <<< "$ACCEPTANCE_CHECKS"
+
+# A gate that verified nothing must not pass: with every check skipped as malformed, PASSED would be a green light on zero evidence.
+if [ "$VERIFIED_COUNT" -eq 0 ]; then
+  GATE_PASS=false
+  FAILED_CHECKS="${FAILED_CHECKS}\n- **(gate)**: no acceptance check could be verified (all were malformed or none ran); regenerate the acceptance spec"
+fi
 ```
 
 **Post gate result comment**:
@@ -917,7 +926,7 @@ Merge is blocked. Fix the failing criteria and re-run the validate phase.
 fi
 ```
 
-A `malformed-check` (a command/behavior target with a run of 4+ backslashes or a `bash -n` syntax error, or a grep target exiting >= 2) is reported in the comment but never sets `GATE_PASS=false`, never enters `FAILED_CHECKS`, is never passed to `--fix-acceptance`, and never adds `needs-human`; the gate still posts exactly one of PASSED/FAILED. <!-- Added: forge#3694 -->
+A `malformed-check` (a command/behavior target with a run of 4+ backslashes or a `bash -n` syntax error, or a grep target exiting >= 2 for a reason other than a missing/unreadable operand file, which stays a real FAIL) is reported in the comment and never sets `GATE_PASS=false` by itself, never enters `FAILED_CHECKS`, is never passed to `--fix-acceptance`, and never adds `needs-human` by itself; the gate still posts exactly one of PASSED/FAILED. The gate never posts PASSED with zero verified checks: if every check was malformed (`VERIFIED_COUNT=0`) it posts FAILED so the repair step regenerates the spec. <!-- Added: forge#3694 -->
 
 If `GATE_PASS = false`, the build repairs itself **once** before anything escalates (a failing acceptance check is pipeline work, not a human decision):
 

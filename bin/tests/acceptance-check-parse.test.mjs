@@ -57,7 +57,7 @@ const rcDetector = build
   .join("\n");
 
 function classify(target, type = "command") {
-  const script = `TYPE="$1"; TARGET="$2"\n${staticDetector}\nif [ -z "$MALFORMED" ]; then eval "$TARGET" >/dev/null 2>&1; RC=$?\n${rcDetector}\nfi\nprintf '%s' "$MALFORMED"`;
+  const script = `TYPE="$1"; TARGET="$2"\n${staticDetector}\nif [ -z "$MALFORMED" ]; then ERR=$(eval "$TARGET" 2>&1 >/dev/null); RC=$?\n${rcDetector}\nfi\nprintf '%s' "$MALFORMED"`;
   return execFileSync("bash", ["-c", script, "x", type, target], { encoding: "utf8", cwd: root });
 }
 
@@ -74,6 +74,14 @@ test("malformed-check: #3621 ac-3 shape (over-escaped backslashes) is malformed"
 test("malformed-check: #3723 shape (pattern starting with - read as an option, grep exit 2) is malformed", () => {
   assert.match(classify(String.raw`grep -qE "-z .\$DOMAIN_FILES_API" commands/review-pr.md`), /usage error/);
   assert.match(classify("grep -qE '--no-such-flag' commands/work-on/build.md"), /usage error/);
+});
+
+test("malformed-check: a missing operand file (grep exit 2) is a real failure, not malformed (SEC-1)", () => {
+  assert.equal(classify("grep -qF -e 'x' commands/work-on/no-such-file-xyzzy.md"), "");
+});
+
+test("acceptance gate never posts PASSED with zero verified checks (SEC-2)", () => {
+  assert.ok(build.includes('"$VERIFIED_COUNT" -eq 0') && build.includes("VERIFIED_COUNT=$((VERIFIED_COUNT+1))"));
 });
 
 test("malformed-check: unbalanced quotes are malformed", () => {
