@@ -2192,6 +2192,28 @@ describe("main-checkout mutation guard (issue #3650)", () => {
     }
   });
 
+  it("enforces from a linked-worktree cwd (no forge.yaml) against the main checkout (SEC-8)", () => {
+    assert.equal(run(`git -C ${mainDir} checkout --detach HEAD`, wtDir).exitCode, 2);
+    assert.equal(run(`git --work-tree=${mainDir} checkout x`, wtDir).exitCode, 2);
+    assert.equal(run("git checkout feat/x", wtDir).exitCode, 0);
+  });
+
+  it("denies grouped, compound, cd-first and --git-dir forms in the main checkout (SEC-9)", () => {
+    for (const c of [
+      "(git checkout x)",
+      "{ git checkout x; }",
+      "if true; then git checkout x; fi",
+      "cd . && git checkout x",
+      `cd ${mainDir} && git checkout x`,
+      "git --git-dir=.git checkout x",
+      "git --work-tree=. checkout x",
+    ]) {
+      assert.equal(run(c, mainDir).exitCode, 2, c);
+    }
+    assert.equal(run(`cd ${wtDir} && git checkout feat/x`, mainDir).exitCode, 0);
+    assert.equal(run(`(cd ${wtDir} && git checkout feat/x)`, mainDir).exitCode, 0);
+  });
+
   it("honours the operator override", () => {
     assert.equal(run("git checkout main", mainDir, { FORGE_ALLOW_MAIN_CHECKOUT_GIT: "1" }).exitCode, 0);
   });

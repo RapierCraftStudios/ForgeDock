@@ -578,6 +578,16 @@ async function main() {
     return;
   }
 
+  // --- Rule 9: Main-checkout mutation guard (issue #3650) ---
+  // Deliberately BEFORE the managed-cwd gate: pipeline workers run with cwd = a linked worktree (no
+  // forge.yaml), and `git -C <main> ...` from there is the case this rule exists for.
+  const mainCheckoutViolation = checkMainCheckoutMutation(command);
+  if (mainCheckoutViolation) {
+    process.stderr.write(mainCheckoutViolation);
+    process.exit(2);
+    return;
+  }
+
   // Only enforce Rules 1-4 and 6 inside a ForgeDock-managed project — this hook
   // installs globally (~/.claude/settings.json), so without this guard those
   // rules would fire in every unrelated repo on the machine (issue #1591).
@@ -611,14 +621,6 @@ async function main() {
   const gistViolation = checkGistVisibility(command);
   if (gistViolation) {
     process.stderr.write(gistViolation);
-    process.exit(2);
-    return;
-  }
-
-  // --- Rule 9: Main-checkout mutation guard (issue #3650) ---
-  const mainCheckoutViolation = checkMainCheckoutMutation(command);
-  if (mainCheckoutViolation) {
-    process.stderr.write(mainCheckoutViolation);
     process.exit(2);
     return;
   }
@@ -1269,6 +1271,13 @@ function checkTempPathStaging(command) {
  * @returns {{name: string, dir: string|null}|null} offender and the `-C` dir it targets, or null
  */
 function mutatingGitCommand(tokens, depth = 0) {
+  // Strip grouping/compound prefixes: `(git x)`, `{ git x; }`, `then git x`, `do git x`, `! git x`.
+  tokens = tokens.slice();
+  for (;;) {
+    if (/^[({]+$/.test(tokens[0] || "") || ["then", "do", "else", "elif", "!", "if", "while", "until"].includes(tokens[0])) tokens.shift();
+    else if (/^[({]+[^({]/.test(tokens[0] || "")) tokens[0] = tokens[0].replace(/^[({]+/, "");
+    else break;
+  }
   const valueOpts = new Set(["-c", "--exec-path", "--namespace", "--super-prefix", "--config-env"]);
   let i = 0;
   // Skip leading env assignments (`FOO=1 git ...`) and transparent wrappers.
@@ -1300,7 +1309,9 @@ function mutatingGitCommand(tokens, depth = 0) {
   let dir = null;
   while (i < tokens.length && tokens[i].startsWith("-")) {
     if (tokens[i] === "-C") { dir = dir === null ? (tokens[i + 1] ?? ".") : resolvePath(dir, tokens[i + 1] ?? "."); i += 2; continue; }
-    if (/^--(?:git-dir|work-tree)(?:=.*)?$/.test(tokens[i])) return null; // targets another tree: allow
+    const wt = /^--work-tree(?:=(.*))?$/.exec(tokens[i]);
+    if (wt) { const v = wt[1] ?? tokens[i + 1] ?? "."; dir = dir === null ? v : resolvePath(dir, v); i += wt[1] === undefined ? 2 : 1; continue; }
+    if (/^--git-dir(?:=.*)?$/.test(tokens[i])) { i += tokens[i].includes("=") ? 1 : 2; continue; } // work tree stays the cwd/-C
     i += valueOpts.has(tokens[i]) ? 2 : 1;
   }
   const sub = tokens[i];
@@ -1366,12 +1377,21 @@ function checkMainCheckoutMutation(command) {
   if (!/\b(?:git|gh)\b/.test(command)) return null;
   try {
     let offender = null;
-    let targetDir = process.cwd();
+    let baseDir = process.cwd();
+    let targetDir = baseDir;
     for (const tokens of extractCommandSegments(command)) {
-      // A directory change makes the effective cwd of LATER segments indeterminate: allow those.
-      if (tokens[0] === "cd" || tokens[0] === "pushd") break;
+      const head = tokens.slice();
+      while (head.length && (/^[({]+$/.test(head[0]) || ["then", "do", "else", "!"].includes(head[0]))) head.shift();
+      if (head.length && /^[({]+[^({]/.test(head[0])) head[0] = head[0].replace(/^[({]+/, "");
+      if (head[0] === "cd" || head[0] === "pushd") {
+        // Follow a literal target; a variable/substitution/`-` makes later segments' cwd indeterminate: allow those.
+        const t = head[1];
+        if (!t || /[$`~]/.test(t) || t === "-") break;
+        baseDir = resolvePath(baseDir, t);
+        continue;
+      }
       const hit = mutatingGitCommand(tokens);
-      if (hit) { offender = hit.name; targetDir = hit.dir === null ? process.cwd() : resolvePath(process.cwd(), hit.dir); break; }
+      if (hit) { offender = hit.name; targetDir = hit.dir === null ? baseDir : resolvePath(baseDir, hit.dir); break; }
     }
     if (!offender) return null;
     if (!isMainCheckout(targetDir)) return null;
