@@ -108,6 +108,8 @@ describe("forge#3753 deploy-gate base never reads forge.yaml from the PR worktre
       for (const f of users) {
         assert.ok(/else (IS_DEPLOY_GATE|PARK_GATE|GUARD_GATE)=true; fi/.test(f), `${name}: fail-closed fallback`);
         assert.ok(!/\$PWD\/scripts\/resolve-deploy-gate/.test(f), `${name}: repo-relative script`);
+        assert.ok(!/"\$\{CLAUDE_PLUGIN_ROOT:-\}"/.test(f), `${name}: CLAUDE_PLUGIN_ROOT is substituted text, never an env var`);
+        assert.ok(f.includes("# FORGE_ROOT bootstrap"), `${name}: gate fence must use the canonical FORGE_ROOT bootstrap`);
       }
     }
   });
