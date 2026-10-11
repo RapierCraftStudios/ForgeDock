@@ -7,9 +7,9 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readdirSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
-import { runIssue, DEFAULT_MAX_ATTEMPTS } from "./engine.mjs";
+import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost } from "./engine.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { readLog, deriveState } from "./engine/runlog.mjs";
 import { assertOpenCodeNativeRuntime } from "./runner.mjs";
@@ -338,6 +338,10 @@ export function lastLocalRun(dir) {
  *                          `runCommand()` call; only applies on the "api" backend.
  *                          Omit to keep runner.mjs's default (`FORGEDOCK_MODEL` env
  *                          or its built-in default).
+ *   --wait-lease           Optional (forge#3574). If another live holder owns the
+ *                          run's lease, wait (bounded by the lease TTL) until it
+ *                          expires or its same-host pid is dead, then continue.
+ *                          Without it, a held lease exits `deferred` (code 75).
  *   --retry                Optional (forge#3511). Reopen a run that ended `engine-error`
  *                          (e.g. a session-limit hit) and resume from its last committed
  *                          phase. A run that ended `phase-complete` (multi-phase issue, phase merged,
@@ -346,7 +350,7 @@ export function lastLocalRun(dir) {
  */
 export async function runFromCli(argv, deps = {}) {
   const issue = parseInt(argv[0], 10);
-  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> --lane <lane> [--retry]");
+  if (!Number.isInteger(issue)) throw new Error("usage: forgedock run-issue <issue-number> --lane <lane> [--retry] [--wait-lease]");
   assertOpenCodeNativeRuntime({ operation: "forgedock run-issue" });
   const lane = flag(argv, "--lane");
   if (!lane) throw new Error("--lane is required: e.g. --lane main or --lane staging. No default to prevent accidental production targeting.");
@@ -355,10 +359,13 @@ export async function runFromCli(argv, deps = {}) {
   const model = flag(argv, "--model");
   // Boolean flag: only counts at a flag position, never as another flag's value.
   const retry = argv.some((a, i) => a === "--retry" && !["--lane", "--repo", "--backend", "--model"].includes(argv[i - 1]));
+  // forge#3574: --wait-lease blocks (bounded by the lease TTL) until a live
+  // holder's lease expires or becomes reclaimable. Same flag-position guard.
+  const waitLease = argv.some((a, i) => a === "--wait-lease" && !["--lane", "--repo", "--backend", "--model"].includes(argv[i - 1]));
   const io = deps.io ?? makeIo();
   await assertRepoMatchesCwd(io, repo);
   const runIssueFn = deps.runIssue ?? runIssue;
-  const agentId = `cli_${process.pid}`;
+  const agentId = `cli_${sanitizeLeaseHost(hostname())}_${process.pid}`;
   // Injectable for tests (forge#2175) — defaults to the real ~/.forge/runs dir.
   const dir = deps.dir ?? runDir();
   // forge#2240: print the run-log path at the very start of the run, not only
@@ -390,8 +397,14 @@ export async function runFromCli(argv, deps = {}) {
     // runIssue's/runner.mjs's existing defaults (forge#2028).
     ...(backend ? { backend } : {}),
     ...(model ? { model } : {}),
-    ...(retry ? { retry: true } : {}) });
+    ...(retry ? { retry: true } : {}),
+    ...(waitLease ? { waitLease: true } : {}) });
   console.log(`issue #${issue} → ${res.terminalReason}`);
+  if (res.terminalReason === "deferred") {
+    // forge#3574: say WHY (holder + expiry); the empty-log diagnostics add nothing.
+    console.log(res.detail ?? "run deferred: another holder owns the lease");
+    return res;
+  }
   if (res.terminalReason === "not-retryable") {
     console.log(res.detail ?? "run is not retryable");
     return res;
