@@ -98,3 +98,9 @@ envelope `result` or in plain output (shared `hasUsageLimitResetClause`, bounded
 windows per #3522). A limit with neither signal is an ordinary failure.
 `runCliBackend` attaches `resetAt`/`resetAtEpochMs` only when the same predicate
 holds, since the engine pauses on the epoch alone. Cite: #3523.
+
+## Entry 2026-10-11 — Refactor: shared resolver/bootstrap helpers, engine FORGEDOCK_HOME export, review-pr-staging stub conversion (#3778)
+
+PR #3782 touched `runner`. See FORGE:BUILDER comment on issue #3778 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/runner.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3778 / PR #3782.
