@@ -170,19 +170,22 @@ DMAP=$(mktemp "${TMPDIR:-/tmp}/classify-finding-dmap.XXXXXX")
 PF=(--prior-findings "$PRIOR")
 M=(--severity MEDIUM --confidence CONFIRMED)
 
-expect_out "NOTE reflag-note" "re-flag by line IoU (same range)" -- "${M[@]}" "${PF[@]}" --file src/sync.sh --line-start 42 --line-end 50 --title "unrelated wording here"
-expect_out "NOTE reflag-note" "re-flag via path:line tolerated" -- "${M[@]}" "${PF[@]}" --file src/sync.sh:41 --line-end 50 --title "x"
+expect_out "NOTE reflag-note" "re-flag by line IoU (same range)" -- "${M[@]}" "${PF[@]}" --file src/sync.sh --line-start 42 --line-end 50 --title "lock handling wording here"
+expect_out "NOTE reflag-note" "re-flag via path:line tolerated" -- "${M[@]}" "${PF[@]}" --file src/sync.sh:41 --line-end 50 --title "lock x"
 printf 'src/sync.sh\t1\t2\t1\t12\n' > "$DMAP"   # 2 lines became 12: prior 40-50 is now 50-60
-expect_out "NOTE reflag-note" "re-flag after the line moved, shifted by diff map" -- "${M[@]}" "${PF[@]}" --diff-map "$DMAP" --file src/sync.sh --line-start 50 --line-end 60 --title "something else"
-expect ISSUE "line moved with no diff map does not match" -- "${M[@]}" "${PF[@]}" --file src/sync.sh --line-start 50 --line-end 60 --title "something else"
+expect_out "NOTE reflag-note" "re-flag after the line moved, shifted by diff map" -- "${M[@]}" "${PF[@]}" --diff-map "$DMAP" --file src/sync.sh --line-start 50 --line-end 60 --title "lock something else"
+expect ISSUE "line moved with no diff map does not match" -- "${M[@]}" "${PF[@]}" --file src/sync.sh --line-start 50 --line-end 60 --title "lock something else"
 printf 'garbage\n' > "$DMAP"
-expect_out "NOTE reflag-note" "unparseable diff map falls back to unshifted range" -- "${M[@]}" "${PF[@]}" --diff-map "$DMAP" --file src/sync.sh --line-start 41 --line-end 50 --title "x"
+expect_out "NOTE reflag-note" "unparseable diff map falls back to unshifted range" -- "${M[@]}" "${PF[@]}" --diff-map "$DMAP" --file src/sync.sh --line-start 41 --line-end 50 --title "lock x"
 expect_out "NOTE reflag-note" "re-flag by title tokens (far line)" -- "${M[@]}" "${PF[@]}" --file src/sync.sh --line-start 300 --title "Lock released before the write"
 expect_out "NOTE reflag-note" "NOTE row with empty line columns matches by title" -- "${M[@]}" "${PF[@]}" --file src/notes.py --line-start 9 --title "Duplicated predicate is counted twice"
+expect ISSUE "same line, different topic MEDIUM CONFIRMED is not swallowed (SEC-1)" -- "${M[@]}" --agent security "${PF[@]}" --file src/sync.sh --line-start 42 --line-end 50 --title "SQL injection via unsanitized token"
+expect ISSUE "same line with no title at all is not swallowed" -- "${M[@]}" "${PF[@]}" --file src/sync.sh --line-start 42 --line-end 50
+expect_out "NOTE reflag-note" "same line, same topic (one shared token) still NOTE" -- "${M[@]}" "${PF[@]}" --file src/sync.sh --line-start 42 --line-end 50 --title "Lock handling is racy"
 expect ISSUE "non-overlapping same-file finding is classified normally" -- "${M[@]}" "${PF[@]}" --file src/sync.sh --line-start 200 --line-end 210 --title "missing bounds check"
 expect ISSUE "two shared tokens are not enough"       -- "${M[@]}" "${PF[@]}" --file src/sync.sh --line-start 200 --title "lock released late"
 expect ISSUE "same title on a different file is classified normally" -- "${M[@]}" "${PF[@]}" --file src/other.sh --line-start 45 --title "lock released before write completes"
-expect_out "NOTE reflag-filed #123" "re-flag of an already-filed issue links it" -- "${M[@]}" "${PF[@]}" --file src/api.py --line-start 12 --line-end 18 --title "x"
+expect_out "NOTE reflag-filed #123" "re-flag of an already-filed issue links it" -- "${M[@]}" "${PF[@]}" --file src/api.py --line-start 12 --line-end 18 --title "retry x"
 expect_out "NOTE reflag-filed #123" "filed re-flag by title tokens" -- "${M[@]}" "${PF[@]}" --file src/api.py --line-start 99 --title "Missing retry on timeout"
 expect ISSUE "filed-closed row is ignored (regression not swallowed)" -- "${M[@]}" "${PF[@]}" --file src/closed.py --line-start 5 --line-end 15 --title "stale cache entry never evicted"
 expect ISSUE "HIGH is never demoted by a re-flag"     -- --severity HIGH --confidence CONFIRMED "${PF[@]}" --file src/api.py --line-start 12 --line-end 18 --title "missing retry on timeout handler"
@@ -190,7 +193,7 @@ expect ISSUE "CRITICAL is never demoted by a re-flag" -- --severity CRITICAL "${
 expect ISSUE "unparseable severity is never demoted"  -- --severity INFO "${PF[@]}" --file src/api.py --line-start 12 --line-end 18
 expect ISSUE "no --file: gate skipped"                -- "${M[@]}" "${PF[@]}" --title "lock released before write completes"
 expect ISSUE "no --prior-findings: unchanged"         -- "${M[@]}" --file src/api.py --line-start 12 --line-end 18
-expect NOTE  "re-flag wins over in-PR fix gate"       -- "${M[@]}" "${PF[@]}" --file src/api.py --line-start 12 --line-end 18 --inpr-diff "$PRIOR"
+expect NOTE  "re-flag wins over in-PR fix gate"       -- "${M[@]}" "${PF[@]}" --file src/api.py --line-start 12 --line-end 18 --title "retry gap" --inpr-diff "$PRIOR"
 : > "$PRIOR"
 expect ISSUE "empty prior-findings: unchanged"        -- "${M[@]}" "${PF[@]}" --file src/api.py --line-start 12 --line-end 18 --title "missing retry"
 rm -f "$PRIOR" "$DMAP"

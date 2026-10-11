@@ -53,7 +53,7 @@
 #                 prior-disposition is `filed` (its issue is still open), `filed-closed` (issue closed:
 #                 the row is IGNORED so a regressed defect is classified normally) or `note`.
 #                 Line columns may be empty (NOTE-sourced rows carry no range). A finding re-flags a row
-#                 when it is the same file AND (line IoU >= 0.6, or >= 3 shared title tokens). Output is
+#                 when it is the same file AND ((line IoU >= 0.6 and >= 1 shared title token), or >= 3 shared title tokens). Output is
 #                 `NOTE reflag-filed #N` (row has an issue number) or `NOTE reflag-note`; this gate never
 #                 emits ISSUE. `--file` may carry `path:line`; explicit --line-start wins.
 #                 `--diff-map <F>` (optional, best-effort) lists `git diff <old>..<new>` hunks as
@@ -209,7 +209,11 @@ if [ -n "$PRIOR_FINDINGS" ] && [ -n "$FINDING_FILE" ]; then
       if (pf != file) next
       if ($5 == "filed-closed") next
       hit = 0
-      if (ls != "" && $2 ~ /^[0-9]+$/) {
+      delete pt; toks($4, pt); shared = 0
+      for (t in pt) if (t in ft) shared++
+      # Line overlap alone is not a match (an unrelated finding can land on the same line): it also
+      # needs at least one shared title token. Title-only matching still needs >= 3.
+      if (shared >= 1 && ls != "" && $2 ~ /^[0-9]+$/) {
         ps = $2 + 0; pe = ($3 ~ /^[0-9]+$/) ? $3 + 0 : ps
         if (pe < ps) pe = ps
         d = shift(pf, ps, pe); ps += d; pe += d
@@ -218,11 +222,7 @@ if [ -n "$PRIOR_FINDINGS" ] && [ -n "$FINDING_FILE" ]; then
         uni = (pe - ps + 1) + (le - ls + 1) - inter
         if (uni > 0 && inter / uni >= 0.6) hit = 1
       }
-      if (!hit && ntitle >= 3) {
-        delete pt; toks($4, pt); shared = 0
-        for (t in pt) if (t in ft) shared++
-        if (shared >= 3) hit = 1
-      }
+      if (!hit && ntitle >= 3 && shared >= 3) hit = 1
       if (!hit) next
       if ($5 == "filed" && $6 ~ /^#?[0-9]+$/) { n = $6; sub(/^#/, "", n); print "NOTE reflag-filed #" n; found = 1; exit }
       if (!note) note = "NOTE reflag-note"
