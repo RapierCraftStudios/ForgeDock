@@ -12,7 +12,9 @@
 #       lease.by that is not the dispatching holder and not a provably dead same-host engine pid. An until past
 #       the TTL cap is not a lease an engine could have written (the issue body is author-editable), so it is dead.
 #   (b) review: the newest trusted FORGE:REVIEW_ROUTE comment is younger than REVIEW_PENDING_MAX_S and no trusted
-#       FORGE:REVIEW-AGENT:* or FORGE:REVIEW-CARRIED comment carries a Reviewed-SHA that prefix-matches the routed sha (either direction).
+#       FORGE:REVIEW-AGENT:* or FORGE:REVIEW-CARRIED comment carries a Reviewed-SHA that prefix-matches the routed sha (either direction),
+#       and no trusted FORGE:{CI|INPR|BASESYNC}_REMEDIATION: pr=<pr> bound marker on the issue is at or after that route
+#       (a review that handed off to remediation, even before dispatching a panel, is never in flight).
 #   A deferral is bounded: after MAX_DEFERRALS trusted FORGE:REMEDIATION_DEFERRED records for this PR the answer is
 #   EXHAUSTED (a human is needed), so a flapping lease or a dead review can never park a PR forever.
 #
@@ -91,7 +93,13 @@ ROUTE_SHA="${ROUTE%% *}"; ROUTE_AT="${ROUTE##* }"; REVIEW_PENDING=false
 if [ -n "$ROUTE_SHA" ]; then
   case "$ROUTE_AT" in ''|*[!0-9]*) ROUTE_AT=0 ;; esac
   VERDICTS=$(printf '%s' "$PR_COMMENTS" | jq -rs --arg r "$ROUTE_SHA" "[.[][] | select($TRUST) | select((.body // \"\") | test(\"^<!-- FORGE:REVIEW-(AGENT:[a-z-]+|CARRIED) -->\")) | ((.body | capture(\"(^|\\\\n)Reviewed-SHA: (?<s>[0-9a-f]{7,40})\")? // {s: \"\"}).s) as \$s | select(\$s != \"\" and ((\$r | startswith(\$s)) or (\$s | startswith(\$r))))] | length" 2>/dev/null) || err "reviewer comments unreadable"
-  [ "${VERDICTS:-0}" -eq 0 ] && [ "$ROUTE_AT" -gt 0 ] && [ $(( NOW_S - ROUTE_AT )) -lt "$REVIEW_PENDING_MAX_S" ] && REVIEW_PENDING=true
+  # Handoff: the dispatcher posts FORGE:{CI|INPR|BASESYNC}_REMEDIATION: pr=N on the issue right before dispatching remediation, so a
+  # trusted marker at or after the route means the review handed off (possibly before any panel) and nothing is in flight. A route newer than the marker is a re-review.
+  HANDOFF_Q='[.[][] | select('"$TRUST"') | select((.body // "") | test("(^|\\n)[ \\t]*<!-- FORGE:(CI|INPR|BASESYNC)_REMEDIATION: " + $m + " -->[ \\t\\r]*(\\n|$)")) | ((.created_at // "") | fromdateiso8601? // 0)] | max // 0'
+  HANDOFF_AT=$(printf '%s' "$ISSUE_COMMENTS" | jq -rs --arg m "pr=$PR" "$HANDOFF_Q" 2>/dev/null) || err "handoff markers unreadable"
+  case "$HANDOFF_AT" in ''|*[!0-9]*) HANDOFF_AT=0 ;; esac
+  [ "${VERDICTS:-0}" -eq 0 ] && [ "$ROUTE_AT" -gt 0 ] && [ $(( NOW_S - ROUTE_AT )) -lt "$REVIEW_PENDING_MAX_S" ] \
+    && { [ "$HANDOFF_AT" -eq 0 ] || [ "$HANDOFF_AT" -lt "$ROUTE_AT" ]; } && REVIEW_PENDING=true
 fi
 
 if [ "$LEASE_LIVE" != "true" ] && [ "$REVIEW_PENDING" != "true" ]; then
