@@ -13,7 +13,7 @@ ok()  { PASS=$((PASS+1)); }
 bad() { FAILN=$((FAILN+1)); echo "FAIL: $1"; }
 expect() { [ "$2" = "$3" ] && ok || bad "$1 (got '$3' want '$2')"; }
 
-SITES="commands/work-on.md commands/work-on/build/validate.md commands/quality-gate.md commands/work-on/review.md commands/work-on/investigate.md commands/work-on/decompose.md commands/work-on/build.md commands/work-on/close.md commands/review-pr.md commands/orchestrate/phase-1-resolve.md commands/orchestrate/phase-4-execution.md"
+SITES="commands/work-on.md commands/work-on/build/validate.md commands/quality-gate.md commands/work-on/review.md commands/work-on/investigate.md commands/work-on/decompose.md commands/work-on/build.md commands/work-on/close.md commands/review-pr.md commands/work-on/remediate.md commands/orchestrate/phase-1-resolve.md commands/orchestrate/phase-4-execution.md"
 
 # extract the bootstrap block (comment line .. closing top-level fi), indentation stripped
 # Block ends at the first line (after the marker) that starts with `fi` at the marker's own indentation.
@@ -110,6 +110,23 @@ if [ -L "$T/h2/.claude/commands/work-on.md" ]; then
 else
   echo "SKIP: symlink cases (this platform cannot create symlinks)"; SKIPPED=$((SKIPPED+1))
 fi
+
+# forge#3758 (hgate is a fixture of its own: the loop runs once per shell and h14 is reused below with other versions): deploy-gate script resolves on a plugin-only install (cache only, no symlink, no FORGE_* env).
+# The gate-script line is taken verbatim from the spec so the test exercises exactly what ships.
+mkscripts "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0"; : > "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh"
+grep -hE '^[[:space:]]*GATE_SCRIPT=""; \[ -n "\$FORGE_ROOT" \]' "$ROOT/commands/work-on/remediate.md" "$ROOT/commands/review-pr.md" | sed 's/^[[:space:]]*//' | sort -u > "$T/gs"
+expect "gate-script resolver line is identical across sites" 1 "$(wc -l < "$T/gs" | tr -d ' ')"
+gate_run() { ( cd "$T/consumer" && env -i PATH="$PATH" HOME="$1" "$SH" -c "$(cat "$T/canon"); $(cat "$T/gs"); printf %s \"\$GATE_SCRIPT\"" ); }
+expect "plugin-only install resolves resolve-deploy-gate.sh" "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh" "$(gate_run "$T/hgate")"
+expect "unresolved gate script stays empty (strict)" "" "$(gate_run "$T/empty")"
+# cwd/consumer repo is never a candidate even when it carries the gate script
+: > "$T/consumer/scripts/resolve-deploy-gate.sh"
+expect "consumer repo gate script never used" "" "$(gate_run "$T/empty")"
+rm -f "$T/consumer/scripts/resolve-deploy-gate.sh"
+# no spec iterates CLAUDE_PLUGIN_ROOT as an env var for the gate script
+for f in commands/work-on/remediate.md commands/review-pr.md; do
+  grep -qF '"${CLAUDE_PLUGIN_ROOT:-}" "${FORGE_ROOT:-}"' "$ROOT/$f" && bad "env-style CLAUDE_PLUGIN_ROOT gate loop in $f" || ok
+done
 
 # newest cached version wins (1.10.0 must beat 1.9.0)
 for v in 1.9.0 1.10.0 1.2.0; do mkscripts "$T/h3/.claude/plugins/cache/forgedock/forgedock/$v"; done
