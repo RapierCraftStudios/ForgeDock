@@ -5,6 +5,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,11 +16,35 @@ describe("forge#3684 remediate.md resume guard", () => {
   it("has no commits[-1] and no unanchored APPROVED: match", () => {
     assert.ok(!spec.includes("commits[-1]"));
     assert.ok(!spec.includes('test("APPROVED:")'));
-    assert.ok(spec.includes('test("^APPROVED:")'));
+    assert.ok(spec.includes('capture("^APPROVED: commit '));
   });
 
-  it("selects the head commit by headRefOid", () => {
-    assert.match(spec, /select\(\.oid == \$head\)/);
+  it("forge#3726: approval is bound to headRefOid by SHA, never by committedDate", () => {
+    assert.ok(!spec.includes("HEAD_COMMITTED"));
+    assert.ok(!spec.includes("committedDate") || /never to author-controlled committedDate|commit dates are author-controlled/.test(spec));
+    assert.ok(!/created_at\s*>/.test(spec), "no timestamp freshness compare");
+    assert.match(spec, /headRefOid/);
+    assert.match(spec, /APPROVED: commit \(\?<s>\[0-9a-f\]\{7,40\}\)/);
+    assert.match(spec, /startswith\(\$s\)/);
+    assert.match(spec, /Reviewed-SHA: /);
+    assert.match(spec, /\.commit_id \/\/ \$head\) == \$head/);
+  });
+
+  it("forge#3726: resume reads PR reviews and issue comments and fails closed on empty head", () => {
+    assert.match(spec, /pulls\/\{PR_NUMBER\}\/reviews/);
+    assert.match(spec, /issues\/\{PR_NUMBER\}\/comments/);
+    assert.match(spec, /if \[ -n "\$HEAD_OID" \]; then/);
+    assert.match(spec, /RESUME_APPROVED_N=0\n/);
+  });
+
+  it("forge#3726: the resume merge is pinned to the approved head", () => {
+    assert.match(spec, /GATED_HEAD" != "\$RESUME_APPROVED_HEAD"/);
+    assert.match(spec, /CI_GATE_RC=4/);
+  });
+
+  it("forge#3726: park evidence must name the PR being merged (fixed string)", () => {
+    assert.match(spec, /PARK_PR_MARK="PR #\{PR_NUMBER\} was previously escalated"/);
+    assert.match(spec, /grep -qF "\$PARK_PR_MARK"/);
   });
 
   it("computes IS_DEPLOY_GATE before the resume substitution", () => {
@@ -60,5 +85,27 @@ describe("forge#3684 remediate.md resume guard", () => {
     assert.match(spec, /for the remediation auto-land bar/);
     assert.match(spec, /RESUME_AT_M7=false\s+# BLOCKED/);
     assert.match(spec, /engine-parked/);
+  });
+});
+
+describe("forge#3738 resume approval filter executes against fixtures", () => {
+  const m = spec.match(/_JQ='([\s\S]*?)'\n/);
+  const HEAD = "a".repeat(40);
+  const run = (items) => {
+    const prog = m[1];
+    const out = spawnSync("jq", ["-s", "--arg", "head", HEAD, prog], { input: items.map((p) => JSON.stringify(p)).join("\n") });
+    return Number(String(out.stdout).trim());
+  };
+  const bot = (body, extra = {}) => ({ user: { type: "Bot" }, author_association: "CONTRIBUTOR", body, ...extra });
+  it("reviewer-agent comment with only a Reviewed-SHA line is not approval", () => {
+    assert.equal(run([[bot(`<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: ${HEAD}\n\nHIGH finding`)]]), 0);
+  });
+  it("APPROVED: body with Reviewed-SHA line at head is approval", () => {
+    assert.equal(run([[bot(`APPROVED: all good\nReviewed-SHA: ${HEAD}\n`)]]), 1);
+  });
+  it("APPROVED: commit <sha> prefix is approval; wrong sha or untrusted author is not", () => {
+    assert.equal(run([[bot(`APPROVED: commit ${HEAD.slice(0, 7)} ok`)]]), 1);
+    assert.equal(run([[bot("APPROVED: commit bbbbbbb ok")]]), 0);
+    assert.equal(run([[{ user: { type: "User" }, author_association: "NONE", body: `APPROVED: commit ${HEAD.slice(0, 7)}` }]]), 0);
   });
 });
