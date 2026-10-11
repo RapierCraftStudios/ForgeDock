@@ -528,12 +528,16 @@ if [ -n "$LIVE_BASE_REF" ] && [ "$LIVE_BASE_REF" != "null" ] && [ "$LIVE_BASE_RE
 **Resume path (`RESUME_AT_M7=true`)**: no M3 quality gate ran in this invocation, so `GATE_PASSED` is not set. Substitute fresh evidence that the PR is approved at its CURRENT head: a collaborator or Bot comment whose body starts with `APPROVED:` (anchored, case-sensitive, so `NOT APPROVED:` and quoted text never match) created AFTER the `committedDate` of the commit whose `oid` equals `headRefOid`. Anything unreadable, stale, or a `headRefOid` that matches no commit means `GATE_PASSED=false` (hold). The substitution applies to non-`main` bases only: when `RESUME_AT_M7=true` and `IS_DEPLOY_GATE=true`, `GATE_PASSED=false` is forced and the bar below holds (`BAR_MET=false`) in code, so a `main` (deploy-gate) base never lands from the resume path. CI is still verified by the mandatory CI gate below.
 
 ```bash
+# Fresh shell per Bash call: re-derive the live base here (same derivation as above) and re-fetch PR_LIVE if empty. Unresolved => strict.
+LIVE_BASE_REF=$(gh pr view {PR_NUMBER} {GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
+if [ -n "$LIVE_BASE_REF" ] && [ "$LIVE_BASE_REF" != "null" ] && [ "$LIVE_BASE_REF" != "main" ]; then IS_DEPLOY_GATE=false; else IS_DEPLOY_GATE=true; fi
+[ -n "${PR_LIVE:-}" ] || PR_LIVE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json state,mergedAt,headRefOid,commits 2>/dev/null || echo "")
 if [ "${RESUME_AT_M7:-false}" = "true" ]; then
   HEAD_OID=$(printf '%s' "$PR_LIVE" | jq -r '.headRefOid // ""' 2>/dev/null)
   HEAD_COMMITTED=""
   [ -n "$HEAD_OID" ] && HEAD_COMMITTED=$(printf '%s' "$PR_LIVE" | jq -r --arg head "$HEAD_OID" '[.commits[] | select(.oid == $head)] | first | .committedDate // ""' 2>/dev/null)
   RESUME_APPROVED_N=$(gh api --paginate repos/{GH_REPO}/issues/{PR_NUMBER}/comments 2>/dev/null | jq -rs --arg t "$HEAD_COMMITTED" '[.[][] | select((.body // "") | test("^APPROVED:")) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | select($t != "" and .created_at > $t)] | length' 2>/dev/null || echo 0)
-  if [ "$IS_DEPLOY_GATE" = "true" ]; then GATE_PASSED=false   # main / empty / null base: resume never lands
+  if [ "${IS_DEPLOY_GATE:-true}" = "true" ]; then GATE_PASSED=false   # main / empty / null base: resume never lands
   elif [ "${RESUME_APPROVED_N:-0}" -ge 1 ]; then GATE_PASSED=true
   else GATE_PASSED=false; fi
 fi
@@ -566,7 +570,7 @@ APPROVED_COUNT=$(echo "$REVIEW_BODIES" | grep -cE 'APPROVED:' 2>/dev/null || tru
 
 **Auto-land bar — base-branch scoped** (forge#2570): the condition the PR must clear to auto-land depends on its target branch. This reconciles the remediation bar with the normal `/work-on` fast-lane merge bar for the *same target branch*, while keeping the strict human-verified bar only where a human is genuinely in the loop (the `staging → main` deploy gate).
 
-(`LIVE_BASE_REF` / `IS_DEPLOY_GATE` were computed above, before the resume substitution, and are not re-derived here. forge#2570 / #2624 / #2625 rationale applies unchanged.)
+(`LIVE_BASE_REF` / `IS_DEPLOY_GATE` are first computed above, before the resume substitution. Every Bash call is a fresh shell, so the resume fence and the bar-evaluation fence re-derive them idempotently with the identical derivation, and every read uses `${IS_DEPLOY_GATE:-true}` so an unset value is strict. forge#2570 / #2624 / #2625 rationale applies unchanged.)
 
 **Non-`main` base (`IS_DEPLOY_GATE=false` — staging / milestone)** — reconcile to the fast-lane bar. `review-pr.md`'s Phase 8 guard only parks a PR at `workflow:awaiting-merge` after a clean, mergeable `APPROVED` re-review (the same bot-`APPROVED` signal the normal fast lane auto-merges on), so the only additional condition is this remediation's own quality gate:
 1. `GATE_PASSED = true` from this remediation's Phase M3 quality-gate loop.
@@ -581,7 +585,10 @@ A `RESUME_AT_M7=true` run on a deploy-gate base NEVER meets this bar (`BAR_MET=f
 
 **Evaluate the base-scoped bar**:
 ```bash
-if [ "$IS_DEPLOY_GATE" = "true" ]; then
+# Fresh shell per Bash call: re-derive the live base in this fence (same derivation as above); read with the :-true fail-closed default.
+LIVE_BASE_REF=$(gh pr view {PR_NUMBER} {GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
+if [ -n "$LIVE_BASE_REF" ] && [ "$LIVE_BASE_REF" != "null" ] && [ "$LIVE_BASE_REF" != "main" ]; then IS_DEPLOY_GATE=false; else IS_DEPLOY_GATE=true; fi
+if [ "${IS_DEPLOY_GATE:-true}" = "true" ]; then
   # main / deploy gate — strict verified-human bar; a resume (no in-run M3 gate) never lands here (forge#3684)
   if [ "${RESUME_AT_M7:-false}" = "true" ]; then BAR_MET=false
   else { [ "${APPROVED_COUNT:-0}" -ge 2 ] && [ "${GATE_PASSED:-false}" = "true" ]; } && BAR_MET=true || BAR_MET=false; fi
