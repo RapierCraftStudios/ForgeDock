@@ -109,6 +109,7 @@ export function deriveState(events) {
           s.committed = s.committed.filter((p) => p !== "remediate");
         }
         lastTerminalReason = null;
+        s.lastRateLimit = null; // forge#3791: an explicit reopen never re-enters a stale pause
         break;
       // forge#3562: an explicit `run-issue --retry` on a `phase-complete` run
       // (multi-phase issue: this phase merged, more remain) starts a NEW cycle.
@@ -121,6 +122,7 @@ export function deriveState(events) {
         s.terminal = false; s.terminalReason = null; s.committed = [];
         s.branch = null; s.pr = null; s.remediationKind = null;
         lastCommitReason = null; lastCommitPhase = null; lastTerminalReason = null; s.v = e.seq;
+        s.lastRateLimit = null; // forge#3791
         break;
       // forge#2524: a session-limit pause is purely informational — it does
       // NOT touch committed/terminal/terminalReason. The phase that hit the
@@ -129,8 +131,15 @@ export function deriveState(events) {
       // run correctly re-enters pickPhase at the same phase with no special
       // casing needed here beyond recording the diagnostic below.
       case "PHASE_RATE_LIMITED":
-        s.lastRateLimit = { phase: e.phase, resetAt: e.resetAt ?? null, waitMs: e.waitMs ?? null };
+        // forge#3791: backendId is the non-secret identity of the backend/account that hit the limit.
+        s.lastRateLimit = { phase: e.phase, resetAt: e.resetAt ?? null, waitMs: e.waitMs ?? null, backendId: e.backendId ?? null };
         s.v = e.seq;
+        break;
+      // forge#3791: the paused phase attempting again means the pause is over. A crash
+      // mid-pause appends no PHASE_START, so a same-backend relaunch still resumes the wait.
+      // `v` is intentionally not bumped.
+      case "PHASE_START":
+        if (s.lastRateLimit && e.phase === s.lastRateLimit.phase) s.lastRateLimit = null;
         break;
       // PHASE_START / PHASE_FAILED do not change committed state
     }
