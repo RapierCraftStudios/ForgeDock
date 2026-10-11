@@ -1520,7 +1520,7 @@ Each agent receives only its domain-relevant diff slice rather than the full cha
 # Domain file patterns — used in Phase 3C to scope each agent's input
 DOMAIN_FILES_AUTH=$(echo "$FILES" | grep -iE "auth|session|login|logout|jwt|oauth|token|user|permission|middleware" || echo "")
 DOMAIN_FILES_BILLING=$(echo "$FILES" | grep -iE "billing|credit|payment|charge|refund|subscription|pricing|tier" || echo "")
-DOMAIN_FILES_CONCURRENCY=$(echo "$FILES" | grep -iE "lock|queue|atomic|transaction|worker|job|task|celery|redis" || echo "")
+DOMAIN_FILES_CONCURRENCY=$(echo "$FILES" | grep -iE "lock|queue|atomic|transaction|worker|job|task|celery|redis|claim|lease|engine-state" || echo "")
 DOMAIN_FILES_DATABASE=$(echo "$FILES" | grep -iE "migration|\.sql$|model|schema|db|database|alembic" || echo "")
 DOMAIN_FILES_INFRA=$(echo "$FILES" | grep -iE "docker|nginx|traefik|\.github|Makefile|deploy|infra" || echo "")
 DOMAIN_FILES_SCRAPING=$(echo "$FILES" | grep -iE "scrape|crawler|stealth|browser.*pool|headless|anti.bot|detection.*keyword|captcha" || echo "")
@@ -1528,10 +1528,15 @@ DOMAIN_FILES_FRONTEND=$(echo "$FILES" | grep -iE "^web/|\.tsx?$|\.jsx?$|componen
 DOMAIN_FILES_API=$(echo "$FILES" | grep -iE "router|route|endpoint|openapi|sdk|api" || echo "")
 
 # Fallback: if a domain has no specific files matched, give it the full file list
-# (happens for Security — which reviews everything — and for edge cases)
+# (a domain can be on the roster without a pattern hit, e.g. via delta_roster or Security's full-diff scope)
 [ -z "$DOMAIN_FILES_AUTH" ] && DOMAIN_FILES_AUTH="$FILES"
 [ -z "$DOMAIN_FILES_BILLING" ] && DOMAIN_FILES_BILLING="$FILES"
+[ -z "$DOMAIN_FILES_CONCURRENCY" ] && DOMAIN_FILES_CONCURRENCY="$FILES"
 [ -z "$DOMAIN_FILES_DATABASE" ] && DOMAIN_FILES_DATABASE="$FILES"
+[ -z "$DOMAIN_FILES_INFRA" ] && DOMAIN_FILES_INFRA="$FILES"
+[ -z "$DOMAIN_FILES_SCRAPING" ] && DOMAIN_FILES_SCRAPING="$FILES"
+[ -z "$DOMAIN_FILES_FRONTEND" ] && DOMAIN_FILES_FRONTEND="$FILES"
+[ -z "$DOMAIN_FILES_API" ] && DOMAIN_FILES_API="$FILES"
 ```
 
 ### 3C: Load Agent Templates & Launch
@@ -1624,7 +1629,7 @@ delta_roster() {
     printf '%s\n' "$files" | grep -qiE "lock|queue|atomic|transaction|worker|job|task|celery|redis|claim|lease|engine-state" && out="$out concurrency"
     printf '%s\n' "$files" | grep -qiE "migration|\.sql$|model|schema|db|database|alembic" && out="$out database"
     printf '%s\n' "$files" | grep -qiE "docker|nginx|traefik|\.github|Makefile|deploy|infra" && out="$out infra"
-    printf '%s\n' "$files" | grep -qiE "scrape|crawler|stealth|browser.*pool|headless|anti.bot|captcha" && out="$out scraper"
+    printf '%s\n' "$files" | grep -qiE "scrape|crawler|stealth|browser.*pool|headless|anti.bot|detection.*keyword|captcha" && out="$out scraper"
     printf '%s\n' "$files" | grep -qiE "^web/|\.tsx?$|\.jsx?$|component|page|layout|style|css" && out="$out frontend"
     printf '%s\n' "$files" | grep -qiE "router|route|endpoint|openapi|sdk|api" && out="$out api"
     printf '%s\n' "$files" | grep -qE "^(commands|bin)/" && [ -f "$root/commands/review-pr-agents/spec-cli.md" ] && out="$out spec-cli"

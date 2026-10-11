@@ -83,5 +83,15 @@ done
 # Test 6: the protocol defines the marker domain through the mapping
 if grep -qF 'marker domain' "$PERSONAS/protocols.md"; then ok; else bad "protocols.md does not define the marker domain"; fi
 
+# Test 7: the roster regexes in delta_roster must equal the DOMAIN_FILES_* regexes, and every domain needs an empty-slice fallback
+for pair in AUTH:auth BILLING:billing CONCURRENCY:concurrency DATABASE:database INFRA:infra SCRAPING:scraper FRONTEND:frontend API:api; do
+  var=${pair%%:*}; dom=${pair#*:}
+  a=$(grep -E "^DOMAIN_FILES_$var=" "$SPEC" | head -n 1 | sed -n 's/.*grep -iE "\([^"]*\)".*/\1/p')
+  b=$(grep -F "&& out=\"\$out $dom\"" "$SPEC" | grep 'grep -qiE' | head -n 1 | sed -n 's/.*grep -qiE "\([^"]*\)".*/\1/p')
+  if [ -z "$a" ] || [ -z "$b" ]; then bad "could not extract $var pattern (DOMAIN_FILES='$a' delta_roster='$b')"
+  elif [ "$a" = "$b" ]; then ok; else bad "$var regex drifted: DOMAIN_FILES='$a' delta_roster='$b'"; fi
+  if grep -qF "[ -z \"\$DOMAIN_FILES_$var\" ] && DOMAIN_FILES_$var=\"\$FILES\"" "$SPEC"; then ok; else bad "no empty-slice fallback for DOMAIN_FILES_$var"; fi
+done
+
 echo "review-pr-domain-map: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
