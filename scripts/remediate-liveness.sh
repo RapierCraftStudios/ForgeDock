@@ -39,7 +39,28 @@ NOW_S=$(( NOW_MS / 1000 ))
 
 TRUST='((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR")))'
 
-ISSUE_JSON=$(gh issue view "$ISSUE" -R "$REPO" --json body 2>/dev/null) || err "issue unreadable"
+# Body + provenance (issue-body FORGE:STATE trust gate): the LAST EDITOR (editor // author) must be a Bot,
+# or the creator with OWNER/MEMBER/COLLABORATOR, or a distinct editor with write/maintain/admin permission.
+# Unreadable provenance fails closed. An untrusted body is treated as having no FORGE:STATE (no lease).
+OWNER_PART="${REPO%%/*}"; NAME_PART="${REPO#*/}"
+PROV_Q='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){body authorAssociation author{login __typename} editor{login __typename}}}}'
+PROV=$(gh api graphql -f query="$PROV_Q" -F owner="$OWNER_PART" -F name="$NAME_PART" -F number="$ISSUE" 2>/dev/null) || err "issue unreadable"
+ISSUE_JSON=$(printf '%s' "$PROV" | jq -c '.data.repository.issue | {body: (.body // "")}' 2>/dev/null) || err "issue unreadable"
+ACTOR_ROW=$(printf '%s' "$PROV" | jq -r '.data.repository.issue | (.editor // .author) as $a | [($a.__typename // ""), ($a.login // ""), (if .editor != null and .editor.login != .author.login then "EDITOR" else (.authorAssociation // "NONE") end)] | @tsv' 2>/dev/null) || err "issue unreadable"
+A_TYPE=$(printf '%s' "$ACTOR_ROW" | cut -f1); A_LOGIN=$(printf '%s' "$ACTOR_ROW" | cut -f2); A_ASSOC=$(printf '%s' "$ACTOR_ROW" | cut -f3)
+BODY_TRUSTED=false
+if [ "$A_TYPE" = "Bot" ]; then BODY_TRUSTED=true
+else
+  case "$A_ASSOC" in
+    OWNER|MEMBER|COLLABORATOR) BODY_TRUSTED=true ;;
+    EDITOR)
+      if printf '%s' "$A_LOGIN" | grep -qE '^[A-Za-z0-9-]{1,39}$'; then
+        PERM=$(gh api "repos/$REPO/collaborators/$A_LOGIN/permission" --jq .permission 2>/dev/null || true)
+        case "$PERM" in admin|maintain|write) BODY_TRUSTED=true ;; esac
+      fi ;;
+  esac
+fi
+[ "$BODY_TRUSTED" = "true" ] || ISSUE_JSON='{"body":""}'
 ISSUE_COMMENTS=$(gh api --paginate "repos/$REPO/issues/$ISSUE/comments" 2>/dev/null) || err "issue comments unreadable"
 PR_COMMENTS=$(gh api --paginate "repos/$REPO/issues/$PR/comments" 2>/dev/null) || err "PR comments unreadable"
 [ -n "$PR_COMMENTS" ] || err "PR comments unreadable"

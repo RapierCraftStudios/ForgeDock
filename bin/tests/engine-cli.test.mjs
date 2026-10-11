@@ -18,6 +18,10 @@ function makeFakeIo(states, { fanOutLabel = "workflow:building" } = {}) {
         }
         return JSON.stringify([]);
       }
+      if (args[0] === "api" && args[1] === "graphql") {
+        const issue = Number(args[args.indexOf("-F", args.indexOf("name={repo}")) + 1].replace("number=", ""));
+        return JSON.stringify({ data: { repository: { issue: { body: serializeState(states[issue]), authorAssociation: "NONE", author: { login: "forge[bot]", __typename: "Bot" }, editor: null } } } });
+      }
       if (args[0] === "issue" && args[1] === "view") {
         const issue = Number(args[2]);
         return JSON.stringify({ body: serializeState(states[issue]) });
