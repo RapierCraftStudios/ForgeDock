@@ -219,11 +219,36 @@ if [ -d "{WORKTREE_PATH}" ]; then
   git -C "{WORKTREE_PATH}" checkout {HEAD_BRANCH}
   git -C "{WORKTREE_PATH}" reset --hard "origin/{HEAD_BRANCH}"
 else
-  git worktree add "{WORKTREE_PATH}" {HEAD_BRANCH} "origin/{HEAD_BRANCH}"
+  if ! git worktree add "{WORKTREE_PATH}" {HEAD_BRANCH} "origin/{HEAD_BRANCH}" 2>/tmp/m2-wt-err.$$; then
+    # "already checked out" / "already used by worktree": the branch lives in another worktree.
+    # Reuse that worktree (resolved from the porcelain list) — never fall back to the main checkout.
+    EXISTING_WT=""; MAIN_WT=""; CUR_WT=""
+    while IFS= read -r line; do
+      case "$line" in
+        "worktree "*) CUR_WT="${line#worktree }"; [ -z "$MAIN_WT" ] && MAIN_WT="$CUR_WT" ;;
+        "branch refs/heads/{HEAD_BRANCH}") [ -z "$EXISTING_WT" ] && EXISTING_WT="$CUR_WT" ;;
+      esac
+    done < <(git worktree list --porcelain)
+    if [ -n "$EXISTING_WT" ] && [ "$EXISTING_WT" != "$MAIN_WT" ] && [ -d "$EXISTING_WT" ]; then
+      WORKTREE_PATH="$EXISTING_WT"
+      if [ -n "$(git -C "$WORKTREE_PATH" status --porcelain)" ]; then
+        WORKTREE_PATH=""   # foreign uncommitted changes: do not reset --hard over them
+      else
+        git -C "$WORKTREE_PATH" fetch origin
+        git -C "$WORKTREE_PATH" reset --hard "origin/{HEAD_BRANCH}"
+      fi
+    else
+      cat /tmp/m2-wt-err.$$ >&2   # branch is checked out in the main checkout, or is gone: BLOCKED below
+      WORKTREE_PATH=""
+    fi
+  fi
+  rm -f /tmp/m2-wt-err.$$
 fi
 ```
 
-If the worktree/branch checkout fails for any reason (branch deleted, force-pushed out from under us, etc.): post a comment, add `needs-human`, EXIT `REMEDIATE_RESULT: status: BLOCKED`.
+**Main-checkout ban**: remediation never runs `checkout`, `switch`, `reset`, `stash`, or `merge` in the main checkout (`{REPO_PATH}`) — not as a fallback for a failed `git worktree add`, not for any other reason. Every mutating git command targets `{WORKTREE_PATH}` via `git -C`. When the existing worktree for `{HEAD_BRANCH}` cannot be resolved with `git worktree list --porcelain`, or the branch is checked out in the main checkout itself, do not improvise: treat it as a failed checkout. A reused worktree with uncommitted changes is never reset: the snippet leaves `WORKTREE_PATH` empty and the run is BLOCKED. An empty `WORKTREE_PATH` after this block means BLOCKED. <!-- Added: forge#3650 -->
+
+If the worktree/branch checkout fails for any reason (branch deleted, force-pushed out from under us, checked out in the main checkout, etc.): post a comment, add `needs-human`, EXIT `REMEDIATE_RESULT: status: BLOCKED`.
 
 ---
 

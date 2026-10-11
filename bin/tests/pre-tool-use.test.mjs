@@ -2097,3 +2097,76 @@ describe("pre-tool-use hook — dangerous rm target guard (#2856)", () => {
     });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Rule 9: main-checkout mutation guard (issue #3650) — subprocess tests
+// ---------------------------------------------------------------------------
+
+describe("main-checkout mutation guard (issue #3650)", () => {
+  const root = mkdtempSync(join(osTop.tmpdir(), "fd-ptu-main-"));
+  const mainDir = join(root, "main");
+  const wtDir = join(root, "wt");
+  const git = (cwd, ...args) =>
+    spawnSync("git", args, {
+      cwd,
+      encoding: "utf-8",
+      env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
+    });
+  spawnSync("mkdir", ["-p", mainDir]);
+  git(mainDir, "init", "-q", "-b", "main");
+  writeFileSyncTop(join(mainDir, "forge.yaml"), "project:\n  owner: t\n  repo: t\n", "utf-8");
+  git(mainDir, "add", "forge.yaml");
+  git(mainDir, "commit", "-q", "-m", "init");
+  git(mainDir, "worktree", "add", "-q", "-b", "feat/x", wtDir);
+  process.on("exit", () => {
+    try { rmSync(root, { recursive: true, force: true }); } catch { /* best effort */ }
+  });
+
+  function run(command, cwd, extraEnv = {}) {
+    const r = spawnSync(process.execPath, [HOOK_PATH], {
+      input: JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command } }),
+      encoding: "utf-8",
+      timeout: 10000,
+      env: { ...process.env, NODE_OPTIONS: "", FORGE_ALLOW_MAIN_CHECKOUT_GIT: "", ...extraEnv },
+      cwd,
+    });
+    return { exitCode: r.status ?? -1, stderr: r.stderr || "" };
+  }
+
+  it("denies git checkout in the main checkout", () => {
+    const r = run("git checkout --detach FETCH_HEAD", mainDir);
+    assert.equal(r.exitCode, 2);
+    assert.match(r.stderr, /main checkout/);
+  });
+
+  it("denies git reset --hard, stash, switch, merge, gh pr checkout in the main checkout", () => {
+    for (const c of ["git reset --hard origin/staging", "git stash -u", "git switch staging", "git merge foo", "gh pr checkout 5"]) {
+      assert.equal(run(c, mainDir).exitCode, 2, c);
+    }
+  });
+
+  it("allows the same commands inside a linked worktree", () => {
+    for (const c of ["git checkout feat/x", "git reset --hard HEAD", "git stash"]) {
+      assert.equal(run(c, wtDir).exitCode, 0, c);
+    }
+  });
+
+  it("allows read-only git, branch creation, and worktree ops in the main checkout", () => {
+    for (const c of ["git status", "git show HEAD:forge.yaml", "git checkout -b feat/y", "git worktree list", "git reset --soft HEAD", "git stash list"]) {
+      assert.equal(run(c, mainDir).exitCode, 0, c);
+    }
+  });
+
+  it("treats git -C and a leading cd as indeterminate (allowed)", () => {
+    assert.equal(run(`git -C ${wtDir} reset --hard HEAD`, mainDir).exitCode, 0);
+    assert.equal(run(`cd ${wtDir} && git checkout feat/x`, mainDir).exitCode, 0);
+  });
+
+  it("honours the operator override", () => {
+    assert.equal(run("git checkout main", mainDir, { FORGE_ALLOW_MAIN_CHECKOUT_GIT: "1" }).exitCode, 0);
+  });
+
+  it("fails open in a non-git directory", () => {
+    assert.equal(run("git checkout main", DEFAULT_MANAGED_DIR).exitCode, 0);
+  });
+});

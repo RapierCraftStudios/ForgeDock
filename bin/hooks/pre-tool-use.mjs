@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createRequire } from "module";
 import { existsSync } from "fs";
+import { spawnSync } from "child_process";
 import { dirname, join, resolve as resolvePath } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 const _require = createRequire(import.meta.url);
@@ -114,6 +115,17 @@ async function getInvariants() {
  *    Override: set FORGE_ALLOW_AI_ATTRIBUTION=1 in the shell environment before
  *    starting Claude Code (operator-set only — same process.env semantics as
  *    the gist guard above).
+ *
+ * 9. Main-checkout mutation guard (issue #3650)
+ *    Denies `git checkout|switch|stash|merge`, `git reset --hard`, and
+ *    `gh pr checkout` when the shell's cwd is the main (non-worktree) checkout
+ *    (`git rev-parse --git-dir` equals `--git-common-dir`). Pipeline workers and
+ *    reviewers share that tree with the operator; mutating it races with them.
+ *    Read-only git, `git checkout -b`, `git worktree ...`, and anything in a
+ *    linked worktree stay allowed. Fails open when the repo cannot be resolved,
+ *    and treats `git -C <dir>`, `--git-dir`, `--work-tree` and a leading `cd` as
+ *    indeterminate (allowed). Override: FORGE_ALLOW_MAIN_CHECKOUT_GIT=1 in the
+ *    shell environment (operator-set only).
  *
  * Rules 1-4 and 6 only apply inside a ForgeDock-managed directory (a directory
  * with a `forge.yaml` or `.forgedock` marker) — see `isForgeDockManagedCwd()`
@@ -599,6 +611,14 @@ async function main() {
   const gistViolation = checkGistVisibility(command);
   if (gistViolation) {
     process.stderr.write(gistViolation);
+    process.exit(2);
+    return;
+  }
+
+  // --- Rule 9: Main-checkout mutation guard (issue #3650) ---
+  const mainCheckoutViolation = checkMainCheckoutMutation(command);
+  if (mainCheckoutViolation) {
+    process.stderr.write(mainCheckoutViolation);
     process.exit(2);
     return;
   }
@@ -1231,6 +1251,105 @@ function checkTempPathStaging(command) {
   }
 
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Rule 9: Main-checkout mutation guard (issue #3650)
+// ---------------------------------------------------------------------------
+
+/** git global options that consume the following token as their value. */
+const GIT_VALUE_OPTS = new Set(["-c", "--exec-path", "--namespace", "--super-prefix"]);
+/** git global options that redirect the target repo/tree: result is indeterminate. */
+const GIT_REDIRECT_OPT_RE = /^(?:-C|--git-dir(?:=.*)?|--work-tree(?:=.*)?)$/;
+
+/**
+ * Classify one command segment as a main-checkout mutation.
+ * @param {string[]} tokens
+ * @returns {string|null} the offending command name, or null
+ */
+function mutatingGitCommand(tokens) {
+  let i = 0;
+  // Skip leading env assignments (`FOO=1 git ...`).
+  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i++;
+  if (tokens[i] === "gh") {
+    return tokens[i + 1] === "pr" && tokens[i + 2] === "checkout" ? "gh pr checkout" : null;
+  }
+  if (tokens[i] !== "git") return null;
+  i++;
+  while (i < tokens.length && tokens[i].startsWith("-")) {
+    if (GIT_REDIRECT_OPT_RE.test(tokens[i])) return null; // targets another dir: allow
+    i += GIT_VALUE_OPTS.has(tokens[i]) ? 2 : 1;
+  }
+  const sub = tokens[i];
+  const rest = tokens.slice(i + 1);
+  switch (sub) {
+    case "checkout":
+      // Creating a new branch is the one sanctioned form (`git checkout -b`).
+      return rest.some((t) => t === "-b" || t === "-B") ? null : "git checkout";
+    case "switch":
+      return rest.some((t) => t === "-c" || t === "-C" || t === "--create") ? null : "git switch";
+    case "merge":
+      return "git merge";
+    case "reset":
+      return rest.includes("--hard") ? "git reset --hard" : null;
+    case "stash": {
+      const action = rest.find((t) => !t.startsWith("-"));
+      return action === "list" || action === "show" ? null : "git stash";
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * Is `cwd` the main (non-linked-worktree) checkout of a git repo?
+ * Fails closed-to-allow: any error or non-git dir returns false.
+ * @param {string} cwd
+ * @returns {boolean}
+ */
+function isMainCheckout(cwd) {
+  try {
+    const r = spawnSync(
+      "git",
+      ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+      { cwd, encoding: "utf-8", timeout: 5000 },
+    );
+    if (r.status !== 0) return false;
+    const [gitDir, commonDir] = String(r.stdout).trim().split(/\r?\n/);
+    if (!gitDir || !commonDir) return false;
+    return resolvePath(cwd, gitDir) === resolvePath(cwd, commonDir);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Rule 9: deny mutating git/gh commands aimed at the main checkout.
+ * @param {string} command
+ * @returns {string|null} stderr message when denied, else null
+ */
+function checkMainCheckoutMutation(command) {
+  if (process.env.FORGE_ALLOW_MAIN_CHECKOUT_GIT === "1") return null;
+  if (!/\b(?:git|gh)\b/.test(command)) return null;
+  try {
+    let offender = null;
+    for (const tokens of extractCommandSegments(command)) {
+      // A directory change makes the effective cwd indeterminate: allow.
+      if (tokens[0] === "cd" || tokens[0] === "pushd") return null;
+      offender = offender || mutatingGitCommand(tokens);
+    }
+    if (!offender) return null;
+    if (!isMainCheckout(process.cwd())) return null;
+    return (
+      `BLOCKED: \`${offender}\` would mutate the main checkout (${process.cwd()}).\n` +
+      "The main checkout is shared with the operator and other agents. Work in a git worktree " +
+      "(`git worktree list`, `git worktree add`) and use `git -C <worktree> ...`, or read code with " +
+      "`git show <sha>:<path>`, `gh pr diff`, or `gh api`.\n" +
+      "Operator override: set FORGE_ALLOW_MAIN_CHECKOUT_GIT=1 in the shell before starting Claude Code.\n"
+    );
+  } catch {
+    return null; // fail open
+  }
 }
 
 // ---------------------------------------------------------------------------
