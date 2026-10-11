@@ -28,6 +28,7 @@ on:
       - 'scripts/review-delta.test.sh'
       - 'scripts/review-pr-delta-wiring.test.sh'
       - 'scripts/review-pr-staging-scope.test.sh'
+      - 'scripts/review-pr-staging-finding-filter.test.sh'
       - 'scripts/check-spec-size.sh'
       - 'scripts/check-spec-size.test.sh'
       - 'scripts/check-test-wiring.sh'
@@ -70,6 +71,7 @@ on:
       - 'scripts/review-delta.test.sh'
       - 'scripts/review-pr-delta-wiring.test.sh'
       - 'scripts/review-pr-staging-scope.test.sh'
+      - 'scripts/review-pr-staging-finding-filter.test.sh'
       - 'scripts/check-spec-size.sh'
       - 'scripts/check-spec-size.test.sh'
       - 'scripts/check-test-wiring.sh'
@@ -344,6 +346,7 @@ jobs:
           bash scripts/review-delta.test.sh
           bash scripts/review-pr-delta-wiring.test.sh
           bash scripts/review-pr-staging-scope.test.sh
+          bash scripts/review-pr-staging-finding-filter.test.sh
           # No args: the script's built-in default file set (all Skill-loaded specs under commands/).
           bash scripts/check-spec-bash.sh
           # Every Bash call is a fresh shell: a fence that reads these variables must bind them itself
