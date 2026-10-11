@@ -436,10 +436,10 @@ grep -nE '\$PWD|\$\(pwd\)|\$\{PWD' "$FR" | grep -vE '^[0-9]+:[[:space:]]*#' | gr
 
 # Behaviour: run the REAL stub locator + forge_resolve in a clean env over each install layout.
 # Paths are compared canonically: macOS resolves /var -> /private/var and Git Bash maps /tmp -> /c/Users/..., so the literal
-# spelling of a temp path differs from what readlink/pwd -P report. cygpath -m (Git Bash) or dirname+pwd -P (POSIX) agree.
+# spelling of a temp path differs from what readlink/pwd -P report (and 8.3 short names like RUNNER~1 differ from long ones). cygpath -ml (Git Bash) or dirname+pwd -P (POSIX) agree.
 canon() { # path -> canonical spelling, empty stays empty
   [ -n "$1" ] || return 0
-  if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1" 2>/dev/null || printf '%s' "$1"
+  if command -v cygpath >/dev/null 2>&1; then cygpath -ml "$1" 2>/dev/null || printf '%s' "$1"
   else ( cd "$(dirname "$1")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$1")" ) || printf '%s' "$1"; fi
 }
 expect_path() { expect "$1" "$(canon "$2")" "$(canon "$3")"; }
@@ -489,6 +489,8 @@ expect "unresolved layout: the bootstrap stub fails closed" "BLOCKED" "$(fr_run 
 expect "unresolved layout: the bootstrap stub does not reach the fence body" "" "$(fr_run "$T/fr/h0" "$(grep '# FENCE_BOOTSTRAP$' "$STG_SPEC" | sed 1q); echo reached" | sed -n 's/^\(reached\)$/\1/p')"
 expect "relative FORGEDOCK_HOME is rejected" "" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' FORGEDOCK_HOME=fr/cwdplant)"
 expect "path traversal in the script name is rejected" "" "$(fr_run "$T/fr/h0" 'forge_resolve ../scripts/trusted-comments.sh' FORGEDOCK_HOME="$T/fr/npm")"
+# INFRA-8: the stub itself must survive errexit in bash (setopt is zsh-only and must not abort a set -e shell)
+expect "errexit: the locator stub itself survives set -e with no helper" "survived" "$(cd "$T/fr/cwdplant" && env -i PATH="$PATH" HOME="$T/fr/h0" bash -c "set -e; $(cat "$T/locator.sh"); X=\$(forge_resolve trusted-comments.sh); [ -z \"\$X\" ] && echo survived" 2>/dev/null)"
 # INFRA-5: errexit callers must survive a resolver miss (helper sourced, and helper never found) and reach their own empty-output branch
 expect "errexit: a resolver miss with the helper sourced survives" "survived" "$(fr_run "$T/fr/h0" 'set -e; X=$(forge_resolve nothere.sh); [ -z "$X" ] && echo survived' FORGEDOCK_HOME="$T/fr/npm")"
 expect "errexit: a resolver miss with no helper at all survives" "survived" "$(fr_run "$T/fr/h0" 'set -e; X=$(forge_resolve trusted-comments.sh); [ -z "$X" ] && echo survived')"
