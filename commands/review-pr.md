@@ -2553,7 +2553,7 @@ Filing a standalone `review-finding` issue for every LOW/POSSIBLE reviewer note 
 - **Safety exemption is content-based** (it bypasses only this severity damper, never the §6B.4 provenance gate: a pre-existing auth gap is flagged through the pre-existing route, not attributed to this PR): a LOW or POSSIBLE finding is still filed when its file path / title / body matches the security/billing keyword set — a LOW finding additionally needs `**Confidence**: CONFIRMED`, so LOW LIKELY/POSSIBLE with a keyword is a NOTE (`security|auth|authz|authn|billing|payment|stripe|charge|invoice|injection|xss|csrf|ssrf|idor|secret(s)|credential(s)|permission(s)|sql|token|password|redact`, whole words, `_`/`-`/`/` separate words — so `auth_service` matches but `author`/`tokenizer` do not), or when it came from a dedicated, signal-selected domain agent (Auth, Billing, Concurrency, Database) AND is MEDIUM — a domain agent rescues MEDIUM only, and a LOW finding stays a NOTE whichever reviewer raised it, CONFIRMED or not. **Origin from the always-on General Security & Quality agent alone does NOT exempt a finding**: that agent runs on every PR, so origin-based exemption filed nearly every LOW note it raised (the 2026-10-08 cascade audit: 50 of 60 would-be notes in one batch were filed only for that reason).
 - **Review-finding lineage** (the PR's linked issue `MERGE_ISSUE` carries the `review-finding` label, any priority — this PR is itself a fix for a finding): only MEDIUM findings that are CONFIRMED, or LIKELY and safety-exempt, become issues; LOW and POSSIBLE are always NOTEs. A fix for a finding must not mint a new generation of findings.
 - **Otherwise**: `**Severity**: LOW`, or `**Confidence**: POSSIBLE` below HIGH, is a NOTE unless safety-exempt (LOW: keyword AND CONFIRMED; MEDIUM: keyword at any confidence, or a domain agent); everything else (MEDIUM CONFIRMED/LIKELY) is an ISSUE.
-- **Cross-head re-flag** <!-- Added: forge#3641 -->: a finding that an earlier head's review already posted, or that an earlier `FORGE:NOTE_DISPOSITION` list recorded, is not filed or noted a second time after its line moved. The caller builds a prior-findings TSV (file, line-start, line-end, title, prior-disposition, issue#) from trusted prior-head reviewer comments (`Reviewed-SHA` other than the current head) and trusted `FORGE:NOTE_DISPOSITION` records carrying a different `reviewed_sha=`, all read through `scripts/trusted-comments.sh`, and passes it as `--prior-findings`. A finding re-flags a row when it is the same file AND (line IoU >= 0.6 after a best-effort `git diff` hunk-offset shift, OR >= 3 shared title tokens) and becomes `NOTE reflag-filed #N` (the prior row's issue is still open) or `NOTE reflag-note`. Never demoted: HIGH/CRITICAL and unparseable severity (the classifier exits on them before this gate, so they keep blocking via §7B), and any row whose linked issue is closed (a regressed defect is classified normally). Prior rows with no issue link are passed as `note`; an unreadable source only shrinks the TSV, it never blocks.
+- **Cross-head re-flag** <!-- Added: forge#3641 -->: a finding that an earlier head's review already posted, or that an earlier `FORGE:NOTE_DISPOSITION` list recorded, is not filed or noted a second time after its line moved. The caller builds a prior-findings TSV (file, line-start, line-end, title, prior-disposition, issue#) from trusted prior-head reviewer comments (`Reviewed-SHA` other than the current head) and trusted `FORGE:NOTE_DISPOSITION` records carrying a different `reviewed_sha=`, all read through `scripts/trusted-comments.sh`, and passes it as `--prior-findings`. A finding re-flags a row when it is the same file AND (line IoU >= 0.6 after a best-effort `git diff` hunk-offset shift, OR >= 3 shared title tokens) and becomes `NOTE reflag-filed #N` (the prior row's issue is still open) or `NOTE reflag-note`. Never demoted: HIGH/CRITICAL and unparseable severity (the classifier exits on them before this gate, so they keep blocking via §7B), and any row whose linked issue is closed (a regressed defect is classified normally). Prior rows with no issue link are passed as `note` (recorded NOTE_DISPOSITION) or `unknown` (reviewer-body finding whose linkage failed; the classifier never demotes a MEDIUM CONFIRMED/LIKELY re-flag against an `unknown` row); an unreadable source only shrinks the TSV, it never blocks.
 - **Contract-declared scope** <!-- Added: forge#3447 -->: the trusted, latest FORGE:CONTRACT of `MERGE_ISSUE` lists out-of-scope items as `deferred → #N`, `not-affected:` or `accepted-risk:` (parsed by `scripts/check-contract-scope.sh list`). A finding whose file equals, or sits under, a `deferred` item whose issue is verified becomes `NOTE contract-deferred #N` and is commented on that issue instead of being filed again. A finding under an `accepted-risk` item becomes `NOTE contract-accepted-risk`. A deferred issue is verified only when it is OPEN, is an issue (not a PR), is not `MERGE_ISSUE` itself, and its body carries `FORGE:DEFERRED_FROM: #<MERGE_ISSUE>` and the deferred path, and it is authored by a trusted author (`author_association` OWNER/MEMBER/COLLABORATOR, or `user.type` Bot); an unverified item is dropped from the scope list. Never demoted: HIGH/CRITICAL, `not-affected` items (a contradicting finding means the contract was wrong), safety-exempt findings under either disposition, findings on a file this PR changed, and anything when the contract is missing, untrusted, unparseable or the deferred issue is closed, unverified or unreadable.
 
 ```bash
@@ -2675,17 +2675,17 @@ if [ -z "${TRUSTED_SCRIPT:-}" ]; then
 fi
 # Cross-head re-flag input (#3641). Fail soft: every unreadable source just leaves the TSV smaller, never blocks the review.
 # PF_SKIP="<sha or empty>" PF_PRS="<pr numbers>" prior_findings_tsv prints file<TAB>line-start<TAB>line-end<TAB>title<TAB>disposition<TAB>issue# rows
-# (disposition: filed = linked issue OPEN, filed-closed = linked issue CLOSED, note = no linked issue). Every comment is read through
+# (disposition: filed = linked issue OPEN, filed-closed = linked issue CLOSED, note = a recorded NOTE_DISPOSITION with no linked issue, unknown = a reviewer-body finding whose issue linkage failed, so the classifier must not let it demote a MEDIUM CONFIRMED/LIKELY re-flag). Every comment is read through
 # scripts/trusted-comments.sh, so an untrusted commenter cannot pre-post a finding to suppress a real one. With PF_SKIP set, reviewer
 # bodies for that head are skipped and only NOTE_DISPOSITION records carrying a different `reviewed_sha=` count (this head's own record,
 # from an earlier run of this same review, must never swallow its findings).
-pf_split_loc() { # PF_LOC="file[:N[-M]]" -> file<TAB>N<TAB>M (line columns empty when absent)
+pf_split_loc() { # PF_LOC="file[:N[-M]]" -> file<TAB>N<TAB>M (`-` sentinel when a line column is absent: a tab IFS read collapses empty fields)
   local _loc="$PF_LOC" _file _r _a="" _b=""; _file="$_loc"
   case "$_loc" in *:[0-9]*) _r="${_loc##*:}"; case "$_r" in *[!0-9-]*|"") ;; *) _file="${_loc%:*}"; _a="${_r%%-*}"; _b="${_r#*-}"; [ "$_b" != "$_r" ] || _b="$_a" ;; esac ;; esac
-  printf '%s\t%s\t%s\n' "$_file" "$_a" "$_b"
+  printf '%s\t%s\t%s\n' "$_file" "${_a:--}" "${_b:--}"
 }
 prior_findings_tsv() {
-  local pr cj rows issues _id _c _s _loc _t _p _hit _f _a _b
+  local pr cj rows issues _id _c _s _loc _t _p _hit _f _a _b _src _dflt
   [ -n "${TRUSTED_SCRIPT:-}" ] || return 0
   rows=$(mktemp "${_pscr}/prior-rows.XXXXXX"); issues=$(mktemp "${_pscr}/prior-issues.XXXXXX")
   for pr in $PF_PRS; do
@@ -2696,21 +2696,25 @@ prior_findings_tsv() {
       | jq -r --arg skip "${PF_SKIP:-}" 'select($skip == "" or (test("(^|\\n)Reviewed-SHA: " + $skip + "\\r?(\\n|$)") | not)) | scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null \
       | while IFS='|' read -r _id _c _s _loc _t; do
           [ -n "$_t" ] || continue
-          _p=$(PF_LOC="$_loc" pf_split_loc); printf '%s\t%s\n' "$_p" "$(printf '%s' "$_t" | tr '\t' ' ')"
+          _p=$(PF_LOC="$_loc" pf_split_loc); printf 'F\t%s\t%s\n' "$_p" "$(printf '%s' "$_t" | tr '\t' ' ')"
         done >> "$rows"
     printf '%s' "$cj" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:NOTE_DISPOSITION' 2>/dev/null \
       | jq -r --arg skip "${PF_SKIP:-}" 'select($skip == "" or ((capture("^<!-- FORGE:NOTE_DISPOSITION:[^>]*reviewed_sha=(?<s>[0-9a-f]{40,64})") | .s) as $s | $s != $skip)) | split("\n")[] | select(startswith("- "))' 2>/dev/null \
       | sed -n 's/^- [^ ]* \([^ ]*\) \[[A-Za-z?]*\] \(.*\): [^:]*$/\1\t\2/p' \
       | while IFS="$(printf '\t')" read -r _loc _t; do
           [ "$_loc" != "?" ] || continue
-          _p=$(PF_LOC="$_loc" pf_split_loc); printf '%s\t%s\n' "$_p" "$_t"
+          _p=$(PF_LOC="$_loc" pf_split_loc); printf 'N\t%s\t%s\n' "$_p" "$_t"
         done >> "$rows"
     gh issue list -R "$REPO" --label review-finding --state all --search "${pr} in:body" --limit 100 --json number,state,title,body 2>/dev/null \
       | jq -c '.[]' >> "$issues" 2>/dev/null || true
   done
   # Linkage: a filed issue whose body names the file and whose title shares >= 3 tokens with the finding (open preferred).
-  sort -u "$rows" | while IFS="$(printf '\t')" read -r _f _a _b _t; do
+  # Rows carry a leading source column (F = reviewer FINDING marker, N = NOTE_DISPOSITION record), stripped on output. An unlinked F row may
+  # have been filed under a reworded title, so it is `unknown` (never demotes MEDIUM CONFIRMED/LIKELY); an unlinked N row is a true `note`.
+  sort -u "$rows" | while IFS="$(printf '\t')" read -r _src _f _a _b _t; do
     [ -n "$_f" ] || continue
+    [ "$_a" != "-" ] || _a=""; [ "$_b" != "-" ] || _b=""
+    case "$_src" in N) _dflt=note ;; *) _dflt=unknown ;; esac
     _hit=$(jq -rs --arg f "$_f" --arg t "$_t" 'def toks: ascii_downcase | [scan("[a-z0-9]{3,}")] | unique;
       ($t | toks) as $a | [ .[] | select((.body // "") | contains($f))
         | select((((.title // "") | toks) as $b | [$a[] | select(. as $x | $b | index($x))] | length) >= 3)
@@ -2719,7 +2723,7 @@ prior_findings_tsv() {
     case "$_hit" in
       open*) printf '%s\t%s\t%s\t%s\tfiled\t%s\n' "$_f" "$_a" "$_b" "$_t" "${_hit#*	}" ;;
       closed*) printf '%s\t%s\t%s\t%s\tfiled-closed\t%s\n' "$_f" "$_a" "$_b" "$_t" "${_hit#*	}" ;;
-      *) printf '%s\t%s\t%s\t%s\tnote\t\n' "$_f" "$_a" "$_b" "$_t" ;;
+      *) printf '%s\t%s\t%s\t%s\t%s\t\n' "$_f" "$_a" "$_b" "$_t" "$_dflt" ;;
     esac
   done
   rm -f "$rows" "$issues"

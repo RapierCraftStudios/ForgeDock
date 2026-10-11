@@ -166,6 +166,7 @@ DMAP=$(mktemp "${TMPDIR:-/tmp}/classify-finding-dmap.XXXXXX")
   printf 'src/api.py\t10\t20\tmissing retry on timeout handler\tfiled\t123\n'
   printf 'src/closed.py\t5\t15\tstale cache entry never evicted\tfiled-closed\t77\n'
   printf 'src/notes.py\t\t\tduplicated predicate counted twice\tnote\t\n'
+  printf 'src/unlinked.py\t30\t40\tunvalidated redirect target in login handler\tunknown\t\n'
 } > "$PRIOR"
 PF=(--prior-findings "$PRIOR")
 M=(--severity MEDIUM --confidence CONFIRMED)
@@ -185,6 +186,12 @@ expect_out "NOTE reflag-note" "same line, same topic (one shared token) still NO
 expect ISSUE "non-overlapping same-file finding is classified normally" -- "${M[@]}" "${PF[@]}" --file src/sync.sh --line-start 200 --line-end 210 --title "missing bounds check"
 expect ISSUE "two shared tokens are not enough"       -- "${M[@]}" "${PF[@]}" --file src/sync.sh --line-start 200 --title "lock released late"
 expect ISSUE "same title on a different file is classified normally" -- "${M[@]}" "${PF[@]}" --file src/other.sh --line-start 45 --title "lock released before write completes"
+expect ISSUE "unknown row does not demote MEDIUM CONFIRMED (unlinked prior)" -- "${M[@]}" "${PF[@]}" --file src/unlinked.py --line-start 300 --title "Unvalidated redirect target in the login handler"
+expect ISSUE "unknown row does not demote MEDIUM CONFIRMED by line IoU" -- "${M[@]}" "${PF[@]}" --file src/unlinked.py --line-start 32 --line-end 40 --title "redirect target unchecked"
+expect ISSUE "unknown row does not demote MEDIUM LIKELY" -- --severity MEDIUM --confidence LIKELY "${PF[@]}" --file src/unlinked.py --line-start 300 --title "Unvalidated redirect target in the login handler"
+expect_out "NOTE reflag-note" "unknown row still demotes LOW" -- --severity LOW --confidence CONFIRMED "${PF[@]}" --file src/unlinked.py --line-start 300 --title "Unvalidated redirect target in the login handler"
+expect_out "NOTE reflag-note" "unknown row still demotes MEDIUM POSSIBLE" -- --severity MEDIUM --confidence POSSIBLE "${PF[@]}" --file src/unlinked.py --line-start 300 --title "Unvalidated redirect target in the login handler"
+expect ISSUE "HIGH unaffected by unknown row" -- --severity HIGH --confidence CONFIRMED "${PF[@]}" --file src/unlinked.py --line-start 300 --title "Unvalidated redirect target in the login handler"
 expect_out "NOTE reflag-filed #123" "re-flag of an already-filed issue links it" -- "${M[@]}" "${PF[@]}" --file src/api.py --line-start 12 --line-end 18 --title "retry x"
 expect_out "NOTE reflag-filed #123" "filed re-flag by title tokens" -- "${M[@]}" "${PF[@]}" --file src/api.py --line-start 99 --title "Missing retry on timeout"
 expect ISSUE "filed-closed row is ignored (regression not swallowed)" -- "${M[@]}" "${PF[@]}" --file src/closed.py --line-start 5 --line-end 15 --title "stale cache entry never evicted"
