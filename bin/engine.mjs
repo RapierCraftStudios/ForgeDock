@@ -4,7 +4,7 @@
  * GitHub state (phase.detectOutcome). All effects are injected → fully testable.
  */
 import { fileURLToPath } from "node:url";
-import { createHash } from "node:crypto";
+import { createHash, scryptSync } from "node:crypto";
 import { hostname as osHostname, homedir } from "node:os";
 import { appendEvent, readLog, deriveState, rewriteLog } from "./engine/runlog.mjs";
 import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postCycleMarker, nextCycleNumber } from "./engine/phases.mjs";
@@ -39,15 +39,16 @@ export const DEFAULT_SESSION_LIMIT_WAIT_MS = 30 * 60 * 1000;
 
 /**
  * forge#3791: non-secret identity of the backend/account a usage-limit pause belongs to.
- * Truncated sha256 over the resolved backend, the Claude config dir, and a hash of the API key
- * (when set). The raw key and path are never emitted.
+ * Truncated sha256 over the resolved backend, the Claude config dir, and a scrypt fingerprint of the
+ * API key (when set; a password KDF, not a bare hash, so the secret is never hashed cheaply). The raw key and path are never emitted.
  * @param {{backend?: string, env?: object}} [p]
  * @returns {string} 16 hex chars
  */
 export function backendIdentity({ backend, env = process.env } = {}) {
   const sha = (s) => createHash("sha256").update(String(s)).digest("hex");
   const cfg = env.CLAUDE_CONFIG_DIR || `${homedir()}/.claude`;
-  const key = env.ANTHROPIC_API_KEY ? sha(env.ANTHROPIC_API_KEY) : "";
+  const key = env.ANTHROPIC_API_KEY
+    ? scryptSync(String(env.ANTHROPIC_API_KEY), "forgedock-backend-identity", 16).toString("hex") : "";
   return sha(JSON.stringify([backend ?? "auto", cfg, key])).slice(0, 16);
 }
 
