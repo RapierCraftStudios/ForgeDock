@@ -99,10 +99,16 @@ function isTrustedComment(c) {
  * Used for markers that drive a state-changing branch (size-gate routing).
  */
 async function trustedCommentBodies(issue, io) {
+  const items = await fetchCommentItems(issue, io);
+  return items.filter(isTrustedComment).map((c) => (typeof c.body === "string" ? c.body : ""));
+}
+
+/** Comments with author fields (one object per comment, chronological), or `[]` on any fetch/parse failure. */
+async function fetchCommentItems(issue, io) {
   let out;
   try {
     out = await io.gh(["api", "--paginate", `repos/{owner}/{repo}/issues/${issue}/comments`,
-      "--jq", ".[] | {body, author_association, user: {login: .user.login, type: .user.type}} | @json"]);
+      "--jq", ".[] | {body, created_at, author_association, user: {login: .user.login, type: .user.type}} | @json"]);
   } catch { return []; }
   let items = null;
   try {
@@ -113,7 +119,26 @@ async function trustedCommentBodies(issue, io) {
     try { items = String(out || "").split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l)); }
     catch { return []; }
   }
-  return items.filter(isTrustedComment).map((c) => (typeof c.body === "string" ? c.body : ""));
+  return items.filter((c) => c && typeof c === "object");
+}
+
+/**
+ * forge#3556 (SEC-1/SEC-2): index-preserving trusted view of the issue's comments. `bodies[i]` is the
+ * body of the i-th comment when its author is trusted, else "" — so an untrusted comment can never
+ * carry a marker, while positions still order the surviving ones (newest wins). `times[i]` is its
+ * created_at (ms epoch, NaN when unknown). Fail closed: any fetch failure yields empty arrays.
+ */
+async function trustedMarkerComments(issue, io) {
+  const items = await fetchCommentItems(issue, io);
+  return {
+    bodies: items.map((c) => (isTrustedComment(c) && typeof c.body === "string" ? c.body : "")),
+    times: items.map((c) => Date.parse(c.created_at)),
+  };
+}
+
+/** Leading-marker test: the marker must open the comment (after whitespace), never merely be quoted mid-body. */
+function opens(body, marker) {
+  return typeof body === "string" && body.trimStart().startsWith(`<!-- ${marker}`);
 }
 
 /** build.md B5.5 Step 2: a SIZE_OVERRIDE needs a non-empty justification — the first non-blank, non-HTML-comment line after the marker line. */
@@ -198,9 +223,9 @@ async function commitsAhead(lane, branch, io) {
  * alone for a "structured" parse would be inconsistent and would not close
  * any real gap: the actual trust boundary for issue-comment content is
  * *authorship* (can an untrusted actor post a comment on this issue at all),
- * not *format*. Only the size-gate markers (DIFF_SIZE / SIZE_OVERRIDE) are
- * author-filtered (trustedCommentBodies); nothing else here validates authorship for any
- * marker today, so an actor able to post an arbitrary comment could just as
+ * not *format*. The size-gate markers (DIFF_SIZE / SIZE_OVERRIDE), the acceptance-gate
+ * markers and FORGE:PHASE:COMPLETE are author-filtered (trustedCommentBodies /
+ * trustedMarkerComments); the remaining markers validate no authorship today, so an actor able to post an arbitrary comment could just as
  * easily post whatever "structured" shape a parser would accept — format
  * hardening alone buys nothing here. If comment-spoofing is ever a concern
  * worth addressing, the fix is an author allowlist applied uniformly to all
@@ -220,31 +245,60 @@ function has(blob, marker) { return blob.includes(marker); }
  *   none                                                -> "none" (no-marker crash path / legacy)
  * `index` is that comment's position (-1 for "none").
  */
-const GATE_PASS_MARKER = "FORGE:ACCEPTANCE_GATE:PASSED";
-const GATE_BLOCK_MARKERS = ["FORGE:ACCEPTANCE_GATE:FAILED", "FORGE:ACCEPTANCE_GATE:BLOCKED", "FORGE:BUILD_BLOCKED"];
+const GATE_PASS_MARKER = "<!-- FORGE:ACCEPTANCE_GATE:PASSED -->";
+const GATE_BLOCK_MARKERS = ["<!-- FORGE:ACCEPTANCE_GATE:FAILED -->", "<!-- FORGE:ACCEPTANCE_GATE:BLOCKED -->"];
+/**
+ * `comments` MUST be the trusted, index-preserving bodies (trustedMarkerComments().bodies). A gate
+ * comment opens with `<!-- FORGE:ACCEPTANCE_GATE` and carries its verdict marker as the closing line
+ * (build.md B6.5); a build-blocked comment opens with `<!-- FORGE:BUILD_BLOCKED`. A comment that only
+ * quotes a marker, or comes from an untrusted author, never decides the gate.
+ */
 function latestGateState(comments) {
   for (let i = comments.length - 1; i >= 0; i--) {
     const c = comments[i];
-    if (has(c, GATE_PASS_MARKER)) return { state: "pass", index: i };
-    if (GATE_BLOCK_MARKERS.some((m) => has(c, m))) return { state: "blocked", index: i };
+    if (opens(c, "FORGE:ACCEPTANCE_GATE")) {
+      if (has(c, GATE_PASS_MARKER)) return { state: "pass", index: i };
+      if (GATE_BLOCK_MARKERS.some((m) => has(c, m))) return { state: "blocked", index: i };
+    }
+    if (opens(c, "FORGE:BUILD_BLOCKED")) return { state: "blocked", index: i };
   }
   return { state: "none", index: -1 };
 }
 
-/** Index of the newest FORGE:DIFF_SIZE comment whose `result:` is OVER, or -1 (forge#3545). */
+/** Index of the newest FORGE:DIFF_SIZE comment whose `result:` is OVER, or -1 (forge#3545). Trusted bodies only. */
 function latestDiffSizeOverIndex(comments) {
   for (let i = comments.length - 1; i >= 0; i--) {
-    if (!has(comments[i], "FORGE:DIFF_SIZE")) continue;
+    if (!opens(comments[i], "FORGE:DIFF_SIZE")) continue;
     // newest DIFF_SIZE comment decides (build.md B5.5 edits it in place; OVERRIDDEN supersedes OVER)
     return /^result:\s*OVER\s*$/m.test(comments[i]) ? i : -1;
   }
   return -1;
 }
 
-/** Index of the newest FORGE:PHASE:COMPLETE comment, or -1 (forge#3545). */
-function latestPhaseCompleteIndex(comments) {
-  for (let i = comments.length - 1; i >= 0; i--) if (has(comments[i], "FORGE:PHASE:COMPLETE")) return i;
+/**
+ * Index of the newest TRUSTED FORGE:PHASE:COMPLETE comment created after the PR merged, or -1
+ * (forge#3545, forge#3556 SEC-2). A marker from before the merge (an earlier phase's) or with no
+ * known merge time never satisfies close. `trusted` is trustedMarkerComments(); `mergedAtMs` the
+ * current PR's merge time (NaN/absent = no merge evidence = -1).
+ */
+function latestPhaseCompleteIndex(trusted, mergedAtMs) {
+  if (!Number.isFinite(mergedAtMs)) return -1;
+  for (let i = trusted.bodies.length - 1; i >= 0; i--) {
+    if (opens(trusted.bodies[i], "FORGE:PHASE:COMPLETE") && trusted.times[i] > mergedAtMs) return i;
+  }
   return -1;
+}
+
+/** Merge time (ms epoch) of the current PR (state.pr, else the merged PR for state.branch into the lane), or NaN. */
+async function currentPrMergedAt(state, io) {
+  try {
+    if (state.pr != null) {
+      const j = JSON.parse((await io.gh(["pr", "view", String(state.pr), "--json", "mergedAt,state,baseRefName"])) || "{}");
+      return j && j.mergedAt && (!state.lane || j.baseRefName === state.lane) ? Date.parse(j.mergedAt) : NaN;
+    }
+    const m = await mergedPrForBranch(state.branch, state.lane, io);
+    return m ? m.mergedAt : NaN;
+  } catch { return NaN; }
 }
 
 /**
@@ -507,7 +561,8 @@ export const PHASES = [
       const { blob, comments } = await issueMarkers(state.issue, io);
       const branch = resolveBranch(state, comments);
       // forge#3545: COMPLETE precedes the B6.5 acceptance gate — never skip build while the newest gate marker blocks.
-      if (latestGateState(comments).state === "blocked") return { satisfied: false };
+      // forge#3556 SEC-1: the gate is decided from trusted-author, leading-anchored comments only.
+      if (latestGateState((await trustedMarkerComments(state.issue, io)).bodies).state === "blocked") return { satisfied: false };
       if (branch && has(blob, PHASE_MARKERS.build.completionMarker) && (await commitsAhead(state.lane, branch, io)) > 0) {
         return { satisfied: true, outputs: { branch } };
       }
@@ -533,11 +588,12 @@ export const PHASES = [
       // non-retryable guard below on the very first attempt.
       const ahead = branch ? await commitsAhead(state.lane, branch, io) : -1; // … AND real commits
       // forge#3545: consult the phase's own declared state (newest wins, by comment order).
-      const gate = latestGateState(comments);
+      const trustedBodies = (await trustedMarkerComments(state.issue, io)).bodies;
+      const gate = latestGateState(trustedBodies);
       // BUILD_RESULT NEEDS_DECOMPOSE (build.md B5.5): no BUILDER:COMPLETE, newest DIFF_SIZE says OVER,
       // and no newer blocking marker (the decompose-loop-guard exit posts BUILD_BLOCKED after DIFF_SIZE).
       if (!complete) {
-        const overIdx = latestDiffSizeOverIndex(comments);
+        const overIdx = latestDiffSizeOverIndex(trustedBodies);
         // Routing still goes through the trusted-author size-gate check (Split Proposal, justified override, #3547).
         if (overIdx >= 0 && overIdx > gate.index && mayRouteToDecompose(comments) &&
             sizeGateRoutesToDecompose(await trustedCommentBodies(state.issue, io)))
@@ -755,8 +811,9 @@ export const PHASES = [
       if (snap.state === "CLOSED" || snap.labels.includes(PHASE_MARKERS.close.completionLabel))
         return { satisfied: true };
       // forge#3545: a PHASE_COMPLETE close already did its work; re-running it is a no-op.
-      const { comments } = await issueMarkers(state.issue, io);
-      return latestPhaseCompleteIndex(comments) >= 0 ? { satisfied: true } : { satisfied: false };
+      // forge#3556 SEC-2: only a trusted marker newer than this PR's merge counts.
+      const trusted = await trustedMarkerComments(state.issue, io);
+      return latestPhaseCompleteIndex(trusted, await currentPrMergedAt(state, io)) >= 0 ? { satisfied: true } : { satisfied: false };
     },
     async detectOutcome(state, io) {
       const snap = await issueSnapshot(state.issue, io);
@@ -779,8 +836,8 @@ export const PHASES = [
       // forge#3545: close.md C2 PHASE_COMPLETE — PR merged, issue deliberately left OPEN with
       // FORGE:PHASE:COMPLETE because later phases remain. A committed terminal state, not a crash:
       // retrying is a guaranteed no-op. Merged/CLOSED checks above stay first and unchanged.
-      const { comments } = await issueMarkers(state.issue, io);
-      if (latestPhaseCompleteIndex(comments) >= 0)
+      const trusted = await trustedMarkerComments(state.issue, io);
+      if (latestPhaseCompleteIndex(trusted, await currentPrMergedAt(state, io)) >= 0)
         return { status: "committed", terminalReason: "phase-complete", outputs: {} };
       return { status: "failed", detail: "issue not closed" };
     },
@@ -832,7 +889,7 @@ async function mergedPrForBranch(branch, lane, io) {
     if (!Array.isArray(a)) return null;
     const hit = a.find((p) => p && typeof p === "object" && Number.isInteger(p.number)
       && (!!p.mergedAt || p.state === "MERGED") && p.baseRefName === lane);
-    return hit ? { number: hit.number } : null;
+    return hit ? { number: hit.number, mergedAt: hit.mergedAt ? Date.parse(hit.mergedAt) : NaN } : null;
   } catch { return null; }
 }
 async function prStatusFor(state, io) {

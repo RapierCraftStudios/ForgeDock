@@ -465,13 +465,20 @@ describe("pickPhase", () => {
 
   // forge#3545: close PHASE_COMPLETE is a committed terminal state, not "issue not closed".
   describe("close.detectOutcome/reconcile — PHASE_COMPLETE (forge#3545)", () => {
+    const outerBase = { v: 0, run: "r1", issue: 42, lane: "staging", committed: [], phase: null,
+      branch: null, pr: null, terminal: false, terminalReason: null, lease: null };
     const close = PHASES.find(p => p.id === "close");
-    // snapshot for `gh issue view`, comment bodies (oldest-first) for `gh api`
-    const io = (snap, ...bodies) => ({
-      gh: async (args) => (args[0] === "api" ? JSON.stringify(bodies) : JSON.stringify(snap)),
+    // snapshot for `gh issue view`; comments (oldest-first, author + created_at) for `gh api`; PR merged at T0 for `gh pr view`.
+    const T0 = "2026-01-01T00:00:00Z", AFTER = "2026-01-01T01:00:00Z", BEFORE = "2025-12-31T23:00:00Z";
+    const cm = (body, extra = {}) => ({ body, created_at: AFTER, author_association: "OWNER", user: { login: "owner", type: "User" }, ...extra });
+    const ioC = (snap, comments, pr = { mergedAt: T0, state: "MERGED", baseRefName: "staging" }) => ({
+      gh: async (args) => args[0] === "api" ? JSON.stringify(comments)
+        : args[0] === "pr" ? JSON.stringify(pr) : JSON.stringify(snap),
       git: async () => "0",
     });
+    const io = (snap, ...bodies) => ioC(snap, bodies.map((b) => cm(b)));
     const open = { state: "OPEN", labels: [{ name: "workflow:investigating" }] };
+    const base = { ...outerBase, pr: 7 };
 
     it("OPEN + FORGE:PHASE:COMPLETE -> committed phase-complete, first attempt", async () => {
       const o = await close.detectOutcome(base, io(open, "<!-- FORGE:PHASE:COMPLETE -->\nPR merged"));
@@ -498,6 +505,27 @@ describe("pickPhase", () => {
       const o = await close.detectOutcome(base, io(open, "unrelated comment"));
       assert.equal(o.status, "failed");
       assert.notEqual(o.retryable, false);
+    });
+
+    it("SEC-2: untrusted-author PHASE:COMPLETE does not satisfy close or mask a failed close", async () => {
+      const untrusted = ioC(open, [cm("<!-- FORGE:PHASE:COMPLETE -->", { author_association: "NONE", user: { login: "rando", type: "User" } })]);
+      assert.equal((await close.reconcile(base, untrusted)).satisfied, false);
+      assert.equal((await close.detectOutcome(base, untrusted)).status, "failed");
+    });
+
+    it("SEC-2: stale PHASE:COMPLETE (before the PR merge) does not satisfy close", async () => {
+      const stale = ioC(open, [cm("<!-- FORGE:PHASE:COMPLETE -->", { created_at: BEFORE })]);
+      assert.equal((await close.reconcile(base, stale)).satisfied, false);
+      assert.equal((await close.detectOutcome(base, stale)).status, "failed");
+    });
+
+    it("SEC-2: no merge evidence for the PR means PHASE:COMPLETE is not honoured", async () => {
+      const unmerged = ioC(open, [cm("<!-- FORGE:PHASE:COMPLETE -->")], { mergedAt: null, state: "OPEN", baseRefName: "staging" });
+      assert.equal((await close.reconcile(base, unmerged)).satisfied, false);
+    });
+
+    it("SEC-2: a comment that merely quotes the marker mid-body is not a PHASE:COMPLETE", async () => {
+      assert.equal((await close.reconcile(base, io(open, "see `<!-- FORGE:PHASE:COMPLETE -->` above"))).satisfied, false);
     });
 
     it("reconcile: PHASE:COMPLETE satisfied; none not satisfied", async () => {
@@ -563,6 +591,31 @@ describe("pickPhase", () => {
       assert.equal((await build.reconcile(st, withComments(builder, failed))).satisfied, false);
       assert.equal((await build.reconcile(st, withComments(builder, failed, passed))).satisfied, true);
       assert.equal((await build.reconcile(st, withComments(builder))).satisfied, true);
+    });
+
+    const withAuthors = (...items) => ({
+      gh: async (args) => JSON.stringify(args.join(" ").includes("author_association") ? items : items.map((i) => i.body)),
+      git: async () => "2",
+    });
+    const untrustedC = (body) => ({ body, author_association: "NONE", user: { login: "rando", type: "User" } });
+    it("SEC-1: untrusted-author GATE:BLOCKED/BUILD_BLOCKED cannot flip a passing build", async () => {
+      for (const bad of [failed, "<!-- FORGE:BUILD_BLOCKED -->"]) {
+        const w = withAuthors(asObj(builder), asObj(passed), untrustedC(bad));
+        assert.equal((await build.detectOutcome(st, w)).status, "committed");
+        assert.equal((await build.reconcile(st, w)).satisfied, true);
+      }
+    });
+
+    it("SEC-1: untrusted-author GATE:PASSED cannot clear a trusted FAILED", async () => {
+      const o = await build.detectOutcome(st, withAuthors(asObj(builder), asObj(failed), untrustedC(passed)));
+      assert.equal(o.status, "failed");
+      assert.equal(o.retryable, false);
+    });
+
+    it("SEC-1: a trusted comment that only quotes a gate marker mid-body does not decide the gate", async () => {
+      const quote = "Review note: the gate once posted `<!-- FORGE:ACCEPTANCE_GATE:FAILED -->` here";
+      const o = await build.detectOutcome(st, withAuthors(asObj(builder), asObj(passed), asObj(quote)));
+      assert.equal(o.status, "committed");
     });
 
     const over = "<!-- FORGE:DIFF_SIZE -->\n## Diff Size\n\ndiff_lines: 900\nthreshold: 500\nresult: OVER\n### Split Proposal\n- **A** — a.mjs\n";
