@@ -12,7 +12,7 @@
 #       lease.by that is not the dispatching holder and not a provably dead same-host engine pid. An until past
 #       the TTL cap is not a lease an engine could have written (the issue body is author-editable), so it is dead.
 #   (b) review: the newest trusted FORGE:REVIEW_ROUTE comment is younger than REVIEW_PENDING_MAX_S and no trusted
-#       FORGE:REVIEW-AGENT:* comment carries a Reviewed-SHA that prefix-matches the routed sha (either direction).
+#       FORGE:REVIEW-AGENT:* or FORGE:REVIEW-CARRIED comment carries a Reviewed-SHA that prefix-matches the routed sha (either direction).
 #   A deferral is bounded: after MAX_DEFERRALS trusted FORGE:REMEDIATION_DEFERRED records for this PR the answer is
 #   EXHAUSTED (a human is needed), so a flapping lease or a dead review can never park a PR forever.
 #
@@ -63,13 +63,13 @@ if [ -n "$STATE_JSON" ]; then
   fi
 fi
 
-# (b) a routed review that is still inside its window and has produced no verdict for the routed sha.
+# (b) a routed review that is still inside its window and has produced no verdict (FORGE:REVIEW-AGENT or, for BASE_SYNC_ONLY, FORGE:REVIEW-CARRIED) for the routed sha.
 ROUTE=$(printf '%s' "$PR_COMMENTS" | jq -rs "[.[][] | select($TRUST) | select((.body // \"\") | test(\"^<!-- FORGE:REVIEW_ROUTE mode=[^ ]+ spec=review-pr.md sha=[0-9a-f]{7,40} -->\")) | select((.body | test(\"mode=spec-evolution-blocked\")) | not)] | last | if . == null then \"\" else ((.body | capture(\"sha=(?<s>[0-9a-f]{7,40})\").s) + \" \" + ((.created_at // \"\") | fromdateiso8601? // 0 | tostring)) end" 2>/dev/null) \
   || err "review comments unparseable"
 ROUTE_SHA="${ROUTE%% *}"; ROUTE_AT="${ROUTE##* }"; REVIEW_PENDING=false
 if [ -n "$ROUTE_SHA" ]; then
   case "$ROUTE_AT" in ''|*[!0-9]*) ROUTE_AT=0 ;; esac
-  VERDICTS=$(printf '%s' "$PR_COMMENTS" | jq -rs --arg r "$ROUTE_SHA" "[.[][] | select($TRUST) | select((.body // \"\") | test(\"^<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->\")) | ((.body | capture(\"(^|\\\\n)Reviewed-SHA: (?<s>[0-9a-f]{7,40})\")? // {s: \"\"}).s) as \$s | select(\$s != \"\" and ((\$r | startswith(\$s)) or (\$s | startswith(\$r))))] | length" 2>/dev/null) || err "reviewer comments unreadable"
+  VERDICTS=$(printf '%s' "$PR_COMMENTS" | jq -rs --arg r "$ROUTE_SHA" "[.[][] | select($TRUST) | select((.body // \"\") | test(\"^<!-- FORGE:REVIEW-(AGENT:[a-z-]+|CARRIED) -->\")) | ((.body | capture(\"(^|\\\\n)Reviewed-SHA: (?<s>[0-9a-f]{7,40})\")? // {s: \"\"}).s) as \$s | select(\$s != \"\" and ((\$r | startswith(\$s)) or (\$s | startswith(\$r))))] | length" 2>/dev/null) || err "reviewer comments unreadable"
   [ "${VERDICTS:-0}" -eq 0 ] && [ "$ROUTE_AT" -gt 0 ] && [ $(( NOW_S - ROUTE_AT )) -lt "$REVIEW_PENDING_MAX_S" ] && REVIEW_PENDING=true
 fi
 
