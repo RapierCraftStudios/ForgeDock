@@ -5,6 +5,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -84,5 +85,27 @@ describe("forge#3684 remediate.md resume guard", () => {
     assert.match(spec, /for the remediation auto-land bar/);
     assert.match(spec, /RESUME_AT_M7=false\s+# BLOCKED/);
     assert.match(spec, /engine-parked/);
+  });
+});
+
+describe("forge#3738 resume approval filter executes against fixtures", () => {
+  const m = spec.match(/_JQ='([\s\S]*?)'\n/);
+  const HEAD = "a".repeat(40);
+  const run = (items) => {
+    const prog = m[1];
+    const out = spawnSync("jq", ["-s", "--arg", "head", HEAD, prog], { input: items.map((p) => JSON.stringify(p)).join("\n") });
+    return Number(String(out.stdout).trim());
+  };
+  const bot = (body, extra = {}) => ({ user: { type: "Bot" }, author_association: "CONTRIBUTOR", body, ...extra });
+  it("reviewer-agent comment with only a Reviewed-SHA line is not approval", () => {
+    assert.equal(run([[bot(`<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: ${HEAD}\n\nHIGH finding`)]]), 0);
+  });
+  it("APPROVED: body with Reviewed-SHA line at head is approval", () => {
+    assert.equal(run([[bot(`APPROVED: all good\nReviewed-SHA: ${HEAD}\n`)]]), 1);
+  });
+  it("APPROVED: commit <sha> prefix is approval; wrong sha or untrusted author is not", () => {
+    assert.equal(run([[bot(`APPROVED: commit ${HEAD.slice(0, 7)} ok`)]]), 1);
+    assert.equal(run([[bot("APPROVED: commit bbbbbbb ok")]]), 0);
+    assert.equal(run([[{ user: { type: "User" }, author_association: "NONE", body: `APPROVED: commit ${HEAD.slice(0, 7)}` }]]), 0);
   });
 });
