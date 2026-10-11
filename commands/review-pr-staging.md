@@ -204,10 +204,11 @@ else
 fi
 # Persist for later fences (each Bash call is a fresh shell). Remove a stale file from a previous run when nothing resolved.
 _SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"
-if [ -n "$PR_NUMBER" ]; then printf '%s\n' "$PR_NUMBER" > "$_SD/staging_pr_number"; else rm -f "$_SD/staging_pr_number"; fi
+FORGE_RUN_KEY="${FORGE_RUN_KEY:-${FORGE_RUN_ID:-${CLAUDE_CODE_SESSION_ID:-${CLAUDE_SESSION_ID:-${CODEX_THREAD_ID:-${OPENCODE_SESSION_ID:-$PPID}}}}}}"; FORGE_RUN_KEY=$(printf '%s' "$FORGE_RUN_KEY" | tr -c 'A-Za-z0-9_-' '_')
+if [ -n "$PR_NUMBER" ]; then printf '%s\n' "$PR_NUMBER" > "$_SD/staging_pr_number.${FORGE_RUN_KEY}"; else rm -f "$_SD/staging_pr_number.${FORGE_RUN_KEY}"; fi
 ```
 
-`$PR_NUMBER` is now set for all downstream phases that conditionally post gate comments to the PR. It is also persisted to `$_SD/staging_pr_number`, because every Bash call is a fresh shell. Every fence that consumes cross-fence state (`PR_NUMBER`, `ALL_PR_NUMBERS`, `GH_REPO`, branch names) begins with the `# FENCE_BOOTSTRAP` stub, which sources `scripts/lib/fence-bootstrap.sh` (via `scripts/lib/forge-resolve.sh`) to re-derive it and exits 1 when the helper is unresolvable; `scripts/review-pr-staging-scope.test.sh` fails if a consuming fence omits it. The Phase 6.5 gate result and the Phase 6.75 launched-agent list are persisted to `$_SD` by their producers and reloaded (validated) by their consumers.
+`$PR_NUMBER` is now set for all downstream phases that conditionally post gate comments to the PR. It is also persisted to the run-keyed pointer `$_SD/staging_pr_number.${FORGE_RUN_KEY}`, because every Bash call is a fresh shell and concurrent runs share `$_SD`. `FORGE_RUN_KEY` is a pre-exported `FORGE_RUN_KEY`, else `FORGE_RUN_ID` or the first available session id (Claude Code, Codex, OpenCode), else `$PPID` (best-effort, may not be stable across calls); `fence-bootstrap.sh` derives it identically and never falls back to an unkeyed pointer. Every fence that consumes cross-fence state (`PR_NUMBER`, `ALL_PR_NUMBERS`, `GH_REPO`, branch names) begins with the `# FENCE_BOOTSTRAP` stub, which sources `scripts/lib/fence-bootstrap.sh` (via `scripts/lib/forge-resolve.sh`) to re-derive it and exits 1 when the helper is unresolvable; `scripts/review-pr-staging-scope.test.sh` fails if a consuming fence omits it. The Phase 6.5 gate result and the Phase 6.75 launched-agent list are persisted to `$_SD` by their producers and reloaded (validated) by their consumers.
 
 ---
 
@@ -1185,7 +1186,7 @@ fi
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
 . "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 # An empty PR_NUMBER would key every scratch file as "_notes.md" / "_scope.env" and the disposition record could not be posted: stop and report it.
-[ -n "${PR_NUMBER:-}" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: PR_NUMBER unavailable (Phase -1 did not persist staging_pr_number); FORGE:NOTE_DISPOSITION cannot be recorded"; exit 0; }
+[ -n "${PR_NUMBER:-}" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: PR_NUMBER unavailable (Phase -1 did not persist the run-keyed staging_pr_number pointer); FORGE:NOTE_DISPOSITION cannot be recorded"; exit 0; }
 NOTE_LIST_FILE="$_SD/${PR_NUMBER}_notes.md"; : > "$NOTE_LIST_FILE"
 NOTES_LISTED=0; NOTES_DROPPED=0; FINDINGS_FILED=0; OUT_OF_SCOPE=0
 # 0B.1 results were written to a scope file by the Phase 0B.1 block; a missing or unreadable file means SCOPE_MODE=full (no demotion, fail open), announced rather than silent.
