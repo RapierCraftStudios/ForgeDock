@@ -99,6 +99,8 @@ async function issueMarkers(issue, io) {
 const REMEDIATION_HELD_MARKER = "FORGE:REMEDIATION_HELD";
 /** Non-terminal deferral record (remediate.md Phase M0 liveness step): a live earlier run holds the lease. Never a COMPLETE/trail marker. */
 const REMEDIATION_DEFERRED_MARKER = "FORGE:REMEDIATION_DEFERRED";
+/** Per-dispatch record the engine posts on every remediate dispatch (forge#3807): scopes a DEFERRED record to its own dispatch. Never a COMPLETE/trail marker. */
+const REMEDIATION_DISPATCH_MARKER = "FORGE:REMEDIATION_DISPATCH";
 /** Lease holder ids the engine mints (`cli_<host>_<pid>`) are passed to remediate only when they match this shape (same as remediate-liveness.sh). */
 const LEASE_HOLDER_RE = /^[A-Za-z0-9._-]{1,128}$/;
 const reEscape = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -854,7 +856,17 @@ export const PHASES = [
       // Legacy handoff with no kind (needs-human label fallback, or no REVIEW_RESULT): there
       // is nothing to bind, so dispatch as before. remediate.md M0 then applies its default
       // single-attempt guard. A present-but-unknown kind is never dispatched.
-      if (kind === null) return legacyArgs();
+      // forge#3807: every dispatch (kind-bound or legacy) posts a dispatch marker AFTER the bound marker,
+      // never deduped, so detectOutcome can tell a stale deferral from an earlier dispatch from this one's.
+      const postDispatchMarker = async () => {
+        try {
+          await io.gh(["issue", "comment", String(state.issue), "--body",
+            `<!-- ${REMEDIATION_DISPATCH_MARKER}: pr=${pr} -->\nEngine dispatching remediation for PR #${pr}.`]);
+        } catch (e) {
+          throw new PhaseArgsError(`github-unavailable: could not post ${REMEDIATION_DISPATCH_MARKER}; remediation not invoked (${e?.message || e})`);
+        }
+      };
+      if (kind === null) { await postDispatchMarker(); return legacyArgs(); }
       if (!isRemediationKind(kind))
         throw new PhaseArgsError(`unknown remediation kind: ${JSON.stringify(kind)}`);
       const boundMarker = REMEDIATION_BOUND_MARKERS[kind];
@@ -870,6 +882,7 @@ export const PHASES = [
       } catch (e) {
         throw new PhaseArgsError(`github-unavailable: could not post FORGE:${boundMarker}; remediation not invoked (${e?.message || e})`);
       }
+      await postDispatchMarker();
       return legacyArgs();
     },
     entryCondition: (s) => s.committed.includes("review") && s.terminalReason === "needs-human",
@@ -935,12 +948,16 @@ export const PHASES = [
         // lease that expired since is the NEXT dispatch's business). Only a trusted, full-line record for THIS
         // PR counts, and only while it is newer than every `FORGE:REMEDIATION` trail comment: a later run
         // that proceeded posts one, which retires the deferral.
-        let deferredAt = -1, trailAt = -1, deferred = null;
+        // forge#3807: a deferral older than this dispatch's marker is stale (a later dispatch proceeded and
+        // crashed before posting a trail), so it is a failed attempt. No marker (older runs) => dispatchAt -1.
+        let deferredAt = -1, trailAt = -1, dispatchAt = -1, deferred = null;
+        const dispatchSentinel = `${REMEDIATION_DISPATCH_MARKER}: pr=${state.pr}`;
         scoped.forEach((b, i) => {
+          if (state.pr != null && hasSentinelLine(b, dispatchSentinel)) dispatchAt = i;
           if (startsWithHeader(b, REMEDIATION_DEFERRED_MARKER) && hasSentinelLine(b, REMEDIATION_DEFERRED_MARKER)) { deferredAt = i; deferred = b; }
           else if (startsWithHeader(b, PHASE_MARKERS.remediate.header)) trailAt = i;
         });
-        if (deferred !== null && deferredAt > trailAt && (state.pr == null || /^pr=(\d+)\s*$/m.exec(deferred)?.[1] === String(state.pr))) {
+        if (deferred !== null && deferredAt > trailAt && deferredAt > dispatchAt && (state.pr == null || /^pr=(\d+)\s*$/m.exec(deferred)?.[1] === String(state.pr))) {
           const kind = /^kind=(\w+)\s*$/m.exec(deferred)?.[1] ?? "lease";
           return { status: "blocked", reason: "deferred", retryable: false, detail: `deferred-live-run: ${kind}` };
         }

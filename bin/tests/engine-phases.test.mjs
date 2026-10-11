@@ -494,15 +494,16 @@ describe("pickPhase", () => {
         const { io, posted } = mk();
         const args = await remediate.buildArgs({ ...st, remediationKind: kind }, ctx, io);
         assert.equal(args[0], "7");
-        assert.equal(posted.length, 1);
+        assert.equal(posted.length, 2);
         assert.ok(posted[0].startsWith(`<!-- FORGE:${name}: pr=7 -->`));
+        assert.ok(posted[1].startsWith("<!-- FORGE:REMEDIATION_DISPATCH: pr=7 -->"));
       });
     }
 
     it("resume: an existing marker for this PR+kind is not re-posted", async () => {
       const { io, posted } = mk(JSON.stringify([trusted("<!-- FORGE:BASESYNC_REMEDIATION: pr=7 -->")]));
       await remediate.buildArgs({ ...st, remediationKind: "base-sync" }, ctx, io);
-      assert.equal(posted.length, 0);
+      assert.equal(posted.filter((b) => b.includes("BASESYNC_REMEDIATION")).length, 0);
     });
 
     it("untrusted author's (or quoted) marker does not suppress the post", async () => {
@@ -510,7 +511,7 @@ describe("pickPhase", () => {
       const quoted = trusted("see <!-- FORGE:BASESYNC_REMEDIATION: pr=7 --> above");
       const { io, posted } = mk(JSON.stringify([forged, quoted]));
       await remediate.buildArgs({ ...st, remediationKind: "base-sync" }, ctx, io);
-      assert.equal(posted.length, 1);
+      assert.equal(posted.filter((b) => b.includes("BASESYNC_REMEDIATION")).length, 1);
     });
 
     it("unknown kind throws PhaseArgsError and posts nothing", async () => {
@@ -524,11 +525,19 @@ describe("pickPhase", () => {
       await assert.rejects(remediate.buildArgs({ ...st, remediationKind: "ci-gate" }, ctx, io), { code: "PHASE_ARGS_INVALID" });
     });
 
-    it("no kind (legacy label-fallback handoff) dispatches without a marker", async () => {
+    it("no kind (legacy label-fallback handoff) posts only the per-dispatch marker (forge#3807)", async () => {
       const { io, posted } = mk();
       const args = await remediate.buildArgs({ ...st, remediationKind: null }, ctx, io);
       assert.equal(args[0], "7");
-      assert.equal(posted.length, 0);
+      assert.equal(posted.length, 1);
+      assert.ok(posted[0].startsWith("<!-- FORGE:REMEDIATION_DISPATCH: pr=7 -->"));
+    });
+
+    it("dispatch marker is posted every call, even when the bound marker already exists (forge#3807)", async () => {
+      const { io, posted } = mk(JSON.stringify([trusted("<!-- FORGE:BASESYNC_REMEDIATION: pr=7 -->")]));
+      await remediate.buildArgs({ ...st, remediationKind: "base-sync" }, ctx, io);
+      assert.equal(posted.length, 1);
+      assert.ok(posted[0].startsWith("<!-- FORGE:REMEDIATION_DISPATCH: pr=7 -->"));
     });
   });
 
@@ -536,6 +545,24 @@ describe("pickPhase", () => {
     const remediate = PHASES.find(p => p.id === "remediate");
     const ioWith = (...cs) => ({ gh: async () => jsonLines(cs.map((c) => (typeof c === "string" ? trusted(c) : c))), git: async () => "0" });
     const remediateBody = (outcome) => remediationBody(`${outcome} to staging`);
+
+    // forge#3807: a deferral is only current when it is newer than the newest dispatch marker.
+    const deferredC = "<!-- FORGE:REMEDIATION_DEFERRED -->\n## Remediation Deferred\n\npr=7\nkind=lease";
+    const dispatchC = "<!-- FORGE:REMEDIATION_DISPATCH: pr=7 -->\nEngine dispatching remediation for PR #7.";
+    const stDef = { ...base, issue: 42, pr: 7 };
+    it("stale DEFERRED then a later DISPATCH, no trail -> failed (forge#3807)", async () => {
+      const r = await remediate.detectOutcome(stDef, ioWith(dispatchC, deferredC, dispatchC));
+      assert.equal(r.status, "failed");
+    });
+    it("DISPATCH then DEFERRED -> blocked/deferred (forge#3807)", async () => {
+      const r = await remediate.detectOutcome(stDef, ioWith(dispatchC, deferredC));
+      assert.equal(r.status, "blocked");
+      assert.equal(r.reason, "deferred");
+    });
+    it("DEFERRED with no dispatch marker keeps legacy behaviour (forge#3807)", async () => {
+      const r = await remediate.detectOutcome(stDef, ioWith(deferredC));
+      assert.equal(r.reason, "deferred");
+    });
 
     // forge#3685: held-resume record is non-terminal (no COMPLETE) and must read as awaiting-merge, not a failed phase.
     const heldIo = (merged, ...cs) => ({
