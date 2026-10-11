@@ -96,9 +96,13 @@ for _s in "$SPEC" "$SPEC_MAIN"; do
   if grep -qE 'BLOCKED.*classifier unavailable' "$_s" && ! grep -qF 'echo script || echo manual' "$_s" && ! grep -qF 'classifier=manual' "$_s" && ! grep -qF 'classifier-unavailable' "$_s"; then ok; else bad "$(basename "$_s") must fail closed with BLOCKED classifier unavailable and have no manual fallback"; fi
 done
 # (8) fresh-shell reload (forge#3654): the FENCE_BOOTSTRAP lines must reload PR_NUMBER / ALL_PR_NUMBERS from the scratchpad, stay empty (with a warning) when nothing was persisted, and reject a tampered number
-awk '/^[^ `#].*   # FENCE_BOOTSTRAP/ && !seen[$0]++' "$SPEC" > "$TMP/boot.sh"
-[ "$(wc -l < "$TMP/boot.sh")" -eq 8 ] && ok || bad "FENCE_BOOTSTRAP block expected 8 distinct lines (got $(wc -l < "$TMP/boot.sh"))"
-[ "$(grep -c '^# Fence bootstrap' "$SPEC")" -ge 3 ] && ok || bad "bootstrap must be carried by 0B.1 and both 7B.5 fences"
+# (forge#3778) the spec carries a byte-identical stub per fence; the body lives in scripts/lib/fence-bootstrap.sh, which is SOURCED
+# in a fresh shell (the stub's locator + source line is executed for real, so the stub itself is covered too).
+[ "$(grep '# FENCE_BOOTSTRAP$' "$SPEC" | sort -u | wc -l | tr -d ' ')" -eq 1 ] && ok || bad "FENCE_BOOTSTRAP stubs must be byte-identical"
+[ "$(grep -c '# FENCE_BOOTSTRAP$' "$SPEC")" -ge 3 ] && ok || bad "bootstrap must be carried by 0B.1 and both 7B.5 fences"
+grep '^type forge_resolve >/dev/null' "$SPEC" | sed 1q > "$TMP/boot.sh"
+grep '# FENCE_BOOTSTRAP$' "$SPEC" | sed 1q >> "$TMP/boot.sh"
+[ "$(wc -l < "$TMP/boot.sh")" -eq 2 ] && ok || bad "bootstrap stub (locator + source line) not found"
 # forge#3681: EVERY bash fence after Phase 0B that reads cross-fence state must carry the bootstrap (a fresh Bash call loses it)
 UNCOVERED=$(awk '
   /^```bash/ { infence=1; body=""; start=NR; next }
@@ -123,7 +127,7 @@ mkdir -p "$TMP/sd9/empty" "$TMP/sd9/full" "$TMP/bin9"
 printf '#!/bin/sh\necho stub-value\n' > "$TMP/bin9/yq"; printf '#!/bin/sh\nexit 0\n' > "$TMP/bin9/gh"; chmod +x "$TMP/bin9/yq" "$TMP/bin9/gh"
 : > "$TMP/sd9/empty/42_launched_review_agents"
 printf 'security\n' > "$TMP/sd9/full/42_launched_review_agents"
-run675() { ( unset LAUNCHED_REVIEW_AGENTS REVIEW_SHA_FULL; export PATH="$TMP/bin9:$PATH" FORGE_SCRATCHPAD="$1" HOME="$TMP/nohome"; [ -n "$2" ] && export PR_NUMBER="$2"; bash "$TMP/f675.sh" 2>&1; echo "rc=$?" ); }
+run675() { ( unset LAUNCHED_REVIEW_AGENTS REVIEW_SHA_FULL; export PATH="$TMP/bin9:$PATH" FORGE_SCRATCHPAD="$1" HOME="$TMP/nohome" FORGEDOCK_HOME="$ROOT"; [ -n "$2" ] && export PR_NUMBER="$2"; bash "$TMP/f675.sh" 2>&1; echo "rc=$?" ); }
 for _case in "$TMP/sd9/empty|42" "$TMP/sd9/none|42" "$TMP/sd9/full|"; do
   OUT9=$(run675 "${_case%%|*}" "${_case##*|}")
   case "$OUT9" in *"REVIEW DELIVERY FAILURE: launched-agent list is empty or unreadable"*"rc=1"*) ok ;; *) bad "6.75 must exit 1 for case '$_case' (got '$OUT9')" ;; esac
@@ -147,7 +151,7 @@ printf '42\n' > "$TMP/sd8/full/staging_pr_number"; printf '7\n8\n' > "$TMP/sd8/f
 printf '42; rm -rf /\n' > "$TMP/sd8/bad/staging_pr_number"
 boot() { # scratch-dir -> prints "PR_NUMBER|ALL_PR_NUMBERS(joined)|GH_REPO" then any warning
   ( unset PR_NUMBER ALL_PR_NUMBERS GH_REPO DEFAULT_BRANCH STAGING_BRANCH; export PATH="$TMP/bin:$PATH" FORGE_SCRATCHPAD="$1"
-    . "$TMP/boot.sh" 2>&1; echo "PR=${PR_NUMBER:-}|ALL=$(echo ${ALL_PR_NUMBERS:-})|REPO=${GH_REPO:-}|BR=${STAGING_BRANCH:-}" ) 2>&1; }
+    export FORGEDOCK_HOME="$ROOT"; . "$TMP/boot.sh" 2>&1; echo "PR=${PR_NUMBER:-}|ALL=$(echo ${ALL_PR_NUMBERS:-})|REPO=${GH_REPO:-}|BR=${STAGING_BRANCH:-}" ) 2>&1; }
 OUT8=$(boot "$TMP/sd8/full")
 [ "$OUT8" = "PR=42|ALL=7 8|REPO=stub-value|BR=stub-value" ] && ok || bad "fresh shell must reload staging_pr_number and bundle-prs from the scratchpad (got '$OUT8')"
 OUT8=$(boot "$TMP/sd8/empty")
@@ -155,7 +159,7 @@ case "$OUT8" in *"WARNING: PR_NUMBER is empty"*"PR=|ALL=|"*) ok ;; *) bad "empty
 OUT8=$(boot "$TMP/sd8/bad")
 case "$OUT8" in *"PR=|"*) ok ;; *) bad "non-numeric staging_pr_number must be rejected (got '$OUT8')" ;; esac
 # an already-set PR_NUMBER wins over a stale scratch file
-OUT8=$( ( unset ALL_PR_NUMBERS; PR_NUMBER=99; export PATH="$TMP/bin:$PATH" FORGE_SCRATCHPAD="$TMP/sd8/full"; . "$TMP/boot.sh" >/dev/null 2>&1; echo "PR=$PR_NUMBER|ALL=${ALL_PR_NUMBERS:-}" ) )
+OUT8=$( ( unset ALL_PR_NUMBERS; PR_NUMBER=99; export PATH="$TMP/bin:$PATH" FORGE_SCRATCHPAD="$TMP/sd8/full" FORGEDOCK_HOME="$ROOT"; . "$TMP/boot.sh" >/dev/null 2>&1; echo "PR=$PR_NUMBER|ALL=${ALL_PR_NUMBERS:-}" ) )
 [ "$OUT8" = "PR=99|ALL=" ] && ok || bad "in-shell PR_NUMBER must not be overridden by the scratch file (got '$OUT8')"
 # producers persist, and 0B.1 / 7B.5 no longer use the unsubstituted-template repo token or a bare unquoted PR number in gh pr comment
 grep -q 'staging_pr_number' "$SPEC" && grep -q '_bundle-prs.txt' "$SPEC" && ok || bad "Phase -1 / 0A must persist staging_pr_number and _bundle-prs.txt"
@@ -278,7 +282,10 @@ OUT9=$(credit9 "$H"); N9=$(printf '%s' "${OUT9#*|}" | wc -w)
 grep -q 'review-delta.sh' "$SPEC" && grep -q 'REVIEW-CARRIED' "$SPEC" && ok || bad "spec must call review-delta.sh and accept the REVIEW-CARRIED record"
 if grep -qE 'merge-base --is-ancestor.*REVIEWED_SHA_STALE|diff_shape\(\)' "$SPEC"; then bad "spec must not carry a second copy of the resolver logic"; else ok; fi
 grep -qF 'printf '"'"'%s\n'"'"' "$_FILES" | sort -u | sed "s|^|$pr |" >> "$_PF"' "$SPEC" && grep -qF 'git diff-tree --no-commit-id --name-only -r --cc "$c"' "$SPEC" && ok || bad "CROSS_PR_FILES accumulation and --cc merge scoping must stay intact"
-[ "$(grep -c '# FENCE_BOOTSTRAP' "$SPEC" | head -1)" -ge 8 ] && ok || bad "FENCE_BOOTSTRAP lines must remain"
+[ "$(grep -c '# FENCE_BOOTSTRAP$' "$SPEC" | head -1)" -ge 3 ] && ok || bad "FENCE_BOOTSTRAP stubs must remain"
+# an unresolvable helper fails the fence closed (exit 1), never an unsourced bootstrap
+OUT8=$( ( unset FORGEDOCK_HOME; export HOME="$TMP/nohome"; cd "$TMP" && bash -c "$(cat "$TMP/boot.sh"); echo reached" ) 2>&1 )
+case "$OUT8" in *BLOCKED*) case "$OUT8" in *reached*) bad "unresolved bootstrap helper must stop the fence" ;; *) ok ;; esac ;; *) bad "unresolved bootstrap helper must print BLOCKED (got '$OUT8')" ;; esac
 # a stale-head PR must not credit its own merge commit (it contains the post-review commits): the DELTA branch only appends DELTA_COMMITS
 if awk '/^bundle_delta_credit\(\)/,/^\}/' "$SPEC" | grep -q 'mergeCommit'; then bad "the DELTA path must not credit the PR merge commit"; else ok; fi
 else echo "review-pr-staging-scope.test.sh: git missing, delta section skipped"; fi

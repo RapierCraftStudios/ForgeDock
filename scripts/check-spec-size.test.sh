@@ -86,6 +86,16 @@ run "stub replaces deleted block passes" 0
 reset; printf 'HELPER_SCRIPT=""\n' >> commands/other.md
 run "copy without removal still fails" 1
 
+# Shared-helper stubs (forge#3778): the sourced-helper stub shape carries none of the markers, so converting an inlined block to a stub
+# is a net reduction, while re-pasting the full block still fails.
+STUB_LOC='type forge_resolve >/dev/null 2>&1 || for _r in "${FORGEDOCK_HOME:-}"; do . "$_r/scripts/lib/forge-resolve.sh"; done'
+reset; printf '%s\n' "$STUB_LOC" '. "$(forge_resolve lib/fence-bootstrap.sh)" || exit 1   # FENCE_BOOTSTRAP' 'HELPER_SCRIPT=$(forge_resolve x.sh)' >> commands/other.md
+run "one-tag-per-stub design passes" 0
+reset; : > commands/donor.md; printf '%s\n' "$STUB_LOC" 'HELPER_SCRIPT=$(forge_resolve x.sh)' >> commands/other.md
+run "block converted to a stub passes" 0
+reset; printf '%s\n' "$STUB_LOC" 'HELPER_SCRIPT=""' >> commands/other.md
+run "stub plus a re-pasted resolver block fails" 1
+
 # Release PR skip (staging -> main only)
 reset; gen 100 >> commands/review-pr.md
 run "release PR skipped" 0 PR_HEAD_REF=staging PR_BASE_REF=main PR_SAME_REPO=true; has "skip reported" "SKIPPED"
