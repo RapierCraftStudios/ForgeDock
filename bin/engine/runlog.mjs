@@ -61,7 +61,9 @@ export function deriveState(events) {
   const s = { v: 0, run: null, issue: null, lane: "staging", committed: [],
               phase: null, branch: null, pr: null, terminal: false,
               terminalReason: null, lease: null, lastRateLimit: null,
-              remediationKind: null };
+              remediationKind: null, outcomeCode: null };
+  // forge#3833: outcome code of the LAST PHASE_COMMIT only (replaced, like lastCommitReason).
+  let lastCommitCode = null;
   // forge#3528: handoff reason of the LAST PHASE_COMMIT only (replaced, not sticky).
   let lastCommitReason = null;
   // forge#3754: phase of the LAST PHASE_COMMIT, so a reopen can tell a remediate-terminal run.
@@ -83,6 +85,8 @@ export function deriveState(events) {
         // remediate instead of defaulting to a "merged" close.
         if (e.terminalReason) s.terminalReason = e.terminalReason;
         lastCommitReason = e.terminalReason ?? null;
+        lastCommitCode = e.code ?? null;
+        if (e.code) s.outcomeCode = e.code;
         lastCommitPhase = e.phase ?? null;
         // forge#3530: the review's remediation kind must survive resume. A later review
         // commit replaces it; a committed remediate consumes it, so it is never reused.
@@ -92,6 +96,7 @@ export function deriveState(events) {
       case "RUN_TERMINAL":
         s.terminal = true; s.terminalReason = e.reason ?? "done"; s.v = e.seq;
         lastTerminalReason = s.terminalReason;
+        if (e.code) s.outcomeCode = e.code;
         break;
       // forge#3511: an explicit `run-issue --retry` reopens an engine-error
       // terminal. Bumping `v` makes the local state newer than the stale
@@ -100,7 +105,7 @@ export function deriveState(events) {
       // (needs-human / decomposed); restore the last commit's reason so the
       // retry re-enters remediate/decompose instead of close/build.
       case "RUN_REOPEN":
-        s.terminal = false; s.terminalReason = lastCommitReason; s.v = e.seq;
+        s.terminal = false; s.terminalReason = lastCommitReason; s.outcomeCode = lastCommitCode; s.v = e.seq;
         // forge#3754: a remediate that ended needs-human is re-run after a human clears the
         // label. Un-commit it (new array, no in-place mutation) so the forge#3506 resume guard
         // does not re-terminate and remediate's entryCondition re-selects it.
@@ -122,9 +127,9 @@ export function deriveState(events) {
       // lastCommitReason is reset so a stale handoff reason cannot leak into
       // the new cycle through a later RUN_REOPEN.
       case "RUN_NEXT_CYCLE":
-        s.terminal = false; s.terminalReason = null; s.committed = [];
+        s.terminal = false; s.terminalReason = null; s.committed = []; s.outcomeCode = null;
         s.branch = null; s.pr = null; s.remediationKind = null;
-        lastCommitReason = null; lastCommitPhase = null; lastTerminalReason = null; s.v = e.seq;
+        lastCommitReason = null; lastCommitPhase = null; lastCommitCode = null; lastTerminalReason = null; s.v = e.seq;
         s.lastRateLimit = null; // forge#3791
         break;
       // forge#2524: a session-limit pause is purely informational — it does

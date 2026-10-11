@@ -66,6 +66,7 @@ import { dirname, join, resolve } from "path";
 import { existsSync, readFileSync } from "fs";
 import { execFileSync } from "child_process";
 import { PHASE_MARKERS as PHASE_MARKER_REGISTRY } from "../../packages/protocol/src/phases.js";
+import { normalizeCode, codeForTerminalReason } from "../engine/outcome-codes.mjs";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -265,6 +266,8 @@ async function main() {
     appendEvent(runLogDir, issueNumber, {
       event: "RUN_TERMINAL",
       reason: terminalReason,
+      // forge#3833: same closed enum as the headless engine (absent -> the reason's own code).
+      code: normalizeCode(outcome.code ?? codeForTerminalReason(terminalReason)),
       source: "interactive",
     });
     state = deriveState(readLog(runLogDir, issueNumber));
