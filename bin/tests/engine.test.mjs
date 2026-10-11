@@ -315,6 +315,33 @@ describe("runIssue", () => {
     assert.deepEqual(s.committed, ["investigate", "build", "review", "remediate"]);
   });
 
+  it("forge#3792: remediate deferring to a live run writes no commit and no terminal, never runs close, and re-runs next dispatch", async () => {
+    const { w, io } = fakeWorld();
+    const calls = [];
+    let defer = true;
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; w.labels.push("needs-human"); },
+      "work-on/remediate": () => {
+        w.markers += defer ? SEP + "<!-- FORGE:REMEDIATION_DEFERRED -->\n## Remediation Deferred\n\npr=7\nkind=lease\nlease_by=cli_o_9\nlease_until=1"
+          : remediation("HELD-AWAITING-MERGE");
+      },
+    };
+    const runner = async ({ commandName }) => { calls.push(commandName); script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "deferred");
+    assert.ok(!calls.includes("work-on/close"), "close must not run against an unmerged PR");
+    const events = readLog(dir, 42);
+    assert.ok(!events.some((e) => e.event === "PHASE_COMMIT" && e.phase === "remediate"), "a deferral is never committed");
+    assert.ok(!events.some((e) => e.event === "RUN_TERMINAL"), "a deferral is never terminal, so a later dispatch is not blocked as not-retryable");
+    // The deferral is retired once a later dispatch proceeds: remediate runs again and completes.
+    defer = false;
+    const res2 = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 2000, maxAttempts: 1 });
+    assert.equal(res2.terminalReason, "awaiting-merge");
+    assert.equal(calls.filter((c) => c === "work-on/remediate").length, 2);
+  });
+
   it("forge#3525: no-signal review (PR created during the run) stops at needs-human without remediate", async () => {
     const { w, io } = fakeWorld();
     const script = {

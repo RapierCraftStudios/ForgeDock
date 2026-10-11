@@ -785,6 +785,13 @@ export async function runIssue(opts) {
       (outcome.outputs?.pr ?? state.pr) != null;
     if (outcome.status === "blocked") {
       emitProgress({ event: "phase_exit", phase: phase.id, status: "blocked", detail: outcome.detail });
+      // forge#3792: remediate deferring to a live earlier run is neither a commit nor a terminal: a RUN_TERMINAL or
+      // PHASE_COMMIT would strand the PR (`deferred` is not --retry-able, and a committed remediate lets `close` run on
+      // an unmerged PR). Release our lease and exit with nothing written; the next dispatch re-picks remediate.
+      if (phase.id === "remediate" && outcome.reason === "deferred") {
+        await projector.writeState(issue, { ...state, lease: null });
+        return { terminalReason: "deferred", detail: outcome.detail };
+      }
       if (!isRemediationHandoff)
         return await terminate(state, outcome.reason || "needs-human", outcome.detail);
     } else {

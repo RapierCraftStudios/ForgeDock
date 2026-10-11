@@ -99,17 +99,8 @@ async function issueMarkers(issue, io) {
 const REMEDIATION_HELD_MARKER = "FORGE:REMEDIATION_HELD";
 /** Non-terminal deferral record (remediate.md Phase M0 liveness step): a live earlier run holds the lease. Never a COMPLETE/trail marker. */
 const REMEDIATION_DEFERRED_MARKER = "FORGE:REMEDIATION_DEFERRED";
-/** Lease holder ids the engine mints (`cli_<host>_<pid>`) are passed to remediate only when they match this shape. */
+/** Lease holder ids the engine mints (`cli_<host>_<pid>`) are passed to remediate only when they match this shape (same as remediate-liveness.sh). */
 const LEASE_HOLDER_RE = /^[A-Za-z0-9._-]{1,128}$/;
-/**
- * Liveness predicate shared by remediate.md M0 and the engine (same `until > now` semantics as
- * `leaseHeld` in bin/engine.mjs): live only when the lease is unexpired AND held by someone other
- * than `holder`. An absent/malformed lease is never live.
- */
-export function remediationLeaseLive(lease, holder, now = Date.now()) {
-  return !!(lease && typeof lease === "object" && Number.isFinite(lease.until) && lease.until > now &&
-    typeof lease.by === "string" && lease.by !== "" && lease.by !== holder);
-}
 const reEscape = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** True when `body` STARTS with the typed header `<!-- {header}` (e.g. `FORGE:BUILDER`). */
 function startsWithHeader(body, header) {
@@ -919,20 +910,19 @@ export const PHASES = [
       }
       if (latest === null) {
         if (await prMerged()) return mergedResult("AUTO-LANDED");
-        // A deferral to a live earlier run is not a failed attempt. Only a trusted, full-line
-        // record newer than the bound marker counts (`scoped`); the newest one decides. Its recorded lease
-        // must still be unexpired; an expired lease falls through to a normal failed attempt.
-        let deferred = null;
-        scoped.forEach((b) => {
-          if (startsWithHeader(b, REMEDIATION_DEFERRED_MARKER) && hasSentinelLine(b, REMEDIATION_DEFERRED_MARKER)) deferred = b;
+        // A deferral to a live earlier run (remediate.md M0 liveness step) is not a failed attempt. The
+        // decision was made by the script at M0 time, so the record is not re-judged against the clock (a
+        // lease that expired since is the NEXT dispatch's business). Only a trusted, full-line record for THIS
+        // PR counts, and only while it is newer than every `FORGE:REMEDIATION` trail comment: a later run
+        // that proceeded posts one, which retires the deferral.
+        let deferredAt = -1, trailAt = -1, deferred = null;
+        scoped.forEach((b, i) => {
+          if (startsWithHeader(b, REMEDIATION_DEFERRED_MARKER) && hasSentinelLine(b, REMEDIATION_DEFERRED_MARKER)) { deferredAt = i; deferred = b; }
+          else if (startsWithHeader(b, PHASE_MARKERS.remediate.header)) trailAt = i;
         });
-        if (deferred !== null) {
-          const by = /^lease_by=(\S+)\s*$/m.exec(deferred)?.[1] ?? "";
-          const until = Number(/^lease_until=(\d+)\s*$/m.exec(deferred)?.[1] ?? NaN);
-          if (remediationLeaseLive({ by, until }, null)) {
-            return { status: "blocked", reason: "deferred", retryable: false,
-              detail: `deferred-live-run: lease held by ${by} until ${new Date(until).toISOString()}` };
-          }
+        if (deferred !== null && deferredAt > trailAt && (state.pr == null || /^pr=(\d+)\s*$/m.exec(deferred)?.[1] === String(state.pr))) {
+          const kind = /^kind=(\w+)\s*$/m.exec(deferred)?.[1] ?? "lease";
+          return { status: "blocked", reason: "deferred", retryable: false, detail: `deferred-live-run: ${kind}` };
         }
         return { status: "failed", detail: `no ${completion} marker` };
       }
