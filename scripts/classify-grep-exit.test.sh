@@ -32,6 +32,9 @@ expect "unmatched paren regex" "grep -qE '(abc' present.txt" malformed
 expect "pattern read as option" "grep -qE '--no-such-flag' present.txt" malformed
 expect "option-looking pattern" "grep -qE '-z foo' present.txt" malformed
 expect "non-grep target" "bash -c 'exit 2'" real
+for _w in "grep: brackets ([ ]) not balanced" "grep: parentheses not balanced" "grep: braces not balanced" "grep: repetition-operator operand invalid" "grep: empty (sub)expression" "grep: invalid repetition count(s)"; do
+  bash "$CLS" 2 "$_w" "grep -E x f" >/dev/null && ok "BSD wording malformed: $_w" || bad "BSD wording malformed: $_w"
+done
 [ "$(bash "$CLS" 2 "grep: Unmatched [" "grep -q x f")" = "grep usage error (exit 2)" ] && ok "reason text" || bad "reason text"
 bash "$CLS" 2 "grep: Unmatched [" "ls -l" >/dev/null && bad "non-grep with usage stderr is not malformed" || ok "non-grep with usage stderr is not malformed"
 bash "$CLS" 1 "grep: Unmatched [" "grep -q x f" >/dev/null && bad "rc 1 is not malformed" || ok "rc 1 is not malformed"
