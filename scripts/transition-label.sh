@@ -8,7 +8,8 @@
 #   GH_FLAG       Repository flag passed to gh (e.g. -R RapierCraftStudios/forgedock)
 #                 May be multiple tokens — pass before TARGET_STATE
 #   TARGET_STATE  One of: investigating, ready-to-build, building, in-review,
-#                         merged, invalid, decomposed, awaiting-merge
+#                         merged, invalid, decomposed, awaiting-merge,
+#                         remediating  (label workflow:remediating: autonomous remediation pending, not a human gate)
 #
 #   --validate    Sub-command mode: translate an investigation verdict into a
 #                 finding-lifecycle label (needs-validation → validated/false-positive).
@@ -184,6 +185,7 @@ VALID_STATES=(
   "invalid"
   "decomposed"
   "awaiting-merge"
+  "remediating"
 )
 
 # ---------------------------------------------------------------------------

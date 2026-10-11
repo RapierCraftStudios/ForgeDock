@@ -46,17 +46,17 @@ For each agent selected in Phase 3B, read **only** the files relevant to that ag
 
 2. **Then read the persona file for each selected agent**:
 
-| Agent | Trigger | File |
-|-------|---------|------|
-| General Security & Quality Scan | ALWAYS RUNS | `review-pr-agents/security.md` |
-| Auth Conventions Auditor | AUTH domain | `review-pr-agents/auth.md` |
-| Billing Integrity Auditor | BILLING domain | `review-pr-agents/billing.md` |
-| Concurrency & Race Condition Auditor | CONCURRENCY or BILLING domain | `review-pr-agents/concurrency.md` |
-| Domain Logic Auditor | SCRAPING domain (requires `review.domains.scraping` in forge.yaml) | `review-pr-agents/scraper.md` |
-| Frontend Quality Auditor | WEB service touched | `review-pr-agents/frontend.md` |
-| API Design & Consistency Auditor | New/modified routers or SDK/OpenAPI files | `review-pr-agents/api.md` |
-| Database & Migration Auditor | DATABASE domain | `review-pr-agents/database.md` |
-| Infrastructure & Deploy Safety Auditor | INFRA service touched | `review-pr-agents/infra.md` |
+| Agent | Trigger | Marker domain | File |
+|-------|---------|---------------|------|
+| General Security & Quality Scan | ALWAYS RUNS | `security` | `review-pr-agents/security.md` |
+| Auth Conventions Auditor | AUTH domain | `auth` | `review-pr-agents/auth.md` |
+| Billing Integrity Auditor | BILLING domain | `billing` | `review-pr-agents/billing.md` |
+| Concurrency & Race Condition Auditor | CONCURRENCY or BILLING domain | `concurrency` | `review-pr-agents/concurrency.md` |
+| Domain Logic Auditor | SCRAPING domain (requires `review.domains.scraping` in forge.yaml) | `scraper` | `review-pr-agents/scraper.md` |
+| Frontend Quality Auditor | WEB service touched | `frontend` | `review-pr-agents/frontend.md` |
+| API Design & Consistency Auditor | New/modified routers or SDK/OpenAPI files | `api` | `review-pr-agents/api.md` |
+| Database & Migration Auditor | DATABASE domain | `database` | `review-pr-agents/database.md` |
+| Infrastructure & Deploy Safety Auditor | INFRA service touched | `infra` | `review-pr-agents/infra.md` |
 
 ## Domain Prefixes (for Structured Findings)
 
@@ -90,6 +90,6 @@ The `protocols.md` file contains:
 - Per-Agent Input Scoping rules
 - Tool-Result Truncation Discipline
 - Evidence-Based Review Protocol (all agents follow)
-- Structured Findings Protocol (machine-readable findings block format)
+- Structured Findings Protocol (machine-readable findings block format; each finding also carries a `**Failure scenario**` and `**Scope**: changed|pre-existing`, consumed by `/review-pr` §6B.4)
 
 **Spec root (MANDATORY)**: read every file named in this catalog from `${CLAUDE_PLUGIN_ROOT}` — the install root of the ForgeDock plugin that is running this command (Claude Code fills it in when it loads the spec). Only if that path does not start with `/` (not a Claude Code plugin session: install.sh, Codex, OpenCode) use `$FORGE_HOME` instead. Never read sub-files from `$FORGE_HOME` when the plugin root resolved: an exported `FORGE_HOME` can point at a different, older ForgeDock checkout, and mixing roots runs stale phase specs.

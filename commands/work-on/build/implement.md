@@ -42,7 +42,7 @@ Parse from $ARGUMENTS:
 
 ---
 
-- `--fix-acceptance "<failed checks>"` — optional. Set only by build B6.5 after a failed acceptance gate. In this mode, skip I1–I2 planning: read the listed failing `ACCEPTANCE_CHECK` ids from the FORGE:INVESTIGATOR comment, change the code in `{WORKTREE_PATH}` until each check's target/matcher holds (do not edit the checks), update the BUILDER comment's `### Changes` list, and return `IMPLEMENT_RESULT: status: COMPLETE`. If a check is impossible as written (contradicts the contract), return `status: BLOCKED` with that reason.
+- `--fix-acceptance "<failed checks>"` — optional. Set only by build B6.5 after a failed acceptance gate. In this mode, skip I1–I2 planning: read the listed failing `ACCEPTANCE_CHECK` ids from the FORGE:INVESTIGATOR comment, change the code in `{WORKTREE_PATH}` until each check's target/matcher holds (do not edit the checks), update the BUILDER comment's `### Changes` list, and return `IMPLEMENT_RESULT: status: COMPLETE`. If a check is impossible as written (contradicts the contract), return `status: BLOCKED` with that reason. **Decomposition refusal** <!-- Added: forge#3543 -->: never implement work that the FORGE:INVESTIGATOR `### Decomposition Assessment` (`**YES**`) assigns to a separate sub-issue, even if a listed check targets it; return `status: BLOCKED` with blocker "check <id> belongs to decomposed item <N>" instead.
 
 ## Phase I1: Load Context from GitHub
 

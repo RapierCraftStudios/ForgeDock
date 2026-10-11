@@ -139,6 +139,45 @@ echo "Findings per PR: $(echo "scale=2; $FINDING_COUNT / $MERGED_COUNT" | bc 2>/
 
 Target: < 0.5 findings per PR (meaning most PRs pass clean).
 
+### 2E.5: Noise share
+
+Noise share is the fraction of candidate review findings that the `/review-pr` §6B.4 provenance gates removed from the fix chain: dropped as stale, routed as pre-existing, or demoted to a note for lacking a failure scenario.
+
+```bash
+# Sum the §6B.4 counters from FORGE:NOTE_DISPOSITION records on PRs merged in the window.
+# Records written before forge#3452 lack the keys: skip them (do not count them as zero) and report the sample size.
+MERGED_PRS=$(gh pr list -R $REPO --state merged --limit 200 --json number,mergedAt \
+  --jq "[.[] | select(.mergedAt > \"$SINCE\")] | .[].number")
+DROPPED=0; PREEXISTING=0; DEMOTED=0; FILED=0; NOTES=0; SAMPLE=0
+for PR in $MERGED_PRS; do
+  REC=$(gh api --paginate "repos/$REPO/issues/$PR/comments" --jq '.[].body' 2>/dev/null \
+    | grep -m1 'FORGE:NOTE_DISPOSITION' | grep 'findings_dropped_stale=' || true)
+  [ -n "$REC" ] || continue
+  SAMPLE=$((SAMPLE+1))
+  for K in findings_dropped_stale findings_preexisting notes_demoted_no_scenario findings_filed notes_fixed notes_listed notes_dropped inpr_fix; do
+    V=$(echo "$REC" | tr ' ' '\n' | sed -n "s/^${K}=\([0-9][0-9]*\)$/\1/p" | head -1)
+    case "$K" in
+      findings_dropped_stale) DROPPED=$((DROPPED+${V:-0})) ;;
+      findings_preexisting) PREEXISTING=$((PREEXISTING+${V:-0})) ;;
+      notes_demoted_no_scenario) DEMOTED=$((DEMOTED+${V:-0})) ;;
+      findings_filed|inpr_fix) FILED=$((FILED+${V:-0})) ;;
+      *) NOTES=$((NOTES+${V:-0})) ;;
+    esac
+  done
+done
+NOISE=$((DROPPED+PREEXISTING+DEMOTED))
+# Denominator: candidate findings after 6A/6B dedup, before the gates. notes_demoted_no_scenario is a subset of the notes
+# totals, so it is not added to the denominator again.
+TOTAL=$((DROPPED+PREEXISTING+FILED+NOTES))
+if [ "$TOTAL" -gt 0 ]; then
+  echo "Noise share: $((NOISE * 100 / TOTAL))% over $SAMPLE PRs"
+else
+  echo "Noise share: N/A (no post-forge#3452 reviews) over $SAMPLE PRs"
+fi
+```
+
+Target: < 20% noise share. Report the sample size; if no merged PR in the window carries the new keys, report `N/A (no post-forge#3452 reviews)`.
+
 ### 2F: Issue lifecycle velocity
 
 ```bash

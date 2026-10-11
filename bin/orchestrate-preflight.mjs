@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { classifyInputPattern } from "./engine/resolve.mjs";
 
 const VERSION = "opencode-preflight-v1";
-const IN_FLIGHT_LABELS = new Set(["workflow:building", "workflow:in-review"]);
+const IN_FLIGHT_LABELS = new Set(["workflow:building", "workflow:in-review", "workflow:remediating"]);
 const EXCLUDED_LABELS = new Set([
   "needs-human",
   "workflow:decomposed",

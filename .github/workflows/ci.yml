@@ -1,7 +1,8 @@
 name: CI
 
 # Runs the repo's unit-test suite (`npm test` = `node --test "bin/tests/**/*.test.mjs"`)
-# on every PR and on push to staging.
+# and every scripts/*.test.sh shell suite (`npm run test:sh`) on every PR and on
+# push to staging.
 #
 # Closes the visibility gap identified in forge#1581: before this workflow,
 # no CI job ran the suite at all, so failing tests (including CLI-breaking
@@ -9,11 +10,11 @@ name: CI
 # without ever failing a check.
 #
 # Push to `main` is intentionally excluded here — `publish.yml` already runs
-# `npm test` as a pre-publish gate on every push to `main`. Including `main`
+# `npm test` and `npm run test:sh` as pre-publish gates on every push to `main`. Including `main`
 # here would duplicate the test run and waste CI minutes (forge#1603).
 #
-# This job intentionally has no continue-on-error: a red result here is the
-# desired, correct signal — it is not masked or auto-passed.
+# These jobs are intentionally never masked or auto-passed: a red result here is
+# the desired, correct signal.
 
 on:
   pull_request:
@@ -46,3 +47,24 @@ jobs:
 
       - name: Run unit tests
         run: npm test
+
+  shell-tests:
+    name: Shell tests (scripts/*.test.sh)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+
+      # review-pr-gate2.test.sh exits 0 ("skipped") when jq is missing, so a
+      # missing jq would read as green. Fail hard instead.
+      - name: Require jq
+        run: command -v jq || { echo "jq is required by the shell suites" >&2; exit 1; }
+
+      - name: Run shell tests
+        run: npm run test:sh

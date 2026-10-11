@@ -182,11 +182,17 @@ const LABEL_TRANSITIONS = {
   "workflow:investigating": ["workflow:ready-to-build", "workflow:invalid", "workflow:decomposed"],
   "workflow:ready-to-build": ["workflow:building", "workflow:invalid"],
   "workflow:building": ["workflow:in-review", "workflow:ready-to-build", "workflow:invalid"], // retry allowed; evidenced reversal allowed (#2326)
-  "workflow:in-review": ["workflow:merged", "workflow:building", "workflow:invalid"],         // review → re-build allowed; evidenced reversal allowed (#2326)
+  "workflow:in-review": ["workflow:merged", "workflow:building", "workflow:invalid", "workflow:remediating", "workflow:awaiting-merge"], // review → re-build allowed; evidenced reversal allowed (#2326); remediation handoff (#3541) and merge-queue handoff (#1810)
+  "workflow:remediating": ["workflow:in-review", "workflow:awaiting-merge", "workflow:merged", "workflow:invalid"], // #3541/#3565: remediation → re-review/merge; evidenced reversal allowed
+  "workflow:awaiting-merge": ["workflow:merged", "workflow:in-review", "workflow:remediating", "workflow:invalid"], // #1810/#3565: merge queue; evidenced reversal allowed
   "workflow:merged": [],     // terminal — no successors
   "workflow:invalid": [],    // terminal
   "workflow:decomposed": [], // terminal
 };
+
+// Every state in scripts/transition-label.sh VALID_STATES must be a key above
+// (a missing key makes the guard fail open for that state — #3541/#3565).
+// A drift test in bin/tests/pre-tool-use.test.mjs enforces this.
 
 /**
  * States from which a transition to `workflow:invalid` requires posted
@@ -199,6 +205,8 @@ const EVIDENCE_REQUIRED_FOR_INVALID_FROM = new Set([
   "workflow:ready-to-build",
   "workflow:building",
   "workflow:in-review",
+  "workflow:remediating",
+  "workflow:awaiting-merge",
 ]);
 
 /**
@@ -869,7 +877,10 @@ function checkLabelTransition(command) {
   // Validate the transition against the state machine.
   const allowed = LABEL_TRANSITIONS[currentWorkflowLabel] || null;
   if (allowed === null) {
-    return null; // current state not in map — unknown, fail-open
+    // Current state not in map — unknown. Other transitions stay fail-open,
+    // but workflow:invalid must still clear the evidence gate (#3565) so a
+    // state added without a hook update cannot bypass #2326.
+    return checkInvalidReversalEvidence(newLabel, currentWorkflowLabel, comments, true);
   }
   if (!allowed.includes(newLabel)) {
     return [
@@ -910,10 +921,11 @@ function checkLabelTransition(command) {
  * @param {string} newLabel
  * @param {string|null} currentWorkflowLabel
  * @param {Array|null} comments
+ * @param {boolean} [unknownSource=false] Current state is not in LABEL_TRANSITIONS; gate anyway (#3565).
  * @returns {string|null} Error message to show, or null if allowed.
  */
-function checkInvalidReversalEvidence(newLabel, currentWorkflowLabel, comments) {
-  if (newLabel === "workflow:invalid" && EVIDENCE_REQUIRED_FOR_INVALID_FROM.has(currentWorkflowLabel)) {
+function checkInvalidReversalEvidence(newLabel, currentWorkflowLabel, comments, unknownSource = false) {
+  if (newLabel === "workflow:invalid" && (unknownSource || EVIDENCE_REQUIRED_FOR_INVALID_FROM.has(currentWorkflowLabel))) {
     if (!hasInvalidReversalEvidence(comments)) {
       return [
         `[ForgeDock] BLOCKED: workflow:invalid requires reversal evidence.`,

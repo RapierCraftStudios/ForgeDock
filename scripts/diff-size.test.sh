@@ -108,8 +108,9 @@ OUT="$(bash "$S" --repo-path "$TMP/w" 2>/dev/null)"; rc=$?
 { [ "$rc" = 2 ] && [ -z "$OUT" ]; } && ok || bad "missing base (rc=$rc)"
 
 # SEC-1: commits landing on the base after the branch point are not counted
-reset; git checkout -q staging; gen 3000 > base-only.txt; git add base-only.txt; git commit -qm "base moves"
-git push -q origin staging 2>/dev/null; git checkout -q feat; gen 10 > a.txt; git add a.txt
+reset; git checkout -q staging; git reset -q --hard origin/staging; gen 3000 > base-only.txt; git add base-only.txt; git commit -qm "base moves"
+git push -q origin staging 2>/dev/null && ok || bad "base-moves push rejected"
+git checkout -q feat; gen 10 > a.txt; git add a.txt
 OUT="$(run --threshold 100)"
 check "moving base lines" "$OUT" diff_lines 10; check "moving base over" "$OUT" over false
 

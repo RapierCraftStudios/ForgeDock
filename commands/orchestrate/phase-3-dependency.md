@@ -83,27 +83,22 @@ declare -A EDGE_FILES   # "{PRED}:{SUCCESSOR}" → the specific file(s) that tri
 declare -A FILE_SOURCE  # {NUM} → contract-deliverables | affected-files-section | body-fallback | none (forge#2436, forge#2848)
 declare -A ISSUE_FILES  # {NUM} → newline-separated declared file set (forge#2844)
 
-# Resolve ForgeDock's helper from the runtime installation before falling back to
-# the target repository. The orchestrator runs inside the project being worked on,
-# so a bare `scripts/extract-affected-files.sh` silently fails when that project
-# has not copied ForgeDock's helper scripts into its own repository (observed in
-# OpenCode runs against installed ForgeDock). Keep the precedence aligned with
-# phase-4-execution.md's classify-lane resolver.
+# Resolve ForgeDock's helper from a trusted ForgeDock install only (same tiers as the
+# TRUSTED_SCRIPT resolver). The orchestrator runs inside the project being worked on, so
+# neither the working directory nor the target repo may supply the script (#3400/#3483),
+# and a bare `scripts/extract-affected-files.sh` would silently fail on consumer repos.
 resolve_extract_affected_files() {
-  local candidates=()
-  case '${CLAUDE_PLUGIN_ROOT}' in /*) candidates+=('${CLAUDE_PLUGIN_ROOT}/scripts/extract-affected-files.sh') ;; esac  # running plugin first
-  [ -n "${FORGE_HOME:-}" ] && candidates+=("$FORGE_HOME/scripts/extract-affected-files.sh")
-  [ -n "${REPO_PATH:-}" ] && candidates+=("$REPO_PATH/scripts/extract-affected-files.sh")
-  candidates+=("$PWD/scripts/extract-affected-files.sh")
-
-  local candidate
-  for candidate in "${candidates[@]}"; do
-    if [ -f "$candidate" ]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
+  # HELPER_SCRIPT resolver (EXTRACT_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude.
+  local _l _tc _cfg _c
+  _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+  _tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+  for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+    [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
   done
-  echo "ERROR: extract-affected-files.sh is not installed in any configured runtime path." >&2
+  while IFS= read -r _c; do
+    case "$_c" in /*) if [ -f "$_c/scripts/extract-affected-files.sh" ]; then printf '%s\n' "$_c/scripts/extract-affected-files.sh"; return 0; fi ;; esac
+  done <<< "$_tc"
+  echo "ERROR: extract-affected-files.sh is not installed in any trusted ForgeDock install path." >&2
   return 1
 }
 

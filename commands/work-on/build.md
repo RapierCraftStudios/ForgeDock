@@ -23,7 +23,7 @@ argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --base {PR_BAS
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (classification, label transitions) stay at this tier because they are interleaved with the reasoning-heavy child phases in the same run. <!-- Added: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
-**CRITICAL: You MUST execute ALL phases B0–B6.5 (including B5.5) in order. Every child (B3 context, B4 architect, B5 implement, B6 validate) is invoked via `Skill(...)` — each is a forked sub-skill with its own isolated context. B3 and B4 are invoked for every complexity band except where the band is TRIVIAL or INVESTIGATION (B2/B2.1/B2.5 are also skipped for INVESTIGATION); the children post their own skip markers, so a skipped child is still visible on the issue. Skipping a child without the band justification degrades build quality and fails the phase-trail check.**
+**CRITICAL: You MUST execute ALL phases B0–B6.5 (including B5.5) in order (the one exception is the B0 size-gate resume branch, which enters at B5.5 with its state verified). Every child (B3 context, B4 architect, B5 implement, B6 validate) is invoked via `Skill(...)` — each is a forked sub-skill with its own isolated context. B3 and B4 are invoked for every complexity band except where the band is TRIVIAL or INVESTIGATION (B2/B2.1/B2.5 are also skipped for INVESTIGATION); the children post their own skip markers, so a skipped child is still visible on the issue. Skipping a child without the band justification degrades build quality and fails the phase-trail check.**
 
 **Synchronous child consumption**: each child `Skill(...)` call (B3-B6) runs to completion in this phase's own turn, and you consume its result in that same turn. Never end or yield your turn to wait for a child, and never wait for a completion notification: notifications for forked children go to the root session, not to this phase, so a turn that yields is never resumed. A child return with no `*_RESULT:` block (running, backgrounded, empty) is not a result — re-read the GitHub markers for that child (`FORGE:CONTEXT`, `FORGE:ARCHITECT`, `FORGE:BUILDER`, `FORGE:VALIDATE`/`FORGE:QUALITY_GATE`) and apply the **bounded re-invoke rule**: re-invoke the same child with the same args at most 2 times per child on running/backgrounded/empty returns (the counter is per child and is not reset by a re-invoke). Before re-invoking, check state: if the child's marker is present, consume it instead of re-invoking; for implement and validate, also check the worktree (`git status --short` and `git log origin/{PR_BASE}..HEAD` in `{WORKTREE_PATH}`) — uncommitted in-flight edits or a fresh commit mean the original child may still be live, so wait for it by re-reading state rather than launching a second writer on the same worktree, and count that as a re-invoke attempt. After the cap is exhausted, take the Blocked exit (see Result emission and Blocked exit) with `blocker: child-stalled: <child>` (child = context|architect|implement|validate); it is terminal and is not re-invoked by the router.
 
@@ -173,6 +173,20 @@ EXISTING_FAST_PATH=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate 
 
 **Resume check**:
 - If `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment → build already complete. Derive BRANCH/WORKTREE_PATH as in B1A/B1C (without creating anything), then print `BUILD_RESULT: status: ALREADY_DONE`.
+- **Size-gate resume** (checked BEFORE the partial-BUILDER rule below; first match wins) <!-- Added: forge#3463 -->: if a `<!-- FORGE:BUILDER -->` comment exists without `<!-- FORGE:BUILDER:COMPLETE -->` AND the latest trusted `FORGE:DIFF_SIZE` comment has `result: OVER`, the build stopped at a deliberate B5.5 exit (`NEEDS_DECOMPOSE` or the decompose-loop-guard Blocked exit), not in a crash. Keep the BUILDER comment, do not re-run B2-B5, and re-enter at **Phase B5.5**. Read the marker through the same anchored, trust-filtered lookup B5.5 uses (script resolution block verbatim):
+  ```bash
+  # <Script resolution block from above goes here, verbatim>
+  set -o pipefail
+  TRUSTED_SCRIPT="${UNIVERSAL_DIR:+$UNIVERSAL_DIR/trusted-comments.sh}"
+  [ -n "$TRUSTED_SCRIPT" ] && [ -f "$TRUSTED_SCRIPT" ] || { echo "DIFF_SIZE_LOOKUP=FAILED (trusted-comments.sh unresolved)"; exit 0; }
+  DS=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:DIFF_SIZE') \
+    || { echo "DIFF_SIZE_LOOKUP=FAILED"; exit 0; }
+  LAST_RESULT=$(printf '%s\n' "$DS" | jq -r 'select(type == "string")' | sed -n 's/^result: *\([A-Z]*\).*/\1/p' | tail -n 1)
+  echo "DIFF_SIZE_RESULT=${LAST_RESULT:-<none>}"
+  ```
+  - `DIFF_SIZE_LOOKUP=FAILED` → Blocked exit with blocker `size-gate-unavailable: could not read FORGE:DIFF_SIZE` (a transient GitHub failure uses the `github-unavailable:` prefix). Never read a failed lookup as "no DIFF_SIZE".
+  - `DIFF_SIZE_RESULT=OVER` → verify, without creating anything, that the branch and worktree exist (derive BRANCH/WORKTREE_PATH as in B1A/B1C), that `git -C "$WORKTREE_PATH" branch --show-current` equals BRANCH, and that a staged diff is present (`! git -C "$WORKTREE_PATH" diff --cached --quiet`). Recover `COMPLEXITY_BAND` from `EXISTING_FAST_PATH` with the B0.5 resume extraction. When all hold, skip B0.5-B5 and continue at B5.5 (it re-measures, then applies the override / `NEEDS_DECOMPOSE` / `OK` logic).
+  - Anything else (no `FORGE:DIFF_SIZE`, `result` is not `OVER`, worktree or branch missing or mismatched, nothing staged, band unrecoverable) → never skip ahead on missing state; fall through to the next rule.
 - If `<!-- FORGE:BUILDER -->` exists BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → build was interrupted after the comment was posted but before the commit (validate V5). Delete the partial comment and restart from Phase B2 (contract): <!-- Added: forge#1305 -->
   ```bash
   PARTIAL_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
@@ -336,7 +350,7 @@ case "$TIER" in
   prose)
     [ -n "${DRY_RUN:-}" ] && echo "DRY_RUN: set workflow:building" || \
     gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:building" \
-      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
+      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:in-review,workflow:remediating,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
     ;;
 esac
 ```
@@ -347,7 +361,87 @@ esac
 
 **Skip if COMPLEXITY_BAND: INVESTIGATION** — go to B5. For every other band (TRIVIAL included) the contract is mandatory. If a `FORGE:CONTRACT` comment already exists on the issue (resume), do not post a second one — continue to B2.1.
 
-Post `<!-- FORGE:CONTRACT -->` comment documenting what will be built and why:
+Post `<!-- FORGE:CONTRACT -->` comment documenting what will be built and why. Run B2.0 first: it files the follow-up issues for `deferred` out-of-scope items and validates the section, so `{OUT_OF_SCOPE_ITEMS}` below already holds real issue numbers.
+
+### B2.0: Out-of-scope dispositions — file deferred follow-ups, validate the section <!-- Added: forge#3447 -->
+
+Every item in the contract's `### Out of Scope` section must carry exactly one disposition, or the section is the single line `None.`. Each bullet names at least one backticked path or symbol so review can match findings against it:
+
+```
+- `path/or/symbol` — deferred → #N: <why it is deferred>
+- `path/or/symbol` — not-affected: <evidence, e.g. the grep or call-graph check that shows no impact>
+- `path/or/symbol` — accepted-risk: <reason the risk is acceptable>
+```
+
+- **`deferred → #N`**: a follow-up issue `#N` already exists (filed in this step, before the contract is posted). Use it for a sibling path the work leaves alone but that still needs the change.
+- **`not-affected: <evidence>`**: the path was checked and the change does not reach it. The evidence must be concrete. Review never demotes a finding against a `not-affected` item: a finding that contradicts the evidence means the contract was wrong.
+- **`accepted-risk: <reason>`**: a known gap that is knowingly kept. Review demotes a non-security finding on this path to a note.
+- **Known-flaw rule**: a contract that keeps a known-flawed design (a design the investigation or architect plan identified as flawed, a fail-open caller, an unsound threshold) must state the flaw and list it as a `deferred → #N` item with a linked follow-up. It may not hide behind `accepted-risk` or free text.
+- Free-text exclusions without a disposition are invalid. `->` is accepted for `→`.
+
+**File the `deferred` follow-ups** (skip the filing on resume when the contract already exists):
+
+```bash
+# <Script resolution block from work-on/build.md, verbatim>
+run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
+# Trusted-author filter (OWNER/MEMBER/COLLABORATOR or Bot, same predicate as trusted-comments.sh) is applied at
+# the source in the LOOKUP --jq, before the path match: an untrusted match is never reused. The REST search API is used because it exposes
+# author_association and user.type (`gh issue list --json` has no authorAssociation field).
+# For each deferred item (DEFERRED_PATH = the backticked path, DEFERRED_WHY = one line), repeat:
+DEFERRED_MARKER="<!-- FORGE:DEFERRED_FROM: #{NUMBER} -->"
+LOOKUP=$(gh api -X GET search/issues -f per_page=50 \
+  -f q="\"FORGE:DEFERRED_FROM: #{NUMBER}\" in:body repo:{GH_REPO} is:issue is:open" --jq '[.items[] | select(((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR")) or ((.user.type // "") == "Bot"))]' 2>/dev/null) || LOOKUP="FAILED"
+if [ "$LOOKUP" = "FAILED" ]; then
+  echo "DEFERRED_LOOKUP=FAILED"   # a failed lookup is not "none found": Blocked exit, never re-file blind
+else
+  DEFERRED_NUM=$(printf '%s' "$LOOKUP" | jq -r --arg p "$DEFERRED_PATH" \
+    '[.[] | select((.body // "") | contains($p))] | first | .number // empty' 2>/dev/null)
+  if [ -z "$DEFERRED_NUM" ]; then
+    DEFERRED_URL=$(run gh issue create {GH_FLAG} --title "follow-up: ${DEFERRED_PATH} (deferred from #{NUMBER})" \
+      --body "## Problem
+
+${DEFERRED_WHY}
+
+Deferred from #{NUMBER}: \`${DEFERRED_PATH}\` was declared out of scope in its contract and is tracked here instead of surfacing later as a review finding.
+
+## Affected Files
+
+- \`${DEFERRED_PATH}\`
+
+## Acceptance Criteria
+
+- [ ] The concern above is resolved for \`${DEFERRED_PATH}\`
+
+${DEFERRED_MARKER}")
+    DEFERRED_NUM=$(printf '%s' "$DEFERRED_URL" | grep -oE '[0-9]+$')
+    [ -n "${DRY_RUN:-}" ] && DEFERRED_NUM="0"
+  fi
+  echo "DEFERRED_ISSUE=${DEFERRED_NUM:-}"
+fi
+```
+
+- Only follow-up issues authored by a trusted author (OWNER/MEMBER/COLLABORATOR or Bot) are reused; an untrusted match carrying the marker is ignored and a fresh follow-up is filed.
+- `DEFERRED_LOOKUP=FAILED`, or an empty `DEFERRED_NUM` after a real (non-`DRY_RUN`) create → Blocked exit with blocker `github-unavailable: could not file or look up deferred follow-up for <path>` (a transient failure follows the retry rule above; no `needs-human` for `github-unavailable:`).
+- On resume the lookup reuses the open issue that carries the marker and the same path, so a retried build never files a duplicate.
+- Prefer filing through the `/issue` create-hook's programmatic contract (`Skill(skill="{FORGE_SKILL_PREFIX}issue", ...)`) when it is available; the raw create above is the fallback and must keep the `FORGE:DEFERRED_FROM` marker in the body.
+
+**Validate the composed section** with `scripts/check-contract-scope.sh validate` (the exact text that will replace `{OUT_OF_SCOPE_ITEMS}`):
+
+```bash
+# <Script resolution block from work-on/build.md, verbatim>
+SCOPE_FILE=$(mktemp "${TMPDIR:-/tmp}/contract-scope.XXXXXX")
+printf '### Out of Scope\n\n%s\n' "{OUT_OF_SCOPE_ITEMS}" > "$SCOPE_FILE"
+SCRIPT_REF=$(resolve_script 'check-contract-scope')
+case "$SCRIPT_REF" in
+  prose:*) echo "SCOPE_CHECK=PROSE" ;;   # apply the three-disposition rules above by hand
+  *) bash "${SCRIPT_REF#*:}" validate "$SCOPE_FILE"; echo "SCOPE_CHECK_RC=$?" ;;
+esac
+rm -f "$SCOPE_FILE"
+```
+
+- `SCOPE_CHECK_RC=0` (or `SCOPE_CHECK=PROSE` after a manual check) → post the contract.
+- `SCOPE_CHECK_RC=1` → the stderr lists each bad item. Fix the items (add the missing disposition, file the missing follow-up, name a backticked path), recompose, and re-run once. Still invalid → Blocked exit with blocker `contract-scope-invalid: <first bad item>`.
+- `SCOPE_CHECK_RC=2` → a usage error in this step: fix the invocation and retry once, then Blocked exit.
 
 **Before posting, read the attribution config**:
 ```bash
@@ -386,6 +480,8 @@ run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:CONTRACT -->
 {OUT_OF_SCOPE_ITEMS}
 ${ATTRIBUTION_LINE}"
 ```
+
+`{OUT_OF_SCOPE_ITEMS}` is the validated B2.0 section body: `None.`, or typed bullets using the literal dispositions `deferred → #N`, `not-affected:` and `accepted-risk:`. Never post free text there.
 
 Contract must be grounded in the investigation report. Every deliverable file must appear in the affected files list from the investigator. Adversarially validate the proposed fix against adjacent system layers before posting.
 
@@ -529,7 +625,12 @@ Review findings per PR rise steeply with diff size, so an oversized diff is spli
 
 ```bash
 # <Script resolution block from above goes here, verbatim>
-git -C "{WORKTREE_PATH}" fetch origin "{PR_BASE}" 2>/dev/null || true  # fresh origin/base for the merge-base measurement
+# Fresh origin/base for the merge-base measurement: retry with 10s/30s/60s backoff, record whether it ever succeeded
+FETCH_OK=0
+for _delay in 0 10 30 60; do
+  [ "$_delay" -gt 0 ] && sleep "$_delay"
+  if git -C "{WORKTREE_PATH}" fetch origin "{PR_BASE}" 2>/dev/null; then FETCH_OK=1; break; fi
+done
 THRESHOLD=$(yq '.build.diff_size.threshold // 1000' forge.yaml 2>/dev/null || echo 1000)
 EXCLUDES=()
 while IFS= read -r _g; do [ -n "$_g" ] && [ "$_g" != "null" ] && EXCLUDES+=(--exclude-glob "$_g"); done \
@@ -539,12 +640,13 @@ case "$SCRIPT_REF" in
   prose:*) echo "SIZE_GATE: scripts/diff-size.sh unresolved (prose tier) — gate skipped with a note in the FORGE:BUILDER comment" ;;
   *)
     SIZE_OUT=$(bash "${SCRIPT_REF#*:}" --repo-path "{WORKTREE_PATH}" --base "{PR_BASE}" --threshold "$THRESHOLD" ${EXCLUDES[@]+"${EXCLUDES[@]}"}) && SIZE_RC=0 || SIZE_RC=$?
-    echo "SIZE_RC=${SIZE_RC}"; printf '%s\n' "$SIZE_OUT" ;;
+    echo "SIZE_RC=${SIZE_RC}"; echo "FETCH_OK=${FETCH_OK}"; printf '%s\n' "$SIZE_OUT" ;;
 esac
 ```
 
 - Prose tier (script unresolvable) → skip the gate, continue to B6 (the script is part of the install; a missing install must not strand every build).
-- Exit 2, empty output, or output without `diff_lines=`, `threshold=` and `over=` → Blocked exit with blocker `size-gate-unavailable: diff-size.sh failed (rc=<N>)`. Do NOT treat an unmeasurable diff as under threshold.
+- Exit 2, empty output, or output without `diff_lines=`, `threshold=` and `over=`, AND `FETCH_OK=0` (the base fetch failed after the 10s/30s/60s retries, worst case about 100s) → Blocked exit with blocker `github-unavailable: could not fetch origin/{PR_BASE} for diff-size measurement` (transient; the router retry rule applies).
+- The same unmeasurable result with `FETCH_OK=1` (the fetch succeeded, so the script itself failed) → Blocked exit with blocker `size-gate-unavailable: diff-size.sh failed (rc=<N>)`. Either way, do NOT treat an unmeasurable diff as under threshold.
 - Otherwise parse `diff_lines`, `excluded_lines`, `threshold`, `over` and the `top=` lines.
 
 **Step 2 — look up an override** (only when `over=true`). Both lookups are anchored, trust-filtered through `scripts/trusted-comments.sh` (trusted association, Bot, or `FORGE_TRAIL_TRUSTED_LOGINS`), and fail closed:
@@ -590,9 +692,26 @@ else run gh issue comment {NUMBER} {GH_FLAG} --body "$BODY"; fi
 | `over=true`, no override, issue body has a `**Parent**: #N` line OR a trusted `FORGE:DECOMPOSED` comment exists | `OVER` | Decompose-loop guard: do NOT route to decompose. Post/refresh `FORGE:DIFF_SIZE`, then Blocked exit with blocker `diff-size-over-threshold: {diff_lines} > {threshold}; post a FORGE:SIZE_OVERRIDE with a justification to proceed` |
 | `over=true`, no override, otherwise | `OVER` | Put a `### Split Proposal` in the `FORGE:DIFF_SIZE` comment, then print `BUILD_RESULT: status: NEEDS_DECOMPOSE` (see below) |
 
-**`### Split Proposal`** (written into the `FORGE:DIFF_SIZE` comment): list the top files by changed lines from the `top=` output, then propose 2-4 sub-issues split along directory or phase seams, each independently buildable and no more than about half the threshold, in dependency order, one `- **{title}** — {files}` line each (this is the plan `work-on:decompose` consumes in D0/D2).
+**`### Split Proposal`** (written into the `FORGE:DIFF_SIZE` comment): list the top files by changed lines from the `top=` output, then propose 2-4 sub-issues split along directory or phase seams, each independently buildable and no more than about half the threshold, in dependency order, one `- **{title}** — {files} — wip: {WIP_REF}@{WIP_SHA} (git checkout {WIP_SHA} -- {files})` line each (this is the plan `work-on:decompose` consumes in D0/D2). The `wip:` part comes from the persist step below; when persistence fell back to a patch file write `patch: {PATCH_PATH}` instead, and when both failed write `wip: unavailable`. Lines without the suffix stay valid.
 
-**`NEEDS_DECOMPOSE` exit**: leave the staged worktree and branch as they are; do not add `needs-human`; do not post `FORGE:BUILDER:COMPLETE`; do NOT call `work-on:decompose` here (the router is the sole dispatcher). The labels stay `workflow:building`; decompose owns the `workflow:decomposed` transition. Print:
+**Persist the staged hunks** (before the `NEEDS_DECOMPOSE` exit; runs once the `FORGE:DIFF_SIZE` result is `OVER` and the decompose-loop guard did not fire) <!-- Added: forge#3573 -->: commit the staged index to a standalone commit object WITHOUT moving the build branch or the index, and push it to a dedicated ref named only from the issue number (never interpolate a title or file name into a ref). Re-running overwrites the same ref, so resume is idempotent. Never block `NEEDS_DECOMPOSE` on a persistence failure.
+
+```bash
+WIP_REF="forge/wip/{NUMBER}"
+WIP_SHA=""; PATCH_PATH=""
+TREE=$(git -C "{WORKTREE_PATH}" write-tree) \
+  && WIP_SHA=$(git -C "{WORKTREE_PATH}" commit-tree "$TREE" -p HEAD -m "wip: staged hunks for #{NUMBER} (diff-size OVER)") || WIP_SHA=""
+if [ -n "$WIP_SHA" ] && git -C "{WORKTREE_PATH}" push --force origin "${WIP_SHA}:refs/heads/${WIP_REF}" 2>/dev/null; then
+  echo "WIP_REF=${WIP_REF}@${WIP_SHA}"
+else
+  PATCH_PATH="$(git -C "{WORKTREE_PATH}" rev-parse --git-common-dir)/forge-wip-{NUMBER}.patch"
+  git -C "{WORKTREE_PATH}" diff --cached --binary > "$PATCH_PATH" 2>/dev/null && echo "PATCH_PATH=${PATCH_PATH}" || echo "WIP=unavailable"
+fi
+```
+
+The checkout command in each line restores that seam's files from the persisted commit (`git fetch origin {WIP_REF}` first in a fresh clone); `git diff {WIP_SHA}^ {WIP_SHA} -- {files}` shows them. Post `FORGE:DIFF_SIZE` (Step 3) after this step so the proposal carries the references.
+
+**`NEEDS_DECOMPOSE` exit**: leave the staged worktree and branch as they are (the persisted WIP ref or patch is an additional durable copy, not a replacement); do not add `needs-human`; do not post `FORGE:BUILDER:COMPLETE`; do NOT call `work-on:decompose` here (the router is the sole dispatcher). The labels stay `workflow:building`; decompose owns the `workflow:decomposed` transition. Print:
 
 ```
 BUILD_RESULT:
@@ -602,7 +721,7 @@ BUILD_RESULT:
   blocker: diff-size-over-threshold: {diff_lines} > {threshold}; split proposal posted in FORGE:DIFF_SIZE
 ```
 
-**Resume**: a re-invoked build whose latest trusted `FORGE:DIFF_SIZE` says `result: OVER` re-measures; if still over with no override it re-emits `NEEDS_DECOMPOSE` without a duplicate comment. When a valid `FORGE:SIZE_OVERRIDE` has appeared since, B5.5 re-measures and continues via `OVERRIDDEN`.
+**Resume**: a re-invoked build re-enters here via the B0 size-gate resume branch (partial `FORGE:BUILDER` plus latest trusted `FORGE:DIFF_SIZE` `result: OVER` plus a staged diff in the kept worktree), so it does not re-run implement; this covers both exits that leave BUILDER incomplete, `NEEDS_DECOMPOSE` and the decompose-loop-guard Blocked exit. B5.5 re-measures: if still over with no override it re-pushes the same `forge/wip/{NUMBER}` ref (idempotent) and re-emits `NEEDS_DECOMPOSE` without a duplicate comment (the loop-guard case re-emits the same Blocked exit); when a valid `FORGE:SIZE_OVERRIDE` has appeared since, it continues via `OVERRIDDEN`.
 # MUST CONTINUE to Phase B6 — the size gate result is intermediate, NOT terminal (validation still required), except the NEEDS_DECOMPOSE and Blocked exits above.
 
 ---
@@ -782,6 +901,7 @@ fi
 If `GATE_PASS = false`, the build repairs itself **once** before anything escalates (a failing acceptance check is pipeline work, not a human decision):
 
 1. Count `<!-- FORGE:ACCEPTANCE_REPAIR: issue={NUMBER} -->` comments on the issue. If one already exists, skip to step 4.
+1.5. **Decomposition guard** <!-- Added: forge#3543 -->: read the `### Decomposition Assessment` of the latest FORGE:INVESTIGATOR comment. If it is `**YES**`, a failing check that belongs to a sub-item the assessment assigns to a separate issue (named in the check's `description`/`# item-N` tag, or matching a listed sub-issue title) is NOT repaired: exclude it from the `--fix-acceptance` list. When ambiguous, treat the check as decomposed-out (fail safe). If every remaining failure is decomposed-out, do not invoke implement: leave `needs-human` and print `BUILD_RESULT: status: BLOCKED`, blocker: "acceptance check {ID} belongs to decomposed item {N} — repair refuses to implement work the investigator assigned to a separate issue".
 2. Post that marker (with the failed check ids), remove `needs-human` if this gate added it, then invoke
    `Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:implement", args="{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE} --fix-acceptance \"<failed check ids and details>\"")`
    then re-derive `{CHANGED_FILES}` from the repaired worktree (never reuse the pre-repair value, and never omit `--files`; an empty list falls back to this diff):

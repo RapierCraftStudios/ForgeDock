@@ -416,7 +416,7 @@ RESOLUTION=$(resolve_script 'transition-label'); TIER="${RESOLUTION%%:*}"; SCRIP
 case "$TIER" in
   adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} investigating ;;
   prose)
-    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:investigating" --remove-label "workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:investigating" --remove-label "workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
     ;;
 esac
 ```
@@ -601,6 +601,12 @@ bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN_LABEL} --repo-path
    - **Scope cap**: if more than 25 `fix` rows result, do not grow one PR to fit them. Record the cited instance plus the rows in the same subsystem as `fix`, mark the rest `fix-deferred`, and recommend decomposition in the report (set `decompose: YES` if the remaining scope is too large for one PR).
    - **Degrade, never block**: if any query fails (`RC` other than 0 or 1), write `Pattern sweep skipped: {reason}` in the `### Pattern Sweep` section, fall back to step 7.5, and continue. A failed query must never be recorded as 0 hits. The sweep is advisory evidence, not a gate.
    - Every `fix` row MUST appear in `### Affected Files`, and the acceptance spec MUST include a class-wide coverage check plus a check that the added test exercises more than the reviewer's single repro (see Phase 1C).
+7.7. **Size estimate** *(always, after the affected-file list is settled)*: estimate the changed lines the build will produce BEFORE anything is built, so an oversized issue is decomposed up front instead of discarded at the post-build size gate (build B5.5). <!-- Added: forge#3573 -->
+   - Per affected file: a new file counts about its full size; an edit counts about its hunks (added plus deleted lines). Add roughly 1:1 test lines for changed behavior. Skip lockfiles, generated files and fixtures (the gate excludes them).
+   - `INDEPENDENT_SEAMS`: the number of independently buildable pieces. For a batch issue (several review findings or checklist members) this is the member count; otherwise count distinct directory/phase seams. Minimum 1.
+   - Resolve config (defaults when absent): `THRESHOLD=$(yq '.build.diff_size.threshold // 1000' forge.yaml 2>/dev/null || echo 1000)`, `FACTOR=$(yq '.build.diff_size.estimate_factor // 1.2' forge.yaml 2>/dev/null || echo 1.2)`, `SEAM_MIN=$(yq '.build.diff_size.batch_seam_min // 3' forge.yaml 2>/dev/null || echo 3)`.
+   - Rule: when `build.diff_size.threshold` is `0` the rule is skipped (emit `GATE_THRESHOLD: 0`). Otherwise the Decomposition Assessment MUST be `**YES**` when `ESTIMATED_DIFF_LINES` > threshold x 1.2 (`estimate_factor`), OR when `INDEPENDENT_SEAMS` >= `batch_seam_min` and `ESTIMATED_DIFF_LINES` > threshold / 2 (not well under the gate). Propose one sub-issue per seam. A batch that is well under the gate (estimate at or under half the threshold) may stay `**NO**`.
+   - Emit the numbers in the comment as the three own-line fields in Phase 1C. A pure estimate is a heuristic; state it in the reason, do not pad it.
 8. **Fix-approach validation** — if the issue proposes a fix, don't adopt it as spec. Trace through the target system's middleware, auth, routing, config. Cross-domain: if fix in domain A interacts with domain B, read domain B's files too.
 
 ---
@@ -609,7 +615,7 @@ bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN_LABEL} --repo-path
 
 The comment MUST include a terminal sentinel at the very end, AFTER all required sections are present. **The sentinel is conditional on the resolved Verdict — it is NOT always `<!-- INVESTIGATION:COMPLETE -->`:**
 
-- **Verdict is INVALID** → close with `<!-- INVESTIGATION:INVALID -->`. This is a distinct, already-wired-up terminal marker: `bin/engine/phases.mjs`'s `detectOutcome` for the `investigate` phase checks for it explicitly (ahead of `INVESTIGATION:COMPLETE`) and routes to `terminalReason: "invalid"`; `bin/hooks/interactive-engine.mjs`'s `PHASE_MARKERS` table also already treats it as terminal. Emitting `INVESTIGATION:COMPLETE` for an INVALID verdict is what previously caused every completed investigation to read as `{verdict: "CONFIRMED"}` regardless of actual outcome — do NOT regress this (forge#2350).
+- **Verdict is INVALID** → close with `<!-- INVESTIGATION:INVALID -->`. This is a distinct, already-wired-up terminal marker: `bin/engine/phases.mjs`'s `detectOutcome` for the `investigate` phase reads it as the closing line of the newest trusted `<!-- FORGE:INVESTIGATOR -->` comment (never as a substring of prose or from an untrusted author) and routes to `terminalReason: "invalid"`; `bin/hooks/interactive-engine.mjs`'s `PHASE_MARKERS` table also already treats it as terminal. Emitting `INVESTIGATION:COMPLETE` for an INVALID verdict is what previously caused every completed investigation to read as `{verdict: "CONFIRMED"}` regardless of actual outcome — do NOT regress this (forge#2350).
 - **Verdict is CONFIRMED or PARTIAL** → close with `<!-- INVESTIGATION:COMPLETE -->` as before (PARTIAL still routes to `ready-to-build` in Phase 1D — only INVALID gets the distinct terminal sentinel).
 
 Compute the sentinel once, before building the comment body:
@@ -635,6 +641,9 @@ ANNOTATION_BODY=$(node packages/protocol/src/cli.js emit INVESTIGATOR \
   --field "Task Type={TASK_TYPE}" \
   --field "Decomposition Assessment={YES|NO} — {reason}")
 # ANNOTATION_BODY now has opening tag + required fields + INVESTIGATION:COMPLETE sentinel.
+# After appending the body sections, the Decomposition Assessment MUST be followed by exactly one
+# machine-readable marker line (`<!-- DECOMPOSE:YES -->` or `<!-- DECOMPOSE:NO -->`) — see the
+# "Decomposition marker" rule below the template. The codec does not add it for you.
 # NOTE: the codec's sentinel is fixed — do not use this path when Verdict=INVALID (see caveat above).
 # Append the Markdown body sections to it before posting.
 ```
@@ -700,6 +709,10 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATOR -->
 ### Decomposition Assessment
 **{YES|NO}** — {reason}
 {if YES: proposed sub-issues with titles and dependencies}
+ESTIMATED_DIFF_LINES: {N}
+INDEPENDENT_SEAMS: {N}
+GATE_THRESHOLD: {N — build.diff_size.threshold; 0 when the gate is disabled}
+<!-- DECOMPOSE:{YES|NO} -->
 
 ### Acceptance Spec <!-- Added: forge#1829 -->
 {For each item in the issue's ## Acceptance Criteria section, emit one machine-checkable check line using the format below. If the issue has no Acceptance Criteria section, derive checks from the Recommendation above. Each check MUST be specific, observable, and testable — not vague prose. Checks are consumed by build/validate Phase B6.5 as the merge gate.}
@@ -730,6 +743,14 @@ ACCEPTANCE_CHECK: id=ac-4 type=command target="grep -qE '(>= ?2|2\+)' commands/o
 ${ANNOTATION_LINK_FOOTER}
 ${INVESTIGATION_SENTINEL}"
 ```
+
+**Rules for the template above (instructions, not template text; never copy them into the posted comment):**
+
+**Decomposition marker (MANDATORY, both output paths — template and codec)**: emit exactly one `<!-- DECOMPOSE:YES -->` or `<!-- DECOMPOSE:NO -->` line per investigator comment, matching the `**YES**`/`**NO**` verdict, on its own line (nothing else on that line) after the verdict line and any sub-issue list (the `**YES**`/`**NO**` line must stay directly under the heading — the resume parser reads it). The headless engine routes to `work-on/decompose` on this marker (or on the `**YES**` heading in older comments). Never quote or mention the opposite marker anywhere in the comment. Never emit it when Verdict=INVALID. <!-- Added: forge#3543 -->
+
+**Size-estimate fields (MANDATORY when Verdict is not INVALID)** <!-- Added: forge#3573 -->: `ESTIMATED_DIFF_LINES: N`, `INDEPENDENT_SEAMS: N` and `GATE_THRESHOLD: N` are each alone on their own line (whole numbers, no prose or backticks on the line), INSIDE `### Decomposition Assessment` after the verdict line and sub-issue list and before the `<!-- DECOMPOSE:.. -->` marker. The engine reads them with full-line anchors as a safety net: an estimate over `GATE_THRESHOLD` x 1.2 routes to decompose even when the verdict says NO, so the verdict and the numbers must agree. Never quote these field lines elsewhere in the comment.
+
+**Decomposition scopes the Acceptance Spec**: when the assessment is YES, the Acceptance Spec MUST cover only the first, in-scope item — or tag each check with the sub-item it belongs to (append `# item-N` to the description). Never emit checks for work the assessment assigns to a separate sub-issue: build's acceptance gate would otherwise fail on them and its repair loop would pull that work into this branch. <!-- Added: forge#3543 -->
 
 **Do not hardcode `<!-- INVESTIGATION:COMPLETE -->` as the closing line.** The closing line MUST be the `${INVESTIGATION_SENTINEL}` variable computed above — it resolves to `<!-- INVESTIGATION:INVALID -->` for an INVALID verdict and `<!-- INVESTIGATION:COMPLETE -->` otherwise. `INVESTIGATION:COMPLETE` and `INVESTIGATION:INVALID` are mutually exclusive within a single posted comment — never emit both.
 
@@ -1183,7 +1204,7 @@ RESOLUTION=$(resolve_script 'transition-label'); TIER="${RESOLUTION%%:*}"; SCRIP
 case "$TIER" in
   adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} ready-to-build ;;
   prose)
-    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:ready-to-build" --remove-label "workflow:investigating,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:ready-to-build" --remove-label "workflow:investigating,workflow:building,workflow:in-review,workflow:remediating,workflow:awaiting-merge,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
     ;;
 esac
 ```
@@ -1203,7 +1224,7 @@ RESOLUTION=$(resolve_script 'transition-label'); TIER="${RESOLUTION%%:*}"; SCRIP
 case "$TIER" in
   adaptive|universal) bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} invalid ;;
   prose)
-    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:invalid" --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
+    gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:invalid" --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:awaiting-merge,workflow:merged,workflow:decomposed" 2>/dev/null || true   # allowlist:check-command-side-effects
     ;;
 esac
 gh issue close {NUMBER} {GH_FLAG} --comment "Closing as invalid: {reason from investigation}"   # allowlist:check-command-side-effects

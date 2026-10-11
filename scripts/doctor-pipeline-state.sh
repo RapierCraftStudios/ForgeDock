@@ -47,6 +47,8 @@
 #   I7  Orphaned worktree branches (local branches fix/* with no open PR)
 #   I8  FORGE-referenced gists with public visibility (KNOWLEDGE_GIST, MILESTONE_INDEX,
 #       PRIOR_GIST annotations in recent issue comments)
+#   I9  Issues stuck in workflow:remediating beyond threshold (the state must
+#       never outlive its remediation run)
 #
 # /pipeline-health should consume this script's JSON output rather than
 # re-discovering state from scratch.
@@ -321,6 +323,39 @@ while IFS= read -r row; do
       "Issue #$num stuck in workflow:in-review for ${hours}h (threshold: ${STUCK_HOURS}h). Resume review with /review-pr (find associated PR first)"
   fi
 done < <(echo "$IN_REVIEW" | jq -c '.[]')
+
+# ---------------------------------------------------------------------------
+# I9: Issues stuck in workflow:remediating
+# ---------------------------------------------------------------------------
+# The review handoff sets workflow:remediating until remediate Phase M1 swaps it
+# for workflow:in-review; it must never outlive the run. Same fail-inconclusive
+# pattern as I1-I3: a failed gh call is not treated as an empty list.
+if ! REMEDIATING=$(gh issue list $GH_FLAG \
+  --state open --label "workflow:remediating" \
+  --limit 100 \
+  --json number,title,updatedAt,labels 2>"$GH_STDERR_TMP"); then
+  echo "WARNING: gh issue list failed for workflow:remediating — I9 check inconclusive, skipping (not treated as empty): $(cat "$GH_STDERR_TMP")" >&2
+  add_skip "I9" "all" "gh issue list failed: $(bounded_reason "$(cat "$GH_STDERR_TMP")")"
+  REMEDIATING="[]"
+fi
+
+while IFS= read -r row; do
+  num=$(echo "$row" | jq -r '.number')
+  labels=$(echo "$row" | jq -c '[.labels[].name]')
+  if has_terminal_label "$labels"; then
+    continue
+  fi
+  updated=$(echo "$row" | jq -r '.updatedAt')
+  hours=$(hours_since "$updated")
+  if [ "$hours" -ge "$STUCK_HOURS" ]; then
+    add_finding \
+      "stuck_remediating" "warning" \
+      "$num" "workflow:remediating" "$hours" \
+      "FORGE:REMEDIATION" \
+      "/work-on $num --resume" \
+      "Issue #$num stuck in workflow:remediating for ${hours}h (threshold: ${STUCK_HOURS}h). The state must not outlive its remediation run. Resume with /work-on $num --resume"
+  fi
+done < <(echo "$REMEDIATING" | jq -c '.[]')
 
 # ---------------------------------------------------------------------------
 # I4: Issues in workflow:building with no FORGE:BUILDER annotation

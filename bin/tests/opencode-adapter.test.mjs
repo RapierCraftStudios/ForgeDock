@@ -107,7 +107,7 @@ describe("OpenCode adapter", () => {
     assert.match(output, /general-purpose.*general.*codebase-explorer.*explore/s);
     assert.match(output, /Omitted `background` means foreground/i);
     assert.match(output, /child-session id/i);
-    assert.match(output, /replace `needs-human` with `workflow:in-review`/);
+    assert.match(output, /replace `needs-human` or `workflow:remediating` with `workflow:in-review`/);
     assert.equal(shellPath("C:\\Forge Dock\\commands", "win32"), "/c/Forge Dock/commands");
   });
 

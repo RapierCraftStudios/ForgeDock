@@ -109,5 +109,61 @@ check 1 "FAIL pos-bad.md:3"             "--positional flags shell \$1"          
 check 1 "violations=2"                  "--positional counts violations"       -- --positional pos-bad.md
 check 0 "violations=0"                  "--positional passes safe forms, prose, allowlist" -- --positional pos-good.md
 
+# --fence-state: a listed var read in a fence without a prior assignment in that same fence is flagged.
+cat > "$T/fs-bad.md" <<EOF
+${FENCE}bash
+gh pr view "\$PR_NUMBER" -R "\$REPO" --json state
+${FENCE}
+${FENCE}bash
+X=\$(gh pr diff \${PR_NUMBER} --name-only)
+${FENCE}
+${FENCE}bash
+echo "\${REPO:-none}"
+${FENCE}
+${FENCE}bash
+gh pr view "\$PR_NUMBER"
+PR_NUMBER="{PR_NUMBER}"
+${FENCE}
+EOF
+cat > "$T/fs-good.md" <<EOF
+Prose mentions \$PR_NUMBER and \$REPO freely.
+${FENCE}bash
+# comment reads \$PR_NUMBER and \$REPO
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
+gh pr view "\$PR_NUMBER" -R "\$REPO"
+${FENCE}
+${FENCE}bash
+export REPO="{GH_REPO}"
+for PR_NUMBER in 1 2; do echo "\${PR_NUMBER}"; done
+echo "\$REPO"
+${FENCE}
+${FENCE}bash
+REPO="\${REPO:-\$(gh repo view)}"
+${FENCE}
+${FENCE}bash
+gh pr view \${REPO_FLAG} "\$OTHER"
+${FENCE}
+${FENCE}bash
+echo "\$PR_NUMBER" # allowlist:fence-state
+${FENCE}
+${FENCE}text
+echo \$PR_NUMBER \$REPO
+${FENCE}
+${FENCE}bash
+PR_NUMBER="{PR_NUMBER}"
+OUT=\$(Skill(skill="x", args="\$PR_NUMBER"))
+${FENCE}
+EOF
+check 1 "FAIL fs-bad.md:2 fence-state: \$PR_NUMBER" "--fence-state flags \$VAR read"        -- --fence-state PR_NUMBER REPO -- fs-bad.md
+check 1 "FAIL fs-bad.md:2 fence-state: \$REPO"      "--fence-state flags each listed var"   -- --fence-state PR_NUMBER REPO -- fs-bad.md
+check 1 "FAIL fs-bad.md:5 fence-state: \$PR_NUMBER" "--fence-state flags \${VAR} form"       -- --fence-state PR_NUMBER REPO -- fs-bad.md
+check 1 "FAIL fs-bad.md:8 fence-state: \$REPO"      "--fence-state flags \${VAR:-default}" -- --fence-state PR_NUMBER REPO -- fs-bad.md
+check 1 "FAIL fs-bad.md:11 fence-state: \$PR_NUMBER" "--fence-state flags read before assignment" -- --fence-state PR_NUMBER REPO -- fs-bad.md
+check 1 "violations=5"                   "--fence-state counts violations"        -- --fence-state PR_NUMBER REPO -- fs-bad.md
+check 0 "violations=0"                   "--fence-state ignores unlisted vars"    -- --fence-state UNLISTED -- fs-bad.md
+check 0 "violations=0"                   "--fence-state passes declared, loop, export, REPO_FLAG, allowlist, comments, prose, non-bash fences" -- --fence-state PR_NUMBER REPO -- fs-good.md
+check 2 "Usage"                          "--fence-state without -- is a usage error"  -- --fence-state PR_NUMBER fs-good.md
+check 2 "Usage"                          "--fence-state without vars is a usage error" -- --fence-state -- fs-good.md
+
 echo "check-spec-bash.test.sh: passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

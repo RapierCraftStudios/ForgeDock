@@ -13,6 +13,7 @@
 # Usage:
 #   check-spec-bash.sh [--base <git-ref>] [--shellcheck] <file.md>...
 #   check-spec-bash.sh --positional [<file.md>...]
+#   check-spec-bash.sh --fence-state <VAR>... -- <file.md>...
 #   check-spec-bash.sh            (no args: same as --positional over all Skill-loaded commands/**/*.md,
 #                                  excluding orchestrate/**, pipeline-health/**, review-pr-agents/**)
 #
@@ -25,6 +26,13 @@
 #                 Scope the file list to Skill-loaded specs (Read-loaded orchestrate/**,
 #                 pipeline-health/** and the review-pr-agents catalog are not substituted).
 #                 Output: `FAIL <file>:<line> positional arg ...` then `SPEC-POSITIONAL: ...`.
+#   --fence-state Different check, opt-in: every Bash tool call is a fresh shell, so a variable bound
+#                 in one fence is empty in the next. Fail any ```bash/sh fence that reads `$VAR` or
+#                 `${VAR...}` for a listed VAR without assigning it in the same fence (`VAR=`,
+#                 `export VAR=`, `read VAR`, `for VAR in`) at or before its first read. Comment-only lines are ignored; `$REPO`
+#                 does not match `$REPO_FLAG`. Suppress a deliberate read by putting
+#                 `allowlist:fence-state` on the same line. Pseudo-tool-call fences are scanned too.
+#                 Output: `FAIL <file>:<line> fence-state ...` then `SPEC-FENCE-STATE: ...`.
 #   --base <ref>   Only check blocks that contain a line changed relative to <ref>
 #                  (`git diff -U0 <ref> -- <file>`), so pre-existing blocks never fail
 #                  a new change. Without --base every block is checked.
@@ -45,14 +53,22 @@
 
 set -u
 
-BASE=""; SHELLCHECK=0; POSITIONAL=0; FILES=""
-usage() { echo "ERROR: Usage: check-spec-bash.sh [--base <git-ref>] [--shellcheck] <file.md>... | --positional [<file.md>...]" >&2; exit 2; }
+BASE=""; SHELLCHECK=0; POSITIONAL=0; FILES=""; FENCESTATE=0; FSVARS=""
+usage() { echo "ERROR: Usage: check-spec-bash.sh [--base <git-ref>] [--shellcheck] <file.md>... | --positional [<file.md>...] | --fence-state <VAR>... -- <file.md>..." >&2; exit 2; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --base) [ "$#" -ge 2 ] || usage; BASE="$2"; shift 2 ;;
     --shellcheck) SHELLCHECK=1; shift ;;
     --positional) POSITIONAL=1; shift ;;
+    --fence-state)
+      FENCESTATE=1; shift
+      while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+        case "$1" in -*|*[!A-Za-z0-9_]*) usage ;; esac
+        FSVARS="$FSVARS $1"; shift
+      done
+      [ "$#" -gt 0 ] && [ -n "$FSVARS" ] || usage
+      shift ;;
     --*) usage ;;
     *) FILES="$FILES
 $1"; shift ;;
@@ -62,13 +78,54 @@ done
 # No file arguments: default to the --positional check over every Skill-loaded spec under commands/
 # (orchestrate/**, pipeline-health/** and the review-pr-agents catalog are Read-loaded, not substituted).
 # Resolved relative to this script, so it works from any cwd and from linked worktrees.
-if [ -z "$FILES" ] && { [ "$#" -eq 0 ] && [ "$POSITIONAL" = 0 ] && [ -z "$BASE" ] && [ "$SHELLCHECK" = 0 ] || [ "$POSITIONAL" = 1 ]; }; then
+if [ -z "$FILES" ] && [ "$FENCESTATE" = 0 ] && { [ "$#" -eq 0 ] && [ "$POSITIONAL" = 0 ] && [ -z "$BASE" ] && [ "$SHELLCHECK" = 0 ] || [ "$POSITIONAL" = 1 ]; }; then
   POSITIONAL=1
   cd "$(dirname "$0")/.." || exit 2
   FILES=$(find commands -name '*.md' -not -path 'commands/orchestrate/*' \
     -not -path 'commands/pipeline-health/*' -not -path 'commands/review-pr-agents/*' | LC_ALL=C sort)
 fi
 [ -n "$FILES" ] || usage
+
+if [ "$FENCESTATE" = 1 ]; then
+  sfail=0; sfiles=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in *.md) ;; *) continue ;; esac
+    [ -f "$f" ] || { echo "SKIP $f missing"; continue; }
+    sfiles=$((sfiles + 1))
+    hits=$(awk -v f="$f" -v vars="$FSVARS" '
+      function flush(   i, v, ln) {
+        for (i = 1; i <= nv; i++) {
+          v = vn[i]
+          if (first[v] != "" && !asg[v]) print "FAIL " f ":" first[v] " fence-state: $" v " read in a fence before it is assigned (fresh shell per Bash call): " firsttxt[v]
+        }
+      }
+      function reset(   i) { for (i = 1; i <= nv; i++) { asg[vn[i]] = 0; first[vn[i]] = ""; firsttxt[vn[i]] = "" } }
+      BEGIN { nv = split(vars, vn, " ") }
+      !inb && /^[ \t]*```(bash|sh)[ \t]*$/ { inb = 1; reset(); next }
+      !inb && /^[ \t]*```/ { other = !other; next }
+      other { next }
+      inb && /^[ \t]*```[ \t]*$/ { flush(); inb = 0; next }
+      inb {
+        if ($0 ~ /^[ \t]*#/) next
+        for (i = 1; i <= nv; i++) {
+          v = vn[i]
+          if (first[v] == "" && ($0 ~ ("(^|[;&|( \t])(export[ \t]+|local[ \t]+|declare[ \t]+(-[A-Za-z]+[ \t]+)?|readonly[ \t]+)?" v "=") ||
+              $0 ~ ("(^|[;&|( \t])read[ \t]+(-[A-Za-z]+[ \t]+)*([A-Za-z0-9_]+[ \t]+)*" v "([ \t;]|$)") ||
+              $0 ~ ("(^|[;&|( \t])for[ \t]+" v "[ \t]+in[ \t]"))) asg[v] = 1
+          if (first[v] == "" && $0 !~ /allowlist:fence-state/ &&
+              ($0 ~ ("\\$" v "([^A-Za-z0-9_]|$)") || $0 ~ ("\\$\\{" v "([^A-Za-z0-9_]|$)"))) { first[v] = NR; firsttxt[v] = $0 }
+        }
+      }
+    ' "$f")
+    if [ -n "$hits" ]; then printf '%s\n' "$hits"; sfail=$((sfail + $(printf '%s\n' "$hits" | wc -l))); fi
+  done <<EOS
+$FILES
+EOS
+  echo "SPEC-FENCE-STATE: files=$sfiles violations=$sfail"
+  [ "$sfail" -eq 0 ]
+  exit $?
+fi
 
 if [ "$POSITIONAL" = 1 ]; then
   pfail=0; pfiles=0

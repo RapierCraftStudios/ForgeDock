@@ -57,7 +57,7 @@ echo "=== Pipeline Issues — $(date +%Y-%m-%d) ==="
 echo ""
 
 # Workflow states to display (in pipeline order)
-STATES="workflow:investigating workflow:building workflow:in-review workflow:ready-to-build needs-human"
+STATES="workflow:investigating workflow:building workflow:in-review workflow:remediating workflow:ready-to-build needs-human"
 
 for LABEL in $STATES; do
     ISSUES=$(gh issue list $GH_FLAG \
@@ -195,7 +195,7 @@ echo ""
 
 # gh --label uses AND filtering, so query each label separately and merge
 ENGINE_CANDIDATES=$(
-    for LABEL in "workflow:investigating" "workflow:ready-to-build" "workflow:building" "workflow:in-review"; do
+    for LABEL in "workflow:investigating" "workflow:ready-to-build" "workflow:building" "workflow:in-review" "workflow:remediating"; do
         gh issue list $GH_FLAG \
             --state open \
             --label "$LABEL" \

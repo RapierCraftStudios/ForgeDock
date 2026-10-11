@@ -251,8 +251,29 @@ findings and what will actually be built.
 {auth model, new configuration, data-safety, security surface, migration risk}
 
 ### Out of Scope
-{items explicitly excluded}
+None.
 ```
+
+`### Out of Scope` is either the single line `None.` or a list of typed bullets. Each bullet names at
+least one backticked path or symbol followed by exactly one disposition:
+
+```
+- `path` — deferred → #N: <why>
+- `path` — not-affected: <evidence>
+- `path` — accepted-risk: <reason>
+```
+
+- `deferred → #N`: a follow-up issue `#N` was filed before the contract was posted (`->` is accepted
+  for `→`). A contract that keeps a known-flawed design must list the flaw as a `deferred` item.
+- `not-affected: <evidence>`: the path was checked and is not reached by the change.
+- `accepted-risk: <reason>`: a known gap that is knowingly kept.
+- Free-text items, a `deferred` item without an issue number, or a missing/empty section are invalid.
+  `scripts/check-contract-scope.sh validate|list` is the reference parser (TSV
+  `disposition<TAB>path<TAB>issue`).
+- Review demotion: a finding on a `deferred` path (follow-up issue still open) or an `accepted-risk`
+  path becomes a note instead of a new `review-finding`; `not-affected` items, HIGH/CRITICAL findings,
+  safety-exempt `accepted-risk` findings and files the PR changed are never demoted. Only a trusted
+  author's contract is read. The count is recorded as `contract_demoted` in `FORGE:NOTE_DISPOSITION`.
 
 #### `FORGE:CONTEXT`
 

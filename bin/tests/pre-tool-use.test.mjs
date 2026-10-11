@@ -176,7 +176,9 @@ const LABEL_TRANSITIONS = {
   "workflow:investigating": ["workflow:ready-to-build", "workflow:invalid", "workflow:decomposed"],
   "workflow:ready-to-build": ["workflow:building", "workflow:invalid"],
   "workflow:building": ["workflow:in-review", "workflow:ready-to-build", "workflow:invalid"],
-  "workflow:in-review": ["workflow:merged", "workflow:building", "workflow:invalid"],
+  "workflow:in-review": ["workflow:merged", "workflow:building", "workflow:invalid", "workflow:remediating", "workflow:awaiting-merge"],
+  "workflow:remediating": ["workflow:in-review", "workflow:awaiting-merge", "workflow:merged", "workflow:invalid"],
+  "workflow:awaiting-merge": ["workflow:merged", "workflow:in-review", "workflow:remediating", "workflow:invalid"],
   "workflow:merged": [],
   "workflow:invalid": [],
   "workflow:decomposed": [],
@@ -186,6 +188,8 @@ const EVIDENCE_REQUIRED_FOR_INVALID_FROM = new Set([
   "workflow:ready-to-build",
   "workflow:building",
   "workflow:in-review",
+  "workflow:remediating",
+  "workflow:awaiting-merge",
 ]);
 
 // Mirrors TRUSTED_REVERSAL_AUTHOR_ASSOCIATIONS in bin/hooks/pre-tool-use.mjs (#2332).
@@ -214,7 +218,13 @@ function decideLabelTransition(currentWorkflowLabel, newLabel, comments) {
     return `BLOCKED: terminal state "${currentWorkflowLabel}"`;
   }
   const allowed = LABEL_TRANSITIONS[currentWorkflowLabel] || null;
-  if (allowed === null) return null;
+  if (allowed === null) {
+    // unknown current state: fail-open except workflow:invalid needs evidence (#3565)
+    if (newLabel === "workflow:invalid" && !hasInvalidReversalEvidence(comments)) {
+      return `BLOCKED: workflow:invalid requires reversal evidence`;
+    }
+    return null;
+  }
   if (!allowed.includes(newLabel)) {
     return `BLOCKED: "${currentWorkflowLabel}" -> "${newLabel}" not a legal transition`;
   }
@@ -285,6 +295,74 @@ describe("label transition state machine — pure logic (#2326)", () => {
     const msg = decideLabelTransition("workflow:merged", "workflow:invalid", [reversalComment]);
     assert.ok(msg);
     assert.match(msg, /terminal/);
+  });
+});
+
+describe("remediating / awaiting-merge / unknown-state transitions (#3565)", () => {
+  const reversal = {
+    body: "<!-- FORGE:INVESTIGATOR -->\n**Verdict**: INVALID",
+    authorAssociation: "OWNER",
+  };
+  const original = { body: "<!-- FORGE:INVESTIGATOR -->\n**Verdict**: CONFIRMED", authorAssociation: "OWNER" };
+  const forged = { body: "<!-- FORGE:INVESTIGATOR -->\n**Verdict**: INVALID", authorAssociation: "NONE" };
+
+  for (const from of ["workflow:remediating", "workflow:awaiting-merge", "workflow:engine-error"]) {
+    it(`${from} -> invalid blocked without evidence`, () => {
+      assert.match(decideLabelTransition(from, "workflow:invalid", [original]), /evidence/);
+      assert.match(decideLabelTransition(from, "workflow:invalid", [forged]), /evidence/);
+    });
+    it(`${from} -> invalid allowed with trusted reversal evidence`, () => {
+      assert.equal(decideLabelTransition(from, "workflow:invalid", [original, reversal]), null);
+    });
+  }
+
+  it("legitimate handoff edges stay allowed", () => {
+    for (const [a, b] of [
+      ["workflow:in-review", "workflow:remediating"],
+      ["workflow:remediating", "workflow:in-review"],
+      ["workflow:in-review", "workflow:awaiting-merge"],
+      ["workflow:remediating", "workflow:awaiting-merge"],
+      ["workflow:awaiting-merge", "workflow:merged"],
+      ["workflow:awaiting-merge", "workflow:in-review"],
+    ]) {
+      assert.equal(decideLabelTransition(a, b, []), null, `${a} -> ${b}`);
+    }
+  });
+
+  it("rejects remediating -> building/investigating", () => {
+    assert.ok(decideLabelTransition("workflow:remediating", "workflow:building", []));
+    assert.ok(decideLabelTransition("workflow:remediating", "workflow:investigating", []));
+  });
+
+  it("unknown state (workflow:engine-error) stays fail-open for non-invalid targets", () => {
+    assert.equal(decideLabelTransition("workflow:engine-error", "workflow:in-review", []), null);
+  });
+
+  it("drift: mirror matches the real hook map and evidence set", () => {
+    const src = readFileSync(new URL("../hooks/pre-tool-use.mjs", import.meta.url), "utf-8");
+    const mapM = src.match(/const LABEL_TRANSITIONS = \{([\s\S]*?)\n\};/);
+    assert.ok(mapM, "LABEL_TRANSITIONS literal not found in hook source");
+    const real = {};
+    for (const line of mapM[1].split("\n")) {
+      const m = line.match(/^\s*"(workflow:[a-z-]+)":\s*\[([^\]]*)\]/);
+      if (m) real[m[1]] = [...m[2].matchAll(/"(workflow:[a-z-]+)"/g)].map((x) => x[1]);
+    }
+    assert.deepEqual(real, LABEL_TRANSITIONS);
+    const setM = src.match(/const EVIDENCE_REQUIRED_FOR_INVALID_FROM = new Set\(\[([\s\S]*?)\]\);/);
+    assert.ok(setM, "EVIDENCE_REQUIRED_FOR_INVALID_FROM not found in hook source");
+    const realSet = [...setM[1].matchAll(/"(workflow:[a-z-]+)"/g)].map((x) => x[1]).sort();
+    assert.deepEqual(realSet, [...EVIDENCE_REQUIRED_FOR_INVALID_FROM].sort());
+  });
+
+  it("drift: every transition-label.sh VALID_STATES entry is a LABEL_TRANSITIONS key", () => {
+    const sh = readFileSync(new URL("../../scripts/transition-label.sh", import.meta.url), "utf-8");
+    const blk = sh.match(/^VALID_STATES=\(([\s\S]*?)^\)/m);
+    assert.ok(blk, "VALID_STATES not found in transition-label.sh");
+    const states = [...blk[1].matchAll(/"([a-z-]+)"/g)].map((x) => x[1]);
+    assert.ok(states.length > 0);
+    for (const s of states) {
+      assert.ok(Object.hasOwn(LABEL_TRANSITIONS, `workflow:${s}`), `workflow:${s} missing from LABEL_TRANSITIONS`);
+    }
   });
 });
 

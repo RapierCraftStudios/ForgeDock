@@ -20,7 +20,7 @@ argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\""
 **Invoked by**: the work-on router, when `INVESTIGATE_RESULT.decompose = YES`. This skill runs in an isolated forked context: it sees only its args and re-reads everything else from GitHub.
 **Output**: Create sub-issues, update parent tracker, post `<!-- FORGE:DECOMPOSED -->` comment, set `workflow:decomposed`. STOP — each sub-issue runs its own /work-on. This skill is the SOLE owner of the `workflow:decomposed` label. On BLOCKED it adds `needs-human` and posts the blocker.
 
-**Engine coverage** (forge#2379): this subcommand's `command` name (`work-on/decompose`) and completion marker (`FORGE:DECOMPOSED:COMPLETE`) are registered as a real phase in the headless engine's phase table — `decompose` in `packages/protocol/src/phases.js`'s `PHASE_IDS`/`PHASE_MARKERS`, and the matching `decompose` entry in `bin/engine/phases.mjs`'s `PHASES` array. The engine's `investigate` phase hands off to it on `DECOMPOSE:YES` instead of terminating in place, so a headless `runIssue()` walk dispatches this subcommand rather than stopping short.
+**Engine coverage** (forge#2379): this subcommand's `command` name (`work-on/decompose`) and completion marker (`FORGE:DECOMPOSED:COMPLETE`) are registered as a real phase in the headless engine's phase table — `decompose` in `packages/protocol/src/phases.js`'s `PHASE_IDS`/`PHASE_MARKERS`, and the matching `decompose` entry in `bin/engine/phases.mjs`'s `PHASES` array. The engine's `investigate` phase hands off to it on `<!-- DECOMPOSE:YES -->` (or a `**YES**` verdict under `### Decomposition Assessment`) in the newest trusted FORGE:INVESTIGATOR report, instead of terminating in place, so a headless `runIssue()` walk dispatches this subcommand rather than stopping short.
 
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (label transitions, sub-issue creation) stay at this tier because they're interleaved with the reasoning-heavy sub-issue design steps in the same `Skill()` invocation. <!-- Added: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
@@ -190,7 +190,7 @@ if [ -n "$TRUSTED_SCRIPT" ] && [ -f "$TRUSTED_SCRIPT" ]; then
 else echo "SIZE_PLAN_READ=FAILED"; fi
 ```
 
-A `FAILED` read or a comment without `result: OVER` means there is no size-gate plan (the assessment rules below then apply unchanged). Its `### Split Proposal` lines (`- **{title}** — {files}`) are the proposed sub-issues, in dependency order, for Phase D2.
+A `FAILED` read or a comment without `result: OVER` means there is no size-gate plan (the assessment rules below then apply unchanged). Its `### Split Proposal` lines (`- **{title}** — {files}`) are the proposed sub-issues, in dependency order, for Phase D2. <!-- Added: forge#3573 --> A line may end with `— wip: {REF}@{SHA} (git checkout {SHA} -- {files})` (the durable staged hunks build B5.5 pushed to `forge/wip/{NUMBER}`), or `— patch: {PATH}` when the push failed and a patch file was written. Parse that per-seam reference as `WIP_REF_{N}` for Phase D2/D3. A line without one (or `wip: unavailable`) means no hunks were persisted; behaviour is unchanged.
 - Milestone (from issue metadata)
 - Priority label (P0/P1/P2) from issue labels
 
@@ -267,7 +267,7 @@ From the Decomposition Assessment in the investigation report (adjusted for any 
 
 For each sub-issue, prepare:
 - **Title**: from investigation report's proposed sub-issue title (re-derived from the owner override when one was detected), including the final `{fix|feat|refactor}: ` prefix used in Phase D3
-- **Body**: brief description of scope + `**Parent**: #{NUMBER}` + dependency note if applicable
+- **Body**: brief description of scope + `**Parent**: #{NUMBER}` + dependency note if applicable + a `## Staged Hunks` section when the Split Proposal line carries a wip ref or patch (see D3)
 - **Labels**: inherit priority label (P0/P1/P2) from parent; do NOT copy workflow labels
 - **Milestone**: same milestone title as parent (if parent has one)
 
@@ -355,6 +355,11 @@ Files that need changes:
 
 **Parent**: #{NUMBER}
 {If depends on another sub-issue: "**Depends on**: #{SUB_ISSUE_N} — {reason}"}
+
+{Only when this seam's Split Proposal line carries a wip ref or patch (D0); otherwise omit this section entirely:}
+## Staged Hunks
+
+The parent build's staged hunks for this seam are preserved outside the worktree: `{REF}@{SHA}`. Reuse them with `git fetch origin {REF} && git checkout {SHA} -- {files}` (wip ref), or `git apply {PATCH_PATH}` (patch file). They survive worktree cleanup.
 SUB_BODY_EOF
 ```
 
@@ -513,7 +518,7 @@ case "$TIER" in
   adaptive|universal) run bash "$SCRIPT_PATH" {NUMBER} {GH_FLAG} decomposed ;;
   prose)
     run gh issue edit {NUMBER} {GH_FLAG} --add-label "workflow:decomposed" \
-      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:awaiting-merge,workflow:merged,workflow:invalid" 2>/dev/null || true
+      --remove-label "workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:awaiting-merge,workflow:merged,workflow:invalid" 2>/dev/null || true
     ;;
 esac
 ```

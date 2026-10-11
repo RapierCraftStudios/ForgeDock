@@ -47,6 +47,7 @@ cat > "$HEALTH_BODY_FILE" <<'EOF'
 |--------|-------|--------|--------|
 | Build pass rate (staging→main) | ?% | 95%+ | ✅/⚠️/❌ |
 | Review findings per PR | ? | < 0.5 | ✅/⚠️/❌ |
+| Review noise share (dropped, pre-existing or demoted / candidate findings; from 2E.5) | ?% | < 20% | ✅/⚠️/❌ |
 | Manual fix-up rate | ?% | < 15% | ✅/⚠️/❌ |
 | False positive rate | ?% | < 10% | ✅/⚠️/❌ |
 | Pipeline self-correction rate | ?% | < 15% | ✅/⚠️/❌ |
