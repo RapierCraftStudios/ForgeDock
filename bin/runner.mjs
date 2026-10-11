@@ -59,7 +59,14 @@ import { DEFAULT_SPAWN_MAX_BUFFER_BYTES } from "./cli-spawn-shared.mjs";
 // Package root (the directory that holds bin/, commands/ and scripts/). Exported to every
 // phase child as FORGEDOCK_HOME so spec fences can source scripts/lib/*.sh without a
 // cache scan. A value the operator already set is never overridden.
-const FORGEDOCK_PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+/** Windows drive-letter path (C:\x or C:/x) -> /c/x, the form the bash helpers accept; other paths are returned unchanged. */
+export function toPosixRoot(p, platform = process.platform) {
+  if (platform !== "win32") return p;
+  const m = /^([A-Za-z]):[\\/](.*)$/.exec(p);
+  return m ? `/${m[1].toLowerCase()}/${m[2].replace(/\\/g, "/")}` : p.replace(/\\/g, "/");
+}
+
+const FORGEDOCK_PACKAGE_ROOT = toPosixRoot(dirname(dirname(fileURLToPath(import.meta.url))));
 
 /** Returns `env` with FORGEDOCK_HOME defaulted to the package root (never overriding a set value). */
 export function withForgedockHome(env) {

@@ -435,32 +435,71 @@ grep -qE '^[[:space:]]*(TRUSTED_SCRIPT|[A-Z_]+_SCRIPT)=""$|_tc="\$\(printf' "$ST
 grep -nE '\$PWD|\$\(pwd\)|\$\{PWD' "$FR" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -q . && bad "forge-resolve.sh must have no PWD tier" || ok
 
 # Behaviour: run the REAL stub locator + forge_resolve in a clean env over each install layout.
+# Paths are compared canonically: macOS resolves /var -> /private/var and Git Bash maps /tmp -> /c/Users/..., so the literal
+# spelling of a temp path differs from what readlink/pwd -P report. cygpath -m (Git Bash) or dirname+pwd -P (POSIX) agree.
+canon() { # path -> canonical spelling, empty stays empty
+  [ -n "$1" ] || return 0
+  if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1" 2>/dev/null || printf '%s' "$1"
+  else ( cd "$(dirname "$1")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$1")" ) || printf '%s' "$1"; fi
+}
+expect_path() { expect "$1" "$(canon "$2")" "$(canon "$3")"; }
 mkdir -p "$T/fr/cwdplant/scripts/lib" "$T/fr/ws"
 cp "$FR" "$T/fr/cwdplant/scripts/lib/forge-resolve.sh"; printf 'PLANT\n' > "$T/fr/cwdplant/scripts/trusted-comments.sh"
 mk_install() { # dir: a minimal install root that carries the helpers and trusted-comments.sh
   mkdir -p "$1/scripts/lib" "$1/commands"; cp "$FR" "$1/scripts/lib/"; cp "$FB" "$1/scripts/lib/"; : > "$1/scripts/trusted-comments.sh"; : > "$1/commands/work-on.md"
 }
-fr_run() { # home cmd [extra env assignments...] -> stdout; cwd is a planted repo that must never be trusted
-  local h="$1" c="$2"; shift 2
-  ( cd "$T/fr/cwdplant" && env -i PATH="$PATH" HOME="$h" "$@" bash -c "$(cat "$T/locator.sh"); $c" 2>/dev/null )
+fr_run_sh() { # shell home cmd [extra env assignments...] -> stdout; cwd is a planted repo that must never be trusted
+  local sh="$1" h="$2" c="$3"; shift 3
+  ( cd "$T/fr/cwdplant" && env -i PATH="$PATH" HOME="$h" "$@" "$sh" -c "$(cat "$T/locator.sh"); $c" 2>/dev/null )
 }
+fr_run() { fr_run_sh bash "$@"; }
 mk_install "$T/fr/npm"
-expect "engine layout: FORGEDOCK_HOME resolves (cwd plant ignored)" "$T/fr/npm/scripts/trusted-comments.sh" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' FORGEDOCK_HOME="$T/fr/npm")"
-expect "forge_root under FORGEDOCK_HOME" "$T/fr/npm" "$(fr_run "$T/fr/h0" 'forge_root' FORGEDOCK_HOME="$T/fr/npm")"
+expect_path "engine layout: FORGEDOCK_HOME resolves (cwd plant ignored)" "$T/fr/npm/scripts/trusted-comments.sh" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' FORGEDOCK_HOME="$T/fr/npm")"
+expect_path "forge_root under FORGEDOCK_HOME" "$T/fr/npm" "$(fr_run "$T/fr/h0" 'forge_root' FORGEDOCK_HOME="$T/fr/npm")"
+mk_install "$T/fr/other"
+expect "FORGEDOCK_HOME is authoritative: a valid FORGE_HOME is not consulted when it points at a bare dir" "" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' FORGEDOCK_HOME="$T/fr/ws" FORGE_HOME="$T/fr/other")"
 CFG="$T/fr/plugonly/.claude/plugins/cache/forgedock/forgedock"
 mk_install "$CFG/1.9.0"; mk_install "$CFG/1.12.0"; : > "$CFG/1.12.0/scripts/review-delta.sh"
-expect "plugin-only layout: newest pinned cache wins (numeric, not lexical)" "$CFG/1.12.0" "$(fr_run "$T/fr/plugonly" 'forge_root')"
-expect "plugin-only layout: script resolves from the cache" "$CFG/1.12.0/scripts/review-delta.sh" "$(fr_run "$T/fr/plugonly" 'forge_resolve review-delta.sh')"
+expect_path "plugin-only layout: newest pinned cache wins (1.12.0 over 1.9.0)" "$CFG/1.12.0" "$(fr_run "$T/fr/plugonly" 'forge_root')"
+expect_path "plugin-only layout: script resolves from the cache" "$CFG/1.12.0/scripts/review-delta.sh" "$(fr_run "$T/fr/plugonly" 'forge_resolve review-delta.sh')"
+# INFRA-3: a lexical glob picks 1.16.0 before 2.0.0 and a pair where 1.9.0/1.12.0 happen to agree masks it; the stub must still end on 2.0.0
+CFG2="$T/fr/lexical/.claude/plugins/cache/forgedock/forgedock"
+mk_install "$CFG2/1.16.0"; mk_install "$CFG2/2.0.0"; : > "$CFG2/2.0.0/scripts/review-delta.sh"
+expect_path "lexical-vs-numeric: 2.0.0 outranks 1.16.0 (stub-loaded helper re-resolves numerically)" "$CFG2/2.0.0" "$(fr_run "$T/fr/lexical" 'forge_root')"
+expect_path "lexical-vs-numeric: a script only in 2.0.0 resolves" "$CFG2/2.0.0/scripts/review-delta.sh" "$(fr_run "$T/fr/lexical" 'forge_resolve review-delta.sh')"
 mk_install "$T/fr/subst"
-expect "plugin-only layout: substituted plugin root is a locator tier" "$T/fr/subst/scripts/trusted-comments.sh" "$(sed "s|'\${CLAUDE_PLUGIN_ROOT}'|'$T/fr/subst'|" "$T/locator.sh" > "$T/locator_subst.sh"; cd "$T/fr/cwdplant" && env -i PATH="$PATH" HOME="$T/fr/h0" bash -c "$(cat "$T/locator_subst.sh"); forge_resolve trusted-comments.sh" 2>/dev/null)"
-mk_install "$T/fr/repo"; mkdir -p "$T/fr/instl/.claude/commands"; ln -s "$T/fr/repo/commands/work-on.md" "$T/fr/instl/.claude/commands/work-on.md"
-expect "install.sh layout: commands symlink resolves to the repo root" "$T/fr/repo" "$(fr_run "$T/fr/instl" 'forge_root')"
+expect_path "plugin-only layout: substituted plugin root is a locator tier" "$T/fr/subst/scripts/trusted-comments.sh" "$(sed "s|'\${CLAUDE_PLUGIN_ROOT}'|'$T/fr/subst'|" "$T/locator.sh" > "$T/locator_subst.sh"; cd "$T/fr/cwdplant" && env -i PATH="$PATH" HOME="$T/fr/h0" bash -c "$(cat "$T/locator_subst.sh"); forge_resolve trusted-comments.sh" 2>/dev/null)"
+mk_install "$T/fr/repo"; mkdir -p "$T/fr/instl/.claude/commands"
+if ln -s "$T/fr/repo/commands/work-on.md" "$T/fr/instl/.claude/commands/work-on.md" 2>/dev/null && [ -L "$T/fr/instl/.claude/commands/work-on.md" ]; then
+  expect_path "install.sh layout: commands symlink resolves to the repo root" "$T/fr/repo" "$(fr_run "$T/fr/instl" 'forge_root')"
+else echo "SKIP: symlinks unavailable here"; SKIPPED=$((SKIPPED+1)); fi
 mk_install "$T/fr/relocated/cfg/plugins/cache/forgedock/forgedock/1.12.0"
-expect "CLAUDE_CONFIG_DIR-relocated layout resolves" "$T/fr/relocated/cfg/plugins/cache/forgedock/forgedock/1.12.0/scripts/trusted-comments.sh" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' CLAUDE_CONFIG_DIR="$T/fr/relocated/cfg")"
+expect_path "CLAUDE_CONFIG_DIR-relocated layout resolves" "$T/fr/relocated/cfg/plugins/cache/forgedock/forgedock/1.12.0/scripts/trusted-comments.sh" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' CLAUDE_CONFIG_DIR="$T/fr/relocated/cfg")"
+# INFRA-2: CLAUDE_CONFIG_DIR is set (and empty) while the plugin cache lives under ~/.claude
+mkdir -p "$T/fr/emptycfg"
+expect_path "CLAUDE_CONFIG_DIR set but empty, cache under ~/.claude resolves" "$CFG/1.12.0/scripts/trusted-comments.sh" "$(fr_run "$T/fr/plugonly" 'forge_resolve trusted-comments.sh' CLAUDE_CONFIG_DIR="$T/fr/emptycfg")"
+# INFRA-1: Codex / legacy variable layouts with no ~/.claude at all
+expect_path "FORGE_HOME-only layout resolves" "$T/fr/repo/scripts/trusted-comments.sh" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' FORGE_HOME="$T/fr/repo")"
+expect_path "FORGE_ROOT-only layout resolves" "$T/fr/repo/scripts/trusted-comments.sh" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' FORGE_ROOT="$T/fr/repo")"
+mkdir -p "$T/fr/codexhome"; printf '%s\n' "$T/fr/repo" > "$T/fr/codexhome/forge-home"
+expect_path "Codex forge-home file layout resolves" "$T/fr/repo/scripts/trusted-comments.sh" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' CODEX_HOME="$T/fr/codexhome")"
+expect "relative FORGE_HOME is rejected" "" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' FORGE_HOME=fr/cwdplant)"
 expect "unresolved layout prints nothing (cwd plant ignored)" "" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh')"
-expect "unresolved layout: locator leaves forge_resolve undefined and the bootstrap stub fails closed" "BLOCKED" "$(fr_run "$T/fr/h0" "$(grep '# FENCE_BOOTSTRAP$' "$STG_SPEC" | sed 1q); echo reached" | sed -n 's/^\(BLOCKED\).*/\1/p')"
+expect "unresolved layout: the bootstrap stub fails closed" "BLOCKED" "$(fr_run "$T/fr/h0" "$(grep '# FENCE_BOOTSTRAP$' "$STG_SPEC" | sed 1q); echo reached" | sed -n 's/^\(BLOCKED\).*/\1/p')"
+expect "unresolved layout: the bootstrap stub does not reach the fence body" "" "$(fr_run "$T/fr/h0" "$(grep '# FENCE_BOOTSTRAP$' "$STG_SPEC" | sed 1q); echo reached" | sed -n 's/^\(reached\)$/\1/p')"
 expect "relative FORGEDOCK_HOME is rejected" "" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' FORGEDOCK_HOME=fr/cwdplant)"
 expect "path traversal in the script name is rejected" "" "$(fr_run "$T/fr/h0" 'forge_resolve ../scripts/trusted-comments.sh' FORGEDOCK_HOME="$T/fr/npm")"
+# INFRA-5: errexit callers must survive a resolver miss (helper sourced, and helper never found) and reach their own empty-output branch
+expect "errexit: a resolver miss with the helper sourced survives" "survived" "$(fr_run "$T/fr/h0" 'set -e; X=$(forge_resolve nothere.sh); [ -z "$X" ] && echo survived' FORGEDOCK_HOME="$T/fr/npm")"
+expect "errexit: a resolver miss with no helper at all survives" "survived" "$(fr_run "$T/fr/h0" 'set -e; X=$(forge_resolve trusted-comments.sh); [ -z "$X" ] && echo survived')"
+# INFRA-4: under zsh an unmatched glob in the locator must not abort, and there is no cwd-derived self root
+if command -v zsh >/dev/null 2>&1; then
+  expect_path "zsh: locator survives no cache at all and a FORGE_HOME layout resolves" "$T/fr/repo/scripts/trusted-comments.sh" "$(fr_run_sh zsh "$T/fr/h0" 'forge_resolve trusted-comments.sh' FORGE_HOME="$T/fr/repo")"
+  expect "zsh: unresolved layout prints nothing and never trusts the cwd plant" "" "$(fr_run_sh zsh "$T/fr/h0" 'forge_resolve trusted-comments.sh')"
+  expect_path "zsh: numeric-newest cache wins" "$CFG2/2.0.0" "$(fr_run_sh zsh "$T/fr/lexical" 'forge_root')"
+else echo "SKIP: zsh not installed"; SKIPPED=$((SKIPPED+1)); fi
+# INFRA-6: a Windows drive-letter FORGEDOCK_HOME is normalized by the helper (cygpath where present, else the /c/x spelling)
+expect "drive-letter FORGEDOCK_HOME normalizes to /c/x" "/c/forge/x" "$(env -i PATH="$PATH" HOME="$T/fr/h0" bash -c ". '$FR'; _forge_posix 'C:\\forge\\x'" 2>/dev/null | sed 's|^/cygdrive||')"
 
 echo "forge-root tests: pass=$PASS fail=$FAILN skipped=$SKIPPED"
 [ "$FAILN" -eq 0 ]
