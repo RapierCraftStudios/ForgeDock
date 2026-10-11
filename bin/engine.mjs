@@ -564,7 +564,8 @@ export async function runIssue(opts) {
     }
     let outcome;
     if (reconciled.satisfied) {
-      outcome = { status: "committed", outputs: reconciled.outputs || {} };
+      outcome = { status: "committed", outputs: reconciled.outputs || {},
+                  ...(reconciled.terminalReason ? { terminalReason: reconciled.terminalReason } : {}) };
     } else {
       if (reconciled.outputs?.pr) state.pr = reconciled.outputs.pr;
       // forge#2240: the phase is actually about to run (not a resume no-op)

@@ -1276,3 +1276,118 @@ describe("FORGE:CYCLE boundary", () => {
     assert.equal(await nextCycleNumber(42, 0, { gh: async () => jsonLines([]) }), 1);
   });
 });
+
+// forge#3545: engine outcomes must honour the phase's own declared result.
+describe("acceptance-gate-aware build outcome (forge#3545)", () => {
+  const build = PHASES.find((p) => p.id === "build");
+  const st = { ...base, committed: ["investigate"], branch: null };
+  const world = (bodies, { ahead = "2" } = {}) => ({
+    gh: async (args) => (args[0] === "pr" ? "[]" : jsonLines(bodies.map((b) => trusted(b)))),
+    git: async () => ahead,
+  });
+  const gate = (kind) => `<!-- FORGE:ACCEPTANCE_GATE -->\n## Acceptance Gate\n\n<!-- FORGE:ACCEPTANCE_GATE:${kind} -->`;
+  const blocked = "<!-- FORGE:BUILD_BLOCKED -->\n## Build Blocked\n\nreason";
+  const done = builderBody("fix/x-42");
+
+  it("COMPLETE + commits ahead + newer FAILED gate -> failed, retryable:false", async () => {
+    const o = await build.detectOutcome(st, world([done, gate("FAILED")]));
+    assert.equal(o.status, "failed");
+    assert.equal(o.retryable, false);
+  });
+
+  it("COMPLETE + newer BLOCKED gate -> failed, retryable:false", async () => {
+    const o = await build.detectOutcome(st, world([done, gate("BLOCKED")]));
+    assert.equal(o.status, "failed");
+    assert.equal(o.retryable, false);
+  });
+
+  it("COMPLETE + newer FORGE:BUILD_BLOCKED -> failed, retryable:false", async () => {
+    const o = await build.detectOutcome(st, world([done, blocked]));
+    assert.equal(o.status, "failed");
+    assert.equal(o.retryable, false);
+  });
+
+  it("FAILED then a newer PASSED -> committed again", async () => {
+    const o = await build.detectOutcome(st, world([done, gate("FAILED"), gate("PASSED")]));
+    assert.equal(o.status, "committed");
+    assert.equal(o.outputs.branch, "fix/x-42");
+  });
+
+  it("PASSED then a newer FAILED -> failed (order decides, not presence)", async () => {
+    const o = await build.detectOutcome(st, world([done, gate("PASSED"), gate("FAILED")]));
+    assert.equal(o.status, "failed");
+    assert.equal(o.retryable, false);
+  });
+
+  it("no gate marker keeps prior behaviour (committed)", async () => {
+    assert.equal((await build.detectOutcome(st, world([done]))).status, "committed");
+  });
+
+  it("a gate marker quoted in prose, or from an untrusted author, does not block", async () => {
+    const quoted = `see <!-- FORGE:ACCEPTANCE_GATE:FAILED --> in the thread`;
+    assert.equal((await build.detectOutcome(st, world([done, quoted]))).status, "committed");
+    const io = { gh: async () => jsonLines([trusted(done), trusted(gate("FAILED"), { assoc: "NONE", login: "rando" })]), git: async () => "2" };
+    assert.equal((await build.detectOutcome(st, io)).status, "committed");
+  });
+
+  it("no-marker crash stays retryable", async () => {
+    const o = await build.detectOutcome(st, world([]));
+    assert.equal(o.status, "failed");
+    assert.equal(o.retryable, undefined);
+  });
+
+  it("reconcile is unsatisfied while the gate is blocked, satisfied once PASSED", async () => {
+    assert.equal((await build.reconcile(st, world([done, gate("FAILED")]))).satisfied, false);
+    assert.equal((await build.reconcile(st, world([done, gate("FAILED"), gate("PASSED")]))).satisfied, true);
+    assert.equal((await build.reconcile(st, world([done]))).satisfied, true);
+  });
+
+  it("a pre-cycle FAILED gate does not block the new cycle", async () => {
+    const o = await build.detectOutcome(st, world([gate("FAILED"), cycleMarker(1), done]));
+    assert.equal(o.status, "committed");
+  });
+});
+
+describe("close PHASE_COMPLETE outcome (forge#3545)", () => {
+  const close = PHASES.find((p) => p.id === "close");
+  const phaseComplete = "<!-- FORGE:PHASE:COMPLETE -->\nPhase complete. PR #9 merged to `staging`. 1 phase item(s) remain.";
+  const world = (snap, bodies = []) => ({
+    gh: async (args) => (args[0] === "issue" ? JSON.stringify(snap) : jsonLines(bodies.map((b) => trusted(b)))),
+    git: async () => "0",
+  });
+  const open = { state: "OPEN", labels: [{ name: "workflow:investigating" }] };
+
+  it("OPEN + FORGE:PHASE:COMPLETE -> committed phase-complete, first attempt", async () => {
+    const o = await close.detectOutcome(base, world(open, [phaseComplete]));
+    assert.equal(o.status, "committed");
+    assert.equal(o.terminalReason, "phase-complete");
+    assert.equal(o.retryable, undefined);
+  });
+
+  it("reconcile is satisfied with phase-complete; no marker is not", async () => {
+    const r = await close.reconcile(base, world(open, [phaseComplete]));
+    assert.equal(r.satisfied, true);
+    assert.equal(r.terminalReason, "phase-complete");
+    assert.equal((await close.reconcile(base, world(open, []))).satisfied, false);
+  });
+
+  it("OPEN with no marker still fails (real crash unchanged)", async () => {
+    const o = await close.detectOutcome(base, world(open, []));
+    assert.equal(o.status, "failed");
+    assert.equal(o.detail, "issue not closed");
+  });
+
+  it("a prior-cycle, quoted or untrusted PHASE:COMPLETE does not count", async () => {
+    assert.equal((await close.detectOutcome(base, world(open, [phaseComplete, cycleMarker(1)]))).status, "failed");
+    assert.equal((await close.detectOutcome(base, world(open, [`quoting <!-- FORGE:PHASE:COMPLETE --> here`]))).status, "failed");
+    const io = { gh: async (a) => (a[0] === "issue" ? JSON.stringify(open) : jsonLines([trusted(phaseComplete, { assoc: "NONE", login: "rando" })])), git: async () => "0" };
+    assert.equal((await close.detectOutcome(base, io)).status, "failed");
+  });
+
+  it("merged label and CLOSED paths still win over the marker", async () => {
+    const merged = await close.detectOutcome(base, world({ state: "OPEN", labels: [{ name: "workflow:merged" }] }, [phaseComplete]));
+    assert.equal(merged.terminalReason, "merged");
+    const closed = await close.detectOutcome(base, world({ state: "CLOSED", labels: [{ name: "workflow:merged" }] }, [phaseComplete]));
+    assert.equal(closed.terminalReason, "merged");
+  });
+});
