@@ -918,7 +918,7 @@ GATE_OUTPUT=$(Skill("{FORGE_SKILL_PREFIX}test-gate", "--prs \"$(echo $ALL_PR_NUM
 
 # Extract machine-readable verdict from Skill output. An absent/invalid marker stays EMPTY (never coerced to SKIP):
 # the verdict-handling fence treats an empty verdict as missing/invalid and fails closed under blocking posture.
-TEST_GATE_VERDICT=$(echo "$GATE_OUTPUT" | grep -oP '(?<=FORGE:TEST_GATE:RESULT=)(BLOCK|PASS|SKIP)' | tail -1)
+TEST_GATE_VERDICT=$(echo "$GATE_OUTPUT" | grep -oE 'FORGE:TEST_GATE:RESULT=(BLOCK|PASS|SKIP)' | sed 's/^FORGE:TEST_GATE:RESULT=//' | tail -1)
 [ -n "$TEST_GATE_VERDICT" ] || TEST_GATE_REASON="gate result missing/invalid (no FORGE:TEST_GATE:RESULT marker in /test-gate output)"
 
 echo "Test-gate verdict: ${TEST_GATE_VERDICT}"
