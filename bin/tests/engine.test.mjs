@@ -3014,6 +3014,27 @@ describe("runIssue — forge#3574 stale lease / wait-lease / rate-limit resume",
     assert.ok(calls.length >= 1);
   });
 
+  it("waitLease re-reconciles against the post-wait remote (SEC-3705-1)", async () => {
+    const { w, io } = fakeWorld();
+    let t = 1_000_000;
+    w.body = leaseState("cli_other_99", t + 5000);
+    const sleep = async (ms) => {
+      t += ms;
+      // The holder commits investigate during the wait, then its lease lapses.
+      w.body = serializeState({
+        v: 7, run: "r_42_staging", issue: 42, lane: "staging", committed: ["investigate"], phase: null,
+        branch: null, pr: null, terminal: false, terminalReason: null, lease: { by: "cli_other_99", until: t - 1 },
+      });
+    };
+    const calls = [];
+    const runner = async ({ commandName }) => { calls.push(commandName); throw new Error("stop"); };
+    await runIssue({ issue: 42, dir, agentId: "cli_h_1", lane: "staging", io, runner,
+      now: () => t, maxAttempts: 1, hostname: "h", waitLease: true, sleep, leaseTtlMs: 600000 });
+    assert.ok(calls.length >= 1);
+    assert.ok(!calls.some((c) => /investigate/.test(c)), `must not re-run committed investigate: ${calls}`);
+    assert.deepEqual(parseState(w.body).committed, ["investigate"], "must not regress the holder committed list");
+  });
+
   it("waitLease defers when the lease outlives the TTL-bounded wait", async () => {
     const { w, io } = fakeWorld();
     let t = 1_000_000;

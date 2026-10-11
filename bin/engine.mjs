@@ -320,7 +320,7 @@ export async function runIssue(opts) {
 
   // 1. Load + reconcile (GitHub wins).
   const local = readLog(dir, issue).length ? deriveState(readLog(dir, issue)) : null;
-  const remote = await projector.readState(issue);
+  let remote = await projector.readState(issue);
   let { state, action } = reconcileState(local, remote);
   const leaseHeld = (r) => !!(r?.lease && r.lease.until > now() && r.lease.by !== agentId &&
     !isLeaseHolderDead({ by: r.lease.by, host: hostname, killFn }));
@@ -347,6 +347,10 @@ export async function runIssue(opts) {
       await sleep(Math.min(remaining, Math.max(0, cur.lease.until - now()), 15000) || 1);
       cur = await projector.readState(issue);
     }
+    // The holder may have committed phases (or finished) while we waited: re-reconcile
+    // against the post-wait remote so the lease write below cannot regress its state.
+    remote = cur;
+    ({ state, action } = reconcileState(local, remote));
   }
   if (!state) {
     state = freshState(issue, lane);
