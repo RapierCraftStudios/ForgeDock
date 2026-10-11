@@ -527,10 +527,19 @@ if [ "$(printf '%s' "$PR_LIVE" | jq -r '.state // ""' 2>/dev/null)" = "MERGED" ]
       ;;
   esac
   # PR_ALREADY_MERGED=true: SKIP the rest of Phase M7 (needs-human, awaiting-merge and bar blocks) and go to Phase M8.
+else
+  # forge#3686: capture the approved head ONCE, here, for the normal (non-resume) path. Never re-read it later: a re-read after the push window would absorb the very push the merge guard must catch. Persisted because every fence is a fresh shell.
+  _SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD" 2>/dev/null || true
+  APPROVED_HEAD=$(printf '%s' "$PR_LIVE" | jq -r '.headRefOid // ""' 2>/dev/null)
+  case "$APPROVED_HEAD" in *[!0-9a-f]*|"") APPROVED_HEAD="" ;; esac
+  [ "${#APPROVED_HEAD}" -eq 40 ] || APPROVED_HEAD=""
+  printf '%s\n' "$APPROVED_HEAD" > "$_SD/remediate_approved_head_{PR_NUMBER}" 2>/dev/null || true
 fi
 ```
 
 **If `RE_GATE_OUTCOME` is already `AUTO-LANDED` after the check above, skip the remainder of Phase M7 and go to Phase M8.** Everything below applies only to a PR that is still open.
+
+**Approved head on every path (forge#3686)**: for a PR that is still open, the fence above captures `APPROVED_HEAD` (the live `headRefOid` that M6's re-review parked) once at M7 start and persists it to `${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/remediate_approved_head_{PR_NUMBER}`; the resume path overwrites it with `RESUME_APPROVED_HEAD`. The CI-gated merge reloads it (never re-reads the PR) and refuses with `CI_GATE_RC=4` when it is empty or differs from `GATED_HEAD`, so a commit pushed after approval cannot merge. Residual window: a push between M6's verdict and the M7 capture is treated as approved.
 
 **Live base (computed BEFORE the resume substitution, forge#3684)**: re-derive the base fresh — do NOT reuse `$PR_BASE` for this decision (forge#2624): `$PR_BASE` was resolved in Phase M0 and a caller-supplied `--base` wins over the PR's actual live base. This is a security-relevant decision point, so re-query the PR's live base independent of `$PR_BASE`. Fail closed: only a KNOWN, non-empty, non-`null`, non-`main` live base reconciles to the fast lane (forge#2570); empty, the literal string `null` (jq stringifies JSON null, forge#2625) or `main` is the deploy gate (strict).
 
@@ -539,7 +548,7 @@ LIVE_BASE_REF=$(gh pr view {PR_NUMBER} {GH_FLAG} --json baseRefName --jq '.baseR
 if [ -n "$LIVE_BASE_REF" ] && [ "$LIVE_BASE_REF" != "null" ] && [ "$LIVE_BASE_REF" != "main" ]; then IS_DEPLOY_GATE=false; else IS_DEPLOY_GATE=true; fi
 ```
 
-**Resume path (`RESUME_AT_M7=true`)**: no M3 quality gate ran in this invocation, so `GATE_PASSED` is not set. Substitute fresh evidence that the PR is approved at its CURRENT head: a trusted (Bot or OWNER/MEMBER/COLLABORATOR) verdict whose body starts with `APPROVED: commit <sha>` (anchored, case-sensitive, so `NOT APPROVED:` and quoted text never match), where `<sha>` is a 7-40 hex prefix of the live `headRefOid` (or the body starts with `APPROVED:` and carries a `Reviewed-SHA: <headRefOid>` line; a `Reviewed-SHA:` line without the `APPROVED:` prefix never counts, forge#3738). The binding is to the commit SHA, never to a timestamp: commit dates are author-controlled. Both the PR reviews (where `review-pr.md` posts the verdict via `gh pr review --comment`; a review's `commit_id` must also equal the head) and the PR issue-comments are read. An empty `headRefOid`, unreadable endpoint, or no SHA-matching verdict means `GATE_PASSED=false` (hold). The CI-gated merge below additionally refuses when `GATED_HEAD` differs from the approved SHA. The substitution applies to non-`main` bases only: when `RESUME_AT_M7=true` and `IS_DEPLOY_GATE=true`, `GATE_PASSED=false` is forced and the bar below holds (`BAR_MET=false`) in code, so a `main` (deploy-gate) base never lands from the resume path. CI is still verified by the mandatory CI gate below.
+**Resume path (`RESUME_AT_M7=true`)**: no M3 quality gate ran in this invocation, so `GATE_PASSED` is not set. Substitute fresh evidence that the PR is approved at its CURRENT head: a trusted (Bot or OWNER/MEMBER/COLLABORATOR) verdict whose body starts with `APPROVED: commit <sha>` (anchored, case-sensitive, so `NOT APPROVED:` and quoted text never match), where `<sha>` is a 7-40 hex prefix of the live `headRefOid` (or the body starts with `APPROVED:` and carries a `Reviewed-SHA: <headRefOid>` line; a `Reviewed-SHA:` line without the `APPROVED:` prefix never counts, forge#3738). The binding is to the commit SHA, never to a timestamp: commit dates are author-controlled. Both the PR reviews (where `review-pr.md` posts the verdict via `gh pr review --comment`; a review's `commit_id` must also equal the head) and the PR issue-comments are read. An empty `headRefOid`, unreadable endpoint, or no SHA-matching verdict means `GATE_PASSED=false` (hold). The CI-gated merge below additionally refuses when `GATED_HEAD` differs from the approved SHA (`APPROVED_HEAD`, which on this path is `RESUME_APPROVED_HEAD`). The substitution applies to non-`main` bases only: when `RESUME_AT_M7=true` and `IS_DEPLOY_GATE=true`, `GATE_PASSED=false` is forced and the bar below holds (`BAR_MET=false`) in code, so a `main` (deploy-gate) base never lands from the resume path. CI is still verified by the mandatory CI gate below.
 
 ```bash
 # Fresh shell per Bash call: re-derive the live base here (same derivation as above) and re-fetch PR_LIVE if empty. Unresolved => strict.
@@ -566,6 +575,9 @@ if [ "${RESUME_AT_M7:-false}" = "true" ]; then
   if [ "${IS_DEPLOY_GATE:-true}" = "true" ]; then GATE_PASSED=false   # main / empty / null base: resume never lands
   elif [ "${RESUME_APPROVED_N:-0}" -ge 1 ]; then GATE_PASSED=true
   else GATE_PASSED=false; fi
+  # forge#3686: on resume the approved head is the SHA the approval evidence was bound to (overrides the M7-start capture).
+  _SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD" 2>/dev/null || true
+  printf '%s\n' "${RESUME_APPROVED_HEAD:-}" > "$_SD/remediate_approved_head_{PR_NUMBER}" 2>/dev/null || true
 fi
 ```
 
@@ -638,10 +650,14 @@ if [ -n "$CI_GATE_SCRIPT" ]; then CI_GATE_OUT=$(bash "$CI_GATE_SCRIPT" {PR_NUMBE
 else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
 echo "$CI_GATE_OUT"
 GATED_HEAD=$(printf '%s\n' "$CI_GATE_OUT" | sed -n 's/^CI_GATE_HEAD: //p' | head -1)
-# forge#3726: on the resume path the merge must land the exact SHA the approval was bound to.
-if [ "${RESUME_AT_M7:-false}" = "true" ] && [ "$CI_GATE_RC" -eq 0 ] && { [ -z "${RESUME_APPROVED_HEAD:-}" ] || [ "$GATED_HEAD" != "$RESUME_APPROVED_HEAD" ]; }; then
+# forge#3726 / forge#3686: on EVERY path the merge must land the exact SHA the approval was bound to. Reload the persisted head (never re-read the PR here); unset/invalid fails closed.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"
+APPROVED_HEAD=$(head -n 1 "$_SD/remediate_approved_head_{PR_NUMBER}" 2>/dev/null || true)
+case "$APPROVED_HEAD" in *[!0-9a-f]*) APPROVED_HEAD="" ;; esac
+[ "${#APPROVED_HEAD}" -eq 40 ] || APPROVED_HEAD=""
+if [ "$CI_GATE_RC" -eq 0 ] && { [ -z "${APPROVED_HEAD:-}" ] || [ "$GATED_HEAD" != "$APPROVED_HEAD" ]; }; then
   CI_GATE_OUT="${CI_GATE_OUT}
-CI_GATE: head ${GATED_HEAD:-unknown} is not the approved head ${RESUME_APPROVED_HEAD:-none} (fail closed)"; CI_GATE_RC=4
+CI_GATE: head ${GATED_HEAD:-unknown} is not the approved head ${APPROVED_HEAD:-none} (fail closed)"; CI_GATE_RC=4
 fi
 # rc 3 = CI still running: re-run this block (up to 3 more times) before treating it as a failure.
 if [ "$CI_GATE_RC" -ne 0 ]; then

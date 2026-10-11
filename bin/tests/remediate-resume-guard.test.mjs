@@ -38,7 +38,8 @@ describe("forge#3684 remediate.md resume guard", () => {
   });
 
   it("forge#3726: the resume merge is pinned to the approved head", () => {
-    assert.match(spec, /GATED_HEAD" != "\$RESUME_APPROVED_HEAD"/);
+    assert.match(spec, /GATED_HEAD" != "\$APPROVED_HEAD"/);
+    assert.ok(!spec.includes('if [ "${RESUME_AT_M7:-false}" = "true" ] && [ "$CI_GATE_RC" -eq 0 ]'), "guard must not be resume-only");
     assert.match(spec, /CI_GATE_RC=4/);
   });
 
