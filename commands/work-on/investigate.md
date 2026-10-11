@@ -74,31 +74,14 @@ if [[ "$ADAPTIVE_DIR" != "${REPO_PATH_NORM}/"* ]]; then
   echo "WARNING: adaptive_scripts.directory resolves outside repo root ('$ADAPTIVE_DIR') — adaptive tier disabled" >&2
   ADAPTIVE_ENABLED=false
 fi
-# ForgeDock's own install root (holds scripts/ and commands/), resolved ONCE by the canonical bootstrap
+# ForgeDock's own install root (holds scripts/ and commands/), resolved ONCE by the shared forge_resolve stub
 # below — never the consumer repo: plugin installs set neither FORGE_HOME nor FORGEDOCK_HOME, and a
 # repo-relative fallback would execute (or miss) a same-named script controlled by the consumer repo.
 # Resolution: $FORGEDOCK_HOME (authoritative when set) > $FORGE_HOME > $CLAUDE_PLUGIN_ROOT > the
 # ~/.claude/commands symlink target > the Claude Code plugin cache/marketplace dirs. <!-- forge#3098 -->
-# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
-FORGE_ROOT=""
-# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
-_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
-# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
-_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
-if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
-  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
-  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-  # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
-  _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
-  # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
-  _m="$HOME/.claude/plugins/marketplaces/$_mk"
-  # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
-  while IFS= read -r _c; do
-    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
-  done <<< "$_k"
-fi
+# FORGE_ROOT: shared resolver scripts/lib/forge-resolve.sh (empty when unresolved => callers fail closed)
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+FORGE_ROOT="$(forge_root 2>/dev/null || true)"
 UNIVERSAL_DIR="${FORGE_ROOT:+$FORGE_ROOT/scripts}"   # empty => tier 3 skipped, prose tier
 # NOTE: never resolve this via `which` or `find` — universal scripts are
 # install-relative, not installed on $PATH, so a PATH lookup always misses.
@@ -605,7 +588,7 @@ bash {REPO_PATH}/scripts/code-index.sh query --domain {DOMAIN_LABEL} --repo-path
    - Per affected file: a new file counts about its full size; an edit counts about its hunks (added plus deleted lines). Add roughly 1:1 test lines for changed behavior. Skip lockfiles, generated files and fixtures (the gate excludes them).
    - `INDEPENDENT_SEAMS`: the number of independently buildable pieces. For a batch issue (several review findings or checklist members) this is the member count; otherwise count distinct directory/phase seams. Minimum 1.
    - Resolve config (defaults when absent): `THRESHOLD=$(yq '.build.diff_size.threshold // 1000' forge.yaml 2>/dev/null || echo 1000)`, `FACTOR=$(yq '.build.diff_size.estimate_factor // 1.2' forge.yaml 2>/dev/null || echo 1.2)`, `SEAM_MIN=$(yq '.build.diff_size.batch_seam_min // 3' forge.yaml 2>/dev/null || echo 3)`.
-   - Rule: when `build.diff_size.threshold` is `0` the rule is skipped (emit `GATE_THRESHOLD: 0`). Otherwise the Decomposition Assessment MUST be `**YES**` when `ESTIMATED_DIFF_LINES` > threshold x `FACTOR` (`estimate_factor`, default 1.2), OR when `INDEPENDENT_SEAMS` >= `batch_seam_min` and `ESTIMATED_DIFF_LINES` > threshold / 2 (not well under the gate). Propose one sub-issue per seam. A batch that is well under the gate (estimate at or under half the threshold) may stay `**NO**`.
+   - Rule: when `build.diff_size.threshold` is `0` the rule is skipped (emit `GATE_THRESHOLD: 0`). Otherwise the Decomposition Assessment MUST be `**YES**` when `ESTIMATED_DIFF_LINES` > threshold x `FACTOR` (`estimate_factor`, default 1.2), OR when `INDEPENDENT_SEAMS` >= `batch_seam_min` and `ESTIMATED_DIFF_LINES` > threshold / 2 (not well under the gate). The seam clause does NOT apply to an issue produced by review-finding batching (it has the `batch` label or a `FORGE:BATCH_MEMBERS` block): a batch was formed to be built as one unit, so it is `**YES**` only when `ESTIMATED_DIFF_LINES` > threshold x `FACTOR`, otherwise `**NO**`. <!-- Added: forge#3786 --> When YES, propose `max(2, ceil(ESTIMATED_DIFF_LINES / (0.8 x threshold)))` sub-issues, packing related seams together so each sub-issue's estimate (code plus tests) is at or under 0.8 x threshold; each sub-issue lists the seams it covers (migration-ordering seams may stay separate). Do not propose one sub-issue per seam. A YES that neither condition requires (estimate at or under threshold x `FACTOR` and not the seam clause) needs an own-line `DECOMPOSE_JUSTIFICATION: <reason>` line; the engine treats a YES without one as NO. A pure under-gate issue may stay `**NO**`.
    - **Exemption** <!-- Added: forge#3676 -->: emit `**NO**` (state the guard in the reason; still emit the numeric fields) instead of `**YES**` when the issue is already a sub-issue (its body has a `**Parent**: #N` line), a `FORGE:DECOMPOSED` comment exists, or a justified `FORGE:SIZE_OVERRIDE` exists. Decompose Guard 1 refuses these issues, so a YES would stall the run; the over-threshold YES rule applies only otherwise. The engine applies the same guard when it reads the verdict.
    - Emit the numbers in the comment as the own-line fields in Phase 1C. A pure estimate is a heuristic; state it in the reason, do not pad it.
 8. **Fix-approach validation** — if the issue proposes a fix, don't adopt it as spec. Trace through the target system's middleware, auth, routing, config. Cross-domain: if fix in domain A interacts with domain B, read domain B's files too.
@@ -714,6 +697,7 @@ ESTIMATED_DIFF_LINES: {N}
 INDEPENDENT_SEAMS: {N}
 GATE_THRESHOLD: {N — build.diff_size.threshold; 0 when the gate is disabled}
 ESTIMATE_FACTOR: {FACTOR — resolved build.diff_size.estimate_factor, positive number, decimal allowed; 1.2 by default}
+{optional, only for a YES the numbers do not require: DECOMPOSE_JUSTIFICATION: {one-line reason}}
 <!-- DECOMPOSE:{YES|NO} -->
 
 ### Acceptance Spec <!-- Added: forge#1829 -->
@@ -737,6 +721,8 @@ ACCEPTANCE_CHECK: id=ac-4 type=command target="grep -qE '(>= ?2|2\+)' commands/o
 - `command` — run a shell command and assert exit 0 (`target` = shell command, `matcher` = `exit_0`)
 - `behavior` — assert a runtime/observable behavior via shell command (`target` = shell command, `matcher` = expected output string or regex)
 
+**Literal shell (MANDATORY)** <!-- Added: forge#3694 -->: a `command`/`behavior` `target` is literal shell, executed as written after only `\"` is unescaped. Never JSON-escape it: do not double backslashes (a run of four or more backslashes is flagged `malformed-check` by the acceptance gate and the check is never run). Pass grep patterns with `-e` or `--` so a pattern starting with `-` is not read as an option (exit 2 is also reported as `malformed-check`). For fixed strings prefer `grep -F`: `grep -qF -e '<literal>' <file>` needs no regex escaping at all.
+
 **Self-defeating pipe guideline**: do NOT chain a `-q`/`--quiet` command into a downstream pipe consumer (e.g. `grep -q ... | grep ...`). A `-q` flag suppresses all stdout, so the next command in the pipe always receives empty input and the check can never pass regardless of the actual file content. If a check needs to verify two conditions against the same output, sequence them instead — e.g. `grep -qE 'first' file && grep -qE 'second' file` — or capture the output once and grep the captured variable.
 
 **Class-wide checks (review-finding issues)**: when a Pattern Sweep was recorded, emit at least one `ACCEPTANCE_CHECK` that verifies the fix covers every `fix` row (for example a `command` check that the defective pattern no longer matches anywhere in the swept paths) and one that verifies the added test covers a representative set of instances rather than the reviewer's single repro. <!-- Added: forge#3449 -->
@@ -750,9 +736,9 @@ ${INVESTIGATION_SENTINEL}"
 
 **Decomposition marker (MANDATORY, both output paths — template and codec)**: emit exactly one `<!-- DECOMPOSE:YES -->` or `<!-- DECOMPOSE:NO -->` line per investigator comment, matching the `**YES**`/`**NO**` verdict, on its own line (nothing else on that line) after the verdict line and any sub-issue list (the `**YES**`/`**NO**` line must stay directly under the heading — the resume parser reads it). The headless engine routes to `work-on/decompose` on this marker (or on the `**YES**` heading in older comments). Never quote or mention the opposite marker anywhere in the comment. Never emit it when Verdict=INVALID. <!-- Added: forge#3543 -->
 
-**Size-estimate fields (MANDATORY when Verdict is not INVALID)** <!-- Added: forge#3573 -->: `ESTIMATED_DIFF_LINES: N`, `INDEPENDENT_SEAMS: N` and `GATE_THRESHOLD: N` are each alone on their own line (whole numbers, no prose or backticks on the line), as is `ESTIMATE_FACTOR: F` (the resolved `FACTOR`, a positive number, decimal allowed), INSIDE `### Decomposition Assessment` after the verdict line and sub-issue list and before the `<!-- DECOMPOSE:.. -->` marker. The engine reads them with full-line anchors as a safety net: an estimate over `GATE_THRESHOLD` x `ESTIMATE_FACTOR` (1.2 when the field is absent or invalid) routes to decompose even when the verdict says NO, so the verdict and the numbers must agree. Never quote these field lines elsewhere in the comment.
+**Size-estimate fields (MANDATORY when Verdict is not INVALID)** <!-- Added: forge#3573 -->: `ESTIMATED_DIFF_LINES: N`, `INDEPENDENT_SEAMS: N` and `GATE_THRESHOLD: N` are each alone on their own line (whole numbers, no prose or backticks on the line), as is `ESTIMATE_FACTOR: F` (the resolved `FACTOR`, a positive number, decimal allowed), INSIDE `### Decomposition Assessment` after the verdict line and sub-issue list and before the `<!-- DECOMPOSE:.. -->` marker. The engine reads them with full-line anchors as a safety net: an estimate over `GATE_THRESHOLD` x `ESTIMATE_FACTOR` (1.2 when the field is absent or invalid) routes to decompose even when the verdict says NO, so the verdict and the numbers must agree. Conversely, the engine downgrades a `**YES**` whose numbers require neither the over-threshold rule nor the seam clause (seams >= 3 and estimate > threshold / 2) to NO unless the comment carries an own-line `DECOMPOSE_JUSTIFICATION: <reason>` line (same placement as the fields above); the line is optional otherwise. <!-- Added: forge#3786 --> Never quote these field lines elsewhere in the comment.
 
-**Decomposition scopes the Acceptance Spec**: when the assessment is YES, the Acceptance Spec MUST cover only the first, in-scope item — or tag each check with the sub-item it belongs to (append `# item-N` to the description). Never emit checks for work the assessment assigns to a separate sub-issue: build's acceptance gate would otherwise fail on them and its repair loop would pull that work into this branch. <!-- Added: forge#3543 -->
+**Decomposition scopes the Acceptance Spec**: when the assessment is YES, the parent becomes a terminal tracker (decompose creates a sub-issue for every item, including the first; the parent builds nothing), so the Acceptance Spec MUST NOT claim item 1 as in scope on the parent: emit only tracker-level checks, or tag each check with the sub-item it belongs to (append `# item-N` to the description). Never emit checks for work the assessment assigns to a sub-issue: build's acceptance gate would otherwise fail on them and its repair loop would pull that work into this branch. <!-- Added: forge#3543 -->
 
 **Do not hardcode `<!-- INVESTIGATION:COMPLETE -->` as the closing line.** The closing line MUST be the `${INVESTIGATION_SENTINEL}` variable computed above — it resolves to `<!-- INVESTIGATION:INVALID -->` for an INVALID verdict and `<!-- INVESTIGATION:COMPLETE -->` otherwise. `INVESTIGATION:COMPLETE` and `INVESTIGATION:INVALID` are mutually exclusive within a single posted comment — never emit both.
 

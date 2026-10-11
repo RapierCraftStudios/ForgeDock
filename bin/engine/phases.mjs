@@ -228,6 +228,17 @@ async function hasTrajectory(issue, io) {
 }
 
 /**
+ * forge#3772: investigation close evidence, shared by close.reconcile and close.detectOutcome.
+ * A trusted FORGE:TRAJECTORY, or a trusted current-cycle FORGE:PHASE:COMPLETE (multi-phase body).
+ * Throws on fetch error; callers fail closed.
+ */
+async function hasInvestigationCloseEvidence(issue, io) {
+  const { comments } = await issueMarkers(issue, io);
+  return comments.some((b) => startsWithHeader(b, "FORGE:TRAJECTORY"))
+    || hasPhaseComplete(sliceToCurrentCycle(comments));
+}
+
+/**
  * Trusted comment bodies, chronological — the same single fetch + trust predicate
  * as issueMarkers() (one path, forge#3542). Fail closed: a fetch error yields `[]` here (issueMarkers itself propagates it).
  */
@@ -529,6 +540,8 @@ async function reviewArgs(state, ctx, io) {
 
 /** Default `build.diff_size.estimate_factor` (docs/CONFIG.md); used when the report carries no valid `ESTIMATE_FACTOR:` field. */
 const DEFAULT_ESTIMATE_FACTOR = 1.2;
+/** Default `build.diff_size.batch_seam_min` (docs/CONFIG.md); the engine cannot read forge.yaml here. */
+const DEFAULT_BATCH_SEAM_MIN = 3;
 
 /**
  * Is the issue assessed for decomposition? Evaluated on ONE comment: the newest
@@ -550,23 +563,41 @@ function isDecomposed(report) {
     console.error(`[engine] conflicting decomposition signals (heading=${verdict ?? "none"}, markers=${[...markers].join("+") || "none"}); treating as not decomposed`);
     return false;
   }
-  if ((verdict ?? marker) === "YES") return true;
-  // forge#3573 safety net: an investigator NO whose own size estimate is clearly over
-  // the gate (estimate > threshold x factor) fails toward decompose. Own-line,
-  // whole-number fields only; absent/0/non-numeric fields have no effect. The factor is
-  // the investigator's effective `ESTIMATE_FACTOR:` (positive decimal); absent/invalid -> 1.2.
+  // forge#3573 safety net inputs: own-line, whole-number fields only; absent/0/non-numeric
+  // fields have no effect. The factor is the investigator's effective `ESTIMATE_FACTOR:`
+  // (positive decimal); absent/invalid -> 1.2.
   const est = /^ESTIMATED_DIFF_LINES:[ \t]*(\d+)[ \t]*$/m.exec(text);
   const gate = /^GATE_THRESHOLD:[ \t]*(\d+)[ \t]*$/m.exec(text);
   const fac = /^ESTIMATE_FACTOR:[ \t]*(\d+(?:\.\d+)?)[ \t]*$/m.exec(text);
+  const seamsM = /^INDEPENDENT_SEAMS:[ \t]*(\d+)[ \t]*$/m.exec(text);
   const parsedFactor = fac ? Number(fac[1]) : NaN;
   const factor = Number.isFinite(parsedFactor) && parsedFactor > 0 ? parsedFactor : DEFAULT_ESTIMATE_FACTOR;
-  if (est && gate) {
-    const estimate = Number(est[1]);
-    const threshold = Number(gate[1]);
-    if (threshold > 0 && estimate > threshold * factor) {
-      console.error(`[engine] investigator estimate ${estimate} exceeds gate ${threshold} x ${factor}; routing to decompose`);
-      return true;
+  const sized = est && gate && Number(gate[1]) > 0;
+  const estimate = sized ? Number(est[1]) : 0;
+  const threshold = sized ? Number(gate[1]) : 0;
+  if ((verdict ?? marker) === "YES") {
+    // forge#3786: a YES the numbers do not require is downgraded to NO unless the report
+    // carries an own-line `DECOMPOSE_JUSTIFICATION:` line. Required = estimate over
+    // threshold x factor, or the seam clause (seams >= batch_seam_min and estimate over
+    // threshold / 2). The engine cannot see the `batch` label or the configured
+    // `batch_seam_min`, so it uses the default 3 and stays lenient for batches. Absent
+    // numeric fields keep the YES (no silent downgrade of a malformed report).
+    if (sized) {
+      const seams = seamsM ? Number(seamsM[1]) : 0;
+      const required = estimate > threshold * factor || (seams >= DEFAULT_BATCH_SEAM_MIN && estimate > threshold / 2);
+      const justified = /^DECOMPOSE_JUSTIFICATION:[ \t]*\S/m.test(text);
+      if (!required && !justified) {
+        console.error(`[engine] unsupported DECOMPOSE:YES (estimate ${estimate}, seams ${seams}, gate ${threshold} x ${factor}, no DECOMPOSE_JUSTIFICATION); treating as not decomposed`);
+        return false;
+      }
     }
+    return true;
+  }
+  // forge#3573 safety net: an investigator NO whose own size estimate is clearly over
+  // the gate (estimate > threshold x factor) fails toward decompose.
+  if (sized && estimate > threshold * factor) {
+    console.error(`[engine] investigator estimate ${estimate} exceeds gate ${threshold} x ${factor}; routing to decompose`);
+    return true;
   }
   return false;
 }
@@ -968,8 +999,11 @@ export const PHASES = [
         // forge#3534: the implement child closes an investigation issue itself, so CLOSED is no
         // proof close.md ran (board, summary, trajectory). Its own idempotency key is the
         // FORGE:TRAJECTORY comment; only that makes this satisfied.
+        // forge#3772: investigation exits are normally single-phase (close.md C1 skips the
+        // multi-phase guard for them); a trusted current-cycle PHASE:COMPLETE is accepted as a
+        // safety net so a multi-phase body cannot make every retry fail.
         try {
-          return { satisfied: await hasTrajectory(state.issue, io), terminalReason: "investigation" };
+          return { satisfied: await hasInvestigationCloseEvidence(state.issue, io), terminalReason: "investigation" };
         } catch { return { satisfied: false }; }
       }
       if (snap.state === "CLOSED") return { satisfied: true };
@@ -1006,7 +1040,7 @@ export const PHASES = [
         // The issue is always already CLOSED for an investigation run, so require the same
         // positive evidence as reconcile (a trusted FORGE:TRAJECTORY); fail closed on error.
         let ran = false;
-        try { ran = await hasTrajectory(state.issue, io); } catch { ran = false; }
+        try { ran = await hasInvestigationCloseEvidence(state.issue, io); } catch { ran = false; }
         return ran
           ? { status: "committed", terminalReason: "investigation", outputs: {} }
           : { status: "failed", detail: "investigation close: no FORGE:TRAJECTORY" };

@@ -32,7 +32,7 @@ chk commands/quality-gate.md 'VALIDATOR="${FORGE_ROOT:+$FORGE_ROOT/scripts/valid
 chk commands/quality-gate.md 'CONFLICT_CHECKER="${FORGE_ROOT:+$FORGE_ROOT/scripts/check-native-conflicts.sh}"'
 chk commands/quality-gate.md 'SPEC_BASH_CHECKER="${FORGE_ROOT:+$FORGE_ROOT/scripts/check-spec-bash.sh}"'
 chk commands/quality-gate.md 'CLASSIFIER="${FORGE_ROOT:+$FORGE_ROOT/scripts/flaky-quarantine.sh}"'
-chk commands/review-pr.md 'CLASSIFIER="${FORGE_ROOT:+$FORGE_ROOT/scripts/flaky-quarantine.sh}"'
+chk commands/review-pr.md 'CLASSIFIER=$(forge_resolve flaky-quarantine.sh)'
 # validate.md must not name the worktree scripts dir at all (ac-1)
 grep -qF '{WORKTREE_PATH}/scripts' "$ROOT/commands/work-on/build/validate.md" && bad "validate.md references {WORKTREE_PATH}/scripts" || ok
 

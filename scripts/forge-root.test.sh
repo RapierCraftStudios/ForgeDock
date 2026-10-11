@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# forge-root.test.sh — guards the canonical FORGE_ROOT bootstrap (forge#3098).
+# forge-root.test.sh — guards the shared forge_resolve stub that resolves FORGE_ROOT in every spec (forge#3098, #3778-#3781).
 # Plugin installs set neither FORGEDOCK_HOME nor FORGE_HOME; the specs must resolve ForgeDock's OWN
 # install root (never the consumer repo) and fail closed when it cannot be found.
 # Usage: bash scripts/forge-root.test.sh
@@ -7,41 +7,23 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$HERE/.."
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); T="$(cd "$T" && pwd -P)"   # physical path: the helper reports pwd -P roots (macOS /var, Git Bash /tmp are symlinks)
+trap 'rm -rf "$T"' EXIT
 PASS=0; FAILN=0; SKIPPED=0
 ok()  { PASS=$((PASS+1)); }
 bad() { FAILN=$((FAILN+1)); echo "FAIL: $1"; }
 expect() { [ "$2" = "$3" ] && ok || bad "$1 (got '$3' want '$2')"; }
 
-SITES="commands/work-on.md commands/work-on/build/validate.md commands/quality-gate.md commands/work-on/review.md commands/work-on/investigate.md commands/work-on/decompose.md commands/work-on/build.md commands/work-on/close.md commands/review-pr.md commands/work-on/remediate.md commands/orchestrate/phase-1-resolve.md commands/orchestrate/phase-4-execution.md"
+STUB_SITES="commands/work-on.md commands/work-on/build/validate.md commands/quality-gate.md commands/work-on/review.md commands/work-on/investigate.md commands/work-on/decompose.md commands/work-on/build.md commands/work-on/close.md commands/orchestrate/phase-1-resolve.md commands/orchestrate/phase-4-execution.md commands/work-on/remediate.md commands/review-pr.md"
+# Every site above carries the #3778 forge_resolve stub (no inlined FORGE_ROOT bootstrap copies; #3779, #3780, #3781), so every per-site hygiene check below applies to all of them.
+# The pinned locator line is the one in review-pr-staging.md; the "FORGE_ROOT stub" the specs carry is that locator plus FORGE_ROOT="$(forge_root 2>/dev/null || true)".
+STG_SPEC="$ROOT/commands/review-pr-staging.md"
+sed 's/^[[:space:]]*//' "$STG_SPEC" | grep '^type forge_resolve >/dev/null' | sed 1q > "$T/locator.sh"
+[ -s "$T/locator.sh" ] && ok || bad "pinned forge_resolve locator not found in review-pr-staging.md"
+FR_LINE='FORGE_ROOT="$(forge_root 2>/dev/null || true)"'
+# the unit under test: the real two-line stub the specs carry
+{ cat "$T/locator.sh"; printf '%s\n' "$FR_LINE"; } > "$T/canon"
 
-# extract the bootstrap block (comment line .. closing top-level fi), indentation stripped
-# Block ends at the first line (after the marker) that starts with `fi` at the marker's own indentation.
-# extract <file> <n> prints the n-th (1-based) bootstrap copy in the file.
-extract() { awk -v want="$2" '/# FORGE_ROOT bootstrap/{c++; if(c==want){f=1; match($0,/^[ ]*/); ind=RLENGTH}} f{l=$0; sub(/^[ ]+/,"",l); print l} f&&match($0,/^[ ]*fi$/)&&RLENGTH-2==ind{exit}' "$ROOT/$1"; }
-count_copies() { grep -c '# FORGE_ROOT bootstrap' "$ROOT/$1"; }
-extract commands/work-on.md 1 > "$T/canon"
-[ -s "$T/canon" ] && ok || bad "canonical bootstrap not found in work-on.md"
-# Expected copies per file are DERIVED from the number of FORGE_ROOT resolution loops
-# (`FORGE_ROOT="$_c"` lines) so adding a site never needs a hardcoded count here; count_copies
-# (marker comments) must still agree with it, which catches a loop pasted without its marker.
-want_copies() { grep -c 'FORGE_ROOT="\$_c"' "$ROOT/$1"; }
-for f in $SITES; do
-  n=$(count_copies "$f"); expect "exact bootstrap copy count in $f" "$(want_copies "$f")" "$n"
-  i=1
-  while [ "$i" -le "$n" ]; do   # compare EVERY copy
-    extract "$f" "$i" > "$T/s"
-    cmp -s "$T/canon" "$T/s" && ok || bad "bootstrap copy $i in $f differs from canonical"
-    i=$((i+1))
-  done
-done
-# the canonical block must not contain the stale lexical glob / unfiltered marketplaces glob
-grep -v '^[[:space:]]*#' "$T/canon" > "$T/canon.code"   # code only: the comments name the banned constructs
-grep -qE 'mapfile|readarray|declare -A|sort[^|]* -[a-zA-Z]*V' "$T/canon.code" && bad "canonical bootstrap uses a bash-4+/non-portable construct" || ok
-grep -q 'sort -k1,1nr -k2,2nr -k3,3nr' "$T/canon.code" && ok || bad "canonical bootstrap lacks numeric component version sort"
-grep -qF 'marketplaces/*; do' "$T/canon" && bad "canonical bootstrap globs all marketplaces" || ok
-grep -qF -- "-iname '*forgedock*'" "$T/canon.code" && bad "canonical bootstrap wildcard-matches marketplaces" || ok
-grep -qF '[A-Za-z]:' "$T/canon.code" && ok || bad "canonical bootstrap lacks drive-letter path handling"
 # review.md must hard-exit on an unreadable trail
 grep -qE 'TRAIL_RC.* -ge 2 .*exit 1' "$ROOT/commands/work-on/review.md" && ok || bad "work-on/review.md lacks hard exit guard for TRAIL_RC>=2"
 # behavioral: execute the guard line itself. rc>=2 => BLOCKED on STDOUT + exit 1; rc 0/1 => falls through.
@@ -57,7 +39,7 @@ for rc in 0 1; do
 done
 
 # no consumer-repo fallback / fail-open remains in the gates
-for f in $SITES; do
+for f in $STUB_SITES; do
   grep -nE 'FORGE_HOME:-\$?\{?\{?REPO_PATH\}*/scripts' "$ROOT/$f" >/dev/null && bad "repo-path fallback in $f" || ok
 done
 for f in commands/review-pr.md commands/work-on/review.md; do
@@ -84,10 +66,8 @@ if [ -z "${FORGE_ROOT_TEST_SHELLS:-}" ] && command -v zsh >/dev/null 2>&1; then 
 for SH in $SHELLS; do
 echo "== bootstrap behavior under: $SH"
 mkdir -p "$T/consumer/scripts"; : > "$T/consumer/scripts/verify-phase-trail.sh"   # hostile/lookalike consumer repo
-mkscripts() {
-  mkdir -p "$1/scripts" "$1/bin/engine"
-  : > "$1/scripts/verify-phase-trail.sh"; : > "$1/scripts/lint-dispatch-prompt.sh"; : > "$1/scripts/is-docs-only.sh"
-  : > "$1/bin/engine/resolve.mjs"; : > "$1/bin/engine/orchestrate-canary.mjs"; : > "$1/bin/engine/admission.mjs"
+mkscripts() {   # a minimal install root: forge_root accepts the first root that carries scripts/lib/forge-resolve.sh
+  mkdir -p "$1/scripts/lib"; cp "$ROOT/scripts/lib/forge-resolve.sh" "$1/scripts/lib/forge-resolve.sh"
 }
 # plugin install: no env vars at all
 mkscripts "$T/h1/.claude/plugins/cache/forgedock/forgedock/1.0.0"
@@ -96,8 +76,9 @@ expect "CLAUDE_PLUGIN_ROOT resolves" "$T/h1/.claude/plugins/cache/forgedock/forg
 # nothing installed: empty (never the consumer repo, never a relative path)
 expect "unresolvable stays empty" "" "$(run "$T/empty")"
 expect "relative FORGE_HOME ignored" "" "$(run "$T/empty" FORGE_HOME=.)"
-# explicit FORGEDOCK_HOME is authoritative, even if bogus (caller then fails closed)
-expect "FORGEDOCK_HOME authoritative" "$T/nowhere" "$(run "$T/h1" FORGEDOCK_HOME="$T/nowhere")"
+# explicit FORGEDOCK_HOME is authoritative, even if bogus: nothing else is consulted, so the root is empty (caller then fails closed)
+expect "FORGEDOCK_HOME authoritative (bogus => empty, no other tier)" "" "$(run "$T/h1" FORGEDOCK_HOME="$T/nowhere")"
+mkscripts "$T/hfh/pinned"; expect "FORGEDOCK_HOME pinning a real install resolves it" "$T/hfh/pinned" "$(run "$T/h1" FORGEDOCK_HOME="$T/hfh/pinned")"
 # symlink install (install.sh): ~/.claude/commands/work-on.md -> <clone>/commands/work-on.md
 mkdir -p "$T/clone/commands" "$T/h2/.claude/commands"; mkscripts "$T/clone"; : > "$T/clone/commands/work-on.md"
 # Git Bash (MSYS) makes a COPY for `ln -s` unless native symlinks are requested, which leaves readlink
@@ -114,9 +95,11 @@ fi
 # forge#3758 (hgate is a fixture of its own: the loop runs once per shell and h14 is reused below with other versions): deploy-gate script resolves on a plugin-only install (cache only, no symlink, no FORGE_* env).
 # The gate-script line is taken verbatim from the spec so the test exercises exactly what ships.
 mkscripts "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0"; : > "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh"
-grep -hE '^[[:space:]]*GATE_SCRIPT=""; \[ -n "\$FORGE_ROOT" \]' "$ROOT/commands/work-on/remediate.md" "$ROOT/commands/review-pr.md" | sed 's/^[[:space:]]*//' | sort -u > "$T/gs"
+# review-pr.md resolves the gate script through the forge_resolve stub (#3780): the locator and the call line are taken verbatim from the spec.
+sed 's/^[[:space:]]*//' "$ROOT/commands/review-pr.md" | grep '^GATE_SCRIPT=\$(forge_resolve resolve-deploy-gate.sh)$' | sort -u > "$T/gs"
 expect "gate-script resolver line is identical across sites" 1 "$(wc -l < "$T/gs" | tr -d ' ')"
-gate_run() { ( cd "$T/consumer" && env -i PATH="$PATH" HOME="$1" "$SH" -c "$(cat "$T/canon"); $(cat "$T/gs"); printf %s \"\$GATE_SCRIPT\"" ); }
+{ sed 's/^[[:space:]]*//' "$ROOT/commands/review-pr.md" | grep -m1 '^type forge_resolve >/dev/null'; cat "$T/gs"; } > "$T/gs_full"
+gate_run() { ( cd "$T/consumer" && env -i PATH="$PATH" HOME="$1" "$SH" -c "$(cat "$T/gs_full"); printf %s \"\$GATE_SCRIPT\"" ); }
 expect "plugin-only install resolves resolve-deploy-gate.sh" "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh" "$(gate_run "$T/hgate")"
 expect "unresolved gate script stays empty (strict)" "" "$(gate_run "$T/empty")"
 # cwd/consumer repo is never a candidate even when it carries the gate script
@@ -137,18 +120,12 @@ expect "space in HOME resolves" "$T/sp ace/.claude/plugins/cache/forgedock/forge
 # relative FORGEDOCK_HOME / CLAUDE_PLUGIN_ROOT rejected (fail closed => empty)
 expect "relative FORGEDOCK_HOME rejected" "" "$(run "$T/h1" FORGEDOCK_HOME=scripts/..)"
 expect "relative CLAUDE_PLUGIN_ROOT ignored" "" "$(run "$T/empty" CLAUDE_PLUGIN_ROOT=../consumer)"
-# a candidate with only one of the two needed scripts is rejected
+# a candidate without the helper is rejected (a bare scripts/ dir is not an install root)
 mkdir -p "$T/h4/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts"; : > "$T/h4/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/verify-phase-trail.sh"
-expect "partial install (missing lint script) rejected" "" "$(run "$T/h4")"
-# stale install: has the two original gate scripts but lacks is-docs-only.sh / engine modules => rejected
-for missing in scripts/is-docs-only.sh bin/engine/resolve.mjs bin/engine/orchestrate-canary.mjs bin/engine/admission.mjs; do
-  rm -rf "$T/h12"; mkscripts "$T/h12/.claude/plugins/cache/forgedock/forgedock/1.0.0"; rm -f "$T/h12/.claude/plugins/cache/forgedock/forgedock/1.0.0/$missing"
-  expect "stale install missing $missing rejected" "" "$(run "$T/h12")"
-done
-# a stale newest version is skipped in favor of a complete older one
-rm -rf "$T/h13"; mkscripts "$T/h13/.claude/plugins/cache/forgedock/forgedock/1.0.0"; mkscripts "$T/h13/.claude/plugins/cache/forgedock/forgedock/2.0.0"
-rm -f "$T/h13/.claude/plugins/cache/forgedock/forgedock/2.0.0/scripts/is-docs-only.sh"
-expect "stale newest skipped for complete older" "$T/h13/.claude/plugins/cache/forgedock/forgedock/1.0.0" "$(run "$T/h13")"
+expect "partial install (no forge-resolve.sh helper) rejected" "" "$(run "$T/h4")"
+# a newest version without the helper is skipped in favor of an older one that has it
+rm -rf "$T/h13"; mkscripts "$T/h13/.claude/plugins/cache/forgedock/forgedock/1.0.0"; mkdir -p "$T/h13/.claude/plugins/cache/forgedock/forgedock/2.0.0/scripts"
+expect "newest without the helper skipped for older with it" "$T/h13/.claude/plugins/cache/forgedock/forgedock/1.0.0" "$(run "$T/h13")"
 # non-ForgeDock marketplace dirs are ignored; ForgeDock-named ones resolve
 mkscripts "$T/h5/.claude/plugins/marketplaces/other-tool"
 expect "non-ForgeDock marketplace ignored" "" "$(run "$T/h5")"
@@ -160,13 +137,13 @@ rm -rf "$T/h7"   # fixture is mutated below; reset per shell
 mkscripts "$T/h7/.claude/plugins/cache/forgedock/forgedock/1.9.0-rc1"; mkscripts "$T/h7/.claude/plugins/cache/forgedock/forgedock/1.9.0"
 expect "release beats its pre-release" "$T/h7/.claude/plugins/cache/forgedock/forgedock/1.9.0" "$(run "$T/h7")"
 mkscripts "$T/h7/.claude/plugins/cache/forgedock/forgedock/2.0.0-rc1"
-expect "newer-core pre-release beats older release" "$T/h7/.claude/plugins/cache/forgedock/forgedock/2.0.0-rc1" "$(run "$T/h7")"
+# the shared helper ranks released x.y.z dirs only: a newer-core pre-release never outranks the newest release
+expect "newer-core pre-release does not outrank the newest release" "$T/h7/.claude/plugins/cache/forgedock/forgedock/1.9.0" "$(run "$T/h7")"
 # marketplace pinning: a higher-versioned forgedock plugin from a non-official marketplace is never used
 mkscripts "$T/h8/.claude/plugins/cache/evil-market/forgedock/99.0.0"; mkscripts "$T/h8/.claude/plugins/cache/forgedock/forgedock/1.1.0"
 expect "hostile marketplace at 99.0.0 ignored" "$T/h8/.claude/plugins/cache/forgedock/forgedock/1.1.0" "$(run "$T/h8")"
 rm -rf "$T/h8b"; mkscripts "$T/h8b/.claude/plugins/cache/evil-market/forgedock/99.0.0"
 expect "only a hostile marketplace => empty" "" "$(run "$T/h8b")"
-expect "FORGEDOCK_MARKETPLACE pins another marketplace" "$T/h8b/.claude/plugins/cache/evil-market/forgedock/99.0.0" "$(run "$T/h8b" FORGEDOCK_MARKETPLACE=evil-market)"
 expect "invalid FORGEDOCK_MARKETPLACE falls back to forgedock" "" "$(run "$T/h8b" FORGEDOCK_MARKETPLACE=..)"
 rm -rf "$T/h8c"; mkscripts "$T/h8c/.claude/plugins/marketplaces/evil-forgedock-tools"
 expect "wildcard-named marketplace dir ignored" "" "$(run "$T/h8c")"
@@ -174,21 +151,16 @@ expect "wildcard-named marketplace dir ignored" "" "$(run "$T/h8c")"
 rm -rf "$T/h14"; P14="$T/h14/.claude/plugins/cache/forgedock/forgedock"
 mkscripts "$P14/1.10.0"; mkscripts "$P14/1e5abcdef"; mkscripts "$P14/abc1234def"; mkscripts "$P14/6f3a9c0"
 expect "SHA-named cache dirs ignored" "$P14/1.10.0" "$(run "$T/h14")"
-rm -rf "$T/h14b"; mkscripts "$T/h14b/.claude/plugins/cache/forgedock/forgedock/abc1234def"
-expect "only SHA-named dir => empty" "" "$(run "$T/h14b")"
 mkscripts "$P14/1.10.0-rc1"; expect "pre-release dir name still accepted (release wins)" "$P14/1.10.0" "$(run "$T/h14")"
-# Windows drive-letter FORGEDOCK_HOME is normalized (/c/...), relative stays rejected
-rm -rf "$T/win"; mkscripts "$T/win/c/forge"
-expect "C:/ FORGEDOCK_HOME authoritative (no cygpath, bogus path)" "/c/nowhere/forge" "$(run "$T/h1" FORGEDOCK_HOME='C:/nowhere/forge')"
-expect "C:\\ FORGEDOCK_HOME normalized" "/d/x/y" "$(run "$T/h1" FORGEDOCK_HOME='D:\x\y')"
+# Windows drive-letter FORGEDOCK_HOME normalization lives in the helper (_forge_posix, pinned in the #3778 section below)
+# SEC-1 (#3781): the stub's own first candidate normalizes a drive-letter FORGEDOCK_HOME (cygpath), so the helper loads from that root.
+rm -rf "$T/hwin"; mkscripts "$T/hwin/c/forge"; mkdir -p "$T/fakebin"
+printf '#!/bin/sh\n[ "$1" = "-u" ] && case "$2" in C:/forge) echo "%s"; exit 0;; esac\nexit 1\n' "$T/hwin/c/forge" > "$T/fakebin/cygpath"; chmod +x "$T/fakebin/cygpath"
+expect "C:/ FORGEDOCK_HOME resolves through the stub (cygpath)" "$T/hwin/c/forge" "$(run "$T/empty" PATH="$T/fakebin:$PATH" FORGEDOCK_HOME='C:/forge')"
 # Codex: forge-home pointer file written by install-codex.sh
 mkscripts "$T/hx/clone"; mkdir -p "$T/hx/.codex"; printf '%s\n' "$T/hx/clone" > "$T/hx/.codex/forge-home"
 expect "codex forge-home pointer resolves" "$T/hx/clone" "$(run "$T/hx")"
 expect "CODEX_HOME override resolves" "$T/hx/clone" "$(run "$T/empty" CODEX_HOME="$T/hx/.codex")"
-# A relative CODEX_HOME must not resolve the pointer against the consumer cwd
-mkdir -p "$T/consumer/.codex"; printf '%s\n' "$T/hx/clone" > "$T/consumer/.codex/forge-home"
-expect "relative CODEX_HOME ignored (cwd-local pointer not read)" "" "$(run "$T/empty" CODEX_HOME=.codex)"
-rm -rf "$T/consumer/.codex"
 printf 'relative/path\n' > "$T/hx/.codex/forge-home"
 expect "relative forge-home pointer rejected" "" "$(run "$T/hx")"
 # install-codex.sh: FORGE_HOME is shell-escaped in env files, and absent env files are not created (forge#3241)
@@ -207,7 +179,7 @@ grep -qF "\$'" "$T/ic-home/.zshenv" && bad "env file contains bash-only \$'...' 
 expect "pointer file still written" "$IC_REAL" "$(cat "$T/ic-home/.codex/forge-home" 2>/dev/null)"
 # errexit/pipefail safety: absent readlink target, absent cache dir, no ~/.claude at all
 for opts in "-e" "-eo pipefail" "-euo pipefail"; do
-  expect "survives set $opts with nothing installed" "ok:" "$( cd "$T/consumer" && env -i PATH="$PATH" HOME="$T/empty" "$SH" -c "set $opts; $(cat "$T/canon"); printf 'ok:%s' \"\$FORGE_ROOT\"" 2>&1 )"
+  expect "survives set $opts with nothing installed (no helper at all, no stderr noise)" "ok:" "$( cd "$T/consumer" && env -i PATH="$PATH" HOME="$T/empty" "$SH" -c "set $opts; $(cat "$T/canon"); printf 'ok:%s' \"\$FORGE_ROOT\"" 2>&1 )"
   expect "resolves under set $opts" "ok:$T/h3/.claude/plugins/cache/forgedock/forgedock/1.10.0" "$( cd "$T/consumer" && env -i PATH="$PATH" HOME="$T/h3" "$SH" -c "set $opts; $(cat "$T/canon"); printf 'ok:%s' \"\$FORGE_ROOT\"" 2>&1 )"
 done
 # a non-forgedock plugin in the cache is ignored even with a higher version
@@ -218,22 +190,21 @@ mkdir -p "$T/h10/.claude/plugins/cache"
 expect "empty cache, no match, no abort" "" "$(run "$T/h10")"
 expect "no ~/.claude at all, no abort" "" "$(run "$T/empty")"
 expect "unmatched glob does not break later candidates" "$T/h1/.claude/plugins/cache/forgedock/forgedock/1.0.0" "$(run "$T/h10" CLAUDE_PLUGIN_ROOT="$T/h1/.claude/plugins/cache/forgedock/forgedock/1.0.0")"
-# plugin root (textually substituted) outranks an exported FORGE_HOME that also has the scripts:
-# the running plugin's own files win over a stale clone named by a global env var (forge#3147 field test)
-mkscripts "$T/h11/stale-clone"; mkscripts "$T/h11/running-plugin"
-expect "substituted plugin root beats FORGE_HOME" "$T/h11/running-plugin" "$(run "$T/h11" FORGE_HOME="$T/h11/stale-clone" CLAUDE_PLUGIN_ROOT="$T/h11/running-plugin")"
+# substituted plugin root alone resolves (the locator loads that root's helper; once loaded, the helper's own tier order applies, see forge-resolve.sh)
+mkscripts "$T/h11/running-plugin"; mkscripts "$T/h11/stale-clone"
+expect "substituted plugin root resolves" "$T/h11/running-plugin" "$(run "$T/h11" CLAUDE_PLUGIN_ROOT="$T/h11/running-plugin")"
 # unsubstituted placeholder (non-Claude runtime) is a literal, rejected by the /* check, never expanded
 expect "unsubstituted placeholder ignored, FORGE_HOME used" "$T/h11/stale-clone" "$(run "$T/h11" FORGE_HOME="$T/h11/stale-clone")"
 expect "unsubstituted placeholder safe under set -u" "" "$( cd "$T/consumer" && env -i PATH="$PATH" HOME="$T/empty" "$SH" -c "set -u; $(cat "$T/canon"); printf %s \"\$FORGE_ROOT\"" 2>&1 )"
 # the env var alone (no substitution) must NOT be relied on: Claude Code does not export it to Bash
 expect "CLAUDE_PLUGIN_ROOT env var alone is not a candidate" "" "$( cd "$T/consumer" && env -i PATH="$PATH" HOME="$T/empty" CLAUDE_PLUGIN_ROOT="$T/h11/running-plugin" "$SH" -c "$(cat "$T/canon"); printf %s \"\$FORGE_ROOT\"" )"
 done
-# the canonical block must use the exact substitutable spelling, single-quoted (no :- form, which Claude Code leaves verbatim)
-grep -qF "'\${CLAUDE_PLUGIN_ROOT}'" "$T/canon.code" && ok || bad "canonical bootstrap lacks the substitutable '\${CLAUDE_PLUGIN_ROOT}' candidate"
-grep -qF 'CLAUDE_PLUGIN_ROOT:-' "$T/canon.code" && bad "canonical bootstrap uses \${CLAUDE_PLUGIN_ROOT:-}, which Claude Code never substitutes" || ok
+# the pinned locator must use the exact substitutable spelling, single-quoted (no :- form, which Claude Code leaves verbatim)
+grep -qF "'\${CLAUDE_PLUGIN_ROOT}'" "$T/locator.sh" && ok || bad "stub locator lacks the substitutable '\${CLAUDE_PLUGIN_ROOT}' candidate"
+grep -qF 'CLAUDE_PLUGIN_ROOT:-' "$T/locator.sh" && bad "stub locator uses \${CLAUDE_PLUGIN_ROOT:-}, which Claude Code never substitutes" || ok
 
 # no hand-built file:// URL from FORGE_ROOT remains; imports go through pathToFileURL (a '#', '?' or space in the path must survive)
-for f in $SITES commands/work-on/close.md; do
+for f in $STUB_SITES; do
   grep -nE 'file://\$\{?(FORGE_ROOT|\(pwd\))' "$ROOT/$f" >/dev/null && bad "concatenated file:// URL in $f" || ok
 done
 if command -v node >/dev/null 2>&1; then
@@ -263,7 +234,7 @@ while IFS= read -r f; do
   arms=$(grep -c 'trusted-comments.sh" \]' "$f" || true)
   [ "$arms" = "$(cat "$T/tc_n")" ] || { TC_STRAY=$((TC_STRAY + 1)); echo "  stray resolver in $f: $arms arms vs $(cat "$T/tc_n") blocks"; }
 done < <(grep -rl 'trusted-comments.sh" \]' "$ROOT/commands")
-expect "trusted-comments.sh resolver blocks discovered (review-pr 11 + review + remediate x2 + phase-4 + review-pr-staging 7)" 22 "$TC_BLOCKS"
+expect "trusted-comments.sh resolver blocks discovered (review + phase-4; review-pr, review-pr-staging and remediate use the forge_resolve stub)" 2 "$TC_BLOCKS"
 expect "trusted-comments.sh resolvers without a canonical block" 0 "$TC_STRAY"
 expect "trusted-comments.sh resolvers byte-identical" 1 "$(sort -u "$T/tc_all" | wc -l | tr -d ' ')"
 grep -qF 'plugins/cache/forgedock/forgedock' "$T/tc_all" && ok || bad 'trusted-comments.sh resolver lacks the plugin-cache scan'
@@ -292,14 +263,18 @@ extract_helper_block() { # file var -> block on stdout
 extract_helper_fn() { # file -> function on stdout
   awk '/^resolve_extract_affected_files\(\) \{/ {inb=1} inb {print} inb && /^\}$/ {exit}' "$1"
 }
+# review-pr.md resolves its helpers through the forge_resolve stub (#3780): the pinned locator plus the call line, taken from the spec.
+stub_block() { # file var -> locator + the first `var=$(forge_resolve ...)` line, indentation stripped
+  sed 's/^[[:space:]]*//' "$1" | grep -m1 '^type forge_resolve >/dev/null'; sed 's/^[[:space:]]*//' "$1" | grep -m1 "^$2=\$(forge_resolve "
+}
 HR_CLASSIFY="$ROOT/commands/review-pr.md"
 HR_AMP="$ROOT/commands/orchestrate/phase-4-execution.md"
 HR_EX3="$ROOT/commands/orchestrate/phase-3-dependency.md"
-extract_helper_block "$HR_CLASSIFY" CLASSIFY_SCRIPT > "$T/hr_classify.sh"
+stub_block "$HR_CLASSIFY" CLASSIFY_SCRIPT > "$T/hr_classify.sh"
 extract_helper_block "$HR_AMP" AMP_SCRIPT > "$T/hr_amp.sh"
 extract_helper_fn "$HR_AMP" > "$T/hr_ex4.sh"
 extract_helper_fn "$HR_EX3" > "$T/hr_ex3.sh"
-expect "CLASSIFY_SCRIPT resolver block found" 1 "$(grep -c '^CLASSIFY_SCRIPT=""' "$T/hr_classify.sh")"
+expect "CLASSIFY_SCRIPT resolver stub found" 1 "$(grep -c '^CLASSIFY_SCRIPT=\$(forge_resolve classify-finding.sh)$' "$T/hr_classify.sh")"
 expect "AMP_SCRIPT resolver block found" 1 "$(grep -c '^AMP_SCRIPT=""' "$T/hr_amp.sh")"
 expect "extract-affected-files resolver found in phase-4" 1 "$(grep -c 'resolve_extract_affected_files() {' "$T/hr_ex4.sh")"
 expect "extract-affected-files resolver found in phase-3" 1 "$(grep -c 'resolve_extract_affected_files() {' "$T/hr_ex3.sh")"
@@ -313,7 +288,8 @@ done
 if grep -rnE 'PWD/scripts/|^\$PWD$|REPO_PATH/scripts/extract' "$ROOT/commands" >/dev/null 2>&1; then bad 'commands/ still lists a working-directory helper tier'; else ok; fi
 
 # Behavior (#3483): a planted scripts/<helper>.sh in the cwd must never be selected; a cache-only install must resolve.
-mkdir -p "$T/hrwork/scripts" "$T/hrhome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts"
+mkdir -p "$T/hrwork/scripts" "$T/hrhome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts/lib"
+cp "$ROOT/scripts/lib/forge-resolve.sh" "$T/hrhome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts/lib/forge-resolve.sh"
 for h in classify-finding amplification-breaker extract-affected-files; do
   : > "$T/hrwork/scripts/$h.sh"; : > "$T/hrhome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts/$h.sh"
 done
@@ -339,23 +315,20 @@ hr_check_block() { # label file var script
   grep -qE '\$PWD|\$REPO_PATH|\$\{PWD|\$\{REPO_PATH' "$T/hr_blk.sh" && bad "$1: $3 resolver lists the working directory or repo path" || ok
   grep -qF "scripts/$4" "$T/hr_blk.sh" && ok || bad "$1: $3 resolver does not resolve scripts/$4"
 }
-hr_check_block review-pr "$HR_CLASSIFY" DERIVE_MILESTONE_SCRIPT derive-finding-milestone.sh
-hr_check_block review-pr "$HR_CLASSIFY" PRIORITY_SCRIPT severity-to-priority.sh
-hr_check_block review-pr "$HR_CLASSIFY" CODE_INDEX_SCRIPT code-index.sh
-hr_check_block review-pr "$HR_CLASSIFY" DEDUP_SCRIPT issue-dedup.sh
+hr_check_stub() { # label file var script: the spec calls the script through the forge_resolve stub (locator in the same fence)
+  stub_block "$2" "$3" > "$T/hr_blk.sh"
+  expect "$1: $3 resolver stub found" "$3=\$(forge_resolve $4)" "$(sed -n 2p "$T/hr_blk.sh")"
+  grep -qE '\$PWD|\$REPO_PATH|\$\{PWD|\$\{REPO_PATH' "$T/hr_blk.sh" && bad "$1: $3 resolver lists the working directory or repo path" || ok
+  local needle="$3=\$(forge_resolve "   # kept out of the awk command substitution: bash 3.2 (macOS) mis-parses the nested quote and paren
+  expect "$1: $3 call without a locator in the same fence" 0 "$(awk -v n="$needle" '/^[ ]*```/{loc=0} /^[ ]*type forge_resolve >\/dev\/null/{loc=1} index($0, n)>0 && !loc {b++} END{print b+0}' "$2")"
+}
+hr_check_stub review-pr "$HR_CLASSIFY" DERIVE_MILESTONE_SCRIPT derive-finding-milestone.sh
+hr_check_stub review-pr "$HR_CLASSIFY" PRIORITY_SCRIPT severity-to-priority.sh
+hr_check_stub review-pr "$HR_CLASSIFY" CODE_INDEX_SCRIPT code-index.sh
+hr_check_stub review-pr "$HR_CLASSIFY" DEDUP_SCRIPT issue-dedup.sh
 hr_check_block issue "$ROOT/commands/issue.md" DEDUP_SCRIPT issue-dedup.sh
-hr_check_block review-pr-staging "$HR_STG" DERIVE_MILESTONE_SCRIPT derive-finding-milestone.sh
-hr_check_block review-pr-staging "$HR_STG" PRIORITY_SCRIPT severity-to-priority.sh
-extract_helper_block "$HR_CLASSIFY" DERIVE_MILESTONE_SCRIPT > "$T/hr_dm.sh"
-extract_helper_block "$HR_CLASSIFY" PRIORITY_SCRIPT > "$T/hr_pr.sh"
-extract_helper_block "$HR_STG" DERIVE_MILESTONE_SCRIPT > "$T/hr_dm_stg.sh"
-extract_helper_block "$HR_STG" PRIORITY_SCRIPT > "$T/hr_pr_stg.sh"
-# only the variable-name-specific text may differ, and review-pr/review-pr-staging must agree
-cmp -s "$T/hr_dm.sh" "$T/hr_dm_stg.sh" && ok || bad 'DERIVE_MILESTONE_SCRIPT resolver differs between review-pr and review-pr-staging'
-cmp -s "$T/hr_pr.sh" "$T/hr_pr_stg.sh" && ok || bad 'PRIORITY_SCRIPT resolver differs between review-pr and review-pr-staging'
-extract_helper_block "$HR_CLASSIFY" DEDUP_SCRIPT > "$T/hr_dd.sh"
-extract_helper_block "$ROOT/commands/issue.md" DEDUP_SCRIPT > "$T/hr_dd_issue.sh"
-cmp -s "$T/hr_dd.sh" "$T/hr_dd_issue.sh" && ok || bad 'DEDUP_SCRIPT resolver differs between review-pr and issue'
+stub_block "$HR_CLASSIFY" DERIVE_MILESTONE_SCRIPT > "$T/hr_dm.sh"
+stub_block "$HR_CLASSIFY" PRIORITY_SCRIPT > "$T/hr_pr.sh"
 # no bare cwd-relative helper call in either review spec
 if grep -nE 'bash scripts/(derive-finding-milestone|severity-to-priority)\.sh' "$HR_CLASSIFY" "$HR_STG" >/dev/null 2>&1; then bad 'review spec still calls a helper by a bare scripts/ path'; else ok; fi
 
@@ -400,6 +373,8 @@ done
 # tiers: plugin-cache scan and CLAUDE_CONFIG_DIR present, no "$PWD"/"$REPO_PATH" tier. Passes with 0 blocks today.
 RD_BLOCKS=0
 while IFS= read -r f; do
+  # a forge_resolve stub (scripts/lib/forge-resolve.sh owns the tiers) satisfies the guard
+  if grep -qE '^[[:space:]]*REVIEW_DELTA_SCRIPT=\$\(forge_resolve review-delta\.sh\)$' "$f"; then RD_BLOCKS=$((RD_BLOCKS + 1)); continue; fi
   awk '/^[ ]*# HELPER_SCRIPT resolver \(/ && index($0, "(REVIEW_DELTA_SCRIPT;") {inb=1} inb {sub(/^[ ]+/, ""); print} inb && /^done <<< "\$_tc"$/ {exit}' "$f" > "$T/rd_block.sh"
   [ -s "$T/rd_block.sh" ] || { bad "review-delta.sh referenced in $f without a canonical REVIEW_DELTA_SCRIPT resolver block"; continue; }
   RD_BLOCKS=$((RD_BLOCKS + 1))
@@ -417,6 +392,150 @@ out=$(cd "$T/rdwork" && bash "$ROOT/scripts/review-delta.sh" --pr 1 --head 01234
 expect "review-delta.sh without --trusted-script prints FULL (cwd trust script ignored)" "FULL" "$out"
 out=$(cd "$T/rdwork" && bash "$ROOT/scripts/review-delta.sh" --pr 1 --head 0123456789abcdef0123456789abcdef01234567 --base main --trusted-script scripts/trusted-comments.sh --comments-file comments.json --labels "" 2>&1 | sed -n 1p)
 expect "review-delta.sh with a relative cwd --trusted-script prints FULL" "FULL" "$out"
+
+
+# Guard (#3778): scripts/lib/forge-resolve.sh owns the install-root tiers; review-pr-staging.md carries only byte-identical
+# stubs. The locator line must be identical everywhere, resolve from trusted tiers only (no $PWD, no repo under review),
+# and every fence stub must fail closed when the helper is unresolved.
+FR="$ROOT/scripts/lib/forge-resolve.sh"; FB="$ROOT/scripts/lib/fence-bootstrap.sh"
+[ -f "$FR" ] && [ -f "$FB" ] && ok || bad "scripts/lib/forge-resolve.sh and scripts/lib/fence-bootstrap.sh must exist"
+sed 's/^[[:space:]]*//' "$STG_SPEC" | grep '^type forge_resolve >/dev/null' | sort | uniq -c > "$T/loc_uniq"
+[ "$(wc -l < "$T/loc_uniq" | tr -d ' ')" = 1 ] && ok || bad "forge_resolve locator line must be byte-identical across every stub in review-pr-staging.md"
+[ "$(awk '{print $1}' "$T/loc_uniq")" -ge 30 ] && ok || bad "expected a locator on every bootstrap (21) and resolver (11) stub"
+grep -qE 'PWD|\$\(pwd\)|REPO_PATH' "$T/locator.sh" && bad "stub locator must not consult the cwd or repo under review" || ok
+[ "$(grep -c '# FENCE_BOOTSTRAP$' "$STG_SPEC")" = 21 ] && ok || bad "expected 21 fence bootstrap stubs"
+[ "$(grep '# FENCE_BOOTSTRAP$' "$STG_SPEC" | sort -u | wc -l | tr -d ' ')" = 1 ] && ok || bad "fence bootstrap stubs must be byte-identical"
+grep '# FENCE_BOOTSTRAP$' "$STG_SPEC" | sed 1q | grep -qF 'exit 1' && ok || bad "fence bootstrap stub must fail closed (exit 1) when the helper is unresolved"
+# the spec carries none of the old inlined blocks
+grep -qE '^[[:space:]]*(TRUSTED_SCRIPT|[A-Z_]+_SCRIPT)=""$|_tc="\$\(printf' "$STG_SPEC" && bad "review-pr-staging.md still carries an inlined resolver block" || ok
+# no $PWD / $(pwd) tier in the helper (comments aside)
+grep -nE '\$PWD|\$\(pwd\)|\$\{PWD' "$FR" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -q . && bad "forge-resolve.sh must have no PWD tier" || ok
+
+# Guard (#3779): remediate.md carries the same byte-identical locator stub (7 fences: 5 gate sites, trusted-comments, CI gate) and none of the old inlined resolvers.
+REM_SPEC="$ROOT/commands/work-on/remediate.md"
+sed 's/^[[:space:]]*//' "$REM_SPEC" | grep '^type forge_resolve >/dev/null' | sort | uniq -c > "$T/rem_uniq"
+[ "$(wc -l < "$T/rem_uniq" | tr -d ' ')" = 1 ] && ok || bad "remediate.md locator lines must be byte-identical"
+expect "remediate.md locator count (one per fence that resolves a script)" 7 "$(awk '{print $1}' "$T/rem_uniq")"
+[ "$(sed 's/^[[:space:]]*//' "$REM_SPEC" | grep '^type forge_resolve >/dev/null' | sed 1q)" = "$(cat "$T/locator.sh")" ] && ok || bad "remediate.md locator differs from the pinned review-pr-staging.md locator"
+expect "remediate.md inlined FORGE_ROOT bootstrap copies" 0 "$(grep -c '# FORGE_ROOT bootstrap' "$REM_SPEC" || true)"
+grep -qE '^[[:space:]]*(TRUSTED_SCRIPT|[A-Z_]+_SCRIPT)=""|_tc="\$\(printf|^[[:space:]]*GATE_SCRIPT=""' "$REM_SPEC" && bad "remediate.md still carries an inlined resolver block" || ok
+# every forge_resolve call in remediate.md must sit in a fence that already defined it via the locator
+expect "remediate.md: forge_resolve calls without a preceding locator in the same fence" 0 "$(awk '/^[ ]*```/{loc=0} /^[ ]*type forge_resolve >\/dev\/null/{loc=1} /(GATE|TRUSTED|CI_GATE)_SCRIPT=\$\(forge_resolve /&&!loc{bad++} END{print bad+0}' "$REM_SPEC")"
+
+# Guard (#3780): review-pr.md carries the same byte-identical locator stub (one per fence that resolves a script) and none of the
+# old inlined blocks: no FORGE_ROOT bootstrap, no `_tc` resolver, no `*_SCRIPT=""` accumulator. Review-delta mode lives in
+# scripts/lib/review-delta-mode.sh (pinned by review-pr-delta-wiring.test.sh).
+RP_SPEC="$ROOT/commands/review-pr.md"
+sed 's/^[[:space:]]*//' "$RP_SPEC" | grep '^type forge_resolve >/dev/null' | sort | uniq -c > "$T/rp_uniq"
+[ "$(wc -l < "$T/rp_uniq" | tr -d ' ')" = 1 ] && ok || bad "review-pr.md locator lines must be byte-identical"
+[ "$(awk '{print $1}' "$T/rp_uniq")" -ge 15 ] && ok || bad "expected a locator in every review-pr.md fence that resolves a script (>=15)"
+[ "$(sed 's/^[[:space:]]*//' "$RP_SPEC" | grep '^type forge_resolve >/dev/null' | sed 1q)" = "$(cat "$T/locator.sh")" ] && ok || bad "review-pr.md locator differs from the pinned review-pr-staging.md locator"
+expect "review-pr.md inlined FORGE_ROOT bootstrap copies" 0 "$(grep -c 'FORGE_ROOT bootstrap' "$RP_SPEC" || true)"
+# (SCOPE_SCRIPT="" is a sibling path derived from the resolved trusted script's own directory, not a resolver accumulator)
+grep -vE '^[[:space:]]*SCOPE_SCRIPT=""$' "$RP_SPEC" | grep -qE '^[[:space:]]*(TRUSTED_SCRIPT|[A-Z_]+_SCRIPT)=""|_tc="\$\(printf|TRUSTED_SCRIPT resolver \(canonical' && bad "review-pr.md still carries an inlined resolver block" || ok
+expect "review-pr.md: forge_resolve calls without a preceding locator in the same fence" 0 "$(awk '/^[ ]*```/{loc=0} /^[ ]*type forge_resolve >\/dev\/null/{loc=1} /=\$\(forge_resolve /&&!loc{bad++} END{print bad+0}' "$RP_SPEC")"
+grep -nE '\$FORGE_ROOT|\$\{FORGE_ROOT:\+' "$RP_SPEC" | grep -q . && bad "review-pr.md consumes \$FORGE_ROOT (resolve through forge_resolve instead)" || ok
+
+# Guard (#3781): every spec that needs FORGE_ROOT resolves it through the pinned locator + `FORGE_ROOT="$(forge_root ...)"` and carries none of
+# the old inlined bootstrap (no marker comment, no `FORGE_ROOT="$_c"` candidate loop, no sentinel-file probes). Per site:
+for f in $STUB_SITES; do
+  sed 's/^[[:space:]]*//' "$ROOT/$f" | grep '^type forge_resolve >/dev/null' | sort -u > "$T/site_loc"
+  [ "$(wc -l < "$T/site_loc" | tr -d ' ')" = 1 ] && [ "$(cat "$T/site_loc")" = "$(cat "$T/locator.sh")" ] && ok || bad "$f: locator lines are not byte-identical to the pinned locator"
+  expect "$f: inlined FORGE_ROOT bootstrap markers" 0 "$(grep -c '# FORGE_ROOT bootstrap' "$ROOT/$f" || true)"
+  expect "$f: inlined FORGE_ROOT candidate loops" 0 "$(grep -c 'FORGE_ROOT="\$_c"' "$ROOT/$f" || true)"
+  grep -qE 'verify-phase-trail\.sh" \] && \[ -f' "$ROOT/$f" && bad "$f: still probes the sentinel files of the old bootstrap" || ok
+  # every FORGE_ROOT resolution is the stub line (shell state does not persist between Bash calls, so each fence repeats it) and follows a locator in its fence
+  expect "$f: FORGE_ROOT resolutions that are not the stub line" 0 "$(grep -E '^[[:space:]]*FORGE_ROOT="\$\(forge_root' "$ROOT/$f" | grep -cvF "$FR_LINE" || true)"
+  expect "$f: forge_root calls without a preceding locator in the same fence" 0 "$(awk '/^[ ]*```/{loc=0} /^[ ]*type forge_resolve >\/dev\/null/{loc=1} /FORGE_ROOT="\$\(forge_root /&&!loc{bad++} END{print bad+0}' "$ROOT/$f")"
+done
+# the spec-count of stub resolutions pins the conversion (a copy dropped or re-inlined changes it)
+for pair in work-on.md:3 work-on/review.md:2 work-on/build/validate.md:2 work-on/investigate.md:1 work-on/decompose.md:1 work-on/close.md:1 work-on/build.md:1 quality-gate.md:4 orchestrate/phase-1-resolve.md:2 orchestrate/phase-4-execution.md:8; do
+  f="commands/${pair%%:*}"; n="${pair##*:}"
+  expect "$f: FORGE_ROOT stub resolutions" "$n" "$(grep -cF "$FR_LINE" "$ROOT/$f" || true)"
+done
+
+# Behaviour: run the REAL stub locator + forge_resolve in a clean env over each install layout.
+# Paths are compared canonically: macOS resolves /var -> /private/var and Git Bash maps /tmp -> /c/Users/..., so the literal
+# spelling of a temp path differs from what readlink/pwd -P report (and 8.3 short names like RUNNER~1 differ from long ones). cygpath -ml (Git Bash) or dirname+pwd -P (POSIX) agree.
+canon() { # path -> canonical spelling, empty stays empty
+  [ -n "$1" ] || return 0
+  if command -v cygpath >/dev/null 2>&1; then cygpath -ml "$1" 2>/dev/null || printf '%s' "$1"
+  else ( cd "$(dirname "$1")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$1")" ) || printf '%s' "$1"; fi
+}
+expect_path() { expect "$1" "$(canon "$2")" "$(canon "$3")"; }
+mkdir -p "$T/fr/cwdplant/scripts/lib" "$T/fr/ws"
+cp "$FR" "$T/fr/cwdplant/scripts/lib/forge-resolve.sh"; printf 'PLANT\n' > "$T/fr/cwdplant/scripts/trusted-comments.sh"
+mk_install() { # dir: a minimal install root that carries the helpers and trusted-comments.sh
+  mkdir -p "$1/scripts/lib" "$1/commands"; cp "$FR" "$1/scripts/lib/"; cp "$FB" "$1/scripts/lib/"; : > "$1/scripts/trusted-comments.sh"; : > "$1/commands/work-on.md"
+}
+fr_run_sh() { # shell home cmd [extra env assignments...] -> stdout; cwd is a planted repo that must never be trusted
+  local sh="$1" h="$2" c="$3"; shift 3
+  ( cd "$T/fr/cwdplant" && env -i PATH="$PATH" HOME="$h" "$@" "$sh" -c "$(cat "$T/locator.sh"); $c" 2>/dev/null )
+}
+fr_run() { fr_run_sh bash "$@"; }
+mk_install "$T/fr/npm"
+expect_path "engine layout: FORGEDOCK_HOME resolves (cwd plant ignored)" "$T/fr/npm/scripts/trusted-comments.sh" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' FORGEDOCK_HOME="$T/fr/npm")"
+expect_path "forge_root under FORGEDOCK_HOME" "$T/fr/npm" "$(fr_run "$T/fr/h0" 'forge_root' FORGEDOCK_HOME="$T/fr/npm")"
+mk_install "$T/fr/other"
+expect "FORGEDOCK_HOME is authoritative: a valid FORGE_HOME is not consulted when it points at a bare dir" "" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' FORGEDOCK_HOME="$T/fr/ws" FORGE_HOME="$T/fr/other")"
+CFG="$T/fr/plugonly/.claude/plugins/cache/forgedock/forgedock"
+mk_install "$CFG/1.9.0"; mk_install "$CFG/1.12.0"; : > "$CFG/1.12.0/scripts/review-delta.sh"
+expect_path "plugin-only layout: newest pinned cache wins (1.12.0 over 1.9.0)" "$CFG/1.12.0" "$(fr_run "$T/fr/plugonly" 'forge_root')"
+expect_path "plugin-only layout: script resolves from the cache" "$CFG/1.12.0/scripts/review-delta.sh" "$(fr_run "$T/fr/plugonly" 'forge_resolve review-delta.sh')"
+# INFRA-3: a lexical glob picks 1.16.0 before 2.0.0 and a pair where 1.9.0/1.12.0 happen to agree masks it; the stub must still end on 2.0.0
+CFG2="$T/fr/lexical/.claude/plugins/cache/forgedock/forgedock"
+mk_install "$CFG2/1.16.0"; mk_install "$CFG2/2.0.0"; : > "$CFG2/2.0.0/scripts/review-delta.sh"
+expect_path "lexical-vs-numeric: 2.0.0 outranks 1.16.0 (stub-loaded helper re-resolves numerically)" "$CFG2/2.0.0" "$(fr_run "$T/fr/lexical" 'forge_root')"
+expect_path "lexical-vs-numeric: a script only in 2.0.0 resolves" "$CFG2/2.0.0/scripts/review-delta.sh" "$(fr_run "$T/fr/lexical" 'forge_resolve review-delta.sh')"
+mk_install "$T/fr/subst"
+expect_path "plugin-only layout: substituted plugin root is a locator tier" "$T/fr/subst/scripts/trusted-comments.sh" "$(sed "s|'\${CLAUDE_PLUGIN_ROOT}'|'$T/fr/subst'|" "$T/locator.sh" > "$T/locator_subst.sh"; cd "$T/fr/cwdplant" && env -i PATH="$PATH" HOME="$T/fr/h0" bash -c "$(cat "$T/locator_subst.sh"); forge_resolve trusted-comments.sh" 2>/dev/null)"
+mk_install "$T/fr/repo"; mkdir -p "$T/fr/instl/.claude/commands"
+if ln -s "$T/fr/repo/commands/work-on.md" "$T/fr/instl/.claude/commands/work-on.md" 2>/dev/null && [ -L "$T/fr/instl/.claude/commands/work-on.md" ]; then
+  expect_path "install.sh layout: commands symlink resolves to the repo root" "$T/fr/repo" "$(fr_run "$T/fr/instl" 'forge_root')"
+else echo "SKIP: symlinks unavailable here"; SKIPPED=$((SKIPPED+1)); fi
+mk_install "$T/fr/relocated/cfg/plugins/cache/forgedock/forgedock/1.12.0"
+expect_path "CLAUDE_CONFIG_DIR-relocated layout resolves" "$T/fr/relocated/cfg/plugins/cache/forgedock/forgedock/1.12.0/scripts/trusted-comments.sh" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' CLAUDE_CONFIG_DIR="$T/fr/relocated/cfg")"
+# INFRA-2: CLAUDE_CONFIG_DIR is set (and empty) while the plugin cache lives under ~/.claude
+mkdir -p "$T/fr/emptycfg"
+expect_path "CLAUDE_CONFIG_DIR set but empty, cache under ~/.claude resolves" "$CFG/1.12.0/scripts/trusted-comments.sh" "$(fr_run "$T/fr/plugonly" 'forge_resolve trusted-comments.sh' CLAUDE_CONFIG_DIR="$T/fr/emptycfg")"
+# INFRA-1: Codex / legacy variable layouts with no ~/.claude at all
+expect_path "FORGE_HOME-only layout resolves" "$T/fr/repo/scripts/trusted-comments.sh" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' FORGE_HOME="$T/fr/repo")"
+expect_path "FORGE_ROOT-only layout resolves" "$T/fr/repo/scripts/trusted-comments.sh" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' FORGE_ROOT="$T/fr/repo")"
+mkdir -p "$T/fr/codexhome"; printf '%s\n' "$T/fr/repo" > "$T/fr/codexhome/forge-home"
+expect_path "Codex forge-home file layout resolves" "$T/fr/repo/scripts/trusted-comments.sh" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' CODEX_HOME="$T/fr/codexhome")"
+expect "relative FORGE_HOME is rejected" "" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' FORGE_HOME=fr/cwdplant)"
+expect "unresolved layout prints nothing (cwd plant ignored)" "" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh')"
+expect "unresolved layout: the bootstrap stub fails closed" "BLOCKED" "$(fr_run "$T/fr/h0" "$(grep '# FENCE_BOOTSTRAP$' "$STG_SPEC" | sed 1q); echo reached" | sed -n 's/^\(BLOCKED\).*/\1/p')"
+expect "unresolved layout: the bootstrap stub does not reach the fence body" "" "$(fr_run "$T/fr/h0" "$(grep '# FENCE_BOOTSTRAP$' "$STG_SPEC" | sed 1q); echo reached" | sed -n 's/^\(reached\)$/\1/p')"
+expect "relative FORGEDOCK_HOME is rejected" "" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' FORGEDOCK_HOME=fr/cwdplant)"
+expect "path traversal in the script name is rejected" "" "$(fr_run "$T/fr/h0" 'forge_resolve ../scripts/trusted-comments.sh' FORGEDOCK_HOME="$T/fr/npm")"
+# #3779: the REAL remediate locator + gate resolution on a plugin-only layout and on an empty HOME (empty output => the spec's strict branch fires)
+sed 's/^[[:space:]]*//' "$REM_SPEC" | grep '^type forge_resolve >/dev/null' | sed 1q > "$T/rem_locator.sh"
+mk_install "$T/fr/remgate/.claude/plugins/cache/forgedock/forgedock/1.0.0"; : > "$T/fr/remgate/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh"
+rem_run() { ( cd "$T/fr/cwdplant" && env -i PATH="$PATH" HOME="$1" bash -c "$(cat "$T/rem_locator.sh"); GATE_SCRIPT=\$(forge_resolve resolve-deploy-gate.sh); printf %s \"\$GATE_SCRIPT\"" 2>/dev/null ); }
+expect_path "remediate stub: plugin-only install resolves resolve-deploy-gate.sh" "$T/fr/remgate/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh" "$(rem_run "$T/fr/remgate")"
+: > "$T/fr/cwdplant/scripts/resolve-deploy-gate.sh"
+expect "remediate stub: empty HOME leaves the gate script empty (strict), cwd plant ignored" "" "$(rem_run "$T/fr/h0")"
+rm -f "$T/fr/cwdplant/scripts/resolve-deploy-gate.sh"
+# INFRA-8: the stub itself must survive errexit in bash (setopt is zsh-only and must not abort a set -e shell)
+expect "errexit: the locator stub itself survives set -e with no helper" "survived" "$(cd "$T/fr/cwdplant" && env -i PATH="$PATH" HOME="$T/fr/h0" bash -c "set -e; $(cat "$T/locator.sh"); X=\$(forge_resolve trusted-comments.sh); [ -z \"\$X\" ] && echo survived" 2>/dev/null)"
+# INFRA-5: errexit callers must survive a resolver miss (helper sourced, and helper never found) and reach their own empty-output branch
+expect "errexit: a resolver miss with the helper sourced survives" "survived" "$(fr_run "$T/fr/h0" 'set -e; X=$(forge_resolve nothere.sh); [ -z "$X" ] && echo survived' FORGEDOCK_HOME="$T/fr/npm")"
+expect "errexit: a resolver miss with no helper at all survives" "survived" "$(fr_run "$T/fr/h0" 'set -e; X=$(forge_resolve trusted-comments.sh); [ -z "$X" ] && echo survived')"
+# #3781: the real two-line stub (locator + FORGE_ROOT line) leaves FORGE_ROOT empty, silently, and survives errexit when nothing resolves (callers keep their own empty-root fail-closed branch)
+for opts in "-e" "-eo pipefail" "-euo pipefail"; do
+  expect "stub: unresolved layout leaves FORGE_ROOT empty under set $opts" "ok:" "$(cd "$T/fr/cwdplant" && env -i PATH="$PATH" HOME="$T/fr/h0" "$SH" -c "set $opts; $(cat "$T/canon"); printf 'ok:%s' \"\$FORGE_ROOT\"" 2>&1)"
+  expect "stub: resolves under set $opts" "ok:$T/fr/npm" "$(cd "$T/fr/cwdplant" && env -i PATH="$PATH" HOME="$T/fr/h0" FORGEDOCK_HOME="$T/fr/npm" "$SH" -c "set $opts; $(cat "$T/canon"); printf 'ok:%s' \"\$FORGE_ROOT\"" 2>&1)"
+done
+expect "stub: cwd plant is never FORGE_ROOT (hostile consumer repo)" "" "$(cd "$T/fr/cwdplant" && env -i PATH="$PATH" HOME="$T/fr/h0" bash -c "$(cat "$T/canon"); printf %s \"\$FORGE_ROOT\"" 2>/dev/null)"
+# INFRA-4: under zsh an unmatched glob in the locator must not abort, and there is no cwd-derived self root
+if command -v zsh >/dev/null 2>&1; then
+  expect_path "zsh: locator survives no cache at all and a FORGE_HOME layout resolves" "$T/fr/repo/scripts/trusted-comments.sh" "$(fr_run_sh zsh "$T/fr/h0" 'forge_resolve trusted-comments.sh' FORGE_HOME="$T/fr/repo")"
+  expect "zsh: unresolved layout prints nothing and never trusts the cwd plant" "" "$(fr_run_sh zsh "$T/fr/h0" 'forge_resolve trusted-comments.sh')"
+  expect_path "zsh: numeric-newest cache wins" "$CFG2/2.0.0" "$(fr_run_sh zsh "$T/fr/lexical" 'forge_root')"
+else echo "SKIP: zsh not installed"; SKIPPED=$((SKIPPED+1)); fi
+# INFRA-6: a Windows drive-letter FORGEDOCK_HOME is normalized by the helper (cygpath where present, else the /c/x spelling)
+expect "drive-letter FORGEDOCK_HOME normalizes to /c/x" "/c/forge/x" "$(env -i PATH="$PATH" HOME="$T/fr/h0" bash -c ". '$FR'; _forge_posix 'C:\\forge\\x'" 2>/dev/null | sed 's|^/cygdrive||')"
 
 echo "forge-root tests: pass=$PASS fail=$FAILN skipped=$SKIPPED"
 [ "$FAILN" -eq 0 ]

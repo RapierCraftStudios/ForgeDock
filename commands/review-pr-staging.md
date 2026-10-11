@@ -203,7 +203,7 @@ _SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"
 if [ -n "$PR_NUMBER" ]; then printf '%s\n' "$PR_NUMBER" > "$_SD/staging_pr_number"; else rm -f "$_SD/staging_pr_number"; fi
 ```
 
-`$PR_NUMBER` is now set for all downstream phases that conditionally post gate comments to the PR. It is also persisted to `$_SD/staging_pr_number`, because every Bash call is a fresh shell. Every fence that consumes cross-fence state (`PR_NUMBER`, `ALL_PR_NUMBERS`, `GH_REPO`, branch names) begins with the `# FENCE_BOOTSTRAP` block, which re-derives it; `scripts/review-pr-staging-scope.test.sh` fails if a consuming fence omits it. The Phase 6.5 gate result and the Phase 6.75 launched-agent list are persisted to `$_SD` by their producers and reloaded (validated) by their consumers.
+`$PR_NUMBER` is now set for all downstream phases that conditionally post gate comments to the PR. It is also persisted to `$_SD/staging_pr_number`, because every Bash call is a fresh shell. Every fence that consumes cross-fence state (`PR_NUMBER`, `ALL_PR_NUMBERS`, `GH_REPO`, branch names) begins with the `# FENCE_BOOTSTRAP` stub, which sources `scripts/lib/fence-bootstrap.sh` (via `scripts/lib/forge-resolve.sh`) to re-derive it and exits 1 when the helper is unresolvable; `scripts/review-pr-staging-scope.test.sh` fails if a consuming fence omits it. The Phase 6.5 gate result and the Phase 6.75 launched-agent list are persisted to `$_SD` by their producers and reloaded (validated) by their consumers.
 
 ---
 
@@ -291,16 +291,8 @@ if [ -n "$BLOCKING_FINDINGS" ]; then
   if [ -n "$PR_NUMBER" ]; then
     # Trusted authors only (scripts/trusted-comments.sh: OWNER/MEMBER/COLLABORATOR or a Bot), all comment pages,
     # marker anchored at the start of the body. Fail closed: unresolvable script or unreadable comments = no override (#3492).
-    # TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-    _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-    _tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-    for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-    [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-    done
-    TRUSTED_SCRIPT=""
-    while IFS= read -r _c; do
-    case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-    done <<< "$_tc"
+    type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+    TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
     OVR_SCRIPT="$TRUSTED_SCRIPT"
     OVR_COMMENTS=$(gh api --paginate "repos/{GH_REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null) || OVR_COMMENTS=""
     if [ -n "$OVR_SCRIPT" ] && [ -n "$OVR_COMMENTS" ]; then
@@ -392,43 +384,20 @@ Create review chunks by priority: Billing/Pricing (CRITICAL) → Security/Auth (
 
 ### 0B.1: Bundle Review Scope (already-reviewed commit set)
 
-A bundle PR already got a full line-level review before it merged to staging, so re-reviewing its diff here re-files the same defects. Compute the already-reviewed commit set and scope line-level review to what a feature-PR review could not see. Consumes `ALL_PR_NUMBERS` (Phase 0A). Trust comes from `scripts/trusted-comments.sh` (resolved with the canonical helper-script resolver below: plugin root, `FORGE_ROOT`, `FORGEDOCK_HOME`, `FORGE_HOME`, install symlink, marketplaces, pinned plugin cache; never the working directory, which is author-controlled).
+A bundle PR already got a full line-level review before it merged to staging, so re-reviewing its diff here re-files the same defects. Compute the already-reviewed commit set and scope line-level review to what a feature-PR review could not see. Consumes `ALL_PR_NUMBERS` (Phase 0A). Trust comes from `scripts/trusted-comments.sh` (resolved by the `forge_resolve` stub below, which sources `scripts/lib/forge-resolve.sh`: `FORGEDOCK_HOME` (authoritative), plugin root, `FORGE_ROOT`, `FORGE_HOME`, install symlink, Codex `forge-home`, pinned plugin cache (numeric-newest), marketplaces; never the working directory, which is author-controlled; an unresolved script leaves the variable empty).
 
 ```bash
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 SCOPE_MODE=full; REVIEWED_COMMITS=""; REVIEWED_MERGES=""; DEPLOY_WIRING_FILES=""; UNREVIEWED_COMMITS=""; UNREVIEWED_FILES=""; _LOG=""; CROSS_PR_FILES=""; REVIEWED_PR_COUNT=0
 _PF="$_SD/${PR_NUMBER}_bundle-pr-files.txt"; : > "$_PF"
 [ -n "${PR_NUMBER:-}" ] && [ -n "${GH_REPO:-}" ] || echo "SCOPE_MODE=full: scoping skipped (PR_NUMBER or GH_REPO empty after reload)"
 [ -n "${ALL_PR_NUMBERS:-}" ] || echo "SCOPE_MODE=full: scoping skipped (ALL_PR_NUMBERS empty: Phase 0A did not persist a bundle list)"
-# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-TRUSTED_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
 [ -n "$TRUSTED_SCRIPT" ] || echo "SCOPE_MODE=full: scoping skipped (trusted-comments.sh not resolvable)"
-# HELPER_SCRIPT resolver (REVIEW_DELTA_SCRIPT; trusted-install tiers only, never the working directory or the PR checkout, #3400/#3483/#3596): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. A PR that shipped its own resolver could otherwise decide that its own head needs no review. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-REVIEW_DELTA_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$REVIEW_DELTA_SCRIPT" ] && [ -f "$_c/scripts/review-delta.sh" ] && REVIEW_DELTA_SCRIPT="$_c/scripts/review-delta.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+REVIEW_DELTA_SCRIPT=$(forge_resolve review-delta.sh)
 [ -n "$REVIEW_DELTA_SCRIPT" ] || echo "delta credit off: review-delta.sh not resolvable (stale-head PR commits stay UNREVIEWED)"
 # BEGIN bundle-delta-credit
 is_sha() { case "${1}" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]; }
@@ -612,29 +581,15 @@ fi
 
 ### 1D: Secrets Scan
 ```bash
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH | grep -iE "(api[_-]?key|secret|password|token|credential)" | grep -vE "(#|//|\.example|placeholder)" | head -20
 ```
 
 ### 1E: CI Status Gate (BLOCKING)
 ```bash
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 gh pr checks "$PR_NUMBER" -R "$GH_REPO" 2>&1
 ```
 Any CI failure → BLOCK DEPLOY (unless autofixed in Phase 1F).
@@ -660,15 +615,8 @@ For fixable failures: checkout staging, apply fix, verify locally, commit as `fi
 
 **Reset launched-agent state (once, before any Phase 2-6 agent launches)**: the list is PR-keyed and append-only, so a prior run or `--retry` would otherwise leave stale domains behind.
 ```bash
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 [ -n "${PR_NUMBER:-}" ] && : > "$_SD/${PR_NUMBER}_launched_review_agents"
 ```
 
@@ -680,15 +628,8 @@ Substitute `[REVIEW_SHA]` in the template below with the literal full head SHA (
 
 **MANDATORY — post findings as PR comment**: Before its first post attempt, the agent MUST persist the final report to a uniquely named durable file, then post it with `--body-file`. It MUST also return verdict, finding count, and one line per finding to the orchestrator whether the post succeeds or fails; on failure, return the file path and stop without retrying. After completing analysis, the agent posts its full report directly to the PR:
 ```bash
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 gh pr comment "$PR_NUMBER" -R "$GH_REPO" --body "<!-- FORGE:REVIEW-AGENT:material-change -->
 Reviewed-SHA: [REVIEW_SHA]
 ## Material Change Analysis
@@ -717,15 +658,8 @@ Each reads the service diff, hunts for bugs, traces context across imports, pers
 
 **MANDATORY — each Bug Hunter agent MUST post its findings directly to the PR immediately upon completion** (do not wait for the orchestrator to batch-post):
 ```bash
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 gh pr comment "$PR_NUMBER" -R "$GH_REPO" --body "<!-- FORGE:REVIEW-AGENT:bug-hunter-{service} -->
 Reviewed-SHA: [REVIEW_SHA]
 ## Bug Hunter Review — {service}
@@ -746,15 +680,8 @@ Agent hunts for: dead code, duplicate logic, complexity (>50 line functions), na
 
 **MANDATORY — post findings as PR comment**: Before its first post attempt, the agent MUST persist the final report to a uniquely named durable file, then post it with `--body-file`. It MUST also return verdict, finding count, and one line per finding to the orchestrator whether the post succeeds or fails; on failure, return the file path and stop without retrying. After completing analysis, the agent posts its full report directly to the PR:
 ```bash
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 gh pr comment "$PR_NUMBER" -R "$GH_REPO" --body "<!-- FORGE:REVIEW-AGENT:code-quality -->
 Reviewed-SHA: [REVIEW_SHA]
 ## Code Quality Review
@@ -819,15 +746,8 @@ Launch domain-specific agents based on which domains have changes. Substitute PR
 
 **Per-domain diff slices (MANDATORY)**: `protocols.md` tells agents to use a pre-supplied `[DOMAIN_DIFF_SLICE]` and not to re-fetch the diff, so staging MUST supply one — the staging→main diff is the largest diff in the pipeline. Slice the uncapped diff first, then cap each slice at ~100K chars with `truncate_slice` (same order as `commands/review-pr.md` "Domain Diff Slicing"). Compute the slices once, then substitute `[DOMAIN_DIFF_SLICE]` in each persona's prompt before dispatch:
 ```bash
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 # Fetched once, UNCAPPED; agents do NOT re-fetch it. Never cap here: slicing must see the whole bundle.
 FULL_DIFF=$(git diff "origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH")
 
@@ -914,15 +834,8 @@ For each dispatched persona, substitute `[DOMAIN_DIFF_SLICE]` → its matching `
 
 **MANDATORY — each domain agent MUST persist its finalized body before posting its findings directly to the PR immediately upon completion** (not batched by the orchestrator). It MUST return verdict, finding count, and one line per finding to the orchestrator independently of delivery; if posting fails, return the durable file path and stop without retrying:
 ```bash
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 gh pr comment "$PR_NUMBER" -R "$GH_REPO" --body "<!-- FORGE:REVIEW-AGENT:{domain} -->
 Reviewed-SHA: [REVIEW_SHA]
 ## {Domain} Review
@@ -943,15 +856,8 @@ Agent maps dependencies, assesses integration points (service boundaries, env va
 
 **MANDATORY — post findings as PR comment**: Before its first post attempt, the agent MUST persist the final report to a uniquely named durable file, then post it with `--body-file`. It MUST also return verdict, finding count, and one line per finding to the orchestrator whether the post succeeds or fails; on failure, return the file path and stop without retrying. After completing analysis, the agent posts its full report directly to the PR:
 ```bash
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 gh pr comment "$PR_NUMBER" -R "$GH_REPO" --body "<!-- FORGE:REVIEW-AGENT:regression-risk -->
 Reviewed-SHA: [REVIEW_SHA]
 ## Regression Risk Assessment
@@ -979,15 +885,8 @@ Reviewed-SHA: [REVIEW_SHA]
 **Posture**: Controlled by `verification.test_gate.posture` in `forge.yaml` (resolved in Config Resolution as `$GATE_POSTURE`). Default: `blocking`. Set to `advisory` to surface failures without preventing deploy. <!-- Added: forge#906 -->
 
 ```bash
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 GH_FLAG="-R $GH_REPO"
 GATE_POSTURE=$(yq '.verification.test_gate.posture // "blocking"' "$CONFIG_FILE" 2>/dev/null || echo "blocking")
 OVERRIDE_PHRASE=$(yq '.verification.test_gate.override_phrase // "OVERRIDE: shipping with test failures —"' "$CONFIG_FILE" 2>/dev/null || echo "OVERRIDE: shipping with test failures —")
@@ -1016,15 +915,8 @@ printf '%s\n' "$TEST_GATE_VERDICT" > "$_SD/${PR_NUMBER}_test_gate_verdict"; prin
 **Verdict handling**:
 
 ```bash
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 GH_FLAG="-R $GH_REPO"
 GATE_POSTURE=$(yq '.verification.test_gate.posture // "blocking"' "$CONFIG_FILE" 2>/dev/null || echo "blocking")
 OVERRIDE_PHRASE=$(yq '.verification.test_gate.override_phrase // "OVERRIDE: shipping with test failures —"' "$CONFIG_FILE" 2>/dev/null || echo "OVERRIDE: shipping with test failures —")
@@ -1061,16 +953,8 @@ case "$TEST_GATE_VERDICT" in
     if [ -n "$PR_NUMBER" ]; then
       # Trusted authors only, all comment pages, anchored; fail closed (no override) if the script or comments are
       # unreadable (#3492). OVERRIDE_PHRASE comes from forge.yaml, so regex-escape it before using it as a pattern.
-      # TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-      _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-      _tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-      for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-      [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-      done
-      TRUSTED_SCRIPT=""
-      while IFS= read -r _c; do
-      case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-      done <<< "$_tc"
+      type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+      TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
       TG_SCRIPT="$TRUSTED_SCRIPT"
       TG_COMMENTS=$(gh api --paginate "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null) || TG_COMMENTS=""
       TG_OVERRIDE=0; OVERRIDE_REASON="(reason not captured)"
@@ -1159,29 +1043,14 @@ If the gate exits with `RESULT: BLOCK DEPLOY` → **STOP**. A `<!-- FORGE:GATE_F
 **Incomplete-panel guard (MANDATORY):** Increment `SELECTED_AGENT_COUNT` for every reviewer selected across Phases 2–6 before launching it. If any dispatch fails, set `DISPATCH_FAILED=true`. Before Phase 7, count unique trusted, current-head `FORGE:REVIEW-AGENT` markers (author trusted per `scripts/trusted-comments.sh`, body starting with the marker, `Reviewed-SHA:` line matching the full head SHA, all comment pages read; an unresolvable script or unreadable comments count as 0). If the completed count is lower than selected, follow the same hard-stop path as pool exhaustion: create `review-degraded` if needed, label the PR, post `FORGE:GATE_FAILURE`, and exit. Do not create a deploy verdict from partial reviewer output.
 
 ```bash
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 # Each Bash call is a fresh shell: re-resolve the full head SHA if it is not set, and refuse when it is not a commit id
 # (an empty SHA would make the Reviewed-SHA match accept any head).
 [ -n "${REVIEW_SHA_FULL:-}" ] || REVIEW_SHA_FULL=$(gh pr view "$PR_NUMBER" -R "$GH_REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
 case "$REVIEW_SHA_FULL" in *[!0-9a-f]*|"") REVIEW_SHA_FULL="" ;; *) [ "${#REVIEW_SHA_FULL}" -eq 40 ] || [ "${#REVIEW_SHA_FULL}" -eq 64 ] || REVIEW_SHA_FULL="" ;; esac
-# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-[ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-TRUSTED_SCRIPT=""
-while IFS= read -r _c; do
-case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
 ACTUAL_AGENT_COUNT=0
 if [ -n "$REVIEW_SHA_FULL" ] && [ -n "$TRUSTED_SCRIPT" ]; then
   # Only TRUSTED, current-head reviewer comments count, over every page of comments. Unique domains, so a duplicate does not inflate the count.
@@ -1215,15 +1084,8 @@ fi
 Before launching every Phase 2-6 review agent, append its lowercase marker domain (for example, `security`, `bug-hunter-api`, or `regression-risk`) to `LAUNCHED_REVIEW_AGENTS` and persist it with `printf '%s\n' "$AGENT_DOMAIN" >> "${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/${PR_NUMBER}_launched_review_agents"` (each Bash call is a fresh shell; the fence below reloads the file, accepting only `^[a-z0-9-]+$` lines). The file is truncated by the executable fence at the start of Phase 2. A completed agent is accounted for only when its marker comment is present on the PR from a trusted author, starts with the marker, and carries the `Reviewed-SHA:` line for the current head.
 
 ```bash
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 # Reload the launched-agent list persisted at dispatch (validated: lowercase marker domains only).
 [ -n "${LAUNCHED_REVIEW_AGENTS:-}" ] || { [ -r "$_SD/${PR_NUMBER}_launched_review_agents" ] && LAUNCHED_REVIEW_AGENTS=$(grep -E '^[a-z0-9-]+$' "$_SD/${PR_NUMBER}_launched_review_agents" | sort -u | tr '\n' ' '); }
 # Fail closed: a staging review always launches at least the Phase 2 material-change agent, so an empty list means lost state or skipped bookkeeping, never "nothing to verify".
@@ -1237,16 +1099,8 @@ MISSING_AGENT_COMMENTS=""
 # (an empty SHA would make the Reviewed-SHA match accept any head).
 [ -n "${REVIEW_SHA_FULL:-}" ] || REVIEW_SHA_FULL=$(gh pr view "$PR_NUMBER" -R "$GH_REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
 case "$REVIEW_SHA_FULL" in *[!0-9a-f]*|"") REVIEW_SHA_FULL="" ;; *) [ "${#REVIEW_SHA_FULL}" -eq 40 ] || [ "${#REVIEW_SHA_FULL}" -eq 64 ] || REVIEW_SHA_FULL="" ;; esac
-# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-[ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-TRUSTED_SCRIPT=""
-while IFS= read -r _c; do
-case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
 for AGENT_DOMAIN in $LAUNCHED_REVIEW_AGENTS; do
   AGENT_COMMENT_COUNT=0
   if [ -n "$REVIEW_SHA_FULL" ] && [ -n "$TRUSTED_SCRIPT" ]; then
@@ -1272,29 +1126,14 @@ An empty or unreadable launched-agent list is also a delivery failure (the fence
 Only findings inside trusted, current-head reviewer comments count: the head SHA is public, so an untrusted commenter must never be able to inject `FINDING` markers that get filed as issues. Read every page of comments, fail closed when the trust script or comments are unreadable (never fall through to "no findings").
 
 ```bash
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 # Each Bash call is a fresh shell: re-resolve the full head SHA if it is not set, and refuse when it is not a commit id
 # (an empty SHA would make the Reviewed-SHA match accept any head).
 [ -n "${REVIEW_SHA_FULL:-}" ] || REVIEW_SHA_FULL=$(gh pr view "$PR_NUMBER" -R "$GH_REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
 case "$REVIEW_SHA_FULL" in *[!0-9a-f]*|"") REVIEW_SHA_FULL="" ;; *) [ "${#REVIEW_SHA_FULL}" -eq 40 ] || [ "${#REVIEW_SHA_FULL}" -eq 64 ] || REVIEW_SHA_FULL="" ;; esac
-# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-[ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-TRUSTED_SCRIPT=""
-while IFS= read -r _c; do
-case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
 [ -n "$REVIEW_SHA_FULL" ] || { echo "STAGING_REVIEW: BLOCKED - head SHA is not a commit id; refusing to extract findings (fail closed)"; exit 1; }
 COMMENTS_JSON=$(gh api --paginate "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
 if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then
@@ -1319,20 +1158,13 @@ Before filing, apply the three gates defined in `commands/review-pr.md` §6B.4 (
 
 ### 7B.5: Note Disposition (same damper and classifier as `/review-pr` §6B.5)
 
-Classify every deduped finding with `scripts/classify-finding.sh` before filing, exactly as `commands/review-pr.md` §6B.5 does (the rules live in the script, not here: HIGH/CRITICAL always ISSUE, content-based safety exemption where LOW needs a keyword AND CONFIRMED and a domain agent rescues MEDIUM only, otherwise LOW/POSSIBLE become NOTEs). Resolve it with the same resolver (`${CLAUDE_PLUGIN_ROOT}`, `FORGE_ROOT`, `FORGEDOCK_HOME`, pinned plugin cache under `CLAUDE_CONFIG_DIR` then `~/.claude`). There is no `$PWD` tier: the repo under review is author-controlled. The staging PR is not a finding fix, so `FINDING_LINEAGE=none`.
+Classify every deduped finding with `scripts/classify-finding.sh` before filing, exactly as `commands/review-pr.md` §6B.5 does (the rules live in the script, not here: HIGH/CRITICAL always ISSUE, content-based safety exemption where LOW needs a keyword AND CONFIRMED and a domain agent rescues MEDIUM only, otherwise LOW/POSSIBLE become NOTEs). Resolve it with the same `forge_resolve` stub. There is no `$PWD` tier: the repo under review is author-controlled. The staging PR is not a finding fix, so `FINDING_LINEAGE=none`.
 
 **Cross-PR re-flag** <!-- Added: forge#3641 -->: the 7B.6 gates run first, so re-flag counts cover only findings that survived them. A finding that a bundle member PR's review already posted, or that a member PR's `FORGE:NOTE_DISPOSITION` list recorded, is not filed or noted again. The fence builds a prior-findings TSV (file, line-start, line-end, title, prior-disposition, issue#) from each member PR in `ALL_PR_NUMBERS`, reading every comment through `scripts/trusted-comments.sh` (never an untrusted author), and passes it to the classifier as `--prior-findings`. A finding re-flags a row when it is the same file AND (line IoU >= 0.6 AND >= 1 shared non-stopword title token, OR >= 3 shared title tokens of which >= 2 are non-stopword; generic stopwords never count as topical similarity); the classifier answers `NOTE reflag-filed #N` (the prior issue is still open) or `NOTE reflag-note`, never a new ISSUE. HIGH/CRITICAL are never demoted (they keep blocking via §7B), and a row whose linked issue is closed is ignored so a regressed defect is classified normally. Reviewer-body rows whose issue linkage fails are passed as `unknown` (recorded NOTE_DISPOSITION rows as `note`); an `unknown` row never demotes a MEDIUM CONFIRMED/LIKELY re-flag. Re-flag NOTEs are listed with the other NOTEs and counted in `notes_reflag` only. An unreadable member PR only shrinks the TSV; it never blocks.
 
 ```bash
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-CLASSIFY_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$CLASSIFY_SCRIPT" ] && [ -f "$_c/scripts/classify-finding.sh" ] && CLASSIFY_SCRIPT="$_c/scripts/classify-finding.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+CLASSIFY_SCRIPT=$(forge_resolve classify-finding.sh)
 # Fail closed (#3639): no hand classification and no ISSUE fallback. Kept OUTSIDE classify_one (the scope test sources that function with a stubbed CLASSIFY_SCRIPT).
 if [ -z "$CLASSIFY_SCRIPT" ]; then
   echo "REVIEW_RESULT: status: BLOCKED, blocker: classifier unavailable (classify-finding.sh not resolvable through the trusted resolver)"
@@ -1341,15 +1173,8 @@ fi
 # Per-finding inputs come from each structured block: FINDING_ID, FINDING_SEVERITY, FINDING_CONFIDENCE, FINDING_AGENT, FINDING_TITLE, FINDING_BODY,
 # FINDING_FILE (primary) and FINDING_PATHS (newline-separated, every cited file). Run THIS WHOLE BLOCK in ONE Bash call, looping over every deduped finding
 # (init once, then classify_one per finding, then the disposition record), because counters and the note list live in shell state and a fresh shell loses them.
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 # An empty PR_NUMBER would key every scratch file as "_notes.md" / "_scope.env" and the disposition record could not be posted: stop and report it.
 [ -n "${PR_NUMBER:-}" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: PR_NUMBER unavailable (Phase -1 did not persist staging_pr_number); FORGE:NOTE_DISPOSITION cannot be recorded"; exit 0; }
 NOTE_LIST_FILE="$_SD/${PR_NUMBER}_notes.md"; : > "$NOTE_LIST_FILE"
@@ -1358,16 +1183,8 @@ NOTES_LISTED=0; NOTES_DROPPED=0; FINDINGS_FILED=0; OUT_OF_SCOPE=0
 SCOPE_MODE=full; CROSS_PR_FILES=""; UNREVIEWED_FILES=""; DEPLOY_WIRING_FILES=""
 if [ -r "$_SD/${PR_NUMBER}_scope.env" ]; then . "$_SD/${PR_NUMBER}_scope.env"; else echo "WARNING: $_SD/${PR_NUMBER}_scope.env unreadable: SCOPE_MODE=full (no out-of-scope demotion)"; fi
 # Cross-PR re-flag input (forge#3641): prior findings and NOTE lists of every bundle member PR, trusted authors only. Unresolvable script or unreadable PRs leave PRIOR_FILE empty (no demotion).
-# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-TRUSTED_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
 REPO="$GH_REPO"; _pscr="$_SD"; NOTES_REFLAG=0; PRIOR_FILE=""
 # Cross-head re-flag input (#3641). Fail soft: every unreadable source just leaves the TSV smaller, never blocks the review.
 # PF_SKIP="<sha or empty>" PF_PRS="<pr numbers>" prior_findings_tsv prints file<TAB>line-start<TAB>line-end<TAB>title<TAB>disposition<TAB>issue# rows
@@ -1469,15 +1286,8 @@ Only `ISSUE` findings continue to 7E/7F. Each `NOTE` is listed in the PR body (`
 ```bash
 CLASSIFIER_MODE=script   # the 7B.5 guard blocks the review when the classifier is unresolvable, so this is always script
 # This is a separate Bash call: shell state is lost. Re-derive PR_NUMBER and GH_REPO; counters the caller did not carry over are recomputed from the note list file (NOTES_LISTED) or flagged.
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 if [ -z "${PR_NUMBER:-}" ]; then
   echo "REVIEW_RESULT: status: BLOCKED, blocker: PR_NUMBER unavailable; FORGE:NOTE_DISPOSITION not posted (record lost)"
 else
@@ -1492,15 +1302,8 @@ fi
 
 ### 7C: Ensure Labels
 ```bash
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 # Colors match the canonical ForgeDock label manifest (bin/labels.json).
 # Run `npx forgedock labels setup` to bootstrap all managed labels at once.
 gh label create "review-finding" --color "D93F0B" --description "Defect or improvement found during automated PR review. Managed by ForgeDock." --force -R "$GH_REPO" 2>/dev/null
@@ -1514,15 +1317,8 @@ gh label create "staging-review" --color "1D76DB" --description "Finding from a 
 Derive both `CODE_BRANCH` and `MILESTONE_FLAG` from the reviewed PR before creating any findings. Unlike `commands/review-pr.md` (feature-lane PRs with short-lived HEAD branches that get deleted post-merge — see the rationale comment on that spec's finding template), `review-pr-staging.md` reviews long-lived branches (`staging`, `milestone/*`) that persist after merge, so `CODE_BRANCH` uses `headRefName` (the PR's HEAD — the branch actually being reviewed), consistent with forge#1391's original fix. This replaces the previous hardcoded `staging` literal, which was silently wrong whenever this spec reviewed a `milestone/X → staging` PR instead of a `staging → main` PR — `CODE_BRANCH` used to always say `staging` even when the reviewed branch was `milestone/X`.
 
 ```bash
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 CODE_BRANCH=$(gh pr view "$PR_NUMBER" -R "$GH_REPO" --json headRefName --jq '.headRefName')
 MILESTONE_FLAG=""
 
@@ -1530,16 +1326,8 @@ MILESTONE_FLAG=""
 # milestone derivation — commands/review-pr.md and commands/review-pr-staging.md
 # both call it identically so the two specs cannot independently drift.
 # <!-- forge#2443 -->
-# HELPER_SCRIPT resolver (DERIVE_MILESTONE_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-DERIVE_MILESTONE_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$DERIVE_MILESTONE_SCRIPT" ] && [ -f "$_c/scripts/derive-finding-milestone.sh" ] && DERIVE_MILESTONE_SCRIPT="$_c/scripts/derive-finding-milestone.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+DERIVE_MILESTONE_SCRIPT=$(forge_resolve derive-finding-milestone.sh)
 # Unresolved helper: empty milestone (non-blocking), never a cwd-relative fallback.
 MILESTONE_TITLE=""
 [ -n "$DERIVE_MILESTONE_SCRIPT" ] && MILESTONE_TITLE=$(bash "$DERIVE_MILESTONE_SCRIPT" "${PR_NUMBER}" -R "$GH_REPO")
@@ -1556,15 +1344,8 @@ Plain staging→main reviews resolve `CODE_BRANCH` to `staging` dynamically (sam
 Re-reviewing the same bundle must not re-file existing findings. For each `ISSUE` finding, check open AND closed `review-finding` issues by file + pattern + location before creating anything:
 
 ```bash
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 GH_FLAG="-R $GH_REPO"
 # FINDING_FILE/FINDING_LINE come from the finding's structured block. Define the title and scratch dir BEFORE use (7F reuses them).
 SCRATCHPAD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$SCRATCHPAD"
@@ -1609,15 +1390,8 @@ Sequential creation. Title: `Staging Review: {summary} (staging → main)`. Labe
 
 **For each finding** (classified `ISSUE` in 7B.5 and not deduped in 7E), create issue through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") instead of calling the raw issue-creation command directly:
 ```bash
-# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
-_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
-CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
-[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
-[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
-[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 # STAGING_FINDING_TITLE was built in 7E; re-assert it here if 7E was skipped.
 STAGING_FINDING_TITLE="${STAGING_FINDING_TITLE:-chore: [summary] (staging review — PR #${PR_NUMBER})}"
 # Defense-in-depth: /issue's arg tokenizer (commands/issue.md, forge#2094) uses
@@ -1675,16 +1449,8 @@ STAGING_FINDING_SEVERITY="LOW"
 # (CONFIRMED/LIKELY/POSSIBLE). scripts/severity-to-priority.sh is the single
 # source of truth for this mapping; commands/review-pr.md calls the identical
 # script so the two specs cannot independently drift. <!-- forge#2447 -->
-# HELPER_SCRIPT resolver (PRIORITY_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-PRIORITY_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$PRIORITY_SCRIPT" ] && [ -f "$_c/scripts/severity-to-priority.sh" ] && PRIORITY_SCRIPT="$_c/scripts/severity-to-priority.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+PRIORITY_SCRIPT=$(forge_resolve severity-to-priority.sh)
 # Unresolved helper: non-zero status so finding creation is skipped (never defaulted to a priority).
 if [ -n "$PRIORITY_SCRIPT" ]; then
   STAGING_FINDING_PRIORITY=$(bash "$PRIORITY_SCRIPT" "$STAGING_FINDING_SEVERITY")

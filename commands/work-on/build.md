@@ -65,31 +65,14 @@ if [[ "$ADAPTIVE_DIR" != "${REPO_PATH_NORM}/"* ]]; then
   echo "WARNING: adaptive_scripts.directory resolves outside repo root ('$ADAPTIVE_DIR') — adaptive tier disabled" >&2
   ADAPTIVE_ENABLED=false
 fi
-# ForgeDock's own install root (holds scripts/ and commands/), resolved ONCE by the canonical bootstrap
+# ForgeDock's own install root (holds scripts/ and commands/), resolved ONCE by the shared forge_resolve stub
 # below — never the consumer repo: plugin installs set neither FORGE_HOME nor FORGEDOCK_HOME, and a
 # repo-relative fallback would execute (or miss) a same-named script controlled by the consumer repo.
 # Resolution: $FORGEDOCK_HOME (authoritative when set) > $FORGE_HOME > $CLAUDE_PLUGIN_ROOT > the
 # ~/.claude/commands symlink target > the Claude Code plugin cache/marketplace dirs. <!-- forge#3098 -->
-# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
-FORGE_ROOT=""
-# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
-_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
-# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
-_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
-if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
-  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
-  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-  # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
-  _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
-  # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
-  _m="$HOME/.claude/plugins/marketplaces/$_mk"
-  # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
-  while IFS= read -r _c; do
-    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
-  done <<< "$_k"
-fi
+# FORGE_ROOT: shared resolver scripts/lib/forge-resolve.sh (empty when unresolved => callers fail closed)
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+FORGE_ROOT="$(forge_root 2>/dev/null || true)"
 UNIVERSAL_DIR="${FORGE_ROOT:+$FORGE_ROOT/scripts}"   # empty => tier 3 skipped, prose tier
 # NOTE: never resolve this via `which` or `find` — universal scripts are
 # install-relative, not installed on $PATH, so a PATH lookup always misses.
@@ -799,6 +782,8 @@ The acceptance spec contains only a skip sentinel (\`type=skipped\`). No automat
 GATE_PASS=true
 CORRECTED=""
 FAILED_CHECKS=""
+VERIFIED_COUNT=0       # checks actually executed and judged (PASS or FAIL); malformed ones do not count
+MALFORMED_CHECKS=""   # malformed-check: generated check that can never pass; reported, never repaired, never needs-human
 
 while IFS= read -r check_line; do
   # Fields are extracted by anchoring each sed pattern to `^ACCEPTANCE_CHECK:` and walking
@@ -836,6 +821,12 @@ while IFS= read -r check_line; do
 
   [ "$TYPE" = "skipped" ] && continue
 
+  # malformed-check <!-- Added: forge#3694 -->: a generated command/behavior target that can never pass is a
+  # check defect, not an implementation failure. Static detection only parses (bash -n), never executes.
+  MALFORMED=""
+  { [ "$TYPE" = "command" ] || [ "$TYPE" = "behavior" ]; } && { case "$TARGET" in *'\\\\'*) MALFORMED="run of 4+ backslashes (over-escaped target)";; esac; [ -n "$MALFORMED" ] || bash -n -c "$TARGET" 2>/dev/null || MALFORMED="shell syntax error (unbalanced quotes)"; }
+  if [ -n "$MALFORMED" ]; then MALFORMED_CHECKS="${MALFORMED_CHECKS}\n- **$ID** ($DESC): $MALFORMED"; continue; fi
+
   RESULT="PASS"
   DETAIL=""
 
@@ -853,10 +844,16 @@ while IFS= read -r check_line; do
       ;;
     command|behavior)
       if [ "$MATCHER" = "exit_0" ]; then
-        eval "$TARGET" >/dev/null 2>&1 || { RESULT="FAIL"; DETAIL="command exited non-zero: $TARGET"; }
+        ERR=$(eval "$TARGET" 2>&1 >/dev/null); RC=$?
+        # grep exit >= 2 is a usage/syntax error (e.g. a pattern starting with `-`), never a verdict on the code; exit 1 stays FAIL.
+        # A missing/unreadable operand file also exits 2 but is a REAL failure (the check asserts a file exists), so it is never malformed.
+        [ "$RC" -ge 2 ] && case "$TARGET" in grep\ *|egrep\ *|fgrep\ *) printf '%s' "$ERR" | grep -qE 'No such file or directory|Permission denied|Is a directory' || MALFORMED="grep usage error (exit $RC)";; esac
+        [ "$RC" -eq 0 ] || [ -n "$MALFORMED" ] || { RESULT="FAIL"; DETAIL="command exited non-zero: $TARGET"; }
       else
-        OUTPUT=$(eval "$TARGET" 2>&1)
-        if ! printf '%s\n' "$OUTPUT" | grep -qE "$MATCHER"; then
+        OUTPUT=$(eval "$TARGET" 2>&1); RC=$?; ERR="$OUTPUT"
+        [ "$RC" -ge 2 ] && case "$TARGET" in grep\ *|egrep\ *|fgrep\ *) printf '%s' "$ERR" | grep -qE 'No such file or directory|Permission denied|Is a directory' || MALFORMED="grep usage error (exit $RC)";; esac
+        if [ -n "$MALFORMED" ]; then :
+        elif ! printf '%s\n' "$OUTPUT" | grep -qE "$MATCHER"; then
           if printf '%s\n' "$OUTPUT" | grep -qF -- "$MATCHER"; then CORRECTED="${CORRECTED}\n- **$ID**: output matched as a literal string"
           else RESULT="FAIL"; DETAIL="output did not match '$MATCHER'. Got: $(printf '%s\n' "$OUTPUT" | head -3)"; fi
         fi
@@ -867,11 +864,20 @@ while IFS= read -r check_line; do
       ;;
   esac
 
+  if [ -n "$MALFORMED" ]; then MALFORMED_CHECKS="${MALFORMED_CHECKS}\n- **$ID** ($DESC): $MALFORMED"; continue; fi
+
+  VERIFIED_COUNT=$((VERIFIED_COUNT+1))
   if [ "$RESULT" = "FAIL" ]; then
     GATE_PASS=false
     FAILED_CHECKS="${FAILED_CHECKS}\n- **$ID** ($DESC): $DETAIL"
   fi
 done <<< "$ACCEPTANCE_CHECKS"
+
+# A gate that verified nothing must not pass: with every check skipped as malformed, PASSED would be a green light on zero evidence.
+if [ "$VERIFIED_COUNT" -eq 0 ]; then
+  GATE_PASS=false
+  FAILED_CHECKS="${FAILED_CHECKS}\n- **(gate)**: no acceptance check could be verified (all were malformed or none ran); regenerate the acceptance spec"
+fi
 ```
 
 **Post gate result comment**:
@@ -884,6 +890,7 @@ if [ "$GATE_PASS" = "true" ]; then
 
 All machine-checkable acceptance criteria verified against real behavior.
 $( [ -n "$CORRECTED" ] && printf '\n**Checks corrected (malformed matcher, literal text present)**:%b\n' "$CORRECTED" )
+$( [ -n "$MALFORMED_CHECKS" ] && printf '\n**malformed-check (not counted as failures; regenerate the acceptance spec by re-running investigate)**:%b\n' "$MALFORMED_CHECKS" )
 
 <!-- FORGE:ACCEPTANCE_GATE:PASSED -->"
 else
@@ -893,6 +900,7 @@ else
 The following acceptance checks did not pass:
 
 $(echo -e "$FAILED_CHECKS")
+$( [ -n "$MALFORMED_CHECKS" ] && printf '\n**malformed-check (not counted as failures; regenerate the acceptance spec by re-running investigate)**:%b\n' "$MALFORMED_CHECKS" )
 
 Merge is blocked. Fix the failing criteria and re-run the validate phase.
 
@@ -900,6 +908,8 @@ Merge is blocked. Fix the failing criteria and re-run the validate phase.
   run gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
 fi
 ```
+
+A `malformed-check` (a command/behavior target with a run of 4+ backslashes or a `bash -n` syntax error, or a grep target exiting >= 2 for a reason other than a missing/unreadable operand file, which stays a real FAIL) is reported in the comment and never sets `GATE_PASS=false` by itself, never enters `FAILED_CHECKS`, is never passed to `--fix-acceptance`, and never adds `needs-human` by itself; the gate still posts exactly one of PASSED/FAILED. The gate never posts PASSED with zero verified checks: if every check was malformed (`VERIFIED_COUNT=0`) it posts FAILED so the repair step regenerates the spec. <!-- Added: forge#3694 -->
 
 If `GATE_PASS = false`, the build repairs itself **once** before anything escalates (a failing acceptance check is pipeline work, not a human decision):
 
