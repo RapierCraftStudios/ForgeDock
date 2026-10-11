@@ -178,7 +178,7 @@ describe("pickPhase", () => {
     });
 
     // forge#3573: pre-build size estimate safety net.
-    const sized = (verdict, est, gate) => inv(verdict, `ESTIMATED_DIFF_LINES: ${est}\nINDEPENDENT_SEAMS: 3\nGATE_THRESHOLD: ${gate}\n<!-- DECOMPOSE:${/YES/.test(verdict) ? "YES" : "NO"} -->`);
+    const sized = (verdict, est, gate, factor) => inv(verdict, `ESTIMATED_DIFF_LINES: ${est}\nINDEPENDENT_SEAMS: 3\nGATE_THRESHOLD: ${gate}\n${factor === undefined ? "" : `ESTIMATE_FACTOR: ${factor}\n`}<!-- DECOMPOSE:${/YES/.test(verdict) ? "YES" : "NO"} -->`);
 
     it("NO verdict with estimate over threshold x 1.2 -> decomposed (safety net)", async () => {
       const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1500, 1000)));
@@ -188,6 +188,33 @@ describe("pickPhase", () => {
     it("NO verdict with estimate within threshold x 1.2 -> not decomposed", async () => {
       const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1200, 1000)));
       assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("ESTIMATE_FACTOR 3.0 -> 2000/1000 is not decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 2000, 1000, "3.0")));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("ESTIMATE_FACTOR 1.0 -> 1100/1000 is decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1100, 1000, "1.0")));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("absent ESTIMATE_FACTOR falls back to 1.2", async () => {
+      const o1 = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1300, 1000)));
+      assert.equal(o1.terminalReason, "decomposed");
+      const o2 = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1100, 1000)));
+      assert.equal(o2.terminalReason, undefined);
+    });
+
+    it("zero, invalid or quoted mid-line ESTIMATE_FACTOR is ignored (fallback 1.2)", async () => {
+      for (const f of ["0", "abc", "-2", "1e2", ".5"]) {
+        const o = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1500, 1000, f)));
+        assert.equal(o.terminalReason, "decomposed", `factor ${f}`);
+      }
+      const quoted = inv("**NO** — one PR", "see `ESTIMATE_FACTOR: 5` inline\nESTIMATED_DIFF_LINES: 1500\nGATE_THRESHOLD: 1000\n<!-- DECOMPOSE:NO -->");
+      const o = await investigate.detectOutcome(base, ioComments(quoted));
+      assert.equal(o.terminalReason, "decomposed");
     });
 
     it("GATE_THRESHOLD 0 disables the estimate net", async () => {
