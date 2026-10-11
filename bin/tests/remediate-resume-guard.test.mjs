@@ -15,11 +15,35 @@ describe("forge#3684 remediate.md resume guard", () => {
   it("has no commits[-1] and no unanchored APPROVED: match", () => {
     assert.ok(!spec.includes("commits[-1]"));
     assert.ok(!spec.includes('test("APPROVED:")'));
-    assert.ok(spec.includes('test("^APPROVED:")'));
+    assert.ok(spec.includes('capture("^APPROVED: commit '));
   });
 
-  it("selects the head commit by headRefOid", () => {
-    assert.match(spec, /select\(\.oid == \$head\)/);
+  it("forge#3726: approval is bound to headRefOid by SHA, never by committedDate", () => {
+    assert.ok(!spec.includes("HEAD_COMMITTED"));
+    assert.ok(!spec.includes("committedDate") || /never to author-controlled committedDate|commit dates are author-controlled/.test(spec));
+    assert.ok(!/created_at\s*>/.test(spec), "no timestamp freshness compare");
+    assert.match(spec, /headRefOid/);
+    assert.match(spec, /APPROVED: commit \(\?<s>\[0-9a-f\]\{7,40\}\)/);
+    assert.match(spec, /startswith\(\$s\)/);
+    assert.match(spec, /Reviewed-SHA: /);
+    assert.match(spec, /\.commit_id \/\/ \$head\) == \$head/);
+  });
+
+  it("forge#3726: resume reads PR reviews and issue comments and fails closed on empty head", () => {
+    assert.match(spec, /pulls\/\{PR_NUMBER\}\/reviews/);
+    assert.match(spec, /issues\/\{PR_NUMBER\}\/comments/);
+    assert.match(spec, /if \[ -n "\$HEAD_OID" \]; then/);
+    assert.match(spec, /RESUME_APPROVED_N=0\n/);
+  });
+
+  it("forge#3726: the resume merge is pinned to the approved head", () => {
+    assert.match(spec, /GATED_HEAD" != "\$RESUME_APPROVED_HEAD"/);
+    assert.match(spec, /CI_GATE_RC=4/);
+  });
+
+  it("forge#3726: park evidence must name the PR being merged (fixed string)", () => {
+    assert.match(spec, /PARK_PR_MARK="PR #\{PR_NUMBER\} was previously escalated"/);
+    assert.match(spec, /grep -qF "\$PARK_PR_MARK"/);
   });
 
   it("computes IS_DEPLOY_GATE before the resume substitution", () => {
