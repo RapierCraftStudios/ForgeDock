@@ -506,7 +506,9 @@ export async function runIssue(opts) {
   // the phase early. Same-host resume reads the LOCAL run-log's lastRateLimit
   // (the remote FORGE:STATE does not carry it). The lease is renewed while we
   // wait so a second relaunch still defers.
-  const rl = local?.lastRateLimit;
+  // forge#3791: after a --retry reopen/next-cycle the reducer cleared the pause, so read the
+  // post-reopen state, not the pre-reopen `local` derive.
+  const rl = (reopened ? state : local)?.lastRateLimit;
   const pendingPhase = pickPhase(state);
   const currentBackendId = backendIdentity({ backend, env: process.env });
   const rlApplies = !!(pendingPhase && rl && rl.phase === pendingPhase.id &&

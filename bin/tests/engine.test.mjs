@@ -2648,6 +2648,18 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
     assert.deepEqual(deriveState(log).committed, ["investigate", "build", "review", "close"]);
   });
 
+  it("forge#3791: a same-backend --retry does not sleep on the pre-reopen rate-limit pause", async () => {
+    const { w, io } = fakeWorld();
+    await runToEngineError(w, io);
+    appendEvent(dir, 42, { event: "PHASE_RATE_LIMITED", phase: "build", resetAt: 5000, waitMs: 3000,
+      backendId: backendIdentity({ backend: undefined, env: process.env }) });
+    const sleeps = [];
+    const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner: okRunner(w),
+      now: () => 2000, maxAttempts: 1, retry: true, sleep: async (ms) => { sleeps.push(ms); } });
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(sleeps.length, 0, "reopen cleared the pause; must not wait on it");
+  });
+
   it("resumes after a remote-hydrate (no local log)", async () => {
     const { w, io } = fakeWorld();
     await runToEngineError(w, io);
