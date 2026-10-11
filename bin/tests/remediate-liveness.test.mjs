@@ -180,6 +180,33 @@ esac
     const forged = { ...route("b".repeat(40)), user: { type: "User", login: "m" }, author_association: "NONE" };
     assert.equal(run({ prComments: [forged] }).rc, 0);
   });
+  const bound = (kind, pr = 7, ms = NOW - 30_000) => bot(`<!-- FORGE:${kind}_REMEDIATION: pr=${pr} -->`, ms);
+  it("handoff shape: route with no verdicts plus a newer bound marker -> DEAD, no deferral posted", () => {
+    for (const kind of ["BASESYNC", "CI", "INPR"]) {
+      const r = run({ prComments: [route("a".repeat(40), NOW - 60_000)], issueComments: [bound(kind)] });
+      assert.equal(r.rc, 0, kind); assert.equal(r.out, "LIVENESS: DEAD"); assert.equal(r.posted, 0);
+    }
+  });
+  it("handoff: equal timestamps resolve to handoff", () => {
+    const r = run({ prComments: [route("a".repeat(40), NOW - 60_000)], issueComments: [bound("BASESYNC", 7, NOW - 60_000)] });
+    assert.equal(r.rc, 0);
+  });
+  it("a route newer than the bound marker (re-review in flight) still defers", () => {
+    const r = run({ prComments: [route("a".repeat(40), NOW - 30_000)], issueComments: [bound("BASESYNC", 7, NOW - 90_000)] });
+    assert.equal(r.rc, 10); assert.match(r.out, /^LIVENESS: DEFER review/);
+  });
+  it("an other-PR, untrusted, or quoted bound marker does not end the pending state", () => {
+    const rt = route("a".repeat(40), NOW - 60_000);
+    assert.equal(run({ prComments: [rt], issueComments: [bound("BASESYNC", 70)] }).rc, 10);
+    assert.equal(run({ prComments: [rt], issueComments: [bound("BASESYNC", 6)] }).rc, 10);
+    const forged = { ...bound("CI"), user: { type: "User", login: "m" }, author_association: "NONE" };
+    assert.equal(run({ prComments: [rt], issueComments: [forged] }).rc, 10);
+    assert.equal(run({ prComments: [rt], issueComments: [bot("see <!-- FORGE:CI_REMEDIATION: pr=7 --> inline", NOW - 30_000)] }).rc, 10);
+  });
+  it("a live lease still defers even when a handoff marker exists", () => {
+    const r = run({ lease: { by: "cli_other_1", until: NOW + 300_000 }, prComments: [route("a".repeat(40), NOW - 60_000)], issueComments: [bound("CI")] });
+    assert.equal(r.rc, 10); assert.match(r.out, /^LIVENESS: DEFER lease/);
+  });
   it("CONC-3: deferrals are bounded; the 4th is EXHAUSTED and posts nothing", () => {
     const lease = { by: "cli_other_1", until: NOW + 300_000 };
     assert.equal(run({ lease, issueComments: [deferral(), deferral()] }).rc, 10);
