@@ -12,7 +12,10 @@ export function appendEvent(dir, issue, event) {
   mkdirSync(dir, { recursive: true });
   const path = logPath(dir, issue);
   const seq = readLog(dir, issue).length + 1;
-  appendFileSync(path, JSON.stringify({ seq, ...event }) + "\n");
+  // forge#3696: wall-clock ISO-8601 `ts` on every appended event. Placed before the
+  // spread so a caller-supplied `ts` wins. rewriteLog() deliberately does not stamp:
+  // a hydrated rewrite time would be a false timestamp. Old logs lack `ts` and still parse.
+  appendFileSync(path, JSON.stringify({ seq, ts: new Date().toISOString(), ...event }) + "\n");
 }
 
 /**

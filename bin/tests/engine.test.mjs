@@ -1743,6 +1743,96 @@ describe("runIssue — forge#2377: per-phase usage recording", () => {
   });
 });
 
+describe("runIssue — forge#3696: per-attempt usage, cumulative commit usage, RUN_START meta", () => {
+  const setup = (extraOpts = {}) => {
+    const { w, io } = fakeWorld();
+    let buildCalls = 0;
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => {
+        buildCalls++;
+        if (buildCalls === 1) return;
+        w.markers += builder("fix/real-branch-42"); w.commitsAhead = 2;
+      },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const A1 = { input_tokens: 100, output_tokens: 20, cache_creation_input_tokens: 0, cache_read_input_tokens: 50 };
+    const A2 = { input_tokens: 30, output_tokens: 5, cache_creation_input_tokens: 1, cache_read_input_tokens: 10 };
+    const runner = async ({ commandName }) => {
+      script[commandName]();
+      if (commandName === "work-on/build") {
+        return { status: "complete", usage: buildCalls === 1 ? A1 : A2, costUsd: buildCalls === 1 ? 0.5 : null,
+                 cliModel: "m1", turns: 3 };
+      }
+      return { status: "complete" };
+    };
+    const run = () => runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner,
+      now: () => 1000, maxAttempts: 3, ...extraOpts });
+    return { run, A1, A2 };
+  };
+
+  it("records one PHASE_ATTEMPT_USAGE per attempt and a cumulative PHASE_COMMIT.usage >= last attempt", async () => {
+    const { run, A1, A2 } = setup();
+    const res = await run();
+    assert.equal(res.terminalReason, "merged");
+    const events = readLog(dir, 42);
+    const attempts = events.filter((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.phase === "build");
+    assert.equal(attempts.length, 2);
+    assert.deepEqual(attempts.map((e) => e.attempt), [1, 2]);
+    assert.deepEqual(attempts[0].usage, A1);
+    assert.equal(attempts[0].cost_usd, 0.5);
+    assert.equal(attempts[1].cost_usd, null, "unreported cost is null, never 0");
+    assert.equal(attempts[0].model, "m1");
+    assert.equal(attempts[0].turns, 3);
+    assert.ok(Number.isFinite(attempts[0].duration_ms) && attempts[0].duration_ms >= 0);
+    const commit = events.find((e) => e.event === "PHASE_COMMIT" && e.phase === "build");
+    assert.deepEqual(commit.usage, {
+      input_tokens: 130, output_tokens: 25, cache_creation_input_tokens: 1, cache_read_input_tokens: 60 });
+    assert.deepEqual(commit.last_attempt_usage, A2);
+    assert.ok(commit.usage.input_tokens >= commit.last_attempt_usage.input_tokens);
+    assert.ok(events.every((e) => typeof e.ts === "string"), "every appended event carries ts");
+  });
+
+  it("a thrown attempt records null usage with a duration", async () => {
+    const { w, io } = fakeWorld();
+    let calls = 0;
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/investigate") {
+        calls++;
+        if (calls === 1) throw new Error("transient");
+        w.markers += investigationComment("COMPLETE");
+      }
+      if (commandName === "work-on/build") { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 2; }
+      if (commandName === "work-on/review") { w.pr = 7; w.prMerged = true; }
+      if (commandName === "work-on/close") { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); }
+      return { status: "complete" };
+    };
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 3 });
+    const a = readLog(dir, 42).filter((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.phase === "investigate");
+    assert.equal(a.length, 2);
+    assert.equal(a[0].usage, null);
+    assert.ok(Number.isFinite(a[0].duration_ms));
+  });
+
+  it("RUN_START carries forge_version and repo alongside version", async () => {
+    const { run } = setup();
+    await run();
+    const start = readLog(dir, 42).find((e) => e.event === "RUN_START");
+    assert.ok("forge_version" in start && "repo" in start);
+    assert.equal(start.forge_version, start.version);
+  });
+
+  it("emitTelemetry is called per attempt, and a throwing emitter never fails the phase", async () => {
+    const seen = [];
+    const { run } = setup({ emitTelemetry: (rec) => { seen.push(rec); throw new Error("emitter down"); } });
+    const res = await run();
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(seen.filter((r) => r.phase === "build").length, 2);
+    assert.equal(seen[0].issue, 42);
+  });
+});
+
 describe("runIssue — forge#2313: lease config validation", () => {
   it("rejects leaseRenewIntervalMs >= leaseTtlMs (boundary-equal case) before any state I/O", async () => {
     const { w, io } = fakeWorld();

@@ -47,6 +47,11 @@ has "o/b single run per-merged math" "$ROW_B" "| 2.0.0 | o/b | 1 | 1000k | 1000k
 has "o/b per merged" "$ROW_B" "| 100% | 1000k |"
 hasnt "unfinished usage never counted" "$OUT" "9999k"
 
+# o/c: new-style log (PHASE_ATTEMPT_USAGE). Per-phase attempts are summed once: investigate 10k + build 100k + 50k
+# = 160k; the cumulative PHASE_COMMIT (150k) and the PHASE_FAILED (100k) must not be added on top.
+ROW_C=$(printf '%s\n' "$OUT" | grep '^| 2\.0\.0 | o/c |')
+has "o/c attempt events not double counted" "$ROW_C" "| 2.0.0 | o/c | 1 | 160k | 160k |"
+
 # Old log: version estimated from mtime (marked ~), repo unknown.
 has "old-log fallback" "$OUT" "| 1.0.0~ | unknown | 1 | 70k |"
 has "excluded footer" "$OUT" "Excluded: 2 unfinished, 1 without usage data"

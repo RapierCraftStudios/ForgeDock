@@ -1609,10 +1609,15 @@ export function runCliBackend({
     let parsedResult = null;
     let usage = null;
     let turns = null;
+    // forge#3696: envelope cost/duration per attempt (null when absent or non-finite).
+    let costUsd = null;
+    let durationMs = null;
     try {
       const parsed = JSON.parse(stdoutTrimmed);
       if (parsed && typeof parsed === "object") {
         if (Number.isFinite(parsed.num_turns)) turns = parsed.num_turns;
+        if (Number.isFinite(parsed.total_cost_usd)) costUsd = parsed.total_cost_usd;
+        if (Number.isFinite(parsed.duration_ms)) durationMs = parsed.duration_ms;
         parsedResult = typeof parsed.result === "string" ? parsed.result : null;
         if (parsed.usage && typeof parsed.usage === "object") {
           usage = {
@@ -1697,6 +1702,8 @@ export function runCliBackend({
       // and the envelope's turn count (null when absent), for runlog recording.
       cliModel: modelFlag,
       turns,
+      costUsd,
+      durationMs,
       backend: "cli",
       // forge#3521: the phase's final reply (the CLI envelope's `.result`), so
       // callers can read its structured `*_RESULT` block. Additive; "" when absent.
