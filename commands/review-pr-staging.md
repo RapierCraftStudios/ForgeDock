@@ -1311,7 +1311,7 @@ Before filing, apply the three gates defined in `commands/review-pr.md` §6B.4 (
 
 Classify every deduped finding with `scripts/classify-finding.sh` before filing, exactly as `commands/review-pr.md` §6B.5 does (the rules live in the script, not here: HIGH/CRITICAL always ISSUE, content-based safety exemption where LOW needs a keyword AND CONFIRMED and a domain agent rescues MEDIUM only, otherwise LOW/POSSIBLE become NOTEs). Resolve it with the same resolver (`${CLAUDE_PLUGIN_ROOT}`, `FORGE_ROOT`, `FORGEDOCK_HOME`, pinned plugin cache under `CLAUDE_CONFIG_DIR` then `~/.claude`). There is no `$PWD` tier: the repo under review is author-controlled. The staging PR is not a finding fix, so `FINDING_LINEAGE=none`.
 
-**Cross-PR re-flag** <!-- Added: forge#3641 -->: the 7B.6 gates run first, so re-flag counts cover only findings that survived them. A finding that a bundle member PR's review already posted, or that a member PR's `FORGE:NOTE_DISPOSITION` list recorded, is not filed or noted again. The fence builds a prior-findings TSV (file, line-start, line-end, title, prior-disposition, issue#) from each member PR in `ALL_PR_NUMBERS`, reading every comment through `scripts/trusted-comments.sh` (never an untrusted author), and passes it to the classifier as `--prior-findings`. A finding re-flags a row when it is the same file AND (line IoU >= 0.6 OR >= 3 shared title tokens); the classifier answers `NOTE reflag-filed #N` (the prior issue is still open) or `NOTE reflag-note`, never a new ISSUE. HIGH/CRITICAL are never demoted (they keep blocking via §7B), and a row whose linked issue is closed is ignored so a regressed defect is classified normally. Re-flag NOTEs are listed with the other NOTEs and counted in `notes_reflag` only. An unreadable member PR only shrinks the TSV; it never blocks.
+**Cross-PR re-flag** <!-- Added: forge#3641 -->: the 7B.6 gates run first, so re-flag counts cover only findings that survived them. A finding that a bundle member PR's review already posted, or that a member PR's `FORGE:NOTE_DISPOSITION` list recorded, is not filed or noted again. The fence builds a prior-findings TSV (file, line-start, line-end, title, prior-disposition, issue#) from each member PR in `ALL_PR_NUMBERS`, reading every comment through `scripts/trusted-comments.sh` (never an untrusted author), and passes it to the classifier as `--prior-findings`. A finding re-flags a row when it is the same file AND (line IoU >= 0.6 OR >= 3 shared title tokens); the classifier answers `NOTE reflag-filed #N` (the prior issue is still open) or `NOTE reflag-note`, never a new ISSUE. HIGH/CRITICAL are never demoted (they keep blocking via §7B), and a row whose linked issue is closed is ignored so a regressed defect is classified normally. Reviewer-body rows whose issue linkage fails are passed as `unknown` (recorded NOTE_DISPOSITION rows as `note`); an `unknown` row never demotes a MEDIUM CONFIRMED/LIKELY re-flag. Re-flag NOTEs are listed with the other NOTEs and counted in `notes_reflag` only. An unreadable member PR only shrinks the TSV; it never blocks.
 
 ```bash
 _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
@@ -1361,17 +1361,17 @@ done <<< "$_tc"
 REPO="$GH_REPO"; _pscr="$_SD"; NOTES_REFLAG=0; PRIOR_FILE=""
 # Cross-head re-flag input (#3641). Fail soft: every unreadable source just leaves the TSV smaller, never blocks the review.
 # PF_SKIP="<sha or empty>" PF_PRS="<pr numbers>" prior_findings_tsv prints file<TAB>line-start<TAB>line-end<TAB>title<TAB>disposition<TAB>issue# rows
-# (disposition: filed = linked issue OPEN, filed-closed = linked issue CLOSED, note = no linked issue). Every comment is read through
+# (disposition: filed = linked issue OPEN, filed-closed = linked issue CLOSED, note = a recorded NOTE_DISPOSITION with no linked issue, unknown = a reviewer-body finding whose issue linkage failed, so the classifier must not let it demote a MEDIUM CONFIRMED/LIKELY re-flag). Every comment is read through
 # scripts/trusted-comments.sh, so an untrusted commenter cannot pre-post a finding to suppress a real one. With PF_SKIP set, reviewer
 # bodies for that head are skipped and only NOTE_DISPOSITION records carrying a different `reviewed_sha=` count (this head's own record,
 # from an earlier run of this same review, must never swallow its findings).
-pf_split_loc() { # PF_LOC="file[:N[-M]]" -> file<TAB>N<TAB>M (line columns empty when absent)
+pf_split_loc() { # PF_LOC="file[:N[-M]]" -> file<TAB>N<TAB>M (`-` sentinel when a line column is absent: a tab IFS read collapses empty fields)
   local _loc="$PF_LOC" _file _r _a="" _b=""; _file="$_loc"
   case "$_loc" in *:[0-9]*) _r="${_loc##*:}"; case "$_r" in *[!0-9-]*|"") ;; *) _file="${_loc%:*}"; _a="${_r%%-*}"; _b="${_r#*-}"; [ "$_b" != "$_r" ] || _b="$_a" ;; esac ;; esac
-  printf '%s\t%s\t%s\n' "$_file" "$_a" "$_b"
+  printf '%s\t%s\t%s\n' "$_file" "${_a:--}" "${_b:--}"
 }
 prior_findings_tsv() {
-  local pr cj rows issues _id _c _s _loc _t _p _hit _f _a _b
+  local pr cj rows issues _id _c _s _loc _t _p _hit _f _a _b _src _dflt
   [ -n "${TRUSTED_SCRIPT:-}" ] || return 0
   rows=$(mktemp "${_pscr}/prior-rows.XXXXXX"); issues=$(mktemp "${_pscr}/prior-issues.XXXXXX")
   for pr in $PF_PRS; do
@@ -1382,21 +1382,25 @@ prior_findings_tsv() {
       | jq -r --arg skip "${PF_SKIP:-}" 'select($skip == "" or (test("(^|\\n)Reviewed-SHA: " + $skip + "\\r?(\\n|$)") | not)) | scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null \
       | while IFS='|' read -r _id _c _s _loc _t; do
           [ -n "$_t" ] || continue
-          _p=$(PF_LOC="$_loc" pf_split_loc); printf '%s\t%s\n' "$_p" "$(printf '%s' "$_t" | tr '\t' ' ')"
+          _p=$(PF_LOC="$_loc" pf_split_loc); printf 'F\t%s\t%s\n' "$_p" "$(printf '%s' "$_t" | tr '\t' ' ')"
         done >> "$rows"
     printf '%s' "$cj" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:NOTE_DISPOSITION' 2>/dev/null \
       | jq -r --arg skip "${PF_SKIP:-}" 'select($skip == "" or ((capture("^<!-- FORGE:NOTE_DISPOSITION:[^>]*reviewed_sha=(?<s>[0-9a-f]{40,64})") | .s) as $s | $s != $skip)) | split("\n")[] | select(startswith("- "))' 2>/dev/null \
       | sed -n 's/^- [^ ]* \([^ ]*\) \[[A-Za-z?]*\] \(.*\): [^:]*$/\1\t\2/p' \
       | while IFS="$(printf '\t')" read -r _loc _t; do
           [ "$_loc" != "?" ] || continue
-          _p=$(PF_LOC="$_loc" pf_split_loc); printf '%s\t%s\n' "$_p" "$_t"
+          _p=$(PF_LOC="$_loc" pf_split_loc); printf 'N\t%s\t%s\n' "$_p" "$_t"
         done >> "$rows"
     gh issue list -R "$REPO" --label review-finding --state all --search "${pr} in:body" --limit 100 --json number,state,title,body 2>/dev/null \
       | jq -c '.[]' >> "$issues" 2>/dev/null || true
   done
   # Linkage: a filed issue whose body names the file and whose title shares >= 3 tokens with the finding (open preferred).
-  sort -u "$rows" | while IFS="$(printf '\t')" read -r _f _a _b _t; do
+  # Rows carry a leading source column (F = reviewer FINDING marker, N = NOTE_DISPOSITION record), stripped on output. An unlinked F row may
+  # have been filed under a reworded title, so it is `unknown` (never demotes MEDIUM CONFIRMED/LIKELY); an unlinked N row is a true `note`.
+  sort -u "$rows" | while IFS="$(printf '\t')" read -r _src _f _a _b _t; do
     [ -n "$_f" ] || continue
+    [ "$_a" != "-" ] || _a=""; [ "$_b" != "-" ] || _b=""
+    case "$_src" in N) _dflt=note ;; *) _dflt=unknown ;; esac
     _hit=$(jq -rs --arg f "$_f" --arg t "$_t" 'def toks: ascii_downcase | [scan("[a-z0-9]{3,}")] | unique;
       ($t | toks) as $a | [ .[] | select((.body // "") | contains($f))
         | select((((.title // "") | toks) as $b | [$a[] | select(. as $x | $b | index($x))] | length) >= 3)
@@ -1405,7 +1409,7 @@ prior_findings_tsv() {
     case "$_hit" in
       open*) printf '%s\t%s\t%s\t%s\tfiled\t%s\n' "$_f" "$_a" "$_b" "$_t" "${_hit#*	}" ;;
       closed*) printf '%s\t%s\t%s\t%s\tfiled-closed\t%s\n' "$_f" "$_a" "$_b" "$_t" "${_hit#*	}" ;;
-      *) printf '%s\t%s\t%s\t%s\tnote\t\n' "$_f" "$_a" "$_b" "$_t" ;;
+      *) printf '%s\t%s\t%s\t%s\t%s\t\n' "$_f" "$_a" "$_b" "$_t" "$_dflt" ;;
     esac
   done
   rm -f "$rows" "$issues"

@@ -51,7 +51,9 @@
 #                 earlier head of this PR or by a bundle's member PRs, one per line, columns
 #                 file<TAB>line-start<TAB>line-end<TAB>title<TAB>prior-disposition<TAB>issue#.
 #                 prior-disposition is `filed` (its issue is still open), `filed-closed` (issue closed:
-#                 the row is IGNORED so a regressed defect is classified normally) or `note`.
+#                 the row is IGNORED so a regressed defect is classified normally), `note` (a recorded NOTE) or
+#                 `unknown` (a reviewer-body row whose issue linkage failed: it is IGNORED for a MEDIUM
+#                 CONFIRMED/LIKELY finding so it can never suppress one, and behaves like `note` otherwise).
 #                 Line columns may be empty (NOTE-sourced rows carry no range). A finding re-flags a row
 #                 when it is the same file AND ((line IoU >= 0.6 and >= 1 shared title token), or >= 3 shared title tokens). Output is
 #                 `NOTE reflag-filed #N` (row has an issue number) or `NOTE reflag-note`; this gate never
@@ -180,7 +182,7 @@ if [ -n "$PRIOR_FINDINGS" ] && [ -n "$FINDING_FILE" ]; then
   case "$_rls" in ''|*[!0-9]*) _rls=""; _rle="" ;; esac
   case "$_rle" in ''|*[!0-9]*) _rle="$_rls" ;; esac
   _dmap="$DIFF_MAP"; { [ -n "$_dmap" ] && [ -r "$_dmap" ]; } || _dmap=""
-  _reflag=$(awk -F '\t' -v file="$_rpath" -v ls="$_rls" -v le="$_rle" -v title="$TITLE" -v dmap="$_dmap" '
+  _reflag=$(awk -F '\t' -v file="$_rpath" -v ls="$_rls" -v le="$_rle" -v title="$TITLE" -v dmap="$_dmap" -v sev="$SEV" -v conf="$CONF" '
     function toks(str, arr,    n, i, parts, t, c) {
       c = 0; str = tolower(str); gsub(/[^a-z0-9]+/, " ", str)
       n = split(str, parts, " ")
@@ -208,6 +210,7 @@ if [ -n "$PRIOR_FINDINGS" ] && [ -n "$FINDING_FILE" ]; then
       pf = $1; sub(/^\.\//, "", pf)
       if (pf != file) next
       if ($5 == "filed-closed") next
+      if ($5 == "unknown" && sev == "MEDIUM" && (conf == "CONFIRMED" || conf == "LIKELY")) next
       hit = 0
       delete pt; toks($4, pt); shared = 0
       for (t in pt) if (t in ft) shared++
