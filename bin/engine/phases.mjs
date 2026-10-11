@@ -518,8 +518,8 @@ async function reviewArgs(state, ctx, io) {
           "--branch", need(state.branch, "branch", BRANCH_RE), ...baseArgs(state)];
 }
 
-/** Default `build.diff_size.estimate_factor` (docs/CONFIG.md); mirrored here for the isDecomposed safety net. */
-const ESTIMATE_FACTOR = 1.2;
+/** Default `build.diff_size.estimate_factor` (docs/CONFIG.md); used when the report carries no valid `ESTIMATE_FACTOR:` field. */
+const DEFAULT_ESTIMATE_FACTOR = 1.2;
 
 /**
  * Is the issue assessed for decomposition? Evaluated on ONE comment: the newest
@@ -544,14 +544,18 @@ function isDecomposed(report) {
   if ((verdict ?? marker) === "YES") return true;
   // forge#3573 safety net: an investigator NO whose own size estimate is clearly over
   // the gate (estimate > threshold x factor) fails toward decompose. Own-line,
-  // whole-number fields only; absent/0/non-numeric fields have no effect.
+  // whole-number fields only; absent/0/non-numeric fields have no effect. The factor is
+  // the investigator's effective `ESTIMATE_FACTOR:` (positive decimal); absent/invalid -> 1.2.
   const est = /^ESTIMATED_DIFF_LINES:[ \t]*(\d+)[ \t]*$/m.exec(text);
   const gate = /^GATE_THRESHOLD:[ \t]*(\d+)[ \t]*$/m.exec(text);
+  const fac = /^ESTIMATE_FACTOR:[ \t]*(\d+(?:\.\d+)?)[ \t]*$/m.exec(text);
+  const parsedFactor = fac ? Number(fac[1]) : NaN;
+  const factor = Number.isFinite(parsedFactor) && parsedFactor > 0 ? parsedFactor : DEFAULT_ESTIMATE_FACTOR;
   if (est && gate) {
     const estimate = Number(est[1]);
     const threshold = Number(gate[1]);
-    if (threshold > 0 && estimate > threshold * ESTIMATE_FACTOR) {
-      console.error(`[engine] investigator estimate ${estimate} exceeds gate ${threshold} x ${ESTIMATE_FACTOR}; routing to decompose`);
+    if (threshold > 0 && estimate > threshold * factor) {
+      console.error(`[engine] investigator estimate ${estimate} exceeds gate ${threshold} x ${factor}; routing to decompose`);
       return true;
     }
   }
