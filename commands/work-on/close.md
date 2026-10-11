@@ -346,6 +346,8 @@ The `INVARIANT_ANOMALIES` variable is read in Phase C5 (Step 1) and rendered in 
 
 **Skip if**: `TERMINAL_STATE` is `decomposed` or `invalid` (set `REMAINING_AFTER=0`; nothing to check off).
 
+**Investigation terminal** <!-- Added: forge#3772 -->: if `TERMINAL_STATE` is `investigation`, skip the multi-phase guard below and set `REMAINING_AFTER=0`. An investigation exit closes its own issue and is never one phase of a multi-phase body; classifying it as multi-phase would post `FORGE:PHASE:COMPLETE` in C2 and skip the trajectory in C5.
+
 **Fresh read — intentionally NOT covered by the session-state cache.** The body is about to be rewritten below, and the review phase's `/review-pr` invocation is an external process that can post comments/edits between the last read and here. Writing back a stale cached body would silently revert any concurrent change, so this file always fetches the body fresh immediately before a body mutation (the parent body in Phase C3 likewise).
 
 **Multi-phase guard**: Before checking off items, detect whether the issue has multiple phases. Only check off items belonging to the current completed phase — not all remaining items across future phases.

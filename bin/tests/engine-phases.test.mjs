@@ -1603,6 +1603,24 @@ describe("build investigation exit (forge#3534)", () => {
     assert.equal((await close.reconcile(s, io(["<!-- FORGE:TRAJECTORY -->\nrow"]))).satisfied, true);
   });
 
+  it("forge#3772 CLOSED investigation accepts a trusted current-cycle PHASE:COMPLETE as close evidence", async () => {
+    const snap = JSON.stringify({ state: "CLOSED", labels: [] });
+    const io = (bodies) => ({ gh: async (a) => (a[0] === "issue" ? snap : jsonLines(bodies.map((b) => trusted(b)))), git: async () => "0" });
+    const s = { ...base, terminalReason: "investigation" };
+    const pc = "<!-- FORGE:PHASE:COMPLETE -->\nPhase complete. 1 phase item(s) remain.";
+    const o = await close.detectOutcome(s, io([marker, pc]));
+    assert.equal(o.status, "committed");
+    assert.equal(o.terminalReason, "investigation");
+    assert.equal((await close.reconcile(s, io([marker, pc]))).satisfied, true);
+    // neither marker -> still failed
+    assert.equal((await close.detectOutcome(s, io([marker]))).status, "failed");
+    // quoted / untrusted PHASE:COMPLETE does not count
+    const quoted = "quoting <!-- FORGE:PHASE:COMPLETE --> here";
+    assert.equal((await close.detectOutcome(s, io([marker, quoted]))).status, "failed");
+    const untrusted = { gh: async (a) => (a[0] === "issue" ? snap : jsonLines([{ body: pc, user: { login: "rando" }, author_association: "NONE" }])), git: async () => "0" };
+    assert.equal((await close.detectOutcome(s, untrusted)).status, "failed");
+  });
+
   it("investigation is not a TERMINAL_REASON (run must reach close)", async () => {
     const { TERMINAL_REASONS } = await import("../engine/phases.mjs");
     assert.ok(!TERMINAL_REASONS.includes("investigation"));

@@ -2729,6 +2729,22 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
       assert.equal((await ph.buildArgs(s, { repo: "o/r" }))[0], "9");
     });
 
+    it("forge#3772 remediate needs-human -> engine-error -> reopen keeps remediate committed, resumes at close", () => {
+      const s = deriveState([start, commit(2, "investigate"), commit(3, "build", { outputs: { branch: "b" } }),
+        commit(4, "review", { outputs: { pr: 9 }, terminalReason: "needs-human" }),
+        commit(5, "remediate", { terminalReason: "needs-human" }), crash(6), reopen(7)]);
+      assert.ok(s.committed.includes("remediate"));
+      assert.notEqual(pickPhase(s)?.id, "remediate");
+    });
+
+    it("forge#3772 a needs-human terminal, reopen, then engine-error reopen no longer un-commits", () => {
+      const s = deriveState([start, commit(2, "investigate"), commit(3, "review", { terminalReason: "needs-human" }),
+        commit(4, "remediate", { terminalReason: "needs-human" }),
+        { seq: 5, event: "RUN_TERMINAL", reason: "needs-human" }, reopen(6),
+        commit(7, "remediate", { terminalReason: "needs-human" }), crash(8), reopen(9)]);
+      assert.ok(s.committed.includes("remediate"));
+    });
+
     it("forge#3754 remediate awaiting-merge -> engine-error -> reopen keeps remediate committed", () => {
       const s = deriveState([start, commit(2, "investigate"), commit(3, "build"),
         commit(4, "review", { outputs: { pr: 9 }, terminalReason: "needs-human" }),

@@ -63,6 +63,9 @@ export function deriveState(events) {
   let lastCommitReason = null;
   // forge#3754: phase of the LAST PHASE_COMMIT, so a reopen can tell a remediate-terminal run.
   let lastCommitPhase = null;
+  // forge#3772: reason of the LAST RUN_TERMINAL, so a reopen can tell a needs-human terminal
+  // (label cleared by a human) from an engine-error retry.
+  let lastTerminalReason = null;
   for (const e of events) {
     switch (e.event) {
       case "RUN_START":
@@ -85,6 +88,7 @@ export function deriveState(events) {
         break;
       case "RUN_TERMINAL":
         s.terminal = true; s.terminalReason = e.reason ?? "done"; s.v = e.seq;
+        lastTerminalReason = s.terminalReason;
         break;
       // forge#3511: an explicit `run-issue --retry` reopens an engine-error
       // terminal. Bumping `v` makes the local state newer than the stale
@@ -97,9 +101,14 @@ export function deriveState(events) {
         // forge#3754: a remediate that ended needs-human is re-run after a human clears the
         // label. Un-commit it (new array, no in-place mutation) so the forge#3506 resume guard
         // does not re-terminate and remediate's entryCondition re-selects it.
-        if (lastCommitPhase === "remediate" && lastCommitReason === "needs-human") {
+        // forge#3772: only when the terminal being reopened was itself needs-human (the engine
+        // reopens that only after a live read shows the label cleared). An engine-error retry
+        // keeps remediate committed so the resume guard is not bypassed.
+        if (lastCommitPhase === "remediate" && lastCommitReason === "needs-human"
+            && lastTerminalReason === "needs-human") {
           s.committed = s.committed.filter((p) => p !== "remediate");
         }
+        lastTerminalReason = null;
         break;
       // forge#3562: an explicit `run-issue --retry` on a `phase-complete` run
       // (multi-phase issue: this phase merged, more remain) starts a NEW cycle.
@@ -111,7 +120,7 @@ export function deriveState(events) {
       case "RUN_NEXT_CYCLE":
         s.terminal = false; s.terminalReason = null; s.committed = [];
         s.branch = null; s.pr = null; s.remediationKind = null;
-        lastCommitReason = null; lastCommitPhase = null; s.v = e.seq;
+        lastCommitReason = null; lastCommitPhase = null; lastTerminalReason = null; s.v = e.seq;
         break;
       // forge#2524: a session-limit pause is purely informational — it does
       // NOT touch committed/terminal/terminalReason. The phase that hit the
