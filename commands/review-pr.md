@@ -1536,6 +1536,210 @@ DOMAIN_FILES_API=$(echo "$FILES" | grep -iE "router|route|endpoint|openapi|sdk|a
 
 ### 3C: Load Agent Templates & Launch
 
+#### Review mode: FULL, DELTA or BASE_SYNC_ONLY (run first, before loading any template)
+
+Re-reviewing a head that only moved since the last fully reviewed head does not need the whole panel over the whole diff. `scripts/review-delta.sh` (resolved from the trusted install, never the working directory or the PR checkout) classifies the move from GitHub state and git history. It is fail closed: every error, an unresolvable script or trust script, unreadable output or an unvalidated SHA means **FULL**, which is the review this spec ran before the resolver existed.
+
+| Mode | Meaning | What changes |
+|------|---------|--------------|
+| `FULL` | First review, anything the resolver cannot prove, `--thorough`, milestone-to-staging, or a same-head re-entry | Nothing. The 3B roster reviews the full PR diff. |
+| `DELTA` | Head moved by ordinary commits since the last fully reviewed head | Reviewers get `git diff <reviewed>..<head>` as their slice (`FULL_FILES` stays as context). The 3B roster stands while `FULL_ROUNDS < 2`; from the third review on the roster is Security plus the domains whose trigger paths the delta touches. Findings of the earlier reviewed head are read again in Phase 6A. |
+| `BASE_SYNC_ONLY` | Head moved only by clean merges of `origin/<base>` with the PR's own change byte-identical | Zero reviewers. A trusted `FORGE:REVIEW-CARRIED` record stands in for the per-domain markers in Phases 4, 5, 6A and 9. |
+
+Phase 2 checks, the §6B.4 provenance gates (against the full PR diff at the current head) and the Phase 7B/8 gates run unchanged in every mode.
+
+```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"; SELECTED_AGENTS="{SELECTED_AGENTS}"
+THOROUGH="{THOROUGH}"; IS_MILESTONE_TO_STAGING="{IS_MILESTONE_TO_STAGING}"
+# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+done
+TRUSTED_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done <<< "$_tc"
+# HELPER_SCRIPT resolver (REVIEW_DELTA_SCRIPT; trusted-install tiers only, never the working directory or the PR checkout, #3400/#3483/#3596): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. A PR that shipped its own resolver could otherwise decide that its own head needs no review. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+done
+REVIEW_DELTA_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$REVIEW_DELTA_SCRIPT" ] && [ -f "$_c/scripts/review-delta.sh" ] && REVIEW_DELTA_SCRIPT="$_c/scripts/review-delta.sh" ;; esac
+done <<< "$_tc"
+BASE_BRANCH=$(gh pr view "$PR_NUMBER" -R "$REPO" --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
+COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
+# BEGIN review-pr-delta-mode
+is_sha() { case "${1}" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]; }
+# Prints "<MODE> <ARG> <FULL_ROUNDS>" from scripts/review-delta.sh: "FULL - n", "DELTA <reviewed-sha> n" or "BASE_SYNC_ONLY <reviewed-sha> n".
+# Needs REPO PR_NUMBER REVIEW_SHA BASE_BRANCH TRUSTED_SCRIPT REVIEW_DELTA_SCRIPT in scope. Every failure (unresolved script, bad output, bad SHA, empty delta) prints FULL, never a skipped review.
+review_delta_mode() {
+    local out l1 l2 kind arg from to rounds=0 top
+    is_sha "$REVIEW_SHA" || { echo "FULL - 0"; return 0; }
+    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$REVIEW_DELTA_SCRIPT" ] || [ -z "$BASE_BRANCH" ]; then echo "FULL - 0"; return 0; fi
+    top=$(git rev-parse --show-toplevel 2>/dev/null) || top=""
+    [ -n "$top" ] || { echo "FULL - 0"; return 0; }
+    out=$(bash "$REVIEW_DELTA_SCRIPT" --pr "$PR_NUMBER" --head "$REVIEW_SHA" --base "$BASE_BRANCH" --trusted-script "$TRUSTED_SCRIPT" --repo "$REPO" --repo-path "$top" 2>/dev/null) || out=""
+    l1=$(printf '%s\n' "$out" | sed -n 1p); l2=$(printf '%s\n' "$out" | sed -n 2p)
+    case "$l2" in FULL_ROUNDS=*) rounds="${l2#FULL_ROUNDS=}" ;; esac
+    case "$rounds" in ''|*[!0-9]*) echo "FULL - 0"; return 0 ;; esac
+    kind="${l1%% *}"; arg="${l1#* }"
+    if [ "$kind" = "BASE_SYNC_ONLY" ] && is_sha "$arg" && [ "$arg" != "$REVIEW_SHA" ]; then echo "BASE_SYNC_ONLY $arg $rounds"; return 0; fi
+    if [ "$kind" = "DELTA" ]; then
+        from="${arg%%..*}"; to="${arg##*..}"
+        if is_sha "$from" && [ "$to" = "$REVIEW_SHA" ] && [ "$from" != "$to" ]; then echo "DELTA $from $rounds"; return 0; fi
+    fi
+    echo "FULL - $rounds"
+}
+# Prints the Carried-From-SHA only when a TRUSTED FORGE:REVIEW-CARRIED record for this head names it AND the resolver
+# still answers BASE_SYNC_ONLY from that same reviewed SHA right now. Needs COMMENTS_JSON as well. Marker text alone never counts.
+carry_verified_from() {
+    local kind from rounds n
+    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then return 0; fi
+    read -r kind from rounds <<< "$(review_delta_mode)"
+    [ "$kind" = "BASE_SYNC_ONLY" ] || return 0
+    n=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "\\A(?=[\\s\\S]*\\nReviewed-SHA: ${REVIEW_SHA}\\r?(\\n|$))(?=[\\s\\S]*\\nCarried-From-SHA: ${from}\\r?(\\n|$))<!-- FORGE:REVIEW-CARRIED -->" 2>/dev/null || echo "")
+    case "$n" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$n" -ge 1 ] && printf '%s' "$from"
+    return 0
+}
+# END review-pr-delta-mode
+# BEGIN review-pr-delta-roster
+# Effective roster for a DELTA head. While fewer than two full panels have run (FULL_ROUNDS < 2) the 3B roster stands;
+# from the third review on it narrows to Security plus the domains whose trigger paths the delta touches.
+# Args: FULL_ROUNDS, the canonical 3B roster (space separated), the delta file list (one path per line).
+delta_roster() {
+    local rounds="${1}" full="${2}" files="${3}" out="security"
+    case "$rounds" in ''|*[!0-9]*) printf '%s' "$full"; return 0 ;; esac
+    if [ "$rounds" -lt 2 ]; then printf '%s' "$full"; return 0; fi
+    printf '%s\n' "$files" | grep -qiE "auth|session|login|logout|jwt|oauth|token|user|permission|middleware" && out="$out auth"
+    printf '%s\n' "$files" | grep -qiE "billing|credit|payment|charge|refund|subscription|pricing|tier" && out="$out billing"
+    printf '%s\n' "$files" | grep -qiE "lock|queue|atomic|transaction|worker|job|task|celery|redis|claim|lease|engine-state" && out="$out concurrency"
+    printf '%s\n' "$files" | grep -qiE "migration|\.sql$|model|schema|db|database|alembic" && out="$out database"
+    printf '%s\n' "$files" | grep -qiE "docker|nginx|traefik|\.github|Makefile|deploy|infra" && out="$out infra"
+    printf '%s\n' "$files" | grep -qiE "scrape|crawler|stealth|browser.*pool|headless|anti.bot|captcha" && out="$out scraper"
+    printf '%s\n' "$files" | grep -qiE "^web/|\.tsx?$|\.jsx?$|component|page|layout|style|css" && out="$out frontend"
+    printf '%s\n' "$files" | grep -qiE "router|route|endpoint|openapi|sdk|api" && out="$out api"
+    printf '%s\n' "$files" | grep -qE "^(commands|bin)/" && out="$out spec-cli"
+    printf '%s' "$out"
+}
+# END review-pr-delta-roster
+REVIEW_MODE="FULL"; DELTA_FROM=""; CARRIED_FROM=""; FULL_ROUNDS=0
+if [ "$THOROUGH" != "true" ] && [ "$IS_MILESTONE_TO_STAGING" != "true" ]; then
+  read -r RD_KIND RD_ARG RD_ROUNDS <<< "$(review_delta_mode)"
+  FULL_ROUNDS="${RD_ROUNDS:-0}"
+  case "$RD_KIND" in
+    DELTA) REVIEW_MODE="DELTA"; DELTA_FROM="$RD_ARG" ;;
+    BASE_SYNC_ONLY) REVIEW_MODE="BASE_SYNC_ONLY"; CARRIED_FROM="$RD_ARG" ;;
+  esac
+fi
+if [ "$REVIEW_MODE" = "DELTA" ]; then
+  RD_TOP=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+  DELTA_FILES=$(git -C "$RD_TOP" -c core.quotepath=off diff --name-only --no-renames "${DELTA_FROM}" "${REVIEW_SHA}" 2>/dev/null) || DELTA_FILES=""
+  if [ -z "$DELTA_FILES" ]; then
+    REVIEW_MODE="FULL"; DELTA_FROM=""   # unreadable or empty delta: review the full diff
+  else
+    SELECTED_AGENTS=$(delta_roster "$FULL_ROUNDS" "$SELECTED_AGENTS" "$DELTA_FILES")
+  fi
+fi
+[ "$REVIEW_MODE" = "BASE_SYNC_ONLY" ] && SELECTED_AGENTS=""
+echo "REVIEW_MODE: ${REVIEW_MODE}"
+echo "DELTA_FROM: ${DELTA_FROM}"
+echo "CARRIED_FROM: ${CARRIED_FROM}"
+echo "FULL_ROUNDS: ${FULL_ROUNDS}"
+echo "SELECTED_AGENTS: ${SELECTED_AGENTS}"
+```
+
+From here on substitute the printed `REVIEW_MODE`, `DELTA_FROM`, `CARRIED_FROM` and `SELECTED_AGENTS` into every later block as `{REVIEW_MODE}`, `{DELTA_FROM}`, `{CARRIED_FROM}` and `{SELECTED_AGENTS}`. The printed `SELECTED_AGENTS` is the **effective roster**: the panel guard here, the Phase 4 count and the Phase 9 count compare against what is actually dispatched, never against a stale full roster. A block that does not receive these values behaves as FULL (never as a skipped review). A printed `REVIEW_MODE` is advisory: Phases 4, 5, 6A and 9 re-verify `BASE_SYNC_ONLY` themselves before honouring it.
+
+**If `REVIEW_MODE` is `BASE_SYNC_ONLY`**: dispatch zero reviewers. Skip the template guard, config load, code index, diff slicing and the dispatch below, post the carry record, then go straight to Phase 4:
+
+```bash
+# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
+REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"
+# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+done
+TRUSTED_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+done <<< "$_tc"
+# Same trusted tiers as the TRUSTED_SCRIPT resolver above (_tc is that block's list); never the working directory or the PR checkout.
+REVIEW_DELTA_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$REVIEW_DELTA_SCRIPT" ] && [ -f "$_c/scripts/review-delta.sh" ] && REVIEW_DELTA_SCRIPT="$_c/scripts/review-delta.sh" ;; esac
+done <<< "$_tc"
+BASE_BRANCH=$(gh pr view "$PR_NUMBER" -R "$REPO" --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
+COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
+# BEGIN review-pr-delta-mode
+is_sha() { case "${1}" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]; }
+# Prints "<MODE> <ARG> <FULL_ROUNDS>" from scripts/review-delta.sh: "FULL - n", "DELTA <reviewed-sha> n" or "BASE_SYNC_ONLY <reviewed-sha> n".
+# Needs REPO PR_NUMBER REVIEW_SHA BASE_BRANCH TRUSTED_SCRIPT REVIEW_DELTA_SCRIPT in scope. Every failure (unresolved script, bad output, bad SHA, empty delta) prints FULL, never a skipped review.
+review_delta_mode() {
+    local out l1 l2 kind arg from to rounds=0 top
+    is_sha "$REVIEW_SHA" || { echo "FULL - 0"; return 0; }
+    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$REVIEW_DELTA_SCRIPT" ] || [ -z "$BASE_BRANCH" ]; then echo "FULL - 0"; return 0; fi
+    top=$(git rev-parse --show-toplevel 2>/dev/null) || top=""
+    [ -n "$top" ] || { echo "FULL - 0"; return 0; }
+    out=$(bash "$REVIEW_DELTA_SCRIPT" --pr "$PR_NUMBER" --head "$REVIEW_SHA" --base "$BASE_BRANCH" --trusted-script "$TRUSTED_SCRIPT" --repo "$REPO" --repo-path "$top" 2>/dev/null) || out=""
+    l1=$(printf '%s\n' "$out" | sed -n 1p); l2=$(printf '%s\n' "$out" | sed -n 2p)
+    case "$l2" in FULL_ROUNDS=*) rounds="${l2#FULL_ROUNDS=}" ;; esac
+    case "$rounds" in ''|*[!0-9]*) echo "FULL - 0"; return 0 ;; esac
+    kind="${l1%% *}"; arg="${l1#* }"
+    if [ "$kind" = "BASE_SYNC_ONLY" ] && is_sha "$arg" && [ "$arg" != "$REVIEW_SHA" ]; then echo "BASE_SYNC_ONLY $arg $rounds"; return 0; fi
+    if [ "$kind" = "DELTA" ]; then
+        from="${arg%%..*}"; to="${arg##*..}"
+        if is_sha "$from" && [ "$to" = "$REVIEW_SHA" ] && [ "$from" != "$to" ]; then echo "DELTA $from $rounds"; return 0; fi
+    fi
+    echo "FULL - $rounds"
+}
+# Prints the Carried-From-SHA only when a TRUSTED FORGE:REVIEW-CARRIED record for this head names it AND the resolver
+# still answers BASE_SYNC_ONLY from that same reviewed SHA right now. Needs COMMENTS_JSON as well. Marker text alone never counts.
+carry_verified_from() {
+    local kind from rounds n
+    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then return 0; fi
+    read -r kind from rounds <<< "$(review_delta_mode)"
+    [ "$kind" = "BASE_SYNC_ONLY" ] || return 0
+    n=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "\\A(?=[\\s\\S]*\\nReviewed-SHA: ${REVIEW_SHA}\\r?(\\n|$))(?=[\\s\\S]*\\nCarried-From-SHA: ${from}\\r?(\\n|$))<!-- FORGE:REVIEW-CARRIED -->" 2>/dev/null || echo "")
+    case "$n" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$n" -ge 1 ] && printf '%s' "$from"
+    return 0
+}
+# END review-pr-delta-mode
+read -r RD_KIND RD_FROM RD_ROUNDS <<< "$(review_delta_mode)"
+if [ "$RD_KIND" != "BASE_SYNC_ONLY" ]; then
+  echo "CARRY_RECORD: NOT_APPLICABLE (resolver says ${RD_KIND}); run the FULL path"; exit 0
+fi
+if [ -n "$(carry_verified_from)" ]; then
+  echo "CARRY_RECORD: PRESENT (verified from ${RD_FROM})"; exit 0   # re-entry: never post a second record
+fi
+gh pr comment "$PR_NUMBER" -R "$REPO" --body "<!-- FORGE:REVIEW-CARRIED -->
+Reviewed-SHA: ${REVIEW_SHA}
+Carried-From-SHA: ${RD_FROM}
+
+## Review carried forward
+
+This head only merged \`origin/${BASE_BRANCH}\` into the PR (the PR's own change is byte-identical to the fully reviewed commit \`${RD_FROM}\`), so no reviewer was dispatched. The panel result and findings of \`${RD_FROM}\` stand; the merge gates still run on this head."
+COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
+if [ -n "$(carry_verified_from)" ]; then
+  echo "CARRY_RECORD: POSTED (verified from ${RD_FROM})"
+else
+  echo "CARRY_RECORD: UNVERIFIED (the record is not trusted or could not be read back); run the FULL path"
+fi
+```
+
+`CARRY_RECORD: PRESENT` or `POSTED` proceeds to Phase 4 with an empty roster. `NOT_APPLICABLE` or `UNVERIFIED` falls back to `REVIEW_MODE=FULL` with the 3B roster: set `{REVIEW_MODE}` back to `FULL`, restore the 3B `{SELECTED_AGENTS}` and continue with the template guard below. A record that cannot be trusted (for example the posting identity is not a trusted author) must never be the reason a head goes unreviewed.
+
+**Otherwise (`FULL` or `DELTA`)** continue below. Under `DELTA`, append to every reviewer prompt: "Delta review: your diff slice is the change since the fully reviewed commit `{DELTA_FROM}`. The file list is context only. Findings of that earlier commit are carried separately; do not re-report code this slice does not show." <!-- Added: forge#3637 -->
+
 **>>> MANDATORY TEMPLATE-RESOLUTION GUARD — run BEFORE any Read of persona templates:**
 
 Missing persona templates are a fatal setup error, not permission to skip multi-agent review. Resolve the template source through this ordered chain and STOP if none resolve — never fall through to reviewing inline in the main context:
@@ -1596,7 +1800,7 @@ Read: $MONOLITHIC_CATALOG
 ```
 Then extract the shared protocols section and each selected persona's section from within that single file — same content, different packaging.
 
-Persona file names: `security.md` (always), `auth.md`, `billing.md`, `concurrency.md`, `scraper.md`, `frontend.md`, `api.md`, `database.md`, `infra.md`.
+Persona file names: `security.md` (always), `auth.md`, `billing.md`, `concurrency.md`, `scraper.md`, `frontend.md`, `api.md`, `database.md`, `infra.md`, and `spec-cli.md` (marker domain `spec-cli`, only ever on a `DELTA` roster whose delta touches `commands/**` or `bin/**`).
 See `review-pr-agents.md` for the full routing table mapping domains → persona files.
 
 (`$FORGE_HOME` defaults to `~/.claude`)
@@ -1675,10 +1879,22 @@ Each domain agent receives only the diff slice relevant to its domain, not the f
 
 ```bash
 # Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
-PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"; REVIEW_SHA="{REVIEW_SHA}"; REVIEW_MODE="{REVIEW_MODE}"; DELTA_FROM="{DELTA_FROM}"
 # Full diff fetched once — agents do NOT re-fetch it
 FULL_DIFF=$(gh pr diff "$PR_NUMBER" -R "$REPO")
 FULL_FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)
+# DELTA (review-delta mode): the slice source becomes the range diff since the last fully reviewed head, and FULL_FILES stays as
+# context. Every failure (bad SHA, commit missing from the checkout, unreadable or empty range) keeps the full PR diff above.
+# The variable keeps its FULL_DIFF name so every awk slice below is unchanged.
+if [ "$REVIEW_MODE" = "DELTA" ]; then
+  is_hex() { case "${1}" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]; }
+  RD_TOP=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
+  if is_hex "$DELTA_FROM" && is_hex "$REVIEW_SHA" && [ -n "$RD_TOP" ] \
+     && git -C "$RD_TOP" cat-file -e "${DELTA_FROM}^{commit}" 2>/dev/null && git -C "$RD_TOP" cat-file -e "${REVIEW_SHA}^{commit}" 2>/dev/null; then
+    DELTA_DIFF=$(git -C "$RD_TOP" -c core.quotepath=off diff --no-color --no-ext-diff "${DELTA_FROM}..${REVIEW_SHA}" 2>/dev/null) || DELTA_DIFF=""
+    [ -n "$DELTA_DIFF" ] && FULL_DIFF="$DELTA_DIFF"
+  fi
+fi
 
 # --- Security agent: always receives the full diff (cross-cutting domain) ---
 DIFF_SLICE_SECURITY="$FULL_DIFF"
@@ -1746,6 +1962,14 @@ DIFF_SLICE_SCRAPER=$(echo "$FULL_DIFF" | awk '
   in_block { print }
 ')
 [ -z "$DIFF_SLICE_SCRAPER" ] && DIFF_SLICE_SCRAPER="$FULL_DIFF"
+
+# --- Spec/CLI agent (DELTA rosters only): commands/** and bin/** files ---
+DIFF_SLICE_SPEC_CLI=$(echo "$FULL_DIFF" | awk '
+  /^diff --git/ { in_block=0 }
+  /^diff --git a\/(commands|bin)\// { in_block=1 }
+  in_block { print }
+')
+[ -z "$DIFF_SLICE_SPEC_CLI" ] && DIFF_SLICE_SPEC_CLI="$FULL_DIFF"
 ```
 
 **Tool-result truncation discipline**: All `gh pr diff` and file-read outputs piped to agents MUST be capped at ~100K characters. This mirrors the runner's built-in 100K-char tool-result cap (`bin/runner.mjs`). Any diff slice exceeding 100K chars must be truncated before substitution — agents that receive oversized context perform worse, not better.
@@ -1771,6 +1995,7 @@ DIFF_SLICE_FRONTEND=$(truncate_slice "$DIFF_SLICE_FRONTEND")
 DIFF_SLICE_API=$(truncate_slice "$DIFF_SLICE_API")
 DIFF_SLICE_INFRA=$(truncate_slice "$DIFF_SLICE_INFRA")
 DIFF_SLICE_SCRAPER=$(truncate_slice "$DIFF_SLICE_SCRAPER")
+DIFF_SLICE_SPEC_CLI=$(truncate_slice "$DIFF_SLICE_SPEC_CLI")
 ```
 
 The `protocols.md` file contains the Evidence-Based Review Protocol, Structured Findings Protocol, Per-Agent Input Scoping rules, and Tool-Result Truncation Discipline. Each persona file contains that agent's full prompt template. For each agent in `$SELECTED_AGENTS` (computed in Phase 3B):
@@ -1787,7 +2012,7 @@ The `protocols.md` file contains the Evidence-Based Review Protocol, Structured 
 
 **Reviewer-comment trust and shape (applies to every check below and in Phase 4)**: a reviewer comment counts only when it is from a trusted author (`scripts/trusted-comments.sh`, the same predicate as the in-PR fix gate and `verify-phase-trail.sh`: trusted association, Bot account, or `FORGE_TRAIL_TRUSTED_LOGINS`), its body **starts with** `<!-- FORGE:REVIEW-AGENT:{domain} -->`, and it carries a line `Reviewed-SHA: ${REVIEW_SHA}` for the current head. The head SHA is public, so the SHA line alone proves nothing: an untrusted commenter must never be able to suppress dispatch or satisfy the panel guard. If the trust script cannot be resolved, or its count is not an integer, the reviewer is treated as **not posted** (fail closed: re-dispatch in 3C, missing in Phase 4).
 
-**Idempotent re-entry (before launching)**: a re-invoked review must reuse reviewers that already posted for the current head instead of re-dispatching the full panel. For each domain in `$SELECTED_AGENTS`, check for an existing trusted comment of the shape above; launch only the domains without one (possibly none), then continue to Phase 4. Comments for a different SHA never count. The selected roster for the panel guard stays the full `$SELECTED_AGENTS` set.
+**Idempotent re-entry (before launching)**: a re-invoked review must reuse reviewers that already posted for the current head instead of re-dispatching the full panel. For each domain in `$SELECTED_AGENTS`, check for an existing trusted comment of the shape above; launch only the domains without one (possibly none), then continue to Phase 4. Comments for a different SHA never count. The selected roster for the panel guard stays the full effective `$SELECTED_AGENTS` set (the one printed by the review-mode block above, not the 3B roster when `DELTA` narrowed it).
 
 ```bash
 # Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
@@ -1910,7 +2135,7 @@ Reviewer completion is read from GitHub, never from notifications (see the "Revi
 
 ```bash
 # Each Bash call is a fresh shell: re-declare state with the orchestrator's values (never rely on Phase 3C variables).
-REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"; SELECTED_AGENTS="{SELECTED_AGENTS}"
+REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"; SELECTED_AGENTS="{SELECTED_AGENTS}"; REVIEW_MODE="{REVIEW_MODE}"
 DISPATCH_TOOL="{DISPATCH_TOOL}"   # Task | Agent | task (OpenCode)
 case "$REVIEW_SHA" in *[!0-9a-f]*|"") REVIEW_SHA_OK=false ;; *) [ "${#REVIEW_SHA}" -eq 40 ] || [ "${#REVIEW_SHA}" -eq 64 ] && REVIEW_SHA_OK=true || REVIEW_SHA_OK=false ;; esac
 if [ "$REVIEW_SHA_OK" != "true" ]; then
@@ -1961,9 +2186,58 @@ TRUSTED_SCRIPT=""
 while IFS= read -r _c; do
   case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
 done <<< "$_tc"
+# Same trusted tiers as the TRUSTED_SCRIPT resolver above (_tc is that block's list); never the working directory or the PR checkout.
+REVIEW_DELTA_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$REVIEW_DELTA_SCRIPT" ] && [ -f "$_c/scripts/review-delta.sh" ] && REVIEW_DELTA_SCRIPT="$_c/scripts/review-delta.sh" ;; esac
+done <<< "$_tc"
+BASE_BRANCH=$(gh pr view "$PR_NUMBER" -R "$REPO" --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
 COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
 MISSING_AGENT_COMMENTS=""
 ACTUAL_AGENT_COUNT=0
+# BEGIN review-pr-delta-mode
+is_sha() { case "${1}" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]; }
+# Prints "<MODE> <ARG> <FULL_ROUNDS>" from scripts/review-delta.sh: "FULL - n", "DELTA <reviewed-sha> n" or "BASE_SYNC_ONLY <reviewed-sha> n".
+# Needs REPO PR_NUMBER REVIEW_SHA BASE_BRANCH TRUSTED_SCRIPT REVIEW_DELTA_SCRIPT in scope. Every failure (unresolved script, bad output, bad SHA, empty delta) prints FULL, never a skipped review.
+review_delta_mode() {
+    local out l1 l2 kind arg from to rounds=0 top
+    is_sha "$REVIEW_SHA" || { echo "FULL - 0"; return 0; }
+    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$REVIEW_DELTA_SCRIPT" ] || [ -z "$BASE_BRANCH" ]; then echo "FULL - 0"; return 0; fi
+    top=$(git rev-parse --show-toplevel 2>/dev/null) || top=""
+    [ -n "$top" ] || { echo "FULL - 0"; return 0; }
+    out=$(bash "$REVIEW_DELTA_SCRIPT" --pr "$PR_NUMBER" --head "$REVIEW_SHA" --base "$BASE_BRANCH" --trusted-script "$TRUSTED_SCRIPT" --repo "$REPO" --repo-path "$top" 2>/dev/null) || out=""
+    l1=$(printf '%s\n' "$out" | sed -n 1p); l2=$(printf '%s\n' "$out" | sed -n 2p)
+    case "$l2" in FULL_ROUNDS=*) rounds="${l2#FULL_ROUNDS=}" ;; esac
+    case "$rounds" in ''|*[!0-9]*) echo "FULL - 0"; return 0 ;; esac
+    kind="${l1%% *}"; arg="${l1#* }"
+    if [ "$kind" = "BASE_SYNC_ONLY" ] && is_sha "$arg" && [ "$arg" != "$REVIEW_SHA" ]; then echo "BASE_SYNC_ONLY $arg $rounds"; return 0; fi
+    if [ "$kind" = "DELTA" ]; then
+        from="${arg%%..*}"; to="${arg##*..}"
+        if is_sha "$from" && [ "$to" = "$REVIEW_SHA" ] && [ "$from" != "$to" ]; then echo "DELTA $from $rounds"; return 0; fi
+    fi
+    echo "FULL - $rounds"
+}
+# Prints the Carried-From-SHA only when a TRUSTED FORGE:REVIEW-CARRIED record for this head names it AND the resolver
+# still answers BASE_SYNC_ONLY from that same reviewed SHA right now. Needs COMMENTS_JSON as well. Marker text alone never counts.
+carry_verified_from() {
+    local kind from rounds n
+    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then return 0; fi
+    read -r kind from rounds <<< "$(review_delta_mode)"
+    [ "$kind" = "BASE_SYNC_ONLY" ] || return 0
+    n=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "\\A(?=[\\s\\S]*\\nReviewed-SHA: ${REVIEW_SHA}\\r?(\\n|$))(?=[\\s\\S]*\\nCarried-From-SHA: ${from}\\r?(\\n|$))<!-- FORGE:REVIEW-CARRIED -->" 2>/dev/null || echo "")
+    case "$n" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$n" -ge 1 ] && printf '%s' "$from"
+    return 0
+}
+# END review-pr-delta-mode
+# A zero-reviewer panel is acceptable only for a BASE_SYNC_ONLY head whose carry record is trusted AND re-verified by the
+# resolver right now. An empty roster with no verified record is a shortfall, never a clean panel (fail closed).
+CARRIED_FROM=""
+if [ "$REVIEW_MODE" = "BASE_SYNC_ONLY" ]; then CARRIED_FROM=$(carry_verified_from); fi
+EMPTY_UNVERIFIED=false
+if [ "$SELECTED_AGENT_COUNT" -eq 0 ] && [ -z "$CARRIED_FROM" ]; then
+  EMPTY_UNVERIFIED=true; MISSING_AGENT_COMMENTS=" (empty roster without a verified carried record)"
+fi
 # BEGIN review-pr-agent-domain
 agent_domain() {
     case "$(printf '%s' "${1}" | tr '[:upper:]' '[:lower:]')" in
@@ -1991,8 +2265,9 @@ for AGENT in $SELECTED_AGENTS; do
 done
 
 if [ -z "$MISSING_AGENT_COMMENTS" ] && [ "$ACTUAL_AGENT_COUNT" -ge "$SELECTED_AGENT_COUNT" ]; then
-  rm -f "$DEADLINE_FILE"; echo "PANEL_STATUS: COMPLETE (${ACTUAL_AGENT_COUNT}/${SELECTED_AGENT_COUNT})"
-elif [ "$JOINED" = "true" ] || [ "$(date +%s)" -ge "$DEADLINE" ]; then
+  rm -f "$DEADLINE_FILE"
+  if [ -n "$CARRIED_FROM" ]; then echo "PANEL_STATUS: COMPLETE (carried from ${CARRIED_FROM}; no reviewers dispatched)"; else echo "PANEL_STATUS: COMPLETE (${ACTUAL_AGENT_COUNT}/${SELECTED_AGENT_COUNT})"; fi
+elif [ "$JOINED" = "true" ] || [ "$EMPTY_UNVERIFIED" = "true" ] || [ "$(date +%s)" -ge "$DEADLINE" ]; then
   rm -f "$DEADLINE_FILE"
   echo "REVIEW DELIVERY FAILURE: missing trusted current-SHA findings comment(s) for:${MISSING_AGENT_COMMENTS}"
   echo "Use each agent's returned verdict, findings, and durable body path to recover the review."
@@ -2005,17 +2280,19 @@ fi
 
 On `PANEL_STATUS: STOP`, return the printed `REVIEW_RESULT` and do nothing else (no hard stop, no verdict, no label change: the panel is intact, only the head moved).
 
+A `BASE_SYNC_ONLY` head has no reviewer comments to wait for. The block above accepts it only through a trusted `FORGE:REVIEW-CARRIED` record for this head whose `Carried-From-SHA` equals the reviewed SHA the resolver names right now; a missing, untrusted, forged or stale record falls into the existing hard stop (`ACTUAL_AGENT_COUNT=0`). The record never substitutes for reviewers on a `FULL` or `DELTA` head: those still need every selected reviewer's trusted current-SHA marker.
+
 **Do NOT proceed until ALL selected agents' current-SHA comments are visible on the PR.** Under OpenCode, each foreground `task(..., background: false)` returns only when that reviewer is complete; verify its corresponding structured PR comment before continuing. A missing comment after the wait is an explicit delivery failure: do not synthesize a verdict or treat it as a clean result. Do not infer a clean review from a missing comment: a reviewer's return text may contain findings that could not be posted because GitHub writes were throttled.
 
 ---
 
 ## Phase 5: Synthesis (Multi-Agent Arbitration)
 
-**Skip if**: Only 1 agent OR total findings ≤ 3.
+**Skip if**: Only 1 agent OR total findings ≤ 3, or `REVIEW_MODE` is `BASE_SYNC_ONLY` (no reviewer ran for this head; the carried head's synthesis, if any, stands and Phase 6A reads it). Under `DELTA` this phase synthesizes the current head's reviewers only; Phase 6A adds the earlier reviewed head's findings.
 
 ```bash
 # Each Bash call is a fresh shell: re-declare state with the orchestrator's values.
-REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"
+REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"; REVIEW_MODE="{REVIEW_MODE}"
 case "$REVIEW_SHA" in *[!0-9a-f]*|"") REVIEW_SHA_OK=false ;; *) [ "${#REVIEW_SHA}" -eq 40 ] || [ "${#REVIEW_SHA}" -eq 64 ] && REVIEW_SHA_OK=true || REVIEW_SHA_OK=false ;; esac
 [ "$REVIEW_SHA_OK" = "true" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: REVIEW_SHA is not a commit id (an empty SHA would count every head's findings)"; exit 0; }
 # Extract structured finding IDs from FINDING HTML comments.
@@ -2034,8 +2311,56 @@ TRUSTED_SCRIPT=""
 while IFS= read -r _c; do
   case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
 done <<< "$_tc"
+# Same trusted tiers as the TRUSTED_SCRIPT resolver above (_tc is that block's list); never the working directory or the PR checkout.
+REVIEW_DELTA_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$REVIEW_DELTA_SCRIPT" ] && [ -f "$_c/scripts/review-delta.sh" ] && REVIEW_DELTA_SCRIPT="$_c/scripts/review-delta.sh" ;; esac
+done <<< "$_tc"
+BASE_BRANCH=$(gh pr view "$PR_NUMBER" -R "$REPO" --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
 COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
-AGENT_RE="^<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)"
+# BEGIN review-pr-delta-mode
+is_sha() { case "${1}" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]; }
+# Prints "<MODE> <ARG> <FULL_ROUNDS>" from scripts/review-delta.sh: "FULL - n", "DELTA <reviewed-sha> n" or "BASE_SYNC_ONLY <reviewed-sha> n".
+# Needs REPO PR_NUMBER REVIEW_SHA BASE_BRANCH TRUSTED_SCRIPT REVIEW_DELTA_SCRIPT in scope. Every failure (unresolved script, bad output, bad SHA, empty delta) prints FULL, never a skipped review.
+review_delta_mode() {
+    local out l1 l2 kind arg from to rounds=0 top
+    is_sha "$REVIEW_SHA" || { echo "FULL - 0"; return 0; }
+    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$REVIEW_DELTA_SCRIPT" ] || [ -z "$BASE_BRANCH" ]; then echo "FULL - 0"; return 0; fi
+    top=$(git rev-parse --show-toplevel 2>/dev/null) || top=""
+    [ -n "$top" ] || { echo "FULL - 0"; return 0; }
+    out=$(bash "$REVIEW_DELTA_SCRIPT" --pr "$PR_NUMBER" --head "$REVIEW_SHA" --base "$BASE_BRANCH" --trusted-script "$TRUSTED_SCRIPT" --repo "$REPO" --repo-path "$top" 2>/dev/null) || out=""
+    l1=$(printf '%s\n' "$out" | sed -n 1p); l2=$(printf '%s\n' "$out" | sed -n 2p)
+    case "$l2" in FULL_ROUNDS=*) rounds="${l2#FULL_ROUNDS=}" ;; esac
+    case "$rounds" in ''|*[!0-9]*) echo "FULL - 0"; return 0 ;; esac
+    kind="${l1%% *}"; arg="${l1#* }"
+    if [ "$kind" = "BASE_SYNC_ONLY" ] && is_sha "$arg" && [ "$arg" != "$REVIEW_SHA" ]; then echo "BASE_SYNC_ONLY $arg $rounds"; return 0; fi
+    if [ "$kind" = "DELTA" ]; then
+        from="${arg%%..*}"; to="${arg##*..}"
+        if is_sha "$from" && [ "$to" = "$REVIEW_SHA" ] && [ "$from" != "$to" ]; then echo "DELTA $from $rounds"; return 0; fi
+    fi
+    echo "FULL - $rounds"
+}
+# Prints the Carried-From-SHA only when a TRUSTED FORGE:REVIEW-CARRIED record for this head names it AND the resolver
+# still answers BASE_SYNC_ONLY from that same reviewed SHA right now. Needs COMMENTS_JSON as well. Marker text alone never counts.
+carry_verified_from() {
+    local kind from rounds n
+    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then return 0; fi
+    read -r kind from rounds <<< "$(review_delta_mode)"
+    [ "$kind" = "BASE_SYNC_ONLY" ] || return 0
+    n=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "\\A(?=[\\s\\S]*\\nReviewed-SHA: ${REVIEW_SHA}\\r?(\\n|$))(?=[\\s\\S]*\\nCarried-From-SHA: ${from}\\r?(\\n|$))<!-- FORGE:REVIEW-CARRIED -->" 2>/dev/null || echo "")
+    case "$n" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$n" -ge 1 ] && printf '%s' "$from"
+    return 0
+}
+# END review-pr-delta-mode
+# BASE_SYNC_ONLY: no reviewer posted for this head, so the findings are the carried head's. Only a verified carry record
+# switches the SHA (the SHA comes from the validated record, never from untrusted text); an unverified claim keeps the
+# current head, finds no reviewer bodies and blocks below (fail closed).
+FINDINGS_SHA="$REVIEW_SHA"
+if [ "$REVIEW_MODE" = "BASE_SYNC_ONLY" ]; then
+  CARRIED_FROM=$(carry_verified_from); [ -n "$CARRIED_FROM" ] && FINDINGS_SHA="$CARRIED_FROM"
+fi
+AGENT_RE="^<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${FINDINGS_SHA}(\\r?\\n|$)"
 if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then
   echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/trusted-comments.sh unresolvable or PR comments unreadable; refusing to read reviewer findings (fail closed)"; exit 0
 fi
@@ -2043,7 +2368,7 @@ AGENT_BODIES=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies "$AG
   || { echo "REVIEW_RESULT: status: BLOCKED, blocker: trusted reviewer comments unreadable (fail closed)"; exit 0; }
 ALL_FINDINGS=$(printf '%s\n' "$AGENT_BODIES" | jq -r 'scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null)
 # Agent bodies start with the REVIEW-AGENT marker and carry REVIEW-FINDINGS-START inside, so count it with a lookahead.
-AGENT_COUNT=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->)<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)" 2>/dev/null || echo "")
+AGENT_COUNT=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->)<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${FINDINGS_SHA}(\\r?\\n|$)" 2>/dev/null || echo "")
 case "$AGENT_COUNT" in ''|*[!0-9]*) AGENT_COUNT=0 ;; esac   # fail closed
 FINDING_COUNT=$(echo "$ALL_FINDINGS" | grep -c '.' || echo 0)
 ```
@@ -2067,10 +2392,10 @@ If synthesis needed, launch a `general-purpose` Task (model: `"{SUBAGENT_MODEL}"
 
 ```bash
 # Each Bash call is a fresh shell: re-declare state with the orchestrator's values.
-REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"
+REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"; REVIEW_MODE="{REVIEW_MODE}"; DELTA_FROM="{DELTA_FROM}"
 case "$REVIEW_SHA" in *[!0-9a-f]*|"") REVIEW_SHA_OK=false ;; *) [ "${#REVIEW_SHA}" -eq 40 ] || [ "${#REVIEW_SHA}" -eq 64 ] && REVIEW_SHA_OK=true || REVIEW_SHA_OK=false ;; esac
 [ "$REVIEW_SHA_OK" = "true" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: REVIEW_SHA is not a commit id (an empty SHA would count every head's findings)"; exit 0; }
-# Only TRUSTED bodies for the CURRENT head count (scripts/trusted-comments.sh + anchored marker + Reviewed-SHA line):
+# Only TRUSTED bodies for the CURRENT head count (BASE_SYNC_ONLY and DELTA add the carried / earlier reviewed head, see below) (scripts/trusted-comments.sh + anchored marker + Reviewed-SHA line):
 # findings from earlier heads are already fixed or re-reviewed, and an untrusted commenter must never be able to inject
 # findings or post a forged synthesis block that makes the review read clean (the head SHA is public).
 # TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
@@ -2083,25 +2408,82 @@ TRUSTED_SCRIPT=""
 while IFS= read -r _c; do
   case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
 done <<< "$_tc"
+# Same trusted tiers as the TRUSTED_SCRIPT resolver above (_tc is that block's list); never the working directory or the PR checkout.
+REVIEW_DELTA_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$REVIEW_DELTA_SCRIPT" ] && [ -f "$_c/scripts/review-delta.sh" ] && REVIEW_DELTA_SCRIPT="$_c/scripts/review-delta.sh" ;; esac
+done <<< "$_tc"
+BASE_BRANCH=$(gh pr view "$PR_NUMBER" -R "$REPO" --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
 COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
 if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then
   echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/trusted-comments.sh unresolvable or PR comments unreadable; refusing to read clean (fail closed)"; exit 0
 fi
-SYNTH_RE="^<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)"
-AGENT_RE="^<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)"
-HAS_SYNTHESIS=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "$SYNTH_RE" 2>/dev/null || echo "")
-case "$HAS_SYNTHESIS" in ''|*[!0-9]*) echo "REVIEW_RESULT: status: BLOCKED, blocker: synthesis count unreadable (fail closed)"; exit 0 ;; esac
-
-if [ "$HAS_SYNTHESIS" -gt 0 ]; then
-    # Extract finding IDs from the trusted current-head synthesized block using jq scan() (no PCRE grep needed)
-    SOURCE_BODIES=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies "$SYNTH_RE" 2>/dev/null) \
-      || { echo "REVIEW_RESULT: status: BLOCKED, blocker: trusted synthesis unreadable (fail closed)"; exit 0; }
-else
-    # Extract finding IDs from the trusted current-head agent comments using jq scan() (portable, no PCRE grep)
-    SOURCE_BODIES=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies "$AGENT_RE" 2>/dev/null) \
-      || { echo "REVIEW_RESULT: status: BLOCKED, blocker: trusted reviewer comments unreadable (fail closed)"; exit 0; }
-    # The panel guard guarantees at least one trusted reviewer body for this head; none means a misread, never "clean".
-    [ -n "$SOURCE_BODIES" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: no trusted reviewer comments for head ${REVIEW_SHA} (fail closed)"; exit 0; }
+# BEGIN review-pr-delta-mode
+is_sha() { case "${1}" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]; }
+# Prints "<MODE> <ARG> <FULL_ROUNDS>" from scripts/review-delta.sh: "FULL - n", "DELTA <reviewed-sha> n" or "BASE_SYNC_ONLY <reviewed-sha> n".
+# Needs REPO PR_NUMBER REVIEW_SHA BASE_BRANCH TRUSTED_SCRIPT REVIEW_DELTA_SCRIPT in scope. Every failure (unresolved script, bad output, bad SHA, empty delta) prints FULL, never a skipped review.
+review_delta_mode() {
+    local out l1 l2 kind arg from to rounds=0 top
+    is_sha "$REVIEW_SHA" || { echo "FULL - 0"; return 0; }
+    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$REVIEW_DELTA_SCRIPT" ] || [ -z "$BASE_BRANCH" ]; then echo "FULL - 0"; return 0; fi
+    top=$(git rev-parse --show-toplevel 2>/dev/null) || top=""
+    [ -n "$top" ] || { echo "FULL - 0"; return 0; }
+    out=$(bash "$REVIEW_DELTA_SCRIPT" --pr "$PR_NUMBER" --head "$REVIEW_SHA" --base "$BASE_BRANCH" --trusted-script "$TRUSTED_SCRIPT" --repo "$REPO" --repo-path "$top" 2>/dev/null) || out=""
+    l1=$(printf '%s\n' "$out" | sed -n 1p); l2=$(printf '%s\n' "$out" | sed -n 2p)
+    case "$l2" in FULL_ROUNDS=*) rounds="${l2#FULL_ROUNDS=}" ;; esac
+    case "$rounds" in ''|*[!0-9]*) echo "FULL - 0"; return 0 ;; esac
+    kind="${l1%% *}"; arg="${l1#* }"
+    if [ "$kind" = "BASE_SYNC_ONLY" ] && is_sha "$arg" && [ "$arg" != "$REVIEW_SHA" ]; then echo "BASE_SYNC_ONLY $arg $rounds"; return 0; fi
+    if [ "$kind" = "DELTA" ]; then
+        from="${arg%%..*}"; to="${arg##*..}"
+        if is_sha "$from" && [ "$to" = "$REVIEW_SHA" ] && [ "$from" != "$to" ]; then echo "DELTA $from $rounds"; return 0; fi
+    fi
+    echo "FULL - $rounds"
+}
+# Prints the Carried-From-SHA only when a TRUSTED FORGE:REVIEW-CARRIED record for this head names it AND the resolver
+# still answers BASE_SYNC_ONLY from that same reviewed SHA right now. Needs COMMENTS_JSON as well. Marker text alone never counts.
+carry_verified_from() {
+    local kind from rounds n
+    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then return 0; fi
+    read -r kind from rounds <<< "$(review_delta_mode)"
+    [ "$kind" = "BASE_SYNC_ONLY" ] || return 0
+    n=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "\\A(?=[\\s\\S]*\\nReviewed-SHA: ${REVIEW_SHA}\\r?(\\n|$))(?=[\\s\\S]*\\nCarried-From-SHA: ${from}\\r?(\\n|$))<!-- FORGE:REVIEW-CARRIED -->" 2>/dev/null || echo "")
+    case "$n" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$n" -ge 1 ] && printf '%s' "$from"
+    return 0
+}
+# END review-pr-delta-mode
+# Trusted synthesized block for one head when present, else that head's trusted agent bodies (the same predicate as before,
+# now per head). Returns non-zero when the trust script cannot count or read.
+bodies_at() {
+    local sha="${1}" synth agent has
+    synth="^<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${sha}(\\r?\\n|$)"
+    agent="^<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${sha}(\\r?\\n|$)"
+    has=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "$synth" 2>/dev/null || echo "")
+    case "$has" in ''|*[!0-9]*) return 1 ;; esac
+    if [ "$has" -gt 0 ]; then
+        printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies "$synth" 2>/dev/null || return 1
+    else
+        printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies "$agent" 2>/dev/null || return 1
+    fi
+}
+# FULL: the current head's bodies, exactly as before. BASE_SYNC_ONLY: the head has no reviewers, so the findings are the
+# carried head's, and only a VERIFIED carry record (trusted, same head, resolver agrees) selects that SHA. DELTA: reviewers
+# saw only the delta, so the earlier fully reviewed head's findings are read too (they must still reach the Phase 8 gates);
+# the §6B.4 head-SHA and provenance gates then drop any whose cited line is gone from the current head.
+PRIMARY_SHA="$REVIEW_SHA"; EARLIER_SHA=""
+if [ "$REVIEW_MODE" = "BASE_SYNC_ONLY" ]; then
+  CARRIED_FROM=$(carry_verified_from); [ -n "$CARRIED_FROM" ] && PRIMARY_SHA="$CARRIED_FROM"
+fi
+if [ "$REVIEW_MODE" = "DELTA" ] && is_sha "$DELTA_FROM"; then EARLIER_SHA="$DELTA_FROM"; fi
+SOURCE_BODIES=$(bodies_at "$PRIMARY_SHA") \
+  || { echo "REVIEW_RESULT: status: BLOCKED, blocker: trusted reviewer comments unreadable (fail closed)"; exit 0; }
+# The panel guard guarantees at least one trusted reviewer body for this head; none means a misread, never "clean".
+[ -n "$SOURCE_BODIES" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: no trusted reviewer comments for head ${PRIMARY_SHA} (fail closed)"; exit 0; }
+if [ -n "$EARLIER_SHA" ]; then
+  EARLIER_BODIES=$(bodies_at "$EARLIER_SHA") && [ -n "$EARLIER_BODIES" ] \
+    || { echo "REVIEW_RESULT: status: BLOCKED, blocker: earlier reviewed head ${EARLIER_SHA} findings unreadable (fail closed)"; exit 0; }
+  SOURCE_BODIES=$(printf '%s\n%s' "$SOURCE_BODIES" "$EARLIER_BODIES")
 fi
 FINDINGS=$(printf '%s\n' "$SOURCE_BODIES" | jq -r 'scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null)
 ```
@@ -3493,7 +3875,7 @@ A degraded run that skipped Task-based agent dispatch must be visible from this 
 
 ```bash
 # Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
-PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"; REVIEW_SHA="{REVIEW_SHA}"; REVIEW_MODE="{REVIEW_MODE}"
 # Same trust rule as Phase 3C/4: only trusted comments whose body starts with the marker count.
 # TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
 _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
@@ -3505,9 +3887,54 @@ TRUSTED_SCRIPT=""
 while IFS= read -r _c; do
   case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
 done <<< "$_tc"
+# Same trusted tiers as the TRUSTED_SCRIPT resolver above (_tc is that block's list); never the working directory or the PR checkout.
+REVIEW_DELTA_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$REVIEW_DELTA_SCRIPT" ] && [ -f "$_c/scripts/review-delta.sh" ] && REVIEW_DELTA_SCRIPT="$_c/scripts/review-delta.sh" ;; esac
+done <<< "$_tc"
+BASE_BRANCH=$(gh pr view "$PR_NUMBER" -R "$REPO" --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
+COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
+# BEGIN review-pr-delta-mode
+is_sha() { case "${1}" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]; }
+# Prints "<MODE> <ARG> <FULL_ROUNDS>" from scripts/review-delta.sh: "FULL - n", "DELTA <reviewed-sha> n" or "BASE_SYNC_ONLY <reviewed-sha> n".
+# Needs REPO PR_NUMBER REVIEW_SHA BASE_BRANCH TRUSTED_SCRIPT REVIEW_DELTA_SCRIPT in scope. Every failure (unresolved script, bad output, bad SHA, empty delta) prints FULL, never a skipped review.
+review_delta_mode() {
+    local out l1 l2 kind arg from to rounds=0 top
+    is_sha "$REVIEW_SHA" || { echo "FULL - 0"; return 0; }
+    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$REVIEW_DELTA_SCRIPT" ] || [ -z "$BASE_BRANCH" ]; then echo "FULL - 0"; return 0; fi
+    top=$(git rev-parse --show-toplevel 2>/dev/null) || top=""
+    [ -n "$top" ] || { echo "FULL - 0"; return 0; }
+    out=$(bash "$REVIEW_DELTA_SCRIPT" --pr "$PR_NUMBER" --head "$REVIEW_SHA" --base "$BASE_BRANCH" --trusted-script "$TRUSTED_SCRIPT" --repo "$REPO" --repo-path "$top" 2>/dev/null) || out=""
+    l1=$(printf '%s\n' "$out" | sed -n 1p); l2=$(printf '%s\n' "$out" | sed -n 2p)
+    case "$l2" in FULL_ROUNDS=*) rounds="${l2#FULL_ROUNDS=}" ;; esac
+    case "$rounds" in ''|*[!0-9]*) echo "FULL - 0"; return 0 ;; esac
+    kind="${l1%% *}"; arg="${l1#* }"
+    if [ "$kind" = "BASE_SYNC_ONLY" ] && is_sha "$arg" && [ "$arg" != "$REVIEW_SHA" ]; then echo "BASE_SYNC_ONLY $arg $rounds"; return 0; fi
+    if [ "$kind" = "DELTA" ]; then
+        from="${arg%%..*}"; to="${arg##*..}"
+        if is_sha "$from" && [ "$to" = "$REVIEW_SHA" ] && [ "$from" != "$to" ]; then echo "DELTA $from $rounds"; return 0; fi
+    fi
+    echo "FULL - $rounds"
+}
+# Prints the Carried-From-SHA only when a TRUSTED FORGE:REVIEW-CARRIED record for this head names it AND the resolver
+# still answers BASE_SYNC_ONLY from that same reviewed SHA right now. Needs COMMENTS_JSON as well. Marker text alone never counts.
+carry_verified_from() {
+    local kind from rounds n
+    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then return 0; fi
+    read -r kind from rounds <<< "$(review_delta_mode)"
+    [ "$kind" = "BASE_SYNC_ONLY" ] || return 0
+    n=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "\\A(?=[\\s\\S]*\\nReviewed-SHA: ${REVIEW_SHA}\\r?(\\n|$))(?=[\\s\\S]*\\nCarried-From-SHA: ${from}\\r?(\\n|$))<!-- FORGE:REVIEW-CARRIED -->" 2>/dev/null || echo "")
+    case "$n" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$n" -ge 1 ] && printf '%s' "$from"
+    return 0
+}
+# END review-pr-delta-mode
+# BASE_SYNC_ONLY: zero reviewers is the expected panel only when the carry record is trusted and the resolver re-verifies it.
+CARRIED_FROM=""
+if [ "$REVIEW_MODE" = "BASE_SYNC_ONLY" ]; then CARRIED_FROM=$(carry_verified_from); fi
 ACTUAL_AGENT_DOMAINS=""
 if [ -n "$TRUSTED_SCRIPT" ]; then
-  ACTUAL_AGENT_DOMAINS=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
+  ACTUAL_AGENT_DOMAINS=$(printf '%s' "$COMMENTS_JSON" \
     | bash "$TRUSTED_SCRIPT" bodies "^<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->" 2>/dev/null \
     | jq -rs '[.[] | scan("^<!-- FORGE:REVIEW-AGENT:([a-z-]+) -->") | .[0]] | unique | join(", ")' 2>/dev/null || echo "")   # unresolvable => empty => count 0 (degraded, fail closed)
 fi
@@ -3517,9 +3944,12 @@ fi
 # second "0" line, corrupting the value to "0\n0" in exactly the zero-agent case this
 # check exists to detect. <!-- Added: forge#1849 -->
 ACTUAL_AGENT_COUNT=$(echo "$ACTUAL_AGENT_DOMAINS" | tr ',' '\n' | grep -c '.' 2>/dev/null)
+# A verified carried head dispatched no reviewers by design: report it as carried instead of a degraded zero-agent panel.
+if [ -n "$CARRIED_FROM" ]; then ACTUAL_AGENT_DOMAINS="carried from ${CARRIED_FROM}"; ACTUAL_AGENT_COUNT=0; fi
+echo "CARRIED_FROM: ${CARRIED_FROM}"
 ```
 
-Substitute `ACTUAL_AGENT_COUNT`/`ACTUAL_AGENT_DOMAINS` into the summary's `**Agents**: [N] ([names])` field below — do NOT substitute a manually-counted or remembered figure. Compare it to `SELECTED_AGENT_COUNT` from Phase 3C. If it is smaller, the panel is degraded: the Phase 3C hard-stop path must already have labelled the PR `review-degraded`, added `needs-human`, and exited without a verdict. Never summarize, approve, or merge a partial panel. `ACTUAL_AGENT_COUNT=0` is the same hard stop, not a solo/inline review mode.
+Substitute `ACTUAL_AGENT_COUNT`/`ACTUAL_AGENT_DOMAINS` into the summary's `**Agents**: [N] ([names])` field below — do NOT substitute a manually-counted or remembered figure. Compare it to `SELECTED_AGENT_COUNT` from Phase 3C. If it is smaller, the panel is degraded: the Phase 3C hard-stop path must already have labelled the PR `review-degraded`, added `needs-human`, and exited without a verdict. Never summarize, approve, or merge a partial panel. `ACTUAL_AGENT_COUNT=0` is the same hard stop, not a solo/inline review mode, with one exception: when the block printed a non-empty `CARRIED_FROM` (a `BASE_SYNC_ONLY` head whose trusted `FORGE:REVIEW-CARRIED` record the resolver re-verified), zero reviewers is the correct panel; write `**Agents**: carried from <CARRIED_FROM>` in the summary and skip this comparison. An empty `CARRIED_FROM` on a `BASE_SYNC_ONLY` head is the hard stop.
 
 ```bash
 # Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
