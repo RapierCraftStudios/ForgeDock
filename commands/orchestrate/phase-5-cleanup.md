@@ -44,13 +44,24 @@ Include the audit summary in the final report (Phase 6). Key metrics to surface:
 
 ### Step 5C: Close the coordination issue (claims board) <!-- Added: forge#2072 -->
 
-**Why this step exists**: Step 3D.1 (`phase-3-dependency.md`) creates a per-batch coordination issue (the claims board) and exports `FORGE_COORD_ISSUE`/`COORD_ISSUE_NUMBER`. Step 5A's `/cleanup` sweep only closes orphaned issues whose PR merged — the claims board has no PR of its own, so that heuristic never matches it. Without this step, one `automation`-labelled issue leaks per orchestration batch.
+**Why this step exists**: Step 3D.1 (`phase-3-dependency.md`) creates a per-batch coordination issue (the claims board) and exports `FORGE_COORD_ISSUE`/`COORD_ISSUE_NUMBER`. Step 5A's `/cleanup` orphan sweep (Phase 2A/2B) only closes issues whose PR merged — the claims board has no PR of its own, so that heuristic never matches it; `/cleanup` Phase 2C is the separate safety net that closes boards this step missed. Without this step, one `automation`-labelled issue leaks per orchestration batch.
 
 **Run after Step 5B, before Step 5D.** No-ops cleanly if the claims board was never created this run (`COORD_ISSUE_NUMBER` unset/empty — e.g. Step 3D.1's `gh issue create` failed, or this batch never reached DAG construction). Tolerates GitHub API failures without aborting the rest of Phase 5 — the same tolerant-failure convention (`2>/dev/null || echo ...`, `|| true`) used throughout `phase-3-dependency.md`/`phase-4-execution.md`.
 
 **Orchestrator lease should already be released by this point** (forge#2627): `phase-4-execution.md`'s Termination condition (end of Step 4B) calls `release_orchestrator_lease()` before handing off to Phase 5 on a normal drain, and the "Stopping the orchestrator" procedure (Step 4A-pre.-0.5) does the same on an interrupted exit. Closing the coordination issue here does not depend on lease state either way — an unreleased lease on an issue about to be closed is harmless (a future batch creates its own new coordination issue per Step 3D.1), but if `ACTIVE_CLAIMS_NOTE` logic is ever extended to also surface lease state, prefer checking for a still-unreleased `FORGE:LEASE` the same way `ACTIVE_CLAIMS` is computed above.
 
+**Recover the board when the variable is lost** <!-- Added: forge#3699 -->: `COORD_ISSUE_NUMBER` is a shell variable and does not survive compaction, `--retry` or a fresh-context resume. When it is unset but `BATCH_ID` is known, look the board up on GitHub by the exact `<!-- FORGE:BATCH_ID: ${BATCH_ID} -->` body marker (never a prefix, so another live batch's board is never matched). If `BATCH_ID` is also lost, fall through to the no-op and leave the board to `/cleanup` Phase 2C.
+
 ```bash
+if [ -z "${COORD_ISSUE_NUMBER:-}" ] && [ -n "${BATCH_ID:-}" ]; then
+  COORD_ISSUE_NUMBER=$(gh issue list -R {GH_REPO} --state open --label automation --limit 100 \
+    --json number,body 2>/dev/null \
+    | jq -r --arg marker "<!-- FORGE:BATCH_ID: ${BATCH_ID} -->" \
+      '[.[] | select(.body | contains("<!-- FORGE:COORD_ISSUE -->") and contains($marker))] | first | .number // empty' \
+      2>/dev/null || echo "")
+  [ -n "$COORD_ISSUE_NUMBER" ] && echo "Recovered coordination issue #${COORD_ISSUE_NUMBER} from FORGE:BATCH_ID marker"
+fi
+
 if [ -n "${COORD_ISSUE_NUMBER:-}" ]; then
   # Use Step 4A's read_active_claims() helper (re-declare it verbatim here when this
   # phase runs in a fresh context). Releases are separate later comments, so checking
@@ -66,7 +77,12 @@ $(echo "$ACTIVE_CLAIMS" | jq -r '.[] | "- " + .' 2>/dev/null)"
     ACTIVE_CLAIMS_NOTE="No active (unreleased) claims at close time."
   fi
 
+  # Outcome counters come from Phase 4/6 state; tolerate unset values (default n/a when the orchestrator did not track them).
+  MERGED_COUNT="${MERGED_COUNT:-n/a}"; GATED_COUNT="${GATED_COUNT:-n/a}"; FAILED_COUNT="${FAILED_COUNT:-n/a}"
+
   gh issue close "$COORD_ISSUE_NUMBER" -R {GH_REPO} --comment "Batch complete — closing claims board.
+
+**Summary**: merged ${MERGED_COUNT} / gated ${GATED_COUNT} / failed ${FAILED_COUNT}
 
 ${ACTIVE_CLAIMS_NOTE}
 
@@ -74,7 +90,7 @@ Closed automatically by \`/orchestrate\` Phase 5 Step 5C." 2>/dev/null \
     && echo "Closed coordination issue #${COORD_ISSUE_NUMBER}" \
     || echo "WARNING: failed to close coordination issue #${COORD_ISSUE_NUMBER} — non-fatal, continuing Phase 5"
 else
-  echo "No coordination issue for this batch (FORGE_COORD_ISSUE unset) — Step 5C is a no-op"
+  echo "No coordination issue for this batch (unset and not recoverable via BATCH_ID) — Step 5C is a no-op; /cleanup Phase 2C will sweep it if it exists"
 fi
 ```
 

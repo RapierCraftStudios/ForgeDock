@@ -10,7 +10,7 @@ install: extras
 
 **Input**: $ARGUMENTS
 
-Scan the entire development environment for rot and fix it. This is a maintenance command — run periodically or after large orchestration batches. It covers 6 domains: stale labels, orphaned issues, worktree/branch pruning, milestone hygiene, and Project board sync.
+Scan the entire development environment for rot and fix it. This is a maintenance command — run periodically or after large orchestration batches. It covers 6 domains: stale labels, orphaned issues and dead claims boards, worktree/branch pruning, milestone hygiene, and Project board sync.
 
 **NEVER use plan mode (EnterPlanMode)** — it breaks execution context.
 
@@ -46,7 +46,7 @@ All `{GH_REPO}`, `{GH_FLAG}`, `{REPO_PATH}`, `{STAGING_BRANCH}`, `{PROJECT_BOARD
 | Input | Action |
 |-------|--------|
 | `labels` or empty | Fix stale/missing workflow labels on closed issues; detect OPEN issues stuck in intermediate states (Phase 1D) |
-| `orphans` | Close open issues whose PRs are already merged |
+| `orphans` | Close open issues whose PRs are already merged (Phase 2A/2B), and close dead orchestrate claims boards (Phase 2C) |
 | `branches` | Prune worktrees and remote branches for merged PRs |
 | `milestones` | Report milestones with 0 open issues (advisory — never closes) |
 | `board` | Sync closed issues to Project board with correct terminal state |
@@ -233,6 +233,82 @@ gh issue edit $NUM {GH_FLAG} --remove-label "workflow:in-review,workflow:remedia
 ```
 
 Also check open issues with `workflow:building` — same pattern (search for merged PRs referencing them).
+
+### 2C: Close dead orchestrate claims boards <!-- Added: forge#3699 -->
+
+Each `/orchestrate` batch creates one claims board (`orchestrate: claims board for batch <id>`, label `automation`) with no PR of its own, so 2A/2B never match it. `/orchestrate` Phase 5 Step 5C closes the board on a clean finish; batches that end by compaction, freeze, crash or a fresh-context resume never reach it. This sweep is the durable safety net. Runs for `orphans` and `all`; respects `DRY_RUN`.
+
+A board is closed only when **all** identity checks pass and **one** closing condition holds:
+
+- Identity: title starts with `orchestrate: claims board for batch`, body contains `<!-- FORGE:COORD_ISSUE -->`, and the author is trusted: `author_association` `OWNER`, `MEMBER` or `COLLABORATOR`, or a Bot account (the pipeline's GitHub App, reported as `CONTRIBUTOR`). A look-alike issue from an outside account is never closed.
+- Close when the last `FORGE:LEASE*` comment is a `FORGE:LEASE_RELEASED`.
+- Close when the last `FORGE:LEASE*`/`FORGE:CLAIM*` comment is older than `BOARD_STALE_HOURS` (default 6, far above the 15 minute lease TTL).
+- Close when there is no lease/claim comment and the issue itself is older than `BOARD_STALE_HOURS`.
+- Never close a board whose last lease event is an unreleased `FORGE:LEASE` younger than `BOARD_STALE_HOURS`.
+
+```bash
+BOARD_STALE_HOURS=${BOARD_STALE_HOURS:-6}
+BOARD_CUTOFF=$(date -u -d "${BOARD_STALE_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+  || date -u -v-${BOARD_STALE_HOURS}H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+  || echo "")
+BOARDS_CLOSED=0
+
+if [ -z "$BOARD_CUTOFF" ]; then
+  echo "WARNING: cannot compute BOARD_STALE_HOURS cutoff — only released boards will be closed"
+fi
+
+# REST (not `gh issue list`): it exposes author_association and user.type. Boards are created by the
+# pipeline's GitHub App, which GitHub reports as CONTRIBUTOR, so trust is the same predicate as
+# scripts/trusted-comments.sh: OWNER/MEMBER/COLLABORATOR or a Bot account.
+BOARDS=$(gh api --paginate "repos/{GH_REPO}/issues?state=open&labels=automation&per_page=100" 2>/dev/null \
+  | jq -rs '.[][] | select(.pull_request == null)
+         | select(((.title // "") | startswith("orchestrate: claims board for batch"))
+                  and ((.body // "") | contains("<!-- FORGE:COORD_ISSUE -->"))
+                  and (((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR")) or ((.user.type // "") == "Bot")))
+         | "\(.number)\t\(.created_at)"' 2>/dev/null || echo "")
+
+while IFS=$'\t' read -r BNUM BCREATED; do
+  [ -z "$BNUM" ] && continue
+
+  # --paginate emits one array per page: slurp (jq -s) and flatten BEFORE taking `last`,
+  # otherwise a board with >30 comments reads a stale event from an earlier page.
+  LAST_LEASE=$(gh api --paginate "repos/{GH_REPO}/issues/${BNUM}/comments" 2>/dev/null \
+    | jq -s '[.[][] | select(.body | contains("FORGE:LEASE"))] | last // empty
+             | {released: (.body | contains("FORGE:LEASE_RELEASED")), at: .created_at}' 2>/dev/null || echo "")
+  LAST_ACTIVITY=$(gh api --paginate "repos/{GH_REPO}/issues/${BNUM}/comments" 2>/dev/null \
+    | jq -rs '[.[][] | select(.body | contains("FORGE:LEASE") or contains("FORGE:CLAIM"))] | last // empty | .created_at' 2>/dev/null || echo "")
+
+  REASON=""
+  if [ -n "$LAST_LEASE" ] && [ "$(echo "$LAST_LEASE" | jq -r '.released')" = "true" ]; then
+    REASON="last lease event is FORGE:LEASE_RELEASED"
+  elif [ -n "$BOARD_CUTOFF" ]; then
+    # ISO-8601 UTC timestamps compare correctly as strings
+    LAST_SEEN="${LAST_ACTIVITY:-$BCREATED}"
+    if [ -n "$LAST_SEEN" ] && [ "$LAST_SEEN" \< "$BOARD_CUTOFF" ]; then
+      REASON="no lease/claim activity since ${LAST_SEEN} (older than ${BOARD_STALE_HOURS}h)"
+    fi
+  fi
+
+  if [ -z "$REASON" ]; then
+    echo "KEEP: board #$BNUM has a live or recent lease"
+    continue
+  fi
+
+  if [ "${DRY_RUN:-false}" = "true" ]; then
+    echo "DRY-RUN: would close claims board #$BNUM — $REASON"
+    continue
+  fi
+
+  # Closing an already-closed issue is a no-op; a gh failure is non-fatal.
+  gh issue close "$BNUM" {GH_FLAG} --comment "Closing dead claims board — ${REASON}.
+
+Closed automatically by \`/cleanup\` Phase 2C." 2>/dev/null \
+    && { echo "Closed claims board #$BNUM ($REASON)"; BOARDS_CLOSED=$((BOARDS_CLOSED + 1)); } \
+    || echo "WARNING: failed to close claims board #$BNUM — non-fatal" # allowlist:check-command-side-effects
+done <<< "$BOARDS"
+
+echo "Claims boards closed: $BOARDS_CLOSED"
+```
 
 ---
 
@@ -598,6 +674,11 @@ fi
 | Issue | Merged PR | Action |
 |-------|-----------|--------|
 | #{N} | PR #{M} | Closed |
+
+### Claims Boards Closed
+| Issue | Reason | Action |
+|-------|--------|--------|
+| #{N} | LEASE_RELEASED / stale > {BOARD_STALE_HOURS}h | Closed |
 
 ### Worktrees & Branches Pruned
 | Type | Count |

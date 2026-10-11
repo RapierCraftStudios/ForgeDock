@@ -53,6 +53,8 @@ fi
 # --- End lease gate ---
 ```
 
+**Board closure ownership** <!-- Added: forge#3699 -->: lease takeover never reclaims or closes a claims board (each batch creates its own, Step 3D.1). Closing it is owned by Phase 5 Step 5C and, for batches that never reach it, `/cleanup` Phase 2C.
+
 **Lease release**: `LEASE_RELEASED_THIS_SESSION` (declared just below, alongside `release_orchestrator_lease()`) guards against double-posting `FORGE:LEASE_RELEASED`. The release call is invoked from both the **Step 4A-pre.-0.5 "Stopping the orchestrator"** procedure (interrupted path) and the **Termination condition** at the end of Step 4B (normal clean/paused drain) — both exit paths route through the same idempotent function so the lease is never left dangling either way.
 
 ```bash
