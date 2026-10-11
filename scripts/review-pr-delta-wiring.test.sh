@@ -120,8 +120,16 @@ expect "round 2 narrows to security by default" "security" "$(roster 2 'security
 expect "round 2 adds a path-triggered domain" "security auth" "$(roster 2 'security auth billing' $'README.md\nsrc/auth/login.py')"
 expect "round 3 cap holds" "security" "$(roster 3 'security auth billing database' 'docs/notes.txt')"
 expect "claim/lease paths trigger concurrency" "security concurrency" "$(roster 2 'security' 'engine/claim-lease.txt')"
+export REPO_PATH="$ROOT"   # ForgeDock itself: the persona file exists
 expect "commands/** triggers spec-cli" "security spec-cli" "$(roster 2 'security' 'commands/foo.md')"
 expect "bin/** triggers spec-cli" "security spec-cli" "$(roster 2 'security' 'bin/foo.mjs')"
+# consumer repo layout: no persona file, so no spec-cli
+mkdir -p "$TMP/consumer/bin" "$TMP/consumer/commands"
+export REPO_PATH="$TMP/consumer"
+expect "consumer bin/ gets no spec-cli" "security" "$(roster 2 'security' 'bin/foo.mjs')"
+expect "consumer commands/ gets no spec-cli" "security" "$(roster 2 'security' 'commands/foo.md')"
+expect "consumer with another trigger keeps it, no spec-cli" "security auth" "$(roster 2 'security' $'bin/foo.mjs\nsrc/auth/login.py')"
+unset REPO_PATH
 expect "non-numeric rounds fail to the 3B roster" "security auth" "$(roster 'x' 'security auth' 'README.md')"
 
 # ---- 3. mode resolution through the real fence ----------------------------------------------------------------------

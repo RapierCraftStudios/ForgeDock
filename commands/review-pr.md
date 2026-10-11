@@ -1612,9 +1612,11 @@ carry_verified_from() {
 # BEGIN review-pr-delta-roster
 # Effective roster for a DELTA head. While fewer than two full panels have run (FULL_ROUNDS < 2) the 3B roster stands;
 # from the third review on it narrows to Security plus the domains whose trigger paths the delta touches.
+# spec-cli is internal-only (not shipped to consumers): it is added only when the persona file exists in the repo under review.
 # Args: FULL_ROUNDS, the canonical 3B roster (space separated), the delta file list (one path per line).
 delta_roster() {
-    local rounds="${1}" full="${2}" files="${3}" out="security"
+    local rounds="${1}" full="${2}" files="${3}" out="security" root
+    root="${REPO_PATH:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
     case "$rounds" in ''|*[!0-9]*) printf '%s' "$full"; return 0 ;; esac
     if [ "$rounds" -lt 2 ]; then printf '%s' "$full"; return 0; fi
     printf '%s\n' "$files" | grep -qiE "auth|session|login|logout|jwt|oauth|token|user|permission|middleware" && out="$out auth"
@@ -1625,7 +1627,7 @@ delta_roster() {
     printf '%s\n' "$files" | grep -qiE "scrape|crawler|stealth|browser.*pool|headless|anti.bot|captcha" && out="$out scraper"
     printf '%s\n' "$files" | grep -qiE "^web/|\.tsx?$|\.jsx?$|component|page|layout|style|css" && out="$out frontend"
     printf '%s\n' "$files" | grep -qiE "router|route|endpoint|openapi|sdk|api" && out="$out api"
-    printf '%s\n' "$files" | grep -qE "^(commands|bin)/" && out="$out spec-cli"
+    printf '%s\n' "$files" | grep -qE "^(commands|bin)/" && [ -f "$root/commands/review-pr-agents/spec-cli.md" ] && out="$out spec-cli"
     printf '%s' "$out"
 }
 # END review-pr-delta-roster
@@ -1800,7 +1802,7 @@ Read: $MONOLITHIC_CATALOG
 ```
 Then extract the shared protocols section and each selected persona's section from within that single file — same content, different packaging.
 
-Persona file names: `security.md` (always), `auth.md`, `billing.md`, `concurrency.md`, `scraper.md`, `frontend.md`, `api.md`, `database.md`, `infra.md`, and `spec-cli.md` (marker domain `spec-cli`, only ever on a `DELTA` roster whose delta touches `commands/**` or `bin/**`).
+Persona file names: `security.md` (always), `auth.md`, `billing.md`, `concurrency.md`, `scraper.md`, `frontend.md`, `api.md`, `database.md`, `infra.md`, and `spec-cli.md` (marker domain `spec-cli`, only ever on a `DELTA` roster whose delta touches `commands/**` or `bin/**` AND whose repo contains `commands/review-pr-agents/spec-cli.md`, i.e. ForgeDock itself; consumer repos never get it).
 See `review-pr-agents.md` for the full routing table mapping domains → persona files.
 
 (`$FORGE_HOME` defaults to `~/.claude`)
