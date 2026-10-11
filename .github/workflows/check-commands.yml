@@ -29,6 +29,7 @@ on:
       - 'scripts/review-pr-delta-wiring.test.sh'
       - 'scripts/review-pr-staging-scope.test.sh'
       - 'scripts/review-pr-staging-finding-filter.test.sh'
+      - 'scripts/close-parent-c3.test.sh'
       - 'scripts/check-spec-size.sh'
       - 'scripts/check-spec-size.test.sh'
       - 'scripts/check-test-wiring.sh'
@@ -72,6 +73,7 @@ on:
       - 'scripts/review-pr-delta-wiring.test.sh'
       - 'scripts/review-pr-staging-scope.test.sh'
       - 'scripts/review-pr-staging-finding-filter.test.sh'
+      - 'scripts/close-parent-c3.test.sh'
       - 'scripts/check-spec-size.sh'
       - 'scripts/check-spec-size.test.sh'
       - 'scripts/check-test-wiring.sh'
@@ -343,6 +345,7 @@ jobs:
           bash scripts/review-pr-arguments.test.sh
           bash scripts/review-pr-domain-map.test.sh
           bash scripts/review-roster.test.sh
+          bash scripts/close-parent-c3.test.sh
           bash scripts/review-delta.test.sh
           bash scripts/review-pr-delta-wiring.test.sh
           bash scripts/review-pr-staging-scope.test.sh
