@@ -49,7 +49,7 @@ has "M8 records a no-merge round as attempted" 'Base sync\*\*: attempted \(no me
 CAPDIR="$(mktemp -d)"
 awk -v d="$CAPDIR" '/^BASESYNC_ROUNDS=0; _p2=""$/{c++; f=1} f{print > (d "/cap" c)} f&&/^BASESYNC_BASE_SHA=/{f=0}' "$SPEC"
 NCAP=$(ls "$CAPDIR" | wc -l); [ "$NCAP" -ge 4 ] && ok "cap derivation present in M3, M6 x2 and M8 ($NCAP copies)" || bad "cap derivation copies ($NCAP)"
-[ "$(cat "$CAPDIR"/cap* | sort | uniq -c | awk '{print $1}' | sort -u | wc -l)" -le 1 ] && [ "$(md5sum "$CAPDIR"/cap* | awk '{print $1}' | sort -u | wc -l)" -eq 1 ] && ok "cap derivation copies are byte-identical" || bad "cap derivation copies are byte-identical"
+[ "$(cat "$CAPDIR"/cap* | sort | uniq -c | awk '{print $1}' | sort -u | wc -l)" -le 1 ] && [ "$(cksum < "$CAPDIR"/cap1)" = "$(for _f in "$CAPDIR"/cap*; do cksum < "$_f"; done | sort -u)" ] && ok "cap derivation copies are byte-identical" || bad "cap derivation copies are byte-identical"
 if grep -qF 'BASESYNC_ROUNDS=$(( ${BASESYNC_ROUNDS:-0}' "$SPEC"; then bad "no shell-state round counter"; else ok "no shell-state round counter"; fi
 if grep -qF '[ -n "${BASESYNC_BASE_SHA:-}" ]' "$SPEC"; then bad "freshness pass not gated on a shell var"; else ok "freshness pass not gated on a shell var"; fi
 has "freshness push rc checked" 'if git push origin HEAD:\{HEAD_BRANCH\}; then'
