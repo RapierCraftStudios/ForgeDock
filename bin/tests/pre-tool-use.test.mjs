@@ -2162,6 +2162,36 @@ describe("main-checkout mutation guard (issue #3650)", () => {
     assert.equal(run(`cd ${wtDir} && git checkout feat/x`, mainDir).exitCode, 0);
   });
 
+  it("denies option-prefixed git and wrapper/-C/trailing-cd bypasses in the main checkout (SEC-1/SEC-2)", () => {
+    for (const c of [
+      "git -c advice.detachedHead=false checkout --detach FETCH_HEAD",
+      "git --no-pager checkout x",
+      "git checkout x && cd .",
+      "git -C . checkout x",
+      `git -C ${mainDir} reset --hard HEAD`,
+      'bash -c "git checkout x"',
+      'eval "git checkout x"',
+      "sudo git checkout x",
+      "env FOO=1 git checkout x",
+      "command git checkout x",
+      "/usr/bin/git checkout x",
+      "echo x | xargs git checkout",
+      "git checkout x # -b",
+      "git checkout main -- -b",
+    ]) {
+      assert.equal(run(c, mainDir).exitCode, 2, c);
+    }
+  });
+
+  it("denies the other tree-rewriting verbs in the main checkout (SEC-3)", () => {
+    for (const c of ["git restore .", "git clean -fd", "git pull", "git rebase x", "git cherry-pick x", "git reset --merge", "git branch -f x HEAD"]) {
+      assert.equal(run(c, mainDir).exitCode, 2, c);
+    }
+    for (const c of ["git clean -n", "git branch --list", "git -c a=b status"]) {
+      assert.equal(run(c, mainDir).exitCode, 0, c);
+    }
+  });
+
   it("honours the operator override", () => {
     assert.equal(run("git checkout main", mainDir, { FORGE_ALLOW_MAIN_CHECKOUT_GIT: "1" }).exitCode, 0);
   });

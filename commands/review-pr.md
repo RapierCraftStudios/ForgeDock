@@ -609,12 +609,14 @@ Read `forge.yaml → verification.commands.typescript.typecheck` and `.build`:
 ```bash
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 # Per-PR throwaway worktree: never check the PR out in the main checkout (HARD RULE 7).
-MAIN_ROOT="$(git rev-parse --show-toplevel)"
+MAIN_ROOT="$(cd "$(git rev-parse --path-format=absolute --git-common-dir)/.." && pwd)"   # main checkout even when run from a linked worktree
 REVIEW_WT="${TMPDIR:-/tmp}/forge-review-wt-${PR_NUMBER}-$$"
 trap 'git worktree remove --force "$REVIEW_WT" 2>/dev/null; rm -rf "$REVIEW_WT"' EXIT
+REVIEW_SHA="{REVIEW_SHA}"
 git fetch origin "pull/${PR_NUMBER}/head" 2>/dev/null
-git worktree add --detach "$REVIEW_WT" FETCH_HEAD 2>/dev/null
-cd "$REVIEW_WT" || { echo "SKIPPED — could not create per-PR worktree"; exit 0; }
+git worktree add --detach "$REVIEW_WT" "$REVIEW_SHA" 2>/dev/null
+# Verify the pinned review SHA, never a stale FETCH_HEAD: a mismatch must not become a type-error finding.
+{ cd "$REVIEW_WT" && [ "$(git rev-parse HEAD)" = "$(git -C "$MAIN_ROOT" rev-parse "$REVIEW_SHA")" ]; } || { echo "SKIPPED — could not create per-PR worktree at $REVIEW_SHA"; exit 0; }
 # A fresh worktree has no installed deps: link the main checkout's node_modules (read-only use), else report SKIPPED. Never run in the main checkout.
 [ -d "$MAIN_ROOT/node_modules" ] && [ ! -e node_modules ] && ln -s "$MAIN_ROOT/node_modules" node_modules
 if [ ! -d node_modules ]; then
@@ -656,12 +658,14 @@ Read `forge.yaml → verification.commands.python.format` and `.build`:
 ```bash
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 # Per-PR throwaway worktree: never check the PR out in the main checkout (HARD RULE 7).
-MAIN_ROOT="$(git rev-parse --show-toplevel)"
+MAIN_ROOT="$(cd "$(git rev-parse --path-format=absolute --git-common-dir)/.." && pwd)"   # main checkout even when run from a linked worktree
 REVIEW_WT="${TMPDIR:-/tmp}/forge-review-wt-${PR_NUMBER}-$$"
 trap 'git worktree remove --force "$REVIEW_WT" 2>/dev/null; rm -rf "$REVIEW_WT"' EXIT
+REVIEW_SHA="{REVIEW_SHA}"
 git fetch origin "pull/${PR_NUMBER}/head" 2>/dev/null
-git worktree add --detach "$REVIEW_WT" FETCH_HEAD 2>/dev/null
-cd "$REVIEW_WT" || { echo "SKIPPED — could not create per-PR worktree"; exit 0; }
+git worktree add --detach "$REVIEW_WT" "$REVIEW_SHA" 2>/dev/null
+# Verify the pinned review SHA, never a stale FETCH_HEAD: a mismatch must not become a type-error finding.
+{ cd "$REVIEW_WT" && [ "$(git rev-parse HEAD)" = "$(git -C "$MAIN_ROOT" rev-parse "$REVIEW_SHA")" ]; } || { echo "SKIPPED — could not create per-PR worktree at $REVIEW_SHA"; exit 0; }
 
 # Compile-check all changed Python files (language-universal — no config needed)
 echo "$CHANGED_FILES" | grep '\.py$' | while IFS= read -r f; do python3 -m py_compile "$f" 2>&1; done

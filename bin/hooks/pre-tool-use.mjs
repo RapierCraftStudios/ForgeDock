@@ -1257,44 +1257,77 @@ function checkTempPathStaging(command) {
 // Rule 9: Main-checkout mutation guard (issue #3650)
 // ---------------------------------------------------------------------------
 
-/** git global options that consume the following token as their value. */
-const GIT_VALUE_OPTS = new Set(["-c", "--exec-path", "--namespace", "--super-prefix"]);
-/** git global options that redirect the target repo/tree: result is indeterminate. */
-const GIT_REDIRECT_OPT_RE = /^(?:-C|--git-dir(?:=.*)?|--work-tree(?:=.*)?)$/;
-
 /**
  * Classify one command segment as a main-checkout mutation.
+ *
+ * The option tables live INSIDE the function: `main()` runs at module top via
+ * `await`, before module-level `const`s declared further down are initialised,
+ * so a module-level table throws (TDZ) and the hook fails open.
+ *
  * @param {string[]} tokens
- * @returns {string|null} the offending command name, or null
+ * @param {number} [depth] wrapper-unwrap depth (bounded)
+ * @returns {{name: string, dir: string|null}|null} offender and the `-C` dir it targets, or null
  */
-function mutatingGitCommand(tokens) {
+function mutatingGitCommand(tokens, depth = 0) {
+  const valueOpts = new Set(["-c", "--exec-path", "--namespace", "--super-prefix", "--config-env"]);
   let i = 0;
-  // Skip leading env assignments (`FOO=1 git ...`).
-  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i++;
-  if (tokens[i] === "gh") {
-    return tokens[i + 1] === "pr" && tokens[i + 2] === "checkout" ? "gh pr checkout" : null;
+  // Skip leading env assignments (`FOO=1 git ...`) and transparent wrappers.
+  for (;;) {
+    while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])) i++;
+    const w = String(tokens[i] || "").replace(/^.*\//, "");
+    if (["sudo", "env", "command", "exec", "nice", "nohup", "time", "xargs", "builtin"].includes(w)) {
+      i++;
+      while (i < tokens.length && (tokens[i].startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]))) i++;
+      continue;
+    }
+    if (["bash", "sh", "zsh", "dash"].includes(w) || w === "eval") {
+      if (depth >= 3) return null;
+      const k = w === "eval" ? i + 1 : tokens.findIndex((t, n) => n > i && /^-[a-z]*c$/.test(t)) + 1;
+      if (k <= i || k >= tokens.length) return null;
+      const inner = w === "eval" ? tokens.slice(k).join(" ") : tokens[k];
+      let hit = null;
+      for (const seg of extractCommandSegments(inner)) hit = hit || mutatingGitCommand(seg, depth + 1);
+      return hit;
+    }
+    break;
   }
-  if (tokens[i] !== "git") return null;
+  const cmd = String(tokens[i] || "").replace(/^.*\//, "");
+  if (cmd === "gh") {
+    return tokens[i + 1] === "pr" && tokens[i + 2] === "checkout" ? { name: "gh pr checkout", dir: null } : null;
+  }
+  if (cmd !== "git") return null;
   i++;
+  let dir = null;
   while (i < tokens.length && tokens[i].startsWith("-")) {
-    if (GIT_REDIRECT_OPT_RE.test(tokens[i])) return null; // targets another dir: allow
-    i += GIT_VALUE_OPTS.has(tokens[i]) ? 2 : 1;
+    if (tokens[i] === "-C") { dir = dir === null ? (tokens[i + 1] ?? ".") : resolvePath(dir, tokens[i + 1] ?? "."); i += 2; continue; }
+    if (/^--(?:git-dir|work-tree)(?:=.*)?$/.test(tokens[i])) return null; // targets another tree: allow
+    i += valueOpts.has(tokens[i]) ? 2 : 1;
   }
   const sub = tokens[i];
-  const rest = tokens.slice(i + 1);
+  // Arguments end at a shell comment; options end at `--`.
+  let rest = tokens.slice(i + 1);
+  const hash = rest.findIndex((t) => t.startsWith("#"));
+  if (hash >= 0) rest = rest.slice(0, hash);
+  const dd = rest.indexOf("--");
+  const opts = dd >= 0 ? rest.slice(0, dd) : rest;
+  const hit = (name) => ({ name, dir });
   switch (sub) {
     case "checkout":
       // Creating a new branch is the one sanctioned form (`git checkout -b`).
-      return rest.some((t) => t === "-b" || t === "-B") ? null : "git checkout";
+      return opts.some((t) => t === "-b" || t === "-B") ? null : hit("git checkout");
     case "switch":
-      return rest.some((t) => t === "-c" || t === "-C" || t === "--create") ? null : "git switch";
-    case "merge":
-      return "git merge";
+      return opts.some((t) => t === "-c" || t === "-C" || t === "--create") ? null : hit("git switch");
+    case "merge": case "pull": case "rebase": case "cherry-pick": case "revert": case "am": case "restore":
+      return hit(`git ${sub}`);
+    case "clean":
+      return opts.some((t) => t === "-n" || t === "--dry-run") ? null : hit("git clean");
+    case "branch":
+      return opts.some((t) => /^(?:-[a-zA-Z]*[fFmMdD][a-zA-Z]*|--force|--move|--delete)$/.test(t)) ? hit("git branch") : null;
     case "reset":
-      return rest.includes("--hard") ? "git reset --hard" : null;
+      return opts.some((t) => t === "--hard" || t === "--merge" || t === "--keep") ? hit("git reset") : null;
     case "stash": {
-      const action = rest.find((t) => !t.startsWith("-"));
-      return action === "list" || action === "show" ? null : "git stash";
+      const action = opts.find((t) => !t.startsWith("-"));
+      return action === "list" || action === "show" ? null : hit("git stash");
     }
     default:
       return null;
@@ -1333,15 +1366,17 @@ function checkMainCheckoutMutation(command) {
   if (!/\b(?:git|gh)\b/.test(command)) return null;
   try {
     let offender = null;
+    let targetDir = process.cwd();
     for (const tokens of extractCommandSegments(command)) {
-      // A directory change makes the effective cwd indeterminate: allow.
-      if (tokens[0] === "cd" || tokens[0] === "pushd") return null;
-      offender = offender || mutatingGitCommand(tokens);
+      // A directory change makes the effective cwd of LATER segments indeterminate: allow those.
+      if (tokens[0] === "cd" || tokens[0] === "pushd") break;
+      const hit = mutatingGitCommand(tokens);
+      if (hit) { offender = hit.name; targetDir = hit.dir === null ? process.cwd() : resolvePath(process.cwd(), hit.dir); break; }
     }
     if (!offender) return null;
-    if (!isMainCheckout(process.cwd())) return null;
+    if (!isMainCheckout(targetDir)) return null;
     return (
-      `BLOCKED: \`${offender}\` would mutate the main checkout (${process.cwd()}).\n` +
+      `BLOCKED: \`${offender}\` would mutate the main checkout (${targetDir}).\n` +
       "The main checkout is shared with the operator and other agents. Work in a git worktree " +
       "(`git worktree list`, `git worktree add`) and use `git -C <worktree> ...`, or read code with " +
       "`git show <sha>:<path>`, `gh pr diff`, or `gh api`.\n" +
