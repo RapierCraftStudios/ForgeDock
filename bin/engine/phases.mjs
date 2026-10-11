@@ -715,8 +715,35 @@ export const PHASES = [
         if (at >= 0) scoped = comments.slice(at + 1);
       }
       const latest = latestMarked(scoped, PHASE_MARKERS.remediate.header, completion);
-      if (latest === null)
+      // forge#3647: ground-truth PR read. An interrupted or rate-limited remediation can leave the
+      // PR already merged with no COMPLETE marker (or a stale HELD-AWAITING-MERGE report). The
+      // reported outcome is never upgraded to a merge decision; only the live PR state is. Same
+      // merged predicate as reconcile (`mergedAt` or state MERGED). Unreadable => null (fail closed).
+      const prMerged = async () => {
+        if (state.pr == null) return false;
+        try {
+          const out = await io.gh(["pr", "view", String(state.pr), "--json", "state,mergedAt,baseRefName"]);
+          const j = JSON.parse(out || "{}");
+          return !!j.mergedAt || j.state === "MERGED";
+        } catch { return false; }
+      };
+      // Shared with the AUTO-LANDED case: CLOSED + workflow:merged means genuinely finished;
+      // anything else (including an unreadable snapshot) hands off to idempotent `close`.
+      const mergedResult = async (reGateOutcome) => {
+        let closed = false;
+        try {
+          const snap = await issueSnapshot(state.issue, io);
+          closed = snap.ok && snap.state === "CLOSED" &&
+            snap.labels.includes(PHASE_MARKERS.close.completionLabel);
+        } catch { closed = false; }
+        return closed
+          ? { status: "committed", terminalReason: "merged", outputs: { reGateOutcome } }
+          : { status: "committed", terminalReason: "merged", outputs: { reGateOutcome, closeHandoff: true } };
+      };
+      if (latest === null) {
+        if (await prMerged()) return mergedResult("AUTO-LANDED");
         return { status: "failed", detail: `no ${completion} marker` };
+      }
       // Parse the **Re-gate outcome**: field remediate.md's Phase M8 posts
       // (e.g. "**Re-gate outcome**: AUTO-LANDED to staging" — value is the
       // first whitespace-delimited token after the colon).
@@ -724,7 +751,7 @@ export const PHASES = [
       const match = matches.length ? matches[matches.length - 1] : null;
       const reGateOutcome = match ? match[1] : null;
       switch (reGateOutcome) {
-        case "AUTO-LANDED": {
+        case "AUTO-LANDED":
           // forge#3624: remediate.md M8 drives close itself on this outcome, but an
           // engine phase session may skip or fail that delegated close and nothing
           // verified it. Check the issue's real state: CLOSED + workflow:merged means
@@ -732,17 +759,10 @@ export const PHASES = [
           // an unreadable snapshot, hands off to `close` (idempotent via its reconcile).
           // The reason stays "merged" either way so the commit replaces the review's
           // sticky "needs-human" and close.buildArgs accepts --terminal-state merged.
-          let closed = false;
-          try {
-            const snap = await issueSnapshot(state.issue, io);
-            closed = snap.ok && snap.state === "CLOSED" &&
-              snap.labels.includes(PHASE_MARKERS.close.completionLabel);
-          } catch { closed = false; }
-          return closed
-            ? { status: "committed", terminalReason: "merged", outputs: { reGateOutcome } }
-            : { status: "committed", terminalReason: "merged", outputs: { reGateOutcome, closeHandoff: true } };
-        }
+          return mergedResult(reGateOutcome);
         case "HELD-AWAITING-MERGE":
+          // forge#3647: a HELD report for a PR that has since merged must still drive close.
+          if (await prMerged()) return mergedResult(reGateOutcome);
           return { status: "committed", terminalReason: "awaiting-merge", outputs: { reGateOutcome } };
         case "RE-ESCALATED":
         case "UNFIXABLE":

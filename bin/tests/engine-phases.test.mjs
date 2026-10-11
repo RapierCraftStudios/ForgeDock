@@ -437,6 +437,58 @@ describe("pickPhase", () => {
       }
     });
 
+    // forge#3647: ground-truth PR read (awaiting-merge / merged resume).
+    const prIo = ({ comments = [], pr, issue }) => ({
+      gh: async (args) => {
+        if (args[0] === "pr" && args[1] === "view") {
+          if (pr instanceof Error) throw pr;
+          return typeof pr === "string" ? pr : JSON.stringify(pr);
+        }
+        if (args[0] === "issue" && args[1] === "view") return JSON.stringify(issue ?? { state: "OPEN", labels: [{ name: "workflow:awaiting-merge" }] });
+        return jsonLines(comments.map((c) => trusted(c)));
+      },
+      git: async () => "0",
+    });
+    const withPr = { ...base, pr: 7 };
+    const merged = { state: "MERGED", mergedAt: "2026-10-11T00:00:00Z", baseRefName: "staging" };
+
+    it("awaiting-merge resume: no COMPLETE marker + PR MERGED + issue OPEN -> merged with closeHandoff", async () => {
+      const o = await remediate.detectOutcome(withPr, prIo({ pr: merged }));
+      assert.equal(o.status, "committed");
+      assert.equal(o.terminalReason, "merged");
+      assert.equal(o.outputs.closeHandoff, true);
+    });
+
+    it("awaiting-merge resume: no marker + PR MERGED + issue CLOSED/merged -> merged, no handoff", async () => {
+      const issue = { state: "CLOSED", labels: [{ name: "workflow:merged" }] };
+      const o = await remediate.detectOutcome(withPr, prIo({ pr: merged, issue }));
+      assert.equal(o.terminalReason, "merged");
+      assert.equal(o.outputs.closeHandoff, undefined);
+    });
+
+    it("awaiting-merge: HELD marker + PR MERGED -> merged with closeHandoff, not awaiting-merge", async () => {
+      const o = await remediate.detectOutcome(withPr, prIo({ pr: merged, comments: [remediateBody("HELD-AWAITING-MERGE")] }));
+      assert.equal(o.terminalReason, "merged");
+      assert.equal(o.outputs.closeHandoff, true);
+    });
+
+    it("awaiting-merge: HELD marker + PR OPEN -> awaiting-merge unchanged", async () => {
+      const o = await remediate.detectOutcome(withPr, prIo({ pr: { state: "OPEN", mergedAt: null }, comments: [remediateBody("HELD-AWAITING-MERGE")] }));
+      assert.equal(o.terminalReason, "awaiting-merge");
+    });
+
+    for (const [name, pr] of [
+      ["PR OPEN", { state: "OPEN", mergedAt: null }],
+      ["PR CLOSED unmerged", { state: "CLOSED", mergedAt: null }],
+      ["pr view malformed", "not json"],
+      ["pr view throws", new Error("gh down")],
+    ]) {
+      it(`awaiting-merge: no marker + ${name} -> failed (fail closed)`, async () => {
+        const o = await remediate.detectOutcome(withPr, prIo({ pr }));
+        assert.equal(o.status, "failed");
+      });
+    }
+
     it("HELD-AWAITING-MERGE -> committed, terminalReason awaiting-merge", async () => {
       const outcome = await remediate.detectOutcome(base, ioWith(remediateBody("HELD-AWAITING-MERGE")));
       assert.equal(outcome.status, "committed");
