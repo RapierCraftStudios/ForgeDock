@@ -52,6 +52,16 @@ Commands are classified by role. Each role has a max line count — beyond this,
 
 ---
 
+## CI Spec-Size Budget
+
+`scripts/check-spec-size.sh` (job `spec-size-budget` in `check-commands.yml`, PRs only) enforces a budget that is independent of the line-count `.baselines`; the baseline is refreshed on release via `/forge-stats baseline`. It compares bytes against the PR base:
+
+- `review-pr.md`, `review-pr-staging.md`, `work-on/remediate.md`, `work-on/review.md`, `work-on.md` may not grow by more than 2% or 4 KB. Shrinking always passes.
+- No `commands/**` file may gain a copy of a canonical block (FORGE_ROOT bootstrap, TRUSTED_SCRIPT/HELPER_SCRIPT resolver, FENCE_BOOTSTRAP anchor); the per-file marker count may not rise. Tighten to an outright ban once the shared helper (#3493) lands.
+- Exemption: the `spec-size-exempt` PR label, or a `<!-- spec-size-exempt: <reason> -->` line in the PR body (non-empty reason). The job summary lists the per-file delta and any waiver.
+
+---
+
 ## Mode: `diff` (default)
 
 Compare current line counts against the last git commit. Shows what grew and what shrank.
