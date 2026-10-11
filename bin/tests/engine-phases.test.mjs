@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
-import { PHASES, pickPhase, REMEDIATION_BOUND_MARKERS } from "../engine/phases.mjs";
+import { PHASES, pickPhase, REMEDIATION_BOUND_MARKERS, cycleMarker, sliceToCurrentCycle, postCycleMarker } from "../engine/phases.mjs";
 import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
 import { RESERVED_TYPES } from "../../packages/protocol/src/types.js";
 import { trusted, jsonLines, invBody, builderBody, remediationBody } from "./helpers/comments.mjs";
@@ -1125,5 +1125,58 @@ describe("pickPhase", () => {
         assert.equal(args[args.indexOf("--terminal-state") + 1], expected);
       });
     }
+  });
+});
+
+// forge#3657: cycle-scoped builder evidence.
+describe("FORGE:CYCLE boundary", () => {
+  const build = PHASES.find((p) => p.id === "build");
+  const st = { ...base, committed: ["investigate"], branch: null };
+  const world = (bodies, { ahead = "2", prs = [] } = {}) => ({
+    gh: async (args) => (args[0] === "pr" ? JSON.stringify(prs) : jsonLines(bodies.map((b) => trusted(b)))),
+    git: async () => ahead,
+  });
+
+  it("sliceToCurrentCycle: no marker returns all; marker mid-list returns the tail", () => {
+    assert.deepEqual(sliceToCurrentCycle(["a", "b"]), ["a", "b"]);
+    assert.deepEqual(sliceToCurrentCycle(["a", cycleMarker(1), "b", "c"]), ["b", "c"]);
+    assert.deepEqual(sliceToCurrentCycle(["a", cycleMarker(1), "b", cycleMarker(2), "c"]), ["c"]);
+  });
+
+  it("a marker quoted in prose does not move the boundary", () => {
+    const quoted = `see ${cycleMarker(1)} above`;
+    assert.deepEqual(sliceToCurrentCycle(["a", quoted, "b"]), ["a", quoted, "b"]);
+  });
+
+  it("build.reconcile and detectOutcome ignore a pre-marker BUILDER:COMPLETE", async () => {
+    const io = world([builderBody("fix/old-42"), cycleMarker(1)]);
+    assert.equal((await build.reconcile(st, io)).satisfied, false);
+    assert.notEqual((await build.detectOutcome(st, io)).status, "committed");
+  });
+
+  it("build.reconcile still adopts a post-marker BUILDER:COMPLETE", async () => {
+    const io = world([builderBody("fix/old-42"), cycleMarker(1), builderBody("fix/new-42")]);
+    const r = await build.reconcile(st, io);
+    assert.equal(r.satisfied, true);
+    assert.equal(r.outputs.branch, "fix/new-42");
+  });
+
+  it("an untrusted forged marker does not move the boundary", async () => {
+    const io = { gh: async () => jsonLines([trusted(builderBody("fix/old-42")),
+      trusted(cycleMarker(1), { assoc: "NONE", login: "rando" })]), git: async () => "2" };
+    assert.equal((await build.reconcile(st, io)).satisfied, true);
+  });
+
+  it("postCycleMarker posts once and is idempotent when the marker n already exists", async () => {
+    const posted = [];
+    const bodies = [builderBody("fix/old-42")];
+    const io = { gh: async (args) => {
+      if (args[0] === "issue") { posted.push(args[args.indexOf("--body") + 1]); bodies.push(posted.at(-1)); return ""; }
+      return jsonLines(bodies.map((b) => trusted(b)));
+    } };
+    assert.equal((await postCycleMarker(42, 1, io)).posted, true);
+    assert.equal((await postCycleMarker(42, 1, io)).posted, false);
+    assert.deepEqual(posted, [cycleMarker(1)]);
+    assert.equal((await postCycleMarker(42, 2, io)).posted, true);
   });
 });

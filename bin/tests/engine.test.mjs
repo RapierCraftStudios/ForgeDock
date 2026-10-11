@@ -37,6 +37,7 @@ function fakeWorld() {
       const a = args.join(" ");
       if (a.startsWith("repo view")) return "acme/widgets";
       if (a.startsWith("api ") && a.includes("/comments")) return asComments(w.markers);
+      if (a.startsWith("issue comment")) { w.markers += SEP + args[args.indexOf("--body") + 1]; (w.posted ||= []).push(args[args.indexOf("--body") + 1]); return ""; }
       if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
       if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
       if (a.startsWith("issue edit")) { const i = args.indexOf("--body"); if (i>=0) w.body = args[i+1];
@@ -2809,10 +2810,9 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
       };
     }
 
-    // todo: build.reconcile re-adopts the cycle-1 branch and merged PR, so build
-    // is skipped in the new cycle (SEC-1, tracked in #3545). Flip to a plain
-    // `it` once the reconcilers are cycle-aware.
-    it("--retry with cycle-1 evidence runs build and ends on the new branch", { todo: "SEC-1 / #3545" }, async () => {
+    // forge#3657: the engine posts a FORGE:CYCLE marker so build reconcile/detect
+    // only see current-cycle evidence.
+    it("--retry with cycle-1 evidence runs build and ends on the new branch", async () => {
       const { w, io } = fakeWorld();
       seedPhaseComplete();
       seedCycleOneEvidence(w);
@@ -2826,6 +2826,28 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
       const s = deriveState(readLog(dir, 42));
       assert.equal(s.branch, "fix/real-branch-42");
       assert.notEqual(s.pr, 7);
+    });
+
+    it("--retry posts a FORGE:CYCLE marker before RUN_NEXT_CYCLE", async () => {
+      const { w, io } = fakeWorld();
+      seedPhaseComplete();
+      seedCycleOneEvidence(w);
+      const runner = okRunner(w);
+      await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner,
+        now: () => 2000, maxAttempts: 1, retry: true });
+      assert.deepEqual(w.posted, ["<!-- FORGE:CYCLE: 1 -->"]);
+    });
+
+    it("--retry fails closed when the FORGE:CYCLE marker cannot be posted", async () => {
+      const { w, io } = fakeWorld();
+      seedPhaseComplete();
+      const gh = io.gh;
+      io.gh = async (args) => { if (args.join(" ").startsWith("issue comment")) throw new Error("boom"); return gh(args); };
+      const before = readLog(dir, 42).length;
+      const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner: okRunner(w),
+        now: () => 2000, maxAttempts: 1, retry: true });
+      assert.equal(res.terminalReason, "not-retryable");
+      assert.equal(readLog(dir, 42).length, before);
     });
 
     it("--retry with cycle-1 evidence still restarts at investigate", async () => {
