@@ -126,3 +126,7 @@ remediate L2, reviewers L3, same as the table.
 - Attribution comes from `RUN_START`, which now records `version` (from `package.json`) and `repo` (`owner/repo`) on all three writers: the engine's fresh start, the hydrate path (`hydrated: true`), and the interactive hook. Both are best-effort and null when unresolved; `deriveState` ignores them.
 - Older logs have neither: the repo shows `unknown` and the version is estimated from the log's mtime against release times (git tags `v*`, or `--release-times FILE` with `<version> <epoch>` lines), marked `~`.
 - Fixture test: `bash scripts/cost-report.test.sh` (fixtures in `scripts/fixtures/cost-report/`).
+
+## 8. Outcome codes
+
+Every `PHASE_FAILED`, blocked `PHASE_COMMIT` and `RUN_TERMINAL` run-log event carries a machine-readable `code` from a closed, versioned enum (`bin/engine/outcome-codes.mjs`), and `FORGE:STATE` records the causing code as `outcomeCode`. Codes come from structured evidence only, never from the prose `detail`; an unmapped outcome is `unclassified` with the raw reason kept. See `docs/OUTCOME-CODES.md`.

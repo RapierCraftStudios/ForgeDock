@@ -319,6 +319,35 @@ OUT8=$( ( unset FORGEDOCK_HOME FORGE_HOME FORGE_ROOT CLAUDE_PLUGIN_ROOT CLAUDE_C
 case "$OUT8" in *BLOCKED*) case "$OUT8" in *reached*) bad "unresolved bootstrap helper must stop the fence" ;; *) ok ;; esac ;; *) bad "unresolved bootstrap helper must print BLOCKED (got '$OUT8')" ;; esac
 # a stale-head PR must not credit its own merge commit (it contains the post-review commits): the DELTA branch only appends DELTA_COMMITS
 if awk '/^bundle_delta_credit\(\)/,/^\}/' "$SPEC" | grep -q 'mergeCommit'; then bad "the DELTA path must not credit the PR merge commit"; else ok; fi
+# (10) fail-closed gate verdict (forge#3734): an empty/missing/invalid persisted verdict must never become SKIP
+awk '/^\*\*Verdict handling\*\*:/{f=1;next} f&&/^```bash/{g=1;next} g&&/^```/{exit} g' "$SPEC" | grep -v '# FENCE_BOOTSTRAP$' > "$TMP/vh.sh"
+[ -s "$TMP/vh.sh" ] && ok || bad "could not extract the Phase 6.5 verdict-handling fence"
+if awk '/^  \*\)/,/;;/' "$SPEC" | grep -q 'TEST_GATE_VERDICT="SKIP"'; then bad "catch-all arm must not set TEST_GATE_VERDICT=SKIP"; else ok; fi
+grep -qF 'missing/invalid' "$SPEC" && ok || bad "spec must document missing/invalid gate-verdict handling"
+if grep -F 'FORGE:TEST_GATE:RESULT=' "$SPEC" | grep -q 'tail -1 || echo "SKIP"'; then bad "producer must not coerce an absent marker to SKIP"; else ok; fi
+vh10() { # $1 posture, $2 persisted verdict content ('-' = no file), $3 env verdict (optional)
+  local sd="$TMP/vh10.$RANDOM"; mkdir -p "$sd"
+  [ "$2" = "-" ] || printf '%s\n' "$2" > "$sd/5_test_gate_verdict"
+  ( export _SD="$sd" PR_NUMBER=5 GH_REPO=o/r DEFAULT_BRANCH=main ALL_PR_NUMBERS="5" CONFIG_FILE=/dev/null P10="$1"
+    [ -z "${3:-}" ] || export TEST_GATE_VERDICT="$3"
+    forge_resolve() { :; }; yq() { case "$*" in *posture*) echo "$P10" ;; *) echo "OVERRIDE: x" ;; esac; }; gh() { return 0; }
+    . "$TMP/vh.sh" >"$sd/out" 2>&1; echo "rc=0" >> "$sd/out" ) ; local rc=$?
+  VH10_OUT=$(cat "$sd/out"); VH10_V=$(cat "$sd/5_test_gate_verdict" 2>/dev/null); VH10_R=$(cat "$sd/5_test_gate_reason" 2>/dev/null)
+}
+for case10 in "-" "" "garbage" "pass" "SKIP extra"; do
+  vh10 blocking "$case10"
+  case "$VH10_OUT" in *rc=0*) bad "blocking posture must exit non-zero for persisted verdict '$case10'" ;; *) ok ;; esac
+  [ "$VH10_V" = "BLOCK" ] && case "$VH10_R" in *missing/invalid*) true ;; *) false ;; esac && ok || bad "blocking posture must persist BLOCK + missing/invalid reason for '$case10' (got '$VH10_V' / '$VH10_R')"
+  vh10 advisory "$case10"
+  case "$VH10_OUT" in *rc=0*) ok ;; *) bad "advisory posture must not block for persisted verdict '$case10'" ;; esac
+  [ "$VH10_V" = "BLOCK" ] && case "$VH10_R" in *advisory*missing/invalid*) true ;; *) false ;; esac && ok || bad "advisory posture must record BLOCK (advisory) missing/invalid for '$case10' (got '$VH10_V' / '$VH10_R')"
+done
+vh10 blocking "-" "bogus"
+case "$VH10_OUT" in *rc=0*) bad "an unrecognised in-env verdict must fail closed under blocking posture" ;; *) ok ;; esac
+vh10 blocking "PASS"
+case "$VH10_OUT" in *rc=0*) [ "$VH10_V" = "PASS" ] && ok || bad "a valid persisted PASS must stay PASS" ;; *) bad "a valid persisted PASS must not block" ;; esac
+vh10 blocking "SKIP"
+case "$VH10_OUT" in *rc=0*) [ "$VH10_V" = "SKIP" ] && ok || bad "a valid persisted SKIP must stay SKIP" ;; *) bad "a valid persisted SKIP must not block" ;; esac
 else echo "review-pr-staging-scope.test.sh: git missing, delta section skipped"; fi
 echo "review-pr-staging-scope.test.sh: passed=$PASS failed=$FAILN"
 [ "$FAILN" -eq 0 ]
