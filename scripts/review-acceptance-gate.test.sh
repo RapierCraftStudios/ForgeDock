@@ -90,4 +90,14 @@ inv "$(chk ac-1 true)" "$(chk ac-7 "echo 'unbalanced")"; rc=$(run); eq "mixed pa
 grep -q ':PASSED:' "$TMP/out" && grep -qi 'malformed' "$TMP/out" && ok "mixed: PASSED with malformed listed" || bad "mixed: wrong output"
 inv "$(chk ac-1 false)" "$(chk ac-7 "echo 'unbalanced")"; rc=$(run); eq "mixed fail+malformed: fails closed" "$rc" 1
 
+# Selection parity with B6.5 (forge#3809): non-review checks are selected by the `gh pr` target only, never by a phase= text match.
+bt() { printf 'ACCEPTANCE_CHECK: id=%s type=command target="%s" matcher="exit_0" phase=%s description=%s' "$1" "$2" "$3" "$4"; }
+inv "$(bt ac-1 'gh pr view 1 && false' build d)"; rc=$(run); eq "phase=build gh pr check is evaluated (fails)" "$rc" 1
+inv "$(bt ac-1 'gh pr view 1 && true' build d)"; rc=$(run)
+grep -q ':PASSED:' "$TMP/out" && ok "phase=build gh pr check counted and passes" || bad "phase=build gh pr check not counted"
+inv "$(bt ac-1 'false' build d)"; rc=$(run); eq "phase=build non-gh-pr check is not selected" "$rc" 0
+inv "$(bt ac-1 'gh pr view 1 && false' build 'x phase=review y')"; rc=$(run); eq "phase=review in description does not change selection" "$rc" 1
+inv "$(bt ac-1 'false' build 'x phase=review y')"; rc=$(run); eq "phase=review in description does not select a non-gh-pr check" "$rc" 0
+inv 'ACCEPTANCE_CHECK: id=ac-1 type=command target="gh pr view 1 && false" matcher="exit_0" description=untagged'; rc=$(run); eq "untagged gh pr check is evaluated" "$rc" 1
+
 echo "$PASS passed, $FAILN failed"; [ "$FAILN" -eq 0 ]

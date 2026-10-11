@@ -135,3 +135,9 @@ test("review.md R2.5 calls a script that evaluates deferred checks with its own 
   const phaseLine = build.split("\n").find((l) => /^ {2}PHASE=\$\(/.test(l));
   assert.ok(gate.includes(phaseLine));
 });
+
+test("review gate selects non-review checks by gh pr target only (no unanchored phase= skip)", () => {
+  const src = readFileSync(new URL("../../scripts/review-acceptance-gate.sh", import.meta.url), "utf8");
+  assert.ok(!src.includes("grep -qE ' phase=(build|review)( |$)'"));
+  assert.ok(src.includes("*'gh pr'*"));
+});
