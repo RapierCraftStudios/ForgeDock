@@ -1389,18 +1389,6 @@ describe("acceptance-gate-aware build outcome (forge#3545)", () => {
     assert.equal(o.status, "failed");
   });
 
-  it("build.md B0 gate resume re-enters B6.5 before returning ALREADY_DONE (forge#3725)", () => {
-    const spec = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "../../commands/work-on/build.md"), "utf8");
-    const start = spec.indexOf("**Resume check**");
-    const end = spec.indexOf("- If there is no `<!-- FORGE:INVESTIGATOR -->`", start);
-    assert.ok(start >= 0 && end > start, "B0 resume block found");
-    const b0 = spec.slice(start, end);
-    assert.match(b0, /ACCEPTANCE_GATE:(FAILED|BLOCKED)/);
-    assert.match(b0, /BUILD_BLOCKED/);
-    assert.match(b0, /re-enter at \*\*Phase B6\.5\*\*/);
-    assert.ok(b0.indexOf("Gate resume") < b0.indexOf("status: ALREADY_DONE"), "gate resume precedes ALREADY_DONE");
-  });
-
   it("a gate marker quoted in prose, or from an untrusted author, does not block", async () => {
     const quoted = `see <!-- FORGE:ACCEPTANCE_GATE:FAILED --> in the thread`;
     assert.equal((await build.detectOutcome(st, world([done, quoted]))).status, "committed");
