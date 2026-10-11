@@ -122,7 +122,7 @@ export function emit(event, payload = {}, ctx = {}) {
     const unlock = () => { if (!canLock) return; try { if (readFileSync(join(lock, "owner"), "utf8") === token) rmSync(lock, { recursive: true, force: true }); } catch { /* already gone */ } };
     // Claim the buffer by renaming it: records appended meanwhile land in a fresh file and are never deleted. Holding
     // the lock, any other "<buf>.flush.*" is an orphan of a killed emitter: fold it in.
-    const claimed = `${buf}.flush.${process.pid}`;
+    const claimed = `${buf}.flush.${token}`;
     let pending = [line];
     try {
       if (existsSync(buf)) renameSync(buf, claimed);

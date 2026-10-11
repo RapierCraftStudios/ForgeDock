@@ -141,7 +141,7 @@ _forge_tel_impl() {
   trap '_forge_tel_unlock' EXIT; trap '_forge_tel_unlock; exit 1' HUP INT TERM
   # Claim the buffer by renaming it first: a record appended by another emitter after this point lands in a fresh
   # buffer file and survives. Holding the lock, any other "$buf.flush.*" is an orphan of a killed emitter: fold it in.
-  local claimed="$buf.flush.$$" f
+  local claimed="$buf.flush.$token" f
   pending="$rec"
   if [ -s "$buf" ]; then mv "$buf" "$claimed" 2>/dev/null; fi
   for f in "$buf".flush.*; do
