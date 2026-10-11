@@ -89,6 +89,42 @@ describe("forge#3684 remediate.md resume guard", () => {
   });
 });
 
+describe("forge#3722 deploy-gate base resolves branches.default", () => {
+  const review = readFileSync(join(ROOT, "commands/review-pr.md"), "utf8");
+  const RES = "yq '.branches.default // \"main\"'";
+  it("no literal-main base comparison remains in either spec", () => {
+    assert.ok(!/!= "main"/.test(spec), "remediate.md");
+    assert.ok(!/!= "main"/.test(review), "review-pr.md");
+    assert.ok(spec.includes("branches.default"));
+  });
+  it("every fence comparing a base to DEFAULT_BRANCH resolves it first", () => {
+    for (const [name, text] of [["remediate", spec], ["review-pr", review]]) {
+      const fences = text.split("```bash").slice(1).map((f) => f.split("```")[0]);
+      const users = fences.filter((f) => /!= "\$DEFAULT_BRANCH"/.test(f));
+      assert.ok(users.length >= 1, name);
+      for (const f of users) {
+        const r = f.indexOf(RES);
+        assert.ok(r >= 0 && r < f.indexOf('!= "$DEFAULT_BRANCH"'), `${name}: resolver precedes comparison`);
+      }
+    }
+  });
+  it("derivation executes correctly for main/master/production/empty/null", () => {
+    const line = spec.match(/^\s*(if \[ -n "\$LIVE_BASE_REF" \][^\n]*)$/m)[1];
+    const run = (base, cfg) => {
+      const script = `DEFAULT_BRANCH="${cfg}"; DEFAULT_BRANCH="\${DEFAULT_BRANCH:-main}"; LIVE_BASE_REF="${base}"; ${line}; echo $IS_DEPLOY_GATE`;
+      return String(spawnSync("bash", ["-c", script]).stdout).trim();
+    };
+    assert.equal(run("main", "main"), "true");
+    assert.equal(run("master", "master"), "true");
+    assert.equal(run("production", "production"), "true");
+    assert.equal(run("staging", "master"), "false");
+    assert.equal(run("", "master"), "true");
+    assert.equal(run("null", "master"), "true");
+    assert.equal(run("master", ""), "false");
+    assert.equal(run("main", ""), "true");
+  });
+});
+
 describe("forge#3738 resume approval filter executes against fixtures", () => {
   const m = spec.match(/_JQ='([\s\S]*?)'\n/);
   const HEAD = "a".repeat(40);
