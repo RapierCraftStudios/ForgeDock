@@ -147,13 +147,22 @@ OUT9=$( ( SELECTED_AGENT_COUNT="abc"; . "$TMP/selcase.sh"; echo "$SELECTED_COUNT
 [ "$OUT9" = "true" ] && ok || bad "Phase 6: non-integer SELECTED_AGENT_COUNT must be invalid (got '$OUT9')"
 mkdir -p "$TMP/sd8/full" "$TMP/sd8/empty" "$TMP/sd8/bad" "$TMP/bin"
 printf '#!/bin/sh\necho stub-value\n' > "$TMP/bin/yq"; chmod +x "$TMP/bin/yq"
-printf '42\n' > "$TMP/sd8/full/staging_pr_number"; printf '7\n8\n' > "$TMP/sd8/full/42_bundle-prs.txt"
-printf '42; rm -rf /\n' > "$TMP/sd8/bad/staging_pr_number"
+printf '42\n' > "$TMP/sd8/full/staging_pr_number.runA"; printf '7\n8\n' > "$TMP/sd8/full/42_bundle-prs.txt"
+printf '43\n' > "$TMP/sd8/full/staging_pr_number.runB"; printf '9\n' > "$TMP/sd8/full/43_bundle-prs.txt"
+printf '42; rm -rf /\n' > "$TMP/sd8/bad/staging_pr_number.runA"
 boot() { # scratch-dir -> prints "PR_NUMBER|ALL_PR_NUMBERS(joined)|GH_REPO" then any warning
-  ( unset PR_NUMBER ALL_PR_NUMBERS GH_REPO DEFAULT_BRANCH STAGING_BRANCH; export PATH="$TMP/bin:$PATH" FORGE_SCRATCHPAD="$1"
+  ( unset PR_NUMBER ALL_PR_NUMBERS GH_REPO DEFAULT_BRANCH STAGING_BRANCH; export PATH="$TMP/bin:$PATH" FORGE_SCRATCHPAD="$1" FORGE_RUN_KEY="${2:-runA}"
     export FORGEDOCK_HOME="$ROOT"; . "$TMP/boot.sh" 2>&1; echo "PR=${PR_NUMBER:-}|ALL=$(echo ${ALL_PR_NUMBERS:-})|REPO=${GH_REPO:-}|BR=${STAGING_BRANCH:-}" ) 2>&1; }
 OUT8=$(boot "$TMP/sd8/full")
 [ "$OUT8" = "PR=42|ALL=7 8|REPO=stub-value|BR=stub-value" ] && ok || bad "fresh shell must reload staging_pr_number and bundle-prs from the scratchpad (got '$OUT8')"
+OUT8=$(boot "$TMP/sd8/full" runB)
+[ "$OUT8" = "PR=43|ALL=9|REPO=stub-value|BR=stub-value" ] && ok || bad "two runs in one scratchpad must each reload their own PR (got '$OUT8')"
+OUT8=$(boot "$TMP/sd8/full" runC)
+case "$OUT8" in *"WARNING: PR_NUMBER is empty"*"PR=|"*) ok ;; *) bad "a run with no pointer must not read another run's pointer (got '$OUT8')" ;; esac
+OUT8=$(boot "$TMP/sd8/full" '../x')
+case "$OUT8" in *"PR=|"*) ok ;; *) bad "a path-like run key must be sanitised (got '$OUT8')" ;; esac
+_KD='FORGE_RUN_KEY=$(printf'
+[ "$(grep -F "$_KD" "$SPEC" | grep -F 'FORGE_RUN_KEY="${FORGE_RUN_KEY:-' | head -1)" = "$(grep -F "$_KD" "$ROOT/scripts/lib/fence-bootstrap.sh" | grep -F 'FORGE_RUN_KEY="${FORGE_RUN_KEY:-' | head -1)" ] && grep -qF 'FORGE_RUN_KEY="${FORGE_RUN_KEY:-' "$SPEC" && ok || bad "FORGE_RUN_KEY derivation must be identical in spec and fence-bootstrap.sh"
 OUT8=$(boot "$TMP/sd8/empty")
 case "$OUT8" in *"WARNING: PR_NUMBER is empty"*"PR=|ALL=|"*) ok ;; *) bad "empty scratchpad must leave PR_NUMBER empty and warn (got '$OUT8')" ;; esac
 OUT8=$(boot "$TMP/sd8/bad")
