@@ -212,6 +212,9 @@ For each hit: read the fallback value.
 
 **H. Runtime UID × volume ownership** (when any Dockerfile is in diff AND diff contains `USER`, `su-exec`, `gosu`, or `setuid` — trigger: `$DOCKERFILE_FILES` non-empty AND UID change detected)
 ```bash
+# Fresh shell per Bash call: re-declare the slice path (same value as protocols.md §1) and fail loudly if it is gone.
+SLICE_FILE="${TMPDIR:-/tmp}/forge-slice-[PR_NUMBER]-[REVIEW_SHA_SHORT]-[AGENT_DOMAIN].diff"
+[ -f "$SLICE_FILE" ] || { echo "SLICE_FILE missing: $SLICE_FILE (materialize it per Evidence-Based Review Protocol §1)" >&2; exit 1; }
 UID_CHANGE=$(while IFS= read -r f; do
     [ -z "$f" ] && continue
     awk -v f="$f" '/^diff --git /{p=(substr($4,3)==f)} p' "$SLICE_FILE" | grep -E '^\+.*(USER\s+[^0]|su-exec|gosu|setuid)' | grep -v '^+++' && break
@@ -248,6 +251,9 @@ For each named volume found: determine its container mount point. Named volumes 
 7. **Callback/callable signature mismatch**: When the diff passes a `lambda`, function reference, or callable as a keyword argument to a library/framework function (e.g., `prepared_statement_name_func=lambda _: ""`, `key=lambda x, y: ...`, `default=lambda: ...`), verify the callback's parameter count matches what the library expects. Check the library's default value for that parameter or its documentation. A lambda with wrong arity is a guaranteed `TypeError` at runtime — this is CONFIRMED CRITICAL. Wrong arity cannot be caught by static analysis or `py_compile` — it only fails at the call site. The review agent must verify signature, not just quote the lambda and approve.
 8. **Fix PR input-format coverage** (when PR title contains "fix" and the diff patches a specific input format failure): When a fix PR addresses one documented failure mode (e.g., blank string → `[]`), search `.env.example` for ALL documented input format examples for the affected env var or config field. For each documented format that the fix does NOT handle, flag as CONFIRMED HIGH.
    ```bash
+   # Fresh shell per Bash call: re-declare the slice path (same value as protocols.md §1) and fail loudly if it is gone.
+   SLICE_FILE="${TMPDIR:-/tmp}/forge-slice-[PR_NUMBER]-[REVIEW_SHA_SHORT]-[AGENT_DOMAIN].diff"
+   [ -f "$SLICE_FILE" ] || { echo "SLICE_FILE missing: $SLICE_FILE (materialize it per Evidence-Based Review Protocol §1)" >&2; exit 1; }
    # Find the env var(s) touched by the fix
    FIXED_VARS=$(grep -oE "ENABLED_[A-Z_]+|[A-Z_]{3,}(?=.*decode_complex_value|.*list\[str\]|.*List\[str\])" "$SLICE_FILE" | sort -u)
    # For each var, read its .env.example comment for documented format examples
@@ -260,6 +266,9 @@ For each named volume found: determine its container mount point. Named volumes 
    Compare documented formats against handled formats. Any documented format not handled by the fix is a gap. A fix that addresses one documented failure mode (e.g., blank string) while leaving another documented format (e.g., CSV) unhandled is an incomplete fix. <!-- Added: forge#190 -->
 9. **Scope creep detection**: Compare the PR title/description scope against the actual diff size. When a fix PR's diff contains significantly more logic than its stated scope implies, there is a high risk that the extra code introduces bugs the reviewer is not primed to look for — and that the builder agent added context from a different branch or a different issue.
    ```bash
+   # Fresh shell per Bash call: re-declare the slice path (same value as protocols.md §1) and fail loudly if it is gone.
+   SLICE_FILE="${TMPDIR:-/tmp}/forge-slice-[PR_NUMBER]-[REVIEW_SHA_SHORT]-[AGENT_DOMAIN].diff"
+   [ -f "$SLICE_FILE" ] || { echo "SLICE_FILE missing: $SLICE_FILE (materialize it per Evidence-Based Review Protocol §1)" >&2; exit 1; }
    # Count lines added in the diff (excluding whitespace-only lines and file headers)
    DIFF_LINES_ADDED=$(grep -c '^+[^+]' "$SLICE_FILE" 2>/dev/null || echo 0)
    PR_TITLE=$(gh pr view [PR_NUMBER] --json title --jq '.title')
@@ -304,6 +313,9 @@ For each named volume found: determine its container mount point. Named volumes 
 
 11. **Pattern-completion check** *(conditional — when PR title contains "fix" AND the diff removes or narrows a condition or field gate in a router file)*: When a fix PR changes a condition that guards a function call or restricts a set of fields, grep for the same original (unfixed) condition in sibling files within the same router directory. A fix that corrects one router but leaves identical gates in sibling routers is incomplete — users of those endpoints still receive the original error.
     ```bash
+    # Fresh shell per Bash call: re-declare the slice path (same value as protocols.md §1) and fail loudly if it is gone.
+    SLICE_FILE="${TMPDIR:-/tmp}/forge-slice-[PR_NUMBER]-[REVIEW_SHA_SHORT]-[AGENT_DOMAIN].diff"
+    [ -f "$SLICE_FILE" ] || { echo "SLICE_FILE missing: $SLICE_FILE (materialize it per Evidence-Based Review Protocol §1)" >&2; exit 1; }
     # Identify the router directory of the changed file
     ROUTER_DIR=$(gh pr diff [PR_NUMBER] --name-only | grep -E "routers/.*\.py$" | head -1 | xargs dirname 2>/dev/null)
 
