@@ -384,15 +384,18 @@ Every item in the contract's `### Out of Scope` section must carry exactly one d
 ```bash
 # <Script resolution block from work-on/build.md, verbatim>
 run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
+# Trusted-author filter (OWNER/MEMBER/COLLABORATOR or Bot, same predicate as trusted-comments.sh) is applied at
+# the source in the LOOKUP --jq, before the path match: an untrusted match is never reused. The REST search API is used because it exposes
+# author_association and user.type (`gh issue list --json` has no authorAssociation field).
 # For each deferred item (DEFERRED_PATH = the backticked path, DEFERRED_WHY = one line), repeat:
 DEFERRED_MARKER="<!-- FORGE:DEFERRED_FROM: #{NUMBER} -->"
-LOOKUP=$(gh issue list {GH_FLAG} --state open --search "\"FORGE:DEFERRED_FROM: #{NUMBER}\" in:body" \
-  --json number,body --limit 50 2>/dev/null) || LOOKUP="FAILED"
+LOOKUP=$(gh api -X GET search/issues -f per_page=50 \
+  -f q="\"FORGE:DEFERRED_FROM: #{NUMBER}\" in:body repo:{GH_REPO} is:issue is:open" --jq '[.items[] | select(((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR")) or ((.user.type // "") == "Bot"))]' 2>/dev/null) || LOOKUP="FAILED"
 if [ "$LOOKUP" = "FAILED" ]; then
   echo "DEFERRED_LOOKUP=FAILED"   # a failed lookup is not "none found": Blocked exit, never re-file blind
 else
   DEFERRED_NUM=$(printf '%s' "$LOOKUP" | jq -r --arg p "$DEFERRED_PATH" \
-    '[.[] | select(.body | contains($p))] | first | .number // empty' 2>/dev/null)
+    '[.[] | select((.body // "") | contains($p))] | first | .number // empty' 2>/dev/null)
   if [ -z "$DEFERRED_NUM" ]; then
     DEFERRED_URL=$(run gh issue create {GH_FLAG} --title "follow-up: ${DEFERRED_PATH} (deferred from #{NUMBER})" \
       --body "## Problem
@@ -417,6 +420,7 @@ ${DEFERRED_MARKER}")
 fi
 ```
 
+- Only follow-up issues authored by a trusted author (OWNER/MEMBER/COLLABORATOR or Bot) are reused; an untrusted match carrying the marker is ignored and a fresh follow-up is filed.
 - `DEFERRED_LOOKUP=FAILED`, or an empty `DEFERRED_NUM` after a real (non-`DRY_RUN`) create → Blocked exit with blocker `github-unavailable: could not file or look up deferred follow-up for <path>` (a transient failure follows the retry rule above; no `needs-human` for `github-unavailable:`).
 - On resume the lookup reuses the open issue that carries the marker and the same path, so a retried build never files a duplicate.
 - Prefer filing through the `/issue` create-hook's programmatic contract (`Skill(skill="{FORGE_SKILL_PREFIX}issue", ...)`) when it is available; the raw create above is the fallback and must keep the `FORGE:DEFERRED_FROM` marker in the body.

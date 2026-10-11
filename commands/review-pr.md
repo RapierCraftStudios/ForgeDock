@@ -2171,7 +2171,7 @@ Filing a standalone `review-finding` issue for every LOW/POSSIBLE reviewer note 
 - **Safety exemption is content-based** (it bypasses only this severity damper, never the §6B.4 provenance gate: a pre-existing auth gap is flagged through the pre-existing route, not attributed to this PR): a LOW or POSSIBLE finding is still filed when its file path / title / body matches the security/billing keyword set — a LOW finding additionally needs `**Confidence**: CONFIRMED`, so LOW LIKELY/POSSIBLE with a keyword is a NOTE (`security|auth|authz|authn|billing|payment|stripe|charge|invoice|injection|xss|csrf|ssrf|idor|secret(s)|credential(s)|permission(s)|sql|token|password|redact`, whole words, `_`/`-`/`/` separate words — so `auth_service` matches but `author`/`tokenizer` do not), or when it came from a dedicated, signal-selected domain agent (Auth, Billing, Concurrency, Database) AND is MEDIUM — a domain agent rescues MEDIUM only, and a LOW finding stays a NOTE whichever reviewer raised it, CONFIRMED or not. **Origin from the always-on General Security & Quality agent alone does NOT exempt a finding**: that agent runs on every PR, so origin-based exemption filed nearly every LOW note it raised (the 2026-10-08 cascade audit: 50 of 60 would-be notes in one batch were filed only for that reason).
 - **Review-finding lineage** (the PR's linked issue `MERGE_ISSUE` carries the `review-finding` label, any priority — this PR is itself a fix for a finding): only MEDIUM findings that are CONFIRMED, or LIKELY and safety-exempt, become issues; LOW and POSSIBLE are always NOTEs. A fix for a finding must not mint a new generation of findings.
 - **Otherwise**: `**Severity**: LOW`, or `**Confidence**: POSSIBLE` below HIGH, is a NOTE unless safety-exempt (LOW: keyword AND CONFIRMED; MEDIUM: keyword at any confidence, or a domain agent); everything else (MEDIUM CONFIRMED/LIKELY) is an ISSUE.
-- **Contract-declared scope** <!-- Added: forge#3447 -->: the trusted, latest FORGE:CONTRACT of `MERGE_ISSUE` lists out-of-scope items as `deferred → #N`, `not-affected:` or `accepted-risk:` (parsed by `scripts/check-contract-scope.sh list`). A finding whose file equals, or sits under, a `deferred` item whose issue is verified becomes `NOTE contract-deferred #N` and is commented on that issue instead of being filed again. A finding under an `accepted-risk` item becomes `NOTE contract-accepted-risk`. A deferred issue is verified only when it is OPEN, is an issue (not a PR), is not `MERGE_ISSUE` itself, and its body carries `FORGE:DEFERRED_FROM: #<MERGE_ISSUE>` and the deferred path; an unverified item is dropped from the scope list. Never demoted: HIGH/CRITICAL, `not-affected` items (a contradicting finding means the contract was wrong), safety-exempt findings under either disposition, findings on a file this PR changed, and anything when the contract is missing, untrusted, unparseable or the deferred issue is closed, unverified or unreadable.
+- **Contract-declared scope** <!-- Added: forge#3447 -->: the trusted, latest FORGE:CONTRACT of `MERGE_ISSUE` lists out-of-scope items as `deferred → #N`, `not-affected:` or `accepted-risk:` (parsed by `scripts/check-contract-scope.sh list`). A finding whose file equals, or sits under, a `deferred` item whose issue is verified becomes `NOTE contract-deferred #N` and is commented on that issue instead of being filed again. A finding under an `accepted-risk` item becomes `NOTE contract-accepted-risk`. A deferred issue is verified only when it is OPEN, is an issue (not a PR), is not `MERGE_ISSUE` itself, and its body carries `FORGE:DEFERRED_FROM: #<MERGE_ISSUE>` and the deferred path, and it is authored by a trusted author (`author_association` OWNER/MEMBER/COLLABORATOR, or `user.type` Bot); an unverified item is dropped from the scope list. Never demoted: HIGH/CRITICAL, `not-affected` items (a contradicting finding means the contract was wrong), safety-exempt findings under either disposition, findings on a file this PR changed, and anything when the contract is missing, untrusted, unparseable or the deferred issue is closed, unverified or unreadable.
 
 ```bash
 # Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
@@ -2222,7 +2222,7 @@ fi
 # issue still open) or `accepted-risk:` become NOTEs. `not-affected` items never demote. Fail toward
 # filing: any missing input (no linked issue, no trusted contract, unparseable section, unreadable
 # PR file list) leaves CONTRACT_SCOPE_FILE empty and nothing demotes. A deferred row whose issue fails
-# verification (closed, unreadable, a PR, MERGE_ISSUE itself, or no DEFERRED_FROM marker + path) is dropped.
+# verification (closed, unreadable, a PR, MERGE_ISSUE itself, no DEFERRED_FROM marker + path, or not authored by a trusted author) is dropped.
 CONTRACT_SCOPE_FILE=""; CONTRACT_OPEN_FILE=""; PR_FILES_FILE=""; CONTRACT_DEMOTED=0
 if [ -n "${MERGE_ISSUE:-}" ]; then
   # TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
@@ -2252,7 +2252,9 @@ if [ -n "${MERGE_ISSUE:-}" ]; then
        && [ -s "$CONTRACT_SCOPE_FILE" ] \
        && gh pr diff {PR_NUMBER} -R {GH_REPO} --name-only > "$PR_FILES_FILE" 2>/dev/null; then
       # A deferred row counts only if issue N is OPEN, is an issue (not a PR), is not MERGE_ISSUE, and its body
-      # carries `FORGE:DEFERRED_FROM: #<MERGE_ISSUE>` plus the row's path. Unverified rows are dropped.
+      # carries `FORGE:DEFERRED_FROM: #<MERGE_ISSUE>` plus the row's path, and is authored by a trusted author
+      # (OWNER/MEMBER/COLLABORATOR or Bot; same predicate as trusted-comments.sh; missing fields fail closed).
+      # Unverified rows are dropped.
       _verified=$(mktemp "$_scratch/{PR_NUMBER}_contract-verified.XXXXXX")
       while IFS="$(printf '\t')" read -r _disp _ipath _n; do
         if [ "$_disp" = "deferred" ]; then
@@ -2260,7 +2262,7 @@ if [ -n "${MERGE_ISSUE:-}" ]; then
           [ "$_n" = "${MERGE_ISSUE#\#}" ] && continue
           gh api "repos/{GH_REPO}/issues/$_n" 2>/dev/null \
             | jq -e --arg m "FORGE:DEFERRED_FROM: #${MERGE_ISSUE#\#} -->" --arg p "$_ipath" \
-                '.state == "open" and .pull_request == null and ((.body // "") | contains($m) and contains($p))' >/dev/null 2>&1 \
+                '.state == "open" and .pull_request == null and ((.body // "") | contains($m) and contains($p)) and (((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR")) or ((.user.type // "") == "Bot"))' >/dev/null 2>&1 \
             || continue
           grep -Fxq -- "$_n" "$CONTRACT_OPEN_FILE" || echo "$_n" >> "$CONTRACT_OPEN_FILE"
         fi
