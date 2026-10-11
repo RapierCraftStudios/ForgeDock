@@ -20,9 +20,13 @@
 # (lexical), so the helper re-resolves by the numeric-newest tier instead of trusting the copy that happened to load.
 
 # Root this file was sourced from (scripts/lib/.. /..), captured now because the cwd changes later. Under zsh
-# BASH_SOURCE is empty: a dirname of "" would be "." (a cwd-derived root), so there is no self root in that case.
-_FORGE_SELF_ROOT=""
-[ -n "${BASH_SOURCE[0]:-}" ] && _FORGE_SELF_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." 2>/dev/null && pwd -P)"
+# BASH_SOURCE is empty, so the sourced path comes from ${(%):-%x} (eval'd: bash cannot parse that expansion). An empty
+# path would make dirname "." (a cwd-derived root), so there is no self root when neither shell reports one.
+_FORGE_SELF_ROOT=""; _forge_src=""
+if [ -n "${BASH_SOURCE[0]:-}" ]; then _forge_src="${BASH_SOURCE[0]}"
+elif [ -n "${ZSH_VERSION:-}" ]; then eval '_forge_src="${(%):-%x}"' 2>/dev/null || _forge_src=""; fi
+[ -n "$_forge_src" ] && _FORGE_SELF_ROOT="$(cd "$(dirname "$_forge_src")/../.." 2>/dev/null && pwd -P)"
+unset _forge_src
 
 # Windows drive-letter path (C:/x or C:\x) -> /c/x (cygpath when present); anything else is printed unchanged.
 _forge_posix() {

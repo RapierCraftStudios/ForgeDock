@@ -7,7 +7,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$HERE/.."
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(mktemp -d); T="$(cd "$T" && pwd -P)"   # physical path: the helper reports pwd -P roots (macOS /var, Git Bash /tmp are symlinks)
+trap 'rm -rf "$T"' EXIT
 PASS=0; FAILN=0; SKIPPED=0
 ok()  { PASS=$((PASS+1)); }
 bad() { FAILN=$((FAILN+1)); echo "FAIL: $1"; }
@@ -152,6 +153,10 @@ mkscripts "$P14/1.10.0"; mkscripts "$P14/1e5abcdef"; mkscripts "$P14/abc1234def"
 expect "SHA-named cache dirs ignored" "$P14/1.10.0" "$(run "$T/h14")"
 mkscripts "$P14/1.10.0-rc1"; expect "pre-release dir name still accepted (release wins)" "$P14/1.10.0" "$(run "$T/h14")"
 # Windows drive-letter FORGEDOCK_HOME normalization lives in the helper (_forge_posix, pinned in the #3778 section below)
+# SEC-1 (#3781): the stub's own first candidate normalizes a drive-letter FORGEDOCK_HOME (cygpath), so the helper loads from that root.
+rm -rf "$T/hwin"; mkscripts "$T/hwin/c/forge"; mkdir -p "$T/fakebin"
+printf '#!/bin/sh\n[ "$1" = "-u" ] && case "$2" in C:/forge) echo "%s"; exit 0;; esac\nexit 1\n' "$T/hwin/c/forge" > "$T/fakebin/cygpath"; chmod +x "$T/fakebin/cygpath"
+expect "C:/ FORGEDOCK_HOME resolves through the stub (cygpath)" "$T/hwin/c/forge" "$(run "$T/empty" PATH="$T/fakebin:$PATH" FORGEDOCK_HOME='C:/forge')"
 # Codex: forge-home pointer file written by install-codex.sh
 mkscripts "$T/hx/clone"; mkdir -p "$T/hx/.codex"; printf '%s\n' "$T/hx/clone" > "$T/hx/.codex/forge-home"
 expect "codex forge-home pointer resolves" "$T/hx/clone" "$(run "$T/hx")"
@@ -314,7 +319,8 @@ hr_check_stub() { # label file var script: the spec calls the script through the
   stub_block "$2" "$3" > "$T/hr_blk.sh"
   expect "$1: $3 resolver stub found" "$3=\$(forge_resolve $4)" "$(sed -n 2p "$T/hr_blk.sh")"
   grep -qE '\$PWD|\$REPO_PATH|\$\{PWD|\$\{REPO_PATH' "$T/hr_blk.sh" && bad "$1: $3 resolver lists the working directory or repo path" || ok
-  expect "$1: $3 call without a locator in the same fence" 0 "$(awk -v v="$3" '/^[ ]*```/{loc=0} /^[ ]*type forge_resolve >\/dev\/null/{loc=1} index($0, v "=$(forge_resolve ")>0 && !loc {b++} END{print b+0}' "$2")"
+  local needle="$3=\$(forge_resolve "   # kept out of the awk command substitution: bash 3.2 (macOS) mis-parses the nested quote and paren
+  expect "$1: $3 call without a locator in the same fence" 0 "$(awk -v n="$needle" '/^[ ]*```/{loc=0} /^[ ]*type forge_resolve >\/dev\/null/{loc=1} index($0, n)>0 && !loc {b++} END{print b+0}' "$2")"
 }
 hr_check_stub review-pr "$HR_CLASSIFY" DERIVE_MILESTONE_SCRIPT derive-finding-milestone.sh
 hr_check_stub review-pr "$HR_CLASSIFY" PRIORITY_SCRIPT severity-to-priority.sh
