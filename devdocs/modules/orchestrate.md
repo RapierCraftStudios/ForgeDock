@@ -104,3 +104,9 @@ Cite: #3233 / PR #3317.
 PR #3338 touched `orchestrate`. See FORGE:BUILDER comment on issue #3296 for full change list.
 Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
 Cite: #3296 / PR #3338.
+
+## Entry 2026-10-11 — Fix: Layer-1 body-fallback file edges serialize issues whose PRs never touch the file (#3697)
+
+PR #3707 touched `orchestrate`. See FORGE:BUILDER comment on issue #3697 for full change list.
+Key gotcha recorded: soft (body-fallback) edges release early only when predecessor PR exists and `gh pr diff` succeeds with no overlap; no PR / error => HOLD, never DROP.
+Cite: #3697 / PR #3707.
