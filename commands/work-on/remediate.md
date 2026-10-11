@@ -43,6 +43,7 @@ Parse from $ARGUMENTS:
 - `--repo {GH_REPO}` — GitHub repo (resolved from `forge.yaml → project` if omitted)
 - `--gh-flag {GH_FLAG}` — gh CLI repo flag
 - `--base {PR_BASE}` — PR target branch (optional; resolved from the PR's `baseRefName` if omitted)
+- `--lease-holder {LEASE_HOLDER}` — the dispatching engine's own lease holder id (optional; passed by the headless engine). Used only by the Phase M0 liveness step to tell a lease held by ANOTHER run from the dispatcher's own lease. Empty when absent.
 
 ---
 
@@ -81,7 +82,7 @@ ISSUE_LABELS=$(echo "$ISSUE_STATE" | jq -r '[.labels[].name] | join(",")')
 
 - If `PR_ALREADY_MERGED` is not `true` and none of `needs-human`, `workflow:remediating` or `workflow:awaiting-merge` is among `ISSUE_LABELS` → EXIT `REMEDIATE_RESULT: status: BLOCKED`, blocker: "issue #{ISSUE_NUMBER} is none of `needs-human`, `workflow:remediating` or `workflow:awaiting-merge` — remediation mode only targets PRs in one of those states; use the normal `/work-on {ISSUE_NUMBER}` resume path instead." This keeps blast radius scoped to exactly the gap this mode fills — it is not a general-purpose re-review trigger. `workflow:remediating` is the non-human state review sets when it hands an autonomous ci-gate / in-pr-fix / base-sync fix to this phase (forge#3541); a bare `needs-human` (older runs, genuine escalations being re-driven) is still accepted. <!-- Added: forge#3541 -->
 - **Resume-at-M7 (forge#3647, hardened forge#3684)**: `workflow:awaiting-merge` is admitted ONLY as a resume of an interrupted M7 auto-land: the PR is OPEN, `needs-human` and `workflow:remediating` are both absent, the idempotency check below finds NO completed `FORGE:REMEDIATION:COMPLETE` trail (`REMEDIATION_COMPLETE_N` = 0), AND there is evidence the PR was engine-parked for the M7 bar rather than parked for a human: the live base is non-empty, non-`null` and not the deploy gate (literal `main`, the GitHub `default_branch`, or the default branch's committed `branches.default`; never read from the PR worktree, forge#3753), and the LATEST trusted (OWNER/MEMBER/COLLABORATOR or Bot) `review-pr.md` Phase 8 park comment on the issue is the non-default-branch "parked at `workflow:awaiting-merge` for the remediation auto-land bar" comment AND names this PR (`PR #{PR_NUMBER} was previously escalated`, so a park for a different PR never admits the resume; M7 then binds approval to the live head SHA, not a timestamp). When all hold, set `RESUME_AT_M7=true`: skip Phases M1-M6 entirely (no checkout, no fixes, no re-review) and continue at Phase M7, which re-verifies the bar from scratch. Without park evidence, return `BLOCKED` (blocker: "awaiting-merge PR is not engine-parked for the remediation auto-land bar"); the issue stays at `workflow:awaiting-merge`. A COMPLETE trail still wins via the `ALREADY_DONE` guard below. A resume that ends `HELD-AWAITING-MERGE` (CI pending, stale approval head, deploy-gate base) writes NO `FORGE:REMEDIATION:COMPLETE` (Phase M8 posts a `FORGE:REMEDIATION_HELD` record instead), so the next invocation re-enters this same resume path rather than exiting `ALREADY_DONE` (forge#3685). On a BLOCKED exit from this path the issue stays at `workflow:awaiting-merge` (it never gains `workflow:remediating`).
-- **Stranded-state rule**: `workflow:remediating` must never outlive this run. Every exit that returns `BLOCKED` or `UNFIXABLE` (including exits before Phase M1; except a `RESUME_AT_M7` run, which leaves the issue at `workflow:awaiting-merge` untouched) removes `workflow:remediating` and adds `needs-human`, because at that point a human really is needed:
+- **Stranded-state rule**: `workflow:remediating` must never outlive this run. Every exit that returns `BLOCKED` or `UNFIXABLE` (including exits before Phase M1; except a `RESUME_AT_M7` run, which leaves the issue at `workflow:awaiting-merge` untouched, and except a `deferred-live-run:` exit, which leaves every label untouched because a live run still owns the issue and nothing needs a human) removes `workflow:remediating` and adds `needs-human`, because at that point a human really is needed:
 
   ```bash
   gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "needs-human" --remove-label "workflow:remediating" 2>/dev/null || true # allowlist:check-command-side-effects
@@ -128,7 +129,48 @@ Completed trails of other kinds are left in place (never deleted); only the inte
 - If `REMEDIATION_COMPLETE_N` or `REMEDIATION_TRAIL_N` is empty (comments or `scripts/trusted-comments.sh` unreadable or unresolvable) → fail closed: EXIT `REMEDIATE_RESULT: status: BLOCKED`, blocker: "github-unavailable: remediation trail unreadable (comments or scripts/trusted-comments.sh unresolvable)". Never treat unreadable as "no trail" and never as `ALREADY_DONE`.
 - If `REMEDIATION_COMPLETE_N` is at least 1 (a trusted comment that starts with `<!-- FORGE:REMEDIATION -->` and contains `<!-- FORGE:REMEDIATION:COMPLETE -->`) → EXIT `REMEDIATE_RESULT: status: ALREADY_DONE`. **Single-attempt semantics (AC5)**: once a genuine `FORGE:REMEDIATION:COMPLETE` trail comment exists for this PR, do NOT re-attempt fixes on a subsequent invocation, regardless of the prior verdict — this is what prevents an infinite remediation retry loop on a genuinely-blocked PR. A comment that only quotes the marker mid-body (review findings, an `INPR_FIX` work order, a disposition record) or comes from an untrusted author never counts.
 - **Merged-PR routing (forge#3685)**: if `PR_ALREADY_MERGED=true` and `REMEDIATION_COMPLETE_N` is 0 (the fail-closed unreadable-trail exit above already ran, so the count is known): if the linked issue is already `CLOSED` with the `workflow:merged` label (`ISSUE_STATE`), EXIT `REMEDIATE_RESULT: status: ALREADY_DONE` (landed and finished, nothing to do). Otherwise (not yet `workflow:merged`/CLOSED, no completed trail) set `RESUME_AT_M7=true` and `PR_ALREADY_MERGED=true`: skip Phases M1-M6 and continue at Phase M7, whose merged-first branch is exclusive, runs the idempotent `merged` label bookkeeping, sets `AUTO-LANDED` and goes to M8, which posts the trail and drives close. No park evidence is required. A `FORGE:REMEDIATION_HELD` record never counts toward `REMEDIATION_COMPLETE_N`.
-- If `REMEDIATION_COMPLETE_N` is 0 and `REMEDIATION_TRAIL_N` is at least 1 → a prior attempt was interrupted mid-flight (same failure mode as the investigation phase's partial-comment case). Delete the partial comment(s) on both the PR and the issue (ids from `PARTIAL_PR_COMMENT_IDS` above and the same anchored filter over the issue's comments), then continue below as a fresh attempt:
+- **Liveness step (runs only when `REMEDIATION_COMPLETE_N` is 0 and `REMEDIATION_TRAIL_N` is at least 1, BEFORE any partial comment is deleted)**: whether the earlier run is alive is decided by these deterministic reads, never by how the partial comments look. Partial `FORGE:REMEDIATION` comments alone are NOT evidence of a live run: a run killed with its session leaves exactly the same comments. The earlier run is **live** only when (a) the `FORGE:STATE` block in the issue body carries `lease.until > now` for a `lease.by` that differs from `{LEASE_HOLDER}` (the dispatching engine's own lease is always fresh, so an equal holder is never "another run"), OR (b) the newest trusted `FORGE:REVIEW_ROUTE` SHA on the PR has no trusted `FORGE:REVIEW-AGENT:*` comment carrying that `Reviewed-SHA` (a re-review that has not produced a verdict yet). Otherwise it is **dead**. Fail closed: a `FORGE:STATE` block that is present but unparseable, or an unreadable PR comment list, is `BLOCKED` with blocker `github-unavailable: ...`, never "no lease" and never defer or delete. A body with no `FORGE:STATE` block has no lease.
+
+  ```bash
+  LEASE_HOLDER="{LEASE_HOLDER}"   # empty when --lease-holder was not passed
+  STATE_JSON=$(printf '%s' "$ISSUE_STATE" | jq -r '.body // ""' | awk '/^<!-- FORGE:STATE[[:space:]]*$/{f=1;next} f&&/^-->/{exit} f')
+  LEASE_BY=""; LEASE_UNTIL=0; LEASE_LIVE=false
+  if [ -n "$STATE_JSON" ]; then
+    LEASE_ROW=$(printf '%s' "$STATE_JSON" | jq -r --arg h "$LEASE_HOLDER" --argjson now "$(( $(date +%s) * 1000 ))" '(.lease // {}) as $l | [($l.by // ""), (if ($l.until|type)=="number" then $l.until else 0 end), (if ($l.until|type)=="number" and $l.until > $now and ($l.by // "") != "" and $l.by != $h then "true" else "false" end)] | @tsv' 2>/dev/null) \
+      || { echo "BLOCKED: github-unavailable: FORGE:STATE block unparseable"; exit 1; }   # EXIT REMEDIATE_RESULT: status: BLOCKED, blocker: "github-unavailable: FORGE:STATE block unparseable"
+    LEASE_BY=$(printf '%s' "$LEASE_ROW" | cut -f1); LEASE_UNTIL=$(printf '%s' "$LEASE_ROW" | cut -f2); LEASE_LIVE=$(printf '%s' "$LEASE_ROW" | cut -f3)
+  fi
+  # (b) re-review still in flight for the newest routed SHA. The route marker names the mode and SHA, not the roster, so "no reviewer verdict for the routed SHA" is the in-flight signal.
+  ROUTE_SHA=$(printf '%s' "$PR_COMMENTS" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:REVIEW_ROUTE mode=(?!spec-evolution-blocked)[^ ]+ spec=review-pr.md sha=[0-9a-f]{7,40} -->' 2>/dev/null | grep -oE 'sha=[0-9a-f]{7,40}' | tail -1 | cut -d= -f2)
+  REVIEW_PENDING=false
+  if [ -n "$ROUTE_SHA" ]; then
+    ROUTE_AGENT_N=$(printf '%s' "$PR_COMMENTS" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${ROUTE_SHA}" 2>/dev/null || echo "")
+    [ -n "$ROUTE_AGENT_N" ] || { echo "BLOCKED: github-unavailable: reviewer comments unreadable"; exit 1; }   # EXIT REMEDIATE_RESULT: status: BLOCKED, blocker: "github-unavailable: reviewer comments unreadable"
+    [ "$ROUTE_AGENT_N" -eq 0 ] && REVIEW_PENDING=true
+  fi
+  if [ "$LEASE_LIVE" = "true" ] || [ "$REVIEW_PENDING" = "true" ]; then
+    DEFER=true
+  else
+    DEFER=false
+  fi
+  ```
+
+  **Defer** (`DEFER=true`): another run owns this PR, so touch nothing. Delete no comment, push nothing, add no `needs-human`, and do not change labels. Post one `FORGE:REMEDIATION_DEFERRED` record on the issue (a distinct marker that never counts toward `REMEDIATION_COMPLETE_N` or `REMEDIATION_TRAIL_N`; the engine reads its `lease_by` and `lease_until` lines to tell a live deferral from a dead one) and EXIT `REMEDIATE_RESULT: status: BLOCKED`, blocker `deferred-live-run: lease held by {LEASE_BY} until {LEASE_UNTIL}` (or `deferred-live-run: re-review of {ROUTE_SHA} has no reviewer verdicts yet`). This exit is before Phase M1, so a deferred run never reaches the push step and two live remediations on one PR can never both push.
+
+  ```bash
+  gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "<!-- FORGE:REMEDIATION_DEFERRED -->
+  ## Remediation Deferred
+
+  PR #{PR_NUMBER}: an earlier remediation run is still live. This run changed nothing.
+
+  pr={PR_NUMBER}
+  lease_by=${LEASE_BY:-none}
+  lease_until=${LEASE_UNTIL}
+  review_pending=${REVIEW_PENDING}" # allowlist:check-command-side-effects
+  ```
+
+  **Dead** (`DEFER=false`): continue with the interrupted-attempt cleanup in the next bullet, then adopt the already-complete re-review: when `ROUTE_SHA` has trusted `FORGE:REVIEW-AGENT:*` verdicts, Phase M1 reads those posted findings and addresses them on this first attempt instead of waiting for or re-running that review.
+- If `REMEDIATION_COMPLETE_N` is 0 and `REMEDIATION_TRAIL_N` is at least 1 and the liveness step above said **dead** → a prior attempt was interrupted mid-flight (same failure mode as the investigation phase's partial-comment case). Delete the partial comment(s) on both the PR and the issue (ids from `PARTIAL_PR_COMMENT_IDS` above and the same anchored filter over the issue's comments), then continue below as a fresh attempt:
   ```bash
   for _id in $PARTIAL_PR_COMMENT_IDS; do gh api repos/{GH_REPO}/issues/comments/$_id -X DELETE 2>/dev/null || true; done
   ISSUE_PARTIAL_IDS=$(gh api --paginate repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments 2>/dev/null | jq -rs '[.[][] | select((.body // "") | startswith("<!-- FORGE:REMEDIATION -->")) | select((.body | contains("<!-- FORGE:REMEDIATION:COMPLETE -->")) | not) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | .id] | .[]' 2>/dev/null || true)
@@ -809,7 +851,7 @@ REMEDIATE_RESULT:
   issue_number: {ISSUE_NUMBER}
   re_gate_outcome: AUTO-LANDED | HELD-AWAITING-MERGE | RE-ESCALATED | UNFIXABLE | REREVIEW-REQUIRED | N/A
   findings_addressed: [{finding_number}, ...]
-  blocker: {description if status=BLOCKED}
+  blocker: {description if status=BLOCKED; `deferred-live-run: ...` when Phase M0 deferred to a live earlier run (labels untouched, no needs-human)}
 ```
 
 **Caller behavior**: this Skill already drives its own close phase when `re_gate_outcome: AUTO-LANDED` (see Phase M8) — the caller does not need to invoke close itself (under the headless engine, the engine verifies the issue is CLOSED + `workflow:merged` and runs close if it is missing). For `re_gate_outcome: REREVIEW-REQUIRED` (`status: REREVIEW_REQUIRED`, forge#3240) the fix is pushed but no review ran because this session has no sub-agent dispatch tool: the caller MUST run `review-pr {PR_NUMBER} --auto-merge --issue {ISSUE_NUMBER} --base {PR_BASE}` from a session that has dispatch (never inline) and then drive close itself on a merge. For every other `re_gate_outcome`, this result is terminal for the current invocation (a held resume, which wrote `FORGE:REMEDIATION_HELD` and not COMPLETE, can be re-invoked by an operator later and re-enters Phase M7): the issue is left at `needs-human` or `workflow:awaiting-merge`, both already recognized as terminal states in the Universal Phase Dispatcher (see `work-on.md`).

@@ -671,7 +671,7 @@ export async function runIssue(opts) {
         let pauseCount = 0;
         for (;;) {
           try {
-            outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo });
+            outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo, agentId });
             break;
           } catch (e) {
             const resetAtMs = e.resetAtEpochMs;
@@ -876,7 +876,7 @@ export async function runIssue(opts) {
 }
 
 async function runPhaseWithRetry(phase, state, ctx) {
-  const { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo } = ctx;
+  const { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo, agentId } = ctx;
   // forge#3499: build the phase's full argument set ONCE, up front. Every
   // work-on phase sub-skill stops with BLOCKED when a required flag is absent,
   // so an incomplete/invalid set is a deterministic engine failure — fail
@@ -884,7 +884,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
   // `[issue]`-only invocation that burns the attempt budget.
   let phaseArgs;
   try {
-    phaseArgs = await phase.buildArgs(state, { repo: await resolveRepo() }, io);
+    phaseArgs = await phase.buildArgs(state, { repo: await resolveRepo(), agentId }, io);
   } catch (e) {
     if (e?.code !== "PHASE_ARGS_INVALID") throw e;
     const detail = `phase ${phase.id} args unresolved: ${e.message}`;

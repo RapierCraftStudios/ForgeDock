@@ -97,6 +97,19 @@ async function issueMarkers(issue, io) {
 
 /** Non-terminal held-resume record (remediate.md Phase M8, forge#3685): header and sentinel are the same line; never a COMPLETE marker. */
 const REMEDIATION_HELD_MARKER = "FORGE:REMEDIATION_HELD";
+/** Non-terminal deferral record (remediate.md Phase M0 liveness step): a live earlier run holds the lease. Never a COMPLETE/trail marker. */
+const REMEDIATION_DEFERRED_MARKER = "FORGE:REMEDIATION_DEFERRED";
+/** Lease holder ids the engine mints (`cli_<host>_<pid>`) are passed to remediate only when they match this shape. */
+const LEASE_HOLDER_RE = /^[A-Za-z0-9._-]{1,128}$/;
+/**
+ * Liveness predicate shared by remediate.md M0 and the engine (same `until > now` semantics as
+ * `leaseHeld` in bin/engine.mjs): live only when the lease is unexpired AND held by someone other
+ * than `holder`. An absent/malformed lease is never live.
+ */
+export function remediationLeaseLive(lease, holder, now = Date.now()) {
+  return !!(lease && typeof lease === "object" && Number.isFinite(lease.until) && lease.until > now &&
+    typeof lease.by === "string" && lease.by !== "" && lease.by !== holder);
+}
 const reEscape = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** True when `body` STARTS with the typed header `<!-- {header}` (e.g. `FORGE:BUILDER`). */
 function startsWithHeader(body, header) {
@@ -824,7 +837,9 @@ export const PHASES = [
     buildArgs: async (state, ctx, io) => {
       const pr = need(state.pr, "pr", /^[0-9]+$/);
       const kind = state.remediationKind ?? null;
-      const legacyArgs = () => [pr, "--issue", String(state.issue), ...repoArgs(ctx), ...baseArgs(state)];
+      // Pass the dispatching lease holder so remediate.md M0 can tell a live OTHER run from this engine's own lease.
+      const holderArgs = () => (typeof ctx.agentId === "string" && LEASE_HOLDER_RE.test(ctx.agentId) ? ["--lease-holder", ctx.agentId] : []);
+      const legacyArgs = () => [pr, "--issue", String(state.issue), ...repoArgs(ctx), ...baseArgs(state), ...holderArgs()];
       // Legacy handoff with no kind (needs-human label fallback, or no REVIEW_RESULT): there
       // is nothing to bind, so dispatch as before. remediate.md M0 then applies its default
       // single-attempt guard. A present-but-unknown kind is never dispatched.
@@ -904,6 +919,21 @@ export const PHASES = [
       }
       if (latest === null) {
         if (await prMerged()) return mergedResult("AUTO-LANDED");
+        // A deferral to a live earlier run is not a failed attempt. Only a trusted, full-line
+        // record newer than the bound marker counts (`scoped`); the newest one decides. Its recorded lease
+        // must still be unexpired; an expired lease falls through to a normal failed attempt.
+        let deferred = null;
+        scoped.forEach((b) => {
+          if (startsWithHeader(b, REMEDIATION_DEFERRED_MARKER) && hasSentinelLine(b, REMEDIATION_DEFERRED_MARKER)) deferred = b;
+        });
+        if (deferred !== null) {
+          const by = /^lease_by=(\S+)\s*$/m.exec(deferred)?.[1] ?? "";
+          const until = Number(/^lease_until=(\d+)\s*$/m.exec(deferred)?.[1] ?? NaN);
+          if (remediationLeaseLive({ by, until }, null)) {
+            return { status: "blocked", reason: "deferred", retryable: false,
+              detail: `deferred-live-run: lease held by ${by} until ${new Date(until).toISOString()}` };
+          }
+        }
         return { status: "failed", detail: `no ${completion} marker` };
       }
       // Parse the **Re-gate outcome**: field remediate.md's Phase M8 posts
