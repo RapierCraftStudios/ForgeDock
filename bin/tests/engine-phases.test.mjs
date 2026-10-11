@@ -1472,6 +1472,12 @@ describe("acceptance-gate-aware build outcome (forge#3545)", () => {
     assert.equal(o.retryable, false);
   });
 
+  it("a newer FORGE:ACCEPTANCE_GATE_REVIEW comment never changes the build gate state (forge#3793)", async () => {
+    const rev = (kind) => `<!-- FORGE:ACCEPTANCE_GATE_REVIEW -->\n## Review Acceptance Gate\n\n<!-- FORGE:ACCEPTANCE_GATE_REVIEW:${kind} -->`;
+    assert.equal((await build.detectOutcome(st, world([done, gate("PASSED"), rev("FAILED")]))).status, "committed");
+    assert.equal((await build.detectOutcome(st, world([done, gate("FAILED"), rev("PASSED")]))).status, "failed");
+  });
+
   it("no gate marker keeps prior behaviour (committed)", async () => {
     assert.equal((await build.detectOutcome(st, world([done]))).status, "committed");
   });

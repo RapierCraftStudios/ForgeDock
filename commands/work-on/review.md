@@ -446,9 +446,26 @@ esac
 
 ---
 
+## Phase R2.5: Review Acceptance Gate <!-- Added: forge#3793 -->
+
+Evaluates the `phase=review` acceptance checks B6.5 deferred (no PR existed at build time) before `/review-pr --auto-merge`: after R2D, and at the top of R3 on resume. Idempotent per head; a no-op without deferred checks; own marker `FORGE:ACCEPTANCE_GATE_REVIEW`, never the build gate's sentinels.
+
+```bash
+# <Script resolution block, verbatim>
+RESOLUTION=$(resolve_script 'review-acceptance-gate'); TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+[ "$TIER" != "prose" ] || { echo "review-acceptance-gate not resolvable (fail closed)"; exit 1; }
+bash "$SCRIPT_PATH" {NUMBER} {GH_REPO} "{GH_FLAG}" "{WORKTREE_PATH}" || exit 1
+```
+
+On non-zero exit do NOT invoke `/review-pr`; the script posted FAILED, added `needs-human` and printed the `REVIEW_RESULT: status: BLOCKED` block as the final reply.
+
+---
+
 ## Phase R3: Invoke /review-pr with --auto-merge
 
 **First re-run the Phase R1.5 phase-trail preflight** (resume entry can skip R1.5). Do not invoke `/review-pr` while it fails. <!-- Added: forge#3061 -->
+
+Then re-run **Phase R2.5** (the review acceptance gate); do not invoke `/review-pr` while it fails. <!-- Added: forge#3793 -->
 
 Re-read the PR number (from creation or from resume check):
 

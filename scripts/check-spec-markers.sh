@@ -75,6 +75,7 @@ fi
 # ---------------------------------------------------------------------------
 MARKER_REGISTRY="
   ACCEPTANCE_GATE
+  ACCEPTANCE_GATE_REVIEW
   ADR_EXTRACTED
   ANCESTRY_FAILED
   ARCHITECT

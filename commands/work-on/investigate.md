@@ -706,14 +706,17 @@ ESTIMATE_FACTOR: {FACTOR — resolved build.diff_size.estimate_factor, positive 
 **Quoting (MANDATORY)**: `target=` and `matcher=` MUST always be wrapped in double quotes — `target="..."` / `matcher="..."` — even when the value is a single token (e.g. a plain file path). The downstream Phase B6.5 parser only extracts quoted values; an unquoted `target=`/`matcher=` will silently truncate at the first space and cause a false-negative gate failure for any multi-word value (shell commands with flags/arguments/pipes are almost always multi-word). Neither `target` nor `matcher` may contain a literal `"` character — use single quotes for any embedded string/regex literal inside the value, as shown below. `id=` and `type=` are always single tokens and are never quoted. `description=` is always the last field on the line and is captured to end-of-line — it does not need quoting.
 
 ```
-ACCEPTANCE_CHECK: id={ac-1} type={exists|contains|command|behavior} target="{file_path|command|url}" matcher="{string|exit_0|regex}" description={one-line human description}
-ACCEPTANCE_CHECK: id={ac-2} type={exists|contains|command|behavior} target="{file_path|command|url}" matcher="{string|exit_0|regex}" description={one-line human description}
+ACCEPTANCE_CHECK: id={ac-1} type={exists|contains|command|behavior} target="{file_path|command|url}" matcher="{string|exit_0|regex}" phase={build|review} description={one-line human description}
+ACCEPTANCE_CHECK: id={ac-2} type={exists|contains|command|behavior} target="{file_path|command|url}" matcher="{string|exit_0|regex}" phase={build|review} description={one-line human description}
 ```
 
 Example with a multi-word shell command target (the case that previously broke — note the embedded single quotes around the regex, and the double quotes wrapping the whole target):
 ```
-ACCEPTANCE_CHECK: id=ac-4 type=command target="grep -qE '(>= ?2|2\+)' commands/orchestrate/phase-1-resolve.md" matcher="exit_0" description=Fan-out cap is documented as >=2 or 2+
+ACCEPTANCE_CHECK: id=ac-4 type=command target="grep -qE '(>= ?2|2\+)' commands/orchestrate/phase-1-resolve.md" matcher="exit_0" phase=build description=Fan-out cap is documented as >=2 or 2+
+ACCEPTANCE_CHECK: id=ac-7 type=command target="gh pr view --json body --jq .body" matcher="time-to-clear|P95" phase=review description=PR body attaches the time-to-clear distribution
 ```
+
+**Phase tag (MANDATORY)** <!-- Added: forge#3793 -->: `phase=` is an optional token placed after `matcher="..."` and before `description=`; allowed values are `build` (default when absent) and `review`. `build` checks run in the build acceptance gate, against the worktree. `review` checks are deferred by the build gate and evaluated by review after the PR exists. Any check whose target reads a PR artifact (`gh pr view`, `gh pr checks`, `gh pr diff`, review comments) MUST be `phase=review`: the PR does not exist until the review phase opens it, so such a check can never pass at build time. Do not put `phase=` inside `target`, `matcher` or `description` text.
 
 **Check types**:
 - `exists` — assert a file or directory exists (`target` = path, `matcher` = ignored)
@@ -727,7 +730,7 @@ ACCEPTANCE_CHECK: id=ac-4 type=command target="grep -qE '(>= ?2|2\+)' commands/o
 
 **Class-wide checks (review-finding issues)**: when a Pattern Sweep was recorded, emit at least one `ACCEPTANCE_CHECK` that verifies the fix covers every `fix` row (for example a `command` check that the defective pattern no longer matches anywhere in the swept paths) and one that verifies the added test covers a representative set of instances rather than the reviewer's single repro. <!-- Added: forge#3449 -->
 
-**Skipping**: if the issue has no verifiable acceptance criteria and none can be derived from the recommendation, emit a single sentinel: `ACCEPTANCE_CHECK: id=ac-skip type=skipped target="none" matcher="none" description=No machine-checkable criteria available — human review required`
+**Skipping**: if the issue has no verifiable acceptance criteria and none can be derived from the recommendation, emit a single sentinel: `ACCEPTANCE_CHECK: id=ac-skip type=skipped target="none" matcher="none" phase=build description=No machine-checkable criteria available — human review required`
 ${ANNOTATION_LINK_FOOTER}
 ${INVESTIGATION_SENTINEL}"
 ```
