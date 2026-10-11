@@ -80,7 +80,7 @@ ISSUE_LABELS=$(echo "$ISSUE_STATE" | jq -r '[.labels[].name] | join(",")')
 ```
 
 - If none of `needs-human`, `workflow:remediating` or `workflow:awaiting-merge` is among `ISSUE_LABELS` → EXIT `REMEDIATE_RESULT: status: BLOCKED`, blocker: "issue #{ISSUE_NUMBER} is none of `needs-human`, `workflow:remediating` or `workflow:awaiting-merge` — remediation mode only targets PRs in one of those states; use the normal `/work-on {ISSUE_NUMBER}` resume path instead." This keeps blast radius scoped to exactly the gap this mode fills — it is not a general-purpose re-review trigger. `workflow:remediating` is the non-human state review sets when it hands an autonomous ci-gate / in-pr-fix / base-sync fix to this phase (forge#3541); a bare `needs-human` (older runs, genuine escalations being re-driven) is still accepted. <!-- Added: forge#3541 -->
-- **Resume-at-M7 (forge#3647)**: `workflow:awaiting-merge` is admitted ONLY as a resume of an interrupted M7 auto-land: the PR is OPEN (the PR state guard above already exited otherwise), `needs-human` and `workflow:remediating` are both absent, and the idempotency check below finds NO completed `FORGE:REMEDIATION:COMPLETE` trail (`REMEDIATION_COMPLETE_N` = 0). When all hold, set `RESUME_AT_M7=true`: skip Phases M1-M6 entirely (no checkout, no fixes, no re-review) and continue at Phase M7, which re-verifies the bar from scratch. If a COMPLETE trail exists the single-attempt `ALREADY_DONE` guard below still wins. On a BLOCKED exit from this path the issue stays at `workflow:awaiting-merge` (it never gains `workflow:remediating`; the stranded-state rule below applies only to `workflow:remediating`).
+- **Resume-at-M7 (forge#3647, hardened forge#3684)**: `workflow:awaiting-merge` is admitted ONLY as a resume of an interrupted M7 auto-land: the PR is OPEN (the PR state guard above already exited otherwise), `needs-human` and `workflow:remediating` are both absent, the idempotency check below finds NO completed `FORGE:REMEDIATION:COMPLETE` trail (`REMEDIATION_COMPLETE_N` = 0), AND there is evidence the PR was engine-parked for the M7 bar rather than parked for a human: the live base is non-empty, non-`null` and non-`main`, and the LATEST trusted (OWNER/MEMBER/COLLABORATOR or Bot) `review-pr.md` Phase 8 park comment on the issue is the non-`main` "parked at `workflow:awaiting-merge` for the remediation auto-land bar" comment (not the deploy-gate "held ... for a human merge decision" comment). When all hold, set `RESUME_AT_M7=true`: skip Phases M1-M6 entirely (no checkout, no fixes, no re-review) and continue at Phase M7, which re-verifies the bar from scratch. Without park evidence, return `BLOCKED` (blocker: "awaiting-merge PR is not engine-parked for the remediation auto-land bar"); the issue stays at `workflow:awaiting-merge`. If a COMPLETE trail exists the single-attempt `ALREADY_DONE` guard below still wins. On a BLOCKED exit from this path the issue stays at `workflow:awaiting-merge` (it never gains `workflow:remediating`; the stranded-state rule below applies only to `workflow:remediating`).
 - **Stranded-state rule**: `workflow:remediating` must never outlive this run. Every exit that returns `BLOCKED` or `UNFIXABLE` (including exits before Phase M1; except a `RESUME_AT_M7` run, which leaves the issue at `workflow:awaiting-merge` untouched) removes `workflow:remediating` and adds `needs-human`, because at that point a human really is needed:
 
   ```bash
@@ -142,7 +142,18 @@ Completed trails of other kinds are left in place (never deleted); only the inte
   for _id in $ISSUE_PARTIAL_IDS; do gh api repos/{GH_REPO}/issues/comments/$_id -X DELETE 2>/dev/null || true; done
   ```
 - If no comment is found → fresh attempt, continue below.
-- If the issue is at `workflow:awaiting-merge` (and neither `needs-human` nor `workflow:remediating`) and `REMEDIATION_COMPLETE_N` is 0 → `RESUME_AT_M7=true` (see Resume-at-M7 above): skip to Phase M7. Any other label combination keeps the normal flow.
+- If the issue is at `workflow:awaiting-merge` (and neither `needs-human` nor `workflow:remediating`) and `REMEDIATION_COMPLETE_N` is 0 → require engine-park evidence (see Resume-at-M7 above); only then `RESUME_AT_M7=true`: skip to Phase M7. Any other label combination keeps the normal flow.
+
+  ```bash
+  # forge#3684: admit the resume only for a PR the engine parked for the M7 bar. Fail closed.
+  PARK_BASE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
+  PARK_LAST=$(gh api --paginate repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments 2>/dev/null | jq -rs '[.[][] | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | select((.body // "") | test("for the remediation auto-land bar|for a human merge decision"))] | last | .body // ""' 2>/dev/null || echo "")
+  if [ -n "$PARK_BASE" ] && [ "$PARK_BASE" != "null" ] && [ "$PARK_BASE" != "main" ] && printf '%s' "$PARK_LAST" | grep -qF 'for the remediation auto-land bar'; then
+    RESUME_AT_M7=true
+  else
+    RESUME_AT_M7=false   # BLOCKED, issue left at workflow:awaiting-merge
+  fi
+  ```
 
 ---
 
@@ -507,13 +518,24 @@ if [ "$(printf '%s' "$PR_LIVE" | jq -r '.state // ""' 2>/dev/null)" = "MERGED" ]
 fi
 ```
 
-**Resume path (`RESUME_AT_M7=true`)**: no M3 quality gate ran in this invocation, so `GATE_PASSED` is not set. Substitute fresh evidence that the PR is approved at its CURRENT head: a collaborator or Bot `APPROVED:` review/comment created AFTER the head commit's `committedDate`. Anything unreadable or stale means `GATE_PASSED=false` (hold). This substitution applies to non-`main` bases only; a `main` (deploy-gate) base never lands from the resume path because it cannot reach `APPROVED_COUNT >= 2` plus a gate in this invocation, so it holds. CI is still verified by the mandatory CI gate below.
+**Live base (computed BEFORE the resume substitution, forge#3684)**: re-derive the base fresh — do NOT reuse `$PR_BASE` for this decision (forge#2624): `$PR_BASE` was resolved in Phase M0 and a caller-supplied `--base` wins over the PR's actual live base. This is a security-relevant decision point, so re-query the PR's live base independent of `$PR_BASE`. Fail closed: only a KNOWN, non-empty, non-`null`, non-`main` live base reconciles to the fast lane (forge#2570); empty, the literal string `null` (jq stringifies JSON null, forge#2625) or `main` is the deploy gate (strict).
+
+```bash
+LIVE_BASE_REF=$(gh pr view {PR_NUMBER} {GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
+if [ -n "$LIVE_BASE_REF" ] && [ "$LIVE_BASE_REF" != "null" ] && [ "$LIVE_BASE_REF" != "main" ]; then IS_DEPLOY_GATE=false; else IS_DEPLOY_GATE=true; fi
+```
+
+**Resume path (`RESUME_AT_M7=true`)**: no M3 quality gate ran in this invocation, so `GATE_PASSED` is not set. Substitute fresh evidence that the PR is approved at its CURRENT head: a collaborator or Bot comment whose body starts with `APPROVED:` (anchored, case-sensitive, so `NOT APPROVED:` and quoted text never match) created AFTER the `committedDate` of the commit whose `oid` equals `headRefOid`. Anything unreadable, stale, or a `headRefOid` that matches no commit means `GATE_PASSED=false` (hold). The substitution applies to non-`main` bases only: when `RESUME_AT_M7=true` and `IS_DEPLOY_GATE=true`, `GATE_PASSED=false` is forced and the bar below holds (`BAR_MET=false`) in code, so a `main` (deploy-gate) base never lands from the resume path. CI is still verified by the mandatory CI gate below.
 
 ```bash
 if [ "${RESUME_AT_M7:-false}" = "true" ]; then
-  HEAD_COMMITTED=$(printf '%s' "$PR_LIVE" | jq -r '.commits[-1].committedDate // ""' 2>/dev/null)
-  RESUME_APPROVED_N=$(gh api --paginate repos/{GH_REPO}/issues/{PR_NUMBER}/comments 2>/dev/null | jq -rs --arg t "$HEAD_COMMITTED" '[.[][] | select((.body // "") | test("APPROVED:")) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | select($t != "" and .created_at > $t)] | length' 2>/dev/null || echo 0)
-  [ "${RESUME_APPROVED_N:-0}" -ge 1 ] && GATE_PASSED=true || GATE_PASSED=false
+  HEAD_OID=$(printf '%s' "$PR_LIVE" | jq -r '.headRefOid // ""' 2>/dev/null)
+  HEAD_COMMITTED=""
+  [ -n "$HEAD_OID" ] && HEAD_COMMITTED=$(printf '%s' "$PR_LIVE" | jq -r --arg head "$HEAD_OID" '[.commits[] | select(.oid == $head)] | first | .committedDate // ""' 2>/dev/null)
+  RESUME_APPROVED_N=$(gh api --paginate repos/{GH_REPO}/issues/{PR_NUMBER}/comments 2>/dev/null | jq -rs --arg t "$HEAD_COMMITTED" '[.[][] | select((.body // "") | test("^APPROVED:")) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | select($t != "" and .created_at > $t)] | length' 2>/dev/null || echo 0)
+  if [ "$IS_DEPLOY_GATE" = "true" ]; then GATE_PASSED=false   # main / empty / null base: resume never lands
+  elif [ "${RESUME_APPROVED_N:-0}" -ge 1 ]; then GATE_PASSED=true
+  else GATE_PASSED=false; fi
 fi
 ```
 
@@ -544,27 +566,7 @@ APPROVED_COUNT=$(echo "$REVIEW_BODIES" | grep -cE 'APPROVED:' 2>/dev/null || tru
 
 **Auto-land bar — base-branch scoped** (forge#2570): the condition the PR must clear to auto-land depends on its target branch. This reconciles the remediation bar with the normal `/work-on` fast-lane merge bar for the *same target branch*, while keeping the strict human-verified bar only where a human is genuinely in the loop (the `staging → main` deploy gate).
 
-**Re-derive the base fresh — do NOT reuse `$PR_BASE` for this decision** (forge#2624): `$PR_BASE` was resolved in Phase M0 as `PR_BASE="${PR_BASE:-$(... .baseRefName)}"` — a caller-supplied `--base` wins over the PR's actual live base whenever non-empty. That is fine for M0's own purposes (worktree base, display text), but this is a security-relevant decision point: a wrong/stale `--base staging` on a PR that actually targets `main` must never be allowed to relax the strict deploy-gate bar. Mirror `review-pr.md`'s sibling guard (`GUARD_BASE`, which always re-fetches `baseRefName` fresh at its own decision point) by re-querying the PR's live base here, independent of whatever `$PR_BASE` currently holds:
-
-```bash
-# forge#2624: re-fetch baseRefName fresh from the PR itself — never trust the
-# M0-resolved $PR_BASE for this decision, since M0 prefers a caller-supplied
-# --base over the live value. This is the one line in this phase that makes
-# a trust/security decision, so it must be immune to a caller-overridable input.
-LIVE_BASE_REF=$(gh pr view {PR_NUMBER} {GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
-
-# forge#2570: `main` (and any deploy-gate base) keeps the strict #1809 Q1 verified-human bar;
-# every other base (staging, milestone/* — the reversible integration branches) reconciles to
-# the fast-lane bar. Key on "is the deploy gate", NOT the literal string "staging", so milestone
-# branches reconcile too. Fail closed: only a KNOWN, non-empty, non-`main` LIVE base reconciles
-# to the fast lane; an empty/unresolved fetch is treated as the deploy gate (strict) so a base-
-# resolution failure (or a caller passing a stale/incorrect --base) can never accidentally
-# relax the bar.
-# forge#2625: `jq -r '.baseRefName'` stringifies a JSON null to the literal text "null" (not an
-# empty string), so the `-n` check alone does not catch it — add an explicit `!= "null"` check
-# so a literal-string "null" is treated the same as an empty/unresolved base (strict).
-if [ -n "$LIVE_BASE_REF" ] && [ "$LIVE_BASE_REF" != "null" ] && [ "$LIVE_BASE_REF" != "main" ]; then IS_DEPLOY_GATE=false; else IS_DEPLOY_GATE=true; fi
-```
+(`LIVE_BASE_REF` / `IS_DEPLOY_GATE` were computed above, before the resume substitution, and are not re-derived here. forge#2570 / #2624 / #2625 rationale applies unchanged.)
 
 **Non-`main` base (`IS_DEPLOY_GATE=false` — staging / milestone)** — reconcile to the fast-lane bar. `review-pr.md`'s Phase 8 guard only parks a PR at `workflow:awaiting-merge` after a clean, mergeable `APPROVED` re-review (the same bot-`APPROVED` signal the normal fast lane auto-merges on), so the only additional condition is this remediation's own quality gate:
 1. `GATE_PASSED = true` from this remediation's Phase M3 quality-gate loop.
@@ -575,11 +577,14 @@ The strict `APPROVED_COUNT >= 2` verified-human requirement does NOT apply here:
 1. `APPROVED_COUNT >= 2` — at least two distinct adversarial `APPROVED:` review comments from repo collaborators (`OWNER`/`MEMBER`/`COLLABORATOR` authorAssociation only — see trust filter above; same counting convention as `work-on/close.md` C4).
 2. `GATE_PASSED = true` from this remediation's own Phase M3 quality-gate loop.
 
+A `RESUME_AT_M7=true` run on a deploy-gate base NEVER meets this bar (`BAR_MET=false` is enforced in the `if` below): no M3 gate ran in the resume invocation, so it holds for a human. <!-- Added: forge#3684 -->
+
 **Evaluate the base-scoped bar**:
 ```bash
 if [ "$IS_DEPLOY_GATE" = "true" ]; then
-  # main / deploy gate — strict verified-human bar
-  { [ "${APPROVED_COUNT:-0}" -ge 2 ] && [ "${GATE_PASSED:-false}" = "true" ]; } && BAR_MET=true || BAR_MET=false
+  # main / deploy gate — strict verified-human bar; a resume (no in-run M3 gate) never lands here (forge#3684)
+  if [ "${RESUME_AT_M7:-false}" = "true" ]; then BAR_MET=false
+  else { [ "${APPROVED_COUNT:-0}" -ge 2 ] && [ "${GATE_PASSED:-false}" = "true" ]; } && BAR_MET=true || BAR_MET=false; fi
 else
   # staging / milestone — fast-lane bar (bot APPROVED already implied by workflow:awaiting-merge)
   [ "${GATE_PASSED:-false}" = "true" ] && BAR_MET=true || BAR_MET=false
