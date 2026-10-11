@@ -937,13 +937,30 @@ export async function runIssue(opts) {
     const foreign = await foreignLiveLease();
     const final = { ...deriveState(readLog(dir, issue)), terminal: true, terminalReason: reason, lease: foreign ?? null };
     await projector.writeState(issue, final);
+    // forge#3566: the terminal projection must not leave a stranded `workflow:remediating`
+    // next to the terminal label. Best-effort: runs after the terminal write and never throws.
+    let wasRemediating = false;
+    if (reason === "needs-human" || reason === "engine-error") {
+      try {
+        const lv = JSON.parse(await io.gh(["issue", "view", String(issue), "--json", "labels"]));
+        wasRemediating = (lv?.labels ?? []).some((l) => (typeof l === "string" ? l : l?.name) === "workflow:remediating");
+      } catch { /* unreadable: treat as not remediating */ }
+      try { await projector.removeLabel(issue, "workflow:remediating"); }
+      catch { /* best-effort: a transient label failure must not lose the terminal state */ }
+    }
     if (reason === "needs-human") await projector.setLabel(issue, "needs-human");
     // forge#2261: a distinct label for engine/tool-level failures (broken CLI
     // invocation, exhausted retries where the runner itself never once
     // succeeded) — NOT needs-human. /orchestrate's classify_predecessor_state()
     // (commands/orchestrate/phase-4-execution.md) must not treat this as GATED:
     // there is no human decision pending, just a tool that needs to be re-run.
-    else if (reason === "engine-error") await projector.setLabel(issue, "workflow:engine-error");
+    else if (reason === "engine-error") {
+      await projector.setLabel(issue, "workflow:engine-error");
+      // A crashed remediate has no human signal otherwise (remediate.md Stranded-state rule).
+      if (wasRemediating) {
+        try { await projector.setLabel(issue, "needs-human"); } catch { /* best-effort */ }
+      }
+    }
     return { terminalReason: reason, detail };
   }
 }

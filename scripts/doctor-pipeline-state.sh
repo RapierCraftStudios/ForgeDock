@@ -49,6 +49,8 @@
 #       PRIOR_GIST annotations in recent issue comments)
 #   I9  Issues stuck in workflow:remediating beyond threshold (the state must
 #       never outlive its remediation run)
+#   I10 Issues in workflow:engine-error that also carry another in-flight
+#       workflow:* label, or that sit there beyond threshold
 #
 # /pipeline-health should consume this script's JSON output rather than
 # re-discovering state from scratch.
@@ -356,6 +358,47 @@ while IFS= read -r row; do
       "Issue #$num stuck in workflow:remediating for ${hours}h (threshold: ${STUCK_HOURS}h). The state must not outlive its remediation run. Resume with /work-on $num --resume"
   fi
 done < <(echo "$REMEDIATING" | jq -c '.[]')
+
+# ---------------------------------------------------------------------------
+# I10: Issues stuck in workflow:engine-error
+# ---------------------------------------------------------------------------
+# engine-error is a terminal projection: it must not coexist with another
+# in-flight workflow:* label (stranded state) and must not sit unrecovered past
+# the threshold. Same fail-inconclusive pattern as I9.
+if ! ENGINE_ERRORS=$(gh issue list $GH_FLAG \
+  --state open --label "workflow:engine-error" \
+  --limit 100 \
+  --json number,title,updatedAt,labels 2>"$GH_STDERR_TMP"); then
+  echo "WARNING: gh issue list failed for workflow:engine-error — I10 check inconclusive, skipping (not treated as empty): $(cat "$GH_STDERR_TMP")" >&2
+  add_skip "I10" "all" "gh issue list failed: $(bounded_reason "$(cat "$GH_STDERR_TMP")")"
+  ENGINE_ERRORS="[]"
+fi
+
+while IFS= read -r row; do
+  num=$(echo "$row" | jq -r '.number')
+  labels=$(echo "$row" | jq -c '[.labels[].name]')
+  if has_terminal_label "$labels"; then
+    continue
+  fi
+  updated=$(echo "$row" | jq -r '.updatedAt')
+  hours=$(hours_since "$updated")
+  other=$(echo "$labels" | jq -r '[.[] | select(startswith("workflow:") and . != "workflow:engine-error")] | first // empty')
+  if [ -n "$other" ]; then
+    add_finding \
+      "stuck_engine_error" "warning" \
+      "$num" "workflow:engine-error" "$hours" \
+      "FORGE:STATE" \
+      "forgedock run-issue $num --retry" \
+      "Issue #$num carries workflow:engine-error together with $other (stranded state). Remove the stale label or recover with forgedock run-issue $num --retry"
+  elif [ "$hours" -ge "$STUCK_HOURS" ]; then
+    add_finding \
+      "stuck_engine_error" "warning" \
+      "$num" "workflow:engine-error" "$hours" \
+      "FORGE:STATE" \
+      "forgedock run-issue $num --retry" \
+      "Issue #$num stuck in workflow:engine-error for ${hours}h (threshold: ${STUCK_HOURS}h). Recover with forgedock run-issue $num --retry"
+  fi
+done < <(echo "$ENGINE_ERRORS" | jq -c '.[]')
 
 # ---------------------------------------------------------------------------
 # I4: Issues in workflow:building with no FORGE:BUILDER annotation

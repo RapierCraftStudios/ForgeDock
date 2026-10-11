@@ -1609,6 +1609,12 @@ classify_predecessor_state() {
     PRED_LABELS=$(echo "$PRED_INFO" | jq -r '.workflow[]?' 2>/dev/null)
   fi
 
+  # forge#3566: age bound for the remediating / engine-error IN_PROGRESS arms below. Resolved here, not once at
+  # Step 4 setup, because wake reconstruction calls this helper from a fresh shell. Non-numeric falls back to 48.
+  local IN_PROGRESS_MAX_HOURS
+  IN_PROGRESS_MAX_HOURS=$(yq '.orchestration.in_progress_max_hours // 48' forge.yaml 2>/dev/null || echo 48)
+  case "$IN_PROGRESS_MAX_HOURS" in ''|*[!0-9]*) IN_PROGRESS_MAX_HOURS=48 ;; esac
+
   # reverify_merged_trail: re-run the phase-trail verifier for a merged predecessor that has NO escalation
   # record (forge#3156), so wake reconstruction does not trust the `workflow:merged` label alone. Prints OK
   # when the trail verifies, UNVERIFIED otherwise. Fails closed: a wake runs in a fresh shell where FORGE_ROOT is
@@ -1671,7 +1677,10 @@ classify_predecessor_state() {
     # forge#3541: autonomous remediation (ci-gate / in-pr-fix / base-sync) is pending or running. No human decision is
     # needed, so this is NOT GATED: dependents keep waiting exactly as for any mid-pipeline predecessor, and item 6.4
     # (or the engine handoff) drives the fix. A concurrent `needs-human` is matched by the GATED arm above first.
-    echo "IN_PROGRESS"
+    # Time-boxed (forge#3566): past orchestration.in_progress_max_hours (default 48) [IN_PROGRESS_MAX_HOURS, resolved from forge.yaml] the state is stranded, not in flight.
+    PRED_AGE_H=$(gh issue view "$PRED" -R {GH_REPO} --json updatedAt --jq '((now - (.updatedAt | fromdateiso8601)) / 3600 | floor)' 2>/dev/null || echo "")
+    case "$PRED_AGE_H" in ''|*[!0-9]*) PRED_AGE_H=0 ;; esac  # unreadable age keeps IN_PROGRESS (fail safe)
+    if [ "$PRED_AGE_H" -ge "${IN_PROGRESS_MAX_HOURS:-48}" ]; then echo "GATED"; else echo "IN_PROGRESS"; fi
   elif echo "$PRED_LABELS" | grep -qx "workflow:engine-error"; then
     # forge#2261: the engine/tool itself broke on this run (e.g. a fail-fast
     # CLI_BACKEND_FAILED, or an exhausted retry loop where the runner never
@@ -1688,7 +1697,11 @@ classify_predecessor_state() {
     # ENGINE_DISPATCH_MAP-tracked issues (fresh Agent-spawn fallback on empty
     # committed state) — 2a's Agent(resume=...) alone cannot reach them, since
     # they were never in AGENT_ISSUE_MAP.
-    echo "IN_PROGRESS"
+    # Time-boxed (forge#3566): past orchestration.in_progress_max_hours (default 48) [IN_PROGRESS_MAX_HOURS, resolved from forge.yaml] auto-resume has evidently
+    # not recovered it; classify GATED so a human is told instead of dependents waiting forever.
+    PRED_AGE_H=$(gh issue view "$PRED" -R {GH_REPO} --json updatedAt --jq '((now - (.updatedAt | fromdateiso8601)) / 3600 | floor)' 2>/dev/null || echo "")
+    case "$PRED_AGE_H" in ''|*[!0-9]*) PRED_AGE_H=0 ;; esac  # unreadable age keeps IN_PROGRESS (fail safe)
+    if [ "$PRED_AGE_H" -ge "${IN_PROGRESS_MAX_HOURS:-48}" ]; then echo "GATED"; else echo "IN_PROGRESS"; fi
   elif [ "$PRED_STATE" = "CLOSED" ]; then
     # Closed with no workflow:invalid/merged label (e.g. closed-not-planned) — treat as DONE,
     # not a new deadlock state; there is no pending code for dependents to wait on.
