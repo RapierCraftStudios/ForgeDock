@@ -699,7 +699,7 @@ export async function runIssue(opts) {
         let pauseCount = 0;
         for (;;) {
           try {
-            outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo });
+            outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo, agentId });
             break;
           } catch (e) {
             const resetAtMs = e.resetAtEpochMs;
@@ -814,6 +814,13 @@ export async function runIssue(opts) {
       (outcome.outputs?.pr ?? state.pr) != null;
     if (outcome.status === "blocked") {
       emitProgress({ event: "phase_exit", phase: phase.id, status: "blocked", detail: outcome.detail });
+      // forge#3792: remediate deferring to a live earlier run is neither a commit nor a terminal: a RUN_TERMINAL or
+      // PHASE_COMMIT would strand the PR (`deferred` is not --retry-able, and a committed remediate lets `close` run on
+      // an unmerged PR). Release our lease and exit with nothing written; the next dispatch re-picks remediate.
+      if (phase.id === "remediate" && outcome.reason === "deferred") {
+        await projector.writeState(issue, { ...state, lease: null });
+        return { terminalReason: "deferred", detail: outcome.detail };
+      }
       if (!isRemediationHandoff)
         return await terminate(state, outcome.reason || "needs-human", outcome.detail);
     } else {
@@ -905,7 +912,7 @@ export async function runIssue(opts) {
 }
 
 async function runPhaseWithRetry(phase, state, ctx) {
-  const { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo } = ctx;
+  const { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo, agentId } = ctx;
   // forge#3499: build the phase's full argument set ONCE, up front. Every
   // work-on phase sub-skill stops with BLOCKED when a required flag is absent,
   // so an incomplete/invalid set is a deterministic engine failure — fail
@@ -913,7 +920,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
   // `[issue]`-only invocation that burns the attempt budget.
   let phaseArgs;
   try {
-    phaseArgs = await phase.buildArgs(state, { repo: await resolveRepo() }, io);
+    phaseArgs = await phase.buildArgs(state, { repo: await resolveRepo(), agentId }, io);
   } catch (e) {
     if (e?.code !== "PHASE_ARGS_INVALID") throw e;
     const detail = `phase ${phase.id} args unresolved: ${e.message}`;
