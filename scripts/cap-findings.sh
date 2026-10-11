@@ -63,7 +63,7 @@ fi
 
 awk -F'\t' -v cap="$CAP" -v lineage="$LINEAGE" '
 function up(s) { return toupper(s) }
-function sevclass(s) { s = up(s); if (s == "CRITICAL" || s == "HIGH") return 3; if (s == "LOW") return 1; return 2 }
+function sevclass(s) { s = up(s); gsub(/[^A-Z]/, "", s); if (s == "CRITICAL" || s == "HIGH") return 3; if (s == "LOW") return 1; return 2 }
 function confrank(c) { c = up(c); if (c == "CONFIRMED") return 3; if (c == "POSSIBLE") return 1; return 2 }
 function domain(a) { a = tolower(a); return (a ~ /(security|auth|billing|concurrency|database)/) ? 1 : 0 }
 /^[ \t\r]*$/ { next }
@@ -75,6 +75,8 @@ function domain(a) { a = tolower(a); return (a ~ /(security|auth|billing|concurr
   split(disp[n], w, " ")
   isissue[n] = (w[1] == "ISSUE")
   sc = sevclass($2)
+  # the classifier already decided HIGH/CRITICAL: never cap those, whatever the raw severity text looked like
+  if (w[2] ~ /^severity-(HIGH|CRITICAL)$/) sc = 3
   if (isissue[n] && sc == 3) { high++ ; capable[n] = 0 }
   else if (isissue[n]) { capable[n] = 1; score[n] = sc * 1000 + confrank($3) * 100 + domain($5) * 10 }
   else capable[n] = 0

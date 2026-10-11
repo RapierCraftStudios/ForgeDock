@@ -103,6 +103,14 @@ if [ "$out" = "a${T}ISSUE medium confirmed" ]; then pass=$((pass+1)); else fail=
 out=$(rows "a:MEDIUM:CONFIRMED:NOTE~stale" | bash "$S" 2>/dev/null | head -n 1)
 if [ "$out" = "a${T}NOTE stale" ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL: NOTE row passes through verbatim (got '$out')"; fi
 
+# --- Severity text noise never demotes HIGH/CRITICAL (classifier strips whitespace and uppercases) ---
+expect "whitespace/markdown HIGH still uncapped at cap 0" "a=ISSUE b=ISSUE c=ISSUE d=NOTE(capped) CAPPED=1" --cap 0 -- \
+  "a:HIGH :CONFIRMED:ISSUE~severity-HIGH" 'b:**HIGH**:CONFIRMED:ISSUE~severity-HIGH' c:High:LIKELY:ISSUE~severity-HIGH d:MEDIUM:LIKELY:ISSUE~x
+expect "classifier severity-HIGH/CRITICAL reason is never capped" "a=ISSUE b=ISSUE CAPPED=0" --cap 0 -- \
+  "a:weird:CONFIRMED:ISSUE~severity-HIGH" "b:weird:CONFIRMED:ISSUE~severity-CRITICAL"
+expect "lineage budget counts noisy HIGH" "a=ISSUE b=NOTE(capped) CAPPED=1" --cap 1 --lineage review-finding -- \
+  "a:HIGH :CONFIRMED:ISSUE~severity-HIGH" b:MEDIUM:CONFIRMED:ISSUE~x
+
 # --- --input file and usage errors ---
 tmp=$(mktemp)
 rows a:MEDIUM:LIKELY:ISSUE~x b:MEDIUM:LIKELY:ISSUE~x c:MEDIUM:LIKELY:ISSUE~x > "$tmp"
