@@ -219,6 +219,15 @@ function hasPhaseComplete(comments) {
 }
 
 /**
+ * close.md's own idempotency key: a trusted FORGE:TRAJECTORY comment. Shared by close.reconcile
+ * and close.detectOutcome so the two cannot drift. Throws on fetch error; callers fail closed.
+ */
+async function hasTrajectory(issue, io) {
+  const { comments } = await issueMarkers(issue, io);
+  return comments.some((b) => startsWithHeader(b, "FORGE:TRAJECTORY"));
+}
+
+/**
  * Trusted comment bodies, chronological — the same single fetch + trust predicate
  * as issueMarkers() (one path, forge#3542). Fail closed: a fetch error yields `[]` here (issueMarkers itself propagates it).
  */
@@ -960,8 +969,7 @@ export const PHASES = [
         // proof close.md ran (board, summary, trajectory). Its own idempotency key is the
         // FORGE:TRAJECTORY comment; only that makes this satisfied.
         try {
-          const { comments } = await issueMarkers(state.issue, io);
-          return { satisfied: comments.some((b) => startsWithHeader(b, "FORGE:TRAJECTORY")), terminalReason: "investigation" };
+          return { satisfied: await hasTrajectory(state.issue, io), terminalReason: "investigation" };
         } catch { return { satisfied: false }; }
       }
       if (snap.state === "CLOSED") return { satisfied: true };
@@ -992,8 +1000,17 @@ export const PHASES = [
       if (snap.labels.includes(PHASE_MARKERS.close.completionLabel))
         return { status: "committed", terminalReason: "merged", outputs: {} };
       // forge#3534: an investigation exit closes the issue itself; keep that reason honest.
-      if (snap.state === "CLOSED")
-        return { status: "committed", terminalReason: state.terminalReason === "investigation" ? "investigation" : "invalid", outputs: {} };
+      if (snap.state === "CLOSED") {
+        if (state.terminalReason !== "investigation")
+          return { status: "committed", terminalReason: "invalid", outputs: {} };
+        // The issue is always already CLOSED for an investigation run, so require the same
+        // positive evidence as reconcile (a trusted FORGE:TRAJECTORY); fail closed on error.
+        let ran = false;
+        try { ran = await hasTrajectory(state.issue, io); } catch { ran = false; }
+        return ran
+          ? { status: "committed", terminalReason: "investigation", outputs: {} }
+          : { status: "failed", detail: "investigation close: no FORGE:TRAJECTORY" };
+      }
       // forge#3545: PHASE_COMPLETE is a valid close exit (multi-phase issue: PR merged,
       // issue deliberately left OPEN). Only the current cycle's marker counts.
       if (snap.state === "OPEN") {
