@@ -535,7 +535,7 @@ needed.
 
 | Marker | Category | Meaning |
 |--------|----------|---------|
-| `<!-- FORGE:DIFF_SIZE -->` | Lifecycle (no completion sentinel) | Measured diff size of the staged build: `diff_lines`, `excluded_lines`, `threshold`, `result: OK \| OVERRIDDEN \| OVER`, and on `OVER` a `### Split Proposal`. Refreshed in place; readers take the latest trusted comment. Consumed by decompose (plan source) and close (records `diff_lines` in `FORGE:TRAJECTORY`) |
+| `<!-- FORGE:DIFF_SIZE -->` | Lifecycle (no completion sentinel) | Measured diff size of the staged build: `diff_lines`, `excluded_lines`, `threshold`, `result: OK \| OVERRIDDEN \| COHESIVE \| OVER`, optional `estimated_diff_lines` (sub-issues), cohesion figures and a reviewer note on `COHESIVE`, and on `OVER` a `### Split Proposal`. Refreshed in place; readers take the latest trusted comment. Consumed by decompose (plan source) and close (records `diff_lines` in `FORGE:TRAJECTORY`) |
 | `<!-- FORGE:SIZE_OVERRIDE -->` | Control | Posted by a human to let an over-threshold build proceed. Valid only from a trusted author and with a non-empty justification on the line after the marker |
 
 Both lookups are anchored at the start of the comment body and trust-filtered

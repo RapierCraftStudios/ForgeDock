@@ -72,10 +72,10 @@ fi
 # ForgeDock's own install root (holds scripts/ and commands/), resolved ONCE by the shared forge_resolve stub
 # below — never the consumer repo: plugin installs set neither FORGE_HOME nor FORGEDOCK_HOME, and a
 # repo-relative fallback would execute (or miss) a same-named script controlled by the consumer repo.
-# Resolution: $FORGEDOCK_HOME (authoritative when set) > $FORGE_HOME > $CLAUDE_PLUGIN_ROOT > the
+# Resolution: $FORGEDOCK_HOME (authoritative when set) > the running plugin root (FORGE_SOURCED_ROOT) > $FORGE_HOME > the
 # ~/.claude/commands symlink target > the Claude Code plugin cache/marketplace dirs. <!-- forge#3098 -->
 # FORGE_ROOT: shared resolver scripts/lib/forge-resolve.sh (empty when unresolved => callers fail closed)
-type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
 FORGE_ROOT="$(forge_root 2>/dev/null || true)"
 UNIVERSAL_DIR="${FORGE_ROOT:+$FORGE_ROOT/scripts}"   # empty => tier 3 skipped, prose tier
 # NOTE: never resolve this via `which` or `find` — universal scripts are
@@ -315,7 +315,7 @@ A PR must not be opened for work whose earlier phases were skipped. Run the dete
 CHANGED=$(git -C {WORKTREE_PATH} diff --name-only --no-renames origin/{PR_BASE}...HEAD)
 # The verifier ships with ForgeDock (not the consumer repo): same resolution as every universal script.
 # FORGE_ROOT: shared resolver scripts/lib/forge-resolve.sh (empty when unresolved => callers fail closed)
-type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
 FORGE_ROOT="$(forge_root 2>/dev/null || true)"
 TRAIL_SCRIPT="$FORGE_ROOT/scripts/verify-phase-trail.sh"
 # Docs-only predicate: ONE shared copy (scripts/is-docs-only.sh, forge#3134). Fail closed: unresolved script or empty diff -> no flag.
@@ -446,9 +446,26 @@ esac
 
 ---
 
+## Phase R2.5: Review Acceptance Gate <!-- Added: forge#3793 -->
+
+Evaluates the `phase=review` acceptance checks B6.5 deferred (no PR existed at build time) before `/review-pr --auto-merge`: after R2D, and at the top of R3 on resume. Idempotent per head; a no-op without deferred checks; own marker `FORGE:ACCEPTANCE_GATE_REVIEW`, never the build gate's sentinels.
+
+```bash
+# <Script resolution block, verbatim>
+RESOLUTION=$(resolve_script 'review-acceptance-gate'); TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+[ "$TIER" != "prose" ] || { echo "review-acceptance-gate not resolvable (fail closed)"; exit 1; }
+bash "$SCRIPT_PATH" {NUMBER} {GH_REPO} "{GH_FLAG}" "{WORKTREE_PATH}" || exit 1
+```
+
+On non-zero exit do NOT invoke `/review-pr`; the script posted FAILED, added `needs-human` and printed the `REVIEW_RESULT: status: BLOCKED` block as the final reply.
+
+---
+
 ## Phase R3: Invoke /review-pr with --auto-merge
 
 **First re-run the Phase R1.5 phase-trail preflight** (resume entry can skip R1.5). Do not invoke `/review-pr` while it fails. <!-- Added: forge#3061 -->
+
+Then re-run **Phase R2.5** (the review acceptance gate); do not invoke `/review-pr` while it fails. <!-- Added: forge#3793 -->
 
 Re-read the PR number (from creation or from resume check):
 

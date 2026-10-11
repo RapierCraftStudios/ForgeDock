@@ -1175,8 +1175,8 @@ describe("pickPhase", () => {
       assert.equal(o.status, "failed");
     });
 
-    it("OK, OVERRIDDEN, malformed and absent DIFF_SIZE fall through", async () => {
-      for (const c of [gate("OK"), gate("OVERRIDDEN"), "<!-- FORGE:DIFF_SIZE -->\nresult: OVERFLOW\n### Split Proposal", "nothing"]) {
+    it("OK, OVERRIDDEN, COHESIVE, malformed and absent DIFF_SIZE fall through", async () => {
+      for (const c of [gate("OK"), gate("OVERRIDDEN"), gate("COHESIVE"), gate("COHESIVE", false), "<!-- FORGE:DIFF_SIZE -->\nresult: OVERFLOW\n### Split Proposal", "nothing"]) {
         const o = await build.detectOutcome(st, withComments(c));
         assert.equal(o.status, "failed", c);
       }
@@ -1470,6 +1470,12 @@ describe("acceptance-gate-aware build outcome (forge#3545)", () => {
     const o = await build.detectOutcome(st, world([done, gate("PASSED"), gate("FAILED")]));
     assert.equal(o.status, "failed");
     assert.equal(o.retryable, false);
+  });
+
+  it("a newer FORGE:ACCEPTANCE_GATE_REVIEW comment never changes the build gate state (forge#3793)", async () => {
+    const rev = (kind) => `<!-- FORGE:ACCEPTANCE_GATE_REVIEW -->\n## Review Acceptance Gate\n\n<!-- FORGE:ACCEPTANCE_GATE_REVIEW:${kind} -->`;
+    assert.equal((await build.detectOutcome(st, world([done, gate("PASSED"), rev("FAILED")]))).status, "committed");
+    assert.equal((await build.detectOutcome(st, world([done, gate("FAILED"), rev("PASSED")]))).status, "failed");
   });
 
   it("no gate marker keeps prior behaviour (committed)", async () => {

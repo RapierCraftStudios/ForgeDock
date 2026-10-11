@@ -15,13 +15,13 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const build = readFileSync(join(root, "commands/work-on/build.md"), "utf8");
 const extraction = build
   .split("\n")
-  .filter((l) => /^ {2}(TARGET|MATCHER)=\$\(|^ {2}\[ -z "\$(TARGET|MATCHER)" \]/.test(l))
+  .filter((l) => /^ {2}(TARGET|MATCHER|PHASE)=\$\(|^ {2}\[ -z "\$(TARGET|MATCHER)" \]|^ {2}\[ "\$PHASE" = "review" \] \|\|/.test(l))
   .join("\n");
 
 function parse(checkLine) {
-  const script = `check_line="$1"\n${extraction}\nprintf '%s\\n%s\\n' "$TARGET" "$MATCHER"`;
-  const [target, matcher] = execFileSync("bash", ["-c", script, "x", checkLine], { encoding: "utf8" }).split("\n");
-  return { target, matcher };
+  const script = `check_line="$1"\n${extraction}\nprintf '%s\\n%s\\n%s\\n' "$TARGET" "$MATCHER" "$PHASE"`;
+  const [target, matcher, phase] = execFileSync("bash", ["-c", script, "x", checkLine], { encoding: "utf8" }).split("\n");
+  return { target, matcher, phase };
 }
 
 test("extraction lines are present in build.md", () => {
@@ -92,4 +92,35 @@ test("malformed-check: valid targets are not flagged, genuine exit 1 stays a fai
   assert.equal(classify("grep -qF -e 'malformed-check' commands/work-on/build.md"), "");
   assert.equal(classify("grep -qF -e 'no-such-string-xyzzy' commands/work-on/build.md"), "");
   assert.equal(classify("commands/work-on/build.md", "exists"), "");
+});
+
+// phase tag (#3793): deferral of review-phase checks.
+test("phase=review is parsed and does not disturb target/matcher/description", () => {
+  const r = parse('ACCEPTANCE_CHECK: id=ac-7 type=command target="gh pr view --json body --jq .body" matcher="time-to-clear|P95" phase=review description=PR body has distribution');
+  assert.equal(r.phase, "review");
+  assert.equal(r.target, "gh pr view --json body --jq .body");
+  assert.equal(r.matcher, "time-to-clear|P95");
+});
+
+test("absent, unknown, or free-text phase= resolves to build (fail closed)", () => {
+  assert.equal(parse('ACCEPTANCE_CHECK: id=ac-1 type=exists target="a.md" matcher="none" description=d').phase, "build");
+  assert.equal(parse('ACCEPTANCE_CHECK: id=ac-1 type=exists target="a.md" matcher="none" phase=reviw description=d').phase, "build");
+  assert.equal(parse('ACCEPTANCE_CHECK: id=ac-1 type=exists target="a.md" matcher="none" description=x phase=review y').phase, "build");
+  assert.equal(parse('ACCEPTANCE_CHECK: id=ac-1 type=command target="echo phase=review" matcher="exit_0" description=d').phase, "build");
+  assert.equal(parse("ACCEPTANCE_CHECK: id=ac-6 type=exists target=a.md matcher=none phase=review description=y").phase, "review");
+});
+
+test("build.md defers review checks and the legacy 'no pull requests found' result", () => {
+  assert.ok(build.includes('"$PHASE" = "review"') && build.includes("DEFERRED (review)"));
+  assert.ok(build.includes("no pull requests found") && build.includes('"$DEFERRED_COUNT" -eq 0'));
+});
+
+test("review.md R2.5 calls a script that evaluates deferred checks with its own marker and the same phase extraction", () => {
+  const review = readFileSync(join(root, "commands/work-on/review.md"), "utf8");
+  const gate = readFileSync(join(root, "scripts/review-acceptance-gate.sh"), "utf8");
+  assert.ok(review.includes("## Phase R2.5") && review.includes("resolve_script 'review-acceptance-gate'"));
+  assert.ok(gate.includes("FORGE:ACCEPTANCE_GATE_REVIEW:FAILED") && gate.includes("FORGE:ACCEPTANCE_GATE_REVIEW:PASSED:"));
+  assert.ok(!gate.includes("FORGE:ACCEPTANCE_GATE -->") && !gate.includes("FORGE:ACCEPTANCE_GATE:"));
+  const phaseLine = build.split("\n").find((l) => /^ {2}PHASE=\$\(/.test(l));
+  assert.ok(gate.includes(phaseLine));
 });

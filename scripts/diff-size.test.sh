@@ -95,6 +95,53 @@ reset; gen 3 > s.txt; gen 9 > l.txt; git add -A
 OUT="$(run)"; FIRST="$(printf '%s\n' "$OUT" | sed -n 's/^top=//p' | head -n1)"
 [ "$FIRST" = "9 l.txt" ] && ok || bad "top ordering (got '$FIRST')"
 
+# cohesion (forge#3790): new files + test files >= 70% of diff_lines and diff_lines <= threshold*3/2
+shape() { # all-new fixture: $1=new module lines, $2=new test file lines
+  reset; mkdir -p src tests; gen "$1" > src/newmod.py; gen "$2" > tests/test_newmod.py; git add -A
+}
+shape 685 458; OUT="$(run --threshold 1000)"
+check "34844 shape cohesive" "$OUT" cohesive true; check "34844 shape new (test file is also new)" "$OUT" new_lines 1143
+check "34844 shape test" "$OUT" test_lines 458; check "34844 shape cohesive_lines" "$OUT" cohesive_lines 1143
+shape 471 593; OUT="$(run --threshold 1000)"; check "35124 shape cohesive" "$OUT" cohesive true
+shape 516 697; OUT="$(run --threshold 1000)"; check "35143 shape cohesive" "$OUT" cohesive true
+shape 1478 0; OUT="$(run --threshold 1000)"; check "35100 all-new at 1.5x cohesive" "$OUT" cohesive true
+shape 1500 1; OUT="$(run --threshold 1000)"; check "over 1.5x not cohesive" "$OUT" cohesive false
+shape 1000 0; OUT="$(run --threshold 0)"; check "threshold 0 not cohesive" "$OUT" cohesive false
+
+# new test file counts once (union), under the threshold still reports cohesive
+reset; mkdir -p tests; gen 50 > tests/test_x.py; git add -A
+OUT="$(run --threshold 1000)"; check "new test file new" "$OUT" new_lines 50; check "new test file test" "$OUT" test_lines 50
+check "new test file union once" "$OUT" cohesive_lines 50
+
+# a modified (not added) test file counts as test, not new
+reset; mkdir -p tests; gen 40 > tests/test_old.py
+git add -A; git commit -qm t; git push -q origin feat:staging 2>/dev/null
+gen 10 | sed 's/line/chg/' > tests/test_old.py; gen 30 > src_new.py; git add -A
+OUT="$(run)"; check "modified test new_lines" "$OUT" new_lines 30; check "modified test test_lines" "$OUT" test_lines 50
+check "modified test union" "$OUT" cohesive_lines 80
+git reset -q --hard origin/staging
+
+# sprawl: 1300 lines across 15 modified files is not cohesive
+reset; for i in $(seq 1 15); do gen 50 > "m$i.txt"; done; git add -A; git commit -qm m; git push -q origin feat:staging 2>/dev/null
+for i in $(seq 1 15); do gen 43 | sed 's/line/edit/' > "m$i.txt"; done; git add -A
+OUT="$(run --threshold 1000)"
+check "sprawl lines" "$OUT" diff_lines 1395; check "sprawl cohesive_lines" "$OUT" cohesive_lines 0; check "sprawl not cohesive" "$OUT" cohesive false
+git reset -q --hard origin/staging
+
+# modified (not added) test file is test-classified; modified non-test stays out; basename patterns, no substring match
+reset; mkdir -p t; gen 10 > latest.sh; gen 10 > contest.txt; gen 10 > a.spec.ts; gen 10 > b_test.go; gen 10 > test_c.py; git add -A
+OUT="$(run)"; check "latest.sh and contest.txt are new, all counted" "$OUT" new_lines 50
+check "test name patterns" "$OUT" test_lines 30
+
+# excluded files are not counted by cohesion
+reset; gen 20 > keep.py; gen 900 > package-lock.json; git add -A
+OUT="$(run --threshold 1000)"; check "excluded not in new_lines" "$OUT" new_lines 20
+
+# existing key order is unchanged: cohesion keys sit between over= and top=
+reset; gen 3 > s.txt; git add -A
+KEYS="$(run | sed -n 's/^\([a-z_]*\)=.*/\1/p' | tr '\n' ' ')"
+[ "$KEYS" = "diff_lines excluded_lines threshold over new_lines test_lines cohesive_lines cohesive top " ] && ok || bad "key order ($KEYS)"
+
 # fail closed: bad repo path, bad base, bad threshold, unknown arg, missing base
 OUT="$(bash "$S" --repo-path "$TMP/nope" --base staging 2>/dev/null)"; rc=$?
 { [ "$rc" = 2 ] && [ -z "$OUT" ]; } && ok || bad "bad repo path (rc=$rc out='$OUT')"

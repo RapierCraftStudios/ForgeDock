@@ -97,6 +97,10 @@ async function issueMarkers(issue, io) {
 
 /** Non-terminal held-resume record (remediate.md Phase M8, forge#3685): header and sentinel are the same line; never a COMPLETE marker. */
 const REMEDIATION_HELD_MARKER = "FORGE:REMEDIATION_HELD";
+/** Non-terminal deferral record (remediate.md Phase M0 liveness step): a live earlier run holds the lease. Never a COMPLETE/trail marker. */
+const REMEDIATION_DEFERRED_MARKER = "FORGE:REMEDIATION_DEFERRED";
+/** Lease holder ids the engine mints (`cli_<host>_<pid>`) are passed to remediate only when they match this shape (same as remediate-liveness.sh). */
+const LEASE_HOLDER_RE = /^[A-Za-z0-9._-]{1,128}$/;
 const reEscape = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** True when `body` STARTS with the typed header `<!-- {header}` (e.g. `FORGE:BUILDER`). */
 function startsWithHeader(body, header) {
@@ -270,7 +274,7 @@ function sizeGateRoutesToDecompose(comments) {
   for (let i = comments.length - 1; i >= 0; i--) if (starts(comments[i], gate)) { idx = i; break; }
   if (idx < 0) return false;
   const body = comments[idx].replace(/\r\n/g, "\n");
-  const m = /^result:[ \t]*(OK|OVERRIDDEN|OVER)[ \t]*$/m.exec(body);
+  const m = /^result:[ \t]*(OK|OVERRIDDEN|COHESIVE|OVER)[ \t]*$/m.exec(body);
   if (!m || m[1] !== "OVER" || !/^###[ \t]+Split Proposal\b/m.test(body)) return false;
   return !comments.slice(idx + 1).some((c) => starts(c, override) && overrideHasJustification(c));
 }
@@ -844,7 +848,9 @@ export const PHASES = [
     buildArgs: async (state, ctx, io) => {
       const pr = need(state.pr, "pr", /^[0-9]+$/);
       const kind = state.remediationKind ?? null;
-      const legacyArgs = () => [pr, "--issue", String(state.issue), ...repoArgs(ctx), ...baseArgs(state)];
+      // Pass the dispatching lease holder so remediate.md M0 can tell a live OTHER run from this engine's own lease.
+      const holderArgs = () => (typeof ctx.agentId === "string" && LEASE_HOLDER_RE.test(ctx.agentId) ? ["--lease-holder", ctx.agentId] : []);
+      const legacyArgs = () => [pr, "--issue", String(state.issue), ...repoArgs(ctx), ...baseArgs(state), ...holderArgs()];
       // Legacy handoff with no kind (needs-human label fallback, or no REVIEW_RESULT): there
       // is nothing to bind, so dispatch as before. remediate.md M0 then applies its default
       // single-attempt guard. A present-but-unknown kind is never dispatched.
@@ -924,6 +930,20 @@ export const PHASES = [
       }
       if (latest === null) {
         if (await prMerged()) return mergedResult("AUTO-LANDED");
+        // A deferral to a live earlier run (remediate.md M0 liveness step) is not a failed attempt. The
+        // decision was made by the script at M0 time, so the record is not re-judged against the clock (a
+        // lease that expired since is the NEXT dispatch's business). Only a trusted, full-line record for THIS
+        // PR counts, and only while it is newer than every `FORGE:REMEDIATION` trail comment: a later run
+        // that proceeded posts one, which retires the deferral.
+        let deferredAt = -1, trailAt = -1, deferred = null;
+        scoped.forEach((b, i) => {
+          if (startsWithHeader(b, REMEDIATION_DEFERRED_MARKER) && hasSentinelLine(b, REMEDIATION_DEFERRED_MARKER)) { deferredAt = i; deferred = b; }
+          else if (startsWithHeader(b, PHASE_MARKERS.remediate.header)) trailAt = i;
+        });
+        if (deferred !== null && deferredAt > trailAt && (state.pr == null || /^pr=(\d+)\s*$/m.exec(deferred)?.[1] === String(state.pr))) {
+          const kind = /^kind=(\w+)\s*$/m.exec(deferred)?.[1] ?? "lease";
+          return { status: "blocked", reason: "deferred", retryable: false, detail: `deferred-live-run: ${kind}` };
+        }
         return { status: "failed", detail: `no ${completion} marker` };
       }
       // Parse the **Re-gate outcome**: field remediate.md's Phase M8 posts
