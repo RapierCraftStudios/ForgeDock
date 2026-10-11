@@ -584,10 +584,12 @@ For fixable failures: checkout staging, apply fix, verify locally, commit as `fi
 
 Launch agent (model: {SUBAGENT_MODEL}) to analyze all commits since last deploy. Categorize as: NEW FEATURE, ENHANCEMENT, BUG FIX, REFACTOR, SECURITY, PERFORMANCE, INFRASTRUCTURE, DEPENDENCY. Separate user-facing vs internal. Document breaking changes and required pre-deploy actions.
 
+Substitute `[REVIEW_SHA]` in the template below with the literal full head SHA (40 or 64 hex, Phase -1 `REVIEW_SHA_FULL`) before dispatch; the agent's fence runs in a fresh shell, so it MUST NOT reference `${REVIEW_SHA_FULL}` or invent a value (empty when no PR resolved: omit the value; Phase 7 consumers fail closed).
+
 **MANDATORY — post findings as PR comment**: Before its first post attempt, the agent MUST persist the final report to a uniquely named durable file, then post it with `--body-file`. It MUST also return verdict, finding count, and one line per finding to the orchestrator whether the post succeeds or fails; on failure, return the file path and stop without retrying. After completing analysis, the agent posts its full report directly to the PR:
 ```bash
 gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:material-change -->
-Reviewed-SHA: ${REVIEW_SHA_FULL}
+Reviewed-SHA: [REVIEW_SHA]
 ## Material Change Analysis
 
 [full analysis report here]
@@ -615,7 +617,7 @@ Each reads the service diff, hunts for bugs, traces context across imports, pers
 **MANDATORY — each Bug Hunter agent MUST post its findings directly to the PR immediately upon completion** (do not wait for the orchestrator to batch-post):
 ```bash
 gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:bug-hunter-{service} -->
-Reviewed-SHA: ${REVIEW_SHA_FULL}
+Reviewed-SHA: [REVIEW_SHA]
 ## Bug Hunter Review — {service}
 
 [full findings here]
@@ -635,7 +637,7 @@ Agent hunts for: dead code, duplicate logic, complexity (>50 line functions), na
 **MANDATORY — post findings as PR comment**: Before its first post attempt, the agent MUST persist the final report to a uniquely named durable file, then post it with `--body-file`. It MUST also return verdict, finding count, and one line per finding to the orchestrator whether the post succeeds or fails; on failure, return the file path and stop without retrying. After completing analysis, the agent posts its full report directly to the PR:
 ```bash
 gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:code-quality -->
-Reviewed-SHA: ${REVIEW_SHA_FULL}
+Reviewed-SHA: [REVIEW_SHA]
 ## Code Quality Review
 
 [full analysis here]
@@ -780,12 +782,12 @@ DIFF_SLICE_API=$(truncate_slice "$DIFF_SLICE_API")
 DIFF_SLICE_INFRA=$(truncate_slice "$DIFF_SLICE_INFRA")
 DIFF_SLICE_SCRAPER=$(truncate_slice "$DIFF_SLICE_SCRAPER")
 ```
-For each dispatched persona, substitute `[DOMAIN_DIFF_SLICE]` → its matching `$DIFF_SLICE_*` variable (an empty slice falls back to the full diff, which is then truncated like every other slice). Also substitute `[AGENT_DOMAIN]` → the persona's marker domain (the `{domain}` used in its `FORGE:REVIEW-AGENT` marker), and keep `[PR_NUMBER]` / `[REVIEW_SHA_SHORT]` bound to the staging review's PR number and short head SHA (`staging` as the key when there is no PR number): personas derive their slice path `forge-slice-[PR_NUMBER]-[REVIEW_SHA_SHORT]-[AGENT_DOMAIN].diff` from them. Agents never run a full `gh pr diff`; only `--name-only` is allowed. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure.
+For each dispatched persona, substitute `[DOMAIN_DIFF_SLICE]` → its matching `$DIFF_SLICE_*` variable (an empty slice falls back to the full diff, which is then truncated like every other slice). Also substitute `[AGENT_DOMAIN]` → the persona's marker domain (the `{domain}` used in its `FORGE:REVIEW-AGENT` marker), and keep `[PR_NUMBER]` / `[REVIEW_SHA_SHORT]` bound to the staging review's PR number and short head SHA (`staging` as the key when there is no PR number): personas derive their slice path `forge-slice-[PR_NUMBER]-[REVIEW_SHA_SHORT]-[AGENT_DOMAIN].diff` from them. Also substitute `[REVIEW_SHA]` → the literal full head SHA (40 or 64 hex, the orchestrator's Phase -1 `REVIEW_SHA_FULL` value) into the dispatch prompt: a reviewer runs its post fence in a fresh shell, so it MUST NOT reference `${REVIEW_SHA_FULL}` and MUST NOT invent a value; when no full SHA resolved (no PR), omit the `Reviewed-SHA:` line value rather than fabricate one (Phase 7 consumers then fail closed). Agents never run a full `gh pr diff`; only `--name-only` is allowed. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure.
 
 **MANDATORY — each domain agent MUST persist its finalized body before posting its findings directly to the PR immediately upon completion** (not batched by the orchestrator). It MUST return verdict, finding count, and one line per finding to the orchestrator independently of delivery; if posting fails, return the durable file path and stop without retrying:
 ```bash
 gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:{domain} -->
-Reviewed-SHA: ${REVIEW_SHA_FULL}
+Reviewed-SHA: [REVIEW_SHA]
 ## {Domain} Review
 
 [full analysis here]
@@ -805,7 +807,7 @@ Agent maps dependencies, assesses integration points (service boundaries, env va
 **MANDATORY — post findings as PR comment**: Before its first post attempt, the agent MUST persist the final report to a uniquely named durable file, then post it with `--body-file`. It MUST also return verdict, finding count, and one line per finding to the orchestrator whether the post succeeds or fails; on failure, return the file path and stop without retrying. After completing analysis, the agent posts its full report directly to the PR:
 ```bash
 gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:regression-risk -->
-Reviewed-SHA: ${REVIEW_SHA_FULL}
+Reviewed-SHA: [REVIEW_SHA]
 ## Regression Risk Assessment
 
 [full risk matrix and rollback plan here]
@@ -995,7 +997,7 @@ ACTUAL_AGENT_COUNT=0
 if [ -n "$REVIEW_SHA_FULL" ] && [ -n "$TRUSTED_SCRIPT" ]; then
   # Only TRUSTED, current-head reviewer comments count, over every page of comments. Unique domains, so a duplicate does not inflate the count.
   ACTUAL_AGENT_COUNT=$(gh api --paginate "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
-    | bash "$TRUSTED_SCRIPT" bodies "^<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA_FULL}(\\r?\\n|$)" 2>/dev/null \
+    | bash "$TRUSTED_SCRIPT" bodies "^<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA:[ ]${REVIEW_SHA_FULL}(\\r?\\n|$)" 2>/dev/null \
     | jq -r 'scan("^<!-- FORGE:REVIEW-AGENT:([a-z0-9-]+) -->") | .[0]' 2>/dev/null | sort -u | grep -c . || echo 0)
 fi
 case "$ACTUAL_AGENT_COUNT" in ''|*[!0-9]*) ACTUAL_AGENT_COUNT=0 ;; esac   # fail closed: unreadable or untrusted counts as not posted
@@ -1039,7 +1041,7 @@ for AGENT_DOMAIN in $LAUNCHED_REVIEW_AGENTS; do
   AGENT_COMMENT_COUNT=0
   if [ -n "$REVIEW_SHA_FULL" ] && [ -n "$TRUSTED_SCRIPT" ]; then
     AGENT_COMMENT_COUNT=$(gh api --paginate "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
-      | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA_FULL}(\\r?\\n|$)" 2>/dev/null || echo 0)
+      | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA:[ ]${REVIEW_SHA_FULL}(\\r?\\n|$)" 2>/dev/null || echo 0)
   fi
   case "$AGENT_COMMENT_COUNT" in ''|*[!0-9]*) AGENT_COMMENT_COUNT=0 ;; esac   # fail closed: counts as missing
   if [ "${AGENT_COMMENT_COUNT:-0}" -lt 1 ]; then
@@ -1079,7 +1081,7 @@ COMMENTS_JSON=$(gh api --paginate "repos/${GH_REPO}/issues/${PR_NUMBER}/comments
 if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then
   echo "STAGING_REVIEW: BLOCKED - scripts/trusted-comments.sh unresolvable or PR comments unreadable; refusing to extract findings (fail closed)"; exit 1
 fi
-AGENT_RE="^<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA_FULL}(\\r?\\n|$)"
+AGENT_RE="^<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA:[ ]${REVIEW_SHA_FULL}(\\r?\\n|$)"
 AGENT_BODIES=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies "$AGENT_RE" 2>/dev/null) \
   || { echo "STAGING_REVIEW: BLOCKED - trusted reviewer comments unreadable (fail closed)"; exit 1; }
 ALL_FINDINGS=$(printf '%s\n' "$AGENT_BODIES" | jq -r 'scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null)

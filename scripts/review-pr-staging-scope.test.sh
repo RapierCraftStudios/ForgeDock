@@ -119,5 +119,10 @@ OUT8=$( ( unset ALL_PR_NUMBERS; PR_NUMBER=99; export PATH="$TMP/bin:$PATH" FORGE
 grep -q 'staging_pr_number' "$SPEC" && grep -q '_bundle-prs.txt' "$SPEC" && ok || bad "Phase -1 / 0A must persist staging_pr_number and _bundle-prs.txt"
 if awk '/^### 0B.1:/,/^## Phase 1:/' "$SPEC" | grep -q '{GH_REPO}'; then bad "0B.1 must not use the {GH_REPO} template token"; else ok; fi
 if awk '/^### 7B.5:/,/^### 7B.6:/' "$SPEC" | grep -qE '\{GH_REPO\}|gh pr comment \$\{PR_NUMBER\}'; then bad "7B.5 must use quoted \$GH_REPO / \$PR_NUMBER"; else ok; fi
+# (7) reviewer templates bind the full head SHA via the dispatch placeholder, not an orchestrator-only shell var
+if grep -qE '^Reviewed-SHA: \$\{REVIEW_SHA_FULL\}$' "$SPEC"; then bad "reviewer template still uses \${REVIEW_SHA_FULL} (unbound in a fresh shell)"; else ok; fi
+[ "$(grep -cE '^Reviewed-SHA: \[REVIEW_SHA\]$' "$SPEC")" -ge 5 ] && ok || bad "all five reviewer templates must use Reviewed-SHA: [REVIEW_SHA]"
+if grep -E '^Reviewed-SHA:' "$SPEC" | grep -qvE '^Reviewed-SHA: \[REVIEW_SHA\]$'; then bad "every Reviewed-SHA template line must be [REVIEW_SHA]"; else ok; fi
+grep -F 'substitute `[REVIEW_SHA]`' "$SPEC" | grep -qF '[REVIEW_SHA_SHORT]' || grep -qF 'Also substitute `[REVIEW_SHA]`' "$SPEC" && ok || bad "dispatch text must bind [REVIEW_SHA]"
 echo "review-pr-staging-scope.test.sh: passed=$PASS failed=$FAILN"
 [ "$FAILN" -eq 0 ]
