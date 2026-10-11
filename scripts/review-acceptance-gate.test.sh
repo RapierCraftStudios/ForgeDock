@@ -75,6 +75,9 @@ inv "$(chk ac-1 false)"; rc=$(run); eq "real fail: rc 1" "$rc" 1
 grep -q 'needs-human' "$TMP/out" && ok "real fail: needs-human added" || bad "real fail: no needs-human"
 inv "$(chk ac-1 'grep -q nomatch f.txt')"; rc=$(run); eq "grep exit 1 is a real fail" "$rc" 1
 inv "$(chk ac-1 'grep -q x nofile.txt')"; rc=$(run); eq "grep missing operand file stays a real fail" "$rc" 1
+inv "$(chk ac-1 'grep -q x nofile.txt 2>/dev/null')"; rc=$(run); eq "stderr-suppressed missing operand is a real fail (forge#3802)" "$rc" 1
+grep -q ':PASSED:' "$TMP/out" && bad "stderr-suppressed missing operand wrote PASSED" || ok "stderr-suppressed missing operand: no PASSED marker"
+inv "$(chk ac-1 'grep -sq x nofile.txt')"; rc=$(run); eq "grep -s missing operand is a real fail (forge#3802)" "$rc" 1
 
 for t in "echo 'unbalanced" 'echo a\\\\\\\\b' "grep -E '[' f.txt"; do
   inv "$(chk ac-7 "$t")"; rc=$(run); eq "malformed skipped, rc 0: $t" "$rc" 0

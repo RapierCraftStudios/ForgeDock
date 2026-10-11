@@ -828,7 +828,7 @@ export async function runIssue(opts) {
       // PHASE_COMMIT would strand the PR (`deferred` is not --retry-able, and a committed remediate lets `close` run on
       // an unmerged PR). Release our lease and exit with nothing written; the next dispatch re-picks remediate.
       if (phase.id === "remediate" && outcome.reason === "deferred") {
-        await projector.writeState(issue, { ...state, lease: null });
+        await releaseLease(state);
         return { terminalReason: "deferred", detail: outcome.detail };
       }
       if (!isRemediationHandoff)
@@ -906,9 +906,31 @@ export async function runIssue(opts) {
   }
   return await terminate(state, state.terminalReason || "merged");
 
+  // Re-read remote state and return the lease another LIVE agent holds, if any. `undefined` = none;
+  // `null` = the read failed (unknown). Our stale in-memory snapshot must never overwrite a live
+  // holder's lease. Residual TOCTOU: projector.writeState has no CAS, so this narrows the window
+  // from a whole phase to one read/write round trip.
+  async function foreignLiveLease() {
+    try {
+      const r = await projector.readState(issue);
+      return leaseHeld(r) ? r.lease : undefined;
+    } catch { return null; }
+  }
+
+  // Guarded lease release (race: another engine claimed the lease after ours expired).
+  // Writes `lease: null` only when no other live agent holds it; on read failure, fail safe (skip).
+  async function releaseLease(s) {
+    if (await foreignLiveLease() !== undefined) return false;
+    await projector.writeState(issue, { ...s, lease: null });
+    return true;
+  }
+
   async function terminate(s, reason, detail) {
     appendEvent(dir, issue, { event: "RUN_TERMINAL", reason });
-    const final = { ...deriveState(readLog(dir, issue)), terminal: true, terminalReason: reason, lease: null };
+    // The terminal write must always land; only the lease field is preserved when another live
+    // agent holds it. A failed read falls back to clearing (a lost terminal write would strand the issue).
+    const foreign = await foreignLiveLease();
+    const final = { ...deriveState(readLog(dir, issue)), terminal: true, terminalReason: reason, lease: foreign ?? null };
     await projector.writeState(issue, final);
     if (reason === "needs-human") await projector.setLabel(issue, "needs-human");
     // forge#2261: a distinct label for engine/tool-level failures (broken CLI

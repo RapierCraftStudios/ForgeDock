@@ -356,6 +356,61 @@ describe("runIssue", () => {
     assert.equal(calls.filter((c) => c === "work-on/remediate").length, 2);
   });
 
+  // forge#3806: a stale in-memory snapshot must never overwrite a lease another agent now holds.
+  const raceLease = (w, lease) => { w.body = upsertStateBlock(w.body, { ...parseState(w.body), lease }); };
+  const raceScript = (w, onRemediate, onReview) => ({
+    "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+    "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; },
+    "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; w.labels.push("needs-human"); onReview?.(); },
+    "work-on/remediate": onRemediate,
+  });
+  const deferMarker = (w) => { w.markers += SEP + "<!-- FORGE:REMEDIATION_DEFERRED -->\n## Remediation Deferred\n\npr=7\nkind=lease\nlease_by=cli_o_9\nlease_until=1"; };
+
+  it("forge#3806: deferral leaves a lease held by another agent (live holder) untouched when raced", async () => {
+    const { w, io } = fakeWorld();
+    const live = { by: "a2", until: 5000000 };
+    const script = raceScript(w, () => { deferMarker(w); raceLease(w, live); });
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "deferred");
+    assert.deepEqual(parseState(w.body).lease, live, "another agent's live lease must survive a1's deferral");
+  });
+
+  it("forge#3806: deferral still clears our own lease when no other agent holds it", async () => {
+    const { w, io } = fakeWorld();
+    const script = raceScript(w, () => deferMarker(w));
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "deferred");
+    assert.equal(parseState(w.body).lease, null);
+  });
+
+  it("forge#3806: deferral clears an expired foreign lease", async () => {
+    const { w, io } = fakeWorld();
+    const script = raceScript(w, () => { deferMarker(w); raceLease(w, { by: "a2", until: 500 }); });
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(parseState(w.body).lease, null);
+  });
+
+  it("forge#3806: terminate records the terminal state and label but keeps another agent's live lease", async () => {
+    const { w, io } = fakeWorld();
+    const live = { by: "a2", until: 5000000 };
+    // no-signal review (PR created during the run) terminates as needs-human via terminate()
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; raceLease(w, live); },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "needs-human");
+    const st = parseState(w.body);
+    assert.equal(st.terminal, true, "terminal write must still land");
+    assert.deepEqual(st.lease, live, "live holder's lease preserved by the raced terminate");
+    assert.ok(w.labels.includes("needs-human"));
+  });
+
   it("forge#3525: no-signal review (PR created during the run) stops at needs-human without remediate", async () => {
     const { w, io } = fakeWorld();
     const script = {
