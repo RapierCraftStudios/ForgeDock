@@ -387,7 +387,8 @@ Before building agent prompts, run `classify-lane.sh` for every issue in the cur
 ```bash
 # Resolve the helper once and reuse it for the initial dispatch and all finding
 # classification loops. Claude keeps its installed path as the default, while
-# OpenCode and Codex can use ForgeDock's repository-local scripts.
+# OpenCode and Codex use FORGE_HOME / FORGEDOCK_HOME / FORGE_ROOT. Never the target repo
+# ($REPO_PATH): it holds consumer-controlled code (#3400/#3483, #3596).
 resolve_classify_lane() {
   local candidates=()
   if [ "${FORGE_RUNTIME:-}" = "opencode" ] ||
@@ -395,14 +396,22 @@ resolve_classify_lane() {
      [ -n "${OPENCODE_PID:-}" ] ||
      [ -n "${OPENCODE:-}" ]; then
     case '${CLAUDE_PLUGIN_ROOT}' in /*) candidates+=('${CLAUDE_PLUGIN_ROOT}/scripts/classify-lane.sh') ;; esac  # running plugin first
+    [ -n "${FORGE_ROOT:-}" ] && candidates+=("$FORGE_ROOT/scripts/classify-lane.sh")
+    [ -n "${FORGEDOCK_HOME:-}" ] && candidates+=("$FORGEDOCK_HOME/scripts/classify-lane.sh")
     [ -n "${FORGE_HOME:-}" ] && candidates+=("$FORGE_HOME/scripts/classify-lane.sh")
-    [ -n "${REPO_PATH:-}" ] && candidates+=("$REPO_PATH/scripts/classify-lane.sh")
     candidates+=("$HOME/.opencode/scripts/classify-lane.sh")
   else
     case '${CLAUDE_PLUGIN_ROOT}' in /*) candidates+=('${CLAUDE_PLUGIN_ROOT}/scripts/classify-lane.sh') ;; esac  # running plugin first
+    [ -n "${FORGE_ROOT:-}" ] && candidates+=("$FORGE_ROOT/scripts/classify-lane.sh")
+    [ -n "${FORGEDOCK_HOME:-}" ] && candidates+=("$FORGEDOCK_HOME/scripts/classify-lane.sh")
     [ -n "${FORGE_HOME:-}" ] && candidates+=("$FORGE_HOME/scripts/classify-lane.sh")
     candidates+=("$HOME/.claude/scripts/classify-lane.sh")
-    [ -n "${REPO_PATH:-}" ] && candidates+=("$REPO_PATH/scripts/classify-lane.sh")
+    local _cfg _d
+    for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do  # newest pinned plugin cache
+      [ -n "$_cfg" ] || continue
+      _d=$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -V | tail -1)
+      [ -n "$_d" ] && candidates+=("$_d/scripts/classify-lane.sh")
+    done
   fi
 
   local candidate

@@ -1231,7 +1231,6 @@ Where:
 # Resolve from the ForgeDock install root (FORGE_ROOT, from the script-resolution block) — never from ${0}, which is meaningless inside a skill
 INDEXER_PATH=""
 [ -n "${FORGE_ROOT:-}" ] && INDEXER_PATH="$FORGE_ROOT/scripts/build-knowledge-index.mjs"
-[ -f "$INDEXER_PATH" ] || INDEXER_PATH="$REPO_PATH/scripts/build-knowledge-index.mjs"
 if node --version >/dev/null 2>&1 && [ -f "$INDEXER_PATH" ]; then
   echo "[cost-prior] Re-indexing issue #${NUMBER} and regenerating cost priors..."
   node "$INDEXER_PATH" --issue {NUMBER} --no-mirror 2>&1 | tail -5 \
@@ -1391,12 +1390,11 @@ LEDGER_INDEXED=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 
 ### Step 2: Run incremental indexer
 
-Resolve the indexer script path from the ForgeDock install root (`FORGE_ROOT`), falling back to the repository root:
+Resolve the indexer script path from the ForgeDock install root (`FORGE_ROOT`), never from the repository root (`REPO_PATH` holds the PR checkout):
 
 ```bash
 INDEXER_PATH=""
 [ -n "${FORGE_ROOT:-}" ] && INDEXER_PATH="$FORGE_ROOT/scripts/build-knowledge-index.mjs"
-[ -f "$INDEXER_PATH" ] || INDEXER_PATH="$REPO_PATH/scripts/build-knowledge-index.mjs"
 
 if [ ! -f "$INDEXER_PATH" ]; then
   echo "[LEDGER] scripts/build-knowledge-index.mjs not found — skipping Phase C5.3"
