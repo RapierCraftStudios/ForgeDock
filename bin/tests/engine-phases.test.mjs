@@ -1373,6 +1373,22 @@ describe("acceptance-gate-aware build outcome (forge#3545)", () => {
     assert.equal((await build.detectOutcome(st, world([done]))).status, "committed");
   });
 
+  it("PASSED then a newer BUILD_BLOCKED -> failed", async () => {
+    const o = await build.detectOutcome(st, world([done, gate("PASSED"), blocked]));
+    assert.equal(o.status, "failed");
+    assert.equal(o.retryable, false);
+  });
+
+  it("PASSED, BUILD_BLOCKED, then a re-run PASSED -> committed (forge#3725)", async () => {
+    const o = await build.detectOutcome(st, world([done, gate("PASSED"), blocked, gate("PASSED")]));
+    assert.equal(o.status, "committed");
+  });
+
+  it("FAILED, re-run FAILED again -> still failed", async () => {
+    const o = await build.detectOutcome(st, world([done, gate("FAILED"), gate("FAILED")]));
+    assert.equal(o.status, "failed");
+  });
+
   it("a gate marker quoted in prose, or from an untrusted author, does not block", async () => {
     const quoted = `see <!-- FORGE:ACCEPTANCE_GATE:FAILED --> in the thread`;
     assert.equal((await build.detectOutcome(st, world([done, quoted]))).status, "committed");
