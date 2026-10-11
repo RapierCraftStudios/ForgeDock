@@ -3128,7 +3128,7 @@ If the preflight failed, skip the rest of Phase 8. On exit code 1, return `REVIE
 REPO="{GH_REPO}"
 # §7B verdict + purpose-regression + calibration + trust-escalation guard — check before any merge attempt <!-- Added: forge#1601, forge#1741, forge#1745 -->
 # HARD RULE 3: VERDICT=CHANGES REQUESTED, HAS_PURPOSE_REGRESSION=true, CALIBRATION_NEEDS_HUMAN=true and TRUST_NEEDS_HUMAN=true all block
-# merge, including under --auto-merge. They are decided in earlier fences (earlier shells): re-declare them here with the orchestrator's
+# merge, including under auto-merge. They are decided in earlier fences (earlier shells): re-declare them here with the orchestrator's
 # values. VERDICT is APPROVED or CHANGES REQUESTED (the report template's APPROVE is normalized below; NEEDS RE-REVIEW fails closed);
 # the other five are true or false.
 VERDICT="{VERDICT}"; HAS_PURPOSE_REGRESSION="{HAS_PURPOSE_REGRESSION}"; CALIBRATION_NEEDS_HUMAN="{CALIBRATION_NEEDS_HUMAN}"
@@ -3159,7 +3159,7 @@ if [ "${ONLY_BASE_CONFLICT:-false}" = "true" ] && [ "$VERDICT" = "CHANGES REQUES
     # Pure base conflict (set in Phase 7B: the ONLY blocker): route to the base-sync path, NOT needs-human. <!-- Added: forge#3496 -->
     # work-on/review.md R4 sets workflow:remediating (not needs-human) when it hands off to remediate; a standalone /review-pr caller just sees the blocker.
     gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: base conflict with \`{MERGE_BASE}\` (the only blocking reason). No operator action is needed: the pipeline is performing the base sync automatically (merging \`origin/{MERGE_BASE}\` into the PR branch, merge only, no rebase, no force-push), re-running the quality gate, then re-reviewing the new head. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
-    # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "base-conflict". No needs-human, no gh pr merge.
+    # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "base-conflict". No needs-human, no merge.
 elif [ "$VERDICT" = "CHANGES REQUESTED" ] || [ "$HAS_PURPOSE_REGRESSION" = "true" ] || [ "$CALIBRATION_NEEDS_HUMAN" = "true" ] || [ "${TRUST_NEEDS_HUMAN:-false}" = "true" ]; then
     BLOCK_REASON=""
     [ "$VERDICT" = "CHANGES REQUESTED" ] && BLOCK_REASON="review verdict is CHANGES REQUESTED (blocking finding confirmed by Phase 7B)"
@@ -3189,7 +3189,7 @@ fi
 if [ "$PRE_MERGE_BASE_CONFLICT" = "true" ]; then
     # Base moved during review: route to the base-sync path, NOT needs-human. <!-- Added: forge#3496 -->
     gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: base conflict (\`mergeable=${PRE_MERGE_HEALTH}\`, \`mergeStateStatus=${PRE_MERGE_HEALTH_STATE}\`). No operator action is needed: the pipeline is performing the base sync automatically (merging \`origin/{MERGE_BASE}\` into the PR branch, merge only, no rebase, no force-push) and then re-reviewing. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
-    # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "base-conflict". No needs-human, no gh pr merge.
+    # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "base-conflict". No needs-human, no merge.
 elif [ "$PRE_MERGE_HEALTH_STATE" = "BLOCKED" ]; then
     # Branch protection not satisfied: syncing the base cannot clear it, so this is NOT a base-conflict blocker.
     gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: branch protection is not satisfied (\`mergeStateStatus=BLOCKED\`); syncing the base cannot clear it. Satisfy the required review/checks, then re-run /review-pr."
