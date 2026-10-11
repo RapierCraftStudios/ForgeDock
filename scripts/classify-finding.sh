@@ -182,6 +182,14 @@ upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]'; }
 SEV=$(upper "$SEVERITY")
 CONF=$(upper "$CONFIDENCE")
 
+# Telemetry (forge#3834): one best-effort record per finding, then the unchanged stdout line.
+_TEL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/telemetry.sh"; [ -f "$_TEL" ] && . "$_TEL" 2>/dev/null
+type forge_emit >/dev/null 2>&1 || forge_emit() { :; }
+disp() { # "<DISPOSITION> <reason>"
+  forge_emit finding_disposition severity="$SEV" confidence="${CONF:-UNKNOWN}" agent="${AGENT:-none}" disposition="${1%% *}" reason="${1#* }"
+  echo "$1"
+}
+
 # In-PR fix gate predicate (#3387, widened to HIGH/CRITICAL in #3592): CONFIRMED, linked to a
 # --inpr-diff file list, and the finding's file is one of those files. Fails toward ISSUE.
 inpr_match() {
@@ -195,11 +203,11 @@ case "$SEV" in
     # HIGH/CRITICAL skip the re-flag and safety gates below, so the in-PR check runs here, before
     # the exit. Everything else stays ISSUE: a HIGH is never demoted to NOTE.
     if inpr_match; then
-      echo "INPR_FIX $(printf '%s' "$SEV" | tr '[:upper:]' '[:lower:]')-confirmed-in-diff"; exit 0
+      disp "INPR_FIX $(printf '%s' "$SEV" | tr '[:upper:]' '[:lower:]')-confirmed-in-diff"; exit 0
     fi
-    echo "ISSUE severity-$SEV"; exit 0 ;;
+    disp "ISSUE severity-$SEV"; exit 0 ;;
   MEDIUM|LOW) ;;
-  *) echo "ISSUE unparseable-severity"; exit 0 ;;
+  *) disp "ISSUE unparseable-severity"; exit 0 ;;
 esac
 
 # Cross-head / cross-PR re-flag gate (#3641). Runs after the severity parse so HIGH/CRITICAL and
@@ -267,14 +275,14 @@ if [ -n "$PRIOR_FINDINGS" ] && [ -n "$FINDING_FILE" ]; then
     }
     END { if (!found && note) print note }
   ' "$PRIOR_FINDINGS" 2>/dev/null) || _reflag=""
-  if [ -n "$_reflag" ]; then echo "$_reflag"; exit 0; fi
+  if [ -n "$_reflag" ]; then disp "$_reflag"; exit 0; fi
 fi
 
 # In-PR fix gate (#3387, narrowed). MEDIUM CONFIRMED is an ISSUE under every rule below
 # (lineage included), so checking here changes only where it is handled, never whether.
 # HIGH/CRITICAL were handled in the severity case above.
 if [ "$SEV" = "MEDIUM" ] && inpr_match; then
-  echo "INPR_FIX medium-confirmed-in-diff"
+  disp "INPR_FIX medium-confirmed-in-diff"
   exit 0
 fi
 
@@ -287,7 +295,7 @@ if [ "$SEV" = "MEDIUM" ]; then
       | grep -Eo '^[[:space:]]*(fix_efficacy:|\*\*fix efficacy\*\*:)[[:space:]]*(fails|regresses)[[:space:]]*$' | head -n 1 \
       | grep -Eo '(fails|regresses)$') || FIX_EFF=""
   fi
-  if [ -n "$FIX_EFF" ]; then echo "ISSUE fix-efficacy-$FIX_EFF"; exit 0; fi
+  if [ -n "$FIX_EFF" ]; then disp "ISSUE fix-efficacy-$FIX_EFF"; exit 0; fi
 fi
 
 # Safety exemption. Keywords match whole words, where `_`, `-`, `/` and other
@@ -323,10 +331,10 @@ if [ -n "$CONTRACT_SCOPE" ] && [ -n "$FINDING_FILE" ]; then
         deferred)
           if [ -z "$SAFETY" ] && [ -n "$_inum" ] && [ "$_inum" != "$MERGE_ISSUE" ] \
              && [ -n "$CONTRACT_OPEN" ] && grep -Fxq -- "$_inum" "$CONTRACT_OPEN"; then
-            echo "NOTE contract-deferred #$_inum"; exit 0
+            disp "NOTE contract-deferred #$_inum"; exit 0
           fi ;;
         accepted-risk)
-          if [ -z "$SAFETY" ]; then echo "NOTE contract-accepted-risk"; exit 0; fi ;;
+          if [ -z "$SAFETY" ]; then disp "NOTE contract-accepted-risk"; exit 0; fi ;;
       esac
     done < "$CONTRACT_SCOPE"
   fi
@@ -334,21 +342,21 @@ fi
 
 if [ "$LINEAGE" = "review-finding" ]; then
   if [ "$SEV" = "MEDIUM" ] && { [ "$CONF" = "CONFIRMED" ] || { [ -n "$SAFETY" ] && [ "$CONF" = "LIKELY" ]; }; }; then
-    echo "ISSUE lineage-medium-${CONF:-UNKNOWN}"
+    disp "ISSUE lineage-medium-${CONF:-UNKNOWN}"
   else
-    echo "NOTE lineage-${SEV}-${CONF:-UNKNOWN}"
+    disp "NOTE lineage-${SEV}-${CONF:-UNKNOWN}"
   fi
   exit 0
 fi
 
 if [ "$SEV" = "LOW" ] || [ "$CONF" = "POSSIBLE" ]; then
   if [ -n "$SAFETY" ]; then
-    echo "ISSUE safety-exemption-$SAFETY"
+    disp "ISSUE safety-exemption-$SAFETY"
   else
-    echo "NOTE ${SEV}-${CONF:-UNKNOWN}"
+    disp "NOTE ${SEV}-${CONF:-UNKNOWN}"
   fi
   exit 0
 fi
 
-echo "ISSUE ${SEV}-${CONF:-UNKNOWN}"
+disp "ISSUE ${SEV}-${CONF:-UNKNOWN}"
 exit 0

@@ -681,6 +681,7 @@ if [ -n "$JUSTIFICATION" ]; then echo "OVERRIDE=VALID"; else echo "OVERRIDE=NONE
 **Step 3 — record.** Set `DIFF_LINES`, `EXCLUDED_LINES`, `THRESHOLD`, `RESULT` (`OK`, `OVERRIDDEN`, `COHESIVE` or `OVER`), `SPLIT_PROPOSAL` and `COHESION_NOTE` (set only for `COHESIVE`) from the steps above, then post one `<!-- FORGE:DIFF_SIZE -->` comment, idempotently: find the latest trusted comment starting with the marker and edit it, otherwise create it (on resume never stack duplicates; readers use the latest trusted one):
 
 ```bash
+# <Script resolution block from above goes here, verbatim>
 BODY="<!-- FORGE:DIFF_SIZE -->
 ## Diff Size
 
@@ -689,6 +690,7 @@ excluded_lines: ${EXCLUDED_LINES}
 threshold: ${THRESHOLD}
 result: ${RESULT}
 ${ESTIMATE_LINE:-}${COHESION_NOTE:-}${SPLIT_PROPOSAL:-}"
+_t=$(forge_resolve lib/telemetry.sh); FORGE_REPO="{GH_REPO}" FORGE_ISSUE="{NUMBER}" FORGE_PHASE=build bash "${_t:-/dev/null}" diff_size lines="$DIFF_LINES" excluded="$EXCLUDED_LINES" threshold="$THRESHOLD" result="$RESULT" >/dev/null 2>&1 || true # forge#3834 telemetry (final result incl. OVERRIDDEN)
 run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
 CID=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" --jq '[.[] | select(.body | startswith("<!-- FORGE:DIFF_SIZE")) | select((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or (.user.type == "Bot"))] | last | .id // ""' 2>/dev/null || true)
 if [ -n "$CID" ]; then run gh api "repos/{GH_REPO}/issues/comments/${CID}" -X PATCH -f body="$BODY" >/dev/null 2>&1 || run gh issue comment {NUMBER} {GH_FLAG} --body "$BODY"
@@ -945,7 +947,10 @@ fi
 **Post gate result comment**:
 
 ```bash
+# <Script resolution block, verbatim>
 run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
+_nf=$(printf '%b' "$FAILED_CHECKS" | grep -c '^- ' || true); _nm=$(printf '%b' "$MALFORMED_CHECKS" | grep -c '^- ' || true); _t=$(forge_resolve lib/telemetry.sh)
+[ -n "${DRY_RUN:-}" ] || FORGE_REPO="{GH_REPO}" FORGE_ISSUE="{NUMBER}" FORGE_PHASE=build bash "${_t:-/dev/null}" acceptance_gate phase=build verified="$VERIFIED_COUNT" failed="${_nf:-0}" malformed="${_nm:-0}" deferred="$DEFERRED_COUNT" >/dev/null 2>&1 || true # forge#3834 telemetry
 if [ "$SPEC_DEFECT" = "true" ]; then
   run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
 ## Acceptance Gate — BLOCKED (spec-defect)
