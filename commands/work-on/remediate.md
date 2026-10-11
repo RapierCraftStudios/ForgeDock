@@ -218,12 +218,28 @@ if [ -d "{WORKTREE_PATH}" ]; then
   git -C "{WORKTREE_PATH}" fetch origin
   git -C "{WORKTREE_PATH}" checkout {HEAD_BRANCH}
   git -C "{WORKTREE_PATH}" reset --hard "origin/{HEAD_BRANCH}"
-else
-  git worktree add "{WORKTREE_PATH}" {HEAD_BRANCH} "origin/{HEAD_BRANCH}"
+elif ! WT_ERR=$(git worktree add "{WORKTREE_PATH}" {HEAD_BRANCH} "origin/{HEAD_BRANCH}" 2>&1); then
+  # Branch already checked out elsewhere: reuse that worktree (never the main checkout).
+  EXISTING_WT=""; MAIN_WT=""; CUR_WT=""
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree "*) CUR_WT="${line#worktree }"; [ -z "$MAIN_WT" ] && MAIN_WT="$CUR_WT" ;;
+      "branch refs/heads/{HEAD_BRANCH}") [ -z "$EXISTING_WT" ] && EXISTING_WT="$CUR_WT" ;;
+    esac
+  done < <(git worktree list --porcelain)
+  WORKTREE_PATH=""   # stays empty (BLOCKED) unless the reuse is provably safe
+  if [ -n "$EXISTING_WT" ] && [ "$EXISTING_WT" != "$MAIN_WT" ] && [ -d "$EXISTING_WT" ] \
+     && [ -z "$(git -C "$EXISTING_WT" status --porcelain)" ] \
+     && [ "$(git -C "$EXISTING_WT" rev-list --count "origin/{HEAD_BRANCH}..HEAD")" = "0" ]; then
+    git -C "$EXISTING_WT" fetch origin && git -C "$EXISTING_WT" reset --hard "origin/{HEAD_BRANCH}" && WORKTREE_PATH="$EXISTING_WT"
+  else echo "$WT_ERR" >&2; fi
+  echo "WORKTREE_PATH=$WORKTREE_PATH"   # use this printed value for every later {WORKTREE_PATH}
 fi
 ```
 
-If the worktree/branch checkout fails for any reason (branch deleted, force-pushed out from under us, etc.): post a comment, add `needs-human`, EXIT `REMEDIATE_RESULT: status: BLOCKED`.
+**Main-checkout ban**: remediation never runs `checkout`, `switch`, `reset`, `stash`, or `merge` in the main checkout (`{REPO_PATH}`), not even as a fallback for a failed `git worktree add`; every mutating git command targets `{WORKTREE_PATH}` via `git -C`. A reused worktree is never reset when it has uncommitted changes or commits not on `origin/{HEAD_BRANCH}`, and an unresolvable one is not improvised around: `WORKTREE_PATH` stays empty and an empty value after this block means BLOCKED. <!-- Added: forge#3650 -->
+
+If the worktree/branch checkout fails for any reason (branch deleted, force-pushed out from under us, checked out in the main checkout, etc.): post a comment, add `needs-human`, EXIT `REMEDIATE_RESULT: status: BLOCKED`.
 
 ---
 
