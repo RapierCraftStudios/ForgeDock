@@ -27,7 +27,12 @@ awk -v dir="$WORK" '
   /^# END review-pr-agent-domain/ {on=0; close(out)}
 ' "$SPEC"
 copies=$(ls "$WORK"/helper.* 2>/dev/null | wc -l | tr -d ' ')
-if [ "$copies" -ge 4 ]; then ok; else bad "expected >=4 inline agent_domain copies (roster, canonicalize, dispatch, phase 4), found $copies"; fi
+if [ "$copies" -ge 3 ]; then ok; else bad "expected >=3 inline agent_domain copies (canonicalize, dispatch, phase 4), found $copies"; fi
+# The roster script carries its own copy of the helper; it must match the inline copies (forge#3599).
+ROSTER="$ROOT/scripts/review-roster.sh"
+want_fn=$(grep '^agent_domain()' "$WORK/helper.1")
+got_fn=$(grep '^agent_domain()' "$ROSTER")
+if [ -n "$want_fn" ] && [ "$want_fn" = "$got_fn" ]; then ok; else bad "scripts/review-roster.sh agent_domain differs from the inline copies"; fi
 for f in "$WORK"/helper.*; do
   [ -f "$f" ] || continue
   if cmp -s "$f" "$WORK/helper.1"; then ok; else bad "$(basename "$f") differs from helper.1"; fi
@@ -54,8 +59,8 @@ for l in API Api; do check "$l" api; done
 check "CustomDomain" customdomain
 
 # Test 4: add_agent dedups across spellings; canonicalization block yields one entry per persona
-ADD=$(awk '/^add_agent\(\) \{/{on=1} on{print} on && /^\}/{exit}' "$SPEC")
-if [ -n "$ADD" ]; then ok; else bad "add_agent not found in spec"; fi
+ADD=$(awk '/^add_agent\(\) \{/{on=1} on{print} on && /^\}/{exit}' "$ROSTER")
+if [ -n "$ADD" ]; then ok; else bad "add_agent not found in scripts/review-roster.sh"; fi
 eval "$ADD"
 SELECTED_AGENTS="Security INFRA SCRAPING"
 add_agent "Infrastructure"; add_agent "Scraping"; add_agent "Auth"; add_agent "AUTH"; add_agent "security"

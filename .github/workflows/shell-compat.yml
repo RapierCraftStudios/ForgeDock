@@ -74,6 +74,7 @@ jobs:
           /bin/bash scripts/check-spec-bash.test.sh
           /bin/bash scripts/review-pr-arguments.test.sh
           /bin/bash scripts/review-pr-domain-map.test.sh
+          /bin/bash scripts/review-roster.test.sh
           /bin/bash scripts/spawn-depth-check.test.sh
           /bin/bash scripts/diff-size.test.sh
           /bin/bash scripts/close-dossier-no-main-commit.test.sh
@@ -128,6 +129,7 @@ jobs:
           bash scripts/check-spec-bash.test.sh
           bash scripts/review-pr-arguments.test.sh
           bash scripts/review-pr-domain-map.test.sh
+          bash scripts/review-roster.test.sh
       - name: Run is-docs-only.test.sh
         run: bash scripts/is-docs-only.test.sh
       - name: Run spawn-depth-check.test.sh
@@ -192,6 +194,7 @@ jobs:
           bash scripts/check-spec-bash.test.sh
           bash scripts/review-pr-arguments.test.sh
           bash scripts/review-pr-domain-map.test.sh
+          bash scripts/review-roster.test.sh
       - name: Run is-docs-only.test.sh
         run: bash scripts/is-docs-only.test.sh
       - name: Run spawn-depth-check.test.sh

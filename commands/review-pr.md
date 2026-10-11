@@ -1012,7 +1012,7 @@ Tiers (fixed thresholds, identical to `architect.md` Phase A5): **HOT** = 15+ co
 
 ### 3B: Select Agents — Risk-Scaled Dispatch
 
-**Default: 2-3 agents.** General Security always runs. Select the top 1-2 domain agents by relevance score, then apply escalation triggers to add more only when signals warrant it. Use `--thorough` to restore full union dispatch for release-critical PRs.
+**Default: risk-tiered roster (Step 4).** General Security always runs; small and fix PRs get Security only unless a path trigger fires, larger PRs add domain agents by score and path. Use `--thorough` to restore full union dispatch for release-critical PRs.
 
 #### Step 1: Score Each Domain by Signal Strength
 
@@ -1106,44 +1106,49 @@ echo "$CHURN_CONTEXT" | grep -q "HOT" && CHURN_ESCALATION=true
 echo "=== CHURN_ESCALATION: $CHURN_ESCALATION ==="
 ```
 
-#### Step 4: Build Selected Agent Roster
+#### Step 4: Build Selected Agent Roster (tiered, delegated to `review-roster.sh`)
 
-**If `THOROUGH=true`** (user passed `--thorough`, or `IS_MILESTONE_TO_STAGING=true`): run full union dispatch — all agents matching any signal. Skip to "Full union dispatch" below.
-
-**Default (THOROUGH=false):**
-
-Start with the baseline roster: `SELECTED_AGENTS="Security"` (General Security always runs).
-
-Pick the top 1-2 domain agents by score:
+The roster is a pure function in `scripts/review-roster.sh` (flags in, `SELECTED_AGENTS=`, `TIER=`, `REASON=` out). Tiers, in order: `full` (`--thorough` or milestone-to-staging: the union of every domain with a score above 0), `fix-pr` (`MERGE_ISSUE` carries `review-finding`: Security, plus the source finding's domain when it was HIGH or CRITICAL), `small` (60 changed lines or fewer, or one file of 150 lines or fewer: Security only), `medium` (61-150 lines: Security plus the score-escalation triggers), `standard` (over 150 lines or unknown size: the top-2 domains by score plus the triggers). Path and contract triggers escalate in every tier but `full`: CONTRACT `HIGH_RISK` (lifts the roster to `standard`), cross-critical score pairs, churn hot-spot or danger zone (top domain), `bin/engine*` (Concurrency, spec-cli), auth/session/trust-filter files (Auth), CI/docker/deploy/infra files (Infra), migration files (Database), SDK/OpenAPI files (API). Auth and Infra are selected by path only, never by diff-text score. Security is always in the roster. <!-- Added: forge#3599 -->
 
 ```bash
-# Build sorted list: "score:domain"
-DOMAIN_SCORES="$SCORE_AUTH:AUTH $SCORE_BILLING:BILLING $SCORE_CONCURRENCY:CONCURRENCY $SCORE_DATABASE:DATABASE $SCORE_INFRA:INFRA $SCORE_SCRAPING:SCRAPING $SCORE_FRONTEND:FRONTEND $SCORE_API:API"
-
-# Sort descending by score, pick top 2 with score > 0
-TOP_DOMAINS=$(echo "$DOMAIN_SCORES" | tr ' ' '\n' | sort -t: -k1 -rn | head -2 | awk -F: '$(1) > 0 {print $(2)}' | tr '\n' ' ')
-for DOMAIN in $TOP_DOMAINS; do
-    SELECTED_AGENTS="$SELECTED_AGENTS $DOMAIN"
-done
-echo "=== BASELINE ROSTER (top domains): $SELECTED_AGENTS ==="
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"; MERGE_ISSUE="{MERGE_ISSUE}"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+ROSTER_SCRIPT=$(forge_resolve review-roster.sh)
+# Size and lineage inputs; any unreadable value stays empty and the script widens the roster (unknown size = standard)
+LINES=$(gh pr view "$PR_NUMBER" -R "$REPO" --json additions,deletions --jq '.additions + .deletions' 2>/dev/null)
+NFILES=$(gh pr view "$PR_NUMBER" -R "$REPO" --json changedFiles --jq '.changedFiles' 2>/dev/null)
+FIX_PR=false; SRC_SEV=""; SRC_DOM=""
+if printf '%s' "$MERGE_ISSUE" | grep -qE '^[0-9]+$'; then
+  gh issue view "$MERGE_ISSUE" -R "$REPO" --json labels --jq '[.labels[].name] | any(. == "review-finding")' 2>/dev/null | grep -qx true && FIX_PR=true
+  if [ "$FIX_PR" = "true" ]; then
+    SRC_BODY=$(gh issue view "$MERGE_ISSUE" -R "$REPO" --json body --jq '.body' 2>/dev/null)
+    SRC_SEV=$(printf '%s\n' "$SRC_BODY" | sed -n 's/^\*\*Severity\*\*: *\([A-Za-z]*\).*/\1/p' | head -n 1)
+    SRC_DOM=$(printf '%s\n' "$SRC_BODY" | sed -n 's/^\*\*Agent\*\*: *//p' | head -n 1 | tr -c 'A-Za-z\n' ' ' | tr ' ' '\n' | grep -viE '^security$' | grep -v '^$' | head -n 1)
+  fi
+fi
+SC="AUTH=$SCORE_AUTH BILLING=$SCORE_BILLING CONCURRENCY=$SCORE_CONCURRENCY DATABASE=$SCORE_DATABASE INFRA=$SCORE_INFRA SECURITY=$SCORE_SECURITY SCRAPING=$SCORE_SCRAPING FRONTEND=$SCORE_FRONTEND API=$SCORE_API"
+DANGER=false; echo "$CHURN_CONTEXT" | grep -q "HOT-FINDINGS" && DANGER=true
+SPEC_CLI=false; [ -f "$(git rev-parse --show-toplevel 2>/dev/null)/commands/review-pr-agents/spec-cli.md" ] && SPEC_CLI=true
+SCRAPING_ON=false; [ -n "$DOMAIN_CONTEXT_SCRAPING" ] && SCRAPING_ON=true
+DBC=false; echo "$DIFF" | grep -qE "docker-compose.*postgres|docker-compose.*redis|postgres.*command:|redis.*command:" && DBC=true
+ROSTER_OUT=""
+[ -n "$ROSTER_SCRIPT" ] && ROSTER_OUT=$(printf '%s\n' "$FILES" | bash "$ROSTER_SCRIPT" --files-file - --scores "$SC" --changed-lines "$LINES" --changed-files "$NFILES" \
+  --fix-pr "$FIX_PR" --source-severity "$SRC_SEV" --source-domain "$SRC_DOM" --contract-flags "$CONTRACT_RISK_FLAGS" --churn "$CHURN_ESCALATION" --danger-zone "$DANGER" \
+  --thorough "$THOROUGH" --milestone "$IS_MILESTONE_TO_STAGING" --scraping-configured "$SCRAPING_ON" --database-container "$DBC" --spec-cli "$SPEC_CLI" 2>/dev/null)
+SELECTED_AGENTS=$(printf '%s\n' "$ROSTER_OUT" | sed -n 's/^SELECTED_AGENTS=//p')
+ROSTER_TIER=$(printf '%s\n' "$ROSTER_OUT" | sed -n 's/^TIER=//p')
+ROSTER_REASON=$(printf '%s\n' "$ROSTER_OUT" | sed -n 's/^REASON=//p')
+if [ -z "$SELECTED_AGENTS" ]; then
+  # Fail toward more agents, never fewer: script unresolved or failed means the full union below runs.
+  THOROUGH=true; ROSTER_TIER=full; ROSTER_REASON="review-roster.sh unavailable: full union"
+fi
+echo "=== ROSTER TIER: $ROSTER_TIER ($ROSTER_REASON) ==="
+echo "=== ROSTER: $SELECTED_AGENTS ==="
+gh pr comment "$PR_NUMBER" -R "$REPO" --body "<!-- FORGE:REVIEW_TIER tier=${ROSTER_TIER} spec=review-pr.md -->
+Reviewer roster tier \`${ROSTER_TIER}\`: ${ROSTER_REASON}. Roster: ${SELECTED_AGENTS:-full union (see below)}." 2>/dev/null || true # allowlist:check-command-side-effects
 ```
 
-**Apply escalation triggers** — each adds agents if not already included:
-
-| Trigger | Condition | Added Agents |
-|---------|-----------|--------------|
-| Critical auth path | `SCORE_AUTH >= 3` | Auth (if not already selected) |
-| Critical billing path | `SCORE_BILLING >= 3` | Billing + Concurrency |
-| Migration/schema change | `SCORE_DATABASE >= 3` | Database |
-| Stateful container change | `SCORE_INFRA >= 3` AND `DATABASE_CONTAINER` signal | Infrastructure |
-| Code execution risk | `SCORE_SECURITY >= 4` (deep scan signals) | Security runs in deep mode (already selected) |
-| Churn hot-spot | `CHURN_ESCALATION=true` AND top-scoring domain | Top domain gets added if not already in roster |
-| CONTRACT high-risk | `CONTRACT_RISK_FLAGS` contains `HIGH_RISK` | All CONTRACT-flagged domain agents |
-| First-pass finding severity | Phase 3 re-entry after a CONFIRMED/HIGH finding posted to PR | Add all agents for the domain of the finding |
-| Scraping domain | `SCORE_SCRAPING >= 3` AND `review.domains.scraping` is set in forge.yaml | Scraping (optional domain pack — never in default catalog) |
-| Cross-critical domains | `SCORE_AUTH >= 2` AND `SCORE_BILLING >= 2` | Auth + Billing + Concurrency |
-| Cross-critical domains | `SCORE_AUTH >= 2` AND `SCORE_DATABASE >= 3` | Auth + Database |
-| Cross-critical domains | `SCORE_BILLING >= 2` AND `SCORE_CONCURRENCY >= 2` | Billing + Concurrency + Database |
+When the fence falls back (empty `SELECTED_AGENTS`, tier `full`), treat `THOROUGH` as true for the "Full union dispatch" block below. The tier and reason are recorded in the `FORGE:REVIEW_TIER` marker; `FORGE:REVIEW_ROUTE` (and its Phase 5 `sha=` parse) is unchanged.
 
 **Roster label to marker domain (single source of truth)**: roster labels come in three spellings (score keys such as `INFRA`/`SCRAPING`, display names such as `Infrastructure`/`Scraping`, persona files such as `infra`/`scraper`). The marker domain in `<!-- FORGE:REVIEW-AGENT:{domain} -->` is always the canonical value below, never the lowercased roster label. Phase 4 stays fail closed on that canonical marker: no alias is accepted. <!-- Added: forge#3485 -->
 
@@ -1159,49 +1164,7 @@ echo "=== BASELINE ROSTER (top domains): $SELECTED_AGENTS ==="
 | `FRONTEND`, `Frontend`, `Web` | `frontend` | `frontend.md` |
 | `API` | `api` | `api.md` |
 
-A label outside the table falls back to its lowercase form. The `agent_domain()` helper is defined inline in every Bash block that needs it (each Bash call is a fresh shell); all copies must stay identical, which `scripts/review-pr-domain-map.test.sh` enforces.
-
-```bash
-# Apply escalation triggers
-# BEGIN review-pr-agent-domain
-agent_domain() { local l; l=$(printf '%s' "${1}" | tr '[:upper:]' '[:lower:]'); case "$l" in infrastructure) l=infra ;; scraping) l=scraper ;; web) l=frontend ;; esac; printf '%s' "$l"; }
-# END review-pr-agent-domain
-add_agent() {
-    local AGENT CUR HAVE=""
-    AGENT=$(agent_domain "${1}")
-    for CUR in $SELECTED_AGENTS; do
-        [ "$(agent_domain "$CUR")" = "$AGENT" ] && HAVE=1
-    done
-    [ -n "$HAVE" ] || SELECTED_AGENTS="$SELECTED_AGENTS $AGENT"
-}
-
-[ "$SCORE_AUTH" -ge 3 ] && add_agent "Auth"
-[ "$SCORE_BILLING" -ge 3 ] && { add_agent "Billing"; add_agent "Concurrency"; }
-[ "$SCORE_DATABASE" -ge 3 ] && add_agent "Database"
-[ "$SCORE_INFRA" -ge 3 ] && echo "$DIFF" | grep -qE "docker-compose.*postgres|docker-compose.*redis|postgres.*command:|redis.*command:" && add_agent "Infrastructure"
-# Scraping agent is opt-in: only spawns when review.domains.scraping is configured in forge.yaml
-[ "$SCORE_SCRAPING" -ge 3 ] && [ -n "$DOMAIN_CONTEXT_SCRAPING" ] && add_agent "Scraping"
-[ "$CHURN_ESCALATION" = "true" ] && {
-    # Add the top-scoring domain for deeper churn scrutiny if not already selected
-    TOP_CHURN_DOMAIN=$(echo "$DOMAIN_SCORES" | tr ' ' '\n' | sort -t: -k1 -rn | head -1 | awk -F: '{print $(2)}')
-    [ -n "$TOP_CHURN_DOMAIN" ] && add_agent "$TOP_CHURN_DOMAIN"
-}
-echo "$CONTRACT_RISK_FLAGS" | grep -q "HIGH_RISK" && {
-    echo "$CONTRACT_RISK_FLAGS" | grep -q "CONTRACT_AUTH" && add_agent "Auth"
-    echo "$CONTRACT_RISK_FLAGS" | grep -q "CONTRACT_BILLING" && { add_agent "Billing"; add_agent "Concurrency"; }
-    echo "$CONTRACT_RISK_FLAGS" | grep -q "CONTRACT_DATABASE" && add_agent "Database"
-}
-# Cross-critical domain escalation
-{ [ "$SCORE_AUTH" -ge 2 ] && [ "$SCORE_BILLING" -ge 2 ]; } && { add_agent "Auth"; add_agent "Billing"; add_agent "Concurrency"; }
-{ [ "$SCORE_AUTH" -ge 2 ] && [ "$SCORE_DATABASE" -ge 3 ]; } && { add_agent "Auth"; add_agent "Database"; }
-{ [ "$SCORE_BILLING" -ge 2 ] && [ "$SCORE_CONCURRENCY" -ge 2 ]; } && { add_agent "Billing"; add_agent "Concurrency"; add_agent "Database"; }
-# SDK/OpenAPI always adds API agent
-echo "$FILES" | grep -qE "^sdk/|openapi.*\.json$|openapi-versions/" && add_agent "API"
-
-echo "=== FINAL ROSTER (after escalation): $SELECTED_AGENTS ==="
-AGENT_COUNT=$(echo "$SELECTED_AGENTS" | wc -w)
-echo "=== AGENT COUNT: $AGENT_COUNT ==="
-```
+A label outside the table falls back to its lowercase form. The `agent_domain()` helper is defined inline in every Bash block that needs it (each Bash call is a fresh shell) and in `scripts/review-roster.sh`; all copies must stay identical, which `scripts/review-pr-domain-map.test.sh` enforces.
 
 ### 3B.5: Provenance-Based Trust Escalation (Conditional)
 
@@ -1614,7 +1577,7 @@ Read: $MONOLITHIC_CATALOG
 ```
 Then extract the shared protocols section and each selected persona's section from within that single file — same content, different packaging.
 
-Persona file names: `security.md` (always), `auth.md`, `billing.md`, `concurrency.md`, `scraper.md`, `frontend.md`, `api.md`, `database.md`, `infra.md`, and `spec-cli.md` (marker domain `spec-cli`, only ever on a `DELTA` roster whose delta touches `commands/**` or `bin/**` AND whose repo contains `commands/review-pr-agents/spec-cli.md`, i.e. ForgeDock itself; consumer repos never get it).
+Persona file names: `security.md` (always), `auth.md`, `billing.md`, `concurrency.md`, `scraper.md`, `frontend.md`, `api.md`, `database.md`, `infra.md`, and `spec-cli.md` (marker domain `spec-cli`, only ever on a roster whose diff touches `bin/**` (any tier) or `commands/**` (standard tier or a `DELTA` roster) AND whose repo contains `commands/review-pr-agents/spec-cli.md`, i.e. ForgeDock itself; consumer repos never get it).
 See `review-pr-agents.md` for the full routing table mapping domains → persona files.
 
 (`$FORGE_HOME` defaults to `~/.claude`)
@@ -1900,6 +1863,7 @@ When substituting `[FILE_LIST]` in each agent's template:
 - Infrastructure agent → `$DOMAIN_FILES_INFRA`
 - Scraping agent → `$DOMAIN_FILES_SCRAPING`
 - Frontend agent → `$DOMAIN_FILES_FRONTEND`
+- spec-cli agent (ForgeDock repo only, added by `review-roster.sh` on `bin/**` and, in the standard tier, `commands/**`) → the full `$FILES` list
 - API agent → `$DOMAIN_FILES_API`
 - Security agent → `$FILES` (full list)
 
