@@ -50,6 +50,19 @@ check "append: telemetry batched into 77 filed=0" "printf '%s' \"\$OUT\" | grep 
 check "append: all three added (substring .bak does not dedup a/x.sh)" "[ \$(grep -c '^- \[ \] \`' '$ISSUE_BODY.edited') -eq 4 ]"
 check "append: known-flaw flagged" "grep -q 'b/y.sh. \*\*known-flaw\*\*' '$ISSUE_BODY.edited'"
 
+# 2b. empty why + known-flaw: the flag must survive (a whitespace IFS would collapse the empty field)
+reset
+printf 'd/w.sh\t\tknown-flaw\n' > "$T/emptywhy.tsv"
+bash "$S" --parent 10 --repo o/r --items "$T/emptywhy.tsv" >/dev/null; RC=$?
+rm -f "$ISSUE_BODY.edited"; printf 'x\n' > "$ISSUE_BODY"
+echo '{"items":[{"number":77,"author_association":"OWNER","user":{"type":"User"},"body":"<!-- FORGE:DEFERRED_FROM: #10 -->"}]}' > "$SEARCH_JSON"
+OUT=$(bash "$S" --parent 10 --repo o/r --items "$T/emptywhy.tsv"); RC=$?
+check "empty-why: append keeps known-flaw flag" "[ $RC -eq 0 ] && grep -q 'd/w.sh. \*\*known-flaw\*\*' '$ISSUE_BODY.edited'"
+
+# 2c. missing option value -> usage exit 2
+bash "$S" --parent >/dev/null 2>&1; RC=$?
+check "missing option value: rc 2" "[ $RC -eq 2 ]"
+
 # 3. already-listed path is not duplicated; nothing to add -> no edit
 reset
 printf -- '- [ ] `a/x.sh` — w\n- [x] `b/y.sh`\n- [ ] `c/z.sh`\n' > "$ISSUE_BODY"

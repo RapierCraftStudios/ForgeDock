@@ -20,10 +20,10 @@ set -uo pipefail
 PARENT=""; REPO=""; ITEMS="-"; FOLDED=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --parent) PARENT="${2-}"; shift 2 ;;
-    --repo) REPO="${2-}"; shift 2 ;;
-    --items) ITEMS="${2-}"; shift 2 ;;
-    --folded) FOLDED="${2-}"; shift 2 ;;
+    --parent|--repo|--items|--folded)
+      [ $# -ge 2 ] || { echo "file-deferred-followups: $1 requires a value" >&2; exit 2; }
+      case "$1" in --parent) PARENT="$2" ;; --repo) REPO="$2" ;; --items) ITEMS="$2" ;; --folded) FOLDED="$2" ;; esac
+      shift 2 ;;
     *) echo "usage: file-deferred-followups.sh --parent N --repo OWNER/REPO [--items FILE|-] [--folded N]" >&2; exit 2 ;;
   esac
 done
@@ -37,14 +37,19 @@ trap 'rm -rf "$TMP"' EXIT
 if [ "$ITEMS" = "-" ]; then cat > "$TMP/items.raw"; else cat "$ITEMS" > "$TMP/items.raw"; fi
 
 # Normalise: drop blank lines and duplicate paths (first wins), strip backticks from the path.
+# Internal file uses a non-whitespace separator (US, \x1f): a tab IFS collapses an empty `why` and drops the known-flaw flag.
+SEP=$(printf '\037')
 : > "$TMP/items"
-while IFS=$'\t' read -r p w k || [ -n "${p:-}" ]; do
+while IFS= read -r line || [ -n "$line" ]; do
+  # Split on TAB by hand: `IFS=$'\t' read` would collapse an empty why field and shift the flag into it.
+  p="${line%%$'\t'*}"; rest=""; w=""; k=""
+  case "$line" in *$'\t'*) rest="${line#*$'\t'}"; w="${rest%%$'\t'*}"; case "$rest" in *$'\t'*) k="${rest#*$'\t'}" ;; esac ;; esac
   p=$(printf '%s' "${p:-}" | tr -d '`' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
   [ -n "$p" ] || continue
-  if cut -f1 "$TMP/items" | grep -qxF -- "$p"; then continue; fi
+  if cut -d "$SEP" -f1 "$TMP/items" | grep -qxF -- "$p"; then continue; fi
   case "${k:-}" in known-flaw|1|yes|true) k="known-flaw" ;; *) k="" ;; esac
   w=$(printf '%s' "${w:-}" | tr '\r\n' '  ')
-  printf '%s\t%s\t%s\n' "$p" "$w" "$k" >> "$TMP/items"
+  printf '%s%s%s%s%s\n' "$p" "$SEP" "$w" "$SEP" "$k" >> "$TMP/items"
 done < "$TMP/items.raw"
 TOTAL=$(wc -l < "$TMP/items" | tr -d ' ')
 
@@ -109,7 +114,7 @@ if [ -n "$NUM" ]; then
     echo "DEFERRED_FILE=FAILED"; exit 4
   fi
   : > "$TMP/add"
-  while IFS=$'\t' read -r p w k; do
+  while IFS="$SEP" read -r p w k; do
     has_entry "$TMP/body" "$p" || entry "$p" "$w" "$k" >> "$TMP/add"
   done < "$TMP/items"
   if [ -s "$TMP/add" ]; then
@@ -120,7 +125,7 @@ if [ -n "$NUM" ]; then
       echo "DEFERRED_FILE=FAILED"; exit 4
     fi
   fi
-  while IFS=$'\t' read -r p w k; do printf '%s\t%s\n' "$p" "$NUM"; done < "$TMP/items"
+  while IFS="$SEP" read -r p w k; do printf '%s\t%s\n' "$p" "$NUM"; done < "$TMP/items"
   finish "$NUM" 0
   exit 0
 fi
@@ -132,9 +137,9 @@ fi
   printf '## Problem\n\n'
   printf 'Deferred from #%s: the items below were declared out of scope in its contract and are tracked here, in one issue, instead of surfacing later as review findings.\n\n' "$PARENT"
   printf '## Affected Files\n\n'
-  while IFS=$'\t' read -r p w k; do printf -- '- `%s`\n' "$p"; done < "$TMP/items"
+  while IFS="$SEP" read -r p w k; do printf -- '- `%s`\n' "$p"; done < "$TMP/items"
   printf '\n## Acceptance Criteria\n\n'
-  while IFS=$'\t' read -r p w k; do entry "$p" "$w" "$k"; done < "$TMP/items"
+  while IFS="$SEP" read -r p w k; do entry "$p" "$w" "$k"; done < "$TMP/items"
   printf '\n%s\n' "$MARKER"
 } > "$TMP/newissue"
 
@@ -147,6 +152,6 @@ else
   NUM=$(printf '%s' "$URL" | grep -oE '[0-9]+$' | tail -n 1)
   [ -n "$NUM" ] || { echo "DEFERRED_FILE=FAILED"; exit 4; }
 fi
-while IFS=$'\t' read -r p w k; do printf '%s\t%s\n' "$p" "$NUM"; done < "$TMP/items"
+while IFS="$SEP" read -r p w k; do printf '%s\t%s\n' "$p" "$NUM"; done < "$TMP/items"
 finish "$NUM" 1
 exit 0
