@@ -3707,7 +3707,7 @@ else
 # forge#2570: the hold is now scoped by the PR's target branch. This PR still transitions
 # to workflow:awaiting-merge (clearing needs-human) in BOTH cases below — the transition is
 # unchanged; only who acts next differs:
-#   - the default branch (`branches.default`, `main` if unset) / deploy gate (or an unresolved base — fail closed): held for a HUMAN merge
+#   - the deploy gate (`main`, the GitHub `default_branch`, or the default branch's committed `branches.default`; never read from the PR worktree) (or an unresolved base — fail closed): held for a HUMAN merge
 #     decision, because `staging → main` is the genuine human gate no agent performs.
 #   - any other base (staging, milestone/* — reversible integration branches): NOT held for
 #     a human. It is parked for remediate.md Phase M7's base-scoped auto-land bar (bot APPROVED
@@ -3723,8 +3723,11 @@ if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
     # forge#2625: `jq -r '.baseRefName'` stringifies a JSON null to the literal text "null" (not
     # an empty string), so the `-n` check alone does not catch it — add an explicit `!= "null"`
     # check so a literal-string "null" is treated the same as an empty/unresolved base (strict).
-    DEFAULT_BRANCH=$(yq '.branches.default // "main"' "${FORGE_CONFIG:-forge.yaml}" 2>/dev/null || echo "main"); DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
-    if [ -n "$GUARD_BASE" ] && [ "$GUARD_BASE" != "null" ] && [ "$GUARD_BASE" != "$DEFAULT_BRANCH" ]; then
+    # forge#3753: trusted resolver only (GitHub default_branch + committed default-branch config); never forge.yaml from $PWD (the PR worktree is author-controlled). Install roots only; unresolved script => strict.
+    _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"; GATE_SCRIPT=""
+    for _c in "${CLAUDE_PLUGIN_ROOT:-}" "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l"; do case "$_c" in /*) [ -z "$GATE_SCRIPT" ] && [ -f "$_c/scripts/resolve-deploy-gate.sh" ] && GATE_SCRIPT="$_c/scripts/resolve-deploy-gate.sh" ;; esac; done
+    if [ -n "$GATE_SCRIPT" ]; then GUARD_GATE=$(bash "$GATE_SCRIPT" "$GUARD_BASE" {GH_REPO} 2>/dev/null || echo true); else GUARD_GATE=true; fi; [ "$GUARD_GATE" = "false" ] || GUARD_GATE=true
+    if [ "$GUARD_GATE" = "false" ]; then
       # forge#2570: non-default-branch base — defer to remediate.md M7's auto-land, not a human.
       # forge#2626: standalone `/review-pr` (no remediate.md M6→M7 chain) would otherwise
       # strand this PR at `workflow:awaiting-merge` with no actionable guidance — add a

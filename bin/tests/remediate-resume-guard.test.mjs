@@ -4,7 +4,8 @@
 // anchored approval match, head-commit selection, engine-park admission).
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,14 +50,14 @@ describe("forge#3684 remediate.md resume guard", () => {
   });
 
   it("computes IS_DEPLOY_GATE before the resume substitution", () => {
-    const gate = spec.indexOf("IS_DEPLOY_GATE=false; else IS_DEPLOY_GATE=true");
+    const gate = spec.indexOf("IS_DEPLOY_GATE=$(bash \"$GATE_SCRIPT\"");
     const resume = spec.indexOf('if [ "${RESUME_AT_M7:-false}" = "true" ]; then\n  HEAD_OID');
     assert.ok(gate > 0 && resume > 0, "markers present");
     assert.ok(gate < resume, "IS_DEPLOY_GATE must be defined before the resume block");
   });
 
   it("forge#3728: every fence that reads IS_DEPLOY_GATE defines it first, identically", () => {
-    const def = "IS_DEPLOY_GATE=false; else IS_DEPLOY_GATE=true";
+    const def = "IS_DEPLOY_GATE=$(bash \"$GATE_SCRIPT\"";
     const fences = spec.split("```bash").slice(1).map((f) => f.split("```")[0]);
     const readers = fences.filter((f) => /\$\{?IS_DEPLOY_GATE/.test(f));
     assert.ok(readers.length >= 3, "resume, bar and M8 fences read the flag");
@@ -89,39 +90,42 @@ describe("forge#3684 remediate.md resume guard", () => {
   });
 });
 
-describe("forge#3722 deploy-gate base resolves branches.default", () => {
+describe("forge#3753 deploy-gate base never reads forge.yaml from the PR worktree", () => {
   const review = readFileSync(join(ROOT, "commands/review-pr.md"), "utf8");
-  const RES = "yq '.branches.default // \"main\"'";
-  it("no literal-main base comparison remains in either spec", () => {
-    assert.ok(!/!= "main"/.test(spec), "remediate.md");
-    assert.ok(!/!= "main"/.test(review), "review-pr.md");
-    assert.ok(spec.includes("branches.default"));
+  const SCRIPT = join(ROOT, "scripts/resolve-deploy-gate.sh");
+  it("no PWD-relative forge.yaml read feeds a gate decision", () => {
+    for (const [name, text] of [["remediate", spec], ["review-pr", review]]) {
+      assert.ok(!/\$\{FORGE_CONFIG:-forge\.yaml\}/.test(text), `${name}: cwd-relative forge.yaml read`);
+      assert.ok(!/!= "main"/.test(text), `${name}: literal-main comparison`);
+      assert.ok(text.includes("default_branch"), `${name}: GitHub default_branch`);
+    }
   });
-  it("every fence comparing a base to DEFAULT_BRANCH resolves it first", () => {
+  it("every gate fence calls the trusted resolver and fails closed when unresolved", () => {
     for (const [name, text] of [["remediate", spec], ["review-pr", review]]) {
       const fences = text.split("```bash").slice(1).map((f) => f.split("```")[0]);
-      const users = fences.filter((f) => /!= "\$DEFAULT_BRANCH"/.test(f));
-      assert.ok(users.length >= 1, name);
+      const users = fences.filter((f) => /resolve-deploy-gate\.sh/.test(f));
+      assert.ok(users.length >= (name === "remediate" ? 5 : 1), name);
       for (const f of users) {
-        const r = f.indexOf(RES);
-        assert.ok(r >= 0 && r < f.indexOf('!= "$DEFAULT_BRANCH"'), `${name}: resolver precedes comparison`);
+        assert.ok(/else (IS_DEPLOY_GATE|PARK_GATE|GUARD_GATE)=true; fi/.test(f), `${name}: fail-closed fallback`);
+        assert.ok(!/\$PWD\/scripts\/resolve-deploy-gate/.test(f), `${name}: repo-relative script`);
       }
     }
   });
-  it("derivation executes correctly for main/master/production/empty/null", () => {
-    const line = spec.match(/^\s*(if \[ -n "\$LIVE_BASE_REF" \][^\n]*)$/m)[1];
-    const run = (base, cfg) => {
-      const script = `DEFAULT_BRANCH="${cfg}"; DEFAULT_BRANCH="\${DEFAULT_BRANCH:-main}"; LIVE_BASE_REF="${base}"; ${line}; echo $IS_DEPLOY_GATE`;
-      return String(spawnSync("bash", ["-c", script]).stdout).trim();
-    };
-    assert.equal(run("main", "main"), "true");
-    assert.equal(run("master", "master"), "true");
-    assert.equal(run("production", "production"), "true");
-    assert.equal(run("staging", "master"), "false");
-    assert.equal(run("", "master"), "true");
-    assert.equal(run("null", "master"), "true");
-    assert.equal(run("master", ""), "false");
-    assert.equal(run("main", ""), "true");
+  it("resolver executes: worktree forge.yaml release vs main stays strict", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gate-"));
+    try {
+      mkdirSync(join(dir, "bin"));
+      writeFileSync(join(dir, "bin/gh"), '#!/usr/bin/env bash\ncase "$*" in *"--jq .default_branch"*) echo "${GH_DEFAULT_STUB:-}";; *) exit 1;; esac\n', { mode: 0o755 });
+      writeFileSync(join(dir, "forge.yaml"), "branches:\n  default: release\n");
+      const run = (base, def) => String(spawnSync("bash", [SCRIPT, base, "o/r"], { cwd: dir, env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH}`, GH_DEFAULT_STUB: def } }).stdout).trim();
+      assert.equal(run("main", "main"), "true");
+      assert.equal(run("release", "main"), "false");
+      assert.equal(run("staging", "main"), "false");
+      assert.equal(run("master", "master"), "true");
+      assert.equal(run("staging", ""), "true");
+      assert.equal(run("", "main"), "true");
+      assert.equal(run("null", "main"), "true");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
 
