@@ -178,7 +178,7 @@ describe("pickPhase", () => {
     });
 
     // forge#3573: pre-build size estimate safety net.
-    const sized = (verdict, est, gate, factor) => inv(verdict, `ESTIMATED_DIFF_LINES: ${est}\nINDEPENDENT_SEAMS: 3\nGATE_THRESHOLD: ${gate}\n${factor === undefined ? "" : `ESTIMATE_FACTOR: ${factor}\n`}<!-- DECOMPOSE:${/YES/.test(verdict) ? "YES" : "NO"} -->`);
+    const sized = (verdict, est, gate, factor, seams = 3, justification) => inv(verdict, `ESTIMATED_DIFF_LINES: ${est}\nINDEPENDENT_SEAMS: ${seams}\nGATE_THRESHOLD: ${gate}\n${factor === undefined ? "" : `ESTIMATE_FACTOR: ${factor}\n`}${justification === undefined ? "" : `DECOMPOSE_JUSTIFICATION: ${justification}\n`}<!-- DECOMPOSE:${/YES/.test(verdict) ? "YES" : "NO"} -->`);
 
     it("NO verdict with estimate over threshold x 1.2 -> decomposed (safety net)", async () => {
       const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1500, 1000)));
@@ -239,6 +239,48 @@ describe("pickPhase", () => {
       const outcome = await investigate.detectOutcome(base, ioComments(
         inv("**YES** — split", `ESTIMATED_DIFF_LINES: 5000\nGATE_THRESHOLD: 1000\n<!-- ${PHASE_MARKERS.investigate.notDecomposedMarker} -->`)));
       assert.equal(outcome.terminalReason, undefined);
+    });
+
+    // forge#3786: a YES the numbers do not require is downgraded unless justified.
+    it("unsupported YES (1150 lines, 2 seams, gate 1000 x 1.2) -> not decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(sized("**YES** — split", 1150, 1000, "1.2", 2)));
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("unsupported YES with an own-line DECOMPOSE_JUSTIFICATION stays decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(sized("**YES** — split", 1150, 1000, "1.2", 2, "two migrations must ship separately")));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("quoted mid-line DECOMPOSE_JUSTIFICATION does not justify a YES", async () => {
+      const body = inv("**YES** — split", "see `DECOMPOSE_JUSTIFICATION: x` inline\nESTIMATED_DIFF_LINES: 1150\nINDEPENDENT_SEAMS: 2\nGATE_THRESHOLD: 1000\n<!-- DECOMPOSE:YES -->");
+      const outcome = await investigate.detectOutcome(base, ioComments(body));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("YES satisfying the seam clause (1150 lines, 3 seams) stays decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(sized("**YES** — split", 1150, 1000, "1.2", 3)));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("YES with 3 seams but estimate at or under threshold / 2 is downgraded", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(sized("**YES** — split", 500, 1000, "1.2", 3)));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("over-threshold YES with a single seam stays decomposed; NO->YES net unchanged (AlterLab#34446 shape)", async () => {
+      const yes = await investigate.detectOutcome(base, ioComments(sized("**YES** — split", 1300, 1000, "1.2", 1)));
+      assert.equal(yes.terminalReason, "decomposed");
+      const no = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1300, 1000, "1.2", 1)));
+      assert.equal(no.terminalReason, "decomposed");
+    });
+
+    it("YES without numeric fields stays decomposed; GATE_THRESHOLD 0 never downgrades", async () => {
+      const bare = await investigate.detectOutcome(base, ioComments(inv("**YES** — split")));
+      assert.equal(bare.terminalReason, "decomposed");
+      const off = await investigate.detectOutcome(base, ioComments(sized("**YES** — split", 100, 0, "1.2", 1)));
+      assert.equal(off.terminalReason, "decomposed");
     });
 
     // forge#3676: loop guard — a child / decomposed / overridden issue is never routed to decompose.

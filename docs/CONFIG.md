@@ -500,9 +500,10 @@ build:
     # straight to decompose without building. Default: 1.2. Skipped when threshold is 0.
     estimate_factor: 1.2
 
-    # Pre-build estimate (investigate): a batch with at least this many independent
-    # seams defaults to one sub-issue per seam unless the estimate is at or under
-    # half the threshold. Default: 3.
+    # Pre-build estimate (investigate): a non-batch issue with at least this many
+    # independent seams and an estimate over half the threshold is decomposed into
+    # packed sub-issues (not one per seam). Review-finding batches are exempt.
+    # Default: 3.
     batch_seam_min: 3
 
     # Extra exclusion globs, ADDITIVE to the built-in defaults below.
@@ -515,14 +516,14 @@ build:
 |-------|------|----------|-------------|
 | `diff_size.threshold` | integer | No | Changed lines allowed before the gate trips. Default: 1000. `0` disables the gate |
 | `diff_size.estimate_factor` | number | No | Multiplier on `threshold` for the pre-build estimate: the investigator forces a decomposition when `ESTIMATED_DIFF_LINES` > `threshold` x `estimate_factor`. The investigator emits the effective value as an own-line `ESTIMATE_FACTOR` field, and the engine's fail-toward-decompose net (`isDecomposed`) uses it even if the verdict says NO (1.2 when the field is absent or invalid). That net is suppressed (treated as not decomposed) for a sub-issue (`**Parent**: #N`), an issue with a trusted `FORGE:DECOMPOSED` comment, or a justified `FORGE:SIZE_OVERRIDE`, because decompose Guard 1 refuses those. Default: 1.2. Skipped when `threshold` is `0` |
-| `diff_size.batch_seam_min` | integer | No | Independent seams (batch members) at which an issue defaults to one sub-issue per seam, unless `ESTIMATED_DIFF_LINES` is at or under half of `threshold`. Default: 3. Skipped when `threshold` is `0` |
+| `diff_size.batch_seam_min` | integer | No | Independent seams at which an issue is decomposed when `ESTIMATED_DIFF_LINES` is over half of `threshold`. Does not apply to review-finding batches (`batch` label or `FORGE:BATCH_MEMBERS`), which decompose only above `threshold` x `estimate_factor`. Seams are packed into sub-issues, not one per seam. Default: 3. Skipped when `threshold` is `0` |
 | `diff_size.exclude_globs` | list of strings | No | Globs excluded from the measurement, in addition to the built-in defaults. Default: `[]` |
 
 **Built-in default exclusions** (always applied, defined once in `scripts/diff-size.sh`): lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `poetry.lock`, `uv.lock`, `go.sum`, `Gemfile.lock`, `composer.lock`), `*.min.*`, `*.snap`, and the directories `dist/`, `build/`, `generated/`, `fixtures/`, `vendor/` (anchored to the repo root, so first-party directories such as `commands/work-on/build/` are counted) plus `__generated__/` and `__snapshots__/` (any depth). The diff is measured against the merge base of `HEAD` and `origin/<base>`, so commits that landed on the base after the branch point are not counted. A configured glob ending in `/` matches that directory at any depth; any other glob is matched against the file basename and the full path. Globs are treated as data, never evaluated.
 
 **Over the threshold**: the build posts a `FORGE:DIFF_SIZE` comment with a split proposal and exits `BUILD_RESULT: status: NEEDS_DECOMPOSE`; the router then runs `work-on:decompose`. To build the oversized diff anyway, post a `FORGE:SIZE_OVERRIDE` comment whose body has a non-empty justification on the line after the marker (only comments from trusted authors count). An issue that is already a decomposed child, or that already has `FORGE:DECOMPOSED`, is not decomposed again: the build blocks until an override is posted. The staged diff is also persisted before the exit (pushed ref `forge/wip/{NUMBER}`, or a patch file when the push fails) and each split-proposal line links its hunks, so they survive worktree cleanup; decompose copies the link into each sub-issue. The measured `diff_lines` is recorded in the `FORGE:TRAJECTORY` comment.
 
-**Pre-build estimate**: `work-on:investigate` emits `ESTIMATED_DIFF_LINES`, `INDEPENDENT_SEAMS`, `GATE_THRESHOLD` and `ESTIMATE_FACTOR` inside `### Decomposition Assessment`. An estimate above `threshold` x `estimate_factor` (or a batch of `batch_seam_min`+ seams whose estimate is not well under the gate) answers `**YES**`, so the issue is decomposed before any build. The estimate rule is skipped when `threshold` is `0`.
+**Pre-build estimate**: `work-on:investigate` emits `ESTIMATED_DIFF_LINES`, `INDEPENDENT_SEAMS`, `GATE_THRESHOLD` and `ESTIMATE_FACTOR` inside `### Decomposition Assessment`. An estimate above `threshold` x `estimate_factor` (or, for a non-batch issue, `batch_seam_min`+ seams whose estimate is over `threshold` / 2) answers `**YES**`, so the issue is decomposed before any build into `max(2, ceil(estimate / (0.8 x threshold)))` packed sub-issues (the parent is a terminal tracker). The engine downgrades a `**YES**` that neither condition requires to NO unless the report has an own-line `DECOMPOSE_JUSTIFICATION:` line (it assumes `batch_seam_min` 3 and cannot see the `batch` label, so it is lenient for batches). The estimate rule is skipped when `threshold` is `0`.
 
 **Commands that use this section**: `work-on` (build phase B5.5, `decompose`, `close`)
 
