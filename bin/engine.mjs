@@ -514,6 +514,8 @@ export async function runIssue(opts) {
     // must honour that reason instead of picking the next phase (close would throw in buildArgs
     // and end as engine-error; build would run on a decomposed parent). Review's `needs-human`
     // is a handoff to remediate, so only these committed phases trigger the guard.
+    // forge#3754: a reopened (--retry) remediate-terminal run has `remediate` un-committed by the
+    // run-log reducer, so this guard does not fire and remediate re-runs.
     if (state.terminalReason && TERMINAL_REASONS.includes(state.terminalReason) &&
         ((state.committed.includes("remediate") && !["merged", "decomposed", "invalid"].includes(state.terminalReason)) ||
          (state.committed.includes("decompose") && state.terminalReason === "decomposed") ||
