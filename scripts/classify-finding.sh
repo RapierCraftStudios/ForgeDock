@@ -11,6 +11,7 @@
 #   classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>]
 #                       [--lineage none|review-finding] [--text <T> | --text-file <F>]
 #                       [--inpr-diff <F> --file <P>] [--contract-scope <F> --contract-open <F> [--pr-files <F>] [--merge-issue <N>]]
+#                       [--fix-efficacy fails|regresses] [--fixes-issue <N>]
 #                       [--prior-findings <F> [--title <T>] [--line-start <N> [--line-end <M>]] [--diff-map <F>]]
 #
 #   --severity    CRITICAL | HIGH | MEDIUM | LOW (case-insensitive). Missing or
@@ -21,6 +22,15 @@
 #   --lineage     `review-finding` when the PR's linked issue (MERGE_ISSUE) carries
 #                 the `review-finding` label — i.e. this PR is itself a fix for a
 #                 review finding. Default `none`.
+#   --fix-efficacy fails|regresses  The finding says the PR's linked issue is not fixed (`fails`) or
+#                 that the PR re-introduces its defect (`regresses`). A MEDIUM finding so marked is
+#                 `ISSUE fix-efficacy-<value>` under any lineage and confidence (the cascade damper must
+#                 not merge a known-broken fix). Without the flag the tag is read from `--text`
+#                 (`FIX_EFFICACY: fails|regresses` or `**Fix efficacy**: fails|regresses`); with
+#                 `--fixes-issue`, text citing exactly `#<N>` with an unfixed/re-introduced phrase also
+#                 counts. Opt-in only: never keyword-based. Runs after the INPR_FIX and re-flag gates and
+#                 before the contract-scope and lineage gates; LOW stays NOTE; HIGH/CRITICAL unchanged.
+#   --fixes-issue <N>  The PR's linked issue; alias of `--merge-issue` (same variable).
 #   --text/--text-file  Finding title + body + affected file paths, used for the
 #                 content-based safety exemption.
 #   --inpr-diff <F> --file <P>  In-PR fix gate (#3387, narrowed): F is a file listing the
@@ -100,6 +110,7 @@ CONTRACT_SCOPE=""
 CONTRACT_OPEN=""
 PR_FILES=""
 MERGE_ISSUE=""
+FIX_EFF=""
 PRIOR_FINDINGS=""
 TITLE=""
 LINE_START=""
@@ -107,7 +118,7 @@ LINE_END=""
 DIFF_MAP=""
 
 usage() {
-  echo "ERROR: Usage: classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>] [--lineage none|review-finding] [--text <T> | --text-file <F>] [--inpr-diff <F> --file <P>] [--contract-scope <F> --contract-open <F> [--pr-files <F>] [--merge-issue <N>]] [--prior-findings <F> [--title <T>] [--line-start <N> [--line-end <M>]] [--diff-map <F>]]" >&2
+  echo "ERROR: Usage: classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>] [--lineage none|review-finding] [--text <T> | --text-file <F>] [--inpr-diff <F> --file <P>] [--contract-scope <F> --contract-open <F> [--pr-files <F>] [--merge-issue <N>]] [--fix-efficacy fails|regresses] [--fixes-issue <N>] [--prior-findings <F> [--title <T>] [--line-start <N> [--line-end <M>]] [--diff-map <F>]]" >&2
   exit 2
 }
 
@@ -124,6 +135,8 @@ while [ "$#" -gt 0 ]; do
     --contract-open)  [ "$#" -ge 2 ] || usage; CONTRACT_OPEN="$2"; shift 2 ;;
     --pr-files)       [ "$#" -ge 2 ] || usage; PR_FILES="$2"; shift 2 ;;
     --merge-issue)    [ "$#" -ge 2 ] || usage; MERGE_ISSUE="${2#\#}"; shift 2 ;;
+    --fixes-issue)    [ "$#" -ge 2 ] || usage; MERGE_ISSUE="${2#\#}"; shift 2 ;;
+    --fix-efficacy)   [ "$#" -ge 2 ] || usage; FIX_EFF=$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]'); shift 2 ;;
     --prior-findings) [ "$#" -ge 2 ] || usage; PRIOR_FINDINGS="$2"; shift 2 ;;
     --title)          [ "$#" -ge 2 ] || usage; TITLE="$2"; shift 2 ;;
     --line-start)     [ "$#" -ge 2 ] || usage; LINE_START="$2"; shift 2 ;;
@@ -140,6 +153,11 @@ done
 case "$LINEAGE" in
   none|review-finding) ;;
   *) echo "ERROR: --lineage must be 'none' or 'review-finding' (got '$LINEAGE')" >&2; exit 2 ;;
+esac
+
+case "$FIX_EFF" in
+  ''|fails|regresses) ;;
+  *) echo "ERROR: --fix-efficacy must be 'fails' or 'regresses' (got '$FIX_EFF')" >&2; exit 2 ;;
 esac
 
 if [ -n "$INPR_DIFF" ] && [ ! -r "$INPR_DIFF" ]; then
@@ -259,6 +277,27 @@ fi
 if [ "$SEV" = "MEDIUM" ] && inpr_match; then
   echo "INPR_FIX medium-confirmed-in-diff"
   exit 0
+fi
+
+# Fix-efficacy exemption: a MEDIUM finding saying the PR's linked issue is not fixed, or that the PR
+# re-introduces its defect, is never damped (any lineage, any confidence, no contract demotion).
+# Opt-in on an explicit flag/tag, or on text citing exactly #MERGE_ISSUE with an unfixed phrase.
+if [ "$SEV" = "MEDIUM" ]; then
+  if [ -z "$FIX_EFF" ]; then
+    FIX_EFF=$(printf '%s' "$TEXT" | tr '[:upper:]' '[:lower:]' \
+      | grep -Eo '(fix_efficacy:|\*\*fix efficacy\*\*:)[[:space:]]*(fails|regresses)' | head -n 1 \
+      | grep -Eo '(fails|regresses)$') || FIX_EFF=""
+  fi
+  if [ -z "$FIX_EFF" ] && [ -n "$MERGE_ISSUE" ]; then
+    case "$MERGE_ISSUE" in *[!0-9]*) ;; *)
+      _lt=$(printf '%s' "$TEXT" | tr '[:upper:]' '[:lower:]')
+      if printf '%s' "$_lt" | grep -Eq "#${MERGE_ISSUE}([^0-9]|$)" \
+         && printf '%s' "$_lt" | grep -Eq 'still fails|does not fix|doesn.t fix|not fixed|not fully fixed|re-?introduc|regress'; then
+        FIX_EFF="fails"
+      fi ;;
+    esac
+  fi
+  if [ -n "$FIX_EFF" ]; then echo "ISSUE fix-efficacy-$FIX_EFF"; exit 0; fi
 fi
 
 # Safety exemption. Keywords match whole words, where `_`, `-`, `/` and other
