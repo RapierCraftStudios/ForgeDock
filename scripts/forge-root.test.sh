@@ -190,12 +190,20 @@ mkdir -p "$T/h10/.claude/plugins/cache"
 expect "empty cache, no match, no abort" "" "$(run "$T/h10")"
 expect "no ~/.claude at all, no abort" "" "$(run "$T/empty")"
 expect "unmatched glob does not break later candidates" "$T/h1/.claude/plugins/cache/forgedock/forgedock/1.0.0" "$(run "$T/h10" CLAUDE_PLUGIN_ROOT="$T/h1/.claude/plugins/cache/forgedock/forgedock/1.0.0")"
-# substituted plugin root alone resolves (the locator loads that root's helper; once loaded, the helper's own tier order applies, see forge-resolve.sh)
+# substituted plugin root alone resolves (the locator loads that root's helper; the stub also hands it to the helper as FORGE_SOURCED_ROOT, so it outranks FORGE_HOME and any newer cache; see forge-resolve.sh)
 mkscripts "$T/h11/running-plugin"; mkscripts "$T/h11/stale-clone"
 expect "substituted plugin root resolves" "$T/h11/running-plugin" "$(run "$T/h11" CLAUDE_PLUGIN_ROOT="$T/h11/running-plugin")"
 # unsubstituted placeholder (non-Claude runtime) is a literal, rejected by the /* check, never expanded
 expect "unsubstituted placeholder ignored, FORGE_HOME used" "$T/h11/stale-clone" "$(run "$T/h11" FORGE_HOME="$T/h11/stale-clone")"
 expect "unsubstituted placeholder safe under set -u" "" "$( cd "$T/consumer" && env -i PATH="$PATH" HOME="$T/empty" "$SH" -c "set -u; $(cat "$T/canon"); printf %s \"\$FORGE_ROOT\"" 2>&1 )"
+# running plugin root (substituted) beats a newer cache version and an exported FORGE_HOME (version skew)
+mkscripts "$T/h12/.claude/plugins/cache/forgedock/forgedock/1.16.0"; mkscripts "$T/h12/.claude/plugins/cache/forgedock/forgedock/1.17.0"; mkscripts "$T/h12/stale-clone"
+expect "running plugin root beats newer cache" "$T/h12/.claude/plugins/cache/forgedock/forgedock/1.16.0" "$(run "$T/h12" CLAUDE_PLUGIN_ROOT="$T/h12/.claude/plugins/cache/forgedock/forgedock/1.16.0")"
+expect "running plugin root beats exported FORGE_HOME" "$T/h11/running-plugin" "$(run "$T/h11" CLAUDE_PLUGIN_ROOT="$T/h11/running-plugin" FORGE_HOME="$T/h11/stale-clone")"
+expect "running plugin root beats exported FORGE_ROOT" "$T/h11/running-plugin" "$(run "$T/h11" CLAUDE_PLUGIN_ROOT="$T/h11/running-plugin" FORGE_ROOT="$T/h11/stale-clone")"
+expect "FORGEDOCK_HOME still authoritative over running root" "$T/h11/stale-clone" "$(run "$T/h11" CLAUDE_PLUGIN_ROOT="$T/h11/running-plugin" FORGEDOCK_HOME="$T/h11/stale-clone")"
+expect "unsubstituted literal ignored, newest cache wins" "$T/h12/.claude/plugins/cache/forgedock/forgedock/1.17.0" "$(run "$T/h12")"
+expect "relative running root rejected" "$T/h11/stale-clone" "$(run "$T/h11" CLAUDE_PLUGIN_ROOT="relative/running-plugin" FORGE_HOME="$T/h11/stale-clone")"
 # the env var alone (no substitution) must NOT be relied on: Claude Code does not export it to Bash
 expect "CLAUDE_PLUGIN_ROOT env var alone is not a candidate" "" "$( cd "$T/consumer" && env -i PATH="$PATH" HOME="$T/empty" CLAUDE_PLUGIN_ROOT="$T/h11/running-plugin" "$SH" -c "$(cat "$T/canon"); printf %s \"\$FORGE_ROOT\"" )"
 done
@@ -488,7 +496,7 @@ mk_install "$CFG2/1.16.0"; mk_install "$CFG2/2.0.0"; : > "$CFG2/2.0.0/scripts/re
 expect_path "lexical-vs-numeric: 2.0.0 outranks 1.16.0 (stub-loaded helper re-resolves numerically)" "$CFG2/2.0.0" "$(fr_run "$T/fr/lexical" 'forge_root')"
 expect_path "lexical-vs-numeric: a script only in 2.0.0 resolves" "$CFG2/2.0.0/scripts/review-delta.sh" "$(fr_run "$T/fr/lexical" 'forge_resolve review-delta.sh')"
 mk_install "$T/fr/subst"
-expect_path "plugin-only layout: substituted plugin root is a locator tier" "$T/fr/subst/scripts/trusted-comments.sh" "$(sed "s|'\${CLAUDE_PLUGIN_ROOT}'|'$T/fr/subst'|" "$T/locator.sh" > "$T/locator_subst.sh"; cd "$T/fr/cwdplant" && env -i PATH="$PATH" HOME="$T/fr/h0" bash -c "$(cat "$T/locator_subst.sh"); forge_resolve trusted-comments.sh" 2>/dev/null)"
+expect_path "plugin-only layout: substituted plugin root is a locator tier" "$T/fr/subst/scripts/trusted-comments.sh" "$(sed "s|'\${CLAUDE_PLUGIN_ROOT}'|'$T/fr/subst'|g" "$T/locator.sh" > "$T/locator_subst.sh"; cd "$T/fr/cwdplant" && env -i PATH="$PATH" HOME="$T/fr/h0" bash -c "$(cat "$T/locator_subst.sh"); forge_resolve trusted-comments.sh" 2>/dev/null)"
 mk_install "$T/fr/repo"; mkdir -p "$T/fr/instl/.claude/commands"
 if ln -s "$T/fr/repo/commands/work-on.md" "$T/fr/instl/.claude/commands/work-on.md" 2>/dev/null && [ -L "$T/fr/instl/.claude/commands/work-on.md" ]; then
   expect_path "install.sh layout: commands symlink resolves to the repo root" "$T/fr/repo" "$(fr_run "$T/fr/instl" 'forge_root')"

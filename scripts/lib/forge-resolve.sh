@@ -8,16 +8,22 @@
 #   forge_resolve <name>  prints the absolute path of scripts/<name> from the first trusted root that has it,
 #                         or prints nothing (status 0). Callers fail closed on empty output.
 #
-# Trust boundary: roots come only from the engine (FORGEDOCK_HOME, authoritative when set), the plugin runtime
+# Trust boundary: roots come only from the engine (FORGEDOCK_HOME, authoritative when set), the running plugin root the
+# stub locator handed over (FORGE_SOURCED_ROOT, the loader-substituted plugin root), the plugin runtime
 # (CLAUDE_PLUGIN_ROOT), the legacy FORGE_ROOT/FORGE_HOME variables, the install.sh symlink, the Codex
 # $CODEX_HOME/forge-home file, the newest pinned plugin cache and the marketplace checkout under CLAUDE_CONFIG_DIR
 # then ~/.claude, and last the directory this file was sourced from. The consumer's working directory and the repo
 # under review are author-controlled and are never consulted, and every root must be an absolute path.
 #
 # Order (matches docs/CONFIG.md "Install root resolution"): FORGEDOCK_HOME (when set, nothing else is consulted) >
-# CLAUDE_PLUGIN_ROOT > FORGE_ROOT > FORGE_HOME > install symlink > Codex forge-home > newest cache > marketplace > self.
+# running plugin root (FORGE_SOURCED_ROOT) > CLAUDE_PLUGIN_ROOT > FORGE_ROOT > FORGE_HOME > install symlink >
+# Codex forge-home > newest cache > marketplace > self.
+# The running plugin root wins so a session keeps the scripts that match its own spec text even when a newer version is
+# cached or a stale FORGE_HOME is exported. The stub assigns it from the loader-substituted plugin root (a shell-local
+# assignment, never exported); non-Claude runtimes leave the literal placeholder, which the absolute-path check rejects.
 # The self root is last on purpose: the stub locator that sourced this file picks a cache directory by glob order
-# (lexical), so the helper re-resolves by the numeric-newest tier instead of trusting the copy that happened to load.
+# (lexical), so absent a running root the helper re-resolves by the numeric-newest tier instead of trusting the copy
+# that happened to load.
 
 # Root this file was sourced from (scripts/lib/.. /..), captured now because the cwd changes later. Under zsh
 # BASH_SOURCE is empty, so the sourced path comes from ${(%):-%x} (eval'd: bash cannot parse that expansion). An empty
@@ -40,12 +46,15 @@ _forge_posix() {
   esac
 }
 
+# Running plugin root handed over by the stub locator (shell-local, consumed once, never exported).
+_FORGE_RUNNING_ROOT="$(_forge_posix "${FORGE_SOURCED_ROOT:-}")"; unset FORGE_SOURCED_ROOT
+
 # One absolute candidate root per line, highest priority first.
 _forge_candidates() {
   local _l _cfg _mk _x _cx
   if [ -n "${FORGEDOCK_HOME:-}" ]; then _forge_posix "$FORGEDOCK_HOME"; return 0; fi
   _mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
-  printf '%s\n' "${CLAUDE_PLUGIN_ROOT:-}" "${FORGE_ROOT:-}" "${FORGE_HOME:-}"
+  printf '%s\n' "$_FORGE_RUNNING_ROOT" "${CLAUDE_PLUGIN_ROOT:-}" "${FORGE_ROOT:-}" "${FORGE_HOME:-}"
   for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
     [ -n "$_cfg" ] || continue
     _l="$(readlink -f "$_cfg/commands/work-on.md" 2>/dev/null || true)"
