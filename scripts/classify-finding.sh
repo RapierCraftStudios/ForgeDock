@@ -11,6 +11,7 @@
 #   classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>]
 #                       [--lineage none|review-finding] [--text <T> | --text-file <F>]
 #                       [--inpr-diff <F> --file <P>] [--contract-scope <F> --contract-open <F> [--pr-files <F>] [--merge-issue <N>]]
+#                       [--prior-findings <F> [--title <T>] [--line-start <N> [--line-end <M>]] [--diff-map <F>]]
 #
 #   --severity    CRITICAL | HIGH | MEDIUM | LOW (case-insensitive). Missing or
 #                 unparseable → ISSUE (fail toward filing, never drop).
@@ -44,6 +45,23 @@
 #                 contract excluded the sibling path, not regressions the PR introduced in it).
 #                 `--pr-files <F>` is the PR's changed paths, one per line, supplied for this guard
 #                 alone (it never triggers INPR_FIX). The gate runs after the severity and in-PR gates. Without the flags output is unchanged.
+#
+#   --prior-findings <F> --file <P> [--title <T>] [--line-start <N> [--line-end <M>]] [--diff-map <F>]
+#                 Cross-head / cross-PR re-flag gate: F is a TSV of findings already raised for an
+#                 earlier head of this PR or by a bundle's member PRs, one per line, columns
+#                 file<TAB>line-start<TAB>line-end<TAB>title<TAB>prior-disposition<TAB>issue#.
+#                 prior-disposition is `filed` (its issue is still open), `filed-closed` (issue closed:
+#                 the row is IGNORED so a regressed defect is classified normally) or `note`.
+#                 Line columns may be empty (NOTE-sourced rows carry no range). A finding re-flags a row
+#                 when it is the same file AND ((line IoU >= 0.6 and >= 1 shared title token), or >= 3 shared title tokens). Output is
+#                 `NOTE reflag-filed #N` (row has an issue number) or `NOTE reflag-note`; this gate never
+#                 emits ISSUE. `--file` may carry `path:line`; explicit --line-start wins.
+#                 `--diff-map <F>` (optional, best-effort) lists `git diff <old>..<new>` hunks as
+#                 file<TAB>old-start<TAB>old-count<TAB>new-start<TAB>new-count; a prior range lying
+#                 wholly after hunks is shifted by their net line delta before the IoU. A missing or
+#                 unparseable map means the unshifted range is used. The gate runs after the severity
+#                 parse (HIGH/CRITICAL and unparseable severity stay ISSUE) and before the in-PR gate.
+#                 Without the flags output is unchanged.
 #
 # Output (stdout, one line): `ISSUE <reason>`, `NOTE <reason>` or `INPR_FIX <reason>`.
 # Exit codes: 0 classified, 2 usage error.
@@ -80,9 +98,14 @@ CONTRACT_SCOPE=""
 CONTRACT_OPEN=""
 PR_FILES=""
 MERGE_ISSUE=""
+PRIOR_FINDINGS=""
+TITLE=""
+LINE_START=""
+LINE_END=""
+DIFF_MAP=""
 
 usage() {
-  echo "ERROR: Usage: classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>] [--lineage none|review-finding] [--text <T> | --text-file <F>] [--inpr-diff <F> --file <P>] [--contract-scope <F> --contract-open <F> [--pr-files <F>] [--merge-issue <N>]]" >&2
+  echo "ERROR: Usage: classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>] [--lineage none|review-finding] [--text <T> | --text-file <F>] [--inpr-diff <F> --file <P>] [--contract-scope <F> --contract-open <F> [--pr-files <F>] [--merge-issue <N>]] [--prior-findings <F> [--title <T>] [--line-start <N> [--line-end <M>]] [--diff-map <F>]]" >&2
   exit 2
 }
 
@@ -99,6 +122,11 @@ while [ "$#" -gt 0 ]; do
     --contract-open)  [ "$#" -ge 2 ] || usage; CONTRACT_OPEN="$2"; shift 2 ;;
     --pr-files)       [ "$#" -ge 2 ] || usage; PR_FILES="$2"; shift 2 ;;
     --merge-issue)    [ "$#" -ge 2 ] || usage; MERGE_ISSUE="${2#\#}"; shift 2 ;;
+    --prior-findings) [ "$#" -ge 2 ] || usage; PRIOR_FINDINGS="$2"; shift 2 ;;
+    --title)          [ "$#" -ge 2 ] || usage; TITLE="$2"; shift 2 ;;
+    --line-start)     [ "$#" -ge 2 ] || usage; LINE_START="$2"; shift 2 ;;
+    --line-end)       [ "$#" -ge 2 ] || usage; LINE_END="$2"; shift 2 ;;
+    --diff-map)       [ "$#" -ge 2 ] || usage; DIFF_MAP="$2"; shift 2 ;;
     --text-file)
       [ "$#" -ge 2 ] || usage
       [ -r "$2" ] || { echo "ERROR: --text-file not readable: $2" >&2; exit 2; }
@@ -127,6 +155,10 @@ if [ -n "$PR_FILES" ] && [ ! -r "$PR_FILES" ]; then
   echo "ERROR: --pr-files not readable: $PR_FILES" >&2; exit 2
 fi
 
+if [ -n "$PRIOR_FINDINGS" ] && [ ! -r "$PRIOR_FINDINGS" ]; then
+  echo "ERROR: --prior-findings not readable: $PRIOR_FINDINGS" >&2; exit 2
+fi
+
 upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]'; }
 SEV=$(upper "$SEVERITY")
 CONF=$(upper "$CONFIDENCE")
@@ -136,6 +168,69 @@ case "$SEV" in
   MEDIUM|LOW) ;;
   *) echo "ISSUE unparseable-severity"; exit 0 ;;
 esac
+
+# Cross-head / cross-PR re-flag gate (#3641). Runs after the severity parse so HIGH/CRITICAL and
+# unparseable severity have already exited as ISSUE. Emits only NOTE; fails toward the normal
+# classification below on a missing file, no match, or an unusable diff map.
+if [ -n "$PRIOR_FINDINGS" ] && [ -n "$FINDING_FILE" ]; then
+  _rpath="${FINDING_FILE#./}"; _rline=""
+  case "$_rpath" in *:[0-9]*) _rline="${_rpath#*:}"; _rline="${_rline%%[!0-9]*}" ;; esac
+  _rpath="${_rpath%%:*}"
+  _rls="${LINE_START:-$_rline}"; _rle="${LINE_END:-$_rls}"
+  case "$_rls" in ''|*[!0-9]*) _rls=""; _rle="" ;; esac
+  case "$_rle" in ''|*[!0-9]*) _rle="$_rls" ;; esac
+  _dmap="$DIFF_MAP"; { [ -n "$_dmap" ] && [ -r "$_dmap" ]; } || _dmap=""
+  _reflag=$(awk -F '\t' -v file="$_rpath" -v ls="$_rls" -v le="$_rle" -v title="$TITLE" -v dmap="$_dmap" '
+    function toks(str, arr,    n, i, parts, t, c) {
+      c = 0; str = tolower(str); gsub(/[^a-z0-9]+/, " ", str)
+      n = split(str, parts, " ")
+      for (i = 1; i <= n; i++) { t = parts[i]; if (length(t) >= 3 && !(t in arr)) { arr[t] = 1; c++ } }
+      return c
+    }
+    function shift(f, s, e,    k, delta) {
+      delta = 0
+      for (k = 1; k <= nh; k++)
+        if (hf[k] == f && (hc[k] == 0 ? ho[k] < s : ho[k] + hc[k] <= s)) delta += hc2[k] - hc[k]
+      return delta
+    }
+    BEGIN {
+      if (dmap != "") {
+        while ((getline line < dmap) > 0) {
+          if (split(line, p, "\t") >= 5 && p[2] ~ /^[0-9]+$/ && p[3] ~ /^[0-9]+$/ && p[4] ~ /^[0-9]+$/ && p[5] ~ /^[0-9]+$/) {
+            nh++; hf[nh] = p[1]; ho[nh] = p[2] + 0; hc[nh] = p[3] + 0; hn[nh] = p[4] + 0; hc2[nh] = p[5] + 0
+          }
+        }
+        close(dmap)
+      }
+      ntitle = toks(title, ft)
+    }
+    {
+      pf = $1; sub(/^\.\//, "", pf)
+      if (pf != file) next
+      if ($5 == "filed-closed") next
+      hit = 0
+      delete pt; toks($4, pt); shared = 0
+      for (t in pt) if (t in ft) shared++
+      # Line overlap alone is not a match (an unrelated finding can land on the same line): it also
+      # needs at least one shared title token. Title-only matching still needs >= 3.
+      if (shared >= 1 && ls != "" && $2 ~ /^[0-9]+$/) {
+        ps = $2 + 0; pe = ($3 ~ /^[0-9]+$/) ? $3 + 0 : ps
+        if (pe < ps) pe = ps
+        d = shift(pf, ps, pe); ps += d; pe += d
+        lo = (ps > ls) ? ps : ls; hi = (pe < le) ? pe : le
+        inter = hi - lo + 1; if (inter < 0) inter = 0
+        uni = (pe - ps + 1) + (le - ls + 1) - inter
+        if (uni > 0 && inter / uni >= 0.6) hit = 1
+      }
+      if (!hit && ntitle >= 3 && shared >= 3) hit = 1
+      if (!hit) next
+      if ($5 == "filed" && $6 ~ /^#?[0-9]+$/) { n = $6; sub(/^#/, "", n); print "NOTE reflag-filed #" n; found = 1; exit }
+      if (!note) note = "NOTE reflag-note"
+    }
+    END { if (!found && note) print note }
+  ' "$PRIOR_FINDINGS" 2>/dev/null) || _reflag=""
+  if [ -n "$_reflag" ]; then echo "$_reflag"; exit 0; fi
+fi
 
 # In-PR fix gate (#3387, narrowed). MEDIUM CONFIRMED is an ISSUE under every rule below
 # (lineage included), so checking here changes only where it is handled, never whether.

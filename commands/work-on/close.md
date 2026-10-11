@@ -355,7 +355,9 @@ The `INVARIANT_ANOMALIES` variable is read in Phase C5 (Step 1) and rendered in 
 BODY=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body')
 
 # Count remaining unchecked items BEFORE any edit
-REMAINING_BEFORE=$(printf '%s\n' "$BODY" | grep -cE '^[-*+] \[ \]' || true)
+# The investigate-appended placeholder box ("Fix confirmed during investigation.") is
+# pipeline scaffolding, not a phase item: never count it (forge#3545).
+REMAINING_BEFORE=$(printf '%s\n' "$BODY" | grep -vE '^[-*+] \[ \] Fix confirmed during investigation\.?[[:space:]]*$' | grep -cE '^[-*+] \[ \]' || true)
 ```
 
 **If `REMAINING_BEFORE == 0`** (no unchecked items): skip body edit — all items already checked, proceed to add PR reference only:
@@ -390,6 +392,7 @@ fi
 CHECKBOX_SECTIONS=$(printf '%s\n' "$BODY_STRIPPED" | awk '
   /^#+ / { if (in_section && has) n++; in_section=1; has=0; previous=""; next }
   /^(=+|-+)$/ && previous != "" { if (in_section && has) n++; in_section=1; has=0; previous=""; next }
+  /^[-*+] \[[ xX]\] Fix confirmed during investigation\.?[ \t]*$/ { previous=$(0); next }
   { if (in_section && /^[-*+] \[[ xX]\]/) has=1; previous=$(0) }
   END { if (in_section && has) n++; print n+0 }
 ')
@@ -1231,7 +1234,6 @@ Where:
 # Resolve from the ForgeDock install root (FORGE_ROOT, from the script-resolution block) — never from ${0}, which is meaningless inside a skill
 INDEXER_PATH=""
 [ -n "${FORGE_ROOT:-}" ] && INDEXER_PATH="$FORGE_ROOT/scripts/build-knowledge-index.mjs"
-[ -f "$INDEXER_PATH" ] || INDEXER_PATH="$REPO_PATH/scripts/build-knowledge-index.mjs"
 if node --version >/dev/null 2>&1 && [ -f "$INDEXER_PATH" ]; then
   echo "[cost-prior] Re-indexing issue #${NUMBER} and regenerating cost priors..."
   node "$INDEXER_PATH" --issue {NUMBER} --no-mirror 2>&1 | tail -5 \
@@ -1391,12 +1393,11 @@ LEDGER_INDEXED=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 
 ### Step 2: Run incremental indexer
 
-Resolve the indexer script path from the ForgeDock install root (`FORGE_ROOT`), falling back to the repository root:
+Resolve the indexer script path from the ForgeDock install root (`FORGE_ROOT`), never from the repository root (`REPO_PATH` holds the PR checkout):
 
 ```bash
 INDEXER_PATH=""
 [ -n "${FORGE_ROOT:-}" ] && INDEXER_PATH="$FORGE_ROOT/scripts/build-knowledge-index.mjs"
-[ -f "$INDEXER_PATH" ] || INDEXER_PATH="$REPO_PATH/scripts/build-knowledge-index.mjs"
 
 if [ ! -f "$INDEXER_PATH" ]; then
   echo "[LEDGER] scripts/build-knowledge-index.mjs not found — skipping Phase C5.3"

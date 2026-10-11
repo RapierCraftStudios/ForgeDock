@@ -4,8 +4,9 @@
  * GitHub state (phase.detectOutcome). All effects are injected → fully testable.
  */
 import { fileURLToPath } from "node:url";
+import { hostname as osHostname } from "node:os";
 import { appendEvent, readLog, deriveState, rewriteLog } from "./engine/runlog.mjs";
-import { pickPhase, TERMINAL_REASONS, issueSnapshot } from "./engine/phases.mjs";
+import { pickPhase, TERMINAL_REASONS, issueSnapshot, postCycleMarker, nextCycleNumber } from "./engine/phases.mjs";
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { VALID_BACKENDS } from "./runner.mjs";
@@ -177,6 +178,48 @@ function makeProgressEmitter(onProgress) {
   };
 }
 
+
+// forge#3574: lease holder ids are `cli_<host>_<pid>`. The host component lets a
+// relaunch on the SAME host probe whether the holder pid is still alive and
+// reclaim a dead holder's lease without waiting out the TTL. Strict regex: the
+// host cannot contain `_` (the separator) and the pid is digits only, so a
+// malformed or legacy `cli_<pid>` id never parses as reclaimable.
+const LEASE_HOLDER_RE = /^cli_([A-Za-z0-9.-]+)_(\d+)$/;
+
+/** Sanitize a hostname for use inside a lease id (no `_`, only `[A-Za-z0-9.-]`). */
+export function sanitizeLeaseHost(host) {
+  return String(host || "unknown").replace(/[^A-Za-z0-9.-]/g, "-") || "unknown";
+}
+
+/** Parse a `cli_<host>_<pid>` lease holder id. Returns null for anything else. */
+export function parseLeaseHolder(by) {
+  const m = LEASE_HOLDER_RE.exec(String(by ?? ""));
+  if (!m) return null;
+  const pid = Number(m[2]);
+  return Number.isSafeInteger(pid) && pid > 0 ? { host: m[1], pid } : null;
+}
+
+/**
+ * True only when the lease holder is provably dead: id parses, host equals this
+ * host, and `kill(pid, 0)` throws ESRCH. EPERM (exists, not ours) and any other
+ * result mean alive. Legacy/other-host/unparseable ids are never reclaimed (TTL
+ * fallback). Best-effort like the I3 guard itself: PID reuse and containers
+ * sharing a hostname are accepted residual risk.
+ */
+export function isLeaseHolderDead({ by, host = osHostname(), killFn = process.kill.bind(process) } = {}) {
+  const parsed = parseLeaseHolder(by);
+  if (!parsed || parsed.host !== sanitizeLeaseHost(host)) return false;
+  try {
+    killFn(parsed.pid, 0);
+    return false;
+  } catch (e) {
+    return e?.code === "ESRCH";
+  }
+}
+
+/** Max startup wait for a persisted rate-limit reset (guards a corrupt far-future resetAt). */
+export const MAX_RESUME_RATE_LIMIT_WAIT_MS = 6 * 60 * 60 * 1000;
+
 /**
  * @param {object} opts
  * @param {string} [opts.backend] - "cli" | "api" | "auto" (forge#2028). Forwarded
@@ -230,6 +273,11 @@ function makeProgressEmitter(onProgress) {
  *   cycle (RUN_NEXT_CYCLE) that resets committed/branch/pr and restarts at
  *   investigate. Any other terminal reason is left untouched and returns
  *   `not-retryable`.
+ * @param {boolean} [opts.waitLease] - forge#3574: when another live holder owns
+ *   the lease, poll (via `sleep`, bounded by `leaseTtlMs`) until it expires or
+ *   its holder is reclaimable, then continue; `deferred` on timeout.
+ * @param {string} [opts.hostname] - injectable host name (tests).
+ * @param {Function} [opts.killFn] - injectable `process.kill` (tests).
  */
 export async function runIssue(opts) {
   const { issue, dir, agentId, lane = "staging", io, runner,
@@ -253,6 +301,9 @@ export async function runIssue(opts) {
           maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES,
           sessionLimitDefaultWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS,
           retry = false,
+          waitLease = false,
+          hostname = osHostname(),
+          killFn = process.kill.bind(process),
           onProgress = () => {} } = opts;
 
   // forge#2452: extracted into makeProgressEmitter() — see its docstring for
@@ -269,18 +320,38 @@ export async function runIssue(opts) {
 
   // 1. Load + reconcile (GitHub wins).
   const local = readLog(dir, issue).length ? deriveState(readLog(dir, issue)) : null;
-  const remote = await projector.readState(issue);
+  let remote = await projector.readState(issue);
   let { state, action } = reconcileState(local, remote);
+  const leaseHeld = (r) => !!(r?.lease && r.lease.until > now() && r.lease.by !== agentId &&
+    !isLeaseHolderDead({ by: r.lease.by, host: hostname, killFn }));
+  const deferredResult = (r) => ({
+    terminalReason: "deferred",
+    leaseUntil: r.lease.until,
+    detail: `issue ${issue} leased by ${r.lease.by} until ${new Date(r.lease.until).toISOString()}`,
+  });
 
   // I3 (best-effort): GitHub issue-edit is not an atomic CAS, so this is a
   // courtesy check, not a hard mutual-exclusion guarantee — a concurrent
   // start can still race between this read and the next lease write.
   // MUST come before any projector.writeState() — remirror/hydrate branches
   // must not overwrite GitHub state when another agent holds a valid lease.
-  if (remote?.lease && remote.lease.until > now() && remote.lease.by !== agentId) {
-    return { terminalReason: "deferred", detail: `issue ${issue} leased by ${remote.lease.by}` };
+  if (leaseHeld(remote)) {
+    if (!waitLease) return deferredResult(remote);
+    // forge#3574: bounded wait — never longer than one lease TTL.
+    const deadline = now() + leaseTtlMs;
+    let cur = remote;
+    while (leaseHeld(cur)) {
+      const remaining = deadline - now();
+      if (remaining <= 0) return deferredResult(cur);
+      emitProgress({ event: "lease_wait", detail: `waiting for lease held by ${cur.lease.by}` });
+      await sleep(Math.min(remaining, Math.max(0, cur.lease.until - now()), 15000) || 1);
+      cur = await projector.readState(issue);
+    }
+    // The holder may have committed phases (or finished) while we waited: re-reconcile
+    // against the post-wait remote so the lease write below cannot regress its state.
+    remote = cur;
+    ({ state, action } = reconcileState(local, remote));
   }
-
   if (!state) {
     state = freshState(issue, lane);
     appendEvent(dir, issue, { event: "RUN_START", issue, run: state.run, lane });
@@ -322,6 +393,17 @@ export async function runIssue(opts) {
           detail: snap.ok
             ? `issue ${issue} is CLOSED; --retry does not start a new cycle on a closed issue`
             : `issue ${issue} state could not be read; --retry did not start a new cycle`,
+        };
+      }
+    }
+    // forge#3657: publish the cycle boundary on GitHub BEFORE the log flips, so
+    // build's reconcilers never re-adopt cycle-1 evidence. Fail closed.
+    if (state.terminalReason === "phase-complete") {
+      const localCycles = readLog(dir, issue).filter((e) => e.event === "RUN_NEXT_CYCLE").length;
+      try { await postCycleMarker(issue, await nextCycleNumber(issue, localCycles, io), io); } catch {
+        return {
+          terminalReason: "not-retryable",
+          detail: `issue ${issue}: could not post FORGE:CYCLE marker; --retry did not start a new cycle`,
         };
       }
     }
@@ -375,6 +457,26 @@ export async function runIssue(opts) {
       return String(out || "").trim() || null;
     } catch { return null; }
   })());
+
+  // forge#3574: a relaunch after a crash mid rate-limit pause must not re-run
+  // the phase early. Same-host resume reads the LOCAL run-log's lastRateLimit
+  // (the remote FORGE:STATE does not carry it). The lease is renewed while we
+  // wait so a second relaunch still defers.
+  const rl = local?.lastRateLimit;
+  const pendingPhase = pickPhase(state);
+  if (pendingPhase && rl && rl.phase === pendingPhase.id &&
+      typeof rl.resetAt === "number" && Number.isFinite(rl.resetAt) && rl.resetAt > now()) {
+    const waitMs = Math.min(rl.resetAt - now(), MAX_RESUME_RATE_LIMIT_WAIT_MS);
+    emitProgress({
+      event: "phase_paused", phase: pendingPhase.id, reason: "session-limit", resetAt: rl.resetAt,
+      detail: `resuming session-limit wait — pausing until ${new Date(rl.resetAt).toISOString()}`,
+    });
+    const resumeRenew = setInterval(() => {
+      projector.writeState(issue, { ...state, lease: { by: agentId, until: now() + leaseTtlMs } }).catch(() => {});
+    }, leaseRenewIntervalMs);
+    if (typeof resumeRenew.unref === "function") resumeRenew.unref();
+    try { await sleep(waitMs); } finally { clearInterval(resumeRenew); }
+  }
 
   let phase;
   while ((phase = pickPhase(state))) {
@@ -462,7 +564,8 @@ export async function runIssue(opts) {
     }
     let outcome;
     if (reconciled.satisfied) {
-      outcome = { status: "committed", outputs: reconciled.outputs || {} };
+      outcome = { status: "committed", outputs: reconciled.outputs || {},
+                  ...(reconciled.terminalReason ? { terminalReason: reconciled.terminalReason } : {}) };
     } else {
       if (reconciled.outputs?.pr) state.pr = reconciled.outputs.pr;
       // forge#2240: the phase is actually about to run (not a resume no-op)

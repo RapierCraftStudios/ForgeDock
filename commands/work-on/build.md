@@ -384,15 +384,18 @@ Every item in the contract's `### Out of Scope` section must carry exactly one d
 ```bash
 # <Script resolution block from work-on/build.md, verbatim>
 run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
+# Trusted-author filter (OWNER/MEMBER/COLLABORATOR or Bot, same predicate as trusted-comments.sh) is applied at
+# the source in the LOOKUP --jq, before the path match: an untrusted match is never reused. The REST search API is used because it exposes
+# author_association and user.type (`gh issue list --json` has no authorAssociation field).
 # For each deferred item (DEFERRED_PATH = the backticked path, DEFERRED_WHY = one line), repeat:
 DEFERRED_MARKER="<!-- FORGE:DEFERRED_FROM: #{NUMBER} -->"
-LOOKUP=$(gh issue list {GH_FLAG} --state open --search "\"FORGE:DEFERRED_FROM: #{NUMBER}\" in:body" \
-  --json number,body --limit 50 2>/dev/null) || LOOKUP="FAILED"
+LOOKUP=$(gh api -X GET search/issues -f per_page=50 \
+  -f q="\"FORGE:DEFERRED_FROM: #{NUMBER}\" in:body repo:{GH_REPO} is:issue is:open" --jq '[.items[] | select(((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR")) or ((.user.type // "") == "Bot"))]' 2>/dev/null) || LOOKUP="FAILED"
 if [ "$LOOKUP" = "FAILED" ]; then
   echo "DEFERRED_LOOKUP=FAILED"   # a failed lookup is not "none found": Blocked exit, never re-file blind
 else
   DEFERRED_NUM=$(printf '%s' "$LOOKUP" | jq -r --arg p "$DEFERRED_PATH" \
-    '[.[] | select(.body | contains($p))] | first | .number // empty' 2>/dev/null)
+    '[.[] | select((.body // "") | contains($p))] | first | .number // empty' 2>/dev/null)
   if [ -z "$DEFERRED_NUM" ]; then
     DEFERRED_URL=$(run gh issue create {GH_FLAG} --title "follow-up: ${DEFERRED_PATH} (deferred from #{NUMBER})" \
       --body "## Problem
@@ -417,6 +420,7 @@ ${DEFERRED_MARKER}")
 fi
 ```
 
+- Only follow-up issues authored by a trusted author (OWNER/MEMBER/COLLABORATOR or Bot) are reused; an untrusted match carrying the marker is ignored and a fresh follow-up is filed.
 - `DEFERRED_LOOKUP=FAILED`, or an empty `DEFERRED_NUM` after a real (non-`DRY_RUN`) create → Blocked exit with blocker `github-unavailable: could not file or look up deferred follow-up for <path>` (a transient failure follows the retry rule above; no `needs-human` for `github-unavailable:`).
 - On resume the lookup reuses the open issue that carries the marker and the same path, so a retried build never files a duplicate.
 - Prefer filing through the `/issue` create-hook's programmatic contract (`Skill(skill="{FORGE_SKILL_PREFIX}issue", ...)`) when it is available; the raw create above is the fallback and must keep the `FORGE:DEFERRED_FROM` marker in the body.
@@ -688,9 +692,26 @@ else run gh issue comment {NUMBER} {GH_FLAG} --body "$BODY"; fi
 | `over=true`, no override, issue body has a `**Parent**: #N` line OR a trusted `FORGE:DECOMPOSED` comment exists | `OVER` | Decompose-loop guard: do NOT route to decompose. Post/refresh `FORGE:DIFF_SIZE`, then Blocked exit with blocker `diff-size-over-threshold: {diff_lines} > {threshold}; post a FORGE:SIZE_OVERRIDE with a justification to proceed` |
 | `over=true`, no override, otherwise | `OVER` | Put a `### Split Proposal` in the `FORGE:DIFF_SIZE` comment, then print `BUILD_RESULT: status: NEEDS_DECOMPOSE` (see below) |
 
-**`### Split Proposal`** (written into the `FORGE:DIFF_SIZE` comment): list the top files by changed lines from the `top=` output, then propose 2-4 sub-issues split along directory or phase seams, each independently buildable and no more than about half the threshold, in dependency order, one `- **{title}** — {files}` line each (this is the plan `work-on:decompose` consumes in D0/D2).
+**`### Split Proposal`** (written into the `FORGE:DIFF_SIZE` comment): list the top files by changed lines from the `top=` output, then propose 2-4 sub-issues split along directory or phase seams, each independently buildable and no more than about half the threshold, in dependency order, one `- **{title}** — {files} — wip: {WIP_REF}@{WIP_SHA} (git checkout {WIP_SHA} -- {files})` line each (this is the plan `work-on:decompose` consumes in D0/D2). The `wip:` part comes from the persist step below; when persistence fell back to a patch file write `patch: {PATCH_PATH}` instead, and when both failed write `wip: unavailable`. Lines without the suffix stay valid.
 
-**`NEEDS_DECOMPOSE` exit**: leave the staged worktree and branch as they are; do not add `needs-human`; do not post `FORGE:BUILDER:COMPLETE`; do NOT call `work-on:decompose` here (the router is the sole dispatcher). The labels stay `workflow:building`; decompose owns the `workflow:decomposed` transition. Print:
+**Persist the staged hunks** (before the `NEEDS_DECOMPOSE` exit; runs once the `FORGE:DIFF_SIZE` result is `OVER` and the decompose-loop guard did not fire) <!-- Added: forge#3573 -->: commit the staged index to a standalone commit object WITHOUT moving the build branch or the index, and push it to a dedicated ref named only from the issue number (never interpolate a title or file name into a ref). Re-running overwrites the same ref, so resume is idempotent. Never block `NEEDS_DECOMPOSE` on a persistence failure.
+
+```bash
+WIP_REF="forge/wip/{NUMBER}"
+WIP_SHA=""; PATCH_PATH=""
+TREE=$(git -C "{WORKTREE_PATH}" write-tree) \
+  && WIP_SHA=$(git -C "{WORKTREE_PATH}" commit-tree "$TREE" -p HEAD -m "wip: staged hunks for #{NUMBER} (diff-size OVER)") || WIP_SHA=""
+if [ -n "$WIP_SHA" ] && git -C "{WORKTREE_PATH}" push --force origin "${WIP_SHA}:refs/heads/${WIP_REF}" 2>/dev/null; then
+  echo "WIP_REF=${WIP_REF}@${WIP_SHA}"
+else
+  PATCH_PATH="$(git -C "{WORKTREE_PATH}" rev-parse --git-common-dir)/forge-wip-{NUMBER}.patch"
+  git -C "{WORKTREE_PATH}" diff --cached --binary > "$PATCH_PATH" 2>/dev/null && echo "PATCH_PATH=${PATCH_PATH}" || echo "WIP=unavailable"
+fi
+```
+
+The checkout command in each line restores that seam's files from the persisted commit (`git fetch origin {WIP_REF}` first in a fresh clone); `git diff {WIP_SHA}^ {WIP_SHA} -- {files}` shows them. Post `FORGE:DIFF_SIZE` (Step 3) after this step so the proposal carries the references.
+
+**`NEEDS_DECOMPOSE` exit**: leave the staged worktree and branch as they are (the persisted WIP ref or patch is an additional durable copy, not a replacement); do not add `needs-human`; do not post `FORGE:BUILDER:COMPLETE`; do NOT call `work-on:decompose` here (the router is the sole dispatcher). The labels stay `workflow:building`; decompose owns the `workflow:decomposed` transition. Print:
 
 ```
 BUILD_RESULT:
@@ -700,7 +721,7 @@ BUILD_RESULT:
   blocker: diff-size-over-threshold: {diff_lines} > {threshold}; split proposal posted in FORGE:DIFF_SIZE
 ```
 
-**Resume**: a re-invoked build re-enters here via the B0 size-gate resume branch (partial `FORGE:BUILDER` plus latest trusted `FORGE:DIFF_SIZE` `result: OVER` plus a staged diff in the kept worktree), so it does not re-run implement; this covers both exits that leave BUILDER incomplete, `NEEDS_DECOMPOSE` and the decompose-loop-guard Blocked exit. B5.5 re-measures: if still over with no override it re-emits `NEEDS_DECOMPOSE` without a duplicate comment (the loop-guard case re-emits the same Blocked exit); when a valid `FORGE:SIZE_OVERRIDE` has appeared since, it continues via `OVERRIDDEN`.
+**Resume**: a re-invoked build re-enters here via the B0 size-gate resume branch (partial `FORGE:BUILDER` plus latest trusted `FORGE:DIFF_SIZE` `result: OVER` plus a staged diff in the kept worktree), so it does not re-run implement; this covers both exits that leave BUILDER incomplete, `NEEDS_DECOMPOSE` and the decompose-loop-guard Blocked exit. B5.5 re-measures: if still over with no override it re-pushes the same `forge/wip/{NUMBER}` ref (idempotent) and re-emits `NEEDS_DECOMPOSE` without a duplicate comment (the loop-guard case re-emits the same Blocked exit); when a valid `FORGE:SIZE_OVERRIDE` has appeared since, it continues via `OVERRIDDEN`.
 # MUST CONTINUE to Phase B6 — the size gate result is intermediate, NOT terminal (validation still required), except the NEEDS_DECOMPOSE and Blocked exits above.
 
 ---

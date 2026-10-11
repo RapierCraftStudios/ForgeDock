@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
-import { PHASES, pickPhase, REMEDIATION_BOUND_MARKERS } from "../engine/phases.mjs";
+import { PHASES, pickPhase, REMEDIATION_BOUND_MARKERS, cycleMarker, sliceToCurrentCycle, postCycleMarker, nextCycleNumber } from "../engine/phases.mjs";
 import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
 import { RESERVED_TYPES } from "../../packages/protocol/src/types.js";
 import { trusted, jsonLines, invBody, builderBody, remediationBody } from "./helpers/comments.mjs";
@@ -169,6 +169,43 @@ describe("pickPhase", () => {
     it("conflicting heading and own-line marker fails safe (not decomposed)", async () => {
       const outcome = await investigate.detectOutcome(base, ioComments(
         inv("**YES** — split", `<!-- ${PHASE_MARKERS.investigate.notDecomposedMarker} -->`)));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    // forge#3573: pre-build size estimate safety net.
+    const sized = (verdict, est, gate) => inv(verdict, `ESTIMATED_DIFF_LINES: ${est}\nINDEPENDENT_SEAMS: 3\nGATE_THRESHOLD: ${gate}\n<!-- DECOMPOSE:${/YES/.test(verdict) ? "YES" : "NO"} -->`);
+
+    it("NO verdict with estimate over threshold x 1.2 -> decomposed (safety net)", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1500, 1000)));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("NO verdict with estimate within threshold x 1.2 -> not decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1200, 1000)));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("GATE_THRESHOLD 0 disables the estimate net", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 5000, 0)));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("YES verdict carrying the estimate fields -> decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(sized("**YES** — split", 1500, 1000)));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("estimate fields in an untrusted comment or quoted mid-line are ignored", async () => {
+      const untrusted = trusted(sized("**NO** — one PR", 9000, 1000), { assoc: "NONE", type: "User", login: "drive-by" });
+      const o1 = await investigate.detectOutcome(base, ioComments(inv("**NO** — fits"), untrusted));
+      assert.equal(o1.terminalReason, undefined);
+      const o2 = await investigate.detectOutcome(base, ioComments(inv("**NO** — fits", "see `ESTIMATED_DIFF_LINES: 9000` and GATE_THRESHOLD: 1000 inline")));
+      assert.equal(o2.terminalReason, undefined);
+    });
+
+    it("conflicting signals still fail safe even with an over-gate estimate", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(
+        inv("**YES** — split", `ESTIMATED_DIFF_LINES: 5000\nGATE_THRESHOLD: 1000\n<!-- ${PHASE_MARKERS.investigate.notDecomposedMarker} -->`)));
       assert.equal(outcome.terminalReason, undefined);
     });
 
@@ -436,6 +473,58 @@ describe("pickPhase", () => {
         assert.equal(o.outputs.closeHandoff, undefined);
       }
     });
+
+    // forge#3647: ground-truth PR read (awaiting-merge / merged resume).
+    const prIo = ({ comments = [], pr, issue }) => ({
+      gh: async (args) => {
+        if (args[0] === "pr" && args[1] === "view") {
+          if (pr instanceof Error) throw pr;
+          return typeof pr === "string" ? pr : JSON.stringify(pr);
+        }
+        if (args[0] === "issue" && args[1] === "view") return JSON.stringify(issue ?? { state: "OPEN", labels: [{ name: "workflow:awaiting-merge" }] });
+        return jsonLines(comments.map((c) => trusted(c)));
+      },
+      git: async () => "0",
+    });
+    const withPr = { ...base, pr: 7 };
+    const merged = { state: "MERGED", mergedAt: "2026-10-11T00:00:00Z", baseRefName: "staging" };
+
+    it("awaiting-merge resume: no COMPLETE marker + PR MERGED + issue OPEN -> merged with closeHandoff", async () => {
+      const o = await remediate.detectOutcome(withPr, prIo({ pr: merged }));
+      assert.equal(o.status, "committed");
+      assert.equal(o.terminalReason, "merged");
+      assert.equal(o.outputs.closeHandoff, true);
+    });
+
+    it("awaiting-merge resume: no marker + PR MERGED + issue CLOSED/merged -> merged, no handoff", async () => {
+      const issue = { state: "CLOSED", labels: [{ name: "workflow:merged" }] };
+      const o = await remediate.detectOutcome(withPr, prIo({ pr: merged, issue }));
+      assert.equal(o.terminalReason, "merged");
+      assert.equal(o.outputs.closeHandoff, undefined);
+    });
+
+    it("awaiting-merge: HELD marker + PR MERGED -> merged with closeHandoff, not awaiting-merge", async () => {
+      const o = await remediate.detectOutcome(withPr, prIo({ pr: merged, comments: [remediateBody("HELD-AWAITING-MERGE")] }));
+      assert.equal(o.terminalReason, "merged");
+      assert.equal(o.outputs.closeHandoff, true);
+    });
+
+    it("awaiting-merge: HELD marker + PR OPEN -> awaiting-merge unchanged", async () => {
+      const o = await remediate.detectOutcome(withPr, prIo({ pr: { state: "OPEN", mergedAt: null }, comments: [remediateBody("HELD-AWAITING-MERGE")] }));
+      assert.equal(o.terminalReason, "awaiting-merge");
+    });
+
+    for (const [name, pr] of [
+      ["PR OPEN", { state: "OPEN", mergedAt: null }],
+      ["PR CLOSED unmerged", { state: "CLOSED", mergedAt: null }],
+      ["pr view malformed", "not json"],
+      ["pr view throws", new Error("gh down")],
+    ]) {
+      it(`awaiting-merge: no marker + ${name} -> failed (fail closed)`, async () => {
+        const o = await remediate.detectOutcome(withPr, prIo({ pr }));
+        assert.equal(o.status, "failed");
+      });
+    }
 
     it("HELD-AWAITING-MERGE -> committed, terminalReason awaiting-merge", async () => {
       const outcome = await remediate.detectOutcome(base, ioWith(remediateBody("HELD-AWAITING-MERGE")));
@@ -1125,5 +1214,180 @@ describe("pickPhase", () => {
         assert.equal(args[args.indexOf("--terminal-state") + 1], expected);
       });
     }
+  });
+});
+
+// forge#3657: cycle-scoped builder evidence.
+describe("FORGE:CYCLE boundary", () => {
+  const build = PHASES.find((p) => p.id === "build");
+  const st = { ...base, committed: ["investigate"], branch: null };
+  const world = (bodies, { ahead = "2", prs = [] } = {}) => ({
+    gh: async (args) => (args[0] === "pr" ? JSON.stringify(prs) : jsonLines(bodies.map((b) => trusted(b)))),
+    git: async () => ahead,
+  });
+
+  it("sliceToCurrentCycle: no marker returns all; marker mid-list returns the tail", () => {
+    assert.deepEqual(sliceToCurrentCycle(["a", "b"]), ["a", "b"]);
+    assert.deepEqual(sliceToCurrentCycle(["a", cycleMarker(1), "b", "c"]), ["b", "c"]);
+    assert.deepEqual(sliceToCurrentCycle(["a", cycleMarker(1), "b", cycleMarker(2), "c"]), ["c"]);
+  });
+
+  it("a marker quoted in prose does not move the boundary", () => {
+    const quoted = `see ${cycleMarker(1)} above`;
+    assert.deepEqual(sliceToCurrentCycle(["a", quoted, "b"]), ["a", quoted, "b"]);
+  });
+
+  it("build.reconcile and detectOutcome ignore a pre-marker BUILDER:COMPLETE", async () => {
+    const io = world([builderBody("fix/old-42"), cycleMarker(1)]);
+    assert.equal((await build.reconcile(st, io)).satisfied, false);
+    assert.notEqual((await build.detectOutcome(st, io)).status, "committed");
+  });
+
+  it("build.reconcile still adopts a post-marker BUILDER:COMPLETE", async () => {
+    const io = world([builderBody("fix/old-42"), cycleMarker(1), builderBody("fix/new-42")]);
+    const r = await build.reconcile(st, io);
+    assert.equal(r.satisfied, true);
+    assert.equal(r.outputs.branch, "fix/new-42");
+  });
+
+  it("an untrusted forged marker does not move the boundary", async () => {
+    const io = { gh: async () => jsonLines([trusted(builderBody("fix/old-42")),
+      trusted(cycleMarker(1), { assoc: "NONE", login: "rando" })]), git: async () => "2" };
+    assert.equal((await build.reconcile(st, io)).satisfied, true);
+  });
+
+  it("postCycleMarker posts once and is idempotent when the marker n already exists", async () => {
+    const posted = [];
+    const bodies = [builderBody("fix/old-42")];
+    const io = { gh: async (args) => {
+      if (args[0] === "issue") { posted.push(args[args.indexOf("--body") + 1]); bodies.push(posted.at(-1)); return ""; }
+      return jsonLines(bodies.map((b) => trusted(b)));
+    } };
+    assert.equal((await postCycleMarker(42, 1, io)).posted, true);
+    assert.equal((await postCycleMarker(42, 1, io)).posted, false);
+    assert.deepEqual(posted, [cycleMarker(1)]);
+    assert.equal((await postCycleMarker(42, 2, io)).posted, true);
+  });
+  it("nextCycleNumber exceeds an existing trusted marker even when the local log has no RUN_NEXT_CYCLE", async () => {
+    const io = { gh: async () => jsonLines([trusted(builderBody("fix/old-42")), trusted(cycleMarker(1)),
+      trusted(cycleMarker(2), { assoc: "NONE", login: "rando" })]) };
+    assert.equal(await nextCycleNumber(42, 0, io), 2);
+    assert.equal(await nextCycleNumber(42, 3, io), 4);
+    assert.equal(await nextCycleNumber(42, 0, { gh: async () => jsonLines([]) }), 1);
+  });
+});
+
+// forge#3545: engine outcomes must honour the phase's own declared result.
+describe("acceptance-gate-aware build outcome (forge#3545)", () => {
+  const build = PHASES.find((p) => p.id === "build");
+  const st = { ...base, committed: ["investigate"], branch: null };
+  const world = (bodies, { ahead = "2" } = {}) => ({
+    gh: async (args) => (args[0] === "pr" ? "[]" : jsonLines(bodies.map((b) => trusted(b)))),
+    git: async () => ahead,
+  });
+  const gate = (kind) => `<!-- FORGE:ACCEPTANCE_GATE -->\n## Acceptance Gate\n\n<!-- FORGE:ACCEPTANCE_GATE:${kind} -->`;
+  const blocked = "<!-- FORGE:BUILD_BLOCKED -->\n## Build Blocked\n\nreason";
+  const done = builderBody("fix/x-42");
+
+  it("COMPLETE + commits ahead + newer FAILED gate -> failed, retryable:false", async () => {
+    const o = await build.detectOutcome(st, world([done, gate("FAILED")]));
+    assert.equal(o.status, "failed");
+    assert.equal(o.retryable, false);
+  });
+
+  it("COMPLETE + newer BLOCKED gate -> failed, retryable:false", async () => {
+    const o = await build.detectOutcome(st, world([done, gate("BLOCKED")]));
+    assert.equal(o.status, "failed");
+    assert.equal(o.retryable, false);
+  });
+
+  it("COMPLETE + newer FORGE:BUILD_BLOCKED -> failed, retryable:false", async () => {
+    const o = await build.detectOutcome(st, world([done, blocked]));
+    assert.equal(o.status, "failed");
+    assert.equal(o.retryable, false);
+  });
+
+  it("FAILED then a newer PASSED -> committed again", async () => {
+    const o = await build.detectOutcome(st, world([done, gate("FAILED"), gate("PASSED")]));
+    assert.equal(o.status, "committed");
+    assert.equal(o.outputs.branch, "fix/x-42");
+  });
+
+  it("PASSED then a newer FAILED -> failed (order decides, not presence)", async () => {
+    const o = await build.detectOutcome(st, world([done, gate("PASSED"), gate("FAILED")]));
+    assert.equal(o.status, "failed");
+    assert.equal(o.retryable, false);
+  });
+
+  it("no gate marker keeps prior behaviour (committed)", async () => {
+    assert.equal((await build.detectOutcome(st, world([done]))).status, "committed");
+  });
+
+  it("a gate marker quoted in prose, or from an untrusted author, does not block", async () => {
+    const quoted = `see <!-- FORGE:ACCEPTANCE_GATE:FAILED --> in the thread`;
+    assert.equal((await build.detectOutcome(st, world([done, quoted]))).status, "committed");
+    const io = { gh: async () => jsonLines([trusted(done), trusted(gate("FAILED"), { assoc: "NONE", login: "rando" })]), git: async () => "2" };
+    assert.equal((await build.detectOutcome(st, io)).status, "committed");
+  });
+
+  it("no-marker crash stays retryable", async () => {
+    const o = await build.detectOutcome(st, world([]));
+    assert.equal(o.status, "failed");
+    assert.equal(o.retryable, undefined);
+  });
+
+  it("reconcile is unsatisfied while the gate is blocked, satisfied once PASSED", async () => {
+    assert.equal((await build.reconcile(st, world([done, gate("FAILED")]))).satisfied, false);
+    assert.equal((await build.reconcile(st, world([done, gate("FAILED"), gate("PASSED")]))).satisfied, true);
+    assert.equal((await build.reconcile(st, world([done]))).satisfied, true);
+  });
+
+  it("a pre-cycle FAILED gate does not block the new cycle", async () => {
+    const o = await build.detectOutcome(st, world([gate("FAILED"), cycleMarker(1), done]));
+    assert.equal(o.status, "committed");
+  });
+});
+
+describe("close PHASE_COMPLETE outcome (forge#3545)", () => {
+  const close = PHASES.find((p) => p.id === "close");
+  const phaseComplete = "<!-- FORGE:PHASE:COMPLETE -->\nPhase complete. PR #9 merged to `staging`. 1 phase item(s) remain.";
+  const world = (snap, bodies = []) => ({
+    gh: async (args) => (args[0] === "issue" ? JSON.stringify(snap) : jsonLines(bodies.map((b) => trusted(b)))),
+    git: async () => "0",
+  });
+  const open = { state: "OPEN", labels: [{ name: "workflow:investigating" }] };
+
+  it("OPEN + FORGE:PHASE:COMPLETE -> committed phase-complete, first attempt", async () => {
+    const o = await close.detectOutcome(base, world(open, [phaseComplete]));
+    assert.equal(o.status, "committed");
+    assert.equal(o.terminalReason, "phase-complete");
+    assert.equal(o.retryable, undefined);
+  });
+
+  it("reconcile is satisfied with phase-complete; no marker is not", async () => {
+    const r = await close.reconcile(base, world(open, [phaseComplete]));
+    assert.equal(r.satisfied, true);
+    assert.equal(r.terminalReason, "phase-complete");
+    assert.equal((await close.reconcile(base, world(open, []))).satisfied, false);
+  });
+
+  it("OPEN with no marker still fails (real crash unchanged)", async () => {
+    const o = await close.detectOutcome(base, world(open, []));
+    assert.equal(o.status, "failed");
+    assert.equal(o.detail, "issue not closed");
+  });
+
+  it("a prior-cycle, quoted or untrusted PHASE:COMPLETE does not count", async () => {
+    assert.equal((await close.detectOutcome(base, world(open, [phaseComplete, cycleMarker(1)]))).status, "failed");
+    assert.equal((await close.detectOutcome(base, world(open, [`quoting <!-- FORGE:PHASE:COMPLETE --> here`]))).status, "failed");
+    const io = { gh: async (a) => (a[0] === "issue" ? JSON.stringify(open) : jsonLines([trusted(phaseComplete, { assoc: "NONE", login: "rando" })])), git: async () => "0" };
+    assert.equal((await close.detectOutcome(base, io)).status, "failed");
+  });
+
+  it("merged label and CLOSED paths still win over the marker", async () => {
+    const merged = await close.detectOutcome(base, world({ state: "OPEN", labels: [{ name: "workflow:merged" }] }, [phaseComplete]));
+    assert.equal(merged.terminalReason, "merged");
+    const closed = await close.detectOutcome(base, world({ state: "CLOSED", labels: [{ name: "workflow:merged" }] }, [phaseComplete]));
+    assert.equal(closed.terminalReason, "merged");
   });
 });

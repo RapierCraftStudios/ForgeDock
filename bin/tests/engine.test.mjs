@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runIssue, DEFAULT_SESSION_LIMIT_WAIT_MS } from "../engine.mjs";
+import { runIssue, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, isLeaseHolderDead } from "../engine.mjs";
 import { readLog, deriveState, appendEvent } from "../engine/runlog.mjs";
 import { pickPhase } from "../engine/phases.mjs";
 import { serializeState, parseState, upsertStateBlock } from "../engine/state.mjs";
@@ -37,6 +37,7 @@ function fakeWorld() {
       const a = args.join(" ");
       if (a.startsWith("repo view")) return "acme/widgets";
       if (a.startsWith("api ") && a.includes("/comments")) return asComments(w.markers);
+      if (a.startsWith("issue comment")) { w.markers += SEP + args[args.indexOf("--body") + 1]; (w.posted ||= []).push(args[args.indexOf("--body") + 1]); return ""; }
       if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
       if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
       if (a.startsWith("issue edit")) { const i = args.indexOf("--body"); if (i>=0) w.body = args[i+1];
@@ -2809,10 +2810,9 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
       };
     }
 
-    // todo: build.reconcile re-adopts the cycle-1 branch and merged PR, so build
-    // is skipped in the new cycle (SEC-1, tracked in #3545). Flip to a plain
-    // `it` once the reconcilers are cycle-aware.
-    it("--retry with cycle-1 evidence runs build and ends on the new branch", { todo: "SEC-1 / #3545" }, async () => {
+    // forge#3657: the engine posts a FORGE:CYCLE marker so build reconcile/detect
+    // only see current-cycle evidence.
+    it("--retry with cycle-1 evidence runs build and ends on the new branch", async () => {
       const { w, io } = fakeWorld();
       seedPhaseComplete();
       seedCycleOneEvidence(w);
@@ -2826,6 +2826,28 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
       const s = deriveState(readLog(dir, 42));
       assert.equal(s.branch, "fix/real-branch-42");
       assert.notEqual(s.pr, 7);
+    });
+
+    it("--retry posts a FORGE:CYCLE marker before RUN_NEXT_CYCLE", async () => {
+      const { w, io } = fakeWorld();
+      seedPhaseComplete();
+      seedCycleOneEvidence(w);
+      const runner = okRunner(w);
+      await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner,
+        now: () => 2000, maxAttempts: 1, retry: true });
+      assert.deepEqual(w.posted, ["<!-- FORGE:CYCLE: 1 -->"]);
+    });
+
+    it("--retry fails closed when the FORGE:CYCLE marker cannot be posted", async () => {
+      const { w, io } = fakeWorld();
+      seedPhaseComplete();
+      const gh = io.gh;
+      io.gh = async (args) => { if (args.join(" ").startsWith("issue comment")) throw new Error("boom"); return gh(args); };
+      const before = readLog(dir, 42).length;
+      const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner: okRunner(w),
+        now: () => 2000, maxAttempts: 1, retry: true });
+      assert.equal(res.terminalReason, "not-retryable");
+      assert.equal(readLog(dir, 42).length, before);
     });
 
     it("--retry with cycle-1 evidence still restarts at investigate", async () => {
@@ -2917,5 +2939,137 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
     assert.equal(res.terminalReason, "not-retryable");
     assert.equal(ran, 0);
     assert.equal(readLog(dir, 42).length, before, "no events appended for a non-retryable terminal");
+  });
+});
+
+// forge#3574: stale-lease reclaim, --wait-lease, and rate-limit resume.
+describe("runIssue — forge#3574 stale lease / wait-lease / rate-limit resume", () => {
+  const errno = (code) => Object.assign(new Error(code), { code });
+  const leaseState = (by, until) => serializeState({
+    v: 1, run: "r_42_staging", issue: 42, lane: "staging", committed: [], phase: null,
+    branch: null, pr: null, terminal: false, terminalReason: null, lease: { by, until },
+  });
+
+  it("parseLeaseHolder accepts cli_<host>_<pid> only", () => {
+    assert.deepEqual(parseLeaseHolder("cli_box-1.local_123"), { host: "box-1.local", pid: 123 });
+    for (const bad of ["cli_123", "cli__123", "cli_a_b_1", "cli_a_0", "x_a_1", "", null, undefined, "cli_a_1x"])
+      assert.equal(parseLeaseHolder(bad), null, String(bad));
+  });
+
+  it("isLeaseHolderDead: ESRCH same host dead; EPERM/alive/other host/legacy not", () => {
+    const dead = () => { throw errno("ESRCH"); };
+    const eperm = () => { throw errno("EPERM"); };
+    const alive = () => true;
+    assert.equal(isLeaseHolderDead({ by: "cli_h_5", host: "h", killFn: dead }), true);
+    assert.equal(isLeaseHolderDead({ by: "cli_h_5", host: "h", killFn: eperm }), false);
+    assert.equal(isLeaseHolderDead({ by: "cli_h_5", host: "h", killFn: alive }), false);
+    assert.equal(isLeaseHolderDead({ by: "cli_h_5", host: "other", killFn: dead }), false);
+    assert.equal(isLeaseHolderDead({ by: "cli_5", host: "h", killFn: dead }), false);
+  });
+
+  const run = (w, io, extra = {}) => {
+    const calls = [];
+    const runner = async ({ commandName }) => { calls.push(commandName); throw new Error("stop"); };
+    return runIssue({ issue: 42, dir, agentId: "cli_h_1", lane: "staging", io, runner,
+      now: () => Date.now(), maxAttempts: 1, hostname: "h", ...extra }).then((res) => ({ res, calls }));
+  };
+
+  it("reclaims a dead same-host holder's lease immediately", async () => {
+    const { w, io } = fakeWorld();
+    w.body = leaseState("cli_h_99", Date.now() + 60000);
+    const { res, calls } = await run(w, io, { killFn: () => { throw errno("ESRCH"); } });
+    assert.notEqual(res.terminalReason, "deferred");
+    assert.ok(calls.length >= 1, "phase runner must run after reclaim");
+  });
+
+  it("still defers (with reason + leaseUntil) for alive, EPERM, other-host and legacy holders", async () => {
+    const cases = [
+      ["cli_h_99", () => true], ["cli_h_99", () => { throw errno("EPERM"); }],
+      ["cli_otherhost_99", () => { throw errno("ESRCH"); }], ["cli_99", () => { throw errno("ESRCH"); }],
+    ];
+    for (const [by, killFn] of cases) {
+      const { w, io } = fakeWorld();
+      const until = Date.now() + 60000;
+      w.body = leaseState(by, until);
+      const { res, calls } = await run(w, io, { killFn });
+      assert.equal(res.terminalReason, "deferred", by);
+      assert.equal(res.leaseUntil, until);
+      assert.match(res.detail, new RegExp(`leased by ${by} until \\d{4}-`));
+      assert.equal(calls.length, 0);
+    }
+  });
+
+  it("waitLease proceeds once the holder lease expires", async () => {
+    const { w, io } = fakeWorld();
+    let t = 1_000_000;
+    w.body = leaseState("cli_other_99", t + 5000);
+    const sleeps = [];
+    const sleep = async (ms) => { sleeps.push(ms); t += ms; };
+    const calls = [];
+    const runner = async ({ commandName }) => { calls.push(commandName); throw new Error("stop"); };
+    const res = await runIssue({ issue: 42, dir, agentId: "cli_h_1", lane: "staging", io, runner,
+      now: () => t, maxAttempts: 1, hostname: "h", waitLease: true, sleep, leaseTtlMs: 600000 });
+    assert.notEqual(res.terminalReason, "deferred");
+    assert.ok(sleeps.length >= 1 && sleeps[0] <= 5000);
+    assert.ok(calls.length >= 1);
+  });
+
+  it("waitLease re-reconciles against the post-wait remote (SEC-3705-1)", async () => {
+    const { w, io } = fakeWorld();
+    let t = 1_000_000;
+    w.body = leaseState("cli_other_99", t + 5000);
+    const sleep = async (ms) => {
+      t += ms;
+      // The holder commits investigate during the wait, then its lease lapses.
+      w.body = serializeState({
+        v: 7, run: "r_42_staging", issue: 42, lane: "staging", committed: ["investigate"], phase: null,
+        branch: null, pr: null, terminal: false, terminalReason: null, lease: { by: "cli_other_99", until: t - 1 },
+      });
+    };
+    const calls = [];
+    const runner = async ({ commandName }) => { calls.push(commandName); throw new Error("stop"); };
+    await runIssue({ issue: 42, dir, agentId: "cli_h_1", lane: "staging", io, runner,
+      now: () => t, maxAttempts: 1, hostname: "h", waitLease: true, sleep, leaseTtlMs: 600000 });
+    assert.ok(calls.length >= 1);
+    assert.ok(!calls.some((c) => /investigate/.test(c)), `must not re-run committed investigate: ${calls}`);
+    assert.deepEqual(parseState(w.body).committed, ["investigate"], "must not regress the holder committed list");
+  });
+
+  it("waitLease defers when the lease outlives the TTL-bounded wait", async () => {
+    const { w, io } = fakeWorld();
+    let t = 1_000_000;
+    w.body = leaseState("cli_other_99", t + 10_000_000);
+    const sleep = async (ms) => { t += ms; };
+    const res = await runIssue({ issue: 42, dir, agentId: "cli_h_1", lane: "staging", io,
+      runner: async () => { throw new Error("must not run"); },
+      now: () => t, maxAttempts: 1, hostname: "h", waitLease: true, sleep, leaseTtlMs: 60000, leaseRenewIntervalMs: 10000 });
+    assert.equal(res.terminalReason, "deferred");
+  });
+
+  it("a relaunch resumes the rate-limit sleep until resetAt before running the phase", async () => {
+    const { w, io } = fakeWorld();
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+    appendEvent(dir, 42, { event: "PHASE_RATE_LIMITED", phase: "investigate", resetAt: 5000, waitMs: 4000 });
+    const sleeps = [];
+    const events = [];
+    const order = [];
+    const sleep = async (ms) => { sleeps.push(ms); order.push("sleep"); };
+    const runner = async () => { order.push("run"); throw new Error("stop"); };
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner,
+      now: () => 1000, maxAttempts: 1, sleep, onProgress: (e) => events.push(e) });
+    assert.deepEqual(sleeps.slice(0, 1), [4000]);
+    assert.equal(order[0], "sleep");
+    assert.ok(events.some((e) => e.event === "phase_paused" && e.resetAt === 5000));
+  });
+
+  it("a past resetAt does not sleep", async () => {
+    const { w, io } = fakeWorld();
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+    appendEvent(dir, 42, { event: "PHASE_RATE_LIMITED", phase: "investigate", resetAt: 500, waitMs: 4000 });
+    const sleeps = [];
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io,
+      runner: async () => { throw new Error("stop"); },
+      now: () => 1000, maxAttempts: 1, sleep: async (ms) => { sleeps.push(ms); } });
+    assert.equal(sleeps.length, 0);
   });
 });

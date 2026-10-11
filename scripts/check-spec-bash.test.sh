@@ -165,5 +165,55 @@ check 0 "violations=0"                   "--fence-state passes declared, loop, e
 check 2 "Usage"                          "--fence-state without -- is a usage error"  -- --fence-state PR_NUMBER fs-good.md
 check 2 "Usage"                          "--fence-state without vars is a usage error" -- --fence-state -- fs-good.md
 
+# --fence-funcs: a function defined only in another fence, then called, is flagged.
+cat > "$T/ff-bad.md" <<EOF
+${FENCE}bash
+helper() {
+  echo hi
+}
+helper
+${FENCE}
+${FENCE}bash
+X=\$(helper arg)
+${FENCE}
+${FENCE}bash
+if helper; then :; fi
+${FENCE}
+EOF
+cat > "$T/ff-good.md" <<EOF
+Prose calls helper and mentions helper() freely.
+${FENCE}bash
+helper() { echo hi; }
+function other_fn { :; }
+helper
+${FENCE}
+${FENCE}bash
+declare -f helper >/dev/null 2>&1 || helper() { echo hi; }
+helper
+${FENCE}
+${FENCE}bash
+# helper is only named in a comment
+declare -f helper >/dev/null 2>&1
+echo "call helper later"
+git log --grep helper
+helper # allowlist:fence-funcs
+${FENCE}
+${FENCE}text
+helper
+${FENCE}
+${FENCE}
+Template with a nested fence:
+${FENCE}bash
+helper
+${FENCE}
+${FENCE}
+EOF
+check 1 "FAIL ff-bad.md:8 fence-funcs: helper()"  "--fence-funcs flags a call in a fence without the definition" -- --fence-funcs -- ff-bad.md
+check 1 "FAIL ff-bad.md:11 fence-funcs: helper()" "--fence-funcs flags a call after if" -- --fence-funcs -- ff-bad.md
+check 1 "violations=2"                           "--fence-funcs counts violations"  -- --fence-funcs -- ff-bad.md
+check 0 "violations=0"                           "--fence-funcs passes same-fence defs, guarded redefinition, comments, quoted/arg uses, allowlist, prose, non-bash fences" -- --fence-funcs -- ff-good.md
+check 2 "Usage"                                  "--fence-funcs without -- is a usage error" -- --fence-funcs ff-good.md
+check 2 "Usage"                                  "--fence-funcs without files is a usage error" -- --fence-funcs --
+
 echo "check-spec-bash.test.sh: passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

@@ -782,3 +782,45 @@ describe("runFromCli terminal diagnostics (forge#2175)", () => {
     assert.ok(!output.includes("usage:"), "must not print a usage line when no usage data exists");
   });
 });
+
+describe("runFromCli — forge#3574 deferred output, agentId, --wait-lease", () => {
+  const io = { gh: async () => { throw new Error("should not be called"); } };
+  const capture = async (fn) => {
+    const lines = []; const orig = console.log;
+    console.log = (...a) => lines.push(a.join(" "));
+    try { await fn(); } finally { console.log = orig; }
+    return lines.join("\n");
+  };
+
+  it("deferred prints the reason and skips empty-log diagnostics", async () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const detail = "issue 42 leased by cli_h_9 until 2026-10-10T16:20:14.000Z";
+    const runIssue = mock.fn(async () => ({ terminalReason: "deferred", detail }));
+    let res;
+    const out = await capture(async () => { res = await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir }); });
+    assert.equal(res.terminalReason, "deferred");
+    assert.ok(out.includes(detail));
+    assert.equal((out.match(/run-log:/g) || []).length, 1, "run-log path printed once (start only)");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("agentId is cli_<hostname>_<pid> and round-trips through parseLeaseHolder", async () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const runIssue = mock.fn(async () => ({ terminalReason: "merged" }));
+    await capture(() => runFromCli(["42", "--lane", "staging"], { io, runIssue, dir }));
+    const { agentId } = runIssue.mock.calls[0].arguments[0];
+    const { parseLeaseHolder } = await import("../engine.mjs");
+    assert.equal(parseLeaseHolder(agentId)?.pid, process.pid);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("forwards --wait-lease only at a flag position", async () => {
+    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const runIssue = mock.fn(async () => ({ terminalReason: "merged" }));
+    await capture(() => runFromCli(["42", "--lane", "staging", "--wait-lease"], { io, runIssue, dir }));
+    assert.equal(runIssue.mock.calls[0].arguments[0].waitLease, true);
+    await capture(() => runFromCli(["42", "--lane", "staging"], { io, runIssue, dir }));
+    assert.ok(!("waitLease" in runIssue.mock.calls[1].arguments[0]));
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
