@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runIssue, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, isLeaseHolderDead } from "../engine.mjs";
+import { runIssue, backendIdentity, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, isLeaseHolderDead } from "../engine.mjs";
 import { readLog, deriveState, appendEvent } from "../engine/runlog.mjs";
 import { pickPhase } from "../engine/phases.mjs";
 import { serializeState, parseState, upsertStateBlock } from "../engine/state.mjs";
@@ -2388,8 +2388,10 @@ describe("runIssue — forge#2524: session-limit auto-resume", () => {
     assert.equal(rateLimited[0].waitMs, 4000);
 
     const s = deriveState(log);
-    assert.deepEqual(s.lastRateLimit, { phase: "build", resetAt: 5000, waitMs: 4000 },
-      "deriveState() must fold PHASE_RATE_LIMITED into RunState.lastRateLimit without touching committed/terminal state");
+    assert.equal(rateLimited[0].backendId, backendIdentity({ backend: undefined, env: process.env }),
+      "PHASE_RATE_LIMITED must carry the non-secret backend identity (forge#3791)");
+    assert.equal(s.lastRateLimit, null,
+      "the retried build's PHASE_START clears the pause (forge#3791); the pause fold itself is covered by the reducer test");
     assert.deepEqual(s.committed, ["investigate", "build", "review", "close"],
       "the pause must not have skipped or duplicated any phase's commit");
   });
@@ -3229,7 +3231,7 @@ describe("runIssue — forge#3574 stale lease / wait-lease / rate-limit resume",
   it("a relaunch resumes the rate-limit sleep until resetAt before running the phase", async () => {
     const { w, io } = fakeWorld();
     appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
-    appendEvent(dir, 42, { event: "PHASE_RATE_LIMITED", phase: "investigate", resetAt: 5000, waitMs: 4000 });
+    appendEvent(dir, 42, { event: "PHASE_RATE_LIMITED", phase: "investigate", resetAt: 5000, waitMs: 4000, backendId: backendIdentity({ backend: undefined, env: process.env }) });
     const sleeps = [];
     const events = [];
     const order = [];
@@ -3242,10 +3244,57 @@ describe("runIssue — forge#3574 stale lease / wait-lease / rate-limit resume",
     assert.ok(events.some((e) => e.event === "phase_paused" && e.resetAt === 5000));
   });
 
+  it("forge#3791: a pause recorded by another backend identity is not waited on", async () => {
+    const { io } = fakeWorld();
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+    appendEvent(dir, 42, { event: "PHASE_RATE_LIMITED", phase: "investigate", resetAt: 5000, waitMs: 4000, backendId: "0000000000000000" });
+    const sleeps = []; const events = [];
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io,
+      runner: async () => { throw new Error("stop"); },
+      now: () => 1000, maxAttempts: 1, sleep: async (ms) => { sleeps.push(ms); }, onProgress: (e) => events.push(e) });
+    assert.equal(sleeps.length, 0);
+    assert.ok(events.some((e) => /rate-limit pause belongs to another backend; not waiting/.test(e.detail || "")));
+    assert.ok(!events.some((e) => e.event === "phase_paused"));
+  });
+
+  it("forge#3791: a legacy pause without backendId is not waited on", async () => {
+    const { io } = fakeWorld();
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+    appendEvent(dir, 42, { event: "PHASE_RATE_LIMITED", phase: "investigate", resetAt: 5000, waitMs: 4000 });
+    const sleeps = [];
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io,
+      runner: async () => { throw new Error("stop"); },
+      now: () => 1000, maxAttempts: 1, sleep: async (ms) => { sleeps.push(ms); } });
+    assert.equal(sleeps.length, 0);
+  });
+
+  it("forge#3791: backendIdentity is stable, non-secret, and varies by config dir / key / backend", () => {
+    const base = { CLAUDE_CONFIG_DIR: "/a", ANTHROPIC_API_KEY: "sk-secret-123" };
+    const id = backendIdentity({ backend: "cli", env: base });
+    assert.match(id, /^[0-9a-f]{16}$/);
+    assert.equal(id, backendIdentity({ backend: "cli", env: { ...base } }));
+    assert.ok(!id.includes("secret"));
+    assert.notEqual(id, backendIdentity({ backend: "cli", env: { ...base, CLAUDE_CONFIG_DIR: "/b" } }));
+    assert.notEqual(id, backendIdentity({ backend: "cli", env: { ...base, ANTHROPIC_API_KEY: "other" } }));
+    assert.notEqual(id, backendIdentity({ backend: "api", env: base }));
+  });
+
+  it("forge#3791: deriveState clears lastRateLimit on RUN_REOPEN, RUN_NEXT_CYCLE and same-phase PHASE_START only", () => {
+    const rl = { event: "PHASE_RATE_LIMITED", phase: "build", resetAt: 5000, waitMs: 1, backendId: "abc" };
+    const mk = (...evs) => deriveState([{ event: "RUN_START", issue: 42, run: "r", lane: "staging" }, rl, ...evs].map((e, i) => ({ seq: i + 1, ...e })));
+    assert.equal(mk().lastRateLimit.backendId, "abc");
+    assert.equal(mk({ event: "RUN_REOPEN" }).lastRateLimit, null);
+    assert.equal(mk({ event: "RUN_NEXT_CYCLE" }).lastRateLimit, null);
+    assert.equal(mk({ event: "PHASE_START", phase: "build" }).lastRateLimit, null);
+    assert.equal(mk({ event: "PHASE_START", phase: "review" }).lastRateLimit?.phase, "build");
+    const before = mk();
+    assert.equal(mk({ event: "PHASE_START", phase: "build" }).v, before.v, "PHASE_START must not bump v");
+  });
+
   it("a past resetAt does not sleep", async () => {
     const { w, io } = fakeWorld();
     appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
-    appendEvent(dir, 42, { event: "PHASE_RATE_LIMITED", phase: "investigate", resetAt: 500, waitMs: 4000 });
+    appendEvent(dir, 42, { event: "PHASE_RATE_LIMITED", phase: "investigate", resetAt: 500, waitMs: 4000, backendId: backendIdentity({ backend: undefined, env: process.env }) });
     const sleeps = [];
     await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io,
       runner: async () => { throw new Error("stop"); },

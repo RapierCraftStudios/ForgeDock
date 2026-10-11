@@ -4,7 +4,8 @@
  * GitHub state (phase.detectOutcome). All effects are injected → fully testable.
  */
 import { fileURLToPath } from "node:url";
-import { hostname as osHostname } from "node:os";
+import { createHash } from "node:crypto";
+import { hostname as osHostname, homedir } from "node:os";
 import { appendEvent, readLog, deriveState, rewriteLog } from "./engine/runlog.mjs";
 import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postCycleMarker, nextCycleNumber } from "./engine/phases.mjs";
 import { reconcileState } from "./engine/reconcile.mjs";
@@ -35,6 +36,20 @@ export const DEFAULT_MAX_SESSION_LIMIT_PAUSES = 5;
 // reset epoch. The runner never fabricates a reset time; this default lives in
 // the engine and is still capped by `maxSessionLimitPauses`.
 export const DEFAULT_SESSION_LIMIT_WAIT_MS = 30 * 60 * 1000;
+
+/**
+ * forge#3791: non-secret identity of the backend/account a usage-limit pause belongs to.
+ * Truncated sha256 over the resolved backend, the Claude config dir, and a hash of the API key
+ * (when set). The raw key and path are never emitted.
+ * @param {{backend?: string, env?: object}} [p]
+ * @returns {string} 16 hex chars
+ */
+export function backendIdentity({ backend, env = process.env } = {}) {
+  const sha = (s) => createHash("sha256").update(String(s)).digest("hex");
+  const cfg = env.CLAUDE_CONFIG_DIR || `${homedir()}/.claude`;
+  const key = env.ANTHROPIC_API_KEY ? sha(env.ANTHROPIC_API_KEY) : "";
+  return sha(JSON.stringify([backend ?? "auto", cfg, key])).slice(0, 16);
+}
 
 /**
  * Validates the subset of `runIssue()`'s options that must fail fast,
@@ -493,8 +508,18 @@ export async function runIssue(opts) {
   // wait so a second relaunch still defers.
   const rl = local?.lastRateLimit;
   const pendingPhase = pickPhase(state);
-  if (pendingPhase && rl && rl.phase === pendingPhase.id &&
-      typeof rl.resetAt === "number" && Number.isFinite(rl.resetAt) && rl.resetAt > now()) {
+  const currentBackendId = backendIdentity({ backend, env: process.env });
+  const rlApplies = !!(pendingPhase && rl && rl.phase === pendingPhase.id &&
+      typeof rl.resetAt === "number" && Number.isFinite(rl.resetAt) && rl.resetAt > now());
+  // forge#3791: only wait when the pause was recorded by this same backend/account. A record
+  // without backendId (pre-fix) cannot be attributed, so it does not wait.
+  if (rlApplies && rl.backendId !== currentBackendId) {
+    emitProgress({
+      event: "phase_resumed", phase: pendingPhase.id, reason: "session-limit",
+      detail: "rate-limit pause belongs to another backend; not waiting",
+    });
+  }
+  if (rlApplies && rl.backendId === currentBackendId) {
     const waitMs = Math.min(rl.resetAt - now(), MAX_RESUME_RATE_LIMIT_WAIT_MS);
     emitProgress({
       event: "phase_paused", phase: pendingPhase.id, reason: "session-limit", resetAt: rl.resetAt,
@@ -696,6 +721,7 @@ export async function runIssue(opts) {
             appendEvent(dir, issue, {
               event: "PHASE_RATE_LIMITED", phase: phase.id,
               resetAt: hasResetEpoch ? resetAtMs : null, resetAtDisplay: e.resetAt || null, waitMs,
+              backendId: backendIdentity({ backend, env: process.env }),
             });
             // forge#2524 AC6: progress observer sees the pause so a caller
             // (bin/engine-cli.mjs) can render the wait state instead of the
