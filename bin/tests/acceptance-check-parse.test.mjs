@@ -44,3 +44,44 @@ test("unquoted fields still parse", () => {
   assert.equal(r.target, "commands/x.md");
   assert.equal(r.matcher, "none");
 });
+
+// malformed-check (#3694): detector lines are extracted from build.md B6.5 and run verbatim.
+const staticDetector = build
+  .split("\n")
+  .filter((l) => /^ {2}MALFORMED=""|^ {2}\{ \[ "\$TYPE" = "command" \]/.test(l))
+  .join("\n");
+const rcDetector = build
+  .split("\n")
+  .filter((l) => /^ {8}\[ "\$RC" -ge 2 \] && case/.test(l))
+  .slice(0, 1)
+  .join("\n");
+
+function classify(target, type = "command") {
+  const script = `TYPE="$1"; TARGET="$2"\n${staticDetector}\nif [ -z "$MALFORMED" ]; then eval "$TARGET" >/dev/null 2>&1; RC=$?\n${rcDetector}\nfi\nprintf '%s' "$MALFORMED"`;
+  return execFileSync("bash", ["-c", script, "x", type, target], { encoding: "utf8", cwd: root });
+}
+
+test("malformed-check detector lines are present in build.md", () => {
+  assert.ok(staticDetector.includes("bash -n") && rcDetector.includes("grep usage error"));
+});
+
+test("malformed-check: #3621 ac-3 shape (over-escaped backslashes) is malformed", () => {
+  const line = String.raw`ACCEPTANCE_CHECK: id=ac-3 type=command target="grep -qE 'breaker\\\\\|\\*' commands/orchestrate/phase-4-execution.md" matcher="exit_0" description=d`;
+  const { target } = parse(line);
+  assert.match(classify(target), /backslashes/);
+});
+
+test("malformed-check: #3723 shape (pattern starting with - read as an option, grep exit 2) is malformed", () => {
+  assert.match(classify(String.raw`grep -qE "-z .\$DOMAIN_FILES_API" commands/review-pr.md`), /usage error/);
+  assert.match(classify("grep -qE '--no-such-flag' commands/work-on/build.md"), /usage error/);
+});
+
+test("malformed-check: unbalanced quotes are malformed", () => {
+  assert.match(classify("grep -qF 'abc commands/work-on/build.md"), /syntax error/);
+});
+
+test("malformed-check: valid targets are not flagged, genuine exit 1 stays a failure", () => {
+  assert.equal(classify("grep -qF -e 'malformed-check' commands/work-on/build.md"), "");
+  assert.equal(classify("grep -qF -e 'no-such-string-xyzzy' commands/work-on/build.md"), "");
+  assert.equal(classify("commands/work-on/build.md", "exists"), "");
+});

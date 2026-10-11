@@ -799,6 +799,7 @@ The acceptance spec contains only a skip sentinel (\`type=skipped\`). No automat
 GATE_PASS=true
 CORRECTED=""
 FAILED_CHECKS=""
+MALFORMED_CHECKS=""   # malformed-check: generated check that can never pass; reported, never repaired, never needs-human
 
 while IFS= read -r check_line; do
   # Fields are extracted by anchoring each sed pattern to `^ACCEPTANCE_CHECK:` and walking
@@ -836,6 +837,12 @@ while IFS= read -r check_line; do
 
   [ "$TYPE" = "skipped" ] && continue
 
+  # malformed-check <!-- Added: forge#3694 -->: a generated command/behavior target that can never pass is a
+  # check defect, not an implementation failure. Static detection only parses (bash -n), never executes.
+  MALFORMED=""
+  { [ "$TYPE" = "command" ] || [ "$TYPE" = "behavior" ]; } && { case "$TARGET" in *'\\\\'*) MALFORMED="run of 4+ backslashes (over-escaped target)";; esac; [ -n "$MALFORMED" ] || bash -n -c "$TARGET" 2>/dev/null || MALFORMED="shell syntax error (unbalanced quotes)"; }
+  if [ -n "$MALFORMED" ]; then MALFORMED_CHECKS="${MALFORMED_CHECKS}\n- **$ID** ($DESC): $MALFORMED"; continue; fi
+
   RESULT="PASS"
   DETAIL=""
 
@@ -853,10 +860,15 @@ while IFS= read -r check_line; do
       ;;
     command|behavior)
       if [ "$MATCHER" = "exit_0" ]; then
-        eval "$TARGET" >/dev/null 2>&1 || { RESULT="FAIL"; DETAIL="command exited non-zero: $TARGET"; }
+        eval "$TARGET" >/dev/null 2>&1; RC=$?
+        # grep exit >= 2 is a usage/syntax error (e.g. a pattern starting with `-`), never a verdict on the code; exit 1 stays FAIL
+        [ "$RC" -ge 2 ] && case "$TARGET" in grep\ *|egrep\ *|fgrep\ *) MALFORMED="grep usage error (exit $RC)";; esac
+        [ "$RC" -eq 0 ] || [ -n "$MALFORMED" ] || { RESULT="FAIL"; DETAIL="command exited non-zero: $TARGET"; }
       else
-        OUTPUT=$(eval "$TARGET" 2>&1)
-        if ! printf '%s\n' "$OUTPUT" | grep -qE "$MATCHER"; then
+        OUTPUT=$(eval "$TARGET" 2>&1); RC=$?
+        [ "$RC" -ge 2 ] && case "$TARGET" in grep\ *|egrep\ *|fgrep\ *) MALFORMED="grep usage error (exit $RC)";; esac
+        if [ -n "$MALFORMED" ]; then :
+        elif ! printf '%s\n' "$OUTPUT" | grep -qE "$MATCHER"; then
           if printf '%s\n' "$OUTPUT" | grep -qF -- "$MATCHER"; then CORRECTED="${CORRECTED}\n- **$ID**: output matched as a literal string"
           else RESULT="FAIL"; DETAIL="output did not match '$MATCHER'. Got: $(printf '%s\n' "$OUTPUT" | head -3)"; fi
         fi
@@ -866,6 +878,8 @@ while IFS= read -r check_line; do
       RESULT="FAIL"; DETAIL="unknown check type: $TYPE"
       ;;
   esac
+
+  if [ -n "$MALFORMED" ]; then MALFORMED_CHECKS="${MALFORMED_CHECKS}\n- **$ID** ($DESC): $MALFORMED"; continue; fi
 
   if [ "$RESULT" = "FAIL" ]; then
     GATE_PASS=false
@@ -884,6 +898,7 @@ if [ "$GATE_PASS" = "true" ]; then
 
 All machine-checkable acceptance criteria verified against real behavior.
 $( [ -n "$CORRECTED" ] && printf '\n**Checks corrected (malformed matcher, literal text present)**:%b\n' "$CORRECTED" )
+$( [ -n "$MALFORMED_CHECKS" ] && printf '\n**malformed-check (not counted as failures; regenerate the acceptance spec by re-running investigate)**:%b\n' "$MALFORMED_CHECKS" )
 
 <!-- FORGE:ACCEPTANCE_GATE:PASSED -->"
 else
@@ -893,6 +908,7 @@ else
 The following acceptance checks did not pass:
 
 $(echo -e "$FAILED_CHECKS")
+$( [ -n "$MALFORMED_CHECKS" ] && printf '\n**malformed-check (not counted as failures; regenerate the acceptance spec by re-running investigate)**:%b\n' "$MALFORMED_CHECKS" )
 
 Merge is blocked. Fix the failing criteria and re-run the validate phase.
 
@@ -900,6 +916,8 @@ Merge is blocked. Fix the failing criteria and re-run the validate phase.
   run gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
 fi
 ```
+
+A `malformed-check` (a command/behavior target with a run of 4+ backslashes or a `bash -n` syntax error, or a grep target exiting >= 2) is reported in the comment but never sets `GATE_PASS=false`, never enters `FAILED_CHECKS`, is never passed to `--fix-acceptance`, and never adds `needs-human`; the gate still posts exactly one of PASSED/FAILED. <!-- Added: forge#3694 -->
 
 If `GATE_PASS = false`, the build repairs itself **once** before anything escalates (a failing acceptance check is pipeline work, not a human decision):
 
