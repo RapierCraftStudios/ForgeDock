@@ -342,6 +342,29 @@ describe("runIssue", () => {
     assert.equal(calls.filter((c) => c === "work-on/remediate").length, 2);
   });
 
+  it("forge#3807: dispatch-2 crash after a dispatch-1 deferral is a failed attempt, not a deferral", async () => {
+    const { w, io } = fakeWorld();
+    let dispatch = 1;
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; w.labels.push("needs-human"); },
+      // dispatch 1 defers to a live run; dispatch 2 proceeds and crashes: no DEFERRED record, no trail.
+      "work-on/remediate": () => {
+        if (dispatch === 1) w.markers += SEP + "<!-- FORGE:REMEDIATION_DEFERRED -->\n## Remediation Deferred\n\npr=7\nkind=lease\nlease_by=cli_o_9\nlease_until=1";
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "deferred");
+    dispatch = 2;
+    const res2 = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 2000, maxAttempts: 1 });
+    assert.notEqual(res2.terminalReason, "deferred", "a stale dispatch-1 deferral must not mask the dispatch-2 failure");
+    assert.equal((w.posted || []).filter((b) => b.includes("FORGE:REMEDIATION_DISPATCH: pr=7")).length, 2, "one dispatch marker per dispatch");
+    const events = readLog(dir, 42);
+    assert.ok(!events.some((e) => e.event === "PHASE_COMMIT" && e.phase === "remediate"));
+  });
+
   // forge#3806: a stale in-memory snapshot must never overwrite a lease another agent now holds.
   const raceLease = (w, lease) => { w.body = upsertStateBlock(w.body, { ...parseState(w.body), lease }); };
   const raceScript = (w, onRemediate, onReview) => ({
@@ -1470,8 +1493,9 @@ describe("runIssue", () => {
     };
     const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
     assert.equal(seenAtRemediate, true, "bound marker must exist before remediate is dispatched");
-    assert.equal(w.posted.length, 1);
+    assert.equal(w.posted.length, 2);
     assert.match(w.posted[0], /^<!-- FORGE:BASESYNC_REMEDIATION: pr=7 -->/);
+    assert.match(w.posted[1], /^<!-- FORGE:REMEDIATION_DISPATCH: pr=7 -->/);
     // The newest trail (RE-ESCALATED) wins over the older HELD-AWAITING-MERGE one.
     assert.equal(res.terminalReason, "needs-human");
     assert.equal(deriveState(readLog(dir, 42)).remediationKind, null, "a committed remediate consumes the kind");
@@ -2796,7 +2820,7 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
       assert.equal(s.terminal, false);
       const ph = pickPhase(s);
       assert.equal(ph.id, "remediate");
-      assert.equal((await ph.buildArgs(s, { repo: "o/r" }))[0], "9");
+      assert.equal((await ph.buildArgs(s, { repo: "o/r" }, { gh: async () => "", git: async () => "" }))[0], "9");
     });
 
     it("decompose handoff -> engine-error -> reopen picks decompose, never build", () => {
@@ -2822,7 +2846,7 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
       assert.equal(s.pr, 9);
       const ph = pickPhase(s);
       assert.equal(ph.id, "remediate");
-      assert.equal((await ph.buildArgs(s, { repo: "o/r" }))[0], "9");
+      assert.equal((await ph.buildArgs(s, { repo: "o/r" }, { gh: async () => "", git: async () => "" }))[0], "9");
     });
 
     it("forge#3772 remediate needs-human -> engine-error -> reopen keeps remediate committed, resumes at close", () => {
