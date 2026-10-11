@@ -104,3 +104,9 @@ Cite: #3233 / PR #3317.
 PR #3338 touched `orchestrate`. See FORGE:BUILDER comment on issue #3296 for full change list.
 Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
 Cite: #3296 / PR #3338.
+
+## Entry 2026-10-11 — Fix: forge_resolve prefers the running plugin root over newer cache and stale FORGE_HOME (#3801)
+
+PR #3804 touched `orchestrate` (resolver stub line in orchestrate phase specs). See FORGE:BUILDER comment on issue #3801 for full change list.
+Key gotcha recorded: the stub sets FORGE_SOURCED_ROOT to the loader-substituted plugin root; forge-resolve.sh must rank it above FORGE_HOME and the newest cache.
+Cite: #3801 / PR #3804.
