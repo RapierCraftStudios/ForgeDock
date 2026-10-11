@@ -95,6 +95,8 @@ async function issueMarkers(issue, io) {
   return { comments };
 }
 
+/** Non-terminal held-resume record (remediate.md Phase M8, forge#3685): header and sentinel are the same line; never a COMPLETE marker. */
+const REMEDIATION_HELD_MARKER = "FORGE:REMEDIATION_HELD";
 const reEscape = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** True when `body` STARTS with the typed header `<!-- {header}` (e.g. `FORGE:BUILDER`). */
 function startsWithHeader(body, header) {
@@ -863,6 +865,19 @@ export const PHASES = [
           ? { status: "committed", terminalReason: "merged", outputs: { reGateOutcome } }
           : { status: "committed", terminalReason: "merged", outputs: { reGateOutcome, closeHandoff: true } };
       };
+      // forge#3685: a resume that ends HELD posts a non-terminal FORGE:REMEDIATION_HELD record (no COMPLETE).
+      // Newest-wins between the held record and COMPLETE, by position in the (trusted, scoped) comment list.
+      const isHeld = (b) => startsWithHeader(b, REMEDIATION_HELD_MARKER) && hasSentinelLine(b, REMEDIATION_HELD_MARKER);
+      let heldAt = -1, completeAt = -1;
+      scoped.forEach((b, i) => {
+        if (isHeld(b)) heldAt = i;
+        if (startsWithHeader(b, PHASE_MARKERS.remediate.header) && hasSentinelLine(b, completion)) completeAt = i;
+      });
+      if (heldAt >= 0 && heldAt > completeAt) {
+        // Merged PR hands to close; otherwise awaiting-merge (terminal for the engine, re-entered by an operator), never a retry.
+        if (await prMerged()) return mergedResult("AUTO-LANDED");
+        return { status: "committed", terminalReason: "awaiting-merge", outputs: { reGateOutcome: "HELD-AWAITING-MERGE" } };
+      }
       if (latest === null) {
         if (await prMerged()) return mergedResult("AUTO-LANDED");
         return { status: "failed", detail: `no ${completion} marker` };

@@ -6,7 +6,7 @@ import path from "node:path";
 import { PHASES, pickPhase, REMEDIATION_BOUND_MARKERS, cycleMarker, sliceToCurrentCycle, postCycleMarker, nextCycleNumber } from "../engine/phases.mjs";
 import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
 import { RESERVED_TYPES } from "../../packages/protocol/src/types.js";
-import { trusted, jsonLines, invBody, builderBody, remediationBody } from "./helpers/comments.mjs";
+import { trusted, jsonLines, invBody, builderBody, remediationBody, remediationHeldBody } from "./helpers/comments.mjs";
 
 const base = { v: 0, run: "r1", issue: 42, lane: "staging", committed: [], phase: null,
   branch: null, pr: null, terminal: false, terminalReason: null, lease: null };
@@ -467,6 +467,40 @@ describe("pickPhase", () => {
     const remediate = PHASES.find(p => p.id === "remediate");
     const ioWith = (...cs) => ({ gh: async () => jsonLines(cs.map((c) => (typeof c === "string" ? trusted(c) : c))), git: async () => "0" });
     const remediateBody = (outcome) => remediationBody(`${outcome} to staging`);
+
+    // forge#3685: held-resume record is non-terminal (no COMPLETE) and must read as awaiting-merge, not a failed phase.
+    const heldIo = (merged, ...cs) => ({
+      gh: async (args) => (args[0] === "pr" && args[1] === "view"
+        ? JSON.stringify(merged ? { state: "MERGED", mergedAt: "2026-01-01T00:00:00Z" } : { state: "OPEN" })
+        : jsonLines(cs.map((c) => (typeof c === "string" ? trusted(c) : c)))),
+      git: async () => "0",
+    });
+    it("forge#3685: held-only record -> committed awaiting-merge (not failed)", async () => {
+      const o = await remediate.detectOutcome({ ...base, pr: 7 }, heldIo(false, remediationHeldBody()));
+      assert.equal(o.status, "committed");
+      assert.equal(o.terminalReason, "awaiting-merge");
+      assert.equal(o.outputs.reGateOutcome, "HELD-AWAITING-MERGE");
+    });
+    it("forge#3685: COMPLETE newer than held -> COMPLETE wins", async () => {
+      const o = await remediate.detectOutcome({ ...base, pr: 7 }, heldIo(false, remediationHeldBody(), remediateBody("RE-ESCALATED")));
+      assert.equal(o.terminalReason, "needs-human");
+    });
+    it("forge#3685: held newer than COMPLETE -> held wins", async () => {
+      const o = await remediate.detectOutcome({ ...base, pr: 7 }, heldIo(false, remediateBody("RE-ESCALATED"), remediationHeldBody()));
+      assert.equal(o.terminalReason, "awaiting-merge");
+    });
+    it("forge#3685: held record + merged PR -> merged with closeHandoff", async () => {
+      const o = await remediate.detectOutcome({ ...base, pr: 7 }, heldIo(true, remediationHeldBody()));
+      assert.equal(o.terminalReason, "merged");
+      assert.equal(o.outputs.closeHandoff, true);
+    });
+    it("forge#3685: untrusted or quoted held marker is ignored", async () => {
+      const untrusted = { body: remediationHeldBody(), author_association: "NONE", user: { type: "User", login: "mallory" } };
+      const o1 = await remediate.detectOutcome({ ...base, pr: 7 }, heldIo(false, untrusted));
+      assert.equal(o1.status, "failed");
+      const o2 = await remediate.detectOutcome({ ...base, pr: 7 }, heldIo(false, `Quoted:\n${remediationHeldBody()}`));
+      assert.equal(o2.status, "failed");
+    });
 
     it("AUTO-LANDED -> committed, terminalReason merged", async () => {
       const outcome = await remediate.detectOutcome(base, ioWith(remediateBody("AUTO-LANDED")));
