@@ -325,6 +325,8 @@ hr_check_block() { # label file var script
 hr_check_block review-pr "$HR_CLASSIFY" DERIVE_MILESTONE_SCRIPT derive-finding-milestone.sh
 hr_check_block review-pr "$HR_CLASSIFY" PRIORITY_SCRIPT severity-to-priority.sh
 hr_check_block review-pr "$HR_CLASSIFY" CODE_INDEX_SCRIPT code-index.sh
+hr_check_block review-pr "$HR_CLASSIFY" DEDUP_SCRIPT issue-dedup.sh
+hr_check_block issue "$ROOT/commands/issue.md" DEDUP_SCRIPT issue-dedup.sh
 hr_check_block review-pr-staging "$HR_STG" DERIVE_MILESTONE_SCRIPT derive-finding-milestone.sh
 hr_check_block review-pr-staging "$HR_STG" PRIORITY_SCRIPT severity-to-priority.sh
 extract_helper_block "$HR_CLASSIFY" DERIVE_MILESTONE_SCRIPT > "$T/hr_dm.sh"
@@ -334,6 +336,9 @@ extract_helper_block "$HR_STG" PRIORITY_SCRIPT > "$T/hr_pr_stg.sh"
 # only the variable-name-specific text may differ, and review-pr/review-pr-staging must agree
 cmp -s "$T/hr_dm.sh" "$T/hr_dm_stg.sh" && ok || bad 'DERIVE_MILESTONE_SCRIPT resolver differs between review-pr and review-pr-staging'
 cmp -s "$T/hr_pr.sh" "$T/hr_pr_stg.sh" && ok || bad 'PRIORITY_SCRIPT resolver differs between review-pr and review-pr-staging'
+extract_helper_block "$HR_CLASSIFY" DEDUP_SCRIPT > "$T/hr_dd.sh"
+extract_helper_block "$ROOT/commands/issue.md" DEDUP_SCRIPT > "$T/hr_dd_issue.sh"
+cmp -s "$T/hr_dd.sh" "$T/hr_dd_issue.sh" && ok || bad 'DEDUP_SCRIPT resolver differs between review-pr and issue'
 # no bare cwd-relative helper call in either review spec
 if grep -nE 'bash scripts/(derive-finding-milestone|severity-to-priority)\.sh' "$HR_CLASSIFY" "$HR_STG" >/dev/null 2>&1; then bad 'review spec still calls a helper by a bare scripts/ path'; else ok; fi
 
@@ -342,10 +347,25 @@ if grep -nE 'bash scripts/(derive-finding-milestone|severity-to-priority)\.sh' "
 #   design-bench.md, design-render-critique-loop.md, pipeline-health/phase-2-metrics.md, phase-3-dependency.md:
 #     node scripts/*.mjs run inside the ForgeDock repo itself or printed as user hints (not run under a PR checkout cwd).
 #   work-on/investigate.md, work-on/build/architect.md: {REPO_PATH}/scripts/code-index.sh, deferred to #3670.
+#   orchestrate/phase-3-dependency.md: scripts/worktree-lifecycle.sh lines sit in a roadmap/proposal fence, not executed.
 #   deploy-info.md: read-only grep of decrypt-secrets.sh, never executed.
-SCRIPTS_ALLOW='commands/(design-bench|design-render-critique-loop|deploy-info|pipeline-health/phase-2-metrics|pipeline-health/phase-3-dependency|work-on/investigate|work-on/build/architect)\.md'
-guard_hits=$(grep -rnE '(^|[^A-Za-z0-9_-])(bash|sh|source) +(\./)?scripts/[A-Za-z0-9_.-]+|REPO_PATH\}?/scripts/' "$ROOT/commands" 2>/dev/null \
-  | sed "s#^$ROOT/##" | grep -vE "^($SCRIPTS_ALLOW):" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)  # comment lines are prose
+SCRIPTS_ALLOW='commands/(design-bench|design-render-critique-loop|deploy-info|pipeline-health/phase-2-metrics|pipeline-health/phase-3-dependency|orchestrate/phase-3-dependency|work-on/investigate|work-on/build/architect)\.md'
+# Executed forms: a bash/sh/source word, a command substitution `$(scripts/x.sh`, or a line-start/after-;&&| direct `scripts/x.sh` / `./scripts/x.sh`.
+GUARD_RE='(^|[^A-Za-z0-9_-])(bash|sh|source) +(\./)?scripts/[A-Za-z0-9_.-]+|REPO_PATH\}?/scripts/|\$\( *(\./)?scripts/[A-Za-z0-9_.-]+\.sh|(^|:[0-9]+:|[;&(] *)[[:space:]]*(\./)?scripts/[A-Za-z0-9_.-]+\.sh'
+guard_scan() { # dir -> offending file:line:text rows (comment lines are prose)
+  grep -rnE "$GUARD_RE" "$1" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true
+}
+guard_hits=$(guard_scan "$ROOT/commands" | sed "s#^$ROOT/##" | grep -vE "^($SCRIPTS_ALLOW):" || true)
+# Negative fixtures (#3679): a bare direct call must be flagged; backticked prose and comments must not.
+mkdir -p "$T/guardfx/bad1" "$T/guardfx/bad2" "$T/guardfx/bad3" "$T/guardfx/good"
+printf 'X=$(scripts/foo.sh a b)\n' > "$T/guardfx/bad1/x.md"
+printf 'scripts/foo.sh arg\n' > "$T/guardfx/bad2/x.md"
+printf 'ok && ./scripts/foo.sh\n' > "$T/guardfx/bad3/x.md"
+printf 'See `scripts/foo.sh` for details, forwarded to scripts/foo.sh --exclude.\n# $(scripts/foo.sh) in a comment\n' > "$T/guardfx/good/x.md"
+for f in bad1 bad2 bad3; do
+  [ -n "$(guard_scan "$T/guardfx/$f")" ] && ok || bad "widened guard missed direct execution fixture $f"
+done
+[ -z "$(guard_scan "$T/guardfx/good")" ] && ok || bad 'widened guard flags prose/comment fixture'
 if [ -n "$guard_hits" ]; then bad "commands/ has a cwd-relative or REPO_PATH helper call outside the allowlist: $(printf '%s' "$guard_hits" | head -5 | tr '\n' '|')"; else ok; fi
 
 # Behavior (#3596): planted cwd copies of the two review helpers must never be selected.

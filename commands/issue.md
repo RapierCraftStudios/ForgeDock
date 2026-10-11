@@ -367,8 +367,23 @@ Run the deterministic dedup script first (authoritative check), then fall back t
 # empty, so this is a no-op for that path.
 DEDUP_EXCLUDE_ARGS=()
 [ -n "$PROGRAMMATIC_EXCLUDE" ] && DEDUP_EXCLUDE_ARGS=(--exclude "$PROGRAMMATIC_EXCLUDE")
-DEDUP_RESULT=$(scripts/issue-dedup.sh "{PROPOSED_TITLE}" {GH_FLAG} "${DEDUP_EXCLUDE_ARGS[@]}" 2>&1)
-DEDUP_EXIT=$?
+# HELPER_SCRIPT resolver (DEDUP_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+done
+DEDUP_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$DEDUP_SCRIPT" ] && [ -f "$_c/scripts/issue-dedup.sh" ] && DEDUP_SCRIPT="$_c/scripts/issue-dedup.sh" ;; esac
+done <<< "$_tc"
+# Unresolved helper: no deterministic result (exit 0, empty) so the LLM fallback below still runs; never exit 1 (duplicate STOP).
+if [ -n "$DEDUP_SCRIPT" ]; then
+  DEDUP_RESULT=$(bash "$DEDUP_SCRIPT" "{PROPOSED_TITLE}" {GH_FLAG} "${DEDUP_EXCLUDE_ARGS[@]}" 2>&1)
+  DEDUP_EXIT=$?
+else
+  DEDUP_RESULT=""; DEDUP_EXIT=0
+fi
 
 if [ "$DEDUP_EXIT" -eq 1 ]; then
   echo "Near-duplicate detected: $DEDUP_RESULT"
