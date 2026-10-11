@@ -34,11 +34,13 @@ _forge_candidates() {
 
 # forge_resolve <path under scripts/>: print the first match, print nothing when unresolved.
 forge_resolve() {
-  local _n="${1:-}" _c
+  local _n="${1:-}" _c _all
   case "$_n" in ''|/*|*..*) return 1 ;; esac
+  # Materialize the list first: returning early from a `< <(...)` loop would close the pipe under the generator (EPIPE noise).
+  _all="$(_forge_candidates)"
   while IFS= read -r _c; do
     case "$_c" in /*) [ -f "$_c/scripts/$_n" ] && { printf '%s\n' "$_c/scripts/$_n"; return 0; } ;; esac
-  done < <(_forge_candidates)
+  done <<< "$_all"
   return 1
 }
 
