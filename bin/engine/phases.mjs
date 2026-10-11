@@ -198,15 +198,32 @@ export async function postCycleMarker(issue, n, io) {
  * ALREADY_DONE when the newest gate marker is blocked (forge#3725).
  */
 function latestGateState(comments) {
+  return latestGateMarker(comments).state;
+}
+/**
+ * Single newest-first scan shared by latestGateState and latestBlockedIndex so their
+ * predicates cannot drift. Returns the newest gate marker's state and its comment index
+ * (`{state: "none", index: -1}` when there is none).
+ */
+function latestGateMarker(comments) {
   const gate = "FORGE:ACCEPTANCE_GATE";
   for (let i = comments.length - 1; i >= 0; i--) {
     const b = comments[i];
-    if (startsWithHeader(b, "FORGE:BUILD_BLOCKED")) return "blocked";
+    if (startsWithHeader(b, "FORGE:BUILD_BLOCKED")) return { state: "blocked", index: i };
     if (!startsWithHeader(b, gate)) continue;
-    if (hasSentinelLine(b, `${gate}:PASSED`)) return "pass";
-    if (hasSentinelLine(b, `${gate}:FAILED`) || hasSentinelLine(b, `${gate}:BLOCKED`)) return "blocked";
+    if (hasSentinelLine(b, `${gate}:PASSED`)) return { state: "pass", index: i };
+    if (hasSentinelLine(b, `${gate}:FAILED`) || hasSentinelLine(b, `${gate}:BLOCKED`)) return { state: "blocked", index: i };
   }
-  return "none";
+  return { state: "none", index: -1 };
+}
+/**
+ * Comment index of the newest blocked gate marker, or -1 when the newest gate marker is
+ * not blocked (a newer PASSED clears it). Recency anchor for build.detectOutcome so an
+ * older blocked marker cannot shadow a strictly newer size-gate routing marker.
+ */
+function latestBlockedIndex(comments) {
+  const m = latestGateMarker(comments);
+  return m.state === "blocked" ? m.index : -1;
 }
 /**
  * Investigation exit evidence (forge#3534): a trusted comment led by
@@ -277,18 +294,22 @@ function overrideHasJustification(body) {
  * chronological order (see trustedCommentBodies); an untrusted comment never
  * reaches this function.
  */
-function sizeGateRoutesToDecompose(comments) {
+function sizeGateRouteIndex(comments) {
   const gate = PHASE_MARKERS.build.sizeGateMarker;
   const override = PHASE_MARKERS.build.sizeOverrideMarker;
   const starts = (c, m) => typeof c === "string" && c.trimStart().startsWith(`<!-- ${m}`);
-  if (comments.some((c) => starts(c, "FORGE:DECOMPOSED"))) return false;
+  if (comments.some((c) => starts(c, "FORGE:DECOMPOSED"))) return -1;
   let idx = -1;
   for (let i = comments.length - 1; i >= 0; i--) if (starts(comments[i], gate)) { idx = i; break; }
-  if (idx < 0) return false;
+  if (idx < 0) return -1;
   const body = comments[idx].replace(/\r\n/g, "\n");
   const m = /^result:[ \t]*(OK|OVERRIDDEN|COHESIVE|OVER)[ \t]*$/m.exec(body);
-  if (!m || m[1] !== "OVER" || !/^###[ \t]+Split Proposal\b/m.test(body)) return false;
-  return !comments.slice(idx + 1).some((c) => starts(c, override) && overrideHasJustification(c));
+  if (!m || m[1] !== "OVER" || !/^###[ \t]+Split Proposal\b/m.test(body)) return -1;
+  return comments.slice(idx + 1).some((c) => starts(c, override) && overrideHasJustification(c)) ? -1 : idx;
+}
+/** Boolean form of sizeGateRouteIndex (index of the routing DIFF_SIZE comment, or -1). */
+function sizeGateRoutesToDecompose(comments) {
+  return sizeGateRouteIndex(comments) >= 0;
 }
 /**
  * Decompose loop guard (mirrors build.md B5.5 and decompose.md Guard 1). Returns a
@@ -734,6 +755,13 @@ export const PHASES = [
       // review. Non-retryable: a retry would only re-read the same append-only markers.
       // A newer PASSED clears this: either the in-build repair loop posts it, or a fresh
       // build invocation does via build.md B0 gate resume (re-enters B6.5; forge#3725).
+      // forge#3712: an OVER + Split Proposal size-gate marker STRICTLY NEWER (comment order)
+      // than the newest blocked marker is the retry's real outcome; route to decompose.
+      // Equal/absent index stays fail-closed, as does a newer blocked marker.
+      if (!complete && latestGateState(comments) === "blocked" && mayRouteToDecompose(comments)
+          && sizeGateRouteIndex(comments) > latestBlockedIndex(comments)) {
+        return { status: "committed", terminalReason: "decomposed", outputs: branch ? { branch } : {} };
+      }
       if (latestGateState(comments) === "blocked") {
         return { status: "failed", detail: `acceptance gate blocked (builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"})`, retryable: false };
       }

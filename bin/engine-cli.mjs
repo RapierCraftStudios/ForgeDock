@@ -77,8 +77,16 @@ export function runDir() { return join(homedir(), ".forge", "runs"); }
 export function aggregateUsage(events) {
   let found = false;
   const total = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+  // forge#3696: PHASE_COMMIT.usage is cumulative over all attempts, so summing it with
+  // PHASE_FAILED would double count. For a phase that has PHASE_ATTEMPT_USAGE events,
+  // sum ONLY those; otherwise (old logs) fall back to the legacy COMMIT + FAILED sum.
+  const attemptPhases = new Set(events.filter((e) => e.event === "PHASE_ATTEMPT_USAGE").map((e) => e.phase));
   for (const e of events) {
-    if (e.event !== "PHASE_COMMIT" && e.event !== "PHASE_FAILED") continue;
+    if (e.event === "PHASE_ATTEMPT_USAGE") {
+      // counted as-is (usage null => nothing to add)
+    } else if (e.event === "PHASE_COMMIT" || e.event === "PHASE_FAILED") {
+      if (attemptPhases.has(e.phase)) continue;
+    } else continue;
     if (!e.usage || typeof e.usage !== "object") continue;
     found = true;
     total.input_tokens += e.usage.input_tokens ?? 0;

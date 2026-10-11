@@ -246,6 +246,7 @@ async function main() {
       run: state.run,
       lane: state.lane,
       version,
+      forge_version: version,
       repo,
       source: "interactive",
     });
