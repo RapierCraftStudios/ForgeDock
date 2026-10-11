@@ -172,6 +172,43 @@ describe("pickPhase", () => {
       assert.equal(outcome.terminalReason, undefined);
     });
 
+    // forge#3573: pre-build size estimate safety net.
+    const sized = (verdict, est, gate) => inv(verdict, `ESTIMATED_DIFF_LINES: ${est}\nINDEPENDENT_SEAMS: 3\nGATE_THRESHOLD: ${gate}\n<!-- DECOMPOSE:${/YES/.test(verdict) ? "YES" : "NO"} -->`);
+
+    it("NO verdict with estimate over threshold x 1.2 -> decomposed (safety net)", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1500, 1000)));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("NO verdict with estimate within threshold x 1.2 -> not decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1200, 1000)));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("GATE_THRESHOLD 0 disables the estimate net", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 5000, 0)));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("YES verdict carrying the estimate fields -> decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(sized("**YES** — split", 1500, 1000)));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("estimate fields in an untrusted comment or quoted mid-line are ignored", async () => {
+      const untrusted = trusted(sized("**NO** — one PR", 9000, 1000), { assoc: "NONE", type: "User", login: "drive-by" });
+      const o1 = await investigate.detectOutcome(base, ioComments(inv("**NO** — fits"), untrusted));
+      assert.equal(o1.terminalReason, undefined);
+      const o2 = await investigate.detectOutcome(base, ioComments(inv("**NO** — fits", "see `ESTIMATED_DIFF_LINES: 9000` and GATE_THRESHOLD: 1000 inline")));
+      assert.equal(o2.terminalReason, undefined);
+    });
+
+    it("conflicting signals still fail safe even with an over-gate estimate", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(
+        inv("**YES** — split", `ESTIMATED_DIFF_LINES: 5000\nGATE_THRESHOLD: 1000\n<!-- ${PHASE_MARKERS.investigate.notDecomposedMarker} -->`)));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
     it("investigate.md emits the template marker line and both exact marker constants", () => {
       const spec = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "../../commands/work-on/investigate.md"), "utf8");
       assert.ok(spec.includes("<!-- DECOMPOSE:{YES|NO} -->"));

@@ -437,6 +437,9 @@ async function reviewArgs(state, ctx, io) {
           "--branch", need(state.branch, "branch", BRANCH_RE), ...baseArgs(state)];
 }
 
+/** Default `build.diff_size.estimate_factor` (docs/CONFIG.md); mirrored here for the isDecomposed safety net. */
+const ESTIMATE_FACTOR = 1.2;
+
 /**
  * Is the issue assessed for decomposition? Evaluated on ONE comment: the newest
  * trusted `<!-- FORGE:INVESTIGATOR` report (forge#3542 selects it; forge#3543's
@@ -457,7 +460,21 @@ function isDecomposed(report) {
     console.error(`[engine] conflicting decomposition signals (heading=${verdict ?? "none"}, markers=${[...markers].join("+") || "none"}); treating as not decomposed`);
     return false;
   }
-  return (verdict ?? marker) === "YES";
+  if ((verdict ?? marker) === "YES") return true;
+  // forge#3573 safety net: an investigator NO whose own size estimate is clearly over
+  // the gate (estimate > threshold x factor) fails toward decompose. Own-line,
+  // whole-number fields only; absent/0/non-numeric fields have no effect.
+  const est = /^ESTIMATED_DIFF_LINES:[ \t]*(\d+)[ \t]*$/m.exec(text);
+  const gate = /^GATE_THRESHOLD:[ \t]*(\d+)[ \t]*$/m.exec(text);
+  if (est && gate) {
+    const estimate = Number(est[1]);
+    const threshold = Number(gate[1]);
+    if (threshold > 0 && estimate > threshold * ESTIMATE_FACTOR) {
+      console.error(`[engine] investigator estimate ${estimate} exceeds gate ${threshold} x ${ESTIMATE_FACTOR}; routing to decompose`);
+      return true;
+    }
+  }
+  return false;
 }
 
 /** @type {Phase[]} */
