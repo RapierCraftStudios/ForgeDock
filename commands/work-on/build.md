@@ -142,8 +142,8 @@ Re-read current state before doing anything:
 gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,milestone
 
 # Check investigation report
-gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
-  --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body'
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh) # script resolution block verbatim; unresolved/failed read = fail closed
+gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:INVESTIGATOR -->'
 
 # Check if build already completed (require FORGE:BUILDER:COMPLETE — not just FORGE:BUILDER)
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
@@ -750,7 +750,7 @@ The spec lines are executed as check targets, so read them only from trusted aut
 TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
 COMMENTS_JSON=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate 2>/dev/null)
 if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ] \
-   || ! TRUSTED_BODIES=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies 'FORGE:INVESTIGATOR'); then
+   || ! TRUSTED_BODIES=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:INVESTIGATOR -->'); then
   echo "acceptance spec unreadable: trust helper or comments unavailable (fail closed)"
   # post nothing executable: label needs-human, print BUILD_RESULT: status: BLOCKED, blocker "acceptance spec trust check unavailable"
 else

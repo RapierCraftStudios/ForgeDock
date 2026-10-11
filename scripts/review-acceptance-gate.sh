@@ -33,7 +33,7 @@ TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
 COMMENTS=$(gh api "repos/$GH_REPO/issues/$NUMBER/comments" --paginate 2>/dev/null) || block "comments unreadable"
 [ -n "$COMMENTS" ] || block "comments unreadable"
 TRUSTED_GATE=$(printf '%s' "$COMMENTS" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:ACCEPTANCE_GATE_REVIEW -->') || block "trust filter failed"
-TRUSTED_INV=$(printf '%s' "$COMMENTS" | bash "$TRUSTED_SCRIPT" bodies 'FORGE:INVESTIGATOR') || block "trust filter failed"
+TRUSTED_INV=$(printf '%s' "$COMMENTS" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:INVESTIGATOR -->') || block "trust filter failed"
 LAST=$(printf '%s\n' "$TRUSTED_GATE" | tail -n 1 | jq -r '. // ""' 2>/dev/null) || LAST=""
 if printf '%s' "$LAST" | grep -qF "<!-- FORGE:ACCEPTANCE_GATE_REVIEW:PASSED:${HEAD_SHA} -->"; then
   echo "Review acceptance gate already PASSED for ${HEAD_SHA}; skipping."; exit 0
