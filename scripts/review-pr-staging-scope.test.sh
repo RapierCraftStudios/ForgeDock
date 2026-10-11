@@ -99,6 +99,17 @@ done
 awk '/^[^ `#].*   # FENCE_BOOTSTRAP/ && !seen[$0]++' "$SPEC" > "$TMP/boot.sh"
 [ "$(wc -l < "$TMP/boot.sh")" -eq 8 ] && ok || bad "FENCE_BOOTSTRAP block expected 8 distinct lines (got $(wc -l < "$TMP/boot.sh"))"
 [ "$(grep -c '^# Fence bootstrap' "$SPEC")" -ge 3 ] && ok || bad "bootstrap must be carried by 0B.1 and both 7B.5 fences"
+# forge#3681: EVERY bash fence after Phase 0B that reads cross-fence state must carry the bootstrap (a fresh Bash call loses it)
+UNCOVERED=$(awk '
+  /^```bash/ { infence=1; body=""; start=NR; next }
+  /^```/ && infence { infence=0
+    if (start > 400 && body ~ /PR_NUMBER|ALL_PR_NUMBERS|GH_REPO|DEFAULT_BRANCH|STAGING_BRANCH/ && body !~ /# FENCE_BOOTSTRAP/) printf "%d ", start
+    next }
+  infence { body = body "\n" $0 }' "$SPEC")
+[ -z "$UNCOVERED" ] && ok || bad "bash fences starting at line(s) ${UNCOVERED}consume cross-fence state without the FENCE_BOOTSTRAP block"
+# the persisted Phase 6.5 / 6.75 values: producers write them, consumers reload them validated
+grep -q 'test_gate_verdict' "$SPEC" && grep -q 'launched_review_agents' "$SPEC" && ok || bad "TEST_GATE_VERDICT and LAUNCHED_REVIEW_AGENTS must be persisted to the scratchpad"
+if awk '/^### 7E:/,/^### 7F:/' "$SPEC" | grep -qF '{GH_REPO}'; then bad "7E must not use the {GH_REPO} template token"; else ok; fi
 mkdir -p "$TMP/sd8/full" "$TMP/sd8/empty" "$TMP/sd8/bad" "$TMP/bin"
 printf '#!/bin/sh\necho stub-value\n' > "$TMP/bin/yq"; chmod +x "$TMP/bin/yq"
 printf '42\n' > "$TMP/sd8/full/staging_pr_number"; printf '7\n8\n' > "$TMP/sd8/full/42_bundle-prs.txt"
