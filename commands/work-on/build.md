@@ -384,18 +384,18 @@ Every item in the contract's `### Out of Scope` section must carry exactly one d
 ```bash
 # <Script resolution block from work-on/build.md, verbatim>
 run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
-# Trusted-author filter (OWNER/MEMBER/COLLABORATOR or Bot, same predicate as trusted-comments.sh) runs before
-# the path match: an untrusted match is never reused. The REST search API is used because it exposes
+# Trusted-author filter (OWNER/MEMBER/COLLABORATOR or Bot, same predicate as trusted-comments.sh) is applied at
+# the source in the LOOKUP --jq, before the path match: an untrusted match is never reused. The REST search API is used because it exposes
 # author_association and user.type (`gh issue list --json` has no authorAssociation field).
 # For each deferred item (DEFERRED_PATH = the backticked path, DEFERRED_WHY = one line), repeat:
 DEFERRED_MARKER="<!-- FORGE:DEFERRED_FROM: #{NUMBER} -->"
 LOOKUP=$(gh api -X GET search/issues -f per_page=50 \
-  -f q="\"FORGE:DEFERRED_FROM: #{NUMBER}\" in:body repo:{GH_REPO} is:issue is:open" --jq '.items' 2>/dev/null) || LOOKUP="FAILED"
+  -f q="\"FORGE:DEFERRED_FROM: #{NUMBER}\" in:body repo:{GH_REPO} is:issue is:open" --jq '[.items[] | select(((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR")) or ((.user.type // "") == "Bot"))]' 2>/dev/null) || LOOKUP="FAILED"
 if [ "$LOOKUP" = "FAILED" ]; then
   echo "DEFERRED_LOOKUP=FAILED"   # a failed lookup is not "none found": Blocked exit, never re-file blind
 else
   DEFERRED_NUM=$(printf '%s' "$LOOKUP" | jq -r --arg p "$DEFERRED_PATH" \
-    '[.[] | select(((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR")) or ((.user.type // "") == "Bot")) | select((.body // "") | contains($p))] | first | .number // empty' 2>/dev/null)
+    '[.[] | select((.body // "") | contains($p))] | first | .number // empty' 2>/dev/null)
   if [ -z "$DEFERRED_NUM" ]; then
     DEFERRED_URL=$(run gh issue create {GH_FLAG} --title "follow-up: ${DEFERRED_PATH} (deferred from #{NUMBER})" \
       --body "## Problem
