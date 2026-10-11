@@ -13,7 +13,9 @@ ok()  { PASS=$((PASS+1)); }
 bad() { FAILN=$((FAILN+1)); echo "FAIL: $1"; }
 expect() { [ "$2" = "$3" ] && ok || bad "$1 (got '$3' want '$2')"; }
 
-SITES="commands/work-on.md commands/work-on/build/validate.md commands/quality-gate.md commands/work-on/review.md commands/work-on/investigate.md commands/work-on/decompose.md commands/work-on/build.md commands/work-on/close.md commands/review-pr.md commands/work-on/remediate.md commands/orchestrate/phase-1-resolve.md commands/orchestrate/phase-4-execution.md"
+SITES="commands/work-on.md commands/work-on/build/validate.md commands/quality-gate.md commands/work-on/review.md commands/work-on/investigate.md commands/work-on/decompose.md commands/work-on/build.md commands/work-on/close.md commands/review-pr.md commands/orchestrate/phase-1-resolve.md commands/orchestrate/phase-4-execution.md"
+# Sites converted to the #3778 forge_resolve stub: no inlined bootstrap copies, but every per-site hygiene check below still applies.
+STUB_SITES="commands/work-on/remediate.md"
 
 # extract the bootstrap block (comment line .. closing top-level fi), indentation stripped
 # Block ends at the first line (after the marker) that starts with `fi` at the marker's own indentation.
@@ -57,7 +59,7 @@ for rc in 0 1; do
 done
 
 # no consumer-repo fallback / fail-open remains in the gates
-for f in $SITES; do
+for f in $SITES $STUB_SITES; do
   grep -nE 'FORGE_HOME:-\$?\{?\{?REPO_PATH\}*/scripts' "$ROOT/$f" >/dev/null && bad "repo-path fallback in $f" || ok
 done
 for f in commands/review-pr.md commands/work-on/review.md; do
@@ -114,7 +116,7 @@ fi
 # forge#3758 (hgate is a fixture of its own: the loop runs once per shell and h14 is reused below with other versions): deploy-gate script resolves on a plugin-only install (cache only, no symlink, no FORGE_* env).
 # The gate-script line is taken verbatim from the spec so the test exercises exactly what ships.
 mkscripts "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0"; : > "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh"
-grep -hE '^[[:space:]]*GATE_SCRIPT=""; \[ -n "\$FORGE_ROOT" \]' "$ROOT/commands/work-on/remediate.md" "$ROOT/commands/review-pr.md" | sed 's/^[[:space:]]*//' | sort -u > "$T/gs"
+grep -hE '^[[:space:]]*GATE_SCRIPT=""; \[ -n "\$FORGE_ROOT" \]' "$ROOT/commands/review-pr.md" | sed 's/^[[:space:]]*//' | sort -u > "$T/gs"
 expect "gate-script resolver line is identical across sites" 1 "$(wc -l < "$T/gs" | tr -d ' ')"
 gate_run() { ( cd "$T/consumer" && env -i PATH="$PATH" HOME="$1" "$SH" -c "$(cat "$T/canon"); $(cat "$T/gs"); printf %s \"\$GATE_SCRIPT\"" ); }
 expect "plugin-only install resolves resolve-deploy-gate.sh" "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh" "$(gate_run "$T/hgate")"
@@ -233,7 +235,7 @@ grep -qF "'\${CLAUDE_PLUGIN_ROOT}'" "$T/canon.code" && ok || bad "canonical boot
 grep -qF 'CLAUDE_PLUGIN_ROOT:-' "$T/canon.code" && bad "canonical bootstrap uses \${CLAUDE_PLUGIN_ROOT:-}, which Claude Code never substitutes" || ok
 
 # no hand-built file:// URL from FORGE_ROOT remains; imports go through pathToFileURL (a '#', '?' or space in the path must survive)
-for f in $SITES commands/work-on/close.md; do
+for f in $SITES $STUB_SITES commands/work-on/close.md; do
   grep -nE 'file://\$\{?(FORGE_ROOT|\(pwd\))' "$ROOT/$f" >/dev/null && bad "concatenated file:// URL in $f" || ok
 done
 if command -v node >/dev/null 2>&1; then
@@ -263,7 +265,7 @@ while IFS= read -r f; do
   arms=$(grep -c 'trusted-comments.sh" \]' "$f" || true)
   [ "$arms" = "$(cat "$T/tc_n")" ] || { TC_STRAY=$((TC_STRAY + 1)); echo "  stray resolver in $f: $arms arms vs $(cat "$T/tc_n") blocks"; }
 done < <(grep -rl 'trusted-comments.sh" \]' "$ROOT/commands")
-expect "trusted-comments.sh resolver blocks discovered (review-pr 11 + review + remediate x2 + phase-4; review-pr-staging uses the forge_resolve stub)" 15 "$TC_BLOCKS"
+expect "trusted-comments.sh resolver blocks discovered (review-pr 11 + review + phase-4; review-pr-staging and remediate use the forge_resolve stub)" 13 "$TC_BLOCKS"
 expect "trusted-comments.sh resolvers without a canonical block" 0 "$TC_STRAY"
 expect "trusted-comments.sh resolvers byte-identical" 1 "$(sort -u "$T/tc_all" | wc -l | tr -d ' ')"
 grep -qF 'plugins/cache/forgedock/forgedock' "$T/tc_all" && ok || bad 'trusted-comments.sh resolver lacks the plugin-cache scan'
@@ -434,6 +436,17 @@ grep -qE '^[[:space:]]*(TRUSTED_SCRIPT|[A-Z_]+_SCRIPT)=""$|_tc="\$\(printf' "$ST
 # no $PWD / $(pwd) tier in the helper (comments aside)
 grep -nE '\$PWD|\$\(pwd\)|\$\{PWD' "$FR" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -q . && bad "forge-resolve.sh must have no PWD tier" || ok
 
+# Guard (#3779): remediate.md carries the same byte-identical locator stub (7 fences: 5 gate sites, trusted-comments, CI gate) and none of the old inlined resolvers.
+REM_SPEC="$ROOT/commands/work-on/remediate.md"
+sed 's/^[[:space:]]*//' "$REM_SPEC" | grep '^type forge_resolve >/dev/null' | sort | uniq -c > "$T/rem_uniq"
+[ "$(wc -l < "$T/rem_uniq" | tr -d ' ')" = 1 ] && ok || bad "remediate.md locator lines must be byte-identical"
+expect "remediate.md locator count (one per fence that resolves a script)" 7 "$(awk '{print $1}' "$T/rem_uniq")"
+[ "$(sed 's/^[[:space:]]*//' "$REM_SPEC" | grep '^type forge_resolve >/dev/null' | sed 1q)" = "$(cat "$T/locator.sh")" ] && ok || bad "remediate.md locator differs from the pinned review-pr-staging.md locator"
+expect "remediate.md inlined FORGE_ROOT bootstrap copies" 0 "$(grep -c '# FORGE_ROOT bootstrap' "$REM_SPEC" || true)"
+grep -qE '^[[:space:]]*(TRUSTED_SCRIPT|[A-Z_]+_SCRIPT)=""|_tc="\$\(printf|^[[:space:]]*GATE_SCRIPT=""' "$REM_SPEC" && bad "remediate.md still carries an inlined resolver block" || ok
+# every forge_resolve call in remediate.md must sit in a fence that already defined it via the locator
+expect "remediate.md: forge_resolve calls without a preceding locator in the same fence" 0 "$(awk '/^[ ]*```/{loc=0} /^[ ]*type forge_resolve >\/dev\/null/{loc=1} /(GATE|TRUSTED|CI_GATE)_SCRIPT=\$\(forge_resolve /&&!loc{bad++} END{print bad+0}' "$REM_SPEC")"
+
 # Behaviour: run the REAL stub locator + forge_resolve in a clean env over each install layout.
 # Paths are compared canonically: macOS resolves /var -> /private/var and Git Bash maps /tmp -> /c/Users/..., so the literal
 # spelling of a temp path differs from what readlink/pwd -P report (and 8.3 short names like RUNNER~1 differ from long ones). cygpath -ml (Git Bash) or dirname+pwd -P (POSIX) agree.
@@ -489,6 +502,14 @@ expect "unresolved layout: the bootstrap stub fails closed" "BLOCKED" "$(fr_run 
 expect "unresolved layout: the bootstrap stub does not reach the fence body" "" "$(fr_run "$T/fr/h0" "$(grep '# FENCE_BOOTSTRAP$' "$STG_SPEC" | sed 1q); echo reached" | sed -n 's/^\(reached\)$/\1/p')"
 expect "relative FORGEDOCK_HOME is rejected" "" "$(fr_run "$T/fr/h0" 'forge_resolve trusted-comments.sh' FORGEDOCK_HOME=fr/cwdplant)"
 expect "path traversal in the script name is rejected" "" "$(fr_run "$T/fr/h0" 'forge_resolve ../scripts/trusted-comments.sh' FORGEDOCK_HOME="$T/fr/npm")"
+# #3779: the REAL remediate locator + gate resolution on a plugin-only layout and on an empty HOME (empty output => the spec's strict branch fires)
+sed 's/^[[:space:]]*//' "$REM_SPEC" | grep '^type forge_resolve >/dev/null' | sed 1q > "$T/rem_locator.sh"
+mk_install "$T/fr/remgate/.claude/plugins/cache/forgedock/forgedock/1.0.0"; : > "$T/fr/remgate/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh"
+rem_run() { ( cd "$T/fr/cwdplant" && env -i PATH="$PATH" HOME="$1" bash -c "$(cat "$T/rem_locator.sh"); GATE_SCRIPT=\$(forge_resolve resolve-deploy-gate.sh); printf %s \"\$GATE_SCRIPT\"" 2>/dev/null ); }
+expect_path "remediate stub: plugin-only install resolves resolve-deploy-gate.sh" "$T/fr/remgate/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh" "$(rem_run "$T/fr/remgate")"
+: > "$T/fr/cwdplant/scripts/resolve-deploy-gate.sh"
+expect "remediate stub: empty HOME leaves the gate script empty (strict), cwd plant ignored" "" "$(rem_run "$T/fr/h0")"
+rm -f "$T/fr/cwdplant/scripts/resolve-deploy-gate.sh"
 # INFRA-8: the stub itself must survive errexit in bash (setopt is zsh-only and must not abort a set -e shell)
 expect "errexit: the locator stub itself survives set -e with no helper" "survived" "$(cd "$T/fr/cwdplant" && env -i PATH="$PATH" HOME="$T/fr/h0" bash -c "set -e; $(cat "$T/locator.sh"); X=\$(forge_resolve trusted-comments.sh); [ -z \"\$X\" ] && echo survived" 2>/dev/null)"
 # INFRA-5: errexit callers must survive a resolver miss (helper sourced, and helper never found) and reach their own empty-output branch

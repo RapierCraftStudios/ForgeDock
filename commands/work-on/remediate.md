@@ -29,7 +29,7 @@ background: false
 **Agent model policy**: Default `model: "sonnet"`. If Sonnet is rate-limited, fall back to `model: "opus"`.
 **NEVER use plan mode (EnterPlanMode).**
 
-**Scope note**: This mode owns exactly one gap — re-driving a `needs-human` or `workflow:remediating` PR's own remediation, plus resuming an interrupted M7 auto-land from `workflow:awaiting-merge` when no `FORGE:REMEDIATION:COMPLETE` trail exists (forge#3647; M1-M6 are skipped, only M7/M8 run), finishing a merged PR whose M7 run was cut off before M8 (forge#3685), and re-entering a held resume (a `FORGE:REMEDIATION_HELD` record, not COMPLETE, is posted when a resume ends HELD) (the `workflow:remediating` state is the non-human "autonomous remediation pending" state review sets for ci-gate, in-pr-fix and base-sync handoffs, forge#3541). It does NOT implement the `needs-human` sub-label taxonomy (#1815's scope) and it does NOT edit `review-pr.md`'s Phase 8 guard (forge#1810) — that guard's existing safe-default (`workflow:awaiting-merge` on any clean re-review of a previously-escalated PR) is reused as-is; this file only adds a bar-check *after* that guard has already fired.
+**Scope note**: This mode owns exactly one gap — re-driving a `needs-human` or `workflow:remediating` PR's own remediation, plus resuming an interrupted M7 auto-land from `workflow:awaiting-merge` when no `FORGE:REMEDIATION:COMPLETE` trail exists (forge#3647; M1-M6 are skipped, only M7/M8 run), finishing a merged PR whose M7 run was cut off before M8 (forge#3685), and re-entering a held resume (the `workflow:remediating` state is the non-human "autonomous remediation pending" state review sets for ci-gate, in-pr-fix and base-sync handoffs, forge#3541). It does NOT implement the `needs-human` sub-label taxonomy (#1815) and does NOT edit `review-pr.md`'s Phase 8 guard (forge#1810), whose safe-default (`workflow:awaiting-merge` on a clean re-review of a previously-escalated PR) is reused as-is; this file only adds a bar-check after it fires.
 
 **Engine coverage** (forge#2379, #2889): this subcommand's `command` name (`work-on/remediate`) and completion marker (`FORGE:REMEDIATION:COMPLETE`, including the `**Re-gate outcome**` field Phase M8 posts below) are registered in the headless engine's phase table — `RESERVED_TYPES.REMEDIATION` in `packages/protocol/src/types.js`, `remediate` in `packages/protocol/src/phases.js`'s `PHASE_IDS`/`PHASE_MARKERS`, and a matching `remediate` entry in `bin/engine/phases.mjs`'s `PHASES` array. The non-terminal held-resume record `FORGE:REMEDIATION_HELD` (forge#3685) is NOT a completion marker; the engine's `detectOutcome` reads it as `terminalReason: "awaiting-merge"`. A blocked review is committed with `terminalReason: "needs-human"`, then the engine continues directly into remediation; the divergence guard permits this specific handoff while keeping all other `needs-human` states paused.
 
@@ -80,7 +80,7 @@ ISSUE_LABELS=$(echo "$ISSUE_STATE" | jq -r '[.labels[].name] | join(",")')
 ```
 
 - If `PR_ALREADY_MERGED` is not `true` and none of `needs-human`, `workflow:remediating` or `workflow:awaiting-merge` is among `ISSUE_LABELS` → EXIT `REMEDIATE_RESULT: status: BLOCKED`, blocker: "issue #{ISSUE_NUMBER} is none of `needs-human`, `workflow:remediating` or `workflow:awaiting-merge` — remediation mode only targets PRs in one of those states; use the normal `/work-on {ISSUE_NUMBER}` resume path instead." This keeps blast radius scoped to exactly the gap this mode fills — it is not a general-purpose re-review trigger. `workflow:remediating` is the non-human state review sets when it hands an autonomous ci-gate / in-pr-fix / base-sync fix to this phase (forge#3541); a bare `needs-human` (older runs, genuine escalations being re-driven) is still accepted. <!-- Added: forge#3541 -->
-- **Resume-at-M7 (forge#3647, hardened forge#3684)**: `workflow:awaiting-merge` is admitted ONLY as a resume of an interrupted M7 auto-land: the PR is OPEN (the PR state guard above already exited otherwise), `needs-human` and `workflow:remediating` are both absent, the idempotency check below finds NO completed `FORGE:REMEDIATION:COMPLETE` trail (`REMEDIATION_COMPLETE_N` = 0), AND there is evidence the PR was engine-parked for the M7 bar rather than parked for a human: the live base is non-empty, non-`null` and not the deploy gate (literal `main`, the GitHub `default_branch`, or the default branch's committed `branches.default`; never read from the PR worktree, forge#3753), and the LATEST trusted (OWNER/MEMBER/COLLABORATOR or Bot) `review-pr.md` Phase 8 park comment on the issue is the non-default-branch "parked at `workflow:awaiting-merge` for the remediation auto-land bar" comment AND names this PR (`PR #{PR_NUMBER} was previously escalated`, so a park for a different PR never admits the resume; M7 then binds approval to the live head SHA, not a timestamp) (not the deploy-gate "held ... for a human merge decision" comment). When all hold, set `RESUME_AT_M7=true`: skip Phases M1-M6 entirely (no checkout, no fixes, no re-review) and continue at Phase M7, which re-verifies the bar from scratch. Without park evidence, return `BLOCKED` (blocker: "awaiting-merge PR is not engine-parked for the remediation auto-land bar"); the issue stays at `workflow:awaiting-merge`. If a COMPLETE trail exists the single-attempt `ALREADY_DONE` guard below still wins. A resume that ends `HELD-AWAITING-MERGE` (CI pending, stale or mismatched approval head, deploy-gate base) writes NO `FORGE:REMEDIATION:COMPLETE` (Phase M8 posts a `FORGE:REMEDIATION_HELD` record instead), so the next invocation re-enters this same resume path rather than exiting `ALREADY_DONE` (forge#3685). On a BLOCKED exit from this path the issue stays at `workflow:awaiting-merge` (it never gains `workflow:remediating`; the stranded-state rule below applies only to `workflow:remediating`).
+- **Resume-at-M7 (forge#3647, hardened forge#3684)**: `workflow:awaiting-merge` is admitted ONLY as a resume of an interrupted M7 auto-land: the PR is OPEN, `needs-human` and `workflow:remediating` are both absent, the idempotency check below finds NO completed `FORGE:REMEDIATION:COMPLETE` trail (`REMEDIATION_COMPLETE_N` = 0), AND there is evidence the PR was engine-parked for the M7 bar rather than parked for a human: the live base is non-empty, non-`null` and not the deploy gate (literal `main`, the GitHub `default_branch`, or the default branch's committed `branches.default`; never read from the PR worktree, forge#3753), and the LATEST trusted (OWNER/MEMBER/COLLABORATOR or Bot) `review-pr.md` Phase 8 park comment on the issue is the non-default-branch "parked at `workflow:awaiting-merge` for the remediation auto-land bar" comment AND names this PR (`PR #{PR_NUMBER} was previously escalated`, so a park for a different PR never admits the resume; M7 then binds approval to the live head SHA, not a timestamp). When all hold, set `RESUME_AT_M7=true`: skip Phases M1-M6 entirely (no checkout, no fixes, no re-review) and continue at Phase M7, which re-verifies the bar from scratch. Without park evidence, return `BLOCKED` (blocker: "awaiting-merge PR is not engine-parked for the remediation auto-land bar"); the issue stays at `workflow:awaiting-merge`. A COMPLETE trail still wins via the `ALREADY_DONE` guard below. A resume that ends `HELD-AWAITING-MERGE` (CI pending, stale approval head, deploy-gate base) writes NO `FORGE:REMEDIATION:COMPLETE` (Phase M8 posts a `FORGE:REMEDIATION_HELD` record instead), so the next invocation re-enters this same resume path rather than exiting `ALREADY_DONE` (forge#3685). On a BLOCKED exit from this path the issue stays at `workflow:awaiting-merge` (it never gains `workflow:remediating`).
 - **Stranded-state rule**: `workflow:remediating` must never outlive this run. Every exit that returns `BLOCKED` or `UNFIXABLE` (including exits before Phase M1; except a `RESUME_AT_M7` run, which leaves the issue at `workflow:awaiting-merge` untouched) removes `workflow:remediating` and adds `needs-human`, because at that point a human really is needed:
 
   ```bash
@@ -93,16 +93,8 @@ ISSUE_LABELS=$(echo "$ISSUE_STATE" | jq -r '[.labels[].name] | join(",")')
 # Trust predicate: ONE shared copy (scripts/trusted-comments.sh). Markers are matched as the comment's LEADING
 # text (^ anchors at the start of the body, not of a line), never with a bare contains(): a review comment or
 # an INPR_FIX work order that merely QUOTES FORGE:REMEDIATION:COMPLETE must not read as a remediation trail (forge#3412).
-# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-TRUSTED_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
 PR_COMMENTS=$(gh api --paginate repos/{GH_REPO}/issues/{PR_NUMBER}/comments 2>/dev/null) || PR_COMMENTS=""
 if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$PR_COMMENTS" ]; then
   # Real trail comments (M5 interim, M8 final) START with <!-- FORGE:REMEDIATION -->; M8 also carries <!-- FORGE:REMEDIATION:COMPLETE -->.
@@ -115,7 +107,7 @@ fi
 PARTIAL_PR_COMMENT_IDS=$(printf '%s' "$PR_COMMENTS" | jq -rs '[.[][] | select((.body // "") | startswith("<!-- FORGE:REMEDIATION -->")) | select((.body | contains("<!-- FORGE:REMEDIATION:COMPLETE -->")) | not) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | .id] | .[]' 2>/dev/null || true)
 ```
 
-**Per-kind scoping of the single-attempt guard** (forge#3496): the guard is scoped per remediation kind so a base-sync round is not swallowed by an earlier `ci-gate` / `inpr-fix` remediation on the same PR. A base-sync handoff is recognised by the router's `FORGE:BASESYNC_REMEDIATION: pr={PR_NUMBER}` bound marker on the issue (the router posts it immediately before invoking this phase); the guard is relaxed only when the NEWEST bound marker (any of `CI` / `INPR` / `BASESYNC`) is the base-sync one, and a completed base-sync round is recognised by a `FORGE:REMEDIATION:COMPLETE` trail carrying the `**Base sync**: ran` or `**Base sync**: attempted` line that Phase M8 posts (a round that merged nothing is still recorded as `attempted`). The router handoff is bounded to one per PR (the marker count in `work-on/review.md` R4, unchanged) and this check; inside remediation the sync is bounded per distinct base head and hard-capped at `BASESYNC_MAX_ROUNDS` pushed sync merges on the branch, counted from git rather than shell state (see Phase M3 and M6):
+**Per-kind scoping of the single-attempt guard** (forge#3496): the guard is scoped per remediation kind so a base-sync round is not swallowed by an earlier `ci-gate` / `inpr-fix` remediation on the same PR. A base-sync handoff is recognised by the router's `FORGE:BASESYNC_REMEDIATION: pr={PR_NUMBER}` bound marker on the issue (the router posts it immediately before invoking this phase); the guard is relaxed only when the NEWEST bound marker (any of `CI` / `INPR` / `BASESYNC`) is the base-sync one, and a completed base-sync round is recognised by a `FORGE:REMEDIATION:COMPLETE` trail carrying the `**Base sync**: ran` or `**Base sync**: attempted` line that Phase M8 posts. The router handoff is bounded to one per PR and this check; inside remediation the sync is bounded per distinct base head and hard-capped at `BASESYNC_MAX_ROUNDS` pushed sync merges on the branch, counted from git rather than shell state (see Phase M3 and M6):
 
 ```bash
 if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$PR_COMMENTS" ]; then
@@ -150,28 +142,9 @@ Completed trails of other kinds are left in place (never deleted); only the inte
   PARK_BASE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
   PARK_PR_MARK="PR #{PR_NUMBER} was previously escalated"   # fixed string: PR #1 never matches PR #12
   PARK_LAST=$(gh api --paginate repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments 2>/dev/null | jq -rs '[.[][] | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | select((.body // "") | test("for the remediation auto-land bar|for a human merge decision"))] | last | .body // ""' 2>/dev/null || echo "")
-  # forge#3753: trusted resolver only (GitHub default_branch + committed default-branch config); never forge.yaml from $PWD (the PR worktree is author-controlled). Install roots only; unresolved script => strict.
-  # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
-  FORGE_ROOT=""
-  # Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
-  _h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
-  # Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
-  _mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
-  if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
-  # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
-  _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-  # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
-  _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
-  # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-  _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
-  _m="$HOME/.claude/plugins/marketplaces/$_mk"
-  # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-  _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
-  while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
-  done <<< "$_k"
-  fi
-  GATE_SCRIPT=""; [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/resolve-deploy-gate.sh" ] && GATE_SCRIPT="$FORGE_ROOT/scripts/resolve-deploy-gate.sh"
+  # forge#3753: trusted resolver only; never forge.yaml from $PWD (the PR worktree is author-controlled); unresolved script => strict.
+  type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+  GATE_SCRIPT=$(forge_resolve resolve-deploy-gate.sh)
   if [ -n "$GATE_SCRIPT" ]; then PARK_GATE=$(bash "$GATE_SCRIPT" "$PARK_BASE" {GH_REPO} 2>/dev/null || echo true); else PARK_GATE=true; fi; [ "$PARK_GATE" = "false" ] || PARK_GATE=true
   if [ "$PARK_GATE" = "false" ] && printf '%s' "$PARK_LAST" | grep -qF 'for the remediation auto-land bar' && printf '%s' "$PARK_LAST" | grep -qF "$PARK_PR_MARK"; then
     RESUME_AT_M7=true
@@ -564,62 +537,22 @@ fi
 
 **Approved head on every path (forge#3686)**: for a PR that is still open, the fence above captures `APPROVED_HEAD` (the live `headRefOid` that M6's re-review parked) once at M7 start and persists it to `${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/remediate_approved_head_{PR_NUMBER}`; the resume path overwrites it with `RESUME_APPROVED_HEAD`. The CI-gated merge reloads it (never re-reads the PR) and refuses with `CI_GATE_RC=4` when it is empty or differs from `GATED_HEAD`, so a commit pushed after approval cannot merge. Residual window: a push between M6's verdict and the M7 capture is treated as approved.
 
-**Live base (computed BEFORE the resume substitution, forge#3684)**: re-derive the base fresh — do NOT reuse `$PR_BASE` for this decision (forge#2624): `$PR_BASE` was resolved in Phase M0 and a caller-supplied `--base` wins over the PR's actual live base. This is a security-relevant decision point, so re-query the PR's live base independent of `$PR_BASE`. Fail closed: only a KNOWN, non-empty, non-`null` live base that is not the deploy gate (literal `main`, the GitHub `default_branch`, or the default branch's committed `branches.default`; never read from the PR worktree, forge#3753) reconciles to the fast lane (forge#2570); empty, the literal string `null` (jq stringifies JSON null, forge#2625) or the default branch is the deploy gate (strict).
+**Live base (computed BEFORE the resume substitution, forge#3684)**: re-derive the base fresh — do NOT reuse `$PR_BASE` for this decision (forge#2624): `$PR_BASE` was resolved in Phase M0 and a caller-supplied `--base` wins over the PR's actual live base. This is a security-relevant decision point. Fail closed: only a KNOWN, non-empty, non-`null` live base that is not the deploy gate (as defined in the Resume-at-M7 rule above) reconciles to the fast lane (forge#2570); empty, the literal string `null` (jq stringifies JSON null, forge#2625) or the default branch is the deploy gate (strict).
 
 ```bash
 LIVE_BASE_REF=$(gh pr view {PR_NUMBER} {GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
-# forge#3753: trusted resolver only (GitHub default_branch + committed default-branch config); never forge.yaml from $PWD (the PR worktree is author-controlled). Install roots only; unresolved script => strict.
-# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
-FORGE_ROOT=""
-# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
-_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
-# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
-_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
-if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
-# Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
-_l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-# Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
-_cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
-# newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-_v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
-_m="$HOME/.claude/plugins/marketplaces/$_mk"
-# '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-_k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
-while IFS= read -r _c; do
-case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
-done <<< "$_k"
-fi
-GATE_SCRIPT=""; [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/resolve-deploy-gate.sh" ] && GATE_SCRIPT="$FORGE_ROOT/scripts/resolve-deploy-gate.sh"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+GATE_SCRIPT=$(forge_resolve resolve-deploy-gate.sh)
 if [ -n "$GATE_SCRIPT" ]; then IS_DEPLOY_GATE=$(bash "$GATE_SCRIPT" "$LIVE_BASE_REF" {GH_REPO} 2>/dev/null || echo true); else IS_DEPLOY_GATE=true; fi; [ "${IS_DEPLOY_GATE:-true}" = "false" ] || IS_DEPLOY_GATE=true
 ```
 
-**Resume path (`RESUME_AT_M7=true`)**: no M3 quality gate ran in this invocation, so `GATE_PASSED` is not set. Substitute fresh evidence that the PR is approved at its CURRENT head: a trusted (Bot or OWNER/MEMBER/COLLABORATOR) verdict whose body starts with `APPROVED: commit <sha>` (anchored, case-sensitive, so `NOT APPROVED:` and quoted text never match), where `<sha>` is a 7-40 hex prefix of the live `headRefOid` (or the body starts with `APPROVED:` and carries a `Reviewed-SHA: <headRefOid>` line; a `Reviewed-SHA:` line without the `APPROVED:` prefix never counts, forge#3738). The binding is to the commit SHA, never to a timestamp: commit dates are author-controlled. Both the PR reviews (where `review-pr.md` posts the verdict via `gh pr review --comment`; a review's `commit_id` must also equal the head) and the PR issue-comments are read. An empty `headRefOid`, unreadable endpoint, or no SHA-matching verdict means `GATE_PASSED=false` (hold). The CI-gated merge below additionally refuses when `GATED_HEAD` differs from the approved SHA (`APPROVED_HEAD`, which on this path is `RESUME_APPROVED_HEAD`). The substitution applies to non-default-branch bases only: when `RESUME_AT_M7=true` and `IS_DEPLOY_GATE=true`, `GATE_PASSED=false` is forced and the bar below holds (`BAR_MET=false`) in code, so a default-branch (deploy-gate) base never lands from the resume path. CI is still verified by the mandatory CI gate below.
+**Resume path (`RESUME_AT_M7=true`)**: no M3 quality gate ran in this invocation, so `GATE_PASSED` is not set. Substitute fresh evidence that the PR is approved at its CURRENT head: a trusted (Bot or OWNER/MEMBER/COLLABORATOR) verdict whose body starts with `APPROVED: commit <sha>` (anchored, case-sensitive, so `NOT APPROVED:` and quoted text never match), where `<sha>` is a 7-40 hex prefix of the live `headRefOid` (or the body starts with `APPROVED:` and carries a `Reviewed-SHA: <headRefOid>` line; a `Reviewed-SHA:` line without the `APPROVED:` prefix never counts, forge#3738). Both the PR reviews (where `review-pr.md` posts the verdict via `gh pr review --comment`; a review's `commit_id` must also equal the head) and the PR issue-comments are read. An empty `headRefOid`, unreadable endpoint, or no SHA-matching verdict means `GATE_PASSED=false` (hold). The CI-gated merge below also refuses when `GATED_HEAD` differs from `APPROVED_HEAD` (`RESUME_APPROVED_HEAD` on this path). The substitution applies to non-default-branch bases only: when `RESUME_AT_M7=true` and `IS_DEPLOY_GATE=true`, `GATE_PASSED=false` is forced and the bar below holds (`BAR_MET=false`) in code, so a deploy-gate base never lands from a resume.
 
 ```bash
-# Fresh shell per Bash call: re-derive the live base here (same derivation as above) and re-fetch PR_LIVE if empty. Unresolved => strict.
+# Fresh shell: re-derive the live base (as above); re-fetch PR_LIVE if empty. Unresolved => strict.
 LIVE_BASE_REF=$(gh pr view {PR_NUMBER} {GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
-# forge#3753: trusted resolver only (GitHub default_branch + committed default-branch config); never forge.yaml from $PWD (the PR worktree is author-controlled). Install roots only; unresolved script => strict.
-# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
-FORGE_ROOT=""
-# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
-_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
-# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
-_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
-if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
-# Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
-_l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-# Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
-_cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
-# newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-_v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
-_m="$HOME/.claude/plugins/marketplaces/$_mk"
-# '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-_k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
-while IFS= read -r _c; do
-case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
-done <<< "$_k"
-fi
-GATE_SCRIPT=""; [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/resolve-deploy-gate.sh" ] && GATE_SCRIPT="$FORGE_ROOT/scripts/resolve-deploy-gate.sh"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+GATE_SCRIPT=$(forge_resolve resolve-deploy-gate.sh)
 if [ -n "$GATE_SCRIPT" ]; then IS_DEPLOY_GATE=$(bash "$GATE_SCRIPT" "$LIVE_BASE_REF" {GH_REPO} 2>/dev/null || echo true); else IS_DEPLOY_GATE=true; fi; [ "${IS_DEPLOY_GATE:-true}" = "false" ] || IS_DEPLOY_GATE=true
 [ -n "${PR_LIVE:-}" ] || PR_LIVE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json state,mergedAt,headRefOid 2>/dev/null || echo "")
 if [ "${RESUME_AT_M7:-false}" = "true" ]; then
@@ -690,30 +623,10 @@ A `RESUME_AT_M7=true` run on a deploy-gate base NEVER meets this bar (`BAR_MET=f
 
 **Evaluate the base-scoped bar**:
 ```bash
-# Fresh shell per Bash call: re-derive the live base in this fence (same derivation as above); read with the :-true fail-closed default.
+# Fresh shell: re-derive the live base (as above); :-true fail-closed default.
 LIVE_BASE_REF=$(gh pr view {PR_NUMBER} {GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
-# forge#3753: trusted resolver only (GitHub default_branch + committed default-branch config); never forge.yaml from $PWD (the PR worktree is author-controlled). Install roots only; unresolved script => strict.
-# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
-FORGE_ROOT=""
-# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
-_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
-# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
-_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
-if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
-# Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
-_l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-# Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
-_cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
-# newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-_v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
-_m="$HOME/.claude/plugins/marketplaces/$_mk"
-# '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-_k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
-while IFS= read -r _c; do
-case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
-done <<< "$_k"
-fi
-GATE_SCRIPT=""; [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/resolve-deploy-gate.sh" ] && GATE_SCRIPT="$FORGE_ROOT/scripts/resolve-deploy-gate.sh"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+GATE_SCRIPT=$(forge_resolve resolve-deploy-gate.sh)
 if [ -n "$GATE_SCRIPT" ]; then IS_DEPLOY_GATE=$(bash "$GATE_SCRIPT" "$LIVE_BASE_REF" {GH_REPO} 2>/dev/null || echo true); else IS_DEPLOY_GATE=true; fi; [ "${IS_DEPLOY_GATE:-true}" = "false" ] || IS_DEPLOY_GATE=true
 if [ "${IS_DEPLOY_GATE:-true}" = "true" ]; then
   # default branch / deploy gate — strict verified-human bar; a resume (no in-run M3 gate) never lands here (forge#3684)
@@ -730,11 +643,8 @@ fi
 # CI gate (MANDATORY before any autonomous merge): merge only when every check on the PR is
 # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch
 # protection required none and an auto-merge waits only for *required* checks.
-CI_GATE_SCRIPT=""
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l"; do
-  case "$_c" in /*) [ -z "$CI_GATE_SCRIPT" ] && [ -f "$_c/scripts/wait-ci-green.sh" ] && CI_GATE_SCRIPT="$_c/scripts/wait-ci-green.sh" ;; esac
-done
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+CI_GATE_SCRIPT=$(forge_resolve wait-ci-green.sh)
 if [ -n "$CI_GATE_SCRIPT" ]; then CI_GATE_OUT=$(bash "$CI_GATE_SCRIPT" {PR_NUMBER} {GH_FLAG}); CI_GATE_RC=$?
 else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
 echo "$CI_GATE_OUT"
@@ -787,30 +697,10 @@ fi
 Post the completion body to **both** `{PR_NUMBER}` and `{ISSUE_NUMBER}` — this is the single idempotency marker checked by Phase M0 (this file, on future resume) and by the orchestrator's item 6.4 dispatch guard. **Exception (forge#3685)**: a `RESUME_AT_M7=true` run whose outcome is `HELD-AWAITING-MERGE` posts a `<!-- FORGE:REMEDIATION_HELD -->` record (carrying `**Re-gate outcome**` and the hold reason) and NO `FORGE:REMEDIATION:COMPLETE`, so a transient hold (CI pending, stale approval) does not strand the PR behind the single-attempt guard. AUTO-LANDED, RE-ESCALATED, UNFIXABLE, REREVIEW-REQUIRED and non-resume HELD keep COMPLETE:
 
 ```bash
-# Fresh shell per Bash call: re-derive the live base in this fence (same derivation as above); read with the :-true fail-closed default.
+# Fresh shell: re-derive the live base (as above); :-true fail-closed default.
 LIVE_BASE_REF=$(gh pr view {PR_NUMBER} {GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
-# forge#3753: trusted resolver only (GitHub default_branch + committed default-branch config); never forge.yaml from $PWD (the PR worktree is author-controlled). Install roots only; unresolved script => strict.
-# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
-FORGE_ROOT=""
-# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
-_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
-# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
-_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
-if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
-# Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
-_l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-# Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
-_cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
-# newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-_v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
-_m="$HOME/.claude/plugins/marketplaces/$_mk"
-# '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-_k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
-while IFS= read -r _c; do
-case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
-done <<< "$_k"
-fi
-GATE_SCRIPT=""; [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/resolve-deploy-gate.sh" ] && GATE_SCRIPT="$FORGE_ROOT/scripts/resolve-deploy-gate.sh"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+GATE_SCRIPT=$(forge_resolve resolve-deploy-gate.sh)
 if [ -n "$GATE_SCRIPT" ]; then IS_DEPLOY_GATE=$(bash "$GATE_SCRIPT" "$LIVE_BASE_REF" {GH_REPO} 2>/dev/null || echo true); else IS_DEPLOY_GATE=true; fi; [ "${IS_DEPLOY_GATE:-true}" = "false" ] || IS_DEPLOY_GATE=true
 case "$RE_GATE_OUTCOME" in
   AUTO-LANDED)
@@ -835,16 +725,7 @@ REMEDIATED_HEAD_SHA=$(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefOid --jq '.
 
 # forge#3496 / forge#3518: mark a base-sync round so Phase M0 scopes the single-attempt guard per kind. This block runs in a fresh
 # shell, so it derives the record from durable state (pushed git history + trusted bound markers), never from a shell variable.
-# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-TRUSTED_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-done <<< "$_tc"
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
 cd {WORKTREE_PATH}
 git fetch origin {PR_BASE} {HEAD_BRANCH} # allowlist:check-command-side-effects
 BASESYNC_MAX_ROUNDS=2
@@ -931,4 +812,4 @@ REMEDIATE_RESULT:
   blocker: {description if status=BLOCKED}
 ```
 
-**Caller behavior**: this Skill already drives its own close phase when `re_gate_outcome: AUTO-LANDED` (see Phase M8) — the caller does not need to invoke close itself (under the headless engine, the engine verifies the issue is CLOSED + `workflow:merged` and runs close if it is missing). For `re_gate_outcome: REREVIEW-REQUIRED` (`status: REREVIEW_REQUIRED`, forge#3240) the fix is pushed but no review ran because this session has no sub-agent dispatch tool: the caller MUST run `review-pr {PR_NUMBER} --auto-merge --issue {ISSUE_NUMBER} --base {PR_BASE}` from a session that has dispatch (never inline) and then drive close itself on a merge. For every other `re_gate_outcome`, this result is terminal for the current invocation (a held resume, which wrote `FORGE:REMEDIATION_HELD` and not COMPLETE, can be re-invoked by an operator later and re-enters Phase M7): the issue is left at `needs-human` or `workflow:awaiting-merge`, both already recognized as terminal states in the Universal Phase Dispatcher (see `work-on.md`). Whether invoked standalone (`/work-on <pr> --remediate`) or via the orchestrator's item 6.4 dispatch, no further action is required from the caller.
+**Caller behavior**: this Skill already drives its own close phase when `re_gate_outcome: AUTO-LANDED` (see Phase M8) — the caller does not need to invoke close itself (under the headless engine, the engine verifies the issue is CLOSED + `workflow:merged` and runs close if it is missing). For `re_gate_outcome: REREVIEW-REQUIRED` (`status: REREVIEW_REQUIRED`, forge#3240) the fix is pushed but no review ran because this session has no sub-agent dispatch tool: the caller MUST run `review-pr {PR_NUMBER} --auto-merge --issue {ISSUE_NUMBER} --base {PR_BASE}` from a session that has dispatch (never inline) and then drive close itself on a merge. For every other `re_gate_outcome`, this result is terminal for the current invocation (a held resume, which wrote `FORGE:REMEDIATION_HELD` and not COMPLETE, can be re-invoked by an operator later and re-enters Phase M7): the issue is left at `needs-human` or `workflow:awaiting-merge`, both already recognized as terminal states in the Universal Phase Dispatcher (see `work-on.md`).
