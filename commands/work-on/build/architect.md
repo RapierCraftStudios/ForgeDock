@@ -80,19 +80,22 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
 
 ## Resume Check
 
-Before doing any work:
+Before doing any work, select the architect comments with ONE anchored, trusted selector (body must start with the marker; author must be a Bot or OWNER/MEMBER/COLLABORATOR; mirrors `scripts/trusted-comments.sh`). A comment that merely mentions the marker (an INVESTIGATOR report, a CONTEXT briefing) never matches. <!-- Added: forge#3648 -->
 
 ```bash
-gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '.[] | select(.body | contains("FORGE:ARCHITECT")) | .body'
+ARCH=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments | jq -s '[.[][] | select((.body // "") | startswith("<!-- FORGE:ARCHITECT -->")) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | {id: .id, complete: (.body | contains("<!-- FORGE:ARCHITECT:COMPLETE -->")), other: (.body | test("<!-- FORGE:(INVESTIGATOR|CONTEXT|CONTRACT|BUILDER)"))}]') || ARCH=""
 ```
 
-- If `<!-- FORGE:ARCHITECT -->` comment exists AND `<!-- FORGE:ARCHITECT:COMPLETE -->` is present in the SAME comment → plan already complete: print `ARCHITECT_RESULT:` with `status: COMPLETE` and the existing comment's `comment_url`, EXIT.
-- If `<!-- FORGE:ARCHITECT -->` comment exists BUT `<!-- FORGE:ARCHITECT:COMPLETE -->` is ABSENT → plan was interrupted, delete the partial comment and restart:
+- If `ARCH` is empty (unparsable) → fail closed: delete nothing and treat as no plan.
+- If any element of `ARCH` has `complete == true` → plan already complete: print `ARCHITECT_RESULT:` with `status: COMPLETE` and the existing comment's `comment_url`, EXIT.
+- If anchored trusted comments exist but none is complete → plan was interrupted. Delete the partial comment ONLY when exactly one such comment exists and it carries no other FORGE phase marker (`other == false`); zero or multiple matches delete nothing (log and continue):
   ```bash
-  COMMENT_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-    --jq '.[] | select(.body | contains("FORGE:ARCHITECT")) | .id')
-  gh api repos/{GH_REPO}/issues/comments/$COMMENT_ID -X DELETE
+  COMMENT_ID=$(printf '%s' "$ARCH" | jq -r '[.[] | select(.complete | not)] | if length == 1 and (.[0].other | not) then .[0].id else empty end')
+  if [ -n "$COMMENT_ID" ]; then
+    gh api repos/{GH_REPO}/issues/comments/$COMMENT_ID -X DELETE
+  else
+    echo "architect resume: no single safe partial plan comment — deleting nothing"
+  fi
   ```
 
 ---
