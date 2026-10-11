@@ -561,13 +561,15 @@ DECISIONS_PRESENTED=false
 # forge#3621: the breaker decision is enqueued on the false->true trip transition, not at one call site.
 # Every `AMPLIFICATION_BREAKER_TRIPPED=true` assignment (deterministic check, live pre-trip, settle) runs
 # this idempotent helper right after it; it mirrors the release dequeue (`breaker\|*`) and queues at most
-# one breaker entry. Trip sites live in separate bash fences: re-declare this function where it is not in scope.
+# one breaker entry. Trip sites live in separate bash fences (fresh shell each): they paste this block behind a `declare -f` guard, and the orchestrator records the printed `PENDING_DECISION_QUEUED=` line.
 enqueue_breaker_decision() {
-  [ "$AMPLIFICATION_BREAKER" = "on" ] || return 0
+  [ "${AMPLIFICATION_BREAKER:-on}" = "on" ] || return 0
   for _d in ${PENDING_DECISIONS[@]+"${PENDING_DECISIONS[@]}"}; do
     case "$_d" in breaker\|*) return 0 ;; esac
   done
-  PENDING_DECISIONS+=("breaker|amplification breaker tripped, P3 cascade admission paused|Batch the paused P3 findings or defer them?")
+  _BD="breaker|amplification breaker tripped, P3 cascade admission paused|Batch the paused P3 findings or defer them?"
+  PENDING_DECISIONS+=("$_BD")
+  echo "PENDING_DECISION_QUEUED=$_BD"   # forge#3690: a fresh shell drops the array, so the orchestrator records this line
 }
 
 # Per-batch token budget for Step 4C's review-finding cascade control (forge#1858).
@@ -1003,7 +1005,7 @@ if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
   # were already ready but held back purely by the concurrency cap. DEFERRED_CONCURRENCY_ISSUES
   # would become a write-only sink on the engine-first path, silently starving deferred work —
   # the same class of bug this PR exists to fix, just relocated.
-  HEADROOM=$(dispatch_headroom)
+  HEADROOM=$(dispatch_headroom) # allowlist:fence-funcs (forge#3690: pre-existing cross-fence call, tracked separately)
   CANDIDATES=("${DEFERRED_CONCURRENCY_ISSUES[@]}" "${DISPATCH_QUEUE[@]}")
   DEFERRED_CONCURRENCY_ISSUES=()
   DISPATCH_NOW=()
@@ -1022,11 +1024,11 @@ if [ "$FORGEDOCK_AVAILABLE" = "true" ]; then
   # instruction below re-checks immediately before each launch to close the remaining TOCTOU gap.
   CLAIM_SAFE_DISPATCH=()
   for NUM in "${DISPATCH_NOW[@]}"; do
-    if recovery_claim_blocks "$NUM"; then   # forge#3172: live FORGE:RECOVERY_CLAIM (fails closed)
+    if recovery_claim_blocks "$NUM"; then   # forge#3172: live FORGE:RECOVERY_CLAIM (fails closed) # allowlist:fence-funcs (forge#3690: pre-existing cross-fence call, tracked separately)
       DEFERRED_CONCURRENCY_ISSUES+=("$NUM")
       continue
     fi
-    if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && claim_conflicts_with_live_holder "$NUM"; then
+    if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_ISSUE_NUMBER:-}" ] && claim_conflicts_with_live_holder "$NUM"; then # allowlist:fence-funcs (forge#3690: pre-existing cross-fence call, tracked separately)
       DEFERRED_CLAIM_ISSUES+=("$NUM")
       continue
     fi
@@ -1400,7 +1402,7 @@ AGENT_ISSUE_MAP[{NUMBER}] = <agent_id returned by Agent()>
 # Compute this dispatch batch (forge#1912): merge any previously-deferred concurrency
 # issues (oldest first, for fairness) with the current ready set, then take only as many
 # as headroom allows. The remainder is re-queued, not dropped.
-HEADROOM=$(dispatch_headroom)
+HEADROOM=$(dispatch_headroom) # allowlist:fence-funcs (forge#3690: pre-existing cross-fence call, tracked separately)
 CANDIDATES=("${DEFERRED_CONCURRENCY_ISSUES[@]}" {ready_issue_numbers})
 DEFERRED_CONCURRENCY_ISSUES=()
 
@@ -1425,7 +1427,7 @@ If `DISPATCH_NOW` is empty (headroom is 0), do not spawn any agents this cycle �
 
 ### Step 4B: Monitor completions and dispatch newly ready issues
 
-**Hard Rule (root orchestrator) — never ask the operator mid-batch; no mid-batch operator question while any issue is dispatchable or in flight** <!-- Added: forge#3497 -->: The worker prompts' "NEVER ask the user questions" rule binds the root session too. A question blocks the root turn, so no completion is processed and no dispatch happens until it is answered, which lets one issue's decision stall every independent issue. When an issue reaches `needs-human`, classify it `GATED` (items 6.4/6.5 below, unchanged), append its decision to `PENDING_DECISIONS` (item 6.5), print the one-line status (item 8), and keep dispatching every issue not gated by it. All queued decisions are presented together, one question per gated issue, at the drain point (see Termination condition), on an operator interrupt (Step 4A-pre.-0.5), or at the Step 4F exit, whichever comes first. Each of those presentation points first runs the `PENDING_DECISIONS` present-time liveness filter (declared with the array in Step 4A; drops entries whose issue is no longer `needs-human`/open, or whose breaker has released) <!-- Added: forge#3508 -->.
+**Hard Rule (root orchestrator) — never ask the operator mid-batch; no mid-batch operator question while any issue is dispatchable or in flight** <!-- Added: forge#3497 -->: The worker prompts' "NEVER ask the user questions" rule binds the root session too. A question blocks the root turn, so no completion is processed and no dispatch happens until it is answered, which lets one issue's decision stall every independent issue. When an issue reaches `needs-human`, classify it `GATED` (items 6.4/6.5 below, unchanged), append its decision to `PENDING_DECISIONS` (item 6.5), print the one-line status (item 8), and keep dispatching every issue not gated by it. The breaker's own entry arrives as a printed `PENDING_DECISION_QUEUED=breaker|...` line (each trip-site fence is a fresh shell): record it into `PENDING_DECISIONS` unless a `breaker|` entry is already held. All queued decisions are presented together, one question per gated issue, at the drain point (see Termination condition), on an operator interrupt (Step 4A-pre.-0.5), or at the Step 4F exit, whichever comes first. Each of those presentation points first runs the `PENDING_DECISIONS` present-time liveness filter (declared with the array in Step 4A; drops entries whose issue is no longer `needs-human`/open, or whose breaker has released) <!-- Added: forge#3508 -->.
 
 **Exceptions — batch-wide blockers that may still be raised immediately** (each blocks every remaining issue, so there is no independent work left to stall): an orchestrator lease conflict (Step 4A-pre.-1), `SECONDARY_RATE_LIMITED` (Step 4A-pre.0.3, rate limit pause awaiting operator resume), and a fully gated batch with nothing runnable (`BATCH_FULLY_GATED`, item 6.7, which is the drain itself). No other condition is a reason to ask.
 
@@ -1880,7 +1882,7 @@ for BLOCKED_NUM in {all_blocked_issue_numbers}; do
   ANY_PRED_GATED=false
   GATING_PREDS=()
   for PRED in {predecessors_of_BLOCKED_NUM}; do
-    PRED_STATE=$(classify_predecessor_state "$PRED")
+    PRED_STATE=$(classify_predecessor_state "$PRED") # allowlist:fence-funcs (forge#3690: pre-existing cross-fence call, tracked separately)
     case "$PRED_STATE" in
       DONE)
         # Same-file current-state brief forwarding (forge#1860): only fires when the
@@ -1901,7 +1903,7 @@ for BLOCKED_NUM in {all_blocked_issue_numbers}; do
           # Fail-safe direction is unchanged: verify_file_overlap_edge returns KEEP on any
           # fetch failure, so a transient API error can only ever preserve the brief, never
           # silently suppress a real one.
-          EDGE_VERDICT=$(verify_file_overlap_edge "$PRED" "$BLOCKED_NUM")
+          EDGE_VERDICT=$(verify_file_overlap_edge "$PRED" "$BLOCKED_NUM") # allowlist:fence-funcs (forge#3690: pre-existing cross-fence call, tracked separately)
           if [ "$EDGE_VERDICT" = "DROP" ]; then
             echo "DONE-path re-verification: edge #${PRED} → #${BLOCKED_NUM} (${EDGE_TYPE}, files: ${EDGE_FILES["${PRED}:${BLOCKED_NUM}"]:-?}) DROPPED — #${PRED}'s merged diff never touched the guessed file. Skipping same-file brief."
 
@@ -2128,7 +2130,7 @@ done
        # retried), then posts the escalation comment (re-read before posting, verified). If the label is not verified no
        # comment is posted. A merged + needs-human issue with no comment classifies GATED regardless of the verifier. A
        # failed half is reported on stderr and the operator must hold dependents manually when the label failed.
-       hold_merged_trail {NUMBER} "${TRAIL}" || echo "PHASE TRAIL ESCALATION FAILED: #{NUMBER} — comment or needs-human not verified." >&2
+       hold_merged_trail {NUMBER} "${TRAIL}" || echo "PHASE TRAIL ESCALATION FAILED: #{NUMBER} — comment or needs-human not verified." >&2 # allowlist:fence-funcs (forge#3690: pre-existing cross-fence call, tracked separately)
      fi
    fi
    ```
@@ -2288,7 +2290,7 @@ done
    # After CLAIM_RELEASED for issue NUM:
    # Read all active FORGE:CLAIM annotations from coordination issue
    if [ -n "${FORGE_COORD_ISSUE:-}" ] && [ -n "${COORD_NUM:-}" ]; then
-      ACTIVE_CLAIMS=$(read_active_claims "$COORD_NUM" 2>/dev/null || echo '[]')
+      ACTIVE_CLAIMS=$(read_active_claims "$COORD_NUM" 2>/dev/null || echo '[]') # allowlist:fence-funcs (forge#3690: pre-existing cross-fence call, tracked separately)
      # For each still-blocked issue in a Layer-2/4 pair: check if its claim's file set
      # is disjoint from all remaining active claims. If so, mark it ready.
      # (Layer-1 and Layer-3 edges are never relaxed — this check is Layer-2/4 only.)
@@ -2390,7 +2392,7 @@ Do not ask the user questions — you are running autonomously in the background
    # stdin: rows of {id, body, login, assoc, at}; stdout: the trusted rows.
    rereview_trusted_rows() {
      local ORCH PERMS ROW RA RL RP
-     ORCH=$(resolve_orch_login); PERMS=""
+     ORCH=$(resolve_orch_login); PERMS="" # allowlist:fence-funcs (forge#3690: pre-existing cross-fence call, tracked separately)
      while IFS= read -r ROW; do
        [ -n "$ROW" ] || continue
        RA=$(printf '%s' "$ROW" | jq -r '.assoc'); RL=$(printf '%s' "$ROW" | jq -r '.login')
@@ -2425,7 +2427,7 @@ Do not ask the user questions — you are running autonomously in the background
      REREVIEW_STATE="UNREADABLE"
    elif [ "${ISSUE_META%% *}" != "OPEN" ] || [ "${ISSUE_META#* }" != "workflow:in-review" ]; then
      REREVIEW_STATE="NONE"   # closed/merged, already at needs-human, or not at workflow:in-review: nothing to re-review
-   elif [ -z "$(resolve_orch_login)" ]; then
+   elif [ -z "$(resolve_orch_login)" ]; then # allowlist:fence-funcs (forge#3690: pre-existing cross-fence call, tracked separately)
      # SEC-8: with no own login the orchestrator's own marker is dropped as untrusted, so a dispatch could never be
      # recorded or deduped. Fail closed BEFORE any dispatch.
      REREVIEW_STATE="UNREADABLE"
@@ -2520,7 +2522,7 @@ Do not ask the user questions — you are running autonomously in the background
        local RB_RAW RB_TRUSTED RB_FIRST
        RB_RAW=$(gh api --paginate "repos/{GH_REPO}/issues/${REREVIEW_PR}/comments" \
              --jq '.[] | {id: (.id // 0), body: (.body // ""), login: (.user.login // ""), assoc: (.author_association // "")}' 2>/dev/null) || return 1
-       RB_TRUSTED=$(printf '%s\n' "$RB_RAW" | rereview_trusted_rows) || return 1
+       RB_TRUSTED=$(printf '%s\n' "$RB_RAW" | rereview_trusted_rows) || return 1 # allowlist:fence-funcs (forge#3690: pre-existing cross-fence call, tracked separately)
        RB_FIRST=$(printf '%s' "$RB_TRUSTED" | jq -s -r --arg sha "$REREVIEW_SHA" "${REREVIEW_CLAIMS} | .[0].body // \"\"" 2>/dev/null) || return 1
        [ -n "$RB_FIRST" ] || return 1
        printf '%s' "$RB_FIRST"
@@ -2587,7 +2589,7 @@ Do not ask the user questions — you are running autonomously in the background
 
    **Edge re-verification gate (run FIRST, before any tracking)** <!-- Added: forge#1904 -->:
    ```bash
-   EDGE_VERDICT=$(verify_file_overlap_edge "$PRED" "$DEP")
+   EDGE_VERDICT=$(verify_file_overlap_edge "$PRED" "$DEP") # allowlist:fence-funcs (forge#3690: pre-existing cross-fence call, tracked separately)
    if [ "$EDGE_VERDICT" = "DROP" ]; then
      echo "#{DEP} — predecessor #{PRED} is GATED but its EDGE_KIND file-overlap edge does not hold (no PR ever opened, or its actual diff never touched the guessed shared file(s)). Dropping the edge — not tracking #{DEP} as blocked-on-human-merge for this predecessor."
      # Remove PRED from DEP's predecessor set. If DEP has other unresolved predecessors it
@@ -2640,7 +2642,7 @@ Do not ask the user questions — you are running autonomously in the background
      [ -n "$GATING_PREDS" ] || { echo "WARNING: #${DEP} has blocked-on-human-merge but no parseable Gating predecessor line - leaving blocked" >&2; continue; }
      STILL_GATED=false
      for GPRED in $GATING_PREDS; do
-       [ "$(classify_predecessor_state "$GPRED")" = "DONE" ] || STILL_GATED=true
+       [ "$(classify_predecessor_state "$GPRED")" = "DONE" ] || STILL_GATED=true # allowlist:fence-funcs (forge#3690: pre-existing cross-fence call, tracked separately)
      done
      [ "$STILL_GATED" = "false" ] || continue
      # Idempotency: only dispatch if DEP hasn't already been dispatched by another path.
@@ -2670,7 +2672,7 @@ Do not ask the user questions — you are running autonomously in the background
          --jq '[.labels[].name | select(startswith("workflow:"))] | length' 2>/dev/null || echo "0")
        [ "$DEP_ALREADY_DISPATCHED" -eq 0 ] || continue
        # Record a human release of a trail-held merged predecessor so the escalation stops gating (decay).
-       for GPRED in $GATING_PREDS; do release_merged_trail "$GPRED"; done
+       for GPRED in $GATING_PREDS; do release_merged_trail "$GPRED"; done # allowlist:fence-funcs (forge#3690: pre-existing cross-fence call, tracked separately)
        echo "#{DEP} unblocked (gating predecessors resolved) — dispatching immediately (Steps 4A.pre.0 → 4A.pre → 4A)."
        # Add DEP to the same-response dispatch batch
      fi
@@ -2690,7 +2692,7 @@ Do not ask the user questions — you are running autonomously in the background
    ANY_ORIGINAL_IN_PROGRESS=false
    ANY_ORIGINAL_GATED=false
    for ORIG_NUM in {all_batch_issue_numbers}; do
-     ORIG_STATE=$(classify_predecessor_state "$ORIG_NUM")
+     ORIG_STATE=$(classify_predecessor_state "$ORIG_NUM") # allowlist:fence-funcs (forge#3690: pre-existing cross-fence call, tracked separately)
      case "$ORIG_STATE" in
        IN_PROGRESS) ANY_ORIGINAL_IN_PROGRESS=true ;;
        GATED) ANY_ORIGINAL_GATED=true ;;
@@ -3102,6 +3104,18 @@ When `CASCADE_MAX_AMPLIFICATION` is not `off`, and the current ratio is greater 
 **Deterministic breaker check (MANDATORY on every dispatch path — engine CLI, Agent-spawn fallback, or a hand-driven orchestrator):** the in-spec bookkeeping above only runs when the Step 4B/4C bash runs. A batch driven through the Agent-spawn fallback never evaluated it and reached about 2 findings per merge (2026-10-08 audit). Before dispatching ANY `review-finding` issue at `priority:P3` or below, and after every completed merge, run `scripts/amplification-breaker.sh` against GitHub state. Its exit code is authoritative, and it overrides an in-memory `AMPLIFICATION_BREAKER_TRIPPED=false`:
 
 ```bash
+# forge#3690: every Bash call is a fresh shell, so the helper from Step 4A is not in scope here. Re-declare it (guarded),
+# and record every printed PENDING_DECISION_QUEUED= line into the orchestrator-held PENDING_DECISIONS (dedup on `breaker|`).
+declare -p PENDING_DECISIONS >/dev/null 2>&1 || PENDING_DECISIONS=()
+declare -f enqueue_breaker_decision >/dev/null 2>&1 || enqueue_breaker_decision() {
+  [ "${AMPLIFICATION_BREAKER:-on}" = "on" ] || return 0
+  for _d in ${PENDING_DECISIONS[@]+"${PENDING_DECISIONS[@]}"}; do
+    case "$_d" in breaker\|*) return 0 ;; esac
+  done
+  _BD="breaker|amplification breaker tripped, P3 cascade admission paused|Batch the paused P3 findings or defer them?"
+  PENDING_DECISIONS+=("$_BD")
+  echo "PENDING_DECISION_QUEUED=$_BD"   # forge#3690: a fresh shell drops the array, so the orchestrator records this line
+}
 # HELPER_SCRIPT resolver (AMP_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
 _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
 _tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
@@ -3179,6 +3193,18 @@ ALL_BATCH_FILES=$(echo "$ALL_BATCH_FILES" | sort -u | grep -v '^$')
 ```
 
 ```bash
+# forge#3690: every Bash call is a fresh shell, so the helper from Step 4A is not in scope here. Re-declare it (guarded),
+# and record every printed PENDING_DECISION_QUEUED= line into the orchestrator-held PENDING_DECISIONS (dedup on `breaker|`).
+declare -p PENDING_DECISIONS >/dev/null 2>&1 || PENDING_DECISIONS=()
+declare -f enqueue_breaker_decision >/dev/null 2>&1 || enqueue_breaker_decision() {
+  [ "${AMPLIFICATION_BREAKER:-on}" = "on" ] || return 0
+  for _d in ${PENDING_DECISIONS[@]+"${PENDING_DECISIONS[@]}"}; do
+    case "$_d" in breaker\|*) return 0 ;; esac
+  done
+  _BD="breaker|amplification breaker tripped, P3 cascade admission paused|Batch the paused P3 findings or defer them?"
+  PENDING_DECISIONS+=("$_BD")
+  echo "PENDING_DECISION_QUEUED=$_BD"   # forge#3690: a fresh shell drops the array, so the orchestrator records this line
+}
 # Use the same bounded ancestor walk as Phase 1 so batching records actual depth,
 # not just whether the immediate source is a review finding.
 compute_finding_generation() {
@@ -3520,6 +3546,18 @@ done
 **Amplification settle (MANDATORY — after the rule loop above, before batching/dispatch; forge#3060):** now that this unit's findings are counted, record its ratio observation (unrounded; the printed value is rounded for display only) and evaluate the breaker over the latest `CONVERGENCE_WINDOW` observations. Release as soon as the newest observation is below 1.0.
 
 ```bash
+# forge#3690: every Bash call is a fresh shell, so the helper from Step 4A is not in scope here. Re-declare it (guarded),
+# and record every printed PENDING_DECISION_QUEUED= line into the orchestrator-held PENDING_DECISIONS (dedup on `breaker|`).
+declare -p PENDING_DECISIONS >/dev/null 2>&1 || PENDING_DECISIONS=()
+declare -f enqueue_breaker_decision >/dev/null 2>&1 || enqueue_breaker_decision() {
+  [ "${AMPLIFICATION_BREAKER:-on}" = "on" ] || return 0
+  for _d in ${PENDING_DECISIONS[@]+"${PENDING_DECISIONS[@]}"}; do
+    case "$_d" in breaker\|*) return 0 ;; esac
+  done
+  _BD="breaker|amplification breaker tripped, P3 cascade admission paused|Batch the paused P3 findings or defer them?"
+  PENDING_DECISIONS+=("$_BD")
+  echo "PENDING_DECISION_QUEUED=$_BD"   # forge#3690: a fresh shell drops the array, so the orchestrator records this line
+}
 if [ "$UNIT_MERGED_THIS_CYCLE" = "true" ]; then
   AMPLIFICATION_RATIO=$(awk "BEGIN { printf \"%.2f\", $FINDINGS_SPAWNED / $MERGED_UNITS }")
   AMPLIFICATION_RATIO_HISTORY+=("$(awk "BEGIN { printf \"%.6f\", $FINDINGS_SPAWNED / $MERGED_UNITS }")")
@@ -4145,7 +4183,7 @@ if [ "${#IDLE_DEFERRED[@]}" -gt 0 ]; then
   ANY_ORIGINAL_IN_PROGRESS=false
   ANY_ORIGINAL_GATED=false
   for ORIG_NUM in {all_batch_issue_numbers}; do
-    ORIG_STATE=$(classify_predecessor_state "$ORIG_NUM")
+    ORIG_STATE=$(classify_predecessor_state "$ORIG_NUM") # allowlist:fence-funcs (forge#3690: pre-existing cross-fence call, tracked separately)
     case "$ORIG_STATE" in
       IN_PROGRESS) ANY_ORIGINAL_IN_PROGRESS=true ;;
       GATED) ANY_ORIGINAL_GATED=true ;;
