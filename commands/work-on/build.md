@@ -791,6 +791,8 @@ The acceptance spec contains only a skip sentinel (\`type=skipped\`). No automat
 **Otherwise — execute each check**: <!-- Added: forge#1829 -->
 
 ```bash
+# <Script resolution block, verbatim>
+GREP_CLS=$(forge_resolve classify-grep-exit.sh) # empty/unresolved = every grep exit>=2 is a real FAIL (fail closed)
 GATE_PASS=true
 CORRECTED=""
 FAILED_CHECKS=""
@@ -868,12 +870,12 @@ while IFS= read -r check_line; do
       if [ "$MATCHER" = "exit_0" ]; then
         ERR=$(eval "$TARGET" 2>&1 >/dev/null); RC=$?
         # grep exit >= 2 is a usage/syntax error (e.g. a pattern starting with `-`), never a verdict on the code; exit 1 stays FAIL.
-        # A missing/unreadable operand file also exits 2 but is a REAL failure (the check asserts a file exists), so it is never malformed.
-        [ "$RC" -ge 2 ] && case "$TARGET" in grep\ *|egrep\ *|fgrep\ *) printf '%s' "$ERR" | grep -qE 'No such file or directory|Permission denied|Is a directory' || MALFORMED="grep usage error (exit $RC)";; esac
+        # Malformed only when stderr positively names a usage error (classify-grep-exit.sh); empty stderr (`2>/dev/null`, `-s`) or any operand error is a REAL failure.
+        [ "$RC" -ge 2 ] && MALFORMED=$(bash "$GREP_CLS" "$RC" "$ERR" "$TARGET" 2>/dev/null)
         [ "$RC" -eq 0 ] || [ -n "$MALFORMED" ] || { RESULT="FAIL"; DETAIL="command exited non-zero: $TARGET"; }
       else
         OUTPUT=$(eval "$TARGET" 2>&1); RC=$?; ERR="$OUTPUT"
-        [ "$RC" -ge 2 ] && case "$TARGET" in grep\ *|egrep\ *|fgrep\ *) printf '%s' "$ERR" | grep -qE 'No such file or directory|Permission denied|Is a directory' || MALFORMED="grep usage error (exit $RC)";; esac
+        [ "$RC" -ge 2 ] && MALFORMED=$(bash "$GREP_CLS" "$RC" "$ERR" "$TARGET" 2>/dev/null)
         if [ -n "$MALFORMED" ]; then :
         elif ! printf '%s\n' "$OUTPUT" | grep -qE "$MATCHER"; then
           if printf '%s\n' "$OUTPUT" | grep -qF -- "$MATCHER"; then CORRECTED="${CORRECTED}\n- **$ID**: output matched as a literal string"

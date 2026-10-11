@@ -50,19 +50,20 @@ const staticDetector = build
   .split("\n")
   .filter((l) => /^ {2}MALFORMED=""|^ {2}\{ \[ "\$TYPE" = "command" \]/.test(l))
   .join("\n");
+const grepClassifier = join(root, "scripts", "classify-grep-exit.sh");
 const rcDetector = build
   .split("\n")
-  .filter((l) => /^ {8}\[ "\$RC" -ge 2 \] && case/.test(l))
+  .filter((l) => /^ {8}\[ "\$RC" -ge 2 \] && MALFORMED=/.test(l))
   .slice(0, 1)
   .join("\n");
 
 function classify(target, type = "command") {
-  const script = `TYPE="$1"; TARGET="$2"\n${staticDetector}\nif [ -z "$MALFORMED" ]; then ERR=$(eval "$TARGET" 2>&1 >/dev/null); RC=$?\n${rcDetector}\nfi\nprintf '%s' "$MALFORMED"`;
+  const script = `TYPE="$1"; TARGET="$2"; GREP_CLS="${grepClassifier}"\n${staticDetector}\nif [ -z "$MALFORMED" ]; then ERR=$(eval "$TARGET" 2>&1 >/dev/null); RC=$?\n${rcDetector}\nfi\nprintf '%s' "$MALFORMED"`;
   return execFileSync("bash", ["-c", script, "x", type, target], { encoding: "utf8", cwd: root });
 }
 
 test("malformed-check detector lines are present in build.md", () => {
-  assert.ok(staticDetector.includes("bash -n") && rcDetector.includes("grep usage error"));
+  assert.ok(staticDetector.includes("bash -n") && rcDetector.includes("GREP_CLS"));
 });
 
 test("malformed-check: #3621 ac-3 shape (over-escaped backslashes) is malformed", () => {
@@ -78,6 +79,16 @@ test("malformed-check: #3723 shape (pattern starting with - read as an option, g
 
 test("malformed-check: a missing operand file (grep exit 2) is a real failure, not malformed (SEC-1)", () => {
   assert.equal(classify("grep -qF -e 'x' commands/work-on/no-such-file-xyzzy.md"), "");
+});
+
+test("malformed-check: stderr-suppressed missing operand file (2>/dev/null, -s) is a real failure (#3802)", () => {
+  assert.equal(classify("grep -qF -e 'x' commands/work-on/no-such-file-xyzzy.md 2>/dev/null"), "");
+  assert.equal(classify("grep -sqF -e 'x' commands/work-on/no-such-file-xyzzy.md"), "");
+  assert.match(classify("grep -qE '(abc' commands/work-on/build.md"), /usage error/);
+});
+
+test("B6.5 no longer carries the stderr allow-list of operand errors (#3802)", () => {
+  assert.ok(!build.includes("No such file or directory|Permission denied"));
 });
 
 test("acceptance gate never posts PASSED with zero verified checks (SEC-2)", () => {
