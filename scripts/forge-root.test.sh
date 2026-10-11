@@ -119,7 +119,7 @@ expect "gate-script resolver line is identical across sites" 1 "$(wc -l < "$T/gs
 # The bootstrap runs under $SH via run() (the proven path); the one-line gate resolver is plain POSIX and runs
 # in bash with the resolved FORGE_ROOT, so a shell-specific -c concatenation cannot mask or fake a result.
 gate_run() { local fr; fr="$(run "$1")"; ( cd "$T/consumer" && env -i PATH="$PATH" HOME="$1" FORGE_ROOT="$fr" bash -c "$(cat "$T/gs"); printf %s \"\$GATE_SCRIPT\"" ); }
-expect "plugin-only install resolves resolve-deploy-gate.sh" "$T/h14/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh" "$(gate_run "$T/h14")"
+expect "plugin-only install resolves resolve-deploy-gate.sh [$SH root=$(run "$T/h14") gs=$(cat "$T/gs")]" "$T/h14/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh" "$(gate_run "$T/h14")"
 expect "unresolved gate script stays empty (strict)" "" "$(gate_run "$T/empty")"
 # cwd/consumer repo is never a candidate even when it carries the gate script
 : > "$T/consumer/scripts/resolve-deploy-gate.sh"
