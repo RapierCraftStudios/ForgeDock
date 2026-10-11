@@ -147,13 +147,16 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate | bash "$TRUSTED_SCRI
 
 # Current-cycle slice (forge#3666): every resume read below runs on the comments AFTER the newest TRUSTED
 # `<!-- FORGE:CYCLE: n -->` marker (same predicate as `cycleNumber`/`sliceToCurrentCycle` in bin/engine/phases.mjs:
-# trusted author, body starts with the header, marker on its own line); all comments when no marker exists.
+# trusted author incl. the FORGE_TRAIL_TRUSTED_ASSOCIATIONS / FORGE_TRAIL_TRUSTED_LOGINS overrides, same `${VAR-default}`
+# handling as scripts/trusted-comments.sh; body starts with the header, marker on its own line); all comments when no marker exists.
 # A cycle-1 BUILDER:COMPLETE must never yield ALREADY_DONE in cycle 2. Re-declare this function verbatim in every
 # fence that uses it (shell functions do not survive across fences).
 cycle_slice() {
-  jq -s '[.[][]] as $c
+  jq -s --arg assoc "${FORGE_TRAIL_TRUSTED_ASSOCIATIONS-OWNER,MEMBER,COLLABORATOR}" --arg logins "${FORGE_TRAIL_TRUSTED_LOGINS-}" '[.[][]] as $c
+    | ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
+    | ($logins | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $L
     | ([$c | to_entries[]
-        | select((.value.user.type // "") == "Bot" or ((.value.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR")))
+        | select(((.value.author_association // "") as $x | $A | index($x) != null) or ((.value.user.type // "") == "Bot") or ((.value.user.login // "") as $x | $L | index($x) != null))
         | select((.value.body // "") | test("\\A\\s*<!--\\s*FORGE:CYCLE:") and test("(?m)^[ \\t]*<!--[ \\t]*FORGE:CYCLE:[ \\t]*[0-9]+[ \\t]*-->[ \\t]*$"))
         | .key] | last) as $i
     | if $i == null then $c else $c[($i + 1):] end'
