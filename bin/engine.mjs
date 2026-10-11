@@ -5,7 +5,7 @@
  */
 import { fileURLToPath } from "node:url";
 import { appendEvent, readLog, deriveState, rewriteLog } from "./engine/runlog.mjs";
-import { pickPhase, TERMINAL_REASONS, issueSnapshot, postCycleMarker } from "./engine/phases.mjs";
+import { pickPhase, TERMINAL_REASONS, issueSnapshot, postCycleMarker, nextCycleNumber } from "./engine/phases.mjs";
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { VALID_BACKENDS } from "./runner.mjs";
@@ -328,8 +328,8 @@ export async function runIssue(opts) {
     // forge#3657: publish the cycle boundary on GitHub BEFORE the log flips, so
     // build's reconcilers never re-adopt cycle-1 evidence. Fail closed.
     if (state.terminalReason === "phase-complete") {
-      const n = readLog(dir, issue).filter((e) => e.event === "RUN_NEXT_CYCLE").length + 1;
-      try { await postCycleMarker(issue, n, io); } catch {
+      const localCycles = readLog(dir, issue).filter((e) => e.event === "RUN_NEXT_CYCLE").length;
+      try { await postCycleMarker(issue, await nextCycleNumber(issue, localCycles, io), io); } catch {
         return {
           terminalReason: "not-retryable",
           detail: `issue ${issue}: could not post FORGE:CYCLE marker; --retry did not start a new cycle`,

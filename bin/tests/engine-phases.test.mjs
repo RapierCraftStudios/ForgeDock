@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
-import { PHASES, pickPhase, REMEDIATION_BOUND_MARKERS, cycleMarker, sliceToCurrentCycle, postCycleMarker } from "../engine/phases.mjs";
+import { PHASES, pickPhase, REMEDIATION_BOUND_MARKERS, cycleMarker, sliceToCurrentCycle, postCycleMarker, nextCycleNumber } from "../engine/phases.mjs";
 import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
 import { RESERVED_TYPES } from "../../packages/protocol/src/types.js";
 import { trusted, jsonLines, invBody, builderBody, remediationBody } from "./helpers/comments.mjs";
@@ -1178,5 +1178,12 @@ describe("FORGE:CYCLE boundary", () => {
     assert.equal((await postCycleMarker(42, 1, io)).posted, false);
     assert.deepEqual(posted, [cycleMarker(1)]);
     assert.equal((await postCycleMarker(42, 2, io)).posted, true);
+  });
+  it("nextCycleNumber exceeds an existing trusted marker even when the local log has no RUN_NEXT_CYCLE", async () => {
+    const io = { gh: async () => jsonLines([trusted(builderBody("fix/old-42")), trusted(cycleMarker(1)),
+      trusted(cycleMarker(2), { assoc: "NONE", login: "rando" })]) };
+    assert.equal(await nextCycleNumber(42, 0, io), 2);
+    assert.equal(await nextCycleNumber(42, 3, io), 4);
+    assert.equal(await nextCycleNumber(42, 0, { gh: async () => jsonLines([]) }), 1);
   });
 });

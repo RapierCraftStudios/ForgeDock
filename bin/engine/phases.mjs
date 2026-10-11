@@ -135,6 +135,21 @@ export function sliceToCurrentCycle(comments) {
   return comments;
 }
 /**
+ * Next cycle number: one past the higher of the newest trusted FORGE:CYCLE on
+ * GitHub and `localCycles` (the local RUN_NEXT_CYCLE count). A rehydrated log
+ * never replays RUN_NEXT_CYCLE, so the local count alone can reset to 0 while
+ * GitHub already carries markers. Errors propagate (caller fails closed).
+ */
+export async function nextCycleNumber(issue, localCycles, io) {
+  const { comments } = await issueMarkers(issue, io);
+  let highest = 0;
+  for (const body of comments) {
+    const c = cycleNumber(body);
+    if (c !== null && c > highest) highest = c;
+  }
+  return Math.max(highest, localCycles) + 1;
+}
+/**
  * Idempotently publish the FORGE:CYCLE marker for cycle `n`: skipped when the
  * newest trusted cycle marker already is `n` (crash between post and the log
  * append retries safely). Errors propagate so the caller can fail closed.
