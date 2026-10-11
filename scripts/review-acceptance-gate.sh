@@ -4,8 +4,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Usage: review-acceptance-gate.sh <issue> <gh_repo> "<gh_flag>" <worktree_path>     (DRY_RUN=1 skips gh writes)
-# Evaluates the ACCEPTANCE_CHECK lines the build gate (B6.5) deferred: `phase=review` checks, plus untagged legacy
-# command/behavior checks on a `gh pr` target. Uses its own FORGE:ACCEPTANCE_GATE_REVIEW marker, never the build
+# Evaluates the ACCEPTANCE_CHECK lines the build gate (B6.5) deferred: `phase=review` checks, plus command/behavior
+# checks on a `gh pr` target (B6.5's legacy deferral ignores any phase= tag, so a tagged phase=build one is selected too). Uses its own FORGE:ACCEPTANCE_GATE_REVIEW marker, never the build
 # gate's FORGE:ACCEPTANCE_GATE header or :PASSED/:FAILED/:BLOCKED sentinels (the engine reads those).
 # Malformed checks (forge#3694 parity with B6.5: 4+ backslash run, `bash -n` parse failure, grep usage error) are skipped and listed,
 # never a FAIL and never needs-human. With zero verified checks and some malformed, a non-blocking notice is posted (no PASSED marker).
@@ -58,7 +58,6 @@ while IFS= read -r check_line; do
   [ "$PHASE" = "review" ] || PHASE=build
   case "$TYPE" in command|behavior) ;; *) [ "$PHASE" = "review" ] || continue ;; esac
   if [ "$PHASE" != "review" ]; then
-    printf '%s\n' "$check_line" | grep -qE ' phase=(build|review)( |$)' && continue
     case "$TARGET" in *'gh pr'*) ;; *) continue ;; esac
   fi
   # malformed-check (forge#3694): static screen only parses (bash -n), never executes.
