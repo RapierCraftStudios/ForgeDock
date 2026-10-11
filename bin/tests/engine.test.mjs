@@ -475,6 +475,21 @@ describe("runIssue", () => {
     assert.ok(!w.labels.includes("needs-human"));
   });
 
+  it("forge#3876: terminate leaves workflow:remediating alone when another engine holds a live lease", async () => {
+    const { w, io } = fakeWorld();
+    w.labels.push("workflow:remediating");
+    const live = { by: "a2", until: 5000000 };
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; raceLease(w, live); },
+      "work-on/remediate": () => { raceLease(w, live); },
+    };
+    const res = await runWith(w, io, script);
+    assert.equal(res.terminalReason, "needs-human");
+    assert.ok(w.labels.includes("workflow:remediating"), "live engine's remediating label must survive");
+  });
+
   it("forge#3566: a failing removeLabel does not throw and the terminal state still lands", async () => {
     const { w, io } = fakeWorld();
     w.labels.push("workflow:remediating");

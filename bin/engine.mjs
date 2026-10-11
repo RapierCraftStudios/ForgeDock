@@ -12,6 +12,7 @@ import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postC
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { VALID_BACKENDS } from "./runner.mjs";
+import { OUTCOME_CODES, UNCLASSIFIED, normalizeCode, codeForRunnerError, codeForTerminalReason } from "./engine/outcome-codes.mjs";
 
 // Exported (forge#2175) so bin/engine-cli.mjs can render "failed N/M attempts"
 // diagnostics without duplicating the retry budget constant.
@@ -338,6 +339,14 @@ export async function runIssue(opts) {
   // the forge#2240 rationale this wrapper implements.
   const emitProgress = makeProgressEmitter(onProgress);
 
+  // forge#3833: one seam for coded outcome records that are not run-log phase events. Appends the
+  // event and forwards it to the telemetry hook (#3834 owns the FORGE:TELEMETRY writer), which can
+  // never fail the run.
+  const emitOutcome = async (rec) => {
+    appendEvent(dir, issue, rec);
+    try { await emitTelemetry?.({ ...rec, issue }); } catch { /* telemetry never fails a run */ }
+  };
+
   // forge#2452: extracted into validateRunIssueOptions() — see its docstring
   // for the forge#2054/#2313/#2329 rationale and required call-order (before
   // any state I/O or timer creation, unchanged from the inline block this
@@ -354,6 +363,7 @@ export async function runIssue(opts) {
     !isLeaseHolderDead({ by: r.lease.by, host: hostname, killFn }));
   const deferredResult = (r) => ({
     terminalReason: "deferred",
+    code: OUTCOME_CODES.LEASE_HELD,
     leaseUntil: r.lease.until,
     detail: `issue ${issue} leased by ${r.lease.by} until ${new Date(r.lease.until).toISOString()}`,
   });
@@ -563,7 +573,7 @@ export async function runIssue(opts) {
          // forge#3512: investigate persists `invalid` on its own commit. Only when investigate is
          // the LAST committed phase: a later remediate/close commit carrying `invalid` is a handoff.
          (state.committed[state.committed.length - 1] === "investigate" && state.terminalReason === "invalid")))
-      return await terminate(state, state.terminalReason);
+      return await terminate(state, state.terminalReason, undefined, state.outcomeCode);
     // forge#2352: state-vs-GitHub divergence guard. Every phase's own
     // `entryCondition` only ever checked `state.committed` (local run-log
     // progress) — never the issue's live GitHub state/labels — so a phase
@@ -606,7 +616,7 @@ export async function runIssue(opts) {
         if (isDead) {
           const detail = `issue ${issue} is ${snap.state === "CLOSED" ? "closed" : "open"} ` +
             `with divergent state before phase ${phase.id} (labels: ${snap.labels.join(", ") || "none"})`;
-          return await terminate(state, "invalid", detail);
+          return await terminate(state, "invalid", detail, OUTCOME_CODES.INVALID);
         }
         // `needs-human` is a PAUSE, not a death sentence — a human may still
         // resolve it, and /orchestrate's classify_predecessor_state() already
@@ -801,7 +811,7 @@ export async function runIssue(opts) {
           // harmless idempotent safety net for the `throw e;` path.
           clearInterval(renewTimer);
           if (pendingRenewal) await pendingRenewal;
-          return await terminate(state, "engine-error", detail);
+          return await terminate(state, "engine-error", detail, codeForRunnerError(e));
         }
         throw e;
       } finally {
@@ -832,10 +842,11 @@ export async function runIssue(opts) {
       // an unmerged PR). Release our lease and exit with nothing written; the next dispatch re-picks remediate.
       if (phase.id === "remediate" && outcome.reason === "deferred") {
         await releaseLease(state);
-        return { terminalReason: "deferred", detail: outcome.detail };
+        await emitOutcome({ event: "PHASE_DEFERRED", phase: phase.id, code: normalizeCode(outcome.code), reason: outcome.detail });
+        return { terminalReason: "deferred", code: normalizeCode(outcome.code), detail: outcome.detail };
       }
       if (!isRemediationHandoff)
-        return await terminate(state, outcome.reason || "needs-human", outcome.detail);
+        return await terminate(state, outcome.reason || "needs-human", outcome.detail, outcome.code);
     } else {
       // committed
       // forge#2321: only report a phase_exit if a matching phase_enter was
@@ -867,13 +878,15 @@ export async function runIssue(opts) {
     // `decomposed`, remediate `merged`/`awaiting-merge`/`needs-human`). Persist them on the
     // commit event too, so a crash before RUN_TERMINAL or a rebuild cannot drop them.
     const commitReason = blockedReason ?? outcome.terminalReason ?? null;
+    // forge#3833: the handoff/blocked cause, persisted on the commit event like the reason.
+    const commitCode = commitReason ? normalizeCode(outcome.code ?? codeForTerminalReason(commitReason)) : null;
     appendEvent(dir, issue, {
       event: "PHASE_COMMIT", phase: phase.id, outputs: commitOutputs,
       // forge#3696: `usage` is cumulative over every attempt of the phase; the last attempt's alone is `last_attempt_usage`.
       usage: outcome.usage ?? null, last_attempt_usage: outcome.last_attempt_usage ?? null,
       // forge#3589: model + turn count per phase (null when the backend does not report them).
       model: outcome.model ?? null, turns: outcome.turns ?? null,
-      ...(commitReason ? { terminalReason: commitReason } : {}),
+      ...(commitReason ? { terminalReason: commitReason, code: commitCode } : {}),
     });
     state = deriveState(readLog(dir, issue));
     const terminalReason = blockedReason ?? outcome.terminalReason;
@@ -905,7 +918,7 @@ export async function runIssue(opts) {
       outcome.outputs?.closeHandoff === true && terminalReason === "merged";
     if (terminalReason && TERMINAL_REASONS.includes(terminalReason) &&
         !isDecomposeHandoff && !isRemediationHandoff && !isCloseHandoff)
-      return await terminate(state, terminalReason, outcome.detail);
+      return await terminate(state, terminalReason, outcome.detail, commitCode);
     if (phase.isTerminalAfter && !isCloseHandoff && phase.isTerminalAfter(state))
       return await terminate(state, state.terminalReason || "merged");
   }
@@ -930,17 +943,21 @@ export async function runIssue(opts) {
     return true;
   }
 
-  async function terminate(s, reason, detail) {
-    appendEvent(dir, issue, { event: "RUN_TERMINAL", reason });
+  async function terminate(s, reason, detail, code) {
+    // forge#3833: absent -> the reason's own code; unknown -> `unclassified` with the raw text kept in `detail`.
+    const outcomeCode = code == null ? codeForTerminalReason(reason) : normalizeCode(code);
+    appendEvent(dir, issue, { event: "RUN_TERMINAL", reason, code: outcomeCode,
+      ...(outcomeCode === UNCLASSIFIED && detail ? { detail } : {}) });
     // The terminal write must always land; only the lease field is preserved when another live
     // agent holds it. A failed read falls back to clearing (a lost terminal write would strand the issue).
     const foreign = await foreignLiveLease();
-    const final = { ...deriveState(readLog(dir, issue)), terminal: true, terminalReason: reason, lease: foreign ?? null };
+    const final = { ...deriveState(readLog(dir, issue)), terminal: true, terminalReason: reason, outcomeCode, lease: foreign ?? null };
     await projector.writeState(issue, final);
     // forge#3566: the terminal projection must not leave a stranded `workflow:remediating`
     // next to the terminal label. Best-effort: runs after the terminal write and never throws.
+    // forge#3876: skipped when another live engine holds the lease (it owns the labels); an unreadable lease (null) falls back to cleanup.
     let wasRemediating = false;
-    if (reason === "needs-human" || reason === "engine-error") {
+    if (foreign == null && (reason === "needs-human" || reason === "engine-error")) {
       try {
         const lv = JSON.parse(await io.gh(["issue", "view", String(issue), "--json", "labels"]));
         wasRemediating = (lv?.labels ?? []).some((l) => (typeof l === "string" ? l : l?.name) === "workflow:remediating");
@@ -961,7 +978,7 @@ export async function runIssue(opts) {
         try { await projector.setLabel(issue, "needs-human"); } catch { /* best-effort */ }
       }
     }
-    return { terminalReason: reason, detail };
+    return { terminalReason: reason, code: outcomeCode, detail };
   }
 }
 
@@ -978,8 +995,8 @@ async function runPhaseWithRetry(phase, state, ctx) {
   } catch (e) {
     if (e?.code !== "PHASE_ARGS_INVALID") throw e;
     const detail = `phase ${phase.id} args unresolved: ${e.message}`;
-    appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt: 0, reason: detail, maxAttempts });
-    return { status: "blocked", detail, reason: "engine-error", usage: null };
+    appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt: 0, reason: detail, code: OUTCOME_CODES.ENGINE_ERROR, maxAttempts });
+    return { status: "blocked", detail, reason: "engine-error", code: OUTCOME_CODES.ENGINE_ERROR, usage: null };
   }
   // forge#2261: true only if EVERY attempt failed by the runner itself
   // throwing (never once reached phase.detectOutcome()). This is the signal
@@ -990,6 +1007,8 @@ async function runPhaseWithRetry(phase, state, ctx) {
   // Flips to false the instant any attempt's runner() call succeeds, even if
   // that attempt's detectOutcome() itself reports failure.
   let allAttemptsThrew = true;
+  // forge#3833: code of the most recent failed attempt (an attempt whose runner threw counts as engine.error).
+  let lastCode = UNCLASSIFIED;
   // forge#2377: the last successful attempt's `usage` (from runner()'s ==
   // runCommand()'s resolved value — {input_tokens, output_tokens,
   // cache_creation_input_tokens, cache_read_input_tokens} on the API
@@ -1054,7 +1073,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
         addUsage(e.usage);
         await recordAttempt(attempt, e.usage, t0, { turns: e.numTurns });
         appendEvent(dir, issue, {
-          event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, maxAttempts,
+          event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, code: codeForRunnerError(e), maxAttempts,
           turns: e.numTurns ?? null, usage: e.usage ?? null,
         });
         throw e;
@@ -1066,7 +1085,8 @@ async function runPhaseWithRetry(phase, state, ctx) {
       // `lastUsage` from a prior attempt) keeps this event's usage
       // trustworthy as "usage actually observed on this attempt".
       await recordAttempt(attempt, null, t0, null);
-      appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, maxAttempts });
+      appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, code: codeForRunnerError(e), maxAttempts });
+      lastCode = OUTCOME_CODES.ENGINE_ERROR;
       continue;
     }
     allAttemptsThrew = false;
@@ -1078,7 +1098,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
     await recordAttempt(attempt, lastUsage, t0, { cost_usd: result?.costUsd ?? null, model: lastModel, turns: lastTurns });
     const outcome = await phase.detectOutcome(state, io, result);
     if (outcome.status === "committed" || outcome.status === "blocked") return { ...outcome, usage: cumulativeUsage, last_attempt_usage: lastUsage, model: lastModel, turns: lastTurns };
-    appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail, maxAttempts, usage: lastUsage, model: lastModel, turns: lastTurns });
+    appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: outcome.detail, code: normalizeCode(outcome.code), maxAttempts, usage: lastUsage, model: lastModel, turns: lastTurns });
     // forge#2176: a phase's detectOutcome can mark a failure as a known,
     // state-derived fixed point — re-running the phase's runner is
     // guaranteed to reproduce the identical failure (e.g. the build phase's
@@ -1089,11 +1109,12 @@ async function runPhaseWithRetry(phase, state, ctx) {
     // Absent/undefined `retryable` defaults to retryable (existing behavior
     // for every phase that doesn't opt in — investigate/context/architect/
     // review/close — is unchanged, preserving transient-failure retries).
+    lastCode = normalizeCode(outcome.code);
     if (outcome.retryable === false) {
       // forge#3521: keep outcome.outputs (e.g. the PR number) for persistence and
       // forward `handoff` so only an explicit opt-in escalation is honoured; a
       // no-signal failure carries no handoff and stops at needs-human.
-      return { status: "blocked", detail: outcome.detail, outputs: outcome.outputs, handoff: outcome.handoff, usage: cumulativeUsage, last_attempt_usage: lastUsage };
+      return { status: "blocked", detail: outcome.detail, outputs: outcome.outputs, handoff: outcome.handoff, code: lastCode, usage: cumulativeUsage, last_attempt_usage: lastUsage };
     }
   }
   // Exhausted transient retries → escalate (spec §7).
@@ -1111,10 +1132,11 @@ async function runPhaseWithRetry(phase, state, ctx) {
       status: "blocked",
       detail: `phase ${phase.id} failed after ${maxAttempts} attempts (runner threw every attempt)`,
       reason: "engine-error",
+      code: OUTCOME_CODES.ENGINE_ERROR,
       usage: null,
     };
   }
-  return { status: "blocked", detail: `phase ${phase.id} failed after ${maxAttempts} attempts`, usage: cumulativeUsage, last_attempt_usage: lastUsage };
+  return { status: "blocked", detail: `phase ${phase.id} failed after ${maxAttempts} attempts`, code: lastCode, usage: cumulativeUsage, last_attempt_usage: lastUsage };
 }
 
 /**
@@ -1138,15 +1160,15 @@ function eventsFromIndex(idx, meta = {}) {
   // would terminate the run. Nothing to attach it to when no phase is committed.
   if (!idx.terminal && idx.terminalReason && idx.committed.length > 0) {
     for (let i = events.length - 1; i >= 0; i--) {
-      if (events[i].event === "PHASE_COMMIT") { events[i].terminalReason = idx.terminalReason; break; }
+      if (events[i].event === "PHASE_COMMIT") { events[i].terminalReason = idx.terminalReason; if (idx.outcomeCode) events[i].code = idx.outcomeCode; break; }
     }
   }
-  if (idx.terminal) events.push({ event: "RUN_TERMINAL", reason: idx.terminalReason });
+  if (idx.terminal) events.push({ event: "RUN_TERMINAL", reason: idx.terminalReason, code: normalizeCode(idx.outcomeCode ?? codeForTerminalReason(idx.terminalReason)) });
   return events;
 }
 
 function freshState(issue, lane) {
   return { v: 0, run: `r_${issue}_${lane}`, issue, lane, committed: [], phase: null,
            branch: null, pr: null, terminal: false, terminalReason: null, lease: null,
-           lastRateLimit: null };
+           lastRateLimit: null, outcomeCode: null };
 }
