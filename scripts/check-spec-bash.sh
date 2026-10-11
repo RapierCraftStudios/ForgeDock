@@ -14,6 +14,7 @@
 #   check-spec-bash.sh [--base <git-ref>] [--shellcheck] <file.md>...
 #   check-spec-bash.sh --positional [<file.md>...]
 #   check-spec-bash.sh --fence-state <VAR>... -- <file.md>...
+#   check-spec-bash.sh --fence-funcs -- <file.md>...
 #   check-spec-bash.sh            (no args: same as --positional over all Skill-loaded commands/**/*.md,
 #                                  excluding orchestrate/**, pipeline-health/**, review-pr-agents/**)
 #
@@ -33,6 +34,13 @@
 #                 does not match `$REPO_FLAG`. Suppress a deliberate read by putting
 #                 `allowlist:fence-state` on the same line. Pseudo-tool-call fences are scanned too.
 #                 Output: `FAIL <file>:<line> fence-state ...` then `SPEC-FENCE-STATE: ...`.
+#   --fence-funcs Different check, opt-in: shell functions are per-shell too, so a function defined
+#                 (`name() {`, `function name`) in one ```bash/sh fence is undefined in every other
+#                 fence. Fail any fence that calls (command position) a function that the same file
+#                 defines only in a DIFFERENT fence. A fence that carries its own definition (also
+#                 `declare -f name >/dev/null || name() {...}`) is fine. Comment lines are ignored.
+#                 Suppress a deliberate call with `allowlist:fence-funcs` on the same line.
+#                 Output: `FAIL <file>:<line> fence-funcs ...` then `SPEC-FENCE-FUNCS: ...`.
 #   --base <ref>   Only check blocks that contain a line changed relative to <ref>
 #                  (`git diff -U0 <ref> -- <file>`), so pre-existing blocks never fail
 #                  a new change. Without --base every block is checked.
@@ -53,8 +61,8 @@
 
 set -u
 
-BASE=""; SHELLCHECK=0; POSITIONAL=0; FILES=""; FENCESTATE=0; FSVARS=""
-usage() { echo "ERROR: Usage: check-spec-bash.sh [--base <git-ref>] [--shellcheck] <file.md>... | --positional [<file.md>...] | --fence-state <VAR>... -- <file.md>..." >&2; exit 2; }
+BASE=""; SHELLCHECK=0; POSITIONAL=0; FILES=""; FENCESTATE=0; FSVARS=""; FENCEFUNCS=0
+usage() { echo "ERROR: Usage: check-spec-bash.sh [--base <git-ref>] [--shellcheck] <file.md>... | --positional [<file.md>...] | --fence-state <VAR>... -- <file.md>... | --fence-funcs -- <file.md>..." >&2; exit 2; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -69,6 +77,10 @@ while [ "$#" -gt 0 ]; do
       done
       [ "$#" -gt 0 ] && [ -n "$FSVARS" ] || usage
       shift ;;
+    --fence-funcs)
+      FENCEFUNCS=1; shift
+      [ "$#" -gt 0 ] && [ "$1" = "--" ] || usage
+      shift ;;
     --*) usage ;;
     *) FILES="$FILES
 $1"; shift ;;
@@ -78,7 +90,7 @@ done
 # No file arguments: default to the --positional check over every Skill-loaded spec under commands/
 # (orchestrate/**, pipeline-health/** and the review-pr-agents catalog are Read-loaded, not substituted).
 # Resolved relative to this script, so it works from any cwd and from linked worktrees.
-if [ -z "$FILES" ] && [ "$FENCESTATE" = 0 ] && { [ "$#" -eq 0 ] && [ "$POSITIONAL" = 0 ] && [ -z "$BASE" ] && [ "$SHELLCHECK" = 0 ] || [ "$POSITIONAL" = 1 ]; }; then
+if [ -z "$FILES" ] && [ "$FENCESTATE" = 0 ] && [ "$FENCEFUNCS" = 0 ] && { [ "$#" -eq 0 ] && [ "$POSITIONAL" = 0 ] && [ -z "$BASE" ] && [ "$SHELLCHECK" = 0 ] || [ "$POSITIONAL" = 1 ]; }; then
   POSITIONAL=1
   cd "$(dirname "$0")/.." || exit 2
   FILES=$(find commands -name '*.md' -not -path 'commands/orchestrate/*' \
@@ -124,6 +136,64 @@ $FILES
 EOS
   echo "SPEC-FENCE-STATE: files=$sfiles violations=$sfail"
   [ "$sfail" -eq 0 ]
+  exit $?
+fi
+
+if [ "$FENCEFUNCS" = 1 ]; then
+  ffail=0; ffiles=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in *.md) ;; *) continue ;; esac
+    [ -f "$f" ] || { echo "SKIP $f missing"; continue; }
+    ffiles=$((ffiles + 1))
+    hits=$(awk -v f="$f" '
+      function isdef(line, name) {
+        return line ~ ("(^|[;&|{ \t])(function[ \t]+)?" name "[ \t]*[(][)]") || line ~ ("(^|[;&|{ \t])function[ \t]+" name "([ \t;{]|$)")
+      }
+      # A non-bash fence (prompt templates) can nest ```lang fences: track depth so they stay ignored.
+      other && /^[ \t]*```[A-Za-z]/ { depth++; next }
+      other && /^[ \t]*```[ \t]*$/ { if (depth > 0) depth--; else other = 0; next }
+      other { next }
+      !inb && /^[ \t]*```(bash|sh)[ \t]*$/ { inb = 1; nf++; next }
+      !inb && /^[ \t]*```/ { other = 1; depth = 0; next }
+      inb && /^[ \t]*```[ \t]*$/ { inb = 0; next }
+      inb {
+        n++; fen[n] = nf; ln[n] = NR; txt[n] = $0
+        if ($0 ~ /^[ \t]*#/) next
+        # Function definitions: `name()` or `function name`, wherever they sit on the line.
+        s = $0
+        while (match(s, /(^|[;&|{ \t])(function[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*[(][)]/)) {
+          d = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH)
+          sub(/^[;&|{ \t]+/, "", d); sub(/^function[ \t]+/, "", d); sub(/[ \t]*[(][)]$/, "", d)
+          defn[d, nf] = 1; if (!(d in seen)) { seen[d] = 1; names[++nn] = d }
+        }
+        s = $0
+        while (match(s, /(^|[;&|{ \t])function[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
+          d = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH)
+          sub(/^[;&|{ \t]+/, "", d); sub(/^function[ \t]+/, "", d)
+          defn[d, nf] = 1; if (!(d in seen)) { seen[d] = 1; names[++nn] = d }
+        }
+      }
+      END {
+        for (k = 1; k <= nn; k++) {
+          name = names[k]
+          for (i = 1; i <= n; i++) {
+            if (defn[name, fen[i]] || reported[name, fen[i]]) continue
+            if (txt[i] ~ /^[ \t]*#/ || txt[i] ~ /allowlist:fence-funcs/) continue
+            if (txt[i] ~ ("(^[ \t]*|[;&|({][ \t]*|[$][(][ \t]*|(then|do|else|elif|if|while|until|!)[ \t]+)" name "([ \t;&|)]|$)")) {
+              reported[name, fen[i]] = 1
+              print "FAIL " f ":" ln[i] " fence-funcs: " name "() is called in a fence that does not define it (fresh shell per Bash call; defined only in another fence): " txt[i]
+            }
+          }
+        }
+      }
+    ' "$f" | LC_ALL=C sort -t: -k2,2n)
+    if [ -n "$hits" ]; then printf '%s\n' "$hits"; ffail=$((ffail + $(printf '%s\n' "$hits" | wc -l))); fi
+  done <<EOS
+$FILES
+EOS
+  echo "SPEC-FENCE-FUNCS: files=$ffiles violations=$ffail"
+  [ "$ffail" -eq 0 ]
   exit $?
 fi
 

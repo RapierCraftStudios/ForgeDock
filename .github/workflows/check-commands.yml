@@ -342,6 +342,9 @@ jobs:
           # Slice-path writers (protocols.md §1) must re-declare it. Persona files wrap their template in an outer bare fence,
           # which this checker skips; review-pr-gate2.test.sh counts persona reads vs re-declarations instead.
           bash scripts/check-spec-bash.sh --fence-state SLICE_FILE -- commands/review-pr-agents/protocols.md docs/spec/review-protocol.md
+          # Every Bash call is a fresh shell: a function defined in one fence is undefined in the others, so a fence
+          # must not call one that only another fence defines (re-declare it guarded). Deliberate calls: `allowlist:fence-funcs`.
+          bash scripts/check-spec-bash.sh --fence-funcs -- commands/orchestrate/phase-4-execution.md
 
   admission-parity:
     name: admission.mjs / bash mirror parity check
