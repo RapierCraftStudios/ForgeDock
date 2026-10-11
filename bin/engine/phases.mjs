@@ -270,7 +270,7 @@ function sizeGateRoutesToDecompose(comments) {
   for (let i = comments.length - 1; i >= 0; i--) if (starts(comments[i], gate)) { idx = i; break; }
   if (idx < 0) return false;
   const body = comments[idx].replace(/\r\n/g, "\n");
-  const m = /^result:[ \t]*(OK|OVERRIDDEN|OVER)[ \t]*$/m.exec(body);
+  const m = /^result:[ \t]*(OK|OVERRIDDEN|COHESIVE|OVER)[ \t]*$/m.exec(body);
   if (!m || m[1] !== "OVER" || !/^###[ \t]+Split Proposal\b/m.test(body)) return false;
   return !comments.slice(idx + 1).some((c) => starts(c, override) && overrideHasJustification(c));
 }

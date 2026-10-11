@@ -159,7 +159,7 @@ EXISTING_FAST_PATH=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate 
   - Lookup failed (`trusted-comments.sh` unresolved or `gh` error) → Blocked exit with blocker `gate-lookup-unavailable: could not read FORGE:ACCEPTANCE_GATE` (a transient GitHub failure uses the `github-unavailable:` prefix). Never read a failed lookup as "no gate marker".
   - Newest is `FORGE:ACCEPTANCE_GATE:FAILED`, `FORGE:ACCEPTANCE_GATE:BLOCKED`, or a `FORGE:BUILD_BLOCKED` comment → the gate is blocked and the engine fails closed on it, so returning ALREADY_DONE would deadlock every re-run. Derive BRANCH/WORKTREE_PATH/PR_BASE as in B1A/B1C (without creating anything), verify the branch and worktree exist and that `git -C "$WORKTREE_PATH" branch --show-current` equals BRANCH (missing or mismatched → Blocked exit `worktree-missing: cannot re-enter B6.5`; never recreate silently), recover `COMPLEXITY_BAND` from `EXISTING_FAST_PATH` with the B0.5 resume extraction, then skip B0.5-B6 and re-enter at **Phase B6.5**, which posts a fresh PASSED/FAILED/BLOCKED verdict (the one-repair `FORGE:ACCEPTANCE_REPAIR` bound still applies).
   - Newest is `FORGE:ACCEPTANCE_GATE:PASSED`, or no gate marker exists → build already complete. Derive BRANCH/WORKTREE_PATH as in B1A/B1C (without creating anything), then print `BUILD_RESULT: status: ALREADY_DONE`.
-- **Size-gate resume** (checked BEFORE the partial-BUILDER rule below; first match wins) <!-- Added: forge#3463 -->: if a `<!-- FORGE:BUILDER -->` comment exists without `<!-- FORGE:BUILDER:COMPLETE -->` AND the latest trusted `FORGE:DIFF_SIZE` comment has `result: OVER`, the build stopped at a deliberate B5.5 exit (`NEEDS_DECOMPOSE` or the decompose-loop-guard Blocked exit), not in a crash. Keep the BUILDER comment, do not re-run B2-B5, and re-enter at **Phase B5.5**. Read the marker through the same anchored, trust-filtered lookup B5.5 uses (script resolution block verbatim):
+- **Size-gate resume** (checked BEFORE the partial-BUILDER rule below; first match wins) <!-- Added: forge#3463 -->: if a `<!-- FORGE:BUILDER -->` comment exists without `<!-- FORGE:BUILDER:COMPLETE -->` AND the latest trusted `FORGE:DIFF_SIZE` comment has `result: OVER` or `result: COHESIVE`, the build stopped at a deliberate B5.5 exit (`NEEDS_DECOMPOSE`, the decompose-loop-guard Blocked exit, or a crash right after the `COHESIVE` comment was posted), not in an implement crash. Keep the BUILDER comment, do not re-run B2-B5, and re-enter at **Phase B5.5**. Read the marker through the same anchored, trust-filtered lookup B5.5 uses (script resolution block verbatim):
   ```bash
   # <Script resolution block from above goes here, verbatim>
   set -o pipefail
@@ -171,7 +171,7 @@ EXISTING_FAST_PATH=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate 
   echo "DIFF_SIZE_RESULT=${LAST_RESULT:-<none>}"
   ```
   - `DIFF_SIZE_LOOKUP=FAILED` → Blocked exit with blocker `size-gate-unavailable: could not read FORGE:DIFF_SIZE` (a transient GitHub failure uses the `github-unavailable:` prefix). Never read a failed lookup as "no DIFF_SIZE".
-  - `DIFF_SIZE_RESULT=OVER` → verify, without creating anything, that the branch and worktree exist (derive BRANCH/WORKTREE_PATH as in B1A/B1C), that `git -C "$WORKTREE_PATH" branch --show-current` equals BRANCH, and that a staged diff is present (`! git -C "$WORKTREE_PATH" diff --cached --quiet`). Recover `COMPLEXITY_BAND` from `EXISTING_FAST_PATH` with the B0.5 resume extraction. When all hold, skip B0.5-B5 and continue at B5.5 (it re-measures, then applies the override / `NEEDS_DECOMPOSE` / `OK` logic).
+  - `DIFF_SIZE_RESULT=OVER` or `DIFF_SIZE_RESULT=COHESIVE` → verify, without creating anything, that the branch and worktree exist (derive BRANCH/WORKTREE_PATH as in B1A/B1C), that `git -C "$WORKTREE_PATH" branch --show-current` equals BRANCH, and that a staged diff is present (`! git -C "$WORKTREE_PATH" diff --cached --quiet`). Recover `COMPLEXITY_BAND` from `EXISTING_FAST_PATH` with the B0.5 resume extraction. When all hold, skip B0.5-B5 and continue at B5.5 (it re-measures, then applies the override / `COHESIVE` / `NEEDS_DECOMPOSE` / `OK` logic; never re-run implement).
   - Anything else (no `FORGE:DIFF_SIZE`, `result` is not `OVER`, worktree or branch missing or mismatched, nothing staged, band unrecoverable) → never skip ahead on missing state; fall through to the next rule.
 - If `<!-- FORGE:BUILDER -->` exists BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → build was interrupted after the comment was posted but before the commit (validate V5). Delete the partial comment and restart from Phase B2 (contract): <!-- Added: forge#1305 -->
   ```bash
@@ -633,7 +633,7 @@ esac
 - Prose tier (script unresolvable) → skip the gate, continue to B6 (the script is part of the install; a missing install must not strand every build).
 - Exit 2, empty output, or output without `diff_lines=`, `threshold=` and `over=`, AND `FETCH_OK=0` (the base fetch failed after the 10s/30s/60s retries, worst case about 100s) → Blocked exit with blocker `github-unavailable: could not fetch origin/{PR_BASE} for diff-size measurement` (transient; the router retry rule applies).
 - The same unmeasurable result with `FETCH_OK=1` (the fetch succeeded, so the script itself failed) → Blocked exit with blocker `size-gate-unavailable: diff-size.sh failed (rc=<N>)`. Either way, do NOT treat an unmeasurable diff as under threshold.
-- Otherwise parse `diff_lines`, `excluded_lines`, `threshold`, `over` and the `top=` lines.
+- Otherwise parse `diff_lines`, `excluded_lines`, `threshold`, `over`, the cohesion keys `new_lines`, `test_lines`, `cohesive_lines`, `cohesive` and the `top=` lines. Fail closed on cohesion: a missing or unparseable `cohesive=` (an older script) reads as `cohesive=false`, never as true.
 
 **Step 2 — look up an override** (only when `over=true`). Both lookups are anchored, trust-filtered through `scripts/trusted-comments.sh` (trusted association, Bot, or `FORGE_TRAIL_TRUSTED_LOGINS`), and fail closed:
 
@@ -652,7 +652,7 @@ if [ -n "$JUSTIFICATION" ]; then echo "OVERRIDE=VALID"; else echo "OVERRIDE=NONE
 - `OVERRIDE_LOOKUP=FAILED` → Blocked exit with blocker `size-gate-unavailable: could not read FORGE:SIZE_OVERRIDE` (a transient GitHub failure uses the `github-unavailable:` prefix per the retry rule above). Never read a failed lookup as "no override".
 - `OVERRIDE=VALID` → result `OVERRIDDEN`. A marker with an empty justification is not valid.
 
-**Step 3 — record.** Set `DIFF_LINES`, `EXCLUDED_LINES`, `THRESHOLD`, `RESULT` (`OK`, `OVERRIDDEN` or `OVER`) and `SPLIT_PROPOSAL` from the steps above, then post one `<!-- FORGE:DIFF_SIZE -->` comment, idempotently: find the latest trusted comment starting with the marker and edit it, otherwise create it (on resume never stack duplicates; readers use the latest trusted one):
+**Step 3 — record.** Set `DIFF_LINES`, `EXCLUDED_LINES`, `THRESHOLD`, `RESULT` (`OK`, `OVERRIDDEN`, `COHESIVE` or `OVER`), `SPLIT_PROPOSAL` and `COHESION_NOTE` (set only for `COHESIVE`) from the steps above, then post one `<!-- FORGE:DIFF_SIZE -->` comment, idempotently: find the latest trusted comment starting with the marker and edit it, otherwise create it (on resume never stack duplicates; readers use the latest trusted one):
 
 ```bash
 BODY="<!-- FORGE:DIFF_SIZE -->
@@ -662,12 +662,14 @@ diff_lines: ${DIFF_LINES}
 excluded_lines: ${EXCLUDED_LINES}
 threshold: ${THRESHOLD}
 result: ${RESULT}
-${SPLIT_PROPOSAL:-}"
+${ESTIMATE_LINE:-}${COHESION_NOTE:-}${SPLIT_PROPOSAL:-}"
 run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
 CID=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" --jq '[.[] | select(.body | startswith("<!-- FORGE:DIFF_SIZE")) | select((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or (.user.type == "Bot"))] | last | .id // ""' 2>/dev/null || true)
 if [ -n "$CID" ]; then run gh api "repos/{GH_REPO}/issues/comments/${CID}" -X PATCH -f body="$BODY" >/dev/null 2>&1 || run gh issue comment {NUMBER} {GH_FLAG} --body "$BODY"
 else run gh issue comment {NUMBER} {GH_FLAG} --body "$BODY"; fi
 ```
+
+For a sub-issue (see Step 4) record the estimate next to the actual: read `ESTIMATED_DIFF_LINES: N` from the issue body (written by `work-on:decompose` D3) and set `ESTIMATE_LINE` to `estimated_diff_lines: N` plus a newline; leave it empty when the body has no such line (a top-level issue, or one decomposed before this field existed). For `COHESIVE`, set `COHESION_NOTE` to the lines `cohesive_lines: {cohesive_lines} ({pct}% of {diff_lines}; new {new_lines}, test {test_lines})`, `review-note: over the gate but cohesive (new files plus tests dominate and diff is at most 1.5x threshold); reviewers: check the new module's boundary and that the tests exercise it` and `reason: sub-issue over threshold, no seam left to split`, each followed by a newline. A `COHESIVE` comment never contains a `### Split Proposal` heading (the engine routes only `OVER` plus that heading to decompose).
 
 **Step 4 — decide.**
 
@@ -675,10 +677,11 @@ else run gh issue comment {NUMBER} {GH_FLAG} --body "$BODY"; fi
 |-----------|--------|--------|
 | `over=false` | `OK` | Post/refresh `FORGE:DIFF_SIZE`, continue to B6 |
 | `over=true`, valid override | `OVERRIDDEN` | Post/refresh `FORGE:DIFF_SIZE` (quote the justification), continue to B6 |
-| `over=true`, no override, issue body has a `**Parent**: #N` line OR a trusted `FORGE:DECOMPOSED` comment exists | `OVER` | Decompose-loop guard: do NOT route to decompose. Post/refresh `FORGE:DIFF_SIZE`, then Blocked exit with blocker `diff-size-over-threshold: {diff_lines} > {threshold}; post a FORGE:SIZE_OVERRIDE with a justification to proceed` |
+| `over=true`, no override, issue body has a `**Parent**: #N` line OR a trusted `FORGE:DECOMPOSED` comment exists, AND `cohesive=true` | `COHESIVE` | Cohesive-overage path <!-- Added: forge#3790 -->: a sub-issue that is over the gate because one new module plus its tests dominate the diff (at least 70% of counted lines are new or test files, and `diff_lines` is at most `threshold` x 1.5, both computed by `diff-size.sh`) has no seam left to split and the loop guard would only strand it. Post/refresh `FORGE:DIFF_SIZE` with the cohesion note, do NOT add `needs-human`, continue to B6. Test lines are classified, never discounted. A `FORGE:SIZE_OVERRIDE` still takes precedence (`OVERRIDDEN`) |
+| `over=true`, no override, issue body has a `**Parent**: #N` line OR a trusted `FORGE:DECOMPOSED` comment exists (and not `cohesive=true`) | `OVER` | Decompose-loop guard: do NOT route to decompose. Post/refresh `FORGE:DIFF_SIZE`, then Blocked exit with blocker `diff-size-over-threshold: {diff_lines} > {threshold}; post a FORGE:SIZE_OVERRIDE with a justification to proceed` |
 | `over=true`, no override, otherwise | `OVER` | Put a `### Split Proposal` in the `FORGE:DIFF_SIZE` comment, then print `BUILD_RESULT: status: NEEDS_DECOMPOSE` (see below) |
 
-**`### Split Proposal`** (written into the `FORGE:DIFF_SIZE` comment): list the top files by changed lines from the `top=` output, then propose 2-4 sub-issues split along directory or phase seams, each independently buildable and no more than about half the threshold, in dependency order, one `- **{title}** — {files} — wip: {WIP_REF}@{WIP_SHA} (git checkout {WIP_SHA} -- {files})` line each (this is the plan `work-on:decompose` consumes in D0/D2). The `wip:` part comes from the persist step below; when persistence fell back to a patch file write `patch: {PATCH_PATH}` instead, and when both failed write `wip: unavailable`. Lines without the suffix stay valid.
+**`### Split Proposal`** (written into the `FORGE:DIFF_SIZE` comment): list the top files by changed lines from the `top=` output, then propose 2-4 sub-issues split along directory or phase seams, each independently buildable and at or under `0.8 x threshold` (code plus tests; a seam that can't fit says so explicitly), in dependency order, one `- **{title}** — {files} — wip: {WIP_REF}@{WIP_SHA} (git checkout {WIP_SHA} -- {files})` line each (this is the plan `work-on:decompose` consumes in D0/D2). The `wip:` part comes from the persist step below; when persistence fell back to a patch file write `patch: {PATCH_PATH}` instead, and when both failed write `wip: unavailable`. Lines without the suffix stay valid.
 
 **Persist the staged hunks** (before the `NEEDS_DECOMPOSE` exit; runs once the `FORGE:DIFF_SIZE` result is `OVER` and the decompose-loop guard did not fire) <!-- Added: forge#3573 -->: commit the staged index to a standalone commit object WITHOUT moving the build branch or the index, and push it to a dedicated ref named only from the issue number (never interpolate a title or file name into a ref). Re-running overwrites the same ref, so resume is idempotent. Never block `NEEDS_DECOMPOSE` on a persistence failure.
 
@@ -707,8 +710,8 @@ BUILD_RESULT:
   blocker: diff-size-over-threshold: {diff_lines} > {threshold}; split proposal posted in FORGE:DIFF_SIZE
 ```
 
-**Resume**: a re-invoked build re-enters here via the B0 size-gate resume branch (partial `FORGE:BUILDER` plus latest trusted `FORGE:DIFF_SIZE` `result: OVER` plus a staged diff in the kept worktree), so it does not re-run implement; this covers both exits that leave BUILDER incomplete, `NEEDS_DECOMPOSE` and the decompose-loop-guard Blocked exit. B5.5 re-measures: if still over with no override it re-pushes the same `forge/wip/{NUMBER}` ref (idempotent) and re-emits `NEEDS_DECOMPOSE` without a duplicate comment (the loop-guard case re-emits the same Blocked exit); when a valid `FORGE:SIZE_OVERRIDE` has appeared since, it continues via `OVERRIDDEN`.
-# MUST CONTINUE to Phase B6 — the size gate result is intermediate, NOT terminal (validation still required), except the NEEDS_DECOMPOSE and Blocked exits above.
+**Resume**: a re-invoked build re-enters here via the B0 size-gate resume branch (partial `FORGE:BUILDER` plus latest trusted `FORGE:DIFF_SIZE` `result: OVER` or `COHESIVE` plus a staged diff in the kept worktree), so it does not re-run implement; this covers the exits that leave BUILDER incomplete, `NEEDS_DECOMPOSE` and the decompose-loop-guard Blocked exit (a `COHESIVE` marker re-enters the same way after a crash and re-decides without a duplicate comment). B5.5 re-measures: if still over with no override it re-pushes the same `forge/wip/{NUMBER}` ref (idempotent) and re-emits `NEEDS_DECOMPOSE` without a duplicate comment (the loop-guard case re-emits the same Blocked exit); when a valid `FORGE:SIZE_OVERRIDE` has appeared since, it continues via `OVERRIDDEN`.
+# MUST CONTINUE to Phase B6 (also after `COHESIVE`) — the size gate result is intermediate, NOT terminal (validation still required), except the NEEDS_DECOMPOSE and Blocked exits above.
 
 ---
 
@@ -956,6 +959,7 @@ BUILD_RESULT:
 - `ALREADY_DONE` — B0 found `FORGE:BUILDER:COMPLETE`.
 - `INVESTIGATION_COMPLETE` — the implement child created the deliverable issues (B5); no review follows.
 - `NEEDS_DECOMPOSE` — B5.5 measured the staged diff over `build.diff_size.threshold` with no valid `FORGE:SIZE_OVERRIDE`; a split proposal is in `FORGE:DIFF_SIZE`. The router runs `work-on:decompose`. Not a failure: no `needs-human`.
+- `COHESIVE` is not a `BUILD_RESULT` status: B5.5 records `result: COHESIVE` in `FORGE:DIFF_SIZE` for an over-gate sub-issue dominated by one new module plus tests, then the build continues to B6 and ends `COMPLETE`.
 - `BLOCKED` — any guard or failure; `needs-human` is set and the blocker is posted.
 
 ---
