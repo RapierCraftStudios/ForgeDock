@@ -607,7 +607,7 @@ Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:implement", args="{NUMBER} --repo
 **After subcommand returns** (read its `IMPLEMENT_RESULT:` block):
 - `status: COMPLETE` → continue to B5.5
 - `status: ALREADY_DONE` → continue to B5.5 (size-check what's already there)
-- `status: INVESTIGATION_COMPLETE` → issues were created as deliverables and the original closed; print `BUILD_RESULT: status: INVESTIGATION_COMPLETE` (skip B5.5/B6/B6.5)
+- `status: INVESTIGATION_COMPLETE` → issues were created as deliverables and the original closed; verify a `<!-- FORGE:INVESTIGATION:DELIVERABLES -->` comment exists on the issue (the implement child posts it and removes `workflow:building`; if it is missing, post it listing the created issues and remove the label), then print `BUILD_RESULT: status: INVESTIGATION_COMPLETE` (skip B5.5/B6/B6.5). The engine keys off that marker, not the result text. <!-- Added: forge#3534 -->
 - `status: BLOCKED` → Blocked exit with the child's `blocker`
 - Skill not found → Blocked exit, blocker "skill not found: work-on:build:implement"
 - Returned running/backgrounded/empty (no `IMPLEMENT_RESULT:`) → do not end the turn to wait; re-read the `FORGE:BUILDER` comment and the worktree state; if `FORGE:BUILDER:COMPLETE` is present consume it, and if the worktree shows in-flight edits or a fresh commit treat the child as possibly live; before re-invoking, apply the bounded re-invoke rule (at most 2, then `child-stalled: implement`)

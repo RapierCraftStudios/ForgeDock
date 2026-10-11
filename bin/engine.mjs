@@ -6,7 +6,7 @@
 import { fileURLToPath } from "node:url";
 import { hostname as osHostname } from "node:os";
 import { appendEvent, readLog, deriveState, rewriteLog } from "./engine/runlog.mjs";
-import { pickPhase, TERMINAL_REASONS, issueSnapshot, postCycleMarker, nextCycleNumber } from "./engine/phases.mjs";
+import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postCycleMarker, nextCycleNumber } from "./engine/phases.mjs";
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { VALID_BACKENDS } from "./runner.mjs";
@@ -524,8 +524,13 @@ export async function runIssue(opts) {
         // Reuses the existing "invalid" terminal reason (TERMINAL_REASONS)
         // rather than inventing a new one; #2353 makes the same choice for
         // `close`'s own CLOSED-not-merged case.
-        const isDead = snap.labels.includes("workflow:invalid") ||
+        let isDead = snap.labels.includes("workflow:invalid") ||
           (snap.state === "CLOSED" && !snap.labels.includes("workflow:merged"));
+        // forge#3534: an investigation exit closes the issue itself without `workflow:merged`.
+        // With the trusted deliverables marker present, a CLOSED (not invalid) issue is not
+        // divergent: build.reconcile must run so the run reaches close --terminal-state investigation.
+        if (isDead && phase.id === "build" && snap.state === "CLOSED" && !snap.labels.includes("workflow:invalid") &&
+            await hasInvestigationExit(issue, io)) isDead = false;
         if (isDead) {
           const detail = `issue ${issue} is ${snap.state === "CLOSED" ? "closed" : "open"} ` +
             `with divergent state before phase ${phase.id} (labels: ${snap.labels.join(", ") || "none"})`;

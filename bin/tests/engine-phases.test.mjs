@@ -1391,3 +1391,85 @@ describe("close PHASE_COMPLETE outcome (forge#3545)", () => {
     assert.equal(closed.terminalReason, "merged");
   });
 });
+
+describe("build investigation exit (forge#3534)", () => {
+  const build = PHASES.find((p) => p.id === "build");
+  const review = PHASES.find((p) => p.id === "review");
+  const close = PHASES.find((p) => p.id === "close");
+  const st = { ...base, committed: ["investigate"], branch: null };
+  const world = (bodies, { ahead = "0" } = {}) => ({
+    gh: async (args) => (args[0] === "pr" ? "[]" : jsonLines(bodies.map((b) => trusted(b)))),
+    git: async () => ahead,
+  });
+  const marker = `<!-- ${PHASE_MARKERS.build.investigationMarker} -->\n## Investigation Deliverables\n\n- #11\n- #12`;
+  const partialBuilder = "<!-- FORGE:BUILDER -->\n## Implementation Complete\n\n**Branch**: `fix/x-42`";
+
+  it("marker present (no code, no COMPLETE) -> committed first attempt, terminalReason investigation", async () => {
+    const o = await build.detectOutcome(st, world([marker]));
+    assert.equal(o.status, "committed");
+    assert.equal(o.terminalReason, "investigation");
+    assert.equal(o.retryable, undefined);
+  });
+
+  it("real crash (no COMPLETE, no marker) still fails and stays retryable", async () => {
+    const o = await build.detectOutcome(st, world([partialBuilder]));
+    assert.equal(o.status, "failed");
+    assert.equal(o.retryable, undefined);
+  });
+
+  it("COMPLETE with ahead=0 and no marker keeps the non-retryable fixed point (forge#2176)", async () => {
+    const o = await build.detectOutcome(st, world([builderBody("fix/x-42")], { ahead: "0" }));
+    assert.equal(o.status, "failed");
+    assert.equal(o.retryable, false);
+  });
+
+  it("COMPLETE + commits ahead + marker takes the normal code path (no investigation reason)", async () => {
+    const o = await build.detectOutcome(st, world([builderBody("fix/x-42"), marker], { ahead: "2" }));
+    assert.equal(o.status, "committed");
+    assert.equal(o.terminalReason, undefined);
+  });
+
+  it("marker quoted inside another comment, or from an untrusted author, does not count", async () => {
+    const quoted = `<!-- FORGE:INVESTIGATOR -->\nquoting\n> <!-- ${PHASE_MARKERS.build.investigationMarker} -->`;
+    assert.equal((await build.detectOutcome(st, world([quoted]))).status, "failed");
+    const untrusted = trusted(marker, { assoc: "NONE", type: "User", login: "drive-by" });
+    const io = { gh: async (a) => (a[0] === "pr" ? "[]" : jsonLines([untrusted])), git: async () => "0" };
+    assert.equal((await build.detectOutcome(st, io)).status, "failed");
+  });
+
+  it("reconcile is satisfied with investigation reason when the marker exists", async () => {
+    const r = await build.reconcile(st, world([marker]));
+    assert.equal(r.satisfied, true);
+    assert.equal(r.terminalReason, "investigation");
+    assert.equal((await build.reconcile(st, world([partialBuilder]))).satisfied, false);
+  });
+
+  it("pickPhase skips review and picks close after an investigation build", () => {
+    const s = { ...base, committed: ["investigate", "build"], terminalReason: "investigation" };
+    assert.equal(review.entryCondition(s), false);
+    assert.equal(pickPhase(s).id, "close");
+    // normal build still goes to review
+    assert.equal(pickPhase({ ...s, terminalReason: null }).id, "review");
+  });
+
+  it("close.detectOutcome keeps the investigation reason for a CLOSED issue", async () => {
+    const io = { gh: async (a) => (a[0] === "issue" ? JSON.stringify({ state: "CLOSED", labels: [] }) : "[]"), git: async () => "0" };
+    const o = await close.detectOutcome({ ...base, terminalReason: "investigation" }, io);
+    assert.equal(o.status, "committed");
+    assert.equal(o.terminalReason, "investigation");
+    assert.equal((await close.detectOutcome(base, io)).terminalReason, "invalid");
+  });
+
+  it("close.reconcile on a CLOSED investigation issue needs the trajectory before it is satisfied", async () => {
+    const snap = JSON.stringify({ state: "CLOSED", labels: [] });
+    const io = (bodies) => ({ gh: async (a) => (a[0] === "issue" ? snap : jsonLines(bodies.map((b) => trusted(b)))), git: async () => "0" });
+    const s = { ...base, terminalReason: "investigation" };
+    assert.equal((await close.reconcile(s, io([marker]))).satisfied, false);
+    assert.equal((await close.reconcile(s, io(["<!-- FORGE:TRAJECTORY -->\nrow"]))).satisfied, true);
+  });
+
+  it("investigation is not a TERMINAL_REASON (run must reach close)", async () => {
+    const { TERMINAL_REASONS } = await import("../engine/phases.mjs");
+    assert.ok(!TERMINAL_REASONS.includes("investigation"));
+  });
+});
