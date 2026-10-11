@@ -196,6 +196,18 @@ function hasInvestigationMarker(comments) {
   const m = PHASE_MARKERS.build.investigationMarker;
   return hasMarker(comments, m, m);
 }
+/**
+ * forge#3534 (SEC-3716-1): does the issue carry a trusted current-cycle investigation exit marker?
+ * The implement child closes an investigation issue itself (CLOSED, no `workflow:merged`), so the
+ * engine's divergence guard must not read that as a dead issue before build.reconcile runs.
+ * Fail closed: any fetch error means "no marker" (the guard then behaves as before).
+ */
+export async function hasInvestigationExit(issue, io) {
+  try {
+    const { comments } = await issueMarkers(issue, io);
+    return hasInvestigationMarker(sliceToCurrentCycle(comments));
+  } catch { return false; }
+}
 /** close.md C2 PHASE_COMPLETE evidence in the current cycle (forge#3545). */
 function hasPhaseComplete(comments) {
   return hasMarker(comments, "FORGE:PHASE:COMPLETE", "FORGE:PHASE:COMPLETE");

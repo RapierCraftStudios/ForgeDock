@@ -3073,3 +3073,46 @@ describe("runIssue — forge#3574 stale lease / wait-lease / rate-limit resume",
     assert.equal(sleeps.length, 0);
   });
 });
+
+describe("runIssue — forge#3534: divergence guard exempts an investigation exit", () => {
+  const delivMarker = SEP + "<!-- FORGE:INVESTIGATION:DELIVERABLES -->\n## Investigation Deliverables\n\n- #11";
+  // Resume after the investigate phase committed (the investigation exit happened in a prior run).
+  const seed = () => {
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "context", outputs: {} });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "architect", outputs: {} });
+  };
+  const run = async (w, io, counts) => {
+    seed();
+    const script = {
+      "work-on/build": () => { throw new Error("build must not run: the marker satisfies reconcile"); },
+      "work-on/close": () => { w.markers += SEP + "<!-- FORGE:TRAJECTORY -->\n## Trajectory"; },
+    };
+    const runner = async ({ commandName }) => { counts[commandName] = (counts[commandName] || 0) + 1; script[commandName](); return { status: "complete" }; };
+    return runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 3 });
+  };
+
+  it("marker present + issue CLOSED (no workflow:merged): build committed as investigation, then close runs", async () => {
+    const { w, io } = fakeWorld();
+    w.markers += investigationComment("COMPLETE") + delivMarker;
+    w.issueState = "CLOSED";
+    const counts = {};
+    const res = await run(w, io, counts);
+    assert.equal(res.terminalReason, "investigation");
+    assert.equal(counts["work-on/build"] || 0, 0);
+    assert.equal(counts["work-on/close"], 1);
+    assert.deepEqual(deriveState(readLog(dir, 42)).committed, ["investigate", "context", "architect", "build", "close"]);
+  });
+
+  it("no marker + issue CLOSED still terminates invalid; workflow:invalid is never exempted", async () => {
+    for (const labels of [[], ["workflow:invalid"]]) {
+      const { w, io } = fakeWorld();
+      w.markers += investigationComment("COMPLETE") + (labels.length ? delivMarker : "");
+      w.issueState = "CLOSED"; w.labels = labels;
+      const res = await run(w, io, {});
+      assert.equal(res.terminalReason, "invalid");
+      rmSync(dir, { recursive: true, force: true }); dir = mkdtempSync(join(tmpdir(), "fd-engine-"));
+    }
+  });
+});
