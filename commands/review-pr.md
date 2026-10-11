@@ -2304,7 +2304,7 @@ fi
 #                   ${MERGE_ISSUE:+--fixes-issue "$MERGE_ISSUE"} ${FINDING_FIX_EFFICACY:+--fix-efficacy "$FINDING_FIX_EFFICACY"} \
 #                   ${PRIOR_FILE:+--prior-findings "$PRIOR_FILE" --title "$FINDING_TITLE" ${DIFF_MAP_FILE:+--diff-map "$DIFF_MAP_FILE"}} \
 #                   ${FINDING_LINE_START:+--line-start "$FINDING_LINE_START" --line-end "${FINDING_LINE_END:-$FINDING_LINE_START}"})
-#   FINDING_FIX_EFFICACY = `fails` or `regresses` from the finding body's `**Fix efficacy**:` line (or a `FIX_EFFICACY:` token); empty when absent.
+#   FINDING_FIX_EFFICACY = `fails` or `regresses` from the finding body's `**Fix efficacy**:` line (or a line-anchored `FIX_EFFICACY:` token; opt-in on the tag, never on keywords); empty when absent.
 #     `--fixes-issue` is always passed when MERGE_ISSUE is set (alias of `--merge-issue`, so the contract-scope gate is unchanged).
 #     `ISSUE fix-efficacy-fails|regresses` files like any ISSUE; the reason lets later audits count exemptions.
 #   case "$DISPOSITION" in ISSUE*) ;; NOTE*) ;; INPR_FIX*) ;; esac   # first word is the class, the rest is the reason

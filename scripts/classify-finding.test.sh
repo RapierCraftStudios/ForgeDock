@@ -75,12 +75,13 @@ expect NOTE  "SEC-1 untagged stays damped"            -- "${LN[@]}"
 expect ISSUE "SEC-1 --fix-efficacy fails"             -- "${LN[@]}" --fix-efficacy fails --fixes-issue 3621
 expect ISSUE "SEC-1 --fix-efficacy regresses"         -- "${LN[@]}" --fix-efficacy regresses
 expect ISSUE "SEC-1 POSSIBLE with fix-efficacy"       -- --severity MEDIUM --confidence POSSIBLE --lineage review-finding --text "x" --fix-efficacy fails
-expect ISSUE "text tag FIX_EFFICACY fallback"         -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "helper missing. FIX_EFFICACY: fails"
+expect ISSUE "text tag FIX_EFFICACY fallback"         -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "$(printf 'helper missing.\nFIX_EFFICACY: fails')"
 expect ISSUE "bold Fix efficacy line fallback"        -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "**Fix efficacy**: regresses"
-expect ISSUE "#N + phrase fallback"                   -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "this still fails to fix #3621 in a fresh shell" --fixes-issue 3621
-expect NOTE  "#N without phrase stays NOTE"           -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "related to #3621 wording" --fixes-issue 3621
-expect NOTE  "#N prefix (#36210) does not match"      -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "#36210 is not fixed" --fixes-issue 3621
-expect NOTE  "phrase without --fixes-issue stays NOTE" -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "#3621 is not fixed"
+expect NOTE  "mid-line FIX_EFFICACY token stays NOTE"  -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "helper missing. FIX_EFFICACY: fails"
+expect NOTE  "#N + still-fails phrase no longer opts in" -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "this still fails to fix #3621 in a fresh shell" --fixes-issue 3621
+expect NOTE  "regression test for #N stays NOTE"       -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "Missing regression test for #3621" --fixes-issue 3621
+expect NOTE  "no regression #N stays NOTE"             -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "no regression #3621, but wording is off" --fixes-issue 3621
+expect NOTE  "reintroduce-style phrase stays NOTE"     -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "could reintroduce #3621 naming" --fixes-issue 3621
 expect NOTE  "LOW + fix-efficacy stays NOTE"          -- --severity LOW --confidence CONFIRMED --lineage review-finding --text "x" --fix-efficacy fails
 expect ISSUE "non-lineage MEDIUM POSSIBLE + efficacy" -- --severity MEDIUM --confidence POSSIBLE --text "x" --fix-efficacy fails
 expect ISSUE "HIGH unchanged"                         -- --severity HIGH --confidence LIKELY --lineage review-finding --fix-efficacy fails

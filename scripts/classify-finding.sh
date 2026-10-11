@@ -26,9 +26,8 @@
 #                 that the PR re-introduces its defect (`regresses`). A MEDIUM finding so marked is
 #                 `ISSUE fix-efficacy-<value>` under any lineage and confidence (the cascade damper must
 #                 not merge a known-broken fix). Without the flag the tag is read from `--text`
-#                 (`FIX_EFFICACY: fails|regresses` or `**Fix efficacy**: fails|regresses`); with
-#                 `--fixes-issue`, text citing exactly `#<N>` with an unfixed/re-introduced phrase also
-#                 counts. Opt-in only: never keyword-based. Runs after the INPR_FIX and re-flag gates and
+#                 (a line consisting only of `FIX_EFFICACY: fails|regresses` or `**Fix efficacy**: fails|regresses`;
+#                 a mid-sentence mention never counts). Opt-in only: never keyword-based. Runs after the INPR_FIX and re-flag gates and
 #                 before the contract-scope and lineage gates; LOW stays NOTE; HIGH/CRITICAL unchanged.
 #   --fixes-issue <N>  The PR's linked issue; alias of `--merge-issue` (same variable).
 #   --text/--text-file  Finding title + body + affected file paths, used for the
@@ -281,21 +280,12 @@ fi
 
 # Fix-efficacy exemption: a MEDIUM finding saying the PR's linked issue is not fixed, or that the PR
 # re-introduces its defect, is never damped (any lineage, any confidence, no contract demotion).
-# Opt-in on an explicit flag/tag, or on text citing exactly #MERGE_ISSUE with an unfixed phrase.
+# Opt-in on an explicit flag or a line-anchored tag only; never keyword-based (a bare "regression test for #N" must not match).
 if [ "$SEV" = "MEDIUM" ]; then
   if [ -z "$FIX_EFF" ]; then
     FIX_EFF=$(printf '%s' "$TEXT" | tr '[:upper:]' '[:lower:]' \
-      | grep -Eo '(fix_efficacy:|\*\*fix efficacy\*\*:)[[:space:]]*(fails|regresses)' | head -n 1 \
+      | grep -Eo '^[[:space:]]*(fix_efficacy:|\*\*fix efficacy\*\*:)[[:space:]]*(fails|regresses)[[:space:]]*$' | head -n 1 \
       | grep -Eo '(fails|regresses)$') || FIX_EFF=""
-  fi
-  if [ -z "$FIX_EFF" ] && [ -n "$MERGE_ISSUE" ]; then
-    case "$MERGE_ISSUE" in *[!0-9]*) ;; *)
-      _lt=$(printf '%s' "$TEXT" | tr '[:upper:]' '[:lower:]')
-      if printf '%s' "$_lt" | grep -Eq "#${MERGE_ISSUE}([^0-9]|$)" \
-         && printf '%s' "$_lt" | grep -Eq 'still fails|does not fix|doesn.t fix|not fixed|not fully fixed|re-?introduc|regress'; then
-        FIX_EFF="fails"
-      fi ;;
-    esac
   fi
   if [ -n "$FIX_EFF" ]; then echo "ISSUE fix-efficacy-$FIX_EFF"; exit 0; fi
 fi
