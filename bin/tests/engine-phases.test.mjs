@@ -907,6 +907,17 @@ describe("pickPhase", () => {
       }
     });
 
+    it("forge#3592: a HIGH in-PR work order (NEXT/remediate/inpr-fix) hands off and pickPhase then reaches remediate", async () => {
+      const io = ioFor({ ...openUnlabelled, issueLabels: ["workflow:remediating"] });
+      const outcome = await review.detectOutcome(reviewState, io,
+        rr("  status: NEXT\n  next: remediate\n  remediation: inpr-fix\n  pr_number: 7"));
+      assert.equal(outcome.status, "blocked");
+      assert.equal(outcome.handoff, true);
+      assert.equal(outcome.outputs.remediation, "inpr-fix");
+      const st = { ...base, committed: ["investigate", "build", "review"], pr: 7, terminalReason: "needs-human", remediationKind: "inpr-fix" };
+      assert.equal(pickPhase(st).id, "remediate");
+    });
+
     it("forge#3521: REVIEW_RESULT next: remediate with no labels -> blocked with outputs.pr", async () => {
       const io = ioFor({ ...openUnlabelled, issueLabels: [] });
       const outcome = await review.detectOutcome(reviewState, io,

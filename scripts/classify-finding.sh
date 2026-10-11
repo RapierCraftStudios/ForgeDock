@@ -165,8 +165,22 @@ upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]'; }
 SEV=$(upper "$SEVERITY")
 CONF=$(upper "$CONFIDENCE")
 
+# In-PR fix gate predicate (#3387, widened to HIGH/CRITICAL in #3592): CONFIRMED, linked to a
+# --inpr-diff file list, and the finding's file is one of those files. Fails toward ISSUE.
+inpr_match() {
+  [ -n "$INPR_DIFF" ] && [ -n "$FINDING_FILE" ] && [ "$CONF" = "CONFIRMED" ] || return 1
+  _path="${FINDING_FILE#./}"; _path="${_path%%:*}"
+  grep -Fxq -- "$_path" "$INPR_DIFF"
+}
+
 case "$SEV" in
-  CRITICAL|HIGH) echo "ISSUE severity-$SEV"; exit 0 ;;
+  CRITICAL|HIGH)
+    # HIGH/CRITICAL skip the re-flag and safety gates below, so the in-PR check runs here, before
+    # the exit. Everything else stays ISSUE: a HIGH is never demoted to NOTE.
+    if inpr_match; then
+      echo "INPR_FIX $(printf '%s' "$SEV" | tr '[:upper:]' '[:lower:]')-confirmed-in-diff"; exit 0
+    fi
+    echo "ISSUE severity-$SEV"; exit 0 ;;
   MEDIUM|LOW) ;;
   *) echo "ISSUE unparseable-severity"; exit 0 ;;
 esac
@@ -241,12 +255,10 @@ fi
 
 # In-PR fix gate (#3387, narrowed). MEDIUM CONFIRMED is an ISSUE under every rule below
 # (lineage included), so checking here changes only where it is handled, never whether.
-if [ -n "$INPR_DIFF" ] && [ -n "$FINDING_FILE" ] && [ "$SEV" = "MEDIUM" ] && [ "$CONF" = "CONFIRMED" ]; then
-  _path="${FINDING_FILE#./}"; _path="${_path%%:*}"
-  if grep -Fxq -- "$_path" "$INPR_DIFF"; then
-    echo "INPR_FIX medium-confirmed-in-diff"
-    exit 0
-  fi
+# HIGH/CRITICAL were handled in the severity case above.
+if [ "$SEV" = "MEDIUM" ] && inpr_match; then
+  echo "INPR_FIX medium-confirmed-in-diff"
+  exit 0
 fi
 
 # Safety exemption. Keywords match whole words, where `_`, `-`, `/` and other

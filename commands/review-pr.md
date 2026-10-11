@@ -2369,24 +2369,25 @@ gh pr comment {PR_NUMBER} -R {GH_REPO} --body "<!-- FORGE:NOTE_DISPOSITION: note
 $(cat "$NOTE_LIST_FILE" 2>/dev/null)" # allowlist:check-command-side-effects
 ```
 
-### 6B.6: In-PR fix gate for CONFIRMED MEDIUM findings in the PR's own files (#3387, narrowed)
+### 6B.6: In-PR fix gate for CONFIRMED MEDIUM/HIGH/CRITICAL findings in the PR's own files (#3387, #3592)
 
-A CONFIRMED MEDIUM defect in a file this PR changed is cheaper to fix before merge than through a separate `/work-on` cycle, and merging it knowingly ships the defect. A finding classified `INPR_FIX` is therefore fixed on the PR instead of filed. The gate is deliberately narrow:
+A CONFIRMED defect in a file this PR changed is cheaper to fix before merge than through a separate `/work-on` cycle, and merging it knowingly ships the defect. A finding classified `INPR_FIX` is therefore fixed on the PR instead of filed. The gate is deliberately narrow:
 
-- **Only `MEDIUM` + `CONFIRMED`.** LIKELY and POSSIBLE are not gated. HIGH/CRITICAL already withhold APPROVED through §7B.
+- **Only `MEDIUM`/`HIGH`/`CRITICAL` + `CONFIRMED`.** LIKELY and POSSIBLE are not gated. HIGH/CRITICAL also withhold APPROVED through §7B and are never waived: a failed round ends at `needs-human` with the PR unmerged.
 - **Only files in the PR diff** (`gh pr diff --name-only`). Pre-existing defects elsewhere are filed as before.
 - **One fix round per PR.** Once any `FORGE:INPR_FIX*` marker is on the PR, later reviews classify normally: anything still present is filed as an issue and the PR merges.
-- **Never stops at `needs-human` because of this gate.** If the fix round fails, `/work-on` waives the gate for the current head and the findings are filed (work-on/review.md R4).
+- **Never stops at `needs-human` because of this gate for MEDIUM.** If the round fails, `/work-on` waives the gate for the current head and files the findings (work-on/review.md R4). `max_severity` HIGH/CRITICAL is not waived.
 - **Auto-merge reviews with `--issue` only.** A standalone review without `--auto-merge` files findings as before.
 
 When at least one finding is `INPR_FIX`, do NOT file those findings in 6C. Post the request on the PR as one comment, after the §6B.5 disposition marker. Phase 8 then refuses to merge this head and returns `REVIEW_RESULT: status: BLOCKED`, blocker `in-pr fix required`:
 
 ```bash
 INPR_HEAD=$(gh pr view {PR_NUMBER} -R {GH_REPO} --json headRefOid --jq .headRefOid)
+# INPR_MAX_SEV: highest severity among the INPR_FIX reasons (critical > high > medium), uppercased.
 # INPR_FIX_IDS: comma-separated finding ids classified INPR_FIX. INPR_FIX_LIST_FILE: mktemp file, one line per finding:
 # id, file:line, one-sentence problem, suggested fix — this is the remediation work order.
-gh pr comment {PR_NUMBER} -R {GH_REPO} --body "<!-- FORGE:INPR_FIX: round=1 head=${INPR_HEAD} findings=${INPR_FIX_IDS} -->
-In-PR fix requested before merge (CONFIRMED MEDIUM findings in files this PR changed). One fix round; anything still present on the next review is filed as an issue.
+gh pr comment {PR_NUMBER} -R {GH_REPO} --body "<!-- FORGE:INPR_FIX: round=1 head=${INPR_HEAD} max_severity=${INPR_MAX_SEV:-MEDIUM} findings=${INPR_FIX_IDS} -->
+In-PR fix requested before merge (CONFIRMED findings in files this PR changed). One fix round; anything still present on the next review is filed as an issue.
 $(cat "$INPR_FIX_LIST_FILE" 2>/dev/null)" # allowlist:check-command-side-effects
 ```
 
@@ -3036,7 +3037,7 @@ fi
 # Latest trusted request wins (bodies are JSON strings, one per line).
 INPR_REQ=$(printf '%s\n' "$INPR_BODIES" | tail -n 1 | jq -r 'capture("head=(?<h>[0-9a-f]{7,40})").h // ""' 2>/dev/null || echo "")
 if [ -n "$INPR_REQ" ] && [ "$INPR_REQ" = "$PR_HEAD_NOW" ] && [ "${INPR_WAIVED:-0}" -eq 0 ]; then
-  echo "IN-PR FIX: CONFIRMED MEDIUM findings in this PR's files were requested at head ${PR_HEAD_NOW} — fix them before merging (§6B.6)" >&2
+  echo "IN-PR FIX: CONFIRMED findings in this PR's files were requested at head ${PR_HEAD_NOW} — fix them before merging (§6B.6)" >&2
   # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "in-pr fix required". Not needs-human: /work-on R4 runs one fix round.
   exit 1
 fi

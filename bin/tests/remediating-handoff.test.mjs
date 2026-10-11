@@ -56,6 +56,17 @@ describe("forge#3541 review.md R4 handoffs", () => {
     assert.ok(!/--add-label "needs-human"/.test(blk));
   });
 
+  it("forge#3592: inpr-fix covers HIGH/CRITICAL, records max_severity, and never waives them", () => {
+    const b = paths["inpr-fix"];
+    assert.match(b, /MEDIUM\/HIGH\/CRITICAL/);
+    assert.match(b, /max_severity=/);
+    assert.match(b, /HIGH\/CRITICAL are never waived/);
+    const used = b.slice(b.indexOf("**Bound already used**"));
+    assert.match(used, /label the issue `needs-human`, leave the PR unmerged/);
+    assert.ok(!/add `needs-human`/.test(boundUnused(b)));
+    assert.match(read("commands/review-pr.md"), /FORGE:INPR_FIX: round=1 head=\$\{INPR_HEAD\} max_severity=/);
+  });
+
   it("exhausted bounds (genuine human gate) still land at needs-human", () => {
     assert.match(paths["ci-gate"], /remove `workflow:remediating`, label the issue `needs-human`/);
     assert.match(paths["base-sync"], /label the issue `needs-human`/);
