@@ -7,6 +7,8 @@
 # Env:   PR_LABELS  comma-separated PR label names (untrusted; grep-matched only)
 #        PR_HEAD_REF / PR_BASE_REF  PR head and base branch names; staging -> main
 #                   (a release PR) is skipped: cumulative growth is not judged here
+#        PR_SAME_REPO  must be "true" for the release skip (a fork branch named
+#                   staging must not bypass the budget)
 #        GITHUB_STEP_SUMMARY  summary file (stdout when unset)
 # Exit:  0 pass/exempt, 1 budget violation, 2 usage/base-ref error (fail closed)
 #
@@ -35,7 +37,7 @@ if ! git rev-parse --verify -q "$BASE^{commit}" >/dev/null; then
 fi
 
 # --- release PR skip (staging -> main) ---------------------------------------
-if [ "${PR_HEAD_REF:-}" = "staging" ] && [ "${PR_BASE_REF:-}" = "main" ]; then
+if [ "${PR_HEAD_REF:-}" = "staging" ] && [ "${PR_BASE_REF:-}" = "main" ] && [ "${PR_SAME_REPO:-}" = "true" ]; then
   out "## Spec-size budget"
   out ""
   out "Result: SKIPPED (release PR staging -> main; growth was checked per PR)"
