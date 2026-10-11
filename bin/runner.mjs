@@ -52,8 +52,20 @@ import { join, dirname, basename, relative, isAbsolute, extname, win32 as win32P
 import os from "os";
 import { execSync, spawnSync } from "child_process";
 import { createRequire } from "module";
+import { fileURLToPath } from "url";
 import { parseForgeYaml, resolveModelAlias } from "./forge-utils.mjs";
 import { DEFAULT_SPAWN_MAX_BUFFER_BYTES } from "./cli-spawn-shared.mjs";
+
+// Package root (the directory that holds bin/, commands/ and scripts/). Exported to every
+// phase child as FORGEDOCK_HOME so spec fences can source scripts/lib/*.sh without a
+// cache scan. A value the operator already set is never overridden.
+const FORGEDOCK_PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+/** Returns `env` with FORGEDOCK_HOME defaulted to the package root (never overriding a set value). */
+export function withForgedockHome(env) {
+  if (!env.FORGEDOCK_HOME) env.FORGEDOCK_HOME = FORGEDOCK_PACKAGE_ROOT;
+  return env;
+}
 
 const DEFAULT_MODEL = "claude-sonnet-5";
 const DEFAULT_MAX_ITERATIONS = 50;
@@ -1391,7 +1403,7 @@ export function runCliBackend({
     // Mirrors the existing scrub in the `run_bash` tool handler below.
     // GH_TOKEN/GITHUB_TOKEN and all other env vars are intentionally left
     // intact — only the Anthropic key is removed.
-    const childEnv = { ...process.env };
+    const childEnv = withForgedockHome({ ...process.env });
     delete childEnv.ANTHROPIC_API_KEY;
 
     // No `shell` option (defaults to false): argv is passed as discrete,
@@ -2182,7 +2194,7 @@ export function getToolHandlers(cwd) {
       // into the model loop, so a prompt-injection payload could otherwise issue
       // a run_bash command that exfiltrates the key. gh/git auth tokens
       // (GH_TOKEN/GITHUB_TOKEN) are intentionally left intact.
-      const childEnv = { ...process.env };
+      const childEnv = withForgedockHome({ ...process.env });
       delete childEnv.ANTHROPIC_API_KEY;
       // Run under bash when available so bash-style commands the model emits
       // (heredocs, scripts/*.sh, single-quote semantics) behave consistently
