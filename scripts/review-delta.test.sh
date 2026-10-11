@@ -117,7 +117,7 @@ crafted_merge a.txt
 expect "crafted merge reverting a file mode" "DELTA $R..$HEAD" 1
 
 # 7. spec / config changes in the delta -> FULL
-for f in forge.yaml commands/review-pr.md commands/review-pr-agents.md commands/review-pr-agents/x.md scripts/review-delta.sh scripts/trusted-comments.sh; do
+for f in forge.yaml commands/review-pr.md commands/review-pr-agents.md commands/review-pr-agents/x.md scripts/review-delta.sh scripts/trusted-comments.sh scripts/verify-phase-trail.sh docs/spec/review-protocol.md scripts/classify-finding.sh; do
   mkrepo; R=$(sha HEAD); panel "$R"; commit "$f" "changed" "touch $f"; HEAD=$(sha HEAD)
   expect "$f changed in delta" "FULL" 1
 done

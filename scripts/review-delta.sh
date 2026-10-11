@@ -33,7 +33,8 @@
 #     **Reviewed commit** is the SHA and whose **Agents** count equals the distinct domains that posted). The
 #     FORGE:REVIEW_ROUTE sha= value is 7 chars and is never a checkpoint. A trusted review-panel-integrity gate
 #     failure / REVIEW_DEGRADED / REVIEW_BLOCKED marker posted after a SHA's first agent body disqualifies it.
-#   - FULL also when forge.yaml, the review specs, this script or the trust script changed in reviewed..head.
+#   - FULL also when forge.yaml, the review specs, this script, the trust script, the phase-trail gate, the review
+#     protocol doc or the finding classifier changed in reviewed..head.
 #   - BASE_SYNC_ONLY also needs the per-path diff shape (modes, status, binary blob ids) of both 3-dot diffs
 #     to match: the +/- line comparison cannot see binary content or mode changes.
 #
@@ -147,7 +148,7 @@ NAMES=$(G diff --name-only --no-renames "$REVIEWED" "$HEAD_SHA" 2>/dev/null); rc
 [ "$rc" -eq 0 ] || full
 while IFS= read -r f; do
   case "$f" in
-    forge.yaml|commands/review-pr*.md|commands/review-pr-agents/*|scripts/review-delta.sh|scripts/trusted-comments.sh) full ;;
+    forge.yaml|commands/review-pr*.md|commands/review-pr-agents/*|scripts/review-delta.sh|scripts/trusted-comments.sh|scripts/verify-phase-trail.sh|docs/spec/review-protocol.md|scripts/classify-finding.sh) full ;;
   esac
 done <<< "$NAMES"
 
