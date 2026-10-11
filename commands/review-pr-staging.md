@@ -203,7 +203,7 @@ _SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"
 if [ -n "$PR_NUMBER" ]; then printf '%s\n' "$PR_NUMBER" > "$_SD/staging_pr_number"; else rm -f "$_SD/staging_pr_number"; fi
 ```
 
-`$PR_NUMBER` is now set for all downstream phases that conditionally post gate comments to the PR. It is also persisted to `$_SD/staging_pr_number`, because every Bash call is a fresh shell. Fences that consume cross-fence state (`PR_NUMBER`, `ALL_PR_NUMBERS`, `GH_REPO`, branch names) begin with the `# FENCE_BOOTSTRAP` block, which re-derives it; the 0B.1 and 7B.5 fences carry it today. Other fences (1E, 2-6.75, 7E, 7F) still rely on earlier-fence state and are tracked separately (#3681).
+`$PR_NUMBER` is now set for all downstream phases that conditionally post gate comments to the PR. It is also persisted to `$_SD/staging_pr_number`, because every Bash call is a fresh shell. Every fence that consumes cross-fence state (`PR_NUMBER`, `ALL_PR_NUMBERS`, `GH_REPO`, branch names) begins with the `# FENCE_BOOTSTRAP` block, which re-derives it; `scripts/review-pr-staging-scope.test.sh` fails if a consuming fence omits it. The Phase 6.5 gate result and the Phase 6.75 launched-agent list are persisted to `$_SD` by their producers and reloaded (validated) by their consumers.
 
 ---
 
@@ -552,12 +552,30 @@ fi
 
 ### 1D: Secrets Scan
 ```bash
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
 git diff origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH | grep -iE "(api[_-]?key|secret|password|token|credential)" | grep -vE "(#|//|\.example|placeholder)" | head -20
 ```
 
 ### 1E: CI Status Gate (BLOCKING)
 ```bash
-gh pr checks ${PR_NUMBER} 2>&1
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+gh pr checks "$PR_NUMBER" -R "$GH_REPO" 2>&1
 ```
 Any CI failure → BLOCK DEPLOY (unless autofixed in Phase 1F).
 
@@ -580,6 +598,20 @@ For fixable failures: checkout staging, apply fix, verify locally, commit as `fi
 
 ## Phase 2: Material Change Analysis
 
+**Reset launched-agent state (once, before any Phase 2-6 agent launches)**: the list is PR-keyed and append-only, so a prior run or `--retry` would otherwise leave stale domains behind.
+```bash
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] && : > "$_SD/${PR_NUMBER}_launched_review_agents"
+```
+
 **Review scope (applies to Phases 2-6, from Phase 0B.1)**: when `SCOPE_MODE=scoped`, pass every agent `REVIEWED_COMMITS`, `UNREVIEWED_COMMITS`, `CROSS_PR_FILES` and `DEPLOY_WIRING_FILES` in its prompt. Line-level review is limited to `CROSS_PR_FILES`, the diffs of `UNREVIEWED_COMMITS`, and a runtime/deploy readiness checklist (required secrets and env vars present and documented, migration ordering and collisions, deploy wiring and workflow sibling drift). Agents report every finding they see, with its severity and file, whatever file or commit it lives in; a defect that lives only in an already-reviewed PR's files was visible to that PR's own review, so the 7B scope filter may demote it, but only when it is `MEDIUM`, `LOW` or `INFO`: a `CRITICAL` or `HIGH` finding is always reported and kept. Safety-domain agents (Security, Auth, Billing, Concurrency, Database) still read the whole diff of any in-scope file, not just the changed hunks. When `SCOPE_MODE=full`, review the full bundle diff. Report the scope used in the agent comment. <!-- Added: forge#3451 -->
 
 Launch agent (model: {SUBAGENT_MODEL}) to analyze all commits since last deploy. Categorize as: NEW FEATURE, ENHANCEMENT, BUG FIX, REFACTOR, SECURITY, PERFORMANCE, INFRASTRUCTURE, DEPENDENCY. Separate user-facing vs internal. Document breaking changes and required pre-deploy actions.
@@ -588,7 +620,16 @@ Substitute `[REVIEW_SHA]` in the template below with the literal full head SHA (
 
 **MANDATORY — post findings as PR comment**: Before its first post attempt, the agent MUST persist the final report to a uniquely named durable file, then post it with `--body-file`. It MUST also return verdict, finding count, and one line per finding to the orchestrator whether the post succeeds or fails; on failure, return the file path and stop without retrying. After completing analysis, the agent posts its full report directly to the PR:
 ```bash
-gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:material-change -->
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+gh pr comment "$PR_NUMBER" -R "$GH_REPO" --body "<!-- FORGE:REVIEW-AGENT:material-change -->
 Reviewed-SHA: [REVIEW_SHA]
 ## Material Change Analysis
 
@@ -616,7 +657,16 @@ Each reads the service diff, hunts for bugs, traces context across imports, pers
 
 **MANDATORY — each Bug Hunter agent MUST post its findings directly to the PR immediately upon completion** (do not wait for the orchestrator to batch-post):
 ```bash
-gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:bug-hunter-{service} -->
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+gh pr comment "$PR_NUMBER" -R "$GH_REPO" --body "<!-- FORGE:REVIEW-AGENT:bug-hunter-{service} -->
 Reviewed-SHA: [REVIEW_SHA]
 ## Bug Hunter Review — {service}
 
@@ -636,7 +686,16 @@ Agent hunts for: dead code, duplicate logic, complexity (>50 line functions), na
 
 **MANDATORY — post findings as PR comment**: Before its first post attempt, the agent MUST persist the final report to a uniquely named durable file, then post it with `--body-file`. It MUST also return verdict, finding count, and one line per finding to the orchestrator whether the post succeeds or fails; on failure, return the file path and stop without retrying. After completing analysis, the agent posts its full report directly to the PR:
 ```bash
-gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:code-quality -->
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+gh pr comment "$PR_NUMBER" -R "$GH_REPO" --body "<!-- FORGE:REVIEW-AGENT:code-quality -->
 Reviewed-SHA: [REVIEW_SHA]
 ## Code Quality Review
 
@@ -700,6 +759,15 @@ Launch domain-specific agents based on which domains have changes. Substitute PR
 
 **Per-domain diff slices (MANDATORY)**: `protocols.md` tells agents to use a pre-supplied `[DOMAIN_DIFF_SLICE]` and not to re-fetch the diff, so staging MUST supply one — the staging→main diff is the largest diff in the pipeline. Slice the uncapped diff first, then cap each slice at ~100K chars with `truncate_slice` (same order as `commands/review-pr.md` "Domain Diff Slicing"). Compute the slices once, then substitute `[DOMAIN_DIFF_SLICE]` in each persona's prompt before dispatch:
 ```bash
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
 # Fetched once, UNCAPPED; agents do NOT re-fetch it. Never cap here: slicing must see the whole bundle.
 FULL_DIFF=$(git diff "origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH")
 
@@ -786,7 +854,16 @@ For each dispatched persona, substitute `[DOMAIN_DIFF_SLICE]` → its matching `
 
 **MANDATORY — each domain agent MUST persist its finalized body before posting its findings directly to the PR immediately upon completion** (not batched by the orchestrator). It MUST return verdict, finding count, and one line per finding to the orchestrator independently of delivery; if posting fails, return the durable file path and stop without retrying:
 ```bash
-gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:{domain} -->
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+gh pr comment "$PR_NUMBER" -R "$GH_REPO" --body "<!-- FORGE:REVIEW-AGENT:{domain} -->
 Reviewed-SHA: [REVIEW_SHA]
 ## {Domain} Review
 
@@ -806,7 +883,16 @@ Agent maps dependencies, assesses integration points (service boundaries, env va
 
 **MANDATORY — post findings as PR comment**: Before its first post attempt, the agent MUST persist the final report to a uniquely named durable file, then post it with `--body-file`. It MUST also return verdict, finding count, and one line per finding to the orchestrator whether the post succeeds or fails; on failure, return the file path and stop without retrying. After completing analysis, the agent posts its full report directly to the PR:
 ```bash
-gh pr comment ${PR_NUMBER} -R ${GH_REPO} --body "<!-- FORGE:REVIEW-AGENT:regression-risk -->
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+gh pr comment "$PR_NUMBER" -R "$GH_REPO" --body "<!-- FORGE:REVIEW-AGENT:regression-risk -->
 Reviewed-SHA: [REVIEW_SHA]
 ## Regression Risk Assessment
 
@@ -833,10 +919,24 @@ Reviewed-SHA: [REVIEW_SHA]
 **Posture**: Controlled by `verification.test_gate.posture` in `forge.yaml` (resolved in Config Resolution as `$GATE_POSTURE`). Default: `blocking`. Set to `advisory` to surface failures without preventing deploy. <!-- Added: forge#906 -->
 
 ```bash
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+GH_FLAG="-R $GH_REPO"
+GATE_POSTURE=$(yq '.verification.test_gate.posture // "blocking"' "$CONFIG_FILE" 2>/dev/null || echo "blocking")
+OVERRIDE_PHRASE=$(yq '.verification.test_gate.override_phrase // "OVERRIDE: shipping with test failures —"' "$CONFIG_FILE" 2>/dev/null || echo "OVERRIDE: shipping with test failures —")
 echo "=== Phase 6.5: Runtime Test Gate ==="
 echo "Bundle PRs: $(echo $ALL_PR_NUMBERS | tr '\n' ' ')"
 echo "Posture: ${GATE_POSTURE}"
 
+# Reset any stale gate result from a prior run before the Skill call (files are PR-keyed)
+rm -f "$_SD/${PR_NUMBER}_test_gate_verdict" "$_SD/${PR_NUMBER}_test_gate_reason"
 # Initialize test-gate verdict (default SKIP — safe if Phase 6.5 is bypassed)
 TEST_GATE_VERDICT="SKIP"
 TEST_GATE_REASON="Phase 6.5 not yet run"
@@ -849,11 +949,28 @@ GATE_OUTPUT=$(Skill("{FORGE_SKILL_PREFIX}test-gate", "--prs \"$(echo $ALL_PR_NUM
 TEST_GATE_VERDICT=$(echo "$GATE_OUTPUT" | grep -oP '(?<=FORGE:TEST_GATE:RESULT=)(BLOCK|PASS|SKIP)' | tail -1 || echo "SKIP")
 
 echo "Test-gate verdict: ${TEST_GATE_VERDICT}"
+# Persist the gate result: every Bash call is a fresh shell, and the verdict-handling fence and Phase 8 read it back (validated on reload).
+printf '%s\n' "$TEST_GATE_VERDICT" > "$_SD/${PR_NUMBER}_test_gate_verdict"; printf '%s\n' "$TEST_GATE_REASON" > "$_SD/${PR_NUMBER}_test_gate_reason"
 ```
 
 **Verdict handling**:
 
 ```bash
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+GH_FLAG="-R $GH_REPO"
+GATE_POSTURE=$(yq '.verification.test_gate.posture // "blocking"' "$CONFIG_FILE" 2>/dev/null || echo "blocking")
+OVERRIDE_PHRASE=$(yq '.verification.test_gate.override_phrase // "OVERRIDE: shipping with test failures —"' "$CONFIG_FILE" 2>/dev/null || echo "OVERRIDE: shipping with test failures —")
+# Reload the Phase 6.5 gate result persisted by its producer (validated: only a known verdict reaches a gate decision).
+[ -n "${TEST_GATE_VERDICT:-}" ] || { [ -r "$_SD/${PR_NUMBER}_test_gate_verdict" ] && TEST_GATE_VERDICT=$(sed -n -E '1{/^(BLOCK|PASS|SKIP)$/p;q}' "$_SD/${PR_NUMBER}_test_gate_verdict"); }
+[ -n "${TEST_GATE_REASON:-}" ] || { [ -r "$_SD/${PR_NUMBER}_test_gate_reason" ] && TEST_GATE_REASON=$(sed -n 1p "$_SD/${PR_NUMBER}_test_gate_reason" | tr -d '\r\000-\037' | cut -c1-400); }
 case "$TEST_GATE_VERDICT" in
 
   SKIP)
@@ -959,6 +1076,7 @@ To override (ship known failures with documented reason), post a comment contain
 
 <!-- FORGE:GATE_FAILURE:TYPE=test-gate|BUNDLE=$(echo $ALL_PR_NUMBERS | tr '\n' ' ' | xargs) -->" 2>/dev/null || true
       fi
+      printf '%s\n' "$TEST_GATE_VERDICT" > "$_SD/${PR_NUMBER}_test_gate_verdict"; printf '%s\n' "BLOCK (blocking posture, no override)" > "$_SD/${PR_NUMBER}_test_gate_reason"
       exit 1
     fi
     ;;
@@ -970,6 +1088,8 @@ To override (ship known failures with documented reason), post a comment contain
     ;;
 
 esac
+# Persist the gate result: every Bash call is a fresh shell, and the verdict-handling fence and Phase 8 read it back (validated on reload).
+printf '%s\n' "$TEST_GATE_VERDICT" > "$_SD/${PR_NUMBER}_test_gate_verdict"; printf '%s\n' "$TEST_GATE_REASON" > "$_SD/${PR_NUMBER}_test_gate_reason"
 ```
 
 If the gate exits with `RESULT: BLOCK DEPLOY` → **STOP**. A `<!-- FORGE:GATE_FAILURE -->` structured comment is automatically posted on the staging→main PR (if `$PR_NUMBER` is set) for pipeline-health tracking. `/test-gate` will have filed `test-failure` issues for each failing cluster before returning BLOCK.
@@ -979,6 +1099,15 @@ If the gate exits with `RESULT: BLOCK DEPLOY` → **STOP**. A `<!-- FORGE:GATE_F
 **Incomplete-panel guard (MANDATORY):** Increment `SELECTED_AGENT_COUNT` for every reviewer selected across Phases 2–6 before launching it. If any dispatch fails, set `DISPATCH_FAILED=true`. Before Phase 7, count unique trusted, current-head `FORGE:REVIEW-AGENT` markers (author trusted per `scripts/trusted-comments.sh`, body starting with the marker, `Reviewed-SHA:` line matching the full head SHA, all comment pages read; an unresolvable script or unreadable comments count as 0). If the completed count is lower than selected, follow the same hard-stop path as pool exhaustion: create `review-degraded` if needed, label the PR, post `FORGE:GATE_FAILURE`, and exit. Do not create a deploy verdict from partial reviewer output.
 
 ```bash
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
 # Each Bash call is a fresh shell: re-resolve the full head SHA if it is not set, and refuse when it is not a commit id
 # (an empty SHA would make the Reviewed-SHA match accept any head).
 [ -n "${REVIEW_SHA_FULL:-}" ] || REVIEW_SHA_FULL=$(gh pr view "$PR_NUMBER" -R "$GH_REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
@@ -1019,9 +1148,20 @@ fi
 
 ### Phase 6.75: Verify Agent Delivery
 
-Before launching every Phase 2-6 review agent, append its lowercase marker domain (for example, `security`, `bug-hunter-api`, or `regression-risk`) to `LAUNCHED_REVIEW_AGENTS`. A completed agent is accounted for only when its marker comment is present on the PR from a trusted author, starts with the marker, and carries the `Reviewed-SHA:` line for the current head.
+Before launching every Phase 2-6 review agent, append its lowercase marker domain (for example, `security`, `bug-hunter-api`, or `regression-risk`) to `LAUNCHED_REVIEW_AGENTS` and persist it with `printf '%s\n' "$AGENT_DOMAIN" >> "${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/${PR_NUMBER}_launched_review_agents"` (each Bash call is a fresh shell; the fence below reloads the file, accepting only `^[a-z0-9-]+$` lines). The file is truncated by the executable fence at the start of Phase 2. A completed agent is accounted for only when its marker comment is present on the PR from a trusted author, starts with the marker, and carries the `Reviewed-SHA:` line for the current head.
 
 ```bash
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+# Reload the launched-agent list persisted at dispatch (validated: lowercase marker domains only).
+[ -n "${LAUNCHED_REVIEW_AGENTS:-}" ] || { [ -r "$_SD/${PR_NUMBER}_launched_review_agents" ] && LAUNCHED_REVIEW_AGENTS=$(grep -E '^[a-z0-9-]+$' "$_SD/${PR_NUMBER}_launched_review_agents" | sort -u | tr '\n' ' '); }
 MISSING_AGENT_COMMENTS=""
 # Each Bash call is a fresh shell: re-resolve the full head SHA if it is not set, and refuse when it is not a commit id
 # (an empty SHA would make the Reviewed-SHA match accept any head).
@@ -1062,6 +1202,15 @@ Missing comments are an explicit failure, never evidence of no findings. Do not 
 Only findings inside trusted, current-head reviewer comments count: the head SHA is public, so an untrusted commenter must never be able to inject `FINDING` markers that get filed as issues. Read every page of comments, fail closed when the trust script or comments are unreadable (never fall through to "no findings").
 
 ```bash
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
 # Each Bash call is a fresh shell: re-resolve the full head SHA if it is not set, and refuse when it is not a commit id
 # (an empty SHA would make the Reviewed-SHA match accept any head).
 [ -n "${REVIEW_SHA_FULL:-}" ] || REVIEW_SHA_FULL=$(gh pr view "$PR_NUMBER" -R "$GH_REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
@@ -1269,12 +1418,21 @@ fi
 
 ### 7C: Ensure Labels
 ```bash
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
 # Colors match the canonical ForgeDock label manifest (bin/labels.json).
 # Run `npx forgedock labels setup` to bootstrap all managed labels at once.
-gh label create "review-finding" --color "D93F0B" --description "Defect or improvement found during automated PR review. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
-gh label create "needs-validation" --color "FBCA04" --description "Review finding awaiting human validation. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
-gh label create "pre-existing" --color "BFD4F2" --description "Defect noticed during PR review that the PR did not introduce. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
-gh label create "staging-review" --color "1D76DB" --description "Finding from a staging branch review before deploy to main. Managed by ForgeDock." --force -R {GH_REPO} 2>/dev/null
+gh label create "review-finding" --color "D93F0B" --description "Defect or improvement found during automated PR review. Managed by ForgeDock." --force -R "$GH_REPO" 2>/dev/null
+gh label create "needs-validation" --color "FBCA04" --description "Review finding awaiting human validation. Managed by ForgeDock." --force -R "$GH_REPO" 2>/dev/null
+gh label create "pre-existing" --color "BFD4F2" --description "Defect noticed during PR review that the PR did not introduce. Managed by ForgeDock." --force -R "$GH_REPO" 2>/dev/null
+gh label create "staging-review" --color "1D76DB" --description "Finding from a staging branch review before deploy to main. Managed by ForgeDock." --force -R "$GH_REPO" 2>/dev/null
 ```
 
 ### 7D: Milestone & Code Branch Detection
@@ -1282,7 +1440,16 @@ gh label create "staging-review" --color "1D76DB" --description "Finding from a 
 Derive both `CODE_BRANCH` and `MILESTONE_FLAG` from the reviewed PR before creating any findings. Unlike `commands/review-pr.md` (feature-lane PRs with short-lived HEAD branches that get deleted post-merge — see the rationale comment on that spec's finding template), `review-pr-staging.md` reviews long-lived branches (`staging`, `milestone/*`) that persist after merge, so `CODE_BRANCH` uses `headRefName` (the PR's HEAD — the branch actually being reviewed), consistent with forge#1391's original fix. This replaces the previous hardcoded `staging` literal, which was silently wrong whenever this spec reviewed a `milestone/X → staging` PR instead of a `staging → main` PR — `CODE_BRANCH` used to always say `staging` even when the reviewed branch was `milestone/X`.
 
 ```bash
-CODE_BRANCH=$(gh pr view ${PR_NUMBER} --json headRefName --jq '.headRefName')
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+CODE_BRANCH=$(gh pr view "$PR_NUMBER" -R "$GH_REPO" --json headRefName --jq '.headRefName')
 MILESTONE_FLAG=""
 
 # scripts/derive-finding-milestone.sh is the single source of truth for
@@ -1301,7 +1468,7 @@ while IFS= read -r _c; do
 done <<< "$_tc"
 # Unresolved helper: empty milestone (non-blocking), never a cwd-relative fallback.
 MILESTONE_TITLE=""
-[ -n "$DERIVE_MILESTONE_SCRIPT" ] && MILESTONE_TITLE=$(bash "$DERIVE_MILESTONE_SCRIPT" "${PR_NUMBER}" -R {GH_REPO})
+[ -n "$DERIVE_MILESTONE_SCRIPT" ] && MILESTONE_TITLE=$(bash "$DERIVE_MILESTONE_SCRIPT" "${PR_NUMBER}" -R "$GH_REPO")
 # Quoted so multi-word milestone titles survive as a single value wherever
 # MILESTONE_FLAG is later interpolated — matches the quoting convention already
 # used for --title/--body-file/--label below.
@@ -1315,6 +1482,16 @@ Plain staging→main reviews resolve `CODE_BRANCH` to `staging` dynamically (sam
 Re-reviewing the same bundle must not re-file existing findings. For each `ISSUE` finding, check open AND closed `review-finding` issues by file + pattern + location before creating anything:
 
 ```bash
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
+GH_FLAG="-R $GH_REPO"
 # FINDING_FILE/FINDING_LINE come from the finding's structured block. Define the title and scratch dir BEFORE use (7F reuses them).
 SCRATCHPAD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$SCRATCHPAD"
 STAGING_FINDING_TITLE="chore: ${FINDING_TITLE:-[summary]} (staging review — PR #${PR_NUMBER})"
@@ -1332,14 +1509,14 @@ fi
 # title is matched above): an exit 1 is a duplicate ONLY when the matched open issue also cites this finding's file. Otherwise it is not a duplicate.
 if [ "$DEDUP_EXIT" -eq 1 ]; then
   _DUP_N=$(printf '%s' "$DEDUP_OUT" | sed -n 's/^DUPLICATE: #\([0-9][0-9]*\).*/\1/p' | head -1)
-  _DUP_BODY=$(gh issue view "${_DUP_N:-0}" -R {GH_REPO} --json body --jq '.body' 2>/dev/null) || _DUP_BODY=""
+  _DUP_BODY=$(gh issue view "${_DUP_N:-0}" -R "$GH_REPO" --json body --jq '.body' 2>/dev/null) || _DUP_BODY=""
   printf '%s' "$_DUP_BODY" | grep -qF -- "$_SAFE_FILE" || DEDUP_EXIT=0
 fi
 # Closed issues that cite this file at a line within +-5 of the finding. FINDING_FILE is finding content: strip quotes/backslashes so it cannot add search qualifiers.
 _FILE_RE=$(printf '%s' "$_SAFE_FILE" | sed 's/[][\.^$*+?(){}|\/]/\\&/g')
 REGRESSION_CHECK=ok; CLOSED_HIT=""
 # Capture the gh read first and test its own status: through a pipe a failed read looks like "no closed hit".
-_CL=$(gh issue list -R {GH_REPO} --label review-finding --state closed --search "\"${_SAFE_FILE}\" in:body" --json number,title,body,stateReason --limit 100 2>/dev/null) || REGRESSION_CHECK=unavailable
+_CL=$(gh issue list -R "$GH_REPO" --label review-finding --state closed --search "\"${_SAFE_FILE}\" in:body" --json number,title,body,stateReason --limit 100 2>/dev/null) || REGRESSION_CHECK=unavailable
 # FINDING_LINE may be a range such as 12-15: use its first integer, and 0 when there is none.
 _L=$(printf '%s' "${FINDING_LINE:-0}" | grep -oE '[0-9]+' | head -1); _L="${_L:-0}"
 _HITS=""; [ "$REGRESSION_CHECK" = "ok" ] && { _HITS=$(printf '%s' "$_CL" | jq -r --arg re "$_FILE_RE" --argjson l "$_L" '.[] | select((.body // "") != "") | select(.stateReason != "NOT_PLANNED")
@@ -1358,6 +1535,15 @@ Sequential creation. Title: `Staging Review: {summary} (staging → main)`. Labe
 
 **For each finding** (classified `ISSUE` in 7B.5 and not deduped in 7E), create issue through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") instead of calling the raw issue-creation command directly:
 ```bash
+# Fence bootstrap (a fresh Bash call loses shell state): re-derive config and the cross-fence PR state from the scratchpad. Identical in every fence that carries it; scripts/review-pr-staging-scope.test.sh executes the marked lines.
+_SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"   # FENCE_BOOTSTRAP
+CONFIG_FILE="${FORGE_CONFIG:-forge.yaml}"   # FENCE_BOOTSTRAP
+[ -n "${GH_REPO:-}" ] || GH_REPO=$(yq '.project.owner + "/" + .project.repo' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${DEFAULT_BRANCH:-}" ] || DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${STAGING_BRANCH:-}" ] || STAGING_BRANCH=$(yq '.branches.staging' "$CONFIG_FILE" 2>/dev/null)   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || { [ -r "$_SD/staging_pr_number" ] && PR_NUMBER=$(sed -n '1{/^[0-9][0-9]*$/p;q}' "$_SD/staging_pr_number"); }   # FENCE_BOOTSTRAP (numeric-validated: a tampered file never reaches gh)
+[ -n "${ALL_PR_NUMBERS:-}" ] || { [ -n "${PR_NUMBER:-}" ] && [ -r "$_SD/${PR_NUMBER}_bundle-prs.txt" ] && ALL_PR_NUMBERS=$(grep -E '^[0-9]+$' "$_SD/${PR_NUMBER}_bundle-prs.txt"); }   # FENCE_BOOTSTRAP
+[ -n "${PR_NUMBER:-}" ] || echo "WARNING: PR_NUMBER is empty after reload (no staging_pr_number in $_SD): this fence cannot key its scratch files or post to a PR."   # FENCE_BOOTSTRAP
 # STAGING_FINDING_TITLE was built in 7E; re-assert it here if 7E was skipped.
 STAGING_FINDING_TITLE="${STAGING_FINDING_TITLE:-chore: [summary] (staging review — PR #${PR_NUMBER})}"
 # Defense-in-depth: /issue's arg tokenizer (commands/issue.md, forge#2094) uses
@@ -1487,7 +1673,7 @@ Include in Finding Triage Results: `SCOPE_MODE`, `reviewed_prs`, `unreviewed_com
 
 Include: Material Changes Summary, Risk Matrix (CI, Build, Bugs, Security, Billing, Quality, Regression, **Test Gate**), Finding Triage Results, Blocking Issues, Deployment Checklist (pre-deploy, deploy, post-deploy verification, rollback triggers), Stats.
 
-**Risk Matrix must include a Test Gate row** (use `$TEST_GATE_VERDICT` and `$TEST_GATE_REASON` set in Phase 6.5):
+**Risk Matrix must include a Test Gate row** (use `$TEST_GATE_VERDICT` and `$TEST_GATE_REASON` set in Phase 6.5; both are persisted to `$_SD/${PR_NUMBER}_test_gate_verdict` / `$_SD/${PR_NUMBER}_test_gate_reason` by that phase, so reload them in a fresh shell with the validated `TEST_GATE_VERDICT` / `TEST_GATE_REASON` reload lines carried by the Phase 6.5 verdict-handling fence):
 
 | Domain | Result | Notes |
 |--------|--------|-------|
