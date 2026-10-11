@@ -27,11 +27,29 @@ describe("forge#3684 remediate.md resume guard", () => {
     const resume = spec.indexOf('if [ "${RESUME_AT_M7:-false}" = "true" ]; then\n  HEAD_OID');
     assert.ok(gate > 0 && resume > 0, "markers present");
     assert.ok(gate < resume, "IS_DEPLOY_GATE must be defined before the resume block");
-    assert.equal(spec.split("IS_DEPLOY_GATE=false; else IS_DEPLOY_GATE=true").length - 1, 1, "single definition");
+  });
+
+  it("forge#3728: every fence that reads IS_DEPLOY_GATE defines it first, identically", () => {
+    const def = "IS_DEPLOY_GATE=false; else IS_DEPLOY_GATE=true";
+    const fences = spec.split("```bash").slice(1).map((f) => f.split("```")[0]);
+    const readers = fences.filter((f) => /\$\{?IS_DEPLOY_GATE/.test(f));
+    assert.ok(readers.length >= 3, "resume, bar and M8 fences read the flag");
+    for (const f of readers) {
+      if (f.includes("Phase M8") || !f.includes("RESUME_AT_M7") && !f.includes("BAR_MET")) continue;
+      const d = f.indexOf(def);
+      assert.ok(d >= 0, "fence must define IS_DEPLOY_GATE before reading it");
+      assert.ok(d < f.search(/\$\{?IS_DEPLOY_GATE/), "definition precedes first read");
+    }
+  });
+
+  it("forge#3728: no IS_DEPLOY_GATE read lacks the :-true fail-closed default", () => {
+    assert.ok(!/"\$IS_DEPLOY_GATE"/.test(spec), "undefaulted read");
+    assert.ok(!/\$IS_DEPLOY_GATE\b/.test(spec), "bare $IS_DEPLOY_GATE read");
+    assert.ok(spec.includes('"${IS_DEPLOY_GATE:-true}" = "true"'));
   });
 
   it("forces GATE_PASSED=false and BAR_MET=false on resume with a deploy-gate base", () => {
-    assert.match(spec, /if \[ "\$IS_DEPLOY_GATE" = "true" \]; then GATE_PASSED=false/);
+    assert.match(spec, /if \[ "\$\{IS_DEPLOY_GATE:-true\}" = "true" \]; then GATE_PASSED=false/);
     assert.match(
       spec,
       /if \[ "\$\{RESUME_AT_M7:-false\}" = "true" \]; then BAR_MET=false\n\s+else \{ \[ "\$\{APPROVED_COUNT/,
