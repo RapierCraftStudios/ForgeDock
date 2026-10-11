@@ -244,7 +244,7 @@ If `GIST_URLS` is non-empty, a `## Prior Investigation` section will be appended
 ## Phase D2: Design Sub-Issues
 
 From the Decomposition Assessment in the investigation report (adjusted for any owner override detected in Phase D0), or, when the assessment lists none, from the size-gate `### Split Proposal` in the trusted `FORGE:DIFF_SIZE` comment (Phase D0), extract:
-1. Sub-issue titles (in dependency order — independent issues first)
+1. Sub-issue titles (in dependency order — independent issues first). **Packing** <!-- Added: forge#3786 -->: do not create one sub-issue per seam. Bin-pack the seams into the fewest sub-issues whose estimate (code plus tests) is at or under 0.8 x threshold, i.e. `max(2, ceil(ESTIMATED_DIFF_LINES / (0.8 x threshold)))` sub-issues, keeping related seams together; each sub-issue body lists the seams it covers. Migration-ordering seams may stay separate. The parent is a terminal tracker and builds nothing, so every packed item, including the first, becomes a sub-issue (N packed items give N sub-issues)
 2. Dependencies between sub-issues (if issue B depends on issue A, A is created first)
 3. Brief description for each sub-issue body
 
