@@ -17,13 +17,29 @@ run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
 gh_i() { gh "$@" $GH_FLAG; }
 
 HEAD_SHA=$(git rev-parse HEAD 2>/dev/null)
-COMMENTS=$(gh api "repos/$GH_REPO/issues/$NUMBER/comments" --paginate 2>/dev/null | jq -rs '[.[][]]' 2>/dev/null) || COMMENTS="[]"
-LAST=$(printf '%s' "$COMMENTS" | jq -r '[.[] | select(.body | startswith("<!-- FORGE:ACCEPTANCE_GATE_REVIEW -->"))] | last | .body // ""')
+# Trust (forge#3813): the spec lines are executed as check targets and the PASSED marker skips the gate, so both are read only
+# from comments scripts/trusted-comments.sh accepts. The helper is resolved from ForgeDock's own install (forge_resolve), never
+# the working directory; an unresolvable helper or unreadable comments fail closed (nothing executed, gate does not pass).
+block() {
+  echo "Review acceptance gate: $1 (fail closed)" >&2
+  printf 'REVIEW_RESULT:\n  status: BLOCKED\n  pr_number:\n  pr_url:\n  merged_to:\n  blocker: review acceptance gate cannot trust issue comments (%s)\n' "$1"
+  exit 1
+}
+_RESOLVE_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/forge-resolve.sh"
+type forge_resolve >/dev/null 2>&1 || { [ -f "$_RESOLVE_LIB" ] && . "$_RESOLVE_LIB"; }
+type forge_resolve >/dev/null 2>&1 || block "forge_resolve unavailable"
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
+[ -n "$TRUSTED_SCRIPT" ] || block "trusted-comments.sh unresolvable"
+COMMENTS=$(gh api "repos/$GH_REPO/issues/$NUMBER/comments" --paginate 2>/dev/null) || block "comments unreadable"
+[ -n "$COMMENTS" ] || block "comments unreadable"
+TRUSTED_GATE=$(printf '%s' "$COMMENTS" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:ACCEPTANCE_GATE_REVIEW -->') || block "trust filter failed"
+TRUSTED_INV=$(printf '%s' "$COMMENTS" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:INVESTIGATOR -->') || block "trust filter failed"
+LAST=$(printf '%s\n' "$TRUSTED_GATE" | tail -n 1 | jq -r '. // ""' 2>/dev/null) || LAST=""
 if printf '%s' "$LAST" | grep -qF "<!-- FORGE:ACCEPTANCE_GATE_REVIEW:PASSED:${HEAD_SHA} -->"; then
   echo "Review acceptance gate already PASSED for ${HEAD_SHA}; skipping."; exit 0
 fi
 
-CHECKS=$(printf '%s' "$COMMENTS" | jq -r '.[] | select(.body | contains("FORGE:INVESTIGATOR")) | .body' | grep "^ACCEPTANCE_CHECK:")
+CHECKS=$(printf '%s\n' "$TRUSTED_INV" | jq -r '.' 2>/dev/null | grep "^ACCEPTANCE_CHECK:")
 GATE_PASS=true; FAILED=""; RAN=0; RESULTS=""
 while IFS= read -r check_line; do
   [ -z "$check_line" ] && continue
