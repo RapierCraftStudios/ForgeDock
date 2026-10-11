@@ -122,14 +122,18 @@ if [ "$PRIOR_ROUTES" -gt 0 ]; then
   IS_REENTRY=1
   echo "Re-entry detected: $PRIOR_ROUTES prior review pass(es) on PR #${PR_NUMBER}"
 
+  # Anchored post-filter: keep a search hit only if its title ends `PR #N)` or its body has a
+  # `**Source**: PR #N` line. Hidden markers (issue-create-token, etc.) never count as references.
+  FINDING_PR_FILTER='[.[] | select((.title | endswith("PR #" + $n + ")")) or ((.body // "") | test("(^|\\n)\\*\\*Source\\*\\*: PR #" + $n + "([^0-9]|$)")))] | .[] | "  - #\(.number): \(.title)"'  # FINDING_PR_FILTER
+
   # Load findings from prior passes that are still open
   PRIOR_OPEN_FINDINGS=$(gh issue list ${GH_FLAG} \
     --label "review-finding" \
     --state open \
     --search "PR #${PR_NUMBER}" \
     --limit 50 \
-    --json number,title,labels \
-    --jq '.[] | "  - #\(.number): \(.title)"' 2>/dev/null || true)
+    --json number,title,labels,body 2>/dev/null \
+    | jq -r --arg n "${PR_NUMBER}" "$FINDING_PR_FILTER" 2>/dev/null || true)  # uses FINDING_PR_FILTER
 
   # Load findings that were resolved (closed) since the last pass
   PRIOR_RESOLVED_FINDINGS=$(gh issue list ${GH_FLAG} \
@@ -137,8 +141,8 @@ if [ "$PRIOR_ROUTES" -gt 0 ]; then
     --state closed \
     --search "PR #${PR_NUMBER}" \
     --limit 50 \
-    --json number,title \
-    --jq '.[] | "  - #\(.number): \(.title)"' 2>/dev/null || true)
+    --json number,title,body 2>/dev/null \
+    | jq -r --arg n "${PR_NUMBER}" "$FINDING_PR_FILTER" 2>/dev/null || true)  # uses FINDING_PR_FILTER
 
   echo "Prior open findings (carry forward): $(echo "$PRIOR_OPEN_FINDINGS" | grep -c '.' || echo 0)"
   echo "Prior resolved findings (exclude from verdict): $(echo "$PRIOR_RESOLVED_FINDINGS" | grep -c '.' || echo 0)"
@@ -248,14 +252,17 @@ for pr_num in $ALL_PR_NUMBERS; do
 **PR #${pr_num}** has a \`review-degraded\` label and requires a full fresh-context re-review."
   fi
 
-  # Search for open review-finding issues that reference this PR
+  # Search for open review-finding issues that reference this PR. The search is only a coarse
+  # candidate fetch (full-text, tokenized: it also hits hidden markers and longer numbers), so
+  # narrow it with the anchored FINDING_PR_FILTER: title suffix `PR #N)` or a `**Source**: PR #N` line.
+  FINDING_PR_FILTER='[.[] | select((.title | endswith("PR #" + $n + ")")) or ((.body // "") | test("(^|\\n)\\*\\*Source\\*\\*: PR #" + $n + "([^0-9]|$)")))] | .[] | "  - #\(.number): \(.title)"'  # FINDING_PR_FILTER
   OPEN_FINDINGS=$(gh issue list -R {GH_REPO} \
     --label "review-finding" \
     --state open \
     --search "PR #${pr_num}" \
     --limit 20 \
-    --json number,title \
-    --jq ".[] | \"  - #\(.number): \(.title)\"" 2>/dev/null)
+    --json number,title,body 2>/dev/null \
+    | jq -r --arg n "${pr_num}" "$FINDING_PR_FILTER" 2>/dev/null)  # uses FINDING_PR_FILTER
 
   if [ -n "$OPEN_FINDINGS" ]; then
     BLOCKING_FINDINGS="${BLOCKING_FINDINGS}
