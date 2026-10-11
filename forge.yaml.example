@@ -411,6 +411,19 @@ branches:
 #       - "*.pb.go"
 
 # =============================================================================
+# DECOMPOSITION (OPTIONAL)
+# What happens to a decomposed parent issue. Default false: the parent stays
+# open until its last child closes. When true, work-on:decompose (D6.5) closes
+# the parent at decomposition (it keeps workflow:decomposed) so it stops
+# inflating the open-issue count; close C3 completes it when the last child closes.
+# Read via `yq '.decomposition.close_parent // false'`.
+# Commands: work-on (decompose D6.5, close C3), orchestrate
+# =============================================================================
+
+# decomposition:
+#   close_parent: false
+
+# =============================================================================
 # SERVICES (OPTIONAL)
 # External service URLs and identifiers. Used by analytics, monitoring, and
 # GEO audit commands.

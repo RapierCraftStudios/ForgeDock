@@ -531,6 +531,30 @@ build:
 
 ---
 
+## `decomposition` (OPTIONAL)
+
+Controls what happens to a decomposed parent issue. A parent is only a tracker for its sub-issues, but while it is open it inflates GitHub's open-issue count and every backlog view.
+
+```yaml
+decomposition:
+  # Close the parent at decomposition. Default: false (parent stays open until its last child closes).
+  close_parent: true
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `close_parent` | boolean | No | When `true`, `work-on:decompose` (Phase D6.5) closes the parent after the sub-issues exist, `FORGE:DECOMPOSED:COMPLETE` is posted and `workflow:decomposed` is set, with the comment "Decomposed into #a #b #c; tracked here until all complete". The label is kept. Every child body is also checked for the `**Parent**: #N` reference. Default: `false`. Any value other than `true`, or an unreadable config, leaves the parent open |
+
+**With `close_parent: true`**: `work-on:close` Phase C3 keeps checking children off the closed parent's checklist. When the last child closes, the parent gets an "All sub-issues complete" comment and `workflow:merged`; it is not closed a second time and never reopened. `/pipeline-status` and `/pipeline-health` exclude `workflow:decomposed` from work counts and report them separately as `trackers (N)`. `/orchestrate` expands an explicitly requested closed decomposed parent to its open children.
+
+**With `close_parent: false`** (default): unchanged. The parent stays open and is closed by C3 when the last child closes.
+
+**Limitation**: `--retry` and engine resume refuse closed issues, so a closed decomposed parent cannot be re-run. It has nothing left to run; work on its open children instead.
+
+**Commands that use this section**: `work-on` (`decompose` D6.5, `close` C3), `orchestrate`
+
+---
+
 ## `services` (OPTIONAL)
 
 External service endpoints and identifiers. Used by analytics and monitoring commands.

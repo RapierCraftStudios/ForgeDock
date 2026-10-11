@@ -36,6 +36,8 @@ else
 fi
 ```
 
+**Decomposition trackers** <!-- Added: forge#3736 -->: issues labelled `workflow:decomposed` are trackers (open, or closed at decomposition when `decomposition.close_parent` is true), not work. Phase 2 excludes `workflow:decomposed` from every open-work and issue-flow count and reports them separately as `trackers (N)`.
+
 ### 1C: Load Prior Health Report
 
 Fetch the most recent `health-report` issue for the same repo and parse its metrics for trend computation. This must run before Phase 2 so that PRIOR_* variables are available when Phase 3A builds the trend column.

@@ -57,7 +57,7 @@ PR_BASE="{PR_BASE}"; BRANCH="{BRANCH}"; WORKTREE_PATH="{WORKTREE_PATH}"; TERMINA
 |---|---|---|
 | `merged` | C0 → C6, all phases | — |
 | `investigation` | C0, C0.5, C1, C1.5, C2, C3, C4, C4.5, C5, C5.1–C5.4, C6 | C1.7, C5.5 (no PR); PR lines in the issue body, report and trajectory use the "no PR" form |
-| `decomposed` | C0, C0.5, C4, C4.5, C5, C5.1–C5.4, C6 | C1, C1.7, C1.5, C2, C3, C5.5 — the parent issue stays OPEN with `workflow:decomposed` (owned by the decompose phase) |
+| `decomposed` | C0, C0.5, C4, C4.5, C5, C5.1–C5.4, C6 | C1, C1.7, C1.5, C2, C3, C5.5 — the parent keeps `workflow:decomposed` (owned by the decompose phase); it stays OPEN unless `decomposition.close_parent` closed it at decomposition, and C3 of the last child then completes it |
 | `invalid` | C0, C0.5, C4, C4.5, C5, C6 | C1, C1.7, C1.5, C2, C3, C5.1–C5.5 — the issue was already closed with `workflow:invalid` by the investigate phase |
 
 Every `gh pr view {PR_NUMBER}` and every other PR-dependent step in this file is guarded on a non-empty `PR_NUMBER`: with an empty PR, the PR-derived values render as `—` and nothing aborts.
@@ -824,14 +824,25 @@ OPEN_SUBS=$(printf '%s\n' "$UPDATED_PARENT" | grep -cE '^[[:space:]]*[-*+] \[ \]
 OPEN_SUBS=${OPEN_SUBS:-0}
 ```
 
-If `OPEN_SUBS == 0` (all sub-issues checked off) — close the parent and transition it to `merged` with the same tiered dispatch and FULL remove list as C2:
+If `OPEN_SUBS == 0` (all sub-issues checked off), branch on the parent's `state` <!-- Added: forge#3736 -->. An OPEN parent is closed and transitioned to `merged` with the same tiered dispatch and FULL remove list as C2. A CLOSED parent (closed at decomposition by `decomposition.close_parent`) is never closed a second time and never reopened: post the completion comment (once) and set `merged`:
 ```bash
 if [ "$OPEN_SUBS" -eq 0 ]; then
-  gh issue close "$PARENT_REF" {GH_FLAG} --comment "All sub-issues complete. Closing parent tracker. Last completed: #{NUMBER}${PR_NUMBER:+ (PR #${PR_NUMBER})}." # allowlist:check-command-side-effects
-  set_workflow_state "$PARENT_REF" merged
+  PARENT_STATE=$(gh issue view "$PARENT_REF" {GH_FLAG} --json state --jq '.state' 2>/dev/null || echo OPEN)
+  COMPLETE_MSG="All sub-issues complete. Closing parent tracker. Last completed: #{NUMBER}${PR_NUMBER:+ (PR #${PR_NUMBER})}."
+  if [ "$PARENT_STATE" = "CLOSED" ]; then
+    ALREADY_POSTED=$(gh api "repos/{GH_REPO}/issues/${PARENT_REF}/comments" \
+      --jq '[.[] | select(.body | startswith("All sub-issues complete"))] | length' 2>/dev/null || echo 0)
+    [ "${ALREADY_POSTED:-0}" -gt 0 ] || gh issue comment "$PARENT_REF" {GH_FLAG} --body "${COMPLETE_MSG/Closing parent tracker. /}" # allowlist:check-command-side-effects
+    set_workflow_state "$PARENT_REF" merged
+  else
+    gh issue close "$PARENT_REF" {GH_FLAG} --comment "$COMPLETE_MSG" # allowlist:check-command-side-effects
+    set_workflow_state "$PARENT_REF" merged
+  fi
   PARENT_CLOSED=true
 fi
 ```
+
+With `decomposition.close_parent: false` (default) the parent is OPEN at this point, so behaviour is unchanged.
 
 Set `PARENT_STATUS="✅ Complete"` and `PARENT_NOTES="Checked off in #${PARENT_REF}"` when the parent was updated.
 
@@ -1068,8 +1079,8 @@ case "$TERMINAL_STATE" in
     PHASE2_ROW="✅ Decomposed | Sub-issues spawned (see FORGE:DECOMPOSED)"
     BUILD_ROW="⏭ Skipped | Handled by sub-issues"
     GATE_CELL="⏭ N/A |"; VERIF_CELL="⏭ N/A |"; REVIEW_CELL="⏭ N/A (no PR) |"
-    CLOSE_CELL="✅ Complete | Issue left open (sub-issue tracker)"
-    DECISIONS_BLOCK="- Decomposed into sub-issues; this issue stays open as the tracker" ;;
+    CLOSE_CELL="✅ Complete | Tracker for sub-issues (stays open unless decomposition.close_parent)"
+    DECISIONS_BLOCK="- Decomposed into sub-issues; this issue is the tracker (open, or closed at decomposition when `decomposition.close_parent` is true)" ;;
   invalid)
     PHASE2_ROW="⏭ Skipped | Issue invalid"
     BUILD_ROW="⏭ Skipped | Issue invalid"

@@ -323,7 +323,7 @@ INVALID_ISSUES=$(gh issue list -R $REPO --state closed --label "workflow:invalid
   --jq "[.[] | select(.createdAt > \"$SINCE\" and (.labels | map(.name) | index(\"review-finding\") | not))] | length")
 
 TOTAL_INVESTIGATED=$(gh issue list -R $REPO --state all --limit 500 --json number,createdAt,labels \
-  --jq "[.[] | select(.createdAt > \"$SINCE\" and (.labels | map(.name) | any(. == \"workflow:investigating\" or . == \"workflow:building\" or . == \"workflow:in-review\" or . == \"workflow:merged\" or . == \"workflow:invalid\")))  ] | length")
+  --jq "[.[] | select(.createdAt > \"$SINCE\" and (.labels | map(.name) | index(\"workflow:decomposed\") | not) and (.labels | map(.name) | any(. == \"workflow:investigating\" or . == \"workflow:building\" or . == \"workflow:in-review\" or . == \"workflow:merged\" or . == \"workflow:invalid\")))  ] | length")
 
 echo "Investigation invalidation rate: $INVALID_ISSUES / $TOTAL_INVESTIGATED"
 # Target: < 15%
@@ -354,13 +354,20 @@ echo "Re-investigation count: $REINVESTIGATED"
 # 4. Issue structure compliance (/issue adoption proxy)
 # Issues created in window that have an "Affected Files" section in their body
 TOTAL_ISSUES=$(gh issue list -R $REPO --state all --limit 500 --json number,createdAt,labels \
-  --jq "[.[] | select(.createdAt > \"$SINCE\" and (.labels | map(.name) | index(\"review-finding\") | not))] | length")
+  --jq "[.[] | select(.createdAt > \"$SINCE\" and (.labels | map(.name) | index(\"review-finding\") | not) and (.labels | map(.name) | index(\"workflow:decomposed\") | not))] | length")
 
 STRUCTURED_ISSUES=$(gh issue list -R $REPO --state all --limit 500 --json number,createdAt,body,labels \
-  --jq "[.[] | select(.createdAt > \"$SINCE\" and (.labels | map(.name) | index(\"review-finding\") | not) and (.body | contains(\"Affected Files\")))] | length")
+  --jq "[.[] | select(.createdAt > \"$SINCE\" and (.labels | map(.name) | index(\"review-finding\") | not) and (.labels | map(.name) | index(\"workflow:decomposed\") | not) and (.body | contains(\"Affected Files\")))] | length")
 
 echo "Issue structure compliance: $STRUCTURED_ISSUES / $TOTAL_ISSUES"
 # Target: > 80%. Issues without Affected Files are harder to investigate and more likely to produce ISSUE_SPEC failures.
+```
+
+**Decomposition trackers** <!-- Added: forge#3736 -->: issues labelled `workflow:decomposed` are trackers, not work. `TOTAL_INVESTIGATED`, `TOTAL_ISSUES`, `STRUCTURED_ISSUES` and both stall-rate queries exclude them with an `index("workflow:decomposed") | not` filter, so a parent closed at decomposition (`decomposition.close_parent`) and an open one are treated alike. Report them separately as `trackers (N)`:
+
+```bash
+TRACKER_COUNT=$(gh issue list -R $REPO --state all --label "workflow:decomposed" --limit 500 --json number --jq 'length' 2>/dev/null || echo 0)
+echo "trackers ($TRACKER_COUNT) — decomposed parents, excluded from work counts"
 ```
 
 **Issue quality score** = weighted average of sub-metrics:
@@ -496,14 +503,14 @@ Query issues that received a `<!-- FORGE:STALL_DETECTED -->` comment within the 
 BATCH_TOTAL=$(gh issue list -R $GH_REPO \
   --state all --limit 500 \
   --json number,createdAt,labels \
-  --jq "[.[] | select(.createdAt > \"$SINCE\") | select(.labels | map(.name) | any(startswith(\"workflow:\")))] | length" \
+  --jq "[.[] | select(.createdAt > \"$SINCE\") | select(.labels | map(.name) | any(startswith(\"workflow:\"))) | select(.labels | map(.name) | index(\"workflow:decomposed\") | not)] | length" \
   2>/dev/null || echo 0)
 
 # Enumerate pipeline-active issue numbers for per-issue comment queries
 PIPELINE_ISSUE_NUMS=$(gh issue list -R $GH_REPO \
   --state all --limit 500 \
   --json number,createdAt,labels \
-  --jq "[.[] | select(.createdAt > \"$SINCE\") | select(.labels | map(.name) | any(startswith(\"workflow:\"))) | .number]" \
+  --jq "[.[] | select(.createdAt > \"$SINCE\") | select(.labels | map(.name) | any(startswith(\"workflow:\"))) | select(.labels | map(.name) | index(\"workflow:decomposed\") | not) | .number]" \
   2>/dev/null || echo "[]")
 
 # Count issues with at least one FORGE:STALL_DETECTED comment
