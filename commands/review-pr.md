@@ -2553,6 +2553,7 @@ Filing a standalone `review-finding` issue for every LOW/POSSIBLE reviewer note 
 - **Safety exemption is content-based** (it bypasses only this severity damper, never the §6B.4 provenance gate: a pre-existing auth gap is flagged through the pre-existing route, not attributed to this PR): a LOW or POSSIBLE finding is still filed when its file path / title / body matches the security/billing keyword set — a LOW finding additionally needs `**Confidence**: CONFIRMED`, so LOW LIKELY/POSSIBLE with a keyword is a NOTE (`security|auth|authz|authn|billing|payment|stripe|charge|invoice|injection|xss|csrf|ssrf|idor|secret(s)|credential(s)|permission(s)|sql|token|password|redact`, whole words, `_`/`-`/`/` separate words — so `auth_service` matches but `author`/`tokenizer` do not), or when it came from a dedicated, signal-selected domain agent (Auth, Billing, Concurrency, Database) AND is MEDIUM — a domain agent rescues MEDIUM only, and a LOW finding stays a NOTE whichever reviewer raised it, CONFIRMED or not. **Origin from the always-on General Security & Quality agent alone does NOT exempt a finding**: that agent runs on every PR, so origin-based exemption filed nearly every LOW note it raised (the 2026-10-08 cascade audit: 50 of 60 would-be notes in one batch were filed only for that reason).
 - **Review-finding lineage** (the PR's linked issue `MERGE_ISSUE` carries the `review-finding` label, any priority — this PR is itself a fix for a finding): only MEDIUM findings that are CONFIRMED, or LIKELY and safety-exempt, become issues; LOW and POSSIBLE are always NOTEs. A fix for a finding must not mint a new generation of findings.
 - **Otherwise**: `**Severity**: LOW`, or `**Confidence**: POSSIBLE` below HIGH, is a NOTE unless safety-exempt (LOW: keyword AND CONFIRMED; MEDIUM: keyword at any confidence, or a domain agent); everything else (MEDIUM CONFIRMED/LIKELY) is an ISSUE.
+- **Cross-head re-flag** <!-- Added: forge#3641 -->: a finding that an earlier head's review already posted, or that an earlier `FORGE:NOTE_DISPOSITION` list recorded, is not filed or noted a second time after its line moved. The caller builds a prior-findings TSV (file, line-start, line-end, title, prior-disposition, issue#) from trusted prior-head reviewer comments (`Reviewed-SHA` other than the current head) and trusted `FORGE:NOTE_DISPOSITION` records carrying a different `reviewed_sha=`, all read through `scripts/trusted-comments.sh`, and passes it as `--prior-findings`. A finding re-flags a row when it is the same file AND (line IoU >= 0.6 after a best-effort `git diff` hunk-offset shift, OR >= 3 shared title tokens) and becomes `NOTE reflag-filed #N` (the prior row's issue is still open) or `NOTE reflag-note`. Never demoted: HIGH/CRITICAL and unparseable severity (the classifier exits on them before this gate, so they keep blocking via §7B), and any row whose linked issue is closed (a regressed defect is classified normally). Prior rows with no issue link are passed as `note`; an unreadable source only shrinks the TSV, it never blocks.
 - **Contract-declared scope** <!-- Added: forge#3447 -->: the trusted, latest FORGE:CONTRACT of `MERGE_ISSUE` lists out-of-scope items as `deferred → #N`, `not-affected:` or `accepted-risk:` (parsed by `scripts/check-contract-scope.sh list`). A finding whose file equals, or sits under, a `deferred` item whose issue is verified becomes `NOTE contract-deferred #N` and is commented on that issue instead of being filed again. A finding under an `accepted-risk` item becomes `NOTE contract-accepted-risk`. A deferred issue is verified only when it is OPEN, is an issue (not a PR), is not `MERGE_ISSUE` itself, and its body carries `FORGE:DEFERRED_FROM: #<MERGE_ISSUE>` and the deferred path, and it is authored by a trusted author (`author_association` OWNER/MEMBER/COLLABORATOR, or `user.type` Bot); an unverified item is dropped from the scope list. Never demoted: HIGH/CRITICAL, `not-affected` items (a contradicting finding means the contract was wrong), safety-exempt findings under either disposition, findings on a file this PR changed, and anything when the contract is missing, untrusted, unparseable or the deferred issue is closed, unverified or unreadable.
 
 ```bash
@@ -2657,18 +2658,109 @@ if [ -n "${MERGE_ISSUE:-}" ]; then
     rm -f "$CONTRACT_BODY_FILE"
   fi
 fi
+PRIOR_FILE=""; DIFF_MAP_FILE=""; NOTES_REFLAG=0
+_pscr="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_pscr"
+REPO="{GH_REPO}"; REVIEW_SHA="{REVIEW_SHA}"
+if [ -z "${TRUSTED_SCRIPT:-}" ]; then
+  # TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+  _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+  _tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+  for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+    [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+  done
+  TRUSTED_SCRIPT=""
+  while IFS= read -r _c; do
+    case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
+  done <<< "$_tc"
+fi
+# Cross-head re-flag input (#3641). Fail soft: every unreadable source just leaves the TSV smaller, never blocks the review.
+# PF_SKIP="<sha or empty>" PF_PRS="<pr numbers>" prior_findings_tsv prints file<TAB>line-start<TAB>line-end<TAB>title<TAB>disposition<TAB>issue# rows
+# (disposition: filed = linked issue OPEN, filed-closed = linked issue CLOSED, note = no linked issue). Every comment is read through
+# scripts/trusted-comments.sh, so an untrusted commenter cannot pre-post a finding to suppress a real one. With PF_SKIP set, reviewer
+# bodies for that head are skipped and only NOTE_DISPOSITION records carrying a different `reviewed_sha=` count (this head's own record,
+# from an earlier run of this same review, must never swallow its findings).
+pf_split_loc() { # PF_LOC="file[:N[-M]]" -> file<TAB>N<TAB>M (line columns empty when absent)
+  local _loc="$PF_LOC" _file _r _a="" _b=""; _file="$_loc"
+  case "$_loc" in *:[0-9]*) _r="${_loc##*:}"; case "$_r" in *[!0-9-]*|"") ;; *) _file="${_loc%:*}"; _a="${_r%%-*}"; _b="${_r#*-}"; [ "$_b" != "$_r" ] || _b="$_a" ;; esac ;; esac
+  printf '%s\t%s\t%s\n' "$_file" "$_a" "$_b"
+}
+prior_findings_tsv() {
+  local pr cj rows issues _id _c _s _loc _t _p _hit _f _a _b
+  [ -n "${TRUSTED_SCRIPT:-}" ] || return 0
+  rows=$(mktemp "${_pscr}/prior-rows.XXXXXX"); issues=$(mktemp "${_pscr}/prior-issues.XXXXXX")
+  for pr in $PF_PRS; do
+    case "$pr" in ''|*[!0-9]*) continue ;; esac
+    cj=$(gh api --paginate "repos/${REPO}/issues/${pr}/comments" 2>/dev/null) || continue
+    [ -n "$cj" ] || continue
+    printf '%s' "$cj" | bash "$TRUSTED_SCRIPT" bodies '^<!-- (FORGE:REVIEW-AGENT:[a-z-]+|REVIEW-FINDINGS-SYNTHESIZED-START) -->[\s\S]*(^|\n)Reviewed-SHA: [0-9a-f]{40,64}' 2>/dev/null \
+      | jq -r --arg skip "${PF_SKIP:-}" 'select($skip == "" or (test("(^|\\n)Reviewed-SHA: " + $skip + "\\r?(\\n|$)") | not)) | scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null \
+      | while IFS='|' read -r _id _c _s _loc _t; do
+          [ -n "$_t" ] || continue
+          _p=$(PF_LOC="$_loc" pf_split_loc); printf '%s\t%s\n' "$_p" "$(printf '%s' "$_t" | tr '\t' ' ')"
+        done >> "$rows"
+    printf '%s' "$cj" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:NOTE_DISPOSITION' 2>/dev/null \
+      | jq -r --arg skip "${PF_SKIP:-}" 'select($skip == "" or ((capture("^<!-- FORGE:NOTE_DISPOSITION:[^>]*reviewed_sha=(?<s>[0-9a-f]{40,64})") | .s) as $s | $s != $skip)) | split("\n")[] | select(startswith("- "))' 2>/dev/null \
+      | sed -n 's/^- [^ ]* \([^ ]*\) \[[A-Za-z?]*\] \(.*\): [^:]*$/\1\t\2/p' \
+      | while IFS="$(printf '\t')" read -r _loc _t; do
+          [ "$_loc" != "?" ] || continue
+          _p=$(PF_LOC="$_loc" pf_split_loc); printf '%s\t%s\n' "$_p" "$_t"
+        done >> "$rows"
+    gh issue list -R "$REPO" --label review-finding --state all --search "${pr} in:body" --limit 100 --json number,state,title,body 2>/dev/null \
+      | jq -c '.[]' >> "$issues" 2>/dev/null || true
+  done
+  # Linkage: a filed issue whose body names the file and whose title shares >= 3 tokens with the finding (open preferred).
+  sort -u "$rows" | while IFS="$(printf '\t')" read -r _f _a _b _t; do
+    [ -n "$_f" ] || continue
+    _hit=$(jq -rs --arg f "$_f" --arg t "$_t" 'def toks: ascii_downcase | [scan("[a-z0-9]{3,}")] | unique;
+      ($t | toks) as $a | [ .[] | select((.body // "") | contains($f))
+        | select((((.title // "") | toks) as $b | [$a[] | select(. as $x | $b | index($x))] | length) >= 3)
+        | {n: .number, s: (.state | ascii_downcase)} ]
+      | (map(select(.s == "open")) + map(select(.s != "open"))) | .[0] // empty | "\(.s)\t\(.n)"' "$issues" 2>/dev/null) || _hit=""
+    case "$_hit" in
+      open*) printf '%s\t%s\t%s\t%s\tfiled\t%s\n' "$_f" "$_a" "$_b" "$_t" "${_hit#*	}" ;;
+      closed*) printf '%s\t%s\t%s\t%s\tfiled-closed\t%s\n' "$_f" "$_a" "$_b" "$_t" "${_hit#*	}" ;;
+      *) printf '%s\t%s\t%s\t%s\tnote\t\n' "$_f" "$_a" "$_b" "$_t" ;;
+    esac
+  done
+  rm -f "$rows" "$issues"
+}
+PRIOR_ROWS=$(PF_SKIP="$REVIEW_SHA" PF_PRS="{PR_NUMBER}" prior_findings_tsv)
+if [ -n "$PRIOR_ROWS" ]; then
+  PRIOR_FILE=$(mktemp "$_pscr/{PR_NUMBER}_prior-findings.XXXXXX"); printf '%s\n' "$PRIOR_ROWS" > "$PRIOR_FILE"
+  # Best-effort hunk map from the most recent prior reviewed head to this one, so a moved line still overlaps. Any failure leaves the unshifted ranges.
+  PRIOR_SHA=$(gh api --paginate "repos/{GH_REPO}/issues/{PR_NUMBER}/comments" 2>/dev/null \
+    | bash "$TRUSTED_SCRIPT" bodies '^<!-- (FORGE:REVIEW-AGENT:[a-z-]+|REVIEW-FINDINGS-SYNTHESIZED-START) -->[\s\S]*(^|\n)Reviewed-SHA: [0-9a-f]{40,64}' 2>/dev/null \
+    | jq -r 'scan("(^|\\n)Reviewed-SHA: ([0-9a-f]{40,64})") | .[1]' 2>/dev/null | grep -vx "$REVIEW_SHA" | tail -n 1)
+  _top=$(git rev-parse --show-toplevel 2>/dev/null) || _top=""
+  if [ -n "$PRIOR_SHA" ] && [ -n "$_top" ]; then
+    DIFF_MAP_FILE=$(mktemp "$_pscr/{PR_NUMBER}_prior-diffmap.XXXXXX")
+    { git -C "$_top" diff -U0 --no-color --no-renames "$PRIOR_SHA" "$REVIEW_SHA" 2>/dev/null || true; } | while IFS= read -r _l; do
+      case "$_l" in
+        "+++ b/"*) _f="${_l#+++ b/}" ;;
+        "@@ "*) _h="${_l#@@ -}"; _o="${_h%% *}"; _n="${_h#* +}"; _n="${_n%% *}"
+                case "$_o" in *,*) _oc="${_o#*,}" ;; *) _oc=1 ;; esac; case "$_n" in *,*) _nc="${_n#*,}" ;; *) _nc=1 ;; esac
+                printf '%s\t%s\t%s\t%s\t%s\n' "$_f" "${_o%%,*}" "$_oc" "${_n%%,*}" "$_nc" ;;
+      esac
+    done > "$DIFF_MAP_FILE" || : > "$DIFF_MAP_FILE"
+  fi
+fi
 # Per deduped finding (FINDING_TEXT_FILE = mktemp file holding title + body + affected paths;
 # FINDING_FILE = the finding's file path, file:line accepted):
 #   DISPOSITION=$(bash "$CLASSIFY_SCRIPT" --severity "$FINDING_SEVERITY" --confidence "$FINDING_CONFIDENCE" \
 #                   --agent "$FINDING_AGENT" --lineage "$FINDING_LINEAGE" --text-file "$FINDING_TEXT_FILE" \
 #                   ${FINDING_FILE:+--file "$FINDING_FILE"} ${INPR_DIFF_FILE:+--inpr-diff "$INPR_DIFF_FILE"} \
-#                   ${CONTRACT_SCOPE_FILE:+--contract-scope "$CONTRACT_SCOPE_FILE" --contract-open "$CONTRACT_OPEN_FILE" --pr-files "$PR_FILES_FILE" --merge-issue "$MERGE_ISSUE"})
+#                   ${CONTRACT_SCOPE_FILE:+--contract-scope "$CONTRACT_SCOPE_FILE" --contract-open "$CONTRACT_OPEN_FILE" --pr-files "$PR_FILES_FILE" --merge-issue "$MERGE_ISSUE"} \
+#                   ${PRIOR_FILE:+--prior-findings "$PRIOR_FILE" --title "$FINDING_TITLE" ${DIFF_MAP_FILE:+--diff-map "$DIFF_MAP_FILE"}} \
+#                   ${FINDING_LINE_START:+--line-start "$FINDING_LINE_START" --line-end "${FINDING_LINE_END:-$FINDING_LINE_START}"})
 #   case "$DISPOSITION" in ISSUE*) ;; NOTE*) ;; INPR_FIX*) ;; esac   # first word is the class, the rest is the reason
 #   Contract-matched NOTE (`NOTE contract-deferred #N`): comment the finding (file:line + title) on the open
 #   deferred issue instead of filing a new one, and count it:
 #     gh issue comment N -R {GH_REPO} --body "Review of #{PR_NUMBER} also found this on a path declared deferred here: <file:line> <title>"  # allowlist:check-command-side-effects
 #     CONTRACT_DEMOTED=$((CONTRACT_DEMOTED + 1))
 #   `NOTE contract-accepted-risk` is counted in CONTRACT_DEMOTED too (no comment; the contract already records the reason).
+#   Re-flag NOTE (`NOTE reflag-filed #N` / `NOTE reflag-note`): an earlier head already raised or recorded this finding. List it in the NOTE list
+#   (`tracked on #N` or `already noted on an earlier head`), file nothing, and count it ONLY in notes_reflag (not notes_listed):
+#     NOTES_REFLAG=$((NOTES_REFLAG + 1))
 ```
 
 If the guard printed `REVIEW_RESULT: status: BLOCKED` (`classifier unavailable`), STOP the whole review: `exit 0` only ends that Bash block, so do not continue to 6C or any later phase, file no issues, post no `FORGE:NOTE_DISPOSITION`, and do not merge (Phase 8 never runs, `--auto-merge` included). The caller treats it like any other `BLOCKED` result.
@@ -2680,14 +2772,15 @@ Each NOTE gets exactly one disposition, in this preference order:
 
 **Metrics note (forge#3106)**: because NOTEs are not filed as issues, `review-finding` issue volume and any metric derived from it (findings per PR, `/pipeline-health` finding rates, amplification ratio) drop relative to pre-#3060 history. Compare against the `notes_*` counts in the review summary, not issue counts alone, when judging review depth across the change.
 
-Every NOTE disposition must be recorded (never silently dropped): list each NOTE (id, file:line, one-line reason) with its disposition in the review summary comment, including dropped ones, so a reviewer can audit the decision. NOTES are never passed to `Skill(issue)`. Record counts in the review summary (`notes_fixed`, `notes_listed`, `notes_dropped`, `findings_filed`, `inpr_fix`, `contract_demoted`) and the §6B.4 counts (`findings_dropped_stale`, `findings_preexisting`, `notes_demoted_no_scenario`). A contract-demoted NOTE is listed with its disposition (`tracked on #N` or `accepted-risk`) and counted only in `contract_demoted`. If no finding is an ISSUE after this step, skip 6C and continue to Phase 7. Findings classified `INPR_FIX` (§6B.6) are neither notes nor filed this round.
+Every NOTE disposition must be recorded (never silently dropped): list each NOTE (id, file:line, one-line reason) with its disposition in the review summary comment, including dropped ones, so a reviewer can audit the decision. NOTES are never passed to `Skill(issue)`. Record counts in the review summary (`notes_fixed`, `notes_listed`, `notes_dropped`, `findings_filed`, `inpr_fix`, `contract_demoted`, `notes_reflag`) and the §6B.4 counts (`findings_dropped_stale`, `findings_preexisting`, `notes_demoted_no_scenario`). A contract-demoted NOTE is listed with its disposition (`tracked on #N` or `accepted-risk`) and counted only in `contract_demoted`. If no finding is an ISSUE after this step, skip 6C and continue to Phase 7. Findings classified `INPR_FIX` (§6B.6) are neither notes nor filed this round.
 
-**Disposition marker (MANDATORY whenever Phase 6A extracted at least one finding):** post one PR comment whose first line is the machine-readable record below, followed by the NOTE list. Phase 8 refuses to auto-merge a PR that has `FINDING:` markers but no `FORGE:NOTE_DISPOSITION` comment — the disposition step is enforced, not advisory.
+**Disposition marker (MANDATORY whenever Phase 6A extracted at least one finding):** post one PR comment whose first line is the machine-readable record below, followed by the NOTE list. Phase 8 refuses to auto-merge a PR that has `FINDING:` markers but no `FORGE:NOTE_DISPOSITION` comment — the disposition step is enforced, not advisory. `notes_reflag` counts findings re-flagged from an earlier head (see Cross-head re-flag); `reviewed_sha` is the head this record covers. Consumers match the marker prefix only, so extra keys are safe.
 
 ```bash
 CLASSIFIER_MODE=script   # the §6B.5 guard blocks the review when the classifier is unresolvable, so this is always script
+REVIEW_SHA="{REVIEW_SHA}"; NOTES_REFLAG="${NOTES_REFLAG:-0}"   # fresh shell: reviewed_sha lets a later review of ANOTHER head read this record as a prior list (never the same head's own)
 # NOTE_LIST_FILE: mktemp file named for the PR number, holding one line per NOTE (id, file:line, disposition, reason).
-gh pr comment {PR_NUMBER} -R {GH_REPO} --body "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=${NOTES_FIXED:-0} notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} inpr_fix=${INPR_FIX_COUNT:-0} contract_demoted=${CONTRACT_DEMOTED:-0} findings_dropped_stale=${FINDINGS_DROPPED_STALE:-0} findings_preexisting=${FINDINGS_PREEXISTING:-0} notes_demoted_no_scenario=${NOTES_DEMOTED_NO_SCENARIO:-0} lineage=${FINDING_LINEAGE} classifier=${CLASSIFIER_MODE} -->
+gh pr comment {PR_NUMBER} -R {GH_REPO} --body "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=${NOTES_FIXED:-0} notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} inpr_fix=${INPR_FIX_COUNT:-0} contract_demoted=${CONTRACT_DEMOTED:-0} findings_dropped_stale=${FINDINGS_DROPPED_STALE:-0} findings_preexisting=${FINDINGS_PREEXISTING:-0} notes_demoted_no_scenario=${NOTES_DEMOTED_NO_SCENARIO:-0} lineage=${FINDING_LINEAGE} classifier=${CLASSIFIER_MODE} notes_reflag=${NOTES_REFLAG:-0} reviewed_sha=${REVIEW_SHA} -->
 $(cat "$NOTE_LIST_FILE" 2>/dev/null)" # allowlist:check-command-side-effects
 ```
 
