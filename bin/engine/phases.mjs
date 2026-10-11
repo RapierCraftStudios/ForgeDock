@@ -187,6 +187,15 @@ function latestGateState(comments) {
   }
   return "none";
 }
+/**
+ * Investigation exit evidence (forge#3534): a trusted comment led by
+ * `<!-- FORGE:INVESTIGATION:DELIVERABLES -->` as a full line. Anchored like every
+ * other marker, so the string quoted inside another comment never counts.
+ */
+function hasInvestigationMarker(comments) {
+  const m = PHASE_MARKERS.build.investigationMarker;
+  return hasMarker(comments, m, m);
+}
 /** close.md C2 PHASE_COMPLETE evidence in the current cycle (forge#3545). */
 function hasPhaseComplete(comments) {
   return hasMarker(comments, "FORGE:PHASE:COMPLETE", "FORGE:PHASE:COMPLETE");
@@ -590,6 +599,8 @@ export const PHASES = [
         const merged = await mergedPrForBranch(branch, state.lane, io);
         if (merged) return { satisfied: true, outputs: { branch, pr: merged.number } };
       }
+      // forge#3534: an investigation exit already posted its deliverables marker: build is done.
+      if (hasInvestigationMarker(comments)) return { satisfied: true, terminalReason: "investigation", outputs: {} };
       return { satisfied: false };
     },
     async detectOutcome(state, io) {
@@ -615,6 +626,12 @@ export const PHASES = [
       }
       if (complete && ahead > 0) {
         return { status: "committed", outputs: { branch, ...buildChildEvidence(comments) } };
+      }
+      // forge#3534: INVESTIGATION_COMPLETE writes no code and opens no PR, so it never
+      // posts FORGE:BUILDER:COMPLETE with commits. The durable deliverables marker is the
+      // ground truth. Not retried; review is skipped and close runs `--terminal-state investigation`.
+      if (hasInvestigationMarker(comments)) {
+        return { status: "committed", terminalReason: "investigation", outputs: {} };
       }
       // B5.5 NEEDS_DECOMPOSE: the size gate posts no FORGE:BUILDER:COMPLETE and
       // build.md says the router (not build) dispatches decompose with no
@@ -667,7 +684,8 @@ export const PHASES = [
     id: "review",
     command: "work-on/review",
     buildArgs: reviewArgs,
-    entryCondition: (s) => s.committed.includes("build"),
+    // forge#3534: an investigation build has no PR to review; close runs directly.
+    entryCondition: (s) => s.committed.includes("build") && s.terminalReason !== "investigation",
     async reconcile(state, io) {
       const pr = await openPrFor(state, io);   // adopt an existing PR instead of opening a second
       return pr ? { satisfied: false, outputs: { pr } } : { satisfied: false };
@@ -841,20 +859,23 @@ export const PHASES = [
       // non-merged handoff reason (needs-human, awaiting-merge, engine-error, ...) must never
       // be closed as merged.
       const reason = state.terminalReason ?? null;
-      if (reason !== null && !["merged", "decomposed", "invalid"].includes(reason))
+      if (reason !== null && !["merged", "decomposed", "invalid", "investigation"].includes(reason))
         throw new PhaseArgsError(`refusing close --terminal-state merged from terminalReason ${JSON.stringify(reason)}`);
       const terminal = reason === "decomposed" ? "decomposed"
-        : reason === "invalid" ? "invalid" : "merged";
+        : reason === "invalid" ? "invalid"
+        : reason === "investigation" ? "investigation" : "merged";
       const args = [String(state.issue), ...repoArgs(ctx), ...baseArgs(state)];
       // forge#3504: a merged close with no PR is fabricated evidence — require it.
-      if (state.pr != null || terminal === "merged") args.push("--pr", need(state.pr, "pr", /^[0-9]+$/));
+      // forge#3534: an investigation close is PR-less by definition; never pass --pr.
+      if (terminal !== "investigation" && (state.pr != null || terminal === "merged")) args.push("--pr", need(state.pr, "pr", /^[0-9]+$/));
       if (state.branch) args.push("--branch", need(state.branch, "branch", BRANCH_RE));
       const wt = await resolveWorktree(state, io);
       if (wt && PATH_RE.test(wt)) args.push("--worktree", wt);
       args.push("--terminal-state", terminal);
       return args;
     },
-    entryCondition: (s) => s.committed.includes("review"),
+    entryCondition: (s) => s.committed.includes("review")
+      || (s.committed.includes("build") && s.terminalReason === "investigation"), // forge#3534
     async reconcile(state, io) {
       // Idempotent resume: issue already CLOSED → skip the LLM re-run. forge#3644: the
       // workflow:merged label alone is NOT proof close ran — remediate M7 labels the issue
@@ -864,6 +885,15 @@ export const PHASES = [
       // strict subset of what satisfies this predicate on a CLOSED issue).
       const snap = await issueSnapshot(state.issue, io);
       if (!snap.ok) return { satisfied: false };
+      if (snap.state === "CLOSED" && state.terminalReason === "investigation") {
+        // forge#3534: the implement child closes an investigation issue itself, so CLOSED is no
+        // proof close.md ran (board, summary, trajectory). Its own idempotency key is the
+        // FORGE:TRAJECTORY comment; only that makes this satisfied.
+        try {
+          const { comments } = await issueMarkers(state.issue, io);
+          return { satisfied: comments.some((b) => startsWithHeader(b, "FORGE:TRAJECTORY")), terminalReason: "investigation" };
+        } catch { return { satisfied: false }; }
+      }
       if (snap.state === "CLOSED") return { satisfied: true };
       // forge#3545: a current-cycle FORGE:PHASE:COMPLETE means close already ran to its
       // PHASE_COMPLETE exit; do not re-run it.
@@ -891,8 +921,9 @@ export const PHASES = [
       // (already in TERMINAL_REASONS) rather than inventing a new one.
       if (snap.labels.includes(PHASE_MARKERS.close.completionLabel))
         return { status: "committed", terminalReason: "merged", outputs: {} };
+      // forge#3534: an investigation exit closes the issue itself; keep that reason honest.
       if (snap.state === "CLOSED")
-        return { status: "committed", terminalReason: "invalid", outputs: {} };
+        return { status: "committed", terminalReason: state.terminalReason === "investigation" ? "investigation" : "invalid", outputs: {} };
       // forge#3545: PHASE_COMPLETE is a valid close exit (multi-phase issue: PR merged,
       // issue deliberately left OPEN). Only the current cycle's marker counts.
       if (snap.state === "OPEN") {
