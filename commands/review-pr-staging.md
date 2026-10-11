@@ -916,8 +916,10 @@ TEST_GATE_REASON="Phase 6.5 not yet run"
 # ALL_PR_NUMBERS is the de-duplicated union of both scan methods (commit log + merge subjects)
 GATE_OUTPUT=$(Skill("{FORGE_SKILL_PREFIX}test-gate", "--prs \"$(echo $ALL_PR_NUMBERS | tr '\n' ' ' | xargs)\" --base $DEFAULT_BRANCH"))
 
-# Extract machine-readable verdict from Skill output
-TEST_GATE_VERDICT=$(echo "$GATE_OUTPUT" | grep -oP '(?<=FORGE:TEST_GATE:RESULT=)(BLOCK|PASS|SKIP)' | tail -1 || echo "SKIP")
+# Extract machine-readable verdict from Skill output. An absent/invalid marker stays EMPTY (never coerced to SKIP):
+# the verdict-handling fence treats an empty verdict as missing/invalid and fails closed under blocking posture.
+TEST_GATE_VERDICT=$(echo "$GATE_OUTPUT" | grep -oP '(?<=FORGE:TEST_GATE:RESULT=)(BLOCK|PASS|SKIP)' | tail -1)
+[ -n "$TEST_GATE_VERDICT" ] || TEST_GATE_REASON="gate result missing/invalid (no FORGE:TEST_GATE:RESULT marker in /test-gate output)"
 
 echo "Test-gate verdict: ${TEST_GATE_VERDICT}"
 # Persist the gate result: every Bash call is a fresh shell, and the verdict-handling fence and Phase 8 read it back (validated on reload).
@@ -935,6 +937,18 @@ OVERRIDE_PHRASE=$(yq '.verification.test_gate.override_phrase // "OVERRIDE: ship
 # Reload the Phase 6.5 gate result persisted by its producer (validated: only a known verdict reaches a gate decision).
 [ -n "${TEST_GATE_VERDICT:-}" ] || { [ -r "$_SD/${PR_NUMBER}_test_gate_verdict" ] && TEST_GATE_VERDICT=$(sed -n -E '1{/^(BLOCK|PASS|SKIP)$/p;q}' "$_SD/${PR_NUMBER}_test_gate_verdict"); }
 [ -n "${TEST_GATE_REASON:-}" ] || { [ -r "$_SD/${PR_NUMBER}_test_gate_reason" ] && TEST_GATE_REASON=$(sed -n 1p "$_SD/${PR_NUMBER}_test_gate_reason" | tr -d '\r\000-\037' | cut -c1-400); }
+# Fail closed: a missing, empty, or unrecognised verdict is never a SKIP. Normalize it to BLOCK so the BLOCK arm applies
+# the override check, advisory/blocking posture, and exit 1; GATE_VERDICT_INVALID makes the reasons say missing/invalid.
+GATE_VERDICT_INVALID=0
+case "${TEST_GATE_VERDICT:-}" in
+  BLOCK|PASS|SKIP) ;;
+  *)
+    GATE_VERDICT_INVALID=1
+    if [ -r "$_SD/${PR_NUMBER}_test_gate_verdict" ]; then _GV_WHY="persisted verdict file present but empty/invalid"; else _GV_WHY="persisted verdict file missing"; fi
+    echo "⚠️  Test gate: gate result missing/invalid (${_GV_WHY}) — treating as BLOCK, not SKIP."
+    TEST_GATE_VERDICT="BLOCK"
+    ;;
+esac
 case "$TEST_GATE_VERDICT" in
 
   SKIP)
@@ -985,15 +999,18 @@ case "$TEST_GATE_VERDICT" in
       echo "   Proceeding with deploy. Override is logged in Phase 8 summary."
       TEST_GATE_VERDICT="PASS"
       TEST_GATE_REASON="BLOCK downgraded to PASS by override: ${OVERRIDE_REASON}"
+      [ "$GATE_VERDICT_INVALID" = 1 ] && TEST_GATE_REASON="BLOCK (gate result missing/invalid) downgraded to PASS by override: ${OVERRIDE_REASON}"
 
     elif [ "$GATE_POSTURE" = "advisory" ]; then
       echo "⚠️  Test gate: BLOCK (advisory posture) — runtime failures detected but deploy is NOT prevented."
       echo "   Switch verification.test_gate.posture to 'blocking' in forge.yaml to enforce this gate."
       TEST_GATE_REASON="BLOCK (advisory) — runtime failures detected; deploy allowed by advisory posture"
+      [ "$GATE_VERDICT_INVALID" = 1 ] && TEST_GATE_REASON="BLOCK (advisory) — gate result missing/invalid; deploy allowed by advisory posture"
 
     else
       # blocking posture (default) — STOP
       echo "⛔ DEPLOY BLOCKED — /test-gate returned BLOCK verdict."
+      [ "$GATE_VERDICT_INVALID" = 1 ] && echo "   (gate result missing/invalid — failing closed; re-run /test-gate or post the override comment)"
       echo ""
       echo "Runtime failures were detected in the staging→${DEFAULT_BRANCH} bundle."
       echo "The failures were batch-introduced (not pre-existing on ${DEFAULT_BRANCH} baseline)."
@@ -1018,7 +1035,7 @@ case "$TEST_GATE_VERDICT" in
 
 ### What Happened
 
-\`/test-gate\` detected runtime failures in the staging→\`${DEFAULT_BRANCH}\` bundle that were NOT present on the \`${DEFAULT_BRANCH}\` baseline. These are batch-introduced regressions.
+\`/test-gate\` detected runtime failures in the staging→\`${DEFAULT_BRANCH}\` bundle that were NOT present on the \`${DEFAULT_BRANCH}\` baseline. These are batch-introduced regressions. (If the gate result was missing/invalid, no verdict could be read and the gate failed closed; re-run \`/test-gate\`.)
 
 \`/test-gate\` has filed \`test-failure\` issues for each failing cluster — check the issue tracker for details.
 
@@ -1032,15 +1049,17 @@ To override (ship known failures with documented reason), post a comment contain
 
 <!-- FORGE:GATE_FAILURE:TYPE=test-gate|BUNDLE=$(echo $ALL_PR_NUMBERS | tr '\n' ' ' | xargs) -->" 2>/dev/null || true
       fi
-      printf '%s\n' "$TEST_GATE_VERDICT" > "$_SD/${PR_NUMBER}_test_gate_verdict"; printf '%s\n' "BLOCK (blocking posture, no override)" > "$_SD/${PR_NUMBER}_test_gate_reason"
+      _GV_REASON="BLOCK (blocking posture, no override)"; [ "$GATE_VERDICT_INVALID" = 1 ] && _GV_REASON="BLOCK (gate result missing/invalid; blocking posture, no override)"
+      printf '%s\n' "$TEST_GATE_VERDICT" > "$_SD/${PR_NUMBER}_test_gate_verdict"; printf '%s\n' "$_GV_REASON" > "$_SD/${PR_NUMBER}_test_gate_reason"
       exit 1
     fi
     ;;
 
   *)
-    echo "⚠️  Test gate: unrecognised verdict '${TEST_GATE_VERDICT}' — treating as SKIP."
-    TEST_GATE_VERDICT="SKIP"
-    TEST_GATE_REASON="SKIP — unrecognised verdict from /test-gate (treated as SKIP)"
+    # Unreachable (normalized above); fail closed regardless — never SKIP.
+    echo "⛔ Test gate: gate result missing/invalid ('${TEST_GATE_VERDICT}') — failing closed."
+    printf '%s\n' "BLOCK" > "$_SD/${PR_NUMBER}_test_gate_verdict"; printf '%s\n' "BLOCK (gate result missing/invalid)" > "$_SD/${PR_NUMBER}_test_gate_reason"
+    exit 1
     ;;
 
 esac
