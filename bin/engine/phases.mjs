@@ -175,6 +175,9 @@ export async function postCycleMarker(issue, n, io) {
  * `FORGE:ACCEPTANCE_GATE:PASSED` => "pass"; `:FAILED`, `:BLOCKED` or a
  * `FORGE:BUILD_BLOCKED` comment => "blocked"; none => "none" (legacy / crash
  * paths keep their prior behaviour). `comments` are trusted bodies, oldest first.
+ * Stays fail-closed by design. A blocked state clears only via a newer PASSED, which a
+ * re-invocation posts: build.md B0 "gate resume" re-enters B6.5 instead of returning
+ * ALREADY_DONE when the newest gate marker is blocked (forge#3725).
  */
 function latestGateState(comments) {
   const gate = "FORGE:ACCEPTANCE_GATE";
@@ -666,8 +669,9 @@ export const PHASES = [
       const ahead = branch ? await commitsAhead(state.lane, branch, io) : -1; // … AND real commits
       // forge#3545: fail closed. COMPLETE is written before the B6.5 acceptance gate, so a
       // newer FAILED/BLOCKED gate (or BUILD_BLOCKED) must not be committed and move on to
-      // review. Non-retryable: a retry would only re-read the same append-only markers;
-      // a repaired build posts a newer PASSED, which clears this.
+      // review. Non-retryable: a retry would only re-read the same append-only markers.
+      // A newer PASSED clears this: either the in-build repair loop posts it, or a fresh
+      // build invocation does via build.md B0 gate resume (re-enters B6.5; forge#3725).
       if (latestGateState(comments) === "blocked") {
         return { status: "failed", detail: `acceptance gate blocked (builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"})`, retryable: false };
       }
