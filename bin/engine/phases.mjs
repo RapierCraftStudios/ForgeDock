@@ -115,6 +115,56 @@ function latestMarked(comments, header, sentinel) {
   return all.length ? all[all.length - 1] : null;
 }
 /**
+ * Cycle boundary (forge#3657). `--retry` on a phase-complete run starts a new
+ * cycle; the engine publishes `<!-- FORGE:CYCLE: n -->` so builder evidence from
+ * earlier cycles (branch, merged PR) is not re-adopted. Callers pass TRUSTED
+ * comments only (issueMarkers), so an untrusted comment cannot move the boundary.
+ */
+export function cycleMarker(n) { return `<!-- FORGE:CYCLE: ${n} -->`; }
+const CYCLE_RE = /^[ \t]*<!--[ \t]*FORGE:CYCLE:[ \t]*(\d+)[ \t]*-->[ \t]*$/m;
+function cycleNumber(body) {
+  if (!startsWithHeader(body, "FORGE:CYCLE")) return null;
+  const m = String(body).match(CYCLE_RE);
+  return m ? Number(m[1]) : null;
+}
+/** Comments after the newest cycle marker; all comments when none is present. */
+export function sliceToCurrentCycle(comments) {
+  for (let i = comments.length - 1; i >= 0; i--) {
+    if (cycleNumber(comments[i]) !== null) return comments.slice(i + 1);
+  }
+  return comments;
+}
+/**
+ * Next cycle number: one past the higher of the newest trusted FORGE:CYCLE on
+ * GitHub and `localCycles` (the local RUN_NEXT_CYCLE count). A rehydrated log
+ * never replays RUN_NEXT_CYCLE, so the local count alone can reset to 0 while
+ * GitHub already carries markers. Errors propagate (caller fails closed).
+ */
+export async function nextCycleNumber(issue, localCycles, io) {
+  const { comments } = await issueMarkers(issue, io);
+  let highest = 0;
+  for (const body of comments) {
+    const c = cycleNumber(body);
+    if (c !== null && c > highest) highest = c;
+  }
+  return Math.max(highest, localCycles) + 1;
+}
+/**
+ * Idempotently publish the FORGE:CYCLE marker for cycle `n`: skipped when the
+ * newest trusted cycle marker already is `n` (crash between post and the log
+ * append retries safely). Errors propagate so the caller can fail closed.
+ */
+export async function postCycleMarker(issue, n, io) {
+  const { comments } = await issueMarkers(issue, io);
+  for (let i = comments.length - 1; i >= 0; i--) {
+    const c = cycleNumber(comments[i]);
+    if (c !== null) { if (c === n) return { posted: false }; break; }
+  }
+  await io.gh(["issue", "comment", String(issue), "--body", cycleMarker(n)]);
+  return { posted: true };
+}
+
+/**
  * Trusted comment bodies, chronological — the same single fetch + trust predicate
  * as issueMarkers() (one path, forge#3542). Fail closed: a fetch error yields `[]` here (issueMarkers itself propagates it).
  */
@@ -481,7 +531,8 @@ export const PHASES = [
       // Idempotent resume: resolve the real branch from ground truth (FORGE:BUILDER
       // comment) rather than trusting a possibly-stale/absent state.branch, then
       // check it's already ahead of base → treat as done, skip the LLM (forge#2174).
-      const { comments } = await issueMarkers(state.issue, io);
+      const { comments: allComments } = await issueMarkers(state.issue, io);
+      const comments = sliceToCurrentCycle(allComments); // forge#3657: current-cycle evidence only
       const branch = resolveBranch(state, comments);
       if (branch && hasMarker(comments, PHASE_MARKERS.build.header, PHASE_MARKERS.build.completionMarker) && (await commitsAhead(state.lane, branch, io)) > 0) {
         return { satisfied: true, outputs: { branch } };
@@ -495,7 +546,8 @@ export const PHASES = [
       return { satisfied: false };
     },
     async detectOutcome(state, io) {
-      const { comments } = await issueMarkers(state.issue, io);
+      const { comments: allComments } = await issueMarkers(state.issue, io);
+      const comments = sliceToCurrentCycle(allComments); // forge#3657
       const complete = hasMarker(comments, PHASE_MARKERS.build.header, PHASE_MARKERS.build.completionMarker); // #1305: require :COMPLETE …
       // Resolve the branch the builder actually created from the FORGE:BUILDER:COMPLETE
       // comment (ground truth), scoped to that specific comment — see
@@ -514,7 +566,7 @@ export const PHASES = [
       // build.md says the router (not build) dispatches decompose with no
       // needs-human. Non-retryable by construction: a retry re-measures and
       // re-emits the same exit.
-      if (!complete && mayRouteToDecompose(comments) && sizeGateRoutesToDecompose(await trustedCommentBodies(state.issue, io))) {
+      if (!complete && mayRouteToDecompose(comments) && sizeGateRoutesToDecompose(comments)) {
         return { status: "committed", terminalReason: "decomposed", outputs: branch ? { branch } : {} };
       }
       const detail = `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}`;
