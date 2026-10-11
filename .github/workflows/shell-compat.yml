@@ -97,6 +97,9 @@ jobs:
       - name: Run review-pr-gate2.test.sh
         if: runner.os != 'macOS'
         run: bash scripts/review-pr-gate2.test.sh
+      - name: Run orchestrate-soft-edge.test.sh
+        if: runner.os != 'macOS'
+        run: bash scripts/orchestrate-soft-edge.test.sh
       - name: Run forge-root.test.sh
         run: bash scripts/forge-root.test.sh
       - name: Run forge-root.test.sh bootstrap under zsh (macOS)

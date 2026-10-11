@@ -1859,7 +1859,54 @@ verify_file_overlap_edge() {
 
 **Recursive cascade note (item 6 only)**: when a dependent `DEP` is itself marked "skipped — dependency failed" (edge confirmed `KEEP`, not dropped), `DEP` becomes the new FAILED anchor for its own direct dependents — re-run this same `verify_file_overlap_edge` check at that next hop too, rather than assuming every transitive descendant is unconditionally skipped. A grandchild dependent whose only path to the failure runs through a spurious (droppable) edge one hop down must not be skipped just because its parent was.
 
-**Never called from**: the `IN_PROGRESS` branch (nothing to re-verify yet — the predecessor hasn't concluded).
+**Not called from the `IN_PROGRESS` branch**: this helper's `DROP`-on-no-PR rule is only safe for a predecessor that has concluded. The `IN_PROGRESS` branch uses the stricter `verify_soft_edge_early` below instead, which can only `RELEASE` or `HOLD`.
+
+**Soft-edge early release** <!-- Added: forge#3697 -->: a Layer 1 edge is *soft* (`EDGE_SOFT["${PRED}:${DEP}"]=true`, tagged in `phase-3-dependency.md` Step 3C) when either endpoint's file set came from `body-fallback` provenance, i.e. a pre-investigation guess. Waiting for such a predecessor to merge can serialize independent work for its whole life, so on each readiness pass (every predecessor build -> in-review transition and the periodic poll) an `IN_PROGRESS` predecessor on a soft edge is checked against its live PR diff. `verify_soft_edge_early` returns `RELEASE` only on positive evidence: a non-CLOSED PR exists, `gh pr diff --name-only` succeeded, and no `EDGE_FILES` entry appears in it. Every other path returns `HOLD`: hard edge, no `EDGE_KIND`, lookup error, **no PR yet (HOLD, never DROP)**, diff error, or overlap. Residual risk: a predecessor's PR may still add a shared file in a later commit; the claims-board dispatch gate (forge#2844) re-checks live claims before dispatch, and only soft edges are ever released. A `RELEASE` is recorded in `EDGE_RELEASED` so the edge is not re-queried.
+
+```bash
+verify_soft_edge_early() {
+  local PRED="$1"
+  local DEP="$2"
+
+  # Hard edges (investigator/contract provenance), explicit dependencies, DATABASE chain and
+  # Layer 2-5 edges are never released early.
+  if [ "${EDGE_SOFT["${PRED}:${DEP}"]:-}" != "true" ] || [ -z "${EDGE_KIND["${PRED}:${DEP}"]:-}" ]; then
+    echo "HOLD"
+    return
+  fi
+
+  local PRED_PR PRED_PR_EXIT
+  PRED_PR=$(gh pr list -R {GH_REPO} --state all --search "\"Closes #${PRED}\" in:body" \
+    --json number,state --jq '[.[] | select(.state != "CLOSED")][0].number // empty' 2>/dev/null)
+  PRED_PR_EXIT=$?
+  if [ "$PRED_PR_EXIT" -ne 0 ] || [ -z "$PRED_PR" ]; then
+    echo "HOLD"   # lookup failed or no live PR yet: no evidence, keep waiting
+    return
+  fi
+
+  local ACTUAL_FILES DIFF_EXIT
+  ACTUAL_FILES=$(gh pr diff "$PRED_PR" -R {GH_REPO} --name-only 2>/dev/null)
+  DIFF_EXIT=$?
+  if [ "$DIFF_EXIT" -ne 0 ]; then
+    echo "HOLD"   # a failed fetch is not "confirmed no overlap"
+    return
+  fi
+
+  local EF EF_CLEAN EF_ESCAPED
+  for EF in ${EDGE_FILES["${PRED}:${DEP}"]:-}; do
+    [ -z "$EF" ] && continue
+    EF_CLEAN="${EF%/}"
+    EF_ESCAPED=$(printf '%s' "$EF_CLEAN" | sed 's/[.[\*^$()+?{|]/\\&/g')
+    if echo "$ACTUAL_FILES" | grep -qE "(^|/)${EF_ESCAPED}(/|$)"; then
+      echo "HOLD"   # real overlap: stay serialized
+      return
+    fi
+  done
+  echo "RELEASE"
+}
+```
+
+**Call sites of `verify_soft_edge_early`**: only the `IN_PROGRESS` arm of the Step 4B readiness loop (below). `verify_file_overlap_edge` keeps its three terminal-state call sites unchanged.
 
 **DONE-path edge re-verification** <!-- Added: forge#2848 --> — the DONE branch *does* call this helper, and it is the only call site that fires on the happy path. Be precise about what it buys, because the obvious reading is wrong:
 
@@ -2028,7 +2075,18 @@ for BLOCKED_NUM in {all_blocked_issue_numbers}; do
         ANY_PRED_GATED=true
         GATING_PREDS+=("$PRED")
         ;;                                        # handled by item 6.5 (blocked-on-human-merge)
-      IN_PROGRESS|*) ALL_PREDS_DONE=false ;;       # just keep waiting
+      IN_PROGRESS)
+        # forge#3697: a soft (body-fallback) edge is released early when the predecessor's live
+        # PR diff shows no overlap; anything else keeps waiting.
+        if [ "${EDGE_SOFT["${PRED}:${BLOCKED_NUM}"]:-}" = "true" ] && [ "${EDGE_RELEASED["${PRED}:${BLOCKED_NUM}"]:-}" != "true" ]; then
+          if [ "$(verify_soft_edge_early "$PRED" "$BLOCKED_NUM")" = "RELEASE" ]; then # allowlist:fence-funcs (forge#3697: helper defined in the Step 4B fence above)
+            EDGE_RELEASED["${PRED}:${BLOCKED_NUM}"]=true
+            echo "soft edge #${PRED} -> #${BLOCKED_NUM} released early (predecessor PR diff has no overlap)"
+          fi
+        fi
+        [ "${EDGE_RELEASED["${PRED}:${BLOCKED_NUM}"]:-}" = "true" ] || ALL_PREDS_DONE=false
+        ;;
+      *) ALL_PREDS_DONE=false ;;                  # just keep waiting
     esac
   done
   if [ "$ALL_PREDS_DONE" = "true" ]; then
