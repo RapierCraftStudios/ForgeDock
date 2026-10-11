@@ -7,9 +7,9 @@
  */
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { accessSync, appendFileSync, constants, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -102,22 +102,36 @@ export function emit(event, payload = {}, ctx = {}) {
     const buf = join(dir, `${rec.repo.replace("/", "_")}__${n}.jsonl`);
     const line = JSON.stringify(rec);
     // Per-target lock (mkdir is atomic): serializes emitters on this host so the unversioned GitHub read-modify-write
-    // cannot lose a record or double-POST a part. A lock over 60s old is stale; on timeout the record is buffered.
+    // cannot lose a record or double-POST a part. Bounded wait (50 x 0.1s); a lock over 5 min old is stale and is
+    // reclaimed by an atomic rename (one winner); the holder writes an owner token and releases only its own lock.
+    // A non-writable buffer dir skips locking; on timeout the record is buffered.
     let canLock = true;
-    try { mkdirSync(dir, { recursive: true }); } catch { canLock = false; }
+    try { mkdirSync(dir, { recursive: true }); accessSync(dir, constants.W_OK); } catch { canLock = false; }
     const lock = join(dir, `.lock-${rec.repo.replace("/", "_")}__${n}`);
+    const token = `${process.pid}.${randomBytes(4).toString("hex")}`;
     let got = !canLock;
-    for (let i = 0; i < 100 && !got; i++) {
-      try { mkdirSync(lock); got = true; } catch {
-        try { if (Date.now() - statSync(lock).mtimeMs > 60000) { rmSync(lock, { recursive: true, force: true }); continue; } } catch { /* raced */ }
-        spawnSync("sleep", ["0.1"]);
+    for (let i = 0; i < 50 && !got; i++) {
+      try { mkdirSync(lock); writeFileSync(join(lock, "owner"), token); got = true; } catch {
+        let stale = false;
+        try { stale = Date.now() - statSync(lock).mtimeMs > 300000; } catch { /* raced */ }
+        if (stale) { try { renameSync(lock, `${lock}.stale.${token}`); rmSync(`${lock}.stale.${token}`, { recursive: true, force: true }); } catch { /* lost the race */ } }
+        else spawnSync("sleep", ["0.1"]);
       }
     }
     if (!got) { appendFileSync(buf, `${line}\n`); return rec; }
-    // Claim the buffer by renaming it: records appended meanwhile land in a fresh file and are never deleted.
+    const unlock = () => { if (!canLock) return; try { if (readFileSync(join(lock, "owner"), "utf8") === token) rmSync(lock, { recursive: true, force: true }); } catch { /* already gone */ } };
+    // Claim the buffer by renaming it: records appended meanwhile land in a fresh file and are never deleted. Holding
+    // the lock, any other "<buf>.flush.*" is an orphan of a killed emitter: fold it in.
     const claimed = `${buf}.flush.${process.pid}`;
     let pending = [line];
-    try { if (existsSync(buf)) { renameSync(buf, claimed); pending = [...readFileSync(claimed, "utf8").split("\n").filter(Boolean), line]; } } catch { /* nothing claimed */ }
+    try {
+      if (existsSync(buf)) renameSync(buf, claimed);
+      for (const f of readdirSync(dir)) {
+        const full = join(dir, f);
+        if (f.startsWith(`${basename(buf)}.flush.`) && full !== claimed) { appendFileSync(claimed, readFileSync(full, "utf8")); rmSync(full, { force: true }); }
+      }
+      if (existsSync(claimed)) pending = [...readFileSync(claimed, "utf8").split("\n").filter(Boolean), line];
+    } catch { /* nothing claimed */ }
     try {
       upsert(rec.repo, n, pending);
       rmSync(claimed, { force: true });
@@ -126,7 +140,7 @@ export function emit(event, payload = {}, ctx = {}) {
         if (existsSync(claimed)) { appendFileSync(buf, readFileSync(claimed, "utf8")); rmSync(claimed, { force: true }); }
         appendFileSync(buf, `${line}\n`);
       } catch { /* lost record costs completeness only */ }
-    } finally { if (canLock) rmSync(lock, { recursive: true, force: true }); }
+    } finally { unlock(); }
     return rec;
   } catch {
     return null;

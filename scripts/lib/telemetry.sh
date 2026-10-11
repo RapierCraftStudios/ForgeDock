@@ -121,27 +121,40 @@ _forge_tel_impl() {
   buf="$bdir/$(printf '%s' "$repo" | tr '/' '_')__${n}.jsonl"
   # Serialize emitters on this host per target: the GitHub read-modify-write has no version check, so two overlapping
   # emitters would each PATCH a stale snapshot (lost record) or both POST a first/rollover part (duplicate comments).
-  # Bounded wait; a lock older than 60s is stale and reclaimed; on timeout the record is buffered, never dropped.
-  local lock="$bdir/.lock-$(printf '%s' "$repo" | tr '/' '_')__${n}" tries=0 got=""
-  mkdir -p "$bdir" 2>/dev/null || { tries=100; got=nolock; }
-  while [ "$tries" -lt 100 ]; do
-    if mkdir "$lock" 2>/dev/null; then got=1; break; fi
-    if [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then rmdir "$lock" 2>/dev/null; continue; fi
-    tries=$((tries + 1)); sleep 0.1 2>/dev/null || sleep 1
+  # Bounded wait (every loop pass counts, 50 x 0.1s); a lock over 5 min old (longer than any bounded hold: two 30s gh
+  # calls plus trust checks) is stale and reclaimed by an atomic rename so only one waiter wins; the holder writes an
+  # owner token and releases only its own lock. A non-writable buffer dir skips locking. On timeout the record is
+  # buffered, never dropped.
+  local lock="$bdir/.lock-$(printf '%s' "$repo" | tr '/' '_')__${n}" tries=0 got="" token="$$.${RANDOM}${RANDOM}"
+  if ! { mkdir -p "$bdir" 2>/dev/null && [ -w "$bdir" ]; }; then tries=50; got=nolock; fi
+  while [ "$tries" -lt 50 ]; do
+    if mkdir "$lock" 2>/dev/null; then printf '%s' "$token" > "$lock/owner" 2>/dev/null; got=1; break; fi
+    if [ -n "$(find "$lock" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then
+      mv "$lock" "$lock.stale.$token" 2>/dev/null && rm -rf "$lock.stale.$token" 2>/dev/null
+    else
+      sleep 0.1 2>/dev/null || sleep 1
+    fi
+    tries=$((tries + 1))
   done
   if [ -z "$got" ]; then printf '%s\n' "$rec" >> "$buf" 2>/dev/null; return 0; fi
+  _forge_tel_unlock() { [ "$got" = 1 ] && [ "$(cat "$lock/owner" 2>/dev/null)" = "$token" ] && rm -rf "$lock" 2>/dev/null; got=""; }
+  trap '_forge_tel_unlock' EXIT; trap '_forge_tel_unlock; exit 1' HUP INT TERM
   # Claim the buffer by renaming it first: a record appended by another emitter after this point lands in a fresh
-  # buffer file and survives, instead of being deleted by a later rm of the whole file.
-  local claimed="$buf.flush.$$"
+  # buffer file and survives. Holding the lock, any other "$buf.flush.*" is an orphan of a killed emitter: fold it in.
+  local claimed="$buf.flush.$$" f
   pending="$rec"
-  if [ -s "$buf" ] && mv "$buf" "$claimed" 2>/dev/null; then pending="$(cat "$claimed")"$'\n'"$rec"; fi
+  if [ -s "$buf" ]; then mv "$buf" "$claimed" 2>/dev/null; fi
+  for f in "$buf".flush.*; do
+    [ -f "$f" ] && [ "$f" != "$claimed" ] && cat "$f" >> "$claimed" 2>/dev/null && rm -f "$f" 2>/dev/null
+  done
+  if [ -s "$claimed" ]; then pending="$(cat "$claimed")"$'\n'"$rec"; fi
   if printf '%s\n' "$pending" | _forge_tel_upsert "$repo" "$n"; then
     rm -f "$claimed" 2>/dev/null
   else
     if [ -f "$claimed" ]; then cat "$claimed" >> "$buf" 2>/dev/null; rm -f "$claimed" 2>/dev/null; fi
     printf '%s\n' "$rec" >> "$buf" 2>/dev/null
   fi
-  [ "$got" = 1 ] && rmdir "$lock" 2>/dev/null
+  _forge_tel_unlock
   return 0
 }
 
