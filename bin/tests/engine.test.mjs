@@ -38,6 +38,7 @@ function fakeWorld() {
       if (a.startsWith("repo view")) return "acme/widgets";
       if (a.startsWith("api ") && a.includes("/comments")) return asComments(w.markers);
       if (a.startsWith("issue comment")) { w.markers += SEP + args[args.indexOf("--body") + 1]; (w.posted ||= []).push(args[args.indexOf("--body") + 1]); return ""; }
+      if (a.startsWith("api graphql")) return JSON.stringify({ data: { repository: { issue: { body: w.body, authorAssociation: "NONE", author: { login: "forge[bot]", __typename: "Bot" }, editor: null } } } });
       if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
       if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
       if (a.startsWith("issue edit")) { const i = args.indexOf("--body"); if (i>=0) w.body = args[i+1];
@@ -1454,6 +1455,7 @@ describe("runIssue", () => {
           w.comments.push(args[args.indexOf("--body") + 1]);
           return "";
         }
+        if (a.startsWith("api graphql")) return JSON.stringify({ data: { repository: { issue: { body: w.body, authorAssociation: "NONE", author: { login: "forge[bot]", __typename: "Bot" }, editor: null } } } });
         if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
         if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
         if (a.startsWith("issue edit")) { const i = args.indexOf("--body"); if (i>=0) w.body = args[i+1];

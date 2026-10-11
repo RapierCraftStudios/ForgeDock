@@ -48,12 +48,22 @@ export const TERMINAL_REASONS = ["merged", "invalid", "needs-human", "decomposed
  */
 export function isTrustedComment(c) {
   if (!c || typeof c !== "object") return false;
+  return isTrustedActor({ association: c.author_association, type: c.user?.type, login: c.user?.login });
+}
+
+/**
+ * The ONE actor predicate behind `isTrustedComment` and the issue-body
+ * FORGE:STATE gate (projector). `association` is the GitHub author association,
+ * `type` the actor's `__typename`/`user.type` ("Bot", "User"...), `login` its
+ * login. Missing fields fail closed.
+ */
+export function isTrustedActor({ association, type, login } = {}) {
   const list = (v) => String(v).split(",").map((x) => x.trim()).filter(Boolean);
   const assoc = list(process.env.FORGE_TRAIL_TRUSTED_ASSOCIATIONS ?? "OWNER,MEMBER,COLLABORATOR");
   const logins = list(process.env.FORGE_TRAIL_TRUSTED_LOGINS ?? "");
-  return assoc.includes(c.author_association ?? "")
-    || (c.user?.type ?? "") === "Bot"
-    || logins.includes(c.user?.login ?? "");
+  return assoc.includes(association ?? "")
+    || (type ?? "") === "Bot"
+    || logins.includes(login ?? "");
 }
 
 /**

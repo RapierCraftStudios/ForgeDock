@@ -90,16 +90,18 @@ describe("scripts/remediate-liveness.sh", () => {
   const iso = (ms) => new Date(ms).toISOString().replace(/\.\d+Z$/, "Z");
   const bot = (body, ms = NOW - 60_000) => ({ body, user: { type: "Bot", login: "x[bot]" }, author_association: "NONE", created_at: iso(ms) });
   const stateBody = (lease) => `desc\n<!-- FORGE:STATE\n${JSON.stringify({ v: 1, lease })}\n-->\n`;
-  function run({ lease, issueBody, prComments = [], issueComments = [], holder = "" }) {
+  function run({ lease, issueBody, prComments = [], issueComments = [], holder = "", editor = { login: "forge[bot]", __typename: "Bot" }, permission = "read" }) {
     const d = mkdtempSync(join(tmpdir(), "fd-lv-"));
     try {
-      writeFileSync(join(d, "issue.json"), JSON.stringify({ body: issueBody ?? (lease === undefined ? "no state" : stateBody(lease)) }));
+      writeFileSync(join(d, "issue.json"), JSON.stringify({ data: { repository: { issue: { body: issueBody ?? (lease === undefined ? "no state" : stateBody(lease)),
+        authorAssociation: "NONE", author: { login: "reporter", __typename: "User" }, editor } } } }));
       writeFileSync(join(d, "pr.json"), JSON.stringify(prComments));
       writeFileSync(join(d, "iss.json"), JSON.stringify(issueComments));
       writeFileSync(join(d, "gh"), `#!/usr/bin/env bash
 D="${d}"
 case "$1 $2" in
-  "issue view") cat "$D/issue.json";;
+  "api graphql") cat "$D/issue.json";;
+  "api repos/acme/w/collaborators/"*) echo "${permission}";;
   "issue comment") echo posted >> "$D/posted";;
   "api --paginate") case "$3" in *issues/7/comments) cat "$D/pr.json";; *issues/42/comments) cat "$D/iss.json";; esac;;
 esac
@@ -129,6 +131,14 @@ esac
   });
   it("SEC-2: a far-future (forged) lease is dead, never an indefinite deferral", () => {
     assert.equal(run({ lease: { by: "mallory", until: 9e15 } }).rc, 0);
+  });
+  it("an untrusted-edited body is ignored: its live lease does not defer", () => {
+    const r = run({ lease: { by: "mallory", until: NOW + 300_000 }, editor: { login: "reporter", __typename: "User" } });
+    assert.equal(r.rc, 0); assert.equal(r.out, "LIVENESS: DEAD");
+  });
+  it("a human editor with write permission is trusted", () => {
+    const r = run({ lease: { by: "cli_other_1", until: NOW + 300_000 }, editor: { login: "maint", __typename: "User" }, permission: "write" });
+    assert.equal(r.rc, 10);
   });
   it("a same-host lease whose pid is gone is dead", () => {
     const host = spawnSync("uname", ["-n"], { encoding: "utf8" }).stdout.trim().replace(/[^A-Za-z0-9.-]/g, "-");

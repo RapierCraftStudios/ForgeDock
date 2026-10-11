@@ -77,6 +77,7 @@ function makeWorld() {
         if (w.commentCalls === w.crashAtComments) { w.crashAtComments = Infinity; throw new Error("CRASH mid-phase (comments)"); }
         return asComments(w.markers);
       }
+      if (a.startsWith("api graphql")) return JSON.stringify({ data: { repository: { issue: { body: w.body, authorAssociation: "NONE", author: { login: "forge[bot]", __typename: "Bot" }, editor: null } } } });
       if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
       if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
       if (a.startsWith("issue edit")) {
@@ -359,6 +360,7 @@ describe("crash injection: forge#2184 comment-scoped last-match resume semantics
         const a = args.join(" ");
         if (a.startsWith("repo view")) return "acme/widgets";
         if (a.includes("/comments")) return JSON.stringify(w.comments.map((b) => (typeof b === "string" ? trusted(b) : b)));
+        if (a.startsWith("api graphql")) return JSON.stringify({ data: { repository: { issue: { body: w.body, authorAssociation: "NONE", author: { login: "forge[bot]", __typename: "Bot" }, editor: null } } } });
         if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
         if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
         if (a.startsWith("issue edit")) {
