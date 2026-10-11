@@ -1325,9 +1325,9 @@ function mutatingGitCommand(tokens, depth = 0) {
   switch (sub) {
     case "checkout":
       // Creating a new branch is the one sanctioned form (`git checkout -b`).
-      return opts.some((t) => t === "-b" || t === "-B") ? null : hit("git checkout");
+      return opts.some((t) => t === "-b") ? null : hit("git checkout");
     case "switch":
-      return opts.some((t) => t === "-c" || t === "-C" || t === "--create") ? null : hit("git switch");
+      return opts.some((t) => t === "-c" || t === "--create") ? null : hit("git switch");
     case "merge": case "pull": case "rebase": case "cherry-pick": case "revert": case "am": case "restore":
       return hit(`git ${sub}`);
     case "clean":
@@ -1395,6 +1395,8 @@ function checkMainCheckoutMutation(command) {
     }
     if (!offender) return null;
     if (!isMainCheckout(targetDir)) return null;
+    // Hook is global: only protect ForgeDock-managed main checkouts (issue #1591 scoping), never unrelated repos.
+    if (!existsSync(join(targetDir, "forge.yaml")) && !existsSync(join(targetDir, ".forgedock"))) return null;
     return (
       `BLOCKED: \`${offender}\` would mutate the main checkout (${targetDir}).\n` +
       "The main checkout is shared with the operator and other agents. Work in a git worktree " +

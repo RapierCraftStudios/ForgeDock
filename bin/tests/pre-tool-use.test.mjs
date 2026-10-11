@@ -2214,6 +2214,19 @@ describe("main-checkout mutation guard (issue #3650)", () => {
     assert.equal(run(`(cd ${wtDir} && git checkout feat/x)`, mainDir).exitCode, 0);
   });
 
+  it("does not guard unmanaged repos and does not exempt forced branch resets (SEC-12/SEC-13)", () => {
+    const plain = join(root, "plain");
+    spawnSync("mkdir", ["-p", plain]);
+    git(plain, "init", "-q", "-b", "main");
+    for (const c of ["git pull", "git rebase x", "git stash", "git checkout x"]) {
+      assert.equal(run(c, plain).exitCode, 0, c);
+    }
+    for (const c of ["git checkout -B staging origin/staging", "git switch -C staging"]) {
+      assert.equal(run(c, mainDir).exitCode, 2, c);
+    }
+    assert.equal(run("git checkout -b feat/z", mainDir).exitCode, 0);
+  });
+
   it("honours the operator override", () => {
     assert.equal(run("git checkout main", mainDir, { FORGE_ALLOW_MAIN_CHECKOUT_GIT: "1" }).exitCode, 0);
   });
