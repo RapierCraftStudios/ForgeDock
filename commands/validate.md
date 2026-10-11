@@ -184,9 +184,17 @@ if [ -n "$INPUT_ISSUE" ] && [ -n "$GH_FLAG" ]; then
     esac
 
     # Resolve and call transition-label.sh --validate
-    REPO_PATH=$(yq -r '.paths.root' forge.yaml 2>/dev/null || echo ".")
-    SCRIPT="$REPO_PATH/scripts/transition-label.sh"
-    if [ -f "$SCRIPT" ]; then
+    # Trusted-install resolution only; never the working tree / REPO_PATH (#3400/#3483, #3596)
+    _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+    _tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+    for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+      [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+    done
+    SCRIPT=""
+    while IFS= read -r _c; do
+      case "$_c" in /*) [ -z "$SCRIPT" ] && [ -f "$_c/scripts/transition-label.sh" ] && SCRIPT="$_c/scripts/transition-label.sh" ;; esac
+    done <<< "$_tc"
+    if [ -n "$SCRIPT" ]; then
       bash "$SCRIPT" --validate "$FORGE_VERDICT" "$INPUT_ISSUE" "$GH_FLAG" || true
     else
       # Prose fallback: apply directly via gh

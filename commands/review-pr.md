@@ -1628,7 +1628,17 @@ Before launching agents, query the code index to build a domain-scoped file list
 
 ```bash
 REPO_PATH=$(yq '.paths.root' "$FORGE_YAML" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || pwd)
-CODE_INDEX_SCRIPT="${REPO_PATH}/scripts/code-index.sh"
+# HELPER_SCRIPT resolver (CODE_INDEX_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+done
+CODE_INDEX_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$CODE_INDEX_SCRIPT" ] && [ -f "$_c/scripts/code-index.sh" ] && CODE_INDEX_SCRIPT="$_c/scripts/code-index.sh" ;; esac
+done <<< "$_tc"
+# REPO_PATH is the PR checkout (author-controlled): it is only the index target, never the script source. Unresolved: skip the index.
 
 # Ensure index is current (cache-hit on unchanged HEAD — instant if already built)
 if [[ -x "$CODE_INDEX_SCRIPT" ]]; then
@@ -2351,7 +2361,19 @@ MILESTONE_FLAG=""
 # milestone via Closes/Fixes/Resolves #N -> branch-slug match against
 # milestone/* branches) supersedes the old base/head-branch-only slug match
 # that used to be hand-rolled here.
-MILESTONE_TITLE=$(bash scripts/derive-finding-milestone.sh "${PR_NUMBER}" -R "${REPO}")
+# HELPER_SCRIPT resolver (DERIVE_MILESTONE_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+done
+DERIVE_MILESTONE_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$DERIVE_MILESTONE_SCRIPT" ] && [ -f "$_c/scripts/derive-finding-milestone.sh" ] && DERIVE_MILESTONE_SCRIPT="$_c/scripts/derive-finding-milestone.sh" ;; esac
+done <<< "$_tc"
+# Unresolved helper: empty milestone (non-blocking), never a cwd-relative fallback.
+MILESTONE_TITLE=""
+[ -n "$DERIVE_MILESTONE_SCRIPT" ] && MILESTONE_TITLE=$(bash "$DERIVE_MILESTONE_SCRIPT" "${PR_NUMBER}" -R "${REPO}")
 # Quoted so multi-word milestone titles (e.g. "Watch & Fleet Observability") survive
 # as a single value wherever MILESTONE_FLAG is later interpolated — matches the
 # quoting convention already used for --title/--body-file/--label below.
@@ -2607,8 +2629,23 @@ FINDING_SEVERITY="LOW"
 # (CONFIRMED/LIKELY/POSSIBLE). scripts/severity-to-priority.sh is the single
 # source of truth for this mapping; commands/review-pr-staging.md calls the
 # identical script so the two specs cannot independently drift. <!-- forge#2447 -->
-FINDING_PRIORITY=$(bash scripts/severity-to-priority.sh "$FINDING_SEVERITY")
-FINDING_PRIORITY_EXIT=$?
+# HELPER_SCRIPT resolver (PRIORITY_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+done
+PRIORITY_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$PRIORITY_SCRIPT" ] && [ -f "$_c/scripts/severity-to-priority.sh" ] && PRIORITY_SCRIPT="$_c/scripts/severity-to-priority.sh" ;; esac
+done <<< "$_tc"
+# Unresolved helper: non-zero status so finding creation is skipped (never defaulted to a priority).
+if [ -n "$PRIORITY_SCRIPT" ]; then
+  FINDING_PRIORITY=$(bash "$PRIORITY_SCRIPT" "$FINDING_SEVERITY")
+  FINDING_PRIORITY_EXIT=$?
+else
+  FINDING_PRIORITY=""; FINDING_PRIORITY_EXIT=127
+fi
 
 # Exit code MUST be checked before use — severity-to-priority.sh exits 1 (empty stdout)
 # on a missing/unrecognized severity, mirroring the DEDUP_EXIT idiom above. Proceeding
