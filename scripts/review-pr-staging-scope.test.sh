@@ -113,6 +113,34 @@ grep -q 'test_gate_verdict' "$SPEC" && grep -q 'launched_review_agents' "$SPEC" 
 if grep -qE '\$_SD/(test_gate_verdict|test_gate_reason|launched_review_agents)|\.forge-scratch\}/launched_review_agents' "$SPEC"; then bad "gate/launched-agent scratch files must be keyed by \${PR_NUMBER}_"; else ok; fi
 grep -qF ': > "$_SD/${PR_NUMBER}_launched_review_agents"' "$SPEC" && grep -qF 'rm -f "$_SD/${PR_NUMBER}_test_gate_verdict" "$_SD/${PR_NUMBER}_test_gate_reason"' "$SPEC" && ok || bad "Phase 2 must truncate and Phase 6.5 must rm -f the PR-keyed scratch files in executable commands"
 if awk '/^### 7E:/,/^### 7F:/' "$SPEC" | grep -qF '{GH_REPO}'; then bad "7E must not use the {GH_REPO} template token"; else ok; fi
+# (8b) forge#3733: Phase 6.75 fails closed on an empty/absent launched-agent list or empty PR_NUMBER; Phase 6 fails closed on a bad SELECTED_AGENT_COUNT
+F675=$(awk '/^### Phase 6.75/,/^### 7A/' "$SPEC" | awk '/^```bash/{f=1;next} /^```/{if(f)exit} f')
+GUARD_LN=$(printf '%s\n' "$F675" | grep -n 'launched-agent list is empty or unreadable' | head -1 | cut -d: -f1)
+LOOP_LN=$(printf '%s\n' "$F675" | grep -n '^for AGENT_DOMAIN in' | head -1 | cut -d: -f1)
+[ -n "$GUARD_LN" ] && [ -n "$LOOP_LN" ] && [ "$GUARD_LN" -lt "$LOOP_LN" ] && ok || bad "6.75 empty-list guard must precede the for AGENT_DOMAIN loop"
+printf '%s\n' "$F675" | sed -n "1,$((LOOP_LN-1))p" | grep -v '^[[:space:]]*gh ' > "$TMP/f675.sh"
+mkdir -p "$TMP/sd9/empty" "$TMP/sd9/full" "$TMP/bin9"
+printf '#!/bin/sh\necho stub-value\n' > "$TMP/bin9/yq"; printf '#!/bin/sh\nexit 0\n' > "$TMP/bin9/gh"; chmod +x "$TMP/bin9/yq" "$TMP/bin9/gh"
+: > "$TMP/sd9/empty/42_launched_review_agents"
+printf 'security\n' > "$TMP/sd9/full/42_launched_review_agents"
+run675() { ( unset LAUNCHED_REVIEW_AGENTS REVIEW_SHA_FULL; export PATH="$TMP/bin9:$PATH" FORGE_SCRATCHPAD="$1" HOME="$TMP/nohome"; [ -n "$2" ] && export PR_NUMBER="$2"; bash "$TMP/f675.sh" 2>&1; echo "rc=$?" ); }
+for _case in "$TMP/sd9/empty|42" "$TMP/sd9/none|42" "$TMP/sd9/full|"; do
+  OUT9=$(run675 "${_case%%|*}" "${_case##*|}")
+  case "$OUT9" in *"REVIEW DELIVERY FAILURE: launched-agent list is empty or unreadable"*"rc=1"*) ok ;; *) bad "6.75 must exit 1 for case '$_case' (got '$OUT9')" ;; esac
+done
+OUT9=$(run675 "$TMP/sd9/full" 42)
+case "$OUT9" in *"launched-agent list is empty"*) bad "6.75 guard must not fire for a non-empty list (got '$OUT9')" ;; *) ok ;; esac
+# Phase 6 SELECTED_AGENT_COUNT validation: static order + behaviour of the reload/validate lines
+F6=$(awk '/Selected isolated reviewers/{exit} {print}' "$SPEC" | awk '/^```bash/{b=""; f=1; next} /^```/{f=0; next} f{b=b $0 "\n"; last=b} END{printf "%s", last}')
+printf '%s' "$F6" | grep -qF 'SELECTED_COUNT_INVALID' && ok || bad "Phase 6 fence must validate SELECTED_AGENT_COUNT (SELECTED_COUNT_INVALID)"
+printf '%s' "$F6" | grep -F 'SELECTED_AGENT_COUNT=' | grep -F 'launched_review_agents' > "$TMP/sel.sh"
+printf '%s\n' 'SELECTED_COUNT_INVALID=false' "$(printf '%s' "$F6" | grep -F 'case "${SELECTED_AGENT_COUNT:-}"')" > "$TMP/selcase.sh"
+for _c in "$TMP/sd9/empty|42" "$TMP/sd9/none|42" "$TMP/sd9/full|42"; do
+  OUT9=$( ( unset SELECTED_AGENT_COUNT; _SD="${_c%%|*}"; PR_NUMBER="${_c##*|}"; . "$TMP/sel.sh"; . "$TMP/selcase.sh"; echo "$SELECTED_COUNT_INVALID|$SELECTED_AGENT_COUNT" ) 2>&1 )
+  case "${_c%%|*}" in */full) [ "$OUT9" = "false|1" ] && ok || bad "Phase 6: one launched agent must give SELECTED_AGENT_COUNT=1 (got '$OUT9')" ;; *) [ "$OUT9" = "true|0" ] && ok || bad "Phase 6: empty/absent list must be invalid (got '$OUT9')" ;; esac
+done
+OUT9=$( ( SELECTED_AGENT_COUNT="abc"; . "$TMP/selcase.sh"; echo "$SELECTED_COUNT_INVALID" ) 2>&1 )
+[ "$OUT9" = "true" ] && ok || bad "Phase 6: non-integer SELECTED_AGENT_COUNT must be invalid (got '$OUT9')"
 mkdir -p "$TMP/sd8/full" "$TMP/sd8/empty" "$TMP/sd8/bad" "$TMP/bin"
 printf '#!/bin/sh\necho stub-value\n' > "$TMP/bin/yq"; chmod +x "$TMP/bin/yq"
 printf '42\n' > "$TMP/sd8/full/staging_pr_number"; printf '7\n8\n' > "$TMP/sd8/full/42_bundle-prs.txt"
