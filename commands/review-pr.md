@@ -31,6 +31,8 @@ allowed-tools: Task, Agent, Bash, Read, Grep, Glob, WebFetch, Skill
 
 5. **`spec-evolution` PRs are NEVER auto-merged.** When a PR carries the `spec-evolution` label (created by `/spec-doctor`), Phase -1 MUST set `AUTO_MERGE=false` and add `needs-human` before any other processing. This cannot be overridden by the caller — the eval gate plus human review are the only permitted merge path. See Phase -1 `spec-evolution guard` block. <!-- Added: forge#1742 -->
 
+6. **Every `bash` fence is a fresh shell.** Each fence re-declares the state it needs with the orchestrator's values (its first lines) and re-resolves ForgeDock scripts through its own `forge_resolve` locator line; never rely on a variable or function from an earlier fence.
+
 ## Sub-Agent Dispatch Tool Resolution (MANDATORY — run once, before Phase 3C)
 
 This spec dispatches domain review agents via a sub-agent-spawning tool. Different runtimes expose different tools for this — resolve deterministically, once per invocation, and use the same tool for every dispatch call in this run:
@@ -225,7 +227,6 @@ echo "THOROUGH=$THOROUGH"
 Resolve the PR number and post a routing marker immediately. This creates an audit trail — if a PR has no `FORGE:REVIEW_ROUTE` comment after a review command was run, the review was bypassed or never started.
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO_FLAG="-R {GH_REPO}"; MERGE_ISSUE="{MERGE_ISSUE}"; MERGE_GH_FLAG="{MERGE_GH_FLAG}"
 # Determine REVIEW_MODE from the first token (PR_REF, bound by Argument Parse) before any routing decision
 REVIEW_MODE_RAW="$ARGS_RAW"
@@ -327,7 +328,6 @@ Show list, ask user which to review, then loop through each with full review.
 
 **Auto-detect staging mode:**
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO_FLAG="-R {GH_REPO}"
 [ -n "$PR_NUMBER" ] || { echo "review-pr: no PR number - stopping" >&2; exit 1; }  # never let gh pick the current-branch PR <!-- Added: forge#3466 -->
 PR_INFO=$(gh pr view "$PR_NUMBER" ${REPO_FLAG} --json baseRefName,headRefName,additions,deletions,title)
@@ -357,7 +357,6 @@ Otherwise → proceed to Phase 1.
 
 ### 1A: Fetch PR Data
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 gh pr view "$PR_NUMBER" -R "$REPO" --json number,title,body,author,baseRefName,headRefName,files,additions,deletions
 REVIEW_SHA=$(gh pr view "$PR_NUMBER" -R "$REPO" --json headRefOid --jq '.headRefOid')
@@ -395,7 +394,6 @@ IS_FIRST_TIME_CONTRIBUTOR="false"
 
 ### 1B: Classify
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)
 DIFF=$(gh pr diff "$PR_NUMBER" -R "$REPO")
@@ -431,7 +429,6 @@ Record: services touched, domains detected, PR scope (1-2 sentences), change cat
 Read `forge.yaml → verification.commands.python` for project-specific tool commands:
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 # Read toolchain commands from forge.yaml
 PYTHON_FORMAT=$(yq '.verification.commands.python.format // ""' forge.yaml 2>/dev/null || echo '')
@@ -504,7 +501,6 @@ Covered by `PYTHON_TYPECHECK` command in 2A above. If `verification.commands.pyt
 
 ### 2D: Environment Variable Audit
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 gh pr diff "$PR_NUMBER" -R "$REPO" | grep -E "os\.getenv|os\.environ|process\.env" | head -30
 ```
@@ -512,7 +508,6 @@ Flag if new env vars not in `.env.example`.
 
 ### 2E: Secrets Detection (CRITICAL — BLOCKING if found)
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 gh pr diff "$PR_NUMBER" -R "$REPO" | grep -iE "(api[_-]?key|secret[_-]?key|password|token|credential|private[_-]?key)" | grep -vE "(#|//|\.example|placeholder|PLACEHOLDER|YOUR_|<|>)" | head -20
 gh pr diff "$PR_NUMBER" -R "$REPO" | grep -oE "['\"][A-Za-z0-9+/=]{40,}['\"]" | head -10
@@ -520,7 +515,6 @@ gh pr diff "$PR_NUMBER" -R "$REPO" | grep -oE "['\"][A-Za-z0-9+/=]{40,}['\"]" | 
 
 ### 2F: SQL Migration Validation (if *.sql changed)
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 gh pr diff "$PR_NUMBER" -R "$REPO" --name-only | grep "\.sql$" | while IFS= read -r sql_file; do
     grep -E "FOR UPDATE" "$sql_file" | grep -qE "(SUM|COUNT|AVG|MIN|MAX)\s*\(" && echo "ERROR: FOR UPDATE with aggregate"
@@ -555,26 +549,7 @@ fi
 
 ```bash
 # Install-root-only classifier resolution (no cwd-relative `scripts/` fallback: the PR under review is author-controlled).
-# FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
-FORGE_ROOT=""
-# Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
-_h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
-# Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
-_mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
-if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
-# Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
-_l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-# Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
-_cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
-# newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-_v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
-_m="$HOME/.claude/plugins/marketplaces/$_mk"
-# '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-_k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
-while IFS= read -r _c; do
-case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
-done <<< "$_k"
-fi
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
 # Check each configured language for a test command
 for lang in python typescript go rust; do
     TEST_CMD=$(yq ".verification.commands.${lang}.test // \"\"" forge.yaml 2>/dev/null || echo '')
@@ -587,7 +562,7 @@ for lang in python typescript go rust; do
             # If ALL failing test names appear in $QUARANTINED_TESTS, suppress the block.
             # Without per-test granularity from the test runner, fall back to treating
             # any failure as blocking unless the classifier script is available.
-            CLASSIFIER="${FORGE_ROOT:+$FORGE_ROOT/scripts/flaky-quarantine.sh}"
+            CLASSIFIER=$(forge_resolve flaky-quarantine.sh)
             if [ -n "$CLASSIFIER" ] && [ -f "$CLASSIFIER" ]; then
                 CL_RESULT=$(bash "$CLASSIFIER" \
                     --test "$TEST_CMD" \
@@ -619,7 +594,6 @@ fi
 ### 2I: Build Verification (MANDATORY for staging→main AND milestone→staging)
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 CHANGED_FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)
 HAS_TS=$(echo "$CHANGED_FILES" | grep -E '\.(tsx?|jsx?)$' | head -1)
@@ -638,7 +612,6 @@ if [ "$IS_STAGING_TO_MAIN" = "true" ] || [ "$IS_MILESTONE_TO_STAGING" = "true" ]
 Read `forge.yaml → verification.commands.typescript.typecheck` and `.build`:
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 gh pr checkout "$PR_NUMBER" -R "$REPO" --detach 2>/dev/null
 
@@ -673,7 +646,6 @@ If `BUILD_EXIT != 0`: **CONFIRMED blocking** — build/prerender failure.
 Read `forge.yaml → verification.commands.python.format` and `.build`:
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 gh pr checkout "$PR_NUMBER" -R "$REPO" --detach 2>/dev/null
 
@@ -699,7 +671,6 @@ git checkout - 2>/dev/null
 Check whether the PR's actual changes match what the builder committed to in its contract:
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 # Find the contract comment on the linked issue
 ISSUE_NUM=$(gh pr view "$PR_NUMBER" -R "$REPO" --json body --jq '.body | gsub("(?s).*?(?:Closes #|#)(?<n>[0-9]+).*"; "\(.n)") // empty' 2>/dev/null | head -1)
@@ -775,7 +746,6 @@ For each changed file, execute the relevant checks using the standalone verifica
 **Platform note**: The verify-*.sh scripts require bash and standard POSIX tools. On Windows without bash (Git Bash / WSL / MSYS2), these checks are skipped with an explicit message — the review continues without them.
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 CHANGED_FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)
 REPO_ROOT="."  # Assumes cwd is the repo root
@@ -983,7 +953,6 @@ Format: `INTEG-N|CONFIRMED|HIGH|file:line|Changed code may be unreachable: {reas
 **NEVER scale review depth by line count.** A 5-line shell script processing LLM output is more dangerous than a 500-line React component.
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 DIFF=$(gh pr diff "$PR_NUMBER" -R "$REPO")
 FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only)
@@ -1134,7 +1103,6 @@ echo "AUTH=$SCORE_AUTH BILLING=$SCORE_BILLING CONCURRENCY=$SCORE_CONCURRENCY DAT
 #### Step 2: Read Architect CONTRACT for Risk Flags (if PR is from /work-on)
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 CONTRACT_RISK_FLAGS=""
 ISSUE_NUM=$(gh pr view "$PR_NUMBER" -R "$REPO" --json body --jq '.body | gsub("(?s).*?(?:Closes #|#)(?<n>[0-9]+).*"; "\(.n)") // empty' 2>/dev/null | head -1)
@@ -1317,7 +1285,6 @@ fi
 #### Step 3: Compute module key and look up cell
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 if [ "$PROVENANCE_TABLE_LOADED" = "true" ]; then
   # Normalize changed files to module key (mirrors normalizeModules() in calibration.mjs):
@@ -1554,66 +1521,14 @@ Re-reviewing a head that only moved since the last fully reviewed head does not 
 Phase 2 checks, the §6B.4 provenance gates (against the full PR diff at the current head) and the Phase 7B/8 gates run unchanged in every mode.
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"; SELECTED_AGENTS="{SELECTED_AGENTS}"
 THOROUGH="{THOROUGH}"; IS_MILESTONE_TO_STAGING="{IS_MILESTONE_TO_STAGING}"
-# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-TRUSTED_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-done <<< "$_tc"
-# HELPER_SCRIPT resolver (REVIEW_DELTA_SCRIPT; trusted-install tiers only, never the working directory or the PR checkout, #3400/#3483/#3596): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. A PR that shipped its own resolver could otherwise decide that its own head needs no review. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-REVIEW_DELTA_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$REVIEW_DELTA_SCRIPT" ] && [ -f "$_c/scripts/review-delta.sh" ] && REVIEW_DELTA_SCRIPT="$_c/scripts/review-delta.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
+REVIEW_DELTA_SCRIPT=$(forge_resolve review-delta.sh)
 BASE_BRANCH=$(gh pr view "$PR_NUMBER" -R "$REPO" --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
 COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
-# BEGIN review-pr-delta-mode
-is_sha() { case "${1}" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]; }
-# Prints "<MODE> <ARG> <FULL_ROUNDS>" from scripts/review-delta.sh: "FULL - n", "DELTA <reviewed-sha> n" or "BASE_SYNC_ONLY <reviewed-sha> n".
-# Needs REPO PR_NUMBER REVIEW_SHA BASE_BRANCH TRUSTED_SCRIPT REVIEW_DELTA_SCRIPT in scope. Every failure (unresolved script, bad output, bad SHA, empty delta) prints FULL, never a skipped review.
-review_delta_mode() {
-    local out l1 l2 kind arg from to rounds=0 top
-    is_sha "$REVIEW_SHA" || { echo "FULL - 0"; return 0; }
-    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$REVIEW_DELTA_SCRIPT" ] || [ -z "$BASE_BRANCH" ]; then echo "FULL - 0"; return 0; fi
-    top=$(git rev-parse --show-toplevel 2>/dev/null) || top=""
-    [ -n "$top" ] || { echo "FULL - 0"; return 0; }
-    out=$(bash "$REVIEW_DELTA_SCRIPT" --pr "$PR_NUMBER" --head "$REVIEW_SHA" --base "$BASE_BRANCH" --trusted-script "$TRUSTED_SCRIPT" --repo "$REPO" --repo-path "$top" 2>/dev/null) || out=""
-    l1=$(printf '%s\n' "$out" | sed -n 1p); l2=$(printf '%s\n' "$out" | sed -n 2p)
-    case "$l2" in FULL_ROUNDS=*) rounds="${l2#FULL_ROUNDS=}" ;; esac
-    case "$rounds" in ''|*[!0-9]*) echo "FULL - 0"; return 0 ;; esac
-    kind="${l1%% *}"; arg="${l1#* }"
-    if [ "$kind" = "BASE_SYNC_ONLY" ] && is_sha "$arg" && [ "$arg" != "$REVIEW_SHA" ]; then echo "BASE_SYNC_ONLY $arg $rounds"; return 0; fi
-    if [ "$kind" = "DELTA" ]; then
-        from="${arg%%..*}"; to="${arg##*..}"
-        if is_sha "$from" && [ "$to" = "$REVIEW_SHA" ] && [ "$from" != "$to" ]; then echo "DELTA $from $rounds"; return 0; fi
-    fi
-    echo "FULL - $rounds"
-}
-# Prints the Carried-From-SHA only when a TRUSTED FORGE:REVIEW-CARRIED record for this head names it AND the resolver
-# still answers BASE_SYNC_ONLY from that same reviewed SHA right now. Needs COMMENTS_JSON as well. Marker text alone never counts.
-carry_verified_from() {
-    local kind from rounds n
-    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then return 0; fi
-    read -r kind from rounds <<< "$(review_delta_mode)"
-    [ "$kind" = "BASE_SYNC_ONLY" ] || return 0
-    n=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "\\A(?=[\\s\\S]*\\nReviewed-SHA: ${REVIEW_SHA}\\r?(\\n|$))(?=[\\s\\S]*\\nCarried-From-SHA: ${from}\\r?(\\n|$))<!-- FORGE:REVIEW-CARRIED -->" 2>/dev/null || echo "")
-    case "$n" in ''|*[!0-9]*) return 0 ;; esac
-    [ "$n" -ge 1 ] && printf '%s' "$from"
-    return 0
-}
-# END review-pr-delta-mode
+_dm=$(forge_resolve lib/review-delta-mode.sh); [ -n "$_dm" ] && . "$_dm" || { review_delta_mode() { echo "FULL - 0"; }; carry_verified_from() { :; }; }
 # BEGIN review-pr-delta-roster
 # Effective roster for a DELTA head. While fewer than two full panels have run (FULL_ROUNDS < 2) the 3B roster stands;
 # from the third review on it narrows to Security plus the domains whose trigger paths the delta touches.
@@ -1667,60 +1582,13 @@ From here on substitute the printed `REVIEW_MODE`, `DELTA_FROM`, `CARRIED_FROM` 
 **If `REVIEW_MODE` is `BASE_SYNC_ONLY`**: dispatch zero reviewers. Skip the template guard, config load, code index, diff slicing and the dispatch below, post the carry record, then go straight to Phase 4:
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"
-# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-TRUSTED_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-done <<< "$_tc"
-# Same trusted tiers as the TRUSTED_SCRIPT resolver above (_tc is that block's list); never the working directory or the PR checkout.
-REVIEW_DELTA_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$REVIEW_DELTA_SCRIPT" ] && [ -f "$_c/scripts/review-delta.sh" ] && REVIEW_DELTA_SCRIPT="$_c/scripts/review-delta.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
+REVIEW_DELTA_SCRIPT=$(forge_resolve review-delta.sh)
 BASE_BRANCH=$(gh pr view "$PR_NUMBER" -R "$REPO" --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
 COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
-# BEGIN review-pr-delta-mode
-is_sha() { case "${1}" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]; }
-# Prints "<MODE> <ARG> <FULL_ROUNDS>" from scripts/review-delta.sh: "FULL - n", "DELTA <reviewed-sha> n" or "BASE_SYNC_ONLY <reviewed-sha> n".
-# Needs REPO PR_NUMBER REVIEW_SHA BASE_BRANCH TRUSTED_SCRIPT REVIEW_DELTA_SCRIPT in scope. Every failure (unresolved script, bad output, bad SHA, empty delta) prints FULL, never a skipped review.
-review_delta_mode() {
-    local out l1 l2 kind arg from to rounds=0 top
-    is_sha "$REVIEW_SHA" || { echo "FULL - 0"; return 0; }
-    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$REVIEW_DELTA_SCRIPT" ] || [ -z "$BASE_BRANCH" ]; then echo "FULL - 0"; return 0; fi
-    top=$(git rev-parse --show-toplevel 2>/dev/null) || top=""
-    [ -n "$top" ] || { echo "FULL - 0"; return 0; }
-    out=$(bash "$REVIEW_DELTA_SCRIPT" --pr "$PR_NUMBER" --head "$REVIEW_SHA" --base "$BASE_BRANCH" --trusted-script "$TRUSTED_SCRIPT" --repo "$REPO" --repo-path "$top" 2>/dev/null) || out=""
-    l1=$(printf '%s\n' "$out" | sed -n 1p); l2=$(printf '%s\n' "$out" | sed -n 2p)
-    case "$l2" in FULL_ROUNDS=*) rounds="${l2#FULL_ROUNDS=}" ;; esac
-    case "$rounds" in ''|*[!0-9]*) echo "FULL - 0"; return 0 ;; esac
-    kind="${l1%% *}"; arg="${l1#* }"
-    if [ "$kind" = "BASE_SYNC_ONLY" ] && is_sha "$arg" && [ "$arg" != "$REVIEW_SHA" ]; then echo "BASE_SYNC_ONLY $arg $rounds"; return 0; fi
-    if [ "$kind" = "DELTA" ]; then
-        from="${arg%%..*}"; to="${arg##*..}"
-        if is_sha "$from" && [ "$to" = "$REVIEW_SHA" ] && [ "$from" != "$to" ]; then echo "DELTA $from $rounds"; return 0; fi
-    fi
-    echo "FULL - $rounds"
-}
-# Prints the Carried-From-SHA only when a TRUSTED FORGE:REVIEW-CARRIED record for this head names it AND the resolver
-# still answers BASE_SYNC_ONLY from that same reviewed SHA right now. Needs COMMENTS_JSON as well. Marker text alone never counts.
-carry_verified_from() {
-    local kind from rounds n
-    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then return 0; fi
-    read -r kind from rounds <<< "$(review_delta_mode)"
-    [ "$kind" = "BASE_SYNC_ONLY" ] || return 0
-    n=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "\\A(?=[\\s\\S]*\\nReviewed-SHA: ${REVIEW_SHA}\\r?(\\n|$))(?=[\\s\\S]*\\nCarried-From-SHA: ${from}\\r?(\\n|$))<!-- FORGE:REVIEW-CARRIED -->" 2>/dev/null || echo "")
-    case "$n" in ''|*[!0-9]*) return 0 ;; esac
-    [ "$n" -ge 1 ] && printf '%s' "$from"
-    return 0
-}
-# END review-pr-delta-mode
+_dm=$(forge_resolve lib/review-delta-mode.sh); [ -n "$_dm" ] && . "$_dm" || { review_delta_mode() { echo "FULL - 0"; }; carry_verified_from() { :; }; }
 read -r RD_KIND RD_FROM RD_ROUNDS <<< "$(review_delta_mode)"
 if [ "$RD_KIND" != "BASE_SYNC_ONLY" ]; then
   echo "CARRY_RECORD: NOT_APPLICABLE (resolver says ${RD_KIND}); run the FULL path"; exit 0
@@ -1839,16 +1707,8 @@ Before launching agents, query the code index to build a domain-scoped file list
 
 ```bash
 REPO_PATH=$(yq '.paths.root' "$FORGE_YAML" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null || pwd)
-# HELPER_SCRIPT resolver (CODE_INDEX_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-CODE_INDEX_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$CODE_INDEX_SCRIPT" ] && [ -f "$_c/scripts/code-index.sh" ] && CODE_INDEX_SCRIPT="$_c/scripts/code-index.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+CODE_INDEX_SCRIPT=$(forge_resolve code-index.sh)
 # REPO_PATH is the PR checkout (author-controlled): it is only the index target, never the script source. Unresolved: skip the index.
 
 # Ensure index is current (cache-hit on unchanged HEAD — instant if already built)
@@ -1885,7 +1745,6 @@ INDEX_SLICE_INFRA=$(build_index_slice "infrastructure")
 Each domain agent receives only the diff slice relevant to its domain, not the full PR changeset. This caps per-child input cost on large PRs. Compute slices once here; substitute `[DOMAIN_DIFF_SLICE]` per agent below.
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"; REVIEW_SHA="{REVIEW_SHA}"; REVIEW_MODE="{REVIEW_MODE}"; DELTA_FROM="{DELTA_FROM}"
 # Full diff fetched once — agents do NOT re-fetch it
 FULL_DIFF=$(gh pr diff "$PR_NUMBER" -R "$REPO")
@@ -2022,7 +1881,6 @@ The `protocols.md` file contains the Evidence-Based Review Protocol, Structured 
 **Idempotent re-entry (before launching)**: a re-invoked review must reuse reviewers that already posted for the current head instead of re-dispatching the full panel. For each domain in `$SELECTED_AGENTS`, check for an existing trusted comment of the shape above; launch only the domains without one (possibly none), then continue to Phase 4. Comments for a different SHA never count. The selected roster for the panel guard stays the full effective `$SELECTED_AGENTS` set (the one printed by the review-mode block above, not the 3B roster when `DELTA` narrowed it).
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"; SELECTED_AGENTS="{SELECTED_AGENTS}"
 case "$REVIEW_SHA" in *[!0-9a-f]*|"") REVIEW_SHA_OK=false ;; *) [ "${#REVIEW_SHA}" -eq 40 ] || [ "${#REVIEW_SHA}" -eq 64 ] && REVIEW_SHA_OK=true || REVIEW_SHA_OK=false ;; esac
 if [ "$REVIEW_SHA_OK" != "true" ]; then
@@ -2031,16 +1889,8 @@ if [ "$REVIEW_SHA_OK" != "true" ]; then
 fi
 WAIT_DIR="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/forge-review-wait-$(id -u)"   # absolute and identical in every Bash call (cwd is not)
 rm -f "${WAIT_DIR}/${PR_NUMBER}_${REVIEW_SHA}_review-wait-deadline"   # a (re)dispatch always starts a fresh wait window
-# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-TRUSTED_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
 PENDING_AGENTS=""
 # BEGIN review-pr-agent-domain
 agent_domain() {
@@ -2141,7 +1991,6 @@ Reviewer completion is read from GitHub, never from notifications (see the "Revi
 - `PANEL_STATUS: TIMEOUT` or `PANEL_STATUS: SHORTFALL`, or a poll call that was killed or timed out, is the hard stop: run the **Panel hard-stop block** from Phase 3C with `ACTUAL_AGENT_COUNT` set to the count the block printed (0 if the call was killed). Never review the missing domain inline.
 
 ```bash
-# Each Bash call is a fresh shell: re-declare state with the orchestrator's values (never rely on Phase 3C variables).
 REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"; SELECTED_AGENTS="{SELECTED_AGENTS}"; REVIEW_MODE="{REVIEW_MODE}"
 DISPATCH_TOOL="{DISPATCH_TOOL}"   # Task | Agent | task (OpenCode)
 case "$REVIEW_SHA" in *[!0-9a-f]*|"") REVIEW_SHA_OK=false ;; *) [ "${#REVIEW_SHA}" -eq 40 ] || [ "${#REVIEW_SHA}" -eq 64 ] && REVIEW_SHA_OK=true || REVIEW_SHA_OK=false ;; esac
@@ -2183,60 +2032,14 @@ if [ "$NOW_SHA" != "$REVIEW_SHA" ]; then
   echo "PANEL_STATUS: STOP"; exit 0
 fi
 
-# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-TRUSTED_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-done <<< "$_tc"
-# Same trusted tiers as the TRUSTED_SCRIPT resolver above (_tc is that block's list); never the working directory or the PR checkout.
-REVIEW_DELTA_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$REVIEW_DELTA_SCRIPT" ] && [ -f "$_c/scripts/review-delta.sh" ] && REVIEW_DELTA_SCRIPT="$_c/scripts/review-delta.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
+REVIEW_DELTA_SCRIPT=$(forge_resolve review-delta.sh)
 BASE_BRANCH=$(gh pr view "$PR_NUMBER" -R "$REPO" --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
 COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
 MISSING_AGENT_COMMENTS=""
 ACTUAL_AGENT_COUNT=0
-# BEGIN review-pr-delta-mode
-is_sha() { case "${1}" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]; }
-# Prints "<MODE> <ARG> <FULL_ROUNDS>" from scripts/review-delta.sh: "FULL - n", "DELTA <reviewed-sha> n" or "BASE_SYNC_ONLY <reviewed-sha> n".
-# Needs REPO PR_NUMBER REVIEW_SHA BASE_BRANCH TRUSTED_SCRIPT REVIEW_DELTA_SCRIPT in scope. Every failure (unresolved script, bad output, bad SHA, empty delta) prints FULL, never a skipped review.
-review_delta_mode() {
-    local out l1 l2 kind arg from to rounds=0 top
-    is_sha "$REVIEW_SHA" || { echo "FULL - 0"; return 0; }
-    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$REVIEW_DELTA_SCRIPT" ] || [ -z "$BASE_BRANCH" ]; then echo "FULL - 0"; return 0; fi
-    top=$(git rev-parse --show-toplevel 2>/dev/null) || top=""
-    [ -n "$top" ] || { echo "FULL - 0"; return 0; }
-    out=$(bash "$REVIEW_DELTA_SCRIPT" --pr "$PR_NUMBER" --head "$REVIEW_SHA" --base "$BASE_BRANCH" --trusted-script "$TRUSTED_SCRIPT" --repo "$REPO" --repo-path "$top" 2>/dev/null) || out=""
-    l1=$(printf '%s\n' "$out" | sed -n 1p); l2=$(printf '%s\n' "$out" | sed -n 2p)
-    case "$l2" in FULL_ROUNDS=*) rounds="${l2#FULL_ROUNDS=}" ;; esac
-    case "$rounds" in ''|*[!0-9]*) echo "FULL - 0"; return 0 ;; esac
-    kind="${l1%% *}"; arg="${l1#* }"
-    if [ "$kind" = "BASE_SYNC_ONLY" ] && is_sha "$arg" && [ "$arg" != "$REVIEW_SHA" ]; then echo "BASE_SYNC_ONLY $arg $rounds"; return 0; fi
-    if [ "$kind" = "DELTA" ]; then
-        from="${arg%%..*}"; to="${arg##*..}"
-        if is_sha "$from" && [ "$to" = "$REVIEW_SHA" ] && [ "$from" != "$to" ]; then echo "DELTA $from $rounds"; return 0; fi
-    fi
-    echo "FULL - $rounds"
-}
-# Prints the Carried-From-SHA only when a TRUSTED FORGE:REVIEW-CARRIED record for this head names it AND the resolver
-# still answers BASE_SYNC_ONLY from that same reviewed SHA right now. Needs COMMENTS_JSON as well. Marker text alone never counts.
-carry_verified_from() {
-    local kind from rounds n
-    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then return 0; fi
-    read -r kind from rounds <<< "$(review_delta_mode)"
-    [ "$kind" = "BASE_SYNC_ONLY" ] || return 0
-    n=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "\\A(?=[\\s\\S]*\\nReviewed-SHA: ${REVIEW_SHA}\\r?(\\n|$))(?=[\\s\\S]*\\nCarried-From-SHA: ${from}\\r?(\\n|$))<!-- FORGE:REVIEW-CARRIED -->" 2>/dev/null || echo "")
-    case "$n" in ''|*[!0-9]*) return 0 ;; esac
-    [ "$n" -ge 1 ] && printf '%s' "$from"
-    return 0
-}
-# END review-pr-delta-mode
+_dm=$(forge_resolve lib/review-delta-mode.sh); [ -n "$_dm" ] && . "$_dm" || { review_delta_mode() { echo "FULL - 0"; }; carry_verified_from() { :; }; }
 # A zero-reviewer panel is acceptable only for a BASE_SYNC_ONLY head whose carry record is trusted AND re-verified by the
 # resolver right now. An empty roster with no verified record is a shortfall, never a clean panel (fail closed).
 CARRIED_FROM=""
@@ -2298,7 +2101,6 @@ A `BASE_SYNC_ONLY` head has no reviewer comments to wait for. The block above ac
 **Skip if**: Only 1 agent OR total findings ≤ 3, or `REVIEW_MODE` is `BASE_SYNC_ONLY` (no reviewer ran for this head; the carried head's synthesis, if any, stands and Phase 6A reads it). Under `DELTA` this phase synthesizes the current head's reviewers only; Phase 6A adds the earlier reviewed head's findings.
 
 ```bash
-# Each Bash call is a fresh shell: re-declare state with the orchestrator's values.
 REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"; REVIEW_MODE="{REVIEW_MODE}"
 case "$REVIEW_SHA" in *[!0-9a-f]*|"") REVIEW_SHA_OK=false ;; *) [ "${#REVIEW_SHA}" -eq 40 ] || [ "${#REVIEW_SHA}" -eq 64 ] && REVIEW_SHA_OK=true || REVIEW_SHA_OK=false ;; esac
 [ "$REVIEW_SHA_OK" = "true" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: REVIEW_SHA is not a commit id (an empty SHA would count every head's findings)"; exit 0; }
@@ -2308,58 +2110,12 @@ case "$REVIEW_SHA" in *[!0-9a-f]*|"") REVIEW_SHA_OK=false ;; *) [ "${#REVIEW_SHA
 # CURRENT head. The head SHA is public, so the SHA line alone proves nothing: a bare contains() selection would let any
 # commenter forge FINDING markers that get filed as issues or inflate the agent count. Earlier-head comments are excluded
 # so a re-entry or head move does not re-file already-fixed findings. Uses jq scan() (POSIX-portable, no PCRE grep).
-# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-TRUSTED_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-done <<< "$_tc"
-# Same trusted tiers as the TRUSTED_SCRIPT resolver above (_tc is that block's list); never the working directory or the PR checkout.
-REVIEW_DELTA_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$REVIEW_DELTA_SCRIPT" ] && [ -f "$_c/scripts/review-delta.sh" ] && REVIEW_DELTA_SCRIPT="$_c/scripts/review-delta.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
+REVIEW_DELTA_SCRIPT=$(forge_resolve review-delta.sh)
 BASE_BRANCH=$(gh pr view "$PR_NUMBER" -R "$REPO" --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
 COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
-# BEGIN review-pr-delta-mode
-is_sha() { case "${1}" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]; }
-# Prints "<MODE> <ARG> <FULL_ROUNDS>" from scripts/review-delta.sh: "FULL - n", "DELTA <reviewed-sha> n" or "BASE_SYNC_ONLY <reviewed-sha> n".
-# Needs REPO PR_NUMBER REVIEW_SHA BASE_BRANCH TRUSTED_SCRIPT REVIEW_DELTA_SCRIPT in scope. Every failure (unresolved script, bad output, bad SHA, empty delta) prints FULL, never a skipped review.
-review_delta_mode() {
-    local out l1 l2 kind arg from to rounds=0 top
-    is_sha "$REVIEW_SHA" || { echo "FULL - 0"; return 0; }
-    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$REVIEW_DELTA_SCRIPT" ] || [ -z "$BASE_BRANCH" ]; then echo "FULL - 0"; return 0; fi
-    top=$(git rev-parse --show-toplevel 2>/dev/null) || top=""
-    [ -n "$top" ] || { echo "FULL - 0"; return 0; }
-    out=$(bash "$REVIEW_DELTA_SCRIPT" --pr "$PR_NUMBER" --head "$REVIEW_SHA" --base "$BASE_BRANCH" --trusted-script "$TRUSTED_SCRIPT" --repo "$REPO" --repo-path "$top" 2>/dev/null) || out=""
-    l1=$(printf '%s\n' "$out" | sed -n 1p); l2=$(printf '%s\n' "$out" | sed -n 2p)
-    case "$l2" in FULL_ROUNDS=*) rounds="${l2#FULL_ROUNDS=}" ;; esac
-    case "$rounds" in ''|*[!0-9]*) echo "FULL - 0"; return 0 ;; esac
-    kind="${l1%% *}"; arg="${l1#* }"
-    if [ "$kind" = "BASE_SYNC_ONLY" ] && is_sha "$arg" && [ "$arg" != "$REVIEW_SHA" ]; then echo "BASE_SYNC_ONLY $arg $rounds"; return 0; fi
-    if [ "$kind" = "DELTA" ]; then
-        from="${arg%%..*}"; to="${arg##*..}"
-        if is_sha "$from" && [ "$to" = "$REVIEW_SHA" ] && [ "$from" != "$to" ]; then echo "DELTA $from $rounds"; return 0; fi
-    fi
-    echo "FULL - $rounds"
-}
-# Prints the Carried-From-SHA only when a TRUSTED FORGE:REVIEW-CARRIED record for this head names it AND the resolver
-# still answers BASE_SYNC_ONLY from that same reviewed SHA right now. Needs COMMENTS_JSON as well. Marker text alone never counts.
-carry_verified_from() {
-    local kind from rounds n
-    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then return 0; fi
-    read -r kind from rounds <<< "$(review_delta_mode)"
-    [ "$kind" = "BASE_SYNC_ONLY" ] || return 0
-    n=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "\\A(?=[\\s\\S]*\\nReviewed-SHA: ${REVIEW_SHA}\\r?(\\n|$))(?=[\\s\\S]*\\nCarried-From-SHA: ${from}\\r?(\\n|$))<!-- FORGE:REVIEW-CARRIED -->" 2>/dev/null || echo "")
-    case "$n" in ''|*[!0-9]*) return 0 ;; esac
-    [ "$n" -ge 1 ] && printf '%s' "$from"
-    return 0
-}
-# END review-pr-delta-mode
+_dm=$(forge_resolve lib/review-delta-mode.sh); [ -n "$_dm" ] && . "$_dm" || { review_delta_mode() { echo "FULL - 0"; }; carry_verified_from() { :; }; }
 # BASE_SYNC_ONLY: no reviewer posted for this head, so the findings are the carried head's. Only a verified carry record
 # switches the SHA (the SHA comes from the validated record, never from untrusted text); an unverified claim keeps the
 # current head, finds no reviewer bodies and blocks below (fail closed).
@@ -2398,68 +2154,21 @@ If synthesis needed, launch a `general-purpose` Task (model: `"{SUBAGENT_MODEL}"
 ### 6A: Extract Findings
 
 ```bash
-# Each Bash call is a fresh shell: re-declare state with the orchestrator's values.
 REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"; REVIEW_MODE="{REVIEW_MODE}"; DELTA_FROM="{DELTA_FROM}"
 case "$REVIEW_SHA" in *[!0-9a-f]*|"") REVIEW_SHA_OK=false ;; *) [ "${#REVIEW_SHA}" -eq 40 ] || [ "${#REVIEW_SHA}" -eq 64 ] && REVIEW_SHA_OK=true || REVIEW_SHA_OK=false ;; esac
 [ "$REVIEW_SHA_OK" = "true" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: REVIEW_SHA is not a commit id (an empty SHA would count every head's findings)"; exit 0; }
 # Only TRUSTED bodies for the CURRENT head count (BASE_SYNC_ONLY and DELTA add the carried / earlier reviewed head, see below) (scripts/trusted-comments.sh + anchored marker + Reviewed-SHA line):
 # findings from earlier heads are already fixed or re-reviewed, and an untrusted commenter must never be able to inject
 # findings or post a forged synthesis block that makes the review read clean (the head SHA is public).
-# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-TRUSTED_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-done <<< "$_tc"
-# Same trusted tiers as the TRUSTED_SCRIPT resolver above (_tc is that block's list); never the working directory or the PR checkout.
-REVIEW_DELTA_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$REVIEW_DELTA_SCRIPT" ] && [ -f "$_c/scripts/review-delta.sh" ] && REVIEW_DELTA_SCRIPT="$_c/scripts/review-delta.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
+REVIEW_DELTA_SCRIPT=$(forge_resolve review-delta.sh)
 BASE_BRANCH=$(gh pr view "$PR_NUMBER" -R "$REPO" --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
 COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
 if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then
   echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/trusted-comments.sh unresolvable or PR comments unreadable; refusing to read clean (fail closed)"; exit 0
 fi
-# BEGIN review-pr-delta-mode
-is_sha() { case "${1}" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]; }
-# Prints "<MODE> <ARG> <FULL_ROUNDS>" from scripts/review-delta.sh: "FULL - n", "DELTA <reviewed-sha> n" or "BASE_SYNC_ONLY <reviewed-sha> n".
-# Needs REPO PR_NUMBER REVIEW_SHA BASE_BRANCH TRUSTED_SCRIPT REVIEW_DELTA_SCRIPT in scope. Every failure (unresolved script, bad output, bad SHA, empty delta) prints FULL, never a skipped review.
-review_delta_mode() {
-    local out l1 l2 kind arg from to rounds=0 top
-    is_sha "$REVIEW_SHA" || { echo "FULL - 0"; return 0; }
-    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$REVIEW_DELTA_SCRIPT" ] || [ -z "$BASE_BRANCH" ]; then echo "FULL - 0"; return 0; fi
-    top=$(git rev-parse --show-toplevel 2>/dev/null) || top=""
-    [ -n "$top" ] || { echo "FULL - 0"; return 0; }
-    out=$(bash "$REVIEW_DELTA_SCRIPT" --pr "$PR_NUMBER" --head "$REVIEW_SHA" --base "$BASE_BRANCH" --trusted-script "$TRUSTED_SCRIPT" --repo "$REPO" --repo-path "$top" 2>/dev/null) || out=""
-    l1=$(printf '%s\n' "$out" | sed -n 1p); l2=$(printf '%s\n' "$out" | sed -n 2p)
-    case "$l2" in FULL_ROUNDS=*) rounds="${l2#FULL_ROUNDS=}" ;; esac
-    case "$rounds" in ''|*[!0-9]*) echo "FULL - 0"; return 0 ;; esac
-    kind="${l1%% *}"; arg="${l1#* }"
-    if [ "$kind" = "BASE_SYNC_ONLY" ] && is_sha "$arg" && [ "$arg" != "$REVIEW_SHA" ]; then echo "BASE_SYNC_ONLY $arg $rounds"; return 0; fi
-    if [ "$kind" = "DELTA" ]; then
-        from="${arg%%..*}"; to="${arg##*..}"
-        if is_sha "$from" && [ "$to" = "$REVIEW_SHA" ] && [ "$from" != "$to" ]; then echo "DELTA $from $rounds"; return 0; fi
-    fi
-    echo "FULL - $rounds"
-}
-# Prints the Carried-From-SHA only when a TRUSTED FORGE:REVIEW-CARRIED record for this head names it AND the resolver
-# still answers BASE_SYNC_ONLY from that same reviewed SHA right now. Needs COMMENTS_JSON as well. Marker text alone never counts.
-carry_verified_from() {
-    local kind from rounds n
-    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then return 0; fi
-    read -r kind from rounds <<< "$(review_delta_mode)"
-    [ "$kind" = "BASE_SYNC_ONLY" ] || return 0
-    n=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "\\A(?=[\\s\\S]*\\nReviewed-SHA: ${REVIEW_SHA}\\r?(\\n|$))(?=[\\s\\S]*\\nCarried-From-SHA: ${from}\\r?(\\n|$))<!-- FORGE:REVIEW-CARRIED -->" 2>/dev/null || echo "")
-    case "$n" in ''|*[!0-9]*) return 0 ;; esac
-    [ "$n" -ge 1 ] && printf '%s' "$from"
-    return 0
-}
-# END review-pr-delta-mode
+_dm=$(forge_resolve lib/review-delta-mode.sh); [ -n "$_dm" ] && . "$_dm" || { review_delta_mode() { echo "FULL - 0"; }; carry_verified_from() { :; }; }
 # Trusted synthesized block for one head when present, else that head's trusted agent bodies (the same predicate as before,
 # now per head). Returns non-zero when the trust script cannot count or read.
 bodies_at() {
@@ -2516,7 +2225,6 @@ A finding is only attributable to this PR when it names a line that exists at th
 3. **Concrete-failure gate.** The finding body must carry a non-empty `**Failure scenario**` (concrete inputs leading to a wrong output or behaviour; see the Structured Findings Protocol). The scenario prose lives in the reviewer's PR comment, not in the `FINDING:` one-liner 6A extracts: look it up by the finding id (e.g. `BUG-3`) in the comment that carried the marker, and keep the finding when that comment cannot be re-read. A MEDIUM or lower finding without one is speculative hardening: demote it to a NOTE and count it in `notes_demoted_no_scenario`. CRITICAL/HIGH, any confidence, are exempt and stay ISSUEs (§6B.5: HIGH is always filed), so a real severe defect is never lost for a missing field.
 
 ```bash
-# Each Bash call is a fresh shell: re-declare state with the orchestrator's values.
 REPO="{GH_REPO}"; PR_NUMBER="{PR_NUMBER}"; REVIEW_SHA="{REVIEW_SHA}"
 case "$REVIEW_SHA" in *[!0-9a-f]*|"") echo "REVIEW_RESULT: status: BLOCKED, blocker: REVIEW_SHA is not a commit id"; exit 0 ;; esac
 # Paths come from the files API (raw names), never from `+++` header lines: those are quoted/tab-suffixed for special names.
@@ -2564,18 +2272,9 @@ Filing a standalone `review-finding` issue for every LOW/POSSIBLE reviewer note 
 - **Contract-declared scope** <!-- Added: forge#3447 -->: the trusted, latest FORGE:CONTRACT of `MERGE_ISSUE` lists out-of-scope items as `deferred → #N`, `not-affected:` or `accepted-risk:` (parsed by `scripts/check-contract-scope.sh list`). A finding whose file equals, or sits under, a `deferred` item whose issue is verified becomes `NOTE contract-deferred #N` and is commented on that issue instead of being filed again. A finding under an `accepted-risk` item becomes `NOTE contract-accepted-risk`. A deferred issue is verified only when it is OPEN, is an issue (not a PR), is not `MERGE_ISSUE` itself, and its body carries `FORGE:DEFERRED_FROM: #<MERGE_ISSUE>` and the deferred path, and it is authored by a trusted author (`author_association` OWNER/MEMBER/COLLABORATOR, or `user.type` Bot); an unverified item is dropped from the scope list. Never demoted: HIGH/CRITICAL, `not-affected` items (a contradicting finding means the contract was wrong), safety-exempt findings under either disposition, findings on a file this PR changed, and anything when the contract is missing, untrusted, unparseable or the deferred issue is closed, unverified or unreadable.
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 MERGE_ISSUE="{MERGE_ISSUE}"; AUTO_MERGE="{AUTO_MERGE}"
-# HELPER_SCRIPT resolver (CLASSIFY_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-CLASSIFY_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$CLASSIFY_SCRIPT" ] && [ -f "$_c/scripts/classify-finding.sh" ] && CLASSIFY_SCRIPT="$_c/scripts/classify-finding.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+CLASSIFY_SCRIPT=$(forge_resolve classify-finding.sh)
 # Fail closed (#3639): no hand classification. An unresolvable classifier ends the review here.
 if [ -z "$CLASSIFY_SCRIPT" ]; then
   echo "REVIEW_RESULT: status: BLOCKED, blocker: classifier unavailable (classify-finding.sh not resolvable through the trusted resolver)"
@@ -2589,16 +2288,7 @@ fi
 # fix round on this PR. Any trusted FORGE:INPR_FIX* marker already on the PR means the round is used.
 INPR_DIFF_FILE=""
 if [ "${AUTO_MERGE:-false}" = "true" ] && [ -n "${MERGE_ISSUE:-}" ]; then
-  # TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-  _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-  _tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-  for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-    [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-  done
-  TRUSTED_SCRIPT=""
-  while IFS= read -r _c; do
-    case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-  done <<< "$_tc"
+  TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
   if [ -n "$TRUSTED_SCRIPT" ]; then INPR_MARKERS=$(gh api --paginate "repos/{GH_REPO}/issues/{PR_NUMBER}/comments" 2>/dev/null \
     | bash "$TRUSTED_SCRIPT" count '^<!-- FORGE:INPR_FIX' 2>/dev/null || echo ""); else INPR_MARKERS=""; fi
   if [ "$INPR_MARKERS" = "0" ]; then
@@ -2615,16 +2305,7 @@ fi
 # verification (closed, unreadable, a PR, MERGE_ISSUE itself, no DEFERRED_FROM marker + path, or not authored by a trusted author) is dropped.
 CONTRACT_SCOPE_FILE=""; CONTRACT_OPEN_FILE=""; PR_FILES_FILE=""; CONTRACT_DEMOTED=0
 if [ -n "${MERGE_ISSUE:-}" ]; then
-  # TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-  _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-  _tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-  for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-    [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-  done
-  TRUSTED_SCRIPT=""
-  while IFS= read -r _c; do
-    case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-  done <<< "$_tc"
+  TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
   SCOPE_SCRIPT=""
   [ -n "$TRUSTED_SCRIPT" ] && [ -f "$(dirname "$TRUSTED_SCRIPT")/check-contract-scope.sh" ] && SCOPE_SCRIPT="$(dirname "$TRUSTED_SCRIPT")/check-contract-scope.sh"
   if [ -n "$SCOPE_SCRIPT" ]; then
@@ -2669,16 +2350,7 @@ PRIOR_FILE=""; DIFF_MAP_FILE=""; NOTES_REFLAG=0
 _pscr="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_pscr"
 REPO="{GH_REPO}"; REVIEW_SHA="{REVIEW_SHA}"
 if [ -z "${TRUSTED_SCRIPT:-}" ]; then
-  # TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-  _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-  _tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-  for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-    [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-  done
-  TRUSTED_SCRIPT=""
-  while IFS= read -r _c; do
-    case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-  done <<< "$_tc"
+  TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
 fi
 # Cross-head re-flag input (#3641). Fail soft: every unreadable source just leaves the TSV smaller, never blocks the review.
 # PF_SKIP="<sha or empty>" PF_PRS="<pr numbers>" prior_findings_tsv prints file<TAB>line-start<TAB>line-end<TAB>title<TAB>disposition<TAB>issue# rows
@@ -2830,7 +2502,6 @@ gh label create "pre-existing" --color "BFD4F2" --description "Defect noticed du
 
 **Milestone detection:**
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 # BASE_BRANCH is what the finding template stamps as **Code branch** below
 # (see the rationale comment at that template block) — HEAD_BRANCH is no
@@ -2849,16 +2520,8 @@ MILESTONE_FLAG=""
 # milestone via Closes/Fixes/Resolves #N -> branch-slug match against
 # milestone/* branches) supersedes the old base/head-branch-only slug match
 # that used to be hand-rolled here.
-# HELPER_SCRIPT resolver (DERIVE_MILESTONE_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-DERIVE_MILESTONE_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$DERIVE_MILESTONE_SCRIPT" ] && [ -f "$_c/scripts/derive-finding-milestone.sh" ] && DERIVE_MILESTONE_SCRIPT="$_c/scripts/derive-finding-milestone.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+DERIVE_MILESTONE_SCRIPT=$(forge_resolve derive-finding-milestone.sh)
 # Unresolved helper: empty milestone (non-blocking), never a cwd-relative fallback.
 MILESTONE_TITLE=""
 [ -n "$DERIVE_MILESTONE_SCRIPT" ] && MILESTONE_TITLE=$(bash "$DERIVE_MILESTONE_SCRIPT" "${PR_NUMBER}" -R "${REPO}")
@@ -2873,23 +2536,14 @@ MILESTONE_TITLE=""
 Run the deterministic dedup script first, then fall through to the line-range check:
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; MERGE_ISSUE="{MERGE_ISSUE}"
 # Step 0: Deterministic title dedup — catches near-duplicates before line-range check
 # See scripts/issue-dedup.sh for the token-overlap algorithm. <!-- Added: forge#1335 -->
 FINDING_TITLE_DEDUP="fix: brief description of finding (review finding — PR #${PR_NUMBER})"
 # Never dedup against the issue this PR fixes (MERGE_ISSUE): it is about to be closed, so a
 # finding "matched" to it is tracked nowhere. Field test #3169: SEC-2 matched #3169 itself and was dropped.
-# HELPER_SCRIPT resolver (DEDUP_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-DEDUP_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$DEDUP_SCRIPT" ] && [ -f "$_c/scripts/issue-dedup.sh" ] && DEDUP_SCRIPT="$_c/scripts/issue-dedup.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+DEDUP_SCRIPT=$(forge_resolve issue-dedup.sh)
 # Unresolved helper: "not deduped" (exit 0, empty result) so the line-range check still runs; NEVER exit 1 (which means "duplicate, skip").
 if [ -n "$DEDUP_SCRIPT" ]; then
   DEDUP_RESULT=$(bash "$DEDUP_SCRIPT" "$FINDING_TITLE_DEDUP" "$GH_FLAG" ${MERGE_ISSUE:+--exclude "$MERGE_ISSUE"} 2>&1)
@@ -2908,7 +2562,6 @@ fi
 ```
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; MERGE_ISSUE="{MERGE_ISSUE}"
 # For each finding (that passes the title dedup above), check line-range overlap
 FINDING_FILE="path/to/file.py"
@@ -2971,7 +2624,6 @@ Title and line-range dedup is instance-keyed, so the same defect class re-filed 
 **Exemptions are decided FIRST, before any lookup or consolidation.** A finding is never consolidated away, and skips this check entirely (file it as a normal instance issue), when ANY of these hold: category `Security`, a REGRESSION (closed-issue match above), severity `HIGH` or `CRITICAL`, or priority `P0`/`P1`. Consolidation exists to damp repeated low-severity noise; it must never lower the `review-finding` counts the Phase 6 cascade damper and breaker read for severe findings.
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 MERGE_ISSUE="{MERGE_ISSUE}"
 REPO="{GH_REPO}"                     # placeholder, not an env var: review-pr never exports GH_REPO
 PATTERN_SLUG="pattern-slug"          # the finding's FORGE:PATTERN value
@@ -3022,7 +2674,6 @@ fi
 Each bash call is a fresh shell. Run the consolidation commands below in the SAME call as the block above, or re-declare `REPO`, `PATTERN_SLUG`, `SUBSYSTEM`, `PRIOR_NUMS` and `CONSOLIDATE` first. When `CONSOLIDATE=true` (this is the 2nd or later occurrence), consolidate instead of filing another instance issue. `CLASS_DONE` stays `false` unless every step below succeeds:
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 REPO="{GH_REPO}"
 CLASS_DONE="false"; CLASS_MARKER="<!-- FORGE:PATTERN-CLASS: ${PATTERN_SLUG} ${SUBSYSTEM} -->"
 find_class() { gh issue list -R "$REPO" --state open --label pattern-class --limit 100 --json number,body 2>/dev/null \
@@ -3037,7 +2688,6 @@ CLASS_NUM=$(find_class) || CLASS_NUM="__LOOKUP_FAILED__"      # lookup error: st
 
 **For each finding** (that passes dedup), create issue through the `/issue` create-hook's programmatic invocation contract (see `commands/issue.md` § "Programmatic Invocation Contract") — this preserves the bespoke line-range/title dedup above as a precise pre-check, while `/issue`'s own Phase 2D dedup runs as a coarser second pass:
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; MERGE_ISSUE="{MERGE_ISSUE}"
 FINDING_ISSUE_TITLE="fix: [summary] (review finding — PR #${PR_NUMBER})"
 # Defense-in-depth: /issue's arg tokenizer (commands/issue.md Argument Parsing,
@@ -3132,16 +2782,8 @@ FINDING_SEVERITY="LOW"
 # (CONFIRMED/LIKELY/POSSIBLE). scripts/severity-to-priority.sh is the single
 # source of truth for this mapping; commands/review-pr-staging.md calls the
 # identical script so the two specs cannot independently drift. <!-- forge#2447 -->
-# HELPER_SCRIPT resolver (PRIORITY_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-PRIORITY_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$PRIORITY_SCRIPT" ] && [ -f "$_c/scripts/severity-to-priority.sh" ] && PRIORITY_SCRIPT="$_c/scripts/severity-to-priority.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+PRIORITY_SCRIPT=$(forge_resolve severity-to-priority.sh)
 # Unresolved helper: non-zero status so finding creation is skipped (never defaulted to a priority).
 if [ -n "$PRIORITY_SCRIPT" ]; then
   FINDING_PRIORITY=$(bash "$PRIORITY_SCRIPT" "$FINDING_SEVERITY")
@@ -3309,7 +2951,6 @@ Verdict determined by standard blocking criteria.
    - Verdict: CHANGES REQUESTED. Message: "Coverage reduction: a deleted test or removed workflow test step is not a fix for a red check. Restore it and fix the code under test, or escalate naming the failing assertions." Detection follows quality-gate 2U (`COVERAGE-1`); never dedup this finding against the PR's own issue.
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 # Determine if mergeability is a blocker (MERGE_HEALTH/MERGE_HEALTH_STATE set in Phase 1A; BASE/HEAD set in Phase 0 Mode 3)
 # BASE_CONFLICT is the single source of truth for "a base sync would fix this"; the Phase 8 guards read it. <!-- Added: forge#3496 -->
@@ -3377,7 +3018,6 @@ $([ "$HAS_PURPOSE_REGRESSION" = "true" ] && echo "
 **Fail-safe**: ANY error reading the calibration table (branch absent, file missing, JSON parse error, git failure) MUST result in `CALIBRATION_NEEDS_HUMAN=false` and the current static blocking criteria (Phase 7B verdict) remaining authoritative. The calibration table can ONLY tighten behavior (add needs-human); it NEVER loosens behavior below the current static baseline.
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 MERGE_ISSUE="{MERGE_ISSUE}"
 # Phase 7B.5: Calibration threshold consultation
 CALIBRATION_NEEDS_HUMAN=false
@@ -3463,7 +3103,6 @@ fi
 **Note-disposition preflight (MANDATORY before any merge attempt)**: §6B.5 is what bounds the review-finding cascade, so a review that extracted findings but never recorded their disposition must not auto-merge. Fail closed on an unreadable comment list.
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 DISPO_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null) || DISPO_JSON=""
 if [ -z "$DISPO_JSON" ]; then
@@ -3474,16 +3113,8 @@ fi
 FINDING_COUNT=$(printf '%s' "$DISPO_JSON" | jq -s '[.[][] | select(.body | test("<!-- FINDING:"))] | length')
 # Trust predicate: ONE shared copy (scripts/trusted-comments.sh, same as verify-phase-trail.sh): trusted association, Bot account, or
 # FORGE_TRAIL_TRUSTED_LOGINS. A GitHub App bot always has author_association NONE, so an association-only filter drops the pipeline's own markers.
-# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-TRUSTED_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
 if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$FINDING_COUNT" ]; then
   echo "NOTE DISPOSITION: scripts/trusted-comments.sh unresolvable or findings unreadable — refusing to merge (fail closed)" >&2
   # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "note disposition unreadable".
@@ -3523,7 +3154,6 @@ fi
 **Phase-trail preflight (MANDATORY before any merge attempt)** <!-- Added: forge#3061 -->: a reviewer verdict alone must not merge work whose earlier pipeline phases were skipped. Run the deterministic verifier against the linked issue; do NOT run the merge block below unless it exits 0.
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 MERGE_ISSUE="{MERGE_ISSUE}"
 if [ -z "${MERGE_ISSUE:-}" ]; then
   echo "PHASE TRAIL: auto-merge requested without --issue — the issue is never inferred from PR-author-controlled text, so the phase trail cannot be verified; the phase trail; refusing to merge (fail closed)" >&2
@@ -3532,27 +3162,8 @@ if [ -z "${MERGE_ISSUE:-}" ]; then
   exit 1
 else
   # Same resolution as work-on/review.md Phase R1.5: the verifier ships with ForgeDock, not the consumer repo.
-  # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
-  FORGE_ROOT=""
-  # Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
-  _h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
-  # Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
-  _mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
-  if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
-    # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
-    _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-    # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
-    _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
-    # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-    _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
-    _m="$HOME/.claude/plugins/marketplaces/$_mk"
-    # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-    _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
-    while IFS= read -r _c; do
-      case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
-    done <<< "$_k"
-  fi
-  TRAIL_SCRIPT="$FORGE_ROOT/scripts/verify-phase-trail.sh"
+  type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+  TRAIL_SCRIPT=$(forge_resolve verify-phase-trail.sh); DOCS_ONLY_SCRIPT=$(forge_resolve is-docs-only.sh)
   # Docs-only predicate: ONE shared copy (scripts/is-docs-only.sh, forge#3134), same as work-on/review.md R1.5. Fail closed: unresolved script or empty diff -> no flag.
   DOCS_ONLY_FLAG=""
   # Both sides of a rename (filename + previous_filename): `gh pr diff --name-only` collapses a rename to its destination (forge#3145).
@@ -3560,13 +3171,13 @@ else
   # Fail closed on truncation: the files API caps at 3000 files, so a PR at/over the cap (or an unreadable count) never yields a docs-only flag.
   PR_CHANGED_N=$(gh api "repos/{GH_REPO}/pulls/{PR_NUMBER}" --jq .changed_files 2>/dev/null) || PR_CHANGED_N=""
   case "$PR_CHANGED_N" in ''|*[!0-9]*) PR_FILES_ALL="" ;; *) [ "$PR_CHANGED_N" -ge 3000 ] && PR_FILES_ALL="" ;; esac
-  if [ -n "$PR_FILES_ALL" ] && [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/is-docs-only.sh" ] && echo "$PR_FILES_ALL" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"; then DOCS_ONLY_FLAG="--docs-only"; fi
+  if [ -n "$PR_FILES_ALL" ] && [ -n "$DOCS_ONLY_SCRIPT" ] && echo "$PR_FILES_ALL" | bash "$DOCS_ONLY_SCRIPT"; then DOCS_ONLY_FLAG="--docs-only"; fi
   # Band cross-check (forge#3149): a non-docs PR diff means an agent-chosen INVESTIGATION band must not waive requirements.
   # No --head-tree here: review auto-fix commits legitimately advance the head after the gate ran; the tree binding is enforced pre-PR (work-on/review.md R1.5).
   # Fail closed: anything not positively docs-only (including an empty/unreadable diff) is treated as a code diff.
   CODE_DIFF_FLAG="--code-diff"
   if [ -n "$DOCS_ONLY_FLAG" ]; then CODE_DIFF_FLAG=""; fi
-  if [ -z "$FORGE_ROOT" ] || [ ! -f "$TRAIL_SCRIPT" ]; then
+  if [ -z "$TRAIL_SCRIPT" ]; then
     # Fail closed: an unresolvable verifier is NOT a pass (plugin installs set no FORGE_HOME; never fall back to the consumer repo).
     echo "PHASE TRAIL: verify-phase-trail.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install) — refusing to merge" >&2
     TRAIL="PHASE_TRAIL: ERROR (verifier not resolvable)"; TRAIL_RC=127
@@ -3623,7 +3234,6 @@ fi
 If the preflight failed, skip the rest of Phase 8. On exit code 1, return `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` listing the missing markers. On exit code ≥2 (unreadable trail, or 127 when the verifier is unresolvable), return `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail unreadable (rc=N)". This is an infrastructure failure with no MISSING lines, so callers neither re-run phases nor merge manually. (`DOCS_ONLY_FLAG` is computed in the block above: `--docs-only` when `scripts/is-docs-only.sh` accepts the PR diff, fed both sides of every rename: every file is an allowlisted `*.md` (`docs/**` or a root README/CHANGELOG/CONTRIBUTING/SECURITY/GOVERNANCE), outside the instruction directories (`commands/`, `devdocs/`, `templates/`, `skills/`, `agents/`, `hooks/`, `.claude/`, `.claude-plugin/`, `.agents/`, `.codex/`, `.cursor/`, `.github/`, `.opencode/`, `.gemini/`, `.kiro/`) at any depth, and not named `AGENTS.md`/`CLAUDE.md`/`SKILL.md`/`GEMINI.md` (or a dotted variant).)
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 REPO="{GH_REPO}"
 # §7B verdict + purpose-regression + calibration + trust-escalation guard — check before any merge attempt <!-- Added: forge#1601, forge#1741, forge#1745 -->
 # HARD RULE 3 requires that VERDICT=CHANGES REQUESTED, HAS_PURPOSE_REGRESSION=true,
@@ -3715,6 +3325,7 @@ else
 #     uses for the same target branch — no manual click. This reconciles the asymmetry where a
 #     bot-only re-review (authorAssociation=NONE) could never satisfy the strict ≥2 verified-
 #     human bar and so stranded staging PRs the fast lane would auto-merge.
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
 PREVIOUSLY_ESCALATED=$(gh issue view {MERGE_ISSUE} {MERGE_GH_FLAG} --json labels,comments \
   --jq '([.labels[].name | . == "needs-human" or . == "workflow:remediating"] + [.comments[].body | contains("FORGE:REMEDIATION")]) | any' 2>/dev/null || echo "false")
 GUARD_BASE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
@@ -3724,27 +3335,7 @@ if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
     # an empty string), so the `-n` check alone does not catch it — add an explicit `!= "null"`
     # check so a literal-string "null" is treated the same as an empty/unresolved base (strict).
     # forge#3753: trusted resolver only (GitHub default_branch + committed default-branch config); never forge.yaml from $PWD (the PR worktree is author-controlled). Install roots only; unresolved script => strict.
-    # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
-    FORGE_ROOT=""
-    # Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
-    _h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
-    # Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
-    _mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
-    if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
-    # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
-    _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
-    # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
-    _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
-    # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
-    _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
-    _m="$HOME/.claude/plugins/marketplaces/$_mk"
-    # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
-    _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
-    while IFS= read -r _c; do
-    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
-    done <<< "$_k"
-    fi
-    GATE_SCRIPT=""; [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/resolve-deploy-gate.sh" ] && GATE_SCRIPT="$FORGE_ROOT/scripts/resolve-deploy-gate.sh"
+    GATE_SCRIPT=$(forge_resolve resolve-deploy-gate.sh)
     if [ -n "$GATE_SCRIPT" ]; then GUARD_GATE=$(bash "$GATE_SCRIPT" "$GUARD_BASE" {GH_REPO} 2>/dev/null || echo true); else GUARD_GATE=true; fi; [ "$GUARD_GATE" = "false" ] || GUARD_GATE=true
     if [ "$GUARD_GATE" = "false" ]; then
       # forge#2570: non-default-branch base — defer to remediate.md M7's auto-land, not a human.
@@ -3757,17 +3348,8 @@ if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
       # forge#2570: default branch / deploy gate (or unresolved base — fail closed to the human gate).
       gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "🟠 PR #{PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check. This PR targets the deploy gate (\`${GUARD_BASE:-unresolved base}\`), so it is held at \`workflow:awaiting-merge\` for a human merge decision — \`staging → main\` is the genuine human gate. Merge manually once reviewed: \`gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge\`."
     fi
-    # Shell state does not persist between Bash calls and `resolve_script` is not defined in this spec:
-    # resolve transition-label.sh inline from the install roots only (never repo-relative / $PWD — the
-    # PR under review is author-controlled). Unresolvable or unknown TIER falls through to the prose
-    # label edit so the awaiting-merge transition can never be silently skipped.
-    _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-    TRANSITION_SCRIPT=""
-    for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l"; do
-      case "$_c" in /*)
-        [ -z "$TRANSITION_SCRIPT" ] && [ -f "$_c/scripts/transition-label.sh" ] && TRANSITION_SCRIPT="$_c/scripts/transition-label.sh" ;;
-      esac
-    done
+    # transition-label.sh: install roots only (never repo-relative / $PWD; the PR under review is author-controlled). Unresolvable or unknown TIER falls through to the prose label edit so the awaiting-merge transition is never silently skipped.
+    TRANSITION_SCRIPT=$(forge_resolve transition-label.sh)
     if [ -n "$TRANSITION_SCRIPT" ]; then TIER=universal; else TIER=prose; fi
     case "$TIER" in
       universal) bash "$TRANSITION_SCRIPT" {MERGE_ISSUE} {MERGE_GH_FLAG} awaiting-merge ;;
@@ -3783,15 +3365,7 @@ else
     # CI gate (MANDATORY before any autonomous merge): merge only when every check on the PR is
     # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch
     # protection required none and an auto-merge waits only for *required* checks.
-    # Shell state does not persist between Bash calls: everything this block needs is resolved here.
-    _l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-    CI_GATE_SCRIPT=""; DOCS_ONLY_SCRIPT=""
-    for _c in '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l"; do
-      case "$_c" in /*)
-        [ -z "$CI_GATE_SCRIPT" ] && [ -f "$_c/scripts/wait-ci-green.sh" ] && CI_GATE_SCRIPT="$_c/scripts/wait-ci-green.sh"
-        [ -z "$DOCS_ONLY_SCRIPT" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && DOCS_ONLY_SCRIPT="$_c/scripts/is-docs-only.sh" ;;
-      esac
-    done
+    CI_GATE_SCRIPT=$(forge_resolve wait-ci-green.sh); DOCS_ONLY_SCRIPT=$(forge_resolve is-docs-only.sh)
     if [ -n "$CI_GATE_SCRIPT" ]; then CI_GATE_OUT=$(bash "$CI_GATE_SCRIPT" {PR_NUMBER} {MERGE_GH_FLAG}); CI_GATE_RC=$?
     else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
     echo "$CI_GATE_OUT"
@@ -3864,7 +3438,6 @@ fi
 **Purpose**: Review-finding issues created during a milestone PR review (Phase 6C) inherit the milestone. Once the milestone PR merges, those findings should flow through the fast lane independently — not remain stranded on a closed milestone. This step clears their milestone assignment automatically.
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 if [ "${IS_MILESTONE_TO_STAGING:-false}" = "true" ] && [ "${MERGE_STATE:-}" = "MERGED" ]; then
     echo "Phase 8B: Clearing milestone from open review-finding issues referencing PR #${PR_NUMBER}..."
@@ -3911,7 +3484,6 @@ fi
 **Detection**: Check if the PR is now MERGED. If so and `IS_MILESTONE_TO_STAGING=true`, run the same demilestoning logic as Phase 8B.
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 if [ "${IS_MILESTONE_TO_STAGING:-false}" = "true" ]; then
     PR_MERGE_STATE=$(gh pr view "$PR_NUMBER" -R "$REPO" --json state --jq '.state' 2>/dev/null || echo "")
@@ -3945,7 +3517,6 @@ fi
 <!-- Added: forge#815 -->
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"; REVIEW_SHA="{REVIEW_SHA}"
 CURRENT_SHA=$(gh pr view "$PR_NUMBER" -R "$REPO" --json headRefOid --jq '.headRefOid')
 REVIEW_IS_STALE="false"
@@ -3960,7 +3531,6 @@ Post a welcome comment when all three conditions are true:
 3. This is a single-PR review (MODE 3) — not a staging→main or multi-PR review
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 # Read config — default enabled when key is absent
 WELCOME_ENABLED=$(yq '.community.welcome_new_contributors // true' forge.yaml 2>/dev/null || echo 'true')
@@ -4016,61 +3586,14 @@ fi
 A degraded run that skipped Task-based agent dispatch must be visible from this summary alone, without interrogating the agent afterward. Compute the actual launched-agent count from the `<!-- FORGE:REVIEW-AGENT:{domain} -->` comments each agent is required to post (Phase 3C), rather than trusting a free-text tally:
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"; REVIEW_SHA="{REVIEW_SHA}"; REVIEW_MODE="{REVIEW_MODE}"
 # Same trust rule as Phase 3C/4: only trusted comments whose body starts with the marker count.
-# TRUSTED_SCRIPT resolver (canonical; byte-identical across specs, guarded by scripts/forge-root.test.sh): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. Never the working directory (author-controlled, #3400). The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
-_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
-_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
-for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
-  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
-done
-TRUSTED_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$TRUSTED_SCRIPT" ] && [ -f "$_c/scripts/trusted-comments.sh" ] && TRUSTED_SCRIPT="$_c/scripts/trusted-comments.sh" ;; esac
-done <<< "$_tc"
-# Same trusted tiers as the TRUSTED_SCRIPT resolver above (_tc is that block's list); never the working directory or the PR checkout.
-REVIEW_DELTA_SCRIPT=""
-while IFS= read -r _c; do
-  case "$_c" in /*) [ -z "$REVIEW_DELTA_SCRIPT" ] && [ -f "$_c/scripts/review-delta.sh" ] && REVIEW_DELTA_SCRIPT="$_c/scripts/review-delta.sh" ;; esac
-done <<< "$_tc"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; for _r in "${FORGEDOCK_HOME:-}" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
+REVIEW_DELTA_SCRIPT=$(forge_resolve review-delta.sh)
 BASE_BRANCH=$(gh pr view "$PR_NUMBER" -R "$REPO" --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
 COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
-# BEGIN review-pr-delta-mode
-is_sha() { case "${1}" in *[!0-9a-f]*|"") return 1 ;; esac; [ "${#1}" -eq 40 ] || [ "${#1}" -eq 64 ]; }
-# Prints "<MODE> <ARG> <FULL_ROUNDS>" from scripts/review-delta.sh: "FULL - n", "DELTA <reviewed-sha> n" or "BASE_SYNC_ONLY <reviewed-sha> n".
-# Needs REPO PR_NUMBER REVIEW_SHA BASE_BRANCH TRUSTED_SCRIPT REVIEW_DELTA_SCRIPT in scope. Every failure (unresolved script, bad output, bad SHA, empty delta) prints FULL, never a skipped review.
-review_delta_mode() {
-    local out l1 l2 kind arg from to rounds=0 top
-    is_sha "$REVIEW_SHA" || { echo "FULL - 0"; return 0; }
-    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$REVIEW_DELTA_SCRIPT" ] || [ -z "$BASE_BRANCH" ]; then echo "FULL - 0"; return 0; fi
-    top=$(git rev-parse --show-toplevel 2>/dev/null) || top=""
-    [ -n "$top" ] || { echo "FULL - 0"; return 0; }
-    out=$(bash "$REVIEW_DELTA_SCRIPT" --pr "$PR_NUMBER" --head "$REVIEW_SHA" --base "$BASE_BRANCH" --trusted-script "$TRUSTED_SCRIPT" --repo "$REPO" --repo-path "$top" 2>/dev/null) || out=""
-    l1=$(printf '%s\n' "$out" | sed -n 1p); l2=$(printf '%s\n' "$out" | sed -n 2p)
-    case "$l2" in FULL_ROUNDS=*) rounds="${l2#FULL_ROUNDS=}" ;; esac
-    case "$rounds" in ''|*[!0-9]*) echo "FULL - 0"; return 0 ;; esac
-    kind="${l1%% *}"; arg="${l1#* }"
-    if [ "$kind" = "BASE_SYNC_ONLY" ] && is_sha "$arg" && [ "$arg" != "$REVIEW_SHA" ]; then echo "BASE_SYNC_ONLY $arg $rounds"; return 0; fi
-    if [ "$kind" = "DELTA" ]; then
-        from="${arg%%..*}"; to="${arg##*..}"
-        if is_sha "$from" && [ "$to" = "$REVIEW_SHA" ] && [ "$from" != "$to" ]; then echo "DELTA $from $rounds"; return 0; fi
-    fi
-    echo "FULL - $rounds"
-}
-# Prints the Carried-From-SHA only when a TRUSTED FORGE:REVIEW-CARRIED record for this head names it AND the resolver
-# still answers BASE_SYNC_ONLY from that same reviewed SHA right now. Needs COMMENTS_JSON as well. Marker text alone never counts.
-carry_verified_from() {
-    local kind from rounds n
-    if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then return 0; fi
-    read -r kind from rounds <<< "$(review_delta_mode)"
-    [ "$kind" = "BASE_SYNC_ONLY" ] || return 0
-    n=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "\\A(?=[\\s\\S]*\\nReviewed-SHA: ${REVIEW_SHA}\\r?(\\n|$))(?=[\\s\\S]*\\nCarried-From-SHA: ${from}\\r?(\\n|$))<!-- FORGE:REVIEW-CARRIED -->" 2>/dev/null || echo "")
-    case "$n" in ''|*[!0-9]*) return 0 ;; esac
-    [ "$n" -ge 1 ] && printf '%s' "$from"
-    return 0
-}
-# END review-pr-delta-mode
+_dm=$(forge_resolve lib/review-delta-mode.sh); [ -n "$_dm" ] && . "$_dm" || { review_delta_mode() { echo "FULL - 0"; }; carry_verified_from() { :; }; }
 # BASE_SYNC_ONLY: zero reviewers is the expected panel only when the carry record is trusted and the resolver re-verifies it.
 CARRIED_FROM=""
 if [ "$REVIEW_MODE" = "BASE_SYNC_ONLY" ]; then CARRIED_FROM=$(carry_verified_from); fi
@@ -4094,7 +3617,6 @@ echo "CARRIED_FROM: ${CARRIED_FROM}"
 Substitute `ACTUAL_AGENT_COUNT`/`ACTUAL_AGENT_DOMAINS` into the summary's `**Agents**: [N] ([names])` field below — do NOT substitute a manually-counted or remembered figure. Compare it to `SELECTED_AGENT_COUNT` from Phase 3C. If it is smaller, the panel is degraded: the Phase 3C hard-stop path must already have labelled the PR `review-degraded`, added `needs-human`, and exited without a verdict. Never summarize, approve, or merge a partial panel. `ACTUAL_AGENT_COUNT=0` is the same hard stop, not a solo/inline review mode, with one exception: when the block printed a non-empty `CARRIED_FROM` (a `BASE_SYNC_ONLY` head whose trusted `FORGE:REVIEW-CARRIED` record the resolver re-verified), zero reviewers is the correct panel; write `**Agents**: carried from <CARRIED_FROM>` in the summary and skip this comparison. An empty `CARRIED_FROM` on a `BASE_SYNC_ONLY` head is the hard stop.
 
 ```bash
-# Each Bash call is a fresh shell: re-declare the state this block needs with the orchestrator's values.
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 gh pr comment "$PR_NUMBER" -R "$REPO" --body "$(cat <<'EOF'
 # PR Review Summary: #[NUMBER] - [TITLE]

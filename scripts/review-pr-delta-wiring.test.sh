@@ -92,15 +92,32 @@ fence_file() { # name pattern -> $TMP/<name>.sh (placeholders filled)
 }
 
 # ---- 0. structure ---------------------------------------------------------------------------------------------------
-n=$(count_blocks review-pr-delta-mode)
-[ "$n" -ge 6 ] && ok || bad "expected the review-delta mode snippet in every consuming fence (3C mode, carry post, Phase 4, 5, 6A, 9), found $n"
-distinct=$(awk '/^# BEGIN review-pr-delta-mode$/ {on=1; buf=""} on {buf = buf $0 "\n"} /^# END review-pr-delta-mode$/ && on {on=0; print buf "\0"}' "$SPEC" | tr -d '\n' | sed 's/\x0/\n/g' | sort -u | grep -c . || true)
-[ "$distinct" = 1 ] && ok || bad "review-delta mode snippet copies differ ($distinct distinct)"
+# The mode functions live in ONE sourced helper (scripts/lib/review-delta-mode.sh); every consuming fence sources it through forge_resolve
+# with a FULL-only fallback, so an unresolved helper can only mean a full review.
+HELPER="$ROOT/scripts/lib/review-delta-mode.sh"
+[ -f "$HELPER" ] && ok || bad "scripts/lib/review-delta-mode.sh must exist"
+n=$(grep -c '^_dm=$(forge_resolve lib/review-delta-mode.sh)' "$SPEC")
+[ "$n" -ge 6 ] && ok || bad "expected the review-delta helper source line in every consuming fence (3C mode, carry post, Phase 4, 5, 6A, 9), found $n"
+distinct=$(grep '^_dm=$(forge_resolve lib/review-delta-mode.sh)' "$SPEC" | sort -u | grep -c . || true)
+[ "$distinct" = 1 ] && ok || bad "review-delta helper source lines differ ($distinct distinct)"
+[ "$(count_blocks review-pr-delta-mode)" = 0 ] && ok || bad "inline review-delta mode copies must not remain in the spec"
+grep -q '^_dm=.*review_delta_mode() { echo "FULL - 0"; }' "$SPEC" && ok || bad "the helper source line must carry a FULL-only fallback"
+# every source line is preceded by a locator in the same fence (a fresh shell has no forge_resolve)
+miss=$(awk '/^```/{loc=0} /^type forge_resolve >\/dev\/null/{loc=1} /^_dm=\$\(forge_resolve lib\/review-delta-mode.sh\)/&&!loc{b++} END{print b+0}' "$SPEC")
+[ "$miss" = 0 ] && ok || bad "$miss helper source line(s) lack a forge_resolve locator in the same fence"
+# unresolved helper: the fallback answers FULL and carries nothing
+fb=$(grep -m1 '^_dm=.*review_delta_mode() { echo "FULL - 0"; }' "$SPEC")
+got=$(bash -c "forge_resolve() { :; }; $fb; review_delta_mode; printf 'carry=[%s]' \"\$(carry_verified_from)\"")
+[ "$got" = "FULL - 0
+carry=[]" ] && ok || bad "an unresolved helper must fall back to FULL (got '$got')"
+# resolved helper: the real functions load
+got=$(bash -c "forge_resolve() { echo '$HELPER'; }; $fb; type -t is_sha")
+[ "$got" = "function" ] && ok || bad "a resolved helper must define the mode functions (got '$got')"
 grep -qF 'scripts/review-delta.sh' "$SPEC" && ok || bad "spec does not name scripts/review-delta.sh"
 
 # ---- 1. resolver block: trusted install only -------------------------------------------------------------------------
 mkrepo; HEAD=$(sha HEAD)
-awk '/^[ ]*# HELPER_SCRIPT resolver \(/ && index($0, "(REVIEW_DELTA_SCRIPT;") {inb=1} inb {print} inb && /^done <<< "\$_tc"$/ {exit}' "$SPEC" > "$TMP/rd_resolver.sh"
+fence_with 'REVIEW_DELTA_SCRIPT=$(forge_resolve review-delta.sh)' | grep -E '^type forge_resolve >/dev/null|^REVIEW_DELTA_SCRIPT=\$\(forge_resolve ' > "$TMP/rd_resolver.sh"
 [ -s "$TMP/rd_resolver.sh" ] && ok || bad "no canonical REVIEW_DELTA_SCRIPT resolver block in the spec"
 mkdir -p "$W/scripts"; printf '#!/usr/bin/env bash\necho "BASE_SYNC_ONLY %s"\necho FULL_ROUNDS=9\n' "$HEAD" > "$W/scripts/review-delta.sh"
 got=$(cd "$W" && HOME="$TMP/home" FORGE_ROOT="$ROOT" CLAUDE_CONFIG_DIR="" bash -c "$(cat "$TMP/rd_resolver.sh"); printf %s \"\$REVIEW_DELTA_SCRIPT\"")
@@ -191,8 +208,8 @@ W=$BS_W; R=$BS_R; HEAD=$BS_HEAD
 fence_file carry "CARRY_RECORD: POSTED" || exit 1
 run_carry() { subst "$TMP/carry.raw" > "$TMP/carry.sh"; run_fence "$TMP/carry.sh" "$@"; }
 verified() { # prints the verified Carried-From-SHA for the current $FAKE_COMMENTS using the real snippet
-  { marked_block review-pr-delta-mode; echo 'COMMENTS_JSON=$(cat "$FAKE_COMMENTS"); carry_verified_from'; } > "$TMP/cv_body.sh"
-  { cat "$TMP/carry.raw" | awk '/^# BEGIN review-pr-delta-mode$/ {exit} {print}'; cat "$TMP/cv_body.sh"; } | subst /dev/stdin > "$TMP/cv.sh"
+  { cat "$HELPER"; echo 'COMMENTS_JSON=$(cat "$FAKE_COMMENTS"); carry_verified_from'; } > "$TMP/cv_body.sh"
+  { cat "$TMP/carry.raw" | awk '/^_dm=\$\(forge_resolve lib\/review-delta-mode\.sh\)/ {exit} {print}'; cat "$TMP/cv_body.sh"; } | subst /dev/stdin > "$TMP/cv.sh"
   run_fence "$TMP/cv.sh" FAKE_COMMENTS="$FAKE_COMMENTS"
 }
 panel_items "$R" | jq -s '.' > "$FAKE_COMMENTS"

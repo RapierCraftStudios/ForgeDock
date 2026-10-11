@@ -13,9 +13,9 @@ ok()  { PASS=$((PASS+1)); }
 bad() { FAILN=$((FAILN+1)); echo "FAIL: $1"; }
 expect() { [ "$2" = "$3" ] && ok || bad "$1 (got '$3' want '$2')"; }
 
-SITES="commands/work-on.md commands/work-on/build/validate.md commands/quality-gate.md commands/work-on/review.md commands/work-on/investigate.md commands/work-on/decompose.md commands/work-on/build.md commands/work-on/close.md commands/review-pr.md commands/orchestrate/phase-1-resolve.md commands/orchestrate/phase-4-execution.md"
+SITES="commands/work-on.md commands/work-on/build/validate.md commands/quality-gate.md commands/work-on/review.md commands/work-on/investigate.md commands/work-on/decompose.md commands/work-on/build.md commands/work-on/close.md commands/orchestrate/phase-1-resolve.md commands/orchestrate/phase-4-execution.md"
 # Sites converted to the #3778 forge_resolve stub: no inlined bootstrap copies, but every per-site hygiene check below still applies.
-STUB_SITES="commands/work-on/remediate.md"
+STUB_SITES="commands/work-on/remediate.md commands/review-pr.md"
 
 # extract the bootstrap block (comment line .. closing top-level fi), indentation stripped
 # Block ends at the first line (after the marker) that starts with `fi` at the marker's own indentation.
@@ -116,9 +116,12 @@ fi
 # forge#3758 (hgate is a fixture of its own: the loop runs once per shell and h14 is reused below with other versions): deploy-gate script resolves on a plugin-only install (cache only, no symlink, no FORGE_* env).
 # The gate-script line is taken verbatim from the spec so the test exercises exactly what ships.
 mkscripts "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0"; : > "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh"
-grep -hE '^[[:space:]]*GATE_SCRIPT=""; \[ -n "\$FORGE_ROOT" \]' "$ROOT/commands/review-pr.md" | sed 's/^[[:space:]]*//' | sort -u > "$T/gs"
+mkdir -p "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/lib"; cp "$ROOT/scripts/lib/forge-resolve.sh" "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/lib/forge-resolve.sh"
+# review-pr.md resolves the gate script through the forge_resolve stub (#3780): the locator and the call line are taken verbatim from the spec.
+sed 's/^[[:space:]]*//' "$ROOT/commands/review-pr.md" | grep '^GATE_SCRIPT=\$(forge_resolve resolve-deploy-gate.sh)$' | sort -u > "$T/gs"
 expect "gate-script resolver line is identical across sites" 1 "$(wc -l < "$T/gs" | tr -d ' ')"
-gate_run() { ( cd "$T/consumer" && env -i PATH="$PATH" HOME="$1" "$SH" -c "$(cat "$T/canon"); $(cat "$T/gs"); printf %s \"\$GATE_SCRIPT\"" ); }
+{ sed 's/^[[:space:]]*//' "$ROOT/commands/review-pr.md" | grep -m1 '^type forge_resolve >/dev/null'; cat "$T/gs"; } > "$T/gs_full"
+gate_run() { ( cd "$T/consumer" && env -i PATH="$PATH" HOME="$1" "$SH" -c "$(cat "$T/gs_full"); printf %s \"\$GATE_SCRIPT\"" ); }
 expect "plugin-only install resolves resolve-deploy-gate.sh" "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh" "$(gate_run "$T/hgate")"
 expect "unresolved gate script stays empty (strict)" "" "$(gate_run "$T/empty")"
 # cwd/consumer repo is never a candidate even when it carries the gate script
@@ -265,7 +268,7 @@ while IFS= read -r f; do
   arms=$(grep -c 'trusted-comments.sh" \]' "$f" || true)
   [ "$arms" = "$(cat "$T/tc_n")" ] || { TC_STRAY=$((TC_STRAY + 1)); echo "  stray resolver in $f: $arms arms vs $(cat "$T/tc_n") blocks"; }
 done < <(grep -rl 'trusted-comments.sh" \]' "$ROOT/commands")
-expect "trusted-comments.sh resolver blocks discovered (review-pr 11 + review + phase-4; review-pr-staging and remediate use the forge_resolve stub)" 13 "$TC_BLOCKS"
+expect "trusted-comments.sh resolver blocks discovered (review + phase-4; review-pr, review-pr-staging and remediate use the forge_resolve stub)" 2 "$TC_BLOCKS"
 expect "trusted-comments.sh resolvers without a canonical block" 0 "$TC_STRAY"
 expect "trusted-comments.sh resolvers byte-identical" 1 "$(sort -u "$T/tc_all" | wc -l | tr -d ' ')"
 grep -qF 'plugins/cache/forgedock/forgedock' "$T/tc_all" && ok || bad 'trusted-comments.sh resolver lacks the plugin-cache scan'
@@ -294,14 +297,18 @@ extract_helper_block() { # file var -> block on stdout
 extract_helper_fn() { # file -> function on stdout
   awk '/^resolve_extract_affected_files\(\) \{/ {inb=1} inb {print} inb && /^\}$/ {exit}' "$1"
 }
+# review-pr.md resolves its helpers through the forge_resolve stub (#3780): the pinned locator plus the call line, taken from the spec.
+stub_block() { # file var -> locator + the first `var=$(forge_resolve ...)` line, indentation stripped
+  sed 's/^[[:space:]]*//' "$1" | grep -m1 '^type forge_resolve >/dev/null'; sed 's/^[[:space:]]*//' "$1" | grep -m1 "^$2=\$(forge_resolve "
+}
 HR_CLASSIFY="$ROOT/commands/review-pr.md"
 HR_AMP="$ROOT/commands/orchestrate/phase-4-execution.md"
 HR_EX3="$ROOT/commands/orchestrate/phase-3-dependency.md"
-extract_helper_block "$HR_CLASSIFY" CLASSIFY_SCRIPT > "$T/hr_classify.sh"
+stub_block "$HR_CLASSIFY" CLASSIFY_SCRIPT > "$T/hr_classify.sh"
 extract_helper_block "$HR_AMP" AMP_SCRIPT > "$T/hr_amp.sh"
 extract_helper_fn "$HR_AMP" > "$T/hr_ex4.sh"
 extract_helper_fn "$HR_EX3" > "$T/hr_ex3.sh"
-expect "CLASSIFY_SCRIPT resolver block found" 1 "$(grep -c '^CLASSIFY_SCRIPT=""' "$T/hr_classify.sh")"
+expect "CLASSIFY_SCRIPT resolver stub found" 1 "$(grep -c '^CLASSIFY_SCRIPT=\$(forge_resolve classify-finding.sh)$' "$T/hr_classify.sh")"
 expect "AMP_SCRIPT resolver block found" 1 "$(grep -c '^AMP_SCRIPT=""' "$T/hr_amp.sh")"
 expect "extract-affected-files resolver found in phase-4" 1 "$(grep -c 'resolve_extract_affected_files() {' "$T/hr_ex4.sh")"
 expect "extract-affected-files resolver found in phase-3" 1 "$(grep -c 'resolve_extract_affected_files() {' "$T/hr_ex3.sh")"
@@ -315,7 +322,8 @@ done
 if grep -rnE 'PWD/scripts/|^\$PWD$|REPO_PATH/scripts/extract' "$ROOT/commands" >/dev/null 2>&1; then bad 'commands/ still lists a working-directory helper tier'; else ok; fi
 
 # Behavior (#3483): a planted scripts/<helper>.sh in the cwd must never be selected; a cache-only install must resolve.
-mkdir -p "$T/hrwork/scripts" "$T/hrhome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts"
+mkdir -p "$T/hrwork/scripts" "$T/hrhome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts/lib"
+cp "$ROOT/scripts/lib/forge-resolve.sh" "$T/hrhome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts/lib/forge-resolve.sh"
 for h in classify-finding amplification-breaker extract-affected-files; do
   : > "$T/hrwork/scripts/$h.sh"; : > "$T/hrhome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts/$h.sh"
 done
@@ -341,17 +349,19 @@ hr_check_block() { # label file var script
   grep -qE '\$PWD|\$REPO_PATH|\$\{PWD|\$\{REPO_PATH' "$T/hr_blk.sh" && bad "$1: $3 resolver lists the working directory or repo path" || ok
   grep -qF "scripts/$4" "$T/hr_blk.sh" && ok || bad "$1: $3 resolver does not resolve scripts/$4"
 }
-hr_check_block review-pr "$HR_CLASSIFY" DERIVE_MILESTONE_SCRIPT derive-finding-milestone.sh
-hr_check_block review-pr "$HR_CLASSIFY" PRIORITY_SCRIPT severity-to-priority.sh
-hr_check_block review-pr "$HR_CLASSIFY" CODE_INDEX_SCRIPT code-index.sh
-hr_check_block review-pr "$HR_CLASSIFY" DEDUP_SCRIPT issue-dedup.sh
+hr_check_stub() { # label file var script: the spec calls the script through the forge_resolve stub (locator in the same fence)
+  stub_block "$2" "$3" > "$T/hr_blk.sh"
+  expect "$1: $3 resolver stub found" "$3=\$(forge_resolve $4)" "$(sed -n 2p "$T/hr_blk.sh")"
+  grep -qE '\$PWD|\$REPO_PATH|\$\{PWD|\$\{REPO_PATH' "$T/hr_blk.sh" && bad "$1: $3 resolver lists the working directory or repo path" || ok
+  expect "$1: $3 call without a locator in the same fence" 0 "$(awk -v v="$3" '/^[ ]*```/{loc=0} /^[ ]*type forge_resolve >\/dev\/null/{loc=1} index($0, v "=$(forge_resolve ")>0 && !loc {b++} END{print b+0}' "$2")"
+}
+hr_check_stub review-pr "$HR_CLASSIFY" DERIVE_MILESTONE_SCRIPT derive-finding-milestone.sh
+hr_check_stub review-pr "$HR_CLASSIFY" PRIORITY_SCRIPT severity-to-priority.sh
+hr_check_stub review-pr "$HR_CLASSIFY" CODE_INDEX_SCRIPT code-index.sh
+hr_check_stub review-pr "$HR_CLASSIFY" DEDUP_SCRIPT issue-dedup.sh
 hr_check_block issue "$ROOT/commands/issue.md" DEDUP_SCRIPT issue-dedup.sh
-extract_helper_block "$HR_CLASSIFY" DERIVE_MILESTONE_SCRIPT > "$T/hr_dm.sh"
-extract_helper_block "$HR_CLASSIFY" PRIORITY_SCRIPT > "$T/hr_pr.sh"
-# only the variable-name-specific text may differ, and review-pr/review-pr-staging must agree
-extract_helper_block "$HR_CLASSIFY" DEDUP_SCRIPT > "$T/hr_dd.sh"
-extract_helper_block "$ROOT/commands/issue.md" DEDUP_SCRIPT > "$T/hr_dd_issue.sh"
-cmp -s "$T/hr_dd.sh" "$T/hr_dd_issue.sh" && ok || bad 'DEDUP_SCRIPT resolver differs between review-pr and issue'
+stub_block "$HR_CLASSIFY" DERIVE_MILESTONE_SCRIPT > "$T/hr_dm.sh"
+stub_block "$HR_CLASSIFY" PRIORITY_SCRIPT > "$T/hr_pr.sh"
 # no bare cwd-relative helper call in either review spec
 if grep -nE 'bash scripts/(derive-finding-milestone|severity-to-priority)\.sh' "$HR_CLASSIFY" "$HR_STG" >/dev/null 2>&1; then bad 'review spec still calls a helper by a bare scripts/ path'; else ok; fi
 
@@ -446,6 +456,20 @@ expect "remediate.md inlined FORGE_ROOT bootstrap copies" 0 "$(grep -c '# FORGE_
 grep -qE '^[[:space:]]*(TRUSTED_SCRIPT|[A-Z_]+_SCRIPT)=""|_tc="\$\(printf|^[[:space:]]*GATE_SCRIPT=""' "$REM_SPEC" && bad "remediate.md still carries an inlined resolver block" || ok
 # every forge_resolve call in remediate.md must sit in a fence that already defined it via the locator
 expect "remediate.md: forge_resolve calls without a preceding locator in the same fence" 0 "$(awk '/^[ ]*```/{loc=0} /^[ ]*type forge_resolve >\/dev\/null/{loc=1} /(GATE|TRUSTED|CI_GATE)_SCRIPT=\$\(forge_resolve /&&!loc{bad++} END{print bad+0}' "$REM_SPEC")"
+
+# Guard (#3780): review-pr.md carries the same byte-identical locator stub (one per fence that resolves a script) and none of the
+# old inlined blocks: no FORGE_ROOT bootstrap, no `_tc` resolver, no `*_SCRIPT=""` accumulator. Review-delta mode lives in
+# scripts/lib/review-delta-mode.sh (pinned by review-pr-delta-wiring.test.sh).
+RP_SPEC="$ROOT/commands/review-pr.md"
+sed 's/^[[:space:]]*//' "$RP_SPEC" | grep '^type forge_resolve >/dev/null' | sort | uniq -c > "$T/rp_uniq"
+[ "$(wc -l < "$T/rp_uniq" | tr -d ' ')" = 1 ] && ok || bad "review-pr.md locator lines must be byte-identical"
+[ "$(awk '{print $1}' "$T/rp_uniq")" -ge 15 ] && ok || bad "expected a locator in every review-pr.md fence that resolves a script (>=15)"
+[ "$(sed 's/^[[:space:]]*//' "$RP_SPEC" | grep '^type forge_resolve >/dev/null' | sed 1q)" = "$(cat "$T/locator.sh")" ] && ok || bad "review-pr.md locator differs from the pinned review-pr-staging.md locator"
+expect "review-pr.md inlined FORGE_ROOT bootstrap copies" 0 "$(grep -c 'FORGE_ROOT bootstrap' "$RP_SPEC" || true)"
+# (SCOPE_SCRIPT="" is a sibling path derived from the resolved trusted script's own directory, not a resolver accumulator)
+grep -vE '^[[:space:]]*SCOPE_SCRIPT=""$' "$RP_SPEC" | grep -qE '^[[:space:]]*(TRUSTED_SCRIPT|[A-Z_]+_SCRIPT)=""|_tc="\$\(printf|TRUSTED_SCRIPT resolver \(canonical' && bad "review-pr.md still carries an inlined resolver block" || ok
+expect "review-pr.md: forge_resolve calls without a preceding locator in the same fence" 0 "$(awk '/^[ ]*```/{loc=0} /^[ ]*type forge_resolve >\/dev\/null/{loc=1} /=\$\(forge_resolve /&&!loc{bad++} END{print bad+0}' "$RP_SPEC")"
+grep -nE '\$FORGE_ROOT|\$\{FORGE_ROOT:\+' "$RP_SPEC" | grep -q . && bad "review-pr.md consumes \$FORGE_ROOT (resolve through forge_resolve instead)" || ok
 
 # Behaviour: run the REAL stub locator + forge_resolve in a clean env over each install layout.
 # Paths are compared canonically: macOS resolves /var -> /private/var and Git Bash maps /tmp -> /c/Users/..., so the literal
