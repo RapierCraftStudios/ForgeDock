@@ -93,7 +93,7 @@ ROUTE_SHA="${ROUTE%% *}"; ROUTE_AT="${ROUTE##* }"; REVIEW_PENDING=false
 if [ -n "$ROUTE_SHA" ]; then
   case "$ROUTE_AT" in ''|*[!0-9]*) ROUTE_AT=0 ;; esac
   VERDICTS=$(printf '%s' "$PR_COMMENTS" | jq -rs --arg r "$ROUTE_SHA" "[.[][] | select($TRUST) | select((.body // \"\") | test(\"^<!-- FORGE:REVIEW-(AGENT:[a-z-]+|CARRIED) -->\")) | ((.body | capture(\"(^|\\\\n)Reviewed-SHA: (?<s>[0-9a-f]{7,40})\")? // {s: \"\"}).s) as \$s | select(\$s != \"\" and ((\$r | startswith(\$s)) or (\$s | startswith(\$r))))] | length" 2>/dev/null) || err "reviewer comments unreadable"
-  # Handoff: the dispatcher posts FORGE:{CI|INPR|BASESYNC}_REMEDIATION: pr=N on the issue right before dispatching remediation, so a
+  # Handoff: the dispatcher posts FORGE:CI_REMEDIATION / FORGE:INPR_REMEDIATION / FORGE:BASESYNC_REMEDIATION: pr=N on the issue right before dispatching remediation, so a
   # trusted marker at or after the route means the review handed off (possibly before any panel) and nothing is in flight. A route newer than the marker is a re-review.
   HANDOFF_Q='[.[][] | select('"$TRUST"') | select((.body // "") | test("(^|\\n)[ \\t]*<!-- FORGE:(CI|INPR|BASESYNC)_REMEDIATION: " + $m + " -->[ \\t\\r]*(\\n|$)")) | ((.created_at // "") | fromdateiso8601? // 0)] | max // 0'
   HANDOFF_AT=$(printf '%s' "$ISSUE_COMMENTS" | jq -rs --arg m "pr=$PR" "$HANDOFF_Q" 2>/dev/null) || err "handoff markers unreadable"
