@@ -121,12 +121,13 @@ Extract from contract:
 The deliverables comment MUST be posted BEFORE the issue is closed, MUST start with the marker line below as its first line, and lists each created issue. The engine reads this marker (not the free-text result) to tell a legitimate investigation exit from a crashed build, since an investigation posts no `FORGE:BUILDER:COMPLETE` and has no commits. <!-- Added: forge#3534 -->
 
 ```bash
-gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:INVESTIGATION:DELIVERABLES -->
+DELIVERABLES_BODY="<!-- FORGE:INVESTIGATION:DELIVERABLES -->
 ## Investigation Deliverables
 
 - #{CREATED_ISSUE_1}: {title}
 - #{CREATED_ISSUE_2}: {title}"
-gh issue edit {NUMBER} {GH_FLAG} --remove-label "workflow:building" 2>/dev/null || true
+gh issue comment {NUMBER} {GH_FLAG} --body "$DELIVERABLES_BODY" # allowlist:check-command-side-effects
+gh issue edit {NUMBER} {GH_FLAG} --remove-label "workflow:building" 2>/dev/null || true # allowlist:check-command-side-effects
 ```
 
 Resume: if a `<!-- FORGE:INVESTIGATION:DELIVERABLES -->` comment already exists on the issue, do not research or create issues again; ensure the label cleanup and close are done and print `INVESTIGATION_COMPLETE`.
