@@ -95,6 +95,8 @@ async function issueMarkers(issue, io) {
   return { comments };
 }
 
+/** Non-terminal held-resume record (remediate.md Phase M8, forge#3685): header and sentinel are the same line; never a COMPLETE marker. */
+const REMEDIATION_HELD_MARKER = "FORGE:REMEDIATION_HELD";
 const reEscape = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** True when `body` STARTS with the typed header `<!-- {header}` (e.g. `FORGE:BUILDER`). */
 function startsWithHeader(body, header) {
@@ -175,6 +177,9 @@ export async function postCycleMarker(issue, n, io) {
  * `FORGE:ACCEPTANCE_GATE:PASSED` => "pass"; `:FAILED`, `:BLOCKED` or a
  * `FORGE:BUILD_BLOCKED` comment => "blocked"; none => "none" (legacy / crash
  * paths keep their prior behaviour). `comments` are trusted bodies, oldest first.
+ * Stays fail-closed by design. A blocked state clears only via a newer PASSED, which a
+ * re-invocation posts: build.md B0 "gate resume" re-enters B6.5 instead of returning
+ * ALREADY_DONE when the newest gate marker is blocked (forge#3725).
  */
 function latestGateState(comments) {
   const gate = "FORGE:ACCEPTANCE_GATE";
@@ -186,6 +191,27 @@ function latestGateState(comments) {
     if (hasSentinelLine(b, `${gate}:FAILED`) || hasSentinelLine(b, `${gate}:BLOCKED`)) return "blocked";
   }
   return "none";
+}
+/**
+ * Investigation exit evidence (forge#3534): a trusted comment led by
+ * `<!-- FORGE:INVESTIGATION:DELIVERABLES -->` as a full line. Anchored like every
+ * other marker, so the string quoted inside another comment never counts.
+ */
+function hasInvestigationMarker(comments) {
+  const m = PHASE_MARKERS.build.investigationMarker;
+  return hasMarker(comments, m, m);
+}
+/**
+ * forge#3534 (SEC-3716-1): does the issue carry a trusted current-cycle investigation exit marker?
+ * The implement child closes an investigation issue itself (CLOSED, no `workflow:merged`), so the
+ * engine's divergence guard must not read that as a dead issue before build.reconcile runs.
+ * Fail closed: any fetch error means "no marker" (the guard then behaves as before).
+ */
+export async function hasInvestigationExit(issue, io) {
+  try {
+    const { comments } = await issueMarkers(issue, io);
+    return hasInvestigationMarker(sliceToCurrentCycle(comments));
+  } catch { return false; }
 }
 /** close.md C2 PHASE_COMPLETE evidence in the current cycle (forge#3545). */
 function hasPhaseComplete(comments) {
@@ -228,6 +254,33 @@ function sizeGateRoutesToDecompose(comments) {
   if (!m || m[1] !== "OVER" || !/^###[ \t]+Split Proposal\b/m.test(body)) return false;
   return !comments.slice(idx + 1).some((c) => starts(c, override) && overrideHasJustification(c));
 }
+/**
+ * Decompose loop guard (mirrors build.md B5.5 and decompose.md Guard 1). Returns a
+ * short reason string when the issue must NOT be routed to decompose, else null:
+ * a `**Parent**: #N` body line (a sub-issue; decompose Guard 1 would BLOCK it), a
+ * TRUSTED `FORGE:DECOMPOSED` comment, or a TRUSTED justified `FORGE:SIZE_OVERRIDE`.
+ * `comments` MUST be trusted bodies. A body-fetch failure fails toward the guard
+ * (not decomposed) so an error can never route into a refusing decompose phase.
+ */
+async function decomposeLoopGuard(issue, comments, io) {
+  const starts = (c, m) => typeof c === "string" && c.trimStart().startsWith(`<!-- ${m}`);
+  if (comments.some((c) => starts(c, "FORGE:DECOMPOSED"))) return "already decomposed (FORGE:DECOMPOSED)";
+  if (comments.some((c) => starts(c, PHASE_MARKERS.build.sizeOverrideMarker) && overrideHasJustification(c)))
+    return "justified FORGE:SIZE_OVERRIDE";
+  let body;
+  try {
+    const out = String((await io.gh(["issue", "view", String(issue), "--json", "body", "--jq", ".body"])) ?? "");
+    body = out;
+    if (out.trimStart().startsWith("{")) {
+      try { const j = JSON.parse(out); if (j && typeof j.body === "string") body = j.body; } catch { /* raw text */ }
+    }
+  } catch {
+    return "issue body unavailable (failing toward not decomposed)";
+  }
+  if (/^\*\*Parent\*\*:[ \t]*#\d+/m.test(body.replace(/\r\n/g, "\n"))) return "sub-issue (**Parent**: #N)";
+  return null;
+}
+
 /** Cheap untrusted pre-check: does ANY comment look like an OVER gate? Only then is the trusted fetch worth making. */
 function mayRouteToDecompose(comments) {
   const gate = PHASE_MARKERS.build.sizeGateMarker;
@@ -465,8 +518,8 @@ async function reviewArgs(state, ctx, io) {
           "--branch", need(state.branch, "branch", BRANCH_RE), ...baseArgs(state)];
 }
 
-/** Default `build.diff_size.estimate_factor` (docs/CONFIG.md); mirrored here for the isDecomposed safety net. */
-const ESTIMATE_FACTOR = 1.2;
+/** Default `build.diff_size.estimate_factor` (docs/CONFIG.md); used when the report carries no valid `ESTIMATE_FACTOR:` field. */
+const DEFAULT_ESTIMATE_FACTOR = 1.2;
 
 /**
  * Is the issue assessed for decomposition? Evaluated on ONE comment: the newest
@@ -491,14 +544,18 @@ function isDecomposed(report) {
   if ((verdict ?? marker) === "YES") return true;
   // forge#3573 safety net: an investigator NO whose own size estimate is clearly over
   // the gate (estimate > threshold x factor) fails toward decompose. Own-line,
-  // whole-number fields only; absent/0/non-numeric fields have no effect.
+  // whole-number fields only; absent/0/non-numeric fields have no effect. The factor is
+  // the investigator's effective `ESTIMATE_FACTOR:` (positive decimal); absent/invalid -> 1.2.
   const est = /^ESTIMATED_DIFF_LINES:[ \t]*(\d+)[ \t]*$/m.exec(text);
   const gate = /^GATE_THRESHOLD:[ \t]*(\d+)[ \t]*$/m.exec(text);
+  const fac = /^ESTIMATE_FACTOR:[ \t]*(\d+(?:\.\d+)?)[ \t]*$/m.exec(text);
+  const parsedFactor = fac ? Number(fac[1]) : NaN;
+  const factor = Number.isFinite(parsedFactor) && parsedFactor > 0 ? parsedFactor : DEFAULT_ESTIMATE_FACTOR;
   if (est && gate) {
     const estimate = Number(est[1]);
     const threshold = Number(gate[1]);
-    if (threshold > 0 && estimate > threshold * ESTIMATE_FACTOR) {
-      console.error(`[engine] investigator estimate ${estimate} exceeds gate ${threshold} x ${ESTIMATE_FACTOR}; routing to decompose`);
+    if (threshold > 0 && estimate > threshold * factor) {
+      console.error(`[engine] investigator estimate ${estimate} exceeds gate ${threshold} x ${factor}; routing to decompose`);
       return true;
     }
   }
@@ -527,8 +584,16 @@ export const PHASES = [
         return { status: "committed", terminalReason: "invalid", outputs: { verdict: "INVALID" } };
       if (closing === complete) {
         // investigate.md emits `### Decomposition Assessment` then `**YES**|**NO**`.
-        if (isDecomposed(report))
+        if (isDecomposed(report)) {
+          // Lazy: the body fetch only happens on the decompose path. A child / already
+          // decomposed / overridden issue cannot be decomposed (decompose Guard 1 BLOCKs).
+          const guard = await decomposeLoopGuard(state.issue, comments, io);
+          if (guard) {
+            console.error(`[engine] decompose suppressed for #${state.issue}: ${guard}; treating as not decomposed`);
+            return { status: "committed", outputs: { verdict: "CONFIRMED" } };
+          }
           return { status: "committed", terminalReason: "decomposed", outputs: { decompose: true } };
+        }
         return { status: "committed", outputs: { verdict: "CONFIRMED" } };
       }
       return { status: "failed", detail: `no ${PHASE_MARKERS.investigate.completionMarker} marker` };
@@ -590,6 +655,8 @@ export const PHASES = [
         const merged = await mergedPrForBranch(branch, state.lane, io);
         if (merged) return { satisfied: true, outputs: { branch, pr: merged.number } };
       }
+      // forge#3534: an investigation exit already posted its deliverables marker: build is done.
+      if (hasInvestigationMarker(comments)) return { satisfied: true, terminalReason: "investigation", outputs: {} };
       return { satisfied: false };
     },
     async detectOutcome(state, io) {
@@ -608,13 +675,20 @@ export const PHASES = [
       const ahead = branch ? await commitsAhead(state.lane, branch, io) : -1; // … AND real commits
       // forge#3545: fail closed. COMPLETE is written before the B6.5 acceptance gate, so a
       // newer FAILED/BLOCKED gate (or BUILD_BLOCKED) must not be committed and move on to
-      // review. Non-retryable: a retry would only re-read the same append-only markers;
-      // a repaired build posts a newer PASSED, which clears this.
+      // review. Non-retryable: a retry would only re-read the same append-only markers.
+      // A newer PASSED clears this: either the in-build repair loop posts it, or a fresh
+      // build invocation does via build.md B0 gate resume (re-enters B6.5; forge#3725).
       if (latestGateState(comments) === "blocked") {
         return { status: "failed", detail: `acceptance gate blocked (builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"})`, retryable: false };
       }
       if (complete && ahead > 0) {
         return { status: "committed", outputs: { branch, ...buildChildEvidence(comments) } };
+      }
+      // forge#3534: INVESTIGATION_COMPLETE writes no code and opens no PR, so it never
+      // posts FORGE:BUILDER:COMPLETE with commits. The durable deliverables marker is the
+      // ground truth. Not retried; review is skipped and close runs `--terminal-state investigation`.
+      if (hasInvestigationMarker(comments)) {
+        return { status: "committed", terminalReason: "investigation", outputs: {} };
       }
       // B5.5 NEEDS_DECOMPOSE: the size gate posts no FORGE:BUILDER:COMPLETE and
       // build.md says the router (not build) dispatches decompose with no
@@ -667,7 +741,8 @@ export const PHASES = [
     id: "review",
     command: "work-on/review",
     buildArgs: reviewArgs,
-    entryCondition: (s) => s.committed.includes("build"),
+    // forge#3534: an investigation build has no PR to review; close runs directly.
+    entryCondition: (s) => s.committed.includes("build") && s.terminalReason !== "investigation",
     async reconcile(state, io) {
       const pr = await openPrFor(state, io);   // adopt an existing PR instead of opening a second
       return pr ? { satisfied: false, outputs: { pr } } : { satisfied: false };
@@ -794,6 +869,19 @@ export const PHASES = [
           ? { status: "committed", terminalReason: "merged", outputs: { reGateOutcome } }
           : { status: "committed", terminalReason: "merged", outputs: { reGateOutcome, closeHandoff: true } };
       };
+      // forge#3685: a resume that ends HELD posts a non-terminal FORGE:REMEDIATION_HELD record (no COMPLETE).
+      // Newest-wins between the held record and COMPLETE, by position in the (trusted, scoped) comment list.
+      const isHeld = (b) => startsWithHeader(b, REMEDIATION_HELD_MARKER) && hasSentinelLine(b, REMEDIATION_HELD_MARKER);
+      let heldAt = -1, completeAt = -1;
+      scoped.forEach((b, i) => {
+        if (isHeld(b)) heldAt = i;
+        if (startsWithHeader(b, PHASE_MARKERS.remediate.header) && hasSentinelLine(b, completion)) completeAt = i;
+      });
+      if (heldAt >= 0 && heldAt > completeAt) {
+        // Merged PR hands to close; otherwise awaiting-merge (terminal for the engine, re-entered by an operator), never a retry.
+        if (await prMerged()) return mergedResult("AUTO-LANDED");
+        return { status: "committed", terminalReason: "awaiting-merge", outputs: { reGateOutcome: "HELD-AWAITING-MERGE" } };
+      }
       if (latest === null) {
         if (await prMerged()) return mergedResult("AUTO-LANDED");
         return { status: "failed", detail: `no ${completion} marker` };
@@ -841,20 +929,23 @@ export const PHASES = [
       // non-merged handoff reason (needs-human, awaiting-merge, engine-error, ...) must never
       // be closed as merged.
       const reason = state.terminalReason ?? null;
-      if (reason !== null && !["merged", "decomposed", "invalid"].includes(reason))
+      if (reason !== null && !["merged", "decomposed", "invalid", "investigation"].includes(reason))
         throw new PhaseArgsError(`refusing close --terminal-state merged from terminalReason ${JSON.stringify(reason)}`);
       const terminal = reason === "decomposed" ? "decomposed"
-        : reason === "invalid" ? "invalid" : "merged";
+        : reason === "invalid" ? "invalid"
+        : reason === "investigation" ? "investigation" : "merged";
       const args = [String(state.issue), ...repoArgs(ctx), ...baseArgs(state)];
       // forge#3504: a merged close with no PR is fabricated evidence — require it.
-      if (state.pr != null || terminal === "merged") args.push("--pr", need(state.pr, "pr", /^[0-9]+$/));
+      // forge#3534: an investigation close is PR-less by definition; never pass --pr.
+      if (terminal !== "investigation" && (state.pr != null || terminal === "merged")) args.push("--pr", need(state.pr, "pr", /^[0-9]+$/));
       if (state.branch) args.push("--branch", need(state.branch, "branch", BRANCH_RE));
       const wt = await resolveWorktree(state, io);
       if (wt && PATH_RE.test(wt)) args.push("--worktree", wt);
       args.push("--terminal-state", terminal);
       return args;
     },
-    entryCondition: (s) => s.committed.includes("review"),
+    entryCondition: (s) => s.committed.includes("review")
+      || (s.committed.includes("build") && s.terminalReason === "investigation"), // forge#3534
     async reconcile(state, io) {
       // Idempotent resume: issue already CLOSED → skip the LLM re-run. forge#3644: the
       // workflow:merged label alone is NOT proof close ran — remediate M7 labels the issue
@@ -864,6 +955,15 @@ export const PHASES = [
       // strict subset of what satisfies this predicate on a CLOSED issue).
       const snap = await issueSnapshot(state.issue, io);
       if (!snap.ok) return { satisfied: false };
+      if (snap.state === "CLOSED" && state.terminalReason === "investigation") {
+        // forge#3534: the implement child closes an investigation issue itself, so CLOSED is no
+        // proof close.md ran (board, summary, trajectory). Its own idempotency key is the
+        // FORGE:TRAJECTORY comment; only that makes this satisfied.
+        try {
+          const { comments } = await issueMarkers(state.issue, io);
+          return { satisfied: comments.some((b) => startsWithHeader(b, "FORGE:TRAJECTORY")), terminalReason: "investigation" };
+        } catch { return { satisfied: false }; }
+      }
       if (snap.state === "CLOSED") return { satisfied: true };
       // forge#3545: a current-cycle FORGE:PHASE:COMPLETE means close already ran to its
       // PHASE_COMPLETE exit; do not re-run it.
@@ -891,8 +991,9 @@ export const PHASES = [
       // (already in TERMINAL_REASONS) rather than inventing a new one.
       if (snap.labels.includes(PHASE_MARKERS.close.completionLabel))
         return { status: "committed", terminalReason: "merged", outputs: {} };
+      // forge#3534: an investigation exit closes the issue itself; keep that reason honest.
       if (snap.state === "CLOSED")
-        return { status: "committed", terminalReason: "invalid", outputs: {} };
+        return { status: "committed", terminalReason: state.terminalReason === "investigation" ? "investigation" : "invalid", outputs: {} };
       // forge#3545: PHASE_COMPLETE is a valid close exit (multi-phase issue: PR merged,
       // issue deliberately left OPEN). Only the current cycle's marker counts.
       if (snap.state === "OPEN") {

@@ -59,6 +59,8 @@ export const PHASE_IDS = ['investigate', 'decompose', 'build', 'review', 'remedi
  *   verdict, emitted as `<!-- DECOMPOSE:NO -->`.
  * @property {string} [sizeGateMarker] - (build only) bare annotation-opener of the diff-size gate record.
  * @property {string} [sizeOverrideMarker] - (build only) bare annotation-opener of the size-gate override.
+ * @property {string} [investigationMarker] - (build only) bare marker of the durable
+ *   investigation-deliverables comment, posted as `<!-- FORGE:INVESTIGATION:DELIVERABLES -->`.
  * @property {string} [partialMarker] - sentinel for an interrupted/partial annotation.
  * @property {string} [presenceMarker] - bare annotation-opener substring, used only by
  *   phases whose completion is non-critical (see `context` below) — presence alone
@@ -111,6 +113,10 @@ export const PHASE_MARKERS = {
     // these to route an oversized build to decompose instead of retrying it.
     sizeGateMarker: `FORGE:${RESERVED_TYPES.DIFF_SIZE.type}`, // 'FORGE:DIFF_SIZE'
     sizeOverrideMarker: `FORGE:${RESERVED_TYPES.SIZE_OVERRIDE.type}`, // 'FORGE:SIZE_OVERRIDE'
+    // Investigation exit (implement.md I2): no code, no PR, so no FORGE:BUILDER:COMPLETE.
+    // This comment is the engine's ground truth that the build ended INVESTIGATION_COMPLETE.
+    // Not a completion sentinel: the drift script only checks completionMarker/completionLabel.
+    investigationMarker: 'FORGE:INVESTIGATION:DELIVERABLES',
   },
   review: {
     // No RESERVED_TYPES entry defines this sentinel (REVIEWER has no

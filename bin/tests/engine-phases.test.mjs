@@ -6,7 +6,7 @@ import path from "node:path";
 import { PHASES, pickPhase, REMEDIATION_BOUND_MARKERS, cycleMarker, sliceToCurrentCycle, postCycleMarker, nextCycleNumber } from "../engine/phases.mjs";
 import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
 import { RESERVED_TYPES } from "../../packages/protocol/src/types.js";
-import { trusted, jsonLines, invBody, builderBody, remediationBody } from "./helpers/comments.mjs";
+import { trusted, jsonLines, invBody, builderBody, remediationBody, remediationHeldBody } from "./helpers/comments.mjs";
 
 const base = { v: 0, run: "r1", issue: 42, lane: "staging", committed: [], phase: null,
   branch: null, pr: null, terminal: false, terminalReason: null, lease: null };
@@ -90,7 +90,12 @@ describe("pickPhase", () => {
   describe("investigate.detectOutcome", () => {
     const investigate = PHASES.find(p => p.id === "investigate");
     // Each argument is a comment: a body string (OWNER-authored) or a full author object.
-    const ioWith = (...cs) => ({ gh: async () => jsonLines(cs.map((c) => (typeof c === "string" ? trusted(c) : c))), git: async () => "0" });
+    // `issue view` (body fetch) is dispatched separately from `api` (comments): configure via ioWith.body / ioWith.bodyError.
+    const ioWithBody = (body, ...cs) => ({
+      gh: async (args) => (args[0] === "issue" ? (body instanceof Error ? Promise.reject(body) : body) : jsonLines(cs.map((c) => (typeof c === "string" ? trusted(c) : c)))),
+      git: async () => "0",
+    });
+    const ioWith = (...cs) => ioWithBody("", ...cs);
 
     it("INVALID sentinel as the closing line -> committed, terminalReason invalid", async () => {
       const outcome = await investigate.detectOutcome(base, ioWith(invBody("INVALID")));
@@ -173,7 +178,7 @@ describe("pickPhase", () => {
     });
 
     // forge#3573: pre-build size estimate safety net.
-    const sized = (verdict, est, gate) => inv(verdict, `ESTIMATED_DIFF_LINES: ${est}\nINDEPENDENT_SEAMS: 3\nGATE_THRESHOLD: ${gate}\n<!-- DECOMPOSE:${/YES/.test(verdict) ? "YES" : "NO"} -->`);
+    const sized = (verdict, est, gate, factor) => inv(verdict, `ESTIMATED_DIFF_LINES: ${est}\nINDEPENDENT_SEAMS: 3\nGATE_THRESHOLD: ${gate}\n${factor === undefined ? "" : `ESTIMATE_FACTOR: ${factor}\n`}<!-- DECOMPOSE:${/YES/.test(verdict) ? "YES" : "NO"} -->`);
 
     it("NO verdict with estimate over threshold x 1.2 -> decomposed (safety net)", async () => {
       const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1500, 1000)));
@@ -183,6 +188,33 @@ describe("pickPhase", () => {
     it("NO verdict with estimate within threshold x 1.2 -> not decomposed", async () => {
       const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1200, 1000)));
       assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("ESTIMATE_FACTOR 3.0 -> 2000/1000 is not decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 2000, 1000, "3.0")));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("ESTIMATE_FACTOR 1.0 -> 1100/1000 is decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1100, 1000, "1.0")));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("absent ESTIMATE_FACTOR falls back to 1.2", async () => {
+      const o1 = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1300, 1000)));
+      assert.equal(o1.terminalReason, "decomposed");
+      const o2 = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1100, 1000)));
+      assert.equal(o2.terminalReason, undefined);
+    });
+
+    it("zero, invalid or quoted mid-line ESTIMATE_FACTOR is ignored (fallback 1.2)", async () => {
+      for (const f of ["0", "abc", "-2", "1e2", ".5"]) {
+        const o = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1500, 1000, f)));
+        assert.equal(o.terminalReason, "decomposed", `factor ${f}`);
+      }
+      const quoted = inv("**NO** — one PR", "see `ESTIMATE_FACTOR: 5` inline\nESTIMATED_DIFF_LINES: 1500\nGATE_THRESHOLD: 1000\n<!-- DECOMPOSE:NO -->");
+      const o = await investigate.detectOutcome(base, ioComments(quoted));
+      assert.equal(o.terminalReason, "decomposed");
     });
 
     it("GATE_THRESHOLD 0 disables the estimate net", async () => {
@@ -207,6 +239,51 @@ describe("pickPhase", () => {
       const outcome = await investigate.detectOutcome(base, ioComments(
         inv("**YES** — split", `ESTIMATED_DIFF_LINES: 5000\nGATE_THRESHOLD: 1000\n<!-- ${PHASE_MARKERS.investigate.notDecomposedMarker} -->`)));
       assert.equal(outcome.terminalReason, undefined);
+    });
+
+    // forge#3676: loop guard — a child / decomposed / overridden issue is never routed to decompose.
+    const over = () => sized("**NO** — one PR", 1500, 1000);
+    const childBody = "## Problem\n\n**Parent**: #12\n\nbody";
+    const override = (just) => `<!-- ${PHASE_MARKERS.build.sizeOverrideMarker} -->${just ? `\n${just}` : ""}`;
+
+    it("child issue with over-gate estimate -> not decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioWithBody(childBody, over()));
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("child issue with explicit YES -> not decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioWithBody(childBody, sized("**YES** — split", 1500, 1000)));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("trusted FORGE:DECOMPOSED comment suppresses the estimate net", async () => {
+      const outcome = await investigate.detectOutcome(base, ioWithBody("", over(), "<!-- FORGE:DECOMPOSED -->\nspawned"));
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("untrusted FORGE:DECOMPOSED comment does not suppress", async () => {
+      const fake = trusted("<!-- FORGE:DECOMPOSED -->\nspawned", { assoc: "NONE", type: "User", login: "drive-by" });
+      const outcome = await investigate.detectOutcome(base, ioWithBody("", over(), fake));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("justified SIZE_OVERRIDE suppresses; unjustified does not", async () => {
+      const ok = await investigate.detectOutcome(base, ioWithBody("", over(), override("Accepted: one cohesive change.")));
+      assert.equal(ok.terminalReason, undefined);
+      const bad = await investigate.detectOutcome(base, ioWithBody("", over(), override("")));
+      assert.equal(bad.terminalReason, "decomposed");
+    });
+
+    it("body fetch failure fails toward not decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioWithBody(new Error("gh down"), over()));
+      assert.equal(outcome.status, "committed");
+      assert.equal(outcome.terminalReason, undefined);
+    });
+
+    it("mid-line Parent mention does not make an issue a child (control still decomposes)", async () => {
+      const outcome = await investigate.detectOutcome(base, ioWithBody("see **Parent**: #12 in docs", over()));
+      assert.equal(outcome.terminalReason, "decomposed");
     });
 
     it("investigate.md emits the template marker line and both exact marker constants", () => {
@@ -417,6 +494,40 @@ describe("pickPhase", () => {
     const remediate = PHASES.find(p => p.id === "remediate");
     const ioWith = (...cs) => ({ gh: async () => jsonLines(cs.map((c) => (typeof c === "string" ? trusted(c) : c))), git: async () => "0" });
     const remediateBody = (outcome) => remediationBody(`${outcome} to staging`);
+
+    // forge#3685: held-resume record is non-terminal (no COMPLETE) and must read as awaiting-merge, not a failed phase.
+    const heldIo = (merged, ...cs) => ({
+      gh: async (args) => (args[0] === "pr" && args[1] === "view"
+        ? JSON.stringify(merged ? { state: "MERGED", mergedAt: "2026-01-01T00:00:00Z" } : { state: "OPEN" })
+        : jsonLines(cs.map((c) => (typeof c === "string" ? trusted(c) : c)))),
+      git: async () => "0",
+    });
+    it("forge#3685: held-only record -> committed awaiting-merge (not failed)", async () => {
+      const o = await remediate.detectOutcome({ ...base, pr: 7 }, heldIo(false, remediationHeldBody()));
+      assert.equal(o.status, "committed");
+      assert.equal(o.terminalReason, "awaiting-merge");
+      assert.equal(o.outputs.reGateOutcome, "HELD-AWAITING-MERGE");
+    });
+    it("forge#3685: COMPLETE newer than held -> COMPLETE wins", async () => {
+      const o = await remediate.detectOutcome({ ...base, pr: 7 }, heldIo(false, remediationHeldBody(), remediateBody("RE-ESCALATED")));
+      assert.equal(o.terminalReason, "needs-human");
+    });
+    it("forge#3685: held newer than COMPLETE -> held wins", async () => {
+      const o = await remediate.detectOutcome({ ...base, pr: 7 }, heldIo(false, remediateBody("RE-ESCALATED"), remediationHeldBody()));
+      assert.equal(o.terminalReason, "awaiting-merge");
+    });
+    it("forge#3685: held record + merged PR -> merged with closeHandoff", async () => {
+      const o = await remediate.detectOutcome({ ...base, pr: 7 }, heldIo(true, remediationHeldBody()));
+      assert.equal(o.terminalReason, "merged");
+      assert.equal(o.outputs.closeHandoff, true);
+    });
+    it("forge#3685: untrusted or quoted held marker is ignored", async () => {
+      const untrusted = { body: remediationHeldBody(), author_association: "NONE", user: { type: "User", login: "mallory" } };
+      const o1 = await remediate.detectOutcome({ ...base, pr: 7 }, heldIo(false, untrusted));
+      assert.equal(o1.status, "failed");
+      const o2 = await remediate.detectOutcome({ ...base, pr: 7 }, heldIo(false, `Quoted:\n${remediationHeldBody()}`));
+      assert.equal(o2.status, "failed");
+    });
 
     it("AUTO-LANDED -> committed, terminalReason merged", async () => {
       const outcome = await remediate.detectOutcome(base, ioWith(remediateBody("AUTO-LANDED")));
@@ -1323,6 +1434,22 @@ describe("acceptance-gate-aware build outcome (forge#3545)", () => {
     assert.equal((await build.detectOutcome(st, world([done]))).status, "committed");
   });
 
+  it("PASSED then a newer BUILD_BLOCKED -> failed", async () => {
+    const o = await build.detectOutcome(st, world([done, gate("PASSED"), blocked]));
+    assert.equal(o.status, "failed");
+    assert.equal(o.retryable, false);
+  });
+
+  it("PASSED, BUILD_BLOCKED, then a re-run PASSED -> committed (forge#3725)", async () => {
+    const o = await build.detectOutcome(st, world([done, gate("PASSED"), blocked, gate("PASSED")]));
+    assert.equal(o.status, "committed");
+  });
+
+  it("FAILED, re-run FAILED again -> still failed", async () => {
+    const o = await build.detectOutcome(st, world([done, gate("FAILED"), gate("FAILED")]));
+    assert.equal(o.status, "failed");
+  });
+
   it("a gate marker quoted in prose, or from an untrusted author, does not block", async () => {
     const quoted = `see <!-- FORGE:ACCEPTANCE_GATE:FAILED --> in the thread`;
     assert.equal((await build.detectOutcome(st, world([done, quoted]))).status, "committed");
@@ -1389,5 +1516,87 @@ describe("close PHASE_COMPLETE outcome (forge#3545)", () => {
     assert.equal(merged.terminalReason, "merged");
     const closed = await close.detectOutcome(base, world({ state: "CLOSED", labels: [{ name: "workflow:merged" }] }, [phaseComplete]));
     assert.equal(closed.terminalReason, "merged");
+  });
+});
+
+describe("build investigation exit (forge#3534)", () => {
+  const build = PHASES.find((p) => p.id === "build");
+  const review = PHASES.find((p) => p.id === "review");
+  const close = PHASES.find((p) => p.id === "close");
+  const st = { ...base, committed: ["investigate"], branch: null };
+  const world = (bodies, { ahead = "0" } = {}) => ({
+    gh: async (args) => (args[0] === "pr" ? "[]" : jsonLines(bodies.map((b) => trusted(b)))),
+    git: async () => ahead,
+  });
+  const marker = `<!-- ${PHASE_MARKERS.build.investigationMarker} -->\n## Investigation Deliverables\n\n- #11\n- #12`;
+  const partialBuilder = "<!-- FORGE:BUILDER -->\n## Implementation Complete\n\n**Branch**: `fix/x-42`";
+
+  it("marker present (no code, no COMPLETE) -> committed first attempt, terminalReason investigation", async () => {
+    const o = await build.detectOutcome(st, world([marker]));
+    assert.equal(o.status, "committed");
+    assert.equal(o.terminalReason, "investigation");
+    assert.equal(o.retryable, undefined);
+  });
+
+  it("real crash (no COMPLETE, no marker) still fails and stays retryable", async () => {
+    const o = await build.detectOutcome(st, world([partialBuilder]));
+    assert.equal(o.status, "failed");
+    assert.equal(o.retryable, undefined);
+  });
+
+  it("COMPLETE with ahead=0 and no marker keeps the non-retryable fixed point (forge#2176)", async () => {
+    const o = await build.detectOutcome(st, world([builderBody("fix/x-42")], { ahead: "0" }));
+    assert.equal(o.status, "failed");
+    assert.equal(o.retryable, false);
+  });
+
+  it("COMPLETE + commits ahead + marker takes the normal code path (no investigation reason)", async () => {
+    const o = await build.detectOutcome(st, world([builderBody("fix/x-42"), marker], { ahead: "2" }));
+    assert.equal(o.status, "committed");
+    assert.equal(o.terminalReason, undefined);
+  });
+
+  it("marker quoted inside another comment, or from an untrusted author, does not count", async () => {
+    const quoted = `<!-- FORGE:INVESTIGATOR -->\nquoting\n> <!-- ${PHASE_MARKERS.build.investigationMarker} -->`;
+    assert.equal((await build.detectOutcome(st, world([quoted]))).status, "failed");
+    const untrusted = trusted(marker, { assoc: "NONE", type: "User", login: "drive-by" });
+    const io = { gh: async (a) => (a[0] === "pr" ? "[]" : jsonLines([untrusted])), git: async () => "0" };
+    assert.equal((await build.detectOutcome(st, io)).status, "failed");
+  });
+
+  it("reconcile is satisfied with investigation reason when the marker exists", async () => {
+    const r = await build.reconcile(st, world([marker]));
+    assert.equal(r.satisfied, true);
+    assert.equal(r.terminalReason, "investigation");
+    assert.equal((await build.reconcile(st, world([partialBuilder]))).satisfied, false);
+  });
+
+  it("pickPhase skips review and picks close after an investigation build", () => {
+    const s = { ...base, committed: ["investigate", "build"], terminalReason: "investigation" };
+    assert.equal(review.entryCondition(s), false);
+    assert.equal(pickPhase(s).id, "close");
+    // normal build still goes to review
+    assert.equal(pickPhase({ ...s, terminalReason: null }).id, "review");
+  });
+
+  it("close.detectOutcome keeps the investigation reason for a CLOSED issue", async () => {
+    const io = { gh: async (a) => (a[0] === "issue" ? JSON.stringify({ state: "CLOSED", labels: [] }) : "[]"), git: async () => "0" };
+    const o = await close.detectOutcome({ ...base, terminalReason: "investigation" }, io);
+    assert.equal(o.status, "committed");
+    assert.equal(o.terminalReason, "investigation");
+    assert.equal((await close.detectOutcome(base, io)).terminalReason, "invalid");
+  });
+
+  it("close.reconcile on a CLOSED investigation issue needs the trajectory before it is satisfied", async () => {
+    const snap = JSON.stringify({ state: "CLOSED", labels: [] });
+    const io = (bodies) => ({ gh: async (a) => (a[0] === "issue" ? snap : jsonLines(bodies.map((b) => trusted(b)))), git: async () => "0" });
+    const s = { ...base, terminalReason: "investigation" };
+    assert.equal((await close.reconcile(s, io([marker]))).satisfied, false);
+    assert.equal((await close.reconcile(s, io(["<!-- FORGE:TRAJECTORY -->\nrow"]))).satisfied, true);
+  });
+
+  it("investigation is not a TERMINAL_REASON (run must reach close)", async () => {
+    const { TERMINAL_REASONS } = await import("../engine/phases.mjs");
+    assert.ok(!TERMINAL_REASONS.includes("investigation"));
   });
 });

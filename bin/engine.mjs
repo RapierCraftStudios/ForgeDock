@@ -6,7 +6,7 @@
 import { fileURLToPath } from "node:url";
 import { hostname as osHostname } from "node:os";
 import { appendEvent, readLog, deriveState, rewriteLog } from "./engine/runlog.mjs";
-import { pickPhase, TERMINAL_REASONS, issueSnapshot, postCycleMarker, nextCycleNumber } from "./engine/phases.mjs";
+import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postCycleMarker, nextCycleNumber } from "./engine/phases.mjs";
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { VALID_BACKENDS } from "./runner.mjs";
@@ -271,7 +271,9 @@ export const MAX_RESUME_RATE_LIMIT_WAIT_MS = 6 * 60 * 60 * 1000;
  *   the last committed phase. forge#3562: when it is `phase-complete` (a
  *   multi-phase issue whose phase merged with more remaining), start a new
  *   cycle (RUN_NEXT_CYCLE) that resets committed/branch/pr and restarts at
- *   investigate. Any other terminal reason is left untouched and returns
+ *   investigate. forge#3571: `needs-human` is reopened (RUN_REOPEN) only when
+ *   a live read shows the issue OPEN with the label cleared. Any other terminal
+ *   reason (or an unreadable snapshot) is left untouched and returns
  *   `not-retryable`.
  * @param {boolean} [opts.waitLease] - forge#3574: when another live holder owns
  *   the lease, poll (via `sleep`, bounded by `leaseTtlMs`) until it expires or
@@ -369,17 +371,44 @@ export async function runIssue(opts) {
   // so the run resumes from its last committed phase. Placed AFTER the I3
   // lease guard (never weaken that ordering) and BEFORE the unconditional
   // lease write below, which then publishes `terminal:false` at the reopen's
-  // higher `v`. Only `engine-error` is ever reopened; needs-human / merged /
-  // decomposed / etc. terminals are left untouched.
+  // higher `v`. `engine-error` is reopened unconditionally; forge#3571:
+  // `needs-human` only once the label is cleared. merged / decomposed / etc.
+  // terminals are left untouched.
   // forge#3562: `phase-complete` is also retryable, but as a NEW cycle
   // (RUN_NEXT_CYCLE clears committed) rather than a reopen of the same one.
   let reopened = false;
   if (retry && state?.terminal) {
-    if (state.terminalReason !== "engine-error" && state.terminalReason !== "phase-complete") {
+    if (state.terminalReason !== "engine-error" && state.terminalReason !== "phase-complete" &&
+        state.terminalReason !== "needs-human") {
       return {
         terminalReason: "not-retryable",
-        detail: `issue ${issue} ended ${state.terminalReason}; --retry only resumes an engine-error or phase-complete run`,
+        detail: `issue ${issue} ended ${state.terminalReason}; --retry only resumes an engine-error, phase-complete or needs-human run`,
       };
+    }
+    // forge#3571: a human clearing `needs-human` is the hand-back signal. Reopen
+    // only on a live read showing the issue OPEN and the label gone; a label
+    // still present keeps today's refusal, and an unreadable snapshot fails closed.
+    if (state.terminalReason === "needs-human") {
+      let snap;
+      try { snap = await issueSnapshot(issue, io); } catch { snap = { ok: false, state: null }; }
+      if (!snap.ok) {
+        return {
+          terminalReason: "not-retryable",
+          detail: `issue ${issue} state could not be read; --retry did not reopen the needs-human run`,
+        };
+      }
+      if (snap.state === "CLOSED") {
+        return {
+          terminalReason: "not-retryable",
+          detail: `issue ${issue} is CLOSED; --retry does not reopen a needs-human run on a closed issue`,
+        };
+      }
+      if ((snap.labels || []).includes("needs-human")) {
+        return {
+          terminalReason: "not-retryable",
+          detail: `issue ${issue} still carries needs-human; resolve it and remove the label before --retry`,
+        };
+      }
     }
     // forge#3562 (SEC-3): a new cycle discards `committed`, so check the live
     // issue first. A CLOSED issue has nothing left to run; an unreadable
@@ -524,8 +553,13 @@ export async function runIssue(opts) {
         // Reuses the existing "invalid" terminal reason (TERMINAL_REASONS)
         // rather than inventing a new one; #2353 makes the same choice for
         // `close`'s own CLOSED-not-merged case.
-        const isDead = snap.labels.includes("workflow:invalid") ||
+        let isDead = snap.labels.includes("workflow:invalid") ||
           (snap.state === "CLOSED" && !snap.labels.includes("workflow:merged"));
+        // forge#3534: an investigation exit closes the issue itself without `workflow:merged`.
+        // With the trusted deliverables marker present, a CLOSED (not invalid) issue is not
+        // divergent: build.reconcile must run so the run reaches close --terminal-state investigation.
+        if (isDead && phase.id === "build" && snap.state === "CLOSED" && !snap.labels.includes("workflow:invalid") &&
+            await hasInvestigationExit(issue, io)) isDead = false;
         if (isDead) {
           const detail = `issue ${issue} is ${snap.state === "CLOSED" ? "closed" : "open"} ` +
             `with divergent state before phase ${phase.id} (labels: ${snap.labels.join(", ") || "none"})`;

@@ -51,7 +51,9 @@
 #                 earlier head of this PR or by a bundle's member PRs, one per line, columns
 #                 file<TAB>line-start<TAB>line-end<TAB>title<TAB>prior-disposition<TAB>issue#.
 #                 prior-disposition is `filed` (its issue is still open), `filed-closed` (issue closed:
-#                 the row is IGNORED so a regressed defect is classified normally) or `note`.
+#                 the row is IGNORED so a regressed defect is classified normally), `note` (a recorded NOTE) or
+#                 `unknown` (a reviewer-body row whose issue linkage failed: it is IGNORED for a MEDIUM
+#                 CONFIRMED/LIKELY finding so it can never suppress one, and behaves like `note` otherwise).
 #                 Line columns may be empty (NOTE-sourced rows carry no range). A finding re-flags a row
 #                 when it is the same file AND ((line IoU >= 0.6 and >= 1 shared title token), or >= 3 shared title tokens). Output is
 #                 `NOTE reflag-filed #N` (row has an issue number) or `NOTE reflag-note`; this gate never
@@ -180,7 +182,7 @@ if [ -n "$PRIOR_FINDINGS" ] && [ -n "$FINDING_FILE" ]; then
   case "$_rls" in ''|*[!0-9]*) _rls=""; _rle="" ;; esac
   case "$_rle" in ''|*[!0-9]*) _rle="$_rls" ;; esac
   _dmap="$DIFF_MAP"; { [ -n "$_dmap" ] && [ -r "$_dmap" ]; } || _dmap=""
-  _reflag=$(awk -F '\t' -v file="$_rpath" -v ls="$_rls" -v le="$_rle" -v title="$TITLE" -v dmap="$_dmap" '
+  _reflag=$(awk -F '\t' -v file="$_rpath" -v ls="$_rls" -v le="$_rle" -v title="$TITLE" -v dmap="$_dmap" -v sev="$SEV" -v conf="$CONF" '
     function toks(str, arr,    n, i, parts, t, c) {
       c = 0; str = tolower(str); gsub(/[^a-z0-9]+/, " ", str)
       n = split(str, parts, " ")
@@ -202,18 +204,23 @@ if [ -n "$PRIOR_FINDINGS" ] && [ -n "$FINDING_FILE" ]; then
         }
         close(dmap)
       }
+      # Generic words count toward the token set but never as topical similarity (#3719).
+      ns = split("the and with for from before after write read when that this into not are but can has have via use using does should may all any only also than then over under without within while where which what its it was were been being each both one two", sw, " ")
+      for (i = 1; i <= ns; i++) stop[sw[i]] = 1
       ntitle = toks(title, ft)
     }
     {
       pf = $1; sub(/^\.\//, "", pf)
       if (pf != file) next
       if ($5 == "filed-closed") next
+      if ($5 == "unknown" && sev == "MEDIUM" && (conf == "CONFIRMED" || conf == "LIKELY")) next
       hit = 0
-      delete pt; toks($4, pt); shared = 0
-      for (t in pt) if (t in ft) shared++
+      delete pt; toks($4, pt); shared = 0; cshared = 0
+      for (t in pt) if (t in ft) { shared++; if (!(t in stop)) cshared++ }
       # Line overlap alone is not a match (an unrelated finding can land on the same line): it also
-      # needs at least one shared title token. Title-only matching still needs >= 3.
-      if (shared >= 1 && ls != "" && $2 ~ /^[0-9]+$/) {
+      # needs at least one shared non-stopword title token. Title-only matching needs >= 3 shared
+      # tokens, of which >= 2 are non-stopword (generic words never count as topical similarity).
+      if (cshared >= 1 && ls != "" && $2 ~ /^[0-9]+$/) {
         ps = $2 + 0; pe = ($3 ~ /^[0-9]+$/) ? $3 + 0 : ps
         if (pe < ps) pe = ps
         d = shift(pf, ps, pe); ps += d; pe += d
@@ -222,7 +229,7 @@ if [ -n "$PRIOR_FINDINGS" ] && [ -n "$FINDING_FILE" ]; then
         uni = (pe - ps + 1) + (le - ls + 1) - inter
         if (uni > 0 && inter / uni >= 0.6) hit = 1
       }
-      if (!hit && ntitle >= 3 && shared >= 3) hit = 1
+      if (!hit && ntitle >= 3 && shared >= 3 && cshared >= 2) hit = 1
       if (!hit) next
       if ($5 == "filed" && $6 ~ /^#?[0-9]+$/) { n = $6; sub(/^#/, "", n); print "NOTE reflag-filed #" n; found = 1; exit }
       if (!note) note = "NOTE reflag-note"

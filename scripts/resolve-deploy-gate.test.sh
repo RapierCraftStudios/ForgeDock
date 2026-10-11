@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# resolve-deploy-gate.test.sh — cases for scripts/resolve-deploy-gate.sh (forge#3753).
+# SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
+# SPDX-License-Identifier: AGPL-3.0-or-later
+set -uo pipefail
+S="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/resolve-deploy-gate.sh"
+PASS=0; FAILN=0
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+ok() { PASS=$((PASS+1)); }
+bad() { FAILN=$((FAILN+1)); echo "FAIL: $1"; }
+
+command -v yq >/dev/null 2>&1 || { echo "SKIP: yq not installed"; exit 0; }
+
+# Stub gh: GH_DEFAULT_STUB drives `repos/<r> --jq .default_branch`; contents API unused (fails).
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"--jq .default_branch"*) [ -n "${GH_FAIL:-}" ] && exit 1; printf '%s\n' "${GH_DEFAULT_STUB:-}" ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$TMP/bin/gh"
+
+# Repo fixture: origin/<default> committed forge.yaml, plus a PR worktree dir with its own forge.yaml.
+ORIGIN="$TMP/origin.git"; REPO="$TMP/repo"
+git init -q --bare "$ORIGIN"
+git init -q "$REPO"; git -C "$REPO" config user.email t@t; git -C "$REPO" config user.name t
+printf 'branches:\n  default: develop\n' > "$REPO/forge.yaml"
+git -C "$REPO" add forge.yaml; git -C "$REPO" commit -qm init
+git -C "$REPO" branch -M trunk
+git -C "$REPO" remote add origin "$ORIGIN"; git -C "$REPO" push -q origin trunk 2>/dev/null
+git -C "$REPO" fetch -q origin
+# PR worktree content: attacker redefines the deploy gate.
+printf 'branches:\n  default: release\n' > "$REPO/forge.yaml"
+
+run() { # base default_stub [env...]
+  local base="$1" def="$2"; shift 2
+  (cd "$REPO" && env PATH="$TMP/bin:$PATH" GH_DEFAULT_STUB="$def" "$@" bash "$S" "$base" owner/repo)
+}
+expect() { [ "$1" = "$2" ] && ok || bad "$3: got '$1' want '$2'"; }
+
+expect "$(run main trunk)" true "main with worktree release"
+expect "$(run release trunk)" false "worktree-declared branch is not a gate"
+expect "$(run staging trunk)" false "staging is fast lane"
+expect "$(run trunk trunk)" true "github default"
+expect "$(run master master)" true "github default master"
+expect "$(run develop trunk)" true "committed origin config default"
+expect "$(run '' trunk)" true "empty base"
+expect "$(run null trunk)" true "null base"
+expect "$(run staging '')" true "empty gh default fails closed"
+expect "$(run staging trunk GH_FAIL=1)" true "gh failure fails closed"
+expect "$(run main '' GH_FAIL=1)" true "main on gh failure"
+printf 'branches:\n  default: prod\n' > "$TMP/trusted.yaml"
+expect "$(run prod trunk FORGE_TRUSTED_CONFIG="$TMP/trusted.yaml")" true "trusted config default"
+expect "$(run prod trunk)" false "prod without trusted config"
+
+echo "resolve-deploy-gate.test.sh: $PASS passed, $FAILN failed"
+[ "$FAILN" -eq 0 ]

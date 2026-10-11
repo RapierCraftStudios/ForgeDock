@@ -3806,15 +3806,22 @@ for FILE in "${!SURFACE_FILE_MEMBERS[@]}"; do
     # Dedup-check with member exclusion (MANDATORY — forge#2432, identical mechanism to
     # phase-1-resolve.md's mirror block; this site keeps its existing direct-to-gh issue
     # creation below rather than migrating to /issue's Skill routing, since this loop runs
-    # per-completion-cycle and a direct scripts/issue-dedup.sh call is cheaper here). A
+    # per-completion-cycle and a direct issue-dedup.sh call is cheaper here). A
     # batch title necessarily restates its own members' subject matter by construction —
     # excluding the cluster's own member numbers means Phase-2D-style dedup only fires on
     # a GENUINE non-member duplicate. --exclude narrows the candidate set; it is NOT a
     # --force equivalent.
     CHUNK_LIST=$(IFS=,; echo "${CHUNK[*]}")
     PROPOSED_BATCH_TITLE="fix(batch): P3 review findings — ${SAFE_SURFACE_AREA} (same-run batch)"
-    DEDUP_RESULT=$(scripts/issue-dedup.sh "$PROPOSED_BATCH_TITLE" {GH_FLAG} --exclude "$CHUNK_LIST" 2>&1)
-    DEDUP_EXIT=$?
+    # Resolve the helper from the FORGE_ROOT bootstrap above (trusted install root, never the cwd/target repo, #3679). Unresolved: skip the dedup check (exit 0), never read as a duplicate.
+    DEDUP_SCRIPT=""
+    [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/issue-dedup.sh" ] && DEDUP_SCRIPT="$FORGE_ROOT/scripts/issue-dedup.sh"
+    if [ -n "$DEDUP_SCRIPT" ]; then
+      DEDUP_RESULT=$(bash "$DEDUP_SCRIPT" "$PROPOSED_BATCH_TITLE" {GH_FLAG} --exclude "$CHUNK_LIST" 2>&1)
+      DEDUP_EXIT=$?
+    else
+      DEDUP_RESULT=""; DEDUP_EXIT=0
+    fi
 
     if [ "$DEDUP_EXIT" -eq 1 ]; then
       # Genuine non-member duplicate — some other open issue already covers this exact

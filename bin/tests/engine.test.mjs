@@ -2940,6 +2940,93 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
     assert.equal(ran, 0);
     assert.equal(readLog(dir, 42).length, before, "no events appended for a non-retryable terminal");
   });
+
+  describe("forge#3571 --retry reopens a needs-human run once the label is cleared", () => {
+    // Drive a real run to a build-blocked needs-human terminal (label set by terminate()).
+    async function blockedWorld() {
+      const { w, io } = fakeWorld();
+      let buildBlocks = true;
+      const script = {
+        "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+        "work-on/build": () => { if (buildBlocks) { w.labels.push("needs-human"); return; } w.markers += builder("fix/real-branch-42"); w.commitsAhead = 2; },
+        "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+        "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+      };
+      const first = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io,
+        runner: async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; },
+        now: () => 1000, maxAttempts: 1 });
+      assert.equal(first.terminalReason, "needs-human");
+      assert.ok(w.labels.includes("needs-human"));
+      return { w, io, script, unblock: () => { buildBlocks = false; } };
+    }
+
+    it("label cleared: logs RUN_REOPEN, bumps v, publishes terminal:false, does not re-add the label, resumes", async () => {
+      const { w, io, unblock } = await blockedWorld();
+      const vBefore = deriveState(readLog(dir, 42)).v;
+      w.labels = w.labels.filter((l) => l !== "needs-human"); // human hand-back
+      unblock();
+      const ran = [];
+      const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io,
+        runner: async ({ commandName }) => {
+          ran.push(commandName);
+          if (commandName === "work-on/build") { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 2; }
+          if (commandName === "work-on/review") { w.pr = 7; w.prMerged = true; }
+          if (commandName === "work-on/close") { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); }
+          return { status: "complete" };
+        }, now: () => 2000, maxAttempts: 1, retry: true });
+      assert.notEqual(res.terminalReason, "not-retryable");
+      assert.equal(readLog(dir, 42).filter((e) => e.event === "RUN_REOPEN").length, 1);
+      assert.ok(deriveState(readLog(dir, 42)).v > vBefore);
+      assert.equal(ran[0], "work-on/build", "resumes at the next uncommitted phase");
+      assert.ok(!ran.includes("work-on/investigate"));
+      assert.ok(!w.labels.includes("needs-human"), "label must not be re-added");
+      const published = w.body.match(/FORGE:STATE\s*(\{[\s\S]*?\})\s*-->/);
+      assert.ok(published, "FORGE:STATE published");
+      assert.equal(JSON.parse(published[1]).terminalReason === "needs-human", false);
+    });
+
+    it("label still present: not-retryable, nothing appended, no runner call", async () => {
+      const { w, io } = await blockedWorld();
+      assert.ok(w.labels.includes("needs-human"));
+      const before = readLog(dir, 42).length;
+      let ran = 0;
+      const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io,
+        runner: async () => { ran++; return { status: "complete" }; }, now: () => 2000, maxAttempts: 1, retry: true });
+      assert.equal(res.terminalReason, "not-retryable");
+      assert.match(res.detail, /still carries needs-human/);
+      assert.equal(ran, 0);
+      assert.equal(readLog(dir, 42).length, before);
+    });
+
+    it("CLOSED issue: not-retryable, nothing appended", async () => {
+      const { w, io } = await blockedWorld();
+      w.labels = w.labels.filter((l) => l !== "needs-human");
+      w.issueState = "CLOSED";
+      const before = readLog(dir, 42).length;
+      let ran = 0;
+      const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io,
+        runner: async () => { ran++; return { status: "complete" }; }, now: () => 2000, maxAttempts: 1, retry: true });
+      assert.equal(res.terminalReason, "not-retryable");
+      assert.match(res.detail, /CLOSED/);
+      assert.equal(ran, 0);
+      assert.equal(readLog(dir, 42).length, before);
+    });
+
+    it("unreadable snapshot fails closed", async () => {
+      const { w, io } = await blockedWorld();
+      w.labels = w.labels.filter((l) => l !== "needs-human");
+      const gh = io.gh;
+      io.gh = async (args) => (args[0] === "issue" && args[1] === "view" && !args.join(" ").includes("body") ? "not json" : gh(args));
+      const before = readLog(dir, 42).length;
+      let ran = 0;
+      const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io,
+        runner: async () => { ran++; return { status: "complete" }; }, now: () => 2000, maxAttempts: 1, retry: true });
+      assert.equal(res.terminalReason, "not-retryable");
+      assert.match(res.detail, /could not be read/);
+      assert.equal(ran, 0);
+      assert.equal(readLog(dir, 42).length, before);
+    });
+  });
 });
 
 // forge#3574: stale-lease reclaim, --wait-lease, and rate-limit resume.
@@ -3071,5 +3158,48 @@ describe("runIssue — forge#3574 stale lease / wait-lease / rate-limit resume",
       runner: async () => { throw new Error("stop"); },
       now: () => 1000, maxAttempts: 1, sleep: async (ms) => { sleeps.push(ms); } });
     assert.equal(sleeps.length, 0);
+  });
+});
+
+describe("runIssue — forge#3534: divergence guard exempts an investigation exit", () => {
+  const delivMarker = SEP + "<!-- FORGE:INVESTIGATION:DELIVERABLES -->\n## Investigation Deliverables\n\n- #11";
+  // Resume after the investigate phase committed (the investigation exit happened in a prior run).
+  const seed = () => {
+    appendEvent(dir, 42, { event: "RUN_START", issue: 42, run: "r_42_staging", lane: "staging" });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "context", outputs: {} });
+    appendEvent(dir, 42, { event: "PHASE_COMMIT", phase: "architect", outputs: {} });
+  };
+  const run = async (w, io, counts) => {
+    seed();
+    const script = {
+      "work-on/build": () => { throw new Error("build must not run: the marker satisfies reconcile"); },
+      "work-on/close": () => { w.markers += SEP + "<!-- FORGE:TRAJECTORY -->\n## Trajectory"; },
+    };
+    const runner = async ({ commandName }) => { counts[commandName] = (counts[commandName] || 0) + 1; script[commandName](); return { status: "complete" }; };
+    return runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 3 });
+  };
+
+  it("marker present + issue CLOSED (no workflow:merged): build committed as investigation, then close runs", async () => {
+    const { w, io } = fakeWorld();
+    w.markers += investigationComment("COMPLETE") + delivMarker;
+    w.issueState = "CLOSED";
+    const counts = {};
+    const res = await run(w, io, counts);
+    assert.equal(res.terminalReason, "investigation");
+    assert.equal(counts["work-on/build"] || 0, 0);
+    assert.equal(counts["work-on/close"], 1);
+    assert.deepEqual(deriveState(readLog(dir, 42)).committed, ["investigate", "context", "architect", "build", "close"]);
+  });
+
+  it("no marker + issue CLOSED still terminates invalid; workflow:invalid is never exempted", async () => {
+    for (const labels of [[], ["workflow:invalid"]]) {
+      const { w, io } = fakeWorld();
+      w.markers += investigationComment("COMPLETE") + (labels.length ? delivMarker : "");
+      w.issueState = "CLOSED"; w.labels = labels;
+      const res = await run(w, io, {});
+      assert.equal(res.terminalReason, "invalid");
+      rmSync(dir, { recursive: true, force: true }); dir = mkdtempSync(join(tmpdir(), "fd-engine-"));
+    }
   });
 });

@@ -13,7 +13,7 @@ ok()  { PASS=$((PASS+1)); }
 bad() { FAILN=$((FAILN+1)); echo "FAIL: $1"; }
 expect() { [ "$2" = "$3" ] && ok || bad "$1 (got '$3' want '$2')"; }
 
-SITES="commands/work-on.md commands/work-on/build/validate.md commands/quality-gate.md commands/work-on/review.md commands/work-on/investigate.md commands/work-on/decompose.md commands/work-on/build.md commands/work-on/close.md commands/review-pr.md commands/orchestrate/phase-1-resolve.md commands/orchestrate/phase-4-execution.md"
+SITES="commands/work-on.md commands/work-on/build/validate.md commands/quality-gate.md commands/work-on/review.md commands/work-on/investigate.md commands/work-on/decompose.md commands/work-on/build.md commands/work-on/close.md commands/review-pr.md commands/work-on/remediate.md commands/orchestrate/phase-1-resolve.md commands/orchestrate/phase-4-execution.md"
 
 # extract the bootstrap block (comment line .. closing top-level fi), indentation stripped
 # Block ends at the first line (after the marker) that starts with `fi` at the marker's own indentation.
@@ -110,6 +110,23 @@ if [ -L "$T/h2/.claude/commands/work-on.md" ]; then
 else
   echo "SKIP: symlink cases (this platform cannot create symlinks)"; SKIPPED=$((SKIPPED+1))
 fi
+
+# forge#3758 (hgate is a fixture of its own: the loop runs once per shell and h14 is reused below with other versions): deploy-gate script resolves on a plugin-only install (cache only, no symlink, no FORGE_* env).
+# The gate-script line is taken verbatim from the spec so the test exercises exactly what ships.
+mkscripts "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0"; : > "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh"
+grep -hE '^[[:space:]]*GATE_SCRIPT=""; \[ -n "\$FORGE_ROOT" \]' "$ROOT/commands/work-on/remediate.md" "$ROOT/commands/review-pr.md" | sed 's/^[[:space:]]*//' | sort -u > "$T/gs"
+expect "gate-script resolver line is identical across sites" 1 "$(wc -l < "$T/gs" | tr -d ' ')"
+gate_run() { ( cd "$T/consumer" && env -i PATH="$PATH" HOME="$1" "$SH" -c "$(cat "$T/canon"); $(cat "$T/gs"); printf %s \"\$GATE_SCRIPT\"" ); }
+expect "plugin-only install resolves resolve-deploy-gate.sh" "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh" "$(gate_run "$T/hgate")"
+expect "unresolved gate script stays empty (strict)" "" "$(gate_run "$T/empty")"
+# cwd/consumer repo is never a candidate even when it carries the gate script
+: > "$T/consumer/scripts/resolve-deploy-gate.sh"
+expect "consumer repo gate script never used" "" "$(gate_run "$T/empty")"
+rm -f "$T/consumer/scripts/resolve-deploy-gate.sh"
+# no spec iterates CLAUDE_PLUGIN_ROOT as an env var for the gate script
+for f in commands/work-on/remediate.md commands/review-pr.md; do
+  grep -qF '"${CLAUDE_PLUGIN_ROOT:-}" "${FORGE_ROOT:-}"' "$ROOT/$f" && bad "env-style CLAUDE_PLUGIN_ROOT gate loop in $f" || ok
+done
 
 # newest cached version wins (1.10.0 must beat 1.9.0)
 for v in 1.9.0 1.10.0 1.2.0; do mkscripts "$T/h3/.claude/plugins/cache/forgedock/forgedock/$v"; done
@@ -325,6 +342,8 @@ hr_check_block() { # label file var script
 hr_check_block review-pr "$HR_CLASSIFY" DERIVE_MILESTONE_SCRIPT derive-finding-milestone.sh
 hr_check_block review-pr "$HR_CLASSIFY" PRIORITY_SCRIPT severity-to-priority.sh
 hr_check_block review-pr "$HR_CLASSIFY" CODE_INDEX_SCRIPT code-index.sh
+hr_check_block review-pr "$HR_CLASSIFY" DEDUP_SCRIPT issue-dedup.sh
+hr_check_block issue "$ROOT/commands/issue.md" DEDUP_SCRIPT issue-dedup.sh
 hr_check_block review-pr-staging "$HR_STG" DERIVE_MILESTONE_SCRIPT derive-finding-milestone.sh
 hr_check_block review-pr-staging "$HR_STG" PRIORITY_SCRIPT severity-to-priority.sh
 extract_helper_block "$HR_CLASSIFY" DERIVE_MILESTONE_SCRIPT > "$T/hr_dm.sh"
@@ -334,6 +353,9 @@ extract_helper_block "$HR_STG" PRIORITY_SCRIPT > "$T/hr_pr_stg.sh"
 # only the variable-name-specific text may differ, and review-pr/review-pr-staging must agree
 cmp -s "$T/hr_dm.sh" "$T/hr_dm_stg.sh" && ok || bad 'DERIVE_MILESTONE_SCRIPT resolver differs between review-pr and review-pr-staging'
 cmp -s "$T/hr_pr.sh" "$T/hr_pr_stg.sh" && ok || bad 'PRIORITY_SCRIPT resolver differs between review-pr and review-pr-staging'
+extract_helper_block "$HR_CLASSIFY" DEDUP_SCRIPT > "$T/hr_dd.sh"
+extract_helper_block "$ROOT/commands/issue.md" DEDUP_SCRIPT > "$T/hr_dd_issue.sh"
+cmp -s "$T/hr_dd.sh" "$T/hr_dd_issue.sh" && ok || bad 'DEDUP_SCRIPT resolver differs between review-pr and issue'
 # no bare cwd-relative helper call in either review spec
 if grep -nE 'bash scripts/(derive-finding-milestone|severity-to-priority)\.sh' "$HR_CLASSIFY" "$HR_STG" >/dev/null 2>&1; then bad 'review spec still calls a helper by a bare scripts/ path'; else ok; fi
 
@@ -342,10 +364,25 @@ if grep -nE 'bash scripts/(derive-finding-milestone|severity-to-priority)\.sh' "
 #   design-bench.md, design-render-critique-loop.md, pipeline-health/phase-2-metrics.md, phase-3-dependency.md:
 #     node scripts/*.mjs run inside the ForgeDock repo itself or printed as user hints (not run under a PR checkout cwd).
 #   work-on/investigate.md, work-on/build/architect.md: {REPO_PATH}/scripts/code-index.sh, deferred to #3670.
+#   orchestrate/phase-3-dependency.md: scripts/worktree-lifecycle.sh lines sit in a roadmap/proposal fence, not executed.
 #   deploy-info.md: read-only grep of decrypt-secrets.sh, never executed.
-SCRIPTS_ALLOW='commands/(design-bench|design-render-critique-loop|deploy-info|pipeline-health/phase-2-metrics|pipeline-health/phase-3-dependency|work-on/investigate|work-on/build/architect)\.md'
-guard_hits=$(grep -rnE '(^|[^A-Za-z0-9_-])(bash|sh|source) +(\./)?scripts/[A-Za-z0-9_.-]+|REPO_PATH\}?/scripts/' "$ROOT/commands" 2>/dev/null \
-  | sed "s#^$ROOT/##" | grep -vE "^($SCRIPTS_ALLOW):" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)  # comment lines are prose
+SCRIPTS_ALLOW='commands/(design-bench|design-render-critique-loop|deploy-info|pipeline-health/phase-2-metrics|pipeline-health/phase-3-dependency|orchestrate/phase-3-dependency|work-on/investigate|work-on/build/architect)\.md'
+# Executed forms: a bash/sh/source word, a command substitution `$(scripts/x.sh`, or a line-start/after-;&&| direct `scripts/x.sh` / `./scripts/x.sh`.
+GUARD_RE='(^|[^A-Za-z0-9_-])(bash|sh|source) +(\./)?scripts/[A-Za-z0-9_.-]+|REPO_PATH\}?/scripts/|\$\( *(\./)?scripts/[A-Za-z0-9_.-]+\.sh|(^|:[0-9]+:|[;&(] *)[[:space:]]*(\./)?scripts/[A-Za-z0-9_.-]+\.sh'
+guard_scan() { # dir -> offending file:line:text rows (comment lines are prose)
+  grep -rnE "$GUARD_RE" "$1" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true
+}
+guard_hits=$(guard_scan "$ROOT/commands" | sed "s#^$ROOT/##" | grep -vE "^($SCRIPTS_ALLOW):" || true)
+# Negative fixtures (#3679): a bare direct call must be flagged; backticked prose and comments must not.
+mkdir -p "$T/guardfx/bad1" "$T/guardfx/bad2" "$T/guardfx/bad3" "$T/guardfx/good"
+printf 'X=$(scripts/foo.sh a b)\n' > "$T/guardfx/bad1/x.md"
+printf 'scripts/foo.sh arg\n' > "$T/guardfx/bad2/x.md"
+printf 'ok && ./scripts/foo.sh\n' > "$T/guardfx/bad3/x.md"
+printf 'See `scripts/foo.sh` for details, forwarded to scripts/foo.sh --exclude.\n# $(scripts/foo.sh) in a comment\n' > "$T/guardfx/good/x.md"
+for f in bad1 bad2 bad3; do
+  [ -n "$(guard_scan "$T/guardfx/$f")" ] && ok || bad "widened guard missed direct execution fixture $f"
+done
+[ -z "$(guard_scan "$T/guardfx/good")" ] && ok || bad 'widened guard flags prose/comment fixture'
 if [ -n "$guard_hits" ]; then bad "commands/ has a cwd-relative or REPO_PATH helper call outside the allowlist: $(printf '%s' "$guard_hits" | head -5 | tr '\n' '|')"; else ok; fi
 
 # Behavior (#3596): planted cwd copies of the two review helpers must never be selected.

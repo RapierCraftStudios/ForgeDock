@@ -2,6 +2,18 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Re-flag gate ignores generic words (#3719)
+
+`scripts/classify-finding.sh` no longer counts generic stopwords (`the`, `with`, `before`, `write`, ...) as topical similarity in the cross-head/cross-PR re-flag gate. The line-overlap match needs >= 1 shared non-stopword title token, and the title-only match needs >= 3 shared tokens of which >= 2 are non-stopword. Domain words such as `lock` and `retry` still count. `/review-pr` §6B.5 and `/review-pr-staging` §7B.5 carry the same wording.
+
+Action: none. Fewer real findings are demoted to `NOTE reflag-note`; a duplicate is preferred over a suppressed finding.
+
+## Unlinked prior re-flag rows no longer suppress MEDIUM findings (#3718)
+
+The prior-findings TSV now marks a reviewer-body finding whose issue linkage failed as prior-disposition `unknown` (a recorded `FORGE:NOTE_DISPOSITION` row without a linked issue stays `note`). `scripts/classify-finding.sh` ignores an `unknown` row for MEDIUM CONFIRMED/LIKELY findings, so a regression of a finding filed under a reworded title is filed instead of demoted to `NOTE reflag-note`. LOW and POSSIBLE findings still demote against an `unknown` row. `/review-pr` §6B.5 and `/review-pr-staging` §7B.5 carry the same change.
+
+Action: none. A re-flagged MEDIUM finding with a reworded prior issue may now be filed again; a duplicate is preferred over a suppressed regression.
+
 ## Cross-head and cross-PR re-flag dedup (#3641)
 
 `scripts/classify-finding.sh` takes `--prior-findings <TSV>` (file, line-start, line-end, title, prior-disposition, issue#) plus `--title`, `--line-start`/`--line-end` and an optional `--diff-map`. A finding that re-raises one already posted or noted earlier (same file AND line IoU >= 0.6 or >= 3 shared title tokens) becomes `NOTE reflag-filed #N` or `NOTE reflag-note` instead of a new issue. HIGH/CRITICAL are never demoted, and a prior row whose issue is closed is ignored so a regression is not swallowed.

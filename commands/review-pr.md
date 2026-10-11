@@ -1520,7 +1520,7 @@ Each agent receives only its domain-relevant diff slice rather than the full cha
 # Domain file patterns — used in Phase 3C to scope each agent's input
 DOMAIN_FILES_AUTH=$(echo "$FILES" | grep -iE "auth|session|login|logout|jwt|oauth|token|user|permission|middleware" || echo "")
 DOMAIN_FILES_BILLING=$(echo "$FILES" | grep -iE "billing|credit|payment|charge|refund|subscription|pricing|tier" || echo "")
-DOMAIN_FILES_CONCURRENCY=$(echo "$FILES" | grep -iE "lock|queue|atomic|transaction|worker|job|task|celery|redis" || echo "")
+DOMAIN_FILES_CONCURRENCY=$(echo "$FILES" | grep -iE "lock|queue|atomic|transaction|worker|job|task|celery|redis|claim|lease|engine-state" || echo "")
 DOMAIN_FILES_DATABASE=$(echo "$FILES" | grep -iE "migration|\.sql$|model|schema|db|database|alembic" || echo "")
 DOMAIN_FILES_INFRA=$(echo "$FILES" | grep -iE "docker|nginx|traefik|\.github|Makefile|deploy|infra" || echo "")
 DOMAIN_FILES_SCRAPING=$(echo "$FILES" | grep -iE "scrape|crawler|stealth|browser.*pool|headless|anti.bot|detection.*keyword|captcha" || echo "")
@@ -1528,10 +1528,15 @@ DOMAIN_FILES_FRONTEND=$(echo "$FILES" | grep -iE "^web/|\.tsx?$|\.jsx?$|componen
 DOMAIN_FILES_API=$(echo "$FILES" | grep -iE "router|route|endpoint|openapi|sdk|api" || echo "")
 
 # Fallback: if a domain has no specific files matched, give it the full file list
-# (happens for Security — which reviews everything — and for edge cases)
+# (a domain can be on the roster without a pattern hit, e.g. via delta_roster or Security's full-diff scope)
 [ -z "$DOMAIN_FILES_AUTH" ] && DOMAIN_FILES_AUTH="$FILES"
 [ -z "$DOMAIN_FILES_BILLING" ] && DOMAIN_FILES_BILLING="$FILES"
+[ -z "$DOMAIN_FILES_CONCURRENCY" ] && DOMAIN_FILES_CONCURRENCY="$FILES"
 [ -z "$DOMAIN_FILES_DATABASE" ] && DOMAIN_FILES_DATABASE="$FILES"
+[ -z "$DOMAIN_FILES_INFRA" ] && DOMAIN_FILES_INFRA="$FILES"
+[ -z "$DOMAIN_FILES_SCRAPING" ] && DOMAIN_FILES_SCRAPING="$FILES"
+[ -z "$DOMAIN_FILES_FRONTEND" ] && DOMAIN_FILES_FRONTEND="$FILES"
+[ -z "$DOMAIN_FILES_API" ] && DOMAIN_FILES_API="$FILES"
 ```
 
 ### 3C: Load Agent Templates & Launch
@@ -1612,9 +1617,11 @@ carry_verified_from() {
 # BEGIN review-pr-delta-roster
 # Effective roster for a DELTA head. While fewer than two full panels have run (FULL_ROUNDS < 2) the 3B roster stands;
 # from the third review on it narrows to Security plus the domains whose trigger paths the delta touches.
+# spec-cli is internal-only (not shipped to consumers): it is added only when the persona file exists in the repo under review.
 # Args: FULL_ROUNDS, the canonical 3B roster (space separated), the delta file list (one path per line).
 delta_roster() {
-    local rounds="${1}" full="${2}" files="${3}" out="security"
+    local rounds="${1}" full="${2}" files="${3}" out="security" root
+    root="${REPO_PATH:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
     case "$rounds" in ''|*[!0-9]*) printf '%s' "$full"; return 0 ;; esac
     if [ "$rounds" -lt 2 ]; then printf '%s' "$full"; return 0; fi
     printf '%s\n' "$files" | grep -qiE "auth|session|login|logout|jwt|oauth|token|user|permission|middleware" && out="$out auth"
@@ -1622,10 +1629,10 @@ delta_roster() {
     printf '%s\n' "$files" | grep -qiE "lock|queue|atomic|transaction|worker|job|task|celery|redis|claim|lease|engine-state" && out="$out concurrency"
     printf '%s\n' "$files" | grep -qiE "migration|\.sql$|model|schema|db|database|alembic" && out="$out database"
     printf '%s\n' "$files" | grep -qiE "docker|nginx|traefik|\.github|Makefile|deploy|infra" && out="$out infra"
-    printf '%s\n' "$files" | grep -qiE "scrape|crawler|stealth|browser.*pool|headless|anti.bot|captcha" && out="$out scraper"
+    printf '%s\n' "$files" | grep -qiE "scrape|crawler|stealth|browser.*pool|headless|anti.bot|detection.*keyword|captcha" && out="$out scraper"
     printf '%s\n' "$files" | grep -qiE "^web/|\.tsx?$|\.jsx?$|component|page|layout|style|css" && out="$out frontend"
     printf '%s\n' "$files" | grep -qiE "router|route|endpoint|openapi|sdk|api" && out="$out api"
-    printf '%s\n' "$files" | grep -qE "^(commands|bin)/" && out="$out spec-cli"
+    printf '%s\n' "$files" | grep -qE "^(commands|bin)/" && [ -f "$root/commands/review-pr-agents/spec-cli.md" ] && out="$out spec-cli"
     printf '%s' "$out"
 }
 # END review-pr-delta-roster
@@ -1800,7 +1807,7 @@ Read: $MONOLITHIC_CATALOG
 ```
 Then extract the shared protocols section and each selected persona's section from within that single file — same content, different packaging.
 
-Persona file names: `security.md` (always), `auth.md`, `billing.md`, `concurrency.md`, `scraper.md`, `frontend.md`, `api.md`, `database.md`, `infra.md`, and `spec-cli.md` (marker domain `spec-cli`, only ever on a `DELTA` roster whose delta touches `commands/**` or `bin/**`).
+Persona file names: `security.md` (always), `auth.md`, `billing.md`, `concurrency.md`, `scraper.md`, `frontend.md`, `api.md`, `database.md`, `infra.md`, and `spec-cli.md` (marker domain `spec-cli`, only ever on a `DELTA` roster whose delta touches `commands/**` or `bin/**` AND whose repo contains `commands/review-pr-agents/spec-cli.md`, i.e. ForgeDock itself; consumer repos never get it).
 See `review-pr-agents.md` for the full routing table mapping domains → persona files.
 
 (`$FORGE_HOME` defaults to `~/.claude`)
@@ -2553,7 +2560,7 @@ Filing a standalone `review-finding` issue for every LOW/POSSIBLE reviewer note 
 - **Safety exemption is content-based** (it bypasses only this severity damper, never the §6B.4 provenance gate: a pre-existing auth gap is flagged through the pre-existing route, not attributed to this PR): a LOW or POSSIBLE finding is still filed when its file path / title / body matches the security/billing keyword set — a LOW finding additionally needs `**Confidence**: CONFIRMED`, so LOW LIKELY/POSSIBLE with a keyword is a NOTE (`security|auth|authz|authn|billing|payment|stripe|charge|invoice|injection|xss|csrf|ssrf|idor|secret(s)|credential(s)|permission(s)|sql|token|password|redact`, whole words, `_`/`-`/`/` separate words — so `auth_service` matches but `author`/`tokenizer` do not), or when it came from a dedicated, signal-selected domain agent (Auth, Billing, Concurrency, Database) AND is MEDIUM — a domain agent rescues MEDIUM only, and a LOW finding stays a NOTE whichever reviewer raised it, CONFIRMED or not. **Origin from the always-on General Security & Quality agent alone does NOT exempt a finding**: that agent runs on every PR, so origin-based exemption filed nearly every LOW note it raised (the 2026-10-08 cascade audit: 50 of 60 would-be notes in one batch were filed only for that reason).
 - **Review-finding lineage** (the PR's linked issue `MERGE_ISSUE` carries the `review-finding` label, any priority — this PR is itself a fix for a finding): only MEDIUM findings that are CONFIRMED, or LIKELY and safety-exempt, become issues; LOW and POSSIBLE are always NOTEs. A fix for a finding must not mint a new generation of findings.
 - **Otherwise**: `**Severity**: LOW`, or `**Confidence**: POSSIBLE` below HIGH, is a NOTE unless safety-exempt (LOW: keyword AND CONFIRMED; MEDIUM: keyword at any confidence, or a domain agent); everything else (MEDIUM CONFIRMED/LIKELY) is an ISSUE.
-- **Cross-head re-flag** <!-- Added: forge#3641 -->: a finding that an earlier head's review already posted, or that an earlier `FORGE:NOTE_DISPOSITION` list recorded, is not filed or noted a second time after its line moved. The caller builds a prior-findings TSV (file, line-start, line-end, title, prior-disposition, issue#) from trusted prior-head reviewer comments (`Reviewed-SHA` other than the current head) and trusted `FORGE:NOTE_DISPOSITION` records carrying a different `reviewed_sha=`, all read through `scripts/trusted-comments.sh`, and passes it as `--prior-findings`. A finding re-flags a row when it is the same file AND (line IoU >= 0.6 after a best-effort `git diff` hunk-offset shift, OR >= 3 shared title tokens) and becomes `NOTE reflag-filed #N` (the prior row's issue is still open) or `NOTE reflag-note`. Never demoted: HIGH/CRITICAL and unparseable severity (the classifier exits on them before this gate, so they keep blocking via §7B), and any row whose linked issue is closed (a regressed defect is classified normally). Prior rows with no issue link are passed as `note`; an unreadable source only shrinks the TSV, it never blocks.
+- **Cross-head re-flag** <!-- Added: forge#3641 -->: a finding that an earlier head's review already posted, or that an earlier `FORGE:NOTE_DISPOSITION` list recorded, is not filed or noted a second time after its line moved. The caller builds a prior-findings TSV (file, line-start, line-end, title, prior-disposition, issue#) from trusted prior-head reviewer comments (`Reviewed-SHA` other than the current head) and trusted `FORGE:NOTE_DISPOSITION` records carrying a different `reviewed_sha=`, all read through `scripts/trusted-comments.sh`, and passes it as `--prior-findings`. A finding re-flags a row when it is the same file AND (line IoU >= 0.6 after a best-effort `git diff` hunk-offset shift AND >= 1 shared non-stopword title token, OR >= 3 shared title tokens of which >= 2 are non-stopword; generic stopwords such as `the`, `with`, `before`, `write` never count as topical similarity) and becomes `NOTE reflag-filed #N` (the prior row's issue is still open) or `NOTE reflag-note`. Never demoted: HIGH/CRITICAL and unparseable severity (the classifier exits on them before this gate, so they keep blocking via §7B), and any row whose linked issue is closed (a regressed defect is classified normally). Prior rows with no issue link are passed as `note` (recorded NOTE_DISPOSITION) or `unknown` (reviewer-body finding whose linkage failed; the classifier never demotes a MEDIUM CONFIRMED/LIKELY re-flag against an `unknown` row); an unreadable source only shrinks the TSV, it never blocks.
 - **Contract-declared scope** <!-- Added: forge#3447 -->: the trusted, latest FORGE:CONTRACT of `MERGE_ISSUE` lists out-of-scope items as `deferred → #N`, `not-affected:` or `accepted-risk:` (parsed by `scripts/check-contract-scope.sh list`). A finding whose file equals, or sits under, a `deferred` item whose issue is verified becomes `NOTE contract-deferred #N` and is commented on that issue instead of being filed again. A finding under an `accepted-risk` item becomes `NOTE contract-accepted-risk`. A deferred issue is verified only when it is OPEN, is an issue (not a PR), is not `MERGE_ISSUE` itself, and its body carries `FORGE:DEFERRED_FROM: #<MERGE_ISSUE>` and the deferred path, and it is authored by a trusted author (`author_association` OWNER/MEMBER/COLLABORATOR, or `user.type` Bot); an unverified item is dropped from the scope list. Never demoted: HIGH/CRITICAL, `not-affected` items (a contradicting finding means the contract was wrong), safety-exempt findings under either disposition, findings on a file this PR changed, and anything when the contract is missing, untrusted, unparseable or the deferred issue is closed, unverified or unreadable.
 
 ```bash
@@ -2675,17 +2682,17 @@ if [ -z "${TRUSTED_SCRIPT:-}" ]; then
 fi
 # Cross-head re-flag input (#3641). Fail soft: every unreadable source just leaves the TSV smaller, never blocks the review.
 # PF_SKIP="<sha or empty>" PF_PRS="<pr numbers>" prior_findings_tsv prints file<TAB>line-start<TAB>line-end<TAB>title<TAB>disposition<TAB>issue# rows
-# (disposition: filed = linked issue OPEN, filed-closed = linked issue CLOSED, note = no linked issue). Every comment is read through
+# (disposition: filed = linked issue OPEN, filed-closed = linked issue CLOSED, note = a recorded NOTE_DISPOSITION with no linked issue, unknown = a reviewer-body finding whose issue linkage failed, so the classifier must not let it demote a MEDIUM CONFIRMED/LIKELY re-flag). Every comment is read through
 # scripts/trusted-comments.sh, so an untrusted commenter cannot pre-post a finding to suppress a real one. With PF_SKIP set, reviewer
 # bodies for that head are skipped and only NOTE_DISPOSITION records carrying a different `reviewed_sha=` count (this head's own record,
 # from an earlier run of this same review, must never swallow its findings).
-pf_split_loc() { # PF_LOC="file[:N[-M]]" -> file<TAB>N<TAB>M (line columns empty when absent)
+pf_split_loc() { # PF_LOC="file[:N[-M]]" -> file<TAB>N<TAB>M (`-` sentinel when a line column is absent: a tab IFS read collapses empty fields)
   local _loc="$PF_LOC" _file _r _a="" _b=""; _file="$_loc"
   case "$_loc" in *:[0-9]*) _r="${_loc##*:}"; case "$_r" in *[!0-9-]*|"") ;; *) _file="${_loc%:*}"; _a="${_r%%-*}"; _b="${_r#*-}"; [ "$_b" != "$_r" ] || _b="$_a" ;; esac ;; esac
-  printf '%s\t%s\t%s\n' "$_file" "$_a" "$_b"
+  printf '%s\t%s\t%s\n' "$_file" "${_a:--}" "${_b:--}"
 }
 prior_findings_tsv() {
-  local pr cj rows issues _id _c _s _loc _t _p _hit _f _a _b
+  local pr cj rows issues _id _c _s _loc _t _p _hit _f _a _b _src _dflt
   [ -n "${TRUSTED_SCRIPT:-}" ] || return 0
   rows=$(mktemp "${_pscr}/prior-rows.XXXXXX"); issues=$(mktemp "${_pscr}/prior-issues.XXXXXX")
   for pr in $PF_PRS; do
@@ -2696,21 +2703,25 @@ prior_findings_tsv() {
       | jq -r --arg skip "${PF_SKIP:-}" 'select($skip == "" or (test("(^|\\n)Reviewed-SHA: " + $skip + "\\r?(\\n|$)") | not)) | scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null \
       | while IFS='|' read -r _id _c _s _loc _t; do
           [ -n "$_t" ] || continue
-          _p=$(PF_LOC="$_loc" pf_split_loc); printf '%s\t%s\n' "$_p" "$(printf '%s' "$_t" | tr '\t' ' ')"
+          _p=$(PF_LOC="$_loc" pf_split_loc); printf 'F\t%s\t%s\n' "$_p" "$(printf '%s' "$_t" | tr '\t' ' ')"
         done >> "$rows"
     printf '%s' "$cj" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:NOTE_DISPOSITION' 2>/dev/null \
       | jq -r --arg skip "${PF_SKIP:-}" 'select($skip == "" or ((capture("^<!-- FORGE:NOTE_DISPOSITION:[^>]*reviewed_sha=(?<s>[0-9a-f]{40,64})") | .s) as $s | $s != $skip)) | split("\n")[] | select(startswith("- "))' 2>/dev/null \
       | sed -n 's/^- [^ ]* \([^ ]*\) \[[A-Za-z?]*\] \(.*\): [^:]*$/\1\t\2/p' \
       | while IFS="$(printf '\t')" read -r _loc _t; do
           [ "$_loc" != "?" ] || continue
-          _p=$(PF_LOC="$_loc" pf_split_loc); printf '%s\t%s\n' "$_p" "$_t"
+          _p=$(PF_LOC="$_loc" pf_split_loc); printf 'N\t%s\t%s\n' "$_p" "$_t"
         done >> "$rows"
     gh issue list -R "$REPO" --label review-finding --state all --search "${pr} in:body" --limit 100 --json number,state,title,body 2>/dev/null \
       | jq -c '.[]' >> "$issues" 2>/dev/null || true
   done
   # Linkage: a filed issue whose body names the file and whose title shares >= 3 tokens with the finding (open preferred).
-  sort -u "$rows" | while IFS="$(printf '\t')" read -r _f _a _b _t; do
+  # Rows carry a leading source column (F = reviewer FINDING marker, N = NOTE_DISPOSITION record), stripped on output. An unlinked F row may
+  # have been filed under a reworded title, so it is `unknown` (never demotes MEDIUM CONFIRMED/LIKELY); an unlinked N row is a true `note`.
+  sort -u "$rows" | while IFS="$(printf '\t')" read -r _src _f _a _b _t; do
     [ -n "$_f" ] || continue
+    [ "$_a" != "-" ] || _a=""; [ "$_b" != "-" ] || _b=""
+    case "$_src" in N) _dflt=note ;; *) _dflt=unknown ;; esac
     _hit=$(jq -rs --arg f "$_f" --arg t "$_t" 'def toks: ascii_downcase | [scan("[a-z0-9]{3,}")] | unique;
       ($t | toks) as $a | [ .[] | select((.body // "") | contains($f))
         | select((((.title // "") | toks) as $b | [$a[] | select(. as $x | $b | index($x))] | length) >= 3)
@@ -2719,7 +2730,7 @@ prior_findings_tsv() {
     case "$_hit" in
       open*) printf '%s\t%s\t%s\t%s\tfiled\t%s\n' "$_f" "$_a" "$_b" "$_t" "${_hit#*	}" ;;
       closed*) printf '%s\t%s\t%s\t%s\tfiled-closed\t%s\n' "$_f" "$_a" "$_b" "$_t" "${_hit#*	}" ;;
-      *) printf '%s\t%s\t%s\t%s\tnote\t\n' "$_f" "$_a" "$_b" "$_t" ;;
+      *) printf '%s\t%s\t%s\t%s\t%s\t\n' "$_f" "$_a" "$_b" "$_t" "$_dflt" ;;
     esac
   done
   rm -f "$rows" "$issues"
@@ -2869,8 +2880,23 @@ PR_NUMBER="{PR_NUMBER}"; MERGE_ISSUE="{MERGE_ISSUE}"
 FINDING_TITLE_DEDUP="fix: brief description of finding (review finding — PR #${PR_NUMBER})"
 # Never dedup against the issue this PR fixes (MERGE_ISSUE): it is about to be closed, so a
 # finding "matched" to it is tracked nowhere. Field test #3169: SEC-2 matched #3169 itself and was dropped.
-DEDUP_RESULT=$(scripts/issue-dedup.sh "$FINDING_TITLE_DEDUP" "$GH_FLAG" ${MERGE_ISSUE:+--exclude "$MERGE_ISSUE"} 2>&1)
-DEDUP_EXIT=$?
+# HELPER_SCRIPT resolver (DEDUP_SCRIPT; trusted-install tiers only, never the working directory or the target repo, #3400/#3483): plugin root, FORGE_ROOT, FORGEDOCK_HOME, FORGE_HOME, install symlink, marketplaces, newest pinned plugin cache under CLAUDE_CONFIG_DIR then ~/.claude. The cache scan matters because the plugin-root placeholder is not always substituted in forked runs.
+_l="$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null || true)"; _l="${_l%/commands/work-on.md}"
+_tc="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGEDOCK_HOME:-}" "${FORGE_HOME:-}" "$_l" "$HOME/.claude/plugins/marketplaces/forgedock")"
+for _cfg in "${CLAUDE_CONFIG_DIR:-}" "$HOME/.claude"; do
+  [ -n "$_cfg" ] && _tc="$_tc"$'\n'"$(find -L "$_cfg/plugins/cache/forgedock/forgedock" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | awk -F/ '$NF ~ /^[0-9]+\.[0-9]+\.[0-9]+$/{split($NF,a,".");printf "%d %d %d %s\n",a[1],a[2],a[3],$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr | cut -d' ' -f4- || true)"
+done
+DEDUP_SCRIPT=""
+while IFS= read -r _c; do
+  case "$_c" in /*) [ -z "$DEDUP_SCRIPT" ] && [ -f "$_c/scripts/issue-dedup.sh" ] && DEDUP_SCRIPT="$_c/scripts/issue-dedup.sh" ;; esac
+done <<< "$_tc"
+# Unresolved helper: "not deduped" (exit 0, empty result) so the line-range check still runs; NEVER exit 1 (which means "duplicate, skip").
+if [ -n "$DEDUP_SCRIPT" ]; then
+  DEDUP_RESULT=$(bash "$DEDUP_SCRIPT" "$FINDING_TITLE_DEDUP" "$GH_FLAG" ${MERGE_ISSUE:+--exclude "$MERGE_ISSUE"} 2>&1)
+  DEDUP_EXIT=$?
+else
+  DEDUP_RESULT=""; DEDUP_EXIT=0
+fi
 if [ "$DEDUP_EXIT" -eq 1 ]; then
   echo "DEDUP: Skipping — $DEDUP_RESULT"
   # Skip this finding — do NOT create a duplicate issue
@@ -3681,7 +3707,7 @@ else
 # forge#2570: the hold is now scoped by the PR's target branch. This PR still transitions
 # to workflow:awaiting-merge (clearing needs-human) in BOTH cases below — the transition is
 # unchanged; only who acts next differs:
-#   - `main` / deploy gate (or an unresolved base — fail closed): held for a HUMAN merge
+#   - the deploy gate (`main`, the GitHub `default_branch`, or the default branch's committed `branches.default`; never read from the PR worktree) (or an unresolved base — fail closed): held for a HUMAN merge
 #     decision, because `staging → main` is the genuine human gate no agent performs.
 #   - any other base (staging, milestone/* — reversible integration branches): NOT held for
 #     a human. It is parked for remediate.md Phase M7's base-scoped auto-land bar (bot APPROVED
@@ -3697,15 +3723,38 @@ if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
     # forge#2625: `jq -r '.baseRefName'` stringifies a JSON null to the literal text "null" (not
     # an empty string), so the `-n` check alone does not catch it — add an explicit `!= "null"`
     # check so a literal-string "null" is treated the same as an empty/unresolved base (strict).
-    if [ -n "$GUARD_BASE" ] && [ "$GUARD_BASE" != "null" ] && [ "$GUARD_BASE" != "main" ]; then
-      # forge#2570: non-`main` base — defer to remediate.md M7's auto-land, not a human.
+    # forge#3753: trusted resolver only (GitHub default_branch + committed default-branch config); never forge.yaml from $PWD (the PR worktree is author-controlled). Install roots only; unresolved script => strict.
+    # FORGE_ROOT bootstrap (canonical; keep byte-identical across specs, guarded by scripts/forge-root.test.sh)
+    FORGE_ROOT=""
+    # Windows drive-letter FORGEDOCK_HOME (C:/x or C:\x) is normalized to /c/x (cygpath when present); relative values stay rejected.
+    _h="${FORGEDOCK_HOME:-}"; case "$_h" in [A-Za-z]:[/\\]*) _w="$_h"; _h="$(cygpath -u "$_w" 2>/dev/null || true)"; [ -n "$_h" ] || _h="/$(printf %s "$_w" | cut -c1 | tr 'A-Z' 'a-z')$(printf %s "${_w#??}" | tr '\\' '/')" ;; esac
+    # Only the official marketplace is trusted (name pinned; override only via the trusted FORGEDOCK_MARKETPLACE env, never repo files).
+    _mk="${FORGEDOCK_MARKETPLACE:-forgedock}"; case "$_mk" in ""|.|..|*[!A-Za-z0-9._-]*) _mk="forgedock" ;; esac
+    if [ -n "${FORGEDOCK_HOME:-}" ]; then case "$_h" in /*) FORGE_ROOT="$_h" ;; esac; else
+    # Portable to bash 3.2 (macOS), BSD/GNU coreutils and zsh: no mapfile, no sort -V, no bare globs (zsh aborts on no match). Every assignment ends in || true so the block survives set -e / pipefail.
+    _l="$HOME/.claude/commands/work-on.md"; _l="$(readlink -f "$_l" 2>/dev/null || readlink "$_l" 2>/dev/null || true)"; [ -n "$_l" ] && _l="$(dirname "$(dirname "$_l")")"
+    # Codex: install-codex.sh records the clone path in $CODEX_HOME/forge-home (one absolute path); skills are generated files, not symlinks.
+    _cx="${CODEX_HOME:-$HOME/.codex}"; case "$_cx" in /*) _x="$(head -n 1 "$_cx/forge-home" 2>/dev/null || true)" ;; *) _x="" ;; esac
+    # newest cached version first: numeric major.minor.patch of the version dir name only (non-semver names such as commit SHAs are skipped); a release outranks its pre-release (1.10.0 > 1.9.0 > 1.9.0-rc1)
+    _v="$(find -L "$HOME/.claude/plugins/cache" -mindepth 3 -maxdepth 3 -type d 2>/dev/null | awk -F/ -v mk="$_mk" '$(NF-2)==mk && $(NF-1)=="forgedock" && $NF ~ /^[0-9]+\.[0-9]+\.[0-9]+(-.*)?$/{v=$NF;p=index(v,"-");r=1;if(p){v=substr(v,1,p-1);r=0};split(v,a,".");printf "%d %d %d %d %s\n",a[1],a[2],a[3],r,$(0)}' | sort -k1,1nr -k2,2nr -k3,3nr -k4,4nr | cut -d' ' -f5- || true)"
+    _m="$HOME/.claude/plugins/marketplaces/$_mk"
+    # '${CLAUDE_PLUGIN_ROOT}' is substituted by Claude Code when it loads a plugin spec (the exact spelling only, never as an env var), so a running plugin resolves to its own root first; unsubstituted (other runtimes) it stays a literal that the /* check rejects.
+    _k="$(printf '%s\n' '${CLAUDE_PLUGIN_ROOT}' "${FORGE_HOME:-}" "$_l" "$_x" "$_v" "$_m")"
+    while IFS= read -r _c; do
+    case "$_c" in /*) [ -z "$FORGE_ROOT" ] && [ -f "$_c/scripts/verify-phase-trail.sh" ] && [ -f "$_c/scripts/lint-dispatch-prompt.sh" ] && [ -f "$_c/scripts/is-docs-only.sh" ] && [ -f "$_c/bin/engine/resolve.mjs" ] && [ -f "$_c/bin/engine/orchestrate-canary.mjs" ] && [ -f "$_c/bin/engine/admission.mjs" ] && FORGE_ROOT="$_c" ;; esac
+    done <<< "$_k"
+    fi
+    GATE_SCRIPT=""; [ -n "$FORGE_ROOT" ] && [ -f "$FORGE_ROOT/scripts/resolve-deploy-gate.sh" ] && GATE_SCRIPT="$FORGE_ROOT/scripts/resolve-deploy-gate.sh"
+    if [ -n "$GATE_SCRIPT" ]; then GUARD_GATE=$(bash "$GATE_SCRIPT" "$GUARD_BASE" {GH_REPO} 2>/dev/null || echo true); else GUARD_GATE=true; fi; [ "$GUARD_GATE" = "false" ] || GUARD_GATE=true
+    if [ "$GUARD_GATE" = "false" ]; then
+      # forge#2570: non-default-branch base — defer to remediate.md M7's auto-land, not a human.
       # forge#2626: standalone `/review-pr` (no remediate.md M6→M7 chain) would otherwise
       # strand this PR at `workflow:awaiting-merge` with no actionable guidance — add a
       # manual-merge fallback so the comment is correct in both the chained and standalone cases.
       # GOVERNOR-exempt: intentional coordination side-effect (best-effort lease/board/finding post), DRY_RUN-safe — reviewed & accepted for the check-command-side-effects gate. Flagged only by the staging->main full-diff; passes on every feature PR. forge#2627
-      gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "🟠 PR #{PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check on non-\`main\` base \`${GUARD_BASE}\`. It is parked at \`workflow:awaiting-merge\` for the remediation auto-land bar (\`remediate.md\` Phase M7, forge#2570) — which auto-merges it on the same fast-lane condition the normal \`/work-on\` path uses for this target branch — NOT for a human merge decision. If no remediation \`M7\` follows (e.g. this review was invoked standalone), merge manually once reviewed: \`gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge\`."
+      gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "🟠 PR #{PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check on non-default-branch base \`${GUARD_BASE}\`. It is parked at \`workflow:awaiting-merge\` for the remediation auto-land bar (\`remediate.md\` Phase M7, forge#2570) — which auto-merges it on the same fast-lane condition the normal \`/work-on\` path uses for this target branch — NOT for a human merge decision. If no remediation \`M7\` follows (e.g. this review was invoked standalone), merge manually once reviewed: \`gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge\`."
     else
-      # forge#2570: `main` / deploy gate (or unresolved base — fail closed to the human gate).
+      # forge#2570: default branch / deploy gate (or unresolved base — fail closed to the human gate).
       gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "🟠 PR #{PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check. This PR targets the deploy gate (\`${GUARD_BASE:-unresolved base}\`), so it is held at \`workflow:awaiting-merge\` for a human merge decision — \`staging → main\` is the genuine human gate. Merge manually once reviewed: \`gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge\`."
     fi
     # Shell state does not persist between Bash calls and `resolve_script` is not defined in this spec:
