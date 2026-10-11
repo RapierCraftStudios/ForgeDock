@@ -18,6 +18,7 @@ gen() { awk -v n="$1" 'BEGIN{for(i=0;i<n;i++) print "line of spec text number " 
 gen 4000 > commands/review-pr.md          # ~110 KB: 2% ~ 2.2 KB < 4 KB cap
 gen 20000 > commands/work-on.md           # ~560 KB: 2% ~ 11 KB, so the 4 KB cap binds
 gen 100 > commands/other.md
+printf 'HELPER_SCRIPT=""\n' > commands/donor.md
 gen 100 > commands/work-on/remediate.md
 git add -A; git commit -qm base; git branch -M staging; git push -q origin staging 2>/dev/null
 git checkout -q -b feat
@@ -26,7 +27,7 @@ reset() { git reset -q --hard origin/staging; git clean -qfd; }
 run() { # name want_rc [env...]
   local name="$1" want="$2"; shift 2
   local sum="$TMP/summary"; : > "$sum"
-  env GITHUB_STEP_SUMMARY="$sum" PR_LABELS="" PR_BODY="" "$@" bash "$S" origin/staging >"$TMP/out" 2>"$TMP/err"
+  env GITHUB_STEP_SUMMARY="$sum" PR_LABELS="" PR_HEAD_REF="" PR_BASE_REF="" "$@" bash "$S" origin/staging >"$TMP/out" 2>"$TMP/err"
   local rc=$?
   if [ "$rc" = "$want" ]; then ok; else bad "$name (rc=$rc want $want)"; cat "$TMP/err"; fi
 }
@@ -72,9 +73,41 @@ run "reduced count passes" 0
 # Exemption
 reset; gen 100 >> commands/review-pr.md
 run "exempt by label" 0 PR_LABELS="bug,spec-size-exempt"; has "label reported" "EXEMPT"
-run "exempt by body marker" 0 PR_BODY=$'text\n<!-- spec-size-exempt: security fix -->\nmore'; has "reason reported" "security fix"
-run "empty-reason marker not exempt" 1 PR_BODY='<!-- spec-size-exempt:  -->'
+run "body marker does not exempt" 1 PR_BODY=$'text\n<!-- spec-size-exempt: security fix -->\nmore'
 run "label substring not exempt" 1 PR_LABELS="spec-size-exempt-not"
+
+# Net counting: moves and stubs pass (the #3493 / #3590 shape)
+reset; : > commands/donor.md; printf 'HELPER_SCRIPT=""\n' >> commands/other.md
+run "net move between files passes" 0
+reset; : > commands/donor.md; printf 'HELPER_SCRIPT=""\n' > commands/new-spec.md; git add -A
+run "move to a new file passes" 0
+reset; git rm -q commands/donor.md; gen 5 > commands/review-pr.md; printf 'HELPER_SCRIPT=""\n' > commands/helper-stub.md; git add -A
+run "stub replaces deleted block passes" 0
+reset; printf 'HELPER_SCRIPT=""\n' >> commands/other.md
+run "copy without removal still fails" 1
+
+# Release PR skip (staging -> main only)
+reset; gen 100 >> commands/review-pr.md
+run "release PR skipped" 0 PR_HEAD_REF=staging PR_BASE_REF=main PR_SAME_REPO=true; has "skip reported" "SKIPPED"
+run "fork branch named staging still checked" 1 PR_HEAD_REF=staging PR_BASE_REF=main PR_SAME_REPO=false
+run "release PR without same-repo flag still checked" 1 PR_HEAD_REF=staging PR_BASE_REF=main
+run "hotfix to main still checked" 1 PR_HEAD_REF=hotfix PR_BASE_REF=main
+run "staging to other base still checked" 1 PR_HEAD_REF=staging PR_BASE_REF=dev
+
+# Merge-base: base advancing after branching must not count against the PR
+reset; git checkout -q -b old-branch; git checkout -q staging 2>/dev/null || git checkout -q -B staging origin/staging
+gen 300 >> commands/review-pr.md; git commit -qam "base grows"; git push -q origin HEAD:staging 2>/dev/null
+git checkout -q old-branch; git fetch -q origin staging
+run "base tip growth ignored (merge-base)" 0
+git checkout -q feat; git branch -qD old-branch; git branch -qf staging origin/staging; reset
+
+# Script extracted from the base ref behaves the same
+git show origin/staging:scripts/check-spec-size.sh > "$TMP/base-script.sh" 2>/dev/null || cp "$S" "$TMP/base-script.sh"
+gen 100 >> commands/review-pr.md
+: > "$TMP/summary"
+GITHUB_STEP_SUMMARY="$TMP/summary" PR_LABELS="" bash "$TMP/base-script.sh" origin/staging >/dev/null 2>&1; rc=$?
+[ "$rc" = 1 ] && ok || bad "extracted base-ref script fails over-budget change (rc=$rc)"
+reset
 
 # Fail closed on unresolvable base
 : > "$TMP/summary"
