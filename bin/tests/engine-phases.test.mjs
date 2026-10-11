@@ -1225,6 +1225,48 @@ describe("pickPhase", () => {
       assert.equal(o.status, "failed");
     });
 
+    describe("older blocked marker vs newer size gate (forge#3712)", () => {
+      const blocked = "<!-- FORGE:BUILD_BLOCKED -->\n## Build Blocked\n\nreason";
+      const failed = "<!-- FORGE:ACCEPTANCE_GATE:FAILED -->\nchecks failed";
+
+      it("BUILD_BLOCKED then newer OVER + Split Proposal -> committed, decomposed", async () => {
+        const o = await build.detectOutcome(st, withComments(blocked, gate("OVER")));
+        assert.equal(o.status, "committed");
+        assert.equal(o.terminalReason, "decomposed");
+      });
+
+      it("OVER + Split Proposal then newer BUILD_BLOCKED -> failed, non-retryable", async () => {
+        const o = await build.detectOutcome(st, withComments(gate("OVER"), blocked));
+        assert.equal(o.status, "failed");
+        assert.equal(o.retryable, false);
+        assert.equal(o.terminalReason, undefined);
+      });
+
+      it("ACCEPTANCE_GATE:FAILED then newer OVER + proposal -> decomposed", async () => {
+        const o = await build.detectOutcome(st, withComments(failed, gate("OVER")));
+        assert.equal(o.status, "committed");
+        assert.equal(o.terminalReason, "decomposed");
+      });
+
+      it("BUILD_BLOCKED then OVER without proposal (loop-guard exit) -> failed", async () => {
+        const o = await build.detectOutcome(st, withComments(blocked, gate("OVER", false)));
+        assert.equal(o.status, "failed");
+        assert.equal(o.retryable, false);
+      });
+
+      it("BUILD_BLOCKED, OVER + proposal, then justified SIZE_OVERRIDE -> failed", async () => {
+        const o = await build.detectOutcome(st, withComments(blocked, gate("OVER"), override));
+        assert.equal(o.status, "failed");
+        assert.equal(o.retryable, false);
+      });
+
+      it("FORGE:BUILDER:COMPLETE still short-circuits routing", async () => {
+        const complete = "<!-- FORGE:BUILDER -->\n<!-- FORGE:BUILDER:COMPLETE -->\n**Branch**: `fix/x-42`";
+        const o = await build.detectOutcome(st, withComments(blocked, gate("OVER"), complete));
+        assert.notEqual(o.terminalReason, "decomposed");
+      });
+    });
+
     describe("trust filter", () => {
       const withEnv = async (env, fn) => {
         const saved = {};
