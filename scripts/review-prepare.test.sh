@@ -33,7 +33,7 @@ case "$a" in
   "pr diff"*"--name-only"*) [ -f "$FIX/difffail" ] && exit 1; cat "$FIX/files" ;;
   "pr diff"*) cat "$FIX/diff" ;;
   "pr list"*) cat "$FIX/prior" 2>/dev/null || echo 1 ;;
-  "api --paginate"*) cat "$FIX/comments.json" 2>/dev/null || echo '[]' ;;
+  "api --paginate"*) [ -f "$FIX/comments.fail" ] && exit 1; cat "$FIX/comments.json" 2>/dev/null || echo '[]' ;;
   "issue view"*"labels"*) cat "$FIX/labels" 2>/dev/null || echo false ;;
   "issue view"*"body"*) cat "$FIX/issuebody" 2>/dev/null ;;
   *) exit 1 ;;
@@ -231,6 +231,9 @@ eq "trusted contract HIGH_RISK" '.contract.flags | test("HIGH_RISK")' true; eq "
 eq "HIGH_RISK lifts the roster above small" '.roster.tier != "small"' true
 printf '[{"body":"<!-- FORGE:CONTRACT -->\\n**Risk**: HIGH","author_association":"NONE","user":{"login":"evil","type":"User"}}]' > "$FIX/comments.json"
 prep "$ROOT"; eq "planted contract from an untrusted author is ignored" .contract.flags ""; eq "roster stays small" .roster.tier small
+touch "$FIX/comments.fail"
+prep "$ROOT"; eq "a failed contract read widens, never narrows" '.contract.flags | test("HIGH_RISK")' true
+rm -f "$FIX/comments.fail"
 mkroot "$WORK/root-notrust"; rm "$WORK/root-notrust/scripts/trusted-comments.sh"
 prep "$WORK/root-notrust"; eq "unresolved trust script widens, never narrows" '.contract.flags | test("HIGH_RISK")' true
 
@@ -251,7 +254,7 @@ if grep -q 'checkout -f "\$ORIG_REF"' "$ROOT/scripts/review-prepare.sh"; then ok
 setup feat/x staging "README.md" "$DIFF_PLAIN"; : > "$FIX/difffail"
 prep "$ROOT"; rc_is "gh pr diff failure" 3; eq "blocked on gh failure" .status BLOCKED
 setup feat/x staging "README.md" "$DIFF_PLAIN"
-for bad_args in "--pr abc --repo o/r" "--pr 7 --repo noslash" "--pr 7 --repo o/r;x/y" "--pr 7 --repo o/r --bogus"; do
+for bad_args in "--pr abc --repo o/r" "--pr 7 --repo noslash" "--pr 7 --repo o/r;x/y" "--pr 7 --repo o/r --bogus" "--repo o/r --pr"; do
     # shellcheck disable=SC2086
     (cd "$REPO_DIR" && FORGEDOCK_HOME="$ROOT" bash "$ROOT/scripts/review-prepare.sh" $bad_args >/dev/null 2>&1); rcx=$?
     if [ "$rcx" = 2 ]; then ok; else bad "args '$bad_args' exit $rcx, want 2"; fi

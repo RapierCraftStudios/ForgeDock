@@ -55,6 +55,10 @@ set -u
 PR_NUMBER=""; REPO=""; MERGE_ISSUE=""; THOROUGH="false"; OUT=""; OUT_DIR=""; CHECKOUT_PR="false"
 while [ $# -gt 0 ]; do
     case "$1" in
+        --pr|--repo|--merge-issue|--thorough|--out|--out-dir)
+            [ $# -ge 2 ] || { echo "review-prepare: $1 requires a value" >&2; exit 2; } ;;
+    esac
+    case "$1" in
         --pr) PR_NUMBER="${2:-}"; shift 2 ;;
         --repo) REPO="${2:-}"; shift 2 ;;
         --merge-issue) MERGE_ISSUE="${2:-}"; shift 2 ;;
@@ -319,7 +323,14 @@ case "$ISSUE_NUM" in ''|*[!0-9]*) ISSUE_NUM="" ;; esac
 if [ -n "$ISSUE_NUM" ]; then
     CONTRACT_BODY=""; CONTRACT_OK="false"
     if [ -n "$TRUSTED_SCRIPT" ]; then
-        CONTRACT_BODY=$(gh api --paginate "repos/${REPO}/issues/${ISSUE_NUM}/comments" 2>/dev/null | bash "$TRUSTED_SCRIPT" bodies 'FORGE:CONTRACT' 2>/dev/null | head -n 1 | jq -r . 2>/dev/null) && CONTRACT_OK="true"
+        # Each stage is checked on its own: in a pipeline `jq -r .` on empty stdin exits 0, so a failed read looked like success.
+        # A failed or empty comment read, or a failing trusted-comments run, stays CONTRACT_OK=false (widen, never narrow).
+        # A successful read with no trusted contract comment is the deliberate "no contract" case (empty body, no flags).
+        if _cc=$(gh api --paginate "repos/${REPO}/issues/${ISSUE_NUM}/comments" 2>/dev/null) && [ -n "$_cc" ] \
+           && _cb=$(printf '%s' "$_cc" | bash "$TRUSTED_SCRIPT" bodies 'FORGE:CONTRACT' 2>/dev/null); then
+            CONTRACT_OK="true"
+            [ -z "$_cb" ] || CONTRACT_BODY=$(printf '%s\n' "$_cb" | head -n 1 | jq -r . 2>/dev/null) || CONTRACT_OK="false"
+        fi
     fi
     if [ "$CONTRACT_OK" != "true" ]; then
         CONTRACT_RISK_FLAGS="HIGH_RISK"   # cannot read the contract trust-filtered: widen, never narrow
