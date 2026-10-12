@@ -285,12 +285,15 @@ do_extract() {
         # binds the k-th body holding that exact marker (k = how often this exact marker was already seen), so each keeps its own agent and
         # prose. Falls back to the first body holding the id-prefix only when no body holds the exact line (reworded synthesis marker).
         BODY_FILE="$WORKDIR/body.$N_EXTRACTED"
+        F_TITLE="${F_TITLE%$'\r'}"   # a CRLF-ending parse (Windows jq) must not leak a CR into the exact marker
         F_MARKER="<!-- FINDING:${F_ID}|${F_CONF}|${F_SEV}|${F_LOC}|${F_TITLE} -->"
         SEEN_K=$(grep -cxF -- "$F_MARKER" "$WORKDIR/seen-markers" 2>/dev/null || true); case "$SEEN_K" in ''|*[!0-9]*) SEEN_K=0 ;; esac
         printf '%s\n' "$F_MARKER" >> "$WORKDIR/seen-markers"
-        jq -rs --arg m "$F_MARKER" --argjson k "$SEEN_K" '[.[] | select(index($m) != null)] | (.[$k] // .[0]) // ""' "$WORKDIR/carriers.jsonl" > "$BODY_FILE" 2>/dev/null || : > "$BODY_FILE"
-        if [ ! -s "$BODY_FILE" ]; then
-            jq -rs --arg p "<!-- FINDING:${F_ID}|" '[.[] | select(index($p) != null)] | .[0] // ""' "$WORKDIR/carriers.jsonl" > "$BODY_FILE" 2>/dev/null || : > "$BODY_FILE"
+        jq -rs --arg m "$F_MARKER" --argjson k "$SEEN_K" '[.[] | select(contains($m))] | (.[$k] // .[0]) // ""' "$WORKDIR/carriers.jsonl" > "$BODY_FILE" 2>/dev/null || : > "$BODY_FILE"
+        # Emptiness is judged on content, not size: jq writes a newline for the empty string, so -s is true for "no body". contains(), not index(): jq index() on strings is unreliable across builds.
+        # WIRE:PROVEN — manual: jq -rs on an empty result writes a lone newline; -s reports it non-empty, the tr/grep content check reports it empty, so the fallback runs
+        if ! tr -d '\r\n' < "$BODY_FILE" | grep -q .; then
+            jq -rs --arg p "<!-- FINDING:${F_ID}|" '[.[] | select(contains($p))] | .[0] // ""' "$WORKDIR/carriers.jsonl" > "$BODY_FILE" 2>/dev/null || : > "$BODY_FILE"
         fi
         AGENT=$(sed -n 's/^<!-- FORGE:REVIEW-AGENT:\([a-z-]*\) -->.*/\1/p' "$BODY_FILE" | head -n 1)
         # The finding's own prose section. Start anchor, in order: a heading naming the id; a non-list line naming the id (a summary
