@@ -36,6 +36,8 @@ export const OUTCOME_CODES = Object.freeze({
   ENGINE_ERROR: "engine.error",
   INFRA_DISK_QUOTA: "infra.disk_quota",
   LEASE_HELD: "lease.held",
+  DEPENDENCY_OPEN: "dependency.open",
+  DEPENDENCY_UNREADABLE: "dependency.unreadable",
   INVALID: "invalid",
   DECOMPOSED: "decomposed",
   // Non-failure terminals, so a RUN_TERMINAL for a healthy run is not counted as a gap.
@@ -105,6 +107,8 @@ export function codeForTerminalReason(reason) {
     case "decomposed": return OUTCOME_CODES.DECOMPOSED;
     case "engine-error": return OUTCOME_CODES.ENGINE_ERROR;
     case "deferred": return OUTCOME_CODES.LEASE_HELD;
+    case "dependency-open": return OUTCOME_CODES.DEPENDENCY_OPEN;
+    case "dependency-unreadable": return OUTCOME_CODES.DEPENDENCY_UNREADABLE;
     default: return UNCLASSIFIED;
   }
 }

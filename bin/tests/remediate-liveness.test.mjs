@@ -218,3 +218,38 @@ esac
     assert.equal(r.rc, 10);
   });
 });
+
+// forge#3932: the CI-only / INPR second-attempt scoping is exercised against the spec's own jq program.
+describe("remediate.md M0 per-kind attribution (forge#3932)", () => {
+  const block = spec.slice(spec.indexOf("**CI-only and INPR second attempts**"));
+  const jqProg = /jq -rs --arg pr "\{PR_NUMBER\}" --arg kind "\$CURRENT_KIND" '([\s\S]*?)' 2>\/dev\/null/.exec(block)?.[1];
+  const bot = { type: "Bot" };
+  const marker = (kind, t) => ({ body: `<!-- FORGE:${kind}_REMEDIATION: pr=7 -->`, created_at: t, user: bot });
+  const trail = (t) => ({ body: "<!-- FORGE:REMEDIATION -->\nx\n<!-- FORGE:REMEDIATION:COMPLETE -->", created_at: t, user: bot });
+  const count = (kind, issueC, prC) => {
+    const r = spawnSync("jq", ["-rs", "--arg", "pr", "7", "--arg", "kind", kind, jqProg],
+      { input: JSON.stringify(issueC) + "\n" + JSON.stringify(prC) + "\n", encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+    return Number(r.stdout.trim());
+  };
+
+  it("documents the CI-only second attempt and keeps one attempt per kind", () => {
+    assert.ok(jqProg, "attribution jq program present");
+    assert.match(block, /CI-only/);
+    assert.match(block, /one attempt per kind per PR/);
+  });
+  it("a CI handoff after an INPR trail is a fresh attempt; a second CI handoff after a CI trail is not", () => {
+    const inprTrail = [marker("INPR", "2026-01-01T00:00:01Z")];
+    assert.equal(count("CI_REMEDIATION", [...inprTrail, marker("CI", "2026-01-01T00:00:09Z")], [trail("2026-01-01T00:00:05Z")]), 0);
+    assert.equal(count("INPR_REMEDIATION", [...inprTrail, marker("CI", "2026-01-01T00:00:09Z")], [trail("2026-01-01T00:00:05Z")]), 1);
+    assert.equal(count("CI_REMEDIATION",
+      [...inprTrail, marker("CI", "2026-01-01T00:00:09Z"), marker("CI", "2026-01-01T00:00:20Z")],
+      [trail("2026-01-01T00:00:05Z"), trail("2026-01-01T00:00:12Z")]), 1);
+  });
+  it("untrusted markers or trails and other-PR markers are never attributed", () => {
+    const stranger = (c) => ({ ...c, user: { type: "User" }, author_association: "NONE" });
+    assert.equal(count("CI_REMEDIATION", [marker("CI", "2026-01-01T00:00:01Z")], [stranger(trail("2026-01-01T00:00:05Z"))]), 0);
+    assert.equal(count("CI_REMEDIATION", [stranger(marker("CI", "2026-01-01T00:00:01Z"))], [trail("2026-01-01T00:00:05Z")]), 0);
+    assert.equal(count("CI_REMEDIATION", [{ ...marker("CI", "2026-01-01T00:00:01Z"), body: "<!-- FORGE:CI_REMEDIATION: pr=8 -->" }], [trail("2026-01-01T00:00:05Z")]), 0);
+  });
+});

@@ -35,6 +35,8 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 | `engine.error` | Engine or tool failure (missing key/SDK, CLI crash, max turns, unresolved args, runner threw every attempt) | engine | `err.code` |
 | `infra.disk_quota` | Disk full or quota exhausted (EDQUOT/ENOSPC, errno -28/-122); retryable infra failure, never `needs-human` | engine | Runner error text |
 | `lease.held` | Another live agent holds the issue lease | engine | Foreign live lease on acquire |
+| `dependency.open` | A trusted `**Depends on**: #N` dependency is still open, so the run was refused before any state write | engine | Trusted issue body `**Depends on**` line + the dependency issue's open state |
+| `dependency.unreadable` | The issue body or a declared dependency could not be read, so the run was refused (fail closed) | engine | Failed or unparsable `gh api` read |
 | `invalid` | Issue is invalid or in a divergent closed state | investigate, engine | `INVESTIGATION:INVALID` marker, or live snapshot |
 | `decomposed` | Issue was decomposed into sub-issues | investigate, decompose | `FORGE:DECOMPOSED` or the decomposition assessment |
 | `completed` | Non-failure terminal (merged, phase-complete, investigation) | engine | Terminal reason |

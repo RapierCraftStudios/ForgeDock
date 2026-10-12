@@ -124,6 +124,19 @@ if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$PR_COMMENTS" ]; then
 fi
 ```
 
+**CI-only and INPR second attempts** <!-- Added: forge#3932 -->: the per-kind scoping also covers `ci-gate` and `inpr-fix`, so a CI-only failure after a remediation of another kind gets its own single attempt, not `ALREADY_DONE`. Trails carry no kind: each completed trail is attributed to the NEWEST trusted bound marker at or before it. When `CURRENT_KIND` is `CI_REMEDIATION` or `INPR_REMEDIATION` and no completed trail is attributed to it, `REMEDIATION_COMPLETE_N` is set to 0: one attempt per kind per PR, keeping the retry bound. An unreadable attribution keeps the kind-agnostic guard:
+
+```bash
+if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$PR_COMMENTS" ] && [ -n "$ISSUE_COMMENTS" ] && { [ "$CURRENT_KIND" = "CI_REMEDIATION" ] || [ "$CURRENT_KIND" = "INPR_REMEDIATION" ]; }; then
+  KIND_DONE_N=$( { printf '%s\n' "$ISSUE_COMMENTS"; printf '%s\n' "$PR_COMMENTS"; } | jq -rs --arg pr "{PR_NUMBER}" --arg kind "$CURRENT_KIND" '
+    [.[][] | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | select((.body // "") | type == "string")] as $c
+    | [$c[] | select(.body | test("\\A<!-- FORGE:(CI|INPR|BASESYNC)_REMEDIATION: pr=" + $pr + " -->")) | {t: .created_at, k: (.body | capture("FORGE:(?<k>CI|INPR|BASESYNC)_REMEDIATION").k + "_REMEDIATION")}] as $m
+    | [$c[] | select(.body | test("\\A<!-- FORGE:REMEDIATION -->[\\s\\S]*<!-- FORGE:REMEDIATION:COMPLETE -->")) | .created_at] as $trails
+    | [$trails[] as $t | ([$m[] | select(.t <= $t)] | sort_by(.t) | last | .k // "") | select(. == $kind)] | length' 2>/dev/null || echo "")
+  if [ -n "$KIND_DONE_N" ] && [ "$KIND_DONE_N" -eq 0 ]; then REMEDIATION_COMPLETE_N=0; fi
+fi
+```
+
 Completed trails of other kinds are left in place (never deleted); only the interrupted-partial cleanup below deletes anything.
 
 - If `REMEDIATION_COMPLETE_N` or `REMEDIATION_TRAIL_N` is empty (comments or `scripts/trusted-comments.sh` unreadable or unresolvable) → fail closed: EXIT `REMEDIATE_RESULT: status: BLOCKED`, blocker: "github-unavailable: remediation trail unreadable (comments or scripts/trusted-comments.sh unresolvable)". Never treat unreadable as "no trail" and never as `ALREADY_DONE`.

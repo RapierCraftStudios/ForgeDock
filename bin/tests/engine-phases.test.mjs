@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
-import { PHASES, pickPhase, REMEDIATION_BOUND_MARKERS, cycleMarker, sliceToCurrentCycle, postCycleMarker, nextCycleNumber, decompositionRevokedWithOverride } from "../engine/phases.mjs";
+import { PHASES, pickPhase, REMEDIATION_BOUND_MARKERS, cycleMarker, sliceToCurrentCycle, postCycleMarker, nextCycleNumber, decompositionRevoked, openDependency } from "../engine/phases.mjs";
 import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
 import { RESERVED_TYPES } from "../../packages/protocol/src/types.js";
 import { trusted, jsonLines, invBody, builderBody, remediationBody, remediationHeldBody } from "./helpers/comments.mjs";
@@ -1191,33 +1191,73 @@ describe("pickPhase", () => {
     });
   });
 
-  describe("decompositionRevokedWithOverride (forge#3862)", () => {
+  describe("decompositionRevoked (forge#3862, forge#3932)", () => {
     const revoked = "<!-- FORGE:DECOMPOSED:REVOKED -->\nOperator revoked the decomposition.";
     const decomposed = "<!-- FORGE:DECOMPOSED -->\nspawned";
     const complete = "<!-- FORGE:DECOMPOSED -->\n<!-- FORGE:DECOMPOSED:COMPLETE -->";
     const ovr = "<!-- FORGE:SIZE_OVERRIDE -->\nJustified: one cohesive change.";
     const stranger = (b) => trusted(b, { assoc: "NONE", type: "User", login: "drive-by" });
-    const run = (...items) => decompositionRevokedWithOverride(42, { gh: async () => jsonLines(items.map((c) => (typeof c === "string" ? trusted(c) : c))), git: async () => "0" });
+    const run = (...items) => decompositionRevoked(42, { gh: async () => jsonLines(items.map((c) => (typeof c === "string" ? trusted(c) : c))), git: async () => "0" });
 
-    it("revocation newer than FORGE:DECOMPOSED plus a justified override -> true", async () => {
+    it("a revocation newer than FORGE:DECOMPOSED suffices, with or without a size override", async () => {
+      assert.equal(await run(decomposed, complete, revoked), true);
       assert.equal(await run(decomposed, complete, revoked, ovr), true);
       assert.equal(await run(ovr, decomposed, revoked), true);
-      assert.equal(await run(revoked, ovr), true);
+      assert.equal(await run(revoked), true);
     });
-    it("no revocation, no override, or a newer re-decomposition -> false", async () => {
+    it("no revocation, an override alone, or a newer re-decomposition -> false", async () => {
+      assert.equal(await run(decomposed, complete), false);
       assert.equal(await run(decomposed, complete, ovr), false);
-      assert.equal(await run(decomposed, revoked), false);
+      assert.equal(await run(decomposed, revoked, complete), false);
       assert.equal(await run(decomposed, revoked, complete, ovr), false);
     });
-    it("an unjustified override does not count", async () => {
-      assert.equal(await run(decomposed, revoked, "<!-- FORGE:SIZE_OVERRIDE -->"), false);
-    });
-    it("untrusted revocation or override never counts", async () => {
+    it("an untrusted revocation never counts", async () => {
+      assert.equal(await run(decomposed, stranger(revoked)), false);
       assert.equal(await run(decomposed, stranger(revoked), ovr), false);
-      assert.equal(await run(decomposed, revoked, stranger(ovr)), false);
     });
     it("an unreadable comment trail fails closed", async () => {
-      assert.equal(await decompositionRevokedWithOverride(42, { gh: async () => { throw new Error("boom"); }, git: async () => "0" }), false);
+      assert.equal(await decompositionRevoked(42, { gh: async () => { throw new Error("boom"); }, git: async () => "0" }), false);
+    });
+  });
+
+  describe("openDependency (forge#3932)", () => {
+    const rec = (over = {}) => JSON.stringify({ body: "x", state: "open", author_association: "OWNER", user: { type: "User", login: "op" }, ...over });
+    const io = (records, calls = []) => ({ git: async () => "0", gh: async (args) => {
+      calls.push(args.join(" "));
+      const m = /issues\/(\d+)$/.exec(args[args.length - 1]);
+      const r = records[m?.[1]];
+      if (r instanceof Error) throw r;
+      return r ?? "";
+    } });
+    const dep = "Body.\n\n**Depends on**: #7 — needs the schema first\n";
+
+    it("a trusted exact **Depends on** line whose dependency is OPEN is reported", async () => {
+      assert.deepEqual(await openDependency(42, io({ 42: rec({ body: dep }), 7: rec({ state: "open" }) })), { open: [7] });
+    });
+    it("a closed dependency, no declaration or an empty read blocks nothing", async () => {
+      assert.equal(await openDependency(42, io({ 42: rec({ body: dep }), 7: rec({ state: "closed" }) })), null);
+      assert.equal(await openDependency(42, io({ 42: rec({ body: "nothing" }) })), null);
+      assert.equal(await openDependency(42, io({})), null);
+    });
+    it("a Bot-authored body is trusted; an untrusted author's claim is ignored (no dependency read)", async () => {
+      assert.deepEqual(await openDependency(42, io({ 42: rec({ body: dep, author_association: "NONE", user: { type: "Bot", login: "forge[bot]" } }), 7: rec() })), { open: [7] });
+      const calls = [];
+      assert.equal(await openDependency(42, io({ 42: rec({ body: dep, author_association: "NONE" }), 7: rec() }, calls)), null);
+      assert.equal(calls.length, 1);
+    });
+    it("loose prose, a mid-line mention and a self-reference are ignored", async () => {
+      for (const body of ["depends on #7", "This is blocked by #7, after #7", "see **Depends on**: #7 here", "**Depends on**: #42"])
+        assert.equal(await openDependency(42, io({ 42: rec({ body }), 7: rec(), })), null, body);
+    });
+    it("several dependencies report only the open ones", async () => {
+      const body = "**Depends on**: #7\n**Depends on**: #8 — why\n";
+      assert.deepEqual(await openDependency(42, io({ 42: rec({ body }), 7: rec({ state: "closed" }), 8: rec() })), { open: [8] });
+    });
+    it("unreadable issue, unreadable dependency or unparsable output fails closed", async () => {
+      assert.equal((await openDependency(42, io({ 42: new Error("boom") }))).unreadable, true);
+      assert.equal((await openDependency(42, io({ 42: rec({ body: dep }), 7: new Error("boom") }))).unreadable, true);
+      assert.equal((await openDependency(42, io({ 42: rec({ body: dep }), 7: "" }))).unreadable, true);
+      assert.equal((await openDependency(42, io({ 42: "not json" }))).unreadable, true);
     });
   });
 

@@ -8,7 +8,7 @@ import { readFileSync, rmSync } from "node:fs";
 import { createHash, scryptSync } from "node:crypto";
 import { hostname as osHostname, homedir } from "node:os";
 import { appendEvent, readLog, deriveState, rewriteLog } from "./engine/runlog.mjs";
-import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postCycleMarker, nextCycleNumber, newestCycle, cycleResetProvable, remediationHeadStale, decompositionRevokedWithOverride } from "./engine/phases.mjs";
+import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postCycleMarker, nextCycleNumber, newestCycle, cycleResetProvable, remediationHeadStale, decompositionRevoked, openDependency } from "./engine/phases.mjs";
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { VALID_BACKENDS, resolveRunTmpRoot, runTmpDir } from "./runner.mjs";
@@ -390,6 +390,27 @@ export async function runIssue(opts) {
     remote = cur;
     ({ state, action } = reconcileState(local, remote));
   }
+  // forge#3932: `Depends on` admission. A trusted `**Depends on**: #N` line whose dependency is still OPEN
+  // refuses the run BEFORE any state/lease write (mirrors deferredResult), so building on top of an
+  // unmerged dependency cannot conflict with it. Checked on every start; a closed dependency, no
+  // declaration or an untrusted body proceeds. An unreadable body/dependency fails closed.
+  {
+    let dep = null;
+    try { dep = await openDependency(issue, io); } catch (e) {
+      dep = { unreadable: true, detail: `issue ${issue} **Depends on** check failed: ${e?.message || e}` };
+    }
+    if (dep?.unreadable) {
+      return { terminalReason: "dependency-unreadable", code: OUTCOME_CODES.DEPENDENCY_UNREADABLE, detail: dep.detail };
+    }
+    if (dep?.open?.length) {
+      return {
+        terminalReason: "dependency-open",
+        code: OUTCOME_CODES.DEPENDENCY_OPEN,
+        dependencies: dep.open,
+        detail: `issue ${issue} **Depends on** ${dep.open.map((n) => `#${n}`).join(", ")} which is still open; re-run once it is closed`,
+      };
+    }
+  }
   // forge#3824: hoisted so RUN_START can carry the repo (lazy, memoised; null when unresolved).
   let repoPromise = null;
   const resolveRepo = () => (repoPromise ??= (async () => {
@@ -440,16 +461,17 @@ export async function runIssue(opts) {
   let reopened = false;
   let reopenUncommit = null;
   if (retry && state?.terminal) {
-    // forge#3862: a `decomposed` terminal is reopened at build only when trusted GitHub state shows the
-    // decomposition revoked AND a justified FORGE:SIZE_OVERRIDE (the AlterLab rescue shape). Anything
-    // else keeps the terminal; an unreadable comment trail fails closed.
-    if (state.terminalReason === "decomposed" && await decompositionRevokedWithOverride(issue, io)) {
+    // forge#3862 / forge#3932: a `decomposed` terminal is reopened at build when trusted GitHub state shows
+    // the decomposition revoked (a trusted FORGE:DECOMPOSED:REVOKED newer than FORGE:DECOMPOSED); the
+    // revocation alone suffices now that the size gate is gone. Anything else keeps the terminal; an
+    // unreadable comment trail fails closed.
+    if (state.terminalReason === "decomposed" && await decompositionRevoked(issue, io)) {
       reopenUncommit = ["build", "decompose"];
     } else if (state.terminalReason !== "engine-error" && state.terminalReason !== "phase-complete" &&
         state.terminalReason !== "needs-human") {
       return {
         terminalReason: "not-retryable",
-        detail: `issue ${issue} ended ${state.terminalReason}; --retry only resumes an engine-error, phase-complete or needs-human run (or a decomposed run whose FORGE:DECOMPOSED was revoked with a justified FORGE:SIZE_OVERRIDE)`,
+        detail: `issue ${issue} ended ${state.terminalReason}; --retry only resumes an engine-error, phase-complete or needs-human run (or a decomposed run whose FORGE:DECOMPOSED was revoked by a trusted FORGE:DECOMPOSED:REVOKED)`,
       };
     }
     // forge#3571: a human clearing `needs-human` is the hand-back signal. Reopen
