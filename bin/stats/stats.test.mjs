@@ -263,6 +263,20 @@ describe("cache", () => {
     assert.ok(b.calls[0].includes("since="), "resumes from the watermark");
     assert.equal(resumed.items.length, 250);
   });
+  it("a mid-crawl failure never advances the watermark past unpersisted telemetry (resume still finds it)", async () => {
+    const env = { ...ENV, FORGE_STATS_CACHE_DIR: join(td, "cache-pending-telemetry") };
+    const store = mkItems(250);
+    // A telemetry comment on the NEWEST issue (listed last), posted before the failing run starts.
+    const comments = [telemetryComment(250, "z1", "phase_attempt", ts(250))];
+    await assert.rejects(() => fetchGithubRecords({ repo: "o/r", gh: storeGh(store, { comments, failOnListCall: 3 }).gh, env }), /rate limited/);
+    const saved = JSON.parse(readFileSync(join(cacheDir("o/r", env), "cache.json"), "utf8"));
+    assert.ok(!saved.watermark, "watermark must not be persisted while telemetry records are unpersisted");
+    // Resume: the comment is older than any watermark a buggy checkpoint would have saved.
+    const resumed = await fetchGithubRecords({ repo: "o/r", gh: storeGh(store, { comments }).gh, env });
+    assert.equal(resumed.items.length, 250);
+    assert.deepEqual(resumed.records.map((r) => r.eid), ["z1"]);
+    assert.equal(resumed.items.find((i) => i.number === 250).records.length, 1);
+  });
   it("bounds the crawl by the window: API calls track the window, not the repo size", async () => {
     const store = mkItems(3000); // 3000 items, one per hour
     const from = ts(2990);

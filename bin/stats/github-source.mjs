@@ -251,19 +251,24 @@ export async function fetchGithubRecords({ repo, since = null, refresh = false, 
   // Never persist a watermark past the moment the comment scan started: a comment posted after it bumps its issue's
   // updated_at, and the next run must still start before that.
   const cap = (w) => (w && w > scanTs ? scanTs : w);
+  // Telemetry issues whose records are not yet in `items` (the records are re-read in memory first). While any remain the
+  // watermark must not move past where the comment scan began, or a resumed run would never re-scan their comments.
+  const pending = new Set();
+  const scanResume = () => (crawlFrom ? shiftIso(crawlFrom, WATERMARK_OVERLAP_MS) : null);
   // Checkpoint: while the crawl extends coverage forward (fresh cache, or the covered range's tail) the watermark is the
   // newest updated_at processed. A gap crawl (window starts before the floor) leaves watermark and floor untouched until
   // it finishes, so a failure never claims coverage it does not have.
   const checkpoint = () => {
     if (!useCache) return;
     const extend = !hasCover || covers || gapDone;
-    saveCache(repo, { ...emptyCache(), watermark: extend ? cap(watermark) : cache.watermark, coveredFrom: extend ? newFloor : cache.coveredFrom, items }, env);
+    saveCache(repo, { ...emptyCache(), watermark: extend ? (pending.size > 0 ? scanResume() : cap(watermark)) : cache.watermark, coveredFrom: extend ? newFloor : cache.coveredFrom, items }, env);
   };
   try {
     const telemetry = [...await scanWindowComments(call, repo, crawlFrom, env, (p) => onProgress({ phase: "comments", done: p, total: null }))];
     // A telemetry run spans several comment parts and the window holds only the touched ones, so each such issue's full
     // comment list is re-read once (bounded pool) and replaces its records.
     const recordsOf = new Map();
+    for (const n of telemetry) pending.add(n);
     let done = 0;
     await pool(telemetry, concurrency, async (n) => {
       recordsOf.set(n, parseTelemetryComments(parsePages(await call(["api", "--paginate", `repos/${repo}/issues/${n}/comments`])), env));
@@ -276,6 +281,7 @@ export async function fetchGithubRecords({ repo, since = null, refresh = false, 
       const m = meta(it);
       items[it.number] = { ...m, records: recordsOf.get(it.number) ?? items[it.number]?.records ?? [] };
       listed.add(it.number);
+      pending.delete(it.number);
       if (m.updatedAt && (!watermark || m.updatedAt > watermark)) watermark = m.updatedAt;
       if (++processed % CHECKPOINT_EVERY === 0) checkpoint();
       if (processed % PAGE_SIZE === 0) onProgress({ phase: "issues", done: processed, total: null });
@@ -284,9 +290,10 @@ export async function fetchGithubRecords({ repo, since = null, refresh = false, 
     // A telemetry comment edited in place does not bump its issue's updated_at, so such an issue can be missing from the
     // listing: update its cached records, and read its metadata once if the cache has never seen it.
     await pool(telemetry.filter((n) => !listed.has(n)), concurrency, async (n) => {
-      if (items[n]) { items[n] = { ...items[n], records: recordsOf.get(n) }; return; }
+      if (items[n]) { items[n] = { ...items[n], records: recordsOf.get(n) }; pending.delete(n); return; }
       const [it] = parsePages(await call(["api", `repos/${repo}/issues/${n}`]));
       if (it && Number.isInteger(it.number)) items[n] = { ...meta(it), records: recordsOf.get(n) };
+      pending.delete(n);
     });
     gapDone = true;
   } catch (err) {
