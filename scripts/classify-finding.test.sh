@@ -29,6 +29,16 @@ expect ISSUE "missing severity files"         -- --severity "" --confidence LIKE
 expect ISSUE "unknown severity files"         -- --severity INFO
 expect ISSUE "lowercase high files"           -- --severity high
 
+# --- --unstructured: a marker-less finding can never be ISSUE on a bad severity ---
+expect NOTE  "unstructured empty severity is NOTE"       -- --unstructured --severity "" --confidence LIKELY
+expect NOTE  "unstructured missing severity is NOTE"     -- --unstructured
+expect NOTE  "unstructured garbage severity is NOTE"     -- --unstructured --severity INFO
+expect ISSUE "unstructured HIGH still files"             -- --unstructured --severity HIGH --confidence POSSIBLE
+expect ISSUE "unstructured CRITICAL still files"         -- --unstructured --severity CRITICAL
+expect ISSUE "unstructured MEDIUM CONFIRMED still files" -- --unstructured --severity MEDIUM --confidence CONFIRMED --text "loop exits early"
+expect ISSUE "marker finding, empty severity stays ISSUE" -- --severity "" --confidence LIKELY
+expect ISSUE "marker finding, bad severity stays ISSUE"  -- --severity INFO
+
 # --- Rule 4: non-lineage ---
 expect ISSUE "MEDIUM CONFIRMED files"         -- --severity MEDIUM --confidence CONFIRMED --text "loop exits early"
 expect ISSUE "MEDIUM LIKELY files"            -- --severity MEDIUM --confidence LIKELY --text "loop exits early"

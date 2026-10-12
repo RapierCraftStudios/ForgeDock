@@ -25,8 +25,9 @@
 #
 # Boundary: the filing call itself (the /issue skill with its programmatic contract) and the LLM-authored finding body stay in the
 # spec: a shell script cannot invoke a skill. The script ends at the work list (file-prepare) and resumes at file-verify.
-# Also left to the caller: INTEG-N findings from Phase 2.5, unstructured-finding extraction when `extract` reports 0 structured
-# findings, pattern-class consolidation issue creation, project-board add, 6D, and the choice of which NOTEs are fixed or dropped
+# `extract` never reads free text: findings come only from `<!-- FINDING:... -->` markers. A trusted current-head agent comment
+# without a REVIEW-FINDINGS-START/END block is listed in AGENTS_WITHOUT_BLOCK (undelivered) and withholds CLEAN_STRUCTURED.
+# Also left to the caller: INTEG-N findings from Phase 2.5, pattern-class consolidation issue creation, project-board add, 6D, and the choice of which NOTEs are fixed or dropped
 # (pass --notes-fixed / --notes-dropped; every other plain NOTE is counted as listed).
 #
 # Options:
@@ -269,12 +270,20 @@ do_extract() {
     # The panel guard guarantees at least one trusted reviewer body for this head; none means a misread, never "clean".
     [ -n "$SOURCE_BODIES" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: no trusted reviewer comments for head ${PRIMARY_SHA} (fail closed)"; exit 3; }
     CARRIER_BODIES=$(agent_bodies_at "$PRIMARY_SHA")
+    CARRIER_BODIES_PRIMARY="$CARRIER_BODIES"
     if [ -n "$EARLIER_SHA" ]; then
         EARLIER_BODIES=$(bodies_at "$EARLIER_SHA") && [ -n "$EARLIER_BODIES" ] \
             || { echo "REVIEW_RESULT: status: BLOCKED, blocker: earlier reviewed head ${EARLIER_SHA} findings unreadable (fail closed)"; exit 3; }
         SOURCE_BODIES=$(printf '%s\n%s' "$SOURCE_BODIES" "$EARLIER_BODIES")
         CARRIER_BODIES=$(printf '%s\n%s' "$CARRIER_BODIES" "$(agent_bodies_at "$EARLIER_SHA")")
     fi
+    # Panel integrity: a trusted agent comment for the primary head counts as delivered only with a findings block (it may be empty).
+    # Computed from the RAW agent bodies, never from bodies_at, so a synthesized block cannot mask a missing agent block.
+    # Per domain: a later (re-dispatched) comment with a complete block clears an earlier block-less one.
+    AGENTS_WITHOUT_BLOCK=$(printf '%s\n' "$CARRIER_BODIES_PRIMARY" | jq -rs '[.[] | select(type == "string")
+        | {d: (capture("^<!-- FORGE:REVIEW-AGENT:(?<d>[a-z-]+) -->").d // empty),
+           ok: (contains("<!-- REVIEW-FINDINGS-START -->") and contains("<!-- REVIEW-FINDINGS-END -->"))}]
+        | group_by(.d) | map(select(any(.[]; .ok) | not) | .[0].d) | .[]' 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//')
     # Match to the closing ` -->`, never `[^>]+`: a `>` or `->` inside a title must not drop the finding (#3897).
     FINDINGS=$(printf '%s\n' "$SOURCE_BODIES" | jq -r 'scan("<!-- FINDING:(.+?) -->") | .[0]' 2>/dev/null)
     # Fail closed when a raw marker did not parse: a lost finding must never read as a clean review.
@@ -488,7 +497,8 @@ EOF
     echo "FINDINGS_DROPPED_STALE=$N_STALE"
     echo "FINDINGS_PREEXISTING=$N_PREEXISTING"
     echo "NOTES_DEMOTED_NO_SCENARIO=$N_NO_SCENARIO"
-    [ "$N_EXTRACTED" -gt 0 ] || echo "CLEAN_STRUCTURED=true"   # 0 structured findings: the caller scans unstructured text, then skips to Phase 7 if still 0
+    echo "AGENTS_WITHOUT_BLOCK=$AGENTS_WITHOUT_BLOCK"   # undelivered agents (no findings block): re-dispatch once, else degraded panel; never read free text
+    { [ "$N_EXTRACTED" -gt 0 ] || [ -n "$AGENTS_WITHOUT_BLOCK" ]; } || echo "CLEAN_STRUCTURED=true"   # 0 structured findings and every agent delivered a block: skip to Phase 7
     exit 0
 }
 
@@ -1456,7 +1466,7 @@ do_integrity() {
     ACTUAL_AGENT_DOMAINS=""
     if [ -n "$TRUSTED_SCRIPT" ]; then
         ACTUAL_AGENT_DOMAINS=$(printf '%s' "$COMMENTS_JSON" \
-            | bash "$TRUSTED_SCRIPT" bodies "^<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->" 2>/dev/null \
+            | bash "$TRUSTED_SCRIPT" bodies "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->[\\s\\S]*<!-- REVIEW-FINDINGS-END -->)<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->" 2>/dev/null \
             | jq -rs '[.[] | scan("^<!-- FORGE:REVIEW-AGENT:([a-z-]+) -->") | .[0]] | unique | join(", ")' 2>/dev/null || echo "")   # unresolvable => empty => count 0 (degraded, fail closed)
     fi
     # No `|| echo 0` fallback after grep -c: it always prints a count (0 on no match) even though it exits 1, so a fallback would double-count to "0\n0".
