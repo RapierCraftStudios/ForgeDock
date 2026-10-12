@@ -17,13 +17,17 @@ export function cacheDir(repo, env = process.env) {
   return join(root, repo.replace("/", "_"));
 }
 
-/** { watermark: ISO string | null, items: { "<number>": item } } */
-export const emptyCache = () => ({ v: CACHE_VERSION, watermark: null, items: {} });
+/**
+ * { watermark: ISO string | null, coveredFrom: ISO string | null, items: { "<number>": item } }
+ * The cache covers activity in [coveredFrom, watermark]; coveredFrom null means "from the beginning". A cache written
+ * before the field existed loads with coveredFrom undefined (floor unknown), never as full coverage.
+ */
+export const emptyCache = () => ({ v: CACHE_VERSION, watermark: null, coveredFrom: null, items: {} });
 
 export function loadCache(repo, env = process.env) {
   try {
     const c = JSON.parse(readFileSync(join(cacheDir(repo, env), "cache.json"), "utf8"));
-    if (c && c.v === CACHE_VERSION && c.items && typeof c.items === "object") return { ...emptyCache(), ...c };
+    if (c && c.v === CACHE_VERSION && c.items && typeof c.items === "object") return { ...emptyCache(), ...c, coveredFrom: "coveredFrom" in c ? c.coveredFrom : undefined };
   } catch { /* missing or corrupt: refetch */ }
   return emptyCache();
 }

@@ -5,17 +5,24 @@
  * Reads labels and ONLY trusted `<!-- FORGE:TELEMETRY v1 -->` comments (same predicate as
  * scripts/trusted-comments.sh: an author_association in FORGE_TRAIL_TRUSTED_ASSOCIATIONS, a Bot, or a login in
  * FORGE_TRAIL_TRUSTED_LOGINS). Every `gh` call is argv-based (no shell). The `gh` runner is injectable for tests.
- * Fetching is incremental: only items updated after the cached watermark (minus a small overlap window) are re-read.
+ * Fetching is windowed and incremental: only items updated after the crawl start (the cached watermark minus a small
+ * overlap, or the requested `--since` bound) are listed, and comments come from the repo-wide `issues/comments?since=`
+ * endpoint (a few paginated calls) instead of one call per item.
  */
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { emptyCache, loadCache, saveCache } from "./cache.mjs";
 
 export const MARKER_RE = /^<!-- FORGE:TELEMETRY v1( part=(\d+))? -->/;
 const OWNER_REPO_RE = /^[\w.-]+\/[\w.-]+$/;
 export const isValidRepo = (r) => typeof r === "string" && OWNER_REPO_RE.test(r) && !r.split("/").some((p) => p === "." || p === "..");
 
-export function defaultGh(args) {
-  return execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120000, maxBuffer: 256 * 1024 * 1024 });
+const execFileAsync = promisify(execFile);
+
+/** Async `gh` runner (concurrency needs it). A test stub may stay synchronous: every call site awaits the result. */
+export async function defaultGh(args) {
+  const { stdout } = await execFileAsync("gh", args, { encoding: "utf8", timeout: 120000, maxBuffer: 256 * 1024 * 1024 });
+  return stdout;
 }
 
 /** `gh api --paginate` prints one JSON array per page; join them into one flat array. */
@@ -102,7 +109,6 @@ export function runsFromRecords(records) {
 export const gateEvents = (records) => records.filter((r) => r.event !== "phase_attempt" && r.event !== "run_terminal")
   .map((r) => ({ ...r, version: r.forge_version ?? null }));
 
-const CHECKPOINT_EVERY = 25;
 const PAGE_SIZE = 100;
 // The next incremental run re-reads this much before the persisted watermark (an overlap window), so a write that races a
 // crawl or a small clock skew is re-listed. Re-reads are idempotent: items are keyed by issue number.
@@ -125,7 +131,7 @@ const sinceParam = (ts) => encodeURIComponent(ts).replace(/%3A/g, ":");
  * the cursor (more than PAGE_SIZE items share one timestamp) is drained with `page=N` for that timestamp only.
  * Yields each page's unseen items sorted updated-asc.
  */
-function* listIssuePages(gh, repo, startSince) {
+async function* listIssuePages(gh, repo, startSince) {
   const base = ["state=all", "sort=updated", "direction=asc", `per_page=${PAGE_SIZE}`];
   const seen = new Set();
   const key = (it) => `${it.number}@${it.updated_at}`;
@@ -137,8 +143,8 @@ function* listIssuePages(gh, repo, startSince) {
   const maxTs = (page) => page.reduce((m, it) => (it?.updated_at && (!m || it.updated_at > m) ? it.updated_at : m), null);
   let cursor = startSince ?? null;
   for (let n = 0; n < MAX_LIST_REQUESTS; n++) {
-    const get = (extra = []) => parsePages(gh(["api", `repos/${repo}/issues?${[...base, ...(cursor ? [`since=${sinceParam(cursor)}`] : []), ...extra].join("&")}`]));
-    const page = get();
+    const get = async (extra = []) => parsePages(await gh(["api", `repos/${repo}/issues?${[...base, ...(cursor ? [`since=${sinceParam(cursor)}`] : []), ...extra].join("&")}`]));
+    const page = await get();
     const fresh = take(page);
     if (fresh.length > 0) yield fresh;
     if (page.length < PAGE_SIZE) return;
@@ -146,7 +152,7 @@ function* listIssuePages(gh, repo, startSince) {
     if (next && next !== cursor) { cursor = next; continue; }
     // No cursor progress on a full page: drain this timestamp by page number, then step past it.
     for (let p = 2; p < MAX_LIST_REQUESTS; p++) {
-      const more = get([`page=${p}`]);
+      const more = await get([`page=${p}`]);
       const freshMore = take(more);
       if (freshMore.length > 0) yield freshMore;
       if (more.length < PAGE_SIZE || freshMore.length === 0) break;
@@ -159,35 +165,137 @@ function* listIssuePages(gh, repo, startSince) {
 const meta = (it) => ({ number: it.number, isPr: Boolean(it.pull_request), createdAt: it.created_at ?? null, closedAt: it.closed_at ?? null,
   updatedAt: it.updated_at ?? null, labels: (it.labels ?? []).map((l) => (typeof l === "string" ? l : l.name)).filter(Boolean), authorType: it.user?.type ?? null });
 
+const CHECKPOINT_EVERY = 1000;
+const RATE_CHECK_EVERY = 50;
+const RATE_LOW = 200;
+const MAX_RATE_SLEEP_MS = 60 * 60 * 1000;
+const DEFAULT_CONCURRENCY = 6;
+const isoNow = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+
+/** Run `fn` over `list` with at most `limit` in flight; the first failure stops new work and is rethrown. */
+async function pool(list, limit, fn) {
+  let next = 0, failed = null;
+  const worker = async () => {
+    while (!failed && next < list.length) {
+      const item = list[next++];
+      try { await fn(item); } catch (err) { failed ??= err; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), list.length) }, worker));
+  if (failed) throw failed;
+}
+
+/** Best effort: when the core rate limit is nearly spent, sleep until it resets. Never throws. */
+async function waitForRate(gh, sleep, now) {
+  try {
+    const core = JSON.parse(await gh(["api", "rate_limit"]))?.resources?.core;
+    if (core && Number.isFinite(core.remaining) && core.remaining < RATE_LOW && Number.isFinite(core.reset)) {
+      await sleep(Math.min(Math.max(core.reset * 1000 - now() + 1000, 0), MAX_RATE_SLEEP_MS));
+    }
+  } catch { /* the limit check is advisory */ }
+}
+
 /**
- * Fetch (or incrementally refresh) the repo's issues, PRs and trusted telemetry records.
- * Returns { items, records, fetched, fromCache }. `refresh` ignores the cache; `useCache:false` never touches disk.
+ * Page the repo-wide comments endpoint (comments updated since `from`, id-ascending) and return the numbers of the issues
+ * and PRs that carry at least one trusted FORGE:TELEMETRY comment in that window. Items without one cost nothing more.
  */
-export function fetchGithubRecords({ repo, refresh = false, useCache = true, gh = defaultGh, env = process.env } = {}) {
+async function scanWindowComments(call, repo, from, env, onPage) {
+  const base = ["per_page=100", ...(from ? [`since=${sinceParam(from)}`] : [])];
+  const numbers = new Set();
+  for (let p = 1; p < MAX_LIST_REQUESTS; p++) {
+    const page = parsePages(await call(["api", `repos/${repo}/issues/comments?${[...base, `page=${p}`].join("&")}`]));
+    for (const c of page) {
+      if (!MARKER_RE.test(c?.body ?? "") || !isTrusted(c, env)) continue;
+      const m = /\/issues\/(\d+)$/.exec(c.issue_url ?? "");
+      if (m) numbers.add(Number(m[1]));
+    }
+    onPage(p);
+    if (page.length < PAGE_SIZE) break;
+  }
+  return numbers;
+}
+
+/**
+ * Fetch (or incrementally refresh) the repo's issues, PRs and trusted telemetry records. Async; `gh` may be sync or async.
+ * `since` (ISO) bounds the crawl: only items and comments updated on/after it are read, plus whatever the cache already
+ * holds. The cache records the lowest window start it covers (`coveredFrom`); a request that starts earlier re-crawls from
+ * its own start and then lowers the floor, so a later wider window is never under-reported.
+ * Returns { items, records, fetched, fromCache, apiCalls, coveredFrom }. `refresh` ignores the cache; `useCache:false`
+ * never touches disk. `onProgress({phase, done, total})` is called as the crawl moves (total is null when unknown).
+ */
+export async function fetchGithubRecords({ repo, since = null, refresh = false, useCache = true, gh = defaultGh, env = process.env,
+  onProgress = () => {}, concurrency = DEFAULT_CONCURRENCY, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = Date.now,
+  rateCheck = gh === defaultGh } = {}) {
   if (!isValidRepo(repo)) throw new Error(`invalid repo: ${repo}`);
   const cache = useCache && !refresh ? loadCache(repo, env) : emptyCache();
-  const startSince = cache.watermark ? shiftIso(cache.watermark, -WATERMARK_OVERLAP_MS) : null;
+  const start = since ?? null;
+  const hasCover = cache.watermark != null;
+  const floor = cache.coveredFrom;
+  // Does the cache already hold everything from `start` on? An unknown floor (a cache from before coveredFrom) is only
+  // trusted for a full-history request, never for a window.
+  const covers = hasCover && (floor === null || (floor === undefined ? start == null : start != null && Date.parse(start) >= Date.parse(floor)));
+  const crawlFrom = covers ? shiftIso(cache.watermark, -WATERMARK_OVERLAP_MS) : start;
+  const newFloor = covers ? (floor === undefined ? null : floor) : start;
+  const scanTs = isoNow(now());
+  let apiCalls = 0, guard = Promise.resolve();
+  const call = async (args) => {
+    if (rateCheck && apiCalls > 0 && apiCalls % RATE_CHECK_EVERY === 0) guard = guard.then(() => waitForRate(gh, sleep, now));
+    apiCalls++;
+    await guard;
+    return gh(args);
+  };
   const items = { ...cache.items };
   let watermark = cache.watermark;
   let fetched = 0;
-  // Checkpoint: the watermark is the newest updated_at actually processed, and the next run starts WATERMARK_OVERLAP_MS
-  // before it, so it is a safe resume point. A failure mid-crawl (rate limit, 5xx, a hook timeout) then keeps the
-  // progress instead of restarting at zero.
-  const checkpoint = () => { if (useCache) saveCache(repo, { ...emptyCache(), watermark, items }, env); };
+  let gapDone = false;
+  // Never persist a watermark past the moment the comment scan started: a comment posted after it bumps its issue's
+  // updated_at, and the next run must still start before that.
+  const cap = (w) => (w && w > scanTs ? scanTs : w);
+  // Telemetry issues whose records are not yet in `items` (the records are re-read in memory first). While any remain the
+  // watermark must not move past where the comment scan began, or a resumed run would never re-scan their comments.
+  const pending = new Set();
+  const scanResume = () => (crawlFrom ? shiftIso(crawlFrom, WATERMARK_OVERLAP_MS) : null);
+  // Checkpoint: while the crawl extends coverage forward (fresh cache, or the covered range's tail) the watermark is the
+  // newest updated_at processed. A gap crawl (window starts before the floor) leaves watermark and floor untouched until
+  // it finishes, so a failure never claims coverage it does not have.
+  const checkpoint = () => {
+    if (!useCache) return;
+    const extend = !hasCover || covers || gapDone;
+    saveCache(repo, { ...emptyCache(), watermark: extend ? (pending.size > 0 ? scanResume() : cap(watermark)) : cache.watermark, coveredFrom: extend ? newFloor : cache.coveredFrom, items }, env);
+  };
   try {
-    for (const page of listIssuePages(gh, repo, startSince)) for (const it of page) {
+    const telemetry = [...await scanWindowComments(call, repo, crawlFrom, env, (p) => onProgress({ phase: "comments", done: p, total: null }))];
+    // A telemetry run spans several comment parts and the window holds only the touched ones, so each such issue's full
+    // comment list is re-read once (bounded pool) and replaces its records.
+    const recordsOf = new Map();
+    for (const n of telemetry) pending.add(n);
+    let done = 0;
+    await pool(telemetry, concurrency, async (n) => {
+      recordsOf.set(n, parseTelemetryComments(parsePages(await call(["api", "--paginate", `repos/${repo}/issues/${n}/comments`])), env));
+      fetched++;
+      onProgress({ phase: "telemetry", done: ++done, total: telemetry.length });
+    });
+    const listed = new Set();
+    let processed = 0;
+    for await (const page of listIssuePages(call, repo, crawlFrom)) for (const it of page) {
       const m = meta(it);
-      let records = items[it.number]?.records ?? [];
-      // A telemetry comment is edited in place (which may not bump the issue's updated_at), so every listed item with
-      // comments is re-read rather than trusting a cached copy.
-      if ((it.comments ?? 0) > 0) {
-        records = parseTelemetryComments(parsePages(gh(["api", "--paginate", `repos/${repo}/issues/${it.number}/comments`])), env);
-        fetched++;
-      }
-      items[it.number] = { ...m, records };
+      items[it.number] = { ...m, records: recordsOf.get(it.number) ?? items[it.number]?.records ?? [] };
+      listed.add(it.number);
+      pending.delete(it.number);
       if (m.updatedAt && (!watermark || m.updatedAt > watermark)) watermark = m.updatedAt;
-      if (fetched > 0 && fetched % CHECKPOINT_EVERY === 0 && (it.comments ?? 0) > 0) checkpoint();
+      if (++processed % CHECKPOINT_EVERY === 0) checkpoint();
+      if (processed % PAGE_SIZE === 0) onProgress({ phase: "issues", done: processed, total: null });
     }
+    onProgress({ phase: "issues", done: processed, total: null });
+    // A telemetry comment edited in place does not bump its issue's updated_at, so such an issue can be missing from the
+    // listing: update its cached records, and read its metadata once if the cache has never seen it.
+    await pool(telemetry.filter((n) => !listed.has(n)), concurrency, async (n) => {
+      if (items[n]) { items[n] = { ...items[n], records: recordsOf.get(n) }; pending.delete(n); return; }
+      const [it] = parsePages(await call(["api", `repos/${repo}/issues/${n}`]));
+      if (it && Number.isInteger(it.number)) items[n] = { ...meta(it), records: recordsOf.get(n) };
+      pending.delete(n);
+    });
+    gapDone = true;
   } catch (err) {
     checkpoint();
     throw err;
@@ -198,7 +306,7 @@ export function fetchGithubRecords({ repo, refresh = false, useCache = true, gh 
   for (const it of Object.values(items)) for (const r of it.records ?? []) {
     if (!seen.has(r.eid)) { seen.add(r.eid); records.push(r); }
   }
-  return { items: Object.values(items), records, fetched, fromCache: cache.watermark != null };
+  return { items: Object.values(items), records, fetched, fromCache: hasCover, apiCalls, coveredFrom: newFloor };
 }
 
 /** Aggregate-model inputs for one repo from a fetch result. */

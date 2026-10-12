@@ -604,7 +604,17 @@ The block is delimited by `<!-- FORGE:BLAST_RADIUS:BEGIN -->` and `<!-- FORGE:BL
 
 ---
 
-## Phase A2.9: Consumer Sweep Intake *(advisory: skip silently when no existing identifier changes; never blocks)* <!-- Added: forge#3970 -->
+## Phase A2.9: Append-Only Registry Check *(skip when no planned file is a hand-maintained list)* <!-- Added: forge#3969 -->
+
+Two PRs appending at the same spot of a shared list (test paths, cron targets, workflow steps) conflict textually although every line is independent, and each conflict costs a base-sync remediation round. For each planned file that is an append-only registry (one independent entry per line, edited by many PRs):
+
+1. Confirm with `bash <scripts>/detect-append-registries.sh --detect` (history ranking) and `--check-union <path>`. Resolve `<scripts>` through the trusted script resolution (plugin root, `FORGE_ROOT`, `FORGEDOCK_HOME`), never `$PWD`. The helper rejects JSON, YAML, TOML, lockfiles and Markdown.
+2. Plan one of: (a) a `.gitattributes` `merge=union` entry, only when `--check-union` prints `UNION SAFE` and every line is independent (no ordering, uniqueness or structure); or (b) converting the list to glob discovery where its consumer supports it.
+3. Name the registry and the chosen option in `### Affected Paths`. Never plan union for a file with ordering, uniqueness or structure: that file is edited at the end of the list, and the pre-handoff base sync resolves its conflicts.
+
+---
+
+## Phase A2.10: Consumer Sweep Intake *(advisory: skip silently when no existing identifier changes; never blocks)* <!-- Added: forge#3970 -->
 
 No diff exists yet, so sweep by name. List the existing identifiers the plan will change, rename or re-type (functions, classes, constants, config or context keys, CLI flags, env vars, paths, literal hashes or versions), take them from the investigation's affected files, and run the script in identifier mode. Validate (Phase V4.6) later re-runs the same sweep on the final diff and gates it.
 
@@ -875,7 +885,7 @@ B4    → [THIS MODULE] Architecture Planning (FORGE:ARCHITECT comment)
           Phase A2.5: Pipeline Phase-Dependency Check
           Phase A2.7: Pattern Sweep Intake (review-finding issues only)
           Phase A2.8: Blast-Radius Manifest (enforced by validate V4.5, passed to review-pr)
-          Phase A2.9: Consumer Sweep Intake (consumer-sweep.sh --ident; gated by validate V4.6)
+          Phase A2.10: Consumer Sweep Intake (consumer-sweep.sh --ident; gated by validate V4.6)
           Phase A3: Consistency Rules
           Phase A4: Sequence the Implementation
           Phase A5: Risk Assessment

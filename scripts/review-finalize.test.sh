@@ -184,6 +184,52 @@ run "$GOOD" extract; rc_is "no trusted bodies" "$RC" 3; has "no trusted bodies" 
 reset; run "$NOTRUST" extract; rc_is "trust script missing" "$RC" 3; has "trust script missing" "scripts/trusted-comments.sh unresolvable or PR comments unreadable; refusing to read clean (fail closed)"
 reset; run "$GOOD" extract; rc_is "comments unreadable" "$RC" 3; has "comments unreadable" "refusing to read clean"
 
+# a findings summary list above the per-finding sections must not hide the scenario (summary bullets never start the section)
+reset
+cm MEMBER User "$(agent_body bug-hunter "$SHA" 'Findings summary:
+- BUG-1: first problem
+- BUG-2: second problem
+- BUG-3: third problem
+
+### BUG-1 first problem
+**Failure scenario**: one breaks
+### BUG-2 second problem
+**Failure scenario**: two breaks
+### BUG-3 third problem
+**Fix efficacy**: n/a
+' '<!-- FINDING:BUG-1|CONFIRMED|MEDIUM|a.py:2|First problem alpha -->
+<!-- FINDING:BUG-2|CONFIRMED|MEDIUM|b.py:10|Second problem bravo -->
+<!-- FINDING:BUG-3|CONFIRMED|MEDIUM|c.py:18|Third problem charlie -->')"
+flush; run "$GOOD" extract; rc_is "summary list" "$RC" 0
+want "summary: first id keeps its scenario" '[.findings[] | select(.id == "BUG-1") | .scenario] | join(",")' findings.json "present"
+want "summary: middle id keeps its scenario" '[.findings[] | select(.id == "BUG-2") | .scenario] | join(",")' findings.json "present"
+want "summary: a section without a scenario stays absent" '[.findings[] | select(.id == "BUG-3") | .scenario] | join(",")' findings.json "absent"
+
+# the same id repeated across two agents binds each finding to its own body: agent and scenario
+reset
+cm MEMBER User "$(agent_body security "$SHA" '### BUG-1 alpha
+**Failure scenario**: alpha scenario
+' '<!-- FINDING:BUG-1|CONFIRMED|MEDIUM|a.py:2|Alpha problem in security -->')"
+cm MEMBER User "$(agent_body billing "$SHA" '### BUG-1 omega
+no scenario written here
+' '<!-- FINDING:BUG-1|CONFIRMED|MEDIUM|d.py:15|Omega problem in billing -->')"
+flush; run "$GOOD" extract; rc_is "repeated id" "$RC" 0
+want "repeated id: first binds its own agent" '[.findings[] | select(.title | test("Alpha")) | .agent] | join(",")' findings.json "security"
+want "repeated id: first keeps its scenario" '[.findings[] | select(.title | test("Alpha")) | .scenario] | join(",")' findings.json "present"
+want "repeated id: second binds its own agent" '[.findings[] | select(.title | test("Omega")) | .agent] | join(",")' findings.json "billing"
+want "repeated id: second does not borrow the first scenario" '[.findings[] | select(.title | test("Omega")) | .scenario] | join(",")' findings.json "absent"
+
+# the identical marker line repeated across two heads (DELTA) binds each occurrence to its own head's body
+reset; mkctx 1 DELTA "$OLD_SHA"
+cm MEMBER User "$(agent_body security "$SHA" '### BUG-1 same
+no scenario at the current head
+' '<!-- FINDING:BUG-1|CONFIRMED|MEDIUM|a.py:2|Same marker both heads -->')"
+cm MEMBER User "$(agent_body billing "$OLD_SHA" '### BUG-1 same
+**Failure scenario**: earlier head scenario
+' '<!-- FINDING:BUG-1|CONFIRMED|MEDIUM|a.py:2|Same marker both heads -->')"
+flush; run "$GOOD" extract
+want "repeated across heads: both occurrences extracted" '.counts.findings_extracted' findings.json "2"
+
 # ======================= extract: 6B dedup =======================
 reset
 cm MEMBER User "$(agent_body security "$SHA" '### A-1 x
