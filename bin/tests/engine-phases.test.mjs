@@ -1609,3 +1609,91 @@ describe("build investigation exit (forge#3534)", () => {
     assert.ok(!TERMINAL_REASONS.includes("investigation"));
   });
 });
+
+// forge#3931: blocking-ISSUE review handoff and head-aware remediation staleness.
+describe("forge#3931 review blocking-ISSUE disposition and remediation head staleness", () => {
+  const review = PHASES.find((p) => p.id === "review");
+  const remediate = PHASES.find((p) => p.id === "remediate");
+  const HEAD_A = "a".repeat(40), HEAD_B = "b".repeat(40);
+  const disposition = (sha, filed) =>
+    `<!-- FORGE:NOTE_DISPOSITION: notes_fixed=0 notes_listed=0 findings_filed=${filed} reviewed_sha=${sha} -->\n- 1 f.js:1 [HIGH] x: filed`;
+  // PR 7 is open at HEAD_A; `prComments` are the comments on the PR (read through the issue-comments API).
+  const mkIo = ({ prComments, readFails = false }) => ({
+    gh: async (args) => {
+      const cmd = args.join(" ");
+      if (cmd.startsWith("pr list")) return JSON.stringify([{ number: 7 }]);
+      if (cmd.startsWith("pr view")) return JSON.stringify({ number: 7, state: "OPEN", mergedAt: null, labels: [], headRefOid: HEAD_A });
+      if (cmd.startsWith("issue view")) return JSON.stringify({ state: "OPEN", labels: [] });
+      if (cmd.includes("/issues/7/comments")) { if (readFails) throw new Error("gh down"); return jsonLines(prComments); }
+      throw new Error(`unexpected gh call: ${cmd}`);
+    },
+    git: async () => "0",
+  });
+  const st = { ...base, branch: "fix/x-42" };
+
+  it("trusted disposition with filed ISSUE at the unchanged head -> coded remediate handoff", async () => {
+    const o = await review.detectOutcome(st, mkIo({ prComments: [trusted(disposition(HEAD_A, 2))] }));
+    assert.equal(o.status, "blocked");
+    assert.equal(o.handoff, true);
+    assert.equal(o.code, "review.blocking_issue");
+    assert.equal(o.outputs.pr, 7);
+  });
+
+  it("disposition for an older head, zero filed, untrusted author, or unreadable PR -> coded pr_open, never uncoded", async () => {
+    const cases = [
+      mkIo({ prComments: [trusted(disposition(HEAD_B, 2))] }),
+      mkIo({ prComments: [trusted(disposition(HEAD_A, 0))] }),
+      mkIo({ prComments: [trusted(disposition(HEAD_A, 2), { assoc: "NONE" })] }),
+      mkIo({ prComments: [], readFails: true }),
+    ];
+    for (const io of cases) {
+      const o = await review.detectOutcome(st, io);
+      assert.equal(o.status, "failed");
+      assert.notEqual(o.handoff, true);
+      assert.equal(o.code, "review.pr_open");
+    }
+  });
+
+  it("an explicit REVIEW_RESULT status keeps the failed result but now carries a code", async () => {
+    const o = await review.detectOutcome(st, mkIo({ prComments: [] }), { text: "REVIEW_RESULT:\n  status: BLOCKED\n  blocker: x\n" });
+    assert.equal(o.status, "failed");
+    assert.equal(o.code, "review.pr_open");
+  });
+
+  const remBody = (outcome, head) =>
+    `<!-- FORGE:REMEDIATION -->\n**Re-gate outcome**: ${outcome}\n**Head**: ${head}\n<!-- FORGE:REMEDIATION:COMPLETE -->`;
+  const remIo = ({ comments, head = HEAD_B, prFails = false }) => ({
+    gh: async (args) => {
+      const cmd = args.join(" ");
+      if (cmd.includes("/comments")) return jsonLines(comments);
+      if (cmd.startsWith("pr view")) { if (prFails) throw new Error("gh down"); return JSON.stringify({ state: "OPEN", mergedAt: null, headRefOid: head }); }
+      throw new Error(`unexpected gh call: ${cmd}`);
+    },
+    git: async () => "0",
+  });
+  const withPr = { ...base, pr: 7 };
+
+  it("RE-ESCALATED trail recorded for an older head is not replayed", async () => {
+    const o = await remediate.detectOutcome(withPr, remIo({ comments: [trusted(remBody("RE-ESCALATED", HEAD_A))] }));
+    assert.equal(o.status, "failed");
+    assert.equal(o.code, "remediate.no_marker");
+  });
+
+  it("RE-ESCALATED trail at the live head, unknown head, or unreadable PR keeps today's outcome (fail closed)", async () => {
+    for (const io of [
+      remIo({ comments: [trusted(remBody("RE-ESCALATED", HEAD_B))] }),
+      remIo({ comments: [trusted(remBody("RE-ESCALATED", "unknown"))] }),
+      remIo({ comments: [trusted(remBody("RE-ESCALATED", HEAD_A))], prFails: true }),
+    ]) {
+      const o = await remediate.detectOutcome(withPr, io);
+      assert.equal(o.status, "committed");
+      assert.equal(o.code, "remediate.re_escalated");
+    }
+  });
+
+  it("an untrusted trail cannot mark the head stale", async () => {
+    const { remediationHeadStale } = await import("../engine/phases.mjs");
+    assert.equal(await remediationHeadStale(withPr, remIo({ comments: [trusted(remBody("RE-ESCALATED", HEAD_A), { assoc: "NONE" })] })), false);
+    assert.equal(await remediationHeadStale(withPr, remIo({ comments: [trusted(remBody("RE-ESCALATED", HEAD_A))] })), true);
+  });
+});

@@ -3721,3 +3721,110 @@ describe("runIssue — forge#3534: divergence guard exempts an investigation exi
     }
   });
 });
+
+describe("runIssue — forge#3931: cycle-aware hydration and head-aware --retry", () => {
+  const cycleComment = (n, opts) => trusted(`<!-- FORGE:CYCLE: ${n} -->`, opts);
+  const withExtraComments = (io, w, extra) => {
+    const gh = io.gh;
+    io.gh = async (args) => (args[0] === "api" && args.join(" ").includes("/comments")
+      ? [extra, asComments(w.markers)].filter(Boolean).map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join("\n")
+      : gh(args));
+  };
+  const staleIndex = { v: 9, run: "r_42_staging", issue: 42, lane: "staging",
+    committed: ["investigate", "build", "review"], phase: null, branch: "fix/real-branch-42", pr: 7,
+    terminal: true, terminalReason: "needs-human", lease: null };
+  const script = (w, ran) => async ({ commandName }) => {
+    ran.push(commandName);
+    if (commandName === "work-on/investigate") w.markers += investigationComment("COMPLETE");
+    if (commandName === "work-on/build") { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; }
+    if (commandName === "work-on/review") { w.pr = 7; w.prMerged = true; }
+    if (commandName === "work-on/close") { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); }
+    return { status: "complete" };
+  };
+
+  it("hydrate with a trusted FORGE:CYCLE resets cycle-scoped phases and builds the new cycle", async () => {
+    const { w, io } = fakeWorld();
+    w.body = serializeState(staleIndex);
+    withExtraComments(io, w, cycleComment(1));
+    const ran = [];
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner: script(w, ran), now: () => 1000, maxAttempts: 1 });
+    assert.equal(readLog(dir, 42).filter((e) => e.event === "RUN_NEXT_CYCLE").length, 1);
+    assert.ok(ran.includes("work-on/build"), "cycle 2 builds instead of ending needs-human");
+    assert.equal(res.terminalReason, "merged");
+  });
+
+  it("an untrusted FORGE:CYCLE comment does not reset the hydrated state", async () => {
+    const { w, io } = fakeWorld();
+    w.body = serializeState(staleIndex);
+    withExtraComments(io, w, cycleComment(1, { assoc: "NONE" }));
+    const ran = [];
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner: script(w, ran), now: () => 1000, maxAttempts: 1 });
+    assert.equal(readLog(dir, 42).filter((e) => e.event === "RUN_NEXT_CYCLE").length, 0);
+    assert.equal(ran.length, 0);
+    assert.equal(res.terminalReason, "needs-human");
+  });
+
+  it("no FORGE:CYCLE on the issue: hydrate does not reset", async () => {
+    const { w, io } = fakeWorld();
+    w.body = serializeState(staleIndex);
+    const ran = [];
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner: script(w, ran), now: () => 1000, maxAttempts: 1 });
+    assert.equal(readLog(dir, 42).filter((e) => e.event === "RUN_NEXT_CYCLE").length, 0);
+    assert.equal(res.terminalReason, "needs-human");
+  });
+
+  it("an unreadable comment trail fails closed: no reset, terminal kept", async () => {
+    const { w, io } = fakeWorld();
+    w.body = serializeState(staleIndex);
+    const gh = io.gh;
+    io.gh = async (args) => { if (args[0] === "api" && args.join(" ").includes("/comments")) throw new Error("gh down"); return gh(args); };
+    const ran = [];
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner: script(w, ran), now: () => 1000, maxAttempts: 1 });
+    assert.equal(readLog(dir, 42).filter((e) => e.event === "RUN_NEXT_CYCLE").length, 0);
+    assert.equal(res.terminalReason, "needs-human");
+  });
+
+  describe("--retry after a re-escalated remediation", () => {
+    const HEAD_OLD = "a".repeat(40), HEAD_NEW = "b".repeat(40);
+    async function world(liveHead) {
+      const { w, io } = fakeWorld();
+      const gh = io.gh;
+      io.gh = async (args) => {
+        const out = await gh(args);
+        if (args[0] === "pr" && args[1] === "view") return JSON.stringify({ ...JSON.parse(out), headRefOid: liveHead() });
+        return out;
+      };
+      const first = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io,
+        runner: async ({ commandName }) => {
+          if (commandName === "work-on/investigate") w.markers += investigationComment("COMPLETE");
+          if (commandName === "work-on/build") { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; }
+          if (commandName === "work-on/review") { w.pr = 7; w.labels.push("needs-human"); }
+          if (commandName === "work-on/remediate")
+            w.markers += SEP + `<!-- FORGE:REMEDIATION -->\n**Re-gate outcome**: RE-ESCALATED\n**Head**: ${HEAD_OLD}\n<!-- FORGE:REMEDIATION:COMPLETE -->`;
+          return { status: "complete" };
+        }, now: () => 1000, maxAttempts: 1 });
+      assert.equal(first.terminalReason, "needs-human");
+      w.labels = w.labels.filter((l) => l !== "needs-human");
+      return { w, io };
+    }
+
+    it("PR head moved since the trail: review re-runs at the new head instead of replaying RE-ESCALATED", async () => {
+      let head = HEAD_OLD;
+      const { w, io } = await world(() => head);
+      head = HEAD_NEW;
+      const ran = [];
+      const res = await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io, runner: script(w, ran), now: () => 2000, maxAttempts: 1, retry: true });
+      assert.equal(ran[0], "work-on/review");
+      assert.ok(!ran.includes("work-on/remediate"));
+      assert.equal(res.terminalReason, "merged");
+    });
+
+    it("PR head unchanged: --retry still re-runs remediate (existing behaviour)", async () => {
+      const { w, io } = await world(() => HEAD_OLD);
+      const ran = [];
+      await runIssue({ issue: 42, dir, agentId: "a2", lane: "staging", io,
+        runner: async ({ commandName }) => { ran.push(commandName); return { status: "complete" }; }, now: () => 2000, maxAttempts: 1, retry: true });
+      assert.equal(ran[0], "work-on/remediate");
+    });
+  });
+});

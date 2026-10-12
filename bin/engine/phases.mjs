@@ -165,13 +165,21 @@ export function sliceToCurrentCycle(comments) {
  * GitHub already carries markers. Errors propagate (caller fails closed).
  */
 export async function nextCycleNumber(issue, localCycles, io) {
+  return Math.max(await newestCycle(issue, io), localCycles) + 1;
+}
+/**
+ * Highest trusted FORGE:CYCLE number on the issue (0 when none). Reads only
+ * trusted comments via issueMarkers/cycleNumber; errors propagate so the caller
+ * fails closed (forge#3931: hydration must not reset on an unreadable trail).
+ */
+export async function newestCycle(issue, io) {
   const { comments } = await issueMarkers(issue, io);
   let highest = 0;
   for (const body of comments) {
     const c = cycleNumber(body);
     if (c !== null && c > highest) highest = c;
   }
-  return Math.max(highest, localCycles) + 1;
+  return highest;
 }
 /**
  * Idempotently publish the FORGE:CYCLE marker for cycle `n`: skipped when the
@@ -794,11 +802,14 @@ export const PHASES = [
       // An explicit REVIEW_RESULT status is authoritative: BLOCKED/COMPLETE exits
       // (phase trail, ci gate, base conflict, merge refusal) also label the issue
       // needs-human but are NOT remediation handoffs, so skip the label fallback.
-      if (rr && rr.status) return { status: "failed", detail: "PR open, not merged", retryable: false, handoff: false, outputs };
+      if (rr && rr.status) return { status: "failed", detail: "PR open, not merged", retryable: false, handoff: false, outputs, code: OC.REVIEW_PR_OPEN };
       let snap = null;
       try { snap = await issueSnapshot(state.issue, io); } catch { snap = null; }
       if (snap?.ok && (snap.labels.includes("needs-human") || snap.labels.includes("workflow:remediating"))) return escalated;
-      return { status: "failed", detail: "PR open, not merged", retryable: false, outputs };
+      // forge#3931: an idempotent re-review at an unchanged head posts nothing new, so the only evidence of a
+      // blocking finding is the trusted FORGE:NOTE_DISPOSITION already on the PR for this head. Hand off to remediate.
+      if (await blockingDispositionAtHead(pr, io)) return { ...escalated, detail: "blocking ISSUE finding at unchanged head", code: OC.REVIEW_BLOCKING_ISSUE };
+      return { status: "failed", detail: "PR open, not merged", retryable: false, outputs, code: OC.REVIEW_PR_OPEN };
     },
   },
   {
@@ -961,6 +972,9 @@ export const PHASES = [
           return { status: "committed", terminalReason: "awaiting-merge", outputs: { reGateOutcome } };
         case "RE-ESCALATED":
         case "UNFIXABLE":
+          // forge#3931: a trail recorded against an older PR head must not be replayed as this run's outcome.
+          if (await remediationHeadStale(state, io))
+            return { status: "failed", code: OC.REMEDIATE_NO_MARKER, detail: `stale ${completion} trail: PR head moved since it was recorded` };
           // Both leave the issue at needs-human (a fresh escalation, or a
           // policy judgment call respectively) — reuse the existing
           // "needs-human" terminal reason rather than inventing two more,
@@ -1148,16 +1162,53 @@ async function mergedPrForBranch(branch, lane, io) {
     return hit ? { number: hit.number } : null;
   } catch { return null; }
 }
+/**
+ * forge#3931: true when the newest trusted FORGE:NOTE_DISPOSITION on the PR covers the live head
+ * (`reviewed_sha`) and filed at least one ISSUE (`findings_filed` > 0). Trusted comments only; an
+ * unreadable PR, missing head or unparsable record returns false (fail closed: no handoff).
+ */
+async function blockingDispositionAtHead(pr, io) {
+  if (!pr?.head) return false;
+  try {
+    const { comments } = await issueMarkers(pr.number, io);
+    const recs = comments.filter((b) => /^\s*<!--\s*FORGE:NOTE_DISPOSITION:/.test(b));
+    if (!recs.length) return false;
+    const first = recs[recs.length - 1].split("\n", 1)[0];
+    const sha = /\breviewed_sha=([0-9a-f]{40,64})\b/.exec(first)?.[1];
+    const filed = /\bfindings_filed=(\d+)\b/.exec(first)?.[1];
+    return sha === pr.head && Number(filed) > 0;
+  } catch { return false; }
+}
 async function prStatusFor(state, io) {
   const n = await openPrFor(state, io);
   if (!n) return null;
-  const out = await io.gh(["pr", "view", String(n), "--json", "number,state,labels,mergedAt"]);
+  const out = await io.gh(["pr", "view", String(n), "--json", "number,state,labels,mergedAt,headRefOid"]);
   let j;
   try { j = JSON.parse(out || "{}"); } catch { return null; }
   const labels = (j.labels || []).map((l) => l.name || l);
   return { number: j.number, merged: !!j.mergedAt || j.state === "MERGED",
            needsHuman: labels.includes("needs-human"),
-           remediating: labels.includes("workflow:remediating") };
+           remediating: labels.includes("workflow:remediating"),
+           head: typeof j.headRefOid === "string" && SHA_RE.test(j.headRefOid) ? j.headRefOid : null };
+}
+const SHA_RE = /^[0-9a-f]{40,64}$/;
+
+/**
+ * forge#3931: true only when the newest trusted FORGE:REMEDIATION:COMPLETE names a
+ * `**Head**:` SHA that differs from the live PR head, i.e. the trail was produced for
+ * an older head. Any unreadable input (no pr, no trail, `unknown`/missing head, gh or
+ * parse failure) returns false so callers keep today's behaviour (fail closed).
+ */
+export async function remediationHeadStale(state, io) {
+  if (state?.pr == null) return false;
+  try {
+    const { comments } = await issueMarkers(state.issue, io);
+    const latest = latestMarked(comments, PHASE_MARKERS.remediate.header, PHASE_MARKERS.remediate.completionMarker);
+    const recorded = latest === null ? null : /\*\*Head\*\*:[ \t]*([0-9a-f]{40,64})\b/.exec(latest)?.[1] ?? null;
+    if (!recorded) return false;
+    const j = JSON.parse((await io.gh(["pr", "view", String(state.pr), "--json", "headRefOid"])) || "{}");
+    return typeof j.headRefOid === "string" && SHA_RE.test(j.headRefOid) && j.headRefOid !== recorded;
+  } catch { return false; }
 }
 
 /** The engine's transition function: first uncommitted phase whose gate holds. */

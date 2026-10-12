@@ -18,6 +18,8 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 | `review.changes_requested` | Review asked for an in-PR fix and handed off to remediate | review | `REVIEW_RESULT` `status: NEXT`, `next: remediate` |
 | `review.escalated` | Review escalated the PR to a human or remediation | review | PR/issue carries `needs-human` or `workflow:remediating` |
 | `review.rereview_skipped` | Re-review was skipped | reserved | No structured evidence source yet |
+| `review.blocking_issue` | Review left the PR open at an unchanged head with a filed blocking ISSUE and handed off to remediate | review | Trusted `FORGE:NOTE_DISPOSITION` on the PR with `findings_filed` > 0 and `reviewed_sha` equal to the live head |
+| `review.pr_open` | Review ended with the PR open and unmerged and no handoff signal | review | Live PR open, no `REVIEW_RESULT` remediate handoff, no `needs-human`/`workflow:remediating` label, no blocking disposition |
 | `build.acceptance_failed` | Newest acceptance gate marker is blocked | build | `FORGE:ACCEPTANCE_GATE:FAILED`/`:BLOCKED` or `FORGE:BUILD_BLOCKED` |
 | `build.acceptance_malformed` | Acceptance spec was malformed | reserved | Indistinguishable from `build.acceptance_failed` by sentinel alone |
 | `build.size_over_gate` | Retired (forge#3862): the old size gate routed a finished build to decompose; never emitted now, kept so historic runs still parse | reserved | A finished build is never routed to decompose |
