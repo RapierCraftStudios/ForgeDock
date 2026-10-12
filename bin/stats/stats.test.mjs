@@ -202,7 +202,7 @@ describe("cache", () => {
     const b = fakeGh();
     const second = fetchGithubRecords({ repo: "o/r", gh: b.gh, env });
     assert.equal(second.fromCache, true);
-    assert.match(b.calls[0], /since=2026-10-06T13:00:00Z/);
+    assert.match(b.calls[0], /since=2026-10-06T12:55:00Z/); // watermark minus the 5 minute overlap window
     assert.deepEqual(second.records.map((r) => r.eid).sort(), first.records.map((r) => r.eid).sort());
     // corrupt cache -> treated as empty -> same result from a full fetch
     writeFileSync(join(cacheDir("o/r", env), "cache.json"), "{not json");
@@ -241,6 +241,47 @@ describe("cache", () => {
     assert.equal(resumed.fromCache, true);
     assert.match(b.calls[0], /since=/);
     assert.deepEqual(resumed.records.map((r) => r.eid).sort(), full.records.map((r) => r.eid).sort());
+  });
+  it("never skips an item updated mid-crawl (keyset crawl, not page-number pagination)", () => {
+    const env = { ...ENV, FORGE_STATS_CACHE_DIR: join(td, "cache-midcrawl") };
+    const ts = (n) => new Date(Date.UTC(2026, 9, 1) + n * 60000).toISOString().replace(/\.\d{3}Z$/, "Z");
+    const store = Array.from({ length: 250 }, (_, i) => ({ number: i + 1, updated_at: ts(i + 1), created_at: ts(0), state: "open", comments: 0, labels: [], user: { type: "Bot" } }));
+    let listCalls = 0;
+    let maxUpdated = 250;
+    // Page-aware fake of the real API: asc by updated_at, honours since (inclusive), per_page and page. After the first
+    // listing call an already-served item is bumped, which moves it to the end of the ordering.
+    const gh = (args) => {
+      const path = args.find((a) => a.startsWith("repos/"));
+      const q = new URLSearchParams(path.split("?")[1]);
+      listCalls++;
+      const since = q.get("since");
+      const sorted = store.filter((i) => !since || i.updated_at >= since).sort((a, b) => a.updated_at.localeCompare(b.updated_at) || a.number - b.number);
+      const per = Number(q.get("per_page")), page = Number(q.get("page") ?? 1);
+      const out = JSON.stringify(sorted.slice((page - 1) * per, page * per));
+      if (listCalls === 1) store[4].updated_at = ts(++maxUpdated);
+      return out;
+    };
+    const first = fetchGithubRecords({ repo: "o/r", gh, env });
+    assert.equal(first.items.length, 250, "every item is cached after the crawl, none skipped by the shift");
+    assert.equal(new Set(first.items.map((i) => i.number)).size, 250);
+    // The bumped item moved past the crawl cursor, so the next incremental run (and its overlap window) still sees it.
+    store[9].updated_at = ts(++maxUpdated); // another item updated after the first run
+    const second = fetchGithubRecords({ repo: "o/r", gh, env });
+    assert.equal(second.fromCache, true);
+    assert.equal(second.items.length, 250);
+    assert.equal(second.items.find((i) => i.number === 10).updatedAt, store[9].updated_at);
+    assert.equal(second.items.find((i) => i.number === 5).updatedAt, store[4].updated_at);
+  });
+  it("terminates and drains a full page whose items all share one updated_at", () => {
+    const env = { ...ENV, FORGE_STATS_CACHE_DIR: join(td, "cache-sameTs") };
+    const store = Array.from({ length: 230 }, (_, i) => ({ number: i + 1, updated_at: "2026-10-02T00:00:00Z", created_at: "2026-10-01T00:00:00Z", comments: 0, labels: [], user: { type: "Bot" } }));
+    const gh = (args) => {
+      const q = new URLSearchParams(args.find((a) => a.startsWith("repos/")).split("?")[1]);
+      const per = Number(q.get("per_page")), page = Number(q.get("page") ?? 1);
+      const since = q.get("since");
+      return JSON.stringify(store.filter((i) => !since || i.updated_at >= since).slice((page - 1) * per, page * per));
+    };
+    assert.equal(fetchGithubRecords({ repo: "o/r", gh, env }).items.length, 230);
   });
   it("rejects an unsafe repo before any gh call", () => {
     const { gh, calls } = fakeGh();
