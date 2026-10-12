@@ -19,6 +19,8 @@ on:
       - 'scripts/check-branch-ancestry.test.sh'
       - 'scripts/check-blast-radius.sh'
       - 'scripts/check-blast-radius.test.sh'
+      - 'scripts/consumer-sweep.sh'
+      - 'scripts/consumer-sweep.test.sh'
       - 'scripts/spec-no-worktree-script.test.sh'
       - 'scripts/review-pr-arguments.test.sh'
       - 'scripts/review-pr-domain-map.test.sh'
@@ -69,6 +71,8 @@ on:
       - 'scripts/check-branch-ancestry.test.sh'
       - 'scripts/check-blast-radius.sh'
       - 'scripts/check-blast-radius.test.sh'
+      - 'scripts/consumer-sweep.sh'
+      - 'scripts/consumer-sweep.test.sh'
       - 'scripts/spec-no-worktree-script.test.sh'
       - 'scripts/review-pr-arguments.test.sh'
       - 'scripts/review-pr-domain-map.test.sh'
@@ -353,6 +357,7 @@ jobs:
           bash scripts/check-spec-bash.test.sh
           bash scripts/check-branch-ancestry.test.sh
           bash scripts/check-blast-radius.test.sh
+          bash scripts/consumer-sweep.test.sh
           bash scripts/spec-no-worktree-script.test.sh
           bash scripts/review-pr-arguments.test.sh
           bash scripts/review-pr-domain-map.test.sh
