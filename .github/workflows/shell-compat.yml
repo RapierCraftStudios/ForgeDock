@@ -149,6 +149,8 @@ jobs:
 
       - name: Run classify-test-run.test.sh
         run: bash scripts/classify-test-run.test.sh
+      - name: Run acceptance-red-green.test.sh
+        run: bash scripts/acceptance-red-green.test.sh
       - name: Run spawn-depth-check.test.sh
         run: bash scripts/spawn-depth-check.test.sh
       - name: Run extract-affected-files.test.sh
