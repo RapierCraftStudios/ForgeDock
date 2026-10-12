@@ -265,6 +265,12 @@ expect_pass "head-tree matches the PASS marker's Tree" "$(ht h1 "$QG_T1")" --hea
 expect_fail "PASS recorded for an earlier tree does not satisfy the gate" "$(ht h2 "$QG_T2")" QUALITY_GATE --head-tree "$T1"
 expect_fail "PASS without a Tree line does not satisfy a bound gate" "$(ht h3 "$QG_NOTREE")" QUALITY_GATE --head-tree "$T1"
 expect_pass "a later PASS for the head tree wins over an earlier-tree PASS" "$(ht h4 "$QG_T2" "$QG_T1")" --head-tree "$T1"
+# Post-merge re-gate (#3983): T1 = pre-sync build tree, T2 = merged tree after the base sync
+expect_fail "stale pre-merge PASS does not satisfy the merged head" "$(ht m1 "$QG_T1")" QUALITY_GATE --head-tree "$T2"
+expect_pass "post-merge re-gate marker satisfies the merged head" "$(ht m2 "$QG_T1" "$QG_T2")" --head-tree "$T2"
+expect_pass "pre-merge PASS still satisfies the pre-merge tree" "$(ht m3 "$QG_T1" "$QG_T2")" --head-tree "$T1"
+QG_T2_FAIL=$'<!-- FORGE:QUALITY_GATE -->\n**Result**: FAIL\n**Tree**: '"$T2"
+expect_fail "a FAIL re-gate on the merged tree is not a PASS" "$(ht m4 "$QG_T2_FAIL")" QUALITY_GATE --head-tree "$T2"
 expect_pass "no --head-tree keeps the unbound behaviour" "$(ht h5 "$QG_NOTREE")"
 expect_pass "uppercase head-tree is normalised" "$(ht h6 "$QG_T1")" --head-tree "$(echo "$T1" | tr a-f A-F)"
 expect_pass "docs-only still waives the bound gate" "$(ht h7)" --docs-only --head-tree "$T1"

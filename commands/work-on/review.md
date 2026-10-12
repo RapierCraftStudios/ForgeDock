@@ -194,12 +194,18 @@ Never hand off a PR born stale. If `origin/{PR_BASE}` exists and is not an ances
 
 ```bash
 cd {WORKTREE_PATH}
+PRE_SYNC_TREE=$(git rev-parse 'HEAD^{tree}')   # the tree the build-time QUALITY_GATE PASS is bound to
 if git fetch origin {PR_BASE} >/dev/null 2>&1 && ! git merge-base --is-ancestor origin/{PR_BASE} HEAD 2>/dev/null; then
   git merge --no-edit origin/{PR_BASE} >/dev/null 2>&1 || { echo "BASE SYNC CONFLICT: resolve in this context, then git commit; on doubt git merge --abort and return BLOCKED + needs-human"; git diff --name-only --diff-filter=U; }
 fi
 ```
 
 On conflict, resolve every file, keep both sides' intent, `git add`, `git commit --no-edit`. If not resolvable with confidence: `git merge --abort`, label `needs-human`, return `REVIEW_RESULT: status: BLOCKED` with blocker "pre-handoff base sync conflict". One bounded round; resolve SHAs only after it.
+
+**Re-gate the merged head** <!-- Added: forge#3983 -->: the `FORGE:QUALITY_GATE` PASS is bound to `HEAD^{tree}` (R1.5 `--head-tree`), so a merge that changes the tree invalidates it. After the merge and any conflict resolution, compare `PRE_SYNC_TREE` with the current `HEAD^{tree}` (fail closed if either cannot be resolved):
+
+- Unchanged: do nothing; never re-gate.
+- Changed: run the scoped quality gate on the merged head here (`work-on/build/validate` V1 loop over the PR's changed files), then post the marker via validate.md V5 Step 1 "Marker-only re-gate mode" (`**Tree**` = merged `HEAD^{tree}`, `**Commands run**` = what ran). Post the real result: on FAIL, fix and re-run within the validate bounds, else add `needs-human` and return `REVIEW_RESULT: status: BLOCKED`, blocker "post-sync quality gate failed"; never post PASS without a run.
 
 ## Phase R1: Pre-Push Ancestry Guard
 
@@ -321,7 +327,7 @@ Print the block above (`status: BLOCKED`, blocker: "git push failed") and STOP.
 
 ## Phase R1.5: Phase-Trail Preflight (MANDATORY — before PR creation) <!-- Added: forge#3061 -->
 
-A PR must not be opened for work whose earlier phases were skipped. Run the deterministic verifier; it requires INVESTIGATOR, FAST_PATH and CONTRACT always, CONTEXT and ARCHITECT unless the band is TRIVIAL/INVESTIGATION, and a passing FORGE:QUALITY_GATE unless the diff is docs-only.
+A PR must not be opened for work whose earlier phases were skipped. Run the deterministic verifier; it requires INVESTIGATOR, FAST_PATH and CONTRACT always, CONTEXT and ARCHITECT unless the band is TRIVIAL/INVESTIGATION, and a passing FORGE:QUALITY_GATE unless the diff is docs-only. The PASS must be bound to the current `HEAD^{tree}`; the Pre-Handoff Base Sync re-gates a merged head, so re-dispatch here is only a backstop. <!-- Added: forge#3983 -->
 
 ```bash
 # --no-renames: list BOTH sides of a rename so a file moved into docs/ cannot hide its source path (forge#3145).
@@ -560,7 +566,7 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 
 - `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker mentions the phase trail (any blocker containing "phase trail": "phase trail unreadable" when the Phase 8 verifier exited ≥2 / 127, "phase trail incomplete…", or "auto-merge requires --issue", forge#3147): the merge gate refused or could not run. Do NOT re-run phases (nothing is missing) and do NOT attempt the manual merge below, because that would bypass the gate. Add `needs-human` and return `REVIEW_RESULT: status: BLOCKED` with the same blocker. The PR stays open and unmerged.
 
-- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "stale review" (a commit landed on the PR after the verdict, or the head moved during the CI wait, so the code that would merge is not the reviewed code): do NOT merge. The re-review bound is persisted, not remembered: count `<!-- FORGE:STALE_REREVIEW: pr={PR_NUMBER} -->` comments on the issue. If the count is 0, post that marker (with the new head SHA), run the quality gate on the new head (`Skill(skill="{FORGE_SKILL_PREFIX}quality-gate", args="<changed files> --worktree {WORKTREE_PATH}")`, which posts a fresh `FORGE:QUALITY_GATE` for the code that will actually merge), then re-invoke Phase R3 once — a review of the new head (scoped by /review-pr: full, delta or carried forward). If the count is already ≥ 1 (the head keeps moving after review), add `needs-human` and return `REVIEW_RESULT: status: BLOCKED`, blocker: "PR head keeps moving after review". <!-- forge#3188 -->
+- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "stale review" (a commit landed on the PR after the verdict, or the head moved during the CI wait, so the code that would merge is not the reviewed code): do NOT merge. The re-review bound is persisted, not remembered: count `<!-- FORGE:STALE_REREVIEW: pr={PR_NUMBER} -->` comments on the issue. If the count is 0, post that marker (with the new head SHA), re-gate the new head per the Pre-Handoff Base Sync "Re-gate the merged head" procedure (the quality-gate skill alone posts no marker), then re-invoke Phase R3 once — a review of the new head (scoped by /review-pr: full, delta or carried forward). If the count is already ≥ 1 (the head keeps moving after review), add `needs-human` and return `REVIEW_RESULT: status: BLOCKED`, blocker: "PR head keeps moving after review". <!-- forge#3188 -->
 
 - **Remediation-pending handoff (shared by the ci-gate, in-pr-fix and base-conflict cases below)** <!-- Added: forge#3541 -->: these three cases are autonomous pipeline work, not a human decision, so the issue must NOT carry `needs-human` while remediation is pending. `needs-human` is a human-gate signal (operators alert on it, and orchestrate holds DAG dependents as GATED on it). Mark the handoff with the non-human state `workflow:remediating` instead, and clear any `needs-human` that review-pr Phase 8 already set for the ci-gate refusal. `work-on:remediate` accepts either label (a bare `needs-human` from an older run still works), clears `workflow:remediating` on every exit, and re-asserts `needs-human` only when it cannot fix the PR. Run this block, then return `REVIEW_RESULT: status: NEXT`:
   ```bash
