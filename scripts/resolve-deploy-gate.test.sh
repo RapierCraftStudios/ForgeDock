@@ -90,11 +90,11 @@ expect "$(run_in "$NOCFGW" trunk)" true "github default stays strict with no con
 expect "$(run_in "$NOREF" staging GH_CONTENTS_404=1)" false "contents API 404 is no-config"
 expect "$(run_in "$NOREF" staging)" true "non-404 contents API failure fails closed"
 
-# Config read fail: yq missing from PATH even though the ref is readable.
+# Config unreadable: yq unusable (a failing stub shadows any real yq; portable to Git Bash, unlike a stripped PATH) even though the ref is readable.
 NOYQ="$TMP/noyqbin"; mkdir -p "$NOYQ"
-for t in git bash base64 cat sh env grep; do p=$(command -v "$t" 2>/dev/null) && ln -sf "$p" "$NOYQ/$t"; done
+printf '#!/usr/bin/env bash\nexit 127\n' > "$NOYQ/yq"; chmod +x "$NOYQ/yq"
 cp "$TMP/bin/gh" "$NOYQ/gh"
-expect "$(cd "$REPO" && env PATH="$NOYQ" GH_DEFAULT_STUB=trunk bash "$S" staging owner/repo)" true "config unreadable without yq fails closed"
+expect "$(cd "$REPO" && env PATH="$NOYQ:$PATH" GH_DEFAULT_STUB=trunk bash "$S" staging owner/repo)" true "config unreadable (yq failing) fails closed"
 
 echo "resolve-deploy-gate.test.sh: $PASS passed, $FAILN failed"
 [ "$FAILN" -eq 0 ]
