@@ -55,6 +55,8 @@ for fx in "acceptance_gate phase=review verified=3 failed=0 malformed=1 deferred
   check "fixture $ev event" "$(grep '^{' "$TD/posted" | jq -r '.event')" "$ev"
   check "fixture $ev key $key" "$(grep '^{' "$TD/posted" | jq -r --arg k "$key" 'has($k)')" "true"
 done
+reset; FORGE_PR=9 forge_emit finding_disposition severity=MEDIUM scope=introduced disposition=INPR_FIX
+check "finding_disposition carries scope" "$(grep '^{' "$TD/posted" | jq -r '.scope')" "introduced"
 # review-side events go to the PR, others to the issue
 reset; FORGE_PR=9 forge_emit review_panel mode=FULL; grep -q 'issues/9/comments' "$TD/calls" && ok || bad "review_panel targets PR"
 reset; FORGE_PR=9 forge_emit diff_size lines=1; grep -q 'issues/5/comments' "$TD/calls" && ok || bad "diff_size targets issue"
