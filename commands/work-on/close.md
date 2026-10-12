@@ -831,7 +831,7 @@ done
 [ "$PARENT_UPDATED" = true ] || echo "WARNING: could not verify checkbox for #{NUMBER} on parent #${PARENT_REF} — completion is derived from sub-issue state"
 ```
 
-Derive completion from sub-issue state, not from the checklist text, so a lost checkbox can never strand the parent. Every `#N` on a checklist line of a fresh parent read is looked up with `gh issue view N --json state`; this sub-issue is already CLOSED by C1/C2 and counts as closed. Unchecked lines without a `#N` ref still count as open. If the re-read or any state lookup fails, or no refs are found, fall back to the checklist count (fail closed: a failed lookup is never treated as closed):
+Derive completion from sub-issue state, not from the checklist text, so a lost checkbox can never strand the parent. Every `#N` on a checklist line of a fresh parent read is looked up with `gh issue view N --json state`; this sub-issue is already CLOSED by C1/C2 and counts as closed. Unchecked lines without a leading `#N` ref (including a non-leading mention such as `(see #9)`) still count as open. If the re-read or any state lookup fails, or no refs are found, fall back to the checklist count (fail closed: a failed lookup is never treated as closed):
 ```bash
 PARENT_FRESH=$(gh issue view "$PARENT_REF" {GH_FLAG} --json body --jq '.body' 2>/dev/null) || PARENT_FRESH="${UPDATED_PARENT:-${PARENT_BODY:-}}"
 CHECKLIST_OPEN=$(printf '%s\n' "$PARENT_FRESH" | grep -cE '^[[:space:]]*[-*+] \[ \]' || true)
@@ -851,7 +851,7 @@ done
 if [ "$LOOKUP_FAILED" = true ] || [ -z "$SUB_REFS" ]; then
   OPEN_SUBS=$CHECKLIST_OPEN
 else
-  NOREF_OPEN=$(printf '%s\n' "$PARENT_FRESH" | grep -E '^[[:space:]]*[-*+] \[ \]' | grep -cvE '#[0-9]+' || true)
+  NOREF_OPEN=$(printf '%s\n' "$PARENT_FRESH" | grep -E '^[[:space:]]*[-*+] \[ \]' | grep -cvE '^[[:space:]]*[-*+] \[ \] #[0-9]+' || true)
   OPEN_SUBS=$((STATE_OPEN + ${NOREF_OPEN:-0}))
 fi
 OPEN_SUBS=${OPEN_SUBS:-0}

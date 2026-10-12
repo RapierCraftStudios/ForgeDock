@@ -116,4 +116,8 @@ OUT=$(run_derive $'- [ ] #70 other\n- [ ] #7 first' "7=CLOSED 70=OPEN")
 printf '%s\n' "$OUT" | grep -q 'OPEN_SUBS=1' || fail "#70 must stay open and not be confused with #7 ($OUT)"
 printf '%s\n' "$OUT" | grep -q 'CHECKED7=1' || fail "#7 checkbox must be checked without touching #70 ($OUT)"
 
+# A non-leading #N mention on an unchecked line is an open item, not a sub-issue ref (no fail-open close).
+OUT=$(run_derive $'- [ ] #7 first\n- [ ] #8 second\n- [ ] Write docs (see #9)' "7=CLOSED 8=CLOSED")
+printf '%s\n' "$OUT" | grep -q 'OPEN_SUBS=1' || fail "non-leading ref line must count as open ($OUT)"
+
 printf 'PASS: close-parent-c3\n'
