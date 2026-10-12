@@ -122,7 +122,8 @@ describe("forge#3753 deploy-gate base never reads forge.yaml from the PR worktre
     const dir = mkdtempSync(join(tmpdir(), "gate-"));
     try {
       mkdirSync(join(dir, "bin"));
-      writeFileSync(join(dir, "bin/gh"), '#!/usr/bin/env bash\ncase "$*" in *"--jq .default_branch"*) echo "${GH_DEFAULT_STUB:-}";; *) exit 1;; esac\n', { mode: 0o755 });
+      writeFileSync(join(dir, "bin/gh"), '#!/usr/bin/env bash\ncase "$*" in *"--jq .default_branch"*) echo "${GH_DEFAULT_STUB:-}";; *"contents/forge.yaml"*) echo "gh: Not Found (HTTP 404)" >&2; exit 1;; *) exit 1;; esac\n', { mode: 0o755 });
+      // The default branch has no committed forge.yaml (contents API 404 = clean "no config"); only the worktree copy declares `release`, and it must be ignored.
       writeFileSync(join(dir, "forge.yaml"), "branches:\n  default: release\n");
       const run = (base, def) => String(spawnSync("bash", [SCRIPT, base, "o/r"], { cwd: dir, env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH}`, GH_DEFAULT_STUB: def } }).stdout).trim();
       assert.equal(run("main", "main"), "true");
