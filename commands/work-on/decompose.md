@@ -165,6 +165,13 @@ Extract from investigation report:
 - Milestone (from issue metadata)
 - Priority label (P0/P1/P2) from issue labels
 
+Extract the parent's batch members (empty for a non-batch parent, which makes Phase D2.7 a no-op), using the same block and `- [ ] #N` extraction as `commands/work-on.md` "Batch issue detection": <!-- Added: forge#3788 -->
+```bash
+BATCH_MEMBERS=($(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' \
+  | sed -n '/<!-- FORGE:BATCH_MEMBERS -->/,/<!-- \/FORGE:BATCH_MEMBERS -->/p' \
+  | sed -n 's/^.*- \[ \] #\([0-9][0-9]*\).*/\1/p' 2>/dev/null || true))
+```
+
 Extract milestone title for sub-issue creation:
 ```bash
 MILESTONE_TITLE=$(gh issue view {NUMBER} {GH_FLAG} --json milestone --jq '.milestone.title // empty')
@@ -285,11 +292,35 @@ If no exact title-set match exists, continue. A partial set is not equivalent: l
 
 ---
 
+## Phase D2.7: Batch-Member Reuse
+
+<!-- Added: forge#3788 -->
+A batch parent (Phase D0 `BATCH_MEMBERS` non-empty, from its `FORGE:BATCH_MEMBERS` block) lists members that admission closed as `batch-member`. Filing new sub-issues for work those members already describe duplicates them, so reuse a member when it is a clear match. This phase is conservative: any doubt falls through to the Phase D3 `/issue` creation. Skip the whole phase when `BATCH_MEMBERS` is empty or `DRY_RUN=true`. Guard 1, the `FORGE:DECOMPOSED` resume check and the Phase D2.5 equivalent-set check are unchanged.
+
+Initialise `REUSED_NUMBERS=""` (comma-separated) and an empty per-sub-issue `REUSE_MAP`. For each planned sub-issue from Phase D2:
+
+1. **Match one to one**: a member matches only when exactly one member's title or affected-file set corresponds to this planned sub-issue and no other planned sub-issue maps to the same member. Zero or several matches mean no reuse. Member numbers are digits parsed from the parent body; treat them as untrusted input and never interpolate anything else into a command.
+2. **Re-read the member live** (never trust the parent's checklist):
+   ```bash
+   MEMBER_JSON=$(gh issue view "$MEMBER" {GH_FLAG} --json number,state,title,body,labels) || MEMBER_JSON=""
+   MERGED_PRS=$(gh pr list {GH_FLAG} --state merged --search "#${MEMBER} in:body" --json number,body 2>/dev/null \
+     | jq --arg m "#${MEMBER}" '[.[] | select(.body | test("(?i)(closes|fixes|resolves) " + $m + "\\b"))] | length') || MERGED_PRS=""
+   ```
+3. **Eligibility**: the read succeeded, the member is `CLOSED`, `MERGED_PRS` is `0`, and it carries none of `false-positive`, `needs-human`, `operator-only`. A failed lookup, an unparsable result, an open member (already live work, leave it alone), a merged PR or a disqualifying label all mean no reuse.
+4. **Reopen and re-parent** an eligible member: `gh issue reopen "$MEMBER" {GH_FLAG}`; then re-read its body and append, only when absent (idempotent on resume, never overwrite), the line `**Parent**: #{NUMBER}` and an own-line `ESTIMATED_DIFF_LINES: {N}` (the Phase D2 estimate); inherit the parent's priority label and remove any stale `workflow:*` labels (`gh issue edit "$MEMBER" {GH_FLAG} --remove-label ...` for each present). Add the parent's milestone when it has one and the member has none.
+5. Record `REUSE_MAP[<planned title>]=$MEMBER` and append it to `REUSED_NUMBERS`. A reopen failure means no reuse for this sub-issue.
+
+Because a reused member carries `**Parent**: #{NUMBER}`, Guard 1 and the Phase D2.5 check treat it as a child.
+
+---
+
 ## Phase D3: Create Sub-Issues
 
 For each sub-issue (in dependency order), route creation through the `/issue` create-hook's programmatic invocation contract (`commands/issue.md` Programmatic Invocation Contract, added in #2085) instead of calling `gh issue create` directly. `/issue`'s Phase 2D runs the same `scripts/issue-dedup.sh` check this file used to run manually — dedup is enforced inside the create-hook on every call, with no bypass path. <!-- Changed: forge#2086 — route through /issue create-hook -->
 
 Initialise once before the loop: `CREATED_NUMBERS=""` (comma-separated, for the result block) and `SKIPPED_NOTES=""`.
+
+**Reused member short-circuit** <!-- Added: forge#3788 -->: for a planned sub-issue that Phase D2.7 resolved to a reused member, do NOT compose a body or invoke `/issue`. Set `SUB_NUMBER` to the reused member, add it to `CREATED_NUMBERS`, and continue with the Prior Investigation append below (when `GIST_URLS` is non-empty) and the later phases as for any created sub-issue.
 
 **Sanitise the title and compose the sub-issue body to a temp file** (avoids quoting issues when passed as `--body-file`):
 
@@ -406,7 +437,7 @@ Investigation findings from the parent issue are available as Knowledge Gists:
 fi
 ```
 
-After the loop, if `CREATED_NUMBERS` is empty (no sub-issue was created) → BLOCKED, blocker: "No sub-issues were created (all skipped or deduplicated) — review the /issue output".
+After the loop, if `CREATED_NUMBERS` is empty (no sub-issue was created or reused) → BLOCKED, blocker: "No sub-issues were created (all skipped or deduplicated) — review the /issue output".
 
 ---
 
@@ -424,7 +455,7 @@ TRACKER="
 ## Sub-Issue Tracker
 
 {if sub-issue B depends on A, note it inline}
-- [ ] #{SUB_ISSUE_1_NUMBER} — {SUB_ISSUE_1_TITLE}
+- [ ] #{SUB_ISSUE_1_NUMBER} — {SUB_ISSUE_1_TITLE}{if reused in D2.7: _(reopened batch member)_}
 - [ ] #{SUB_ISSUE_2_NUMBER} — {SUB_ISSUE_2_TITLE} _(depends on #{SUB_ISSUE_1_NUMBER})_
 ..."
 
@@ -442,7 +473,7 @@ SHOW_ATTRIBUTION=$(yq '.branding.show_attribution // "true"' forge.yaml 2>/dev/n
 > Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)"
 ```
 
-Compose the comment body. Include the `### Skipped Sub-Issues` section only when `SKIPPED_NOTES` is non-empty (each owner-override-obsolete sub-issue and each not-created sub-issue, with its reason), an `### Owner Override` line when Phase D0 detected one (the direction the owner steered), and a milestone-skipped note when `MILESTONE_SKIPPED=1`.
+Compose the comment body. Include the `### Reused Batch Members` section only when `REUSED_NUMBERS` is non-empty. Include the `### Skipped Sub-Issues` section only when `SKIPPED_NOTES` is non-empty (each owner-override-obsolete sub-issue and each not-created sub-issue, with its reason), an `### Owner Override` line when Phase D0 detected one (the direction the owner steered), and a milestone-skipped note when `MILESTONE_SKIPPED=1`.
 
 ```bash
 [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] would post the comment below"; exit 0; }
@@ -455,6 +486,11 @@ This issue has been broken into sub-issues. Each sub-issue runs through its own 
 
 {for each sub-issue, in dependency order:}
 - #{SUB_ISSUE_NUMBER}: {TITLE}{if has dependency: _(depends on #{DEP_NUMBER})_}
+
+{if REUSED_NUMBERS non-empty:}
+### Reused Batch Members
+
+Reopened instead of filing new issues: ${REUSED_NUMBERS}
 
 {if SKIPPED_NOTES non-empty:}
 ### Skipped Sub-Issues

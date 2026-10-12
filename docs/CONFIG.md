@@ -565,6 +565,8 @@ decomposition:
 |-------|------|----------|-------------|
 | `close_parent` | boolean | No | When `true`, `work-on:decompose` (Phase D6.5) closes the parent after the sub-issues exist, `FORGE:DECOMPOSED:COMPLETE` is posted and `workflow:decomposed` is set, with the comment "Decomposed into #a #b #c; tracked here until all complete". The label is kept. Every child body is also checked for the `**Parent**: #N` reference. Default: `false`. Any value other than `true`, or an unreadable config, leaves the parent open |
 
+**Batch members**: when the parent carries a `FORGE:BATCH_MEMBERS` block, `work-on:decompose` (Phase D2.7) reopens and reuses a closed member that matches a planned sub-issue one to one, instead of filing a duplicate. Members with a merged PR or a `false-positive`, `needs-human` or `operator-only` label are never reopened, and any ambiguity falls back to creating a new issue. There is no config key for this.
+
 **With `close_parent: true`**: `work-on:close` Phase C3 keeps checking children off the closed parent's checklist. When the last child closes, the parent gets an "All sub-issues complete" comment and `workflow:merged`; it is not closed a second time and never reopened. `/pipeline-status` and `/pipeline-health` exclude `workflow:decomposed` from work counts and report them separately as `trackers (N)`. `/orchestrate` expands an explicitly requested closed decomposed parent to its open children.
 
 **With `close_parent: false`** (default): unchanged. The parent stays open and is closed by C3 when the last child closes.
