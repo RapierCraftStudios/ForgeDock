@@ -36,6 +36,7 @@ Parse from $ARGUMENTS:
 - `--branch {BRANCH}` — feature branch name (required)
 - `--base {PR_BASE}` — PR base branch name without the `origin/` prefix (required; used by the V5 ancestry audit)
 - `--files {CHANGED_FILES}` — space-separated list of changed files (required; from the implement result)
+- `--consumers-final` — optional. Set by build B6 on the re-validation after the one consumer repair round: V4.6 then runs in `advisory` mode whatever forge.yaml says, so remaining unaddressed sites are recorded as `CONSUMERS: unresolved` instead of failing again. <!-- Added: forge#4017 -->
 
 **Fail closed**: if `{NUMBER}`, `--repo`, `--worktree`, `--branch`, `--base`, or `--files` is missing or empty, or `{WORKTREE_PATH}` is not an existing directory, print `VALIDATE_RESULT:` with `gate_passed: false` and `blocker: missing or invalid arg: <name>` and STOP. `{GH_FLAG}` defaults to `-R {GH_REPO}` when absent.
 
@@ -624,11 +625,12 @@ On `FAIL`, the blocker line for `VALIDATE_RESULT` is `blast-radius: <UNLISTED/NO
 
 ## Phase V4.6: Consumer Sweep *(runs after V4.5, before V5 — skipped only on the docs-only skip path)* <!-- Added: forge#3970 -->
 
-A changed or removed identifier (function, class, constant, config or context key, CLI flag, env var, path, literal hash or version) leaves stale references in files the diff never touched. This phase runs `consumer-sweep.sh`, a script and not a prompt: it extracts the identifiers from the removed side of the final diff and lists every reference outside the change set (generated and vendored paths excluded through the `build.scope.exclude_globs` set, read as in build B5.5). Every listed site must be justified by a `unaffected: <reason>` line in the `CONSUMERS:` block of the FORGE:BUILDER comment (grammar in implement I6); a site in a changed file is already addressed.
+A changed or removed identifier (function, class, constant, config or context key, CLI flag, env var, path, literal hash or version) leaves stale references in files the diff never touched. This phase runs `consumer-sweep.sh`, a script and not a prompt: it extracts the identifiers the final diff actually removed, renamed or re-typed (a per-file survival filter: tokens that still appear on the file's added lines, prose words and versions are never swept) and lists every reference outside the change set in ONE bounded `git grep` (generated and vendored paths excluded through the `build.scope.exclude_globs` set, read as in build B5.5). Every listed site must be justified by a `unaffected: <reason>` line in the `CONSUMERS:` block of the FORGE:BUILDER comment (grammar in implement I6); a site in a changed file is already addressed.
 
 - **Trust and install root**: the same rules as V4.5. The BUILDER body is read only from the newest comment `trusted-comments.sh` accepts, and both scripts resolve from `FORGE_ROOT`, never from the worktree.
-- **Exit codes**: `0` all sites addressed or none (PASS); `1` an `UNADDRESSED:` line was printed, so set `GATE_PASSED=false`, then update the file or add a justified `unaffected:` line to the `CONSUMERS:` block, and re-run V1 onward; anything else, a failed fetch, or an unresolvable script is DEGRADED: append `consumer-sweep` to `SKIPPED_CHECKS` and print the reason. DEGRADED never passes silently and a failed read is never treated as "no sites". A missing BUILDER comment is not a pass: the sweep still runs with an empty justification set.
-- **Carry-forward**: as V4.5, the block prints `CONSUMER_SWEEP_STATE: <PASS|FAIL|DEGRADED>`, plus `GATE_PASSED: false` on FAIL and `SKIPPED_CHECKS+=consumer-sweep` on DEGRADED. Record those lines; V5 Step 1 and Step 4 read them.
+- **Mode and budget** <!-- Added: forge#4017 -->: `verification.consumer_sweep.mode` in forge.yaml (`advisory` | `blocking`, default `advisory`; see `docs/CONFIG.md`) and `verification.consumer_sweep.budget_seconds` (default 60) are passed as `--mode` and `--budget-seconds`. In `advisory` mode the sweep records sites (`ADVISORY:` lines) and never fails. `BUDGET_EXCEEDED` is always advisory: the sweep stopped early, so the run is a PASS with a note and never a FAIL. A removed function/class whose name is still defined outside the change set is reported `ambiguous` and is not a site.
+- **Exit codes**: `0` all sites addressed or none, advisory mode, or `BUDGET_EXCEEDED` (PASS); `1` (`blocking` mode only) an `UNADDRESSED:` line was printed, so set `GATE_PASSED=false` and print `CONSUMER_SWEEP_STATE: FAIL`: this is a repair, not a block. Validate does NOT add `needs-human` for it and returns `blocker: consumer_unaddressed: ...`; build B6 runs ONE implement repair round (`--fix-consumers`) and re-validates, after which still-unresolved sites are recorded as `CONSUMERS: unresolved ...` in FORGE:BUILDER and passed to review as known risk. Anything else, a failed fetch, or an unresolvable script is DEGRADED: append `consumer-sweep` to `SKIPPED_CHECKS` and print the reason. DEGRADED never passes silently and a failed read is never treated as "no sites". A missing BUILDER comment is not a pass: the sweep still runs with an empty justification set.
+- **Carry-forward**: as V4.5, the block prints `CONSUMER_SWEEP_STATE: <PASS|FAIL|DEGRADED>`, plus `GATE_PASSED: false` on FAIL and `SKIPPED_CHECKS+=consumer-sweep` on DEGRADED, and one `CONSUMERS_UNRESOLVED: - <file:line> unresolved: <identifier>` line per site left unaddressed in advisory mode (including the forced-advisory `--consumers-final` run). Record those lines; V5 Step 1 and Step 4 read them.
 
 ```bash
 cd {WORKTREE_PATH}
@@ -638,6 +640,12 @@ FORGE_ROOT="$(forge_root 2>/dev/null || true)"
 CS_SCRIPT="${FORGE_ROOT:+$FORGE_ROOT/scripts/consumer-sweep.sh}"; [ -f "$CS_SCRIPT" ] || CS_SCRIPT=""
 TRUST_SCRIPT="${FORGE_ROOT:+$FORGE_ROOT/scripts/trusted-comments.sh}"; [ -f "$TRUST_SCRIPT" ] || TRUST_SCRIPT=""
 CS_STATE=""; CS_NOTE=""; CS_FILE=$(mktemp "${TMPDIR:-/tmp}/forge-consumers.XXXXXX")
+# mode and budget from forge.yaml; anything unreadable or invalid falls back to the safe defaults (advisory, 60 s)
+CS_MODE=$(yq '.verification.consumer_sweep.mode // "advisory"' forge.yaml 2>/dev/null || true)
+case "$CS_MODE" in advisory|blocking) ;; *) CS_MODE=advisory ;; esac
+[ "${CONSUMERS_FINAL:-}" != "1" ] || CS_MODE=advisory   # set CONSUMERS_FINAL=1 before this block when invoked with --consumers-final
+CS_BUDGET=$(yq '.verification.consumer_sweep.budget_seconds // 60' forge.yaml 2>/dev/null || true)
+case "$CS_BUDGET" in ""|*[!0-9]*) CS_BUDGET=60 ;; esac
 if [ -z "$CS_SCRIPT" ] || [ -z "$TRUST_SCRIPT" ]; then
   CS_STATE="DEGRADED"; CS_NOTE="consumer-sweep.sh or trusted-comments.sh not found under FORGE_ROOT"
 else
@@ -658,10 +666,13 @@ else
         CS_STATE="DEGRADED"; CS_NOTE="could not decode the FORGE:BUILDER comment (rc=${JQ_RC})"
       else
         git fetch origin {PR_BASE} >/dev/null 2>&1 || true
-        CS_OUT=$(bash "$CS_SCRIPT" --range "origin/{PR_BASE}..WORKTREE" --repo "{WORKTREE_PATH}" --consumers "$CS_FILE" ${EXCLUDES[@]+"${EXCLUDES[@]}"} 2>&1); CS_RC=$?
+        CS_OUT=$(bash "$CS_SCRIPT" --range "origin/{PR_BASE}..WORKTREE" --repo "{WORKTREE_PATH}" --consumers "$CS_FILE" --mode "$CS_MODE" --budget-seconds "$CS_BUDGET" ${EXCLUDES[@]+"${EXCLUDES[@]}"} 2>&1); CS_RC=$?
         printf '%s\n' "$CS_OUT"
+        # carry-forward for V5 Step 4: every unaddressed site becomes a "CONSUMERS: unresolved" line in FORGE:BUILDER
+        printf '%s\n' "$CS_OUT" | sed -n 's/^ADVISORY: \([^ ]*\) \(.*\)$/CONSUMERS_UNRESOLVED: - \2 unresolved: \1/p' | head -n 50
         case "$CS_RC" in
-          0) CS_STATE="PASS" ;;
+          0) CS_STATE="PASS"
+             case "$CS_OUT" in *BUDGET_EXCEEDED*) CS_NOTE="budget exceeded, partial sweep (advisory)" ;; *ADVISORY:*) CS_NOTE="advisory sites recorded (mode=advisory)" ;; esac ;;
           1) CS_STATE="FAIL"; GATE_PASSED=false ;;
           *) CS_STATE="DEGRADED"; CS_NOTE="consumer-sweep.sh exited ${CS_RC}" ;;
         esac
@@ -681,7 +692,7 @@ elif [ "$CS_STATE" = "DEGRADED" ]; then
 fi
 ```
 
-On `FAIL`, the blocker line for `VALIDATE_RESULT` is `consumer_unaddressed: <UNADDRESSED lines>`; the repair loop (build B6.5) updates the listed files or adds a justified `unaffected:` line to the BUILDER `CONSUMERS:` block, never edits the checker.
+On `FAIL` (`blocking` mode only), the blocker line for `VALIDATE_RESULT` is `consumer_unaddressed: <UNADDRESSED lines>` and no `needs-human` label is added for it. Build B6 runs one repair round: implement updates the listed files or adds a justified `unaffected:` line to the BUILDER `CONSUMERS:` block, never edits the checker; sites still unaddressed after that round are recorded as `CONSUMERS: unresolved` (implement I6) and continue to review as known risk. In `advisory` mode the `ADVISORY:` lines are the record and nothing fails.
 
 ---
 
@@ -822,7 +833,7 @@ If the output contains `ANCESTRY_FAILED=1`: do NOT append `:COMPLETE` and do NOT
 
 After the ancestry audit passes (or is skipped), patch the existing FORGE:BUILDER comment: add the `**Verification Status**` line, the best-effort `cost_usd:` line, and the `<!-- FORGE:BUILDER:COMPLETE -->` marker. This is the **only** place the marker is written — it signals that a real commit exists on the branch and the build is safe to resume-skip. <!-- Added: forge#1305 -->
 
-`SKIPPED_CHECKS` comes from Phase V2 (unconfigured checks) and Phase V4.6. Shell state may not persist between Bash calls, so set it here from your V2 notes before running the block (comma-separated check names, empty when every configured check ran), and append `consumer-sweep` when V4.6 printed `SKIPPED_CHECKS+=consumer-sweep` (`CONSUMER_SWEEP_STATE: DEGRADED`). `DEGRADED_CHECKS` (V2 test runs that ran nothing, known-slow skips, V4.5 `DEGRADED`) is the same list posted in V5 Step 1; it is never merged into `SKIPPED_CHECKS`.
+`SKIPPED_CHECKS` comes from Phase V2 (unconfigured checks) and Phase V4.6. Shell state may not persist between Bash calls, so set it here from your V2 notes before running the block (comma-separated check names, empty when every configured check ran), and append `consumer-sweep` when V4.6 printed `SKIPPED_CHECKS+=consumer-sweep` (`CONSUMER_SWEEP_STATE: DEGRADED`). `DEGRADED_CHECKS` (V2 test runs that ran nothing, known-slow skips, V4.5 `DEGRADED`) is the same list posted in V5 Step 1; it is never merged into `SKIPPED_CHECKS`. Set `UNRESOLVED_LINES` from the V4.6 `CONSUMERS_UNRESOLVED:` lines (prefix stripped, newline-separated; empty when none).
 
 **Cost line reconciliation**: the machine-readable `cost_usd:` line (best-effort; only when `PHASE_COST_USD` is available, never blocking) is the single cost signal. Do not add a separate `**Cost (build phase)**` line.
 
@@ -855,6 +866,14 @@ if [ -n "$BUILDER_COMMENT_ID" ]; then
   PHASE_COST_LINE=""
   [ -n "${PHASE_COST_USD:-}" ] && PHASE_COST_LINE="
 cost_usd: ${PHASE_COST_USD}"
+  # Unaddressed consumer sites (V4.6 CONSUMERS_UNRESOLVED lines, prefix stripped, one "- <file:line> unresolved: <id>" per line)
+  UNRESOLVED_LINES="${UNRESOLVED_LINES:-}"
+  if [ -n "$UNRESOLVED_LINES" ] && ! printf '%s' "$PATCHED_BODY" | grep -q '^CONSUMERS: unresolved'; then
+    PATCHED_BODY="${PATCHED_BODY}
+
+CONSUMERS: unresolved
+${UNRESOLVED_LINES}"
+  fi
   UPDATED_BODY="${PATCHED_BODY}${PHASE_COST_LINE}
 
 <!-- FORGE:BUILDER:COMPLETE -->"
@@ -908,4 +927,4 @@ implement (work-on:build:implement) — code written, staged (not committed), FO
 review (work-on:review) — push, PR, merge
 ```
 
-If `VALIDATE_RESULT: gate_passed: false`, the build skill reports BLOCKED (`needs-human` is set) and no PR is created.
+If `VALIDATE_RESULT: gate_passed: false`, the build skill reports BLOCKED (`needs-human` is set) and no PR is created, except for `blocker: consumer_unaddressed: ...`, which carries no `needs-human` and which build B6 routes to one consumer repair round (V4.6).
