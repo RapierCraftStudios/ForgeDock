@@ -189,7 +189,13 @@ do_extract() {
         SOURCE_BODIES=$(printf '%s\n%s' "$SOURCE_BODIES" "$EARLIER_BODIES")
         CARRIER_BODIES=$(printf '%s\n%s' "$CARRIER_BODIES" "$(agent_bodies_at "$EARLIER_SHA")")
     fi
-    FINDINGS=$(printf '%s\n' "$SOURCE_BODIES" | jq -r 'scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null)
+    # Match to the closing ` -->`, never `[^>]+`: a `>` or `->` inside a title must not drop the finding (#3897).
+    FINDINGS=$(printf '%s\n' "$SOURCE_BODIES" | jq -r 'scan("<!-- FINDING:(.+?) -->") | .[0]' 2>/dev/null)
+    # Fail closed when a raw marker did not parse: a lost finding must never read as a clean review.
+    N_RAW_MARKERS=$(printf '%s\n' "$SOURCE_BODIES" | jq -r '[scan("<!-- FINDING:")] | length' 2>/dev/null | awk '{ s += $1 } END { print s + 0 }')
+    N_PARSED_MARKERS=$(printf '%s\n' "$FINDINGS" | grep -c . || true)
+    [ "$N_RAW_MARKERS" -eq "$N_PARSED_MARKERS" ] \
+        || { echo "REVIEW_RESULT: status: BLOCKED, blocker: ${N_RAW_MARKERS} FINDING markers but ${N_PARSED_MARKERS} parsed (malformed marker, fail closed)"; exit 3; }
 
     # Carrier lookup order: raw agent bodies first (they carry the agent marker and the per-finding prose), then the source bodies.
     printf '%s\n%s\n' "$CARRIER_BODIES" "$SOURCE_BODIES" | grep -v '^$' > "$WORKDIR/carriers.jsonl" || : > "$WORKDIR/carriers.jsonl"
@@ -462,7 +468,7 @@ do_classify() {
             cj=$(gh api --paginate "repos/${REPO}/issues/${pr}/comments" 2>/dev/null) || continue
             [ -n "$cj" ] || continue
             printf '%s' "$cj" | bash "$TRUSTED_SCRIPT" bodies '^<!-- (FORGE:REVIEW-AGENT:[a-z-]+|REVIEW-FINDINGS-SYNTHESIZED-START) -->[\s\S]*(^|\n)Reviewed-SHA: [0-9a-f]{40,64}' 2>/dev/null \
-                | jq -r --arg skip "${PF_SKIP:-}" 'select($skip == "" or (test("(^|\\n)Reviewed-SHA: " + $skip + "\\r?(\\n|$)") | not)) | scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null \
+                | jq -r --arg skip "${PF_SKIP:-}" 'select($skip == "" or (test("(^|\\n)Reviewed-SHA: " + $skip + "\\r?(\\n|$)") | not)) | scan("<!-- FINDING:(.+?) -->") | .[0]' 2>/dev/null \
                 | while IFS='|' read -r _id _c _s _loc _t; do
                     [ -n "$_t" ] || continue
                     _p=$(PF_LOC="$_loc" pf_split_loc); printf 'F\t%s\t%s\n' "$_p" "$(printf '%s' "$_t" | tr '\t' ' ')"

@@ -129,6 +129,22 @@ want "panel: scenario read from the finding prose" '.findings[0].scenario' findi
 want "panel: extracted count" '.counts.findings_extracted' findings.json "1"
 has "panel: stdout" "STRUCTURED_FINDINGS=1"
 
+# a `>` / `->` inside a title must not drop the finding (#3897)
+reset
+cm MEMBER User "$(agent_body security "$SHA" '### SEC-3 arrow
+**Failure scenario**: a -> b
+' '<!-- FINDING:SEC-3|CONFIRMED|HIGH|a.py:6|value -> sink when x > 1 -->')"
+flush
+run "$GOOD" extract; rc_is "gt in title" "$RC" 0
+want "gt in title: finding kept" '[.findings[].id] | join(",")' findings.json "SEC-3"
+want "gt in title: full title" '.findings[0].title' findings.json "value -> sink when x > 1"
+
+# an unparseable raw marker fails closed instead of reading clean (#3897)
+reset
+cm MEMBER User "$(agent_body security "$SHA" '### SEC-4 broken' '<!-- FINDING:SEC-4|CONFIRMED|HIGH|a.py:7|no closing marker')"
+flush
+run "$GOOD" extract; rc_is "malformed marker" "$RC" 3; has "malformed marker" "FINDING markers but"
+
 # a trusted synthesis block replaces the raw bodies; the agent still comes from the raw agent body
 reset
 cm MEMBER User "$(agent_body security "$SHA" '### SEC-1 injection
