@@ -2133,12 +2133,48 @@ describe("main-checkout mutation guard (issue #3650)", () => {
     return { exitCode: r.status ?? -1, stderr: r.stderr || "" };
   }
 
-  it("is advisory by default: warns but allows the spec commands that still run in the main checkout (#3873)", () => {
-    for (const c of ["git checkout main", "git pull origin main --rebase", "git branch -D revert/pr-1", "git stash", "git merge origin/staging --no-edit"]) {
-      const r = run(c, mainDir, { FORGE_ENFORCE_MAIN_CHECKOUT_GIT: "" });
+  it("is enforced by default (#3873)", () => {
+    for (const c of ["git checkout main", "git stash", "git merge origin/staging --no-edit"]) {
+      assert.equal(run(c, mainDir, { FORGE_ENFORCE_MAIN_CHECKOUT_GIT: "" }).exitCode, 2, c);
+    }
+  });
+
+  it("FORGE_ENFORCE_MAIN_CHECKOUT_GIT=0 makes it advisory: warns but allows (#3873)", () => {
+    for (const c of ["git checkout main", "git pull origin main --rebase", "git stash"]) {
+      const r = run(c, mainDir, { FORGE_ENFORCE_MAIN_CHECKOUT_GIT: "0" });
       assert.equal(r.exitCode, 0, c);
       assert.match(r.stderr, /WARNING \(advisory, not blocked\)/, c);
     }
+  });
+
+  it("allows ref-only verbs that do not touch the checked-out branch or working tree (#3873)", () => {
+    for (const c of ["git branch -D other-branch", "git branch -d revert/pr-1", "git branch -m a b", "git branch -f other HEAD", "git restore --staged x", "git restore -S x"]) {
+      assert.equal(run(c, mainDir).exitCode, 0, c);
+    }
+  });
+
+  it("denies deleting/renaming the checked-out branch and working-tree restore (#3873)", () => {
+    for (const c of ["git branch -D main", "git branch -m renamed", "git branch -M main other", "git restore x", "git restore --worktree --staged x", "git restore -SW x"]) {
+      assert.equal(run(c, mainDir).exitCode, 2, c);
+    }
+  });
+
+  it("an allowed ref-only verb inside bash -c / eval does not mask a later mutation (#3920)", () => {
+    for (const c of ['bash -c "git branch -d other; git checkout main"', 'eval "git branch -d other && git stash"', "sh -c 'git branch -D other || git reset --hard HEAD'"]) {
+      assert.equal(run(c, mainDir).exitCode, 2, c);
+    }
+    assert.equal(run('bash -c "git branch -d other; git branch -D another"', mainDir).exitCode, 0);
+  });
+
+  it("counts positionals after -- for branch -m (#3920)", () => {
+    assert.equal(run("git branch -m -- renamed", mainDir).exitCode, 2);
+  });
+
+  it("an allowed ref-only verb does not mask a later mutating segment (#3873)", () => {
+    for (const c of ["git branch -D other && git stash", "git branch -d other; git checkout feat/x", "git branch -D other || git reset --hard HEAD", "git branch -D other && git branch -D main"]) {
+      assert.equal(run(c, mainDir).exitCode, 2, c);
+    }
+    assert.equal(run("git branch -D other && git branch -d another", mainDir).exitCode, 0);
   });
 
   it("denies git checkout in the main checkout", () => {
@@ -2192,7 +2228,7 @@ describe("main-checkout mutation guard (issue #3650)", () => {
   });
 
   it("denies the other tree-rewriting verbs in the main checkout (SEC-3)", () => {
-    for (const c of ["git restore .", "git clean -fd", "git pull", "git rebase x", "git cherry-pick x", "git reset --merge", "git branch -f x HEAD"]) {
+    for (const c of ["git restore .", "git clean -fd", "git pull", "git rebase x", "git cherry-pick x", "git reset --merge", "git branch -f main HEAD"]) {
       assert.equal(run(c, mainDir).exitCode, 2, c);
     }
     for (const c of ["git clean -n", "git branch --list", "git -c a=b status"]) {

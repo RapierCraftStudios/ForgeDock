@@ -3943,7 +3943,10 @@ if [ -n "$TS_CHANGED" ]; then
     echo "=== Integration Build Gate (TypeScript): batch checkpoint ==="
     cd {REPO_PATH}
     git fetch origin ${MILESTONE_BRANCH}
-    git checkout origin/${MILESTONE_BRANCH} --detach 2>/dev/null
+    # Detached worktree: never check out in the main checkout
+    GATE_WT=$(mktemp -d)
+    git worktree add --detach "$GATE_WT" "origin/${MILESTONE_BRANCH}" 2>/dev/null
+    cd "$GATE_WT"
 
     if [ -n "$TS_TYPECHECK" ]; then
         eval "$TS_TYPECHECK" 2>&1 | head -30
@@ -3961,7 +3964,8 @@ if [ -n "$TS_CHANGED" ]; then
         BUILD_EXIT=0
     fi
 
-    git checkout - 2>/dev/null
+    cd {REPO_PATH}
+    git worktree remove --force "$GATE_WT" 2>/dev/null || true
 
     if [ "$TSC_EXIT" -ne 0 ]; then
         echo "BLOCKING: TypeScript errors on ${MILESTONE_BRANCH} after batch checkpoint."
@@ -3977,7 +3981,9 @@ PY_CHANGED=$(git diff origin/{DEFAULT_BRANCH}...origin/${MILESTONE_BRANCH} --nam
 if [ -n "$PY_CHANGED" ]; then
     echo "=== Integration Build Gate (Python): batch checkpoint ==="
     cd {REPO_PATH}
-    git checkout origin/${MILESTONE_BRANCH} --detach 2>/dev/null
+    GATE_WT=$(mktemp -d)
+    git worktree add --detach "$GATE_WT" "origin/${MILESTONE_BRANCH}" 2>/dev/null
+    cd "$GATE_WT"
 
     if [ -n "$PYTHON_FORMAT" ]; then
         eval "$PYTHON_FORMAT" 2>&1 | tail -10
@@ -3987,7 +3993,8 @@ if [ -n "$PY_CHANGED" ]; then
         FORMAT_EXIT=0
     fi
 
-    git checkout - 2>/dev/null
+    cd {REPO_PATH}
+    git worktree remove --force "$GATE_WT" 2>/dev/null || true
 
     if [ "$FORMAT_EXIT" -ne 0 ]; then
         echo "WARNING: Python formatting issues on ${MILESTONE_BRANCH} after batch checkpoint."
