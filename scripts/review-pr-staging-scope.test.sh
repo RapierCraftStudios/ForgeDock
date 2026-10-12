@@ -60,7 +60,7 @@ grep -q "review-prepare.sh" "$SPEC" && grep -q -- "--no-delta" "$SPEC" && ok || 
 # (7) fail-closed guard: BLOCKED when the classifier is unresolvable, no manual classifier mode, no classifier-unavailable fallback
 SPEC_FIN="$ROOT/scripts/review-finalize.sh"   # review-pr.md delegates classification to review-finalize.sh, which owns the fail-closed BLOCKED line (#3841)
 if grep -qE 'classifier=manual|echo script \|\| echo manual|classifier-unavailable' "$SPEC"; then bad "review-pr-staging.md must carry no manual classifier mode"; else ok; fi
-for _s in "$SPEC_FIN"; do
+for _s in $SPEC_FIN; do   # one path today; unquoted so SC2066 does not flag a single-iteration loop
   if grep -qE 'BLOCKED.*classifier unavailable' "$_s" && ! grep -qF 'echo script || echo manual' "$_s" && ! grep -qF 'classifier=manual' "$_s" && ! grep -qF 'classifier-unavailable' "$_s"; then ok; else bad "$(basename "$_s") must fail closed with BLOCKED classifier unavailable and have no manual fallback"; fi
 done
 # (8) fresh-shell reload (forge#3654): the FENCE_BOOTSTRAP lines must reload PR_NUMBER / ALL_PR_NUMBERS from the scratchpad, stay empty (with a warning) when nothing was persisted, and reject a tampered number

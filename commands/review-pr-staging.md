@@ -1106,8 +1106,8 @@ OUT_DIR="$_SD/review-finalize-${PR_NUMBER}"
 SCOPE_FILE="$_SD/${PR_NUMBER}_scope-files.txt"; [ -r "$SCOPE_FILE" ] || SCOPE_FILE=""   # written by 7A only for a scoped review
 PRIOR_PRS=$(printf '%s ' $ALL_PR_NUMBERS)
 # 7B for real: posts FORGE:NOTE_DISPOSITION with the caller's NOTE counts.
-bash "$RF" classify --pr "$PR_NUMBER" --repo "$GH_REPO" --context "$CTX" --out-dir "$OUT_DIR" --auto-merge false ${SCOPE_FILE:+--scope-files "$SCOPE_FILE"} --prior-prs "$PRIOR_PRS" \
-  --notes-fixed 0 --notes-dropped "${NOTES_DROPPED:-0}"; RC=$?
+bash "$RF" classify --pr "$PR_NUMBER" --repo "$GH_REPO" --context "$CTX" --out-dir "$OUT_DIR" ${SCOPE_FILE:+--scope-files "$SCOPE_FILE"} --prior-prs "$PRIOR_PRS" \
+  --auto-merge false --notes-fixed 0 --notes-dropped "${NOTES_DROPPED:-0}"; RC=$?   # never merges here (staging deploy is gated separately) allowlist:check-command-side-effects
 [ "$RC" -eq 0 ] || exit 1   # STOP: REVIEW_RESULT: status: BLOCKED was printed
 PATTERNS_FILE="$OUT_DIR/patterns.json"; [ -s "$PATTERNS_FILE" ] || PATTERNS_FILE=""
 bash "$RF" file-prepare --pr "$PR_NUMBER" --repo "$GH_REPO" --context "$CTX" --out-dir "$OUT_DIR" ${PATTERNS_FILE:+--patterns "$PATTERNS_FILE"}; RC=$?
