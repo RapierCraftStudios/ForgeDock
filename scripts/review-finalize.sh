@@ -1313,7 +1313,7 @@ Re-run each missing phase via its Skill (see the \`->\` action on each MISSING l
         # previously-escalated guard (#3919).
         gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "⏳ Auto-merge deferred for PR #${PR_NUMBER}: CI checks still pending after the wait window (ci gate rc=3). Re-run the merge gate once they finish; nothing to fix." 2>/dev/null || true # allowlist:check-command-side-effects
         echo "MERGE_OUTCOME=ci-pending"
-        blocked "ci gate timeout (checks still pending) — re-run once CI finishes"
+        blocked "checks still pending after the wait window (timeout) — re-run the merge once CI finishes"
     elif [ "$CI_GATE_RC" -ne 0 ]; then
         CI_MSG="⛔ Auto-merge refused for PR #${PR_NUMBER}: CI is not green (ci gate rc=${CI_GATE_RC}). The PR stays open; fix the failing checks on its branch (remediation treats this as FIXABLE) or re-run flaky ones.
 \`\`\`
