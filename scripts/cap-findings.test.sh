@@ -106,6 +106,10 @@ if [ "$out" = "a${T}NOTE stale" ]; then pass=$((pass+1)); else fail=$((fail+1));
 # --- Severity text noise never demotes HIGH/CRITICAL (classifier strips whitespace and uppercases) ---
 expect "whitespace/markdown HIGH still uncapped at cap 0" "a=ISSUE b=ISSUE c=ISSUE d=NOTE(capped) CAPPED=1" --cap 0 -- \
   "a:HIGH :CONFIRMED:ISSUE~severity-HIGH" 'b:**HIGH**:CONFIRMED:ISSUE~severity-HIGH' c:High:LIKELY:ISSUE~severity-HIGH d:MEDIUM:LIKELY:ISSUE~x
+expect "fix-efficacy ISSUE rows are never capped (#3857 exemption survives the cap)" "a=ISSUE b=ISSUE c=NOTE(capped) CAPPED=1" --cap 1 -- \
+  a:MEDIUM:LIKELY:ISSUE~fix-efficacy-fails b:MEDIUM:CONFIRMED:ISSUE~x c:MEDIUM:LIKELY:ISSUE~x
+expect "lineage: fix-efficacy beats an unrelated CONFIRMED MEDIUM and consumes the budget" "a=NOTE(capped) b=ISSUE CAPPED=1" --lineage review-finding -- \
+  a:MEDIUM:CONFIRMED:ISSUE~lineage-medium-CONFIRMED b:MEDIUM:LIKELY:ISSUE~fix-efficacy-regresses
 expect "classifier severity-HIGH/CRITICAL reason is never capped" "a=ISSUE b=ISSUE CAPPED=0" --cap 0 -- \
   "a:weird:CONFIRMED:ISSUE~severity-HIGH" "b:weird:CONFIRMED:ISSUE~severity-CRITICAL"
 expect "lineage budget counts noisy HIGH" "a=ISSUE b=NOTE(capped) CAPPED=1" --cap 1 --lineage review-finding -- \
