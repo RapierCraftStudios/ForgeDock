@@ -155,9 +155,18 @@ Run after quality gate passes. All tool commands are read from `forge.yaml → v
 
 **Scratch placement (venvs, caches)** <!-- Added: forge#3572 -->: any virtualenv, package cache or other large scratch data a verification command needs goes under `"$TMPDIR/forge-venv-{NUMBER}"` (the engine exports a per-run, disk-backed `TMPDIR`) or inside the worktree, never a literal `/tmp/<name>` path. A size-limited `/tmp` fails concurrent lanes with EDQUOT/ENOSPC. Remove what you created when validation finishes.
 
-**Track skipped checks** — initialize before any check runs:
+**Track skipped and degraded checks** — initialize before any check runs. `SKIPPED_CHECKS` is advisory (an unconfigured check). `DEGRADED_CHECKS` is a different state: a check that was configured or required but demonstrably verified nothing (a test run that ran nothing, a known-slow `skip`, V4.5 `DEGRADED`). It is carried to the merge gate (V5, `gate_status`). <!-- Added: forge#3628 -->
 ```bash
 SKIPPED_CHECKS=""
+DEGRADED_CHECKS=""   # "name — reason; name — reason"; never mixed into SKIPPED_CHECKS
+
+# degrade_check <name> <reason> — record a degraded check and print the carry-forward line (each Bash call is a fresh shell).
+degrade_check() {
+    local name="${1}" reason
+    reason=$(printf '%s' "${2}" | tr -d ';\r\n')
+    DEGRADED_CHECKS="${DEGRADED_CHECKS:+$DEGRADED_CHECKS; }${name} — ${reason}"
+    echo "DEGRADED_CHECKS+=${name} — ${reason}"
+}
 
 # Verification commands are project configuration; bound each one so a stalled
 # formatter, typechecker, or build cannot block validation indefinitely.
@@ -274,36 +283,76 @@ apply_known_slow_filter() {
 }
 ```
 
-### Learned test commands <!-- Added: forge#667, forge#1861 -->
+### Test commands: classified runs <!-- Added: forge#667, forge#1861, forge#3628 -->
 
-After all `verification.commands` steps complete, run any commands from `forge.yaml → learned.test_commands` (captured from owner corrections or set manually), filtered through the known-slow gate above. This phase reads `learned:` itself — no value is passed in from the caller.
+After all format/typecheck steps complete, run every test command: `forge.yaml → verification.commands.<lang>.test` (when configured) and every `forge.yaml → learned.test_commands` entry (captured from owner corrections or set manually), each filtered through the known-slow gate above. This phase reads `learned:` itself, no value is passed in from the caller.
+
+A non-zero exit is a real failure and BLOCKING. A zero exit is not proof the tests ran: every test command's exit code and captured output go through `scripts/classify-test-run.sh <exit_code> <output_file>`, which prints `RAN`, `RAN_NOTHING` or `FAILED`. `RAN_NOTHING` (pytest exit 5, "no tests ran/collected", every collected test skipped, or an unreachable DB/service that turned tests into skips) is NOT a pass: the command is recorded in `DEGRADED_CHECKS` and the build continues as DEGRADED. A command skipped by the known-slow gate (`skip: true`) is also recorded in `DEGRADED_CHECKS`. Only test commands are classified; format, typecheck and build commands never are, so a docs-only repo never gets a false DEGRADED. The classifier resolves from `FORGE_ROOT` (never the worktree); an unresolvable classifier is DEGRADED for that command, never a pass.
 
 ```bash
 cd {WORKTREE_PATH}
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+CLASSIFY_SCRIPT=$(forge_resolve classify-test-run.sh)
 FORGE_CFG=forge.yaml; [ -f "$FORGE_CFG" ] || { _gcd=$(git rev-parse --git-common-dir 2>/dev/null) && _gcd=$(cd "$_gcd" 2>/dev/null && pwd) && [ -f "${_gcd%/.git}/forge.yaml" ] && FORGE_CFG="${_gcd%/.git}/forge.yaml"; }  # gitignored forge.yaml exists only in the main checkout, not in worktrees
-LEARNED_TEST_COMMANDS=$(yq -o=json -I=0 '.learned.test_commands // []' "$FORGE_CFG" 2>/dev/null || echo '[]')
+TEST_FAILED=0
 LEARNED_FAILED=0
+
+# run_classified_test <label> <command> — runs one test command, prints its tail, classifies the run.
+# Sets TEST_FAILED=1 on FAILED (or any non-zero exit); records DEGRADED_CHECKS on RAN_NOTHING or an unresolvable classifier.
+run_classified_test() {
+    local label="${1}" cmd="${2}" out_file cls
+    out_file=$(mktemp "${TMPDIR:-/tmp}/forge-test-run.XXXXXX")
+    run_verification_command "$label" "$cmd" > "$out_file" 2>&1
+    CMD_EXIT=$?
+    tail -30 "$out_file"
+    if [ "$CMD_EXIT" -ne 0 ] && [ "$CMD_EXIT" -ne 5 ]; then
+        echo "FAILED (exit $CMD_EXIT): $cmd"
+        TEST_FAILED=1
+    elif [ -z "$CLASSIFY_SCRIPT" ]; then
+        degrade_check "$label" "classify-test-run.sh not found under FORGE_ROOT; could not confirm tests ran"
+    else
+        cls=$(bash "$CLASSIFY_SCRIPT" "$CMD_EXIT" "$out_file" 2>/dev/null) || cls=""
+        case "$cls" in
+            RAN) ;;
+            RAN_NOTHING) degrade_check "$label" "test run exercised nothing (exit ${CMD_EXIT}: no tests ran, all skipped, or service unavailable)" ;;
+            FAILED) echo "FAILED (exit $CMD_EXIT): $cmd"; TEST_FAILED=1 ;;
+            *) degrade_check "$label" "classify-test-run.sh returned no classification" ;;
+        esac
+    fi
+    rm -f "$out_file"
+}
+
+# verification.commands.<lang>.test (when configured)
+for _lang in python typescript; do
+    TEST_CMD=$(yq ".verification.commands.${_lang}.test // \"\"" "$FORGE_CFG" 2>/dev/null || echo '')
+    [ -n "$TEST_CMD" ] || continue
+    FILTERED_CMD=$(apply_known_slow_filter "$TEST_CMD")
+    if [ -z "$FILTERED_CMD" ]; then degrade_check "${_lang}.test" "skipped by verification.known_slow_tests"; continue; fi
+    echo "Running ${_lang}.test: $FILTERED_CMD"
+    run_classified_test "${_lang}.test" "$FILTERED_CMD"
+done
+
+# learned.test_commands
+LEARNED_TEST_COMMANDS=$(yq -o=json -I=0 '.learned.test_commands // []' "$FORGE_CFG" 2>/dev/null || echo '[]')
 if [ -n "$LEARNED_TEST_COMMANDS" ] && [ "$LEARNED_TEST_COMMANDS" != "[]" ] && [ "$LEARNED_TEST_COMMANDS" != "null" ]; then
   echo "Running learned test commands..."
+  LEARNED_IDX=0
   while IFS= read -r cmd; do
     [ -z "$cmd" ] && continue
+    LEARNED_IDX=$((LEARNED_IDX+1))
     FILTERED_CMD=$(apply_known_slow_filter "$cmd")
-    [ -z "$FILTERED_CMD" ] && continue
+    if [ -z "$FILTERED_CMD" ]; then degrade_check "learned.test_commands[${LEARNED_IDX}]" "skipped by verification.known_slow_tests"; continue; fi
     echo "Running learned command: $FILTERED_CMD"
-    CMD_OUTPUT=$(run_verification_command "learned.test_commands" "$FILTERED_CMD")
-    CMD_EXIT=$?
-    echo "$CMD_OUTPUT" | tail -30
-    if [ "$CMD_EXIT" -ne 0 ]; then
-      echo "FAILED (exit $CMD_EXIT): $FILTERED_CMD"
-      LEARNED_FAILED=1
-    fi
+    run_classified_test "learned.test_commands[${LEARNED_IDX}]" "$FILTERED_CMD"
   done < <(echo "$LEARNED_TEST_COMMANDS" | yq -r '.[]' 2>/dev/null)
 else
   echo "No learned test commands configured — skipping"
 fi
+[ "$TEST_FAILED" -eq 1 ] && LEARNED_FAILED=1
+echo "TEST_FAILED=${TEST_FAILED}"
 ```
 
-Learned test command failures (`LEARNED_FAILED=1`) are BLOCKING (same as `verification.commands` failures) — fix and re-run. A command matched and skipped by the known-slow gate is never executed and never counted as a failure.
+Test command failures (`TEST_FAILED=1`, also reported as `LEARNED_FAILED=1`) are BLOCKING (same as `verification.commands` failures): fix and re-run. A command matched and skipped by the known-slow gate is never executed and never counted as a failure, but it is DEGRADED, not verified. Each `DEGRADED_CHECKS+=` line printed here is a carry-forward line: record it in your notes, V5 Step 1 and Step 4 rebuild `DEGRADED_CHECKS` from them (a fresh shell does not keep the variable).
 
 ---
 
@@ -516,8 +565,8 @@ The architect records the caller and sibling sweep as a machine-readable manifes
 
 - **Trust**: the manifest drives a gate, so it is read only from the newest comment that `trusted-comments.sh` accepts (the same trust predicate as the phase-trail verifier). An untrusted comment is never parsed.
 - **Install root only**: both scripts resolve from `FORGE_ROOT` and never from the worktree, because the branch under audit must not supply its own gate. An unresolvable script is DEGRADED, never a pass.
-- **Exit codes**: `0` covered or no manifest (SKIP); `1` an `UNLISTED:` or `NOT_DONE:` line was printed, so set `GATE_PASSED=false`, fix the code (or add a justified `verified-unaffected` row to the plan by editing the FORGE:ARCHITECT comment; never delete a row), and re-run V1 onward; anything else, a failed fetch, or an unresolvable script is DEGRADED: append `blast-radius` to `SKIPPED_CHECKS` so it appears in `verification_skipped`, and print the reason. DEGRADED never passes silently and a failed fetch is never treated as "no manifest".
-- **Carry-forward**: each Bash call is a fresh shell, so V4.5's variables do not reach V5. The block prints its result as explicit lines: `BLAST_RADIUS_STATE: <PASS|SKIP|FAIL|DEGRADED>`, plus `GATE_PASSED: false` on FAIL and `SKIPPED_CHECKS+=blast-radius` on DEGRADED. Record those lines in your notes; V5 Step 1 sets `GATE_PASSED` and V5 Step 4 sets `SKIPPED_CHECKS` from them, alongside the V2 notes.
+- **Exit codes**: `0` covered or no manifest (SKIP); `1` an `UNLISTED:` or `NOT_DONE:` line was printed, so set `GATE_PASSED=false`, fix the code (or add a justified `verified-unaffected` row to the plan by editing the FORGE:ARCHITECT comment; never delete a row), and re-run V1 onward; anything else, a failed fetch, or an unresolvable script is DEGRADED: record `blast-radius` in `DEGRADED_CHECKS` (not the advisory `SKIPPED_CHECKS`) with the reason, so the merge gate sees it. DEGRADED never passes silently and a failed fetch is never treated as "no manifest".
+- **Carry-forward**: each Bash call is a fresh shell, so V4.5's variables do not reach V5. The block prints its result as explicit lines: `BLAST_RADIUS_STATE: <PASS|SKIP|FAIL|DEGRADED>`, plus `GATE_PASSED: false` on FAIL and `DEGRADED_CHECKS+=blast-radius — <reason>` on DEGRADED. Record those lines in your notes; V5 Step 1 sets `GATE_PASSED` and `DEGRADED_CHECKS` from them, alongside the V2 notes.
 
 ```bash
 cd {WORKTREE_PATH}
@@ -564,8 +613,8 @@ echo "BLAST_RADIUS_STATE: ${BR_STATE}"
 if [ "$BR_STATE" = "FAIL" ]; then
   echo "GATE_PASSED: false"
 elif [ "$BR_STATE" = "DEGRADED" ]; then
-  SKIPPED_CHECKS="${SKIPPED_CHECKS:+$SKIPPED_CHECKS, }blast-radius"
-  echo "SKIPPED_CHECKS+=blast-radius"
+  # self-contained (fresh shell): same line format as V2's degrade_check
+  echo "DEGRADED_CHECKS+=blast-radius — $(printf '%s' "${BR_NOTE:-blast-radius check did not complete}" | tr -d ';\r\n')"
 fi
 ```
 
@@ -648,9 +697,14 @@ The quality gate must leave a checkable artifact. `scripts/verify-phase-trail.sh
 
 Set `GATE_PASSED` from the V1 loop result, then apply the printed carry-forward lines of V4.5 and V4.6: if either printed `GATE_PASSED: false` (`BLAST_RADIUS_STATE: FAIL` or `CONSUMER_SWEEP_STATE: FAIL`), `GATE_PASSED` is `false` here even if the V1 loop passed.
 
+Rebuild `DEGRADED_CHECKS` from every `DEGRADED_CHECKS+=<name> — <reason>` line printed by V2 and V4.5 (joined with `; `, empty when none). `GATE_STATUS` is `FAIL` when `GATE_PASSED` is false, `DEGRADED` when it is true and `DEGRADED_CHECKS` is non-empty, else `PASS`. The marker keeps `**Result**: PASS` for a DEGRADED gate (the build still completes) and adds the `**Degraded**:` line; the merge gate (`scripts/review-finalize.sh`) reads it. Check names contain no ` — ` and no `;`. <!-- Added: forge#3628 -->
+
 ```bash
 # GATE_PASSED: set from the V1 loop result, and forced to false when V4.5 or V4.6 printed "GATE_PASSED: false"
 GATE_RESULT=$([ "$GATE_PASSED" = "true" ] && echo PASS || echo FAIL)
+# DEGRADED_CHECKS: set from the V2/V4.5 carry-forward lines, e.g. DEGRADED_CHECKS="python.test — test run exercised nothing; blast-radius — check unavailable"
+DEGRADED_CHECKS="${DEGRADED_CHECKS:-}"
+GATE_STATUS=$([ "$GATE_PASSED" != "true" ] && echo FAIL || { [ -n "$DEGRADED_CHECKS" ] && echo DEGRADED || echo PASS; })
 # Bind the PASS to what was actually gated: the staged tree is exactly the tree the V5 commit will have.
 # scripts/verify-phase-trail.sh --head-tree (work-on/review.md R1.5) rejects a PASS recorded for a different tree. <!-- Added: forge#3149 -->
 git -C {WORKTREE_PATH} add -u   # same staging as the commit below; valid only because V2-V4 are done
@@ -662,7 +716,8 @@ QG_BODY="<!-- FORGE:QUALITY_GATE -->
 **Tree**: ${GATE_TREE}
 **Iterations**: {N}
 **Commands run**: {quality-gate invocation, format/verify commands, test commands actually executed}
-**Findings remaining**: {none | summary}"
+**Findings remaining**: {none | summary}
+**Degraded**: ${DEGRADED_CHECKS:-none}"
 gh issue comment {NUMBER} {GH_FLAG} --body "$QG_BODY" # allowlist:check-command-side-effects
 ```
 
@@ -761,18 +816,20 @@ If the output contains `ANCESTRY_FAILED=1`: do NOT append `:COMPLETE` and do NOT
 
 After the ancestry audit passes (or is skipped), patch the existing FORGE:BUILDER comment: add the `**Verification Status**` line, the best-effort `cost_usd:` line, and the `<!-- FORGE:BUILDER:COMPLETE -->` marker. This is the **only** place the marker is written — it signals that a real commit exists on the branch and the build is safe to resume-skip. <!-- Added: forge#1305 -->
 
-`SKIPPED_CHECKS` comes from Phase V2, Phase V4.5 and Phase V4.6. Shell state may not persist between Bash calls, so set it here from your V2 notes before running the block (comma-separated check names, empty when every configured check ran), append `blast-radius` when V4.5 printed `SKIPPED_CHECKS+=blast-radius` (`BLAST_RADIUS_STATE: DEGRADED`), and append `consumer-sweep` when V4.6 printed `SKIPPED_CHECKS+=consumer-sweep` (`CONSUMER_SWEEP_STATE: DEGRADED`).
+`SKIPPED_CHECKS` comes from Phase V2 (unconfigured checks) and Phase V4.6. Shell state may not persist between Bash calls, so set it here from your V2 notes before running the block (comma-separated check names, empty when every configured check ran), and append `consumer-sweep` when V4.6 printed `SKIPPED_CHECKS+=consumer-sweep` (`CONSUMER_SWEEP_STATE: DEGRADED`). `DEGRADED_CHECKS` (V2 test runs that ran nothing, known-slow skips, V4.5 `DEGRADED`) is the same list posted in V5 Step 1; it is never merged into `SKIPPED_CHECKS`.
 
 **Cost line reconciliation**: the machine-readable `cost_usd:` line (best-effort; only when `PHASE_COST_USD` is available, never blocking) is the single cost signal. Do not add a separate `**Cost (build phase)**` line.
 
 ```bash
-# SKIPPED_CHECKS: set from the V2 notes plus the V4.5 and V4.6 carry-forward lines, e.g. SKIPPED_CHECKS="python.format, blast-radius, consumer-sweep"
+# SKIPPED_CHECKS: set from the V2 notes plus the V4.6 carry-forward line, e.g. SKIPPED_CHECKS="python.format, consumer-sweep"
 SKIPPED_CHECKS="${SKIPPED_CHECKS:-}"
+DEGRADED_CHECKS="${DEGRADED_CHECKS:-}"   # same value as V5 Step 1
 if [ -z "$SKIPPED_CHECKS" ]; then
   VERIFICATION_STATUS="✅ All configured verification commands passed"
 else
   VERIFICATION_STATUS="⚠ Verification NOT run: ${SKIPPED_CHECKS} — verification.commands not configured for these checks"
 fi
+[ -z "$DEGRADED_CHECKS" ] || VERIFICATION_STATUS="${VERIFICATION_STATUS}; ⚠ DEGRADED (ran nothing, review must cover these paths): ${DEGRADED_CHECKS}"
 
 # Find the FORGE:BUILDER comment posted by implement.md Phase I6
 # Anchored, trusted, single-match selector (forge#3668): zero/many/unparsable → empty → append skipped.
@@ -821,9 +878,11 @@ VALIDATE_RESULT:
   deploy_completeness_fixes: [{VAR_NAME: location_added}, ...]
   commits_added: [{SHA}, ...]  # from V5 if any
   blocker: {description if gate_passed=false}
-  verification_skipped: []  # empty when all configured checks ran; list of skipped check names otherwise
+  gate_status: PASS | DEGRADED | FAIL  # FAIL iff gate_passed=false; DEGRADED when DEGRADED_CHECKS is non-empty (V5 Step 1)
+  degraded_checks: []       # check names from DEGRADED_CHECKS (test run ran nothing, known-slow skip, blast-radius DEGRADED); empty on PASS
+  verification_skipped: []  # empty when all configured checks ran; list of skipped (unconfigured) check names otherwise
                             # e.g. ["python.format", "typescript.typecheck/build"]
-                            # populated from SKIPPED_CHECKS in Phase V2, V4.5 and V4.6
+# populated from SKIPPED_CHECKS in Phase V2 and V4.6
 ```
 
 ---
@@ -835,7 +894,7 @@ This module is invoked by `work-on:build` after implement and before review:
 ```
 implement (work-on:build:implement) — code written, staged (not committed), FORGE:BUILDER posted
   → [THIS MODULE] validate
-      V0 self-check → V1 quality-gate loop (Skill quality-gate, forked) → V2 format/verify + known-slow/learned tests
+      V0 self-check → V1 quality-gate loop (Skill quality-gate, forked) → V2 format/verify + classified test runs (classify-test-run.sh) + known-slow/learned tests
       → V3 proxy wiring → V3.5 DB advisory → V3.6 browser signals → V4 deploy completeness
       → V4.5 blast-radius manifest check (check-blast-radius.sh, install-root only)
       → V4.6 consumer sweep (consumer-sweep.sh, install-root only)

@@ -573,6 +573,8 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
   gh pr edit {PR_NUMBER} {GH_FLAG} --remove-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
   ```
 
+- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "degraded-gate-unreviewed" (the build gate was DEGRADED, a check ran nothing, and no trusted `### Degraded Paths Reviewed` PR section names every degraded check; forge#3628): do NOT merge by any other route, and do NOT leave `needs-human` because of this gate on the first pass. Remove the `needs-human` that Phase 8 set, then re-review once on its own bound (forge#3996; never the `STALE_REREVIEW` bound, which other causes consume): count `<!-- FORGE:DEGRADED_REREVIEW: pr={PR_NUMBER} -->` (the `DEGRADED_REREVIEW` bound below), post the marker, and re-invoke Phase R3 once so `/review-pr` reads the degraded list from the issue's FORGE:QUALITY_GATE and adds the section. If the bound is already used, add `needs-human` and return `REVIEW_RESULT: status: BLOCKED`, blocker "degraded-gate-unreviewed after re-review".
+
 - `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "checks still pending" (Phase 8 merge-gate timed out while CI was still running; nothing failed, #3919): do NOT remediate and do NOT add `needs-human`. Return that BLOCKED result unchanged so the caller retries the review phase, whose merge gate re-runs once CI finishes. The engine (`forgedock run-issue`) is that caller: it recognises the blocker, polls CI with `scripts/wait-ci-green.sh` and backoff (no model calls, bounded by `engine.ci_pending_max_minutes`, default 90), then re-dispatches this review phase once; budget exhaustion ends `needs-human` with `review.ci_pending_timeout`. The router and interactive caller path is unchanged.
 
 - `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "ci gate" (Phase 8 refused to merge because checks failed or were cancelled): do NOT attempt the manual merge below — that would bypass the CI gate. Fixing red CI is pipeline work, not a human decision: hand remediation to the router **once**. Bound: count `<!-- FORGE:CI_REMEDIATION: pr={PR_NUMBER} -->` comments on the issue first; if ≥ 1, do not remediate again — remove `workflow:remediating`, label the issue `needs-human` (the bound is exhausted, so a human is now genuinely needed) and return `REVIEW_RESULT: status: BLOCKED` with blocker "ci gate not green after remediation". Otherwise run the remediation-pending handoff block above (sets `workflow:remediating`, removes the `needs-human` that Phase 8 set) and return `REVIEW_RESULT: status: NEXT` with `next: remediate` and `remediation: ci-gate` (see Output). Do not post the marker here: the router posts it immediately before it invokes remediation (Phase 4R), so a handoff interrupted before remediation starts is retried instead of being counted as used. **Never invoke `work-on:remediate` from this phase** (forge#3398): remediation re-reviews through `/review-pr`, which spawns domain-reviewer sub-agents, so it must run one level below the router, not nested inside this fork. Nested here, it lands at the sub-agent depth limit under `/orchestrate` with no `Agent` tool and strands the PR at `REREVIEW-REQUIRED` (forge#3391). The router runs `work-on:remediate`, which classifies a CI-gate refusal as FIXABLE, swaps `workflow:remediating` (or a legacy `needs-human`) for `workflow:in-review`, fixes the failing jobs on the PR branch, re-runs the quality gate and re-reviews the new head (scoped by /review-pr: full, delta or carried forward), and auto-lands through the same CI gate. <!-- forge#3191 -->
@@ -587,27 +589,19 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 In-PR fix round did not land; the remaining CONFIRMED MEDIUM findings are filed as issues on the next review instead of blocking the merge." # allowlist:check-command-side-effects
     ```
 
-  Persisted loop bounds for the cases above — count first, then act (`{BOUND}` is `STALE_REREVIEW`, `CI_REMEDIATION`, `INPR_REMEDIATION` or `BASESYNC_REMEDIATION`). This phase posts only the `STALE_REREVIEW` marker; `CI_REMEDIATION`, `INPR_REMEDIATION` and `BASESYNC_REMEDIATION` are posted by the router in Phase 4R, immediately before it invokes remediation (forge#3398):
+  Persisted loop bounds for the cases above — count first, then act (`{BOUND}` is `STALE_REREVIEW`, `DEGRADED_REREVIEW`, `CI_REMEDIATION`, `INPR_REMEDIATION` or `BASESYNC_REMEDIATION`). This phase posts only the `STALE_REREVIEW` and `DEGRADED_REREVIEW` markers; `CI_REMEDIATION`, `INPR_REMEDIATION` and `BASESYNC_REMEDIATION` are posted by the router in Phase 4R, immediately before it invokes remediation (forge#3398):
   ```bash
   [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] bound check only"; }
-  if [ "{BOUND}" = "STALE_REREVIEW" ]; then
-    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
-      --jq '[.[] | select((.body | contains("FORGE:STALE_REREVIEW:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
-  elif [ "{BOUND}" = "INPR_REMEDIATION" ]; then
-    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
-      --jq '[.[] | select((.body | contains("FORGE:INPR_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
-  elif [ "{BOUND}" = "BASESYNC_REMEDIATION" ]; then
-    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
-      --jq '[.[] | select((.body | contains("FORGE:BASESYNC_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
-  else
-    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
-      --jq '[.[] | select((.body | contains("FORGE:CI_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
-  fi
+  BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
+    --jq '[.[] | select((.body | contains("FORGE:{BOUND}:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
   if [ "$BOUND_COUNT" -ge 1 ]; then
     echo "BOUND_EXHAUSTED: {BOUND} already used for PR #{PR_NUMBER}"
   elif [ "{BOUND}" = "STALE_REREVIEW" ] && [ "${DRY_RUN:-false}" != "true" ]; then
     gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:STALE_REREVIEW: pr={PR_NUMBER} -->
 Stale review on PR #{PR_NUMBER}: quality-gating and re-reviewing the new head once." 2>/dev/null || true
+  elif [ "{BOUND}" = "DEGRADED_REREVIEW" ] && [ "${DRY_RUN:-false}" != "true" ]; then
+    gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:DEGRADED_REREVIEW: pr={PR_NUMBER} -->
+Degraded-gate review on PR #{PR_NUMBER}: re-reviewing once so the review names each degraded check." 2>/dev/null || true
   fi
   ```
   `BOUND_EXHAUSTED` → take the "already ≥ 1" branch of that case.
@@ -616,7 +610,7 @@ Stale review on PR #{PR_NUMBER}: quality-gating and re-reviewing the new head on
   - **Bound unused**: run the remediation-pending handoff block above (set `workflow:remediating`, no `needs-human`; a pure base sync needs no human). Then return `REVIEW_RESULT: status: NEXT` with `next: remediate` and `remediation: base-sync`. The router posts the bound marker (Phase 4R) and runs `work-on:remediate`, which merges the base in, re-runs the quality gate and re-reviews the new head. Never invoke `work-on:remediate` from this phase (same reason as the ci-gate case).
   - **Bound already used** (the sync ran and the PR still conflicts, or the sync could not resolve a hunk): do not sync again. Remove `workflow:remediating`, label the issue `needs-human` (a genuine human decision now) and return `REVIEW_RESULT: status: BLOCKED` with blocker "base conflict persists after base-sync remediation". List the conflicting files in the issue comment you post, taken from the remediation's `FORGE:BASESYNC_FAILED` comment (the `git diff --name-only --diff-filter=U` list) when present.
 
-- PR NOT MERGED (and not a phase-trail, auto-merge-gate, stale-review, ci-gate, in-pr-fix or base-conflict BLOCKED above) → attempt manual merge, **only if the PR head is still the commit named in the latest `<!-- FORGE:REVIEW -->` APPROVED verdict** (otherwise re-invoke Phase R3 instead, as for "stale review") **and only after the same CI gate**:
+- PR NOT MERGED (and not a phase-trail, auto-merge-gate, stale-review, degraded-gate-unreviewed, ci-gate, in-pr-fix or base-conflict BLOCKED above) → attempt manual merge, **only if the PR head is still the commit named in the latest `<!-- FORGE:REVIEW -->` APPROVED verdict** (otherwise re-invoke Phase R3 instead, as for "stale review") **and only after the same CI gate**:
   ```bash
   # CI gate (MANDATORY before any autonomous merge): merge only when every check on the PR is
   # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch

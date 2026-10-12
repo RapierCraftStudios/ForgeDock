@@ -21,7 +21,7 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 | `review.blocking_issue` | Review left the PR open at an unchanged head with a filed blocking ISSUE and handed off to remediate | review | Trusted `FORGE:NOTE_DISPOSITION` on the PR with `findings_filed` > 0 and `reviewed_sha` equal to the live head |
 | `review.pr_open` | Review ended with the PR open and unmerged and no handoff signal | review | Live PR open, no `REVIEW_RESULT` remediate handoff, no `needs-human`/`workflow:remediating` label, no blocking disposition |
 | `review.ci_pending_timeout` | CI was still pending at the merge gate after the engine's bounded wait (`engine.ci_pending_max_minutes`) ran out | engine | Review ended `REVIEW_RESULT` `status: BLOCKED` with a blocker containing `checks still pending`, and `scripts/wait-ci-green.sh` still reported pending when the budget expired |
-| `build.acceptance_failed` | Newest acceptance gate marker is blocked | build | `FORGE:ACCEPTANCE_GATE:FAILED`/`:BLOCKED` or `FORGE:BUILD_BLOCKED` |
+| `build.acceptance_failed` | Newest acceptance gate marker is blocked | build | `FORGE:ACCEPTANCE_GATE:FAILED`/`:BLOCKED` or `FORGE:BUILD_BLOCKED` (`:DEGRADED` is a pass-class marker, not blocked) |
 | `build.acceptance_malformed` | Acceptance spec was malformed | reserved | Indistinguishable from `build.acceptance_failed` by sentinel alone |
 | `build.size_over_gate` | Retired (forge#3862): the old size gate routed a finished build to decompose; never emitted now, kept so historic runs still parse | reserved | A finished build is never routed to decompose |
 | `build.cohesive` | Retired (forge#3862): the old size gate judged an oversized diff cohesive | reserved | No size gate remains |
