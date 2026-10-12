@@ -3915,3 +3915,67 @@ describe("runIssue — forge#3931: cycle-aware hydration and head-aware --retry"
     });
   });
 });
+
+// CI still pending at the merge gate: the engine polls CI (no model), then re-dispatches review once.
+describe("runIssue — CI pending at the merge gate", () => {
+  const run = (extra) => runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", now: () => 1000, maxAttempts: 2, ...extra });
+  const PENDING = "REVIEW_RESULT:\n  status: BLOCKED\n  blocker: checks still pending after the wait window\n";
+  function world(reviewScript) {
+    const { w, io } = fakeWorld();
+    const ran = [];
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 2; },
+      "work-on/review": () => reviewScript(w),
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const runner = async ({ commandName }) => { ran.push(commandName); return { status: "complete", text: script[commandName]() }; };
+    return { w, io, ran, runner };
+  }
+
+  it("pending, then green: re-polls, re-dispatches review once, merges; no remediation, no needs-human", async () => {
+    let reviews = 0;
+    const { io, ran, runner } = world((w) => { reviews++; if (reviews === 1) { w.pr = 7; return PENDING; } w.prMerged = true; return ""; });
+    const polls = [];
+    io.waitCiGreen = async (pr, repo, timeoutSec) => { polls.push({ pr, repo, timeoutSec }); return { rc: polls.length < 3 ? 3 : 0, text: "" }; };
+    const sleeps = [];
+    const telemetry = [];
+    const res = await run({ io, runner, sleep: async (ms) => { sleeps.push(ms); },
+      emitTelemetry: async (r) => { telemetry.push(r); } });
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(ran.filter((c) => c === "work-on/review").length, 2, "review dispatched exactly twice");
+    assert.ok(!ran.includes("work-on/remediate"));
+    assert.deepEqual(polls.map((p) => p.pr), [7, 7, 7]);
+    assert.equal(polls[0].repo, "acme/widgets");
+    assert.deepEqual(sleeps, [120000, 240000], "backoff 2 then 4 minutes");
+    assert.ok(telemetry.some((r) => r.event === "CI_PENDING_WAIT" && r.result === "green" && Number.isFinite(r.minutes_waited)));
+    assert.ok(!w_needsHuman(readLog(dir, 42)));
+  });
+
+  it("pending past the bound: needs-human with review.ci_pending_timeout", async () => {
+    const { io, ran, runner } = world((w) => { w.pr = 7; return PENDING; });
+    io.waitCiGreen = async () => ({ rc: 3, text: "" });
+    const res = await run({ io, runner, sleep: async () => {}, ciPendingMaxMinutes: 20 });
+    assert.equal(res.terminalReason, "needs-human");
+    assert.equal(res.code, "review.ci_pending_timeout");
+    assert.equal(ran.filter((c) => c === "work-on/review").length, 1, "no re-review on timeout");
+    assert.ok(!ran.includes("work-on/remediate"));
+  });
+
+  it("red CI re-dispatches review once so the ci-gate path applies", async () => {
+    let reviews = 0;
+    const { io, ran, runner } = world((w) => { reviews++; w.pr = 7; return reviews === 1 ? PENDING : "REVIEW_RESULT:\n  status: BLOCKED\n  blocker: ci gate\n"; });
+    io.waitCiGreen = async () => ({ rc: 1, text: "" });
+    const res = await run({ io, runner, sleep: async () => {} });
+    assert.equal(ran.filter((c) => c === "work-on/review").length, 2);
+    assert.equal(res.terminalReason, "needs-human");
+    assert.equal(res.code, "review.pr_open");
+  });
+
+  it("without a waitCiGreen seam the original review.pr_open outcome stands", async () => {
+    const { io, runner } = world((w) => { w.pr = 7; return PENDING; });
+    const res = await run({ io, runner });
+    assert.equal(res.code, "review.pr_open");
+  });
+});
+function w_needsHuman(log) { return log.some((e) => e.event === "RUN_TERMINAL" && e.reason === "needs-human"); }
