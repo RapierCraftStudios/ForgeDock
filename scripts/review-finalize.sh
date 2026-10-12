@@ -174,14 +174,15 @@ if [ -n "$CONTEXT" ]; then
     REVIEW_SHA=$(jq -r '.pr.review_sha // empty' "$CONTEXT")
     REVIEW_MODE=$(jq -r '.delta.mode // "FULL"' "$CONTEXT")
     DELTA_FROM=$(jq -r '.delta.from // empty' "$CONTEXT")
-    MERGE_ISSUE=$(jq -r '.contract.issue // empty' "$CONTEXT")
-    case "$MERGE_ISSUE" in *[!0-9]*) MERGE_ISSUE="" ;; esac
+    # Never the context's contract.issue: review-prepare reads it from the PR body (author-controlled), and the fixing
+    # issue drives lineage damping, contract demotion and the cap. Only the invoker's --issue sets it (#3952 SEC-1/QA-2).
+    MERGE_ISSUE=""
     CTX_BASE_BRANCH=$(jq -r '.pr.base_ref // empty' "$CONTEXT")
 fi
-# A staging bundle review (--prior-prs) has no single fixing issue: the context's contract.issue (read from a PR body that lists many) is ignored.
-[ "$BUNDLE" != "true" ] || MERGE_ISSUE=""
 # --issue is the invoker's own --issue (never PR-author text); a non-numeric value is ignored like the context's.
 case "$ISSUE_OPT" in ''|*[!0-9]*) ;; *) MERGE_ISSUE="$ISSUE_OPT" ;; esac
+# A staging bundle review (--prior-prs) has no single fixing issue, whatever was passed.
+[ "$BUNDLE" != "true" ] || MERGE_ISSUE=""
 case "$REVIEW_MODE" in FULL|DELTA|BASE_SYNC_ONLY) ;; *) REVIEW_MODE="FULL" ;; esac
 
 [ -n "$OUT_DIR" ] || OUT_DIR="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/review-finalize-${PR_NUMBER}"
@@ -1002,10 +1003,14 @@ do_calibrate() {
     ISSUE_NUMBER="${MERGE_ISSUE:-}"
     TASK_TYPE=""; CONFIDENCE=""
     if [ -n "$ISSUE_NUMBER" ]; then
-        INVESTIGATOR_BODY=$(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/comments" \
-            --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR"))] | last | .body // ""' 2>/dev/null || echo '')
-        TASK_TYPE=$(printf '%s\n' "$INVESTIGATOR_BODY" | sed -n 's/.*\*\*Task Type\*\*: \(.*\)/\1/p' | head -1 | tr -d ' \r')
-        CONFIDENCE=$(printf '%s\n' "$INVESTIGATOR_BODY" | sed -n 's/.*\*\*Confidence\*\*: \(.*\)/\1/p' | head -1 | tr -d ' \r')
+        # Trusted, anchored INVESTIGATOR only (body starts with the marker; Bot or OWNER/MEMBER/COLLABORATOR): an
+        # outsider's comment that merely mentions the marker must never feed the calibration lookup or the note.
+        INVESTIGATOR_BODY=$(gh api --paginate "repos/${REPO}/issues/${ISSUE_NUMBER}/comments" 2>/dev/null \
+            | jq -rs '[.[][] | select((.body // "") | startswith("<!-- FORGE:INVESTIGATOR")) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR")))] | last | .body // ""' 2>/dev/null || echo '')
+        # Values reach CALIBRATION_NOTE, which the spec substitutes into a shell fence: restrict to a safe charset.
+        TASK_TYPE=$(printf '%s\n' "$INVESTIGATOR_BODY" | sed -n 's/.*\*\*Task Type\*\*: \(.*\)/\1/p' | head -1 | tr -cd 'A-Za-z0-9_-' | cut -c1-40)
+        CONFIDENCE=$(printf '%s\n' "$INVESTIGATOR_BODY" | sed -n 's/.*\*\*Confidence\*\*: \(.*\)/\1/p' | head -1 | tr -cd 'A-Za-z' | tr '[:lower:]' '[:upper:]')
+        case "$CONFIDENCE" in HIGH|MEDIUM|LOW) ;; *) CONFIDENCE="" ;; esac
         echo "Phase 7B.5: task_type=${TASK_TYPE:-unknown} confidence=${CONFIDENCE:-unknown} (from issue #${ISSUE_NUMBER})"
     fi
     if [ -n "${TASK_TYPE:-}" ] && [ -n "${CONFIDENCE:-}" ]; then
@@ -1056,6 +1061,9 @@ do_calibrate() {
     fi
     echo "CALIBRATION_NEEDS_HUMAN=${CALIBRATION_NEEDS_HUMAN}"
     echo "CALIBRATION_CELL=${CALIBRATION_CELL}"
+    # The orchestrator substitutes this line into a single-quoted shell assignment (review-pr.md Phase 8): never emit
+    # a quote, backtick, dollar sign, backslash or newline (#3918 class).
+    CALIBRATION_NOTE=$(printf '%s' "$CALIBRATION_NOTE" | tr -d "'\`\$\\\\" | tr '\r\n' '  ')
     echo "CALIBRATION_NOTE=${CALIBRATION_NOTE}"
     exit 0
 }
@@ -1299,6 +1307,13 @@ Re-run each missing phase via its Skill (see the \`->\` action on each MISSING l
         # Not a human problem: the caller re-runs /review-pr on the new head (work-on/review.md R4).
         echo "MERGE_OUTCOME=stale-review"
         blocked "stale review — ${CI_GATE_OUT}; re-run /review-pr on the new head"
+    elif [ "$CI_GATE_RC" -eq 3 ]; then
+        # TIMEOUT = checks still pending, not failing (wait-ci-green.sh rc=3). Not a human problem: no needs-human label,
+        # so the documented re-run (or engine retry) merges once CI is green instead of parking behind the
+        # previously-escalated guard (#3919).
+        gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "⏳ Auto-merge deferred for PR #${PR_NUMBER}: CI checks still pending after the wait window (ci gate rc=3). Re-run the merge gate once they finish; nothing to fix." 2>/dev/null || true # allowlist:check-command-side-effects
+        echo "MERGE_OUTCOME=ci-pending"
+        blocked "ci gate timeout (checks still pending) — re-run once CI finishes"
     elif [ "$CI_GATE_RC" -ne 0 ]; then
         CI_MSG="⛔ Auto-merge refused for PR #${PR_NUMBER}: CI is not green (ci gate rc=${CI_GATE_RC}). The PR stays open; fix the failing checks on its branch (remediation treats this as FIXABLE) or re-run flaky ones.
 \`\`\`

@@ -442,14 +442,27 @@ BASELINE_RESULTS=""
 # Use a detached worktree at the base branch — never stash/checkout in the main checkout
 BASE_WT=$(mktemp -d)
 git -C "$REPO_PATH" worktree add --detach "$BASE_WT" "origin/${BASE_BRANCH}" 2>/dev/null \
-  || { echo "WARNING: could not create baseline worktree — baseline unavailable"; rmdir "$BASE_WT" 2>/dev/null; BASE_WT=""; }
+  || { echo "WARNING: could not create baseline worktree — baseline unavailable (failures will count as batch-introduced)"; rmdir "$BASE_WT" 2>/dev/null; BASE_WT=""; }
+# A fresh worktree has no installed deps or local env files: link the main checkout's (read-only use), at the repo
+# root and in every cluster working_dir, so a baseline cluster fails only for code reasons, never for a missing install.
+if [ -n "$BASE_WT" ]; then
+  for _wd in . $(yq '.verification.integration_tests[].working_dir // "."' "$CONFIG_FILE" 2>/dev/null | sort -u); do
+    for _dep in node_modules .venv venv .env .env.local .env.test; do
+      [ -e "${REPO_PATH}/${_wd}/${_dep}" ] && [ ! -e "${BASE_WT}/${_wd}/${_dep}" ] && [ -d "${BASE_WT}/${_wd}" ] \
+        && ln -s "${REPO_PATH}/${_wd}/${_dep}" "${BASE_WT}/${_wd}/${_dep}"
+    done
+  done
+fi
 
 for i in $(seq 0 $((CLUSTER_COUNT - 1))); do
   CLUSTER=$(yq ".verification.integration_tests[${i}].cluster" "$CONFIG_FILE")
   CMD=$(yq ".verification.integration_tests[${i}].command" "$CONFIG_FILE")
   WORKING_DIR=$(yq ".verification.integration_tests[${i}].working_dir // \".\"" "$CONFIG_FILE")
 
-  if [ -n "$BASE_WT" ] && (cd "${BASE_WT}/${WORKING_DIR}" && eval "$CMD") 2>&1; then
+  if [ -z "$BASE_WT" ]; then
+    # No baseline: never claim pre-existing. A bundle failure in this cluster counts as batch-introduced (fail closed).
+    BASELINE_RESULTS="${BASELINE_RESULTS}\n- ${CLUSTER}: UNAVAILABLE"
+  elif (cd "${BASE_WT}/${WORKING_DIR}" && eval "$CMD") 2>&1; then
     BASELINE_RESULTS="${BASELINE_RESULTS}\n- ${CLUSTER}: PASS"
   else
     BASELINE_RESULTS="${BASELINE_RESULTS}\n- ${CLUSTER}: FAIL (pre-existing)"
@@ -477,10 +490,10 @@ while IFS= read -r result_line; do
   if echo "$STATUS" | grep -q "^FAIL"; then
     # Check if this cluster also failed in baseline
     BASELINE_STATUS=$(echo -e "$BASELINE_RESULTS" | grep "^- ${CLUSTER}:" | grep -oP ':\s+\K.+' || echo "PASS")
-    if echo "$BASELINE_STATUS" | grep -q "^PASS"; then
-      # This cluster passed in baseline but fails in the bundle — batch-introduced failure
+    if ! echo "$BASELINE_STATUS" | grep -q "^FAIL"; then
+      # Baseline PASS (or UNAVAILABLE: no proof it was pre-existing) but fails in the bundle — batch-introduced failure
       BATCH_FAILURES="${BATCH_FAILURES}\n${CLUSTER}"
-      echo "BATCH-INTRODUCED FAILURE: cluster '${CLUSTER}' (baseline: PASS → bundle: FAIL)"
+      echo "BATCH-INTRODUCED FAILURE: cluster '${CLUSTER}' (baseline: ${BASELINE_STATUS} → bundle: FAIL)"
     else
       echo "PRE-EXISTING FAILURE: cluster '${CLUSTER}' (baseline: FAIL → bundle: FAIL — not this batch)"
     fi

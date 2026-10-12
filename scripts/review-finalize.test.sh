@@ -95,6 +95,8 @@ mkctx() {   # mkctx [sv] [mode] [from] [issue]
     jq -n --arg sha "${SHA_OVERRIDE:-$SHA}" --argjson sv "${1:-1}" --arg mode "${2:-FULL}" --arg from "${3:-}" --arg issue "${4:-}" \
         '{schema_version: $sv, status: "OK", blockers: [], pr: {number: 7, repo: "o/r", review_sha: $sha, base_ref: "main"},
           delta: {mode: $mode, from: $from}, contract: {issue: ($issue | tonumber? // null), flags: ""}}' > "$CTXF"
+    # The specs pass the fixing issue explicitly (--issue "$MERGE_ISSUE"); review-finalize never reads it from the context (#3952).
+    CTX_ISSUE="${4:-}"
 }
 
 # comment builders: cm <association> <type> <body> ; arrays assembled into comments.json
@@ -108,7 +110,8 @@ reset() { rm -rf "${FIX:?}"/*; rm -rf "$WORK/out"; echo "$SHA" > "$FIX/head"; pr
 RC=0; OUT=""
 run() {   # run <root> <subcommand> [args...]
     local r="$1" s="$2"; shift 2
-    OUT=$(cd "$REPO_DIR" && FORGEDOCK_HOME="$r" bash "$ROOT/scripts/review-finalize.sh" "$s" --pr 7 --repo o/r --context "$CTXF" --out-dir "$WORK/out" "$@" 2>"$WORK/stderr"); RC=$?
+    local iss=(); [ -n "${CTX_ISSUE:-}" ] && [ -z "${NO_ISSUE_FLAG:-}" ] && iss=(--issue "$CTX_ISSUE")
+    OUT=$(cd "$REPO_DIR" && FORGEDOCK_HOME="$r" bash "$ROOT/scripts/review-finalize.sh" "$s" --pr 7 --repo o/r --context "$CTXF" --out-dir "$WORK/out" ${iss[@]+"${iss[@]}"} "$@" 2>"$WORK/stderr"); RC=$?
 }
 has() { case "$OUT" in *"$2"*) ok ;; *) bad "$1: output lacks '$2' (got: $(printf '%s' "$OUT" | head -c 300))" ;; esac; }
 rc_is() { if [ "$RC" = "$2" ]; then ok; else bad "$1: exit $RC, want $2 ($(head -c 300 "$WORK/stderr"))"; fi; }
@@ -427,6 +430,11 @@ want "lineage damps LIKELY medium" '.findings[] | select(.id == "L-1") | .class'
 want "no-scenario note" '.findings[] | select(.id == "L-2") | .disposition' classified.json "NOTE no-scenario"
 posted_has "no-scenario counter" "notes_demoted_no_scenario=1"
 posted_has "no-scenario listed" "- L-2 a.py:9 [LIKELY] Demoted for lack of a scenario: no-scenario"
+# the PR-body issue in the context alone never sets lineage: only the invoker's --issue does (#3952 SEC-1/QA-2)
+reset; echo review-finding > "$FIX/labels"; mkctx 1 FULL "" 12
+mkfind L-1 LIKELY MEDIUM a.py 2 "Lineage damped medium finding"
+putfind 1 0 0; NO_ISSUE_FLAG=1 run "$GOOD" classify
+has "lineage: PR-body issue alone never sets lineage" "FINDING_LINEAGE=none"
 
 # ---- pre-existing route: classified, at most 3 filed, highest severity first ----
 reset
@@ -685,7 +693,7 @@ rc_is "escalated: no transition script" "$RC" 0; logged "escalated: prose label 
 gate_reset; echo 1 > "$FIX/ci-rc"; printf 'CI_GATE: FAIL\nCI_GATE_HEAD: %s\nfailed: build\n' "$SHA" > "$FIX/ci-out"; mg "$GATE"
 rc_is "ci: red" "$RC" 3; has "ci: red" "blocker: ci gate not green (rc=1)"; logged "ci: red comment" issue-bodies.log "CI is not green (ci gate rc=1)"; logged "ci: red needs-human" edits.log "needs-human"; not_merged "ci: red"
 gate_reset; echo 3 > "$FIX/ci-rc"; printf 'CI_GATE: TIMEOUT\nCI_GATE_HEAD: %s\n' "$SHA" > "$FIX/ci-out"; mg "$GATE"
-rc_is "ci: timeout" "$RC" 3; has "ci: timeout" "CI_GATE_TIMEOUT: CI still running"; has "ci: timeout" "blocker: ci gate not green (rc=3)"
+rc_is "ci: timeout" "$RC" 3; has "ci: timeout" "CI_GATE_TIMEOUT: CI still running"; has "ci: timeout" "blocker: ci gate timeout (checks still pending)"; has "ci: timeout outcome" "MERGE_OUTCOME=ci-pending"; not_logged "ci: timeout is not needs-human (#3919)" edits.log "needs-human"; not_merged "ci: timeout"
 gate_reset; mg "$G_NOCI"
 rc_is "ci: gate unresolvable" "$RC" 3; has "ci: gate unresolvable" "blocker: ci gate not green (rc=2)"; not_merged "ci: unresolvable"
 gate_reset; echo 2 > "$FIX/ci-rc"; printf 'CI_GATE: ERROR\nCI_GATE_HEAD: %s\nPR head moved during the wait\n' "$SHA" > "$FIX/ci-out"; mg "$GATE"
@@ -747,7 +755,9 @@ setcal() {   # setcal <json>: publish calibration/table.json as origin/forge-kno
     git -C "$REPO_DIR" checkout -q main; git -C "$REPO_DIR" branch -q -D kn-tmp; rm -rf "$REPO_DIR/calibration"
 }
 clrcal() { git -C "$REPO_DIR" update-ref -d refs/remotes/origin/forge-knowledge 2>/dev/null || true; }
-cal() { reset; mkctx 1 FULL "" 42; printf '## Investigation\n**Task Type**: Refactor\n**Confidence**: HIGH\n' > "$FIX/investigator"; run "$GOOD" calibrate "$@"; }
+# investigator comments: inv_comments <association> <type> <body> -> $FIX/comments-42.json (read by calibrate via --paginate)
+inv_comments() { jq -n -c --arg a "$1" --arg t "$2" --arg b "$3" '[{author_association: $a, user: {type: $t, login: "u"}, body: $b}]' > "$FIX/comments-42.json"; }
+cal() { reset; mkctx 1 FULL "" 42; inv_comments NONE Bot "$(printf '<!-- FORGE:INVESTIGATOR -->\n## Investigation\n**Task Type**: Refactor\n**Confidence**: HIGH\n')"; run "$GOOD" calibrate "$@"; }
 setcal "$(CAL_ROW Refactor HIGH true overconfidence)"
 cal; rc_is "calibrate: overconfidence" "$RC" 0; has "calibrate: overconfidence" "CALIBRATION_NEEDS_HUMAN=true"; has "calibrate: cell" "CALIBRATION_CELL=Refactor × HIGH: survival=0.5 (n=20)"
 has "calibrate: note" "Routing to needs-human per forge#1741 policy."; logged "calibrate: trajectory record" issue-bodies.log "<!-- FORGE:CALIBRATION_CHECK -->"
@@ -764,6 +774,13 @@ clrcal; setcal "not json"
 cal; has "calibrate: malformed table fails safe" "CALIBRATION_NEEDS_HUMAN=false"
 clrcal
 cal; has "calibrate: missing table fails safe" "CALIBRATION_NEEDS_HUMAN=false"; has "calibrate: missing table note" "calibration table unavailable"
+# untrusted / unanchored INVESTIGATOR text never feeds the note, and the note never carries shell metacharacters (BUG-3, #3952)
+reset; mkctx 1 FULL "" 42; inv_comments NONE User "$(printf '<!-- FORGE:INVESTIGATOR -->\n**Task Type**: X\x27;touch${IFS}/tmp/pwn;\x27\n**Confidence**: HIGH\n')"; run "$GOOD" calibrate
+has "calibrate: untrusted investigator ignored" "could not resolve task type/confidence"
+reset; mkctx 1 FULL "" 42; inv_comments MEMBER User "$(printf 'see <!-- FORGE:INVESTIGATOR -->\n**Task Type**: Refactor\n**Confidence**: HIGH\n')"; run "$GOOD" calibrate
+has "calibrate: unanchored marker ignored" "could not resolve task type/confidence"
+reset; mkctx 1 FULL "" 42; inv_comments MEMBER User "$(printf '<!-- FORGE:INVESTIGATOR -->\n**Task Type**: Re\x27fa$(id)ctor\n**Confidence**: HIGH\n')"; run "$GOOD" calibrate
+note=$(printf '%s\n' "$OUT" | sed -n 's/^CALIBRATION_NOTE=//p'); case "$note" in *"'"*|*'$'*|*'`'*) bad "calibrate: note carries a shell metacharacter: $note" ;; *) ok ;; esac
 setcal "$(CAL_ROW Refactor HIGH true overconfidence)"
 reset; mkctx 1 FULL "" 42; run "$GOOD" calibrate; has "calibrate: no investigator comment fails safe" "CALIBRATION_NEEDS_HUMAN=false"; has "calibrate: unresolved note" "task type or confidence not resolved"
 reset; mkctx 1 FULL "" ""; run "$GOOD" calibrate; has "calibrate: no issue fails safe" "CALIBRATION_NEEDS_HUMAN=false"
