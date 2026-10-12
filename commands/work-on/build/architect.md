@@ -604,6 +604,16 @@ The block is delimited by `<!-- FORGE:BLAST_RADIUS:BEGIN -->` and `<!-- FORGE:BL
 
 ---
 
+## Phase A2.9: Append-Only Registry Check *(skip when no planned file is a hand-maintained list)* <!-- Added: forge#3969 -->
+
+Two PRs appending at the same spot of a shared list (test paths, cron targets, workflow steps) conflict textually although every line is independent, and each conflict costs a base-sync remediation round. For each planned file that is an append-only registry (one independent entry per line, edited by many PRs):
+
+1. Confirm with `bash <scripts>/detect-append-registries.sh --detect` (history ranking) and `--check-union <path>`. Resolve `<scripts>` through the trusted script resolution (plugin root, `FORGE_ROOT`, `FORGEDOCK_HOME`), never `$PWD`. The helper rejects JSON, YAML, TOML, lockfiles and Markdown.
+2. Plan one of: (a) a `.gitattributes` `merge=union` entry, only when `--check-union` prints `UNION SAFE` and every line is independent (no ordering, uniqueness or structure); or (b) converting the list to glob discovery where its consumer supports it.
+3. Name the registry and the chosen option in `### Affected Paths`. Never plan union for a file with ordering, uniqueness or structure: that file is edited at the end of the list, and the pre-handoff base sync resolves its conflicts.
+
+---
+
 ## Phase A3: Consistency Rules
 
 Identify invariants that ALL affected paths must satisfy. These become the builder's consistency checklist.
