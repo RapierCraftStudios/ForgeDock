@@ -308,6 +308,11 @@ orchestration:
   # shrink cascade queue growth.
   max_concurrent: 12
 
+  # Age (hours since the issue last updated) after which a predecessor still at
+  # `workflow:remediating` or `workflow:engine-error` is classified GATED
+  # (stalled, needs a human) instead of IN_PROGRESS. Default: 48.
+  in_progress_max_hours: 48
+
   cascade:
     # Named preset expanding to the granular keys below. Any granular key set
     # explicitly overrides just that field — the preset supplies defaults, not

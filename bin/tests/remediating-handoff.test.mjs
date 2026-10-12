@@ -92,7 +92,7 @@ describe("forge#3541 consumers accept workflow:remediating", () => {
     const fn = t.slice(t.indexOf("classify_predecessor_state() {"));
     const arm = fn.indexOf('grep -qx "workflow:remediating"');
     assert.ok(arm > 0, "classifier has a remediating arm");
-    assert.match(fn.slice(arm, arm + 900), /echo "IN_PROGRESS"/);
+    assert.match(fn.slice(arm, arm + 1800), /echo "IN_PROGRESS"/);
     assert.ok(fn.indexOf('grep -qxE "needs-human|workflow:awaiting-merge"') < arm, "needs-human still wins (GATED)");
     assert.match(t, /\[ "\$PRED_CURRENT_LABEL" = "workflow:remediating" \]/);
   });

@@ -435,6 +435,75 @@ describe("runIssue", () => {
     assert.ok(w.labels.includes("needs-human"));
   });
 
+  // forge#3566: terminate() must not strand workflow:remediating next to a terminal label.
+  const crashBuild = (w) => ({
+    "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+    "work-on/build": () => { throw Object.assign(new Error("cli crashed"), { code: "CLI_BACKEND_FAILED" }); },
+  });
+  const runWith = (w, io, script) => runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io,
+    runner: async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; }, now: () => 1000, maxAttempts: 1 });
+
+  it("forge#3566: needs-human terminal removes a stranded workflow:remediating", async () => {
+    const { w, io } = fakeWorld();
+    w.labels.push("workflow:remediating");
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; },
+    };
+    const res = await runWith(w, io, script);
+    assert.equal(res.terminalReason, "needs-human");
+    assert.ok(!w.labels.includes("workflow:remediating"));
+    assert.ok(w.labels.includes("needs-human"));
+  });
+
+  it("forge#3566: engine-error from a remediating issue removes it, keeps engine-error and adds needs-human", async () => {
+    const { w, io } = fakeWorld();
+    w.labels.push("workflow:remediating");
+    const res = await runWith(w, io, crashBuild(w));
+    assert.equal(res.terminalReason, "engine-error");
+    assert.ok(!w.labels.includes("workflow:remediating"));
+    assert.ok(w.labels.includes("workflow:engine-error"));
+    assert.ok(w.labels.includes("needs-human"));
+  });
+
+  it("forge#3566: engine-error on a non-remediating issue does not add needs-human", async () => {
+    const { w, io } = fakeWorld();
+    const res = await runWith(w, io, crashBuild(w));
+    assert.equal(res.terminalReason, "engine-error");
+    assert.ok(w.labels.includes("workflow:engine-error"));
+    assert.ok(!w.labels.includes("needs-human"));
+  });
+
+  it("forge#3876: terminate leaves workflow:remediating alone when another engine holds a live lease", async () => {
+    const { w, io } = fakeWorld();
+    w.labels.push("workflow:remediating");
+    const live = { by: "a2", until: 5000000 };
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; raceLease(w, live); },
+      "work-on/remediate": () => { raceLease(w, live); },
+    };
+    const res = await runWith(w, io, script);
+    assert.equal(res.terminalReason, "needs-human");
+    assert.ok(w.labels.includes("workflow:remediating"), "live engine's remediating label must survive");
+  });
+
+  it("forge#3566: a failing removeLabel does not throw and the terminal state still lands", async () => {
+    const { w, io } = fakeWorld();
+    w.labels.push("workflow:remediating");
+    const realGh = io.gh;
+    io.gh = async (args) => {
+      if (args.includes("--remove-label") && args.includes("workflow:remediating")) throw new Error("boom");
+      return realGh(args);
+    };
+    const res = await runWith(w, io, crashBuild(w));
+    assert.equal(res.terminalReason, "engine-error");
+    assert.equal(parseState(w.body).terminal, true);
+    assert.ok(w.labels.includes("workflow:engine-error"));
+  });
+
   it("forge#3525: no-signal review (PR created during the run) stops at needs-human without remediate", async () => {
     const { w, io } = fakeWorld();
     const script = {
