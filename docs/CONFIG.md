@@ -487,6 +487,8 @@ engine:
 
 **Turn exhaustion**: when `--max-turns` is exhausted the run ends `engine-error` (detail `max-turns`) and the phase is never committed, so `forgedock run-issue --retry` re-enters the same phase. Raise `<key>_max_turns` before retrying. Phase runlog events record `model` and `turns` next to `usage` so a limit can be sized from measured turn counts.
 
+**Per-run scratch dir** (`tmp_root`): every engine child runs with `TMPDIR` and `CLAUDE_CODE_TMPDIR` set to `<tmp_root>/<issue>` so venvs and Claude session data stay off a size-limited `/tmp`. `engine.tmp_root` is an absolute or `~`-prefixed path; default `~/.forge/tmp`. When `tmp_root` is unset and the operator already exported `TMPDIR` or `CLAUDE_CODE_TMPDIR`, that choice is respected and never cleaned. The dir is removed on a terminal outcome and kept on `engine-error` so `--retry` resumes. A disk-full/quota failure (EDQUOT, ENOSPC, errno -28/-122) ends a retryable `engine-error` (outcome code `infra.disk_quota`), never `needs-human`.
+
 **Commands that use this section**: CLI backend (`runCommand` in `bin/runner.mjs`)
 
 ---
