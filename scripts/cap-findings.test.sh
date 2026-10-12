@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Fixtures for scripts/cap-findings.sh (review-pr §6B.5 / review-pr-staging §7B.5 per-review cap).
+# Fixtures for scripts/cap-findings.sh (review-pr §6B.5 / review-pr-staging §7B per-review cap).
 # Run: bash scripts/cap-findings.test.sh   (bash 3.2 compatible)
 
 set -u

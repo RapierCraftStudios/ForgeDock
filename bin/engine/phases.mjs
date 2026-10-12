@@ -1061,7 +1061,11 @@ export const PHASES = [
       // that label is still a real terminal state (nothing left for this phase
       // to do), just not a "merged" one — reuse the existing "invalid" reason
       // (already in TERMINAL_REASONS) rather than inventing a new one.
-      if (snap.labels.includes(PHASE_MARKERS.close.completionLabel))
+      // SEC-1: the label alone is not proof either. A reopened or never-closed issue can still
+      // carry a stale `workflow:merged`, so "merged" requires CLOSED together with the label
+      // (same predicate as the remediate `mergedResult`). A label without CLOSED falls through
+      // to the OPEN / PHASE_COMPLETE / "issue not closed" paths below.
+      if (snap.state === "CLOSED" && snap.labels.includes(PHASE_MARKERS.close.completionLabel))
         return { status: "committed", terminalReason: "merged", outputs: {} };
       // forge#3534: an investigation exit closes the issue itself; keep that reason honest.
       if (snap.state === "CLOSED") {

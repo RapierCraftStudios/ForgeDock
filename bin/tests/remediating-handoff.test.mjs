@@ -64,7 +64,9 @@ describe("forge#3541 review.md R4 handoffs", () => {
     const used = b.slice(b.indexOf("**Bound already used**"));
     assert.match(used, /label the issue `needs-human`, leave the PR unmerged/);
     assert.ok(!/add `needs-human`/.test(boundUnused(b)));
-    assert.match(read("commands/review-pr.md"), /FORGE:INPR_FIX: round=1 head=\$\{INPR_HEAD\} max_severity=/);
+    // forge#3841: the in-PR fix request is posted by `review-finalize.sh classify` (the spec only calls it).
+    assert.match(read("scripts/review-finalize.sh"), /FORGE:INPR_FIX: round=1 head=\$\{INPR_HEAD\} max_severity=/);
+    assert.match(read("commands/review-pr.md"), /FORGE:INPR_FIX/);
   });
 
   it("exhausted bounds (genuine human gate) still land at needs-human", () => {

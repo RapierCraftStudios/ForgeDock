@@ -512,7 +512,7 @@ else:
 
 Wait for that task's completed result before Phase R4. Propagate its `REVIEW_RESULT` as this module's child state; do not return `REVIEW_RESULT`, report progress, release an orchestrator slot, or begin close work while the child is running. If the child errors or returns no parseable `REVIEW_RESULT`, return `REVIEW_RESULT: status: BLOCKED` with the child failure as the blocker. The normal `Skill(...)` invocation above remains the non-OpenCode path.
 
-/review-pr handles: the domain-agent review (it picks FULL, DELTA or BASE_SYNC_ONLY itself: a head that only merged the base is carried forward without reviewers) → post findings as separate issues (non-blocking) → merge the PR. It does NOT close the issue or clean up the worktree — `work-on:close` does both.
+/review-pr handles, in this order: **prepare** (`scripts/review-prepare.sh`: PR data, mergeability, scans, roster, FULL, DELTA or BASE_SYNC_ONLY decision, templates and slices into one context file; exit 3 is `BLOCKED`, never skipped) → **LLM** (domain-agent dispatch, arbitration, verdict rationale; a head that only merged the base is carried forward without reviewers) → **finalize** (`scripts/review-finalize.sh`: extract, classify, file findings as separate non-blocking issues, verdict, merge gates, integrity). The same sequence runs on the Agent-spawn and engine paths because it lives in the spec, so no engine hook is needed. It does NOT close the issue or clean up the worktree — `work-on:close` does both.
 
 If `review-pr` is not found under `{FORGE_SKILL_PREFIX}review-pr` or `review-pr`, print `REVIEW_RESULT: status: BLOCKED`, blocker: "skill not found: review-pr" and STOP. Never review inline.
 

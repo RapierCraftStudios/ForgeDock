@@ -68,7 +68,7 @@ printf 'project:\n  name: Demo\nverification:\n  commands:\n    typescript:\n   
 # setup <head> <base> <files> <diff> [sha]
 setup() {
     rm -f "${FIX:?}"/*; printf 'MERGEABLE|CLEAN\n' > "$FIX/merge.seq"; : > "$FIX/body.txt"
-    printf '{"number":7,"title":"t","author":{"login":"dev"},"baseRefName":"%s","headRefName":"%s","headRefOid":"%s","additions":5,"deletions":2,"changedFiles":1}\n' "$2" "$1" "${5:-$SHA_B}" > "$FIX/prinfo.json"
+    printf '{"number":7,"title":"t","author":{"login":"dev"},"baseRefName":"%s","headRefName":"%s","headRefOid":"%s","isCrossRepository":%s,"additions":5,"deletions":2,"changedFiles":1}\n' "$2" "$1" "${5:-$SHA_B}" "${CROSS_REPO:-false}" > "$FIX/prinfo.json"
     printf '%s\n' "$3" > "$FIX/files"; printf '%s\n' "$4" > "$FIX/diff"
 }
 CTX=""; RC=0
@@ -94,6 +94,8 @@ prep "$ROOT"
 rc_is "happy path" 0
 eq "schema" .schema_version 1; eq "status" .status OK; eq "pr number" .pr.number 7; eq "review sha" .pr.review_sha "$SHA_B"
 eq "sha7" .pr.review_sha_short "$(printf '%s' "$SHA_B" | cut -c1-7)"
+eq "review depth defaults to STANDARD" .roster.review_depth STANDARD
+eq "review weight key present in context" '.roster | has("review_weight")' true
 eq "small tier" .roster.tier small; eq "small roster" '.roster.agents | join(" ")' security
 eq "lines" '.pr.additions + .pr.deletions' 7
 eq "first-time false" .pr.first_time_contributor false
@@ -253,6 +255,17 @@ if grep -q 'checkout -f "\$ORIG_REF"' "$ROOT/scripts/review-prepare.sh"; then ok
 # --- 10. fail closed on gh and bad arguments ---
 setup feat/x staging "README.md" "$DIFF_PLAIN"; : > "$FIX/difffail"
 prep "$ROOT"; rc_is "gh pr diff failure" 3; eq "blocked on gh failure" .status BLOCKED
+# a staging bundle review (--no-delta) reads an API-oversized diff from the long-lived branches; a per-PR review still blocks
+setup pr-branch main "README.md" "$DIFF_PLAIN"; : > "$FIX/difffail"
+prep "$ROOT" --no-delta; rc_is "--no-delta falls back to git when the API diff fails" 0; eq "fallback status" .status OK
+eq "fallback file list comes from git" '.full_files | index("services/api/auth.py") != null' true; eq "--no-delta mode is FULL" .delta.mode FULL
+# forge#3935: the fallback is pinned to the review SHA and refuses fork PRs
+setup pr-branch main "README.md" "$DIFF_PLAIN" "0000000000000000000000000000000000000000"; : > "$FIX/difffail"
+prep "$ROOT" --no-delta; rc_is "--no-delta fallback refuses a branch tip that is not the review SHA" 3
+CROSS_REPO=true setup pr-branch main "README.md" "$DIFF_PLAIN"; : > "$FIX/difffail"
+prep "$ROOT" --no-delta; rc_is "--no-delta fallback refuses a cross-repository PR" 3
+setup feat/x staging "README.md" "$DIFF_PLAIN"; : > "$FIX/difffail"
+prep "$ROOT" --no-delta; rc_is "--no-delta with unfetchable branches still fails closed" 3; eq "unfetchable blocked" .status BLOCKED
 setup feat/x staging "README.md" "$DIFF_PLAIN"
 for bad_args in "--pr abc --repo o/r" "--pr 7 --repo noslash" "--pr 7 --repo o/r;x/y" "--pr 7 --repo o/r --bogus" "--repo o/r --pr"; do
     # shellcheck disable=SC2086
