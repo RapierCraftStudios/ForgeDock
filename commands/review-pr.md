@@ -2031,7 +2031,13 @@ if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$COMMENTS_JSON" ]; then
 fi
 AGENT_BODIES=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies "$AGENT_RE" 2>/dev/null) \
   || { echo "REVIEW_RESULT: status: BLOCKED, blocker: trusted reviewer comments unreadable (fail closed)"; exit 0; }
-ALL_FINDINGS=$(printf '%s\n' "$AGENT_BODIES" | jq -r 'scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null)
+ALL_FINDINGS=$(printf '%s\n' "$AGENT_BODIES" | jq -r 'scan("<!-- FINDING:(.+?) -->") | .[0]' 2>/dev/null)
+# Fail closed: every raw marker in the trusted bodies must be extracted; a marker the parser cannot read must never make the review look clean.
+RAW_FINDING_COUNT=$(printf '%s\n' "$AGENT_BODIES" | grep -o '<!-- FINDING:' | wc -l | tr -d ' ')
+EXTRACTED_FINDING_COUNT=$(printf '%s\n' "$ALL_FINDINGS" | grep -c '.' || true)
+if [ "${RAW_FINDING_COUNT:-0}" != "${EXTRACTED_FINDING_COUNT:-0}" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: finding marker extraction mismatch (raw=${RAW_FINDING_COUNT}, extracted=${EXTRACTED_FINDING_COUNT}); refusing to treat the review as clean (fail closed)"; exit 0
+fi
 # Agent bodies start with the REVIEW-AGENT marker and carry REVIEW-FINDINGS-START inside, so count it with a lookahead.
 AGENT_COUNT=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->)<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${FINDINGS_SHA}(\\r?\\n|$)" 2>/dev/null || echo "")
 case "$AGENT_COUNT" in ''|*[!0-9]*) AGENT_COUNT=0 ;; esac   # fail closed
@@ -2103,7 +2109,7 @@ if [ -n "$EARLIER_SHA" ]; then
     || { echo "REVIEW_RESULT: status: BLOCKED, blocker: earlier reviewed head ${EARLIER_SHA} findings unreadable (fail closed)"; exit 0; }
   SOURCE_BODIES=$(printf '%s\n%s' "$SOURCE_BODIES" "$EARLIER_BODIES")
 fi
-FINDINGS=$(printf '%s\n' "$SOURCE_BODIES" | jq -r 'scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null)
+FINDINGS=$(printf '%s\n' "$SOURCE_BODIES" | jq -r 'scan("<!-- FINDING:(.+?) -->") | .[0]' 2>/dev/null)
 ```
 
 Also include any `INTEG-N` findings from Phase 2.5 that weren't already covered by agents.
@@ -2278,7 +2284,7 @@ prior_findings_tsv() {
     cj=$(gh api --paginate "repos/${REPO}/issues/${pr}/comments" 2>/dev/null) || continue
     [ -n "$cj" ] || continue
     printf '%s' "$cj" | bash "$TRUSTED_SCRIPT" bodies '^<!-- (FORGE:REVIEW-AGENT:[a-z-]+|REVIEW-FINDINGS-SYNTHESIZED-START) -->[\s\S]*(^|\n)Reviewed-SHA: [0-9a-f]{40,64}' 2>/dev/null \
-      | jq -r --arg skip "${PF_SKIP:-}" 'select($skip == "" or (test("(^|\\n)Reviewed-SHA: " + $skip + "\\r?(\\n|$)") | not)) | scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null \
+      | jq -r --arg skip "${PF_SKIP:-}" 'select($skip == "" or (test("(^|\\n)Reviewed-SHA: " + $skip + "\\r?(\\n|$)") | not)) | scan("<!-- FINDING:(.+?) -->") | .[0]' 2>/dev/null \
       | while IFS='|' read -r _id _c _s _loc _t; do
           [ -n "$_t" ] || continue
           _p=$(PF_LOC="$_loc" pf_split_loc); printf 'F\t%s\t%s\n' "$_p" "$(printf '%s' "$_t" | tr '\t' ' ')"
