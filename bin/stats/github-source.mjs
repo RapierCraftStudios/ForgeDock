@@ -102,6 +102,8 @@ export function runsFromRecords(records) {
 export const gateEvents = (records) => records.filter((r) => r.event !== "phase_attempt" && r.event !== "run_terminal")
   .map((r) => ({ ...r, version: r.forge_version ?? null }));
 
+const CHECKPOINT_EVERY = 25;
+
 const meta = (it) => ({ number: it.number, isPr: Boolean(it.pull_request), createdAt: it.created_at ?? null, closedAt: it.closed_at ?? null,
   updatedAt: it.updated_at ?? null, labels: (it.labels ?? []).map((l) => (typeof l === "string" ? l : l.name)).filter(Boolean), authorType: it.user?.type ?? null });
 
@@ -117,20 +119,29 @@ export function fetchGithubRecords({ repo, refresh = false, useCache = true, gh 
   const items = { ...cache.items };
   let watermark = cache.watermark;
   let fetched = 0;
-  for (const it of listed) {
-    if (!Number.isInteger(it?.number)) continue;
-    const m = meta(it);
-    let records = items[it.number]?.records ?? [];
-    // A telemetry comment is edited in place (which may not bump the issue's updated_at), so every listed item with
-    // comments is re-read rather than trusting a cached copy.
-    if ((it.comments ?? 0) > 0) {
-      records = parseTelemetryComments(parsePages(gh(["api", "--paginate", `repos/${repo}/issues/${it.number}/comments`])), env);
-      fetched++;
+  // Checkpoint: the list is sorted updated-asc, so the watermark of the last fully processed item is a valid resume
+  // point. A failure mid-crawl (rate limit, 5xx, a hook timeout) then keeps the progress instead of restarting at zero.
+  const checkpoint = () => { if (useCache) saveCache(repo, { ...emptyCache(), watermark, items }, env); };
+  try {
+    for (const it of listed) {
+      if (!Number.isInteger(it?.number)) continue;
+      const m = meta(it);
+      let records = items[it.number]?.records ?? [];
+      // A telemetry comment is edited in place (which may not bump the issue's updated_at), so every listed item with
+      // comments is re-read rather than trusting a cached copy.
+      if ((it.comments ?? 0) > 0) {
+        records = parseTelemetryComments(parsePages(gh(["api", "--paginate", `repos/${repo}/issues/${it.number}/comments`])), env);
+        fetched++;
+      }
+      items[it.number] = { ...m, records };
+      if (m.updatedAt && (!watermark || m.updatedAt > watermark)) watermark = m.updatedAt;
+      if (fetched > 0 && fetched % CHECKPOINT_EVERY === 0 && (it.comments ?? 0) > 0) checkpoint();
     }
-    items[it.number] = { ...m, records };
-    if (m.updatedAt && (!watermark || m.updatedAt > watermark)) watermark = m.updatedAt;
+  } catch (err) {
+    checkpoint();
+    throw err;
   }
-  if (useCache) saveCache(repo, { ...emptyCache(), watermark, items }, env);
+  checkpoint();
   const seen = new Set();
   const records = [];
   for (const it of Object.values(items)) for (const r of it.records ?? []) {

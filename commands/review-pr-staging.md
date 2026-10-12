@@ -1617,7 +1617,8 @@ COST_SCRIPT=$(forge_resolve cost-report.sh)
 ```bash
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
 . "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
-STATS_OUT=$(forgedock stats --compact --repo "${GH_REPO}" 2>/dev/null || npx --no-install forgedock stats --compact --repo "${GH_REPO}" 2>/dev/null) || STATS_OUT=""
+STATS_TMO=""; command -v timeout >/dev/null 2>&1 && STATS_TMO="timeout 120"   # bound the crawl; stock macOS lacks timeout. A killed run keeps its cache checkpoints
+STATS_OUT=$($STATS_TMO forgedock stats --compact --repo "${GH_REPO}" 2>/dev/null || $STATS_TMO npx --no-install forgedock stats --compact --repo "${GH_REPO}" 2>/dev/null) || STATS_OUT=""
 [ -n "$STATS_OUT" ] && printf '%s\n' "$STATS_OUT" || echo "Pipeline stats: unavailable"
 ```
 
