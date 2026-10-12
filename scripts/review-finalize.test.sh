@@ -477,7 +477,7 @@ not_merged() { if [ -f "$FIX/merge.log" ]; then bad "$1: must not merge"; else o
 for tok in NOTE_DISPOSITION INPR_FIX verify-phase-trail wait-ci-green is-docs-only PHASE_TRAIL_FAILED FORGE:REVIEW-AGENT; do
     grep -qF -- "$tok" "$ROOT/scripts/review-finalize.sh" && ok || bad "script lacks gate token $tok"
 done
-if grep -vE '^[[:space:]]*#' "$ROOT/scripts/review-finalize.sh" | grep -qE 'grep -[a-zA-Z]*P|mapfile|declare -A'; then bad "script must stay bash 3.2 portable (grep -P / mapfile / declare -A)"; else ok; fi
+if grep -vE '^[[:space:]]*#' "$ROOT/scripts/review-finalize.sh" | grep -qE 'grep -[a-zA-Z]*P|mapfile|declare -A'; then bad "script must stay bash 3.2 portable (PCRE grep / mapfile / declare -A)"; else ok; fi
 grep -qF '"\(.mergeable)|\(.mergeStateStatus)"' "$ROOT/scripts/review-finalize.sh" && ok || bad "pre-merge jq must interpolate mergeable|mergeStateStatus"
 /bin/bash -n "$ROOT/scripts/review-finalize.sh" && ok || bad "/bin/bash -n"
 
