@@ -59,12 +59,22 @@ export function makeIo() {
   const waitCiGreen = async (pr, repo, timeoutSec) => {
     const script = fileURLToPath(new URL("../scripts/wait-ci-green.sh", import.meta.url));
     try {
+      // The engine owns the backoff and the budget: each call is ONE read (no in-script polling, no settle hold;
+      // the re-dispatched phase re-runs the full gate before any merge).
       const { stdout } = await pexec("bash", [script, String(pr), "-R", String(repo), "--timeout", String(timeoutSec)],
-        { maxBuffer: 10 * 1024 * 1024, timeout: (timeoutSec + 120) * 1000 });
+        { maxBuffer: 10 * 1024 * 1024, timeout: (timeoutSec + 120) * 1000, env: { ...process.env, FORGE_CI_SETTLE: "0" } });
       return { rc: 0, text: stdout };
     } catch (e) { return { rc: Number.isInteger(e?.code) ? e.code : 2, text: String(e?.stdout ?? "") }; }
   };
-  return { gh: run("gh"), git: run("git"), waitCiGreen };
+  // REST budget seam (`gh api rate_limit`, argv only; the call itself is not rate-limited). Resolves { remaining, limit, reset } or null.
+  const rateLimit = async () => {
+    try {
+      const { stdout } = await pexec("gh", ["api", "rate_limit", "--jq", ".resources.core"], { maxBuffer: 1024 * 1024, timeout: 10000 });
+      const j = JSON.parse(stdout);
+      return { remaining: j.remaining, limit: j.limit, reset: j.reset };
+    } catch { return null; }
+  };
+  return { gh: run("gh"), git: run("git"), waitCiGreen, rateLimit };
 }
 
 /** forge.yaml `engine.ci_pending_max_minutes` from the cwd checkout; undefined when absent or invalid. */

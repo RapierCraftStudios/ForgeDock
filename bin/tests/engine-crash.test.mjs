@@ -15,9 +15,10 @@
  *       effect but BEFORE the commit, so the phase must re-run idempotently.
  *   Both propagate out of runIssue; a supervisor re-launches it and it resumes.
  */
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runIssue } from "../engine.mjs";
@@ -25,7 +26,7 @@ import { readLog, deriveState } from "../engine/runlog.mjs";
 import { trusted, builderBody, invBody, asComments, inv as investigationComment, ctx, arch, builder, remediation, decomposed } from "./helpers/comments.mjs";
 
 let dir;
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "fd-crash-")); });
+beforeEach(() => { dir = tmpDir("fd-crash-"); });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
 const ALL = ["investigate", "build", "review", "close"];
@@ -104,8 +105,7 @@ function makeWorld() {
       w.gitCalls++;
       if (w.gitCalls === w.crashAtGit) { w.crashAtGit = Infinity; throw new Error("CRASH mid-phase (git)"); }
       return String(w.commitsAhead);
-    },
-  };
+    } };
   const runner = async ({ commandName }) => {
     switch (commandName) {
       case "work-on/investigate": w.markers += investigationComment("COMPLETE"); break;

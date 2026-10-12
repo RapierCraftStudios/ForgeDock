@@ -481,9 +481,9 @@ engine:
 | `<key>_model` | string | No | Model alias (`sonnet`, `opus`, `haiku`) or full model id passed as `--model`. Invalid values are ignored. |
 | `<key>_max_turns` | integer | No | Positive integer passed as `--max-turns`. Invalid values are ignored. |
 
-| `ci_pending_max_minutes` | integer | No | Minutes the engine waits for CI when the review phase ends BLOCKED with "checks still pending" (the merge gate's wait window ended while CI was still running). Default: 90. Invalid values are ignored. This key is flat like the others but is not part of the `<key>_model` / `<key>_max_turns` pattern. |
+| `ci_pending_max_minutes` | integer | No | Minutes the engine waits for CI when the review phase ends BLOCKED with "checks still pending", or the remediate phase holds at its M7 re-gate on "CI pending" (the merge gate's wait window ended while CI was still running). Default: 90. Invalid values are ignored. This key is flat like the others but is not part of the `<key>_model` / `<key>_max_turns` pattern. |
 
-**CI still pending**: the engine polls `scripts/wait-ci-green.sh` (no model calls) with 2, 4, 8 ... minute backoff while the lease keeps renewing, then re-dispatches the review phase once (idempotent at an unchanged head: it re-runs the merge gate and merges). Red CI takes the normal ci-gate path. When the budget is exhausted the run ends `needs-human` with outcome code `review.ci_pending_timeout`; `--retry` resumes. Each wait emits a `ci_pending_wait` telemetry event with the minutes waited.
+**CI still pending**: the engine polls `scripts/wait-ci-green.sh` (no model calls) one read per poll on a 60 s, 2 min, 4 min, 5 min (cap) backoff with +/-20% jitter, while the lease keeps renewing, then re-dispatches the phase that was waiting, review or remediate (idempotent at an unchanged head: review re-runs the merge gate and merges; remediate resumes at its M7 re-gate). Before each poll it reads `gh api rate_limit` (not itself rate-limited) and, below 10% of the REST budget, sleeps until the window resets instead of polling; a rate-limited or transient (5xx, network) poll is retried and never re-dispatches the phase. Red CI takes the normal ci-gate path. When the budget is exhausted the run ends `needs-human` with outcome code `review.ci_pending_timeout`; `--retry` resumes. Each wait emits a `ci_pending_wait` telemetry event (`docs/TELEMETRY.md`) with the minutes waited, polls made and rate-limit sleeps.
 
 **Precedence** (model): `engine.<key>_model`, then the run-level model the caller passed explicitly, then omitted. `max_turns` comes only from this section. No defaults ship.
 
@@ -740,6 +740,10 @@ verification:
     - name: "web"
       container: "acme-web-blue"
       health_url: "http://localhost:3000"
+
+  consumer_sweep:
+    mode: advisory         # advisory (default) | blocking
+    budget_seconds: 60     # wall-clock budget for the sweep
 ```
 
 | Field | Type | Required | Description |
@@ -750,8 +754,10 @@ verification:
 | `services[].name` | string | **Yes (per entry)** | Human-readable service name |
 | `services[].container` | string | No | Docker container name for `docker exec` verification |
 | `services[].health_url` | string | No | Local URL for container-level health checks |
+| `consumer_sweep.mode` | string | No | `advisory` (default): the validate consumer sweep (`scripts/consumer-sweep.sh`, V4.6) records unaddressed referencing sites and never fails. `blocking`: unaddressed sites fail validate with `consumer_unaddressed`, build runs one repair round, and sites still unaddressed are recorded as `CONSUMERS: unresolved` and passed to review as known risk (never `needs-human`). Flip to `blocking` only after `bash scripts/consumer-sweep.sh --eval-history 20` shows a mean of at most 2 flagged sites per merge and none above 10 on your repo |
+| `consumer_sweep.budget_seconds` | integer | No | Wall-clock budget for the sweep (default `60`). When it runs out the sweep stops with `BUDGET_EXCEEDED`, reports the partial result, and never fails, in either mode |
 
-**Commands that use this section**: `quality-gate`, `validate`
+**Commands that use this section**: `quality-gate`, `validate` (health checks and `consumer_sweep`)
 
 ---
 

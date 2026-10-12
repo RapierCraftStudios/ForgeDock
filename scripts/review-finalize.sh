@@ -1426,6 +1426,9 @@ The review must add a \`### Degraded Paths Reviewed\` section that names each de
     else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
     echo "$CI_GATE_OUT"
     GATED_HEAD=$(printf '%s\n' "$CI_GATE_OUT" | sed -n 's/^CI_GATE_HEAD: //p' | head -1)
+    # rc 4 RATE_LIMITED (GitHub throttled or briefly unavailable for the whole window) is a wait like TIMEOUT: map it to the
+    # pending path BEFORE rc 4 is reused below as the stale-review sentinel, so it is never a merge and never a re-review.
+    [ "$CI_GATE_RC" -eq 4 ] && CI_GATE_RC=3
     # rc 2 "head moved" is a stale review, not a human problem; rc 3 TIMEOUT means CI is still running.
     printf '%s\n' "$CI_GATE_OUT" | grep -q 'PR head moved during the wait' && CI_GATE_RC=4
     if [ "$CI_GATE_RC" -eq 3 ]; then

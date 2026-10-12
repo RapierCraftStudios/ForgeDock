@@ -1,6 +1,7 @@
+import { tmpDir } from "./_tmp.mjs";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -8,8 +9,7 @@ import {
   buildPreflightPlan,
   domainsFor,
   explicitDependencies,
-  runPreflight,
-} from "../orchestrate-preflight.mjs";
+  runPreflight } from "../orchestrate-preflight.mjs";
 
 const issue = (number, overrides = {}) => ({
   number,
@@ -132,7 +132,7 @@ describe("OpenCode orchestration preflight", () => {
   });
 
   it("resolves forge.yaml from a parent of the nested Git worktree", () => {
-    const root = mkdtempSync(join(tmpdir(), "forge-preflight-config-"));
+    const root = tmpDir("forge-preflight-config-");
     const nested = join(root, "repo");
     mkdirSync(nested);
     writeFileSync(join(root, "forge.yaml"), "project:\n  owner: owner\n  repo: repo\n");

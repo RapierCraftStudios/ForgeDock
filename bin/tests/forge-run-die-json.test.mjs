@@ -21,9 +21,10 @@
  * Run with: node --test bin/tests/forge-run-die-json.test.mjs
  */
 
+import { tmpDir as makeTmpDir } from "./_tmp.mjs";
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, chmodSync, mkdirSync, readFileSync } from "node:fs";
+import { rmSync, writeFileSync, chmodSync, mkdirSync, readFileSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -76,8 +77,7 @@ function runForgeRun(args, fakeGhBinDir) {
     timeout: 15000,
     env: {
       ...process.env,
-      PATH: `${fakeGhBinDir}${process.platform === "win32" ? ";" : ":"}${process.env.PATH}`,
-    },
+      PATH: `${fakeGhBinDir}${process.platform === "win32" ? ";" : ":"}${process.env.PATH}` },
   });
   return result;
 }
@@ -95,7 +95,7 @@ describe("forge-run.sh die() — JSON validity for gh stderr (forge#2216)", asyn
   let fakeGhBinDir;
 
   before(() => {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-run-die-json-"));
+    tmpDir = makeTmpDir("forge-run-die-json-");
     fakeGhBinDir = join(tmpDir, "fake-gh-bin");
     makeFakeGhStub(fakeGhBinDir);
   });
@@ -169,7 +169,7 @@ describe("forge-run.sh json_str() — full C0 control-character escaping (forge#
   let fakeGhBinDir;
 
   before(() => {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-run-c0-escape-"));
+    tmpDir = makeTmpDir("forge-run-c0-escape-");
     fakeGhBinDir = join(tmpDir, "fake-gh-bin");
     mkdirSync(fakeGhBinDir, { recursive: true });
     const stubPath = join(fakeGhBinDir, "gh");
@@ -278,7 +278,7 @@ describe("forge-run.sh ACTION_ESCAPED — routed through json_str() (forge#2265)
       `expected ACTION_ESCAPED assignment line to start with ACTION_ESCAPED=, got: ${actionEscapedLine}`,
     );
 
-    const tmpDir = mkdtempSync(join(os.tmpdir(), "forge-run-action-escaped-"));
+    const tmpDir = makeTmpDir("forge-run-action-escaped-");
     try {
       const harnessPath = join(tmpDir, "harness.sh");
       const harness = [

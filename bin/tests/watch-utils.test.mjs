@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import { tmpDir } from "./_tmp.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdtempSync, rmSync } from "fs";
+import { writeFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -16,8 +17,7 @@ import {
   parseSatelliteRepos,
   buildHeartbeatBatchQuery,
   parseHeartbeatBatchResponse,
-  chunkArray,
-} from "../watch-utils.mjs";
+  chunkArray } from "../watch-utils.mjs";
 
 // ---------------------------------------------------------------------------
 // Regression test (forge#2235): a review-finding issue that carries
@@ -54,7 +54,7 @@ test("an issue carrying a workflow:* label is excluded from the findings lane ev
 // deriveWorkflowLabels: canonical manifest vs fallback
 // ---------------------------------------------------------------------------
 test("deriveWorkflowLabels reads workflow:* + needs-human from a real labels.json manifest", () => {
-  const dir = mkdtempSync(join(tmpdir(), "watch-utils-"));
+  const dir = tmpDir("watch-utils-");
   const manifestPath = join(dir, "labels.json");
   try {
     writeFileSync(
@@ -85,7 +85,7 @@ test("deriveWorkflowLabels falls back to the built-in list when the manifest is 
 });
 
 test("deriveWorkflowLabels falls back to the built-in list when the manifest is malformed JSON", () => {
-  const dir = mkdtempSync(join(tmpdir(), "watch-utils-bad-"));
+  const dir = tmpDir("watch-utils-bad-");
   const manifestPath = join(dir, "labels.json");
   try {
     writeFileSync(manifestPath, "{ not valid json");

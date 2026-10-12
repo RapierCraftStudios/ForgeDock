@@ -17,9 +17,10 @@
  * Run with: node --test bin/tests/session-start.test.mjs
  */
 
+import { tmpDir as makeTmpDir } from "./_tmp.mjs";
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, cpSync, renameSync, rmSync } from "node:fs";
+import { mkdirSync, cpSync, renameSync, rmSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync, execFileSync } from "node:child_process";
@@ -27,8 +28,7 @@ import os from "node:os";
 import {
   parseForgeYaml,
   sanitizeContextValue,
-  resolveModelAlias,
-} from "../forge-utils.mjs";
+  resolveModelAlias } from "../forge-utils.mjs";
 
 // ---------------------------------------------------------------------------
 // Paths used by fail-open integration tests
@@ -347,7 +347,7 @@ describe("session-start fail-open when forge-utils.mjs is missing", async () => 
   before(() => {
     // Create a temporary copy of the bin/ directory so we can rename
     // forge-utils.mjs without touching the real installation.
-    tmpBinDir = mkdtempSync(join(os.tmpdir(), "forge-failopen-utils-"));
+    tmpBinDir = makeTmpDir("forge-failopen-utils-");
     // Copy bin/ tree: hooks/, registry.mjs, forge-utils.mjs, init-detect.mjs, etc.
     cpSync(BIN_DIR, tmpBinDir, { recursive: true });
     tmpHooksDir = join(tmpBinDir, "hooks");
@@ -438,7 +438,7 @@ describe("session-start nudge tracking resolves git root (forge#1927)", async ()
   let hookPath;
 
   before(() => {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-nudge-gitroot-"));
+    tmpDir = makeTmpDir("forge-nudge-gitroot-");
     fakeHome = join(tmpDir, "fake-home");
     mkdirSync(fakeHome, { recursive: true });
     hookPath = join(BIN_DIR, "hooks", "session-start.mjs");

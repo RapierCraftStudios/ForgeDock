@@ -20,9 +20,10 @@
  * Run with: node --test bin/tests/init-detect.test.mjs
  */
 
+import { tmpDir as makeTmpDir } from "./_tmp.mjs";
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
+import { rmSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import os from "node:os";
 import { execFileSync } from "node:child_process";
@@ -47,8 +48,7 @@ function git(args, cwd) {
       // Ensure git does not prompt for credentials
       GIT_TERMINAL_PROMPT: "0",
       // Suppress "safe directory" warnings on Windows CI
-      GIT_CONFIG_GLOBAL: "",
-    },
+      GIT_CONFIG_GLOBAL: "" },
   });
 }
 
@@ -105,7 +105,7 @@ describe("detectConfig — SSH remote URL", async () => {
   let repoPath;
 
   before(() => {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-detect-ssh-"));
+    tmpDir = makeTmpDir("forge-detect-ssh-");
     repoPath = join(tmpDir, "repo");
     makeLocalRepo(repoPath, "main");
     addRemote(repoPath, "origin", "git@github.com:my-org/my-repo.git");
@@ -158,7 +158,7 @@ describe("detectConfig — HTTPS remote URL", async () => {
   let repoPath;
 
   before(() => {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-detect-https-"));
+    tmpDir = makeTmpDir("forge-detect-https-");
     repoPath = join(tmpDir, "repo");
     makeLocalRepo(repoPath, "main");
     addRemote(repoPath, "origin", "https://github.com/acme-corp/acme-platform.git");
@@ -197,7 +197,7 @@ describe("detectConfig — no remote", async () => {
   let repoPath;
 
   before(() => {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-detect-noremote-"));
+    tmpDir = makeTmpDir("forge-detect-noremote-");
     repoPath = join(tmpDir, "repo");
     makeLocalRepo(repoPath, "main");
     // No remote added
@@ -233,7 +233,7 @@ describe("detectConfig — default branch detection", async () => {
   let repoPath;
 
   before(() => {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-detect-branch-"));
+    tmpDir = makeTmpDir("forge-detect-branch-");
     repoPath = join(tmpDir, "repo");
     makeLocalRepo(repoPath, "develop");
     addRemote(repoPath, "origin", "git@github.com:org/repo.git");
@@ -272,7 +272,7 @@ describe("detectConfig — staging branch detection", async () => {
   let stagingRepoPath;
 
   before(() => {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-detect-staging-"));
+    tmpDir = makeTmpDir("forge-detect-staging-");
   });
 
   after(() => {
@@ -363,7 +363,7 @@ describe("detectConfig — non-git directory (graceful fallback)", async () => {
   let tmpDir;
 
   before(() => {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-detect-nongit-"));
+    tmpDir = makeTmpDir("forge-detect-nongit-");
   });
 
   after(() => {
@@ -406,7 +406,7 @@ describe("detectConfig — monorepo-adjacent subdirectory detection (forge#1850)
   let tmpDir;
 
   before(() => {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-detect-monorepo-"));
+    tmpDir = makeTmpDir("forge-detect-monorepo-");
   });
 
   after(() => {
@@ -467,7 +467,7 @@ describe("resolveGitRoot", async () => {
   let tmpDir;
 
   before(() => {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-resolve-git-root-"));
+    tmpDir = makeTmpDir("forge-resolve-git-root-");
   });
 
   after(() => {
@@ -551,7 +551,7 @@ describe("detectConfig — project name derivation", async () => {
   let tmpDir;
 
   before(() => {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-detect-name-"));
+    tmpDir = makeTmpDir("forge-detect-name-");
   });
 
   after(() => {

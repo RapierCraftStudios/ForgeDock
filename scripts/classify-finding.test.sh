@@ -6,6 +6,8 @@
 # Run: bash scripts/classify-finding.test.sh   (bash 3.2 compatible)
 
 set -u
+# Every mktemp below lands in one private dir that the EXIT trap removes (forge#4016).
+_SUITE_TMP=$(mktemp -d); export TMPDIR="$_SUITE_TMP"; trap 'rm -rf "$_SUITE_TMP"' EXIT
 DIR=$(cd "$(dirname "$0")" && pwd)
 S="$DIR/classify-finding.sh"
 pass=0; fail=0
