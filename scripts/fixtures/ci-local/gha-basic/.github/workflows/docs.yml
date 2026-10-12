@@ -1,0 +1,10 @@
+name: Docs
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo docs-ok

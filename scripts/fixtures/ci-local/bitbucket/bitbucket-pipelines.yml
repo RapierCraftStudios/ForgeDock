@@ -1,0 +1,12 @@
+image: atlassian/default-image:4
+pipelines:
+  default:
+    - step:
+        name: Build and test
+        script:
+          - echo bitbucket-test
+    - step:
+        name: Deploy
+        deployment: production
+        script:
+          - echo deploy

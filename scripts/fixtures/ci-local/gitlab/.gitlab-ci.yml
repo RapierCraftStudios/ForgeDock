@@ -1,0 +1,43 @@
+stages: [build, test, deploy]
+variables:
+  GREETING: hello
+.template:
+  script:
+    - echo template
+lint:
+  stage: test
+  image: node:20
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        - src/**/*
+  script:
+    - echo "$GREETING lint"
+unit:
+  stage: test
+  extends: .template
+  only:
+    - merge_requests
+withdb:
+  stage: test
+  services:
+    - postgres:16
+  script:
+    - echo db
+manualjob:
+  stage: test
+  when: manual
+  script:
+    - echo manual
+release:
+  stage: deploy
+  environment: production
+  script:
+    - echo release
+docsonly:
+  stage: test
+  rules:
+    - changes:
+        - docs/**/*
+  script:
+    - echo docs
