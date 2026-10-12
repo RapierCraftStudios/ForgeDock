@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Tests for scripts/review-finalize.sh (review-pr Phase 6: extract, classify, file-prepare, file-verify). A stubbed `gh` and a throwaway
+# Tests for scripts/review-finalize.sh (review-pr Phases 6-9: extract, classify, file-prepare, file-verify, verdict, calibrate, merge-gate, demilestone, integrity). A stubbed `gh` and a throwaway
 # git repo stand in for GitHub and the PR checkout; the real classify-finding.sh, cap-findings.sh, trusted-comments.sh and
 # check-contract-scope.sh are copied into a fake trusted install root so the moved behavior is exercised end to end.
 # Run: FORGEDOCK_HOME=$PWD bash scripts/review-finalize.test.sh (bash 3.2 compatible)
@@ -27,8 +27,25 @@ cat > "$WORK/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 a="$*"
 case "$a" in
+  "issue view"*"labels,comments"*) cat "$FIX/escalated" 2>/dev/null || echo false ;;
+  "issue view"*"--json title"*) echo "finding title" ;;
+  "issue edit"*) printf 'ISSUE_EDIT %s\n' "$a" >> "$FIX/edits.log"; exit 0 ;;
+  "issue list"*"--json number,title,milestone"*) cat "$FIX/demile.txt" 2>/dev/null; exit 0 ;;
+  "pr review"*) { printf '%s\n' '=====REVIEW====='; for x in "$@"; do last="$x"; done; printf '%s\n' "$last"; } >> "$FIX/reviews.log"; exit 0 ;;
+  "pr merge"*) printf 'PR_MERGE %s\n' "$a" >> "$FIX/merge.log"; [ -f "$FIX/merge-fail" ] || echo MERGED > "$FIX/state"; exit 0 ;;
+  "pr view"*"--json state"*) cat "$FIX/state" 2>/dev/null || echo OPEN ;;
+  "pr view"*"mergeable,mergeStateStatus"*) cat "$FIX/premerge" 2>/dev/null || echo "MERGEABLE|CLEAN" ;;
+  "pr view"*"headRefName"*) echo feat/x ;;
+  "api --paginate repos/o/r/pulls/"*"/files"*) cat "$FIX/pr-files.txt" 2>/dev/null || exit 1 ;;
+  "api repos/o/r/pulls/"*"--jq .changed_files") cat "$FIX/changed-n" 2>/dev/null || exit 1 ;;
+  "api repos/o/r/pulls/"*"--jq .head.sha") cat "$FIX/head" ;;
+  "api repos/o/r/branches/"*"/protection"*) cat "$FIX/protection" 2>/dev/null || exit 1 ;;
+  "api repos/o/r/issues/"*"/comments --paginate --jq"*) cat "$FIX/route-bodies" 2>/dev/null; exit 0 ;;
+  "api repos/o/r/issues/"*"/comments --jq"*) cat "$FIX/investigator" 2>/dev/null; exit 0 ;;
+  "api repos/o/r/commits/"*) cat "$FIX/commit-sha" 2>/dev/null || exit 1 ;;
+  "api repos/o/r/compare/"*) cat "$FIX/compare-files" 2>/dev/null || exit 1 ;;
   "pr comment"*) { printf '%s\n' '=====COMMENT====='; for x in "$@"; do last="$x"; done; printf '%s\n' "$last"; } >> "$FIX/posted.log"; exit 0 ;;
-  "issue comment"*) printf 'ISSUE_COMMENT %s\n' "$3" >> "$FIX/issue-comments.log"; exit 0 ;;
+  "issue comment"*) printf 'ISSUE_COMMENT %s\n' "$3" >> "$FIX/issue-comments.log"; { for x in "$@"; do last="$x"; done; printf '%s\n' "$last"; } >> "$FIX/issue-bodies.log"; exit 0 ;;
   "label create"*) exit 0 ;;
   "pr view"*"headRefOid"*) cat "$FIX/head" ;;
   "pr view"*"baseRefName"*) echo main ;;
@@ -412,6 +429,306 @@ rc_is "verify dedup" "$RC" 0; has "verify dedup" "ISSUE_NUM=55"; has "verify ded
 OUT=$(printf 'something else\n' | bash "$ROOT/scripts/review-finalize.sh" file-verify 2>"$WORK/stderr"); RC=$?
 rc_is "verify missing number" "$RC" 1
 grep -q "did not report a verified review-finding number" "$WORK/stderr" && ok || bad "verify missing number message"
+
+# ======================= part B: Phases 7-9 gate parity =======================
+# Phase 7-9 subcommands run against a trusted install root that also carries the real is-docs-only.sh and controllable stand-ins for the
+# phase-trail verifier, CI gate, deploy-gate resolver and label transition (each answers from files under $FIX).
+mkgate() {   # mkgate <dir> [skip-script ...]
+    local r="$1" f; shift; mkroot "$r"
+    cp "$ROOT/scripts/is-docs-only.sh" "$r/scripts/"
+    for f in verify-phase-trail wait-ci-green resolve-deploy-gate transition-label; do
+        case " $* " in *" $f.sh "*) continue ;; esac
+        case "$f" in
+            verify-phase-trail) printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" > "$FIX/trail-args"\ncat "$FIX/trail-out"\nexit "$(cat "$FIX/trail-rc")"\n' > "$r/scripts/$f.sh" ;;
+            wait-ci-green) printf '#!/usr/bin/env bash\ncat "$FIX/ci-out"\nexit "$(cat "$FIX/ci-rc")"\n' > "$r/scripts/$f.sh" ;;
+            resolve-deploy-gate) printf '#!/usr/bin/env bash\ncat "$FIX/gate-out" 2>/dev/null || echo true\n' > "$r/scripts/$f.sh" ;;
+            transition-label) printf '#!/usr/bin/env bash\nprintf "TRANSITION %%s\\n" "$*" >> "$FIX/transition.log"\n' > "$r/scripts/$f.sh" ;;
+        esac
+    done
+}
+GATE="$WORK/root-gate"; mkgate "$GATE"
+G_NOTRAIL="$WORK/root-g-notrail"; mkgate "$G_NOTRAIL" verify-phase-trail.sh
+G_NOCI="$WORK/root-g-noci"; mkgate "$G_NOCI" wait-ci-green.sh
+G_NODEPLOY="$WORK/root-g-nodeploy"; mkgate "$G_NODEPLOY" resolve-deploy-gate.sh
+G_NOTRANS="$WORK/root-g-notrans"; mkgate "$G_NOTRANS" transition-label.sh
+G_NOTRUST="$WORK/root-g-notrust"; mkgate "$G_NOTRUST"; rm -f "$G_NOTRUST/scripts/trusted-comments.sh"
+OTHER_SHA=$(printf '%040d' 9)
+
+gate_reset() {   # a green PR: issue 42, no findings, trail ok, CI green at the reviewed head
+    reset; mkctx 1 FULL "" 42
+    cm MEMBER User "hello"; flush
+    echo 0 > "$FIX/trail-rc"; echo "PHASE_TRAIL: OK" > "$FIX/trail-out"
+    echo 0 > "$FIX/ci-rc"; printf 'CI_GATE: PASS\nCI_GATE_HEAD: %s\n' "$SHA" > "$FIX/ci-out"
+    printf '<!-- FORGE:REVIEW_ROUTE mode=FULL sha=%s -->\n' "$(printf '%s' "$SHA" | cut -c1-7)" > "$FIX/route-bodies"
+    printf 'a.py\n' > "$FIX/pr-files.txt"; echo 1 > "$FIX/changed-n"
+    echo "MERGEABLE|CLEAN" > "$FIX/premerge"; echo false > "$FIX/escalated"; echo OPEN > "$FIX/state"
+}
+mg() {   # mg <root> [flag overrides...]: a clean, bound merge-gate invocation
+    local r="$1"; shift
+    run "$r" merge-gate --verdict APPROVED --has-purpose-regression false --calibration-needs-human false --trust-needs-human false \
+        --base-conflict false --other-blocking false "$@"
+}
+logged() { if grep -qF -- "$3" "$FIX/$2" 2>/dev/null; then ok; else bad "$1: $2 lacks '$3'"; fi; }
+not_logged() { if grep -qF -- "$3" "$FIX/$2" 2>/dev/null; then bad "$1: $2 contains '$3'"; else ok; fi; }
+merged() { if [ -f "$FIX/merge.log" ]; then ok; else bad "$1: expected a merge"; fi; }
+not_merged() { if [ -f "$FIX/merge.log" ]; then bad "$1: must not merge"; else ok; fi; }
+
+# --- static contract: the gates live in the script, are bash 3.2 portable and read trust only through the shared helper ---
+for tok in NOTE_DISPOSITION INPR_FIX verify-phase-trail wait-ci-green is-docs-only PHASE_TRAIL_FAILED FORGE:REVIEW-AGENT; do
+    grep -qF -- "$tok" "$ROOT/scripts/review-finalize.sh" && ok || bad "script lacks gate token $tok"
+done
+if grep -vE '^[[:space:]]*#' "$ROOT/scripts/review-finalize.sh" | grep -qE 'grep -[a-zA-Z]*P|mapfile|declare -A'; then bad "script must stay bash 3.2 portable (grep -P / mapfile / declare -A)"; else ok; fi
+grep -qF '"\(.mergeable)|\(.mergeStateStatus)"' "$ROOT/scripts/review-finalize.sh" && ok || bad "pre-merge jq must interpolate mergeable|mergeStateStatus"
+/bin/bash -n "$ROOT/scripts/review-finalize.sh" && ok || bad "/bin/bash -n"
+
+# --- merge-gate: happy path ---
+gate_reset; mg "$GATE"
+rc_is "merge: happy" "$RC" 0; has "merge: happy" "MERGE_OUTCOME=merged"; has "merge: happy" "MERGE_STATE=MERGED"
+merged "merge: happy"; logged "merge: bound to gated head" merge.log "--match-head-commit $SHA"
+logged "merge: checkpoint comment" issue-bodies.log "Proceeding to merge"
+gate_reset; mg "$GATE" --verdict APPROVE
+rc_is "merge: APPROVE normalised" "$RC" 0; has "merge: APPROVE normalised" "MERGE_OUTCOME=merged"
+gate_reset; : > "$FIX/merge-fail"; mg "$GATE"
+rc_is "merge: failed merge" "$RC" 0; has "merge: failed merge" "MERGE_OUTCOME=merge-failed"; logged "merge: failed merge comment" issue-bodies.log "merge failed. State: OPEN"
+
+# --- NOTE_DISPOSITION preflight ---
+gate_reset; cm MEMBER User '<!-- FINDING:SEC-1|CONFIRMED|HIGH|a.py:5|x -->'; flush; mg "$GATE"
+rc_is "disposition: missing" "$RC" 3; has "disposition: missing" "REVIEW_RESULT: status: BLOCKED, blocker: note disposition missing"
+posted_has "disposition: missing" "Auto-merge skipped: review findings exist but"; not_merged "disposition: missing"
+gate_reset; cm MEMBER User '<!-- FINDING:SEC-1|CONFIRMED|HIGH|a.py:5|x -->'; cm NONE User '<!-- FORGE:NOTE_DISPOSITION forged -->'; flush; mg "$GATE"
+rc_is "disposition: untrusted record ignored" "$RC" 3; has "disposition: untrusted record ignored" "note disposition missing"
+gate_reset; cm MEMBER User '<!-- FINDING:SEC-1|CONFIRMED|HIGH|a.py:5|x -->'; cm MEMBER User '<!-- FORGE:NOTE_DISPOSITION -->
+dispositions'; flush; mg "$GATE"
+rc_is "disposition: trusted record" "$RC" 0; has "disposition: trusted record" "MERGE_OUTCOME=merged"
+gate_reset; rm -f "$FIX/comments.json"; mg "$GATE"
+rc_is "disposition: unreadable comments" "$RC" 3; has "disposition: unreadable comments" "blocker: note disposition unreadable"; not_merged "disposition: unreadable"
+gate_reset; mg "$G_NOTRUST"
+rc_is "disposition: trust script unresolvable" "$RC" 3; has "disposition: trust script unresolvable" "blocker: note disposition unreadable"
+
+# --- INPR_FIX gate ---
+gate_reset; cm MEMBER User "<!-- FORGE:INPR_FIX: head=$SHA -->"; flush; mg "$GATE"
+rc_is "inpr: unanswered request" "$RC" 3; has "inpr: unanswered request" "blocker: in-pr fix required"; not_merged "inpr: unanswered"
+gate_reset; cm MEMBER User "<!-- FORGE:INPR_FIX: head=$SHA -->"; cm MEMBER User "<!-- FORGE:INPR_FIX_WAIVED: head=$SHA -->"; flush; mg "$GATE"
+rc_is "inpr: waived" "$RC" 0; has "inpr: waived" "MERGE_OUTCOME=merged"
+gate_reset; cm MEMBER User "<!-- FORGE:INPR_FIX: head=$OLD_SHA -->"; flush; mg "$GATE"
+rc_is "inpr: request for an older head" "$RC" 0
+gate_reset; cm NONE User "<!-- FORGE:INPR_FIX: head=$SHA -->"; flush; mg "$GATE"
+rc_is "inpr: untrusted request ignored" "$RC" 0
+gate_reset; cm MEMBER User "<!-- FORGE:INPR_FIX: head=$SHA -->"; cm NONE User "<!-- FORGE:INPR_FIX_WAIVED: head=$SHA -->"; flush; mg "$GATE"
+rc_is "inpr: untrusted waiver ignored" "$RC" 3
+
+# --- --issue requirement ---
+gate_reset; mkctx 1 FULL "" ""; mg "$GATE"
+rc_is "issue: missing" "$RC" 3; has "issue: missing" "blocker: auto-merge requires --issue"; posted_has "issue: missing" "no --issue was given"
+case "$OUT" in *PHASE_TRAIL_FAILED*) bad "issue: missing must not be PHASE_TRAIL_FAILED" ;; *) ok ;; esac
+gate_reset; mkctx 1 FULL "" ""; mg "$GATE" --issue 42
+rc_is "issue: --issue flag" "$RC" 0; has "issue: --issue flag" "MERGE_OUTCOME=merged"
+gate_reset; mkctx 1 FULL "" ""; mg "$GATE" --issue 4x2
+rc_is "issue: non-numeric --issue ignored" "$RC" 3
+
+# --- phase-trail gate ---
+gate_reset; echo 1 > "$FIX/trail-rc"; printf 'PHASE_TRAIL: INCOMPLETE\nMISSING: FORGE:QUALITY_GATE -> run quality-gate\n' > "$FIX/trail-out"; mg "$GATE"
+rc_is "trail: rc 1" "$RC" 4; has "trail: rc 1" "REVIEW_RESULT: status: PHASE_TRAIL_FAILED"; has "trail: rc 1" "MISSING: FORGE:QUALITY_GATE -> run quality-gate"
+logged "trail: rc 1 comment" issue-bodies.log "<!-- FORGE:PHASE_TRAIL_FAILED -->"; not_logged "trail: rc 1 is not needs-human" edits.log "needs-human"; not_merged "trail: rc 1"
+gate_reset; echo 2 > "$FIX/trail-rc"; echo "PHASE_TRAIL: ERROR (gh)" > "$FIX/trail-out"; mg "$GATE"
+rc_is "trail: rc 2" "$RC" 3; has "trail: rc 2" "blocker: phase trail unreadable (rc=2)"
+case "$OUT" in *"status: PHASE_TRAIL_FAILED"*) bad "trail: rc 2 must not report PHASE_TRAIL_FAILED" ;; *) ok ;; esac
+logged "trail: rc 2 comment" issue-bodies.log "<!-- FORGE:PHASE_TRAIL_ERROR -->"; logged "trail: rc 2 parks" edits.log "needs-human"; not_merged "trail: rc 2"
+gate_reset; mg "$G_NOTRAIL"
+rc_is "trail: verifier unresolvable" "$RC" 3; has "trail: verifier unresolvable" "blocker: phase trail unreadable (rc=127)"; not_merged "trail: unresolvable"
+gate_reset; mg "$GATE"
+logged "trail: code diff flag" trail-args "--code-diff"; logged "trail: head bound" trail-args "--head-sha $SHA"; logged "trail: issue arg" trail-args "42 -R o/r"
+gate_reset; printf 'README.md\n' > "$FIX/pr-files.txt"; mg "$GATE"
+logged "trail: docs-only flag" trail-args "--docs-only"; not_logged "trail: docs-only is not a code diff" trail-args "--code-diff"
+gate_reset; printf 'README.md\n' > "$FIX/pr-files.txt"; echo 3000 > "$FIX/changed-n"; mg "$GATE"
+logged "trail: truncated files list fails closed" trail-args "--code-diff"
+gate_reset; printf 'README.md\n' > "$FIX/pr-files.txt"; rm -f "$FIX/changed-n"; mg "$GATE"
+logged "trail: unreadable count fails closed" trail-args "--code-diff"
+gate_reset; printf 'OVERRIDE: human waived (bound to head)\nPHASE_TRAIL: OK\n' > "$FIX/trail-out"; mg "$GATE"
+rc_is "trail: override on the bound head" "$RC" 0; posted_has "trail: override recorded" "FORGE:PHASE_TRAIL_OVERRIDE_APPLIED"
+gate_reset; printf 'OVERRIDE: human waived\nPHASE_TRAIL: OK\n' > "$FIX/trail-out"
+printf 'CI_GATE: PASS\nCI_GATE_HEAD: %s\n' "$OTHER_SHA" > "$FIX/ci-out"; printf '<!-- FORGE:REVIEW_ROUTE sha=%s -->\n' "$(printf '%s' "$OTHER_SHA" | cut -c1-7)" > "$FIX/route-bodies"; mg "$GATE"
+rc_is "trail: override bound to another head" "$RC" 3; has "trail: override bound to another head" "break-glass override was bound to"; not_merged "trail: override"
+
+# --- unbound guard state aborts (fail closed) ---
+gate_reset; run "$GATE" merge-gate
+rc_is "guard: nothing bound" "$RC" 3; has "guard: nothing bound" "blocker: merge guard state unbound"; logged "guard: needs-human" edits.log "needs-human"; not_merged "guard: nothing bound"
+gate_reset; mg "$GATE" --other-blocking ""
+rc_is "guard: empty OTHER_BLOCKING" "$RC" 3; has "guard: empty OTHER_BLOCKING" "merge guard state unbound"
+gate_reset; mg "$GATE" --verdict "NEEDS RE-REVIEW"
+rc_is "guard: NEEDS RE-REVIEW" "$RC" 3; has "guard: NEEDS RE-REVIEW" "merge guard state unbound"
+gate_reset; mg "$GATE" --trust-needs-human maybe
+rc_is "guard: non-boolean" "$RC" 3; has "guard: non-boolean" "merge guard state unbound"; not_merged "guard: non-boolean"
+
+# --- verdict / calibration / trust / base-conflict routing ---
+gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true
+rc_is "route: only base conflict" "$RC" 3; has "route: only base conflict" "blocker: base-conflict"; has "route: only base conflict" "MERGE_OUTCOME=base-conflict"
+logged "route: base-sync comment" issue-bodies.log "the pipeline is performing the base sync automatically"; not_logged "route: base conflict is not needs-human" edits.log "needs-human"; not_merged "route: base conflict"
+gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true --other-blocking true
+rc_is "route: base conflict plus blocker" "$RC" 3; has "route: base conflict plus blocker" "MERGE_OUTCOME=needs-human"; logged "route: needs-human" edits.log "needs-human"
+gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true --trust-needs-human true --table-cell-key "feature x HIGH"
+rc_is "route: base conflict plus trust" "$RC" 3; logged "route: trust reason" issue-bodies.log "provenance trust: NOVEL_NEEDS_HUMAN tier for cell \`feature x HIGH\`"; logged "route: trust needs-human" edits.log "needs-human"
+gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true --calibration-needs-human true --calibration-note "overconfident cell"
+rc_is "route: base conflict plus calibration" "$RC" 3; logged "route: calibration reason" issue-bodies.log "calibration threshold: overconfident cell"; logged "route: calibration needs-human" edits.log "needs-human"
+gate_reset; mg "$GATE" --has-purpose-regression true
+rc_is "route: purpose regression with APPROVED" "$RC" 3; logged "route: purpose reason" issue-bodies.log "purpose regression detected by Phase 7A"; logged "route: purpose needs-human" edits.log "needs-human"; not_merged "route: purpose"
+gate_reset; mg "$GATE" --calibration-needs-human true --calibration-note "note"
+rc_is "route: calibration alone blocks an APPROVED verdict" "$RC" 3; not_merged "route: calibration alone"
+gate_reset; mg "$GATE" --trust-needs-human true
+rc_is "route: trust alone blocks an APPROVED verdict" "$RC" 3; not_merged "route: trust alone"
+gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED"
+rc_is "route: CHANGES REQUESTED" "$RC" 3; logged "route: verdict reason" issue-bodies.log "review verdict is CHANGES REQUESTED"; not_merged "route: CHANGES REQUESTED"
+
+# --- pre-merge mergeability guard ---
+gate_reset; echo "CONFLICTING|DIRTY" > "$FIX/premerge"; mg "$GATE"
+rc_is "premerge: conflicting" "$RC" 3; has "premerge: conflicting" "blocker: base-conflict"; not_logged "premerge: conflict is not needs-human" edits.log "needs-human"; not_merged "premerge: conflicting"
+gate_reset; echo "MERGEABLE|BEHIND" > "$FIX/premerge"; echo true > "$FIX/protection"; mg "$GATE"
+rc_is "premerge: behind under strict protection" "$RC" 3; has "premerge: behind under strict protection" "blocker: base-conflict"
+gate_reset; echo "MERGEABLE|BEHIND" > "$FIX/premerge"; echo false > "$FIX/protection"; mg "$GATE"
+rc_is "premerge: behind without strict protection" "$RC" 0; has "premerge: behind without strict protection" "MERGE_OUTCOME=merged"
+gate_reset; echo "MERGEABLE|BEHIND" > "$FIX/premerge"; mg "$GATE"
+rc_is "premerge: behind, unreadable protection" "$RC" 0
+gate_reset; echo "MERGEABLE|BLOCKED" > "$FIX/premerge"; mg "$GATE"
+rc_is "premerge: branch protection" "$RC" 3; has "premerge: branch protection" "blocker: branch protection not satisfied"
+case "$OUT" in *base-conflict*) bad "premerge: protection must never read as base-conflict" ;; *) ok ;; esac
+logged "premerge: protection needs-human" edits.log "needs-human"
+
+# --- previously-escalated re-review guard ---
+gate_reset; echo true > "$FIX/escalated"; echo false > "$FIX/gate-out"; mg "$GATE"
+rc_is "escalated: non-default base" "$RC" 0; has "escalated: non-default base" "MERGE_OUTCOME=parked-awaiting-merge"
+logged "escalated: non-default comment" issue-bodies.log "remediation auto-land bar"; logged "escalated: transition" transition.log "awaiting-merge"; not_merged "escalated: non-default"
+gate_reset; echo true > "$FIX/escalated"; echo true > "$FIX/gate-out"; mg "$GATE"
+rc_is "escalated: deploy gate" "$RC" 0; logged "escalated: deploy gate comment" issue-bodies.log "for a human merge decision"; not_merged "escalated: deploy gate"
+gate_reset; echo true > "$FIX/escalated"; echo false > "$FIX/gate-out"; mg "$G_NODEPLOY"
+rc_is "escalated: unresolved resolver" "$RC" 0; logged "escalated: unresolved resolver holds for a human" issue-bodies.log "for a human merge decision"; not_merged "escalated: unresolved resolver"
+gate_reset; echo true > "$FIX/escalated"; mg "$G_NOTRANS"
+rc_is "escalated: no transition script" "$RC" 0; logged "escalated: prose label fallback" edits.log "workflow:awaiting-merge"
+
+# --- CI gate, reviewed-head guard ---
+gate_reset; echo 1 > "$FIX/ci-rc"; printf 'CI_GATE: FAIL\nCI_GATE_HEAD: %s\nfailed: build\n' "$SHA" > "$FIX/ci-out"; mg "$GATE"
+rc_is "ci: red" "$RC" 3; has "ci: red" "blocker: ci gate not green (rc=1)"; logged "ci: red comment" issue-bodies.log "CI is not green (ci gate rc=1)"; logged "ci: red needs-human" edits.log "needs-human"; not_merged "ci: red"
+gate_reset; echo 3 > "$FIX/ci-rc"; printf 'CI_GATE: TIMEOUT\nCI_GATE_HEAD: %s\n' "$SHA" > "$FIX/ci-out"; mg "$GATE"
+rc_is "ci: timeout" "$RC" 3; has "ci: timeout" "CI_GATE_TIMEOUT: CI still running"; has "ci: timeout" "blocker: ci gate not green (rc=3)"
+gate_reset; mg "$G_NOCI"
+rc_is "ci: gate unresolvable" "$RC" 3; has "ci: gate unresolvable" "blocker: ci gate not green (rc=2)"; not_merged "ci: unresolvable"
+gate_reset; echo 2 > "$FIX/ci-rc"; printf 'CI_GATE: ERROR\nCI_GATE_HEAD: %s\nPR head moved during the wait\n' "$SHA" > "$FIX/ci-out"; mg "$GATE"
+rc_is "ci: head moved" "$RC" 3; has "ci: head moved" "blocker: stale review"; not_logged "ci: stale is not needs-human" edits.log "needs-human"; not_merged "ci: head moved"
+gate_reset; rm -f "$FIX/route-bodies"; mg "$GATE"
+rc_is "stale: no route marker" "$RC" 3; has "stale: no route marker" "cannot bind the merge to a reviewed commit"; not_merged "stale: no route"
+gate_reset; printf 'CI_GATE: PASS\nCI_GATE_HEAD: %s\n' "$OTHER_SHA" > "$FIX/ci-out"; echo "$SHA" > "$FIX/commit-sha"; printf 'README.md\n' > "$FIX/compare-files"; mg "$GATE"
+rc_is "stale: docs-only post-review delta" "$RC" 0; has "stale: docs-only post-review delta" "Post-review commits are docs-only"; logged "stale: merges the gated head" merge.log "--match-head-commit $OTHER_SHA"
+gate_reset; printf 'CI_GATE: PASS\nCI_GATE_HEAD: %s\n' "$OTHER_SHA" > "$FIX/ci-out"; echo "$SHA" > "$FIX/commit-sha"; printf 'a.py\n' > "$FIX/compare-files"; mg "$GATE"
+rc_is "stale: code post-review delta" "$RC" 3; has "stale: code post-review delta" "is not the reviewed commit"; not_merged "stale: code delta"
+gate_reset; printf 'CI_GATE: PASS\nCI_GATE_HEAD: %s\n' "$OTHER_SHA" > "$FIX/ci-out"; rm -f "$FIX/compare-files"; mg "$GATE"
+rc_is "stale: unreadable compare fails closed" "$RC" 3; not_merged "stale: unreadable compare"
+
+# --- verdict (7A log, 7B base conflict and posting) ---
+vd() { run "$GOOD" verdict --merge-health "${MH:-MERGEABLE}" --merge-health-state "${MHS:-CLEAN}" --base main --head-branch feat/x "$@"; }
+reset; MH=MERGEABLE; MHS=CLEAN; vd
+rc_is "verdict: clean state" "$RC" 0; has "verdict: clean state" "BASE_CONFLICT=false"; has "verdict: clean state" "HAS_MERGE_CONFLICT=false"
+reset; MH=CONFLICTING; MHS=DIRTY; vd
+has "verdict: conflicting" "BASE_CONFLICT=true"; has "verdict: conflicting message" "Merge \`origin/main\` into \`feat/x\` (merge only, no rebase, no force-push)"
+reset; MH=MERGEABLE; MHS=DIRTY; vd; has "verdict: dirty alone" "BASE_CONFLICT=true"
+reset; MH=MERGEABLE; MHS=BEHIND; echo true > "$FIX/protection"; vd; has "verdict: behind under strict protection" "BASE_CONFLICT=true"
+reset; MH=MERGEABLE; MHS=BEHIND; echo false > "$FIX/protection"; vd; has "verdict: behind without strict protection" "BASE_CONFLICT=false"
+reset; MH=MERGEABLE; MHS=BEHIND; vd; has "verdict: behind, unreadable protection" "BASE_CONFLICT=false"
+reset; MH=MERGEABLE; MHS=BLOCKED; vd
+has "verdict: blocked is not a conflict" "BASE_CONFLICT=false"; has "verdict: blocked warning" "MERGE_PROTECTION_WARNING=Merge state is BLOCKED"
+reset; MH=MERGEABLE; MHS=CLEAN; vd --result clean --agents "3 agents: a, b, c" --findings-count 2
+rc_is "verdict: clean post" "$RC" 0; has "verdict: clean" "VERDICT=APPROVED"
+logged "verdict: clean body" reviews.log "APPROVED: commit $(printf '%s' "$SHA" | cut -c1-7) after context-aware review (3 agents: a, b, c). 2 findings created as issues. Safe to merge."
+logged "verdict: trust annotation defaults" reviews.log '**Intensity tier**: SHADOW | **Cell**: `(unavailable)` | **Shadow mode**: true'
+reset; MH=UNKNOWN; MHS=UNKNOWN; vd --result clean; logged "verdict: unknown mergeability warning" reviews.log "GitHub is still computing merge state"
+reset; MH=MERGEABLE; MHS=CLEAN; vd --result clean --intensity-tier FAST --table-cell-key "bug HIGH" --trust-shadow-mode false
+logged "verdict: trust annotation" reviews.log '**Intensity tier**: FAST | **Cell**: `bug HIGH` | **Shadow mode**: false'
+reset; MH=CONFLICTING; MHS=DIRTY; vd --result blocking --blocking-count 1
+has "verdict: blocking" "VERDICT=CHANGES REQUESTED"; logged "verdict: blocking body" reviews.log "CHANGES REQUESTED: commit"; logged "verdict: base conflict line" reviews.log "🔴 Base Conflict:"
+reset; MH=CONFLICTING; MHS=DIRTY; vd --result clean
+has "verdict: clean coerced over a base conflict" "VERDICT_COERCED=true"; has "verdict: coerced verdict" "VERDICT=CHANGES REQUESTED"; logged "verdict: coerced body" reviews.log "CHANGES REQUESTED: commit"
+reset; MH=MERGEABLE; MHS=CLEAN; vd --result clean --has-purpose-regression true --purpose-findings "F-1"
+has "verdict: clean coerced over a purpose regression" "VERDICT_COERCED=true"; logged "verdict: purpose line" reviews.log "⚠ Purpose Regression:"; logged "verdict: purpose finding list" reviews.log "See: F-1"
+reset; MH=MERGEABLE; MHS=CLEAN; vd --result stale
+has "verdict: stale" "VERDICT=STALE"; logged "verdict: stale body" reviews.log "is stale — PR HEAD changed. Re-run /review-pr."
+reset; MH=MERGEABLE; MHS=CLEAN; vd --result clean --dry-run
+if [ -f "$FIX/reviews.log" ]; then bad "verdict: --dry-run must post nothing"; else ok; fi
+# 7A: the purpose-regression log is milestone-only
+reset; MH=MERGEABLE; MHS=CLEAN; vd --is-milestone true --has-purpose-regression true --purpose-findings "F-1"
+has "7A: blocked log" "PURPOSE REGRESSION GATE: BLOCKED"; has "7A: escalation" "Verdict escalated to CHANGES REQUESTED."
+reset; MH=MERGEABLE; MHS=CLEAN; vd --is-milestone true --has-purpose-regression false; has "7A: passed log" "PURPOSE REGRESSION GATE: PASSED"
+reset; MH=MERGEABLE; MHS=CLEAN; vd --has-purpose-regression true
+case "$OUT" in *"PURPOSE REGRESSION GATE"*) bad "7A: non-milestone PRs print no gate log" ;; *) ok ;; esac
+reset; OUT=$(cd "$REPO_DIR" && FORGEDOCK_HOME="$GOOD" bash "$ROOT/scripts/review-finalize.sh" verdict --pr 7 --repo o/r --context "$CTXF" --merge-health 2>/dev/null); RC=$?
+rc_is "verdict: flag without a value" "$RC" 2
+reset; vd --result bogus; rc_is "verdict: invalid result" "$RC" 2
+
+# --- calibrate (7B.5) ---
+CAL_ROW() { printf '{"rows":[{"taskType":"%s","confidence":"%s","trusted":%s,"survivalRate":0.5,"sampleCount":20,"flag":"%s"}]}' "$1" "$2" "$3" "$4"; }
+setcal() {   # setcal <json>: publish calibration/table.json as origin/forge-knowledge in the throwaway checkout
+    git -C "$REPO_DIR" checkout -q -b kn-tmp; mkdir -p "$REPO_DIR/calibration"; printf '%s' "$1" > "$REPO_DIR/calibration/table.json"
+    git -C "$REPO_DIR" add -A; git -C "$REPO_DIR" commit -qm cal
+    git -C "$REPO_DIR" update-ref refs/remotes/origin/forge-knowledge HEAD
+    git -C "$REPO_DIR" checkout -q main; git -C "$REPO_DIR" branch -q -D kn-tmp; rm -rf "$REPO_DIR/calibration"
+}
+clrcal() { git -C "$REPO_DIR" update-ref -d refs/remotes/origin/forge-knowledge 2>/dev/null || true; }
+cal() { reset; mkctx 1 FULL "" 42; printf '## Investigation\n**Task Type**: Refactor\n**Confidence**: HIGH\n' > "$FIX/investigator"; run "$GOOD" calibrate "$@"; }
+setcal "$(CAL_ROW Refactor HIGH true overconfidence)"
+cal; rc_is "calibrate: overconfidence" "$RC" 0; has "calibrate: overconfidence" "CALIBRATION_NEEDS_HUMAN=true"; has "calibrate: cell" "CALIBRATION_CELL=Refactor × HIGH: survival=0.5 (n=20)"
+has "calibrate: note" "Routing to needs-human per forge#1741 policy."; logged "calibrate: trajectory record" issue-bodies.log "<!-- FORGE:CALIBRATION_CHECK -->"
+cal --intensity-tier FAST --table-cell-key "k" --trust-shadow-mode false --trust-needs-human true
+logged "calibrate: provenance record" issue-bodies.log '**TRUST_NEEDS_HUMAN**: true'
+cal --dry-run; has "calibrate: dry run" "CALIBRATION_NEEDS_HUMAN=true"; if [ -f "$FIX/issue-bodies.log" ]; then bad "calibrate: --dry-run must post nothing"; else ok; fi
+clrcal; setcal "$(CAL_ROW Refactor HIGH true null)"
+cal; has "calibrate: healthy cell" "CALIBRATION_NEEDS_HUMAN=false"; has "calibrate: healthy cell note" "within acceptable threshold"
+clrcal; setcal "$(CAL_ROW Refactor HIGH false overconfidence)"
+cal; has "calibrate: untrusted cell never tightens" "CALIBRATION_NEEDS_HUMAN=false"; has "calibrate: untrusted cell note" "absent or untrusted"
+clrcal; setcal "$(CAL_ROW Refactor MEDIUM true overconfidence)"
+cal; has "calibrate: only HIGH confidence tightens" "CALIBRATION_NEEDS_HUMAN=false"
+clrcal; setcal "not json"
+cal; has "calibrate: malformed table fails safe" "CALIBRATION_NEEDS_HUMAN=false"
+clrcal
+cal; has "calibrate: missing table fails safe" "CALIBRATION_NEEDS_HUMAN=false"; has "calibrate: missing table note" "calibration table unavailable"
+setcal "$(CAL_ROW Refactor HIGH true overconfidence)"
+reset; mkctx 1 FULL "" 42; run "$GOOD" calibrate; has "calibrate: no investigator comment fails safe" "CALIBRATION_NEEDS_HUMAN=false"; has "calibrate: unresolved note" "task type or confidence not resolved"
+reset; mkctx 1 FULL "" ""; run "$GOOD" calibrate; has "calibrate: no issue fails safe" "CALIBRATION_NEEDS_HUMAN=false"
+clrcal
+
+# --- demilestone (8B / 9A) ---
+printf '11\n12\n' > "$WORK/demile.seed"
+dm() { reset; cp "$WORK/demile.seed" "$FIX/demile.txt"; run "$GOOD" demilestone "$@"; }
+dm --is-milestone false --merge-state MERGED; has "demilestone: non-milestone PR" "DEMILESTONED=0"; not_logged "demilestone: non-milestone edits" edits.log "--milestone"
+dm --is-milestone true --merge-state OPEN; has "demilestone: not merged" "DEMILESTONED=0"; not_logged "demilestone: unmerged edits" edits.log "--milestone"
+dm --is-milestone true --merge-state MERGED
+rc_is "demilestone: 8B" "$RC" 0; has "demilestone: 8B count" "DEMILESTONED=2"; logged "demilestone: first finding" edits.log "issue edit 11 -R o/r --milestone"; logged "demilestone: second finding" edits.log "issue edit 12 -R o/r --milestone"
+has "demilestone: fast lane line" "Moved to fast lane: #11"
+dm --is-milestone true; echo MERGED > "$FIX/state"; run "$GOOD" demilestone --is-milestone true
+has "demilestone: 9A reads the PR state" "DEMILESTONED=2"
+dm --is-milestone true; has "demilestone: 9A open PR" "DEMILESTONED=0"
+reset; run "$GOOD" demilestone --is-milestone true --merge-state MERGED; has "demilestone: nothing to clear" "No open review-finding issues"; has "demilestone: nothing to clear count" "DEMILESTONED=0"
+
+# --- integrity (Phase 9) ---
+ig() { run "${IGROOT:-$GOOD}" integrity "$@"; }
+reset; ig; rc_is "integrity: current head" "$RC" 0; has "integrity: current" "REVIEW_IS_STALE=false"; has "integrity: no panel" "ACTUAL_AGENT_COUNT=0"
+reset; echo "$OTHER_SHA" > "$FIX/head"; ig; has "integrity: moved head" "REVIEW_IS_STALE=true"; has "integrity: moved head current sha" "CURRENT_SHA=$OTHER_SHA"
+reset; rm -f "$FIX/head"; ig; has "integrity: unreadable head is stale" "REVIEW_IS_STALE=true"
+reset
+cm MEMBER User "$(agent_body security "$SHA" 'a' '')"; cm MEMBER User "$(agent_body api "$SHA" 'b' '')"; cm MEMBER User "$(agent_body api "$SHA" 'dup' '')"
+cm NONE User "$(agent_body billing "$SHA" 'forged' '')"; cm MEMBER User "prose mentioning <!-- FORGE:REVIEW-AGENT:auth --> mid-body"; flush
+ig; has "integrity: trusted agents counted once per domain" "ACTUAL_AGENT_COUNT=2"; has "integrity: domains" "ACTUAL_AGENT_DOMAINS=api, security"
+case "$OUT" in *billing*|*auth*) bad "integrity: untrusted or mid-body markers must not count" ;; *) ok ;; esac
+IGROOT="$G_NOTRUST"; ig; has "integrity: trust script unresolvable counts zero" "ACTUAL_AGENT_COUNT=0"; IGROOT=""
+reset; rm -f "$FIX/comments.json"; ig; has "integrity: unreadable comments count zero" "ACTUAL_AGENT_COUNT=0"
+reset; mkctx 1 BASE_SYNC_ONLY "$OLD_SHA" 42; cm MEMBER User "$(agent_body security "$SHA" 'a' '')"; flush; ig
+has "integrity: unverified carry is not reported as carried" "CARRIED_FROM: "; case "$OUT" in *"carried from"*) bad "integrity: carried requires a verified record" ;; *) ok ;; esac
+
+# --- Phase 7-9 subcommands run without a review-prepare context (flags only) ---
+nctx() { local sub="$1"; shift; OUT=$(cd "$REPO_DIR" && FORGEDOCK_HOME="$GATE" bash "$ROOT/scripts/review-finalize.sh" "$sub" --pr 7 --repo o/r "$@" 2>"$WORK/stderr"); RC=$?; }
+gate_reset; nctx merge-gate --issue 42 --base main --verdict APPROVED --has-purpose-regression false --calibration-needs-human false --trust-needs-human false --base-conflict false --other-blocking false
+rc_is "no context: merge-gate" "$RC" 0; has "no context: merge-gate" "MERGE_OUTCOME=merged"
+gate_reset; nctx merge-gate --base main --verdict APPROVED --has-purpose-regression false --calibration-needs-human false --trust-needs-human false --base-conflict false --other-blocking false
+rc_is "no context: merge-gate without --issue" "$RC" 3; has "no context: merge-gate without --issue" "auto-merge requires --issue"
+gate_reset; nctx integrity --review-sha "$SHA"; rc_is "no context: integrity" "$RC" 0; has "no context: integrity" "REVIEW_IS_STALE=false"
+gate_reset; nctx integrity; rc_is "no context: integrity without a sha" "$RC" 3; has "no context: integrity without a sha" "REVIEW_SHA is not a commit id"
+gate_reset; nctx extract --out-dir "$WORK/out"; rc_is "no context: extract still needs one" "$RC" 2
 
 # ======================= usage errors =======================
 OUT=$(bash "$ROOT/scripts/review-finalize.sh" bogus 2>/dev/null); RC=$?; rc_is "unknown subcommand" "$RC" 2

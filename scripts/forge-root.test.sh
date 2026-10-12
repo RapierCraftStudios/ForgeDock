@@ -95,8 +95,8 @@ fi
 # forge#3758 (hgate is a fixture of its own: the loop runs once per shell and h14 is reused below with other versions): deploy-gate script resolves on a plugin-only install (cache only, no symlink, no FORGE_* env).
 # The gate-script line is taken verbatim from the spec so the test exercises exactly what ships.
 mkscripts "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0"; : > "$T/hgate/.claude/plugins/cache/forgedock/forgedock/1.0.0/scripts/resolve-deploy-gate.sh"
-# review-pr.md resolves the gate script through the forge_resolve stub (#3780): the locator and the call line are taken verbatim from the spec.
-sed 's/^[[:space:]]*//' "$ROOT/commands/review-pr.md" | grep '^GATE_SCRIPT=\$(forge_resolve resolve-deploy-gate.sh)$' | sort -u > "$T/gs"
+# review-finalize.sh (the review-pr.md Phase 8 gate) resolves the gate script through forge_resolve (#3780): the locator and the call line are taken verbatim from the script.
+sed 's/^[[:space:]]*//' "$ROOT/scripts/review-finalize.sh" | grep '^GATE_SCRIPT=\$(forge_resolve resolve-deploy-gate.sh)$' | sort -u > "$T/gs"
 expect "gate-script resolver line is identical across sites" 1 "$(wc -l < "$T/gs" | tr -d ' ')"
 { sed 's/^[[:space:]]*//' "$ROOT/commands/review-pr.md" | grep -m1 '^type forge_resolve >/dev/null'; cat "$T/gs"; } > "$T/gs_full"
 gate_run() { ( cd "$T/consumer" && env -i PATH="$PATH" HOME="$1" "$SH" -c "$(cat "$T/gs_full"); printf %s \"\$GATE_SCRIPT\"" ); }
