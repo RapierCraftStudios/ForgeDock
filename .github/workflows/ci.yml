@@ -48,6 +48,9 @@ jobs:
       - name: Test temp cleanup lint
         run: bash scripts/check-test-tmp-cleanup.sh
 
+      - name: Test temp cleanup lint tests
+        run: bash scripts/check-test-tmp-cleanup.test.sh
+
       - name: Run unit tests
         run: npm test
 
