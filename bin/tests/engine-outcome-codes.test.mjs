@@ -59,7 +59,7 @@ const REVIEW_NEXT = "REVIEW_RESULT:\n  status: NEXT\n  next: remediate\n  remedi
 // (see docs/OUTCOME-CODES.md) so only the enum membership is asserted for them.
 const COVERAGE = {
   "review.changes_requested": "review.detectOutcome", "review.escalated": "review.detectOutcome",
-  "review.rereview_skipped": "reserved", "build.acceptance_failed": "build.detectOutcome",
+  "review.rereview_skipped": "reserved", "review.blocking_issue": "review.detectOutcome", "review.pr_open": "review.detectOutcome", "build.acceptance_failed": "build.detectOutcome",
   "build.acceptance_malformed": "reserved", "build.size_over_gate": "reserved",
   "build.cohesive": "reserved", "remediate.no_marker": "remediate.detectOutcome",
   "remediate.deferred_live_run": "remediate.detectOutcome", "remediate.re_escalated": "remediate.detectOutcome",
