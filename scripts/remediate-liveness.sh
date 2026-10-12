@@ -25,6 +25,10 @@
 #   LIVENESS: ERROR <why>              exit 2   unreadable state; fail closed (never "no lease", never delete)
 # Trust predicate for comments: Bot, or OWNER/MEMBER/COLLABORATOR (same default as scripts/trusted-comments.sh).
 set -uo pipefail
+# Telemetry (forge#3834): best-effort decision record; never changes stdout, stderr or the exit code.
+_TEL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/telemetry.sh"; [ -f "$_TEL" ] && . "$_TEL" 2>/dev/null
+type forge_emit >/dev/null 2>&1 || forge_emit() { :; }
+[ -z "${DRY_RUN:-}" ] || FORGE_TELEMETRY=off
 
 PR="${1:-}"; ISSUE="${2:-}"; REPO="${3:-}"; HOLDER="${4:-}"
 MAX_LEASE_TTL_MS=1800000      # 3x the engine's 10 min lease TTL
@@ -103,11 +107,13 @@ if [ -n "$ROUTE_SHA" ]; then
 fi
 
 if [ "$LEASE_LIVE" != "true" ] && [ "$REVIEW_PENDING" != "true" ]; then
+  FORGE_REPO="${FORGE_REPO:-$REPO}" FORGE_ISSUE="${FORGE_ISSUE:-$ISSUE}" FORGE_PR="${FORGE_PR:-$PR}" forge_emit liveness decision=PROCEED why=dead
   echo "LIVENESS: DEAD"; exit 0
 fi
 
 PRIOR=$(printf '%s' "$ISSUE_COMMENTS" | jq -rs --arg pr "pr=$PR" "[.[][] | select($TRUST) | select((.body // \"\") | startswith(\"<!-- FORGE:REMEDIATION_DEFERRED -->\")) | select((.body | split(\"\\n\") | index(\$pr)) != null)] | length" 2>/dev/null) || err "deferral records unreadable"
-if [ "${PRIOR:-0}" -ge "$MAX_DEFERRALS" ]; then echo "LIVENESS: EXHAUSTED ${PRIOR}"; exit 11; fi
+if [ "${PRIOR:-0}" -ge "$MAX_DEFERRALS" ]; then FORGE_REPO="${FORGE_REPO:-$REPO}" FORGE_ISSUE="${FORGE_ISSUE:-$ISSUE}" FORGE_PR="${FORGE_PR:-$PR}" forge_emit liveness decision=EXHAUSTED why=deferrals-${PRIOR}
+  echo "LIVENESS: EXHAUSTED ${PRIOR}"; exit 11; fi
 
 if [ "$LEASE_LIVE" = "true" ]; then KIND=lease; DETAIL="lease held by ${LEASE_BY} until ${LEASE_UNTIL}"
 else KIND=review; DETAIL="re-review of ${ROUTE_SHA} has no reviewer verdicts yet"; fi
@@ -122,4 +128,5 @@ lease_by=${LEASE_BY:-none}
 lease_until=${LEASE_UNTIL}"
 if [ -n "${DRY_RUN:-}" ]; then printf 'DRY_RUN: would post:\n%s\n' "$BODY"
 else gh issue comment "$ISSUE" -R "$REPO" --body "$BODY" >/dev/null 2>&1 || err "could not post deferral record"; fi
+FORGE_REPO="${FORGE_REPO:-$REPO}" FORGE_ISSUE="${FORGE_ISSUE:-$ISSUE}" FORGE_PR="${FORGE_PR:-$PR}" forge_emit liveness decision=DEFER why="$KIND"
 echo "LIVENESS: DEFER ${KIND} ${DETAIL}"; exit 10

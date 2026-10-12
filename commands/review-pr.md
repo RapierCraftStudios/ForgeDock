@@ -1979,9 +1979,11 @@ done
 
 if [ -z "$MISSING_AGENT_COMMENTS" ] && [ "$ACTUAL_AGENT_COUNT" -ge "$SELECTED_AGENT_COUNT" ]; then
   rm -f "$DEADLINE_FILE"
+  _t=$(forge_resolve lib/telemetry.sh); FORGE_REPO="$REPO" FORGE_PR="$PR_NUMBER" bash "${_t:-/dev/null}" review_panel agents_selected="$SELECTED_AGENT_COUNT" agents_completed="$ACTUAL_AGENT_COUNT" mode="${REVIEW_MODE%% *}" >/dev/null 2>&1 || true # forge#3834 telemetry
   if [ -n "$CARRIED_FROM" ]; then echo "PANEL_STATUS: COMPLETE (carried from ${CARRIED_FROM}; no reviewers dispatched)"; else echo "PANEL_STATUS: COMPLETE (${ACTUAL_AGENT_COUNT}/${SELECTED_AGENT_COUNT})"; fi
 elif [ "$JOINED" = "true" ] || [ "$EMPTY_UNVERIFIED" = "true" ] || [ "$(date +%s)" -ge "$DEADLINE" ]; then
   rm -f "$DEADLINE_FILE"
+  _t=$(forge_resolve lib/telemetry.sh); FORGE_REPO="$REPO" FORGE_PR="$PR_NUMBER" bash "${_t:-/dev/null}" review_panel agents_selected="$SELECTED_AGENT_COUNT" agents_completed="$ACTUAL_AGENT_COUNT" mode="${REVIEW_MODE%% *}" >/dev/null 2>&1 || true # forge#3834 telemetry
   echo "REVIEW DELIVERY FAILURE: missing trusted current-SHA findings comment(s) for:${MISSING_AGENT_COMMENTS}"
   echo "Use each agent's returned verdict, findings, and durable body path to recover the review."
   [ "$JOINED" = "true" ] && echo "PANEL_STATUS: SHORTFALL (ACTUAL_AGENT_COUNT=${ACTUAL_AGENT_COUNT})" || echo "PANEL_STATUS: TIMEOUT (ACTUAL_AGENT_COUNT=${ACTUAL_AGENT_COUNT})"
@@ -2180,6 +2182,7 @@ if [ -z "$CLASSIFY_SCRIPT" ]; then
   echo "REVIEW_RESULT: status: BLOCKED, blocker: classifier unavailable (classify-finding.sh not resolvable through the trusted resolver)"
   exit 0
 fi
+export FORGE_REPO="{GH_REPO}" FORGE_PR="{PR_NUMBER}" FORGE_ISSUE="${MERGE_ISSUE:-}" # forge#3834: classifier telemetry context
 # Per-review cap (#3642): same trusted resolver, same fail-closed rule. An unresolvable cap helper would file unbounded, so it ends the review.
 CAP_SCRIPT=$(forge_resolve cap-findings.sh)
 if [ -z "$CAP_SCRIPT" ]; then

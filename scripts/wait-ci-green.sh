@@ -30,6 +30,9 @@
 # "No checks" passes only when GitHub Actions also reports no workflow runs for the head commit;
 # if runs exist but their checks have not appeared yet, the gate keeps waiting.
 set -uo pipefail
+# Telemetry (forge#3834): best-effort decision record; never changes stdout, stderr or the exit code.
+_TEL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/telemetry.sh"; [ -f "$_TEL" ] && . "$_TEL" 2>/dev/null
+type forge_emit >/dev/null 2>&1 || forge_emit() { :; }
 
 PR=""; REPO=""
 TIMEOUT="${FORGE_CI_TIMEOUT:-540}"; INTERVAL="${FORGE_CI_INTERVAL:-20}"; SETTLE="${FORGE_CI_SETTLE:-45}"
@@ -50,7 +53,11 @@ case "$REPO" in */*) ;; *) usage ;; esac
 for v in "$TIMEOUT" "$INTERVAL" "$GRACE" "$SETTLE"; do case "$v" in ''|*[!0-9]*) usage ;; esac; done
 [ "$INTERVAL" -ge 1 ] || INTERVAL=1
 
-emit() { echo "CI_GATE: $1"; echo "CI_GATE_HEAD: ${START_SHA:-unknown}"; }
+emit() {
+  case "$1" in PASS) _rc=0 ;; FAIL) _rc=1 ;; TIMEOUT) _rc=3 ;; *) _rc=2 ;; esac
+  FORGE_REPO="${FORGE_REPO:-$REPO}" FORGE_PR="${FORGE_PR:-$PR}" forge_emit ci_gate result="$1" rc="$_rc" checks="${total:-0}"
+  echo "CI_GATE: $1"; echo "CI_GATE_HEAD: ${START_SHA:-unknown}"
+}
 head_sha() { gh pr view "$PR" -R "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null; }
 START_SHA="$(head_sha)"
 if [ -z "$START_SHA" ]; then START_SHA=""; emit ERROR; echo "cannot read PR #$PR head in $REPO"; exit 2; fi

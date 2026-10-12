@@ -2,6 +2,12 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Gate scripts emit structured telemetry (#3834)
+
+`diff-size.sh`, `review-acceptance-gate.sh`, `classify-finding.sh`, `wait-ci-green.sh`, `remediate-liveness.sh` and the build/review spec call sites (B5.5, B6.5, review panel) now append one JSONL record per decision to a trusted `<!-- FORGE:TELEMETRY v1 -->` comment on the issue or PR (shell emitter `scripts/lib/telemetry.sh`, Node twin `bin/engine/telemetry.mjs`). A failed write is buffered under `~/.forge/telemetry-buffer/` and flushed on the next emit. Catalogue and privacy note: `docs/TELEMETRY.md`.
+
+Action: none. Set `FORGE_TELEMETRY=off` to disable. Gate stdout and exit codes are unchanged.
+
 ## Deferred follow-ups are folded or batched into one issue (#3843)
 
 Build B2.0 no longer files one issue per `deferred → #N` item. A same-mechanical-change sibling that fits the remaining `0.8 × build.diff_size.threshold` budget (1000 when the threshold is 0 or unset) is folded into the contract's Deliverables. The rest go through `scripts/file-deferred-followups.sh`: one follow-up per parent with a checklist (known-flaw items flagged `known-flaw`), or an append to the open trusted follow-up for the same parent (exact path match). The script prints a `DEFERRED_TELEMETRY deferred_items= folded= batched_into= filed=` line and calls the #3834 emitter only if present. The `FORGE:DEFERRED_FROM` marker and every path stay in the body, so review-pr deferred verification is unchanged.

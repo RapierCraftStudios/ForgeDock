@@ -19,6 +19,9 @@ set -u
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 cd "$REPO_ROOT" || exit 1
+# Gate scripts emit best-effort telemetry (forge#3834); suites run with it off so stubbed gh calls never buffer into ~/.forge.
+# scripts/telemetry.test.sh sets its own environment.
+export FORGE_TELEMETRY=off
 
 TIMEOUT_SECS="${SHELL_TEST_TIMEOUT:-300}"
 # WIRE:PROVEN — manual: SHELL_TEST_TIMEOUT=abc and SHELL_TEST_TIMEOUT=0 both print the error and exit 2

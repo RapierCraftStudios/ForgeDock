@@ -11,6 +11,10 @@
 # never a FAIL and never needs-human. With zero verified checks and some malformed, a non-blocking notice is posted (no PASSED marker).
 # Exit: 0 passed / no-op / notice / already passed for this head, 1 a deferred check failed (issue gets needs-human).
 set -uo pipefail
+# Telemetry (forge#3834): best-effort decision record; never changes stdout, stderr or the exit code.
+_TEL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/telemetry.sh"; [ -f "$_TEL" ] && . "$_TEL" 2>/dev/null
+type forge_emit >/dev/null 2>&1 || forge_emit() { :; }
+[ -z "${DRY_RUN:-}" ] || FORGE_TELEMETRY=off
 
 NUMBER="${1:?issue number}"; GH_REPO="${2:?repo}"; GH_FLAG="${3:-}"; WT="${4:-.}"
 cd "$WT" || exit 2
@@ -98,6 +102,8 @@ done <<< "$CHECKS"
 MALFORMED_SECTION=""
 [ -n "$MALFORMED_CHECKS" ] && MALFORMED_SECTION=$(printf '\n**malformed-check (not counted as failures; regenerate the acceptance spec by re-running investigate)**:%b\n' "$MALFORMED_CHECKS")
 
+_nf=$(printf '%b' "$FAILED" | grep -c '^- ' || true); _nm=$(printf '%b' "$MALFORMED_CHECKS" | grep -c '^- ' || true)
+FORGE_REPO="${FORGE_REPO:-$GH_REPO}" FORGE_ISSUE="${FORGE_ISSUE:-$NUMBER}" forge_emit acceptance_gate phase=review verified="$VERIFIED_COUNT" failed="${_nf:-0}" malformed="${_nm:-0}" deferred=$((VERIFIED_COUNT + ${_nm:-0}))
 if [ "$VERIFIED_COUNT" -eq 0 ] && [ -z "$MALFORMED_CHECKS" ]; then
   echo "No deferred acceptance checks; R2.5 is a no-op."
 elif [ "$VERIFIED_COUNT" -eq 0 ]; then
