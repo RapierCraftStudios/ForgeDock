@@ -419,7 +419,7 @@ Cleans up stale labels, missing workflow state, project board gaps, dangling wor
 /cleanup branches                 # Prune merged branches
 /cleanup milestones               # Archive shipped milestones
 /cleanup board                    # Fix project board gaps
-/cleanup orphans                  # Remove dangling worktrees
+/cleanup orphans                  # Remove dangling worktrees; close dead orchestrate claims boards
 /cleanup all                      # Everything
 ```
 
