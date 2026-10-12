@@ -605,12 +605,14 @@ SLICE=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" | cycle_sli
 ARCH_BODY=$(printf '%s' "$SLICE" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:ARCHITECT' | jq -rs 'map(select(type == "string")) | last // ""') || { echo "BASELINE_LOOKUP=FAILED"; exit 0; }
 INV_BODY=$(printf '%s' "$SLICE" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:INVESTIGATOR' | jq -rs 'map(select(type == "string")) | last // ""') || { echo "BASELINE_LOOKUP=FAILED"; exit 0; }
 ISSUE_BODY=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq .body) || { echo "BASELINE_LOOKUP=FAILED"; exit 0; }
-PLAN_FILE=$(mktemp "${TMPDIR:-/tmp}/scope-plan.XXXXXX")
+SCOPE_DIR="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$SCOPE_DIR"
+PLAN_FILE="$SCOPE_DIR/scope-plan-{NUMBER}"   # fixed path: Step 2 runs in a fresh shell and re-derives it
 printf '%s\n' "$ARCH_BODY" | awk '/^PLANNED_FILES:[ \t]*$/{f=1;next} f&&/^[ \t]*[-*][ \t]+/{print;next} f{exit}' > "$PLAN_FILE"
 EST_RE='s/^ESTIMATED_DIFF_LINES: *\([0-9][0-9]*\) *$/\1/p'
 ESTIMATE=$(printf '%s\n' "$ARCH_BODY" | sed -n "$EST_RE" | tail -n 1)
 [ -n "$ESTIMATE" ] || ESTIMATE=$(printf '%s\n' "$ISSUE_BODY" | sed -n "$EST_RE" | tail -n 1)
 [ -n "$ESTIMATE" ] || ESTIMATE=$(printf '%s\n' "$INV_BODY" | sed -n "$EST_RE" | tail -n 1)
+printf '%s' "${ESTIMATE:-}" > "$SCOPE_DIR/scope-estimate-{NUMBER}"
 echo "BASELINE_LOOKUP=ok PLAN_FILE=${PLAN_FILE} ESTIMATE=${ESTIMATE:-none}"
 ```
 
@@ -620,6 +622,10 @@ echo "BASELINE_LOOKUP=ok PLAN_FILE=${PLAN_FILE} ESTIMATE=${ESTIMATE:-none}"
 
 ```bash
 # <Script resolution block from above goes here, verbatim>
+# Step 1's variables do not survive into this fence: reload the baseline it persisted.
+SCOPE_DIR="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"
+PLAN_FILE="$SCOPE_DIR/scope-plan-{NUMBER}"; [ -f "$PLAN_FILE" ] || : > "$PLAN_FILE"
+ESTIMATE=$(cat "$SCOPE_DIR/scope-estimate-{NUMBER}" 2>/dev/null || true)
 # Fresh origin/base for the merge-base measurement: retry with 10s/30s/60s backoff, record whether it ever succeeded
 FETCH_OK=0
 for _delay in 0 10 30 60; do

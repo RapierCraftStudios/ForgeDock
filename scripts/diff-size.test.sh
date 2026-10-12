@@ -181,9 +181,9 @@ OUT="$(run --plan-files "$TMP/plan")"; check "scope 3 out" "$OUT" out_of_plan_co
 : > "$TMP/plan"; OUT="$(run --plan-files "$TMP/plan")"; check "empty plan is no_baseline" "$OUT" scope no_baseline; check "no_baseline count" "$OUT" out_of_plan_count 0
 OUT="$(run)"; [ -z "$(val "$OUT" scope)" ] && ok || bad "scope keys absent without plan args"
 # excluded files are never out-of-plan; a path is data (glob chars, spaces) not a pattern
-reset; mkdir -p vendor; gen 5 > vendor/z.js; gen 5 > 'we ird*.txt'; git add -A
+reset; mkdir -p vendor; gen 5 > vendor/z.js; gen 5 > 'we ird[1].txt'; git add -A
 printf '%s\n' 'src/a.py' > "$TMP/plan"
-OUT="$(run --plan-files "$TMP/plan")"; check "excluded not out-of-plan" "$OUT" out_of_plan_count 1; check "path with space and glob quoted" "$OUT" out_of_plan 'we ird*.txt'
+OUT="$(run --plan-files "$TMP/plan")"; check "excluded not out-of-plan" "$OUT" out_of_plan_count 1; check "path with space and glob quoted" "$OUT" out_of_plan 'we ird[1].txt'
 printf '%s\n' '*.txt' > "$TMP/plan"; OUT="$(run --plan-files "$TMP/plan")"; check "plan entry is not a glob" "$OUT" out_of_plan_count 1
 # overrun against the plan estimate (ws-insensitive actual)
 reset; gen 500 > big.py; git add -A
