@@ -2159,6 +2159,13 @@ describe("main-checkout mutation guard (issue #3650)", () => {
     }
   });
 
+  it("an allowed ref-only verb does not mask a later mutating segment (#3873)", () => {
+    for (const c of ["git branch -D other && git stash", "git branch -d other; git checkout feat/x", "git branch -D other || git reset --hard HEAD", "git branch -D other && git branch -D main"]) {
+      assert.equal(run(c, mainDir).exitCode, 2, c);
+    }
+    assert.equal(run("git branch -D other && git branch -d another", mainDir).exitCode, 0);
+  });
+
   it("denies git checkout in the main checkout", () => {
     const r = run("git checkout --detach FETCH_HEAD", mainDir);
     assert.equal(r.exitCode, 2);

@@ -1398,10 +1398,8 @@ function checkMainCheckoutMutation(command) {
   if (process.env.FORGE_ALLOW_MAIN_CHECKOUT_GIT === "1") return null;
   if (!/\b(?:git|gh)\b/.test(command)) return null;
   try {
-    let offender = null;
-    let branches = null;
     let baseDir = process.cwd();
-    let targetDir = baseDir;
+    // Decide per segment: an allowed ref-only verb (`git branch -d other`) must not mask a later mutating segment.
     for (const tokens of extractCommandSegments(command)) {
       const head = tokens.slice();
       while (head.length && (/^[({]+$/.test(head[0]) || ["then", "do", "else", "!"].includes(head[0]))) head.shift();
@@ -1414,26 +1412,27 @@ function checkMainCheckoutMutation(command) {
         continue;
       }
       const hit = mutatingGitCommand(tokens);
-      if (hit) { offender = hit.name; branches = hit.branches ?? null; targetDir = hit.dir === null ? baseDir : resolvePath(baseDir, hit.dir); break; }
+      if (!hit) continue;
+      const targetDir = hit.dir === null ? baseDir : resolvePath(baseDir, hit.dir);
+      if (!isMainCheckout(targetDir)) continue;
+      if (hit.branches) {
+        // Ref-only verb: only the checked-out branch matters; unresolvable (detached HEAD, error) = allow.
+        const cur = spawnSync("git", ["-C", targetDir, "branch", "--show-current"], { encoding: "utf-8", timeout: 5000 });
+        const current = cur.status === 0 ? String(cur.stdout).trim() : "";
+        if (!current || !hit.branches.some((b) => b === "@current" || b === current)) continue;
+      }
+      // Hook is global: only protect ForgeDock-managed main checkouts (issue #1591 scoping), never unrelated repos.
+      if (!existsSync(join(targetDir, "forge.yaml")) && !existsSync(join(targetDir, ".forgedock"))) continue;
+      return (
+        `BLOCKED: \`${hit.name}\` would mutate the main checkout (${targetDir}).\n` +
+        "The main checkout is shared with the operator and other agents. Work in a git worktree " +
+        "(`git worktree list`, `git worktree add`) and use `git -C <worktree> ...`, or read code with " +
+        "`git show <sha>:<path>`, `gh pr diff`, or `gh api`.\n" +
+        "Operator override: set FORGE_ALLOW_MAIN_CHECKOUT_GIT=1 in the shell before starting Claude Code " +
+        "(set FORGE_ENFORCE_MAIN_CHECKOUT_GIT=0 to make this advisory only).\n"
+      );
     }
-    if (!offender) return null;
-    if (!isMainCheckout(targetDir)) return null;
-    if (branches) {
-      // Ref-only verb: only the checked-out branch matters; unresolvable (detached HEAD, error) = allow.
-      const cur = spawnSync("git", ["-C", targetDir, "branch", "--show-current"], { encoding: "utf-8", timeout: 5000 });
-      const current = cur.status === 0 ? String(cur.stdout).trim() : "";
-      if (!current || !branches.some((b) => b === "@current" || b === current)) return null;
-    }
-    // Hook is global: only protect ForgeDock-managed main checkouts (issue #1591 scoping), never unrelated repos.
-    if (!existsSync(join(targetDir, "forge.yaml")) && !existsSync(join(targetDir, ".forgedock"))) return null;
-    return (
-      `BLOCKED: \`${offender}\` would mutate the main checkout (${targetDir}).\n` +
-      "The main checkout is shared with the operator and other agents. Work in a git worktree " +
-      "(`git worktree list`, `git worktree add`) and use `git -C <worktree> ...`, or read code with " +
-      "`git show <sha>:<path>`, `gh pr diff`, or `gh api`.\n" +
-      "Operator override: set FORGE_ALLOW_MAIN_CHECKOUT_GIT=1 in the shell before starting Claude Code " +
-      "(set FORGE_ENFORCE_MAIN_CHECKOUT_GIT=0 to make this advisory only).\n"
-    );
+    return null;
   } catch {
     return null; // fail open
   }
