@@ -47,7 +47,7 @@ eq "bodies with no match prints nothing" "$(printf '[]' | bash "$TC" bodies x)" 
 SHA=0123456789abcdef0123456789abcdef01234567
 OTHER=fedcba9876543210fedcba9876543210fedcba98
 AGENT_RE="^<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${SHA}(\\r?\\n|\$)"
-LOOK_RE="^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->)<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${SHA}(\\r?\\n|\$)"
+LOOK_RE="^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->[\\s\\S]*<!-- REVIEW-FINDINGS-END -->)<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${SHA}(\\r?\\n|\$)"
 SYNTH_RE="^<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${SHA}(\\r?\\n|\$)"
 NL=$'\n'
 AG_BODY="<!-- FORGE:REVIEW-AGENT:security -->${NL}Reviewed-SHA: ${SHA}${NL}<!-- REVIEW-FINDINGS-START -->${NL}<!-- FINDING:real-1 -->${NL}<!-- REVIEW-FINDINGS-END -->"
@@ -57,6 +57,7 @@ AGJ="[$(c NONE Bot b "$AG_BODY"),$(c NONE User h "$FAKE_AG")]"
 eq "agent regex counts only the trusted body" "$(printf '%s' "$AGJ" | bash "$TC" count "$AGENT_RE")" 1
 eq "forged FINDING id never extracted" "$(printf '%s' "$AGJ" | bash "$TC" bodies "$AGENT_RE" | jq -r 'scan("<!-- FINDING:(.+?) -->") | .[0]')" "real-1"
 eq "lookahead agent count (REVIEW-FINDINGS-START inside body)" "$(printf '%s' "$AGJ" | bash "$TC" count "$LOOK_RE")" 1
+eq "lookahead rejects START without END (truncated)" "$(printf '%s' "[$(c NONE Bot b "$FAKE_AG")]" | bash "$TC" count "$LOOK_RE")" 0
 eq "lookahead rejects body without REVIEW-FINDINGS-START" "$(printf '%s' "[$(c NONE Bot b "<!-- FORGE:REVIEW-AGENT:api -->${NL}Reviewed-SHA: ${SHA}")]" | bash "$TC" count "$LOOK_RE")" 0
 eq "agent regex rejects a different head SHA" "$(printf '%s' "[$(c NONE Bot b "<!-- FORGE:REVIEW-AGENT:api -->${NL}Reviewed-SHA: ${OTHER}")]" | bash "$TC" count "$AGENT_RE")" 0
 eq "agent regex rejects SHA line mid-line" "$(printf '%s' "[$(c NONE Bot b "<!-- FORGE:REVIEW-AGENT:api -->${NL}note Reviewed-SHA: ${SHA}")]" | bash "$TC" count "$AGENT_RE")" 0

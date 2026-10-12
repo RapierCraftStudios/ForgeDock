@@ -334,6 +334,45 @@ run "$GOOD" extract; rc_is "delta: earlier head unreadable" "$RC" 3; has "delta:
 # clean review
 reset; cm MEMBER User "$(agent_body security "$SHA" 'all good' 'no findings')"; flush
 run "$GOOD" extract; has "clean" "STRUCTURED_FINDINGS=0"; has "clean" "CLEAN_STRUCTURED=true"
+has "clean: no undelivered agent" "AGENTS_WITHOUT_BLOCK=
+"
+lacks() { case "$OUT" in *"$2"*) bad "$1: output has '$2'" ;; *) ok ;; esac; }
+nob() { printf '<!-- FORGE:REVIEW-AGENT:%s -->\n**Verdict: APPROVE - no findings.**\nReviewed-SHA: %s\n' "$1" "$2"; }
+
+# verdict-only agent comment (no findings block): undelivered, never a finding, never clean
+reset; cm MEMBER User "$(nob security "$SHA")"; flush
+run "$GOOD" extract; rc_is "no-block agent" "$RC" 0
+has "no-block agent: reported undelivered" "AGENTS_WITHOUT_BLOCK=security"
+has "no-block agent: no finding created" "STRUCTURED_FINDINGS=0"
+lacks "no-block agent: not clean" "CLEAN_STRUCTURED=true"
+# mix: one clean (empty block) agent and one block-less agent
+reset; cm MEMBER User "$(agent_body auth "$SHA" 'all good' '')"; cm MEMBER User "$(nob security "$SHA")"; flush
+run "$GOOD" extract
+has "mixed: block-less agent listed" "AGENTS_WITHOUT_BLOCK=security"
+lacks "mixed: block-delivering agent not listed" "AGENTS_WITHOUT_BLOCK=auth"
+lacks "mixed: block-delivering agent not listed (joined)" "security auth"
+lacks "mixed: not clean" "CLEAN_STRUCTURED=true"
+# SEC-1: a re-dispatched agent's later complete block clears its earlier block-less comment
+reset; cm MEMBER User "$(nob security "$SHA")"; cm MEMBER User "$(agent_body security "$SHA" 'all good' '')"; flush
+run "$GOOD" extract
+lacks "redispatch: delivered domain not listed" "AGENTS_WITHOUT_BLOCK=security"
+has "redispatch: clean" "CLEAN_STRUCTURED=true"
+# SEC-2: START without END (truncated) is not delivered
+reset; cm MEMBER User "$(printf '<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: %s\n<!-- REVIEW-FINDINGS-START -->\n' "$SHA")"; flush
+run "$GOOD" extract
+has "START without END: undelivered" "AGENTS_WITHOUT_BLOCK=security"
+lacks "START without END: not clean" "CLEAN_STRUCTURED=true"
+# a synthesized block must not mask a block-less raw agent comment
+reset; cm MEMBER User "$(nob security "$SHA")"
+cm MEMBER User "$(printf '<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->\nclean\nReviewed-SHA: %s\n' "$SHA")"; flush
+run "$GOOD" extract
+has "synth: block-less agent still reported" "AGENTS_WITHOUT_BLOCK=security"
+lacks "synth: not clean" "CLEAN_STRUCTURED=true"
+# an untrusted block-less comment is ignored (cannot park a review)
+reset; cm MEMBER User "$(agent_body auth "$SHA" 'ok' '')"; cm NONE User "$(nob security "$SHA")"; flush
+run "$GOOD" extract
+lacks "untrusted block-less ignored" "AGENTS_WITHOUT_BLOCK=security"
+has "untrusted block-less ignored: clean" "CLEAN_STRUCTURED=true"
 
 # ======================= classify =======================
 # mkfind <id> <conf> <sev> <file> <line> <title> [route] [agent] [scenario-text] [scope]
@@ -675,6 +714,54 @@ gate_reset; cm NONE User "<!-- FORGE:INPR_FIX: head=$SHA -->"; flush; mg "$GATE"
 rc_is "inpr: untrusted request ignored" "$RC" 0
 gate_reset; cm MEMBER User "<!-- FORGE:INPR_FIX: head=$SHA -->"; cm NONE User "<!-- FORGE:INPR_FIX_WAIVED: head=$SHA -->"; flush; mg "$GATE"
 rc_is "inpr: untrusted waiver ignored" "$RC" 3
+
+# --- degraded-gate gate (forge#3628): issue 42's newest trusted QUALITY_GATE / ACCEPTANCE_GATE name the degraded checks; PR 7's comments must cover each ---
+QG_DEG=$'<!-- FORGE:QUALITY_GATE -->\n## Quality Gate Result\n\n**Result**: PASS\n**Degraded**: python.test — test run exercised nothing; blast-radius — check did not complete'
+QG_OK=$'<!-- FORGE:QUALITY_GATE -->\n## Quality Gate Result\n\n**Result**: PASS\n**Degraded**: none'
+AG_DEG=$'<!-- FORGE:ACCEPTANCE_GATE -->\n## Acceptance Gate — DEGRADED\n\n**Degraded checks (verified nothing)**: python.test — test run exercised nothing\n\n<!-- FORGE:ACCEPTANCE_GATE:DEGRADED -->'
+AGM='<!-- FORGE:REVIEW-AGENT:security -->'
+SEC_FULL="$AGM"$'\nReviewed-SHA: '"$SHA"$'\n\n### Degraded Paths Reviewed\n- python.test: read the skipped DB tests by hand\n- blast-radius: callers checked manually\n\n### Other\nx'
+SEC_PART="$AGM"$'\nReviewed-SHA: '"$SHA"$'\n\n### Degraded Paths Reviewed\n- python.test: read the skipped DB tests by hand\n\n### Other\nblast-radius is mentioned only outside the section'
+SEC_GENERIC="$AGM"$'\nReviewed-SHA: '"$SHA"$'\n\n### Degraded Paths Reviewed\nAll degraded paths were reviewed.\n'
+SEC_STALE="$AGM"$'\nReviewed-SHA: '"$OLD_SHA"$'\n\n### Degraded Paths Reviewed\n- python.test: read the skipped DB tests by hand\n- blast-radius: callers checked manually\n'
+SEC_NEG="$AGM"$'\nReviewed-SHA: '"$SHA"$'\n\n### Degraded Paths Reviewed\n- python.test: NOT reviewed\n- blast-radius: callers checked manually\n'
+SEC_PLAIN=$'### Degraded Paths Reviewed\n- python.test: read the skipped DB tests by hand\n- blast-radius: callers checked manually\n'
+SEC_AG="$AGM"$'\nReviewed-SHA: '"$SHA"$'\n\n### Degraded Paths Reviewed\n- python.test: covered by hand\n'
+gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; mg "$GATE"
+rc_is "degraded: no section" "$RC" 3; has "degraded: no section" "REVIEW_RESULT: status: BLOCKED, blocker: degraded-gate-unreviewed"
+logged "degraded: no section needs-human" edits.log "needs-human"; logged "degraded: no section comment" issue-bodies.log "FORGE:DEGRADED_GATE_UNREVIEWED"; not_merged "degraded: no section"
+gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User "$SEC_PART"; flush; mg "$GATE"
+rc_is "degraded: partial coverage" "$RC" 3; has "degraded: partial coverage" "blocker: degraded-gate-unreviewed"; logged "degraded: partial names the gap" issue-bodies.log "not covered: blast-radius"; not_merged "degraded: partial"
+gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User "$SEC_GENERIC"; flush; mg "$GATE"
+rc_is "degraded: generic section" "$RC" 3; has "degraded: generic section" "blocker: degraded-gate-unreviewed"; not_merged "degraded: generic"
+gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm NONE User "$SEC_FULL"; flush; mg "$GATE"
+rc_is "degraded: untrusted section ignored" "$RC" 3; has "degraded: untrusted section ignored" "blocker: degraded-gate-unreviewed"
+gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User "$SEC_STALE"; flush; mg "$GATE"
+rc_is "degraded: stale-head section ignored" "$RC" 3; has "degraded: stale-head section ignored" "blocker: degraded-gate-unreviewed"
+gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User "$SEC_NEG"; flush; mg "$GATE"
+rc_is "degraded: negated item is not coverage" "$RC" 3; logged "degraded: negated item names the gap" issue-bodies.log "not covered: python.test"
+gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User "$SEC_PLAIN"; flush; mg "$GATE"
+rc_is "degraded: plain comment without review marker ignored" "$RC" 3
+gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User "$SEC_FULL"; flush; mg "$GATE"
+rc_is "degraded: full per-check section" "$RC" 0; has "degraded: full per-check section" "MERGE_OUTCOME=merged"; merged "degraded: full"
+gate_reset; cm Bot Bot "$QG_DEG"; flush "$FIX/comments-42.json"; cm NONE Bot "$SEC_FULL"; flush; mg "$GATE"
+rc_is "degraded: bot-authored gate and section" "$RC" 0
+gate_reset; cm MEMBER User "$AG_DEG"; flush "$FIX/comments-42.json"; mg "$GATE"
+rc_is "degraded: ACCEPTANCE_GATE:DEGRADED unreviewed" "$RC" 3; has "degraded: ACCEPTANCE_GATE:DEGRADED unreviewed" "blocker: degraded-gate-unreviewed"
+gate_reset; cm MEMBER User "$AG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User "$SEC_AG"; flush; mg "$GATE"
+rc_is "degraded: ACCEPTANCE_GATE:DEGRADED reviewed" "$RC" 0
+gate_reset; cm MEMBER User "$QG_OK"; flush "$FIX/comments-42.json"; mg "$GATE"
+rc_is "degraded: Degraded none is unaffected" "$RC" 0; has "degraded: Degraded none" "MERGE_OUTCOME=merged"
+gate_reset; cm MEMBER User "$QG_DEG"; cm MEMBER User "$QG_OK"; flush "$FIX/comments-42.json"; mg "$GATE"
+rc_is "degraded: a newer clean gate clears it" "$RC" 0
+gate_reset; cm MEMBER User "$QG_OK"; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; mg "$GATE"
+rc_is "degraded: a newer degraded gate wins" "$RC" 3
+gate_reset; cm NONE User "$QG_DEG"; flush "$FIX/comments-42.json"; mg "$GATE"
+rc_is "degraded: untrusted DEGRADED marker cannot block" "$RC" 0
+gate_reset; mg "$GATE"
+rc_is "degraded: no gate comments is unaffected" "$RC" 0
+gate_reset; rm -f "$FIX/comments.json"; mg "$GATE"
+rc_is "degraded: unreadable comments fail closed" "$RC" 3; not_merged "degraded: unreadable"
 
 # --- --issue requirement ---
 gate_reset; mkctx 1 FULL "" ""; mg "$GATE"

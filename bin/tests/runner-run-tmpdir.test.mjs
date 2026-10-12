@@ -1,7 +1,8 @@
 // forge#3572: per-run disk-backed TMPDIR, confined cleanup, disk-full classification, spec rules.
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, readdirSync, statSync, symlinkSync } from "node:fs";
+import { chmodSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, readdirSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +12,7 @@ import { isDiskQuotaText, isDiskQuotaError, codeForRunnerError, OUTCOME_CODES } 
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 let cwd;
-beforeEach(() => { cwd = mkdtempSync(join(tmpdir(), "fd-tmproot-")); });
+beforeEach(() => { cwd = tmpDir("fd-tmproot-"); });
 afterEach(() => { rmSync(cwd, { recursive: true, force: true }); });
 
 describe("resolveRunTmpRoot / runTmpDir", () => {
@@ -39,7 +40,7 @@ describe("resolveRunTmpRoot / runTmpDir", () => {
     assert.equal(runTmpDir(null, 7, cwd), null);
   });
   it("two repos with the same issue number get distinct dirs; the same cwd is stable", () => {
-    const other = mkdtempSync(join(tmpdir(), "fd-tmproot-"));
+    const other = tmpDir("fd-tmproot-");
     try {
       assert.notEqual(runTmpDir("/r", 42, cwd), runTmpDir("/r", 42, other));
       assert.equal(runTmpDir("/r", 42, cwd), runTmpDir("/r", 42, cwd));
@@ -107,7 +108,7 @@ describe("cleanupRunTmpdir", () => {
   });
   it("cleanup of one repo's run leaves another repo's same-numbered dir intact", () => {
     const root = join(cwd, "root");
-    const other = mkdtempSync(join(tmpdir(), "fd-tmproot-"));
+    const other = tmpDir("fd-tmproot-");
     try {
       const yaml = `engine:\n  tmp_root: ${root}\n`;
       writeFileSync(join(cwd, "forge.yaml"), yaml);

@@ -2,9 +2,10 @@
  * bin/tests/journey.test.mjs — Unit tests for bin/journey.mjs.
  * Run with: node --test bin/tests/journey.test.mjs
  */
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync, chmodSync, utimesSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, unlinkSync, rmSync, chmodSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 import { writeForgeYaml, backfillForgeYaml, backupExisting, detectDescription, makeCtx, preflight, forge, read, review, celebrate, connect, maybeOfferDemo, openUrl, runJourney, manualLowConfidenceKeys, parseInstallTier, findMarkdownFiles, isEphemeralCachePath, detectCrossEnvInstall, validateForgeYamlShape, writeInstallReceipt, persistHome, isSymlinkTraversable, atomicSymlinkInstall, pruneStaleExtensionlessEntries } from "../journey.mjs";
@@ -18,12 +19,11 @@ const VALUES = {
   root: "C:\\proj\\ForgeDock",
   worktreeBase: "C:\\proj\\ForgeDock\\.claude\\worktrees",
   defaultBranch: "main",
-  stagingBranch: "staging",
-};
+  stagingBranch: "staging" };
 
 let dir;
 beforeEach(() => {
-  dir = mkdtempSync(join(os.tmpdir(), "fd-journey-"));
+  dir = tmpDir("fd-journey-");
 });
 
 describe("writeForgeYaml", () => {
@@ -424,7 +424,7 @@ function stubCtx({ execMap = {}, home = os.tmpdir(), cwd = os.tmpdir(), ...overr
 
 describe("preflight", () => {
   it("all green when everything is present", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-home-"));
+    const home = tmpDir("fd-home-");
     const { mkdirSync } = await import("node:fs");
     mkdirSync(join(home, ".claude"), { recursive: true });
     const { ctx, w } = stubCtx({
@@ -442,7 +442,7 @@ describe("preflight", () => {
   });
 
   it("missing gh yields a fix card and ghReady=false, but does not throw", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-home2-"));
+    const home = tmpDir("fd-home2-");
     const { mkdirSync } = await import("node:fs");
     mkdirSync(join(home, ".claude"), { recursive: true });
     const { ctx, w } = stubCtx({
@@ -457,7 +457,7 @@ describe("preflight", () => {
   });
 
   it("missing ~/.claude flags Claude Code check", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-home3-"));
+    const home = tmpDir("fd-home3-");
     const { ctx } = stubCtx({ home, execMap: { "git --version": "git version 2.45.0" } });
     const res = await preflight(ctx);
     const cc = res.checks.find((c) => c.name === "Claude Code");
@@ -465,7 +465,7 @@ describe("preflight", () => {
   });
 
   it("gh installed but unauthenticated → auth fix card, ghReady=false", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-home4-"));
+    const home = tmpDir("fd-home4-");
     mkdirSync(join(home, ".claude"), { recursive: true });
     const { ctx, w } = stubCtx({
       home,
@@ -484,7 +484,7 @@ describe("preflight", () => {
   });
 
   it("old Node version → failed check with upgrade fix card", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-home5-"));
+    const home = tmpDir("fd-home5-");
     mkdirSync(join(home, ".claude"), { recursive: true });
     const { ctx, w } = stubCtx({ home, execMap: { "git --version": "git version 2.45.0" } });
     ctx.nodeVersion = "16.20.0";
@@ -495,7 +495,7 @@ describe("preflight", () => {
   });
 
   it("adds Platform/WSL/Shell rows after GitHub CLI without disturbing ghReady's index", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-home6-"));
+    const home = tmpDir("fd-home6-");
     mkdirSync(join(home, ".claude"), { recursive: true });
     const { ctx } = stubCtx({
       home,
@@ -528,7 +528,7 @@ describe("preflight", () => {
   });
 
   it("Platform/WSL rows reflect WSL detection when WSL_DISTRO_NAME is injected", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-home7-"));
+    const home = tmpDir("fd-home7-");
     mkdirSync(join(home, ".claude"), { recursive: true });
     const { ctx } = stubCtx({
       home,
@@ -544,7 +544,7 @@ describe("preflight", () => {
   });
 
   it("Platform row reports Windows label + shell when platform/release are injected as win32", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-home8-"));
+    const home = tmpDir("fd-home8-");
     mkdirSync(join(home, ".claude"), { recursive: true });
     const { ctx } = stubCtx({
       home,
@@ -632,7 +632,7 @@ describe("isEphemeralCachePath", () => {
 describe("persistHome (forge#1943)", () => {
   /** Populate a fake forgeHome source tree with a minimal payload + package.json. */
   function makeSourceForgeHome({ version = "1.2.3" } = {}) {
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-persist-src-"));
+    const forgeHome = tmpDir("fd-persist-src-");
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "scripts"), { recursive: true });
@@ -647,7 +647,7 @@ describe("persistHome (forge#1943)", () => {
 
   it("fresh copy: copies bin/commands/scripts into ~/.forge/ and writes version", async () => {
     const forgeHome = makeSourceForgeHome({ version: "1.2.3" });
-    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-"));
+    const home = tmpDir("fd-persist-home-");
 
     const res = await persistHome({ forgeHome, home });
 
@@ -665,7 +665,7 @@ describe("persistHome (forge#1943)", () => {
   it("git-clone skip: does not touch ~/.forge/ at all when ctx.forgeHome is a real git clone", async () => {
     const forgeHome = makeSourceForgeHome();
     mkdirSyncFs(join(forgeHome, ".git"), { recursive: true }); // real clone: .git is a DIRECTORY
-    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-git-"));
+    const home = tmpDir("fd-persist-home-git-");
 
     const res = await persistHome({ forgeHome, home });
 
@@ -678,7 +678,7 @@ describe("persistHome (forge#1943)", () => {
 
   it("idempotent re-run: unchanged source content does not rewrite files (mtime preserved, migrated: false)", async () => {
     const forgeHome = makeSourceForgeHome({ version: "2.0.0" });
-    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-idempotent-"));
+    const home = tmpDir("fd-persist-home-idempotent-");
 
     const first = await persistHome({ forgeHome, home });
     assert.equal(first.migrated, true);
@@ -697,7 +697,7 @@ describe("persistHome (forge#1943)", () => {
 
   it("re-run after a real content change re-copies only the changed file and reports migrated: true", async () => {
     const forgeHome = makeSourceForgeHome({ version: "2.0.0" });
-    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-changed-"));
+    const home = tmpDir("fd-persist-home-changed-");
 
     await persistHome({ forgeHome, home });
     writeFileSync(join(forgeHome, "commands", "one.md"), "# /one (edited)\n", "utf-8");
@@ -709,7 +709,7 @@ describe("persistHome (forge#1943)", () => {
 
   it("degrades gracefully when a source subdirectory (templates/) does not exist", async () => {
     const forgeHome = makeSourceForgeHome(); // no templates/ dir created
-    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-notemplates-"));
+    const home = tmpDir("fd-persist-home-notemplates-");
 
     await assert.doesNotReject(persistHome({ forgeHome, home }));
     const res = await persistHome({ forgeHome, home });
@@ -723,7 +723,7 @@ describe("persistHome (forge#1943)", () => {
   it("worktree shape (.git is a FILE, not a directory) is also skipped — not just real clones", async () => {
     const forgeHome = makeSourceForgeHome();
     writeFileSync(join(forgeHome, ".git"), "gitdir: /somewhere/else/.git/worktrees/foo\n", "utf-8");
-    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-worktree-"));
+    const home = tmpDir("fd-persist-home-worktree-");
 
     const res = await persistHome({ forgeHome, home });
 
@@ -732,10 +732,10 @@ describe("persistHome (forge#1943)", () => {
   });
 
   it("missing package.json degrades to an empty version string rather than throwing", async () => {
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-persist-src-nopkg-"));
+    const forgeHome = tmpDir("fd-persist-src-nopkg-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n", "utf-8");
-    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-home-nopkg-"));
+    const home = tmpDir("fd-persist-home-nopkg-");
 
     const res = await persistHome({ forgeHome, home });
 
@@ -755,7 +755,7 @@ describe("persistHome (forge#1943)", () => {
   // -------------------------------------------------------------------------
 
   it("downgrade guard: refuses to overwrite a newer persisted ~/.forge/ with an older source package", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-downgrade-home-"));
+    const home = tmpDir("fd-persist-downgrade-home-");
 
     // First persist a NEWER version (2.0.0).
     const newerSource = makeSourceForgeHome({ version: "2.0.0" });
@@ -782,7 +782,7 @@ describe("persistHome (forge#1943)", () => {
   });
 
   it("same-version re-persist is not blocked by the downgrade guard (compareVersions == 0 proceeds normally)", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-sameversion-home-"));
+    const home = tmpDir("fd-persist-sameversion-home-");
     const source = makeSourceForgeHome({ version: "3.1.0" });
 
     await persistHome({ forgeHome: source, home });
@@ -797,7 +797,7 @@ describe("persistHome (forge#1943)", () => {
   });
 
   it("orphan cleanup: a file removed from the source payload is deleted from the persisted ~/.forge/ copy", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-orphan-home-"));
+    const home = tmpDir("fd-persist-orphan-home-");
     const forgeHome = makeSourceForgeHome({ version: "1.0.0" });
     writeFileSync(join(forgeHome, "commands", "two.md"), "# /two\n", "utf-8");
 
@@ -826,7 +826,7 @@ describe("persistHome (forge#1943)", () => {
   });
 
   it("orphan cleanup: an entire orphaned subdirectory is removed recursively", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-orphan-dir-home-"));
+    const home = tmpDir("fd-persist-orphan-dir-home-");
     const forgeHome = makeSourceForgeHome({ version: "1.0.0" });
     mkdirSyncFs(join(forgeHome, "commands", "legacy-subdir"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "legacy-subdir", "old.md"), "# old\n", "utf-8");
@@ -847,7 +847,7 @@ describe("persistHome (forge#1943)", () => {
   });
 
   it("removeOrphans: source subdir replaced by a symlink-to-file (ENOTDIR) does not abort the whole persist (forge#2227)", async (t) => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-persist-enotdir-home-"));
+    const home = tmpDir("fd-persist-enotdir-home-");
     const forgeHome = makeSourceForgeHome({ version: "1.0.0" });
     mkdirSyncFs(join(forgeHome, "commands", "subdir"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "subdir", "old.md"), "# old\n", "utf-8");
@@ -1068,8 +1068,8 @@ describe("detectCrossEnvInstall (forge#1893)", () => {
 
 describe("forge (Act II)", () => {
   it("installs commands (symlink or copy-fallback), registers hook, reports counts", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src-"));
+    const home = tmpDir("fd-forge-home-");
+    const forgeHome = tmpDir("fd-forge-src-");
     mkdirSyncFs(join(forgeHome, "commands", "sub"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -1091,8 +1091,8 @@ describe("forge (Act II)", () => {
   });
 
   it("second run is idempotent: skips links, hook already", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home2-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src2-"));
+    const home = tmpDir("fd-forge-home2-");
+    const forgeHome = tmpDir("fd-forge-src2-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -1114,8 +1114,8 @@ describe("forge (Act II)", () => {
   });
 
   it("warns when ctx.forgeHome resolves inside an ephemeral npx cache (forge#1895)", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-npx-"));
-    const forgeHome = join(mkdtempSync(join(os.tmpdir(), "fd-forge-src-npx-")), "_npx", "abcd1234", "node_modules", "forgedock");
+    const home = tmpDir("fd-forge-home-npx-");
+    const forgeHome = join(tmpDir("fd-forge-src-npx-"), "_npx", "abcd1234", "node_modules", "forgedock");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -1130,8 +1130,8 @@ describe("forge (Act II)", () => {
   });
 
   it("does NOT warn for a durable forgeHome (global install / local clone) — no false positive (forge#1895)", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-durable-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src-durable-"));
+    const home = tmpDir("fd-forge-home-durable-");
+    const forgeHome = tmpDir("fd-forge-src-durable-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -1145,8 +1145,8 @@ describe("forge (Act II)", () => {
   });
 
   it("re-run over our copied files is idempotent (manifest recognizes our copies)", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home3-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src3-"));
+    const home = tmpDir("fd-forge-home3-");
+    const forgeHome = tmpDir("fd-forge-src3-");
     mkdirSyncFs(join(forgeHome, "commands", "sub"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -1179,8 +1179,8 @@ describe("forge (Act II)", () => {
   });
 
   it("manifest-tracked file with changed content is updated", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home5-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src5-"));
+    const home = tmpDir("fd-forge-home5-");
+    const forgeHome = tmpDir("fd-forge-src5-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -1207,8 +1207,8 @@ describe("forge (Act II)", () => {
   });
 
   it("linkStrategy copy replaces a stale symlink with a copy", async (t) => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home6-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src6-"));
+    const home = tmpDir("fd-forge-home6-");
+    const forgeHome = tmpDir("fd-forge-src6-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -1244,8 +1244,8 @@ describe("forge (Act II)", () => {
   });
 
   it("relinking a stale symlink uses a per-process tmp path, unaffected by a stray plain target+\".tmp\" file (forge#2600)", async (t) => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home6b-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src6b-"));
+    const home = tmpDir("fd-forge-home6b-");
+    const forgeHome = tmpDir("fd-forge-src6b-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -1295,8 +1295,8 @@ describe("forge (Act II)", () => {
   });
 
   it("upgrading a manifest-tracked copy to a symlink uses a per-process tmp path, unaffected by a stray plain target+\".tmp\" file (forge#2600)", async (t) => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home6c-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src6c-"));
+    const home = tmpDir("fd-forge-home6c-");
+    const forgeHome = tmpDir("fd-forge-src6c-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -1356,8 +1356,8 @@ describe("forge (Act II)", () => {
   });
 
   it("stale regular-file copy with no manifest entry is overwritten and adopted (forge#2459)", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home4-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src4-"));
+    const home = tmpDir("fd-forge-home4-");
+    const forgeHome = tmpDir("fd-forge-src4-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -1387,8 +1387,8 @@ describe("forge (Act II)", () => {
   });
 
   it("stale regular-file copy with no manifest entry: target is untouched on a .tmp write failure (forge#2498)", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home4b-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src4b-"));
+    const home = tmpDir("fd-forge-home4b-");
+    const forgeHome = tmpDir("fd-forge-src4b-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -1428,8 +1428,8 @@ describe("forge (Act II)", () => {
   });
 
   it("stale regular-file copy with no manifest entry: orphaned .tmp file is cleaned up on a copyFile failure (forge#2540)", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home4d-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src4d-"));
+    const home = tmpDir("fd-forge-home4d-");
+    const forgeHome = tmpDir("fd-forge-src4d-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -1481,8 +1481,8 @@ describe("forge (Act II)", () => {
   });
 
   it("stale regular-file copy with no manifest entry: prior content is backed up before being overwritten (forge#2499)", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home4c-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src4c-"));
+    const home = tmpDir("fd-forge-home4c-");
+    const forgeHome = tmpDir("fd-forge-src4c-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -1511,8 +1511,8 @@ describe("forge (Act II)", () => {
   });
 
   it("stale regular-file copy with no manifest entry: uses a per-process tmp path, unaffected by a stray plain target+\".tmp\" file (forge#2542)", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home4e-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src4e-"));
+    const home = tmpDir("fd-forge-home4e-");
+    const forgeHome = tmpDir("fd-forge-src4e-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -1552,8 +1552,8 @@ describe("forge (Act II)", () => {
   });
 
   it("files outside the shipped command set are never touched by forge() (forge#2459 AC#3)", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-unrelated-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src-unrelated-"));
+    const home = tmpDir("fd-forge-home-unrelated-");
+    const forgeHome = tmpDir("fd-forge-src-unrelated-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -1576,8 +1576,8 @@ describe("forge (Act II)", () => {
   });
 
   it("adopts pre-manifest regular file into manifest when content matches source", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-adopt-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-adopt-src-"));
+    const home = tmpDir("fd-forge-adopt-");
+    const forgeHome = tmpDir("fd-forge-adopt-src-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -1602,8 +1602,8 @@ describe("forge (Act II)", () => {
   });
 
   it("saveCopiedManifest uses a per-process tmp path, unaffected by a stray plain manifestPath+\".tmp\" file (forge#2599)", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-pid-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-pid-src-"));
+    const home = tmpDir("fd-forge-manifest-pid-");
+    const forgeHome = tmpDir("fd-forge-manifest-pid-src-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -1645,8 +1645,8 @@ describe("forge (Act II)", () => {
   });
 
   it("saveCopiedManifest cleans up its per-process tmp sibling on write failure, without touching the previous manifest (forge#2599)", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-fail-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-fail-src-"));
+    const home = tmpDir("fd-forge-manifest-fail-");
+    const forgeHome = tmpDir("fd-forge-manifest-fail-src-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -1699,8 +1699,8 @@ describe("forge (Act II)", () => {
   });
 
   it("forge() sweeps a crash-orphaned pid-suffixed manifest tmp sibling but preserves an in-flight one and the legacy plain .tmp (forge#2612)", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-sweep-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-sweep-src-"));
+    const home = tmpDir("fd-forge-manifest-sweep-");
+    const forgeHome = tmpDir("fd-forge-manifest-sweep-src-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -1754,8 +1754,8 @@ describe("forge (Act II)", () => {
     // copy so its loop spans many await points, and inject the "other
     // process's" manifest write via a macrotask timer so it lands on disk
     // sometime during that loop — well before this run's final save.
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-merge-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-merge-src-"));
+    const home = tmpDir("fd-forge-manifest-merge-");
+    const forgeHome = tmpDir("fd-forge-manifest-merge-src-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     const fileCount = 25;
@@ -1812,8 +1812,8 @@ describe("forge (Act II)", () => {
   // convention of testing forge()'s on-disk effects rather than its private
   // helpers).
   it("final manifest save waits for a concurrently held lock and merges both sides once it's released (forge#2637)", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-wait-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-wait-src-"));
+    const home = tmpDir("fd-forge-manifest-lock-wait-");
+    const forgeHome = tmpDir("fd-forge-manifest-lock-wait-src-");
     mkdirSync(join(forgeHome, "commands"), { recursive: true });
     mkdirSync(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "content a", "utf-8");
@@ -1857,8 +1857,8 @@ describe("forge (Act II)", () => {
   });
 
   it("stale (crash-orphaned) manifest lock is reclaimed so forge() is not permanently blocked (forge#2637)", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-stale-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-stale-src-"));
+    const home = tmpDir("fd-forge-manifest-lock-stale-");
+    const forgeHome = tmpDir("fd-forge-manifest-lock-stale-src-");
     mkdirSync(join(forgeHome, "commands"), { recursive: true });
     mkdirSync(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "content a", "utf-8");
@@ -1900,8 +1900,8 @@ describe("forge (Act II)", () => {
     // 10s, this lock would incorrectly get reclaimed and unlinked/replaced —
     // this test catches that by asserting the original lock file survives
     // byte-for-byte (same mtime) after forge() completes.
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-boundary-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-boundary-src-"));
+    const home = tmpDir("fd-forge-manifest-lock-boundary-");
+    const forgeHome = tmpDir("fd-forge-manifest-lock-boundary-src-");
     mkdirSync(join(forgeHome, "commands"), { recursive: true });
     mkdirSync(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "content a", "utf-8");
@@ -1932,8 +1932,8 @@ describe("forge (Act II)", () => {
   });
 
   it("falls back to an unlocked save (never-abort contract preserved) when the lock cannot be acquired within the retry budget (forge#2637)", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-heldfull-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-manifest-lock-heldfull-src-"));
+    const home = tmpDir("fd-forge-manifest-lock-heldfull-");
+    const forgeHome = tmpDir("fd-forge-manifest-lock-heldfull-src-");
     mkdirSync(join(forgeHome, "commands"), { recursive: true });
     mkdirSync(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "content a", "utf-8");
@@ -1982,8 +1982,8 @@ describe("forge (Act II)", () => {
   // effect. `forge()` must no longer install it, and must clean up any prior
   // installation.
   it("does not install the SubagentStop annotation-enforcement hook", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home7-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src7-"));
+    const home = tmpDir("fd-forge-home7-");
+    const forgeHome = tmpDir("fd-forge-src7-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -2000,8 +2000,8 @@ describe("forge (Act II)", () => {
   });
 
   it("removes a previously installed SubagentStop annotation-enforcement hook", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home8-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src8-"));
+    const home = tmpDir("fd-forge-home8-");
+    const forgeHome = tmpDir("fd-forge-src8-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -2034,8 +2034,8 @@ describe("forge (Act II)", () => {
   });
 
   it("prunes orphaned ForgeDock symlink after command rename (forge#1701)", async (t) => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home9-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src9-"));
+    const home = tmpDir("fd-forge-home9-");
+    const forgeHome = tmpDir("fd-forge-src9-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     // Current state: only pipeline-resume.md exists (resume.md was renamed away)
@@ -2074,8 +2074,8 @@ describe("forge (Act II)", () => {
   });
 
   it("does not remove user-owned symlinks pointing outside commandsDir", async (t) => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home10-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src10-"));
+    const home = tmpDir("fd-forge-home10-");
+    const forgeHome = tmpDir("fd-forge-src10-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -2108,7 +2108,7 @@ describe("forge (Act II)", () => {
 
   describe("isSymlinkTraversable (forge#2620)", () => {
     it("returns true for a symlink that resolves to a readable file", async () => {
-      const dirT = mkdtempSync(join(os.tmpdir(), "fd-symtrav-ok-"));
+      const dirT = tmpDir("fd-symtrav-ok-");
       const src = join(dirT, "src.md");
       writeFileSync(src, "content", "utf-8");
       const link = join(dirT, "link.md");
@@ -2117,14 +2117,14 @@ describe("forge (Act II)", () => {
     });
 
     it("returns false for a symlink whose target does not exist", async () => {
-      const dirT = mkdtempSync(join(os.tmpdir(), "fd-symtrav-missing-"));
+      const dirT = tmpDir("fd-symtrav-missing-");
       const link = join(dirT, "link.md");
       symlinkSync(join(dirT, "does-not-exist.md"), link);
       assert.equal(await isSymlinkTraversable(link), false);
     });
 
     it("returns false for a symlink whose target cannot be read as a file (e.g. a directory) — the portable proxy for an MSYS 'untrusted mount point' failure", async () => {
-      const dirT = mkdtempSync(join(os.tmpdir(), "fd-symtrav-eisdir-"));
+      const dirT = tmpDir("fd-symtrav-eisdir-");
       const targetDirEntry = join(dirT, "not-a-file");
       mkdirSyncFs(targetDirEntry, { recursive: true });
       const link = join(dirT, "link.md");
@@ -2140,7 +2140,7 @@ describe("forge (Act II)", () => {
       // any pre-existing target untouched — it must NOT rename the dead link
       // over target and then unlink target (which the pre-fix code did, and
       // which could remove a *concurrent* installer's fresh link).
-      const dirT = mkdtempSync(join(os.tmpdir(), "fd-atomic-unreadable-"));
+      const dirT = tmpDir("fd-atomic-unreadable-");
       const target = join(dirT, "cmd.md");
       writeFileSync(target, "PRE-EXISTING CONTENT", "utf-8");
       // Point the symlink at a non-existent source → the tmp readback fails
@@ -2159,7 +2159,7 @@ describe("forge (Act II)", () => {
     });
 
     it("returns 'linked' and installs a traversable symlink for a readable source", async () => {
-      const dirT = mkdtempSync(join(os.tmpdir(), "fd-atomic-linked-"));
+      const dirT = tmpDir("fd-atomic-linked-");
       const src = join(dirT, "src.md");
       writeFileSync(src, "SOURCE", "utf-8");
       const target = join(dirT, "cmd.md");
@@ -2172,7 +2172,7 @@ describe("forge (Act II)", () => {
     });
 
     it("returns 'denied' and leaves target untouched when the destination directory denies write access (EPERM/EACCES)", async (t) => {
-      const dirT = mkdtempSync(join(os.tmpdir(), "fd-atomic-denied-"));
+      const dirT = tmpDir("fd-atomic-denied-");
       const src = join(dirT, "src.md");
       writeFileSync(src, "SOURCE", "utf-8");
       const target = join(dirT, "cmd.md");
@@ -2216,7 +2216,7 @@ describe("forge (Act II)", () => {
 
   describe("pruneStaleExtensionlessEntries (forge#2620)", () => {
     it("removes a top-level extensionless symlink whose target no longer exists", async () => {
-      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-missing-"));
+      const targetDir = tmpDir("fd-stale-missing-");
       const link = join(targetDir, "orchestrate");
       symlinkSync(join(targetDir, "gone-forever"), link);
       const pruned = await pruneStaleExtensionlessEntries(targetDir);
@@ -2225,8 +2225,8 @@ describe("forge (Act II)", () => {
     });
 
     it("removes a top-level extensionless symlink pointing into the npx cache", async () => {
-      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-npx-"));
-      const cacheHome = mkdtempSync(join(os.tmpdir(), "fd-stale-npxsrc-"));
+      const targetDir = tmpDir("fd-stale-npx-");
+      const cacheHome = tmpDir("fd-stale-npxsrc-");
       const cacheTarget = join(cacheHome, "_npx", "abcd1234", "node_modules", "forgedock", "commands", "pipeline-health.md");
       mkdirSyncFs(join(cacheHome, "_npx", "abcd1234", "node_modules", "forgedock", "commands"), { recursive: true });
       writeFileSync(cacheTarget, "STALE", "utf-8");
@@ -2238,7 +2238,7 @@ describe("forge (Act II)", () => {
     });
 
     it("does not touch a real extensionless directory (e.g. a multi-file command dir like work-on/)", async () => {
-      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-realdir-"));
+      const targetDir = tmpDir("fd-stale-realdir-");
       const cmdDir = join(targetDir, "work-on");
       mkdirSyncFs(cmdDir, { recursive: true });
       writeFileSync(join(cmdDir, "build.md"), "BUILD", "utf-8");
@@ -2248,7 +2248,7 @@ describe("forge (Act II)", () => {
     });
 
     it("does not touch entries with a file extension", async () => {
-      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-hasext-"));
+      const targetDir = tmpDir("fd-stale-hasext-");
       const link = join(targetDir, "orchestrate.md");
       symlinkSync(join(targetDir, "gone-forever"), link);
       const pruned = await pruneStaleExtensionlessEntries(targetDir);
@@ -2257,7 +2257,7 @@ describe("forge (Act II)", () => {
     });
 
     it("does not touch a plain (non-symlink) extensionless file", async () => {
-      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-plainfile-"));
+      const targetDir = tmpDir("fd-stale-plainfile-");
       writeFileSync(join(targetDir, "orchestrate"), "not a symlink", "utf-8");
       const pruned = await pruneStaleExtensionlessEntries(targetDir);
       assert.equal(pruned, 0);
@@ -2270,7 +2270,7 @@ describe("forge (Act II)", () => {
     });
 
     it("resolves a relative symlink target against the symlink's own directory, not process.cwd() (forge#2646)", async () => {
-      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-relative-"));
+      const targetDir = tmpDir("fd-stale-relative-");
       // Relative target that DOES exist when resolved against targetDir
       // (its own containing directory), but would NOT exist if resolved
       // against process.cwd() instead.
@@ -2283,7 +2283,7 @@ describe("forge (Act II)", () => {
     });
 
     it("still prunes a relative symlink target that is genuinely missing", async () => {
-      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-relative-missing-"));
+      const targetDir = tmpDir("fd-stale-relative-missing-");
       const link = join(targetDir, "orchestrate");
       symlinkSync("does-not-exist.md", link); // relative target, missing either way
       const pruned = await pruneStaleExtensionlessEntries(targetDir);
@@ -2292,7 +2292,7 @@ describe("forge (Act II)", () => {
     });
 
     it("leaves a Windows drive-relative symlink target (e.g. \"C:foo\") untouched on win32; treats it as an ordinary relative target on POSIX (forge#2659, win32-gated per forge#2663)", async () => {
-      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-driverel-"));
+      const targetDir = tmpDir("fd-stale-driverel-");
       const link = join(targetDir, "orchestrate");
       // "C:foo" — drive letter + colon with NO separator after it — is
       // classified as "relative" by both path.win32.isAbsolute() and
@@ -2324,7 +2324,7 @@ describe("forge (Act II)", () => {
     });
 
     it("does NOT mistake a genuinely drive-absolute target (\"C:\\\\foo\") for drive-relative", async () => {
-      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-driveabs-"));
+      const targetDir = tmpDir("fd-stale-driveabs-");
       const realTarget = join(targetDir, "real-target.md");
       writeFileSync(realTarget, "REAL", "utf-8");
       const link = join(targetDir, "orchestrate");
@@ -2335,8 +2335,8 @@ describe("forge (Act II)", () => {
     });
 
     it("expands a leading ~ against the home directory before resolving the target (forge#2660)", async () => {
-      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-tilde-"));
-      const homeDir = mkdtempSync(join(os.tmpdir(), "fd-stale-tildehome-"));
+      const targetDir = tmpDir("fd-stale-tilde-");
+      const homeDir = tmpDir("fd-stale-tildehome-");
       const realTargetHomeRelative = join(homeDir, "real-target.md");
       writeFileSync(realTargetHomeRelative, "REAL", "utf-8");
       const originalHomedir = os.homedir;
@@ -2360,8 +2360,8 @@ describe("forge (Act II)", () => {
     });
 
     it("still prunes a tilde-prefixed target that is genuinely missing under the home directory", async () => {
-      const targetDir = mkdtempSync(join(os.tmpdir(), "fd-stale-tilde-missing-"));
-      const homeDir = mkdtempSync(join(os.tmpdir(), "fd-stale-tildehome-missing-"));
+      const targetDir = tmpDir("fd-stale-tilde-missing-");
+      const homeDir = tmpDir("fd-stale-tildehome-missing-");
       const originalHomedir = os.homedir;
       os.homedir = () => homeDir;
       try {
@@ -2378,8 +2378,8 @@ describe("forge (Act II)", () => {
 
   describe("linkPipelineScripts copy-fallback content comparison (forge#1916)", () => {
     it("byte-identical plain-file target is skipped, not recopied", async () => {
-      const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-scripts1-"));
-      const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src-scripts1-"));
+      const home = tmpDir("fd-forge-home-scripts1-");
+      const forgeHome = tmpDir("fd-forge-src-scripts1-");
       mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
       mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
       mkdirSyncFs(join(forgeHome, "scripts"), { recursive: true });
@@ -2406,8 +2406,8 @@ describe("forge (Act II)", () => {
     });
 
     it("differing plain-file target is still recopied (unchanged behavior)", async () => {
-      const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-scripts2-"));
-      const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src-scripts2-"));
+      const home = tmpDir("fd-forge-home-scripts2-");
+      const forgeHome = tmpDir("fd-forge-src-scripts2-");
       mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
       mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
       mkdirSyncFs(join(forgeHome, "scripts"), { recursive: true });
@@ -2476,8 +2476,8 @@ describe("forge (Act II)", () => {
     };
 
     it("forge() repairs an existing link whose target string is correct but which cannot be read", async (t) => {
-      const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-2836a-"));
-      const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src-2836a-"));
+      const home = tmpDir("fd-forge-home-2836a-");
+      const forgeHome = tmpDir("fd-forge-src-2836a-");
       mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
       mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
       writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -2503,8 +2503,8 @@ describe("forge (Act II)", () => {
     });
 
     it("a healthy pre-existing link is still skipped and left untouched (the gate must not over-fire)", async (t) => {
-      const home = mkdtempSync(join(os.tmpdir(), "fd-forge-home-2836c-"));
-      const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-src-2836c-"));
+      const home = tmpDir("fd-forge-home-2836c-");
+      const forgeHome = tmpDir("fd-forge-src-2836c-");
       mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
       mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
       writeFileSync(join(forgeHome, "commands", "a.md"), "A", "utf-8");
@@ -2539,7 +2539,7 @@ describe("forge (Act II)", () => {
 
 describe("read (Act III)", () => {
   it("returns a draft + description without a git repo (placeholders, low confidence)", async () => {
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-read-"));
+    const cwd = tmpDir("fd-read-");
     writeFileSync(join(cwd, "README.md"), "# X\n\nA test project.\n", "utf-8");
     const { ctx, w } = stubCtx({ cwd, isCliAvailableFn: () => false });
     const res = await read(ctx);
@@ -2549,7 +2549,7 @@ describe("read (Act III)", () => {
   });
 
   it("enrichFn is called when ANTHROPIC_API_KEY is set and returns enriched draft", async () => {
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-read-enrich-"));
+    const cwd = tmpDir("fd-read-enrich-");
     const original = await read(stubCtx({ cwd, isCliAvailableFn: () => false }).ctx);
     const { ctx, w } = stubCtx({
       cwd,
@@ -2568,7 +2568,7 @@ describe("read (Act III)", () => {
   });
 
   it("enrichFn throws: draft stays original, error message written", async () => {
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-read-enrich-fail-"));
+    const cwd = tmpDir("fd-read-enrich-fail-");
     const { ctx, w } = stubCtx({
       cwd,
       env: { ANTHROPIC_API_KEY: "test-key" },
@@ -2583,7 +2583,7 @@ describe("read (Act III)", () => {
   });
 
   it("no ANTHROPIC_API_KEY and no CLI: enrichFn is never called", async () => {
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-read-no-key-"));
+    const cwd = tmpDir("fd-read-no-key-");
     let enrichFnCalled = false;
     const { ctx, w } = stubCtx({
       cwd,
@@ -2600,7 +2600,7 @@ describe("read (Act III)", () => {
   });
 
   it("CLI available and no ANTHROPIC_API_KEY: enrichFn is still called (cli backend)", async () => {
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-read-cli-backend-"));
+    const cwd = tmpDir("fd-read-cli-backend-");
     let receivedOpts;
     const { ctx, w } = stubCtx({
       cwd,
@@ -2622,7 +2622,7 @@ describe("read (Act III)", () => {
 
 describe("review (Act IV)", () => {
   it("non-TTY + no existing config: writes forge.yaml with TODO flags for low fields", async () => {
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-review-"));
+    const cwd = tmpDir("fd-review-");
     const { ctx } = stubCtx({ cwd });
     const res0 = await read(ctx);
     const res = await review(ctx, res0.draft, res0.description);
@@ -2634,7 +2634,7 @@ describe("review (Act IV)", () => {
   });
 
   it("non-TTY + existing config: aborts and leaves the file untouched", async () => {
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-review2-"));
+    const cwd = tmpDir("fd-review2-");
     writeFileSync(join(cwd, "forge.yaml"), "precious: true\n", "utf-8");
     const { ctx } = stubCtx({ cwd });
     const res0 = await read(ctx);
@@ -2663,7 +2663,7 @@ describe("review (Act IV) — TTY overwrite confirmation gate (forge#1850, regre
   });
 
   it("declining the confirm prompt aborts before any backup or write", async () => {
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-review-tty-decline-"));
+    const cwd = tmpDir("fd-review-tty-decline-");
     writeFileSync(join(cwd, "forge.yaml"), "precious: true\n", "utf-8");
     let confirmCalled = false;
     let confirmMessage = "";
@@ -2687,7 +2687,7 @@ describe("review (Act IV) — TTY overwrite confirmation gate (forge#1850, regre
   });
 
   it("accepting the confirm prompt proceeds to backup + write", async () => {
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-review-tty-accept-"));
+    const cwd = tmpDir("fd-review-tty-accept-");
     writeFileSync(join(cwd, "forge.yaml"), "precious: true\n", "utf-8");
     const { ctx } = stubCtx({
       cwd,
@@ -2722,7 +2722,7 @@ describe("review (Act IV) — TTY overwrite confirmation gate (forge#1850, regre
   });
 
   it("no existing config: confirmFn is never called (nothing to confirm)", async () => {
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-review-tty-fresh-"));
+    const cwd = tmpDir("fd-review-tty-fresh-");
     let confirmCalled = false;
     const { ctx } = stubCtx({
       cwd,
@@ -2740,7 +2740,7 @@ describe("review (Act IV) — TTY overwrite confirmation gate (forge#1850, regre
 
   it("hard-fails when overwrite is confirmed but owner/repo are unresolved placeholders", async () => {
     // cwd has no git remote, so detection resolves owner/repo to placeholders.
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-review-tty-placeholder-"));
+    const cwd = tmpDir("fd-review-tty-placeholder-");
     writeFileSync(join(cwd, "forge.yaml"), "precious: true\n", "utf-8");
     const { ctx } = stubCtx({
       cwd,
@@ -2920,8 +2920,8 @@ describe("maybeOfferDemo (Act V.6)", () => {
 
 describe("runJourney", () => {
   it("fresh cwd: resolves exit code 0 and forge.yaml exists", async () => {
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-journey-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-journey-"));
+    const cwd = tmpDir("fd-journey-");
+    const forgeHome = tmpDir("fd-forge-journey-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest command\n", "utf-8");
@@ -2931,7 +2931,7 @@ describe("runJourney", () => {
     const ctx = makeCtx({
       cwd,
       forgeHome,
-      home: mkdtempSync(join(os.tmpdir(), "fd-home-journey-")),
+      home: tmpDir("fd-home-journey-"),
       env: {},
       stdout: fakeWriter(),
       mode: "none",
@@ -2948,8 +2948,8 @@ describe("runJourney", () => {
   });
 
   it("pre-existing forge.yaml: resolves exit code 1, file byte-identical", async () => {
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-journey2-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-journey2-"));
+    const cwd = tmpDir("fd-journey2-");
+    const forgeHome = tmpDir("fd-forge-journey2-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest command\n", "utf-8");
@@ -2961,7 +2961,7 @@ describe("runJourney", () => {
     const ctx = makeCtx({
       cwd,
       forgeHome,
-      home: mkdtempSync(join(os.tmpdir(), "fd-home-journey2-")),
+      home: tmpDir("fd-home-journey2-"),
       env: {},
       stdout: fakeWriter(),
       mode: "none",
@@ -2977,8 +2977,8 @@ describe("runJourney", () => {
   });
 
   it("SIGINT listener is cleaned up after journey (or error)", async () => {
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-journey3-"));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-forge-journey3-"));
+    const cwd = tmpDir("fd-journey3-");
+    const forgeHome = tmpDir("fd-forge-journey3-");
     mkdirSyncFs(join(forgeHome, "commands"), { recursive: true });
     mkdirSyncFs(join(forgeHome, "bin", "hooks"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest\n", "utf-8");
@@ -2988,7 +2988,7 @@ describe("runJourney", () => {
     const ctx = makeCtx({
       cwd,
       forgeHome,
-      home: mkdtempSync(join(os.tmpdir(), "fd-home-journey3-")),
+      home: tmpDir("fd-home-journey3-"),
       env: {},
       stdout: fakeWriter(),
       mode: "none",
@@ -3015,7 +3015,7 @@ describe("runJourney", () => {
 describe("parseInstallTier", () => {
   let dir;
   beforeEach(() => {
-    dir = mkdtempSync(join(os.tmpdir(), "fd-tier-"));
+    dir = tmpDir("fd-tier-");
   });
 
   it("returns 'core' when install key is absent", () => {
@@ -3080,7 +3080,7 @@ describe("parseInstallTier", () => {
 describe("findMarkdownFiles — install tier filter", () => {
   let dir;
   beforeEach(() => {
-    dir = mkdtempSync(join(os.tmpdir(), "fd-find-"));
+    dir = tmpDir("fd-find-");
   });
 
   it("includes files with no install key (core by default)", async () => {
@@ -3173,7 +3173,7 @@ describe("findMarkdownFiles — install tier filter", () => {
 describe("validateForgeYamlShape", () => {
   let cwd;
   beforeEach(() => {
-    cwd = mkdtempSync(join(os.tmpdir(), "fd-yamlshape-"));
+    cwd = tmpDir("fd-yamlshape-");
   });
 
   it("returns present:false, validShape:false when forge.yaml is absent", () => {
@@ -3206,9 +3206,9 @@ describe("validateForgeYamlShape", () => {
 describe("writeInstallReceipt", () => {
   let home, forgeHome, cwd;
   beforeEach(() => {
-    home = mkdtempSync(join(os.tmpdir(), "fd-receipt-home-"));
-    forgeHome = mkdtempSync(join(os.tmpdir(), "fd-receipt-forgehome-"));
-    cwd = mkdtempSync(join(os.tmpdir(), "fd-receipt-cwd-"));
+    home = tmpDir("fd-receipt-home-");
+    forgeHome = tmpDir("fd-receipt-forgehome-");
+    cwd = tmpDir("fd-receipt-cwd-");
     mkdirSync(join(forgeHome, "commands"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest command\n", "utf-8");
     writeFileSync(join(forgeHome, "commands", "two.md"), "---\ninstall: extras\n---\n# /two\n\nExtras command\n", "utf-8");
@@ -3311,7 +3311,7 @@ describe("writeInstallReceipt", () => {
     // Point ctx.home at a path whose parent is a FILE, not a directory —
     // mkdir(..., {recursive:true}) will fail with ENOTDIR, and the function
     // must swallow it rather than propagate.
-    const blockerFile = join(mkdtempSync(join(os.tmpdir(), "fd-receipt-blocker-")), "im-a-file");
+    const blockerFile = join(tmpDir("fd-receipt-blocker-"), "im-a-file");
     writeFileSync(blockerFile, "x", "utf-8");
     const ctx = makeReceiptCtx({ home: join(blockerFile, "nested", "home") });
     const res = await writeInstallReceipt(ctx, { forged: {} });

@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // remediate.md M0 liveness step: a dead run's partial markers must not be read as a live run, and a
 // deferral to a genuinely live run must not burn the engine's retry budget or add needs-human.
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { join, dirname } from "node:path";
@@ -23,8 +24,7 @@ const deferredBody = (pr = 7, kind = "lease") =>
   `<!-- FORGE:REMEDIATION_DEFERRED -->\n## Remediation Deferred\n\npr=${pr}\nkind=${kind}\nlease_by=cli_o_9\nlease_until=1`;
 const ioWith = (...cs) => ({
   gh: async (a) => (a[0] === "pr" && a[1] === "view" ? JSON.stringify({ state: "OPEN" }) : jsonLines(cs.map((c) => (typeof c === "string" ? trusted(c) : c)))),
-  git: async () => "0",
-});
+  git: async () => "0" });
 
 describe("remediate.md M0 liveness spec", () => {
   it("delegates the decision to scripts/remediate-liveness.sh and shape-checks the holder", () => {
@@ -91,7 +91,7 @@ describe("scripts/remediate-liveness.sh", () => {
   const bot = (body, ms = NOW - 60_000) => ({ body, user: { type: "Bot", login: "x[bot]" }, author_association: "NONE", created_at: iso(ms) });
   const stateBody = (lease) => `desc\n<!-- FORGE:STATE\n${JSON.stringify({ v: 1, lease })}\n-->\n`;
   function run({ lease, issueBody, prComments = [], issueComments = [], holder = "", editor = { login: "forge[bot]", __typename: "Bot" }, permission = "read" }) {
-    const d = mkdtempSync(join(tmpdir(), "fd-lv-"));
+    const d = tmpDir("fd-lv-");
     try {
       writeFileSync(join(d, "issue.json"), JSON.stringify({ data: { repository: { issue: { body: issueBody ?? (lease === undefined ? "no state" : stateBody(lease)),
         authorAssociation: "NONE", author: { login: "reporter", __typename: "User" }, editor } } } }));

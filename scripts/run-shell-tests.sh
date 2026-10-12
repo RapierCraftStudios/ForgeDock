@@ -22,6 +22,11 @@ cd "$REPO_ROOT" || exit 1
 # Gate scripts emit best-effort telemetry (forge#3834); suites run with it off so stubbed gh calls never buffer into ~/.forge.
 # scripts/telemetry.test.sh sets its own environment.
 export FORGE_TELEMETRY=off
+# Per-run TMPDIR (forge#4016): every suite and child process inherits it and the whole dir is removed at exit,
+# so a temp path a suite forgets to clean never outlives the run (tmpfs quotas fail with EDQUOT otherwise).
+RUN_TMP=$(mktemp -d) || { echo "run-shell-tests: cannot create per-run TMPDIR" >&2; exit 1; }
+trap 'rm -rf "$RUN_TMP"' EXIT
+export TMPDIR="$RUN_TMP"
 
 TIMEOUT_SECS="${SHELL_TEST_TIMEOUT:-300}"
 # WIRE:PROVEN — manual: SHELL_TEST_TIMEOUT=abc and SHELL_TEST_TIMEOUT=0 both print the error and exit 2

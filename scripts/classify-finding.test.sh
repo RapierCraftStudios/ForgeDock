@@ -6,6 +6,8 @@
 # Run: bash scripts/classify-finding.test.sh   (bash 3.2 compatible)
 
 set -u
+# Every mktemp below lands in one private dir that the EXIT trap removes (forge#4016).
+_SUITE_TMP=$(mktemp -d); export TMPDIR="$_SUITE_TMP"; trap 'rm -rf "$_SUITE_TMP"' EXIT
 DIR=$(cd "$(dirname "$0")" && pwd)
 S="$DIR/classify-finding.sh"
 pass=0; fail=0
@@ -28,6 +30,16 @@ expect ISSUE "HIGH on lineage files"          -- --severity HIGH --confidence LI
 expect ISSUE "missing severity files"         -- --severity "" --confidence LIKELY
 expect ISSUE "unknown severity files"         -- --severity INFO
 expect ISSUE "lowercase high files"           -- --severity high
+
+# --- --unstructured: a marker-less finding can never be ISSUE on a bad severity ---
+expect NOTE  "unstructured empty severity is NOTE"       -- --unstructured --severity "" --confidence LIKELY
+expect NOTE  "unstructured missing severity is NOTE"     -- --unstructured
+expect NOTE  "unstructured garbage severity is NOTE"     -- --unstructured --severity INFO
+expect ISSUE "unstructured HIGH still files"             -- --unstructured --severity HIGH --confidence POSSIBLE
+expect ISSUE "unstructured CRITICAL still files"         -- --unstructured --severity CRITICAL
+expect ISSUE "unstructured MEDIUM CONFIRMED still files" -- --unstructured --severity MEDIUM --confidence CONFIRMED --text "loop exits early"
+expect ISSUE "marker finding, empty severity stays ISSUE" -- --severity "" --confidence LIKELY
+expect ISSUE "marker finding, bad severity stays ISSUE"  -- --severity INFO
 
 # --- Rule 4: non-lineage ---
 expect ISSUE "MEDIUM CONFIRMED files"         -- --severity MEDIUM --confidence CONFIRMED --text "loop exits early"

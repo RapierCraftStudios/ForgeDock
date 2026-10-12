@@ -15,13 +15,13 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const build = readFileSync(join(root, "commands/work-on/build.md"), "utf8");
 const extraction = build
   .split("\n")
-  .filter((l) => /^ {2}(TARGET|MATCHER|PHASE)=\$\(|^ {2}\[ -z "\$(TARGET|MATCHER)" \]|^ {2}\[ "\$PHASE" = "review" \] \|\|/.test(l))
+  .filter((l) => /^ {2}(TARGET|MATCHER|PHASE|TEST_RG)=\$\(|^ {2}\[ -z "\$(TARGET|MATCHER)" \]|^ {2}\[ "\$PHASE" = "review" \] \|\|/.test(l))
   .join("\n");
 
 function parse(checkLine) {
-  const script = `check_line="$1"\n${extraction}\nprintf '%s\\n%s\\n%s\\n' "$TARGET" "$MATCHER" "$PHASE"`;
-  const [target, matcher, phase] = execFileSync("bash", ["-c", script, "x", checkLine], { encoding: "utf8" }).split("\n");
-  return { target, matcher, phase };
+  const script = `check_line="$1"\n${extraction}\nprintf '%s\\n%s\\n%s\\n%s\\n' "$TARGET" "$MATCHER" "$PHASE" "$TEST_RG"`;
+  const [target, matcher, phase, testRg] = execFileSync("bash", ["-c", script, "x", checkLine], { encoding: "utf8" }).split("\n");
+  return { target, matcher, phase, testRg };
 }
 
 test("extraction lines are present in build.md", () => {
@@ -43,6 +43,27 @@ test("unquoted fields still parse", () => {
   const r = parse("ACCEPTANCE_CHECK: id=ac-6 type=exists target=commands/x.md matcher=none description=y");
   assert.equal(r.target, "commands/x.md");
   assert.equal(r.matcher, "none");
+});
+
+// test= (#3630): optional red-green field after phase=, before description=; must not disturb the other fields.
+test("test= is parsed and leaves target/matcher/phase undisturbed", () => {
+  const r = parse('ACCEPTANCE_CHECK: id=ac-1 type=command target="node --test a.mjs" matcher="exit_0" phase=build test="node --test bin/tests/a.test.mjs" description=d');
+  assert.deepEqual([r.target, r.matcher, r.phase, r.testRg], ["node --test a.mjs", "exit_0", "build", "node --test bin/tests/a.test.mjs"]);
+});
+
+test("test= with escaped quotes is unescaped; description= text is not mistaken for test=", () => {
+  assert.equal(parse('ACCEPTANCE_CHECK: id=ac-1 type=command target="x" matcher="exit_0" phase=build test="grep -qF \\"a b\\" f" description=d').testRg, 'grep -qF "a b" f');
+  assert.equal(parse('ACCEPTANCE_CHECK: id=ac-1 type=command target="x" matcher="exit_0" phase=build description=uses test="foo" here').testRg, "");
+});
+
+test("absent test= is empty and the rest of the line parses exactly as before", () => {
+  const r = parse('ACCEPTANCE_CHECK: id=ac-1 type=command target="a" matcher="exit_0" phase=build description=d');
+  assert.deepEqual([r.target, r.matcher, r.phase, r.testRg], ["a", "exit_0", "build", ""]);
+  assert.equal(parse("ACCEPTANCE_CHECK: id=ac-6 type=exists target=a.md matcher=none description=y").testRg, "");
+});
+
+test("phase=review with test= is still review (never executed)", () => {
+  assert.equal(parse('ACCEPTANCE_CHECK: id=ac-1 type=command target="a" matcher="exit_0" phase=review test="b" description=d').phase, "review");
 });
 
 // malformed-check (#3694): detector lines are extracted from build.md B6.5 and run verbatim.
@@ -152,7 +173,13 @@ test("malformed-check: #35004 ac-4/ac-5 shape (target=\"none\" on a behavior che
 
 test("malformed-check: rc 127 with 'command not found' is malformed", () => {
   assert.match(classify("no-such-command-xyzzy --flag"), /command not found/);
-  assert.match(classify("true && no-such-command-xyzzy"), /command not found/);
+  assert.match(classify("  no-such-command-xyzzy --flag"), /command not found/);
+});
+
+test("rc 127 whose missing command is not the target's first word stays a real failure", () => {
+  assert.equal(classify("true && no-such-command-xyzzy"), "");
+  assert.equal(classify("bash -c 'no-such-xyzzy'"), "");
+  assert.equal(classify("FOO=1 no-such-command-xyzzy"), "");
 });
 
 test("a missing script (rc 127, 'No such file or directory') and a #3802 missing-file grep stay real failures", () => {

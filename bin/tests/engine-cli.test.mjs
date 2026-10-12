@@ -1,6 +1,7 @@
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it, mock } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync, utimesSync } from "node:fs";
+import { writeFileSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 import { scanStalls, resumeStalledFromCli, runFromCli, countEngineActivity, lastLocalRun, formatTerminalDiagnostics, aggregateUsage, formatUsageLine } from "../engine-cli.mjs";
@@ -27,8 +28,7 @@ function makeFakeIo(states, { fanOutLabel = "workflow:building" } = {}) {
         return JSON.stringify({ body: serializeState(states[issue]) });
       }
       throw new Error(`unexpected gh call: ${args.join(" ")}`);
-    },
-  };
+    } };
 }
 
 describe("scanStalls", () => {
@@ -290,7 +290,7 @@ describe("lastLocalRun (re-entry dashboard, #1945)", () => {
   });
 
   it("returns null when the runs dir has no .jsonl files", () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "fd-runs-empty-"));
+    const dir = tmpDir("fd-runs-empty-");
     try {
       writeFileSync(join(dir, "notes.txt"), "not a run log");
       assert.equal(lastLocalRun(dir), null);
@@ -300,7 +300,7 @@ describe("lastLocalRun (re-entry dashboard, #1945)", () => {
   });
 
   it("returns the most recently modified run's summary", () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "fd-runs-multi-"));
+    const dir = tmpDir("fd-runs-multi-");
     try {
       writeFileSync(join(dir, "100.jsonl"), JSON.stringify({ seq: 1, event: "RUN_START", run: "r1", issue: 100 }) + "\n");
       // Write the second file after a tick so its mtime is newer.
@@ -319,7 +319,7 @@ describe("lastLocalRun (re-entry dashboard, #1945)", () => {
   });
 
   it("skips a corrupt newest file and falls back to the next-newest readable one", () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "fd-runs-corrupt-"));
+    const dir = tmpDir("fd-runs-corrupt-");
     try {
       writeFileSync(join(dir, "300.jsonl"), JSON.stringify({ seq: 1, event: "RUN_START", run: "r3", issue: 300 }) + "\n");
       writeFileSync(join(dir, "301.jsonl"), "{not valid json at all");
@@ -366,7 +366,7 @@ describe("runFromCli --repo targeting guard", () => {
     // forge#2175: an injected dir keeps the terminal-diagnostics read (triggered
     // here since the mocked terminalReason isn't the literal "merged") off the
     // real ~/.forge/runs directory.
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
 
     const res = await runFromCli(["42", "--lane", "staging", "--repo", "acme/target-repo"], { io, runIssue, dir });
 
@@ -378,7 +378,7 @@ describe("runFromCli --repo targeting guard", () => {
   it("skips the repo-view check entirely when --repo is omitted", async () => {
     const io = { gh: async () => { throw new Error("should not be called"); } };
     const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
 
     const res = await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
 
@@ -411,7 +411,7 @@ describe("runFromCli OpenCode runtime guard", () => {
 
 describe("runFromCli phase progress output (forge#2240)", () => {
   it("prints the run-log path at start, before runIssue is even invoked", async () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
     const io = { gh: async () => { throw new Error("should not be called"); } };
     const logs = [];
     let runLogPrintedBeforeRunIssue = false;
@@ -435,7 +435,7 @@ describe("runFromCli phase progress output (forge#2240)", () => {
   });
 
   it("emits a stdout line for each phase_enter/phase_exit onProgress event from runIssue", async () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
     const io = { gh: async () => { throw new Error("should not be called"); } };
     const runIssue = mock.fn(async ({ onProgress }) => {
       // Simulate a multi-phase run in flight — more than the startup banner.
@@ -472,7 +472,7 @@ describe("runFromCli --backend/--model forwarding (forge#2028)", () => {
   it("forwards --backend and --model to runIssue when both are supplied", async () => {
     const io = { gh: async () => { throw new Error("should not be called"); } };
     const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
 
     const res = await runFromCli(
       ["42", "--lane", "staging", "--backend", "cli", "--model", "claude-test-model"],
@@ -490,7 +490,7 @@ describe("runFromCli --backend/--model forwarding (forge#2028)", () => {
   it("omits backend/model keys from the runIssue call when neither flag is supplied", async () => {
     const io = { gh: async () => { throw new Error("should not be called"); } };
     const runIssue = mock.fn(async () => ({ terminalReason: "workflow:merged" }));
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
 
     await runFromCli(["42", "--lane", "staging"], { io, runIssue, dir });
 
@@ -504,7 +504,7 @@ describe("runFromCli --backend/--model forwarding (forge#2028)", () => {
 
 describe("formatTerminalDiagnostics (forge#2175)", () => {
   it("renders phase, attempt/max, reason, state, and run-log path from a run-log with a PHASE_FAILED event", () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
     try {
       appendEvent(dir, 29241, { event: "RUN_START", issue: 29241, run: "r_29241_staging", lane: "staging" });
       appendEvent(dir, 29241, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
@@ -530,7 +530,7 @@ describe("formatTerminalDiagnostics (forge#2175)", () => {
   });
 
   it("uses the run's effective maxAttempts (forge#2226) rather than the DEFAULT_MAX_ATTEMPTS constant", () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
     try {
       appendEvent(dir, 30001, { event: "RUN_START", issue: 30001, run: "r_30001_staging", lane: "staging" });
       appendEvent(dir, 30001, { event: "PHASE_START", phase: "build", attempt: 1 });
@@ -548,7 +548,7 @@ describe("formatTerminalDiagnostics (forge#2175)", () => {
   });
 
   it("falls back to DEFAULT_MAX_ATTEMPTS for legacy run-logs whose PHASE_FAILED events predate the maxAttempts field (forge#2226)", () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
     try {
       appendEvent(dir, 30002, { event: "RUN_START", issue: 30002, run: "r_30002_staging", lane: "staging" });
       appendEvent(dir, 30002, { event: "PHASE_START", phase: "build", attempt: 1 });
@@ -565,7 +565,7 @@ describe("formatTerminalDiagnostics (forge#2175)", () => {
   });
 
   it("omits the phase/reason lines but still prints state and run-log path when there is no PHASE_FAILED event", () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
     try {
       appendEvent(dir, 55, { event: "RUN_START", issue: 55, run: "r_55_staging", lane: "staging" });
       appendEvent(dir, 55, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
@@ -583,7 +583,7 @@ describe("formatTerminalDiagnostics (forge#2175)", () => {
   });
 
   it("prints only the run-log path when the log is empty/nonexistent (e.g. a deferred early return)", () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
     try {
       const out = formatTerminalDiagnostics(dir, 999);
       assert.ok(!out.includes("phase:"));
@@ -595,7 +595,7 @@ describe("formatTerminalDiagnostics (forge#2175)", () => {
   });
 
   it("degrades to a safe placeholder without touching the filesystem when issue is not an integer (forge#2190)", () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
     try {
       for (const invalid of [NaN, "not-a-number", undefined, null, 1.5]) {
         const out = formatTerminalDiagnostics(dir, invalid);
@@ -609,7 +609,7 @@ describe("formatTerminalDiagnostics (forge#2175)", () => {
   });
 
   it("appends an aggregate usage line when at least one PHASE_COMMIT/PHASE_FAILED event carries usage (forge#2399)", () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
     try {
       appendEvent(dir, 40001, { event: "RUN_START", issue: 40001, run: "r_40001_staging", lane: "staging" });
       appendEvent(dir, 40001, { event: "PHASE_COMMIT", phase: "investigate", outputs: {}, usage: { input_tokens: 100, output_tokens: 20, cache_creation_input_tokens: 5, cache_read_input_tokens: 50 } });
@@ -625,7 +625,7 @@ describe("formatTerminalDiagnostics (forge#2175)", () => {
   });
 
   it("omits the usage line entirely (no misleading 0 tokens line) when no event carries usage data (forge#2399)", () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
     try {
       appendEvent(dir, 40002, { event: "RUN_START", issue: 40002, run: "r_40002_staging", lane: "staging" });
       appendEvent(dir, 40002, { event: "PHASE_COMMIT", phase: "investigate", outputs: {} });
@@ -695,7 +695,7 @@ describe("aggregateUsage / formatUsageLine (forge#2399)", () => {
 
 describe("runFromCli terminal diagnostics (forge#2175)", () => {
   it("prints the diagnostic block after a needs-human termination", async () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
     const io = { gh: async () => { throw new Error("should not be called"); } };
     const runIssue = mock.fn(async ({ dir: d, issue }) => {
       appendEvent(d, issue, { event: "RUN_START", issue, run: `r_${issue}_staging`, lane: "staging" });
@@ -724,7 +724,7 @@ describe("runFromCli terminal diagnostics (forge#2175)", () => {
   });
 
   it("does NOT print the post-completion diagnostic block after a merged termination", async () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
     const io = { gh: async () => { throw new Error("should not be called"); } };
     const runIssue = mock.fn(async () => ({ terminalReason: "merged" }));
 
@@ -752,7 +752,7 @@ describe("runFromCli terminal diagnostics (forge#2175)", () => {
   });
 
   it("prints the aggregate usage line on a merged termination when the run-log carries usage data (forge#2399)", async () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
     const io = { gh: async () => { throw new Error("should not be called"); } };
     const runIssue = mock.fn(async ({ dir: d, issue }) => {
       appendEvent(d, issue, { event: "RUN_START", issue, run: `r_${issue}_staging`, lane: "staging" });
@@ -778,7 +778,7 @@ describe("runFromCli terminal diagnostics (forge#2175)", () => {
   });
 
   it("prints no usage line on a merged termination when the run-log carries no usage data (forge#2399)", async () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
     const io = { gh: async () => { throw new Error("should not be called"); } };
     const runIssue = mock.fn(async ({ dir: d, issue }) => {
       appendEvent(d, issue, { event: "RUN_START", issue, run: `r_${issue}_staging`, lane: "staging" });
@@ -813,7 +813,7 @@ describe("runFromCli — forge#3574 deferred output, agentId, --wait-lease", () 
   };
 
   it("deferred prints the reason and skips empty-log diagnostics", async () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
     const detail = "issue 42 leased by cli_h_9 until 2026-10-10T16:20:14.000Z";
     const runIssue = mock.fn(async () => ({ terminalReason: "deferred", detail }));
     let res;
@@ -825,7 +825,7 @@ describe("runFromCli — forge#3574 deferred output, agentId, --wait-lease", () 
   });
 
   it("agentId is cli_<hostname>_<pid> and round-trips through parseLeaseHolder", async () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
     const runIssue = mock.fn(async () => ({ terminalReason: "merged" }));
     await capture(() => runFromCli(["42", "--lane", "staging"], { io, runIssue, dir }));
     const { agentId } = runIssue.mock.calls[0].arguments[0];
@@ -835,7 +835,7 @@ describe("runFromCli — forge#3574 deferred output, agentId, --wait-lease", () 
   });
 
   it("forwards --wait-lease only at a flag position", async () => {
-    const dir = mkdtempSync(join(os.tmpdir(), "engine-cli-test-"));
+    const dir = tmpDir("engine-cli-test-");
     const runIssue = mock.fn(async () => ({ terminalReason: "merged" }));
     await capture(() => runFromCli(["42", "--lane", "staging", "--wait-lease"], { io, runIssue, dir }));
     assert.equal(runIssue.mock.calls[0].arguments[0].waitLease, true);

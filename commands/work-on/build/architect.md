@@ -669,6 +669,14 @@ Rules for ordering:
 
 ---
 
+## Phase A4.5: Edge-Case Enumeration *(skip on the skip-marker path; an empty block is valid)* <!-- Added: forge#3631 -->
+
+List the error, edge and concurrency cases the change must survive, so validate (Phase V4.7, `scripts/check-edge-cases.sh`) can require a test for each. Cover every error class the code path can raise (not only the one in the report), boundary and empty inputs, and concurrent or repeated invocation. Skip cases that only restate a normal-path acceptance criterion.
+
+Record one single-line record per case between `<!-- FORGE:EDGE_CASES:BEGIN -->` and `<!-- FORGE:EDGE_CASES:END -->`: `EDGE: id=e1 kind=error|edge|concurrency description=<free text>`. Ids are `e1`, `e2`, ... and are unique and stable. Only `id=` and `kind=` are parsed; the description is free text. Emit an empty block (or omit the section) when the change has no such cases. The builder maps each id to a test or an `untestable=` reason in FORGE:BUILDER (implement I6). Never use the architect marker strings as delimiters.
+
+---
+
 ## Phase A5: Risk Assessment
 
 For each non-obvious interaction or potential failure mode:
@@ -776,6 +784,16 @@ SYMBOL: id=s1 kind={function|field|flag|schema|contract} name={SYMBOL} query=\"{
 HIT: symbol=s1 file={FILE} role={producer|consumer|sibling} disposition=change
 HIT: symbol=s1 file={FILE} role={producer|consumer|sibling} disposition=verified-unaffected reason={one-hyphenated-token}
 <!-- FORGE:BLAST_RADIUS:END -->
+
+### Edge Cases
+<!-- Phase A4.5. Human table plus the machine block. Omit when skipped; an empty block is valid. -->
+| id | kind | description |
+|----|------|-------------|
+| e1 | {error\|edge\|concurrency} | {DESCRIPTION} |
+
+<!-- FORGE:EDGE_CASES:BEGIN -->
+EDGE: id=e1 kind={error|edge|concurrency} description={ONE_LINE_DESCRIPTION}
+<!-- FORGE:EDGE_CASES:END -->
 
 ### Implementation Order
 1. {FIRST_CHANGE} — {WHY_FIRST}
@@ -888,6 +906,7 @@ B4    → [THIS MODULE] Architecture Planning (FORGE:ARCHITECT comment)
           Phase A2.10: Consumer Sweep Intake (consumer-sweep.sh --ident; gated by validate V4.6)
           Phase A3: Consistency Rules
           Phase A4: Sequence the Implementation
+          Phase A4.5: Edge-Case Enumeration (EDGE: ids; gated by validate V4.7)
           Phase A5: Risk Assessment
 B5    → Implement (builder reads plan, implements ALL affected paths)
 ```

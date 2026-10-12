@@ -232,6 +232,19 @@ case "$(p4 DELTA 'security auth billing')" in "PANEL_STATUS: SHORTFALL"*) ok ;; 
 { cm "$(body_agent security "$HEAD")" User NONE; cm "$(body_agent auth "$HEAD")" User NONE; } | jq -s '.' > "$FAKE_COMMENTS"
 case "$(p4 FULL 'security auth')" in "PANEL_STATUS: SHORTFALL"*) ok ;; *) bad "untrusted reviewer markers must not satisfy the panel: $(p4 FULL 'security auth')" ;; esac
 
+# a verdict without a findings block is undelivered (#3976): not complete, never counted
+{ cm "$(printf '<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: %s\n\nVerdict: APPROVE, no findings.' "$HEAD")" User MEMBER; cm "$(body_agent auth "$HEAD")" User MEMBER; } | jq -s '.' > "$FAKE_COMMENTS"
+case "$(p4 FULL 'security auth')" in "PANEL_STATUS: SHORTFALL (ACTUAL_AGENT_COUNT=1)"*) ok ;; *) bad "a block-less reviewer comment must not satisfy Phase 4: $(p4 FULL 'security auth')" ;; esac
+# the 3C pending-agent count and the staging 6.75 delivery count carry the same block lookahead as Phase 4
+STAGING="$ROOT/commands/review-pr-staging.md"
+for spec in "$SPEC" "$STAGING"; do
+  n=$(grep -F 'count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->[\\s\\S]*<!-- REVIEW-FINDINGS-END -->)<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->' "$spec" | wc -l)
+  want=2; [ "$spec" = "$STAGING" ] && want=1
+  [ "$n" -eq "$want" ] && ok || bad "$(basename "$spec"): $n delivery counts carry the findings-block lookahead, want $want"
+  if grep -E 'count "\^<!-- FORGE:REVIEW-AGENT:\$\{AGENT_DOMAIN\}' "$spec" >/dev/null; then bad "$(basename "$spec"): header-only delivery regex remains"; else ok; fi
+  if grep -qE 'scan the trusted (agent comments|reviewer bodies) for unstructured|no unstructured finding' "$spec"; then bad "$(basename "$spec"): free-text finding scan remains"; else ok; fi
+done
+
 # ---- 6. The 6A read of the carried / earlier head's findings is scripts/review-finalize.sh extract (covered by scripts/review-finalize.test.sh).
 
 echo "review-pr-delta-wiring tests: pass=$PASS fail=$FAILN"

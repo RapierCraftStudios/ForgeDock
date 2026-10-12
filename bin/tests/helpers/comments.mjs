@@ -26,7 +26,7 @@ export const builder = (branch) => SEP + builderBody(branch);
 export const remediationBody = (outcome) =>
   `<!-- FORGE:REMEDIATION -->\n**Re-gate outcome**: ${outcome}\n<!-- FORGE:REMEDIATION:COMPLETE -->`;
 // forge#3685: non-terminal held-resume record (no COMPLETE marker).
-export const remediationHeldBody = (outcome = "HELD-AWAITING-MERGE") =>
-  `<!-- FORGE:REMEDIATION_HELD -->\n**Re-gate outcome**: ${outcome}\n**Hold reason**: CI pending`;
+export const remediationHeldBody = (outcome = "HELD-AWAITING-MERGE", reason = "approval not bound to the live head") =>
+  `<!-- FORGE:REMEDIATION_HELD -->\n**Re-gate outcome**: ${outcome}\n**Hold reason**: ${reason}`;
 export const remediation = (outcome) => SEP + remediationBody(outcome);
 export const decomposed = () => SEP + "<!-- FORGE:DECOMPOSED -->\nspawned\n<!-- FORGE:DECOMPOSED:COMPLETE -->";

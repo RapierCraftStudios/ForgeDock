@@ -1,6 +1,7 @@
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, appendFileSync } from "node:fs";
+import { rmSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendEvent, readLog, deriveState, rewriteLog } from "../engine/runlog.mjs";
@@ -9,7 +10,7 @@ import { serializeState } from "../engine/state.mjs";
 import { asComments, inv as investigationComment, ctx, arch, builder, remediation, decomposed } from "./helpers/comments.mjs";
 
 let dir;
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "fd-runlog-")); });
+beforeEach(() => { dir = tmpDir("fd-runlog-"); });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
 describe("runlog", () => {
@@ -30,6 +31,21 @@ describe("runlog", () => {
     assert.equal(deriveState(readLog(dir, 7)).remediationKind, null);
     appendEvent(dir, 7, { event: "PHASE_COMMIT", phase: "review", outputs: { pr: 12, remediation: "ci-gate" } });
     assert.equal(deriveState(readLog(dir, 7)).remediationKind, "ci-gate");
+  });
+
+  it("forge#4021: a remediate commit with remediation inpr-fix re-arms remediate and keeps the kind; a plain one still clears it", () => {
+    appendEvent(dir, 7, { event: "RUN_START", issue: 7, run: "r", lane: "staging" });
+    appendEvent(dir, 7, { event: "PHASE_COMMIT", phase: "review", outputs: { pr: 12, remediation: "inpr-fix" }, terminalReason: "needs-human" });
+    appendEvent(dir, 7, { event: "PHASE_COMMIT", phase: "remediate", outputs: { remediation: "inpr-fix", reGateOutcome: "INPR-FIX-REQUESTED" } });
+    let s = deriveState(readLog(dir, 7));
+    assert.equal(s.remediationKind, "inpr-fix");
+    assert.ok(!s.committed.includes("remediate"), "remediate is re-armed");
+    assert.ok(s.committed.includes("review"));
+    assert.equal(s.terminalReason, "needs-human");
+    appendEvent(dir, 7, { event: "PHASE_COMMIT", phase: "remediate", outputs: { reGateOutcome: "RE-ESCALATED" }, terminalReason: "needs-human" });
+    s = deriveState(readLog(dir, 7));
+    assert.equal(s.remediationKind, null);
+    assert.ok(s.committed.includes("remediate"));
   });
 
   it("forge#3824: RUN_START version/repo/hydrated fields persist through the log and do not disturb deriveState", () => {
@@ -124,8 +140,7 @@ describe("runlog", () => {
       git: async (args) => {
         if (args?.[0] === "worktree") return "worktree /repo\nHEAD 0\nbranch refs/heads/main\n\nworktree /repo/.claude/worktrees/fix-b-42\nHEAD 1\nbranch refs/heads/fix/b-42\n";
         return String(w.commitsAhead);
-      },
-    };
+      } };
     return { w, io };
   }
 

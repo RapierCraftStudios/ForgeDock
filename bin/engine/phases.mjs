@@ -220,7 +220,8 @@ function latestGateMarker(comments) {
     const b = comments[i];
     if (startsWithHeader(b, "FORGE:BUILD_BLOCKED")) return { state: "blocked", index: i };
     if (!startsWithHeader(b, gate)) continue;
-    if (hasSentinelLine(b, `${gate}:PASSED`)) return { state: "pass", index: i };
+    // :DEGRADED is pass-class (forge#3628): the build completed, and review gates the merge on the degraded paths.
+    if (hasSentinelLine(b, `${gate}:PASSED`) || hasSentinelLine(b, `${gate}:DEGRADED`)) return { state: "pass", index: i };
     if (hasSentinelLine(b, `${gate}:FAILED`) || hasSentinelLine(b, `${gate}:BLOCKED`)) return { state: "blocked", index: i };
   }
   return { state: "none", index: -1 };
@@ -553,6 +554,9 @@ function isRemediationKind(k) {
   return typeof k === "string" && Object.hasOwn(REMEDIATION_BOUND_MARKERS, k);
 }
 
+// forge#4021: the newest remediation trail reported an in-PR fix request (remediate.md M8).
+const INPR_REQUESTED_RE = /\*\*Re-gate outcome\*\*:\s*INPR-FIX-REQUESTED\b/;
+
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const BRANCH_RE = /^[A-Za-z0-9._][A-Za-z0-9._\/-]*$/;
 const LANE_RE = BRANCH_RE;
@@ -842,6 +846,11 @@ export const PHASES = [
       // An explicit REVIEW_RESULT status is authoritative: BLOCKED/COMPLETE exits
       // (phase trail, ci gate, base conflict, merge refusal) also label the issue
       // needs-human but are NOT remediation handoffs, so skip the label fallback.
+      // CI still running when the merge gate's wait window ended: nothing failed, so this is a wait the engine
+      // polls (runIssue), not a block. Structured `blocker` field only, never PR/comment prose; "ci gate"
+      // (red CI) is a disjoint phrase and keeps the REVIEW_PR_OPEN path below.
+      if (rr && rr.status === "BLOCKED" && isCiPendingBlocker(rr.blocker))
+        return { status: "failed", detail: "checks still pending", retryable: false, handoff: false, wait: "ci-pending", outputs, code: OC.REVIEW_PR_OPEN };
       if (rr && rr.status) return { status: "failed", detail: "PR open, not merged", retryable: false, handoff: false, outputs, code: OC.REVIEW_PR_OPEN };
       let snap = null;
       try { snap = await issueSnapshot(state.issue, io); } catch { snap = null; }
@@ -902,7 +911,15 @@ export const PHASES = [
         const { comments } = await issueMarkers(state.issue, io);
         // Resume idempotency: a handoff interrupted after the marker post must not double-count.
         // forge#3542: only a full-line marker in a trusted comment counts.
-        if (!comments.some((b) => hasSentinelLine(b, `FORGE:${boundMarker}: pr=${pr}`))) {
+        // forge#4021: an in-PR fix re-armed by the re-gate (the newest trail after the newest marker reports
+        // INPR-FIX-REQUESTED) needs a FRESH marker, or M0's per-kind guard sees the first trail as this dispatch's
+        // and returns ALREADY_DONE. The marker count is also the bound (detectOutcome allows one re-arm).
+        const sentinel = `FORGE:${boundMarker}: pr=${pr}`;
+        let markerAt = -1;
+        comments.forEach((b, i) => { if (hasSentinelLine(b, sentinel)) markerAt = i; });
+        const trailAfter = markerAt < 0 ? null : latestMarked(comments.slice(markerAt + 1), PHASE_MARKERS.remediate.header, PHASE_MARKERS.remediate.completionMarker);
+        const rearmed = kind === "inpr-fix" && trailAfter !== null && INPR_REQUESTED_RE.test(trailAfter);
+        if (markerAt < 0 || rearmed) {
           await io.gh(["issue", "comment", String(state.issue), "--body",
             `${marker}\nReview handed PR #${pr} to remediation (${kind}); the engine is dispatching it once.`]);
         }
@@ -912,7 +929,8 @@ export const PHASES = [
       await postDispatchMarker();
       return legacyArgs();
     },
-    entryCondition: (s) => s.committed.includes("review") && s.terminalReason === "needs-human",
+    // forge#4021: also re-entered (with remediationKind "inpr-fix") after a re-gate that requested one in-PR fix round.
+    entryCondition: (s) => s.committed.includes("review") && (s.terminalReason === "needs-human" || s.remediationKind === "inpr-fix"),
     async detectOutcome(state, io) {
       // forge#3530: read the NEWEST completed trail only. A concatenated oldest-first blob
       // returned a stale outcome from an earlier remediation when a later one posted nothing.
@@ -966,6 +984,12 @@ export const PHASES = [
       if (heldAt >= 0 && heldAt > completeAt) {
         // Merged PR hands to close; otherwise awaiting-merge (terminal for the engine, re-entered by an operator), never a retry.
         if (await prMerged()) return mergedResult("AUTO-LANDED");
+        // CI still pending at M7 is a wait, not a park: the engine polls CI (no model) and re-dispatches this phase, which
+        // resumes at M7. Only the structured `Hold reason` line of the newest trusted held record counts; the stale-head
+        // and deploy-gate holds keep the terminal awaiting-merge result below.
+        if (/^\*\*Hold reason\*\*:[ \t]*CI pending\b/m.test(scoped[heldAt]))
+          return { status: "failed", detail: "checks still pending", retryable: false, handoff: false, wait: "ci-pending",
+                   outputs: { reGateOutcome: "HELD-AWAITING-MERGE" }, code: OC.REVIEW_PR_OPEN };
         return { status: "committed", terminalReason: "awaiting-merge", outputs: { reGateOutcome: "HELD-AWAITING-MERGE" } };
       }
       if (latest === null) {
@@ -1024,11 +1048,30 @@ export const PHASES = [
           return { status: "committed", terminalReason: "needs-human",
                    code: reGateOutcome === "UNFIXABLE" ? OC.REMEDIATE_UNFIXABLE : OC.REMEDIATE_RE_ESCALATED,
                    outputs: { reGateOutcome } };
+        case "INPR-FIX-REQUESTED": {
+          // forge#4021: the re-review approved but posted a FORGE:INPR_FIX work order. One further in-PR fix
+          // remediation is allowed (never needs-human on the first request); the bound marker count caps it.
+          if (await remediationHeadStale(state, io))
+            return { status: "failed", code: OC.REMEDIATE_NO_MARKER, detail: `stale ${completion} trail: PR head moved since it was recorded` };
+          if (await prMerged()) return mergedResult(reGateOutcome);
+          const round = /\*\*INPR round\*\*:\s*(\d+)/.exec(latest)?.[1] ?? null;
+          const outputs = { reGateOutcome, ...(round ? { inprRound: Number(round) } : {}) };
+          const boundSentinel = `FORGE:${REMEDIATION_BOUND_MARKERS["inpr-fix"]}: pr=${state.pr}`;
+          const priorMarkers = state.pr == null ? 2 : comments.filter((b) => hasSentinelLine(b, boundSentinel)).length;
+          if (priorMarkers >= 2)
+            return { status: "committed", terminalReason: "needs-human", code: OC.REMEDIATE_RE_ESCALATED, outputs };
+          return { status: "committed", code: OC.REMEDIATE_INPR_REQUESTED, outputs: { ...outputs, remediation: "inpr-fix" } };
+        }
+        case "REREVIEW-REQUIRED":
+          if (await remediationHeadStale(state, io))
+            return { status: "failed", code: OC.REMEDIATE_NO_MARKER, detail: `stale ${completion} trail: PR head moved since it was recorded` };
+          return { status: "committed", terminalReason: "needs-human", code: OC.REMEDIATE_RE_ESCALATED, outputs: { reGateOutcome } };
         default:
           return { status: "failed", detail: `FORGE:REMEDIATION:COMPLETE present but Re-gate outcome unrecognized/missing: ${reGateOutcome || "none"}` };
       }
     },
-    isTerminalAfter: () => true,
+    // forge#4021: a committed in-PR fix request continues the run (remediate re-arms) instead of ending it.
+    isTerminalAfter: (s) => s.remediationKind !== "inpr-fix",
   },
   {
     id: "close",
@@ -1164,6 +1207,10 @@ export async function detectTrustedOutcome(phaseId, state, io) {
  * Untrusted model output: only the fixed keys below are read, via anchored
  * line matches; `pr_number` must be digits-only. Returns null when absent.
  */
+export function isCiPendingBlocker(blocker) {
+  return typeof blocker === "string" && /checks still pending/i.test(blocker) && !/ci gate/i.test(blocker);
+}
+
 export function parseReviewResult(text) {
   if (typeof text !== "string" || !text) return null;
   const lines = text.split(/\r?\n/);
@@ -1174,6 +1221,9 @@ export function parseReviewResult(text) {
   for (let i = start + 1; i < lines.length; i++) {
     const m = /^\s+(status|next|remediation|pr_number):[ \t]*(\S*)[ \t]*$/.exec(lines[i]);
     if (m) { if (!(m[1] in out)) out[m[1]] = m[2]; continue; }
+    // `blocker` is free text (spaces): rest of the anchored line, first wins, only ever substring-tested.
+    const b = /^\s+blocker:[ \t]*(.*?)[ \t]*$/.exec(lines[i]);
+    if (b) { if (!("blocker" in out)) out.blocker = b[1].slice(0, 500); continue; }
     if (/^\s+[A-Za-z_]+:/.test(lines[i]) || !lines[i].trim()) continue;
     break;
   }
