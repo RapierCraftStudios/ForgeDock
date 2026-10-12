@@ -64,12 +64,12 @@ JITTER_PCT="${FORGE_CI_JITTER_PCT:-20}"; case "$JITTER_PCT" in ''|*[!0-9]*) JITT
 jitter() { awk -v s="$1" -v p="$JITTER_PCT" -v r="$RANDOM" 'BEGIN{ v=s*(1-p/100+2*(p/100)*(r/32767)); if (v<1) v=1; printf "%.2f", v }'; }
 
 # classify_gh <text> -> prints one class, or nothing when the text is unrecognised:
-#   limited    real rate-limit evidence (x-ratelimit-remaining: 0, HTTP 429, "API rate limit exceeded", secondary rate limit,
+#   limited    real rate-limit evidence (x-ratelimit-remaining: 0, HTTP 429, "API rate limit exceeded" or GraphQL "API rate limit already exceeded", secondary rate limit,
 #              abuse detection, too many requests): a wait, bounded by the whole window
 #   auth       a bare 401/403 (bad credentials, missing scope): permanent, never waited on
 #   transient  5xx / gateway / network failures: a small bounded retry (FORGE_CI_TRANSIENT_RETRIES), never the long wait
 classify_gh() {
-  if printf '%s' "$1" | grep -Eqi 'api rate limit exceeded|secondary (rate )?limit|abuse detection|x-ratelimit-remaining: *0|HTTP 429|status 429|too many requests'; then echo limited
+  if printf '%s' "$1" | grep -Eqi 'api rate limit (already )?exceeded|secondary (rate )?limit|abuse detection|x-ratelimit-remaining: *0|HTTP 429|status 429|too many requests'; then echo limited
   elif printf '%s' "$1" | grep -Eqi 'HTTP (401|403)|status (401|403)|bad credentials|requires authentication'; then echo auth
   elif printf '%s' "$1" | grep -Eqi 'HTTP 5[0-9][0-9]|status 5[0-9][0-9]|bad gateway|service unavailable|gateway time-?out|timed? ?out|i/o timeout|connection (reset|refused)|could not resolve host|unexpected EOF|network is unreachable|TLS handshake'; then echo transient
   fi

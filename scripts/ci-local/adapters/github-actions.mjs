@@ -8,7 +8,7 @@
 import path from 'node:path';
 import {
   Unsupported, Degraded, parseYaml, branchMatches, matchesFilter, evalExpr, interpolate, condTrue, hostClass, jobId, deferred, notApplicable,
-  SECRET_REF, DEPLOY_NAME, commandExists, run, majorOf,
+  SECRET_REF, DEPLOY_NAME, commandExists, run, majorOf, str,
 } from '../lib.mjs';
 import { stepsFromScript, shellArgv } from './common.mjs';
 
@@ -88,7 +88,7 @@ function topo(jobs) {
   return out;
 }
 
-function expandMatrix(m, ctx) {
+export function expandMatrix(m, ctx) {
   if (m === undefined || m === null) return [{}];
   if (typeof m === 'string') throw new Unsupported('dynamic matrix');
   const base = {}; for (const [k, v] of Object.entries(m)) if (!['include', 'exclude'].includes(k)) { let val = v; if (typeof val === 'string') val = interpolate(val, ctx); if (!Array.isArray(val)) throw new Unsupported('dynamic matrix axis ' + k); base[k] = val; }
@@ -97,12 +97,14 @@ function expandMatrix(m, ctx) {
   if (!Object.keys(base).length) combos = [];
   const ex = Array.isArray(m.exclude) ? m.exclude : [];
   combos = combos.filter((c) => !ex.some((e) => Object.entries(e).every(([k, v]) => c[k] === v)));
+  // GitHub include semantics (forge#4040): an entry extends every combo whose ORIGINAL axis values all match it (an entry
+  // naming no original axis matches every combo); an entry that matches no combo is added as a new combo. Original axis
+  // values are never overwritten; extra keys are.
   for (const inc of Array.isArray(m.include) ? m.include : []) {
     const keys = Object.keys(inc).filter((k) => k in base);
-    const targets = combos.filter((c) => keys.every((k) => c[k] === inc[k]));
-    if (keys.length && targets.length) for (const t of targets) for (const [k, v] of Object.entries(inc)) if (!(k in base)) t[k] = v;
+    const targets = Object.keys(base).length ? combos.filter((c) => keys.every((k) => c[k] === inc[k])) : [];
+    if (targets.length) { for (const t of targets) for (const [k, v] of Object.entries(inc)) if (!(k in base)) t[k] = v; }
     else combos.push({ ...inc });
-    if (!keys.length) combos.push({ ...inc });
   }
   return combos.length ? combos : [{}];
 }
@@ -115,6 +117,38 @@ function osClass(runsOn) {
   return { reason: `unknown runner label ${labels.join(',')}` };
 }
 function hostRuns(os) { const h = hostClass(); return os === 'linux' ? h === 'linux' || h === 'darwin' : os === h; }
+
+// forge#4040 (SEC-5, FIX-2): no expression whose value could carry attacker-influenced text is ever substituted into script
+// text. A `github.*` or `env.*` expression (env values are themselves expanded from github.* at plan time, so
+// `${{ env.X }}` is the indirect form of the same injection) is evaluated into an environment VALUE and the script gets a
+// quoted shell variable reference. Any other expression is substituted literally only when its value is inert
+// ([A-Za-z0-9_./:@+,=-]); otherwise it goes through the environment too.
+const INERT = /^[A-Za-z0-9_.\/:@+,=-]*$/;
+function quoteState(before) {
+  let q = '';
+  for (let i = 0; i < before.length; i++) {
+    const c = before[i];
+    if (q === "'") { if (c === "'") q = ''; continue; }
+    if (c === '\\') { i++; continue; }
+    if (q === '"') { if (c === '"') q = ''; continue; }
+    if (c === '"' || c === "'") q = c;
+  }
+  return q;
+}
+export function interpolateRunScript(text, ctx, env, shell) {
+  if (typeof text !== 'string' || !text.includes('${{')) return text;
+  const posix = !shell || /^\s*(bash|sh)(\s|$)/.test(String(shell));
+  let n = 0;
+  return text.replace(/\$\{\{([\s\S]*?)\}\}/g, (m, e, off, whole) => {
+    const v = str(evalExpr(e, ctx));
+    const tainted = /(^|[^A-Za-z0-9_.])(github|env)\s*(\.|\[)/.test(e);
+    if (!tainted && INERT.test(v)) return v;
+    if (!posix) throw new Unsupported('expression with a non-inert value in a non-POSIX shell script');
+    const name = `FORGE_CI_EXPR_${++n}`; env[name] = v;
+    const q = quoteState(whole.slice(0, off));
+    return q === '"' ? `\${${name}}` : q === "'" ? `'"\${${name}}"'` : `"\${${name}}"`;
+  });
+}
 
 function versionNote(action, step, ctx) {
   const spec = SETUP[action]; if (!spec) return '';
@@ -291,7 +325,7 @@ function buildJob(file, wfName, key, jid, name, job, doc, chosen, needs, wfEnv, 
       return { defer: `unknown action ${st.uses}` };
     }
     if (typeof st.run === 'string') {
-      const script = String(interpolate(st.run, ctx));
+      const script = interpolateRunScript(st.run, { ...ctx, env: { ...ctx.env, ...senv } }, senv, st.shell || defaults.shell);
       const cwd = st['working-directory'] || defaults['working-directory'] || '.';
       const shell = st.shell || defaults.shell;
       if (!shellArgv(shell)) return { defer: `shell ${shell} is not available locally` };
@@ -309,7 +343,7 @@ function buildJob(file, wfName, key, jid, name, job, doc, chosen, needs, wfEnv, 
   if (job.services) services = parseServices(job.services, ctx);
   warnings.push(...toolWarn.map((w) => `${jid}: ${w}`));
   const timeout_s = job['timeout-minutes'] ? Number(job['timeout-minutes']) * 60 : undefined;
-  const j = { id: jid, source: 'github-actions', name, workflow: file, cwd: '.', env, services, steps, needs: needs.map((n) => jobId('gha', wfName, n)), timeout_s, matrix: chosen.tag || undefined, deferred_reason: null, warnings: toolWarn, resolves_outputs: Object.keys(outputs).length > 0 && !steps.length };
+  const j = { id: jid, source: 'github-actions', name, workflow: file, cwd: '.', env, services, steps, needs: needs.map((n) => jobId('gha', wfName, n)), timeout_s, matrix: chosen.tag || undefined, deferred_reason: null, warnings: toolWarn, version_drift: toolWarn.length ? toolWarn : undefined, resolves_outputs: Object.keys(outputs).length > 0 && !steps.length };
   if (!steps.length) { j.not_applicable = Object.keys(outputs).length ? 'resolved locally (path-filter outputs only)' : 'no runnable steps'; }
   return { job: j, outputs };
 }

@@ -166,6 +166,20 @@ function stemsOf(f) {
     s.push(noExt);
     const bare = px.basename(noExt);
     if (bare.length >= 4) s.push(bare);
+    // forge#4040: short module names (db, io, __init__) cannot be grepped bare without drowning the repo, so reference them
+    // by their qualified forms: dotted python module paths and `from pkg import mod` / relative-import spellings.
+    if (e === 'py' || e === 'pyi') {
+      const isInit = bare === '__init__';
+      const modPath = isInit ? px.dirname(noExt) : noExt;
+      if (modPath && modPath !== '.') {
+        const dotted = modPath.split('/').join('.');
+        s.push(dotted);
+        const parts = dotted.split('.'); const leaf = parts.pop();
+        if (parts.length) s.push(`from ${parts.join('.')} import ${leaf}`);
+        s.push(`from . import ${leaf}`, `from .${leaf} import`);
+        if (isInit || bare.length < 4) s.push(modPath);
+      }
+    }
   }
   const m = FIXTURE_DIR.exec(f);
   if (m) { const idx = m.index + (m[1] ? m[1].length : 0); const after = f.slice(idx).split('/'); s.push(after.slice(0, 2).join('/')); if (m.index > 0) s.push(f.slice(0, idx) + after.slice(0, 2).join('/')); }
@@ -210,6 +224,24 @@ function reach(sctx) {
   return out;
 }
 
+// Files reachable from ONE changed file through the reference graph (same walk as reach(), cached per file).
+function reachFile(sctx, f) {
+  sctx.cache.reachFile = sctx.cache.reachFile || new Map();
+  if (sctx.cache.reachFile.has(f)) return sctx.cache.reachFile.get(f);
+  const out = { files: new Set([f]), widen: '' };
+  sctx.cache.reachFile.set(f, out);
+  let frontier = [f]; const seen = new Set(frontier);
+  for (let depth = 0; depth < 3 && frontier.length; depth++) {
+    const hits = grepFiles(sctx, dedupe(frontier.flatMap(stemsOf)));
+    if (hits === null) { out.widen = 'git-grep-failed'; return out; }
+    if (hits.size > 600) { out.widen = `fan-out-cap: ${hits.size} files reference ${f}`; return out; }
+    const next = [];
+    for (const h of hits) { out.files.add(h); if (!isTestFile(h) && !DOC_EXT.has(extOf(h)) && !seen.has(h)) { seen.add(h); next.push(h); } }
+    frontier = next;
+  }
+  return out;
+}
+
 // Which of testFiles can this change reach? { selected, total, widen } ; widen is a reason string or ''.
 export function impactedTests(sctx, testFiles) {
   const r = reach(sctx);
@@ -217,6 +249,18 @@ export function impactedTests(sctx, testFiles) {
   const selected = new Set();
   for (const t of testFiles) if (r.files.has(t) && sctx.present.has(t)) selected.add(t);
   for (const f of sctx.changed) if (!isTestFile(f)) for (const t of siblingTests(f, testFiles)) selected.add(t);
+  // forge#4040 (SEC-3, per file): every changed non-test source file must itself reach at least one test (reverse-reference
+  // graph or conventional sibling). One that reaches none widens the whole job: another changed file selecting tests must
+  // never hide it. The reason names the file.
+  const srcFiles = sctx.changed.filter((f) => !isTestFile(f) && (CODE_EXT.has(extOf(f)) || /^(sh|bash)$/.test(extOf(f))));
+  const unreached = [];
+  for (const f of srcFiles) {
+    const rf = reachFile(sctx, f);
+    if (rf.widen) return { selected: [...testFiles], total: testFiles.length, widen: rf.widen };
+    const hit = testFiles.some((t) => rf.files.has(t) && sctx.present.has(t)) || siblingTests(f, testFiles).length > 0;
+    if (!hit) unreached.push(f);
+  }
+  if (unreached.length) return { selected: [...testFiles], total: testFiles.length, widen: `empty-selection: no test reaches ${unreached.slice(0, 5).join(', ')}${unreached.length > 5 ? ` (+${unreached.length - 5} more)` : ''}` };
   return { selected: [...selected].sort(), total: testFiles.length, widen: '' };
 }
 
