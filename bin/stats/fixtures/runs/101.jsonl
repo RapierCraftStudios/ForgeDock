@@ -1,0 +1,6 @@
+{"seq": 1, "ts": "2026-10-01T10:00:00.000Z", "event": "RUN_START", "issue": 101, "run": "r_101", "version": "1.16.0", "repo": "o/r"}
+{"seq": 2, "ts": "2026-10-01T10:00:01.000Z", "event": "PHASE_ATTEMPT_USAGE", "phase": "build", "attempt": 1, "usage": {"input_tokens": 10, "output_tokens": 2000, "cache_creation_input_tokens": 5, "cache_read_input_tokens": 3000000}, "duration_ms": 600000, "cost_usd": 1.5, "model": "sonnet", "turns": 20}
+{"seq": 3, "ts": "2026-10-01T10:10:00.000Z", "event": "PHASE_COMMIT", "phase": "build", "usage": {"input_tokens": 10, "output_tokens": 2000, "cache_creation_input_tokens": 5, "cache_read_input_tokens": 3000000}}
+{"seq": 4, "ts": "2026-10-01T10:11:00.000Z", "event": "PHASE_ATTEMPT_USAGE", "phase": "review", "attempt": 1, "usage": {"input_tokens": 10, "output_tokens": 500, "cache_creation_input_tokens": 5, "cache_read_input_tokens": 1000000}, "duration_ms": 300000, "cost_usd": 0.5, "model": "sonnet", "turns": 8}
+{"seq": 5, "ts": "2026-10-01T10:16:00.000Z", "event": "PHASE_COMMIT", "phase": "remediate"}
+{"seq": 6, "ts": "2026-10-01T10:20:00.000Z", "event": "RUN_TERMINAL", "reason": "merged", "code": "completed"}

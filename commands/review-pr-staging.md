@@ -1606,6 +1606,13 @@ COST_SCRIPT=$(forge_resolve cost-report.sh)
 [ -n "$COST_SCRIPT" ] && bash "$COST_SCRIPT" --last 3 2>/dev/null || echo "Pipeline cost: unavailable"
 ```
 
+**Pipeline stats** (fail-soft, informational; never changes the verdict or any `FORGE:GATE_*` marker; additive to the cost table above) <!-- Added: forge#3835 -->: embed the compact `forgedock stats` table (per version: cost, merged / needs-human / remediation rates, wall time, findings per review, acceptance block rate, delta vs the previous version). A missing CLI, no `gh` auth or no data omits the table.
+
+```bash
+STATS_OUT=$(forgedock stats --compact --repo "${GH_REPO}" 2>/dev/null || npx --no-install forgedock stats --compact --repo "${GH_REPO}" 2>/dev/null) || STATS_OUT=""
+[ -n "$STATS_OUT" ] && printf '%s\n' "$STATS_OUT" || echo "Pipeline stats: unavailable"
+```
+
 **CRITICAL**: This review NEVER merges staging → main. User makes deploy decision via GitHub web UI.
 
 ---

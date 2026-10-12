@@ -1,0 +1,2 @@
+{"seq": 1, "event": "RUN_START", "issue": 104, "hydrated": true, "version": "1.17.0", "repo": "o/r"}
+{"seq": 2, "event": "RUN_TERMINAL", "reason": "merged"}

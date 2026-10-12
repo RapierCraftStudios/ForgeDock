@@ -1,0 +1,78 @@
+[
+ {
+  "number": 201,
+  "labels": [
+   {
+    "name": "workflow:merged"
+   }
+  ],
+  "created_at": "2026-10-06T10:00:00Z",
+  "closed_at": "2026-10-06T13:00:00Z",
+  "updated_at": "2026-10-06T13:00:00Z",
+  "comments": 4,
+  "user": {
+   "type": "Bot"
+  }
+ },
+ {
+  "number": 301,
+  "labels": [],
+  "created_at": "2026-10-06T11:00:00Z",
+  "closed_at": null,
+  "updated_at": "2026-10-06T12:30:00Z",
+  "comments": 1,
+  "user": {
+   "type": "Bot"
+  },
+  "pull_request": {
+   "url": "x"
+  }
+ },
+ {
+  "number": 202,
+  "labels": [
+   {
+    "name": "review-finding"
+   },
+   {
+    "name": "validated"
+   }
+  ],
+  "created_at": "2026-10-06T12:10:00Z",
+  "closed_at": null,
+  "updated_at": "2026-10-06T12:10:00Z",
+  "comments": 0,
+  "user": {
+   "type": "Bot"
+  }
+ },
+ {
+  "number": 203,
+  "labels": [
+   {
+    "name": "review-finding"
+   },
+   {
+    "name": "false-positive"
+   }
+  ],
+  "created_at": "2026-10-06T12:11:00Z",
+  "closed_at": "2026-10-06T12:50:00Z",
+  "updated_at": "2026-10-06T12:50:00Z",
+  "comments": 0,
+  "user": {
+   "type": "Bot"
+  }
+ },
+ {
+  "number": 204,
+  "labels": [],
+  "created_at": "2026-10-06T12:20:00Z",
+  "closed_at": null,
+  "updated_at": "2026-10-06T12:20:00Z",
+  "comments": 0,
+  "user": {
+   "type": "User"
+  }
+ }
+]

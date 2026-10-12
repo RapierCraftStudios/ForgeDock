@@ -13,6 +13,7 @@ import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost } from "./engine.mjs"
 import { makeProjector } from "./engine/projector.mjs";
 import { readLog, deriveState } from "./engine/runlog.mjs";
 import { assertOpenCodeNativeRuntime } from "./runner.mjs";
+import { makeEmitTelemetry } from "./engine/telemetry-seam.mjs";
 
 /**
  * Workflow labels that mark an issue as "in the pipeline" (not yet terminal).
@@ -401,6 +402,8 @@ export async function runFromCli(argv, deps = {}) {
     ...(repo ? { repo } : {}),
     runner: (await import("./runner.mjs")).runCommand, now: () => Date.now(),
     onProgress,
+    // forge#3835: phase_attempt / run_terminal records reach GitHub so `forgedock stats` works from any machine.
+    emitTelemetry: deps.emitTelemetry ?? makeEmitTelemetry({ repo }),
     // Only forwarded when explicitly provided — omitting them preserves
     // runIssue's/runner.mjs's existing defaults (forge#2028).
     ...(backend ? { backend } : {}),

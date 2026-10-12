@@ -948,6 +948,8 @@ export async function runIssue(opts) {
     const outcomeCode = code == null ? codeForTerminalReason(reason) : normalizeCode(code);
     appendEvent(dir, issue, { event: "RUN_TERMINAL", reason, code: outcomeCode,
       ...(outcomeCode === UNCLASSIFIED && detail ? { detail } : {}) });
+    // forge#3835: forward the terminal record to the telemetry seam (best-effort, never fails the run).
+    try { await emitTelemetry?.({ event: "RUN_TERMINAL", reason, code: outcomeCode, issue }); } catch { /* telemetry never fails a run */ }
     // The terminal write must always land; only the lease field is preserved when another live
     // agent holds it. A failed read falls back to clearing (a lost terminal write would strand the issue).
     const foreign = await foreignLiveLease();
