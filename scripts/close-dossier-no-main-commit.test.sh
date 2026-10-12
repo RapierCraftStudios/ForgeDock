@@ -42,6 +42,10 @@ TRAP_LN=$(printf '%s\n' "$C17" | grep -nE "^\s*trap .*EXIT" | head -1 | cut -d: 
 grep -q 'force-with-lease' <<< "$C17" && ok "C1.7 pushes with --force-with-lease" || bad "C1.7 missing force-with-lease"
 grep -qE 'push .*--force( |$)' <<< "$C17" && bad "C1.7 uses bare --force" || ok "C1.7 has no bare --force"
 grep -q 'gh pr list' <<< "$C17" && ok "C1.7 checks for an existing open PR" || bad "C1.7 missing gh pr list"
+grep -q 'docs/dossier-rolling' <<< "$C17" && ok "C1.7 uses the single rolling branch" || bad "C1.7 missing docs/dossier-rolling"
+grep -qF 'docs/dossier-{NUMBER}' <<< "$C17" && bad "C1.7 still names a per-issue dossier branch" || ok "C1.7 has no per-issue dossier branch"
+grep -qE '^\s*gh pr merge' <<< "$C17" && bad "C1.7 runs a raw gh pr merge" || ok "C1.7 never runs a raw gh pr merge"
+grep -q 'review-pr' <<< "$C17" && ok "C1.7 routes the rolling PR to the review/merge gate" || bad "C1.7 missing gate hand-off"
 grep -q 'FORGE:DOSSIER_UPDATED' "$CLOSE_MD" && ok "FORGE:DOSSIER_UPDATED marker kept" || bad "FORGE:DOSSIER_UPDATED marker missing"
 
 # --- Dynamic: execute the REAL C1.7 block extracted from close.md (gh stubbed) ---
@@ -76,11 +80,12 @@ echo "gh $*" >> "$GH_LOG"
 case "$1 $2" in
   "api repos/o/r/issues/1/comments")
     printf '<!-- FORGE:BUILDER -->\n### Changes\n- `scripts/foo.sh` changed\n### Next\n' ;;
-  "pr view") echo "Test PR title" ;;
-  "pr list")
+  "pr view")
+    # First call after the temporary worktree exists (the PR lookup runs before it): fault-injection point.
     echo "pr-list worktrees: $(git -C "$REPO_PATH" worktree list | wc -l | tr -d ' ')" >> "$GH_LOG"
     [ "${GH_KILL_ON_PR_LIST:-}" = 1 ] && kill -TERM "$(cat "$PIDF")" && sleep 1
-    echo "${GH_PR_LIST_URL:-}" ;;
+    echo "Test PR title" ;;
+  "pr list") echo "${GH_PR_LIST_URL:-}" ;;
   "pr create") [ "${GH_FAIL_PR_CREATE:-}" = 1 ] && exit 1; echo "https://example.invalid/o/r/pull/9" ;;
 esac
 exit 0
@@ -106,17 +111,19 @@ no_leak() {
 run_block; RC=$?
 [ "$RC" -eq 0 ] && ok "A: real block exits 0" || bad "A: real block exit $RC"
 main_untouched && ok "A: main checkout untouched (HEAD, branch, clean tree)" || bad "A: main checkout modified"
-git -C "$TMP/origin.git" rev-parse -q --verify refs/heads/docs/dossier-1 >/dev/null && ok "A: dossier branch pushed to origin" || bad "A: dossier branch not pushed"
-grep -q '^## Entry' <<< "$(git -C "$TMP/origin.git" show refs/heads/docs/dossier-1:devdocs/modules/m.md 2>/dev/null)" && ok "A: dossier entry appended on pushed branch" || bad "A: no entry on pushed branch"
+git -C "$TMP/origin.git" rev-parse -q --verify refs/heads/docs/dossier-rolling >/dev/null && ok "A: dossier branch pushed to origin" || bad "A: dossier branch not pushed"
+grep -q '^## Entry' <<< "$(git -C "$TMP/origin.git" show refs/heads/docs/dossier-rolling:devdocs/modules/m.md 2>/dev/null)" && ok "A: dossier entry appended on pushed branch" || bad "A: no entry on pushed branch"
 grep -q '^gh pr create' "$GH_LOG" && ok "A: gh pr create called" || bad "A: gh pr create not called"
 grep -q 'FORGE:DOSSIER_UPDATED' "$GH_LOG" && ok "A: FORGE:DOSSIER_UPDATED comment posted" || bad "A: no FORGE:DOSSIER_UPDATED comment"
 no_leak && ok "A: temporary worktree removed" || bad "A: temporary worktree leaked"
+grep -q '^DOSSIER_PR_URL=https' "$TMP/out.log" && ok "A: block prints DOSSIER_PR_URL for the gate hand-off" || bad "A: no DOSSIER_PR_URL line"
+grep -q 'gh pr merge' "$GH_LOG" && bad "A: raw gh pr merge called" || ok "A: no raw gh pr merge"
 
 # Scenario B: retry over the existing remote branch (real fetch + --force-with-lease)
-OLD=$(git -C "$TMP/origin.git" rev-parse refs/heads/docs/dossier-1)
+OLD=$(git -C "$TMP/origin.git" rev-parse refs/heads/docs/dossier-rolling)
 sleep 1  # commit SHAs embed second-resolution timestamps; ensure the retry differs
 run_block; RC=$?
-NEW=$(git -C "$TMP/origin.git" rev-parse refs/heads/docs/dossier-1)
+NEW=$(git -C "$TMP/origin.git" rev-parse refs/heads/docs/dossier-rolling)
 [ "$RC" -eq 0 ] && [ "$OLD" != "$NEW" ] && ok "B: retry push over existing remote branch succeeds" || bad "B: retry push failed (rc=$RC)"
 main_untouched && no_leak && ok "B: main untouched and worktree removed" || bad "B: main modified or worktree leaked"
 
@@ -133,6 +140,23 @@ run_block GH_FAIL_PR_CREATE=1; RC=$?
 [ "$RC" -eq 0 ] && grep -q 'skipped - gh pr create failed' "$TMP/out.log" && ok "D: pr create failure logged as skip, exit 0" || bad "D: pr create failure not handled"
 grep -q 'issue comment' "$GH_LOG" && bad "D: annotation posted despite no PR" || ok "D: no annotation without a PR"
 no_leak && ok "D: worktree removed" || bad "D: worktree leaked"
+
+# Scenario E: second close (issue 2) with an OPEN rolling PR: appends on top of the first entry, no new PR
+mkblock() { printf '%s\n' "$BLOCK" | perl -pe "s/(?<!\\\$)\\{GH_REPO\\}/o\\/r/g; s/(?<!\\\$)\\{NUMBER\\}/$1/g; s/(?<!\\\$)\\{PR_NUMBER\\}/$2/g; s/(?<!\\\$)\\{GH_FLAG\\}/-R o\\/r/g" > "$TMP/block.sh"; }
+sed -i 's#"api repos/o/r/issues/1/comments")#"api repos/o/r/issues/"*"/comments")#' "$TMP/bin/gh"
+git -C "$TMP/origin.git" update-ref -d refs/heads/docs/dossier-rolling
+mkblock 1 2; run_block
+FIRST=$(git -C "$TMP/origin.git" rev-parse refs/heads/docs/dossier-rolling)
+sleep 1
+mkblock 2 3; run_block GH_PR_LIST_URL=https://example.invalid/o/r/pull/9; RC=$?
+SECOND=$(git -C "$TMP/origin.git" rev-parse refs/heads/docs/dossier-rolling)
+[ "$RC" -eq 0 ] && [ "$FIRST" != "$SECOND" ] && git -C "$TMP/origin.git" merge-base --is-ancestor "$FIRST" "$SECOND" \
+  && ok "E: second close fast-forwards on top of the rolling branch" || bad "E: second close did not build on the rolling branch (rc=$RC)"
+ENTRIES=$(git -C "$TMP/origin.git" show refs/heads/docs/dossier-rolling:devdocs/modules/m.md 2>/dev/null | grep -c '^## Entry')
+[ "$ENTRIES" -eq 2 ] && ok "E: rolling branch carries both entries" || bad "E: expected 2 entries, found $ENTRIES"
+grep -q '^gh pr create' "$GH_LOG" && bad "E: a second PR was created" || ok "E: no second PR created (rolling PR reused)"
+grep -q '^DOSSIER_PR_URL=https://example.invalid/o/r/pull/9' "$TMP/out.log" && ok "E: hand-off URL is the existing rolling PR" || bad "E: wrong hand-off URL"
+main_untouched && no_leak && ok "E: main untouched and worktree removed" || bad "E: main modified or worktree leaked"
 fi
 
 echo "Passed: $PASS  Failed: $FAIL"
