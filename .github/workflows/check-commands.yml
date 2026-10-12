@@ -24,6 +24,10 @@ on:
       - 'scripts/review-pr-domain-map.test.sh'
       - 'scripts/review-roster.sh'
       - 'scripts/review-roster.test.sh'
+      - 'scripts/review-prepare.sh'
+      - 'scripts/review-prepare.test.sh'
+      - 'scripts/lib/pr-issue-number.sh'
+      - 'scripts/lib/review-template-resolve.sh'
       - 'scripts/review-delta.sh'
       - 'scripts/review-delta.test.sh'
       - 'scripts/review-pr-delta-wiring.test.sh'
@@ -68,6 +72,10 @@ on:
       - 'scripts/review-pr-domain-map.test.sh'
       - 'scripts/review-roster.sh'
       - 'scripts/review-roster.test.sh'
+      - 'scripts/review-prepare.sh'
+      - 'scripts/review-prepare.test.sh'
+      - 'scripts/lib/pr-issue-number.sh'
+      - 'scripts/lib/review-template-resolve.sh'
       - 'scripts/review-delta.sh'
       - 'scripts/review-delta.test.sh'
       - 'scripts/review-pr-delta-wiring.test.sh'
@@ -345,6 +353,7 @@ jobs:
           bash scripts/review-pr-arguments.test.sh
           bash scripts/review-pr-domain-map.test.sh
           bash scripts/review-roster.test.sh
+          bash scripts/review-prepare.test.sh
           bash scripts/close-parent-c3.test.sh
           bash scripts/review-delta.test.sh
           bash scripts/review-pr-delta-wiring.test.sh
