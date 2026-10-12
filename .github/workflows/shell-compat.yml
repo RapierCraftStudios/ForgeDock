@@ -104,6 +104,8 @@ jobs:
           bash scripts/checkbox-sections.test.sh
           bash scripts/file-deferred-followups.test.sh
           bash scripts/resolve-deploy-gate.test.sh
+      - name: Run publish-staging-sync.test.sh
+        run: bash scripts/publish-staging-sync.test.sh
       - name: Run review-pr-gate2.test.sh
         if: runner.os != 'macOS'
         run: bash scripts/review-pr-gate2.test.sh
