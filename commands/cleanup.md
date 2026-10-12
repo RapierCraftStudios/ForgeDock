@@ -241,6 +241,7 @@ Each `/orchestrate` batch creates one claims board (`orchestrate: claims board f
 A board is closed only when **all** identity checks pass and **one** closing condition holds:
 
 - Identity: title starts with `orchestrate: claims board for batch`, body contains `<!-- FORGE:COORD_ISSUE -->`, and the author is trusted: `author_association` `OWNER`, `MEMBER` or `COLLABORATOR`, or a Bot account (the pipeline's GitHub App, reported as `CONTRIBUTOR`). A look-alike issue from an outside account is never closed.
+- Lease/claim comments count only when trusted (same `author_association` `OWNER`/`MEMBER`/`COLLABORATOR` or Bot predicate as the board, mirroring `scripts/trusted-comments.sh`) and when the marker starts the comment body; an untrusted or quoted marker is ignored, so a board falls back to its trusted events or its creation time. Unlike `/orchestrate`'s no-authorship lease check (forge#2644, a bounded self-expiring dispatch refusal), cleanup's action is a destructive issue close, so it must not trust arbitrary commenters.
 - Close when the last `FORGE:LEASE*` comment is a `FORGE:LEASE_RELEASED`.
 - Close when the last `FORGE:LEASE*`/`FORGE:CLAIM*` comment is older than `BOARD_STALE_HOURS` (default 6, far above the 15 minute lease TTL).
 - Close when there is no lease/claim comment and the issue itself is older than `BOARD_STALE_HOURS`.
@@ -272,11 +273,17 @@ while IFS=$'\t' read -r BNUM BCREATED; do
 
   # --paginate emits one array per page: slurp (jq -s) and flatten BEFORE taking `last`,
   # otherwise a board with >30 comments reads a stale event from an earlier page.
+  # Lease/claim comments are trust-filtered with the same predicate as the board (OWNER/MEMBER/
+  # COLLABORATOR or Bot; mirrors scripts/trusted-comments.sh) and the marker must LEAD the body, so an
+  # outside commenter can neither post a fake FORGE:LEASE_RELEASED nor a fake fresh FORGE:LEASE/CLAIM,
+  # and a quoted marker in prose never matches.
   LAST_LEASE=$(gh api --paginate "repos/{GH_REPO}/issues/${BNUM}/comments" 2>/dev/null \
-    | jq -s '[.[][] | select(.body | contains("FORGE:LEASE"))] | last // empty
-             | {released: (.body | contains("FORGE:LEASE_RELEASED")), at: .created_at}' 2>/dev/null || echo "")
+    | jq -s '[.[][] | select((((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR")) or ((.user.type // "") == "Bot")))
+                     | select((.body // "") | test("\\A\\s*<!-- FORGE:LEASE"))] | last // empty
+             | {released: (.body | test("\\A\\s*<!-- FORGE:LEASE_RELEASED")), at: .created_at}' 2>/dev/null || echo "")
   LAST_ACTIVITY=$(gh api --paginate "repos/{GH_REPO}/issues/${BNUM}/comments" 2>/dev/null \
-    | jq -rs '[.[][] | select(.body | contains("FORGE:LEASE") or contains("FORGE:CLAIM"))] | last // empty | .created_at' 2>/dev/null || echo "")
+    | jq -rs '[.[][] | select((((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR")) or ((.user.type // "") == "Bot")))
+                      | select((.body // "") | test("\\A\\s*<!-- FORGE:(LEASE|CLAIM)"))] | last // empty | .created_at' 2>/dev/null || echo "")
 
   REASON=""
   if [ -n "$LAST_LEASE" ] && [ "$(echo "$LAST_LEASE" | jq -r '.released')" = "true" ]; then
