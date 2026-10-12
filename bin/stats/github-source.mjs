@@ -58,8 +58,10 @@ export function parseTelemetryComments(comments, env = process.env) {
 const num = (x) => { const v = Number(x); return x != null && x !== "" && Number.isFinite(v) ? v : null; };
 
 /**
- * Turn `phase_attempt` / `run_terminal` records into run summaries (one per repo#issue#run, finished only when a
- * `run_terminal` exists). Field names are the ones bin/engine/telemetry-seam.mjs writes (docs/TELEMETRY.md).
+ * Turn `phase_attempt` / `run_terminal` records into run summaries, finished only when a `run_terminal` exists.
+ * The run id is per engine process, so a `--retry` yields several; they collapse to ONE run per repo#issue, the latest
+ * by start timestamp (tie: greater run id), matching scripts/cost-report.sh (last RUN_START slice). Finished/usage
+ * filtering stays downstream, so an unfinished latest run still excludes the issue. Field names are the ones bin/engine/telemetry-seam.mjs writes (docs/TELEMETRY.md).
  */
 export function runsFromRecords(records) {
   const byRun = new Map();
@@ -86,7 +88,14 @@ export function runsFromRecords(records) {
     if (num(r.cost_usd) != null) p.usd = (p.usd ?? 0) + num(r.cost_usd);
     if (id === "remediate") run.remediated = true;
   }
-  return [...byRun.values()].map(({ _first, ...run }) => ({ ...run, startTs: _first }));
+  const latest = new Map();
+  for (const run of byRun.values()) {
+    const k = `${run.repo}#${run.issue}`;
+    const cur = latest.get(k);
+    const a = run._first ?? "", b = cur?._first ?? "";
+    if (!cur || a > b || (a === b && (run.run ?? "") > (cur.run ?? ""))) latest.set(k, run);
+  }
+  return [...latest.values()].map(({ _first, ...run }) => ({ ...run, startTs: _first }));
 }
 
 /** Gate/review records (everything that is not a run record) become aggregate events. */

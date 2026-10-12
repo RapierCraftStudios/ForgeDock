@@ -42,7 +42,7 @@ is dropped. Payload keys are `[A-Za-z0-9_]+` and cannot shadow the shared keys; 
 
 The engine records carry `run` = `r_<issue>_<start epoch seconds>` (one per `forgedock run-issue` process) so `forgedock stats`
 (`docs/STATS.md`) can group the attempts of a run and tell a finished run from an unfinished one. They are the GitHub-side
-source for Cost, Time and outcome codes: without them a fresh machine can rebuild only the gate and review sections.
+source for Cost, Time and outcome codes (`run` is per process, but stats count one run per issue, last wins): without them a fresh machine can rebuild only the gate and review sections.
 
 The classifier and the scripts emit only when a destination is known: callers export `FORGE_ISSUE` and/or `FORGE_PR`
 (`review-pr.md` exports them before classifying; the other scripts default `FORGE_REPO`/`FORGE_ISSUE`/`FORGE_PR` from

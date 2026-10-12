@@ -93,6 +93,27 @@ describe("GitHub-only report (fresh machine)", () => {
     assert.equal(runs[0].finished, true);
     assert.equal(runs[0].phases.review.cr, 500000);
   });
+  const rec = (run, ts, event, x = {}) => ({ event, repo: "o/r", issue: 500, run, ts, eid: run + ts + event, ...x });
+  it("collapses a retried issue (two run ids) to the latest run", () => {
+    const runs = runsFromRecords([
+      rec("r_500_1", "2026-01-01T00:00:00Z", "phase_attempt", { phase: "build", cache_read_tokens: 2000000 }),
+      rec("r_500_1", "2026-01-01T00:01:00Z", "run_terminal", { reason: "engine-error" }),
+      rec("r_500_2", "2026-01-02T00:00:00Z", "phase_attempt", { phase: "build", cache_read_tokens: 1000000 }),
+      rec("r_500_2", "2026-01-02T00:01:00Z", "run_terminal", { reason: "merged" }),
+    ]);
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].reason, "merged");
+    assert.equal(runs[0].phases.build.cr, 1000000);
+  });
+  it("lets an unfinished latest run win over an earlier finished retried run", () => {
+    const runs = runsFromRecords([
+      rec("r_500_1", "2026-01-01T00:00:00Z", "phase_attempt", { phase: "build", cache_read_tokens: 2000000 }),
+      rec("r_500_1", "2026-01-01T00:01:00Z", "run_terminal", { reason: "merged" }),
+      rec("r_500_2", "2026-01-02T00:00:00Z", "phase_attempt", { phase: "build", cache_read_tokens: 1000000 }),
+    ]);
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].finished, false);
+  });
 });
 
 describe("local runs, joins, version delta and low-n", () => {
