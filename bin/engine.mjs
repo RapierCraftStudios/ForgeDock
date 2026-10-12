@@ -1044,7 +1044,7 @@ export async function runIssue(opts) {
 export function cleanupRunTmpdir(issue, { cwd = process.cwd(), env = process.env, rm = rmSync } = {}) {
   try {
     const root = resolveRunTmpRoot(cwd, env);
-    const dir = runTmpDir(root, issue);
+    const dir = runTmpDir(root, issue, cwd);
     if (!dir || dir === root) return false;
     rm(dir, { recursive: true, force: true });
     return true;

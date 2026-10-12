@@ -47,8 +47,11 @@ import {
   mkdtempSync,
   rmSync,
   realpathSync,
+  lstatSync,
+  chmodSync,
 } from "fs";
-import { join, dirname, basename, relative, isAbsolute, extname, win32 as win32Path } from "path";
+import { createHash } from "crypto";
+import { join, dirname, basename, resolve, relative, isAbsolute, extname, win32 as win32Path } from "path";
 import os from "os";
 import { execSync, spawnSync } from "child_process";
 import { createRequire } from "module";
@@ -104,22 +107,47 @@ export function resolveRunTmpRoot(cwd, env = process.env) {
   return join(os.homedir(), ".forge", "tmp");
 }
 
-/** `<root>/<issue>` for a numeric issue; null for an empty root or non-numeric issue (no path-escape, never the root). */
-export function runTmpDir(root, issue) {
+/**
+ * Stable, path-safe identity of the repo checkout: `<sanitized basename>-<8 hex of sha1(realpath)>`.
+ * Local only (no network), identical across a `--retry` from the same checkout, distinct per checkout.
+ * Never empty, never `.`/`..`, never contains a path separator.
+ */
+export function repoKey(cwd = process.cwd()) {
+  let real;
+  try { real = realpathSync(cwd); } catch { real = resolve(String(cwd)); }
+  const name = basename(real).replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "") || "repo";
+  return `${name}-${createHash("sha1").update(real).digest("hex").slice(0, 8)}`;
+}
+
+/** `<root>/<repoKey>/<issue>` for a numeric issue; null for an empty root or non-numeric issue (no path-escape, never the root). */
+export function runTmpDir(root, issue, cwd = process.cwd()) {
   const id = String(issue ?? "").trim();
-  return root && /^[0-9]+$/.test(id) ? join(root, id) : null;
+  return root && /^[0-9]+$/.test(id) ? join(root, repoKey(cwd), id) : null;
+}
+
+/** True when `p` is a real directory (not a symlink) owned by the current uid (uid check skipped where unavailable). */
+function isOwnedRealDir(p) {
+  const st = lstatSync(p);
+  if (!st.isDirectory() || st.isSymbolicLink()) return false;
+  return typeof process.getuid !== "function" || st.uid === process.getuid();
 }
 
 /**
  * Point TMPDIR and CLAUDE_CODE_TMPDIR at a per-run, disk-backed dir so venvs and Claude session data
- * stay off a size-limited /tmp. No-op when the issue is unknown or the operator owns the tmp root.
- * Best-effort: a failed mkdir leaves the env unchanged.
+ * stay off a size-limited /tmp. The dir is repo-scoped and created 0700; an existing dir that is a symlink
+ * or owned by another uid is not used. No-op when the issue is unknown or the operator owns the tmp root.
+ * Best-effort: any failure leaves the env unchanged.
  */
 export function withRunTmpdir(env, { issue, cwd = process.cwd() } = {}) {
-  const dir = runTmpDir(resolveRunTmpRoot(cwd, env), issue);
+  const dir = runTmpDir(resolveRunTmpRoot(cwd, env), issue, cwd);
   if (!dir) return env;
   try {
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const parent = dirname(dir);
+    for (const d of [parent, dir]) {
+      if (!isOwnedRealDir(d)) return env;
+      chmodSync(d, 0o700);
+    }
     env.TMPDIR = dir;
     env.CLAUDE_CODE_TMPDIR = dir;
   } catch { /* scratch stays on the inherited tmp */ }
