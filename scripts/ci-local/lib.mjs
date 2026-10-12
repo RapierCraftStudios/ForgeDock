@@ -321,13 +321,19 @@ export function shellQuote(s) {
 // must not reach the jobs. Toolchain variables are passed through; credential-looking names are always dropped.
 const ENV_EXACT = new Set(['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LANGUAGE', 'TERM', 'TMPDIR', 'TMP', 'TEMP', 'TZ', 'COLORTERM', 'NO_COLOR', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy', 'DOCKER_HOST', 'JAVA_HOME', 'GOPATH', 'GOROOT', 'GOFLAGS', 'GOCACHE', 'GOMODCACHE', 'GOPROXY', 'GOTOOLCHAIN', 'VIRTUAL_ENV', 'PYTHONPATH', 'PYTHONDONTWRITEBYTECODE', 'RUSTFLAGS', 'RUSTUP_HOME', 'SDKMAN_DIR', 'PNPM_HOME', 'BUN_INSTALL', 'NVM_DIR', 'NVM_BIN', 'NVM_INC', 'RBENV_ROOT', 'PYENV_ROOT', 'ASDF_DIR', 'ASDF_DATA_DIR', 'MISE_DATA_DIR', 'HOMEBREW_PREFIX', 'ComSpec', 'SystemRoot', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMFILES', 'MSYSTEM']);
 const ENV_PREFIX = ['LC_', 'XDG_', 'CARGO_', 'MAVEN_', 'M2_', 'GRADLE_', 'DOTNET_', 'npm_config_', 'NPM_CONFIG_', 'YARN_', 'UV_', 'POETRY_', 'PIP_CACHE', 'FORGE_CI_LOCAL_'];
-const SECRET_NAME = /(TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|CREDENTIAL|PRIVATE_?KEY|AUTHORIZATION|_AUTH\b)/i;
+// Substring tokens are unambiguous; short ones (PASS, PAT, KEY, IDENT, CRED, SESSION, COOKIE) match only as whole
+// name segments (or a trailing _KEY) so benign names such as FORGE_CI_LOCAL_PASSTHROUGH or PATH are kept.
+export const SECRET_NAME = /(TOKEN|SECRET|PASSWORD|PASSWD|AUTH|CREDENTIAL|PRIVATE|API_?KEY|ACCESS_?KEY|SESSION|COOKIE)|(^|[^A-Za-z0-9])(PASS|PAT|IDENT|CRED|CREDS|KEY)([^A-Za-z0-9]|$)|_KEY$/i;
+// URL-embedded credentials (scheme://user:pass@host) in proxy/index/registry variables: the userinfo is stripped, the
+// rest of the value is kept so the job still reaches the same host.
+const URL_USERINFO = /([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\/?#\s@]*@/g;
+export function stripUserinfo(v) { return typeof v === 'string' ? v.replace(URL_USERINFO, '$1') : v; }
 export function scrubbedEnv(extra = {}) {
   const pass = new Set((process.env.FORGE_CI_LOCAL_PASSTHROUGH || '').split(',').map((x) => x.trim()).filter(Boolean));
   const env = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (SECRET_NAME.test(k)) continue;
-    if (ENV_EXACT.has(k) || pass.has(k) || ENV_PREFIX.some((p) => k.startsWith(p))) env[k] = v;
+    if (ENV_EXACT.has(k) || pass.has(k) || ENV_PREFIX.some((p) => k.startsWith(p))) env[k] = stripUserinfo(v);
   }
   env.CI = 'true'; env.FORGE_CI_LOCAL = '1'; env.FORGE_TELEMETRY = 'off';
   return Object.assign(env, extra);

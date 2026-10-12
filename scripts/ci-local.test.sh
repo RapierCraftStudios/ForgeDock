@@ -467,15 +467,26 @@ jobs:
           test -z "${LEAKED_SECRET_TOKEN:-}" || { echo "credential leaked"; exit 1; }
           test -z "${FORGEDOCK_HOME:-}" || { echo "ambient install root leaked"; exit 1; }
           test -z "${GIT_INDEX_FILE:-}" || { echo "git hook variable leaked"; exit 1; }
-          test "${CUSTOM_PASS:-}" = 1 || { echo "passthrough missing"; exit 1; }
+          test "${CUSTOM_FLAG:-}" = 1 || { echo "passthrough missing"; exit 1; }
           test "$CI" = true || { echo "CI not set"; exit 1; }
           test -z "$LABELS" || { echo "labels should be empty locally"; exit 1; }
           test "$BASE" = main || { echo "base_ref not substituted"; exit 1; }
 YML
 echo s > "$r/s.txt"; commit_base "$r"; echo x >> "$r/s.txt"
-OUT=$(LEAKED_SECRET_TOKEN=x FORGEDOCK_HOME=/nonexistent GIT_INDEX_FILE=/nonexistent CUSTOM_PASS=1 FORGE_CI_LOCAL_PASSTHROUGH=CUSTOM_PASS bash "$S" run --repo "$r" --base main --base-branch main --head-branch feat 2>&1); RC=$?
+OUT=$(LEAKED_SECRET_TOKEN=x FORGEDOCK_HOME=/nonexistent GIT_INDEX_FILE=/nonexistent CUSTOM_FLAG=1 FORGE_CI_LOCAL_PASSTHROUGH=CUSTOM_FLAG bash "$S" run --repo "$r" --base main --base-branch main --head-branch feat 2>&1); RC=$?
 eq "jobs run in a clean runner-like environment (no credentials, no ambient install root, allowlisted passthrough)" 0 "$RC"
 hasnt "no leak reported" "$OUT" "leaked"
+# AUTH-1: credential-bearing names and URL userinfo never reach jobs (checked on scrubbedEnv directly)
+_senv() { env "$@" node -e "import('$ROOT/scripts/ci-local/lib.mjs').then(m=>{const e=m.scrubbedEnv();console.log(['YARN_NPM_AUTH_IDENT','NPM_TOKEN','NODE_AUTH_TOKEN','GH_TOKEN','DEPLOY_PASS','MY_PAT','AWS_ACCESS_KEY','SESSION_COOKIE','HTTPS_PROXY','UV_INDEX_URL','NO_PROXY','LANG','PATH','BENIGN_FLAG','FORGE_CI_LOCAL_PASSTHROUGH'].map(k=>k+'='+(k in e?e[k]:'<unset>')).join('\\n'))})"; }
+SE=$(_senv YARN_NPM_AUTH_IDENT=u:p NPM_TOKEN=t NODE_AUTH_TOKEN=t GH_TOKEN=t DEPLOY_PASS=p MY_PAT=p AWS_ACCESS_KEY=k SESSION_COOKIE=c HTTPS_PROXY=http://u:p@h:3128 UV_INDEX_URL=https://bot:hunter2@pypi.example/simple NO_PROXY=localhost LANG=C.UTF-8 BENIGN_FLAG=1 FORGE_CI_LOCAL_PASSTHROUGH=BENIGN_FLAG)
+for _n in YARN_NPM_AUTH_IDENT NPM_TOKEN NODE_AUTH_TOKEN GH_TOKEN DEPLOY_PASS MY_PAT AWS_ACCESS_KEY SESSION_COOKIE; do has "env: $_n dropped" "$SE" "$_n=<unset>"; done
+has "env: proxy userinfo stripped, host kept" "$SE" "HTTPS_PROXY=http://h:3128"
+has "env: index-url userinfo stripped" "$SE" "UV_INDEX_URL=https://pypi.example/simple"
+hasnt "env: no password text survives" "$SE" "hunter2"
+has "env: NO_PROXY kept" "$SE" "NO_PROXY=localhost"
+has "env: LANG kept" "$SE" "LANG=C.UTF-8"
+has "env: PATH kept" "$SE" "PATH=/"
+has "env: benign passthrough var kept" "$SE" "BENIGN_FLAG=1"
 # native selectors: another language's source does not widen, a data file does
 r=$(blank); mkdir -p "$r/lib" "$r/src"
 printf '{ "name": "js", "version": "1.0.0", "scripts": { "test": "jest" } }\n' > "$r/package.json"
