@@ -60,7 +60,7 @@ const REVIEW_NEXT = "REVIEW_RESULT:\n  status: NEXT\n  next: remediate\n  remedi
 const COVERAGE = {
   "review.changes_requested": "review.detectOutcome", "review.escalated": "review.detectOutcome",
   "review.rereview_skipped": "reserved", "build.acceptance_failed": "build.detectOutcome",
-  "build.acceptance_malformed": "reserved", "build.size_over_gate": "build.detectOutcome",
+  "build.acceptance_malformed": "reserved", "build.size_over_gate": "reserved",
   "build.cohesive": "reserved", "remediate.no_marker": "remediate.detectOutcome",
   "remediate.deferred_live_run": "remediate.detectOutcome", "remediate.re_escalated": "remediate.detectOutcome",
   "remediate.unfixable": "remediate.detectOutcome", "ci.red": "reserved", "ci.timeout": "reserved",
@@ -127,10 +127,10 @@ describe("detectOutcome carries codes from structured evidence", () => {
     assert.equal(o.status, "failed");
     assert.equal(o.code, "build.acceptance_failed");
   });
-  it("build: OVER + Split Proposal -> build.size_over_gate", async () => {
+  it("build: OVER + Split Proposal never routes to decompose (forge#3862)", async () => {
     const o = await phase("build").detectOutcome({ ...base, committed: ["investigate"] }, ioWith("<!-- FORGE:INVESTIGATOR -->", gate("OVER")));
-    assert.equal(o.terminalReason, "decomposed");
-    assert.equal(o.code, "build.size_over_gate");
+    assert.notEqual(o.terminalReason, "decomposed");
+    assert.notEqual(o.code, "build.size_over_gate");
   });
   it("remediate: no marker, deferral, RE-ESCALATED, UNFIXABLE", async () => {
     const r = phase("remediate");

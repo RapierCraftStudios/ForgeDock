@@ -11,6 +11,7 @@
 #          [--source-severity SEV] [--source-domain DOMAIN] [--contract-flags "HIGH_RISK CONTRACT_AUTH ..."]
 #          [--churn true|false] [--danger-zone true|false] [--thorough true|false] [--milestone true|false]
 #          [--scraping-configured true|false] [--database-container true|false] [--spec-cli true|false]
+#          [--review-depth STANDARD|EXTENDED]
 # Output (stdout): SELECTED_AGENTS=<canonical marker domains, space separated>  TIER=<tier>  REASON=<text>
 # Exit: 0 always for a parseable call; 2 on an unknown flag (callers fall back to the full union, never a narrower roster).
 #
@@ -20,6 +21,10 @@
 #   small     <= 60 changed lines, or one file of <= 150 lines: Security only.
 #   medium    61-150 lines: Security plus the score-escalation table (no top-2 baseline).
 #   standard  > 150 lines, or an unknown size (fail toward more agents): top-2 domains by score plus the table.
+# --review-depth EXTENDED (forge#3862: the build's FORGE:DIFF_SIZE review_weight or out-of-plan scope flagged extended
+# review) only ever ADDS reviewers: a small, medium or fix-pr roster is lifted to standard and the standard baseline takes
+# the top-3 domains instead of top-2. It never narrows a roster and never touches the Security floor. Anything but the
+# exact value EXTENDED is STANDARD. An extended roster prints an extra DEPTH=extended line.
 # Path triggers escalate in EVERY tier except full (which already runs the union): CONTRACT HIGH_RISK, cross-critical
 # pairs, churn hot-spot, danger zone, bin/engine* (Concurrency + spec-cli), bin/ (spec-cli), auth/session/trust-filter
 # files (Auth), CI/docker/deploy/infra files (Infra), migration/.sql files (Database), SDK/OpenAPI files (API).
@@ -30,7 +35,7 @@ set -u
 
 S_AUTH=0; S_BILLING=0; S_CONCURRENCY=0; S_DATABASE=0; S_INFRA=0; S_SCRAPING=0; S_FRONTEND=0; S_API=0
 LINES=""; NFILES=""; FILES_FILE=""; FIX_PR=false; SRC_SEV=""; SRC_DOM=""; CFLAGS=""
-CHURN=false; DANGER=false; THOROUGH=false; MILESTONE=false; SCRAPING_ON=false; DB_CONTAINER=false; SPEC_CLI=false
+DEPTH=STANDARD; CHURN=false; DANGER=false; THOROUGH=false; MILESTONE=false; SCRAPING_ON=false; DB_CONTAINER=false; SPEC_CLI=false
 
 num() { case "${1:-}" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$1" ;; esac; }
 agent_domain() { local l; l=$(printf '%s' "${1}" | tr '[:upper:]' '[:lower:]'); case "$l" in infrastructure) l=infra ;; scraping) l=scraper ;; web) l=frontend ;; esac; printf '%s' "$l"; }
@@ -67,6 +72,7 @@ while [ $# -gt 0 ]; do
         --scraping-configured) SCRAPING_ON="${2:-false}"; shift 2 ;;
         --database-container) DB_CONTAINER="${2:-false}"; shift 2 ;;
         --spec-cli) SPEC_CLI="${2:-false}"; shift 2 ;;
+        --review-depth) [ "${2:-}" = "EXTENDED" ] && DEPTH=EXTENDED; shift 2 ;;
         *) echo "review-roster: unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -121,6 +127,12 @@ fi
 # CONTRACT HIGH_RISK is never narrowed: a small, medium or fix-PR roster is lifted to the standard roster.
 BASE_TIER="$TIER"
 if [ "$HIGH_RISK" = "true" ] && [ "$TIER" != "standard" ]; then TIER=standard; REASON="$REASON; CONTRACT HIGH_RISK lifts $BASE_TIER to standard"; fi
+# Extended review depth (forge#3862) is only ever additive: lift to standard, widen the standard baseline to top-3.
+TOP_N=2
+if [ "$DEPTH" = "EXTENDED" ]; then
+    TOP_N=3
+    if [ "$TIER" != "standard" ]; then REASON="$REASON; extended review depth lifts $TIER to standard"; TIER=standard; else REASON="$REASON; extended review depth"; fi
+fi
 
 TRIG=""
 trig() { case " $TRIG " in *" $1 "*) ;; *) TRIG="$TRIG $1" ;; esac; }
@@ -133,7 +145,7 @@ case "$TIER" in
                 if [ -n "$SRC_DOM" ]; then add_agent "$SRC_DOM"; else for d in $(top_domains 1); do add_agent "$d"; done; fi
                 REASON="$REASON; source finding ${SRC_SEV} adds its domain" ;;
         esac ;;
-    standard) for d in $(top_domains 2); do add_agent "$d"; done ;;
+    standard) for d in $(top_domains "$TOP_N"); do add_agent "$d"; done ;;
 esac
 
 # Score escalation table (medium and standard only; diff-text signals, so never in the small or fix-pr tiers)
@@ -170,3 +182,5 @@ fi
 
 [ -n "$TRIG" ] && REASON="$REASON; triggers:$TRIG"
 printf 'SELECTED_AGENTS=%s\nTIER=%s\nREASON=%s\n' "${SELECTED_AGENTS# }" "$TIER" "$REASON"
+[ "$DEPTH" = "EXTENDED" ] && printf 'DEPTH=extended\n'
+exit 0

@@ -68,7 +68,7 @@ printf 'project:\n  name: Demo\nverification:\n  commands:\n    typescript:\n   
 # setup <head> <base> <files> <diff> [sha]
 setup() {
     rm -f "${FIX:?}"/*; printf 'MERGEABLE|CLEAN\n' > "$FIX/merge.seq"; : > "$FIX/body.txt"
-    printf '{"number":7,"title":"t","author":{"login":"dev"},"baseRefName":"%s","headRefName":"%s","headRefOid":"%s","additions":5,"deletions":2,"changedFiles":1}\n' "$2" "$1" "${5:-$SHA_B}" > "$FIX/prinfo.json"
+    printf '{"number":7,"title":"t","author":{"login":"dev"},"baseRefName":"%s","headRefName":"%s","headRefOid":"%s","isCrossRepository":%s,"additions":5,"deletions":2,"changedFiles":1}\n' "$2" "$1" "${5:-$SHA_B}" "${CROSS_REPO:-false}" > "$FIX/prinfo.json"
     printf '%s\n' "$3" > "$FIX/files"; printf '%s\n' "$4" > "$FIX/diff"
 }
 CTX=""; RC=0
@@ -257,6 +257,11 @@ prep "$ROOT"; rc_is "gh pr diff failure" 3; eq "blocked on gh failure" .status B
 setup pr-branch main "README.md" "$DIFF_PLAIN"; : > "$FIX/difffail"
 prep "$ROOT" --no-delta; rc_is "--no-delta falls back to git when the API diff fails" 0; eq "fallback status" .status OK
 eq "fallback file list comes from git" '.full_files | index("services/api/auth.py") != null' true; eq "--no-delta mode is FULL" .delta.mode FULL
+# forge#3935: the fallback is pinned to the review SHA and refuses fork PRs
+setup pr-branch main "README.md" "$DIFF_PLAIN" "0000000000000000000000000000000000000000"; : > "$FIX/difffail"
+prep "$ROOT" --no-delta; rc_is "--no-delta fallback refuses a branch tip that is not the review SHA" 3
+CROSS_REPO=true setup pr-branch main "README.md" "$DIFF_PLAIN"; : > "$FIX/difffail"
+prep "$ROOT" --no-delta; rc_is "--no-delta fallback refuses a cross-repository PR" 3
 setup feat/x staging "README.md" "$DIFF_PLAIN"; : > "$FIX/difffail"
 prep "$ROOT" --no-delta; rc_is "--no-delta with unfetchable branches still fails closed" 3; eq "unfetchable blocked" .status BLOCKED
 setup feat/x staging "README.md" "$DIFF_PLAIN"

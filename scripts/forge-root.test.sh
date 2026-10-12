@@ -426,11 +426,11 @@ grep -qE '^[[:space:]]*(TRUSTED_SCRIPT|[A-Z_]+_SCRIPT)=""$|_tc="\$\(printf' "$ST
 # no $PWD / $(pwd) tier in the helper (comments aside)
 grep -nE '\$PWD|\$\(pwd\)|\$\{PWD' "$FR" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -q . && bad "forge-resolve.sh must have no PWD tier" || ok
 
-# Guard (#3779): remediate.md carries the same byte-identical locator stub (7 fences: 5 gate sites, trusted-comments, CI gate) and none of the old inlined resolvers.
+# Guard (#3779): remediate.md carries the same byte-identical locator stub (9 fences: M4 ancestry, merged-first transition-label (the merge-branch one reuses the CI-gate fence locator), 5 gate sites, trusted-comments, CI gate) and none of the old inlined resolvers.
 REM_SPEC="$ROOT/commands/work-on/remediate.md"
 sed 's/^[[:space:]]*//' "$REM_SPEC" | grep '^type forge_resolve >/dev/null' | sort | uniq -c > "$T/rem_uniq"
 [ "$(wc -l < "$T/rem_uniq" | tr -d ' ')" = 1 ] && ok || bad "remediate.md locator lines must be byte-identical"
-expect "remediate.md locator count (one per fence that resolves a script)" 7 "$(awk '{print $1}' "$T/rem_uniq")"
+expect "remediate.md locator count (one per fence that resolves a script)" 9 "$(awk '{print $1}' "$T/rem_uniq")"
 [ "$(sed 's/^[[:space:]]*//' "$REM_SPEC" | grep '^type forge_resolve >/dev/null' | sed 1q)" = "$(cat "$T/locator.sh")" ] && ok || bad "remediate.md locator differs from the pinned review-pr-staging.md locator"
 expect "remediate.md inlined FORGE_ROOT bootstrap copies" 0 "$(grep -c '# FORGE_ROOT bootstrap' "$REM_SPEC" || true)"
 grep -qE '^[[:space:]]*(TRUSTED_SCRIPT|[A-Z_]+_SCRIPT)=""|_tc="\$\(printf|^[[:space:]]*GATE_SCRIPT=""' "$REM_SPEC" && bad "remediate.md still carries an inlined resolver block" || ok

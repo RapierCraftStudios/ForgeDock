@@ -342,15 +342,15 @@ If still failing after 3 iterations: post a comment, re-affirm `needs-human`, EX
 **Pre-push ancestry guard** (same guard as `work-on/review.md` Phase R1; reuse it, do not write a parallel check): a base-sync merge of `origin/{PR_BASE}` passes it, a merge that brings in history from outside the base fails it.
 
 ```bash
-# <Script resolution block from work-on/review.md, verbatim>
 cd {WORKTREE_PATH}
 run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
 git fetch origin {PR_BASE} >/dev/null 2>&1 || true
-RESOLUTION=$(resolve_script 'check-branch-ancestry'); TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
-if [ "$TIER" = "prose" ]; then
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+ANCESTRY_SCRIPT=$(forge_resolve check-branch-ancestry.sh)
+if [ -z "$ANCESTRY_SCRIPT" ]; then
   MERGE_COMMITS="check-branch-ancestry script not resolvable (fail closed)"; ANCESTRY_RC=2
 else
-  MERGE_COMMITS=$(bash "$SCRIPT_PATH" {HEAD_BRANCH} origin/{PR_BASE} 2>&1); ANCESTRY_RC=$?
+  MERGE_COMMITS=$(bash "$ANCESTRY_SCRIPT" {HEAD_BRANCH} origin/{PR_BASE} 2>&1); ANCESTRY_RC=$?
 fi
 if [ "$ANCESTRY_RC" -ne 0 ]; then
   run gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "## Pre-Push Ancestry Guard Failed
@@ -540,11 +540,12 @@ PR_LIVE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json state,mergedAt,headRefOid 2>/d
 if [ "$(printf '%s' "$PR_LIVE" | jq -r '.state // ""' 2>/dev/null)" = "MERGED" ] || [ -n "$(printf '%s' "$PR_LIVE" | jq -r '.mergedAt // empty' 2>/dev/null)" ]; then
   RE_GATE_OUTCOME="AUTO-LANDED"
   # Idempotent post-merge bookkeeping (same case as the merge branch below; harmless when already applied).
-  RESOLUTION=$(resolve_script 'transition-label')
-  TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+  type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+  TRANSITION_SCRIPT=$(forge_resolve transition-label.sh)
+  if [ -n "$TRANSITION_SCRIPT" ]; then TIER=universal; else TIER=prose; fi
   case "$TIER" in
-    adaptive|universal) bash "$SCRIPT_PATH" {ISSUE_NUMBER} {GH_FLAG} merged ;;
-    prose)
+    universal) bash "$TRANSITION_SCRIPT" {ISSUE_NUMBER} {GH_FLAG} merged ;;
+    prose|*)
       gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "workflow:merged" --remove-label "workflow:awaiting-merge,needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:invalid,workflow:decomposed" 2>/dev/null || true # allowlist:check-command-side-effects
       ;;
   esac
@@ -698,11 +699,11 @@ gh pr merge {PR_NUMBER} {GH_FLAG} --merge --match-head-commit "$GATED_HEAD" # al
 fi
 MERGE_STATE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json state --jq '.state')
 if [ "$MERGE_STATE" = "MERGED" ]; then
-  RESOLUTION=$(resolve_script 'transition-label')
-  TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+  TRANSITION_SCRIPT=$(forge_resolve transition-label.sh)
+  if [ -n "$TRANSITION_SCRIPT" ]; then TIER=universal; else TIER=prose; fi
   case "$TIER" in
-    adaptive|universal) bash "$SCRIPT_PATH" {ISSUE_NUMBER} {GH_FLAG} merged ;;
-    prose)
+    universal) bash "$TRANSITION_SCRIPT" {ISSUE_NUMBER} {GH_FLAG} merged ;;
+    prose|*)
       gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "workflow:merged" --remove-label "workflow:awaiting-merge,needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:invalid,workflow:decomposed" 2>/dev/null || true # allowlist:check-command-side-effects
       ;;
   esac

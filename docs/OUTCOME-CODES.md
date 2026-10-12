@@ -20,8 +20,8 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 | `review.rereview_skipped` | Re-review was skipped | reserved | No structured evidence source yet |
 | `build.acceptance_failed` | Newest acceptance gate marker is blocked | build | `FORGE:ACCEPTANCE_GATE:FAILED`/`:BLOCKED` or `FORGE:BUILD_BLOCKED` |
 | `build.acceptance_malformed` | Acceptance spec was malformed | reserved | Indistinguishable from `build.acceptance_failed` by sentinel alone |
-| `build.size_over_gate` | Size gate routed the build to decompose | build | `FORGE:DIFF_SIZE` `result: OVER` with `### Split Proposal` |
-| `build.cohesive` | Size gate judged an oversized diff cohesive | reserved | `result: COHESIVE` is a pass, so no failure to code |
+| `build.size_over_gate` | Retired (forge#3862): the old size gate routed a finished build to decompose; never emitted now, kept so historic runs still parse | reserved | A finished build is never routed to decompose |
+| `build.cohesive` | Retired (forge#3862): the old size gate judged an oversized diff cohesive | reserved | No size gate remains |
 | `remediate.no_marker` | Remediation ended without its completion marker | remediate | No trusted `FORGE:REMEDIATION:COMPLETE` |
 | `remediate.deferred_live_run` | Remediation deferred to a live earlier run | remediate, engine | Trusted `FORGE:REMEDIATION_DEFERRED` record |
 | `remediate.re_escalated` | Remediation re-escalated to a human | remediate | `**Re-gate outcome**: RE-ESCALATED` |

@@ -382,26 +382,33 @@ branches:
 
 # =============================================================================
 # BUILD (OPTIONAL)
-# Build-phase diff-size gate (forge#3450). After implement stages its changes,
-# /work-on build measures the changed lines (added + deleted) against the PR
-# base. Over the threshold, the build routes to /work-on decompose, or proceeds
-# when a justified FORGE:SIZE_OVERRIDE comment is on the issue.
-# Read via `yq '.build.diff_size.threshold // 1000'`.
-# Commands: work-on (build phase B5.5), work-on close (records diff_lines)
+# Build-phase scope check (forge#3862, replaces the forge#3450 diff-size gate).
+# After implement stages its changes, /work-on build compares the diff with the
+# architect plan (planned files + estimate), measures a deterministic
+# review_weight (whitespace-insensitive, generated/vendored code excluded, tests
+# weighted, modules counted) and records the outcome in FORGE:DIFF_SIZE. Size
+# never blocks and a finished build is never discarded or sent to decompose:
+# a high review_weight extends review (review.depth.*), and files outside the
+# plan are flagged (or, opt-in, trimmed into a batched follow-up checklist).
+# All values are config, calibrated from telemetry (forge#3834).
+# Read via `yq '.build.scope.<key> // <default>'`.
+# Commands: work-on (build phase B5.5), review-pr (Phase 3), work-on close
 # =============================================================================
 
 # build:
-#   diff_size:
-#     # Changed-line ceiling. Default: 1000. 0 disables the gate.
-#     threshold: 1000
-#     # Pre-build estimate (investigate): estimate > threshold x estimate_factor
-#     # routes to decompose before building. Default: 1.2. Skipped when threshold is 0.
-#     estimate_factor: 1.2
-#     # Non-batch issue with >= this many independent seams and an estimate over
-#     # half the threshold is decomposed into packed sub-issues (not one per seam).
-#     # Review-finding batches are exempt (only decomposed above threshold x
-#     # estimate_factor). Default: 3.
-#     batch_seam_min: 3
+#   scope:
+#     # Percent weight of test lines in review_weight. Default: 50.
+#     test_weight: 50
+#     # Path segments that identify a module for the module count. Default: 2.
+#     module_depth: 2
+#     # Whitespace-insensitive changed lines over the plan estimate, in percent,
+#     # that count as scope creep (flagged, never blocking). Default: 200.
+#     overrun_pct: 200
+#     # Move out-of-plan hunks into the batched follow-up checklist instead of
+#     # only flagging them. Default: false.
+#     trim_out_of_plan: false
+#     # Trim only when at most this many files are out of plan. Default: 3.
+#     trim_max_files: 3
 #     # ADDITIVE to the built-in defaults (lockfiles, *.min.*, *.snap, dist/,
 #     # build/, generated/, __generated__/, fixtures/, __snapshots__/, vendor/).
 #     # A glob ending in "/" matches that directory at any depth; any other glob
@@ -409,6 +416,20 @@ branches:
 #     exclude_globs:
 #       - "docs/api/*"
 #       - "*.pb.go"
+#   # DEPRECATED (one release): build.diff_size.exclude_globs is read as an alias
+#   # of build.scope.exclude_globs; a positive build.diff_size.threshold is read
+#   # as review.depth.extended_weight (it no longer blocks). estimate_factor and
+#   # batch_seam_min are ignored: decomposition rests on separability.
+#
+# review:
+#   depth:
+#     # review_weight at or above which review is EXTENDED (more reviewers and
+#     # per-file slices; never blocking). Default: 1500.
+#     extended_weight: 1500
+#     # Modules touched at or above which review is EXTENDED. Default: 6.
+#     extended_modules: 6
+#     # Changed files per slice in extended review. Default: 12.
+#     slice_files: 12
 
 # =============================================================================
 # DECOMPOSITION (OPTIONAL)

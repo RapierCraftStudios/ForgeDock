@@ -159,5 +159,27 @@ hold 3520 4977 9 false "concurrency" "concurrency" "bin/engine-cli.mjs bin/engin
 hold 3524 156 5 false "spec-cli" "spec-cli" "bin/engine.mjs bin/engine/phases.mjs bin/runner.mjs bin/tests/engine-phases.test.mjs bin/tests/engine.test.mjs"
 hold 3555 137 8 false "security" "" "bin/engine/phases.mjs bin/tests/engine-phases.test.mjs commands/work-on/build.md commands/work-on/build/implement.md commands/work-on/decompose.md commands/work-on/investigate.md packages/protocol/CHANGELOG.md packages/protocol/src/phases.js"
 
+# forge#3862: extended review depth (from the build's review_weight / scope flag) only ever adds reviewers
+SC_TOP="AUTH=0 BILLING=1 CONCURRENCY=0 DATABASE=1 INFRA=0 SECURITY=1 SCRAPING=0 FRONTEND=2 API=2"
+run "svc/a.py" --scores "$SC_TOP" --changed-lines 40 --changed-files 1
+expect_tier "no depth flag stays small" small; expect_sel "no depth flag stays security-only" "security"
+case "$out" in *DEPTH=*) bad "standard roster prints no DEPTH line" ;; *) ok ;; esac
+run "svc/a.py" --scores "$SC_TOP" --changed-lines 40 --changed-files 1 --review-depth STANDARD
+expect_tier "STANDARD depth stays small" small
+run "svc/a.py" --scores "$SC_TOP" --changed-lines 40 --changed-files 1 --review-depth extended
+expect_tier "lowercase depth is not EXTENDED" small
+run "svc/a.py" --scores "$SC_TOP" --changed-lines 40 --changed-files 1 --review-depth EXTENDED
+expect_tier "EXTENDED lifts small to standard" standard; expect_has "EXTENDED keeps security" security
+expect_has "EXTENDED small adds top domains" frontend; expect_has "EXTENDED small adds top domains" api
+case "$out" in *DEPTH=extended*) ok ;; *) bad "extended roster prints DEPTH=extended" ;; esac
+run "svc/a.py" --scores "$SC_TOP" --changed-lines 400 --changed-files 6
+expect_not "standard top-2 omits the third domain" database
+run "svc/a.py" --scores "$SC_TOP" --changed-lines 400 --changed-files 6 --review-depth EXTENDED
+expect_has "EXTENDED standard takes a third domain" database; expect_has "EXTENDED standard keeps security" security
+run "svc/a.py" --scores "$SC_TOP" --changed-lines 30 --fix-pr true --review-depth EXTENDED
+expect_tier "EXTENDED lifts fix-pr to standard" standard
+run "svc/a.py" --scores "$SC_TOP" --changed-lines 400 --thorough true --review-depth EXTENDED
+expect_tier "full stays full" full
+
 echo "review-roster: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

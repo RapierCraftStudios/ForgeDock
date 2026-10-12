@@ -10,6 +10,8 @@ to version bumps.
 
 ## [Unreleased]
 
+- Docs only: the `build` phase-marker comments describe `FORGE:DIFF_SIZE` as the scope-check record (build never routes to decompose); no field or reserved type changed.
+
 ## [1.3.0] - 2026-10-10
 
 Minor — additive phase-marker fields only (no reserved type removed).

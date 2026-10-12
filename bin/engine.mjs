@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { createHash, scryptSync } from "node:crypto";
 import { hostname as osHostname, homedir } from "node:os";
 import { appendEvent, readLog, deriveState, rewriteLog } from "./engine/runlog.mjs";
-import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postCycleMarker, nextCycleNumber } from "./engine/phases.mjs";
+import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postCycleMarker, nextCycleNumber, decompositionRevokedWithOverride } from "./engine/phases.mjs";
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { VALID_BACKENDS } from "./runner.mjs";
@@ -424,12 +424,18 @@ export async function runIssue(opts) {
   // forge#3562: `phase-complete` is also retryable, but as a NEW cycle
   // (RUN_NEXT_CYCLE clears committed) rather than a reopen of the same one.
   let reopened = false;
+  let reopenUncommit = null;
   if (retry && state?.terminal) {
-    if (state.terminalReason !== "engine-error" && state.terminalReason !== "phase-complete" &&
+    // forge#3862: a `decomposed` terminal is reopened at build only when trusted GitHub state shows the
+    // decomposition revoked AND a justified FORGE:SIZE_OVERRIDE (the AlterLab rescue shape). Anything
+    // else keeps the terminal; an unreadable comment trail fails closed.
+    if (state.terminalReason === "decomposed" && await decompositionRevokedWithOverride(issue, io)) {
+      reopenUncommit = ["build", "decompose"];
+    } else if (state.terminalReason !== "engine-error" && state.terminalReason !== "phase-complete" &&
         state.terminalReason !== "needs-human") {
       return {
         terminalReason: "not-retryable",
-        detail: `issue ${issue} ended ${state.terminalReason}; --retry only resumes an engine-error, phase-complete or needs-human run`,
+        detail: `issue ${issue} ended ${state.terminalReason}; --retry only resumes an engine-error, phase-complete or needs-human run (or a decomposed run whose FORGE:DECOMPOSED was revoked with a justified FORGE:SIZE_OVERRIDE)`,
       };
     }
     // forge#3571: a human clearing `needs-human` is the hand-back signal. Reopen
@@ -486,6 +492,7 @@ export async function runIssue(opts) {
     appendEvent(dir, issue, {
       event: state.terminalReason === "phase-complete" ? "RUN_NEXT_CYCLE" : "RUN_REOPEN",
       issue,
+      ...(reopenUncommit ? { uncommit: reopenUncommit } : {}),
     });
     state = deriveState(readLog(dir, issue));
     reopened = true;
@@ -910,8 +917,8 @@ export async function runIssue(opts) {
     // is seen), phase.id is "decompose" — not "investigate" — so this
     // exemption does not apply and the normal terminate() path below fires,
     // ending the run for real.
-    // build also hands off: the B5.5 size gate (NEEDS_DECOMPOSE) reports "decomposed".
-    const isDecomposeHandoff = (phase.id === "investigate" || phase.id === "build") && terminalReason === "decomposed";
+    // forge#3862: only investigate hands off (decomposition is a planning decision); build never reports "decomposed".
+    const isDecomposeHandoff = phase.id === "investigate" && terminalReason === "decomposed";
     // forge#3624: remediate AUTO-LANDED whose issue is not yet CLOSED+workflow:merged hands off
     // to `close` instead of ending the run (close is idempotent). Exempts BOTH terminate paths.
     const isCloseHandoff = phase.id === "remediate" && outcome.status === "committed" &&
