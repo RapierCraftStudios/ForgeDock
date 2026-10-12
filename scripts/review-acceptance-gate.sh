@@ -79,12 +79,12 @@ while IFS= read -r check_line; do
         ERR=$(eval "$TARGET" 2>&1 >/dev/null); RC=$?
         # grep exit >= 2 is a usage error, not a verdict; only a positively identified usage error (classify-grep-exit.sh) is malformed; a missing operand stays a real FAIL even with stderr suppressed.
         [ "$RC" -ge 2 ] && MALFORMED=$(bash "$GREP_CLS" "$RC" "$ERR" "$TARGET" 2>/dev/null)
-        [ "$RC" -eq 127 ] && [ -z "$MALFORMED" ] && printf '%s' "$ERR" | grep -qF 'command not found' && MALFORMED="command not found (rc 127): the target is not an executable command"
+        [ "$RC" -eq 127 ] && [ -z "$MALFORMED" ] && { FIRST=${TARGET#"${TARGET%%[![:space:]]*}"}; FIRST=${FIRST%%[[:space:]]*}; [ -n "$FIRST" ] && [ "${FIRST#*/}" = "$FIRST" ] && ! command -v -- "$FIRST" >/dev/null 2>&1 && printf '%s\n' "$ERR" | grep -qE "(^|: )$(printf '%s' "$FIRST" | sed 's/[][\.*^$(){}?+|/]/\\&/g'):"; } && MALFORMED="command not found (rc 127): the target is not an executable command"
         [ "$RC" -eq 0 ] || [ -n "$MALFORMED" ] || { RESULT="FAIL"; DETAIL="command exited non-zero: $TARGET"; }
       else
         ERRF=$(mktemp); OUTPUT=$(eval "$TARGET" 2>"$ERRF"); RC=$?; ERR=$(cat "$ERRF"); rm -f "$ERRF"; [ -z "$ERR" ] || OUTPUT="${OUTPUT}${OUTPUT:+$'\n'}${ERR}" # classify on stderr only, match on both
         [ "$RC" -ge 2 ] && MALFORMED=$(bash "$GREP_CLS" "$RC" "$ERR" "$TARGET" 2>/dev/null)
-        [ "$RC" -eq 127 ] && [ -z "$MALFORMED" ] && printf '%s' "$ERR" | grep -qF 'command not found' && MALFORMED="command not found (rc 127): the target is not an executable command"
+        [ "$RC" -eq 127 ] && [ -z "$MALFORMED" ] && { FIRST=${TARGET#"${TARGET%%[![:space:]]*}"}; FIRST=${FIRST%%[[:space:]]*}; [ -n "$FIRST" ] && [ "${FIRST#*/}" = "$FIRST" ] && ! command -v -- "$FIRST" >/dev/null 2>&1 && printf '%s\n' "$ERR" | grep -qE "(^|: )$(printf '%s' "$FIRST" | sed 's/[][\.*^$(){}?+|/]/\\&/g'):"; } && MALFORMED="command not found (rc 127): the target is not an executable command"
         if [ -n "$MALFORMED" ]; then :
         else
           printf '%s\n' "$OUTPUT" | grep -qE "$MATCHER" || printf '%s\n' "$OUTPUT" | grep -qF -- "$MATCHER" \
