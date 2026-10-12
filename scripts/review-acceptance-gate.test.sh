@@ -90,6 +90,19 @@ inv "$(chk ac-1 true)" "$(chk ac-7 "echo 'unbalanced")"; rc=$(run); eq "mixed pa
 grep -q ':PASSED:' "$TMP/out" && grep -qi 'malformed' "$TMP/out" && ok "mixed: PASSED with malformed listed" || bad "mixed: wrong output"
 inv "$(chk ac-1 false)" "$(chk ac-7 "echo 'unbalanced")"; rc=$(run); eq "mixed fail+malformed: fails closed" "$rc" 1
 
+# rc 127 downgrade only when the target's own first word is the missing command (forge#3842).
+printf '#!/bin/bash\nno-such-tool-xyzzy\n' > "$TMP/wt/inner.sh"
+inv "$(chk ac-8 'no-such-cmd-xyzzy --help')"; rc=$(run); eq "first word missing: malformed, rc 0" "$rc" 0
+grep -qi 'malformed' "$TMP/out" && ok "first word missing reported malformed" || bad "first word missing not reported"
+inv "$(chk ac-8 'bash inner.sh')"; rc=$(run); eq "script with missing inner tool is a real fail" "$rc" 1
+inv "$(chk ac-8 'true && no-such-cmd-xyzzy')"; rc=$(run); eq "missing command not first word is a real fail" "$rc" 1
+export LANG=de_DE.UTF-8 LC_MESSAGES=de_DE.UTF-8
+inv "$(chk ac-8 'no-such-cmd-xyzzy --help')"; rc=$(run); eq "non-English locale: first word missing still malformed" "$rc" 0
+grep -qi 'malformed' "$TMP/out" && ok "locale: reported malformed" || bad "locale: not reported malformed"
+unset LANG LC_MESSAGES
+inv 'ACCEPTANCE_CHECK: id=ac-9 type=command target="no-such-cmd-xyzzy" matcher="QQQ" phase=review description=d'; rc=$(run); eq "matcher branch: first word missing malformed" "$rc" 0
+inv 'ACCEPTANCE_CHECK: id=ac-9 type=command target="bash inner.sh" matcher="QQQ" phase=review description=d'; rc=$(run); eq "matcher branch: inner missing tool is a real fail" "$rc" 1
+
 # Selection parity with B6.5 (forge#3809): non-review checks are selected by the `gh pr` target only, never by a phase= text match.
 bt() { printf 'ACCEPTANCE_CHECK: id=%s type=command target="%s" matcher="exit_0" phase=%s description=%s' "$1" "$2" "$3" "$4"; }
 inv "$(bt ac-1 'gh pr view 1 && false' build d)"; rc=$(run); eq "phase=build gh pr check is evaluated (fails)" "$rc" 1
