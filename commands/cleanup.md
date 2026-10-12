@@ -8,6 +8,8 @@ install: extras
 
 # /cleanup — Full Hygiene Sweep
 
+> **Skill names**: `{FORGE_SKILL_PREFIX}` is `forgedock:` (plugin install) or empty (`install.sh`), resolved once per run by `commands/work-on.md` § Skill Name Resolution. If the skill is not found under either name, STOP and report "skill not found" — never run the phase inline.
+
 **Input**: $ARGUMENTS
 
 Scan the entire development environment for rot and fix it. This is a maintenance command — run periodically or after large orchestration batches. It covers 7 domains: stale labels, orphaned issues and dead claims boards, worktree/branch pruning, milestone hygiene, Project board sync, and the legacy dossier PR backlog.
