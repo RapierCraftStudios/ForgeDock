@@ -17,6 +17,7 @@ cat > "$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
   *"--jq .default_branch"*) [ -n "${GH_FAIL:-}" ] && exit 1; printf '%s\n' "${GH_DEFAULT_STUB:-}" ;;
+  *"contents/forge.yaml"*) [ -n "${GH_CONTENTS_404:-}" ] && { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }; exit 1 ;;
   *) exit 1 ;;
 esac
 EOF
@@ -75,9 +76,23 @@ run_in() { # dir base [env...]
 }
 expect "$(run_in "$NOREF" staging)" true "config read fail (no origin ref, API failing) fails closed"
 
+# Missing forge.yaml is a clean "no config" read, not a read failure (falls through to false).
+NOCFG="$TMP/nocfg.git"; NOCFGW="$TMP/nocfgw"
+git init -q --bare "$NOCFG"; git init -q "$NOCFGW"
+git -C "$NOCFGW" config user.email t@t; git -C "$NOCFGW" config user.name t
+echo x > "$NOCFGW/README"; git -C "$NOCFGW" add README; git -C "$NOCFGW" commit -qm init
+git -C "$NOCFGW" branch -M trunk; git -C "$NOCFGW" remote add origin "$NOCFG"
+git -C "$NOCFGW" push -q origin trunk 2>/dev/null; git -C "$NOCFGW" fetch -q origin
+expect "$(run_in "$NOCFGW" staging)" false "forge.yaml absent on default branch ref is no-config (fast lane)"
+expect "$(run_in "$NOCFGW" main)" true "main stays strict with no config"
+expect "$(run_in "$NOCFGW" trunk)" true "github default stays strict with no config"
+# API 404 (ref not fetched, file absent) is also a clean no-config read; other API failures stay closed.
+expect "$(run_in "$NOREF" staging GH_CONTENTS_404=1)" false "contents API 404 is no-config"
+expect "$(run_in "$NOREF" staging)" true "non-404 contents API failure fails closed"
+
 # Config read fail: yq missing from PATH even though the ref is readable.
 NOYQ="$TMP/noyqbin"; mkdir -p "$NOYQ"
-for t in git bash base64 cat sh env; do p=$(command -v "$t" 2>/dev/null) && ln -sf "$p" "$NOYQ/$t"; done
+for t in git bash base64 cat sh env grep; do p=$(command -v "$t" 2>/dev/null) && ln -sf "$p" "$NOYQ/$t"; done
 cp "$TMP/bin/gh" "$NOYQ/gh"
 expect "$(cd "$REPO" && env PATH="$NOYQ" GH_DEFAULT_STUB=trunk bash "$S" staging owner/repo)" true "config unreadable without yq fails closed"
 

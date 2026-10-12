@@ -12,7 +12,8 @@
 # floor), the repository's GitHub default branch (`default_branch`), or the
 # `branches.default` of the default branch's COMMITTED forge.yaml
 # (`refs/remotes/origin/<default>:forge.yaml`, falling back to the contents API;
-# if neither source is readable the result is `true`, never `false`) or of an
+# if neither source is readable the result is `true`, never `false`; a source that
+# cleanly reports forge.yaml absent is "no config" and falls through) or of an
 # explicit trusted config (FORGE_TRUSTED_CONFIG, orchestrator-supplied).
 #
 # It NEVER reads forge.yaml from $PWD: the PR worktree is author-controlled, so
@@ -43,13 +44,26 @@ CFG_DEFAULT=""
 READ_OK=""
 # Committed default-branch config only (a ref, never the working tree). The
 # fully-qualified ref cannot be shadowed by a local tag/branch named origin/<default>.
-CFG_RAW=$(git show "refs/remotes/origin/${GH_DEFAULT}:forge.yaml" 2>/dev/null) && [ -n "$CFG_RAW" ] \
-  && CFG_DEFAULT=$(printf '%s\n' "$CFG_RAW" | _cfg_parse) && READ_OK=1
+# A present ref with no forge.yaml at that path is a clean "no config" read (READ_OK,
+# empty default); an unfetched ref, missing yq or parse error stays unreadable.
+CFG_REF="refs/remotes/origin/${GH_DEFAULT}"
+if git rev-parse -q --verify "${CFG_REF}^{commit}" >/dev/null 2>&1; then
+  if git cat-file -e "${CFG_REF}:forge.yaml" 2>/dev/null; then
+    CFG_RAW=$(git show "${CFG_REF}:forge.yaml" 2>/dev/null) && [ -n "$CFG_RAW" ] \
+      && CFG_DEFAULT=$(printf '%s\n' "$CFG_RAW" | _cfg_parse) && READ_OK=1
+  else
+    READ_OK=1
+  fi
+fi
 if [ -z "$READ_OK" ]; then
   CFG_DEFAULT=""
-  CFG_RAW=$(gh api "repos/${REPO}/contents/forge.yaml?ref=${GH_DEFAULT}" --jq .content 2>/dev/null \
-    | base64 -d 2>/dev/null) && [ -n "$CFG_RAW" ] \
-    && CFG_DEFAULT=$(printf '%s\n' "$CFG_RAW" | _cfg_parse) && READ_OK=1
+  API_OUT=$(gh api "repos/${REPO}/contents/forge.yaml?ref=${GH_DEFAULT}" --jq .content 2>&1); API_RC=$?
+  if [ "$API_RC" -eq 0 ]; then
+    CFG_RAW=$(printf '%s' "$API_OUT" | base64 -d 2>/dev/null) && [ -n "$CFG_RAW" ] \
+      && CFG_DEFAULT=$(printf '%s\n' "$CFG_RAW" | _cfg_parse) && READ_OK=1
+  elif printf '%s' "$API_OUT" | grep -q 'HTTP 404'; then
+    READ_OK=1   # API says the file does not exist: clean "no config", not a read failure
+  fi
 fi
 # Config unreadable from every source (no yq, ref unfetched, API failing): fail closed.
 [ -n "$READ_OK" ] || emit true
