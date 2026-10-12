@@ -31,7 +31,7 @@ background: false
 
 **Scope note**: This mode owns exactly one gap — re-driving a `needs-human` or `workflow:remediating` PR's own remediation, plus resuming an interrupted M7 auto-land from `workflow:awaiting-merge` when no `FORGE:REMEDIATION:COMPLETE` trail exists (forge#3647; M1-M6 are skipped, only M7/M8 run), finishing a merged PR whose M7 run was cut off before M8 (forge#3685), and re-entering a held resume (the `workflow:remediating` state is the non-human "autonomous remediation pending" state review sets for ci-gate, in-pr-fix and base-sync handoffs, forge#3541). It does NOT implement the `needs-human` sub-label taxonomy (#1815) and does NOT edit `review-pr.md`'s Phase 8 guard (forge#1810), whose safe-default (`workflow:awaiting-merge` on a clean re-review of a previously-escalated PR) is reused as-is; this file only adds a bar-check after it fires.
 
-**Engine coverage** (forge#2379, #2889): this subcommand's `command` name (`work-on/remediate`) and completion marker (`FORGE:REMEDIATION:COMPLETE`, including the `**Re-gate outcome**` field Phase M8 posts below) are registered in the headless engine's phase table — `RESERVED_TYPES.REMEDIATION` in `packages/protocol/src/types.js`, `remediate` in `packages/protocol/src/phases.js`'s `PHASE_IDS`/`PHASE_MARKERS`, and a matching `remediate` entry in `bin/engine/phases.mjs`'s `PHASES` array. The non-terminal held-resume record `FORGE:REMEDIATION_HELD` (forge#3685) is NOT a completion marker; the engine's `detectOutcome` reads it as `terminalReason: "awaiting-merge"`. A blocked review is committed with `terminalReason: "needs-human"`, then the engine continues directly into remediation; the divergence guard permits this specific handoff while keeping all other `needs-human` states paused. Any `**Re-gate outcome**` outside the Output list fails the attempt; `INPR-FIX-REQUESTED` (with `**INPR round**: N`) re-arms one further in-PR fix remediation instead of parking (forge#4021).
+**Engine coverage** (forge#2379, #2889): this subcommand's `command` name (`work-on/remediate`) and completion marker (`FORGE:REMEDIATION:COMPLETE`, including the `**Re-gate outcome**` field Phase M8 posts below) are registered in the headless engine's phase table — `RESERVED_TYPES.REMEDIATION` in `packages/protocol/src/types.js`, `remediate` in `packages/protocol/src/phases.js`'s `PHASE_IDS`/`PHASE_MARKERS`, and a matching `remediate` entry in `bin/engine/phases.mjs`'s `PHASES` array. The non-terminal held-resume record `FORGE:REMEDIATION_HELD` (forge#3685) is NOT a completion marker; the engine's `detectOutcome` reads it as `terminalReason: "awaiting-merge"`, except a `Hold reason` of `CI pending`, which it reads as a wait (`wait: "ci-pending"`): the engine polls CI with backoff and re-dispatches this resume (forge#4018). A blocked review is committed with `terminalReason: "needs-human"`, then the engine continues directly into remediation; the divergence guard permits this specific handoff while keeping all other `needs-human` states paused. Any `**Re-gate outcome**` outside the Output list fails the attempt; `INPR-FIX-REQUESTED` (with `**INPR round**: N`) re-arms one further in-PR fix remediation instead of parking (forge#4021).
 
 ---
 
@@ -665,6 +665,8 @@ The strict `APPROVED_COUNT >= 2` verified-human requirement does NOT apply here:
 
 A `RESUME_AT_M7=true` run on a deploy-gate base NEVER meets this bar (`BAR_MET=false` is enforced in the `if` below): no M3 gate ran in the resume invocation, so it holds for a human. <!-- Added: forge#3684 -->
 
+**CI pending is a hold (forge#4018)**: `wait-ci-green.sh` rc 3 (pending) or rc 4 (rate-limited) at the CI gate below sets `RE_GATE_OUTCOME=HELD-AWAITING-MERGE` with `HOLD_REASON="CI pending..."` and posts no refusal and no `needs-human`; only rc 1/2 and the head-binding refusal re-escalate.
+
 **Evaluate the base-scoped bar**:
 ```bash
 # Fresh shell: re-derive the live base (as above); :-true fail-closed default.
@@ -693,6 +695,8 @@ if [ -n "$CI_GATE_SCRIPT" ]; then CI_GATE_OUT=$(bash "$CI_GATE_SCRIPT" {PR_NUMBE
 else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
 echo "$CI_GATE_OUT"
 GATED_HEAD=$(printf '%s\n' "$CI_GATE_OUT" | sed -n 's/^CI_GATE_HEAD: //p' | head -1)
+# rc 3 (TIMEOUT: checks still pending) and rc 4 (RATE_LIMITED: GitHub throttled or briefly down) are waits, not failures: captured BEFORE the local head check below reuses rc 4.
+CI_WAIT=false; case "$CI_GATE_RC" in 3|4) CI_WAIT=true ;; esac
 # forge#3726 / forge#3686: on EVERY path the merge must land the exact SHA the approval was bound to. Reload the persisted head (never re-read the PR here); unset/invalid fails closed.
 _SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"
 APPROVED_HEAD=$(head -n 1 "$_SD/remediate_approved_head_{PR_NUMBER}" 2>/dev/null || true)
@@ -702,8 +706,10 @@ if [ "$CI_GATE_RC" -eq 0 ] && { [ -z "${APPROVED_HEAD:-}" ] || [ "$GATED_HEAD" !
   CI_GATE_OUT="${CI_GATE_OUT}
 CI_GATE: head ${GATED_HEAD:-unknown} is not the approved head ${APPROVED_HEAD:-none} (fail closed)"; CI_GATE_RC=4
 fi
-# rc 3 = CI still running: re-run this block (up to 3 more times) before treating it as a failure.
-if [ "$CI_GATE_RC" -ne 0 ]; then
+if [ "$CI_WAIT" = "true" ]; then
+  # CI pending / rate-limited: hold, never needs-human, no refusal comment. The engine polls CI (no model) and re-dispatches this resume.
+  RE_GATE_OUTCOME="HELD-AWAITING-MERGE"; HOLD_REASON="CI pending (gate rc=${CI_GATE_RC}); nothing to fix, the re-gate resumes once CI settles"
+elif [ "$CI_GATE_RC" -ne 0 ]; then
   # Not green: do not land. Re-escalate with the gate output (counts as RE-ESCALATED below).
   CI_MSG="⛔ Remediation auto-land refused for PR #{PR_NUMBER}: CI is not green (rc=${CI_GATE_RC}).
 \`\`\`
@@ -738,7 +744,7 @@ fi
 
 ## Phase M8: Finalize FORGE:REMEDIATION Paper Trail
 
-Post the completion body to **both** `{PR_NUMBER}` and `{ISSUE_NUMBER}` — this is the single idempotency marker checked by Phase M0 (this file, on future resume) and by the orchestrator's item 6.4 dispatch guard. **Exception (forge#3685)**: a `RESUME_AT_M7=true` run whose outcome is `HELD-AWAITING-MERGE` posts a `<!-- FORGE:REMEDIATION_HELD -->` record (carrying `**Re-gate outcome**` and the hold reason) and NO `FORGE:REMEDIATION:COMPLETE`, so a transient hold (CI pending, stale approval) does not strand the PR behind the single-attempt guard. AUTO-LANDED, RE-ESCALATED, UNFIXABLE, REREVIEW-REQUIRED, INPR-FIX-REQUESTED and non-resume HELD keep COMPLETE:
+Post the completion body to **both** `{PR_NUMBER}` and `{ISSUE_NUMBER}` — this is the single idempotency marker checked by Phase M0 (this file, on future resume) and by the orchestrator's item 6.4 dispatch guard. **Exception (forge#3685)**: a `RESUME_AT_M7=true` run, or a first run held on `CI pending`, whose outcome is `HELD-AWAITING-MERGE` posts a `<!-- FORGE:REMEDIATION_HELD -->` record (carrying `**Re-gate outcome**` and the hold reason) and NO `FORGE:REMEDIATION:COMPLETE`, so a transient hold (CI pending, stale approval) does not strand the PR behind the single-attempt guard. AUTO-LANDED, RE-ESCALATED, UNFIXABLE, REREVIEW-REQUIRED, INPR-FIX-REQUESTED and non-resume HELD (other than CI pending) keep COMPLETE:
 
 ```bash
 # Fresh shell: re-derive the live base (as above); :-true fail-closed default.
@@ -803,8 +809,9 @@ if [ "$BASESYNC_KIND" = "BASESYNC_REMEDIATION" ]; then
   fi
 fi
 
-if [ "${RESUME_AT_M7:-false}" = "true" ] && [ "$RE_GATE_OUTCOME" = "HELD-AWAITING-MERGE" ]; then
-  # forge#3685: a resume that ends HELD is NOT a completed attempt. Post a distinct, non-terminal record: header is
+_CI_HOLD=false; case "${HOLD_REASON:-}" in "CI pending"*) _CI_HOLD=true ;; esac
+if { [ "${RESUME_AT_M7:-false}" = "true" ] || [ "$_CI_HOLD" = "true" ]; } && [ "$RE_GATE_OUTCOME" = "HELD-AWAITING-MERGE" ]; then
+  # forge#3685: a resume (or a first-run CI-pending hold) that ends HELD is NOT a completed attempt. Post a distinct, non-terminal record: header is
   # FORGE:REMEDIATION_HELD (never "<!-- FORGE:REMEDIATION -->", so the M0 partial-trail cleanup and the COMPLETE/TRAIL
   # matchers never see it) and NO FORGE:REMEDIATION:COMPLETE, so the next invocation re-enters M7 instead of ALREADY_DONE.
   REMEDIATION_BODY="<!-- FORGE:REMEDIATION_HELD -->
@@ -812,7 +819,7 @@ if [ "${RESUME_AT_M7:-false}" = "true" ] && [ "$RE_GATE_OUTCOME" = "HELD-AWAITIN
 
 **Re-gate outcome**: ${RE_GATE_OUTCOME} ${OUTCOME_DETAIL}
 **Auto-land bar**: ${AUTO_LAND_BAR_TEXT}
-**Hold reason**: ${HOLD_REASON:-CI pending, approval not bound to the live head, or deploy-gate base (see Phase M7 output above)}
+**Hold reason**: ${HOLD_REASON:-approval not bound to the live head, deploy-gate base, or a CI wait (set HOLD_REASON in M7; see its output above)}
 **Head**: ${REMEDIATED_HEAD_SHA:-unknown}"
 else
 REMEDIATION_BODY="<!-- FORGE:REMEDIATION -->

@@ -530,6 +530,22 @@ describe("pickPhase", () => {
       assert.equal(o.terminalReason, "awaiting-merge");
       assert.equal(o.outputs.reGateOutcome, "HELD-AWAITING-MERGE");
     });
+    it("forge#4018: held with hold reason CI pending -> wait ci-pending (not terminal)", async () => {
+      const o = await remediate.detectOutcome({ ...base, pr: 7 }, heldIo(false, remediationHeldBody("HELD-AWAITING-MERGE", "CI pending")));
+      assert.equal(o.status, "failed");
+      assert.equal(o.retryable, false);
+      assert.equal(o.wait, "ci-pending");
+      assert.equal(o.outputs.reGateOutcome, "HELD-AWAITING-MERGE");
+    });
+    it("forge#4018: CI-pending hold on a merged PR still hands to close, never waits", async () => {
+      const o = await remediate.detectOutcome({ ...base, pr: 7 }, heldIo(true, remediationHeldBody("HELD-AWAITING-MERGE", "CI pending")));
+      assert.equal(o.terminalReason, "merged");
+      assert.equal(o.wait, undefined);
+    });
+    it("forge#4018: only the newest hold counts (stale-head hold after a CI-pending hold stays terminal)", async () => {
+      const o = await remediate.detectOutcome({ ...base, pr: 7 }, heldIo(false, remediationHeldBody("HELD-AWAITING-MERGE", "CI pending"), remediationHeldBody()));
+      assert.equal(o.terminalReason, "awaiting-merge");
+    });
     it("forge#3685: COMPLETE newer than held -> COMPLETE wins", async () => {
       const o = await remediate.detectOutcome({ ...base, pr: 7 }, heldIo(false, remediationHeldBody(), remediateBody("RE-ESCALATED")));
       assert.equal(o.terminalReason, "needs-human");

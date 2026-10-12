@@ -6,12 +6,12 @@ import { rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runIssue, backendIdentity, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, isLeaseHolderDead } from "../engine.mjs";
+import { runIssue, ciPollDelayMs, ciRateLimitSleepMs, backendIdentity, DEFAULT_SESSION_LIMIT_WAIT_MS, parseLeaseHolder, isLeaseHolderDead } from "../engine.mjs";
 import { readLog, deriveState, appendEvent } from "../engine/runlog.mjs";
 import { pickPhase } from "../engine/phases.mjs";
 import { serializeState, parseState, upsertStateBlock } from "../engine/state.mjs";
 import { VALID_BACKENDS } from "../runner.mjs";
-import { SEP, trusted, builderBody, invBody, asComments, inv as investigationComment, ctx, arch, builder, remediation, decomposed } from "./helpers/comments.mjs";
+import { SEP, trusted, builderBody, invBody, asComments, inv as investigationComment, ctx, arch, builder, remediation, remediationHeldBody, decomposed } from "./helpers/comments.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -3978,16 +3978,55 @@ describe("runIssue — CI pending at the merge gate", () => {
     io.waitCiGreen = async (pr, repo, timeoutSec) => { polls.push({ pr, repo, timeoutSec }); return { rc: polls.length < 3 ? 3 : 0, text: "" }; };
     const sleeps = [];
     const telemetry = [];
-    const res = await run({ io, runner, sleep: async (ms) => { sleeps.push(ms); },
+    const res = await run({ io, runner, random: () => 0.5, sleep: async (ms) => { sleeps.push(ms); },
       emitTelemetry: async (r) => { telemetry.push(r); } });
     assert.equal(res.terminalReason, "merged");
     assert.equal(ran.filter((c) => c === "work-on/review").length, 2, "review dispatched exactly twice");
     assert.ok(!ran.includes("work-on/remediate"));
     assert.deepEqual(polls.map((p) => p.pr), [7, 7, 7]);
     assert.equal(polls[0].repo, "acme/widgets");
-    assert.deepEqual(sleeps, [120000, 240000], "backoff 2 then 4 minutes");
-    assert.ok(telemetry.some((r) => r.event === "CI_PENDING_WAIT" && r.result === "green" && Number.isFinite(r.minutes_waited)));
+    assert.deepEqual(sleeps, [60000, 120000], "backoff 60 s then 120 s (no jitter at rand 0.5)");
+    assert.ok(telemetry.some((r) => r.event === "CI_PENDING_WAIT" && r.result === "green" && Number.isFinite(r.minutes_waited)
+      && r.phase === "review" && r.polls === 3 && r.rate_limit_sleeps === 0));
     assert.ok(!w_needsHuman(readLog(dir, 42)));
+  });
+
+  it("rate-limited polls (rc 4) sleep and retry; review is never re-dispatched until a real result", async () => {
+    let reviews = 0;
+    const { io, ran, runner } = world((w) => { reviews++; if (reviews === 1) { w.pr = 7; return PENDING; } w.prMerged = true; return ""; });
+    const rcs = [4, 4, 3, 0]; let polls = 0;
+    io.waitCiGreen = async () => ({ rc: rcs[polls++], text: "" });
+    const sleeps = []; const telemetry = [];
+    const res = await run({ io, runner, random: () => 0.5, sleep: async (ms) => { sleeps.push(ms); }, emitTelemetry: async (r) => { telemetry.push(r); } });
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(polls, 4);
+    assert.equal(ran.filter((c) => c === "work-on/review").length, 2, "one re-dispatch, only after the green poll");
+    assert.deepEqual(sleeps, [60000, 120000, 240000]);
+    const end = telemetry.find((r) => r.event === "CI_PENDING_WAIT");
+    assert.equal(end.rate_limit_sleeps, 2);
+  });
+
+  it("a poll whose budget read is below the reserve sleeps until reset instead of polling", async () => {
+    let reviews = 0;
+    const { io, runner } = world((w) => { reviews++; if (reviews === 1) { w.pr = 7; return PENDING; } w.prMerged = true; return ""; });
+    const reads = [{ remaining: 100, limit: 5000, reset: 1 + 600 }, { remaining: 4000, limit: 5000, reset: 1 + 3600 }];
+    let n = 0; let polled = 0;
+    io.rateLimit = async () => reads[Math.min(n++, reads.length - 1)];
+    io.waitCiGreen = async () => { polled++; return { rc: 0, text: "" }; };
+    const sleeps = []; const telemetry = [];
+    await run({ io, runner, random: () => 0, now: () => 1000, sleep: async (ms) => { sleeps.push(ms); }, emitTelemetry: async (r) => { telemetry.push(r); } });
+    assert.equal(polled, 1, "no poll while below the reserve");
+    assert.ok(sleeps[0] >= 599000 && sleeps[0] <= 601000, `sleeps until reset (got ${sleeps[0]})`);
+    assert.equal(telemetry.find((r) => r.event === "CI_PENDING_WAIT").rate_limit_sleeps, 1);
+  });
+
+  it("an unreadable budget never blocks the poll", async () => {
+    let reviews = 0;
+    const { io, runner } = world((w) => { reviews++; if (reviews === 1) { w.pr = 7; return PENDING; } w.prMerged = true; return ""; });
+    io.rateLimit = async () => { throw new Error("gh down"); };
+    io.waitCiGreen = async () => ({ rc: 0, text: "" });
+    const res = await run({ io, runner, sleep: async () => {} });
+    assert.equal(res.terminalReason, "merged");
   });
 
   it("pending past the bound: needs-human with review.ci_pending_timeout", async () => {
@@ -4014,6 +4053,102 @@ describe("runIssue — CI pending at the merge gate", () => {
     const { io, runner } = world((w) => { w.pr = 7; return PENDING; });
     const res = await run({ io, runner });
     assert.equal(res.code, "review.pr_open");
+  });
+});
+
+// CI still pending at remediate's M7 re-gate: the same poll, then only the remediate phase resumes (never M1-M6 via review).
+describe("runIssue — CI pending at remediate's re-gate (forge#4018)", () => {
+  const seed = (w) => {
+    w.body = serializeState({ v: 5, run: "r_42_staging", issue: 42, lane: "staging", committed: ["investigate", "build", "review"],
+      phase: "remediate", branch: "fix/real-branch-42", pr: 7, terminal: false, terminalReason: "needs-human", lease: null });
+    w.pr = 7; w.prNeedsHuman = true; w.commitsAhead = 1;
+    w.markers = investigationComment("COMPLETE") + builder("fix/real-branch-42");
+  };
+  it("held on CI pending, then green: waits, re-dispatches remediate once, merges, no needs-human", async () => {
+    const { w, io } = fakeWorld(); seed(w);
+    const ran = [];
+    let remediations = 0;
+    const script = {
+      "work-on/remediate": () => {
+        remediations++;
+        if (remediations === 1) w.markers += SEP + remediationHeldBody("HELD-AWAITING-MERGE", "CI pending");
+        else { w.markers += remediation("AUTO-LANDED"); w.prMerged = true; w.issueState = "CLOSED"; w.labels.push("workflow:merged"); }
+      },
+      "work-on/close": () => { throw new Error("close must not run"); },
+      "work-on/review": () => { throw new Error("review must not be re-dispatched"); },
+    };
+    const runner = async ({ commandName }) => { ran.push(commandName); script[commandName](); return { status: "complete" }; };
+    const polls = []; const sleeps = [];
+    io.waitCiGreen = async (pr) => { polls.push(pr); return { rc: polls.length < 2 ? 3 : 0, text: "" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1,
+      random: () => 0.5, sleep: async (ms) => { sleeps.push(ms); } });
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(remediations, 2);
+    assert.deepEqual(ran, ["work-on/remediate", "work-on/remediate"]);
+    assert.deepEqual(polls, [7, 7]);
+    assert.deepEqual(sleeps, [60000]);
+    assert.ok(!w_needsHuman(readLog(dir, 42)));
+  });
+  it("a non-CI hold (stale head) keeps the terminal awaiting-merge result and polls nothing", async () => {
+    const { w, io } = fakeWorld(); seed(w);
+    const runner = async () => { w.markers += SEP + remediationHeldBody(); return { status: "complete" }; };
+    let polled = 0; io.waitCiGreen = async () => { polled++; return { rc: 0, text: "" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1, sleep: async () => {} });
+    assert.equal(res.terminalReason, "awaiting-merge");
+    assert.equal(polled, 0);
+  });
+});
+
+// Pure CI-poll scheduler: backoff, jitter bounds, budget reserve, and 100 simulated lanes.
+describe("CI poll scheduler (forge#4018)", () => {
+  it("backs off 60 s -> 5 min with +/-20% jitter", () => {
+    const mid = [0, 1, 2, 3, 4, 9].map((i) => ciPollDelayMs(i, () => 0.5));
+    assert.deepEqual(mid, [60000, 120000, 240000, 300000, 300000, 300000]);
+    for (let i = 0; i < 6; i++) {
+      const base = Math.min(60000 * 2 ** i, 300000);
+      assert.equal(ciPollDelayMs(i, () => 0), Math.round(base * 0.8));
+      assert.equal(ciPollDelayMs(i, () => 1), Math.round(base * 1.2));
+    }
+  });
+  it("budget gate: healthy or unreadable -> 0; below the 10% reserve -> until reset", () => {
+    assert.equal(ciRateLimitSleepMs({ remaining: 4000, limit: 5000, reset: 9999 }, 0, () => 0), 0);
+    assert.equal(ciRateLimitSleepMs(null, 0, () => 0), 0);
+    assert.equal(ciRateLimitSleepMs({ remaining: "x" }, 0, () => 0), 0);
+    assert.equal(ciRateLimitSleepMs({ remaining: 500, limit: 5000, reset: 100 }, 40000, () => 0), 60000);
+    assert.equal(ciRateLimitSleepMs({ remaining: 499, limit: 5000, reset: 100 }, 200000, () => 1), 30000, "past reset: only the spread");
+  });
+  // Virtual-time simulation of N lanes sharing one 5,000/h REST budget (3 gh calls per one-shot poll).
+  function simulate({ lanes, background = 0, minutes = 90 }) {
+    const LIMIT = 5000, COST = 3, HOUR = 3600 * 1000, END = minutes * 60000;
+    let seed = 12345; const rand = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
+    const used = new Map(); const usedAt = (t) => used.get(Math.floor(t / HOUR)) ?? 0;
+    const add = (t, n) => used.set(Math.floor(t / HOUR), usedAt(t) + n);
+    const queue = Array.from({ length: lanes }, (_, i) => ({ t: Math.floor(rand() * 30000), i, idx: 0 }));
+    let polls = 0, sleeps = 0, peak = 0;
+    while (queue.length) {
+      queue.sort((a, b) => a.t - b.t);
+      const lane = queue.shift();
+      if (lane.t > END) continue;
+      add(lane.t, 0);
+      if (usedAt(lane.t) < background) used.set(Math.floor(lane.t / HOUR), background);
+      const reset = (Math.floor(lane.t / HOUR) + 1) * 3600;
+      const hold = ciRateLimitSleepMs({ remaining: LIMIT - usedAt(lane.t), limit: LIMIT, reset }, lane.t, rand);
+      if (hold > 0) { sleeps++; lane.t += hold; queue.push(lane); continue; }
+      add(lane.t, COST); polls++; peak = Math.max(peak, usedAt(lane.t));
+      lane.t += ciPollDelayMs(lane.idx++, rand); queue.push(lane);
+    }
+    return { polls, sleeps, peak, perHour: polls * COST / (minutes / 60) };
+  }
+  it("100 simulated waiting lanes stay under the 5,000/h budget", () => {
+    const r = simulate({ lanes: 100 });
+    assert.ok(r.perHour < 5000, `request rate ${r.perHour}/h`);
+    assert.ok(r.peak < 5000, `peak window usage ${r.peak}`);
+    assert.equal(r.sleeps, 0, "an unloaded budget needs no reserve sleeps");
+  });
+  it("with the budget mostly consumed by other tools, lanes hold the 10% reserve and never exhaust it", () => {
+    const r = simulate({ lanes: 100, background: 4200 });
+    assert.ok(r.peak <= 5000, `peak window usage ${r.peak}`);
+    assert.ok(r.sleeps > 0, "lanes slept until reset");
   });
 });
 function w_needsHuman(log) { return log.some((e) => e.event === "RUN_TERMINAL" && e.reason === "needs-human"); }

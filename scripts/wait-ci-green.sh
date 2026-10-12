@@ -18,6 +18,9 @@
 #   2  ERROR    bad usage, gh unreadable for too long, the PR head moved during the wait, or
 #               FORGE_CI_REQUIRE_CHECKS=1 and no checks were reported
 #   3  TIMEOUT  checks still pending when the timeout expired (listed)
+#   4  RATE_LIMITED  the window ended while GitHub only answered with rate-limit (403/429,
+#               x-ratelimit-remaining: 0, secondary-limit text) or transient 5xx/network errors. Retryable,
+#               never a CI verdict: callers treat it like TIMEOUT (wait and re-run), and it is never a merge.
 #
 # Every result also prints "CI_GATE_HEAD: <sha>" — the exact PR head the decision applies to. Callers
 # MUST merge with `--match-head-commit <that sha>` so a push after the gate cannot land unchecked.
@@ -26,7 +29,10 @@
 #      caller re-runs the gate, it does not raise the timeout), FORGE_CI_INTERVAL (default 20),
 #      FORGE_CI_NO_CHECKS_GRACE (default 120), FORGE_CI_SETTLE (default 45 — never PASS earlier than
 #      this after the wait starts, so workflows that register late are not missed),
-#      FORGE_CI_REQUIRE_CHECKS (default 0).
+#      FORGE_CI_REQUIRE_CHECKS (default 0), FORGE_CI_JITTER_PCT (default 20 — each sleep varies by +/- this
+#      percent so many waiting lanes do not poll in lockstep).
+# Rate-limit and transient gh failures are retried with a growing, jittered sleep and never count toward
+# the 5-error ERROR limit.
 # "No checks" passes only when GitHub Actions also reports no workflow runs for the head commit;
 # if runs exist but their checks have not appeared yet, the gate keeps waiting.
 set -uo pipefail
@@ -44,7 +50,7 @@ while [ $# -gt 0 ]; do
     -R*) REPO="${1#-R}"; REPO="${REPO# }"; shift ;;
     --timeout) [ $# -ge 2 ] || usage; TIMEOUT="$2"; shift 2 ;;
     --interval) [ $# -ge 2 ] || usage; INTERVAL="$2"; shift 2 ;;
-    -h|--help) sed -n '5,25p' "$0"; exit 0 ;;
+    -h|--help) sed -n '5,32p' "$0"; exit 0 ;;
     *) [ -z "$PR" ] || usage; PR="$1"; shift ;;
   esac
 done
@@ -52,17 +58,26 @@ case "$PR" in ''|*[!0-9]*) usage ;; esac
 case "$REPO" in */*) ;; *) usage ;; esac
 for v in "$TIMEOUT" "$INTERVAL" "$GRACE" "$SETTLE"; do case "$v" in ''|*[!0-9]*) usage ;; esac; done
 [ "$INTERVAL" -ge 1 ] || INTERVAL=1
+JITTER_PCT="${FORGE_CI_JITTER_PCT:-20}"; case "$JITTER_PCT" in ''|*[!0-9]*) JITTER_PCT=20 ;; esac
+[ "$JITTER_PCT" -le 90 ] || JITTER_PCT=90
+# jitter <seconds> -> seconds varied by +/- JITTER_PCT percent (never below 1).
+jitter() { awk -v s="$1" -v p="$JITTER_PCT" -v r="$RANDOM" 'BEGIN{ v=s*(1-p/100+2*(p/100)*(r/32767)); if (v<1) v=1; printf "%.2f", v }'; }
+# classify_gh <text> -> prints "limited" for rate-limit / transient 5xx / network failures, else nothing.
+classify_gh() {
+  printf '%s' "$1" | grep -Eqi 'rate limit|secondary limit|abuse detection|x-ratelimit-remaining: *0|HTTP (403|429|5[0-9][0-9])|status (403|429|5[0-9][0-9])|too many requests|bad gateway|service unavailable|gateway time-?out|timed? ?out|connection (reset|refused)|could not resolve host|unexpected EOF|network is unreachable|TLS handshake' && echo limited
+}
 
 emit() {
-  case "$1" in PASS) _rc=0 ;; FAIL) _rc=1 ;; TIMEOUT) _rc=3 ;; *) _rc=2 ;; esac
+  case "$1" in PASS) _rc=0 ;; FAIL) _rc=1 ;; TIMEOUT) _rc=3 ;; RATE_LIMITED) _rc=4 ;; *) _rc=2 ;; esac
   FORGE_REPO="${FORGE_REPO:-$REPO}" FORGE_PR="${FORGE_PR:-$PR}" forge_emit ci_gate result="$1" rc="$_rc" checks="${total:-0}"
   echo "CI_GATE: $1"; echo "CI_GATE_HEAD: ${START_SHA:-unknown}"
 }
 head_sha() { gh pr view "$PR" -R "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null; }
 START_SHA="$(head_sha)"
+for _try in 1 2; do [ -n "$START_SHA" ] || { sleep "$(jitter "$INTERVAL")"; START_SHA="$(head_sha)"; }; done
 if [ -z "$START_SHA" ]; then START_SHA=""; emit ERROR; echo "cannot read PR #$PR head in $REPO"; exit 2; fi
 
-start=$(date +%s); errors=0
+start=$(date +%s); errors=0; limited=0
 while :; do
   now=$(date +%s); elapsed=$((now - start))
   if ! JSON="$(gh pr checks "$PR" -R "$REPO" --json name,bucket 2>/dev/null)" || ! printf '%s' "$JSON" | jq -e 'type=="array"' >/dev/null 2>&1; then
@@ -72,14 +87,19 @@ while :; do
       # does precisely in the "no checks reported" case this branch exists to detect.
       NC_OUT="$(gh pr checks "$PR" -R "$REPO" 2>&1 || true)"
       if printf '%s' "$NC_OUT" | grep -qi 'no checks reported'; then JSON='[]'
+      elif [ -n "$(classify_gh "$NC_OUT")" ]; then
+        # Rate limit or transient outage: a wait, not a verdict. Retry with a growing jittered sleep; never counts toward ERROR.
+        limited=$((limited + 1)); now=$(date +%s)
+        if [ $((now - start)) -ge "$TIMEOUT" ]; then emit RATE_LIMITED; echo "PR #$PR: GitHub rate-limited or unavailable for the whole ${TIMEOUT}s window (${limited} retries); retry later"; exit 4; fi
+        _m=$((limited > 4 ? 4 : limited)); sleep "$(jitter $((INTERVAL * (1 << (_m - 1)))))"; continue
       else
         errors=$((errors + 1))
         if [ "$errors" -ge 5 ]; then emit ERROR; echo "gh pr checks unreadable 5 times in a row"; exit 2; fi
-        sleep "$INTERVAL"; continue
+        sleep "$(jitter "$INTERVAL")"; continue
       fi
     fi
   fi
-  errors=0
+  errors=0; limited=0
   cur="$(head_sha)"
   if [ -n "$cur" ] && [ "$cur" != "$START_SHA" ]; then emit ERROR; echo "PR head moved during the wait ($START_SHA -> $cur); re-review the new head"; exit 2; fi
   total=$(printf '%s' "$JSON" | jq 'length')
@@ -101,5 +121,5 @@ while :; do
     emit PASS; echo "PR #$PR head ${START_SHA:0:7}: $total checks passed or skipped"; exit 0
   fi
   if [ "$elapsed" -ge "$TIMEOUT" ]; then emit TIMEOUT; echo "PR #$PR: still pending after ${TIMEOUT}s:"; echo "$pending"; exit 3; fi
-  sleep "$INTERVAL"
+  sleep "$(jitter "$INTERVAL")"
 done
