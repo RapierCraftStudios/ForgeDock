@@ -153,6 +153,8 @@ gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human" # allowlist:check-com
 
 Run after quality gate passes. All tool commands are read from `forge.yaml → verification.commands`. `forge.yaml` is usually gitignored, so it is absent from the worktree: every block below resolves `FORGE_CFG` to the worktree copy if present, else the main checkout's `forge.yaml` (via `git rev-parse --git-common-dir`). Before this, every verification command, learned test command and the SOPS chain check were silently skipped in worktree builds; each step logs `SKIPPED — not configured` when the corresponding key is absent rather than silently passing.
 
+**Scratch placement (venvs, caches)** <!-- Added: forge#3572 -->: any virtualenv, package cache or other large scratch data a verification command needs goes under `"$TMPDIR/forge-venv-{NUMBER}"` (the engine exports a per-run, disk-backed `TMPDIR`) or inside the worktree, never a literal `/tmp/<name>` path. A size-limited `/tmp` fails concurrent lanes with EDQUOT/ENOSPC. Remove what you created when validation finishes.
+
 **Track skipped checks** — initialize before any check runs:
 ```bash
 SKIPPED_CHECKS=""
