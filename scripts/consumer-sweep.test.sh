@@ -53,6 +53,9 @@ read_cfg() { echo retry_budget; }
 P
 echo 'compute_total vendored copy' > "$T/r/vendor/lib.txt"
 echo 'x = TIMEOUT_SECONDS' > "$T/r/svc/user_c.py"
+mkdir -p "$T/r/db"
+printf -- '-- see "obsolete_table_ref"\nSELECT 1;\n' > "$T/r/db/schema.sql"
+echo 'report reads obsolete_table_ref nightly' > "$T/r/db/report.txt"
 echo 'docs: pass --output-dir and set OUT_DIRECTORY' > "$T/r/docs.txt"
 g add -A; g commit -m base
 g checkout -q -b feat
@@ -92,6 +95,13 @@ g add -A; g commit -m hash
 run --range base..feat
 has "old literal hash swept" "9f8e7d6c5b4a	literal	.github/workflows/verify.yml:2"
 lacks "new hash is not swept (added side)" "1a2b3c4d5e6f"
+
+# (d2) removed line that starts with "-- " (diff line "--- ...") is content, not a file header
+reset
+printf 'SELECT 1;\n' > "$T/r/db/schema.sql"
+g add -A; g commit -m dropcomment
+run --range base..feat
+has "removed '-- ' line identifier swept" "obsolete_table_ref	key	db/report.txt:1"
 
 # (e) CLI flag and env var on the removed side
 reset

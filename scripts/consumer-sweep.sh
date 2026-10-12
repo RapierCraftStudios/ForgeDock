@@ -117,11 +117,13 @@ if [ -n "$RANGE" ]; then
   # shellcheck disable=SC2086
   git -C "$REPO" -c core.quotepath=off diff -U0 --no-color --no-ext-diff --no-renames $DIFFARGS -- > "$TMP/diff" 2>/dev/null \
     || die2 "git diff failed"
-  # removed lines only, minus excluded files; the old path comes from the "--- a/<path>" header
+  # removed lines only, minus excluded files; the old path comes from the "--- a/<path>" header, read only before the first @@ of a file so removed "-- " lines are never mistaken for headers
   awk -v excl="$TMP/excl" '
     BEGIN { while ((getline l < excl) > 0) skip[l] = 1 }
-    /^--- / { p = substr($0, 5); sub(/^a\//, "", p); cur = p; next }
-    /^\+\+\+ / { next }
+    /^diff --git / { inhunk = 0; next }
+    /^@@ / { inhunk = 1; next }
+    !inhunk && /^--- / { p = substr($0, 5); sub(/^a\//, "", p); cur = p; next }
+    !inhunk && /^\+\+\+ / { next }
     /^-/ { if (!(cur in skip) && cur != "/dev/null") print substr($0, 2) }
   ' "$TMP/diff" > "$TMP/removed"
 
