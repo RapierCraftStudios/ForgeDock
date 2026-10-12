@@ -116,8 +116,14 @@ async function getInvariants() {
  *    starting Claude Code (operator-set only — same process.env semantics as
  *    the gist guard above).
  *
- * 9. Main-checkout mutation guard (issue #3650)
- *    Denies `git checkout|switch|stash|merge`, `git reset --hard`, and
+ * 9. Main-checkout mutation guard (issue #3650) — ADVISORY by default
+ *    Enforced (exit 2) only when FORGE_ENFORCE_MAIN_CHECKOUT_GIT=1. Otherwise it
+ *    writes a warning to stderr and allows the call: shipped specs (fix-ci,
+ *    milestone, test-gate, cleanup, rollback, recover-orphans, spec-doctor,
+ *    orchestrate phase-4) still run these verbs in the main checkout on purpose,
+ *    and a denial blocks the whole Bash call (their `|| true` fallbacks never run).
+ *    Enforcement becomes the default once those specs use worktrees (#3873).
+ *    When enforced it denies `git checkout|switch|stash|merge`, `git reset --hard`, and
  *    `gh pr checkout` when the shell's cwd is the main (non-worktree) checkout
  *    (`git rev-parse --git-dir` equals `--git-common-dir`). Pipeline workers and
  *    reviewers share that tree with the operator; mutating it races with them.
@@ -583,9 +589,13 @@ async function main() {
   // forge.yaml), and `git -C <main> ...` from there is the case this rule exists for.
   const mainCheckoutViolation = checkMainCheckoutMutation(command);
   if (mainCheckoutViolation) {
-    process.stderr.write(mainCheckoutViolation);
-    process.exit(2);
-    return;
+    if (process.env.FORGE_ENFORCE_MAIN_CHECKOUT_GIT === "1") {
+      process.stderr.write(mainCheckoutViolation);
+      process.exit(2);
+      return;
+    }
+    // Advisory (default): several shipped specs still mutate the main checkout on purpose (#3873).
+    process.stderr.write("WARNING (advisory, not blocked): " + mainCheckoutViolation.replace(/^BLOCKED: /, ""));
   }
 
   // Only enforce Rules 1-4 and 6 inside a ForgeDock-managed project — this hook
@@ -1402,7 +1412,8 @@ function checkMainCheckoutMutation(command) {
       "The main checkout is shared with the operator and other agents. Work in a git worktree " +
       "(`git worktree list`, `git worktree add`) and use `git -C <worktree> ...`, or read code with " +
       "`git show <sha>:<path>`, `gh pr diff`, or `gh api`.\n" +
-      "Operator override: set FORGE_ALLOW_MAIN_CHECKOUT_GIT=1 in the shell before starting Claude Code.\n"
+      "Operator override: set FORGE_ALLOW_MAIN_CHECKOUT_GIT=1 in the shell before starting Claude Code " +
+      "(enforcement itself is opt-in: FORGE_ENFORCE_MAIN_CHECKOUT_GIT=1).\n"
     );
   } catch {
     return null; // fail open

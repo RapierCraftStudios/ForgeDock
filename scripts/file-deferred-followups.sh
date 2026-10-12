@@ -61,10 +61,12 @@ finish() { # $1 = batched_into number or empty, $2 = filed count
   local into="none"; [ -n "$1" ] && into="#$1"
   local line="DEFERRED_TELEMETRY deferred_items=${TOTAL} folded=${FOLDED} batched_into=${into} filed=$2"
   echo "$line"
-  # #3834 emitter: optional, never blocks.
+  # #3834 emitter (scripts/lib/telemetry.sh): optional, never blocks, never changes stdout or the exit code.
   local d; d=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-  if [ -f "$d/telemetry-emit.sh" ]; then
-    bash "$d/telemetry-emit.sh" deferred "$line" >/dev/null 2>&1 || true
+  if [ -f "$d/lib/telemetry.sh" ]; then
+    FORGE_ISSUE="${FORGE_ISSUE:-$PARENT}" FORGE_REPO="${FORGE_REPO:-$REPO}" \
+      bash "$d/lib/telemetry.sh" deferred_followups deferred_items="$TOTAL" folded="$FOLDED" \
+      batched_into="${1:-none}" filed="$2" >/dev/null 2>&1 </dev/null || true
   fi
 }
 

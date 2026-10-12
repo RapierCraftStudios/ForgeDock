@@ -23,6 +23,10 @@
 #     consume the cap.
 #   - HIGH/CRITICAL ISSUE rows are NEVER capped (they always file and still block via the review's
 #     severity gate).
+#   - `ISSUE fix-efficacy-*` rows (the classifier's never-damped "the linked issue is not fixed / the
+#     PR re-introduces its defect" exemption, #3857) are NEVER capped either: capping one would merge
+#     a known-broken fix and close its issue as fixed. They are treated like HIGH rows (under
+#     --lineage review-finding they consume the budget).
 #   - Remaining ISSUE rows are ranked by severity (MEDIUM > LOW), then confidence (CONFIRMED >
 #     LIKELY > POSSIBLE), then safety domain (Security/Auth/Billing/Concurrency/Database agent
 #     first), then input order. Unparseable severity or confidence ranks as MEDIUM / LIKELY, so the
@@ -77,6 +81,8 @@ function domain(a) { a = tolower(a); return (a ~ /(security|auth|billing|concurr
   sc = sevclass($2)
   # the classifier already decided HIGH/CRITICAL: never cap those, whatever the raw severity text looked like
   if (w[2] ~ /^severity-(HIGH|CRITICAL)$/) sc = 3
+  # fix-efficacy is never damped (classify-finding.sh): the per-review cap must not re-damp it
+  if (w[2] ~ /^fix-efficacy-/) sc = 3
   if (isissue[n] && sc == 3) { high++ ; capable[n] = 0 }
   else if (isissue[n]) { capable[n] = 1; score[n] = sc * 1000 + confrank($3) * 100 + domain($5) * 10 }
   else capable[n] = 0

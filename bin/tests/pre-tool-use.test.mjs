@@ -2127,11 +2127,19 @@ describe("main-checkout mutation guard (issue #3650)", () => {
       input: JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command } }),
       encoding: "utf-8",
       timeout: 10000,
-      env: { ...process.env, NODE_OPTIONS: "", FORGE_ALLOW_MAIN_CHECKOUT_GIT: "", ...extraEnv },
+      env: { ...process.env, NODE_OPTIONS: "", FORGE_ALLOW_MAIN_CHECKOUT_GIT: "", FORGE_ENFORCE_MAIN_CHECKOUT_GIT: "1", ...extraEnv },
       cwd,
     });
     return { exitCode: r.status ?? -1, stderr: r.stderr || "" };
   }
+
+  it("is advisory by default: warns but allows the spec commands that still run in the main checkout (#3873)", () => {
+    for (const c of ["git checkout main", "git pull origin main --rebase", "git branch -D revert/pr-1", "git stash", "git merge origin/staging --no-edit"]) {
+      const r = run(c, mainDir, { FORGE_ENFORCE_MAIN_CHECKOUT_GIT: "" });
+      assert.equal(r.exitCode, 0, c);
+      assert.match(r.stderr, /WARNING \(advisory, not blocked\)/, c);
+    }
+  });
 
   it("denies git checkout in the main checkout", () => {
     const r = run("git checkout --detach FETCH_HEAD", mainDir);
