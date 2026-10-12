@@ -22,10 +22,12 @@ export const HELP = `Usage: forgedock stats [--since <version|date>] [--repo <ow
 Version-over-version report: Cost, Time, Flow, Review funnel, Gates and Issue flow per (version, repo), with a
 delta against the previous version and a low-n flag for samples under 10. Missing data prints n/a.
 
-  --since <v|date>      only versions >= <v> (e.g. 1.16.0) or activity on/after <date> (YYYY-MM-DD)
+  --since <v|date>      only versions >= <v> (e.g. 1.16.0) or activity on/after <date> (YYYY-MM-DD);
+                        also bounds the GitHub crawl to that window
   --repo <owner/repo>   target repo (default: forge.yaml project, else the git origin remote)
   --json                machine-readable output
   --refresh             ignore the local cache and re-read everything from GitHub
+  (progress is printed to stderr while crawling)
   --compact             one-row-per-version table (embedded in the staging review summary)
   --no-local            ignore ~/.forge/runs (FORGE_RUNS_DIR)
   --no-cache            do not read or write ~/.forge/stats-cache
@@ -78,6 +80,38 @@ export function parseReleaseTimes(text) {
     .filter((p) => p.length === 2 && /^\d+$/.test(p[1])).map((p) => ({ v: p[0].replace(/^v/, ""), t: Number(p[1]) }));
 }
 
+// A version --since becomes the tag's release time minus this margin: unversioned records are placed by release time, so
+// the crawl must start a little before the tag.
+const VERSION_SINCE_MARGIN_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Lower-bound timestamp for the GitHub crawl from `--since`: a date as is, a version as its tag time minus a margin.
+ * Returns { since: ISO | null, note }: since null means a full crawl (no --since, or a version with no known tag time).
+ */
+export function sinceToTimestamp(since, releaseTimes = []) {
+  const p = parseSince(since);
+  const iso = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+  if (p.sinceMs != null) return { since: iso(p.sinceMs), note: null };
+  if (p.sinceVersion) {
+    const hit = releaseTimes.find((r) => r.v === p.sinceVersion);
+    if (hit) return { since: iso(hit.t * 1000 - VERSION_SINCE_MARGIN_MS), note: null };
+    return { since: null, note: `no release time known for ${p.sinceVersion}; crawling the full history (pass --release-times or use a date to bound it)` };
+  }
+  return { since: null, note: null };
+}
+
+/** Throttled stderr progress printer (never stdout, so --json stays parseable). */
+export function makeProgressPrinter(write = (t) => process.stderr.write(t), now = Date.now) {
+  let last = 0, lastPhase = null;
+  return ({ phase, done, total }) => {
+    const t = now();
+    const final = total != null && done >= total;
+    if (phase === lastPhase && !final && t - last < 2000) return;
+    last = t; lastPhase = phase;
+    write(`forgedock stats: ${phase} ${done}${total != null ? `/${total}` : ""}\n`);
+  };
+}
+
 function gitTagTimes() {
   try {
     const out = execFileSync("git", ["-C", join(here, "..", ".."), "for-each-ref", "refs/tags", "--format=%(refname:short) %(creatordate:unix)"],
@@ -107,21 +141,24 @@ export function resolveRepo(explicit, cwd = process.cwd()) {
   return null;
 }
 
-/** Build the report object. deps: { gh, env, localRuns, now } for tests. Never touches the network when `gh` is stubbed. */
-export function buildReport(opts, deps = {}) {
+/** Build the report object. deps: { gh, env, localRuns, now, onProgress, warn, sleep } for tests. Never touches the network when `gh` is stubbed. */
+export async function buildReport(opts, deps = {}) {
   const env = deps.env ?? process.env;
   const repo = opts.repo;
-  const gh = fetchGithubRecords({ repo, refresh: opts.refresh, useCache: opts.cache, gh: deps.gh, env });
+  let releaseTimes = [];
+  if (opts.releaseTimes) releaseTimes = parseReleaseTimes(readFileSync(opts.releaseTimes, "utf8"));
+  else if (deps.releaseTimes) releaseTimes = deps.releaseTimes;
+  else releaseTimes = gitTagTimes();
+  const bound = sinceToTimestamp(opts.since, releaseTimes);
+  if (bound.note) (deps.warn ?? ((m) => process.stderr.write(`forgedock stats: ${m}\n`)))(bound.note);
+  const gh = await fetchGithubRecords({ repo, since: bound.since, refresh: opts.refresh, useCache: opts.cache, gh: deps.gh, env,
+    onProgress: deps.onProgress, sleep: deps.sleep, now: deps.now });
   const model = toModel(repo, gh);
   const ghKeys = new Set(model.runs.map((r) => `${r.repo}#${r.issue}`));
   let local = [];
   if (opts.local) {
     local = (deps.localRuns ?? readLocalRuns(runsDir(env))).filter((r) => r.repo === repo && !ghKeys.has(`${r.repo}#${r.issue}`));
   }
-  let releaseTimes = [];
-  if (opts.releaseTimes) releaseTimes = parseReleaseTimes(readFileSync(opts.releaseTimes, "utf8"));
-  else if (deps.releaseTimes) releaseTimes = deps.releaseTimes;
-  else releaseTimes = gitTagTimes();
   const report = aggregate({ runs: [...model.runs, ...local], events: model.events, issues: model.issues },
     { minN: opts.minN, releaseTimes, ...parseSince(opts.since) });
   return { repo, sources: { github: { items: gh.items.length, records: gh.records.length, cached: gh.fromCache }, local: { runs: local.length } }, ...report };
@@ -140,7 +177,7 @@ export async function runStats(argv, deps = {}) {
     return 2;
   }
   try {
-    const report = buildReport(opts, deps);
+    const report = await buildReport(opts, { onProgress: makeProgressPrinter(), ...deps });
     process.stdout.write(`${opts.json ? renderJson(report) : opts.compact ? renderCompact(report) : renderMarkdown(report)}\n`);
     return 0;
   } catch (err) {

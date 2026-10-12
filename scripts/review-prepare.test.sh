@@ -125,8 +125,24 @@ eq "auth score" '.scores.AUTH > 0' true; eq "billing score" '.scores.BILLING > 0
 eq "security baseline" .scores.SECURITY 1
 eq "risk FINANCIAL" '.risk_signals | index("FINANCIAL") != null' true
 eq "slice auth file exists" '.slices.auth.diff_file | length > 0' true
-if grep -q "auth.py" "$WORK/out/slice-auth.diff" 2>/dev/null; then ok; else bad "auth slice should hold the auth.py diff"; fi
-if grep -q "billing.py" "$WORK/out/slice-auth.diff" 2>/dev/null; then bad "auth slice leaked the billing diff"; else ok; fi
+AUTH_SLICE=$(jqv '.slices.auth.diff_file')
+eq "auth slice name is keyed by head SHA" '.slices.auth.diff_file | endswith("/slice-'"$(printf '%s' "$SHA_B" | cut -c1-7)"'-auth.diff")' true
+if grep -q "auth.py" "$AUTH_SLICE" 2>/dev/null; then ok; else bad "auth slice should hold the auth.py diff"; fi
+if grep -q "billing.py" "$AUTH_SLICE" 2>/dev/null; then bad "auth slice leaked the billing diff"; else ok; fi
+if [ -z "$(ls -A "$WORK"/out/.slice-* 2>/dev/null)" ]; then ok; else bad "temp slice files left behind"; fi
+# SHA isolation: a re-run at a different head SHA must not overwrite the earlier head's slice
+FIRST_SUM=$(cksum < "$AUTH_SLICE")
+setup feat/x staging "services/api/auth.py
+services/api/billing.py" "$DIFF_AUTH_BILL
++changed-for-head-A" "$SHA_A"
+prep "$ROOT"
+AUTH_SLICE_A=$(jqv '.slices.auth.diff_file')
+if [ -n "$AUTH_SLICE_A" ] && [ "$AUTH_SLICE_A" != "$AUTH_SLICE" ] && [ -f "$AUTH_SLICE" ] && [ -f "$AUTH_SLICE_A" ]; then ok; else bad "different head SHA must produce a distinct slice file ($AUTH_SLICE_A vs $AUTH_SLICE)"; fi
+if [ "$(cksum < "$AUTH_SLICE")" = "$FIRST_SUM" ]; then ok; else bad "earlier head's slice was overwritten by a re-review at another SHA"; fi
+if [ -z "$(ls -A "$WORK"/out/.slice-* 2>/dev/null)" ]; then ok; else bad "temp slice files left behind after re-run"; fi
+setup feat/x staging "services/api/auth.py
+services/api/billing.py" "$DIFF_AUTH_BILL"
+prep "$ROOT"
 eq "auth slice paths" '.slices.auth.paths | join(" ")' "services/api/auth.py"
 eq "security slice is the full diff" '.slices.security.paths | length' 2
 

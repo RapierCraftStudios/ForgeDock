@@ -13,7 +13,7 @@
 #   --pr            PR number (numeric, required)          --repo        owner/name (required)
 #   --merge-issue   issue the PR closes, from --issue (numeric; non-numeric is ignored)
 #   --thorough      true restores the full-union roster    --out         write the context JSON here (default: stdout)
-#   --out-dir       directory for per-domain diff slices (default: ${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/review-prepare-<pr>)
+#   --out-dir       directory for per-domain diff slices, named slice-<sha7>-<domain>.diff (default: ${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/review-prepare-<pr>)
 #   --checkout-pr   `git checkout -f --detach <review sha>` in the CURRENT repo (must be a throwaway review checkout, never the
 #                   main checkout); the recorded original ref is restored by restore_ref on every exit path
 #   --build-gate    block (default): an empty trusted typescript.build / python.format on a full-build lane BLOCKs.
@@ -482,7 +482,7 @@ if [ "$REVIEW_MODE" != "BASE_SYNC_ONLY" ]; then
     SLICE_FILES_SRC="$FILES"; [ "$REVIEW_MODE" = "DELTA" ] && SLICE_FILES_SRC="$DELTA_FILES"
     # slice <domain> <diff-header regex|ALL> <file-path regex|ALL>
     slice() {
-        local dom="$1" dre="$2" fre="$3" body paths df="$OUT_DIR/slice-$1.diff"
+        local dom="$1" dre="$2" fre="$3" body paths tmp df="$OUT_DIR/slice-${REVIEW_SHA_SHORT:-unresolved}-$1.diff"
         if [ "$dre" = "ALL" ]; then body="$FULL_DIFF"
         else
             body=$(printf '%s\n' "$FULL_DIFF" | awk -v re="$dre" '/^diff --git/ { in_block=0 } $0 ~ re { in_block=1 } in_block { print }')
@@ -492,7 +492,9 @@ if [ "$REVIEW_MODE" != "BASE_SYNC_ONLY" ]; then
         else paths=$(printf '%s\n' "$SLICE_FILES_SRC" | grep -iE "$fre" || echo ""); [ -n "$paths" ] || paths="$SLICE_FILES_SRC"; fi
         # 100K-char cap, same as the runner's tool-result cap
         if [ "${#body}" -gt 102400 ]; then body="$(printf '%s' "$body" | head -c 102400)"$'\n'"... [TRUNCATED — diff exceeded 100K chars; focus on the files listed]"; fi
-        printf '%s\n' "$body" > "$df"
+        # Publish atomically: temp file in $OUT_DIR (same filesystem) then rename, so a concurrent reader sees nothing or the whole file.
+        tmp=$(mktemp "$OUT_DIR/.slice-XXXXXX") || { echo "review-prepare: cannot create temp slice in $OUT_DIR" >&2; exit 2; }
+        if printf '%s\n' "$body" > "$tmp" && chmod 644 "$tmp"; then mv -f "$tmp" "$df"; else rm -f "$tmp"; echo "review-prepare: cannot write slice $df" >&2; exit 2; fi
         SLICES_JSON=$(printf '%s' "$SLICES_JSON" | jq -c --arg d "$dom" --arg df "$df" --arg p "$paths" '. + {($d): {paths: ($p | split("\n") | map(select(length > 0))), diff_file: $df}}')
     }
     slice security ALL ALL

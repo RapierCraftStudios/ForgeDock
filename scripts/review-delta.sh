@@ -172,7 +172,14 @@ while IFS= read -r c; do
   if [ "$rc" -ne 0 ]; then SYNC=0; break; fi         # second parent is not base history
   CC=$(G diff-tree --cc --no-commit-id -r "$c" 2>/dev/null); rc=$?
   [ "$rc" -eq 0 ] || full
-  if [ -n "$CC" ]; then SYNC=0; break; fi            # conflict-resolution content in the merge
+  if [ -n "$CC" ]; then
+    # Non-empty --cc is either hand-written resolution content (not mechanical) or a merge=union result (forge#3969).
+    # Accept only when re-running the merge mechanically reproduces the committed tree exactly: a clean
+    # `merge-tree` (rc 0) whose tree equals the merge commit's. A hand-resolved or hand-edited merge never matches.
+    MT=$(G merge-tree --write-tree "$2" "$3" 2>/dev/null); rc=$?
+    MT=$(printf '%s\n' "$MT" | sed -n 1p)
+    if [ "$rc" -ne 0 ] || [ -z "$MT" ] || [ "$MT" != "$(G rev-parse "${c}^{tree}" 2>/dev/null)" ]; then SYNC=0; break; fi
+  fi
 done <<< "$CHAIN"
 
 # per-path shape of a diff: modes, status and path for every file, plus both blob ids for binary files

@@ -604,6 +604,39 @@ The block is delimited by `<!-- FORGE:BLAST_RADIUS:BEGIN -->` and `<!-- FORGE:BL
 
 ---
 
+## Phase A2.9: Append-Only Registry Check *(skip when no planned file is a hand-maintained list)* <!-- Added: forge#3969 -->
+
+Two PRs appending at the same spot of a shared list (test paths, cron targets, workflow steps) conflict textually although every line is independent, and each conflict costs a base-sync remediation round. For each planned file that is an append-only registry (one independent entry per line, edited by many PRs):
+
+1. Confirm with `bash <scripts>/detect-append-registries.sh --detect` (history ranking) and `--check-union <path>`. Resolve `<scripts>` through the trusted script resolution (plugin root, `FORGE_ROOT`, `FORGEDOCK_HOME`), never `$PWD`. The helper rejects JSON, YAML, TOML, lockfiles and Markdown.
+2. Plan one of: (a) a `.gitattributes` `merge=union` entry, only when `--check-union` prints `UNION SAFE` and every line is independent (no ordering, uniqueness or structure); or (b) converting the list to glob discovery where its consumer supports it.
+3. Name the registry and the chosen option in `### Affected Paths`. Never plan union for a file with ordering, uniqueness or structure: that file is edited at the end of the list, and the pre-handoff base sync resolves its conflicts.
+
+---
+
+## Phase A2.10: Consumer Sweep Intake *(advisory: skip silently when no existing identifier changes; never blocks)* <!-- Added: forge#3970 -->
+
+No diff exists yet, so sweep by name. List the existing identifiers the plan will change, rename or re-type (functions, classes, constants, config or context keys, CLI flags, env vars, paths, literal hashes or versions), take them from the investigation's affected files, and run the script in identifier mode. Validate (Phase V4.6) later re-runs the same sweep on the final diff and gates it.
+
+```bash
+# FORGE_ROOT: shared resolver scripts/lib/forge-resolve.sh (empty when unresolved => the sweep is skipped, never guessed)
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+FORGE_ROOT="$(forge_root 2>/dev/null || true)"
+CS_SCRIPT="${FORGE_ROOT:+$FORGE_ROOT/scripts/consumer-sweep.sh}"; [ -f "$CS_SCRIPT" ] || CS_SCRIPT=""
+EXCLUDES=()
+while IFS= read -r _g; do [ -n "$_g" ] && [ "$_g" != "null" ] && EXCLUDES+=(--exclude-glob "$_g"); done \
+  < <(yq '(.build.scope.exclude_globs // []) + (.build.diff_size.exclude_globs // []) | .[]' forge.yaml 2>/dev/null || true)
+if [ -z "$CS_SCRIPT" ]; then echo "CONSUMER_SWEEP: unavailable (script not found under FORGE_ROOT)"; else
+  bash "$CS_SCRIPT" --ident {IDENTIFIER_1} --ident {IDENTIFIER_2} ${EXCLUDES[@]+"${EXCLUDES[@]}"}; echo "CONSUMER_SWEEP_RC=$?"
+fi
+```
+
+Each identifier must match `^[A-Za-z0-9_.:/-]{4,80}$` (flags without leading dashes). Output is TSV `identifier<TAB>kind<TAB>file:line`; a `truncated` row means more sites exist than the cap shows (advisory). Exit `2` or an unavailable script is not "no sites": write "consumer sweep unavailable" in `### Risk Assessment` and continue; never block the plan.
+
+Fold the result into Phase A2.8, with no new record grammar: each swept identifier becomes a `SYMBOL:` (`query` = the identifier) and each referencing file a `HIT:` (`disposition=change` when the plan edits it, else `verified-unaffected` with a reason after reading the site). The builder must update or justify each site (implement I6 `CONSUMERS:` block).
+
+---
+
 ## Phase A3: Consistency Rules
 
 Identify invariants that ALL affected paths must satisfy. These become the builder's consistency checklist.
@@ -852,6 +885,7 @@ B4    → [THIS MODULE] Architecture Planning (FORGE:ARCHITECT comment)
           Phase A2.5: Pipeline Phase-Dependency Check
           Phase A2.7: Pattern Sweep Intake (review-finding issues only)
           Phase A2.8: Blast-Radius Manifest (enforced by validate V4.5, passed to review-pr)
+          Phase A2.10: Consumer Sweep Intake (consumer-sweep.sh --ident; gated by validate V4.6)
           Phase A3: Consistency Rules
           Phase A4: Sequence the Implementation
           Phase A5: Risk Assessment

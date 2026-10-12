@@ -55,7 +55,7 @@ function sections(g) {
   const kv = (o) => Object.entries(o).map(([a, b]) => `${a} ${b}`).join(", ") || NA;
   out.push("### Issue flow", ...table(["metric", "value"], [
     ["created by source", kv(i.created)], ["closed by kind", kv(i.closed)],
-    ["net flow (created - closed)", isNum(i.net) ? signed(i.net, String) : NA], ["findings per merged issue", f1(i.findingsPerMerge)],
+    ["net flow (created - closed)", isNum(i.net) ? signed(i.net, String) : NA], ["findings per merged issue", f1(i.findingsPerMerge)], ["introduced findings per merged issue", f1(i.introducedPerMerge)],
   ]), "");
   if (g.delta) {
     const d = g.delta;
