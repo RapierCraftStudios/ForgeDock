@@ -3753,6 +3753,27 @@ describe("runIssue — forge#3931: cycle-aware hydration and head-aware --retry"
     assert.equal(res.terminalReason, "merged");
   });
 
+  it("CONC-1: same-cycle hydrate (needs-human label set, or open PR, or non-terminal index) is never reset", async () => {
+    let ci = 0;
+    for (const mut of [
+      (w) => { w.labels = ["needs-human"]; },
+      (w) => { w.pr = 7; w.prList = () => [{ number: 7, state: "OPEN" }]; },
+      (w) => { w.issueState = "CLOSED"; },
+      (w) => { w.body = serializeState({ ...staleIndex, terminal: false, phase: "remediate" }); },
+    ]) {
+      const { w, io } = fakeWorld();
+      w.body = serializeState(staleIndex);
+      mut(w);
+      withExtraComments(io, w, cycleComment(1));
+      const ran = [];
+      await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner: script(w, ran), now: () => 1000, maxAttempts: 1 });
+      assert.equal(readLog(dir, 42).filter((e) => e.event === "RUN_NEXT_CYCLE").length, 0, `case ${ci}`);
+      ci++;
+      assert.ok(!ran.includes("work-on/build"), "same-cycle state must not rebuild");
+      rmSync(dir, { recursive: true, force: true }); dir = mkdtempSync(join(tmpdir(), "fd-engine-"));
+    }
+  });
+
   it("an untrusted FORGE:CYCLE comment does not reset the hydrated state", async () => {
     const { w, io } = fakeWorld();
     w.body = serializeState(staleIndex);

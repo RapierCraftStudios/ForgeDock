@@ -1211,6 +1211,26 @@ export async function remediationHeadStale(state, io) {
   } catch { return false; }
 }
 
+/**
+ * forge#3931 (CONC-1): hydrate-time cycle reset is safe only when the hydrated progress is provably from an
+ * OLDER cycle. The index carries no cycle number, so a same-cycle mid-flight or blocked run must not reset.
+ * Provable = a terminal index AND live GitHub state showing the issue OPEN with `needs-human` and
+ * `workflow:remediating` both clear AND no OPEN PR on the branch. Any unreadable input returns false.
+ */
+export async function cycleResetProvable(state, io) {
+  if (!state?.terminal) return false;
+  try {
+    const snap = await issueSnapshot(state.issue, io);
+    if (!snap.ok || snap.state !== "OPEN") return false;
+    if (snap.labels.includes("needs-human") || snap.labels.includes("workflow:remediating")) return false;
+    if (state.branch) {
+      const a = JSON.parse((await io.gh(["pr", "list", "--head", state.branch, "--json", "number,state", "--state", "all"])) || "[]");
+      if (!Array.isArray(a) || a.some((p) => p && p.state === "OPEN")) return false;
+    }
+    return true;
+  } catch { return false; }
+}
+
 /** The engine's transition function: first uncommitted phase whose gate holds. */
 export function pickPhase(state) {
   if (state.terminal) return null;

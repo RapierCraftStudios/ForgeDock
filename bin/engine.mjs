@@ -8,7 +8,7 @@ import { readFileSync, rmSync } from "node:fs";
 import { createHash, scryptSync } from "node:crypto";
 import { hostname as osHostname, homedir } from "node:os";
 import { appendEvent, readLog, deriveState, rewriteLog } from "./engine/runlog.mjs";
-import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postCycleMarker, nextCycleNumber, newestCycle, remediationHeadStale, decompositionRevokedWithOverride } from "./engine/phases.mjs";
+import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postCycleMarker, nextCycleNumber, newestCycle, cycleResetProvable, remediationHeadStale, decompositionRevokedWithOverride } from "./engine/phases.mjs";
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { VALID_BACKENDS, resolveRunTmpRoot, runTmpDir } from "./runner.mjs";
@@ -414,10 +414,11 @@ export async function runIssue(opts) {
     state = deriveState(readLog(dir, issue));
     // forge#3931: the index does not carry the cycle, so a hydrated log always starts at cycle 0. When a
     // trusted FORGE:CYCLE exists, cycle-scoped progress (or a needs-human/phase-complete/engine-error terminal)
-    // belongs to an older cycle: reset via the existing RUN_NEXT_CYCLE event so build runs again instead of
+    // belongs to an older cycle ONLY when provably so (cycleResetProvable: terminal index, issue OPEN, no needs-human/remediating label, no open PR): reset via the existing RUN_NEXT_CYCLE event so build runs again instead of
     // terminating. An unreadable trail resets nothing (fail closed). merged/decomposed/invalid terminals stay.
     if (state.committed.some((p) => ["build", "review", "remediate", "close"].includes(p)) &&
-        (!state.terminal || ["needs-human", "phase-complete", "engine-error"].includes(state.terminalReason))) {
+        state.terminal && ["needs-human", "phase-complete", "engine-error"].includes(state.terminalReason) &&
+        await cycleResetProvable(state, io)) {
       let cyc = 0;
       try { cyc = await newestCycle(issue, io); } catch { cyc = 0; }
       if (cyc > 0) {
