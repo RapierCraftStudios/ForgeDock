@@ -1,0 +1,10 @@
+steps:
+  - label: ":hammer: test"
+    command: echo bk-test
+  - wait
+  - label: "docker plugin"
+    command: echo bk-docker
+    plugins:
+      - docker#v5.0.0:
+          image: node:20
+  - block: ":rocket: release"

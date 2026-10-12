@@ -1,0 +1,29 @@
+version: 2.1
+jobs:
+  test:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - run:
+          name: unit
+          command: echo circle-unit
+  secured:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - run: echo secured
+  deploy-prod:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - run: echo deploy
+workflows:
+  main:
+    jobs:
+      - test
+      - secured:
+          context: org-secrets
+          requires: [test]
+      - deploy-prod:
+          requires: [test]

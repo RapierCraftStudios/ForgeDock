@@ -1,0 +1,59 @@
+name: CI
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - '.github/workflows/ci.yml'
+jobs:
+  unit:
+    name: Unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: unit tests
+        run: bash tests/greet.test.sh
+  matrix:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo matrix-ok
+  withservice:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: example
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 5s
+    steps:
+      - run: echo service-ok
+  needsecret:
+    runs-on: ubuntu-latest
+    env:
+      API_TOKEN: ${{ secrets.API_TOKEN }}
+    steps:
+      - run: echo uses-secret
+  unknownaction:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: some-org/mystery-action@v9
+  deployprod:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - run: echo deploy
+  conditional:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - run: echo push-only

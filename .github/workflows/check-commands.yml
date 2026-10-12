@@ -19,6 +19,10 @@ on:
       - 'scripts/check-branch-ancestry.test.sh'
       - 'scripts/check-blast-radius.sh'
       - 'scripts/check-blast-radius.test.sh'
+      - 'scripts/ci-local.sh'
+      - 'scripts/ci-local.test.sh'
+      - 'scripts/ci-local/**'
+      - 'scripts/fixtures/ci-local/**'
       - 'scripts/consumer-sweep.sh'
       - 'scripts/check-edge-cases.sh'
       - 'scripts/check-edge-cases.test.sh'
@@ -75,6 +79,10 @@ on:
       - 'scripts/check-branch-ancestry.test.sh'
       - 'scripts/check-blast-radius.sh'
       - 'scripts/check-blast-radius.test.sh'
+      - 'scripts/ci-local.sh'
+      - 'scripts/ci-local.test.sh'
+      - 'scripts/ci-local/**'
+      - 'scripts/fixtures/ci-local/**'
       - 'scripts/consumer-sweep.sh'
       - 'scripts/check-edge-cases.sh'
       - 'scripts/check-edge-cases.test.sh'
@@ -365,6 +373,7 @@ jobs:
           bash scripts/check-spec-bash.test.sh
           bash scripts/check-branch-ancestry.test.sh
           bash scripts/check-blast-radius.test.sh
+          bash scripts/ci-local.test.sh
           bash scripts/check-edge-cases.test.sh
           bash scripts/consumer-sweep.test.sh
           bash scripts/spec-no-worktree-script.test.sh

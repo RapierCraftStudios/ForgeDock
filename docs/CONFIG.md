@@ -754,10 +754,73 @@ verification:
 | `services[].name` | string | **Yes (per entry)** | Human-readable service name |
 | `services[].container` | string | No | Docker container name for `docker exec` verification |
 | `services[].health_url` | string | No | Local URL for container-level health checks |
+| `ci_local` | object | No | Local CI gate settings (see below) |
 | `consumer_sweep.mode` | string | No | `advisory` (default): the validate consumer sweep (`scripts/consumer-sweep.sh`, V4.6) records unaddressed referencing sites and never fails. `blocking`: unaddressed sites fail validate with `consumer_unaddressed`, build runs one repair round, and sites still unaddressed are recorded as `CONSUMERS: unresolved` and passed to review as known risk (never `needs-human`). Flip to `blocking` only after `bash scripts/consumer-sweep.sh --eval-history 20` shows a mean of at most 2 flagged sites per merge and none above 10 on your repo |
 | `consumer_sweep.budget_seconds` | integer | No | Wall-clock budget for the sweep (default `60`). When it runs out the sweep stops with `BUDGET_EXCEEDED`, reports the partial result, and never fails, in either mode |
 
-**Commands that use this section**: `quality-gate`, `validate` (health checks and `consumer_sweep`)
+**Commands that use this section**: `quality-gate`, `validate` (V2 runs `verification.commands`; V4.8 runs the local CI gate; health checks and `consumer_sweep`), `work-on`
+
+### `verification.ci_local` (OPTIONAL)
+
+Validate Phase V4.8 runs `scripts/ci-local.sh` before review: it derives the repo's pull-request checks from its own CI
+definitions and runs them locally in the build worktree, so deterministic CI failures are fixed in build (at most 2 fix
+iterations, then the build is blocked with `ci-local: <jobs>`). It never contacts GitHub and never triggers a remote
+workflow; remote CI still runs once, at merge. Everything works with no configuration.
+
+```yaml
+verification:
+  ci_local:
+    exclude_jobs: ["gha:ci:e2e-*"]
+    include_jobs: []
+    extra_commands:
+      - "make lint-docs"
+    services: auto
+    budget_minutes: 15
+    max_parallel: 4
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `exclude_jobs` | array of globs | `[]` | Job ids or names to drop from the plan (matched against `gha:<workflow>:<job>`, `gitlab:<job>`, and the job name) |
+| `include_jobs` | array of globs | `[]` | When non-empty, only matching CI jobs run (an allowlist); `extra_commands` and the portability checks always run |
+| `extra_commands` | array of strings or `{name, command}` | `[]` | Extra commands always added to the plan. `verification.commands` is not repeated here: V2 already runs it as the fast pre-step |
+| `services` | `auto` \| `off` | `auto` | `auto` starts a job's service containers with docker (same image, env, ports), tearing them down afterwards; without docker, or with `off`, such jobs are deferred |
+| `budget_minutes` | number | `15` | Overall wall-time budget; jobs not finished or started within it are deferred, not failed |
+| `max_parallel` | number | `4` | Jobs run in parallel by one run (also bounded machine-wide, see below) |
+
+**Where checks come from**: GitHub Actions (`.github/workflows`), GitLab CI, CircleCI, Azure Pipelines, Bitbucket Pipelines
+and Buildkite definitions, read from the trusted base ref plus the PR's own edits (a PR can add a check but cannot delete
+one). When no CI definition gates the change, the repo's task runners are used (`package.json` scripts, Makefile, justfile,
+Taskfile, tox/nox, pre-commit, pyproject tools, Cargo, Go, Maven, Gradle). Deterministic portability checks (Windows-invalid
+filenames, case collisions, CRLF in scripts, bash 3.2 constructs and GNU-only flags on added lines, plus the repo's
+`scripts/check-shell-portability.sh` when present) always run, because macOS/Windows jobs are deferred.
+
+**Deferred to CI** (listed in the `FORGE:BUILDER` comment under `### Deferred to CI`, never guessed): jobs that reference
+`secrets.` or `environment:`, deploy/publish jobs, `pull_request_target`, schedule/dispatch-only workflows, unknown `uses:`
+actions, orbs, plugins and templates, service containers without docker, macOS/Windows variants on another host, matrix
+variants beyond the first host-compatible one, and jobs whose tools are not installed locally. A failed dependency install
+(for example offline) defers the job instead of failing it.
+
+**Exact scoping** (runs only what the change can affect): job-level path filters from the CI definition (including
+`dorny/paths-filter` outputs) gate whole jobs; per-file linters (shellcheck, eslint, prettier, ruff, black, flake8, ...) run
+on the changed files only; tests use the ecosystem selector (`jest --findRelatedTests`, `vitest related`, `go` affected
+packages with reverse dependencies, `cargo test -p` affected crates, Maven `-pl ... -amd`, `nx affected`, `turbo --filter`) or a
+git-grep reference graph for file-list runners (pytest, mocha, `node --test`, bats, rspec, direct `*.test.*` invocations);
+changed test files always run. **Fail-safe widening**: a lockfile, build or lint config, CI definition, unreferenced shared
+fixture, or an unknown file type widens the step to the full command (the reason is reported, never silently narrowed).
+Passing results are cached by input hash under `~/.forge/ci-local/results` and reused across build iterations, lanes and
+issues on the same base.
+
+**Environment** (all optional): `FORGE_CI_LOCAL_SLOTS` (machine-wide concurrent jobs across all runs, default
+`max(2, min(8, cpus/2))`; slots live under `~/.forge/ci-local.lock` and stale ones are reclaimed), `FORGE_CI_LOCAL_BUDGET_MINUTES`,
+`FORGE_CI_LOCAL_MAX_PARALLEL`, `FORGE_CI_LOCAL_JOB_TIMEOUT` (seconds, default min(900, budget)), `FORGE_CI_LOCAL_SERVICES=off`,
+`FORGE_CI_LOCAL_HOME` (default `~/.forge`), `FORGE_CI_LOCAL_NO_CACHE=1`. Jobs run in a runner-like environment: an allowlist of
+system and toolchain variables (PATH, HOME, locale, XDG_*, CARGO_*, GOPATH, JAVA_HOME, proxies, ...) plus `CI=true`; credentials and
+ambient operator state (agent tokens, `FORGE_*`/`CLAUDE_*` settings, git hook variables) never reach them. Extra names can be
+listed in `FORGE_CI_LOCAL_PASSTHROUGH` (comma separated). Requires `node`, `git`, and mikefarah `yq` v4 for YAML CI definitions (without `yq`
+the gate is DEGRADED and reported in `verification_skipped`, never a silent pass).
+
+**Commands that use this section**: `work-on` (validate V4.8)
 
 ---
 

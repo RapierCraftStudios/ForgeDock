@@ -1,0 +1,11 @@
+pr:
+  branches:
+    include: [main]
+pool:
+  vmImage: ubuntu-latest
+variables:
+  greeting: hi
+steps:
+  - script: echo "$(greeting) azure"
+    displayName: say
+  - task: SomeUnknownTask@1
