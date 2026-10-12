@@ -554,6 +554,9 @@ function isRemediationKind(k) {
   return typeof k === "string" && Object.hasOwn(REMEDIATION_BOUND_MARKERS, k);
 }
 
+// forge#4021: the newest remediation trail reported an in-PR fix request (remediate.md M8).
+const INPR_REQUESTED_RE = /\*\*Re-gate outcome\*\*:\s*INPR-FIX-REQUESTED\b/;
+
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const BRANCH_RE = /^[A-Za-z0-9._][A-Za-z0-9._\/-]*$/;
 const LANE_RE = BRANCH_RE;
@@ -908,7 +911,15 @@ export const PHASES = [
         const { comments } = await issueMarkers(state.issue, io);
         // Resume idempotency: a handoff interrupted after the marker post must not double-count.
         // forge#3542: only a full-line marker in a trusted comment counts.
-        if (!comments.some((b) => hasSentinelLine(b, `FORGE:${boundMarker}: pr=${pr}`))) {
+        // forge#4021: an in-PR fix re-armed by the re-gate (the newest trail after the newest marker reports
+        // INPR-FIX-REQUESTED) needs a FRESH marker, or M0's per-kind guard sees the first trail as this dispatch's
+        // and returns ALREADY_DONE. The marker count is also the bound (detectOutcome allows one re-arm).
+        const sentinel = `FORGE:${boundMarker}: pr=${pr}`;
+        let markerAt = -1;
+        comments.forEach((b, i) => { if (hasSentinelLine(b, sentinel)) markerAt = i; });
+        const trailAfter = markerAt < 0 ? null : latestMarked(comments.slice(markerAt + 1), PHASE_MARKERS.remediate.header, PHASE_MARKERS.remediate.completionMarker);
+        const rearmed = kind === "inpr-fix" && trailAfter !== null && INPR_REQUESTED_RE.test(trailAfter);
+        if (markerAt < 0 || rearmed) {
           await io.gh(["issue", "comment", String(state.issue), "--body",
             `${marker}\nReview handed PR #${pr} to remediation (${kind}); the engine is dispatching it once.`]);
         }
@@ -918,7 +929,8 @@ export const PHASES = [
       await postDispatchMarker();
       return legacyArgs();
     },
-    entryCondition: (s) => s.committed.includes("review") && s.terminalReason === "needs-human",
+    // forge#4021: also re-entered (with remediationKind "inpr-fix") after a re-gate that requested one in-PR fix round.
+    entryCondition: (s) => s.committed.includes("review") && (s.terminalReason === "needs-human" || s.remediationKind === "inpr-fix"),
     async detectOutcome(state, io) {
       // forge#3530: read the NEWEST completed trail only. A concatenated oldest-first blob
       // returned a stale outcome from an earlier remediation when a later one posted nothing.
@@ -1036,11 +1048,30 @@ export const PHASES = [
           return { status: "committed", terminalReason: "needs-human",
                    code: reGateOutcome === "UNFIXABLE" ? OC.REMEDIATE_UNFIXABLE : OC.REMEDIATE_RE_ESCALATED,
                    outputs: { reGateOutcome } };
+        case "INPR-FIX-REQUESTED": {
+          // forge#4021: the re-review approved but posted a FORGE:INPR_FIX work order. One further in-PR fix
+          // remediation is allowed (never needs-human on the first request); the bound marker count caps it.
+          if (await remediationHeadStale(state, io))
+            return { status: "failed", code: OC.REMEDIATE_NO_MARKER, detail: `stale ${completion} trail: PR head moved since it was recorded` };
+          if (await prMerged()) return mergedResult(reGateOutcome);
+          const round = /\*\*INPR round\*\*:\s*(\d+)/.exec(latest)?.[1] ?? null;
+          const outputs = { reGateOutcome, ...(round ? { inprRound: Number(round) } : {}) };
+          const boundSentinel = `FORGE:${REMEDIATION_BOUND_MARKERS["inpr-fix"]}: pr=${state.pr}`;
+          const priorMarkers = state.pr == null ? 2 : comments.filter((b) => hasSentinelLine(b, boundSentinel)).length;
+          if (priorMarkers >= 2)
+            return { status: "committed", terminalReason: "needs-human", code: OC.REMEDIATE_RE_ESCALATED, outputs };
+          return { status: "committed", code: OC.REMEDIATE_INPR_REQUESTED, outputs: { ...outputs, remediation: "inpr-fix" } };
+        }
+        case "REREVIEW-REQUIRED":
+          if (await remediationHeadStale(state, io))
+            return { status: "failed", code: OC.REMEDIATE_NO_MARKER, detail: `stale ${completion} trail: PR head moved since it was recorded` };
+          return { status: "committed", terminalReason: "needs-human", code: OC.REMEDIATE_RE_ESCALATED, outputs: { reGateOutcome } };
         default:
           return { status: "failed", detail: `FORGE:REMEDIATION:COMPLETE present but Re-gate outcome unrecognized/missing: ${reGateOutcome || "none"}` };
       }
     },
-    isTerminalAfter: () => true,
+    // forge#4021: a committed in-PR fix request continues the run (remediate re-arms) instead of ending it.
+    isTerminalAfter: (s) => s.remediationKind !== "inpr-fix",
   },
   {
     id: "close",

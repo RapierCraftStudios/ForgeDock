@@ -1538,15 +1538,24 @@ export function runCliBackend({
       // review findings — #2277, #2292, #2293, #2355 — for that defect
       // class).
       const partial = (stdout + stderr).trim();
-      throw new Error(
+      const timeoutError = new Error(
         `claude CLI invocation timed out after ${timeoutSecs}s and was killed. ` +
           `Set FORGEDOCK_CLI_TIMEOUT_MS (ms) to adjust, or use --backend api.` +
           (partial ? ` Partial output: ${sanitizeOutputExcerptForLog(partial)}` : ""),
       );
+      // forge#4021: stable transient-infra class; the engine retries it on a
+      // separate bounded counter without consuming a phase attempt.
+      timeoutError.code = "CLI_SPAWN_TRANSIENT";
+      timeoutError.spawnErrno = "ETIMEDOUT";
+      throw timeoutError;
     }
     if (result.error) {
       const error = new Error(`Failed to invoke claude CLI: ${result.error.message}`);
       error.code = result.error.code;
+      if (["EAGAIN", "ENOMEM", "EMFILE"].includes(result.error.code)) {
+        error.spawnErrno = result.error.code;
+        error.code = "CLI_SPAWN_TRANSIENT";
+      }
       throw error;
     }
 

@@ -1704,6 +1704,31 @@ describe("runCliBackend spawnFn seam (issue #2033)", () => {
     );
   });
 
+  // forge#4021: spawn-level transient failures get a stable class the engine retries without burning an attempt.
+  for (const [errno, status] of [["ETIMEDOUT", null], ["EAGAIN", null], ["ENOMEM", null], ["EMFILE", null]]) {
+    it(`tags a ${errno} spawn failure as CLI_SPAWN_TRANSIENT (original errno kept)`, () => {
+      const spawnFn = () => ({ status, stdout: "", stderr: "", error: Object.assign(new Error(`spawnSync claude ${errno}`), { code: errno }) });
+      assert.throws(
+        () => runCliBackend({
+          spec: loadCommandSpec(COMMANDS_DIR, "work-on"), userMessage: "Execute: /work-on 4021", args: ["4021"],
+          cwd: TMP, logger: { log: () => {} }, bin: "claude", spawnFn,
+        }),
+        (err) => err.code === "CLI_SPAWN_TRANSIENT" && err.spawnErrno === errno,
+      );
+    });
+  }
+
+  it("a non-transient spawn error (ENOENT) keeps its own code", () => {
+    const spawnFn = () => ({ status: null, stdout: "", stderr: "", error: Object.assign(new Error("nope"), { code: "ENOENT" }) });
+    assert.throws(
+      () => runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"), userMessage: "Execute: /work-on 4021", args: ["4021"],
+        cwd: TMP, logger: { log: () => {} }, bin: "claude", spawnFn,
+      }),
+      (err) => err.code === "ENOENT",
+    );
+  });
+
   it("propagates a non-zero exit status from the injected spawnFn as CLI_BACKEND_FAILED", () => {
     const spawnFn = () => ({
       status: 1,

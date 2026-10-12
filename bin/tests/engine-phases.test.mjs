@@ -790,6 +790,82 @@ describe("pickPhase", () => {
       );
     });
 
+    // forge#4021: a re-gate whose re-review approved but requested an in-PR fix continues the run.
+    describe("INPR-FIX-REQUESTED re-gate (forge#4021)", () => {
+      const inprBody = `<!-- FORGE:REMEDIATION -->\n**Re-gate outcome**: INPR-FIX-REQUESTED at workflow:in-review, in-pr fix round 1\n**INPR round**: 1\n**Head**: ${"a".repeat(40)}\n<!-- FORGE:REMEDIATION:COMPLETE -->`;
+      const bound = "<!-- FORGE:INPR_REMEDIATION: pr=7 -->\nhandoff";
+      const stInpr = { ...base, issue: 42, pr: 7, remediationKind: "inpr-fix" };
+      const io = (comments, pr = { state: "OPEN", mergedAt: null, headRefOid: "a".repeat(40) }) => ({
+        gh: async (args) => (args[0] === "pr" ? JSON.stringify(pr) : jsonLines(comments.map((c) => trusted(c)))),
+        git: async () => "0",
+      });
+
+      it("first request -> committed with remediation inpr-fix and NO terminalReason (never needs-human)", async () => {
+        const o = await remediate.detectOutcome(stInpr, io([bound, inprBody]));
+        assert.equal(o.status, "committed");
+        assert.equal(o.terminalReason, undefined);
+        assert.equal(o.outputs.remediation, "inpr-fix");
+        assert.equal(o.outputs.inprRound, 1);
+        assert.equal(o.code, "remediate.inpr_requested");
+      });
+
+      it("a missing INPR round line does not fail the phase", async () => {
+        const o = await remediate.detectOutcome(stInpr, io([bound, inprBody.replace("**INPR round**: 1\n", "")]));
+        assert.equal(o.status, "committed");
+        assert.equal(o.outputs.remediation, "inpr-fix");
+      });
+
+      it("a prior INPR_REMEDIATION marker (second request) escalates to needs-human, never loops", async () => {
+        const o = await remediate.detectOutcome(stInpr, io([bound, inprBody, bound, inprBody]));
+        assert.equal(o.status, "committed");
+        assert.equal(o.terminalReason, "needs-human");
+        assert.equal(o.code, "remediate.re_escalated");
+        assert.equal(o.outputs.remediation, undefined);
+      });
+
+      it("a PR head that moved since the trail -> failed (stale trail)", async () => {
+        const o = await remediate.detectOutcome(stInpr, io([bound, inprBody], { state: "OPEN", mergedAt: null, headRefOid: "b".repeat(40) }));
+        assert.equal(o.status, "failed");
+      });
+
+      it("an already merged PR hands to merge/close instead of re-arming", async () => {
+        const o = await remediate.detectOutcome(stInpr, io([bound, inprBody], { state: "MERGED", mergedAt: "t", headRefOid: "a".repeat(40) }));
+        assert.equal(o.terminalReason, "merged");
+      });
+
+      it("REREVIEW-REQUIRED is a recognised outcome (needs-human hold), not an attempt-burning failure", async () => {
+        const o = await remediate.detectOutcome(base, ioWith(remediateBody("REREVIEW-REQUIRED")));
+        assert.equal(o.status, "committed");
+        assert.equal(o.terminalReason, "needs-human");
+      });
+
+      it("N/A (the old collapsed outcome) is still not a recognised outcome", async () => {
+        const o = await remediate.detectOutcome(base, ioWith(remediationBody("N/A — held")));
+        assert.equal(o.status, "failed");
+      });
+
+      it("entryCondition re-enters remediate for kind inpr-fix and isTerminalAfter continues the run", () => {
+        const s = { ...base, committed: ["build", "review"], terminalReason: "needs-human", remediationKind: "inpr-fix" };
+        assert.equal(remediate.entryCondition({ ...s, terminalReason: null }), true);
+        assert.equal(remediate.isTerminalAfter(s), false);
+        assert.equal(remediate.isTerminalAfter({ ...s, remediationKind: null }), true);
+      });
+
+      it("buildArgs posts a FRESH INPR_REMEDIATION marker when the newest trail requested an in-PR fix, and dedupes otherwise", async () => {
+        const mk = (existing) => { const posted = []; return { posted, io: { gh: async (a) => {
+          if (a[0] === "issue" && a[1] === "comment") { posted.push(a[a.indexOf("--body") + 1]); return ""; }
+          return existing;
+        }, git: async () => "" } }; };
+        const st = { ...base, issue: 42, pr: 7, remediationKind: "inpr-fix" };
+        const rearmed = mk(jsonLines([bound, inprBody].map((c) => trusted(c))));
+        await remediate.buildArgs(st, { repo: "acme/widgets" }, rearmed.io);
+        assert.equal(rearmed.posted.filter((b) => b.includes("FORGE:INPR_REMEDIATION: pr=7")).length, 1);
+        const resumed = mk(jsonLines([bound].map((c) => trusted(c))));
+        await remediate.buildArgs(st, { repo: "acme/widgets" }, resumed.io);
+        assert.equal(resumed.posted.filter((b) => b.includes("FORGE:INPR_REMEDIATION: pr=7")).length, 0);
+      });
+    });
+
     it("entryCondition requires review committed AND terminalReason needs-human", () => {
       const reviewCommitted = { ...base, committed: ["build", "review"] };
       assert.equal(remediate.entryCondition({ ...reviewCommitted, terminalReason: "needs-human" }), true);
