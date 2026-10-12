@@ -592,22 +592,8 @@ In-PR fix round did not land; the remaining CONFIRMED MEDIUM findings are filed 
   Persisted loop bounds for the cases above — count first, then act (`{BOUND}` is `STALE_REREVIEW`, `DEGRADED_REREVIEW`, `CI_REMEDIATION`, `INPR_REMEDIATION` or `BASESYNC_REMEDIATION`). This phase posts only the `STALE_REREVIEW` and `DEGRADED_REREVIEW` markers; `CI_REMEDIATION`, `INPR_REMEDIATION` and `BASESYNC_REMEDIATION` are posted by the router in Phase 4R, immediately before it invokes remediation (forge#3398):
   ```bash
   [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] bound check only"; }
-  if [ "{BOUND}" = "STALE_REREVIEW" ]; then
-    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
-      --jq '[.[] | select((.body | contains("FORGE:STALE_REREVIEW:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
-  elif [ "{BOUND}" = "DEGRADED_REREVIEW" ]; then
-    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
-      --jq '[.[] | select((.body | contains("FORGE:DEGRADED_REREVIEW:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
-  elif [ "{BOUND}" = "INPR_REMEDIATION" ]; then
-    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
-      --jq '[.[] | select((.body | contains("FORGE:INPR_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
-  elif [ "{BOUND}" = "BASESYNC_REMEDIATION" ]; then
-    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
-      --jq '[.[] | select((.body | contains("FORGE:BASESYNC_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
-  else
-    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
-      --jq '[.[] | select((.body | contains("FORGE:CI_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
-  fi
+  BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
+    --jq '[.[] | select((.body | contains("FORGE:{BOUND}:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
   if [ "$BOUND_COUNT" -ge 1 ]; then
     echo "BOUND_EXHAUSTED: {BOUND} already used for PR #{PR_NUMBER}"
   elif [ "{BOUND}" = "STALE_REREVIEW" ] && [ "${DRY_RUN:-false}" != "true" ]; then
