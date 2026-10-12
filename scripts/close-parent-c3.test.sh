@@ -6,6 +6,8 @@
 # Usage: bash scripts/close-parent-c3.test.sh
 
 set -euo pipefail
+# Every mktemp below lands in one private dir that the EXIT trap removes (forge#4016).
+_SUITE_TMP=$(mktemp -d); export TMPDIR="$_SUITE_TMP"; trap 'rm -rf "$_SUITE_TMP"' EXIT
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLOSE="$ROOT/commands/work-on/close.md"

@@ -1,15 +1,14 @@
+import { tmpDir } from "./_tmp.mjs";
 import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   existsSync,
-  mkdtempSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
-  writeFileSync,
-} from "node:fs";
+  writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -28,7 +27,7 @@ import {
 const roots = [];
 
 function temp(prefix) {
-  const path = mkdtempSync(join(tmpdir(), prefix));
+  const path = tmpDir(prefix);
   roots.push(path);
   return path;
 }

@@ -13,9 +13,10 @@
  * Run with: node --test bin/tests/registry.test.mjs
  */
 
+import { tmpDir as makeTmpDir } from "./_tmp.mjs";
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -66,7 +67,7 @@ describe("resolveState — state matrix", async () => {
   let reg;
 
   before(async () => {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-reg-test-"));
+    tmpDir = makeTmpDir("forge-reg-test-");
     projDir = join(tmpDir, "project");
     mkdirSync(projDir, { recursive: true });
     // Load registry with a temp HOME so the registry file goes to tmpDir
@@ -129,7 +130,7 @@ describe("setOptOut, nudgeSeen, markNudgeSeen", async () => {
   let reg;
 
   before(async () => {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-reg-test-"));
+    tmpDir = makeTmpDir("forge-reg-test-");
     projDir = join(tmpDir, "project2");
     mkdirSync(projDir, { recursive: true });
     writeFileSync(join(projDir, "forge.yaml"), "# forge\n");
@@ -175,7 +176,7 @@ describe("normalizeDir — path normalization", async () => {
   let reg;
 
   before(async () => {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-norm-test-"));
+    tmpDir = makeTmpDir("forge-norm-test-");
     reg = await loadRegistry(tmpDir, "normalize-1");
   });
 
@@ -231,7 +232,7 @@ describe("Registry queue RMW serialization (PR #460)", async () => {
   let projDirB;
 
   before(async () => {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-queue-test-"));
+    tmpDir = makeTmpDir("forge-queue-test-");
     projDirA = join(tmpDir, "proj-a");
     projDirB = join(tmpDir, "proj-b");
     mkdirSync(projDirA, { recursive: true });
@@ -301,7 +302,7 @@ describe("Registry fail-open for missing or corrupt file", async () => {
   let reg;
 
   before(async () => {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "forge-failopen-test-"));
+    tmpDir = makeTmpDir("forge-failopen-test-");
     reg = await loadRegistry(tmpDir, "failopen-1");
   });
 

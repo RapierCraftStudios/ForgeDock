@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { tmpDir } from "../tests/_tmp.mjs";
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,7 +41,7 @@ function fakeGh() {
 }
 
 let td;
-beforeEach(() => { td = mkdtempSync(join(tmpdir(), "stats-")); });
+beforeEach(() => { td = tmpDir("stats-"); });
 afterEach(() => rmSync(td, { recursive: true, force: true }));
 
 describe("telemetry comment parsing", () => {

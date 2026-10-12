@@ -2,9 +2,10 @@
  * bin/tests/settings-hook.test.mjs — Unit tests for bin/settings-hook.mjs.
  * Run with: node --test bin/tests/settings-hook.test.mjs
  */
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 import { installSessionStartHook, removeSessionStartHook } from "../settings-hook.mjs";
@@ -13,7 +14,7 @@ const HOOK_SCRIPT = "C:/fake/forgedock/bin/hooks/session-start.mjs";
 
 let dir, settingsPath;
 beforeEach(() => {
-  dir = mkdtempSync(join(os.tmpdir(), "fd-hook-"));
+  dir = tmpDir("fd-hook-");
   settingsPath = join(dir, "settings.json");
 });
 
@@ -40,8 +41,7 @@ describe("installSessionStartHook", () => {
       settingsPath,
       JSON.stringify({
         model: "opus",
-        hooks: { SessionStart: [{ hooks: [{ type: "command", command: "echo hi" }] }], Stop: [] },
-      }),
+        hooks: { SessionStart: [{ hooks: [{ type: "command", command: "echo hi" }] }], Stop: [] } }),
       "utf-8",
     );
     installSessionStartHook(settingsPath, HOOK_SCRIPT);

@@ -1,7 +1,8 @@
 // bin/tests/engine.test.mjs
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,7 +15,7 @@ import { SEP, trusted, builderBody, invBody, asComments, inv as investigationCom
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-let dir; beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "fd-engine-")); });
+let dir; beforeEach(() => { dir = tmpDir("fd-engine-"); });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
 
@@ -50,8 +51,7 @@ function fakeWorld() {
         mergedAt: w.prMerged ? "t" : null, labels: w.prNeedsHuman ? [{name:"needs-human"}] : [] });
       return "";
     },
-    git: async (args) => (args[0] === "worktree" ? fakeWorktreeList(w.markers) : String(w.commitsAhead)),
-  };
+    git: async (args) => (args[0] === "worktree" ? fakeWorktreeList(w.markers) : String(w.commitsAhead)) };
   return { w, io };
 }
 
@@ -2612,7 +2612,7 @@ describe("runIssue — forge#2239: in-flight lease", () => {
     assert.ok(leaseSnapshotAfterA1Start, "a1 must have claimed a lease before its phase runner was invoked");
 
     const runnerA2 = async () => { throw new Error("a2's runner must never be called while a1 holds the lease"); };
-    const res2 = await runIssue({ issue: 42, dir: mkdtempSync(join(tmpdir(), "fd-engine-a2-")), agentId: "a2", lane: "staging",
+    const res2 = await runIssue({ issue: 42, dir: tmpDir("fd-engine-a2-"), agentId: "a2", lane: "staging",
       io, runner: runnerA2, now: () => Date.now(), maxAttempts: 1 });
 
     assert.equal(res2.terminalReason, "deferred");
@@ -3821,7 +3821,7 @@ describe("runIssue — forge#3534: divergence guard exempts an investigation exi
       w.issueState = "CLOSED"; w.labels = labels;
       const res = await run(w, io, {});
       assert.equal(res.terminalReason, "invalid");
-      rmSync(dir, { recursive: true, force: true }); dir = mkdtempSync(join(tmpdir(), "fd-engine-"));
+      rmSync(dir, { recursive: true, force: true }); dir = tmpDir("fd-engine-");
     }
   });
 });
@@ -3874,7 +3874,7 @@ describe("runIssue — forge#3931: cycle-aware hydration and head-aware --retry"
       assert.equal(readLog(dir, 42).filter((e) => e.event === "RUN_NEXT_CYCLE").length, 0, `case ${ci}`);
       ci++;
       assert.ok(!ran.includes("work-on/build"), "same-cycle state must not rebuild");
-      rmSync(dir, { recursive: true, force: true }); dir = mkdtempSync(join(tmpdir(), "fd-engine-"));
+      rmSync(dir, { recursive: true, force: true }); dir = tmpDir("fd-engine-");
     }
   });
 

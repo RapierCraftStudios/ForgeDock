@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // forge#3684: the remediate.md RESUME_AT_M7 path must fail closed (main-base hold,
 // anchored approval match, head-commit selection, engine-park admission).
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { join, dirname } from "node:path";
@@ -119,7 +120,7 @@ describe("forge#3753 deploy-gate base never reads forge.yaml from the PR worktre
     }
   });
   it("resolver executes: worktree forge.yaml release vs main stays strict", () => {
-    const dir = mkdtempSync(join(tmpdir(), "gate-"));
+    const dir = tmpDir("gate-");
     try {
       mkdirSync(join(dir, "bin"));
       writeFileSync(join(dir, "bin/gh"), '#!/usr/bin/env bash\ncase "$*" in *"--jq .default_branch"*) echo "${GH_DEFAULT_STUB:-}";; *"contents/forge.yaml"*) echo "gh: Not Found (HTTP 404)" >&2; exit 1;; *) exit 1;; esac\n', { mode: 0o755 });

@@ -1,6 +1,7 @@
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, appendFileSync } from "node:fs";
+import { rmSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendEvent, readLog, deriveState, rewriteLog } from "../engine/runlog.mjs";
@@ -9,7 +10,7 @@ import { serializeState } from "../engine/state.mjs";
 import { asComments, inv as investigationComment, ctx, arch, builder, remediation, decomposed } from "./helpers/comments.mjs";
 
 let dir;
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "fd-runlog-")); });
+beforeEach(() => { dir = tmpDir("fd-runlog-"); });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
 describe("runlog", () => {
@@ -139,8 +140,7 @@ describe("runlog", () => {
       git: async (args) => {
         if (args?.[0] === "worktree") return "worktree /repo\nHEAD 0\nbranch refs/heads/main\n\nworktree /repo/.claude/worktrees/fix-b-42\nHEAD 1\nbranch refs/heads/fix/b-42\n";
         return String(w.commitsAhead);
-      },
-    };
+      } };
     return { w, io };
   }
 

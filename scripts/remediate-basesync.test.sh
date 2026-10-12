@@ -66,7 +66,7 @@ eq "MERGE_RC/MERGE_OUT read only in the fence that sets them" "$FENCE_USE" "$FEN
 has "refused park posts needs-human from the sync fence" 'echo "BLOCKED: base-sync: merge refused'
 
 # Behavioural: dirty tree + base change -> refused (rc!=0, no MERGE_HEAD, empty U-list); real conflict -> MERGE_HEAD present.
-T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+T="$(mktemp -d)"; trap 'rm -rf "$T" "$CAPDIR"' EXIT
 (
   cd "$T" && git init -q -b main . && git config user.email t@t && git config user.name t
   echo a > f && git add f && git commit -qm base

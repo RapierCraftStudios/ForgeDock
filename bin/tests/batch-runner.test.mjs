@@ -11,14 +11,13 @@
  * Run with: node --test bin/tests/batch-runner.test.mjs
  */
 
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import {
-  mkdtempSync,
   writeFileSync,
   readFileSync,
-  rmSync,
-} from "node:fs";
+  rmSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 
@@ -36,7 +35,7 @@ import {
 
 let TMP;
 before(() => {
-  TMP = mkdtempSync(join(os.tmpdir(), "forgedock-batch-runner-"));
+  TMP = tmpDir("forgedock-batch-runner-");
 });
 after(() => {
   rmSync(TMP, { recursive: true, force: true });

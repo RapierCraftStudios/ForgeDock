@@ -16,18 +16,17 @@
  * Run with: node --test bin/tests/runner.test.mjs
  */
 
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it, before, after, mock } from "node:test";
 import assert from "node:assert/strict";
 import {
-  mkdtempSync,
   mkdirSync,
   writeFileSync,
   rmSync,
   readFileSync,
   existsSync,
   symlinkSync,
-  chmodSync,
-} from "node:fs";
+  chmodSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 
@@ -83,7 +82,7 @@ let TMP;
 let COMMANDS_DIR;
 
 before(() => {
-  TMP = mkdtempSync(join(os.tmpdir(), "forgedock-runner-"));
+  TMP = tmpDir("forgedock-runner-");
   COMMANDS_DIR = join(TMP, "commands");
   mkdirSync(join(COMMANDS_DIR, "work-on", "build"), { recursive: true });
   writeFileSync(join(COMMANDS_DIR, "work-on.md"), "# work-on spec\nDo the work.");
@@ -405,7 +404,7 @@ describe("getToolHandlers", () => {
   // -------------------------------------------------------------------------
 
   it("read_file rejects a symlinked file that resolves outside cwd (SEC: symlink escape)", (t) => {
-    const symlinkTmp = mkdtempSync(join(os.tmpdir(), "forgedock-symlink-src-"));
+    const symlinkTmp = tmpDir("forgedock-symlink-src-");
     const outsideSecret = join(symlinkTmp, "secret.txt");
     writeFileSync(outsideSecret, "outside-cwd-secret");
 
@@ -433,7 +432,7 @@ describe("getToolHandlers", () => {
   });
 
   it("write_file rejects a target inside a symlinked directory that resolves outside cwd (SEC: symlink escape)", (t) => {
-    const symlinkTmp = mkdtempSync(join(os.tmpdir(), "forgedock-symlink-dst-"));
+    const symlinkTmp = tmpDir("forgedock-symlink-dst-");
 
     const handlers = getToolHandlers(TMP);
     const linkDir = join(TMP, "evil-link-dir");
@@ -1021,7 +1020,7 @@ describe("resolveConfiguredDefaultModel", () => {
   let modelTmp;
 
   before(() => {
-    modelTmp = mkdtempSync(join(os.tmpdir(), "forgedock-model-cfg-"));
+    modelTmp = tmpDir("forgedock-model-cfg-");
   });
 
   after(() => {
@@ -1092,7 +1091,7 @@ describe("CLI timeout resolution", () => {
   let originalTimeout;
 
   before(() => {
-    timeoutTmp = mkdtempSync(join(os.tmpdir(), "forgedock-cli-timeout-cfg-"));
+    timeoutTmp = tmpDir("forgedock-cli-timeout-cfg-");
     originalTimeout = process.env.FORGEDOCK_CLI_TIMEOUT_MS;
     delete process.env.FORGEDOCK_CLI_TIMEOUT_MS;
   });
@@ -1170,7 +1169,7 @@ describe("runCommand model resolution precedence", () => {
   let originalForgedockModel;
 
   before(() => {
-    precTmp = mkdtempSync(join(os.tmpdir(), "forgedock-model-prec-"));
+    precTmp = tmpDir("forgedock-model-prec-");
     originalForgedockModel = process.env.FORGEDOCK_MODEL;
     delete process.env.FORGEDOCK_MODEL;
   });
@@ -1302,7 +1301,7 @@ describe("runCliBackend argv safety", () => {
     // platform-independent: the injection payload's side effect (creating a
     // marker file via $(...)) must never occur, because runCliBackend never
     // hands the message to a shell in the first place.
-    const shimDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-injection-"));
+    const shimDir = tmpDir("forgedock-cli-injection-");
     const injectionMarkerPath = join(shimDir, "INJECTED");
     const maliciousMessage =
       `Execute: /work-on 2003; $(touch ${injectionMarkerPath.replace(/\\/g, "/")}) ` +
@@ -1377,7 +1376,7 @@ describe("runCliBackend content passthrough (issue #2029, updated for #2019)", (
       return;
     }
 
-    const shimDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-argv-capture-"));
+    const shimDir = tmpDir("forgedock-cli-argv-capture-");
     const captureFile = join(shimDir, "captured-argv.json");
     const recorderPath = join(shimDir, "record-argv.mjs");
     const fakeClaudePath = join(shimDir, "fake-claude");
@@ -1479,7 +1478,7 @@ describe("runCliBackend content passthrough (issue #2029, updated for #2019)", (
       return;
     }
 
-    const shimDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-argv-capture-nosysprompt-"));
+    const shimDir = tmpDir("forgedock-cli-argv-capture-nosysprompt-");
     const captureFile = join(shimDir, "captured-argv.json");
     const recorderPath = join(shimDir, "record-argv.mjs");
     const fakeClaudePath = join(shimDir, "fake-claude");
@@ -1529,7 +1528,7 @@ describe("runCliBackend content passthrough (issue #2029, updated for #2019)", (
       return;
     }
 
-    const shimDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-argv-capture-fail-"));
+    const shimDir = tmpDir("forgedock-cli-argv-capture-fail-");
     const captureFile = join(shimDir, "captured-argv.json");
     const recorderPath = join(shimDir, "record-argv.mjs");
     const fakeClaudePath = join(shimDir, "fake-claude-fail");
@@ -1593,7 +1592,7 @@ describe("runCliBackend env scrub (issue #2021)", () => {
       return;
     }
 
-    const shimDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-env-capture-"));
+    const shimDir = tmpDir("forgedock-cli-env-capture-");
     const captureFile = join(shimDir, "captured-env.json");
     const recorderPath = join(shimDir, "record-env.mjs");
     const fakeClaudePath = join(shimDir, "fake-claude-env");
@@ -3022,7 +3021,7 @@ describe("isClaudeCliAvailable", () => {
   // cwd.
   it("only spawns the probe once per cwd across repeated calls", () => {
     const execImpl = mock.fn(() => "1.2.3");
-    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-cache-"));
+    const cwd = tmpDir("forgedock-cli-cache-");
     try {
       const first = isClaudeCliAvailable(cwd, { execImpl });
       const second = isClaudeCliAvailable(cwd, { execImpl });
@@ -3044,7 +3043,7 @@ describe("isClaudeCliAvailable", () => {
     const execImpl = mock.fn(() => {
       throw new Error("ENOENT: claude not found");
     });
-    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-cache-neg-"));
+    const cwd = tmpDir("forgedock-cli-cache-neg-");
     try {
       const first = isClaudeCliAvailable(cwd, { execImpl });
       const second = isClaudeCliAvailable(cwd, { execImpl });
@@ -3062,8 +3061,8 @@ describe("isClaudeCliAvailable", () => {
 
   it("probes independently for different cwd values", () => {
     const execImpl = mock.fn(() => "1.2.3");
-    const cwdA = mkdtempSync(join(os.tmpdir(), "forgedock-cli-cache-a-"));
-    const cwdB = mkdtempSync(join(os.tmpdir(), "forgedock-cli-cache-b-"));
+    const cwdA = tmpDir("forgedock-cli-cache-a-");
+    const cwdB = tmpDir("forgedock-cli-cache-b-");
     try {
       isClaudeCliAvailable(cwdA, { execImpl });
       isClaudeCliAvailable(cwdB, { execImpl });
@@ -3095,7 +3094,7 @@ describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issu
   it("resolves and caches the shell-validated absolute path, not the bare command name", () => {
     const shimPath = "/home/user/.npm/_npx/abc123/node_modules/.bin/claude";
     const execImpl = mock.fn(() => `${shimPath}\n${CLI_PROBE_OUTPUT_SENTINEL}\n1.2.3 (Claude Code)`);
-    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-resolve-"));
+    const cwd = tmpDir("forgedock-cli-resolve-");
     try {
       const resolved = resolveClaudeCliBinary(cwd, {
         execImpl,
@@ -3115,7 +3114,7 @@ describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issu
 
   it("returns null when the probe succeeds but no path-like line is present (e.g. a bare version string)", () => {
     const execImpl = mock.fn(() => "1.2.3");
-    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-resolve-nopath-"));
+    const cwd = tmpDir("forgedock-cli-resolve-nopath-");
     try {
       assert.equal(resolveClaudeCliBinary(cwd, { execImpl }), null);
     } finally {
@@ -3127,7 +3126,7 @@ describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issu
     const execImpl = mock.fn(() => {
       throw new Error("ENOENT: claude not found");
     });
-    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-resolve-unavailable-"));
+    const cwd = tmpDir("forgedock-cli-resolve-unavailable-");
     try {
       assert.equal(resolveClaudeCliBinary(cwd, { execImpl }), null);
     } finally {
@@ -3141,7 +3140,7 @@ describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issu
     const cmdShim = `${bareShim}.cmd`;
     const exeTarget = "C:\\Users\\dev\\AppData\\Local\\npm-cache\\_npx\\abc\\node_modules\\.bin\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe";
     const execImpl = mock.fn(() => `${bareShim}\n${cmdShim}\n${CLI_PROBE_OUTPUT_SENTINEL}\n1.2.3 (Claude Code)`);
-    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-resolve-win-"));
+    const cwd = tmpDir("forgedock-cli-resolve-win-");
     try {
       assert.equal(resolveClaudeCliBinary(cwd, {
         execImpl,
@@ -3180,7 +3179,7 @@ describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issu
   it("runCliBackend spawns the resolved path successfully when the bare name would ENOENT (the reported bug)", () => {
     const shimPath = "/home/user/.npm/_npx/abc123/node_modules/.bin/claude";
     const execImpl = mock.fn(() => `${shimPath}\n${CLI_PROBE_OUTPUT_SENTINEL}\n1.2.3 (Claude Code)`);
-    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-resolve-e2e-"));
+    const cwd = tmpDir("forgedock-cli-resolve-e2e-");
     try {
       const resolvedBin = resolveClaudeCliBinary(cwd, {
         execImpl,
@@ -3243,7 +3242,7 @@ describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issu
       return `${path}\n${CLI_PROBE_OUTPUT_SENTINEL}\n1.2.3`;
     });
     const existsImpl = (candidate) => candidate === newShim || (candidate === oldShim && oldExists);
-    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-resolve-stale-"));
+    const cwd = tmpDir("forgedock-cli-resolve-stale-");
     try {
       assert.equal(resolveClaudeCliBinary(cwd, { execImpl, existsImpl, platform: "linux" }), oldShim);
       oldExists = false;
@@ -3275,7 +3274,7 @@ describe("resolveClaudeCliBinary — probe/invocation asymmetry regression (issu
       existsImpl,
       readImpl: () => '"%dp0%\\claude.exe" %*',
     };
-    const cwd = mkdtempSync(join(os.tmpdir(), "forgedock-cli-resolve-win-stale-"));
+    const cwd = tmpDir("forgedock-cli-resolve-win-stale-");
     try {
       assert.match(resolveClaudeCliBinary(cwd, opts), /npm-old[\\/]claude\.exe$/);
       oldTargetExists = false;
@@ -4018,7 +4017,7 @@ describe("per-command CLI model/max-turns (forge#3589)", () => {
   });
 
   it("resolveCommandEngineSettings reads flat engine keys for work-on and non-work-on commands", () => {
-    const d = mkdtempSync(join(os.tmpdir(), "fd-3589-cfg-"));
+    const d = tmpDir("fd-3589-cfg-");
     try {
       writeFileSync(join(d, "forge.yaml"),
         'project: x/y\nengine:\n  max_concurrent: 3\n  work_on_review_model: sonnet\n  work_on_review_max_turns: 60\n' +
@@ -4040,8 +4039,8 @@ describe("per-command CLI model/max-turns (forge#3589)", () => {
   it("capability probe is version-gated and fails safe on an unparseable version", () => {
     assert.deepEqual(parseCliVersion(`/usr/bin/claude\n${CLI_PROBE_OUTPUT_SENTINEL}\n2.1.296 (Claude Code)\n`), [2, 1, 296]);
     assert.equal(parseCliVersion("no version"), null);
-    const cwdOk = mkdtempSync(join(os.tmpdir(), "fd-3589-cap-"));
-    const cwdBad = mkdtempSync(join(os.tmpdir(), "fd-3589-cap-"));
+    const cwdOk = tmpDir("fd-3589-cap-");
+    const cwdBad = tmpDir("fd-3589-cap-");
     try {
       assert.deepEqual(getClaudeCliCapabilities(cwdOk, { execImpl: () => "2.1.296 (Claude Code)" }), { model: true, maxTurns: true });
       assert.deepEqual(getClaudeCliCapabilities(cwdBad, { execImpl: () => "garbage" }), { model: false, maxTurns: false });
@@ -4055,7 +4054,7 @@ describe("per-command CLI model/max-turns (forge#3589)", () => {
   const posix = process.platform !== "win32";
   for (const [commandName, specName] of [["review-pr", "review-pr"], ["review-pr-staging", "review-pr-staging"]]) {
     it(`runCommand(${commandName}) applies forge.yaml per-command settings to the CLI argv`, { skip: !posix }, async () => {
-      const root = mkdtempSync(join(os.tmpdir(), "fd-3589-e2e-"));
+      const root = tmpDir("fd-3589-e2e-");
       const oldPath = process.env.PATH;
       try {
         mkdirSync(join(root, "bin"));
