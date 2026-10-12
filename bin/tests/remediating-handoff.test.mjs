@@ -77,11 +77,17 @@ describe("forge#3541 review.md R4 handoffs", () => {
 });
 
 describe("forge#3628 degraded-gate-unreviewed consumers", () => {
-  it("review.md R4 re-reviews once under STALE_REREVIEW before needs-human", () => {
+  it("review.md R4 re-reviews once under its own DEGRADED_REREVIEW bound before needs-human", () => {
     const b = bullet('- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "degraded-gate-unreviewed"');
-    assert.match(b, /STALE_REREVIEW/);
+    assert.match(b, /DEGRADED_REREVIEW/);
+    assert.doesNotMatch(b, /count `<!-- FORGE:STALE_REREVIEW/);
+    assert.match(review, /DEGRADED_REREVIEW\/*[^\n]*\n[\s\S]*FORGE:DEGRADED_REREVIEW: pr=/);
     assert.match(b, /Degraded Paths Reviewed/);
     assert.match(b, /bound is already used, add `needs-human`/);
+  });
+  it("review-pr.md tells reviewers the marker, Reviewed-SHA and per-item format Phase 8 requires", () => {
+    const rp = read("commands/review-pr.md");
+    assert.match(rp, /first line is `<!-- FORGE:REVIEW-AGENT:\{domain\} -->`[^\n]*Reviewed-SHA: \$\{REVIEW_SHA\}[^\n]*`- <exact name>: <how its path was reviewed>`/);
   });
   it("remediate.md classifies the blocker and never edits code for it", () => {
     const rem = read("commands/work-on/remediate.md");

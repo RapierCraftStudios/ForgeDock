@@ -1270,28 +1270,45 @@ Re-run each missing phase via its Skill (see the \`->\` action on each MISSING l
         [ -n "$DEG_AG_LINE" ] && DEG_NAMES="${DEG_NAMES:+$DEG_NAMES; }${DEG_AG_LINE}"
     fi
     if [ "$DEG_ANY" = "true" ]; then
-        # Reviewed section: every trusted PR comment's `### Degraded Paths Reviewed` section, up to the next heading.
+        # Reviewed section (forge#3995): only a trusted review comment (FORGE:REVIEW-AGENT / FORGE:REVIEW / synthesis marker as the
+        # LEADING text) carrying `Reviewed-SHA:` for the CURRENT head counts, so a stale section from an older head or a plain comment
+        # cannot clear the gate. An unreadable head fails closed.
         DEG_SECTIONS=""
-        DEG_PR_BODIES=$(printf '%s' "$DISPO_JSON" | bash "$TRUSTED_SCRIPT" bodies '(^|\n)### Degraded Paths Reviewed') || DEG_PR_BODIES="__ERR__"
+        DEG_HEAD=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq .head.sha 2>/dev/null) || DEG_HEAD=""
+        if ! [[ "$DEG_HEAD" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
+            echo "DEGRADED GATE: PR head unreadable — refusing to merge (fail closed)" >&2
+            blocked "note disposition unreadable"
+        fi
+        DEG_PR_BODIES=$(printf '%s' "$DISPO_JSON" | bash "$TRUSTED_SCRIPT" bodies '^<!-- (FORGE:REVIEW-AGENT:[a-z-]+|FORGE:REVIEW|REVIEW-FINDINGS-SYNTHESIZED-START) -->[\s\S]*(^|\n)### Degraded Paths Reviewed') || DEG_PR_BODIES="__ERR__"
         if [ "$DEG_PR_BODIES" = "__ERR__" ]; then
             echo "DEGRADED GATE: trust filter failed on PR comments — refusing to merge (fail closed)" >&2
             blocked "note disposition unreadable"
         fi
         if [ -n "$DEG_PR_BODIES" ]; then
             DEG_SECTIONS=$(printf '%s\n' "$DEG_PR_BODIES" | while IFS= read -r _db; do
-                printf '%s' "$_db" | jq -r 'select(type == "string")' 2>/dev/null \
+                printf '%s' "$_db" | jq -r --arg head "$DEG_HEAD" 'select(type == "string") | select(split("\n") | map(rtrimstr("\r")) | index("Reviewed-SHA: " + $head))' 2>/dev/null \
                     | awk '/^### Degraded Paths Reviewed[[:space:]]*$/ {f=1; next} f && /^(#|##|###) / {f=0} f {print}'
             done)
         fi
         DEG_MISSING=""
         if [ -z "$(printf '%s' "$DEG_SECTIONS" | tr -d '[:space:]')" ]; then
-            DEG_MISSING="no \`### Degraded Paths Reviewed\` section"
+            DEG_MISSING="no \`### Degraded Paths Reviewed\` section on a review comment for the current head"
         else
-            # per-check name match: the name is everything before " — " in each "; "-separated entry
+            # per-check match (forge#3995): the name is everything before " — " in each "; "-separated entry. It must be a whole list
+            # item `- name: <how it was reviewed>` whose explanation does not negate it; a substring or a "NOT reviewed" item is not coverage.
             DEG_NAME_LIST=$(printf '%s\n' "$DEG_NAMES" | tr ';' '\n' | sed 's/ — .*$//; s/^[[:space:]]*//; s/[[:space:]]*$//' | sed '/^$/d' | sort -u)
             while IFS= read -r _dn; do
                 [ -n "$_dn" ] || continue
-                printf '%s\n' "$DEG_SECTIONS" | grep -qF -- "$_dn" || DEG_MISSING="${DEG_MISSING:+$DEG_MISSING, }${_dn}"
+                _hit=$(printf '%s\n' "$DEG_SECTIONS" | awk -v n="$_dn" '
+                    { l=$0; sub(/^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+/, "", l); gsub(/`/, "", l)
+                      if (index(l, n) != 1) next
+                      r=substr(l, length(n)+1)
+                      if (r !~ /^[[:space:]]*[:—-][[:space:]]*[^[:space:]]/) next
+                      sub(/^[[:space:]]*[:—-][[:space:]]*/, "", r)
+                      if (tolower(r) ~ /^(not|never|no|n\/a|none|unreviewed|skipped)([^a-z]|$)/) next
+                      found=1 }
+                    END { print found+0 }')
+                [ "$_hit" = "1" ] || DEG_MISSING="${DEG_MISSING:+$DEG_MISSING, }${_dn}"
             done <<< "$DEG_NAME_LIST"
             [ -z "$DEG_MISSING" ] || DEG_MISSING="not covered: ${DEG_MISSING}"
         fi

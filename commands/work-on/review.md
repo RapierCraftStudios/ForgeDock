@@ -573,7 +573,7 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
   gh pr edit {PR_NUMBER} {GH_FLAG} --remove-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
   ```
 
-- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "degraded-gate-unreviewed" (the build gate was DEGRADED, a check ran nothing, and no trusted `### Degraded Paths Reviewed` PR section names every degraded check; forge#3628): do NOT merge by any other route, and do NOT leave `needs-human` because of this gate on the first pass. Remove the `needs-human` that Phase 8 set, then treat it like a stale review: count `<!-- FORGE:STALE_REREVIEW: pr={PR_NUMBER} -->` (the `STALE_REREVIEW` bound below), post the marker, and re-invoke Phase R3 once so `/review-pr` reads the degraded list from the issue's FORGE:QUALITY_GATE and adds the section. If the bound is already used, add `needs-human` and return `REVIEW_RESULT: status: BLOCKED`, blocker "degraded-gate-unreviewed after re-review".
+- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "degraded-gate-unreviewed" (the build gate was DEGRADED, a check ran nothing, and no trusted `### Degraded Paths Reviewed` PR section names every degraded check; forge#3628): do NOT merge by any other route, and do NOT leave `needs-human` because of this gate on the first pass. Remove the `needs-human` that Phase 8 set, then re-review once on its own bound (forge#3996; never the `STALE_REREVIEW` bound, which other causes consume): count `<!-- FORGE:DEGRADED_REREVIEW: pr={PR_NUMBER} -->` (the `DEGRADED_REREVIEW` bound below), post the marker, and re-invoke Phase R3 once so `/review-pr` reads the degraded list from the issue's FORGE:QUALITY_GATE and adds the section. If the bound is already used, add `needs-human` and return `REVIEW_RESULT: status: BLOCKED`, blocker "degraded-gate-unreviewed after re-review".
 
 - `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "checks still pending" (Phase 8 merge-gate timed out while CI was still running; nothing failed, #3919): do NOT remediate and do NOT add `needs-human`. Return that BLOCKED result unchanged so the caller retries the review phase, whose merge gate re-runs once CI finishes.
 
@@ -589,12 +589,15 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 In-PR fix round did not land; the remaining CONFIRMED MEDIUM findings are filed as issues on the next review instead of blocking the merge." # allowlist:check-command-side-effects
     ```
 
-  Persisted loop bounds for the cases above — count first, then act (`{BOUND}` is `STALE_REREVIEW`, `CI_REMEDIATION`, `INPR_REMEDIATION` or `BASESYNC_REMEDIATION`). This phase posts only the `STALE_REREVIEW` marker; `CI_REMEDIATION`, `INPR_REMEDIATION` and `BASESYNC_REMEDIATION` are posted by the router in Phase 4R, immediately before it invokes remediation (forge#3398):
+  Persisted loop bounds for the cases above — count first, then act (`{BOUND}` is `STALE_REREVIEW`, `DEGRADED_REREVIEW`, `CI_REMEDIATION`, `INPR_REMEDIATION` or `BASESYNC_REMEDIATION`). This phase posts only the `STALE_REREVIEW` and `DEGRADED_REREVIEW` markers; `CI_REMEDIATION`, `INPR_REMEDIATION` and `BASESYNC_REMEDIATION` are posted by the router in Phase 4R, immediately before it invokes remediation (forge#3398):
   ```bash
   [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] bound check only"; }
   if [ "{BOUND}" = "STALE_REREVIEW" ]; then
     BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
       --jq '[.[] | select((.body | contains("FORGE:STALE_REREVIEW:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
+  elif [ "{BOUND}" = "DEGRADED_REREVIEW" ]; then
+    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
+      --jq '[.[] | select((.body | contains("FORGE:DEGRADED_REREVIEW:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
   elif [ "{BOUND}" = "INPR_REMEDIATION" ]; then
     BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
       --jq '[.[] | select((.body | contains("FORGE:INPR_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
@@ -610,6 +613,9 @@ In-PR fix round did not land; the remaining CONFIRMED MEDIUM findings are filed 
   elif [ "{BOUND}" = "STALE_REREVIEW" ] && [ "${DRY_RUN:-false}" != "true" ]; then
     gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:STALE_REREVIEW: pr={PR_NUMBER} -->
 Stale review on PR #{PR_NUMBER}: quality-gating and re-reviewing the new head once." 2>/dev/null || true
+  elif [ "{BOUND}" = "DEGRADED_REREVIEW" ] && [ "${DRY_RUN:-false}" != "true" ]; then
+    gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:DEGRADED_REREVIEW: pr={PR_NUMBER} -->
+Degraded-gate review on PR #{PR_NUMBER}: re-reviewing once so the review names each degraded check." 2>/dev/null || true
   fi
   ```
   `BOUND_EXHAUSTED` → take the "already ≥ 1" branch of that case.

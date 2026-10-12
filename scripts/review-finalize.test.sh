@@ -680,9 +680,14 @@ rc_is "inpr: untrusted waiver ignored" "$RC" 3
 QG_DEG=$'<!-- FORGE:QUALITY_GATE -->\n## Quality Gate Result\n\n**Result**: PASS\n**Degraded**: python.test — test run exercised nothing; blast-radius — check did not complete'
 QG_OK=$'<!-- FORGE:QUALITY_GATE -->\n## Quality Gate Result\n\n**Result**: PASS\n**Degraded**: none'
 AG_DEG=$'<!-- FORGE:ACCEPTANCE_GATE -->\n## Acceptance Gate — DEGRADED\n\n**Degraded checks (verified nothing)**: python.test — test run exercised nothing\n\n<!-- FORGE:ACCEPTANCE_GATE:DEGRADED -->'
-SEC_FULL=$'Review synthesis\n\n### Degraded Paths Reviewed\n- python.test: read the skipped DB tests by hand\n- blast-radius: callers checked manually\n\n### Other\nx'
-SEC_PART=$'Review synthesis\n\n### Degraded Paths Reviewed\n- python.test: read the skipped DB tests by hand\n\n### Other\nblast-radius is mentioned only outside the section'
-SEC_GENERIC=$'Review synthesis\n\n### Degraded Paths Reviewed\nAll degraded paths were reviewed.\n'
+AGM='<!-- FORGE:REVIEW-AGENT:security -->'
+SEC_FULL="$AGM"$'\nReviewed-SHA: '"$SHA"$'\n\n### Degraded Paths Reviewed\n- python.test: read the skipped DB tests by hand\n- blast-radius: callers checked manually\n\n### Other\nx'
+SEC_PART="$AGM"$'\nReviewed-SHA: '"$SHA"$'\n\n### Degraded Paths Reviewed\n- python.test: read the skipped DB tests by hand\n\n### Other\nblast-radius is mentioned only outside the section'
+SEC_GENERIC="$AGM"$'\nReviewed-SHA: '"$SHA"$'\n\n### Degraded Paths Reviewed\nAll degraded paths were reviewed.\n'
+SEC_STALE="$AGM"$'\nReviewed-SHA: '"$OLD_SHA"$'\n\n### Degraded Paths Reviewed\n- python.test: read the skipped DB tests by hand\n- blast-radius: callers checked manually\n'
+SEC_NEG="$AGM"$'\nReviewed-SHA: '"$SHA"$'\n\n### Degraded Paths Reviewed\n- python.test: NOT reviewed\n- blast-radius: callers checked manually\n'
+SEC_PLAIN=$'### Degraded Paths Reviewed\n- python.test: read the skipped DB tests by hand\n- blast-radius: callers checked manually\n'
+SEC_AG="$AGM"$'\nReviewed-SHA: '"$SHA"$'\n\n### Degraded Paths Reviewed\n- python.test: covered by hand\n'
 gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; mg "$GATE"
 rc_is "degraded: no section" "$RC" 3; has "degraded: no section" "REVIEW_RESULT: status: BLOCKED, blocker: degraded-gate-unreviewed"
 logged "degraded: no section needs-human" edits.log "needs-human"; logged "degraded: no section comment" issue-bodies.log "FORGE:DEGRADED_GATE_UNREVIEWED"; not_merged "degraded: no section"
@@ -692,13 +697,19 @@ gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER U
 rc_is "degraded: generic section" "$RC" 3; has "degraded: generic section" "blocker: degraded-gate-unreviewed"; not_merged "degraded: generic"
 gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm NONE User "$SEC_FULL"; flush; mg "$GATE"
 rc_is "degraded: untrusted section ignored" "$RC" 3; has "degraded: untrusted section ignored" "blocker: degraded-gate-unreviewed"
+gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User "$SEC_STALE"; flush; mg "$GATE"
+rc_is "degraded: stale-head section ignored" "$RC" 3; has "degraded: stale-head section ignored" "blocker: degraded-gate-unreviewed"
+gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User "$SEC_NEG"; flush; mg "$GATE"
+rc_is "degraded: negated item is not coverage" "$RC" 3; logged "degraded: negated item names the gap" issue-bodies.log "not covered: python.test"
+gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User "$SEC_PLAIN"; flush; mg "$GATE"
+rc_is "degraded: plain comment without review marker ignored" "$RC" 3
 gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User "$SEC_FULL"; flush; mg "$GATE"
 rc_is "degraded: full per-check section" "$RC" 0; has "degraded: full per-check section" "MERGE_OUTCOME=merged"; merged "degraded: full"
 gate_reset; cm Bot Bot "$QG_DEG"; flush "$FIX/comments-42.json"; cm NONE Bot "$SEC_FULL"; flush; mg "$GATE"
 rc_is "degraded: bot-authored gate and section" "$RC" 0
 gate_reset; cm MEMBER User "$AG_DEG"; flush "$FIX/comments-42.json"; mg "$GATE"
 rc_is "degraded: ACCEPTANCE_GATE:DEGRADED unreviewed" "$RC" 3; has "degraded: ACCEPTANCE_GATE:DEGRADED unreviewed" "blocker: degraded-gate-unreviewed"
-gate_reset; cm MEMBER User "$AG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User $'### Degraded Paths Reviewed\npython.test covered'; flush; mg "$GATE"
+gate_reset; cm MEMBER User "$AG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User "$SEC_AG"; flush; mg "$GATE"
 rc_is "degraded: ACCEPTANCE_GATE:DEGRADED reviewed" "$RC" 0
 gate_reset; cm MEMBER User "$QG_OK"; flush "$FIX/comments-42.json"; mg "$GATE"
 rc_is "degraded: Degraded none is unaffected" "$RC" 0; has "degraded: Degraded none" "MERGE_OUTCOME=merged"
