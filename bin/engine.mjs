@@ -1230,6 +1230,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
         appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, code: codeForRunnerError(e), maxAttempts });
         throw e;
       }
+      // Transient spawn class: e.code === "CLI_SPAWN_TRANSIENT" (see isTransientSpawnError); retried with infra backoff.
       if (isTransientSpawnError(e) && infraRetries < INFRA_SPAWN_BACKOFF_MS.length) {
         await recordAttempt(attempt, null, t0, null);
         appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, code: codeForRunnerError(e), maxAttempts, infraRetry: infraRetries + 1 });

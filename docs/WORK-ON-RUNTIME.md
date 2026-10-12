@@ -151,4 +151,6 @@ order. The engine commits `remediate` with `outputs.remediation = "inpr-fix"`, r
 
 A CLI spawn failure (`ETIMEDOUT`, `EAGAIN`, `ENOMEM`, `EMFILE`) carries `code = "CLI_SPAWN_TRANSIENT"`. The engine
 retries it after a 10s/30s/60s backoff on a separate counter (max 3) that does not consume a phase attempt; once
-spent, normal attempt accounting applies.
+spent, normal attempt accounting applies. `ETIMEDOUT` (a `FORGEDOCK_CLI_TIMEOUT_MS` kill) is in this class by design,
+so a phase that times out every time can run up to `maxAttempts + 3` full-length CLI sessions; lower the timeout or
+max attempts if that cost is unacceptable.
