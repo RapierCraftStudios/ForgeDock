@@ -278,14 +278,14 @@ function overrideHasJustification(body) {
 }
 
 /**
- * forge#3862: does trusted GitHub state show a REVOKED decomposition that was overridden?
+ * forge#3862 / forge#3932: does trusted GitHub state show a REVOKED decomposition?
  * Revoked = a trusted `<!-- FORGE:DECOMPOSED:REVOKED -->` comment newer than the newest
- * trusted `FORGE:DECOMPOSED` comment (or one with no `FORGE:DECOMPOSED` left). Overridden =
- * a trusted `FORGE:SIZE_OVERRIDE` with a non-empty justification. Both must hold: either
- * alone (or an untrusted comment of either kind) leaves a `decomposed` terminal untouched.
- * Fail closed: an unreadable comment trail is `false`, never "revoked".
+ * trusted `FORGE:DECOMPOSED` comment (or one with no `FORGE:DECOMPOSED` left). The revocation
+ * alone is the operator's explicit signal: the size gate that once required a justified
+ * `FORGE:SIZE_OVERRIDE` alongside it is gone, so no override clause remains. An untrusted
+ * revocation never counts. Fail closed: an unreadable comment trail is `false`, never "revoked".
  */
-export async function decompositionRevokedWithOverride(issue, io) {
+export async function decompositionRevoked(issue, io) {
   let comments;
   try { comments = (await issueMarkers(issue, io)).comments; } catch { return false; }
   const last = (pred) => { for (let i = comments.length - 1; i >= 0; i--) if (pred(comments[i])) return i; return -1; };
@@ -294,8 +294,48 @@ export async function decompositionRevokedWithOverride(issue, io) {
   // `startsWithHeader` also matches `FORGE:DECOMPOSED:REVOKED` for the header `FORGE:DECOMPOSED` (":" ends
   // the identifier), so the live decomposition record is the newest one that is not the revocation itself.
   const decomposedAt = last((c) => startsWithHeader(c, "FORGE:DECOMPOSED") && !startsWithHeader(c, "FORGE:DECOMPOSED:REVOKED"));
-  if (decomposedAt > revokedAt) return false;
-  return comments.some((c) => startsWithHeader(c, PHASE_MARKERS.build.sizeOverrideMarker) && overrideHasJustification(c));
+  return decomposedAt <= revokedAt;
+}
+
+/** Read one issue's REST record (`state`, `body`, author provenance). Throws on a failed read; null on unparsable/non-object output. */
+async function readIssueRecord(n, io) {
+  const out = String((await io.gh(["api", `repos/{owner}/{repo}/issues/${n}`])) ?? "").trim();
+  if (!out) return { empty: true };
+  try {
+    const j = JSON.parse(out);
+    return j && typeof j === "object" && !Array.isArray(j) ? j : null;
+  } catch { return null; }
+}
+
+/**
+ * forge#3932: does the issue declare a `**Depends on**: #N` dependency that is still OPEN?
+ * Honoured only when the issue BODY's author is trusted (`isTrustedComment`: OWNER/MEMBER/COLLABORATOR,
+ * Bot, or FORGE_TRAIL_TRUSTED_LOGINS) and only for the exact line decompose.md emits
+ * (`**Depends on**: #N` at line start; loose "depends on/after" prose is ignored). A self-reference is
+ * ignored. Returns `null` (nothing blocking), `{ open: [N, ...] }`, or `{ unreadable: true, detail }`
+ * when the issue or a declared dependency cannot be read (fail closed: the caller refuses the run).
+ * An empty read of the issue itself means "no body to trust" and yields `null`.
+ */
+export async function openDependency(issue, io) {
+  let rec;
+  try { rec = await readIssueRecord(issue, io); } catch (e) {
+    return { unreadable: true, detail: `issue ${issue} could not be read for its **Depends on** line: ${e?.message || e}` };
+  }
+  if (rec === null) return { unreadable: true, detail: `issue ${issue} could not be parsed for its **Depends on** line` };
+  if (rec.empty || typeof rec.body !== "string" || !isTrustedComment(rec)) return null;
+  const deps = [...new Set([...rec.body.replace(/\r\n/g, "\n").matchAll(/^\*\*Depends on\*\*:[ \t]*#(\d+)\b/gm)].map((m) => Number(m[1])))]
+    .filter((n) => n > 0 && n !== Number(issue));
+  const open = [];
+  for (const dep of deps) {
+    let d;
+    try { d = await readIssueRecord(dep, io); } catch (e) {
+      return { unreadable: true, detail: `dependency #${dep} of issue ${issue} could not be read: ${e?.message || e}` };
+    }
+    const st = typeof d?.state === "string" ? d.state.toLowerCase() : "";
+    if (st === "open") open.push(dep);
+    else if (st !== "closed") return { unreadable: true, detail: `dependency #${dep} of issue ${issue} has no readable state` };
+  }
+  return open.length ? { open } : null;
 }
 
 /**

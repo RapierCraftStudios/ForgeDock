@@ -124,6 +124,20 @@ if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$PR_COMMENTS" ]; then
 fi
 ```
 
+**CI-only and INPR second attempts** <!-- Added: forge#3932 -->: the same per-kind scoping applies to `ci-gate` and `inpr-fix`, so a CI-only failure after an earlier remediation that fixed review findings (or a review-requested `inpr-fix` round after a `ci-gate` one) gets its own single attempt instead of being swallowed as `ALREADY_DONE`. Trails carry no kind field, so each completed trail is attributed to the NEWEST trusted bound marker (`FORGE:{CI|INPR|BASESYNC}_REMEDIATION: pr={PR_NUMBER}` on the issue) created at or before it. When `CURRENT_KIND` is `CI_REMEDIATION` or `INPR_REMEDIATION` and NO completed trail is attributed to that kind, the handoff is a fresh attempt for its kind and `REMEDIATION_COMPLETE_N` is set to 0. The trails the current kind already owns still count, so the budget stays one attempt per kind per PR and the infinite-retry guarantee holds. A trail with no preceding bound marker is attributed to no kind. Fail closed: an unreadable attribution (empty or failed `jq`) keeps the kind-agnostic guard:
+
+```bash
+if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$PR_COMMENTS" ] && [ -n "$ISSUE_COMMENTS" ] && { [ "$CURRENT_KIND" = "CI_REMEDIATION" ] || [ "$CURRENT_KIND" = "INPR_REMEDIATION" ]; }; then
+  KIND_DONE_N=$( { printf '%s\n' "$ISSUE_COMMENTS"; printf '%s\n' "$PR_COMMENTS"; } | jq -rs --arg pr "{PR_NUMBER}" --arg kind "$CURRENT_KIND" '
+    def trusted: (.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"));
+    [.[][] | select(trusted) | select((.body // "") | type == "string")] as $c
+    | [$c[] | select(.body | test("\\A<!-- FORGE:(CI|INPR|BASESYNC)_REMEDIATION: pr=" + $pr + " -->")) | {t: .created_at, k: (.body | capture("FORGE:(?<k>CI|INPR|BASESYNC)_REMEDIATION").k + "_REMEDIATION")}] as $m
+    | [$c[] | select(.body | test("\\A<!-- FORGE:REMEDIATION -->[\\s\\S]*<!-- FORGE:REMEDIATION:COMPLETE -->")) | .created_at] as $trails
+    | [$trails[] as $t | ([$m[] | select(.t <= $t)] | sort_by(.t) | last | .k // "") | select(. == $kind)] | length' 2>/dev/null || echo "")
+  if [ -n "$KIND_DONE_N" ] && [ "$KIND_DONE_N" -eq 0 ]; then REMEDIATION_COMPLETE_N=0; fi
+fi
+```
+
 Completed trails of other kinds are left in place (never deleted); only the interrupted-partial cleanup below deletes anything.
 
 - If `REMEDIATION_COMPLETE_N` or `REMEDIATION_TRAIL_N` is empty (comments or `scripts/trusted-comments.sh` unreadable or unresolvable) → fail closed: EXIT `REMEDIATE_RESULT: status: BLOCKED`, blocker: "github-unavailable: remediation trail unreadable (comments or scripts/trusted-comments.sh unresolvable)". Never treat unreadable as "no trail" and never as `ALREADY_DONE`.

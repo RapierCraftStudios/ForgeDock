@@ -65,6 +65,7 @@ const COVERAGE = {
   "remediate.deferred_live_run": "remediate.detectOutcome", "remediate.re_escalated": "remediate.detectOutcome",
   "remediate.unfixable": "remediate.detectOutcome", "ci.red": "reserved", "ci.timeout": "reserved",
   "base.conflict": "reserved", "rate_limited": "engine", "engine.error": "engine", "infra.disk_quota": "engine", "lease.held": "engine",
+  "dependency.open": "engine", "dependency.unreadable": "engine",
   "invalid": "engine", "decomposed": "investigate.detectOutcome", "completed": "engine",
   "awaiting_merge": "codeForTerminalReason", "unclassified": "engine",
 };
@@ -99,6 +100,8 @@ describe("outcome-codes module", () => {
     assert.equal(codeForTerminalReason("decomposed"), "decomposed");
     assert.equal(codeForTerminalReason("engine-error"), "engine.error");
     assert.equal(codeForTerminalReason("deferred"), "lease.held");
+    assert.equal(codeForTerminalReason("dependency-open"), "dependency.open");
+    assert.equal(codeForTerminalReason("dependency-unreadable"), "dependency.unreadable");
     assert.equal(codeForTerminalReason("needs-human"), "unclassified");
   });
   it("docs/OUTCOME-CODES.md and the enum agree in both directions, and carry the version", () => {
