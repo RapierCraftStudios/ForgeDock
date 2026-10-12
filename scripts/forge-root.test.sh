@@ -464,7 +464,7 @@ for f in $STUB_SITES; do
   expect "$f: forge_root calls without a preceding locator in the same fence" 0 "$(awk '/^[ ]*```/{loc=0} /^[ ]*type forge_resolve >\/dev\/null/{loc=1} /FORGE_ROOT="\$\(forge_root /&&!loc{bad++} END{print bad+0}' "$ROOT/$f")"
 done
 # the spec-count of stub resolutions pins the conversion (a copy dropped or re-inlined changes it)
-for pair in work-on.md:3 work-on/review.md:2 work-on/build/validate.md:3 work-on/investigate.md:1 work-on/decompose.md:1 work-on/close.md:1 work-on/build.md:1 quality-gate.md:4 orchestrate/phase-1-resolve.md:2 orchestrate/phase-4-execution.md:8; do
+for pair in work-on.md:3 work-on/review.md:2 work-on/build/validate.md:4 work-on/investigate.md:1 work-on/decompose.md:1 work-on/close.md:1 work-on/build.md:1 quality-gate.md:4 orchestrate/phase-1-resolve.md:2 orchestrate/phase-4-execution.md:8; do
   f="commands/${pair%%:*}"; n="${pair##*:}"
   expect "$f: FORGE_ROOT stub resolutions" "$n" "$(grep -cF "$FR_LINE" "$ROOT/$f" || true)"
 done

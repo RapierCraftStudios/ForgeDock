@@ -685,6 +685,73 @@ On `FAIL`, the blocker line for `VALIDATE_RESULT` is `consumer_unaddressed: <UNA
 
 ---
 
+## Phase V4.7: Edge-Case Coverage *(runs after V4.6, before V5 — skipped only on the docs-only skip path)* <!-- Added: forge#3631 -->
+
+The architect lists error, edge and concurrency cases as `EDGE:` records between `<!-- FORGE:EDGE_CASES:BEGIN -->` and `<!-- FORGE:EDGE_CASES:END -->`; the builder maps each id to an `EDGE_TEST:` line in its FORGE:BUILDER comment (grammar in architect A4.5 and implement I6). This phase runs `check-edge-cases.sh`, a script and not a prompt: an id is covered by a non-empty `untestable=` reason or by a `test=<path>::<name>` whose name occurs in a line the change adds to that file. A test that already existed never satisfies a new case.
+
+- **Trust and install root**: as V4.5. Both bodies are read only from the newest comment `trusted-comments.sh` accepts, and both scripts resolve from `FORGE_ROOT`, never from the worktree.
+- **Exit codes**: `0` covered, or an absent or empty block (SKIP/PASS); `1` an `UNMAPPED:`, `TEST_NOT_IN_DIFF:`, `EMPTY_REASON:` or `DUPLICATE_ID:` line was printed, so set `GATE_PASSED=false`, add the test or a real `untestable=` reason (edit the FORGE:BUILDER comment), and re-run V1 onward; anything else, a failed fetch, a missing BUILDER comment or an unresolvable script is DEGRADED: record `edge-cases` in `DEGRADED_CHECKS` with the reason. A covered case that maps to a test is also DEGRADED when the V2 test run printed a `DEGRADED_CHECKS+=` line for tests (the mapped tests could not run; set `TEST_RUNNER_DEGRADED=1` from your V2 notes). DEGRADED never passes silently and a failed read is never treated as "no edge cases".
+- **Carry-forward**: as V4.5, the block prints `EDGE_CASES_STATE: <PASS|SKIP|FAIL|DEGRADED>`, plus `GATE_PASSED: false` on FAIL and `DEGRADED_CHECKS+=edge-cases — <reason>` on DEGRADED. Record those lines; V5 Step 1 reads them.
+
+```bash
+cd {WORKTREE_PATH}
+# FORGE_ROOT: shared resolver scripts/lib/forge-resolve.sh (empty when unresolved => callers fail closed)
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+FORGE_ROOT="$(forge_root 2>/dev/null || true)"
+EC_SCRIPT="${FORGE_ROOT:+$FORGE_ROOT/scripts/check-edge-cases.sh}"; [ -f "$EC_SCRIPT" ] || EC_SCRIPT=""
+TRUST_SCRIPT="${FORGE_ROOT:+$FORGE_ROOT/scripts/trusted-comments.sh}"; [ -f "$TRUST_SCRIPT" ] || TRUST_SCRIPT=""
+TEST_RUNNER_DEGRADED="${TEST_RUNNER_DEGRADED:-0}"   # set to 1 from the V2 notes when a test run printed DEGRADED_CHECKS+=
+EC_STATE=""; EC_NOTE=""; EC_ARCH=$(mktemp "${TMPDIR:-/tmp}/forge-edge-arch.XXXXXX"); EC_BLD=$(mktemp "${TMPDIR:-/tmp}/forge-edge-bld.XXXXXX")
+if [ -z "$EC_SCRIPT" ] || [ -z "$TRUST_SCRIPT" ]; then
+  EC_STATE="DEGRADED"; EC_NOTE="check-edge-cases.sh or trusted-comments.sh not found under FORGE_ROOT"
+else
+  COMMENTS_JSON=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments 2>/dev/null); FETCH_RC=$?
+  if [ "$FETCH_RC" -ne 0 ]; then
+    EC_STATE="DEGRADED"; EC_NOTE="could not fetch issue comments (rc=${FETCH_RC})"
+  else
+    A_BODIES=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUST_SCRIPT" bodies '^<!-- FORGE:ARCHITECT -->'); A_RC=$?
+    B_BODIES=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUST_SCRIPT" bodies '^<!-- FORGE:BUILDER'); B_RC=$?
+    if [ "$A_RC" -ne 0 ] || [ "$B_RC" -ne 0 ]; then
+      EC_STATE="DEGRADED"; EC_NOTE="trusted-comments.sh failed (rc=${A_RC}/${B_RC})"
+    elif [ -z "$A_BODIES" ]; then
+      EC_STATE="SKIP"; EC_NOTE="no trusted FORGE:ARCHITECT comment"
+    elif [ -z "$B_BODIES" ]; then
+      EC_STATE="DEGRADED"; EC_NOTE="no trusted FORGE:BUILDER comment to read the edge-case mapping from"
+    else
+      # one JSON string per line, newest last
+      printf '%s\n' "$A_BODIES" | tail -n 1 | jq -r . > "$EC_ARCH"; JQ_A=$?
+      printf '%s\n' "$B_BODIES" | tail -n 1 | jq -r . > "$EC_BLD"; JQ_B=$?
+      if [ "$JQ_A" -ne 0 ] || [ "$JQ_B" -ne 0 ]; then
+        EC_STATE="DEGRADED"; EC_NOTE="could not decode the FORGE:ARCHITECT or FORGE:BUILDER comment"
+      else
+        git fetch origin {PR_BASE} >/dev/null 2>&1 || true
+        EC_OUT=$(bash "$EC_SCRIPT" --architect "$EC_ARCH" --builder "$EC_BLD" --base "origin/{PR_BASE}" --repo "{WORKTREE_PATH}" 2>&1); EC_RC=$?
+        printf '%s\n' "$EC_OUT"
+        case "$EC_RC" in
+          0) case "$EC_OUT" in SKIP:*) EC_STATE="SKIP" ;; *) EC_STATE="PASS" ;; esac
+             case "$EC_OUT" in *"MAPPED_TESTS: 0"*|SKIP:*) ;; *) [ "$TEST_RUNNER_DEGRADED" = "1" ] && { EC_STATE="DEGRADED"; EC_NOTE="mapped tests exist but the test runner did not run"; } ;; esac ;;
+          1) EC_STATE="FAIL"; GATE_PASSED=false ;;
+          *) EC_STATE="DEGRADED"; EC_NOTE="check-edge-cases.sh exited ${EC_RC}" ;;
+        esac
+      fi
+    fi
+  fi
+fi
+rm -f "$EC_ARCH" "$EC_BLD"
+echo "EDGE_CASES: ${EC_STATE}${EC_NOTE:+ — $EC_NOTE}"
+# Carry-forward lines for V5 (fresh shell): read them back in V5 Step 1.
+echo "EDGE_CASES_STATE: ${EC_STATE}"
+if [ "$EC_STATE" = "FAIL" ]; then
+  echo "GATE_PASSED: false"
+elif [ "$EC_STATE" = "DEGRADED" ]; then
+  echo "DEGRADED_CHECKS+=edge-cases — $(printf '%s' "${EC_NOTE:-edge-case check did not complete}" | tr -d ';\r\n')"
+fi
+```
+
+On `FAIL`, the blocker line for `VALIDATE_RESULT` is `edge-cases: <ids>` (the ids from the `UNMAPPED:`, `TEST_NOT_IN_DIFF:`, `EMPTY_REASON:` and `DUPLICATE_ID:` lines); the repair loop (build B6.5) adds the tests or reasons, never edits the checker or removes an `EDGE:` record.
+
+---
+
 ## Phase V5: Marker, Commit, Audit, Complete (always — after GATE_PASSED=true)
 
 Phase V5 runs in this exact order: **(1)** post the `FORGE:QUALITY_GATE` marker, **(2)** commit, **(3)** ancestry audit, **(4)** append `FORGE:BUILDER:COMPLETE` and the verification status. Do not reorder.
@@ -695,9 +762,9 @@ The quality gate must leave a checkable artifact. `scripts/verify-phase-trail.sh
 
 **Skip-path marker**: when the Skip Conditions above set `GATE_PASSED=true` early (single config/docs file), still post the marker with `**Result**: PASS (skipped — single config/docs file)` and `**Iterations**: 0`, so the verifier never has to guess. The verifier's `--docs-only` waiver additionally covers diffs accepted by `scripts/is-docs-only.sh` (allowlisted Markdown only: `docs/**` or root README/CHANGELOG/CONTRIBUTING/SECURITY/GOVERNANCE; nested `AGENTS.md`/`CLAUDE.md`/`SKILL.md`/`GEMINI.md` and the instruction directories `commands/`, `devdocs/`, `templates/`, `skills/`, `agents/`, `hooks/`, `.claude/`, `.claude-plugin/`, `.agents/`, `.codex/`, `.cursor/`, `.github/`, `.opencode/`, `.gemini/`, `.kiro/` excluded; callers feed both sides of renames).
 
-Set `GATE_PASSED` from the V1 loop result, then apply the printed carry-forward lines of V4.5 and V4.6: if either printed `GATE_PASSED: false` (`BLAST_RADIUS_STATE: FAIL` or `CONSUMER_SWEEP_STATE: FAIL`), `GATE_PASSED` is `false` here even if the V1 loop passed.
+Set `GATE_PASSED` from the V1 loop result, then apply the printed carry-forward lines of V4.5, V4.6 and V4.7: if any printed `GATE_PASSED: false` (`BLAST_RADIUS_STATE: FAIL`, `CONSUMER_SWEEP_STATE: FAIL` or `EDGE_CASES_STATE: FAIL`), `GATE_PASSED` is `false` here even if the V1 loop passed.
 
-Rebuild `DEGRADED_CHECKS` from every `DEGRADED_CHECKS+=<name> — <reason>` line printed by V2 and V4.5 (joined with `; `, empty when none). `GATE_STATUS` is `FAIL` when `GATE_PASSED` is false, `DEGRADED` when it is true and `DEGRADED_CHECKS` is non-empty, else `PASS`. The marker keeps `**Result**: PASS` for a DEGRADED gate (the build still completes) and adds the `**Degraded**:` line; the merge gate (`scripts/review-finalize.sh`) reads it. Check names contain no ` — ` and no `;`. <!-- Added: forge#3628 -->
+Rebuild `DEGRADED_CHECKS` from every `DEGRADED_CHECKS+=<name> — <reason>` line printed by V2, V4.5 and V4.7 (joined with `; `, empty when none). `GATE_STATUS` is `FAIL` when `GATE_PASSED` is false, `DEGRADED` when it is true and `DEGRADED_CHECKS` is non-empty, else `PASS`. The marker keeps `**Result**: PASS` for a DEGRADED gate (the build still completes) and adds the `**Degraded**:` line; the merge gate (`scripts/review-finalize.sh`) reads it. Check names contain no ` — ` and no `;`. <!-- Added: forge#3628 -->
 
 ```bash
 # GATE_PASSED: set from the V1 loop result, and forced to false when V4.5 or V4.6 printed "GATE_PASSED: false"
