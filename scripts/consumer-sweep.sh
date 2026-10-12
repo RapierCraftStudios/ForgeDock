@@ -161,6 +161,7 @@ set +f
 : > "$TMP/changed"
 : > "$TMP/excl"
 : > "$TMP/raw"
+OVER=0; OVERWHY=""
 
 # ---- diff mode: change set and per-file survival extraction ---------------------------------------------
 if [ -n "$RANGE" ]; then
@@ -208,19 +209,29 @@ function spans(s,   out) {
   while (match(s, /`[^`]+`/)) { out = out " \001 " substr(s, RSTART + 1, RLENGTH - 2); s = substr(s, RSTART + RLENGTH) }
   return out
 }
-function survives(F, id,   k, line, p, start, abs, prev, nx) {
-  if (id ~ /^[A-Za-z0-9_]+$/) return ((F SUBSEP id) in aw)
+# every maximal word-bounded run of identifier characters in one file's added lines, built once per file on first use
+# (O(added chars x 80)), so a survival test is one hash lookup instead of a scan of every added line per candidate
+function build(F,   k, line, n, i, j, c, pc, nc2) {
+  built[F] = 1
   for (k = 1; k <= anl[F]; k++) {
-    line = al[F, k]; start = 1
-    while ((p = index(substr(line, start), id)) > 0) {
-      abs = start + p - 1
-      prev = (abs > 1) ? substr(line, abs - 1, 1) : ""
-      nx = substr(line, abs + length(id), 1)
-      if (prev !~ /[A-Za-z0-9_]/ && nx !~ /[A-Za-z0-9_]/) return 1
-      start = abs + 1
+    line = al[F, k]; n = length(line)
+    for (i = 1; i <= n; i++) {
+      c = substr(line, i, 1)
+      if (c !~ /[A-Za-z0-9_.:\/-]/) continue
+      pc = (i > 1) ? substr(line, i - 1, 1) : ""
+      if (pc ~ /[A-Za-z0-9_]/) continue
+      for (j = i; j <= n && j < i + 80; j++) {
+        if (substr(line, j, 1) !~ /[A-Za-z0-9_.:\/-]/) break
+        nc2 = (j < n) ? substr(line, j + 1, 1) : ""
+        if (nc2 !~ /[A-Za-z0-9_]/) sx[F, substr(line, i, j - i + 1)] = 1
+      }
     }
   }
-  return 0
+}
+function survives(F, id) {
+  if (id ~ /^[A-Za-z0-9_]+$/) return ((F SUBSEP id) in aw)
+  if (!(F in built)) build(F)
+  return ((F SUBSEP id) in sx)
 }
 # a candidate must be code-like: charset, 4..80 chars, a letter, not a version/number, not a stop word
 function cand(F, id, kind, head, norm) {
@@ -361,7 +372,18 @@ END {
 }
 AWK
   XSTOP="that this with from have will your into than then them they were been being their there these those which while where when what would could should about after before because between both each other such only also more most some many much very just like make made used uses using need needs needed must may might shall can cannot does done doing not nor yet but and for are the any all one two use via per set get put add see run runs also else elif try catch finally case switch default return returns import export from yield await async static public private protected final override begin end then fi done esac function class struct enum type none null true false undefined void version versions note notes todo fixme hack example examples see below above following here step steps stage phase section sections item items line lines word words text name names title label labels body bodies content contents message messages description summary details detail info information option options param params parameter parameters arg args argument arguments key keys value values field fields row rows column columns table tables list lists array arrays map maps string strings number numbers boolean object objects element elements node nodes child children parent parents root base head tail first last next prev previous current latest main master release releases branch branches commit commits change changes changed file files path paths dir dirs directory folder folders link links url urls href src dest target targets source sources input inputs output outputs result results error errors warn warning warnings debug trace level levels mode modes state states status user users admin id ids uid uuid time date datetime timestamp when once always never true false enabled disabled enable disable active inactive required optional allow deny allowed denied yes no on off"
-  awk -v excl="$TMP/excl" -v xstop="$XSTOP" -f "$TMP/extract.awk" "$TMP/diff" 2>/dev/null > "$TMP/raw" || die2 "extraction failed"
+  # the extraction runs inside the same --budget-seconds deadline as the grep: over budget is advisory, never a failure
+  REM=$((BUDGET - SECONDS)); TO=""
+  if command -v timeout >/dev/null 2>&1; then TO="timeout"; elif command -v gtimeout >/dev/null 2>&1; then TO="gtimeout"; fi
+  if [ "$REM" -le 0 ]; then
+    OVER=1; OVERWHY="budget ${BUDGET}s spent before the extraction started"
+  else
+    ${TO:+"$TO" "$REM"} awk -v excl="$TMP/excl" -v xstop="$XSTOP" -f "$TMP/extract.awk" "$TMP/diff" 2>/dev/null > "$TMP/raw"
+    xrc=$?
+    if [ "$xrc" -eq 124 ]; then
+      : > "$TMP/raw"; OVER=1; OVERWHY="budget ${BUDGET}s elapsed during the extraction; results are partial"
+    elif [ "$xrc" -ne 0 ]; then die2 "extraction failed"; fi
+  fi
 else
   # ---- identifier mode ------------------------------------------------------------------------------------
   printf '%s' "$IDENTS" | sed '/^$/d' | awk '{ print $0 "\tident" }' > "$TMP/raw"
@@ -384,7 +406,6 @@ fi
 
 # ---- sweep: ONE bounded git grep -----------------------------------------------------------------------
 : > "$TMP/sites"   # identifier<TAB>kind<TAB>file:line
-OVER=0; OVERWHY=""
 NIDS=$(wc -l < "$TMP/ids" | tr -d ' ')
 if [ "$NIDS" -gt "$MAX_IDS" ]; then
   head -n "$MAX_IDS" "$TMP/ids" > "$TMP/ids.cut"; mv "$TMP/ids.cut" "$TMP/ids"

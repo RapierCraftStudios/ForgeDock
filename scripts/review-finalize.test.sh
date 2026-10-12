@@ -1022,5 +1022,19 @@ OUT=$(bash "$ROOT/scripts/review-finalize.sh" bogus 2>/dev/null); RC=$?; rc_is "
 OUT=$(bash "$ROOT/scripts/review-finalize.sh" extract --pr x --repo o/r --context "$CTXF" 2>/dev/null); RC=$?; rc_is "non-numeric pr" "$RC" 2
 OUT=$(bash "$ROOT/scripts/review-finalize.sh" extract --pr 7 --repo o/r 2>/dev/null); RC=$?; rc_is "missing context" "$RC" 2
 
+# ======================= forge#4037: build.md red-green DEGRADED entry survives the real name splitter =======================
+RG_LINE=$(grep -F 'RG_DEGRADED_LIST="${RG_DEGRADED_LIST}' "$ROOT/commands/work-on/build.md" | sed -n '1p' | sed 's/^[[:space:]]*\*) //; s/ ;;.*$//')
+SPLIT_LINE=$(grep -F 'DEG_NAME_LIST=$(printf' "$ROOT/scripts/review-finalize.sh" | sed -n '1p' | sed 's/^[[:space:]]*//')
+if [ -n "$RG_LINE" ] && [ -n "$SPLIT_LINE" ]; then
+  RG_DEGRADED_LIST=""; ID="AC2"; RG_BASE=UNRUNNABLE; RG_HEAD=RAN
+  eval "$RG_LINE"
+  RG_DEGRADED_LIST="${RG_DEGRADED_LIST}; AC3 — base run cannot execute (base=UNRUNNABLE head=RAN), so the test is unproven"
+  DEG_NAMES="$RG_DEGRADED_LIST"
+  eval "$SPLIT_LINE"
+  [ "$DEG_NAME_LIST" = "$(printf 'AC2\nAC3')" ] && ok || bad "red-green DEGRADED entries split into exactly their check names (got: $DEG_NAME_LIST)"
+else
+  bad "could not extract the build.md DEGRADED entry or the review-finalize splitter"
+fi
+
 echo "review-finalize tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

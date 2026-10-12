@@ -34,6 +34,16 @@ if grep -qE '(^|[^0-9A-Za-z])[1-9][0-9]* passed' "$FILE" || grep -qE '^# pass [1
    || grep -qE '^ok [0-9]+' "$FILE"; then
   PASSED=true
 fi
+# forge#4037: pass summaries of other common runners count as positive evidence BEFORE any error-keyword heuristic, so a
+# passing run whose output merely mentions ECONNREFUSED / "skip" is not RAN_NOTHING. node --test spec ("ℹ pass N", "✔ name (Nms)"),
+# jest/vitest ("Tests: N passed" is covered above), go test ("ok  pkg 0.3s", "--- PASS"), cargo ("test result: ok. N passed").
+if [ "$PASSED" = "false" ] && { grep -qE '^[[:space:]]*ℹ pass [1-9][0-9]*' "$FILE" \
+   || grep -qE '^[[:space:]]*✔ .*\([0-9.]+ ?m?s\)[[:space:]]*$' "$FILE" \
+   || grep -qE '^ok[[:space:]]+[^[:space:]]+[[:space:]]+[0-9.]+s' "$FILE" \
+   || grep -qE '^[[:space:]]*--- PASS: ' "$FILE" \
+   || grep -qE '^test result: ok\. [1-9][0-9]* passed' "$FILE"; }; then
+  PASSED=true
+fi
 
 # Explicit "nothing ran" output.
 if has 'no tests ran' || has 'no tests collected' || has 'collected 0 items' || has '^Ran 0 tests' \

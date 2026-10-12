@@ -1289,8 +1289,11 @@ async function runPhaseWithRetry(phase, state, ctx) {
       // Do not fabricate a value; omitting the field (rather than a stale
       // `lastUsage` from a prior attempt) keeps this event's usage
       // trustworthy as "usage actually observed on this attempt".
-      await recordAttempt(attempt, null, t0, null);
-      appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, code: codeForRunnerError(e), maxAttempts });
+      // forge#4037: a wall-clock kill (CLI_TIMEOUT) consumes this attempt; its usage is recorded when the CLI emitted any.
+      const killUsage = e.code === "CLI_TIMEOUT" ? e.usage ?? null : null;
+      if (killUsage) addUsage(killUsage);
+      await recordAttempt(attempt, killUsage, t0, null);
+      appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, code: codeForRunnerError(e), maxAttempts, ...(killUsage ? { usage: killUsage } : {}) });
       lastCode = OUTCOME_CODES.ENGINE_ERROR;
       continue;
     }

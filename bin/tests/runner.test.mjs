@@ -1717,6 +1717,32 @@ describe("runCliBackend spawnFn seam (issue #2033)", () => {
     });
   }
 
+  // forge#4037: a wall-clock kill (child ran, SIGTERM) is a normal attempt, never the free-retry spawn class.
+  it("a wall-clock kill (signal set) is CLI_TIMEOUT, not CLI_SPAWN_TRANSIENT, and carries usage when emitted", () => {
+    const usage = { input_tokens: 5, output_tokens: 7, cache_creation_input_tokens: 1, cache_read_input_tokens: 2 };
+    const spawnFn = () => ({ status: null, signal: "SIGTERM", pid: 4242, stdout: JSON.stringify({ usage }), stderr: "",
+      error: Object.assign(new Error("spawnSync claude ETIMEDOUT"), { code: "ETIMEDOUT" }) });
+    assert.throws(
+      () => runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"), userMessage: "Execute: /work-on 4037", args: ["4037"],
+        cwd: TMP, logger: { log: () => {} }, bin: "claude", spawnFn,
+      }),
+      (err) => err.code === "CLI_TIMEOUT" && err.spawnErrno === undefined && err.usage?.output_tokens === 7 && /timed out after/.test(err.message),
+    );
+  });
+
+  it("a wall-clock kill with no parseable output is CLI_TIMEOUT with null usage", () => {
+    const spawnFn = () => ({ status: null, signal: "SIGTERM", stdout: "", stderr: "",
+      error: Object.assign(new Error("spawnSync claude ETIMEDOUT"), { code: "ETIMEDOUT" }) });
+    assert.throws(
+      () => runCliBackend({
+        spec: loadCommandSpec(COMMANDS_DIR, "work-on"), userMessage: "Execute: /work-on 4037", args: ["4037"],
+        cwd: TMP, logger: { log: () => {} }, bin: "claude", spawnFn,
+      }),
+      (err) => err.code === "CLI_TIMEOUT" && err.usage === null,
+    );
+  });
+
   it("a non-transient spawn error (ENOENT) keeps its own code", () => {
     const spawnFn = () => ({ status: null, stdout: "", stderr: "", error: Object.assign(new Error("nope"), { code: "ENOENT" }) });
     assert.throws(

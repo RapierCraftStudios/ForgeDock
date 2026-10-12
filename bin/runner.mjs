@@ -1521,6 +1521,9 @@ export function runCliBackend({
     // intentionally omitted here since spawnSync's own `timeout` + ETIMEDOUT is
     // reliable for this single, non-looped invocation.
     const timedOut = result.status === null && result.error?.code === "ETIMEDOUT";
+    // forge#4037: only a spawn-stage failure is transient infra. A wall-clock kill leaves evidence that the child ran
+    // (a kill signal, a pid, or captured output); an ETIMEDOUT with none of those never started the child.
+    const childRan = !!result.signal || (Number.isInteger(result.pid) && result.pid > 0) || (stdout + stderr).trim().length > 0;
     if (timedOut) {
       const timeoutSecs = Math.round(timeoutMs / 1000);
       // forge#2360: spawnSync's `timeout` option kills the child outright on
@@ -1543,10 +1546,30 @@ export function runCliBackend({
           `Set FORGEDOCK_CLI_TIMEOUT_MS (ms) to adjust, or use --backend api.` +
           (partial ? ` Partial output: ${sanitizeOutputExcerptForLog(partial)}` : ""),
       );
-      // forge#4021: stable transient-infra class; the engine retries it on a
-      // separate bounded counter without consuming a phase attempt.
-      timeoutError.code = "CLI_SPAWN_TRANSIENT";
-      timeoutError.spawnErrno = "ETIMEDOUT";
+      if (!childRan) {
+        // forge#4021: stable transient-infra class; the engine retries it on a
+        // separate bounded counter without consuming a phase attempt.
+        timeoutError.code = "CLI_SPAWN_TRANSIENT";
+        timeoutError.spawnErrno = "ETIMEDOUT";
+        throw timeoutError;
+      }
+      // forge#4037: the child ran and was killed at the wall-clock limit: a normal, attempt-consuming failure
+      // (`cli.timeout`), with usage attached when the CLI had already emitted a parseable envelope.
+      timeoutError.code = "CLI_TIMEOUT";
+      timeoutError.usage = null;
+      try {
+        const u = JSON.parse(stdout.trim())?.usage;
+        if (u && typeof u === "object") {
+          timeoutError.usage = {
+            input_tokens: toFiniteUsageNumber(u.input_tokens),
+            output_tokens: toFiniteUsageNumber(u.output_tokens),
+            cache_creation_input_tokens: toFiniteUsageNumber(u.cache_creation_input_tokens),
+            cache_read_input_tokens: toFiniteUsageNumber(u.cache_read_input_tokens),
+          };
+        }
+      } catch {
+        // No parseable envelope from a killed child: usage stays null (never fabricated).
+      }
       throw timeoutError;
     }
     if (result.error) {

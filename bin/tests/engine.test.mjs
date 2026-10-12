@@ -823,6 +823,26 @@ describe("runIssue", () => {
     assert.ok(res.terminalReason, "the run terminates instead of looping forever");
   });
 
+  it("forge#4037: a CLI wall-clock timeout consumes an attempt (no free infra retries) and records usage", async () => {
+    const { w, io } = fakeWorld();
+    let buildCalls = 0;
+    const sleeps = [];
+    const usage = { input_tokens: 3, output_tokens: 4, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { buildCalls++; throw Object.assign(new Error("claude CLI invocation timed out after 3600s and was killed."), { code: "CLI_TIMEOUT", usage }); },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 2,
+      sleep: async (ms) => { sleeps.push(ms); } });
+    assert.equal(buildCalls, 2, "exactly maxAttempts runs, not 3 free retries on top");
+    assert.deepEqual(sleeps.filter((ms) => ms === 10000 || ms === 30000 || ms === 60000), []);
+    assert.ok(res.terminalReason);
+    const failed = readLog(dir, 42).filter((e) => e.event === "PHASE_FAILED" && e.phase === "build");
+    assert.equal(failed.length, 2);
+    assert.ok(failed.every((e) => e.code === "cli.timeout" && e.usage?.output_tokens === 4));
+  });
+
   it("forge#2259/#2261: CLI_BACKEND_FAILED thrown by the runner fails fast on attempt 1, not retried to maxAttempts", async () => {
     // Regression for #2244: a deterministic non-zero exit from the nested
     // `claude` CLI (bin/runner.mjs's runCliBackend() throws with

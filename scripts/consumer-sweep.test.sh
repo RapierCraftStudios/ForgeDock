@@ -336,5 +336,22 @@ if [ "$before" = "$(git -C "$T/h" rev-parse HEAD)" ] && [ -z "$(git -C "$T/h" st
 run --eval-history 2 --range base..feat
 rc 2 "eval-history is exclusive with --range"
 
+# forge#4037: a 10,000-line YAML rewrite finishes quickly (per-file token sets, not removed x added), and extraction runs
+# under --budget-seconds: a spent budget reports BUDGET_EXCEEDED, advisory, exit 0.
+mkdir "$T/y"; gy() { git -C "$T/y" -c user.name=t -c user.email=t@example.com -c commit.gpgsign=false "$@" >/dev/null 2>&1; }
+git -C "$T/y" init -q -b base >/dev/null 2>&1
+awk 'BEGIN{for(i=1;i<=10000;i++) printf "  svc.old-key-%d: value_%d\n", i, i}' > "$T/y/big.yaml"
+gy add -A; gy commit -m base; gy checkout -q -b feat
+awk 'BEGIN{for(i=1;i<=10000;i++) printf "  svc.new-key-%d: value_%d\n", i, i}' > "$T/y/big.yaml"
+gy add -A; gy commit -m rewrite
+start=$(date +%s)
+OUT=$(bash "$S" --repo "$T/y" --range base..feat --budget-seconds 20 --mode advisory 2>"$T/err"); RC=$?
+elapsed=$(( $(date +%s) - start ))
+rc 0 "10k-line yaml rewrite exits 0"
+if [ "$elapsed" -le 20 ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL: 10k-line yaml rewrite took ${elapsed}s"; fi
+OUT=$(bash "$S" --repo "$T/y" --range base..feat --budget-seconds 0 --mode blocking 2>"$T/err"); RC=$?
+rc 0 "zero budget is advisory exit 0"
+has "zero budget reports BUDGET_EXCEEDED" "BUDGET_EXCEEDED"
+
 echo "consumer-sweep.test.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
