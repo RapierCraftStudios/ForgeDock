@@ -327,9 +327,11 @@ run_classified_test() {
 }
 
 # verification.commands.<lang>.test (when configured). forge#4037: this runs the whole suite unscoped, so when the change-scoped local CI
-# gate (scripts/ci-local) exists on the branch it is preferred and this run is skipped (recorded, not silent).
+# gate (scripts/ci-local.sh, resolved from the ForgeDock install root like V4.8 — never the repo under build) is available
+# it is preferred and this run is skipped (recorded, not silent).
 _LANGS="python typescript"
-if [ -x scripts/ci-local ]; then _LANGS=""; echo "verification.commands.<lang>.test skipped: change-scoped local CI gate scripts/ci-local is available"; fi
+_CL=$(forge_resolve ci-local.sh 2>/dev/null)
+if [ -n "$_CL" ] && [ -f "$_CL" ]; then _LANGS=""; echo "verification.commands.<lang>.test skipped: change-scoped local CI gate (V4.8, $_CL) covers it"; fi
 for _lang in $_LANGS; do
     TEST_CMD=$(yq ".verification.commands.${_lang}.test // \"\"" "$FORGE_CFG" 2>/dev/null || echo '')
     [ -n "$TEST_CMD" ] || continue
