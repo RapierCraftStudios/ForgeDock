@@ -69,15 +69,36 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:CONTEXT")) | .body'
 ```
 
-**Resume check**:
-- If `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment → implementation is done — EXIT and print `IMPLEMENT_RESULT: status: ALREADY_DONE` as the final reply.
-- If `<!-- FORGE:BUILDER -->` exists BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → implementation was interrupted after the comment was posted but before the commit (validate.md V5). Delete the partial comment and restart from Phase I2:
+**Resume check** (current-cycle slice only, same as build.md B0 <!-- Added: forge#3666 -->): every read below runs on the comments AFTER the newest trusted `<!-- FORGE:CYCLE: n -->` marker, so a cycle-1 `BUILDER:COMPLETE` never yields `ALREADY_DONE` in cycle 2 (the build would then proceed on an empty branch). `cycle_slice` is declared verbatim from build.md B0:
   ```bash
-  PARTIAL_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-    --jq '[.[] | select(.body | contains("FORGE:BUILDER") and (contains("FORGE:BUILDER:COMPLETE") | not))] | last | .id // ""')
+  cycle_slice() {
+    jq -s --arg assoc "${FORGE_TRAIL_TRUSTED_ASSOCIATIONS-OWNER,MEMBER,COLLABORATOR}" --arg logins "${FORGE_TRAIL_TRUSTED_LOGINS-}" '[.[][]] as $c
+      | ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
+      | ($logins | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $L
+      | ([$c | to_entries[]
+          | select(((.value.author_association // "") as $x | $A | index($x) != null) or ((.value.user.type // "") == "Bot") or ((.value.user.login // "") as $x | $L | index($x) != null))
+          | select((.value.body // "") | test("\\A\\s*<!--\\s*FORGE:CYCLE:") and test("(?m)^[ \\t]*<!--[ \\t]*FORGE:CYCLE:[ \\t]*[0-9]+[ \\t]*-->[ \\t]*$"))
+          | .key] | last) as $i
+      | if $i == null then $c else $c[($i + 1):] end'
+  }
+  # Capture the read first (as build.md B0): piped straight into jq -s, a failed gh call still yields `[]` and exit 0.
+  COMMENTS_JSON=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments) \
+    && CYCLE_SLICE=$(printf '%s' "$COMMENTS_JSON" | cycle_slice) && [ -n "$CYCLE_SLICE" ] \
+    || { echo "IMPLEMENT_RESULT: status: BLOCKED (cycle-lookup-unavailable: could not read FORGE:CYCLE)"; exit 1; }  # a failed read is NEVER "no marker"
+  BUILDER_DONE=$(printf '%s' "$CYCLE_SLICE" | jq '[.[] | select((.body // "") | startswith("<!-- FORGE:BUILDER")) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | select(.body | contains("<!-- FORGE:BUILDER:COMPLETE -->"))] | length')
+  ```
+- If `BUILDER_DONE` > 0 (a `<!-- FORGE:BUILDER:COMPLETE -->` BUILDER comment in the current-cycle slice) → implementation is done — EXIT and print `IMPLEMENT_RESULT: status: ALREADY_DONE` as the final reply.
+- If `<!-- FORGE:BUILDER -->` exists in the current-cycle slice BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → implementation was interrupted after the comment was posted but before the commit (validate.md V5). Delete the partial comment and restart from Phase I2:
+  Select with ONE anchored, trusted selector (body must start with the marker; author must be a Bot or OWNER/MEMBER/COLLABORATOR; mirrors `scripts/trusted-comments.sh`). A comment that merely mentions the marker (INVESTIGATOR, CONTEXT, ARCHITECT) never matches. Delete ONLY when exactly one non-complete candidate exists and it carries no other FORGE phase marker; unparsable, zero, or multiple matches delete nothing (fail closed). <!-- Added: forge#3668 -->
+  ```bash
+  # only a current-cycle partial is ever deleted; prior-cycle comments are never touched
+  BLD=$(printf '%s' "$CYCLE_SLICE" | jq -s '[.[][] | select((.body // "") | startswith("<!-- FORGE:BUILDER -->")) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | {id: .id, complete: (.body | contains("<!-- FORGE:BUILDER:COMPLETE -->")), other: (.body | test("<!-- FORGE:(INVESTIGATOR|CONTEXT|CONTRACT|ARCHITECT)"))}]') || BLD=""
+  PARTIAL_ID=$(printf '%s' "$BLD" | jq -r '[.[] | select(.complete | not)] | if length == 1 and (.[0].other | not) then .[0].id else empty end' 2>/dev/null)
   if [ -n "$PARTIAL_ID" ]; then
     gh api repos/{GH_REPO}/issues/comments/$PARTIAL_ID -X DELETE
     echo "Deleted partial FORGE:BUILDER comment (no FORGE:BUILDER:COMPLETE) — restarting implementation"
+  else
+    echo "builder resume: no single safe partial BUILDER comment — deleting nothing"
   fi
   ```
 

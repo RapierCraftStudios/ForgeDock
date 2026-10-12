@@ -147,13 +147,22 @@ OUT9=$( ( SELECTED_AGENT_COUNT="abc"; . "$TMP/selcase.sh"; echo "$SELECTED_COUNT
 [ "$OUT9" = "true" ] && ok || bad "Phase 6: non-integer SELECTED_AGENT_COUNT must be invalid (got '$OUT9')"
 mkdir -p "$TMP/sd8/full" "$TMP/sd8/empty" "$TMP/sd8/bad" "$TMP/bin"
 printf '#!/bin/sh\necho stub-value\n' > "$TMP/bin/yq"; chmod +x "$TMP/bin/yq"
-printf '42\n' > "$TMP/sd8/full/staging_pr_number"; printf '7\n8\n' > "$TMP/sd8/full/42_bundle-prs.txt"
-printf '42; rm -rf /\n' > "$TMP/sd8/bad/staging_pr_number"
+printf '42\n' > "$TMP/sd8/full/staging_pr_number.runA"; printf '7\n8\n' > "$TMP/sd8/full/42_bundle-prs.txt"
+printf '43\n' > "$TMP/sd8/full/staging_pr_number.runB"; printf '9\n' > "$TMP/sd8/full/43_bundle-prs.txt"
+printf '42; rm -rf /\n' > "$TMP/sd8/bad/staging_pr_number.runA"
 boot() { # scratch-dir -> prints "PR_NUMBER|ALL_PR_NUMBERS(joined)|GH_REPO" then any warning
-  ( unset PR_NUMBER ALL_PR_NUMBERS GH_REPO DEFAULT_BRANCH STAGING_BRANCH; export PATH="$TMP/bin:$PATH" FORGE_SCRATCHPAD="$1"
+  ( unset PR_NUMBER ALL_PR_NUMBERS GH_REPO DEFAULT_BRANCH STAGING_BRANCH; export PATH="$TMP/bin:$PATH" FORGE_SCRATCHPAD="$1" FORGE_RUN_KEY="${2:-runA}"
     export FORGEDOCK_HOME="$ROOT"; . "$TMP/boot.sh" 2>&1; echo "PR=${PR_NUMBER:-}|ALL=$(echo ${ALL_PR_NUMBERS:-})|REPO=${GH_REPO:-}|BR=${STAGING_BRANCH:-}" ) 2>&1; }
 OUT8=$(boot "$TMP/sd8/full")
 [ "$OUT8" = "PR=42|ALL=7 8|REPO=stub-value|BR=stub-value" ] && ok || bad "fresh shell must reload staging_pr_number and bundle-prs from the scratchpad (got '$OUT8')"
+OUT8=$(boot "$TMP/sd8/full" runB)
+[ "$OUT8" = "PR=43|ALL=9|REPO=stub-value|BR=stub-value" ] && ok || bad "two runs in one scratchpad must each reload their own PR (got '$OUT8')"
+OUT8=$(boot "$TMP/sd8/full" runC)
+case "$OUT8" in *"WARNING: PR_NUMBER is empty"*"PR=|"*) ok ;; *) bad "a run with no pointer must not read another run's pointer (got '$OUT8')" ;; esac
+OUT8=$(boot "$TMP/sd8/full" '../x')
+case "$OUT8" in *"PR=|"*) ok ;; *) bad "a path-like run key must be sanitised (got '$OUT8')" ;; esac
+_KD='FORGE_RUN_KEY=$(printf'
+[ "$(grep -F "$_KD" "$SPEC" | grep -F 'FORGE_RUN_KEY="${FORGE_RUN_KEY:-' | head -1)" = "$(grep -F "$_KD" "$ROOT/scripts/lib/fence-bootstrap.sh" | grep -F 'FORGE_RUN_KEY="${FORGE_RUN_KEY:-' | head -1)" ] && grep -qF 'FORGE_RUN_KEY="${FORGE_RUN_KEY:-' "$SPEC" && ok || bad "FORGE_RUN_KEY derivation must be identical in spec and fence-bootstrap.sh"
 OUT8=$(boot "$TMP/sd8/empty")
 case "$OUT8" in *"WARNING: PR_NUMBER is empty"*"PR=|ALL=|"*) ok ;; *) bad "empty scratchpad must leave PR_NUMBER empty and warn (got '$OUT8')" ;; esac
 OUT8=$(boot "$TMP/sd8/bad")
@@ -191,16 +200,38 @@ jq -n --arg sha "$OLDSHA" '[{author_association:"MEMBER",user:{type:"User",login
 PRIOR_OUT=$( ( export FIX_COMMENTS="$TMP/member-comments.json" PATH="$TMP/bin:$PATH"; REPO=o/r; _pscr="$TMP"; TRUSTED_SCRIPT="$TC"; . "$TMP/prior-fn.sh"; PF_SKIP="" PF_PRS=41 prior_findings_tsv ) 2>/dev/null )
 printf '%s\n' "$PRIOR_OUT" > "$TMP/prior.tsv"
 [ "$(printf '%s\n' "$PRIOR_OUT" | grep -c .)" = "1" ] && printf '%s' "$PRIOR_OUT" | grep -q '^src/api.py	12	12	Missing retry on timeout handler	filed	123$' && ok || bad "member PR finding must reach the TSV (open issue linked) and an untrusted comment must not (got: $PRIOR_OUT)"
+awk '/^cap_pass\(\) \{/,/^\}/' "$SPEC" > "$TMP/cap-fn.sh"
+[ -s "$TMP/cap-fn.sh" ] && ok || bad "cap_pass not found in the spec"
 run_dup() { # finding-file finding-line -> "DISPOSITION|FILED|REFLAG|LISTED"
   ( _SD="$TMP"; PR_NUMBER=9; CLASSIFY_SCRIPT="$ROOT/scripts/classify-finding.sh"; PRIOR_FILE="$TMP/prior.tsv"; SCOPE_MODE=full; CROSS_PR_FILES=""; UNREVIEWED_FILES=""; DEPLOY_WIRING_FILES=""
     NOTE_LIST_FILE="$TMP/dup-notes.md"; : > "$NOTE_LIST_FILE"; NOTES_LISTED=0; FINDINGS_FILED=0; OUT_OF_SCOPE=0; NOTES_REFLAG=0
     FINDING_ID=Z1; FINDING_SEVERITY="${3:-MEDIUM}"; FINDING_CONFIDENCE=CONFIRMED; FINDING_AGENT="General"; FINDING_TITLE="${4:-retry missing for the timeout handler}"; FINDING_BODY=b; FINDING_FILE="$1"; FINDING_PATHS="$1"
-    . "$TMP/fn.sh"; classify_one; echo "$DISPOSITION|$FINDINGS_FILED|$NOTES_REFLAG|$NOTES_LISTED" ) 2>&1 | tail -1; }
+    CAP_ROWS_FILE="$TMP/dup-rows.tsv"; : > "$CAP_ROWS_FILE"; CAPPED_IDS_FILE="$TMP/dup-capped.txt"; CAP_SCRIPT="$ROOT/scripts/cap-findings.sh"; NOTES_CAPPED=0
+    . "$TMP/fn.sh"; . "$TMP/cap-fn.sh"; classify_one; cap_pass >/dev/null; echo "$DISPOSITION|$FINDINGS_FILED|$NOTES_REFLAG|$NOTES_LISTED" ) 2>&1 | tail -1; }
 [ "$(run_dup src/api.py:12)" = "NOTE reflag-filed #123|0|1|0" ] && ok || bad "a staging finding duplicating a member PR finding must be NOTE reflag-filed and file nothing (got '$(run_dup src/api.py:12)')"
 [ "$(run_dup src/api.py:12 x HIGH)" = "ISSUE severity-HIGH|1|0|0" ] && ok || bad "a HIGH duplicate of a member PR finding must still be an ISSUE (got '$(run_dup src/api.py:12 x HIGH)')"
 [ "$(run_dup src/other.py:12)" = "ISSUE MEDIUM-CONFIRMED|1|0|0" ] && ok || bad "a non-duplicate on another file must classify normally (got '$(run_dup src/other.py:12)')"
 run_dup src/api.py:12 >/dev/null
 grep -q 'reflag-filed #123' "$TMP/dup-notes.md" && ok || bad "a re-flag NOTE must be listed, not dropped"
+# (8b) per-review cap (forge#3642): classify_one only records ISSUE rows; cap_pass keeps review.max_filed_findings (default 2), lists the rest as NOTE capped, never caps HIGH.
+run_cap() { # "<sev>:<conf>:<id>"... -> "FILED|CAPPED|NOTES_LISTED|capped-ids(comma)|note-lines-with-capped"
+  ( _SD="$TMP"; PR_NUMBER=9; CLASSIFY_SCRIPT="$ROOT/scripts/classify-finding.sh"; PRIOR_FILE=""; SCOPE_MODE=full; CROSS_PR_FILES=""; UNREVIEWED_FILES=""; DEPLOY_WIRING_FILES=""
+    NOTE_LIST_FILE="$TMP/cap-notes.md"; : > "$NOTE_LIST_FILE"; NOTES_LISTED=0; FINDINGS_FILED=0; OUT_OF_SCOPE=0; NOTES_REFLAG=0; NOTES_CAPPED=0
+    CAP_ROWS_FILE="$TMP/cap-rows.tsv"; : > "$CAP_ROWS_FILE"; CAPPED_IDS_FILE="$TMP/cap-capped.txt"; CAP_SCRIPT="$ROOT/scripts/cap-findings.sh"; MAX_FILED_FINDINGS="${CAPMAX:-}"
+    . "$TMP/fn.sh"; . "$TMP/cap-fn.sh"
+    for spec in "$@"; do
+      IFS=: read -r FINDING_SEVERITY FINDING_CONFIDENCE FINDING_ID <<EOF3
+$spec
+EOF3
+      FINDING_AGENT=General; FINDING_TITLE="finding $FINDING_ID"; FINDING_BODY=b; FINDING_FILE="src/$FINDING_ID.py"; FINDING_PATHS="$FINDING_FILE"
+      classify_one
+    done
+    cap_pass >/dev/null
+    echo "$FINDINGS_FILED|$NOTES_CAPPED|$NOTES_LISTED|$(paste -sd, "$CAPPED_IDS_FILE")|$(grep -c 'NOTE capped (' "$NOTE_LIST_FILE")" ) 2>&1 | tail -1; }
+[ "$(run_cap MEDIUM:LIKELY:a MEDIUM:CONFIRMED:b MEDIUM:LIKELY:c)" = "2|1|0|c|1" ] && ok || bad "3 MEDIUM findings: 2 filed, the lowest-ranked capped and listed (got '$(run_cap MEDIUM:LIKELY:a MEDIUM:CONFIRMED:b MEDIUM:LIKELY:c)')"
+[ "$(run_cap HIGH:LIKELY:a HIGH:POSSIBLE:b CRITICAL:CONFIRMED:c MEDIUM:LIKELY:d)" = "4|0|0||0" ] && ok || bad "HIGH/CRITICAL must never be capped (got '$(run_cap HIGH:LIKELY:a HIGH:POSSIBLE:b CRITICAL:CONFIRMED:c MEDIUM:LIKELY:d)')"
+[ "$(CAPMAX=1 run_cap MEDIUM:LIKELY:a MEDIUM:CONFIRMED:b)" = "1|1|0|a|1" ] && ok || bad "review.max_filed_findings=1 must be honoured (got '$(CAPMAX=1 run_cap MEDIUM:LIKELY:a MEDIUM:CONFIRMED:b)')"
+[ "$(CAPMAX=zzz run_cap MEDIUM:LIKELY:a MEDIUM:LIKELY:b MEDIUM:LIKELY:c)" = "2|1|0|c|1" ] && ok || bad "an invalid review.max_filed_findings must fall back to the default 2"
 # (9) stale-head delta credit (forge#3638): the spec's bundle_delta_credit runs against real git fixtures and the REAL review-delta.sh / trusted-comments.sh.
 # Fail-closed cases first: every FULL / error / untrusted path must leave the PR's commits UNREVIEWED (empty credit).
 if command -v git >/dev/null 2>&1; then
@@ -284,10 +315,39 @@ if grep -qE 'merge-base --is-ancestor.*REVIEWED_SHA_STALE|diff_shape\(\)' "$SPEC
 grep -qF 'printf '"'"'%s\n'"'"' "$_FILES" | sort -u | sed "s|^|$pr |" >> "$_PF"' "$SPEC" && grep -qF 'git diff-tree --no-commit-id --name-only -r --cc "$c"' "$SPEC" && ok || bad "CROSS_PR_FILES accumulation and --cc merge scoping must stay intact"
 [ "$(grep -c '# FENCE_BOOTSTRAP$' "$SPEC" | head -1)" -ge 3 ] && ok || bad "FENCE_BOOTSTRAP stubs must remain"
 # an unresolvable helper fails the fence closed (exit 1), never an unsourced bootstrap
-OUT8=$( ( unset FORGEDOCK_HOME; export HOME="$TMP/nohome"; cd "$TMP" && bash -c "$(cat "$TMP/boot.sh"); echo reached" ) 2>&1 )
+OUT8=$( ( unset FORGEDOCK_HOME FORGE_HOME FORGE_ROOT CLAUDE_PLUGIN_ROOT CLAUDE_CONFIG_DIR CODEX_HOME FORGE_SOURCED_ROOT FORGEDOCK_MARKETPLACE; export HOME="$TMP/nohome"; cd "$TMP" && bash -c "$(cat "$TMP/boot.sh"); echo reached" ) 2>&1 )
 case "$OUT8" in *BLOCKED*) case "$OUT8" in *reached*) bad "unresolved bootstrap helper must stop the fence" ;; *) ok ;; esac ;; *) bad "unresolved bootstrap helper must print BLOCKED (got '$OUT8')" ;; esac
 # a stale-head PR must not credit its own merge commit (it contains the post-review commits): the DELTA branch only appends DELTA_COMMITS
 if awk '/^bundle_delta_credit\(\)/,/^\}/' "$SPEC" | grep -q 'mergeCommit'; then bad "the DELTA path must not credit the PR merge commit"; else ok; fi
+# (10) fail-closed gate verdict (forge#3734): an empty/missing/invalid persisted verdict must never become SKIP
+awk '/^\*\*Verdict handling\*\*:/{f=1;next} f&&/^```bash/{g=1;next} g&&/^```/{exit} g' "$SPEC" | grep -v '# FENCE_BOOTSTRAP$' > "$TMP/vh.sh"
+[ -s "$TMP/vh.sh" ] && ok || bad "could not extract the Phase 6.5 verdict-handling fence"
+if awk '/^  \*\)/,/;;/' "$SPEC" | grep -q 'TEST_GATE_VERDICT="SKIP"'; then bad "catch-all arm must not set TEST_GATE_VERDICT=SKIP"; else ok; fi
+grep -qF 'missing/invalid' "$SPEC" && ok || bad "spec must document missing/invalid gate-verdict handling"
+if grep -F 'FORGE:TEST_GATE:RESULT=' "$SPEC" | grep -q 'tail -1 || echo "SKIP"'; then bad "producer must not coerce an absent marker to SKIP"; else ok; fi
+vh10() { # $1 posture, $2 persisted verdict content ('-' = no file), $3 env verdict (optional)
+  local sd="$TMP/vh10.$RANDOM"; mkdir -p "$sd"
+  [ "$2" = "-" ] || printf '%s\n' "$2" > "$sd/5_test_gate_verdict"
+  ( export _SD="$sd" PR_NUMBER=5 GH_REPO=o/r DEFAULT_BRANCH=main ALL_PR_NUMBERS="5" CONFIG_FILE=/dev/null P10="$1"
+    [ -z "${3:-}" ] || export TEST_GATE_VERDICT="$3"
+    forge_resolve() { :; }; yq() { case "$*" in *posture*) echo "$P10" ;; *) echo "OVERRIDE: x" ;; esac; }; gh() { return 0; }
+    . "$TMP/vh.sh" >"$sd/out" 2>&1; echo "rc=0" >> "$sd/out" ) ; local rc=$?
+  VH10_OUT=$(cat "$sd/out"); VH10_V=$(cat "$sd/5_test_gate_verdict" 2>/dev/null); VH10_R=$(cat "$sd/5_test_gate_reason" 2>/dev/null)
+}
+for case10 in "-" "" "garbage" "pass" "SKIP extra"; do
+  vh10 blocking "$case10"
+  case "$VH10_OUT" in *rc=0*) bad "blocking posture must exit non-zero for persisted verdict '$case10'" ;; *) ok ;; esac
+  [ "$VH10_V" = "BLOCK" ] && case "$VH10_R" in *missing/invalid*) true ;; *) false ;; esac && ok || bad "blocking posture must persist BLOCK + missing/invalid reason for '$case10' (got '$VH10_V' / '$VH10_R')"
+  vh10 advisory "$case10"
+  case "$VH10_OUT" in *rc=0*) ok ;; *) bad "advisory posture must not block for persisted verdict '$case10'" ;; esac
+  [ "$VH10_V" = "BLOCK" ] && case "$VH10_R" in *advisory*missing/invalid*) true ;; *) false ;; esac && ok || bad "advisory posture must record BLOCK (advisory) missing/invalid for '$case10' (got '$VH10_V' / '$VH10_R')"
+done
+vh10 blocking "-" "bogus"
+case "$VH10_OUT" in *rc=0*) bad "an unrecognised in-env verdict must fail closed under blocking posture" ;; *) ok ;; esac
+vh10 blocking "PASS"
+case "$VH10_OUT" in *rc=0*) [ "$VH10_V" = "PASS" ] && ok || bad "a valid persisted PASS must stay PASS" ;; *) bad "a valid persisted PASS must not block" ;; esac
+vh10 blocking "SKIP"
+case "$VH10_OUT" in *rc=0*) [ "$VH10_V" = "SKIP" ] && ok || bad "a valid persisted SKIP must stay SKIP" ;; *) bad "a valid persisted SKIP must not block" ;; esac
 else echo "review-pr-staging-scope.test.sh: git missing, delta section skipped"; fi
 echo "review-pr-staging-scope.test.sh: passed=$PASS failed=$FAILN"
 [ "$FAILN" -eq 0 ]

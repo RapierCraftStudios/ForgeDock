@@ -12,6 +12,8 @@
 // imports the identical registry, so the two can no longer drift apart the way
 // they did in forge#2375/PR#2395.
 import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
+// forge#3833: closed outcome-code enum; every code below comes from structured evidence, never `detail` prose.
+import { OUTCOME_CODES as OC } from "./outcome-codes.mjs";
 
 // forge#2261: "engine-error" is a distinct terminal reason for engine/tool-level
 // failures (e.g. an exhausted retry loop where the runner itself never once
@@ -48,12 +50,22 @@ export const TERMINAL_REASONS = ["merged", "invalid", "needs-human", "decomposed
  */
 export function isTrustedComment(c) {
   if (!c || typeof c !== "object") return false;
+  return isTrustedActor({ association: c.author_association, type: c.user?.type, login: c.user?.login });
+}
+
+/**
+ * The ONE actor predicate behind `isTrustedComment` and the issue-body
+ * FORGE:STATE gate (projector). `association` is the GitHub author association,
+ * `type` the actor's `__typename`/`user.type` ("Bot", "User"...), `login` its
+ * login. Missing fields fail closed.
+ */
+export function isTrustedActor({ association, type, login } = {}) {
   const list = (v) => String(v).split(",").map((x) => x.trim()).filter(Boolean);
   const assoc = list(process.env.FORGE_TRAIL_TRUSTED_ASSOCIATIONS ?? "OWNER,MEMBER,COLLABORATOR");
   const logins = list(process.env.FORGE_TRAIL_TRUSTED_LOGINS ?? "");
-  return assoc.includes(c.author_association ?? "")
-    || (c.user?.type ?? "") === "Bot"
-    || logins.includes(c.user?.login ?? "");
+  return assoc.includes(association ?? "")
+    || (type ?? "") === "Bot"
+    || logins.includes(login ?? "");
 }
 
 /**
@@ -99,6 +111,8 @@ async function issueMarkers(issue, io) {
 const REMEDIATION_HELD_MARKER = "FORGE:REMEDIATION_HELD";
 /** Non-terminal deferral record (remediate.md Phase M0 liveness step): a live earlier run holds the lease. Never a COMPLETE/trail marker. */
 const REMEDIATION_DEFERRED_MARKER = "FORGE:REMEDIATION_DEFERRED";
+/** Per-dispatch record the engine posts on every remediate dispatch (forge#3807): scopes a DEFERRED record to its own dispatch. Never a COMPLETE/trail marker. */
+const REMEDIATION_DISPATCH_MARKER = "FORGE:REMEDIATION_DISPATCH";
 /** Lease holder ids the engine mints (`cli_<host>_<pid>`) are passed to remediate only when they match this shape (same as remediate-liveness.sh). */
 const LEASE_HOLDER_RE = /^[A-Za-z0-9._-]{1,128}$/;
 const reEscape = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -186,15 +200,32 @@ export async function postCycleMarker(issue, n, io) {
  * ALREADY_DONE when the newest gate marker is blocked (forge#3725).
  */
 function latestGateState(comments) {
+  return latestGateMarker(comments).state;
+}
+/**
+ * Single newest-first scan shared by latestGateState and latestBlockedIndex so their
+ * predicates cannot drift. Returns the newest gate marker's state and its comment index
+ * (`{state: "none", index: -1}` when there is none).
+ */
+function latestGateMarker(comments) {
   const gate = "FORGE:ACCEPTANCE_GATE";
   for (let i = comments.length - 1; i >= 0; i--) {
     const b = comments[i];
-    if (startsWithHeader(b, "FORGE:BUILD_BLOCKED")) return "blocked";
+    if (startsWithHeader(b, "FORGE:BUILD_BLOCKED")) return { state: "blocked", index: i };
     if (!startsWithHeader(b, gate)) continue;
-    if (hasSentinelLine(b, `${gate}:PASSED`)) return "pass";
-    if (hasSentinelLine(b, `${gate}:FAILED`) || hasSentinelLine(b, `${gate}:BLOCKED`)) return "blocked";
+    if (hasSentinelLine(b, `${gate}:PASSED`)) return { state: "pass", index: i };
+    if (hasSentinelLine(b, `${gate}:FAILED`) || hasSentinelLine(b, `${gate}:BLOCKED`)) return { state: "blocked", index: i };
   }
-  return "none";
+  return { state: "none", index: -1 };
+}
+/**
+ * Comment index of the newest blocked gate marker, or -1 when the newest gate marker is
+ * not blocked (a newer PASSED clears it). Recency anchor for build.detectOutcome so an
+ * older blocked marker cannot shadow a strictly newer size-gate routing marker.
+ */
+function latestBlockedIndex(comments) {
+  const m = latestGateMarker(comments);
+  return m.state === "blocked" ? m.index : -1;
 }
 /**
  * Investigation exit evidence (forge#3534): a trusted comment led by
@@ -265,18 +296,22 @@ function overrideHasJustification(body) {
  * chronological order (see trustedCommentBodies); an untrusted comment never
  * reaches this function.
  */
-function sizeGateRoutesToDecompose(comments) {
+function sizeGateRouteIndex(comments) {
   const gate = PHASE_MARKERS.build.sizeGateMarker;
   const override = PHASE_MARKERS.build.sizeOverrideMarker;
   const starts = (c, m) => typeof c === "string" && c.trimStart().startsWith(`<!-- ${m}`);
-  if (comments.some((c) => starts(c, "FORGE:DECOMPOSED"))) return false;
+  if (comments.some((c) => starts(c, "FORGE:DECOMPOSED"))) return -1;
   let idx = -1;
   for (let i = comments.length - 1; i >= 0; i--) if (starts(comments[i], gate)) { idx = i; break; }
-  if (idx < 0) return false;
+  if (idx < 0) return -1;
   const body = comments[idx].replace(/\r\n/g, "\n");
   const m = /^result:[ \t]*(OK|OVERRIDDEN|COHESIVE|OVER)[ \t]*$/m.exec(body);
-  if (!m || m[1] !== "OVER" || !/^###[ \t]+Split Proposal\b/m.test(body)) return false;
-  return !comments.slice(idx + 1).some((c) => starts(c, override) && overrideHasJustification(c));
+  if (!m || m[1] !== "OVER" || !/^###[ \t]+Split Proposal\b/m.test(body)) return -1;
+  return comments.slice(idx + 1).some((c) => starts(c, override) && overrideHasJustification(c)) ? -1 : idx;
+}
+/** Boolean form of sizeGateRouteIndex (index of the routing DIFF_SIZE comment, or -1). */
+function sizeGateRoutesToDecompose(comments) {
+  return sizeGateRouteIndex(comments) >= 0;
 }
 /**
  * Decompose loop guard (mirrors build.md B5.5 and decompose.md Guard 1). Returns a
@@ -625,7 +660,7 @@ export const PHASES = [
       const invalid = `<!-- ${PHASE_MARKERS.investigate.invalidMarker} -->`;
       const complete = `<!-- ${PHASE_MARKERS.investigate.completionMarker} -->`;
       if (closing === invalid)
-        return { status: "committed", terminalReason: "invalid", outputs: { verdict: "INVALID" } };
+        return { status: "committed", terminalReason: "invalid", code: OC.INVALID, outputs: { verdict: "INVALID" } };
       if (closing === complete) {
         // investigate.md emits `### Decomposition Assessment` then `**YES**|**NO**`.
         if (isDecomposed(report)) {
@@ -636,7 +671,7 @@ export const PHASES = [
             console.error(`[engine] decompose suppressed for #${state.issue}: ${guard}; treating as not decomposed`);
             return { status: "committed", outputs: { verdict: "CONFIRMED" } };
           }
-          return { status: "committed", terminalReason: "decomposed", outputs: { decompose: true } };
+          return { status: "committed", terminalReason: "decomposed", code: OC.DECOMPOSED, outputs: { decompose: true } };
         }
         return { status: "committed", outputs: { verdict: "CONFIRMED" } };
       }
@@ -665,7 +700,7 @@ export const PHASES = [
     async detectOutcome(state, io) {
       const { comments } = await issueMarkers(state.issue, io);
       if (hasMarker(comments, PHASE_MARKERS.decompose.header, PHASE_MARKERS.decompose.completionMarker))
-        return { status: "committed", terminalReason: "decomposed", outputs: {} };
+        return { status: "committed", terminalReason: "decomposed", code: OC.DECOMPOSED, outputs: {} };
       return { status: "failed", detail: `no ${PHASE_MARKERS.decompose.completionMarker} marker` };
     },
     // Always terminal: decomposition spawns independent sub-issues, each of
@@ -722,8 +757,15 @@ export const PHASES = [
       // review. Non-retryable: a retry would only re-read the same append-only markers.
       // A newer PASSED clears this: either the in-build repair loop posts it, or a fresh
       // build invocation does via build.md B0 gate resume (re-enters B6.5; forge#3725).
+      // forge#3712: an OVER + Split Proposal size-gate marker STRICTLY NEWER (comment order)
+      // than the newest blocked marker is the retry's real outcome; route to decompose.
+      // Equal/absent index stays fail-closed, as does a newer blocked marker.
+      if (!complete && latestGateState(comments) === "blocked" && mayRouteToDecompose(comments)
+          && sizeGateRouteIndex(comments) > latestBlockedIndex(comments)) {
+        return { status: "committed", terminalReason: "decomposed", code: OC.BUILD_SIZE_OVER_GATE, outputs: branch ? { branch } : {} };
+      }
       if (latestGateState(comments) === "blocked") {
-        return { status: "failed", detail: `acceptance gate blocked (builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"})`, retryable: false };
+        return { status: "failed", detail: `acceptance gate blocked (builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"})`, code: OC.BUILD_ACCEPTANCE_FAILED, retryable: false };
       }
       if (complete && ahead > 0) {
         return { status: "committed", outputs: { branch, ...buildChildEvidence(comments) } };
@@ -739,7 +781,7 @@ export const PHASES = [
       // needs-human. Non-retryable by construction: a retry re-measures and
       // re-emits the same exit.
       if (!complete && mayRouteToDecompose(comments) && sizeGateRoutesToDecompose(comments)) {
-        return { status: "committed", terminalReason: "decomposed", outputs: branch ? { branch } : {} };
+        return { status: "committed", terminalReason: "decomposed", code: OC.BUILD_SIZE_OVER_GATE, outputs: branch ? { branch } : {} };
       }
       const detail = `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}`;
       // forge#2176: when the builder has already posted FORGE:BUILDER:COMPLETE
@@ -803,7 +845,7 @@ export const PHASES = [
       // The PR number from GitHub (openPrFor) always wins over parsed text.
       const outputs = { pr: pr.number };
       // Opt-in: only an explicit escalation signal sets handoff:true. A PR number alone never hands off.
-      const escalated = { status: "blocked", detail: "review escalated", outputs, handoff: true };
+      const escalated = { status: "blocked", detail: "review escalated", outputs, handoff: true, code: OC.REVIEW_ESCALATED };
       const rr = parseReviewResult(result?.text);
       // forge#3530: carry the review's remediation kind (router Phase 4R parity) so the
       // remediate phase can post the matching bound marker. Untrusted model output: only
@@ -812,7 +854,7 @@ export const PHASES = [
       if (rr && rr.status === "NEXT" && rr.next === "remediate" && rr.remediation)
         outputs.remediation = isRemediationKind(rr.remediation) ? rr.remediation : "unknown";
       if (pr.needsHuman || pr.remediating) return escalated;
-      if (rr && rr.status === "NEXT" && rr.next === "remediate") return escalated;
+      if (rr && rr.status === "NEXT" && rr.next === "remediate") return { ...escalated, code: OC.REVIEW_CHANGES_REQUESTED };
       // An explicit REVIEW_RESULT status is authoritative: BLOCKED/COMPLETE exits
       // (phase trail, ci gate, base conflict, merge refusal) also label the issue
       // needs-human but are NOT remediation handoffs, so skip the label fallback.
@@ -854,7 +896,17 @@ export const PHASES = [
       // Legacy handoff with no kind (needs-human label fallback, or no REVIEW_RESULT): there
       // is nothing to bind, so dispatch as before. remediate.md M0 then applies its default
       // single-attempt guard. A present-but-unknown kind is never dispatched.
-      if (kind === null) return legacyArgs();
+      // forge#3807: every dispatch (kind-bound or legacy) posts a dispatch marker AFTER the bound marker,
+      // never deduped, so detectOutcome can tell a stale deferral from an earlier dispatch from this one's.
+      const postDispatchMarker = async () => {
+        try {
+          await io.gh(["issue", "comment", String(state.issue), "--body",
+            `<!-- ${REMEDIATION_DISPATCH_MARKER}: pr=${pr} -->\nEngine dispatching remediation for PR #${pr}.`]);
+        } catch (e) {
+          throw new PhaseArgsError(`github-unavailable: could not post ${REMEDIATION_DISPATCH_MARKER}; remediation not invoked (${e?.message || e})`);
+        }
+      };
+      if (kind === null) { await postDispatchMarker(); return legacyArgs(); }
       if (!isRemediationKind(kind))
         throw new PhaseArgsError(`unknown remediation kind: ${JSON.stringify(kind)}`);
       const boundMarker = REMEDIATION_BOUND_MARKERS[kind];
@@ -870,6 +922,7 @@ export const PHASES = [
       } catch (e) {
         throw new PhaseArgsError(`github-unavailable: could not post FORGE:${boundMarker}; remediation not invoked (${e?.message || e})`);
       }
+      await postDispatchMarker();
       return legacyArgs();
     },
     entryCondition: (s) => s.committed.includes("review") && s.terminalReason === "needs-human",
@@ -935,16 +988,20 @@ export const PHASES = [
         // lease that expired since is the NEXT dispatch's business). Only a trusted, full-line record for THIS
         // PR counts, and only while it is newer than every `FORGE:REMEDIATION` trail comment: a later run
         // that proceeded posts one, which retires the deferral.
-        let deferredAt = -1, trailAt = -1, deferred = null;
+        // forge#3807: a deferral older than this dispatch's marker is stale (a later dispatch proceeded and
+        // crashed before posting a trail), so it is a failed attempt. No marker (older runs) => dispatchAt -1.
+        let deferredAt = -1, trailAt = -1, dispatchAt = -1, deferred = null;
+        const dispatchSentinel = `${REMEDIATION_DISPATCH_MARKER}: pr=${state.pr}`;
         scoped.forEach((b, i) => {
+          if (state.pr != null && hasSentinelLine(b, dispatchSentinel)) dispatchAt = i;
           if (startsWithHeader(b, REMEDIATION_DEFERRED_MARKER) && hasSentinelLine(b, REMEDIATION_DEFERRED_MARKER)) { deferredAt = i; deferred = b; }
           else if (startsWithHeader(b, PHASE_MARKERS.remediate.header)) trailAt = i;
         });
-        if (deferred !== null && deferredAt > trailAt && (state.pr == null || /^pr=(\d+)\s*$/m.exec(deferred)?.[1] === String(state.pr))) {
+        if (deferred !== null && deferredAt > trailAt && deferredAt > dispatchAt && (state.pr == null || /^pr=(\d+)\s*$/m.exec(deferred)?.[1] === String(state.pr))) {
           const kind = /^kind=(\w+)\s*$/m.exec(deferred)?.[1] ?? "lease";
-          return { status: "blocked", reason: "deferred", retryable: false, detail: `deferred-live-run: ${kind}` };
+          return { status: "blocked", reason: "deferred", code: OC.REMEDIATE_DEFERRED_LIVE_RUN, retryable: false, detail: `deferred-live-run: ${kind}` };
         }
-        return { status: "failed", detail: `no ${completion} marker` };
+        return { status: "failed", code: OC.REMEDIATE_NO_MARKER, detail: `no ${completion} marker` };
       }
       // Parse the **Re-gate outcome**: field remediate.md's Phase M8 posts
       // (e.g. "**Re-gate outcome**: AUTO-LANDED to staging" — value is the
@@ -972,8 +1029,11 @@ export const PHASES = [
           // policy judgment call respectively) — reuse the existing
           // "needs-human" terminal reason rather than inventing two more,
           // matching the #2352/#2353 precedent of reusing an existing
-          // TERMINAL_REASONS value where semantically equivalent.
-          return { status: "committed", terminalReason: "needs-human", outputs: { reGateOutcome } };
+          // TERMINAL_REASONS value where semantically equivalent. forge#3833:
+          // the two stay distinguishable by outcome code.
+          return { status: "committed", terminalReason: "needs-human",
+                   code: reGateOutcome === "UNFIXABLE" ? OC.REMEDIATE_UNFIXABLE : OC.REMEDIATE_RE_ESCALATED,
+                   outputs: { reGateOutcome } };
         default:
           return { status: "failed", detail: `FORGE:REMEDIATION:COMPLETE present but Re-gate outcome unrecognized/missing: ${reGateOutcome || "none"}` };
       }

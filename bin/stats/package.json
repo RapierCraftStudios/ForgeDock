@@ -1,0 +1,6 @@
+{
+  "name": "forgedock-stats",
+  "private": true,
+  "description": "Directory entry so `node --test bin/stats/` runs the stats suite on Node versions that treat a directory argument as a module path.",
+  "main": "stats.test.mjs"
+}

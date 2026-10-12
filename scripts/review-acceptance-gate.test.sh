@@ -75,6 +75,9 @@ inv "$(chk ac-1 false)"; rc=$(run); eq "real fail: rc 1" "$rc" 1
 grep -q 'needs-human' "$TMP/out" && ok "real fail: needs-human added" || bad "real fail: no needs-human"
 inv "$(chk ac-1 'grep -q nomatch f.txt')"; rc=$(run); eq "grep exit 1 is a real fail" "$rc" 1
 inv "$(chk ac-1 'grep -q x nofile.txt')"; rc=$(run); eq "grep missing operand file stays a real fail" "$rc" 1
+inv "$(chk ac-1 'grep -q x nofile.txt 2>/dev/null')"; rc=$(run); eq "stderr-suppressed missing operand is a real fail (forge#3802)" "$rc" 1
+grep -q ':PASSED:' "$TMP/out" && bad "stderr-suppressed missing operand wrote PASSED" || ok "stderr-suppressed missing operand: no PASSED marker"
+inv "$(chk ac-1 'grep -sq x nofile.txt')"; rc=$(run); eq "grep -s missing operand is a real fail (forge#3802)" "$rc" 1
 
 for t in "echo 'unbalanced" 'echo a\\\\\\\\b' "grep -E '[' f.txt"; do
   inv "$(chk ac-7 "$t")"; rc=$(run); eq "malformed skipped, rc 0: $t" "$rc" 0
@@ -86,5 +89,15 @@ done
 inv "$(chk ac-1 true)" "$(chk ac-7 "echo 'unbalanced")"; rc=$(run); eq "mixed pass+malformed: rc 0" "$rc" 0
 grep -q ':PASSED:' "$TMP/out" && grep -qi 'malformed' "$TMP/out" && ok "mixed: PASSED with malformed listed" || bad "mixed: wrong output"
 inv "$(chk ac-1 false)" "$(chk ac-7 "echo 'unbalanced")"; rc=$(run); eq "mixed fail+malformed: fails closed" "$rc" 1
+
+# Selection parity with B6.5 (forge#3809): non-review checks are selected by the `gh pr` target only, never by a phase= text match.
+bt() { printf 'ACCEPTANCE_CHECK: id=%s type=command target="%s" matcher="exit_0" phase=%s description=%s' "$1" "$2" "$3" "$4"; }
+inv "$(bt ac-1 'gh pr view 1 && false' build d)"; rc=$(run); eq "phase=build gh pr check is evaluated (fails)" "$rc" 1
+inv "$(bt ac-1 'gh pr view 1 && true' build d)"; rc=$(run)
+grep -q ':PASSED:' "$TMP/out" && ok "phase=build gh pr check counted and passes" || bad "phase=build gh pr check not counted"
+inv "$(bt ac-1 'false' build d)"; rc=$(run); eq "phase=build non-gh-pr check is not selected" "$rc" 0
+inv "$(bt ac-1 'gh pr view 1 && false' build 'x phase=review y')"; rc=$(run); eq "phase=review in description does not change selection" "$rc" 1
+inv "$(bt ac-1 'false' build 'x phase=review y')"; rc=$(run); eq "phase=review in description does not select a non-gh-pr check" "$rc" 0
+inv 'ACCEPTANCE_CHECK: id=ac-1 type=command target="gh pr view 1 && false" matcher="exit_0" description=untagged'; rc=$(run); eq "untagged gh pr check is evaluated" "$rc" 1
 
 echo "$PASS passed, $FAILN failed"; [ "$FAILN" -eq 0 ]

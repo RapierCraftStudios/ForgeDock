@@ -30,6 +30,9 @@
 # Exit: 0 measured (even when over); 2 usage or git failure with EMPTY stdout (fail closed: unknown is not zero).
 
 set -euo pipefail
+# Telemetry (forge#3834): best-effort decision record; never changes stdout, stderr or the exit code.
+_TEL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/telemetry.sh"; [ -f "$_TEL" ] && . "$_TEL" 2>/dev/null
+type forge_emit >/dev/null 2>&1 || forge_emit() { :; }
 
 REPO_PATH=""; BASE=""; THRESHOLD="1000"; EXTRA=()
 die() { echo "diff-size.sh: $*" >&2; exit 2; }
@@ -112,6 +115,8 @@ echo "new_lines=$NEWL"
 echo "test_lines=$TESTL"
 echo "cohesive_lines=$COHL"
 echo "cohesive=$COHESIVE"
+_res=OK; if [ "$COHESIVE" = true ]; then _res=COHESIVE; elif [ "$OVER" = true ]; then _res=OVER; fi
+forge_emit diff_size lines="$TOTAL" excluded="$EXCL" threshold="$THRESHOLD" result="$_res"
 if [ -n "$LIST" ]; then
   printf '%s' "$LIST" | sort -t' ' -k1,1nr | head -n 10 | sed 's/^/top=/' || true
 fi

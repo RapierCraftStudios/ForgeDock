@@ -117,3 +117,16 @@ remediate L2, reviewers L3, same as the table.
 - `/orchestrate` still dispatches one worker `Agent` per issue (L1).
 - Phases keep their specs, `*_RESULT` contracts and GitHub markers; phase-trail verification is unchanged.
 - Solo `/work-on` gets one extra layer of headroom.
+
+## 7. Pipeline cost report
+
+`bash scripts/cost-report.sh [--runs-dir DIR] [--last N] [--versions a,b] [--min-n N]` reads the engine run logs (`~/.forge/runs/*.jsonl`) and prints a markdown table per ForgeDock version and repo: finished-run count `n`, mean and median cache-read tokens per issue, mean per phase, remediated %, merged %, and cache-read tokens per merged issue. Groups with `n` below `--min-n` (default 10) are flagged `low-n`. The staging review (`commands/review-pr-staging.md` Phase 8) embeds it for the current version and the previous two (`--last 3`).
+
+- Only finished runs count (a `RUN_TERMINAL` after any `RUN_REOPEN` / `RUN_NEXT_CYCLE`). Unfinished runs and hydrated runs (reconstructed from `FORGE:STATE`, no usage data) are excluded and counted in the footer.
+- Attribution comes from `RUN_START`, which now records `version` (from `package.json`) and `repo` (`owner/repo`) on all three writers: the engine's fresh start, the hydrate path (`hydrated: true`), and the interactive hook. Both are best-effort and null when unresolved; `deriveState` ignores them.
+- Older logs have neither: the repo shows `unknown` and the version is estimated from the log's mtime against release times (git tags `v*`, or `--release-times FILE` with `<version> <epoch>` lines), marked `~`.
+- Fixture test: `bash scripts/cost-report.test.sh` (fixtures in `scripts/fixtures/cost-report/`).
+
+## 8. Outcome codes
+
+Every `PHASE_FAILED`, blocked `PHASE_COMMIT` and `RUN_TERMINAL` run-log event carries a machine-readable `code` from a closed, versioned enum (`bin/engine/outcome-codes.mjs`), and `FORGE:STATE` records the causing code as `outcomeCode`. Codes come from structured evidence only, never from the prose `detail`; an unmapped outcome is `unclassified` with the raw reason kept. See `docs/OUTCOME-CODES.md`.

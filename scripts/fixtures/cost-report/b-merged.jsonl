@@ -1,0 +1,3 @@
+{"seq":1,"event":"RUN_START","issue":4,"run":"r_4_staging","lane":"staging","version":"2.0.0","repo":"o/b"}
+{"seq":2,"event":"PHASE_COMMIT","phase":"build","outputs":{},"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":1,"cache_read_input_tokens":1000000}}
+{"seq":3,"event":"RUN_TERMINAL","reason":"merged"}

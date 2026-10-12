@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendEvent, readLog, deriveState } from "../engine/runlog.mjs";
+import { appendEvent, readLog, deriveState, rewriteLog } from "../engine/runlog.mjs";
 import { runIssue } from "../engine.mjs";
 import { serializeState } from "../engine/state.mjs";
 import { asComments, inv as investigationComment, ctx, arch, builder, remediation, decomposed } from "./helpers/comments.mjs";
@@ -30,6 +30,18 @@ describe("runlog", () => {
     assert.equal(deriveState(readLog(dir, 7)).remediationKind, null);
     appendEvent(dir, 7, { event: "PHASE_COMMIT", phase: "review", outputs: { pr: 12, remediation: "ci-gate" } });
     assert.equal(deriveState(readLog(dir, 7)).remediationKind, "ci-gate");
+  });
+
+  it("forge#3824: RUN_START version/repo/hydrated fields persist through the log and do not disturb deriveState", () => {
+    appendEvent(dir, 9, { event: "RUN_START", issue: 9, run: "r", lane: "staging", version: "1.16.2", repo: "o/r", hydrated: true });
+    const events = readLog(dir, 9);
+    assert.equal(events[0].version, "1.16.2");
+    assert.equal(events[0].repo, "o/r");
+    assert.equal(events[0].hydrated, true);
+    const s = deriveState(events);
+    assert.equal(s.issue, 9);
+    assert.equal(s.run, "r");
+    assert.equal(s.lane, "staging");
   });
 
   it("append then read returns events in order with assigned seq", () => {
@@ -169,5 +181,32 @@ describe("runlog", () => {
     assert.equal(seen.pr, 7);
     assert.equal(seen.terminal, false, "a non-terminal handoff reason must not be replayed as RUN_TERMINAL");
     assert.deepEqual(seen.committed, ["investigate", "build", "review"]);
+  });
+});
+
+describe("runlog timestamps (forge#3696)", () => {
+  it("appendEvent stamps an ISO-8601 ts on every event; a caller-supplied ts wins", () => {
+    appendEvent(dir, 9, { event: "RUN_START", issue: 9, run: "r", lane: "staging" });
+    appendEvent(dir, 9, { event: "PHASE_COMMIT", phase: "investigate", outputs: {}, ts: "2020-01-01T00:00:00.000Z" });
+    const [a, b] = readLog(dir, 9);
+    assert.match(a.ts, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    assert.equal(a.seq, 1);
+    assert.equal(b.ts, "2020-01-01T00:00:00.000Z");
+  });
+
+  it("rewriteLog does not stamp a ts (hydrated history must not carry a false time)", () => {
+    rewriteLog(dir, 9, [{ event: "RUN_START", issue: 9, run: "r", lane: "staging" }]);
+    assert.equal("ts" in readLog(dir, 9)[0], false);
+  });
+
+  it("an old log without ts parses and derives the same state as a stamped one", () => {
+    appendFileSync(join(dir, "9.jsonl"),
+      JSON.stringify({ seq: 1, event: "RUN_START", issue: 9, run: "r", lane: "staging" }) + "\n" +
+      JSON.stringify({ seq: 2, event: "PHASE_COMMIT", phase: "investigate", outputs: {} }) + "\n");
+    const old = deriveState(readLog(dir, 9));
+    appendEvent(dir, 9, { event: "PHASE_ATTEMPT_USAGE", phase: "build", attempt: 1, usage: null });
+    const withNew = deriveState(readLog(dir, 9));
+    assert.deepEqual(old.committed, ["investigate"]);
+    assert.deepEqual(withNew.committed, old.committed, "PHASE_ATTEMPT_USAGE must not affect derived state");
   });
 });

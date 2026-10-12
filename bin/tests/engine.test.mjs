@@ -38,6 +38,7 @@ function fakeWorld() {
       if (a.startsWith("repo view")) return "acme/widgets";
       if (a.startsWith("api ") && a.includes("/comments")) return asComments(w.markers);
       if (a.startsWith("issue comment")) { w.markers += SEP + args[args.indexOf("--body") + 1]; (w.posted ||= []).push(args[args.indexOf("--body") + 1]); return ""; }
+      if (a.startsWith("api graphql")) return JSON.stringify({ data: { repository: { issue: { body: w.body, authorAssociation: "NONE", author: { login: "forge[bot]", __typename: "Bot" }, editor: null } } } });
       if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
       if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
       if (a.startsWith("issue edit")) { const i = args.indexOf("--body"); if (i>=0) w.body = args[i+1];
@@ -210,6 +211,20 @@ describe("runIssue", () => {
     assert.deepEqual(reviewEvents, ["phase_enter", "phase_exit"]);
   });
 
+  it("forge#3824: a fresh run stamps version and repo on RUN_START", async () => {
+    const { w, io } = fakeWorld();
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("INVALID"); },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", repo: "o/r",
+      io, runner, now: () => 1000, maxAttempts: 1 });
+    const start = readLog(dir, 42).find((e) => e.event === "RUN_START");
+    assert.equal(start.repo, "o/r");
+    assert.equal(start.version, JSON.parse(readFileSync(join(__dirname, "..", "..", "package.json"), "utf8")).version);
+    assert.equal(deriveState(readLog(dir, 42)).run, "r_42_staging", "deriveState ignores the new fields");
+  });
+
   it("forge#2889: commits a blocked review and hands it to remediation in the same run", async () => {
     const { w, io } = fakeWorld();
     const script = {
@@ -340,6 +355,153 @@ describe("runIssue", () => {
     const res2 = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 2000, maxAttempts: 1 });
     assert.equal(res2.terminalReason, "awaiting-merge");
     assert.equal(calls.filter((c) => c === "work-on/remediate").length, 2);
+  });
+
+  it("forge#3807: dispatch-2 crash after a dispatch-1 deferral is a failed attempt, not a deferral", async () => {
+    const { w, io } = fakeWorld();
+    let dispatch = 1;
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; w.labels.push("needs-human"); },
+      // dispatch 1 defers to a live run; dispatch 2 proceeds and crashes: no DEFERRED record, no trail.
+      "work-on/remediate": () => {
+        if (dispatch === 1) w.markers += SEP + "<!-- FORGE:REMEDIATION_DEFERRED -->\n## Remediation Deferred\n\npr=7\nkind=lease\nlease_by=cli_o_9\nlease_until=1";
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "deferred");
+    dispatch = 2;
+    const res2 = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 2000, maxAttempts: 1 });
+    assert.notEqual(res2.terminalReason, "deferred", "a stale dispatch-1 deferral must not mask the dispatch-2 failure");
+    assert.equal((w.posted || []).filter((b) => b.includes("FORGE:REMEDIATION_DISPATCH: pr=7")).length, 2, "one dispatch marker per dispatch");
+    const events = readLog(dir, 42);
+    assert.ok(!events.some((e) => e.event === "PHASE_COMMIT" && e.phase === "remediate"));
+  });
+
+  // forge#3806: a stale in-memory snapshot must never overwrite a lease another agent now holds.
+  const raceLease = (w, lease) => { w.body = upsertStateBlock(w.body, { ...parseState(w.body), lease }); };
+  const raceScript = (w, onRemediate, onReview) => ({
+    "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+    "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; },
+    "work-on/review": () => { w.pr = 7; w.prNeedsHuman = true; w.labels.push("needs-human"); onReview?.(); },
+    "work-on/remediate": onRemediate,
+  });
+  const deferMarker = (w) => { w.markers += SEP + "<!-- FORGE:REMEDIATION_DEFERRED -->\n## Remediation Deferred\n\npr=7\nkind=lease\nlease_by=cli_o_9\nlease_until=1"; };
+
+  it("forge#3806: deferral leaves a lease held by another agent (live holder) untouched when raced", async () => {
+    const { w, io } = fakeWorld();
+    const live = { by: "a2", until: 5000000 };
+    const script = raceScript(w, () => { deferMarker(w); raceLease(w, live); });
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "deferred");
+    assert.deepEqual(parseState(w.body).lease, live, "another agent's live lease must survive a1's deferral");
+  });
+
+  it("forge#3806: deferral still clears our own lease when no other agent holds it", async () => {
+    const { w, io } = fakeWorld();
+    const script = raceScript(w, () => deferMarker(w));
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "deferred");
+    assert.equal(parseState(w.body).lease, null);
+  });
+
+  it("forge#3806: deferral clears an expired foreign lease", async () => {
+    const { w, io } = fakeWorld();
+    const script = raceScript(w, () => { deferMarker(w); raceLease(w, { by: "a2", until: 500 }); });
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(parseState(w.body).lease, null);
+  });
+
+  it("forge#3806: terminate records the terminal state and label but keeps another agent's live lease", async () => {
+    const { w, io } = fakeWorld();
+    const live = { by: "a2", until: 5000000 };
+    // no-signal review (PR created during the run) terminates as needs-human via terminate()
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; raceLease(w, live); },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
+    assert.equal(res.terminalReason, "needs-human");
+    const st = parseState(w.body);
+    assert.equal(st.terminal, true, "terminal write must still land");
+    assert.deepEqual(st.lease, live, "live holder's lease preserved by the raced terminate");
+    assert.ok(w.labels.includes("needs-human"));
+  });
+
+  // forge#3566: terminate() must not strand workflow:remediating next to a terminal label.
+  const crashBuild = (w) => ({
+    "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+    "work-on/build": () => { throw Object.assign(new Error("cli crashed"), { code: "CLI_BACKEND_FAILED" }); },
+  });
+  const runWith = (w, io, script) => runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io,
+    runner: async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; }, now: () => 1000, maxAttempts: 1 });
+
+  it("forge#3566: needs-human terminal removes a stranded workflow:remediating", async () => {
+    const { w, io } = fakeWorld();
+    w.labels.push("workflow:remediating");
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; },
+    };
+    const res = await runWith(w, io, script);
+    assert.equal(res.terminalReason, "needs-human");
+    assert.ok(!w.labels.includes("workflow:remediating"));
+    assert.ok(w.labels.includes("needs-human"));
+  });
+
+  it("forge#3566: engine-error from a remediating issue removes it, keeps engine-error and adds needs-human", async () => {
+    const { w, io } = fakeWorld();
+    w.labels.push("workflow:remediating");
+    const res = await runWith(w, io, crashBuild(w));
+    assert.equal(res.terminalReason, "engine-error");
+    assert.ok(!w.labels.includes("workflow:remediating"));
+    assert.ok(w.labels.includes("workflow:engine-error"));
+    assert.ok(w.labels.includes("needs-human"));
+  });
+
+  it("forge#3566: engine-error on a non-remediating issue does not add needs-human", async () => {
+    const { w, io } = fakeWorld();
+    const res = await runWith(w, io, crashBuild(w));
+    assert.equal(res.terminalReason, "engine-error");
+    assert.ok(w.labels.includes("workflow:engine-error"));
+    assert.ok(!w.labels.includes("needs-human"));
+  });
+
+  it("forge#3876: terminate leaves workflow:remediating alone when another engine holds a live lease", async () => {
+    const { w, io } = fakeWorld();
+    w.labels.push("workflow:remediating");
+    const live = { by: "a2", until: 5000000 };
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 1; },
+      "work-on/review": () => { w.pr = 7; raceLease(w, live); },
+      "work-on/remediate": () => { raceLease(w, live); },
+    };
+    const res = await runWith(w, io, script);
+    assert.equal(res.terminalReason, "needs-human");
+    assert.ok(w.labels.includes("workflow:remediating"), "live engine's remediating label must survive");
+  });
+
+  it("forge#3566: a failing removeLabel does not throw and the terminal state still lands", async () => {
+    const { w, io } = fakeWorld();
+    w.labels.push("workflow:remediating");
+    const realGh = io.gh;
+    io.gh = async (args) => {
+      if (args.includes("--remove-label") && args.includes("workflow:remediating")) throw new Error("boom");
+      return realGh(args);
+    };
+    const res = await runWith(w, io, crashBuild(w));
+    assert.equal(res.terminalReason, "engine-error");
+    assert.equal(parseState(w.body).terminal, true);
+    assert.ok(w.labels.includes("workflow:engine-error"));
   });
 
   it("forge#3525: no-signal review (PR created during the run) stops at needs-human without remediate", async () => {
@@ -1362,6 +1524,7 @@ describe("runIssue", () => {
           w.comments.push(args[args.indexOf("--body") + 1]);
           return "";
         }
+        if (a.startsWith("api graphql")) return JSON.stringify({ data: { repository: { issue: { body: w.body, authorAssociation: "NONE", author: { login: "forge[bot]", __typename: "Bot" }, editor: null } } } });
         if (a.startsWith("issue view") && a.includes("body")) return JSON.stringify({ body: w.body });
         if (a.startsWith("issue view")) return JSON.stringify({ state: w.issueState, labels: w.labels });
         if (a.startsWith("issue edit")) { const i = args.indexOf("--body"); if (i>=0) w.body = args[i+1];
@@ -1415,8 +1578,9 @@ describe("runIssue", () => {
     };
     const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1 });
     assert.equal(seenAtRemediate, true, "bound marker must exist before remediate is dispatched");
-    assert.equal(w.posted.length, 1);
+    assert.equal(w.posted.length, 2);
     assert.match(w.posted[0], /^<!-- FORGE:BASESYNC_REMEDIATION: pr=7 -->/);
+    assert.match(w.posted[1], /^<!-- FORGE:REMEDIATION_DISPATCH: pr=7 -->/);
     // The newest trail (RE-ESCALATED) wins over the older HELD-AWAITING-MERGE one.
     assert.equal(res.terminalReason, "needs-human");
     assert.equal(deriveState(readLog(dir, 42)).remediationKind, null, "a committed remediate consumes the kind");
@@ -1645,6 +1809,108 @@ describe("runIssue — forge#2377: per-phase usage recording", () => {
     assert.equal(buildFailures.length, 1, "attempt 1 fails (no commits yet), attempt 2 succeeds");
     assert.deepEqual(buildFailures[0].usage, USAGE_ATTEMPT_1,
       "the PHASE_FAILED event for a detectOutcome-reported failure must carry that attempt's usage");
+  });
+});
+
+describe("runIssue — forge#3696: per-attempt usage, cumulative commit usage, RUN_START meta", () => {
+  const setup = (extraOpts = {}) => {
+    const { w, io } = fakeWorld();
+    let buildCalls = 0;
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => {
+        buildCalls++;
+        if (buildCalls === 1) return;
+        w.markers += builder("fix/real-branch-42"); w.commitsAhead = 2;
+      },
+      "work-on/review": () => { w.pr = 7; w.prMerged = true; },
+      "work-on/close": () => { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); },
+    };
+    const A1 = { input_tokens: 100, output_tokens: 20, cache_creation_input_tokens: 0, cache_read_input_tokens: 50 };
+    const A2 = { input_tokens: 30, output_tokens: 5, cache_creation_input_tokens: 1, cache_read_input_tokens: 10 };
+    const runner = async ({ commandName }) => {
+      script[commandName]();
+      if (commandName === "work-on/build") {
+        return { status: "complete", usage: buildCalls === 1 ? A1 : A2, costUsd: buildCalls === 1 ? 0.5 : null,
+                 cliModel: "m1", turns: 3 };
+      }
+      return { status: "complete" };
+    };
+    const run = () => runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner,
+      now: () => 1000, maxAttempts: 3, ...extraOpts });
+    return { run, A1, A2 };
+  };
+
+  it("records one PHASE_ATTEMPT_USAGE per attempt and a cumulative PHASE_COMMIT.usage >= last attempt", async () => {
+    const { run, A1, A2 } = setup();
+    const res = await run();
+    assert.equal(res.terminalReason, "merged");
+    const events = readLog(dir, 42);
+    const attempts = events.filter((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.phase === "build");
+    assert.equal(attempts.length, 2);
+    assert.deepEqual(attempts.map((e) => e.attempt), [1, 2]);
+    assert.deepEqual(attempts[0].usage, A1);
+    assert.equal(attempts[0].cost_usd, 0.5);
+    assert.equal(attempts[1].cost_usd, null, "unreported cost is null, never 0");
+    assert.equal(attempts[0].model, "m1");
+    assert.equal(attempts[0].turns, 3);
+    assert.ok(Number.isFinite(attempts[0].duration_ms) && attempts[0].duration_ms >= 0);
+    const commit = events.find((e) => e.event === "PHASE_COMMIT" && e.phase === "build");
+    assert.deepEqual(commit.usage, {
+      input_tokens: 130, output_tokens: 25, cache_creation_input_tokens: 1, cache_read_input_tokens: 60 });
+    assert.deepEqual(commit.last_attempt_usage, A2);
+    assert.ok(commit.usage.input_tokens >= commit.last_attempt_usage.input_tokens);
+    assert.ok(events.every((e) => typeof e.ts === "string"), "every appended event carries ts");
+  });
+
+  it("a thrown attempt records null usage with a duration", async () => {
+    const { w, io } = fakeWorld();
+    let calls = 0;
+    const runner = async ({ commandName }) => {
+      if (commandName === "work-on/investigate") {
+        calls++;
+        if (calls === 1) throw new Error("transient");
+        w.markers += investigationComment("COMPLETE");
+      }
+      if (commandName === "work-on/build") { w.markers += builder("fix/real-branch-42"); w.commitsAhead = 2; }
+      if (commandName === "work-on/review") { w.pr = 7; w.prMerged = true; }
+      if (commandName === "work-on/close") { w.issueState = "CLOSED"; w.labels.push("workflow:merged"); }
+      return { status: "complete" };
+    };
+    await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 3 });
+    const a = readLog(dir, 42).filter((e) => e.event === "PHASE_ATTEMPT_USAGE" && e.phase === "investigate");
+    assert.equal(a.length, 2);
+    assert.equal(a[0].usage, null);
+    assert.ok(Number.isFinite(a[0].duration_ms));
+  });
+
+  it("RUN_START carries forge_version and repo alongside version", async () => {
+    const { run } = setup();
+    await run();
+    const start = readLog(dir, 42).find((e) => e.event === "RUN_START");
+    assert.ok("forge_version" in start && "repo" in start);
+    assert.equal(start.forge_version, start.version);
+  });
+
+  it("emitTelemetry is called per attempt, and a throwing emitter never fails the phase", async () => {
+    const seen = [];
+    const { run } = setup({ emitTelemetry: (rec) => { seen.push(rec); throw new Error("emitter down"); } });
+    const res = await run();
+    assert.equal(res.terminalReason, "merged");
+    assert.equal(seen.filter((r) => r.phase === "build").length, 2);
+    assert.equal(seen[0].issue, 42);
+  });
+
+  it("forge#3835: RUN_TERMINAL is forwarded to emitTelemetry once, and a throwing emitter does not change the outcome", async () => {
+    const seen = [];
+    const { run } = setup({ emitTelemetry: (rec) => { seen.push(rec); if (rec.event === "RUN_TERMINAL") throw new Error("emitter down"); } });
+    const res = await run();
+    assert.equal(res.terminalReason, "merged");
+    const term = seen.filter((r) => r.event === "RUN_TERMINAL");
+    assert.equal(term.length, 1);
+    assert.equal(term[0].reason, "merged");
+    assert.equal(term[0].code, "completed");
+    assert.equal(term[0].issue, 42);
   });
 });
 
@@ -2741,7 +3007,7 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
       assert.equal(s.terminal, false);
       const ph = pickPhase(s);
       assert.equal(ph.id, "remediate");
-      assert.equal((await ph.buildArgs(s, { repo: "o/r" }))[0], "9");
+      assert.equal((await ph.buildArgs(s, { repo: "o/r" }, { gh: async () => "", git: async () => "" }))[0], "9");
     });
 
     it("decompose handoff -> engine-error -> reopen picks decompose, never build", () => {
@@ -2767,7 +3033,7 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
       assert.equal(s.pr, 9);
       const ph = pickPhase(s);
       assert.equal(ph.id, "remediate");
-      assert.equal((await ph.buildArgs(s, { repo: "o/r" }))[0], "9");
+      assert.equal((await ph.buildArgs(s, { repo: "o/r" }, { gh: async () => "", git: async () => "" }))[0], "9");
     });
 
     it("forge#3772 remediate needs-human -> engine-error -> reopen keeps remediate committed, resumes at close", () => {

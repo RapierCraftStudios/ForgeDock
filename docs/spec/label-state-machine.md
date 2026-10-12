@@ -20,7 +20,7 @@ See also: [FORGE Annotation Protocol §6](forge-protocol-v1.md#6-label-state-mac
 | `workflow:invalid` | Issue closed as invalid | Investigator agent |
 | `workflow:decomposed` | Issue decomposed into sub-issues | Decomposer agent |
 | `needs-human` | Pipeline blocked, human intervention required | Any agent on error |
-| `workflow:engine-error` | Pipeline blocked by the engine/tool itself breaking (CLI crash, missing SDK/API key, exhausted retries with no attempt ever reaching a real outcome) — not a genuine content-level judgment call | `terminate()` in `bin/engine.mjs` |
+| `workflow:engine-error` | Pipeline blocked by the engine/tool itself breaking (CLI crash, missing SDK/API key, exhausted retries with no attempt ever reaching a real outcome) — not a genuine content-level judgment call | `terminate()` in `bin/engine.mjs` (also removes a stacked `workflow:remediating`, and adds `needs-human` when the run was remediating) |
 
 `workflow:remediating` vs `needs-human` (forge#3541): `needs-human` is reserved for genuine human decisions and external actions (an exhausted remediation bound, an unresolvable conflict, a policy gate, spend, real-environment validation). Work the pipeline fixes by itself (a pure base-sync, a red CI gate, an in-PR finding round) is marked `workflow:remediating` instead, so operators are not alerted and orchestrate does not hold DAG dependents as GATED. `work-on:remediate` accepts either label (a bare `needs-human` from an older run still works), swaps it for `workflow:in-review` on a FIXABLE run, and on every BLOCKED/UNFIXABLE exit clears `workflow:remediating` and asserts `needs-human`.
 

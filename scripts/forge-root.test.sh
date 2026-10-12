@@ -279,15 +279,18 @@ HR_CLASSIFY="$ROOT/commands/review-pr.md"
 HR_AMP="$ROOT/commands/orchestrate/phase-4-execution.md"
 HR_EX3="$ROOT/commands/orchestrate/phase-3-dependency.md"
 stub_block "$HR_CLASSIFY" CLASSIFY_SCRIPT > "$T/hr_classify.sh"
+stub_block "$HR_CLASSIFY" CAP_SCRIPT > "$T/hr_cap.sh"
 extract_helper_block "$HR_AMP" AMP_SCRIPT > "$T/hr_amp.sh"
 extract_helper_fn "$HR_AMP" > "$T/hr_ex4.sh"
 extract_helper_fn "$HR_EX3" > "$T/hr_ex3.sh"
 expect "CLASSIFY_SCRIPT resolver stub found" 1 "$(grep -c '^CLASSIFY_SCRIPT=\$(forge_resolve classify-finding.sh)$' "$T/hr_classify.sh")"
+expect "CAP_SCRIPT resolver stub found" 1 "$(grep -c '^CAP_SCRIPT=\$(forge_resolve cap-findings.sh)$' "$T/hr_cap.sh")"
+expect "CAP_SCRIPT resolver stub found in review-pr-staging.md" 1 "$(sed 's/^[[:space:]]*//' "$ROOT/commands/review-pr-staging.md" | grep -c '^CAP_SCRIPT=\$(forge_resolve cap-findings.sh)$')"
 expect "AMP_SCRIPT resolver block found" 1 "$(grep -c '^AMP_SCRIPT=""' "$T/hr_amp.sh")"
 expect "extract-affected-files resolver found in phase-4" 1 "$(grep -c 'resolve_extract_affected_files() {' "$T/hr_ex4.sh")"
 expect "extract-affected-files resolver found in phase-3" 1 "$(grep -c 'resolve_extract_affected_files() {' "$T/hr_ex3.sh")"
 cmp -s "$T/hr_ex3.sh" "$T/hr_ex4.sh" && ok || bad 'resolve_extract_affected_files copies differ between phase-3 and phase-4'
-for hr in classify amp ex3 ex4; do
+for hr in classify cap amp ex3 ex4; do
   grep -qF 'plugins/cache/forgedock/forgedock' "$T/hr_$hr.sh" && ok || bad "$hr helper resolver lacks the plugin-cache scan"
   grep -qF 'CLAUDE_CONFIG_DIR' "$T/hr_$hr.sh" && ok || bad "$hr helper resolver lacks CLAUDE_CONFIG_DIR"
   grep -qE '\$PWD|\$REPO_PATH|\$\{PWD|\$\{REPO_PATH' "$T/hr_$hr.sh" && bad "$hr helper resolver lists the working directory or repo path" || ok
@@ -298,7 +301,7 @@ if grep -rnE 'PWD/scripts/|^\$PWD$|REPO_PATH/scripts/extract' "$ROOT/commands" >
 # Behavior (#3483): a planted scripts/<helper>.sh in the cwd must never be selected; a cache-only install must resolve.
 mkdir -p "$T/hrwork/scripts" "$T/hrhome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts/lib"
 cp "$ROOT/scripts/lib/forge-resolve.sh" "$T/hrhome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts/lib/forge-resolve.sh"
-for h in classify-finding amplification-breaker extract-affected-files; do
+for h in classify-finding cap-findings amplification-breaker extract-affected-files; do
   : > "$T/hrwork/scripts/$h.sh"; : > "$T/hrhome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts/$h.sh"
 done
 CACHE_SCRIPTS="$T/hrhome/.claude/plugins/cache/forgedock/forgedock/1.12.0/scripts"
@@ -307,6 +310,8 @@ hr_run() { # home blockfile expr
 }
 expect "CLASSIFY_SCRIPT: cache-only install resolves (cwd copy ignored)" "$CACHE_SCRIPTS/classify-finding.sh" "$(hr_run "$T/hrhome" "$T/hr_classify.sh" 'printf %s "$CLASSIFY_SCRIPT"')"
 expect "CLASSIFY_SCRIPT: no install resolves empty (cwd copy ignored)" "" "$(hr_run "$T/nohome" "$T/hr_classify.sh" 'printf %s "$CLASSIFY_SCRIPT"')"
+expect "CAP_SCRIPT: cache-only install resolves (cwd copy ignored)" "$CACHE_SCRIPTS/cap-findings.sh" "$(hr_run "$T/hrhome" "$T/hr_cap.sh" 'printf %s "$CAP_SCRIPT"')"
+expect "CAP_SCRIPT: no install resolves empty (cwd copy ignored)" "" "$(hr_run "$T/nohome" "$T/hr_cap.sh" 'printf %s "$CAP_SCRIPT"')"
 expect "AMP_SCRIPT: cache-only install resolves (cwd copy ignored)" "$CACHE_SCRIPTS/amplification-breaker.sh" "$(hr_run "$T/hrhome" "$T/hr_amp.sh" 'printf %s "$AMP_SCRIPT"')"
 expect "AMP_SCRIPT: no install resolves empty (cwd copy ignored)" "" "$(hr_run "$T/nohome" "$T/hr_amp.sh" 'printf %s "$AMP_SCRIPT"')"
 expect "extract-affected-files: cache-only install resolves (cwd and REPO_PATH copies ignored)" "$CACHE_SCRIPTS/extract-affected-files.sh" "$(hr_run "$T/hrhome" "$T/hr_ex4.sh" 'resolve_extract_affected_files')"
@@ -411,7 +416,7 @@ sed 's/^[[:space:]]*//' "$STG_SPEC" | grep '^type forge_resolve >/dev/null' | so
 [ "$(wc -l < "$T/loc_uniq" | tr -d ' ')" = 1 ] && ok || bad "forge_resolve locator line must be byte-identical across every stub in review-pr-staging.md"
 [ "$(awk '{print $1}' "$T/loc_uniq")" -ge 30 ] && ok || bad "expected a locator on every bootstrap (21) and resolver (11) stub"
 grep -qE 'PWD|\$\(pwd\)|REPO_PATH' "$T/locator.sh" && bad "stub locator must not consult the cwd or repo under review" || ok
-[ "$(grep -c '# FENCE_BOOTSTRAP$' "$STG_SPEC")" = 21 ] && ok || bad "expected 21 fence bootstrap stubs"
+[ "$(grep -c '# FENCE_BOOTSTRAP$' "$STG_SPEC")" = 22 ] && ok || bad "expected 22 fence bootstrap stubs"
 [ "$(grep '# FENCE_BOOTSTRAP$' "$STG_SPEC" | sort -u | wc -l | tr -d ' ')" = 1 ] && ok || bad "fence bootstrap stubs must be byte-identical"
 grep '# FENCE_BOOTSTRAP$' "$STG_SPEC" | sed 1q | grep -qF 'exit 1' && ok || bad "fence bootstrap stub must fail closed (exit 1) when the helper is unresolved"
 # the spec carries none of the old inlined blocks

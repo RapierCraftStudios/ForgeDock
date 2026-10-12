@@ -308,6 +308,11 @@ orchestration:
   # shrink cascade queue growth.
   max_concurrent: 12
 
+  # Age (hours since the issue last updated) after which a predecessor still at
+  # `workflow:remediating` or `workflow:engine-error` is classified GATED
+  # (stalled, needs a human) instead of IN_PROGRESS. Default: 48.
+  in_progress_max_hours: 48
+
   cascade:
     # Named preset expanding to the granular keys below. Any granular key set
     # explicitly overrides just that field — the preset supplies defaults, not
@@ -531,6 +536,30 @@ build:
 
 ---
 
+## `decomposition` (OPTIONAL)
+
+Controls what happens to a decomposed parent issue. A parent is only a tracker for its sub-issues, but while it is open it inflates GitHub's open-issue count and every backlog view.
+
+```yaml
+decomposition:
+  # Close the parent at decomposition. Default: false (parent stays open until its last child closes).
+  close_parent: true
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `close_parent` | boolean | No | When `true`, `work-on:decompose` (Phase D6.5) closes the parent after the sub-issues exist, `FORGE:DECOMPOSED:COMPLETE` is posted and `workflow:decomposed` is set, with the comment "Decomposed into #a #b #c; tracked here until all complete". The label is kept. Every child body is also checked for the `**Parent**: #N` reference. Default: `false`. Any value other than `true`, or an unreadable config, leaves the parent open |
+
+**With `close_parent: true`**: `work-on:close` Phase C3 keeps checking children off the closed parent's checklist. When the last child closes, the parent gets an "All sub-issues complete" comment and `workflow:merged`; it is not closed a second time and never reopened. `/pipeline-status` and `/pipeline-health` exclude `workflow:decomposed` from work counts and report them separately as `trackers (N)`. `/orchestrate` expands an explicitly requested closed decomposed parent to its open children.
+
+**With `close_parent: false`** (default): unchanged. The parent stays open and is closed by C3 when the last child closes.
+
+**Limitation**: `--retry` and engine resume refuse closed issues, so a closed decomposed parent cannot be re-run. It has nothing left to run; work on its open children instead.
+
+**Commands that use this section**: `work-on` (`decompose` D6.5, `close` C3), `orchestrate`
+
+---
+
 ## `services` (OPTIONAL)
 
 External service endpoints and identifiers. Used by analytics and monitoring commands.
@@ -595,6 +624,8 @@ review:
     auth: "JWT + refresh token rotation; sessions stored in Redis"
     database: "Always use docker exec <container> for psql/migrations"
 
+  # max_filed_findings: 2   # per-review cap on filed findings (default 2; 1 on review-finding lineage)
+
   # key_paths:
   #   auth: ["services/api/auth/**", "web/src/lib/auth/**"]
   #   billing: ["services/api/billing/**", "web/src/app/billing/**"]
@@ -606,6 +637,7 @@ review:
 | `tech_stack` | string | No | One-line tech stack summary. Injected into all review agent prompts |
 | `context` | string (multiline) | No | Freeform context about architecture, deploy model, and known pitfalls |
 | `domains.*` | string | No | Domain-specific notes keyed by review agent name (`billing`, `auth`, `database`, `frontend`, `api`, `infra`, `security`) |
+| `max_filed_findings` | integer >= 0 | No | Per-review cap on ISSUE dispositions (`scripts/cap-findings.sh`, applied by `review-pr` §6B.5 and `review-pr-staging` §7B.5 after classification). Default `2`; `1` when the reviewed PR is itself a fix for a `review-finding` issue, where every filed HIGH/CRITICAL consumes that budget. ISSUE findings are ranked by severity, then confidence, then safety-domain agent (security, auth, billing, concurrency, database), then input order; an unparseable severity or confidence ranks as MEDIUM/LIKELY. The overflow becomes `NOTE capped`: listed in the PR body and counted as `notes_capped` in `FORGE:NOTE_DISPOSITION`, never filed and never dropped. **HIGH/CRITICAL findings are never capped** and still block; `ISSUE fix-efficacy-*` findings (the linked issue is not fixed, or the PR re-introduces its defect) are never capped either and count against the review-finding budget like HIGH. `0` is valid (cap every MEDIUM/LOW finding); a non-numeric or negative value falls back to the default with a warning. An explicit value overrides both defaults. |
 | `key_paths` | map(string→list of strings) | No | Domain-to-file mapping used by `/work-on` investigation and `/review-pr` agents to quickly locate relevant files. Keys are domain names matching issue labels; values are lists of file path patterns (glob-style, relative to repo root). When present, agents use this table instead of inferring files from labels and issue body. |
 
 **Commands that use this section**: `review-pr`, `review-pr-agents` (all domain agents), `work-on` (Phase 1B investigation)
@@ -939,6 +971,7 @@ These variables are read from the operator's runner environment, not from `forge
 | `FORGE_TRAIL_OVERRIDE_ASSOCIATIONS` | the resolved `FORGE_TRAIL_TRUSTED_ASSOCIATIONS` value | Comma-separated `author_association` values prefiltering break-glass override candidates (the permission API stays authoritative). Never affects which FORGE markers count toward the gate. An approver with concealed org membership can show `CONTRIBUTOR`/`NONE`, so widen this variable (not the trail list) to accept them. An explicitly empty value means no override candidates. |
 | `FORGE_TRAIL_PIPELINE_LOGINS` | empty | Comma-separated GitHub logins (case-insensitive) that are the pipeline's own identity and can never approve a phase-trail break-glass override. The authors of trusted FORGE marker comments on the issue are added automatically. |
 | `FORGE_TRAIL_QG_SINCE` | `2026-10-07T03:40:12Z` | ISO-8601 UTC cutoff for the legacy `FORGE:QUALITY_GATE` grace. An issue whose trusted `FORGE:BUILDER:COMPLETE` comment was last updated before this time has `QUALITY_GATE` waived. Set to an empty string to disable the grace. A malformed or future value (including a runner clock earlier than this default) fails closed: the verifier exits 2, an infrastructure block rather than `MISSING`. |
+| `FORGE_TELEMETRY` | `on` | Set to `off` to disable gate telemetry. Gate scripts append one structured record per decision to a trusted `FORGE:TELEMETRY v1` comment; emission is best-effort and never changes a gate's output or exit code. See [TELEMETRY.md](TELEMETRY.md). |
 
 ### Install root resolution
 

@@ -18,7 +18,7 @@ argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\""
 
 
 **Invoked by**: the work-on router, when `INVESTIGATE_RESULT.decompose = YES`. This skill runs in an isolated forked context: it sees only its args and re-reads everything else from GitHub.
-**Output**: Create sub-issues, update parent tracker, post `<!-- FORGE:DECOMPOSED -->` comment, set `workflow:decomposed`. STOP — each sub-issue runs its own /work-on. This skill is the SOLE owner of the `workflow:decomposed` label. On BLOCKED it adds `needs-human` and posts the blocker.
+**Output**: Create sub-issues, update parent tracker, post `<!-- FORGE:DECOMPOSED -->` comment, set `workflow:decomposed`, close the parent when `decomposition.close_parent` is true (D6.5). STOP — each sub-issue runs its own /work-on. This skill is the SOLE owner of the `workflow:decomposed` label. On BLOCKED it adds `needs-human` and posts the blocker.
 
 **Engine coverage** (forge#2379): this subcommand's `command` name (`work-on/decompose`) and completion marker (`FORGE:DECOMPOSED:COMPLETE`) are registered as a real phase in the headless engine's phase table — `decompose` in `packages/protocol/src/phases.js`'s `PHASE_IDS`/`PHASE_MARKERS`, and the matching `decompose` entry in `bin/engine/phases.mjs`'s `PHASES` array. The engine's `investigate` phase hands off to it on `<!-- DECOMPOSE:YES -->` (or a `**YES**` verdict under `### Decomposition Assessment`) in the newest trusted FORGE:INVESTIGATOR report, instead of terminating in place, so a headless `runIssue()` walk dispatches this subcommand rather than stopping short.
 
@@ -217,7 +217,7 @@ SUB_LIST=$(printf '%s\n' "$DECOMP_BODY" | sed -nE 's/^- #([0-9]+).*/\1/p' | past
 echo "sub_issues: [${SUB_LIST}]"
 ```
 
-Run Phase D6 (idempotent label re-assert), then EXIT with `DECOMPOSE_RESULT: status: ALREADY_DONE`, `sub_issues: [${SUB_LIST}]`, `comment_url` from the comment.
+Run Phase D6 (idempotent label re-assert) and Phase D6.5 (close parent when `decomposition.close_parent` is true), then EXIT with `DECOMPOSE_RESULT: status: ALREADY_DONE`, `sub_issues: [${SUB_LIST}]`, `comment_url` from the comment.
 
 ---
 
@@ -283,7 +283,7 @@ CANONICAL_SUB_ISSUES=$(jq --arg parent "**Parent**: #{NUMBER}" --argjson expecte
 CANONICAL_NUMBERS=$(printf '%s' "$CANONICAL_SUB_ISSUES" | jq -r 'map(.number) | sort | map(tostring) | join(", ")' 2>/dev/null)
 ```
 
-If `CANONICAL_SUB_ISSUES` is non-empty, the decomposition has already created an equivalent set. Do **not** create issues, edit the parent body, or post another decomposition comment. Preserve those original sub-issues, run Phase D6 (idempotent label re-assert), and EXIT with:
+If `CANONICAL_SUB_ISSUES` is non-empty, the decomposition has already created an equivalent set. Do **not** create issues, edit the parent body, or post another decomposition comment. Preserve those original sub-issues, run Phase D6 (idempotent label re-assert) and Phase D6.5 (close parent when `decomposition.close_parent` is true), and EXIT with:
 
 ```
 DECOMPOSE_RESULT:
@@ -493,7 +493,7 @@ ${ATTRIBUTION_LINE}
 
 ## Phase D6: Update Labels
 
-Decompose is the SOLE owner of the `workflow:decomposed` label. Transition with tiered dispatch; a transition to `decomposed` removes every other workflow label. Also run this block (idempotently) on both ALREADY_DONE exits.
+Decompose is the SOLE owner of the `workflow:decomposed` label. Transition with tiered dispatch; a transition to `decomposed` removes every other workflow label. Also run this block (idempotently) on both ALREADY_DONE exits, followed by D6.5.
 
 ```bash
 run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
@@ -509,9 +509,50 @@ esac
 
 ---
 
+## Phase D6.5: Close Parent (opt-in)
+
+<!-- Added: forge#3736 -->
+A decomposed parent is only a tracker, but while it is open it inflates GitHub's open-issue count. When `decomposition.close_parent` is `true`, close the parent now that the sub-issues exist, the `FORGE:DECOMPOSED:COMPLETE` comment is posted (D5) and `workflow:decomposed` is set (D6). The label is kept. Close C3 keeps checking children off the closed parent and posts the completion comment when the last one closes.
+
+Run this phase on the normal path and on both ALREADY_DONE exits (D1 resume, D2.5). Set `SUB_NUMBERS` to the sub-issue numbers: `CREATED_NUMBERS` on the normal path, `SUB_LIST` (D1) or `CANONICAL_NUMBERS` (D2.5) on the resume paths, as a space or comma separated list. Config read is fail-safe: an unreadable `forge.yaml`, missing `yq` or any value other than `true` leaves the parent open.
+
+```bash
+run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
+CLOSE_PARENT=$(yq '.decomposition.close_parent // false' forge.yaml 2>/dev/null || echo false)
+[ "$CLOSE_PARENT" = "true" ] || CLOSE_PARENT=false
+if [ "$CLOSE_PARENT" = "true" ]; then
+  SUB_NUMBERS=$(printf '%s' "${SUB_NUMBERS:-}" | tr -c '0-9\n' ' ')
+
+  # Child guard: every child body must carry the parent reference Close C3 matches on.
+  for SUB_NUMBER in $SUB_NUMBERS; do
+    [ -n "$SUB_NUMBER" ] || continue
+    SUB_BODY=$(gh issue view "$SUB_NUMBER" {GH_FLAG} --json body --jq '.body' 2>/dev/null || true)
+    [ -n "$SUB_BODY" ] || continue
+    printf '%s\n' "$SUB_BODY" | grep -qE '^\*\*Parent\*\*: #{NUMBER}([^0-9]|$)' && continue
+    run gh issue edit "$SUB_NUMBER" {GH_FLAG} --body "$(printf '**Parent**: #{NUMBER}\n\n%s' "$SUB_BODY")" # allowlist:check-command-side-effects
+  done
+
+  # Close only an OPEN parent, and only once the DECOMPOSED:COMPLETE marker is on it.
+  PARENT_STATE=$(gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state' 2>/dev/null || true)
+  HAS_COMPLETE=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
+    --jq '[.[] | select(.body | contains("FORGE:DECOMPOSED:COMPLETE"))] | length' 2>/dev/null || echo 0)
+  if [ "$PARENT_STATE" = "OPEN" ] && [ "${HAS_COMPLETE:-0}" -gt 0 ]; then
+    REFS=$(for n in $SUB_NUMBERS; do printf '#%s ' "$n"; done)
+    run gh issue close {NUMBER} {GH_FLAG} --reason completed \
+      --comment "Decomposed into ${REFS}; tracked here until all complete." # allowlist:check-command-side-effects
+  fi
+fi
+```
+
+If the close fails, do not fail the phase: the parent stays open (today's behaviour) and the decomposition is still complete. A closed parent keeps `workflow:decomposed`; `--retry` and engine resume refuse closed issues, which is acceptable because a decomposed parent has nothing left to run.
+
+---
+
 ## Phase D7: STOP
 
 Decomposition is a terminal route for the parent issue. Each sub-issue will be picked up separately by /work-on.
+
+Phase D6.5 has already run (with `SUB_NUMBERS="${CREATED_NUMBERS}"`) before this point.
 
 Print the result block (see Result emission) as the final reply, with `status: COMPLETE`, `sub_issues: [${CREATED_NUMBERS}]` (numbers only) and `comment_url: ${COMMENT_URL}`.
 

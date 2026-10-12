@@ -129,7 +129,7 @@ Completed trails of other kinds are left in place (never deleted); only the inte
 - If `REMEDIATION_COMPLETE_N` or `REMEDIATION_TRAIL_N` is empty (comments or `scripts/trusted-comments.sh` unreadable or unresolvable) → fail closed: EXIT `REMEDIATE_RESULT: status: BLOCKED`, blocker: "github-unavailable: remediation trail unreadable (comments or scripts/trusted-comments.sh unresolvable)". Never treat unreadable as "no trail" and never as `ALREADY_DONE`.
 - If `REMEDIATION_COMPLETE_N` is at least 1 (a trusted comment that starts with `<!-- FORGE:REMEDIATION -->` and contains `<!-- FORGE:REMEDIATION:COMPLETE -->`) → EXIT `REMEDIATE_RESULT: status: ALREADY_DONE`. **Single-attempt semantics (AC5)**: once a genuine `FORGE:REMEDIATION:COMPLETE` trail comment exists for this PR, do NOT re-attempt fixes on a subsequent invocation, regardless of the prior verdict — this is what prevents an infinite remediation retry loop on a genuinely-blocked PR. A comment that only quotes the marker mid-body (review findings, an `INPR_FIX` work order, a disposition record) or comes from an untrusted author never counts.
 - **Merged-PR routing (forge#3685)**: if `PR_ALREADY_MERGED=true` and `REMEDIATION_COMPLETE_N` is 0 (the fail-closed unreadable-trail exit above already ran, so the count is known): if the linked issue is already `CLOSED` with the `workflow:merged` label (`ISSUE_STATE`), EXIT `REMEDIATE_RESULT: status: ALREADY_DONE` (landed and finished, nothing to do). Otherwise (not yet `workflow:merged`/CLOSED, no completed trail) set `RESUME_AT_M7=true` and `PR_ALREADY_MERGED=true`: skip Phases M1-M6 and continue at Phase M7, whose merged-first branch is exclusive, runs the idempotent `merged` label bookkeeping, sets `AUTO-LANDED` and goes to M8, which posts the trail and drives close. No park evidence is required. A `FORGE:REMEDIATION_HELD` record never counts toward `REMEDIATION_COMPLETE_N`.
-- **Liveness step (forge#3792)**: when the PR is open, the issue carries `needs-human` or `workflow:remediating` and `REMEDIATION_COMPLETE_N` is 0, run this BEFORE any partial comment is deleted or anything is pushed. Partial trail comments are not evidence of a live run; the script decides from the `FORGE:STATE` lease and the routed re-review. Pass `{LEASE_HOLDER}` only if it matches `^[A-Za-z0-9._-]{1,128}$`, else an empty string.
+- **Liveness step (forge#3792)**: when the PR is open, the issue carries `needs-human` or `workflow:remediating` and `REMEDIATION_COMPLETE_N` is 0, run this BEFORE any partial comment is deleted or anything is pushed. Partial trail comments are not evidence of a live run; the script decides from the `FORGE:STATE` lease and the routed re-review. A review that handed off to remediation (a trusted `FORGE:{CI|INPR|BASESYNC}_REMEDIATION: pr={N}` marker at or after the newest route, e.g. a base-sync handoff before any panel was dispatched) is never in flight: it never defers and spends none of the deferral budget. Pass `{LEASE_HOLDER}` only if it matches `^[A-Za-z0-9._-]{1,128}$`, else an empty string.
 
   ```bash
   LV_SCRIPT=$(forge_resolve remediate-liveness.sh)
@@ -137,7 +137,7 @@ Completed trails of other kinds are left in place (never deleted); only the inte
   echo "$LV_OUT"
   ```
 
-  `LV_RC` 0 (dead): continue with the cleanup below. 10 (`DEFER`, the script posted a `FORGE:REMEDIATION_DEFERRED` record): EXIT `REMEDIATE_RESULT: status: BLOCKED`, blocker `deferred-live-run: {detail}`, touching nothing (no deletes, labels or push; the plain `git push` is the atomic backstop, a non-fast-forward race is rejected and parks at M4). 11 (`EXHAUSTED`, 3 deferrals already): a normal `BLOCKED` exit with `needs-human`. Any other rc: EXIT `BLOCKED`, blocker `github-unavailable: liveness: {detail}`.
+  `LV_RC` 0 (dead): continue with the cleanup below. 10 (`DEFER`, the script posted a `FORGE:REMEDIATION_DEFERRED` record): EXIT `REMEDIATE_RESULT: status: BLOCKED`, blocker `deferred-live-run: {detail}`, touching nothing (no deletes, labels or push; the plain `git push` is the atomic backstop, a non-fast-forward race is rejected and parks at M4). 11 (`EXHAUSTED`, 3 deferrals already): a normal `BLOCKED` exit with `needs-human`. Any other rc: EXIT `BLOCKED`, blocker `github-unavailable: liveness: {detail}`. The engine posts a `<!-- FORGE:REMEDIATION_DISPATCH: pr={pr} -->` record on every dispatch to scope a deferral to its own dispatch; it is not a trail or completion marker and the partial-trail cleanup ignores it.
 - If `REMEDIATION_COMPLETE_N` is 0 and `REMEDIATION_TRAIL_N` is at least 1 and the liveness step above said **dead** → a prior attempt was interrupted mid-flight (same failure mode as the investigation phase's partial-comment case). Delete the partial comment(s) on both the PR and the issue (ids from `PARTIAL_PR_COMMENT_IDS` above and the same anchored filter over the issue's comments), then continue below as a fresh attempt:
   ```bash
   for _id in $PARTIAL_PR_COMMENT_IDS; do gh api repos/{GH_REPO}/issues/comments/$_id -X DELETE 2>/dev/null || true; done
@@ -185,7 +185,7 @@ BLOCK_COMMENTS=$(gh api repos/{GH_REPO}/issues/{ISSUE_NUMBER}/comments \
 ```
 
 **Classify into FIXABLE vs. UNFIXABLE**:
-- **FIXABLE** — open `review-finding` issues (CONFIRMED/LIKELY code defects), a `VERDICT=CHANGES REQUESTED` block with concrete findings attached, a base conflict (`base-conflict`: `CONFLICTING`/`DIRTY`, or `BEHIND` under required-up-to-date protection — resolvable by merging `origin/{PR_BASE}` in, the base-sync step in Phase M3; `BLOCKED` alone is branch protection that a sync cannot clear and is UNFIXABLE unless a conflict state is also present), a quality-gate/build failure, or a CI-gate refusal (`ci gate not green` — the failing/cancelled/timed-out checks are listed on the linked issue; read each failing job's log with `gh run view --log-failed`, fix the cause on the PR branch, or re-run a check that failed for an infrastructure reason), or an in-PR fix request (`in-pr fix required` — review-pr §6B.6 posted a `<!-- FORGE:INPR_FIX: round=1 head=<sha> findings=<ids> -->` comment on the PR listing CONFIRMED MEDIUM findings in files this PR changed. That comment is the work order: fix exactly the listed findings, at the listed `file:line`, and nothing else. Do not file them as issues; the re-review in Phase M6 files any that remain).
+- **FIXABLE** — open `review-finding` issues (CONFIRMED/LIKELY code defects), a `VERDICT=CHANGES REQUESTED` block with concrete findings attached, a base conflict (`base-conflict`: `CONFLICTING`/`DIRTY`, or `BEHIND` under required-up-to-date protection — resolvable by merging `origin/{PR_BASE}` in, the base-sync step in Phase M3; `BLOCKED` alone is branch protection that a sync cannot clear and is UNFIXABLE unless a conflict state is also present), a quality-gate/build failure, or a CI-gate refusal (`ci gate not green` — the failing/cancelled/timed-out checks are listed on the linked issue; read each failing job's log with `gh run view --log-failed`, fix the cause on the PR branch, or re-run a check that failed for an infrastructure reason), or an in-PR fix request (`in-pr fix required` — review-pr §6B.6 posted a `<!-- FORGE:INPR_FIX: round=1 head=<sha> max_severity=<MEDIUM|HIGH|CRITICAL> findings=<ids> -->` comment on the PR listing CONFIRMED MEDIUM/HIGH/CRITICAL findings in files this PR changed. That comment is the work order: fix exactly the listed findings, at the listed `file:line`, and nothing else. Do not file them as issues; the re-review in Phase M6 files any that remain).
 - **UNFIXABLE (policy escalation)** — `HAS_PURPOSE_REGRESSION=true` (the PR's behavior diverges from the issue's intent — a judgment call, not a code defect), `CALIBRATION_NEEDS_HUMAN=true` (statistical trust threshold), or `TRUST_NEEDS_HUMAN=true` (provenance `NOVEL_NEEDS_HUMAN` tier, insufficient prior data — a policy gate, not a bug). None of these are mechanically "fixable" by re-editing code.
 
 **If the block reason classifies as UNFIXABLE** (and no FIXABLE item accompanies it): do NOT attempt any fix. Skip directly to Phase M8 with verdict `UNFIXABLE`, re-affirm `needs-human` (add it and remove `workflow:remediating` if the issue entered as `workflow:remediating`), and return `REMEDIATE_RESULT: status: UNFIXABLE`. This satisfies AC5 — "genuinely-blocked PRs still terminate at `needs-human`."
@@ -218,12 +218,28 @@ if [ -d "{WORKTREE_PATH}" ]; then
   git -C "{WORKTREE_PATH}" fetch origin
   git -C "{WORKTREE_PATH}" checkout {HEAD_BRANCH}
   git -C "{WORKTREE_PATH}" reset --hard "origin/{HEAD_BRANCH}"
-else
-  git worktree add "{WORKTREE_PATH}" {HEAD_BRANCH} "origin/{HEAD_BRANCH}"
+elif ! WT_ERR=$(git worktree add "{WORKTREE_PATH}" {HEAD_BRANCH} "origin/{HEAD_BRANCH}" 2>&1); then
+  # Branch already checked out elsewhere: reuse that worktree (never the main checkout).
+  EXISTING_WT=""; MAIN_WT=""; CUR_WT=""
+  while IFS= read -r line; do
+    case "$line" in
+      "worktree "*) CUR_WT="${line#worktree }"; [ -z "$MAIN_WT" ] && MAIN_WT="$CUR_WT" ;;
+      "branch refs/heads/{HEAD_BRANCH}") [ -z "$EXISTING_WT" ] && EXISTING_WT="$CUR_WT" ;;
+    esac
+  done < <(git worktree list --porcelain)
+  WORKTREE_PATH=""   # stays empty (BLOCKED) unless the reuse is provably safe
+  if [ -n "$EXISTING_WT" ] && [ "$EXISTING_WT" != "$MAIN_WT" ] && [ -d "$EXISTING_WT" ] \
+     && [ -z "$(git -C "$EXISTING_WT" status --porcelain)" ] \
+     && [ "$(git -C "$EXISTING_WT" rev-list --count "origin/{HEAD_BRANCH}..HEAD")" = "0" ]; then
+    git -C "$EXISTING_WT" fetch origin && git -C "$EXISTING_WT" reset --hard "origin/{HEAD_BRANCH}" && WORKTREE_PATH="$EXISTING_WT"
+  else echo "$WT_ERR" >&2; fi
+  echo "WORKTREE_PATH=$WORKTREE_PATH"   # use this printed value for every later {WORKTREE_PATH}
 fi
 ```
 
-If the worktree/branch checkout fails for any reason (branch deleted, force-pushed out from under us, etc.): post a comment, add `needs-human`, EXIT `REMEDIATE_RESULT: status: BLOCKED`.
+**Main-checkout ban**: remediation never runs `checkout`, `switch`, `reset`, `stash`, or `merge` in the main checkout (`{REPO_PATH}`), not even as a fallback for a failed `git worktree add`; every mutating git command targets `{WORKTREE_PATH}` via `git -C`. A reused worktree is never reset when it has uncommitted changes or commits not on `origin/{HEAD_BRANCH}`, and an unresolvable one is not improvised around: `WORKTREE_PATH` stays empty and an empty value after this block means BLOCKED. <!-- Added: forge#3650 -->
+
+If the worktree/branch checkout fails for any reason (branch deleted, force-pushed out from under us, checked out in the main checkout, etc.): post a comment, add `needs-human`, EXIT `REMEDIATE_RESULT: status: BLOCKED`.
 
 ---
 

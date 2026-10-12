@@ -2,6 +2,18 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Gate scripts emit structured telemetry (#3834)
+
+`diff-size.sh`, `review-acceptance-gate.sh`, `classify-finding.sh`, `wait-ci-green.sh`, `remediate-liveness.sh` and the build/review spec call sites (B5.5, B6.5, review panel) now append one JSONL record per decision to a trusted `<!-- FORGE:TELEMETRY v1 -->` comment on the issue or PR (shell emitter `scripts/lib/telemetry.sh`, Node twin `bin/engine/telemetry.mjs`). A failed write is buffered under `~/.forge/telemetry-buffer/` and flushed on the next emit. Catalogue and privacy note: `docs/TELEMETRY.md`.
+
+Action: none. Set `FORGE_TELEMETRY=off` to disable. Gate stdout and exit codes are unchanged.
+
+## Deferred follow-ups are folded or batched into one issue (#3843)
+
+Build B2.0 no longer files one issue per `deferred → #N` item. A same-mechanical-change sibling that fits the remaining `0.8 × build.diff_size.threshold` budget (1000 when the threshold is 0 or unset) is folded into the contract's Deliverables. The rest go through `scripts/file-deferred-followups.sh`: one follow-up per parent with a checklist (known-flaw items flagged `known-flaw`), or an append to the open trusted follow-up for the same parent (exact path match). The script prints a `DEFERRED_TELEMETRY deferred_items= folded= batched_into= filed=` line and calls the #3834 emitter only if present. The `FORGE:DEFERRED_FROM` marker and every path stay in the body, so review-pr deferred verification is unchanged.
+
+Action: none. Expect fewer, larger follow-up issues titled `follow-up: N deferred item(s) (deferred from #P)`.
+
 ## remediate.md uses the shared resolver stub (#3779)
 
 `commands/work-on/remediate.md` no longer inlines the `FORGE_ROOT` bootstrap or the `TRUSTED_SCRIPT` / `CI_GATE_SCRIPT` resolvers; each fence uses the pinned `forge_resolve` locator from `scripts/lib/forge-resolve.sh` (unresolved script => empty => the existing strict branch). The spec shrinks from 95,283 to 80,957 bytes (-15.0%).

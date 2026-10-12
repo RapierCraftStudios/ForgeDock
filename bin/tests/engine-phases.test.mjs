@@ -494,15 +494,16 @@ describe("pickPhase", () => {
         const { io, posted } = mk();
         const args = await remediate.buildArgs({ ...st, remediationKind: kind }, ctx, io);
         assert.equal(args[0], "7");
-        assert.equal(posted.length, 1);
+        assert.equal(posted.length, 2);
         assert.ok(posted[0].startsWith(`<!-- FORGE:${name}: pr=7 -->`));
+        assert.ok(posted[1].startsWith("<!-- FORGE:REMEDIATION_DISPATCH: pr=7 -->"));
       });
     }
 
     it("resume: an existing marker for this PR+kind is not re-posted", async () => {
       const { io, posted } = mk(JSON.stringify([trusted("<!-- FORGE:BASESYNC_REMEDIATION: pr=7 -->")]));
       await remediate.buildArgs({ ...st, remediationKind: "base-sync" }, ctx, io);
-      assert.equal(posted.length, 0);
+      assert.equal(posted.filter((b) => b.includes("BASESYNC_REMEDIATION")).length, 0);
     });
 
     it("untrusted author's (or quoted) marker does not suppress the post", async () => {
@@ -510,7 +511,7 @@ describe("pickPhase", () => {
       const quoted = trusted("see <!-- FORGE:BASESYNC_REMEDIATION: pr=7 --> above");
       const { io, posted } = mk(JSON.stringify([forged, quoted]));
       await remediate.buildArgs({ ...st, remediationKind: "base-sync" }, ctx, io);
-      assert.equal(posted.length, 1);
+      assert.equal(posted.filter((b) => b.includes("BASESYNC_REMEDIATION")).length, 1);
     });
 
     it("unknown kind throws PhaseArgsError and posts nothing", async () => {
@@ -524,11 +525,19 @@ describe("pickPhase", () => {
       await assert.rejects(remediate.buildArgs({ ...st, remediationKind: "ci-gate" }, ctx, io), { code: "PHASE_ARGS_INVALID" });
     });
 
-    it("no kind (legacy label-fallback handoff) dispatches without a marker", async () => {
+    it("no kind (legacy label-fallback handoff) posts only the per-dispatch marker (forge#3807)", async () => {
       const { io, posted } = mk();
       const args = await remediate.buildArgs({ ...st, remediationKind: null }, ctx, io);
       assert.equal(args[0], "7");
-      assert.equal(posted.length, 0);
+      assert.equal(posted.length, 1);
+      assert.ok(posted[0].startsWith("<!-- FORGE:REMEDIATION_DISPATCH: pr=7 -->"));
+    });
+
+    it("dispatch marker is posted every call, even when the bound marker already exists (forge#3807)", async () => {
+      const { io, posted } = mk(JSON.stringify([trusted("<!-- FORGE:BASESYNC_REMEDIATION: pr=7 -->")]));
+      await remediate.buildArgs({ ...st, remediationKind: "base-sync" }, ctx, io);
+      assert.equal(posted.length, 1);
+      assert.ok(posted[0].startsWith("<!-- FORGE:REMEDIATION_DISPATCH: pr=7 -->"));
     });
   });
 
@@ -536,6 +545,24 @@ describe("pickPhase", () => {
     const remediate = PHASES.find(p => p.id === "remediate");
     const ioWith = (...cs) => ({ gh: async () => jsonLines(cs.map((c) => (typeof c === "string" ? trusted(c) : c))), git: async () => "0" });
     const remediateBody = (outcome) => remediationBody(`${outcome} to staging`);
+
+    // forge#3807: a deferral is only current when it is newer than the newest dispatch marker.
+    const deferredC = "<!-- FORGE:REMEDIATION_DEFERRED -->\n## Remediation Deferred\n\npr=7\nkind=lease";
+    const dispatchC = "<!-- FORGE:REMEDIATION_DISPATCH: pr=7 -->\nEngine dispatching remediation for PR #7.";
+    const stDef = { ...base, issue: 42, pr: 7 };
+    it("stale DEFERRED then a later DISPATCH, no trail -> failed (forge#3807)", async () => {
+      const r = await remediate.detectOutcome(stDef, ioWith(dispatchC, deferredC, dispatchC));
+      assert.equal(r.status, "failed");
+    });
+    it("DISPATCH then DEFERRED -> blocked/deferred (forge#3807)", async () => {
+      const r = await remediate.detectOutcome(stDef, ioWith(dispatchC, deferredC));
+      assert.equal(r.status, "blocked");
+      assert.equal(r.reason, "deferred");
+    });
+    it("DEFERRED with no dispatch marker keeps legacy behaviour (forge#3807)", async () => {
+      const r = await remediate.detectOutcome(stDef, ioWith(deferredC));
+      assert.equal(r.reason, "deferred");
+    });
 
     // forge#3685: held-resume record is non-terminal (no COMPLETE) and must read as awaiting-merge, not a failed phase.
     const heldIo = (merged, ...cs) => ({
@@ -907,6 +934,17 @@ describe("pickPhase", () => {
       }
     });
 
+    it("forge#3592: a HIGH in-PR work order (NEXT/remediate/inpr-fix) hands off and pickPhase then reaches remediate", async () => {
+      const io = ioFor({ ...openUnlabelled, issueLabels: ["workflow:remediating"] });
+      const outcome = await review.detectOutcome(reviewState, io,
+        rr("  status: NEXT\n  next: remediate\n  remediation: inpr-fix\n  pr_number: 7"));
+      assert.equal(outcome.status, "blocked");
+      assert.equal(outcome.handoff, true);
+      assert.equal(outcome.outputs.remediation, "inpr-fix");
+      const st = { ...base, committed: ["investigate", "build", "review"], pr: 7, terminalReason: "needs-human", remediationKind: "inpr-fix" };
+      assert.equal(pickPhase(st).id, "remediate");
+    });
+
     it("forge#3521: REVIEW_RESULT next: remediate with no labels -> blocked with outputs.pr", async () => {
       const io = ioFor({ ...openUnlabelled, issueLabels: [] });
       const outcome = await review.detectOutcome(reviewState, io,
@@ -1185,6 +1223,48 @@ describe("pickPhase", () => {
     it("only the latest DIFF_SIZE counts (OVER then refreshed OK)", async () => {
       const o = await build.detectOutcome(st, withComments(gate("OVER"), gate("OK")));
       assert.equal(o.status, "failed");
+    });
+
+    describe("older blocked marker vs newer size gate (forge#3712)", () => {
+      const blocked = "<!-- FORGE:BUILD_BLOCKED -->\n## Build Blocked\n\nreason";
+      const failed = "<!-- FORGE:ACCEPTANCE_GATE:FAILED -->\nchecks failed";
+
+      it("BUILD_BLOCKED then newer OVER + Split Proposal -> committed, decomposed", async () => {
+        const o = await build.detectOutcome(st, withComments(blocked, gate("OVER")));
+        assert.equal(o.status, "committed");
+        assert.equal(o.terminalReason, "decomposed");
+      });
+
+      it("OVER + Split Proposal then newer BUILD_BLOCKED -> failed, non-retryable", async () => {
+        const o = await build.detectOutcome(st, withComments(gate("OVER"), blocked));
+        assert.equal(o.status, "failed");
+        assert.equal(o.retryable, false);
+        assert.equal(o.terminalReason, undefined);
+      });
+
+      it("ACCEPTANCE_GATE:FAILED then newer OVER + proposal -> decomposed", async () => {
+        const o = await build.detectOutcome(st, withComments(failed, gate("OVER")));
+        assert.equal(o.status, "committed");
+        assert.equal(o.terminalReason, "decomposed");
+      });
+
+      it("BUILD_BLOCKED then OVER without proposal (loop-guard exit) -> failed", async () => {
+        const o = await build.detectOutcome(st, withComments(blocked, gate("OVER", false)));
+        assert.equal(o.status, "failed");
+        assert.equal(o.retryable, false);
+      });
+
+      it("BUILD_BLOCKED, OVER + proposal, then justified SIZE_OVERRIDE -> failed", async () => {
+        const o = await build.detectOutcome(st, withComments(blocked, gate("OVER"), override));
+        assert.equal(o.status, "failed");
+        assert.equal(o.retryable, false);
+      });
+
+      it("FORGE:BUILDER:COMPLETE still short-circuits routing", async () => {
+        const complete = "<!-- FORGE:BUILDER -->\n<!-- FORGE:BUILDER:COMPLETE -->\n**Branch**: `fix/x-42`";
+        const o = await build.detectOutcome(st, withComments(blocked, gate("OVER"), complete));
+        assert.notEqual(o.terminalReason, "decomposed");
+      });
     });
 
     describe("trust filter", () => {

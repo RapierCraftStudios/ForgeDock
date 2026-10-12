@@ -260,7 +260,7 @@ gh issue list -R {SATELLITE_REPO} --state open --limit 500 --json number,title,l
 ### Filter out ineligible issues
 
 Remove issues that should NOT be worked on:
-- Already closed or has `workflow:merged` label
+- Already closed or has `workflow:merged` label (exception: an explicitly requested closed `workflow:decomposed` parent is expanded first, see below)
 - Has `workflow:invalid` label
 - Has `needs-human` label (requires manual action)
 - Has `workflow:decomposed` label (parent tracker — its sub-issues should be picked up instead)
@@ -268,6 +268,9 @@ Remove issues that should NOT be worked on:
 - Is an epic (`epic` label) — these are planning containers, not buildable
 
 If a `workflow:decomposed` issue is found, automatically expand it to its open sub-issues instead.
+
+<!-- Added: forge#3736 -->
+**Closed decomposed parents**: with `decomposition.close_parent` enabled, a decomposed parent is CLOSED at decomposition and keeps `workflow:decomposed`. Run this expansion BEFORE the "already closed" filter: when an explicitly requested issue is a closed `workflow:decomposed` parent, expand it to its open children (parse the `- [ ] #N` and `- [x] #N` lines of the Sub-Issue Tracker in its body, keep those whose state is OPEN) instead of dropping it as closed. A closed decomposed parent with no open children is reported as complete and skipped. A closed parent without `workflow:decomposed` is still dropped.
 
 ### Source-PR Triage Hint (pre-flight, non-binding)
 

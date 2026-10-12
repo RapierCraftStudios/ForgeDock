@@ -18,6 +18,10 @@ function makeFakeIo(states, { fanOutLabel = "workflow:building" } = {}) {
         }
         return JSON.stringify([]);
       }
+      if (args[0] === "api" && args[1] === "graphql") {
+        const issue = Number(args[args.indexOf("-F", args.indexOf("name={repo}")) + 1].replace("number=", ""));
+        return JSON.stringify({ data: { repository: { issue: { body: serializeState(states[issue]), authorAssociation: "NONE", author: { login: "forge[bot]", __typename: "Bot" }, editor: null } } } });
+      }
       if (args[0] === "issue" && args[1] === "view") {
         const issue = Number(args[2]);
         return JSON.stringify({ body: serializeState(states[issue]) });
@@ -657,6 +661,22 @@ describe("aggregateUsage / formatUsageLine (forge#2399)", () => {
       { event: "PHASE_FAILED", reason: "x" },
     ];
     assert.equal(aggregateUsage(events), null);
+  });
+
+  it("forge#3696: sums only PHASE_ATTEMPT_USAGE for a phase that has them (cumulative PHASE_COMMIT not double counted)", () => {
+    const events = [
+      { event: "PHASE_ATTEMPT_USAGE", phase: "build", attempt: 1, usage: { input_tokens: 10, output_tokens: 1 } },
+      { event: "PHASE_FAILED", phase: "build", attempt: 1, usage: { input_tokens: 10, output_tokens: 1 } },
+      { event: "PHASE_ATTEMPT_USAGE", phase: "build", attempt: 2, usage: { input_tokens: 5, output_tokens: 2 } },
+      { event: "PHASE_COMMIT", phase: "build", usage: { input_tokens: 15, output_tokens: 3 } },
+      // legacy phase (no attempt events) still uses COMMIT + FAILED
+      { event: "PHASE_FAILED", phase: "review", usage: { input_tokens: 4 } },
+      { event: "PHASE_COMMIT", phase: "review", usage: { input_tokens: 6 } },
+      // thrown attempt: null usage adds nothing
+      { event: "PHASE_ATTEMPT_USAGE", phase: "close", attempt: 1, usage: null },
+    ];
+    assert.deepEqual(aggregateUsage(events),
+      { input_tokens: 25, output_tokens: 3, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 });
   });
 
   it("ignores usage on event types other than PHASE_COMMIT/PHASE_FAILED", () => {

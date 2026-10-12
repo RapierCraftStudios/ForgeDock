@@ -68,6 +68,35 @@ expect NOTE  "lineage MEDIUM LIKELY no-safety note" -- --severity MEDIUM --confi
 expect ISSUE "lineage MEDIUM LIKELY with keyword files" -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "token leaks"
 expect NOTE  "lineage MEDIUM POSSIBLE with keyword note" -- --severity MEDIUM --confidence POSSIBLE --lineage review-finding --text "token leaks"
 
+# --- Fix-efficacy exemption (#3693): #3683 SEC-1 shape ---
+SEC1="enqueue_breaker_decision helper never declared in the fences that call it; fresh shell never queues the breaker decision"
+LN=(--severity MEDIUM --confidence LIKELY --lineage review-finding --agent Security --text "$SEC1")
+expect NOTE  "SEC-1 untagged stays damped"            -- "${LN[@]}"
+expect ISSUE "SEC-1 --fix-efficacy fails"             -- "${LN[@]}" --fix-efficacy fails --fixes-issue 3621
+expect ISSUE "SEC-1 --fix-efficacy regresses"         -- "${LN[@]}" --fix-efficacy regresses
+expect ISSUE "SEC-1 POSSIBLE with fix-efficacy"       -- --severity MEDIUM --confidence POSSIBLE --lineage review-finding --text "x" --fix-efficacy fails
+expect ISSUE "text tag FIX_EFFICACY fallback"         -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "$(printf 'helper missing.\nFIX_EFFICACY: fails')"
+expect ISSUE "bold Fix efficacy line fallback"        -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "**Fix efficacy**: regresses"
+expect NOTE  "mid-line FIX_EFFICACY token stays NOTE"  -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "helper missing. FIX_EFFICACY: fails"
+expect NOTE  "#N + still-fails phrase no longer opts in" -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "this still fails to fix #3621 in a fresh shell" --fixes-issue 3621
+expect NOTE  "regression test for #N stays NOTE"       -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "Missing regression test for #3621" --fixes-issue 3621
+expect NOTE  "no regression #N stays NOTE"             -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "no regression #3621, but wording is off" --fixes-issue 3621
+expect NOTE  "reintroduce-style phrase stays NOTE"     -- --severity MEDIUM --confidence LIKELY --lineage review-finding --text "could reintroduce #3621 naming" --fixes-issue 3621
+expect NOTE  "LOW + fix-efficacy stays NOTE"          -- --severity LOW --confidence CONFIRMED --lineage review-finding --text "x" --fix-efficacy fails
+expect ISSUE "non-lineage MEDIUM POSSIBLE + efficacy" -- --severity MEDIUM --confidence POSSIBLE --text "x" --fix-efficacy fails
+expect ISSUE "HIGH unchanged"                         -- --severity HIGH --confidence LIKELY --lineage review-finding --fix-efficacy fails
+expect_exit 2 "bad --fix-efficacy value"              -- --severity MEDIUM --fix-efficacy broken
+FX_DIFF=$(mktemp "${TMPDIR:-/tmp}/classify-finding-fx.XXXXXX"); printf 'src/a.sh\n' > "$FX_DIFF"
+expect INPR_FIX "CONFIRMED in-PR efficacy stays INPR_FIX" -- --severity MEDIUM --confidence CONFIRMED --lineage review-finding --fix-efficacy fails --inpr-diff "$FX_DIFF" --file src/a.sh
+rm -f "$FX_DIFF"
+FX_SCOPE=$(mktemp "${TMPDIR:-/tmp}/classify-finding-fxs.XXXXXX"); FX_OPEN=$(mktemp "${TMPDIR:-/tmp}/classify-finding-fxo.XXXXXX")
+printf 'deferred\tsrc/b.sh\t3446\n' > "$FX_SCOPE"; printf '3446\n' > "$FX_OPEN"
+expect NOTE  "contract-deferred untagged demotes"     -- --severity MEDIUM --confidence LIKELY --text "x" --file src/b.sh --contract-scope "$FX_SCOPE" --contract-open "$FX_OPEN"
+expect ISSUE "contract-deferred + efficacy files"     -- --severity MEDIUM --confidence LIKELY --text "x" --file src/b.sh --contract-scope "$FX_SCOPE" --contract-open "$FX_OPEN" --fix-efficacy fails
+rm -f "$FX_SCOPE" "$FX_OPEN"
+_a=$(bash "$S" --severity MEDIUM --lineage review-finding --text "x" --fix-efficacy fails --fixes-issue 5); _b=$(bash "$S" --severity MEDIUM --lineage review-finding --text "x" --fix-efficacy fails --merge-issue 5)
+if [ "$_a" = "$_b" ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL: --fixes-issue/--merge-issue equivalence"; fi
+
 # --- text-file input ---
 TMPF=$(mktemp "${TMPDIR:-/tmp}/classify-finding-test.XXXXXX")
 printf 'Title: unchecked xss sink\n' > "$TMPF"
@@ -83,7 +112,20 @@ expect INPR_FIX "./ prefix matches"                   -- --severity MEDIUM --con
 expect INPR_FIX "lineage PR still fixes in-PR"        -- --severity MEDIUM --confidence CONFIRMED --lineage review-finding --inpr-diff "$DIFF" --file src/api/jobs.py
 expect ISSUE "MEDIUM CONFIRMED outside diff files"    -- --severity MEDIUM --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/other.py
 expect ISSUE "MEDIUM LIKELY in diff is not gated"     -- --severity MEDIUM --confidence LIKELY --inpr-diff "$DIFF" --file src/api/jobs.py
-expect ISSUE "HIGH in diff stays ISSUE (7B blocks it)" -- --severity HIGH --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/jobs.py
+expect INPR_FIX "HIGH CONFIRMED in diff (#3592)"       -- --severity HIGH --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/jobs.py
+expect INPR_FIX "CRITICAL CONFIRMED in diff (#3592)"   -- --severity CRITICAL --confidence CONFIRMED --inpr-diff "$DIFF" --file "src/api/jobs.py:9"
+expect INPR_FIX "HIGH in diff with safety keyword"     -- --severity HIGH --confidence CONFIRMED --title "billing refund leg unreachable" --inpr-diff "$DIFF" --file src/api/jobs.py
+expect ISSUE "HIGH LIKELY in diff stays ISSUE"         -- --severity HIGH --confidence LIKELY --inpr-diff "$DIFF" --file src/api/jobs.py
+expect ISSUE "CRITICAL LIKELY in diff stays ISSUE"     -- --severity CRITICAL --confidence LIKELY --inpr-diff "$DIFF" --file src/api/jobs.py
+expect ISSUE "HIGH CONFIRMED outside diff stays ISSUE" -- --severity HIGH --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/other.py
+expect ISSUE "CRITICAL CONFIRMED outside diff"         -- --severity CRITICAL --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/other.py
+expect ISSUE "HIGH CONFIRMED without --inpr-diff"      -- --severity HIGH --confidence CONFIRMED --file src/api/jobs.py
+expect ISSUE "HIGH CONFIRMED without --file"           -- --severity HIGH --confidence CONFIRMED --inpr-diff "$DIFF"
+for _s in HIGH CRITICAL MEDIUM; do
+  _want="INPR_FIX $(printf '%s' "$_s" | tr '[:upper:]' '[:lower:]')-confirmed-in-diff"
+  _got=$(bash "$S" --severity "$_s" --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/jobs.py 2>/dev/null)
+  if [ "$_got" = "$_want" ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL: reason carries severity $_s (want '$_want', got '$_got')"; fi
+done
 expect NOTE  "LOW in diff stays NOTE"                 -- --severity LOW --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/jobs.py
 expect ISSUE "no --inpr-diff: unchanged behaviour"    -- --severity MEDIUM --confidence CONFIRMED --file src/api/jobs.py
 expect ISSUE "no --file: unchanged behaviour"         -- --severity MEDIUM --confidence CONFIRMED --inpr-diff "$DIFF"

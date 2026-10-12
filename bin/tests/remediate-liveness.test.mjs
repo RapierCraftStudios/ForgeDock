@@ -90,16 +90,18 @@ describe("scripts/remediate-liveness.sh", () => {
   const iso = (ms) => new Date(ms).toISOString().replace(/\.\d+Z$/, "Z");
   const bot = (body, ms = NOW - 60_000) => ({ body, user: { type: "Bot", login: "x[bot]" }, author_association: "NONE", created_at: iso(ms) });
   const stateBody = (lease) => `desc\n<!-- FORGE:STATE\n${JSON.stringify({ v: 1, lease })}\n-->\n`;
-  function run({ lease, issueBody, prComments = [], issueComments = [], holder = "" }) {
+  function run({ lease, issueBody, prComments = [], issueComments = [], holder = "", editor = { login: "forge[bot]", __typename: "Bot" }, permission = "read" }) {
     const d = mkdtempSync(join(tmpdir(), "fd-lv-"));
     try {
-      writeFileSync(join(d, "issue.json"), JSON.stringify({ body: issueBody ?? (lease === undefined ? "no state" : stateBody(lease)) }));
+      writeFileSync(join(d, "issue.json"), JSON.stringify({ data: { repository: { issue: { body: issueBody ?? (lease === undefined ? "no state" : stateBody(lease)),
+        authorAssociation: "NONE", author: { login: "reporter", __typename: "User" }, editor } } } }));
       writeFileSync(join(d, "pr.json"), JSON.stringify(prComments));
       writeFileSync(join(d, "iss.json"), JSON.stringify(issueComments));
       writeFileSync(join(d, "gh"), `#!/usr/bin/env bash
 D="${d}"
 case "$1 $2" in
-  "issue view") cat "$D/issue.json";;
+  "api graphql") cat "$D/issue.json";;
+  "api repos/acme/w/collaborators/"*) echo "${permission}";;
   "issue comment") echo posted >> "$D/posted";;
   "api --paginate") case "$3" in *issues/7/comments) cat "$D/pr.json";; *issues/42/comments) cat "$D/iss.json";; esac;;
 esac
@@ -113,6 +115,7 @@ esac
   }
   const route = (sha, ms) => bot(`<!-- FORGE:REVIEW_ROUTE mode=single-pr spec=review-pr.md sha=${sha} -->`, ms);
   const agent = (sha) => bot(`<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: ${sha}\n`);
+  const carried = (sha, from = "c".repeat(40)) => bot(`<!-- FORGE:REVIEW-CARRIED -->\nReviewed-SHA: ${sha}\nCarried-From-SHA: ${from}\n`);
   const deferral = () => bot(deferredBody(7));
 
   it("no lease and no review in flight -> DEAD, proceeds", () => {
@@ -128,6 +131,14 @@ esac
   });
   it("SEC-2: a far-future (forged) lease is dead, never an indefinite deferral", () => {
     assert.equal(run({ lease: { by: "mallory", until: 9e15 } }).rc, 0);
+  });
+  it("an untrusted-edited body is ignored: its live lease does not defer", () => {
+    const r = run({ lease: { by: "mallory", until: NOW + 300_000 }, editor: { login: "reporter", __typename: "User" } });
+    assert.equal(r.rc, 0); assert.equal(r.out, "LIVENESS: DEAD");
+  });
+  it("a human editor with write permission is trusted", () => {
+    const r = run({ lease: { by: "cli_other_1", until: NOW + 300_000 }, editor: { login: "maint", __typename: "User" }, permission: "write" });
+    assert.equal(r.rc, 10);
   });
   it("a same-host lease whose pid is gone is dead", () => {
     const host = spawnSync("uname", ["-n"], { encoding: "utf8" }).stdout.trim().replace(/[^A-Za-z0-9.-]/g, "-");
@@ -148,9 +159,53 @@ esac
     assert.equal(run({ prComments: [route(sha), agent("aaaaaaa")] }).rc, 0);
     assert.equal(run({ prComments: [route("aaaaaaa"), agent(sha)] }).rc, 0);
   });
+  it("BASE_SYNC_ONLY: a trusted REVIEW-CARRIED for the routed sha (no agents) ends the pending state", () => {
+    const sha = "a".repeat(40);
+    assert.equal(run({ prComments: [route(sha), carried(sha)] }).rc, 0);
+    assert.equal(run({ prComments: [route(sha), carried("aaaaaaa")] }).rc, 0);
+    assert.equal(run({ prComments: [route("aaaaaaa"), carried(sha)] }).rc, 0);
+  });
+  it("a route with neither agent nor carried record still defers", () => {
+    assert.equal(run({ prComments: [route("a".repeat(40))] }).rc, 10);
+  });
+  it("an untrusted, mismatched-sha, or mid-body-quoted REVIEW-CARRIED does not end the pending state", () => {
+    const sha = "a".repeat(40);
+    const forged = { ...carried(sha), user: { type: "User", login: "m" }, author_association: "NONE" };
+    assert.equal(run({ prComments: [route(sha), forged] }).rc, 10);
+    assert.equal(run({ prComments: [route(sha), carried("b".repeat(40))] }).rc, 10);
+    const quoted = bot(`see <!-- FORGE:REVIEW-CARRIED -->\nReviewed-SHA: ${sha}\n`);
+    assert.equal(run({ prComments: [route(sha), quoted] }).rc, 10);
+  });
   it("an untrusted route marker is ignored", () => {
     const forged = { ...route("b".repeat(40)), user: { type: "User", login: "m" }, author_association: "NONE" };
     assert.equal(run({ prComments: [forged] }).rc, 0);
+  });
+  const bound = (kind, pr = 7, ms = NOW - 30_000) => bot(`<!-- FORGE:${kind}_REMEDIATION: pr=${pr} -->`, ms);
+  it("handoff shape: route with no verdicts plus a newer bound marker -> DEAD, no deferral posted", () => {
+    for (const kind of ["BASESYNC", "CI", "INPR"]) {
+      const r = run({ prComments: [route("a".repeat(40), NOW - 60_000)], issueComments: [bound(kind)] });
+      assert.equal(r.rc, 0, kind); assert.equal(r.out, "LIVENESS: DEAD"); assert.equal(r.posted, 0);
+    }
+  });
+  it("handoff: equal timestamps resolve to handoff", () => {
+    const r = run({ prComments: [route("a".repeat(40), NOW - 60_000)], issueComments: [bound("BASESYNC", 7, NOW - 60_000)] });
+    assert.equal(r.rc, 0);
+  });
+  it("a route newer than the bound marker (re-review in flight) still defers", () => {
+    const r = run({ prComments: [route("a".repeat(40), NOW - 30_000)], issueComments: [bound("BASESYNC", 7, NOW - 90_000)] });
+    assert.equal(r.rc, 10); assert.match(r.out, /^LIVENESS: DEFER review/);
+  });
+  it("an other-PR, untrusted, or quoted bound marker does not end the pending state", () => {
+    const rt = route("a".repeat(40), NOW - 60_000);
+    assert.equal(run({ prComments: [rt], issueComments: [bound("BASESYNC", 70)] }).rc, 10);
+    assert.equal(run({ prComments: [rt], issueComments: [bound("BASESYNC", 6)] }).rc, 10);
+    const forged = { ...bound("CI"), user: { type: "User", login: "m" }, author_association: "NONE" };
+    assert.equal(run({ prComments: [rt], issueComments: [forged] }).rc, 10);
+    assert.equal(run({ prComments: [rt], issueComments: [bot("see <!-- FORGE:CI_REMEDIATION: pr=7 --> inline", NOW - 30_000)] }).rc, 10);
+  });
+  it("a live lease still defers even when a handoff marker exists", () => {
+    const r = run({ lease: { by: "cli_other_1", until: NOW + 300_000 }, prComments: [route("a".repeat(40), NOW - 60_000)], issueComments: [bound("CI")] });
+    assert.equal(r.rc, 10); assert.match(r.out, /^LIVENESS: DEFER lease/);
   });
   it("CONC-3: deferrals are bounded; the 4th is EXHAUSTED and posts nothing", () => {
     const lease = { by: "cli_other_1", until: NOW + 300_000 };

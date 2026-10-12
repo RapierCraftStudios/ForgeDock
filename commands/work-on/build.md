@@ -141,21 +141,42 @@ Re-read current state before doing anything:
 ```bash
 gh issue view {NUMBER} {GH_FLAG} --json number,title,body,labels,state,milestone
 
-# Check investigation report
+# Check investigation report — intentionally NOT cycle-scoped: investigate may commit CONFIRMED in a later cycle without re-posting INVESTIGATOR, so scoping it would block every new-cycle build
 TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh) # script resolution block verbatim; unresolved/failed read = fail closed
 gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:INVESTIGATOR -->'
 
-# Check if build already completed (require FORGE:BUILDER:COMPLETE — not just FORGE:BUILDER)
-gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
-  --jq '.[] | select(.body | contains("FORGE:BUILDER")) | .body'
+# Current-cycle slice (forge#3666): every resume read below runs on the comments AFTER the newest TRUSTED
+# `<!-- FORGE:CYCLE: n -->` marker (same predicate as `cycleNumber`/`sliceToCurrentCycle` in bin/engine/phases.mjs:
+# trusted author incl. the FORGE_TRAIL_TRUSTED_ASSOCIATIONS / FORGE_TRAIL_TRUSTED_LOGINS overrides, same `${VAR-default}`
+# handling as scripts/trusted-comments.sh; body starts with the header, marker on its own line); all comments when no marker exists.
+# A cycle-1 BUILDER:COMPLETE must never yield ALREADY_DONE in cycle 2. Re-declare this function verbatim in every
+# fence that uses it (shell functions do not survive across fences).
+cycle_slice() {
+  jq -s --arg assoc "${FORGE_TRAIL_TRUSTED_ASSOCIATIONS-OWNER,MEMBER,COLLABORATOR}" --arg logins "${FORGE_TRAIL_TRUSTED_LOGINS-}" '[.[][]] as $c
+    | ($assoc | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $A
+    | ($logins | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))) as $L
+    | ([$c | to_entries[]
+        | select(((.value.author_association // "") as $x | $A | index($x) != null) or ((.value.user.type // "") == "Bot") or ((.value.user.login // "") as $x | $L | index($x) != null))
+        | select((.value.body // "") | test("\\A\\s*<!--\\s*FORGE:CYCLE:") and test("(?m)^[ \\t]*<!--[ \\t]*FORGE:CYCLE:[ \\t]*[0-9]+[ \\t]*-->[ \\t]*$"))
+        | .key] | last) as $i
+    | if $i == null then $c else $c[($i + 1):] end'
+}
+COMMENTS_JSON=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate) \
+  && CYCLE_SLICE=$(printf '%s' "$COMMENTS_JSON" | cycle_slice) && [ -n "$CYCLE_SLICE" ] \
+  || echo "CYCLE_LOOKUP=FAILED"  # a failed read is NEVER "no marker"
 
-# Existing classification from a prior run (resume path)
-EXISTING_FAST_PATH=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
-  --jq '.[] | select(.body | contains("FORGE:FAST_PATH")) | .body' 2>/dev/null | head -1)
+# Check if build already completed (require FORGE:BUILDER:COMPLETE — not just FORGE:BUILDER); current-cycle slice only
+printf '%s' "$CYCLE_SLICE" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:BUILDER'
+
+# Existing classification from a prior run of THIS cycle (resume path); none in a fresh cycle, so B0.5 re-classifies and re-posts
+EXISTING_FAST_PATH=$(printf '%s' "$CYCLE_SLICE" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:FAST_PATH' 2>/dev/null \
+  | head -n 1 | jq -r 'select(type == "string")')
 ```
 
+`CYCLE_LOOKUP=FAILED` (or `trusted-comments.sh` unresolved) → Blocked exit with blocker `cycle-lookup-unavailable: could not read FORGE:CYCLE` (a transient GitHub failure uses the `github-unavailable:` prefix); never read a failed lookup as "no marker". Below, "present" and "exists" for BUILDER, BUILDER:COMPLETE, FAST_PATH, DIFF_SIZE, ACCEPTANCE_GATE and BUILD_BLOCKED comments always mean present in the **current-cycle slice** (comments after the newest trusted `FORGE:CYCLE` marker); a cycle-1 `BUILDER:COMPLETE` is invisible in cycle 2, so a new cycle with no slice COMPLETE falls through to B1 and builds fresh.
+
 **Resume check**:
-- If `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment → the builder finished, but COMPLETE is posted at validate V5, BEFORE the B6.5 acceptance gate, so it is not proof the build passed. **Gate resume** (checked first; first match wins) <!-- Added: forge#3725 -->: read the newest trusted, current-cycle (after the newest `FORGE:CYCLE`) comment that starts with `FORGE:ACCEPTANCE_GATE` or `FORGE:BUILD_BLOCKED`, through the same anchored, trust-filtered lookup as the size-gate resume below (script resolution block verbatim; use `bodies '^<!-- FORGE:(ACCEPTANCE_GATE|BUILD_BLOCKED)'`, and compare by comment order, never by presence):
+- If `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment of the current-cycle slice → the builder finished, but COMPLETE is posted at validate V5, BEFORE the B6.5 acceptance gate, so it is not proof the build passed. **Gate resume** (checked first; first match wins) <!-- Added: forge#3725 -->: read the newest trusted, comment of the current-cycle slice that starts with `FORGE:ACCEPTANCE_GATE` or `FORGE:BUILD_BLOCKED`, through the same anchored, trust-filtered lookup as the size-gate resume below (script resolution block verbatim; pipe `cycle_slice` into `bodies '^<!-- FORGE:(ACCEPTANCE_GATE|BUILD_BLOCKED)'`, and compare by comment order, never by presence):
   - Lookup failed (`trusted-comments.sh` unresolved or `gh` error) → Blocked exit with blocker `gate-lookup-unavailable: could not read FORGE:ACCEPTANCE_GATE` (a transient GitHub failure uses the `github-unavailable:` prefix). Never read a failed lookup as "no gate marker".
   - Newest is `FORGE:ACCEPTANCE_GATE:FAILED`, `FORGE:ACCEPTANCE_GATE:BLOCKED`, or a `FORGE:BUILD_BLOCKED` comment → the gate is blocked and the engine fails closed on it, so returning ALREADY_DONE would deadlock every re-run. Derive BRANCH/WORKTREE_PATH/PR_BASE as in B1A/B1C (without creating anything), verify the branch and worktree exist and that `git -C "$WORKTREE_PATH" branch --show-current` equals BRANCH (missing or mismatched → Blocked exit `worktree-missing: cannot re-enter B6.5`; never recreate silently), recover `COMPLEXITY_BAND` from `EXISTING_FAST_PATH` with the B0.5 resume extraction, then skip B0.5-B6 and re-enter at **Phase B6.5**, which posts a fresh PASSED/FAILED/BLOCKED verdict (the one-repair `FORGE:ACCEPTANCE_REPAIR` bound still applies).
   - Newest is `FORGE:ACCEPTANCE_GATE:PASSED`, or no gate marker exists → build already complete. Derive BRANCH/WORKTREE_PATH as in B1A/B1C (without creating anything), then print `BUILD_RESULT: status: ALREADY_DONE`.
@@ -165,7 +186,8 @@ EXISTING_FAST_PATH=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate 
   set -o pipefail
   TRUSTED_SCRIPT="${UNIVERSAL_DIR:+$UNIVERSAL_DIR/trusted-comments.sh}"
   [ -n "$TRUSTED_SCRIPT" ] && [ -f "$TRUSTED_SCRIPT" ] || { echo "DIFF_SIZE_LOOKUP=FAILED (trusted-comments.sh unresolved)"; exit 0; }
-  DS=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:DIFF_SIZE') \
+  # <cycle_slice function from B0, verbatim>
+  DS=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" | cycle_slice | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:DIFF_SIZE') \
     || { echo "DIFF_SIZE_LOOKUP=FAILED"; exit 0; }
   LAST_RESULT=$(printf '%s\n' "$DS" | jq -r 'select(type == "string")' | sed -n 's/^result: *\([A-Z]*\).*/\1/p' | tail -n 1)
   echo "DIFF_SIZE_RESULT=${LAST_RESULT:-<none>}"
@@ -173,13 +195,17 @@ EXISTING_FAST_PATH=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate 
   - `DIFF_SIZE_LOOKUP=FAILED` → Blocked exit with blocker `size-gate-unavailable: could not read FORGE:DIFF_SIZE` (a transient GitHub failure uses the `github-unavailable:` prefix). Never read a failed lookup as "no DIFF_SIZE".
   - `DIFF_SIZE_RESULT=OVER` or `DIFF_SIZE_RESULT=COHESIVE` → verify, without creating anything, that the branch and worktree exist (derive BRANCH/WORKTREE_PATH as in B1A/B1C), that `git -C "$WORKTREE_PATH" branch --show-current` equals BRANCH, and that a staged diff is present (`! git -C "$WORKTREE_PATH" diff --cached --quiet`). Recover `COMPLEXITY_BAND` from `EXISTING_FAST_PATH` with the B0.5 resume extraction. When all hold, skip B0.5-B5 and continue at B5.5 (it re-measures, then applies the override / `COHESIVE` / `NEEDS_DECOMPOSE` / `OK` logic; never re-run implement).
   - Anything else (no `FORGE:DIFF_SIZE`, `result` is not `OVER`, worktree or branch missing or mismatched, nothing staged, band unrecoverable) → never skip ahead on missing state; fall through to the next rule.
-- If `<!-- FORGE:BUILDER -->` exists BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → build was interrupted after the comment was posted but before the commit (validate V5). Delete the partial comment and restart from Phase B2 (contract): <!-- Added: forge#1305 -->
+- If `<!-- FORGE:BUILDER -->` exists in the current-cycle slice BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → build was interrupted after the comment was posted but before the commit (validate V5). Delete the partial comment and restart from Phase B2 (contract): <!-- Added: forge#1305 -->
+  Select with ONE anchored, trusted selector (body must start with the marker; author must be a Bot or OWNER/MEMBER/COLLABORATOR). Delete ONLY when exactly one non-complete candidate exists and it carries no other FORGE phase marker; unparsable, zero, or multiple matches delete nothing (fail closed). <!-- Added: forge#3668 -->
   ```bash
-  PARTIAL_ID=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments --paginate \
-    --jq '[.[] | select(.body | contains("FORGE:BUILDER") and (contains("FORGE:BUILDER:COMPLETE") | not))] | last | .id // ""')
+  # <cycle_slice function from B0, verbatim> — only a current-cycle partial is ever deleted; prior-cycle comments are never touched
+  BLD=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments | cycle_slice | jq -s '[.[][] | select((.body // "") | startswith("<!-- FORGE:BUILDER -->")) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | {id: .id, complete: (.body | contains("<!-- FORGE:BUILDER:COMPLETE -->")), other: (.body | test("<!-- FORGE:(INVESTIGATOR|CONTEXT|CONTRACT|ARCHITECT)"))}]') || BLD=""
+  PARTIAL_ID=$(printf '%s' "$BLD" | jq -r '[.[] | select(.complete | not)] | if length == 1 and (.[0].other | not) then .[0].id else empty end' 2>/dev/null)
   if [ -n "$PARTIAL_ID" ]; then
     gh api repos/{GH_REPO}/issues/comments/$PARTIAL_ID -X DELETE
     echo "Deleted partial FORGE:BUILDER comment (no FORGE:BUILDER:COMPLETE) — restarting build from Phase B2"
+  else
+    echo "builder resume: no single safe partial BUILDER comment — deleting nothing"
   fi
   ```
 - If there is no `<!-- FORGE:INVESTIGATOR -->` comment with `<!-- INVESTIGATION:COMPLETE -->` → Blocked exit with blocker "Investigation not complete — run investigate first".
@@ -267,7 +293,7 @@ Whatever path was taken, set `COMPLEXITY_BAND` (uppercase) for the rest of this 
 
 ### B1A: Derive branch name
 
-If `--branch` was passed, or a local/remote branch already exists whose name ends in `-{NUMBER}` (`git branch -a --list "*-{NUMBER}"`), reuse it (resume). Otherwise derive from the issue title: lowercase, hyphenated, max 40 chars (truncate if needed).
+If `--branch` was passed, or a local/remote branch already exists whose name ends in `-{NUMBER}` (`git branch -a --list "*-{NUMBER}"`), reuse it (resume). **New-cycle guard** <!-- Added: forge#3666 -->: when a trusted `FORGE:CYCLE` marker exists and the current-cycle slice has no `FORGE:BUILDER`, never re-adopt a prior-cycle branch whose PR is already merged or closed (`gh pr list {GH_FLAG} --head "<branch>" --state all --json state --jq '.[].state'` shows `MERGED`/`CLOSED`, or the branch is already merged into `origin/{PR_BASE}`); derive a fresh name instead (append `-c<cycle>` before `-{NUMBER}`, e.g. `fix/foo-c2-{NUMBER}`). Otherwise derive from the issue title: lowercase, hyphenated, max 40 chars (truncate if needed).
 - Bug / fix issues → prefix `fix/`
 - Feature issues → prefix `feat/`
 - Refactor / maintenance → prefix `fix/` or `refactor/`
@@ -347,7 +373,7 @@ esac
 
 **Skip if COMPLEXITY_BAND: INVESTIGATION** — go to B5. For every other band (TRIVIAL included) the contract is mandatory. If a `FORGE:CONTRACT` comment already exists on the issue (resume), do not post a second one — continue to B2.1.
 
-Post `<!-- FORGE:CONTRACT -->` comment documenting what will be built and why. Run B2.0 first: it files the follow-up issues for `deferred` out-of-scope items and validates the section, so `{OUT_OF_SCOPE_ITEMS}` below already holds real issue numbers.
+Post `<!-- FORGE:CONTRACT -->` comment documenting what will be built and why. Run B2.0 first: it folds small siblings and files one batched follow-up for the `deferred` out-of-scope items and validates the section, so `{OUT_OF_SCOPE_ITEMS}` below already holds real issue numbers.
 
 ### B2.0: Out-of-scope dispositions — file deferred follow-ups, validate the section <!-- Added: forge#3447 -->
 
@@ -365,51 +391,26 @@ Every item in the contract's `### Out of Scope` section must carry exactly one d
 - **Known-flaw rule**: a contract that keeps a known-flawed design (a design the investigation or architect plan identified as flawed, a fail-open caller, an unsound threshold) must state the flaw and list it as a `deferred → #N` item with a linked follow-up. It may not hide behind `accepted-risk` or free text.
 - Free-text exclusions without a disposition are invalid. `->` is accepted for `→`.
 
+**Fold, then batch** <!-- Added: forge#3843 -->: before filing anything, fold small siblings into scope. A candidate deferred item that is the same mechanical change at a sibling path and fits the remaining size budget (estimate within `0.8 × build.diff_size.threshold`, `1000` when the threshold is `0` or unset, minus the current estimate) goes into the contract's Deliverables, not Out of Scope; count it as `folded`. Defer only genuinely separate work (different module, design or owner). All remaining deferred items of this build go into ONE follow-up issue with a checklist; `scripts/file-deferred-followups.sh` appends to an open trusted follow-up for the same parent (exact path match) or creates one.
+
 **File the `deferred` follow-ups** (skip the filing on resume when the contract already exists):
 
 ```bash
 # <Script resolution block from work-on/build.md, verbatim>
-run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
-# Trusted-author filter (OWNER/MEMBER/COLLABORATOR or Bot, same predicate as trusted-comments.sh) is applied at
-# the source in the LOOKUP --jq, before the path match: an untrusted match is never reused. The REST search API is used because it exposes
-# author_association and user.type (`gh issue list --json` has no authorAssociation field).
-# For each deferred item (DEFERRED_PATH = the backticked path, DEFERRED_WHY = one line), repeat:
-DEFERRED_MARKER="<!-- FORGE:DEFERRED_FROM: #{NUMBER} -->"
-LOOKUP=$(gh api -X GET search/issues -f per_page=50 \
-  -f q="\"FORGE:DEFERRED_FROM: #{NUMBER}\" in:body repo:{GH_REPO} is:issue is:open" --jq '[.items[] | select(((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR")) or ((.user.type // "") == "Bot"))]' 2>/dev/null) || LOOKUP="FAILED"
-if [ "$LOOKUP" = "FAILED" ]; then
-  echo "DEFERRED_LOOKUP=FAILED"   # a failed lookup is not "none found": Blocked exit, never re-file blind
-else
-  DEFERRED_NUM=$(printf '%s' "$LOOKUP" | jq -r --arg p "$DEFERRED_PATH" \
-    '[.[] | select((.body // "") | contains($p))] | first | .number // empty' 2>/dev/null)
-  if [ -z "$DEFERRED_NUM" ]; then
-    DEFERRED_URL=$(run gh issue create {GH_FLAG} --title "follow-up: ${DEFERRED_PATH} (deferred from #{NUMBER})" \
-      --body "## Problem
-
-${DEFERRED_WHY}
-
-Deferred from #{NUMBER}: \`${DEFERRED_PATH}\` was declared out of scope in its contract and is tracked here instead of surfacing later as a review finding.
-
-## Affected Files
-
-- \`${DEFERRED_PATH}\`
-
-## Acceptance Criteria
-
-- [ ] The concern above is resolved for \`${DEFERRED_PATH}\`
-
-${DEFERRED_MARKER}")
-    DEFERRED_NUM=$(printf '%s' "$DEFERRED_URL" | grep -oE '[0-9]+$')
-    [ -n "${DRY_RUN:-}" ] && DEFERRED_NUM="0"
-  fi
-  echo "DEFERRED_ISSUE=${DEFERRED_NUM:-}"
-fi
+# DEFERRED_TSV: one line per remaining deferred item: path<TAB>one-line why<TAB>known-flaw (or empty)
+SCRIPT_REF=$(resolve_script 'file-deferred-followups')
+case "$SCRIPT_REF" in
+  prose:*) echo "DEFERRED_SCRIPT=PROSE" ;;   # file ONE issue by hand: marker + checklist of every path (see below)
+  *) printf '%s\n' "$DEFERRED_TSV" | bash "${SCRIPT_REF#*:}" --parent {NUMBER} --repo {GH_REPO} --folded "${FOLDED_COUNT:-0}"; echo "DEFERRED_RC=$?" ;;
+esac
 ```
 
-- Only follow-up issues authored by a trusted author (OWNER/MEMBER/COLLABORATOR or Bot) are reused; an untrusted match carrying the marker is ignored and a fresh follow-up is filed.
-- `DEFERRED_LOOKUP=FAILED`, or an empty `DEFERRED_NUM` after a real (non-`DRY_RUN`) create → Blocked exit with blocker `github-unavailable: could not file or look up deferred follow-up for <path>` (a transient failure follows the retry rule above; no `needs-human` for `github-unavailable:`).
-- On resume the lookup reuses the open issue that carries the marker and the same path, so a retried build never files a duplicate.
-- Prefer filing through the `/issue` create-hook's programmatic contract (`Skill(skill="{FORGE_SKILL_PREFIX}issue", ...)`) when it is available; the raw create above is the fallback and must keep the `FORGE:DEFERRED_FROM` marker in the body.
+- Output is one `path<TAB>issue` row per item (rows share the batched issue number: use it as the `#N` in each `deferred → #N` bullet) plus a `DEFERRED_TELEMETRY deferred_items=N folded=N batched_into=#M filed=N` line (forwarded to the #3834 emitter when present).
+- A known-flawed design is recorded as a `known-flaw` checklist item in that batched issue (pass the flag in the TSV); it is never dropped or hidden behind `accepted-risk`.
+- Only follow-ups by a trusted author (OWNER/MEMBER/COLLABORATOR or Bot; `FORGE_TRAIL_TRUSTED_*` honoured) are reused; an untrusted match is ignored.
+- `DEFERRED_LOOKUP=FAILED` or `DEFERRED_FILE=FAILED` (non-zero `DEFERRED_RC`) → Blocked exit with blocker `github-unavailable: could not file or look up deferred follow-ups` (a transient failure follows the retry rule above; no `needs-human` for `github-unavailable:`).
+- Prose tier (script absent): create one issue by hand whose body has the exact `<!-- FORGE:DEFERRED_FROM: #{NUMBER} -->` marker and a `- [ ] \`path\` — why` checklist line per path, after a trusted-author marker lookup; a failed lookup is a Blocked exit.
+- On resume the lookup reuses the open issue carrying the marker and appends only missing paths, so a retried build never files a duplicate.
 
 **Validate the composed section** with `scripts/check-contract-scope.sh validate` (the exact text that will replace `{OUT_OF_SCOPE_ITEMS}`):
 
@@ -655,6 +656,7 @@ if [ -n "$JUSTIFICATION" ]; then echo "OVERRIDE=VALID"; else echo "OVERRIDE=NONE
 **Step 3 — record.** Set `DIFF_LINES`, `EXCLUDED_LINES`, `THRESHOLD`, `RESULT` (`OK`, `OVERRIDDEN`, `COHESIVE` or `OVER`), `SPLIT_PROPOSAL` and `COHESION_NOTE` (set only for `COHESIVE`) from the steps above, then post one `<!-- FORGE:DIFF_SIZE -->` comment, idempotently: find the latest trusted comment starting with the marker and edit it, otherwise create it (on resume never stack duplicates; readers use the latest trusted one):
 
 ```bash
+# <Script resolution block from above goes here, verbatim>
 BODY="<!-- FORGE:DIFF_SIZE -->
 ## Diff Size
 
@@ -663,6 +665,7 @@ excluded_lines: ${EXCLUDED_LINES}
 threshold: ${THRESHOLD}
 result: ${RESULT}
 ${ESTIMATE_LINE:-}${COHESION_NOTE:-}${SPLIT_PROPOSAL:-}"
+_t=$(forge_resolve lib/telemetry.sh); FORGE_REPO="{GH_REPO}" FORGE_ISSUE="{NUMBER}" FORGE_PHASE=build bash "${_t:-/dev/null}" diff_size lines="$DIFF_LINES" excluded="$EXCLUDED_LINES" threshold="$THRESHOLD" result="$RESULT" >/dev/null 2>&1 || true # forge#3834 telemetry (final result incl. OVERRIDDEN)
 run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
 CID=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" --jq '[.[] | select(.body | startswith("<!-- FORGE:DIFF_SIZE")) | select((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or (.user.type == "Bot"))] | last | .id // ""' 2>/dev/null || true)
 if [ -n "$CID" ]; then run gh api "repos/{GH_REPO}/issues/comments/${CID}" -X PATCH -f body="$BODY" >/dev/null 2>&1 || run gh issue comment {NUMBER} {GH_FLAG} --body "$BODY"
@@ -791,6 +794,8 @@ The acceptance spec contains only a skip sentinel (\`type=skipped\`). No automat
 **Otherwise — execute each check**: <!-- Added: forge#1829 -->
 
 ```bash
+# <Script resolution block, verbatim>
+GREP_CLS=$(forge_resolve classify-grep-exit.sh) # empty/unresolved = every grep exit>=2 is a real FAIL (fail closed)
 GATE_PASS=true
 CORRECTED=""
 FAILED_CHECKS=""
@@ -798,6 +803,8 @@ VERIFIED_COUNT=0       # checks actually executed and judged (PASS or FAIL); mal
 MALFORMED_CHECKS=""   # malformed-check: generated check that can never pass; reported, never repaired, never needs-human
 DEFERRED_COUNT=0       # phase=review checks (and legacy "no pull requests found" results): evaluated by review R2.5, never counted here
 DEFERRED_CHECKS=""    # <!-- Added: forge#3793 -->
+MANUAL_CHECKS=""      # per-check type=skipped (manual / post-deploy): never executed, listed as unchecked follow-ups <!-- Added: forge#3825 -->
+SPEC_DEFECT=false     # nothing verifiable: a spec defect that code repair cannot fix <!-- Added: forge#3825 -->
 
 while IFS= read -r check_line; do
   # Fields are extracted by anchoring each sed pattern to `^ACCEPTANCE_CHECK:` and walking
@@ -837,7 +844,7 @@ while IFS= read -r check_line; do
   PHASE=$(printf '%s\n' "$check_line" | sed -nE 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=("(([^"\\]|\\.)*)"|[^ ]*) matcher=("(([^"\\]|\\.)*)"|[^ ]*) phase=(build|review)( .*)?$/\7/p')
   [ "$PHASE" = "review" ] || PHASE=build
 
-  [ "$TYPE" = "skipped" ] && continue
+  [ "$TYPE" = "skipped" ] && { MANUAL_CHECKS="${MANUAL_CHECKS}\n- [ ] **$ID** ($DESC)"; continue; }
 
   # Deferred (review) <!-- Added: forge#3793 -->: never executed, never VERIFIED, never GATE_PASS=false, never in FAILED_CHECKS / --fix-acceptance.
   if [ "$PHASE" = "review" ]; then DEFERRED_COUNT=$((DEFERRED_COUNT+1)); DEFERRED_CHECKS="${DEFERRED_CHECKS}\n- **$ID** ($DESC): DEFERRED (review)"; continue; fi
@@ -846,6 +853,7 @@ while IFS= read -r check_line; do
   # check defect, not an implementation failure. Static detection only parses (bash -n), never executes.
   MALFORMED=""
   { [ "$TYPE" = "command" ] || [ "$TYPE" = "behavior" ]; } && { case "$TARGET" in *'\\\\'*) MALFORMED="run of 4+ backslashes (over-escaped target)";; esac; [ -n "$MALFORMED" ] || bash -n -c "$TARGET" 2>/dev/null || MALFORMED="shell syntax error (unbalanced quotes)"; }
+  { [ "$TYPE" = "command" ] || [ "$TYPE" = "behavior" ]; } && [ -z "$MALFORMED" ] && case "$(printf '%s' "$TARGET" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" in none) MALFORMED='target "none" is not a command (a manual criterion must be type=skipped)';; esac
   if [ -n "$MALFORMED" ]; then MALFORMED_CHECKS="${MALFORMED_CHECKS}\n- **$ID** ($DESC): $MALFORMED"; continue; fi
 
   RESULT="PASS"
@@ -868,12 +876,14 @@ while IFS= read -r check_line; do
       if [ "$MATCHER" = "exit_0" ]; then
         ERR=$(eval "$TARGET" 2>&1 >/dev/null); RC=$?
         # grep exit >= 2 is a usage/syntax error (e.g. a pattern starting with `-`), never a verdict on the code; exit 1 stays FAIL.
-        # A missing/unreadable operand file also exits 2 but is a REAL failure (the check asserts a file exists), so it is never malformed.
-        [ "$RC" -ge 2 ] && case "$TARGET" in grep\ *|egrep\ *|fgrep\ *) printf '%s' "$ERR" | grep -qE 'No such file or directory|Permission denied|Is a directory' || MALFORMED="grep usage error (exit $RC)";; esac
+        # Malformed only when stderr positively names a usage error (classify-grep-exit.sh); empty stderr (`2>/dev/null`, `-s`) or any operand error is a REAL failure.
+        [ "$RC" -ge 2 ] && MALFORMED=$(bash "$GREP_CLS" "$RC" "$ERR" "$TARGET" 2>/dev/null)
+        [ "$RC" -eq 127 ] && [ -z "$MALFORMED" ] && printf '%s' "$ERR" | grep -qF 'command not found' && MALFORMED="command not found (rc 127): the target is not an executable command"
         [ "$RC" -eq 0 ] || [ -n "$MALFORMED" ] || { RESULT="FAIL"; DETAIL="command exited non-zero: $TARGET"; }
       else
-        OUTPUT=$(eval "$TARGET" 2>&1); RC=$?; ERR="$OUTPUT"
-        [ "$RC" -ge 2 ] && case "$TARGET" in grep\ *|egrep\ *|fgrep\ *) printf '%s' "$ERR" | grep -qE 'No such file or directory|Permission denied|Is a directory' || MALFORMED="grep usage error (exit $RC)";; esac
+        ERRF=$(mktemp); OUTPUT=$(eval "$TARGET" 2>"$ERRF"); RC=$?; ERR=$(cat "$ERRF"); rm -f "$ERRF"; [ -z "$ERR" ] || OUTPUT="${OUTPUT}${OUTPUT:+$'\n'}${ERR}" # classify on stderr only, match on both
+        [ "$RC" -ge 2 ] && MALFORMED=$(bash "$GREP_CLS" "$RC" "$ERR" "$TARGET" 2>/dev/null)
+        [ "$RC" -eq 127 ] && [ -z "$MALFORMED" ] && printf '%s' "$ERR" | grep -qF 'command not found' && MALFORMED="command not found (rc 127): the target is not an executable command"
         if [ -n "$MALFORMED" ]; then :
         elif ! printf '%s\n' "$OUTPUT" | grep -qE "$MATCHER"; then
           if printf '%s\n' "$OUTPUT" | grep -qF -- "$MATCHER"; then CORRECTED="${CORRECTED}\n- **$ID**: output matched as a literal string"
@@ -888,7 +898,7 @@ while IFS= read -r check_line; do
 
   if [ -n "$MALFORMED" ]; then MALFORMED_CHECKS="${MALFORMED_CHECKS}\n- **$ID** ($DESC): $MALFORMED"; continue; fi
 
-  # Legacy fallback (untagged spec): a gh pr check that finds no PR is waiting on the review phase, not failing.
+  # Legacy fallback (any phase tag): a gh pr check that finds no PR is waiting on the review phase, not failing.
   if [ "$RESULT" = "FAIL" ] && printf '%s' "$ERR" | grep -qF 'no pull requests found'; then
     case "$TARGET" in *'gh pr'*) DEFERRED_COUNT=$((DEFERRED_COUNT+1)); DEFERRED_CHECKS="${DEFERRED_CHECKS}\n- **$ID** ($DESC): DEFERRED (review) (no pull request exists yet)"; continue;; esac
   fi
@@ -903,21 +913,38 @@ done <<< "$ACCEPTANCE_CHECKS"
 # A gate that verified nothing must not pass: with every check skipped as malformed, PASSED would be a green light on zero evidence.
 # A spec whose checks are all deferred to review (DEFERRED_COUNT > 0) is not vacuous: review R2.5 evaluates them before merge.
 if [ "$VERIFIED_COUNT" -eq 0 ] && [ "$DEFERRED_COUNT" -eq 0 ]; then
+  # spec-defect <!-- Added: forge#3825 -->: only the spec is wrong, so this is a BLOCKED verdict that never enters the --fix-acceptance repair (#3774).
   GATE_PASS=false
-  FAILED_CHECKS="${FAILED_CHECKS}\n- **(gate)**: no acceptance check could be verified (all were malformed or none ran); regenerate the acceptance spec"
+  SPEC_DEFECT=true
 fi
 ```
 
 **Post gate result comment**:
 
 ```bash
+# <Script resolution block, verbatim>
 run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
-if [ "$GATE_PASS" = "true" ]; then
+_nf=$(printf '%b' "$FAILED_CHECKS" | grep -c '^- ' || true); _nm=$(printf '%b' "$MALFORMED_CHECKS" | grep -c '^- ' || true); _t=$(forge_resolve lib/telemetry.sh)
+[ -n "${DRY_RUN:-}" ] || FORGE_REPO="{GH_REPO}" FORGE_ISSUE="{NUMBER}" FORGE_PHASE=build bash "${_t:-/dev/null}" acceptance_gate phase=build verified="$VERIFIED_COUNT" failed="${_nf:-0}" malformed="${_nm:-0}" deferred="$DEFERRED_COUNT" >/dev/null 2>&1 || true # forge#3834 telemetry
+if [ "$SPEC_DEFECT" = "true" ]; then
+  run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
+## Acceptance Gate — BLOCKED (spec-defect)
+
+No acceptance check could be verified: every check was malformed, manual, or empty. The implementation is not at fault and a code repair cannot fix this, so the repair step is skipped.
+$( [ -n "$MALFORMED_CHECKS" ] && printf '\n**malformed-check**:%b\n' "$MALFORMED_CHECKS" )
+$( [ -n "$MANUAL_CHECKS" ] && printf '\n**Manual follow-up (type=skipped; not verified at build time)**:%b\n' "$MANUAL_CHECKS" )
+
+**Gate result: BLOCKED** — regenerate the acceptance spec by re-running \`/work-on:investigate {NUMBER}\`, then retry the build.
+
+<!-- FORGE:ACCEPTANCE_GATE:BLOCKED -->"
+  run gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
+elif [ "$GATE_PASS" = "true" ]; then
   run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
 ## Acceptance Gate — PASSED
 
 All machine-checkable build-phase acceptance criteria verified against real behavior.
 $( [ -n "$DEFERRED_CHECKS" ] && printf '\n**Deferred to review (phase=review; evaluated against the PR before merge)**:%b\n' "$DEFERRED_CHECKS" )
+$( [ -n "$MANUAL_CHECKS" ] && printf '\n**Manual follow-up (type=skipped; not verified at build time, confirm after merge/deploy)**:%b\n' "$MANUAL_CHECKS" )
 $( [ -n "$CORRECTED" ] && printf '\n**Checks corrected (malformed matcher, literal text present)**:%b\n' "$CORRECTED" )
 $( [ -n "$MALFORMED_CHECKS" ] && printf '\n**malformed-check (not counted as failures; regenerate the acceptance spec by re-running investigate)**:%b\n' "$MALFORMED_CHECKS" )
 
@@ -938,11 +965,15 @@ Merge is blocked. Fix the failing criteria and re-run the validate phase.
 fi
 ```
 
-A `malformed-check` (a command/behavior target with a run of 4+ backslashes or a `bash -n` syntax error, or a grep target exiting >= 2 for a reason other than a missing/unreadable operand file, which stays a real FAIL) is reported in the comment and never sets `GATE_PASS=false` by itself, never enters `FAILED_CHECKS`, is never passed to `--fix-acceptance`, and never adds `needs-human` by itself; the gate still posts exactly one of PASSED/FAILED. The gate never posts PASSED with zero verified checks: if every check was malformed (`VERIFIED_COUNT=0` and `DEFERRED_COUNT=0`) it posts FAILED so the repair step regenerates the spec. <!-- Added: forge#3694 -->
+A `malformed-check` (a command/behavior target with a run of 4+ backslashes or a `bash -n` syntax error, or a grep target exiting >= 2 for a reason other than a missing/unreadable operand file, which stays a real FAIL) is reported in the comment and never sets `GATE_PASS=false` by itself, never enters `FAILED_CHECKS`, is never passed to `--fix-acceptance`, and never adds `needs-human` by itself; the gate still posts exactly one of PASSED/FAILED. The gate never posts PASSED with zero verified checks: if every check was malformed (`VERIFIED_COUNT=0` and `DEFERRED_COUNT=0`) it is a spec-defect: it posts `FORGE:ACCEPTANCE_GATE:BLOCKED`, adds `needs-human`, prints `BUILD_RESULT: status: BLOCKED` (blocker: "regenerate acceptance spec via investigate") and skips the `--fix-acceptance` repair entirely, because implement cannot fix a spec defect. <!-- Added: forge#3694, forge#3825 -->
 
-A `phase=review` check (or, for an untagged legacy spec, a `command`/`behavior` check on a `gh pr` target whose output contains `no pull requests found`) is recorded as `DEFERRED (review)` in the PASSED comment: it is never executed here, never counted in `VERIFIED_COUNT`, never sets `GATE_PASS=false`, never enters `FAILED_CHECKS` or `--fix-acceptance`, and never spends the repair. A spec whose checks are all deferred posts PASSED (it is not "No Spec Found"). Review R2.5 evaluates the deferred checks against the real PR and blocks merge on failure. <!-- Added: forge#3793 -->
+Also `malformed-check` <!-- Added: forge#3825 -->: a `command`/`behavior` target that is literally `none` (any case), or that exits 127 with `command not found` on stderr. Classification keys on that stderr text, never on the code alone: a missing script (a `bash` run of a nonexistent script path, with `No such file or directory`) also exits 127 and stays a real FAIL, so the missing-operand class is not reopened. A per-check `type=skipped` is never executed, never counted, and is listed under "Manual follow-up" as unchecked items in the PASSED comment.
 
-If `GATE_PASS = false`, the build repairs itself **once** before anything escalates (a failing acceptance check is pipeline work, not a human decision):
+A `phase=review` check (or, for legacy specs, tagged or not, a `command`/`behavior` check on a `gh pr` target whose output contains `no pull requests found`) is recorded as `DEFERRED (review)` in the PASSED comment: it is never executed here, never counted in `VERIFIED_COUNT`, never sets `GATE_PASS=false`, never enters `FAILED_CHECKS` or `--fix-acceptance`, and never spends the repair. A spec whose checks are all deferred posts PASSED (it is not "No Spec Found"). Review R2.5 evaluates the deferred checks against the real PR and blocks merge on failure. <!-- Added: forge#3793 -->
+
+If `SPEC_DEFECT = true`: leave `needs-human`, print `BUILD_RESULT: status: BLOCKED`, blocker: "regenerate acceptance spec via investigate (spec-defect: no check could be verified)", and do NOT run the repair below.
+
+If `GATE_PASS = false` and `SPEC_DEFECT` is not `true`, the build repairs itself **once** before anything escalates (a failing acceptance check is pipeline work, not a human decision):
 
 1. Count `<!-- FORGE:ACCEPTANCE_REPAIR: issue={NUMBER} -->` comments on the issue. If one already exists, skip to step 4.
 1.5. **Decomposition guard** <!-- Added: forge#3543 -->: read the `### Decomposition Assessment` of the latest FORGE:INVESTIGATOR comment. If it is `**YES**`, a failing check that belongs to a sub-item the assessment assigns to a separate issue (named in the check's `description`/`# item-N` tag, or matching a listed sub-issue title) is NOT repaired: exclude it from the `--fix-acceptance` list. When ambiguous, treat the check as decomposed-out (fail safe). If every remaining failure is decomposed-out, do not invoke implement: leave `needs-human` and print `BUILD_RESULT: status: BLOCKED`, blocker: "acceptance check {ID} belongs to decomposed item {N} — repair refuses to implement work the investigator assigned to a separate issue".

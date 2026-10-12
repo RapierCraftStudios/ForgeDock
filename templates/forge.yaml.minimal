@@ -42,3 +42,12 @@ branches:
   default: "main"
   staging: "staging"
   feature_pattern: "milestone/{slug}"
+
+# =============================================================================
+# DECOMPOSITION (OPTIONAL)
+# Set close_parent: true to close a decomposed parent issue at decomposition
+# (default false: it stays open until its last child closes).
+# =============================================================================
+
+# decomposition:
+#   close_parent: false

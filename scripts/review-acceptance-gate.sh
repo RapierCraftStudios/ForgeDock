@@ -4,13 +4,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Usage: review-acceptance-gate.sh <issue> <gh_repo> "<gh_flag>" <worktree_path>     (DRY_RUN=1 skips gh writes)
-# Evaluates the ACCEPTANCE_CHECK lines the build gate (B6.5) deferred: `phase=review` checks, plus untagged legacy
-# command/behavior checks on a `gh pr` target. Uses its own FORGE:ACCEPTANCE_GATE_REVIEW marker, never the build
+# Evaluates the ACCEPTANCE_CHECK lines the build gate (B6.5) deferred: `phase=review` checks, plus command/behavior
+# checks on a `gh pr` target (B6.5's legacy deferral ignores any phase= tag, so a tagged phase=build one is selected too). Uses its own FORGE:ACCEPTANCE_GATE_REVIEW marker, never the build
 # gate's FORGE:ACCEPTANCE_GATE header or :PASSED/:FAILED/:BLOCKED sentinels (the engine reads those).
 # Malformed checks (forge#3694 parity with B6.5: 4+ backslash run, `bash -n` parse failure, grep usage error) are skipped and listed,
 # never a FAIL and never needs-human. With zero verified checks and some malformed, a non-blocking notice is posted (no PASSED marker).
 # Exit: 0 passed / no-op / notice / already passed for this head, 1 a deferred check failed (issue gets needs-human).
 set -uo pipefail
+# Telemetry (forge#3834): best-effort decision record; never changes stdout, stderr or the exit code.
+_TEL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/telemetry.sh"; [ -f "$_TEL" ] && . "$_TEL" 2>/dev/null
+type forge_emit >/dev/null 2>&1 || forge_emit() { :; }
+[ -z "${DRY_RUN:-}" ] || FORGE_TELEMETRY=off
 
 NUMBER="${1:?issue number}"; GH_REPO="${2:?repo}"; GH_FLAG="${3:-}"; WT="${4:-.}"
 cd "$WT" || exit 2
@@ -42,6 +46,7 @@ if printf '%s' "$LAST" | grep -qF "<!-- FORGE:ACCEPTANCE_GATE_REVIEW:PASSED:${HE
 fi
 
 CHECKS=$(printf '%s\n' "$TRUSTED_INV" | jq -r '.' 2>/dev/null | grep "^ACCEPTANCE_CHECK:")
+GREP_CLS=$(forge_resolve classify-grep-exit.sh) # unresolved = grep exit>=2 stays a real FAIL (fail closed, forge#3802)
 GATE_PASS=true; FAILED=""; VERIFIED_COUNT=0; MALFORMED_CHECKS=""; RESULTS=""
 while IFS= read -r check_line; do
   [ -z "$check_line" ] && continue
@@ -57,12 +62,12 @@ while IFS= read -r check_line; do
   [ "$PHASE" = "review" ] || PHASE=build
   case "$TYPE" in command|behavior) ;; *) [ "$PHASE" = "review" ] || continue ;; esac
   if [ "$PHASE" != "review" ]; then
-    printf '%s\n' "$check_line" | grep -qE ' phase=(build|review)( |$)' && continue
     case "$TARGET" in *'gh pr'*) ;; *) continue ;; esac
   fi
   # malformed-check (forge#3694): static screen only parses (bash -n), never executes.
   MALFORMED=""
   { [ "$TYPE" = "command" ] || [ "$TYPE" = "behavior" ]; } && { case "$TARGET" in *'\\\\'*) MALFORMED="run of 4+ backslashes (over-escaped target)";; esac; [ -n "$MALFORMED" ] || bash -n -c "$TARGET" 2>/dev/null || MALFORMED="shell syntax error (unbalanced quotes)"; }
+  { [ "$TYPE" = "command" ] || [ "$TYPE" = "behavior" ]; } && [ -z "$MALFORMED" ] && case "$(printf '%s' "$TARGET" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" in none) MALFORMED='target "none" is not a command (a manual criterion must be type=skipped)';; esac
   if [ -n "$MALFORMED" ]; then MALFORMED_CHECKS="${MALFORMED_CHECKS}\n- **$ID** ($DESC): $MALFORMED"; continue; fi
   RESULT="PASS"; DETAIL=""
   case "$TYPE" in
@@ -72,12 +77,14 @@ while IFS= read -r check_line; do
     command|behavior)
       if [ "$MATCHER" = "exit_0" ]; then
         ERR=$(eval "$TARGET" 2>&1 >/dev/null); RC=$?
-        # grep exit >= 2 is a usage error, not a verdict; a missing/unreadable operand also exits 2 but stays a real FAIL.
-        [ "$RC" -ge 2 ] && case "$TARGET" in grep\ *|egrep\ *|fgrep\ *) printf '%s' "$ERR" | grep -qE 'No such file or directory|Permission denied|Is a directory' || MALFORMED="grep usage error (exit $RC)";; esac
+        # grep exit >= 2 is a usage error, not a verdict; only a positively identified usage error (classify-grep-exit.sh) is malformed; a missing operand stays a real FAIL even with stderr suppressed.
+        [ "$RC" -ge 2 ] && MALFORMED=$(bash "$GREP_CLS" "$RC" "$ERR" "$TARGET" 2>/dev/null)
+        [ "$RC" -eq 127 ] && [ -z "$MALFORMED" ] && printf '%s' "$ERR" | grep -qF 'command not found' && MALFORMED="command not found (rc 127): the target is not an executable command"
         [ "$RC" -eq 0 ] || [ -n "$MALFORMED" ] || { RESULT="FAIL"; DETAIL="command exited non-zero: $TARGET"; }
       else
-        OUTPUT=$(eval "$TARGET" 2>&1); RC=$?; ERR="$OUTPUT"
-        [ "$RC" -ge 2 ] && case "$TARGET" in grep\ *|egrep\ *|fgrep\ *) printf '%s' "$ERR" | grep -qE 'No such file or directory|Permission denied|Is a directory' || MALFORMED="grep usage error (exit $RC)";; esac
+        ERRF=$(mktemp); OUTPUT=$(eval "$TARGET" 2>"$ERRF"); RC=$?; ERR=$(cat "$ERRF"); rm -f "$ERRF"; [ -z "$ERR" ] || OUTPUT="${OUTPUT}${OUTPUT:+$'\n'}${ERR}" # classify on stderr only, match on both
+        [ "$RC" -ge 2 ] && MALFORMED=$(bash "$GREP_CLS" "$RC" "$ERR" "$TARGET" 2>/dev/null)
+        [ "$RC" -eq 127 ] && [ -z "$MALFORMED" ] && printf '%s' "$ERR" | grep -qF 'command not found' && MALFORMED="command not found (rc 127): the target is not an executable command"
         if [ -n "$MALFORMED" ]; then :
         else
           printf '%s\n' "$OUTPUT" | grep -qE "$MATCHER" || printf '%s\n' "$OUTPUT" | grep -qF -- "$MATCHER" \
@@ -95,6 +102,8 @@ done <<< "$CHECKS"
 MALFORMED_SECTION=""
 [ -n "$MALFORMED_CHECKS" ] && MALFORMED_SECTION=$(printf '\n**malformed-check (not counted as failures; regenerate the acceptance spec by re-running investigate)**:%b\n' "$MALFORMED_CHECKS")
 
+_nf=$(printf '%b' "$FAILED" | grep -c '^- ' || true); _nm=$(printf '%b' "$MALFORMED_CHECKS" | grep -c '^- ' || true)
+FORGE_REPO="${FORGE_REPO:-$GH_REPO}" FORGE_ISSUE="${FORGE_ISSUE:-$NUMBER}" forge_emit acceptance_gate phase=review verified="$VERIFIED_COUNT" failed="${_nf:-0}" malformed="${_nm:-0}" deferred=$((VERIFIED_COUNT + ${_nm:-0}))
 if [ "$VERIFIED_COUNT" -eq 0 ] && [ -z "$MALFORMED_CHECKS" ]; then
   echo "No deferred acceptance checks; R2.5 is a no-op."
 elif [ "$VERIFIED_COUNT" -eq 0 ]; then

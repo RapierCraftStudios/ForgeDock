@@ -122,14 +122,18 @@ if [ "$PRIOR_ROUTES" -gt 0 ]; then
   IS_REENTRY=1
   echo "Re-entry detected: $PRIOR_ROUTES prior review pass(es) on PR #${PR_NUMBER}"
 
+  # Anchored post-filter: keep a search hit only if its title ends `PR #N)` or its body has a
+  # `**Source**: PR #N` line. Hidden markers (issue-create-token, etc.) never count as references.
+  FINDING_PR_FILTER='[.[] | select((.title | endswith("PR #" + $n + ")")) or ((.body // "") | test("(^|\\n)\\*\\*Source\\*\\*: PR #" + $n + "([^0-9]|$)")))] | .[] | "  - #\(.number): \(.title)"'  # FINDING_PR_FILTER
+
   # Load findings from prior passes that are still open
   PRIOR_OPEN_FINDINGS=$(gh issue list ${GH_FLAG} \
     --label "review-finding" \
     --state open \
     --search "PR #${PR_NUMBER}" \
     --limit 50 \
-    --json number,title,labels \
-    --jq '.[] | "  - #\(.number): \(.title)"' 2>/dev/null || true)
+    --json number,title,labels,body 2>/dev/null \
+    | jq -r --arg n "${PR_NUMBER}" "$FINDING_PR_FILTER" 2>/dev/null || true)  # uses FINDING_PR_FILTER
 
   # Load findings that were resolved (closed) since the last pass
   PRIOR_RESOLVED_FINDINGS=$(gh issue list ${GH_FLAG} \
@@ -137,8 +141,8 @@ if [ "$PRIOR_ROUTES" -gt 0 ]; then
     --state closed \
     --search "PR #${PR_NUMBER}" \
     --limit 50 \
-    --json number,title \
-    --jq '.[] | "  - #\(.number): \(.title)"' 2>/dev/null || true)
+    --json number,title,body 2>/dev/null \
+    | jq -r --arg n "${PR_NUMBER}" "$FINDING_PR_FILTER" 2>/dev/null || true)  # uses FINDING_PR_FILTER
 
   echo "Prior open findings (carry forward): $(echo "$PRIOR_OPEN_FINDINGS" | grep -c '.' || echo 0)"
   echo "Prior resolved findings (exclude from verdict): $(echo "$PRIOR_RESOLVED_FINDINGS" | grep -c '.' || echo 0)"
@@ -192,6 +196,8 @@ REVIEW_SHA_FULL=""
 [ -n "$PR_NUMBER" ] && REVIEW_SHA_FULL=$(gh pr view "$PR_NUMBER" ${GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null || echo "")
 case "$REVIEW_SHA_FULL" in *[!0-9a-f]*|"") REVIEW_SHA_FULL="" ;; *) [ "${#REVIEW_SHA_FULL}" -eq 40 ] || [ "${#REVIEW_SHA_FULL}" -eq 64 ] || REVIEW_SHA_FULL="" ;; esac
 [ -n "$REVIEW_SHA_FULL" ] || echo "WARNING: could not resolve a full head SHA; reviewer trust checks will refuse (fail closed)." >&2
+# Short SHA for the persona slice path (forge-slice-[PR_NUMBER]-[REVIEW_SHA_SHORT]-...): hex-only so a sentinel like n/a or an empty value can never put a / or -- into the path. <!-- Added: forge#3700 -->
+REVIEW_SHA_SHORT=$(printf '%s' "${REVIEW_SHA_FULL:-}" | tr -cd '0-9a-f' | cut -c1-7); [ -n "$REVIEW_SHA_SHORT" ] || REVIEW_SHA_SHORT="unresolved"
 
 if [ -n "$PR_NUMBER" ]; then
   gh pr comment "$PR_NUMBER" ${GH_FLAG} --body "<!-- FORGE:REVIEW_ROUTE mode=staging-deploy spec=review-pr-staging.md sha=${REVIEW_SHA_STAGING} -->"
@@ -200,10 +206,11 @@ else
 fi
 # Persist for later fences (each Bash call is a fresh shell). Remove a stale file from a previous run when nothing resolved.
 _SD="${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}"; mkdir -p "$_SD"
-if [ -n "$PR_NUMBER" ]; then printf '%s\n' "$PR_NUMBER" > "$_SD/staging_pr_number"; else rm -f "$_SD/staging_pr_number"; fi
+FORGE_RUN_KEY="${FORGE_RUN_KEY:-${FORGE_RUN_ID:-${CLAUDE_CODE_SESSION_ID:-${CLAUDE_SESSION_ID:-${CODEX_THREAD_ID:-${OPENCODE_SESSION_ID:-$PPID}}}}}}"; FORGE_RUN_KEY=$(printf '%s' "$FORGE_RUN_KEY" | tr -c 'A-Za-z0-9_-' '_')
+if [ -n "$PR_NUMBER" ]; then printf '%s\n' "$PR_NUMBER" > "$_SD/staging_pr_number.${FORGE_RUN_KEY}"; else rm -f "$_SD/staging_pr_number.${FORGE_RUN_KEY}"; fi
 ```
 
-`$PR_NUMBER` is now set for all downstream phases that conditionally post gate comments to the PR. It is also persisted to `$_SD/staging_pr_number`, because every Bash call is a fresh shell. Every fence that consumes cross-fence state (`PR_NUMBER`, `ALL_PR_NUMBERS`, `GH_REPO`, branch names) begins with the `# FENCE_BOOTSTRAP` stub, which sources `scripts/lib/fence-bootstrap.sh` (via `scripts/lib/forge-resolve.sh`) to re-derive it and exits 1 when the helper is unresolvable; `scripts/review-pr-staging-scope.test.sh` fails if a consuming fence omits it. The Phase 6.5 gate result and the Phase 6.75 launched-agent list are persisted to `$_SD` by their producers and reloaded (validated) by their consumers.
+`$PR_NUMBER` is now set for all downstream phases that conditionally post gate comments to the PR. It is also persisted to the run-keyed pointer `$_SD/staging_pr_number.${FORGE_RUN_KEY}`, because every Bash call is a fresh shell and concurrent runs share `$_SD`. `FORGE_RUN_KEY` is a pre-exported `FORGE_RUN_KEY`, else `FORGE_RUN_ID` or the first available session id (Claude Code, Codex, OpenCode), else `$PPID` (best-effort, may not be stable across calls); `fence-bootstrap.sh` derives it identically and never falls back to an unkeyed pointer. Every fence that consumes cross-fence state (`PR_NUMBER`, `ALL_PR_NUMBERS`, `GH_REPO`, branch names) begins with the `# FENCE_BOOTSTRAP` stub, which sources `scripts/lib/fence-bootstrap.sh` (via `scripts/lib/forge-resolve.sh`) to re-derive it and exits 1 when the helper is unresolvable; `scripts/review-pr-staging-scope.test.sh` fails if a consuming fence omits it. The Phase 6.5 gate result and the Phase 6.75 launched-agent list are persisted to `$_SD` by their producers and reloaded (validated) by their consumers.
 
 ---
 
@@ -248,14 +255,17 @@ for pr_num in $ALL_PR_NUMBERS; do
 **PR #${pr_num}** has a \`review-degraded\` label and requires a full fresh-context re-review."
   fi
 
-  # Search for open review-finding issues that reference this PR
+  # Search for open review-finding issues that reference this PR. The search is only a coarse
+  # candidate fetch (full-text, tokenized: it also hits hidden markers and longer numbers), so
+  # narrow it with the anchored FINDING_PR_FILTER: title suffix `PR #N)` or a `**Source**: PR #N` line.
+  FINDING_PR_FILTER='[.[] | select((.title | endswith("PR #" + $n + ")")) or ((.body // "") | test("(^|\\n)\\*\\*Source\\*\\*: PR #" + $n + "([^0-9]|$)")))] | .[] | "  - #\(.number): \(.title)"'  # FINDING_PR_FILTER
   OPEN_FINDINGS=$(gh issue list -R {GH_REPO} \
     --label "review-finding" \
     --state open \
     --search "PR #${pr_num}" \
     --limit 20 \
-    --json number,title \
-    --jq ".[] | \"  - #\(.number): \(.title)\"" 2>/dev/null)
+    --json number,title,body 2>/dev/null \
+    | jq -r --arg n "${pr_num}" "$FINDING_PR_FILTER" 2>/dev/null)  # uses FINDING_PR_FILTER
 
   if [ -n "$OPEN_FINDINGS" ]; then
     BLOCKING_FINDINGS="${BLOCKING_FINDINGS}
@@ -744,6 +754,8 @@ fi
 
 Launch domain-specific agents based on which domains have changes. Substitute PR diff commands with staging diff commands.
 
+**Risk-tiered domain panel** <!-- Added: forge#3599 -->: choose the domain agents with `scripts/review-roster.sh` (resolve it with `forge_resolve review-roster.sh`, never from `$PWD`) instead of launching every domain with a change. Every PR in the bundle already had its own review, so this panel only needs to catch cross-PR interactions. Pass the bundle's changed lines (`git diff --numstat "origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH"`, added plus deleted), changed-file count and file list (`--files-file -`), optional `--scores` diff-text signals (omit for none), and `--fix-pr false`; a bundle of 60 lines or fewer runs Security only unless a path trigger fires, a larger one follows the medium and standard tiers, and Auth and Infra run only when auth/session/trust-filter or CI/docker/deploy files are in the bundle. Run the full union when `--thorough` was passed. When the script cannot be resolved or fails, launch the full union (fail toward more agents). Record the tier and reason in the final summary.
+
 **Per-domain diff slices (MANDATORY)**: `protocols.md` tells agents to use a pre-supplied `[DOMAIN_DIFF_SLICE]` and not to re-fetch the diff, so staging MUST supply one — the staging→main diff is the largest diff in the pipeline. Slice the uncapped diff first, then cap each slice at ~100K chars with `truncate_slice` (same order as `commands/review-pr.md` "Domain Diff Slicing"). Compute the slices once, then substitute `[DOMAIN_DIFF_SLICE]` in each persona's prompt before dispatch:
 ```bash
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
@@ -830,7 +842,7 @@ DIFF_SLICE_API=$(truncate_slice "$DIFF_SLICE_API")
 DIFF_SLICE_INFRA=$(truncate_slice "$DIFF_SLICE_INFRA")
 DIFF_SLICE_SCRAPER=$(truncate_slice "$DIFF_SLICE_SCRAPER")
 ```
-For each dispatched persona, substitute `[DOMAIN_DIFF_SLICE]` → its matching `$DIFF_SLICE_*` variable (an empty slice falls back to the full diff, which is then truncated like every other slice). Also substitute `[AGENT_DOMAIN]` → the persona's marker domain (the `{domain}` used in its `FORGE:REVIEW-AGENT` marker), and keep `[PR_NUMBER]` / `[REVIEW_SHA_SHORT]` bound to the staging review's PR number and short head SHA (`staging` as the key when there is no PR number): personas derive their slice path `forge-slice-[PR_NUMBER]-[REVIEW_SHA_SHORT]-[AGENT_DOMAIN].diff` from them. Also substitute `[REVIEW_SHA]` → the literal full head SHA (40 or 64 hex, the orchestrator's Phase -1 `REVIEW_SHA_FULL` value) into the dispatch prompt: a reviewer runs its post fence in a fresh shell, so it MUST NOT reference `${REVIEW_SHA_FULL}` and MUST NOT invent a value; when no full SHA resolved (no PR), omit the `Reviewed-SHA:` line value rather than fabricate one (Phase 7 consumers then fail closed). Agents never run a full `gh pr diff`; only `--name-only` is allowed. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure.
+For each dispatched persona, substitute `[DOMAIN_DIFF_SLICE]` → its matching `$DIFF_SLICE_*` variable (an empty slice falls back to the full diff, which is then truncated like every other slice). Also substitute `[AGENT_DOMAIN]` → the persona's marker domain (the `{domain}` used in its `FORGE:REVIEW-AGENT` marker), and bind `[PR_NUMBER]` to the staging review's PR number (`staging` when there is none) and `[REVIEW_SHA_SHORT]` to the literal Phase -1 `REVIEW_SHA_SHORT` value (hex, or `unresolved`; never `REVIEW_SHA_STAGING`, whose `n/a` sentinel would put a `/` in the path): personas derive their slice path `forge-slice-[PR_NUMBER]-[REVIEW_SHA_SHORT]-[AGENT_DOMAIN].diff` from them. Also substitute `[REVIEW_SHA]` → the literal full head SHA (40 or 64 hex, the orchestrator's Phase -1 `REVIEW_SHA_FULL` value) into the dispatch prompt: a reviewer runs its post fence in a fresh shell, so it MUST NOT reference `${REVIEW_SHA_FULL}` and MUST NOT invent a value; when no full SHA resolved (no PR), omit the `Reviewed-SHA:` line value rather than fabricate one (Phase 7 consumers then fail closed). Agents never run a full `gh pr diff`; only `--name-only` is allowed. Agents: General Security (always), Auth, Billing, Concurrency, Scraper, API Design, Database, Infrastructure.
 
 **MANDATORY — each domain agent MUST persist its finalized body before posting its findings directly to the PR immediately upon completion** (not batched by the orchestrator). It MUST return verdict, finding count, and one line per finding to the orchestrator independently of delivery; if posting fails, return the durable file path and stop without retrying:
 ```bash
@@ -904,8 +916,10 @@ TEST_GATE_REASON="Phase 6.5 not yet run"
 # ALL_PR_NUMBERS is the de-duplicated union of both scan methods (commit log + merge subjects)
 GATE_OUTPUT=$(Skill("{FORGE_SKILL_PREFIX}test-gate", "--prs \"$(echo $ALL_PR_NUMBERS | tr '\n' ' ' | xargs)\" --base $DEFAULT_BRANCH"))
 
-# Extract machine-readable verdict from Skill output
-TEST_GATE_VERDICT=$(echo "$GATE_OUTPUT" | grep -oP '(?<=FORGE:TEST_GATE:RESULT=)(BLOCK|PASS|SKIP)' | tail -1 || echo "SKIP")
+# Extract machine-readable verdict from Skill output. An absent/invalid marker stays EMPTY (never coerced to SKIP):
+# the verdict-handling fence treats an empty verdict as missing/invalid and fails closed under blocking posture.
+TEST_GATE_VERDICT=$(echo "$GATE_OUTPUT" | grep -oE 'FORGE:TEST_GATE:RESULT=(BLOCK|PASS|SKIP)' | sed 's/^FORGE:TEST_GATE:RESULT=//' | tail -1)
+[ -n "$TEST_GATE_VERDICT" ] || TEST_GATE_REASON="gate result missing/invalid (no FORGE:TEST_GATE:RESULT marker in /test-gate output)"
 
 echo "Test-gate verdict: ${TEST_GATE_VERDICT}"
 # Persist the gate result: every Bash call is a fresh shell, and the verdict-handling fence and Phase 8 read it back (validated on reload).
@@ -923,6 +937,18 @@ OVERRIDE_PHRASE=$(yq '.verification.test_gate.override_phrase // "OVERRIDE: ship
 # Reload the Phase 6.5 gate result persisted by its producer (validated: only a known verdict reaches a gate decision).
 [ -n "${TEST_GATE_VERDICT:-}" ] || { [ -r "$_SD/${PR_NUMBER}_test_gate_verdict" ] && TEST_GATE_VERDICT=$(sed -n -E '1{/^(BLOCK|PASS|SKIP)$/p;q}' "$_SD/${PR_NUMBER}_test_gate_verdict"); }
 [ -n "${TEST_GATE_REASON:-}" ] || { [ -r "$_SD/${PR_NUMBER}_test_gate_reason" ] && TEST_GATE_REASON=$(sed -n 1p "$_SD/${PR_NUMBER}_test_gate_reason" | tr -d '\r\000-\037' | cut -c1-400); }
+# Fail closed: a missing, empty, or unrecognised verdict is never a SKIP. Normalize it to BLOCK so the BLOCK arm applies
+# the override check, advisory/blocking posture, and exit 1; GATE_VERDICT_INVALID makes the reasons say missing/invalid.
+GATE_VERDICT_INVALID=0
+case "${TEST_GATE_VERDICT:-}" in
+  BLOCK|PASS|SKIP) ;;
+  *)
+    GATE_VERDICT_INVALID=1
+    if [ -r "$_SD/${PR_NUMBER}_test_gate_verdict" ]; then _GV_WHY="persisted verdict file present but empty/invalid"; else _GV_WHY="persisted verdict file missing"; fi
+    echo "⚠️  Test gate: gate result missing/invalid (${_GV_WHY}) — treating as BLOCK, not SKIP."
+    TEST_GATE_VERDICT="BLOCK"
+    ;;
+esac
 case "$TEST_GATE_VERDICT" in
 
   SKIP)
@@ -973,15 +999,18 @@ case "$TEST_GATE_VERDICT" in
       echo "   Proceeding with deploy. Override is logged in Phase 8 summary."
       TEST_GATE_VERDICT="PASS"
       TEST_GATE_REASON="BLOCK downgraded to PASS by override: ${OVERRIDE_REASON}"
+      [ "$GATE_VERDICT_INVALID" = 1 ] && TEST_GATE_REASON="BLOCK (gate result missing/invalid) downgraded to PASS by override: ${OVERRIDE_REASON}"
 
     elif [ "$GATE_POSTURE" = "advisory" ]; then
       echo "⚠️  Test gate: BLOCK (advisory posture) — runtime failures detected but deploy is NOT prevented."
       echo "   Switch verification.test_gate.posture to 'blocking' in forge.yaml to enforce this gate."
       TEST_GATE_REASON="BLOCK (advisory) — runtime failures detected; deploy allowed by advisory posture"
+      [ "$GATE_VERDICT_INVALID" = 1 ] && TEST_GATE_REASON="BLOCK (advisory) — gate result missing/invalid; deploy allowed by advisory posture"
 
     else
       # blocking posture (default) — STOP
       echo "⛔ DEPLOY BLOCKED — /test-gate returned BLOCK verdict."
+      [ "$GATE_VERDICT_INVALID" = 1 ] && echo "   (gate result missing/invalid — failing closed; re-run /test-gate or post the override comment)"
       echo ""
       echo "Runtime failures were detected in the staging→${DEFAULT_BRANCH} bundle."
       echo "The failures were batch-introduced (not pre-existing on ${DEFAULT_BRANCH} baseline)."
@@ -1006,7 +1035,7 @@ case "$TEST_GATE_VERDICT" in
 
 ### What Happened
 
-\`/test-gate\` detected runtime failures in the staging→\`${DEFAULT_BRANCH}\` bundle that were NOT present on the \`${DEFAULT_BRANCH}\` baseline. These are batch-introduced regressions.
+\`/test-gate\` detected runtime failures in the staging→\`${DEFAULT_BRANCH}\` bundle that were NOT present on the \`${DEFAULT_BRANCH}\` baseline. These are batch-introduced regressions. (If the gate result was missing/invalid, no verdict could be read and the gate failed closed; re-run \`/test-gate\`.)
 
 \`/test-gate\` has filed \`test-failure\` issues for each failing cluster — check the issue tracker for details.
 
@@ -1020,15 +1049,17 @@ To override (ship known failures with documented reason), post a comment contain
 
 <!-- FORGE:GATE_FAILURE:TYPE=test-gate|BUNDLE=$(echo $ALL_PR_NUMBERS | tr '\n' ' ' | xargs) -->" 2>/dev/null || true
       fi
-      printf '%s\n' "$TEST_GATE_VERDICT" > "$_SD/${PR_NUMBER}_test_gate_verdict"; printf '%s\n' "BLOCK (blocking posture, no override)" > "$_SD/${PR_NUMBER}_test_gate_reason"
+      _GV_REASON="BLOCK (blocking posture, no override)"; [ "$GATE_VERDICT_INVALID" = 1 ] && _GV_REASON="BLOCK (gate result missing/invalid; blocking posture, no override)"
+      printf '%s\n' "$TEST_GATE_VERDICT" > "$_SD/${PR_NUMBER}_test_gate_verdict"; printf '%s\n' "$_GV_REASON" > "$_SD/${PR_NUMBER}_test_gate_reason"
       exit 1
     fi
     ;;
 
   *)
-    echo "⚠️  Test gate: unrecognised verdict '${TEST_GATE_VERDICT}' — treating as SKIP."
-    TEST_GATE_VERDICT="SKIP"
-    TEST_GATE_REASON="SKIP — unrecognised verdict from /test-gate (treated as SKIP)"
+    # Unreachable (normalized above); fail closed regardless — never SKIP.
+    echo "⛔ Test gate: gate result missing/invalid ('${TEST_GATE_VERDICT}') — failing closed."
+    printf '%s\n' "BLOCK" > "$_SD/${PR_NUMBER}_test_gate_verdict"; printf '%s\n' "BLOCK (gate result missing/invalid)" > "$_SD/${PR_NUMBER}_test_gate_reason"
+    exit 1
     ;;
 
 esac
@@ -1170,15 +1201,25 @@ if [ -z "$CLASSIFY_SCRIPT" ]; then
   echo "REVIEW_RESULT: status: BLOCKED, blocker: classifier unavailable (classify-finding.sh not resolvable through the trusted resolver)"
   exit 0
 fi
+# Per-review cap (#3642): same resolver, same fail-closed rule.
+CAP_SCRIPT=$(forge_resolve cap-findings.sh)
+if [ -z "$CAP_SCRIPT" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: cap helper unavailable (cap-findings.sh not resolvable through the trusted resolver)"
+  exit 0
+fi
+# review.max_filed_findings (optional; helper default 2, falls back on invalid)
+MAX_FILED_FINDINGS=$(yq '.review.max_filed_findings // ""' forge.yaml 2>/dev/null || echo '')
 # Per-finding inputs come from each structured block: FINDING_ID, FINDING_SEVERITY, FINDING_CONFIDENCE, FINDING_AGENT, FINDING_TITLE, FINDING_BODY,
 # FINDING_FILE (primary) and FINDING_PATHS (newline-separated, every cited file). Run THIS WHOLE BLOCK in ONE Bash call, looping over every deduped finding
 # (init once, then classify_one per finding, then the disposition record), because counters and the note list live in shell state and a fresh shell loses them.
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
 . "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
 # An empty PR_NUMBER would key every scratch file as "_notes.md" / "_scope.env" and the disposition record could not be posted: stop and report it.
-[ -n "${PR_NUMBER:-}" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: PR_NUMBER unavailable (Phase -1 did not persist staging_pr_number); FORGE:NOTE_DISPOSITION cannot be recorded"; exit 0; }
+[ -n "${PR_NUMBER:-}" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: PR_NUMBER unavailable (Phase -1 did not persist the run-keyed staging_pr_number pointer); FORGE:NOTE_DISPOSITION cannot be recorded"; exit 0; }
 NOTE_LIST_FILE="$_SD/${PR_NUMBER}_notes.md"; : > "$NOTE_LIST_FILE"
-NOTES_LISTED=0; NOTES_DROPPED=0; FINDINGS_FILED=0; OUT_OF_SCOPE=0
+NOTES_LISTED=0; NOTES_DROPPED=0; FINDINGS_FILED=0; OUT_OF_SCOPE=0; NOTES_CAPPED=0
+CAP_ROWS_FILE="$_SD/${PR_NUMBER}_cap-rows.tsv"; : > "$CAP_ROWS_FILE"   # ISSUE rows awaiting the cap
+CAPPED_IDS_FILE="$_SD/${PR_NUMBER}_capped-ids.txt"; : > "$CAPPED_IDS_FILE"   # capped ids: 7E/7F skip them
 # 0B.1 results were written to a scope file by the Phase 0B.1 block; a missing or unreadable file means SCOPE_MODE=full (no demotion, fail open), announced rather than silent.
 SCOPE_MODE=full; CROSS_PR_FILES=""; UNREVIEWED_FILES=""; DEPLOY_WIRING_FILES=""
 if [ -r "$_SD/${PR_NUMBER}_scope.env" ]; then . "$_SD/${PR_NUMBER}_scope.env"; else echo "WARNING: $_SD/${PR_NUMBER}_scope.env unreadable: SCOPE_MODE=full (no out-of-scope demotion)"; fi
@@ -1273,15 +1314,33 @@ classify_one() {
   case "$DISPOSITION" in
     "NOTE reflag"*) NOTES_REFLAG=$((NOTES_REFLAG+1)); printf '%s\n' "- ${FINDING_ID:-?} ${FINDING_FILE:-?} [${SEV:-?}] ${FINDING_TITLE:-}: ${DISPOSITION}" >> "$NOTE_LIST_FILE" ;;   # counted in notes_reflag only
     NOTE*) NOTES_LISTED=$((NOTES_LISTED+1)); printf '%s\n' "- ${FINDING_ID:-?} ${FINDING_FILE:-?} [${SEV:-?}] ${FINDING_TITLE:-}: ${DISPOSITION}" >> "$NOTE_LIST_FILE" ;;
-    *) FINDINGS_FILED=$((FINDINGS_FILED+1)) ;;   # classified ISSUE; 7E dedup may still skip creation
+    *) [ -n "${CAP_ROWS_FILE:-}" ] && printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${FINDING_ID:--}" "${SEV:--}" "${FINDING_CONFIDENCE:--}" "$DISPOSITION" "${FINDING_AGENT:--}" "${FINDING_FILE:--}" "$(printf '%s' "${FINDING_TITLE:--}" | tr '\t\n' '  ')" >> "$CAP_ROWS_FILE" ;; # ISSUE: counted by cap_pass after the cap
   esac
 }
-# for each deduped finding: set the FINDING_* inputs, call classify_one, then use $DISPOSITION (ISSUE continues to 7E/7F).
+cap_pass() {
+  # #3642: run ONCE after the last classify_one, before 7E; sets FINDINGS_FILED (post-cap) and NOTES_CAPPED.
+  local _out="$_SD/${PR_NUMBER}_cap-out.tsv" _total
+  FINDINGS_FILED=0; NOTES_CAPPED=0; : > "$CAPPED_IDS_FILE"
+  [ -s "$CAP_ROWS_FILE" ] || return 0
+  _total=$(grep -c . "$CAP_ROWS_FILE")
+  # Helper failure keeps every ISSUE (fail toward filing).
+  if ! bash "$CAP_SCRIPT" --lineage none ${MAX_FILED_FINDINGS:+--cap "$MAX_FILED_FINDINGS"} --input "$CAP_ROWS_FILE" > "$_out" 2>/dev/null || ! grep -q '^CAPPED=' "$_out"; then
+    FINDINGS_FILED="$_total"; echo "WARNING: cap-findings.sh failed: all $_total ISSUE findings kept"; return 0
+  fi
+  NOTES_CAPPED=$(sed -n 's/^CAPPED=//p' "$_out" | tail -n 1); NOTES_CAPPED="${NOTES_CAPPED:-0}"
+  awk -F'\t' -v ids="$CAPPED_IDS_FILE" 'NR == FNR { if ($0 !~ /^CAPPED=/) o[++n] = $2; next }   # allowlist:positional-arg (awk fields)
+    { k++; if (o[k] == "NOTE capped") { printf "%s\n", $1 > ids; printf "- %s %s [%s] %s: NOTE capped (over review.max_filed_findings)\n", $1, $6, $2, $7 } }' "$_out" "$CAP_ROWS_FILE" >> "$NOTE_LIST_FILE"   # allowlist:positional-arg (awk fields)
+  FINDINGS_FILED=$((_total - NOTES_CAPPED))
+  echo "cap_pass: findings_filed=$FINDINGS_FILED notes_capped=$NOTES_CAPPED"
+}
+# per deduped finding: set FINDING_*, call classify_one; then cap_pass ONCE. Ids in $CAPPED_IDS_FILE are capped NOTEs: skip them in 7E/7F.
 ```
 
-If the guard printed `REVIEW_RESULT: status: BLOCKED` (`classifier unavailable`), STOP: `exit 0` only ends that Bash block, so do not run 7E/7F or any later phase, file no issues, emit no deploy approval, and report `RESULT: BLOCK DEPLOY` with the blocker.
+If the guard printed `REVIEW_RESULT: status: BLOCKED` (`classifier unavailable` or `cap helper unavailable`), STOP: `exit 0` only ends that Bash block, so do not run 7E/7F or any later phase, file no issues, emit no deploy approval, and report `RESULT: BLOCK DEPLOY` with the blocker.
 
-Only `ISSUE` findings continue to 7E/7F. Each `NOTE` is listed in the PR body (`## Non-blocking notes`, edit never replace) or dropped as a duplicate or nit; NOTEs are NEVER passed to `Skill(issue)`. Post one disposition record (counts only plus the NOTE list; every NOTE is recorded, never silently dropped), whenever 7A extracted at least one finding:
+**Per-review cap** <!-- Added: forge#3642 -->: `cap_pass` (once, before 7E) runs `scripts/cap-findings.sh`: at most `review.max_filed_findings` ISSUEs (default 2) are kept, ranked by severity, confidence, safety domain. The overflow is a listed `NOTE capped` (counted in `notes_capped`, never filed or dropped); HIGH/CRITICAL are never capped.
+
+Only `ISSUE` findings that are not in `CAPPED_IDS_FILE` continue to 7E/7F. Each `NOTE` is listed in the PR body (`## Non-blocking notes`, edit never replace) or dropped as a duplicate or nit; NOTEs are NEVER passed to `Skill(issue)`. Post one disposition record (counts only plus the NOTE list; every NOTE is recorded, never silently dropped), whenever 7A extracted at least one finding:
 
 ```bash
 CLASSIFIER_MODE=script   # the 7B.5 guard blocks the review when the classifier is unresolvable, so this is always script
@@ -1292,10 +1351,11 @@ if [ -z "${PR_NUMBER:-}" ]; then
   echo "REVIEW_RESULT: status: BLOCKED, blocker: PR_NUMBER unavailable; FORGE:NOTE_DISPOSITION not posted (record lost)"
 else
 NOTE_LIST_FILE="${NOTE_LIST_FILE:-$_SD/${PR_NUMBER}_notes.md}"
-[ -n "${NOTES_LISTED:-}" ] || { NOTES_LISTED=$(grep -c '^- ' "$NOTE_LIST_FILE" 2>/dev/null || true); echo "WARNING: classification counters lost (fresh shell): notes_listed recomputed from $NOTE_LIST_FILE; set SCOPE_MODE, FINDINGS_FILED, OUT_OF_SCOPE and NOTES_REFLAG from the 7B.5 block output before posting"; }
+[ -n "${NOTES_LISTED:-}" ] || { NOTES_LISTED=$(grep -v ': NOTE capped (' "$NOTE_LIST_FILE" 2>/dev/null | grep -c '^- ' || true); echo "WARNING: classification counters lost (fresh shell): notes_listed recomputed from $NOTE_LIST_FILE; set SCOPE_MODE, FINDINGS_FILED, OUT_OF_SCOPE, NOTES_REFLAG and NOTES_CAPPED from the 7B.5 block output before posting"; }
+[ -n "${NOTES_CAPPED:-}" ] || NOTES_CAPPED=$(grep -c ': NOTE capped (' "$NOTE_LIST_FILE" 2>/dev/null || true)
 [ -n "${SCOPE_MODE:-}" ] || { SCOPE_MODE=full; echo "WARNING: SCOPE_MODE lost (fresh shell): recording scope=full"; }
 _DISP_BODY="$_SD/${PR_NUMBER}_note_disposition.md"
-{ printf '%s\n' "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=0 notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} out_of_scope=${OUT_OF_SCOPE:-0} notes_reflag=${NOTES_REFLAG:-0} lineage=none classifier=${CLASSIFIER_MODE} scope=${SCOPE_MODE} -->"; cat "$NOTE_LIST_FILE" 2>/dev/null; } > "$_DISP_BODY"
+{ printf '%s\n' "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=0 notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} out_of_scope=${OUT_OF_SCOPE:-0} notes_reflag=${NOTES_REFLAG:-0} notes_capped=${NOTES_CAPPED:-0} lineage=none classifier=${CLASSIFIER_MODE} scope=${SCOPE_MODE} -->"; cat "$NOTE_LIST_FILE" 2>/dev/null; } > "$_DISP_BODY"
 gh pr comment "$PR_NUMBER" -R "$GH_REPO" --body-file "$_DISP_BODY" # allowlist:check-command-side-effects
 fi
 ```
@@ -1537,6 +1597,23 @@ If `TEST_GATE_VERDICT` is `PASS`, note it as a positive signal:
 If `TEST_GATE_VERDICT` is `BLOCK` and Phase 8 was reached (advisory posture or override active), note it as a risk:
 
 > **Test Gate: BLOCK (override/advisory)** — Runtime failures were detected but deploy is proceeding. Reason: `${TEST_GATE_REASON}`. Filed `test-failure` issues track the failures.
+
+**Pipeline cost** (fail-soft, informational; never changes the verdict) <!-- Added: forge#3824 -->: add a "Pipeline cost" table from `scripts/cost-report.sh` (current version vs the previous two). An unresolvable script or an empty runs dir omits the table.
+
+```bash
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+COST_SCRIPT=$(forge_resolve cost-report.sh)
+[ -n "$COST_SCRIPT" ] && bash "$COST_SCRIPT" --last 3 2>/dev/null || echo "Pipeline cost: unavailable"
+```
+
+**Pipeline stats** (fail-soft, informational; never changes the verdict or any `FORGE:GATE_*` marker; additive to the cost table above) <!-- Added: forge#3835 -->: embed the compact `forgedock stats` table (per version: cost, merged / needs-human / remediation rates, wall time, findings per review, acceptance block rate, delta vs the previous version). A missing CLI, no `gh` auth or no data omits the table.
+
+```bash
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+. "$(forge_resolve lib/fence-bootstrap.sh)" || { echo "BLOCKED: ForgeDock helper lib/fence-bootstrap.sh not resolvable"; exit 1; }   # FENCE_BOOTSTRAP
+STATS_OUT=$(forgedock stats --compact --repo "${GH_REPO}" 2>/dev/null || npx --no-install forgedock stats --compact --repo "${GH_REPO}" 2>/dev/null) || STATS_OUT=""
+[ -n "$STATS_OUT" ] && printf '%s\n' "$STATS_OUT" || echo "Pipeline stats: unavailable"
+```
 
 **CRITICAL**: This review NEVER merges staging → main. User makes deploy decision via GitHub web UI.
 

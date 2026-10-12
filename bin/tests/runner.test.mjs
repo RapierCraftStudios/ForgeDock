@@ -3946,6 +3946,16 @@ describe("per-command CLI model/max-turns (forge#3589)", () => {
     assert.equal(r.model, "cli");
   });
 
+  it("forge#3696: surfaces envelope total_cost_usd / duration_ms; null when absent or non-finite", () => {
+    const spawn = (env) => () => ({ status: 0, stdout: JSON.stringify(env), stderr: "" });
+    const a = runCliBackend({ ...base(), spawnFn: spawn({ result: "ok", total_cost_usd: 0.42, duration_ms: 1234 }) });
+    assert.equal(a.costUsd, 0.42);
+    assert.equal(a.durationMs, 1234);
+    const b = runCliBackend({ ...base(), spawnFn: spawn({ result: "ok", total_cost_usd: "x" }) });
+    assert.equal(b.costUsd, null);
+    assert.equal(b.durationMs, null);
+  });
+
   it("drops invalid model / max_turns values instead of forwarding them", () => {
     const a = {};
     runCliBackend({ ...base(), model: "bad model; rm -rf", maxTurns: "-3", spawnFn: okSpawn(a) });

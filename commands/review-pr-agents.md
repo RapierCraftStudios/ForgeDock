@@ -35,6 +35,12 @@ post `FORGE:REVIEW_BLOCKED` and never replace the isolated review with inline wo
 
 ---
 
+## Read-Only Git Rule (all reviewer agents)
+
+Every reviewer agent is read-only with respect to the main checkout (the repo's shared primary working tree). It MUST NOT run `git checkout`, `git switch`, `git reset`, `git stash`, or `git merge` there: those race with the operator and other agents. Read PR code with `git show <sha>:<path>`, `gh pr diff`, `gh api`, or a per-PR worktree (`git worktree add --detach`) that the agent removes afterward. The orchestrator appends this rule to every dispatched prompt (review-pr.md Phase 3C). <!-- Added: forge#3650 -->
+
+---
+
 ## How to Load Agents (Phase 3C)
 
 For each agent selected in Phase 3B, read **only** the files relevant to that agent:
@@ -49,14 +55,16 @@ For each agent selected in Phase 3B, read **only** the files relevant to that ag
 | Agent | Trigger | Marker domain | File |
 |-------|---------|---------------|------|
 | General Security & Quality Scan | ALWAYS RUNS | `security` | `review-pr-agents/security.md` |
-| Auth Conventions Auditor | AUTH domain | `auth` | `review-pr-agents/auth.md` |
+| Auth Conventions Auditor | Auth/session/trust-filter files changed (path-gated) | `auth` | `review-pr-agents/auth.md` |
 | Billing Integrity Auditor | BILLING domain | `billing` | `review-pr-agents/billing.md` |
 | Concurrency & Race Condition Auditor | CONCURRENCY or BILLING domain | `concurrency` | `review-pr-agents/concurrency.md` |
 | Domain Logic Auditor | SCRAPING domain (requires `review.domains.scraping` in forge.yaml) | `scraper` | `review-pr-agents/scraper.md` |
 | Frontend Quality Auditor | WEB service touched | `frontend` | `review-pr-agents/frontend.md` |
 | API Design & Consistency Auditor | New/modified routers or SDK/OpenAPI files | `api` | `review-pr-agents/api.md` |
 | Database & Migration Auditor | DATABASE domain | `database` | `review-pr-agents/database.md` |
-| Infrastructure & Deploy Safety Auditor | INFRA service touched | `infra` | `review-pr-agents/infra.md` |
+| Infrastructure & Deploy Safety Auditor | Docker, CI, deploy or infra files changed (path-gated) | `infra` | `review-pr-agents/infra.md` |
+
+The table is applied by `scripts/review-roster.sh` (Phase 3B Step 4), which tiers the roster by diff size and fix-PR lineage: small and fix PRs run Security only unless a path trigger fires, and Auth and Infra are selected by file path, never by diff-text score. `--thorough` and milestone-to-staging always run the full union. The tier and reason are recorded in `FORGE:REVIEW_TIER`.
 
 ## Domain Prefixes (for Structured Findings)
 

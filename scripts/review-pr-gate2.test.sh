@@ -93,5 +93,20 @@ for p in infra security scraper; do
   if [ "$reads" -ge 1 ] && [ "$reads" = "$decls" ]; then ok; else bad "$p.md: $reads fences read SLICE_FILE, $decls re-declare it"; fi
 done
 
+# Staging slice path: every placeholder must be bound, and an unresolved SHA must yield a slash-free component.
+STAGING_SPEC="$ROOT/commands/review-pr-staging.md"
+if grep -qE '^REVIEW_SHA_SHORT=.*tr -cd .*unresolved' "$STAGING_SPEC"; then ok; else bad "staging spec does not define a hex-sanitized REVIEW_SHA_SHORT with an unresolved fallback"; fi
+if grep -qF 'Phase -1 `REVIEW_SHA_SHORT`' "$STAGING_SPEC"; then ok; else bad "staging dispatch text does not bind [REVIEW_SHA_SHORT] to Phase -1 REVIEW_SHA_SHORT"; fi
+SHORT_LINE=$(grep -E '^REVIEW_SHA_SHORT=' "$STAGING_SPEC" | head -n 1)
+for full in "" "n/x" "0123456789abcdef0123456789abcdef01234567"; do
+  got=$(REVIEW_SHA_FULL="$full"; eval "$SHORT_LINE"; printf '%s' "$REVIEW_SHA_SHORT")
+  case "$full" in
+    0123*) want="0123456" ;;
+    *) want="unresolved" ;;
+  esac
+  if [ "$got" = "$want" ]; then ok; else bad "REVIEW_SHA_SHORT for '$full' = '$got' (want '$want')"; fi
+  case "$got" in */*) bad "REVIEW_SHA_SHORT contains a slash for '$full'" ;; *) ok ;; esac
+done
+
 echo "review-pr-gate2.test.sh: passed=$PASS failed=$FAILN"
 [ "$FAILN" -eq 0 ]

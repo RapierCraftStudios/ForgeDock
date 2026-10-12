@@ -1,0 +1,7 @@
+{"seq":1,"event":"RUN_START","issue":2,"run":"r_2_staging","lane":"staging","version":"2.0.0","repo":"o/a"}
+{"seq":2,"event":"PHASE_COMMIT","phase":"investigate","outputs":{},"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":1,"cache_read_input_tokens":10000}}
+{"seq":3,"event":"PHASE_COMMIT","phase":"build","outputs":{},"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":1,"cache_read_input_tokens":200000}}
+{"seq":4,"event":"PHASE_COMMIT","phase":"review","outputs":{},"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":1,"cache_read_input_tokens":300000}}
+{"seq":5,"event":"PHASE_COMMIT","phase":"remediate","outputs":{},"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":1,"cache_read_input_tokens":40000}}
+{"seq":6,"event":"PHASE_COMMIT","phase":"close","outputs":{},"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":1,"cache_read_input_tokens":10000}}
+{"seq":7,"event":"RUN_TERMINAL","reason":"merged"}

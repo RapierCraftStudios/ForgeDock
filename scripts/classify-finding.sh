@@ -11,6 +11,7 @@
 #   classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>]
 #                       [--lineage none|review-finding] [--text <T> | --text-file <F>]
 #                       [--inpr-diff <F> --file <P>] [--contract-scope <F> --contract-open <F> [--pr-files <F>] [--merge-issue <N>]]
+#                       [--fix-efficacy fails|regresses] [--fixes-issue <N>]
 #                       [--prior-findings <F> [--title <T>] [--line-start <N> [--line-end <M>]] [--diff-map <F>]]
 #
 #   --severity    CRITICAL | HIGH | MEDIUM | LOW (case-insensitive). Missing or
@@ -21,6 +22,14 @@
 #   --lineage     `review-finding` when the PR's linked issue (MERGE_ISSUE) carries
 #                 the `review-finding` label — i.e. this PR is itself a fix for a
 #                 review finding. Default `none`.
+#   --fix-efficacy fails|regresses  The finding says the PR's linked issue is not fixed (`fails`) or
+#                 that the PR re-introduces its defect (`regresses`). A MEDIUM finding so marked is
+#                 `ISSUE fix-efficacy-<value>` under any lineage and confidence (the cascade damper must
+#                 not merge a known-broken fix). Without the flag the tag is read from `--text`
+#                 (a line consisting only of `FIX_EFFICACY: fails|regresses` or `**Fix efficacy**: fails|regresses`;
+#                 a mid-sentence mention never counts). Opt-in only: never keyword-based. Runs after the INPR_FIX and re-flag gates and
+#                 before the contract-scope and lineage gates; LOW stays NOTE; HIGH/CRITICAL unchanged.
+#   --fixes-issue <N>  The PR's linked issue; alias of `--merge-issue` (same variable).
 #   --text/--text-file  Finding title + body + affected file paths, used for the
 #                 content-based safety exemption.
 #   --inpr-diff <F> --file <P>  In-PR fix gate (#3387, narrowed): F is a file listing the
@@ -100,6 +109,7 @@ CONTRACT_SCOPE=""
 CONTRACT_OPEN=""
 PR_FILES=""
 MERGE_ISSUE=""
+FIX_EFF=""
 PRIOR_FINDINGS=""
 TITLE=""
 LINE_START=""
@@ -107,7 +117,7 @@ LINE_END=""
 DIFF_MAP=""
 
 usage() {
-  echo "ERROR: Usage: classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>] [--lineage none|review-finding] [--text <T> | --text-file <F>] [--inpr-diff <F> --file <P>] [--contract-scope <F> --contract-open <F> [--pr-files <F>] [--merge-issue <N>]] [--prior-findings <F> [--title <T>] [--line-start <N> [--line-end <M>]] [--diff-map <F>]]" >&2
+  echo "ERROR: Usage: classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>] [--lineage none|review-finding] [--text <T> | --text-file <F>] [--inpr-diff <F> --file <P>] [--contract-scope <F> --contract-open <F> [--pr-files <F>] [--merge-issue <N>]] [--fix-efficacy fails|regresses] [--fixes-issue <N>] [--prior-findings <F> [--title <T>] [--line-start <N> [--line-end <M>]] [--diff-map <F>]]" >&2
   exit 2
 }
 
@@ -124,6 +134,8 @@ while [ "$#" -gt 0 ]; do
     --contract-open)  [ "$#" -ge 2 ] || usage; CONTRACT_OPEN="$2"; shift 2 ;;
     --pr-files)       [ "$#" -ge 2 ] || usage; PR_FILES="$2"; shift 2 ;;
     --merge-issue)    [ "$#" -ge 2 ] || usage; MERGE_ISSUE="${2#\#}"; shift 2 ;;
+    --fixes-issue)    [ "$#" -ge 2 ] || usage; MERGE_ISSUE="${2#\#}"; shift 2 ;;
+    --fix-efficacy)   [ "$#" -ge 2 ] || usage; FIX_EFF=$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]'); shift 2 ;;
     --prior-findings) [ "$#" -ge 2 ] || usage; PRIOR_FINDINGS="$2"; shift 2 ;;
     --title)          [ "$#" -ge 2 ] || usage; TITLE="$2"; shift 2 ;;
     --line-start)     [ "$#" -ge 2 ] || usage; LINE_START="$2"; shift 2 ;;
@@ -140,6 +152,11 @@ done
 case "$LINEAGE" in
   none|review-finding) ;;
   *) echo "ERROR: --lineage must be 'none' or 'review-finding' (got '$LINEAGE')" >&2; exit 2 ;;
+esac
+
+case "$FIX_EFF" in
+  ''|fails|regresses) ;;
+  *) echo "ERROR: --fix-efficacy must be 'fails' or 'regresses' (got '$FIX_EFF')" >&2; exit 2 ;;
 esac
 
 if [ -n "$INPR_DIFF" ] && [ ! -r "$INPR_DIFF" ]; then
@@ -165,10 +182,32 @@ upper() { printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]'; }
 SEV=$(upper "$SEVERITY")
 CONF=$(upper "$CONFIDENCE")
 
+# Telemetry (forge#3834): one best-effort record per finding, then the unchanged stdout line.
+_TEL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/telemetry.sh"; [ -f "$_TEL" ] && . "$_TEL" 2>/dev/null
+type forge_emit >/dev/null 2>&1 || forge_emit() { :; }
+disp() { # "<DISPOSITION> <reason>"
+  forge_emit finding_disposition severity="$SEV" confidence="${CONF:-UNKNOWN}" agent="${AGENT:-none}" disposition="${1%% *}" reason="${1#* }"
+  echo "$1"
+}
+
+# In-PR fix gate predicate (#3387, widened to HIGH/CRITICAL in #3592): CONFIRMED, linked to a
+# --inpr-diff file list, and the finding's file is one of those files. Fails toward ISSUE.
+inpr_match() {
+  [ -n "$INPR_DIFF" ] && [ -n "$FINDING_FILE" ] && [ "$CONF" = "CONFIRMED" ] || return 1
+  _path="${FINDING_FILE#./}"; _path="${_path%%:*}"
+  grep -Fxq -- "$_path" "$INPR_DIFF"
+}
+
 case "$SEV" in
-  CRITICAL|HIGH) echo "ISSUE severity-$SEV"; exit 0 ;;
+  CRITICAL|HIGH)
+    # HIGH/CRITICAL skip the re-flag and safety gates below, so the in-PR check runs here, before
+    # the exit. Everything else stays ISSUE: a HIGH is never demoted to NOTE.
+    if inpr_match; then
+      disp "INPR_FIX $(printf '%s' "$SEV" | tr '[:upper:]' '[:lower:]')-confirmed-in-diff"; exit 0
+    fi
+    disp "ISSUE severity-$SEV"; exit 0 ;;
   MEDIUM|LOW) ;;
-  *) echo "ISSUE unparseable-severity"; exit 0 ;;
+  *) disp "ISSUE unparseable-severity"; exit 0 ;;
 esac
 
 # Cross-head / cross-PR re-flag gate (#3641). Runs after the severity parse so HIGH/CRITICAL and
@@ -236,17 +275,27 @@ if [ -n "$PRIOR_FINDINGS" ] && [ -n "$FINDING_FILE" ]; then
     }
     END { if (!found && note) print note }
   ' "$PRIOR_FINDINGS" 2>/dev/null) || _reflag=""
-  if [ -n "$_reflag" ]; then echo "$_reflag"; exit 0; fi
+  if [ -n "$_reflag" ]; then disp "$_reflag"; exit 0; fi
 fi
 
 # In-PR fix gate (#3387, narrowed). MEDIUM CONFIRMED is an ISSUE under every rule below
 # (lineage included), so checking here changes only where it is handled, never whether.
-if [ -n "$INPR_DIFF" ] && [ -n "$FINDING_FILE" ] && [ "$SEV" = "MEDIUM" ] && [ "$CONF" = "CONFIRMED" ]; then
-  _path="${FINDING_FILE#./}"; _path="${_path%%:*}"
-  if grep -Fxq -- "$_path" "$INPR_DIFF"; then
-    echo "INPR_FIX medium-confirmed-in-diff"
-    exit 0
+# HIGH/CRITICAL were handled in the severity case above.
+if [ "$SEV" = "MEDIUM" ] && inpr_match; then
+  disp "INPR_FIX medium-confirmed-in-diff"
+  exit 0
+fi
+
+# Fix-efficacy exemption: a MEDIUM finding saying the PR's linked issue is not fixed, or that the PR
+# re-introduces its defect, is never damped (any lineage, any confidence, no contract demotion).
+# Opt-in on an explicit flag or a line-anchored tag only; never keyword-based (a bare "regression test for #N" must not match).
+if [ "$SEV" = "MEDIUM" ]; then
+  if [ -z "$FIX_EFF" ]; then
+    FIX_EFF=$(printf '%s' "$TEXT" | tr '[:upper:]' '[:lower:]' \
+      | grep -Eo '^[[:space:]]*(fix_efficacy:|\*\*fix efficacy\*\*:)[[:space:]]*(fails|regresses)[[:space:]]*$' | head -n 1 \
+      | grep -Eo '(fails|regresses)$') || FIX_EFF=""
   fi
+  if [ -n "$FIX_EFF" ]; then disp "ISSUE fix-efficacy-$FIX_EFF"; exit 0; fi
 fi
 
 # Safety exemption. Keywords match whole words, where `_`, `-`, `/` and other
@@ -282,10 +331,10 @@ if [ -n "$CONTRACT_SCOPE" ] && [ -n "$FINDING_FILE" ]; then
         deferred)
           if [ -z "$SAFETY" ] && [ -n "$_inum" ] && [ "$_inum" != "$MERGE_ISSUE" ] \
              && [ -n "$CONTRACT_OPEN" ] && grep -Fxq -- "$_inum" "$CONTRACT_OPEN"; then
-            echo "NOTE contract-deferred #$_inum"; exit 0
+            disp "NOTE contract-deferred #$_inum"; exit 0
           fi ;;
         accepted-risk)
-          if [ -z "$SAFETY" ]; then echo "NOTE contract-accepted-risk"; exit 0; fi ;;
+          if [ -z "$SAFETY" ]; then disp "NOTE contract-accepted-risk"; exit 0; fi ;;
       esac
     done < "$CONTRACT_SCOPE"
   fi
@@ -293,21 +342,21 @@ fi
 
 if [ "$LINEAGE" = "review-finding" ]; then
   if [ "$SEV" = "MEDIUM" ] && { [ "$CONF" = "CONFIRMED" ] || { [ -n "$SAFETY" ] && [ "$CONF" = "LIKELY" ]; }; }; then
-    echo "ISSUE lineage-medium-${CONF:-UNKNOWN}"
+    disp "ISSUE lineage-medium-${CONF:-UNKNOWN}"
   else
-    echo "NOTE lineage-${SEV}-${CONF:-UNKNOWN}"
+    disp "NOTE lineage-${SEV}-${CONF:-UNKNOWN}"
   fi
   exit 0
 fi
 
 if [ "$SEV" = "LOW" ] || [ "$CONF" = "POSSIBLE" ]; then
   if [ -n "$SAFETY" ]; then
-    echo "ISSUE safety-exemption-$SAFETY"
+    disp "ISSUE safety-exemption-$SAFETY"
   else
-    echo "NOTE ${SEV}-${CONF:-UNKNOWN}"
+    disp "NOTE ${SEV}-${CONF:-UNKNOWN}"
   fi
   exit 0
 fi
 
-echo "ISSUE ${SEV}-${CONF:-UNKNOWN}"
+disp "ISSUE ${SEV}-${CONF:-UNKNOWN}"
 exit 0

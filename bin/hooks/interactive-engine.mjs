@@ -66,6 +66,7 @@ import { dirname, join, resolve } from "path";
 import { existsSync, readFileSync } from "fs";
 import { execFileSync } from "child_process";
 import { PHASE_MARKERS as PHASE_MARKER_REGISTRY } from "../../packages/protocol/src/phases.js";
+import { normalizeCode, codeForTerminalReason } from "../engine/outcome-codes.mjs";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -236,11 +237,18 @@ async function main() {
   if (freshLog.length && deriveState(freshLog).committed.includes(phaseId)) return;
 
   if (bootstrapped) {
+    // forge#3824: attribute the run to a release and repo (best-effort; null when unavailable).
+    let version = null, repo = null;
+    try { version = JSON.parse(readFileSync(join(FORGE_HOME, "package.json"), "utf8")).version || null; } catch { /* fail-soft */ }
+    try { repo = String(await io.gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"]) || "").trim() || null; } catch { /* fail-soft */ }
     appendEvent(runLogDir, issueNumber, {
       event: "RUN_START",
       issue: issueNumber,
       run: state.run,
       lane: state.lane,
+      version,
+      forge_version: version,
+      repo,
       source: "interactive",
     });
   }
@@ -258,6 +266,8 @@ async function main() {
     appendEvent(runLogDir, issueNumber, {
       event: "RUN_TERMINAL",
       reason: terminalReason,
+      // forge#3833: same closed enum as the headless engine (absent -> the reason's own code).
+      code: normalizeCode(outcome.code ?? codeForTerminalReason(terminalReason)),
       source: "interactive",
     });
     state = deriveState(readLog(runLogDir, issueNumber));

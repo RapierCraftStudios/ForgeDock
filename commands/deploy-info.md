@@ -56,13 +56,15 @@ else
   # Step 2: Check for open review-finding issues referencing each PR
   OPEN_FINDINGS_SUMMARY=""
   for pr_num in $ALL_PR_NUMBERS; do
+    # Anchored post-filter (same as review-pr-staging.md): the search is a coarse candidate fetch only
+    FINDING_PR_FILTER='[.[] | select((.title | endswith("PR #" + $n + ")")) or ((.body // "") | test("(^|\\n)\\*\\*Source\\*\\*: PR #" + $n + "([^0-9]|$)")))] | .[] | "  - #\(.number): \(.title)"'  # FINDING_PR_FILTER
     OPEN_FINDINGS=$(gh issue list -R {GH_REPO} \
       --label "review-finding" \
       --state open \
       --search "PR #${pr_num}" \
       --limit 20 \
-      --json number,title \
-      --jq ".[] | \"  - #\(.number): \(.title)\"" 2>/dev/null)
+      --json number,title,body 2>/dev/null \
+      | jq -r --arg n "${pr_num}" "$FINDING_PR_FILTER" 2>/dev/null)  # uses FINDING_PR_FILTER
 
     if [ -n "$OPEN_FINDINGS" ]; then
       OPEN_FINDINGS_SUMMARY="${OPEN_FINDINGS_SUMMARY}
@@ -304,13 +306,15 @@ if [ -z "$TRAIN_PR_NUMBER" ]; then
   TRAIN_STATUS="NO_TRAIN — no open staging→main PR. Run /review-pr-staging to open one."
 else
   # Step 2: Check whether the train is held (has blocking findings)
+  # Anchored post-filter (same as review-pr-staging.md): the search is a coarse candidate fetch only
+  FINDING_PR_FILTER='[.[] | select((.title | endswith("PR #" + $n + ")")) or ((.body // "") | test("(^|\\n)\\*\\*Source\\*\\*: PR #" + $n + "([^0-9]|$)")))] | .[] | "  - #\(.number): \(.title)"'  # FINDING_PR_FILTER
   HELD_BY=$(gh issue list {GH_FLAG} \
     --label "review-finding" \
     --state open \
     --search "PR #${TRAIN_PR_NUMBER}" \
     --limit 20 \
-    --json number,title \
-    --jq '[.[] | "#\(.number): \(.title)"] | join("\n")' 2>/dev/null || true)
+    --json number,title,body 2>/dev/null \
+    | jq -r --arg n "${TRAIN_PR_NUMBER}" "$FINDING_PR_FILTER" 2>/dev/null | sed 's/^  - //' || true)  # uses FINDING_PR_FILTER
 
   if [ -n "$HELD_BY" ]; then
     TRAIN_STATUS="HELD"
