@@ -437,7 +437,7 @@ Re-reviewing a head that only moved does not need the whole panel over the whole
 
 Phase 2, the §6B.4 gates (full PR diff at the current head) and the 7B/8 gates run unchanged in every mode.
 
-**Reviewer-comment trust and shape (applies to every check below and in Phase 4)**: a reviewer comment counts only when it is from a trusted author (`scripts/trusted-comments.sh`, the same predicate as the in-PR fix gate and `verify-phase-trail.sh`: trusted association, Bot account, or `FORGE_TRAIL_TRUSTED_LOGINS`), its body **starts with** `<!-- FORGE:REVIEW-AGENT:{domain} -->`, and it carries a line `Reviewed-SHA: ${REVIEW_SHA}` for the current head. The head SHA is public, so the SHA line alone proves nothing: an untrusted commenter must never suppress dispatch or satisfy the panel guard. An unresolved trust script or a non-integer count means **not posted** (fail closed).
+**Reviewer-comment trust and shape (applies to every check below and in Phase 4)**: a reviewer comment counts only when it is from a trusted author (`scripts/trusted-comments.sh`, the same predicate as the in-PR fix gate and `verify-phase-trail.sh`: trusted association, Bot account, or `FORGE_TRAIL_TRUSTED_LOGINS`), its body **starts with** `<!-- FORGE:REVIEW-AGENT:{domain} -->`, it carries a line `Reviewed-SHA: ${REVIEW_SHA}` for the current head, and it carries a `<!-- REVIEW-FINDINGS-START -->` ... `<!-- REVIEW-FINDINGS-END -->` block (empty allowed). A verdict without the block ("APPROVE, no findings") is **undelivered**, never read as clean and never scanned for free-text findings. The head SHA is public, so the SHA line alone proves nothing: an untrusted commenter must never suppress dispatch or satisfy the panel guard. An unresolved trust script or a non-integer count means **not posted** (fail closed).
 
 **Pre-dispatch fence.** For `BASE_SYNC_ONLY` it dispatches zero reviewers and posts the carry record (then go straight to Phase 4). Otherwise it implements **idempotent re-entry**: a re-invoked review reuses reviewers that already posted for the current head, so it prints `PENDING_AGENTS` (the domains of the effective roster with no trusted current-SHA comment; comments for another SHA never count) and the linked issue's `BLAST_RADIUS_MANIFEST` (advisory; any failure prints it empty).
 
@@ -479,7 +479,7 @@ agent_domain() { local l; l=$(printf '%s' "${1}" | tr '[:upper:]' '[:lower:]'); 
 for AGENT in $SELECTED_AGENTS; do
   AGENT_DOMAIN=$(agent_domain "$AGENT"); HAVE=""
   if [ -n "$TRUSTED_SCRIPT" ]; then
-    HAVE=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)" 2>/dev/null || echo "")
+    HAVE=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->)<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)" 2>/dev/null || echo "")
   fi
   case "$HAVE" in ''|*[!0-9]*) HAVE=0 ;; esac   # fail closed: unreadable or untrusted counts as not posted
   [ "$HAVE" -lt 1 ] && PENDING_AGENTS="${PENDING_AGENTS} ${AGENT}"
@@ -548,7 +548,7 @@ Each agent's `[FILE_LIST]` is `slices.<domain>.paths` from the context: the Secu
 
 ## Phase 4: Wait for Agents
 
-Completion is read from GitHub, never from notifications. A reviewer is complete only when a **trusted** comment (3C trust rule) starting with `<!-- FORGE:REVIEW-AGENT:{domain} -->` carries `Reviewed-SHA: <current head>`.
+Completion is read from GitHub, never from notifications. A reviewer is complete only when a **trusted** comment (3C trust rule) starting with `<!-- FORGE:REVIEW-AGENT:{domain} -->` carries `Reviewed-SHA: <current head>` and a findings block (`REVIEW-FINDINGS-START` ... `REVIEW-FINDINGS-END`, empty allowed). A domain whose comment lacks the block is missing: re-dispatch it **once** (3C, with the note "structured findings block required: end your comment with REVIEW-FINDINGS-START/END, empty if no findings"), then re-run this phase; a second miss is a delivery failure and takes the existing degraded-panel hard stop below. Never loop beyond that one re-dispatch.
 
 - **Joined tools** (`Task`, `task`): the reviewers already returned, so one pass decides; anything missing is a delivery failure.
 - **Async `Agent`**: bounded wait, **one poll pass per Bash call** (a call is capped at 120s, 600s max, so one long loop would be killed before the hard stop ran). The first pass records an epoch deadline in a private absolute file keyed by PR and head SHA; every exit removes it and 3C removes it before (re)dispatch, so a re-review never inherits an expired window. Re-run while it prints `PANEL_STATUS: WAITING`.
@@ -590,7 +590,7 @@ agent_domain() { local l; l=$(printf '%s' "${1}" | tr '[:upper:]' '[:lower:]'); 
 for AGENT in $SELECTED_AGENTS; do
   AGENT_DOMAIN=$(agent_domain "$AGENT"); N=""
   if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$COMMENTS_JSON" ]; then
-    N=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)" 2>/dev/null || echo "")
+    N=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->)<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)" 2>/dev/null || echo "")
   fi
   case "$N" in ''|*[!0-9]*) N=0 ;; esac   # fail closed
   if [ "$N" -lt 1 ]; then MISSING_AGENT_COMMENTS="${MISSING_AGENT_COMMENTS} ${AGENT_DOMAIN}"; else ACTUAL_AGENT_COUNT=$(( ACTUAL_AGENT_COUNT + 1 )); fi
@@ -655,7 +655,7 @@ cat "$OUT_DIR/note-list.txt" 2>/dev/null
 
 `extract` reads the trusted synthesized block for the head, else its trusted agent bodies (`BASE_SYNC_ONLY`: the carried head; `DELTA`: this head plus the earlier reviewed one), parses every `<!-- FINDING:... -->` marker (an unparseable marker blocks the review), dedupes by file + line range ±5 and by title (3+ shared keywords, higher confidence wins), and applies the **§6B.4 gates** in order, each keeping the finding when its input is unreadable: (1) **head-SHA**: a cited line past the end of the file at `REVIEW_SHA` is stale and DROPPED (`findings_dropped_stale`); (2) **introduced-line**: a MEDIUM-or-lower finding whose range (±5) misses the PR's added lines is `pre-existing` (**CRITICAL/HIGH are never routed as pre-existing**, whatever their confidence, `protocols.md` §5; input comes from the diff, never a reviewer's `**Scope**` tag; deleted, renamed and patch-less files always intersect); (3) **concrete-failure**: a MEDIUM-or-lower finding without a `**Failure scenario**` becomes a NOTE (`notes_demoted_no_scenario`).
 
-Read `STRUCTURED_FINDINGS`, `FINDINGS_KEPT`, `FINDINGS_DROPPED_STALE`, `FINDINGS_PREEXISTING` and `NOTES_DEMOTED_NO_SCENARIO` for the record and summary. The caller's part of 6A: add the Phase 2.5 `INTEG-N` findings no reviewer covered (CONFIRMED HIGH, so ISSUE, filed in 6C); on `CLEAN_STRUCTURED=true` scan the trusted agent comments for unstructured findings (lines starting "Finding", "Issue", "Bug", "Warning"), and with none and no `INTEG-N` the review is clean: skip to Phase 7. **Pre-existing route**: a pre-existing finding (MEDIUM or lower) is never filed as `review-finding`/`needs-validation` nor linked to this PR (it stays out of findings-per-PR and the amplification ratio); it still passes the §6B.5 classifier, is listed once in the summary, and at most 3 per review (highest severity first) are filed with the `pre-existing` label plus `priority:*`, citing this PR (`preexisting_filed`, not `findings_filed`).
+Read `STRUCTURED_FINDINGS`, `FINDINGS_KEPT`, `FINDINGS_DROPPED_STALE`, `FINDINGS_PREEXISTING` and `NOTES_DEMOTED_NO_SCENARIO` for the record and summary. The caller's part of 6A: add the Phase 2.5 `INTEG-N` findings no reviewer covered (CONFIRMED HIGH, so ISSUE, filed in 6C); findings come only from `FINDING:` markers, never from free text. If `AGENTS_WITHOUT_BLOCK` is non-empty those agents are undelivered: re-dispatch them once (Phase 4 rule), else take the degraded-panel path; `CLEAN_STRUCTURED` is withheld while it is non-empty. On `CLEAN_STRUCTURED=true` and no `INTEG-N` the review is clean: skip to Phase 7. A finding that somehow has no marker is classified with `classify-finding.sh --unstructured` (empty or unparseable severity gives `NOTE unstructured`, never ISSUE). **Pre-existing route**: a pre-existing finding (MEDIUM or lower) is never filed as `review-finding`/`needs-validation` nor linked to this PR (it stays out of findings-per-PR and the amplification ratio); it still passes the §6B.5 classifier, is listed once in the summary, and at most 3 per review (highest severity first) are filed with the `pre-existing` label plus `priority:*`, citing this PR (`preexisting_filed`, not `findings_filed`).
 
 ### 6B.5: Non-blocking note disposition (MANDATORY before 6C)
 

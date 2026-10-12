@@ -1044,7 +1044,7 @@ for AGENT_DOMAIN in $LAUNCHED_REVIEW_AGENTS; do
   AGENT_COMMENT_COUNT=0
   if [ -n "$REVIEW_SHA_FULL" ] && [ -n "$TRUSTED_SCRIPT" ]; then
     AGENT_COMMENT_COUNT=$(gh api --paginate "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
-      | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA:[ ]${REVIEW_SHA_FULL}(\\r?\\n|$)" 2>/dev/null || echo 0)
+      | bash "$TRUSTED_SCRIPT" count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->)<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA:[ ]${REVIEW_SHA_FULL}(\\r?\\n|$)" 2>/dev/null || echo 0)
   fi
   case "$AGENT_COMMENT_COUNT" in ''|*[!0-9]*) AGENT_COMMENT_COUNT=0 ;; esac   # fail closed: counts as missing
   if [ "${AGENT_COMMENT_COUNT:-0}" -lt 1 ]; then
@@ -1054,7 +1054,7 @@ done
 
 if [ -n "$MISSING_AGENT_COMMENTS" ]; then
   echo "REVIEW DELIVERY FAILURE: missing findings comment(s) for:${MISSING_AGENT_COMMENTS}"
-  echo "Recover each agent's returned verdict, findings, and durable body path before rerunning review."
+  echo "A comment without a REVIEW-FINDINGS-START block counts as missing. Re-dispatch the missing agent once with the note: structured findings block required. A second miss is a degraded panel. Recover each agent's returned verdict, findings, and durable body path before rerunning review."
   exit 1
 fi
 ```
@@ -1086,7 +1086,7 @@ bash "$RF" classify --pr "$PR_NUMBER" --repo "$GH_REPO" --context "$CTX" --out-d
 cat "$OUT_DIR/note-list.txt" 2>/dev/null
 ```
 
-Read `FINDINGS_KEPT`, `FINDINGS_DROPPED_STALE`, `FINDINGS_PREEXISTING` and `NOTES_DEMOTED_NO_SCENARIO` for the summary. With no kept finding and no unstructured finding in the trusted reviewer bodies, skip to Phase 8.
+Read `FINDINGS_KEPT`, `FINDINGS_DROPPED_STALE`, `FINDINGS_PREEXISTING` and `NOTES_DEMOTED_NO_SCENARIO` for the summary. Findings come only from `FINDING:` markers, never from free text. If `AGENTS_WITHOUT_BLOCK` is non-empty those agents are undelivered (no findings block): re-dispatch them once with the note "structured findings block required", else take the degraded-panel path; `CLEAN_STRUCTURED` is withheld meanwhile. With no kept finding and `CLEAN_STRUCTURED=true`, skip to Phase 8. A marker-less finding is classified with `classify-finding.sh --unstructured` (empty or unparseable severity is `NOTE unstructured`, never ISSUE).
 
 ### 7B: Note disposition (same damper and classifier as `/review-pr` §6B.5)
 

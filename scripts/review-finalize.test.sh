@@ -277,6 +277,35 @@ run "$GOOD" extract; rc_is "delta: earlier head unreadable" "$RC" 3; has "delta:
 # clean review
 reset; cm MEMBER User "$(agent_body security "$SHA" 'all good' 'no findings')"; flush
 run "$GOOD" extract; has "clean" "STRUCTURED_FINDINGS=0"; has "clean" "CLEAN_STRUCTURED=true"
+has "clean: no undelivered agent" "AGENTS_WITHOUT_BLOCK=
+"
+lacks() { case "$OUT" in *"$2"*) bad "$1: output has '$2'" ;; *) ok ;; esac; }
+nob() { printf '<!-- FORGE:REVIEW-AGENT:%s -->\n**Verdict: APPROVE - no findings.**\nReviewed-SHA: %s\n' "$1" "$2"; }
+
+# verdict-only agent comment (no findings block): undelivered, never a finding, never clean
+reset; cm MEMBER User "$(nob security "$SHA")"; flush
+run "$GOOD" extract; rc_is "no-block agent" "$RC" 0
+has "no-block agent: reported undelivered" "AGENTS_WITHOUT_BLOCK=security"
+has "no-block agent: no finding created" "STRUCTURED_FINDINGS=0"
+lacks "no-block agent: not clean" "CLEAN_STRUCTURED=true"
+# mix: one clean (empty block) agent and one block-less agent
+reset; cm MEMBER User "$(agent_body auth "$SHA" 'all good' '')"; cm MEMBER User "$(nob security "$SHA")"; flush
+run "$GOOD" extract
+has "mixed: block-less agent listed" "AGENTS_WITHOUT_BLOCK=security"
+lacks "mixed: block-delivering agent not listed" "AGENTS_WITHOUT_BLOCK=auth"
+lacks "mixed: block-delivering agent not listed (joined)" "security auth"
+lacks "mixed: not clean" "CLEAN_STRUCTURED=true"
+# a synthesized block must not mask a block-less raw agent comment
+reset; cm MEMBER User "$(nob security "$SHA")"
+cm MEMBER User "$(printf '<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->\nclean\nReviewed-SHA: %s\n' "$SHA")"; flush
+run "$GOOD" extract
+has "synth: block-less agent still reported" "AGENTS_WITHOUT_BLOCK=security"
+lacks "synth: not clean" "CLEAN_STRUCTURED=true"
+# an untrusted block-less comment is ignored (cannot park a review)
+reset; cm MEMBER User "$(agent_body auth "$SHA" 'ok' '')"; cm NONE User "$(nob security "$SHA")"; flush
+run "$GOOD" extract
+lacks "untrusted block-less ignored" "AGENTS_WITHOUT_BLOCK=security"
+has "untrusted block-less ignored: clean" "CLEAN_STRUCTURED=true"
 
 # ======================= classify =======================
 # mkfind <id> <conf> <sev> <file> <line> <title> [route] [agent] [scenario-text]
