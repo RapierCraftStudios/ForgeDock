@@ -112,6 +112,7 @@ function strip(toks) {
   for (;;) {
     const a = px.basename(rest[0] || '');
     if (['npx', 'bunx'].includes(a) || (['pnpm', 'yarn', 'bun'].includes(a) && ['exec', 'dlx'].includes(rest[1]))) { prefix.push(...rest.slice(0, a === 'npx' || a === 'bunx' ? 1 : 2)); rest = rest.slice(a === 'npx' || a === 'bunx' ? 1 : 2); while (rest[0] && /^--?(yes|y|no-install|quiet|q)$/.test(rest[0])) { prefix.push(rest[0]); rest = rest.slice(1); } continue; }
+    if (['bash', 'sh'].includes(a) && /(^|\/)with-run-tmpdir\.sh$/.test(rest[1] || '') && rest[2]) { prefix.push(rest[0], rest[1]); rest = rest.slice(2); continue; }
     if (['uv', 'poetry', 'pipenv', 'pdm', 'hatch'].includes(a) && rest[1] === 'run') { prefix.push(rest[0], rest[1]); rest = rest.slice(2); continue; }
     if (a === 'bundle' && rest[1] === 'exec') { prefix.push(rest[0], rest[1]); rest = rest.slice(2); continue; }
     if (/^python[0-9.]*$/.test(a) && rest[1] === '-m' && rest[2]) { prefix.push(rest[0], rest[1]); rest = rest.slice(2); continue; }
