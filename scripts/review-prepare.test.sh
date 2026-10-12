@@ -253,6 +253,12 @@ if grep -q 'checkout -f "\$ORIG_REF"' "$ROOT/scripts/review-prepare.sh"; then ok
 # --- 10. fail closed on gh and bad arguments ---
 setup feat/x staging "README.md" "$DIFF_PLAIN"; : > "$FIX/difffail"
 prep "$ROOT"; rc_is "gh pr diff failure" 3; eq "blocked on gh failure" .status BLOCKED
+# a staging bundle review (--no-delta) reads an API-oversized diff from the long-lived branches; a per-PR review still blocks
+setup pr-branch main "README.md" "$DIFF_PLAIN"; : > "$FIX/difffail"
+prep "$ROOT" --no-delta; rc_is "--no-delta falls back to git when the API diff fails" 0; eq "fallback status" .status OK
+eq "fallback file list comes from git" '.full_files | index("services/api/auth.py") != null' true; eq "--no-delta mode is FULL" .delta.mode FULL
+setup feat/x staging "README.md" "$DIFF_PLAIN"; : > "$FIX/difffail"
+prep "$ROOT" --no-delta; rc_is "--no-delta with unfetchable branches still fails closed" 3; eq "unfetchable blocked" .status BLOCKED
 setup feat/x staging "README.md" "$DIFF_PLAIN"
 for bad_args in "--pr abc --repo o/r" "--pr 7 --repo noslash" "--pr 7 --repo o/r;x/y" "--pr 7 --repo o/r --bogus" "--repo o/r --pr"; do
     # shellcheck disable=SC2086

@@ -33,6 +33,8 @@
 #                 `export VAR=`, `read VAR`, `for VAR in`) at or before its first read. Comment-only lines are ignored; `$REPO`
 #                 does not match `$REPO_FLAG`. Suppress a deliberate read by putting
 #                 `allowlist:fence-state` on the same line. Pseudo-tool-call fences are scanned too.
+#                 A line that sources scripts/lib/fence-bootstrap.sh and ends in `# FENCE_BOOTSTRAP` binds the variables that
+#                 library derives (PR_NUMBER ALL_PR_NUMBERS GH_REPO DEFAULT_BRANCH STAGING_BRANCH CONFIG_FILE _SD FORGE_RUN_KEY).
 #                 Output: `FAIL <file>:<line> fence-state ...` then `SPEC-FENCE-STATE: ...`.
 #   --fence-funcs Different check, opt-in: shell functions are per-shell too, so a function defined
 #                 (`name() {`, `function name`) in one ```bash/sh fence is undefined in every other
@@ -113,15 +115,17 @@ if [ "$FENCESTATE" = 1 ]; then
         }
       }
       function reset(   i) { for (i = 1; i <= nv; i++) { asg[vn[i]] = 0; first[vn[i]] = ""; firsttxt[vn[i]] = "" } }
-      BEGIN { nv = split(vars, vn, " ") }
+      BEGIN { nv = split(vars, vn, " "); nb = split("PR_NUMBER ALL_PR_NUMBERS GH_REPO DEFAULT_BRANCH STAGING_BRANCH CONFIG_FILE _SD FORGE_RUN_KEY", bv, " ") }
       !inb && /^[ \t]*```(bash|sh)[ \t]*$/ { inb = 1; reset(); next }
       !inb && /^[ \t]*```/ { other = !other; next }
       other { next }
       inb && /^[ \t]*```[ \t]*$/ { flush(); inb = 0; next }
       inb {
         if ($0 ~ /^[ \t]*#/) next
+        boot = ($0 ~ /fence-bootstrap\.sh/ && $0 ~ /# FENCE_BOOTSTRAP[ \t]*$/)
         for (i = 1; i <= nv; i++) {
           v = vn[i]
+          if (boot && first[v] == "") for (j = 1; j <= nb; j++) if (bv[j] == v) asg[v] = 1
           if (first[v] == "" && ($0 ~ ("(^|[;&|( \t])(export[ \t]+|local[ \t]+|declare[ \t]+(-[A-Za-z]+[ \t]+)?|readonly[ \t]+)?" v "=") ||
               $0 ~ ("(^|[;&|( \t])read[ \t]+(-[A-Za-z]+[ \t]+)*([A-Za-z0-9_]+[ \t]+)*" v "([ \t;]|$)") ||
               $0 ~ ("(^|[;&|( \t])for[ \t]+" v "[ \t]+in[ \t]"))) asg[v] = 1

@@ -1021,11 +1021,21 @@ describe("pickPhase", () => {
       assert.equal(outcome.terminalReason, "invalid");
     });
 
-    it("workflow:merged label -> committed, terminalReason merged", async () => {
-      const io = ioWith(JSON.stringify({ state: "OPEN", labels: [{ name: "workflow:merged" }] }));
+    it("CLOSED + workflow:merged label -> committed, terminalReason merged", async () => {
+      const io = ioWith(JSON.stringify({ state: "CLOSED", labels: [{ name: "workflow:merged" }] }));
       const outcome = await close.detectOutcome(base, io);
       assert.equal(outcome.status, "committed");
       assert.equal(outcome.terminalReason, "merged");
+    });
+
+    // SEC-1: the label alone is not proof of a merge. A reopened or never-closed issue that
+    // still carries a stale workflow:merged must NOT be reported as merged (fail closed).
+    it("OPEN + workflow:merged label (no CLOSED) -> not merged, failed 'issue not closed' (SEC-1)", async () => {
+      const io = ioWith(JSON.stringify({ state: "OPEN", labels: [{ name: "workflow:merged" }] }));
+      const outcome = await close.detectOutcome(base, io);
+      assert.notEqual(outcome.terminalReason, "merged");
+      assert.equal(outcome.status, "failed");
+      assert.match(outcome.detail, /issue not closed/);
     });
 
     it("issue CLOSED AND workflow:merged label -> committed, terminalReason merged", async () => {
@@ -1639,9 +1649,9 @@ describe("close PHASE_COMPLETE outcome (forge#3545)", () => {
     assert.equal((await close.detectOutcome(base, io)).status, "failed");
   });
 
-  it("merged label and CLOSED paths still win over the marker", async () => {
+  it("CLOSED + merged label still wins over the marker; a label without CLOSED does not (SEC-1)", async () => {
     const merged = await close.detectOutcome(base, world({ state: "OPEN", labels: [{ name: "workflow:merged" }] }, [phaseComplete]));
-    assert.equal(merged.terminalReason, "merged");
+    assert.equal(merged.terminalReason, "phase-complete");
     const closed = await close.detectOutcome(base, world({ state: "CLOSED", labels: [{ name: "workflow:merged" }] }, [phaseComplete]));
     assert.equal(closed.terminalReason, "merged");
   });

@@ -271,11 +271,13 @@ extract_helper_block() { # file var -> block on stdout
 extract_helper_fn() { # file -> function on stdout
   awk '/^resolve_extract_affected_files\(\) \{/ {inb=1} inb {print} inb && /^\}$/ {exit}' "$1"
 }
-# review-pr.md resolves its helpers through the forge_resolve stub (#3780): the pinned locator plus the call line, taken from the spec.
+# review-pr.md resolves its helpers through the forge_resolve stub (#3780); since #3841 the classify, cap, milestone, priority and dedup helpers are resolved inside
+# scripts/review-finalize.sh and the code-index helper inside scripts/review-prepare.sh: the pinned locator plus the call line, taken from those scripts.
 stub_block() { # file var -> locator + the first `var=$(forge_resolve ...)` line, indentation stripped
   sed 's/^[[:space:]]*//' "$1" | grep -m1 '^type forge_resolve >/dev/null'; sed 's/^[[:space:]]*//' "$1" | grep -m1 "^$2=\$(forge_resolve "
 }
-HR_CLASSIFY="$ROOT/commands/review-pr.md"
+HR_CLASSIFY="$ROOT/scripts/review-finalize.sh"
+HR_PREPARE="$ROOT/scripts/review-prepare.sh"
 HR_AMP="$ROOT/commands/orchestrate/phase-4-execution.md"
 HR_EX3="$ROOT/commands/orchestrate/phase-3-dependency.md"
 stub_block "$HR_CLASSIFY" CLASSIFY_SCRIPT > "$T/hr_classify.sh"
@@ -285,7 +287,7 @@ extract_helper_fn "$HR_AMP" > "$T/hr_ex4.sh"
 extract_helper_fn "$HR_EX3" > "$T/hr_ex3.sh"
 expect "CLASSIFY_SCRIPT resolver stub found" 1 "$(grep -c '^CLASSIFY_SCRIPT=\$(forge_resolve classify-finding.sh)$' "$T/hr_classify.sh")"
 expect "CAP_SCRIPT resolver stub found" 1 "$(grep -c '^CAP_SCRIPT=\$(forge_resolve cap-findings.sh)$' "$T/hr_cap.sh")"
-expect "CAP_SCRIPT resolver stub found in review-pr-staging.md" 1 "$(sed 's/^[[:space:]]*//' "$ROOT/commands/review-pr-staging.md" | grep -c '^CAP_SCRIPT=\$(forge_resolve cap-findings.sh)$')"
+expect "review-pr-staging.md no longer carries a CAP_SCRIPT resolver stub (review-finalize.sh owns the cap helper, #3841)" 0 "$(sed 's/^[[:space:]]*//' "$ROOT/commands/review-pr-staging.md" | grep -c '^CAP_SCRIPT=\$(forge_resolve cap-findings.sh)$')"
 expect "AMP_SCRIPT resolver block found" 1 "$(grep -c '^AMP_SCRIPT=""' "$T/hr_amp.sh")"
 expect "extract-affected-files resolver found in phase-4" 1 "$(grep -c 'resolve_extract_affected_files() {' "$T/hr_ex4.sh")"
 expect "extract-affected-files resolver found in phase-3" 1 "$(grep -c 'resolve_extract_affected_files() {' "$T/hr_ex3.sh")"
@@ -337,7 +339,7 @@ hr_check_stub() { # label file var script: the spec calls the script through the
 }
 hr_check_stub review-pr "$HR_CLASSIFY" DERIVE_MILESTONE_SCRIPT derive-finding-milestone.sh
 hr_check_stub review-pr "$HR_CLASSIFY" PRIORITY_SCRIPT severity-to-priority.sh
-hr_check_stub review-pr "$HR_CLASSIFY" CODE_INDEX_SCRIPT code-index.sh
+hr_check_stub review-prepare "$HR_PREPARE" CODE_INDEX_SCRIPT code-index.sh
 hr_check_stub review-pr "$HR_CLASSIFY" DEDUP_SCRIPT issue-dedup.sh
 hr_check_block issue "$ROOT/commands/issue.md" DEDUP_SCRIPT issue-dedup.sh
 stub_block "$HR_CLASSIFY" DERIVE_MILESTONE_SCRIPT > "$T/hr_dm.sh"
@@ -414,9 +416,9 @@ FR="$ROOT/scripts/lib/forge-resolve.sh"; FB="$ROOT/scripts/lib/fence-bootstrap.s
 [ -f "$FR" ] && [ -f "$FB" ] && ok || bad "scripts/lib/forge-resolve.sh and scripts/lib/fence-bootstrap.sh must exist"
 sed 's/^[[:space:]]*//' "$STG_SPEC" | grep '^type forge_resolve >/dev/null' | sort | uniq -c > "$T/loc_uniq"
 [ "$(wc -l < "$T/loc_uniq" | tr -d ' ')" = 1 ] && ok || bad "forge_resolve locator line must be byte-identical across every stub in review-pr-staging.md"
-[ "$(awk '{print $1}' "$T/loc_uniq")" -ge 30 ] && ok || bad "expected a locator on every bootstrap (21) and resolver (11) stub"
+[ "$(awk '{print $1}' "$T/loc_uniq")" -ge 25 ] && ok || bad "expected a locator on every bootstrap (21) and resolver (5) stub"
 grep -qE 'PWD|\$\(pwd\)|REPO_PATH' "$T/locator.sh" && bad "stub locator must not consult the cwd or repo under review" || ok
-[ "$(grep -c '# FENCE_BOOTSTRAP$' "$STG_SPEC")" = 22 ] && ok || bad "expected 22 fence bootstrap stubs"
+[ "$(grep -c '# FENCE_BOOTSTRAP$' "$STG_SPEC")" = 21 ] && ok || bad "expected 21 fence bootstrap stubs"
 [ "$(grep '# FENCE_BOOTSTRAP$' "$STG_SPEC" | sort -u | wc -l | tr -d ' ')" = 1 ] && ok || bad "fence bootstrap stubs must be byte-identical"
 grep '# FENCE_BOOTSTRAP$' "$STG_SPEC" | sed 1q | grep -qF 'exit 1' && ok || bad "fence bootstrap stub must fail closed (exit 1) when the helper is unresolved"
 # the spec carries none of the old inlined blocks
@@ -441,7 +443,7 @@ expect "remediate.md: forge_resolve calls without a preceding locator in the sam
 RP_SPEC="$ROOT/commands/review-pr.md"
 sed 's/^[[:space:]]*//' "$RP_SPEC" | grep '^type forge_resolve >/dev/null' | sort | uniq -c > "$T/rp_uniq"
 [ "$(wc -l < "$T/rp_uniq" | tr -d ' ')" = 1 ] && ok || bad "review-pr.md locator lines must be byte-identical"
-[ "$(awk '{print $1}' "$T/rp_uniq")" -ge 15 ] && ok || bad "expected a locator in every review-pr.md fence that resolves a script (>=15)"
+[ "$(awk '{print $1}' "$T/rp_uniq")" -ge 10 ] && ok || bad "expected a locator in every review-pr.md fence that resolves a script (>=10; the classify/file/prepare helpers resolve inside the review scripts since #3841)"
 [ "$(sed 's/^[[:space:]]*//' "$RP_SPEC" | grep '^type forge_resolve >/dev/null' | sed 1q)" = "$(cat "$T/locator.sh")" ] && ok || bad "review-pr.md locator differs from the pinned review-pr-staging.md locator"
 expect "review-pr.md inlined FORGE_ROOT bootstrap copies" 0 "$(grep -c 'FORGE_ROOT bootstrap' "$RP_SPEC" || true)"
 # (SCOPE_SCRIPT="" is a sibling path derived from the resolved trusted script's own directory, not a resolver accumulator)

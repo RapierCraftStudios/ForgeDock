@@ -40,6 +40,12 @@
 #   --notes-fixed N / --notes-dropped N   classify: NOTE dispositions chosen by the caller (default 0); the rest are notes_listed
 #   --patterns FILE   file-prepare: JSON object {finding id: FORGE:PATTERN slug}; absent = the recurrence check is skipped
 #   --dry-run         classify: post no PR or issue comments; file-prepare: create no labels
+#   --scope-files FILE   classify (staging bundle review): newline list of the files in review scope (cross-PR, unreviewed and deploy-wiring files). When
+#                     given, a MEDIUM/LOW/INFO finding whose cited file is outside it becomes `NOTE out_of_scope` (never HIGH/CRITICAL, never a safety-exempt
+#                     or re-flagged finding, never a finding with no file), counted as out_of_scope in the disposition record (`scope=scoped`).
+#   --prior-prs "N N"    classify (staging bundle review; an empty list is valid): read the prior findings and NOTE lists of these PRs (the bundle
+#                     members) for the cross-PR re-flag instead of this PR's own earlier heads. It also marks the run as a bundle review: the context's
+#                     contract.issue is ignored (no single fixing issue, lineage none) and the disposition record carries out_of_scope= and scope=
 #   Phase 7-9 subcommands: --context FILE is optional; without it pass --review-sha SHA, --review-mode FULL|DELTA|BASE_SYNC_ONLY, --issue N, --base B.
 #   verdict:      --merge-health S --merge-health-state S [--base B] [--head-branch H] [--is-milestone true|false] [--has-purpose-regression true|false]
 #                 [--purpose-findings TEXT] [--result stale|clean|blocking] [--agents TEXT] [--findings-count N] [--blocking-count N]
@@ -66,13 +72,13 @@ case "$SUB" in
     *) echo "usage: review-finalize.sh extract|classify|file-prepare|file-verify|verdict|calibrate|merge-gate|demilestone|integrity --pr N --repo owner/name --context FILE [options]" >&2; exit 2 ;;
 esac
 
-PR_NUMBER=""; REPO=""; CONTEXT=""; OUT_DIR=""; IN_FILE=""; OUT_FILE=""; AUTO_MERGE="false"; NOTES_FIXED=0; NOTES_DROPPED=0; PATTERNS=""; DRY_RUN="false"
+PR_NUMBER=""; REPO=""; CONTEXT=""; OUT_DIR=""; IN_FILE=""; OUT_FILE=""; AUTO_MERGE="false"; NOTES_FIXED=0; NOTES_DROPPED=0; PATTERNS=""; DRY_RUN="false"; SCOPE_FILES=""; PRIOR_PRS=""; BUNDLE="false"
 REVIEW_SHA_OPT=""; REVIEW_MODE_OPT=""; BASE_OPT=""; HEAD_BRANCH=""; ISSUE_OPT=""; VERDICT=""; HAS_PURPOSE_REGRESSION=""; CALIBRATION_NEEDS_HUMAN=""; CALIBRATION_NOTE=""; TRUST_NEEDS_HUMAN=""
 BASE_CONFLICT=""; OTHER_BLOCKING=""; INTENSITY_TIER=""; TABLE_CELL_KEY=""; TRUST_SHADOW_MODE=""; MERGE_HEALTH=""; MERGE_HEALTH_STATE=""; RESULT=""
 AGENTS_TEXT=""; FINDINGS_COUNT=""; BLOCKING_COUNT=""; PURPOSE_FINDINGS=""; IS_MILESTONE="false"; MERGE_STATE_IN=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --pr|--repo|--context|--out-dir|--findings|--out|--auto-merge|--notes-fixed|--notes-dropped|--patterns|--base|--head-branch|--issue|--verdict|--has-purpose-regression|--calibration-needs-human|--calibration-note|--trust-needs-human|--base-conflict|--other-blocking|--intensity-tier|--table-cell-key|--trust-shadow-mode|--merge-health|--merge-health-state|--result|--agents|--findings-count|--blocking-count|--purpose-findings|--is-milestone|--merge-state|--review-sha|--review-mode)
+        --pr|--repo|--context|--out-dir|--findings|--out|--auto-merge|--notes-fixed|--notes-dropped|--patterns|--base|--head-branch|--issue|--verdict|--has-purpose-regression|--calibration-needs-human|--calibration-note|--trust-needs-human|--base-conflict|--other-blocking|--intensity-tier|--table-cell-key|--trust-shadow-mode|--merge-health|--merge-health-state|--result|--agents|--findings-count|--blocking-count|--purpose-findings|--is-milestone|--merge-state|--review-sha|--review-mode|--scope-files|--prior-prs)
             [ $# -ge 2 ] || { echo "review-finalize: $1 requires a value" >&2; exit 2; } ;;
     esac
     case "$1" in
@@ -110,6 +116,8 @@ while [ $# -gt 0 ]; do
         --purpose-findings) PURPOSE_FINDINGS="${2:-}"; shift 2 ;;
         --is-milestone) IS_MILESTONE="${2:-false}"; shift 2 ;;
         --merge-state) MERGE_STATE_IN="${2:-}"; shift 2 ;;
+        --scope-files) SCOPE_FILES="${2:-}"; shift 2 ;;
+        --prior-prs) PRIOR_PRS="${2:-}"; BUNDLE="true"; shift 2 ;;
         --dry-run) DRY_RUN="true"; shift ;;
         *) echo "review-finalize: unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -170,6 +178,8 @@ if [ -n "$CONTEXT" ]; then
     case "$MERGE_ISSUE" in *[!0-9]*) MERGE_ISSUE="" ;; esac
     CTX_BASE_BRANCH=$(jq -r '.pr.base_ref // empty' "$CONTEXT")
 fi
+# A staging bundle review (--prior-prs) has no single fixing issue: the context's contract.issue (read from a PR body that lists many) is ignored.
+[ "$BUNDLE" != "true" ] || MERGE_ISSUE=""
 # --issue is the invoker's own --issue (never PR-author text); a non-numeric value is ignored like the context's.
 case "$ISSUE_OPT" in ''|*[!0-9]*) ;; *) MERGE_ISSUE="$ISSUE_OPT" ;; esac
 case "$REVIEW_MODE" in FULL|DELTA|BASE_SYNC_ONLY) ;; *) REVIEW_MODE="FULL" ;; esac
@@ -507,7 +517,7 @@ do_classify() {
             rm -f "$CONTRACT_BODY_FILE"
         fi
     fi
-    PRIOR_FILE=""; DIFF_MAP_FILE=""; NOTES_REFLAG=0
+    PRIOR_FILE=""; DIFF_MAP_FILE=""; NOTES_REFLAG=0; OUT_OF_SCOPE=0
     # Cross-head re-flag input (#3641). Fail soft: an unreadable source only shrinks the TSV, never blocks the review.
     # PF_SKIP="<sha or empty>" PF_PRS="<pr numbers>" prior_findings_tsv prints file<TAB>line-start<TAB>line-end<TAB>title<TAB>disposition<TAB>issue# rows
     # (disposition: filed = linked issue OPEN, filed-closed = CLOSED, note = recorded NOTE_DISPOSITION with no issue, unknown = reviewer-body finding whose linkage failed, never demotes a MEDIUM CONFIRMED/LIKELY re-flag).
@@ -561,11 +571,13 @@ do_classify() {
         done
         rm -f "$rows" "$issues"
     }
-    PRIOR_ROWS=$(PF_SKIP="$REVIEW_SHA" PF_PRS="$PR_NUMBER" prior_findings_tsv)
+    # A staging bundle review (--prior-prs) re-flags against the member PRs' own reviews, with nothing skipped; otherwise against this PR's earlier heads.
+    if [ "$BUNDLE" = "true" ]; then PRIOR_ROWS=$(PF_SKIP="" PF_PRS="$PRIOR_PRS" prior_findings_tsv); else PRIOR_ROWS=$(PF_SKIP="$REVIEW_SHA" PF_PRS="$PR_NUMBER" prior_findings_tsv); fi
     if [ -n "$PRIOR_ROWS" ]; then
         PRIOR_FILE="$WORKDIR/prior-findings"; printf '%s\n' "$PRIOR_ROWS" > "$PRIOR_FILE"
         # Best-effort hunk map from the most recent prior reviewed head to this one, so a moved line still overlaps. Any failure leaves the unshifted ranges.
-        PRIOR_SHA=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
+        PRIOR_SHA=""
+        [ "$BUNDLE" = "true" ] || PRIOR_SHA=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null \
             | bash "$TRUSTED_SCRIPT" bodies '^<!-- (FORGE:REVIEW-AGENT:[a-z-]+|REVIEW-FINDINGS-SYNTHESIZED-START) -->[\s\S]*(^|\n)Reviewed-SHA: [0-9a-f]{40,64}' 2>/dev/null \
             | jq -r 'scan("(^|\\n)Reviewed-SHA: ([0-9a-f]{40,64})") | .[1]' 2>/dev/null | grep -vx "$REVIEW_SHA" | tail -n 1)
         _top=$(git rev-parse --show-toplevel 2>/dev/null) || _top=""
@@ -605,6 +617,15 @@ do_classify() {
         DISPOSITION=$(printf '%s\n' "$DISPOSITION" | head -n 1)
         # A classifier runtime failure fails toward filing, like the classifier itself (the resolution failure above is what blocks).
         case "$DISPOSITION" in ISSUE*|NOTE*|INPR_FIX*) ;; *) DISPOSITION="ISSUE classifier-error" ;; esac
+        # Staging bundle scope rule (--scope-files; the two SCOPE_RULE lines are evaluated by scripts/review-pr-staging-scope.test.sh): only a finding whose
+        # normalised severity is MEDIUM, LOW or INFO may be demoted, and only when it cites a file and that file is outside the review scope.
+        # The classifier's safety exemption and an existing re-flag are never second-guessed, and the demotion is a listed NOTE, never a drop.
+        SEV=$(printf '%s' "$F_SEV" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')   # SCOPE_RULE
+        case "$SEV" in MEDIUM|LOW|INFO) OOS_DEMOTE=1 ;; *) OOS_DEMOTE=0 ;; esac   # SCOPE_RULE
+        case "$DISPOSITION" in *safety-exemption*|"NOTE reflag"*|INPR_FIX*) OOS_DEMOTE=0 ;; esac
+        if [ -n "$SCOPE_FILES" ] && [ -r "$SCOPE_FILES" ] && [ "$OOS_DEMOTE" = "1" ] && [ -n "$F_FILE" ] && ! grep -qxF -- "$F_FILE" "$SCOPE_FILES"; then
+            DISPOSITION="NOTE out_of_scope"; OUT_OF_SCOPE=$((OUT_OF_SCOPE + 1))
+        fi
         case "$DISPOSITION" in
             "NOTE contract-deferred #"*)
                 _dn="${DISPOSITION##*#}"
@@ -682,7 +703,8 @@ do_classify() {
 
     # Disposition marker (MANDATORY whenever Phase 6A extracted at least one finding): Phase 8 refuses to auto-merge a PR that has FINDING:
     # markers but no FORGE:NOTE_DISPOSITION comment. `reviewed_sha` is the head this record covers (a later review of ANOTHER head reads it as a prior list).
-    NOTE_DISPOSITION_BODY="<!-- FORGE:NOTE_DISPOSITION: notes_fixed=${NOTES_FIXED:-0} notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} inpr_fix=${INPR_FIX_COUNT:-0} contract_demoted=${CONTRACT_DEMOTED:-0} findings_dropped_stale=${N_STALE:-0} findings_preexisting=${N_PRE:-0} notes_demoted_no_scenario=${N_NOSCEN:-0} lineage=${FINDING_LINEAGE} classifier=${CLASSIFIER_MODE} notes_reflag=${NOTES_REFLAG:-0} notes_capped=${NOTES_CAPPED:-0} reviewed_sha=${REVIEW_SHA} -->
+    BUNDLE_MARKER=""; if [ "$BUNDLE" = "true" ]; then _sm=full; [ -z "$SCOPE_FILES" ] || _sm=scoped; BUNDLE_MARKER=" out_of_scope=${OUT_OF_SCOPE} scope=${_sm}"; fi
+    NOTE_DISPOSITION_BODY="<!-- FORGE:NOTE_DISPOSITION: notes_fixed=${NOTES_FIXED:-0} notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} inpr_fix=${INPR_FIX_COUNT:-0} contract_demoted=${CONTRACT_DEMOTED:-0} findings_dropped_stale=${N_STALE:-0} findings_preexisting=${N_PRE:-0} notes_demoted_no_scenario=${N_NOSCEN:-0} lineage=${FINDING_LINEAGE} classifier=${CLASSIFIER_MODE} notes_reflag=${NOTES_REFLAG:-0} notes_capped=${NOTES_CAPPED:-0} reviewed_sha=${REVIEW_SHA}${BUNDLE_MARKER} -->
 $(cat "$NOTE_LIST_FILE" 2>/dev/null)"
     printf '%s\n' "$NOTE_DISPOSITION_BODY" > "$OUT_DIR/note-disposition.md"
     POSTED_DISPOSITION=false; POSTED_INPR=false

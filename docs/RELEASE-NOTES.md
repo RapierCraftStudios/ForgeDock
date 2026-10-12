@@ -2,6 +2,12 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Review specs call the prepare and finalize scripts (#3841)
+
+`commands/review-pr.md` is now under 100 KB: Phases 1-3B and 6 run through `scripts/review-prepare.sh` and `scripts/review-finalize.sh`, and `commands/review-pr-staging.md` reuses both (`review-prepare.sh --no-delta` in 0C, then `review-finalize.sh extract|classify|file-prepare|file-verify` with `--scope-files` and `--prior-prs` in Phase 7) instead of carrying its own template resolution, slicing, classifier and cap copies. A staging bundle whose API diff is too large is read from `origin/<base>...origin/<head>`. CI now runs `--fence-funcs` over `commands/review-pr*.md` and `--fence-state` over the staging spec. Engine: `close.detectOutcome` reports `merged` only for a CLOSED issue that also carries `workflow:merged` (a stale label on an open issue no longer counts).
+
+Action: none. Staging reviews now stop with `REVIEW_RESULT: status: BLOCKED` when `review-prepare.sh` exits 3 (for example no template source, or an empty trusted `typescript.build` on the full-build lane) instead of continuing.
+
 ## Gate scripts emit structured telemetry (#3834)
 
 `diff-size.sh`, `review-acceptance-gate.sh`, `classify-finding.sh`, `wait-ci-green.sh`, `remediate-liveness.sh` and the build/review spec call sites (B5.5, B6.5, review panel) now append one JSONL record per decision to a trusted `<!-- FORGE:TELEMETRY v1 -->` comment on the issue or PR (shell emitter `scripts/lib/telemetry.sh`, Node twin `bin/engine/telemetry.mjs`). A failed write is buffered under `~/.forge/telemetry-buffer/` and flushed on the next emit. Catalogue and privacy note: `docs/TELEMETRY.md`.

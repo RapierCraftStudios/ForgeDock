@@ -9,13 +9,15 @@
 # the PR checkout, a SPEC_CLI persona file, forge.yaml paths.root) as data.
 #
 # Usage: review-prepare.sh --pr N --repo owner/name [--merge-issue N] [--thorough true|false] [--out FILE] [--out-dir DIR]
-#                          [--checkout-pr]
+#                          [--checkout-pr] [--no-delta]
 #   --pr            PR number (numeric, required)          --repo        owner/name (required)
 #   --merge-issue   issue the PR closes, from --issue (numeric; non-numeric is ignored)
 #   --thorough      true restores the full-union roster    --out         write the context JSON here (default: stdout)
 #   --out-dir       directory for per-domain diff slices (default: ${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/review-prepare-<pr>)
 #   --checkout-pr   `git checkout -f --detach <review sha>` in the CURRENT repo (must be a throwaway review checkout, never the
 #                   main checkout); the recorded original ref is restored by restore_ref on every exit path
+#   --no-delta      skip the FULL/DELTA/BASE_SYNC_ONLY resolver: the review mode is always FULL (a staging bundle review always reviews the
+#                   whole bundle), without widening the roster to the full union the way --thorough does
 # Env: FORGE_CONFIG (forge.yaml path; default: the main checkout's forge.yaml, then the git top-level one),
 #      REVIEW_PREPARE_SLEEP (seconds between mergeability retries, default 5).
 # Exit: 0 context emitted (status OK) | 3 context emitted with status BLOCKED (the caller must stop, never skip) | 2 usage error
@@ -52,7 +54,7 @@
 
 set -u
 
-PR_NUMBER=""; REPO=""; MERGE_ISSUE=""; THOROUGH="false"; OUT=""; OUT_DIR=""; CHECKOUT_PR="false"
+PR_NUMBER=""; REPO=""; MERGE_ISSUE=""; THOROUGH="false"; OUT=""; OUT_DIR=""; CHECKOUT_PR="false"; NO_DELTA="false"
 while [ $# -gt 0 ]; do
     case "$1" in
         --pr|--repo|--merge-issue|--thorough|--out|--out-dir)
@@ -66,6 +68,7 @@ while [ $# -gt 0 ]; do
         --out) OUT="${2:-}"; shift 2 ;;
         --out-dir) OUT_DIR="${2:-}"; shift 2 ;;
         --checkout-pr) CHECKOUT_PR="true"; shift ;;
+        --no-delta) NO_DELTA="true"; shift ;;
         *) echo "review-prepare: unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -118,8 +121,16 @@ LINES=$((ADDITIONS + DELETIONS))
 
 FILES=""; DIFF=""
 if [ -z "$BLOCKERS" ]; then
-    FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only 2>/dev/null) || block "gh pr diff --name-only failed"
-    DIFF=$(gh pr diff "$PR_NUMBER" -R "$REPO" 2>/dev/null) || block "gh pr diff failed"
+    FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only 2>/dev/null) || FILES="__FAILED__"
+    [ "$FILES" = "__FAILED__" ] || DIFF=$(gh pr diff "$PR_NUMBER" -R "$REPO" 2>/dev/null) || FILES="__FAILED__"
+    if [ "$FILES" = "__FAILED__" ]; then
+        # A staging bundle can exceed the API's diff size limit: read it from the long-lived branches instead (--no-delta only; a per-PR review blocks).
+        FILES=""; DIFF=""
+        if [ "$NO_DELTA" = "true" ] && [ -n "$BASE" ] && [ -n "$HEAD" ] && git fetch -q origin "$BASE" "$HEAD" 2>/dev/null; then
+            FILES=$(git diff --name-only "origin/${BASE}...origin/${HEAD}" 2>/dev/null) && DIFF=$(git diff "origin/${BASE}...origin/${HEAD}" 2>/dev/null) || { FILES=""; DIFF=""; }
+        fi
+        [ -n "$FILES" ] || block "gh pr diff failed"
+    fi
     [ -n "$FILES" ] || [ -n "$BLOCKERS" ] || block "PR #${PR_NUMBER} has an empty file list"
 fi
 
@@ -405,7 +416,7 @@ delta_roster() {
     printf '%s' "$out"
 }
 REVIEW_MODE="FULL"; DELTA_FROM=""; CARRIED_FROM=""; FULL_ROUNDS=0; DELTA_FILES=""
-if [ "$THOROUGH" != "true" ] && [ "$IS_MILESTONE_TO_STAGING" != "true" ]; then
+if [ "$THOROUGH" != "true" ] && [ "$IS_MILESTONE_TO_STAGING" != "true" ] && [ "$NO_DELTA" != "true" ]; then
     read -r RD_KIND RD_ARG RD_ROUNDS <<< "$(review_delta_mode)"
     FULL_ROUNDS="${RD_ROUNDS:-0}"
     case "$RD_KIND" in
