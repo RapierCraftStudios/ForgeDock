@@ -446,12 +446,12 @@ git -C "$REPO_PATH" worktree add --detach "$BASE_WT" "origin/${BASE_BRANCH}" 2>/
 # A fresh worktree has no installed deps or local env files: link the main checkout's (read-only use), at the repo
 # root and in every cluster working_dir, so a baseline cluster fails only for code reasons, never for a missing install.
 if [ -n "$BASE_WT" ]; then
-  for _wd in . $(yq '.verification.integration_tests[].working_dir // "."' "$CONFIG_FILE" 2>/dev/null | sort -u); do
+  { echo .; yq '.verification.integration_tests[].working_dir // "."' "$CONFIG_FILE" 2>/dev/null; } | sort -u | while IFS= read -r _wd; do
     for _dep in node_modules .venv venv .env .env.local .env.test; do
       [ -e "${REPO_PATH}/${_wd}/${_dep}" ] && [ ! -e "${BASE_WT}/${_wd}/${_dep}" ] && [ -d "${BASE_WT}/${_wd}" ] \
         && ln -s "${REPO_PATH}/${_wd}/${_dep}" "${BASE_WT}/${_wd}/${_dep}"
     done
-  done
+  done   # one working_dir per line: a path with spaces is never word-split
 fi
 
 for i in $(seq 0 $((CLUSTER_COUNT - 1))); do
@@ -549,7 +549,7 @@ else
     cat <<ISSUE_EOF > "$TESTGATE_FAIL_BODY_FILE"
 ## Problem
 
-The \`/test-gate\` command detected a runtime failure in cluster \`${cluster}\` that was introduced by the staging→${DEFAULT_BRANCH} bundle. The failure did not exist on \`${BASE_BRANCH}\` (baseline PASS), confirming it is batch-introduced, not pre-existing.
+The \`/test-gate\` command detected a runtime failure in cluster \`${cluster}\` that was introduced by the staging→${DEFAULT_BRANCH} bundle. It was not observed failing on \`${BASE_BRANCH}\` (baseline: PASS, or UNAVAILABLE when the baseline could not run — then treated as batch-introduced, fail closed).
 
 ## Root Cause (if known)
 

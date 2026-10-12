@@ -693,7 +693,7 @@ rc_is "escalated: no transition script" "$RC" 0; logged "escalated: prose label 
 gate_reset; echo 1 > "$FIX/ci-rc"; printf 'CI_GATE: FAIL\nCI_GATE_HEAD: %s\nfailed: build\n' "$SHA" > "$FIX/ci-out"; mg "$GATE"
 rc_is "ci: red" "$RC" 3; has "ci: red" "blocker: ci gate not green (rc=1)"; logged "ci: red comment" issue-bodies.log "CI is not green (ci gate rc=1)"; logged "ci: red needs-human" edits.log "needs-human"; not_merged "ci: red"
 gate_reset; echo 3 > "$FIX/ci-rc"; printf 'CI_GATE: TIMEOUT\nCI_GATE_HEAD: %s\n' "$SHA" > "$FIX/ci-out"; mg "$GATE"
-rc_is "ci: timeout" "$RC" 3; has "ci: timeout" "CI_GATE_TIMEOUT: CI still running"; has "ci: timeout" "blocker: ci gate timeout (checks still pending)"; has "ci: timeout outcome" "MERGE_OUTCOME=ci-pending"; not_logged "ci: timeout is not needs-human (#3919)" edits.log "needs-human"; not_merged "ci: timeout"
+rc_is "ci: timeout" "$RC" 3; has "ci: timeout" "CI_GATE_TIMEOUT: CI still running"; has "ci: timeout" "blocker: checks still pending after the wait window"; case "$OUT" in *"blocker: ci gate"*) bad "ci: timeout blocker must not match the work-on \"ci gate\" remediation route" ;; *) ok ;; esac; has "ci: timeout outcome" "MERGE_OUTCOME=ci-pending"; not_logged "ci: timeout is not needs-human (#3919)" edits.log "needs-human"; not_merged "ci: timeout"
 gate_reset; mg "$G_NOCI"
 rc_is "ci: gate unresolvable" "$RC" 3; has "ci: gate unresolvable" "blocker: ci gate not green (rc=2)"; not_merged "ci: unresolvable"
 gate_reset; echo 2 > "$FIX/ci-rc"; printf 'CI_GATE: ERROR\nCI_GATE_HEAD: %s\nPR head moved during the wait\n' "$SHA" > "$FIX/ci-out"; mg "$GATE"
