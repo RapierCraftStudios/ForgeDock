@@ -191,6 +191,11 @@ rc_is "empty ts build on a milestone lane" 3; eq "BLOCKED status" .status BLOCKE
 eq "blocker names typescript.build" '.blockers | join(" ") | test("typescript.build")' true
 eq "config status blocked" .phase2.build_config.status blocked; eq "lane flag" .lane.requires_full_build true
 prep "$ROOT"; rc_is "configured ts build passes" 0; eq "status OK" .status OK
+# --build-gate advisory (review-pr-staging): an unconfigured build is a SKIPPED Phase 2 finding, never a block (#3952 QA-1)
+CFG_OVERRIDE="$WORK/nobuild.yaml" prep "$ROOT" --build-gate advisory
+rc_is "advisory build gate does not block" 0; eq "advisory status OK" .status OK
+eq "advisory config status skipped" .phase2.build_config.status skipped
+eq "advisory records SKIPPED finding" '.phase2.findings | join(" ") | test("SKIPPED — typescript.build")' true
 PY_DIFF='diff --git a/app/x.py b/app/x.py
 +x'
 printf 'project:\n  name: Demo\n' > "$WORK/empty.yaml"

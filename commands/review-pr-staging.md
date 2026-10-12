@@ -537,7 +537,7 @@ echo "SCOPE_MODE=$SCOPE_MODE reviewed_prs=$REVIEWED_PR_COUNT unreviewed_commits=
 
 ### 0C: Prepare (one script call)
 
-`scripts/review-prepare.sh` is the same preparation `/review-pr` Phase 1 runs, called with `--no-delta` (a bundle review always reviews the whole bundle: no FULL/DELTA resolver). It resolves the persona template source, the per-domain diff slices (`slices.<domain>.diff_file`, read from `origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH` when the API diff is too large), project config and the head SHA into one context file that Phase 5 and the Phase 7 `review-finalize.sh` calls read. A non-zero exit is `BLOCKED` (for example no template source, or an empty trusted build command on this full-build lane): STOP, never skip.
+`scripts/review-prepare.sh` is the same preparation `/review-pr` Phase 1 runs, called with `--no-delta` (a bundle review always reviews the whole bundle: no FULL/DELTA resolver). It resolves the persona template source, the per-domain diff slices (`slices.<domain>.diff_file`, read from `origin/$DEFAULT_BRANCH...origin/$STAGING_BRANCH` when the API diff is too large), project config and the head SHA into one context file that Phase 5 and the Phase 7 `review-finalize.sh` calls read. A non-zero exit is `BLOCKED` (for example no template source or no readable trusted forge.yaml): STOP, never skip. An unconfigured `typescript.build` / `python.format` is reported as a SKIPPED Phase 2 finding (`--build-gate advisory`), as the deploy review always did.
 
 ```bash
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
@@ -546,7 +546,7 @@ type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FO
 RP=$(forge_resolve review-prepare.sh)   # install roots only, never the PR checkout; unresolvable is a stop (fail closed)
 [ -n "$RP" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/review-prepare.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install); refusing to continue (fail closed)"; exit 1; }
 CTX="$_SD/review-ctx-${PR_NUMBER}.json"
-bash "$RP" --pr "$PR_NUMBER" --repo "$GH_REPO" --no-delta --out "$CTX"; RP_RC=$?
+bash "$RP" --pr "$PR_NUMBER" --repo "$GH_REPO" --no-delta --build-gate advisory --out "$CTX"; RP_RC=$?   # an unconfigured build is reported SKIPPED, never a deploy block
 if [ "$RP_RC" -ne 0 ] || [ ! -s "$CTX" ]; then
   [ -s "$CTX" ] && jq -r '.blockers[]? | "BLOCKER: " + .' "$CTX"
   echo "REVIEW_RESULT: status: BLOCKED, blocker: review-prepare failed (exit ${RP_RC}); nothing reviewed (fail closed)"; exit 1

@@ -9,13 +9,17 @@
 # the PR checkout, a SPEC_CLI persona file, forge.yaml paths.root) as data.
 #
 # Usage: review-prepare.sh --pr N --repo owner/name [--merge-issue N] [--thorough true|false] [--out FILE] [--out-dir DIR]
-#                          [--checkout-pr] [--no-delta]
+#                          [--checkout-pr] [--no-delta] [--build-gate block|advisory]
 #   --pr            PR number (numeric, required)          --repo        owner/name (required)
 #   --merge-issue   issue the PR closes, from --issue (numeric; non-numeric is ignored)
 #   --thorough      true restores the full-union roster    --out         write the context JSON here (default: stdout)
 #   --out-dir       directory for per-domain diff slices (default: ${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/review-prepare-<pr>)
 #   --checkout-pr   `git checkout -f --detach <review sha>` in the CURRENT repo (must be a throwaway review checkout, never the
 #                   main checkout); the recorded original ref is restored by restore_ref on every exit path
+#   --build-gate    block (default): an empty trusted typescript.build / python.format on a full-build lane BLOCKs.
+#                   advisory: record it as a SKIPPED Phase 2 finding instead (review-pr-staging: the deploy review only ever
+#                   reported "SKIPPED — typescript.build not configured", and blocking it would stop every deploy of a repo
+#                   with plain .js files and no build command, ForgeDock itself included).
 #   --no-delta      skip the FULL/DELTA/BASE_SYNC_ONLY resolver: the review mode is always FULL (a staging bundle review always reviews the
 #                   whole bundle), without widening the roster to the full union the way --thorough does
 # Env: FORGE_CONFIG (forge.yaml path; default: the main checkout's forge.yaml, then the git top-level one),
@@ -54,7 +58,7 @@
 
 set -u
 
-PR_NUMBER=""; REPO=""; MERGE_ISSUE=""; THOROUGH="false"; OUT=""; OUT_DIR=""; CHECKOUT_PR="false"; NO_DELTA="false"
+PR_NUMBER=""; REPO=""; MERGE_ISSUE=""; THOROUGH="false"; OUT=""; OUT_DIR=""; CHECKOUT_PR="false"; NO_DELTA="false"; BUILD_GATE="block"
 while [ $# -gt 0 ]; do
     case "$1" in
         --pr|--repo|--merge-issue|--thorough|--out|--out-dir)
@@ -69,6 +73,7 @@ while [ $# -gt 0 ]; do
         --out-dir) OUT_DIR="${2:-}"; shift 2 ;;
         --checkout-pr) CHECKOUT_PR="true"; shift ;;
         --no-delta) NO_DELTA="true"; shift ;;
+        --build-gate) case "${2:-}" in block|advisory) BUILD_GATE="$2" ;; *) echo "review-prepare: --build-gate must be block or advisory" >&2; exit 2 ;; esac; shift 2 ;;
         *) echo "review-prepare: unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -214,8 +219,13 @@ if [ "$REQUIRES_FULL_BUILD" = "true" ]; then
     if [ "$CONFIG_READABLE" != "true" ]; then
         BUILD_CONFIG_STATUS="blocked"; block "full-build lane but no readable trusted forge.yaml (checked FORGE_CONFIG, the main checkout and the git top-level)"
     else
-        if [ -n "$HAS_TS" ] && [ -z "$TS_BUILD" ]; then BUILD_CONFIG_STATUS="blocked"; block "BLOCKED: typescript.build is empty in verification.commands on a full-build lane (typecheck alone misses prerender failures)"; fi
-        if [ -n "$HAS_PY" ] && [ -z "$PY_FORMAT" ]; then BUILD_CONFIG_STATUS="blocked"; block "BLOCKED: python.format is empty in verification.commands on a full-build lane"; fi
+        if [ "$BUILD_GATE" = "advisory" ]; then
+            if [ -n "$HAS_TS" ] && [ -z "$TS_BUILD" ]; then BUILD_CONFIG_STATUS="skipped"; p2 "1B: SKIPPED — typescript.build not configured in verification.commands (build not run)"; fi
+            if [ -n "$HAS_PY" ] && [ -z "$PY_FORMAT" ]; then BUILD_CONFIG_STATUS="skipped"; p2 "1A: SKIPPED — python.format not configured in verification.commands"; fi
+        else
+            if [ -n "$HAS_TS" ] && [ -z "$TS_BUILD" ]; then BUILD_CONFIG_STATUS="blocked"; block "BLOCKED: typescript.build is empty in verification.commands on a full-build lane (typecheck alone misses prerender failures)"; fi
+            if [ -n "$HAS_PY" ] && [ -z "$PY_FORMAT" ]; then BUILD_CONFIG_STATUS="blocked"; block "BLOCKED: python.format is empty in verification.commands on a full-build lane"; fi
+        fi
     fi
 fi
 # 2D env vars, 2E secrets (CRITICAL), 2F SQL, over the diff text
