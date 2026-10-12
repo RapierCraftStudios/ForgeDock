@@ -100,6 +100,26 @@ if [ -n "$UNTRACKED" ] && [ "$UNTRACKED_COUNT" -gt 0 ]; then
     done
     echo ""
 fi
+
+# Decomposition trackers (workflow:decomposed) are NOT work: they are excluded from every
+# work count in this report and listed separately. With decomposition.close_parent a tracker
+# is CLOSED at decomposition, so query --state all and keep only trackers with unfinished
+# `- [ ]` checklist items. <!-- Added: forge#3736 -->
+TRACKERS=$(gh issue list $GH_FLAG \
+    --state all \
+    --label "workflow:decomposed" \
+    --limit 100 \
+    --json number,title,state,body \
+    --jq '.[] | select(.body | test("(?m)^[[:space:]]*[-*+] \\[ \\]")) | "#\(.number) \(.title[:60]) [\(.state | ascii_downcase)]"' \
+    2>/dev/null || echo "")
+TRACKER_COUNT=$(printf '%s' "$TRACKERS" | grep -c '#' 2>/dev/null || true)
+echo "[trackers] (${TRACKER_COUNT:-0} — decomposed parents awaiting children; not counted as work)"
+if [ -n "$TRACKERS" ]; then
+    echo "$TRACKERS" | while IFS= read -r line; do
+        echo "  $line"
+    done
+fi
+echo ""
 ```
 
 ---
@@ -295,7 +315,7 @@ echo ""
 INVESTIGATING=$(gh issue list $GH_FLAG --state open --label "workflow:investigating" --limit 100 --json number --jq '. | length' 2>/dev/null || echo 0)
 BUILDING=$(gh issue list $GH_FLAG --state open --label "workflow:building" --limit 100 --json number --jq '. | length' 2>/dev/null || echo 0)
 IN_REVIEW=$(gh issue list $GH_FLAG --state open --label "workflow:in-review" --limit 100 --json number --jq '. | length' 2>/dev/null || echo 0)
-BLOCKED=$(gh issue list $GH_FLAG --state open --label "needs-human" --limit 100 --json number --jq '. | length' 2>/dev/null || echo 0)
+BLOCKED=$(gh issue list $GH_FLAG --state open --label "needs-human" --limit 100 --json number,labels --jq '[.[] | select(.labels | map(.name) | index("workflow:decomposed") | not)] | length' 2>/dev/null || echo 0)  # workflow:decomposed trackers are excluded from work counts
 READY=$(gh issue list $GH_FLAG --state open --label "workflow:ready-to-build" --limit 100 --json number --jq '. | length' 2>/dev/null || echo 0)
 
 TOTAL_INFLIGHT=$((INVESTIGATING + BUILDING + IN_REVIEW + READY))
