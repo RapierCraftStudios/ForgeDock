@@ -2,10 +2,11 @@
  * bin/tests/router.test.mjs — CLI-level tests for bin/forgedock.mjs routing.
  * Run with: node --test bin/tests/router.test.mjs
  */
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync, cpSync, unlinkSync, rmSync, chmodSync, symlinkSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, mkdirSync, cpSync, unlinkSync, rmSync, chmodSync, symlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -14,16 +15,15 @@ const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "forgedock.mjs")
 
 function runCli(args, { cli = CLI, cwd, home, extraEnv } = {}) {
   return spawnSync(process.execPath, [cli, ...args], {
-    cwd: cwd ?? mkdtempSync(join(os.tmpdir(), "fd-cli-cwd-")),
+    cwd: cwd ?? tmpDir("fd-cli-cwd-"),
     env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1", ...extraEnv },
     encoding: "utf-8",
-    timeout: 30000,
-  });
+    timeout: 30000 });
 }
 
 describe("router", () => {
   it("backend-check fails configured API mode when its key is absent", () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-backend-check-"));
+    const home = tmpDir("fd-backend-check-");
     const unavailable = runCli(["backend-check", "--quiet"], {
       home,
       extraEnv: { FORGEDOCK_BACKEND: "api", ANTHROPIC_API_KEY: "" },
@@ -32,14 +32,14 @@ describe("router", () => {
   });
 
   it("backend-check rejects unknown flags with exit 2", () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-backend-check-bad-"));
+    const home = tmpDir("fd-backend-check-bad-");
     const res = runCli(["backend-check", "--bogus-flag"], { home });
     assert.equal(res.status, 2, res.stdout + res.stderr);
     assert.match(res.stderr, /Unknown option: --bogus-flag/);
   });
 
   it("help lists the union of journey + engine commands — no phantom commands", () => {
-    const res = runCli(["help"], { home: mkdtempSync(join(os.tmpdir(), "fd-h-")) });
+    const res = runCli(["help"], { home: tmpDir("fd-h-") });
     assert.equal(res.status, 0);
     // Journey/onboarding surface
     assert.match(res.stdout, /install/);
@@ -59,14 +59,14 @@ describe("router", () => {
   });
 
   it("unknown command exits 1", () => {
-    const res = runCli(["frobnicate"], { home: mkdtempSync(join(os.tmpdir(), "fd-u-")) });
+    const res = runCli(["frobnicate"], { home: tmpDir("fd-u-") });
     assert.equal(res.status, 1);
     assert.match(res.stdout + res.stderr, /Unknown command/);
   });
 
   it("routes the OpenCode install, status, and uninstall lifecycle", () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-opencode-cli-home-"));
-    const configDir = mkdtempSync(join(os.tmpdir(), "fd-opencode-cli-config-"));
+    const home = tmpDir("fd-opencode-cli-home-");
+    const configDir = tmpDir("fd-opencode-cli-config-");
     const extraEnv = { OPENCODE_CONFIG_DIR: configDir };
 
     const install = runCli(["opencode", "install"], { home, extraEnv });
@@ -90,10 +90,10 @@ describe("router", () => {
   });
 
   it("refreshes an existing managed OpenCode adapter during generic update", () => {
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-opencode-update-source-"));
-    const home = mkdtempSync(join(os.tmpdir(), "fd-opencode-update-home-"));
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-opencode-update-cwd-"));
-    const configDir = mkdtempSync(join(os.tmpdir(), "fd-opencode-update-config-"));
+    const forgeHome = tmpDir("fd-opencode-update-source-");
+    const home = tmpDir("fd-opencode-update-home-");
+    const cwd = tmpDir("fd-opencode-update-cwd-");
+    const configDir = tmpDir("fd-opencode-update-config-");
 
     try {
       cpSync(dirname(CLI), join(forgeHome, "bin"), {
@@ -149,14 +149,14 @@ describe("router", () => {
   });
 
   it("status reports unmanaged in a fresh directory", () => {
-    const res = runCli(["status"], { home: mkdtempSync(join(os.tmpdir(), "fd-s-")) });
+    const res = runCli(["status"], { home: tmpDir("fd-s-") });
     assert.equal(res.status, 0);
     assert.match(res.stdout, /unmanaged|not active/i);
   });
 
   it("install restores commands in an already managed directory", () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-managed-install-home-"));
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-managed-install-cwd-"));
+    const home = tmpDir("fd-managed-install-home-");
+    const cwd = tmpDir("fd-managed-install-cwd-");
     writeFileSync(join(cwd, "forge.yaml"), "project:\n", "utf-8");
 
     try {
@@ -171,8 +171,8 @@ describe("router", () => {
   });
 
   it("disable then status reports opted out", () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-d-"));
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-d-cwd-"));
+    const home = tmpDir("fd-d-");
+    const cwd = tmpDir("fd-d-cwd-");
     writeFileSync(join(cwd, "forge.yaml"), "project:\n", "utf-8");
     assert.equal(runCli(["disable"], { home, cwd }).status, 0);
     const res = runCli(["status"], { home, cwd });
@@ -180,14 +180,14 @@ describe("router", () => {
   });
 
   it("enable in a bare directory creates the .forgedock marker", () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-e-"));
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-e-cwd-"));
+    const home = tmpDir("fd-e-");
+    const cwd = tmpDir("fd-e-cwd-");
     assert.equal(runCli(["enable"], { home, cwd }).status, 0);
     assert.ok(existsSync(join(cwd, ".forgedock")));
   });
 
   it("works without HOME when USERPROFILE is set (no hard exit)", () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-w-"));
+    const home = tmpDir("fd-w-");
     const res = spawnSync(process.execPath, [CLI, "help"], {
       env: { ...process.env, HOME: "", USERPROFILE: home, NO_COLOR: "1" },
       encoding: "utf-8",
@@ -198,8 +198,8 @@ describe("router", () => {
   });
 
   it("uninstall removes copy-installed commands and clears the ownership manifest", () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-copy-"));
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-copy-cwd-"));
+    const home = tmpDir("fd-copy-");
+    const cwd = tmpDir("fd-copy-cwd-");
     const targetDir = join(home, ".claude", "commands");
     mkdirSync(targetDir, { recursive: true });
 
@@ -235,16 +235,16 @@ describe("router", () => {
     // resolves to "" here — the branch taken then depends only on whether the
     // sandbox has network access to the npm registry, so the assertion below
     // accepts either outcome rather than asserting on a live network result.
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-npm-"));
+    const forgeHome = tmpDir("fd-npm-");
     cpSync(join(dirname(CLI)), join(forgeHome, "bin"), {
       recursive: true,
       filter: (src) => !src.includes("tests"),
     });
     mkdirSync(join(forgeHome, "commands"), { recursive: true });
     writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest command\n", "utf-8");
-    const home = mkdtempSync(join(os.tmpdir(), "fd-npm-home-"));
+    const home = tmpDir("fd-npm-home-");
     const res = spawnSync(process.execPath, [join(forgeHome, "bin", "forgedock.mjs"), "update"], {
-      cwd: mkdtempSync(join(os.tmpdir(), "fd-npm-cwd-")),
+      cwd: tmpDir("fd-npm-cwd-"),
       env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" },
       encoding: "utf-8",
       timeout: 30000,
@@ -294,9 +294,9 @@ describe("router", () => {
     //     → on "main" branch → git fetch origin main → succeeds (local bare remote)
     //     → already up to date → relinkAndHint() → links mainRepo/commands
 
-    const remoteRepo = mkdtempSync(join(os.tmpdir(), "fd-remote-"));
-    const mainRepo = mkdtempSync(join(os.tmpdir(), "fd-main-repo-"));
-    const worktree = mkdtempSync(join(os.tmpdir(), "fd-worktree-"));
+    const remoteRepo = tmpDir("fd-remote-");
+    const mainRepo = tmpDir("fd-main-repo-");
+    const worktree = tmpDir("fd-worktree-");
 
     // Git identity env vars — required on CI runners that have no global user.email/user.name.
     // Without these, `git commit --allow-empty` exits non-zero (silent, stdio:pipe), leaving
@@ -362,7 +362,7 @@ describe("router", () => {
       filter: (src) => !src.includes("tests"),
     });
 
-    const home = mkdtempSync(join(os.tmpdir(), "fd-wt-home-"));
+    const home = tmpDir("fd-wt-home-");
 
     // Run forgedock update from the WORKTREE binary.
     // Before fix: FORGE_HOME = worktree path → ephemeral.md installed → dangling after cleanup.
@@ -371,7 +371,7 @@ describe("router", () => {
       process.execPath,
       [join(worktree, "bin", "forgedock.mjs"), "update"],
       {
-        cwd: mkdtempSync(join(os.tmpdir(), "fd-wt-cwd-")),
+        cwd: tmpDir("fd-wt-cwd-"),
         env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" },
         encoding: "utf-8",
         timeout: 30000,
@@ -408,7 +408,7 @@ describe("router", () => {
   // skipping. HEAD must never move in either case.
   // -------------------------------------------------------------------------
   function makeDirtyNonMainClone(prefix) {
-    const forgeHome = mkdtempSync(join(os.tmpdir(), prefix));
+    const forgeHome = tmpDir(prefix);
     const gitEnv = {
       ...process.env,
       GIT_AUTHOR_NAME: "ForgeDock Test",
@@ -442,8 +442,8 @@ describe("router", () => {
   }
 
   function makeCleanNonMainClone(prefix) {
-    const remoteRepo = mkdtempSync(join(os.tmpdir(), `${prefix}remote-`));
-    const forgeHome = mkdtempSync(join(os.tmpdir(), `${prefix}clone-`));
+    const remoteRepo = tmpDir(`${prefix}remote-`);
+    const forgeHome = tmpDir(`${prefix}clone-`);
     const gitEnv = {
       ...process.env,
       GIT_AUTHOR_NAME: "ForgeDock Test",
@@ -498,7 +498,7 @@ describe("router", () => {
 
   it("does not switch or relink a clean non-main source checkout", () => {
     const { forgeHome, branch, headBefore } = makeCleanNonMainClone("fd-clean-non-main-");
-    const home = mkdtempSync(join(os.tmpdir(), "fd-clean-non-main-home-"));
+    const home = tmpDir("fd-clean-non-main-home-");
 
     const res = spawnSync(process.execPath, [join(forgeHome, "bin", "forgedock.mjs"), "update"], {
       cwd: forgeHome,
@@ -530,7 +530,7 @@ describe("router", () => {
 
   it("update on a dirty, non-main branch run from INSIDE the source repo itself relinks commands/hooks and prints the npm fallback hint, HEAD unmoved (forge#2460)", () => {
     const { forgeHome, branch, headBefore } = makeDirtyNonMainClone("fd-selfrepo-");
-    const home = mkdtempSync(join(os.tmpdir(), "fd-selfrepo-home-"));
+    const home = tmpDir("fd-selfrepo-home-");
 
     const res = spawnSync(process.execPath, [join(forgeHome, "bin", "forgedock.mjs"), "update"], {
       cwd: forgeHome, // cwd IS FORGE_HOME — the npx-shadowing self-checkout case
@@ -563,7 +563,7 @@ describe("router", () => {
 
   it("update on a dirty, non-main branch run from INSIDE the source repo, when relinkAndHint() throws, prints an accurate error instead of the misleading fast-forward message (forge#2493)", () => {
     const { forgeHome, branch, headBefore } = makeDirtyNonMainClone("fd-selfrepo-relinkfail-");
-    const home = mkdtempSync(join(os.tmpdir(), "fd-selfrepo-relinkfail-home-"));
+    const home = tmpDir("fd-selfrepo-relinkfail-home-");
     // Force relinkAndHint() to throw: forge() does
     // `await mkdir(join(ctx.home, ".claude", "commands"), { recursive: true })`
     // — pre-creating a REGULAR FILE at `home/.claude` makes that mkdir throw
@@ -602,8 +602,8 @@ describe("router", () => {
 
   it("update on a dirty, non-main branch run from OUTSIDE the source repo (separate cwd) keeps the original commit/stash guidance — no npm fallback, no relink (forge#2460)", () => {
     const { forgeHome, branch, headBefore } = makeDirtyNonMainClone("fd-elsewhere-");
-    const home = mkdtempSync(join(os.tmpdir(), "fd-elsewhere-home-"));
-    const outsideCwd = mkdtempSync(join(os.tmpdir(), "fd-elsewhere-cwd-"));
+    const home = tmpDir("fd-elsewhere-home-");
+    const outsideCwd = tmpDir("fd-elsewhere-cwd-");
 
     const res = spawnSync(process.execPath, [join(forgeHome, "bin", "forgedock.mjs"), "update"], {
       cwd: outsideCwd, // cwd is NOT inside FORGE_HOME
@@ -634,8 +634,8 @@ describe("router", () => {
   });
 
   it("init --manual non-TTY with existing forge.yaml aborts (exit 1, file untouched)", () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-manual-abort-home-"));
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-manual-abort-cwd-"));
+    const home = tmpDir("fd-manual-abort-home-");
+    const cwd = tmpDir("fd-manual-abort-cwd-");
     const preContent = "precious: config\n";
     writeFileSync(join(cwd, "forge.yaml"), preContent, "utf-8");
 
@@ -653,8 +653,8 @@ describe("router", () => {
   });
 
   it("golden path: journey install (--fast, non-TTY) with a pre-existing CLAUDE.md (no managed block) leaves doctor exiting 0", () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-doctor-home-"));
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-doctor-cwd-"));
+    const home = tmpDir("fd-doctor-home-");
+    const cwd = tmpDir("fd-doctor-cwd-");
 
     // Deterministic git identity, independent of the host machine's own
     // global git config — Check 3 (git configured) must pass reliably.
@@ -675,7 +675,7 @@ describe("router", () => {
 
     // Stub external tools (gh, yq) so doctor passes in isolated environments
     // (CI, sandboxed test HOMEs) where these aren't installed/authenticated.
-    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-stub-bin-"));
+    const stubBin = tmpDir("fd-stub-bin-");
     // gh: must handle "gh --version" and "gh auth status" with exit 0
     writeFileSync(join(stubBin, "gh"), "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
     // yq: must handle "yq --version" with exit 0
@@ -707,8 +707,8 @@ describe("router", () => {
     // treated cwd's .claude/commands/ existence as evidence of a
     // "project-scoped ForgeDock install" and pointed status/doctor/uninstall
     // at the wrong directory.
-    const home = mkdtempSync(join(os.tmpdir(), "fd-split-home-"));
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-split-cwd-"));
+    const home = tmpDir("fd-split-home-");
+    const cwd = tmpDir("fd-split-cwd-");
 
     writeFileSync(
       join(home, ".gitconfig"),
@@ -723,7 +723,7 @@ describe("router", () => {
     const unrelatedFile = "not-a-forgedock-command.md";
     writeFileSync(join(cwdClaudeCommands, unrelatedFile), "# user's own command\n", "utf-8");
 
-    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-split-stub-bin-"));
+    const stubBin = tmpDir("fd-split-stub-bin-");
     writeFileSync(join(stubBin, "gh"), "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
     writeFileSync(join(stubBin, "yq"), "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n", { mode: 0o755 });
     const stubEnv = { PATH: `${stubBin}:${process.env.PATH}` };
@@ -826,19 +826,19 @@ describe("orchestrate engine fallback guards", () => {
 
 describe("version command / --version, -v flags (#1981)", () => {
   it("`version` prints the local version and exits 0", () => {
-    const res = runCli(["version"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-")) });
+    const res = runCli(["version"], { home: tmpDir("fd-ver-") });
     assert.equal(res.status, 0, res.stdout + res.stderr);
     assert.match(res.stdout, /forgedock v\d+\.\d+\.\d+/);
   });
 
   it("`--version` behaves identically to `version`", () => {
-    const res = runCli(["--version"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-flag-")) });
+    const res = runCli(["--version"], { home: tmpDir("fd-ver-flag-") });
     assert.equal(res.status, 0, res.stdout + res.stderr);
     assert.match(res.stdout, /forgedock v\d+\.\d+\.\d+/);
   });
 
   it("`-v` behaves identically to `version`", () => {
-    const res = runCli(["-v"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-short-")) });
+    const res = runCli(["-v"], { home: tmpDir("fd-ver-short-") });
     assert.equal(res.status, 0, res.stdout + res.stderr);
     assert.match(res.stdout, /forgedock v\d+\.\d+\.\d+/);
   });
@@ -847,14 +847,14 @@ describe("version command / --version, -v flags (#1981)", () => {
     // version/--version/-v are deliberately excluded from SPLASH_COMMANDS —
     // splash() renders to stderr, so stdout must contain only the version
     // output, not a duplicated logo block.
-    const res = runCli(["version"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-nosplash-")) });
+    const res = runCli(["version"], { home: tmpDir("fd-ver-nosplash-") });
     assert.equal(res.status, 0, res.stdout + res.stderr);
     const versionLines = res.stdout.split("\n").filter((l) => /forgedock v/.test(l));
     assert.equal(versionLines.length, 1, res.stdout);
   });
 
   it("help lists the version command and flag", () => {
-    const res = runCli(["help"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-help-")) });
+    const res = runCli(["help"], { home: tmpDir("fd-ver-help-") });
     assert.equal(res.status, 0);
     assert.match(res.stdout, /npx forgedock version/);
     assert.match(res.stdout, /--version/);
@@ -867,13 +867,13 @@ describe("version command / --version, -v flags (#1981)", () => {
     // command must still print the local version and exit 0 within the
     // process timeout, proving the 5s internal timeout on the latest-version
     // check never blocks the primary output.
-    const res = runCli(["version"], { home: mkdtempSync(join(os.tmpdir(), "fd-ver-net-"))});
+    const res = runCli(["version"], { home: tmpDir("fd-ver-net-")});
     assert.equal(res.status, 0, res.stdout + res.stderr);
   });
 
   // forge#2719 — package-vs-installed-commands drift advisory.
   it("warns when installed commands (~/.forge/version) are older than the package", () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-ver-drift-stale-"));
+    const home = tmpDir("fd-ver-drift-stale-");
     mkdirSync(join(home, ".forge"), { recursive: true });
     writeFileSync(join(home, ".forge", "version"), "0.0.1");
     const res = runCli(["version"], { home });
@@ -883,7 +883,7 @@ describe("version command / --version, -v flags (#1981)", () => {
   });
 
   it("stays silent about drift when installed commands match the package version", () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-ver-drift-equal-"));
+    const home = tmpDir("fd-ver-drift-equal-");
     // Read this checkout's own package.json version so the persisted version
     // exactly matches the source version under test.
     const pkgVersion = JSON.parse(
@@ -898,7 +898,7 @@ describe("version command / --version, -v flags (#1981)", () => {
 
   it("stays silent about drift when ~/.forge/version is missing (degrades to unknown, no throw)", () => {
     // No ~/.forge directory created at all — persisted state is absent.
-    const home = mkdtempSync(join(os.tmpdir(), "fd-ver-drift-missing-"));
+    const home = tmpDir("fd-ver-drift-missing-");
     const res = runCli(["version"], { home });
     assert.equal(res.status, 0, res.stdout + res.stderr);
     assert.doesNotMatch(res.stdout, /Installed commands are stale/);
@@ -934,8 +934,8 @@ describe("getInstalledCommandsDriftStatus() — package-vs-installed-commands he
   }
 
   it("reports isStale=true when the persisted version is older than the source version", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-drift-older-"));
-    const pkgDir = mkdtempSync(join(os.tmpdir(), "fd-drift-older-pkg-"));
+    const home = tmpDir("fd-drift-older-");
+    const pkgDir = tmpDir("fd-drift-older-pkg-");
     mkdirSync(join(home, ".forge"), { recursive: true });
     writeFileSync(join(home, ".forge", "version"), "1.0.0");
     writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ version: "2.0.0" }));
@@ -949,8 +949,8 @@ describe("getInstalledCommandsDriftStatus() — package-vs-installed-commands he
   });
 
   it("reports isStale=false when the persisted version equals the source version", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-drift-equal-"));
-    const pkgDir = mkdtempSync(join(os.tmpdir(), "fd-drift-equal-pkg-"));
+    const home = tmpDir("fd-drift-equal-");
+    const pkgDir = tmpDir("fd-drift-equal-pkg-");
     mkdirSync(join(home, ".forge"), { recursive: true });
     writeFileSync(join(home, ".forge", "version"), "3.1.4");
     writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ version: "3.1.4" }));
@@ -960,8 +960,8 @@ describe("getInstalledCommandsDriftStatus() — package-vs-installed-commands he
   });
 
   it("reports isStale=false when the persisted version is newer than the source version", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-drift-newer-"));
-    const pkgDir = mkdtempSync(join(os.tmpdir(), "fd-drift-newer-pkg-"));
+    const home = tmpDir("fd-drift-newer-");
+    const pkgDir = tmpDir("fd-drift-newer-pkg-");
     mkdirSync(join(home, ".forge"), { recursive: true });
     writeFileSync(join(home, ".forge", "version"), "9.9.9");
     writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ version: "1.0.0" }));
@@ -971,8 +971,8 @@ describe("getInstalledCommandsDriftStatus() — package-vs-installed-commands he
   });
 
   it("degrades to unknown=true, never throws, when ~/.forge/version is missing", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-drift-unknown-home-"));
-    const pkgDir = mkdtempSync(join(os.tmpdir(), "fd-drift-unknown-pkg-"));
+    const home = tmpDir("fd-drift-unknown-home-");
+    const pkgDir = tmpDir("fd-drift-unknown-pkg-");
     writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ version: "1.0.0" }));
     const result = await withHome(home, (fn) => fn(pkgDir));
     assert.equal(result.unknown, true);
@@ -980,8 +980,8 @@ describe("getInstalledCommandsDriftStatus() — package-vs-installed-commands he
   });
 
   it("degrades to unknown=true, never throws, when package.json is missing/unreadable", async () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-drift-unknown-pkg-home-"));
-    const pkgDir = mkdtempSync(join(os.tmpdir(), "fd-drift-unknown-pkg-missing-"));
+    const home = tmpDir("fd-drift-unknown-pkg-home-");
+    const pkgDir = tmpDir("fd-drift-unknown-pkg-missing-");
     mkdirSync(join(home, ".forge"), { recursive: true });
     writeFileSync(join(home, ".forge", "version"), "1.0.0");
     // No package.json written in pkgDir at all.
@@ -996,8 +996,8 @@ describe("getInstalledCommandsDriftStatus() — package-vs-installed-commands he
     ["non-string", 123],
   ]) {
     it(`degrades to unknown=true when package.json version is ${label}`, async () => {
-      const home = mkdtempSync(join(os.tmpdir(), `fd-drift-${label}-home-`));
-      const pkgDir = mkdtempSync(join(os.tmpdir(), `fd-drift-${label}-pkg-`));
+      const home = tmpDir(`fd-drift-${label}-home-`);
+      const pkgDir = tmpDir(`fd-drift-${label}-pkg-`);
       mkdirSync(join(home, ".forge"), { recursive: true });
       writeFileSync(join(home, ".forge", "version"), "1.0.0");
       const pkg = version === undefined ? {} : { version };
@@ -1015,7 +1015,7 @@ describe("getInstalledCommandsDriftStatus() — package-vs-installed-commands he
 
 describe("doctor — forge.yaml placeholder / staleness checks (forge#1850)", () => {
   function stubTools() {
-    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-doctor-stub-bin-"));
+    const stubBin = tmpDir("fd-doctor-stub-bin-");
     writeFileSync(join(stubBin, "gh"), "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
     writeFileSync(join(stubBin, "yq"), "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n", { mode: 0o755 });
     return { PATH: `${stubBin}:${process.env.PATH}` };
@@ -1028,8 +1028,8 @@ describe("doctor — forge.yaml placeholder / staleness checks (forge#1850)", ()
    * under test, not the whole install surface.
    */
   function setupWithForgeYaml(forgeYamlContent) {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-doctor-ph-home-"));
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-doctor-ph-cwd-"));
+    const home = tmpDir("fd-doctor-ph-home-");
+    const cwd = tmpDir("fd-doctor-ph-cwd-");
     writeFileSync(
       join(home, ".gitconfig"),
       "[user]\n\tname = Test User\n\temail = test@example.com\n",
@@ -1111,7 +1111,7 @@ describe("doctor — forge.yaml placeholder / staleness checks (forge#1850)", ()
 
 describe("doctor: SessionStart hook script path integrity (Check 5c, forge#1895)", () => {
   function stubTools() {
-    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-hookcheck-stub-bin-"));
+    const stubBin = tmpDir("fd-hookcheck-stub-bin-");
     writeFileSync(join(stubBin, "gh"), "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
     writeFileSync(join(stubBin, "yq"), "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n", { mode: 0o755 });
     return { PATH: `${stubBin}:${process.env.PATH}` };
@@ -1124,8 +1124,8 @@ describe("doctor: SessionStart hook script path integrity (Check 5c, forge#1895)
    * a hook script that has since gone missing (e.g. a pruned npx cache).
    */
   function installThenBreakHookPath(brokenPath) {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-hookcheck-home-"));
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-hookcheck-cwd-"));
+    const home = tmpDir("fd-hookcheck-home-");
+    const cwd = tmpDir("fd-hookcheck-cwd-");
     writeFileSync(
       join(home, ".gitconfig"),
       "[user]\n\tname = Test User\n\temail = test@example.com\n",
@@ -1201,15 +1201,15 @@ describe("doctor: SessionStart hook script path integrity (Check 5c, forge#1895)
 
 describe("doctor --fix (forge#1944)", () => {
   function stubTools() {
-    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-stub-bin-"));
+    const stubBin = tmpDir("fd-doctor-fix-stub-bin-");
     writeFileSync(join(stubBin, "gh"), "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
     writeFileSync(join(stubBin, "yq"), "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n", { mode: 0o755 });
     return { PATH: `${stubBin}:${process.env.PATH}` };
   }
 
   function setupInstall() {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-home-"));
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-cwd-"));
+    const home = tmpDir("fd-doctor-fix-home-");
+    const cwd = tmpDir("fd-doctor-fix-cwd-");
     writeFileSync(
       join(home, ".gitconfig"),
       "[user]\n\tname = Test User\n\temail = test@example.com\n",
@@ -1247,9 +1247,9 @@ describe("doctor --fix (forge#1944)", () => {
   }
 
   it("reports a symlink that resolves but cannot be traversed (forge#2837)", (t) => {
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-doctor-unreadable-src-"));
-    const home = mkdtempSync(join(os.tmpdir(), "fd-doctor-unreadable-home-"));
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-doctor-unreadable-cwd-"));
+    const forgeHome = tmpDir("fd-doctor-unreadable-src-");
+    const home = tmpDir("fd-doctor-unreadable-home-");
+    const cwd = tmpDir("fd-doctor-unreadable-cwd-");
     const sourcePath = join(forgeHome, "commands", "one.md");
     const targetPath = join(home, ".claude", "commands", "one.md");
 
@@ -1453,7 +1453,7 @@ describe("doctor --fix (forge#1944)", () => {
   // runs on POSIX platforms, which matches the project's CI (ubuntu-latest
   // — see .github/workflows/ci.yml) and is where the real coverage lives.
   function stubToolsWithLabels() {
-    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-label-stub-bin-"));
+    const stubBin = tmpDir("fd-doctor-fix-label-stub-bin-");
     const present = [
       "workflow:investigating",
       "workflow:ready-to-build",
@@ -1515,8 +1515,8 @@ describe("doctor --fix (forge#1944)", () => {
   const itPosix = process.platform === "win32" ? it.skip : it;
 
   itPosix("bootstraps missing GitHub workflow labels (Check 7) and is idempotent", () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-home-"));
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-doctor-fix-cwd-"));
+    const home = tmpDir("fd-doctor-fix-home-");
+    const cwd = tmpDir("fd-doctor-fix-cwd-");
     writeFileSync(
       join(home, ".gitconfig"),
       "[user]\n\tname = Test User\n\temail = test@example.com\n",
@@ -1592,14 +1592,14 @@ describe("doctor --fix (forge#1944)", () => {
 describe("status — re-entry mini-dashboard (#1945)", () => {
   /** Same install + forge.yaml overwrite pattern as the doctor placeholder suite above. */
   function setupConfigured(forgeYamlContent, { gh } = {}) {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-dash-home-"));
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-dash-cwd-"));
+    const home = tmpDir("fd-dash-home-");
+    const cwd = tmpDir("fd-dash-cwd-");
     writeFileSync(
       join(home, ".gitconfig"),
       "[user]\n\tname = Test User\n\temail = test@example.com\n",
       "utf-8",
     );
-    const stubBin = mkdtempSync(join(os.tmpdir(), "fd-dash-stub-bin-"));
+    const stubBin = tmpDir("fd-dash-stub-bin-");
     writeFileSync(join(stubBin, "gh"), gh ?? "#!/bin/sh\necho 'gh version 2.60.0'\n", { mode: 0o755 });
     writeFileSync(join(stubBin, "yq"), "#!/bin/sh\necho 'yq (https://github.com/mikefarah/yq/) version v4.44.0'\n", { mode: 0o755 });
     const extraEnv = { PATH: `${stubBin}:${process.env.PATH}` };
@@ -1642,8 +1642,8 @@ describe("status — re-entry mini-dashboard (#1945)", () => {
   });
 
   it("does not render dashboard rows for an unconfigured directory (no forge.yaml)", () => {
-    const home = mkdtempSync(join(os.tmpdir(), "fd-dash-unconf-home-"));
-    const cwd = mkdtempSync(join(os.tmpdir(), "fd-dash-unconf-cwd-"));
+    const home = tmpDir("fd-dash-unconf-home-");
+    const cwd = tmpDir("fd-dash-unconf-cwd-");
     const res = runCli(["status"], { cwd, home });
     assert.equal(res.status, 0, res.stdout + res.stderr);
     assert.doesNotMatch(res.stdout, /staging PRs/i);
@@ -1698,7 +1698,7 @@ describe("update — global npm install self-update (forge#2133)", () => {
       return;
     }
 
-    const shimDir = mkdtempSync(join(os.tmpdir(), "fd-npm-shim-"));
+    const shimDir = tmpDir("fd-npm-shim-");
     const globalRoot = join(shimDir, "global-root");
     const forgeHome = join(globalRoot, "forgedock");
     const installLog = join(shimDir, "install-log.txt");
@@ -1747,12 +1747,12 @@ describe("update — global npm install self-update (forge#2133)", () => {
         { mode: 0o755 },
       );
 
-      const home = mkdtempSync(join(os.tmpdir(), "fd-npm-shim-home-"));
+      const home = tmpDir("fd-npm-shim-home-");
       const res = spawnSync(
         process.execPath,
         [join(forgeHome, "bin", "forgedock.mjs"), "update"],
         {
-          cwd: mkdtempSync(join(os.tmpdir(), "fd-npm-shim-cwd-")),
+          cwd: tmpDir("fd-npm-shim-cwd-"),
           env: {
             ...process.env,
             HOME: home,
@@ -1793,7 +1793,7 @@ describe("update — global npm install self-update (forge#2133)", () => {
     // detection is negative for an ordinary temp-dir forgeHome (not nested
     // under any `npm root -g` result), so the pre-existing advisory-only
     // behavior for genuinely ephemeral installs is unchanged by forge#2133.
-    const forgeHome = mkdtempSync(join(os.tmpdir(), "fd-npm-notglobal-"));
+    const forgeHome = tmpDir("fd-npm-notglobal-");
     cpSync(dirname(CLI), join(forgeHome, "bin"), {
       recursive: true,
       filter: (src) => !src.includes("tests"),
@@ -1802,9 +1802,9 @@ describe("update — global npm install self-update (forge#2133)", () => {
     writeFileSync(join(forgeHome, "commands", "one.md"), "# /one\n\nTest command\n", "utf-8");
     writeFileSync(join(forgeHome, "package.json"), JSON.stringify({ name: "forgedock", version: "0.0.1" }), "utf-8");
 
-    const home = mkdtempSync(join(os.tmpdir(), "fd-npm-notglobal-home-"));
+    const home = tmpDir("fd-npm-notglobal-home-");
     const res = spawnSync(process.execPath, [join(forgeHome, "bin", "forgedock.mjs"), "update"], {
-      cwd: mkdtempSync(join(os.tmpdir(), "fd-npm-notglobal-cwd-")),
+      cwd: tmpDir("fd-npm-notglobal-cwd-"),
       env: { ...process.env, HOME: home, USERPROFILE: home, NO_COLOR: "1" },
       encoding: "utf-8",
       timeout: 30000,
@@ -1843,7 +1843,7 @@ describe("update — global npm install self-update (forge#2133)", () => {
       return;
     }
 
-    const shimDir = mkdtempSync(join(os.tmpdir(), "fd-npm-stale-shim-"));
+    const shimDir = tmpDir("fd-npm-stale-shim-");
     const globalRoot = join(shimDir, "global-root");
     const forgeHome = join(globalRoot, "forgedock");
     const installLog = join(shimDir, "install-log.txt");
@@ -1885,12 +1885,12 @@ describe("update — global npm install self-update (forge#2133)", () => {
         { mode: 0o755 },
       );
 
-      const home = mkdtempSync(join(os.tmpdir(), "fd-npm-stale-shim-home-"));
+      const home = tmpDir("fd-npm-stale-shim-home-");
       const res = spawnSync(
         process.execPath,
         [join(forgeHome, "bin", "forgedock.mjs"), "update"],
         {
-          cwd: mkdtempSync(join(os.tmpdir(), "fd-npm-stale-shim-cwd-")),
+          cwd: tmpDir("fd-npm-stale-shim-cwd-"),
           env: {
             ...process.env,
             HOME: home,
@@ -1946,7 +1946,7 @@ describe("update — global npm install self-update (forge#2133)", () => {
       return;
     }
 
-    const shimDir = mkdtempSync(join(os.tmpdir(), "fd-npm-neg-shim-"));
+    const shimDir = tmpDir("fd-npm-neg-shim-");
     const globalRoot = join(shimDir, "global-root");
     const forgeHome = join(globalRoot, "forgedock");
     const installLog = join(shimDir, "install-log.txt");
@@ -1984,12 +1984,12 @@ describe("update — global npm install self-update (forge#2133)", () => {
         { mode: 0o755 },
       );
 
-      const home = mkdtempSync(join(os.tmpdir(), "fd-npm-neg-shim-home-"));
+      const home = tmpDir("fd-npm-neg-shim-home-");
       const res = spawnSync(
         process.execPath,
         [join(forgeHome, "bin", "forgedock.mjs"), "update"],
         {
-          cwd: mkdtempSync(join(os.tmpdir(), "fd-npm-neg-shim-cwd-")),
+          cwd: tmpDir("fd-npm-neg-shim-cwd-"),
           env: {
             ...process.env,
             HOME: home,
@@ -2043,7 +2043,7 @@ describe("update — global npm install self-update (forge#2133)", () => {
       return;
     }
 
-    const shimDir = mkdtempSync(join(os.tmpdir(), "fd-npm-sig-shim-"));
+    const shimDir = tmpDir("fd-npm-sig-shim-");
     const globalRoot = join(shimDir, "global-root");
     const forgeHome = join(globalRoot, "forgedock");
     const forgedockBin = join(forgeHome, "bin", "forgedock.mjs");
@@ -2083,12 +2083,12 @@ describe("update — global npm install self-update (forge#2133)", () => {
         { mode: 0o755 },
       );
 
-      const home = mkdtempSync(join(os.tmpdir(), "fd-npm-sig-shim-home-"));
+      const home = tmpDir("fd-npm-sig-shim-home-");
       const res = spawnSync(
         process.execPath,
         [forgedockBin, "update"],
         {
-          cwd: mkdtempSync(join(os.tmpdir(), "fd-npm-sig-shim-cwd-")),
+          cwd: tmpDir("fd-npm-sig-shim-cwd-"),
           env: {
             ...process.env,
             HOME: home,
@@ -2138,7 +2138,7 @@ describe("update — global npm install self-update (forge#2133)", () => {
       return;
     }
 
-    const shimDir = mkdtempSync(join(os.tmpdir(), "fd-npm-win-shim-"));
+    const shimDir = tmpDir("fd-npm-win-shim-");
     const globalRoot = join(shimDir, "global-root");
     const forgeHome = join(globalRoot, "forgedock");
     const installLog = join(shimDir, "install-log.txt");
@@ -2180,12 +2180,12 @@ describe("update — global npm install self-update (forge#2133)", () => {
         ].join("\r\n"),
       );
 
-      const home = mkdtempSync(join(os.tmpdir(), "fd-npm-win-shim-home-"));
+      const home = tmpDir("fd-npm-win-shim-home-");
       const res = spawnSync(
         process.execPath,
         [join(forgeHome, "bin", "forgedock.mjs"), "update"],
         {
-          cwd: mkdtempSync(join(os.tmpdir(), "fd-npm-win-shim-cwd-")),
+          cwd: tmpDir("fd-npm-win-shim-cwd-"),
           env: {
             ...process.env,
             HOME: home,

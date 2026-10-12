@@ -1,17 +1,18 @@
 // forge#3572: per-run disk-backed TMPDIR, confined cleanup, disk-full classification, spec rules.
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { chmodSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync, readdirSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveRunTmpRoot, runTmpDir, withRunTmpdir } from "../runner.mjs";
+import { resolveRunTmpRoot, runTmpDir, withRunTmpdir, repoKey } from "../runner.mjs";
 import { cleanupRunTmpdir } from "../engine.mjs";
 import { isDiskQuotaText, isDiskQuotaError, codeForRunnerError, OUTCOME_CODES } from "../engine/outcome-codes.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 let cwd;
-beforeEach(() => { cwd = mkdtempSync(join(tmpdir(), "fd-tmproot-")); });
+beforeEach(() => { cwd = tmpDir("fd-tmproot-"); });
 afterEach(() => { rmSync(cwd, { recursive: true, force: true }); });
 
 describe("resolveRunTmpRoot / runTmpDir", () => {
@@ -33,10 +34,24 @@ describe("resolveRunTmpRoot / runTmpDir", () => {
     assert.equal(resolveRunTmpRoot(cwd, {}), join(homedir(), "scratch"));
   });
   it("runTmpDir is per-issue and rejects empty/non-numeric issues (never the root)", () => {
-    assert.equal(runTmpDir("/r", 7), join("/r", "7"));
-    assert.notEqual(runTmpDir("/r", 7), runTmpDir("/r", 8));
-    for (const bad of ["", null, undefined, "../x", "1/2", "a"]) assert.equal(runTmpDir("/r", bad), null);
-    assert.equal(runTmpDir(null, 7), null);
+    assert.equal(runTmpDir("/r", 7, cwd), join("/r", repoKey(cwd), "7"));
+    assert.notEqual(runTmpDir("/r", 7, cwd), runTmpDir("/r", 8, cwd));
+    for (const bad of ["", null, undefined, "../x", "1/2", "a"]) assert.equal(runTmpDir("/r", bad, cwd), null);
+    assert.equal(runTmpDir(null, 7, cwd), null);
+  });
+  it("two repos with the same issue number get distinct dirs; the same cwd is stable", () => {
+    const other = tmpDir("fd-tmproot-");
+    try {
+      assert.notEqual(runTmpDir("/r", 42, cwd), runTmpDir("/r", 42, other));
+      assert.equal(runTmpDir("/r", 42, cwd), runTmpDir("/r", 42, cwd));
+    } finally { rmSync(other, { recursive: true, force: true }); }
+  });
+  it("repoKey is path-safe: no separators, never empty, never dot segments", () => {
+    for (const c of ["/", "/a/b c/..weird", "/tmp/we ird;$(x)", "relative/nonexistent/dir"]) {
+      const k = repoKey(c);
+      assert.match(k, /^[A-Za-z0-9._-]+-[0-9a-f]{8}$/, c);
+      assert.ok(!k.startsWith("."), c);
+    }
   });
 });
 
@@ -45,9 +60,35 @@ describe("withRunTmpdir", () => {
     const root = join(cwd, "root");
     writeFileSync(join(cwd, "forge.yaml"), `engine:\n  tmp_root: ${root}\n`);
     const env = withRunTmpdir({ TMPDIR: "/tmp" }, { issue: "55", cwd });
-    assert.equal(env.TMPDIR, join(root, "55"));
-    assert.equal(env.CLAUDE_CODE_TMPDIR, join(root, "55"));
-    assert.ok(existsSync(join(root, "55")));
+    const dir = join(root, repoKey(cwd), "55");
+    assert.equal(env.TMPDIR, dir);
+    assert.equal(env.CLAUDE_CODE_TMPDIR, dir);
+    assert.ok(existsSync(dir));
+  });
+  it("creates the run dir and its repo-key parent with mode 0700", () => {
+    const root = join(cwd, "root");
+    writeFileSync(join(cwd, "forge.yaml"), `engine:\n  tmp_root: ${root}\n`);
+    const env = withRunTmpdir({}, { issue: "55", cwd });
+    assert.equal(statSync(env.TMPDIR).mode & 0o777, 0o700);
+    assert.equal(statSync(dirname(env.TMPDIR)).mode & 0o777, 0o700);
+  });
+  it("tightens a pre-existing loose-mode dir owned by us", () => {
+    const root = join(cwd, "root");
+    writeFileSync(join(cwd, "forge.yaml"), `engine:\n  tmp_root: ${root}\n`);
+    const dir = join(root, repoKey(cwd), "55");
+    mkdirSync(dir, { recursive: true, mode: 0o755 });
+    chmodSync(dir, 0o755);
+    const env = withRunTmpdir({}, { issue: "55", cwd });
+    assert.equal(env.TMPDIR, dir);
+    assert.equal(statSync(dir).mode & 0o777, 0o700);
+  });
+  it("does not use a pre-existing symlink at the run dir path", () => {
+    const root = join(cwd, "root");
+    writeFileSync(join(cwd, "forge.yaml"), `engine:\n  tmp_root: ${root}\n`);
+    const target = join(cwd, "victim"); mkdirSync(target);
+    mkdirSync(join(root, repoKey(cwd)), { recursive: true });
+    symlinkSync(target, join(root, repoKey(cwd), "55"));
+    assert.deepEqual(withRunTmpdir({ TMPDIR: "/tmp" }, { issue: "55", cwd }), { TMPDIR: "/tmp" });
   });
   it("leaves the env untouched when the operator owns the tmp root or the issue is unknown", () => {
     assert.deepEqual(withRunTmpdir({ TMPDIR: "/mnt/x" }, { issue: "55", cwd }), { TMPDIR: "/mnt/x" });
@@ -58,12 +99,36 @@ describe("withRunTmpdir", () => {
 describe("cleanupRunTmpdir", () => {
   it("removes only the issue dir under the root, leaving siblings and the root", () => {
     const root = join(cwd, "root");
-    mkdirSync(join(root, "55"), { recursive: true });
-    mkdirSync(join(root, "56"), { recursive: true });
+    mkdirSync(join(root, repoKey(cwd), "55"), { recursive: true });
+    mkdirSync(join(root, repoKey(cwd), "56"), { recursive: true });
     writeFileSync(join(cwd, "forge.yaml"), `engine:\n  tmp_root: ${root}\n`);
     assert.equal(cleanupRunTmpdir(55, { cwd, env: {} }), true);
-    assert.ok(!existsSync(join(root, "55")));
-    assert.ok(existsSync(join(root, "56")));
+    assert.ok(!existsSync(join(root, repoKey(cwd), "55")));
+    assert.ok(existsSync(join(root, repoKey(cwd), "56")));
+  });
+  it("cleanup of one repo's run leaves another repo's same-numbered dir intact", () => {
+    const root = join(cwd, "root");
+    const other = tmpDir("fd-tmproot-");
+    try {
+      const yaml = `engine:\n  tmp_root: ${root}\n`;
+      writeFileSync(join(cwd, "forge.yaml"), yaml);
+      writeFileSync(join(other, "forge.yaml"), yaml);
+      const a = withRunTmpdir({}, { issue: "55", cwd }).TMPDIR;
+      const b = withRunTmpdir({}, { issue: "55", cwd: other }).TMPDIR;
+      assert.notEqual(a, b);
+      assert.equal(cleanupRunTmpdir(55, { cwd, env: {} }), true);
+      assert.ok(!existsSync(a));
+      assert.ok(existsSync(b));
+    } finally { rmSync(other, { recursive: true, force: true }); }
+  });
+  it("cleanup of a symlinked run dir removes the link only, never the target", () => {
+    const root = join(cwd, "root");
+    writeFileSync(join(cwd, "forge.yaml"), `engine:\n  tmp_root: ${root}\n`);
+    const target = join(cwd, "victim"); mkdirSync(target); writeFileSync(join(target, "f"), "x");
+    mkdirSync(join(root, repoKey(cwd)), { recursive: true });
+    symlinkSync(target, join(root, repoKey(cwd), "55"));
+    cleanupRunTmpdir(55, { cwd, env: {} });
+    assert.ok(existsSync(join(target, "f")));
   });
   it("never deletes an operator-exported TMPDIR and never throws", () => {
     const op = join(cwd, "op"); mkdirSync(join(op, "55"), { recursive: true });

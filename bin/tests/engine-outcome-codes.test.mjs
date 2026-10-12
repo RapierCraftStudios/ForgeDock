@@ -1,7 +1,8 @@
 // forge#3833: closed outcome-code enum carried on PHASE_FAILED / blocked PHASE_COMMIT / RUN_TERMINAL.
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,13 +12,12 @@ import { PHASES } from "../engine/phases.mjs";
 import { parseState } from "../engine/state.mjs";
 import {
   OUTCOME_CODES, OUTCOME_CODES_VERSION, ALL_OUTCOME_CODES, UNCLASSIFIED,
-  isOutcomeCode, normalizeCode, codeForRunnerError, codeForTerminalReason,
-} from "../engine/outcome-codes.mjs";
+  isOutcomeCode, normalizeCode, codeForRunnerError, codeForTerminalReason } from "../engine/outcome-codes.mjs";
 import { SEP, trusted, jsonLines, asComments, inv, builder, remediation, remediationBody } from "./helpers/comments.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let dir;
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "fd-codes-")); });
+beforeEach(() => { dir = tmpDir("fd-codes-"); });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
 function fakeWorktreeList(text) {
@@ -59,11 +59,11 @@ const REVIEW_NEXT = "REVIEW_RESULT:\n  status: NEXT\n  next: remediate\n  remedi
 // (see docs/OUTCOME-CODES.md) so only the enum membership is asserted for them.
 const COVERAGE = {
   "review.changes_requested": "review.detectOutcome", "review.escalated": "review.detectOutcome",
-  "review.rereview_skipped": "reserved", "review.blocking_issue": "review.detectOutcome", "review.pr_open": "review.detectOutcome", "build.acceptance_failed": "build.detectOutcome",
+  "review.rereview_skipped": "reserved", "review.blocking_issue": "review.detectOutcome", "review.pr_open": "review.detectOutcome", "review.ci_pending_timeout": "engine", "build.acceptance_failed": "build.detectOutcome",
   "build.acceptance_malformed": "reserved", "build.size_over_gate": "reserved",
   "build.cohesive": "reserved", "remediate.no_marker": "remediate.detectOutcome",
   "remediate.deferred_live_run": "remediate.detectOutcome", "remediate.re_escalated": "remediate.detectOutcome",
-  "remediate.unfixable": "remediate.detectOutcome", "ci.red": "reserved", "ci.timeout": "reserved",
+  "remediate.unfixable": "remediate.detectOutcome", "remediate.inpr_requested": "remediate.detectOutcome", "infra.cli_spawn_transient": "engine", "cli.timeout": "engine", "ci.red": "reserved", "ci.timeout": "reserved",
   "base.conflict": "reserved", "rate_limited": "engine", "engine.error": "engine", "infra.disk_quota": "engine", "lease.held": "engine",
   "dependency.open": "engine", "dependency.unreadable": "engine",
   "invalid": "engine", "decomposed": "investigate.detectOutcome", "completed": "engine",

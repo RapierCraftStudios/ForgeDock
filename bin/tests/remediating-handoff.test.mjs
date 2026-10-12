@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // forge#3541: autonomous remediation handoffs (ci-gate, in-pr-fix, base-sync) use the
 // non-human `workflow:remediating` state, never `needs-human`.
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import { readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -34,8 +35,7 @@ describe("forge#3541 review.md R4 handoffs", () => {
   const paths = {
     "ci-gate": bullet('- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "ci gate"'),
     "inpr-fix": bullet('- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "in-pr fix required"'),
-    "base-sync": bullet('- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "base-conflict"'),
-  };
+    "base-sync": bullet('- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "base-conflict"') };
 
   for (const [kind, b] of Object.entries(paths)) {
     it(`${kind}: bound-unused branch hands off via the remediating state and never adds needs-human`, () => {
@@ -76,6 +76,29 @@ describe("forge#3541 review.md R4 handoffs", () => {
   });
 });
 
+describe("forge#3628 degraded-gate-unreviewed consumers", () => {
+  it("review.md R4 re-reviews once under its own DEGRADED_REREVIEW bound before needs-human", () => {
+    const b = bullet('- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "degraded-gate-unreviewed"');
+    assert.match(b, /DEGRADED_REREVIEW/);
+    assert.doesNotMatch(b, /count `<!-- FORGE:STALE_REREVIEW/);
+    assert.match(review, /DEGRADED_REREVIEW\/*[^\n]*\n[\s\S]*FORGE:DEGRADED_REREVIEW: pr=/);
+    assert.match(b, /Degraded Paths Reviewed/);
+    assert.match(b, /bound is already used, add `needs-human`/);
+  });
+  it("review-pr.md tells reviewers the marker, Reviewed-SHA and per-item format Phase 8 requires", () => {
+    const rp = read("commands/review-pr.md");
+    assert.match(rp, /first line is `<!-- FORGE:REVIEW-AGENT:\{domain\} -->`[^\n]*Reviewed-SHA: \$\{REVIEW_SHA\}[^\n]*`- <exact name>: <how its path was reviewed>`/);
+  });
+  it("remediate.md classifies the blocker and never edits code for it", () => {
+    const rem = read("commands/work-on/remediate.md");
+    assert.ok(rem.includes("degraded-gate-unreviewed"));
+    assert.match(rem, /not a code defect/);
+  });
+  it("the manual-merge fallthrough excludes the blocker", () => {
+    assert.match(review, /not a phase-trail[^)]*degraded-gate-unreviewed/);
+  });
+});
+
 describe("forge#3541 consumers accept workflow:remediating", () => {
   it("labels.json registers the state", () => {
     const labels = JSON.parse(read("bin/labels.json"));
@@ -108,7 +131,7 @@ describe("forge#3541 consumers accept workflow:remediating", () => {
 
 describe("forge#3541 transition-label.sh", () => {
   it("accepts `remediating` and removes the other workflow states", () => {
-    const dir = mkdtempSync(join(tmpdir(), "fd-3541-"));
+    const dir = tmpDir("fd-3541-");
     const log = join(dir, "calls.log");
     writeFileSync(join(dir, "gh"), `#!/usr/bin/env bash\necho "$@" >> "${log}"\ncase "$*" in *"--json labels"*) if [ -e "${dir}/seen" ]; then echo "workflow:remediating"; else touch "${dir}/seen"; echo "workflow:in-review"; fi ;; esac\nexit 0\n`);
     chmodSync(join(dir, "gh"), 0o755);

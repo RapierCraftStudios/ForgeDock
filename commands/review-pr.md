@@ -367,6 +367,8 @@ Reviewer roster tier \`${ROSTER_TIER}\`: ${ROSTER_REASON}. Roster: ${SELECTED_AG
 
 **Extended review (`REVIEW_DEPTH=EXTENDED`)** <!-- Added: forge#3862 -->: the roster script has already lifted a small, medium or fix-pr roster to standard and widened the standard baseline to the top-3 domains. Additionally dispatch each selected domain agent once per slice of at most `review.depth.slice_files` changed files (default 12; one slice when the PR has no more files), each slice carrying only its files' diff and the shared PR context, and merge the per-slice findings in Phase 5 (the dedup there treats the same `file:line` from two slices as one). The Security agent always reviews the whole diff, never a slice. Extended depth never skips a Phase 2 check, never weakens the Security floor, and never blocks the merge by itself; it is not a finding.
 
+**Degraded gate** <!-- Added: forge#3628 -->: when `MERGE_ISSUE` is set, read the `**Degraded**:` line of its newest trusted `FORGE:QUALITY_GATE` and the `FORGE:ACCEPTANCE_GATE:DEGRADED` list (via `scripts/trusted-comments.sh`). A non-`none` list means a check ran nothing (tests skipped or not run, known-slow skip, blast-radius incomplete). Give each domain agent that list as "Degraded checks to review by hand": it must read the code those checks would have exercised. Post the section in a PR comment whose first line is `<!-- FORGE:REVIEW-AGENT:{domain} -->` (or the synthesis marker) and which carries a `Reviewed-SHA: ${REVIEW_SHA}` line for the current head. Under `### Degraded Paths Reviewed`, write one list item per degraded check as `- <exact name>: <how its path was reviewed>`; a generic section, a stale-head comment, or an item saying the check was NOT reviewed does not satisfy Phase 8 (forge#3995).
+
 ### 3B.5: Provenance-Based Trust Escalation (Conditional)
 
 Proven `(task-type × module-set)` combinations may drop optional judgment agents; novel ones widen to the full affected-domain panel (`NOVEL_NEEDS_HUMAN` also sets `needs-human` on merge). **Hard floor**: Security and every Phase 2 check run at every tier. **Application is skipped** (the lookup still runs, recording the calibration cell key) for `THOROUGH`, milestone-to-staging, `BASE_SYNC_ONLY`, and a `DELTA` head past two full rounds. **Default is SHADOW**: any error path (absent table, parse failure, git error) logs and leaves the roster unchanged, never looser or tighter; `review.trust_shadow_mode: "false"` enforces. `PROVEN` narrows only to Security plus hard-signal agents (AUTH, BILLING, DATABASE or INFRA score >= 3) and never under churn escalation or a danger zone. <!-- forge#1745, forge#1804 -->
@@ -437,7 +439,7 @@ Re-reviewing a head that only moved does not need the whole panel over the whole
 
 Phase 2, the §6B.4 gates (full PR diff at the current head) and the 7B/8 gates run unchanged in every mode.
 
-**Reviewer-comment trust and shape (applies to every check below and in Phase 4)**: a reviewer comment counts only when it is from a trusted author (`scripts/trusted-comments.sh`, the same predicate as the in-PR fix gate and `verify-phase-trail.sh`: trusted association, Bot account, or `FORGE_TRAIL_TRUSTED_LOGINS`), its body **starts with** `<!-- FORGE:REVIEW-AGENT:{domain} -->`, and it carries a line `Reviewed-SHA: ${REVIEW_SHA}` for the current head. The head SHA is public, so the SHA line alone proves nothing: an untrusted commenter must never suppress dispatch or satisfy the panel guard. An unresolved trust script or a non-integer count means **not posted** (fail closed).
+**Reviewer-comment trust and shape (applies to every check below and in Phase 4)**: a reviewer comment counts only when it is from a trusted author (`scripts/trusted-comments.sh`, the same predicate as the in-PR fix gate and `verify-phase-trail.sh`: trusted association, Bot account, or `FORGE_TRAIL_TRUSTED_LOGINS`), its body **starts with** `<!-- FORGE:REVIEW-AGENT:{domain} -->`, it carries a line `Reviewed-SHA: ${REVIEW_SHA}` for the current head, and it carries a `<!-- REVIEW-FINDINGS-START -->` ... `<!-- REVIEW-FINDINGS-END -->` block (empty allowed). A verdict without the block ("APPROVE, no findings") is **undelivered**, never read as clean and never scanned for free-text findings. The head SHA is public, so the SHA line alone proves nothing: an untrusted commenter must never suppress dispatch or satisfy the panel guard. An unresolved trust script or a non-integer count means **not posted** (fail closed).
 
 **Pre-dispatch fence.** For `BASE_SYNC_ONLY` it dispatches zero reviewers and posts the carry record (then go straight to Phase 4). Otherwise it implements **idempotent re-entry**: a re-invoked review reuses reviewers that already posted for the current head, so it prints `PENDING_AGENTS` (the domains of the effective roster with no trusted current-SHA comment; comments for another SHA never count) and the linked issue's `BLAST_RADIUS_MANIFEST` (advisory; any failure prints it empty).
 
@@ -479,7 +481,7 @@ agent_domain() { local l; l=$(printf '%s' "${1}" | tr '[:upper:]' '[:lower:]'); 
 for AGENT in $SELECTED_AGENTS; do
   AGENT_DOMAIN=$(agent_domain "$AGENT"); HAVE=""
   if [ -n "$TRUSTED_SCRIPT" ]; then
-    HAVE=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)" 2>/dev/null || echo "")
+    HAVE=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->[\\s\\S]*<!-- REVIEW-FINDINGS-END -->)<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)" 2>/dev/null || echo "")
   fi
   case "$HAVE" in ''|*[!0-9]*) HAVE=0 ;; esac   # fail closed: unreadable or untrusted counts as not posted
   [ "$HAVE" -lt 1 ] && PENDING_AGENTS="${PENDING_AGENTS} ${AGENT}"
@@ -548,7 +550,7 @@ Each agent's `[FILE_LIST]` is `slices.<domain>.paths` from the context: the Secu
 
 ## Phase 4: Wait for Agents
 
-Completion is read from GitHub, never from notifications. A reviewer is complete only when a **trusted** comment (3C trust rule) starting with `<!-- FORGE:REVIEW-AGENT:{domain} -->` carries `Reviewed-SHA: <current head>`.
+Completion is read from GitHub, never from notifications. A reviewer is complete only when a **trusted** comment (3C trust rule) starting with `<!-- FORGE:REVIEW-AGENT:{domain} -->` carries `Reviewed-SHA: <current head>` and a findings block (`REVIEW-FINDINGS-START` ... `REVIEW-FINDINGS-END`, empty allowed). A domain whose comment lacks the block is missing: re-dispatch it **once** (3C, with the note "structured findings block required: end your comment with REVIEW-FINDINGS-START/END, empty if no findings"), then re-run this phase; a second miss is a delivery failure and takes the existing degraded-panel hard stop below. Never loop beyond that one re-dispatch.
 
 - **Joined tools** (`Task`, `task`): the reviewers already returned, so one pass decides; anything missing is a delivery failure.
 - **Async `Agent`**: bounded wait, **one poll pass per Bash call** (a call is capped at 120s, 600s max, so one long loop would be killed before the hard stop ran). The first pass records an epoch deadline in a private absolute file keyed by PR and head SHA; every exit removes it and 3C removes it before (re)dispatch, so a re-review never inherits an expired window. Re-run while it prints `PANEL_STATUS: WAITING`.
@@ -590,7 +592,7 @@ agent_domain() { local l; l=$(printf '%s' "${1}" | tr '[:upper:]' '[:lower:]'); 
 for AGENT in $SELECTED_AGENTS; do
   AGENT_DOMAIN=$(agent_domain "$AGENT"); N=""
   if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$COMMENTS_JSON" ]; then
-    N=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)" 2>/dev/null || echo "")
+    N=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->[\\s\\S]*<!-- REVIEW-FINDINGS-END -->)<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->[\\s\\S]*(^|\\n)Reviewed-SHA: ${REVIEW_SHA}(\\r?\\n|$)" 2>/dev/null || echo "")
   fi
   case "$N" in ''|*[!0-9]*) N=0 ;; esac   # fail closed
   if [ "$N" -lt 1 ]; then MISSING_AGENT_COMMENTS="${MISSING_AGENT_COMMENTS} ${AGENT_DOMAIN}"; else ACTUAL_AGENT_COUNT=$(( ACTUAL_AGENT_COUNT + 1 )); fi
@@ -655,7 +657,7 @@ cat "$OUT_DIR/note-list.txt" 2>/dev/null
 
 `extract` reads the trusted synthesized block for the head, else its trusted agent bodies (`BASE_SYNC_ONLY`: the carried head; `DELTA`: this head plus the earlier reviewed one), parses every `<!-- FINDING:... -->` marker (an unparseable marker blocks the review), dedupes by file + line range ±5 and by title (3+ shared keywords, higher confidence wins), and applies the **§6B.4 gates** in order, each keeping the finding when its input is unreadable: (1) **head-SHA**: a cited line past the end of the file at `REVIEW_SHA` is stale and DROPPED (`findings_dropped_stale`); (2) **introduced-line**: a MEDIUM-or-lower finding whose range (±5) misses the PR's added lines is `pre-existing` (**CRITICAL/HIGH are never routed as pre-existing**, whatever their confidence, `protocols.md` §5; input comes from the diff, never a reviewer's `**Scope**` tag; deleted, renamed and patch-less files always intersect); (3) **concrete-failure**: a MEDIUM-or-lower finding without a `**Failure scenario**` becomes a NOTE (`notes_demoted_no_scenario`).
 
-Read `STRUCTURED_FINDINGS`, `FINDINGS_KEPT`, `FINDINGS_DROPPED_STALE`, `FINDINGS_PREEXISTING` and `NOTES_DEMOTED_NO_SCENARIO` for the record and summary. The caller's part of 6A: add the Phase 2.5 `INTEG-N` findings no reviewer covered (CONFIRMED HIGH, so ISSUE, filed in 6C); on `CLEAN_STRUCTURED=true` scan the trusted agent comments for unstructured findings (lines starting "Finding", "Issue", "Bug", "Warning"), and with none and no `INTEG-N` the review is clean: skip to Phase 7. **Pre-existing route**: a pre-existing finding (MEDIUM or lower) is never filed as `review-finding`/`needs-validation` nor linked to this PR (it stays out of findings-per-PR and the amplification ratio); it still passes the §6B.5 classifier, is listed once in the summary, and at most 3 per review (highest severity first) are filed with the `pre-existing` label plus `priority:*`, citing this PR (`preexisting_filed`, not `findings_filed`).
+Read `STRUCTURED_FINDINGS`, `FINDINGS_KEPT`, `FINDINGS_DROPPED_STALE`, `FINDINGS_PREEXISTING` and `NOTES_DEMOTED_NO_SCENARIO` for the record and summary. The caller's part of 6A: add the Phase 2.5 `INTEG-N` findings no reviewer covered (CONFIRMED HIGH, so ISSUE, filed in 6C); findings come only from `FINDING:` markers, never from free text. If `AGENTS_WITHOUT_BLOCK` is non-empty those agents are undelivered: re-dispatch them once (Phase 4 rule), else take the degraded-panel path; `CLEAN_STRUCTURED` is withheld while it is non-empty. On `CLEAN_STRUCTURED=true` and no `INTEG-N` the review is clean: skip to Phase 7. A finding that somehow has no marker is classified with `classify-finding.sh --unstructured` (empty or unparseable severity gives `NOTE unstructured`, never ISSUE). **Pre-existing route**: a pre-existing finding (MEDIUM or lower) is never filed as `review-finding`/`needs-validation` nor linked to this PR (it stays out of findings-per-PR and the amplification ratio); it still passes the §6B.5 classifier, is listed once in the summary, and at most 3 per review (highest severity first) are filed with the `pre-existing` label plus `priority:*`, citing this PR (`preexisting_filed`, not `findings_filed`).
 
 ### 6B.5: Non-blocking note disposition (MANDATORY before 6C)
 
@@ -674,7 +676,7 @@ Each NOTE gets one disposition: (1) **fix in this PR**, only comment, documentat
 
 ### 6B.6: In-PR fix gate
 
-A CONFIRMED MEDIUM-or-higher defect in a file this PR changed is cheaper to fix before merge than through a separate `/work-on` cycle: `classify` marks it `INPR_FIX` and posts the `FORGE:INPR_FIX` request after the disposition marker (`INPR_FIX_POSTED=true`), so do NOT file those findings in 6C. Narrow by design: auto-merge reviews with `--issue`, files in the PR diff, one round per PR (any trusted `FORGE:INPR_FIX*` marker ends it). Phase 8 then refuses to merge this head (blocker `in-pr fix required`). If the round fails, `/work-on` waives it for MEDIUM and files the findings (`work-on/review.md` R4); HIGH/CRITICAL are never waived and end at `needs-human`.
+A CONFIRMED MEDIUM-or-higher defect, or a LIKELY MEDIUM defect whose line the PR introduced (`scope=introduced`), in a file this PR changed is cheaper to fix before merge than through a separate `/work-on` cycle: `classify` marks it `INPR_FIX` and posts the `FORGE:INPR_FIX` request after the disposition marker (`INPR_FIX_POSTED=true`), so do NOT file those findings in 6C. `review-finalize.sh extract` computes `scope` (`introduced` | `pre-existing` | `unknown`) per finding from the PR diff (the added-line window; unknown provenance never widens the gate). Narrow by design: auto-merge reviews with `--issue`, files in the PR diff, one round per PR (any trusted `FORGE:INPR_FIX*` marker ends it). Phase 8 then refuses to merge this head (blocker `in-pr fix required`). If the round fails, `/work-on` waives it for MEDIUM and files the findings (`work-on/review.md` R4); HIGH/CRITICAL are never waived and end at `needs-human`.
 
 ### 6C: Create Issues
 
@@ -718,6 +720,7 @@ cat <<'ISSUE_EOF' > "$FINDING_ISSUE_BODY_FILE"
 **Agent**: [name] ([domain])
 **Confidence**: [CONFIRMED/LIKELY/POSSIBLE]
 **Severity**: [CRITICAL/HIGH/MEDIUM/LOW]
+**Scope**: introduced|pre-existing (the worklist item's `scope`; omit the line when it is `unknown`)
 **Review comment**: [permalink to agent comment]
 
 ## Pattern Metadata
@@ -799,25 +802,29 @@ Append a `## Review Findings` table (summaries and issue links) to the PR body: 
 
 ```bash
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"; MERGE_ISSUE="{MERGE_ISSUE}"
-MERGE_HEALTH="{MERGE_HEALTH}"; MERGE_HEALTH_STATE="{MERGE_HEALTH_STATE}"; BASE="{BASE}"; HEAD="{HEAD}"; REVIEW_SHA="{REVIEW_SHA}"
+MERGE_HEALTH="{MERGE_HEALTH}"; MERGE_HEALTH_STATE="{MERGE_HEALTH_STATE}"; BASE="{BASE}"; HEAD="{HEAD}"; REVIEW_SHA="{REVIEW_SHA}"; CTX="{CONTEXT_FILE}"
 INTENSITY_TIER="{INTENSITY_TIER}"; TABLE_CELL_KEY="{TABLE_CELL_KEY}"; TRUST_SHADOW_MODE="{TRUST_SHADOW_MODE}"; TRUST_NEEDS_HUMAN="{TRUST_NEEDS_HUMAN}"
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
 RF=$(forge_resolve review-finalize.sh)   # install roots only, never the PR checkout; unresolvable is a stop (fail closed), never a skipped gate
 [ -n "$RF" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/review-finalize.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install); refusing to continue (fail closed)"; exit 1; }   # STOP
-# --result: stale (PR HEAD moved) | clean (no blocking criteria) | blocking (any criterion above). Free text is data, never code.
+OUT_DIR="$(dirname "$CTX")/review-finalize-${PR_NUMBER}"; mkdir -p "$OUT_DIR"
+# Free text (purpose-regression findings, agents list) derives from PR content: BEFORE this fence, write it with the file-write tool (never a
+# shell heredoc, echo or printf of the text) to "$OUT_DIR/purpose-findings.txt" (ids and reasons; leave absent when there is no purpose regression)
+# and "$OUT_DIR/agents.txt" ("{N} agents: {names}"). It is passed by path, so it is never re-parsed as shell. Never put free text in a shell word.
+# --result: stale (PR HEAD moved) | clean (no blocking criteria) | blocking (any criterion above).
 VERDICT_OUT=$(bash "$RF" verdict --pr "$PR_NUMBER" --repo "$REPO" --review-sha "$REVIEW_SHA" --base "$BASE" --head-branch "$HEAD" \
   --merge-health "$MERGE_HEALTH" --merge-health-state "$MERGE_HEALTH_STATE" --is-milestone "{IS_MILESTONE_TO_STAGING}" \
-  --has-purpose-regression "{HAS_PURPOSE_REGRESSION}" --purpose-findings '{PURPOSE_REGRESSION_FINDINGS}' \
-  --result "{RESULT}" --agents '{N} agents: {names}' --findings-count "{M}" --blocking-count "{N_BLOCKING}" \
+  --has-purpose-regression "{HAS_PURPOSE_REGRESSION}" --purpose-findings-file "$OUT_DIR/purpose-findings.txt" \
+  --result "{RESULT}" --agents-file "$OUT_DIR/agents.txt" --findings-count "{M}" --blocking-count "{N_BLOCKING}" \
   --intensity-tier "$INTENSITY_TIER" --table-cell-key "$TABLE_CELL_KEY" --trust-shadow-mode "$TRUST_SHADOW_MODE"); VERDICT_RC=$?
 printf '%s\n' "$VERDICT_OUT"
 [ "$VERDICT_RC" -eq 0 ] || exit 1   # STOP: REVIEW_RESULT: status: BLOCKED was printed
 # 7B.5: reads task type and confidence from the linked issue's FORGE:INVESTIGATOR, consults origin/forge-knowledge, records FORGE:CALIBRATION_CHECK.
-bash "$RF" calibrate --pr "$PR_NUMBER" --repo "$REPO" --issue "$MERGE_ISSUE" \
+bash "$RF" calibrate --pr "$PR_NUMBER" --repo "$REPO" --issue "$MERGE_ISSUE" --out-dir "$OUT_DIR" \
   --intensity-tier "$INTENSITY_TIER" --table-cell-key "$TABLE_CELL_KEY" --trust-shadow-mode "$TRUST_SHADOW_MODE" --trust-needs-human "$TRUST_NEEDS_HUMAN"
 ```
 
-`verdict` computes `BASE_CONFLICT` (the single source of truth for the Phase 8 guards), posts the verdict with the trust annotation, and never posts a clean verdict over a base conflict or purpose regression (it downgrades to CHANGES REQUESTED, `VERDICT_COERCED=true`). Read `VERDICT=`, `BASE_CONFLICT=`, `HAS_PURPOSE_REGRESSION=` and, from `calibrate`, `CALIBRATION_NEEDS_HUMAN=` / `CALIBRATION_NOTE=`: they are the Phase 8 flags.
+`verdict` computes `BASE_CONFLICT` (the single source of truth for the Phase 8 guards), posts the verdict with the trust annotation, and never posts a clean verdict over a base conflict or purpose regression (it downgrades to CHANGES REQUESTED, `VERDICT_COERCED=true`). Read `VERDICT=`, `BASE_CONFLICT=`, `HAS_PURPOSE_REGRESSION=` and, from `calibrate`, `CALIBRATION_NEEDS_HUMAN=` / `CALIBRATION_NOTE=`: they are the Phase 8 flags. The note itself is also written to `$OUT_DIR/calibration-note.txt`, which Phase 8 passes by path; free text is never placed in a shell word.
 
 ---
 
@@ -825,18 +832,20 @@ bash "$RF" calibrate --pr "$PR_NUMBER" --repo "$REPO" --issue "$MERGE_ISSUE" \
 
 **Skip if** `AUTO_MERGE=false`.
 
-**One script owns every Phase 8 gate (MANDATORY; a gate is never skipped, reordered or hand-run).** `review-finalize.sh merge-gate` runs, in order, and stops at the first refusal: the note-disposition preflight (a trusted `FORGE:NOTE_DISPOSITION` must exist), the in-PR fix gate (an unanswered trusted `FORGE:INPR_FIX` at the current head blocks), the phase-trail preflight (`scripts/verify-phase-trail.sh` on the linked issue; `--issue` is mandatory and never inferred; an infrastructure failure is `BLOCKED` plus `needs-human`) <!-- Added: forge#3061 -->, the guard-state flags below (`VERDICT` is `APPROVED` or `CHANGES REQUESTED`, the others `true`/`false`; an empty or unsubstituted value aborts with `needs-human`; `--other-blocking true` when 7B criterion 1, 2, 3 or 5 fired), routing (a base conflict as the ONLY blocker routes to the base-sync path, `blocker: base-conflict`; any other hold adds `needs-human`), the pre-merge mergeability guard on fresh state, the previously-escalated guard (parks at `workflow:awaiting-merge`, never merges), the CI gate (`scripts/wait-ci-green.sh`) with the reviewed-head guard (only the commit the `FORGE:REVIEW_ROUTE` sha approved; a docs-only delta is allowed), and finally the merge with `--match-head-commit`. Every gate fails closed.
+**One script owns every Phase 8 gate (MANDATORY; a gate is never skipped, reordered or hand-run).** `review-finalize.sh merge-gate` runs, in order, and stops at the first refusal: the note-disposition preflight (a trusted `FORGE:NOTE_DISPOSITION` must exist), the in-PR fix gate (an unanswered trusted `FORGE:INPR_FIX` at the current head blocks), the phase-trail preflight (`scripts/verify-phase-trail.sh` on the linked issue; `--issue` is mandatory and never inferred; an infrastructure failure is `BLOCKED` plus `needs-human`) <!-- Added: forge#3061 -->, the degraded-gate review (`degraded-gate-unreviewed` unless a `### Degraded Paths Reviewed` section covers each degraded check), the guard-state flags below (`VERDICT` is `APPROVED` or `CHANGES REQUESTED`, the others `true`/`false`; an empty or unsubstituted value aborts with `needs-human`; `--other-blocking true` when 7B criterion 1, 2, 3 or 5 fired), routing (a base conflict as the ONLY blocker routes to the base-sync path, `blocker: base-conflict`; any other hold adds `needs-human`), the pre-merge mergeability guard on fresh state, the previously-escalated guard (parks at `workflow:awaiting-merge`, never merges), the CI gate (`scripts/wait-ci-green.sh`) with the reviewed-head guard (only the commit the `FORGE:REVIEW_ROUTE` sha approved; a docs-only delta is allowed), and finally the merge with `--match-head-commit`. Every gate fails closed.
 
 ```bash
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 MERGE_ISSUE="{MERGE_ISSUE}"; MERGE_BASE="{MERGE_BASE}"; IS_MILESTONE_TO_STAGING="{IS_MILESTONE_TO_STAGING}"
-VERDICT="{VERDICT}"; HAS_PURPOSE_REGRESSION="{HAS_PURPOSE_REGRESSION}"; CALIBRATION_NEEDS_HUMAN="{CALIBRATION_NEEDS_HUMAN}"; CALIBRATION_NOTE='{CALIBRATION_NOTE}'
+VERDICT="{VERDICT}"; HAS_PURPOSE_REGRESSION="{HAS_PURPOSE_REGRESSION}"; CALIBRATION_NEEDS_HUMAN="{CALIBRATION_NEEDS_HUMAN}"; CTX="{CONTEXT_FILE}"
 TRUST_NEEDS_HUMAN="{TRUST_NEEDS_HUMAN}"; BASE_CONFLICT="{BASE_CONFLICT}"; OTHER_BLOCKING="{OTHER_BLOCKING}"; TABLE_CELL_KEY="{TABLE_CELL_KEY}"
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
 RF=$(forge_resolve review-finalize.sh)   # install roots only, never the PR checkout; unresolvable is a stop (fail closed), never a skipped gate
 [ -n "$RF" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/review-finalize.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install); refusing to continue (fail closed)"; exit 1; }   # STOP
+# The calibration note derives from issue text: `calibrate` (Phase 7B.5) wrote it to this file; it is passed by path, never substituted into a shell word.
+OUT_DIR="$(dirname "$CTX")/review-finalize-${PR_NUMBER}"
 GATE_OUT=$(bash "$RF" merge-gate --pr "$PR_NUMBER" --repo "$REPO" --issue "$MERGE_ISSUE" --base "$MERGE_BASE" \
-  --verdict "$VERDICT" --has-purpose-regression "$HAS_PURPOSE_REGRESSION" --calibration-needs-human "$CALIBRATION_NEEDS_HUMAN" --calibration-note "$CALIBRATION_NOTE" \
+  --verdict "$VERDICT" --has-purpose-regression "$HAS_PURPOSE_REGRESSION" --calibration-needs-human "$CALIBRATION_NEEDS_HUMAN" --calibration-note-file "$OUT_DIR/calibration-note.txt" \
   --trust-needs-human "$TRUST_NEEDS_HUMAN" --base-conflict "$BASE_CONFLICT" --other-blocking "$OTHER_BLOCKING" --table-cell-key "$TABLE_CELL_KEY"); GATE_RC=$?
 printf '%s\n' "$GATE_OUT"
 # 8B: only for a milestone->staging PR whose merge just succeeded: clears the milestone on its open review-finding issues so they flow through the fast lane.
@@ -849,6 +858,7 @@ exit "$GATE_RC"
 **Outcome mapping.** Report the script's output; never re-run its gates by hand and never `gh pr merge` yourself.
 - Exit 0, `MERGE_OUTCOME=merged` (`MERGE_STATE=MERGED`): merged. `merge-failed`: the merge did not land (the script commented on the issue). `parked-awaiting-merge`: parked per the previously-escalated guard; the script performs the transition itself (`transition-label.sh ... awaiting-merge`, prose fallback `gh issue edit --add-label "workflow:awaiting-merge"`).
 - Exit 3: print the `REVIEW_RESULT: status: BLOCKED, blocker: ...` line and stop; `MERGE_OUTCOME=` names the case (`base-conflict`, `needs-human`, `protection-blocked`, `stale-review`, `ci-not-green`). A CI gate TIMEOUT prints `CI_GATE_TIMEOUT`: re-run the same fence up to 3 more times. A phase-trail blocker with no MISSING lines (`phase trail unreadable (rc=N)`, `auto-merge requires --issue`) is an infrastructure or usage failure: callers neither re-run phases nor merge manually.
+- Exit 3 with `blocker: degraded-gate-unreviewed` (`needs-human` added): the linked issue's gate is DEGRADED and no trusted review comment for the current head has a `### Degraded Paths Reviewed` section with a `- name: how reviewed` item for every degraded check. Not a code defect: `work-on:review` (R4) re-runs the review once so the section is added. Never merge by hand. <!-- Added: forge#3628 -->
 - Exit 4: `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` plus the `MISSING:` lines. Return that status and stop: this phase never re-runs the missing phases and never escalates to `needs-human`; `work-on:review` (R4) alone owns re-dispatching them (forge#3102).
 
 Phase 8 ONLY merges the PR. It does NOT close the issue, update labels or clean up worktrees: when invoked via `/work-on` those belong to `work-on/close.md`, and doing them here would close the issue with `workflow:merged` before the close phase ran. <!-- Added: forge#815 -->

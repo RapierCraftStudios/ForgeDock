@@ -6,6 +6,8 @@
 # Run: bash scripts/classify-finding.test.sh   (bash 3.2 compatible)
 
 set -u
+# Every mktemp below lands in one private dir that the EXIT trap removes (forge#4016).
+_SUITE_TMP=$(mktemp -d); export TMPDIR="$_SUITE_TMP"; trap 'rm -rf "$_SUITE_TMP"' EXIT
 DIR=$(cd "$(dirname "$0")" && pwd)
 S="$DIR/classify-finding.sh"
 pass=0; fail=0
@@ -28,6 +30,16 @@ expect ISSUE "HIGH on lineage files"          -- --severity HIGH --confidence LI
 expect ISSUE "missing severity files"         -- --severity "" --confidence LIKELY
 expect ISSUE "unknown severity files"         -- --severity INFO
 expect ISSUE "lowercase high files"           -- --severity high
+
+# --- --unstructured: a marker-less finding can never be ISSUE on a bad severity ---
+expect NOTE  "unstructured empty severity is NOTE"       -- --unstructured --severity "" --confidence LIKELY
+expect NOTE  "unstructured missing severity is NOTE"     -- --unstructured
+expect NOTE  "unstructured garbage severity is NOTE"     -- --unstructured --severity INFO
+expect ISSUE "unstructured HIGH still files"             -- --unstructured --severity HIGH --confidence POSSIBLE
+expect ISSUE "unstructured CRITICAL still files"         -- --unstructured --severity CRITICAL
+expect ISSUE "unstructured MEDIUM CONFIRMED still files" -- --unstructured --severity MEDIUM --confidence CONFIRMED --text "loop exits early"
+expect ISSUE "marker finding, empty severity stays ISSUE" -- --severity "" --confidence LIKELY
+expect ISSUE "marker finding, bad severity stays ISSUE"  -- --severity INFO
 
 # --- Rule 4: non-lineage ---
 expect ISSUE "MEDIUM CONFIRMED files"         -- --severity MEDIUM --confidence CONFIRMED --text "loop exits early"
@@ -112,6 +124,17 @@ expect INPR_FIX "./ prefix matches"                   -- --severity MEDIUM --con
 expect INPR_FIX "lineage PR still fixes in-PR"        -- --severity MEDIUM --confidence CONFIRMED --lineage review-finding --inpr-diff "$DIFF" --file src/api/jobs.py
 expect ISSUE "MEDIUM CONFIRMED outside diff files"    -- --severity MEDIUM --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/other.py
 expect ISSUE "MEDIUM LIKELY in diff is not gated"     -- --severity MEDIUM --confidence LIKELY --inpr-diff "$DIFF" --file src/api/jobs.py
+# --- scope-aware gate (#3975): MEDIUM LIKELY in diff is INPR_FIX only when introduced ---
+expect INPR_FIX "MEDIUM LIKELY introduced in diff"     -- --severity MEDIUM --confidence LIKELY --scope introduced --inpr-diff "$DIFF" --file src/api/jobs.py
+expect INPR_FIX "MEDIUM CONFIRMED introduced in diff"  -- --severity MEDIUM --confidence CONFIRMED --scope introduced --inpr-diff "$DIFF" --file src/api/jobs.py
+expect ISSUE "MEDIUM LIKELY pre-existing stays ISSUE"  -- --severity MEDIUM --confidence LIKELY --scope pre-existing --inpr-diff "$DIFF" --file src/api/jobs.py
+expect ISSUE "MEDIUM LIKELY unknown stays ISSUE"       -- --severity MEDIUM --confidence LIKELY --scope unknown --inpr-diff "$DIFF" --file src/api/jobs.py
+expect ISSUE "MEDIUM LIKELY introduced outside diff"   -- --severity MEDIUM --confidence LIKELY --scope introduced --inpr-diff "$DIFF" --file src/api/other.py
+expect NOTE  "MEDIUM POSSIBLE introduced stays NOTE"  -- --severity MEDIUM --confidence POSSIBLE --scope introduced --inpr-diff "$DIFF" --file src/api/jobs.py
+expect NOTE  "LOW LIKELY introduced is not INPR_FIX"   -- --severity LOW --confidence LIKELY --scope introduced --inpr-diff "$DIFF" --file src/api/jobs.py
+expect ISSUE "HIGH LIKELY introduced stays ISSUE"      -- --severity HIGH --confidence LIKELY --scope introduced --inpr-diff "$DIFF" --file src/api/jobs.py
+expect INPR_FIX "HIGH CONFIRMED pre-existing scope unchanged" -- --severity HIGH --confidence CONFIRMED --scope pre-existing --inpr-diff "$DIFF" --file src/api/jobs.py
+expect_exit 2 "bad --scope value"                      -- --severity MEDIUM --scope bogus
 expect INPR_FIX "HIGH CONFIRMED in diff (#3592)"       -- --severity HIGH --confidence CONFIRMED --inpr-diff "$DIFF" --file src/api/jobs.py
 expect INPR_FIX "CRITICAL CONFIRMED in diff (#3592)"   -- --severity CRITICAL --confidence CONFIRMED --inpr-diff "$DIFF" --file "src/api/jobs.py:9"
 expect INPR_FIX "HIGH in diff with safety keyword"     -- --severity HIGH --confidence CONFIRMED --title "billing refund leg unreachable" --inpr-diff "$DIFF" --file src/api/jobs.py

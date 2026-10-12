@@ -184,6 +184,52 @@ run "$GOOD" extract; rc_is "no trusted bodies" "$RC" 3; has "no trusted bodies" 
 reset; run "$NOTRUST" extract; rc_is "trust script missing" "$RC" 3; has "trust script missing" "scripts/trusted-comments.sh unresolvable or PR comments unreadable; refusing to read clean (fail closed)"
 reset; run "$GOOD" extract; rc_is "comments unreadable" "$RC" 3; has "comments unreadable" "refusing to read clean"
 
+# a findings summary list above the per-finding sections must not hide the scenario (summary bullets never start the section)
+reset
+cm MEMBER User "$(agent_body bug-hunter "$SHA" 'Findings summary:
+- BUG-1: first problem
+- BUG-2: second problem
+- BUG-3: third problem
+
+### BUG-1 first problem
+**Failure scenario**: one breaks
+### BUG-2 second problem
+**Failure scenario**: two breaks
+### BUG-3 third problem
+**Fix efficacy**: n/a
+' '<!-- FINDING:BUG-1|CONFIRMED|MEDIUM|a.py:2|First problem alpha -->
+<!-- FINDING:BUG-2|CONFIRMED|MEDIUM|b.py:10|Second problem bravo -->
+<!-- FINDING:BUG-3|CONFIRMED|MEDIUM|c.py:18|Third problem charlie -->')"
+flush; run "$GOOD" extract; rc_is "summary list" "$RC" 0
+want "summary: first id keeps its scenario" '[.findings[] | select(.id == "BUG-1") | .scenario] | join(",")' findings.json "present"
+want "summary: middle id keeps its scenario" '[.findings[] | select(.id == "BUG-2") | .scenario] | join(",")' findings.json "present"
+want "summary: a section without a scenario stays absent" '[.findings[] | select(.id == "BUG-3") | .scenario] | join(",")' findings.json "absent"
+
+# the same id repeated across two agents binds each finding to its own body: agent and scenario
+reset
+cm MEMBER User "$(agent_body security "$SHA" '### BUG-1 alpha
+**Failure scenario**: alpha scenario
+' '<!-- FINDING:BUG-1|CONFIRMED|MEDIUM|a.py:2|Alpha problem in security -->')"
+cm MEMBER User "$(agent_body billing "$SHA" '### BUG-1 omega
+no scenario written here
+' '<!-- FINDING:BUG-1|CONFIRMED|MEDIUM|d.py:15|Omega problem in billing -->')"
+flush; run "$GOOD" extract; rc_is "repeated id" "$RC" 0
+want "repeated id: first binds its own agent" '[.findings[] | select(.title | test("Alpha")) | .agent] | join(",")' findings.json "security"
+want "repeated id: first keeps its scenario" '[.findings[] | select(.title | test("Alpha")) | .scenario] | join(",")' findings.json "present"
+want "repeated id: second binds its own agent" '[.findings[] | select(.title | test("Omega")) | .agent] | join(",")' findings.json "billing"
+want "repeated id: second does not borrow the first scenario" '[.findings[] | select(.title | test("Omega")) | .scenario] | join(",")' findings.json "absent"
+
+# the identical marker line repeated across two heads (DELTA) binds each occurrence to its own head's body
+reset; mkctx 1 DELTA "$OLD_SHA"
+cm MEMBER User "$(agent_body security "$SHA" '### BUG-1 same
+no scenario at the current head
+' '<!-- FINDING:BUG-1|CONFIRMED|MEDIUM|a.py:2|Same marker both heads -->')"
+cm MEMBER User "$(agent_body billing "$OLD_SHA" '### BUG-1 same
+**Failure scenario**: earlier head scenario
+' '<!-- FINDING:BUG-1|CONFIRMED|MEDIUM|a.py:2|Same marker both heads -->')"
+flush; run "$GOOD" extract
+want "repeated across heads: both occurrences extracted" '.counts.findings_extracted' findings.json "2"
+
 # ======================= extract: 6B dedup =======================
 reset
 cm MEMBER User "$(agent_body security "$SHA" '### A-1 x
@@ -231,12 +277,20 @@ want "gate3: HIGH exempt" '.findings[] | select(.id == "N-2") | .route' findings
 want "gate3: unreadable prose keeps the finding" '.findings[] | select(.id == "U-1") | .route' findings.json "file"
 want "gate: introduced finding stays" '.findings[] | select(.id == "N-3") | .route' findings.json "file"
 want "gate: counts" '[.counts.findings_preexisting, .counts.notes_demoted_no_scenario] | join(",")' findings.json "1,1"
+# scope (#3975): recorded for every finding, any severity, computed from the added-line map
+want "scope: MEDIUM far from added lines" '.findings[] | select(.id == "P-1") | .scope' findings.json "pre-existing"
+want "scope: HIGH is recorded although never routed pre-existing" '.findings[] | select(.id == "P-2") | .scope' findings.json "pre-existing"
+want "scope: HIGH near an added line" '.findings[] | select(.id == "N-2") | .scope' findings.json "introduced"
+want "scope: MEDIUM near an added line" '.findings[] | select(.id == "N-3") | .scope' findings.json "introduced"
+want "scope: every finding carries a valid scope" '[.findings[].scope | select(. == "introduced" or . == "pre-existing" or . == "unknown")] | length' findings.json "$(jq '.findings | length' "$WORK/out/findings.json")"
+want "scope: introduced count" '.counts.findings_introduced' findings.json "$(jq '[.findings[] | select(.scope == "introduced")] | length' "$WORK/out/findings.json")"
 # an unreadable files API classifies nothing as pre-existing
 reset; echo '[]' > "$FIX/pr-files.json"
 cm MEMBER User "$(agent_body security "$SHA" '### P-1 pre
 **Failure scenario**: s
 ' '<!-- FINDING:P-1|LIKELY|MEDIUM|a.py:19|Pre-existing defect far from added lines -->')"; flush
 run "$GOOD" extract; want "unreadable diff keeps" '.findings[0].route' findings.json "file"
+want "unreadable diff: scope unknown" '.findings[0].scope' findings.json "unknown"
 
 # gate 2 route table (ported from the retired spec sketch test): severity normalisation, deleted/renamed/patch-less files, files absent from the diff
 reset
@@ -258,6 +312,9 @@ run "$GOOD" extract; rc_is "gate2 table" "$RC" 0
 for pair in G-1:file G-2:pre-existing G-3:file G-4:file G-5:file G-6:file G-7:file G-8:file G-9:pre-existing G-10:pre-existing G-11:file G-12:pre-existing G-13:file; do
     want "gate2 table: ${pair%%:*}" ".findings[] | select(.id == \"${pair%%:*}\") | .route" findings.json "${pair#*:}"
 done
+for pair in G-1:introduced G-2:pre-existing G-3:pre-existing G-4:unknown G-7:pre-existing G-13:introduced G-12:pre-existing; do
+    want "scope table: ${pair%%:*}" ".findings[] | select(.id == \"${pair%%:*}\") | .scope" findings.json "${pair#*:}"
+done
 want "gate2 table: a file absent from the PR and from the head is stale (gate 1), not pre-existing" '[.findings[].id] | contains(["G-14"]) | not' findings.json "true"
 
 # DELTA: the earlier reviewed head's findings are read as well
@@ -277,14 +334,53 @@ run "$GOOD" extract; rc_is "delta: earlier head unreadable" "$RC" 3; has "delta:
 # clean review
 reset; cm MEMBER User "$(agent_body security "$SHA" 'all good' 'no findings')"; flush
 run "$GOOD" extract; has "clean" "STRUCTURED_FINDINGS=0"; has "clean" "CLEAN_STRUCTURED=true"
+has "clean: no undelivered agent" "AGENTS_WITHOUT_BLOCK=
+"
+lacks() { case "$OUT" in *"$2"*) bad "$1: output has '$2'" ;; *) ok ;; esac; }
+nob() { printf '<!-- FORGE:REVIEW-AGENT:%s -->\n**Verdict: APPROVE - no findings.**\nReviewed-SHA: %s\n' "$1" "$2"; }
+
+# verdict-only agent comment (no findings block): undelivered, never a finding, never clean
+reset; cm MEMBER User "$(nob security "$SHA")"; flush
+run "$GOOD" extract; rc_is "no-block agent" "$RC" 0
+has "no-block agent: reported undelivered" "AGENTS_WITHOUT_BLOCK=security"
+has "no-block agent: no finding created" "STRUCTURED_FINDINGS=0"
+lacks "no-block agent: not clean" "CLEAN_STRUCTURED=true"
+# mix: one clean (empty block) agent and one block-less agent
+reset; cm MEMBER User "$(agent_body auth "$SHA" 'all good' '')"; cm MEMBER User "$(nob security "$SHA")"; flush
+run "$GOOD" extract
+has "mixed: block-less agent listed" "AGENTS_WITHOUT_BLOCK=security"
+lacks "mixed: block-delivering agent not listed" "AGENTS_WITHOUT_BLOCK=auth"
+lacks "mixed: block-delivering agent not listed (joined)" "security auth"
+lacks "mixed: not clean" "CLEAN_STRUCTURED=true"
+# SEC-1: a re-dispatched agent's later complete block clears its earlier block-less comment
+reset; cm MEMBER User "$(nob security "$SHA")"; cm MEMBER User "$(agent_body security "$SHA" 'all good' '')"; flush
+run "$GOOD" extract
+lacks "redispatch: delivered domain not listed" "AGENTS_WITHOUT_BLOCK=security"
+has "redispatch: clean" "CLEAN_STRUCTURED=true"
+# SEC-2: START without END (truncated) is not delivered
+reset; cm MEMBER User "$(printf '<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: %s\n<!-- REVIEW-FINDINGS-START -->\n' "$SHA")"; flush
+run "$GOOD" extract
+has "START without END: undelivered" "AGENTS_WITHOUT_BLOCK=security"
+lacks "START without END: not clean" "CLEAN_STRUCTURED=true"
+# a synthesized block must not mask a block-less raw agent comment
+reset; cm MEMBER User "$(nob security "$SHA")"
+cm MEMBER User "$(printf '<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->\nclean\nReviewed-SHA: %s\n' "$SHA")"; flush
+run "$GOOD" extract
+has "synth: block-less agent still reported" "AGENTS_WITHOUT_BLOCK=security"
+lacks "synth: not clean" "CLEAN_STRUCTURED=true"
+# an untrusted block-less comment is ignored (cannot park a review)
+reset; cm MEMBER User "$(agent_body auth "$SHA" 'ok' '')"; cm NONE User "$(nob security "$SHA")"; flush
+run "$GOOD" extract
+lacks "untrusted block-less ignored" "AGENTS_WITHOUT_BLOCK=security"
+has "untrusted block-less ignored: clean" "CLEAN_STRUCTURED=true"
 
 # ======================= classify =======================
-# mkfind <id> <conf> <sev> <file> <line> <title> [route] [agent] [scenario-text]
+# mkfind <id> <conf> <sev> <file> <line> <title> [route] [agent] [scenario-text] [scope]
 FJ=""
 mkfind() {
-    FJ="${FJ:+$FJ,}$(jq -n -c --arg id "$1" --arg c "$2" --arg s "$3" --arg f "$4" --arg l "$5" --arg t "$6" --arg r "${7:-file}" --arg a "${8:-}" \
+    FJ="${FJ:+$FJ,}$(jq -n -c --arg id "$1" --arg c "$2" --arg s "$3" --arg f "$4" --arg l "$5" --arg t "$6" --arg r "${7:-file}" --arg a "${8:-}" --arg sc "${10:-}" \
         '{id: $id, confidence: $c, severity: $s, loc: ($f + ":" + $l), file: $f, line_start: ($l | tonumber), line_end: ($l | tonumber), title: $t, agent: $a,
-          scenario: "present", fix_efficacy: "", text: ($t + "\n" + $f), route: $r}')"
+          scenario: "present", fix_efficacy: "", text: ($t + "\n" + $f), route: $r} + (if $sc == "" then {} else {scope: $sc} end)')"
 }
 putfind() { printf '{"schema_version":1,"review_sha":"%s","review_mode":"FULL","counts":{"findings_extracted":%s,"findings_dropped_stale":0,"findings_preexisting":%s,"notes_demoted_no_scenario":%s},"findings":[%s]}\n' \
     "$SHA" "${1:-1}" "${2:-0}" "${3:-0}" "$FJ" > "$WORK/findings-in.json"; FJ=""; mkdir -p "$WORK/out"; cp "$WORK/findings-in.json" "$WORK/out/findings.json"; }
@@ -298,7 +394,7 @@ run "$GOOD" classify; rc_is "classify" "$RC" 0
 has "classify: filed" "FINDINGS_FILED=1"
 want "classify: note" '.findings[] | select(.id == "X-1") | .disposition | startswith("NOTE")' classified.json "true"
 want "classify: issue" '.findings[] | select(.id == "X-2") | .class' classified.json "ISSUE"
-posted_has "marker first line" "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=0 notes_listed=1 notes_dropped=0 findings_filed=1 inpr_fix=0 contract_demoted=0 findings_dropped_stale=0 findings_preexisting=0 notes_demoted_no_scenario=0 lineage=none classifier=script notes_reflag=0 notes_capped=0 reviewed_sha=${SHA} -->"
+posted_has "marker first line" "<!-- FORGE:NOTE_DISPOSITION: notes_fixed=0 notes_listed=1 notes_dropped=0 findings_filed=1 inpr_fix=0 contract_demoted=0 findings_dropped_stale=0 findings_preexisting=0 introduced=0 notes_demoted_no_scenario=0 lineage=none classifier=script notes_reflag=0 notes_capped=0 reviewed_sha=${SHA} -->"
 posted_has "note list line" "- X-1 a.py:5 [POSSIBLE] Rename a local variable for clarity:"
 # the later-head reader (prior_findings_tsv) must be able to parse the list line this script wrote
 ROUND=$(grep '^- X-1' "$FIX/posted.log" | sed -n 's/^- [^ ]* \([^ ]*\) \[[A-Za-z?]*\] \(.*\): [^:]*$/\1\t\2/p')
@@ -343,6 +439,19 @@ mkfind I-1 CONFIRMED MEDIUM a.py 5 "Confirmed defect inside the changed file"; p
 run "$GOOD" classify --auto-merge true; has "inpr round 2" "INPR_FIX=0"
 posted_lacks "no second in-pr fix request" "FORGE:INPR_FIX"
 want "inpr round 2 files it" '.findings[0].class' classified.json "ISSUE"
+# scope (#3975): an introduced MEDIUM LIKELY finding in the diff is an in-PR fix; other scopes keep filing it
+reset; mkctx 1 FULL "" 12; echo "false" > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"; echo '[]' > "$FIX/comments.json"
+mkfind S-1 LIKELY MEDIUM a.py 5 "Introduced likely defect in new code" file "" "" introduced
+mkfind S-2 LIKELY MEDIUM a.py 6 "Pre-existing likely defect in old code" file "" "" pre-existing
+mkfind S-3 LIKELY MEDIUM a.py 7 "Likely defect with unknown provenance" file "" "" unknown
+mkfind S-4 LIKELY MEDIUM a.py 8 "Likely defect with no scope recorded"; putfind 4
+run "$GOOD" classify --auto-merge true; has "scope inpr" "INPR_FIX=1"
+want "scope: introduced LIKELY is INPR_FIX" '.findings[] | select(.id == "S-1") | .class' classified.json "INPR_FIX"
+want "scope: pre-existing LIKELY is ISSUE" '.findings[] | select(.id == "S-2") | .class' classified.json "ISSUE"
+want "scope: unknown LIKELY is ISSUE" '.findings[] | select(.id == "S-3") | .class' classified.json "ISSUE"
+want "scope: absent LIKELY is never INPR_FIX" '.findings[] | select(.id == "S-4") | .class != "INPR_FIX"' classified.json "true"
+want "scope: carried into classified.json" '.findings[] | select(.id == "S-1") | .scope' classified.json "introduced"
+posted_has "NOTE_DISPOSITION records introduced count" " introduced=1 "
 # an untrusted FORGE:INPR_FIX marker does not use up the round
 reset; mkctx 1 FULL "" 12; printf 'a.py\n' > "$FIX/files"
 cm NONE User "<!-- FORGE:INPR_FIX: round=1 head=${OLD_SHA} max_severity=MEDIUM findings=I-0 -->"; flush
@@ -458,6 +567,7 @@ mkfind F-3 CONFIRMED LOW a.py 2 "Low defect to file"
 mkfind F-4 CONFIRMED LOW billing/pay.py 2 "Low billing defect"
 mkfind F-5 CONFIRMED MEDIUM a.py 19 "Pre-existing medium defect" file-pre-existing
 mkfind F-6 LIKELY LOW a.py 3 "A note, never filed" file
+FJ=$(printf '%s' "[$FJ]" | jq -c 'map(if .id == "F-2" then . + {scope: "introduced"} elif .id == "F-5" then . + {scope: "pre-existing"} else . end) | .[]' | paste -sd, -)
 putfind 6
 cp "$WORK/out/findings.json" "$WORK/out/classified.json"
 jq '.findings |= map(. + {class: (if .id == "F-6" then "NOTE" else "ISSUE" end), disposition: (if .id == "F-6" then "NOTE x" else "ISSUE x" end)})' "$WORK/out/findings.json" > "$WORK/out/classified.json"
@@ -466,6 +576,9 @@ want "worklist: notes are not filed" '[.items[].id] | join(",")' worklist.json "
 want "priority from severity (HIGH)" '.items[] | select(.id == "F-1") | .priority' worklist.json "priority:P1"
 want "priority from severity (MEDIUM)" '.items[] | select(.id == "F-2") | .priority' worklist.json "priority:P2"
 want "labels" '.items[] | select(.id == "F-2") | .labels | join(",")' worklist.json "review-finding,needs-validation,priority:P2"
+want "worklist item carries scope" '.items[] | select(.id == "F-2") | .scope' worklist.json "introduced"
+want "worklist item scope pre-existing" '.items[] | select(.id == "F-5") | .scope' worklist.json "pre-existing"
+want "worklist item without scope is unknown" '.items[] | select(.id == "F-1") | .scope' worklist.json "unknown"
 want "P3 batchable" '.items[] | select(.id == "F-3") | .batchable' worklist.json "true"
 want "P3 on a billing path is not batchable" '.items[] | select(.id == "F-4") | .batchable' worklist.json "false"
 want "pre-existing label only" '.items[] | select(.id == "F-5") | .labels | join(",")' worklist.json "pre-existing,priority:P2"
@@ -602,6 +715,54 @@ rc_is "inpr: untrusted request ignored" "$RC" 0
 gate_reset; cm MEMBER User "<!-- FORGE:INPR_FIX: head=$SHA -->"; cm NONE User "<!-- FORGE:INPR_FIX_WAIVED: head=$SHA -->"; flush; mg "$GATE"
 rc_is "inpr: untrusted waiver ignored" "$RC" 3
 
+# --- degraded-gate gate (forge#3628): issue 42's newest trusted QUALITY_GATE / ACCEPTANCE_GATE name the degraded checks; PR 7's comments must cover each ---
+QG_DEG=$'<!-- FORGE:QUALITY_GATE -->\n## Quality Gate Result\n\n**Result**: PASS\n**Degraded**: python.test — test run exercised nothing; blast-radius — check did not complete'
+QG_OK=$'<!-- FORGE:QUALITY_GATE -->\n## Quality Gate Result\n\n**Result**: PASS\n**Degraded**: none'
+AG_DEG=$'<!-- FORGE:ACCEPTANCE_GATE -->\n## Acceptance Gate — DEGRADED\n\n**Degraded checks (verified nothing)**: python.test — test run exercised nothing\n\n<!-- FORGE:ACCEPTANCE_GATE:DEGRADED -->'
+AGM='<!-- FORGE:REVIEW-AGENT:security -->'
+SEC_FULL="$AGM"$'\nReviewed-SHA: '"$SHA"$'\n\n### Degraded Paths Reviewed\n- python.test: read the skipped DB tests by hand\n- blast-radius: callers checked manually\n\n### Other\nx'
+SEC_PART="$AGM"$'\nReviewed-SHA: '"$SHA"$'\n\n### Degraded Paths Reviewed\n- python.test: read the skipped DB tests by hand\n\n### Other\nblast-radius is mentioned only outside the section'
+SEC_GENERIC="$AGM"$'\nReviewed-SHA: '"$SHA"$'\n\n### Degraded Paths Reviewed\nAll degraded paths were reviewed.\n'
+SEC_STALE="$AGM"$'\nReviewed-SHA: '"$OLD_SHA"$'\n\n### Degraded Paths Reviewed\n- python.test: read the skipped DB tests by hand\n- blast-radius: callers checked manually\n'
+SEC_NEG="$AGM"$'\nReviewed-SHA: '"$SHA"$'\n\n### Degraded Paths Reviewed\n- python.test: NOT reviewed\n- blast-radius: callers checked manually\n'
+SEC_PLAIN=$'### Degraded Paths Reviewed\n- python.test: read the skipped DB tests by hand\n- blast-radius: callers checked manually\n'
+SEC_AG="$AGM"$'\nReviewed-SHA: '"$SHA"$'\n\n### Degraded Paths Reviewed\n- python.test: covered by hand\n'
+gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; mg "$GATE"
+rc_is "degraded: no section" "$RC" 3; has "degraded: no section" "REVIEW_RESULT: status: BLOCKED, blocker: degraded-gate-unreviewed"
+logged "degraded: no section needs-human" edits.log "needs-human"; logged "degraded: no section comment" issue-bodies.log "FORGE:DEGRADED_GATE_UNREVIEWED"; not_merged "degraded: no section"
+gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User "$SEC_PART"; flush; mg "$GATE"
+rc_is "degraded: partial coverage" "$RC" 3; has "degraded: partial coverage" "blocker: degraded-gate-unreviewed"; logged "degraded: partial names the gap" issue-bodies.log "not covered: blast-radius"; not_merged "degraded: partial"
+gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User "$SEC_GENERIC"; flush; mg "$GATE"
+rc_is "degraded: generic section" "$RC" 3; has "degraded: generic section" "blocker: degraded-gate-unreviewed"; not_merged "degraded: generic"
+gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm NONE User "$SEC_FULL"; flush; mg "$GATE"
+rc_is "degraded: untrusted section ignored" "$RC" 3; has "degraded: untrusted section ignored" "blocker: degraded-gate-unreviewed"
+gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User "$SEC_STALE"; flush; mg "$GATE"
+rc_is "degraded: stale-head section ignored" "$RC" 3; has "degraded: stale-head section ignored" "blocker: degraded-gate-unreviewed"
+gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User "$SEC_NEG"; flush; mg "$GATE"
+rc_is "degraded: negated item is not coverage" "$RC" 3; logged "degraded: negated item names the gap" issue-bodies.log "not covered: python.test"
+gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User "$SEC_PLAIN"; flush; mg "$GATE"
+rc_is "degraded: plain comment without review marker ignored" "$RC" 3
+gate_reset; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User "$SEC_FULL"; flush; mg "$GATE"
+rc_is "degraded: full per-check section" "$RC" 0; has "degraded: full per-check section" "MERGE_OUTCOME=merged"; merged "degraded: full"
+gate_reset; cm Bot Bot "$QG_DEG"; flush "$FIX/comments-42.json"; cm NONE Bot "$SEC_FULL"; flush; mg "$GATE"
+rc_is "degraded: bot-authored gate and section" "$RC" 0
+gate_reset; cm MEMBER User "$AG_DEG"; flush "$FIX/comments-42.json"; mg "$GATE"
+rc_is "degraded: ACCEPTANCE_GATE:DEGRADED unreviewed" "$RC" 3; has "degraded: ACCEPTANCE_GATE:DEGRADED unreviewed" "blocker: degraded-gate-unreviewed"
+gate_reset; cm MEMBER User "$AG_DEG"; flush "$FIX/comments-42.json"; cm MEMBER User "$SEC_AG"; flush; mg "$GATE"
+rc_is "degraded: ACCEPTANCE_GATE:DEGRADED reviewed" "$RC" 0
+gate_reset; cm MEMBER User "$QG_OK"; flush "$FIX/comments-42.json"; mg "$GATE"
+rc_is "degraded: Degraded none is unaffected" "$RC" 0; has "degraded: Degraded none" "MERGE_OUTCOME=merged"
+gate_reset; cm MEMBER User "$QG_DEG"; cm MEMBER User "$QG_OK"; flush "$FIX/comments-42.json"; mg "$GATE"
+rc_is "degraded: a newer clean gate clears it" "$RC" 0
+gate_reset; cm MEMBER User "$QG_OK"; cm MEMBER User "$QG_DEG"; flush "$FIX/comments-42.json"; mg "$GATE"
+rc_is "degraded: a newer degraded gate wins" "$RC" 3
+gate_reset; cm NONE User "$QG_DEG"; flush "$FIX/comments-42.json"; mg "$GATE"
+rc_is "degraded: untrusted DEGRADED marker cannot block" "$RC" 0
+gate_reset; mg "$GATE"
+rc_is "degraded: no gate comments is unaffected" "$RC" 0
+gate_reset; rm -f "$FIX/comments.json"; mg "$GATE"
+rc_is "degraded: unreadable comments fail closed" "$RC" 3; not_merged "degraded: unreadable"
+
 # --- --issue requirement ---
 gate_reset; mkctx 1 FULL "" ""; mg "$GATE"
 rc_is "issue: missing" "$RC" 3; has "issue: missing" "blocker: auto-merge requires --issue"; posted_has "issue: missing" "no --issue was given"
@@ -657,6 +818,13 @@ gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true --cali
 rc_is "route: base conflict plus calibration" "$RC" 3; logged "route: calibration reason" issue-bodies.log "calibration threshold: overconfident cell"; logged "route: calibration needs-human" edits.log "needs-human"
 gate_reset; mg "$GATE" --has-purpose-regression true
 rc_is "route: purpose regression with APPROVED" "$RC" 3; logged "route: purpose reason" issue-bodies.log "purpose regression detected by Phase 7A"; logged "route: purpose needs-human" edits.log "needs-human"; not_merged "route: purpose"
+for payload in "it's cal" "\$(touch $FIX/SENTINEL)" "\`touch $FIX/SENTINEL\`" "'; touch $FIX/SENTINEL; '"; do
+    gate_reset; rm -f "$FIX/SENTINEL"; printf '%s' "$payload" > "$FIX/cn.txt"
+    mg "$GATE" --calibration-needs-human true --calibration-note-file "$FIX/cn.txt"
+    rc_is "calibration note file: gate blocks" "$RC" 3
+    if [ -e "$FIX/SENTINEL" ]; then bad "calibration note file: payload executed ($payload)"; else ok; fi
+    logged "calibration note file: rendered as data" issue-bodies.log "calibration threshold: $payload"
+done
 gate_reset; mg "$GATE" --calibration-needs-human true --calibration-note "note"
 rc_is "route: calibration alone blocks an APPROVED verdict" "$RC" 3; not_merged "route: calibration alone"
 gate_reset; mg "$GATE" --trust-needs-human true
@@ -742,6 +910,30 @@ has "7A: blocked log" "PURPOSE REGRESSION GATE: BLOCKED"; has "7A: escalation" "
 reset; MH=MERGEABLE; MHS=CLEAN; vd --is-milestone true --has-purpose-regression false; has "7A: passed log" "PURPOSE REGRESSION GATE: PASSED"
 reset; MH=MERGEABLE; MHS=CLEAN; vd --has-purpose-regression true
 case "$OUT" in *"PURPOSE REGRESSION GATE"*) bad "7A: non-milestone PRs print no gate log" ;; *) ok ;; esac
+# free text arrives through *-file flags and is data, never code (injection payload classes: apostrophe, command substitution, backtick, quote breakout, newline)
+SENT="$FIX/SENTINEL"
+for payload in "it's a F-1" "\$(touch $SENT)" "\`touch $SENT\`" "'; touch $SENT; '" "\"; touch $SENT; \"" "F-1
+touch $SENT"; do
+    reset; rm -f "$SENT"; MH=MERGEABLE; MHS=CLEAN
+    printf '%s' "$payload" > "$FIX/pf.txt"; printf '%s' "$payload" > "$FIX/ag.txt"
+    vd --result clean --has-purpose-regression true --purpose-findings-file "$FIX/pf.txt" --agents-file "$FIX/ag.txt"
+    rc_is "payload file: verdict runs" "$RC" 0
+    if [ -e "$SENT" ]; then bad "payload file: payload executed ($payload)"; else ok; fi
+    logged "payload file: purpose text kept as data" reviews.log "See: $(printf '%s' "$payload" | tr '\n' ' ')"
+done
+reset; MH=MERGEABLE; MHS=CLEAN; printf 'a\001b\033c\nd' > "$FIX/pf.txt"
+vd --result clean --has-purpose-regression true --purpose-findings-file "$FIX/pf.txt"
+logged "payload file: control characters stripped, newline folded" reviews.log "See: abc d"
+reset; MH=MERGEABLE; MHS=CLEAN; head -c 5000 /dev/zero | tr '\0' 'x' > "$FIX/pf.txt"
+vd --result clean --has-purpose-regression true --purpose-findings-file "$FIX/pf.txt"
+if grep -qF "$(head -c 2001 /dev/zero | tr '\0' 'x')" "$FIX/reviews.log" 2>/dev/null; then bad "payload file: text must be capped at 2000 bytes"; else ok; fi
+logged "payload file: capped text still rendered" reviews.log "See: $(head -c 2000 /dev/zero | tr '\0' 'x')"
+reset; MH=MERGEABLE; MHS=CLEAN
+vd --result clean --has-purpose-regression true --purpose-findings-file "$FIX/does-not-exist.txt"
+rc_is "payload file: missing file tolerated" "$RC" 0
+reset; MH=MERGEABLE; MHS=CLEAN; printf 'from-file' > "$FIX/pf.txt"
+vd --result clean --has-purpose-regression true --purpose-findings "from-flag" --purpose-findings-file "$FIX/pf.txt"
+logged "payload file: file wins over inline flag" reviews.log "See: from-file"; not_logged "payload file: inline flag overridden" reviews.log "from-flag"
 reset; OUT=$(cd "$REPO_DIR" && FORGEDOCK_HOME="$GOOD" bash "$ROOT/scripts/review-finalize.sh" verdict --pr 7 --repo o/r --context "$CTXF" --merge-health 2>/dev/null); RC=$?
 rc_is "verdict: flag without a value" "$RC" 2
 reset; vd --result bogus; rc_is "verdict: invalid result" "$RC" 2
@@ -780,6 +972,7 @@ has "calibrate: untrusted investigator ignored" "could not resolve task type/con
 reset; mkctx 1 FULL "" 42; inv_comments MEMBER User "$(printf 'see <!-- FORGE:INVESTIGATOR -->\n**Task Type**: Refactor\n**Confidence**: HIGH\n')"; run "$GOOD" calibrate
 has "calibrate: unanchored marker ignored" "could not resolve task type/confidence"
 reset; mkctx 1 FULL "" 42; inv_comments MEMBER User "$(printf '<!-- FORGE:INVESTIGATOR -->\n**Task Type**: Re\x27fa$(id)ctor\n**Confidence**: HIGH\n')"; run "$GOOD" calibrate
+if [ -s "$(dirname "$CTXF")/review-finalize-7/calibration-note.txt" ] || find "$FIX" "$(dirname "$CTXF")" -name calibration-note.txt 2>/dev/null | grep -q .; then ok; else bad "calibrate: must write calibration-note.txt under the out dir"; fi
 note=$(printf '%s\n' "$OUT" | sed -n 's/^CALIBRATION_NOTE=//p'); case "$note" in *"'"*|*'$'*|*'`'*) bad "calibrate: note carries a shell metacharacter: $note" ;; *) ok ;; esac
 setcal "$(CAL_ROW Refactor HIGH true overconfidence)"
 reset; mkctx 1 FULL "" 42; run "$GOOD" calibrate; has "calibrate: no investigator comment fails safe" "CALIBRATION_NEEDS_HUMAN=false"; has "calibrate: unresolved note" "task type or confidence not resolved"
@@ -828,6 +1021,20 @@ gate_reset; nctx extract --out-dir "$WORK/out"; rc_is "no context: extract still
 OUT=$(bash "$ROOT/scripts/review-finalize.sh" bogus 2>/dev/null); RC=$?; rc_is "unknown subcommand" "$RC" 2
 OUT=$(bash "$ROOT/scripts/review-finalize.sh" extract --pr x --repo o/r --context "$CTXF" 2>/dev/null); RC=$?; rc_is "non-numeric pr" "$RC" 2
 OUT=$(bash "$ROOT/scripts/review-finalize.sh" extract --pr 7 --repo o/r 2>/dev/null); RC=$?; rc_is "missing context" "$RC" 2
+
+# ======================= forge#4037: build.md red-green DEGRADED entry survives the real name splitter =======================
+RG_LINE=$(grep -F 'RG_DEGRADED_LIST="${RG_DEGRADED_LIST}' "$ROOT/commands/work-on/build.md" | sed -n '1p' | sed 's/^[[:space:]]*\*) //; s/ ;;.*$//')
+SPLIT_LINE=$(grep -F 'DEG_NAME_LIST=$(printf' "$ROOT/scripts/review-finalize.sh" | sed -n '1p' | sed 's/^[[:space:]]*//')
+if [ -n "$RG_LINE" ] && [ -n "$SPLIT_LINE" ]; then
+  RG_DEGRADED_LIST=""; ID="AC2"; RG_BASE=UNRUNNABLE; RG_HEAD=RAN
+  eval "$RG_LINE"
+  RG_DEGRADED_LIST="${RG_DEGRADED_LIST}; AC3 — base run cannot execute (base=UNRUNNABLE head=RAN), so the test is unproven"
+  DEG_NAMES="$RG_DEGRADED_LIST"
+  eval "$SPLIT_LINE"
+  [ "$DEG_NAME_LIST" = "$(printf 'AC2\nAC3')" ] && ok || bad "red-green DEGRADED entries split into exactly their check names (got: $DEG_NAME_LIST)"
+else
+  bad "could not extract the build.md DEGRADED entry or the review-finalize splitter"
+fi
 
 echo "review-finalize tests: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

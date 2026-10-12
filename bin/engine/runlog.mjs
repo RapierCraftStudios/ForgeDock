@@ -91,7 +91,13 @@ export function deriveState(events) {
         // forge#3530: the review's remediation kind must survive resume. A later review
         // commit replaces it; a committed remediate consumes it, so it is never reused.
         if (e.phase === "review") s.remediationKind = e.outputs?.remediation ?? null;
-        else if (e.phase === "remediate") s.remediationKind = null;
+        else if (e.phase === "remediate") {
+          // forge#4021: a re-gate that requested an in-PR fix re-arms remediate once (bounded in
+          // phases.mjs by the INPR_REMEDIATION marker count); every other remediate commit consumes the kind.
+          const rearm = e.outputs?.remediation === "inpr-fix";
+          s.remediationKind = rearm ? "inpr-fix" : null;
+          if (rearm) s.committed = s.committed.filter((ph) => ph !== "remediate");
+        }
         break;
       case "RUN_TERMINAL":
         s.terminal = true; s.terminalReason = e.reason ?? "done"; s.v = e.seq;
@@ -112,6 +118,8 @@ export function deriveState(events) {
         if (Array.isArray(e.uncommit) && e.uncommit.length) {
           s.committed = s.committed.filter((p) => !e.uncommit.includes(p));
           s.terminalReason = null; s.outcomeCode = null;
+          // the revoked handoff reason must not be restored by a later RUN_REOPEN (e.g. after an engine-error)
+          lastCommitReason = null; lastCommitCode = null;
         }
         // forge#3754: a remediate that ended needs-human is re-run after a human clears the
         // label. Un-commit it (new array, no in-place mutation) so the forge#3506 resume guard
@@ -121,7 +129,7 @@ export function deriveState(events) {
         // keeps remediate committed so the resume guard is not bypassed.
         if (lastCommitPhase === "remediate" && lastCommitReason === "needs-human"
             && lastTerminalReason === "needs-human") {
-          s.committed = s.committed.filter((p) => p !== "remediate");
+          s.committed = s.committed.filter((ph) => ph !== "remediate");
         }
         lastTerminalReason = null;
         s.lastRateLimit = null; // forge#3791: an explicit reopen never re-enters a stale pause

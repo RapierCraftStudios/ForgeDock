@@ -1,0 +1,13 @@
+name: CI
+on:
+  pull_request:
+jobs:
+  test-a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: bash packages/a/tests/a.test.sh
+      - run: bash packages/b/tests/b.test.sh
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: shellcheck -S error packages/a/src/a.sh packages/b/src/b.sh

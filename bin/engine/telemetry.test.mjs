@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { tmpDir } from "../tests/_tmp.mjs";
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -31,7 +32,7 @@ const setComments = (bodies) => writeFileSync(join(td, "comments.json"),
 
 beforeEach(() => {
   saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
-  td = mkdtempSync(join(tmpdir(), "tel-"));
+  td = tmpDir("tel-");
   Object.assign(process.env, { TD: td, FORGE_TELEMETRY_BUFFER_DIR: join(td, "buf"), FORGE_REPO: "o/r", FORGE_ISSUE: "5" });
   for (const k of ["FORGE_TELEMETRY", "FORGE_PR", "FORGE_RUN", "FORGE_PHASE", "FORGE_TELEMETRY_MAX_CHARS"]) delete process.env[k];
 });

@@ -98,3 +98,27 @@ envelope `result` or in plain output (shared `hasUsageLimitResetClause`, bounded
 windows per #3522). A limit with neither signal is an ordinary failure.
 `runCliBackend` attaches `resetAt`/`resetAtEpochMs` only when the same predicate
 holds, since the engine pauses on the epoch alone. Cite: #3523.
+
+## Entry 2026-10-10 — Fix: review→remediate handoff checks needs-human on the PR, not the issue — engine runs stop at needs-human instead of remediating (#3521)
+
+PR #3524 touched `runner`. See FORGE:BUILDER comment on issue #3521 for full change list.
+Key gotcha recorded: runner now returns the final reply as `text`; engine passes it to phase detectOutcome.
+Cite: #3521 / PR #3524.
+
+## Entry 2026-10-10 — Fix: catastrophic regex backtracking in usage-limit reset parsing (#3522)
+
+PR #3538 touched `runner`. See FORGE:BUILDER comment on issue #3522 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/runner.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3522 / PR #3538.
+
+## Entry 2026-10-10 — Feat: per-phase --model and --max-turns for CLI-backend phases (#3589)
+
+PR #3610 touched `runner`. See FORGE:BUILDER comment on issue #3589 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/runner.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3589 / PR #3610.
+
+## Entry 2026-10-11 — Refactor: shared resolver/bootstrap helpers, engine FORGEDOCK_HOME export, review-pr-staging stub conversion (#3778)
+
+PR #3782 touched `runner`. See FORGE:BUILDER comment on issue #3778 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/runner.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3778 / PR #3782.

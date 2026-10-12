@@ -21,6 +21,7 @@ export const OUTCOME_CODES = Object.freeze({
   REVIEW_REREVIEW_SKIPPED: "review.rereview_skipped",
   REVIEW_BLOCKING_ISSUE: "review.blocking_issue",
   REVIEW_PR_OPEN: "review.pr_open",
+  REVIEW_CI_PENDING_TIMEOUT: "review.ci_pending_timeout",
   BUILD_ACCEPTANCE_FAILED: "build.acceptance_failed",
   BUILD_ACCEPTANCE_MALFORMED: "build.acceptance_malformed",
   BUILD_SIZE_OVER_GATE: "build.size_over_gate", // retired (forge#3862): never emitted; kept so historic runs parse
@@ -29,12 +30,15 @@ export const OUTCOME_CODES = Object.freeze({
   REMEDIATE_DEFERRED_LIVE_RUN: "remediate.deferred_live_run",
   REMEDIATE_RE_ESCALATED: "remediate.re_escalated",
   REMEDIATE_UNFIXABLE: "remediate.unfixable",
+  REMEDIATE_INPR_REQUESTED: "remediate.inpr_requested",
   CI_RED: "ci.red",
   CI_TIMEOUT: "ci.timeout",
   BASE_CONFLICT: "base.conflict",
   RATE_LIMITED: "rate_limited",
   ENGINE_ERROR: "engine.error",
   INFRA_DISK_QUOTA: "infra.disk_quota",
+  INFRA_CLI_SPAWN_TRANSIENT: "infra.cli_spawn_transient",
+  CLI_TIMEOUT: "cli.timeout",
   LEASE_HELD: "lease.held",
   DEPENDENCY_OPEN: "dependency.open",
   DEPENDENCY_UNREADABLE: "dependency.unreadable",
@@ -74,6 +78,11 @@ export function isDiskQuotaError(err) {
   return isDiskQuotaText(err.message) || isDiskQuotaText(err.stderr);
 }
 
+/** True when a thrown runner error is a transient CLI spawn failure (ETIMEDOUT/EAGAIN/ENOMEM/EMFILE at spawn), forge#4021. */
+export function isTransientSpawnError(err) {
+  return !!err && typeof err === "object" && err.code === "CLI_SPAWN_TRANSIENT";
+}
+
 /** Code for a thrown runner error, from `err.code` / session-limit evidence only. */
 export function codeForRunnerError(err) {
   if (!err || typeof err !== "object") return UNCLASSIFIED;
@@ -81,6 +90,10 @@ export function codeForRunnerError(err) {
   if (err.usageLimit === true || (typeof err.resetAtEpochMs === "number" && Number.isFinite(err.resetAtEpochMs)))
     return OUTCOME_CODES.RATE_LIMITED;
   switch (err.code) {
+    case "CLI_SPAWN_TRANSIENT":
+      return OUTCOME_CODES.INFRA_CLI_SPAWN_TRANSIENT;
+    case "CLI_TIMEOUT":
+      return OUTCOME_CODES.CLI_TIMEOUT;
     case "NO_API_KEY":
     case "NO_SDK":
     case "CLI_BACKEND_FAILED":

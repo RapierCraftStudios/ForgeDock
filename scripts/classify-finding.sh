@@ -10,12 +10,18 @@
 # Usage:
 #   classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>]
 #                       [--lineage none|review-finding] [--text <T> | --text-file <F>]
-#                       [--inpr-diff <F> --file <P>] [--contract-scope <F> --contract-open <F> [--pr-files <F>] [--merge-issue <N>]]
+#                       [--inpr-diff <F> --file <P> [--scope introduced|pre-existing|unknown]] [--contract-scope <F> --contract-open <F> [--pr-files <F>] [--merge-issue <N>]]
 #                       [--fix-efficacy fails|regresses] [--fixes-issue <N>]
 #                       [--prior-findings <F> [--title <T>] [--line-start <N> [--line-end <M>]] [--diff-map <F>]]
+#                       [--unstructured]
 #
 #   --severity    CRITICAL | HIGH | MEDIUM | LOW (case-insensitive). Missing or
 #                 unparseable → ISSUE (fail toward filing, never drop).
+#   --unstructured The finding has no `FINDING:` marker (it was not read from a structured
+#                 findings block). With an empty or unparseable severity it is `NOTE unstructured`,
+#                 never ISSUE: a marker-less finding cannot block a PR. HIGH/CRITICAL/MEDIUM/LOW
+#                 still classify normally. A real marker with a bad severity (no flag) stays
+#                 `ISSUE unparseable-severity`.
 #   --confidence  CONFIRMED | LIKELY | POSSIBLE (case-insensitive). Missing is
 #                 treated as not-POSSIBLE.
 #   --agent       The `**Agent**:` value of the finding (e.g. "Security", "Auth").
@@ -37,6 +43,11 @@
 #                 are given, a MEDIUM CONFIRMED finding whose path is in the PR diff is
 #                 classified INPR_FIX — fix it on the PR before merge instead of filing it.
 #                 Callers pass these only for the first fix round of an auto-merge review.
+#   --scope <S>   introduced | pre-existing | unknown: whether the finding's line sits in code the PR
+#                 added or changed (computed from the diff by review-finalize.sh). With `introduced`,
+#                 a MEDIUM LIKELY finding in the PR diff is also INPR_FIX (a defect in new code is fixed
+#                 in the PR, not filed). Absent, `pre-existing` or `unknown` keeps the CONFIRMED-only
+#                 behaviour. Any other value exits 2. Always recorded as `scope=` on the telemetry event.
 #
 #   --contract-scope <F> --contract-open <F> --file <P>  Contract-declared scope gate: F is the TSV
 #                 from `check-contract-scope.sh list` (disposition<TAB>path<TAB>issue). A finding
@@ -115,9 +126,11 @@ TITLE=""
 LINE_START=""
 LINE_END=""
 DIFF_MAP=""
+UNSTRUCTURED=0
+SCOPE=""
 
 usage() {
-  echo "ERROR: Usage: classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>] [--lineage none|review-finding] [--text <T> | --text-file <F>] [--inpr-diff <F> --file <P>] [--contract-scope <F> --contract-open <F> [--pr-files <F>] [--merge-issue <N>]] [--fix-efficacy fails|regresses] [--fixes-issue <N>] [--prior-findings <F> [--title <T>] [--line-start <N> [--line-end <M>]] [--diff-map <F>]]" >&2
+  echo "ERROR: Usage: classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>] [--lineage none|review-finding] [--text <T> | --text-file <F>] [--inpr-diff <F> --file <P> [--scope introduced|pre-existing|unknown]] [--contract-scope <F> --contract-open <F> [--pr-files <F>] [--merge-issue <N>]] [--fix-efficacy fails|regresses] [--fixes-issue <N>] [--prior-findings <F> [--title <T>] [--line-start <N> [--line-end <M>]] [--diff-map <F>]] [--unstructured]" >&2
   exit 2
 }
 
@@ -130,6 +143,7 @@ while [ "$#" -gt 0 ]; do
     --text)       [ "$#" -ge 2 ] || usage; TEXT="$2"; shift 2 ;;
     --inpr-diff)  [ "$#" -ge 2 ] || usage; INPR_DIFF="$2"; shift 2 ;;
     --file)       [ "$#" -ge 2 ] || usage; FINDING_FILE="$2"; shift 2 ;;
+    --scope)      [ "$#" -ge 2 ] || usage; SCOPE=$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]'); shift 2 ;;
     --contract-scope) [ "$#" -ge 2 ] || usage; CONTRACT_SCOPE="$2"; shift 2 ;;
     --contract-open)  [ "$#" -ge 2 ] || usage; CONTRACT_OPEN="$2"; shift 2 ;;
     --pr-files)       [ "$#" -ge 2 ] || usage; PR_FILES="$2"; shift 2 ;;
@@ -141,6 +155,7 @@ while [ "$#" -gt 0 ]; do
     --line-start)     [ "$#" -ge 2 ] || usage; LINE_START="$2"; shift 2 ;;
     --line-end)       [ "$#" -ge 2 ] || usage; LINE_END="$2"; shift 2 ;;
     --diff-map)       [ "$#" -ge 2 ] || usage; DIFF_MAP="$2"; shift 2 ;;
+    --unstructured)   UNSTRUCTURED=1; shift ;;
     --text-file)
       [ "$#" -ge 2 ] || usage
       [ -r "$2" ] || { echo "ERROR: --text-file not readable: $2" >&2; exit 2; }
@@ -157,6 +172,11 @@ esac
 case "$FIX_EFF" in
   ''|fails|regresses) ;;
   *) echo "ERROR: --fix-efficacy must be 'fails' or 'regresses' (got '$FIX_EFF')" >&2; exit 2 ;;
+esac
+
+case "$SCOPE" in
+  ''|introduced|pre-existing|unknown) ;;
+  *) echo "ERROR: --scope must be 'introduced', 'pre-existing' or 'unknown'" >&2; exit 2 ;;
 esac
 
 if [ -n "$INPR_DIFF" ] && [ ! -r "$INPR_DIFF" ]; then
@@ -186,14 +206,18 @@ CONF=$(upper "$CONFIDENCE")
 _TEL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/telemetry.sh"; [ -f "$_TEL" ] && . "$_TEL" 2>/dev/null
 type forge_emit >/dev/null 2>&1 || forge_emit() { :; }
 disp() { # "<DISPOSITION> <reason>"
-  forge_emit finding_disposition severity="$SEV" confidence="${CONF:-UNKNOWN}" agent="${AGENT:-none}" disposition="${1%% *}" reason="${1#* }"
+  forge_emit finding_disposition severity="$SEV" confidence="${CONF:-UNKNOWN}" agent="${AGENT:-none}" scope="${SCOPE:-unknown}" disposition="${1%% *}" reason="${1#* }"
   echo "$1"
 }
 
 # In-PR fix gate predicate (#3387, widened to HIGH/CRITICAL in #3592): CONFIRMED, linked to a
 # --inpr-diff file list, and the finding's file is one of those files. Fails toward ISSUE.
+# MEDIUM LIKELY also matches, only when --scope introduced (a defect in code this PR added).
 inpr_match() {
-  [ -n "$INPR_DIFF" ] && [ -n "$FINDING_FILE" ] && [ "$CONF" = "CONFIRMED" ] || return 1
+  [ -n "$INPR_DIFF" ] && [ -n "$FINDING_FILE" ] || return 1
+  if [ "$CONF" != "CONFIRMED" ]; then
+    [ "$SEV" = "MEDIUM" ] && [ "$CONF" = "LIKELY" ] && [ "$SCOPE" = "introduced" ] || return 1
+  fi
   _path="${FINDING_FILE#./}"; _path="${_path%%:*}"
   grep -Fxq -- "$_path" "$INPR_DIFF"
 }
@@ -207,7 +231,9 @@ case "$SEV" in
     fi
     disp "ISSUE severity-$SEV"; exit 0 ;;
   MEDIUM|LOW) ;;
-  *) disp "ISSUE unparseable-severity"; exit 0 ;;
+  *)
+    if [ "$UNSTRUCTURED" = "1" ]; then disp "NOTE unstructured"; exit 0; fi
+    disp "ISSUE unparseable-severity"; exit 0 ;;
 esac
 
 # Cross-head / cross-PR re-flag gate (#3641). Runs after the severity parse so HIGH/CRITICAL and
@@ -282,7 +308,7 @@ fi
 # (lineage included), so checking here changes only where it is handled, never whether.
 # HIGH/CRITICAL were handled in the severity case above.
 if [ "$SEV" = "MEDIUM" ] && inpr_match; then
-  disp "INPR_FIX medium-confirmed-in-diff"
+  if [ "$CONF" = "CONFIRMED" ]; then disp "INPR_FIX medium-confirmed-in-diff"; else disp "INPR_FIX medium-likely-introduced-in-diff"; fi
   exit 0
 fi
 

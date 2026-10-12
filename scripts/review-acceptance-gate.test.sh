@@ -90,6 +90,23 @@ inv "$(chk ac-1 true)" "$(chk ac-7 "echo 'unbalanced")"; rc=$(run); eq "mixed pa
 grep -q ':PASSED:' "$TMP/out" && grep -qi 'malformed' "$TMP/out" && ok "mixed: PASSED with malformed listed" || bad "mixed: wrong output"
 inv "$(chk ac-1 false)" "$(chk ac-7 "echo 'unbalanced")"; rc=$(run); eq "mixed fail+malformed: fails closed" "$rc" 1
 
+# rc 127 downgrade only when the target's own first word is the missing command (forge#3842).
+printf '#!/bin/bash\nno-such-tool-xyzzy\n' > "$TMP/wt/inner.sh"
+inv "$(chk ac-8 'no-such-cmd-xyzzy --help')"; rc=$(run); eq "first word missing: malformed, rc 0" "$rc" 0
+grep -qi 'malformed' "$TMP/out" && ok "first word missing reported malformed" || bad "first word missing not reported"
+inv "$(chk ac-8 'bash inner.sh')"; rc=$(run); eq "script with missing inner tool is a real fail" "$rc" 1
+inv "$(chk ac-8 'true && no-such-cmd-xyzzy')"; rc=$(run); eq "missing command not first word is a real fail" "$rc" 1
+export LANG=de_DE.UTF-8 LC_MESSAGES=de_DE.UTF-8
+inv "$(chk ac-8 'no-such-cmd-xyzzy --help')"; rc=$(run); eq "non-English locale: first word missing still malformed" "$rc" 0
+grep -qi 'malformed' "$TMP/out" && ok "locale: reported malformed" || bad "locale: not reported malformed"
+unset LANG LC_MESSAGES
+# target runs in its native locale: a locale-dependent verdict (wc -m on multibyte) must not be forced to C
+export LC_ALL=C.UTF-8
+inv "$(chk ac-8 'printf "\303\251" | wc -m | grep -qx 1')"; rc=$(run); eq "target keeps native locale (wc -m multibyte)" "$rc" 0
+unset LC_ALL
+inv 'ACCEPTANCE_CHECK: id=ac-9 type=command target="no-such-cmd-xyzzy" matcher="QQQ" phase=review description=d'; rc=$(run); eq "matcher branch: first word missing malformed" "$rc" 0
+inv 'ACCEPTANCE_CHECK: id=ac-9 type=command target="bash inner.sh" matcher="QQQ" phase=review description=d'; rc=$(run); eq "matcher branch: inner missing tool is a real fail" "$rc" 1
+
 # Selection parity with B6.5 (forge#3809): non-review checks are selected by the `gh pr` target only, never by a phase= text match.
 bt() { printf 'ACCEPTANCE_CHECK: id=%s type=command target="%s" matcher="exit_0" phase=%s description=%s' "$1" "$2" "$3" "$4"; }
 inv "$(bt ac-1 'gh pr view 1 && false' build d)"; rc=$(run); eq "phase=build gh pr check is evaluated (fails)" "$rc" 1
@@ -99,5 +116,8 @@ inv "$(bt ac-1 'false' build d)"; rc=$(run); eq "phase=build non-gh-pr check is 
 inv "$(bt ac-1 'gh pr view 1 && false' build 'x phase=review y')"; rc=$(run); eq "phase=review in description does not change selection" "$rc" 1
 inv "$(bt ac-1 'false' build 'x phase=review y')"; rc=$(run); eq "phase=review in description does not select a non-gh-pr check" "$rc" 0
 inv 'ACCEPTANCE_CHECK: id=ac-1 type=command target="gh pr view 1 && false" matcher="exit_0" description=untagged'; rc=$(run); eq "untagged gh pr check is evaluated" "$rc" 1
+# test= tolerance (forge#3630): a test="..." token between phase= and description= does not change phase handling or selection.
+inv 'ACCEPTANCE_CHECK: id=ac-1 type=command target="gh pr view 1 && false" matcher="exit_0" phase=review test="node --test x.mjs" description=d'; rc=$(run); eq "test= token on a phase=review check is tolerated (evaluated, fails)" "$rc" 1
+inv 'ACCEPTANCE_CHECK: id=ac-1 type=command target="false" matcher="exit_0" phase=build test="node --test x.mjs" description=d'; rc=$(run); eq "test= token on a phase=build non-gh-pr check is not selected" "$rc" 0
 
 echo "$PASS passed, $FAILN failed"; [ "$FAILN" -eq 0 ]

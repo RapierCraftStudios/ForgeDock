@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // forge#3684: the remediate.md RESUME_AT_M7 path must fail closed (main-base hold,
 // anchored approval match, head-commit selection, engine-park admission).
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { join, dirname } from "node:path";
@@ -119,7 +120,7 @@ describe("forge#3753 deploy-gate base never reads forge.yaml from the PR worktre
     }
   });
   it("resolver executes: worktree forge.yaml release vs main stays strict", () => {
-    const dir = mkdtempSync(join(tmpdir(), "gate-"));
+    const dir = tmpDir("gate-");
     try {
       mkdirSync(join(dir, "bin"));
       writeFileSync(join(dir, "bin/gh"), '#!/usr/bin/env bash\ncase "$*" in *"--jq .default_branch"*) echo "${GH_DEFAULT_STUB:-}";; *"contents/forge.yaml"*) echo "gh: Not Found (HTTP 404)" >&2; exit 1;; *) exit 1;; esac\n', { mode: 0o755 });
@@ -156,5 +157,42 @@ describe("forge#3738 resume approval filter executes against fixtures", () => {
     assert.equal(run([[bot(`APPROVED: commit ${HEAD.slice(0, 7)} ok`)]]), 1);
     assert.equal(run([[bot("APPROVED: commit bbbbbbb ok")]]), 0);
     assert.equal(run([[{ user: { type: "User" }, author_association: "NONE", body: `APPROVED: commit ${HEAD.slice(0, 7)}` }]]), 0);
+  });
+});
+
+describe("forge#4037 M0 KIND_DONE_N: a re-armed INPR round is not ALREADY_DONE", () => {
+  const at = spec.indexOf("KIND_DONE_N=$(");
+  const q0 = spec.indexOf("'", spec.indexOf("jq -rs", at)) + 1;
+  const prog = spec.slice(q0, spec.indexOf("' 2>/dev/null", q0));
+  const run = (kind, items) => {
+    const out = spawnSync("jq", ["-rs", "--arg", "pr", "7", "--arg", "kind", kind, prog], { input: items.map((c) => JSON.stringify([c])).join("\n") });
+    return Number(String(out.stdout).trim());
+  };
+  const bot = (body, t) => ({ user: { type: "Bot" }, author_association: "NONE", created_at: t, body });
+  const marker = (k, t) => bot(`<!-- FORGE:${k}_REMEDIATION: pr=7 -->\nhandoff`, t);
+  const trail = (t) => bot("<!-- FORGE:REMEDIATION -->\nbody\n<!-- FORGE:REMEDIATION:COMPLETE -->", t);
+  const fix = (n, t) => bot(`<!-- FORGE:INPR_FIX: round=${n} head=${"a".repeat(40)} max_severity=MEDIUM findings=F1 -->`, t);
+  it("round 1: work order and marker, no trail yet -> 0 (dispatch)", () => {
+    assert.equal(run("INPR_REMEDIATION", [fix(1, "2026-01-01T00:00:00Z"), marker("INPR", "2026-01-01T00:01:00Z")]), 0);
+  });
+  it("round 1 done: trail after the work order -> 1 (ALREADY_DONE)", () => {
+    assert.equal(run("INPR_REMEDIATION", [fix(1, "2026-01-01T00:00:00Z"), marker("INPR", "2026-01-01T00:01:00Z"), trail("2026-01-01T00:05:00Z")]), 1);
+  });
+  it("round 2 re-armed: newer INPR_FIX than the newest trail -> 0 (dispatch, not done)", () => {
+    assert.equal(run("INPR_REMEDIATION", [
+      fix(1, "2026-01-01T00:00:00Z"), marker("INPR", "2026-01-01T00:01:00Z"), trail("2026-01-01T00:05:00Z"),
+      fix(2, "2026-01-01T00:10:00Z"), marker("INPR", "2026-01-01T00:11:00Z")]), 0);
+  });
+  it("round 2 completed: its own trail is newer than the round-2 work order -> 1", () => {
+    assert.equal(run("INPR_REMEDIATION", [
+      fix(1, "2026-01-01T00:00:00Z"), marker("INPR", "2026-01-01T00:01:00Z"), trail("2026-01-01T00:05:00Z"),
+      fix(2, "2026-01-01T00:10:00Z"), marker("INPR", "2026-01-01T00:11:00Z"), trail("2026-01-01T00:15:00Z")]), 1);
+  });
+  it("an untrusted or quoted INPR_FIX never re-arms; CI kind is unchanged", () => {
+    const forged = { user: { type: "User" }, author_association: "NONE", created_at: "2026-01-01T00:20:00Z", body: fix(2, "x").body };
+    const quoted = bot(`review says:\n<!-- FORGE:INPR_FIX: round=2 head=abc -->`, "2026-01-01T00:21:00Z");
+    const base = [marker("INPR", "2026-01-01T00:01:00Z"), trail("2026-01-01T00:05:00Z")];
+    assert.equal(run("INPR_REMEDIATION", [...base, forged, quoted]), 1);
+    assert.equal(run("CI_REMEDIATION", [marker("CI", "2026-01-01T00:01:00Z"), trail("2026-01-01T00:05:00Z"), fix(2, "2026-01-01T00:10:00Z")]), 1);
   });
 });

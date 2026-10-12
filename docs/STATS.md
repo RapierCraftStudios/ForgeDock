@@ -14,6 +14,10 @@ npx forgedock stats [--since <version|date>] [--repo <owner/repo>] [--json] [--r
 versions at or above it; `--since 2026-10-01` keeps activity on or after the date. `--compact` prints one row per
 version (the table embedded in the staging review summary). `--json` is machine-readable.
 
+`--since` also bounds the GitHub crawl: only issues and comments updated on or after the window start are read (a version
+is resolved to its tag time minus one day; an unknown tag falls back to a full crawl and says so on stderr). Progress is
+printed to stderr while crawling, so `--json` stdout stays parseable.
+
 ## Sources
 
 1. **GitHub (primary).** Issues, PRs and labels of the target repo, plus trusted `<!-- FORGE:TELEMETRY v1 -->` comments
@@ -21,8 +25,9 @@ version (the table embedded in the staging review summary). `--json` is machine-
    `scripts/trusted-comments.sh`); `part=N` comments are concatenated and records are deduped on `eid`. All `gh` calls
    are argv-based. Needs an authenticated `gh`.
 2. **Local cache (optional).** `~/.forge/stats-cache/<owner>_<repo>/cache.json` (`FORGE_STATS_CACHE_DIR`) holds what was
-   fetched plus an `updated_at` watermark, so the next run only re-reads items updated since. It is safe to delete (the
-   cost is one full re-fetch); a corrupt cache is treated as empty. `--refresh` ignores it, `--no-cache` never touches it.
+   fetched, an `updated_at` watermark (the next run only re-reads items updated since) and a `coveredFrom` floor (the
+   oldest window start crawled, so a later, wider `--since` crawls the uncovered gap instead of under-reporting). It is
+   safe to delete (the cost is one full re-fetch); a corrupt cache is treated as empty. `--refresh` ignores it, `--no-cache` never touches it.
 3. **Local run logs (optional).** `~/.forge/runs/*.jsonl` (`FORGE_RUNS_DIR`) for runs that predate the engine's
    `phase_attempt` / `run_terminal` records. A run already present on GitHub is not counted twice. Only runs whose
    `RUN_START.repo` equals the target repo are used. `--no-local` skips them.
@@ -59,5 +64,7 @@ instead of failing.
 
 ## Limits
 
-Issues and PRs are listed by `updated_at`, so the first run on a large repo makes one comment request per item that has
-comments. Telemetry comments are edited in place; if a cached item looks stale, run with `--refresh`.
+Comments are read from the repo-wide `issues/comments?since=` endpoint (a few paginated calls); only issues with a trusted
+telemetry comment in the window get their full comment list re-read (6 in parallel, backing off when the API rate limit is
+low). A run with no `--since` and no cache still walks the whole history once. Telemetry comments are edited in place, which
+the comment window catches; if a cached item still looks stale, run with `--refresh`.

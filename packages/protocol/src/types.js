@@ -109,7 +109,7 @@ export const RESERVED_TYPES = {
     partialSentinel: null,
     inlineValue: false,
     requiredFields: [],
-    reGateOutcomeValues: ['AUTO-LANDED', 'HELD-AWAITING-MERGE', 'RE-ESCALATED', 'UNFIXABLE'],
+    reGateOutcomeValues: ['AUTO-LANDED', 'HELD-AWAITING-MERGE', 'RE-ESCALATED', 'UNFIXABLE', 'INPR-FIX-REQUESTED', 'REREVIEW-REQUIRED'],
   },
   TRAJECTORY: {
     type: 'TRAJECTORY',

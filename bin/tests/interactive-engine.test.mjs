@@ -6,9 +6,10 @@
  *
  * Run with: node --test bin/tests/interactive-engine.test.mjs
  */
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
+import { rmSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import os from "node:os";
 
@@ -39,8 +40,7 @@ import {
   detectPhase,
   detectLane,
   phaseFromSkill,
-  isMissingMarkerOutcome,
-} from "../hooks/interactive-engine.mjs";
+  isMissingMarkerOutcome } from "../hooks/interactive-engine.mjs";
 
 // ---------------------------------------------------------------------------
 // Helper: simulate what the hook does after detecting a phase
@@ -117,7 +117,7 @@ function extractFlag(command, flag) {
 // ---------------------------------------------------------------------------
 
 let dir;
-beforeEach(() => { dir = mkdtempSync(join(os.tmpdir(), "fd-iengine-")); });
+beforeEach(() => { dir = tmpDir("fd-iengine-"); });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
 // ---------------------------------------------------------------------------

@@ -47,8 +47,11 @@ import {
   mkdtempSync,
   rmSync,
   realpathSync,
+  lstatSync,
+  chmodSync,
 } from "fs";
-import { join, dirname, basename, relative, isAbsolute, extname, win32 as win32Path } from "path";
+import { createHash } from "crypto";
+import { join, dirname, basename, resolve, relative, isAbsolute, extname, win32 as win32Path } from "path";
 import os from "os";
 import { execSync, spawnSync } from "child_process";
 import { createRequire } from "module";
@@ -104,22 +107,47 @@ export function resolveRunTmpRoot(cwd, env = process.env) {
   return join(os.homedir(), ".forge", "tmp");
 }
 
-/** `<root>/<issue>` for a numeric issue; null for an empty root or non-numeric issue (no path-escape, never the root). */
-export function runTmpDir(root, issue) {
+/**
+ * Stable, path-safe identity of the repo checkout: `<sanitized basename>-<8 hex of sha1(realpath)>`.
+ * Local only (no network), identical across a `--retry` from the same checkout, distinct per checkout.
+ * Never empty, never `.`/`..`, never contains a path separator.
+ */
+export function repoKey(cwd = process.cwd()) {
+  let real;
+  try { real = realpathSync(cwd); } catch { real = resolve(String(cwd)); }
+  const name = basename(real).replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "") || "repo";
+  return `${name}-${createHash("sha1").update(real).digest("hex").slice(0, 8)}`;
+}
+
+/** `<root>/<repoKey>/<issue>` for a numeric issue; null for an empty root or non-numeric issue (no path-escape, never the root). */
+export function runTmpDir(root, issue, cwd = process.cwd()) {
   const id = String(issue ?? "").trim();
-  return root && /^[0-9]+$/.test(id) ? join(root, id) : null;
+  return root && /^[0-9]+$/.test(id) ? join(root, repoKey(cwd), id) : null;
+}
+
+/** True when `p` is a real directory (not a symlink) owned by the current uid (uid check skipped where unavailable). */
+function isOwnedRealDir(p) {
+  const st = lstatSync(p);
+  if (!st.isDirectory() || st.isSymbolicLink()) return false;
+  return typeof process.getuid !== "function" || st.uid === process.getuid();
 }
 
 /**
  * Point TMPDIR and CLAUDE_CODE_TMPDIR at a per-run, disk-backed dir so venvs and Claude session data
- * stay off a size-limited /tmp. No-op when the issue is unknown or the operator owns the tmp root.
- * Best-effort: a failed mkdir leaves the env unchanged.
+ * stay off a size-limited /tmp. The dir is repo-scoped and created 0700; an existing dir that is a symlink
+ * or owned by another uid is not used. No-op when the issue is unknown or the operator owns the tmp root.
+ * Best-effort: any failure leaves the env unchanged.
  */
 export function withRunTmpdir(env, { issue, cwd = process.cwd() } = {}) {
-  const dir = runTmpDir(resolveRunTmpRoot(cwd, env), issue);
+  const dir = runTmpDir(resolveRunTmpRoot(cwd, env), issue, cwd);
   if (!dir) return env;
   try {
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const parent = dirname(dir);
+    for (const d of [parent, dir]) {
+      if (!isOwnedRealDir(d)) return env;
+      chmodSync(d, 0o700);
+    }
     env.TMPDIR = dir;
     env.CLAUDE_CODE_TMPDIR = dir;
   } catch { /* scratch stays on the inherited tmp */ }
@@ -1493,6 +1521,9 @@ export function runCliBackend({
     // intentionally omitted here since spawnSync's own `timeout` + ETIMEDOUT is
     // reliable for this single, non-looped invocation.
     const timedOut = result.status === null && result.error?.code === "ETIMEDOUT";
+    // forge#4037: only a spawn-stage failure is transient infra. A wall-clock kill leaves evidence that the child ran
+    // (a kill signal, a pid, or captured output); an ETIMEDOUT with none of those never started the child.
+    const childRan = !!result.signal || (Number.isInteger(result.pid) && result.pid > 0) || (stdout + stderr).trim().length > 0;
     if (timedOut) {
       const timeoutSecs = Math.round(timeoutMs / 1000);
       // forge#2360: spawnSync's `timeout` option kills the child outright on
@@ -1510,15 +1541,44 @@ export function runCliBackend({
       // review findings — #2277, #2292, #2293, #2355 — for that defect
       // class).
       const partial = (stdout + stderr).trim();
-      throw new Error(
+      const timeoutError = new Error(
         `claude CLI invocation timed out after ${timeoutSecs}s and was killed. ` +
           `Set FORGEDOCK_CLI_TIMEOUT_MS (ms) to adjust, or use --backend api.` +
           (partial ? ` Partial output: ${sanitizeOutputExcerptForLog(partial)}` : ""),
       );
+      if (!childRan) {
+        // forge#4021: stable transient-infra class; the engine retries it on a
+        // separate bounded counter without consuming a phase attempt.
+        timeoutError.code = "CLI_SPAWN_TRANSIENT";
+        timeoutError.spawnErrno = "ETIMEDOUT";
+        throw timeoutError;
+      }
+      // forge#4037: the child ran and was killed at the wall-clock limit: a normal, attempt-consuming failure
+      // (`cli.timeout`), with usage attached when the CLI had already emitted a parseable envelope.
+      timeoutError.code = "CLI_TIMEOUT";
+      timeoutError.usage = null;
+      try {
+        const u = JSON.parse(stdout.trim())?.usage;
+        if (u && typeof u === "object") {
+          timeoutError.usage = {
+            input_tokens: toFiniteUsageNumber(u.input_tokens),
+            output_tokens: toFiniteUsageNumber(u.output_tokens),
+            cache_creation_input_tokens: toFiniteUsageNumber(u.cache_creation_input_tokens),
+            cache_read_input_tokens: toFiniteUsageNumber(u.cache_read_input_tokens),
+          };
+        }
+      } catch {
+        // No parseable envelope from a killed child: usage stays null (never fabricated).
+      }
+      throw timeoutError;
     }
     if (result.error) {
       const error = new Error(`Failed to invoke claude CLI: ${result.error.message}`);
       error.code = result.error.code;
+      if (["EAGAIN", "ENOMEM", "EMFILE"].includes(result.error.code)) {
+        error.spawnErrno = result.error.code;
+        error.code = "CLI_SPAWN_TRANSIENT";
+      }
       throw error;
     }
 
