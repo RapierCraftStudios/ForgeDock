@@ -389,11 +389,14 @@ jobs:
 YML
 echo s > "$r/s.txt"; commit_base "$r"; echo x >> "$r/s.txt"
 OUT=$(FORGE_CI_LOCAL_JOB_TIMEOUT=2 bash "$S" run --repo "$r" --base main --base-branch main --head-branch feat 2>&1); RC=$?
-eq "a job past its timeout fails" 1 "$RC"
+eq "a job past its timeout is DEGRADED (exit 2), never FAIL (forge#4040)" 2 "$RC"
+has "the timeout is a DEGRADED result line" "$OUT" "CI_LOCAL_RESULT: DEGRADED"
+hasnt "a timeout is never a CI_LOCAL_FAIL" "$OUT" "CI_LOCAL_FAIL:"
 has "timeout is reported" "$OUT" "timed out after 2s"
 has "other jobs still pass" "$OUT" "CI_LOCAL_JOB: pass gha:ci:quick"
 OUT=$(FORGE_CI_LOCAL_BUDGET_SECONDS=2 FORGE_CI_LOCAL_JOB_TIMEOUT=600 bash "$S" run --repo "$r" --base main --base-branch main --head-branch feat 2>&1); RC=$?
-eq "an exhausted budget defers the unfinished job instead of failing" 0 "$RC"
+eq "an exhausted budget leaves the run DEGRADED (partial), not a pass and not a fail (forge#4040)" 2 "$RC"
+has "budget exhaustion names the reason" "$OUT" "reason=budget_exhausted"
 has "budget exhaustion is reported" "$OUT" "budget exhausted"
 has "the unfinished job is deferred" "$OUT" "CI_LOCAL_DEFERRED: gha:ci:hang"
 
@@ -518,6 +521,319 @@ for _c in 'cd x && aws s3 sync dist s3://prod' 'npm test; gh pr merge 1' 'x=$(aw
   eq "denylist: compound line is deferred: $_c" remote "$(node -e "import('$ROOT/scripts/ci-local/adapters/common.mjs').then(m=>console.log(m.classifyCommand(process.argv[1],'.','.').kind))" "$_c")"
 done
 eq "denylist: a plain compound check still runs" check "$(node -e "import('$ROOT/scripts/ci-local/adapters/common.mjs').then(m=>console.log(m.classifyCommand(process.argv[1],'.','.').kind))" 'npm run lint && npm test')"
+
+
+# ------------------------------------------------------------------------------------------------ forge#4040: v1.19 final-review blockers
+trunc() { printf '%s' "$1" | head -c 400; }
+nrun() { printf '%s' "$1" | jq '[.jobs[] | select((.not_applicable | not) and (.deferred_reason | not))] | length'; }
+
+# item 2 (SEC-2): the gate config is read from the trusted copy only, never from the PR tree
+r=$(blank); mkdir -p "$r/.github/workflows"
+cat > "$r/.github/workflows/ci.yml" <<'YML'
+on: pull_request
+jobs:
+  a:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo a
+  b:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo b
+YML
+echo s > "$r/s.txt"; printf 'verification:\n  ci_local:\n    exclude_jobs: ["gha:ci:b"]\n' > "$r/forge.yaml"
+commit_base "$r"; echo x >> "$r/s.txt"
+printf 'verification:\n  ci_local:\n    exclude_jobs: ["*"]\n' > "$r/forge.yaml"
+P=$(plan "$r")
+eq "SEC-2: a PR edit of a tracked forge.yaml cannot exclude jobs (base copy is used)" runnable "$(state "$P" gha:ci:a)"
+eq "SEC-2: the trusted base copy's exclude still applies" not-applicable "$(state "$P" gha:ci:b)"
+printf 'verification:\n  ci_local:\n    mode: blocking\n' > "$r/forge.yaml"; g "$r" checkout -q -- forge.yaml 2>/dev/null
+# worktree: the main checkout's (gitignored) forge.yaml is trusted, the worktree's own copy never is
+m=$(blank); mkdir -p "$m/.github/workflows"; cp "$r/.github/workflows/ci.yml" "$m/.github/workflows/ci.yml"
+echo s > "$m/s.txt"; printf 'forge.yaml\n' > "$m/.gitignore"; printf 'verification:\n  ci_local:\n    exclude_jobs: ["gha:ci:b"]\n' > "$m/forge.yaml"
+g "$m" add -A; g "$m" commit -q -m base
+git -C "$m" worktree add -q -b feat "$T/wt-sec2" main >/dev/null 2>&1
+echo x >> "$T/wt-sec2/s.txt"; printf 'verification:\n  ci_local:\n    exclude_jobs: ["*"]\n' > "$T/wt-sec2/forge.yaml"
+P=$(plan "$T/wt-sec2")
+eq "SEC-2: worktree - a forge.yaml dropped in the PR tree cannot exclude jobs" runnable "$(state "$P" gha:ci:a)"
+eq "SEC-2: worktree - the main checkout's config applies" not-applicable "$(state "$P" gha:ci:b)"
+[ "$(nrun "$P")" -ge 1 ] && ok || bad "SEC-2: the gate never ends with zero jobs because of PR config"
+
+# item 3 (SEC-3): an empty or unreachable test selection for a changed source file widens (never selects 0 and passes)
+r=$(blank); mkdir -p "$r/app" "$r/tests" "$r/lib"
+echo 'X = 1' > "$r/app/db.py"; echo 'X = 2' > "$r/app/__init__.py"; echo 'Y = 1' > "$r/lib/zz.py"
+printf 'from app import db\n\ndef test_a():\n    assert db.X\n' > "$r/tests/test_user.py"
+printf 'import app\n\ndef test_pkg():\n    assert app.X\n' > "$r/tests/test_pkg.py"
+printf 'def test_other():\n    assert True\n' > "$r/tests/test_other.py"; echo '# doc' > "$r/README.md"
+commit_base "$r"
+_imp() { node -e "
+import('$ROOT/scripts/ci-local/scoping.mjs').then(m=>{const c=process.argv.slice(1);const s=m.makeScopeCtx({repo:'$r',baseRef:'main',from:'main',changed:c});
+const t=['tests/test_user.py','tests/test_pkg.py','tests/test_other.py'];const r=m.impactedTests(s,t);console.log(JSON.stringify({sel:r.selected,widen:r.widen}))})" "$@"; }
+echo '# c' >> "$r/app/db.py"
+R=$(_imp app/db.py)
+eq "SEC-3: a module name under 4 chars (app/db.py) selects its importer" '["tests/test_user.py"]' "$(printf '%s' "$R" | jq -c '.sel')"
+eq "SEC-3: ...without widening" "" "$(printf '%s' "$R" | jq -r '.widen')"
+R=$(_imp app/__init__.py)
+has "SEC-3: __init__.py selects the importer of the package" "$(printf '%s' "$R" | jq -c '.sel')" "tests/test_pkg.py"
+R=$(_imp lib/zz.py)
+has "SEC-3: an empty selection for a changed source file widens" "$(printf '%s' "$R" | jq -r '.widen')" "empty-selection"
+eq "SEC-3: the widened selection is the full set" 3 "$(printf '%s' "$R" | jq '.sel | length')"
+R=$(_imp README.md)
+eq "SEC-3: a docs-only change still selects nothing (no widening)" '[]' "$(printf '%s' "$R" | jq -c '.sel')"
+
+# item 4 (REG-3): the built-in bash-3.2/GNU portability job runs only when CI targets macOS/Windows
+r=$(blank); mkdir -p "$r/.github/workflows" "$r/scripts"
+cat > "$r/.github/workflows/ci.yml" <<'YML'
+on: pull_request
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo lint
+YML
+printf '#!/usr/bin/env bash\necho hi\n' > "$r/scripts/x.sh"; commit_base "$r"
+printf 'mapfile -t lines < /dev/null\n' >> "$r/scripts/x.sh"
+P=$(plan "$r")
+eq "REG-3: Linux-only CI: the portability job is skipped (a mapfile repo is not hard-blocked)" not-applicable "$(state "$P" portability:builtin)"
+has "REG-3: the skip carries a note" "$(reason "$P" portability:builtin)" "Linux only"
+run_ "$r"; eq "REG-3: Linux-only repo with mapfile passes the gate" 0 "$RC"
+sed -i.bak 's/runs-on: ubuntu-latest/runs-on: ${{ matrix.os }}\n    strategy:\n      matrix:\n        os: [ubuntu-latest, macos-14]/' "$r/.github/workflows/ci.yml"; rm -f "$r/.github/workflows/ci.yml.bak"
+P=$(plan "$r")
+eq "REG-3: CI that targets macOS keeps the portability job" runnable "$(state "$P" portability:builtin)"
+r=$(mkrepo no-ci); echo x >> "$r/$(git -C "$r" ls-files | head -1)"
+P=$(plan "$r")
+eq "REG-3: a repo with no CI definitions skips the portability job" not-applicable "$(state "$P" portability:builtin)"
+
+# item 5 (REG-4): a failure under a major tool-version drift is DEFERRED, never FAIL
+r=$(blank); mkdir -p "$r/.github/workflows"
+cat > "$r/.github/workflows/ci.yml" <<'YML'
+on: pull_request
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 6
+      - run: exit 1
+YML
+echo s > "$r/s.txt"; commit_base "$r"; echo x >> "$r/s.txt"
+run_ "$r"
+eq "REG-4: setup-node 6 vs the host: the failing job does not fail the gate (exit 0)" 0 "$RC"
+has "REG-4: it is DEFERRED with the version-drift reason" "$OUT" "CI_LOCAL_DEFERRED: gha:ci:drift"
+has "REG-4: reason names the drift" "$OUT" "version drift"
+hasnt "REG-4: never a CI_LOCAL_FAIL" "$OUT" "CI_LOCAL_FAIL:"
+HM=$(node -p 'process.versions.node.split(".")[0]')
+sed -i.bak "s/node-version: 6/node-version: $HM/" "$r/.github/workflows/ci.yml"; rm -f "$r/.github/workflows/ci.yml.bak"; g "$r" add -A; g "$r" commit -q -m wf; echo y >> "$r/s.txt"
+run_ "$r"; eq "REG-4: with no drift the same failing step is a real FAIL (exit 1)" 1 "$RC"
+
+# item 6 (REG-5): slot-wait time does not count toward the job timeout; a real timeout is DEGRADED
+r=$(blank); mkdir -p "$r/.github/workflows"
+cat > "$r/.github/workflows/ci.yml" <<'YML'
+on: pull_request
+jobs:
+  one:
+    runs-on: ubuntu-latest
+    steps:
+      - run: sleep 2
+  two:
+    runs-on: ubuntu-latest
+    steps:
+      - run: sleep 2
+YML
+echo s > "$r/s.txt"; commit_base "$r"; echo x >> "$r/s.txt"
+OUT=$(FORGE_CI_LOCAL_SLOTS=1 FORGE_CI_LOCAL_JOB_TIMEOUT=3 bash "$S" run --repo "$r" --base main --base-branch main --head-branch feat --max-parallel 2 2>&1); RC=$?
+eq "REG-5: the job that waited ~2s for a slot is not timed out by its wait (jobs take 2s, timeout 3s)" 0 "$RC"
+hasnt "REG-5: no timeout reported" "$OUT" "timed out"
+
+# item 7 + 8 + validate.md fences (V2 skip removed, V4.8 mode, DEGRADED_CHECKS name)
+VAL="$ROOT/commands/work-on/build/validate.md"
+STUB="$T/stubroot"; mkdir -p "$STUB/scripts/lib"; cp "$ROOT/scripts/lib/forge-resolve.sh" "$STUB/scripts/lib/"
+cat > "$STUB/scripts/ci-local.sh" <<'STB'
+#!/usr/bin/env bash
+case "${STUB_CL:-fail}" in
+  fail) echo "CI_LOCAL_FAIL: gha:ci:unit | step: unit | exit 1"; echo "CI_LOCAL_RESULT: FAIL jobs_run=1 jobs_failed=1"; exit 1 ;;
+  degraded) echo "CI_LOCAL_RESULT: DEGRADED jobs_run=1 reason=job_timeout"; exit 2 ;;
+  pass) echo "CI_LOCAL_DEFERRED: gha:ci:e2e | e2e | needs secrets"; echo "CI_LOCAL_RESULT: PASS jobs_run=1"; exit 0 ;;
+esac
+STB
+chmod +x "$STUB/scripts/ci-local.sh"
+_fence() { awk -v h="$1" '$0 ~ h {p=1} p && /^```bash$/ {f=1; next} f && /^```$/ {exit} f {print}' "$VAL"; }
+_fence '^## Phase V4.8' > "$T/v48.sh"
+mm=$(blank); echo s > "$mm/s.txt"; printf 'forge.yaml\n' > "$mm/.gitignore"; g "$mm" add -A; g "$mm" commit -q -m base
+git -C "$mm" worktree add -q -b feat48 "$T/wt48" main >/dev/null 2>&1
+_v48() { # _v48 <iter> -> runs the real V4.8 fence against the stub gate; output in $OUT
+  sed -e "s|{WORKTREE_PATH}|$T/wt48|g" -e 's|{GH_REPO}|o/r|g' -e 's|{NUMBER}|1|g' -e 's|{PR_BASE}|main|g' -e 's|{BRANCH}|feat48|g' -e "s|^CL_ITER=0 |CL_ITER=$1 |" "$T/v48.sh" > "$T/v48.run.sh"
+  OUT=$(FORGEDOCK_HOME="$STUB" FORGE_ROOT="$STUB" bash "$T/v48.run.sh" 2>&1); }
+[ -s "$T/v48.sh" ] && ok || bad "V4.8 fence extracted"
+STUB_CL=fail; export STUB_CL
+_v48 0
+has "mode: iteration 0 FAIL stays a FAIL so the fix loop runs" "$OUT" "CI_LOCAL_STATE: FAIL"
+has "mode: iteration 0 FAIL sets GATE_PASSED false" "$OUT" "GATE_PASSED: false"
+_v48 2
+has "mode: default advisory - unfixable after 2 iterations is DEGRADED" "$OUT" "CI_LOCAL_STATE: DEGRADED"
+has "mode: DEGRADED_CHECKS names ci-local and the failing job" "$OUT" "DEGRADED_CHECKS+=ci-local — unfixable after 2 fix iterations: gha:ci:unit"
+hasnt "mode: advisory never sets GATE_PASSED false (no BUILD_BLOCKED)" "$OUT" "GATE_PASSED: false"
+has "mode: the unresolved failure is surfaced for FORGE:BUILDER" "$OUT" "CI_LOCAL_UNRESOLVED: gha:ci:unit"
+hasnt "REG-2: DEGRADED is never printed as SKIPPED_CHECKS" "$OUT" "SKIPPED_CHECKS+="
+printf 'verification:\n  ci_local:\n    mode: blocking\n' > "$mm/forge.yaml"
+_v48 2
+has "mode: blocking (main checkout config) keeps FAIL after the fix iterations" "$OUT" "CI_LOCAL_STATE: FAIL"
+has "mode: blocking sets GATE_PASSED false" "$OUT" "GATE_PASSED: false"
+rm -f "$mm/forge.yaml"; printf 'verification:\n  ci_local:\n    mode: blocking\n' > "$T/wt48/forge.yaml"
+_v48 2
+has "mode: a PR-tree forge.yaml cannot flip the mode" "$OUT" "CI_LOCAL_STATE: DEGRADED"
+rm -f "$T/wt48/forge.yaml"
+STUB_CL=degraded; _v48 0
+has "REG-2: a DEGRADED gate prints DEGRADED_CHECKS+=ci-local" "$OUT" "DEGRADED_CHECKS+=ci-local — job_timeout"
+hasnt "REG-2: ...and not SKIPPED_CHECKS" "$OUT" "SKIPPED_CHECKS+="
+STUB_CL=pass; _v48 0
+has "a passing gate prints PASS and its deferred lines" "$OUT" "CI_LOCAL_DEFERRED: gha:ci:e2e"
+STUB_CL=fail; unset STUB_CL
+
+# item 1: V2 runs the configured test command even when ci-local.sh resolves (a failing suite fails V2)
+{ for fn in degrade_check run_verification_command apply_known_slow_filter run_classified_test; do sed -n "/^${fn}() {/,/^}/p" "$VAL"; done; } > "$T/v2fns.sh"
+_fence '^### Test commands: classified runs' | sed '/^cd {WORKTREE_PATH}$/d' > "$T/v2.sh"
+mkdir -p "$T/wt-v2"; printf 'verification:\n  commands:\n    python:\n      test: "echo suite-ran; exit 3"\n' > "$T/wt-v2/forge.yaml"
+git -C "$T/wt-v2" init -q >/dev/null 2>&1
+OUT=$(cd "$T/wt-v2" && DEGRADED_CHECKS="" FORGEDOCK_HOME="$STUB" bash -c ". '$T/v2fns.sh'; . '$T/v2.sh'" 2>&1)
+has "item 1: the configured test command runs although ci-local.sh resolves" "$OUT" "suite-ran"
+has "item 1: its failure fails V2 (TEST_FAILED=1)" "$OUT" "TEST_FAILED=1"
+hasnt "item 1: no 'skipped: change-scoped local CI gate' shortcut" "$OUT" "covers it"
+
+# item 9 (REG-6): one invocation is capped below the Bash tool limit; beyond it the run is a partial DEGRADED
+r=$(blank); mkdir -p "$r/.github/workflows"
+cat > "$r/.github/workflows/ci.yml" <<'YML'
+on: pull_request
+jobs:
+  hang:
+    runs-on: ubuntu-latest
+    steps:
+      - run: sleep 30
+YML
+echo s > "$r/s.txt"; commit_base "$r"; echo x >> "$r/s.txt"
+OUT=$(FORGE_CI_LOCAL_MAX_INVOCATION_SECONDS=2 FORGE_CI_LOCAL_JOB_TIMEOUT=600 bash "$S" run --repo "$r" --base main --base-branch main --head-branch feat --budget-minutes 30 2>&1); RC=$?
+eq "REG-6: a 30 minute budget is clamped to the invocation cap: partial run is DEGRADED (exit 2)" 2 "$RC"
+has "REG-6: the cap is named" "$OUT" "reason=budget_capped_at_invocation_limit"
+_cap=$(grep -o 'MAX_INVOCATION_SECONDS) || [0-9]*' "$DIR/ci-local/run.mjs" | grep -o '[0-9]*$')
+[ "${_cap:-9999}" -le 540 ] && ok || bad "REG-6: default invocation cap must be <= 540 s (got '$_cap')"
+has "REG-6: the V4.8 block passes a <= 9 minute budget" "$(cat "$T/v48.sh")" "--budget-minutes 9"
+
+# item 11 (SEC-4): the working-directory guard is a path-segment check
+_in() { node -e "import('$ROOT/scripts/ci-local/run.mjs').then(m=>console.log(m.insideRepo(process.argv[1],process.argv[2])))" "$1" "$2"; }
+eq "SEC-4: ../r6-sibling is outside r6" false "$(_in /tmp/x/r6 /tmp/x/r6/../r6-sibling)"
+eq "SEC-4: a plain sibling prefix is outside" false "$(_in /tmp/x/r6 /tmp/x/r6-sibling/sub)"
+eq "SEC-4: a nested directory is inside" true "$(_in /tmp/x/r6 /tmp/x/r6/pkg/a)"
+eq "SEC-4: the root itself is inside" true "$(_in /tmp/x/r6 /tmp/x/r6)"
+eq "SEC-4: parent traversal is outside" false "$(_in /tmp/x/r6 /tmp/x/r6/../other)"
+
+# item 12 (SEC-5): github.* expressions go through the environment, never into the script text
+r=$(blank); mkdir -p "$r/.github/workflows"
+cat > "$r/.github/workflows/ci.yml" <<'YML'
+on: pull_request
+jobs:
+  inj:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "branch=${{ github.head_ref }}" > "$RUNNER_TEMP/out.txt"
+          test "$(cat "$RUNNER_TEMP/out.txt")" = 'branch=feat/x";touch PWNED;"' || { echo "value mangled"; exit 1; }
+YML
+echo s > "$r/s.txt"; commit_base "$r"; g "$r" checkout -q -b 'feat/x";touch PWNED;"' 2>/dev/null; echo x >> "$r/s.txt"
+P=$(bash "$S" plan --repo "$r" --base main --base-branch main --head-branch 'feat/x";touch PWNED;"' --json --no-cache 2>/dev/null)
+CMD=$(step_field "$P" gha:ci:inj 0 '.command')
+hasnt "SEC-5: the branch name is not substituted into the script text" "$CMD" "PWNED"
+has "SEC-5: the script reads it from the environment" "$CMD" 'FORGE_CI_EXPR_1'
+OUT=$(bash "$S" run --repo "$r" --base main --base-branch main --head-branch 'feat/x";touch PWNED;"' 2>&1); RC=$?
+eq "SEC-5: a hostile head ref reaches the script as data (value intact, exit 0)" 0 "$RC"
+[ ! -e "$r/PWNED" ] && ok || bad "SEC-5: injected command executed"
+
+# item 13 (SEC-6): CircleCI secondary containers never use host networking
+r=$(blank); mkdir -p "$r/.circleci"
+cat > "$r/.circleci/config.yml" <<'YML'
+version: 2.1
+jobs:
+  test:
+    docker:
+      - image: cimg/base:stable
+      - image: cimg/postgres:16.1
+        ports: ["54331:5432"]
+        environment:
+          POSTGRES_PASSWORD: example
+    steps:
+      - run: echo with-db
+workflows:
+  main:
+    jobs:
+      - test
+YML
+echo s > "$r/s.txt"; commit_base "$r"; echo x >> "$r/s.txt"
+: > "$FAKE_DOCKER_LOG"
+OUT=$(PATH="$T/bin:$PATH" bash "$S" run --repo "$r" --base main --base-branch main --head-branch feat 2>&1); RC=$?
+LOG=$(cat "$FAKE_DOCKER_LOG")
+eq "SEC-6: the circleci service job runs" 0 "$RC"
+hasnt "SEC-6: no --network host" "$LOG" "--network host"
+has "SEC-6: a per-job docker network is created" "$LOG" "network create forge-ci-net-"
+has "SEC-6: the container joins it" "$LOG" "--network forge-ci-net-"
+has "SEC-6: only the declared/default port is published, on 127.0.0.1" "$LOG" "-p 127.0.0.1:54331:5432"
+has "SEC-6: the network is removed afterwards" "$LOG" "network rm forge-ci-net-"
+
+# item 14: task-runner checks are a fallback ONLY for repos with no CI definitions
+r=$(blank); mkdir -p "$r/.github/workflows" "$r/docs"
+cat > "$r/.github/workflows/ci.yml" <<'YML'
+on:
+  pull_request:
+    paths: ["src/**"]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo build
+YML
+printf 'test:\n\techo full-suite\n' > "$r/Makefile"; printf '{ "name": "x", "scripts": { "test": "echo full" } }\n' > "$r/package.json"
+echo doc > "$r/docs/a.md"; mkdir -p "$r/src"; echo 1 > "$r/src/a.txt"; commit_base "$r"; echo more >> "$r/docs/a.md"
+P=$(plan "$r")
+eq "item 14: CI exists but no job applies: no task-runner fallback" 0 "$(printf '%s' "$P" | jq '[.jobs[] | select(.source == "task-runners")] | length')"
+eq "item 14: no_applicable_jobs is recorded" true "$(printf '%s' "$P" | jq '.no_applicable_jobs')"
+run_ "$r"
+eq "item 14: the run executes nothing and passes" 0 "$RC"
+has "item 14: the run records no_applicable_jobs" "$OUT" "no_applicable_jobs"
+hasnt "item 14: no suite ran" "$OUT" "full-suite"
+r=$(mkrepo no-ci); f=$(git -C "$r" ls-files | head -1); echo x >> "$r/$f"
+P=$(plan "$r"); eq "item 14: a repo with no CI definitions keeps the task-runner fallback (unchanged)" false "$(printf '%s' "$P" | jq '.no_applicable_jobs')"
+
+# item 15: matrix include semantics (extend matching combos, add non-matching ones)
+r=$(blank); mkdir -p "$r/.github/workflows"
+cat > "$r/.github/workflows/ci.yml" <<'YML'
+on: pull_request
+jobs:
+  m:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14]
+        node: [18, 20]
+        include:
+          - os: ubuntu-latest
+            node: 20
+            extra: yes
+          - os: ubuntu-latest
+            node: 22
+    steps:
+      - run: echo ${{ matrix.node }}-${{ matrix.extra }}
+YML
+echo s > "$r/s.txt"; commit_base "$r"; echo x >> "$r/s.txt"
+_mx() { node -e "
+import('$ROOT/scripts/ci-local/adapters/github-actions.mjs').then(m=>{console.log(JSON.stringify(m.expandMatrix(JSON.parse(process.argv[1]),{})))})" "$1"; }
+MX=$(_mx '{"os":["a","b"],"node":[18,20],"include":[{"os":"a","node":20,"extra":"y"},{"os":"a","node":22}]}')
+eq "item 15: 4 base combos + 1 non-matching include = 5, matched include extends (no duplicate)" 5 "$(printf '%s' "$MX" | jq 'length')"
+eq "item 15: the matching include extended exactly one combo" 1 "$(printf '%s' "$MX" | jq '[.[] | select(.extra == "y")] | length')"
+eq "item 15: the non-matching include added a new combo" 1 "$(printf '%s' "$MX" | jq '[.[] | select(.node == 22)] | length')"
+MX=$(_mx '{"os":["a","b"],"include":[{"color":"green"}]}')
+eq "item 15: an include naming no axis extends every combo" 2 "$(printf '%s' "$MX" | jq '[.[] | select(.color == "green")] | length')"
+eq "item 15: ...without adding combos" 2 "$(printf '%s' "$MX" | jq 'length')"
+MX=$(_mx '{"include":[{"a":1},{"a":2}]}')
+eq "item 15: an include-only matrix yields one combo per entry" 2 "$(printf '%s' "$MX" | jq 'length')"
 
 echo "ci-local.test.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

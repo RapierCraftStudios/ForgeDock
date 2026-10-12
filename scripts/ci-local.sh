@@ -20,7 +20,7 @@
 # Output (stdout): CI_LOCAL_JOB / CI_LOCAL_DEFERRED / CI_LOCAL_CHECK / CI_LOCAL_FAIL lines, then exactly one
 #       CI_LOCAL_RESULT: PASS|FAIL|DEGRADED line.
 # Exit: 0 every runnable job passed (deferred-to-ci jobs are listed), 1 a runnable job failed,
-#       2 degraded or usage error (the gate could not run; never a pass).
+#       2 degraded (job timeout, exhausted or capped budget, gate could not run) or usage error; never a pass.
 #
 # This script only reads CI definitions and runs the commands they name on this machine. It never contacts GitHub
 # and never starts a remote workflow. Requires: bash, node, git, and mikefarah yq v4 for YAML CI definitions.

@@ -71,6 +71,15 @@ function exec(argv, { cwd, env, timeoutMs, onData }) {
   });
 }
 
+// forge#4040 (SEC-4): a path-SEGMENT containment check; a string prefix would accept `<repo>-sibling`.
+export function insideRepo(repo, target) {
+  const root = path.resolve(repo); const t = path.resolve(target);
+  const rel = path.relative(root, t);
+  if (!(rel === '' || (rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel)))) return false;
+  try { const rr = path.relative(fs.realpathSync(root), fs.realpathSync(t)); if (rr === '..' || rr.startsWith('..' + path.sep) || path.isAbsolute(rr)) return false; } catch { /* target not created yet: the lexical check stands */ }
+  return true;
+}
+
 class Tail {
   constructor(max = 120) { this.lines = []; this.max = max; this.partial = ''; }
   push(buf) { const t = this.partial + buf.toString('utf8'); const parts = t.split('\n'); this.partial = parts.pop(); for (const l of parts) { this.lines.push(l); if (this.lines.length > this.max) this.lines.shift(); } }
@@ -85,14 +94,20 @@ async function startServices(job, log) {
   const started = [];
   const stop = () => { for (const n of started) runSync('docker', ['rm', '-f', n], { timeout: 30000 }); started.length = 0; };
   cleanups.add(stop);
-  const finish = () => { stop(); cleanups.delete(stop); };
+  let net = '';
+  const dropNet = () => { if (net) { runSync('docker', ['network', 'rm', net], { timeout: 30000 }); net = ''; } };
+  const finish = () => { stop(); dropNet(); cleanups.delete(stop); cleanups.delete(dropNet); };
+  cleanups.add(dropNet);
   if (!commandExists('docker') || runSync('docker', ['info'], { timeout: 20000 }).code !== 0) return { error: 'docker is not available', finish };
+  // forge#4040 (SEC-6): one docker network per job; nothing runs with --network host.
+  net = `forge-ci-net-${process.pid}-${job.id.replace(/[^A-Za-z0-9_.-]/g, '-')}`.slice(0, 120);
+  const nr = runSync('docker', ['network', 'create', net], { timeout: 30000 });
+  if (nr.code !== 0) { net = ''; return { error: `docker network create failed: ${(nr.err || nr.out).split('\n')[0]}`, finish }; }
   for (const svc of job.services) {
     const name = `forge-ci-${process.pid}-${job.id.replace(/[^A-Za-z0-9_.-]/g, '-')}-${svc.name}`.slice(0, 120);
-    const args = ['run', '-d', '--rm', '--name', name];
+    const args = ['run', '-d', '--rm', '--name', name, '--network', net, '--network-alias', svc.name];
     const hostPorts = [];
-    if (svc.host_network) args.push('--network', 'host');
-    else for (const p of svc.ports || []) {
+    for (const p of svc.ports || []) {
       const m = /^(?:(\d+):)?(\d+)(?:\/(tcp|udp))?$/.exec(String(p).trim());
       if (!m) return { error: `unsupported port mapping ${p}`, finish };
       if (m[1]) { if (!(await portFree(Number(m[1])))) return { error: `host port ${m[1]} is already in use`, finish }; hostPorts.push(Number(m[1])); args.push('-p', `127.0.0.1:${m[1]}:${m[2]}${m[3] ? '/' + m[3] : ''}`); } else args.push('-p', `127.0.0.1::${m[2]}`);
@@ -179,12 +194,14 @@ async function runJob(job, ctx) {
   try {
     if (needExec) {
       release = await acquireSlot(job.id, ctx.deadline);
-      if (!release) { res.status = 'deferred'; res.reason = 'budget exhausted waiting for a machine slot'; return res; }
+      if (!release) { res.status = 'deferred'; res.budget = true; res.reason = 'budget exhausted waiting for a machine slot'; return res; }
       if (job.services && job.services.length) {
         svc = await startServices(job, log);
         if (svc.error) { res.status = 'deferred'; res.reason = `service containers: ${svc.error}`; return res; }
       }
     }
+    // forge#4040 (REG-5): the job timeout clock starts when the job starts executing, never while it waits for a slot.
+    const tExec = Date.now();
     const ghFiles = { env: path.join(ctx.tmp, `${job.id.replace(/[^A-Za-z0-9]/g, '_')}.env`), path: path.join(ctx.tmp, `${job.id.replace(/[^A-Za-z0-9]/g, '_')}.path`), output: path.join(ctx.tmp, `${job.id.replace(/[^A-Za-z0-9]/g, '_')}.out`), summary: path.join(ctx.tmp, `${job.id.replace(/[^A-Za-z0-9]/g, '_')}.sum`) };
     for (const f of Object.values(ghFiles)) fs.writeFileSync(f, '');
     const carried = {}; let failedGroup = null;
@@ -194,7 +211,7 @@ async function runJob(job, ctx) {
       res.steps.push(sr);
       if (step.skip) { sr.status = 'skipped'; sr.reason = step.skip; continue; }
       if (failedGroup && step.group !== failedGroup) break;
-      if (Date.now() > ctx.deadline) { res.status = 'deferred'; res.reason = 'budget exhausted'; return res; }
+      if (Date.now() > ctx.deadline) { res.status = 'deferred'; res.budget = true; res.reason = 'budget exhausted'; return res; }
       const s0 = Date.now();
       if (step.builtin === 'portability') {
         const f = checkPortability({ repo: ctx.repo, from: ctx.plan.merge_base, changed: ctx.plan.changed_files, tracked: ctx.tracked });
@@ -215,22 +232,24 @@ async function runJob(job, ctx) {
       fs.writeFileSync(scriptFile, step.command + '\n');
       const env = jobEnv(job, step, ctx, ghFiles); Object.assign(env, carried);
       const cwd = path.resolve(ctx.repo, step.cwd || '.');
-      if (!cwd.startsWith(path.resolve(ctx.repo))) { res.status = 'deferred'; res.reason = 'step working-directory escapes the repository'; return res; }
+      if (!insideRepo(ctx.repo, cwd)) { res.status = 'deferred'; res.reason = 'step working-directory escapes the repository'; return res; }
       const tail = new Tail();
-      const left = Math.max(1000, Math.min((step.timeout_s || ctx.jobTimeoutS) * 1000, jobTimeout - (Date.now() - t0), ctx.deadline - Date.now()));
+      const left = Math.max(1000, Math.min((step.timeout_s || ctx.jobTimeoutS) * 1000, jobTimeout - (Date.now() - tExec), ctx.deadline - Date.now()));
       const r = await exec([...argv, scriptFile], { cwd, env, timeoutMs: left, onData: (b) => tail.push(b) });
       sr.duration_ms = Date.now() - s0;
       if (job.source === 'github-actions') { const e2 = { ...env }; absorbGhFiles(ghFiles, e2); for (const k of Object.keys(e2)) if (e2[k] !== env[k]) carried[k] = e2[k]; }
       if (r.code === 0) { if (key) { try { fs.mkdirSync(cacheDir(ctx.o), { recursive: true }); fs.writeFileSync(path.join(cacheDir(ctx.o), key + '.json'), JSON.stringify({ cmd: step.command.slice(0, 300), ts: Date.now() })); } catch { /* cache is best effort */ } } continue; }
       if (r.error) tail.push(Buffer.from(`${r.error}\n`));
       const text = tail.text(60);
-      if (r.timedOut) { if (Date.now() > ctx.deadline) { res.status = 'deferred'; res.reason = 'budget exhausted (job killed)'; return res; } sr.status = 'fail'; res.status = 'fail'; res.reason = `timed out after ${Math.round(left / 1000)}s`; res.tail = text; res.failed_step = step.name; return res; }
+      if (r.timedOut) { if (Date.now() > ctx.deadline) { res.status = 'deferred'; res.budget = true; res.reason = 'budget exhausted (job killed)'; return res; } sr.status = 'timeout'; res.status = 'degraded'; res.reason = `timed out after ${Math.round(left / 1000)}s (a timeout proves nothing about the code)`; res.tail = text; res.failed_step = step.name; return res; }
       if (step.kind === 'install') { res.status = 'deferred'; res.reason = `dependency install failed (offline?): ${step.command.slice(0, 60)}`; return res; }
       if (r.code === 127 && text.some((l) => /command not found|not found$|No such file or directory/.test(l)) && !step.continue_on_error) {
         const tool = (text.find((l) => /command not found/.test(l)) || '').replace(/^.*?([A-Za-z0-9._-]+): command not found.*$/, '$1');
         if (/command not found/.test(text.join('\n'))) { res.status = 'deferred'; res.reason = `tool not installed locally: ${tool || 'unknown'}`; return res; }
       }
       if (step.continue_on_error) { sr.status = 'allowed-failure'; continue; }
+      // forge#4040 (REG-4): a failure under a tool-version drift (setup-node 18 vs host 26) cannot be attributed to the change.
+      if (job.version_drift && job.version_drift.length) { res.status = 'deferred'; res.reason = `version drift (${job.version_drift[0]}); step "${step.name}" failed locally (exit ${r.code}), CI proves it on the pinned toolchain`; res.tail = text; return res; }
       sr.status = 'fail'; sr.exit = r.code; res.status = 'fail'; res.failed_step = step.name; res.exit = r.code; res.failed_command = step.command; res.tail = text;
       failedGroup = step.group || null; if (!failedGroup) break;
     }
@@ -246,7 +265,11 @@ async function runJob(job, ctx) {
 export async function runPlan(plan, o = {}) {
   const t0 = Date.now();
   const repo = path.resolve(plan.repo || o.repo || '.');
-  const budgetS = Number(process.env.FORGE_CI_LOCAL_BUDGET_SECONDS) || (o.budgetMinutes || plan.config.budget_minutes || Number(process.env.FORGE_CI_LOCAL_BUDGET_MINUTES) || 15) * 60;
+  const requestedS = Number(process.env.FORGE_CI_LOCAL_BUDGET_SECONDS) || (o.budgetMinutes || plan.config.budget_minutes || Number(process.env.FORGE_CI_LOCAL_BUDGET_MINUTES) || 15) * 60;
+  // forge#4040 (REG-6): one invocation never exceeds the Bash tool cap (10 min); beyond the cap it ends as a partial run
+  // (DEGRADED) and a re-run resumes from the result cache.
+  const maxInvS = Number(process.env.FORGE_CI_LOCAL_MAX_INVOCATION_SECONDS) || 540;
+  const budgetS = Math.min(requestedS, maxInvS); const capped = requestedS > maxInvS;
   const maxParallel = o.maxParallel || plan.config.max_parallel || Number(process.env.FORGE_CI_LOCAL_MAX_PARALLEL) || 4;
   const tmpRoot = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'forge-ci-local.'));
   cleanups.add(() => { try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ } });
@@ -268,7 +291,7 @@ export async function runPlan(plan, o = {}) {
       if (blocked) { pending.delete(id); const b = results.get(blocked); const r = { id, name: j.name, source: j.source, status: b.status === 'fail' ? 'skipped' : 'deferred', reason: b.status === 'fail' ? `needs ${blocked}, which failed` : `needs ${blocked}, which is not proven locally`, steps: [], duration_ms: 0 }; results.set(id, r); printJob(r); continue; }
       if (needs.some((n) => !results.has(n))) continue;
       if (running.size >= maxParallel) break;
-      if (Date.now() > ctx.deadline) { pending.delete(id); results.set(id, { id, name: j.name, source: j.source, status: 'deferred', reason: 'budget exhausted before the job started', steps: [], duration_ms: 0 }); continue; }
+      if (Date.now() > ctx.deadline) { pending.delete(id); results.set(id, { id, name: j.name, source: j.source, status: 'deferred', budget: true, reason: 'budget exhausted before the job started', steps: [], duration_ms: 0 }); continue; }
       pending.delete(id);
       const p = runJob(j, ctx).catch((e) => ({ id, name: j.name, source: j.source, status: 'deferred', reason: `runner error: ${e.message}`, steps: [], duration_ms: 0 })).then((r) => { results.set(id, r); running.delete(id); printJob(r); });
       running.set(id, p);
@@ -282,7 +305,7 @@ export async function runPlan(plan, o = {}) {
     if (j.deferred_reason) { all.push({ id: j.id, name: j.name, status: 'deferred', reason: j.deferred_reason, steps: [], duration_ms: 0 }); continue; }
     const r = results.get(j.id); if (r) all.push(r);
   }
-  const run_ = all.filter((r) => r.status === 'pass' || r.status === 'fail');
+  const run_ = all.filter((r) => r.status === 'pass' || r.status === 'fail' || r.status === 'degraded');
   const failed = all.filter((r) => r.status === 'fail'); const defd = all.filter((r) => r.status === 'deferred'); const skipped = all.filter((r) => r.status === 'skipped');
   for (const r of defd) console.log(`CI_LOCAL_DEFERRED: ${r.id} | ${r.name} | ${r.reason}`);
   let checks = 0; let hits = 0; let narrowed = 0; let widened = 0; let selTotal = 0; let selSel = 0;
@@ -294,12 +317,19 @@ export async function runPlan(plan, o = {}) {
     if (typeof s.scope.selected === 'number' && typeof s.scope.total === 'number') { selSel += s.scope.selected; selTotal += s.scope.total; }
     if (checks++ < 40) console.log(`CI_LOCAL_CHECK: job=${r.id} step=${n + 1} selector=${s.scope.selector || 'none'} selected=${s.scope.selected ?? ''} total=${s.scope.total ?? ''} cache=${s.cache} duration_ms=${s.duration_ms} widen=${(s.scope.widen_reason || '').replace(/\s+/g, '_') || 'none'}`);
   }
-  const state = failed.length ? 'FAIL' : 'PASS';
+  const degraded = all.filter((r) => r.status === 'degraded');
+  const budgetHit = all.some((r) => r.budget) || (all.some((r) => r.status === 'deferred' && /budget exhausted/.test(r.reason || '')));
+  for (const r of degraded) console.log(`CI_LOCAL_DEGRADED: ${r.id} | ${r.name} | ${r.reason}`);
+  // forge#4040: FAIL only for a runnable job that really failed. A timeout or an exhausted budget leaves code unproven:
+  // DEGRADED (exit 2), never a pass and never a fail.
+  const degReason = degraded.length ? 'job_timeout' : budgetHit ? (capped ? 'budget_capped_at_invocation_limit' : 'budget_exhausted') : '';
+  const state = failed.length ? 'FAIL' : degReason ? 'DEGRADED' : 'PASS';
   const dur = Date.now() - t0;
-  console.log(`CI_LOCAL_RESULT: ${state} jobs_run=${run_.length} jobs_deferred=${defd.length} jobs_failed=${failed.length} jobs_skipped=${skipped.length} checks=${checks} cache_hits=${hits} narrowed=${narrowed} widened=${widened} selected=${selSel} total=${selTotal} duration_ms=${dur}${Date.now() > ctx.deadline ? ' budget_exhausted=true' : ''}`);
-  if (o.resultFile) { try { fs.writeFileSync(o.resultFile, JSON.stringify({ state, jobs: all, plan_key: plan.plan_key, duration_ms: dur }, null, 2)); } catch { /* ignore */ } }
+  if (plan.no_applicable_jobs && !all.length) console.log('CI_LOCAL_NOTE: no_applicable_jobs (CI definitions exist but no job applies to this change)');
+  console.log(`CI_LOCAL_RESULT: ${state} jobs_run=${run_.length} jobs_deferred=${defd.length} jobs_failed=${failed.length} jobs_degraded=${degraded.length} jobs_skipped=${skipped.length} checks=${checks} cache_hits=${hits} narrowed=${narrowed} widened=${widened} selected=${selSel} total=${selTotal} duration_ms=${dur}${Date.now() > ctx.deadline ? ' budget_exhausted=true' : ''}${plan.no_applicable_jobs && !all.length ? ' no_applicable_jobs=true' : ''}${degReason && state === 'DEGRADED' ? ` reason=${degReason}` : ''}`);
+  if (o.resultFile) { try { fs.writeFileSync(o.resultFile, JSON.stringify({ state, mode: plan.config && plan.config.mode, jobs: all, plan_key: plan.plan_key, duration_ms: dur }, null, 2)); } catch { /* ignore */ } }
   try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* ignore */ }
-  return failed.length ? 1 : 0;
+  return failed.length ? 1 : state === 'DEGRADED' ? 2 : 0;
 }
 
 function printJob(r) {
@@ -307,8 +337,8 @@ function printJob(r) {
   const stepsRun = r.steps.filter((s) => s.status !== 'skipped').length;
   const hit = r.steps.filter((s) => s.cache === 'hit').length;
   console.log(`CI_LOCAL_JOB: ${r.status === 'pass' ? 'pass' : r.status} ${r.id} | ${r.name} | ${secs}s | steps=${stepsRun}/${r.steps.length}${hit ? ` cached=${hit}` : ''}${r.reason ? ` | ${r.reason}` : ''}`);
-  if (r.status === 'fail') {
-    console.log(`CI_LOCAL_FAIL: ${r.id} | step: ${r.failed_step || '?'}${r.exit !== undefined ? ` | exit ${r.exit}` : ''}`);
+  if (r.status === 'fail' || r.status === 'degraded') {
+    console.log(`${r.status === 'fail' ? 'CI_LOCAL_FAIL' : 'CI_LOCAL_DEGRADED_STEP'}: ${r.id} | step: ${r.failed_step || '?'}${r.exit !== undefined ? ` | exit ${r.exit}` : ''}`);
     if (r.failed_command) console.log(`CI_LOCAL_FAIL_COMMAND: ${r.failed_command.split('\n')[0].slice(0, 300)}`);
     for (const l of r.tail || []) console.log(`  | ${l}`);
   }

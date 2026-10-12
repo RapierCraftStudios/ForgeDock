@@ -173,7 +173,7 @@ function looseEq(a, b) {
   if (typeof a === typeof b) return a === b;
   return num(a) === num(b);
 }
-const str = (v) => (v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v));
+export const str = (v) => (v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v));
 
 function tokenize(src) {
   const toks = []; let i = 0;

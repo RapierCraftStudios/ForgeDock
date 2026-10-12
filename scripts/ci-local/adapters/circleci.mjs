@@ -35,6 +35,14 @@ function expand(steps, doc, params, depth, out) {
 }
 function defaultsOf(def, args) { const p = {}; for (const [k, d] of Object.entries(def.parameters || {})) p[k] = k in args ? args[k] : d && d.default; for (const [k, v] of Object.entries(args)) p[k] = v; return p; }
 
+const DEFAULT_PORTS = { postgres: 5432, mysql: 3306, mariadb: 3306, redis: 6379, mongo: 27017, rabbitmq: 5672, memcached: 11211, elasticsearch: 9200 };
+export function declaredPorts(d) {
+  if (Array.isArray(d.ports) && d.ports.length) return d.ports.map((p) => (/^\d+$/.test(String(p)) ? `${p}:${p}` : String(p)));
+  const base = String(d.image || '').split('/').pop().split(':')[0].replace(/^cimg-/, '');
+  const hit = DEFAULT_PORTS[base] || DEFAULT_PORTS[String(d.image || '').split('/').pop().split(':')[0]];
+  return hit ? [`${hit}:${hit}`] : [];
+}
+
 export function plan(a) {
   const out = []; const warnings = []; const used = [];
   for (const file of a.defFiles(DEF_RE)) {
@@ -72,8 +80,9 @@ export function plan(a) {
         const steps = []; expand(jobDef.steps, doc, params, 0, steps);
         if (jobDef.steps.some((s) => s && typeof s === 'object' && Object.keys(s)[0] === 'add_ssh_keys')) { def('add_ssh_keys'); continue; }
         const services = [];
-        if (Array.isArray(exec.docker) && exec.docker.length > 1) for (const d of exec.docker.slice(1)) services.push({ name: String(d.name || d.image).replace(/[^A-Za-z0-9_.-]/g, '-'), image: d.image, env: d.environment || {}, ports: [], options: '', host_network: true });
-        if (services.length && hostClass() !== 'linux') { def('service containers need host networking (Linux only)'); continue; }
+        // forge#4040 (SEC-6): secondary containers never use host networking. Each runs on a per-job docker network and only
+        // its declared ports (a `ports:` list, else the image's well-known default) are published on 127.0.0.1.
+        if (Array.isArray(exec.docker) && exec.docker.length > 1) for (const d of exec.docker.slice(1)) services.push({ name: String(d.name || d.image).replace(/[^A-Za-z0-9_.-]/g, '-'), image: d.image, env: d.environment || {}, ports: declaredPorts(d), options: '' });
         const env = Object.fromEntries(Object.entries({ ...(exec.environment || {}), ...(exec.docker && exec.docker[0] ? exec.docker[0].environment || {} : {}) }).map(([k, v]) => [k, subst(v, params)]));
         const defined = new Set(Object.keys(env));
         const all = steps.map((s) => s.command).join('\n');

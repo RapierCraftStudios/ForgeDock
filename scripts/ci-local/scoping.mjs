@@ -166,6 +166,20 @@ function stemsOf(f) {
     s.push(noExt);
     const bare = px.basename(noExt);
     if (bare.length >= 4) s.push(bare);
+    // forge#4040: short module names (db, io, __init__) cannot be grepped bare without drowning the repo, so reference them
+    // by their qualified forms: dotted python module paths and `from pkg import mod` / relative-import spellings.
+    if (e === 'py' || e === 'pyi') {
+      const isInit = bare === '__init__';
+      const modPath = isInit ? px.dirname(noExt) : noExt;
+      if (modPath && modPath !== '.') {
+        const dotted = modPath.split('/').join('.');
+        s.push(dotted);
+        const parts = dotted.split('.'); const leaf = parts.pop();
+        if (parts.length) s.push(`from ${parts.join('.')} import ${leaf}`);
+        s.push(`from . import ${leaf}`, `from .${leaf} import`);
+        if (isInit || bare.length < 4) s.push(modPath);
+      }
+    }
   }
   const m = FIXTURE_DIR.exec(f);
   if (m) { const idx = m.index + (m[1] ? m[1].length : 0); const after = f.slice(idx).split('/'); s.push(after.slice(0, 2).join('/')); if (m.index > 0) s.push(f.slice(0, idx) + after.slice(0, 2).join('/')); }
@@ -217,6 +231,11 @@ export function impactedTests(sctx, testFiles) {
   const selected = new Set();
   for (const t of testFiles) if (r.files.has(t) && sctx.present.has(t)) selected.add(t);
   for (const f of sctx.changed) if (!isTestFile(f)) for (const t of siblingTests(f, testFiles)) selected.add(t);
+  // forge#4040 (SEC-3): an empty selection for a changed source file is never a pass: widen to the full job.
+  if (!selected.size) {
+    const src = sctx.changed.find((f) => !isTestFile(f) && (CODE_EXT.has(extOf(f)) || /^(sh|bash)$/.test(extOf(f))));
+    if (src) return { selected: [...testFiles], total: testFiles.length, widen: `empty-selection: no test reaches ${src}` };
+  }
   return { selected: [...selected].sort(), total: testFiles.length, widen: '' };
 }
 
