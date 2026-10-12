@@ -127,8 +127,10 @@ function funnelSection(events, issues) {
   for (const d of Object.values(bySeverity)) d.perReview = reviews.size ? d.total / reviews.size : null;
   const dispositions = { ISSUE: 0, NOTE: 0, INPR_FIX: 0 };
   for (const f of findings) if (f.disposition in dispositions) dispositions[f.disposition]++;
+  // Events written before the scope field existed carry none and are not counted.
+  const introduced = findings.filter((f) => f.scope === "introduced").length;
   return {
-    reviews: reviews.size, findings: findings.length, perReview: ratio(findings.length, reviews.size),
+    reviews: reviews.size, findings: findings.length, introduced, perReview: ratio(findings.length, reviews.size),
     bySeverity, dispositions,
     validated: issues.filter((i) => i.labels.includes("validated")).length,
     falsePositive: issues.filter((i) => i.labels.includes("false-positive")).length,
@@ -150,7 +152,7 @@ function gatesSection(events) {
   };
 }
 
-function issueFlowSection(issues) {
+function issueFlowSection(issues, introduced = 0) {
   const real = issues.filter((i) => !i.isPr);
   const created = {};
   for (const i of real) { const s = issueSource(i); created[s] = (created[s] ?? 0) + 1; }
@@ -162,6 +164,7 @@ function issueFlowSection(issues) {
     n: real.length, created, createdTotal: real.length, closed, closedTotal: closedIssues.length,
     net: real.length ? real.length - closedIssues.length : null,
     findingsPerMerge: ratio(created["review-finding"] ?? 0, merged),
+    introducedPerMerge: ratio(introduced, merged),
   };
 }
 
@@ -214,7 +217,8 @@ export function aggregate({ runs = [], events = [], issues = [] } = {}, opts = {
   let groups = [...keys.values()].map(({ version, repo }) => {
     const sel = (list) => list.filter((x) => x.version === version && x.repo === repo);
     const g = { version, repo, cost: costSection(sel(counted)), time: timeSection(sel(counted)), flow: flowSection(sel(counted)),
-      funnel: funnelSection(sel(evs), sel(iss)), gates: gatesSection(sel(evs)), issueFlow: issueFlowSection(sel(iss)) };
+      funnel: funnelSection(sel(evs), sel(iss)), gates: gatesSection(sel(evs)), issueFlow: null };
+    g.issueFlow = issueFlowSection(sel(iss), g.funnel.introduced);
     g.n = g.flow.n;
     g.lowN = g.n < minN;
     g.minN = minN;

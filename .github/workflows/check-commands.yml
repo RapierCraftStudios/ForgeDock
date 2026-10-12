@@ -23,6 +23,8 @@ on:
       - 'scripts/ci-local.test.sh'
       - 'scripts/ci-local/**'
       - 'scripts/fixtures/ci-local/**'
+      - 'scripts/consumer-sweep.sh'
+      - 'scripts/consumer-sweep.test.sh'
       - 'scripts/spec-no-worktree-script.test.sh'
       - 'scripts/review-pr-arguments.test.sh'
       - 'scripts/review-pr-domain-map.test.sh'
@@ -36,6 +38,8 @@ on:
       - 'scripts/lib/review-template-resolve.sh'
       - 'scripts/review-delta.sh'
       - 'scripts/review-delta.test.sh'
+      - 'scripts/detect-append-registries.sh'
+      - 'scripts/detect-append-registries.test.sh'
       - 'scripts/review-pr-delta-wiring.test.sh'
       - 'scripts/review-pr-staging-scope.test.sh'
       - 'scripts/review-pr-staging-finding-filter.test.sh'
@@ -77,6 +81,8 @@ on:
       - 'scripts/ci-local.test.sh'
       - 'scripts/ci-local/**'
       - 'scripts/fixtures/ci-local/**'
+      - 'scripts/consumer-sweep.sh'
+      - 'scripts/consumer-sweep.test.sh'
       - 'scripts/spec-no-worktree-script.test.sh'
       - 'scripts/review-pr-arguments.test.sh'
       - 'scripts/review-pr-domain-map.test.sh'
@@ -90,6 +96,8 @@ on:
       - 'scripts/lib/review-template-resolve.sh'
       - 'scripts/review-delta.sh'
       - 'scripts/review-delta.test.sh'
+      - 'scripts/detect-append-registries.sh'
+      - 'scripts/detect-append-registries.test.sh'
       - 'scripts/review-pr-delta-wiring.test.sh'
       - 'scripts/review-pr-staging-scope.test.sh'
       - 'scripts/review-pr-staging-finding-filter.test.sh'
@@ -362,6 +370,7 @@ jobs:
           bash scripts/check-branch-ancestry.test.sh
           bash scripts/check-blast-radius.test.sh
           bash scripts/ci-local.test.sh
+          bash scripts/consumer-sweep.test.sh
           bash scripts/spec-no-worktree-script.test.sh
           bash scripts/review-pr-arguments.test.sh
           bash scripts/review-pr-domain-map.test.sh
@@ -370,6 +379,7 @@ jobs:
           bash scripts/review-finalize.test.sh
           bash scripts/close-parent-c3.test.sh
           bash scripts/review-delta.test.sh
+          bash scripts/detect-append-registries.test.sh
           bash scripts/review-pr-delta-wiring.test.sh
           bash scripts/review-pr-staging-scope.test.sh
           bash scripts/review-pr-staging-finding-filter.test.sh

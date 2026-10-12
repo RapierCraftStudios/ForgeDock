@@ -1,0 +1,7 @@
+# Merge policy for append-only line registries (forge#3969).
+# A `merge=union` entry makes two PRs that append at the same spot merge without a conflict (and without a
+# base-sync remediation round). Add an entry ONLY when BOTH hold:
+#   1. `bash scripts/detect-append-registries.sh --check-union <path>` prints UNION SAFE, and
+#   2. every line of the file is independent: no ordering, uniqueness or structural constraint
+#      (never YAML/JSON/TOML maps, lockfiles, or ordered lists).
+# Justify each entry in a comment on the line above it. No file currently qualifies, so there are no entries.

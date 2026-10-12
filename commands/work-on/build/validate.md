@@ -43,7 +43,7 @@ Parse from $ARGUMENTS:
 
 ## Skip Conditions
 
-Skip Phases V0–V4.6 (set `GATE_PASSED=true`, iterations 0) and go straight to Phase V5 (which posts the skip-path quality-gate marker, commits, and marks the build complete) if:
+Skip Phases V0–V4.7 (set `GATE_PASSED=true`, iterations 0) and go straight to Phase V5 (which posts the skip-path quality-gate marker, commits, and marks the build complete) if:
 - Only 1 file was changed AND the shared predicate classifies it as documentation: `printf '%s\n' "<that file>" | bash "$FORGE_ROOT/scripts/is-docs-only.sh"` exits 0 (resolve `FORGE_ROOT` with the canonical block; unresolvable → the gate runs). A single file under `commands/`, `.claude/`, `.agents/`, `hooks/`, … or any agent-instruction Markdown is **code** for this purpose (it contains executable shell and agent instructions) and is never skipped. <!-- field test: phase-4-execution.md was skipped as "docs" -->
 
 In all other cases, the gate MUST run.
@@ -573,14 +573,77 @@ On `FAIL`, the blocker line for `VALIDATE_RESULT` is `blast-radius: <UNLISTED/NO
 
 ---
 
-## Phase V4.6: Local CI Gate *(runs after V4.5, before V5 — skipped only on the docs-only skip path)* <!-- Added: forge#3973 -->
+## Phase V4.6: Consumer Sweep *(runs after V4.5, before V5 — skipped only on the docs-only skip path)* <!-- Added: forge#3970 -->
+
+A changed or removed identifier (function, class, constant, config or context key, CLI flag, env var, path, literal hash or version) leaves stale references in files the diff never touched. This phase runs `consumer-sweep.sh`, a script and not a prompt: it extracts the identifiers from the removed side of the final diff and lists every reference outside the change set (generated and vendored paths excluded through the `build.scope.exclude_globs` set, read as in build B5.5). Every listed site must be justified by a `unaffected: <reason>` line in the `CONSUMERS:` block of the FORGE:BUILDER comment (grammar in implement I6); a site in a changed file is already addressed.
+
+- **Trust and install root**: the same rules as V4.5. The BUILDER body is read only from the newest comment `trusted-comments.sh` accepts, and both scripts resolve from `FORGE_ROOT`, never from the worktree.
+- **Exit codes**: `0` all sites addressed or none (PASS); `1` an `UNADDRESSED:` line was printed, so set `GATE_PASSED=false`, then update the file or add a justified `unaffected:` line to the `CONSUMERS:` block, and re-run V1 onward; anything else, a failed fetch, or an unresolvable script is DEGRADED: append `consumer-sweep` to `SKIPPED_CHECKS` and print the reason. DEGRADED never passes silently and a failed read is never treated as "no sites". A missing BUILDER comment is not a pass: the sweep still runs with an empty justification set.
+- **Carry-forward**: as V4.5, the block prints `CONSUMER_SWEEP_STATE: <PASS|FAIL|DEGRADED>`, plus `GATE_PASSED: false` on FAIL and `SKIPPED_CHECKS+=consumer-sweep` on DEGRADED. Record those lines; V5 Step 1 and Step 4 read them.
+
+```bash
+cd {WORKTREE_PATH}
+# FORGE_ROOT: shared resolver scripts/lib/forge-resolve.sh (empty when unresolved => callers fail closed)
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+FORGE_ROOT="$(forge_root 2>/dev/null || true)"
+CS_SCRIPT="${FORGE_ROOT:+$FORGE_ROOT/scripts/consumer-sweep.sh}"; [ -f "$CS_SCRIPT" ] || CS_SCRIPT=""
+TRUST_SCRIPT="${FORGE_ROOT:+$FORGE_ROOT/scripts/trusted-comments.sh}"; [ -f "$TRUST_SCRIPT" ] || TRUST_SCRIPT=""
+CS_STATE=""; CS_NOTE=""; CS_FILE=$(mktemp "${TMPDIR:-/tmp}/forge-consumers.XXXXXX")
+if [ -z "$CS_SCRIPT" ] || [ -z "$TRUST_SCRIPT" ]; then
+  CS_STATE="DEGRADED"; CS_NOTE="consumer-sweep.sh or trusted-comments.sh not found under FORGE_ROOT"
+else
+  COMMENTS_JSON=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments 2>/dev/null); FETCH_RC=$?
+  if [ "$FETCH_RC" -ne 0 ]; then
+    CS_STATE="DEGRADED"; CS_NOTE="could not fetch issue comments (rc=${FETCH_RC})"
+  else
+    BODIES=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUST_SCRIPT" bodies '^<!-- FORGE:BUILDER'); TRUST_RC=$?
+    if [ "$TRUST_RC" -ne 0 ]; then
+      CS_STATE="DEGRADED"; CS_NOTE="trusted-comments.sh failed (rc=${TRUST_RC})"
+    else
+      # one JSON string per line, newest last; no trusted BUILDER comment leaves the justification file empty
+      if [ -n "$BODIES" ]; then printf '%s\n' "$BODIES" | tail -n 1 | jq -r . > "$CS_FILE"; JQ_RC=$?; else JQ_RC=0; fi
+      EXCLUDES=()
+      while IFS= read -r _g; do [ -n "$_g" ] && [ "$_g" != "null" ] && EXCLUDES+=(--exclude-glob "$_g"); done \
+        < <(yq '(.build.scope.exclude_globs // []) + (.build.diff_size.exclude_globs // []) | .[]' forge.yaml 2>/dev/null || true)
+      if [ "$JQ_RC" -ne 0 ]; then
+        CS_STATE="DEGRADED"; CS_NOTE="could not decode the FORGE:BUILDER comment (rc=${JQ_RC})"
+      else
+        git fetch origin {PR_BASE} >/dev/null 2>&1 || true
+        CS_OUT=$(bash "$CS_SCRIPT" --range "origin/{PR_BASE}..WORKTREE" --repo "{WORKTREE_PATH}" --consumers "$CS_FILE" ${EXCLUDES[@]+"${EXCLUDES[@]}"} 2>&1); CS_RC=$?
+        printf '%s\n' "$CS_OUT"
+        case "$CS_RC" in
+          0) CS_STATE="PASS" ;;
+          1) CS_STATE="FAIL"; GATE_PASSED=false ;;
+          *) CS_STATE="DEGRADED"; CS_NOTE="consumer-sweep.sh exited ${CS_RC}" ;;
+        esac
+      fi
+    fi
+  fi
+fi
+rm -f "$CS_FILE"
+echo "CONSUMER_SWEEP: ${CS_STATE}${CS_NOTE:+ — $CS_NOTE}"
+# Carry-forward lines for V5 (fresh shell): read them back in V5 Step 1 and Step 4.
+echo "CONSUMER_SWEEP_STATE: ${CS_STATE}"
+if [ "$CS_STATE" = "FAIL" ]; then
+  echo "GATE_PASSED: false"
+elif [ "$CS_STATE" = "DEGRADED" ]; then
+  SKIPPED_CHECKS="${SKIPPED_CHECKS:+$SKIPPED_CHECKS, }consumer-sweep"
+  echo "SKIPPED_CHECKS+=consumer-sweep"
+fi
+```
+
+On `FAIL`, the blocker line for `VALIDATE_RESULT` is `consumer_unaddressed: <UNADDRESSED lines>`; the repair loop (build B6.5) updates the listed files or adds a justified `unaffected:` line to the BUILDER `CONSUMERS:` block, never edits the checker.
+
+---
+
+## Phase V4.7: Local CI Gate *(runs after V4.6, before V5 — skipped only on the docs-only skip path)* <!-- Added: forge#3973 -->
 
 The repo's own CI checks used to run first at review, after the full panel, so deterministic failures (spec-size budget, test wiring, lint, portability) cost a remediation round. `scripts/ci-local.sh run` derives the pull-request checks from the repo's CI definitions (read from the trusted base ref plus the PR's own edits), runs only what this change can affect, locally in `{WORKTREE_PATH}`, and never contacts GitHub or triggers a remote run. Remote CI still runs once, at merge.
 
 - **Install root only**: `ci-local.sh` resolves from `FORGE_ROOT`, never from the worktree. An unresolvable script is DEGRADED, never a pass.
 - **Exit codes**: `0` every runnable job passed (jobs it could not prove locally are printed as `CI_LOCAL_DEFERRED:` lines); `1` a runnable job failed; anything else (`CI_LOCAL_RESULT: DEGRADED`, exit 2, a missing script or `yq`) is DEGRADED: append `ci-local` to `SKIPPED_CHECKS` and print the reason.
 - **Fix loop**: on exit `1`, read the `CI_LOCAL_FAIL:` blocks, fix the failure in this same context (the code, never the check or the CI definition), stage it, and re-run this block with `CL_ITER` set to 1, then 2. At most 2 fix iterations: still failing after the second is `GATE_PASSED=false` with blocker `ci-local: <failing job ids>`. A fix that touches files beyond the failing check's own inputs re-runs V1 first.
-- **Carry-forward**: each Bash call is a fresh shell, so the block prints `CI_LOCAL_STATE: <PASS|FAIL|DEGRADED>`, plus `GATE_PASSED: false` on FAIL, `SKIPPED_CHECKS+=ci-local` on DEGRADED, and its `CI_LOCAL_DEFERRED:` lines. Record them in your notes; V5 Step 1 and Step 4 read them.
+- **Carry-forward**: each Bash call is a fresh shell, so the block prints `CI_LOCAL_STATE: <PASS|FAIL|DEGRADED>`, plus `GATE_PASSED: false` on FAIL, `SKIPPED_CHECKS+=ci-local` on DEGRADED, and its `CI_LOCAL_DEFERRED:` lines. Record them in your notes; V5 Step 1 and Step 4 read them. Only the FINAL iteration's `CI_LOCAL_STATE` counts: a `FAIL` printed by an earlier iteration is superseded once a later iteration prints `PASS` (forge#3999).
 
 ```bash
 cd {WORKTREE_PATH}
@@ -617,10 +680,10 @@ The quality gate must leave a checkable artifact. `scripts/verify-phase-trail.sh
 
 **Skip-path marker**: when the Skip Conditions above set `GATE_PASSED=true` early (single config/docs file), still post the marker with `**Result**: PASS (skipped — single config/docs file)` and `**Iterations**: 0`, so the verifier never has to guess. The verifier's `--docs-only` waiver additionally covers diffs accepted by `scripts/is-docs-only.sh` (allowlisted Markdown only: `docs/**` or root README/CHANGELOG/CONTRIBUTING/SECURITY/GOVERNANCE; nested `AGENTS.md`/`CLAUDE.md`/`SKILL.md`/`GEMINI.md` and the instruction directories `commands/`, `devdocs/`, `templates/`, `skills/`, `agents/`, `hooks/`, `.claude/`, `.claude-plugin/`, `.agents/`, `.codex/`, `.cursor/`, `.github/`, `.opencode/`, `.gemini/`, `.kiro/` excluded; callers feed both sides of renames).
 
-Set `GATE_PASSED` from the V1 loop result, then apply the printed carry-forward lines: if V4.5 or V4.6 printed `GATE_PASSED: false` (`BLAST_RADIUS_STATE: FAIL`, `CI_LOCAL_STATE: FAIL`), `GATE_PASSED` is `false` here even if the V1 loop passed.
+Set `GATE_PASSED` from the V1 loop result, then apply the printed carry-forward lines of V4.5, V4.6 and V4.7: if any printed `GATE_PASSED: false` (`BLAST_RADIUS_STATE: FAIL`, `CONSUMER_SWEEP_STATE: FAIL`, or the FINAL V4.7 iteration's `CI_LOCAL_STATE: FAIL`), `GATE_PASSED` is `false` here even if the V1 loop passed. A V4.7 `FAIL` from an earlier iteration that a later iteration superseded with `CI_LOCAL_STATE: PASS` does not count (forge#3999).
 
 ```bash
-# GATE_PASSED: set from the V1 loop result, and forced to false when V4.5 or V4.6 printed "GATE_PASSED: false"
+# GATE_PASSED: set from the V1 loop result, and forced to false when V4.5, V4.6 or the final V4.7 iteration printed "GATE_PASSED: false"
 GATE_RESULT=$([ "$GATE_PASSED" = "true" ] && echo PASS || echo FAIL)
 # Bind the PASS to what was actually gated: the staged tree is exactly the tree the V5 commit will have.
 # scripts/verify-phase-trail.sh --head-tree (work-on/review.md R1.5) rejects a PASS recorded for a different tree. <!-- Added: forge#3149 -->
@@ -732,14 +795,14 @@ If the output contains `ANCESTRY_FAILED=1`: do NOT append `:COMPLETE` and do NOT
 
 After the ancestry audit passes (or is skipped), patch the existing FORGE:BUILDER comment: add the `**Verification Status**` line, the best-effort `cost_usd:` line, and the `<!-- FORGE:BUILDER:COMPLETE -->` marker. This is the **only** place the marker is written — it signals that a real commit exists on the branch and the build is safe to resume-skip. <!-- Added: forge#1305 -->
 
-`SKIPPED_CHECKS` comes from Phase V2 and Phase V4.5. Shell state may not persist between Bash calls, so set it here from your V2 notes before running the block (comma-separated check names, empty when every configured check ran), and append `blast-radius` when V4.5 printed `SKIPPED_CHECKS+=blast-radius` (`BLAST_RADIUS_STATE: DEGRADED`). Likewise append `ci-local` when V4.6 printed `SKIPPED_CHECKS+=ci-local`, and set `CI_LOCAL_DEFERRED_LINES` from V4.6's `CI_LOCAL_DEFERRED:` lines (one `- <job id> | <name> | <reason>` bullet each, empty when none): they become the `### Deferred to CI` section of the `FORGE:BUILDER` comment.
+`SKIPPED_CHECKS` comes from Phase V2, Phase V4.5, Phase V4.6 and Phase V4.7. Shell state may not persist between Bash calls, so set it here from your V2 notes before running the block (comma-separated check names, empty when every configured check ran), append `blast-radius` when V4.5 printed `SKIPPED_CHECKS+=blast-radius` (`BLAST_RADIUS_STATE: DEGRADED`), append `consumer-sweep` when V4.6 printed `SKIPPED_CHECKS+=consumer-sweep` (`CONSUMER_SWEEP_STATE: DEGRADED`), and append `ci-local` when V4.7 printed `SKIPPED_CHECKS+=ci-local`. Set `CI_LOCAL_DEFERRED_LINES` from V4.7's `CI_LOCAL_DEFERRED:` lines (one `- <job id> | <name> | <reason>` bullet each, empty when none): they become the `### Deferred to CI` section of the `FORGE:BUILDER` comment.
 
 **Cost line reconciliation**: the machine-readable `cost_usd:` line (best-effort; only when `PHASE_COST_USD` is available, never blocking) is the single cost signal. Do not add a separate `**Cost (build phase)**` line.
 
 ```bash
-# SKIPPED_CHECKS: set from the V2 notes plus the V4.5/V4.6 carry-forward lines, e.g. SKIPPED_CHECKS="python.format, blast-radius, ci-local"
+# SKIPPED_CHECKS: set from the V2 notes plus the V4.5, V4.6 and V4.7 carry-forward lines, e.g. SKIPPED_CHECKS="python.format, blast-radius, consumer-sweep, ci-local"
 SKIPPED_CHECKS="${SKIPPED_CHECKS:-}"
-# CI_LOCAL_DEFERRED_LINES: bullets from V4.6's CI_LOCAL_DEFERRED lines (empty when none)
+# CI_LOCAL_DEFERRED_LINES: bullets from V4.7's CI_LOCAL_DEFERRED lines (empty when none)
 CI_LOCAL_DEFERRED_LINES="${CI_LOCAL_DEFERRED_LINES:-}"
 if [ -z "$SKIPPED_CHECKS" ]; then
   VERIFICATION_STATUS="✅ All configured verification commands passed"
@@ -804,7 +867,7 @@ VALIDATE_RESULT:
   blocker: {description if gate_passed=false}
   verification_skipped: []  # empty when all configured checks ran; list of skipped check names otherwise
                             # e.g. ["python.format", "typescript.typecheck/build"]
-                            # populated from SKIPPED_CHECKS in Phase V2, V4.5 and V4.6
+                            # populated from SKIPPED_CHECKS in Phase V2, V4.5, V4.6 and V4.7
 ```
 
 ---
@@ -819,7 +882,8 @@ implement (work-on:build:implement) — code written, staged (not committed), FO
       V0 self-check → V1 quality-gate loop (Skill quality-gate, forked) → V2 format/verify + known-slow/learned tests
       → V3 proxy wiring → V3.5 DB advisory → V3.6 browser signals → V4 deploy completeness
       → V4.5 blast-radius manifest check (check-blast-radius.sh, install-root only)
-      → V4.6 local CI gate (ci-local.sh, install-root only; at most 2 fix iterations, then blocker `ci-local: <jobs>`)
+      → V4.6 consumer sweep (consumer-sweep.sh, install-root only)
+      → V4.7 local CI gate (ci-local.sh, install-root only; at most 2 fix iterations, then blocker `ci-local: <jobs>`)
       → V5 marker → commit → ancestry audit → BUILDER:COMPLETE
 review (work-on:review) — push, PR, merge
 ```

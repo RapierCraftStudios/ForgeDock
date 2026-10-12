@@ -674,7 +674,7 @@ Each NOTE gets one disposition: (1) **fix in this PR**, only comment, documentat
 
 ### 6B.6: In-PR fix gate
 
-A CONFIRMED MEDIUM-or-higher defect in a file this PR changed is cheaper to fix before merge than through a separate `/work-on` cycle: `classify` marks it `INPR_FIX` and posts the `FORGE:INPR_FIX` request after the disposition marker (`INPR_FIX_POSTED=true`), so do NOT file those findings in 6C. Narrow by design: auto-merge reviews with `--issue`, files in the PR diff, one round per PR (any trusted `FORGE:INPR_FIX*` marker ends it). Phase 8 then refuses to merge this head (blocker `in-pr fix required`). If the round fails, `/work-on` waives it for MEDIUM and files the findings (`work-on/review.md` R4); HIGH/CRITICAL are never waived and end at `needs-human`.
+A CONFIRMED MEDIUM-or-higher defect, or a LIKELY MEDIUM defect whose line the PR introduced (`scope=introduced`), in a file this PR changed is cheaper to fix before merge than through a separate `/work-on` cycle: `classify` marks it `INPR_FIX` and posts the `FORGE:INPR_FIX` request after the disposition marker (`INPR_FIX_POSTED=true`), so do NOT file those findings in 6C. `review-finalize.sh extract` computes `scope` (`introduced` | `pre-existing` | `unknown`) per finding from the PR diff (the added-line window; unknown provenance never widens the gate). Narrow by design: auto-merge reviews with `--issue`, files in the PR diff, one round per PR (any trusted `FORGE:INPR_FIX*` marker ends it). Phase 8 then refuses to merge this head (blocker `in-pr fix required`). If the round fails, `/work-on` waives it for MEDIUM and files the findings (`work-on/review.md` R4); HIGH/CRITICAL are never waived and end at `needs-human`.
 
 ### 6C: Create Issues
 
@@ -718,6 +718,7 @@ cat <<'ISSUE_EOF' > "$FINDING_ISSUE_BODY_FILE"
 **Agent**: [name] ([domain])
 **Confidence**: [CONFIRMED/LIKELY/POSSIBLE]
 **Severity**: [CRITICAL/HIGH/MEDIUM/LOW]
+**Scope**: introduced|pre-existing (the worklist item's `scope`; omit the line when it is `unknown`)
 **Review comment**: [permalink to agent comment]
 
 ## Pattern Metadata
@@ -799,25 +800,29 @@ Append a `## Review Findings` table (summaries and issue links) to the PR body: 
 
 ```bash
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"; MERGE_ISSUE="{MERGE_ISSUE}"
-MERGE_HEALTH="{MERGE_HEALTH}"; MERGE_HEALTH_STATE="{MERGE_HEALTH_STATE}"; BASE="{BASE}"; HEAD="{HEAD}"; REVIEW_SHA="{REVIEW_SHA}"
+MERGE_HEALTH="{MERGE_HEALTH}"; MERGE_HEALTH_STATE="{MERGE_HEALTH_STATE}"; BASE="{BASE}"; HEAD="{HEAD}"; REVIEW_SHA="{REVIEW_SHA}"; CTX="{CONTEXT_FILE}"
 INTENSITY_TIER="{INTENSITY_TIER}"; TABLE_CELL_KEY="{TABLE_CELL_KEY}"; TRUST_SHADOW_MODE="{TRUST_SHADOW_MODE}"; TRUST_NEEDS_HUMAN="{TRUST_NEEDS_HUMAN}"
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
 RF=$(forge_resolve review-finalize.sh)   # install roots only, never the PR checkout; unresolvable is a stop (fail closed), never a skipped gate
 [ -n "$RF" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/review-finalize.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install); refusing to continue (fail closed)"; exit 1; }   # STOP
-# --result: stale (PR HEAD moved) | clean (no blocking criteria) | blocking (any criterion above). Free text is data, never code.
+OUT_DIR="$(dirname "$CTX")/review-finalize-${PR_NUMBER}"; mkdir -p "$OUT_DIR"
+# Free text (purpose-regression findings, agents list) derives from PR content: BEFORE this fence, write it with the file-write tool (never a
+# shell heredoc, echo or printf of the text) to "$OUT_DIR/purpose-findings.txt" (ids and reasons; leave absent when there is no purpose regression)
+# and "$OUT_DIR/agents.txt" ("{N} agents: {names}"). It is passed by path, so it is never re-parsed as shell. Never put free text in a shell word.
+# --result: stale (PR HEAD moved) | clean (no blocking criteria) | blocking (any criterion above).
 VERDICT_OUT=$(bash "$RF" verdict --pr "$PR_NUMBER" --repo "$REPO" --review-sha "$REVIEW_SHA" --base "$BASE" --head-branch "$HEAD" \
   --merge-health "$MERGE_HEALTH" --merge-health-state "$MERGE_HEALTH_STATE" --is-milestone "{IS_MILESTONE_TO_STAGING}" \
-  --has-purpose-regression "{HAS_PURPOSE_REGRESSION}" --purpose-findings '{PURPOSE_REGRESSION_FINDINGS}' \
-  --result "{RESULT}" --agents '{N} agents: {names}' --findings-count "{M}" --blocking-count "{N_BLOCKING}" \
+  --has-purpose-regression "{HAS_PURPOSE_REGRESSION}" --purpose-findings-file "$OUT_DIR/purpose-findings.txt" \
+  --result "{RESULT}" --agents-file "$OUT_DIR/agents.txt" --findings-count "{M}" --blocking-count "{N_BLOCKING}" \
   --intensity-tier "$INTENSITY_TIER" --table-cell-key "$TABLE_CELL_KEY" --trust-shadow-mode "$TRUST_SHADOW_MODE"); VERDICT_RC=$?
 printf '%s\n' "$VERDICT_OUT"
 [ "$VERDICT_RC" -eq 0 ] || exit 1   # STOP: REVIEW_RESULT: status: BLOCKED was printed
 # 7B.5: reads task type and confidence from the linked issue's FORGE:INVESTIGATOR, consults origin/forge-knowledge, records FORGE:CALIBRATION_CHECK.
-bash "$RF" calibrate --pr "$PR_NUMBER" --repo "$REPO" --issue "$MERGE_ISSUE" \
+bash "$RF" calibrate --pr "$PR_NUMBER" --repo "$REPO" --issue "$MERGE_ISSUE" --out-dir "$OUT_DIR" \
   --intensity-tier "$INTENSITY_TIER" --table-cell-key "$TABLE_CELL_KEY" --trust-shadow-mode "$TRUST_SHADOW_MODE" --trust-needs-human "$TRUST_NEEDS_HUMAN"
 ```
 
-`verdict` computes `BASE_CONFLICT` (the single source of truth for the Phase 8 guards), posts the verdict with the trust annotation, and never posts a clean verdict over a base conflict or purpose regression (it downgrades to CHANGES REQUESTED, `VERDICT_COERCED=true`). Read `VERDICT=`, `BASE_CONFLICT=`, `HAS_PURPOSE_REGRESSION=` and, from `calibrate`, `CALIBRATION_NEEDS_HUMAN=` / `CALIBRATION_NOTE=`: they are the Phase 8 flags.
+`verdict` computes `BASE_CONFLICT` (the single source of truth for the Phase 8 guards), posts the verdict with the trust annotation, and never posts a clean verdict over a base conflict or purpose regression (it downgrades to CHANGES REQUESTED, `VERDICT_COERCED=true`). Read `VERDICT=`, `BASE_CONFLICT=`, `HAS_PURPOSE_REGRESSION=` and, from `calibrate`, `CALIBRATION_NEEDS_HUMAN=` / `CALIBRATION_NOTE=`: they are the Phase 8 flags. The note itself is also written to `$OUT_DIR/calibration-note.txt`, which Phase 8 passes by path; free text is never placed in a shell word.
 
 ---
 
@@ -830,13 +835,15 @@ bash "$RF" calibrate --pr "$PR_NUMBER" --repo "$REPO" --issue "$MERGE_ISSUE" \
 ```bash
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 MERGE_ISSUE="{MERGE_ISSUE}"; MERGE_BASE="{MERGE_BASE}"; IS_MILESTONE_TO_STAGING="{IS_MILESTONE_TO_STAGING}"
-VERDICT="{VERDICT}"; HAS_PURPOSE_REGRESSION="{HAS_PURPOSE_REGRESSION}"; CALIBRATION_NEEDS_HUMAN="{CALIBRATION_NEEDS_HUMAN}"; CALIBRATION_NOTE='{CALIBRATION_NOTE}'
+VERDICT="{VERDICT}"; HAS_PURPOSE_REGRESSION="{HAS_PURPOSE_REGRESSION}"; CALIBRATION_NEEDS_HUMAN="{CALIBRATION_NEEDS_HUMAN}"; CTX="{CONTEXT_FILE}"
 TRUST_NEEDS_HUMAN="{TRUST_NEEDS_HUMAN}"; BASE_CONFLICT="{BASE_CONFLICT}"; OTHER_BLOCKING="{OTHER_BLOCKING}"; TABLE_CELL_KEY="{TABLE_CELL_KEY}"
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
 RF=$(forge_resolve review-finalize.sh)   # install roots only, never the PR checkout; unresolvable is a stop (fail closed), never a skipped gate
 [ -n "$RF" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/review-finalize.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install); refusing to continue (fail closed)"; exit 1; }   # STOP
+# The calibration note derives from issue text: `calibrate` (Phase 7B.5) wrote it to this file; it is passed by path, never substituted into a shell word.
+OUT_DIR="$(dirname "$CTX")/review-finalize-${PR_NUMBER}"
 GATE_OUT=$(bash "$RF" merge-gate --pr "$PR_NUMBER" --repo "$REPO" --issue "$MERGE_ISSUE" --base "$MERGE_BASE" \
-  --verdict "$VERDICT" --has-purpose-regression "$HAS_PURPOSE_REGRESSION" --calibration-needs-human "$CALIBRATION_NEEDS_HUMAN" --calibration-note "$CALIBRATION_NOTE" \
+  --verdict "$VERDICT" --has-purpose-regression "$HAS_PURPOSE_REGRESSION" --calibration-needs-human "$CALIBRATION_NEEDS_HUMAN" --calibration-note-file "$OUT_DIR/calibration-note.txt" \
   --trust-needs-human "$TRUST_NEEDS_HUMAN" --base-conflict "$BASE_CONFLICT" --other-blocking "$OTHER_BLOCKING" --table-cell-key "$TABLE_CELL_KEY"); GATE_RC=$?
 printf '%s\n' "$GATE_OUT"
 # 8B: only for a milestone->staging PR whose merge just succeeded: clears the milestone on its open review-finding issues so they flow through the fast lane.

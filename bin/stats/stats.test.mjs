@@ -10,7 +10,7 @@ import { spawnSync } from "node:child_process";
 import { aggregate, compareVersions, percentile } from "./aggregate.mjs";
 import { cacheDir } from "./cache.mjs";
 import { fetchGithubRecords, parseTelemetryComments, runsFromRecords, toModel } from "./github-source.mjs";
-import { buildReport, parseArgs, parseSince, runStats } from "./index.mjs";
+import { buildReport, makeProgressPrinter, parseArgs, parseSince, runStats, sinceToTimestamp } from "./index.mjs";
 import { readLocalRuns } from "./local-source.mjs";
 import { renderCompact, renderJson, renderMarkdown } from "./render.mjs";
 
@@ -29,6 +29,10 @@ function fakeGh() {
     const path = args.find((a) => a.startsWith("repos/"));
     const m = /issues\/(\d+)\/comments$/.exec(path);
     if (m) return JSON.stringify(comments[m[1]] ?? []);
+    if (/issues\/comments\?/.test(path)) { // repo-wide endpoint: every comment, tagged with its issue (fixtures carry no updated_at)
+      const all = Object.entries(comments).flatMap(([n, list]) => list.map((c) => ({ ...c, issue_url: `https://api.github.com/repos/o/r/issues/${n}` })));
+      return JSON.stringify(/page=1(&|$)/.test(path) ? all : []);
+    }
     const since = /since=([^&]+)/.exec(path)?.[1];
     return JSON.stringify(issues.filter((i) => !since || i.updated_at >= since));
   };
@@ -58,9 +62,9 @@ describe("telemetry comment parsing", () => {
 });
 
 describe("GitHub-only report (fresh machine)", () => {
-  it("rebuilds cost, time, flow, funnel, gates and issue flow from GitHub alone", () => {
+  it("rebuilds cost, time, flow, funnel, gates and issue flow from GitHub alone", async () => {
     const { gh } = fakeGh();
-    const report = buildReport({ repo: "o/r", local: false, cache: false, minN: 10 }, { gh, env: ENV, releaseTimes: [] });
+    const report = await buildReport({ repo: "o/r", local: false, cache: false, minN: 10 }, { gh, env: ENV, releaseTimes: [] });
     const g = report.groups.find((x) => x.version === "1.17.0");
     assert.equal(g.n, 1);
     assert.equal(g.cost.cacheReadMean, 3000000);
@@ -85,6 +89,8 @@ describe("GitHub-only report (fresh machine)", () => {
     assert.equal(u.funnel.falsePositive, 1);
     assert.equal(u.issueFlow.net, 2);
     assert.equal(u.issueFlow.findingsPerMerge, null);
+    assert.equal(g.funnel.introduced, 2, "only events carrying scope=introduced are counted");
+    assert.equal(g.issueFlow.introducedPerMerge, (g.issueFlow.closed.merged ?? 0) > 0 ? 2 / g.issueFlow.closed.merged : null);
     assert.ok(!JSON.stringify(report).includes("999999999"), "untrusted record leaked into the report");
   });
   it("matches the run-record field names written by the engine seam", () => {
@@ -138,6 +144,15 @@ describe("local runs, joins, version delta and low-n", () => {
     assert.equal(legacy.cost.cacheReadMean, 4000000, "legacy PHASE_COMMIT usage counted when no attempt events exist");
     assert.equal(legacy.flow.codesN, 0, "old logs have no outcome codes");
   });
+  it("reports introduced findings per merged issue", () => {
+    const ev = (eid, scope) => ({ event: "finding_disposition", eid, repo: "o/r", pr: 1, issue: eid === "d" ? 2 : 1, version: "1.18.0", severity: "MEDIUM", disposition: "INPR_FIX", ...(scope ? { scope } : {}) });
+    const issue = (number) => ({ number, repo: "o/r", isPr: false, labels: ["workflow:merged"], createdAt: "2026-10-06T00:00:00Z", closedAt: "2026-10-07T00:00:00Z" });
+    const r = aggregate({ events: [ev("a", "introduced"), ev("b", "introduced"), ev("c", "pre-existing"), ev("d")], issues: [issue(1), issue(2)] }, { releaseTimes: [] });
+    const g = r.groups.find((x) => x.version === "1.18.0");
+    assert.equal(g.funnel.introduced, 2);
+    assert.equal(g.issueFlow.introducedPerMerge, 1);
+    assert.match(renderMarkdown(r), /introduced findings per merged issue/);
+  });
   it("computes the delta against the previous version of the same repo", () => {
     const g = agg().groups.find((x) => x.version === "1.17.0");
     assert.equal(g.delta.against, "1.16.0");
@@ -178,9 +193,9 @@ describe("n/a degradation and rendering", () => {
     assert.match(renderMarkdown(aggregate({})), /No data/);
     assert.equal(percentile([], 90), null);
   });
-  it("json output is parseable and carries every section", () => {
+  it("json output is parseable and carries every section", async () => {
     const { gh } = fakeGh();
-    const report = buildReport({ repo: "o/r", local: false, cache: false, minN: 10 }, { gh, env: ENV, releaseTimes: [] });
+    const report = await buildReport({ repo: "o/r", local: false, cache: false, minN: 10 }, { gh, env: ENV, releaseTimes: [] });
     const parsed = JSON.parse(renderJson(report));
     for (const k of ["cost", "time", "flow", "funnel", "gates", "issueFlow"]) assert.ok(k in parsed.groups[0]);
     const md = renderMarkdown(report);
@@ -193,56 +208,173 @@ describe("n/a degradation and rendering", () => {
 });
 
 describe("cache", () => {
-  it("refreshes incrementally from the updated_at watermark and survives deletion or corruption", () => {
+  it("refreshes incrementally from the updated_at watermark and survives deletion or corruption", async () => {
     const env = { ...ENV, FORGE_STATS_CACHE_DIR: join(td, "cache") };
     const a = fakeGh();
-    const first = fetchGithubRecords({ repo: "o/r", gh: a.gh, env });
+    const first = await fetchGithubRecords({ repo: "o/r", gh: a.gh, env });
     assert.equal(first.fromCache, false);
     assert.ok(!a.calls[0].includes("since="));
     const b = fakeGh();
-    const second = fetchGithubRecords({ repo: "o/r", gh: b.gh, env });
+    const second = await fetchGithubRecords({ repo: "o/r", gh: b.gh, env });
     assert.equal(second.fromCache, true);
     assert.match(b.calls[0], /since=2026-10-06T12:55:00Z/); // watermark minus the 5 minute overlap window
     assert.deepEqual(second.records.map((r) => r.eid).sort(), first.records.map((r) => r.eid).sort());
     // corrupt cache -> treated as empty -> same result from a full fetch
     writeFileSync(join(cacheDir("o/r", env), "cache.json"), "{not json");
     const c = fakeGh();
-    const third = fetchGithubRecords({ repo: "o/r", gh: c.gh, env });
+    const third = await fetchGithubRecords({ repo: "o/r", gh: c.gh, env });
     assert.equal(third.fromCache, false);
     assert.equal(third.records.length, first.records.length);
     // --refresh ignores a good cache
     const d = fakeGh();
-    fetchGithubRecords({ repo: "o/r", gh: d.gh, env, refresh: true });
+    await fetchGithubRecords({ repo: "o/r", gh: d.gh, env, refresh: true });
     assert.ok(!d.calls[0].includes("since="));
     assert.equal(toModel("o/r", third).issues.length, 5);
   });
-  it("saves a partial checkpoint on a mid-crawl failure and the next run resumes from it", () => {
-    const env = { ...ENV, FORGE_STATS_CACHE_DIR: join(td, "cache-partial") };
-    const ok = fakeGh();
-    const full = fetchGithubRecords({ repo: "o/r", gh: ok.gh, env: { ...ENV }, useCache: false });
-    const withComments = full.items.filter((i) => ok.calls.some((c) => c.includes(`/issues/${i.number}/comments`)));
-    assert.ok(withComments.length >= 2, "fixture needs at least two items with comments");
-    let commentCalls = 0;
-    // The real API honours sort=updated&direction=asc, which the watermark resume relies on; the fixture is unsorted.
-    const asc = (gh) => (args) => {
-      const out = gh(args);
-      return args.some((a) => /\/issues\?/.test(a)) ? JSON.stringify(JSON.parse(out).sort((x, y) => x.updated_at.localeCompare(y.updated_at))) : out;
+  // Page-aware fake of the issues API over a synthetic store; the repo-wide comments endpoint is empty unless `comments` is given.
+  const storeGh = (store, { comments = [], failOnListCall = 0 } = {}) => {
+    const calls = [];
+    let listCalls = 0;
+    const gh = (args) => {
+      const path = args.find((a) => a.startsWith("repos/"));
+      calls.push(path);
+      const q = new URLSearchParams(path.split("?")[1] ?? "");
+      if (/issues\/comments\?/.test(path)) {
+        const since = q.get("since"), page = Number(q.get("page") ?? 1);
+        return JSON.stringify(comments.filter((c) => !since || c.updated_at >= since).slice((page - 1) * 100, page * 100));
+      }
+      const m = /issues\/(\d+)\/comments$/.exec(path);
+      if (m) return JSON.stringify(comments.filter((c) => c.issue_url.endsWith(`/issues/${m[1]}`)));
+      const one = /issues\/(\d+)$/.exec(path);
+      if (one) return JSON.stringify(store.find((i) => i.number === Number(one[1])));
+      if (++listCalls === failOnListCall) throw new Error("rate limited");
+      const since = q.get("since");
+      const sorted = store.filter((i) => !since || i.updated_at >= since).sort((x, y) => x.updated_at.localeCompare(y.updated_at) || x.number - y.number);
+      const per = Number(q.get("per_page")), page = Number(q.get("page") ?? 1);
+      return JSON.stringify(sorted.slice((page - 1) * per, page * per));
     };
-    const flaky = asc((args) => {
-      if (args[args.length - 1].endsWith("/comments") && ++commentCalls === 2) throw new Error("rate limited");
-      return ok.gh(args);
-    });
-    assert.throws(() => fetchGithubRecords({ repo: "o/r", gh: flaky, env }), /rate limited/);
+    return { gh, calls };
+  };
+  const ts = (n) => new Date(Date.UTC(2026, 9, 1) + n * 3600000).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const mkItems = (n) => Array.from({ length: n }, (_, i) => ({ number: i + 1, updated_at: ts(i + 1), created_at: ts(0), state: "open", comments: 0, labels: [], user: { type: "Bot" } }));
+  const telemetryComment = (issue, eid, event, updated, extra = {}) => ({ id: issue * 1000 + Number(eid.replace(/\D/g, "")), updated_at: updated, user: { type: "Bot" },
+    issue_url: `https://api.github.com/repos/o/r/issues/${issue}`,
+    body: `<!-- FORGE:TELEMETRY v1 -->\n\`\`\`jsonl\n${JSON.stringify({ v: 1, ts: updated, forge_version: "1.18.0", repo: "o/r", issue, run: `r_${issue}`, eid, event, phase: "build", cache_read_tokens: 100, ...extra })}\n\`\`\`` });
+
+  it("saves a partial checkpoint on a mid-crawl failure and the next run resumes from it", async () => {
+    const env = { ...ENV, FORGE_STATS_CACHE_DIR: join(td, "cache-partial") };
+    const store = mkItems(250);
+    await assert.rejects(() => fetchGithubRecords({ repo: "o/r", gh: storeGh(store, { failOnListCall: 3 }).gh, env }), /rate limited/);
     const saved = JSON.parse(readFileSync(join(cacheDir("o/r", env), "cache.json"), "utf8"));
     assert.ok(saved.watermark, "partial watermark persisted");
-    assert.ok(Object.keys(saved.items).length > 0 && Object.keys(saved.items).length < full.items.length);
-    const b = fakeGh();
-    const resumed = fetchGithubRecords({ repo: "o/r", gh: asc(b.gh), env });
+    assert.ok(Object.keys(saved.items).length >= 100 && Object.keys(saved.items).length < 250);
+    const b = storeGh(store);
+    const resumed = await fetchGithubRecords({ repo: "o/r", gh: b.gh, env });
     assert.equal(resumed.fromCache, true);
-    assert.match(b.calls[0], /since=/);
-    assert.deepEqual(resumed.records.map((r) => r.eid).sort(), full.records.map((r) => r.eid).sort());
+    assert.ok(b.calls[0].includes("since="), "resumes from the watermark");
+    assert.equal(resumed.items.length, 250);
   });
-  it("never skips an item updated mid-crawl (keyset crawl, not page-number pagination)", () => {
+  it("a mid-crawl failure never advances the watermark past unpersisted telemetry (resume still finds it)", async () => {
+    const env = { ...ENV, FORGE_STATS_CACHE_DIR: join(td, "cache-pending-telemetry") };
+    const store = mkItems(250);
+    // A telemetry comment on the NEWEST issue (listed last), posted before the failing run starts.
+    const comments = [telemetryComment(250, "z1", "phase_attempt", ts(250))];
+    await assert.rejects(() => fetchGithubRecords({ repo: "o/r", gh: storeGh(store, { comments, failOnListCall: 3 }).gh, env }), /rate limited/);
+    const saved = JSON.parse(readFileSync(join(cacheDir("o/r", env), "cache.json"), "utf8"));
+    assert.ok(!saved.watermark, "watermark must not be persisted while telemetry records are unpersisted");
+    // Resume: the comment is older than any watermark a buggy checkpoint would have saved.
+    const resumed = await fetchGithubRecords({ repo: "o/r", gh: storeGh(store, { comments }).gh, env });
+    assert.equal(resumed.items.length, 250);
+    assert.deepEqual(resumed.records.map((r) => r.eid), ["z1"]);
+    assert.equal(resumed.items.find((i) => i.number === 250).records.length, 1);
+  });
+  it("bounds the crawl by the window: API calls track the window, not the repo size", async () => {
+    const store = mkItems(3000); // 3000 items, one per hour
+    const from = ts(2990);
+    const windowItems = store.filter((i) => i.updated_at >= from).length;
+    const comments = store.slice(-5).map((i) => telemetryComment(i.number, `x${i.number}`, "phase_attempt", i.updated_at));
+    const { gh, calls } = storeGh(store, { comments });
+    const r = await fetchGithubRecords({ repo: "o/r", gh, useCache: false, since: from, env: ENV });
+    assert.equal(r.items.length, windowItems);
+    // 1 comments page + one refetch per telemetry issue + ceil(window / 100) list pages; never one call per repo item.
+    const bound = 1 + comments.length + Math.ceil(windowItems / 100) + 1;
+    assert.ok(r.apiCalls <= bound, `api calls ${r.apiCalls} exceed window bound ${bound}`);
+    assert.equal(calls.length, r.apiCalls);
+    assert.ok(calls.length < 30 && store.length > 100 * calls.length, `calls.length ${calls.length} must be far below the repo size`);
+    assert.ok(calls.some((c) => /issues\/comments\?.*since=/.test(c)), "comments come from the repo-wide since= endpoint");
+    assert.ok(!calls.some((c) => /issues\/\d+\/comments$/.test(c) && !comments.some((x) => x.issue_url.endsWith(c.match(/issues\/(\d+)\//)[1]))), "no comment call for items without telemetry");
+    assert.equal(r.records.length, comments.length);
+  });
+  it("re-reads every part of an issue whose telemetry was touched in the window, and only those", async () => {
+    const store = mkItems(20);
+    const comments = [telemetryComment(7, "e1", "phase_attempt", ts(1)), telemetryComment(7, "e2", "run_terminal", ts(15), { reason: "merged" }),
+      telemetryComment(9, "e1", "phase_attempt", ts(2))];
+    const { gh, calls } = storeGh(store, { comments });
+    const r = await fetchGithubRecords({ repo: "o/r", gh, useCache: false, since: ts(10), env: ENV });
+    assert.deepEqual(r.records.filter((x) => x.issue === 7).map((x) => x.event).sort(), ["phase_attempt", "run_terminal"], "the pre-window part is fetched too");
+    assert.equal(calls.filter((c) => /issues\/7\/comments$/.test(c)).length, 1);
+    assert.equal(calls.filter((c) => /issues\/9\/comments$/.test(c)).length, 0, "issue 9 has no telemetry in the window");
+  });
+  it("accepts an async gh and awaits it", async () => {
+    const store = mkItems(5);
+    const { gh } = storeGh(store);
+    const r = await fetchGithubRecords({ repo: "o/r", gh: async (a) => gh(a), useCache: false, env: ENV });
+    assert.equal(r.items.length, 5);
+  });
+  it("records the coverage floor, crawls only the gap for a wider window and resets on --refresh", async () => {
+    const env = { ...ENV, FORGE_STATS_CACHE_DIR: join(td, "cache-floor") };
+    const store = mkItems(100);
+    const w1 = storeGh(store);
+    const narrow = await fetchGithubRecords({ repo: "o/r", gh: w1.gh, env, since: ts(90) });
+    assert.equal(narrow.items.length, 11);
+    assert.equal(JSON.parse(readFileSync(join(cacheDir("o/r", env), "cache.json"), "utf8")).coveredFrom, ts(90));
+    // same or narrower window: incremental from the watermark, floor unchanged
+    const same = storeGh(store);
+    await fetchGithubRecords({ repo: "o/r", gh: same.gh, env, since: ts(95) });
+    assert.ok(/since=/.test(same.calls[0]) && !same.calls[0].includes(`since=${ts(95)}`), "resumes from the watermark, not the window start");
+    assert.equal(JSON.parse(readFileSync(join(cacheDir("o/r", env), "cache.json"), "utf8")).coveredFrom, ts(90));
+    // wider window: the uncovered gap is crawled (from the new start), then the floor is lowered
+    const wide = storeGh(store);
+    const r = await fetchGithubRecords({ repo: "o/r", gh: wide.gh, env, since: ts(50) });
+    assert.ok(wide.calls[0].includes(`since=${ts(50)}`));
+    assert.equal(r.items.length, 51, "the pre-window gap is not silently treated as covered");
+    assert.equal(JSON.parse(readFileSync(join(cacheDir("o/r", env), "cache.json"), "utf8")).coveredFrom, ts(50));
+    // no --since after a windowed run: full history is crawled and the floor becomes null
+    const all = storeGh(store);
+    assert.equal((await fetchGithubRecords({ repo: "o/r", gh: all.gh, env })).items.length, 100);
+    assert.equal(JSON.parse(readFileSync(join(cacheDir("o/r", env), "cache.json"), "utf8")).coveredFrom, null);
+    // --refresh ignores the cache and its floor
+    const fresh = storeGh(store);
+    await fetchGithubRecords({ repo: "o/r", gh: fresh.gh, env, refresh: true, since: ts(80) });
+    assert.equal(JSON.parse(readFileSync(join(cacheDir("o/r", env), "cache.json"), "utf8")).coveredFrom, ts(80));
+  });
+  it("does not trust a legacy cache (no coveredFrom) for a window and never lowers the floor on failure", async () => {
+    const env = { ...ENV, FORGE_STATS_CACHE_DIR: join(td, "cache-legacy") };
+    const store = mkItems(250);
+    mkdirSync(cacheDir("o/r", env), { recursive: true });
+    writeFileSync(join(cacheDir("o/r", env), "cache.json"), JSON.stringify({ v: 1, watermark: ts(250), items: {} }));
+    const g = storeGh(store, { failOnListCall: 2 });
+    await assert.rejects(() => fetchGithubRecords({ repo: "o/r", gh: g.gh, env, since: ts(10) }), /rate limited/);
+    const saved = JSON.parse(readFileSync(join(cacheDir("o/r", env), "cache.json"), "utf8"));
+    assert.equal(saved.watermark, ts(250), "failed gap crawl keeps the old watermark");
+    assert.ok(!("coveredFrom" in saved) || saved.coveredFrom == null || saved.coveredFrom === undefined);
+    const h = storeGh(store);
+    const r = await fetchGithubRecords({ repo: "o/r", gh: h.gh, env, since: ts(10) });
+    assert.ok(h.calls[0].includes(`since=${ts(10)}`));
+    assert.equal(r.items.length, 241);
+  });
+  it("reports progress through onProgress and backs off when the rate limit is low", async () => {
+    const store = mkItems(6000);
+    const events = [];
+    await fetchGithubRecords({ repo: "o/r", gh: storeGh(store).gh, useCache: false, env: ENV, onProgress: (e) => events.push(e) });
+    assert.ok(events.some((e) => e.phase === "comments") && events.some((e) => e.phase === "issues" && e.done === 6000));
+    const slept = [];
+    const base = storeGh(store).gh;
+    const gh = (args) => (args.join(" ") === "api rate_limit" ? JSON.stringify({ resources: { core: { remaining: 3, reset: 1_000_100 } } }) : base(args));
+    await fetchGithubRecords({ repo: "o/r", gh, useCache: false, env: ENV, rateCheck: true, now: () => 1_000_000_000, sleep: async (ms) => { slept.push(ms); } });
+    assert.ok(slept.length > 0 && slept[0] === 101000, `slept ${slept}`);
+  });
+  it("never skips an item updated mid-crawl (keyset crawl, not page-number pagination)", async () => {
     const env = { ...ENV, FORGE_STATS_CACHE_DIR: join(td, "cache-midcrawl") };
     const ts = (n) => new Date(Date.UTC(2026, 9, 1) + n * 60000).toISOString().replace(/\.\d{3}Z$/, "Z");
     const store = Array.from({ length: 250 }, (_, i) => ({ number: i + 1, updated_at: ts(i + 1), created_at: ts(0), state: "open", comments: 0, labels: [], user: { type: "Bot" } }));
@@ -252,6 +384,7 @@ describe("cache", () => {
     // listing call an already-served item is bumped, which moves it to the end of the ordering.
     const gh = (args) => {
       const path = args.find((a) => a.startsWith("repos/"));
+      if (/issues\/comments\?/.test(path)) return "[]";
       const q = new URLSearchParams(path.split("?")[1]);
       listCalls++;
       const since = q.get("since");
@@ -261,31 +394,32 @@ describe("cache", () => {
       if (listCalls === 1) store[4].updated_at = ts(++maxUpdated);
       return out;
     };
-    const first = fetchGithubRecords({ repo: "o/r", gh, env });
+    const first = await fetchGithubRecords({ repo: "o/r", gh, env });
     assert.equal(first.items.length, 250, "every item is cached after the crawl, none skipped by the shift");
     assert.equal(new Set(first.items.map((i) => i.number)).size, 250);
     // The bumped item moved past the crawl cursor, so the next incremental run (and its overlap window) still sees it.
     store[9].updated_at = ts(++maxUpdated); // another item updated after the first run
-    const second = fetchGithubRecords({ repo: "o/r", gh, env });
+    const second = await fetchGithubRecords({ repo: "o/r", gh, env });
     assert.equal(second.fromCache, true);
     assert.equal(second.items.length, 250);
     assert.equal(second.items.find((i) => i.number === 10).updatedAt, store[9].updated_at);
     assert.equal(second.items.find((i) => i.number === 5).updatedAt, store[4].updated_at);
   });
-  it("terminates and drains a full page whose items all share one updated_at", () => {
+  it("terminates and drains a full page whose items all share one updated_at", async () => {
     const env = { ...ENV, FORGE_STATS_CACHE_DIR: join(td, "cache-sameTs") };
     const store = Array.from({ length: 230 }, (_, i) => ({ number: i + 1, updated_at: "2026-10-02T00:00:00Z", created_at: "2026-10-01T00:00:00Z", comments: 0, labels: [], user: { type: "Bot" } }));
     const gh = (args) => {
+      if (/issues\/comments\?/.test(args.find((a) => a.startsWith("repos/")))) return "[]";
       const q = new URLSearchParams(args.find((a) => a.startsWith("repos/")).split("?")[1]);
       const per = Number(q.get("per_page")), page = Number(q.get("page") ?? 1);
       const since = q.get("since");
       return JSON.stringify(store.filter((i) => !since || i.updated_at >= since).slice((page - 1) * per, page * per));
     };
-    assert.equal(fetchGithubRecords({ repo: "o/r", gh, env }).items.length, 230);
+    assert.equal((await fetchGithubRecords({ repo: "o/r", gh, env })).items.length, 230);
   });
-  it("rejects an unsafe repo before any gh call", () => {
+  it("rejects an unsafe repo before any gh call", async () => {
     const { gh, calls } = fakeGh();
-    assert.throws(() => fetchGithubRecords({ repo: "o/r; rm -rf /", gh }), /invalid repo/);
+    await assert.rejects(() => fetchGithubRecords({ repo: "o/r; rm -rf /", gh }), /invalid repo/);
     assert.equal(calls.length, 0);
   });
 });
@@ -297,6 +431,32 @@ describe("cli", () => {
     assert.throws(() => parseArgs(["--since"]), /needs a value/);
     assert.throws(() => parseArgs(["--bogus"]), /unknown argument/);
     assert.throws(() => parseSince("yesterday"), /--since must be/);
+  });
+  it("resolves --since to a crawl lower bound (date as is, version via release time minus a margin)", () => {
+    assert.equal(sinceToTimestamp("2026-10-01").since, "2026-10-01T00:00:00Z");
+    assert.equal(sinceToTimestamp(undefined).since, null);
+    const v = sinceToTimestamp("v1.16.0", [{ v: "1.16.0", t: Date.parse("2026-10-05T00:00:00Z") / 1000 }]);
+    assert.equal(v.since, "2026-10-04T00:00:00Z");
+    const unknown = sinceToTimestamp("1.99.0", []);
+    assert.equal(unknown.since, null);
+    assert.match(unknown.note, /full history/);
+  });
+  it("prints progress to stderr only, throttled, and keeps --json stdout parseable", async () => {
+    const out = [];
+    let t = 0;
+    const print = makeProgressPrinter((x) => out.push(x), () => t);
+    print({ phase: "issues", done: 100, total: null });
+    t += 500; print({ phase: "issues", done: 200, total: null });
+    t += 2000; print({ phase: "issues", done: 300, total: null });
+    assert.equal(out.length, 2);
+    const { gh } = fakeGh();
+    const realOut = process.stdout.write, realErr = process.stderr.write;
+    let stdout = "", stderr = "";
+    process.stdout.write = (c) => { stdout += c; return true; };
+    process.stderr.write = (c) => { stderr += c; return true; };
+    try { assert.equal(await runStats(["--repo", "o/r", "--json", "--no-cache", "--no-local"], { gh, env: ENV, releaseTimes: [] }), 0); } finally { process.stdout.write = realOut; process.stderr.write = realErr; }
+    assert.ok(JSON.parse(stdout).groups, "stdout is only the JSON report");
+    assert.match(stderr, /forgedock stats: (comments|issues) /);
   });
   it("--help exits 0 and importing the module did not run it", () => {
     const r = spawnSync(process.execPath, [join(here, "index.mjs"), "--help"], { encoding: "utf8" });

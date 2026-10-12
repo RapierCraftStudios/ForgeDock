@@ -188,6 +188,19 @@ If `LAST_VERDICT_SHA` is empty (no prior CHANGES REQUESTED verdict found) or dif
 
 ---
 
+## Pre-Handoff Base Sync (before the R1 ancestry guard and the first push) <!-- Added: forge#3969 -->
+
+Never hand off a PR born stale. If `origin/{PR_BASE}` exists and is not an ancestor of `{BRANCH}`, merge it now, while the build context is warm. Merge only: no rebase, no force.
+
+```bash
+cd {WORKTREE_PATH}
+if git fetch origin {PR_BASE} >/dev/null 2>&1 && ! git merge-base --is-ancestor origin/{PR_BASE} HEAD 2>/dev/null; then
+  git merge --no-edit origin/{PR_BASE} >/dev/null 2>&1 || { echo "BASE SYNC CONFLICT: resolve in this context, then git commit; on doubt git merge --abort and return BLOCKED + needs-human"; git diff --name-only --diff-filter=U; }
+fi
+```
+
+On conflict, resolve every file, keep both sides' intent, `git add`, `git commit --no-edit`. If not resolvable with confidence: `git merge --abort`, label `needs-human`, return `REVIEW_RESULT: status: BLOCKED` with blocker "pre-handoff base sync conflict". One bounded round; resolve SHAs only after it.
+
 ## Phase R1: Pre-Push Ancestry Guard
 
 Before pushing, verify the branch contains no merge commits that bring in history from outside the PR base. Merging `origin/{PR_BASE}` itself into the branch (a base sync) is allowed: every non-first parent of each merge in `origin/{PR_BASE}..{BRANCH}` must be an ancestor of `origin/{PR_BASE}`. This is the final defense against milestone-code-onto-staging contamination.
