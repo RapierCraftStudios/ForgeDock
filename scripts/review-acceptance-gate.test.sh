@@ -100,6 +100,10 @@ export LANG=de_DE.UTF-8 LC_MESSAGES=de_DE.UTF-8
 inv "$(chk ac-8 'no-such-cmd-xyzzy --help')"; rc=$(run); eq "non-English locale: first word missing still malformed" "$rc" 0
 grep -qi 'malformed' "$TMP/out" && ok "locale: reported malformed" || bad "locale: not reported malformed"
 unset LANG LC_MESSAGES
+# target runs in its native locale: a locale-dependent verdict (wc -m on multibyte) must not be forced to C
+export LC_ALL=C.UTF-8
+inv "$(chk ac-8 'printf "\303\251" | wc -m | grep -qx 1')"; rc=$(run); eq "target keeps native locale (wc -m multibyte)" "$rc" 0
+unset LC_ALL
 inv 'ACCEPTANCE_CHECK: id=ac-9 type=command target="no-such-cmd-xyzzy" matcher="QQQ" phase=review description=d'; rc=$(run); eq "matcher branch: first word missing malformed" "$rc" 0
 inv 'ACCEPTANCE_CHECK: id=ac-9 type=command target="bash inner.sh" matcher="QQQ" phase=review description=d'; rc=$(run); eq "matcher branch: inner missing tool is a real fail" "$rc" 1
 

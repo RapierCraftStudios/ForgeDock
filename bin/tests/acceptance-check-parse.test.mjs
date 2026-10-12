@@ -58,7 +58,7 @@ const rcDetector = build
   .join("\n");
 
 function classify(target, type = "command") {
-  const script = `TYPE="$1"; TARGET="$2"; GREP_CLS="${grepClassifier}"\n${staticDetector}\nif [ -z "$MALFORMED" ]; then ERR=$(LC_ALL=C eval "$TARGET" 2>&1 >/dev/null); RC=$?\n${rcDetector}\nfi\nprintf '%s' "$MALFORMED"`;
+  const script = `TYPE="$1"; TARGET="$2"; GREP_CLS="${grepClassifier}"\n${staticDetector}\nif [ -z "$MALFORMED" ]; then ERR=$(eval "$TARGET" 2>&1 >/dev/null); RC=$?\n${rcDetector}\nfi\nprintf '%s' "$MALFORMED"`;
   return execFileSync("bash", ["-c", script, "x", type, target], { encoding: "utf8", cwd: root });
 }
 
