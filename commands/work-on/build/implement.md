@@ -81,7 +81,9 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
           | .key] | last) as $i
       | if $i == null then $c else $c[($i + 1):] end'
   }
-  CYCLE_SLICE=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments | cycle_slice) && [ -n "$CYCLE_SLICE" ] \
+  # Capture the read first (as build.md B0): piped straight into jq -s, a failed gh call still yields `[]` and exit 0.
+  COMMENTS_JSON=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments) \
+    && CYCLE_SLICE=$(printf '%s' "$COMMENTS_JSON" | cycle_slice) && [ -n "$CYCLE_SLICE" ] \
     || { echo "IMPLEMENT_RESULT: status: BLOCKED (cycle-lookup-unavailable: could not read FORGE:CYCLE)"; exit 1; }  # a failed read is NEVER "no marker"
   BUILDER_DONE=$(printf '%s' "$CYCLE_SLICE" | jq '[.[] | select((.body // "") | startswith("<!-- FORGE:BUILDER")) | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | select(.body | contains("<!-- FORGE:BUILDER:COMPLETE -->"))] | length')
   ```
