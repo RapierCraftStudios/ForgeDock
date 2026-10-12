@@ -439,23 +439,25 @@ BASELINE_RESULTS=""
 
 # Run the same tests against the base branch state to establish baseline
 # If base-branch tests also fail, those are pre-existing failures — not batch-introduced
-git stash 2>/dev/null || true
-git checkout "origin/${BASE_BRANCH}" -- . 2>/dev/null || true
+# Use a detached worktree at the base branch — never stash/checkout in the main checkout
+BASE_WT=$(mktemp -d)
+git -C "$REPO_PATH" worktree add --detach "$BASE_WT" "origin/${BASE_BRANCH}" 2>/dev/null \
+  || { echo "WARNING: could not create baseline worktree — baseline unavailable"; rmdir "$BASE_WT" 2>/dev/null; BASE_WT=""; }
 
 for i in $(seq 0 $((CLUSTER_COUNT - 1))); do
   CLUSTER=$(yq ".verification.integration_tests[${i}].cluster" "$CONFIG_FILE")
   CMD=$(yq ".verification.integration_tests[${i}].command" "$CONFIG_FILE")
   WORKING_DIR=$(yq ".verification.integration_tests[${i}].working_dir // \".\"" "$CONFIG_FILE")
 
-  if (cd "${REPO_PATH}/${WORKING_DIR}" && eval "$CMD") 2>&1; then
+  if [ -n "$BASE_WT" ] && (cd "${BASE_WT}/${WORKING_DIR}" && eval "$CMD") 2>&1; then
     BASELINE_RESULTS="${BASELINE_RESULTS}\n- ${CLUSTER}: PASS"
   else
     BASELINE_RESULTS="${BASELINE_RESULTS}\n- ${CLUSTER}: FAIL (pre-existing)"
   fi
 done
 
-# Restore working state
-git checkout HEAD -- . 2>/dev/null || true
+# Remove the baseline worktree (the main checkout was never touched)
+[ -n "$BASE_WT" ] && git -C "$REPO_PATH" worktree remove --force "$BASE_WT" 2>/dev/null || true
 
 echo "Baseline results:"
 echo -e "$BASELINE_RESULTS"
@@ -574,7 +576,7 @@ $(echo -e "$SOURCE_ISSUES_LIST")
    \`\`\`
 3. Observe failure. Compare against \`${BASE_BRANCH}\` baseline:
    \`\`\`bash
-   git checkout origin/${BASE_BRANCH} -- .
+   git worktree add --detach "$BASE_WT" origin/${BASE_BRANCH}   # run the command inside $BASE_WT
    $(yq ".verification.integration_tests[] | select(.cluster == \"${cluster}\") | .command" "$CONFIG_FILE")
    \`\`\`
 ISSUE_EOF

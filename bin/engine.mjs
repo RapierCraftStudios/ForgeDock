@@ -4,15 +4,15 @@
  * GitHub state (phase.detectOutcome). All effects are injected → fully testable.
  */
 import { fileURLToPath } from "node:url";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { createHash, scryptSync } from "node:crypto";
 import { hostname as osHostname, homedir } from "node:os";
 import { appendEvent, readLog, deriveState, rewriteLog } from "./engine/runlog.mjs";
 import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postCycleMarker, nextCycleNumber, decompositionRevokedWithOverride } from "./engine/phases.mjs";
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
-import { VALID_BACKENDS } from "./runner.mjs";
-import { OUTCOME_CODES, UNCLASSIFIED, normalizeCode, codeForRunnerError, codeForTerminalReason } from "./engine/outcome-codes.mjs";
+import { VALID_BACKENDS, resolveRunTmpRoot, runTmpDir } from "./runner.mjs";
+import { OUTCOME_CODES, UNCLASSIFIED, normalizeCode, codeForRunnerError, codeForTerminalReason, isDiskQuotaError, isDiskQuotaText } from "./engine/outcome-codes.mjs";
 
 // Exported (forge#2175) so bin/engine-cli.mjs can render "failed N/M attempts"
 // diagnostics without duplicating the retry budget constant.
@@ -786,7 +786,7 @@ export async function runIssue(opts) {
         // "needs-human" — this is the engine/tool breaking, not a genuine
         // human-judgment block (see #2244/#2261). Any other thrown error is
         // a true unexpected crash and keeps propagating unchanged.
-        if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED" || e.code === "CLI_MAX_TURNS") {
+        if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED" || e.code === "CLI_MAX_TURNS" || isDiskQuotaError(e)) {
           // forge#2241: when the runner attached a session-limit reset time
           // (bin/runner.mjs's extractSessionLimitResetTime(), only ever set
           // for a genuine session-limit CLI_BACKEND_FAILED — never
@@ -796,7 +796,7 @@ export async function runIssue(opts) {
           const resetSuffix = e.resetAt ? ` (resets: ${e.resetAt})` : "";
           const detail = e.code === "CLI_MAX_TURNS"
             ? `phase ${phase.id}: CLI_MAX_TURNS - max-turns exhausted${e.numTurns != null ? ` after ${e.numTurns} turns` : ""}: ${e.message}`
-            : `phase ${phase.id}: ${e.code} - ${e.message}${resetSuffix}`;
+            : `phase ${phase.id}: ${e.code ?? "DISK_QUOTA"} - ${e.message}${resetSuffix}`;
           // forge#2240 (review finding): this fail-fast path previously left
           // phase_exit unreported — a caller tailing progress output would see
           // "→ phase X started" and then nothing, dangling exactly on the
@@ -852,6 +852,9 @@ export async function runIssue(opts) {
         await emitOutcome({ event: "PHASE_DEFERRED", phase: phase.id, code: normalizeCode(outcome.code), reason: outcome.detail });
         return { terminalReason: "deferred", code: normalizeCode(outcome.code), detail: outcome.detail };
       }
+      // forge#3572: a phase that returned blocked because the disk/quota ran out is a retryable infra failure.
+      if (isDiskQuotaText(outcome.detail))
+        return await terminate(state, "engine-error", outcome.detail, OUTCOME_CODES.INFRA_DISK_QUOTA);
       if (!isRemediationHandoff)
         return await terminate(state, outcome.reason || "needs-human", outcome.detail, outcome.code);
     } else {
@@ -987,8 +990,22 @@ export async function runIssue(opts) {
         try { await projector.setLabel(issue, "needs-human"); } catch { /* best-effort */ }
       }
     }
+    // forge#3572: drop the per-run scratch dir (venvs, session data) on a terminal outcome. Kept for
+    // `engine-error` so `--retry` resumes with it, and when another live engine owns the issue.
+    if (reason !== "engine-error" && foreign === undefined) cleanupRunTmpdir(issue);
     return { terminalReason: reason, code: outcomeCode, detail };
   }
+}
+
+/** Best-effort removal of the issue's per-run scratch dir. Confined to the resolved tmp root; never throws. */
+export function cleanupRunTmpdir(issue, { cwd = process.cwd(), env = process.env, rm = rmSync } = {}) {
+  try {
+    const root = resolveRunTmpRoot(cwd, env);
+    const dir = runTmpDir(root, issue);
+    if (!dir || dir === root) return false;
+    rm(dir, { recursive: true, force: true });
+    return true;
+  } catch { return false; }
 }
 
 async function runPhaseWithRetry(phase, state, ctx) {
@@ -1085,6 +1102,13 @@ async function runPhaseWithRetry(phase, state, ctx) {
           event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, code: codeForRunnerError(e), maxAttempts,
           turns: e.numTurns ?? null, usage: e.usage ?? null,
         });
+        throw e;
+      }
+      // forge#3572: a full disk / exhausted quota (EDQUOT/ENOSPC) is infra, not content: retrying burns the budget on the same
+      // failure, so rethrow fail-fast and let runIssue end it as a retryable `engine-error` (never needs-human).
+      if (isDiskQuotaError(e)) {
+        await recordAttempt(attempt, null, t0, null);
+        appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, code: codeForRunnerError(e), maxAttempts });
         throw e;
       }
       if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED") throw e;

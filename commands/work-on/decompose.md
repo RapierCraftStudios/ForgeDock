@@ -40,7 +40,7 @@ If `{NUMBER}`, `--repo` or `--gh-flag` is missing, print the result block with `
 
 ## Script resolution
 
-**Shell state does not persist between Bash tool calls** (each call is a fresh shell): paste the block below at the top of every bash command in this skill that calls `resolve_script` or uses `FORGE_ROOT`/`UNIVERSAL_DIR`.
+**Shell state does not persist between Bash tool calls** (each call is a fresh shell): paste the block below at the top of every bash command in this skill that calls `resolve_script` or `forge_resolve` or uses `FORGE_ROOT`/`UNIVERSAL_DIR` (including the D1 resume check and Phase D6.5).
 
 ```bash
 # Canonical script resolution (keep byte-identical across specs; guarded by scripts/forge-root.test.sh).
@@ -197,22 +197,28 @@ If `PARENT_REF` is non-empty → BLOCKED, blocker: "Issue #{NUMBER} is a sub-iss
 
 **Guard 3 — decomposition plan present**: If the investigation report has no Decomposition Assessment section, OR the assessment does not list any sub-issues → BLOCKED, blocker: "Investigation report has no decomposition plan — re-run investigate with explicit decomposition scope".
 
-**Resume check**:
+**Resume check** <!-- Added: forge#3881 -->: the marker comment drives parent edits and the D6.5 close, so only a trusted, marker-anchored comment counts (`scripts/trusted-comments.sh`, the same predicate as the review gates). Paste the Script resolution block first (fresh shell per Bash call). An unresolved helper or a failed read is treated as "no trusted comment" and the normal path continues (the D2.5 equivalent-set check still guards duplicates); an untrusted body never reaches `SUB_LIST`.
 
 ```bash
-gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '[.[] | select(.body | contains("<!-- FORGE:DECOMPOSED -->"))] | last // empty | {url: .html_url, body: .body}'
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)   # unresolved => empty => fail closed
+DECOMP_BODY=""; COMMENT_URL=""
+if [ -n "$TRUSTED_SCRIPT" ] && COMMENTS_JSON=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments); then
+  DECOMP_BODY=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:DECOMPOSED -->' | tail -n 1 | jq -r '.' 2>/dev/null || true)
+  [ -n "$DECOMP_BODY" ] && COMMENT_URL=$(printf '%s' "$COMMENTS_JSON" | jq -rs --arg b "$DECOMP_BODY" '[.[][] | select(.body == $b)] | last | .html_url // empty' 2>/dev/null || true)
+else
+  echo "decompose resume lookup unavailable"
+fi
 ```
 
-If a `<!-- FORGE:DECOMPOSED -->` comment exists → decomposition already complete. Derive `sub_issues` as a plain number list from that comment's `- #N:` lines and the comment URL from `.url`:
+If a `<!-- FORGE:DECOMPOSED -->` comment exists → decomposition already complete. Derive `sub_issues` as a plain number list from that comment's `- #N:` lines and the comment URL from `$COMMENT_URL`:
 
 ```bash
-# $DECOMP_BODY is the .body of the comment found above
+# $DECOMP_BODY is the trusted, anchored comment body found above
 SUB_LIST=$(printf '%s\n' "$DECOMP_BODY" | sed -nE 's/^- #([0-9]+).*/\1/p' | paste -sd, - | sed 's/,/, /g')
 echo "sub_issues: [${SUB_LIST}]"
 ```
 
-Run Phase D6 (idempotent label re-assert) and Phase D6.5 (close parent when `decomposition.close_parent` is true), then EXIT with `DECOMPOSE_RESULT: status: ALREADY_DONE`, `sub_issues: [${SUB_LIST}]`, `comment_url` from the comment.
+Run Phase D6 (idempotent label re-assert) and Phase D6.5 (close parent when `decomposition.close_parent` is true), then EXIT with `DECOMPOSE_RESULT: status: ALREADY_DONE`, `sub_issues: [${SUB_LIST}]`, `comment_url` from the comment. When `DECOMP_BODY` is empty, continue to the normal path.
 
 ---
 
@@ -534,7 +540,7 @@ esac
 <!-- Added: forge#3736 -->
 A decomposed parent is only a tracker, but while it is open it inflates GitHub's open-issue count. When `decomposition.close_parent` is `true`, close the parent now that the sub-issues exist, the `FORGE:DECOMPOSED:COMPLETE` comment is posted (D5) and `workflow:decomposed` is set (D6). The label is kept. Close C3 keeps checking children off the closed parent and posts the completion comment when the last one closes.
 
-Run this phase on the normal path and on both ALREADY_DONE exits (D1 resume, D2.5). Set `SUB_NUMBERS` to the sub-issue numbers: `CREATED_NUMBERS` on the normal path, `SUB_LIST` (D1) or `CANONICAL_NUMBERS` (D2.5) on the resume paths, as a space or comma separated list. Config read is fail-safe: an unreadable `forge.yaml`, missing `yq` or any value other than `true` leaves the parent open.
+Run this phase on the normal path and on both ALREADY_DONE exits (D1 resume, D2.5). Set `SUB_NUMBERS` to the sub-issue numbers: `CREATED_NUMBERS` on the normal path, `SUB_LIST` (D1) or `CANONICAL_NUMBERS` (D2.5) on the resume paths, as a space or comma separated list; an empty list (after dropping non-digits and the parent's own number) logs `SUB_NUMBERS empty` and skips the child guard and the close. Paste the Script resolution block first (the close gate calls `forge_resolve`). Config read is fail-safe: an unreadable `forge.yaml`, missing `yq` or any value other than `true` leaves the parent open.
 
 ```bash
 run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
@@ -542,6 +548,14 @@ CLOSE_PARENT=$(yq '.decomposition.close_parent // false' forge.yaml 2>/dev/null 
 [ "$CLOSE_PARENT" = "true" ] || CLOSE_PARENT=false
 if [ "$CLOSE_PARENT" = "true" ]; then
   SUB_NUMBERS=$(printf '%s' "${SUB_NUMBERS:-}" | tr -c '0-9\n' ' ')
+  # Digits only, never the parent itself: an empty or unparsable list must not close the parent.
+  SUB_NUMBERS=$(for n in $SUB_NUMBERS; do [ "$n" = "{NUMBER}" ] || printf '%s ' "$n"; done)
+fi
+if [ "$CLOSE_PARENT" = "true" ] && [ -z "${SUB_NUMBERS// /}" ]; then
+  echo "D6.5: SUB_NUMBERS empty — parent left open"
+  CLOSE_PARENT=false
+fi
+if [ "$CLOSE_PARENT" = "true" ]; then
 
   # Child guard: every child body must carry the parent reference Close C3 matches on.
   for SUB_NUMBER in $SUB_NUMBERS; do
@@ -554,8 +568,12 @@ if [ "$CLOSE_PARENT" = "true" ]; then
 
   # Close only an OPEN parent, and only once the DECOMPOSED:COMPLETE marker is on it.
   PARENT_STATE=$(gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state' 2>/dev/null || true)
-  HAS_COMPLETE=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-    --jq '[.[] | select(.body | contains("FORGE:DECOMPOSED:COMPLETE"))] | length' 2>/dev/null || echo 0)
+  # Trusted + anchored (marker on its own line); unresolved helper or failed read => 0 => parent stays open.
+  TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
+  HAS_COMPLETE=0
+  [ -z "$TRUSTED_SCRIPT" ] || HAS_COMPLETE=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments 2>/dev/null \
+    | bash "$TRUSTED_SCRIPT" count '(^|\n)<!-- FORGE:DECOMPOSED:COMPLETE -->[ \t]*($|\n)' 2>/dev/null) || HAS_COMPLETE=0
+  case "$HAS_COMPLETE" in ''|*[!0-9]*) HAS_COMPLETE=0 ;; esac
   if [ "$PARENT_STATE" = "OPEN" ] && [ "${HAS_COMPLETE:-0}" -gt 0 ]; then
     REFS=$(for n in $SUB_NUMBERS; do printf '#%s ' "$n"; done)
     run gh issue close {NUMBER} {GH_FLAG} --reason completed \

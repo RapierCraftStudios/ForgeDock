@@ -766,6 +766,25 @@ describe("runIssue", () => {
     assert.equal(reviewFailures.length, 1, "the fixed-point failure must be logged once");
   });
 
+  it("forge#3572: EDQUOT thrown by the runner ends a retryable engine-error (infra.disk_quota), never needs-human, not retried", async () => {
+    const { w, io } = fakeWorld();
+    let buildCalls = 0;
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => {
+        buildCalls++;
+        throw new Error("Unknown system error -122: Disk quota exceeded, write");
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 3 });
+    assert.equal(res.terminalReason, "engine-error");
+    assert.equal(res.code, "infra.disk_quota");
+    assert.ok(w.labels.includes("workflow:engine-error"));
+    assert.ok(!w.labels.includes("needs-human"), "EDQUOT must never add needs-human");
+    assert.equal(buildCalls, 1, "a full disk is not retried within the phase");
+  });
+
   it("forge#2259/#2261: CLI_BACKEND_FAILED thrown by the runner fails fast on attempt 1, not retried to maxAttempts", async () => {
     // Regression for #2244: a deterministic non-zero exit from the nested
     // `claude` CLI (bin/runner.mjs's runCliBackend() throws with

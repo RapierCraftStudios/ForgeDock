@@ -412,11 +412,18 @@ Before shipping, ensure the milestone branch is up to date with `staging` (picks
 ```bash
 cd {REPO_PATH}
 git fetch origin {STAGING_BRANCH} milestone/{slug}
-git checkout milestone/{slug}
-git merge origin/{STAGING_BRANCH} --no-edit
-# If conflicts, report to user and STOP — do not auto-resolve
-git push origin milestone/{slug}
-git checkout {STAGING_BRANCH}
+# Never mutate the main checkout: sync in a detached worktree at the milestone tip
+SYNC_WT=$(mktemp -d)
+git worktree add --detach "$SYNC_WT" origin/milestone/{slug}
+if git -C "$SYNC_WT" merge origin/{STAGING_BRANCH} --no-edit; then
+  git -C "$SYNC_WT" push origin HEAD:refs/heads/milestone/{slug}
+  git worktree remove --force "$SYNC_WT"
+else
+  # Conflicts: report to user and STOP — do not auto-resolve
+  git -C "$SYNC_WT" merge --abort 2>/dev/null || true
+  git worktree remove --force "$SYNC_WT"
+  echo "STOP: merge conflict syncing milestone/{slug} with {STAGING_BRANCH}"; exit 1
+fi
 ```
 
 ### Step 2.5: Pre-Merge Hunk-Loss Audit (MANDATORY before creating PR)
@@ -425,6 +432,7 @@ git checkout {STAGING_BRANCH}
 
 This step identifies "at-risk hunks" — staging-only content in files the milestone also modifies — and absorbs them into the milestone branch via rebase before the PR is created. After the rebase, even a squash merge will preserve all staging content because it's now part of the milestone branch's commits.
 
+<!-- allowlist:check-spec-bash -->
 ```bash
 cd {REPO_PATH}
 git fetch origin {STAGING_BRANCH} milestone/{slug}
@@ -453,18 +461,19 @@ else
         echo "$AT_RISK" | grep '^--- a/' | sed 's|^--- a/||'
 
         echo "Rebasing milestone/{slug} onto origin/{STAGING_BRANCH} to absorb at-risk hunks..."
-        git checkout milestone/{slug}
-        git rebase origin/{STAGING_BRANCH}
+        REBASE_WT=$(mktemp -d)
+        git worktree add --detach "$REBASE_WT" origin/milestone/{slug}
+        git -C "$REBASE_WT" rebase origin/{STAGING_BRANCH}
 
         REBASE_EXIT=$?
         if [ "$REBASE_EXIT" -ne 0 ]; then
             # Capture conflicting files BEFORE aborting (after abort, unmerged state is gone)
-            CONFLICTING_FILES=$(git diff --name-only --diff-filter=U 2>/dev/null)
+            CONFLICTING_FILES=$(git -C "$REBASE_WT" diff --name-only --diff-filter=U 2>/dev/null)
             [ -z "$CONFLICTING_FILES" ] && CONFLICTING_FILES="unknown — check git status after resolving manually"
 
             # Abort the failed rebase and return to a clean state
-            git rebase --abort 2>/dev/null || true
-            git checkout {STAGING_BRANCH}
+            git -C "$REBASE_WT" rebase --abort 2>/dev/null || true
+            git worktree remove --force "$REBASE_WT"
 
             # Truncate AT_RISK to safe size for issue body (avoid shell quoting issues with large diffs)
             AT_RISK_SNIPPET=$(echo "$AT_RISK" | head -60 | sed "s/'/'\\\\''/g")
@@ -519,6 +528,7 @@ ISSUE_EOF
 ISSUE_SKILL_OUTPUT=$(Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"fix(milestone): rebase conflict during hunk-loss audit for milestone/{slug}\" --body-file \"${REBASE_ISSUE_BODY_FILE}\" --label \"bug\" --label \"priority:P0\" --label \"needs-human\""))
 ```
 
+<!-- allowlist:check-spec-bash -->
 ```bash
             echo "STOP: Rebase conflict. Created issue for manual resolution (see /issue output above). Do NOT proceed to PR creation."
             echo "Run '/milestone ship {slug}' again after resolving the conflict."
@@ -526,9 +536,9 @@ ISSUE_SKILL_OUTPUT=$(Skill(skill="{FORGE_SKILL_PREFIX}issue", args="--title \"fi
         fi
 
         # Rebase succeeded — push the rebased branch
-        git push origin milestone/{slug} --force-with-lease
+        git -C "$REBASE_WT" push origin HEAD:refs/heads/milestone/{slug} --force-with-lease
+        git worktree remove --force "$REBASE_WT"
         echo "Rebase complete. Milestone branch now includes all $AT_RISK_COUNT at-risk staging hunks."
-        git checkout {STAGING_BRANCH}
     fi
 fi
 ```
@@ -716,11 +726,18 @@ Syncs the milestone branch with the latest default branch to pick up fast-lane f
 cd {REPO_PATH}
 DEFAULT_BRANCH=$(yq '.branches.default' "$CONFIG_FILE")
 git fetch origin $DEFAULT_BRANCH milestone/{slug}
-git checkout milestone/{slug}
-git merge origin/$DEFAULT_BRANCH --no-edit
-# If conflicts, report to user and STOP
-git push origin milestone/{slug}
-git checkout $DEFAULT_BRANCH
+# Never mutate the main checkout: sync in a detached worktree at the milestone tip
+SYNC_WT=$(mktemp -d)
+git worktree add --detach "$SYNC_WT" origin/milestone/{slug}
+if git -C "$SYNC_WT" merge origin/$DEFAULT_BRANCH --no-edit; then
+  git -C "$SYNC_WT" push origin HEAD:refs/heads/milestone/{slug}
+  git worktree remove --force "$SYNC_WT"
+else
+  # If conflicts, report to user and STOP
+  git -C "$SYNC_WT" merge --abort 2>/dev/null || true
+  git worktree remove --force "$SYNC_WT"
+  echo "STOP: merge conflict syncing milestone/{slug} with $DEFAULT_BRANCH"; exit 1
+fi
 ```
 
 Report: "Synced milestone/{slug} with latest `{DEFAULT_BRANCH}`. {N} new commits incorporated."

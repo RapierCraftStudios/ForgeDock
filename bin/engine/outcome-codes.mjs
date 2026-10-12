@@ -32,6 +32,7 @@ export const OUTCOME_CODES = Object.freeze({
   BASE_CONFLICT: "base.conflict",
   RATE_LIMITED: "rate_limited",
   ENGINE_ERROR: "engine.error",
+  INFRA_DISK_QUOTA: "infra.disk_quota",
   LEASE_HELD: "lease.held",
   INVALID: "invalid",
   DECOMPOSED: "decomposed",
@@ -55,9 +56,24 @@ export function normalizeCode(code) {
   return isOutcomeCode(code) ? code : UNCLASSIFIED;
 }
 
+const DISK_QUOTA_RE = /EDQUOT|ENOSPC|(?:errno|system error) -?(?:28|122)\b|No space left|Disk quota exceeded/i;
+
+/** True when runner/stderr text reports a full disk or exhausted quota (forge#3572). Match runner error text only, never review prose. */
+export function isDiskQuotaText(text) {
+  return typeof text === "string" && DISK_QUOTA_RE.test(text);
+}
+
+/** True when a thrown runner error is a disk-full/quota failure (message, errno or stderr). */
+export function isDiskQuotaError(err) {
+  if (!err || typeof err !== "object") return false;
+  if (err.code === "ENOSPC" || err.code === "EDQUOT" || err.errno === -28 || err.errno === -122) return true;
+  return isDiskQuotaText(err.message) || isDiskQuotaText(err.stderr);
+}
+
 /** Code for a thrown runner error, from `err.code` / session-limit evidence only. */
 export function codeForRunnerError(err) {
   if (!err || typeof err !== "object") return UNCLASSIFIED;
+  if (isDiskQuotaError(err)) return OUTCOME_CODES.INFRA_DISK_QUOTA;
   if (err.usageLimit === true || (typeof err.resetAtEpochMs === "number" && Number.isFinite(err.resetAtEpochMs)))
     return OUTCOME_CODES.RATE_LIMITED;
   switch (err.code) {
