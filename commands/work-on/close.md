@@ -809,22 +809,55 @@ If no parent reference found → log a warning and skip this phase (`PARENT_STAT
 echo "WARNING: No parent reference found in issue body — skipping parent tracker update"
 ```
 
-If parent found:
+If parent found, check this sub-issue off with a verified retry. The parent body is a shared read-modify-write target: a sibling lane closing at the same moment can overwrite this write from a stale copy and silently drop a checkbox. Each attempt re-reads the body, re-applies the substitution to the fresh copy, writes it, then re-reads to verify the box is present, retrying up to 3 times with backoff. Idempotent, so the resume path may re-enter it:
 ```bash
-# Read parent body (fresh read immediately before the body mutation)
-PARENT_BODY=$(gh issue view "$PARENT_REF" {GH_FLAG} --json body --jq '.body')
+PARENT_UPDATED=false
+for ATTEMPT in 1 2 3; do
+  # Fresh read immediately before each body mutation
+  PARENT_BODY=$(gh issue view "$PARENT_REF" {GH_FLAG} --json body --jq '.body')
+  # Already checked (earlier attempt, earlier run, or restored): nothing to write
+  if printf '%s\n' "$PARENT_BODY" | grep -qE "^[[:space:]]*[-*+] \[[xX]\] #{NUMBER}([^0-9]|\$)"; then PARENT_UPDATED=true; break; fi
+  # No checklist entry for this sub-issue: nothing to check off
+  printf '%s\n' "$PARENT_BODY" | grep -qE "^[[:space:]]*[-*+] \[ \] #{NUMBER}([^0-9]|\$)" || break
+  # Replace "- [ ] #{NUMBER}" with "- [x] #{NUMBER}"; the trailing guard stops #12 matching #123
+  UPDATED_PARENT=$(printf '%s\n' "$PARENT_BODY" | sed -E "s/- \[ \] #{NUMBER}([^0-9]|\$)/- [x] #{NUMBER}\1/g")
+  gh issue edit "$PARENT_REF" {GH_FLAG} --body "$UPDATED_PARENT" # allowlist:check-command-side-effects
+  # Verify the write survived: re-read and confirm the box is present
+  VERIFY_BODY=$(gh issue view "$PARENT_REF" {GH_FLAG} --json body --jq '.body')
+  if printf '%s\n' "$VERIFY_BODY" | grep -qE "^[[:space:]]*[-*+] \[[xX]\] #{NUMBER}([^0-9]|\$)"; then PARENT_UPDATED=true; break; fi
+  echo "WARNING: parent #${PARENT_REF} checkbox for #{NUMBER} not present after write (attempt ${ATTEMPT}/3) — retrying"
+  sleep "$ATTEMPT"
+done
+[ "$PARENT_UPDATED" = true ] || echo "WARNING: could not verify checkbox for #{NUMBER} on parent #${PARENT_REF} — completion is derived from sub-issue state"
+```
 
-# Check off this sub-issue in parent body (replace "- [ ] #{NUMBER}" with "- [x] #{NUMBER}"; the trailing guard stops #12 matching #123)
-UPDATED_PARENT=$(printf '%s\n' "$PARENT_BODY" | sed -E "s/- \[ \] #${NUMBER}([^0-9]|\$)/- [x] #${NUMBER}\1/g")
-gh issue edit "$PARENT_REF" {GH_FLAG} --body "$UPDATED_PARENT" # allowlist:check-command-side-effects
-PARENT_UPDATED=true
-
-# Check if all sub-issues are now checked off
-OPEN_SUBS=$(printf '%s\n' "$UPDATED_PARENT" | grep -cE '^[[:space:]]*[-*+] \[ \]' || true)
+Derive completion from sub-issue state, not from the checklist text, so a lost checkbox can never strand the parent. Every `#N` on a checklist line of a fresh parent read is looked up with `gh issue view N --json state`; this sub-issue is already CLOSED by C1/C2 and counts as closed. Unchecked lines without a leading `#N` ref (including a non-leading mention such as `(see #9)`) still count as open. If the re-read or any state lookup fails, or no refs are found, fall back to the checklist count (fail closed: a failed lookup is never treated as closed):
+```bash
+PARENT_FRESH=$(gh issue view "$PARENT_REF" {GH_FLAG} --json body --jq '.body' 2>/dev/null) || PARENT_FRESH="${UPDATED_PARENT:-${PARENT_BODY:-}}"
+CHECKLIST_OPEN=$(printf '%s\n' "$PARENT_FRESH" | grep -cE '^[[:space:]]*[-*+] \[ \]' || true)
+CHECKLIST_OPEN=${CHECKLIST_OPEN:-0}
+SUB_REFS=$(printf '%s\n' "$PARENT_FRESH" | grep -E '^[[:space:]]*[-*+] \[[ xX]\] #[0-9]+' \
+  | sed -E 's/^[[:space:]]*[-*+] \[[ xX]\] #([0-9]+).*/\1/' | grep -vx "$PARENT_REF" | sort -u || true)
+LOOKUP_FAILED=false; STATE_OPEN=0
+for SUB in $SUB_REFS; do
+  [ "$SUB" = "{NUMBER}" ] && continue
+  SUB_STATE=$(gh issue view "$SUB" {GH_FLAG} --json state --jq '.state' 2>/dev/null) || SUB_STATE=""
+  case "$SUB_STATE" in
+    CLOSED) ;;
+    OPEN) STATE_OPEN=$((STATE_OPEN + 1)) ;;
+    *) LOOKUP_FAILED=true ;;
+  esac
+done
+if [ "$LOOKUP_FAILED" = true ] || [ -z "$SUB_REFS" ]; then
+  OPEN_SUBS=$CHECKLIST_OPEN
+else
+  NOREF_OPEN=$(printf '%s\n' "$PARENT_FRESH" | grep -E '^[[:space:]]*[-*+] \[ \]' | grep -cvE '^[[:space:]]*[-*+] \[ \] #[0-9]+' || true)
+  OPEN_SUBS=$((STATE_OPEN + ${NOREF_OPEN:-0}))
+fi
 OPEN_SUBS=${OPEN_SUBS:-0}
 ```
 
-If `OPEN_SUBS == 0` (all sub-issues checked off), branch on the parent's `state` <!-- Added: forge#3736 -->. An OPEN parent is closed and transitioned to `merged` with the same tiered dispatch and FULL remove list as C2. A CLOSED parent (closed at decomposition by `decomposition.close_parent`) is never closed a second time and never reopened: post the completion comment (once) and set `merged`:
+If `OPEN_SUBS == 0` (all sub-issues done), branch on the parent's `state` <!-- Added: forge#3736 -->. An OPEN parent is closed and transitioned to `merged` with the same tiered dispatch and FULL remove list as C2. A CLOSED parent (closed at decomposition by `decomposition.close_parent`) is never closed a second time and never reopened: post the completion comment (once) and set `merged`:
 ```bash
 if [ "$OPEN_SUBS" -eq 0 ]; then
   PARENT_STATE=$(gh issue view "$PARENT_REF" {GH_FLAG} --json state --jq '.state' 2>/dev/null || echo OPEN)
