@@ -18,15 +18,16 @@
 #   file-verify   6C post-filing parse: reads the issue-creation result text on stdin, prints ISSUE_NUM=N, exits 1 when no number.
 #   verdict       7A gate log + 7B base-conflict computation; posts the verdict comment when --result stale|clean|blocking is given.
 #   calibrate     7B.5 calibration-table consultation (can only tighten); records FORGE:CALIBRATION_CHECK on the linked issue.
-#   merge-gate    Phase 8: note-disposition, in-PR fix, --issue, phase-trail, guard-state, base-conflict / calibration / trust routing,
+#   merge-gate    Phase 8: note-disposition, in-PR fix, --issue, phase-trail, degraded-gate review, guard-state, base-conflict / calibration / trust routing,
 #                 pre-merge mergeability, previously-escalated parking, CI gate, reviewed-head guard, merge. Never skips a gate.
 #   demilestone   8B / 9A: clears the milestone from open review-finding issues of a merged milestone PR.
 #   integrity     Phase 9: stale-head check and the verifiable trusted REVIEW-AGENT count (carry-aware).
 #
 # Boundary: the filing call itself (the /issue skill with its programmatic contract) and the LLM-authored finding body stay in the
 # spec: a shell script cannot invoke a skill. The script ends at the work list (file-prepare) and resumes at file-verify.
-# Also left to the caller: INTEG-N findings from Phase 2.5, unstructured-finding extraction when `extract` reports 0 structured
-# findings, pattern-class consolidation issue creation, project-board add, 6D, and the choice of which NOTEs are fixed or dropped
+# `extract` never reads free text: findings come only from `<!-- FINDING:... -->` markers. A trusted current-head agent comment
+# without a REVIEW-FINDINGS-START/END block is listed in AGENTS_WITHOUT_BLOCK (undelivered) and withholds CLEAN_STRUCTURED.
+# Also left to the caller: INTEG-N findings from Phase 2.5, pattern-class consolidation issue creation, project-board add, 6D, and the choice of which NOTEs are fixed or dropped
 # (pass --notes-fixed / --notes-dropped; every other plain NOTE is counted as listed).
 #
 # Options:
@@ -62,6 +63,8 @@
 # Exit: 0 ok | 3 BLOCKED (REVIEW_RESULT: status: BLOCKED printed; the caller must stop the review, never skip) | 4 merge-gate only:
 #       REVIEW_RESULT: status: PHASE_TRAIL_FAILED printed, followed by the verifier's MISSING lines (re-dispatch is owned by work-on/review.md R4)
 #       | 1 file-verify found no issue number | 2 usage error
+# merge-gate: `blocked degraded-gate-unreviewed` (exit 3, needs-human added) when the linked issue's newest trusted FORGE:QUALITY_GATE `**Degraded**:` line or
+# FORGE:ACCEPTANCE_GATE:DEGRADED marker lists checks that no trusted `### Degraded Paths Reviewed` PR section names (forge#3628).
 # merge-gate reports every non-merging routed outcome as MERGE_OUTCOME=<merged|merge-failed|parked-awaiting-merge|base-conflict|needs-human|
 # protection-blocked|stale-review|ci-not-green>; everything except merged / merge-failed / parked-awaiting-merge also exits 3 with a blocker.
 #
@@ -269,12 +272,20 @@ do_extract() {
     # The panel guard guarantees at least one trusted reviewer body for this head; none means a misread, never "clean".
     [ -n "$SOURCE_BODIES" ] || { echo "REVIEW_RESULT: status: BLOCKED, blocker: no trusted reviewer comments for head ${PRIMARY_SHA} (fail closed)"; exit 3; }
     CARRIER_BODIES=$(agent_bodies_at "$PRIMARY_SHA")
+    CARRIER_BODIES_PRIMARY="$CARRIER_BODIES"
     if [ -n "$EARLIER_SHA" ]; then
         EARLIER_BODIES=$(bodies_at "$EARLIER_SHA") && [ -n "$EARLIER_BODIES" ] \
             || { echo "REVIEW_RESULT: status: BLOCKED, blocker: earlier reviewed head ${EARLIER_SHA} findings unreadable (fail closed)"; exit 3; }
         SOURCE_BODIES=$(printf '%s\n%s' "$SOURCE_BODIES" "$EARLIER_BODIES")
         CARRIER_BODIES=$(printf '%s\n%s' "$CARRIER_BODIES" "$(agent_bodies_at "$EARLIER_SHA")")
     fi
+    # Panel integrity: a trusted agent comment for the primary head counts as delivered only with a findings block (it may be empty).
+    # Computed from the RAW agent bodies, never from bodies_at, so a synthesized block cannot mask a missing agent block.
+    # Per domain: a later (re-dispatched) comment with a complete block clears an earlier block-less one.
+    AGENTS_WITHOUT_BLOCK=$(printf '%s\n' "$CARRIER_BODIES_PRIMARY" | jq -rs '[.[] | select(type == "string")
+        | {d: (capture("^<!-- FORGE:REVIEW-AGENT:(?<d>[a-z-]+) -->").d // empty),
+           ok: (contains("<!-- REVIEW-FINDINGS-START -->") and contains("<!-- REVIEW-FINDINGS-END -->"))}]
+        | group_by(.d) | map(select(any(.[]; .ok) | not) | .[0].d) | .[]' 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//')
     # Match to the closing ` -->`, never `[^>]+`: a `>` or `->` inside a title must not drop the finding (#3897).
     FINDINGS=$(printf '%s\n' "$SOURCE_BODIES" | jq -r 'scan("<!-- FINDING:(.+?) -->") | .[0]' 2>/dev/null)
     # Fail closed when a raw marker did not parse: a lost finding must never read as a clean review.
@@ -488,7 +499,8 @@ EOF
     echo "FINDINGS_DROPPED_STALE=$N_STALE"
     echo "FINDINGS_PREEXISTING=$N_PREEXISTING"
     echo "NOTES_DEMOTED_NO_SCENARIO=$N_NO_SCENARIO"
-    [ "$N_EXTRACTED" -gt 0 ] || echo "CLEAN_STRUCTURED=true"   # 0 structured findings: the caller scans unstructured text, then skips to Phase 7 if still 0
+    echo "AGENTS_WITHOUT_BLOCK=$AGENTS_WITHOUT_BLOCK"   # undelivered agents (no findings block): re-dispatch once, else degraded panel; never read free text
+    { [ "$N_EXTRACTED" -gt 0 ] || [ -n "$AGENTS_WITHOUT_BLOCK" ]; } || echo "CLEAN_STRUCTURED=true"   # 0 structured findings and every agent delivered a block: skip to Phase 7
     exit 0
 }
 
@@ -1241,6 +1253,86 @@ Re-run each missing phase via its Skill (see the \`->\` action on each MISSING l
     fi
     [ "${TRAIL_RC:-1}" -eq 0 ] || blocked "phase trail unreadable (rc=${TRAIL_RC:-1})"   # hard guard: nothing below runs unless the trail verified
 
+    # --- degraded-gate gate (forge#3628): a build whose tests ran nothing is not a verified build ---
+    # The newest trusted FORGE:QUALITY_GATE (`**Degraded**: name — reason; ...`) and FORGE:ACCEPTANCE_GATE (`:DEGRADED` marker) on the linked
+    # issue name the degraded checks. Each one must be named in a trusted `### Degraded Paths Reviewed` section on the PR; a generic section
+    # does not satisfy it. Unreadable comments fail closed. Only trusted-comments.sh ever reads these comments, so an untrusted comment can
+    # neither forge a DEGRADED marker nor clear one.
+    DEG_ISSUE_JSON=$(gh api --paginate "repos/${REPO}/issues/${MERGE_ISSUE}/comments" 2>/dev/null) || DEG_ISSUE_JSON=""
+    if [ -z "$DEG_ISSUE_JSON" ] || [ -z "$TRUSTED_SCRIPT" ]; then
+        echo "DEGRADED GATE: issue comments or trusted-comments.sh unreadable — refusing to merge (fail closed)" >&2
+        blocked "note disposition unreadable"
+    fi
+    DEG_NAMES=""; DEG_ANY=false
+    DEG_QG=$(printf '%s' "$DEG_ISSUE_JSON" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:QUALITY_GATE -->') || DEG_QG="__ERR__"
+    DEG_AG=$(printf '%s' "$DEG_ISSUE_JSON" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:ACCEPTANCE_GATE -->') || DEG_AG="__ERR__"
+    if [ "$DEG_QG" = "__ERR__" ] || [ "$DEG_AG" = "__ERR__" ]; then
+        echo "DEGRADED GATE: trust filter failed — refusing to merge (fail closed)" >&2
+        blocked "note disposition unreadable"
+    fi
+    # newest body of each gate (bodies are JSON strings, one per line, oldest first)
+    DEG_QG_LINE=$(printf '%s\n' "$DEG_QG" | tail -n 1 | jq -r 'select(type == "string")' 2>/dev/null | sed -n 's/^\*\*Degraded\*\*: *//p' | sed -n '1p')
+    DEG_AG_BODY=$(printf '%s\n' "$DEG_AG" | tail -n 1 | jq -r 'select(type == "string")' 2>/dev/null)
+    case "$DEG_QG_LINE" in ''|none|None|NONE) ;; *) DEG_ANY=true; DEG_NAMES="$DEG_QG_LINE" ;; esac
+    if printf '%s\n' "$DEG_AG_BODY" | grep -qE '^[[:space:]]*<!-- FORGE:ACCEPTANCE_GATE:DEGRADED -->[[:space:]]*$'; then
+        DEG_ANY=true
+        DEG_AG_LINE=$(printf '%s\n' "$DEG_AG_BODY" | sed -n 's/^\*\*Degraded checks[^*]*\*\*: *//p' | sed -n '1p')
+        [ -n "$DEG_AG_LINE" ] && DEG_NAMES="${DEG_NAMES:+$DEG_NAMES; }${DEG_AG_LINE}"
+    fi
+    if [ "$DEG_ANY" = "true" ]; then
+        # Reviewed section (forge#3995): only a trusted review comment (FORGE:REVIEW-AGENT / FORGE:REVIEW / synthesis marker as the
+        # LEADING text) carrying `Reviewed-SHA:` for the CURRENT head counts, so a stale section from an older head or a plain comment
+        # cannot clear the gate. An unreadable head fails closed.
+        DEG_SECTIONS=""
+        DEG_HEAD=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq .head.sha 2>/dev/null) || DEG_HEAD=""
+        if ! [[ "$DEG_HEAD" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
+            echo "DEGRADED GATE: PR head unreadable — refusing to merge (fail closed)" >&2
+            blocked "note disposition unreadable"
+        fi
+        DEG_PR_BODIES=$(printf '%s' "$DISPO_JSON" | bash "$TRUSTED_SCRIPT" bodies '^<!-- (FORGE:REVIEW-AGENT:[a-z-]+|FORGE:REVIEW|REVIEW-FINDINGS-SYNTHESIZED-START) -->[\s\S]*(^|\n)### Degraded Paths Reviewed') || DEG_PR_BODIES="__ERR__"
+        if [ "$DEG_PR_BODIES" = "__ERR__" ]; then
+            echo "DEGRADED GATE: trust filter failed on PR comments — refusing to merge (fail closed)" >&2
+            blocked "note disposition unreadable"
+        fi
+        if [ -n "$DEG_PR_BODIES" ]; then
+            DEG_SECTIONS=$(printf '%s\n' "$DEG_PR_BODIES" | while IFS= read -r _db; do
+                printf '%s' "$_db" | jq -r --arg head "$DEG_HEAD" 'select(type == "string") | select(split("\n") | map(rtrimstr("\r")) | index("Reviewed-SHA: " + $head))' 2>/dev/null \
+                    | awk '/^### Degraded Paths Reviewed[[:space:]]*$/ {f=1; next} f && /^(#|##|###) / {f=0} f {print}'
+            done)
+        fi
+        DEG_MISSING=""
+        if [ -z "$(printf '%s' "$DEG_SECTIONS" | tr -d '[:space:]')" ]; then
+            DEG_MISSING="no \`### Degraded Paths Reviewed\` section on a review comment for the current head"
+        else
+            # per-check match (forge#3995): the name is everything before " — " in each "; "-separated entry. It must be a whole list
+            # item `- name: <how it was reviewed>` whose explanation does not negate it; a substring or a "NOT reviewed" item is not coverage.
+            DEG_NAME_LIST=$(printf '%s\n' "$DEG_NAMES" | tr ';' '\n' | sed 's/ — .*$//; s/^[[:space:]]*//; s/[[:space:]]*$//' | sed '/^$/d' | sort -u)
+            while IFS= read -r _dn; do
+                [ -n "$_dn" ] || continue
+                _hit=$(printf '%s\n' "$DEG_SECTIONS" | awk -v n="$_dn" '
+                    { l=$0; sub(/^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+/, "", l); gsub(/`/, "", l)
+                      if (index(l, n) != 1) next
+                      r=substr(l, length(n)+1)
+                      if (r !~ /^[[:space:]]*[:—-][[:space:]]*[^[:space:]]/) next
+                      sub(/^[[:space:]]*[:—-][[:space:]]*/, "", r)
+                      if (tolower(r) ~ /^(not|never|no|n\/a|none|unreviewed|skipped)([^a-z]|$)/) next
+                      found=1 }
+                    END { print found+0 }')
+                [ "$_hit" = "1" ] || DEG_MISSING="${DEG_MISSING:+$DEG_MISSING, }${_dn}"
+            done <<< "$DEG_NAME_LIST"
+            [ -z "$DEG_MISSING" ] || DEG_MISSING="not covered: ${DEG_MISSING}"
+        fi
+        if [ -n "$DEG_MISSING" ]; then
+            echo "DEGRADED GATE: the build's gate is DEGRADED (${DEG_NAMES}) and the review does not cover it (${DEG_MISSING})" >&2
+            gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "<!-- FORGE:DEGRADED_GATE_UNREVIEWED -->
+Auto-merge refused for PR #${PR_NUMBER}: the build's verification was DEGRADED (a check ran nothing or did not complete): ${DEG_NAMES}.
+
+The review must add a \`### Degraded Paths Reviewed\` section that names each degraded check and states how its path was reviewed (${DEG_MISSING}). Then re-run /review-pr." 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
+            gh issue edit "$MERGE_ISSUE" -R "$REPO" --add-label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
+            blocked "degraded-gate-unreviewed"
+        fi
+    fi
+
     # --- merge guard state: §7B verdict + purpose-regression + calibration + trust-escalation ---
     # These are decided in earlier steps (earlier shells), so they arrive as flags. An empty or unbound value would read as
     # "not blocking" and fall through to the merge path, so any value outside the expected set stops here instead of merging.
@@ -1459,7 +1551,7 @@ do_integrity() {
     ACTUAL_AGENT_DOMAINS=""
     if [ -n "$TRUSTED_SCRIPT" ]; then
         ACTUAL_AGENT_DOMAINS=$(printf '%s' "$COMMENTS_JSON" \
-            | bash "$TRUSTED_SCRIPT" bodies "^<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->" 2>/dev/null \
+            | bash "$TRUSTED_SCRIPT" bodies "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->[\\s\\S]*<!-- REVIEW-FINDINGS-END -->)<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->" 2>/dev/null \
             | jq -rs '[.[] | scan("^<!-- FORGE:REVIEW-AGENT:([a-z-]+) -->") | .[0]] | unique | join(", ")' 2>/dev/null || echo "")   # unresolvable => empty => count 0 (degraded, fail closed)
     fi
     # No `|| echo 0` fallback after grep -c: it always prints a count (0 on no match) even though it exits 1, so a fallback would double-count to "0\n0".

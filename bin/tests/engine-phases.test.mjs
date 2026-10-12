@@ -1479,6 +1479,14 @@ describe("acceptance-gate-aware build outcome (forge#3545)", () => {
     assert.equal((await build.detectOutcome(st, world([done, gate("FAILED"), rev("PASSED")]))).status, "failed");
   });
 
+  it("DEGRADED is pass-class; order decides against FAILED (forge#3628)", async () => {
+    assert.equal((await build.detectOutcome(st, world([done, gate("DEGRADED")]))).status, "committed");
+    assert.equal((await build.detectOutcome(st, world([done, gate("FAILED"), gate("DEGRADED")]))).status, "committed");
+    const o = await build.detectOutcome(st, world([done, gate("DEGRADED"), gate("FAILED")]));
+    assert.equal(o.status, "failed");
+    assert.equal(o.retryable, false);
+  });
+
   it("no gate marker keeps prior behaviour (committed)", async () => {
     assert.equal((await build.detectOutcome(st, world([done]))).status, "committed");
   });

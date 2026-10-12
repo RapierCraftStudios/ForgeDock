@@ -13,9 +13,15 @@
 #                       [--inpr-diff <F> --file <P> [--scope introduced|pre-existing|unknown]] [--contract-scope <F> --contract-open <F> [--pr-files <F>] [--merge-issue <N>]]
 #                       [--fix-efficacy fails|regresses] [--fixes-issue <N>]
 #                       [--prior-findings <F> [--title <T>] [--line-start <N> [--line-end <M>]] [--diff-map <F>]]
+#                       [--unstructured]
 #
 #   --severity    CRITICAL | HIGH | MEDIUM | LOW (case-insensitive). Missing or
 #                 unparseable → ISSUE (fail toward filing, never drop).
+#   --unstructured The finding has no `FINDING:` marker (it was not read from a structured
+#                 findings block). With an empty or unparseable severity it is `NOTE unstructured`,
+#                 never ISSUE: a marker-less finding cannot block a PR. HIGH/CRITICAL/MEDIUM/LOW
+#                 still classify normally. A real marker with a bad severity (no flag) stays
+#                 `ISSUE unparseable-severity`.
 #   --confidence  CONFIRMED | LIKELY | POSSIBLE (case-insensitive). Missing is
 #                 treated as not-POSSIBLE.
 #   --agent       The `**Agent**:` value of the finding (e.g. "Security", "Auth").
@@ -120,10 +126,11 @@ TITLE=""
 LINE_START=""
 LINE_END=""
 DIFF_MAP=""
+UNSTRUCTURED=0
 SCOPE=""
 
 usage() {
-  echo "ERROR: Usage: classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>] [--lineage none|review-finding] [--text <T> | --text-file <F>] [--inpr-diff <F> --file <P> [--scope introduced|pre-existing|unknown]] [--contract-scope <F> --contract-open <F> [--pr-files <F>] [--merge-issue <N>]] [--fix-efficacy fails|regresses] [--fixes-issue <N>] [--prior-findings <F> [--title <T>] [--line-start <N> [--line-end <M>]] [--diff-map <F>]]" >&2
+  echo "ERROR: Usage: classify-finding.sh --severity <S> [--confidence <C>] [--agent <A>] [--lineage none|review-finding] [--text <T> | --text-file <F>] [--inpr-diff <F> --file <P> [--scope introduced|pre-existing|unknown]] [--contract-scope <F> --contract-open <F> [--pr-files <F>] [--merge-issue <N>]] [--fix-efficacy fails|regresses] [--fixes-issue <N>] [--prior-findings <F> [--title <T>] [--line-start <N> [--line-end <M>]] [--diff-map <F>]] [--unstructured]" >&2
   exit 2
 }
 
@@ -148,6 +155,7 @@ while [ "$#" -gt 0 ]; do
     --line-start)     [ "$#" -ge 2 ] || usage; LINE_START="$2"; shift 2 ;;
     --line-end)       [ "$#" -ge 2 ] || usage; LINE_END="$2"; shift 2 ;;
     --diff-map)       [ "$#" -ge 2 ] || usage; DIFF_MAP="$2"; shift 2 ;;
+    --unstructured)   UNSTRUCTURED=1; shift ;;
     --text-file)
       [ "$#" -ge 2 ] || usage
       [ -r "$2" ] || { echo "ERROR: --text-file not readable: $2" >&2; exit 2; }
@@ -223,7 +231,9 @@ case "$SEV" in
     fi
     disp "ISSUE severity-$SEV"; exit 0 ;;
   MEDIUM|LOW) ;;
-  *) disp "ISSUE unparseable-severity"; exit 0 ;;
+  *)
+    if [ "$UNSTRUCTURED" = "1" ]; then disp "NOTE unstructured"; exit 0; fi
+    disp "ISSUE unparseable-severity"; exit 0 ;;
 esac
 
 # Cross-head / cross-PR re-flag gate (#3641). Runs after the severity parse so HIGH/CRITICAL and

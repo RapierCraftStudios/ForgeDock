@@ -220,7 +220,8 @@ function latestGateMarker(comments) {
     const b = comments[i];
     if (startsWithHeader(b, "FORGE:BUILD_BLOCKED")) return { state: "blocked", index: i };
     if (!startsWithHeader(b, gate)) continue;
-    if (hasSentinelLine(b, `${gate}:PASSED`)) return { state: "pass", index: i };
+    // :DEGRADED is pass-class (forge#3628): the build completed, and review gates the merge on the degraded paths.
+    if (hasSentinelLine(b, `${gate}:PASSED`) || hasSentinelLine(b, `${gate}:DEGRADED`)) return { state: "pass", index: i };
     if (hasSentinelLine(b, `${gate}:FAILED`) || hasSentinelLine(b, `${gate}:BLOCKED`)) return { state: "blocked", index: i };
   }
   return { state: "none", index: -1 };
