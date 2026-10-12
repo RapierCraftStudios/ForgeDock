@@ -748,11 +748,11 @@ verification:
 | `services[].health_url` | string | No | Local URL for container-level health checks |
 | `ci_local` | object | No | Local CI gate settings (see below) |
 
-**Commands that use this section**: `quality-gate`, `validate` (V2 runs `verification.commands`; V4.6 runs the local CI gate), `work-on`
+**Commands that use this section**: `quality-gate`, `validate` (V2 runs `verification.commands`; V4.7 runs the local CI gate), `work-on`
 
 ### `verification.ci_local` (OPTIONAL)
 
-Validate Phase V4.6 runs `scripts/ci-local.sh` before review: it derives the repo's pull-request checks from its own CI
+Validate Phase V4.7 runs `scripts/ci-local.sh` before review: it derives the repo's pull-request checks from its own CI
 definitions and runs them locally in the build worktree, so deterministic CI failures are fixed in build (at most 2 fix
 iterations, then the build is blocked with `ci-local: <jobs>`). It never contacts GitHub and never triggers a remote
 workflow; remote CI still runs once, at merge. Everything works with no configuration.
@@ -810,7 +810,7 @@ ambient operator state (agent tokens, `FORGE_*`/`CLAUDE_*` settings, git hook va
 listed in `FORGE_CI_LOCAL_PASSTHROUGH` (comma separated). Requires `node`, `git`, and mikefarah `yq` v4 for YAML CI definitions (without `yq`
 the gate is DEGRADED and reported in `verification_skipped`, never a silent pass).
 
-**Commands that use this section**: `work-on` (validate V4.6)
+**Commands that use this section**: `work-on` (validate V4.7)
 
 ---
 

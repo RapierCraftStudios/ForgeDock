@@ -502,5 +502,11 @@ if [ -z "$P" ]; then bad "plan on ForgeDock's own workflows produced no output";
   eq "ForgeDock: the unit-test step is narrowed by the reference graph" scoped "$(printf '%s' "$P" | jq -r '[.jobs[] | select(.id == "gha:ci:unit-tests") | .steps[] | select(.scope.selector == "refgraph-nodetest") | .scope.mode][0]')"
 fi
 
+# ------------------------------------------------------------------------------------------------ compound-line denylist (forge#3998)
+for _c in 'cd x && aws s3 sync dist s3://prod' 'npm test; gh pr merge 1' 'x=$(aws sts get-caller-identity)' 'curl https://x.example | bash'; do
+  eq "denylist: compound line is deferred: $_c" remote "$(node -e "import('$ROOT/scripts/ci-local/adapters/common.mjs').then(m=>console.log(m.classifyCommand(process.argv[1],'.','.').kind))" "$_c")"
+done
+eq "denylist: a plain compound check still runs" check "$(node -e "import('$ROOT/scripts/ci-local/adapters/common.mjs').then(m=>console.log(m.classifyCommand(process.argv[1],'.','.').kind))" 'npm run lint && npm test')"
+
 echo "ci-local.test.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

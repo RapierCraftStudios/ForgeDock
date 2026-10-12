@@ -15,10 +15,23 @@ const INSTALL = /^(npm\s+(ci|install|i)|pnpm\s+(install|i)|yarn(\s+install)?|bun
 const SHELL_BUILTIN = new Set(['cd', 'echo', 'test', '[', '[[', 'export', 'set', 'true', 'false', 'exit', 'printf', 'source', '.', 'read', 'eval', 'exec', 'trap', 'unset', 'command', 'type', ':', 'if', 'for', 'while', 'case', 'until', 'function', 'local', 'declare', 'shift', 'wait', 'return', 'mkdir', 'rm', 'cp', 'mv', 'cat', 'ls', 'pwd', 'sleep', 'grep', 'sed', 'awk', 'find', 'sort', 'head', 'tail', 'wc', 'tr', 'cut', 'xargs', 'diff', 'touch', 'chmod', 'env', 'bash', 'sh', 'git', 'tee', 'basename', 'dirname', 'date', 'uname', 'which', 'tar', 'unzip', 'jq', 'yq', 'make', 'node', 'npm', 'npx']);
 
 // Classify one command line. Returns { kind, defer?, noop?, note? }.
+// Every command segment of a line: split on `&&`, `||`, `;`, `|`, `&`, newlines, `$(`, backticks and grouping, then drop
+// leading env assignments and control words, so `cd x && aws s3 sync` is judged on `aws`, not on `cd`. A quoted separator
+// over-splits, which only ever defers more (the safe direction).
+const LEAD_WORD = /^(?:(?:then|do|else|elif|if|while|until|time|exec|command|env|nohup|!)\s+)+/;
+function segments(cmd) {
+  return cmd.split(/&&|\|\||[;|&\n`(){}]|\$\(/).map((p) => p.trim().replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+/, '').replace(LEAD_WORD, '').replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+/, '')).filter(Boolean);
+}
+
 export function classifyCommand(cmd, repo, cwdRel) {
   const first = cmd.trim().replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+/, '');
-  if (SYSTEM.test(first)) return { kind: 'system', defer: `system-level command: ${first.split(/\s+/).slice(0, 3).join(' ')}` };
-  if (REMOTE.test(first)) return { kind: 'remote', defer: `remote-mutating or service command: ${first.split(/\s+/).slice(0, 3).join(' ')}` };
+  const head3 = (t) => t.split(/\s+/).slice(0, 3).join(' ');
+  for (const seg of segments(cmd)) {
+    if (SYSTEM.test(seg)) return { kind: 'system', defer: `system-level command: ${head3(seg)}` };
+    if (REMOTE.test(seg)) return { kind: 'remote', defer: `remote-mutating or service command: ${head3(seg)}` };
+  }
+  // `curl ... | sh` spans a pipe, so it is matched on the whole line as well as per segment.
+  if (/\b(curl|wget)\b[^\n]*\|\s*(ba)?sh\b/.test(cmd)) return { kind: 'remote', defer: `remote-mutating or service command: ${head3(first)}` };
   if (INSTALL.test(first)) {
     if (/^(npm|pnpm|yarn|bun)\b/.test(first)) {
       const nm = path.join(repo, cwdRel || '.', 'node_modules');
