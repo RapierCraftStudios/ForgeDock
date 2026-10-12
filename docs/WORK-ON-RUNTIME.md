@@ -110,6 +110,10 @@ phase hosting `/review-pr` cannot wait on a notification. Therefore:
 `/orchestrate` Step 4B item 6.4 dispatches a worker that runs `work-on <pr> --remediate`: worker L1,
 remediate L2, reviewers L3, same as the table.
 
+### Pre-handoff base sync and union registries (forge#3969)
+
+`work-on:review` merges `origin/<base>` into the branch before the first push, so a PR is never born stale and a conflict is resolved while the build context is warm. Hand-maintained append-only registries (test lists, cron targets) are the usual conflict source; `scripts/detect-append-registries.sh` ranks them from history and proves a `.gitattributes` `merge=union` entry safe (`--check-union`). Union is allowed only for line-independent files, never YAML/JSON maps or ordered lists (see `.gitattributes`). `scripts/review-delta.sh` still treats a hand-resolved merge as not `BASE_SYNC_ONLY`, but accepts a merge whose tree is exactly what a mechanical `git merge-tree` of the same parents produces (a clean or union merge), so union registries take the no-panel fast path.
+
 ## 5. Router routing
 
 | Phase result | Router action |

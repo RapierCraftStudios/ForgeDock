@@ -83,6 +83,25 @@ commit shared.txt "feat side" "feat edits shared"; R=$(sha HEAD); panel "$R"
 g merge -q --no-ff origin/main >/dev/null 2>&1; printf 'resolved\n' > "$W/shared.txt"; g add -A >/dev/null; g commit -q -m "merge main (resolved)" >/dev/null; HEAD=$(sha HEAD)
 out=$(run_rd | sed -n 1p); case "$out" in BASE_SYNC_ONLY*) bad "conflict-resolution merge must not be BASE_SYNC_ONLY (got $out)" ;; *) ok ;; esac
 
+# 5b. union-merged base merge (forge#3969): both sides append a different line to a union-attributed registry.
+# merge=union makes the same-spot append conflict-free, so the sync merge has no resolution edit and stays BASE_SYNC_ONLY.
+mkrepo; g checkout -q main; printf 'e1\ne2\n' > "$W/list.txt"; g add -A >/dev/null; g commit -q -m "registry" >/dev/null; g push -q origin main
+g checkout -q feat; g merge -q --no-ff -m "sync" main >/dev/null 2>&1
+printf 'list.txt merge=union\n' > "$W/.git/info/attributes"
+printf 'e-pr\n' >> "$W/list.txt"; g add -A >/dev/null; g commit -q -m "pr appends" >/dev/null; R=$(sha HEAD); panel "$R"
+g checkout -q main; printf 'e-base\n' >> "$W/list.txt"; g add -A >/dev/null; g commit -q -m "base appends" >/dev/null; g push -q origin main; g checkout -q feat; g fetch -q origin
+if g merge -q --no-ff -m "merge main" origin/main >/dev/null 2>&1; then
+  HEAD=$(sha HEAD)
+  grep -qxF e-pr "$W/list.txt" && grep -qxF e-base "$W/list.txt" && ok || bad "union-merged base merge lost a line"
+  expect "union-merged base merge" "BASE_SYNC_ONLY $R" 1
+else
+  bad "union-merged base merge should be conflict-free"
+fi
+# same union merge, then hand-edited before the merge commit: the mechanical re-merge no longer matches -> not BASE_SYNC_ONLY
+g reset -q --hard "$R"; g merge -q --no-ff --no-commit origin/main >/dev/null 2>&1; printf 'e-hand\n' >> "$W/list.txt"; g add -A >/dev/null; g commit -q -m "merge main (edited)" >/dev/null; HEAD=$(sha HEAD)
+out=$(run_rd | sed -n 1p); case "$out" in BASE_SYNC_ONLY*) bad "hand-edited union merge must not be BASE_SYNC_ONLY (got $out)" ;; *) ok ;; esac
+rm -f "$W/.git/info/attributes"
+
 # 6. mixed: base merge plus a regular commit -> DELTA
 mkrepo; R=$(sha HEAD); panel "$R"; base_advance b.txt "b1"; g merge -q --no-ff -m "merge main" origin/main >/dev/null 2>&1; commit pr.txt "pr2" "pr2"; HEAD=$(sha HEAD)
 expect "base merge plus regular commit" "DELTA $R..$HEAD" 1
