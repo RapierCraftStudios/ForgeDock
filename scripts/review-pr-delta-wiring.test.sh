@@ -238,7 +238,7 @@ case "$(p4 FULL 'security auth')" in "PANEL_STATUS: SHORTFALL (ACTUAL_AGENT_COUN
 # the 3C pending-agent count and the staging 6.75 delivery count carry the same block lookahead as Phase 4
 STAGING="$ROOT/commands/review-pr-staging.md"
 for spec in "$SPEC" "$STAGING"; do
-  n=$(grep -F 'count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->)<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->' "$spec" | wc -l)
+  n=$(grep -F 'count "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->[\\s\\S]*<!-- REVIEW-FINDINGS-END -->)<!-- FORGE:REVIEW-AGENT:${AGENT_DOMAIN} -->' "$spec" | wc -l)
   want=2; [ "$spec" = "$STAGING" ] && want=1
   [ "$n" -eq "$want" ] && ok || bad "$(basename "$spec"): $n delivery counts carry the findings-block lookahead, want $want"
   if grep -E 'count "\^<!-- FORGE:REVIEW-AGENT:\$\{AGENT_DOMAIN\}' "$spec" >/dev/null; then bad "$(basename "$spec"): header-only delivery regex remains"; else ok; fi

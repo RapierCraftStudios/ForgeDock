@@ -262,9 +262,11 @@ do_extract() {
     fi
     # Panel integrity: a trusted agent comment for the primary head counts as delivered only with a findings block (it may be empty).
     # Computed from the RAW agent bodies, never from bodies_at, so a synthesized block cannot mask a missing agent block.
-    AGENTS_WITHOUT_BLOCK=$(printf '%s\n' "$CARRIER_BODIES_PRIMARY" | jq -r 'select(type == "string")
-        | select((contains("<!-- REVIEW-FINDINGS-START -->") and contains("<!-- REVIEW-FINDINGS-END -->")) | not)
-        | capture("^<!-- FORGE:REVIEW-AGENT:(?<d>[a-z-]+) -->").d // empty' 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//')
+    # Per domain: a later (re-dispatched) comment with a complete block clears an earlier block-less one.
+    AGENTS_WITHOUT_BLOCK=$(printf '%s\n' "$CARRIER_BODIES_PRIMARY" | jq -rs '[.[] | select(type == "string")
+        | {d: (capture("^<!-- FORGE:REVIEW-AGENT:(?<d>[a-z-]+) -->").d // empty),
+           ok: (contains("<!-- REVIEW-FINDINGS-START -->") and contains("<!-- REVIEW-FINDINGS-END -->"))}]
+        | group_by(.d) | map(select(any(.[]; .ok) | not) | .[0].d) | .[]' 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//')
     # Match to the closing ` -->`, never `[^>]+`: a `>` or `->` inside a title must not drop the finding (#3897).
     FINDINGS=$(printf '%s\n' "$SOURCE_BODIES" | jq -r 'scan("<!-- FINDING:(.+?) -->") | .[0]' 2>/dev/null)
     # Fail closed when a raw marker did not parse: a lost finding must never read as a clean review.
@@ -1407,7 +1409,7 @@ do_integrity() {
     ACTUAL_AGENT_DOMAINS=""
     if [ -n "$TRUSTED_SCRIPT" ]; then
         ACTUAL_AGENT_DOMAINS=$(printf '%s' "$COMMENTS_JSON" \
-            | bash "$TRUSTED_SCRIPT" bodies "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->)<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->" 2>/dev/null \
+            | bash "$TRUSTED_SCRIPT" bodies "^(?=[\\s\\S]*<!-- REVIEW-FINDINGS-START -->[\\s\\S]*<!-- REVIEW-FINDINGS-END -->)<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->" 2>/dev/null \
             | jq -rs '[.[] | scan("^<!-- FORGE:REVIEW-AGENT:([a-z-]+) -->") | .[0]] | unique | join(", ")' 2>/dev/null || echo "")   # unresolvable => empty => count 0 (degraded, fail closed)
     fi
     # No `|| echo 0` fallback after grep -c: it always prints a count (0 on no match) even though it exits 1, so a fallback would double-count to "0\n0".

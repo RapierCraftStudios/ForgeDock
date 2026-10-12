@@ -295,6 +295,16 @@ has "mixed: block-less agent listed" "AGENTS_WITHOUT_BLOCK=security"
 lacks "mixed: block-delivering agent not listed" "AGENTS_WITHOUT_BLOCK=auth"
 lacks "mixed: block-delivering agent not listed (joined)" "security auth"
 lacks "mixed: not clean" "CLEAN_STRUCTURED=true"
+# SEC-1: a re-dispatched agent's later complete block clears its earlier block-less comment
+reset; cm MEMBER User "$(nob security "$SHA")"; cm MEMBER User "$(agent_body security "$SHA" 'all good' '')"; flush
+run "$GOOD" extract
+lacks "redispatch: delivered domain not listed" "AGENTS_WITHOUT_BLOCK=security"
+has "redispatch: clean" "CLEAN_STRUCTURED=true"
+# SEC-2: START without END (truncated) is not delivered
+reset; cm MEMBER User "$(printf '<!-- FORGE:REVIEW-AGENT:security -->\nReviewed-SHA: %s\n<!-- REVIEW-FINDINGS-START -->\n' "$SHA")"; flush
+run "$GOOD" extract
+has "START without END: undelivered" "AGENTS_WITHOUT_BLOCK=security"
+lacks "START without END: not clean" "CLEAN_STRUCTURED=true"
 # a synthesized block must not mask a block-less raw agent comment
 reset; cm MEMBER User "$(nob security "$SHA")"
 cm MEMBER User "$(printf '<!-- REVIEW-FINDINGS-SYNTHESIZED-START -->\nclean\nReviewed-SHA: %s\n' "$SHA")"; flush
