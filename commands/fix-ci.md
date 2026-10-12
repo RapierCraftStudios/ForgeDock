@@ -312,11 +312,18 @@ echo "Failure detail: ${FAILURE_DETAIL}"
 
 ### Phase 1D: Apply targeted fix
 
-Work on the PR's head branch directly. Check out the branch in the repo root (not a worktree — we push to the existing PR head):
+Work on the PR's head in a dedicated detached worktree, never in the main checkout (it is shared with the operator and other agents). The fix is pushed to the existing PR head with `HEAD:refs/heads/...`. Create the worktree once (reuse it on later attempts) and run every fix, format, test, commit and push step from inside it (`cd "$FIX_WT"`); Phase 2A removes it on every exit path:
 
 ```bash
-git checkout "$FIX_TARGET" 2>/dev/null || git checkout -b "$FIX_TARGET" "origin/${FIX_TARGET}" 2>/dev/null
-git pull origin "$FIX_TARGET" --rebase 2>/dev/null || true
+if [ -z "${FIX_WT:-}" ] || [ ! -d "$FIX_WT" ]; then
+  FIX_WT=$(mktemp -d)
+  git -C "$REPO_PATH" fetch origin "$FIX_TARGET" \
+    && git -C "$REPO_PATH" worktree add --detach "$FIX_WT" "origin/${FIX_TARGET}" \
+    || { echo "ERROR: could not create fix worktree"; rmdir "$FIX_WT" 2>/dev/null; LOOP_STATUS="blocked"; break; }
+fi
+git -C "$FIX_WT" fetch origin "$FIX_TARGET" 2>/dev/null || true
+git -C "$FIX_WT" rebase "origin/${FIX_TARGET}" 2>/dev/null || true
+cd "$FIX_WT"
 ```
 
 **Apply fix based on failure class**:
@@ -440,13 +447,14 @@ echo "Committed fix for attempt ${ATTEMPT}"
 **Push** (normal push only — no force):
 
 ```bash
-git push origin "$FIX_TARGET" 2>&1
+git -C "$FIX_WT" push origin HEAD:"refs/heads/${FIX_TARGET}" 2>&1
 PUSH_EXIT=$?
 
 if [ "$PUSH_EXIT" -ne 0 ]; then
   echo "Push failed (exit ${PUSH_EXIT}) — attempting pull-rebase then re-push..."
-  git pull origin "$FIX_TARGET" --rebase 2>&1 && \
-    git push origin "$FIX_TARGET" 2>&1
+  git -C "$FIX_WT" fetch origin "$FIX_TARGET" 2>&1 && \
+    git -C "$FIX_WT" rebase "origin/${FIX_TARGET}" 2>&1 && \
+    git -C "$FIX_WT" push origin HEAD:"refs/heads/${FIX_TARGET}" 2>&1
   PUSH_EXIT=$?
 fi
 
@@ -476,6 +484,12 @@ After the loop exits, determine the final status and report.
 ### 2A: Determine final status
 
 ```bash
+# Remove the fix worktree on every exit path (success, failure, timeout, blocked).
+cd "$REPO_PATH"
+if [ -n "${FIX_WT:-}" ] && [ -d "$FIX_WT" ]; then
+  git -C "$REPO_PATH" worktree remove --force "$FIX_WT" 2>/dev/null || true
+fi
+
 case "$LOOP_STATUS" in
   "success")
     FINAL_STATUS="success"

@@ -116,14 +116,12 @@ async function getInvariants() {
  *    starting Claude Code (operator-set only — same process.env semantics as
  *    the gist guard above).
  *
- * 9. Main-checkout mutation guard (issue #3650) — ADVISORY by default
- *    Enforced (exit 2) only when FORGE_ENFORCE_MAIN_CHECKOUT_GIT=1. Otherwise it
- *    writes a warning to stderr and allows the call: shipped specs (fix-ci,
- *    milestone, test-gate, cleanup, rollback, recover-orphans, spec-doctor,
- *    orchestrate phase-4) still run these verbs in the main checkout on purpose,
- *    and a denial blocks the whole Bash call (their `|| true` fallbacks never run).
- *    Enforcement becomes the default once those specs use worktrees (#3873).
- *    When enforced it denies `git checkout|switch|stash|merge`, `git reset --hard`, and
+ * 9. Main-checkout mutation guard (issue #3650) — enforced by default
+ *    Enforced (exit 2) unless FORGE_ENFORCE_MAIN_CHECKOUT_GIT=0, which downgrades it
+ *    to a stderr warning (#3873). Ref-only verbs are narrowed: `git branch -d/-D/-m/-f`
+ *    is denied only for the branch checked out in the target dir, and
+ *    `git restore --staged` (index only) is allowed.
+ *    It denies `git checkout|switch|stash|merge`, `git reset --hard`, and
  *    `gh pr checkout` when the shell's cwd is the main (non-worktree) checkout
  *    (`git rev-parse --git-dir` equals `--git-common-dir`). Pipeline workers and
  *    reviewers share that tree with the operator; mutating it races with them.
@@ -589,12 +587,12 @@ async function main() {
   // forge.yaml), and `git -C <main> ...` from there is the case this rule exists for.
   const mainCheckoutViolation = checkMainCheckoutMutation(command);
   if (mainCheckoutViolation) {
-    if (process.env.FORGE_ENFORCE_MAIN_CHECKOUT_GIT === "1") {
+    if (process.env.FORGE_ENFORCE_MAIN_CHECKOUT_GIT !== "0") {
       process.stderr.write(mainCheckoutViolation);
       process.exit(2);
       return;
     }
-    // Advisory (default): several shipped specs still mutate the main checkout on purpose (#3873).
+    // Advisory only when the operator opts out with FORGE_ENFORCE_MAIN_CHECKOUT_GIT=0 (#3873).
     process.stderr.write("WARNING (advisory, not blocked): " + mainCheckoutViolation.replace(/^BLOCKED: /, ""));
   }
 
@@ -1338,12 +1336,26 @@ function mutatingGitCommand(tokens, depth = 0) {
       return opts.some((t) => t === "-b") ? null : hit("git checkout");
     case "switch":
       return opts.some((t) => t === "-c" || t === "--create") ? null : hit("git switch");
-    case "merge": case "pull": case "rebase": case "cherry-pick": case "revert": case "am": case "restore":
+    case "merge": case "pull": case "rebase": case "cherry-pick": case "revert": case "am":
       return hit(`git ${sub}`);
+    case "restore": {
+      // `restore --staged` only rewrites the index (not the working tree); anything else (or --worktree/-W) does.
+      const flag = (long, ch) => opts.some((t) => t === long || (/^-[a-zA-Z]+$/.test(t) && t.includes(ch)));
+      return flag("--worktree", "W") || !flag("--staged", "S") ? hit("git restore") : null;
+    }
     case "clean":
       return opts.some((t) => t === "-n" || t === "--dry-run") ? null : hit("git clean");
-    case "branch":
-      return opts.some((t) => /^(?:-[a-zA-Z]*[fFmMdD][a-zA-Z]*|--force|--move|--delete)$/.test(t)) ? hit("git branch") : null;
+    case "branch": {
+      // Ref-only verbs: a hit only when the delete/move/force target is the branch checked out at the
+      // target dir (resolved by the caller). `-m <new>` with one positional renames the current branch.
+      if (!opts.some((t) => /^(?:-[a-zA-Z]*[fFmMdD][a-zA-Z]*|--force|--move|--delete)$/.test(t))) return null;
+      const pos = opts.filter((t) => !t.startsWith("-"));
+      if (!pos.length) return null;
+      const moves = opts.some((t) => t === "--move" || /^-[a-zA-Z]*[mM][a-zA-Z]*$/.test(t));
+      const deletes = opts.some((t) => t === "--delete" || /^-[a-zA-Z]*[dD][a-zA-Z]*$/.test(t));
+      const branches = moves && !deletes ? (pos.length === 1 ? ["@current"] : [pos[0]]) : deletes ? pos : [pos[0]];
+      return { name: "git branch", dir, branches };
+    }
     case "reset":
       return opts.some((t) => t === "--hard" || t === "--merge" || t === "--keep") ? hit("git reset") : null;
     case "stash": {
@@ -1387,6 +1399,7 @@ function checkMainCheckoutMutation(command) {
   if (!/\b(?:git|gh)\b/.test(command)) return null;
   try {
     let offender = null;
+    let branches = null;
     let baseDir = process.cwd();
     let targetDir = baseDir;
     for (const tokens of extractCommandSegments(command)) {
@@ -1401,10 +1414,16 @@ function checkMainCheckoutMutation(command) {
         continue;
       }
       const hit = mutatingGitCommand(tokens);
-      if (hit) { offender = hit.name; targetDir = hit.dir === null ? baseDir : resolvePath(baseDir, hit.dir); break; }
+      if (hit) { offender = hit.name; branches = hit.branches ?? null; targetDir = hit.dir === null ? baseDir : resolvePath(baseDir, hit.dir); break; }
     }
     if (!offender) return null;
     if (!isMainCheckout(targetDir)) return null;
+    if (branches) {
+      // Ref-only verb: only the checked-out branch matters; unresolvable (detached HEAD, error) = allow.
+      const cur = spawnSync("git", ["-C", targetDir, "branch", "--show-current"], { encoding: "utf-8", timeout: 5000 });
+      const current = cur.status === 0 ? String(cur.stdout).trim() : "";
+      if (!current || !branches.some((b) => b === "@current" || b === current)) return null;
+    }
     // Hook is global: only protect ForgeDock-managed main checkouts (issue #1591 scoping), never unrelated repos.
     if (!existsSync(join(targetDir, "forge.yaml")) && !existsSync(join(targetDir, ".forgedock"))) return null;
     return (
@@ -1413,7 +1432,7 @@ function checkMainCheckoutMutation(command) {
       "(`git worktree list`, `git worktree add`) and use `git -C <worktree> ...`, or read code with " +
       "`git show <sha>:<path>`, `gh pr diff`, or `gh api`.\n" +
       "Operator override: set FORGE_ALLOW_MAIN_CHECKOUT_GIT=1 in the shell before starting Claude Code " +
-      "(enforcement itself is opt-in: FORGE_ENFORCE_MAIN_CHECKOUT_GIT=1).\n"
+      "(set FORGE_ENFORCE_MAIN_CHECKOUT_GIT=0 to make this advisory only).\n"
     );
   } catch {
     return null; // fail open
