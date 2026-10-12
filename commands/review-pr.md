@@ -274,7 +274,7 @@ echo "CONTEXT_FILE=$CTX"
 jq -r '.pr as $p | .lane as $l | .delta as $d | "REVIEW_SHA=\($p.review_sha)", "REVIEW_SHA_SHORT=\($p.review_sha_short)", "PR_TITLE=\($p.title)", "PR_AUTHOR=\($p.author)", "BASE=\($p.base_ref)", "HEAD=\($p.head_ref)",
   "IS_FIRST_TIME_CONTRIBUTOR=\($p.first_time_contributor)", "IS_STAGING_TO_MAIN=\($l.is_staging_to_main)", "IS_MILESTONE_TO_STAGING=\($l.is_milestone_to_staging)", "REQUIRES_FULL_BUILD=\($l.requires_full_build)",
   "MERGE_HEALTH=\(.merge_health.mergeable)", "MERGE_HEALTH_STATE=\(.merge_health.state)", "SERVICES=\(.classification.services | join(" "))", "DOMAINS=\(.classification.domains | join(" "))",
-  "CONTRACT_ISSUE=\(.contract.issue // "")", "ROSTER_TIER=\(.roster.tier)", "ROSTER_REASON=\(.roster.reason)", "SELECTED_AGENTS=\(.roster.agents | join(" "))",
+  "CONTRACT_ISSUE=\(.contract.issue // "")", "ROSTER_TIER=\(.roster.tier)", "REVIEW_DEPTH=\(.roster.review_depth)", "REVIEW_WEIGHT=\(.roster.review_weight)", "ROSTER_REASON=\(.roster.reason)", "SELECTED_AGENTS=\(.roster.agents | join(" "))",
   "REVIEW_MODE=\($d.mode)", "DELTA_FROM=\($d.from)", "CARRIED_FROM=\($d.carried_from)", "FULL_ROUNDS=\($d.full_rounds)", "TEMPLATE_SOURCE=\(.templates.source)", "TEMPLATE_BASE=\(.templates.base)"' "$CTX"
 echo "--- PHASE2_FINDINGS (2D env vars, 2E secrets, 2F SQL) ---"; jq -r '.phase2.findings[]?' "$CTX"
 echo "--- BROKEN_ASSUMPTIONS (Phase 2.5) ---"; jq -r '.broken_assumptions[]?' "$CTX"
@@ -282,7 +282,7 @@ echo "--- RISK_SIGNALS ---"; jq -r '.risk_signals | join(" ")' "$CTX"
 echo "--- CHURN_CONTEXT ---"; jq -r '.churn_context' "$CTX"
 ```
 
-Substitute each printed value into later fences as `{NAME}` (`{CONTEXT_FILE}`, `{REVIEW_SHA}`, `{BASE}`, `{HEAD}`, `{MERGE_HEALTH}`, `{MERGE_HEALTH_STATE}`, `{IS_MILESTONE_TO_STAGING}`, `{REQUIRES_FULL_BUILD}`, `{ROSTER_TIER}`, `{SELECTED_AGENTS}`, `{REVIEW_MODE}`, `{DELTA_FROM}`, `{PR_AUTHOR}`, ...) and record the services, domains and a one-or-two sentence PR scope for the summary.
+Substitute each printed value into later fences as `{NAME}` (`{CONTEXT_FILE}`, `{REVIEW_SHA}`, `{BASE}`, `{HEAD}`, `{MERGE_HEALTH}`, `{MERGE_HEALTH_STATE}`, `{IS_MILESTONE_TO_STAGING}`, `{REQUIRES_FULL_BUILD}`, `{ROSTER_TIER}`, `{SELECTED_AGENTS}`, `{REVIEW_DEPTH}`, `{REVIEW_MODE}`, `{DELTA_FROM}`, `{PR_AUTHOR}`, ...) and record the services, domains and a one-or-two sentence PR scope for the summary.
 
 - **BLOCKED stops the review** (any non-zero exit): print the blockers, return `REVIEW_RESULT: status: BLOCKED`, never skip. Typical blockers: no template source (`npx forgedock update`; never review inline) and an empty trusted `typescript.build` / `python.format` on a full-build lane.
 - `SELECTED_AGENTS` is the **effective** roster (canonical marker domains, Security always present, empty for `BASE_SYNC_ONLY`); `CHURN_CONTEXT` is a scrutiny prior substituted as `[CHURN_CONTEXT]`, not a selection input.

@@ -94,6 +94,7 @@ prep "$ROOT"
 rc_is "happy path" 0
 eq "schema" .schema_version 1; eq "status" .status OK; eq "pr number" .pr.number 7; eq "review sha" .pr.review_sha "$SHA_B"
 eq "sha7" .pr.review_sha_short "$(printf '%s' "$SHA_B" | cut -c1-7)"
+eq "review depth defaults to STANDARD" .roster.review_depth STANDARD
 eq "small tier" .roster.tier small; eq "small roster" '.roster.agents | join(" ")' security
 eq "lines" '.pr.additions + .pr.deletions' 7
 eq "first-time false" .pr.first_time_contributor false
