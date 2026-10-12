@@ -1,8 +1,9 @@
 // forge#3862: the post-build scope check replaces the size gate. These tests pin the spec contracts the
 // pieces share: no post-build route to decompose, and the architect's PLANNED_FILES format being exactly what
 // build B5.5 parses and scripts/diff-size.sh consumes.
+import { tmpDir } from "./_tmp.mjs";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -41,7 +42,7 @@ test("architect's Scope Baseline is parsed by the exact awk/sed in build B5.5", 
   const awk = /awk '(\/\^PLANNED_FILES:[^']*)'/.exec(build);
   assert.ok(awk, "build.md must carry the PLANNED_FILES awk");
   const body = "## Plan\n\n### Scope Baseline\nPLANNED_FILES:\n- a/b.md\n* `c/d.sh`\n- e/\n\nESTIMATED_DIFF_LINES: 321\n\n### Risk\n- not a file\n";
-  const dir = mkdtempSync(join(tmpdir(), "scope-"));
+  const dir = tmpDir("scope-");
   const plan = join(dir, "plan");
   const out = spawnSync("awk", [awk[1]], { input: body, encoding: "utf8" });
   assert.equal(out.status, 0);

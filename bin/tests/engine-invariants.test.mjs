@@ -6,9 +6,10 @@
  *
  * Run with: node --test bin/tests/engine-invariants.test.mjs
  */
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -24,8 +25,7 @@ const {
   checkPrecondition,
   checkAllPreconditions,
   assertCloseInvariants,
-  formatViolation,
-} = await import(INVARIANTS_PATH);
+  formatViolation } = await import(INVARIANTS_PATH);
 
 // ---------------------------------------------------------------------------
 // Minimal YAML for tests — avoids depending on yq availability in test env.
@@ -66,7 +66,7 @@ invariants:
 
 /** Write a temp forge-invariants.yaml and load it. Returns the invariant list or []. */
 function loadTestInvariants() {
-  const dir = mkdtempSync(join(tmpdir(), "fd-inv-"));
+  const dir = tmpDir("fd-inv-");
   const path = join(dir, "forge-invariants.yaml");
   writeFileSync(path, standardInvariantsYaml(), "utf-8");
   try {
@@ -112,7 +112,7 @@ describe("loadInvariants", () => {
   });
 
   it("returns empty array gracefully when yq is unavailable or YAML is malformed", () => {
-    const dir = mkdtempSync(join(tmpdir(), "fd-inv-bad-"));
+    const dir = tmpDir("fd-inv-bad-");
     const path = join(dir, "bad.yaml");
     writeFileSync(path, "this: is: not: valid: yaml: [[[\n", "utf-8");
     try {

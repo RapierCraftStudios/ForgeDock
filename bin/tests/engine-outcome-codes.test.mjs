@@ -1,7 +1,8 @@
 // forge#3833: closed outcome-code enum carried on PHASE_FAILED / blocked PHASE_COMMIT / RUN_TERMINAL.
+import { tmpDir } from "./_tmp.mjs";
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,13 +12,12 @@ import { PHASES } from "../engine/phases.mjs";
 import { parseState } from "../engine/state.mjs";
 import {
   OUTCOME_CODES, OUTCOME_CODES_VERSION, ALL_OUTCOME_CODES, UNCLASSIFIED,
-  isOutcomeCode, normalizeCode, codeForRunnerError, codeForTerminalReason,
-} from "../engine/outcome-codes.mjs";
+  isOutcomeCode, normalizeCode, codeForRunnerError, codeForTerminalReason } from "../engine/outcome-codes.mjs";
 import { SEP, trusted, jsonLines, asComments, inv, builder, remediation, remediationBody } from "./helpers/comments.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let dir;
-beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "fd-codes-")); });
+beforeEach(() => { dir = tmpDir("fd-codes-"); });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
 
 function fakeWorktreeList(text) {

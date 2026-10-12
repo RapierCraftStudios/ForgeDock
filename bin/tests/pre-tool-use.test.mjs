@@ -6,12 +6,13 @@
  *
  * Run with: node --test bin/tests/pre-tool-use.test.mjs
  */
+import { tmpDir as makeTmpDir } from "./_tmp.mjs";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, rmSync, writeFileSync as writeFileSyncTop } from "node:fs";
+import { rmSync, writeFileSync as writeFileSyncTop } from "node:fs";
 import osTop from "node:os";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -24,7 +25,7 @@ const HOOK_PATH = resolve(__dirname, "..", "hooks", "pre-tool-use.mjs");
  * @returns {string} absolute path to the managed directory
  */
 function makeManagedDir() {
-  const dir = mkdtempSync(join(osTop.tmpdir(), "fd-ptu-managed-"));
+  const dir = makeTmpDir("fd-ptu-managed-");
   writeFileSyncTop(join(dir, "forge.yaml"), "project:\n  owner: test\n  repo: test\n", "utf-8");
   return dir;
 }
@@ -84,8 +85,7 @@ function runHook(payload, opts = {}) {
     encoding: "utf-8",
     timeout: 5000,
     env: { ...process.env, NODE_OPTIONS: "" },
-    cwd: opts.cwd || DEFAULT_MANAGED_DIR,
-  });
+    cwd: opts.cwd || DEFAULT_MANAGED_DIR });
   return {
     exitCode: result.status ?? -1,
     stdout: result.stdout || "",
@@ -744,7 +744,7 @@ describe("pre-tool-use hook — subprocess", () => {
   // -------------------------------------------------------------------------
 
   it("exits 0 (no-op) for a forbidden PR base when cwd is NOT a ForgeDock-managed directory (#1591)", () => {
-    const unmanagedDir = mkdtempSync(join(osTop.tmpdir(), "fd-ptu-unmanaged-"));
+    const unmanagedDir = makeTmpDir("fd-ptu-unmanaged-");
     try {
       const { exitCode } = runHook(
         {
@@ -880,7 +880,7 @@ describe("pre-tool-use hook — gist visibility guard (#1729)", () => {
   });
 
   it("exits 0 (no-op) for gist --public in an unmanaged directory (#1729)", () => {
-    const unmanagedDir = mkdtempSync(join(osTop.tmpdir(), "fd-ptu-unmanaged-gist-"));
+    const unmanagedDir = makeTmpDir("fd-ptu-unmanaged-gist-");
     try {
       const { exitCode } = runHook(
         {
@@ -1184,7 +1184,7 @@ describe("pre-tool-use hook — filesystem-root find guard (#2034)", () => {
   });
 
   it("blocks find / even when cwd is NOT a ForgeDock-managed directory (cwd-independent, #2034)", () => {
-    const unmanagedDir = mkdtempSync(join(osTop.tmpdir(), "fd-ptu-unmanaged-find-"));
+    const unmanagedDir = makeTmpDir("fd-ptu-unmanaged-find-");
     try {
       const { exitCode, stderr } = runHook(
         {
@@ -1464,7 +1464,7 @@ describe("pre-tool-use hook — content-staging temp-path guard (#2686)", () => 
   // -- Cwd independence: like Rule 5, fires inside a git worktree with no
   //    forge.yaml/.forgedock marker (exactly where the #2672 agents ran). --
   it("blocks a fixed /tmp --body-file even in an unmanaged directory (#2686, runs before the managed-cwd gate)", () => {
-    const unmanagedDir = mkdtempSync(join(osTop.tmpdir(), "fd-ptu-unmanaged-tmp-"));
+    const unmanagedDir = makeTmpDir("fd-ptu-unmanaged-tmp-");
     try {
       const { exitCode, stderr } = runHook(
         {
@@ -1638,7 +1638,7 @@ import os from "node:os";
 describe("settings-hook — SubagentStop wiring", () => {
   let tmpDir, settingsPath;
   const before = () => {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "fd-sh-"));
+    tmpDir = makeTmpDir("fd-sh-");
     settingsPath = join(tmpDir, "settings.json");
   };
   const after = () => rmSync(tmpDir, { recursive: true, force: true });
@@ -1685,7 +1685,7 @@ describe("settings-hook — SubagentStop wiring", () => {
 describe("settings-hook — PreToolUse wiring", () => {
   let tmpDir, settingsPath;
   const before = () => {
-    tmpDir = mkdtempSync(join(os.tmpdir(), "fd-sh-ptu-"));
+    tmpDir = makeTmpDir("fd-sh-ptu-");
     settingsPath = join(tmpDir, "settings.json");
   };
   const after = () => rmSync(tmpDir, { recursive: true, force: true });
@@ -2011,7 +2011,7 @@ describe("pre-tool-use hook — dangerous rm target guard (#2856)", () => {
   // those are exactly the contexts that stall.
 
   it("fires in an UNMANAGED directory — dispatch precedes the isForgeDockManagedCwd gate (ac-2)", () => {
-    const unmanagedDir = mkdtempSync(join(osTop.tmpdir(), "fd-ptu-unmanaged-rm-"));
+    const unmanagedDir = makeTmpDir("fd-ptu-unmanaged-rm-");
     try {
       const { exitCode, stderr } = runBash(`${RM} -f /probe.txt`, { cwd: unmanagedDir });
       assert.equal(exitCode, 2, "guard must fire outside a ForgeDock-managed project");
@@ -2103,7 +2103,7 @@ describe("pre-tool-use hook — dangerous rm target guard (#2856)", () => {
 // ---------------------------------------------------------------------------
 
 describe("main-checkout mutation guard (issue #3650)", () => {
-  const root = mkdtempSync(join(osTop.tmpdir(), "fd-ptu-main-"));
+  const root = makeTmpDir("fd-ptu-main-");
   const mainDir = join(root, "main");
   const wtDir = join(root, "wt");
   const git = (cwd, ...args) =>
