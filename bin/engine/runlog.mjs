@@ -106,6 +106,13 @@ export function deriveState(events) {
       // retry re-enters remediate/decompose instead of close/build.
       case "RUN_REOPEN":
         s.terminal = false; s.terminalReason = lastCommitReason; s.outcomeCode = lastCommitCode; s.v = e.seq;
+        // forge#3862: a `decomposed` terminal whose decomposition was revoked (trusted GitHub state,
+        // checked by the engine before it appends this event) reopens at build: un-commit the
+        // phases named in `uncommit` and drop the stale handoff reason so pickPhase re-selects build.
+        if (Array.isArray(e.uncommit) && e.uncommit.length) {
+          s.committed = s.committed.filter((p) => !e.uncommit.includes(p));
+          s.terminalReason = null; s.outcomeCode = null;
+        }
         // forge#3754: a remediate that ended needs-human is re-run after a human clears the
         // label. Un-commit it (new array, no in-place mutation) so the forge#3506 resume guard
         // does not re-terminate and remediate's entryCondition re-selects it.

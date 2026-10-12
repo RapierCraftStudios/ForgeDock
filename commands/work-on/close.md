@@ -970,15 +970,17 @@ First read the build's diff size (forge#3450). `FORGE:DIFF_SIZE` is posted by `w
 
 ```bash
 # <Script resolution block, verbatim>
-DIFF_LINES="—"; DIFF_THRESHOLD="—"; SIZE_OVERRIDE_USED="no"
+DIFF_LINES="—"; REVIEW_WEIGHT="—"; SCOPE_RESULT="—"; SIZE_OVERRIDE_USED="no"
 TRUSTED_SCRIPT="${UNIVERSAL_DIR:+$UNIVERSAL_DIR/trusted-comments.sh}"
 if [ -n "$TRUSTED_SCRIPT" ] && [ -f "$TRUSTED_SCRIPT" ]; then
   _ds=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" 2>/dev/null \
     | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:DIFF_SIZE' 2>/dev/null | tail -n 1 | jq -r 'select(type == "string")' 2>/dev/null) || _ds=""
   _n=$(printf '%s\n' "$_ds" | sed -n 's/^diff_lines: *\([0-9][0-9]*\).*/\1/p' | head -n 1)
-  _t=$(printf '%s\n' "$_ds" | sed -n 's/^threshold: *\([0-9][0-9]*\).*/\1/p' | head -n 1)
+  _t=$(printf '%s\n' "$_ds" | sed -n 's/^review_weight: *\([0-9][0-9]*\).*/\1/p' | head -n 1)
+  _r=$(printf '%s\n' "$_ds" | sed -n 's/^result: *\([A-Z_]*\).*/\1/p' | head -n 1)
   [ -n "$_n" ] && DIFF_LINES="$_n"
-  [ -n "$_t" ] && DIFF_THRESHOLD="$_t"
+  [ -n "$_t" ] && REVIEW_WEIGHT="$_t"
+  [ -n "$_r" ] && SCOPE_RESULT="$_r"
   printf '%s\n' "$_ds" | grep -q '^result: *OVERRIDDEN' && SIZE_OVERRIDE_USED="yes"
 fi
 ```
@@ -1182,7 +1184,7 @@ ${DECISIONS_BLOCK}
 
 **Cost (economic scheduling)**: ${COST_DELTA_NOTE}
 
-**Diff size**: ${DIFF_LINES:-—} lines (threshold ${DIFF_THRESHOLD:-—}, override: ${SIZE_OVERRIDE_USED:-no})
+**Diff size**: ${DIFF_LINES:-—} lines (review weight ${REVIEW_WEIGHT:-—}, scope check ${SCOPE_RESULT:-—}, override: ${SIZE_OVERRIDE_USED:-no})
 
 **Pipeline completed**: ${TIMESTAMP}
 

@@ -954,7 +954,7 @@ Format: `INTEG-N|CONFIRMED|HIGH|file:line|Changed code may be unreachable: {reas
 
 ### 3A: Risk Assessment
 
-**NEVER scale review depth by line count.** A 5-line shell script processing LLM output is more dangerous than a 500-line React component.
+**Raw line count never lowers review depth, and size never blocks a PR.** A 5-line shell script processing LLM output is more dangerous than a 500-line React component, so the risk signals below decide which domains review. Size only ever ADDS depth, and only through the deterministic `review_weight` the build records in `FORGE:DIFF_SIZE` (changed lines with whitespace ignored, generated and vendored code excluded, tests weighted, plus the number of modules touched; forge#3862): a high `review_weight` (or an out-of-plan scope flag) sets `review_depth: EXTENDED`, which adds reviewers and per-file slices (Phase 3 Step 4). The Security agent and the Phase 2 hard floor are unconditional at every depth and every size.
 
 ```bash
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
@@ -1143,6 +1143,14 @@ ROSTER_SCRIPT=$(forge_resolve review-roster.sh)
 LINES=$(gh pr view "$PR_NUMBER" -R "$REPO" --json additions,deletions --jq '.additions + .deletions' 2>/dev/null)
 NFILES=$(gh pr view "$PR_NUMBER" -R "$REPO" --json changedFiles --jq '.changedFiles' 2>/dev/null)
 FIX_PR=false; SRC_SEV=""; SRC_DOM=""
+# Review depth (forge#3862): the build's latest TRUSTED FORGE:DIFF_SIZE record on the merge issue; unreadable or absent stays STANDARD
+# (extended depth only ever adds reviewers, so a failed read never narrows a roster).
+REVIEW_DEPTH=STANDARD; REVIEW_WEIGHT=""
+if printf '%s' "$MERGE_ISSUE" | grep -qE '^[0-9]+$'; then
+  _ds=$(gh api --paginate "repos/$REPO/issues/$MERGE_ISSUE/comments" --jq '[.[] | select(.body | startswith("<!-- FORGE:DIFF_SIZE")) | select((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or (.user.type == "Bot"))] | last | .body // ""' 2>/dev/null) || _ds=""
+  printf '%s\n' "$_ds" | grep -qE '^review_depth: *EXTENDED[[:space:]]*$' && REVIEW_DEPTH=EXTENDED
+  REVIEW_WEIGHT=$(printf '%s\n' "$_ds" | sed -n 's/^review_weight: *\([0-9][0-9]*\).*/\1/p' | head -n 1)
+fi
 if printf '%s' "$MERGE_ISSUE" | grep -qE '^[0-9]+$'; then
   gh issue view "$MERGE_ISSUE" -R "$REPO" --json labels --jq '[.labels[].name] | any(. == "review-finding")' 2>/dev/null | grep -qx true && FIX_PR=true
   if [ "$FIX_PR" = "true" ]; then
@@ -1159,7 +1167,7 @@ DBC=false; echo "$DIFF" | grep -qE "docker-compose.*postgres|docker-compose.*red
 ROSTER_OUT=""
 [ -n "$ROSTER_SCRIPT" ] && ROSTER_OUT=$(printf '%s\n' "$FILES" | bash "$ROSTER_SCRIPT" --files-file - --scores "$SC" --changed-lines "$LINES" --changed-files "$NFILES" \
   --fix-pr "$FIX_PR" --source-severity "$SRC_SEV" --source-domain "$SRC_DOM" --contract-flags "$CONTRACT_RISK_FLAGS" --churn "$CHURN_ESCALATION" --danger-zone "$DANGER" \
-  --thorough "$THOROUGH" --milestone "$IS_MILESTONE_TO_STAGING" --scraping-configured "$SCRAPING_ON" --database-container "$DBC" --spec-cli "$SPEC_CLI" 2>/dev/null)
+  --thorough "$THOROUGH" --milestone "$IS_MILESTONE_TO_STAGING" --scraping-configured "$SCRAPING_ON" --database-container "$DBC" --spec-cli "$SPEC_CLI" --review-depth "$REVIEW_DEPTH" 2>/dev/null)
 SELECTED_AGENTS=$(printf '%s\n' "$ROSTER_OUT" | sed -n 's/^SELECTED_AGENTS=//p')
 ROSTER_TIER=$(printf '%s\n' "$ROSTER_OUT" | sed -n 's/^TIER=//p')
 ROSTER_REASON=$(printf '%s\n' "$ROSTER_OUT" | sed -n 's/^REASON=//p')
@@ -1167,11 +1175,13 @@ if [ -z "$SELECTED_AGENTS" ]; then
   # Fail toward more agents, never fewer: script unresolved or failed means the full union below runs.
   THOROUGH=true; ROSTER_TIER=full; ROSTER_REASON="review-roster.sh unavailable: full union"
 fi
-echo "=== ROSTER TIER: $ROSTER_TIER ($ROSTER_REASON) ==="
+echo "=== ROSTER TIER: $ROSTER_TIER ($ROSTER_REASON) === REVIEW_DEPTH: $REVIEW_DEPTH review_weight: ${REVIEW_WEIGHT:-unknown} ==="
 echo "=== ROSTER: $SELECTED_AGENTS ==="
 gh pr comment "$PR_NUMBER" -R "$REPO" --body "<!-- FORGE:REVIEW_TIER tier=${ROSTER_TIER} spec=review-pr.md -->
 Reviewer roster tier \`${ROSTER_TIER}\`: ${ROSTER_REASON}. Roster: ${SELECTED_AGENTS:-full union (see below)}." 2>/dev/null || true # allowlist:check-command-side-effects
 ```
+
+**Extended review (`REVIEW_DEPTH=EXTENDED`)** <!-- Added: forge#3862 -->: the roster script has already lifted a small, medium or fix-pr roster to standard and widened the standard baseline to the top-3 domains (it only ever adds reviewers). Additionally dispatch each selected domain agent once per slice of at most `review.depth.slice_files` changed files (default 12; one slice when the PR has no more files), each slice carrying only its files' diff and the shared PR context, and merge the per-slice findings in Phase 5 (the dedup there treats the same `file:line` from two slices as one). The Security agent always reviews the whole diff, never a slice. Extended depth never skips a Phase 2 check, never weakens the Security floor, and never blocks the merge by itself; it is not a finding.
 
 When the fence falls back (empty `SELECTED_AGENTS`, tier `full`), treat `THOROUGH` as true for the "Full union dispatch" block below. The tier and reason are recorded in the `FORGE:REVIEW_TIER` marker; `FORGE:REVIEW_ROUTE` (and its Phase 5 `sha=` parse) is unchanged.
 

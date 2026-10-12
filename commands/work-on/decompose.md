@@ -147,7 +147,7 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR") | not) | {author: .user.login, body: .body}'
 ```
 
-Ignore machine-posted marker comments (`FORGE:DIFF_SIZE`, `FORGE:SIZE_OVERRIDE`) in this scan: a `FORGE:DIFF_SIZE` comment is a plan source (below), never an owner override direction. Scan non-agent comments for override signals — phrases like "do not", "do NOT", "instead", "revert", "remove this", "override", "actually", or explicit disagreement with the investigation's recommendation. If an override comment is found from a repo owner or admin (not a bot):
+Ignore machine-posted marker comments (`FORGE:DIFF_SIZE`, `FORGE:SIZE_OVERRIDE`) in this scan: they are never an owner override direction. Scan non-agent comments for override signals — phrases like "do not", "do NOT", "instead", "revert", "remove this", "override", "actually", or explicit disagreement with the investigation's recommendation. If an override comment is found from a repo owner or admin (not a bot):
 
 1. **Document the override**: Note which direction the owner is steering (e.g., "remove the feature" vs. investigation's "keep with warnings")
 2. **Re-derive sub-issue scopes**: Derive sub-issue titles, bodies, and file scope from the override direction — NOT from the original investigation recommendation. The investigation's Decomposition Assessment may list sub-issues that are now stale or contradictory with the override.
@@ -161,19 +161,7 @@ Ignore machine-posted marker comments (`FORGE:DIFF_SIZE`, `FORGE:SIZE_OVERRIDE`)
 Extract from investigation report:
 - Decomposition Assessment section: list of proposed sub-issues with titles and dependencies
 
-**Size-gate plan source** <!-- Added: forge#3450 -->: when the build's diff-size gate routed here, the investigation said no decomposition, so its assessment lists no sub-issues. Read the latest TRUSTED `FORGE:DIFF_SIZE` comment (anchored, through `scripts/trusted-comments.sh`; the Script resolution block applies) and use it when it has `result: OVER`:
-
-```bash
-# <Script resolution block, verbatim>
-set -o pipefail
-TRUSTED_SCRIPT="${UNIVERSAL_DIR:+$UNIVERSAL_DIR/trusted-comments.sh}"
-if [ -n "$TRUSTED_SCRIPT" ] && [ -f "$TRUSTED_SCRIPT" ]; then
-  SIZE_PLAN=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:DIFF_SIZE' | jq -r 'select(type == "string")' ) \
-    && echo "SIZE_PLAN_READ=ok" || echo "SIZE_PLAN_READ=FAILED"
-else echo "SIZE_PLAN_READ=FAILED"; fi
-```
-
-A `FAILED` read or a comment without `result: OVER` means there is no size-gate plan (the assessment rules below then apply unchanged). Its `### Split Proposal` lines (`- **{title}** — {files}`) are the proposed sub-issues, in dependency order, for Phase D2. <!-- Added: forge#3573 --> A line may end with `— wip: {REF}@{SHA} (git checkout {SHA} -- {files})` (the durable staged hunks build B5.5 pushed to `forge/wip/{NUMBER}`), or `— patch: {PATH}` when the push failed and a patch file was written. Parse that per-seam reference as `WIP_REF_{N}` for Phase D2/D3. A line without one (or `wip: unavailable`) means no hunks were persisted; behaviour is unchanged.
+**Planning-time only** <!-- Added: forge#3862 -->: decompose runs only from the investigation's Decomposition Assessment (`**YES**`, which requires separable pieces: independent modules or services, no shared files, no ordering dependency, each independently testable). There is no post-build route into this skill: build never discards a finished diff and never hands one here, so the assessment is the only plan source and there are no persisted staged hunks to reuse.
 - Milestone (from issue metadata)
 - Priority label (P0/P1/P2) from issue labels
 
@@ -200,7 +188,7 @@ If `PARENT_REF` is non-empty → BLOCKED, blocker: "Issue #{NUMBER} is a sub-iss
 
 **Guard 2 — investigation report present**: If the FORGE:INVESTIGATOR comment is absent → BLOCKED, blocker: "No investigation report found — run investigate first".
 
-**Guard 3 — decomposition plan present**: If the investigation report has no Decomposition Assessment section, OR the assessment does not list any sub-issues, AND there is no trusted `FORGE:DIFF_SIZE` comment with `result: OVER` and a `### Split Proposal` (the size-gate plan source from D0) → BLOCKED, blocker: "Investigation report has no decomposition plan — re-run investigate with explicit decomposition scope".
+**Guard 3 — decomposition plan present**: If the investigation report has no Decomposition Assessment section, OR the assessment does not list any sub-issues → BLOCKED, blocker: "Investigation report has no decomposition plan — re-run investigate with explicit decomposition scope".
 
 **Resume check**:
 
@@ -243,14 +231,14 @@ If `GIST_URLS` is non-empty, a `## Prior Investigation` section will be appended
 
 ## Phase D2: Design Sub-Issues
 
-From the Decomposition Assessment in the investigation report (adjusted for any owner override detected in Phase D0), or, when the assessment lists none, from the size-gate `### Split Proposal` in the trusted `FORGE:DIFF_SIZE` comment (Phase D0), extract:
-1. Sub-issue titles (in dependency order — independent issues first). **Packing** <!-- Added: forge#3786 -->: do not create one sub-issue per seam. Bin-pack the seams into the fewest sub-issues whose estimate (code plus tests) is at or under 0.8 x threshold, i.e. `max(2, ceil(ESTIMATED_DIFF_LINES / (0.8 x threshold)))` sub-issues, keeping related seams together; each sub-issue body lists the seams it covers. Migration-ordering seams may stay separate. **Budget check** <!-- Added: forge#3790 -->: reject or repack any plan item whose estimate (code plus tests) is over 0.8 x threshold: split it along a real seam or merge-and-resplit until each item fits. A seam that can't fit (one cohesive module plus its tests) stays as one item, and its body states that explicitly with the estimate; build B5.5 then treats a cohesive overage as `COHESIVE` instead of stranding it. Never inflate the sub-issue count to force a fit. Record each item's estimate as `ESTIMATED_DIFF_LINES` for Phase D3. The parent is a terminal tracker and builds nothing, so every packed item, including the first, becomes a sub-issue (N packed items give N sub-issues)
+From the Decomposition Assessment in the investigation report (adjusted for any owner override detected in Phase D0), extract:
+1. Sub-issue titles (in dependency order — independent issues first). **Separability**: one sub-issue per separable piece the assessment names (independent module or service, no file shared with another piece, no ordering dependency). Re-check each pair of pieces: if two pieces edit the same file or one needs the other's output first, they are NOT separable, so merge them into one sub-issue rather than creating dependent siblings on the same file. Do not split a cohesive change (one new module plus its tests) to hit a size, and never inflate the sub-issue count. Record each item's estimate as `ESTIMATED_DIFF_LINES` for Phase D3 (a scope baseline, not a limit). The parent is a terminal tracker and builds nothing, so every item, including the first, becomes a sub-issue (N items give N sub-issues)
 2. Dependencies between sub-issues (if issue B depends on issue A, A is created first)
 3. Brief description for each sub-issue body
 
 For each sub-issue, prepare:
 - **Title**: from investigation report's proposed sub-issue title (re-derived from the owner override when one was detected), including the final `{fix|feat|refactor}: ` prefix used in Phase D3
-- **Body**: brief description of scope + `**Parent**: #{NUMBER}` + an own-line `ESTIMATED_DIFF_LINES: {N}` (the packed item's estimate, code plus tests; build B5.5 compares it with the actual diff in `FORGE:DIFF_SIZE`) + dependency note if applicable + a `## Staged Hunks` section when the Split Proposal line carries a wip ref or patch (see D3)
+- **Body**: brief description of scope + `**Parent**: #{NUMBER}` + an own-line `ESTIMATED_DIFF_LINES: {N}` (the item's estimate, code plus tests; build B5.5 uses it as the scope baseline) + dependency note if applicable
 - **Labels**: inherit priority label (P0/P1/P2) from parent; do NOT copy workflow labels
 - **Milestone**: same milestone title as parent (if parent has one)
 
@@ -340,10 +328,6 @@ Files that need changes:
 {If depends on another sub-issue: "**Depends on**: #{SUB_ISSUE_N} — {reason}"}
 ESTIMATED_DIFF_LINES: {N}
 
-{Only when this seam's Split Proposal line carries a wip ref or patch (D0); otherwise omit this section entirely:}
-## Staged Hunks
-
-The parent build's staged hunks for this seam are preserved outside the worktree: `{REF}@{SHA}`. Reuse them with `git fetch origin {REF} && git checkout {SHA} -- {files}` (wip ref), or `git apply {PATCH_PATH}` (patch file). They survive worktree cleanup.
 SUB_BODY_EOF
 ```
 

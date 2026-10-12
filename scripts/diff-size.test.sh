@@ -137,10 +137,67 @@ check "test name patterns" "$OUT" test_lines 30
 reset; gen 20 > keep.py; gen 900 > package-lock.json; git add -A
 OUT="$(run --threshold 1000)"; check "excluded not in new_lines" "$OUT" new_lines 20
 
-# existing key order is unchanged: cohesion keys sit between over= and top=
+# existing key order is unchanged: cohesion keys sit between over= and top=; review keys follow cohesive=
 reset; gen 3 > s.txt; git add -A
 KEYS="$(run | sed -n 's/^\([a-z_]*\)=.*/\1/p' | tr '\n' ' ')"
-[ "$KEYS" = "diff_lines excluded_lines threshold over new_lines test_lines cohesive_lines cohesive top " ] && ok || bad "key order ($KEYS)"
+[ "$KEYS" = "diff_lines excluded_lines threshold over new_lines test_lines cohesive_lines cohesive ws_lines review_weight modules top " ] && ok || bad "key order ($KEYS)"
+
+# review_weight (forge#3862): a pure re-indent counts about 0, whatever its raw size
+reset; mkdir -p svc; awk 'BEGIN{for(i=0;i<120;i++) print "if x:\n    y" i}' > svc/h.py; git add -A; git commit -qm h; git push -q origin feat:staging 2>/dev/null
+awk 'BEGIN{for(i=0;i<120;i++) print "if x:\n        y" i}' > svc/h.py; git add -A
+OUT="$(run)"; check "re-indent raw diff_lines" "$OUT" diff_lines 240; check "re-indent ws_lines" "$OUT" ws_lines 0
+check "re-indent review_weight" "$OUT" review_weight 0; check "re-indent modules" "$OUT" modules 0
+git reset -q --hard origin/staging
+
+# tests are weighted (default 50%, configurable); ws_lines is unweighted
+reset; mkdir -p src tests; gen 100 > src/m.py; gen 200 > tests/test_m.py; git add -A
+OUT="$(run)"; check "weight ws_lines" "$OUT" ws_lines 300; check "weight default 50" "$OUT" review_weight 200
+OUT="$(run --test-weight 25)"; check "weight 25" "$OUT" review_weight 150
+OUT="$(run --test-weight 0)"; check "weight 0" "$OUT" review_weight 100
+OUT="$(run --test-weight 100)"; check "weight 100" "$OUT" review_weight 300
+reset; mkdir -p src; gen 3 > src/o.py; mkdir -p tests; gen 1 > tests/test_o.py; git add -A
+OUT="$(run)"; check "weight rounds up" "$OUT" review_weight 4
+
+# generated and vendored code is excluded from review_weight and modules
+reset; gen 10 > keep.py; mkdir -p vendor generated; gen 900 > vendor/v.js; gen 900 > generated/g.js; gen 900 > package-lock.json; git add -A
+OUT="$(run)"; check "excluded ws_lines" "$OUT" ws_lines 10; check "excluded review_weight" "$OUT" review_weight 10; check "excluded modules" "$OUT" modules 1
+
+# module count: distinct directories at --module-depth
+reset; mkdir -p a/b/c a/b/d a/e f; gen 5 > a/b/c/1.py; gen 5 > a/b/d/2.py; gen 5 > a/e/3.py; gen 5 > f/4.py; gen 5 > root.py; git add -A
+OUT="$(run)"; check "modules depth 2" "$OUT" modules 4
+OUT="$(run --module-depth 1)"; check "modules depth 1" "$OUT" modules 3
+OUT="$(run --module-depth 3)"; check "modules depth 3" "$OUT" modules 5
+
+# scope diff: in-plan, out-of-plan, prefix entries, formatting noise, no baseline, overrun
+reset; mkdir -p src tests docs; gen 10 > src/a.py; gen 10 > src/b.py; gen 10 > tests/test_a.py; gen 10 > docs/x.md; git add -A
+printf '%s\n' '# plan' '- `src/a.py`' '* ./src/b.py' '' 'tests/' > "$TMP/plan"
+OUT="$(run --plan-files "$TMP/plan")"
+check "scope out_of_plan" "$OUT" scope out_of_plan; check "scope count" "$OUT" out_of_plan_count 1
+check "scope plan_files" "$OUT" plan_files 3; check "scope path" "$OUT" out_of_plan docs/x.md
+printf '%s\n' src/a.py src/b.py tests/test_a.py docs/x.md > "$TMP/plan"
+OUT="$(run --plan-files "$TMP/plan")"; check "scope ok" "$OUT" scope ok; check "scope ok count" "$OUT" out_of_plan_count 0
+printf '%s\n' 'src/a.py' > "$TMP/plan"
+OUT="$(run --plan-files "$TMP/plan")"; check "scope 3 out" "$OUT" out_of_plan_count 3
+: > "$TMP/plan"; OUT="$(run --plan-files "$TMP/plan")"; check "empty plan is no_baseline" "$OUT" scope no_baseline; check "no_baseline count" "$OUT" out_of_plan_count 0
+OUT="$(run)"; [ -z "$(val "$OUT" scope)" ] && ok || bad "scope keys absent without plan args"
+# excluded files are never out-of-plan; a path is data (glob chars, spaces) not a pattern
+reset; mkdir -p vendor; gen 5 > vendor/z.js; gen 5 > 'we ird[1].txt'; git add -A
+printf '%s\n' 'src/a.py' > "$TMP/plan"
+OUT="$(run --plan-files "$TMP/plan")"; check "excluded not out-of-plan" "$OUT" out_of_plan_count 1; check "path with space and glob quoted" "$OUT" out_of_plan 'we ird[1].txt'
+printf '%s\n' '*.txt' > "$TMP/plan"; OUT="$(run --plan-files "$TMP/plan")"; check "plan entry is not a glob" "$OUT" out_of_plan_count 1
+# overrun against the plan estimate (ws-insensitive actual)
+reset; gen 500 > big.py; git add -A
+OUT="$(run --estimate 200)"; check "overrun 2.5x" "$OUT" overrun true; check "overrun estimate" "$OUT" estimate 200; check "overrun no plan file is no_baseline" "$OUT" scope no_baseline
+OUT="$(run --estimate 250)"; check "at 2x not overrun" "$OUT" overrun false
+OUT="$(run --estimate 200 --overrun-pct 300)"; check "custom overrun pct" "$OUT" overrun false
+OUT="$(run --estimate 0)"; check "estimate 0 is no estimate" "$OUT" overrun false
+# unreadable plan fails closed; bad numeric args are usage errors
+OUT="$(bash "$S" --repo-path "$TMP/w" --base staging --plan-files "$TMP/none" 2>/dev/null)"; rc=$?
+{ [ "$rc" = 2 ] && [ -z "$OUT" ]; } && ok || bad "unreadable plan (rc=$rc)"
+for bad_arg in "--test-weight x" "--module-depth 0" "--overrun-pct -1" "--estimate x"; do
+  OUT="$(bash "$S" --repo-path "$TMP/w" --base staging $bad_arg 2>/dev/null)"; rc=$?
+  { [ "$rc" = 2 ] && [ -z "$OUT" ]; } && ok || bad "bad arg $bad_arg (rc=$rc)"
+done
 
 # fail closed: bad repo path, bad base, bad threshold, unknown arg, missing base
 OUT="$(bash "$S" --repo-path "$TMP/nope" --base staging 2>/dev/null)"; rc=$?
