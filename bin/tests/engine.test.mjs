@@ -3139,6 +3139,19 @@ describe("runIssue — forge#3511: --retry reopens an engine-error run", () => {
       assert.equal(pickPhase(s).id, "decompose");
     });
 
+    it("revoked decomposition -> reopen(uncommit) -> engine-error -> reopen resumes build, not decompose", () => {
+      const log = [start, commit(2, "investigate"), commit(3, "build", { terminalReason: "decomposed" }),
+        commit(4, "decompose", { terminalReason: "decomposed" }),
+        { seq: 5, event: "RUN_TERMINAL", reason: "decomposed" },
+        { seq: 6, event: "RUN_REOPEN", uncommit: ["build", "decompose"] }];
+      assert.equal(deriveState(log).terminalReason, null);
+      const s = deriveState([...log, crash(7), reopen(8)]);
+      assert.equal(s.terminalReason, null);
+      assert.equal(s.outcomeCode, null);
+      assert.equal(s.terminal, false);
+      assert.equal(pickPhase(s)?.id, "build");
+    });
+
     it("reopen without a prior handoff still yields null", () => {
       const s = deriveState([start, commit(2, "investigate"), crash(3), reopen(4)]);
       assert.equal(s.terminalReason, null);
