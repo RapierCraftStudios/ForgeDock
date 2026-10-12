@@ -145,7 +145,7 @@ no_leak && ok "D: worktree removed" || bad "D: worktree leaked"
 
 # Scenario E: second close (issue 2) with an OPEN rolling PR: appends on top of the first entry, no new PR
 mkblock() { printf '%s\n' "$BLOCK" | perl -pe "s/(?<!\\\$)\\{GH_REPO\\}/o\\/r/g; s/(?<!\\\$)\\{NUMBER\\}/$1/g; s/(?<!\\\$)\\{PR_NUMBER\\}/$2/g; s/(?<!\\\$)\\{GH_FLAG\\}/-R o\\/r/g" > "$TMP/block.sh"; }
-sed -i 's#"api repos/o/r/issues/1/comments")#"api repos/o/r/issues/"*"/comments")#' "$TMP/bin/gh"
+sed -i.bak 's#"api repos/o/r/issues/1/comments")#"api repos/o/r/issues/"*"/comments")#' "$TMP/bin/gh"
 git -C "$TMP/origin.git" update-ref -d refs/heads/docs/dossier-rolling
 mkblock 1 2; run_block
 FIRST=$(git -C "$TMP/origin.git" rev-parse refs/heads/docs/dossier-rolling)
@@ -167,7 +167,7 @@ git clone -q "$TMP/origin.git" "$TMP/other" && git -C "$TMP/other" checkout -q d
   && printf '\n## Entry concurrent close\n' >> "$TMP/other/devdocs/modules/m.md" \
   && git -C "$TMP/other" commit -q -am concurrent && git -C "$TMP/other" push -q origin docs/dossier-rolling
 IEOF
-sed -i 's#^  "pr view")#  "pr view") [ -n "${GH_INTERLEAVE:-}" ] \&\& [ ! -f "$TMP/interleaved" ] \&\& { touch "$TMP/interleaved"; TMP="$TMP" bash "$TMP/interleave.sh" >/dev/null 2>\&1; }#' "$TMP/bin/gh"
+sed -i.bak 's#^  "pr view")#  "pr view") [ -n "${GH_INTERLEAVE:-}" ] \&\& [ ! -f "$TMP/interleaved" ] \&\& { touch "$TMP/interleaved"; TMP="$TMP" bash "$TMP/interleave.sh" >/dev/null 2>\&1; }#' "$TMP/bin/gh"
 export TMP
 git -C "$TMP/origin.git" update-ref -d refs/heads/docs/dossier-rolling
 mkblock 1 2; run_block
