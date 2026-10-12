@@ -419,7 +419,7 @@ The `REMAINING_AFTER` variable is passed to Phase C2 to decide whether to close.
 
 **Never touch the main checkout**: `$REPO_PATH` is the operator's main checkout. This phase never writes, stages or commits there (no git add or git commit against it, no directory change into it). `index.yaml` is only read from it. The dossier edit is made in a temporary detached worktree off `origin/${DOSSIER_BASE}`, committed on the single rolling branch `docs/dossier-rolling`, pushed, and carried by ONE rolling PR (reviewed path to the base branch); the temporary worktree is always removed (EXIT trap). Every failure logs `Phase C1.7: skipped - <reason>` and continues.
 
-**One rolling PR, not one per issue**: every close appends its entry to the same branch. When an open PR already exists for `docs/dossier-rolling`, the temporary worktree is based on that branch head, so entries are serial appends on one history and never conflict with each other; the push is a fast-forward under `--force-with-lease`. When no open PR exists (first run, or the previous rolling PR merged), the worktree is based on `origin/${DOSSIER_BASE}` and the branch is reset from it, so a stale remote copy of an already-merged rolling branch is never built upon. The rolling PR is handed to the normal review/merge gate in Step 4 (never a raw `gh pr merge` from this phase), so dossier entries land without a human merge. `/cleanup dossiers` folds any legacy per-issue `docs/dossier-<N>` PRs into the rolling PR.
+**One rolling PR, not one per issue**: every close appends its entry to the same branch. When an open PR already exists for `docs/dossier-rolling`, the temporary worktree is based on that branch head, so entries are serial appends on one history and never conflict with each other; the push is a fast-forward under `--force-with-lease` leased on the SHA the worktree was built on, so a concurrent close rejects the push and the block retries (up to 3 attempts) on the new head instead of overwriting its entry. When no open PR exists (first run, or the previous rolling PR merged), the worktree is based on `origin/${DOSSIER_BASE}` and the branch is reset from it, so a stale remote copy of an already-merged rolling branch is never built upon. The rolling PR is handed to the normal review/merge gate in Step 4 (never a raw `gh pr merge` from this phase), so dossier entries land without a human merge. `/cleanup dossiers` folds any legacy per-issue `docs/dossier-<N>` PRs into the rolling PR.
 
 **Skip if**: `{PR_NUMBER}` is empty (investigation / decomposed / invalid terminals — `TERMINAL_STATE` is not `merged`) OR `$REPO_PATH` is unset OR `devdocs/index.yaml` does not contain a `modules:` section OR no PR files match any module glob OR no `origin` remote / no push rights / worktree creation fails / PR creation fails (each logged as `Phase C1.7: skipped - <reason>`).
 
@@ -496,13 +496,17 @@ fi
 # Rolling branch: build on the open rolling PR's head when there is one, else on the base tip.
 DOSSIER_FROM="origin/${DOSSIER_BASE}"
 DOSSIER_PUSHED=0
+DOSSIER_BASE_SHA=""   # the remote tip this attempt's worktree is built on: the push lease value (empty = branch must not exist)
 DOSSIER_PR_URL=$(gh pr list {GH_FLAG} --head "$DOSSIER_BRANCH" --base "${DOSSIER_BASE}" --state open --json url --jq '.[0].url // empty' 2>/dev/null || echo "")
 if [ -n "$DOSSIER_PR_URL" ] \
    && git -C "${REPO_PATH}" fetch -q origin "+refs/heads/${DOSSIER_BRANCH}:refs/remotes/origin/${DOSSIER_BRANCH}" >/dev/null 2>&1; then
   DOSSIER_FROM="origin/${DOSSIER_BRANCH}"
+  DOSSIER_BASE_SHA=$(git -C "${REPO_PATH}" rev-parse "$DOSSIER_FROM" 2>/dev/null || echo "")
   echo "Phase C1.7: appending on top of open rolling dossier PR ${DOSSIER_PR_URL}"
 else
   DOSSIER_PR_URL=""
+  # No open PR: a stale remote copy of a merged/abandoned rolling branch may exist; lease on the tip seen NOW, not at push time.
+  DOSSIER_BASE_SHA=$(git -C "${REPO_PATH}" ls-remote origin "refs/heads/${DOSSIER_BRANCH}" 2>/dev/null | cut -f1 | head -n 1)
 fi
 DOSSIER_TMP=$(mktemp -d "${TMPDIR:-/tmp}/forge-dossier-{NUMBER}.XXXXXX" 2>/dev/null)
 if [ -z "$DOSSIER_TMP" ] || ! git -C "${REPO_PATH}" worktree add --detach "$DOSSIER_TMP" "$DOSSIER_FROM" >/dev/null 2>&1; then
@@ -627,13 +631,13 @@ elif [ -n "$DOSSIER_TMP" ] && [ -n "$DOSSIER_UPDATED_MODULES" ]; then
     echo "Phase C1.7: skipped - cannot create branch ${DOSSIER_BRANCH}"
   elif ! git -C "$DOSSIER_TMP" commit -s -q -m "docs(dossier): append entry for PR #{PR_NUMBER} (#${NUMBER})" 2>/dev/null; then
     echo "Phase C1.7: skipped - commit failed in temporary worktree"
-  elif { DOSSIER_REMOTE_SHA=$(git -C "$DOSSIER_TMP" ls-remote origin "refs/heads/${DOSSIER_BRANCH}" 2>/dev/null | cut -f1 | head -n 1); \
-         ! git -C "$DOSSIER_TMP" push -u --force-with-lease="refs/heads/${DOSSIER_BRANCH}:${DOSSIER_REMOTE_SHA}" origin "$DOSSIER_BRANCH" >/dev/null 2>&1; }; then
-    # Pipeline-owned branch: with an open rolling PR this is a fast-forward on its head; otherwise a stale remote
-    # copy (merged or abandoned rolling branch) is overwritten under an explicit lease on the SHA just read from the remote
-    # (empty SHA = branch must not exist), so a stale local remote-tracking ref can never wedge the push.
-    # Never a bare --force. A concurrent close that pushed first rejects the lease: logged skip, non-blocking.
-    echo "Phase C1.7: skipped - push of ${DOSSIER_BRANCH} failed (no push rights, branch protection, or lease rejected)"
+  elif ! git -C "$DOSSIER_TMP" push -u --force-with-lease="refs/heads/${DOSSIER_BRANCH}:${DOSSIER_BASE_SHA}" origin "$DOSSIER_BRANCH" >/dev/null 2>&1; then
+    # Pipeline-owned branch: the lease is the SHA this worktree was BUILT on (DOSSIER_BASE_SHA, recorded before the
+    # worktree was created), never one read at push time: a concurrent close that pushed in between rejects the lease
+    # instead of being overwritten and losing its entry. Never a bare --force. A rejected push is retried by
+    # re-running the whole block (fresh fetch, entry rebuilt on the new head), up to DOSSIER_MAX_ATTEMPTS attempts.
+    DOSSIER_RETRY=1
+    echo "Phase C1.7: push of ${DOSSIER_BRANCH} failed on attempt ${DOSSIER_ATTEMPT:-1} (no push rights, branch protection, or lease rejected)"
   else
     DOSSIER_PUSHED=1
     # Reuse the open rolling PR (resolved before the worktree was created); create it only when none is open.
@@ -654,6 +658,12 @@ fi
 # Always remove the temporary worktree (non-fatal); the main checkout was never modified.
 _dossier_cleanup
 
+# Rejected push with attempts left: return so the driver below re-runs the block on the new remote head.
+if [ "${DOSSIER_RETRY:-0}" = "1" ] && [ "${DOSSIER_ATTEMPT:-1}" -lt "${DOSSIER_MAX_ATTEMPTS:-3}" ]; then
+  return 0
+fi
+[ "${DOSSIER_RETRY:-0}" = "1" ] && echo "Phase C1.7: skipped - push of ${DOSSIER_BRANCH} failed after ${DOSSIER_ATTEMPT:-1} attempt(s)"
+
 if [ -n "$DOSSIER_PR_URL" ]; then
   echo "DOSSIER_PR_URL=${DOSSIER_PR_URL}"
   gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:DOSSIER_UPDATED -->
@@ -668,7 +678,12 @@ else
 fi
 }
 
-_dossier_run
+DOSSIER_MAX_ATTEMPTS=3
+for DOSSIER_ATTEMPT in $(seq 1 "$DOSSIER_MAX_ATTEMPTS"); do
+  DOSSIER_RETRY=0
+  _dossier_run
+  [ "${DOSSIER_RETRY:-0}" = "1" ] || break
+done
 _dossier_cleanup
 trap - EXIT
 ```

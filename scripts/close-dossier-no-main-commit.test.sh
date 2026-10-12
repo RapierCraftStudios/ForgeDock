@@ -40,6 +40,8 @@ ADD_LN=$(printf '%s\n' "$C17" | grep -n 'worktree add --detach' | head -1 | cut 
 TRAP_LN=$(printf '%s\n' "$C17" | grep -nE "^\s*trap .*EXIT" | head -1 | cut -d: -f1)
 [ -n "$ADD_LN" ] && [ -n "$TRAP_LN" ] && [ "$TRAP_LN" -gt "$ADD_LN" ] && ok "EXIT trap registered after worktree add" || bad "EXIT trap must follow worktree add"
 grep -q 'force-with-lease' <<< "$C17" && ok "C1.7 pushes with --force-with-lease" || bad "C1.7 missing force-with-lease"
+grep -qF 'force-with-lease="refs/heads/${DOSSIER_BRANCH}:${DOSSIER_BASE_SHA}"' <<< "$C17" && ok "C1.7 lease is the SHA the worktree was built on" || bad "C1.7 lease is not DOSSIER_BASE_SHA"
+printf '%s\n' "$C17" | grep -E 'ls-remote' | grep -qv 'DOSSIER_BASE_SHA=' && bad "C1.7 reads the lease value at push time (ls-remote outside the build-time capture)" || ok "C1.7 reads the lease only at build time"
 grep -qE 'push .*--force( |$)' <<< "$C17" && bad "C1.7 uses bare --force" || ok "C1.7 has no bare --force"
 grep -q 'gh pr list' <<< "$C17" && ok "C1.7 checks for an existing open PR" || bad "C1.7 missing gh pr list"
 grep -q 'docs/dossier-rolling' <<< "$C17" && ok "C1.7 uses the single rolling branch" || bad "C1.7 missing docs/dossier-rolling"
@@ -157,6 +159,27 @@ ENTRIES=$(git -C "$TMP/origin.git" show refs/heads/docs/dossier-rolling:devdocs/
 grep -q '^gh pr create' "$GH_LOG" && bad "E: a second PR was created" || ok "E: no second PR created (rolling PR reused)"
 grep -q '^DOSSIER_PR_URL=https://example.invalid/o/r/pull/9' "$TMP/out.log" && ok "E: hand-off URL is the existing rolling PR" || bad "E: wrong hand-off URL"
 main_untouched && no_leak && ok "E: main untouched and worktree removed" || bad "E: main modified or worktree leaked"
+
+# Scenario F: interleaved close. A concurrent close pushes its entry AFTER this close built its worktree and BEFORE its push.
+# The lease (build-time SHA) must reject our push; the block must retry on the new head so BOTH entries survive.
+cat > "$TMP/interleave.sh" <<'IEOF'
+git clone -q "$TMP/origin.git" "$TMP/other" && git -C "$TMP/other" checkout -q docs/dossier-rolling \
+  && printf '\n## Entry concurrent close\n' >> "$TMP/other/devdocs/modules/m.md" \
+  && git -C "$TMP/other" commit -q -am concurrent && git -C "$TMP/other" push -q origin docs/dossier-rolling
+IEOF
+sed -i 's#^  "pr view")#  "pr view") [ -n "${GH_INTERLEAVE:-}" ] \&\& [ ! -f "$TMP/interleaved" ] \&\& { touch "$TMP/interleaved"; TMP="$TMP" bash "$TMP/interleave.sh" >/dev/null 2>\&1; }#' "$TMP/bin/gh"
+export TMP
+git -C "$TMP/origin.git" update-ref -d refs/heads/docs/dossier-rolling
+mkblock 1 2; run_block
+sleep 1
+mkblock 3 4; run_block GH_INTERLEAVE=1 GH_PR_LIST_URL=https://example.invalid/o/r/pull/9; RC=$?
+FIN=$(git -C "$TMP/origin.git" show refs/heads/docs/dossier-rolling:devdocs/modules/m.md 2>/dev/null)
+[ -f "$TMP/interleaved" ] && ok "F: concurrent push fired between build and push" || bad "F: interleave did not fire (vacuous)"
+grep -q 'push of docs/dossier-rolling failed on attempt 1' "$TMP/out.log" && ok "F: stale lease rejected the first push" || bad "F: first push was not rejected (concurrent entry overwritten?)"
+grep -q '^## Entry concurrent close' <<< "$FIN" && ok "F: concurrent entry survived" || bad "F: concurrent entry was overwritten and lost"
+[ "$(grep -c '^## Entry' <<< "$FIN")" -eq 3 ] && ok "F: retry rebuilt our entry on the new head (3 entries)" || bad "F: expected 3 entries, found $(grep -c '^## Entry' <<< "$FIN")"
+[ "$RC" -eq 0 ] && grep -q '^DOSSIER_PR_URL=https' "$TMP/out.log" && ok "F: retry succeeded and handed off the PR" || bad "F: retry did not complete (rc=$RC)"
+main_untouched && no_leak && ok "F: main untouched and worktree removed" || bad "F: main modified or worktree leaked"
 fi
 
 echo "Passed: $PASS  Failed: $FAIL"
