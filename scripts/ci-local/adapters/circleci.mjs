@@ -83,6 +83,7 @@ export function plan(a) {
         // forge#4040 (SEC-6): secondary containers never use host networking. Each runs on a per-job docker network and only
         // its declared ports (a `ports:` list, else the image's well-known default) are published on 127.0.0.1.
         if (Array.isArray(exec.docker) && exec.docker.length > 1) for (const d of exec.docker.slice(1)) services.push({ name: String(d.name || d.image).replace(/[^A-Za-z0-9_.-]/g, '-'), image: d.image, env: d.environment || {}, ports: declaredPorts(d), options: '' });
+        { const blind = services.filter((sv) => !sv.ports.length); if (blind.length) { def(`unknown service ports: ${blind.map((sv) => sv.image).join(', ')} (no ports: declared and no well-known default; unreachable without host networking)`); continue; } }
         const env = Object.fromEntries(Object.entries({ ...(exec.environment || {}), ...(exec.docker && exec.docker[0] ? exec.docker[0].environment || {} : {}) }).map(([k, v]) => [k, subst(v, params)]));
         const defined = new Set(Object.keys(env));
         const all = steps.map((s) => s.command).join('\n');

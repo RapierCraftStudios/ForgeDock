@@ -835,5 +835,85 @@ eq "item 15: ...without adding combos" 2 "$(printf '%s' "$MX" | jq 'length')"
 MX=$(_mx '{"include":[{"a":1},{"a":2}]}')
 eq "item 15: an include-only matrix yields one combo per entry" 2 "$(printf '%s' "$MX" | jq 'length')"
 
+
+# ------------------------------------------------------------------------------------------------ forge#4040 review fixes
+# FIX-1: widening is per changed source file (a changed test file or another selecting file must not hide an unreached one)
+r=$(blank); mkdir -p "$r/app" "$r/tests" "$r/lib"
+echo 'X = 1' > "$r/app/db.py"; echo 'Y = 1' > "$r/lib/zz.py"
+printf 'from app import db\n\ndef test_a():\n    assert db.X\n' > "$r/tests/test_user.py"
+printf 'from lib import zz\n\ndef test_b():\n    assert zz.Y\n' > "$r/tests/test_numbers.py"
+printf 'def test_other():\n    assert True\n' > "$r/tests/test_other.py"
+commit_base "$r"; echo '# c' >> "$r/app/db.py"; echo '# c' >> "$r/lib/zz.py"; echo '# t' >> "$r/tests/test_other.py"
+_imp2() { node -e "
+import('$ROOT/scripts/ci-local/scoping.mjs').then(m=>{const c=process.argv.slice(1);const s=m.makeScopeCtx({repo:'$r',baseRef:'main',from:'main',changed:c});
+const t=['tests/test_user.py','tests/test_numbers.py','tests/test_other.py'];const r=m.impactedTests(s,t);console.log(JSON.stringify({sel:r.selected,widen:r.widen}))})" "$@"; }
+R=$(_imp2 tests/test_other.py lib/zz.py)
+has "FIX-1: changed test file + lib/zz.py imported by a differently named test: that test runs" "$(printf '%s' "$R" | jq -c '.sel')" "tests/test_numbers.py"
+R=$(_imp2 tests/test_other.py app/db.py lib/zz.py)
+eq "FIX-1: every changed source file reaches a test: narrowed, no widening" "" "$(printf '%s' "$R" | jq -r '.widen')"
+echo 'W = 1' > "$r/lib/unref.py"
+R=$(_imp2 tests/test_other.py app/db.py lib/unref.py)
+has "FIX-1: one unreached source file widens the job even though others select tests" "$(printf '%s' "$R" | jq -r '.widen')" "lib/unref.py"
+eq "FIX-1: ...to the full test set" 3 "$(printf '%s' "$R" | jq '.sel | length')"
+
+# FIX-2: no expression is substituted into script text, direct or through env
+r=$(blank); mkdir -p "$r/.github/workflows"
+cat > "$r/.github/workflows/ci.yml" <<'YML'
+on: pull_request
+env:
+  WF_REF: ${{ github.head_ref }}
+jobs:
+  inj:
+    runs-on: ubuntu-latest
+    env:
+      JOB_REF: ${{ github.head_ref }}
+    steps:
+      - env:
+          STEP_REF: ${{ github.head_ref }}
+        run: |
+          echo "direct=${{ github.head_ref }}" > "$RUNNER_TEMP/d.txt"
+          echo "wf=${{ env.WF_REF }}" > "$RUNNER_TEMP/w.txt"
+          echo "job=${{ env.JOB_REF }}" > "$RUNNER_TEMP/j.txt"
+          echo 'single='${{ env.STEP_REF }}'' > "$RUNNER_TEMP/s.txt"
+          echo ${{ env.STEP_REF }} > "$RUNNER_TEMP/b.txt"
+          for f in d w j s b; do grep -q 'PWNED' "$RUNNER_TEMP/$f.txt" || { echo "value lost in $f"; exit 1; }; done
+YML
+echo s > "$r/s.txt"; commit_base "$r"
+HB='x$(touch${IFS}PWNED)'
+git -C "$r" checkout -q -b 'hostile' 2>/dev/null; echo x >> "$r/s.txt"
+P=$(bash "$S" plan --repo "$r" --base main --base-branch main --head-branch "$HB" --json --no-cache 2>/dev/null)
+CMD=$(step_field "$P" gha:ci:inj 0 '.command')
+hasnt "FIX-2: no payload text in the script (direct or via env.X)" "$CMD" 'touch'
+has "FIX-2: indirect env.X is a quoted variable reference" "$CMD" '"${FORGE_CI_EXPR_'
+OUT=$(cd "$r" && bash "$S" run --repo "$r" --base main --base-branch main --head-branch "$HB" 2>&1); RC=$?
+eq "FIX-2: direct and indirect hostile head ref reach the script as data (exit 0)" 0 "$RC" || echo "$OUT" | head -20
+[ ! -e "$r/PWNED" ] && ok || bad "FIX-2: injected command executed"
+[ ! -e "$(pwd)/PWNED" ] && ok || { bad "FIX-2: injected command executed in cwd"; rm -f "$(pwd)/PWNED"; }
+
+# FIX-3: an unknown-port secondary container is DEFERRED, not run unreachable
+r=$(blank); mkdir -p "$r/.circleci"
+cat > "$r/.circleci/config.yml" <<'YML'
+version: 2.1
+jobs:
+  test:
+    docker:
+      - image: cimg/base:stable
+      - image: example/custom-service:1.2
+    steps:
+      - run: echo with-custom
+workflows:
+  main:
+    jobs:
+      - test
+YML
+echo s > "$r/s.txt"; commit_base "$r"; echo x >> "$r/s.txt"
+P=$(plan "$r")
+eq "FIX-3: unknown service ports: job is deferred" deferred "$(state "$P" circleci:main:test)"
+has "FIX-3: the reason names the cause" "$(reason "$P" circleci:main:test)" "unknown service ports"
+: > "$FAKE_DOCKER_LOG"
+OUT=$(PATH="$T/bin:$PATH" bash "$S" run --repo "$r" --base main --base-branch main --head-branch feat 2>&1); RC=$?
+eq "FIX-3: the run passes with the job deferred" 0 "$RC"
+hasnt "FIX-3: no container was started" "$(cat "$FAKE_DOCKER_LOG")" "run -d"
+
 echo "ci-local.test.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

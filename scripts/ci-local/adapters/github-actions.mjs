@@ -118,19 +118,35 @@ function osClass(runsOn) {
 }
 function hostRuns(os) { const h = hostClass(); return os === 'linux' ? h === 'linux' || h === 'darwin' : os === h; }
 
-// forge#4040 (SEC-5): a `github.*` expression (head_ref, ref_name, event fields: attacker-influenced strings) is never
-// substituted into the script text. Its value goes into the step's environment and the script reads it as a shell
-// variable, exactly the hardening GitHub recommends. Other expressions keep text substitution.
+// forge#4040 (SEC-5, FIX-2): no expression whose value could carry attacker-influenced text is ever substituted into script
+// text. A `github.*` or `env.*` expression (env values are themselves expanded from github.* at plan time, so
+// `${{ env.X }}` is the indirect form of the same injection) is evaluated into an environment VALUE and the script gets a
+// quoted shell variable reference. Any other expression is substituted literally only when its value is inert
+// ([A-Za-z0-9_./:@+,=-]); otherwise it goes through the environment too.
+const INERT = /^[A-Za-z0-9_.\/:@+,=-]*$/;
+function quoteState(before) {
+  let q = '';
+  for (let i = 0; i < before.length; i++) {
+    const c = before[i];
+    if (q === "'") { if (c === "'") q = ''; continue; }
+    if (c === '\\') { i++; continue; }
+    if (q === '"') { if (c === '"') q = ''; continue; }
+    if (c === '"' || c === "'") q = c;
+  }
+  return q;
+}
 export function interpolateRunScript(text, ctx, env, shell) {
   if (typeof text !== 'string' || !text.includes('${{')) return text;
   const posix = !shell || /^\s*(bash|sh)(\s|$)/.test(String(shell));
   let n = 0;
-  return text.replace(/\$\{\{([\s\S]*?)\}\}/g, (_, e) => {
+  return text.replace(/\$\{\{([\s\S]*?)\}\}/g, (m, e, off, whole) => {
     const v = str(evalExpr(e, ctx));
-    if (!/(^|[^A-Za-z0-9_.])github\s*(\.|\[)/.test(e)) return v;
-    if (!posix) throw new Unsupported('github expression in a non-POSIX shell script');
+    const tainted = /(^|[^A-Za-z0-9_.])(github|env)\s*(\.|\[)/.test(e);
+    if (!tainted && INERT.test(v)) return v;
+    if (!posix) throw new Unsupported('expression with a non-inert value in a non-POSIX shell script');
     const name = `FORGE_CI_EXPR_${++n}`; env[name] = v;
-    return `\${${name}}`;
+    const q = quoteState(whole.slice(0, off));
+    return q === '"' ? `\${${name}}` : q === "'" ? `'"\${${name}}"'` : `"\${${name}}"`;
   });
 }
 
@@ -309,7 +325,7 @@ function buildJob(file, wfName, key, jid, name, job, doc, chosen, needs, wfEnv, 
       return { defer: `unknown action ${st.uses}` };
     }
     if (typeof st.run === 'string') {
-      const script = interpolateRunScript(st.run, ctx, senv, st.shell || defaults.shell);
+      const script = interpolateRunScript(st.run, { ...ctx, env: { ...ctx.env, ...senv } }, senv, st.shell || defaults.shell);
       const cwd = st['working-directory'] || defaults['working-directory'] || '.';
       const shell = st.shell || defaults.shell;
       if (!shellArgv(shell)) return { defer: `shell ${shell} is not available locally` };
