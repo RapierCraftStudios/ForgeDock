@@ -194,12 +194,18 @@ Never hand off a PR born stale. If `origin/{PR_BASE}` exists and is not an ances
 
 ```bash
 cd {WORKTREE_PATH}
+PRE_SYNC_TREE=$(git rev-parse 'HEAD^{tree}')   # the tree the build-time QUALITY_GATE PASS is bound to
 if git fetch origin {PR_BASE} >/dev/null 2>&1 && ! git merge-base --is-ancestor origin/{PR_BASE} HEAD 2>/dev/null; then
   git merge --no-edit origin/{PR_BASE} >/dev/null 2>&1 || { echo "BASE SYNC CONFLICT: resolve in this context, then git commit; on doubt git merge --abort and return BLOCKED + needs-human"; git diff --name-only --diff-filter=U; }
 fi
 ```
 
 On conflict, resolve every file, keep both sides' intent, `git add`, `git commit --no-edit`. If not resolvable with confidence: `git merge --abort`, label `needs-human`, return `REVIEW_RESULT: status: BLOCKED` with blocker "pre-handoff base sync conflict". One bounded round; resolve SHAs only after it.
+
+**Re-gate the merged head** <!-- Added: forge#3983 -->: the `FORGE:QUALITY_GATE` PASS is bound to `HEAD^{tree}` (R1.5 `--head-tree`), so a merge that changes the tree invalidates it. After the merge and any conflict resolution, compare `PRE_SYNC_TREE` with the current `HEAD^{tree}` (fail closed if either cannot be resolved):
+
+- Unchanged: do nothing; never re-gate.
+- Changed: run the scoped quality gate on the merged head here (`work-on/build/validate` V1 loop over the PR's changed files), then post the marker via validate.md V5 Step 1 "Marker-only re-gate mode" (`**Tree**` = merged `HEAD^{tree}`, `**Commands run**` = what ran). Post the real result: on FAIL, fix and re-run within the validate bounds, else add `needs-human` and return `REVIEW_RESULT: status: BLOCKED`, blocker "post-sync quality gate failed"; never post PASS without a run.
 
 ## Phase R1: Pre-Push Ancestry Guard
 
@@ -321,7 +327,7 @@ Print the block above (`status: BLOCKED`, blocker: "git push failed") and STOP.
 
 ## Phase R1.5: Phase-Trail Preflight (MANDATORY — before PR creation) <!-- Added: forge#3061 -->
 
-A PR must not be opened for work whose earlier phases were skipped. Run the deterministic verifier; it requires INVESTIGATOR, FAST_PATH and CONTRACT always, CONTEXT and ARCHITECT unless the band is TRIVIAL/INVESTIGATION, and a passing FORGE:QUALITY_GATE unless the diff is docs-only.
+A PR must not be opened for work whose earlier phases were skipped. Run the deterministic verifier; it requires INVESTIGATOR, FAST_PATH and CONTRACT always, CONTEXT and ARCHITECT unless the band is TRIVIAL/INVESTIGATION, and a passing FORGE:QUALITY_GATE unless the diff is docs-only. The PASS must be bound to the current `HEAD^{tree}`; the Pre-Handoff Base Sync re-gates a merged head, so re-dispatch here is only a backstop. <!-- Added: forge#3983 -->
 
 ```bash
 # --no-renames: list BOTH sides of a rename so a file moved into docs/ cannot hide its source path (forge#3145).
@@ -560,7 +566,7 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 
 - `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker mentions the phase trail (any blocker containing "phase trail": "phase trail unreadable" when the Phase 8 verifier exited ≥2 / 127, "phase trail incomplete…", or "auto-merge requires --issue", forge#3147): the merge gate refused or could not run. Do NOT re-run phases (nothing is missing) and do NOT attempt the manual merge below, because that would bypass the gate. Add `needs-human` and return `REVIEW_RESULT: status: BLOCKED` with the same blocker. The PR stays open and unmerged.
 
-- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "stale review" (a commit landed on the PR after the verdict, or the head moved during the CI wait, so the code that would merge is not the reviewed code): do NOT merge. The re-review bound is persisted, not remembered: count `<!-- FORGE:STALE_REREVIEW: pr={PR_NUMBER} -->` comments on the issue. If the count is 0, post that marker (with the new head SHA), run the quality gate on the new head (`Skill(skill="{FORGE_SKILL_PREFIX}quality-gate", args="<changed files> --worktree {WORKTREE_PATH}")`, which posts a fresh `FORGE:QUALITY_GATE` for the code that will actually merge), then re-invoke Phase R3 once — a review of the new head (scoped by /review-pr: full, delta or carried forward). If the count is already ≥ 1 (the head keeps moving after review), add `needs-human` and return `REVIEW_RESULT: status: BLOCKED`, blocker: "PR head keeps moving after review". <!-- forge#3188 -->
+- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "stale review" (a commit landed on the PR after the verdict, or the head moved during the CI wait, so the code that would merge is not the reviewed code): do NOT merge. The re-review bound is persisted, not remembered: count `<!-- FORGE:STALE_REREVIEW: pr={PR_NUMBER} -->` comments on the issue. If the count is 0, post that marker (with the new head SHA), re-gate the new head per the Pre-Handoff Base Sync "Re-gate the merged head" procedure (the quality-gate skill alone posts no marker), then re-invoke Phase R3 once — a review of the new head (scoped by /review-pr: full, delta or carried forward). If the count is already ≥ 1 (the head keeps moving after review), add `needs-human` and return `REVIEW_RESULT: status: BLOCKED`, blocker: "PR head keeps moving after review". <!-- forge#3188 -->
 
 - **Remediation-pending handoff (shared by the ci-gate, in-pr-fix and base-conflict cases below)** <!-- Added: forge#3541 -->: these three cases are autonomous pipeline work, not a human decision, so the issue must NOT carry `needs-human` while remediation is pending. `needs-human` is a human-gate signal (operators alert on it, and orchestrate holds DAG dependents as GATED on it). Mark the handoff with the non-human state `workflow:remediating` instead, and clear any `needs-human` that review-pr Phase 8 already set for the ci-gate refusal. `work-on:remediate` accepts either label (a bare `needs-human` from an older run still works), clears `workflow:remediating` on every exit, and re-asserts `needs-human` only when it cannot fix the PR. Run this block, then return `REVIEW_RESULT: status: NEXT`:
   ```bash
@@ -572,6 +578,8 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
   gh issue edit {NUMBER} {GH_FLAG} --remove-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
   gh pr edit {PR_NUMBER} {GH_FLAG} --remove-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
   ```
+
+- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "degraded-gate-unreviewed" (the build gate was DEGRADED, a check ran nothing, and no trusted `### Degraded Paths Reviewed` PR section names every degraded check; forge#3628): do NOT merge by any other route, and do NOT leave `needs-human` because of this gate on the first pass. Remove the `needs-human` that Phase 8 set, then re-review once on its own bound (forge#3996; never the `STALE_REREVIEW` bound, which other causes consume): count `<!-- FORGE:DEGRADED_REREVIEW: pr={PR_NUMBER} -->` (the `DEGRADED_REREVIEW` bound below), post the marker, and re-invoke Phase R3 once so `/review-pr` reads the degraded list from the issue's FORGE:QUALITY_GATE and adds the section. If the bound is already used, add `needs-human` and return `REVIEW_RESULT: status: BLOCKED`, blocker "degraded-gate-unreviewed after re-review".
 
 - `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "checks still pending" (Phase 8 merge-gate timed out while CI was still running; nothing failed, #3919): do NOT remediate and do NOT add `needs-human`. Return that BLOCKED result unchanged so the caller retries the review phase, whose merge gate re-runs once CI finishes. The engine (`forgedock run-issue`) is that caller: it recognises the blocker, polls CI with `scripts/wait-ci-green.sh` and backoff (no model calls, bounded by `engine.ci_pending_max_minutes`, default 90), then re-dispatches this review phase once; budget exhaustion ends `needs-human` with `review.ci_pending_timeout`. The router and interactive caller path is unchanged.
 
@@ -587,27 +595,19 @@ gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state'
 In-PR fix round did not land; the remaining CONFIRMED MEDIUM findings are filed as issues on the next review instead of blocking the merge." # allowlist:check-command-side-effects
     ```
 
-  Persisted loop bounds for the cases above — count first, then act (`{BOUND}` is `STALE_REREVIEW`, `CI_REMEDIATION`, `INPR_REMEDIATION` or `BASESYNC_REMEDIATION`). This phase posts only the `STALE_REREVIEW` marker; `CI_REMEDIATION`, `INPR_REMEDIATION` and `BASESYNC_REMEDIATION` are posted by the router in Phase 4R, immediately before it invokes remediation (forge#3398):
+  Persisted loop bounds for the cases above — count first, then act (`{BOUND}` is `STALE_REREVIEW`, `DEGRADED_REREVIEW`, `CI_REMEDIATION`, `INPR_REMEDIATION` or `BASESYNC_REMEDIATION`). This phase posts only the `STALE_REREVIEW` and `DEGRADED_REREVIEW` markers; `CI_REMEDIATION`, `INPR_REMEDIATION` and `BASESYNC_REMEDIATION` are posted by the router in Phase 4R, immediately before it invokes remediation (forge#3398):
   ```bash
   [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] bound check only"; }
-  if [ "{BOUND}" = "STALE_REREVIEW" ]; then
-    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
-      --jq '[.[] | select((.body | contains("FORGE:STALE_REREVIEW:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
-  elif [ "{BOUND}" = "INPR_REMEDIATION" ]; then
-    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
-      --jq '[.[] | select((.body | contains("FORGE:INPR_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
-  elif [ "{BOUND}" = "BASESYNC_REMEDIATION" ]; then
-    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
-      --jq '[.[] | select((.body | contains("FORGE:BASESYNC_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
-  else
-    BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
-      --jq '[.[] | select((.body | contains("FORGE:CI_REMEDIATION:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
-  fi
+  BOUND_COUNT=$(gh api "repos/{GH_REPO}/issues/{NUMBER}/comments" --paginate \
+    --jq '[.[] | select((.body | contains("FORGE:{BOUND}:")) and (.body | contains("pr={PR_NUMBER}")))] | length' 2>/dev/null | awk '{s+=$(1)} END {print s+0}')
   if [ "$BOUND_COUNT" -ge 1 ]; then
     echo "BOUND_EXHAUSTED: {BOUND} already used for PR #{PR_NUMBER}"
   elif [ "{BOUND}" = "STALE_REREVIEW" ] && [ "${DRY_RUN:-false}" != "true" ]; then
     gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:STALE_REREVIEW: pr={PR_NUMBER} -->
 Stale review on PR #{PR_NUMBER}: quality-gating and re-reviewing the new head once." 2>/dev/null || true
+  elif [ "{BOUND}" = "DEGRADED_REREVIEW" ] && [ "${DRY_RUN:-false}" != "true" ]; then
+    gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:DEGRADED_REREVIEW: pr={PR_NUMBER} -->
+Degraded-gate review on PR #{PR_NUMBER}: re-reviewing once so the review names each degraded check." 2>/dev/null || true
   fi
   ```
   `BOUND_EXHAUSTED` → take the "already ≥ 1" branch of that case.
@@ -616,7 +616,7 @@ Stale review on PR #{PR_NUMBER}: quality-gating and re-reviewing the new head on
   - **Bound unused**: run the remediation-pending handoff block above (set `workflow:remediating`, no `needs-human`; a pure base sync needs no human). Then return `REVIEW_RESULT: status: NEXT` with `next: remediate` and `remediation: base-sync`. The router posts the bound marker (Phase 4R) and runs `work-on:remediate`, which merges the base in, re-runs the quality gate and re-reviews the new head. Never invoke `work-on:remediate` from this phase (same reason as the ci-gate case).
   - **Bound already used** (the sync ran and the PR still conflicts, or the sync could not resolve a hunk): do not sync again. Remove `workflow:remediating`, label the issue `needs-human` (a genuine human decision now) and return `REVIEW_RESULT: status: BLOCKED` with blocker "base conflict persists after base-sync remediation". List the conflicting files in the issue comment you post, taken from the remediation's `FORGE:BASESYNC_FAILED` comment (the `git diff --name-only --diff-filter=U` list) when present.
 
-- PR NOT MERGED (and not a phase-trail, auto-merge-gate, stale-review, ci-gate, in-pr-fix or base-conflict BLOCKED above) → attempt manual merge, **only if the PR head is still the commit named in the latest `<!-- FORGE:REVIEW -->` APPROVED verdict** (otherwise re-invoke Phase R3 instead, as for "stale review") **and only after the same CI gate**:
+- PR NOT MERGED (and not a phase-trail, auto-merge-gate, stale-review, degraded-gate-unreviewed, ci-gate, in-pr-fix or base-conflict BLOCKED above) → attempt manual merge, **only if the PR head is still the commit named in the latest `<!-- FORGE:REVIEW -->` APPROVED verdict** (otherwise re-invoke Phase R3 instead, as for "stale review") **and only after the same CI gate**:
   ```bash
   # CI gate (MANDATORY before any autonomous merge): merge only when every check on the PR is
   # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch

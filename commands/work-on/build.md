@@ -179,7 +179,7 @@ EXISTING_FAST_PATH=$(printf '%s' "$CYCLE_SLICE" | bash "$TRUSTED_SCRIPT" bodies 
 - If `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment of the current-cycle slice → the builder finished, but COMPLETE is posted at validate V5, BEFORE the B6.5 acceptance gate, so it is not proof the build passed. **Gate resume** (checked first; first match wins) <!-- Added: forge#3725 -->: read the newest trusted, comment of the current-cycle slice that starts with `FORGE:ACCEPTANCE_GATE` or `FORGE:BUILD_BLOCKED`, through the same anchored, trust-filtered lookup as the FAST_PATH read above (script resolution block verbatim; pipe `cycle_slice` into `bodies '^<!-- FORGE:(ACCEPTANCE_GATE|BUILD_BLOCKED)'`, and compare by comment order, never by presence):
   - Lookup failed (`trusted-comments.sh` unresolved or `gh` error) → Blocked exit with blocker `gate-lookup-unavailable: could not read FORGE:ACCEPTANCE_GATE` (a transient GitHub failure uses the `github-unavailable:` prefix). Never read a failed lookup as "no gate marker".
   - Newest is `FORGE:ACCEPTANCE_GATE:FAILED`, `FORGE:ACCEPTANCE_GATE:BLOCKED`, or a `FORGE:BUILD_BLOCKED` comment → the gate is blocked and the engine fails closed on it, so returning ALREADY_DONE would deadlock every re-run. Derive BRANCH/WORKTREE_PATH/PR_BASE as in B1A/B1C (without creating anything), verify the branch and worktree exist and that `git -C "$WORKTREE_PATH" branch --show-current` equals BRANCH (missing or mismatched → Blocked exit `worktree-missing: cannot re-enter B6.5`; never recreate silently), recover `COMPLEXITY_BAND` from `EXISTING_FAST_PATH` with the B0.5 resume extraction, then skip B0.5-B6 and re-enter at **Phase B6.5**, which posts a fresh PASSED/FAILED/BLOCKED verdict (the one-repair `FORGE:ACCEPTANCE_REPAIR` bound still applies).
-  - Newest is `FORGE:ACCEPTANCE_GATE:PASSED`, or no gate marker exists → build already complete. Derive BRANCH/WORKTREE_PATH as in B1A/B1C (without creating anything), then print `BUILD_RESULT: status: ALREADY_DONE`.
+  - Newest is `FORGE:ACCEPTANCE_GATE:PASSED` or `FORGE:ACCEPTANCE_GATE:DEGRADED` (pass-class: the build completed, review gates the merge on the degraded paths), or no gate marker exists → build already complete. Derive BRANCH/WORKTREE_PATH as in B1A/B1C (without creating anything), then print `BUILD_RESULT: status: ALREADY_DONE`.
 - If `<!-- FORGE:BUILDER -->` exists in the current-cycle slice BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → build was interrupted after the comment was posted but before the commit (validate V5). Delete the partial comment and restart from Phase B2 (contract): <!-- Added: forge#1305 -->
   Select with ONE anchored, trusted selector (body must start with the marker; author must be a Bot or OWNER/MEMBER/COLLABORATOR). Delete ONLY when exactly one non-complete candidate exists and it carries no other FORGE phase marker; unparsable, zero, or multiple matches delete nothing (fail closed). <!-- Added: forge#3668 -->
   ```bash
@@ -755,7 +755,7 @@ CHANGED_FILES=$(git -C "{WORKTREE_PATH}" diff --name-only "origin/{PR_BASE}...HE
 ```
 
 **After subcommand returns** (read its `VALIDATE_RESULT:` block):
-- `gate_passed: true` → verify the `FORGE:QUALITY_GATE` marker exists on the issue (posted by validate V5; docs-only changes exempt). If absent, re-derive `{CHANGED_FILES}` with the B6 command above and re-invoke validate once with the full B6 `Skill(...)` call, including `--files "{CHANGED_FILES}"` (never omit `--files`; an empty list falls back to the git diff); a missing marker is not a pass. Then continue to Phase B6.5 (acceptance gate)
+- `gate_passed: true` → record `gate_status` (`PASS` or `DEGRADED`) and `degraded_checks` from the `VALIDATE_RESULT:` block for B6.5 (the FORGE:QUALITY_GATE `**Degraded**:` line is the source of truth); a DEGRADED gate never blocks the build. Verify the `FORGE:QUALITY_GATE` marker exists on the issue (posted by validate V5; docs-only changes exempt). If absent, re-derive `{CHANGED_FILES}` with the B6 command above and re-invoke validate once with the full B6 `Skill(...)` call, including `--files "{CHANGED_FILES}"` (never omit `--files`; an empty list falls back to the git diff); a missing marker is not a pass. Then continue to Phase B6.5 (acceptance gate)
 - `gate_passed: false` with a `blocker` starting `consumer_unaddressed` → the consumer sweep failed in `blocking` mode. This is a repair, never BLOCKED and never `needs-human` <!-- Added: forge#4017 -->: remove `needs-human` if one is present, then run **one** repair round guarded by the `<!-- FORGE:CONSUMER_REPAIR: issue={NUMBER} -->` marker (count the markers first; if one already exists the round is spent, so go to step 3):
   1. Post the marker with the `UNADDRESSED:` site list from the blocker.
   2. Invoke `Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:implement", args="{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE} --fix-consumers \"<UNADDRESSED lines>\"")`, then re-derive `{CHANGED_FILES}` with the B6 command above (never reuse the pre-repair value).
@@ -945,6 +945,24 @@ if [ "$VERIFIED_COUNT" -eq 0 ] && [ "$DEFERRED_COUNT" -eq 0 ]; then
 fi
 ```
 
+**Gate status (DEGRADED)** <!-- Added: forge#3628 -->: `GATE_STATUS` and `DEGRADED_LIST` come from the B6 `VALIDATE_RESULT` (`gate_status`, `degraded_checks`). When B6.5 is entered without one (B0 gate resume), read them from the `**Degraded**:` line of the newest trusted `FORGE:QUALITY_GATE` comment; an unreadable lookup is DEGRADED, never a pass. A DEGRADED gate means a test run exercised nothing, a known-slow test was skipped, or the blast-radius check did not complete. It does not fail the build: when every check passes, the gate closes with `<!-- FORGE:ACCEPTANCE_GATE:DEGRADED -->` instead of `:PASSED` and lists the degraded checks. Review must cover each one before merge (`scripts/review-finalize.sh`, `degraded-gate-unreviewed`).
+
+```bash
+# <Script resolution block, verbatim>
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
+if [ -z "${GATE_STATUS:-}" ]; then
+  GATE_STATUS=PASS; DEGRADED_LIST=""
+  if [ -z "$TRUSTED_SCRIPT" ] || ! QG_COMMENTS=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments 2>/dev/null) \
+     || ! QG_BODIES=$(printf '%s' "$QG_COMMENTS" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:QUALITY_GATE -->'); then
+    GATE_STATUS=DEGRADED; DEGRADED_LIST="quality-gate — degraded state unreadable"
+  else
+    DEGRADED_LIST=$(printf '%s\n' "$QG_BODIES" | tail -n 1 | jq -r 'select(type == "string")' | sed -n 's/^\*\*Degraded\*\*: //p' | head -n 1)
+    case "$DEGRADED_LIST" in ''|none) DEGRADED_LIST="" ;; *) GATE_STATUS=DEGRADED ;; esac
+  fi
+fi
+[ "$GATE_STATUS" = "DEGRADED" ] && [ -z "${DEGRADED_LIST:-}" ] && DEGRADED_LIST="unspecified (see FORGE:QUALITY_GATE)"
+```
+
 **Post gate result comment**:
 
 ```bash
@@ -965,16 +983,18 @@ $( [ -n "$MANUAL_CHECKS" ] && printf '\n**Manual follow-up (type=skipped; not ve
 <!-- FORGE:ACCEPTANCE_GATE:BLOCKED -->"
   run gh issue edit {NUMBER} {GH_FLAG} --add-label "needs-human"
 elif [ "$GATE_PASS" = "true" ]; then
+  GATE_MARKER=PASSED; [ "${GATE_STATUS:-PASS}" = "DEGRADED" ] && GATE_MARKER=DEGRADED
   run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
-## Acceptance Gate — PASSED
+## Acceptance Gate — ${GATE_MARKER}
 
 All machine-checkable build-phase acceptance criteria verified against real behavior.
+$( [ "$GATE_MARKER" = "DEGRADED" ] && printf '\n**Degraded checks (verified nothing; the review must name each one under `### Degraded Paths Reviewed` before merge)**: %s\n' "$DEGRADED_LIST" )
 $( [ -n "$DEFERRED_CHECKS" ] && printf '\n**Deferred to review (phase=review; evaluated against the PR before merge)**:%b\n' "$DEFERRED_CHECKS" )
 $( [ -n "$MANUAL_CHECKS" ] && printf '\n**Manual follow-up (type=skipped; not verified at build time, confirm after merge/deploy)**:%b\n' "$MANUAL_CHECKS" )
 $( [ -n "$CORRECTED" ] && printf '\n**Checks corrected (malformed matcher, literal text present)**:%b\n' "$CORRECTED" )
 $( [ -n "$MALFORMED_CHECKS" ] && printf '\n**malformed-check (not counted as failures; regenerate the acceptance spec by re-running investigate)**:%b\n' "$MALFORMED_CHECKS" )
 
-<!-- FORGE:ACCEPTANCE_GATE:PASSED -->"
+<!-- FORGE:ACCEPTANCE_GATE:${GATE_MARKER} -->"
 else
   run gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ACCEPTANCE_GATE -->
 ## Acceptance Gate — FAILED
@@ -1040,7 +1060,7 @@ BUILD_RESULT:
   blocker: {description if status=BLOCKED}
 ```
 
-- `COMPLETE` — B0–B6.5 all passed; `FORGE:BUILDER:COMPLETE` is on the issue.
+- `COMPLETE` — B0–B6.5 all passed (a DEGRADED acceptance gate, `FORGE:ACCEPTANCE_GATE:DEGRADED`, counts as passed here); `FORGE:BUILDER:COMPLETE` is on the issue.
 - `ALREADY_DONE` — B0 found `FORGE:BUILDER:COMPLETE`.
 - `INVESTIGATION_COMPLETE` — the implement child created the deliverable issues (B5); no review follows.
 - B5.5 never produces a `BUILD_RESULT` status of its own: its scope-check outcome (`OK`, `EXTENDED_REVIEW`, `SCOPE_FLAGGED`, `OVERRIDDEN`) is recorded in `FORGE:DIFF_SIZE`, then the build continues to B6 and ends `COMPLETE`. A finished build is never routed to decompose or discarded. <!-- Added: forge#3862 -->
