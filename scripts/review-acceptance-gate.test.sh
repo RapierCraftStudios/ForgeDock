@@ -116,5 +116,8 @@ inv "$(bt ac-1 'false' build d)"; rc=$(run); eq "phase=build non-gh-pr check is 
 inv "$(bt ac-1 'gh pr view 1 && false' build 'x phase=review y')"; rc=$(run); eq "phase=review in description does not change selection" "$rc" 1
 inv "$(bt ac-1 'false' build 'x phase=review y')"; rc=$(run); eq "phase=review in description does not select a non-gh-pr check" "$rc" 0
 inv 'ACCEPTANCE_CHECK: id=ac-1 type=command target="gh pr view 1 && false" matcher="exit_0" description=untagged'; rc=$(run); eq "untagged gh pr check is evaluated" "$rc" 1
+# test= tolerance (forge#3630): a test="..." token between phase= and description= does not change phase handling or selection.
+inv 'ACCEPTANCE_CHECK: id=ac-1 type=command target="gh pr view 1 && false" matcher="exit_0" phase=review test="node --test x.mjs" description=d'; rc=$(run); eq "test= token on a phase=review check is tolerated (evaluated, fails)" "$rc" 1
+inv 'ACCEPTANCE_CHECK: id=ac-1 type=command target="false" matcher="exit_0" phase=build test="node --test x.mjs" description=d'; rc=$(run); eq "test= token on a phase=build non-gh-pr check is not selected" "$rc" 0
 
 echo "$PASS passed, $FAILN failed"; [ "$FAILN" -eq 0 ]

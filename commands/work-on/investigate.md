@@ -715,6 +715,13 @@ ACCEPTANCE_CHECK: id=ac-7 type=command target="gh pr view --json body --jq .body
 
 **Phase tag (MANDATORY)** <!-- Added: forge#3793 -->: `phase=` is an optional token placed after `matcher="..."` and before `description=`; allowed values are `build` (default when absent) and `review`. `build` checks run in the build acceptance gate, against the worktree. `review` checks are deferred by the build gate and evaluated by review after the PR exists. Any check whose target reads a PR artifact (`gh pr view`, `gh pr checks`, `gh pr diff`, review comments) MUST be `phase=review`: the PR does not exist until the review phase opens it, so such a check can never pass at build time. Do not put `phase=` inside `target`, `matcher` or `description` text.
 
+**Test tag (optional)** <!-- Added: forge#3630 -->: `test="<cmd>"` is an optional token placed after `phase=` and before `description=`. It names the runnable test that proves the criterion (for example `test="node --test bin/tests/foo.test.mjs"`). The build gate runs it on the head worktree and on the merge-base commit: a real proof FAILS on base and PASSES on head, a test that also passes on base fails the gate (it never touched the defect), and a base run that cannot execute makes the gate DEGRADED. Quote it like `target=`, escape an embedded `"` as `\"`, and never write the text `description=` inside it. Emit it only on `phase=build` checks whose test is runnable by a single command; it is forbidden on `phase=review` and `type=skipped` checks (never executed). Without `test=` the check evaluates exactly as before.
+
+Example:
+```
+ACCEPTANCE_CHECK: id=ac-3 type=command target="node --test bin/tests/foo.test.mjs" matcher="exit_0" phase=build test="node --test bin/tests/foo.test.mjs" description=Rejects an empty input
+```
+
 **Check types**:
 - `exists` — assert a file or directory exists (`target` = path, `matcher` = ignored)
 - `contains` — assert a file contains a string or regex (`target` = file path, `matcher` = string/regex). **Prefer a literal string** for code: the matcher is applied as an extended regex first, so `$`, `(`, `[`, `.`, `*`, `+`, `?`, `|` must be escaped if you mean them literally (e.g. `return \"\$HELD\"`). The acceptance gate falls back to a literal match, but a correct matcher avoids a needless repair round. For a `command` check that looks for code, use `grep -qF '<literal>' <file>`, not `grep -qE`.

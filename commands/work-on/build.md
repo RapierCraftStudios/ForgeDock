@@ -822,6 +822,9 @@ The acceptance spec contains only a skip sentinel (\`type=skipped\`). No automat
 ```bash
 # <Script resolution block, verbatim>
 GREP_CLS=$(forge_resolve classify-grep-exit.sh) # empty/unresolved = every grep exit>=2 is a real FAIL (fail closed)
+RG_SCRIPT=$(forge_resolve acceptance-red-green.sh) # empty/unresolved = every test= check is DEGRADED, never PASS <!-- Added: forge#3630 -->
+RG_ROWS=""             # per-AC red-green record rows for `test=` checks: | AC | test | base | head |
+RG_DEGRADED_LIST=""    # test= checks whose base run cannot execute; merged into DEGRADED_LIST after the gate-status block
 GATE_PASS=true
 CORRECTED=""
 FAILED_CHECKS=""
@@ -869,6 +872,8 @@ while IFS= read -r check_line; do
   # Anchored after the matcher field so `phase=` text inside description/target/matcher cannot hijack it; any other value or an absent token is `build` (fail closed).
   PHASE=$(printf '%s\n' "$check_line" | sed -nE 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=("(([^"\\]|\\.)*)"|[^ ]*) matcher=("(([^"\\]|\\.)*)"|[^ ]*) phase=(build|review)( .*)?$/\7/p')
   [ "$PHASE" = "review" ] || PHASE=build
+  # test= (optional, after phase=, before description=): the runnable test that proves the AC, red-green checked below (forge#3630). Absent = no change.
+  TEST_RG=$(printf '%s\n' "$check_line" | sed -nE 's/^ACCEPTANCE_CHECK: id=[^ ]* type=[^ ]* target=("(([^"\\]|\\.)*)"|[^ ]*) matcher=("(([^"\\]|\\.)*)"|[^ ]*) phase=(build|review) test="(([^"\\]|\\.)*)"( description=.*)?$/\8/p' | sed 's/\\"/"/g')
 
   [ "$TYPE" = "skipped" ] && { MANUAL_CHECKS="${MANUAL_CHECKS}\n- [ ] **$ID** ($DESC)"; continue; }
 
@@ -880,6 +885,8 @@ while IFS= read -r check_line; do
   MALFORMED=""
   { [ "$TYPE" = "command" ] || [ "$TYPE" = "behavior" ]; } && { case "$TARGET" in *'\\\\'*) MALFORMED="run of 4+ backslashes (over-escaped target)";; esac; [ -n "$MALFORMED" ] || bash -n -c "$TARGET" 2>/dev/null || MALFORMED="shell syntax error (unbalanced quotes)"; }
   { [ "$TYPE" = "command" ] || [ "$TYPE" = "behavior" ]; } && [ -z "$MALFORMED" ] && case "$(printf '%s' "$TARGET" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')" in none) MALFORMED='target "none" is not a command (a manual criterion must be type=skipped)';; esac
+  # A test= value that would break description= extraction or fails the same static parse is a check defect (never executed).
+  if [ -n "$TEST_RG" ]; then case "$TEST_RG" in *description=*) MALFORMED="test= contains description= (ambiguous field boundary)";; esac; [ -n "$MALFORMED" ] || bash -n -c "$TEST_RG" 2>/dev/null || MALFORMED="test= shell syntax error (unbalanced quotes)"; fi
   if [ -n "$MALFORMED" ]; then MALFORMED_CHECKS="${MALFORMED_CHECKS}\n- **$ID** ($DESC): $MALFORMED"; continue; fi
 
   RESULT="PASS"
@@ -929,6 +936,24 @@ while IFS= read -r check_line; do
     case "$TARGET" in *'gh pr'*) DEFERRED_COUNT=$((DEFERRED_COUNT+1)); DEFERRED_CHECKS="${DEFERRED_CHECKS}\n- **$ID** ($DESC): DEFERRED (review) (no pull request exists yet)"; continue;; esac
   fi
 
+  # Red-green proof <!-- Added: forge#3630 -->: only for a build-phase check with test= whose own head result is PASS.
+  # The helper runs test= on head, then (head RAN only) on a detached base worktree (`git worktree add --detach` at the merge-base) with head's changed test files overlaid;
+  # the worktree is removed on every exit path (trap + explicit `git worktree remove`). Output: `BASE=<..> HEAD=<..>`.
+  if [ "$RESULT" = "PASS" ] && [ -n "$TEST_RG" ]; then
+    RG_OUT=""; [ -n "$RG_SCRIPT" ] && RG_OUT=$(bash "$RG_SCRIPT" --repo-path "{WORKTREE_PATH}" --base-ref "origin/{PR_BASE}" --test-cmd "$TEST_RG" 2>/dev/null)
+    RG_BASE=$(printf '%s\n' "$RG_OUT" | sed -n 's/^BASE=\([A-Z_]*\) HEAD=\([A-Z_]*\)$/\1/p' | head -n 1)
+    RG_HEAD=$(printf '%s\n' "$RG_OUT" | sed -n 's/^BASE=\([A-Z_]*\) HEAD=\([A-Z_]*\)$/\2/p' | head -n 1)
+    [ -n "$RG_BASE" ] && [ -n "$RG_HEAD" ] || { RG_BASE=UNRUNNABLE; RG_HEAD=UNRUNNABLE; } # helper missing or unparsable: DEGRADED, never PASS
+    RG_ID=$(printf '%s' "$TEST_RG" | tr '\n\r|`\\' '    ' | cut -c1-80)   # table-safe: no pipe, backtick, backslash or newline; truncated
+    RG_ROWS="${RG_ROWS}${RG_ROWS:+$'\n'}| $ID | $RG_ID | $RG_BASE | $RG_HEAD |"
+    case "$RG_HEAD:$RG_BASE" in
+      RAN:FAILED) : ;;  # red on base, green on head: the test proves the AC
+      RAN:RAN) RESULT="FAIL"; DETAIL="test passes on base (it never exercised the defect): rewrite the test so it fails on the base commit and passes on head" ;;
+      FAILED:*) RESULT="FAIL"; DETAIL="test= command fails on head: $RG_ID" ;;
+      *) RG_DEGRADED_LIST="${RG_DEGRADED_LIST}${RG_DEGRADED_LIST:+; }$ID — base run cannot execute (base=$RG_BASE head=$RG_HEAD); the test is unproven" ;; # a base run that cannot execute is DEGRADED, never PASS
+    esac
+  fi
+
   VERIFIED_COUNT=$((VERIFIED_COUNT+1))
   if [ "$RESULT" = "FAIL" ]; then
     GATE_PASS=false
@@ -960,6 +985,8 @@ if [ -z "${GATE_STATUS:-}" ]; then
     case "$DEGRADED_LIST" in ''|none) DEGRADED_LIST="" ;; *) GATE_STATUS=DEGRADED ;; esac
   fi
 fi
+# test= checks whose base run cannot execute (forge#3630): merged after the lookup above so it cannot wipe them
+[ -n "$RG_DEGRADED_LIST" ] && { GATE_STATUS=DEGRADED; DEGRADED_LIST="${DEGRADED_LIST:+$DEGRADED_LIST; }$RG_DEGRADED_LIST"; }
 [ "$GATE_STATUS" = "DEGRADED" ] && [ -z "${DEGRADED_LIST:-}" ] && DEGRADED_LIST="unspecified (see FORGE:QUALITY_GATE)"
 ```
 
@@ -989,6 +1016,7 @@ elif [ "$GATE_PASS" = "true" ]; then
 
 All machine-checkable build-phase acceptance criteria verified against real behavior.
 $( [ "$GATE_MARKER" = "DEGRADED" ] && printf '\n**Degraded checks (verified nothing; the review must name each one under `### Degraded Paths Reviewed` before merge)**: %s\n' "$DEGRADED_LIST" )
+$( [ -n "$RG_ROWS" ] && printf '\n**Red-green proof (test= checks: must FAIL on base, PASS on head)**:\n\n| AC | test | base | head |\n|----|------|------|------|\n%s\n' "$RG_ROWS" )
 $( [ -n "$DEFERRED_CHECKS" ] && printf '\n**Deferred to review (phase=review; evaluated against the PR before merge)**:%b\n' "$DEFERRED_CHECKS" )
 $( [ -n "$MANUAL_CHECKS" ] && printf '\n**Manual follow-up (type=skipped; not verified at build time, confirm after merge/deploy)**:%b\n' "$MANUAL_CHECKS" )
 $( [ -n "$CORRECTED" ] && printf '\n**Checks corrected (malformed matcher, literal text present)**:%b\n' "$CORRECTED" )
@@ -1002,6 +1030,7 @@ else
 The following acceptance checks did not pass:
 
 $(echo -e "$FAILED_CHECKS")
+$( [ -n "$RG_ROWS" ] && printf '\n**Red-green proof (test= checks: must FAIL on base, PASS on head)**:\n\n| AC | test | base | head |\n|----|------|------|------|\n%s\n' "$RG_ROWS" )
 $( [ -n "$MALFORMED_CHECKS" ] && printf '\n**malformed-check (not counted as failures; regenerate the acceptance spec by re-running investigate)**:%b\n' "$MALFORMED_CHECKS" )
 
 Merge is blocked. Fix the failing criteria and re-run the validate phase.
@@ -1033,6 +1062,8 @@ If `GATE_PASS = false` and `SPEC_DEFECT` is not `true`, the build repairs itself
    `Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:validate", args="{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --worktree {WORKTREE_PATH} --branch {BRANCH} --base {PR_BASE} --files \"{CHANGED_FILES}\"")`
 3. Re-run this whole B6.5 gate. PASS → continue to the checkpoint.
 4. Still failing (or already repaired once) → leave `needs-human` and print `BUILD_RESULT: status: BLOCKED`, blocker: "Acceptance gate failed after one repair — see FORGE:ACCEPTANCE_GATE comment".
+
+**Red-green proof (`test=`)** <!-- Added: forge#3630 -->: a `phase=build` check carrying `test="<cmd>"` whose own head result is PASS also runs `scripts/acceptance-red-green.sh`: the test must FAIL on the merge-base commit (head's changed test files overlaid, so a new test file is not a false red) and PASS on head. Every such check gets a row in the gate comment's `| AC | test | base | head |` table. A test that passes on base FAILS the gate (`passes on base`) and enters the one-repair `--fix-acceptance` path with the instruction to rewrite the test so it fails on base. A base run that cannot execute (worktree or overlay failure, timeout, rc 126/127, a runner that exercised nothing, or an unresolved helper) is DEGRADED, never PASS: it is appended to `DEGRADED_LIST` and the gate closes `FORGE:ACCEPTANCE_GATE:DEGRADED` (#3628). A `test=` that contains `description=` or fails `bash -n` is a `malformed-check`. Checks without `test=` evaluate exactly as before.
 
 If `GATE_PASS = true`: continue to write the phase checkpoint below.
 
