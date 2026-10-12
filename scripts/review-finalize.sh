@@ -267,7 +267,8 @@ do_extract() {
         || { echo "REVIEW_RESULT: status: BLOCKED, blocker: ${N_RAW_MARKERS} FINDING markers but ${N_PARSED_MARKERS} parsed (malformed marker, fail closed)"; exit 3; }
 
     # Carrier lookup order: raw agent bodies first (they carry the agent marker and the per-finding prose), then the source bodies.
-    printf '%s\n%s\n' "$CARRIER_BODIES" "$SOURCE_BODIES" | grep -v '^$' > "$WORKDIR/carriers.jsonl" || : > "$WORKDIR/carriers.jsonl"
+    printf '%s\n%s\n' "$CARRIER_BODIES" "$SOURCE_BODIES" | grep -v '^$' | awk '!seen[$0]++' > "$WORKDIR/carriers.jsonl" || : > "$WORKDIR/carriers.jsonl"
+    : > "$WORKDIR/seen-markers"
 
     RAW="$WORKDIR/raw.jsonl"; : > "$RAW"; N_EXTRACTED=0
     while IFS='|' read -r F_ID F_CONF F_SEV F_LOC F_TITLE; do
@@ -280,11 +281,21 @@ do_extract() {
                 case "$_r" in *[!0-9-]*|"") ;; *) F_FILE="${F_LOC%:*}"; L1="${_r%%-*}"; L2="${_r#*-}"; [ "$L2" != "$_r" ] || L2="$L1" ;; esac ;;
         esac
         case "$L1" in *[!0-9]*) L1=""; L2="" ;; esac; case "$L2" in *[!0-9]*) L2="$L1" ;; esac
-        # The carrying comment: the first trusted body that holds this finding's marker.
+        # The carrying comment: bound by the finding's FULL marker line, not its id. A finding repeated across heads, slices or agents
+        # binds the k-th body holding that exact marker (k = how often this exact marker was already seen), so each keeps its own agent and
+        # prose. Falls back to the first body holding the id-prefix only when no body holds the exact line (reworded synthesis marker).
         BODY_FILE="$WORKDIR/body.$N_EXTRACTED"
-        jq -rs --arg m "<!-- FINDING:${F_ID}|" 'map(select(contains($m))) | .[0] // ""' "$WORKDIR/carriers.jsonl" > "$BODY_FILE" 2>/dev/null || : > "$BODY_FILE"
+        F_MARKER="<!-- FINDING:${F_ID}|${F_CONF}|${F_SEV}|${F_LOC}|${F_TITLE} -->"
+        SEEN_K=$(grep -cxF -- "$F_MARKER" "$WORKDIR/seen-markers" 2>/dev/null || true); case "$SEEN_K" in ''|*[!0-9]*) SEEN_K=0 ;; esac
+        printf '%s\n' "$F_MARKER" >> "$WORKDIR/seen-markers"
+        jq -rs --arg m "$F_MARKER" --argjson k "$SEEN_K" '[.[] | select(index($m) != null)] | (.[$k] // .[0]) // ""' "$WORKDIR/carriers.jsonl" > "$BODY_FILE" 2>/dev/null || : > "$BODY_FILE"
+        if [ ! -s "$BODY_FILE" ]; then
+            jq -rs --arg p "<!-- FINDING:${F_ID}|" '[.[] | select(index($p) != null)] | .[0] // ""' "$WORKDIR/carriers.jsonl" > "$BODY_FILE" 2>/dev/null || : > "$BODY_FILE"
+        fi
         AGENT=$(sed -n 's/^<!-- FORGE:REVIEW-AGENT:\([a-z-]*\) -->.*/\1/p' "$BODY_FILE" | head -n 1)
-        # The finding's own prose section: from the first non-marker line naming the id to the next heading / marker / other finding id.
+        # The finding's own prose section. Start anchor, in order: a heading naming the id; a non-list line naming the id (a summary
+        # bullet `- ID: ...` is never the section); the first mention; the prose after the finding's own marker. It runs to the next
+        # heading / marker / other finding id.
         SECTION_FILE="$WORKDIR/section.$N_EXTRACTED"
         awk -v id="$F_ID" '
             function hasid(l,   p, pre, post, rest, off) {
@@ -297,12 +308,29 @@ do_extract() {
                 }
                 return 0
             }
-            /<!-- (FINDING:|REVIEW-FINDINGS)/ { if (started) exit; next }
-            !started { if (hasid($0)) { started = 1; print; first = 0; n = 1 } ; next }
-            { n++
-              if ($0 ~ /^#/) exit
-              if (match($0, /^[-*#> \t]*\**[A-Z][A-Z0-9]*-[0-9]+/) && !hasid($0)) exit
-              print }' "$BODY_FILE" > "$SECTION_FILE" 2>/dev/null || : > "$SECTION_FILE"
+            { line[NR] = $0 }
+            END {
+                start = 0; nonlist = 0; mention = 0; mk = 0
+                for (i = 1; i <= NR; i++) {
+                    l = line[i]
+                    if (l ~ /<!-- (FINDING:|REVIEW-FINDINGS)/) { if (!mk && index(l, "<!-- FINDING:" id "|")) mk = i; continue }
+                    if (!hasid(l)) continue
+                    if (!mention) mention = i
+                    if (!nonlist && l !~ /^[ \t]*([-*+]|[0-9]+[.)])[ \t]/) nonlist = i
+                    if (l ~ /^#/) { start = i; break }
+                }
+                if (!start) start = nonlist
+                if (!start) start = mention
+                if (!start && mk) start = mk + 1
+                if (!start) exit
+                for (i = start; i <= NR; i++) {
+                    l = line[i]
+                    if (l ~ /<!-- (FINDING:|REVIEW-FINDINGS)/) break
+                    if (i > start && l ~ /^#/) break
+                    if (i > start && match(l, /^[-*#> \t]*\**[A-Z][A-Z0-9]*-[0-9]+/) && !hasid(l)) break
+                    print l
+                }
+            }' "$BODY_FILE" > "$SECTION_FILE" 2>/dev/null || : > "$SECTION_FILE"
         # Failure scenario: present / absent when the section was found, unknown when the carrying comment or section is unreadable.
         SCENARIO="unknown"
         if [ -s "$SECTION_FILE" ]; then
