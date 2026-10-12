@@ -76,6 +76,23 @@ describe("forge#3541 review.md R4 handoffs", () => {
   });
 });
 
+describe("forge#3628 degraded-gate-unreviewed consumers", () => {
+  it("review.md R4 re-reviews once under STALE_REREVIEW before needs-human", () => {
+    const b = bullet('- `REVIEW_RESULT: status: BLOCKED` from /review-pr whose blocker contains "degraded-gate-unreviewed"');
+    assert.match(b, /STALE_REREVIEW/);
+    assert.match(b, /Degraded Paths Reviewed/);
+    assert.match(b, /bound is already used, add `needs-human`/);
+  });
+  it("remediate.md classifies the blocker and never edits code for it", () => {
+    const rem = read("commands/work-on/remediate.md");
+    assert.ok(rem.includes("degraded-gate-unreviewed"));
+    assert.match(rem, /not a code defect/);
+  });
+  it("the manual-merge fallthrough excludes the blocker", () => {
+    assert.match(review, /not a phase-trail[^)]*degraded-gate-unreviewed/);
+  });
+});
+
 describe("forge#3541 consumers accept workflow:remediating", () => {
   it("labels.json registers the state", () => {
     const labels = JSON.parse(read("bin/labels.json"));

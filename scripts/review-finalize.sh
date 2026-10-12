@@ -18,7 +18,7 @@
 #   file-verify   6C post-filing parse: reads the issue-creation result text on stdin, prints ISSUE_NUM=N, exits 1 when no number.
 #   verdict       7A gate log + 7B base-conflict computation; posts the verdict comment when --result stale|clean|blocking is given.
 #   calibrate     7B.5 calibration-table consultation (can only tighten); records FORGE:CALIBRATION_CHECK on the linked issue.
-#   merge-gate    Phase 8: note-disposition, in-PR fix, --issue, phase-trail, guard-state, base-conflict / calibration / trust routing,
+#   merge-gate    Phase 8: note-disposition, in-PR fix, --issue, phase-trail, degraded-gate review, guard-state, base-conflict / calibration / trust routing,
 #                 pre-merge mergeability, previously-escalated parking, CI gate, reviewed-head guard, merge. Never skips a gate.
 #   demilestone   8B / 9A: clears the milestone from open review-finding issues of a merged milestone PR.
 #   integrity     Phase 9: stale-head check and the verifiable trusted REVIEW-AGENT count (carry-aware).
@@ -59,6 +59,8 @@
 # Exit: 0 ok | 3 BLOCKED (REVIEW_RESULT: status: BLOCKED printed; the caller must stop the review, never skip) | 4 merge-gate only:
 #       REVIEW_RESULT: status: PHASE_TRAIL_FAILED printed, followed by the verifier's MISSING lines (re-dispatch is owned by work-on/review.md R4)
 #       | 1 file-verify found no issue number | 2 usage error
+# merge-gate: `blocked degraded-gate-unreviewed` (exit 3, needs-human added) when the linked issue's newest trusted FORGE:QUALITY_GATE `**Degraded**:` line or
+# FORGE:ACCEPTANCE_GATE:DEGRADED marker lists checks that no trusted `### Degraded Paths Reviewed` PR section names (forge#3628).
 # merge-gate reports every non-merging routed outcome as MERGE_OUTCOME=<merged|merge-failed|parked-awaiting-merge|base-conflict|needs-human|
 # protection-blocked|stale-review|ci-not-green>; everything except merged / merge-failed / parked-awaiting-merge also exits 3 with a blocker.
 #
@@ -1214,6 +1216,69 @@ Re-run each missing phase via its Skill (see the \`->\` action on each MISSING l
         exit 4
     fi
     [ "${TRAIL_RC:-1}" -eq 0 ] || blocked "phase trail unreadable (rc=${TRAIL_RC:-1})"   # hard guard: nothing below runs unless the trail verified
+
+    # --- degraded-gate gate (forge#3628): a build whose tests ran nothing is not a verified build ---
+    # The newest trusted FORGE:QUALITY_GATE (`**Degraded**: name — reason; ...`) and FORGE:ACCEPTANCE_GATE (`:DEGRADED` marker) on the linked
+    # issue name the degraded checks. Each one must be named in a trusted `### Degraded Paths Reviewed` section on the PR; a generic section
+    # does not satisfy it. Unreadable comments fail closed. Only trusted-comments.sh ever reads these comments, so an untrusted comment can
+    # neither forge a DEGRADED marker nor clear one.
+    DEG_ISSUE_JSON=$(gh api --paginate "repos/${REPO}/issues/${MERGE_ISSUE}/comments" 2>/dev/null) || DEG_ISSUE_JSON=""
+    if [ -z "$DEG_ISSUE_JSON" ] || [ -z "$TRUSTED_SCRIPT" ]; then
+        echo "DEGRADED GATE: issue comments or trusted-comments.sh unreadable — refusing to merge (fail closed)" >&2
+        blocked "note disposition unreadable"
+    fi
+    DEG_NAMES=""; DEG_ANY=false
+    DEG_QG=$(printf '%s' "$DEG_ISSUE_JSON" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:QUALITY_GATE -->') || DEG_QG="__ERR__"
+    DEG_AG=$(printf '%s' "$DEG_ISSUE_JSON" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:ACCEPTANCE_GATE -->') || DEG_AG="__ERR__"
+    if [ "$DEG_QG" = "__ERR__" ] || [ "$DEG_AG" = "__ERR__" ]; then
+        echo "DEGRADED GATE: trust filter failed — refusing to merge (fail closed)" >&2
+        blocked "note disposition unreadable"
+    fi
+    # newest body of each gate (bodies are JSON strings, one per line, oldest first)
+    DEG_QG_LINE=$(printf '%s\n' "$DEG_QG" | tail -n 1 | jq -r 'select(type == "string")' 2>/dev/null | sed -n 's/^\*\*Degraded\*\*: *//p' | sed -n '1p')
+    DEG_AG_BODY=$(printf '%s\n' "$DEG_AG" | tail -n 1 | jq -r 'select(type == "string")' 2>/dev/null)
+    case "$DEG_QG_LINE" in ''|none|None|NONE) ;; *) DEG_ANY=true; DEG_NAMES="$DEG_QG_LINE" ;; esac
+    if printf '%s\n' "$DEG_AG_BODY" | grep -qE '^[[:space:]]*<!-- FORGE:ACCEPTANCE_GATE:DEGRADED -->[[:space:]]*$'; then
+        DEG_ANY=true
+        DEG_AG_LINE=$(printf '%s\n' "$DEG_AG_BODY" | sed -n 's/^\*\*Degraded checks[^*]*\*\*: *//p' | sed -n '1p')
+        [ -n "$DEG_AG_LINE" ] && DEG_NAMES="${DEG_NAMES:+$DEG_NAMES; }${DEG_AG_LINE}"
+    fi
+    if [ "$DEG_ANY" = "true" ]; then
+        # Reviewed section: every trusted PR comment's `### Degraded Paths Reviewed` section, up to the next heading.
+        DEG_SECTIONS=""
+        DEG_PR_BODIES=$(printf '%s' "$DISPO_JSON" | bash "$TRUSTED_SCRIPT" bodies '(^|\n)### Degraded Paths Reviewed') || DEG_PR_BODIES="__ERR__"
+        if [ "$DEG_PR_BODIES" = "__ERR__" ]; then
+            echo "DEGRADED GATE: trust filter failed on PR comments — refusing to merge (fail closed)" >&2
+            blocked "note disposition unreadable"
+        fi
+        if [ -n "$DEG_PR_BODIES" ]; then
+            DEG_SECTIONS=$(printf '%s\n' "$DEG_PR_BODIES" | while IFS= read -r _db; do
+                printf '%s' "$_db" | jq -r 'select(type == "string")' 2>/dev/null \
+                    | awk '/^### Degraded Paths Reviewed[[:space:]]*$/ {f=1; next} f && /^(#|##|###) / {f=0} f {print}'
+            done)
+        fi
+        DEG_MISSING=""
+        if [ -z "$(printf '%s' "$DEG_SECTIONS" | tr -d '[:space:]')" ]; then
+            DEG_MISSING="no \`### Degraded Paths Reviewed\` section"
+        else
+            # per-check name match: the name is everything before " — " in each "; "-separated entry
+            DEG_NAME_LIST=$(printf '%s\n' "$DEG_NAMES" | tr ';' '\n' | sed 's/ — .*$//; s/^[[:space:]]*//; s/[[:space:]]*$//' | sed '/^$/d' | sort -u)
+            while IFS= read -r _dn; do
+                [ -n "$_dn" ] || continue
+                printf '%s\n' "$DEG_SECTIONS" | grep -qF -- "$_dn" || DEG_MISSING="${DEG_MISSING:+$DEG_MISSING, }${_dn}"
+            done <<< "$DEG_NAME_LIST"
+            [ -z "$DEG_MISSING" ] || DEG_MISSING="not covered: ${DEG_MISSING}"
+        fi
+        if [ -n "$DEG_MISSING" ]; then
+            echo "DEGRADED GATE: the build's gate is DEGRADED (${DEG_NAMES}) and the review does not cover it (${DEG_MISSING})" >&2
+            gh issue comment "$MERGE_ISSUE" -R "$REPO" --body "<!-- FORGE:DEGRADED_GATE_UNREVIEWED -->
+Auto-merge refused for PR #${PR_NUMBER}: the build's verification was DEGRADED (a check ran nothing or did not complete): ${DEG_NAMES}.
+
+The review must add a \`### Degraded Paths Reviewed\` section that names each degraded check and states how its path was reviewed (${DEG_MISSING}). Then re-run /review-pr." 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
+            gh issue edit "$MERGE_ISSUE" -R "$REPO" --add-label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
+            blocked "degraded-gate-unreviewed"
+        fi
+    fi
 
     # --- merge guard state: §7B verdict + purpose-regression + calibration + trust-escalation ---
     # These are decided in earlier steps (earlier shells), so they arrive as flags. An empty or unbound value would read as

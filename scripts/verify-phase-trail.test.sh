@@ -52,6 +52,7 @@ mk() {
       CONTEXT) items+=('{"body":"<!-- FORGE:CONTEXT -->\n## Context"}') ;;
       ARCH) items+=('{"body":"<!-- FORGE:ARCHITECT -->\n## Plan"}') ;;
       QG_PASS) items+=('{"body":"<!-- FORGE:QUALITY_GATE -->\n**Result**: PASS\n"}') ;;
+      QG_DEGRADED) items+=('{"body":"<!-- FORGE:QUALITY_GATE -->\n## Quality Gate Result\n\n**Result**: PASS\n**Tree**: abc\n**Degraded**: python.test — test run exercised nothing; blast-radius — check did not complete\n"}') ;;
       QG_FAIL) items+=('{"body":"<!-- FORGE:QUALITY_GATE -->\n**Result**: FAIL\n"}') ;;
       FP_NOBAND) items+=('{"body":"<!-- FORGE:FAST_PATH -->\nnothing"}') ;;
       FP_*) items+=("{\"body\":\"<!-- FORGE:FAST_PATH -->\\n**COMPLEXITY_BAND**: ${k#FP_}\"}") ;;
@@ -90,6 +91,7 @@ expect_fail "missing FAST_PATH" "$(mk f INV CONTRACT CONTEXT ARCH QG_PASS)" FAST
 expect_fail "FAST_PATH without band value fails" "$(mk g INV CONTRACT FP_NOBAND CONTEXT ARCH QG_PASS)" FAST_PATH
 expect_fail "missing QUALITY_GATE" "$(mk h INV CONTRACT FP_COMPLEX CONTEXT ARCH)" QUALITY_GATE
 expect_fail "QUALITY_GATE FAIL result does not count" "$(mk i INV CONTRACT FP_COMPLEX CONTEXT ARCH QG_FAIL)" QUALITY_GATE
+expect_pass "QUALITY_GATE PASS with a **Degraded**: line still counts (forge#3628)" "$(mk i2 INV CONTRACT FP_COMPLEX CONTEXT ARCH QG_DEGRADED)"
 expect_fail "TRIVIAL still needs CONTRACT" "$(mk j INV FP_TRIVIAL QG_PASS)" CONTRACT
 expect_fail "prose mentions do not satisfy markers" "$(mk k INV CONTRACT FP_COMPLEX PROSE)" CONTEXT
 

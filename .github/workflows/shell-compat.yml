@@ -146,6 +146,9 @@ jobs:
           bash scripts/review-finalize.test.sh
       - name: Run is-docs-only.test.sh
         run: bash scripts/is-docs-only.test.sh
+
+      - name: Run classify-test-run.test.sh
+        run: bash scripts/classify-test-run.test.sh
       - name: Run spawn-depth-check.test.sh
         run: bash scripts/spawn-depth-check.test.sh
       - name: Run extract-affected-files.test.sh
