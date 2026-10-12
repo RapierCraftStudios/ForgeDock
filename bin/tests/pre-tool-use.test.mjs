@@ -2159,6 +2159,17 @@ describe("main-checkout mutation guard (issue #3650)", () => {
     }
   });
 
+  it("an allowed ref-only verb inside bash -c / eval does not mask a later mutation (#3920)", () => {
+    for (const c of ['bash -c "git branch -d other; git checkout main"', 'eval "git branch -d other && git stash"', "sh -c 'git branch -D other || git reset --hard HEAD'"]) {
+      assert.equal(run(c, mainDir).exitCode, 2, c);
+    }
+    assert.equal(run('bash -c "git branch -d other; git branch -D another"', mainDir).exitCode, 0);
+  });
+
+  it("counts positionals after -- for branch -m (#3920)", () => {
+    assert.equal(run("git branch -m -- renamed", mainDir).exitCode, 2);
+  });
+
   it("an allowed ref-only verb does not mask a later mutating segment (#3873)", () => {
     for (const c of ["git branch -D other && git stash", "git branch -d other; git checkout feat/x", "git branch -D other || git reset --hard HEAD", "git branch -D other && git branch -D main"]) {
       assert.equal(run(c, mainDir).exitCode, 2, c);

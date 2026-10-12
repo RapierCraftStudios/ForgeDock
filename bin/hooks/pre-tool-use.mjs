@@ -1302,9 +1302,11 @@ function mutatingGitCommand(tokens, depth = 0) {
       const k = w === "eval" ? i + 1 : tokens.findIndex((t, n) => n > i && /^-[a-z]*c$/.test(t)) + 1;
       if (k <= i || k >= tokens.length) return null;
       const inner = w === "eval" ? tokens.slice(k).join(" ") : tokens[k];
-      let hit = null;
-      for (const seg of extractCommandSegments(inner)) hit = hit || mutatingGitCommand(seg, depth + 1);
-      return hit;
+      // Every hit of the payload, not just the first (#3920): an allowed ref-only segment (`git branch -d other`)
+      // must not mask a later mutating one. The caller decides per hit.
+      const hits = [];
+      for (const seg of extractCommandSegments(inner)) hits.push(...mutatingGitHits(seg, depth + 1));
+      return hits.length ? { name: hits[0].name, dir: hits[0].dir, hits } : null;
     }
     break;
   }
@@ -1349,7 +1351,8 @@ function mutatingGitCommand(tokens, depth = 0) {
       // Ref-only verbs: a hit only when the delete/move/force target is the branch checked out at the
       // target dir (resolved by the caller). `-m <new>` with one positional renames the current branch.
       if (!opts.some((t) => /^(?:-[a-zA-Z]*[fFmMdD][a-zA-Z]*|--force|--move|--delete)$/.test(t))) return null;
-      const pos = opts.filter((t) => !t.startsWith("-"));
+      // Positionals after `--` count too (`git branch -m -- renamed` renames the checked-out branch, #3920).
+      const pos = [...opts.filter((t) => !t.startsWith("-")), ...(dd >= 0 ? rest.slice(dd + 1) : [])];
       if (!pos.length) return null;
       const moves = opts.some((t) => t === "--move" || /^-[a-zA-Z]*[mM][a-zA-Z]*$/.test(t));
       const deletes = opts.some((t) => t === "--delete" || /^-[a-zA-Z]*[dD][a-zA-Z]*$/.test(t));
@@ -1365,6 +1368,18 @@ function mutatingGitCommand(tokens, depth = 0) {
     default:
       return null;
   }
+}
+
+/**
+ * All main-checkout mutation hits in one command segment, flattening `bash -c` / `eval` payloads (#3920).
+ * @param {string[]} tokens
+ * @param {number} [depth]
+ * @returns {Array<{name: string, dir: string|null, branches?: string[]}>}
+ */
+function mutatingGitHits(tokens, depth = 0) {
+  const h = mutatingGitCommand(tokens, depth);
+  if (!h) return [];
+  return h.hits ? h.hits : [h];
 }
 
 /**
@@ -1411,8 +1426,7 @@ function checkMainCheckoutMutation(command) {
         baseDir = resolvePath(baseDir, t);
         continue;
       }
-      const hit = mutatingGitCommand(tokens);
-      if (!hit) continue;
+      for (const hit of mutatingGitHits(tokens)) {
       const targetDir = hit.dir === null ? baseDir : resolvePath(baseDir, hit.dir);
       if (!isMainCheckout(targetDir)) continue;
       if (hit.branches) {
@@ -1431,6 +1445,7 @@ function checkMainCheckoutMutation(command) {
         "Operator override: set FORGE_ALLOW_MAIN_CHECKOUT_GIT=1 in the shell before starting Claude Code " +
         "(set FORGE_ENFORCE_MAIN_CHECKOUT_GIT=0 to make this advisory only).\n"
       );
+      }
     }
     return null;
   } catch {
