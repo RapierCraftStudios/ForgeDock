@@ -27,8 +27,10 @@
 #      FORGE_CI_NO_CHECKS_GRACE (default 120), FORGE_CI_SETTLE (default 45 — never PASS earlier than
 #      this after the wait starts, so workflows that register late are not missed),
 #      FORGE_CI_REQUIRE_CHECKS (default 0).
-# "No checks" passes only when GitHub Actions also reports no workflow runs for the head commit;
-# if runs exist but their checks have not appeared yet, the gate keeps waiting.
+# "No checks" passes only when GitHub Actions also reports no unfinished workflow run that can
+# produce PR checks (event pull_request, pull_request_target, push, merge_group; status not
+# completed) for the head commit; such a run keeps the gate waiting. Completed runs and
+# workflow_dispatch/schedule runs never hold it. An unreadable runs query also keeps waiting.
 set -uo pipefail
 # Telemetry (forge#3834): best-effort decision record; never changes stdout, stderr or the exit code.
 _TEL="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/telemetry.sh"; [ -f "$_TEL" ] && . "$_TEL" 2>/dev/null
@@ -88,13 +90,13 @@ while :; do
   if [ -n "$failed" ]; then emit FAIL; echo "PR #$PR head ${START_SHA:0:7}: failing checks:"; echo "$failed"; exit 1; fi
   if [ "$total" -eq 0 ]; then
     if [ "$elapsed" -ge "$GRACE" ]; then
-      RUNS=$(gh api "repos/$REPO/actions/runs?head_sha=$START_SHA&per_page=1" --jq '.total_count' 2>/dev/null || echo "")
-      if [ -n "$RUNS" ] && [ "$RUNS" != "0" ]; then
-        :  # workflow runs exist for this head but no checks are reported yet — keep waiting
+      RUNS=$(gh api "repos/$REPO/actions/runs?head_sha=$START_SHA&per_page=100" --jq '[.workflow_runs[] | select(.status != "completed") | select(.event | IN("pull_request","pull_request_target","push","merge_group"))] | length' 2>/dev/null || echo "")
+      if [ -z "$RUNS" ] || [ "$RUNS" != "0" ]; then
+        :  # unfinished PR-capable run (or unreadable query) — no checks reported yet, keep waiting
       elif [ "$REQUIRE" = "1" ]; then
         emit ERROR; echo "no checks reported after ${GRACE}s and FORGE_CI_REQUIRE_CHECKS=1"; exit 2
       else
-        emit PASS; echo "no checks reported for PR #$PR after ${GRACE}s and no workflow runs for its head (no CI on this branch)"; exit 0
+        emit PASS; echo "no checks reported for PR #$PR after ${GRACE}s and no pending PR-triggering workflow runs for its head (no CI on this branch)"; exit 0
       fi
     fi
   elif [ -z "$pending" ] && [ "$elapsed" -ge "$SETTLE" ]; then

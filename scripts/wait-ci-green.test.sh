@@ -20,7 +20,9 @@ if [ "$1 $2" = "pr view" ]; then
   total=$(wc -l < "$D/sha"); [ "$n" -gt "$total" ] && n=$total; sed -n "${n}p" "$D/sha"; exit 0
 fi
 if [ "$1" = "api" ]; then
-  case "$2" in *actions/runs*) cat "$D/runs" 2>/dev/null || echo 0; exit 0 ;; esac
+  case "$2" in *actions/runs*)
+    q=""; prev=""; for a in "$@"; do [ "$prev" = "--jq" ] && q="$a"; prev="$a"; done
+    { cat "$D/runs" 2>/dev/null || echo '{"workflow_runs":[]}'; } | jq -r "${q:-.}"; exit 0 ;; esac
   exit 1
 fi
 if [ "$1 $2" = "pr checks" ]; then
@@ -60,8 +62,15 @@ expect "head moved during wait" "2|CI_GATE: ERROR" "$(run "$d")"
 expect "bad pr number" "2|CI_GATE: ERROR" "$(FAKE_DIR="$T/pass" PATH="$T/bin:$PATH" bash "$GATE" abc -R o/r 2>/dev/null | head -1 | sed 's/^/2|/')"
 expect "missing repo" "2" "$(FAKE_DIR="$T/pass" PATH="$T/bin:$PATH" bash "$GATE" 7 >/dev/null 2>&1; echo $?)"
 
-d=$(mk runsnochecks NONE); touch "$d/nochecks"; echo 3 > "$d/runs"
+d=$(mk runsnochecks NONE); touch "$d/nochecks"; echo '{"workflow_runs":[{"event":"pull_request","status":"in_progress"}]}' > "$d/runs"
 expect "no checks but workflow runs exist keeps waiting (timeout)" "3|CI_GATE: TIMEOUT" "$(run "$d" --timeout 3)"
+d=$(mk runsqueued NONE); touch "$d/nochecks"; echo '{"workflow_runs":[{"event":"pull_request","status":"queued"}]}' > "$d/runs"
+expect "queued pull_request run, no checks yet, keeps waiting" "3|CI_GATE: TIMEOUT" "$(run "$d" --timeout 3)"
+d=$(mk runsdispatch NONE); touch "$d/nochecks"; echo '{"workflow_runs":[{"event":"workflow_dispatch","status":"completed"}]}' > "$d/runs"
+expect "completed workflow_dispatch run only passes (no CI)" "0|CI_GATE: PASS" "$(run "$d" --timeout 3)"
+expect "completed workflow_dispatch run + REQUIRE fails closed" "2|CI_GATE: ERROR" "$(FORGE_CI_REQUIRE_CHECKS=1 run "$d" --timeout 3)"
+echo '{"workflow_runs":[{"event":"schedule","status":"in_progress"},{"event":"pull_request","status":"completed"}]}' > "$d/runs"
+expect "in-progress schedule + completed pull_request do not hold the gate" "0|CI_GATE: PASS" "$(run "$d" --timeout 3)"
 expect "pass is held until the settle period" "0|CI_GATE: PASS" "$(SETTLE=2 run "$(mk settle "$P")")"
 out=$(FAKE_DIR="$(mk headline "$P")" PATH="$T/bin:$PATH" FORGE_CI_INTERVAL=1 FORGE_CI_SETTLE=0 bash "$GATE" 7 -R o/r 2>/dev/null)
 expect "every result names the gated head" "CI_GATE_HEAD: abc1234" "$(printf '%s\n' "$out" | grep '^CI_GATE_HEAD:')"
