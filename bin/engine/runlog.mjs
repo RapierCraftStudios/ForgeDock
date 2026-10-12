@@ -112,6 +112,8 @@ export function deriveState(events) {
         if (Array.isArray(e.uncommit) && e.uncommit.length) {
           s.committed = s.committed.filter((p) => !e.uncommit.includes(p));
           s.terminalReason = null; s.outcomeCode = null;
+          // the revoked handoff reason must not be restored by a later RUN_REOPEN (e.g. after an engine-error)
+          lastCommitReason = null; lastCommitCode = null;
         }
         // forge#3754: a remediate that ended needs-human is re-run after a human clears the
         // label. Un-commit it (new array, no in-place mutation) so the forge#3506 resume guard
