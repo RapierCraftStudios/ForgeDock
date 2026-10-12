@@ -50,7 +50,7 @@ If you have both a local `claude` CLI and `ANTHROPIC_API_KEY` set and want to pi
 | [`project_board`](#project_board-optional) | No | GitHub Projects v2 integration |
 | [`orchestration`](#orchestration-optional) | No | `/orchestrate` concurrency and cascade admission policy |
 | [`pipeline`](#pipeline-optional) | No | `/orchestrate` batch-engine tuning (stall detection, token budget, narration) |
-| [`build`](#build-optional) | No | `/work-on` build-phase diff-size gate (threshold, exclusion globs) |
+| [`build`](#build-optional) | No | `/work-on` build-phase scope check (`build.scope.*`) and review depth (`review.depth.*`) |
 | [`services`](#services-optional) | No | External service URLs and IDs |
 | [`review`](#review-optional) | No | Context injected into review agents |
 | [`devdocs`](#devdocs-optional) | No | Devdocs knowledge tree path |
@@ -493,46 +493,61 @@ engine:
 
 ## `build` (OPTIONAL)
 
-Tuning for the `/work-on` build phase. Today it holds the diff-size gate: after the implement phase stages its changes and before validation commits them, the build measures the changed lines (added plus deleted) of the index and any earlier commits against `origin/{base}`, using `scripts/diff-size.sh`. Review findings per PR rise steeply with diff size, so an oversized build is split before it is validated.
+Tuning for the `/work-on` build phase. Today it holds the **scope check** (forge#3862, replacing the diff-size gate): after the implement phase stages its changes and before validation commits them, the build compares the staged diff with the architect plan (the `PLANNED_FILES:` list and `ESTIMATED_DIFF_LINES` in the plan's `### Scope Baseline`), measures a deterministic `review_weight` with `scripts/diff-size.sh`, and records the outcome in `FORGE:DIFF_SIZE`. **Size never blocks, a finished build is never discarded, and a completed build is never routed to decompose.**
 
 ```yaml
 build:
-  diff_size:
-    # Changed-line ceiling. Default: 1000. 0 disables the gate.
-    threshold: 1000
-
-    # Pre-build estimate (investigate): an estimate above threshold x factor routes
-    # straight to decompose without building. Default: 1.2. Skipped when threshold is 0.
-    estimate_factor: 1.2
-
-    # Pre-build estimate (investigate): a non-batch issue with at least this many
-    # independent seams and an estimate over half the threshold is decomposed into
-    # packed sub-issues (not one per seam). Review-finding batches are exempt.
-    # Default: 3.
-    batch_seam_min: 3
-
+  scope:
+    test_weight: 50          # percent weight of test lines in review_weight (default 50)
+    module_depth: 2          # path segments that define a module (default 2)
+    overrun_pct: 200         # whitespace-insensitive lines over the plan estimate, in percent, that count as scope creep (default 200)
+    trim_out_of_plan: false  # move out-of-plan hunks into the batched follow-up checklist (default false: flag only)
+    trim_max_files: 3        # trim only when at most this many files are out of plan (default 3)
     # Extra exclusion globs, ADDITIVE to the built-in defaults below.
     exclude_globs:
       - "docs/api/*"
       - "*.pb.go"
+
+review:
+  depth:
+    extended_weight: 1500    # review_weight at or above which review is EXTENDED (default 1500)
+    extended_modules: 6      # modules touched at or above which review is EXTENDED (default 6)
+    slice_files: 12          # changed files per slice in extended review (default 12)
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `diff_size.threshold` | integer | No | Changed lines allowed before the gate trips. Default: 1000. `0` disables the gate |
-| `diff_size.estimate_factor` | number | No | Multiplier on `threshold` for the pre-build estimate: the investigator forces a decomposition when `ESTIMATED_DIFF_LINES` > `threshold` x `estimate_factor`. The investigator emits the effective value as an own-line `ESTIMATE_FACTOR` field, and the engine's fail-toward-decompose net (`isDecomposed`) uses it even if the verdict says NO (1.2 when the field is absent or invalid). That net is suppressed (treated as not decomposed) for a sub-issue (`**Parent**: #N`), an issue with a trusted `FORGE:DECOMPOSED` comment, or a justified `FORGE:SIZE_OVERRIDE`, because decompose Guard 1 refuses those. Default: 1.2. Skipped when `threshold` is `0` |
-| `diff_size.batch_seam_min` | integer | No | Independent seams at which an issue is decomposed when `ESTIMATED_DIFF_LINES` is over half of `threshold`. Does not apply to review-finding batches (`batch` label or `FORGE:BATCH_MEMBERS`), which decompose only above `threshold` x `estimate_factor`. Seams are packed into sub-issues, not one per seam. Default: 3. Skipped when `threshold` is `0` |
-| `diff_size.exclude_globs` | list of strings | No | Globs excluded from the measurement, in addition to the built-in defaults. Default: `[]` |
+| `build.scope.test_weight` | integer | No | Percent of a test file's changed lines counted in `review_weight` (tests are easier to review). Default: 50 |
+| `build.scope.module_depth` | integer | No | Leading path segments of a file's directory that identify a module for the `modules` count. Default: 2 |
+| `build.scope.overrun_pct` | integer | No | The scope is flagged when whitespace-insensitive changed lines exceed the plan's estimate by more than this percent (200 = more than twice the estimate). Default: 200 |
+| `build.scope.trim_out_of_plan` | boolean | No | Opt-in. Moves each out-of-plan file's hunks out of the PR into the batched follow-up issue (forge#3843); the hunks are saved in a patch file next to the git dir, so nothing is lost. Never triggered by an overrun alone. Default: `false` (flag only) |
+| `build.scope.trim_max_files` | integer | No | Trim only when at most this many files are out of plan; more is flagged, not trimmed. Default: 3 |
+| `build.scope.exclude_globs` | list of strings | No | Globs excluded from the measurement, in addition to the built-in defaults. Default: `[]` |
+| `review.depth.extended_weight` | integer | No | `review_weight` at or above which the build records `review_depth: EXTENDED`. Default: 1500 |
+| `review.depth.extended_modules` | integer | No | Modules touched at or above which the build records `review_depth: EXTENDED`. Default: 6 |
+| `review.depth.slice_files` | integer | No | In extended review, each domain agent reviews slices of at most this many changed files. Default: 12 |
+
+All thresholds are config values with generous defaults, to be calibrated from telemetry (`diff_size` events carry the plan estimate, the actual, `review_weight`, the scope outcome and the review depth; see `docs/TELEMETRY.md`).
+
+**`review_weight`** (computed by `scripts/diff-size.sh`): changed lines with whitespace ignored (`git diff -w`, so a pure re-indent counts about 0), over the counted files only (generated and vendored code excluded), where test files count `test_weight` percent. `modules` counts the distinct directories (first `module_depth` segments) holding at least one non-whitespace change. It drives review depth, never blocking.
 
 **Built-in default exclusions** (always applied, defined once in `scripts/diff-size.sh`): lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Cargo.lock`, `poetry.lock`, `uv.lock`, `go.sum`, `Gemfile.lock`, `composer.lock`), `*.min.*`, `*.snap`, and the directories `dist/`, `build/`, `generated/`, `fixtures/`, `vendor/` (anchored to the repo root, so first-party directories such as `commands/work-on/build/` are counted) plus `__generated__/` and `__snapshots__/` (any depth). The diff is measured against the merge base of `HEAD` and `origin/<base>`, so commits that landed on the base after the branch point are not counted. A configured glob ending in `/` matches that directory at any depth; any other glob is matched against the file basename and the full path. Globs are treated as data, never evaluated.
 
-**Over the threshold**: the build posts a `FORGE:DIFF_SIZE` comment with a split proposal and exits `BUILD_RESULT: status: NEEDS_DECOMPOSE`; the router then runs `work-on:decompose`. To build the oversized diff anyway, post a `FORGE:SIZE_OVERRIDE` comment whose body has a non-empty justification on the line after the marker (only comments from trusted authors count). An issue that is already a decomposed child, or that already has `FORGE:DECOMPOSED`, is not decomposed again: the build blocks until an override is posted, unless the diff is cohesive (next paragraph). The staged diff is also persisted before the exit (pushed ref `forge/wip/{NUMBER}`, or a patch file when the push fails) and each split-proposal line links its hunks, so they survive worktree cleanup; decompose copies the link into each sub-issue. The measured `diff_lines` is recorded in the `FORGE:TRAJECTORY` comment.
+**Scope-check outcomes** (`result:` in `FORGE:DIFF_SIZE`): `OK` (in plan, standard depth); `EXTENDED_REVIEW` (in plan, `review_weight` or `modules` at the extended threshold: review adds reviewers and per-file slices); `SCOPE_FLAGGED` (files outside the plan, or an estimate overrun: listed in the comment for review, review extended, optionally trimmed); `OVERRIDDEN` (scope flagged but a justified `FORGE:SIZE_OVERRIDE` is present). An architect skip marker (empty plan) means no plan baseline: the out-of-plan check is skipped, never blocking. A `FORGE:SIZE_OVERRIDE` comment (trusted author, non-empty justification on the line after the marker) suppresses the scope flag and the decompose loop guard. The measured `diff_lines` is still recorded in the `FORGE:TRAJECTORY` comment.
 
-**Cohesive sub-issue overage**: a sub-issue (or an issue with `FORGE:DECOMPOSED`) that is over the threshold with no override continues instead of blocking when `scripts/diff-size.sh` reports `cohesive=true`: at least 70% of the counted lines are in files added by the diff or in test files (test directories `test/`, `tests/`, `__tests__/`, or `*.test.*`, `*.spec.*`, `test_*`, `*_test.*`), and `diff_lines` is at most `threshold` x 1.5. The build records `result: COHESIVE` with the cohesion figures and a reviewer note in `FORGE:DIFF_SIZE`, adds no `needs-human`, and continues to validation. Test lines are classified, not discounted. The 70% and 1.5x constants live in the script and are not configurable. A non-sub-issue over the threshold still routes to `NEEDS_DECOMPOSE`, and `FORGE:SIZE_OVERRIDE` still takes precedence. Each sub-issue is packed to at most `0.8 x threshold` and carries an own-line `ESTIMATED_DIFF_LINES: N` in its body, which `FORGE:DIFF_SIZE` records next to the actual `diff_lines` as `estimated_diff_lines`.
+**Decomposition is a planning decision**: `work-on:investigate` answers `**YES**` only when the work is separable (independent modules or services, no shared files, no ordering dependency, each piece independently testable), with the reason recorded; a cohesive change stays one unit at any size. It emits `ESTIMATED_DIFF_LINES` (the scope baseline) and `INDEPENDENT_SEAMS` inside `### Decomposition Assessment`. The engine downgrades a `**YES**` to NO unless `INDEPENDENT_SEAMS` is at least 2 with an own-line `DECOMPOSE_JUSTIFICATION:`; it has no line-count rule. A sub-issue, an issue with a trusted `FORGE:DECOMPOSED` comment, or one with a justified `FORGE:SIZE_OVERRIDE` is never decomposed (decompose Guard 1).
 
-**Pre-build estimate**: `work-on:investigate` emits `ESTIMATED_DIFF_LINES`, `INDEPENDENT_SEAMS`, `GATE_THRESHOLD` and `ESTIMATE_FACTOR` inside `### Decomposition Assessment`. An estimate above `threshold` x `estimate_factor` (or, for a non-batch issue, `batch_seam_min`+ seams whose estimate is over `threshold` / 2) answers `**YES**`, so the issue is decomposed before any build into `max(2, ceil(estimate / (0.8 x threshold)))` packed sub-issues (the parent is a terminal tracker). The engine downgrades a `**YES**` that neither condition requires to NO unless the report has an own-line `DECOMPOSE_JUSTIFICATION:` line (it assumes `batch_seam_min` 3 and cannot see the `batch` label, so it is lenient for batches). The estimate rule is skipped when `threshold` is `0`.
+**Migration from `build.diff_size.*`** (deprecated; read as aliases for one release, then removed):
 
-**Commands that use this section**: `work-on` (build phase B5.5, `decompose`, `close`)
+| Old key | New behaviour |
+|---------|---------------|
+| `build.diff_size.threshold` | No longer a gate. A positive value is read as `review.depth.extended_weight` (extended review instead of a block or split); `0` (gate disabled) now just means the defaults. The build records `deprecated_config` in `FORGE:DIFF_SIZE` when an alias supplied a value |
+| `build.diff_size.exclude_globs` | Read as an alias of `build.scope.exclude_globs` (additive) |
+| `build.diff_size.estimate_factor`, `build.diff_size.batch_seam_min` | Ignored. The investigator's decomposition rule is separability, not a line count |
+
+`BUILD_RESULT: status: NEEDS_DECOMPOSE`, the `forge/wip/{NUMBER}` ref, the cohesive-overage path and the outcome code `build.size_over_gate` are retired. An old run whose build was handed to decompose can be resumed at build with `run-issue --retry` once a trusted `FORGE:DECOMPOSED:REVOKED` comment (newer than the `FORGE:DECOMPOSED` comment) and a justified `FORGE:SIZE_OVERRIDE` are on the issue; untrusted comments never reopen a run.
+
+**Commands that use this section**: `work-on` (build phase B5.5, `close`), `review-pr` (Phase 3 review depth)
 
 ---
 

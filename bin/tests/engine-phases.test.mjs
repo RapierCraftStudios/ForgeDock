@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
-import { PHASES, pickPhase, REMEDIATION_BOUND_MARKERS, cycleMarker, sliceToCurrentCycle, postCycleMarker, nextCycleNumber } from "../engine/phases.mjs";
+import { PHASES, pickPhase, REMEDIATION_BOUND_MARKERS, cycleMarker, sliceToCurrentCycle, postCycleMarker, nextCycleNumber, decompositionRevokedWithOverride } from "../engine/phases.mjs";
 import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
 import { RESERVED_TYPES } from "../../packages/protocol/src/types.js";
 import { trusted, jsonLines, invBody, builderBody, remediationBody, remediationHeldBody } from "./helpers/comments.mjs";
@@ -177,154 +177,107 @@ describe("pickPhase", () => {
       assert.equal(outcome.terminalReason, undefined);
     });
 
-    // forge#3573: pre-build size estimate safety net.
-    const sized = (verdict, est, gate, factor, seams = 3, justification) => inv(verdict, `ESTIMATED_DIFF_LINES: ${est}\nINDEPENDENT_SEAMS: ${seams}\nGATE_THRESHOLD: ${gate}\n${factor === undefined ? "" : `ESTIMATE_FACTOR: ${factor}\n`}${justification === undefined ? "" : `DECOMPOSE_JUSTIFICATION: ${justification}\n`}<!-- DECOMPOSE:${/YES/.test(verdict) ? "YES" : "NO"} -->`);
+    // forge#3862: decomposition rests on separability, never on size. No estimate net remains.
+    const sized = (verdict, est, seams = 2, justification) => inv(verdict, `ESTIMATED_DIFF_LINES: ${est}\nINDEPENDENT_SEAMS: ${seams}\n${justification === undefined ? "" : `DECOMPOSE_JUSTIFICATION: ${justification}\n`}<!-- DECOMPOSE:${/YES/.test(verdict) ? "YES" : "NO"} -->`);
 
-    it("NO verdict with estimate over threshold x 1.2 -> decomposed (safety net)", async () => {
-      const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1500, 1000)));
-      assert.equal(outcome.terminalReason, "decomposed");
-    });
-
-    it("NO verdict with estimate within threshold x 1.2 -> not decomposed", async () => {
-      const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1200, 1000)));
-      assert.equal(outcome.terminalReason, undefined);
-    });
-
-    it("ESTIMATE_FACTOR 3.0 -> 2000/1000 is not decomposed", async () => {
-      const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 2000, 1000, "3.0")));
-      assert.equal(outcome.terminalReason, undefined);
-    });
-
-    it("ESTIMATE_FACTOR 1.0 -> 1100/1000 is decomposed", async () => {
-      const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1100, 1000, "1.0")));
-      assert.equal(outcome.terminalReason, "decomposed");
-    });
-
-    it("absent ESTIMATE_FACTOR falls back to 1.2", async () => {
-      const o1 = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1300, 1000)));
-      assert.equal(o1.terminalReason, "decomposed");
-      const o2 = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1100, 1000)));
-      assert.equal(o2.terminalReason, undefined);
-    });
-
-    it("zero, invalid or quoted mid-line ESTIMATE_FACTOR is ignored (fallback 1.2)", async () => {
-      for (const f of ["0", "abc", "-2", "1e2", ".5"]) {
-        const o = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1500, 1000, f)));
-        assert.equal(o.terminalReason, "decomposed", `factor ${f}`);
+    it("a NO verdict is never overturned by a huge estimate (no size-based routing)", async () => {
+      for (const est of [1500, 5000, 100000]) {
+        const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one cohesive change", est, 1)));
+        assert.equal(outcome.terminalReason, undefined, `estimate ${est}`);
       }
-      const quoted = inv("**NO** — one PR", "see `ESTIMATE_FACTOR: 5` inline\nESTIMATED_DIFF_LINES: 1500\nGATE_THRESHOLD: 1000\n<!-- DECOMPOSE:NO -->");
-      const o = await investigate.detectOutcome(base, ioComments(quoted));
-      assert.equal(o.terminalReason, "decomposed");
     });
 
-    it("GATE_THRESHOLD 0 disables the estimate net", async () => {
-      const outcome = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 5000, 0)));
+    it("a legacy report carrying GATE_THRESHOLD / ESTIMATE_FACTOR is read as NO (fields ignored)", async () => {
+      const legacy = inv("**NO** — one PR", "ESTIMATED_DIFF_LINES: 1500\nINDEPENDENT_SEAMS: 1\nGATE_THRESHOLD: 1000\nESTIMATE_FACTOR: 1.0\n<!-- DECOMPOSE:NO -->");
+      const outcome = await investigate.detectOutcome(base, ioComments(legacy));
       assert.equal(outcome.terminalReason, undefined);
     });
 
-    it("YES verdict carrying the estimate fields -> decomposed", async () => {
-      const outcome = await investigate.detectOutcome(base, ioComments(sized("**YES** — split", 1500, 1000)));
-      assert.equal(outcome.terminalReason, "decomposed");
+    it("separable YES (2+ seams, own-line DECOMPOSE_JUSTIFICATION) -> decomposed, however small the estimate", async () => {
+      for (const est of [90, 600, 5000]) {
+        const outcome = await investigate.detectOutcome(base, ioComments(sized("**YES** — independent services", est, 2, "services a and b share no file and have no ordering")));
+        assert.equal(outcome.terminalReason, "decomposed", `estimate ${est}`);
+      }
     });
 
-    it("estimate fields in an untrusted comment or quoted mid-line are ignored", async () => {
-      const untrusted = trusted(sized("**NO** — one PR", 9000, 1000), { assoc: "NONE", type: "User", login: "drive-by" });
-      const o1 = await investigate.detectOutcome(base, ioComments(inv("**NO** — fits"), untrusted));
-      assert.equal(o1.terminalReason, undefined);
-      const o2 = await investigate.detectOutcome(base, ioComments(inv("**NO** — fits", "see `ESTIMATED_DIFF_LINES: 9000` and GATE_THRESHOLD: 1000 inline")));
-      assert.equal(o2.terminalReason, undefined);
-    });
-
-    it("conflicting signals still fail safe even with an over-gate estimate", async () => {
-      const outcome = await investigate.detectOutcome(base, ioComments(
-        inv("**YES** — split", `ESTIMATED_DIFF_LINES: 5000\nGATE_THRESHOLD: 1000\n<!-- ${PHASE_MARKERS.investigate.notDecomposedMarker} -->`)));
-      assert.equal(outcome.terminalReason, undefined);
-    });
-
-    // forge#3786: a YES the numbers do not require is downgraded unless justified.
-    it("unsupported YES (1150 lines, 2 seams, gate 1000 x 1.2) -> not decomposed", async () => {
-      const outcome = await investigate.detectOutcome(base, ioComments(sized("**YES** — split", 1150, 1000, "1.2", 2)));
+    it("YES with a single seam is downgraded to NO even when huge (size is not separability)", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(sized("**YES** — too big", 5000, 1, "it is large")));
       assert.equal(outcome.status, "committed");
       assert.equal(outcome.terminalReason, undefined);
     });
 
-    it("unsupported YES with an own-line DECOMPOSE_JUSTIFICATION stays decomposed", async () => {
-      const outcome = await investigate.detectOutcome(base, ioComments(sized("**YES** — split", 1150, 1000, "1.2", 2, "two migrations must ship separately")));
-      assert.equal(outcome.terminalReason, "decomposed");
+    it("YES with 2+ seams but no DECOMPOSE_JUSTIFICATION is downgraded", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(sized("**YES** — split", 1500, 3)));
+      assert.equal(outcome.terminalReason, undefined);
     });
 
     it("quoted mid-line DECOMPOSE_JUSTIFICATION does not justify a YES", async () => {
-      const body = inv("**YES** — split", "see `DECOMPOSE_JUSTIFICATION: x` inline\nESTIMATED_DIFF_LINES: 1150\nINDEPENDENT_SEAMS: 2\nGATE_THRESHOLD: 1000\n<!-- DECOMPOSE:YES -->");
+      const body = inv("**YES** — split", "see `DECOMPOSE_JUSTIFICATION: x` inline\nESTIMATED_DIFF_LINES: 1150\nINDEPENDENT_SEAMS: 2\n<!-- DECOMPOSE:YES -->");
       const outcome = await investigate.detectOutcome(base, ioComments(body));
       assert.equal(outcome.terminalReason, undefined);
     });
 
-    it("YES satisfying the seam clause (1150 lines, 3 seams) stays decomposed", async () => {
-      const outcome = await investigate.detectOutcome(base, ioComments(sized("**YES** — split", 1150, 1000, "1.2", 3)));
-      assert.equal(outcome.terminalReason, "decomposed");
+    it("YES without a seam field stays decomposed (older or malformed report is not silently downgraded)", async () => {
+      const bare = await investigate.detectOutcome(base, ioComments(inv("**YES** — split")));
+      assert.equal(bare.terminalReason, "decomposed");
     });
 
-    it("YES with 3 seams but estimate at or under threshold / 2 is downgraded", async () => {
-      const outcome = await investigate.detectOutcome(base, ioComments(sized("**YES** — split", 500, 1000, "1.2", 3)));
+    it("estimate fields in an untrusted comment or quoted mid-line are ignored", async () => {
+      const untrusted = trusted(sized("**YES** — split", 9000, 4, "x"), { assoc: "NONE", type: "User", login: "drive-by" });
+      const o1 = await investigate.detectOutcome(base, ioComments(inv("**NO** — fits"), untrusted));
+      assert.equal(o1.terminalReason, undefined);
+      const o2 = await investigate.detectOutcome(base, ioComments(inv("**NO** — fits", "see `ESTIMATED_DIFF_LINES: 9000` inline")));
+      assert.equal(o2.terminalReason, undefined);
+    });
+
+    it("conflicting signals still fail safe", async () => {
+      const outcome = await investigate.detectOutcome(base, ioComments(
+        inv("**YES** — split", `ESTIMATED_DIFF_LINES: 5000\n<!-- ${PHASE_MARKERS.investigate.notDecomposedMarker} -->`)));
       assert.equal(outcome.terminalReason, undefined);
     });
 
-    it("over-threshold YES with a single seam stays decomposed; NO->YES net unchanged (AlterLab#34446 shape)", async () => {
-      const yes = await investigate.detectOutcome(base, ioComments(sized("**YES** — split", 1300, 1000, "1.2", 1)));
-      assert.equal(yes.terminalReason, "decomposed");
-      const no = await investigate.detectOutcome(base, ioComments(sized("**NO** — one PR", 1300, 1000, "1.2", 1)));
-      assert.equal(no.terminalReason, "decomposed");
-    });
-
-    it("YES without numeric fields stays decomposed; GATE_THRESHOLD 0 never downgrades", async () => {
-      const bare = await investigate.detectOutcome(base, ioComments(inv("**YES** — split")));
-      assert.equal(bare.terminalReason, "decomposed");
-      const off = await investigate.detectOutcome(base, ioComments(sized("**YES** — split", 100, 0, "1.2", 1)));
-      assert.equal(off.terminalReason, "decomposed");
-    });
-
     // forge#3676: loop guard — a child / decomposed / overridden issue is never routed to decompose.
-    const over = () => sized("**NO** — one PR", 1500, 1000);
+    const separable = () => sized("**YES** — independent services", 1500, 2, "no shared files, no ordering");
     const childBody = "## Problem\n\n**Parent**: #12\n\nbody";
     const override = (just) => `<!-- ${PHASE_MARKERS.build.sizeOverrideMarker} -->${just ? `\n${just}` : ""}`;
 
-    it("child issue with over-gate estimate -> not decomposed", async () => {
-      const outcome = await investigate.detectOutcome(base, ioWithBody(childBody, over()));
+    it("separable YES on a plain issue (control) -> decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioWithBody("", separable()));
+      assert.equal(outcome.terminalReason, "decomposed");
+    });
+
+    it("child issue with a separable YES -> not decomposed", async () => {
+      const outcome = await investigate.detectOutcome(base, ioWithBody(childBody, separable()));
       assert.equal(outcome.status, "committed");
       assert.equal(outcome.terminalReason, undefined);
     });
 
-    it("child issue with explicit YES -> not decomposed", async () => {
-      const outcome = await investigate.detectOutcome(base, ioWithBody(childBody, sized("**YES** — split", 1500, 1000)));
-      assert.equal(outcome.terminalReason, undefined);
-    });
-
-    it("trusted FORGE:DECOMPOSED comment suppresses the estimate net", async () => {
-      const outcome = await investigate.detectOutcome(base, ioWithBody("", over(), "<!-- FORGE:DECOMPOSED -->\nspawned"));
+    it("trusted FORGE:DECOMPOSED comment suppresses a YES", async () => {
+      const outcome = await investigate.detectOutcome(base, ioWithBody("", separable(), "<!-- FORGE:DECOMPOSED -->\nspawned"));
       assert.equal(outcome.terminalReason, undefined);
     });
 
     it("untrusted FORGE:DECOMPOSED comment does not suppress", async () => {
       const fake = trusted("<!-- FORGE:DECOMPOSED -->\nspawned", { assoc: "NONE", type: "User", login: "drive-by" });
-      const outcome = await investigate.detectOutcome(base, ioWithBody("", over(), fake));
+      const outcome = await investigate.detectOutcome(base, ioWithBody("", separable(), fake));
       assert.equal(outcome.terminalReason, "decomposed");
     });
 
     it("justified SIZE_OVERRIDE suppresses; unjustified does not", async () => {
-      const ok = await investigate.detectOutcome(base, ioWithBody("", over(), override("Accepted: one cohesive change.")));
+      const ok = await investigate.detectOutcome(base, ioWithBody("", separable(), override("Accepted: one cohesive change.")));
       assert.equal(ok.terminalReason, undefined);
-      const bad = await investigate.detectOutcome(base, ioWithBody("", over(), override("")));
+      const bad = await investigate.detectOutcome(base, ioWithBody("", separable(), override("")));
       assert.equal(bad.terminalReason, "decomposed");
     });
 
     it("body fetch failure fails toward not decomposed", async () => {
-      const outcome = await investigate.detectOutcome(base, ioWithBody(new Error("gh down"), over()));
+      const outcome = await investigate.detectOutcome(base, ioWithBody(new Error("gh down"), separable()));
       assert.equal(outcome.status, "committed");
       assert.equal(outcome.terminalReason, undefined);
     });
 
     it("mid-line Parent mention does not make an issue a child (control still decomposes)", async () => {
-      const outcome = await investigate.detectOutcome(base, ioWithBody("see **Parent**: #12 in docs", over()));
+      const outcome = await investigate.detectOutcome(base, ioWithBody("see **Parent**: #12 in docs", separable()));
       assert.equal(outcome.terminalReason, "decomposed");
     });
 
@@ -1173,186 +1126,88 @@ describe("pickPhase", () => {
   // Regression tests for #2193: within-comment `**Branch**:` field match order is
   // first-match, by design (see phases.mjs parseBranchFromMarkers doc comment).
   // Comment-level last-match (#2184) is unaffected/untouched by these tests.
-  // NEEDS_DECOMPOSE routing: build.md B5.5 size-gate exit posts FORGE:DIFF_SIZE
-  // (result: OVER + ### Split Proposal) and no FORGE:BUILDER:COMPLETE.
-  describe("build.detectOutcome — size-gate NEEDS_DECOMPOSE routes to decompose", () => {
+  // forge#3862: build.md B5.5 is a scope check, not a size gate; a FORGE:DIFF_SIZE record never routes anywhere.
+  describe("build.detectOutcome — a finished build never routes to decompose (forge#3862)", () => {
     const build = PHASES.find(p => p.id === "build");
     const withComments = (...items) => ({ gh: async () => jsonLines(items.map((c) => (typeof c === "string" ? trusted(c) : c))), git: async () => "0" });
-    const stranger = (body) => ({ body, author_association: "NONE", user: { login: "rando", type: "User" } });
-    const gate = (result, proposal = true) =>
-      `<!-- FORGE:DIFF_SIZE -->\n## Diff Size\n\ndiff_lines: 1906\nexcluded_lines: 0\nthreshold: 1000\nresult: ${result}\n` +
+    const gate = (result, proposal = false) =>
+      `<!-- FORGE:DIFF_SIZE -->\n## Diff Size and Scope\n\ndiff_lines: 1906\nreview_weight: 1500\nresult: ${result}\n` +
       (proposal ? "### Split Proposal\n- **A** — a.mjs\n" : "");
     const override = "<!-- FORGE:SIZE_OVERRIDE -->\nJustified: generated bulk.";
     const st = { ...base, committed: ["investigate"] };
 
-    it("OVER + Split Proposal -> committed, decomposed, non-retryable", async () => {
-      const o = await build.detectOutcome(st, withComments("<!-- FORGE:INVESTIGATOR -->", gate("OVER")));
-      assert.equal(o.status, "committed");
-      assert.equal(o.terminalReason, "decomposed");
-      assert.equal(o.retryable, undefined);
-    });
-
-    it("pickPhase selects decompose after the build commit", () => {
-      const s = { ...base, committed: ["investigate", "build"], terminalReason: "decomposed" };
-      assert.equal(pickPhase(s).id, "decompose");
-    });
-
-    it("OVER followed by FORGE:SIZE_OVERRIDE does not route", async () => {
-      const o = await build.detectOutcome(st, withComments(gate("OVER"), override));
+    it("a legacy OVER + Split Proposal record no longer routes to decompose", async () => {
+      const o = await build.detectOutcome(st, withComments("<!-- FORGE:INVESTIGATOR -->", gate("OVER", true)));
       assert.equal(o.status, "failed");
       assert.equal(o.terminalReason, undefined);
     });
 
-    it("an override posted BEFORE the latest OVER does not suppress it", async () => {
-      const o = await build.detectOutcome(st, withComments(override, gate("OVER")));
-      assert.equal(o.terminalReason, "decomposed");
-    });
-
-    it("OVER without Split Proposal (loop-guard Blocked exit) falls through to the failure", async () => {
-      const o = await build.detectOutcome(st, withComments(gate("OVER", false)));
-      assert.equal(o.status, "failed");
-    });
-
-    it("OK, OVERRIDDEN, COHESIVE, malformed and absent DIFF_SIZE fall through", async () => {
-      for (const c of [gate("OK"), gate("OVERRIDDEN"), gate("COHESIVE"), gate("COHESIVE", false), "<!-- FORGE:DIFF_SIZE -->\nresult: OVERFLOW\n### Split Proposal", "nothing"]) {
-        const o = await build.detectOutcome(st, withComments(c));
-        assert.equal(o.status, "failed", c);
+    it("no DIFF_SIZE result (OK, EXTENDED_REVIEW, SCOPE_FLAGGED, OVERRIDDEN, legacy COHESIVE/OVER) routes anywhere", async () => {
+      for (const r of ["OK", "EXTENDED_REVIEW", "SCOPE_FLAGGED", "OVERRIDDEN", "COHESIVE", "OVER"]) {
+        const o = await build.detectOutcome(st, withComments(gate(r)));
+        assert.equal(o.status, "failed", r);
+        assert.equal(o.terminalReason, undefined, r);
+        assert.notEqual(o.code, "build.size_over_gate", r);
       }
     });
 
-    it("only the latest DIFF_SIZE counts (OVER then refreshed OK)", async () => {
-      const o = await build.detectOutcome(st, withComments(gate("OVER"), gate("OK")));
+    it("a size override does not change the outcome", async () => {
+      const o = await build.detectOutcome(st, withComments(gate("OVER", true), override));
+      assert.equal(o.terminalReason, undefined);
+    });
+
+    it("a newer OVER after a blocked acceptance gate stays fail-closed (no decompose)", async () => {
+      const o = await build.detectOutcome(st, withComments("<!-- FORGE:BUILD_BLOCKED -->\n## Build Blocked\n\nreason", gate("OVER", true)));
       assert.equal(o.status, "failed");
+      assert.equal(o.code, "build.acceptance_failed");
+      assert.equal(o.terminalReason, undefined);
     });
 
-    describe("older blocked marker vs newer size gate (forge#3712)", () => {
-      const blocked = "<!-- FORGE:BUILD_BLOCKED -->\n## Build Blocked\n\nreason";
-      const failed = "<!-- FORGE:ACCEPTANCE_GATE:FAILED -->\nchecks failed";
-
-      it("BUILD_BLOCKED then newer OVER + Split Proposal -> committed, decomposed", async () => {
-        const o = await build.detectOutcome(st, withComments(blocked, gate("OVER")));
-        assert.equal(o.status, "committed");
-        assert.equal(o.terminalReason, "decomposed");
-      });
-
-      it("OVER + Split Proposal then newer BUILD_BLOCKED -> failed, non-retryable", async () => {
-        const o = await build.detectOutcome(st, withComments(gate("OVER"), blocked));
-        assert.equal(o.status, "failed");
-        assert.equal(o.retryable, false);
-        assert.equal(o.terminalReason, undefined);
-      });
-
-      it("ACCEPTANCE_GATE:FAILED then newer OVER + proposal -> decomposed", async () => {
-        const o = await build.detectOutcome(st, withComments(failed, gate("OVER")));
-        assert.equal(o.status, "committed");
-        assert.equal(o.terminalReason, "decomposed");
-      });
-
-      it("BUILD_BLOCKED then OVER without proposal (loop-guard exit) -> failed", async () => {
-        const o = await build.detectOutcome(st, withComments(blocked, gate("OVER", false)));
-        assert.equal(o.status, "failed");
-        assert.equal(o.retryable, false);
-      });
-
-      it("BUILD_BLOCKED, OVER + proposal, then justified SIZE_OVERRIDE -> failed", async () => {
-        const o = await build.detectOutcome(st, withComments(blocked, gate("OVER"), override));
-        assert.equal(o.status, "failed");
-        assert.equal(o.retryable, false);
-      });
-
-      it("FORGE:BUILDER:COMPLETE still short-circuits routing", async () => {
-        const complete = "<!-- FORGE:BUILDER -->\n<!-- FORGE:BUILDER:COMPLETE -->\n**Branch**: `fix/x-42`";
-        const o = await build.detectOutcome(st, withComments(blocked, gate("OVER"), complete));
-        assert.notEqual(o.terminalReason, "decomposed");
-      });
+    it("pickPhase after a committed build with no terminal reason never selects decompose", () => {
+      const s = { ...base, committed: ["investigate", "build"], terminalReason: null };
+      assert.notEqual(pickPhase(s)?.id, "decompose");
     });
 
-    describe("trust filter", () => {
-      const withEnv = async (env, fn) => {
-        const saved = {};
-        for (const k of Object.keys(env)) { saved[k] = process.env[k]; if (env[k] === undefined) delete process.env[k]; else process.env[k] = env[k]; }
-        try { return await fn(); } finally { for (const k of Object.keys(saved)) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } }
-      };
-      const noEnv = { FORGE_TRAIL_TRUSTED_ASSOCIATIONS: undefined, FORGE_TRAIL_TRUSTED_LOGINS: undefined };
-
-      it("untrusted OVER gate never routes", async () => {
-        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(stranger(gate("OVER")))));
-        assert.equal(o.status, "failed");
-        assert.equal(o.terminalReason, undefined);
-      });
-
-      it("untrusted override does not suppress a trusted OVER gate", async () => {
-        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(gate("OVER"), stranger(override))));
-        assert.equal(o.terminalReason, "decomposed");
-      });
-
-      it("trusted override with empty justification does not suppress", async () => {
-        for (const bare of ["<!-- FORGE:SIZE_OVERRIDE -->", "<!-- FORGE:SIZE_OVERRIDE -->\r\n\r\n<!-- note -->\r\n  \r\n"]) {
-          const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(gate("OVER"), bare)));
-          assert.equal(o.terminalReason, "decomposed", JSON.stringify(bare));
-        }
-      });
-
-      it("trusted override with a justification suppresses (CRLF body too)", async () => {
-        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(gate("OVER"), "<!-- FORGE:SIZE_OVERRIDE -->\r\nJustified: bulk.\r\n")));
-        assert.equal(o.status, "failed");
-      });
-
-      it("CRLF gate body routes", async () => {
-        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(gate("OVER").replace(/\n/g, "\r\n"))));
-        assert.equal(o.terminalReason, "decomposed");
-      });
-
-      it("only trusted comments count when an untrusted later OK is interleaved", async () => {
-        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(gate("OVER"), stranger(gate("OK")))));
-        assert.equal(o.terminalReason, "decomposed");
-      });
-
-      it("trusted Bot author is accepted", async () => {
-        const bot = { body: gate("OVER"), author_association: "NONE", user: { login: "app[bot]", type: "Bot" } };
-        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(bot)));
-        assert.equal(o.terminalReason, "decomposed");
-      });
-
-      it("login in FORGE_TRAIL_TRUSTED_LOGINS is accepted", async () => {
-        const c = { body: gate("OVER"), author_association: "NONE", user: { login: "ci-user", type: "User" } };
-        const o = await withEnv({ ...noEnv, FORGE_TRAIL_TRUSTED_LOGINS: "x, ci-user" }, () => build.detectOutcome(st, withComments(c)));
-        assert.equal(o.terminalReason, "decomposed");
-      });
-
-      it("explicitly empty FORGE_TRAIL_TRUSTED_ASSOCIATIONS trusts no association", async () => {
-        const o = await withEnv({ ...noEnv, FORGE_TRAIL_TRUSTED_ASSOCIATIONS: "" }, () => build.detectOutcome(st, withComments(gate("OVER"))));
-        assert.equal(o.status, "failed");
-      });
-
-      it("fails closed on fetch error, non-JSON, and missing author data", async () => {
-        const mk = (fn) => ({ gh: fn, git: async () => "0" });
-        const body = gate("OVER");
-        for (const io of [
-          mk(async (a) => (a.join(" ").includes("author_association") ? "not json" : JSON.stringify([body]))),
-          mk(async () => JSON.stringify([body])), // bodies only, no author fields
-        ]) {
-          const o = await withEnv(noEnv, () => build.detectOutcome(st, io));
-          assert.equal(o.status, "failed");
-        }
-      });
-
-      it("a comment fetch error never routes (propagates, no decompose)", async () => {
-        const io = { gh: async () => { throw new Error("boom"); }, git: async () => "0" };
-        await assert.rejects(() => withEnv(noEnv, () => build.detectOutcome(st, io)), /boom/);
-      });
-
-      it("a trusted FORGE:DECOMPOSED comment suppresses re-routing", async () => {
-        const o = await withEnv(noEnv, () => build.detectOutcome(st, withComments(gate("OVER"), "<!-- FORGE:DECOMPOSED:COMPLETE -->")));
-        assert.equal(o.status, "failed");
-      });
+    it("a comment fetch error never routes (propagates, no decompose)", async () => {
+      const io = { gh: async () => { throw new Error("boom"); }, git: async () => "0" };
+      await assert.rejects(() => build.detectOutcome(st, io), /boom/);
     });
 
     it("a posted FORGE:BUILDER:COMPLETE with commits wins over a stale OVER", async () => {
       const o = await build.detectOutcome({ ...st, branch: "fix/x-42" },
-        { gh: async () => JSON.stringify([trusted(gate("OVER")), trusted("<!-- FORGE:BUILDER -->\n<!-- FORGE:BUILDER:COMPLETE -->")]), git: async () => "2" });
+        { gh: async () => JSON.stringify([trusted(gate("OVER", true)), trusted("<!-- FORGE:BUILDER -->\n<!-- FORGE:BUILDER:COMPLETE -->")]), git: async () => "2" });
       assert.equal(o.status, "committed");
       assert.equal(o.terminalReason, undefined);
+    });
+  });
+
+  describe("decompositionRevokedWithOverride (forge#3862)", () => {
+    const revoked = "<!-- FORGE:DECOMPOSED:REVOKED -->\nOperator revoked the decomposition.";
+    const decomposed = "<!-- FORGE:DECOMPOSED -->\nspawned";
+    const complete = "<!-- FORGE:DECOMPOSED -->\n<!-- FORGE:DECOMPOSED:COMPLETE -->";
+    const ovr = "<!-- FORGE:SIZE_OVERRIDE -->\nJustified: one cohesive change.";
+    const stranger = (b) => trusted(b, { assoc: "NONE", type: "User", login: "drive-by" });
+    const run = (...items) => decompositionRevokedWithOverride(42, { gh: async () => jsonLines(items.map((c) => (typeof c === "string" ? trusted(c) : c))), git: async () => "0" });
+
+    it("revocation newer than FORGE:DECOMPOSED plus a justified override -> true", async () => {
+      assert.equal(await run(decomposed, complete, revoked, ovr), true);
+      assert.equal(await run(ovr, decomposed, revoked), true);
+      assert.equal(await run(revoked, ovr), true);
+    });
+    it("no revocation, no override, or a newer re-decomposition -> false", async () => {
+      assert.equal(await run(decomposed, complete, ovr), false);
+      assert.equal(await run(decomposed, revoked), false);
+      assert.equal(await run(decomposed, revoked, complete, ovr), false);
+    });
+    it("an unjustified override does not count", async () => {
+      assert.equal(await run(decomposed, revoked, "<!-- FORGE:SIZE_OVERRIDE -->"), false);
+    });
+    it("untrusted revocation or override never counts", async () => {
+      assert.equal(await run(decomposed, stranger(revoked), ovr), false);
+      assert.equal(await run(decomposed, revoked, stranger(ovr)), false);
+    });
+    it("an unreadable comment trail fails closed", async () => {
+      assert.equal(await decompositionRevokedWithOverride(42, { gh: async () => { throw new Error("boom"); }, git: async () => "0" }), false);
     });
   });
 

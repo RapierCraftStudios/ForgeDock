@@ -21,8 +21,8 @@ export const OUTCOME_CODES = Object.freeze({
   REVIEW_REREVIEW_SKIPPED: "review.rereview_skipped",
   BUILD_ACCEPTANCE_FAILED: "build.acceptance_failed",
   BUILD_ACCEPTANCE_MALFORMED: "build.acceptance_malformed",
-  BUILD_SIZE_OVER_GATE: "build.size_over_gate",
-  BUILD_COHESIVE: "build.cohesive",
+  BUILD_SIZE_OVER_GATE: "build.size_over_gate", // retired (forge#3862): never emitted; kept so historic runs parse
+  BUILD_COHESIVE: "build.cohesive", // retired (forge#3862): never emitted
   REMEDIATE_NO_MARKER: "remediate.no_marker",
   REMEDIATE_DEFERRED_LIVE_RUN: "remediate.deferred_live_run",
   REMEDIATE_RE_ESCALATED: "remediate.re_escalated",

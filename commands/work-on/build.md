@@ -23,7 +23,7 @@ argument-hint: "{NUMBER} --repo {GH_REPO} --gh-flag \"{GH_FLAG}\" --base {PR_BAS
 **Agent model policy**: `model: "{DEFAULT_MODEL}"` — resolved from forge.yaml `agents.default_model`, else "sonnet" (standard tier). Fallback: `model: "opus"` if rate-limited. Feature gate: pass `effort` in Task/Skill spawns only on Claude Code >= 2.1.154. This file's mechanical bits (classification, label transitions) stay at this tier because they are interleaved with the reasoning-heavy child phases in the same run. <!-- Added: forge#1827 -->
 **NEVER use plan mode (EnterPlanMode).**
 
-**CRITICAL: You MUST execute ALL phases B0–B6.5 (including B5.5) in order (the exceptions are the B0 size-gate resume branch, which enters at B5.5, and the B0 gate-resume branch, which enters at B6.5, each with its state verified). Every child (B3 context, B4 architect, B5 implement, B6 validate) is invoked via `Skill(...)` — each is a forked sub-skill with its own isolated context. B3 and B4 are invoked for every complexity band except where the band is TRIVIAL or INVESTIGATION (B2/B2.1/B2.5 are also skipped for INVESTIGATION); the children post their own skip markers, so a skipped child is still visible on the issue. Skipping a child without the band justification degrades build quality and fails the phase-trail check.**
+**CRITICAL: You MUST execute ALL phases B0–B6.5 (including B5.5) in order (the one exception is the B0 gate-resume branch, which enters at B6.5 with its state verified). Every child (B3 context, B4 architect, B5 implement, B6 validate) is invoked via `Skill(...)` — each is a forked sub-skill with its own isolated context. B3 and B4 are invoked for every complexity band except where the band is TRIVIAL or INVESTIGATION (B2/B2.1/B2.5 are also skipped for INVESTIGATION); the children post their own skip markers, so a skipped child is still visible on the issue. Skipping a child without the band justification degrades build quality and fails the phase-trail check.**
 
 **Synchronous child consumption**: each child `Skill(...)` call (B3-B6) runs to completion in this phase's own turn, and you consume its result in that same turn. Never end or yield your turn to wait for a child, and never wait for a completion notification: notifications for forked children go to the root session, not to this phase, so a turn that yields is never resumed. A child return with no `*_RESULT:` block (running, backgrounded, empty) is not a result — re-read the GitHub markers for that child (`FORGE:CONTEXT`, `FORGE:ARCHITECT`, `FORGE:BUILDER`, `FORGE:VALIDATE`/`FORGE:QUALITY_GATE`) and apply the **bounded re-invoke rule**: re-invoke the same child with the same args at most 2 times per child on running/backgrounded/empty returns (the counter is per child and is not reset by a re-invoke). Before re-invoking, check state: if the child's marker is present, consume it instead of re-invoking; for implement and validate, also check the worktree (`git status --short` and `git log origin/{PR_BASE}..HEAD` in `{WORKTREE_PATH}`) — uncommitted in-flight edits or a fresh commit mean the original child may still be live, so wait for it by re-reading state rather than launching a second writer on the same worktree, and count that as a re-invoke attempt. After the cap is exhausted, take the Blocked exit (see Result emission and Blocked exit) with `blocker: child-stalled: <child>` (child = context|architect|implement|validate); it is terminal and is not re-invoked by the router.
 
@@ -108,7 +108,7 @@ Every exit path of this skill — COMPLETE, ALREADY_DONE, INVESTIGATION_COMPLETE
 
 ```
 BUILD_RESULT:
-  status: COMPLETE | ALREADY_DONE | INVESTIGATION_COMPLETE | NEEDS_DECOMPOSE | BLOCKED
+  status: COMPLETE | ALREADY_DONE | INVESTIGATION_COMPLETE | BLOCKED
   branch: {BRANCH}
   worktree: {WORKTREE_PATH}
   blocker: {description if status=BLOCKED, else empty}
@@ -176,25 +176,10 @@ EXISTING_FAST_PATH=$(printf '%s' "$CYCLE_SLICE" | bash "$TRUSTED_SCRIPT" bodies 
 `CYCLE_LOOKUP=FAILED` (or `trusted-comments.sh` unresolved) → Blocked exit with blocker `cycle-lookup-unavailable: could not read FORGE:CYCLE` (a transient GitHub failure uses the `github-unavailable:` prefix); never read a failed lookup as "no marker". Below, "present" and "exists" for BUILDER, BUILDER:COMPLETE, FAST_PATH, DIFF_SIZE, ACCEPTANCE_GATE and BUILD_BLOCKED comments always mean present in the **current-cycle slice** (comments after the newest trusted `FORGE:CYCLE` marker); a cycle-1 `BUILDER:COMPLETE` is invisible in cycle 2, so a new cycle with no slice COMPLETE falls through to B1 and builds fresh.
 
 **Resume check**:
-- If `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment of the current-cycle slice → the builder finished, but COMPLETE is posted at validate V5, BEFORE the B6.5 acceptance gate, so it is not proof the build passed. **Gate resume** (checked first; first match wins) <!-- Added: forge#3725 -->: read the newest trusted, comment of the current-cycle slice that starts with `FORGE:ACCEPTANCE_GATE` or `FORGE:BUILD_BLOCKED`, through the same anchored, trust-filtered lookup as the size-gate resume below (script resolution block verbatim; pipe `cycle_slice` into `bodies '^<!-- FORGE:(ACCEPTANCE_GATE|BUILD_BLOCKED)'`, and compare by comment order, never by presence):
+- If `<!-- FORGE:BUILDER:COMPLETE -->` is present in a BUILDER comment of the current-cycle slice → the builder finished, but COMPLETE is posted at validate V5, BEFORE the B6.5 acceptance gate, so it is not proof the build passed. **Gate resume** (checked first; first match wins) <!-- Added: forge#3725 -->: read the newest trusted, comment of the current-cycle slice that starts with `FORGE:ACCEPTANCE_GATE` or `FORGE:BUILD_BLOCKED`, through the same anchored, trust-filtered lookup as the FAST_PATH read above (script resolution block verbatim; pipe `cycle_slice` into `bodies '^<!-- FORGE:(ACCEPTANCE_GATE|BUILD_BLOCKED)'`, and compare by comment order, never by presence):
   - Lookup failed (`trusted-comments.sh` unresolved or `gh` error) → Blocked exit with blocker `gate-lookup-unavailable: could not read FORGE:ACCEPTANCE_GATE` (a transient GitHub failure uses the `github-unavailable:` prefix). Never read a failed lookup as "no gate marker".
   - Newest is `FORGE:ACCEPTANCE_GATE:FAILED`, `FORGE:ACCEPTANCE_GATE:BLOCKED`, or a `FORGE:BUILD_BLOCKED` comment → the gate is blocked and the engine fails closed on it, so returning ALREADY_DONE would deadlock every re-run. Derive BRANCH/WORKTREE_PATH/PR_BASE as in B1A/B1C (without creating anything), verify the branch and worktree exist and that `git -C "$WORKTREE_PATH" branch --show-current` equals BRANCH (missing or mismatched → Blocked exit `worktree-missing: cannot re-enter B6.5`; never recreate silently), recover `COMPLEXITY_BAND` from `EXISTING_FAST_PATH` with the B0.5 resume extraction, then skip B0.5-B6 and re-enter at **Phase B6.5**, which posts a fresh PASSED/FAILED/BLOCKED verdict (the one-repair `FORGE:ACCEPTANCE_REPAIR` bound still applies).
   - Newest is `FORGE:ACCEPTANCE_GATE:PASSED`, or no gate marker exists → build already complete. Derive BRANCH/WORKTREE_PATH as in B1A/B1C (without creating anything), then print `BUILD_RESULT: status: ALREADY_DONE`.
-- **Size-gate resume** (checked BEFORE the partial-BUILDER rule below; first match wins) <!-- Added: forge#3463 -->: if a `<!-- FORGE:BUILDER -->` comment exists without `<!-- FORGE:BUILDER:COMPLETE -->` AND the latest trusted `FORGE:DIFF_SIZE` comment has `result: OVER` or `result: COHESIVE`, the build stopped at a deliberate B5.5 exit (`NEEDS_DECOMPOSE`, the decompose-loop-guard Blocked exit, or a crash right after the `COHESIVE` comment was posted), not in an implement crash. Keep the BUILDER comment, do not re-run B2-B5, and re-enter at **Phase B5.5**. Read the marker through the same anchored, trust-filtered lookup B5.5 uses (script resolution block verbatim):
-  ```bash
-  # <Script resolution block from above goes here, verbatim>
-  set -o pipefail
-  TRUSTED_SCRIPT="${UNIVERSAL_DIR:+$UNIVERSAL_DIR/trusted-comments.sh}"
-  [ -n "$TRUSTED_SCRIPT" ] && [ -f "$TRUSTED_SCRIPT" ] || { echo "DIFF_SIZE_LOOKUP=FAILED (trusted-comments.sh unresolved)"; exit 0; }
-  # <cycle_slice function from B0, verbatim>
-  DS=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" | cycle_slice | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:DIFF_SIZE') \
-    || { echo "DIFF_SIZE_LOOKUP=FAILED"; exit 0; }
-  LAST_RESULT=$(printf '%s\n' "$DS" | jq -r 'select(type == "string")' | sed -n 's/^result: *\([A-Z]*\).*/\1/p' | tail -n 1)
-  echo "DIFF_SIZE_RESULT=${LAST_RESULT:-<none>}"
-  ```
-  - `DIFF_SIZE_LOOKUP=FAILED` → Blocked exit with blocker `size-gate-unavailable: could not read FORGE:DIFF_SIZE` (a transient GitHub failure uses the `github-unavailable:` prefix). Never read a failed lookup as "no DIFF_SIZE".
-  - `DIFF_SIZE_RESULT=OVER` or `DIFF_SIZE_RESULT=COHESIVE` → verify, without creating anything, that the branch and worktree exist (derive BRANCH/WORKTREE_PATH as in B1A/B1C), that `git -C "$WORKTREE_PATH" branch --show-current` equals BRANCH, and that a staged diff is present (`! git -C "$WORKTREE_PATH" diff --cached --quiet`). Recover `COMPLEXITY_BAND` from `EXISTING_FAST_PATH` with the B0.5 resume extraction. When all hold, skip B0.5-B5 and continue at B5.5 (it re-measures, then applies the override / `COHESIVE` / `NEEDS_DECOMPOSE` / `OK` logic; never re-run implement).
-  - Anything else (no `FORGE:DIFF_SIZE`, `result` is not `OVER`, worktree or branch missing or mismatched, nothing staged, band unrecoverable) → never skip ahead on missing state; fall through to the next rule.
 - If `<!-- FORGE:BUILDER -->` exists in the current-cycle slice BUT `<!-- FORGE:BUILDER:COMPLETE -->` is ABSENT → build was interrupted after the comment was posted but before the commit (validate V5). Delete the partial comment and restart from Phase B2 (contract): <!-- Added: forge#1305 -->
   Select with ONE anchored, trusted selector (body must start with the marker; author must be a Bot or OWNER/MEMBER/COLLABORATOR). Delete ONLY when exactly one non-complete candidate exists and it carries no other FORGE phase marker; unparsable, zero, or multiple matches delete nothing (fail closed). <!-- Added: forge#3668 -->
   ```bash
@@ -391,7 +376,7 @@ Every item in the contract's `### Out of Scope` section must carry exactly one d
 - **Known-flaw rule**: a contract that keeps a known-flawed design (a design the investigation or architect plan identified as flawed, a fail-open caller, an unsound threshold) must state the flaw and list it as a `deferred → #N` item with a linked follow-up. It may not hide behind `accepted-risk` or free text.
 - Free-text exclusions without a disposition are invalid. `->` is accepted for `→`.
 
-**Fold, then batch** <!-- Added: forge#3843 -->: before filing anything, fold small siblings into scope. A candidate deferred item that is the same mechanical change at a sibling path and fits the remaining size budget (estimate within `0.8 × build.diff_size.threshold`, `1000` when the threshold is `0` or unset, minus the current estimate) goes into the contract's Deliverables, not Out of Scope; count it as `folded`. Defer only genuinely separate work (different module, design or owner). All remaining deferred items of this build go into ONE follow-up issue with a checklist; `scripts/file-deferred-followups.sh` appends to an open trusted follow-up for the same parent (exact path match) or creates one.
+**Fold, then batch** <!-- Added: forge#3843 -->: before filing anything, fold small siblings into scope. A candidate deferred item that is the same mechanical change at a sibling path and fits the remaining scope budget (a small fraction of the plan's own estimate: at most 20% of the current `ESTIMATED_DIFF_LINES`, or 200 lines when no estimate exists) goes into the contract's Deliverables, not Out of Scope; count it as `folded`. Defer only genuinely separate work (different module, design or owner). All remaining deferred items of this build go into ONE follow-up issue with a checklist; `scripts/file-deferred-followups.sh` appends to an open trusted follow-up for the same parent (exact path match) or creates one.
 
 **File the `deferred` follow-ups** (skip the filing on resume when the contract already exists):
 
@@ -593,22 +578,45 @@ Skill(skill="{FORGE_SKILL_PREFIX}work-on:build:implement", args="{NUMBER} --repo
 
 **After subcommand returns** (read its `IMPLEMENT_RESULT:` block):
 - `status: COMPLETE` → continue to B5.5
-- `status: ALREADY_DONE` → continue to B5.5 (size-check what's already there)
+- `status: ALREADY_DONE` → continue to B5.5 (scope-check what's already there)
 - `status: INVESTIGATION_COMPLETE` → issues were created as deliverables and the original closed; verify a `<!-- FORGE:INVESTIGATION:DELIVERABLES -->` comment exists on the issue (the implement child posts it and removes `workflow:building`; if it is missing, post it listing the created issues and remove the label), then print `BUILD_RESULT: status: INVESTIGATION_COMPLETE` (skip B5.5/B6/B6.5). The engine keys off that marker, not the result text. <!-- Added: forge#3534 -->
 - `status: BLOCKED` → Blocked exit with the child's `blocker`
 - Skill not found → Blocked exit, blocker "skill not found: work-on:build:implement"
 - Returned running/backgrounded/empty (no `IMPLEMENT_RESULT:`) → do not end the turn to wait; re-read the `FORGE:BUILDER` comment and the worktree state; if `FORGE:BUILDER:COMPLETE` is present consume it, and if the worktree shows in-flight edits or a fresh commit treat the child as possibly live; before re-invoking, apply the bounded re-invoke rule (at most 2, then `child-stalled: implement`)
-# MUST CONTINUE to Phase B5.5 — implement result is intermediate, NOT terminal (the size gate and validation still follow).
+# MUST CONTINUE to Phase B5.5 — implement result is intermediate, NOT terminal (the scope check and validation still follow).
 
 ---
 
-## Phase B5.5: Diff-Size Gate
+## Phase B5.5: Scope Check
 
-Review findings per PR rise steeply with diff size, so an oversized diff is split before it is validated. This phase measures the staged diff (implement staged everything in I4; nothing is committed until validate V5) and either continues, routes to decompose, or requires a justified override. It never edits code. <!-- Added: forge#3450 -->
+A finished build is never discarded and never routed to decompose: decomposition is a planning decision (investigate / architect), not a post-build one. This phase compares the staged diff with the plan, measures a deterministic `review_weight`, and records a scope outcome. Size never blocks; it scales review depth. It measures the staged diff (implement staged everything in I4; nothing is committed until validate V5) and edits code only for the opt-in out-of-plan trim in Step 4. <!-- Added: forge#3862 -->
 
-**Skip** (continue to B6) when the task type is Investigation (B5 already exited), or when `build.diff_size.threshold` resolves to `0`. Never skip because a lookup failed: unknown is not under threshold.
+**Skip** (continue to B6) only when the task type is Investigation (B5 already exited). Never skip because a lookup failed: unknown is not in plan.
 
-**Step 1 — measure.** Paste the Script resolution block first (shell state does not persist); quote every interpolation:
+**Step 1 — baseline.** The plan is the scope baseline: the latest trusted `FORGE:ARCHITECT` comment of the current-cycle slice carries `PLANNED_FILES:` (a `- path` list; a trailing `/` is a directory prefix) and `ESTIMATED_DIFF_LINES: N` under `### Scope Baseline`. An architect skip marker has an empty list, which means "no plan baseline": proceed with no out-of-plan check. The estimate falls back to the issue body's own-line `ESTIMATED_DIFF_LINES: N` (written by `work-on:decompose` D3), then to the latest trusted `FORGE:INVESTIGATOR` comment's. Paste the Script resolution block and the `cycle_slice` function from B0 first (shell state does not persist); quote every interpolation:
+
+```bash
+# <Script resolution block from above goes here, verbatim>
+# <cycle_slice function from B0, verbatim>
+set -o pipefail
+TRUSTED_SCRIPT="${UNIVERSAL_DIR:+$UNIVERSAL_DIR/trusted-comments.sh}"
+[ -n "$TRUSTED_SCRIPT" ] && [ -f "$TRUSTED_SCRIPT" ] || { echo "BASELINE_LOOKUP=FAILED (trusted-comments.sh unresolved)"; exit 0; }
+SLICE=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" | cycle_slice) && [ -n "$SLICE" ] || { echo "BASELINE_LOOKUP=FAILED"; exit 0; }
+ARCH_BODY=$(printf '%s' "$SLICE" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:ARCHITECT' | jq -rs 'map(select(type == "string")) | last // ""') || { echo "BASELINE_LOOKUP=FAILED"; exit 0; }
+INV_BODY=$(printf '%s' "$SLICE" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:INVESTIGATOR' | jq -rs 'map(select(type == "string")) | last // ""') || { echo "BASELINE_LOOKUP=FAILED"; exit 0; }
+ISSUE_BODY=$(gh issue view {NUMBER} {GH_FLAG} --json body --jq .body) || { echo "BASELINE_LOOKUP=FAILED"; exit 0; }
+PLAN_FILE=$(mktemp "${TMPDIR:-/tmp}/scope-plan.XXXXXX")
+printf '%s\n' "$ARCH_BODY" | awk '/^PLANNED_FILES:[ \t]*$/{f=1;next} f&&/^[ \t]*[-*][ \t]+/{print;next} f{exit}' > "$PLAN_FILE"
+EST_RE='s/^ESTIMATED_DIFF_LINES: *\([0-9][0-9]*\) *$/\1/p'
+ESTIMATE=$(printf '%s\n' "$ARCH_BODY" | sed -n "$EST_RE" | tail -n 1)
+[ -n "$ESTIMATE" ] || ESTIMATE=$(printf '%s\n' "$ISSUE_BODY" | sed -n "$EST_RE" | tail -n 1)
+[ -n "$ESTIMATE" ] || ESTIMATE=$(printf '%s\n' "$INV_BODY" | sed -n "$EST_RE" | tail -n 1)
+echo "BASELINE_LOOKUP=ok PLAN_FILE=${PLAN_FILE} ESTIMATE=${ESTIMATE:-none}"
+```
+
+`BASELINE_LOOKUP=FAILED` → Blocked exit with blocker `github-unavailable: could not read the scope baseline (FORGE:ARCHITECT)` (transient; the router retry rule applies; no `needs-human`). Never read a failed lookup as "no plan" or "in plan". A read that succeeds with no `PLANNED_FILES:` entries is a legitimate "no plan baseline".
+
+**Step 2 — measure.** Config (all values are config, none is a magic number; defaults are generous and are calibrated from telemetry, forge#3834): `build.scope.test_weight` (percent weight of test lines in `review_weight`, default 50), `build.scope.module_depth` (path segments that define a module, default 2), `build.scope.overrun_pct` (actual whitespace-insensitive lines over the plan estimate, in percent, that count as scope creep, default 200), `build.scope.exclude_globs`, `review.depth.extended_weight` (`review_weight` at or above which review is extended, default 1500) and `review.depth.extended_modules` (modules touched at or above which review is extended, default 6). The deprecated `build.diff_size.exclude_globs` is read as an alias of `build.scope.exclude_globs` and a positive `build.diff_size.threshold` as an alias of `review.depth.extended_weight` for one release; when an alias supplied the value, add `deprecated_config: build.diff_size.*` to the comment (Step 5). The threshold no longer blocks anything.
 
 ```bash
 # <Script resolution block from above goes here, verbatim>
@@ -618,25 +626,37 @@ for _delay in 0 10 30 60; do
   [ "$_delay" -gt 0 ] && sleep "$_delay"
   if git -C "{WORKTREE_PATH}" fetch origin "{PR_BASE}" 2>/dev/null; then FETCH_OK=1; break; fi
 done
-THRESHOLD=$(yq '.build.diff_size.threshold // 1000' forge.yaml 2>/dev/null || echo 1000)
+TEST_WEIGHT=$(yq '.build.scope.test_weight // 50' forge.yaml 2>/dev/null || echo 50)
+MODULE_DEPTH=$(yq '.build.scope.module_depth // 2' forge.yaml 2>/dev/null || echo 2)
+OVERRUN_PCT=$(yq '.build.scope.overrun_pct // 200' forge.yaml 2>/dev/null || echo 200)
+EXT_WEIGHT=$(yq '.review.depth.extended_weight // ""' forge.yaml 2>/dev/null || true)
+EXT_MODULES=$(yq '.review.depth.extended_modules // 6' forge.yaml 2>/dev/null || echo 6)
+DEPRECATED=""
+if [ -z "$EXT_WEIGHT" ] || [ "$EXT_WEIGHT" = "null" ]; then
+  OLD_THRESHOLD=$(yq '.build.diff_size.threshold // 0' forge.yaml 2>/dev/null || echo 0)
+  case "$OLD_THRESHOLD" in ''|*[!0-9]*|0) EXT_WEIGHT=1500 ;; *) EXT_WEIGHT="$OLD_THRESHOLD"; DEPRECATED="build.diff_size.threshold" ;; esac
+fi
 EXCLUDES=()
 while IFS= read -r _g; do [ -n "$_g" ] && [ "$_g" != "null" ] && EXCLUDES+=(--exclude-glob "$_g"); done \
-  < <(yq '.build.diff_size.exclude_globs // [] | .[]' forge.yaml 2>/dev/null || true)
+  < <(yq '(.build.scope.exclude_globs // []) + (.build.diff_size.exclude_globs // []) | .[]' forge.yaml 2>/dev/null || true)
 SCRIPT_REF=$(resolve_script 'diff-size')
 case "$SCRIPT_REF" in
-  prose:*) echo "SIZE_GATE: scripts/diff-size.sh unresolved (prose tier) — gate skipped with a note in the FORGE:BUILDER comment" ;;
+  prose:*) echo "SCOPE_CHECK: scripts/diff-size.sh unresolved (prose tier) — check skipped with a note in the FORGE:BUILDER comment" ;;
   *)
-    SIZE_OUT=$(bash "${SCRIPT_REF#*:}" --repo-path "{WORKTREE_PATH}" --base "{PR_BASE}" --threshold "$THRESHOLD" ${EXCLUDES[@]+"${EXCLUDES[@]}"}) && SIZE_RC=0 || SIZE_RC=$?
+    SIZE_OUT=$(bash "${SCRIPT_REF#*:}" --repo-path "{WORKTREE_PATH}" --base "{PR_BASE}" --test-weight "$TEST_WEIGHT" --module-depth "$MODULE_DEPTH" --overrun-pct "$OVERRUN_PCT" \
+      --plan-files "$PLAN_FILE" ${ESTIMATE:+--estimate "$ESTIMATE"} ${EXCLUDES[@]+"${EXCLUDES[@]}"}) && SIZE_RC=0 || SIZE_RC=$?
     echo "SIZE_RC=${SIZE_RC}"; echo "FETCH_OK=${FETCH_OK}"; printf '%s\n' "$SIZE_OUT" ;;
 esac
 ```
 
-- Prose tier (script unresolvable) → skip the gate, continue to B6 (the script is part of the install; a missing install must not strand every build).
-- Exit 2, empty output, or output without `diff_lines=`, `threshold=` and `over=`, AND `FETCH_OK=0` (the base fetch failed after the 10s/30s/60s retries, worst case about 100s) → Blocked exit with blocker `github-unavailable: could not fetch origin/{PR_BASE} for diff-size measurement` (transient; the router retry rule applies).
-- The same unmeasurable result with `FETCH_OK=1` (the fetch succeeded, so the script itself failed) → Blocked exit with blocker `size-gate-unavailable: diff-size.sh failed (rc=<N>)`. Either way, do NOT treat an unmeasurable diff as under threshold.
-- Otherwise parse `diff_lines`, `excluded_lines`, `threshold`, `over`, the cohesion keys `new_lines`, `test_lines`, `cohesive_lines`, `cohesive` and the `top=` lines. Fail closed on cohesion: a missing or unparseable `cohesive=` (an older script) reads as `cohesive=false`, never as true.
+- Prose tier (script unresolvable) → skip the check, continue to B6 (the script is part of the install; a missing install must not strand every build).
+- Exit 2, empty output, or output without `diff_lines=`, `review_weight=`, `modules=` and `scope=`, AND `FETCH_OK=0` (the base fetch failed after the 10s/30s/60s retries) → Blocked exit with blocker `github-unavailable: could not fetch origin/{PR_BASE} for scope measurement` (transient; the router retry rule applies).
+- The same unmeasurable result with `FETCH_OK=1` → Blocked exit with blocker `scope-check-unavailable: diff-size.sh failed (rc=<N>)`. Either way, do NOT treat an unmeasurable diff as in plan.
+- Otherwise parse `diff_lines`, `excluded_lines`, `ws_lines`, `review_weight`, `modules`, `scope` (`ok` | `out_of_plan` | `no_baseline`), `plan_files`, `out_of_plan_count`, `estimate`, `overrun` and the `out_of_plan=` and `top=` lines.
 
-**Step 2 — look up an override** (only when `over=true`). Both lookups are anchored, trust-filtered through `scripts/trusted-comments.sh` (trusted association, Bot, or `FORGE_TRAIL_TRUSTED_LOGINS`), and fail closed:
+**Step 3 — classify.** `review_depth` is `EXTENDED` when `review_weight` >= `EXT_WEIGHT` or `modules` >= `EXT_MODULES`, else `STANDARD`. The scope is flagged when `scope=out_of_plan` or `overrun=true` (an unparseable `scope=`/`overrun=` reads as flagged, never as clean). A flagged scope also sets `review_depth: EXTENDED`.
+
+**Step 4 — look up an override and decide** (override lookup only when the scope is flagged). The lookup is anchored, trust-filtered through `scripts/trusted-comments.sh` (trusted association, Bot, or `FORGE_TRAIL_TRUSTED_LOGINS`), and fails closed:
 
 ```bash
 # <Script resolution block from above goes here, verbatim>
@@ -650,71 +670,67 @@ JUSTIFICATION=$(printf '%s\n' "$OVR" | jq -r 'select(type == "string") | split("
 if [ -n "$JUSTIFICATION" ]; then echo "OVERRIDE=VALID"; else echo "OVERRIDE=NONE"; fi
 ```
 
-- `OVERRIDE_LOOKUP=FAILED` → Blocked exit with blocker `size-gate-unavailable: could not read FORGE:SIZE_OVERRIDE` (a transient GitHub failure uses the `github-unavailable:` prefix per the retry rule above). Never read a failed lookup as "no override".
-- `OVERRIDE=VALID` → result `OVERRIDDEN`. A marker with an empty justification is not valid.
+- `OVERRIDE_LOOKUP=FAILED` → Blocked exit with blocker `scope-check-unavailable: could not read FORGE:SIZE_OVERRIDE` (a transient GitHub failure uses the `github-unavailable:` prefix per the retry rule above). Never read a failed lookup as "no override".
+- A marker with an empty justification is not valid.
 
-**Step 3 — record.** Set `DIFF_LINES`, `EXCLUDED_LINES`, `THRESHOLD`, `RESULT` (`OK`, `OVERRIDDEN`, `COHESIVE` or `OVER`), `SPLIT_PROPOSAL` and `COHESION_NOTE` (set only for `COHESIVE`) from the steps above, then post one `<!-- FORGE:DIFF_SIZE -->` comment, idempotently: find the latest trusted comment starting with the marker and edit it, otherwise create it (on resume never stack duplicates; readers use the latest trusted one):
+| Condition | Result | Action |
+|-----------|--------|--------|
+| scope not flagged, `review_depth=STANDARD` | `OK` | Post/refresh `FORGE:DIFF_SIZE`, continue to B6 |
+| scope not flagged, `review_depth=EXTENDED` | `EXTENDED_REVIEW` | Post/refresh `FORGE:DIFF_SIZE` (review extends: more reviewers or per-file slices, read by review-pr), continue to B6. Never a block, never a split |
+| scope flagged, valid `FORGE:SIZE_OVERRIDE` | `OVERRIDDEN` | Post/refresh `FORGE:DIFF_SIZE` quoting the justification, `review_depth` as classified (a valid override suppresses only the scope flag, not extended review), continue to B6 |
+| scope flagged, no valid override | `SCOPE_FLAGGED` | Flag: list every `out_of_plan=` path and the overrun in the comment so review checks them (a scope-creep note, not a block), `review_depth: EXTENDED`, continue to B6. When `build.scope.trim_out_of_plan` is `true`, also trim (below) |
+
+**Trim out-of-plan scope** (opt-in: `build.scope.trim_out_of_plan: true`, default `false`; only when `out_of_plan_count` is at most `build.scope.trim_max_files`, default 3; never for `overrun=true` alone). Each out-of-plan path's hunks move out of this PR into the batched follow-up checklist (forge#3843) instead of being discarded, so no work is lost:
+
+```bash
+# <Script resolution block from above goes here, verbatim>
+MB=$(git -C "{WORKTREE_PATH}" merge-base HEAD "origin/{PR_BASE}") || { echo "TRIM=FAILED"; exit 0; }
+PATCH_PATH="$(git -C "{WORKTREE_PATH}" rev-parse --git-common-dir)/forge-trimmed-{NUMBER}.patch"
+DEFERRED_TSV=""
+# OOP_PATHS: the out_of_plan= values, one per line (data, never evaluated)
+while IFS= read -r _p; do
+  [ -n "$_p" ] || continue
+  git -C "{WORKTREE_PATH}" diff --cached --binary "$MB" -- "$_p" >> "$PATCH_PATH" || { echo "TRIM=FAILED"; exit 0; }
+  if git -C "{WORKTREE_PATH}" cat-file -e "${MB}:${_p}" 2>/dev/null; then
+    git -C "{WORKTREE_PATH}" restore --source="$MB" --staged --worktree -- "$_p" || { echo "TRIM=FAILED"; exit 0; }
+  else
+    git -C "{WORKTREE_PATH}" rm -q -f --cached -- "$_p" && rm -f -- "{WORKTREE_PATH}/$_p" || { echo "TRIM=FAILED"; exit 0; }
+  fi
+  DEFERRED_TSV="${DEFERRED_TSV}${_p}"$'\t'"out-of-plan hunks trimmed from #{NUMBER}; saved in ${PATCH_PATH}"$'\t'$'\n'
+done <<< "$OOP_PATHS"
+printf '%s' "$DEFERRED_TSV" | bash "$(resolve_script 'file-deferred-followups' | sed 's/^[^:]*://')" --parent {NUMBER} --repo {GH_REPO}; echo "DEFERRED_RC=$?"
+```
+
+`TRIM=FAILED` or a non-zero `DEFERRED_RC` → do not trim further; keep whatever state is staged, fall back to the flag outcome (`SCOPE_FLAGGED`, nothing lost), and say so in the comment. After a successful trim re-run Step 2 once so `FORGE:DIFF_SIZE` records the trimmed numbers, set `trimmed: <N> file(s) -> #<follow-up>` and result `SCOPE_FLAGGED`.
+
+**Step 5 — record.** Set `DIFF_LINES`, `EXCLUDED_LINES`, `WS_LINES`, `REVIEW_WEIGHT`, `MODULES`, `ESTIMATE`, `SCOPE`, `REVIEW_DEPTH` and `RESULT` from the steps above, then post one `<!-- FORGE:DIFF_SIZE -->` comment, idempotently: find the latest trusted comment starting with the marker and edit it, otherwise create it (on resume never stack duplicates; readers use the latest trusted one). `diff_lines` stays the first field close.md and the protocol read:
 
 ```bash
 # <Script resolution block from above goes here, verbatim>
 BODY="<!-- FORGE:DIFF_SIZE -->
-## Diff Size
+## Diff Size and Scope
 
 diff_lines: ${DIFF_LINES}
 excluded_lines: ${EXCLUDED_LINES}
-threshold: ${THRESHOLD}
+ws_lines: ${WS_LINES}
+review_weight: ${REVIEW_WEIGHT}
+modules: ${MODULES}
+estimated_diff_lines: ${ESTIMATE:-none}
+scope: ${SCOPE}
+review_depth: ${REVIEW_DEPTH}
 result: ${RESULT}
-${ESTIMATE_LINE:-}${COHESION_NOTE:-}${SPLIT_PROPOSAL:-}"
-_t=$(forge_resolve lib/telemetry.sh); FORGE_REPO="{GH_REPO}" FORGE_ISSUE="{NUMBER}" FORGE_PHASE=build bash "${_t:-/dev/null}" diff_size lines="$DIFF_LINES" excluded="$EXCLUDED_LINES" threshold="$THRESHOLD" result="$RESULT" >/dev/null 2>&1 || true # forge#3834 telemetry (final result incl. OVERRIDDEN)
+${DEPRECATION_NOTE:-}${SCOPE_NOTE:-}"
+_t=$(forge_resolve lib/telemetry.sh); FORGE_REPO="{GH_REPO}" FORGE_ISSUE="{NUMBER}" FORGE_PHASE=build bash "${_t:-/dev/null}" diff_size lines="$DIFF_LINES" excluded="$EXCLUDED_LINES" estimate="${ESTIMATE:-0}" actual="$WS_LINES" review_weight="$REVIEW_WEIGHT" modules="$MODULES" scope="$SCOPE" review_depth="$REVIEW_DEPTH" result="$RESULT" >/dev/null 2>&1 || true # forge#3834 telemetry (final result: estimate vs actual, review_weight, scope outcome, depth)
 run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
 CID=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" --jq '[.[] | select(.body | startswith("<!-- FORGE:DIFF_SIZE")) | select((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or (.user.type == "Bot"))] | last | .id // ""' 2>/dev/null || true)
 if [ -n "$CID" ]; then run gh api "repos/{GH_REPO}/issues/comments/${CID}" -X PATCH -f body="$BODY" >/dev/null 2>&1 || run gh issue comment {NUMBER} {GH_FLAG} --body "$BODY"
 else run gh issue comment {NUMBER} {GH_FLAG} --body "$BODY"; fi
 ```
 
-For a sub-issue (see Step 4) record the estimate next to the actual: read `ESTIMATED_DIFF_LINES: N` from the issue body (written by `work-on:decompose` D3) and set `ESTIMATE_LINE` to `estimated_diff_lines: N` plus a newline; leave it empty when the body has no such line (a top-level issue, or one decomposed before this field existed). For `COHESIVE`, set `COHESION_NOTE` to the lines `cohesive_lines: {cohesive_lines} ({pct}% of {diff_lines}; new {new_lines}, test {test_lines})`, `review-note: over the gate but cohesive (new files plus tests dominate and diff is at most 1.5x threshold); reviewers: check the new module's boundary and that the tests exercise it` and `reason: sub-issue over threshold, no seam left to split`, each followed by a newline. A `COHESIVE` comment never contains a `### Split Proposal` heading (the engine routes only `OVER` plus that heading to decompose).
+`SCOPE_NOTE` carries, one per line, `out_of_plan: <path>` for each out-of-plan file (up to 50), `overrun: <ws_lines> vs estimate <N> (>{OVERRUN_PCT}%)` when `overrun=true`, the `trimmed:` line after a trim, the override justification for `OVERRIDDEN`, and `review-note: <what reviewers should check>` (for example, check the out-of-plan files first). `DEPRECATION_NOTE` is `deprecated_config: build.diff_size.*` plus a newline when an alias supplied a value. A `FORGE:DIFF_SIZE` comment never contains a `### Split Proposal` heading and never routes anywhere: no engine path reads it as a decompose signal.
 
-**Step 4 — decide.**
-
-| Condition | Result | Action |
-|-----------|--------|--------|
-| `over=false` | `OK` | Post/refresh `FORGE:DIFF_SIZE`, continue to B6 |
-| `over=true`, valid override | `OVERRIDDEN` | Post/refresh `FORGE:DIFF_SIZE` (quote the justification), continue to B6 |
-| `over=true`, no override, issue body has a `**Parent**: #N` line OR a trusted `FORGE:DECOMPOSED` comment exists, AND `cohesive=true` | `COHESIVE` | Cohesive-overage path <!-- Added: forge#3790 -->: a sub-issue that is over the gate because one new module plus its tests dominate the diff (at least 70% of counted lines are new or test files, and `diff_lines` is at most `threshold` x 1.5, both computed by `diff-size.sh`) has no seam left to split and the loop guard would only strand it. Post/refresh `FORGE:DIFF_SIZE` with the cohesion note, do NOT add `needs-human`, continue to B6. Test lines are classified, never discounted. A `FORGE:SIZE_OVERRIDE` still takes precedence (`OVERRIDDEN`) |
-| `over=true`, no override, issue body has a `**Parent**: #N` line OR a trusted `FORGE:DECOMPOSED` comment exists (and not `cohesive=true`) | `OVER` | Decompose-loop guard: do NOT route to decompose. Post/refresh `FORGE:DIFF_SIZE`, then Blocked exit with blocker `diff-size-over-threshold: {diff_lines} > {threshold}; post a FORGE:SIZE_OVERRIDE with a justification to proceed` |
-| `over=true`, no override, otherwise | `OVER` | Put a `### Split Proposal` in the `FORGE:DIFF_SIZE` comment, then print `BUILD_RESULT: status: NEEDS_DECOMPOSE` (see below) |
-
-**`### Split Proposal`** (written into the `FORGE:DIFF_SIZE` comment): list the top files by changed lines from the `top=` output, then propose 2-4 sub-issues split along directory or phase seams, each independently buildable and at or under `0.8 x threshold` (code plus tests; a seam that can't fit says so explicitly), in dependency order, one `- **{title}** — {files} — wip: {WIP_REF}@{WIP_SHA} (git checkout {WIP_SHA} -- {files})` line each (this is the plan `work-on:decompose` consumes in D0/D2). The `wip:` part comes from the persist step below; when persistence fell back to a patch file write `patch: {PATCH_PATH}` instead, and when both failed write `wip: unavailable`. Lines without the suffix stay valid.
-
-**Persist the staged hunks** (before the `NEEDS_DECOMPOSE` exit; runs once the `FORGE:DIFF_SIZE` result is `OVER` and the decompose-loop guard did not fire) <!-- Added: forge#3573 -->: commit the staged index to a standalone commit object WITHOUT moving the build branch or the index, and push it to a dedicated ref named only from the issue number (never interpolate a title or file name into a ref). Re-running overwrites the same ref, so resume is idempotent. Never block `NEEDS_DECOMPOSE` on a persistence failure.
-
-```bash
-WIP_REF="forge/wip/{NUMBER}"
-WIP_SHA=""; PATCH_PATH=""
-TREE=$(git -C "{WORKTREE_PATH}" write-tree) \
-  && WIP_SHA=$(git -C "{WORKTREE_PATH}" commit-tree "$TREE" -p HEAD -m "wip: staged hunks for #{NUMBER} (diff-size OVER)") || WIP_SHA=""
-if [ -n "$WIP_SHA" ] && git -C "{WORKTREE_PATH}" push --force origin "${WIP_SHA}:refs/heads/${WIP_REF}" 2>/dev/null; then
-  echo "WIP_REF=${WIP_REF}@${WIP_SHA}"
-else
-  PATCH_PATH="$(git -C "{WORKTREE_PATH}" rev-parse --git-common-dir)/forge-wip-{NUMBER}.patch"
-  git -C "{WORKTREE_PATH}" diff --cached --binary > "$PATCH_PATH" 2>/dev/null && echo "PATCH_PATH=${PATCH_PATH}" || echo "WIP=unavailable"
-fi
-```
-
-The checkout command in each line restores that seam's files from the persisted commit (`git fetch origin {WIP_REF}` first in a fresh clone); `git diff {WIP_SHA}^ {WIP_SHA} -- {files}` shows them. Post `FORGE:DIFF_SIZE` (Step 3) after this step so the proposal carries the references.
-
-**`NEEDS_DECOMPOSE` exit**: leave the staged worktree and branch as they are (the persisted WIP ref or patch is an additional durable copy, not a replacement); do not add `needs-human`; do not post `FORGE:BUILDER:COMPLETE`; do NOT call `work-on:decompose` here (the router is the sole dispatcher). The labels stay `workflow:building`; decompose owns the `workflow:decomposed` transition. Print:
-
-```
-BUILD_RESULT:
-  status: NEEDS_DECOMPOSE
-  branch: {BRANCH}
-  worktree: {WORKTREE_PATH}
-  blocker: diff-size-over-threshold: {diff_lines} > {threshold}; split proposal posted in FORGE:DIFF_SIZE
-```
-
-**Resume**: a re-invoked build re-enters here via the B0 size-gate resume branch (partial `FORGE:BUILDER` plus latest trusted `FORGE:DIFF_SIZE` `result: OVER` or `COHESIVE` plus a staged diff in the kept worktree), so it does not re-run implement; this covers the exits that leave BUILDER incomplete, `NEEDS_DECOMPOSE` and the decompose-loop-guard Blocked exit (a `COHESIVE` marker re-enters the same way after a crash and re-decides without a duplicate comment). B5.5 re-measures: if still over with no override it re-pushes the same `forge/wip/{NUMBER}` ref (idempotent) and re-emits `NEEDS_DECOMPOSE` without a duplicate comment (the loop-guard case re-emits the same Blocked exit); when a valid `FORGE:SIZE_OVERRIDE` has appeared since, it continues via `OVERRIDDEN`.
-# MUST CONTINUE to Phase B6 (also after `COHESIVE`) — the size gate result is intermediate, NOT terminal (validation still required), except the NEEDS_DECOMPOSE and Blocked exits above.
+**Resume**: B5.5 is idempotent. A re-invoked build re-runs B5.5 only through the normal path (B0 resumes at B5/B6 by BUILDER/COMPLETE state); a repeated measure edits the same `FORGE:DIFF_SIZE` comment, and a repeated trim finds the out-of-plan files already gone from the diff.
+# MUST CONTINUE to Phase B6 — the scope check result is intermediate, NOT terminal (validation still required), except the Blocked exits above.
 
 ---
 
@@ -1008,7 +1024,7 @@ Print this structured block as your final reply (and nothing after it) — the r
 
 ```
 BUILD_RESULT:
-  status: COMPLETE | ALREADY_DONE | INVESTIGATION_COMPLETE | NEEDS_DECOMPOSE | BLOCKED
+  status: COMPLETE | ALREADY_DONE | INVESTIGATION_COMPLETE | BLOCKED
   branch: {BRANCH}
   worktree: {WORKTREE_PATH}
   blocker: {description if status=BLOCKED}
@@ -1017,8 +1033,7 @@ BUILD_RESULT:
 - `COMPLETE` — B0–B6.5 all passed; `FORGE:BUILDER:COMPLETE` is on the issue.
 - `ALREADY_DONE` — B0 found `FORGE:BUILDER:COMPLETE`.
 - `INVESTIGATION_COMPLETE` — the implement child created the deliverable issues (B5); no review follows.
-- `NEEDS_DECOMPOSE` — B5.5 measured the staged diff over `build.diff_size.threshold` with no valid `FORGE:SIZE_OVERRIDE`; a split proposal is in `FORGE:DIFF_SIZE`. The router runs `work-on:decompose`. Not a failure: no `needs-human`.
-- `COHESIVE` is not a `BUILD_RESULT` status: B5.5 records `result: COHESIVE` in `FORGE:DIFF_SIZE` for an over-gate sub-issue dominated by one new module plus tests, then the build continues to B6 and ends `COMPLETE`.
+- B5.5 never produces a `BUILD_RESULT` status of its own: its scope-check outcome (`OK`, `EXTENDED_REVIEW`, `SCOPE_FLAGGED`, `OVERRIDDEN`) is recorded in `FORGE:DIFF_SIZE`, then the build continues to B6 and ends `COMPLETE`. A finished build is never routed to decompose or discarded. <!-- Added: forge#3862 -->
 - `BLOCKED` — any guard or failure; `needs-human` is set and the blocker is posted.
 
 ---

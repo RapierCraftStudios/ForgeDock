@@ -305,7 +305,7 @@ git add {CHANGED_FILES}
 
 Do NOT run `git commit` here. The commit (with conventional commit message and issue reference) is made by validate.md Phase V5 after `GATE_PASSED=true`.
 
-**Informational diff size** <!-- Added: forge#3450 -->: after staging, read the changed-line count so the builder comment and result carry it. This is a hint only. Implement never gates or decides: the diff-size gate lives in build B5.5, which re-measures authoritatively. Leave `DIFF_LINES` empty when the script is unavailable or fails.
+**Informational diff size** <!-- Added: forge#3450 -->: after staging, read the changed-line count so the builder comment and result carry it. This is a hint only. Implement never gates or decides: the scope check lives in build B5.5, which re-measures authoritatively against the plan (it needs only the `diff_lines=` key here). Leave `DIFF_LINES` empty when the script is unavailable or fails.
 
 ```bash
 # <Script resolution block from work-on/build.md, verbatim>

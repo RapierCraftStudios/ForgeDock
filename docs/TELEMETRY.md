@@ -31,7 +31,7 @@ is dropped. Payload keys are `[A-Za-z0-9_]+` and cannot shadow the shared keys; 
 
 | Event | Emitted by | Payload |
 |-------|-----------|---------|
-| `diff_size` | `scripts/diff-size.sh`; `work-on/build.md` B5.5 (final result) | `lines`, `excluded`, `threshold`, `result` = `OK` \| `OVER` \| `COHESIVE` (`OVERRIDDEN` from the B5.5 call site) |
+| `diff_size` | `scripts/diff-size.sh`; `work-on/build.md` B5.5 (final result) | `lines`, `excluded`, `ws_lines`, `review_weight`, `modules`, `result`; the script emits the legacy `threshold` and `OK` \| `OVER` \| `COHESIVE`, the B5.5 call site emits the final `result` = `OK` \| `EXTENDED_REVIEW` \| `SCOPE_FLAGGED` \| `OVERRIDDEN` plus `estimate` (plan), `actual` (whitespace-insensitive lines), `scope` = `ok` \| `out_of_plan` \| `no_baseline` and `review_depth` = `STANDARD` \| `EXTENDED` (calibration inputs, forge#3862) |
 | `acceptance_gate` | `work-on/build.md` B6.5 (`phase=build`); `scripts/review-acceptance-gate.sh` (`phase=review`) | `phase`, `verified`, `failed`, `malformed`, `deferred` |
 | `finding_disposition` | `scripts/classify-finding.sh`, one per finding | `severity`, `confidence`, `agent`, `disposition` = `ISSUE` \| `NOTE` \| `INPR_FIX`, `reason` |
 | `review_panel` | `review-pr.md` Phase 4 | `agents_selected`, `agents_completed`, `mode` = `FULL` \| `DELTA` \| `BASE_SYNC_ONLY` |

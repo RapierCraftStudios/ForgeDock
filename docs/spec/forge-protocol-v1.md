@@ -535,8 +535,8 @@ needed.
 
 | Marker | Category | Meaning |
 |--------|----------|---------|
-| `<!-- FORGE:DIFF_SIZE -->` | Lifecycle (no completion sentinel) | Measured diff size of the staged build: `diff_lines`, `excluded_lines`, `threshold`, `result: OK \| OVERRIDDEN \| COHESIVE \| OVER`, optional `estimated_diff_lines` (sub-issues), cohesion figures and a reviewer note on `COHESIVE`, and on `OVER` a `### Split Proposal`. Refreshed in place; readers take the latest trusted comment. Consumed by decompose (plan source) and close (records `diff_lines` in `FORGE:TRAJECTORY`) |
-| `<!-- FORGE:SIZE_OVERRIDE -->` | Control | Posted by a human to let an over-threshold build proceed. Valid only from a trusted author and with a non-empty justification on the line after the marker |
+| `<!-- FORGE:DIFF_SIZE -->` | Lifecycle (no completion sentinel) | Record of the build's post-build scope check (B5.5): `diff_lines`, `excluded_lines`, `ws_lines`, `review_weight`, `modules`, `estimated_diff_lines`, `scope: ok \| out_of_plan \| no_baseline`, `review_depth: STANDARD \| EXTENDED`, `result: OK \| EXTENDED_REVIEW \| SCOPE_FLAGGED \| OVERRIDDEN` plus `out_of_plan:` / `overrun:` / `trimmed:` notes. Never a size gate and never a decompose signal (a finished build is not routed to decompose). Refreshed in place; readers take the latest trusted comment. Consumed by review-pr (review depth) and close (records `diff_lines` in `FORGE:TRAJECTORY`). Older records carrying `threshold` / `result: OVER \| COHESIVE` still parse |
+| `<!-- FORGE:SIZE_OVERRIDE -->` | Control | Posted by a human to suppress the scope-check flag (out-of-plan files or estimate overrun) and the decompose loop guard. Valid only from a trusted author and with a non-empty justification on the line after the marker |
 
 Both lookups are anchored at the start of the comment body and trust-filtered
 (`scripts/trusted-comments.sh`); an unreadable lookup fails closed.
