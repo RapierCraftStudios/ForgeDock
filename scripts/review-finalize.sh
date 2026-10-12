@@ -403,7 +403,7 @@ EOF
         fi
         # Gate 2 (introduced-line): scope is computed for every finding (any severity) from the added-line map. A file the PR deleted or renamed is introduced;
         # a patch-less file, an empty map or a missing line is unknown. MEDIUM or lower with no added line within +-5 is routed pre-existing.
-        # CRITICAL/HIGH and unknown severities are never routed pre-existing (their scope is still recorded).
+        # CRITICAL/HIGH and unknown severities never are (their scope is still recorded).
         SCOPE="unknown"
         if [ "$GONE" -eq 1 ]; then
             SCOPE="introduced"
