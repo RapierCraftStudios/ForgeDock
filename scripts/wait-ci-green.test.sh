@@ -68,7 +68,7 @@ expect "every result names the gated head" "CI_GATE_HEAD: abc1234" "$(printf '%s
 
 # Static guard: every autonomous `gh pr merge` command line in the pipeline specs must be preceded
 # (within 25 lines) by a CI gate result check. Prose/manual instructions are not command lines.
-for spec in commands/review-pr.md commands/work-on/review.md commands/work-on/remediate.md commands/recover-orphans.md commands/deploy-pr.md; do
+for spec in commands/review-pr.md scripts/review-finalize.sh commands/work-on/review.md commands/work-on/remediate.md commands/recover-orphans.md commands/deploy-pr.md; do
   bad=$(awk '
     { line[NR]=$0 }
     /^[[:space:]]*(MERGE_RESULT=\$\()?gh pr merge / {
@@ -78,7 +78,7 @@ for spec in commands/review-pr.md commands/work-on/review.md commands/work-on/re
   expect "every autonomous merge in $spec is CI-gated" "" "$bad"
 done
 # Every autonomous merge pins the gated head (forge#3187): no merge line may omit --match-head-commit.
-for spec in commands/review-pr.md commands/work-on/review.md commands/work-on/remediate.md commands/recover-orphans.md commands/deploy-pr.md; do
+for spec in commands/review-pr.md scripts/review-finalize.sh commands/work-on/review.md commands/work-on/remediate.md commands/recover-orphans.md commands/deploy-pr.md; do
   unpinned=$(grep -nE '^[[:space:]]*(MERGE_RESULT=\$\(|MERGE_OUTPUT=\$\()?gh pr merge ' "$HERE/../$spec" | grep -v -- '--match-head-commit')
   expect "every autonomous merge in $spec pins the gated head" "" "$unpinned"
 done
@@ -90,7 +90,7 @@ if grep -qE '^[[:space:]]*(MERGE_RESULT=\$\()?gh pr merge ' "$HERE/../commands/w
 
 # Reviewed-head guard: review-pr Phase 8 must refuse to merge a head other than the reviewed commit,
 # and the work-on callers must route "stale review" to a re-review, never a manual merge.
-grep -qF '${GATED_HEAD#"$REVIEWED_SHORT"}' "$HERE/../commands/review-pr.md" && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: review-pr Phase 8 lacks reviewed-head guard"; }
+grep -qF '${GATED_HEAD#"$REVIEWED_SHORT"}' "$HERE/../scripts/review-finalize.sh" && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: review-pr Phase 8 (scripts/review-finalize.sh merge-gate) lacks reviewed-head guard"; }
 for f in commands/work-on/review.md; do
   grep -q 'stale review' "$HERE/../$f" && PASS=$((PASS+1)) || { FAILN=$((FAILN+1)); echo "FAIL: $f does not route stale review"; }
 done

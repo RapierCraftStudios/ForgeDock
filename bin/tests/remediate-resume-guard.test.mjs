@@ -92,23 +92,28 @@ describe("forge#3684 remediate.md resume guard", () => {
 
 describe("forge#3753 deploy-gate base never reads forge.yaml from the PR worktree", () => {
   const review = readFileSync(join(ROOT, "commands/review-pr.md"), "utf8");
+  // forge#3840: the review-pr gate bash lives in scripts/review-finalize.sh now; the spec only calls it.
+  const finalize = readFileSync(join(ROOT, "scripts/review-finalize.sh"), "utf8");
   const SCRIPT = join(ROOT, "scripts/resolve-deploy-gate.sh");
   it("no PWD-relative forge.yaml read feeds a gate decision", () => {
     for (const [name, text] of [["remediate", spec], ["review-pr", review]]) {
       assert.ok(!/\$\{FORGE_CONFIG:-forge\.yaml\}/.test(text), `${name}: cwd-relative forge.yaml read`);
       assert.ok(!/!= "main"/.test(text), `${name}: literal-main comparison`);
-      assert.ok(text.includes("default_branch"), `${name}: GitHub default_branch`);
+      if (name === "remediate") assert.ok(text.includes("default_branch"), `${name}: GitHub default_branch`);
     }
+    // forge#3840: review-finalize.sh reads forge.yaml only for non-gate settings (max_filed_findings, attribution).
+    assert.ok(!/!= "main"/.test(finalize), "review-finalize: literal-main comparison");
+    assert.ok(!/forge\.yaml[^\n]*(default|deploy|branches)/.test(finalize.replace(/#.*$/gm, "")), "review-finalize: forge.yaml read feeds a gate decision");
   });
   it("every gate fence calls the trusted resolver and fails closed when unresolved", () => {
-    for (const [name, text] of [["remediate", spec], ["review-pr", review]]) {
-      const fences = text.split("```bash").slice(1).map((f) => f.split("```")[0]);
+    for (const [name, text] of [["remediate", spec], ["review-pr", finalize]]) {
+      const fences = name === "review-pr" ? [text] : text.split("```bash").slice(1).map((f) => f.split("```")[0]);
       const users = fences.filter((f) => /resolve-deploy-gate\.sh/.test(f));
       assert.ok(users.length >= (name === "remediate" ? 5 : 1), name);
       for (const f of users) {
         assert.ok(/else (IS_DEPLOY_GATE|PARK_GATE|GUARD_GATE)=true; fi/.test(f), `${name}: fail-closed fallback`);
         assert.ok(!/\$PWD\/scripts\/resolve-deploy-gate/.test(f), `${name}: repo-relative script`);
-        assert.ok(!/"\$\{CLAUDE_PLUGIN_ROOT:-\}"/.test(f), `${name}: CLAUDE_PLUGIN_ROOT is substituted text, never an env var`);
+        if (name === "remediate") assert.ok(!/"\$\{CLAUDE_PLUGIN_ROOT:-\}"/.test(f), `${name}: CLAUDE_PLUGIN_ROOT is substituted text, never an env var`);
         assert.ok(f.includes("type forge_resolve >/dev/null") && f.includes("forge_resolve resolve-deploy-gate.sh"), `${name}: gate fence must use the forge_resolve locator stub`);
       }
     }

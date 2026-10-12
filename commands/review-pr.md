@@ -59,7 +59,7 @@ When `IS_OPENCODE_RUNTIME=true`, lowercase native `task` is the preferred isolat
 
 1. **If `Task` is available in the current environment**: set `{DISPATCH_TOOL} = Task`. This is the preferred tool — tightest `allowed-tools` scoping.
 2. **Else if `Agent` is available**: set `{DISPATCH_TOOL} = Agent`. This is the documented fallback, not a degraded path — use it exactly as you would `Task`: one call per selected domain agent, same prompt template, `subagent_type: "general-purpose"` (or the closest equivalent the environment offers), same requirement that each agent posts its own findings directly to the PR via `gh pr comment`. Isolation and fresh-context review are preserved either way.
-3. **Neither tool is available**: this is a genuine setup defect, not a routing decision — HARD STOP, post a PR/issue comment explaining that no sub-agent dispatch tool is available, add `needs-human`, and exit without posting a verdict. Do NOT fall back to reviewing inline in the orchestrator's own context — inline self-review is strictly weaker than an isolated fresh-context reviewer and is never a substitute for a missing dispatch tool.
+3. **Neither tool is available**: this is a genuine setup defect, not a routing decision. The usual cause is the sub-agent depth limit: `Agent` is withheld at layer 3 and deeper (`docs/WORK-ON-RUNTIME.md` F1/F5), which happens when this review was invoked from inside a forked phase instead of by the router (R1). Name the depth limit in the comment and blocker rather than reporting a missing install. HARD STOP, post a PR/issue comment explaining that no sub-agent dispatch tool is available, add `needs-human`, and exit without posting a verdict. Do NOT fall back to reviewing inline in the orchestrator's own context — inline self-review is strictly weaker than an isolated fresh-context reviewer and is never a substitute for a missing dispatch tool.
 4. **Dispatch pool exhausted or dispatch call fails**: this is distinct from tool absence. If any selected reviewer cannot be launched because the runtime reports a sub-agent/session/pool limit (or any dispatch call fails), HARD STOP immediately. Do not review that domain inline, do not silently reduce the panel, and do not merge. Mark the PR `review-degraded`, add `needs-human` to the linked issue, post `<!-- FORGE:GATE_FAILURE:TYPE=review-panel-integrity -->` with the selected and completed reviewer counts, then exit without a `FORGE:REVIEW` verdict. A later fresh session must re-run the full selected panel.
 
 **Reviewer completion model (spawn-site ownership)**: `Task` and OpenCode `task` calls are joined, so their return is the completion signal. `Agent` is async-only: the call returns `Async agent launched`, and inside a forked phase (`work-on:review` / `work-on:remediate`) completion notifications go to the root session, not this phase (`docs/WORK-ON-RUNTIME.md` R6). With `{DISPATCH_TOOL}=Agent`, never end the turn waiting for notifications nor treat a missing one as a missing review: the completion signal is each reviewer's `FORGE:REVIEW-AGENT:{domain}` PR comment for the reviewed head SHA, read by the bounded wait in Phase 4.
@@ -2829,21 +2829,7 @@ HAS_PURPOSE_REGRESSION=true
 PURPOSE_REGRESSION_FINDINGS+=("Finding ID: ..., Reason: ...")
 ```
 
-**Step 4 — Log result:**
-
-If `HAS_PURPOSE_REGRESSION=true`:
-```
-PURPOSE REGRESSION GATE: BLOCKED
-Reason: [finding] contradicts milestone goal "[milestone name]"
-Verdict escalated to CHANGES REQUESTED.
-```
-
-If no purpose regression found:
-```
-PURPOSE REGRESSION GATE: PASSED
-No findings contradict the milestone's stated purpose.
-Verdict determined by standard blocking criteria.
-```
+**Step 4 — Log result:** the `verdict` subcommand in 7B prints the gate log (`PURPOSE REGRESSION GATE: BLOCKED` with the reason and the escalation to CHANGES REQUESTED, or `PURPOSE REGRESSION GATE: PASSED` with standard blocking criteria applying) when it is given `--is-milestone true` and the `--has-purpose-regression` flag from Step 3. Non-milestone PRs print nothing.
 
 ---
 
@@ -2865,60 +2851,27 @@ Verdict determined by standard blocking criteria.
 
 ```bash
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
-# Determine if mergeability is a blocker (MERGE_HEALTH/MERGE_HEALTH_STATE set in Phase 1A; BASE/HEAD set in Phase 0 Mode 3)
-# BASE_CONFLICT is the single source of truth for "a base sync would fix this"; the Phase 8 guards read it. <!-- Added: forge#3496 -->
-HAS_MERGE_CONFLICT=false
-BASE_CONFLICT=false
-MERGE_CONFLICT_MSG=""
-MERGE_PROTECTION_WARNING=""
-BASE_REQUIRES_UPTODATE=false
-if [ "$MERGE_HEALTH_STATE" = "BEHIND" ]; then
-    # Unreadable protection (404 / 403 / no admin access) is treated as "not required": no sync, and a later failed merge lands in the existing needs-human path.
-    [ "$(gh api "repos/${REPO}/branches/${BASE}/protection" --jq '.required_status_checks.strict // false' 2>/dev/null)" = "true" ] && BASE_REQUIRES_UPTODATE=true
+# Phase 1A / 0 values: MERGE_HEALTH, MERGE_HEALTH_STATE, BASE, HEAD. Phase 3B.5 values: INTENSITY_TIER, TABLE_CELL_KEY, TRUST_SHADOW_MODE (defaults SHADOW / unavailable / true).
+MERGE_HEALTH="{MERGE_HEALTH}"; MERGE_HEALTH_STATE="{MERGE_HEALTH_STATE}"; BASE="{BASE}"; HEAD="{HEAD}"; REVIEW_SHA="{REVIEW_SHA}"
+INTENSITY_TIER="{INTENSITY_TIER}"; TABLE_CELL_KEY="{TABLE_CELL_KEY}"; TRUST_SHADOW_MODE="{TRUST_SHADOW_MODE}"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+# Fail closed: an unresolvable script is a stop, never a skipped gate (install roots only, never the PR checkout).
+RF=$(forge_resolve review-finalize.sh)
+if [ -z "$RF" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/review-finalize.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install); refusing to continue (fail closed)"
+  exit 1   # STOP
 fi
-if [ "$MERGE_HEALTH" = "CONFLICTING" ] || [ "$MERGE_HEALTH_STATE" = "DIRTY" ] || { [ "$MERGE_HEALTH_STATE" = "BEHIND" ] && [ "$BASE_REQUIRES_UPTODATE" = "true" ]; }; then
-    HAS_MERGE_CONFLICT=true
-    BASE_CONFLICT=true
-    MERGE_CONFLICT_MSG="Base conflict with \`${BASE}\`. Merge \`origin/${BASE}\` into \`${HEAD}\` (merge only, no rebase, no force-push), resolve the conflicting files by reading both sides, then re-run /review-pr."
-elif [ "$MERGE_HEALTH_STATE" = "BLOCKED" ]; then
-    MERGE_PROTECTION_WARNING="Merge state is BLOCKED: branch protection is not satisfied (required review or check). Syncing the base cannot clear this."
-fi
-
-# ONLY_BASE_CONFLICT is NOT computed here: CALIBRATION_NEEDS_HUMAN is only set later (Phase 7B.5) and TRUST_NEEDS_HUMAN in Phase 3B.5,
-# so it is evaluated at the top of the Phase 8 guard, after every human gate has been set. <!-- forge#3496 -->
-
-# Resolve attribution footer (forge.yaml → attribution.pr_footer)
-ATTRIBUTION_PR_FOOTER=$(grep -A5 "^attribution:" forge.yaml 2>/dev/null | grep "pr_footer:" | awk '{print $(2)}' | tr -d '"' || echo "false")
-ATTRIBUTION_FOOTER_LINE=""
-if [ "$ATTRIBUTION_PR_FOOTER" = "true" ]; then
-  ATTRIBUTION_FOOTER_LINE="
----
-> ⚒️ Orchestrated with [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock) — state, scheduling, review, and memory on GitHub."
-fi
-
-# Build trust annotation line for verdict body — always included so the decision is auditable.
-# INTENSITY_TIER and TABLE_CELL_KEY are set in Phase 3B.5 (defaults: SHADOW / unavailable).
-TRUST_ANNOTATION="**Intensity tier**: ${INTENSITY_TIER:-SHADOW} | **Cell**: \`${TABLE_CELL_KEY:-(unavailable)}\` | **Shadow mode**: ${TRUST_SHADOW_MODE:-true}"
-
-# Stale review:
-gh pr review "$PR_NUMBER" -R "$REPO" --comment --body "Review of commit $REVIEW_SHA_SHORT is stale — PR HEAD changed. Re-run /review-pr."
-
-# Clean (no blocking issues):
-gh pr review "$PR_NUMBER" -R "$REPO" --comment --body "APPROVED: commit $REVIEW_SHA_SHORT after context-aware review ([N] agents: [names]). [M] findings created as issues. Safe to merge.
-${TRUST_ANNOTATION}
-$([ "$MERGE_HEALTH" = "UNKNOWN" ] && echo "
-⚠ Mergeability: GitHub is still computing merge state (UNKNOWN after retries). Verify manually before merging.")${ATTRIBUTION_FOOTER_LINE}"
-
-# Blocking issues (including merge conflicts and purpose regressions):
-gh pr review "$PR_NUMBER" -R "$REPO" --comment --body "CHANGES REQUESTED: commit $REVIEW_SHA_SHORT — [N] blocking issues found. See GitHub issues.
-${TRUST_ANNOTATION}
-$([ "$HAS_MERGE_CONFLICT" = "true" ] && echo "
-🔴 Base Conflict: ${MERGE_CONFLICT_MSG}")
-$([ -n "$MERGE_PROTECTION_WARNING" ] && echo "
-⚠ ${MERGE_PROTECTION_WARNING}")
-$([ "$HAS_PURPOSE_REGRESSION" = "true" ] && echo "
-⚠ Purpose Regression: [N] finding(s) contradict the milestone's stated goal and are automatically blocking regardless of runtime impact. See: ${PURPOSE_REGRESSION_FINDINGS[@]}")${ATTRIBUTION_FOOTER_LINE}"
+# --result: stale (PR HEAD moved) | clean (no blocking criteria) | blocking (any criterion above). Free text is data, never code.
+VERDICT_OUT=$(bash "$RF" verdict --pr "$PR_NUMBER" --repo "$REPO" --review-sha "$REVIEW_SHA" --base "$BASE" --head-branch "$HEAD" \
+  --merge-health "$MERGE_HEALTH" --merge-health-state "$MERGE_HEALTH_STATE" --is-milestone "{IS_MILESTONE_TO_STAGING}" \
+  --has-purpose-regression "{HAS_PURPOSE_REGRESSION}" --purpose-findings '{PURPOSE_REGRESSION_FINDINGS}' \
+  --result "{RESULT}" --agents '{N} agents: {names}' --findings-count "{M}" --blocking-count "{N_BLOCKING}" \
+  --intensity-tier "$INTENSITY_TIER" --table-cell-key "$TABLE_CELL_KEY" --trust-shadow-mode "$TRUST_SHADOW_MODE"); VERDICT_RC=$?
+printf '%s\n' "$VERDICT_OUT"
+[ "$VERDICT_RC" -eq 0 ] || exit 1   # STOP: REVIEW_RESULT: status: BLOCKED was printed
 ```
+
+`verdict` computes `BASE_CONFLICT` (criterion 4: the single source of truth that the Phase 8 guards read), always posts the verdict as a `--comment` review (`gh pr review --approve` fails for self-reviews), includes the trust annotation so the decision is auditable, and never posts a clean verdict over a base conflict or a purpose regression (it downgrades to CHANGES REQUESTED and prints `VERDICT_COERCED=true`). Read `VERDICT=`, `BASE_CONFLICT=` and `HAS_PURPOSE_REGRESSION=` from its output: they feed the Phase 8 flags. `ONLY_BASE_CONFLICT` is not computed here; the Phase 8 gate evaluates it after every human gate is set.
 
 ---
 
@@ -2931,81 +2884,23 @@ $([ "$HAS_PURPOSE_REGRESSION" = "true" ] && echo "
 **Fail-safe**: ANY error reading the calibration table (branch absent, file missing, JSON parse error, git failure) MUST result in `CALIBRATION_NEEDS_HUMAN=false` and the current static blocking criteria (Phase 7B verdict) remaining authoritative. The calibration table can ONLY tighten behavior (add needs-human); it NEVER loosens behavior below the current static baseline.
 
 ```bash
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
 MERGE_ISSUE="{MERGE_ISSUE}"
-# Phase 7B.5: Calibration threshold consultation
-CALIBRATION_NEEDS_HUMAN=false
-CALIBRATION_CELL=""
-CALIBRATION_NOTE=""
-
-# Read task type from FORGE:INVESTIGATOR on the linked issue
-# (MERGE_ISSUE is the issue number; passed from --auto-merge args)
-ISSUE_NUMBER="${MERGE_ISSUE:-}"
-
-if [ -n "$ISSUE_NUMBER" ]; then
-  INVESTIGATOR_BODY=$(gh api "repos/{GH_REPO}/issues/${ISSUE_NUMBER}/comments" \
-    --jq '[.[] | select(.body | contains("FORGE:INVESTIGATOR"))] | last | .body // ""' 2>/dev/null || echo '')
-  TASK_TYPE=$(echo "$INVESTIGATOR_BODY" | grep -oP '(?<=\*\*Task Type\*\*: )[^\n]+' | head -1 | tr -d ' \r')
-  CONFIDENCE=$(echo "$INVESTIGATOR_BODY" | grep -oP '(?<=\*\*Confidence\*\*: )[^\n]+' | head -1 | tr -d ' \r')
-  echo "Phase 7B.5: task_type=${TASK_TYPE:-unknown} confidence=${CONFIDENCE:-unknown} (from issue #${ISSUE_NUMBER})"
+INTENSITY_TIER="{INTENSITY_TIER}"; TABLE_CELL_KEY="{TABLE_CELL_KEY}"; TRUST_SHADOW_MODE="{TRUST_SHADOW_MODE}"; TRUST_NEEDS_HUMAN="{TRUST_NEEDS_HUMAN}"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+# Fail closed: an unresolvable script is a stop, never a skipped gate (install roots only, never the PR checkout).
+RF=$(forge_resolve review-finalize.sh)
+if [ -z "$RF" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/review-finalize.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install); refusing to continue (fail closed)"
+  exit 1   # STOP
 fi
-
-# Read calibration table from forge-knowledge branch (fail-safe: any error → skip)
-if [ -n "${TASK_TYPE:-}" ] && [ -n "${CONFIDENCE:-}" ]; then
-  CALIB_RAW=$(git show "origin/forge-knowledge:calibration/table.json" 2>/dev/null || echo '')
-
-  if [ -n "$CALIB_RAW" ]; then
-    # Look up the task-type × confidence cell
-    CALIB_CELL=$(echo "$CALIB_RAW" | jq -r --arg tt "$TASK_TYPE" --arg c "$CONFIDENCE" \
-      '.rows[] | select(.taskType == $tt and .confidence == $c and .trusted == true)' 2>/dev/null || echo '')
-
-    if [ -n "$CALIB_CELL" ]; then
-      SURVIVAL_RATE=$(echo "$CALIB_CELL" | jq -r '.survivalRate // "null"' 2>/dev/null || echo 'null')
-      SAMPLE_COUNT=$(echo "$CALIB_CELL" | jq -r '.sampleCount // 0' 2>/dev/null || echo '0')
-      CELL_FLAG=$(echo "$CALIB_CELL" | jq -r '.flag // "null"' 2>/dev/null || echo 'null')
-
-      CALIBRATION_CELL="${TASK_TYPE} × ${CONFIDENCE}: survival=${SURVIVAL_RATE} (n=${SAMPLE_COUNT})"
-      echo "Phase 7B.5: calibration cell found — ${CALIBRATION_CELL} flag=${CELL_FLAG}"
-
-      # Check overconfidence threshold: HIGH confidence with survival < 0.8
-      if [ "$CONFIDENCE" = "HIGH" ] && [ "$CELL_FLAG" = "overconfidence" ]; then
-        CALIBRATION_NEEDS_HUMAN=true
-        CALIBRATION_NOTE="Calibration table: ${TASK_TYPE} × HIGH confidence has ${SURVIVAL_RATE} survival rate (< 0.80 threshold, n=${SAMPLE_COUNT}). Routing to needs-human per forge#1741 policy."
-        echo "Phase 7B.5: CALIBRATION_NEEDS_HUMAN=true — ${CALIBRATION_NOTE}"
-      else
-        CALIBRATION_NOTE="Calibration cell: ${CALIBRATION_CELL} — within acceptable threshold"
-        echo "Phase 7B.5: CALIBRATION_NEEDS_HUMAN=false — ${CALIBRATION_NOTE}"
-      fi
-    else
-      # Cell not found or not trusted (below min-samples) — static behavior applies
-      CALIBRATION_NOTE="Calibration cell for ${TASK_TYPE} × ${CONFIDENCE} is absent or untrusted — using static behavior"
-      echo "Phase 7B.5: no trusted cell — ${CALIBRATION_NOTE}"
-    fi
-  else
-    CALIBRATION_NOTE="forge-knowledge:calibration/table.json not found — using static behavior"
-    echo "Phase 7B.5: calibration table unavailable — ${CALIBRATION_NOTE}"
-  fi
-else
-  CALIBRATION_NOTE="task type or confidence not resolved from FORGE:INVESTIGATOR — using static behavior"
-  echo "Phase 7B.5: could not resolve task type/confidence — ${CALIBRATION_NOTE}"
-fi
-
-# Log threshold decision in TRAJECTORY (append to existing issue comment or note for Phase 6)
-# This satisfies the acceptance criterion: "Threshold adjustments appear in TRAJECTORY with the cell that justified them"
-if [ -n "$ISSUE_NUMBER" ]; then
-  gh issue comment "${ISSUE_NUMBER}" {MERGE_GH_FLAG} --body "<!-- FORGE:CALIBRATION_CHECK -->
-**Phase 7B.5 — Calibration Threshold Check**
-**Cell**: ${CALIBRATION_CELL:-not found}
-**CALIBRATION_NEEDS_HUMAN**: ${CALIBRATION_NEEDS_HUMAN}
-**Note**: ${CALIBRATION_NOTE}
-
-**Phase 3B.5 — Provenance Trust Decision**
-**Intensity tier**: ${INTENSITY_TIER:-SHADOW}
-**Provenance cell**: \`${TABLE_CELL_KEY:-(unavailable)}\`
-**Shadow mode**: ${TRUST_SHADOW_MODE:-true}
-**TRUST_NEEDS_HUMAN**: ${TRUST_NEEDS_HUMAN:-false}
-**Timestamp**: $(date -u +%Y-%m-%dT%H:%M:%SZ)" 2>/dev/null || true
-fi
+# Reads task type and confidence from the linked issue's FORGE:INVESTIGATOR (MERGE_ISSUE comes from --issue), consults origin/forge-knowledge,
+# and records FORGE:CALIBRATION_CHECK. Any read error yields CALIBRATION_NEEDS_HUMAN=false: the table only ever tightens.
+bash "$RF" calibrate --pr "$PR_NUMBER" --repo "$REPO" --issue "$MERGE_ISSUE" \
+  --intensity-tier "$INTENSITY_TIER" --table-cell-key "$TABLE_CELL_KEY" --trust-shadow-mode "$TRUST_SHADOW_MODE" --trust-needs-human "$TRUST_NEEDS_HUMAN"
 ```
+
+Read `CALIBRATION_NEEDS_HUMAN=` and `CALIBRATION_NOTE=` from the output; they are Phase 8 flags.
 
 ---
 
@@ -3013,319 +2908,42 @@ fi
 
 **Skip if** `AUTO_MERGE=false`.
 
-**Note-disposition preflight (MANDATORY before any merge attempt)**: §6B.5 is what bounds the review-finding cascade, so a review that extracted findings but never recorded their disposition must not auto-merge. Fail closed on an unreadable comment list.
+**One script owns every Phase 8 gate (MANDATORY; a gate is never skipped, reordered or hand-run).** `review-finalize.sh merge-gate` runs, in this order, and stops at the first refusal (nothing below a refusal runs):
+
+1. **Note-disposition preflight**: §6B.5 is what bounds the review-finding cascade, so a review that extracted findings but never recorded their disposition must not auto-merge. Fails closed on an unreadable comment list, an unresolvable `scripts/trusted-comments.sh`, or a failed trust filter. Only a trusted `FORGE:NOTE_DISPOSITION` counts.
+2. **In-PR fix gate (§6B.6)**: an unanswered trusted `FORGE:INPR_FIX` request at the current head blocks the merge until the fix round runs (a new head) or `/work-on` waives it for that head. Not `needs-human`: `/work-on` R4 runs one fix round.
+3. **Phase-trail preflight** <!-- Added: forge#3061 -->: a reviewer verdict alone must not merge work whose earlier pipeline phases were skipped. Runs `scripts/verify-phase-trail.sh` against the linked issue. `--issue` is mandatory (the issue is never inferred from PR-author-controlled text). The docs-only predicate (`scripts/is-docs-only.sh`, fed both sides of every rename) and the band cross-check (`--code-diff` unless positively docs-only, fail closed on a truncated or unreadable file list) are computed once inside the script, and the break-glass override is bound to the PR head. Exit code 1 means missing phases (`PHASE_TRAIL_FAILED`); exit code >= 2 or 127 (unreadable trail, or verifier not resolvable) is an infrastructure failure with no MISSING lines, so it is `BLOCKED` with `needs-human`.
+4. **Guard state**: `--verdict`, `--has-purpose-regression`, `--calibration-needs-human`, `--trust-needs-human`, `--base-conflict` and `--other-blocking` are decided in earlier fences (earlier shells), so they are passed as flags. `VERDICT` is `APPROVED` or `CHANGES REQUESTED` (`APPROVE` is normalized, `NEEDS RE-REVIEW` fails closed) and the other five are `true` or `false`; an empty or unsubstituted value aborts with `needs-human`, because it would otherwise read as "not blocking". `--other-blocking true` when any other Phase 7B criterion (1, 2, 3 or 5) fired.
+5. **Routing**: a base conflict that is the ONLY blocker (`ONLY_BASE_CONFLICT`, evaluated after calibration and trust are set) routes to the base-sync path, not `needs-human` (`blocker: base-conflict`). Any other CHANGES REQUESTED, purpose regression, calibration or trust hold comments the reason and adds `needs-human`.
+6. **Pre-merge mergeability guard**: fresh state, because the base may have moved during the review. A conflict (`CONFLICTING`, `DIRTY`, or `BEHIND` under required-up-to-date protection) is `base-conflict`; `BLOCKED` is a protection abort with `needs-human` and never reads as a base conflict.
+7. **Previously-escalated re-review guard**: a linked issue that carries `needs-human`/`workflow:remediating` or a `FORGE:REMEDIATION` comment is parked at `workflow:awaiting-merge` and never merged here: for the deploy gate (or an unresolved base, fail closed) a human decides; any other base is parked for `remediate.md` Phase M7's base-scoped auto-land bar.
+8. **CI gate** (`scripts/wait-ci-green.sh`) and the **reviewed-head guard**: merge only when every check is green and only the exact commit this review approved (the `FORGE:REVIEW_ROUTE` sha); a docs-only post-review delta is allowed, any other change or head movement is a stale review. A human override accepted by the verifier stays bound to the head it was granted for.
+9. **Merge** `--match-head-commit` the gated head, then verify the state.
 
 ```bash
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
-DISPO_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null) || DISPO_JSON=""
-if [ -z "$DISPO_JSON" ]; then
-  echo "NOTE DISPOSITION: could not read PR comments — refusing to merge (fail closed)" >&2
-  # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "note disposition unreadable".
-  exit 1
-fi
-FINDING_COUNT=$(printf '%s' "$DISPO_JSON" | jq -s '[.[][] | select(.body | test("<!-- FINDING:"))] | length')
-# Trust predicate: ONE shared copy (scripts/trusted-comments.sh, same as verify-phase-trail.sh): trusted association, Bot account, or
-# FORGE_TRAIL_TRUSTED_LOGINS. A GitHub App bot always has author_association NONE, so an association-only filter drops the pipeline's own markers.
+MERGE_ISSUE="{MERGE_ISSUE}"; MERGE_BASE="{MERGE_BASE}"
+VERDICT="{VERDICT}"; HAS_PURPOSE_REGRESSION="{HAS_PURPOSE_REGRESSION}"; CALIBRATION_NEEDS_HUMAN="{CALIBRATION_NEEDS_HUMAN}"; CALIBRATION_NOTE='{CALIBRATION_NOTE}'
+TRUST_NEEDS_HUMAN="{TRUST_NEEDS_HUMAN}"; BASE_CONFLICT="{BASE_CONFLICT}"; OTHER_BLOCKING="{OTHER_BLOCKING}"; TABLE_CELL_KEY="{TABLE_CELL_KEY}"
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
-TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
-if [ -z "$TRUSTED_SCRIPT" ] || [ -z "$FINDING_COUNT" ]; then
-  echo "NOTE DISPOSITION: scripts/trusted-comments.sh unresolvable or findings unreadable — refusing to merge (fail closed)" >&2
-  # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "note disposition unreadable".
-  exit 1
+# Fail closed: an unresolvable script is a stop, never a skipped gate (install roots only, never the PR checkout).
+RF=$(forge_resolve review-finalize.sh)
+if [ -z "$RF" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/review-finalize.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install); refusing to continue (fail closed)"
+  exit 1   # STOP
 fi
-DISPOSITION_COUNT=$(printf '%s' "$DISPO_JSON" | bash "$TRUSTED_SCRIPT" count '^<!-- FORGE:NOTE_DISPOSITION') || DISPOSITION_COUNT=""
-if [ -z "$DISPOSITION_COUNT" ]; then
-  echo "NOTE DISPOSITION: trust filter failed — refusing to merge (fail closed)" >&2
-  # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "note disposition unreadable".
-  exit 1
-fi
-if [ "${FINDING_COUNT:-0}" -gt 0 ] && [ "${DISPOSITION_COUNT:-0}" -eq 0 ]; then
-  echo "NOTE DISPOSITION: ${FINDING_COUNT} finding comment(s) but no FORGE:NOTE_DISPOSITION record — run §6B.5 before merging" >&2
-  gh pr comment {PR_NUMBER} {MERGE_GH_FLAG} --body "Auto-merge skipped: review findings exist but §6B.5 note disposition was not recorded. Re-run \`/review-pr {PR_NUMBER} --auto-merge --issue <N>\`." 2>/dev/null || true # allowlist:check-command-side-effects
-  # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "note disposition missing".
-  exit 1
-fi
-# In-PR fix gate (§6B.6): an unanswered INPR_FIX request at the current head blocks the merge until the fix
-# round runs (a new head) or /work-on waives it for this head. Only trusted authors' markers count.
-PR_HEAD_NOW=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json headRefOid --jq .headRefOid 2>/dev/null || echo "")
-INPR_BODIES=$(printf '%s' "$DISPO_JSON" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:INPR_FIX: ') || INPR_BODIES="__ERR__"
-INPR_WAIVED=$(printf '%s' "$DISPO_JSON" | bash "$TRUSTED_SCRIPT" count "^<!-- FORGE:INPR_FIX_WAIVED: head=${PR_HEAD_NOW}") || INPR_WAIVED=""
-if [ "$INPR_BODIES" = "__ERR__" ] || [ -z "$INPR_WAIVED" ]; then
-  echo "IN-PR FIX: trust filter failed — refusing to merge (fail closed)" >&2
-  # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "note disposition unreadable".
-  exit 1
-fi
-# Latest trusted request wins (bodies are JSON strings, one per line).
-INPR_REQ=$(printf '%s\n' "$INPR_BODIES" | tail -n 1 | jq -r 'capture("head=(?<h>[0-9a-f]{7,40})").h // ""' 2>/dev/null || echo "")
-if [ -n "$INPR_REQ" ] && [ "$INPR_REQ" = "$PR_HEAD_NOW" ] && [ "${INPR_WAIVED:-0}" -eq 0 ]; then
-  echo "IN-PR FIX: CONFIRMED findings in this PR's files were requested at head ${PR_HEAD_NOW} — fix them before merging (§6B.6)" >&2
-  # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "in-pr fix required". Not needs-human: /work-on R4 runs one fix round.
-  exit 1
-fi
+GATE_OUT=$(bash "$RF" merge-gate --pr "$PR_NUMBER" --repo "$REPO" --issue "$MERGE_ISSUE" --base "$MERGE_BASE" \
+  --verdict "$VERDICT" --has-purpose-regression "$HAS_PURPOSE_REGRESSION" --calibration-needs-human "$CALIBRATION_NEEDS_HUMAN" --calibration-note "$CALIBRATION_NOTE" \
+  --trust-needs-human "$TRUST_NEEDS_HUMAN" --base-conflict "$BASE_CONFLICT" --other-blocking "$OTHER_BLOCKING" --table-cell-key "$TABLE_CELL_KEY"); GATE_RC=$?
+printf '%s\n' "$GATE_OUT"
+exit "$GATE_RC"
 ```
 
-**Phase-trail preflight (MANDATORY before any merge attempt)** <!-- Added: forge#3061 -->: a reviewer verdict alone must not merge work whose earlier pipeline phases were skipped. Run the deterministic verifier against the linked issue; do NOT run the merge block below unless it exits 0.
-
-```bash
-MERGE_ISSUE="{MERGE_ISSUE}"
-if [ -z "${MERGE_ISSUE:-}" ]; then
-  echo "PHASE TRAIL: auto-merge requested without --issue — the issue is never inferred from PR-author-controlled text, so the phase trail cannot be verified; the phase trail; refusing to merge (fail closed)" >&2
-  gh pr comment {PR_NUMBER} {MERGE_GH_FLAG} --body "Auto-merge skipped: no --issue was given, so the phase trail cannot be verified. Re-run \`/review-pr {PR_NUMBER} --auto-merge --issue <N>\` or merge manually." 2>/dev/null || true # allowlist:check-command-side-effects
-  # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "auto-merge requires --issue". Not a PHASE_TRAIL_FAILED (nothing to re-run).
-  exit 1
-else
-  # Same resolution as work-on/review.md Phase R1.5: the verifier ships with ForgeDock, not the consumer repo.
-  type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
-  TRAIL_SCRIPT=$(forge_resolve verify-phase-trail.sh); DOCS_ONLY_SCRIPT=$(forge_resolve is-docs-only.sh)
-  # Docs-only predicate: ONE shared copy (scripts/is-docs-only.sh, forge#3134), same as work-on/review.md R1.5. Fail closed: unresolved script or empty diff -> no flag.
-  DOCS_ONLY_FLAG=""
-  # Both sides of a rename (filename + previous_filename): `gh pr diff --name-only` collapses a rename to its destination (forge#3145).
-  PR_FILES_ALL=$(gh api --paginate "repos/{GH_REPO}/pulls/{PR_NUMBER}/files" --jq '.[] | .filename, (.previous_filename // empty)' 2>/dev/null) || PR_FILES_ALL=""
-  # Fail closed on truncation: the files API caps at 3000 files, so a PR at/over the cap (or an unreadable count) never yields a docs-only flag.
-  PR_CHANGED_N=$(gh api "repos/{GH_REPO}/pulls/{PR_NUMBER}" --jq .changed_files 2>/dev/null) || PR_CHANGED_N=""
-  case "$PR_CHANGED_N" in ''|*[!0-9]*) PR_FILES_ALL="" ;; *) [ "$PR_CHANGED_N" -ge 3000 ] && PR_FILES_ALL="" ;; esac
-  if [ -n "$PR_FILES_ALL" ] && [ -n "$DOCS_ONLY_SCRIPT" ] && echo "$PR_FILES_ALL" | bash "$DOCS_ONLY_SCRIPT"; then DOCS_ONLY_FLAG="--docs-only"; fi
-  # Band cross-check (forge#3149): a non-docs PR diff means an agent-chosen INVESTIGATION band must not waive requirements.
-  # No --head-tree here: review auto-fix commits legitimately advance the head after the gate ran; the tree binding is enforced pre-PR (work-on/review.md R1.5).
-  # Fail closed: anything not positively docs-only (including an empty/unreadable diff) is treated as a code diff.
-  CODE_DIFF_FLAG="--code-diff"
-  if [ -n "$DOCS_ONLY_FLAG" ]; then CODE_DIFF_FLAG=""; fi
-  if [ -z "$TRAIL_SCRIPT" ]; then
-    # Fail closed: an unresolvable verifier is NOT a pass (plugin installs set no FORGE_HOME; never fall back to the consumer repo).
-    echo "PHASE TRAIL: verify-phase-trail.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install) — refusing to merge" >&2
-    TRAIL="PHASE_TRAIL: ERROR (verifier not resolvable)"; TRAIL_RC=127
-  else
-    # Bind the human break-glass override (forge#3152) to the PR head. An unreadable head omits the flag, so no override is offered (fails closed).
-    PR_HEAD_SHA=$(gh api "repos/{GH_REPO}/pulls/{PR_NUMBER}" --jq .head.sha 2>/dev/null) || PR_HEAD_SHA=""
-    HEAD_SHA_ARGS=()
-    if [[ "$PR_HEAD_SHA" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then HEAD_SHA_ARGS=(--head-sha "$PR_HEAD_SHA"); fi
-    TRAIL=$(bash "$TRAIL_SCRIPT" "$MERGE_ISSUE" -R {GH_REPO} $DOCS_ONLY_FLAG $CODE_DIFF_FLAG ${HEAD_SHA_ARGS[@]+"${HEAD_SHA_ARGS[@]}"}); TRAIL_RC=$?
-    if [ "$TRAIL_RC" -eq 0 ]; then
-      # An `OVERRIDE:` line means the verifier accepted a human override. Record it on the PR from the verifier's output (never agent prose).
-      OVR=$(printf '%s\n' "$TRAIL" | sed -n 's/^OVERRIDE: //p' | sed -n '1p')
-      OVERRIDE_BOUND_HEAD=""
-      if [ -n "$OVR" ]; then
-        OVERRIDE_BOUND_HEAD="$PR_HEAD_SHA"   # forge#3273: the merge below must land exactly this commit
-        gh pr comment {PR_NUMBER} -R {GH_REPO} --body "$(printf '<!-- FORGE:PHASE_TRAIL_OVERRIDE_APPLIED -->\nThe phase-trail gate was waived by a human break-glass override.\n\n%s\n%s\n%s\n' '```' "$OVR" '```')" # <!-- allowlist:check-command-side-effects -->
-      fi
-    fi
-  fi
-  if [ "$TRAIL_RC" -ge 2 ]; then
-    # rc 2 (trail unreadable) / 127 (verifier not resolvable) is an infrastructure failure, NOT missing phases:
-    # there are no MISSING lines to re-run, so never report PHASE_TRAIL_FAILED here (same routing as work-on/review.md R1.5, forge#3147).
-    TRAIL_ERR_BODY="<!-- FORGE:PHASE_TRAIL_ERROR -->
-Auto-merge refused for PR #{PR_NUMBER}: the phase-trail verifier could not run (rc=${TRAIL_RC}). This is an infrastructure problem, not a missing phase. Do not re-run phases.
-
-\`\`\`
-${TRAIL}
-\`\`\`
-
-Fix the cause (gh auth/API outage, \`FORGE_TRAIL_QG_SINCE\`/runner clock, or set \`FORGEDOCK_HOME\` when the verifier is unresolvable), then re-run /review-pr."
-    gh issue comment "$MERGE_ISSUE" {MERGE_GH_FLAG} --body "$TRAIL_ERR_BODY" # <!-- allowlist:check-command-side-effects -->
-    # Nothing can resume this automatically, so park it for a human instead of leaving workflow:in-review (standalone /review-pr and remediate callers too).
-    gh issue edit "$MERGE_ISSUE" {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
-    # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "phase trail unreadable (rc=${TRAIL_RC})". The PR stays open and unmerged; callers must NOT fall back to a manual merge.
-    exit 1
-  elif [ "$TRAIL_RC" -ne 0 ]; then
-    TRAIL_FAIL_BODY="<!-- FORGE:PHASE_TRAIL_FAILED -->
-Auto-merge refused for PR #{PR_NUMBER}: the issue's phase trail is incomplete.
-
-\`\`\`
-${TRAIL}
-\`\`\`
-
-Re-run each missing phase via its Skill (see the \`->\` action on each MISSING line), then re-run /review-pr."
-    gh issue comment "$MERGE_ISSUE" {MERGE_GH_FLAG} --body "$TRAIL_FAIL_BODY" # <!-- allowlist:check-command-side-effects -->
-    # STOP — return REVIEW_RESULT: status: PHASE_TRAIL_FAILED with the MISSING lines (rc 1 only; rc >= 2 is handled above as BLOCKED).
-    # The /work-on router (work-on/review.md Phase R4), the work-on.md router (Phase 4 → work-on/review.md) and remediate.md Phase M6 consume this status and re-dispatch the named phases once (forge#3102); this is NOT an immediate needs-human escalation.
-    exit 1
-  fi
-fi
-[ "${TRAIL_RC:-1}" -eq 0 ] || exit 1   # hard guard: nothing below runs unless the trail verified
-```
-
-If the preflight failed, skip the rest of Phase 8. On exit code 1, return `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` listing the missing markers. On exit code ≥2 (unreadable trail, or 127 when the verifier is unresolvable), return `REVIEW_RESULT: status: BLOCKED`, blocker: "phase trail unreadable (rc=N)". This is an infrastructure failure with no MISSING lines: callers neither re-run phases nor merge manually. (`DOCS_ONLY_FLAG` is computed in the block above: `--docs-only` when `scripts/is-docs-only.sh` accepts the PR diff, fed both sides of every rename: every file is an allowlisted `*.md` outside the instruction directories and agent-instruction filenames; the allowlist lives in `scripts/is-docs-only.sh`.)
-
-```bash
-REPO="{GH_REPO}"
-# §7B verdict + purpose-regression + calibration + trust-escalation guard — check before any merge attempt <!-- Added: forge#1601, forge#1741, forge#1745 -->
-# HARD RULE 3: VERDICT=CHANGES REQUESTED, HAS_PURPOSE_REGRESSION=true, CALIBRATION_NEEDS_HUMAN=true and TRUST_NEEDS_HUMAN=true all block
-# merge, including under auto-merge. They are decided in earlier fences (earlier shells): re-declare them here with the orchestrator's
-# values. VERDICT is APPROVED or CHANGES REQUESTED (the report template's APPROVE is normalized below; NEEDS RE-REVIEW fails closed);
-# the other five are true or false.
-VERDICT="{VERDICT}"; HAS_PURPOSE_REGRESSION="{HAS_PURPOSE_REGRESSION}"; CALIBRATION_NEEDS_HUMAN="{CALIBRATION_NEEDS_HUMAN}"
-TRUST_NEEDS_HUMAN="{TRUST_NEEDS_HUMAN}"; BASE_CONFLICT="{BASE_CONFLICT}"; OTHER_BLOCKING="{OTHER_BLOCKING}"
-[ "$VERDICT" = "APPROVE" ] && VERDICT="APPROVED"
-# Fail closed: an empty or unsubstituted value would read as "not blocking" and fall through to the merge path,
-# so any value outside the expected set stops here instead of merging.
-GUARD_STATE_OK=true
-case "$VERDICT" in "APPROVED"|"CHANGES REQUESTED") ;; *) GUARD_STATE_OK=false ;; esac
-for _guard_val in "$HAS_PURPOSE_REGRESSION" "$CALIBRATION_NEEDS_HUMAN" "$TRUST_NEEDS_HUMAN" "$BASE_CONFLICT" "$OTHER_BLOCKING"; do
-    case "$_guard_val" in true|false) ;; *) GUARD_STATE_OK=false ;; esac
-done
-if [ "$GUARD_STATE_OK" != "true" ]; then
-    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: the Phase 8 merge guard state is unbound (VERDICT='${VERDICT}', HAS_PURPOSE_REGRESSION='${HAS_PURPOSE_REGRESSION}', CALIBRATION_NEEDS_HUMAN='${CALIBRATION_NEEDS_HUMAN}', TRUST_NEEDS_HUMAN='${TRUST_NEEDS_HUMAN}', BASE_CONFLICT='${BASE_CONFLICT}', OTHER_BLOCKING='${OTHER_BLOCKING}'). Not merging; re-run /review-pr." # <!-- allowlist:check-command-side-effects -->
-    gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true # <!-- allowlist:check-command-side-effects -->
-    # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "merge guard state unbound". Do NOT attempt gh pr merge.
-    exit 1
-fi
-# TRUST_NEEDS_HUMAN: true when Phase 3B.5 set INTENSITY_TIER=NOVEL_NEEDS_HUMAN AND shadow mode is off.
-# ONLY_BASE_CONFLICT: the base conflict is the ONLY reason for CHANGES REQUESTED. Computed HERE, after 7B.5 and 3B.5, so the calibration
-# and trust human gates are already set and never skipped for a base-conflict PR. <!-- forge#3496 -->
-# OTHER_BLOCKING=true when ANY other blocking criterion (1, 2, 3 or 5 in Phase 7B) fired; then route to needs-human below.
-ONLY_BASE_CONFLICT=false
-if [ "${BASE_CONFLICT:-false}" = "true" ] && [ "${OTHER_BLOCKING:-false}" != "true" ] && [ "${HAS_PURPOSE_REGRESSION:-false}" != "true" ] && [ "${CALIBRATION_NEEDS_HUMAN:-false}" != "true" ] && [ "${TRUST_NEEDS_HUMAN:-false}" != "true" ]; then
-    ONLY_BASE_CONFLICT=true
-fi
-if [ "${ONLY_BASE_CONFLICT:-false}" = "true" ] && [ "$VERDICT" = "CHANGES REQUESTED" ]; then
-    # Pure base conflict (set in Phase 7B: the ONLY blocker): route to the base-sync path, NOT needs-human. <!-- Added: forge#3496 -->
-    # work-on/review.md R4 sets workflow:remediating (not needs-human) when it hands off to remediate; a standalone /review-pr caller just sees the blocker.
-    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: base conflict with \`{MERGE_BASE}\` (the only blocking reason). No operator action is needed: the pipeline is performing the base sync automatically (merging \`origin/{MERGE_BASE}\` into the PR branch, merge only, no rebase, no force-push), re-running the quality gate, then re-reviewing the new head. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
-    # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "base-conflict". No needs-human, no merge.
-elif [ "$VERDICT" = "CHANGES REQUESTED" ] || [ "$HAS_PURPOSE_REGRESSION" = "true" ] || [ "$CALIBRATION_NEEDS_HUMAN" = "true" ] || [ "${TRUST_NEEDS_HUMAN:-false}" = "true" ]; then
-    BLOCK_REASON=""
-    [ "$VERDICT" = "CHANGES REQUESTED" ] && BLOCK_REASON="review verdict is CHANGES REQUESTED (blocking finding confirmed by Phase 7B)"
-    [ "$HAS_PURPOSE_REGRESSION" = "true" ] && BLOCK_REASON="${BLOCK_REASON:+${BLOCK_REASON}; }purpose regression detected by Phase 7A (\`HAS_PURPOSE_REGRESSION=true\`)"
-    [ "$CALIBRATION_NEEDS_HUMAN" = "true" ] && BLOCK_REASON="${BLOCK_REASON:+${BLOCK_REASON}; }calibration threshold: ${CALIBRATION_NOTE}"
-    [ "${TRUST_NEEDS_HUMAN:-false}" = "true" ] && BLOCK_REASON="${BLOCK_REASON:+${BLOCK_REASON}; }provenance trust: NOVEL_NEEDS_HUMAN tier for cell \`${TABLE_CELL_KEY}\` — no sufficient prior data (forge#1745)"
-    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: ${BLOCK_REASON}. Manual review required before merging."
-    gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true
-    # STOP — do not attempt gh pr merge when §7B/7B.5 blocking conditions are active
-else
-
-# Pre-merge mergeability guard — re-fetch fresh state before attempting merge <!-- Added: forge#194 -->
-# A PR that was MERGEABLE at Phase 1A may have become CONFLICTING if the base branch
-# received commits while the review was running. Re-check before every auto-merge.
-PRE_MERGE_RESULT=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json mergeable,mergeStateStatus --jq '"\\(.mergeable)|\\(.mergeStateStatus)"')
-PRE_MERGE_HEALTH=${PRE_MERGE_RESULT%%|*}
-PRE_MERGE_HEALTH_STATE=${PRE_MERGE_RESULT##*|}
-
-PRE_MERGE_BASE_CONFLICT=false
-if [ "$PRE_MERGE_HEALTH" = "CONFLICTING" ] || [ "$PRE_MERGE_HEALTH_STATE" = "DIRTY" ]; then
-    PRE_MERGE_BASE_CONFLICT=true
-elif [ "$PRE_MERGE_HEALTH_STATE" = "BEHIND" ]; then
-    # BEHIND is a conflict only under required-up-to-date protection; unreadable protection counts as "not required". <!-- Added: forge#3496 -->
-    [ "$(gh api "repos/${REPO}/branches/{MERGE_BASE}/protection" --jq '.required_status_checks.strict // false' 2>/dev/null)" = "true" ] && PRE_MERGE_BASE_CONFLICT=true
-fi
-
-if [ "$PRE_MERGE_BASE_CONFLICT" = "true" ]; then
-    # Base moved during review: route to the base-sync path, NOT needs-human. <!-- Added: forge#3496 -->
-    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: base conflict (\`mergeable=${PRE_MERGE_HEALTH}\`, \`mergeStateStatus=${PRE_MERGE_HEALTH_STATE}\`). No operator action is needed: the pipeline is performing the base sync automatically (merging \`origin/{MERGE_BASE}\` into the PR branch, merge only, no rebase, no force-push) and then re-reviewing. A human is pulled in only if the conflict cannot be resolved automatically." # <!-- allowlist:check-command-side-effects -->
-    # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "base-conflict". No needs-human, no merge.
-elif [ "$PRE_MERGE_HEALTH_STATE" = "BLOCKED" ]; then
-    # Branch protection not satisfied: syncing the base cannot clear it, so this is NOT a base-conflict blocker.
-    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "⛔ Auto-merge aborted for PR #{PR_NUMBER}: branch protection is not satisfied (\`mergeStateStatus=BLOCKED\`); syncing the base cannot clear it. Satisfy the required review/checks, then re-run /review-pr."
-    gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true
-    # STOP — return REVIEW_RESULT: status: BLOCKED, blocker: "branch protection not satisfied" (never "base-conflict")
-else
-
-# Previously-escalated re-review guard <!-- Added: forge#1810; base-scoped: forge#2570 -->
-# If the linked issue carries needs-human, or remediation posted its in-progress marker, this PR was escalated earlier
-# (VERDICT/purpose-regression/calibration/trust/mergeability) and is now remediated + re-reviewed to a clean, mergeable APPROVED state.
-# The PR still moves to workflow:awaiting-merge (clearing needs-human) in BOTH cases below; only who acts next differs:
-#   - the deploy gate (`main`, the GitHub `default_branch`, or the default branch's committed `branches.default`; never read from the PR worktree)
-#     or an unresolved base (fail closed): held for a HUMAN merge decision, because `staging → main` is the genuine human gate.
-#   - any other base (staging, milestone/*; reversible integration branches): parked for remediate.md Phase M7's base-scoped auto-land bar
-#     (bot APPROVED + quality-gate pass), the SAME condition the normal /work-on fast lane uses for that branch. A bot-only re-review
-#     (authorAssociation=NONE) could never satisfy the strict >=2 verified-human bar and would strand staging PRs.
-type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
-PREVIOUSLY_ESCALATED=$(gh issue view {MERGE_ISSUE} {MERGE_GH_FLAG} --json labels,comments \
-  --jq '([.labels[].name | . == "needs-human" or . == "workflow:remediating"] + [.comments[].body | contains("FORGE:REMEDIATION")]) | any' 2>/dev/null || echo "false")
-GUARD_BASE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
-
-if [ "$PREVIOUSLY_ESCALATED" = "true" ]; then
-    # forge#2625: `jq -r '.baseRefName'` stringifies a JSON null to the text "null", so the `-n` check alone misses it:
-    # treat a literal "null" like an empty/unresolved base (strict).
-    GATE_SCRIPT=$(forge_resolve resolve-deploy-gate.sh)
-    if [ -n "$GATE_SCRIPT" ]; then GUARD_GATE=$(bash "$GATE_SCRIPT" "$GUARD_BASE" {GH_REPO} 2>/dev/null || echo true); else GUARD_GATE=true; fi; [ "$GUARD_GATE" = "false" ] || GUARD_GATE=true
-    if [ "$GUARD_GATE" = "false" ]; then
-      # forge#2570/#2626: non-default-branch base: defer to remediate.md M7's auto-land, not a human; the comment also carries a
-      # manual-merge fallback for a standalone `/review-pr` (no M6→M7 chain).
-      gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "🟠 PR #{PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check on non-default-branch base \`${GUARD_BASE}\`. It is parked at \`workflow:awaiting-merge\` for the remediation auto-land bar (\`remediate.md\` Phase M7, forge#2570) — which auto-merges it on the same fast-lane condition the normal \`/work-on\` path uses for this target branch — NOT for a human merge decision. If no remediation \`M7\` follows (e.g. this review was invoked standalone), merge manually once reviewed: \`gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge\`."
-    else
-      # forge#2570: default branch / deploy gate (or unresolved base — fail closed to the human gate).
-      gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "🟠 PR #{PR_NUMBER} was previously escalated (\`needs-human\`) and has now been re-reviewed to \`${VERDICT:-APPROVED}\` with a clean mergeability check. This PR targets the deploy gate (\`${GUARD_BASE:-unresolved base}\`), so it is held at \`workflow:awaiting-merge\` for a human merge decision — \`staging → main\` is the genuine human gate. Merge manually once reviewed: \`gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge\`."
-    fi
-    # transition-label.sh: install roots only (never repo-relative / $PWD; the PR under review is author-controlled). Unresolvable or unknown TIER falls through to the prose label edit so the awaiting-merge transition is never silently skipped.
-    TRANSITION_SCRIPT=$(forge_resolve transition-label.sh)
-    if [ -n "$TRANSITION_SCRIPT" ]; then TIER=universal; else TIER=prose; fi
-    case "$TIER" in
-      universal) bash "$TRANSITION_SCRIPT" {MERGE_ISSUE} {MERGE_GH_FLAG} awaiting-merge ;;
-      prose|*)
-        gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "workflow:awaiting-merge" \
-          --remove-label "needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:merged,workflow:invalid,workflow:decomposed" 2>/dev/null || true
-        ;;
-    esac
-    # STOP — do not attempt gh pr merge here. The merge decision belongs to a human for a
-    # `main`/deploy-gate base, or to remediate.md Phase M7's base-scoped auto-land bar for a
-    # non-`main` base (forge#2570). Either way this guard only parks at workflow:awaiting-merge.
-else
-    # CI gate (MANDATORY before any autonomous merge): merge only when every check on the PR is
-    # green. Field test: PRs merged to staging with checks pending or red (#3165), because branch
-    # protection required none and an auto-merge waits only for *required* checks.
-    CI_GATE_SCRIPT=$(forge_resolve wait-ci-green.sh); DOCS_ONLY_SCRIPT=$(forge_resolve is-docs-only.sh)
-    if [ -n "$CI_GATE_SCRIPT" ]; then CI_GATE_OUT=$(bash "$CI_GATE_SCRIPT" {PR_NUMBER} {MERGE_GH_FLAG}); CI_GATE_RC=$?
-    else CI_GATE_OUT="CI_GATE: ERROR — scripts/wait-ci-green.sh not resolvable (fail closed)"; CI_GATE_RC=2; fi
-    echo "$CI_GATE_OUT"
-    GATED_HEAD=$(printf '%s\n' "$CI_GATE_OUT" | sed -n 's/^CI_GATE_HEAD: //p' | head -1)
-    # rc 2 "head moved" is a stale review, not a human problem; rc 3 TIMEOUT means CI is still running.
-    printf '%s\n' "$CI_GATE_OUT" | grep -q 'PR head moved during the wait' && CI_GATE_RC=4
-    if [ "$CI_GATE_RC" -eq 3 ]; then
-      echo "CI_GATE_TIMEOUT: CI still running — re-run this whole block (up to 3 more times) before treating it as a failure."
-    fi
-    # Reviewed-head guard: merge only the exact commit this review approved. A commit pushed after
-    # the verdict (field test: post-review "fix" commits merged unreviewed on #3156 and #3158) needs a
-    # fresh full review, not a merge. Checked after the CI wait so a push during the wait is caught.
-    # A docs-only delta (this review's own §6B.5 note fixes) is allowed; any other change is stale.
-    # REVIEW_SHA is re-derived from this review's FORGE:REVIEW_ROUTE marker (sha=<7 chars>), never
-    # assumed from an earlier shell.
-    REVIEWED_SHORT=$(gh api "repos/{GH_REPO}/issues/{PR_NUMBER}/comments" --paginate --jq '.[] | select(.body | contains("FORGE:REVIEW_ROUTE")) | .body' 2>/dev/null \
-      | sed -n 's/.*FORGE:REVIEW_ROUTE[^>]* sha=\([0-9a-f]\{7,\}\).*/\1/p' | tail -1)
-    if [ "$CI_GATE_RC" -eq 0 ]; then
-      if [ -z "$REVIEWED_SHORT" ] || [ -z "$GATED_HEAD" ] || [ "$GATED_HEAD" = "unknown" ]; then
-        CI_GATE_RC=4; CI_GATE_OUT="STALE_REVIEW: cannot bind the merge to a reviewed commit (route sha='${REVIEWED_SHORT}', gated head='${GATED_HEAD}')"
-      elif [ "${GATED_HEAD#"$REVIEWED_SHORT"}" = "$GATED_HEAD" ]; then
-        REVIEW_BASE_SHA=$(gh api "repos/{GH_REPO}/commits/${REVIEWED_SHORT}" --jq '.sha' 2>/dev/null)
-        POST_REVIEW_FILES=$(gh api "repos/{GH_REPO}/compare/${REVIEW_BASE_SHA:-$REVIEWED_SHORT}...${GATED_HEAD}" --jq '.files[] | .filename, (.previous_filename // empty)' 2>/dev/null)
-        if [ -n "$POST_REVIEW_FILES" ] && [ -n "$DOCS_ONLY_SCRIPT" ] && printf '%s\n' "$POST_REVIEW_FILES" | bash "$DOCS_ONLY_SCRIPT"; then
-          echo "Post-review commits are docs-only (note fixes) — reviewed code unchanged."
-        else
-          CI_GATE_RC=4; CI_GATE_OUT="STALE_REVIEW: PR head ${GATED_HEAD:0:7} is not the reviewed commit ${REVIEWED_SHORT} and the delta is not docs-only"
-        fi
-      fi
-    fi
-    # WIRE:PROVEN — spec prose; OVERRIDE_BOUND_HEAD is set in the verifier block above and consumed here (reviewed by trace)
-    # forge#3273: an accepted break-glass override is bound to one exact head. If the commit being merged
-    # differs (a push after the verifier ran, even a docs-only one), the override does not cover it.
-    if [ "$CI_GATE_RC" -eq 0 ] && [ -n "${OVERRIDE_BOUND_HEAD:-}" ] && [ "$GATED_HEAD" != "$OVERRIDE_BOUND_HEAD" ]; then
-      CI_GATE_RC=4; CI_GATE_OUT="STALE_REVIEW: break-glass override was bound to ${OVERRIDE_BOUND_HEAD:0:7} but the gated head is ${GATED_HEAD:0:7}"
-    fi
-    if [ "$CI_GATE_RC" -eq 4 ]; then
-      # Not a human problem: the caller re-runs /review-pr on the new head (work-on/review.md R4).
-      echo "REVIEW_RESULT: status: BLOCKED, blocker: stale review — ${CI_GATE_OUT}; re-run /review-pr on the new head"
-    elif [ "$CI_GATE_RC" -ne 0 ]; then
-      CI_MSG="⛔ Auto-merge refused for PR #{PR_NUMBER}: CI is not green (ci gate rc=${CI_GATE_RC}). The PR stays open; fix the failing checks on its branch (remediation treats this as FIXABLE) or re-run flaky ones.
-\`\`\`
-${CI_GATE_OUT}
-\`\`\`"
-      gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "$CI_MSG" 2>/dev/null || true # allowlist:check-command-side-effects
-      gh issue edit {MERGE_ISSUE} {MERGE_GH_FLAG} --add-label "needs-human" 2>/dev/null || true # allowlist:check-command-side-effects
-      echo "REVIEW_RESULT: status: BLOCKED, blocker: ci gate not green (rc=${CI_GATE_RC})"
-    else
-    # Checkpoint comment on issue
-    gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "Review complete for PR #{PR_NUMBER}. Verdict: ${VERDICT:-APPROVED}. CI green. Proceeding to merge."
-
-    # Merge exactly the commit the CI gate (and the reviewed-head guard) checked.
-    gh pr merge {PR_NUMBER} {MERGE_GH_FLAG} --merge --match-head-commit "$GATED_HEAD"
-
-    # Verify
-    MERGE_STATE=$(gh pr view {PR_NUMBER} {MERGE_GH_FLAG} --json state --jq '.state')
-    [ "$MERGE_STATE" != "MERGED" ] && gh issue comment {MERGE_ISSUE} {MERGE_GH_FLAG} --body "PR #{PR_NUMBER} merge failed. State: $MERGE_STATE."
-    fi
-fi
-fi
-fi
-```
+**Outcome mapping.** Report the script's output; never re-run its gates by hand and never `gh pr merge` yourself.
+- Exit 0 with `MERGE_OUTCOME=merged` (`MERGE_STATE=MERGED`): merged. `MERGE_OUTCOME=merge-failed`: the merge call did not land (the script already commented on the issue). `MERGE_OUTCOME=parked-awaiting-merge`: parked per guard 7, not merged. The script performs that parking transition itself (`transition-label.sh ... awaiting-merge`, prose fallback `gh issue edit --add-label "workflow:awaiting-merge"`); this spec names it so the spec-graph state machine stays visible.
+- Exit 3: print the `REVIEW_RESULT: status: BLOCKED, blocker: ...` line the script already printed and stop. `MERGE_OUTCOME=` names the routed case (`base-conflict`, `needs-human`, `protection-blocked`, `stale-review`, `ci-not-green`). A CI gate TIMEOUT prints `CI_GATE_TIMEOUT`; re-run the same fence (up to 3 more times) before treating it as a failure.
+- Exit 4: `REVIEW_RESULT: status: PHASE_TRAIL_FAILED` followed by the `MISSING:` lines. Return that status with the missing markers and stop: this phase never re-runs the missing phases and never escalates to `needs-human`. The `work-on:review` phase (Phase R4) is the single owner of re-dispatching the named phases (forge#3102).
+- Exit 3 with a phase-trail blocker (`phase trail unreadable (rc=N)`, `auto-merge requires --issue`) is an infrastructure or usage failure with no MISSING lines: callers neither re-run phases nor merge manually.
 
 **Important**: Phase 8 ONLY merges the PR. It does NOT close the issue, update labels, or clean up worktrees. When invoked via `/work-on`, those responsibilities belong to `work-on/close.md` (the router's Phase 5 — triggered when the PR is merged and the issue is still open). Doing them here would cause the issue to be closed with `workflow:merged` before Phase 6 runs, skipping the close phase entirely.
 
@@ -3337,34 +2955,16 @@ fi
 
 ```bash
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
-if [ "${IS_MILESTONE_TO_STAGING:-false}" = "true" ] && [ "${MERGE_STATE:-}" = "MERGED" ]; then
-    echo "Phase 8B: Clearing milestone from open review-finding issues referencing PR #${PR_NUMBER}..."
-
-    # Find open review-finding issues whose body references this PR number
-    # The title template in Phase 6C always includes: "review finding — PR #${PR_NUMBER}"
-    FINDINGS_TO_DEMILESTONE=$(gh issue list -R "${REPO}" \
-        --state open \
-        --label "review-finding" \
-        --limit 200 \
-        --json number,title,milestone \
-        --jq ".[] | select(.milestone != null) | select(.title | test(\"PR #${PR_NUMBER}\")) | .number" \
-        2>/dev/null || echo "")
-
-    if [ -z "$FINDINGS_TO_DEMILESTONE" ]; then
-        echo "Phase 8B: No open review-finding issues with milestones found referencing PR #${PR_NUMBER}."
-    else
-        MOVED_COUNT=0
-        echo "$FINDINGS_TO_DEMILESTONE" | while IFS= read -r FINDING_NUM; do
-            [ -z "$FINDING_NUM" ] && continue
-            FINDING_TITLE=$(gh issue view "$FINDING_NUM" -R "${REPO}" --json title --jq '.title' 2>/dev/null || echo "#${FINDING_NUM}")
-            gh issue edit "$FINDING_NUM" -R "${REPO}" --milestone "" 2>/dev/null && \
-                echo "  Moved to fast lane: #${FINDING_NUM} — ${FINDING_TITLE}" || \
-                echo "  WARNING: Failed to clear milestone for #${FINDING_NUM}"
-            MOVED_COUNT=$((MOVED_COUNT + 1))
-        done
-        echo "Phase 8B: Review finding demilestoning complete."
-    fi
+IS_MILESTONE_TO_STAGING="{IS_MILESTONE_TO_STAGING}"; MERGE_STATE="{MERGE_STATE}"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+# Fail closed: an unresolvable script is a stop, never a skipped gate (install roots only, never the PR checkout).
+RF=$(forge_resolve review-finalize.sh)
+if [ -z "$RF" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/review-finalize.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install); refusing to continue (fail closed)"
+  exit 1   # STOP
 fi
+# Runs only for a milestone->staging PR whose merge just succeeded; clears the milestone on its open review-finding issues.
+bash "$RF" demilestone --pr "$PR_NUMBER" --repo "$REPO" --is-milestone "$IS_MILESTONE_TO_STAGING" --merge-state "$MERGE_STATE"
 ```
 
 <!-- Added: forge#815 -->
@@ -3383,43 +2983,20 @@ fi
 
 ```bash
 PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
-if [ "${IS_MILESTONE_TO_STAGING:-false}" = "true" ]; then
-    PR_MERGE_STATE=$(gh pr view "$PR_NUMBER" -R "$REPO" --json state --jq '.state' 2>/dev/null || echo "")
-    if [ "$PR_MERGE_STATE" = "MERGED" ]; then
-        echo "Phase 9A: Checking for open review-finding issues to demilestone (fallback — manual merge path)..."
-
-        FINDINGS_TO_DEMILESTONE=$(gh issue list -R "${REPO}" \
-            --state open \
-            --label "review-finding" \
-            --limit 200 \
-            --json number,title,milestone \
-            --jq ".[] | select(.milestone != null) | select(.title | test(\"PR #${PR_NUMBER}\")) | .number" \
-            2>/dev/null || echo "")
-
-        if [ -z "$FINDINGS_TO_DEMILESTONE" ]; then
-            echo "Phase 9A: No open review-finding issues with milestones found referencing PR #${PR_NUMBER} (already cleared or none created)."
-        else
-            echo "$FINDINGS_TO_DEMILESTONE" | while IFS= read -r FINDING_NUM; do
-                [ -z "$FINDING_NUM" ] && continue
-                FINDING_TITLE=$(gh issue view "$FINDING_NUM" -R "${REPO}" --json title --jq '.title' 2>/dev/null || echo "#${FINDING_NUM}")
-                gh issue edit "$FINDING_NUM" -R "${REPO}" --milestone "" 2>/dev/null && \
-                    echo "  Moved to fast lane: #${FINDING_NUM} — ${FINDING_TITLE}" || \
-                    echo "  WARNING: Failed to clear milestone for #${FINDING_NUM}"
-            done
-            echo "Phase 9A: Fallback demilestoning complete."
-        fi
-    fi
+IS_MILESTONE_TO_STAGING="{IS_MILESTONE_TO_STAGING}"
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+# Fail closed: an unresolvable script is a stop, never a skipped gate (install roots only, never the PR checkout).
+RF=$(forge_resolve review-finalize.sh)
+if [ -z "$RF" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/review-finalize.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install); refusing to continue (fail closed)"
+  exit 1   # STOP
 fi
+# No --merge-state: the script reads the PR's current state, and only a MERGED PR is touched.
+bash "$RF" demilestone --pr "$PR_NUMBER" --repo "$REPO" --is-milestone "$IS_MILESTONE_TO_STAGING"
 ```
 
 <!-- Added: forge#815 -->
 
-```bash
-PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"; REVIEW_SHA="{REVIEW_SHA}"
-CURRENT_SHA=$(gh pr view "$PR_NUMBER" -R "$REPO" --json headRefOid --jq '.headRefOid')
-REVIEW_IS_STALE="false"
-if [ "$CURRENT_SHA" != "$REVIEW_SHA" ]; then REVIEW_IS_STALE="true"; fi
-```
 
 ### Phase 9 — New Contributor Welcome (Conditional) <!-- Added: forge#960 -->
 
@@ -3484,32 +3061,19 @@ fi
 A degraded run that skipped Task-based agent dispatch must be visible from this summary alone, without interrogating the agent afterward. Compute the actual launched-agent count from the `<!-- FORGE:REVIEW-AGENT:{domain} -->` comments each agent is required to post (Phase 3C), rather than trusting a free-text tally:
 
 ```bash
-PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"; REVIEW_SHA="{REVIEW_SHA}"; REVIEW_MODE="{REVIEW_MODE}"
-# Same trust rule as Phase 3C/4: only trusted comments whose body starts with the marker count.
+PR_NUMBER="{PR_NUMBER}"; REPO="{GH_REPO}"
+REVIEW_SHA="{REVIEW_SHA}"; REVIEW_MODE="{REVIEW_MODE}"; MERGE_BASE="{MERGE_BASE}"
 type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
-TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
-REVIEW_DELTA_SCRIPT=$(forge_resolve review-delta.sh)
-BASE_BRANCH=$(gh pr view "$PR_NUMBER" -R "$REPO" --json baseRefName --jq '.baseRefName' 2>/dev/null || echo "")
-COMMENTS_JSON=$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" 2>/dev/null || echo "")
-_dm=$(forge_resolve lib/review-delta-mode.sh); [ -n "$_dm" ] && . "$_dm" || { review_delta_mode() { echo "FULL - 0"; }; carry_verified_from() { :; }; }
-# BASE_SYNC_ONLY: zero reviewers is the expected panel only when the carry record is trusted and the resolver re-verifies it.
-CARRIED_FROM=""
-if [ "$REVIEW_MODE" = "BASE_SYNC_ONLY" ]; then CARRIED_FROM=$(carry_verified_from); fi
-ACTUAL_AGENT_DOMAINS=""
-if [ -n "$TRUSTED_SCRIPT" ]; then
-  ACTUAL_AGENT_DOMAINS=$(printf '%s' "$COMMENTS_JSON" \
-    | bash "$TRUSTED_SCRIPT" bodies "^<!-- FORGE:REVIEW-AGENT:[a-z-]+ -->" 2>/dev/null \
-    | jq -rs '[.[] | scan("^<!-- FORGE:REVIEW-AGENT:([a-z-]+) -->") | .[0]] | unique | join(", ")' 2>/dev/null || echo "")   # unresolvable => empty => count 0 (degraded, fail closed)
+# Fail closed: an unresolvable script is a stop, never a skipped gate (install roots only, never the PR checkout).
+RF=$(forge_resolve review-finalize.sh)
+if [ -z "$RF" ]; then
+  echo "REVIEW_RESULT: status: BLOCKED, blocker: scripts/review-finalize.sh not resolvable (set FORGEDOCK_HOME to the ForgeDock install); refusing to continue (fail closed)"
+  exit 1   # STOP
 fi
-# NOTE: no `|| echo 0` fallback here — grep -c always prints a count (including 0 on
-# no match) even though it exits 1 in that case. Appending `|| echo 0` after a `grep -c`
-# pipeline double-counts: the pipeline already printed "0", then the fallback prints a
-# second "0" line, corrupting the value to "0\n0" in exactly the zero-agent case this
-# check exists to detect. <!-- Added: forge#1849 -->
-ACTUAL_AGENT_COUNT=$(echo "$ACTUAL_AGENT_DOMAINS" | tr ',' '\n' | grep -c '.' 2>/dev/null)
-# A verified carried head dispatched no reviewers by design: report it as carried instead of a degraded zero-agent panel.
-if [ -n "$CARRIED_FROM" ]; then ACTUAL_AGENT_DOMAINS="carried from ${CARRIED_FROM}"; ACTUAL_AGENT_COUNT=0; fi
-echo "CARRIED_FROM: ${CARRIED_FROM}"
+# Stale check (an unreadable head is stale) plus the verifiable agent count: only trusted comments whose body STARTS with the marker count.
+# BASE_SYNC_ONLY: zero reviewers is the expected panel only when the carry record is trusted and the resolver re-verifies it.
+bash "$RF" integrity --pr "$PR_NUMBER" --repo "$REPO" --review-sha "$REVIEW_SHA" --review-mode "$REVIEW_MODE" --base "$MERGE_BASE"; INTEG_RC=$?
+[ "$INTEG_RC" -eq 0 ] || exit 1   # STOP: REVIEW_RESULT: status: BLOCKED was printed
 ```
 
 Substitute `ACTUAL_AGENT_COUNT`/`ACTUAL_AGENT_DOMAINS` into the summary's `**Agents**: [N] ([names])` field below — do NOT substitute a manually-counted or remembered figure. Compare it to `SELECTED_AGENT_COUNT` from Phase 3C. If smaller, the panel is degraded: the Phase 3C hard stop must already have labelled the PR `review-degraded`, added `needs-human` and exited without a verdict. Never summarize, approve, or merge a partial panel. `ACTUAL_AGENT_COUNT=0` is the same hard stop, not a solo/inline review mode, with one exception: when the block printed a non-empty `CARRIED_FROM` (a `BASE_SYNC_ONLY` head whose trusted `FORGE:REVIEW-CARRIED` record the resolver re-verified), zero reviewers is the correct panel; write `**Agents**: carried from <CARRIED_FROM>` in the summary and skip this comparison. An empty `CARRIED_FROM` on a `BASE_SYNC_ONLY` head is the hard stop.
