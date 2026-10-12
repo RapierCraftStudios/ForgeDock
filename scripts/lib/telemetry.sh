@@ -66,7 +66,7 @@ _forge_tel_target() {
 # Appends the JSONL lines on stdin to the trusted telemetry comment of <repo>#<n>; returns non-zero on any failure.
 _forge_tel_upsert() {
   local repo="$1" n="$2" gh="${FORGE_TELEMETRY_GH:-gh}" max="${FORGE_TELEMETRY_MAX_CHARS:-60000}"
-  local new comments cand id body part best_id="" best_part=0 best_body="" all_bodies="" lines hdr out tc
+  local nl fence new comments cand id body part best_id="" best_part=0 best_body="" all_bodies="" lines hdr out tc
   new=$(cat); [ -n "$new" ] || return 0
   tc="$_FORGE_TEL_DIR/../trusted-comments.sh"; [ -f "$tc" ] || return 1
   command -v jq >/dev/null 2>&1 || return 1
@@ -92,9 +92,12 @@ _forge_tel_upsert() {
     lines="${lines}${l}"$'\n'
   done <<< "$new"
   [ -n "$lines" ] || return 0
-  lines="${lines%$'\n'}"
+  # bash 3.2: $'..' inside a double-quoted ${..%..} is NOT expanded (and backticks there start a command
+  # substitution), so the newline and fence live in variables and the pattern quotes them.
+  nl=$'\n'; fence='```'
+  lines="${lines%"$nl"}"
   if [ -n "$best_id" ]; then
-    local cur="${best_body%$'\n```'*}"            # body up to the closing fence
+    local cur="${best_body%"$nl$fence"*}"            # body up to the closing fence
     out="${cur}"$'\n'"${lines}"$'\n```'
     if [ "${#out}" -le "$max" ]; then
       $to "$gh" api -X PATCH "repos/$repo/issues/comments/$best_id" -f body="$out" >/dev/null 2>&1; return $?
