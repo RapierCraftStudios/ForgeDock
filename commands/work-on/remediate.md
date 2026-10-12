@@ -31,7 +31,7 @@ background: false
 
 **Scope note**: This mode owns exactly one gap — re-driving a `needs-human` or `workflow:remediating` PR's own remediation, plus resuming an interrupted M7 auto-land from `workflow:awaiting-merge` when no `FORGE:REMEDIATION:COMPLETE` trail exists (forge#3647; M1-M6 are skipped, only M7/M8 run), finishing a merged PR whose M7 run was cut off before M8 (forge#3685), and re-entering a held resume (the `workflow:remediating` state is the non-human "autonomous remediation pending" state review sets for ci-gate, in-pr-fix and base-sync handoffs, forge#3541). It does NOT implement the `needs-human` sub-label taxonomy (#1815) and does NOT edit `review-pr.md`'s Phase 8 guard (forge#1810), whose safe-default (`workflow:awaiting-merge` on a clean re-review of a previously-escalated PR) is reused as-is; this file only adds a bar-check after it fires.
 
-**Engine coverage** (forge#2379, #2889): this subcommand's `command` name (`work-on/remediate`) and completion marker (`FORGE:REMEDIATION:COMPLETE`, including the `**Re-gate outcome**` field Phase M8 posts below) are registered in the headless engine's phase table — `RESERVED_TYPES.REMEDIATION` in `packages/protocol/src/types.js`, `remediate` in `packages/protocol/src/phases.js`'s `PHASE_IDS`/`PHASE_MARKERS`, and a matching `remediate` entry in `bin/engine/phases.mjs`'s `PHASES` array. The non-terminal held-resume record `FORGE:REMEDIATION_HELD` (forge#3685) is NOT a completion marker; the engine's `detectOutcome` reads it as `terminalReason: "awaiting-merge"`. A blocked review is committed with `terminalReason: "needs-human"`, then the engine continues directly into remediation; the divergence guard permits this specific handoff while keeping all other `needs-human` states paused.
+**Engine coverage** (forge#2379, #2889): this subcommand's `command` name (`work-on/remediate`) and completion marker (`FORGE:REMEDIATION:COMPLETE`, including the `**Re-gate outcome**` field Phase M8 posts below) are registered in the headless engine's phase table — `RESERVED_TYPES.REMEDIATION` in `packages/protocol/src/types.js`, `remediate` in `packages/protocol/src/phases.js`'s `PHASE_IDS`/`PHASE_MARKERS`, and a matching `remediate` entry in `bin/engine/phases.mjs`'s `PHASES` array. The non-terminal held-resume record `FORGE:REMEDIATION_HELD` (forge#3685) is NOT a completion marker; the engine's `detectOutcome` reads it as `terminalReason: "awaiting-merge"`. A blocked review is committed with `terminalReason: "needs-human"`, then the engine continues directly into remediation; the divergence guard permits this specific handoff while keeping all other `needs-human` states paused. The engine's `**Re-gate outcome**` vocabulary is `AUTO-LANDED`, `HELD-AWAITING-MERGE`, `RE-ESCALATED`, `UNFIXABLE`, `REREVIEW-REQUIRED` and `INPR-FIX-REQUESTED` (with `**INPR round**: N`); `INPR-FIX-REQUESTED` continues the run into one further in-PR fix remediation instead of parking it (forge#4021), and any other value fails the attempt.
 
 ---
 
@@ -500,6 +500,8 @@ else:
 
 Wait for the completed child result and retain its `REVIEW_RESULT` in remediation state before continuing to Phase M7. A running/progress response is not a completion result. If the child errors or does not return a parseable `REVIEW_RESULT`, stop with `REMEDIATE_RESULT: status: BLOCKED`; do not report remediation in progress as a terminal parent result. The `Skill(...)` invocation above remains the non-OpenCode path.
 
+If the re-review approved but requested a further in-PR fix round (forge#4021): the retained `REVIEW_RESULT` is not `BLOCKED` and a trusted (Bot or OWNER/MEMBER/COLLABORATOR) `<!-- FORGE:INPR_FIX: round=N head=<sha> ... -->` comment, posted on the PR after this Phase M6 started, names the live head. This is a known state, not a hold and not an escalation: set `RE_GATE_OUTCOME="INPR-FIX-REQUESTED"` and `INPR_ROUND=N` (the `round=` value), do NOT add `needs-human`, skip Phase M7, go to Phase M8 (which posts `FORGE:REMEDIATION:COMPLETE` with a `**Re-gate outcome**: INPR-FIX-REQUESTED` line and an `**INPR round**: N` line) and return `REMEDIATE_RESULT: status: COMPLETE`. The caller (the engine or the router) dispatches exactly one further in-PR fix remediation and re-reviews; a second request after that is bounded by the `INPR_REMEDIATION` marker and escalates normally. <!-- Added: forge#4021 -->
+
 If the retained `REVIEW_RESULT` is `PHASE_TRAIL_FAILED` (forge#3102): the gate refused to merge on missing phase markers, not on a code finding. This phase does NOT re-dispatch the missing phases: it is a dispatching phase running in a fork (`docs/WORK-ON-RUNTIME.md` R1), and `work-on:review` Phase R4 is the single re-dispatch owner. Keep `needs-human`, post `<!-- FORGE:PHASE_TRAIL_FAILED -->` listing the missing markers from the `MISSING:` lines, and exit `REMEDIATE_RESULT: status: BLOCKED` with blocker "phase trail incomplete" so the router can hand the `MISSING:` lines back to the review owner. Never treat it as `HELD-AWAITING-MERGE` or `AUTO-LANDED`. A still-failing trail can also be cleared by a human `<!-- FORGE:PHASE_TRAIL_OVERRIDE -->` comment (forge#3152, see `scripts/verify-phase-trail.sh -h`); the verifier decides, this phase never posts one.
 
 If the retained `REVIEW_RESULT` is `BLOCKED` with a blocker mentioning the phase trail (e.g. "phase trail unreadable (rc=N)": the Phase 8 verifier exited ≥2 / 127, forge#3147): the gate could not run, so nothing is missing and nothing is re-run. Keep `needs-human` (review-pr Phase 8 already re-asserted it), do not merge, and exit `REMEDIATE_RESULT: status: BLOCKED` with the same blocker.
@@ -734,7 +736,7 @@ fi
 
 ## Phase M8: Finalize FORGE:REMEDIATION Paper Trail
 
-Post the completion body to **both** `{PR_NUMBER}` and `{ISSUE_NUMBER}` — this is the single idempotency marker checked by Phase M0 (this file, on future resume) and by the orchestrator's item 6.4 dispatch guard. **Exception (forge#3685)**: a `RESUME_AT_M7=true` run whose outcome is `HELD-AWAITING-MERGE` posts a `<!-- FORGE:REMEDIATION_HELD -->` record (carrying `**Re-gate outcome**` and the hold reason) and NO `FORGE:REMEDIATION:COMPLETE`, so a transient hold (CI pending, stale approval) does not strand the PR behind the single-attempt guard. AUTO-LANDED, RE-ESCALATED, UNFIXABLE, REREVIEW-REQUIRED and non-resume HELD keep COMPLETE:
+Post the completion body to **both** `{PR_NUMBER}` and `{ISSUE_NUMBER}` — this is the single idempotency marker checked by Phase M0 (this file, on future resume) and by the orchestrator's item 6.4 dispatch guard. **Exception (forge#3685)**: a `RESUME_AT_M7=true` run whose outcome is `HELD-AWAITING-MERGE` posts a `<!-- FORGE:REMEDIATION_HELD -->` record (carrying `**Re-gate outcome**` and the hold reason) and NO `FORGE:REMEDIATION:COMPLETE`, so a transient hold (CI pending, stale approval) does not strand the PR behind the single-attempt guard. AUTO-LANDED, RE-ESCALATED, UNFIXABLE, REREVIEW-REQUIRED, INPR-FIX-REQUESTED and non-resume HELD keep COMPLETE:
 
 ```bash
 # Fresh shell: re-derive the live base (as above); :-true fail-closed default.
@@ -757,8 +759,13 @@ case "$RE_GATE_OUTCOME" in
   RE-ESCALATED)        AUTO_LAND_BAR_TEXT="N/A — re-escalated before the bar was evaluated"; OUTCOME_DETAIL="at needs-human" ;;
   UNFIXABLE)           AUTO_LAND_BAR_TEXT="N/A — unfixable (see Phase M1 classification)"; OUTCOME_DETAIL="at needs-human" ;;
   REREVIEW-REQUIRED)   AUTO_LAND_BAR_TEXT="N/A — re-review not run (no sub-agent dispatch tool in this session)"; OUTCOME_DETAIL="at workflow:in-review, re-review required from a session with dispatch" ;;
-  *)                   AUTO_LAND_BAR_TEXT="N/A"; OUTCOME_DETAIL="" ;;
+  INPR-FIX-REQUESTED)  AUTO_LAND_BAR_TEXT="N/A — in-pr fix requested by the re-review (forge#4021)"; OUTCOME_DETAIL="at workflow:in-review, in-pr fix round ${INPR_ROUND:-1}" ;;
+  *)                   echo "remediate: unknown RE_GATE_OUTCOME '${RE_GATE_OUTCOME}' (a known state must have its own arm above)" >&2; AUTO_LAND_BAR_TEXT="N/A"; OUTCOME_DETAIL="" ;;
 esac
+
+# forge#4021: machine-readable in-PR round for the engine (empty for every other outcome).
+INPR_ROUND_LINE=""; [ "$RE_GATE_OUTCOME" = "INPR-FIX-REQUESTED" ] && INPR_ROUND_LINE="**INPR round**: ${INPR_ROUND:-1}
+"
 
 # forge#3413: embed the pushed head so the orchestrator scopes a REREVIEW-REQUIRED trail to the CURRENT head only.
 REMEDIATED_HEAD_SHA=$(gh pr view {PR_NUMBER} {GH_FLAG} --json headRefOid --jq '.headRefOid' 2>/dev/null || true)
@@ -813,7 +820,7 @@ REMEDIATION_BODY="<!-- FORGE:REMEDIATION -->
 **Re-review verdict**: ${RE_REVIEW_VERDICT:-unknown}
 **Auto-land bar**: ${AUTO_LAND_BAR_TEXT}
 **Re-gate outcome**: ${RE_GATE_OUTCOME} ${OUTCOME_DETAIL}
-**Head**: ${REMEDIATED_HEAD_SHA:-unknown}
+${INPR_ROUND_LINE}**Head**: ${REMEDIATED_HEAD_SHA:-unknown}
 ${BASESYNC_LINE}
 <!-- FORGE:REMEDIATION:COMPLETE -->"
 fi
@@ -847,9 +854,9 @@ REMEDIATE_RESULT:
   status: COMPLETE | ALREADY_DONE | UNFIXABLE | BLOCKED | REREVIEW_REQUIRED
   pr_number: {PR_NUMBER}
   issue_number: {ISSUE_NUMBER}
-  re_gate_outcome: AUTO-LANDED | HELD-AWAITING-MERGE | RE-ESCALATED | UNFIXABLE | REREVIEW-REQUIRED | N/A
+  re_gate_outcome: AUTO-LANDED | HELD-AWAITING-MERGE | RE-ESCALATED | UNFIXABLE | REREVIEW-REQUIRED | INPR-FIX-REQUESTED | N/A
   findings_addressed: [{finding_number}, ...]
   blocker: {description if status=BLOCKED; `deferred-live-run: ...` when M0 deferred to a live run}
 ```
 
-**Caller behavior**: this Skill already drives its own close phase when `re_gate_outcome: AUTO-LANDED` (see Phase M8) — the caller does not need to invoke close itself (under the headless engine, the engine verifies the issue is CLOSED + `workflow:merged` and runs close if it is missing). For `re_gate_outcome: REREVIEW-REQUIRED` (`status: REREVIEW_REQUIRED`, forge#3240) the fix is pushed but no review ran because this session has no sub-agent dispatch tool: the caller MUST run `review-pr {PR_NUMBER} --auto-merge --issue {ISSUE_NUMBER} --base {PR_BASE}` from a session that has dispatch (never inline) and then drive close itself on a merge. For every other `re_gate_outcome`, this result is terminal for the current invocation (a held resume, which wrote `FORGE:REMEDIATION_HELD` and not COMPLETE, can be re-invoked by an operator later and re-enters Phase M7): the issue is left at `needs-human` or `workflow:awaiting-merge`, both already recognized as terminal states in the Universal Phase Dispatcher (see `work-on.md`).
+**Caller behavior**: this Skill already drives its own close phase when `re_gate_outcome: AUTO-LANDED` (see Phase M8) — the caller does not need to invoke close itself (under the headless engine, the engine verifies the issue is CLOSED + `workflow:merged` and runs close if it is missing). For `re_gate_outcome: REREVIEW-REQUIRED` (`status: REREVIEW_REQUIRED`, forge#3240) the fix is pushed but no review ran because this session has no sub-agent dispatch tool: the caller MUST run `review-pr {PR_NUMBER} --auto-merge --issue {ISSUE_NUMBER} --base {PR_BASE}` from a session that has dispatch (never inline) and then drive close itself on a merge. For `re_gate_outcome: INPR-FIX-REQUESTED` (`status: COMPLETE`, forge#4021) the re-review approved but posted a `FORGE:INPR_FIX` work order: the caller dispatches one further in-PR fix remediation (the headless engine re-arms `remediate` with kind `inpr-fix`, bounded by the `INPR_REMEDIATION` marker) and never parks the issue at `needs-human` for the first request. For every other `re_gate_outcome`, this result is terminal for the current invocation (a held resume, which wrote `FORGE:REMEDIATION_HELD` and not COMPLETE, can be re-invoked by an operator later and re-enters Phase M7): the issue is left at `needs-human` or `workflow:awaiting-merge`, both already recognized as terminal states in the Universal Phase Dispatcher (see `work-on.md`).

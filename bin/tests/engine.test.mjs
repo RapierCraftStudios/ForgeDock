@@ -785,6 +785,44 @@ describe("runIssue", () => {
     assert.equal(buildCalls, 1, "a full disk is not retried within the phase");
   });
 
+  it("forge#4021: a transient CLI spawn failure retries after backoff without consuming a phase attempt", async () => {
+    const { w, io } = fakeWorld();
+    let buildCalls = 0;
+    const sleeps = [];
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => {
+        buildCalls++;
+        if (buildCalls <= 3) throw Object.assign(new Error("claude CLI invocation timed out"), { code: "CLI_SPAWN_TRANSIENT" });
+        throw Object.assign(new Error("stop here"), { code: "CLI_BACKEND_FAILED" });
+      },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    // maxAttempts 1: three transient failures would exhaust it if they consumed attempts.
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 1,
+      sleep: async (ms) => { sleeps.push(ms); } });
+    assert.equal(buildCalls, 4, "3 transient retries then the 4th call ran as the first real attempt");
+    assert.deepEqual(sleeps.slice(0, 3), [10000, 30000, 60000]);
+    assert.equal(res.terminalReason, "engine-error");
+    const failed = readLog(dir, 42).filter((e) => e.event === "PHASE_FAILED" && e.phase === "build");
+    assert.equal(failed.length, 3);
+    assert.ok(failed.every((e) => e.code === "infra.cli_spawn_transient"));
+  });
+
+  it("forge#4021: transient spawn retries are bounded, then fall through to normal attempt accounting", async () => {
+    const { w, io } = fakeWorld();
+    let buildCalls = 0;
+    const script = {
+      "work-on/investigate": () => { w.markers += investigationComment("COMPLETE"); },
+      "work-on/build": () => { buildCalls++; throw Object.assign(new Error("claude CLI invocation timed out"), { code: "CLI_SPAWN_TRANSIENT" }); },
+    };
+    const runner = async ({ commandName }) => { script[commandName]?.(); return { status: "complete" }; };
+    const res = await runIssue({ issue: 42, dir, agentId: "a1", lane: "staging", io, runner, now: () => 1000, maxAttempts: 2,
+      sleep: async () => {} });
+    assert.equal(buildCalls, 3 + 2, "3 free infra retries, then maxAttempts (2) normal attempts");
+    assert.ok(res.terminalReason, "the run terminates instead of looping forever");
+  });
+
   it("forge#2259/#2261: CLI_BACKEND_FAILED thrown by the runner fails fast on attempt 1, not retried to maxAttempts", async () => {
     // Regression for #2244: a deterministic non-zero exit from the nested
     // `claude` CLI (bin/runner.mjs's runCliBackend() throws with
