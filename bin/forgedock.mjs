@@ -3214,6 +3214,7 @@ function help() {
     ["npx forgedock config migrate [dir]", "Backfill missing optional sections into an existing forge.yaml (idempotent)"],
     ["npx forgedock watch [--repo owner/repo]", "Live per-agent orchestration view (Ctrl+C to exit)"],
     ["npx forgedock report [--days 30] [--md] [--json]", "30-day pipeline impact receipts for your repo"],
+    ["npx forgedock stats [--since <ver|date>] [--repo owner/repo] [--json] [--refresh]", "Version-over-version cost/time/flow/review/gate report from GitHub telemetry (no model)"],
     ["npx forgedock doctor", "Check installation health"],
     ["npx forgedock doctor --fix", "Auto-fix deterministic issues (symlinks, hook, labels, legacy block)"],
     ["npx forgedock update", "Pull latest & reinstall"],
@@ -3783,7 +3784,7 @@ async function watch() {
 const SPLASH_COMMANDS = new Set(["run", "run-issue", "resume-stalled", "demo", "doctor", "watch", "help", "--help", "-h"]);
 const KNOWN_COMMANDS = new Set([
   "install", "init", "enable", "disable", "status", "uninstall", "update",
-  "run", "backend-check", "run-issue", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "help", "--help", "-h",
+  "run", "backend-check", "run-issue", "resume-stalled", "demo", "doctor", "watch", "labels", "config", "stats", "help", "--help", "-h",
   "version", "--version", "-v",
 ]);
 if (SPLASH_COMMANDS.has(command) || !KNOWN_COMMANDS.has(command)) splash(command);
@@ -4001,6 +4002,11 @@ switch (command) {
   case "report": {
     const { runReport } = await import("./report.mjs");
     await runReport(restArgs);
+    break;
+  }
+  case "stats": {
+    const { runStats } = await import("./stats/index.mjs");
+    exitCode = await runStats(restArgs);
     break;
   }
   case "watch":

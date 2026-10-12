@@ -1900,6 +1900,18 @@ describe("runIssue — forge#3696: per-attempt usage, cumulative commit usage, R
     assert.equal(seen.filter((r) => r.phase === "build").length, 2);
     assert.equal(seen[0].issue, 42);
   });
+
+  it("forge#3835: RUN_TERMINAL is forwarded to emitTelemetry once, and a throwing emitter does not change the outcome", async () => {
+    const seen = [];
+    const { run } = setup({ emitTelemetry: (rec) => { seen.push(rec); if (rec.event === "RUN_TERMINAL") throw new Error("emitter down"); } });
+    const res = await run();
+    assert.equal(res.terminalReason, "merged");
+    const term = seen.filter((r) => r.event === "RUN_TERMINAL");
+    assert.equal(term.length, 1);
+    assert.equal(term[0].reason, "merged");
+    assert.equal(term[0].code, "completed");
+    assert.equal(term[0].issue, 42);
+  });
 });
 
 describe("runIssue — forge#2313: lease config validation", () => {

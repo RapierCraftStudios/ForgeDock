@@ -35,6 +35,7 @@
   "files": [
     "bin/",
     "!bin/tests/",
+    "!bin/stats/fixtures/",
     "commands/",
     "docs/",
     "!docs/site/.vitepress/",
@@ -47,7 +48,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --test \"bin/tests/**/*.test.mjs\" \"bin/engine/**/*.test.mjs\" \"packages/protocol/test/**/*.test.mjs\"",
+    "test": "node --test \"bin/tests/**/*.test.mjs\" \"bin/engine/**/*.test.mjs\" \"bin/stats/**/*.test.mjs\" \"packages/protocol/test/**/*.test.mjs\"",
     "test:sh": "bash scripts/run-shell-tests.sh",
     "docs:dev": "vitepress dev docs/site",
     "docs:build": "vitepress build docs/site",

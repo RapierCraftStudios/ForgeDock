@@ -416,7 +416,7 @@ sed 's/^[[:space:]]*//' "$STG_SPEC" | grep '^type forge_resolve >/dev/null' | so
 [ "$(wc -l < "$T/loc_uniq" | tr -d ' ')" = 1 ] && ok || bad "forge_resolve locator line must be byte-identical across every stub in review-pr-staging.md"
 [ "$(awk '{print $1}' "$T/loc_uniq")" -ge 30 ] && ok || bad "expected a locator on every bootstrap (21) and resolver (11) stub"
 grep -qE 'PWD|\$\(pwd\)|REPO_PATH' "$T/locator.sh" && bad "stub locator must not consult the cwd or repo under review" || ok
-[ "$(grep -c '# FENCE_BOOTSTRAP$' "$STG_SPEC")" = 21 ] && ok || bad "expected 21 fence bootstrap stubs"
+[ "$(grep -c '# FENCE_BOOTSTRAP$' "$STG_SPEC")" = 22 ] && ok || bad "expected 22 fence bootstrap stubs"
 [ "$(grep '# FENCE_BOOTSTRAP$' "$STG_SPEC" | sort -u | wc -l | tr -d ' ')" = 1 ] && ok || bad "fence bootstrap stubs must be byte-identical"
 grep '# FENCE_BOOTSTRAP$' "$STG_SPEC" | sed 1q | grep -qF 'exit 1' && ok || bad "fence bootstrap stub must fail closed (exit 1) when the helper is unresolved"
 # the spec carries none of the old inlined blocks

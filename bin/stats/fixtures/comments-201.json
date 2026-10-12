@@ -1,0 +1,38 @@
+[
+ {
+  "id": 1,
+  "body": "<!-- FORGE:TELEMETRY v1 -->\n```jsonl\n{\"v\":1,\"ts\":\"2026-10-06T12:00:00Z\",\"forge_version\":\"1.17.0\",\"repo\":\"o/r\",\"issue\":201,\"pr\":null,\"run\":\"r_201_1\",\"phase\":\"build\",\"eid\":\"e1\",\"event\":\"phase_attempt\",\"attempt\":1,\"input_tokens\":10,\"output_tokens\":900,\"cache_read_tokens\":2500000,\"cache_creation_tokens\":5,\"duration_ms\":500000,\"cost_usd\":\"1.2\",\"model\":\"sonnet\",\"turns\":12}\n{\"v\":1,\"ts\":\"2026-10-06T12:00:00Z\",\"forge_version\":\"1.17.0\",\"repo\":\"o/r\",\"issue\":201,\"pr\":null,\"run\":null,\"phase\":null,\"eid\":\"e2\",\"event\":\"diff_size\",\"lines\":300,\"threshold\":0,\"result\":\"OK\"}\n{\"v\":1,\"ts\":\"2026-10-06T12:00:00Z\",\"forge_version\":\"1.17.0\",\"repo\":\"o/r\",\"issue\":201,\"pr\":null,\"run\":null,\"phase\":\"build\",\"eid\":\"e3\",\"event\":\"acceptance_gate\",\"verified\":3,\"failed\":1,\"malformed\":1,\"deferred\":0}\n```",
+  "author_association": "NONE",
+  "user": {
+   "type": "Bot",
+   "login": "x"
+  }
+ },
+ {
+  "id": 2,
+  "body": "<!-- FORGE:TELEMETRY v1 part=2 -->\n```jsonl\n{\"v\":1,\"ts\":\"2026-10-06T12:00:00Z\",\"forge_version\":\"1.17.0\",\"repo\":\"o/r\",\"issue\":201,\"pr\":null,\"run\":null,\"phase\":\"build\",\"eid\":\"e3\",\"event\":\"acceptance_gate\",\"verified\":3,\"failed\":1,\"malformed\":1,\"deferred\":0}\n{\"v\":1,\"ts\":\"2026-10-06T12:00:00Z\",\"forge_version\":\"1.17.0\",\"repo\":\"o/r\",\"issue\":201,\"pr\":null,\"run\":\"r_201_1\",\"phase\":\"review\",\"eid\":\"e4\",\"event\":\"phase_attempt\",\"attempt\":1,\"output_tokens\":100,\"cache_read_tokens\":500000,\"duration_ms\":200000}\n{\"v\":1,\"ts\":\"2026-10-06T12:00:00Z\",\"forge_version\":\"1.17.0\",\"repo\":\"o/r\",\"issue\":201,\"pr\":null,\"run\":\"r_201_1\",\"phase\":null,\"eid\":\"e5\",\"event\":\"run_terminal\",\"reason\":\"merged\",\"code\":\"completed\",\"wall_ms\":900000}\n```",
+  "author_association": "NONE",
+  "user": {
+   "type": "Bot",
+   "login": "x"
+  }
+ },
+ {
+  "id": 3,
+  "body": "<!-- FORGE:TELEMETRY v1 -->\n```jsonl\n{\"v\":1,\"ts\":\"2026-10-06T12:00:00Z\",\"forge_version\":\"1.17.0\",\"repo\":\"o/r\",\"issue\":201,\"pr\":null,\"run\":\"r_201_x\",\"phase\":\"build\",\"eid\":\"e90\",\"event\":\"phase_attempt\",\"cache_read_tokens\":999999999,\"input_tokens\":1,\"output_tokens\":1}\n```",
+  "author_association": "NONE",
+  "user": {
+   "type": "User",
+   "login": "x"
+  }
+ },
+ {
+  "id": 4,
+  "body": "unrelated comment",
+  "author_association": "NONE",
+  "user": {
+   "type": "Bot",
+   "login": "x"
+  }
+ }
+]

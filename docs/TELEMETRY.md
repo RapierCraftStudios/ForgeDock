@@ -37,6 +37,12 @@ is dropped. Payload keys are `[A-Za-z0-9_]+` and cannot shadow the shared keys; 
 | `review_panel` | `review-pr.md` Phase 4 | `agents_selected`, `agents_completed`, `mode` = `FULL` \| `DELTA` \| `BASE_SYNC_ONLY` |
 | `ci_gate` | `scripts/wait-ci-green.sh` | `result` = `PASS` \| `FAIL` \| `ERROR` \| `TIMEOUT`, `rc`, `checks` |
 | `liveness` | `scripts/remediate-liveness.sh` | `decision` = `PROCEED` \| `DEFER` \| `EXHAUSTED`, `why` |
+| `phase_attempt` | the engine (`bin/engine/telemetry-seam.mjs`, one per phase attempt; `phase` = the phase id) | `attempt`, `model`, `turns`, `duration_ms`, `cost_usd`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens` (any value the runner did not report is omitted) |
+| `run_terminal` | the engine (`terminate()`, one per run segment) | `reason` (terminal reason), `code` (see `docs/OUTCOME-CODES.md`), `wall_ms` (this engine process, start to terminal) |
+
+The engine records carry `run` = `r_<issue>_<start epoch seconds>` (one per `forgedock run-issue` process) so `forgedock stats`
+(`docs/STATS.md`) can group the attempts of a run and tell a finished run from an unfinished one. They are the GitHub-side
+source for Cost, Time and outcome codes: without them a fresh machine can rebuild only the gate and review sections.
 
 The classifier and the scripts emit only when a destination is known: callers export `FORGE_ISSUE` and/or `FORGE_PR`
 (`review-pr.md` exports them before classifying; the other scripts default `FORGE_REPO`/`FORGE_ISSUE`/`FORGE_PR` from
