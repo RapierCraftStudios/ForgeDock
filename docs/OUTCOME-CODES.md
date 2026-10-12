@@ -29,12 +29,14 @@ An absent or unknown code is recorded as `unclassified`, with the raw reason kep
 | `remediate.deferred_live_run` | Remediation deferred to a live earlier run | remediate, engine | Trusted `FORGE:REMEDIATION_DEFERRED` record |
 | `remediate.re_escalated` | Remediation re-escalated to a human | remediate | `**Re-gate outcome**: RE-ESCALATED` |
 | `remediate.unfixable` | Remediation judged the findings unfixable | remediate | `**Re-gate outcome**: UNFIXABLE` |
+| `remediate.inpr_requested` | Re-gate approved but requested one further in-PR fix round; the run continues, never `needs-human` | remediate | `**Re-gate outcome**: INPR-FIX-REQUESTED` |
 | `ci.red` | CI failed | reserved | `REVIEW_RESULT` carries no CI field yet |
 | `ci.timeout` | CI timed out | reserved | `REVIEW_RESULT` carries no CI field yet |
 | `base.conflict` | Base-branch conflict blocked the PR | reserved | `REVIEW_RESULT` carries no conflict field yet |
 | `rate_limited` | Session or usage limit outlasted the pause budget | engine | `err.usageLimit` / `err.resetAtEpochMs` |
 | `engine.error` | Engine or tool failure (missing key/SDK, CLI crash, max turns, unresolved args, runner threw every attempt) | engine | `err.code` |
 | `infra.disk_quota` | Disk full or quota exhausted (EDQUOT/ENOSPC, errno -28/-122); retryable infra failure, never `needs-human` | engine | Runner error text |
+| `infra.cli_spawn_transient` | CLI spawn failed transiently (ETIMEDOUT, EAGAIN, ENOMEM, EMFILE); retried with backoff on a separate bounded counter that does not consume a phase attempt | engine | `err.code` `CLI_SPAWN_TRANSIENT` |
 | `lease.held` | Another live agent holds the issue lease | engine | Foreign live lease on acquire |
 | `dependency.open` | A trusted `**Depends on**: #N` dependency is still open, so the run was refused before any state write | engine | Trusted issue body `**Depends on**` line + the dependency issue's open state |
 | `dependency.unreadable` | The issue body or a declared dependency could not be read, so the run was refused (fail closed) | engine | Failed or unparsable `gh api` read |

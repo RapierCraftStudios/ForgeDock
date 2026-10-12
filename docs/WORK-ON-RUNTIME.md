@@ -140,3 +140,17 @@ remediate L2, reviewers L3, same as the table.
 ## 8. Outcome codes
 
 Every `PHASE_FAILED`, blocked `PHASE_COMMIT` and `RUN_TERMINAL` run-log event carries a machine-readable `code` from a closed, versioned enum (`bin/engine/outcome-codes.mjs`), and `FORGE:STATE` records the causing code as `outcomeCode`. Codes come from structured evidence only, never from the prose `detail`; an unmapped outcome is `unclassified` with the raw reason kept. See `docs/OUTCOME-CODES.md`.
+
+## Remediation re-gate outcomes and spawn retries (forge#4021)
+
+The `**Re-gate outcome**` token in a `FORGE:REMEDIATION:COMPLETE` trail is a closed vocabulary the engine parses:
+`AUTO-LANDED`, `HELD-AWAITING-MERGE`, `RE-ESCALATED`, `UNFIXABLE`, `REREVIEW-REQUIRED` and `INPR-FIX-REQUESTED`.
+`INPR-FIX-REQUESTED` (with `**INPR round**: N`) means the re-review approved but posted a `FORGE:INPR_FIX` work
+order. The engine commits `remediate` with `outputs.remediation = "inpr-fix"`, re-arms it once, and re-reviews. The
+`INPR_REMEDIATION` marker count bounds it: a second request escalates to `needs-human`.
+
+A CLI spawn failure (`ETIMEDOUT`, `EAGAIN`, `ENOMEM`, `EMFILE`) carries `code = "CLI_SPAWN_TRANSIENT"`. The engine
+retries it after a 10s/30s/60s backoff on a separate counter (max 3) that does not consume a phase attempt; once
+spent, normal attempt accounting applies. `ETIMEDOUT` (a `FORGEDOCK_CLI_TIMEOUT_MS` kill) is in this class by design,
+so a phase that times out every time can run up to `maxAttempts + 3` full-length CLI sessions; lower the timeout or
+max attempts if that cost is unacceptable.

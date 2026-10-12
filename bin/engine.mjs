@@ -12,7 +12,7 @@ import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postC
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { VALID_BACKENDS, resolveRunTmpRoot, runTmpDir } from "./runner.mjs";
-import { OUTCOME_CODES, UNCLASSIFIED, normalizeCode, codeForRunnerError, codeForTerminalReason, isDiskQuotaError, isDiskQuotaText } from "./engine/outcome-codes.mjs";
+import { OUTCOME_CODES, UNCLASSIFIED, normalizeCode, codeForRunnerError, codeForTerminalReason, isDiskQuotaError, isDiskQuotaText, isTransientSpawnError } from "./engine/outcome-codes.mjs";
 
 // Exported (forge#2175) so bin/engine-cli.mjs can render "failed N/M attempts"
 // diagnostics without duplicating the retry budget constant.
@@ -786,7 +786,7 @@ export async function runIssue(opts) {
         for (;;) {
         for (;;) {
           try {
-            outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo, agentId, emitTelemetry });
+            outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo, agentId, emitTelemetry, sleep });
             break;
           } catch (e) {
             const resetAtMs = e.resetAtEpochMs;
@@ -1120,8 +1120,11 @@ export function cleanupRunTmpdir(issue, { cwd = process.cwd(), env = process.env
   } catch { return false; }
 }
 
+/** forge#4021: backoff before each transient-spawn retry; its length is the cap (3). */
+export const INFRA_SPAWN_BACKOFF_MS = Object.freeze([10_000, 30_000, 60_000]);
+
 async function runPhaseWithRetry(phase, state, ctx) {
-  const { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo, agentId, emitTelemetry } = ctx;
+  const { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo, agentId, emitTelemetry, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = ctx;
   // forge#3499: build the phase's full argument set ONCE, up front. Every
   // work-on phase sub-skill stops with BLOCKED when a required flag is absent,
   // so an incomplete/invalid set is a deterministic engine failure — fail
@@ -1174,6 +1177,10 @@ async function runPhaseWithRetry(phase, state, ctx) {
     appendEvent(dir, issue, rec);
     try { await emitTelemetry?.({ ...rec, issue }); } catch { /* telemetry never fails a phase */ }
   };
+  // forge#4021: transient CLI spawn failures (ETIMEDOUT/EAGAIN/ENOMEM at spawn) retry on their own bounded
+  // counter and never consume a phase attempt; once spent they fall through to normal attempt accounting,
+  // so a CLI that merely runs long cannot loop forever.
+  let infraRetries = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     appendEvent(dir, issue, { event: "PHASE_START", phase: phase.id, attempt });
     let result;
@@ -1222,6 +1229,14 @@ async function runPhaseWithRetry(phase, state, ctx) {
         await recordAttempt(attempt, null, t0, null);
         appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, code: codeForRunnerError(e), maxAttempts });
         throw e;
+      }
+      // Transient spawn class: e.code === "CLI_SPAWN_TRANSIENT" (see isTransientSpawnError); retried with infra backoff.
+      if (isTransientSpawnError(e) && infraRetries < INFRA_SPAWN_BACKOFF_MS.length) {
+        await recordAttempt(attempt, null, t0, null);
+        appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, code: codeForRunnerError(e), maxAttempts, infraRetry: infraRetries + 1 });
+        await sleep(INFRA_SPAWN_BACKOFF_MS[infraRetries++]);
+        attempt--;
+        continue;
       }
       if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED") throw e;
       // forge#2377: no `usage` field here — the runner threw, so no result

@@ -63,7 +63,7 @@ const COVERAGE = {
   "build.acceptance_malformed": "reserved", "build.size_over_gate": "reserved",
   "build.cohesive": "reserved", "remediate.no_marker": "remediate.detectOutcome",
   "remediate.deferred_live_run": "remediate.detectOutcome", "remediate.re_escalated": "remediate.detectOutcome",
-  "remediate.unfixable": "remediate.detectOutcome", "ci.red": "reserved", "ci.timeout": "reserved",
+  "remediate.unfixable": "remediate.detectOutcome", "remediate.inpr_requested": "remediate.detectOutcome", "infra.cli_spawn_transient": "engine", "ci.red": "reserved", "ci.timeout": "reserved",
   "base.conflict": "reserved", "rate_limited": "engine", "engine.error": "engine", "infra.disk_quota": "engine", "lease.held": "engine",
   "dependency.open": "engine", "dependency.unreadable": "engine",
   "invalid": "engine", "decomposed": "investigate.detectOutcome", "completed": "engine",
