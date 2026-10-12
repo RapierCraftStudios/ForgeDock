@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
-import { PHASES, pickPhase, REMEDIATION_BOUND_MARKERS, cycleMarker, sliceToCurrentCycle, postCycleMarker, nextCycleNumber, decompositionRevoked, openDependency } from "../engine/phases.mjs";
+import { PHASES, parseReviewResult, isCiPendingBlocker, pickPhase, REMEDIATION_BOUND_MARKERS, cycleMarker, sliceToCurrentCycle, postCycleMarker, nextCycleNumber, decompositionRevoked, openDependency } from "../engine/phases.mjs";
 import { PHASE_MARKERS } from "../../packages/protocol/src/phases.js";
 import { RESERVED_TYPES } from "../../packages/protocol/src/types.js";
 import { trusted, jsonLines, invBody, builderBody, remediationBody, remediationHeldBody } from "./helpers/comments.mjs";
@@ -1676,11 +1676,11 @@ describe("forge#3931 review blocking-ISSUE disposition and remediation head stal
   const disposition = (sha, filed) =>
     `<!-- FORGE:NOTE_DISPOSITION: notes_fixed=0 notes_listed=0 findings_filed=${filed} reviewed_sha=${sha} -->\n- 1 f.js:1 [HIGH] x: filed`;
   // PR 7 is open at HEAD_A; `prComments` are the comments on the PR (read through the issue-comments API).
-  const mkIo = ({ prComments, readFails = false }) => ({
+  const mkIo = ({ prComments, readFails = false, needsHuman = false }) => ({
     gh: async (args) => {
       const cmd = args.join(" ");
       if (cmd.startsWith("pr list")) return JSON.stringify([{ number: 7 }]);
-      if (cmd.startsWith("pr view")) return JSON.stringify({ number: 7, state: "OPEN", mergedAt: null, labels: [], headRefOid: HEAD_A });
+      if (cmd.startsWith("pr view")) return JSON.stringify({ number: 7, state: "OPEN", mergedAt: null, labels: needsHuman ? [{ name: "needs-human" }] : [], headRefOid: HEAD_A });
       if (cmd.startsWith("issue view")) return JSON.stringify({ state: "OPEN", labels: [] });
       if (cmd.includes("/issues/7/comments")) { if (readFails) throw new Error("gh down"); return jsonLines(prComments); }
       throw new Error(`unexpected gh call: ${cmd}`);
@@ -1716,6 +1716,33 @@ describe("forge#3931 review blocking-ISSUE disposition and remediation head stal
     const o = await review.detectOutcome(st, mkIo({ prComments: [] }), { text: "REVIEW_RESULT:\n  status: BLOCKED\n  blocker: x\n" });
     assert.equal(o.status, "failed");
     assert.equal(o.code, "review.pr_open");
+  });
+
+  it("BLOCKED with blocker 'checks still pending' is a wait; 'ci gate' and other blockers are not", async () => {
+    const pending = "REVIEW_RESULT:\n  status: BLOCKED\n  blocker: checks still pending after the wait window (CI running)\n";
+    const o = await review.detectOutcome(st, mkIo({ prComments: [] }), { text: pending });
+    assert.equal(o.status, "failed");
+    assert.equal(o.wait, "ci-pending");
+    assert.equal(o.retryable, false);
+    assert.equal(o.handoff, false);
+    assert.equal(o.outputs.pr, 7);
+    for (const blocker of ["ci gate: checks failed", "ci gate refused; checks still pending elsewhere", "phase trail incomplete", ""]) {
+      const n = await review.detectOutcome(st, mkIo({ prComments: [] }), { text: `REVIEW_RESULT:\n  status: BLOCKED\n  blocker: ${blocker}\n` });
+      assert.equal(n.wait, undefined, blocker);
+      assert.equal(n.code, "review.pr_open");
+    }
+    // Only the structured field counts: status COMPLETE or prose elsewhere is never a wait.
+    const prose = await review.detectOutcome(st, mkIo({ prComments: [] }), { text: "checks still pending\nREVIEW_RESULT:\n  status: COMPLETE\n  blocker: checks still pending\n" });
+    assert.equal(prose.wait, undefined);
+  });
+
+  it("parseReviewResult reads a blocker with spaces, first wins, and escalation still beats the wait", async () => {
+    const rr = parseReviewResult("REVIEW_RESULT:\n  status: BLOCKED\n  blocker: checks still pending after 9 min\n  blocker: other\n");
+    assert.equal(rr.blocker, "checks still pending after 9 min");
+    assert.equal(parseReviewResult("REVIEW_RESULT:\n  status: BLOCKED\n").blocker, undefined);
+    assert.equal(isCiPendingBlocker("Checks still pending"), true);
+    const escalated = await review.detectOutcome(st, mkIo({ prComments: [], needsHuman: true }), { text: "REVIEW_RESULT:\n  status: BLOCKED\n  blocker: checks still pending\n" });
+    assert.equal(escalated.wait, undefined);
   });
 
   const remBody = (outcome, head) =>

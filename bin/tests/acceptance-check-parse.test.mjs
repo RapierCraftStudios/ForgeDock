@@ -152,7 +152,13 @@ test("malformed-check: #35004 ac-4/ac-5 shape (target=\"none\" on a behavior che
 
 test("malformed-check: rc 127 with 'command not found' is malformed", () => {
   assert.match(classify("no-such-command-xyzzy --flag"), /command not found/);
-  assert.match(classify("true && no-such-command-xyzzy"), /command not found/);
+  assert.match(classify("  no-such-command-xyzzy --flag"), /command not found/);
+});
+
+test("rc 127 whose missing command is not the target's first word stays a real failure", () => {
+  assert.equal(classify("true && no-such-command-xyzzy"), "");
+  assert.equal(classify("bash -c 'no-such-xyzzy'"), "");
+  assert.equal(classify("FOO=1 no-such-command-xyzzy"), "");
 });
 
 test("a missing script (rc 127, 'No such file or directory') and a #3802 missing-file grep stay real failures", () => {

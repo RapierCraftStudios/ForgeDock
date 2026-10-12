@@ -6,13 +6,15 @@
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { readdirSync, statSync } from "node:fs";
+import { readdirSync, statSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { runIssue, DEFAULT_MAX_ATTEMPTS, sanitizeLeaseHost } from "./engine.mjs";
 import { makeProjector } from "./engine/projector.mjs";
 import { readLog, deriveState } from "./engine/runlog.mjs";
 import { assertOpenCodeNativeRuntime } from "./runner.mjs";
+import { parseForgeYaml } from "./forge-utils.mjs";
 import { makeEmitTelemetry } from "./engine/telemetry-seam.mjs";
 
 /**
@@ -53,7 +55,24 @@ export function makeIo() {
     const { stdout } = await pexec(bin, args, { maxBuffer: 100 * 1024 * 1024, timeout: 10000 });
     return stdout;
   };
-  return { gh: run("gh"), git: run("git") };
+  // CI wait seam (scripts/wait-ci-green.sh, argv only, no shell). Resolves { rc, text } for any exit code.
+  const waitCiGreen = async (pr, repo, timeoutSec) => {
+    const script = fileURLToPath(new URL("../scripts/wait-ci-green.sh", import.meta.url));
+    try {
+      const { stdout } = await pexec("bash", [script, String(pr), "-R", String(repo), "--timeout", String(timeoutSec)],
+        { maxBuffer: 10 * 1024 * 1024, timeout: (timeoutSec + 120) * 1000 });
+      return { rc: 0, text: stdout };
+    } catch (e) { return { rc: Number.isInteger(e?.code) ? e.code : 2, text: String(e?.stdout ?? "") }; }
+  };
+  return { gh: run("gh"), git: run("git"), waitCiGreen };
+}
+
+/** forge.yaml `engine.ci_pending_max_minutes` from the cwd checkout; undefined when absent or invalid. */
+export function readCiPendingMaxMinutes(cwd = process.cwd()) {
+  try {
+    const n = Number(parseForgeYaml(readFileSync(join(cwd, "forge.yaml"), "utf8"))?.engine?.ci_pending_max_minutes);
+    return Number.isInteger(n) && n > 0 ? n : undefined;
+  } catch { return undefined; }
 }
 
 export function runDir() { return join(homedir(), ".forge", "runs"); }
@@ -408,6 +427,7 @@ export async function runFromCli(argv, deps = {}) {
     // runIssue's/runner.mjs's existing defaults (forge#2028).
     ...(backend ? { backend } : {}),
     ...(model ? { model } : {}),
+    ...(readCiPendingMaxMinutes() ? { ciPendingMaxMinutes: readCiPendingMaxMinutes() } : {}),
     ...(retry ? { retry: true } : {}),
     ...(waitLease ? { waitLease: true } : {}) });
   console.log(`issue #${issue} → ${res.terminalReason}`);

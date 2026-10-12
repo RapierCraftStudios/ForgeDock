@@ -843,6 +843,11 @@ export const PHASES = [
       // An explicit REVIEW_RESULT status is authoritative: BLOCKED/COMPLETE exits
       // (phase trail, ci gate, base conflict, merge refusal) also label the issue
       // needs-human but are NOT remediation handoffs, so skip the label fallback.
+      // CI still running when the merge gate's wait window ended: nothing failed, so this is a wait the engine
+      // polls (runIssue), not a block. Structured `blocker` field only, never PR/comment prose; "ci gate"
+      // (red CI) is a disjoint phrase and keeps the REVIEW_PR_OPEN path below.
+      if (rr && rr.status === "BLOCKED" && isCiPendingBlocker(rr.blocker))
+        return { status: "failed", detail: "checks still pending", retryable: false, handoff: false, wait: "ci-pending", outputs, code: OC.REVIEW_PR_OPEN };
       if (rr && rr.status) return { status: "failed", detail: "PR open, not merged", retryable: false, handoff: false, outputs, code: OC.REVIEW_PR_OPEN };
       let snap = null;
       try { snap = await issueSnapshot(state.issue, io); } catch { snap = null; }
@@ -1165,6 +1170,10 @@ export async function detectTrustedOutcome(phaseId, state, io) {
  * Untrusted model output: only the fixed keys below are read, via anchored
  * line matches; `pr_number` must be digits-only. Returns null when absent.
  */
+export function isCiPendingBlocker(blocker) {
+  return typeof blocker === "string" && /checks still pending/i.test(blocker) && !/ci gate/i.test(blocker);
+}
+
 export function parseReviewResult(text) {
   if (typeof text !== "string" || !text) return null;
   const lines = text.split(/\r?\n/);
@@ -1175,6 +1184,9 @@ export function parseReviewResult(text) {
   for (let i = start + 1; i < lines.length; i++) {
     const m = /^\s+(status|next|remediation|pr_number):[ \t]*(\S*)[ \t]*$/.exec(lines[i]);
     if (m) { if (!(m[1] in out)) out[m[1]] = m[2]; continue; }
+    // `blocker` is free text (spaces): rest of the anchored line, first wins, only ever substring-tested.
+    const b = /^\s+blocker:[ \t]*(.*?)[ \t]*$/.exec(lines[i]);
+    if (b) { if (!("blocker" in out)) out.blocker = b[1].slice(0, 500); continue; }
     if (/^\s+[A-Za-z_]+:/.test(lines[i]) || !lines[i].trim()) continue;
     break;
   }
