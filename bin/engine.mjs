@@ -38,11 +38,39 @@ export const DEFAULT_MAX_SESSION_LIMIT_PAUSES = 5;
 // reset epoch. The runner never fabricates a reset time; this default lives in
 // the engine and is still capped by `maxSessionLimitPauses`.
 export const DEFAULT_SESSION_LIMIT_WAIT_MS = 30 * 60 * 1000;
-// CI still pending at the merge gate: total wait budget (engine.ci_pending_max_minutes), per-poll cap and backoff bounds.
+// CI still pending at the merge gate: total wait budget (engine.ci_pending_max_minutes) and the poll scheduler bounds.
 export const DEFAULT_CI_PENDING_MAX_MINUTES = 90;
-const CI_POLL_TIMEOUT_SEC = 540;
-const CI_BACKOFF_START_MIN = 2;
-const CI_BACKOFF_MAX_MIN = 16;
+export const CI_BACKOFF_START_MS = 60 * 1000;
+export const CI_BACKOFF_MAX_MS = 5 * 60 * 1000;
+export const CI_JITTER_FRACTION = 0.2;
+/** Below this fraction of the GitHub REST budget the scheduler sleeps until the window resets instead of polling. */
+export const CI_RATE_RESERVE_FRACTION = 0.1;
+const CI_RESET_SPREAD_MS = 30 * 1000;
+const MAX_CI_PENDING_WAITS = 3;
+
+/**
+ * Pure CI-poll scheduler: delay before poll number `pollIndex` (0-based). 60 s, x2 per poll, capped at 5 min,
+ * +/-20% jitter so lanes waiting on the same CI do not poll in lockstep. `rand` is injectable (returns [0,1)).
+ */
+export function ciPollDelayMs(pollIndex, rand = Math.random) {
+  const base = Math.min(CI_BACKOFF_START_MS * 2 ** Math.max(0, pollIndex), CI_BACKOFF_MAX_MS);
+  const r = Math.min(Math.max(Number(rand()) || 0, 0), 1);
+  return Math.round(base * (1 + (r * 2 - 1) * CI_JITTER_FRACTION));
+}
+
+/**
+ * Pure budget check: ms to sleep before the next poll so the shared REST budget keeps its reserve.
+ * `rl` is `{ remaining, limit, reset }` (reset in epoch seconds, as `gh api rate_limit` reports it). Returns 0 when the
+ * budget is healthy or unreadable (a failed read never blocks polling); otherwise the time until reset plus a random
+ * spread so lanes released by the same reset do not stampede.
+ */
+export function ciRateLimitSleepMs(rl, nowMs, rand = Math.random) {
+  const remaining = Number(rl?.remaining), limit = Number(rl?.limit), reset = Number(rl?.reset);
+  if (![remaining, limit, reset].every(Number.isFinite) || limit <= 0) return 0;
+  if (remaining > limit * CI_RATE_RESERVE_FRACTION) return 0;
+  const untilReset = Math.max(0, reset * 1000 - nowMs);
+  return untilReset + Math.round(Math.min(Math.max(Number(rand()) || 0, 0), 1) * CI_RESET_SPREAD_MS);
+}
 
 /**
  * forge#3791: non-secret identity of the backend/account a usage-limit pause belongs to.
@@ -334,6 +362,8 @@ export async function runIssue(opts) {
           // CI still pending at the merge gate: engine-side wait budget in minutes (forge.yaml
           // `engine.ci_pending_max_minutes`). Invalid values fall back to the default.
           ciPendingMaxMinutes: ciPendingMaxMinutesOpt,
+          // CI-poll jitter source (tests inject a deterministic value).
+          random = Math.random,
           retry = false,
           waitLease = false,
           hostname = osHostname(),
@@ -780,9 +810,9 @@ export async function runIssue(opts) {
         // the entire duration of this loop, including any `sleep()` below —
         // no separate heartbeat mechanism is needed for the wait itself.
         let pauseCount = 0;
-        let ciWaited = false;
+        let ciWaits = 0; // bounded: a poll that reads green while the phase still sees pending cannot loop forever
         // CI-pending wait: the review phase may return BLOCKED "checks still pending" (nothing failed). The outer
-        // loop re-dispatches review at most once after the deterministic wait below (no model calls while waiting).
+        // loop re-dispatches the phase after each deterministic wait below (at most MAX_CI_PENDING_WAITS times) (no model calls while waiting).
         for (;;) {
         for (;;) {
           try {
@@ -829,9 +859,9 @@ export async function runIssue(opts) {
             // the exhausted one) — AC2.
           }
         }
-        if (!ciWaited && phase.id === "review" && outcome?.status === "blocked" && outcome.wait === "ci-pending") {
-          ciWaited = true;
-          const w = await waitForCiGreen(outcome);
+        if (ciWaits < MAX_CI_PENDING_WAITS && (phase.id === "review" || phase.id === "remediate") && outcome?.status === "blocked" && outcome.wait === "ci-pending") {
+          ciWaits++;
+          const w = await waitForCiGreen(outcome, phase.id);
           if (w.redispatch) continue;
           if (w.outcome) outcome = w.outcome;
         }
@@ -1018,12 +1048,15 @@ export async function runIssue(opts) {
     return true;
   }
 
-  // CI still pending at the merge gate. Polls `io.waitCiGreen` (scripts/wait-ci-green.sh, no model) with backoff
-  // inside `ciPendingMaxMinutes`; the in-flight `renewTimer` keeps the lease alive. Resolves to
-  // `{ redispatch: true }` (green, red or unreadable: review runs once more and merges or reproduces the ci-gate
+  // CI still pending at the merge gate (review AND remediate's M7 re-gate). Polls `io.waitCiGreen`
+  // (scripts/wait-ci-green.sh one-shot, no model) on the ciPollDelayMs schedule inside `ciPendingMaxMinutes`; before
+  // each poll `io.rateLimit` (when present) is read and, below the reserve, the wait sleeps until the budget resets.
+  // The in-flight `renewTimer` keeps the lease alive. Resolves to
+  // `{ redispatch: true }` (green, red or a genuine error: the phase runs once more and merges or reproduces the
   // block), `{ outcome }` (budget exhausted: needs-human `review.ci_pending_timeout`), or `{}` (no seam/PR/repo:
-  // the original outcome stands). The start time is a run-log event so a crash resumes the remaining budget.
-  async function waitForCiGreen(outcome) {
+  // the original outcome stands). Rate-limit and transient results (rc 4, a failed read) are waits: they retry the poll
+  // and NEVER redispatch. The start time is a run-log event so a crash resumes the remaining budget.
+  async function waitForCiGreen(outcome, phaseId = "review") {
     const pr = outcome.outputs?.pr ?? state.pr;
     const repoName = await resolveRepo();
     if (typeof io.waitCiGreen !== "function" || pr == null || !repoName) return {};
@@ -1031,33 +1064,45 @@ export async function runIssue(opts) {
     const open = readLog(dir, issue).filter((ev) => ev.event === "CI_PENDING_WAIT" && ev.pr === pr).pop();
     const startedAt = open && open.state === "start" && Number.isFinite(open.startedAt) ? open.startedAt : now();
     if (!(open && open.state === "start")) appendEvent(dir, issue, { event: "CI_PENDING_WAIT", state: "start", pr, startedAt });
-    let slept = 0;
-    let backoffMin = CI_BACKOFF_START_MIN;
+    let slept = 0, polls = 0, rateLimitSleeps = 0, pollIndex = 0;
     const spentMs = () => Math.max(now() - startedAt, slept);
     const report = async (result) => {
       const minutes = Math.round(spentMs() / 600) / 100;
-      appendEvent(dir, issue, { event: "CI_PENDING_WAIT", state: "end", pr, startedAt, minutes_waited: minutes, result });
-      try { await emitTelemetry?.({ event: "CI_PENDING_WAIT", phase: "review", issue, pr, minutes_waited: minutes, result }); } catch { /* telemetry never fails a run */ }
+      appendEvent(dir, issue, { event: "CI_PENDING_WAIT", state: "end", pr, startedAt, minutes_waited: minutes, result, polls, rate_limit_sleeps: rateLimitSleeps });
+      try { await emitTelemetry?.({ event: "CI_PENDING_WAIT", phase: phaseId, issue, pr, minutes_waited: minutes, result, polls, rate_limit_sleeps: rateLimitSleeps }); } catch { /* telemetry never fails a run */ }
       return minutes;
+    };
+    const nap = async (ms, reason, detail) => {
+      emitProgress({ event: "phase_paused", phase: phaseId, reason, detail });
+      if (ms > 0) { await sleep(ms); slept += ms; }
     };
     for (;;) {
       const remainingMs = budgetMs - spentMs();
       if (remainingMs <= 0) break;
-      const timeoutSec = Math.max(1, Math.min(CI_POLL_TIMEOUT_SEC, Math.floor(remainingMs / 1000)));
+      // Budget first: a read failure or absent seam never blocks the poll.
+      if (typeof io.rateLimit === "function") {
+        let holdMs = 0;
+        try { holdMs = ciRateLimitSleepMs(await io.rateLimit(), now(), random); } catch { holdMs = 0; }
+        if (holdMs > 0) {
+          rateLimitSleeps++;
+          await nap(Math.min(holdMs, remainingMs), "ci-rate-limit",
+            `GitHub API budget below reserve — sleeping ${Math.round(Math.min(holdMs, remainingMs) / 1000)}s until reset before polling PR #${pr}`);
+          continue;
+        }
+      }
       let rc = 2;
-      try { rc = (await io.waitCiGreen(pr, repoName, timeoutSec))?.rc ?? 2; } catch { rc = 2; }
-      if (rc !== 3) {
-        // 0 green, 1 red, 2 error or head moved: one review dispatch resolves each (merge, ci-gate handoff, re-review).
+      polls++;
+      try { rc = (await io.waitCiGreen(pr, repoName, 0))?.rc ?? 2; } catch { rc = 2; }
+      if (rc !== 3 && rc !== 4) {
+        // 0 green, 1 red, 2 genuine error or head moved: one phase dispatch resolves each (merge, ci-gate handoff, re-review).
         await report(rc === 0 ? "green" : rc === 1 ? "red" : "error");
         return { redispatch: true };
       }
-      slept += timeoutSec * 1000;
-      const waitMs = Math.min(backoffMin * 60000, Math.max(0, budgetMs - spentMs()));
+      if (rc === 4) rateLimitSleeps++;
+      const waitMs = Math.min(ciPollDelayMs(pollIndex++, random), Math.max(0, budgetMs - spentMs()));
       // ci_pending_wait: the progress observer sees each wait cycle (distinct from a failure).
-      emitProgress({ event: "phase_paused", phase: "review", reason: "ci-pending",
-        detail: `CI still pending on PR #${pr} — waited ${Math.round(spentMs() / 60000)} of ${ciPendingMaxMinutes} min` });
-      if (waitMs > 0) { await sleep(waitMs); slept += waitMs; }
-      backoffMin = Math.min(backoffMin * 2, CI_BACKOFF_MAX_MIN);
+      await nap(waitMs, rc === 4 ? "ci-rate-limit" : "ci-pending",
+        `${rc === 4 ? "GitHub rate-limited or unavailable; retrying" : "CI still pending"} on PR #${pr} — waited ${Math.round(spentMs() / 60000)} of ${ciPendingMaxMinutes} min`);
     }
     const minutes = await report("timeout");
     return { outcome: { status: "blocked", reason: "needs-human", handoff: false, outputs: outcome.outputs,

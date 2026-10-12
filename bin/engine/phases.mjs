@@ -971,6 +971,12 @@ export const PHASES = [
       if (heldAt >= 0 && heldAt > completeAt) {
         // Merged PR hands to close; otherwise awaiting-merge (terminal for the engine, re-entered by an operator), never a retry.
         if (await prMerged()) return mergedResult("AUTO-LANDED");
+        // CI still pending at M7 is a wait, not a park: the engine polls CI (no model) and re-dispatches this phase, which
+        // resumes at M7. Only the structured `Hold reason` line of the newest trusted held record counts; the stale-head
+        // and deploy-gate holds keep the terminal awaiting-merge result below.
+        if (/^\*\*Hold reason\*\*:[ \t]*CI pending\b/m.test(scoped[heldAt]))
+          return { status: "failed", detail: "checks still pending", retryable: false, handoff: false, wait: "ci-pending",
+                   outputs: { reGateOutcome: "HELD-AWAITING-MERGE" }, code: OC.REVIEW_PR_OPEN };
         return { status: "committed", terminalReason: "awaiting-merge", outputs: { reGateOutcome: "HELD-AWAITING-MERGE" } };
       }
       if (latest === null) {

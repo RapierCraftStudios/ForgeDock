@@ -24,10 +24,14 @@ if [ "$1" = "api" ]; then
   exit 1
 fi
 if [ "$1 $2" = "pr checks" ]; then
-  case " $* " in *" --json "*) ;; *) [ -f "$D/nochecks" ] && { echo "no checks reported on the 'x' branch" >&2; exit 1; }; exit 1 ;; esac
+  case " $* " in *" --json "*) ;; *)
+    [ -f "$D/nochecks" ] && { echo "no checks reported on the 'x' branch" >&2; exit 1; }
+    cn=$(cat "$D/chk.n" 2>/dev/null || echo 1); while [ ! -f "$D/checks.$cn" ] && [ "$cn" -gt 1 ]; do cn=$((cn-1)); done; cc=$(cat "$D/checks.$cn" 2>/dev/null || true)
+    case "$cc" in RATE) echo "HTTP 403: API rate limit exceeded for user (https://api.github.com/graphql)" >&2 ;; SECOND) echo "You have exceeded a secondary rate limit" >&2 ;; ERR) echo "HTTP 502: Bad Gateway" >&2 ;; ERRX) echo "boom: unexpected failure" >&2 ;; esac
+    exit 1 ;; esac
   n=$(( $(cat "$D/chk.n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$D/chk.n"
   f="$D/checks.$n"; while [ ! -f "$f" ] && [ "$n" -gt 1 ]; do n=$((n-1)); f="$D/checks.$n"; done
-  c=$(cat "$f"); [ "$c" = "ERR" ] && { echo "HTTP 502" >&2; exit 1; }
+  c=$(cat "$f"); case "$c" in ERR|ERRX|RATE|SECOND) exit 1 ;; esac
   [ "$c" = "NONE" ] && { echo "no checks reported on the 'x' branch" >&2; exit 1; }
   echo "$c"; exit 0
 fi
@@ -51,7 +55,19 @@ expect "pending then fail" "1|CI_GATE: FAIL" "$(run "$(mk pendfail '[{"name":"a"
 expect "pending past timeout" "3|CI_GATE: TIMEOUT" "$(run "$(mk slow '[{"name":"a","bucket":"pending"}]')" --timeout 2)"
 expect "fail wins over pending" "1|CI_GATE: FAIL" "$(run "$(mk mixed '[{"name":"a","bucket":"pending"},{"name":"b","bucket":"fail"}]')")"
 expect "transient outage then pass" "0|CI_GATE: PASS" "$(run "$(mk blip ERR "$P")")"
-expect "persistent outage" "2|CI_GATE: ERROR" "$(run "$(mk down ERR)" --timeout 60)"
+expect "persistent unclassified failure is an ERROR" "2|CI_GATE: ERROR" "$(run "$(mk down ERRX)" --timeout 60)"
+# Rate-limit / 5xx classification: retried, never an ERROR; a window that only saw them ends RATE_LIMITED (rc 4).
+expect "rate limited then pass retries" "0|CI_GATE: PASS" "$(run "$(mk rl RATE "$P")")"
+expect "secondary limit then pass retries" "0|CI_GATE: PASS" "$(run "$(mk rl2 SECOND "$P")")"
+expect "transient 5xx then pass retries" "0|CI_GATE: PASS" "$(run "$(mk fivexx ERR "$P")")"
+expect "rate limited for the whole window is RATE_LIMITED rc 4" "4|CI_GATE: RATE_LIMITED" "$(run "$(mk rlall RATE)" --timeout 2)"
+expect "more than 5 rate-limit hits are not an ERROR" "0|CI_GATE: PASS" "$(run "$(mk rlmany RATE RATE RATE RATE RATE RATE RATE "$P")" --timeout 60)"
+# Jitter: sleeps vary within +/-20% of the interval (fake sleep records its argument and returns at once).
+mkdir -p "$T/bin2"; printf '#!/usr/bin/env bash\necho "$1" >> "$FAKE_DIR/sleeps"\n' > "$T/bin2/sleep"; chmod +x "$T/bin2/sleep"
+d=$(mk jit '[{"name":"a","bucket":"pending"}]' '[{"name":"a","bucket":"pending"}]' '[{"name":"a","bucket":"pending"}]' '[{"name":"a","bucket":"pending"}]' '[{"name":"a","bucket":"pending"}]' '[{"name":"a","bucket":"pending"}]' '[{"name":"a","bucket":"pending"}]' '[{"name":"a","bucket":"pending"}]' "$P")
+FAKE_DIR="$d" PATH="$T/bin2:$T/bin:$PATH" FORGE_CI_INTERVAL=100 FORGE_CI_SETTLE=0 bash "$GATE" 7 -R o/r >/dev/null 2>&1
+expect "jittered sleeps stay within +/-20%" "0" "$(awk '$1<80||$1>120{bad++} END{print bad+0}' "$d/sleeps")"
+expect "jitter is applied (not a fixed interval)" "1" "$(awk '{u[$1]=1} END{n=0; for(k in u) n++; print (n>1)?1:0}' "$d/sleeps")"
 d=$(mk none NONE); touch "$d/nochecks"
 expect "no checks after grace passes" "0|CI_GATE: PASS" "$(run "$d")"
 expect "no checks + REQUIRE fails closed" "2|CI_GATE: ERROR" "$(FORGE_CI_REQUIRE_CHECKS=1 run "$d")"

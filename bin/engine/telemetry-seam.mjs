@@ -38,7 +38,7 @@ export function mapRecord(rec, wallMs) {
     return { event: "run_terminal", phase: null, payload: compact({ reason: rec.reason, code: rec.code, wall_ms: wallMs }) };
   }
   if (rec.event === "CI_PENDING_WAIT") {
-    return { event: "ci_pending_wait", phase: rec.phase ?? "review", payload: compact({ pr: rec.pr, minutes_waited: rec.minutes_waited, result: rec.result }) };
+    return { event: "ci_pending_wait", phase: rec.phase ?? "review", payload: compact({ pr: rec.pr, minutes_waited: rec.minutes_waited, result: rec.result, polls: rec.polls, rate_limit_sleeps: rec.rate_limit_sleeps }) };
   }
   return null;
 }
