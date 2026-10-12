@@ -655,6 +655,10 @@ GATE_RESULT=$([ "$GATE_PASSED" = "true" ] && echo PASS || echo FAIL)
 # scripts/verify-phase-trail.sh --head-tree (work-on/review.md R1.5) rejects a PASS recorded for a different tree. <!-- Added: forge#3149 -->
 git -C {WORKTREE_PATH} add -u   # same staging as the commit below; valid only because V2-V4 are done
 GATE_TREE=$(git -C {WORKTREE_PATH} write-tree)
+# Marker-only re-gate (invoked by work-on/review.md after a base sync or a stale re-review): HEAD is already committed and
+# the index is clean, so the gated tree is HEAD's tree. Use it instead of write-tree, and post the marker only (no V5 Step 2 commit).
+[ "${REGATE_MERGED_HEAD:-}" = "1" ] && GATE_TREE=$(git -C {WORKTREE_PATH} rev-parse 'HEAD^{tree}')
+[ -n "$GATE_TREE" ] || { echo "QUALITY_GATE: tree unresolved - not posting a marker" >&2; exit 1; }
 QG_BODY="<!-- FORGE:QUALITY_GATE -->
 ## Quality Gate Result
 
@@ -665,6 +669,8 @@ QG_BODY="<!-- FORGE:QUALITY_GATE -->
 **Findings remaining**: {none | summary}"
 gh issue comment {NUMBER} {GH_FLAG} --body "$QG_BODY" # allowlist:check-command-side-effects
 ```
+
+**Marker-only re-gate mode** <!-- Added: forge#3983 -->: when `work-on/review.md` re-gates a merged head (Pre-Handoff Base Sync or stale re-review), it runs the scoped V1 gate on the committed head first, then sets `REGATE_MERGED_HEAD=1` and runs only this Step 1 with the real `GATE_RESULT` (FAIL stays FAIL). Steps 2-4 are skipped: there is nothing staged and no commit to make.
 
 ### V5 Step 2: Commit
 
