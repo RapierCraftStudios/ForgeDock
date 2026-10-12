@@ -1173,7 +1173,13 @@ fi
 AGENT_RE="^<!-- FORGE:REVIEW-AGENT:[a-z0-9-]+ -->[\\s\\S]*(^|\\n)Reviewed-SHA:[ ]${REVIEW_SHA_FULL}(\\r?\\n|$)"
 AGENT_BODIES=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies "$AGENT_RE" 2>/dev/null) \
   || { echo "STAGING_REVIEW: BLOCKED - trusted reviewer comments unreadable (fail closed)"; exit 1; }
-ALL_FINDINGS=$(printf '%s\n' "$AGENT_BODIES" | jq -r 'scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null)
+ALL_FINDINGS=$(printf '%s\n' "$AGENT_BODIES" | jq -r 'scan("<!-- FINDING:(.+?) -->") | .[0]' 2>/dev/null)
+# Fail closed: every raw marker in the trusted bodies must be extracted; a marker the parser cannot read must never make the review look clean.
+RAW_FINDING_COUNT=$(printf '%s\n' "$AGENT_BODIES" | grep -o '<!-- FINDING:' | wc -l | tr -d ' ')
+EXTRACTED_FINDING_COUNT=$(printf '%s\n' "$ALL_FINDINGS" | grep -c '.' || true)
+if [ "${RAW_FINDING_COUNT:-0}" != "${EXTRACTED_FINDING_COUNT:-0}" ]; then
+  echo "STAGING_REVIEW: BLOCKED - finding marker extraction mismatch (raw=${RAW_FINDING_COUNT}, extracted=${EXTRACTED_FINDING_COUNT}); refusing to treat the review as clean (fail closed)"; exit 1
+fi
 ```
 
 Extract structured findings (`<!-- FINDING:... -->`) from `ALL_FINDINGS`. If none found, scan the trusted bodies for unstructured findings. If still 0 → skip to Phase 8.
@@ -1247,7 +1253,7 @@ prior_findings_tsv() {
     cj=$(gh api --paginate "repos/${REPO}/issues/${pr}/comments" 2>/dev/null) || continue
     [ -n "$cj" ] || continue
     printf '%s' "$cj" | bash "$TRUSTED_SCRIPT" bodies '^<!-- (FORGE:REVIEW-AGENT:[a-z-]+|REVIEW-FINDINGS-SYNTHESIZED-START) -->[\s\S]*(^|\n)Reviewed-SHA: [0-9a-f]{40,64}' 2>/dev/null \
-      | jq -r --arg skip "${PF_SKIP:-}" 'select($skip == "" or (test("(^|\\n)Reviewed-SHA: " + $skip + "\\r?(\\n|$)") | not)) | scan("<!-- FINDING:([^>]+) -->") | .[0]' 2>/dev/null \
+      | jq -r --arg skip "${PF_SKIP:-}" 'select($skip == "" or (test("(^|\\n)Reviewed-SHA: " + $skip + "\\r?(\\n|$)") | not)) | scan("<!-- FINDING:(.+?) -->") | .[0]' 2>/dev/null \
       | while IFS='|' read -r _id _c _s _loc _t; do
           [ -n "$_t" ] || continue
           _p=$(PF_LOC="$_loc" pf_split_loc); printf 'F\t%s\t%s\n' "$_p" "$(printf '%s' "$_t" | tr '\t' ' ')"
