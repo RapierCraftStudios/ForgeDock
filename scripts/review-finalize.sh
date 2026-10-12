@@ -48,12 +48,15 @@
 #                     contract.issue is ignored (no single fixing issue, lineage none) and the disposition record carries out_of_scope= and scope=
 #   Phase 7-9 subcommands: --context FILE is optional; without it pass --review-sha SHA, --review-mode FULL|DELTA|BASE_SYNC_ONLY, --issue N, --base B.
 #   verdict:      --merge-health S --merge-health-state S [--base B] [--head-branch H] [--is-milestone true|false] [--has-purpose-regression true|false]
-#                 [--purpose-findings TEXT] [--result stale|clean|blocking] [--agents TEXT] [--findings-count N] [--blocking-count N]
+#                 [--purpose-findings-file F | --purpose-findings TEXT] [--result stale|clean|blocking] [--agents-file F | --agents TEXT] [--findings-count N] [--blocking-count N]
 #                 [--intensity-tier T] [--table-cell-key K] [--trust-shadow-mode B] [--dry-run]
 #   calibrate:    [--intensity-tier T] [--table-cell-key K] [--trust-shadow-mode B] [--trust-needs-human B] [--dry-run]; the issue is context contract.issue or --issue N
 #   merge-gate:   --verdict "APPROVED|CHANGES REQUESTED" --has-purpose-regression B --calibration-needs-human B --trust-needs-human B
-#                 --base-conflict B --other-blocking B [--calibration-note T] [--table-cell-key K] [--base B] [--issue N]
+#                 --base-conflict B --other-blocking B [--calibration-note-file F | --calibration-note T] [--table-cell-key K] [--base B] [--issue N]
 #                 (every B is true|false; an empty or other value aborts the merge: the guard state must be bound)
+#   Free text (purpose findings, agents, calibration note) derives from PR content: pass it through the *-file flags (a file written with the
+#   file-write tool, read here as data: control characters stripped, length capped, unreadable file = empty). The inline TEXT flags are for
+#   trusted callers only; the file flag wins when both are given. Never place free text in a shell word.
 #   demilestone:  --is-milestone true|false [--merge-state S] (8B passes MERGED; 9A omits it and the state is read from the PR)
 # Env: FORGE_CONFIG (forge.yaml for review.max_filed_findings; default ./forge.yaml).
 # Exit: 0 ok | 3 BLOCKED (REVIEW_RESULT: status: BLOCKED printed; the caller must stop the review, never skip) | 4 merge-gate only:
@@ -78,9 +81,10 @@ PR_NUMBER=""; REPO=""; CONTEXT=""; OUT_DIR=""; IN_FILE=""; OUT_FILE=""; AUTO_MER
 REVIEW_SHA_OPT=""; REVIEW_MODE_OPT=""; BASE_OPT=""; HEAD_BRANCH=""; ISSUE_OPT=""; VERDICT=""; HAS_PURPOSE_REGRESSION=""; CALIBRATION_NEEDS_HUMAN=""; CALIBRATION_NOTE=""; TRUST_NEEDS_HUMAN=""
 BASE_CONFLICT=""; OTHER_BLOCKING=""; INTENSITY_TIER=""; TABLE_CELL_KEY=""; TRUST_SHADOW_MODE=""; MERGE_HEALTH=""; MERGE_HEALTH_STATE=""; RESULT=""
 AGENTS_TEXT=""; FINDINGS_COUNT=""; BLOCKING_COUNT=""; PURPOSE_FINDINGS=""; IS_MILESTONE="false"; MERGE_STATE_IN=""
+CALIBRATION_NOTE_FILE=""; AGENTS_FILE=""; PURPOSE_FINDINGS_FILE=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --pr|--repo|--context|--out-dir|--findings|--out|--auto-merge|--notes-fixed|--notes-dropped|--patterns|--base|--head-branch|--issue|--verdict|--has-purpose-regression|--calibration-needs-human|--calibration-note|--trust-needs-human|--base-conflict|--other-blocking|--intensity-tier|--table-cell-key|--trust-shadow-mode|--merge-health|--merge-health-state|--result|--agents|--findings-count|--blocking-count|--purpose-findings|--is-milestone|--merge-state|--review-sha|--review-mode|--scope-files|--prior-prs)
+        --pr|--repo|--context|--out-dir|--findings|--out|--auto-merge|--notes-fixed|--notes-dropped|--patterns|--base|--head-branch|--issue|--verdict|--has-purpose-regression|--calibration-needs-human|--calibration-note|--calibration-note-file|--agents-file|--purpose-findings-file|--trust-needs-human|--base-conflict|--other-blocking|--intensity-tier|--table-cell-key|--trust-shadow-mode|--merge-health|--merge-health-state|--result|--agents|--findings-count|--blocking-count|--purpose-findings|--is-milestone|--merge-state|--review-sha|--review-mode|--scope-files|--prior-prs)
             [ $# -ge 2 ] || { echo "review-finalize: $1 requires a value" >&2; exit 2; } ;;
     esac
     case "$1" in
@@ -103,6 +107,9 @@ while [ $# -gt 0 ]; do
         --has-purpose-regression) HAS_PURPOSE_REGRESSION="${2:-}"; shift 2 ;;
         --calibration-needs-human) CALIBRATION_NEEDS_HUMAN="${2:-}"; shift 2 ;;
         --calibration-note) CALIBRATION_NOTE="${2:-}"; shift 2 ;;
+        --calibration-note-file) CALIBRATION_NOTE_FILE="${2:-}"; shift 2 ;;
+        --agents-file) AGENTS_FILE="${2:-}"; shift 2 ;;
+        --purpose-findings-file) PURPOSE_FINDINGS_FILE="${2:-}"; shift 2 ;;
         --trust-needs-human) TRUST_NEEDS_HUMAN="${2:-}"; shift 2 ;;
         --base-conflict) BASE_CONFLICT="${2:-}"; shift 2 ;;
         --other-blocking) OTHER_BLOCKING="${2:-}"; shift 2 ;;
@@ -124,6 +131,16 @@ while [ $# -gt 0 ]; do
         *) echo "review-finalize: unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+
+# read_text_file FILE: print FILE as one line of data (#3918). Free text from PR content reaches this script through a file, never a shell word.
+# Control characters are dropped, newlines fold to spaces, output is capped at 2000 bytes; an unreadable or empty path prints nothing.
+read_text_file() {
+    [ -n "${1:-}" ] && [ -f "$1" ] && [ -r "$1" ] || return 0
+    head -c 2000 "$1" 2>/dev/null | tr '\r\n\t' '   ' | tr -d '\000-\037\177'
+}
+[ -z "$PURPOSE_FINDINGS_FILE" ] || PURPOSE_FINDINGS=$(read_text_file "$PURPOSE_FINDINGS_FILE")
+[ -z "$AGENTS_FILE" ] || AGENTS_TEXT=$(read_text_file "$AGENTS_FILE")
+[ -z "$CALIBRATION_NOTE_FILE" ] || CALIBRATION_NOTE=$(read_text_file "$CALIBRATION_NOTE_FILE")
 
 # --- file-verify needs nothing else: it only parses the issue-creation result text on stdin ---
 if [ "$SUB" = "file-verify" ]; then
@@ -410,7 +427,7 @@ EOF
     }
 
     FINAL="$WORKDIR/final.jsonl"; : > "$FINAL"
-    N_STALE=0; N_PREEXISTING=0; N_NO_SCENARIO=0; N_KEPT=0
+    N_STALE=0; N_PREEXISTING=0; N_NO_SCENARIO=0; N_INTRODUCED=0; N_KEPT=0
     I=0; TOTAL=$(jq 'length' "$DEDUPED")
     while [ "$I" -lt "$TOTAL" ]; do
         F=$(jq -c ".[$I]" "$DEDUPED"); I=$((I + 1))
@@ -434,17 +451,22 @@ EOF
             esac
             if [ "$STALE" -eq 1 ]; then N_STALE=$((N_STALE + 1)); continue; fi
         fi
-        # Gate 2 (introduced-line): MEDIUM or lower with no added line within +-5 is pre-existing. CRITICAL/HIGH and unknown severities never are.
-        if [ -n "$LINE" ] && [ "$GONE" -eq 0 ] && [ "$NOPATCH" -eq 0 ] && [ -s "$ADDED_LINES_FILE" ]; then
-            case "$SEV" in
-                MEDIUM|LOW|INFO)
-                    LO=$((LINE > 5 ? LINE - 5 : 1)); INTRODUCED=0; L="$LO"
-                    while [ "$L" -le $((LINE + 5)) ]; do
-                        if grep -qxF -- "${FILE}:${L}" "$ADDED_LINES_FILE"; then INTRODUCED=1; break; fi
-                        L=$((L + 1))
-                    done
-                    [ "$INTRODUCED" -eq 1 ] || ROUTE="pre-existing" ;;
-            esac
+        # Gate 2 (introduced-line): scope is computed for every finding (any severity) from the added-line map. A file the PR deleted or renamed is introduced;
+        # a patch-less file, an empty map or a missing line is unknown. MEDIUM or lower with no added line within +-5 is routed pre-existing.
+        # CRITICAL/HIGH and unknown severities never are (their scope is still recorded).
+        SCOPE="unknown"
+        if [ "$GONE" -eq 1 ]; then
+            SCOPE="introduced"
+        elif [ -n "$LINE" ] && [ "$NOPATCH" -eq 0 ] && [ -s "$ADDED_LINES_FILE" ]; then
+            LO=$((LINE > 5 ? LINE - 5 : 1)); INTRODUCED=0; L="$LO"
+            while [ "$L" -le $((LINE + 5)) ]; do
+                if grep -qxF -- "${FILE}:${L}" "$ADDED_LINES_FILE"; then INTRODUCED=1; break; fi
+                L=$((L + 1))
+            done
+            if [ "$INTRODUCED" -eq 1 ]; then SCOPE="introduced"; else
+                SCOPE="pre-existing"
+                case "$SEV" in MEDIUM|LOW|INFO) ROUTE="pre-existing" ;; esac
+            fi
         fi
         # Gate 3 (concrete failure): MEDIUM or lower without a **Failure scenario** is speculative hardening, demoted to a NOTE.
         # CRITICAL/HIGH are exempt; an unreadable carrying comment keeps the finding.
@@ -453,13 +475,14 @@ EOF
         fi
         case "$ROUTE" in pre-existing) N_PREEXISTING=$((N_PREEXISTING + 1)) ;; demoted-no-scenario) N_NO_SCENARIO=$((N_NO_SCENARIO + 1)) ;; esac
         N_KEPT=$((N_KEPT + 1))
-        printf '%s' "$F" | jq -c --arg r "$ROUTE" '. + {route: $r}' >> "$FINAL"
+        [ "$SCOPE" != "introduced" ] || N_INTRODUCED=$((N_INTRODUCED + 1))
+        printf '%s' "$F" | jq -c --arg r "$ROUTE" --arg sc "$SCOPE" '. + {route: $r, scope: $sc}' >> "$FINAL"
     done
 
     jq -s --arg sha "$REVIEW_SHA" --arg mode "$REVIEW_MODE" --arg mi "$MERGE_ISSUE" \
-        --argjson ex "$N_EXTRACTED" --argjson dd "$N_DEDUPED" --argjson st "$N_STALE" --argjson pe "$N_PREEXISTING" --argjson ns "$N_NO_SCENARIO" \
+        --argjson ex "$N_EXTRACTED" --argjson dd "$N_DEDUPED" --argjson st "$N_STALE" --argjson pe "$N_PREEXISTING" --argjson ns "$N_NO_SCENARIO" --argjson ni "$N_INTRODUCED" \
         '{schema_version: 1, review_sha: $sha, review_mode: $mode, merge_issue: ($mi | tonumber? // null),
-          counts: {findings_extracted: $ex, findings_deduped: $dd, findings_dropped_stale: $st, findings_preexisting: $pe, notes_demoted_no_scenario: $ns},
+          counts: {findings_extracted: $ex, findings_deduped: $dd, findings_dropped_stale: $st, findings_preexisting: $pe, findings_introduced: $ni, notes_demoted_no_scenario: $ns},
           findings: .}' "$FINAL" > "$OUT_FILE" || { echo "review-finalize: cannot write $OUT_FILE" >&2; exit 2; }
     echo "FINDINGS_OUT=$OUT_FILE"
     echo "STRUCTURED_FINDINGS=$N_EXTRACTED"
@@ -636,7 +659,7 @@ do_classify() {
     TOTAL=$(jq '.findings | length' "$IN_FILE"); I=0
     while [ "$I" -lt "$TOTAL" ]; do
         F_ID=$(fj .id); F_SEV=$(fj .severity); F_CONF=$(fj .confidence); F_AGENT=$(fj .agent); F_FILE=$(fj .file); F_TITLE=$(fj .title)
-        F_ROUTE=$(fj .route); F_FIX=$(fj .fix_efficacy); F_L1=$(fj .line_start); F_L2=$(fj .line_end); F_LOC=$(fj .loc)
+        F_ROUTE=$(fj .route); F_SCOPE=$(fj .scope); F_FIX=$(fj .fix_efficacy); F_L1=$(fj .line_start); F_L2=$(fj .line_end); F_LOC=$(fj .loc)
         if [ "$F_ROUTE" = "demoted-no-scenario" ]; then printf '%s\t%s\n' "$I" "NOTE no-scenario" >> "$DISP_FILE"; I=$((I + 1)); continue; fi
         FINDING_TEXT_FILE="$WORKDIR/finding-text.$I"; jq -r ".findings[$I].text // \"\"" "$IN_FILE" > "$FINDING_TEXT_FILE" 2>/dev/null
         set -- --severity "$F_SEV" --confidence "$F_CONF" --agent "$F_AGENT" --lineage "$FINDING_LINEAGE" --text-file "$FINDING_TEXT_FILE"
@@ -644,6 +667,7 @@ do_classify() {
         [ -n "$INPR_DIFF_FILE" ] && [ "$F_ROUTE" != "pre-existing" ] && set -- "$@" --inpr-diff "$INPR_DIFF_FILE"
         [ -n "$CONTRACT_SCOPE_FILE" ] && set -- "$@" --contract-scope "$CONTRACT_SCOPE_FILE" --contract-open "$CONTRACT_OPEN_FILE" --pr-files "$PR_FILES_FILE"
         [ -n "$MERGE_ISSUE" ] && set -- "$@" --fixes-issue "$MERGE_ISSUE"
+        case "$F_SCOPE" in introduced|pre-existing|unknown) set -- "$@" --scope "$F_SCOPE" ;; esac
         case "$F_FIX" in fails|regresses) set -- "$@" --fix-efficacy "$F_FIX" ;; esac
         [ -n "$PRIOR_FILE" ] && { set -- "$@" --prior-findings "$PRIOR_FILE" --title "$F_TITLE"; [ -n "$DIFF_MAP_FILE" ] && set -- "$@" --diff-map "$DIFF_MAP_FILE"; }
         [ -n "$F_L1" ] && set -- "$@" --line-start "$F_L1" --line-end "${F_L2:-$F_L1}"
@@ -716,7 +740,7 @@ do_classify() {
     FINDINGS_FILED=$(jq '[.findings[] | select(.class == "ISSUE" and .route != "file-pre-existing" and .route != "pre-existing")] | length' "$OUT_FILE")
     PLAIN_NOTES=$(jq '[.findings[] | select(.class == "NOTE" and .route != "pre-existing" and (.disposition | test("^NOTE (contract-|reflag-|capped)") | not))] | length' "$OUT_FILE")
     NOTES_LISTED=$((PLAIN_NOTES - NOTES_FIXED - NOTES_DROPPED)); [ "$NOTES_LISTED" -ge 0 ] || NOTES_LISTED=0
-    N_STALE=$(jq -r '.counts.findings_dropped_stale // 0' "$OUT_FILE"); N_PRE=$(jq -r '.counts.findings_preexisting // 0' "$OUT_FILE"); N_NOSCEN=$(jq -r '.counts.notes_demoted_no_scenario // 0' "$OUT_FILE")
+    N_STALE=$(jq -r '.counts.findings_dropped_stale // 0' "$OUT_FILE"); N_PRE=$(jq -r '.counts.findings_preexisting // 0' "$OUT_FILE"); N_INTRO=$(jq -r '[.findings[] | select(.scope == "introduced")] | length' "$OUT_FILE"); N_NOSCEN=$(jq -r '.counts.notes_demoted_no_scenario // 0' "$OUT_FILE")
     N_EXTRACTED=$(jq -r '.counts.findings_extracted // (.findings | length)' "$OUT_FILE")
     CLASSIFIER_MODE=script   # the guard above blocks the review when the classifier is unresolvable, so this is always script
 
@@ -738,7 +762,7 @@ do_classify() {
     # Disposition marker (MANDATORY whenever Phase 6A extracted at least one finding): Phase 8 refuses to auto-merge a PR that has FINDING:
     # markers but no FORGE:NOTE_DISPOSITION comment. `reviewed_sha` is the head this record covers (a later review of ANOTHER head reads it as a prior list).
     BUNDLE_MARKER=""; if [ "$BUNDLE" = "true" ]; then _sm=full; [ -z "$SCOPE_FILES" ] || _sm=scoped; BUNDLE_MARKER=" out_of_scope=${OUT_OF_SCOPE} scope=${_sm}"; fi
-    NOTE_DISPOSITION_BODY="<!-- FORGE:NOTE_DISPOSITION: notes_fixed=${NOTES_FIXED:-0} notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} inpr_fix=${INPR_FIX_COUNT:-0} contract_demoted=${CONTRACT_DEMOTED:-0} findings_dropped_stale=${N_STALE:-0} findings_preexisting=${N_PRE:-0} notes_demoted_no_scenario=${N_NOSCEN:-0} lineage=${FINDING_LINEAGE} classifier=${CLASSIFIER_MODE} notes_reflag=${NOTES_REFLAG:-0} notes_capped=${NOTES_CAPPED:-0} reviewed_sha=${REVIEW_SHA}${BUNDLE_MARKER} -->
+    NOTE_DISPOSITION_BODY="<!-- FORGE:NOTE_DISPOSITION: notes_fixed=${NOTES_FIXED:-0} notes_listed=${NOTES_LISTED:-0} notes_dropped=${NOTES_DROPPED:-0} findings_filed=${FINDINGS_FILED:-0} inpr_fix=${INPR_FIX_COUNT:-0} contract_demoted=${CONTRACT_DEMOTED:-0} findings_dropped_stale=${N_STALE:-0} findings_preexisting=${N_PRE:-0} introduced=${N_INTRO:-0} notes_demoted_no_scenario=${N_NOSCEN:-0} lineage=${FINDING_LINEAGE} classifier=${CLASSIFIER_MODE} notes_reflag=${NOTES_REFLAG:-0} notes_capped=${NOTES_CAPPED:-0} reviewed_sha=${REVIEW_SHA}${BUNDLE_MARKER} -->
 $(cat "$NOTE_LIST_FILE" 2>/dev/null)"
     printf '%s\n' "$NOTE_DISPOSITION_BODY" > "$OUT_DIR/note-disposition.md"
     POSTED_DISPOSITION=false; POSTED_INPR=false
@@ -815,7 +839,8 @@ do_file_prepare() {
     while [ "$I" -lt "$TOTAL" ]; do
         F_ROUTE=$(fj .route); F_CLASS=$(fj .class)
         case "$F_CLASS:$F_ROUTE" in ISSUE:file|ISSUE:file-pre-existing) ;; *) I=$((I + 1)); continue ;; esac
-        F_ID=$(fj .id); F_FILE=$(fj .file); F_TITLE=$(fj .title); F_SEV=$(fj .severity); F_AGENT=$(fj .agent); F_LINE=$(fj .line_start)
+        F_ID=$(fj .id); F_FILE=$(fj .file); F_TITLE=$(fj .title); F_SEV=$(fj .severity); F_AGENT=$(fj .agent); F_LINE=$(fj .line_start); F_SCOPE=$(fj .scope)
+        case "$F_SCOPE" in introduced|pre-existing|unknown) ;; *) F_SCOPE="unknown" ;; esac
         case "$F_LINE" in ''|*[!0-9]*) F_LINE=0 ;; esac
         ACTION="file"; DEDUP_OF=""; REGRESSION=""; NOTE=""; CONSOLIDATE="false"; PRIOR_NUMS=""; SUBSYSTEM=""; RECURRENCE=""
         # Title (defense in depth: strip command substitution so the raw title stays readable if it round-trips through an eval-based consumer).
@@ -914,8 +939,8 @@ do_file_prepare() {
         jq -n -c --arg id "$F_ID" --arg action "$ACTION" --arg title "$ISSUE_TITLE" --arg file "$F_FILE" --arg line "$F_LINE" --arg sev "$(upper "$F_SEV")" \
             --arg prio "$FINDING_PRIORITY" --argjson labels "$LABELS" --arg ms "$MILESTONE_TITLE" --arg batch "$BATCHABLE" --arg dedup "$DEDUP_OF" \
             --arg reg "$REGRESSION" --arg note "$NOTE" --arg cons "$CONSOLIDATE" --arg prior "$PRIOR_NUMS" --arg sub "$SUBSYSTEM" --arg slug "$PATTERN_SLUG" \
-            --arg rec "$RECURRENCE" --arg route "$F_ROUTE" --arg agent "$F_AGENT" \
-            '{id: $id, action: $action, route: $route, title: $title, file: $file, line: ($line | tonumber), severity: $sev, agent: $agent, priority: $prio,
+            --arg rec "$RECURRENCE" --arg route "$F_ROUTE" --arg agent "$F_AGENT" --arg scope "$F_SCOPE" \
+            '{id: $id, action: $action, route: $route, title: $title, file: $file, line: ($line | tonumber), severity: $sev, scope: $scope, agent: $agent, priority: $prio,
               labels: $labels, milestone: $ms, batchable: ($batch == "true"), dedup_of: ($dedup | tonumber? // null), regression_of: ($reg | tonumber? // null),
               note: $note, pattern: {slug: $slug, subsystem: $sub, consolidate: ($cons == "true"), prior: ($prior | split(" ") | map(select(length > 0) | tonumber)), recurrence: $rec}}' >> "$OUT_ITEMS"
         I=$((I + 1))
@@ -1094,9 +1119,10 @@ do_calibrate() {
     fi
     echo "CALIBRATION_NEEDS_HUMAN=${CALIBRATION_NEEDS_HUMAN}"
     echo "CALIBRATION_CELL=${CALIBRATION_CELL}"
-    # The orchestrator substitutes this line into a single-quoted shell assignment (review-pr.md Phase 8): never emit
-    # a quote, backtick, dollar sign, backslash or newline (#3918 class).
+    # Defense in depth: strip quote, backtick, dollar sign, backslash and newline from the echoed line (#3918 class). Phase 8 reads the
+    # note from the file below, not from this line, so it never passes through a shell word.
     CALIBRATION_NOTE=$(printf '%s' "$CALIBRATION_NOTE" | tr -d "'\`\$\\\\" | tr '\r\n' '  ')
+    printf '%s\n' "$CALIBRATION_NOTE" > "$OUT_DIR/calibration-note.txt" 2>/dev/null || true
     echo "CALIBRATION_NOTE=${CALIBRATION_NOTE}"
     exit 0
 }

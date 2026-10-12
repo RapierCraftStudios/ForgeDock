@@ -104,3 +104,120 @@ Cite: #3233 / PR #3317.
 PR #3338 touched `orchestrate`. See FORGE:BUILDER comment on issue #3296 for full change list.
 Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
 Cite: #3296 / PR #3338.
+
+## Entry 2026-10-08 — Fix: verify REREVIEW_DISPATCHED marker write after re-review dispatch (#3411)
+
+PR #3417 touched `orchestrate`. See FORGE:BUILDER comment on issue #3411 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3411 / PR #3417.
+
+## Entry 2026-10-08 — Fix: anchor and trust-filter FORGE:REMEDIATION single-attempt guard marker (#3412)
+
+PR #3422 touched `orchestrate`. See FORGE:BUILDER comment on issue #3412 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3412 / PR #3422.
+
+## Entry 2026-10-08 — Fix: re-review handoff can dispatch duplicate review-pr --auto-merge runs (#3413)
+
+PR #3426 touched `orchestrate`. See FORGE:BUILDER comment on issue #3413 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3413 / PR #3426.
+
+## Entry 2026-10-09 — Fix: re-review claim lease liveness (orchestrate STALE detection) (#3428)
+
+PR #3458 touched `orchestrate`. See FORGE:BUILDER comment on issue #3428 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3428 / PR #3458.
+
+## Entry 2026-10-09 — Fix: re-review earliest-claim ordering depends on implicit API row order (#3429)
+
+PR #3464 touched `orchestrate`. See FORGE:BUILDER comment on issue #3429 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3429 / PR #3464.
+
+## Entry 2026-10-10 — Feat: autonomous merge-only base sync when a PR conflicts with its base (#3496)
+
+PR #3513 touched `orchestrate`. See FORGE:BUILDER comment on issue #3496 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3496 / PR #3513.
+
+## Entry 2026-10-10 — Fix: release re-review claim only after the outcome is settled (#3486)
+
+PR #3552 touched `orchestrate`. See FORGE:BUILDER comment on issue #3486 for full change list.
+Key gotcha recorded: re-review claim release must follow outcome settlement (Outcome: SETTLED), else a crash strands the issue.
+Cite: #3486 / PR #3552.
+
+## Entry 2026-10-10 — Fix: re-review Step 2 never echoes CLAIM_ID, so own-claim check cannot fire (#3472)
+
+PR #3582 touched `orchestrate`. See FORGE:BUILDER comment on issue #3472 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3472 / PR #3582.
+
+## Entry 2026-10-10 — Fix: helper resolvers (classify-finding / amplification-breaker / extract-affected-files) no longer resolve from $PWD (#3483)
+
+PR #3584 touched `orchestrate`. See FORGE:BUILDER comment on issue #3483 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3483 / PR #3584.
+
+## Entry 2026-10-10 — Fix: exclude workflow:remediating from in-flight filters (review finding — PR #3563) (#3564)
+
+PR #3580 touched `orchestrate`. See FORGE:BUILDER comment on issue #3564 for full change list.
+Cite: #3564 / PR #3580.
+
+## Entry 2026-10-10 — Fix: PENDING_DECISIONS queue has no dequeue; stale entries presented (review finding — PR #3507) (#3508)
+
+PR #3614 touched `orchestrate`. See FORGE:BUILDER comment on issue #3508 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3508 / PR #3614.
+
+## Entry 2026-10-11 — Fix: review-pr resolves helper scripts from FORGE_ROOT, not cwd-relative paths (#3596)
+
+PR #3675 touched `orchestrate`. See FORGE:BUILDER comment on issue #3596 for full change list.
+Key gotcha recorded: helper scripts must resolve from FORGE_ROOT, never cwd-relative paths after PR checkout.
+Cite: #3596 / PR #3675.
+
+## Entry 2026-10-11 — Fix: amplification breaker re-trip never re-enqueues its PENDING_DECISIONS entry (#3621)
+
+PR #3683 touched `orchestrate`. See FORGE:BUILDER comment on issue #3621 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3621 / PR #3683.
+
+## Entry 2026-10-11 — Fix: enqueue_breaker_decision declared in the three breaker trip-site fences (#3690)
+
+PR #3692 touched `orchestrate`. See FORGE:BUILDER comment on issue #3690 for full change list.
+Key gotcha recorded: breaker helper must be re-declared per fence (fresh shell per Bash call); `check-spec-bash.sh --fence-funcs` now guards cross-fence function calls.
+Cite: #3690 / PR #3692.
+
+## Entry 2026-10-11 — Fix: Layer-1 body-fallback file edges serialize issues whose PRs never touch the file (#3697)
+
+PR #3707 touched `orchestrate`. See FORGE:BUILDER comment on issue #3697 for full change list.
+Key gotcha recorded: soft (body-fallback) edges release early only when predecessor PR exists and `gh pr diff` succeeds with no overlap; no PR / error => HOLD, never DROP.
+Cite: #3697 / PR #3707.
+
+## Entry 2026-10-11 — convert remaining specs to shared bootstrap stub (#3781)
+
+PR #3794 touched `orchestrate`. See FORGE:BUILDER comment on issue #3781 for full change list.
+Cite: #3781 / PR #3794.
+
+## Entry 2026-10-11 — Fix: forge_resolve prefers the running plugin root over newer cache and stale FORGE_HOME (#3801)
+
+PR #3804 touched `orchestrate` (resolver stub line in orchestrate phase specs). See FORGE:BUILDER comment on issue #3801 for full change list.
+Key gotcha recorded: the stub sets FORGE_SOURCED_ROOT to the loader-substituted plugin root; forge-resolve.sh must rank it above FORGE_HOME and the newest cache.
+Cite: #3801 / PR #3804.
+
+## Entry 2026-10-12 — Feat: close decomposed parents once all sub-issues are done (#3736)
+
+PR #3879 touched `orchestrate`. See FORGE:BUILDER comment on issue #3736 for full change list.
+Key gotcha recorded: (update this entry by editing `modules/orchestrate.md` in a follow-up PR if the change revealed a new failure mode).
+Cite: #3736 / PR #3879.
+
+## Entry 2026-10-12 — Fix: orchestrate claims-board issues are never closed after batch completion (#3699)
+
+PR #3885 touched `orchestrate`. See FORGE:BUILDER comment on issue #3699 for full change list.
+Key gotcha recorded: the claims board must be closed by the batch itself (phase-5) and swept by /cleanup for crashed batches.
+Cite: #3699 / PR #3885.
+
+## Entry 2026-10-12 — Fix: Rule 9 over-blocks ref-only git verbs used by cleanup specs (#3873)
+
+PR #3912 touched `orchestrate` (commands/orchestrate/phase-4-execution.md). See FORGE:BUILDER comment on issue #3873 for full change list.
+Cite: #3873 / PR #3912.
