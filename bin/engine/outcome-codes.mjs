@@ -21,6 +21,7 @@ export const OUTCOME_CODES = Object.freeze({
   REVIEW_REREVIEW_SKIPPED: "review.rereview_skipped",
   REVIEW_BLOCKING_ISSUE: "review.blocking_issue",
   REVIEW_PR_OPEN: "review.pr_open",
+  REVIEW_CI_PENDING_TIMEOUT: "review.ci_pending_timeout",
   BUILD_ACCEPTANCE_FAILED: "build.acceptance_failed",
   BUILD_ACCEPTANCE_MALFORMED: "build.acceptance_malformed",
   BUILD_SIZE_OVER_GATE: "build.size_over_gate", // retired (forge#3862): never emitted; kept so historic runs parse

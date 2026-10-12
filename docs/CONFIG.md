@@ -481,6 +481,10 @@ engine:
 | `<key>_model` | string | No | Model alias (`sonnet`, `opus`, `haiku`) or full model id passed as `--model`. Invalid values are ignored. |
 | `<key>_max_turns` | integer | No | Positive integer passed as `--max-turns`. Invalid values are ignored. |
 
+| `ci_pending_max_minutes` | integer | No | Minutes the engine waits for CI when the review phase ends BLOCKED with "checks still pending" (the merge gate's wait window ended while CI was still running). Default: 90. Invalid values are ignored. This key is flat like the others but is not part of the `<key>_model` / `<key>_max_turns` pattern. |
+
+**CI still pending**: the engine polls `scripts/wait-ci-green.sh` (no model calls) with 2, 4, 8 ... minute backoff while the lease keeps renewing, then re-dispatches the review phase once (idempotent at an unchanged head: it re-runs the merge gate and merges). Red CI takes the normal ci-gate path. When the budget is exhausted the run ends `needs-human` with outcome code `review.ci_pending_timeout`; `--retry` resumes. Each wait emits a `ci_pending_wait` telemetry event with the minutes waited.
+
 **Precedence** (model): `engine.<key>_model`, then the run-level model the caller passed explicitly, then omitted. `max_turns` comes only from this section. No defaults ship.
 
 **Version gate**: the flags are added only when the installed `claude --version` supports them (`--max-turns` is hidden from `claude --help`, so help text is never scraped); an unparseable version omits both flags.

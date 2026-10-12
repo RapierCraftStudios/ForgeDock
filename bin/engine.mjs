@@ -38,6 +38,11 @@ export const DEFAULT_MAX_SESSION_LIMIT_PAUSES = 5;
 // reset epoch. The runner never fabricates a reset time; this default lives in
 // the engine and is still capped by `maxSessionLimitPauses`.
 export const DEFAULT_SESSION_LIMIT_WAIT_MS = 30 * 60 * 1000;
+// CI still pending at the merge gate: total wait budget (engine.ci_pending_max_minutes), per-poll cap and backoff bounds.
+export const DEFAULT_CI_PENDING_MAX_MINUTES = 90;
+const CI_POLL_TIMEOUT_SEC = 540;
+const CI_BACKOFF_START_MIN = 2;
+const CI_BACKOFF_MAX_MIN = 16;
 
 /**
  * forge#3791: non-secret identity of the backend/account a usage-limit pause belongs to.
@@ -326,6 +331,9 @@ export async function runIssue(opts) {
           sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
           maxSessionLimitPauses = DEFAULT_MAX_SESSION_LIMIT_PAUSES,
           sessionLimitDefaultWaitMs = DEFAULT_SESSION_LIMIT_WAIT_MS,
+          // CI still pending at the merge gate: engine-side wait budget in minutes (forge.yaml
+          // `engine.ci_pending_max_minutes`). Invalid values fall back to the default.
+          ciPendingMaxMinutes: ciPendingMaxMinutesOpt,
           retry = false,
           waitLease = false,
           hostname = osHostname(),
@@ -338,6 +346,8 @@ export async function runIssue(opts) {
   // forge#2452: extracted into makeProgressEmitter() — see its docstring for
   // the forge#2240 rationale this wrapper implements.
   const emitProgress = makeProgressEmitter(onProgress);
+  const ciPendingMaxMinutes = Number.isFinite(ciPendingMaxMinutesOpt) && ciPendingMaxMinutesOpt > 0
+    ? ciPendingMaxMinutesOpt : DEFAULT_CI_PENDING_MAX_MINUTES;
 
   // forge#3833: one seam for coded outcome records that are not run-log phase events. Appends the
   // event and forwards it to the telemetry hook (#3834 owns the FORGE:TELEMETRY writer), which can
@@ -770,6 +780,10 @@ export async function runIssue(opts) {
         // the entire duration of this loop, including any `sleep()` below —
         // no separate heartbeat mechanism is needed for the wait itself.
         let pauseCount = 0;
+        let ciWaited = false;
+        // CI-pending wait: the review phase may return BLOCKED "checks still pending" (nothing failed). The outer
+        // loop re-dispatches review at most once after the deterministic wait below (no model calls while waiting).
+        for (;;) {
         for (;;) {
           try {
             outcome = await runPhaseWithRetry(phase, state, { io, runner, dir, issue, commandsDir, maxAttempts, backend, model, resolveRepo, agentId, emitTelemetry });
@@ -814,6 +828,14 @@ export async function runIssue(opts) {
             // (a brand-new runPhaseWithRetry() call, not a continuation of
             // the exhausted one) — AC2.
           }
+        }
+        if (!ciWaited && phase.id === "review" && outcome?.status === "blocked" && outcome.wait === "ci-pending") {
+          ciWaited = true;
+          const w = await waitForCiGreen(outcome);
+          if (w.redispatch) continue;
+          if (w.outcome) outcome = w.outcome;
+        }
+        break;
         }
       } catch (e) {
         // forge#2261: NO_API_KEY/NO_SDK/CLI_BACKEND_FAILED are fail-fast
@@ -994,6 +1016,53 @@ export async function runIssue(opts) {
     if (await foreignLiveLease() !== undefined) return false;
     await projector.writeState(issue, { ...s, lease: null });
     return true;
+  }
+
+  // CI still pending at the merge gate. Polls `io.waitCiGreen` (scripts/wait-ci-green.sh, no model) with backoff
+  // inside `ciPendingMaxMinutes`; the in-flight `renewTimer` keeps the lease alive. Resolves to
+  // `{ redispatch: true }` (green, red or unreadable: review runs once more and merges or reproduces the ci-gate
+  // block), `{ outcome }` (budget exhausted: needs-human `review.ci_pending_timeout`), or `{}` (no seam/PR/repo:
+  // the original outcome stands). The start time is a run-log event so a crash resumes the remaining budget.
+  async function waitForCiGreen(outcome) {
+    const pr = outcome.outputs?.pr ?? state.pr;
+    const repoName = await resolveRepo();
+    if (typeof io.waitCiGreen !== "function" || pr == null || !repoName) return {};
+    const budgetMs = ciPendingMaxMinutes * 60000;
+    const open = readLog(dir, issue).filter((ev) => ev.event === "CI_PENDING_WAIT" && ev.pr === pr).pop();
+    const startedAt = open && open.state === "start" && Number.isFinite(open.startedAt) ? open.startedAt : now();
+    if (!(open && open.state === "start")) appendEvent(dir, issue, { event: "CI_PENDING_WAIT", state: "start", pr, startedAt });
+    let slept = 0;
+    let backoffMin = CI_BACKOFF_START_MIN;
+    const spentMs = () => Math.max(now() - startedAt, slept);
+    const report = async (result) => {
+      const minutes = Math.round(spentMs() / 600) / 100;
+      appendEvent(dir, issue, { event: "CI_PENDING_WAIT", state: "end", pr, startedAt, minutes_waited: minutes, result });
+      try { await emitTelemetry?.({ event: "CI_PENDING_WAIT", phase: "review", issue, pr, minutes_waited: minutes, result }); } catch { /* telemetry never fails a run */ }
+      return minutes;
+    };
+    for (;;) {
+      const remainingMs = budgetMs - spentMs();
+      if (remainingMs <= 0) break;
+      const timeoutSec = Math.max(1, Math.min(CI_POLL_TIMEOUT_SEC, Math.floor(remainingMs / 1000)));
+      let rc = 2;
+      try { rc = (await io.waitCiGreen(pr, repoName, timeoutSec))?.rc ?? 2; } catch { rc = 2; }
+      if (rc !== 3) {
+        // 0 green, 1 red, 2 error or head moved: one review dispatch resolves each (merge, ci-gate handoff, re-review).
+        await report(rc === 0 ? "green" : rc === 1 ? "red" : "error");
+        return { redispatch: true };
+      }
+      slept += timeoutSec * 1000;
+      const waitMs = Math.min(backoffMin * 60000, Math.max(0, budgetMs - spentMs()));
+      // ci_pending_wait: the progress observer sees each wait cycle (distinct from a failure).
+      emitProgress({ event: "phase_paused", phase: "review", reason: "ci-pending",
+        detail: `CI still pending on PR #${pr} — waited ${Math.round(spentMs() / 60000)} of ${ciPendingMaxMinutes} min` });
+      if (waitMs > 0) { await sleep(waitMs); slept += waitMs; }
+      backoffMin = Math.min(backoffMin * 2, CI_BACKOFF_MAX_MIN);
+    }
+    const minutes = await report("timeout");
+    return { outcome: { status: "blocked", reason: "needs-human", handoff: false, outputs: outcome.outputs,
+      detail: `checks still pending after ${minutes} min (engine.ci_pending_max_minutes=${ciPendingMaxMinutes}); re-run with --retry once CI finishes`,
+      code: OUTCOME_CODES.REVIEW_CI_PENDING_TIMEOUT, usage: outcome.usage ?? null, last_attempt_usage: outcome.last_attempt_usage ?? null } };
   }
 
   async function terminate(s, reason, detail, code) {
@@ -1190,7 +1259,7 @@ async function runPhaseWithRetry(phase, state, ctx) {
       // forge#3521: keep outcome.outputs (e.g. the PR number) for persistence and
       // forward `handoff` so only an explicit opt-in escalation is honoured; a
       // no-signal failure carries no handoff and stops at needs-human.
-      return { status: "blocked", detail: outcome.detail, outputs: outcome.outputs, handoff: outcome.handoff, code: lastCode, usage: cumulativeUsage, last_attempt_usage: lastUsage };
+      return { status: "blocked", detail: outcome.detail, outputs: outcome.outputs, handoff: outcome.handoff, ...(outcome.wait ? { wait: outcome.wait } : {}), code: lastCode, usage: cumulativeUsage, last_attempt_usage: lastUsage };
     }
   }
   // Exhausted transient retries → escalate (spec §7).
