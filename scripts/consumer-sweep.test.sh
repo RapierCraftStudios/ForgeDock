@@ -50,11 +50,15 @@ cat > "$T/r/scripts/run.sh" <<'P'
 #!/bin/sh
 exec tool --output-dir "$OUT_DIRECTORY" --retry_budget
 read_cfg() { echo retry_budget; }
+parse() { case "$1" in
+  --output-dir) shift ;;
+esac; }
 P
 echo 'compute_total vendored copy' > "$T/r/vendor/lib.txt"
 echo 'x = TIMEOUT_SECONDS' > "$T/r/svc/user_c.py"
+printf 'import os\nOUT = os.environ.get("OUT_DIRECTORY")\n' > "$T/r/svc/cfg.py"
 mkdir -p "$T/r/db"
-printf -- '-- see "obsolete_table_ref"\nSELECT 1;\n' > "$T/r/db/schema.sql"
+printf -- '-- see "obsolete_table_ref": dropped\nSELECT 1;\n' > "$T/r/db/schema.sql"
 echo 'report reads obsolete_table_ref nightly' > "$T/r/db/report.txt"
 echo 'docs: pass --output-dir and set OUT_DIRECTORY' > "$T/r/docs.txt"
 g add -A; g commit -m base
@@ -78,15 +82,14 @@ g add -A; g commit -m retype
 run --range base..feat
 has "re-typed function swept by name" "compute_total	function	svc/user_a.py:1"
 
-# (c) changed config key + changed constant
+# (c) renamed config key + renamed constant
 reset
 printf 'retry_budget: 3\npinned_hash: "9f8e7d6c5b4a"\n' | sed 's/retry_budget/retry_limit/' > "$T/r/ci/settings.yaml"
-sed -i.bak 's/TIMEOUT_SECONDS = 30/TIMEOUT_SECONDS = 60/' "$T/r/svc/core.py"; rm -f "$T/r/svc/core.py.bak"
+sed -i.bak 's/TIMEOUT_SECONDS = 30/TIMEOUT_LIMIT = 30/' "$T/r/svc/core.py"; rm -f "$T/r/svc/core.py.bak"
 git -C "$T/r" add -A; g commit -m key
 run --range base..feat
 has "changed config key swept (sh consumer)" "retry_budget	key	scripts/run.sh:"
-has "changed constant swept" "TIMEOUT_SECONDS	"
-has "changed constant consumer" "svc/user_c.py:1"
+has "renamed constant swept" "TIMEOUT_SECONDS	const	svc/user_c.py:1"
 
 # (d) changed literal hash is found in a different workflow
 reset
@@ -105,7 +108,8 @@ has "removed '-- ' line identifier swept" "obsolete_table_ref	key	db/report.txt:
 
 # (e) CLI flag and env var on the removed side
 reset
-sed -i.bak 's/--output-dir "\$OUT_DIRECTORY"/--out "$OUT_DIR"/' "$T/r/scripts/run.sh"; rm -f "$T/r/scripts/run.sh.bak"
+sed -i.bak -e 's/--output-dir "\$OUT_DIRECTORY"/--out "$OUT_DIR"/' -e 's/^  --output-dir)/  --out)/' "$T/r/scripts/run.sh"; rm -f "$T/r/scripts/run.sh.bak"
+sed -i.bak 's/OUT_DIRECTORY/OUT_DIR/' "$T/r/svc/cfg.py"; rm -f "$T/r/svc/cfg.py.bak"
 g add -A; g commit -m flag
 run --range base..feat
 has "flag swept without dashes" "output-dir	flag	docs.txt:1"
@@ -204,6 +208,133 @@ run --ident compute_total --consumers "$T/c1"
 rc 2 "--consumers needs --range"
 run
 rc 2 "no mode is exit 2"
+
+# (n) survival: an edit that keeps its identifiers flags nothing; prose words and version bumps flag nothing
+reset
+printf 'cfg = get_setting("alpha_key")\n' > "$T/r/svc/surv.py"
+printf 'The tool MUST validate input.\n- `legacy_option` toggles the old path.\n' > "$T/r/docs-note.md"
+printf '{\n  "name": "pkg",\n  "version": "1.2.3"\n}\n' > "$T/r/package.json"
+printf 'MUST be set. alpha_key lives here. legacy_option is documented. 1.2.3 is pinned.\n' > "$T/r/svc/consumer_notes.txt"
+g add -A; g commit -m survbase; g checkout -q -b feat5
+printf 'cfg = get_setting("alpha_key", default=None)\n' > "$T/r/svc/surv.py"
+printf 'The tool SHOULD validate input.\n- `legacy_option` toggles the old path.\n' > "$T/r/docs-note.md"
+printf '{\n  "name": "pkg",\n  "version": "1.2.4"\n}\n' > "$T/r/package.json"
+g add -A; g commit -m surv
+run --range feat..feat5
+rc 0 "survival sweep exits 0"
+lacks "kept identifier is not swept" "alpha_key"
+lacks "prose word change is not swept" "MUST"
+lacks "version bump is not swept" "1.2.3"
+lacks "kept backticked token is not swept" "legacy_option"
+g checkout -q -b feat6
+printf 'The tool SHOULD validate input.\n' > "$T/r/docs-note.md"
+g add -A; g commit -m prose2
+run --range feat5..feat6
+has "removed documented prose option is swept" "legacy_option	"
+has "backticked token consumer found" "svc/consumer_notes.txt:1"
+g checkout -q -f base; g branch -q -D feat5 feat6
+
+# (o) a removed function whose name is still defined outside the change set is ambiguous, not flagged
+reset
+printf 'def helper_probe(x):\n    return x\n' > "$T/r/svc/probe_a.py"
+printf 'def helper_probe(y):\n    return y\n' > "$T/r/svc/probe_b.py"
+printf 'helper_probe(1)\n' > "$T/r/svc/probe_use.py"
+g add -A; g commit -m probes; g checkout -q -b feat7
+git -C "$T/r" rm -q svc/probe_a.py; g commit -m dropprobe
+run --range feat..feat7
+has "still-defined name is reported ambiguous" "helper_probe	ambiguous"
+lacks "ambiguous name has no site rows" "svc/probe_use.py"
+g checkout -q -f base; g branch -q -D feat7
+
+# (p) special-character paths can be justified (gate parser splits on the literal ' unaffected: ', not on characters)
+reset
+mkdir -p "$T/r/app/[id]" "$T/r/app/(auth)" "$T/r/docs"
+echo 'compute_total(page)' > "$T/r/app/[id]/page.tsx"
+echo 'compute_total(login)' > "$T/r/app/(auth)/login.tsx"
+echo 'compute_total notes' > "$T/r/docs/my notes.md"
+g add -A; g commit -m specialpaths; g checkout -q -b feat8
+sed -i.bak 's/compute_total/compute_sum/' "$T/r/svc/core.py"; rm -f "$T/r/svc/core.py.bak"; g add -A; g commit -m rename
+printf -- '- svc/user_a.py:1 unaffected: alias\n- web/user_b.ts:1 unaffected: re-export\n- cmd/main.go:2 unaffected: comment\n' > "$T/c4"
+run --range feat..feat8 --consumers "$T/c4"
+rc 1 "special-char paths stay unaddressed until justified"
+has "bracket path reported" "UNADDRESSED: compute_total app/[id]/page.tsx:1"
+has "paren path reported" "UNADDRESSED: compute_total app/(auth)/login.tsx:1"
+has "space path reported" "UNADDRESSED: compute_total docs/my notes.md:1"
+printf -- '%s\n' '- svc/user_a.py:1 unaffected: alias' '- web/user_b.ts:1 unaffected: re-export' '- cmd/main.go:2 unaffected: comment' \
+  '- app/[id]/page.tsx:12 unaffected: route param only' '- `app/(auth)/login.tsx:3` unaffected: login copy' '* docs/my notes.md:2 unaffected: prose' > "$T/c5"
+run --range feat..feat8 --consumers "$T/c5"
+rc 0 "special-char paths are accepted as justified"
+has "gate OK" "OK:"
+printf -- '%s\n' '- app/[id]/page.tsx unresolved: not checked' > "$T/c6"
+run --range feat..feat8 --consumers "$T/c6"
+rc 1 "an unresolved line never justifies a site"
+
+# (q) advisory mode records sites but never fails
+run --range feat..feat8 --mode advisory --consumers "$T/c4"
+rc 0 "advisory mode exits 0 with unaddressed sites"
+has "advisory prints ADVISORY lines" "ADVISORY: compute_total app/[id]/page.tsx:1"
+lacks "advisory never prints UNADDRESSED" "UNADDRESSED"
+run --range feat..feat8 --mode sideways
+rc 2 "unknown --mode is exit 2"
+
+# (r) budget: an exhausted budget stops the run with the advisory BUDGET_EXCEEDED result, never exit 1
+run --range feat..feat8 --budget-seconds 0
+rc 0 "zero budget exits 0 in sweep mode"
+has "zero budget reports BUDGET_EXCEEDED" "BUDGET_EXCEEDED"
+run --range feat..feat8 --budget-seconds 0 --consumers "$T/c6"
+rc 0 "zero budget never fails the gate"
+has "gate prints BUDGET_EXCEEDED" "BUDGET_EXCEEDED:"
+run --range feat..feat8 --budget-seconds abc
+rc 2 "non-numeric budget is exit 2"
+g checkout -q -f base; g branch -q -D feat8
+
+# (s) one grep per run (a PATH shim counts git grep calls) and a 3000-hit identifier completes fast
+reset
+mkdir -p "$T/r/bulk"
+i=1; while [ "$i" -le 30 ]; do
+  j=1; : > "$T/r/bulk/b$i.txt"; while [ "$j" -le 100 ]; do echo "call heavy_symbol_x $j" >> "$T/r/bulk/b$i.txt"; j=$((j+1)); done
+  i=$((i+1))
+done
+printf 'def heavy_symbol_x():\n    pass\ndef other_symbol_y():\n    pass\ndef third_symbol_z():\n    pass\n' > "$T/r/svc/heavy.py"
+echo 'other_symbol_y third_symbol_z' > "$T/r/svc/other_use.txt"
+g add -A; g commit -m bulk; g checkout -q -b feat9
+printf 'def renamed_a():\n    pass\ndef renamed_b():\n    pass\ndef renamed_c():\n    pass\n' > "$T/r/svc/heavy.py"
+g add -A; g commit -m renamebulk
+mkdir "$T/shim"; REALGIT=$(command -v git)
+printf '#!/bin/sh\ncase " $* " in *" grep "*) echo x >> "%s/grepcount" ;; esac\nexec "%s" "$@"\n' "$T" "$REALGIT" > "$T/shim/git"; chmod +x "$T/shim/git"
+: > "$T/grepcount"
+t0=$SECONDS
+OUT=$(PATH="$T/shim:$PATH" bash "$S" --repo "$T/r" --range feat..feat9 2>"$T/err"); RC=$?
+elapsed=$((SECONDS - t0))
+rc 0 "bulk sweep exits 0"
+n=$(wc -l < "$T/grepcount" | tr -d ' ')
+if [ "$n" = 1 ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL: expected exactly 1 git grep, saw $n"; fi
+if [ "$elapsed" -lt 3 ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL: 3000-hit sweep took ${elapsed}s (want < 3s)"; fi
+has "heavy identifier is capped" "heavy_symbol_x	truncated	+2975"
+rows=$(printf '%s\n' "$OUT" | grep -c '^heavy_symbol_x	function	')
+if [ "$rows" = 25 ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL: heavy identifier rows=$rows (want 25)"; fi
+has "sibling identifiers found with the same single grep" "other_symbol_y	function	svc/other_use.txt:1"
+g checkout -q -f base; g branch -q -D feat9
+
+# (t) --eval-history measures flagged sites per merge and prints mean and max (read-only)
+mkdir "$T/h"
+gh_() { git -C "$T/h" -c user.name=t -c user.email=t@example.com -c commit.gpgsign=false "$@" >/dev/null 2>&1; }
+git -C "$T/h" init -q -b main >/dev/null 2>&1 || { git -C "$T/h" init -q; gh_ checkout -b main; }
+printf 'def legacy_entry():\n    pass\n' > "$T/h/lib.py"; echo 'legacy_entry()' > "$T/h/use.py"
+gh_ add -A; gh_ commit -m init
+gh_ checkout -q -b topic1; sed -i.bak 's/legacy_entry/modern_entry/' "$T/h/lib.py"; rm -f "$T/h/lib.py.bak"; gh_ add -A; gh_ commit -m t1
+gh_ checkout -q main; gh_ merge --no-ff -m "Merge topic1" topic1
+gh_ checkout -q -b topic2; echo 'brand_new = 1' > "$T/h/new.py"; gh_ add -A; gh_ commit -m t2
+gh_ checkout -q main; gh_ merge --no-ff -m "Merge topic2" topic2
+before=$(git -C "$T/h" rev-parse HEAD)
+OUT=$(bash "$S" --repo "$T/h" --eval-history 5 2>"$T/err"); RC=$?
+rc 0 "eval-history exits 0"
+has "eval prints the flagged merge" "sites=1"
+has "eval prints mean and max" "mean=0.50 max=1 prs=2"
+has "eval reports the guard verdict" "guard=PASS"
+if [ "$before" = "$(git -C "$T/h" rev-parse HEAD)" ] && [ -z "$(git -C "$T/h" status --short)" ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL: eval-history modified the repo"; fi
+run --eval-history 2 --range base..feat
+rc 2 "eval-history is exclusive with --range"
 
 echo "consumer-sweep.test.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

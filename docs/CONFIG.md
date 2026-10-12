@@ -740,6 +740,10 @@ verification:
     - name: "web"
       container: "acme-web-blue"
       health_url: "http://localhost:3000"
+
+  consumer_sweep:
+    mode: advisory         # advisory (default) | blocking
+    budget_seconds: 60     # wall-clock budget for the sweep
 ```
 
 | Field | Type | Required | Description |
@@ -750,8 +754,10 @@ verification:
 | `services[].name` | string | **Yes (per entry)** | Human-readable service name |
 | `services[].container` | string | No | Docker container name for `docker exec` verification |
 | `services[].health_url` | string | No | Local URL for container-level health checks |
+| `consumer_sweep.mode` | string | No | `advisory` (default): the validate consumer sweep (`scripts/consumer-sweep.sh`, V4.6) records unaddressed referencing sites and never fails. `blocking`: unaddressed sites fail validate with `consumer_unaddressed`, build runs one repair round, and sites still unaddressed are recorded as `CONSUMERS: unresolved` and passed to review as known risk (never `needs-human`). Flip to `blocking` only after `bash scripts/consumer-sweep.sh --eval-history 20` shows a mean of at most 2 flagged sites per merge and none above 10 on your repo |
+| `consumer_sweep.budget_seconds` | integer | No | Wall-clock budget for the sweep (default `60`). When it runs out the sweep stops with `BUDGET_EXCEEDED`, reports the partial result, and never fails, in either mode |
 
-**Commands that use this section**: `quality-gate`, `validate`
+**Commands that use this section**: `quality-gate`, `validate` (health checks and `consumer_sweep`)
 
 ---
 
