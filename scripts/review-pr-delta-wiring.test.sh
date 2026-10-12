@@ -97,7 +97,7 @@ fence_file() { # name pattern -> $TMP/<name>.sh (placeholders filled)
 HELPER="$ROOT/scripts/lib/review-delta-mode.sh"
 [ -f "$HELPER" ] && ok || bad "scripts/lib/review-delta-mode.sh must exist"
 n=$(grep -c '^_dm=$(forge_resolve lib/review-delta-mode.sh)' "$SPEC")
-[ "$n" -ge 6 ] && ok || bad "expected the review-delta helper source line in every consuming fence (3C mode, carry post, Phase 4, 5, 6A, 9), found $n"
+[ "$n" -ge 5 ] && ok || bad "expected the review-delta helper source line in every consuming fence (3C mode, carry post, Phase 4, 5, 6A; Phase 9 sources it inside scripts/review-finalize.sh integrity), found $n"
 distinct=$(grep '^_dm=$(forge_resolve lib/review-delta-mode.sh)' "$SPEC" | sort -u | grep -c . || true)
 [ "$distinct" = 1 ] && ok || bad "review-delta helper source lines differ ($distinct distinct)"
 [ "$(count_blocks review-pr-delta-mode)" = 0 ] && ok || bad "inline review-delta mode copies must not remain in the spec"

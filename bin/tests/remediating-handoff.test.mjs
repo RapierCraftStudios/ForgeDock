@@ -98,7 +98,7 @@ describe("forge#3541 consumers accept workflow:remediating", () => {
   });
 
   it("review-pr base-conflict comments say the pipeline performs the sync", () => {
-    const t = read("commands/review-pr.md");
+    const t = read("scripts/review-finalize.sh"); // forge#3840: the merge-gate comments moved into the script
     const hits = t.match(/the pipeline is performing the base sync/g) || [];
     assert.ok(hits.length >= 2, "both base-conflict comments reworded");
   });

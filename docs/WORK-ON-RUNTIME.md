@@ -51,6 +51,12 @@ Only the router may invoke them, so they always run at router layer + 1 (L2 unde
 L1 solo). When another phase needs one, it returns a handoff (`status: NEXT`, `next: <phase>`) and
 the router invokes it. Concretely: review returns `next: remediate` instead of calling remediation.
 
+The same rule gives the `PHASE_TRAIL_FAILED` re-dispatch a single owner: `work-on:review` Phase R4 alone
+re-runs the missing phases. `/review-pr` (Phase 8, via `scripts/review-finalize.sh merge-gate`) and
+`work-on:remediate` (Phase M6) only report the status with its `MISSING:` lines and never re-dispatch. When
+`/review-pr` finds neither `Task` nor `Agent` ("neither tool available"), the usual cause is this depth limit
+(F1/F5): the review was invoked from inside a fork instead of by the router, so `Agent` was withheld.
+
 **R2 — Non-dispatching forks may nest.** Phases and children that never spawn sub-agents may invoke
 further forks at any depth (F5): build → context/architect/implement/validate → quality-gate,
 review → quality-gate / missing-phase re-dispatch, remediate → close. Forking them keeps each
