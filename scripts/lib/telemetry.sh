@@ -51,6 +51,7 @@ _forge_tel_record() { # event k=v... -> one JSON line on stdout
        run: ($run | str), phase: ($phase | str), event: $ev, eid: $eid} + $p' --args "${args[@]}"
 }
 
+# finding_disposition payload is generic key=value (incl. scope=introduced|pre-existing|unknown); no per-field allowlist applies.
 # Prints "<number> <repo>" of the comment target (issue or PR) for this event, or nothing when none is usable.
 _forge_tel_target() {
   local ev="$1" repo="$2" n

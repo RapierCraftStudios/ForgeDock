@@ -674,7 +674,7 @@ Each NOTE gets one disposition: (1) **fix in this PR**, only comment, documentat
 
 ### 6B.6: In-PR fix gate
 
-A CONFIRMED MEDIUM-or-higher defect in a file this PR changed is cheaper to fix before merge than through a separate `/work-on` cycle: `classify` marks it `INPR_FIX` and posts the `FORGE:INPR_FIX` request after the disposition marker (`INPR_FIX_POSTED=true`), so do NOT file those findings in 6C. Narrow by design: auto-merge reviews with `--issue`, files in the PR diff, one round per PR (any trusted `FORGE:INPR_FIX*` marker ends it). Phase 8 then refuses to merge this head (blocker `in-pr fix required`). If the round fails, `/work-on` waives it for MEDIUM and files the findings (`work-on/review.md` R4); HIGH/CRITICAL are never waived and end at `needs-human`.
+A CONFIRMED MEDIUM-or-higher defect, or a LIKELY MEDIUM defect whose line the PR introduced (`scope=introduced`), in a file this PR changed is cheaper to fix before merge than through a separate `/work-on` cycle: `classify` marks it `INPR_FIX` and posts the `FORGE:INPR_FIX` request after the disposition marker (`INPR_FIX_POSTED=true`), so do NOT file those findings in 6C. `review-finalize.sh extract` computes `scope` (`introduced` | `pre-existing` | `unknown`) per finding from the PR diff (the added-line window; unknown provenance never widens the gate). Narrow by design: auto-merge reviews with `--issue`, files in the PR diff, one round per PR (any trusted `FORGE:INPR_FIX*` marker ends it). Phase 8 then refuses to merge this head (blocker `in-pr fix required`). If the round fails, `/work-on` waives it for MEDIUM and files the findings (`work-on/review.md` R4); HIGH/CRITICAL are never waived and end at `needs-human`.
 
 ### 6C: Create Issues
 
@@ -718,6 +718,7 @@ cat <<'ISSUE_EOF' > "$FINDING_ISSUE_BODY_FILE"
 **Agent**: [name] ([domain])
 **Confidence**: [CONFIRMED/LIKELY/POSSIBLE]
 **Severity**: [CRITICAL/HIGH/MEDIUM/LOW]
+**Scope**: introduced|pre-existing (the worklist item's `scope`; omit the line when it is `unknown`)
 **Review comment**: [permalink to agent comment]
 
 ## Pattern Metadata

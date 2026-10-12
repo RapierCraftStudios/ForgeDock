@@ -85,6 +85,8 @@ describe("GitHub-only report (fresh machine)", () => {
     assert.equal(u.funnel.falsePositive, 1);
     assert.equal(u.issueFlow.net, 2);
     assert.equal(u.issueFlow.findingsPerMerge, null);
+    assert.equal(g.funnel.introduced, 2, "only events carrying scope=introduced are counted");
+    assert.equal(g.issueFlow.introducedPerMerge, (g.issueFlow.closed.merged ?? 0) > 0 ? 2 / g.issueFlow.closed.merged : null);
     assert.ok(!JSON.stringify(report).includes("999999999"), "untrusted record leaked into the report");
   });
   it("matches the run-record field names written by the engine seam", () => {
@@ -137,6 +139,15 @@ describe("local runs, joins, version delta and low-n", () => {
     const legacy = r.groups.find((x) => x.version === "unknown");
     assert.equal(legacy.cost.cacheReadMean, 4000000, "legacy PHASE_COMMIT usage counted when no attempt events exist");
     assert.equal(legacy.flow.codesN, 0, "old logs have no outcome codes");
+  });
+  it("reports introduced findings per merged issue", () => {
+    const ev = (eid, scope) => ({ event: "finding_disposition", eid, repo: "o/r", pr: 1, issue: eid === "d" ? 2 : 1, version: "1.18.0", severity: "MEDIUM", disposition: "INPR_FIX", ...(scope ? { scope } : {}) });
+    const issue = (number) => ({ number, repo: "o/r", isPr: false, labels: ["workflow:merged"], createdAt: "2026-10-06T00:00:00Z", closedAt: "2026-10-07T00:00:00Z" });
+    const r = aggregate({ events: [ev("a", "introduced"), ev("b", "introduced"), ev("c", "pre-existing"), ev("d")], issues: [issue(1), issue(2)] }, { releaseTimes: [] });
+    const g = r.groups.find((x) => x.version === "1.18.0");
+    assert.equal(g.funnel.introduced, 2);
+    assert.equal(g.issueFlow.introducedPerMerge, 1);
+    assert.match(renderMarkdown(r), /introduced findings per merged issue/);
   });
   it("computes the delta against the previous version of the same repo", () => {
     const g = agg().groups.find((x) => x.version === "1.17.0");
