@@ -703,6 +703,13 @@ gate_reset; mg "$GATE" --verdict "CHANGES REQUESTED" --base-conflict true --cali
 rc_is "route: base conflict plus calibration" "$RC" 3; logged "route: calibration reason" issue-bodies.log "calibration threshold: overconfident cell"; logged "route: calibration needs-human" edits.log "needs-human"
 gate_reset; mg "$GATE" --has-purpose-regression true
 rc_is "route: purpose regression with APPROVED" "$RC" 3; logged "route: purpose reason" issue-bodies.log "purpose regression detected by Phase 7A"; logged "route: purpose needs-human" edits.log "needs-human"; not_merged "route: purpose"
+for payload in "it's cal" "\$(touch $FIX/SENTINEL)" "\`touch $FIX/SENTINEL\`" "'; touch $FIX/SENTINEL; '"; do
+    gate_reset; rm -f "$FIX/SENTINEL"; printf '%s' "$payload" > "$FIX/cn.txt"
+    mg "$GATE" --calibration-needs-human true --calibration-note-file "$FIX/cn.txt"
+    rc_is "calibration note file: gate blocks" "$RC" 3
+    if [ -e "$FIX/SENTINEL" ]; then bad "calibration note file: payload executed ($payload)"; else ok; fi
+    logged "calibration note file: rendered as data" issue-bodies.log "calibration threshold: $payload"
+done
 gate_reset; mg "$GATE" --calibration-needs-human true --calibration-note "note"
 rc_is "route: calibration alone blocks an APPROVED verdict" "$RC" 3; not_merged "route: calibration alone"
 gate_reset; mg "$GATE" --trust-needs-human true
@@ -788,6 +795,30 @@ has "7A: blocked log" "PURPOSE REGRESSION GATE: BLOCKED"; has "7A: escalation" "
 reset; MH=MERGEABLE; MHS=CLEAN; vd --is-milestone true --has-purpose-regression false; has "7A: passed log" "PURPOSE REGRESSION GATE: PASSED"
 reset; MH=MERGEABLE; MHS=CLEAN; vd --has-purpose-regression true
 case "$OUT" in *"PURPOSE REGRESSION GATE"*) bad "7A: non-milestone PRs print no gate log" ;; *) ok ;; esac
+# free text arrives through *-file flags and is data, never code (injection payload classes: apostrophe, command substitution, backtick, quote breakout, newline)
+SENT="$FIX/SENTINEL"
+for payload in "it's a F-1" "\$(touch $SENT)" "\`touch $SENT\`" "'; touch $SENT; '" "\"; touch $SENT; \"" "F-1
+touch $SENT"; do
+    reset; rm -f "$SENT"; MH=MERGEABLE; MHS=CLEAN
+    printf '%s' "$payload" > "$FIX/pf.txt"; printf '%s' "$payload" > "$FIX/ag.txt"
+    vd --result clean --has-purpose-regression true --purpose-findings-file "$FIX/pf.txt" --agents-file "$FIX/ag.txt"
+    rc_is "payload file: verdict runs" "$RC" 0
+    if [ -e "$SENT" ]; then bad "payload file: payload executed ($payload)"; else ok; fi
+    logged "payload file: purpose text kept as data" reviews.log "See: $(printf '%s' "$payload" | tr '\n' ' ')"
+done
+reset; MH=MERGEABLE; MHS=CLEAN; printf 'a\001b\033c\nd' > "$FIX/pf.txt"
+vd --result clean --has-purpose-regression true --purpose-findings-file "$FIX/pf.txt"
+logged "payload file: control characters stripped, newline folded" reviews.log "See: abc d"
+reset; MH=MERGEABLE; MHS=CLEAN; head -c 5000 /dev/zero | tr '\0' 'x' > "$FIX/pf.txt"
+vd --result clean --has-purpose-regression true --purpose-findings-file "$FIX/pf.txt"
+if grep -qF "$(head -c 2001 /dev/zero | tr '\0' 'x')" "$FIX/reviews.log" 2>/dev/null; then bad "payload file: text must be capped at 2000 bytes"; else ok; fi
+logged "payload file: capped text still rendered" reviews.log "See: $(head -c 2000 /dev/zero | tr '\0' 'x')"
+reset; MH=MERGEABLE; MHS=CLEAN
+vd --result clean --has-purpose-regression true --purpose-findings-file "$FIX/does-not-exist.txt"
+rc_is "payload file: missing file tolerated" "$RC" 0
+reset; MH=MERGEABLE; MHS=CLEAN; printf 'from-file' > "$FIX/pf.txt"
+vd --result clean --has-purpose-regression true --purpose-findings "from-flag" --purpose-findings-file "$FIX/pf.txt"
+logged "payload file: file wins over inline flag" reviews.log "See: from-file"; not_logged "payload file: inline flag overridden" reviews.log "from-flag"
 reset; OUT=$(cd "$REPO_DIR" && FORGEDOCK_HOME="$GOOD" bash "$ROOT/scripts/review-finalize.sh" verdict --pr 7 --repo o/r --context "$CTXF" --merge-health 2>/dev/null); RC=$?
 rc_is "verdict: flag without a value" "$RC" 2
 reset; vd --result bogus; rc_is "verdict: invalid result" "$RC" 2
@@ -826,6 +857,7 @@ has "calibrate: untrusted investigator ignored" "could not resolve task type/con
 reset; mkctx 1 FULL "" 42; inv_comments MEMBER User "$(printf 'see <!-- FORGE:INVESTIGATOR -->\n**Task Type**: Refactor\n**Confidence**: HIGH\n')"; run "$GOOD" calibrate
 has "calibrate: unanchored marker ignored" "could not resolve task type/confidence"
 reset; mkctx 1 FULL "" 42; inv_comments MEMBER User "$(printf '<!-- FORGE:INVESTIGATOR -->\n**Task Type**: Re\x27fa$(id)ctor\n**Confidence**: HIGH\n')"; run "$GOOD" calibrate
+if [ -s "$(dirname "$CTXF")/review-finalize-7/calibration-note.txt" ] || find "$FIX" "$(dirname "$CTXF")" -name calibration-note.txt 2>/dev/null | grep -q .; then ok; else bad "calibrate: must write calibration-note.txt under the out dir"; fi
 note=$(printf '%s\n' "$OUT" | sed -n 's/^CALIBRATION_NOTE=//p'); case "$note" in *"'"*|*'$'*|*'`'*) bad "calibrate: note carries a shell metacharacter: $note" ;; *) ok ;; esac
 setcal "$(CAL_ROW Refactor HIGH true overconfidence)"
 reset; mkctx 1 FULL "" 42; run "$GOOD" calibrate; has "calibrate: no investigator comment fails safe" "CALIBRATION_NEEDS_HUMAN=false"; has "calibrate: unresolved note" "task type or confidence not resolved"

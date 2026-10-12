@@ -48,12 +48,15 @@
 #                     contract.issue is ignored (no single fixing issue, lineage none) and the disposition record carries out_of_scope= and scope=
 #   Phase 7-9 subcommands: --context FILE is optional; without it pass --review-sha SHA, --review-mode FULL|DELTA|BASE_SYNC_ONLY, --issue N, --base B.
 #   verdict:      --merge-health S --merge-health-state S [--base B] [--head-branch H] [--is-milestone true|false] [--has-purpose-regression true|false]
-#                 [--purpose-findings TEXT] [--result stale|clean|blocking] [--agents TEXT] [--findings-count N] [--blocking-count N]
+#                 [--purpose-findings-file F | --purpose-findings TEXT] [--result stale|clean|blocking] [--agents-file F | --agents TEXT] [--findings-count N] [--blocking-count N]
 #                 [--intensity-tier T] [--table-cell-key K] [--trust-shadow-mode B] [--dry-run]
 #   calibrate:    [--intensity-tier T] [--table-cell-key K] [--trust-shadow-mode B] [--trust-needs-human B] [--dry-run]; the issue is context contract.issue or --issue N
 #   merge-gate:   --verdict "APPROVED|CHANGES REQUESTED" --has-purpose-regression B --calibration-needs-human B --trust-needs-human B
-#                 --base-conflict B --other-blocking B [--calibration-note T] [--table-cell-key K] [--base B] [--issue N]
+#                 --base-conflict B --other-blocking B [--calibration-note-file F | --calibration-note T] [--table-cell-key K] [--base B] [--issue N]
 #                 (every B is true|false; an empty or other value aborts the merge: the guard state must be bound)
+#   Free text (purpose findings, agents, calibration note) derives from PR content: pass it through the *-file flags (a file written with the
+#   file-write tool, read here as data: control characters stripped, length capped, unreadable file = empty). The inline TEXT flags are for
+#   trusted callers only; the file flag wins when both are given. Never place free text in a shell word.
 #   demilestone:  --is-milestone true|false [--merge-state S] (8B passes MERGED; 9A omits it and the state is read from the PR)
 # Env: FORGE_CONFIG (forge.yaml for review.max_filed_findings; default ./forge.yaml).
 # Exit: 0 ok | 3 BLOCKED (REVIEW_RESULT: status: BLOCKED printed; the caller must stop the review, never skip) | 4 merge-gate only:
@@ -76,9 +79,10 @@ PR_NUMBER=""; REPO=""; CONTEXT=""; OUT_DIR=""; IN_FILE=""; OUT_FILE=""; AUTO_MER
 REVIEW_SHA_OPT=""; REVIEW_MODE_OPT=""; BASE_OPT=""; HEAD_BRANCH=""; ISSUE_OPT=""; VERDICT=""; HAS_PURPOSE_REGRESSION=""; CALIBRATION_NEEDS_HUMAN=""; CALIBRATION_NOTE=""; TRUST_NEEDS_HUMAN=""
 BASE_CONFLICT=""; OTHER_BLOCKING=""; INTENSITY_TIER=""; TABLE_CELL_KEY=""; TRUST_SHADOW_MODE=""; MERGE_HEALTH=""; MERGE_HEALTH_STATE=""; RESULT=""
 AGENTS_TEXT=""; FINDINGS_COUNT=""; BLOCKING_COUNT=""; PURPOSE_FINDINGS=""; IS_MILESTONE="false"; MERGE_STATE_IN=""
+CALIBRATION_NOTE_FILE=""; AGENTS_FILE=""; PURPOSE_FINDINGS_FILE=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --pr|--repo|--context|--out-dir|--findings|--out|--auto-merge|--notes-fixed|--notes-dropped|--patterns|--base|--head-branch|--issue|--verdict|--has-purpose-regression|--calibration-needs-human|--calibration-note|--trust-needs-human|--base-conflict|--other-blocking|--intensity-tier|--table-cell-key|--trust-shadow-mode|--merge-health|--merge-health-state|--result|--agents|--findings-count|--blocking-count|--purpose-findings|--is-milestone|--merge-state|--review-sha|--review-mode|--scope-files|--prior-prs)
+        --pr|--repo|--context|--out-dir|--findings|--out|--auto-merge|--notes-fixed|--notes-dropped|--patterns|--base|--head-branch|--issue|--verdict|--has-purpose-regression|--calibration-needs-human|--calibration-note|--calibration-note-file|--agents-file|--purpose-findings-file|--trust-needs-human|--base-conflict|--other-blocking|--intensity-tier|--table-cell-key|--trust-shadow-mode|--merge-health|--merge-health-state|--result|--agents|--findings-count|--blocking-count|--purpose-findings|--is-milestone|--merge-state|--review-sha|--review-mode|--scope-files|--prior-prs)
             [ $# -ge 2 ] || { echo "review-finalize: $1 requires a value" >&2; exit 2; } ;;
     esac
     case "$1" in
@@ -101,6 +105,9 @@ while [ $# -gt 0 ]; do
         --has-purpose-regression) HAS_PURPOSE_REGRESSION="${2:-}"; shift 2 ;;
         --calibration-needs-human) CALIBRATION_NEEDS_HUMAN="${2:-}"; shift 2 ;;
         --calibration-note) CALIBRATION_NOTE="${2:-}"; shift 2 ;;
+        --calibration-note-file) CALIBRATION_NOTE_FILE="${2:-}"; shift 2 ;;
+        --agents-file) AGENTS_FILE="${2:-}"; shift 2 ;;
+        --purpose-findings-file) PURPOSE_FINDINGS_FILE="${2:-}"; shift 2 ;;
         --trust-needs-human) TRUST_NEEDS_HUMAN="${2:-}"; shift 2 ;;
         --base-conflict) BASE_CONFLICT="${2:-}"; shift 2 ;;
         --other-blocking) OTHER_BLOCKING="${2:-}"; shift 2 ;;
@@ -122,6 +129,16 @@ while [ $# -gt 0 ]; do
         *) echo "review-finalize: unknown argument: $1" >&2; exit 2 ;;
     esac
 done
+
+# read_text_file FILE: print FILE as one line of data (#3918). Free text from PR content reaches this script through a file, never a shell word.
+# Control characters are dropped, newlines fold to spaces, output is capped at 2000 bytes; an unreadable or empty path prints nothing.
+read_text_file() {
+    [ -n "${1:-}" ] && [ -f "$1" ] && [ -r "$1" ] || return 0
+    head -c 2000 "$1" 2>/dev/null | tr '\r\n\t' '   ' | tr -d '\000-\037\177'
+}
+[ -z "$PURPOSE_FINDINGS_FILE" ] || PURPOSE_FINDINGS=$(read_text_file "$PURPOSE_FINDINGS_FILE")
+[ -z "$AGENTS_FILE" ] || AGENTS_TEXT=$(read_text_file "$AGENTS_FILE")
+[ -z "$CALIBRATION_NOTE_FILE" ] || CALIBRATION_NOTE=$(read_text_file "$CALIBRATION_NOTE_FILE")
 
 # --- file-verify needs nothing else: it only parses the issue-creation result text on stdin ---
 if [ "$SUB" = "file-verify" ]; then
@@ -1092,9 +1109,10 @@ do_calibrate() {
     fi
     echo "CALIBRATION_NEEDS_HUMAN=${CALIBRATION_NEEDS_HUMAN}"
     echo "CALIBRATION_CELL=${CALIBRATION_CELL}"
-    # The orchestrator substitutes this line into a single-quoted shell assignment (review-pr.md Phase 8): never emit
-    # a quote, backtick, dollar sign, backslash or newline (#3918 class).
+    # Defense in depth: strip quote, backtick, dollar sign, backslash and newline from the echoed line (#3918 class). Phase 8 reads the
+    # note from the file below, not from this line, so it never passes through a shell word.
     CALIBRATION_NOTE=$(printf '%s' "$CALIBRATION_NOTE" | tr -d "'\`\$\\\\" | tr '\r\n' '  ')
+    printf '%s\n' "$CALIBRATION_NOTE" > "$OUT_DIR/calibration-note.txt" 2>/dev/null || true
     echo "CALIBRATION_NOTE=${CALIBRATION_NOTE}"
     exit 0
 }
