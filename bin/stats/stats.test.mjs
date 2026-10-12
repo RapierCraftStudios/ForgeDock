@@ -216,6 +216,32 @@ describe("cache", () => {
     assert.ok(!d.calls[0].includes("since="));
     assert.equal(toModel("o/r", third).issues.length, 5);
   });
+  it("saves a partial checkpoint on a mid-crawl failure and the next run resumes from it", () => {
+    const env = { ...ENV, FORGE_STATS_CACHE_DIR: join(td, "cache-partial") };
+    const ok = fakeGh();
+    const full = fetchGithubRecords({ repo: "o/r", gh: ok.gh, env: { ...ENV }, useCache: false });
+    const withComments = full.items.filter((i) => ok.calls.some((c) => c.includes(`/issues/${i.number}/comments`)));
+    assert.ok(withComments.length >= 2, "fixture needs at least two items with comments");
+    let commentCalls = 0;
+    // The real API honours sort=updated&direction=asc, which the watermark resume relies on; the fixture is unsorted.
+    const asc = (gh) => (args) => {
+      const out = gh(args);
+      return args.some((a) => /\/issues\?/.test(a)) ? JSON.stringify(JSON.parse(out).sort((x, y) => x.updated_at.localeCompare(y.updated_at))) : out;
+    };
+    const flaky = asc((args) => {
+      if (args[args.length - 1].endsWith("/comments") && ++commentCalls === 2) throw new Error("rate limited");
+      return ok.gh(args);
+    });
+    assert.throws(() => fetchGithubRecords({ repo: "o/r", gh: flaky, env }), /rate limited/);
+    const saved = JSON.parse(readFileSync(join(cacheDir("o/r", env), "cache.json"), "utf8"));
+    assert.ok(saved.watermark, "partial watermark persisted");
+    assert.ok(Object.keys(saved.items).length > 0 && Object.keys(saved.items).length < full.items.length);
+    const b = fakeGh();
+    const resumed = fetchGithubRecords({ repo: "o/r", gh: asc(b.gh), env });
+    assert.equal(resumed.fromCache, true);
+    assert.match(b.calls[0], /since=/);
+    assert.deepEqual(resumed.records.map((r) => r.eid).sort(), full.records.map((r) => r.eid).sort());
+  });
   it("rejects an unsafe repo before any gh call", () => {
     const { gh, calls } = fakeGh();
     assert.throws(() => fetchGithubRecords({ repo: "o/r; rm -rf /", gh }), /invalid repo/);
