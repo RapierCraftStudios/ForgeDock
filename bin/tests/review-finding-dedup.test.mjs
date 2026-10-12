@@ -10,16 +10,20 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-const spec = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../..", "commands/review-pr.md"), "utf8");
+const root = join(dirname(fileURLToPath(import.meta.url)), "../..");
+const spec = readFileSync(join(root, "commands/review-pr.md"), "utf8");
+// forge#3841: the 6C dedup passes (title dedup, line-range check) run in `review-finalize.sh file-prepare`; the spec keeps the filing call.
+const finalize = readFileSync(join(root, "scripts/review-finalize.sh"), "utf8");
 
 test("title dedup excludes the PR's own issue", () => {
-  assert.match(spec, /bash "\$DEDUP_SCRIPT" "\$FINDING_TITLE_DEDUP" "\$GH_FLAG" \$\{MERGE_ISSUE:\+--exclude "\$MERGE_ISSUE"\}/);
+  assert.match(finalize, /bash "\$DEDUP_SCRIPT" "\$ISSUE_TITLE" "-R \$REPO" \$\{MERGE_ISSUE:\+--exclude "\$MERGE_ISSUE"\}/);
 });
 
 test("line-range dedup skips the PR's own issue", () => {
-  assert.match(spec, /select\(\.number != \$\{MERGE_ISSUE:-0\}\) \| select\(\.body \| test\(\\"\$\{FINDING_FILE\}\\"\)\)/);
+  assert.match(finalize, /SELF="\$\{MERGE_ISSUE:-0\}"/);
+  assert.match(finalize, /select\(\.number != \$self\) \| select\(\(\.body \/\/ ""\) \| contains\(\$file\)\)/);
 });
 
 test("/issue create forwards the exclusion", () => {
-  assert.match(spec, /Skill\(skill="\{FORGE_SKILL_PREFIX\}issue", args="[^\n]*\$\{MERGE_ISSUE:\+--exclude \\"\$MERGE_ISSUE\\"\}"\)\)/);
+  assert.match(spec, /Skill\(skill="\{FORGE_SKILL_PREFIX\}issue", args="[^\n]*--exclude \\"\{MERGE_ISSUE\}\\"/);
 });

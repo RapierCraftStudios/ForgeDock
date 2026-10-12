@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# cap-findings.sh — PR-level cap on filed review findings (review-pr §6B.5, review-pr-staging §7B.5).
+# cap-findings.sh — PR-level cap on filed review findings (review-pr §6B.5, review-pr-staging §7B).
 #                   classify-finding.sh decides one finding at a time; this is the aggregation
 #                   step after it: at most N ISSUE dispositions per review run are kept, the rest
 #                   become `NOTE capped` (listed in FORGE:NOTE_DISPOSITION, never dropped).

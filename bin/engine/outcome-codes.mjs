@@ -19,10 +19,12 @@ export const OUTCOME_CODES = Object.freeze({
   REVIEW_CHANGES_REQUESTED: "review.changes_requested",
   REVIEW_ESCALATED: "review.escalated",
   REVIEW_REREVIEW_SKIPPED: "review.rereview_skipped",
+  REVIEW_BLOCKING_ISSUE: "review.blocking_issue",
+  REVIEW_PR_OPEN: "review.pr_open",
   BUILD_ACCEPTANCE_FAILED: "build.acceptance_failed",
   BUILD_ACCEPTANCE_MALFORMED: "build.acceptance_malformed",
-  BUILD_SIZE_OVER_GATE: "build.size_over_gate",
-  BUILD_COHESIVE: "build.cohesive",
+  BUILD_SIZE_OVER_GATE: "build.size_over_gate", // retired (forge#3862): never emitted; kept so historic runs parse
+  BUILD_COHESIVE: "build.cohesive", // retired (forge#3862): never emitted
   REMEDIATE_NO_MARKER: "remediate.no_marker",
   REMEDIATE_DEFERRED_LIVE_RUN: "remediate.deferred_live_run",
   REMEDIATE_RE_ESCALATED: "remediate.re_escalated",
@@ -32,7 +34,10 @@ export const OUTCOME_CODES = Object.freeze({
   BASE_CONFLICT: "base.conflict",
   RATE_LIMITED: "rate_limited",
   ENGINE_ERROR: "engine.error",
+  INFRA_DISK_QUOTA: "infra.disk_quota",
   LEASE_HELD: "lease.held",
+  DEPENDENCY_OPEN: "dependency.open",
+  DEPENDENCY_UNREADABLE: "dependency.unreadable",
   INVALID: "invalid",
   DECOMPOSED: "decomposed",
   // Non-failure terminals, so a RUN_TERMINAL for a healthy run is not counted as a gap.
@@ -55,9 +60,24 @@ export function normalizeCode(code) {
   return isOutcomeCode(code) ? code : UNCLASSIFIED;
 }
 
+const DISK_QUOTA_RE = /EDQUOT|ENOSPC|(?:errno|system error) -?(?:28|122)\b|No space left|Disk quota exceeded/i;
+
+/** True when runner/stderr text reports a full disk or exhausted quota (forge#3572). Match runner error text only, never review prose. */
+export function isDiskQuotaText(text) {
+  return typeof text === "string" && DISK_QUOTA_RE.test(text);
+}
+
+/** True when a thrown runner error is a disk-full/quota failure (message, errno or stderr). */
+export function isDiskQuotaError(err) {
+  if (!err || typeof err !== "object") return false;
+  if (err.code === "ENOSPC" || err.code === "EDQUOT" || err.errno === -28 || err.errno === -122) return true;
+  return isDiskQuotaText(err.message) || isDiskQuotaText(err.stderr);
+}
+
 /** Code for a thrown runner error, from `err.code` / session-limit evidence only. */
 export function codeForRunnerError(err) {
   if (!err || typeof err !== "object") return UNCLASSIFIED;
+  if (isDiskQuotaError(err)) return OUTCOME_CODES.INFRA_DISK_QUOTA;
   if (err.usageLimit === true || (typeof err.resetAtEpochMs === "number" && Number.isFinite(err.resetAtEpochMs)))
     return OUTCOME_CODES.RATE_LIMITED;
   switch (err.code) {
@@ -87,6 +107,8 @@ export function codeForTerminalReason(reason) {
     case "decomposed": return OUTCOME_CODES.DECOMPOSED;
     case "engine-error": return OUTCOME_CODES.ENGINE_ERROR;
     case "deferred": return OUTCOME_CODES.LEASE_HELD;
+    case "dependency-open": return OUTCOME_CODES.DEPENDENCY_OPEN;
+    case "dependency-unreadable": return OUTCOME_CODES.DEPENDENCY_UNREADABLE;
     default: return UNCLASSIFIED;
   }
 }

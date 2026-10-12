@@ -420,6 +420,11 @@ export async function runFromCli(argv, deps = {}) {
     console.log(res.detail ?? "run is not retryable");
     return res;
   }
+  // forge#3932: refused before any state write (open or unreadable **Depends on**); nothing ran.
+  if (res.terminalReason === "dependency-open" || res.terminalReason === "dependency-unreadable") {
+    console.log(res.detail ?? "run refused: dependency check");
+    return res;
+  }
   // forge#2175: a non-success termination previously printed nothing beyond
   // the bare reason above — the actual failing phase/attempt/reason was only
   // recoverable by manually reading ~/.forge/runs/{issue}.jsonl and then the

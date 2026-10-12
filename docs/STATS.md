@@ -47,7 +47,8 @@ Each group shows a delta against the previous version of the same repo and is fl
 They match `scripts/cost-report.sh`, so the two reports agree on the same logs: only finished runs count; hydrated runs
 and runs with no usage events are excluded; tokens are cache-read tokens; `PHASE_ATTEMPT_USAGE` supersedes the cumulative
 `PHASE_COMMIT` usage of the same phase. On GitHub a run is the set of `phase_attempt` records sharing a `run` id and it is
-finished once a `run_terminal` record exists. Wall time covers one engine process; a resumed run is a separate run.
+finished once a `run_terminal` record exists. On GitHub stats count one run per issue: the latest by start timestamp wins and earlier attempts (for example before a
+`--retry`) are discarded, as in `scripts/cost-report.sh`. Wall time covers the winning engine process only.
 
 ## Versions and n/a
 

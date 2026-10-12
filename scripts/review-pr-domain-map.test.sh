@@ -27,12 +27,14 @@ awk -v dir="$WORK" '
   /^# END review-pr-agent-domain/ {on=0; close(out)}
 ' "$SPEC"
 copies=$(ls "$WORK"/helper.* 2>/dev/null | wc -l | tr -d ' ')
-if [ "$copies" -ge 3 ]; then ok; else bad "expected >=3 inline agent_domain copies (canonicalize, dispatch, phase 4), found $copies"; fi
-# The roster script carries its own copy of the helper; it must match the inline copies (forge#3599).
-ROSTER="$ROOT/scripts/review-roster.sh"
+if [ "$copies" -ge 2 ]; then ok; else bad "expected >=2 inline agent_domain copies (the 3C pre-dispatch fence and Phase 4), found $copies"; fi
+# The roster and prepare scripts carry their own copy of the helper; both must match the inline copies (forge#3599, forge#3841).
+ROSTER="$ROOT/scripts/review-roster.sh"; PREPARE="$ROOT/scripts/review-prepare.sh"
 want_fn=$(grep '^agent_domain()' "$WORK/helper.1")
 got_fn=$(grep '^agent_domain()' "$ROSTER")
 if [ -n "$want_fn" ] && [ "$want_fn" = "$got_fn" ]; then ok; else bad "scripts/review-roster.sh agent_domain differs from the inline copies"; fi
+got_fn=$(grep '^agent_domain()' "$PREPARE")
+if [ -n "$want_fn" ] && [ "$want_fn" = "$got_fn" ]; then ok; else bad "scripts/review-prepare.sh agent_domain differs from the inline copies"; fi
 for f in "$WORK"/helper.*; do
   [ -f "$f" ] || continue
   if cmp -s "$f" "$WORK/helper.1"; then ok; else bad "$(basename "$f") differs from helper.1"; fi
@@ -67,9 +69,11 @@ add_agent "Infrastructure"; add_agent "Scraping"; add_agent "Auth"; add_agent "A
 want=$(printf '%s' "Security INFRA SCRAPING auth")
 if [ "$SELECTED_AGENTS" = "$want" ]; then ok; else bad "add_agent roster '$SELECTED_AGENTS', want '$want'"; fi
 
-CANON=$(awk '/^# END review-pr-agent-domain/{seen++} seen && /^CANON_ROSTER=/{on=1} on{print} on && /^SELECTED_AGENTS=/{exit}' "$SPEC" | head -20)
-SELECTED_AGENTS="Security AUTH INFRA Infrastructure SCRAPING Scraping Frontend API api"
+# The canonicalization (one entry per persona) is scripts/review-prepare.sh canonical_roster, which review-roster.sh output flows through.
+CANON=$(grep '^canonical_roster()' "$PREPARE")
+if [ -n "$CANON" ]; then ok; else bad "canonical_roster not found in scripts/review-prepare.sh"; fi
 eval "$CANON"
+SELECTED_AGENTS=$(canonical_roster "Security AUTH INFRA Infrastructure SCRAPING Scraping Frontend API api")
 want="security auth infra scraper frontend api"
 if [ "$SELECTED_AGENTS" = "$want" ]; then ok; else bad "canonical roster '$SELECTED_AGENTS', want '$want'"; fi
 cnt=$(printf '%s' "$SELECTED_AGENTS" | tr ' ' '\n' | grep -c '.')
@@ -79,7 +83,7 @@ if [ "$cnt" -eq 6 ]; then ok; else bad "roster count $cnt, want 6"; fi
 for pf in "$PERSONAS"/*.md; do
   name=$(basename "$pf" .md)
   case "$name" in protocols|spec-cli) continue ;; esac
-  if grep -qE "^\| .*\| \`$name\` \| \`$name\.md\` \|" "$SPEC"; then ok; else bad "spec table has no row for persona $name"; fi
+  if grep -qE "(→|->)\`$name\`" "$SPEC"; then ok; else bad "spec roster label mapping has no entry for persona $name"; fi
   if grep -qE "^\| .*\| \`$name\` \| \`review-pr-agents/$name\.md\` \|" "$CATALOG"; then ok; else bad "catalog has no marker-domain row for persona $name"; fi
   got=$(agent_domain "$name")
   if [ "$got" = "$name" ]; then ok; else bad "persona $name maps to $got"; fi
@@ -88,15 +92,16 @@ done
 # Test 6: the protocol defines the marker domain through the mapping
 if grep -qF 'marker domain' "$PERSONAS/protocols.md"; then ok; else bad "protocols.md does not define the marker domain"; fi
 
-# Test 7: the roster regexes in delta_roster must equal the DOMAIN_FILES_* regexes, and every domain needs an empty-slice fallback
-for pair in AUTH:auth BILLING:billing CONCURRENCY:concurrency DATABASE:database INFRA:infra SCRAPING:scraper FRONTEND:frontend API:api; do
+# Test 7: the roster regexes in delta_roster must equal the per-domain file regexes of the diff slices (both in scripts/review-prepare.sh since #3841),
+# and the slice function must fall back to the full file list and full diff for a domain with no hit
+for pair in auth:auth billing:billing concurrency:concurrency database:database infra:infra scraper:scraper frontend:frontend api:api; do
   var=${pair%%:*}; dom=${pair#*:}
-  a=$(grep -E "^DOMAIN_FILES_$var=" "$SPEC" | head -n 1 | sed -n 's/.*grep -iE "\([^"]*\)".*/\1/p')
-  b=$(grep -F "&& out=\"\$out $dom\"" "$SPEC" | grep 'grep -qiE' | head -n 1 | sed -n 's/.*grep -qiE "\([^"]*\)".*/\1/p')
-  if [ -z "$a" ] || [ -z "$b" ]; then bad "could not extract $var pattern (DOMAIN_FILES='$a' delta_roster='$b')"
-  elif [ "$a" = "$b" ]; then ok; else bad "$var regex drifted: DOMAIN_FILES='$a' delta_roster='$b'"; fi
-  if grep -qF "[ -z \"\$DOMAIN_FILES_$var\" ] && DOMAIN_FILES_$var=\"\$FILES\"" "$SPEC"; then ok; else bad "no empty-slice fallback for DOMAIN_FILES_$var"; fi
+  a=$(grep -E "^    slice $var " "$PREPARE" | head -n 1 | sed -n 's/.* "\([^"]*\)"$/\1/p')
+  b=$(grep -F "&& out=\"\$out $dom\"" "$PREPARE" | grep 'grep -qiE' | head -n 1 | sed -n 's/.*grep -qiE "\([^"]*\)".*/\1/p')
+  if [ -z "$a" ] || [ -z "$b" ]; then bad "could not extract $var pattern (slice='$a' delta_roster='$b')"
+  elif [ "$a" = "$b" ]; then ok; else bad "$var regex drifted: slice='$a' delta_roster='$b'"; fi
 done
+if grep -qF '[ -n "$paths" ] || paths="$SLICE_FILES_SRC"' "$PREPARE" && grep -qF '[ -n "$body" ] || body="$FULL_DIFF"' "$PREPARE"; then ok; else bad "prepare slice() lacks the empty-slice fallback"; fi
 
 echo "review-pr-domain-map: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

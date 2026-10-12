@@ -5,7 +5,7 @@
  * Reads labels and ONLY trusted `<!-- FORGE:TELEMETRY v1 -->` comments (same predicate as
  * scripts/trusted-comments.sh: an author_association in FORGE_TRAIL_TRUSTED_ASSOCIATIONS, a Bot, or a login in
  * FORGE_TRAIL_TRUSTED_LOGINS). Every `gh` call is argv-based (no shell). The `gh` runner is injectable for tests.
- * Fetching is incremental: only items updated after the cached watermark are re-read.
+ * Fetching is incremental: only items updated after the cached watermark (minus a small overlap window) are re-read.
  */
 import { execFileSync } from "node:child_process";
 import { emptyCache, loadCache, saveCache } from "./cache.mjs";
@@ -58,8 +58,10 @@ export function parseTelemetryComments(comments, env = process.env) {
 const num = (x) => { const v = Number(x); return x != null && x !== "" && Number.isFinite(v) ? v : null; };
 
 /**
- * Turn `phase_attempt` / `run_terminal` records into run summaries (one per repo#issue#run, finished only when a
- * `run_terminal` exists). Field names are the ones bin/engine/telemetry-seam.mjs writes (docs/TELEMETRY.md).
+ * Turn `phase_attempt` / `run_terminal` records into run summaries, finished only when a `run_terminal` exists.
+ * The run id is per engine process, so a `--retry` yields several; they collapse to ONE run per repo#issue, the latest
+ * by start timestamp (tie: greater run id), matching scripts/cost-report.sh (last RUN_START slice). Finished/usage
+ * filtering stays downstream, so an unfinished latest run still excludes the issue. Field names are the ones bin/engine/telemetry-seam.mjs writes (docs/TELEMETRY.md).
  */
 export function runsFromRecords(records) {
   const byRun = new Map();
@@ -86,12 +88,73 @@ export function runsFromRecords(records) {
     if (num(r.cost_usd) != null) p.usd = (p.usd ?? 0) + num(r.cost_usd);
     if (id === "remediate") run.remediated = true;
   }
-  return [...byRun.values()].map(({ _first, ...run }) => ({ ...run, startTs: _first }));
+  const latest = new Map();
+  for (const run of byRun.values()) {
+    const k = `${run.repo}#${run.issue}`;
+    const cur = latest.get(k);
+    const a = run._first ?? "", b = cur?._first ?? "";
+    if (!cur || a > b || (a === b && (run.run ?? "") > (cur.run ?? ""))) latest.set(k, run);
+  }
+  return [...latest.values()].map(({ _first, ...run }) => ({ ...run, startTs: _first }));
 }
 
 /** Gate/review records (everything that is not a run record) become aggregate events. */
 export const gateEvents = (records) => records.filter((r) => r.event !== "phase_attempt" && r.event !== "run_terminal")
   .map((r) => ({ ...r, version: r.forge_version ?? null }));
+
+const CHECKPOINT_EVERY = 25;
+const PAGE_SIZE = 100;
+// The next incremental run re-reads this much before the persisted watermark (an overlap window), so a write that races a
+// crawl or a small clock skew is re-listed. Re-reads are idempotent: items are keyed by issue number.
+const WATERMARK_OVERLAP_MS = 5 * 60 * 1000;
+const MAX_LIST_REQUESTS = 100000;
+
+/** Shift an ISO-8601 timestamp by `ms`; an unparsable value is returned unchanged. */
+export function shiftIso(ts, ms) {
+  const t = Date.parse(ts);
+  return Number.isNaN(t) ? ts : new Date(t + ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+const sinceParam = (ts) => encodeURIComponent(ts).replace(/%3A/g, ":");
+
+/**
+ * Keyset crawl of the issue listing. The listing is sorted by a MUTABLE key (updated_at), so page-number pagination
+ * (`gh --paginate`) can skip an item updated mid-crawl: it moves to the end of the ordering and the items behind it shift
+ * one page earlier. Instead every request is page 1 from `since=CURSOR`, the cursor moves to the newest `updated_at` read,
+ * and already-seen (number, updated_at) pairs are dropped (the `since` boundary is inclusive). A full page that cannot move
+ * the cursor (more than PAGE_SIZE items share one timestamp) is drained with `page=N` for that timestamp only.
+ * Yields each page's unseen items sorted updated-asc.
+ */
+function* listIssuePages(gh, repo, startSince) {
+  const base = ["state=all", "sort=updated", "direction=asc", `per_page=${PAGE_SIZE}`];
+  const seen = new Set();
+  const key = (it) => `${it.number}@${it.updated_at}`;
+  const take = (page) => {
+    const fresh = page.filter((it) => Number.isInteger(it?.number) && !seen.has(key(it)));
+    for (const it of fresh) seen.add(key(it));
+    return fresh.sort((a, b) => String(a.updated_at).localeCompare(String(b.updated_at)));
+  };
+  const maxTs = (page) => page.reduce((m, it) => (it?.updated_at && (!m || it.updated_at > m) ? it.updated_at : m), null);
+  let cursor = startSince ?? null;
+  for (let n = 0; n < MAX_LIST_REQUESTS; n++) {
+    const get = (extra = []) => parsePages(gh(["api", `repos/${repo}/issues?${[...base, ...(cursor ? [`since=${sinceParam(cursor)}`] : []), ...extra].join("&")}`]));
+    const page = get();
+    const fresh = take(page);
+    if (fresh.length > 0) yield fresh;
+    if (page.length < PAGE_SIZE) return;
+    const next = maxTs(page);
+    if (next && next !== cursor) { cursor = next; continue; }
+    // No cursor progress on a full page: drain this timestamp by page number, then step past it.
+    for (let p = 2; p < MAX_LIST_REQUESTS; p++) {
+      const more = get([`page=${p}`]);
+      const freshMore = take(more);
+      if (freshMore.length > 0) yield freshMore;
+      if (more.length < PAGE_SIZE || freshMore.length === 0) break;
+    }
+    if (!cursor) return;
+    cursor = shiftIso(cursor, 1000);
+  }
+}
 
 const meta = (it) => ({ number: it.number, isPr: Boolean(it.pull_request), createdAt: it.created_at ?? null, closedAt: it.closed_at ?? null,
   updatedAt: it.updated_at ?? null, labels: (it.labels ?? []).map((l) => (typeof l === "string" ? l : l.name)).filter(Boolean), authorType: it.user?.type ?? null });
@@ -103,25 +166,33 @@ const meta = (it) => ({ number: it.number, isPr: Boolean(it.pull_request), creat
 export function fetchGithubRecords({ repo, refresh = false, useCache = true, gh = defaultGh, env = process.env } = {}) {
   if (!isValidRepo(repo)) throw new Error(`invalid repo: ${repo}`);
   const cache = useCache && !refresh ? loadCache(repo, env) : emptyCache();
-  const q = ["state=all", "sort=updated", "direction=asc", "per_page=100", ...(cache.watermark ? [`since=${cache.watermark}`] : [])];
-  const listed = parsePages(gh(["api", "--paginate", `repos/${repo}/issues?${q.join("&")}`]));
+  const startSince = cache.watermark ? shiftIso(cache.watermark, -WATERMARK_OVERLAP_MS) : null;
   const items = { ...cache.items };
   let watermark = cache.watermark;
   let fetched = 0;
-  for (const it of listed) {
-    if (!Number.isInteger(it?.number)) continue;
-    const m = meta(it);
-    let records = items[it.number]?.records ?? [];
-    // A telemetry comment is edited in place (which may not bump the issue's updated_at), so every listed item with
-    // comments is re-read rather than trusting a cached copy.
-    if ((it.comments ?? 0) > 0) {
-      records = parseTelemetryComments(parsePages(gh(["api", "--paginate", `repos/${repo}/issues/${it.number}/comments`])), env);
-      fetched++;
+  // Checkpoint: the watermark is the newest updated_at actually processed, and the next run starts WATERMARK_OVERLAP_MS
+  // before it, so it is a safe resume point. A failure mid-crawl (rate limit, 5xx, a hook timeout) then keeps the
+  // progress instead of restarting at zero.
+  const checkpoint = () => { if (useCache) saveCache(repo, { ...emptyCache(), watermark, items }, env); };
+  try {
+    for (const page of listIssuePages(gh, repo, startSince)) for (const it of page) {
+      const m = meta(it);
+      let records = items[it.number]?.records ?? [];
+      // A telemetry comment is edited in place (which may not bump the issue's updated_at), so every listed item with
+      // comments is re-read rather than trusting a cached copy.
+      if ((it.comments ?? 0) > 0) {
+        records = parseTelemetryComments(parsePages(gh(["api", "--paginate", `repos/${repo}/issues/${it.number}/comments`])), env);
+        fetched++;
+      }
+      items[it.number] = { ...m, records };
+      if (m.updatedAt && (!watermark || m.updatedAt > watermark)) watermark = m.updatedAt;
+      if (fetched > 0 && fetched % CHECKPOINT_EVERY === 0 && (it.comments ?? 0) > 0) checkpoint();
     }
-    items[it.number] = { ...m, records };
-    if (m.updatedAt && (!watermark || m.updatedAt > watermark)) watermark = m.updatedAt;
+  } catch (err) {
+    checkpoint();
+    throw err;
   }
-  if (useCache) saveCache(repo, { ...emptyCache(), watermark, items }, env);
+  checkpoint();
   const seen = new Set();
   const records = [];
   for (const it of Object.values(items)) for (const r of it.records ?? []) {

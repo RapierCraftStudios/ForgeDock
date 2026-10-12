@@ -74,6 +74,64 @@ export function withForgedockHome(env) {
   return env;
 }
 
+/** Expand a leading `~` and require an absolute result; anything else -> null. */
+function absoluteTmpRoot(value) {
+  const v = typeof value === "string" ? value.trim() : "";
+  if (!v) return null;
+  const expanded = v === "~" || v.startsWith("~/") ? join(os.homedir(), v.slice(1)) : v;
+  return isAbsolute(expanded) ? expanded : null;
+}
+
+/**
+ * Root of the per-run scratch dirs (forge#3572). Precedence: forge.yaml `engine.tmp_root`
+ * (absolute or `~`-prefixed), else null when the operator exported their own
+ * CLAUDE_CODE_TMPDIR/TMPDIR (their choice is respected and never cleaned), else `~/.forge/tmp`.
+ * A null return means "operator-managed: leave the child env untouched".
+ *
+ * @param {string} cwd
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string|null}
+ */
+export function resolveRunTmpRoot(cwd, env = process.env) {
+  try {
+    const forgeYamlPath = join(cwd, "forge.yaml");
+    if (existsSync(forgeYamlPath)) {
+      const configured = absoluteTmpRoot(parseForgeYaml(readFileSync(forgeYamlPath, "utf-8"))?.engine?.tmp_root);
+      if (configured) return configured;
+    }
+  } catch { /* unreadable config: fall through to the defaults */ }
+  if (env.CLAUDE_CODE_TMPDIR || env.TMPDIR) return null;
+  return join(os.homedir(), ".forge", "tmp");
+}
+
+/** `<root>/<issue>` for a numeric issue; null for an empty root or non-numeric issue (no path-escape, never the root). */
+export function runTmpDir(root, issue) {
+  const id = String(issue ?? "").trim();
+  return root && /^[0-9]+$/.test(id) ? join(root, id) : null;
+}
+
+/**
+ * Point TMPDIR and CLAUDE_CODE_TMPDIR at a per-run, disk-backed dir so venvs and Claude session data
+ * stay off a size-limited /tmp. No-op when the issue is unknown or the operator owns the tmp root.
+ * Best-effort: a failed mkdir leaves the env unchanged.
+ */
+export function withRunTmpdir(env, { issue, cwd = process.cwd() } = {}) {
+  const dir = runTmpDir(resolveRunTmpRoot(cwd, env), issue);
+  if (!dir) return env;
+  try {
+    mkdirSync(dir, { recursive: true });
+    env.TMPDIR = dir;
+    env.CLAUDE_CODE_TMPDIR = dir;
+  } catch { /* scratch stays on the inherited tmp */ }
+  return env;
+}
+
+/** First positional arg when it is an issue number (the phase arg convention), else null. */
+function issueFromArgs(args) {
+  const first = Array.isArray(args) ? args[0] : String(args ?? "").trim().split(/\s+/)[0];
+  return /^[0-9]+$/.test(String(first ?? "")) ? String(first) : null;
+}
+
 const DEFAULT_MODEL = "claude-sonnet-5";
 const DEFAULT_MAX_ITERATIONS = 50;
 const DEFAULT_MAX_TOKENS = 16384;
@@ -1410,7 +1468,7 @@ export function runCliBackend({
     // Mirrors the existing scrub in the `run_bash` tool handler below.
     // GH_TOKEN/GITHUB_TOKEN and all other env vars are intentionally left
     // intact — only the Anthropic key is removed.
-    const childEnv = withForgedockHome({ ...process.env });
+    const childEnv = withRunTmpdir(withForgedockHome({ ...process.env }), { issue: issueFromArgs(args), cwd });
     delete childEnv.ANTHROPIC_API_KEY;
 
     // No `shell` option (defaults to false): argv is passed as discrete,
@@ -2186,9 +2244,10 @@ export function resolveBashShell() {
  * the loop catches and reports the error back to the model as an error result.
  *
  * @param {string} cwd
+ * @param {string|null} [runIssueNumber] - issue number scoping the per-run TMPDIR (forge#3572)
  * @returns {Record<string, (input: object) => string>}
  */
-export function getToolHandlers(cwd) {
+export function getToolHandlers(cwd, runIssueNumber = null) {
   return {
     read_file: ({ path }) => {
       if (!path) throw new Error("read_file requires a 'path'");
@@ -2208,7 +2267,7 @@ export function getToolHandlers(cwd) {
       // into the model loop, so a prompt-injection payload could otherwise issue
       // a run_bash command that exfiltrates the key. gh/git auth tokens
       // (GH_TOKEN/GITHUB_TOKEN) are intentionally left intact.
-      const childEnv = withForgedockHome({ ...process.env });
+      const childEnv = withRunTmpdir(withForgedockHome({ ...process.env }), { issue: runIssueNumber, cwd });
       delete childEnv.ANTHROPIC_API_KEY;
       // Run under bash when available so bash-style commands the model emits
       // (heredocs, scripts/*.sh, single-quote semantics) behave consistently
@@ -2648,7 +2707,7 @@ export async function runCommand(opts = {}) {
   // is a known Linux limitation at the OS level; closing it would require
   // a native module (e.g. prctl PR_SET_DUMPABLE) or process isolation.
   // See: issue #1370 for tracking this known limitation.
-  const handlers = getToolHandlers(cwd);
+  const handlers = getToolHandlers(cwd, issueFromArgs(args));
   const messages = [{ role: "user", content: userMessage }];
 
   // Accumulate token usage across all messages.create() calls in this run.

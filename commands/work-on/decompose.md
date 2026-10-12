@@ -40,7 +40,7 @@ If `{NUMBER}`, `--repo` or `--gh-flag` is missing, print the result block with `
 
 ## Script resolution
 
-**Shell state does not persist between Bash tool calls** (each call is a fresh shell): paste the block below at the top of every bash command in this skill that calls `resolve_script` or uses `FORGE_ROOT`/`UNIVERSAL_DIR`.
+**Shell state does not persist between Bash tool calls** (each call is a fresh shell): paste the block below at the top of every bash command in this skill that calls `resolve_script` or `forge_resolve` or uses `FORGE_ROOT`/`UNIVERSAL_DIR` (including the D1 resume check and Phase D6.5).
 
 ```bash
 # Canonical script resolution (keep byte-identical across specs; guarded by scripts/forge-root.test.sh).
@@ -147,7 +147,7 @@ gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
   --jq '.[] | select(.body | contains("FORGE:INVESTIGATOR") | not) | {author: .user.login, body: .body}'
 ```
 
-Ignore machine-posted marker comments (`FORGE:DIFF_SIZE`, `FORGE:SIZE_OVERRIDE`) in this scan: a `FORGE:DIFF_SIZE` comment is a plan source (below), never an owner override direction. Scan non-agent comments for override signals — phrases like "do not", "do NOT", "instead", "revert", "remove this", "override", "actually", or explicit disagreement with the investigation's recommendation. If an override comment is found from a repo owner or admin (not a bot):
+Ignore machine-posted marker comments (`FORGE:DIFF_SIZE`, `FORGE:SIZE_OVERRIDE`) in this scan: they are never an owner override direction. Scan non-agent comments for override signals — phrases like "do not", "do NOT", "instead", "revert", "remove this", "override", "actually", or explicit disagreement with the investigation's recommendation. If an override comment is found from a repo owner or admin (not a bot):
 
 1. **Document the override**: Note which direction the owner is steering (e.g., "remove the feature" vs. investigation's "keep with warnings")
 2. **Re-derive sub-issue scopes**: Derive sub-issue titles, bodies, and file scope from the override direction — NOT from the original investigation recommendation. The investigation's Decomposition Assessment may list sub-issues that are now stale or contradictory with the override.
@@ -161,21 +161,16 @@ Ignore machine-posted marker comments (`FORGE:DIFF_SIZE`, `FORGE:SIZE_OVERRIDE`)
 Extract from investigation report:
 - Decomposition Assessment section: list of proposed sub-issues with titles and dependencies
 
-**Size-gate plan source** <!-- Added: forge#3450 -->: when the build's diff-size gate routed here, the investigation said no decomposition, so its assessment lists no sub-issues. Read the latest TRUSTED `FORGE:DIFF_SIZE` comment (anchored, through `scripts/trusted-comments.sh`; the Script resolution block applies) and use it when it has `result: OVER`:
-
-```bash
-# <Script resolution block, verbatim>
-set -o pipefail
-TRUSTED_SCRIPT="${UNIVERSAL_DIR:+$UNIVERSAL_DIR/trusted-comments.sh}"
-if [ -n "$TRUSTED_SCRIPT" ] && [ -f "$TRUSTED_SCRIPT" ]; then
-  SIZE_PLAN=$(gh api --paginate "repos/{GH_REPO}/issues/{NUMBER}/comments" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:DIFF_SIZE' | jq -r 'select(type == "string")' ) \
-    && echo "SIZE_PLAN_READ=ok" || echo "SIZE_PLAN_READ=FAILED"
-else echo "SIZE_PLAN_READ=FAILED"; fi
-```
-
-A `FAILED` read or a comment without `result: OVER` means there is no size-gate plan (the assessment rules below then apply unchanged). Its `### Split Proposal` lines (`- **{title}** — {files}`) are the proposed sub-issues, in dependency order, for Phase D2. <!-- Added: forge#3573 --> A line may end with `— wip: {REF}@{SHA} (git checkout {SHA} -- {files})` (the durable staged hunks build B5.5 pushed to `forge/wip/{NUMBER}`), or `— patch: {PATH}` when the push failed and a patch file was written. Parse that per-seam reference as `WIP_REF_{N}` for Phase D2/D3. A line without one (or `wip: unavailable`) means no hunks were persisted; behaviour is unchanged.
+**Planning-time only** <!-- Added: forge#3862 -->: decompose runs only from the investigation's Decomposition Assessment (`**YES**`, which requires separable pieces: independent modules or services, no shared files, no ordering dependency, each independently testable). There is no post-build route into this skill: build never discards a finished diff and never hands one here, so the assessment is the only plan source and there are no persisted staged hunks to reuse.
 - Milestone (from issue metadata)
 - Priority label (P0/P1/P2) from issue labels
+
+Extract the parent's batch members (empty for a non-batch parent, which makes Phase D2.7 a no-op), using the same block and `- [ ] #N` extraction as `commands/work-on.md` "Batch issue detection": <!-- Added: forge#3788 -->
+```bash
+BATCH_MEMBERS=($(gh issue view {NUMBER} {GH_FLAG} --json body --jq '.body' \
+  | sed -n '/<!-- FORGE:BATCH_MEMBERS -->/,/<!-- \/FORGE:BATCH_MEMBERS -->/p' \
+  | sed -n 's/^.*- \[ \] #\([0-9][0-9]*\).*/\1/p' 2>/dev/null || true))
+```
 
 Extract milestone title for sub-issue creation:
 ```bash
@@ -200,24 +195,30 @@ If `PARENT_REF` is non-empty → BLOCKED, blocker: "Issue #{NUMBER} is a sub-iss
 
 **Guard 2 — investigation report present**: If the FORGE:INVESTIGATOR comment is absent → BLOCKED, blocker: "No investigation report found — run investigate first".
 
-**Guard 3 — decomposition plan present**: If the investigation report has no Decomposition Assessment section, OR the assessment does not list any sub-issues, AND there is no trusted `FORGE:DIFF_SIZE` comment with `result: OVER` and a `### Split Proposal` (the size-gate plan source from D0) → BLOCKED, blocker: "Investigation report has no decomposition plan — re-run investigate with explicit decomposition scope".
+**Guard 3 — decomposition plan present**: If the investigation report has no Decomposition Assessment section, OR the assessment does not list any sub-issues → BLOCKED, blocker: "Investigation report has no decomposition plan — re-run investigate with explicit decomposition scope".
 
-**Resume check**:
+**Resume check** <!-- Added: forge#3881 -->: the marker comment drives parent edits and the D6.5 close, so only a trusted, marker-anchored comment counts (`scripts/trusted-comments.sh`, the same predicate as the review gates). Paste the Script resolution block first (fresh shell per Bash call). An unresolved helper or a failed read is treated as "no trusted comment" and the normal path continues (the D2.5 equivalent-set check still guards duplicates); an untrusted body never reaches `SUB_LIST`.
 
 ```bash
-gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-  --jq '[.[] | select(.body | contains("<!-- FORGE:DECOMPOSED -->"))] | last // empty | {url: .html_url, body: .body}'
+TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)   # unresolved => empty => fail closed
+DECOMP_BODY=""; COMMENT_URL=""
+if [ -n "$TRUSTED_SCRIPT" ] && COMMENTS_JSON=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments); then
+  DECOMP_BODY=$(printf '%s' "$COMMENTS_JSON" | bash "$TRUSTED_SCRIPT" bodies '^<!-- FORGE:DECOMPOSED -->' | tail -n 1 | jq -r '.' 2>/dev/null || true)
+  [ -n "$DECOMP_BODY" ] && COMMENT_URL=$(printf '%s' "$COMMENTS_JSON" | jq -rs --arg b "$DECOMP_BODY" '[.[][] | select(.body == $b)] | last | .html_url // empty' 2>/dev/null || true)
+else
+  echo "decompose resume lookup unavailable"
+fi
 ```
 
-If a `<!-- FORGE:DECOMPOSED -->` comment exists → decomposition already complete. Derive `sub_issues` as a plain number list from that comment's `- #N:` lines and the comment URL from `.url`:
+If a `<!-- FORGE:DECOMPOSED -->` comment exists → decomposition already complete. Derive `sub_issues` as a plain number list from that comment's `- #N:` lines and the comment URL from `$COMMENT_URL`:
 
 ```bash
-# $DECOMP_BODY is the .body of the comment found above
+# $DECOMP_BODY is the trusted, anchored comment body found above
 SUB_LIST=$(printf '%s\n' "$DECOMP_BODY" | sed -nE 's/^- #([0-9]+).*/\1/p' | paste -sd, - | sed 's/,/, /g')
 echo "sub_issues: [${SUB_LIST}]"
 ```
 
-Run Phase D6 (idempotent label re-assert) and Phase D6.5 (close parent when `decomposition.close_parent` is true), then EXIT with `DECOMPOSE_RESULT: status: ALREADY_DONE`, `sub_issues: [${SUB_LIST}]`, `comment_url` from the comment.
+Run Phase D6 (idempotent label re-assert) and Phase D6.5 (close parent when `decomposition.close_parent` is true), then EXIT with `DECOMPOSE_RESULT: status: ALREADY_DONE`, `sub_issues: [${SUB_LIST}]`, `comment_url` from the comment. When `DECOMP_BODY` is empty, continue to the normal path.
 
 ---
 
@@ -243,14 +244,14 @@ If `GIST_URLS` is non-empty, a `## Prior Investigation` section will be appended
 
 ## Phase D2: Design Sub-Issues
 
-From the Decomposition Assessment in the investigation report (adjusted for any owner override detected in Phase D0), or, when the assessment lists none, from the size-gate `### Split Proposal` in the trusted `FORGE:DIFF_SIZE` comment (Phase D0), extract:
-1. Sub-issue titles (in dependency order — independent issues first). **Packing** <!-- Added: forge#3786 -->: do not create one sub-issue per seam. Bin-pack the seams into the fewest sub-issues whose estimate (code plus tests) is at or under 0.8 x threshold, i.e. `max(2, ceil(ESTIMATED_DIFF_LINES / (0.8 x threshold)))` sub-issues, keeping related seams together; each sub-issue body lists the seams it covers. Migration-ordering seams may stay separate. **Budget check** <!-- Added: forge#3790 -->: reject or repack any plan item whose estimate (code plus tests) is over 0.8 x threshold: split it along a real seam or merge-and-resplit until each item fits. A seam that can't fit (one cohesive module plus its tests) stays as one item, and its body states that explicitly with the estimate; build B5.5 then treats a cohesive overage as `COHESIVE` instead of stranding it. Never inflate the sub-issue count to force a fit. Record each item's estimate as `ESTIMATED_DIFF_LINES` for Phase D3. The parent is a terminal tracker and builds nothing, so every packed item, including the first, becomes a sub-issue (N packed items give N sub-issues)
+From the Decomposition Assessment in the investigation report (adjusted for any owner override detected in Phase D0), extract:
+1. Sub-issue titles (in dependency order — independent issues first). **Separability**: one sub-issue per separable piece the assessment names (independent module or service, no file shared with another piece, no ordering dependency). Re-check each pair of pieces: if two pieces edit the same file or one needs the other's output first, they are NOT separable, so merge them into one sub-issue rather than creating dependent siblings on the same file. Do not split a cohesive change (one new module plus its tests) to hit a size, and never inflate the sub-issue count. Record each item's estimate as `ESTIMATED_DIFF_LINES` for Phase D3 (a scope baseline, not a limit). The parent is a terminal tracker and builds nothing, so every item, including the first, becomes a sub-issue (N items give N sub-issues)
 2. Dependencies between sub-issues (if issue B depends on issue A, A is created first)
 3. Brief description for each sub-issue body
 
 For each sub-issue, prepare:
 - **Title**: from investigation report's proposed sub-issue title (re-derived from the owner override when one was detected), including the final `{fix|feat|refactor}: ` prefix used in Phase D3
-- **Body**: brief description of scope + `**Parent**: #{NUMBER}` + an own-line `ESTIMATED_DIFF_LINES: {N}` (the packed item's estimate, code plus tests; build B5.5 compares it with the actual diff in `FORGE:DIFF_SIZE`) + dependency note if applicable + a `## Staged Hunks` section when the Split Proposal line carries a wip ref or patch (see D3)
+- **Body**: brief description of scope + `**Parent**: #{NUMBER}` + an own-line `ESTIMATED_DIFF_LINES: {N}` (the item's estimate, code plus tests; build B5.5 uses it as the scope baseline) + dependency note if applicable
 - **Labels**: inherit priority label (P0/P1/P2) from parent; do NOT copy workflow labels
 - **Milestone**: same milestone title as parent (if parent has one)
 
@@ -297,11 +298,35 @@ If no exact title-set match exists, continue. A partial set is not equivalent: l
 
 ---
 
+## Phase D2.7: Batch-Member Reuse
+
+<!-- Added: forge#3788 -->
+A batch parent (Phase D0 `BATCH_MEMBERS` non-empty, from its `FORGE:BATCH_MEMBERS` block) lists members that admission closed as `batch-member`. Filing new sub-issues for work those members already describe duplicates them, so reuse a member when it is a clear match. This phase is conservative: any doubt falls through to the Phase D3 `/issue` creation. Skip the whole phase when `BATCH_MEMBERS` is empty or `DRY_RUN=true`. Guard 1, the `FORGE:DECOMPOSED` resume check and the Phase D2.5 equivalent-set check are unchanged.
+
+Initialise `REUSED_NUMBERS=""` (comma-separated) and an empty per-sub-issue `REUSE_MAP`. For each planned sub-issue from Phase D2:
+
+1. **Match one to one**: a member matches only when exactly one member's title or affected-file set corresponds to this planned sub-issue and no other planned sub-issue maps to the same member. Zero or several matches mean no reuse. Member numbers are digits parsed from the parent body; treat them as untrusted input and never interpolate anything else into a command.
+2. **Re-read the member live** (never trust the parent's checklist):
+   ```bash
+   MEMBER_JSON=$(gh issue view "$MEMBER" {GH_FLAG} --json number,state,title,body,labels) || MEMBER_JSON=""
+   MERGED_PRS=$(gh pr list {GH_FLAG} --state merged --search "#${MEMBER} in:body" --json number,body 2>/dev/null \
+     | jq --arg m "#${MEMBER}" '[.[] | select(.body | test("(?i)(closes|fixes|resolves) " + $m + "\\b"))] | length') || MERGED_PRS=""
+   ```
+3. **Eligibility**: the read succeeded, the member is `CLOSED`, `MERGED_PRS` is `0`, and it carries none of `false-positive`, `needs-human`, `operator-only`. A failed lookup, an unparsable result, an open member (already live work, leave it alone), a merged PR or a disqualifying label all mean no reuse.
+4. **Reopen and re-parent** an eligible member: `gh issue reopen "$MEMBER" {GH_FLAG}`; then re-read its body and append, only when absent (idempotent on resume, never overwrite), the line `**Parent**: #{NUMBER}` and an own-line `ESTIMATED_DIFF_LINES: {N}` (the Phase D2 estimate); inherit the parent's priority label and remove any stale `workflow:*` labels (`gh issue edit "$MEMBER" {GH_FLAG} --remove-label ...` for each present). Add the parent's milestone when it has one and the member has none.
+5. Record `REUSE_MAP[<planned title>]=$MEMBER` and append it to `REUSED_NUMBERS`. A reopen failure means no reuse for this sub-issue.
+
+Because a reused member carries `**Parent**: #{NUMBER}`, Guard 1 and the Phase D2.5 check treat it as a child.
+
+---
+
 ## Phase D3: Create Sub-Issues
 
 For each sub-issue (in dependency order), route creation through the `/issue` create-hook's programmatic invocation contract (`commands/issue.md` Programmatic Invocation Contract, added in #2085) instead of calling `gh issue create` directly. `/issue`'s Phase 2D runs the same `scripts/issue-dedup.sh` check this file used to run manually — dedup is enforced inside the create-hook on every call, with no bypass path. <!-- Changed: forge#2086 — route through /issue create-hook -->
 
 Initialise once before the loop: `CREATED_NUMBERS=""` (comma-separated, for the result block) and `SKIPPED_NOTES=""`.
+
+**Reused member short-circuit** <!-- Added: forge#3788 -->: for a planned sub-issue that Phase D2.7 resolved to a reused member, do NOT compose a body or invoke `/issue`. Set `SUB_NUMBER` to the reused member, add it to `CREATED_NUMBERS`, and continue with the Prior Investigation append below (when `GIST_URLS` is non-empty) and the later phases as for any created sub-issue.
 
 **Sanitise the title and compose the sub-issue body to a temp file** (avoids quoting issues when passed as `--body-file`):
 
@@ -340,10 +365,6 @@ Files that need changes:
 {If depends on another sub-issue: "**Depends on**: #{SUB_ISSUE_N} — {reason}"}
 ESTIMATED_DIFF_LINES: {N}
 
-{Only when this seam's Split Proposal line carries a wip ref or patch (D0); otherwise omit this section entirely:}
-## Staged Hunks
-
-The parent build's staged hunks for this seam are preserved outside the worktree: `{REF}@{SHA}`. Reuse them with `git fetch origin {REF} && git checkout {SHA} -- {files}` (wip ref), or `git apply {PATCH_PATH}` (patch file). They survive worktree cleanup.
 SUB_BODY_EOF
 ```
 
@@ -422,7 +443,7 @@ Investigation findings from the parent issue are available as Knowledge Gists:
 fi
 ```
 
-After the loop, if `CREATED_NUMBERS` is empty (no sub-issue was created) → BLOCKED, blocker: "No sub-issues were created (all skipped or deduplicated) — review the /issue output".
+After the loop, if `CREATED_NUMBERS` is empty (no sub-issue was created or reused) → BLOCKED, blocker: "No sub-issues were created (all skipped or deduplicated) — review the /issue output".
 
 ---
 
@@ -440,7 +461,7 @@ TRACKER="
 ## Sub-Issue Tracker
 
 {if sub-issue B depends on A, note it inline}
-- [ ] #{SUB_ISSUE_1_NUMBER} — {SUB_ISSUE_1_TITLE}
+- [ ] #{SUB_ISSUE_1_NUMBER} — {SUB_ISSUE_1_TITLE}{if reused in D2.7: _(reopened batch member)_}
 - [ ] #{SUB_ISSUE_2_NUMBER} — {SUB_ISSUE_2_TITLE} _(depends on #{SUB_ISSUE_1_NUMBER})_
 ..."
 
@@ -458,7 +479,7 @@ SHOW_ATTRIBUTION=$(yq '.branding.show_attribution // "true"' forge.yaml 2>/dev/n
 > Pipeline powered by [ForgeDock](https://github.com/RapierCraftStudios/ForgeDock)"
 ```
 
-Compose the comment body. Include the `### Skipped Sub-Issues` section only when `SKIPPED_NOTES` is non-empty (each owner-override-obsolete sub-issue and each not-created sub-issue, with its reason), an `### Owner Override` line when Phase D0 detected one (the direction the owner steered), and a milestone-skipped note when `MILESTONE_SKIPPED=1`.
+Compose the comment body. Include the `### Reused Batch Members` section only when `REUSED_NUMBERS` is non-empty. Include the `### Skipped Sub-Issues` section only when `SKIPPED_NOTES` is non-empty (each owner-override-obsolete sub-issue and each not-created sub-issue, with its reason), an `### Owner Override` line when Phase D0 detected one (the direction the owner steered), and a milestone-skipped note when `MILESTONE_SKIPPED=1`.
 
 ```bash
 [ "${DRY_RUN:-false}" = "true" ] && { echo "[DRY_RUN] would post the comment below"; exit 0; }
@@ -471,6 +492,11 @@ This issue has been broken into sub-issues. Each sub-issue runs through its own 
 
 {for each sub-issue, in dependency order:}
 - #{SUB_ISSUE_NUMBER}: {TITLE}{if has dependency: _(depends on #{DEP_NUMBER})_}
+
+{if REUSED_NUMBERS non-empty:}
+### Reused Batch Members
+
+Reopened instead of filing new issues: ${REUSED_NUMBERS}
 
 {if SKIPPED_NOTES non-empty:}
 ### Skipped Sub-Issues
@@ -514,7 +540,7 @@ esac
 <!-- Added: forge#3736 -->
 A decomposed parent is only a tracker, but while it is open it inflates GitHub's open-issue count. When `decomposition.close_parent` is `true`, close the parent now that the sub-issues exist, the `FORGE:DECOMPOSED:COMPLETE` comment is posted (D5) and `workflow:decomposed` is set (D6). The label is kept. Close C3 keeps checking children off the closed parent and posts the completion comment when the last one closes.
 
-Run this phase on the normal path and on both ALREADY_DONE exits (D1 resume, D2.5). Set `SUB_NUMBERS` to the sub-issue numbers: `CREATED_NUMBERS` on the normal path, `SUB_LIST` (D1) or `CANONICAL_NUMBERS` (D2.5) on the resume paths, as a space or comma separated list. Config read is fail-safe: an unreadable `forge.yaml`, missing `yq` or any value other than `true` leaves the parent open.
+Run this phase on the normal path and on both ALREADY_DONE exits (D1 resume, D2.5). Set `SUB_NUMBERS` to the sub-issue numbers: `CREATED_NUMBERS` on the normal path, `SUB_LIST` (D1) or `CANONICAL_NUMBERS` (D2.5) on the resume paths, as a space or comma separated list; an empty list (after dropping non-digits and the parent's own number) logs `SUB_NUMBERS empty` and skips the child guard and the close. Paste the Script resolution block first (the close gate calls `forge_resolve`). Config read is fail-safe: an unreadable `forge.yaml`, missing `yq` or any value other than `true` leaves the parent open.
 
 ```bash
 run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
@@ -522,6 +548,14 @@ CLOSE_PARENT=$(yq '.decomposition.close_parent // false' forge.yaml 2>/dev/null 
 [ "$CLOSE_PARENT" = "true" ] || CLOSE_PARENT=false
 if [ "$CLOSE_PARENT" = "true" ]; then
   SUB_NUMBERS=$(printf '%s' "${SUB_NUMBERS:-}" | tr -c '0-9\n' ' ')
+  # Digits only, never the parent itself: an empty or unparsable list must not close the parent.
+  SUB_NUMBERS=$(for n in $SUB_NUMBERS; do [ "$n" = "{NUMBER}" ] || printf '%s ' "$n"; done)
+fi
+if [ "$CLOSE_PARENT" = "true" ] && [ -z "${SUB_NUMBERS// /}" ]; then
+  echo "D6.5: SUB_NUMBERS empty — parent left open"
+  CLOSE_PARENT=false
+fi
+if [ "$CLOSE_PARENT" = "true" ]; then
 
   # Child guard: every child body must carry the parent reference Close C3 matches on.
   for SUB_NUMBER in $SUB_NUMBERS; do
@@ -534,8 +568,12 @@ if [ "$CLOSE_PARENT" = "true" ]; then
 
   # Close only an OPEN parent, and only once the DECOMPOSED:COMPLETE marker is on it.
   PARENT_STATE=$(gh issue view {NUMBER} {GH_FLAG} --json state --jq '.state' 2>/dev/null || true)
-  HAS_COMPLETE=$(gh api repos/{GH_REPO}/issues/{NUMBER}/comments \
-    --jq '[.[] | select(.body | contains("FORGE:DECOMPOSED:COMPLETE"))] | length' 2>/dev/null || echo 0)
+  # Trusted + anchored (marker on its own line); unresolved helper or failed read => 0 => parent stays open.
+  TRUSTED_SCRIPT=$(forge_resolve trusted-comments.sh)
+  HAS_COMPLETE=0
+  [ -z "$TRUSTED_SCRIPT" ] || HAS_COMPLETE=$(gh api --paginate repos/{GH_REPO}/issues/{NUMBER}/comments 2>/dev/null \
+    | bash "$TRUSTED_SCRIPT" count '(^|\n)<!-- FORGE:DECOMPOSED:COMPLETE -->[ \t]*($|\n)' 2>/dev/null) || HAS_COMPLETE=0
+  case "$HAS_COMPLETE" in ''|*[!0-9]*) HAS_COMPLETE=0 ;; esac
   if [ "$PARENT_STATE" = "OPEN" ] && [ "${HAS_COMPLETE:-0}" -gt 0 ]; then
     REFS=$(for n in $SUB_NUMBERS; do printf '#%s ' "$n"; done)
     run gh issue close {NUMBER} {GH_FLAG} --reason completed \

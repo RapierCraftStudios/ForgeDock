@@ -57,8 +57,8 @@ export const PHASE_IDS = ['investigate', 'decompose', 'build', 'review', 'remedi
  *   investigate.md emits it as the HTML comment `<!-- DECOMPOSE:YES -->`.
  * @property {string} [notDecomposedMarker] - (investigate only) the explicit not-decomposed
  *   verdict, emitted as `<!-- DECOMPOSE:NO -->`.
- * @property {string} [sizeGateMarker] - (build only) bare annotation-opener of the diff-size gate record.
- * @property {string} [sizeOverrideMarker] - (build only) bare annotation-opener of the size-gate override.
+ * @property {string} [sizeGateMarker] - (build only) bare annotation-opener of the scope-check record (diff size, review weight, scope outcome).
+ * @property {string} [sizeOverrideMarker] - (build only) bare annotation-opener of the scope-check override.
  * @property {string} [investigationMarker] - (build only) bare marker of the durable
  *   investigation-deliverables comment, posted as `<!-- FORGE:INVESTIGATION:DELIVERABLES -->`.
  * @property {string} [partialMarker] - sentinel for an interrupted/partial annotation.
@@ -108,9 +108,9 @@ export const PHASE_MARKERS = {
   build: {
     completionMarker: RESERVED_TYPES.BUILDER.completionSentinel, // 'FORGE:BUILDER:COMPLETE'
     header: 'FORGE:BUILDER',
-    // Size-gate (B5.5) records. Neither is a completion sentinel: the gate's
-    // NEEDS_DECOMPOSE exit posts no FORGE:BUILDER:COMPLETE, so the engine reads
-    // these to route an oversized build to decompose instead of retrying it.
+    // Scope-check (B5.5) records. Neither is a completion sentinel and neither routes anywhere
+    // (forge#3862): a finished build is never sent to decompose. DIFF_SIZE is the record of the
+    // scope-check outcome; SIZE_OVERRIDE suppresses the scope flag and the decompose loop guard.
     sizeGateMarker: `FORGE:${RESERVED_TYPES.DIFF_SIZE.type}`, // 'FORGE:DIFF_SIZE'
     sizeOverrideMarker: `FORGE:${RESERVED_TYPES.SIZE_OVERRIDE.type}`, // 'FORGE:SIZE_OVERRIDE'
     // Investigation exit (implement.md I2): no code, no PR, so no FORGE:BUILDER:COMPLETE.

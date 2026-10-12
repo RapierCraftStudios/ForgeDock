@@ -165,6 +165,26 @@ check 0 "violations=0"                   "--fence-state passes declared, loop, e
 check 2 "Usage"                          "--fence-state without -- is a usage error"  -- --fence-state PR_NUMBER fs-good.md
 check 2 "Usage"                          "--fence-state without vars is a usage error" -- --fence-state -- fs-good.md
 
+# --fence-state: a FENCE_BOOTSTRAP source line binds the variables scripts/lib/fence-bootstrap.sh derives (and only those, and only on a marked line)
+cat > "$T/fs-boot.md" <<EOF
+${FENCE}bash
+. "\$(forge_resolve lib/fence-bootstrap.sh)" || exit 1   # FENCE_BOOTSTRAP
+gh pr view "\$PR_NUMBER" -R "\$GH_REPO" --json state
+${FENCE}
+EOF
+cat > "$T/fs-boot-bad.md" <<EOF
+${FENCE}bash
+. "\$(forge_resolve lib/fence-bootstrap.sh)" || exit 1
+gh pr view "\$PR_NUMBER" -R "\$GH_REPO" --json state
+${FENCE}
+${FENCE}bash
+. "\$(forge_resolve lib/fence-bootstrap.sh)" || exit 1   # FENCE_BOOTSTRAP
+echo "\$MERGE_ISSUE"
+${FENCE}
+EOF
+check 0 "violations=0"                   "--fence-state treats a FENCE_BOOTSTRAP source line as binding PR_NUMBER and GH_REPO" -- --fence-state PR_NUMBER GH_REPO -- fs-boot.md
+check 1 "violations=3"                   "--fence-state ignores an unmarked source line and a var the bootstrap does not derive" -- --fence-state PR_NUMBER GH_REPO MERGE_ISSUE -- fs-boot-bad.md
+
 # --fence-funcs: a function defined only in another fence, then called, is flagged.
 cat > "$T/ff-bad.md" <<EOF
 ${FENCE}bash

@@ -9,13 +9,19 @@
 # the PR checkout, a SPEC_CLI persona file, forge.yaml paths.root) as data.
 #
 # Usage: review-prepare.sh --pr N --repo owner/name [--merge-issue N] [--thorough true|false] [--out FILE] [--out-dir DIR]
-#                          [--checkout-pr]
+#                          [--checkout-pr] [--no-delta] [--build-gate block|advisory]
 #   --pr            PR number (numeric, required)          --repo        owner/name (required)
 #   --merge-issue   issue the PR closes, from --issue (numeric; non-numeric is ignored)
 #   --thorough      true restores the full-union roster    --out         write the context JSON here (default: stdout)
 #   --out-dir       directory for per-domain diff slices (default: ${FORGE_SCRATCHPAD:-$PWD/.forge-scratch}/review-prepare-<pr>)
 #   --checkout-pr   `git checkout -f --detach <review sha>` in the CURRENT repo (must be a throwaway review checkout, never the
 #                   main checkout); the recorded original ref is restored by restore_ref on every exit path
+#   --build-gate    block (default): an empty trusted typescript.build / python.format on a full-build lane BLOCKs.
+#                   advisory: record it as a SKIPPED Phase 2 finding instead (review-pr-staging: the deploy review only ever
+#                   reported "SKIPPED — typescript.build not configured", and blocking it would stop every deploy of a repo
+#                   with plain .js files and no build command, ForgeDock itself included).
+#   --no-delta      skip the FULL/DELTA/BASE_SYNC_ONLY resolver: the review mode is always FULL (a staging bundle review always reviews the
+#                   whole bundle), without widening the roster to the full union the way --thorough does
 # Env: FORGE_CONFIG (forge.yaml path; default: the main checkout's forge.yaml, then the git top-level one),
 #      REVIEW_PREPARE_SLEEP (seconds between mergeability retries, default 5).
 # Exit: 0 context emitted (status OK) | 3 context emitted with status BLOCKED (the caller must stop, never skip) | 2 usage error
@@ -52,7 +58,7 @@
 
 set -u
 
-PR_NUMBER=""; REPO=""; MERGE_ISSUE=""; THOROUGH="false"; OUT=""; OUT_DIR=""; CHECKOUT_PR="false"
+PR_NUMBER=""; REPO=""; MERGE_ISSUE=""; THOROUGH="false"; OUT=""; OUT_DIR=""; CHECKOUT_PR="false"; NO_DELTA="false"; BUILD_GATE="block"
 while [ $# -gt 0 ]; do
     case "$1" in
         --pr|--repo|--merge-issue|--thorough|--out|--out-dir)
@@ -66,6 +72,8 @@ while [ $# -gt 0 ]; do
         --out) OUT="${2:-}"; shift 2 ;;
         --out-dir) OUT_DIR="${2:-}"; shift 2 ;;
         --checkout-pr) CHECKOUT_PR="true"; shift ;;
+        --no-delta) NO_DELTA="true"; shift ;;
+        --build-gate) case "${2:-}" in block|advisory) BUILD_GATE="$2" ;; *) echo "review-prepare: --build-gate must be block or advisory" >&2; exit 2 ;; esac; shift 2 ;;
         *) echo "review-prepare: unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -104,7 +112,7 @@ cleanup() { restore_ref; rm -rf "$TMP_DIR"; }
 trap cleanup EXIT
 
 # --- Phase 1A: fetch ---
-PR_INFO=$(gh pr view "$PR_NUMBER" -R "$REPO" --json number,title,author,baseRefName,headRefName,headRefOid,additions,deletions,changedFiles 2>/dev/null) || PR_INFO=""
+PR_INFO=$(gh pr view "$PR_NUMBER" -R "$REPO" --json number,title,author,baseRefName,headRefName,headRefOid,isCrossRepository,additions,deletions,changedFiles 2>/dev/null) || PR_INFO=""
 printf '%s' "$PR_INFO" | jq -e . >/dev/null 2>&1 || PR_INFO=""
 if [ -z "$PR_INFO" ]; then block "gh pr view failed for #${PR_NUMBER}"; fi
 pj() { printf '%s' "$PR_INFO" | jq -r "$1 // empty" 2>/dev/null; }
@@ -118,8 +126,18 @@ LINES=$((ADDITIONS + DELETIONS))
 
 FILES=""; DIFF=""
 if [ -z "$BLOCKERS" ]; then
-    FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only 2>/dev/null) || block "gh pr diff --name-only failed"
-    DIFF=$(gh pr diff "$PR_NUMBER" -R "$REPO" 2>/dev/null) || block "gh pr diff failed"
+    FILES=$(gh pr diff "$PR_NUMBER" -R "$REPO" --name-only 2>/dev/null) || FILES="__FAILED__"
+    [ "$FILES" = "__FAILED__" ] || DIFF=$(gh pr diff "$PR_NUMBER" -R "$REPO" 2>/dev/null) || FILES="__FAILED__"
+    if [ "$FILES" = "__FAILED__" ]; then
+        # A staging bundle can exceed the API's diff size limit: read it from the long-lived branches instead (--no-delta only; a per-PR review blocks).
+        FILES=""; DIFF=""
+        # Pinned (forge#3935): same-repo PRs only (a fork's branch name resolves to origin's own branch), and the fetched tip must equal REVIEW_SHA; the diff is taken against REVIEW_SHA, never the branch name.
+        if [ "$NO_DELTA" = "true" ] && [ -n "$BASE" ] && [ -n "$HEAD" ] && [ "$(printf '%s' "$PR_INFO" | jq -r .isCrossRepository 2>/dev/null)" = "false" ] && printf '%s' "$REVIEW_SHA" | grep -qE '^[0-9a-f]{40}$' \
+           && git fetch -q origin "$BASE" "$HEAD" 2>/dev/null && [ "$(git rev-parse -q --verify "refs/remotes/origin/${HEAD}^{commit}" 2>/dev/null)" = "$REVIEW_SHA" ]; then
+            FILES=$(git diff --name-only "origin/${BASE}...${REVIEW_SHA}" 2>/dev/null) && DIFF=$(git diff "origin/${BASE}...${REVIEW_SHA}" 2>/dev/null) || { FILES=""; DIFF=""; }
+        fi
+        [ -n "$FILES" ] || block "gh pr diff failed"
+    fi
     [ -n "$FILES" ] || [ -n "$BLOCKERS" ] || block "PR #${PR_NUMBER} has an empty file list"
 fi
 
@@ -201,8 +219,13 @@ if [ "$REQUIRES_FULL_BUILD" = "true" ]; then
     if [ "$CONFIG_READABLE" != "true" ]; then
         BUILD_CONFIG_STATUS="blocked"; block "full-build lane but no readable trusted forge.yaml (checked FORGE_CONFIG, the main checkout and the git top-level)"
     else
-        if [ -n "$HAS_TS" ] && [ -z "$TS_BUILD" ]; then BUILD_CONFIG_STATUS="blocked"; block "BLOCKED: typescript.build is empty in verification.commands on a full-build lane (typecheck alone misses prerender failures)"; fi
-        if [ -n "$HAS_PY" ] && [ -z "$PY_FORMAT" ]; then BUILD_CONFIG_STATUS="blocked"; block "BLOCKED: python.format is empty in verification.commands on a full-build lane"; fi
+        if [ "$BUILD_GATE" = "advisory" ]; then
+            if [ -n "$HAS_TS" ] && [ -z "$TS_BUILD" ]; then BUILD_CONFIG_STATUS="skipped"; p2 "1B: SKIPPED — typescript.build not configured in verification.commands (build not run)"; fi
+            if [ -n "$HAS_PY" ] && [ -z "$PY_FORMAT" ]; then BUILD_CONFIG_STATUS="skipped"; p2 "1A: SKIPPED — python.format not configured in verification.commands"; fi
+        else
+            if [ -n "$HAS_TS" ] && [ -z "$TS_BUILD" ]; then BUILD_CONFIG_STATUS="blocked"; block "BLOCKED: typescript.build is empty in verification.commands on a full-build lane (typecheck alone misses prerender failures)"; fi
+            if [ -n "$HAS_PY" ] && [ -z "$PY_FORMAT" ]; then BUILD_CONFIG_STATUS="blocked"; block "BLOCKED: python.format is empty in verification.commands on a full-build lane"; fi
+        fi
     fi
 fi
 # 2D env vars, 2E secrets (CRITICAL), 2F SQL, over the diff text
@@ -346,6 +369,13 @@ CONTRACT_RISK_FLAGS="${CONTRACT_RISK_FLAGS# }"
 # --- Phase 3B step 4: roster (review-roster.sh; unresolved or failing means the full union) ---
 agent_domain() { local l; l=$(printf '%s' "${1}" | tr '[:upper:]' '[:lower:]'); case "$l" in infrastructure) l=infra ;; scraping) l=scraper ;; web) l=frontend ;; esac; printf '%s' "$l"; }
 FIX_PR=false; SRC_SEV=""; SRC_DOM=""
+# Review depth (forge#3862): latest TRUSTED FORGE:DIFF_SIZE on the merge issue; unreadable or absent stays STANDARD (extended only adds reviewers).
+REVIEW_DEPTH=STANDARD; REVIEW_WEIGHT=""
+if [ -n "$MERGE_ISSUE" ]; then
+    _ds=$(gh api --paginate "repos/$REPO/issues/$MERGE_ISSUE/comments" --jq '[.[] | select(.body | startswith("<!-- FORGE:DIFF_SIZE")) | select((.author_association | IN("OWNER","MEMBER","COLLABORATOR")) or (.user.type == "Bot"))] | last | .body // ""' 2>/dev/null) || _ds=""
+    printf '%s\n' "$_ds" | grep -qE '^review_depth: *EXTENDED[[:space:]]*$' && REVIEW_DEPTH=EXTENDED
+    REVIEW_WEIGHT=$(printf '%s\n' "$_ds" | sed -n 's/^review_weight: *\([0-9][0-9]*\).*/\1/p' | head -n 1)
+fi
 if [ -n "$MERGE_ISSUE" ]; then
     gh issue view "$MERGE_ISSUE" -R "$REPO" --json labels --jq '[.labels[].name] | any(. == "review-finding")' 2>/dev/null | grep -qx true && FIX_PR=true
     if [ "$FIX_PR" = "true" ]; then
@@ -361,7 +391,7 @@ DBC=false; printf '%s\n' "$DIFF" | grep -qE "docker-compose.*postgres|docker-com
 ROSTER_OUT=""
 [ -n "$ROSTER_SCRIPT" ] && ROSTER_OUT=$(printf '%s\n' "$FILES" | bash "$ROSTER_SCRIPT" --files-file - --scores "$SC" --changed-lines "$LINES" --changed-files "$NFILES" \
     --fix-pr "$FIX_PR" --source-severity "$SRC_SEV" --source-domain "$SRC_DOM" --contract-flags "$CONTRACT_RISK_FLAGS" --churn "$CHURN_ESCALATION" --danger-zone "$DANGER" \
-    --thorough "$THOROUGH" --milestone "$IS_MILESTONE_TO_STAGING" --scraping-configured "$SCRAPING_ON" --database-container "$DBC" --spec-cli "$SPEC_CLI" 2>/dev/null)
+    --thorough "$THOROUGH" --milestone "$IS_MILESTONE_TO_STAGING" --scraping-configured "$SCRAPING_ON" --database-container "$DBC" --spec-cli "$SPEC_CLI" --review-depth "$REVIEW_DEPTH" 2>/dev/null)
 SELECTED_AGENTS=$(printf '%s\n' "$ROSTER_OUT" | sed -n 's/^SELECTED_AGENTS=//p')
 ROSTER_TIER=$(printf '%s\n' "$ROSTER_OUT" | sed -n 's/^TIER=//p')
 ROSTER_REASON=$(printf '%s\n' "$ROSTER_OUT" | sed -n 's/^REASON=//p')
@@ -405,7 +435,7 @@ delta_roster() {
     printf '%s' "$out"
 }
 REVIEW_MODE="FULL"; DELTA_FROM=""; CARRIED_FROM=""; FULL_ROUNDS=0; DELTA_FILES=""
-if [ "$THOROUGH" != "true" ] && [ "$IS_MILESTONE_TO_STAGING" != "true" ]; then
+if [ "$THOROUGH" != "true" ] && [ "$IS_MILESTONE_TO_STAGING" != "true" ] && [ "$NO_DELTA" != "true" ]; then
     read -r RD_KIND RD_ARG RD_ROUNDS <<< "$(review_delta_mode)"
     FULL_ROUNDS="${RD_ROUNDS:-0}"
     case "$RD_KIND" in
@@ -426,7 +456,13 @@ IDX_AUTH=""; IDX_BILLING=""; IDX_DATABASE=""; IDX_API=""; IDX_FRONTEND=""; IDX_I
 SLICES_JSON="{}"
 if [ "$REVIEW_MODE" != "BASE_SYNC_ONLY" ]; then
     review_template_resolve "$REPO_PATH"
-    [ "$TEMPLATE_SOURCE" = "none" ] && block "no review-pr-agents template source resolved: run \`npx forgedock update\`; NEVER review inline"
+    if [ "$TEMPLATE_SOURCE" = "none" ]; then
+        block "no review-pr-agents template source resolved: run \`npx forgedock update\`; NEVER review inline"
+        # forge#3936: keep the setup-error trace and the needs-human alert the old spec bash posted before returning BLOCKED.
+        _msg="Review of PR #${PR_NUMBER} could not start: no review-pr-agents template source resolved (broken install). Run \`npx forgedock update\`, then re-run the review. Reviews are never done inline."
+        gh pr comment "$PR_NUMBER" -R "$REPO" --body "$_msg" >/dev/null 2>&1 || true # allowlist:check-command-side-effects
+        [ -z "$MERGE_ISSUE" ] || gh issue edit "$MERGE_ISSUE" -R "$REPO" --add-label needs-human >/dev/null 2>&1 || true # allowlist:check-command-side-effects
+    fi
     if [ -n "$CODE_INDEX_SCRIPT" ]; then bash "$CODE_INDEX_SCRIPT" --repo-path "$REPO_PATH" >/dev/null 2>&1 || true; fi
     build_index_slice() {
         local domain="${1}" files
@@ -487,7 +523,7 @@ CTX=$(jq -n \
     --argjson sa "$SCORE_AUTH" --argjson sb "$SCORE_BILLING" --argjson sc "$SCORE_CONCURRENCY" --argjson sd "$SCORE_DATABASE" --argjson si "$SCORE_INFRA" \
     --argjson ss "$SCORE_SECURITY" --argjson ssc "$SCORE_SCRAPING" --argjson sf "$SCORE_FRONTEND" --argjson sap "$SCORE_API" \
     --arg cissue "$ISSUE_NUM" --arg cflags "$CONTRACT_RISK_FLAGS" \
-    --arg rtier "$ROSTER_TIER" --arg rreason "$ROSTER_REASON" --argjson agents "$(j_words "$SELECTED_AGENTS")" \
+    --arg rdepth "$REVIEW_DEPTH" --arg rweight "$REVIEW_WEIGHT" --arg rtier "$ROSTER_TIER" --arg rreason "$ROSTER_REASON" --argjson agents "$(j_words "$SELECTED_AGENTS")" \
     --arg dmode "$REVIEW_MODE" --arg dfrom "$DELTA_FROM" --arg dcarried "$CARRIED_FROM" --argjson drounds "$FULL_ROUNDS" --argjson dfiles "$(j_lines "$DELTA_FILES")" \
     --arg pname "$PROJECT_NAME" --arg pctx "$PROJECT_CONTEXT" --arg scraping_on "$SCRAPING_ON" --arg rpath "$REPO_PATH" \
     --arg d_auth "$DOMAIN_CONTEXT_AUTH" --arg d_billing "$DOMAIN_CONTEXT_BILLING" --arg d_conc "$DOMAIN_CONTEXT_CONCURRENCY" --arg d_infra "$DOMAIN_CONTEXT_INFRA" \
@@ -505,7 +541,7 @@ CTX=$(jq -n \
      broken_assumptions: $asm, risk_signals: $risk, churn_context: $churn, churn_escalation: ($churn_esc == "true"), danger_zone: ($danger == "true"),
      scores: {AUTH: $sa, BILLING: $sb, CONCURRENCY: $sc, DATABASE: $sd, INFRA: $si, SECURITY: $ss, SCRAPING: $ssc, FRONTEND: $sf, API: $sap},
      contract: {issue: ($cissue | tonumber? // null), flags: $cflags},
-     roster: {tier: $rtier, reason: $rreason, agents: $agents},
+     roster: {tier: $rtier, review_depth: $rdepth, review_weight: $rweight, reason: $rreason, agents: $agents},
      delta: {mode: $dmode, from: $dfrom, carried_from: $dcarried, full_rounds: $drounds, files: $dfiles},
      config: {project_name: $pname, project_context: $pctx, scraping_configured: ($scraping_on == "true"), repo_path: $rpath,
               domains: {auth: $d_auth, billing: $d_billing, concurrency: $d_conc, infra: $d_infra, database: $d_db, frontend: $d_fe, security: $d_sec, api: $d_api, scraping: $d_scr}},

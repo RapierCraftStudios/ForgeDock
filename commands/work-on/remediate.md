@@ -124,6 +124,19 @@ if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$PR_COMMENTS" ]; then
 fi
 ```
 
+**CI-only and INPR second attempts** <!-- Added: forge#3932 -->: the per-kind scoping also covers `ci-gate` and `inpr-fix`, so a CI-only failure after a remediation of another kind gets its own single attempt, not `ALREADY_DONE`. Trails carry no kind: each completed trail is attributed to the NEWEST trusted bound marker at or before it. When `CURRENT_KIND` is `CI_REMEDIATION` or `INPR_REMEDIATION` and no completed trail is attributed to it, `REMEDIATION_COMPLETE_N` is set to 0: one attempt per kind per PR, keeping the retry bound. An unreadable attribution keeps the kind-agnostic guard:
+
+```bash
+if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$PR_COMMENTS" ] && [ -n "$ISSUE_COMMENTS" ] && { [ "$CURRENT_KIND" = "CI_REMEDIATION" ] || [ "$CURRENT_KIND" = "INPR_REMEDIATION" ]; }; then
+  KIND_DONE_N=$( { printf '%s\n' "$ISSUE_COMMENTS"; printf '%s\n' "$PR_COMMENTS"; } | jq -rs --arg pr "{PR_NUMBER}" --arg kind "$CURRENT_KIND" '
+    [.[][] | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | select((.body // "") | type == "string")] as $c
+    | [$c[] | select(.body | test("\\A<!-- FORGE:(CI|INPR|BASESYNC)_REMEDIATION: pr=" + $pr + " -->")) | {t: .created_at, k: (.body | capture("FORGE:(?<k>CI|INPR|BASESYNC)_REMEDIATION").k + "_REMEDIATION")}] as $m
+    | [$c[] | select(.body | test("\\A<!-- FORGE:REMEDIATION -->[\\s\\S]*<!-- FORGE:REMEDIATION:COMPLETE -->")) | .created_at] as $trails
+    | [$trails[] as $t | ([$m[] | select(.t <= $t)] | sort_by(.t) | last | .k // "") | select(. == $kind)] | length' 2>/dev/null || echo "")
+  if [ -n "$KIND_DONE_N" ] && [ "$KIND_DONE_N" -eq 0 ]; then REMEDIATION_COMPLETE_N=0; fi
+fi
+```
+
 Completed trails of other kinds are left in place (never deleted); only the interrupted-partial cleanup below deletes anything.
 
 - If `REMEDIATION_COMPLETE_N` or `REMEDIATION_TRAIL_N` is empty (comments or `scripts/trusted-comments.sh` unreadable or unresolvable) → fail closed: EXIT `REMEDIATE_RESULT: status: BLOCKED`, blocker: "github-unavailable: remediation trail unreadable (comments or scripts/trusted-comments.sh unresolvable)". Never treat unreadable as "no trail" and never as `ALREADY_DONE`.
@@ -342,15 +355,15 @@ If still failing after 3 iterations: post a comment, re-affirm `needs-human`, EX
 **Pre-push ancestry guard** (same guard as `work-on/review.md` Phase R1; reuse it, do not write a parallel check): a base-sync merge of `origin/{PR_BASE}` passes it, a merge that brings in history from outside the base fails it.
 
 ```bash
-# <Script resolution block from work-on/review.md, verbatim>
 cd {WORKTREE_PATH}
 run() { if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: $*"; else "$@"; fi; }
 git fetch origin {PR_BASE} >/dev/null 2>&1 || true
-RESOLUTION=$(resolve_script 'check-branch-ancestry'); TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
-if [ "$TIER" = "prose" ]; then
+type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+ANCESTRY_SCRIPT=$(forge_resolve check-branch-ancestry.sh)
+if [ -z "$ANCESTRY_SCRIPT" ]; then
   MERGE_COMMITS="check-branch-ancestry script not resolvable (fail closed)"; ANCESTRY_RC=2
 else
-  MERGE_COMMITS=$(bash "$SCRIPT_PATH" {HEAD_BRANCH} origin/{PR_BASE} 2>&1); ANCESTRY_RC=$?
+  MERGE_COMMITS=$(bash "$ANCESTRY_SCRIPT" {HEAD_BRANCH} origin/{PR_BASE} 2>&1); ANCESTRY_RC=$?
 fi
 if [ "$ANCESTRY_RC" -ne 0 ]; then
   run gh issue comment {ISSUE_NUMBER} {GH_FLAG} --body "## Pre-Push Ancestry Guard Failed
@@ -487,7 +500,7 @@ else:
 
 Wait for the completed child result and retain its `REVIEW_RESULT` in remediation state before continuing to Phase M7. A running/progress response is not a completion result. If the child errors or does not return a parseable `REVIEW_RESULT`, stop with `REMEDIATE_RESULT: status: BLOCKED`; do not report remediation in progress as a terminal parent result. The `Skill(...)` invocation above remains the non-OpenCode path.
 
-If the retained `REVIEW_RESULT` is `PHASE_TRAIL_FAILED` (forge#3102): the gate refused to merge on missing phase markers, not on a code finding. Re-run each missing phase named on the `MISSING:` lines via its `Skill(...)`, then re-invoke this phase once. If it is `PHASE_TRAIL_FAILED` again, keep `needs-human`, post `<!-- FORGE:PHASE_TRAIL_FAILED -->` listing the still-missing markers, and exit `REMEDIATE_RESULT: status: BLOCKED`. Never treat it as `HELD-AWAITING-MERGE` or `AUTO-LANDED`. A still-failing trail can also be cleared by a human `<!-- FORGE:PHASE_TRAIL_OVERRIDE -->` comment (forge#3152, see `scripts/verify-phase-trail.sh -h`); the verifier decides, this phase never posts one.
+If the retained `REVIEW_RESULT` is `PHASE_TRAIL_FAILED` (forge#3102): the gate refused to merge on missing phase markers, not on a code finding. This phase does NOT re-dispatch the missing phases: it is a dispatching phase running in a fork (`docs/WORK-ON-RUNTIME.md` R1), and `work-on:review` Phase R4 is the single re-dispatch owner. Keep `needs-human`, post `<!-- FORGE:PHASE_TRAIL_FAILED -->` listing the missing markers from the `MISSING:` lines, and exit `REMEDIATE_RESULT: status: BLOCKED` with blocker "phase trail incomplete" so the router can hand the `MISSING:` lines back to the review owner. Never treat it as `HELD-AWAITING-MERGE` or `AUTO-LANDED`. A still-failing trail can also be cleared by a human `<!-- FORGE:PHASE_TRAIL_OVERRIDE -->` comment (forge#3152, see `scripts/verify-phase-trail.sh -h`); the verifier decides, this phase never posts one.
 
 If the retained `REVIEW_RESULT` is `BLOCKED` with a blocker mentioning the phase trail (e.g. "phase trail unreadable (rc=N)": the Phase 8 verifier exited ≥2 / 127, forge#3147): the gate could not run, so nothing is missing and nothing is re-run. Keep `needs-human` (review-pr Phase 8 already re-asserted it), do not merge, and exit `REMEDIATE_RESULT: status: BLOCKED` with the same blocker.
 
@@ -540,11 +553,12 @@ PR_LIVE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json state,mergedAt,headRefOid 2>/d
 if [ "$(printf '%s' "$PR_LIVE" | jq -r '.state // ""' 2>/dev/null)" = "MERGED" ] || [ -n "$(printf '%s' "$PR_LIVE" | jq -r '.mergedAt // empty' 2>/dev/null)" ]; then
   RE_GATE_OUTCOME="AUTO-LANDED"
   # Idempotent post-merge bookkeeping (same case as the merge branch below; harmless when already applied).
-  RESOLUTION=$(resolve_script 'transition-label')
-  TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+  type forge_resolve >/dev/null 2>&1 || { setopt nonomatch 2>/dev/null || true; FORGE_SOURCED_ROOT='${CLAUDE_PLUGIN_ROOT}'; for _r in "$(cygpath -u "${FORGEDOCK_HOME:-}" 2>/dev/null || printf %s "${FORGEDOCK_HOME:-}")" '${CLAUDE_PLUGIN_ROOT}' "${FORGE_ROOT:-}" "${FORGE_HOME:-}" "$(readlink -f "$HOME/.claude/commands/work-on.md" 2>/dev/null | sed 's|/commands/work-on\.md$||')" "$(head -n 1 "${CODEX_HOME:-$HOME/.codex}/forge-home" 2>/dev/null)" "$HOME/.claude/plugins/marketplaces/forgedock" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/forgedock/forgedock/* "$HOME/.claude"/plugins/cache/forgedock/forgedock/*; do case "$_r" in /*) [ -f "$_r/scripts/lib/forge-resolve.sh" ] && { . "$_r/scripts/lib/forge-resolve.sh"; break; };; esac; done; type forge_resolve >/dev/null 2>&1 || forge_resolve() { :; }; }
+  TRANSITION_SCRIPT=$(forge_resolve transition-label.sh)
+  if [ -n "$TRANSITION_SCRIPT" ]; then TIER=universal; else TIER=prose; fi
   case "$TIER" in
-    adaptive|universal) bash "$SCRIPT_PATH" {ISSUE_NUMBER} {GH_FLAG} merged ;;
-    prose)
+    universal) bash "$TRANSITION_SCRIPT" {ISSUE_NUMBER} {GH_FLAG} merged ;;
+    prose|*)
       gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "workflow:merged" --remove-label "workflow:awaiting-merge,needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:invalid,workflow:decomposed" 2>/dev/null || true # allowlist:check-command-side-effects
       ;;
   esac
@@ -698,11 +712,11 @@ gh pr merge {PR_NUMBER} {GH_FLAG} --merge --match-head-commit "$GATED_HEAD" # al
 fi
 MERGE_STATE=$(gh pr view {PR_NUMBER} {GH_FLAG} --json state --jq '.state')
 if [ "$MERGE_STATE" = "MERGED" ]; then
-  RESOLUTION=$(resolve_script 'transition-label')
-  TIER="${RESOLUTION%%:*}"; SCRIPT_PATH="${RESOLUTION#*:}"
+  TRANSITION_SCRIPT=$(forge_resolve transition-label.sh)
+  if [ -n "$TRANSITION_SCRIPT" ]; then TIER=universal; else TIER=prose; fi
   case "$TIER" in
-    adaptive|universal) bash "$SCRIPT_PATH" {ISSUE_NUMBER} {GH_FLAG} merged ;;
-    prose)
+    universal) bash "$TRANSITION_SCRIPT" {ISSUE_NUMBER} {GH_FLAG} merged ;;
+    prose|*)
       gh issue edit {ISSUE_NUMBER} {GH_FLAG} --add-label "workflow:merged" --remove-label "workflow:awaiting-merge,needs-human,workflow:investigating,workflow:ready-to-build,workflow:building,workflow:in-review,workflow:remediating,workflow:invalid,workflow:decomposed" 2>/dev/null || true # allowlist:check-command-side-effects
       ;;
   esac

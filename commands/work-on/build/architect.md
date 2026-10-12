@@ -719,6 +719,15 @@ gh issue comment {NUMBER} {GH_FLAG} --body "<!-- FORGE:ARCHITECT -->
 |---|------|----------------|-----------------|-----|
 | 1 | {FILE} | {FUNCTION} | {CHANGE} | {REASON} |
 
+### Scope Baseline
+<!-- Machine-readable scope baseline read by build B5.5's post-build scope check (forge#3862). Every
+     path in ### Affected Paths (including tests, docs and config the plan changes), one per line as
+     - path (repo-relative; a trailing slash means every file under that directory). The keys sit alone
+     on their lines. ESTIMATED_DIFF_LINES is the plan's own estimate (code plus tests, a whole number). -->
+PLANNED_FILES:
+- {FILE}
+ESTIMATED_DIFF_LINES: {N}
+
 ### Pattern Sweep
 <!-- Pass-through from the FORGE:INVESTIGATOR '### Pattern Sweep' table (Phase A2.7).
      Omit this section when the investigation report had none. -->
@@ -799,13 +808,16 @@ SKIP_BODY=$(cat <<SKIP_EOF
 
 **Skipped**: {SKIP_REASON}. No cross-path consistency risk — the builder proceeds with the investigation report + context briefing.
 
+### Scope Baseline
+PLANNED_FILES:
+
 <!-- FORGE:ARCHITECT:COMPLETE -->
 SKIP_EOF
 )
 gh issue comment {NUMBER} {GH_FLAG} --body "$SKIP_BODY" # <!-- allowlist:check-command-side-effects -->
 ```
 
-The empty-plan-with-marker changes no downstream behavior — the builder already falls back to the investigation report + contract when the plan is empty (see Integration Point below). The marker only makes the legitimate skip **observable** to the marker-only engine gate. This intentionally does **not** weaken crash detection: a genuinely interrupted architect run still posts no marker at all, so `detectOutcome` still fails-and-escalates it correctly.
+The empty `PLANNED_FILES:` list means "no plan baseline": build B5.5 then skips the out-of-plan check (proceed, never block) and falls back to the investigation's `ESTIMATED_DIFF_LINES`. The empty-plan-with-marker changes no downstream behavior — the builder already falls back to the investigation report + contract when the plan is empty (see Integration Point below). The marker only makes the legitimate skip **observable** to the marker-only engine gate. This intentionally does **not** weaken crash detection: a genuinely interrupted architect run still posts no marker at all, so `detectOutcome` still fails-and-escalates it correctly.
 
 ---
 

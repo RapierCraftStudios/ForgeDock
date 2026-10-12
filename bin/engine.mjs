@@ -4,15 +4,15 @@
  * GitHub state (phase.detectOutcome). All effects are injected → fully testable.
  */
 import { fileURLToPath } from "node:url";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { createHash, scryptSync } from "node:crypto";
 import { hostname as osHostname, homedir } from "node:os";
 import { appendEvent, readLog, deriveState, rewriteLog } from "./engine/runlog.mjs";
-import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postCycleMarker, nextCycleNumber } from "./engine/phases.mjs";
+import { pickPhase, TERMINAL_REASONS, issueSnapshot, hasInvestigationExit, postCycleMarker, nextCycleNumber, newestCycle, cycleResetProvable, remediationHeadStale, decompositionRevoked, openDependency } from "./engine/phases.mjs";
 import { reconcileState } from "./engine/reconcile.mjs";
 import { makeProjector } from "./engine/projector.mjs";
-import { VALID_BACKENDS } from "./runner.mjs";
-import { OUTCOME_CODES, UNCLASSIFIED, normalizeCode, codeForRunnerError, codeForTerminalReason } from "./engine/outcome-codes.mjs";
+import { VALID_BACKENDS, resolveRunTmpRoot, runTmpDir } from "./runner.mjs";
+import { OUTCOME_CODES, UNCLASSIFIED, normalizeCode, codeForRunnerError, codeForTerminalReason, isDiskQuotaError, isDiskQuotaText } from "./engine/outcome-codes.mjs";
 
 // Exported (forge#2175) so bin/engine-cli.mjs can render "failed N/M attempts"
 // diagnostics without duplicating the retry budget constant.
@@ -390,6 +390,27 @@ export async function runIssue(opts) {
     remote = cur;
     ({ state, action } = reconcileState(local, remote));
   }
+  // forge#3932: `Depends on` admission. A trusted `**Depends on**: #N` line whose dependency is still OPEN
+  // refuses the run BEFORE any state/lease write (mirrors deferredResult), so building on top of an
+  // unmerged dependency cannot conflict with it. Checked on every start; a closed dependency, no
+  // declaration or an untrusted body proceeds. An unreadable body/dependency fails closed.
+  {
+    let dep = null;
+    try { dep = await openDependency(issue, io); } catch (e) {
+      dep = { unreadable: true, detail: `issue ${issue} **Depends on** check failed: ${e?.message || e}` };
+    }
+    if (dep?.unreadable) {
+      return { terminalReason: "dependency-unreadable", code: OUTCOME_CODES.DEPENDENCY_UNREADABLE, detail: dep.detail };
+    }
+    if (dep?.open?.length) {
+      return {
+        terminalReason: "dependency-open",
+        code: OUTCOME_CODES.DEPENDENCY_OPEN,
+        dependencies: dep.open,
+        detail: `issue ${issue} **Depends on** ${dep.open.map((n) => `#${n}`).join(", ")} which is still open; re-run once it is closed`,
+      };
+    }
+  }
   // forge#3824: hoisted so RUN_START can carry the repo (lazy, memoised; null when unresolved).
   let repoPromise = null;
   const resolveRepo = () => (repoPromise ??= (async () => {
@@ -412,6 +433,20 @@ export async function runIssue(opts) {
     // and regress committed/issue/v (C2).
     rewriteLog(dir, issue, eventsFromIndex(state, await runMeta()));
     state = deriveState(readLog(dir, issue));
+    // forge#3931: the index does not carry the cycle, so a hydrated log always starts at cycle 0. When a
+    // trusted FORGE:CYCLE exists, cycle-scoped progress (or a needs-human/phase-complete/engine-error terminal)
+    // belongs to an older cycle ONLY when provably so (cycleResetProvable: terminal index, issue OPEN, no needs-human/remediating label, no open PR): reset via the existing RUN_NEXT_CYCLE event so build runs again instead of
+    // terminating. An unreadable trail resets nothing (fail closed). merged/decomposed/invalid terminals stay.
+    if (state.committed.some((p) => ["build", "review", "remediate", "close"].includes(p)) &&
+        state.terminal && ["needs-human", "phase-complete", "engine-error"].includes(state.terminalReason) &&
+        await cycleResetProvable(state, io)) {
+      let cyc = 0;
+      try { cyc = await newestCycle(issue, io); } catch { cyc = 0; }
+      if (cyc > 0) {
+        appendEvent(dir, issue, { event: "RUN_NEXT_CYCLE", issue });
+        state = deriveState(readLog(dir, issue));
+      }
+    }
   }
 
   // forge#3511: explicit `--retry` reopens a transient `engine-error` terminal
@@ -424,12 +459,19 @@ export async function runIssue(opts) {
   // forge#3562: `phase-complete` is also retryable, but as a NEW cycle
   // (RUN_NEXT_CYCLE clears committed) rather than a reopen of the same one.
   let reopened = false;
+  let reopenUncommit = null;
   if (retry && state?.terminal) {
-    if (state.terminalReason !== "engine-error" && state.terminalReason !== "phase-complete" &&
+    // forge#3862 / forge#3932: a `decomposed` terminal is reopened at build when trusted GitHub state shows
+    // the decomposition revoked (a trusted FORGE:DECOMPOSED:REVOKED newer than FORGE:DECOMPOSED); the
+    // revocation alone suffices now that the size gate is gone. Anything else keeps the terminal; an
+    // unreadable comment trail fails closed.
+    if (state.terminalReason === "decomposed" && await decompositionRevoked(issue, io)) {
+      reopenUncommit = ["build", "decompose"];
+    } else if (state.terminalReason !== "engine-error" && state.terminalReason !== "phase-complete" &&
         state.terminalReason !== "needs-human") {
       return {
         terminalReason: "not-retryable",
-        detail: `issue ${issue} ended ${state.terminalReason}; --retry only resumes an engine-error, phase-complete or needs-human run`,
+        detail: `issue ${issue} ended ${state.terminalReason}; --retry only resumes an engine-error, phase-complete or needs-human run (or a decomposed run whose FORGE:DECOMPOSED was revoked by a trusted FORGE:DECOMPOSED:REVOKED)`,
       };
     }
     // forge#3571: a human clearing `needs-human` is the hand-back signal. Reopen
@@ -456,6 +498,13 @@ export async function runIssue(opts) {
           detail: `issue ${issue} still carries needs-human; resolve it and remove the label before --retry`,
         };
       }
+    }
+    // forge#3931: a remediate that ended needs-human was recorded against an older PR head. When the
+    // live head differs from the head in its trusted trail, un-commit remediate AND review so review
+    // re-runs at the new head instead of the old RE-ESCALATED result replaying. Unreadable => no change.
+    if (state.terminalReason === "needs-human" && !reopenUncommit &&
+        state.committed[state.committed.length - 1] === "remediate" && await remediationHeadStale(state, io)) {
+      reopenUncommit = ["remediate", "review"];
     }
     // forge#3562 (SEC-3): a new cycle discards `committed`, so check the live
     // issue first. A CLOSED issue has nothing left to run; an unreadable
@@ -486,6 +535,7 @@ export async function runIssue(opts) {
     appendEvent(dir, issue, {
       event: state.terminalReason === "phase-complete" ? "RUN_NEXT_CYCLE" : "RUN_REOPEN",
       issue,
+      ...(reopenUncommit ? { uncommit: reopenUncommit } : {}),
     });
     state = deriveState(readLog(dir, issue));
     reopened = true;
@@ -779,7 +829,7 @@ export async function runIssue(opts) {
         // "needs-human" — this is the engine/tool breaking, not a genuine
         // human-judgment block (see #2244/#2261). Any other thrown error is
         // a true unexpected crash and keeps propagating unchanged.
-        if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED" || e.code === "CLI_MAX_TURNS") {
+        if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED" || e.code === "CLI_MAX_TURNS" || isDiskQuotaError(e)) {
           // forge#2241: when the runner attached a session-limit reset time
           // (bin/runner.mjs's extractSessionLimitResetTime(), only ever set
           // for a genuine session-limit CLI_BACKEND_FAILED — never
@@ -789,7 +839,7 @@ export async function runIssue(opts) {
           const resetSuffix = e.resetAt ? ` (resets: ${e.resetAt})` : "";
           const detail = e.code === "CLI_MAX_TURNS"
             ? `phase ${phase.id}: CLI_MAX_TURNS - max-turns exhausted${e.numTurns != null ? ` after ${e.numTurns} turns` : ""}: ${e.message}`
-            : `phase ${phase.id}: ${e.code} - ${e.message}${resetSuffix}`;
+            : `phase ${phase.id}: ${e.code ?? "DISK_QUOTA"} - ${e.message}${resetSuffix}`;
           // forge#2240 (review finding): this fail-fast path previously left
           // phase_exit unreported — a caller tailing progress output would see
           // "→ phase X started" and then nothing, dangling exactly on the
@@ -845,6 +895,9 @@ export async function runIssue(opts) {
         await emitOutcome({ event: "PHASE_DEFERRED", phase: phase.id, code: normalizeCode(outcome.code), reason: outcome.detail });
         return { terminalReason: "deferred", code: normalizeCode(outcome.code), detail: outcome.detail };
       }
+      // forge#3572: a phase that returned blocked because the disk/quota ran out is a retryable infra failure.
+      if (isDiskQuotaText(outcome.detail))
+        return await terminate(state, "engine-error", outcome.detail, OUTCOME_CODES.INFRA_DISK_QUOTA);
       if (!isRemediationHandoff)
         return await terminate(state, outcome.reason || "needs-human", outcome.detail, outcome.code);
     } else {
@@ -910,8 +963,8 @@ export async function runIssue(opts) {
     // is seen), phase.id is "decompose" — not "investigate" — so this
     // exemption does not apply and the normal terminate() path below fires,
     // ending the run for real.
-    // build also hands off: the B5.5 size gate (NEEDS_DECOMPOSE) reports "decomposed".
-    const isDecomposeHandoff = (phase.id === "investigate" || phase.id === "build") && terminalReason === "decomposed";
+    // forge#3862: only investigate hands off (decomposition is a planning decision); build never reports "decomposed".
+    const isDecomposeHandoff = phase.id === "investigate" && terminalReason === "decomposed";
     // forge#3624: remediate AUTO-LANDED whose issue is not yet CLOSED+workflow:merged hands off
     // to `close` instead of ending the run (close is idempotent). Exempts BOTH terminate paths.
     const isCloseHandoff = phase.id === "remediate" && outcome.status === "committed" &&
@@ -980,8 +1033,22 @@ export async function runIssue(opts) {
         try { await projector.setLabel(issue, "needs-human"); } catch { /* best-effort */ }
       }
     }
+    // forge#3572: drop the per-run scratch dir (venvs, session data) on a terminal outcome. Kept for
+    // `engine-error` so `--retry` resumes with it, and when another live engine owns the issue.
+    if (reason !== "engine-error" && foreign === undefined) cleanupRunTmpdir(issue);
     return { terminalReason: reason, code: outcomeCode, detail };
   }
+}
+
+/** Best-effort removal of the issue's per-run scratch dir. Confined to the resolved tmp root; never throws. */
+export function cleanupRunTmpdir(issue, { cwd = process.cwd(), env = process.env, rm = rmSync } = {}) {
+  try {
+    const root = resolveRunTmpRoot(cwd, env);
+    const dir = runTmpDir(root, issue);
+    if (!dir || dir === root) return false;
+    rm(dir, { recursive: true, force: true });
+    return true;
+  } catch { return false; }
 }
 
 async function runPhaseWithRetry(phase, state, ctx) {
@@ -1078,6 +1145,13 @@ async function runPhaseWithRetry(phase, state, ctx) {
           event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, code: codeForRunnerError(e), maxAttempts,
           turns: e.numTurns ?? null, usage: e.usage ?? null,
         });
+        throw e;
+      }
+      // forge#3572: a full disk / exhausted quota (EDQUOT/ENOSPC) is infra, not content: retrying burns the budget on the same
+      // failure, so rethrow fail-fast and let runIssue end it as a retryable `engine-error` (never needs-human).
+      if (isDiskQuotaError(e)) {
+        await recordAttempt(attempt, null, t0, null);
+        appendEvent(dir, issue, { event: "PHASE_FAILED", phase: phase.id, attempt, reason: e.message, code: codeForRunnerError(e), maxAttempts });
         throw e;
       }
       if (e.code === "NO_API_KEY" || e.code === "NO_SDK" || e.code === "CLI_BACKEND_FAILED") throw e;

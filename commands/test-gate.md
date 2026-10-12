@@ -439,23 +439,38 @@ BASELINE_RESULTS=""
 
 # Run the same tests against the base branch state to establish baseline
 # If base-branch tests also fail, those are pre-existing failures — not batch-introduced
-git stash 2>/dev/null || true
-git checkout "origin/${BASE_BRANCH}" -- . 2>/dev/null || true
+# Use a detached worktree at the base branch — never stash/checkout in the main checkout
+BASE_WT=$(mktemp -d)
+git -C "$REPO_PATH" worktree add --detach "$BASE_WT" "origin/${BASE_BRANCH}" 2>/dev/null \
+  || { echo "WARNING: could not create baseline worktree — baseline unavailable (failures will count as batch-introduced)"; rmdir "$BASE_WT" 2>/dev/null; BASE_WT=""; }
+# A fresh worktree has no installed deps or local env files: link the main checkout's (read-only use), at the repo
+# root and in every cluster working_dir, so a baseline cluster fails only for code reasons, never for a missing install.
+if [ -n "$BASE_WT" ]; then
+  { echo .; yq '.verification.integration_tests[].working_dir // "."' "$CONFIG_FILE" 2>/dev/null; } | sort -u | while IFS= read -r _wd; do
+    for _dep in node_modules .venv venv .env .env.local .env.test; do
+      [ -e "${REPO_PATH}/${_wd}/${_dep}" ] && [ ! -e "${BASE_WT}/${_wd}/${_dep}" ] && [ -d "${BASE_WT}/${_wd}" ] \
+        && ln -s "${REPO_PATH}/${_wd}/${_dep}" "${BASE_WT}/${_wd}/${_dep}"
+    done
+  done   # one working_dir per line: a path with spaces is never word-split
+fi
 
 for i in $(seq 0 $((CLUSTER_COUNT - 1))); do
   CLUSTER=$(yq ".verification.integration_tests[${i}].cluster" "$CONFIG_FILE")
   CMD=$(yq ".verification.integration_tests[${i}].command" "$CONFIG_FILE")
   WORKING_DIR=$(yq ".verification.integration_tests[${i}].working_dir // \".\"" "$CONFIG_FILE")
 
-  if (cd "${REPO_PATH}/${WORKING_DIR}" && eval "$CMD") 2>&1; then
+  if [ -z "$BASE_WT" ]; then
+    # No baseline: never claim pre-existing. A bundle failure in this cluster counts as batch-introduced (fail closed).
+    BASELINE_RESULTS="${BASELINE_RESULTS}\n- ${CLUSTER}: UNAVAILABLE"
+  elif (cd "${BASE_WT}/${WORKING_DIR}" && eval "$CMD") 2>&1; then
     BASELINE_RESULTS="${BASELINE_RESULTS}\n- ${CLUSTER}: PASS"
   else
     BASELINE_RESULTS="${BASELINE_RESULTS}\n- ${CLUSTER}: FAIL (pre-existing)"
   fi
 done
 
-# Restore working state
-git checkout HEAD -- . 2>/dev/null || true
+# Remove the baseline worktree (the main checkout was never touched)
+[ -n "$BASE_WT" ] && git -C "$REPO_PATH" worktree remove --force "$BASE_WT" 2>/dev/null || true
 
 echo "Baseline results:"
 echo -e "$BASELINE_RESULTS"
@@ -475,10 +490,10 @@ while IFS= read -r result_line; do
   if echo "$STATUS" | grep -q "^FAIL"; then
     # Check if this cluster also failed in baseline
     BASELINE_STATUS=$(echo -e "$BASELINE_RESULTS" | grep "^- ${CLUSTER}:" | grep -oP ':\s+\K.+' || echo "PASS")
-    if echo "$BASELINE_STATUS" | grep -q "^PASS"; then
-      # This cluster passed in baseline but fails in the bundle — batch-introduced failure
+    if ! echo "$BASELINE_STATUS" | grep -q "^FAIL"; then
+      # Baseline PASS (or UNAVAILABLE: no proof it was pre-existing) but fails in the bundle — batch-introduced failure
       BATCH_FAILURES="${BATCH_FAILURES}\n${CLUSTER}"
-      echo "BATCH-INTRODUCED FAILURE: cluster '${CLUSTER}' (baseline: PASS → bundle: FAIL)"
+      echo "BATCH-INTRODUCED FAILURE: cluster '${CLUSTER}' (baseline: ${BASELINE_STATUS} → bundle: FAIL)"
     else
       echo "PRE-EXISTING FAILURE: cluster '${CLUSTER}' (baseline: FAIL → bundle: FAIL — not this batch)"
     fi
@@ -534,7 +549,7 @@ else
     cat <<ISSUE_EOF > "$TESTGATE_FAIL_BODY_FILE"
 ## Problem
 
-The \`/test-gate\` command detected a runtime failure in cluster \`${cluster}\` that was introduced by the staging→${DEFAULT_BRANCH} bundle. The failure did not exist on \`${BASE_BRANCH}\` (baseline PASS), confirming it is batch-introduced, not pre-existing.
+The \`/test-gate\` command detected a runtime failure in cluster \`${cluster}\` that was introduced by the staging→${DEFAULT_BRANCH} bundle. It was not observed failing on \`${BASE_BRANCH}\` (baseline: PASS, or UNAVAILABLE when the baseline could not run — then treated as batch-introduced, fail closed).
 
 ## Root Cause (if known)
 
@@ -574,7 +589,7 @@ $(echo -e "$SOURCE_ISSUES_LIST")
    \`\`\`
 3. Observe failure. Compare against \`${BASE_BRANCH}\` baseline:
    \`\`\`bash
-   git checkout origin/${BASE_BRANCH} -- .
+   git worktree add --detach "$BASE_WT" origin/${BASE_BRANCH}   # run the command inside $BASE_WT
    $(yq ".verification.integration_tests[] | select(.cluster == \"${cluster}\") | .command" "$CONFIG_FILE")
    \`\`\`
 ISSUE_EOF

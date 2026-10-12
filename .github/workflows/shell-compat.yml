@@ -79,6 +79,7 @@ jobs:
           /bin/bash scripts/review-pr-domain-map.test.sh
           /bin/bash scripts/review-roster.test.sh
           /bin/bash scripts/review-prepare.test.sh
+          /bin/bash scripts/review-finalize.test.sh
           /bin/bash scripts/spawn-depth-check.test.sh
           /bin/bash scripts/diff-size.test.sh
           /bin/bash scripts/close-dossier-no-main-commit.test.sh
@@ -103,6 +104,8 @@ jobs:
           bash scripts/checkbox-sections.test.sh
           bash scripts/file-deferred-followups.test.sh
           bash scripts/resolve-deploy-gate.test.sh
+      - name: Run publish-staging-sync.test.sh
+        run: bash scripts/publish-staging-sync.test.sh
       - name: Run review-pr-gate2.test.sh
         if: runner.os != 'macOS'
         run: bash scripts/review-pr-gate2.test.sh
@@ -140,6 +143,7 @@ jobs:
           bash scripts/review-pr-domain-map.test.sh
           bash scripts/review-roster.test.sh
           bash scripts/review-prepare.test.sh
+          bash scripts/review-finalize.test.sh
       - name: Run is-docs-only.test.sh
         run: bash scripts/is-docs-only.test.sh
       - name: Run spawn-depth-check.test.sh
@@ -209,6 +213,7 @@ jobs:
           bash scripts/review-pr-domain-map.test.sh
           bash scripts/review-roster.test.sh
           bash scripts/review-prepare.test.sh
+          bash scripts/review-finalize.test.sh
       - name: Run is-docs-only.test.sh
         run: bash scripts/is-docs-only.test.sh
       - name: Run spawn-depth-check.test.sh

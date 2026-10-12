@@ -165,13 +165,21 @@ export function sliceToCurrentCycle(comments) {
  * GitHub already carries markers. Errors propagate (caller fails closed).
  */
 export async function nextCycleNumber(issue, localCycles, io) {
+  return Math.max(await newestCycle(issue, io), localCycles) + 1;
+}
+/**
+ * Highest trusted FORGE:CYCLE number on the issue (0 when none). Reads only
+ * trusted comments via issueMarkers/cycleNumber; errors propagate so the caller
+ * fails closed (forge#3931: hydration must not reset on an unreadable trail).
+ */
+export async function newestCycle(issue, io) {
   const { comments } = await issueMarkers(issue, io);
   let highest = 0;
   for (const body of comments) {
     const c = cycleNumber(body);
     if (c !== null && c > highest) highest = c;
   }
-  return Math.max(highest, localCycles) + 1;
+  return highest;
 }
 /**
  * Idempotently publish the FORGE:CYCLE marker for cycle `n`: skipped when the
@@ -203,8 +211,7 @@ function latestGateState(comments) {
   return latestGateMarker(comments).state;
 }
 /**
- * Single newest-first scan shared by latestGateState and latestBlockedIndex so their
- * predicates cannot drift. Returns the newest gate marker's state and its comment index
+ * Single newest-first scan used by latestGateState. Returns the newest gate marker's state and its comment index
  * (`{state: "none", index: -1}` when there is none).
  */
 function latestGateMarker(comments) {
@@ -217,15 +224,6 @@ function latestGateMarker(comments) {
     if (hasSentinelLine(b, `${gate}:FAILED`) || hasSentinelLine(b, `${gate}:BLOCKED`)) return { state: "blocked", index: i };
   }
   return { state: "none", index: -1 };
-}
-/**
- * Comment index of the newest blocked gate marker, or -1 when the newest gate marker is
- * not blocked (a newer PASSED clears it). Recency anchor for build.detectOutcome so an
- * older blocked marker cannot shadow a strictly newer size-gate routing marker.
- */
-function latestBlockedIndex(comments) {
-  const m = latestGateMarker(comments);
-  return m.state === "blocked" ? m.index : -1;
 }
 /**
  * Investigation exit evidence (forge#3534): a trusted comment led by
@@ -273,48 +271,75 @@ async function hasInvestigationCloseEvidence(issue, io) {
     || hasPhaseComplete(sliceToCurrentCycle(comments));
 }
 
-/**
- * Trusted comment bodies, chronological — the same single fetch + trust predicate
- * as issueMarkers() (one path, forge#3542). Fail closed: a fetch error yields `[]` here (issueMarkers itself propagates it).
- */
-async function trustedCommentBodies(issue, io) {
-  try { return (await issueMarkers(issue, io)).comments; } catch { return []; }
-}
-
-/** build.md B5.5 Step 2: a SIZE_OVERRIDE needs a non-empty justification — the first non-blank, non-HTML-comment line after the marker line. */
+/** A SIZE_OVERRIDE needs a non-empty justification — the first non-blank, non-HTML-comment line after the marker line. */
 function overrideHasJustification(body) {
   const lines = String(body).replace(/\r\n/g, "\n").split("\n");
   return lines.slice(1).some((l) => l.trim() !== "" && !l.trimStart().startsWith("<!--"));
 }
 
 /**
- * Size-gate routing (build.md B5.5). True only when the latest `FORGE:DIFF_SIZE`
- * says `result: OVER`, carries a `### Split Proposal` (the discriminator against
- * the decompose-loop-guard Blocked exit, which also posts OVER but must not
- * re-enter decompose), and no justified `FORGE:SIZE_OVERRIDE` comment follows it,
- * and the issue is not already decomposed. `comments` MUST be TRUSTED bodies in
- * chronological order (see trustedCommentBodies); an untrusted comment never
- * reaches this function.
+ * forge#3862 / forge#3932: does trusted GitHub state show a REVOKED decomposition?
+ * Revoked = a trusted `<!-- FORGE:DECOMPOSED:REVOKED -->` comment newer than the newest
+ * trusted `FORGE:DECOMPOSED` comment (or one with no `FORGE:DECOMPOSED` left). The revocation
+ * alone is the operator's explicit signal: the size gate that once required a justified
+ * `FORGE:SIZE_OVERRIDE` alongside it is gone, so no override clause remains. An untrusted
+ * revocation never counts. Fail closed: an unreadable comment trail is `false`, never "revoked".
  */
-function sizeGateRouteIndex(comments) {
-  const gate = PHASE_MARKERS.build.sizeGateMarker;
-  const override = PHASE_MARKERS.build.sizeOverrideMarker;
-  const starts = (c, m) => typeof c === "string" && c.trimStart().startsWith(`<!-- ${m}`);
-  if (comments.some((c) => starts(c, "FORGE:DECOMPOSED"))) return -1;
-  let idx = -1;
-  for (let i = comments.length - 1; i >= 0; i--) if (starts(comments[i], gate)) { idx = i; break; }
-  if (idx < 0) return -1;
-  const body = comments[idx].replace(/\r\n/g, "\n");
-  const m = /^result:[ \t]*(OK|OVERRIDDEN|COHESIVE|OVER)[ \t]*$/m.exec(body);
-  if (!m || m[1] !== "OVER" || !/^###[ \t]+Split Proposal\b/m.test(body)) return -1;
-  return comments.slice(idx + 1).some((c) => starts(c, override) && overrideHasJustification(c)) ? -1 : idx;
+export async function decompositionRevoked(issue, io) {
+  let comments;
+  try { comments = (await issueMarkers(issue, io)).comments; } catch { return false; }
+  const last = (pred) => { for (let i = comments.length - 1; i >= 0; i--) if (pred(comments[i])) return i; return -1; };
+  const revokedAt = last((c) => startsWithHeader(c, "FORGE:DECOMPOSED:REVOKED"));
+  if (revokedAt < 0) return false;
+  // `startsWithHeader` also matches `FORGE:DECOMPOSED:REVOKED` for the header `FORGE:DECOMPOSED` (":" ends
+  // the identifier), so the live decomposition record is the newest one that is not the revocation itself.
+  const decomposedAt = last((c) => startsWithHeader(c, "FORGE:DECOMPOSED") && !startsWithHeader(c, "FORGE:DECOMPOSED:REVOKED"));
+  return decomposedAt <= revokedAt;
 }
-/** Boolean form of sizeGateRouteIndex (index of the routing DIFF_SIZE comment, or -1). */
-function sizeGateRoutesToDecompose(comments) {
-  return sizeGateRouteIndex(comments) >= 0;
+
+/** Read one issue's REST record (`state`, `body`, author provenance). Throws on a failed read; null on unparsable/non-object output. */
+async function readIssueRecord(n, io) {
+  const out = String((await io.gh(["api", `repos/{owner}/{repo}/issues/${n}`])) ?? "").trim();
+  if (!out) return { empty: true };
+  try {
+    const j = JSON.parse(out);
+    return j && typeof j === "object" && !Array.isArray(j) ? j : null;
+  } catch { return null; }
 }
+
 /**
- * Decompose loop guard (mirrors build.md B5.5 and decompose.md Guard 1). Returns a
+ * forge#3932: does the issue declare a `**Depends on**: #N` dependency that is still OPEN?
+ * Honoured only when the issue BODY's author is trusted (`isTrustedComment`: OWNER/MEMBER/COLLABORATOR,
+ * Bot, or FORGE_TRAIL_TRUSTED_LOGINS) and only for the exact line decompose.md emits
+ * (`**Depends on**: #N` at line start; loose "depends on/after" prose is ignored). A self-reference is
+ * ignored. Returns `null` (nothing blocking), `{ open: [N, ...] }`, or `{ unreadable: true, detail }`
+ * when the issue or a declared dependency cannot be read (fail closed: the caller refuses the run).
+ * An empty read of the issue itself means "no body to trust" and yields `null`.
+ */
+export async function openDependency(issue, io) {
+  let rec;
+  try { rec = await readIssueRecord(issue, io); } catch (e) {
+    return { unreadable: true, detail: `issue ${issue} could not be read for its **Depends on** line: ${e?.message || e}` };
+  }
+  if (rec === null) return { unreadable: true, detail: `issue ${issue} could not be parsed for its **Depends on** line` };
+  if (rec.empty || typeof rec.body !== "string" || !isTrustedComment(rec)) return null;
+  const deps = [...new Set([...rec.body.replace(/\r\n/g, "\n").matchAll(/^\*\*Depends on\*\*:[ \t]*#(\d+)\b/gm)].map((m) => Number(m[1])))]
+    .filter((n) => n > 0 && n !== Number(issue));
+  const open = [];
+  for (const dep of deps) {
+    let d;
+    try { d = await readIssueRecord(dep, io); } catch (e) {
+      return { unreadable: true, detail: `dependency #${dep} of issue ${issue} could not be read: ${e?.message || e}` };
+    }
+    const st = typeof d?.state === "string" ? d.state.toLowerCase() : "";
+    if (st === "open") open.push(dep);
+    else if (st !== "closed") return { unreadable: true, detail: `dependency #${dep} of issue ${issue} has no readable state` };
+  }
+  return open.length ? { open } : null;
+}
+
+/**
+ * Decompose loop guard (mirrors decompose.md Guard 1; forge#3676). Returns a
  * short reason string when the issue must NOT be routed to decompose, else null:
  * a `**Parent**: #N` body line (a sub-issue; decompose Guard 1 would BLOCK it), a
  * TRUSTED `FORGE:DECOMPOSED` comment, or a TRUSTED justified `FORGE:SIZE_OVERRIDE`.
@@ -340,11 +365,6 @@ async function decomposeLoopGuard(issue, comments, io) {
   return null;
 }
 
-/** Cheap untrusted pre-check: does ANY comment look like an OVER gate? Only then is the trusted fetch worth making. */
-function mayRouteToDecompose(comments) {
-  const gate = PHASE_MARKERS.build.sizeGateMarker;
-  return comments.some((c) => typeof c === "string" && c.trimStart().startsWith(`<!-- ${gate}`) && /^result:[ \t]*OVER[ \t]*\r?$/m.test(c));
-}
 /**
  * Count commits on `branch` ahead of `lane`'s base. On the first build the
  * branch does not exist yet, so real git rejects the ref range — swallow
@@ -577,11 +597,6 @@ async function reviewArgs(state, ctx, io) {
           "--branch", need(state.branch, "branch", BRANCH_RE), ...baseArgs(state)];
 }
 
-/** Default `build.diff_size.estimate_factor` (docs/CONFIG.md); used when the report carries no valid `ESTIMATE_FACTOR:` field. */
-const DEFAULT_ESTIMATE_FACTOR = 1.2;
-/** Default `build.diff_size.batch_seam_min` (docs/CONFIG.md); the engine cannot read forge.yaml here. */
-const DEFAULT_BATCH_SEAM_MIN = 3;
-
 /**
  * Is the issue assessed for decomposition? Evaluated on ONE comment: the newest
  * trusted `<!-- FORGE:INVESTIGATOR` report (forge#3542 selects it; forge#3543's
@@ -602,40 +617,22 @@ function isDecomposed(report) {
     console.error(`[engine] conflicting decomposition signals (heading=${verdict ?? "none"}, markers=${[...markers].join("+") || "none"}); treating as not decomposed`);
     return false;
   }
-  // forge#3573 safety net inputs: own-line, whole-number fields only; absent/0/non-numeric
-  // fields have no effect. The factor is the investigator's effective `ESTIMATE_FACTOR:`
-  // (positive decimal); absent/invalid -> 1.2.
-  const est = /^ESTIMATED_DIFF_LINES:[ \t]*(\d+)[ \t]*$/m.exec(text);
-  const gate = /^GATE_THRESHOLD:[ \t]*(\d+)[ \t]*$/m.exec(text);
-  const fac = /^ESTIMATE_FACTOR:[ \t]*(\d+(?:\.\d+)?)[ \t]*$/m.exec(text);
-  const seamsM = /^INDEPENDENT_SEAMS:[ \t]*(\d+)[ \t]*$/m.exec(text);
-  const parsedFactor = fac ? Number(fac[1]) : NaN;
-  const factor = Number.isFinite(parsedFactor) && parsedFactor > 0 ? parsedFactor : DEFAULT_ESTIMATE_FACTOR;
-  const sized = est && gate && Number(gate[1]) > 0;
-  const estimate = sized ? Number(est[1]) : 0;
-  const threshold = sized ? Number(gate[1]) : 0;
+  // forge#3862: decomposition is a planning decision on SEPARABILITY, never on size. The engine has
+  // no line-count rule and no estimate net: an estimate, however large, never routes to decompose.
+  // A YES must be backed by the separability evidence the investigator records: an own-line
+  // `INDEPENDENT_SEAMS:` of at least 2 and an own-line `DECOMPOSE_JUSTIFICATION:`. A report that
+  // carries the seam field but not that evidence is downgraded to NO (fail toward building).
+  // A YES with no `INDEPENDENT_SEAMS:` field at all (an older or malformed report) is kept.
   if ((verdict ?? marker) === "YES") {
-    // forge#3786: a YES the numbers do not require is downgraded to NO unless the report
-    // carries an own-line `DECOMPOSE_JUSTIFICATION:` line. Required = estimate over
-    // threshold x factor, or the seam clause (seams >= batch_seam_min and estimate over
-    // threshold / 2). The engine cannot see the `batch` label or the configured
-    // `batch_seam_min`, so it uses the default 3 and stays lenient for batches. Absent
-    // numeric fields keep the YES (no silent downgrade of a malformed report).
-    if (sized) {
-      const seams = seamsM ? Number(seamsM[1]) : 0;
-      const required = estimate > threshold * factor || (seams >= DEFAULT_BATCH_SEAM_MIN && estimate > threshold / 2);
+    const seamsM = /^INDEPENDENT_SEAMS:[ \t]*(\d+)[ \t]*$/m.exec(text);
+    if (seamsM) {
+      const seams = Number(seamsM[1]);
       const justified = /^DECOMPOSE_JUSTIFICATION:[ \t]*\S/m.test(text);
-      if (!required && !justified) {
-        console.error(`[engine] unsupported DECOMPOSE:YES (estimate ${estimate}, seams ${seams}, gate ${threshold} x ${factor}, no DECOMPOSE_JUSTIFICATION); treating as not decomposed`);
+      if (seams < 2 || !justified) {
+        console.error(`[engine] unsupported DECOMPOSE:YES (separable seams ${seams}${justified ? "" : ", no DECOMPOSE_JUSTIFICATION"}); treating as not decomposed`);
         return false;
       }
     }
-    return true;
-  }
-  // forge#3573 safety net: an investigator NO whose own size estimate is clearly over
-  // the gate (estimate > threshold x factor) fails toward decompose.
-  if (sized && estimate > threshold * factor) {
-    console.error(`[engine] investigator estimate ${estimate} exceeds gate ${threshold} x ${factor}; routing to decompose`);
     return true;
   }
   return false;
@@ -757,13 +754,7 @@ export const PHASES = [
       // review. Non-retryable: a retry would only re-read the same append-only markers.
       // A newer PASSED clears this: either the in-build repair loop posts it, or a fresh
       // build invocation does via build.md B0 gate resume (re-enters B6.5; forge#3725).
-      // forge#3712: an OVER + Split Proposal size-gate marker STRICTLY NEWER (comment order)
-      // than the newest blocked marker is the retry's real outcome; route to decompose.
-      // Equal/absent index stays fail-closed, as does a newer blocked marker.
-      if (!complete && latestGateState(comments) === "blocked" && mayRouteToDecompose(comments)
-          && sizeGateRouteIndex(comments) > latestBlockedIndex(comments)) {
-        return { status: "committed", terminalReason: "decomposed", code: OC.BUILD_SIZE_OVER_GATE, outputs: branch ? { branch } : {} };
-      }
+      // forge#3862: the build never routes to decompose (no size-gate decomposed outcome).
       if (latestGateState(comments) === "blocked") {
         return { status: "failed", detail: `acceptance gate blocked (builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"})`, code: OC.BUILD_ACCEPTANCE_FAILED, retryable: false };
       }
@@ -775,13 +766,6 @@ export const PHASES = [
       // ground truth. Not retried; review is skipped and close runs `--terminal-state investigation`.
       if (hasInvestigationMarker(comments)) {
         return { status: "committed", terminalReason: "investigation", outputs: {} };
-      }
-      // B5.5 NEEDS_DECOMPOSE: the size gate posts no FORGE:BUILDER:COMPLETE and
-      // build.md says the router (not build) dispatches decompose with no
-      // needs-human. Non-retryable by construction: a retry re-measures and
-      // re-emits the same exit.
-      if (!complete && mayRouteToDecompose(comments) && sizeGateRoutesToDecompose(comments)) {
-        return { status: "committed", terminalReason: "decomposed", code: OC.BUILD_SIZE_OVER_GATE, outputs: branch ? { branch } : {} };
       }
       const detail = `builder complete=${complete} commitsAhead=${ahead} branch=${branch || "unresolved"}`;
       // forge#2176: when the builder has already posted FORGE:BUILDER:COMPLETE
@@ -858,11 +842,14 @@ export const PHASES = [
       // An explicit REVIEW_RESULT status is authoritative: BLOCKED/COMPLETE exits
       // (phase trail, ci gate, base conflict, merge refusal) also label the issue
       // needs-human but are NOT remediation handoffs, so skip the label fallback.
-      if (rr && rr.status) return { status: "failed", detail: "PR open, not merged", retryable: false, handoff: false, outputs };
+      if (rr && rr.status) return { status: "failed", detail: "PR open, not merged", retryable: false, handoff: false, outputs, code: OC.REVIEW_PR_OPEN };
       let snap = null;
       try { snap = await issueSnapshot(state.issue, io); } catch { snap = null; }
       if (snap?.ok && (snap.labels.includes("needs-human") || snap.labels.includes("workflow:remediating"))) return escalated;
-      return { status: "failed", detail: "PR open, not merged", retryable: false, outputs };
+      // forge#3931: an idempotent re-review at an unchanged head posts nothing new, so the only evidence of a
+      // blocking finding is the trusted FORGE:NOTE_DISPOSITION already on the PR for this head. Hand off to remediate.
+      if (await blockingDispositionAtHead(pr, io)) return { ...escalated, detail: "blocking ISSUE finding at unchanged head", code: OC.REVIEW_BLOCKING_ISSUE };
+      return { status: "failed", detail: "PR open, not merged", retryable: false, outputs, code: OC.REVIEW_PR_OPEN };
     },
   },
   {
@@ -1025,6 +1012,9 @@ export const PHASES = [
           return { status: "committed", terminalReason: "awaiting-merge", outputs: { reGateOutcome } };
         case "RE-ESCALATED":
         case "UNFIXABLE":
+          // forge#3931: a trail recorded against an older PR head must not be replayed as this run's outcome.
+          if (await remediationHeadStale(state, io))
+            return { status: "failed", code: OC.REMEDIATE_NO_MARKER, detail: `stale ${completion} trail: PR head moved since it was recorded` };
           // Both leave the issue at needs-human (a fresh escalation, or a
           // policy judgment call respectively) — reuse the existing
           // "needs-human" terminal reason rather than inventing two more,
@@ -1111,7 +1101,11 @@ export const PHASES = [
       // that label is still a real terminal state (nothing left for this phase
       // to do), just not a "merged" one — reuse the existing "invalid" reason
       // (already in TERMINAL_REASONS) rather than inventing a new one.
-      if (snap.labels.includes(PHASE_MARKERS.close.completionLabel))
+      // SEC-1: the label alone is not proof either. A reopened or never-closed issue can still
+      // carry a stale `workflow:merged`, so "merged" requires CLOSED together with the label
+      // (same predicate as the remediate `mergedResult`). A label without CLOSED falls through
+      // to the OPEN / PHASE_COMPLETE / "issue not closed" paths below.
+      if (snap.state === "CLOSED" && snap.labels.includes(PHASE_MARKERS.close.completionLabel))
         return { status: "committed", terminalReason: "merged", outputs: {} };
       // forge#3534: an investigation exit closes the issue itself; keep that reason honest.
       if (snap.state === "CLOSED") {
@@ -1212,16 +1206,73 @@ async function mergedPrForBranch(branch, lane, io) {
     return hit ? { number: hit.number } : null;
   } catch { return null; }
 }
+/**
+ * forge#3931: true when the newest trusted FORGE:NOTE_DISPOSITION on the PR covers the live head
+ * (`reviewed_sha`) and filed at least one ISSUE (`findings_filed` > 0). Trusted comments only; an
+ * unreadable PR, missing head or unparsable record returns false (fail closed: no handoff).
+ */
+async function blockingDispositionAtHead(pr, io) {
+  if (!pr?.head) return false;
+  try {
+    const { comments } = await issueMarkers(pr.number, io);
+    const recs = comments.filter((b) => /^\s*<!--\s*FORGE:NOTE_DISPOSITION:/.test(b));
+    if (!recs.length) return false;
+    const first = recs[recs.length - 1].split("\n", 1)[0];
+    const sha = /\breviewed_sha=([0-9a-f]{40,64})\b/.exec(first)?.[1];
+    const filed = /\bfindings_filed=(\d+)\b/.exec(first)?.[1];
+    return sha === pr.head && Number(filed) > 0;
+  } catch { return false; }
+}
 async function prStatusFor(state, io) {
   const n = await openPrFor(state, io);
   if (!n) return null;
-  const out = await io.gh(["pr", "view", String(n), "--json", "number,state,labels,mergedAt"]);
+  const out = await io.gh(["pr", "view", String(n), "--json", "number,state,labels,mergedAt,headRefOid"]);
   let j;
   try { j = JSON.parse(out || "{}"); } catch { return null; }
   const labels = (j.labels || []).map((l) => l.name || l);
   return { number: j.number, merged: !!j.mergedAt || j.state === "MERGED",
            needsHuman: labels.includes("needs-human"),
-           remediating: labels.includes("workflow:remediating") };
+           remediating: labels.includes("workflow:remediating"),
+           head: typeof j.headRefOid === "string" && SHA_RE.test(j.headRefOid) ? j.headRefOid : null };
+}
+const SHA_RE = /^[0-9a-f]{40,64}$/;
+
+/**
+ * forge#3931: true only when the newest trusted FORGE:REMEDIATION:COMPLETE names a
+ * `**Head**:` SHA that differs from the live PR head, i.e. the trail was produced for
+ * an older head. Any unreadable input (no pr, no trail, `unknown`/missing head, gh or
+ * parse failure) returns false so callers keep today's behaviour (fail closed).
+ */
+export async function remediationHeadStale(state, io) {
+  if (state?.pr == null) return false;
+  try {
+    const { comments } = await issueMarkers(state.issue, io);
+    const latest = latestMarked(comments, PHASE_MARKERS.remediate.header, PHASE_MARKERS.remediate.completionMarker);
+    const recorded = latest === null ? null : /\*\*Head\*\*:[ \t]*([0-9a-f]{40,64})\b/.exec(latest)?.[1] ?? null;
+    if (!recorded) return false;
+    const j = JSON.parse((await io.gh(["pr", "view", String(state.pr), "--json", "headRefOid"])) || "{}");
+    return typeof j.headRefOid === "string" && SHA_RE.test(j.headRefOid) && j.headRefOid !== recorded;
+  } catch { return false; }
+}
+
+/**
+ * forge#3931 (CONC-1): hydrate-time cycle reset is safe only when the hydrated progress is provably from an
+ * OLDER cycle. The index carries no cycle number, so a same-cycle mid-flight or blocked run must not reset.
+ * Provable = a terminal index AND live GitHub state showing the issue OPEN with `needs-human` and
+ * `workflow:remediating` both clear AND no OPEN PR on the branch. Any unreadable input returns false.
+ */
+export async function cycleResetProvable(state, io) {
+  if (!state?.terminal) return false;
+  try {
+    const snap = await issueSnapshot(state.issue, io);
+    if (!snap.ok || snap.state !== "OPEN") return false;
+    if (snap.labels.includes("needs-human") || snap.labels.includes("workflow:remediating")) return false;
+    if (state.branch) {
+      const a = JSON.parse((await io.gh(["pr", "list", "--head", state.branch, "--json", "number,state", "--state", "all"])) || "[]");
+      if (!Array.isArray(a) || a.some((p) => p && p.state === "OPEN")) return false;
+    }
+    return true;
+  } catch { return false; }
 }
 
 /** The engine's transition function: first uncommitted phase whose gate holds. */

@@ -26,6 +26,8 @@ on:
       - 'scripts/review-roster.test.sh'
       - 'scripts/review-prepare.sh'
       - 'scripts/review-prepare.test.sh'
+      - 'scripts/review-finalize.sh'
+      - 'scripts/review-finalize.test.sh'
       - 'scripts/lib/pr-issue-number.sh'
       - 'scripts/lib/review-template-resolve.sh'
       - 'scripts/review-delta.sh'
@@ -74,6 +76,8 @@ on:
       - 'scripts/review-roster.test.sh'
       - 'scripts/review-prepare.sh'
       - 'scripts/review-prepare.test.sh'
+      - 'scripts/review-finalize.sh'
+      - 'scripts/review-finalize.test.sh'
       - 'scripts/lib/pr-issue-number.sh'
       - 'scripts/lib/review-template-resolve.sh'
       - 'scripts/review-delta.sh'
@@ -354,6 +358,7 @@ jobs:
           bash scripts/review-pr-domain-map.test.sh
           bash scripts/review-roster.test.sh
           bash scripts/review-prepare.test.sh
+          bash scripts/review-finalize.test.sh
           bash scripts/close-parent-c3.test.sh
           bash scripts/review-delta.test.sh
           bash scripts/review-pr-delta-wiring.test.sh
@@ -364,12 +369,14 @@ jobs:
           # Every Bash call is a fresh shell: a fence that reads these variables must bind them itself
           # (re-declare with the orchestrator's values). Deliberate reads: `allowlist:fence-state`.
           bash scripts/check-spec-bash.sh --fence-state PR_NUMBER REPO REPO_FLAG MERGE_ISSUE MERGE_GH_FLAG AUTO_MERGE REVIEW_SHA -- commands/review-pr.md
+          # The staging spec binds its state through the FENCE_BOOTSTRAP stub (scripts/lib/fence-bootstrap.sh), which the checker understands.
+          bash scripts/check-spec-bash.sh --fence-state PR_NUMBER GH_REPO DEFAULT_BRANCH STAGING_BRANCH ALL_PR_NUMBERS -- commands/review-pr-staging.md
           # Slice-path writers (protocols.md §1) must re-declare it. Persona files wrap their template in an outer bare fence,
           # which this checker skips; review-pr-gate2.test.sh counts persona reads vs re-declarations instead.
           bash scripts/check-spec-bash.sh --fence-state SLICE_FILE -- commands/review-pr-agents/protocols.md docs/spec/review-protocol.md
           # Every Bash call is a fresh shell: a function defined in one fence is undefined in the others, so a fence
           # must not call one that only another fence defines (re-declare it guarded). Deliberate calls: `allowlist:fence-funcs`.
-          bash scripts/check-spec-bash.sh --fence-funcs -- commands/orchestrate/phase-4-execution.md
+          bash scripts/check-spec-bash.sh --fence-funcs -- commands/orchestrate/phase-4-execution.md commands/review-pr*.md
 
   admission-parity:
     name: admission.mjs / bash mirror parity check

@@ -194,6 +194,61 @@ jobs:
           git commit -m "chore: bump version to ${{ env.VERSION }} [skip ci]"
           git push
 
+      - name: Sync version to staging
+        if: env.SKIP_PUBLISH != 'true'
+        # Non-fatal: the release is already on npm by this point, so a failed
+        # back-sync must never turn it red. commands/deploy-pr.md Phase 2A.5 is
+        # the safety net that repairs a missed sync before the deploy PR opens.
+        continue-on-error: true
+        run: |
+          # Back-propagate the version bump to staging as a version-only commit
+          # (never a merge of main) so the next staging->main deploy PR passes
+          # the Deploy Version Guard without a manual sync PR. GITHUB_TOKEN
+          # pushes do not retrigger workflows; [skip ci] is added for clarity.
+          SYNC_DIR="$RUNNER_TEMP/staging-sync"
+          cleanup() { git worktree remove --force "$SYNC_DIR" 2>/dev/null || true; }
+          trap cleanup EXIT
+          for attempt in 1 2 3; do
+            cleanup
+            if ! git fetch origin staging; then
+              echo "::warning::staging sync: could not fetch origin/staging (attempt $attempt)"
+              continue
+            fi
+            # Numeric semver compare in node (never a string compare: 1.10.0 > 1.9.0).
+            STAGING_VERSION=$(git show origin/staging:package.json | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(0, 'utf8')).version)") || STAGING_VERSION=""
+            if [ -z "$STAGING_VERSION" ]; then
+              echo "::warning::staging sync: could not read staging package.json version (attempt $attempt)"
+              continue
+            fi
+            if STAGING_VERSION="$STAGING_VERSION" node -e "
+              const p = (v) => v.split('.').map(Number);
+              const [a, b] = [p(process.env.STAGING_VERSION), p(process.env.VERSION)];
+              for (let i = 0; i < 3; i++) { if (a[i] !== b[i]) process.exit(a[i] > b[i] ? 0 : 1); }
+              process.exit(0);
+            "; then
+              echo "staging already at $STAGING_VERSION (>= $VERSION) — nothing to sync"
+              exit 0
+            fi
+            git worktree add --detach "$SYNC_DIR" origin/staging || { echo "::warning::staging sync: worktree add failed"; continue; }
+            (
+              cd "$SYNC_DIR" || exit 1
+              node -e "
+                const fs = require('fs');
+                for (const f of ['package.json', '.claude-plugin/plugin.json']) {
+                  const j = JSON.parse(fs.readFileSync(f, 'utf8'));
+                  j.version = process.env.VERSION;
+                  fs.writeFileSync(f, JSON.stringify(j, null, 2) + '\\n');
+                }
+              "
+              git add package.json .claude-plugin/plugin.json
+              git commit -m "chore: sync version ${VERSION} to staging [skip ci]"
+              git push origin HEAD:staging
+            ) && { echo "Synced version $VERSION to staging"; exit 0; }
+            echo "::warning::staging sync: push attempt $attempt failed, retrying"
+          done
+          echo "::warning::staging sync failed after 3 attempts — deploy-pr Phase 2A.5 will repair it"
+          exit 0
+
       - name: Create GitHub Release
         if: env.SKIP_PUBLISH != 'true'
         run: |

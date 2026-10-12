@@ -2,6 +2,18 @@
 
 Operator-facing notes for behavior changes that need action or awareness. Newest first.
 
+## Review specs call the prepare and finalize scripts (#3841)
+
+`commands/review-pr.md` is now under 100 KB: Phases 1-3B and 6 run through `scripts/review-prepare.sh` and `scripts/review-finalize.sh`, and `commands/review-pr-staging.md` reuses both (`review-prepare.sh --no-delta` in 0C, then `review-finalize.sh extract|classify|file-prepare|file-verify` with `--scope-files` and `--prior-prs` in Phase 7) instead of carrying its own template resolution, slicing, classifier and cap copies. A staging bundle whose API diff is too large is read from `origin/<base>...origin/<head>`. CI now runs `--fence-funcs` over `commands/review-pr*.md` and `--fence-state` over the staging spec. Engine: `close.detectOutcome` reports `merged` only for a CLOSED issue that also carries `workflow:merged` (a stale label on an open issue no longer counts).
+
+Action: none. Staging reviews now stop with `REVIEW_RESULT: status: BLOCKED` when `review-prepare.sh` exits 3 (for example no template source, or an empty trusted `typescript.build` on the full-build lane) instead of continuing.
+
+## Post-build scope check replaces the diff-size gate (#3862)
+
+The line-count size gate is gone. A finished build is never discarded and never routed to decompose; `BUILD_RESULT: status: NEEDS_DECOMPOSE`, the `forge/wip/{N}` ref, the `COHESIVE` path and the engine's size-based decompose routing (including the investigate estimate net) are removed. Decomposition is a planning decision: `work-on:investigate` says `**YES**` only for separable work (independent modules or services, no shared files, no ordering), and the engine downgrades a YES without `INDEPENDENT_SEAMS >= 2` and a `DECOMPOSE_JUSTIFICATION`. Build B5.5 is now a scope check: it compares the diff with the architect plan (`### Scope Baseline`: `PLANNED_FILES:` and `ESTIMATED_DIFF_LINES:`), flags files outside the plan (opt-in trim into the batched follow-up), and measures `review_weight` (whitespace-insensitive, generated/vendored excluded, tests weighted, modules counted). A high `review_weight` extends review (more reviewers, per-file slices) instead of blocking; the Security agent and the Phase 2 floor stay unconditional. `FORGE:SIZE_OVERRIDE`, the loop guards and the batch exemption keep working. `run-issue --retry` reopens a stale `decomposed` run at build when a trusted `FORGE:DECOMPOSED:REVOKED` comment and a justified `FORGE:SIZE_OVERRIDE` are present. Telemetry `diff_size` events now carry estimate, actual, `review_weight`, scope outcome and review depth.
+
+Action: replace `build.diff_size.*` with `build.scope.*` / `review.depth.*` (see docs/CONFIG.md, "Migration"). The old keys are read as deprecated aliases for one release; `threshold` no longer blocks anything. Stacked-PR splitting and default calibration are tracked in #3907.
+
 ## Gate scripts emit structured telemetry (#3834)
 
 `diff-size.sh`, `review-acceptance-gate.sh`, `classify-finding.sh`, `wait-ci-green.sh`, `remediate-liveness.sh` and the build/review spec call sites (B5.5, B6.5, review panel) now append one JSONL record per decision to a trusted `<!-- FORGE:TELEMETRY v1 -->` comment on the issue or PR (shell emitter `scripts/lib/telemetry.sh`, Node twin `bin/engine/telemetry.mjs`). A failed write is buffered under `~/.forge/telemetry-buffer/` and flushed on the next emit. Catalogue and privacy note: `docs/TELEMETRY.md`.

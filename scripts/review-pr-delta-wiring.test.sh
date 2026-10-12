@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # review-pr-delta-wiring.test.sh — wiring tests for the review-delta modes in commands/review-pr.md (forge#3637).
-# Extracts the real spec fences (Phase 3C review mode, carry record, Phase 4 panel guard, Phase 6A finding read) and runs
-# them against temp git repos, synthetic PR comments, a stubbed `gh` and the REAL scripts/review-delta.sh and
-# scripts/trusted-comments.sh. No network. Covers: DELTA roster and the 2-round cap, BASE_SYNC_ONLY zero dispatch, a forged
-# or untrusted carry record failing closed, resolver resolution from FORGE_ROOT (never the worktree), FULL fallbacks.
+# Extracts the real spec fences (the 3C pre-dispatch carry record, the Phase 4 panel guard) and the delta_roster function of
+# scripts/review-prepare.sh (which owns the 3C review-mode decision and the 6A finding read moved to review-finalize.sh extract;
+# scripts/review-prepare.test.sh and scripts/review-finalize.test.sh cover those) and runs them against temp git repos,
+# synthetic PR comments, a stubbed `gh` and the REAL scripts/review-delta.sh and scripts/trusted-comments.sh. No network.
+# Covers: the DELTA roster and the 2-round cap, BASE_SYNC_ONLY zero dispatch, a forged or untrusted carry record failing
+# closed, resolver resolution from FORGE_ROOT (never the worktree), FULL fallbacks.
 # SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 # SPDX-License-Identifier: AGPL-3.0-or-later
 set -uo pipefail
@@ -97,7 +99,10 @@ fence_file() { # name pattern -> $TMP/<name>.sh (placeholders filled)
 HELPER="$ROOT/scripts/lib/review-delta-mode.sh"
 [ -f "$HELPER" ] && ok || bad "scripts/lib/review-delta-mode.sh must exist"
 n=$(grep -c '^_dm=$(forge_resolve lib/review-delta-mode.sh)' "$SPEC")
-[ "$n" -ge 6 ] && ok || bad "expected the review-delta helper source line in every consuming fence (3C mode, carry post, Phase 4, 5, 6A, 9), found $n"
+[ "$n" -ge 2 ] && ok || bad "expected the review-delta helper source line in every consuming fence (3C pre-dispatch, Phase 4; the mode decision lives in scripts/review-prepare.sh, the 6A read and Phase 9 in scripts/review-finalize.sh), found $n"
+for sc in review-prepare review-finalize; do
+  grep -q 'forge_resolve lib/review-delta-mode.sh' "$ROOT/scripts/$sc.sh" && grep -q 'review_delta_mode() { echo "FULL - 0"; }' "$ROOT/scripts/$sc.sh" && ok || bad "scripts/$sc.sh must source the helper through forge_resolve with a FULL-only fallback"
+done
 distinct=$(grep '^_dm=$(forge_resolve lib/review-delta-mode.sh)' "$SPEC" | sort -u | grep -c . || true)
 [ "$distinct" = 1 ] && ok || bad "review-delta helper source lines differ ($distinct distinct)"
 [ "$(count_blocks review-pr-delta-mode)" = 0 ] && ok || bad "inline review-delta mode copies must not remain in the spec"
@@ -127,8 +132,9 @@ got=$(cd "$W" && HOME="$TMP/nohome" FORGE_ROOT="" FORGEDOCK_HOME="" FORGE_HOME="
 rm -f "$W/scripts/review-delta.sh"
 
 # ---- 2. delta_roster ------------------------------------------------------------------------------------------------
-marked_block review-pr-delta-roster > "$TMP/roster.sh"
-[ -s "$TMP/roster.sh" ] && ok || bad "delta roster block missing"
+# delta_roster lives in scripts/review-prepare.sh (the 3C review-mode decision moved there): extract the real function.
+awk '/^delta_roster\(\) \{/ {on=1} on {print} on && /^\}$/ {exit}' "$ROOT/scripts/review-prepare.sh" > "$TMP/roster.sh"
+[ -s "$TMP/roster.sh" ] && ok || bad "delta_roster missing from scripts/review-prepare.sh"
 roster() { bash -c "source '$TMP/roster.sh'; delta_roster \"\$@\"" _ "$@"; }
 expect() { [ "$2" = "$3" ] && ok || bad "$1: want '$2', got '$3'"; }
 expect "round 0/1 keeps the 3B roster" "security auth billing" "$(roster 1 'security auth billing' 'README.md')"
@@ -149,63 +155,17 @@ expect "consumer with another trigger keeps it, no spec-cli" "security auth" "$(
 unset REPO_PATH
 expect "non-numeric rounds fail to the 3B roster" "security auth" "$(roster 'x' 'security auth' 'README.md')"
 
-# ---- 3. mode resolution through the real fence ----------------------------------------------------------------------
-# 3a. no checkpoint -> FULL
-mkrepo; R=$(sha HEAD); commit pr.txt pr2 pr2; HEAD=$(sha HEAD)
-comments "$(cm 'hello' User MEMBER)"
-SEL="security auth billing"; MODE=FULL
-fence_file mode "REVIEW_MODE: \${REVIEW_MODE}" || exit 1
-run_mode() { subst "$TMP/mode.raw" > "$TMP/mode.sh"; run_fence "$TMP/mode.sh"; }
-out=$(run_mode)
-printf '%s\n' "$out" | grep -qx 'REVIEW_MODE: FULL' && ok || bad "no checkpoint must be FULL: $out"
-printf '%s\n' "$out" | grep -qx 'SELECTED_AGENTS: security auth billing' && ok || bad "FULL keeps the 3B roster: $out"
-
-# 3b. one proven panel + a regular commit -> DELTA, roster unchanged below the cap
-{ panel_items "$R"; } | jq -s '.' > "$FAKE_COMMENTS"
-out=$(run_mode)
-printf '%s\n' "$out" | grep -qx 'REVIEW_MODE: DELTA' && ok || bad "one panel then a commit must be DELTA: $out"
-printf '%s\n' "$out" | grep -qx "DELTA_FROM: $R" && ok || bad "DELTA_FROM must be the reviewed SHA: $out"
-printf '%s\n' "$out" | grep -qx 'SELECTED_AGENTS: security auth billing' && ok || bad "FULL_ROUNDS<2 keeps the 3B roster under DELTA: $out"
-
-# 3c. two proven panels -> cap: delta + security only
-mkrepo; R1=$(sha HEAD); commit pr.txt pr2 pr2; R2=$(sha HEAD); commit src/auth/login.py x "auth change"; HEAD=$(sha HEAD)
-{ panel_items "$R1"; panel_items "$R2"; } | jq -s '.' > "$FAKE_COMMENTS"
-out=$(run_mode)
-printf '%s\n' "$out" | grep -qx 'REVIEW_MODE: DELTA' && ok || bad "two panels then a commit must be DELTA: $out"
-printf '%s\n' "$out" | grep -qx 'FULL_ROUNDS: 2' && ok || bad "FULL_ROUNDS must be 2: $out"
-printf '%s\n' "$out" | grep -qx 'SELECTED_AGENTS: security auth' && ok || bad "round 3 roster must be security + path-triggered auth: $out"
-mkrepo; R1=$(sha HEAD); commit pr.txt pr2 pr2; R2=$(sha HEAD); commit notes.txt x "notes"; HEAD=$(sha HEAD)
-{ panel_items "$R1"; panel_items "$R2"; } | jq -s '.' > "$FAKE_COMMENTS"
-out=$(run_mode)
-printf '%s\n' "$out" | grep -qx 'SELECTED_AGENTS: security' && ok || bad "round 3 with no triggered path must be security only: $out"
-
-# 3d. THOROUGH forces FULL
-out=$(THOROUGH=true run_mode)
-printf '%s\n' "$out" | grep -qx 'REVIEW_MODE: FULL' && ok || bad "--thorough must stay FULL: $out"
-
-# 3e. a planted worktree resolver must not decide the mode
-mkdir -p "$W/scripts"; printf '#!/usr/bin/env bash\necho "BASE_SYNC_ONLY %s"\necho FULL_ROUNDS=1\n' "$R2" > "$W/scripts/review-delta.sh"
-out=$(run_mode)
-printf '%s\n' "$out" | grep -qx 'REVIEW_MODE: DELTA' && ok || bad "a planted scripts/review-delta.sh in the worktree must be ignored: $out"
-rm -f "$W/scripts/review-delta.sh"
-
-# 3f. unresolvable resolver (no trusted install) -> FULL
-subst "$TMP/mode.raw" > "$TMP/mode.sh"
-out=$(cd "$W" && env PATH="$STUB:$PATH" HOME="$TMP/nohome" FORGE_ROOT="" FORGEDOCK_HOME="" FORGE_HOME="" CLAUDE_CONFIG_DIR="" FAKE_HEAD="$HEAD" bash "$TMP/mode.sh" 2>&1)
-printf '%s\n' "$out" | grep -qx 'REVIEW_MODE: FULL' && ok || bad "no trusted install must fall back to FULL: $out"
-
-# 3g. base merge only -> BASE_SYNC_ONLY with an empty roster
+# ---- 3. mode resolution -------------------------------------------------------------------------------------------
+# The FULL / DELTA / BASE_SYNC_ONLY decision is made by scripts/review-prepare.sh (covered by scripts/review-prepare.test.sh, including the
+# round cap, THOROUGH forcing FULL, an unvalidated SHA and a junk resolver answer). This test keeps the repos the carry and panel tests need.
+# base merge only: a BASE_SYNC_ONLY head (the repo the carry-record and panel tests below run in)
 mkrepo; R=$(sha HEAD); base_merge b.txt b1; HEAD=$(sha HEAD)
 panel_items "$R" | jq -s '.' > "$FAKE_COMMENTS"
-out=$(run_mode)
-printf '%s\n' "$out" | grep -qx 'REVIEW_MODE: BASE_SYNC_ONLY' && ok || bad "a pure base merge must be BASE_SYNC_ONLY: $out"
-printf '%s\n' "$out" | grep -qx "CARRIED_FROM: $R" && ok || bad "CARRIED_FROM must name the reviewed SHA: $out"
-printf '%s\n' "$out" | grep -qx 'SELECTED_AGENTS: ' && ok || bad "BASE_SYNC_ONLY dispatches zero reviewers (empty roster): $out"
 BS_R=$R; BS_HEAD=$HEAD; BS_W=$W
 
 # ---- 4. carry record: post, trust, forge resistance ------------------------------------------------------------------
 W=$BS_W; R=$BS_R; HEAD=$BS_HEAD
-fence_file carry "CARRY_RECORD: POSTED" || exit 1
+MODE=BASE_SYNC_ONLY; fence_file carry "CARRY_RECORD: POSTED" || exit 1
 run_carry() { subst "$TMP/carry.raw" > "$TMP/carry.sh"; run_fence "$TMP/carry.sh" "$@"; }
 verified() { # prints the verified Carried-From-SHA for the current $FAKE_COMMENTS using the real snippet
   { cat "$HELPER"; echo 'COMMENTS_JSON=$(cat "$FAKE_COMMENTS"); carry_verified_from'; } > "$TMP/cv_body.sh"
@@ -272,20 +232,7 @@ case "$(p4 DELTA 'security auth billing')" in "PANEL_STATUS: SHORTFALL"*) ok ;; 
 { cm "$(body_agent security "$HEAD")" User NONE; cm "$(body_agent auth "$HEAD")" User NONE; } | jq -s '.' > "$FAKE_COMMENTS"
 case "$(p4 FULL 'security auth')" in "PANEL_STATUS: SHORTFALL"*) ok ;; *) bad "untrusted reviewer markers must not satisfy the panel: $(p4 FULL 'security auth')" ;; esac
 
-# ---- 6. Phase 6A reads the carried / earlier head's findings -------------------------------------------------------
-fence_file p6 'bodies_at()' || exit 1
-p6() { # mode dfrom -> FINDINGS or the BLOCKED line
-  MODE="$1"; DFROM="${2:-}"; subst "$TMP/p6.raw" > "$TMP/p6.sh"; printf '\necho "FINDINGS=$(printf %%s "$FINDINGS" | tr "\\n" " ")"\n' >> "$TMP/p6.sh"
-  run_fence "$TMP/p6.sh" | grep -E '^(FINDINGS=|REVIEW_RESULT:)' | head -1
-}
-{ panel_items "$R" F-old; cm "$(body_carry "$HEAD" "$R")" Bot NONE; } | jq -s '.' > "$FAKE_COMMENTS"
-case "$(p6 BASE_SYNC_ONLY)" in *F-old*) ok ;; *) bad "BASE_SYNC_ONLY must read the carried head's findings: $(p6 BASE_SYNC_ONLY)" ;; esac
-{ panel_items "$R" F-old; cm "$(body_carry "$HEAD" "$R")" User NONE; } | jq -s '.' > "$FAKE_COMMENTS"
-case "$(p6 BASE_SYNC_ONLY)" in REVIEW_RESULT:*BLOCKED*) ok ;; *) bad "an unverified carry must block reading findings (fail closed): $(p6 BASE_SYNC_ONLY)" ;; esac
-case "$(p6 FULL)" in REVIEW_RESULT:*BLOCKED*) ok ;; *) bad "FULL reads only current-head bodies; none posted must block: $(p6 FULL)" ;; esac
-{ panel_items "$R" F-old; panel_items "$HEAD" F-new; } | jq -s '.' > "$FAKE_COMMENTS"
-case "$(p6 FULL)" in *F-new*) case "$(p6 FULL)" in *F-old*) bad "FULL must not read earlier-head findings" ;; *) ok ;; esac ;; *) bad "FULL must read current-head findings" ;; esac
-case "$(p6 DELTA "$R")" in *F-new*F-old*|*F-old*F-new*) ok ;; *) bad "DELTA must read the current and the earlier reviewed head's findings: $(p6 DELTA "$R")" ;; esac
+# ---- 6. The 6A read of the carried / earlier head's findings is scripts/review-finalize.sh extract (covered by scripts/review-finalize.test.sh).
 
 echo "review-pr-delta-wiring tests: pass=$PASS fail=$FAILN"
 [ "$FAILN" -eq 0 ]
