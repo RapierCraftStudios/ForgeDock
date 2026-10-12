@@ -372,7 +372,7 @@ CONSUMERS: unresolved
 EDGE_TEST: id=e1 test={path}::{test_name}
 EDGE_TEST: id=e2 untestable={reason}
 
-> **Edge case block**: one line per `EDGE:` id of the architect's `FORGE:EDGE_CASES` block, each line starting at the line start (no prose before `EDGE_TEST:`). `test=` names a file and a test name that occurs in a line this change adds to that file; a pre-existing test does not count. `untestable=` needs a non-empty reason. Omit the section when the plan has no edge cases.
+> **Edge case block**: one line per `EDGE:` id of the architect's `FORGE:EDGE_CASES` block, each line starting at the line start (no prose before `EDGE_TEST:`). `test=` names a file and a test name (a single token with no whitespace; name the test with underscores or hyphens) that occurs in a line this change adds to that file; a pre-existing test does not count. `untestable=` needs a non-empty reason. Omit the section when the plan has no edge cases.
 
 ### Testing Checklist
 - [ ] {Test scenario 1} [type:api]
