@@ -38,6 +38,7 @@ export const OUTCOME_CODES = Object.freeze({
   ENGINE_ERROR: "engine.error",
   INFRA_DISK_QUOTA: "infra.disk_quota",
   INFRA_CLI_SPAWN_TRANSIENT: "infra.cli_spawn_transient",
+  CLI_TIMEOUT: "cli.timeout",
   LEASE_HELD: "lease.held",
   DEPENDENCY_OPEN: "dependency.open",
   DEPENDENCY_UNREADABLE: "dependency.unreadable",
@@ -91,6 +92,8 @@ export function codeForRunnerError(err) {
   switch (err.code) {
     case "CLI_SPAWN_TRANSIENT":
       return OUTCOME_CODES.INFRA_CLI_SPAWN_TRANSIENT;
+    case "CLI_TIMEOUT":
+      return OUTCOME_CODES.CLI_TIMEOUT;
     case "NO_API_KEY":
     case "NO_SDK":
     case "CLI_BACKEND_FAILED":

@@ -62,9 +62,17 @@ JITTER_PCT="${FORGE_CI_JITTER_PCT:-20}"; case "$JITTER_PCT" in ''|*[!0-9]*) JITT
 [ "$JITTER_PCT" -le 90 ] || JITTER_PCT=90
 # jitter <seconds> -> seconds varied by +/- JITTER_PCT percent (never below 1).
 jitter() { awk -v s="$1" -v p="$JITTER_PCT" -v r="$RANDOM" 'BEGIN{ v=s*(1-p/100+2*(p/100)*(r/32767)); if (v<1) v=1; printf "%.2f", v }'; }
-# classify_gh <text> -> prints "limited" for rate-limit / transient 5xx / network failures, else nothing.
+
+# classify_gh <text> -> prints one class, or nothing when the text is unrecognised:
+#   limited    real rate-limit evidence (x-ratelimit-remaining: 0, HTTP 429, "API rate limit exceeded", secondary rate limit,
+#              abuse detection, too many requests): a wait, bounded by the whole window
+#   auth       a bare 401/403 (bad credentials, missing scope): permanent, never waited on
+#   transient  5xx / gateway / network failures: a small bounded retry (FORGE_CI_TRANSIENT_RETRIES), never the long wait
 classify_gh() {
-  printf '%s' "$1" | grep -Eqi 'rate limit|secondary limit|abuse detection|x-ratelimit-remaining: *0|HTTP (403|429|5[0-9][0-9])|status (403|429|5[0-9][0-9])|too many requests|bad gateway|service unavailable|gateway time-?out|timed? ?out|connection (reset|refused)|could not resolve host|unexpected EOF|network is unreachable|TLS handshake' && echo limited
+  if printf '%s' "$1" | grep -Eqi 'api rate limit exceeded|secondary (rate )?limit|abuse detection|x-ratelimit-remaining: *0|HTTP 429|status 429|too many requests'; then echo limited
+  elif printf '%s' "$1" | grep -Eqi 'HTTP (401|403)|status (401|403)|bad credentials|requires authentication'; then echo auth
+  elif printf '%s' "$1" | grep -Eqi 'HTTP 5[0-9][0-9]|status 5[0-9][0-9]|bad gateway|service unavailable|gateway time-?out|timed? ?out|i/o timeout|connection (reset|refused)|could not resolve host|unexpected EOF|network is unreachable|TLS handshake'; then echo transient
+  fi
 }
 
 emit() {
@@ -73,11 +81,27 @@ emit() {
   echo "CI_GATE: $1"; echo "CI_GATE_HEAD: ${START_SHA:-unknown}"
 }
 head_sha() { gh pr view "$PR" -R "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null; }
-START_SHA="$(head_sha)"
-for _try in 1 2; do [ -n "$START_SHA" ] || { sleep "$(jitter "$INTERVAL")"; START_SHA="$(head_sha)"; }; done
-if [ -z "$START_SHA" ]; then START_SHA=""; emit ERROR; echo "cannot read PR #$PR head in $REPO"; exit 2; fi
+# forge#4037: the initial head read goes through the same classification as the checks poll: a rate limit is a wait
+# (rc 4 once the window is spent), a bare 401/403 is a fast permanent error, anything else a small bounded retry.
+START_SHA=""; _hstart=$(date +%s); _hlim=0; _hfail=0; _herr="$(mktemp)"; trap 'rm -f "$_herr"' EXIT
+while :; do
+  START_SHA="$(gh pr view "$PR" -R "$REPO" --json headRefOid --jq '.headRefOid' 2>"$_herr")" && [ -n "$START_SHA" ] && break
+  START_SHA=""; _hc="$(classify_gh "$(cat "$_herr" 2>/dev/null)")"
+  case "$_hc" in
+    auth) emit ERROR; echo "cannot read PR #$PR head in $REPO (HTTP 401/403 without rate-limit evidence)"; exit 2 ;;
+    limited)
+      _hlim=$((_hlim + 1))
+      if [ $(( $(date +%s) - _hstart )) -ge "$TIMEOUT" ]; then emit RATE_LIMITED; echo "PR #$PR: GitHub rate-limited for the whole ${TIMEOUT}s window reading the PR head; retry later"; exit 4; fi
+      _m=$((_hlim > 4 ? 4 : _hlim)); sleep "$(jitter $((INTERVAL * (1 << (_m - 1)))))" ;;
+    *)
+      _hfail=$((_hfail + 1))
+      if [ "$_hfail" -gt 2 ]; then emit ERROR; echo "cannot read PR #$PR head in $REPO"; exit 2; fi
+      sleep "$(jitter "$INTERVAL")" ;;
+  esac
+done
 
-start=$(date +%s); errors=0; limited=0
+start=$(date +%s); errors=0; limited=0; transient=0
+TRANSIENT_MAX="${FORGE_CI_TRANSIENT_RETRIES:-4}"; case "$TRANSIENT_MAX" in ''|*[!0-9]*) TRANSIENT_MAX=4 ;; esac
 while :; do
   now=$(date +%s); elapsed=$((now - start))
   if ! JSON="$(gh pr checks "$PR" -R "$REPO" --json name,bucket 2>/dev/null)" || ! printf '%s' "$JSON" | jq -e 'type=="array"' >/dev/null 2>&1; then
@@ -87,10 +111,18 @@ while :; do
       # does precisely in the "no checks reported" case this branch exists to detect.
       NC_OUT="$(gh pr checks "$PR" -R "$REPO" 2>&1 || true)"
       if printf '%s' "$NC_OUT" | grep -qi 'no checks reported'; then JSON='[]'
-      elif [ -n "$(classify_gh "$NC_OUT")" ]; then
-        # Rate limit or transient outage: a wait, not a verdict. Retry with a growing jittered sleep; never counts toward ERROR.
+      elif GH_CLASS="$(classify_gh "$NC_OUT")"; [ "$GH_CLASS" = auth ]; then
+        # A bare 401/403 is an auth fault that never clears: fail fast instead of waiting out the window (forge#4037).
+        emit ERROR; echo "gh pr checks refused (HTTP 401/403 without rate-limit evidence); fix the token or its scopes"; exit 2
+      elif [ "$GH_CLASS" = transient ]; then
+        # Network timeout / 5xx: a small bounded retry, never the long rate-limit wait.
+        transient=$((transient + 1))
+        if [ "$transient" -gt "$TRANSIENT_MAX" ]; then emit ERROR; echo "gh pr checks unavailable (transient error) ${transient} times in a row"; exit 2; fi
+        sleep "$(jitter "$INTERVAL")"; continue
+      elif [ "$GH_CLASS" = limited ]; then
+        # Real rate limit: a wait, not a verdict. Retry with a growing jittered sleep; never counts toward ERROR.
         limited=$((limited + 1)); now=$(date +%s)
-        if [ $((now - start)) -ge "$TIMEOUT" ]; then emit RATE_LIMITED; echo "PR #$PR: GitHub rate-limited or unavailable for the whole ${TIMEOUT}s window (${limited} retries); retry later"; exit 4; fi
+        if [ $((now - start)) -ge "$TIMEOUT" ]; then emit RATE_LIMITED; echo "PR #$PR: GitHub rate-limited for the whole ${TIMEOUT}s window (${limited} retries); retry later"; exit 4; fi
         _m=$((limited > 4 ? 4 : limited)); sleep "$(jitter $((INTERVAL * (1 << (_m - 1)))))"; continue
       else
         errors=$((errors + 1))
@@ -99,7 +131,7 @@ while :; do
       fi
     fi
   fi
-  errors=0; limited=0
+  errors=0; limited=0; transient=0
   cur="$(head_sha)"
   if [ -n "$cur" ] && [ "$cur" != "$START_SHA" ]; then emit ERROR; echo "PR head moved during the wait ($START_SHA -> $cur); re-review the new head"; exit 2; fi
   total=$(printf '%s' "$JSON" | jq 'length')

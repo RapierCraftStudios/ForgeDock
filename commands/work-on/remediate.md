@@ -132,10 +132,13 @@ if [ -n "$TRUSTED_SCRIPT" ] && [ -n "$PR_COMMENTS" ] && [ -n "$ISSUE_COMMENTS" ]
     [.[][] | select((.user.type // "") == "Bot" or ((.author_association // "") | IN("OWNER","MEMBER","COLLABORATOR"))) | select((.body // "") | type == "string")] as $c
     | [$c[] | select(.body | test("\\A<!-- FORGE:(CI|INPR|BASESYNC)_REMEDIATION: pr=" + $pr + " -->")) | {t: .created_at, k: (.body | capture("FORGE:(?<k>CI|INPR|BASESYNC)_REMEDIATION").k + "_REMEDIATION")}] as $m
     | [$c[] | select(.body | test("\\A<!-- FORGE:REMEDIATION -->[\\s\\S]*<!-- FORGE:REMEDIATION:COMPLETE -->")) | .created_at] as $trails
-    | [$trails[] as $t | ([$m[] | select(.t <= $t)] | sort_by(.t) | last | .k // "") | select(. == $kind)] | length' 2>/dev/null || echo "")
+    | ([$c[] | select(.body | test("\\A<!-- FORGE:INPR_FIX: round=[0-9]+ head=")) | .created_at] | max // "") as $fix
+    | [$trails[] as $t | select($kind != "INPR_REMEDIATION" or $fix == "" or $t > $fix) | ([$m[] | select(.t <= $t)] | sort_by(.t) | last | .k // "") | select(. == $kind)] | length' 2>/dev/null || echo "")
   if [ -n "$KIND_DONE_N" ] && [ "$KIND_DONE_N" -eq 0 ]; then REMEDIATION_COMPLETE_N=0; fi
 fi
 ```
+
+**Re-armed INPR round** <!-- Added: forge#4037 -->: for `INPR_REMEDIATION` a completed trail counts only when it is newer than the newest trusted `FORGE:INPR_FIX: round=N head=` work order (the `$fix` bound above), so the re-gate's second in-PR round (a newer `INPR_FIX` than the newest trail) dispatches instead of returning `ALREADY_DONE`; with no work order the per-kind rule above is unchanged. The router bounds re-arms to one.
 
 Completed trails of other kinds are left in place (never deleted); only the interrupted-partial cleanup below deletes anything.
 

@@ -950,7 +950,7 @@ while IFS= read -r check_line; do
       RAN:FAILED) : ;;  # red on base, green on head: the test proves the AC
       RAN:RAN) RESULT="FAIL"; DETAIL="test passes on base (it never exercised the defect): rewrite the test so it fails on the base commit and passes on head" ;;
       FAILED:*) RESULT="FAIL"; DETAIL="test= command fails on head: $RG_ID" ;;
-      *) RG_DEGRADED_LIST="${RG_DEGRADED_LIST}${RG_DEGRADED_LIST:+; }$ID — base run cannot execute (base=$RG_BASE head=$RG_HEAD); the test is unproven" ;; # a base run that cannot execute is DEGRADED, never PASS
+      *) RG_DEGRADED_LIST="${RG_DEGRADED_LIST}${RG_DEGRADED_LIST:+; }$ID — base run cannot execute (base=$RG_BASE head=$RG_HEAD), so the test is unproven" ;; # a base run that cannot execute is DEGRADED, never PASS
     esac
   fi
 

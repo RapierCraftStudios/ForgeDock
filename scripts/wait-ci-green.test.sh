@@ -16,6 +16,7 @@ cat > "$T/bin/gh" <<'GH'
 #!/usr/bin/env bash
 D="$FAKE_DIR"
 if [ "$1 $2" = "pr view" ]; then
+  if [ -f "$D/headerr" ]; then hn=$(( $(cat "$D/headerr.n" 2>/dev/null || echo 0) + 1 )); echo "$hn" > "$D/headerr.n"; if [ "$hn" -le "$(cat "$D/headerr.max")" ]; then cat "$D/headerr" >&2; exit 1; fi; fi
   n=$(( $(cat "$D/sha.n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$D/sha.n"
   total=$(wc -l < "$D/sha"); [ "$n" -gt "$total" ] && n=$total; sed -n "${n}p" "$D/sha"; exit 0
 fi
@@ -27,11 +28,11 @@ if [ "$1 $2" = "pr checks" ]; then
   case " $* " in *" --json "*) ;; *)
     [ -f "$D/nochecks" ] && { echo "no checks reported on the 'x' branch" >&2; exit 1; }
     cn=$(cat "$D/chk.n" 2>/dev/null || echo 1); while [ ! -f "$D/checks.$cn" ] && [ "$cn" -gt 1 ]; do cn=$((cn-1)); done; cc=$(cat "$D/checks.$cn" 2>/dev/null || true)
-    case "$cc" in RATE) echo "HTTP 403: API rate limit exceeded for user (https://api.github.com/graphql)" >&2 ;; SECOND) echo "You have exceeded a secondary rate limit" >&2 ;; ERR) echo "HTTP 502: Bad Gateway" >&2 ;; ERRX) echo "boom: unexpected failure" >&2 ;; esac
+    case "$cc" in RATE) echo "HTTP 403: API rate limit exceeded for user (https://api.github.com/graphql)" >&2 ;; SECOND) echo "You have exceeded a secondary rate limit" >&2 ;; ERR) echo "HTTP 502: Bad Gateway" >&2 ;; ERRX) echo "boom: unexpected failure" >&2 ;; A403) echo "HTTP 403: Resource not accessible by personal access token" >&2 ;; A401) echo "HTTP 401: Bad credentials" >&2 ;; R429) echo "HTTP 429: Too Many Requests" >&2 ;; RHDR) printf "HTTP 403: Forbidden\nx-ratelimit-remaining: 0\n" >&2 ;; TMO) echo "dial tcp: i/o timeout" >&2 ;; esac
     exit 1 ;; esac
   n=$(( $(cat "$D/chk.n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$D/chk.n"
   f="$D/checks.$n"; while [ ! -f "$f" ] && [ "$n" -gt 1 ]; do n=$((n-1)); f="$D/checks.$n"; done
-  c=$(cat "$f"); case "$c" in ERR|ERRX|RATE|SECOND) exit 1 ;; esac
+  c=$(cat "$f"); case "$c" in ERR|ERRX|RATE|SECOND|A403|A401|R429|RHDR|TMO) exit 1 ;; esac
   [ "$c" = "NONE" ] && { echo "no checks reported on the 'x' branch" >&2; exit 1; }
   echo "$c"; exit 0
 fi
@@ -62,6 +63,21 @@ expect "secondary limit then pass retries" "0|CI_GATE: PASS" "$(run "$(mk rl2 SE
 expect "transient 5xx then pass retries" "0|CI_GATE: PASS" "$(run "$(mk fivexx ERR "$P")")"
 expect "rate limited for the whole window is RATE_LIMITED rc 4" "4|CI_GATE: RATE_LIMITED" "$(run "$(mk rlall RATE)" --timeout 2)"
 expect "more than 5 rate-limit hits are not an ERROR" "0|CI_GATE: PASS" "$(run "$(mk rlmany RATE RATE RATE RATE RATE RATE RATE "$P")" --timeout 60)"
+# forge#4037: only real rate-limit evidence is RATE_LIMITED; a bare 401/403 fails fast; timeouts/5xx are a small bounded retry.
+expect "bare 403 is a permanent error rc 2" "2|CI_GATE: ERROR" "$(run "$(mk a403 A403 "$P")" --timeout 60)"
+expect "bare 401 is a permanent error rc 2" "2|CI_GATE: ERROR" "$(run "$(mk a401 A401 "$P")" --timeout 60)"
+expect "HTTP 429 is RATE_LIMITED rc 4" "4|CI_GATE: RATE_LIMITED" "$(run "$(mk r429 R429)" --timeout 2)"
+expect "x-ratelimit-remaining: 0 on a 403 is RATE_LIMITED rc 4" "4|CI_GATE: RATE_LIMITED" "$(run "$(mk rhdr RHDR)" --timeout 2)"
+expect "network timeout then pass retries" "0|CI_GATE: PASS" "$(run "$(mk tmo TMO "$P")")"
+expect "persistent network timeout is a bounded ERROR, not the long wait" "2|CI_GATE: ERROR" "$(FORGE_CI_TRANSIENT_RETRIES=2 run "$(mk tmoall TMO)" --timeout 600)"
+expect "persistent 5xx is a bounded ERROR, not the long wait" "2|CI_GATE: ERROR" "$(FORGE_CI_TRANSIENT_RETRIES=2 run "$(mk fivexxall ERR)" --timeout 600)"
+# forge#4037: the initial head read uses the same classification.
+d=$(mk headrl "$P"); echo "HTTP 403: API rate limit exceeded for user" > "$d/headerr"; echo 2 > "$d/headerr.max"
+expect "rate-limited head read waits, then passes" "0|CI_GATE: PASS" "$(run "$d" --timeout 60)"
+d=$(mk headrlall "$P"); echo "HTTP 429: Too Many Requests" > "$d/headerr"; echo 99999 > "$d/headerr.max"
+expect "rate-limited head read for the whole window is rc 4" "4|CI_GATE: RATE_LIMITED" "$(run "$d" --timeout 2)"
+d=$(mk head403 "$P"); echo "HTTP 403: Resource not accessible" > "$d/headerr"; echo 99999 > "$d/headerr.max"
+expect "bare 403 head read is rc 2" "2|CI_GATE: ERROR" "$(run "$d" --timeout 60)"
 # Jitter: sleeps vary within +/-20% of the interval (fake sleep records its argument and returns at once).
 mkdir -p "$T/bin2"; printf '#!/usr/bin/env bash\necho "$1" >> "$FAKE_DIR/sleeps"\n' > "$T/bin2/sleep"; chmod +x "$T/bin2/sleep"
 d=$(mk jit '[{"name":"a","bucket":"pending"}]' '[{"name":"a","bucket":"pending"}]' '[{"name":"a","bucket":"pending"}]' '[{"name":"a","bucket":"pending"}]' '[{"name":"a","bucket":"pending"}]' '[{"name":"a","bucket":"pending"}]' '[{"name":"a","bucket":"pending"}]' '[{"name":"a","bucket":"pending"}]' "$P")

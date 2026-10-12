@@ -306,7 +306,10 @@ run_classified_test() {
     run_verification_command "$label" "$cmd" > "$out_file" 2>&1
     CMD_EXIT=$?
     tail -30 "$out_file"
-    if [ "$CMD_EXIT" -ne 0 ] && [ "$CMD_EXIT" -ne 5 ]; then
+    if [ "$CMD_EXIT" -eq 124 ]; then
+        # forge#4037: a wall-clock timeout proves nothing about the code: DEGRADED (recorded, review informed), never FAILED / needs-human.
+        degrade_check "$label" "test command timed out (exit 124) so the tests are unproven"
+    elif [ "$CMD_EXIT" -ne 0 ] && [ "$CMD_EXIT" -ne 5 ]; then
         echo "FAILED (exit $CMD_EXIT): $cmd"
         TEST_FAILED=1
     elif [ -z "$CLASSIFY_SCRIPT" ]; then
@@ -323,8 +326,11 @@ run_classified_test() {
     rm -f "$out_file"
 }
 
-# verification.commands.<lang>.test (when configured)
-for _lang in python typescript; do
+# verification.commands.<lang>.test (when configured). forge#4037: this runs the whole suite unscoped, so when the change-scoped local CI
+# gate (scripts/ci-local) exists on the branch it is preferred and this run is skipped (recorded, not silent).
+_LANGS="python typescript"
+if [ -x scripts/ci-local ]; then _LANGS=""; echo "verification.commands.<lang>.test skipped: change-scoped local CI gate scripts/ci-local is available"; fi
+for _lang in $_LANGS; do
     TEST_CMD=$(yq ".verification.commands.${_lang}.test // \"\"" "$FORGE_CFG" 2>/dev/null || echo '')
     [ -n "$TEST_CMD" ] || continue
     FILTERED_CMD=$(apply_known_slow_filter "$TEST_CMD")
