@@ -1256,7 +1256,7 @@ Where:
 
 **Goal**: Re-index this issue's knowledge cards and regenerate cost-priors.json so that economic scheduling (orchestrate Step 3E.5) has up-to-date data for future runs. The actual-vs-prior delta recorded in the TRAJECTORY above is the write side of the self-correction loop — this step performs the read/recompute.
 
-**This phase is non-blocking** — if the indexer fails, log the reason and continue to Phase C5.2. Never stall close for the cost-prior update.
+**This phase is non-blocking** — if the indexer fails, log the reason (last 20 lines of its output) and always continue to Phase C5.2–C5.4. Never stall close for the cost-prior update.
 
 **Skip if**: Terminal state is `INVALID` (no useful cost data from invalid issues).
 
@@ -1267,9 +1267,14 @@ INDEXER_PATH=""
 [ -n "${FORGE_ROOT:-}" ] && INDEXER_PATH="$FORGE_ROOT/scripts/build-knowledge-index.mjs"
 if node --version >/dev/null 2>&1 && [ -f "$INDEXER_PATH" ]; then
   echo "[cost-prior] Re-indexing issue #${NUMBER} and regenerating cost priors..."
-  node "$INDEXER_PATH" --issue {NUMBER} --no-mirror 2>&1 | tail -5 \
-    && echo "[cost-prior] Cost priors updated" \
-    || echo "WARNING: Cost prior update failed — continuing (non-blocking)"
+  # Capture output and take the status from node itself (a pipe to tail would mask it); --repo targets the repo being closed
+  INDEXER_OUT=$(node "$INDEXER_PATH" --repo {GH_REPO} --issue {NUMBER} --no-mirror 2>&1) && INDEXER_RC=0 || INDEXER_RC=$?
+  if [ "$INDEXER_RC" -eq 0 ]; then
+    echo "[cost-prior] Cost priors updated"
+  else
+    echo "WARNING: Cost prior update failed (exit $INDEXER_RC) — continuing (non-blocking). Last output:"
+    printf '%s\n' "$INDEXER_OUT" | tail -20
+  fi
 else
   echo "[cost-prior] Indexer not available — skipping cost prior update (non-blocking)"
 fi
