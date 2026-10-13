@@ -143,10 +143,13 @@ export function readForgeYaml(repoPath) {
   const configPath = join(repoPath, 'forge.yaml');
   if (!existsSync(configPath)) return null;
   try {
-    const result = spawnSync('yq', ['-r', '.project.owner + "/" + .project.repo', configPath], {
+    const result = spawnSync('yq', ['-r', '.project.owner, .project.repo', configPath], {
       encoding: 'utf8', timeout: 5000,
     });
-    if (result.status === 0 && result.stdout.trim()) return result.stdout.trim();
+    if (result.status === 0) {
+      const [owner, name] = result.stdout.split('\n').map(l => l.trim());
+      if (owner && name && owner !== 'null' && name !== 'null') return `${owner}/${name}`;
+    }
   } catch (_) { /* ignore */ }
   return null;
 }
