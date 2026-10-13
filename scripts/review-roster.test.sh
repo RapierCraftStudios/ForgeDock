@@ -130,6 +130,15 @@ run "docs/author.md" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
 expect_not "no auth path docs/author.md" auth
 run "svc/tokenizer.py" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
 expect_not "no-auth-path-svc/tokenizer.py" auth
+# forge#4071: weak names (session, token, permission, login) select Auth only as whole words in code files; docs never
+for f in design-tokens/colors.json src/SessionTimeline.tsx docs/permissions.md src/components/LoginButton.tsx src/editor/cursor-token.ts docs/auth.md; do
+  run "$f" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+  expect_not "no-auth-path-$f" auth
+done
+for f in src/auth/session.py api/tokens.py middleware/permissions.ts lib/jwt.go src/session/store.ts svc/login_handler.go; do
+  run "$f" --scores "$SC_QUIET" --changed-lines 20 --changed-files 1
+  expect_has "auth-path-$f" auth
+done
 run "commands/review-pr.md" --scores "AUTH=3 INFRA=0 DATABASE=0 BILLING=0 CONCURRENCY=0" --changed-lines 20 --changed-files 1
 expect_not "auth-from-prose-score-alone" auth
 run "commands/review-pr.md" --scores "AUTH=3 INFRA=3 DATABASE=0 BILLING=0 CONCURRENCY=0" --changed-lines 120
