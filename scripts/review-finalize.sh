@@ -697,11 +697,32 @@ do_classify() {
         fi
         case "$DISPOSITION" in
             "NOTE contract-deferred #"*)
-                _dn="${DISPOSITION##*#}"
-                case "$_dn" in ''|*[!0-9]*) ;; *)
-                    [ "$DRY_RUN" = "true" ] || gh issue comment "$_dn" -R "$REPO" --body "Review of #${PR_NUMBER} also found this on a path declared deferred here: ${F_LOC} ${F_TITLE}" >/dev/null 2>&1 || true # allowlist:check-command-side-effects
+                # The demotion counts only after the comment on #N succeeded and #N is still OPEN; any failure files the finding (fails toward filing).
+                _dn="${DISPOSITION##*#}"; _dok=1
+                case "$_dn" in ''|*[!0-9]*) _dok=0 ;; *)
+                    if [ "$DRY_RUN" != "true" ]; then
+                        _dst=$(gh issue view "$_dn" -R "$REPO" --json state --jq .state 2>/dev/null) || _dst=""
+                        if [ "$_dst" != "OPEN" ]; then _dok=0
+                        elif ! gh issue comment "$_dn" -R "$REPO" --body "Review of #${PR_NUMBER} also found this on a path declared deferred here: ${F_LOC} ${F_TITLE}" >/dev/null 2>&1; then _dok=0 # allowlist:check-command-side-effects
+                        fi
+                    fi
                 ;; esac
-                CONTRACT_DEMOTED=$((CONTRACT_DEMOTED + 1)) ;;
+                if [ "$_dok" = "1" ]; then CONTRACT_DEMOTED=$((CONTRACT_DEMOTED + 1)); else
+                    # Fall back to what the finding would have been absent the contract (a LOW/POSSIBLE or lineage-damped finding stays a NOTE),
+                    # not a blanket ISSUE: re-run the classifier without the contract flags. An INPR_FIX or unusable result files (fails toward filing).
+                    DISPOSITION="ISSUE contract-comment-failed"
+                    _n=$#; _skip=0
+                    while [ "$_n" -gt 0 ]; do
+                        _a="$1"; shift; _n=$((_n - 1))
+                        if [ "$_skip" = "1" ]; then _skip=0; continue; fi
+                        case "$_a" in --contract-scope|--contract-open|--pr-files) _skip=1 ;; *) set -- "$@" "$_a" ;; esac
+                    done
+                    _fb=$(bash "$CLASSIFY_SCRIPT" "$@" 2>/dev/null | head -n 1) || _fb=""
+                    case "$_fb" in
+                        "NOTE reflag"*) DISPOSITION="$_fb"; NOTES_REFLAG=$((NOTES_REFLAG + 1)) ;;
+                        NOTE*|ISSUE*) DISPOSITION="$_fb" ;;
+                    esac
+                fi ;;
             "NOTE contract-accepted-risk"*) CONTRACT_DEMOTED=$((CONTRACT_DEMOTED + 1)) ;;
             "NOTE reflag-"*) NOTES_REFLAG=$((NOTES_REFLAG + 1)) ;;
             INPR_FIX*)

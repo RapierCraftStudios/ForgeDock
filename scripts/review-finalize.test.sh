@@ -45,7 +45,8 @@ case "$a" in
   "api repos/o/r/commits/"*) cat "$FIX/commit-sha" 2>/dev/null || exit 1 ;;
   "api repos/o/r/compare/"*) cat "$FIX/compare-files" 2>/dev/null || exit 1 ;;
   "pr comment"*) { printf '%s\n' '=====COMMENT====='; for x in "$@"; do last="$x"; done; printf '%s\n' "$last"; } >> "$FIX/posted.log"; exit 0 ;;
-  "issue comment"*) printf 'ISSUE_COMMENT %s\n' "$3" >> "$FIX/issue-comments.log"; { for x in "$@"; do last="$x"; done; printf '%s\n' "$last"; } >> "$FIX/issue-bodies.log"; exit 0 ;;
+  "issue view"*"--json state"*) [ -f "$FIX/issue-closed" ] && echo CLOSED || echo OPEN; exit 0 ;;
+  "issue comment"*) [ -f "$FIX/issue-comment-fail" ] && exit 1; printf 'ISSUE_COMMENT %s\n' "$3" >> "$FIX/issue-comments.log"; { for x in "$@"; do last="$x"; done; printf '%s\n' "$last"; } >> "$FIX/issue-bodies.log"; exit 0 ;;
   "label create"*) exit 0 ;;
   "pr view"*"headRefOid"*) cat "$FIX/head" ;;
   "pr view"*"baseRefName"*) echo main ;;
@@ -481,6 +482,26 @@ cm MEMBER User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FI
 echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [x] `docs/`","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
 mkfind K-1 LIKELY MEDIUM docs/guide.md 3 "Docs example is misleading"; putfind 1
 run "$GOOD" classify; has "checked-item-verifies" "CONTRACT_DEMOTED=1"
+# a failing comment on the deferred issue, or a no-longer-open one, files the finding instead of demoting it
+for _mode in issue-comment-fail issue-closed; do
+reset; mkctx 1 FULL "" 12; echo false > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"
+cm MEMBER User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FIX/comments.json"
+echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/` — why","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
+mkfind K-1 LIKELY MEDIUM docs/guide.md 3 "Docs example is misleading"; putfind 1
+: > "$FIX/$_mode"
+run "$GOOD" classify; has "$_mode not counted" "CONTRACT_DEMOTED=0"
+want "$_mode falls back to the no-contract disposition" '.findings[0].disposition' classified.json "ISSUE MEDIUM-LIKELY"
+rm -f "$FIX/$_mode"
+done
+# a failing comment on a LOW/POSSIBLE finding falls back to its no-contract disposition (a NOTE), not a blanket ISSUE (DB-1)
+reset; mkctx 1 FULL "" 12; echo false > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"
+cm MEMBER User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FIX/comments.json"
+echo '{"state":"open","body":"x <!-- FORGE:DEFERRED_FROM: #12 -->\n- [ ] `docs/` — why","author_association":"MEMBER","user":{"type":"User"}}' > "$FIX/issue-30.json"
+mkfind K-1 POSSIBLE LOW docs/guide.md 3 "Docs example is misleading"; putfind 1
+: > "$FIX/issue-comment-fail"
+run "$GOOD" classify; has "low-fallback not counted" "CONTRACT_DEMOTED=0"
+want "low finding falls back to its NOTE" '.findings[0].class' classified.json "NOTE"
+rm -f "$FIX/issue-comment-fail"
 # an untrusted contract demotes nothing
 reset; mkctx 1 FULL "" 12; echo false > "$FIX/labels"; printf 'a.py\n' > "$FIX/files"
 cm NONE User "$CONTRACT_BODY"; flush "$FIX/comments-12.json"; echo '[]' > "$FIX/comments.json"
