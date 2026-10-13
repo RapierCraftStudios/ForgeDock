@@ -1925,15 +1925,31 @@ export function runCliBackend({
   }
 }
 
+/** Descendant processes of `pid` (pid + command line), best effort. Used to record what was alive when a session was killed. */
+export function listDescendants(pid, { psFn = null } = {}) {
+  try {
+    const out = psFn ? psFn() : execSync("ps -eo pid=,ppid=,args=", { encoding: "utf-8", timeout: 3000, maxBuffer: 8 * 1024 * 1024 });
+    const rows = String(out).split("\n").map((l) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l)).filter(Boolean).map((m) => ({ pid: Number(m[1]), ppid: Number(m[2]), cmd: m[3].slice(0, 200) }));
+    const kids = []; const seen = new Set([Number(pid)]);
+    for (let grew = true; grew;) { grew = false; for (const r of rows) if (!seen.has(r.pid) && seen.has(r.ppid)) { seen.add(r.pid); kids.push({ pid: r.pid, cmd: r.cmd }); grew = true; } }
+    return kids.slice(0, 30);
+  } catch { return []; }
+}
+
 /**
  * Async twin of runCliBackend (core work-on live comments): the CLI runs under child_process.spawn so the caller's event
  * loop keeps turning while the session runs. It returns the SAME envelope (and throws the same errors) because the
  * argv/env building and the envelope parsing are the sync function itself: pass 1 captures the spawn arguments, the
  * child runs asynchronously, pass 2 replays the collected result through runCliBackend's `spawnFn` seam.
- * `onSpawn(child)` receives the ChildProcess (e.g. to kill it).
+ *
+ * Extras (#4112, #4115): `idleMs` kills a session with no stdout activity (CLI_IDLE; the last tool call and the live
+ * child processes ride on the error); `maxMs` is the absolute ceiling (CLI_TIMEOUT); `stream` switches the CLI to
+ * stream-json so progress is observable (the final `result` line is the envelope); `wrap(bin,args)` rewrites the spawn
+ * (cgroup caps); `control` receives {pause, resume} (SIGSTOP/SIGCONT of the child's whole process group) and paused time
+ * does not count as idle. `onSpawn(child)` receives the ChildProcess.
  */
 export async function runCliBackendAsync(opts) {
-  const { spawnFn: _ignored, onSpawn = null, ...rest } = opts;
+  const { spawnFn: _ignored, onSpawn = null, idleMs = 0, maxMs = 0, stream = false, wrap = null, control = null, ...rest } = opts;
   let captured = null;
   try {
     runCliBackend({ ...rest, spawnFn: (bin, args, o) => {
@@ -1944,33 +1960,82 @@ export async function runCliBackendAsync(opts) {
       return { status: 0, stdout: "{}", stderr: "" };
     } });
   } catch (e) { if (!captured) throw e; }
-  const { bin, args, o, sysIdx, sys } = captured;
+  let { bin, args } = captured;
+  const { o, sysIdx, sys } = captured;
   let sysDir = null;
   if (sysIdx >= 0 && sys !== null) {
     sysDir = mkdtempSync(join(os.tmpdir(), "forgedock-cli-system-prompt-"));
     args[sysIdx + 1] = join(sysDir, "system-prompt.txt");
     writeFileSync(args[sysIdx + 1], sys, "utf-8");
   }
-  let collected;
+  if (stream) {
+    const j = args.indexOf("--output-format");
+    if (j >= 0) { args[j + 1] = "stream-json"; if (!args.includes("--verbose")) args.splice(j + 2, 0, "--verbose"); }
+  }
+  if (typeof wrap === "function") ({ bin, args } = wrap(bin, args));
+  const ceiling = maxMs > 0 ? maxMs : o.timeout;
+  let collected, idleInfo = null;
   try {
     collected = await new Promise((resolveP) => {
-      let stdout = "", stderr = "", settled = false, timedOut = false;
+      let stdout = "", stderr = "", settled = false, timedOut = false, paused = false;
+      let lineBuf = "", resultLine = null, lastTool = null;
       const max = o.maxBuffer ?? DEFAULT_SPAWN_MAX_BUFFER_BYTES;
-      let timer = null;
-      const finish = (r) => { if (settled) return; settled = true; clearTimeout(timer); resolveP(r); };
+      const startedAt = Date.now();
+      let lastActivity = startedAt, pausedAt = 0, pausedTotal = 0, timer = null;
+      const finish = (r) => { if (settled) return; settled = true; clearInterval(timer); resolveP(r); };
       let child;
-      try { child = spawn(bin, args, { cwd: o.cwd, env: o.env, stdio: ["ignore", "pipe", "pipe"] }); }
+      try { child = spawn(bin, args, { cwd: o.cwd, env: o.env, stdio: ["ignore", "pipe", "pipe"], detached: true }); }
       catch (error) { return finish({ status: null, signal: null, pid: 0, error, stdout: "", stderr: "" }); }
+      const signalGroup = (sig) => { try { process.kill(-child.pid, sig); } catch { try { child.kill(sig); } catch { /* gone */ } } };
+      const ctl = {
+        pause() { if (paused || settled) return false; paused = true; pausedAt = Date.now(); signalGroup("SIGSTOP"); return true; },
+        resume() { if (!paused) return false; paused = false; const d = Date.now() - pausedAt; pausedTotal += d; lastActivity = Date.now(); signalGroup("SIGCONT"); return true; },
+        get paused() { return paused; },
+      };
+      if (control && typeof control === "object") Object.assign(control, { pause: ctl.pause, resume: ctl.resume, isPaused: () => paused });
       onSpawn?.(child);
-      timer = setTimeout(() => { timedOut = true; try { child.kill("SIGTERM"); } catch { /* gone */ } }, o.timeout);
-      const add = (cur, d) => (cur.length >= max ? cur : cur + d.toString("utf-8"));
-      child.stdout.on("data", (d) => { stdout = add(stdout, d); });
-      child.stderr.on("data", (d) => { stderr = add(stderr, d); });
+      const kill = () => { if (paused) ctl.resume(); signalGroup("SIGTERM"); setTimeout(() => signalGroup("SIGKILL"), 5000).unref?.(); };
+      const tick = Math.max(20, Math.min(1000, (idleMs || 4000) / 4));
+      timer = setInterval(() => {
+        const now = Date.now();
+        if (!paused && idleMs > 0 && now - lastActivity >= idleMs && !idleInfo) {
+          idleInfo = { lastTool, children: listDescendants(child.pid), idleMs, pid: child.pid };
+          kill();
+        } else if (!timedOut && !idleInfo && now - startedAt - pausedTotal - (paused ? now - pausedAt : 0) >= ceiling) { timedOut = true; kill(); }
+      }, tick);
+      timer.unref?.();
+      const noteLine = (line) => {
+        if (!line.startsWith("{") || line.length > 4_000_000) return;
+        let j; try { j = JSON.parse(line); } catch { return; }
+        if (j?.type === "result") resultLine = line;
+        else if (j?.type === "assistant" && Array.isArray(j.message?.content)) {
+          for (const c of j.message.content) if (c?.type === "tool_use") lastTool = { name: c.name, input: JSON.stringify(c.input ?? {}).slice(0, 200), at: Date.now() };
+        }
+      };
+      child.stdout.on("data", (d) => {
+        lastActivity = Date.now();
+        if (stream) {
+          lineBuf += d.toString("utf-8");
+          let nl;
+          while ((nl = lineBuf.indexOf("\n")) >= 0) { noteLine(lineBuf.slice(0, nl).trim()); lineBuf = lineBuf.slice(nl + 1); }
+          if (lineBuf.length > 4_000_000) lineBuf = "";
+        } else if (stdout.length < max) stdout += d.toString("utf-8");
+      });
+      child.stderr.on("data", (d) => { lastActivity = Date.now(); if (stderr.length < max) stderr += d.toString("utf-8"); });
       child.on("error", (error) => finish({ status: null, signal: null, pid: child.pid ?? 0, error, stdout, stderr }));
-      child.on("close", (status, signal) => finish({ status: timedOut ? null : status, signal, pid: child.pid ?? 0, stdout, stderr,
-        ...(timedOut ? { error: Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT" }) } : {}) }));
+      child.on("close", (status, signal) => {
+        if (stream && lineBuf.trim()) noteLine(lineBuf.trim());
+        finish({ status: timedOut ? null : status, signal, pid: child.pid ?? 0, stdout: stream ? (resultLine ?? "") : stdout, stderr,
+          ...(timedOut ? { error: Object.assign(new Error("spawnSync ETIMEDOUT"), { code: "ETIMEDOUT" }) } : {}) });
+      });
     });
   } finally { if (sysDir) rmSync(sysDir, { recursive: true, force: true }); }
+  if (idleInfo) {
+    const mins = Math.round((idleInfo.idleMs / 60000) * 10) / 10;
+    const err = new Error(`claude CLI had no stream activity for ${mins} min and was killed (idle). Last tool: ${idleInfo.lastTool ? `${idleInfo.lastTool.name} ${idleInfo.lastTool.input}` : "none"}. Live children: ${idleInfo.children.map((c) => `${c.pid}:${c.cmd}`).join("; ") || "none"}`);
+    err.code = "CLI_IDLE"; err.lastTool = idleInfo.lastTool; err.children = idleInfo.children; err.idleMs = idleInfo.idleMs;
+    throw err;
+  }
   return runCliBackend({ ...rest, spawnFn: () => collected });
 }
 

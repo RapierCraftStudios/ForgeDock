@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) RapierCraft Studios
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /** Core work-on: the real effects behind runCore's injected `io`. Argv only, no shell. */
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { readFileSync, appendFileSync, mkdirSync, statSync, existsSync, rmSync, writeFileSync, readdirSync, lstatSync } from "node:fs";
 import { homedir, hostname, freemem, loadavg, cpus, tmpdir } from "node:os";
@@ -16,14 +16,32 @@ const pexec = promisify(execFile);
 const script = (n) => fileURLToPath(new URL(`../../scripts/${n}`, import.meta.url));
 
 /** Claude CLI session runner: fresh session, or `--resume <id>` for the builder. Resolves usage + session_id. */
-export function makeLeanRunner({ runCli = runCliBackendAsync } = {}) {
-  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, env = null }) => {
+let systemdProbe = null;
+/** `systemd-run --user --scope` usable here? Probed once and cached. */
+export function systemdRunAvailable() {
+  if (systemdProbe === null) {
+    try { execFileSync("systemd-run", ["--user", "--scope", "-q", "true"], { stdio: "ignore", timeout: 5000 }); systemdProbe = true; } catch { systemdProbe = false; }
+  }
+  return systemdProbe;
+}
+const MEM_RE = /^\d+(\.\d+)?[KMGT]?$/i, CPU_RE = /^\d+%$/;
+/** Cap the whole lane process tree: spawn under `systemd-run --user --scope -p MemoryMax=.. -p CPUQuota=..`. Unset or invalid limits leave the spawn unchanged. */
+export function wrapLaneLimits(bin, args, limits) {
+  const mem = limits?.memory_max && MEM_RE.test(String(limits.memory_max)) ? String(limits.memory_max) : null;
+  const cpu = limits?.cpu_quota && CPU_RE.test(String(limits.cpu_quota)) ? String(limits.cpu_quota) : null;
+  if (!mem && !cpu) return { bin, args };
+  return { bin: "systemd-run", args: ["--user", "--scope", "-q", ...(mem ? ["-p", `MemoryMax=${mem}`] : []), ...(cpu ? ["-p", `CPUQuota=${cpu}`] : []), "--", bin, ...args] };
+}
+
+export function makeLeanRunner({ runCli = runCliBackendAsync, probe = systemdRunAvailable } = {}) {
+  return async ({ role, issue, cwd, model, resume, system, prompt, readOnly = false, env = null, idleMs = 0, maxMs = 0, laneLimits = null, control = null }) => {
     const bin = resolveClaudeCliBinary(cwd) || "claude";
     const caps = getClaudeCliCapabilities(cwd);
     const flags = [...buildLeanSessionFlags(caps), ...(readOnly ? buildReadOnlyToolFlags(caps) : [])];
     const r = await runCli({ spec: { name: `core-${role}` }, userMessage: prompt, systemPrompt: resume ? "" : system,
       args: [String(issue)], cwd, bin, model, env, sessionFlags: flags, extraArgs: resume ? ["--resume", resume] : [],
-      logger: { log() {} } });
+      logger: { log() {} },
+      idleMs, maxMs, stream: idleMs > 0, control, wrap: laneLimits && probe() ? (b, a) => wrapLaneLimits(b, a, laneLimits) : null });
     return { text: r.text, sessionId: r.sessionId, usage: r.usage, costUsd: r.costUsd, durationMs: r.durationMs, turns: r.turns, model: r.cliModel ?? "default" };
   };
 }

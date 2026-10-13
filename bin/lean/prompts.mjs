@@ -12,6 +12,8 @@ export const IMPLEMENTATION_FILE = `${LEAN_DIR}/implementation.md`;
 export function builderPrompt(n) {
   return `Resolve issue #${n} (read it with gh issue view ${n} --comments). If it is already fixed or invalid on this code, explain why with file:line evidence and change nothing. Otherwise implement a complete fix with a regression test following repo conventions, run the relevant tests, and commit. Do not push or touch GitHub.
 
+Host rules (many lanes share this machine): run only targeted tests for the code you changed (specific test files or -k filters), never the full suite. Never create extra checkouts, copies or base clones of the repo; compare against the base with git show or git diff origin/<base> instead. Never install browsers. Keep all scratch files under $TMPDIR.
+
 The engine publishes three stage notes to the issue for you. Write each as markdown with exactly these headings, in this order, concise and concrete (file:line wherever you cite code). All files live in ${LEAN_DIR}/ (git-excluded, never commit them). Do not write HTML comments.
 
 1. BEFORE coding, write ${INVESTIGATION_FILE}:
