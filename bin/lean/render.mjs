@@ -96,7 +96,7 @@ export function renderPrBody({ issue, investigation, plan, implementation, resul
 
 // ---- trajectory ----
 export function renderTrajectory(T) {
-  const rows = [["Validate", T.validate], ["Plan", T.plan], ["Implement", T.implement], ["Review", T.review], ["PR", T.pr], ["Merge", T.merge], ["Close", T.close]];
+  const rows = [["Validate", T.validate], ["Plan", T.plan], ["Implement", T.implement], ["Review", T.review], ["PR", T.pr], ["Base Sync", T.baseSync ?? "not needed"], ["Merge", T.merge], ["Close", T.close]];
   const cellPair = (v) => {
     const [res, notes] = Array.isArray(v) ? v : [v, ""];
     return `${cell(res ?? "not reached")} | ${notes ? cell(notes) : "-"}`;

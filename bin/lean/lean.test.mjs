@@ -9,6 +9,7 @@ import { orchestrate, parseDeps, formatTable } from "./orchestrate.mjs";
 import { REVIEWER_SYSTEM, approxTokens, builderPrompt, reviewerPrompt, parseVerdict } from "./prompts.mjs";
 import { mapRecord } from "../engine/telemetry-seam.mjs";
 import { readLog } from "../engine/runlog.mjs";
+import { makeRunTmp } from "./effects.mjs";
 import { runFromCli, orchestrateFromCli, ENGINE_PATHS } from "../engine-cli.mjs";
 
 const WT = "/wt/lean-7";
@@ -26,7 +27,7 @@ function world(o = {}) {
     comments: [], labels: [], closed: [], edits: [], prs: [], merges: [], calls: [], telemetry: [], files: {}, head: "aaaa1111aaaa1111",
     changed: o.changed ?? ["src/foo.js", "test/foo.test.js"], reviews: [...(o.reviews ?? [])], waits: [...(o.waits ?? [])], clock: 0,
     result: o.result ?? { status: "fixed", summary: "fixed foo", evidence: [], tests: ["test/foo.test.js"] },
-    prList: o.prList ?? [], remote: o.remote ?? "", resumeResult: o.resumeResult, seq: [], mtimes: {},
+    prList: o.prList ?? [], remote: o.remote ?? "", resumeResult: o.resumeResult, seq: [], mtimes: {}, envs: [], prView: [...(o.prView ?? [])], mergeResults: [...(o.mergeResults ?? [])], mergeErrors: [...(o.mergeErrors ?? [])], conflictFiles: [], mergeInProgress: false, markers: false, mergeAttempts: 0,
     stages: { ...STAGE_MD, ...(o.stages ?? {}) },
   };
   const put = (name, text) => { const p = `${WT}/.forge-lean/${name}`; if (w.files[p] !== text) w.mtimes[p] = Date.now(); w.files[p] = text; };
@@ -43,12 +44,28 @@ function world(o = {}) {
       if (k === "issue close") { w.closed.push(a); w.seq.push("close"); return ""; }
       if (k === "issue edit") { w.edits.push(a); return ""; }
       if (k === "pr create") { w.prs.push(a); w.seq.push("pr"); return "https://github.com/o/r/pull/77\n"; }
+      if (k === "pr view" && a.includes("mergeable,mergeStateStatus")) { const v = w.prView.length > 1 ? w.prView.shift() : (w.prView[0] ?? { mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" }); return JSON.stringify(v); }
+      if (k === "pr merge" && w.mergeErrors.length) { w.mergeAttempts++; throw new Error(w.mergeErrors.shift()); }
+      if (k === "pr merge") { w.mergeAttempts++; }
       if (k === "pr merge") { w.merges.push(a); w.seq.push("merge"); return ""; }
       throw new Error(`unexpected gh ${a.join(" ")}`);
     },
     git: async (a) => {
       w.calls.push(["git", ...a]);
+      if (a[0] === "worktree" && a[1] === "add" && (w.lockFails ?? 0) > 0) {
+        w.lockFails--; const e = new Error("git failed"); e.stderr = "error: could not lock config file .git/config: File exists"; throw e;
+      }
       if (a[0] === "rev-parse" && a[1] === "--git-path") return "/repo/.git/info/exclude";
+      if (a[0] === "merge" && a[1] === "--no-edit") {
+        const r = w.mergeResults.shift() ?? "clean";
+        if (r === "clean") { w.head = `cccc${w.calls.length}`.padEnd(16, "0"); return ""; }
+        w.conflictFiles = o.conflictFiles ?? ["src/foo.js"]; w.mergeInProgress = true; throw new Error("CONFLICT (content): Merge conflict in src/foo.js");
+      }
+      if (a[0] === "rev-parse" && a.includes("MERGE_HEAD")) return w.mergeInProgress ? "deadbeef" : "";
+      if (a[0] === "diff" && a.includes("--diff-filter=U")) return w.conflictFiles.join("\n");
+      if (a[0] === "diff" && a[1] === "--check") return "";
+      if (a[0] === "grep") return w.markers ? "src/foo.js:3:<<<<<<< HEAD" : "";
+      if (a[0] === "merge" && a[1] === "--abort") { w.mergeInProgress = false; return ""; }
       if (a[0] === "rev-parse") return w.head;
       if (a[0] === "diff" && a[1] === "--name-only") return w.changed.join("\n");
       if (a[0] === "diff") return "diff --git a/src/foo.js b/src/foo.js\n+fix";
@@ -59,12 +76,13 @@ function world(o = {}) {
     runner: async (c) => {
       w.calls.push(["runner", c.role, c.resume ?? null, c.model ?? null, c.prompt, c.readOnly ?? false, c.system]);
       w.seq.push(c.role + (c.resume ? "-resume" : ""));
+      w.envs.push(c.env ?? null);
       if (c.role === "builder") {
         const r = c.resume ? (w.resumeResult ?? w.result) : w.result;
         if (o.live) await o.live(w, put);
         else if (!c.resume && !o.noStages) writeStages(["investigation", "plan", "implementation"]);
         if (r) put("result.json", JSON.stringify(r));
-        if (c.resume) w.head = `bbbb${w.calls.length}`.padEnd(16, "0");
+        if (c.resume || /Merging origin\//.test(c.prompt)) { w.head = `bbbb${w.calls.length}`.padEnd(16, "0"); if (!o.leaveConflicts) { w.conflictFiles = []; w.mergeInProgress = false; } }
         return { text: "done", sessionId: "sess-1", usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 100 }, costUsd: 0.1, durationMs: 1000, turns: 3, model: "default" };
       }
       return { text: w.reviews.length ? w.reviews.shift() : ok(), sessionId: "rev", usage: { input_tokens: 4, output_tokens: 2 }, costUsd: 0.05, durationMs: 500, turns: 2, model: c.model };
@@ -213,6 +231,15 @@ describe("core work-on", () => {
   it("builder blocked, or no commit, is needs-human", async () => {
     assert.equal((await run(world({ result: { status: "blocked", summary: "need creds" } }))).terminalReason, "needs-human");
     assert.equal((await run(world({ changed: [] }))).terminalReason, "needs-human");
+  });
+
+  it("worktree add retries a concurrent .git lock collision, then gives up after 5 tries", async () => {
+    const w = world(); w.lockFails = 2;
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(w.calls.filter((c) => c[1] === "worktree" && c[2] === "add").length, 3);
+    const w2 = world(); w2.lockFails = 99;
+    assert.notEqual((await run(w2)).terminalReason, "merged");
+    assert.equal(w2.calls.filter((c) => c[1] === "worktree" && c[2] === "add").length, 5);
   });
 
   it("needs-human terminals carry a specific outcome code, never unclassified", async () => {
@@ -620,5 +647,261 @@ describe("runCliBackendAsync", () => {
     const d = tmpDir("core-async-");
     writeFileSync(`${d}/bad`, "#!/bin/sh\necho boom >&2\nexit 3\n"); chmodSync(`${d}/bad`, 0o755);
     await assert.rejects(runCliBackendAsync({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: d, bin: `${d}/bad`, logger: { log() {} } }), (e) => e.code === "CLI_BACKEND_FAILED" && /boom/.test(e.message));
+  });
+});
+
+describe("base-sync (#4100)", () => {
+  const CONFLICTING = { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" };
+  const OKSTATE = { mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" };
+  const gitCalls = (w) => w.calls.filter((c) => c[0] === "git").map((c) => c.slice(1));
+  const noRebaseNoForce = (w) => {
+    for (const g of gitCalls(w)) {
+      assert.notEqual(g[0], "rebase");
+      if (g[0] === "push") assert.ok(!g.some((x) => /^(--force|-f$|\+)/.test(x)), `force push: ${g.join(" ")}`);
+    }
+  };
+  const syncComment = (w) => w.comments.find((c) => c.includes("<!-- FORGE:BASE_SYNC -->"));
+
+  it("conflicting PR, clean merge: fetch, merge, push, merge the PR at the new head; no re-review", async () => {
+    const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["clean"] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(reviewers(w).length, 1, "no re-review for a conflict-free base merge");
+    assert.equal(builders(w).length, 1);
+    const g = gitCalls(w);
+    assert.ok(g.some((x) => x[0] === "fetch" && x[1] === "origin" && x[2] === "staging"));
+    assert.ok(g.some((x) => x[0] === "merge" && x[1] === "--no-edit" && x[2] === "origin/staging"));
+    assert.equal(g.filter((x) => x[0] === "push").length, 2, "initial push plus the sync push");
+    assert.match(syncComment(w), /## Base Sync[\s\S]*clean merge[\s\S]*not required \(conflict-free base merge\)/);
+    assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
+    assert.match(traj(w)[0], /\| Base Sync \| 1 sync\(s\) \|/);
+    noRebaseNoForce(w);
+  });
+
+  it("no conflict: no Base Sync row detail and no sync comment", async () => {
+    const w = world();
+    await run(w);
+    assert.ok(!syncComment(w));
+    assert.match(traj(w)[0], /\| Base Sync \| not needed \| - \|/);
+  });
+
+  it("conflicting PR, real conflict: builder resumed with the files, reviewer PASS on the full diff, merge", async () => {
+    const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], reviews: [ok(), ok()] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 2);
+    assert.equal(b[1][2], "sess-1", "same session resumed");
+    assert.match(b[1][4], /Merging origin\/staging into this branch conflicts in: src\/foo\.js\. Resolve the conflicts preserving both this fix's intent and the base's changes, run the relevant tests, and commit the merge\. Do not push\./);
+    assert.equal(reviewers(w).length, 2, "re-review after the conflict resolution");
+    assert.match(syncComment(w), /conflicts in `src\/foo\.js`[\s\S]*builder resolved 1 conflicted file[\s\S]*Re-review:\*\* PASS/);
+    assert.equal(w.merges.length, 1);
+    assert.deepEqual(w.merges[0].slice(-2), ["--match-head-commit", w.head]);
+    noRebaseNoForce(w);
+  });
+
+  it("conflict resolution that the re-review FAILs gets one retry then merges on PASS", async () => {
+    const w = world({ prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], reviews: [ok(), bad("src/foo.js:4 lost base change"), ok()] });
+    assert.equal((await run(w)).terminalReason, "merged");
+    assert.equal(reviewers(w).length, 3);
+    assert.equal(builders(w).length, 3);
+  });
+
+  it("still conflicting after 2 base-syncs ends needs-human with base.conflict, never engine-error", async () => {
+    const w = world({ prView: [CONFLICTING], mergeResults: ["clean", "clean", "clean"] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human");
+    assert.equal(r.code, "base.conflict");
+    assert.equal(gitCalls(w).filter((x) => x[0] === "merge" && x[1] === "--no-edit").length, 2, "at most 2 base-syncs");
+    assert.equal(w.merges.length, 0);
+    assert.ok(w.edits.some((e) => e.includes("needs-human")));
+  });
+
+  it("unresolved conflict markers after the builder ends needs-human with base.conflict", async () => {
+    const w = world({ prView: [CONFLICTING], mergeResults: ["conflict"] });
+    w.markers = true;
+    const r = await run(w);
+    assert.equal(r.terminalReason, "needs-human"); assert.equal(r.code, "base.conflict");
+    assert.equal(w.merges.length, 0);
+    assert.ok(gitCalls(w).some((x) => x[0] === "merge" && x[1] === "--abort"));
+  });
+
+  it("a gh pr merge conflict error triggers base-sync, then the merge is retried", async () => {
+    const w = world({ prView: [OKSTATE], mergeErrors: ["GraphQL: Pull request is not mergeable (mergePullRequest)"], mergeResults: ["clean"] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.equal(w.mergeAttempts, 2);
+    assert.match(syncComment(w), /gh pr merge reported a conflict/);
+    noRebaseNoForce(w);
+  });
+
+  it("an unrelated gh pr merge error is not a base-sync", async () => {
+    const w = world({ mergeErrors: ["HTTP 500 boom"] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "engine-error");
+    assert.ok(!syncComment(w));
+  });
+
+  it("a resumed run with a conflicting PR syncs (fresh builder when the conflict needs resolving)", async () => {
+    const w = world({ prList: [{ number: 77, headRefOid: "x" }], remote: "abc\trefs/heads/feat/issue-7-lean", prView: [CONFLICTING, OKSTATE], mergeResults: ["conflict"], reviews: [ok(), ok()] });
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    const b = builders(w);
+    assert.equal(b.length, 1);
+    assert.equal(b[0][2], null, "no session id on resume: a fresh builder");
+    assert.match(b[0][4], /Merging origin\/staging into this branch conflicts in: src\/foo\.js/);
+    assert.equal(w.prs.length, 0);
+    noRebaseNoForce(w);
+  });
+
+  it("UNKNOWN mergeability with nothing to merge is not treated as a conflict", async () => {
+    const w = world({ prView: [{ mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" }, { mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" }, OKSTATE], mergeResults: ["clean"] });
+    // a clean merge that changes head would count; here make the merge a no-op by pinning the head
+    const orig = w.io.git;
+    w.io.git = async (a, o2) => { const r = await orig(a, o2); if (a[0] === "merge" && a[1] === "--no-edit") w.head = "aaaa1111aaaa1111"; return r; };
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(!syncComment(w));
+  });
+});
+
+describe("usage limit, lease takeover, worktree setup, run tmp (#4101-#4104)", () => {
+  const limitErr = (extra) => Object.assign(new Error("claude CLI exited with status 1. You've hit your session limit"), { code: "CLI_BACKEND_FAILED", usageLimit: true, ...extra });
+  const failFirstBuilder = (w, err, times = 1) => { const orig = w.io.runner; let n = 0; w.io.runner = async (c) => { if (c.role === "builder" && n++ < times) throw err; return orig(c); }; };
+  const projector = (w, lease) => { w.leaseWrites = []; w.io.projector = { readState: async () => (lease ? { v: 1, lease } : null), writeState: async (_i, st) => { w.leaseWrites.push(st); } }; };
+
+  it("#4101 a usage limit with a near reset pauses until the reset, then resumes the same step", async () => {
+    const w = world(); const sleeps = [];
+    const s0 = w.io.sleep; w.io.sleep = async (ms) => { sleeps.push(ms); return s0(ms); };
+    failFirstBuilder(w, limitErr({ resetAtEpochMs: 90000, resetAt: "8:30pm" }));
+    const r = await run(w);
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(sleeps.includes(90000), `slept until the reset: ${sleeps}`);
+    assert.equal(builders(w).length, 1);
+  });
+
+  it("#4101 a usage limit with a far reset ends deferred/rate_limited with the reset time, lease released, no needs-human", async () => {
+    const w = world(); projector(w, null);
+    failFirstBuilder(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000, resetAt: "8:30pm (Asia/Kolkata)" }));
+    const r = await run(w);
+    assert.equal(r.terminalReason, "deferred");
+    assert.equal(r.code, "rate_limited");
+    assert.match(r.detail, /resets at 8:30pm \(Asia\/Kolkata\)/);
+    assert.equal(w.edits.some((e) => e.includes("needs-human")), false);
+    assert.equal(traj(w).length, 0, "no trajectory comment for a deferral");
+    assert.equal(w.leaseWrites.at(-1).lease, null, "lease released");
+    assert.equal(w.merges.length, 0);
+  });
+
+  it("#4101 unknown reset pauses a bounded number of times, then defers", async () => {
+    const w = world(); let sleeps = 0;
+    const s0 = w.io.sleep; w.io.sleep = async (ms) => { sleeps++; return s0(ms); };
+    failFirstBuilder(w, limitErr(), 99);
+    const r = await run(w, { maxSessionLimitPauses: 2 });
+    assert.equal(r.terminalReason, "deferred"); assert.equal(r.code, "rate_limited");
+    assert.equal(sleeps, 2);
+    assert.match(r.detail, /resets at unknown/);
+  });
+
+  it("#4101 a non-limit runner error is still engine-error", async () => {
+    const w = world(); failFirstBuilder(w, new Error("boom"));
+    assert.equal((await run(w)).terminalReason, "engine-error");
+  });
+
+  it("#4102 a same-host holder whose pid is gone is taken over immediately; a live one or another host is not", async () => {
+    const future = Date.now() + 1e6;
+    const dead = Object.assign(new Error("no such process"), { code: "ESRCH" });
+    const w = world(); projector(w, { by: "core_4242", until: future, host: "h1", pid: 4242 });
+    const r = await run(w, { hostName: "h1", killFn: () => { throw dead; } });
+    assert.equal(r.terminalReason, "merged");
+    assert.ok(w.leaseWrites.some((x) => x.lease?.host === "h1" && Number.isSafeInteger(x.lease?.pid)), "lease records host and pid");
+    const w2 = world(); projector(w2, { by: "core_4242", until: 1e12, host: "h1", pid: 4242 });
+    assert.equal((await run(w2, { hostName: "h1", killFn: () => true })).terminalReason, "deferred");
+    const w3 = world(); projector(w3, { by: "core_4242", until: 1e12, host: "other-host", pid: 4242 });
+    assert.equal((await run(w3, { hostName: "h1", killFn: () => { throw dead; } })).terminalReason, "deferred");
+    assert.equal(builders(w3).length, 0);
+  });
+
+  it("#4103 a leftover unregistered worktree dir is removed (only this issue's lean dir) before add", async () => {
+    const w = world(); const removed = [];
+    w.io.fs.exists = async (p) => p === "/wt/lean-7"; w.io.fs.rmdir = async (p) => { removed.push(p); };
+    await run(w);
+    assert.deepEqual(removed, ["/wt/lean-7"]);
+    // a registered worktree dir is left to `git worktree remove`
+    const w2 = world(); const removed2 = [];
+    w2.io.fs.exists = async () => true; w2.io.fs.rmdir = async (p) => { removed2.push(p); };
+    const g = w2.io.git; w2.io.git = async (a, o2) => (a[0] === "worktree" && a[1] === "list" ? "worktree /wt/lean-7\nHEAD abc\n" : g(a, o2));
+    await run(w2);
+    assert.deepEqual(removed2, []);
+    // a worktree root that is not the lean root never deletes anything
+    const w3 = world(); const removed3 = [];
+    w3.io.fs.exists = async () => true; w3.io.fs.rmdir = async (p) => { removed3.push(p); };
+    await run(w3, { worktreeRoot: "/wt" , issue: 7 });
+    assert.ok(removed3.every((p) => p === "/wt/lean-7"));
+  });
+
+  it("#4103 'already exists' on add cleans the leftover and retries; index.lock and packed-refs.lock are retried", async () => {
+    for (const msg of ["fatal: '/wt/lean-7' already exists", "fatal: Unable to create '/r/.git/index.lock': File exists.", "error: cannot lock ref: Unable to create '/r/.git/packed-refs.lock': File exists", "fatal: could not lock config file /r/.git/config: File exists"]) {
+      const w = world(); let failed = false; const removed = [];
+      w.io.fs.exists = async (p) => failed && p === "/wt/lean-7"; w.io.fs.rmdir = async (p) => { removed.push(p); };
+      const g = w.io.git;
+      w.io.git = async (a, o2) => { if (a[0] === "worktree" && a[1] === "add" && !failed) { failed = true; throw Object.assign(new Error(msg), { stderr: msg }); } return g(a, o2); };
+      const r = await run(w);
+      assert.equal(r.terminalReason, "merged", msg);
+      if (/already exists/.test(msg)) assert.deepEqual(removed, ["/wt/lean-7"]);
+    }
+  });
+
+  it("#4104 the builder and reviewer run with a per-run TMPDIR that is removed on every terminal", async () => {
+    const mk = (w) => { w.tmpMade = []; w.tmpRemoved = []; w.io.runTmp = { prune: async () => { w.pruned = true; }, make: async (i, id) => { const d = `/home/x/.forge/tmp/runs/${id}`; w.tmpMade.push(d); return d; }, remove: async (d) => { w.tmpRemoved.push(d); } }; };
+    const cases = {
+      merged: (w) => w,
+      "needs-human": (w) => { w.reviews.push(bad(), bad()); return w; },
+      "engine-error": (w) => { failFirstBuilder(w, new Error("boom")); return w; },
+      deferred: (w) => { failFirstBuilder(w, limitErr({ resetAtEpochMs: 3 * 3600 * 1000 })); return w; },
+    };
+    for (const [reason, prep] of Object.entries(cases)) {
+      const w = world(); mk(w); prep(w);
+      const r = await run(w);
+      assert.equal(r.terminalReason, reason);
+      assert.equal(w.pruned, true);
+      assert.equal(w.tmpMade.length, 1);
+      assert.match(w.tmpMade[0], /\/\.forge\/tmp\/runs\/7-/);
+      assert.deepEqual(w.tmpRemoved, w.tmpMade, `${reason}: removed`);
+      for (const e of w.envs) assert.equal(e?.TMPDIR, w.tmpMade[0]);
+      if (["merged", "needs-human"].includes(reason)) assert.ok(w.envs.length >= 1);
+    }
+  });
+
+  it("#4104 makeRunTmp: removes only its own dirs; prune takes only old dirs with a dead owner and our marker", async () => {
+    const { mkdirSync, writeFileSync, existsSync, utimesSync } = await import("node:fs");
+    const root = tmpDir("core-runs-");
+    let t = 1_000_000_000_000;
+    const rt = makeRunTmp({ root, now: () => t, host: "h", alive: (pid) => pid === 111 });
+    const mine = await rt.make(7, "7-1");
+    assert.ok(existsSync(mine));
+    assert.equal(await rt.remove(mine), true); assert.ok(!existsSync(mine));
+    assert.equal(await rt.remove(`${root}/not-made`), false);
+    const outside = tmpDir("core-outside-"); writeFileSync(`${outside}/f`, "x");
+    assert.equal(await rt.remove(outside), false); assert.ok(existsSync(outside));
+    const own = (name, o2) => { mkdirSync(`${root}/${name}`); writeFileSync(`${root}/${name}/.forge-run-owner`, JSON.stringify({ host: "h", ...o2 })); };
+    own("old-dead", { pid: 999, created: t - 7 * 3600 * 1000 });
+    own("old-alive", { pid: 111, created: t - 7 * 3600 * 1000 });
+    own("fresh-dead", { pid: 999, created: t - 3600 * 1000 });
+    own("old-otherhost", { pid: 999, host: "zzz", created: t - 7 * 3600 * 1000 });
+    mkdirSync(`${root}/foreign`); writeFileSync(`${root}/foreign/data`, "not ours");
+    t += 1;
+    const removed = await rt.prune();
+    assert.deepEqual(removed.sort(), ["old-dead"]);
+    for (const keep of ["old-alive", "fresh-dead", "foreign"]) assert.ok(existsSync(`${root}/${keep}`), keep);
+  });
+
+  it("#4104 runCliBackend applies the per-run env to the child", async () => {
+    const { runCliBackend } = await import("../runner.mjs");
+    let seen;
+    runCliBackend({ spec: { name: "t" }, userMessage: "go", args: ["1"], cwd: tmpDir("core-env-"), logger: { log() {} }, env: { TMPDIR: "/x/run-tmp", CLAUDE_CODE_TMPDIR: "/x/run-tmp" },
+      spawnFn: (_b, _a, o2) => { seen = o2.env; return { status: 0, stdout: "{}", stderr: "" }; } });
+    assert.equal(seen.TMPDIR, "/x/run-tmp"); assert.equal(seen.CLAUDE_CODE_TMPDIR, "/x/run-tmp");
+    assert.equal(seen.ANTHROPIC_API_KEY, undefined);
   });
 });

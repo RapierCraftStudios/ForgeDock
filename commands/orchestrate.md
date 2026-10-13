@@ -36,7 +36,8 @@ Do this yourself from issue text and the code. Spawn no sub-agents here.
      `git grep` of the symbols it names. Keep this to a few greps per issue, not an investigation.
    - **Size.** S, M or L, from the scope the issue describes.
 3. **Build the DAG.** Edge X → N means N waits until X merges:
-   - **Explicit:** `Depends on #X` / `Blocked by #X` where X is in the set. An open X outside the set
+   - **Explicit:** `Depends on #X` / `Blocked by #X` where X is in the set. Match it case-insensitively and
+     also in bold or list form (`**Depends on** #X`, `- Depends on: #X, #Y`). An open X outside the set
      means N is skipped as blocked.
    - **Conflict:** two issues that will edit the same file or the same function run one after the
      other (smaller first), so their PRs don't conflict. Different files run in parallel.
@@ -46,7 +47,9 @@ Do this yourself from issue text and the code. Spawn no sub-agents here.
 4. **Show the plan** as one table: issue, title, size, likely files, waits-on. There are no waves. Then proceed
    without asking.
 
-`K` = `--parallel` (default 3). `L` = `--lane` if given, otherwise the repo's base lane from forge.yaml.
+`K` = `--parallel` if given, otherwise `orchestration.max_concurrent` from the repo's `forge.yaml`
+(`yq '.orchestration.max_concurrent' forge.yaml`), otherwise 3. State the value of K and where it came
+from in the plan. `L` = `--lane` if given, otherwise the repo's base lane from forge.yaml.
 
 ## 3. Launch lanes
 
@@ -55,8 +58,10 @@ waits on nothing). Keep at most K lanes running. Whenever a lane is free, start 
 issue right away (priority label first, then the smaller size). Never hold a ready issue back until other
 lanes finish.
 
-- **Shell lane (default, when `forgedock` is on PATH).** One `Bash` call per issue with
-  `run_in_background: true`:
+- **Shell lane (default, when `forgedock` is on PATH).** Each lane is its own `Bash` call with
+  `run_in_background: true`, so every running lane appears as its own background shell in this session.
+  Do NOT write a scheduler, wrapper or queue script that launches lanes for you. You are the scheduler:
+  start a lane, and when a lane's completion notification arrives, start the next ready issue.
 
   ```bash
   forgedock run-issue <N> --lane <L>
@@ -74,6 +79,9 @@ lanes finish.
   The agent does not merge.
 
 When a lane finishes:
+- `deferred` (lease held by another or a dead session): put it back in the queue and retry after the
+  lease time printed in its output.
+- `dependency-open`: the engine found a dependency you missed. Add the edge and requeue the issue behind it.
 - `merged` or `invalid`: start the next ready issue.
 - `needs-human`: read the issue's last comment for the reason, and mark its dependents skipped.
 - `engine-error`: relaunch it once.
