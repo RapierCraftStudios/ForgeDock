@@ -194,6 +194,20 @@ describe("core work-on", () => {
     assert.equal((await run(world({ changed: [] }))).terminalReason, "needs-human");
   });
 
+  it("needs-human terminals carry a specific outcome code, never unclassified", async () => {
+    const code = async (w, extra) => {
+      const dir = tmpDir("lean-code-");
+      const r = await run(w, { dir, ...extra });
+      const term = readLog(dir, 7).filter((e) => e.event === "RUN_TERMINAL");
+      assert.equal(term.length, 1);
+      assert.equal(term[0].code, r.code);
+      return term[0].code;
+    };
+    assert.equal(await code(world({ result: { status: "blocked", summary: "need creds" } })), "builder.blocked");
+    assert.equal(await code(world({ changed: [] })), "builder.no_commit");
+    assert.equal(await code(world({ waits: [{ rc: 1, text: "lint failed" }] }), { mergeWait: "all" }), "ci.red");
+  });
+
   it("red remote CI is needs-human; slow CI polls with backoff and ends ci-pending, never needs-human", async () => {
     const w = world({ waits: [{ rc: 1, text: "lint failed" }] });
     assert.equal((await run(w, { mergeWait: "all" })).terminalReason, "needs-human");

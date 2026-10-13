@@ -67,6 +67,8 @@ const COVERAGE = {
   "base.conflict": "reserved", "rate_limited": "engine", "engine.error": "engine", "infra.disk_quota": "engine", "lease.held": "engine",
   "dependency.open": "engine", "dependency.unreadable": "engine",
   "invalid": "engine", "decomposed": "investigate.detectOutcome", "completed": "engine",
+  "builder.blocked": "lean", "builder.no_evidence": "lean", "builder.no_commit": "lean",
+  "review.failed": "lean", "review.no_verdict": "lean", "merge.head_mismatch": "lean",
   "awaiting_merge": "codeForTerminalReason", "unclassified": "engine",
 };
 
