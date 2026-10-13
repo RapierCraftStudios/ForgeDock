@@ -842,11 +842,18 @@ DEGRADED_CHECKS="${DEGRADED_CHECKS:-}"
 GATE_STATUS=$([ "$GATE_PASSED" != "true" ] && echo FAIL || { [ -n "$DEGRADED_CHECKS" ] && echo DEGRADED || echo PASS; })
 # Bind the PASS to what was actually gated: the staged tree is exactly the tree the V5 commit will have.
 # scripts/verify-phase-trail.sh --head-tree (work-on/review.md R1.5) rejects a PASS recorded for a different tree. <!-- Added: forge#3149 -->
-git -C {WORKTREE_PATH} add -u   # same staging as the commit below; valid only because V2-V4 are done
-GATE_TREE=$(git -C {WORKTREE_PATH} write-tree)
-# Marker-only re-gate (invoked by work-on/review.md after a base sync or a stale re-review): HEAD is already committed and
-# the index is clean, so the gated tree is HEAD's tree. Use it instead of write-tree, and post the marker only (no V5 Step 2 commit).
-[ "${REGATE_MERGED_HEAD:-}" = "1" ] && GATE_TREE=$(git -C {WORKTREE_PATH} rev-parse 'HEAD^{tree}')
+if [ "${REGATE_MERGED_HEAD:-}" = "1" ]; then
+  # Marker-only re-gate (invoked by work-on/review.md after a base sync or a stale re-review): HEAD is already committed, so the
+  # gated tree must be HEAD's tree. Never stage here: require a clean worktree so no uncommitted fix sits outside the marked tree.
+  if [ -n "$(git -C {WORKTREE_PATH} status --porcelain --untracked-files=no)" ]; then
+    echo "QUALITY_GATE: marker-only re-gate needs a clean worktree (uncommitted tracked changes) - commit the fix, re-run the scoped V1 gate on the committed head, then re-run this step; not posting a marker" >&2
+    exit 1
+  fi
+  GATE_TREE=$(git -C {WORKTREE_PATH} rev-parse 'HEAD^{tree}')
+else
+  git -C {WORKTREE_PATH} add -u   # same staging as the commit below; valid only because V2-V4 are done
+  GATE_TREE=$(git -C {WORKTREE_PATH} write-tree)
+fi
 [ -n "$GATE_TREE" ] || { echo "QUALITY_GATE: tree unresolved - not posting a marker" >&2; exit 1; }
 QG_BODY="<!-- FORGE:QUALITY_GATE -->
 ## Quality Gate Result
@@ -860,7 +867,7 @@ QG_BODY="<!-- FORGE:QUALITY_GATE -->
 gh issue comment {NUMBER} {GH_FLAG} --body "$QG_BODY" # allowlist:check-command-side-effects
 ```
 
-**Marker-only re-gate mode** <!-- Added: forge#3983 -->: when `work-on/review.md` re-gates a merged head (Pre-Handoff Base Sync or stale re-review), it runs the scoped V1 gate on the committed head first, then sets `REGATE_MERGED_HEAD=1` and runs only this Step 1 with the real `GATE_RESULT` (FAIL stays FAIL). Steps 2-4 are skipped: there is nothing staged and no commit to make.
+**Marker-only re-gate mode** <!-- Added: forge#3983 -->: when `work-on/review.md` re-gates a merged head (Pre-Handoff Base Sync or stale re-review), it runs the scoped V1 gate on the committed head first, then sets `REGATE_MERGED_HEAD=1` and runs only this Step 1 with the real `GATE_RESULT` (FAIL stays FAIL). Steps 2-4 are skipped: there is nothing staged and no commit to make. **Precondition**: a clean worktree (no uncommitted tracked changes, untracked files ignored); a dirty tracked file or staged change exits 1 with no marker, so a fix made after a FAIL must be committed and the scoped V1 gate re-run on the committed head before this step is re-run, keeping the gated tree equal to the marked `HEAD^{tree}`.
 
 ### V5 Step 2: Commit
 
